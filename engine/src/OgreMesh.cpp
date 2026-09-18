@@ -170,18 +170,16 @@ float jahLodHysteresis()
     return band;
 }
 
-// THE SUITE'S ONLY WAY IN (`engine.lod_hysteresis`). A band is only ever given
-// to a view a person watches over time, and `View::readPixels` refuses an
-// on-screen view (its target is a swapchain), so a test that wants to SEE what
-// the band does has no reachable subject at all. This latch grants the band to
-// OFFSCREEN views as well; nothing but the suite sets it, and with it unset
-// every capture in this engine — thumbnail, preview, screenshot, pixel suite —
-// takes the exact level, frame after frame.
-bool jahLodHysteresisOffscreen()
-{
-    static const bool on = std::getenv("JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN") != nullptr;
-    return on;
-}
+// (THE SUITE'S WAY IN IS NO LONGER HERE — LOD-LATCH-1, 2026-09-18. A band is
+// only ever given to a view a person watches over time, and `View::readPixels`
+// refuses an on-screen view, so the suite that reads what the band does needs an
+// offscreen view WITH a band. That used to be a process-wide env latch,
+// `JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN`, read once by a function-local static; it
+// is now `View::setLodHysteresisOffscreen`, a per-view field beside PostFx's,
+// the overlay's and the PiP's own `allowOffscreen` — one picture's property, in
+// the description of that picture, settable by a host. Unset it still is
+// everywhere else: every thumbnail, preview, screenshot and pixel suite takes
+// the exact level, frame after frame.)
 
 // Registered once per process, before any mesh's LOD values are written
 // (`applyLodValues` reads the default strategy's base value) and before any

@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #include <OgreHlmsManager.h>
 
@@ -1979,13 +1980,51 @@ void OgreScene::noteGiCascadeDirty(const Ogre::Aabb *box) {
     if (mVctCascades.empty()) return;          // no chain: nothing to describe
     if (mGiCascadeDirtyAll) return;            // already the strongest statement
     if (!box) { mGiCascadeDirtyAll = true; mGiCascadeDirtyBoxes.clear(); return; }
-    // BOUNDED. Past the cap a list of boxes costs more to carry and to test than
-    // the answer it saves, and a scene changing in sixteen places at once is one
-    // the whole chain has to answer for anyway.
-    if (mGiCascadeDirtyBoxes.size() >= kGiCascadeDirtyBoxCap) {
-        mGiCascadeDirtyAll = true; mGiCascadeDirtyBoxes.clear(); return;
+    if (mGiCascadeDirtyBoxes.size() < kGiCascadeDirtyBoxCap) {
+        mGiCascadeDirtyBoxes.push_back(*box);
+        return;
     }
-    mGiCascadeDirtyBoxes.push_back(*box);
+    // AT THE CAP THE LIST MERGES; IT DOES NOT GIVE UP (PHOTON audit F14). The
+    // member's note has the why — seventeen crates settling in one corner used
+    // to read as "the scene changed everywhere" and rebuild the chain out to the
+    // horizon, one cascade per frame, for as long as they moved.
+    //
+    // LEAST MARGIN ENLARGEMENT — the R*-tree's metric, and NOT the volume
+    // (the lead's read of the first version, 2026-09-18). A box's margin is the
+    // sum of its extents; the new box joins the entry whose margin grows least,
+    // so boxes near each other coalesce and boxes far apart stay apart.
+    //
+    // WHY NOT VOLUME, which is what a plain R-tree uses: THIS ENGINE'S BOXES GO
+    // FLAT. A Plane primitive's world AABB has zero height, so the volume of
+    // every coplanar box — and of their union — is zero, and a flat mover slid
+    // in x/z merged at zero growth with any coplanar box HOWEVER FAR AWAY: the
+    // first entry won every comparison and a floor of moving planes coalesced
+    // into one slab spanning the whole scene. Never WRONG (a merged box is
+    // conservative by construction) but the exact opposite of what the merge is
+    // for, and it would have dirtied every cascade between two far-apart flat
+    // clusters. The margin is degenerate for nothing: a zero-height box still
+    // has width and depth, and a union that reaches further has a bigger one.
+    // (Surface area would also do; the margin is one add per axis and has no
+    // degenerate case at all.)
+    //
+    // O(cap) per call with cap 16, against a test that is O(cap) per cascade
+    // anyway.
+    const auto marginOf = [](const Ogre::Aabb &a) {
+        // Half-extents, not extents — a factor of 2 changes no ordering. A
+        // degenerate (null) box has a negative half size; max() keeps the
+        // growth monotonic.
+        return double(std::max(a.mHalfSize.x, 0.0f)) + double(std::max(a.mHalfSize.y, 0.0f)) +
+               double(std::max(a.mHalfSize.z, 0.0f));
+    };
+    size_t best = 0;
+    double bestGrowth = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < mGiCascadeDirtyBoxes.size(); ++i) {
+        Ogre::Aabb merged = mGiCascadeDirtyBoxes[i];
+        merged.merge(*box);
+        const double growth = marginOf(merged) - marginOf(mGiCascadeDirtyBoxes[i]);
+        if (growth < bestGrowth) { bestGrowth = growth; best = i; }
+    }
+    mGiCascadeDirtyBoxes[best].merge(*box);
 }
 
 // A DATABLOCK OR A TEXTURE THE VOXELISERS' MATERIAL CACHE HOLDS IS DYING.
@@ -2421,21 +2460,35 @@ void OgreScene::runItemWalk(bool shadow) {
     // TWO THINGS THE GATE MUST NOT SKIP, and neither is a transform:
     //   * a caster whose Item DIED (mShadowVanished) — unindexItemNode notes a
     //     scene transform write, so the epoch moves and the walk runs;
-    //   * a material with a VERTEX-STAGE generated piece, which moves vertices
-    //     every frame off the shader clock. Its items must be re-flagged every
-    //     frame, so the presence of one takes the gate out entirely. The list
-    //     is over MATERIALS (a handful), never items, and walkItems builds it
-    //     for its own use anyway.
-    bool deforms = false;
-    for (const auto &mk : mMaterials)
-        if (!mk.second.customPiece[1].empty()) { deforms = true; break; }
+    //   * a caster whose material moves VERTICES every frame off the shader
+    //     clock (a vertex-stage generated piece). Its lamps must re-render
+    //     every frame, so it must be re-flagged every frame.
+    //
+    // THE SECOND ONE USED TO TAKE THE GATE OUT FOR THE WHOLE SCENE (audit
+    // ON-16): `deforms` was a scene-wide bool, so ONE wind or wave material
+    // anywhere meant every item in the scene was visited on every frame, at
+    // rest, for ever — O(items) per frame, which is exactly the cost this gate
+    // exists to remove. It is PER ITEM now: the full walk keeps a roster of the
+    // deforming casters (mShadowDeformers, by node id — see its note for why it
+    // cannot go stale while the gate holds), and a still frame re-flags those
+    // nodes and nothing else.
     const unsigned long long epoch = shadowEpoch();
-    if (!deforms && mShadowScanPrimed && mShadowWalkEpochValid && epoch == mShadowWalkEpoch) {
+    if (mShadowScanPrimed && mShadowWalkEpochValid && epoch == mShadowWalkEpoch) {
         // The changes are per frame by contract (walkItems clears them at its
         // head), and "the walk ran and found nothing" is what the consumer
         // must see — collectShadowCacheFrame walks for itself when the frame's
         // walk did not happen, which would undo the whole gate.
         mShadowChanges.clear();
+        // ...EXCEPT THE DEFORMERS, whose vertices have moved since the last
+        // frame even though no transform was written. Their box and channels
+        // are the ones the walk recorded, and they are still current for
+        // exactly the reason the gate fired: nothing moved.
+        for (NodeId id : mShadowDeformers) {
+            auto it = mNodes.find(id);
+            if (it == mNodes.end()) continue;              // gone; the epoch moved too
+            const Node::ScanRec &r = it->second.scan;
+            if (r.shadowPresent) mShadowChanges.push_back({ r.shadowBox, r.shadowChannels });
+        }
         mShadowWalked = true;
         mCasterWalkMicros = 0.0;
         return;
@@ -2579,6 +2632,10 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
         channelsAll = allShadowCasterChannels();
         for (const auto &mk : mMaterials)
             if (!mk.second.customPiece[1].empty()) deforming.push_back(mk.first);
+        // The per-item gate's roster, rebuilt by this walk (ON-16): which
+        // CASTERS deform, not which materials do. Cleared here and refilled
+        // below, so it describes exactly the state this walk saw.
+        mShadowDeformers.clear();
     }
     for (Node *np : mItemNodes) {
         Node &n = *np;
@@ -2694,11 +2751,14 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
                         r.shadowChannels != channels) {
                         Ogre::Aabb both = r.shadowBox; both.merge(a);
                         mShadowChanges.push_back({ both, channels | r.shadowChannels });
-                    } else if (r.shadowPose != pose || (deforms && present) || n.shadowShapeDirty) {
+                    } else if (r.shadowPose != pose || deforms || n.shadowShapeDirty) {
                         mShadowChanges.push_back({ a, channels });
                     }
                 }
             }
+            // THE ROSTER (ON-16): a present caster whose material deforms owes
+            // a change on every frame, gate or no gate.
+            if (deforms && present) mShadowDeformers.push_back(n.selfId);
             n.shadowShapeDirty = false;
             r.shadowPresent = present;
             r.shadowItem = present ? item : nullptr;

@@ -291,12 +291,13 @@ constexpr const char *kDistorted     = "jahDistorted";
 constexpr const char *kLookA = "jahLookA";
 constexpr const char *kLookB = "jahLookB";
 /// Refraction (phase 7). Faithful to Samples/.../Refractions.compositor: the
-/// refractive objects render into a MSAA-preserving CLONE of the opaque result
-/// while SAMPLING the opaque result itself, and they need a non-MSAA copy of the
-/// depth (HlmsPbs samples it per pixel, which an MSAA texture cannot do).
+/// refractive objects render into a CLONE of the opaque result while SAMPLING
+/// the opaque result itself. (Upstream's recipe also resolves the depth into a
+/// non-MSAA copy for HlmsPbs to sample per pixel; the chain renders at 1x — see
+/// ChainDesc — so the scene depth IS that copy and `jahDepthNoMsaa` went with
+/// the rest of the MSAA scaffolding, CHAIN-MSAA-CRUD.)
 constexpr const char *kRefractOut   = "jahRefractOut";
 constexpr const char *kRefractRtv   = "jahRefractRtv";
-constexpr const char *kDepthNoMsaa  = "jahDepthNoMsaa";
 /// The picture-in-picture inset's background swatch (CAMERAS_SPEC §7.7): a 4x4
 /// texture cleared to ViewPipDesc::background and copied over the inset rect.
 /// It exists because the inset's colour attachment must LOAD (a Vulkan clear is
@@ -532,7 +533,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
            a.rayReflect == b.rayReflect &&
-           a.refractions == b.refractions && a.samples == b.samples &&
+           a.refractions == b.refractions &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
@@ -793,8 +794,6 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // Once, here, and never again — see kMaxTargetPasses.
     n->setNumTargetPass(kMaxTargetPasses);
 
-    bool msaa = desc.samples > 1;
-
     // -----------------------------------------------------------------------
     // PASSTHROUGH — the shape every view had before this file, and the shape
     // every offscreen view still has. Bit-identical to createBasicWorkspaceDef.
@@ -898,17 +897,23 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // ever asks for both. A user who sets both by hand gets the chain at 1x and
     // an unused multisampled window, not a crash.
     //
-    // AND SO THE EXPLICIT HDR RESOLVE IS GONE (HDR-MSAA-CRUD, 2026-09-18): the
-    // `jahResolvedRt` target, the box-filter quad and its recompile were gated
-    // on `msaa && hdr`, which this line makes impossible — dead since the
-    // policy landed. The remaining `if (msaa)` sites below (the sample counts
-    // on the depth and GBuffer targets, kDepthNoMsaa, the MSAA HZB seed, the
-    // refraction store action) are the same class and go with CHAIN-MSAA-CRUD
-    // when the chain's 1x rule is written into ChainDesc itself.
+    // AND SO IS EVERY LINE THAT USED TO ASK "BUT WHAT IF IT IS NOT?"
+    // (HDR-MSAA-CRUD 2026-09-18, then CHAIN-MSAA-CRUD 2026-09-18). This
+    // paragraph used to END with `msaa = false;` — an assignment over a local
+    // initialised from `desc.samples`, with fourteen `if (msaa)` sites below it
+    // that no build could reach. They are gone, `ChainDesc` no longer carries a
+    // sample count at all (the rule is written where the description is, and the
+    // reasons with it), and the ones worth naming because a reader will look for
+    // them are: `fsaa` on the scene, depth, normals-GBuffer and refraction-clone
+    // targets; the `jahDepthNoMsaa` resolve the refraction pass sampled; the
+    // `Jahshaka/HzbSeedMsaa` compute job and its `hzb_msaa` shader branch; the
+    // `Ogre/Depth/DownscaleMax_Subsample0` SSAO downscale; and the
+    // StoreAndMultisampleResolve action on the opaque pass. Nothing that ships
+    // changes — the selftest hash holds, which is the proof that none of it was
+    // reachable.
     //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
-    msaa = false;
     n->setNumLocalTextureDefinitions(27);   // 25 + the letterbox swatch + the HZB
     if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
@@ -945,7 +950,6 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         auto *td = addTex(n, kRt0, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         td->depthBufferId = 1u;                      // the scene needs depth
         td->preferDepthTexture = desc.ssao || ssr;   // sampled by the AO/SSR passes
-        if (msaa) td->fsaa = std::to_string(desc.samples);
         syncRtvDepth(n, kRt0, td);
     }
 
@@ -1044,7 +1048,6 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     if (namedDepth) {
         auto *td = addTex(n, kDepth, Ogre::PFG_D32_FLOAT);
         td->preferDepthTexture = true;
-        if (msaa) td->fsaa = std::to_string(desc.samples);
     }
 
     // THE NORMALS G-BUFFER, and it is ONE texture for two effects. SSAO gets it
@@ -1056,7 +1059,6 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // for a second attachment it does not need is pure bandwidth.
     if (desc.ssao || ssr) {
         auto *td = addTex(n, kGBufNormals, Ogre::PFG_R10G10B10A2_UNORM);
-        if (msaa) td->fsaa = std::to_string(desc.samples);
         syncRtvDepth(n, kGBufNormals, td);
     }
 
@@ -1227,7 +1229,6 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         {
             auto *td = addTex(n, kRefractOut,
                               desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
-            if (msaa) td->fsaa = std::to_string(desc.samples);
         }
         {
             Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kRefractRtv);
@@ -1238,10 +1239,6 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             rtv->stencilAttachment.textureName = kDepth;
             rtv->preferDepthTexture = true;
         }
-        // The MSAA depth resolve. R32_FLOAT, NOT a depth format: this is a
-        // sampled texture, and the sample's own note says resolving it rather
-        // than sampling MSAA depth is what keeps refraction affordable.
-        if (msaa) addTex(n, kDepthNoMsaa, Ogre::PFG_R32_FLOAT);
     }
 
     // The view the scene pass renders through when it needs more than a plain
@@ -1428,12 +1425,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // away and the frame would come out empty. Loading it also buys exact
         // early-Z for free, which is most of what pays for the extra traversal.
         if (ssr) p->mLoadActionDepth = Ogre::LoadAction::Load;
-        // With refractions the opaque result must exist BOTH as multisample
-        // (the refractive pass keeps rendering into a clone of it) and resolved
-        // (that same pass samples it) — the sample's "store_and_resolve".
-        p->mStoreActionColour[0] = (desc.refractions && msaa)
-                                       ? Ogre::StoreAction::StoreAndMultisampleResolve
-                                       : Ogre::StoreAction::Store;
+        // Plain Store, at every effect combination: upstream's recipe needs
+        // "store_and_resolve" here because its refractive pass renders into a
+        // MULTISAMPLE clone while sampling the resolved original, and at 1x
+        // (ChainDesc) those are the same image.
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
         if (desc.ssao && !ssr) p->mStoreActionColour[1] = Ogre::StoreAction::Store;
         // Depth survives the pass: SSAO marches it, refraction copies it, the
         // refractive pass depth-tests against it — and so does the DISTORTION
@@ -1488,8 +1484,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         Ogre::Root &root = Ogre::Root::getSingleton();
         Ogre::HlmsCompute *hc = root.getHlmsManager() ? root.getHlmsManager()->getComputeHlms()
                                                       : nullptr;
-        const char *seedName = msaa ? "Jahshaka/HzbSeedMsaa" : "Jahshaka/HzbSeed";
-        Ogre::HlmsComputeJob *seed = hc ? hc->findComputeJobNoThrow(seedName) : nullptr;
+        Ogre::HlmsComputeJob *seed = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbSeed") : nullptr;
         Ogre::HlmsComputeJob *reduce = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbReduce") : nullptr;
         if (seed && reduce) {
             // WHICH WAY IS CLOSE. Ogre's Vulkan render system defaults to
@@ -1505,7 +1500,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                 t->setNumPasses(1);
                 auto *c = static_cast<Ogre::CompositorPassComputeDef *>(
                     t->addPass(Ogre::PASS_COMPUTE));
-                c->mJobName = seedName;
+                c->mJobName = "Jahshaka/HzbSeed";
                 c->mProfilingId = "Jahshaka HZB 0";
                 c->addTextureSource(0, kDepth);
                 c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, 0,
@@ -1527,7 +1522,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     }
 
     // The scene result the post passes read. (No MSAA resolve stands here any
-    // more: the chain renders at 1x — see `msaa = false` above — and the
+    // more: the chain renders at 1x by construction — see ChainDesc — and the
     // explicit HDR box-filter resolve that used to be gated on a flag that
     // could never be true is gone, HDR-MSAA-CRUD.)
     const char *hdrSrc = kRt0;
@@ -1536,15 +1531,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // result and a non-MSAA depth copy (VISUAL_PARITY §4, re-hosted here).
     const char *sceneResult = hdrSrc;
     if (desc.refractions) {
-        // MSAA depth has to be resolved before HlmsPbs can sample it.
-        if (msaa) {
-            auto *q = addQuad(n, kDepthNoMsaa, "Ogre/Resolve/1xFP32_Subsample0",
-                              "Jahshaka refraction depth resolve");
-            q->addQuadTextureSource(0, kDepth);
-        }
-        // An exact, MSAA-preserving clone of the opaque result. The refractive
-        // objects render into the clone and sample the original — writing and
-        // sampling the same texture in one pass is what this avoids.
+        // An exact clone of the opaque result. The refractive objects render
+        // into the clone and sample the original — writing and sampling the
+        // same texture in one pass is what this avoids.
         {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kRefractRtv);
             t->setNumPasses(2);
@@ -1573,7 +1562,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // pass; recomputing it would render every shadow map a second time.
             p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
             p->mShadowNodeRecalculation = Ogre::SHADOW_NODE_REUSE;
-            p->setUseRefractions(msaa ? kDepthNoMsaa : kDepth, kRt0);
+            p->setUseRefractions(kDepth, kRt0);
             p->mFirstRQ = kRefractiveRenderQueue;
             p->mLastRQ  = kOverlayRenderQueue;
             p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
@@ -1670,8 +1659,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // also the upsample) -> multiply into the scene colour.
     if (desc.ssao) {
         {
-            auto *q = addQuad(n, kDepthHalf,
-                              msaa ? "Ogre/Depth/DownscaleMax_Subsample0" : "Ogre/Depth/DownscaleMax",
+            auto *q = addQuad(n, kDepthHalf, "Ogre/Depth/DownscaleMax",
                               "Jahshaka SSAO depth downsample");
             q->addQuadTextureSource(0, kDepth);
         }

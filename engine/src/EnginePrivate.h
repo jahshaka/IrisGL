@@ -136,7 +136,6 @@ inline Ogre::ColourValue toOgre(const Colour &c) { return Ogre::ColourValue(c.r,
 /// The LOD switch band a WATCHED view's scene passes carry, and the suite's
 /// offscreen latch (OgreMesh.cpp; ogre-patch 0075). @see ChainDesc::lodHysteresis.
 float jahLodHysteresis();
-bool  jahLodHysteresisOffscreen();
 
 /// ATOM stage 1's VIEW rule (OgreMesh.cpp): registers `jah_world_error` — the
 /// LOD strategy whose per-object value is the world-space error the pass's own
@@ -832,7 +831,33 @@ struct StereoEyeBasis {
 struct ChainDesc {
     Colour   background;
     bool     shadows = false;   ///< instantiate the process-wide shadow node
-    unsigned samples = 1u;      ///< achieved MSAA count of the view's target
+
+    /// THE CHAIN RENDERS AT 1x, BY CONSTRUCTION, AND THAT IS WHY THERE IS NO
+    /// SAMPLE COUNT IN THIS DESCRIPTION (CHAIN-MSAA-CRUD, 2026-09-18).
+    ///
+    /// There used to be `unsigned samples`, the view target's achieved MSAA
+    /// count, and `chain::build` opened with `bool msaa = desc.samples > 1`
+    /// — and then, 115 lines later, `msaa = false` unconditionally, because
+    /// two combinations were reproduced BROKEN on this pin and driver (the
+    /// note at that line has the detail: HDR + MSAA segfaults the driver
+    /// inside the tonemapped box-filter resolve's pipeline creation, SSAO +
+    /// MSAA renders black). Everything downstream of that assignment —
+    /// `fsaa` on four targets, the non-MSAA depth copy the refraction pass
+    /// sampled, the MSAA HZB seed job, the subsample SSAO downscale, the
+    /// store-and-resolve action — was therefore DEAD, reachable only by
+    /// deleting the policy line above it. The policy is not a workaround to
+    /// be lifted later either: the AA in this engine is SMAA, a post pass
+    /// that composes with everything in the chain, and the World Modes table
+    /// asks for no tier with both.
+    ///
+    /// So the count is gone rather than pinned to 1: a field that may only
+    /// ever hold one value is not a description, it is scaffolding, and
+    /// `sameShape` comparing it made a window's sample-count change look like
+    /// a graph change when the graph cannot see it (the window is recreated
+    /// for its own reasons — OgreView::setSampleCount). The VIEW still has a
+    /// sample count and the on-screen window still honours it; the chain's
+    /// own targets are 1x, which is what makes a post-chain picture and a
+    /// passthrough picture the same colours.
 
     // ---- Effects (phases 3-7). Every one of them is OFF on offscreen views by
     //      construction: OgreView::chainDesc() clears them (POST_CHAIN_SPEC §7.3).
@@ -2582,7 +2607,51 @@ public:
     void applyPendingSkyCapture();
     /// The ambient half of the capture: the cube's 32^2 mip, read back and
     /// integrated into 9 SH bands (the host scales them by its Sky Light).
+    ///
+    /// THE READ IS ASYNCHRONOUS EXCEPT THE FIRST (render audit ON-14, lane
+    /// ENGINE-SMALL-A, 2026-09-18). `flushCommands()` + `map()` is a GPU->CPU
+    /// wait on the UI thread, and it ran on every sky CHANGE — every frame of a
+    /// sun drag (measured: 0.94 ms of wait + 0.47 ms of integral per change on
+    /// this box, and the wait's share is unbounded in principle because
+    /// flushCommands submits and waits for whatever the frame had recorded).
+    /// Now: the FIRST capture of a scene is synchronous (nothing valid to lag
+    /// behind, and a thumbnail renders a handful of frames and asserts their
+    /// colours), and every later one issues the download with INACCURATE
+    /// tracking and maps it on a later frame — `pollSkyShRead` at the frame's
+    /// top — with the previous coefficients staying valid meanwhile.
+    /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture,
+    /// which is how the two are A/B'd on one binary.
     void integrateSkyShFromCube(Ogre::TextureGpu *cube);
+    void integrateSkyShNow(Ogre::TextureGpu *cube);
+    void issueSkyShRead(Ogre::TextureGpu *cube);
+    void integrateSkyShFromBox(const Ogre::TextureBox &box);
+    /// Called at the top of every frame this scene is drawn in: counts the
+    /// gesture's clock and, if the pending read has landed, integrates it.
+    /// Never blocks.
+    void pollSkyShRead();
+    /// The read itself. `force` maps unconditionally — a capture about to
+    /// replace the ticket takes its answer first, and by then the copy is a
+    /// frame old and free (see the note in OgreSky.cpp).
+    void readSkyShTicket(bool force);
+    void destroySkyShTicket();
+    /// The read in flight, or null. Owned; read (not dropped) by the next
+    /// capture, which is one frame later at worst and therefore free.
+    Ogre::AsyncTextureTicket *mSkyShTicket = nullptr;
+    /// Drawn frames since the last sky capture — the gesture's clock. A capture
+    /// within `kSkyCaptureDragFrames` of the previous one is a DRAG and defers
+    /// its read; a lone change stays synchronous, so nothing that renders a
+    /// handful of frames and asserts their colours moves. Counted by
+    /// pollSkyShRead, which runs once per drawn frame.
+    unsigned mSkyCaptureIdleFrames = 1000u;
+    /// TWO, and the number is a measurement of both sides. A sun being dragged
+    /// pushes a new sky on every frame or every other frame (one document edit
+    /// per mouse-move event against a 60 Hz loop), so 2 catches every real
+    /// gesture; and a HOST or a suite that changes a sky, renders a few frames
+    /// and asserts the picture is at 3 or more — mirror.document_to_engine's
+    /// red-sky case renders exactly three between pushes, and at a threshold of
+    /// 3 it read the previous sky's light. The rule is "the frame after, or the
+    /// one after that", not a timer.
+    static const unsigned kSkyCaptureDragFrames = 2u;
     bool mSkyCapturePending = false;
     /// The sky's ambient, 9 SH bands x 3 channels, integrated from the captured
     /// cube. Valid only while mSkyShValid; the host scales it by its Sky Light.
@@ -4411,9 +4480,32 @@ private:
     /// boxes) plus the box of every edit that carried one. A cascade is marked
     /// `pending` only when its own box intersects one of these, which is what
     /// makes dragging a chair in one corner cost the cascades that can see the
-    /// chair and nothing else. Bounded: past `kGiCascadeDirtyBoxCap` the list
-    /// collapses into `mGiCascadeDirtyAll`, because a scene-wide edit is cheaper
-    /// to answer whole than to describe.
+    /// chair and nothing else.
+    ///
+    /// BOUNDED BY MERGING, NOT BY GIVING UP (PHOTON audit F14, 2026-09-18). Past
+    /// `kGiCascadeDirtyBoxCap` the list used to collapse into
+    /// `mGiCascadeDirtyAll` — "the scene changed everywhere" — on the reasoning
+    /// that a scene changing in sixteen places is one the whole chain has to
+    /// answer for anyway. That reasoning is wrong for the commonest case there
+    /// is: SEVENTEEN OBJECTS SETTLING IN ONE CORNER (a physics pile, an animated
+    /// set, a crowd) produce seventeen SMALL boxes a metre apart, and answering
+    /// "everywhere" marks every cascade out to the horizon, so the chain
+    /// rebuilds one cascade per frame for as long as they keep moving — the
+    /// exact cost the per-cascade path exists to avoid, reached by having TOO
+    /// MUCH information rather than too little.
+    ///
+    /// At the cap a new box is therefore MERGED into the existing entry whose
+    /// MARGIN (the sum of its extents) grows least — the R*-tree's metric, and
+    /// deliberately not the volume: this engine's boxes go FLAT, a Plane's world
+    /// AABB has zero height, and under a volume metric every coplanar box merges
+    /// at zero growth however far apart it is (a floor of moving planes
+    /// coalesces into one scene-spanning slab — conservative, never wrong, and
+    /// the exact opposite of the point). See noteGiCascadeDirty. The list stays
+    /// bounded, the description stays conservative in the only direction that is
+    /// safe — a merged box covers everything both boxes did — and seventeen
+    /// crates in a corner stay a corner. `mGiCascadeDirtyAll` survives for the
+    /// one statement that really is scene-wide: a null box, i.e. "somewhere, I
+    /// cannot say where".
     std::vector<Ogre::Aabb> mGiCascadeDirtyBoxes;
     bool mGiCascadeDirtyAll = false;
     static const size_t kGiCascadeDirtyBoxCap = 16;
@@ -4543,6 +4635,24 @@ private:
     std::vector<Ogre::Aabb>                       mScanReach;
     std::unordered_map<NodeId, unsigned long long> mScanKeys;
     std::vector<MaterialId>                       mScanDeforming;
+    /// THE CASTERS WHOSE MATERIAL MOVES VERTICES EVERY FRAME (audit ON-16,
+    /// 2026-09-18), by node id, as the last full caster walk found them.
+    ///
+    /// A material with a VERTEX-STAGE generated piece reads the shader clock, so
+    /// its items' shadow maps are never cacheable — the way Unreal excludes
+    /// world-position-offset materials from its shadow caches. That used to take
+    /// the caster walk's still-frame gate out FOR THE WHOLE SCENE (`deforms` in
+    /// runItemWalk): one wind material anywhere and every item in the scene was
+    /// visited every frame again, which is the cost the gate exists to remove.
+    ///
+    /// The roster is what makes the gate per ITEM: it is rebuilt by every full
+    /// walk (which visits every item anyway, so it costs nothing extra), and on
+    /// a still frame the walk re-flags exactly these nodes and returns. It
+    /// cannot go stale while the gate holds, because every seam that could
+    /// change a node's material, a material's pieces, or a caster's presence
+    /// counts a shadow-scan input (markShadowShapeDirty / noteShadowScanInput)
+    /// — and that moves the epoch, which forces a full walk that rebuilds it.
+    std::vector<NodeId>                           mShadowDeformers;
     /// (materialId, the albedo/emissive half of noteMaterialChanged) for
     /// materials waiting on a texture — see settleTextureResidency.
     std::vector<std::pair<MaterialId, bool>> mMaterialsAwaitingTexture;
@@ -5031,6 +5141,8 @@ public:
     bool helpersVisible() const override { return mHelpersVisible; }
     void setVrHelpersVisible(bool on) override;
     bool vrHelpersVisible() const override { return mVrHelpersVisible; }
+    void setLodHysteresisOffscreen(bool on) override;
+    bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -5362,6 +5474,10 @@ private:
     /// ...and the VR channel (kVrHelperBit). Off everywhere but the session's
     /// own view, so nothing meant for a headset reaches a desktop picture.
     bool                       mVrHelpersVisible = false;
+    /// Does this OFFSCREEN view get the LOD switch band anyway
+    /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
+    /// everywhere but the one suite that has to read what the band does.
+    bool                       mLodHysteresisOffscreen = false;
     /// An exposure multiplier a host handed over before this view had a chain
     /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
     /// on the chain it builds, once; 0 = nothing owed.
@@ -5588,6 +5704,7 @@ public:
     unsigned long long textureLoadRequests() const override;
     unsigned textureMultiLoadThreads() const override;
     unsigned textureWaitTimeouts() const override { return mTextureWaitTimeouts; }
+    unsigned long long textureWaitAdvances() const override;
     double textureWaitWorstMs() const override { return mTextureWaitWorstMs; }
     unsigned textureWaitBudgetMs() const override { return mTextureWaitBudgetMs; }
     unsigned textureMetadataCacheEntries() const override;
@@ -6071,6 +6188,30 @@ private:
     /// only way to prove the give-up path, because the real trigger kills a
     /// decode worker before the main thread can time anything.
     bool            mTextureWaitFault = false;
+    /// THE DRAIN'S ADVANCE CADENCE, in ms (lane ENGINE-SMALL-A / DRAIN-1, audit
+    /// ON-17). The drain polls every 1 ms and used to call
+    /// `VaoManager::_update()` on EVERY poll — and a bare `_update` outside a
+    /// frame commits a command buffer with a fence at the TOP of the call
+    /// whenever the previous one left the fence unflushed
+    /// (OgreVulkanVaoManager.cpp, the pin's issue #433), so a drain that waits
+    /// a second for a scene's textures submitted ~1,000 empty command buffers,
+    /// advanced the descriptor pools ~1,000 times and reset the BarrierSolver
+    /// as often. One advance per FRAME's worth of time does the same work per
+    /// tick — the commit, the frame-index advance, the staging/semaphore/
+    /// delayed-block retires — 16 times more cheaply, and the drain's progress
+    /// never depended on the rate (it depends on the decode workers, which run
+    /// on their own threads; `TextureGpuManager::_update(true)` is still called
+    /// on every poll, exactly as upstream's own wait does).
+    ///
+    /// JAH_TEXTURE_DRAIN_ADVANCE_MS overrides it for the A/B (0 = advance on
+    /// every poll, i.e. the pre-DRAIN-1 behaviour) — the same shape as every
+    /// other measurable rule in this engine.
+    double          mTextureDrainAdvanceMs = 16.0;
+    /// How many times the drain advanced the VaoManager, this process
+    /// (`Engine::textureWaitAdvances`, `app.textureStreaming().waitAdvances`).
+    /// Monotonic; the guard `threading.texture_wait_watchdog` asserts it against
+    /// the cadence over a known 300 ms stuck drain.
+    unsigned long long mTextureWaitAdvances = 0ull;
     /// How many times advanceResources() has run (RenderStats::resourceAdvances).
     unsigned long long mResourceAdvances = 0ull;
 

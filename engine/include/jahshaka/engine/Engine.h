@@ -115,6 +115,30 @@ public:
     /// all, or the capture has not run: it happens inside the next rendered
     /// frame, like the IBL convolution).
     ///
+    /// WHEN THE ANSWER CHANGES, exactly (lane ENGINE-SMALL-A / audit ON-14,
+    /// 2026-09-18) — because it is one frame for a lone edit and two for a
+    /// gesture, and a host that renders a fixed number of frames and then
+    /// asserts a picture has to know which:
+    ///
+    ///   * A LONE sky change is read SYNCHRONOUSLY, inside the frame that
+    ///     captured it. This call answers with the new sky from the next frame
+    ///     on, and a host pushing the ambient per frame has it in the picture
+    ///     one frame after the capture — the behaviour this contract has always
+    ///     described.
+    ///   * A GESTURE — a second capture within a couple of drawn frames of the
+    ///     previous one, i.e. a sun being dragged — DEFERS its readback: the
+    ///     download is issued without a flush and read at the top of the NEXT
+    ///     frame, so this call answers with the new sky from that frame on and
+    ///     a host's per-frame push puts it in the picture the frame after, TWO
+    ///     frames behind the capture. In exchange the capture frame does not
+    ///     block on the GPU (measured 0.94 ms of flush and wait per change,
+    ///     i.e. per frame of a drag). Nothing ever flickers: the previous
+    ///     coefficients stay valid until the new ones land.
+    ///
+    /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture — the
+    /// run-wide diagnostic latch this engine's measurable rules carry, and the
+    /// way the two arms are A/B'd on one binary.
+    ///
     /// UNSCALED: this is the sky's mean incident radiance. A host that models a
     /// sky LIGHT multiplies by its intensity and tint and pushes the result
     /// through setAmbientSh — the backend never applies a light of its own.
@@ -1316,6 +1340,35 @@ public:
     virtual void setVrHelpersVisible(bool) = 0;
     virtual bool vrHelpersVisible() const = 0;
 
+    /// DOES THIS OFFSCREEN VIEW GET THE LOD SWITCH BAND? (ogre-patch 0075,
+    /// ATOM-3; lane ENGINE-SMALL-A's LOD-LATCH-1, 2026-09-18.)
+    ///
+    /// The band (`ChainDesc::lodHysteresis`) holds an object's LOD level across
+    /// a window of the switch distance so a camera dithering on a threshold does
+    /// not pop, and it belongs to a picture somebody WATCHES OVER TIME: it is on
+    /// for every ON-SCREEN view and for the VR session's view (offscreen only
+    /// because both eyes share one texture), and OFF for every thumbnail,
+    /// preview, screenshot and pixel suite, which must take the level their own
+    /// value asks for so one pose is always one set of pixels.
+    ///
+    /// This is the deliberate exception, per view, and it is here because
+    /// `View::readPixels` refuses an on-screen view (its target is a swapchain)
+    /// — so the one kind of view whose pixels a test can READ is the one kind
+    /// that has no band, and a suite that wants to see what the band does has no
+    /// reachable subject without it. It replaces the process-wide env latch
+    /// `JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN`, which is DELETED: an environment
+    /// variable read once per process could not be scoped to a view, could not
+    /// be set by a host at all, and was invisible in the description of the
+    /// picture it changed — the same reason the post chain, the overlay and the
+    /// PiP each carry their own `allowOffscreen`.
+    ///
+    /// False by default, and nothing in Studio sets it. GRAPH SHAPE (the band is
+    /// written onto the pass definitions), so setting it rebuilds this view's
+    /// workspace and restarts its adaptation history — set it once, when the
+    /// view is created. Ignored on an on-screen view, which has the band anyway.
+    virtual void setLodHysteresisOffscreen(bool) = 0;
+    virtual bool lodHysteresisOffscreen() const = 0;
+
     /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
     /// tonemapper's own multiplier (SS1, 2026-09-13) — the number the shader
     /// samples as `fInvLumAvg`, read back off the GPU's 1x1 adaptation history.
@@ -1940,6 +1993,22 @@ public:
     /// any non-zero value means textures were left unfinished and at least one
     /// frame was drawn without them.
     virtual unsigned textureWaitTimeouts() const = 0;
+
+    /// HOW MANY TIMES THE DRAIN ADVANCED THE RENDERER'S RESOURCE BOOKKEEPING
+    /// (lane ENGINE-SMALL-A / DRAIN-1, audit ON-17). Monotonic, never reset.
+    ///
+    /// The drain polls the texture manager every millisecond and, on a cadence
+    /// of one frame's worth of time, calls `VaoManager::_update()` — which
+    /// retires staging buffers, semaphores and delayed blocks, and whose
+    /// COMMIT is a pair: a bare `_update` outside a frame commits at the top of
+    /// the call and only when the previous one left the fence unflushed (the
+    /// pin's issue #433), so the first advance of a drain ARMS and the second —
+    /// one cadence later — commits and advances the frame index. It used to be
+    /// called on EVERY poll, which is an empty command buffer plus a fence per
+    /// millisecond of waiting (up to ~1,000/s while a scene loads). Only
+    /// differences mean anything; it is here so a suite can assert the cadence
+    /// rather than trusting it.
+    virtual unsigned long long textureWaitAdvances() const = 0;
 
     /// The longest single bounded wait this process has performed, in ms.
     /// A timing observation, not a budget — useful for a suite that wants to
