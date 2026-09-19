@@ -7286,10 +7286,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // The editor lends a mesh's material slot to whatever is being dragged
         // over it and takes it back when the drag leaves; the document is never
         // written and no undo step exists. The engine's material signature
-        // cannot tell the two apart. (Measured 2026-09-19, ledger 804: a material
-        // SWAP does not move that signature today — a defect of its own, queued
-        // as MATERIAL-SWAP-GI-1 — so this gate has nothing to hold back yet; it
-        // is here for the day a swap does.)
+        // cannot tell the two apart. (Measured 2026-09-19, ledger 804-805: a
+        // colour-only swap does not move this term; a textured one does, and the
+        // engine re-voxelises on the re-attach either way — MATERIAL-SWAP-GI-1
+        // owns the rest, this gate's falling edge included.)
         //
         // The whole answer is here, at the ONE read: while the scene says a
         // preview is on screen the material term reads as whatever was

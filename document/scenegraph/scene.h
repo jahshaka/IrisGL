@@ -523,12 +523,12 @@ public:
     /// committed one, so whatever a material change costs the GI caches a hover
     /// would be charged too — for a state that will never be saved.
     ///
-    /// MEASURED 2026-09-19 (ledger 804): today that cost is ZERO, because a
-    /// material SWAP on a voxelised item does not reach the engine's material
-    /// generation at all — which is a defect (a committed swap leaves the voxels
-    /// carrying the old albedo), queued as MATERIAL-SWAP-GI-1. That lane is when
-    /// this flag starts to matter, and it owns the falling edge (the restore's
-    /// own bump lands in the first unflagged sync).
+    /// MEASURED 2026-09-19 (ledger 804-805): the mirror's material term does not
+    /// move for a colour-only swap, so today this flag holds back little; the
+    /// cost a hover really pays is the engine's — a material-pointer change
+    /// re-attaches the item and invalidates the GI caches whole. A TEXTURED
+    /// preview does bump the (monotonic) generation while flagged, so the
+    /// falling edge needs an adopt. All three belong to MATERIAL-SWAP-GI-1.
     ///
     /// So the preview says so. While this is true the mirror neither arms nor
     /// ADOPTS the material term: it keeps the signature it remembered before
