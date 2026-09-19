@@ -155,6 +155,11 @@ ChainDesc OgreView::chainDesc() const {
     d.ssaoScale      = mPostFx.ssaoScale;
     d.ssaoPower      = mPostFx.ssaoPower;
     d.ssaoRadius     = mPostFx.ssaoRadius;
+    // The dither's diagnostic off switch (a uniform, per view — see
+    // PostFxDesc::ditherOff). It sits BELOW the offscreen early-out with
+    // everything else the chain carries, which is right: an offscreen view
+    // with no chain has no tonemap quad and therefore no dither to turn off.
+    d.ditherOff      = mPostFx.ditherOff;
     d.smaaPreset     = mPostFx.smaaPreset;
     d.ssr            = mPostFx.ssr;
     // AND THE SOURCE THE ROW SELECTS, which this line was missing for one round
@@ -561,6 +566,17 @@ void OgreView::setPostFx(const PostFxDesc &fx) {
     // ...and the one thing that is NOT a shape change but still lives in the
     // graph: the fixed tonemap's exposure clear.
     applyFixedExposure();
+    // THE DITHER'S OFF SWITCH, PUSHED HERE AS WELL AS PER FRAME, and the "as
+    // well" is load-bearing (lane DITHER-1). Everything else the chain tunes
+    // per view rides chain::ViewGlobalsListener, which OgreEngine arms once a
+    // frame for every view that is ENABLED — and the VR session's View is not:
+    // the session drives its own workspace and leaves the engine's loop out of
+    // it, so the eye picture receives no per-view push at all (not exposure,
+    // not the bloom threshold, not the AO camera terms, and not this). The
+    // tonemap's parameter is process-global, so a write here reaches the eyes
+    // whoever owns the view; it is debounced inside setDither and costs
+    // nothing when the value has not moved.
+    if (chainDesc().hdr) chain::setDither(chainDesc().ditherOff);
 }
 
 const PostFxDesc &OgreView::postFx() const { return mPostFx; }

@@ -1931,11 +1931,58 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     `updateFrustumImpl` calls the function with swapped arguments, so every branch
     publishes under swapped names — upstream's behaviour, untouched.
 
-THE STACK IS 0001-0078 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0079-final-grade-is-dithered — THE FINAL GRADE'S 8-BIT WRITE IS DITHERED (lane
+    DITHER-1, 2026-09-18), MEDIA-only, two files
+    (Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl and
+    .../HDR/HDR.material), NO overlap with any other patch. The owner's "faint
+    circular rippling in the ground plane while flying" is 8-bit contour banding:
+    the renderer computes in RGBA16F, every target a person sees is 8-bit UNORM,
+    10-bit output is not available on this path (LATER_OPTIMISATIONS L14), and
+    there was no dither anywhere in the final grade. `HDR/FinalToneMapping` is the
+    ONE place a float picture becomes display codes in this engine — every target
+    it writes is 8-bit (the window, the offscreen RTT, the VR eye image, SMAA's
+    LDR buffer, the looks stage's first buffer, the picture-in-picture inset) —
+    so the dither is unconditional there and needed nowhere else. The dither
+    itself is OUR media (irisgl/engine/media/Hlms/Jahshaka/JahDither.glsl,
+    reached through Ogre's own `#include` + `enable_include_header`, which
+    resolves through the resource GROUP): a deterministic interleaved-gradient
+    offset of at most 0.498 of a code, keyed on the INTEGER pixel coordinate
+    alone — no time term, so a still frame stays byte-identical — added to the
+    shader's own output value, which in this engine IS the display code. 0.498
+    and not 0.500 so that a value already sitting exactly on a code rounds back
+    to it, which is what makes a dithered write over an already-quantised
+    picture the identity.
+    IT IS ALL INTEGER ARITHMETIC AND THE SHADER QUANTISES ITSELF, because
+    neither the compiler nor the driver may decide the picture: a float
+    `fract(52.98 * fract(dot(p,k)))` turns a 1-ULP difference into a completely
+    different offset under fused-multiply-add contraction, and a float handed
+    to a UNORM attachment lets the hardware break the rounding tie. So the
+    noise is 32-bit unsigned (the same IGN, its constants as Q32 fixed point)
+    and the shader writes `floor(v*255 + 0.5 + n)/255`. MEASURED: NVIDIA's and
+    lavapipe's dropped-pixel sets on an unshaded frame are NESTED (12,339 a
+    subset of 14,425, zero violations) — the same noise field thresholded at
+    two slightly different fractions, which is what an identical integer noise
+    looks like through two float pipelines that disagree by 1e-4.
+    Measured (default scene, plain ground, 25 m overhead, 'scene' grade): the
+    longest run of one code on a cut 475 -> 76 px, the radial profile's max
+    annulus-to-annulus step 0.5756 -> 0.0243 of a code. `jahDitherOff` is the
+    diagnostic switch (`PostFxDesc::ditherOff` per view, or JAHSHAKA_NO_DITHER
+    read once for the process), named so that its SAFE value is zero — an
+    unwritten constant buffer renders the CORRECT picture. Guarded by
+    `hdr.dither` (ten arms, both pictures in one process) and, for the eyes, by
+    `vr.session` + `vr.session_undithered`. The selftest hashes move by design:
+    pose 1 `2bc1ab3a…` -> `3d2e88e7…`, pose 2 `a42ec3d6…` -> `90d06e1f…`. The
+    same binary with the dither off gives `e4f35c84…`/`89335f30…` and NOT the
+    pre-lane pair: taking the rounding of ties away from the driver moves 2.02 %
+    / 1.72 % of the poses' pixels by exactly 1/255 on its own (flat regions
+    sharing one float value that lands on a tie), and the dither then moves
+    25.08 %.
+
+THE STACK IS 0001-0079 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075 and 0078 are SOURCE-only (0062, 0065 and 0076 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
