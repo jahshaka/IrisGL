@@ -913,6 +913,21 @@ struct ChainDesc {
     float ssaoScale = 1.0f;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower = 1.5f;
     float ssaoRadius = 2.0f;
+    /// THE DITHER'S OFF SWITCH, AND IT IS A DIAGNOSTIC, NOT A DIAL (lane
+    /// DITHER-1). The tonemap quad dithers its 8-bit write; this turns that
+    /// off so a suite can render the SAME picture both ways IN ONE PROCESS and
+    /// measure the difference, which is what makes hdr.dither's discrimination
+    /// arms real and what the --engine-selftest hash A/B rests on. There is no
+    /// project row and there will not be one: a dither is correctness.
+    ///
+    /// A UNIFORM, never a shape term (it is deliberately not in sameShape()) —
+    /// and per VIEW, pushed by applyViewGlobals immediately before that view's
+    /// passes execute, which is the same mechanism that lets two on-screen
+    /// views carry two exposures through one process-global material.
+    ///
+    /// The environment variable JAHSHAKA_NO_DITHER forces it on for the whole
+    /// process; it is read ONCE (chain::noDitherEnv) and ORed with this.
+    bool  ditherOff = false;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
     /// Does the screen-space MARCH contribute (PostFxDesc::ssrScreenMarch)?
@@ -1275,7 +1290,8 @@ bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef)
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
 /// THE METER'S PATTERN AND CLIPS (EXPOSURE-2). Uniforms on the histogram
 /// meter's compute jobs; only meaningful for the form that measures.
-void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent);
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent,
+               bool stereo);
 void setBloomThreshold(float minThreshold, float fullColourThreshold);
 void initSsao(Ogre::Root *root);
 void destroySsao(Ogre::Root *root);
@@ -1311,6 +1327,14 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc);
 //     on screen and offscreen), which fixes two pre-existing defects outright:
 //     two on-screen views no longer fight over one exposure, and SSAO no longer
 //     marches the FIRST view's projection in the second view's frame.
+/// Pushes the dither's diagnostic off switch onto the tonemap material
+/// (ChainDesc::ditherOff, ORed with the once-read JAHSHAKA_NO_DITHER). Called
+/// from applyViewGlobals; separate only so its teardown twin has a name.
+void setDither(bool off);
+/// Drops the cached tonemap parameter block. Called from destroySsao, i.e. from
+/// ~OgreEngine, because the cache is a SharedPtr into a material that is about
+/// to stop existing.
+void forgetDitherParams();
 void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc);
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                       unsigned viewWidth, unsigned viewHeight);
@@ -5213,6 +5237,22 @@ public:
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
     bool stereo() const { return mStereo; }
+    /// THE ONE-SESSION REFLECTION OVERRIDE (lane EYE-GRADE-1). The SSR row a
+    /// stereo view renders with is the PROJECT's — the mirror pushes it here
+    /// like it does into the desktop's view — and this is `vr.begin({
+    /// reflections:n})`'s measurement arm over it: -1 follows the project, 0/1/2
+    /// pin the row for as long as this view is stereo. Applied inside
+    /// `applyVrViewPolicy`, so it cannot be forgotten by a later push.
+    void setVrSsrOverride(int row);
+    int  vrSsrOverride() const { return mVrSsrOverride; }
+    /// HOW MANY TIMES THIS VIEW'S PER-FRAME CHAIN GLOBALS HAVE BEEN PUSHED
+    /// (chain::ViewGlobalsListener). The meter's uniforms, the auto exposure's
+    /// terms, the bloom threshold, the AO and SSR camera terms and every look's
+    /// parameters ride that push and NOTHING else — so a view whose count does
+    /// not climb is a view rendering with whatever the last workspace to update
+    /// happened to leave in the process-wide materials. @see globalsPushes.
+    void noteGlobalsPush() { ++mGlobalsPushes; }
+    unsigned long long globalsPushes() const override { return mGlobalsPushes; }
     /// THE TWO EYES THIS VIEW IS RENDERING, this frame (@see StereoEyeBasis).
     /// Pushed by the VR session every frame it locates them, dropped when the
     /// session ends; read by the ray-traced reflection so each eye's pixels get
@@ -5497,6 +5537,17 @@ private:
     bool                       mStereo = false;
     bool                       mGiPriority = false;
     std::string                mCullCameraName;
+    /// THE SESSION'S ONE-RUN REFLECTION OVERRIDE (lane EYE-GRADE-1;
+    /// `vr.begin({reflections:n})`). -1 — every view but a session's — means
+    /// "whatever the project's row says", which is what the mirror pushes.
+    int                        mVrSsrOverride = -1;
+    /// @see noteGlobalsPush.
+    unsigned long long         mGlobalsPushes = 0;
+    /// WHAT THE VR POLICY LAST TOOK AWAY, as one number (looks * 4 + refraction
+    /// bit * 2 + distortion bit) — the latch behind the one log line that tells
+    /// an author why something they can see on the desktop is not in the
+    /// headset. size_t(-1) = nothing said yet.
+    size_t                     mVrPolicyDropped = size_t(-1);
     /// The located eyes of THIS frame (@see StereoEyeBasis). Not part of the
     /// chain's identity — they change every frame and change no pass.
     StereoEyeBasis             mStereoEyes[2];
@@ -5655,6 +5706,17 @@ void bootEnd(VrBoot *);
 VrSession *sessionBegin(VrBoot *, OgreEngine *, OgreScene *, const VrConfig &,
                         std::string &reason);
 void sessionEnd(VrSession *);
+/// IS THE LIVE SESSION'S PICTURE ENCODED EXACTLY ONCE between this renderer and
+/// the wearer's eye (lane EYE-GRADE-1)? False only while a session is running
+/// on a runtime that offered no _SRGB swapchain format and is therefore going
+/// to encode our display-ready bytes a SECOND time; true when no session runs.
+///
+/// PROCESS-WIDE, because a session is (`Engine::beginVrSession` refuses a
+/// second), and declared HERE rather than reached through the engine because
+/// the caller that needs it most is CHAIN code — a composite that dithers the
+/// final picture must stand down when the runtime is about to re-encode it,
+/// and the chain has no session pointer.
+bool colourEncodedOnce();
 }  // namespace vr
 
 /// THE PUMP, from the frame's point of view. `vrSessionBeginFrame` polls the

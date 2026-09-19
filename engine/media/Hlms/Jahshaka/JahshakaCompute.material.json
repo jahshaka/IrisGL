@@ -49,7 +49,8 @@
 			"uav_units" : 1,
 			"params" :
 			[
-				["meterParams", [1.0, 2.7725887, 0.025, 0.05], "float"]
+				["meterParams", [1.0, 2.7725887, 0.025, 0.05], "float"],
+				["meterEyes", [1.0, 0.0, 0.0, 0.0], "float"]
 			]
 		},
 

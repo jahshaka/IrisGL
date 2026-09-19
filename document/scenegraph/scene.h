@@ -514,6 +514,33 @@ public:
     /// still be one re-solve, and because a bool would need a clearer — which is
     /// the mirror's job, not the caller's.
     quint64 giRefreshSerial = 0;
+    /// A MATERIAL THE USER HAS NOT COMMITTED IS ON THE SCREEN (MATERIAL-PREVIEW-1).
+    ///
+    /// The editor's hover preview borrows a mesh's material slot while a
+    /// material is dragged over it and puts the original back when the drag
+    /// leaves, drops or is cancelled — the document is never written and no
+    /// undo step exists. The renderer cannot tell a borrowed material from a
+    /// committed one, so whatever a material change costs the GI caches a hover
+    /// would be charged too — for a state that will never be saved.
+    ///
+    /// MEASURED 2026-09-19 (ledger 804-805): the mirror's material term does not
+    /// move for a colour-only swap, so today this flag holds back little; the
+    /// cost a hover really pays is the engine's — a material-pointer change
+    /// re-attaches the item and invalidates the GI caches whole. A TEXTURED
+    /// preview does bump the (monotonic) generation while flagged, so the
+    /// falling edge needs an adopt. All three belong to MATERIAL-SWAP-GI-1.
+    ///
+    /// So the preview says so. While this is true the mirror neither arms nor
+    /// ADOPTS the material term: it keeps the signature it remembered before
+    /// the preview began, so the restore lands back on it and nothing has
+    /// changed as far as the debounce is concerned. A real apply ends the
+    /// preview FIRST (MaterialPreviewService), so its own signature move arms
+    /// the one re-solve it should.
+    ///
+    /// NEVER SERIALIZED and never true for longer than a gesture. A counter
+    /// rather than a bool so nested/overlapping previews cannot clear it early.
+    int materialPreviewDepth = 0;
+    bool materialPreviewActive() const { return materialPreviewDepth > 0; }
     /// The SAME shape for the cached point/spot shadow maps
     /// (ENGINE_CACHE_POLICY_SPEC P2): monotonic, never serialized, bumped by
     /// world.refreshShadows(). The mirror compares it against the value it last
