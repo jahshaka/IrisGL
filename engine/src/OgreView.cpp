@@ -159,7 +159,13 @@ ChainDesc OgreView::chainDesc() const {
     // PostFxDesc::ditherOff). It sits BELOW the offscreen early-out with
     // everything else the chain carries, which is right: an offscreen view
     // with no chain has no tonemap quad and therefore no dither to turn off.
-    d.ditherOff      = mPostFx.ditherOff;
+    // ...AND THE EYE'S DITHER STANDS DOWN WHEN THE RUNTIME WILL ENCODE AGAIN (the
+    // lead, at the merge of EYE-GRADE-1 onto DITHER-1). The dither is sized for
+    // the LAST 8-bit write; on the UNORM-swapchain fallback the runtime re-encodes
+    // our bytes and stretches a half-code of noise ~13x in the darks — a visible
+    // grain where there was a band. On the _SRGB contract (every runtime seen so
+    // far) this term is false and the eye dithers like the desktop.
+    d.ditherOff      = mPostFx.ditherOff || (mStereo && !vr::colourEncodedOnce());
     d.smaaPreset     = mPostFx.smaaPreset;
     d.ssr            = mPostFx.ssr;
     // AND THE SOURCE THE ROW SELECTS, which this line was missing for one round
