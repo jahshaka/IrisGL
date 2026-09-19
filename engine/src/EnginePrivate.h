@@ -913,6 +913,21 @@ struct ChainDesc {
     float ssaoScale = 1.0f;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower = 1.5f;
     float ssaoRadius = 2.0f;
+    /// THE DITHER'S OFF SWITCH, AND IT IS A DIAGNOSTIC, NOT A DIAL (lane
+    /// DITHER-1). The tonemap quad dithers its 8-bit write; this turns that
+    /// off so a suite can render the SAME picture both ways IN ONE PROCESS and
+    /// measure the difference, which is what makes hdr.dither's discrimination
+    /// arms real and what the --engine-selftest hash A/B rests on. There is no
+    /// project row and there will not be one: a dither is correctness.
+    ///
+    /// A UNIFORM, never a shape term (it is deliberately not in sameShape()) —
+    /// and per VIEW, pushed by applyViewGlobals immediately before that view's
+    /// passes execute, which is the same mechanism that lets two on-screen
+    /// views carry two exposures through one process-global material.
+    ///
+    /// The environment variable JAHSHAKA_NO_DITHER forces it on for the whole
+    /// process; it is read ONCE (chain::noDitherEnv) and ORed with this.
+    bool  ditherOff = false;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
     /// Does the screen-space MARCH contribute (PostFxDesc::ssrScreenMarch)?
@@ -1312,6 +1327,14 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc);
 //     on screen and offscreen), which fixes two pre-existing defects outright:
 //     two on-screen views no longer fight over one exposure, and SSAO no longer
 //     marches the FIRST view's projection in the second view's frame.
+/// Pushes the dither's diagnostic off switch onto the tonemap material
+/// (ChainDesc::ditherOff, ORed with the once-read JAHSHAKA_NO_DITHER). Called
+/// from applyViewGlobals; separate only so its teardown twin has a name.
+void setDither(bool off);
+/// Drops the cached tonemap parameter block. Called from destroySsao, i.e. from
+/// ~OgreEngine, because the cache is a SharedPtr into a material that is about
+/// to stop existing.
+void forgetDitherParams();
 void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc);
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                       unsigned viewWidth, unsigned viewHeight);
