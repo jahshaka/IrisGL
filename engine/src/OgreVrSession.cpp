@@ -108,6 +108,7 @@ VrSession *sessionBegin(VrBoot *, OgreEngine *, OgreScene *, const VrConfig &,
     return nullptr;
 }
 void sessionEnd(VrSession *) {}
+bool colourEncodedOnce() { return true; }   // no session is ever wrong about colour
 }  // namespace vr
 
 // The engine's four session entry points, for the same reason.
@@ -147,6 +148,12 @@ namespace {
 constexpr float kVrDefaultNear = 0.05f;
 constexpr float kVrDefaultFar = 1000.0f;
 
+/// IS THE LIVE SESSION'S PICTURE ENCODED EXACTLY ONCE (`vr::colourEncodedOnce`,
+/// declared in EnginePrivate.h)? A file static because there is one session per
+/// process and the reader is chain code with no session pointer: raised when a
+/// session takes its swapchain format, lowered when that session dies.
+bool sColourEncodedOnce = true;
+
 void vrLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vrLog(const char *fmt, ...) {
     char buf[1024];
@@ -161,6 +168,32 @@ std::string xrResultName(XrInstance instance, XrResult r) {
     if (instance != XR_NULL_HANDLE && XR_SUCCEEDED(xrResultToString(instance, r, buf)))
         return buf;
     return std::to_string(int(r));
+}
+
+/// THE SWAPCHAIN FORMATS A RUNTIME MIGHT OFFER, BY NAME (lane EYE-GRADE-1).
+///
+/// Vulkan has no format-to-string in core and the loader's one is a validation-
+/// layer facility, so this is a small table of the formats a runtime plausibly
+/// offers for a colour swapchain — enough to make the once-per-session log line
+/// readable. Anything else is printed as its number, which is still findable in
+/// vulkan_core.h.
+std::string vkFormatName(int64_t f) {
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM:          return "R8G8B8A8_UNORM";
+    case VK_FORMAT_R8G8B8A8_SRGB:           return "R8G8B8A8_SRGB";
+    case VK_FORMAT_B8G8R8A8_UNORM:          return "B8G8R8A8_UNORM";
+    case VK_FORMAT_B8G8R8A8_SRGB:           return "B8G8R8A8_SRGB";
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "A2B10G10R10_UNORM_PACK32";
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return "A2R10G10B10_UNORM_PACK32";
+    case VK_FORMAT_R16G16B16A16_UNORM:      return "R16G16B16A16_UNORM";
+    case VK_FORMAT_R16G16B16A16_SFLOAT:     return "R16G16B16A16_SFLOAT";
+    case VK_FORMAT_R32G32B32A32_SFLOAT:     return "R32G32B32A32_SFLOAT";
+    case VK_FORMAT_D16_UNORM:               return "D16_UNORM";
+    case VK_FORMAT_D32_SFLOAT:              return "D32_SFLOAT";
+    case VK_FORMAT_X8_D24_UNORM_PACK32:     return "X8_D24_UNORM_PACK32";
+    default: break;
+    }
+    return std::to_string(f);
 }
 
 /// The standard OpenXR asymmetric projection in OGRE's convention ([-1,1]
@@ -766,6 +799,15 @@ private:
     /// The one Vulkan routine: the two eye copies, recorded on the frame's own
     /// command buffer while the BarrierSolver still knows the target's state.
     void copyEyes();
+    /// THE SCALED EYE'S TRANSIENT IMAGE (the measurement path only —
+    /// VrConfig::overrideEyeWidth). Swapchain-sized and PFG_RGBA8_UNORM, i.e.
+    /// the SAME format as the eye target, so the blit into it converts nothing
+    /// and the copy out of it into the _SRGB swapchain stays a raw byte
+    /// transfer. Created on the first frame that needs it and destroyed with
+    /// the session; null (and the frame's copy skipped) if it cannot be made.
+    Ogre::TextureGpu *scaleImage(unsigned w, unsigned h);
+    void destroyScaleImage();
+    Ogre::TextureGpu *mScaleImage = nullptr;
     /// Everything that must be released before Ogre's objects go: the XR
     /// swapchains, the space and the session. Safe twice.
     void destroyXr();
@@ -876,6 +918,9 @@ private:
     uint32_t    mAcquired[2] = { 0u, 0u };
     bool        mHasAcquired[2] = { false, false };
     int64_t     mSwapchainFormat = 0;
+    /// Is the picture encoded exactly ONCE between the renderer and the eye
+    /// (`VrStatus::colourEncodedOnce`)? False only on the UNORM fallback.
+    bool        mColourEncodedOnce = true;
 
     VrState     mState = VrState::Idle;
     bool        mRunning = false;     ///< between xrBeginSession and xrEndSession
@@ -1127,28 +1172,110 @@ bool VrSession::create(std::string &reason) {
     mEngine->mVrInfo.space = spaceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "stage" : "local";
     vrLog("reference space: %s", mEngine->mVrInfo.space.c_str());
 
-    // THE SWAPCHAIN FORMAT, WITH NO SILENT FALLBACK (phase 1a fix round F4).
-    // The copy is a vkCmdCopyImage, which demands format COMPATIBILITY — the
-    // same texel block size — so a 4-byte eye target cannot be copied into
-    // Monado's first preference (R16G16B16A16_UNORM, 8 bytes). We ask for the
-    // UNORM 8-bit format because that is what this engine's own view targets
-    // are (OgreView::createRtt, PFG_RGBA8_UNORM) and what its windows are
-    // (VulkanWindow picks a non-sRGB format without the `gamma` param): the
-    // HlmsPbs pixel shader does the linear->gamma conversion ITSELF when the
-    // target is not sRGB (`@property( !hw_gamma_write ) outPs_colour0.xyz =
-    // sqrt( finalColour )`), so our bytes are already display-encoded and a
-    // pass-through is exactly right. Taking an _SRGB swapchain instead would
-    // ask the runtime to encode them a second time.
+    // ---- THE COLOUR CONTRACT WITH THE RUNTIME, STATED ONCE (lane EYE-GRADE-1,
+    //      2026-09-18; it was INVERTED from phase 1a to push #50) -------------
+    //
+    // WHAT OPENXR SAYS A SWAPCHAIN FORMAT MEANS. The runtime SAMPLES the image
+    // we hand it and composites it for the display. A format with an _SRGB
+    // suffix tells it "these bytes are display-encoded": the sampler decodes
+    // them to linear on the way in and the compositor re-encodes for the
+    // display, which is an identity round trip. A NON-sRGB (UNORM) format tells
+    // it the opposite — "these bytes ARE linear" — so it encodes them a SECOND
+    // time on the way out.
+    //
+    // WHAT WE HAND IT. The eye target is `PFG_RGBA8_UNORM` (OgreView::createRtt)
+    // and the chain writes a DISPLAY-REFERRED picture into it: with the target
+    // not sRGB, `hw_gamma_write` is off and the HlmsPbs pixel shader encodes
+    // itself (`outPs_colour0.xyz = sqrt( finalColour )`), and the HDR chain's
+    // composite writes the tonemapped, display-referred value (OgreChain's
+    // kLook* note: "the composite quad writes a DISPLAY-REFERRED value"). So our
+    // bytes are ENCODED, and the format that says so is the _SRGB one.
+    //
+    // MEASURED, because phase 1a's comment reasoned the other way round and was
+    // wrong (spikes/smoke-50/f5b): through Monado's XCB compositor the runtime's
+    // displayed picture was the sRGB DECODE of the bytes we submitted, across
+    // five sky levels — 28->3, 79->20, 95->29, 99->32, a red 164->95 — i.e. one
+    // encode too many, and the wearer saw a picture that was much too dark.
+    //
+    // THE COPY IS UNCHANGED AND STILL A RAW BYTE TRANSFER. `vkCmdCopyImage`
+    // converts nothing and requires only SIZE COMPATIBILITY, and
+    // R8G8B8A8_UNORM and R8G8B8A8_SRGB are the same 32-bit block: the same
+    // bytes land in the swapchain, and only the runtime's reading of them
+    // changes. That makes the chain of encodes exactly ONE from radiance to the
+    // wearer's eye — ours — with the runtime's decode and its display encode
+    // cancelling.
+    //
+    // ONE FORMAT ASKED FOR, AND ONLY ONE, because a raw copy fixes both halves
+    // of the contract:
+    //
+    //   * THE CHANNEL ORDER. `vkCmdCopyImage` moves BYTES. B8G8R8A8_SRGB is
+    //     size-compatible with our R8G8B8A8 eye target and the copy is legal,
+    //     and it would hand the wearer a picture with red and blue exchanged.
+    //     (A blit is not the way out either: `vkCmdBlitImage` CONVERTS, and
+    //     writing linear-read texels into an _SRGB destination encodes them —
+    //     the very second encode this change exists to remove.)
+    //   * THE WIDTH. Monado's first preference is R16G16B16A16_UNORM (8 bytes),
+    //     which is not copy-compatible at all and would need a blit or a quad.
+    //     A wider swapchain is also not obviously worth anything here — the eye
+    //     target is 8-bit, and WiVRn video-encodes 8 bits to the Quest — so
+    //     every offered format is ENUMERATED AND LOGGED and none of them is
+    //     taken on a guess.
+    //
+    // AND THE FALLBACK IS LOUD, NOT ABSENT. A runtime that offers no
+    // R8G8B8A8_SRGB at all would otherwise be a runtime this editor refuses to
+    // enter — a colour question taking VR away entirely — so the UNORM
+    // spelling is still taken when it is the only 8-bit RGBA on offer, with
+    // the consequence named in the log AND reported (`VrStatus::
+    // colourEncodedOnce`, `vr.state().colourEncodedOnce`, a scene issue the
+    // author can see): the picture reaches the wearer with one encode too many
+    // and reads about a stop too bright.
+    //
+    // Monado 25 offers the _SRGB form — measured on this box, fourteen formats
+    // logged. WiVRn's list is UNVERIFIED here: this tree has never logged it
+    // (it does now), so the first session on the owner's headset is what will
+    // say. The properly correct answer for a runtime with no _SRGB 8-bit form
+    // — a DECODE quad into a 16-bit format the runtime then encodes once — is
+    // its own lane; this fallback is what keeps such a runtime usable and
+    // honest meanwhile.
     uint32_t fmtCount = 0;
     xrEnumerateSwapchainFormats(mSession, 0, &fmtCount, nullptr);
     std::vector<int64_t> formats(fmtCount);
     if (fmtCount) xrEnumerateSwapchainFormats(mSession, fmtCount, &fmtCount, formats.data());
+    {
+        // LOGGED ONCE PER SESSION (the lead's brief): what a runtime offers is
+        // the first thing anybody asks when a headset's colours are wrong, and
+        // it is not otherwise recoverable from a log.
+        std::string list;
+        for (int64_t f : formats) {
+            if (!list.empty()) list += ", ";
+            list += vkFormatName(f);
+        }
+        vrLog("swapchain formats offered by the runtime (%u): %s", fmtCount,
+              list.empty() ? "(none)" : list.c_str());
+    }
     mSwapchainFormat = 0;
+    mColourEncodedOnce = true;
+    sColourEncodedOnce = true;
     for (int64_t f : formats)
-        if (f == VK_FORMAT_R8G8B8A8_UNORM) { mSwapchainFormat = f; break; }
-    if (!mSwapchainFormat) {
-        reason = "the runtime does not offer VK_FORMAT_R8G8B8A8_UNORM (the eye target's format)";
-        return false;
+        if (f == int64_t(VK_FORMAT_R8G8B8A8_SRGB)) { mSwapchainFormat = f; break; }
+    if (mSwapchainFormat) {
+        vrLog("swapchain format: R8G8B8A8_SRGB (our display-encoded bytes, copied raw; the "
+              "runtime decodes and re-encodes them, so the picture reaching the wearer is "
+              "encoded exactly once)");
+    } else {
+        for (int64_t f : formats)
+            if (f == int64_t(VK_FORMAT_R8G8B8A8_UNORM)) { mSwapchainFormat = f; break; }
+        if (!mSwapchainFormat) {
+            reason = "the runtime offers no 8-bit RGBA swapchain format (R8G8B8A8_SRGB or "
+                     "R8G8B8A8_UNORM); the eye target is PFG_RGBA8_UNORM and the copy into "
+                     "the swapchain is a raw byte transfer";
+            return false;
+        }
+        mColourEncodedOnce = false;
+        sColourEncodedOnce = false;
+        vrLog("swapchain format: R8G8B8A8_UNORM - THIS RUNTIME OFFERS NO R8G8B8A8_SRGB, so it "
+              "will treat our display-encoded bytes as linear and encode them a SECOND time: "
+              "the wearer's picture will read about a stop too bright. Report this runtime.");
     }
 
     mEyeWidth  = mConfig.overrideEyeWidth  ? mConfig.overrideEyeWidth
@@ -1197,43 +1324,47 @@ bool VrSession::create(std::string &reason) {
     // engine that keeps the post chain (PostFxDesc::allowOffscreen) — because
     // it is not a thumbnail, it is the picture the user is standing in.
     //
-    // THE PHASE-2 PROFILE, stated here and nowhere else (VR_SPEC §9 item 6):
-    // HDR and its tonemap ON, MSAA at 1 (HDR + MSAA segfaults this driver —
-    // OgreChain.cpp's own note), SSAO / SMAA / SSR OFF because every one of
-    // them samples a neighbourhood and would read across the seam between the
-    // eyes, and ray-traced reflections off with SSR (they ride its chain).
+    // THE GRADE IS THE PROJECT'S AND IT IS NOT WRITTEN HERE (lane EYE-GRADE-1).
+    // Until this lane the phase-2 profile was a hand-written PostFxDesc at this
+    // line, on the reasoning that "no mirror reaches a view the session made" —
+    // and the consequence was that the wearer got the struct's DEFAULTS
+    // (automatic exposure across a +/-2.5 stop window) whatever the author had
+    // chosen in the World panel. `SceneMirror::applyViewEnvironment` pushes the
+    // project's description into this view every frame now, exactly as it does
+    // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what a
+    // side-by-side eye pair cannot carry — in ONE place, stated once, with the
+    // reason for every entry.
+    //
+    // WHAT IS SET HERE IS THE SESSION'S OWN, AND ONLY THAT:
+    //   * MSAA at 1. Not a PostFxDesc field: HDR + MSAA segfaults this driver
+    //     (OgreChain.cpp's own note), and the mirror never pushes a sample
+    //     count into an offscreen view, so this is the one statement of it.
+    //   * the reflection OVERRIDE, `vr.begin({reflections:n})`'s measurement
+    //     arm over the project's row (VrConfig::ssr; -1 = follow the project).
+    //   * an HDR base, which is what the view renders with for the frames
+    //     BEFORE a host's first environment push — the warm-up frames, and an
+    //     engine-only caller (tests/vr) that has no mirror at all. Every other
+    //     field is the struct's default and is replaced on the first push.
     View *v = mEngine->createOffscreenView("jahshaka-vr", mEyeWidth * 2u, mEyeHeight,
                                            Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
     if (!v) { reason = "createOffscreenView failed: " + mEngine->lastError(); return false; }
     mView = static_cast<OgreView *>(v);
-    PostFxDesc fx;
-    fx.allowOffscreen = true;
-    fx.hdr = true;
-    fx.bloom = false;
-    fx.ssao = false;
-    fx.smaaPreset = -1;
-    // REFLECTIONS IN THE HEADSET (lane REFLECT-VR-1). The row is the PROJECT'S —
-    // the World panel's SSR row, which the host passes in `VrConfig::ssr`
-    // because no mirror reaches a view the session made — and it selects the
-    // reflection's RESOLUTION and its prepass, exactly as on the desktop.
-    //
-    // WHAT IT DOES NOT SELECT IS THE SCREEN-SPACE MARCH, which is off here and
-    // structurally impossible in a stereo chain (PostFxDesc::ssrScreenMarch,
-    // and chain::build enforces it): the march walks the TARGET, and this
-    // target is two eyes side by side. Phase 2 read that correctly and
-    // concluded "so no reflections in VR", which is the line the owner saw the
-    // consequence of — a chrome sphere showing the room on the desktop and
-    // nothing in the headset. The rays have no such term: a ray is traced in
-    // the world from the eye that owns its pixel, so they answer per eye, and
-    // with the march off they answer ALL of it.
-    //
-    // SSAO and SMAA stay off for the reason phase 2 gave and it still holds:
-    // both are neighbourhood filters over the target, both would read across
-    // the seam, and neither has a per-eye form here yet.
-    fx.ssr = mConfig.ssr;
-    fx.ssrScreenMarch = false;
-    mView->setPostFx(fx);
+    // ORDER, AND IT IS WORTH A LINE (the Fable read's F8): the override and the
+    // base description are set BEFORE `setStereo`, because every one of these
+    // can rebuild the workspace DEFINITION and setStereo is the one that makes
+    // the shape stereo. Setting them after it rebuilt the definition up to
+    // three times on a session's first breath — the first cut of this lane did
+    // — where this order rebuilds once, into the shape the warm-up then
+    // compiles for. That matters beyond tidiness: `vr.warmup` asserts that no
+    // frame the runtime is SHOWN compiles a shader, and a warm-up that ran on a
+    // different chain shape from the wearer's would warm the wrong permutations.
     mView->setSampleCount(1u);
+    mView->setVrSsrOverride(mConfig.ssr);
+    {
+        PostFxDesc fx;
+        fx.hdr = true;
+        mView->setPostFx(fx);   // the policy is applied by setStereo, below
+    }
     mView->setStereo(true, "JahshakaVrCullCamera");
     // THE TWO HELPER CHANNELS (kVrHelperBit's two-bit rule, phase 4; owner
     // 2026-09-17). Until this lane the session's view simply INHERITED
@@ -3134,6 +3265,42 @@ void VrSession::setSessionViewEnabled(bool on) {
 // the target is in RenderTarget and written: the barrier it emits carries the
 // right source scope, no `assumeTransition` repair is needed, and the copy
 // rides the frame's own submit instead of paying a second one.
+Ogre::TextureGpu *VrSession::scaleImage(unsigned w, unsigned h) {
+    if (mScaleImage && mScaleImage->getWidth() == w && mScaleImage->getHeight() == h)
+        return mScaleImage;
+    destroyScaleImage();
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::TextureGpuManager *tm =
+        root ? root->getRenderSystem()->getTextureGpuManager() : nullptr;
+    if (!tm) return nullptr;
+    std::string err;
+    JAH_TRY {
+        // RenderToTexture is what gives a Vulkan texture the transfer usage
+        // bits on both sides in this pin (VulkanTextureGpu's createInternal),
+        // which is all this image needs: it is never rendered into.
+        mScaleImage = tm->createTexture("JahshakaVrEyeScale", Ogre::GpuPageOutStrategy::Discard,
+                                        Ogre::TextureFlags::RenderToTexture,
+                                        Ogre::TextureTypes::Type2D);
+        mScaleImage->setResolution(w, h);
+        mScaleImage->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+        mScaleImage->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+        vrLog("eye scale image: %ux%u RGBA8_UNORM (the measurement override's scale happens "
+              "between two UNORM images, so the copy into the sRGB swapchain stays raw)", w, h);
+    } JAH_CATCH(err, (vrLog("eye scale image REFUSED (%s) - the measurement override's frames "
+                            "will not reach the runtime", err.c_str()),
+                      mScaleImage = nullptr, nullptr));
+    return mScaleImage;
+}
+
+void VrSession::destroyScaleImage() {
+    if (!mScaleImage) return;
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    if (root)
+        if (Ogre::TextureGpuManager *tm = root->getRenderSystem()->getTextureGpuManager())
+            tm->destroyTexture(mScaleImage);
+    mScaleImage = nullptr;
+}
+
 void VrSession::copyEyes() {
     OgreView *view = mView;
     if (!view) return;
@@ -3196,8 +3363,36 @@ void VrSession::copyEyes() {
                            dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         } else {
             // ONLY WHEN THE MEASUREMENT OVERRIDE IS IN USE (VrConfig::
-            // overrideEyeWidth): a copy cannot scale, so the eye is blitted.
-            // The product path never takes this branch.
+            // overrideEyeWidth): a copy cannot scale, so the eye is SCALED into
+            // a transient image of the swapchain's size and that image is
+            // copied. The product path never takes this branch.
+            //
+            // WHY NOT BLIT STRAIGHT INTO THE SWAPCHAIN, which is what this did
+            // until the Fable read's F3 caught it: `vkCmdBlitImage` CONVERTS.
+            // It reads the source through its format (UNORM: the raw byte as a
+            // linear value) and writes through the destination's — and the
+            // destination is now _SRGB, so the write ENCODES. That is exactly
+            // the second encode the whole of this lane removes, reintroduced on
+            // every `vr.begin({eyeWidth, eyeHeight})` arm: about a stop too
+            // bright, in a measurement whose entire purpose is to be comparable
+            // with the product path.
+            //
+            // So the scale happens UNORM -> UNORM (no conversion: the same
+            // format on both sides) and the result reaches the _SRGB swapchain
+            // through the same raw `vkCmdCopyImage` the product path uses. One
+            // encode, both paths. A mutable-format view of the runtime's image
+            // would be cheaper and is not portable — a runtime's swapchain
+            // images are rarely created with VK_IMAGE_CREATE_MUTABLE_FORMAT.
+            Ogre::TextureGpu *scale = scaleImage(scW, scH);
+            if (!scale) return;
+            const VkImage scaleImg =
+                static_cast<Ogre::VulkanTextureGpu *>(scale)->getFinalTextureName();
+            {
+                Ogre::ResourceTransitionArray t;
+                solver.resolveTransition(t, scale, Ogre::ResourceLayout::CopyDst,
+                                         Ogre::ResourceAccess::Write, 0);
+                vkRs->executeResourceTransition(t);
+            }
             VkImageBlit region{};
             region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             region.srcOffsets[0] = { int32_t(eye * mEyeWidth), 0, 0 };
@@ -3206,8 +3401,20 @@ void VrSession::copyEyes() {
             region.dstOffsets[0] = { 0, 0, 0 };
             region.dstOffsets[1] = { int32_t(scW), int32_t(scH), 1 };
             vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
+                           scaleImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
                            VK_FILTER_LINEAR);
+            {
+                Ogre::ResourceTransitionArray t;
+                solver.resolveTransition(t, scale, Ogre::ResourceLayout::CopySrc,
+                                         Ogre::ResourceAccess::Read, 0);
+                vkRs->executeResourceTransition(t);
+            }
+            VkImageCopy copy{};
+            copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.extent = { scW, scH, 1 };
+            vkCmdCopyImage(cmd, scaleImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
         }
 
         b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -3380,6 +3587,11 @@ VrStatus VrSession::status() const {
     s.warmUpMs = mWarmUpMs;
     s.eyeWidth = mEyeWidth;
     s.eyeHeight = mEyeHeight;
+    // THE COLOUR CONTRACT, REPORTED (lane EYE-GRADE-1's fix round). The log
+    // line is where a diagnosis starts; this is what a suite, the scene-issue
+    // bar and the eye dither can act on.
+    s.swapchainFormat = vkFormatName(mSwapchainFormat);
+    s.colourEncodedOnce = mColourEncodedOnce;
     s.mirror = mMirrorView ? mConfig.mirror : VrMirrorMode::None;
     s.worldScale = mConfig.worldScale;
     s.asymmetricFov = mAsymmetricFov;
@@ -3531,6 +3743,12 @@ VrSession::~VrSession() {
     // The mask's Item and its mesh, before the View and long before Root: a
     // MeshPtr that outlives Root throws in the VaoManager.
     destroyHiddenAreaMesh();
+    // ...and the measurement path's transient scale image, on the same terms.
+    destroyScaleImage();
+    // The process-wide colour latch belongs to a LIVE session (vr::
+    // colourEncodedOnce): a chain built after this one has ended must not be
+    // told a runtime is about to re-encode its picture.
+    sColourEncodedOnce = true;
     if (mView) {
         mView->removeWorkspaceListener(this);
         if (mView->camera()) mView->camera()->setVrData(nullptr);
@@ -4315,6 +4533,13 @@ VrSession *sessionBegin(VrBoot *boot, OgreEngine *engine, OgreScene *scene, cons
 }
 
 void sessionEnd(VrSession *s) { delete s; }
+
+// THE COLOUR CONTRACT, PROCESS-WIDE (lane EYE-GRADE-1's fix round; declared in
+// EnginePrivate.h, where the reason it is not reached through the engine is
+// written out). The latch is raised by the session that takes a swapchain
+// format and lowered when that session dies, so a chain built after a session
+// has ended is never told the runtime is about to re-encode its picture.
+bool colourEncodedOnce() { return sColourEncodedOnce; }
 
 }  // namespace vr
 

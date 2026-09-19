@@ -2583,12 +2583,22 @@ void setExposure(float exposure, float minAutoExposure, float maxAutoExposure) {
 /// coefficient that puts half weight at `kCentreWeightedHalfRadius` half-frame-
 /// heights from the centre, and the spot's radius is derived in the shader from
 /// its AREA fraction so that the same 2.5 % holds on any window shape.
-void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent) {
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent, bool stereo) {
     const float k = float(std::log(2.0)) /
                     (meter::kCentreWeightedHalfRadius * meter::kCentreWeightedHalfRadius);
     setMeterParam(kMeterBuildJob, "meterParams",
                   Ogre::Vector4(float(int(pattern)), k, meter::kSpotAreaFraction,
                                 meter::kCentreWeightedPedestal));
+    // HOW MANY EYES ARE IN THE TARGET (lane EYE-GRADE-1). A stereo view renders
+    // the two eyes side by side into one texture, so the target's CENTRE — the
+    // origin of every metering pattern — is the pair's inner edge and is nowhere
+    // in either picture: a centre-weighted meter would weight both nasal edges
+    // and a spot would meter the wearer's nose. The shader evaluates the
+    // pattern in the EYE's own frame when this is 2, and bins both eyes into
+    // the one histogram (one measurement, two patterns —
+    // JahHdrMeterBuild_cs.glsl says why a per-eye exposure would be worse).
+    setMeterParam(kMeterBuildJob, "meterEyes",
+                  Ogre::Vector4(stereo ? 2.0f : 1.0f, 0.0f, 0.0f, 0.0f));
     // Percentiles in, FRACTIONS out, ordered and inside [0, 1]: the shader walks
     // a cumulative weight and a reversed or out-of-range pair would silently
     // select nothing.
@@ -3060,7 +3070,8 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         // uniforms for a view that never dispatches it would hand the next
         // auto-exposed view somebody else's pattern.
         if (!desc.tonemapFixed)
-            setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent);
+            setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent,
+                     desc.stereo);
         if (desc.bloom)
             setBloomThreshold(desc.bloomThreshold,
                               desc.bloomThreshold + std::max(0.01f, desc.bloomKnee));
@@ -3088,6 +3099,14 @@ float exposureSeed(float exposure) {
 
 void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *) {
     if (!mRoot || !mView) return;
+    // COUNTED, because "did this view's globals reach the frame at all" is a
+    // question that cost a sibling lane a day (DITHER-1, 2026-09-18: a switch
+    // flipped mid-session moved zero bytes of the eye picture). It is one
+    // increment on a path that already writes a dozen material parameters, and
+    // it is what `View::globalsPushes()` and `vr.state().postFx.*.globalsPushes`
+    // report — so a suite can assert the eye pair is pushed once per frame
+    // rather than inferring it from a picture.
+    mView->noteGlobalsPush();
     // THE WHOLE MECHANISM, in three lines. Ogre fires this immediately before
     // THIS workspace's passes execute (CompositorWorkspace::_update), and the
     // material parameters these writes land in are read at pass execute time —

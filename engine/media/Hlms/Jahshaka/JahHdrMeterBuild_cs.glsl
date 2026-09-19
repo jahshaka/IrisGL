@@ -88,12 +88,17 @@ uniform restrict uimage2D histogram;
 
 vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 meterParams;
+	uniform vec4 meterEyes;
 vulkan( }; )
 
 #define p_pattern       meterParams.x
 #define p_gaussK        meterParams.y
 #define p_spotArea      meterParams.z
 #define p_pedestal      meterParams.w
+// HOW MANY EYES ARE IN THIS TARGET (lane EYE-GRADE-1): 1 for every ordinary
+// view, 2 for the VR session's pair, which renders the two eyes side by side
+// into ONE texture. See jahMeterWeight.
+#define p_eyes          meterEyes.x
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
@@ -121,11 +126,29 @@ const float c_weightScale = 256.0;
 const float c_logScale    = 4096.0;
 const float c_spotFeather = 0.15;
 
-float jahMeterWeight( vec2 uv, float aspect )
+// THE PATTERN IS PER EYE, AND THE MEASUREMENT IS ONE (lane EYE-GRADE-1).
+//
+// A stereo target carries the two eyes side by side, so its geometric centre is
+// the pair's INNER EDGE and is nowhere in either picture: a centre-weighted
+// meter would have weighted each eye's nasal edge and a spot would have metered
+// the wearer's nose. `uv` is therefore mapped into the EYE's own frame before
+// the pattern is evaluated (and the aspect is the eye's, not the pair's), so
+// the same circle-in-pixels rule holds per eye.
+//
+// BOTH EYES STILL BIN INTO ONE HISTOGRAM, deliberately: the two pictures differ
+// by an interpupillary distance, and a per-eye exposure — two chains converging
+// separately — is binocular rivalry in the one dimension the visual system is
+// least forgiving about. One measurement, two patterns.
+float jahMeterWeight( vec2 uv, float aspect, float eyes )
 {
+	const float n = max( eyes, 1.0 );
+	// The eye-local u: 0..1 inside whichever half (or whole) this texel is in,
+	// and the EYE's own aspect, which is the target's divided by the eye count.
+	const vec2 eyeUv = vec2( fract( uv.x * n ), uv.y );
+	const float a = aspect / n;
 	// q: the offset from the centre in units of half the frame HEIGHT, so the
 	// pattern is a circle in pixels on any window shape.
-	const vec2 q = ( uv - 0.5 ) * 2.0 * vec2( aspect, 1.0 );
+	const vec2 q = ( eyeUv - 0.5 ) * 2.0 * vec2( a, 1.0 );
 	const float d = length( q );
 
 	if( p_pattern < 0.5 )
@@ -134,8 +157,8 @@ float jahMeterWeight( vec2 uv, float aspect )
 		return p_pedestal + ( 1.0 - p_pedestal ) * exp( -p_gaussK * d * d );	// centreWeighted
 
 	// spot: the radius that makes the disc's area exactly p_spotArea of the
-	// frame. Frame area in q units is 2*aspect x 2 = 4*aspect; pi*rho^2 = f*4*aspect.
-	const float rho = sqrt( max( p_spotArea, 0.0 ) * 4.0 * aspect * 0.31830989 );
+	// frame. Frame area in q units is 2*a x 2 = 4*a; pi*rho^2 = f*4*a.
+	const float rho = sqrt( max( p_spotArea, 0.0 ) * 4.0 * a * 0.31830989 );
 	return 1.0 - smoothstep( rho * ( 1.0 - c_spotFeather ), rho * ( 1.0 + c_spotFeather ), d );
 }
 
@@ -181,7 +204,7 @@ void main()
 
 	const vec2 uv = ( vec2( px ) + 0.5 ) / vec2( texSize );
 	const float aspect = float( texSize.x ) / float( texSize.y );
-	const float w = clamp( jahMeterWeight( uv, aspect ), 0.0, 1.0 );
+	const float w = clamp( jahMeterWeight( uv, aspect, p_eyes ), 0.0, 1.0 );
 
 	const uint wq = uint( w * c_weightScale + 0.5 );
 	if( wq == 0u )

@@ -115,6 +115,33 @@ public:
     void applyEnvironment(jahshaka::engine::View *view,
                           jahshaka::engine::Engine *engine = nullptr);
 
+    /// A SECOND VIEW OF THIS SCENE, GRADED LIKE THE FIRST (lane EYE-GRADE-1) —
+    /// applyEnvironment's PER-VIEW half on its own: the shadow flag, the MSAA
+    /// count and the whole post description, with `driving`'s lens over it.
+    ///
+    /// THE VIEW THIS EXISTS FOR is the VR session's eye pair, which the engine
+    /// creates for itself and which therefore used to be the one view in the
+    /// process that no mirror ever reached — it rendered a hand-written
+    /// PostFxDesc, so the World panel's exposure, grade and looks did nothing
+    /// at all in the headset (measured: an exposure sweep that moved the
+    /// desktop 8 -> 255 moved the eye 79 -> 77). A host calls this once per
+    /// frame for `Engine::vrView()` beside its own applyEnvironment call.
+    ///
+    /// NOT applyEnvironment TWICE, deliberately: the scene half of that
+    /// function counts frames of GI stability, so a second call per frame would
+    /// halve the settle window and re-solve the chain in the middle of a drag.
+    ///
+    /// `hostCamera` is the camera the HOST holds, and it is resolved here
+    /// through `Scene::renderCamera` exactly as applyCamera resolves its own —
+    /// so the eye carries the lens of the camera the scene is really rendered
+    /// through (an armed authored camera while playing, a possessed
+    /// character's arm), which is also the camera the VR rig was placed on.
+    /// Null is allowed and means "the world's description, no camera over it".
+    /// A CUT — this view's driving camera changing — re-seeds the view's
+    /// exposure history, like applyCamera's.
+    void applyViewEnvironment(jahshaka::engine::View *view,
+                              const iris::CameraNodePtr &hostCamera = {});
+
     /// Forgets what applyEnvironment has already pushed, so the next call pushes
     /// everything again.
     ///
@@ -632,6 +659,12 @@ public:
     bool hideDefaultFloor() const { return mHideDefaultFloor; }
 
 private:
+    /// applyEnvironment's per-view half, shared with applyViewEnvironment.
+    /// `record` writes the mirror-level records (`mWorldPostFx`, the inset's
+    /// base, and `mSunExposureGain`) — true for the view the host called
+    /// applyEnvironment for, false for a second view of the same scene, which
+    /// must not overwrite them.
+    void applyViewPostFx(jahshaka::engine::View *view, bool record);
     /// Records which camera is driving `view` and answers "did it CHANGE" — the
     /// cut test the exposure re-seed rides on (CAMERA_LENS_SPEC §4). False the
     /// first time a view is seen: an opening frame is not a cut.

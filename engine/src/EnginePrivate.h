@@ -1290,7 +1290,8 @@ bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef)
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
 /// THE METER'S PATTERN AND CLIPS (EXPOSURE-2). Uniforms on the histogram
 /// meter's compute jobs; only meaningful for the form that measures.
-void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent);
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent,
+               bool stereo);
 void setBloomThreshold(float minThreshold, float fullColourThreshold);
 void initSsao(Ogre::Root *root);
 void destroySsao(Ogre::Root *root);
@@ -5236,6 +5237,22 @@ public:
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
     bool stereo() const { return mStereo; }
+    /// THE ONE-SESSION REFLECTION OVERRIDE (lane EYE-GRADE-1). The SSR row a
+    /// stereo view renders with is the PROJECT's — the mirror pushes it here
+    /// like it does into the desktop's view — and this is `vr.begin({
+    /// reflections:n})`'s measurement arm over it: -1 follows the project, 0/1/2
+    /// pin the row for as long as this view is stereo. Applied inside
+    /// `applyVrViewPolicy`, so it cannot be forgotten by a later push.
+    void setVrSsrOverride(int row);
+    int  vrSsrOverride() const { return mVrSsrOverride; }
+    /// HOW MANY TIMES THIS VIEW'S PER-FRAME CHAIN GLOBALS HAVE BEEN PUSHED
+    /// (chain::ViewGlobalsListener). The meter's uniforms, the auto exposure's
+    /// terms, the bloom threshold, the AO and SSR camera terms and every look's
+    /// parameters ride that push and NOTHING else — so a view whose count does
+    /// not climb is a view rendering with whatever the last workspace to update
+    /// happened to leave in the process-wide materials. @see globalsPushes.
+    void noteGlobalsPush() { ++mGlobalsPushes; }
+    unsigned long long globalsPushes() const override { return mGlobalsPushes; }
     /// THE TWO EYES THIS VIEW IS RENDERING, this frame (@see StereoEyeBasis).
     /// Pushed by the VR session every frame it locates them, dropped when the
     /// session ends; read by the ray-traced reflection so each eye's pixels get
@@ -5520,6 +5537,17 @@ private:
     bool                       mStereo = false;
     bool                       mGiPriority = false;
     std::string                mCullCameraName;
+    /// THE SESSION'S ONE-RUN REFLECTION OVERRIDE (lane EYE-GRADE-1;
+    /// `vr.begin({reflections:n})`). -1 — every view but a session's — means
+    /// "whatever the project's row says", which is what the mirror pushes.
+    int                        mVrSsrOverride = -1;
+    /// @see noteGlobalsPush.
+    unsigned long long         mGlobalsPushes = 0;
+    /// WHAT THE VR POLICY LAST TOOK AWAY, as one number (looks * 4 + refraction
+    /// bit * 2 + distortion bit) — the latch behind the one log line that tells
+    /// an author why something they can see on the desktop is not in the
+    /// headset. size_t(-1) = nothing said yet.
+    size_t                     mVrPolicyDropped = size_t(-1);
     /// The located eyes of THIS frame (@see StereoEyeBasis). Not part of the
     /// chain's identity — they change every frame and change no pass.
     StereoEyeBasis             mStereoEyes[2];
@@ -5678,6 +5706,17 @@ void bootEnd(VrBoot *);
 VrSession *sessionBegin(VrBoot *, OgreEngine *, OgreScene *, const VrConfig &,
                         std::string &reason);
 void sessionEnd(VrSession *);
+/// IS THE LIVE SESSION'S PICTURE ENCODED EXACTLY ONCE between this renderer and
+/// the wearer's eye (lane EYE-GRADE-1)? False only while a session is running
+/// on a runtime that offered no _SRGB swapchain format and is therefore going
+/// to encode our display-ready bytes a SECOND time; true when no session runs.
+///
+/// PROCESS-WIDE, because a session is (`Engine::beginVrSession` refuses a
+/// second), and declared HERE rather than reached through the engine because
+/// the caller that needs it most is CHAIN code — a composite that dithers the
+/// final picture must stand down when the runtime is about to re-encode it,
+/// and the chain has no session pointer.
+bool colourEncodedOnce();
 }  // namespace vr
 
 /// THE PUMP, from the frame's point of view. `vrSessionBeginFrame` polls the

@@ -6797,6 +6797,171 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// THE PER-VIEW HALF OF applyEnvironment (lane EYE-GRADE-1, 2026-09-18).
+//
+// WHY IT IS ITS OWN FUNCTION. Everything below is a property of a VIEW — the
+// shadow flag, the MSAA count, the whole post description with the driving
+// camera's lens over it — while everything else in applyEnvironment is a
+// property of the SCENE: the ambient spherical harmonics, the fog, the ray
+// tracing row, the GI configuration and its settle. A scene has one of those
+// and, since the headset, TWO views of it at once: the desktop's and the
+// session's eye pair, which used to be the one view in this engine that no
+// mirror reached (VrSession::create's old hand-written PostFxDesc, and the
+// owner's "the World panel does nothing in the headset").
+//
+// SO THE SECOND VIEW GETS THIS, AND NOT THE WHOLE FUNCTION. Calling
+// applyEnvironment twice a frame would be wrong rather than merely wasteful:
+// the GI block counts FRAMES of stability (`++mGiStableFrames`) and would reach
+// its window in half the frames it is meant to, so a drag would re-solve the
+// whole chain mid-gesture. One scene half per frame; one call per view.
+//
+// `driving` is the camera the view is drawn through, for the per-camera lens
+// (CAMERA_LENS_SPEC §4/§5). applyEnvironment passes none because it reads the
+// record applyCamera left for its view; a second view's host hands it in,
+// because nothing else knows which camera that view belongs to.
+//
+// `record` is what keeps a SECOND view from overwriting the mirror-level
+// records the FIRST one wrote — `mWorldPostFx` (the picture-in-picture inset's
+// base) and `mSunExposureGain` (the sun's night rule). They describe the view
+// the host calls applyEnvironment for, and only that one.
+void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &hostCamera)
+{
+    if (!mSource || !view) return;
+    // THE CAMERA THE SCENE IS RENDERED THROUGH, NOT THE ONE THE HOST HOLDS
+    // (the Fable read's F1). `applyCamera` resolves its host's camera through
+    // `Scene::renderCamera` — the three-term active-camera/possession rule —
+    // and a host that hands us its own camera instead would grade the eye with
+    // a DIFFERENT camera's lens than the desktop the moment the rule picks
+    // another one: an authored camera armed while playing, a possessed
+    // character's arm. That is the very disagreement this lane removes, and it
+    // would bite exactly where it hurts most — the rig is PLACED on
+    // renderCamera, so the wearer would be standing at the shot with somebody
+    // else's grade.
+    //
+    // Resolved HERE rather than in the two hosts, because applyCamera's own
+    // note says why: a second copy of a three-term rule is how a wearer ends up
+    // somewhere the picture never was. One rule, two callers.
+    iris::CameraNodePtr driving = hostCamera;
+    if (driving) driving = mSource->renderCamera(driving);
+    if (!driving) driving = hostCamera;
+    const bool cut = driving ? noteDrivingCamera(view, driving) : false;
+    applyViewPostFx(view, /*record=*/false);
+    // A CUT IS NOT A LIGHTING CHANGE — applyCamera's rule, which this path used
+    // to drop on the floor. The chain's automatic exposure adapts at ~75 %/s,
+    // so a cut to a differently exposed camera fades over one to two seconds in
+    // the headset while the desktop re-seeds and starts at the new grade. Two
+    // eyes ramping through an exposure the desktop already arrived at is worse
+    // than a desktop doing it: it is a whole-field brightness change with no
+    // cause the wearer can see. Re-seeded AFTER the description is pushed,
+    // because the seed is derived from it.
+    if (cut) view->resetExposureHistory();
+}
+
+void SceneMirror::applyViewPostFx(View *view, bool record)
+{
+    // World-panel Enable Shadows (used to be hardcoded on).
+    if (view->shadows() != mSource->shadowEnabled)
+        view->setShadows(mSource->shadowEnabled);
+    // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
+    // frame — the engine ignores a repeat of the value already REQUESTED (the
+    // achieved count may be clamped lower by the driver, so comparing against
+    // view->sampleCount() here would rebuild the target every frame).
+    //
+    // ON-SCREEN ONLY (POST_CHAIN_SPEC.md §7.3). Offscreen views — thumbnails,
+    // material previews, the asset and avatar viewers, screenshots and every
+    // pixel suite — stay at 1x so their readbacks are exact and reproducible.
+    // Pushing the scene's count to them was a latent inconsistency: harmless
+    // while scenes defaulted to 1x, and a whole-suite re-baseline the moment a
+    // World Mode set 4x.
+    if (!view->isOffscreen())
+        view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
+    // World panel post-processing chain (POST_CHAIN_SPEC.md §§3-7). Safe to push
+    // per frame: the engine ignores a repeat of the value already set, and only
+    // a change to an ENABLE flag rebuilds a workspace. Offscreen views (this
+    // includes thumbnails, previews and every pixel suite) discard it inside the
+    // engine, in one place — the host does not have to remember to.
+    {
+        PostFxDesc fx;
+        fx.hdr            = mSource->hdrEnabled;
+        // EXPOSURE: the world's statement, in the document's unit. The DRIVING
+        // CAMERA's block is layered over it below (applyCameraPostFx) and the
+        // whole thing is converted ONCE, there, by iris::lens::toChain — this
+        // is why nothing here touches fx.exposure*.
+        {
+            iris::ExposureDesc e{ mSource->exposureMode, mSource->exposure,
+                                  mSource->exposureMin, mSource->exposureMax };
+            e.metering = mSource->exposureMetering;
+            e.lowPercent = mSource->exposureMeterLowPercent;
+            e.highPercent = mSource->exposureMeterHighPercent;
+            applyExposure(e, fx);
+            applyMeter(e, fx);
+        }
+        fx.bloom          = mSource->bloomEnabled;
+        fx.bloomThreshold = mSource->bloomThreshold;
+        fx.bloomKnee      = mSource->bloomKnee;
+        fx.ssao           = mSource->ssaoEnabled;
+        fx.ssaoScale      = mSource->ssaoScale;
+        fx.ssaoPower      = mSource->ssaoPower;
+        fx.ssaoRadius     = mSource->ssaoRadius;
+        fx.smaaPreset     = mSource->smaaPreset;
+        fx.ssr            = mSource->ssrMode;
+        // Percent in the document, a fraction in the renderer — one conversion,
+        // here, so nothing downstream has to know which unit it is holding.
+        fx.reflectionRoughnessCutoff = float(mSource->reflectionRoughnessCutoff) * 0.01f;
+        // Refraction "Auto" (the recommended default): the second scene pass and
+        // its full-res copy only enter the graph while the scene actually holds a
+        // refractive material, so the cost when unused is exactly zero. The flag
+        // is accumulated by sync() the same way mAnyShadowCaster is.
+        fx.refractions    = mSource->refractionsMode == 2 ||
+                            (mSource->refractionsMode == 1 && mAnyRefractive);
+        // Distortion, resolved the same way (POST_LOOKS_SPEC §5.3): 0 off,
+        // 1 auto (only while the scene holds a distortion material — the
+        // recommended default), 2 always.
+        fx.distortion     = mSource->distortionMode == 2 ||
+                            (mSource->distortionMode == 1 && mAnyDistortion);
+        fx.distortionStrength = mSource->distortionStrength;
+        // THE LOOKS STACK (POST_LOOKS_SPEC §4.1). The document's array, in its
+        // own order, minus the entries the user switched off — a disabled look
+        // stays in the document and out of the graph, which is what makes the
+        // panel's toggle free rather than a destructive edit.
+        fx.looks = resolveLooks(mSource->looks);
+        // THE DRIVING CAMERA'S OWN LOOK, layered over the world's
+        // (CAMERA_LENS_SPEC §4/§5 — applyCameraPostFx documents the model).
+        //
+        // IT HAS TO HAPPEN HERE AS WELL AS IN applyCamera, and the reason is
+        // performance rather than taste: hosts call applyEnvironment and then
+        // applyCamera every frame, and an enable-flag difference between the
+        // two descriptions is a WORKSPACE REBUILD. Pushing the world's flags
+        // here and the camera's a moment later would rebuild the chain TWICE
+        // PER FRAME for as long as a camera with a bloom override was driving.
+        // Substituting here makes the steady state one stable description that
+        // the engine's own "same value is free" check drops on arrival, and
+        // applyCamera's push then only ever does anything on the frame the
+        // camera actually changed.
+        //
+        // The record is a frame old (applyCamera writes it after this runs), so
+        // a CUT grades one frame late — 16 ms, and applyCamera corrects it in
+        // the same frame anyway. A view seen for the FIRST time has no record
+        // at all and gets the world's description, which is exactly right: the
+        // camera has not been applied to it yet.
+        // THE WORLD'S OWN DESCRIPTION, before any camera is layered over it.
+        // The picture-in-picture inset needs exactly this and not what the view
+        // ends up with: the inset is a DIFFERENT camera's shot, so inheriting
+        // the MAIN view's camera grade would hand the pipped camera the driving
+        // camera's exposure (applyPip layers the pipped camera over this).
+        if (record) mWorldPostFx = fx;
+        if (const iris::CameraNodePtr driving = drivingCameraFor(view))
+            if (cameraOverridesAnything(driving)) applyCameraPostFx(driving, fx);
+        // THE GRADE THE SUN'S NIGHT RULE DECIDES AGAINST (SKY-NIGHT-1), from
+        // the EFFECTIVE description — the camera's override included, since a
+        // shot that opens up two stops makes a disc this rule would otherwise
+        // have dropped worth twenty output codes.
+        if (record) mSunExposureGain = sunExposureGain(fx);
+        view->setPostFx(fx);
+    }
+}
+
 void SceneMirror::applyEnvironment(View *view, Engine *engine)
 {
     if (!mSource || !view) return;
@@ -6941,106 +7106,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mAmbientPushed = true;
         }
     }
-    // World-panel Enable Shadows (used to be hardcoded on).
-    if (view->shadows() != mSource->shadowEnabled)
-        view->setShadows(mSource->shadowEnabled);
-    // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
-    // frame — the engine ignores a repeat of the value already REQUESTED (the
-    // achieved count may be clamped lower by the driver, so comparing against
-    // view->sampleCount() here would rebuild the target every frame).
-    //
-    // ON-SCREEN ONLY (POST_CHAIN_SPEC.md §7.3). Offscreen views — thumbnails,
-    // material previews, the asset and avatar viewers, screenshots and every
-    // pixel suite — stay at 1x so their readbacks are exact and reproducible.
-    // Pushing the scene's count to them was a latent inconsistency: harmless
-    // while scenes defaulted to 1x, and a whole-suite re-baseline the moment a
-    // World Mode set 4x.
-    if (!view->isOffscreen())
-        view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
-    // World panel post-processing chain (POST_CHAIN_SPEC.md §§3-7). Safe to push
-    // per frame: the engine ignores a repeat of the value already set, and only
-    // a change to an ENABLE flag rebuilds a workspace. Offscreen views (this
-    // includes thumbnails, previews and every pixel suite) discard it inside the
-    // engine, in one place — the host does not have to remember to.
-    {
-        PostFxDesc fx;
-        fx.hdr            = mSource->hdrEnabled;
-        // EXPOSURE: the world's statement, in the document's unit. The DRIVING
-        // CAMERA's block is layered over it below (applyCameraPostFx) and the
-        // whole thing is converted ONCE, there, by iris::lens::toChain — this
-        // is why nothing here touches fx.exposure*.
-        {
-            iris::ExposureDesc e{ mSource->exposureMode, mSource->exposure,
-                                  mSource->exposureMin, mSource->exposureMax };
-            e.metering = mSource->exposureMetering;
-            e.lowPercent = mSource->exposureMeterLowPercent;
-            e.highPercent = mSource->exposureMeterHighPercent;
-            applyExposure(e, fx);
-            applyMeter(e, fx);
-        }
-        fx.bloom          = mSource->bloomEnabled;
-        fx.bloomThreshold = mSource->bloomThreshold;
-        fx.bloomKnee      = mSource->bloomKnee;
-        fx.ssao           = mSource->ssaoEnabled;
-        fx.ssaoScale      = mSource->ssaoScale;
-        fx.ssaoPower      = mSource->ssaoPower;
-        fx.ssaoRadius     = mSource->ssaoRadius;
-        fx.smaaPreset     = mSource->smaaPreset;
-        fx.ssr            = mSource->ssrMode;
-        // Percent in the document, a fraction in the renderer — one conversion,
-        // here, so nothing downstream has to know which unit it is holding.
-        fx.reflectionRoughnessCutoff = float(mSource->reflectionRoughnessCutoff) * 0.01f;
-        // Refraction "Auto" (the recommended default): the second scene pass and
-        // its full-res copy only enter the graph while the scene actually holds a
-        // refractive material, so the cost when unused is exactly zero. The flag
-        // is accumulated by sync() the same way mAnyShadowCaster is.
-        fx.refractions    = mSource->refractionsMode == 2 ||
-                            (mSource->refractionsMode == 1 && mAnyRefractive);
-        // Distortion, resolved the same way (POST_LOOKS_SPEC §5.3): 0 off,
-        // 1 auto (only while the scene holds a distortion material — the
-        // recommended default), 2 always.
-        fx.distortion     = mSource->distortionMode == 2 ||
-                            (mSource->distortionMode == 1 && mAnyDistortion);
-        fx.distortionStrength = mSource->distortionStrength;
-        // THE LOOKS STACK (POST_LOOKS_SPEC §4.1). The document's array, in its
-        // own order, minus the entries the user switched off — a disabled look
-        // stays in the document and out of the graph, which is what makes the
-        // panel's toggle free rather than a destructive edit.
-        fx.looks = resolveLooks(mSource->looks);
-        // THE DRIVING CAMERA'S OWN LOOK, layered over the world's
-        // (CAMERA_LENS_SPEC §4/§5 — applyCameraPostFx documents the model).
-        //
-        // IT HAS TO HAPPEN HERE AS WELL AS IN applyCamera, and the reason is
-        // performance rather than taste: hosts call applyEnvironment and then
-        // applyCamera every frame, and an enable-flag difference between the
-        // two descriptions is a WORKSPACE REBUILD. Pushing the world's flags
-        // here and the camera's a moment later would rebuild the chain TWICE
-        // PER FRAME for as long as a camera with a bloom override was driving.
-        // Substituting here makes the steady state one stable description that
-        // the engine's own "same value is free" check drops on arrival, and
-        // applyCamera's push then only ever does anything on the frame the
-        // camera actually changed.
-        //
-        // The record is a frame old (applyCamera writes it after this runs), so
-        // a CUT grades one frame late — 16 ms, and applyCamera corrects it in
-        // the same frame anyway. A view seen for the FIRST time has no record
-        // at all and gets the world's description, which is exactly right: the
-        // camera has not been applied to it yet.
-        // THE WORLD'S OWN DESCRIPTION, before any camera is layered over it.
-        // The picture-in-picture inset needs exactly this and not what the view
-        // ends up with: the inset is a DIFFERENT camera's shot, so inheriting
-        // the MAIN view's camera grade would hand the pipped camera the driving
-        // camera's exposure (applyPip layers the pipped camera over this).
-        mWorldPostFx = fx;
-        if (const iris::CameraNodePtr driving = drivingCameraFor(view))
-            if (cameraOverridesAnything(driving)) applyCameraPostFx(driving, fx);
-        // THE GRADE THE SUN'S NIGHT RULE DECIDES AGAINST (SKY-NIGHT-1), from
-        // the EFFECTIVE description — the camera's override included, since a
-        // shot that opens up two stops makes a disc this rule would otherwise
-        // have dropped worth twenty output codes.
-        mSunExposureGain = sunExposureGain(fx);
-        view->setPostFx(fx);
-    }
+    // THE PER-VIEW HALF, which a second view of this scene gets on its own
+    // (applyViewEnvironment, above the definition): shadows, MSAA and the post
+    // chain. The records it writes — the inset's base description and the sun's
+    // exposure gain — belong to THIS view, the one the host asked about.
+    applyViewPostFx(view, /*record=*/true);
     // Fog panel: exponential distance fog (+ optional height layer) on lit
     // surfaces; the engine keeps unlit overlays and the sky unfogged, like the
     // legacy renderer. Cheap per-frame push WHILE THE STATE HOLDS — but the
