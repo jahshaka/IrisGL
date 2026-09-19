@@ -148,6 +148,15 @@ namespace {
 constexpr float kVrDefaultNear = 0.05f;
 constexpr float kVrDefaultFar = 1000.0f;
 
+/// HOW LONG THE DESKTOP KEEPS SHOWING THE EYE AFTER THE RUNTIME STOPS ASKING
+/// FOR PICTURES (lane MIRROR-LIVE-1) — the hysteresis of the rule stated on
+/// `VrSession::setDesktopShowsEye`, in frames of the runtime's own cadence.
+/// Six is 67 ms at 90 Hz: longer than any single-frame hiccup, shorter than the
+/// time it takes a person to lift a headset off their face. It applies ONLY
+/// while the session still has focus; a runtime that says the headset is not
+/// being worn hands the desktop back on the same frame.
+constexpr unsigned kDesktopHoldFrames = 6u;
+
 /// IS THE LIVE SESSION'S PICTURE ENCODED EXACTLY ONCE (`vr::colourEncodedOnce`,
 /// declared in EnginePrivate.h)? A file static because there is one session per
 /// process and the reader is chain code with no session pointer: raised when a
@@ -283,6 +292,21 @@ unsigned vrTestStopAfterFrames() { return vrEnvFrames("JAHSHAKA_VR_TEST_STOP_AFT
 /// one getenv per session and one modulo per frame, and it is read fresh per
 /// session like its two siblings.
 unsigned vrTestBlinkEvery() { return vrEnvFrames("JAHSHAKA_VR_TEST_BLINK_EVERY"); }
+
+/// ...AND HOW LONG EACH BLINK LASTS (`JAHSHAKA_VR_TEST_BLINK_FRAMES=N`, lane
+/// MIRROR-LIVE-1; 1 when unset, which is what the hook has always done).
+///
+/// The length is the whole question the desktop's rule asks (see
+/// `VrSession::setDesktopShowsEye`): ONE no-picture frame is a hiccup and must
+/// change nothing on the screen, while a STRETCH of them is a wearer who has
+/// lifted the headset and must give the desktop its own camera back. A hook
+/// that can only blink for one frame can prove half of that rule and not the
+/// other half, and the difference between the two halves is exactly the defect
+/// the owner found (a desktop frozen on the last eye).
+unsigned vrTestBlinkFrames() {
+    const unsigned n = vrEnvFrames("JAHSHAKA_VR_TEST_BLINK_FRAMES");
+    return n ? n : 1u;
+}
 
 }   // namespace
 
@@ -735,6 +759,12 @@ private:
     /// The session's own View, on for a frame the runtime wants a picture for
     /// and off for one it does not (F4).
     void setSessionViewEnabled(bool on);
+    /// WHO PAINTS THE DESKTOP — the eye's copy or the desktop's own camera.
+    /// The rule and the state table are on the definition.
+    void setDesktopShowsEye(bool eye);
+    /// One frame the runtime did NOT accept (no picture, or no pose), counted
+    /// for the hysteresis and answered by the rule above.
+    void noteFrameWithoutEye();
     /// Everything the eyes are derived from `mViews` — see the definition.
     void applyEyeViews();
     /// ONE STEREO WARM-UP FRAME (VrConfig::warmUpFrames, lane VR-WARMUP-1).
@@ -935,6 +965,10 @@ private:
     /// "no picture", for as long as it lives — a doff, a dashboard, a lost
     /// tracking moment, repeated.
     unsigned    mTestBlinkEvery = vrTestBlinkEvery();
+    /// TEST ONLY (vrTestBlinkFrames): how many CONSECUTIVE frames each of those
+    /// blinks lasts, and how many of them are left in the blink now running.
+    unsigned    mTestBlinkFrames = vrTestBlinkFrames();
+    unsigned    mTestBlinkLeft = 0u;
     /// TEST ONLY (vrTestStopAfterFrames): ask the runtime to exit after this
     /// many accepted frames, once. Zero = never.
     unsigned    mTestStopAfter = vrTestStopAfterFrames();
@@ -1018,6 +1052,15 @@ private:
     Ogre::Quaternion mOriginRot = Ogre::Quaternion::IDENTITY;
     float            mOriginYawDeg = 0.0f;
     OgreView   *mMirrorView = nullptr;
+    /// THE ANSWER TO "WHO PAINTS THE DESKTOP", and the two things it drives
+    /// (lane MIRROR-LIVE-1): `mShowEye` is the decision — the mirror quad is
+    /// built only while it is true — and `mDesktopViewOff` records that THIS
+    /// object switched the mirrored View off, so it can only ever switch back
+    /// what it took. `mFramesWithoutEye` counts consecutive frames the runtime
+    /// accepted no picture for, which is the hysteresis a blink rides out.
+    bool        mShowEye = false;
+    bool        mDesktopViewOff = false;
+    unsigned    mFramesWithoutEye = 0u;
     Ogre::CompositorWorkspace *mMirrorWorkspace = nullptr;
     std::vector<std::string> mMirrorNodeDefs;
     std::string mMirrorWorkspaceDef;
@@ -1231,9 +1274,10 @@ bool VrSession::create(std::string &reason) {
     // and reads about a stop too bright.
     //
     // Monado 25 offers the _SRGB form — measured on this box, fourteen formats
-    // logged. WiVRn's list is UNVERIFIED here: this tree has never logged it
-    // (it does now), so the first session on the owner's headset is what will
-    // say. The properly correct answer for a runtime with no _SRGB 8-bit form
+    // logged — and so does WiVRn 26.9 on the owner's Quest Pro (his #51 smoke,
+    // 2026-09-19: thirteen formats, R8G8B8A8_SRGB among them and taken), so
+    // both runtimes this tree has met take the one-encode path. The properly
+    // correct answer for a runtime with no _SRGB 8-bit form
     // — a DECODE quad into a 16-bit format the runtime then encodes once — is
     // its own lane; this fallback is what keeps such a runtime usable and
     // honest meanwhile.
@@ -1458,8 +1502,9 @@ bool VrSession::create(std::string &reason) {
         vrLog("TEST HOOK: the first %u frames will be answered 'no picture' "
               "(JAHSHAKA_VR_TEST_NO_RENDER_FRAMES)", mTestNoRenderLeft);
     if (mTestBlinkEvery)
-        vrLog("TEST HOOK: every %uth frame will be answered 'no picture' "
-              "(JAHSHAKA_VR_TEST_BLINK_EVERY)", mTestBlinkEvery);
+        vrLog("TEST HOOK: every %uth frame will be answered 'no picture', %u frame(s) at a "
+              "time (JAHSHAKA_VR_TEST_BLINK_EVERY / _BLINK_FRAMES)", mTestBlinkEvery,
+              mTestBlinkFrames);
     if (mTestStopAfter)
         vrLog("TEST HOOK: the runtime will be asked to exit after %u frames "
               "(JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES)", mTestStopAfter);
@@ -2648,12 +2693,19 @@ void VrSession::beginFrame() {
     // pose.
     mHandValid[0] = mHandValid[1] = false;
     mInput[0] = mInput[1] = VrHandState();
-    if (mState == VrState::Lost) { teardownMirror(); setSessionViewEnabled(false); return; }
+    if (mState == VrState::Lost) {
+        // THE DESKTOP TAKES ITS OWN CAMERA BACK, ON THIS FRAME
+        // (setDesktopShowsEye's table): there is no runtime left to draw an eye
+        // for, so a copy would be a still of the last one for ever.
+        setDesktopShowsEye(false);
+        teardownMirror(); setSessionViewEnabled(false); return;
+    }
     pollEvents();
     if (!mRunning) {
         // NOTHING HAS BEEN DRAWN INTO THE EYE TARGET YET, so a mirror would
         // paint black over the desktop's own picture. It appears when the
         // session starts producing frames and goes again when it stops.
+        setDesktopShowsEye(false);
         teardownMirror();
         setSessionViewEnabled(false);
         return;
@@ -2687,6 +2739,7 @@ void VrSession::beginFrame() {
         vrLog("xrWaitFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
         setSessionViewEnabled(false);
+        setDesktopShowsEye(false);      // no runtime, no eye to copy
         return;
     }
     if (mRefreshHz <= 0.0f && mFrameState.predictedDisplayPeriod > 0) {
@@ -2701,6 +2754,7 @@ void VrSession::beginFrame() {
         vrLog("xrBeginFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
         setSessionViewEnabled(false);
+        setDesktopShowsEye(false);      // no runtime, no eye to copy
         return;
     }
     mInFrame = true;
@@ -2726,8 +2780,12 @@ void VrSession::beginFrame() {
     // periodically instead of once: every Nth accepted frame is answered "no
     // picture", so the session's View goes off and on again, over and over, the
     // way a real runtime does through a doff or a dashboard.
-    if (mTestBlinkEvery && mFrames && (mFrames % mTestBlinkEvery) == 0ull)
+    if (mTestBlinkEvery && mFrames && !mTestBlinkLeft && (mFrames % mTestBlinkEvery) == 0ull)
+        mTestBlinkLeft = mTestBlinkFrames;   // a blink is 1 frame unless asked otherwise
+    if (mTestBlinkLeft) {
+        --mTestBlinkLeft;
         mFrameState.shouldRender = XR_FALSE;
+    }
     if (!mFrameState.shouldRender) {
         if (!mSaidNoRender) { vrLog("the runtime asks for NO picture (shouldRender=0) in state %d", int(mState)); mSaidNoRender = true; }
         // A FRAME IS STILL OWED, with no layers (the spec's contract, and what
@@ -2741,8 +2799,16 @@ void VrSession::beginFrame() {
         // was up. The XR frame is closed here (it is owed and it is paid), the
         // session's own View is switched off so nothing renders two eyes for a
         // picture nobody will see, and the frame goes ahead for everybody else.
+        //
+        // ...AND THE DESKTOP STOPS BEING A COPY OF AN EYE NOBODY IS DRAWING
+        // (lane MIRROR-LIVE-1). This is the owner's F2 exactly: on a real
+        // headset `shouldRender` goes 0 when the wearer LIFTS IT to look at the
+        // desk, and the mirror used to keep painting the last eye for ever. The
+        // rule (setDesktopShowsEye) rides out a blink and hands the desktop its
+        // own camera back for anything longer.
         endFrame();
         setSessionViewEnabled(false);
+        noteFrameWithoutEye();
         return;
     }
     mSaidNoRender = false;
@@ -2763,12 +2829,23 @@ void VrSession::beginFrame() {
         // No tracking this frame (the headset is off the head, the runtime is
         // still coming up). Draw no EYE rather than draw a lie — and, as above,
         // never stop the desktop's frame over it.
+        //
+        // The desktop follows the same rule as a no-picture frame: a moment of
+        // lost tracking is ridden out, a headset that has stopped being worn
+        // gets the editor's own camera back.
         endFrame();
         setSessionViewEnabled(false);
+        noteFrameWithoutEye();
         return;
     }
     mSaidNoPose = false;
     setSessionViewEnabled(true);
+    // THE RUNTIME IS DRAWING AGAIN: the desktop is the eye's copy from the
+    // first frame that has been DRAWN (setDesktopShowsEye refuses to hide a
+    // view with no mirror over it, which is what makes the first frames of a
+    // WiVRn session harmless).
+    mFramesWithoutEye = 0u;
+    setDesktopShowsEye(true);
 
     // EVERYTHING THE EYES ARE DERIVED FROM IS ONE FUNCTION (lane VR-WARMUP-1),
     // because the session needs to apply a pose that the runtime did NOT
@@ -3470,21 +3547,115 @@ void VrSession::teardownMirror() {
 }
 
 void VrSession::setMirrorView(OgreView *v) {
-    if (mMirrorView != v) teardownMirror();
+    // THE VIEW GOES BACK THE WAY IT CAME (lane MIRROR-LIVE-1). A host clears
+    // its mirror when it stops showing the page; the View it named is one this
+    // object may have switched OFF, and nothing else knows that. Restored
+    // before the pointer is forgotten — and only ever restored by whoever took
+    // it, which is what `mDesktopViewOff` records.
+    //
+    // It is deliberately set ENABLED and not to "whatever the host wants": the
+    // host's own answer (a hidden page, a stopped Player) is applied by the
+    // host on the very next line of its own teardown, and it wins. This only
+    // undoes what this object did.
+    if (mMirrorView != v) { setDesktopShowsEye(false); teardownMirror(); }
     mMirrorView = v;
+    mFramesWithoutEye = 0u;
     syncMirror();
 }
 
-/// THE MIRROR SHOWS THE LAST EYE PICTURE, AND WHILE THE SESSION VIEW IS OFF
-/// THAT PICTURE IS STALE (V2F-8, by design). The mirror is a quad over the eye
-/// TARGET, and that target is only rewritten by a frame the runtime asked for:
-/// when it asks for none — the headset is off the head, the dashboard is up,
-/// the runtime is paused — the session's own View is switched off for those
-/// frames (F4) and the mirror keeps painting the last eye that was drawn. That
-/// is the right answer for a mirror (a frozen last frame beats a black hole,
-/// and the desktop's own picture is still being drawn underneath it), and it is
-/// stated here so that "the mirror froze" is read as the runtime pausing rather
-/// than as the loop stopping — `vr.state()` says which.
+/// THE ONE RULE FOR WHO PAINTS THE DESKTOP DURING A SESSION (lane
+/// MIRROR-LIVE-1; the owner's finding F2 of the push-#50 smoke: "in the editor
+/// the 3D view is not the same as the VR view — a static image, or its own
+/// camera").
+///
+/// THE OWNER'S RULE IS ONE PIPELINE WHILE THE HEADSET IS WORN: the desktop is a
+/// COPY of the eye, so a frame costs two eyes and a blit instead of two eyes
+/// and a third render. That was already true — and it was also true when the
+/// runtime STOPPED asking for pictures, which is exactly the moment somebody
+/// looks at the desk: the wearer lifts the headset, the runtime drops out of
+/// FOCUSED and answers `shouldRender = 0`, the eye target stops being written
+/// and the mirror went on painting the last eye that was drawn. A frozen still,
+/// at the only moment anybody was looking at it.
+///
+/// So the mirror FOLLOWS THE RUNTIME, and this is the whole state table:
+///
+///   runtime            shouldRender  poses    who paints the desktop
+///   -----------------  ------------  -------  ------------------------------
+///   Lost / not running      -           -     own camera, at once
+///   Ready/Synchronized/     -           -     own camera, at once (nobody is
+///   Visible (not focused)                     wearing it, or another app has
+///                                             the wearer's attention)
+///   Focused                 0           -     the eye, for up to
+///   Focused                 1        invalid  kDesktopHoldFrames frames, then
+///                                             the own camera
+///   Focused                 1         valid   the eye, from the first frame
+///                                             that has been DRAWN
+///
+/// WHY THE HOLD, and why only while FOCUSED. A runtime skips single frames for
+/// reasons that are not "nobody is looking": a reprojection hiccup, a frame the
+/// compositor decided to reuse, WiVRn's first frames on a fresh session. Two
+/// pictures alternating at 90 Hz is worse than either, so a blink is ridden
+/// out — but ONLY while the session still has focus, because the states that
+/// mean the headset is off the head (VISIBLE, SYNCHRONIZED) are a statement,
+/// not a hiccup, and those hand the desktop back on the same frame.
+///
+/// The count is in FRAMES rather than milliseconds because it is the runtime's
+/// own cadence that is being ridden out, and that cadence IS the frame (the
+/// session paces the loop from xrWaitFrame): six frames is 67 ms at 90 Hz and
+/// 96 ms at 62.5 — long enough to swallow any hiccup measured, short enough
+/// that a person lifting the headset sees their editor before they have
+/// finished lifting it.
+///
+/// THE ENGINE OWNS THIS FLAG. The hosts used to switch the desktop View off
+/// themselves (a `mMirrorViewOff` bool in EditorVrPreview and PlayerVr, on a
+/// `status().rendered > 0` test), which put the decision in two places that
+/// could not see the runtime's answer for THIS frame. They now only name the
+/// view and read the result (`VrStatus::mirrorShowing`).
+void VrSession::setDesktopShowsEye(bool eye) {
+    // A session asked for no mirror (`mirror: "none"` — the desktop as a third,
+    // independent camera for somebody at the desk) never takes the desktop
+    // away, so there is nothing here to give back either.
+    const bool want = eye && mMirrorView && mConfig.mirror != VrMirrorMode::None;
+    mShowEye = want;
+    // Builds the quad when the eye paints and takes it down when it does not —
+    // in the same call, so the workspace and the enabled flag can never
+    // disagree for a frame.
+    syncMirror();
+    if (!mMirrorView) { mDesktopViewOff = false; return; }
+    // NEVER HIDE A VIEW NOBODY IS PAINTING OVER (VR-3b's rule, kept): the
+    // mirror exists only once a frame the runtime ASKED FOR has been drawn into
+    // the eye target. Until then the desktop keeps its own picture, which is
+    // also what makes a session that never renders harmless.
+    const bool off = want && mMirrorWorkspace != nullptr && mMirrorWorkspace->getEnabled();
+    if (off == mDesktopViewOff) return;
+    mDesktopViewOff = off;
+    mMirrorView->setEnabled(!off);
+    vrLog("the desktop now shows %s", off ? "the headset's eye" : "its own camera");
+}
+
+void VrSession::noteFrameWithoutEye() {
+    // The hold is only for a runtime that still has the wearer's attention;
+    // every other state hands the desktop back on this frame (the table above).
+    if (mFramesWithoutEye < ~0u) ++mFramesWithoutEye;
+    const bool hold = mState == VrState::Focused &&
+                      mFramesWithoutEye <= kDesktopHoldFrames;
+    // `mShowEye` and not `true`: a skipped frame can only KEEP a copy that is
+    // already up, never start one.
+    setDesktopShowsEye(hold && mShowEye);
+}
+
+/// THE MIRROR EXISTS ONLY WHILE THE RUNTIME IS DRAWING EYES (lane
+/// MIRROR-LIVE-1 — this used to read "a frozen last eye beats a black hole",
+/// which was V2F-8's design and the owner's F2 defect).
+///
+/// The mirror is a quad over the eye TARGET, and that target is only rewritten
+/// by a frame the runtime asked for. When it asks for none — the headset is off
+/// the head, the dashboard is up, the runtime is paused — there is no live eye
+/// to be a window onto, so the quad comes DOWN and the desktop View draws its
+/// own camera again (setDesktopShowsEye's rule and its hysteresis). The
+/// desktop is therefore never a still: it is the headset's picture while the
+/// headset is being worn, and the editor's own picture the moment it is not.
+/// `vr.state().mirror.showing` says which, live.
 void VrSession::syncMirror() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root || !mView) return;
@@ -3529,9 +3700,9 @@ void VrSession::syncMirror() {
     // scene, line blocks and a white band in a loaded one, which is exactly
     // what the owner photographed. A mirror is a window onto the headset's
     // picture; with no picture yet there is nothing to be a window onto, so the
-    // desktop keeps its OWN (the host leaves its view drawing until the same
-    // moment — PlayerVr::step). From the first accepted frame on, the note
-    // above applies: a frozen last eye beats a black hole.
+    // desktop keeps its OWN. (The host no longer has a half of this rule: the
+    // engine owns the desktop View's flag since MIRROR-LIVE-1, so "there is no
+    // eye yet" and "the desktop draws its own" are one condition.)
     const bool wanted = mMirrorView && mRendered > 0ull &&
                         mConfig.mirror != VrMirrorMode::None && mView->targetTexture() &&
                         mMirrorView->targetTexture() && mMirrorView->camera();
@@ -3544,8 +3715,19 @@ void VrSession::syncMirror() {
     const unsigned gen = mMirrorView->workspaceGeneration() + mView->workspaceGeneration();
     Ogre::TextureGpu *const target = mMirrorView->targetTexture();
     if (mMirrorWorkspace && gen == mMirrorGeneration && target == mMirrorTarget &&
-        target->getWidth() == mMirrorW && target->getHeight() == mMirrorH)
+        target->getWidth() == mMirrorW && target->getHeight() == mMirrorH) {
+        // THE PER-FRAME FLIP IS A FLAG, NOT A REBUILD (lane MIRROR-LIVE-1).
+        // Whether the eye is painted this frame is `mShowEye` — the rule on
+        // setDesktopShowsEye — and it changes whenever a wearer lifts the
+        // headset and puts it back, which is a thing people do all day. A
+        // teardown and a rebuild of the quad's node definitions cost 2.3 ms on
+        // the rig, measured, ON EXACTLY THE FRAME the person is looking at the
+        // screen; a workspace's enabled flag costs nothing (it is what
+        // View::setEnabled does for the same reason). The definitions are kept
+        // for the life of the session and torn down with it.
+        mMirrorWorkspace->setEnabled(mShowEye);
         return;
+    }
     teardownMirror();
     if (!mMirrorView->workspace()) return;   // nothing to paint over yet
 
@@ -3560,8 +3742,11 @@ void VrSession::syncMirror() {
     Ogre::CompositorChannelVec targets;
     targets.push_back(mMirrorView->targetTexture());
     targets.push_back(mView->targetTexture());
+    // Created ENABLED only when the eye is what the desktop shows right now:
+    // a stretch of no-picture frames may build it (a resize, a chain rebuild on
+    // either side) while the desktop is drawing its own camera.
     mMirrorWorkspace = cm->addWorkspace(mScene->sceneManager(), targets, mMirrorView->camera(),
-                                        mMirrorWorkspaceDef, true);
+                                        mMirrorWorkspaceDef, mShowEye);
     mMirrorGeneration = gen;
     mMirrorTarget = target;
     mMirrorW = target->getWidth();
@@ -3593,6 +3778,11 @@ VrStatus VrSession::status() const {
     s.swapchainFormat = vkFormatName(mSwapchainFormat);
     s.colourEncodedOnce = mColourEncodedOnce;
     s.mirror = mMirrorView ? mConfig.mirror : VrMirrorMode::None;
+    // THE WISH ABOVE, THE ANSWER HERE (lane MIRROR-LIVE-1). Read from the flag
+    // that really drives the two things a host can see — the mirror workspace
+    // and the desktop View's enabled bit — rather than recomputed, so
+    // `vr.state().mirror.showing` cannot disagree with the window.
+    s.mirrorShowing = mDesktopViewOff ? VrDesktopPicture::Eye : VrDesktopPicture::Own;
     s.worldScale = mConfig.worldScale;
     s.asymmetricFov = mAsymmetricFov;
     s.headPosition = Vec3(mWorldHeadPos.x, mWorldHeadPos.y, mWorldHeadPos.z);
@@ -3738,6 +3928,12 @@ VrSession::~VrSession() {
     // a pass holds a raw Camera* and destroying it first segfaults on the next
     // frame (the PiP lane's T6).
     destroyXr();
+    // THE DESKTOP GETS ITS PICTURE BACK BEFORE THE MIRROR GOES (lane
+    // MIRROR-LIVE-1): this object switched that View off, so this object
+    // switches it on again — whatever ends the session, and whoever forgot to.
+    // The host applies its own answer (a hidden page, a stopped Player) right
+    // after, and it wins.
+    setDesktopShowsEye(false);
     teardownMirror();
     dropStereoQuads();
     // The mask's Item and its mesh, before the View and long before Root: a
