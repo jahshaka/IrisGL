@@ -7282,7 +7282,28 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // one-re-solve-on-settle debounce but NOT the cheap light re-inject
         // cadence (and its irradiance-field reset) — nothing a re-inject reads
         // changed. Every mode (Instant Radiosity re-traces on it too).
-        const quint64 matSig = mTarget->giMaterialSignature();
+        // A HOVER PREVIEW IS NOT A MATERIAL EDIT (MATERIAL-PREVIEW-1).
+        // The editor lends a mesh's material slot to whatever is being dragged
+        // over it and takes it back when the drag leaves; the document is never
+        // written and no undo step exists. The engine's material signature
+        // cannot tell the two apart. (Measured 2026-09-19, ledger 804-805: a
+        // colour-only swap does not move this term; a textured one does, and the
+        // engine re-voxelises on the re-attach either way — MATERIAL-SWAP-GI-1
+        // owns the rest, this gate's falling edge included.)
+        //
+        // The whole answer is here, at the ONE read: while the scene says a
+        // preview is on screen the material term reads as whatever was
+        // remembered before it began. Nothing can arm on it and — just as
+        // important — nothing can ADOPT it either (adoptSignature and the full
+        // push below both go through this), so the restore lands back on the
+        // remembered value and the debounce never saw a change at all. A real
+        // apply ends the preview BEFORE it pushes (MaterialPreviewService), so
+        // the commit's own signature move arms the one re-solve it is owed.
+        const auto readMaterialSignature = [&]() -> quint64 {
+            return mSource->materialPreviewActive() ? mGiMaterialSignature
+                                                    : mTarget->giMaterialSignature();
+        };
+        const quint64 matSig = readMaterialSignature();
         // Compared BY VALUE (GiParams::operator==, beside the struct — every
         // field setGlobalIllumination reads is in it, so a new field cannot fall
         // behind the comparison the way a lambda one file away did).
@@ -7321,7 +7342,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mGiMovableLightSignature = movableLightSig;
             mGiMovableLightsMoving = false;
             mGiMovableSettleOwed = false;
-            mGiMaterialSignature = mTarget->giMaterialSignature();
+            mGiMaterialSignature = readMaterialSignature();
             mGiPushed = true;
             mGiPendingRefresh = false;
             mGiPendingInject = false;
@@ -7419,7 +7440,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // second being the signature changing back).
             const auto adoptSignature = [&]() {
                 if (vctLike) mGiLightSignature = readEngineSignature();
-                mGiMaterialSignature = mTarget->giMaterialSignature();
+                mGiMaterialSignature = readMaterialSignature();
                 mGiPendingInject = false;
                 // A full re-solve IS the rest frame, at the full bounce count:
                 // the movable path's owed one would only redo it (F1).
