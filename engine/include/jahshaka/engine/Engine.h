@@ -366,6 +366,18 @@ public:
     /// attaching again replaces it. Mesh and material may be shared across nodes and
     /// survive the node.
     virtual bool        attachMesh(NodeId, MeshId, MaterialId) = 0;
+    /// A MATERIAL SWAP ON A LIVE ITEM (MATERIAL-SWAP-GI-1): the node keeps its
+    /// mesh, its Item and its rig; only the material changes, in place. What a
+    /// material decides for the Item (its render queue, its visibility family,
+    /// its shadow shape) is re-derived, and the GI caches are invalidated for
+    /// the ITEM'S BOX with nothing died — under a cascade chain only the
+    /// cascades that box reaches re-voxelise, where attachMesh (detach + create)
+    /// re-voxelises every cascade. False, with lastError(), when the swap
+    /// crosses a family the Item cannot carry in place (Lit <-> Unlit /
+    /// Distortion), when the node carries no mesh, or when the new material
+    /// binds a normal map the mesh has no tangents for — attachMesh is the
+    /// answer to every refusal. Idempotent for the material already worn.
+    virtual bool        setNodeMaterial(NodeId, MaterialId) = 0;
     virtual bool        detachMesh(NodeId) = 0;
     /// How many renderables this node actually carries right now.
     ///

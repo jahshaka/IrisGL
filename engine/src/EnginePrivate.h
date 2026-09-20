@@ -2810,6 +2810,7 @@ public:
     void  applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &errors) const;
     std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
+    bool setNodeMaterial(NodeId, MaterialId) override;
     bool detachMesh(NodeId id) override;
     size_t itemCount(NodeId id) const override;
 
@@ -4220,7 +4221,12 @@ private:
     /// cached mesh in one call), while only a dead DATABLOCK or TEXTURE can
     /// outlive that, because `VctMaterial` keys its conversion cache on the
     /// datablock POINTER and a recycled address would alias.
-    void noteGiDatablockDied();
+    /// THE BY-POINTER ALIAS GUARD (MATERIAL-SWAP-GI-1, patch 0081): VctMaterial
+    /// caches conversions by raw datablock pointer across builds, so a dying
+    /// datablock is EVICTED from every live voxeliser's cache — no volume is
+    /// re-voxelised for a death. With a null pointer (a caller that cannot name
+    /// the datablock) it falls back to marking every cascade's voxels fresh.
+    void noteGiDatablockDied(Ogre::HlmsDatablock *dying = nullptr);
     /// Marks every cascade whose box intersects the recorded dirty region (or
     /// all of them when the region is unknown) `pending`, and clears the region.
     /// `why` is the reason the monitor row will carry. Returns how many cascades
