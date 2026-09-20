@@ -53,8 +53,8 @@ to the document's own 0..2 range, so a garbage buffer cannot subtract light.
 
 AMOUNT 1 IS BYTE-IDENTICAL, by arithmetic and by measurement. `clamp(1.0 + 0.0,
 0.0, 2.0)` is exactly 1.0, `16.0 * 1.0` is exactly 16.0 in IEEE-754, so the
-multiplied term is bit for bit the term this line produced before — both
---engine-selftest hashes are unchanged by this patch (the lane measured them:
+multiplied term is bit for bit the term this line produced before — both of
+the --engine-selftest hashes are unchanged by this patch (the lane measured them:
 pose 1 2aadbc10ec831fd5e2fb4eba88d6e36e7abc008b960b6cda8e5f57e61ee6db29,
 pose 2 0f084cec87ff265e2852f8f5294def97eec3d6ffdbc7ec7251449f8190866573).
 Amount 0 makes the added term exactly zero, which is precisely what the

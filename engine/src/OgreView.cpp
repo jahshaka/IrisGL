@@ -628,9 +628,15 @@ void OgreView::setPostFx(const PostFxDesc &pushed) {
     if (chainDesc().hdr) chain::setDither(chainDesc().ditherOff);
     // ...and the bloom amount, which is a uniform on the SAME material and is
     // therefore unreachable by the same view for the same reason. It is inert
-    // in the headset today — applyVrViewPolicy turns bloom off in both eyes —
-    // so this line is what keeps the dial honest the day that policy changes,
-    // at the cost of one debounced float comparison per setPostFx.
+    // in the headset today — applyVrViewPolicy turns bloom off in both eyes.
+    // NOTE (the merge read, 2026-09-20): this push-time write does NOT make the
+    // dial honest in the eyes the day that policy changes — the session's
+    // workspace runs outside the engine loop, so every desktop view's per-frame
+    // listener write lands AFTER this one and the eye reads whichever view
+    // pushed last. The dither has the same shape and is only masked because it
+    // is process-wide. When bloom reaches the headset, the session must run
+    // applyViewGlobals for its own view before its update instead of relying
+    // on this line; until then this costs one debounced float comparison.
     if (chainDesc().hdr && chainDesc().bloom) chain::setBloomAmount(chainDesc().bloomAmount);
 }
 
