@@ -514,6 +514,33 @@ public:
     /// still be one re-solve, and because a bool would need a clearer — which is
     /// the mirror's job, not the caller's.
     quint64 giRefreshSerial = 0;
+    /// A MATERIAL THE USER HAS NOT COMMITTED IS ON THE SCREEN (MATERIAL-PREVIEW-1).
+    ///
+    /// The editor's hover preview borrows a mesh's material slot while a
+    /// material is dragged over it and puts the original back when the drag
+    /// leaves, drops or is cancelled — the document is never written and no
+    /// undo step exists. The renderer cannot tell a borrowed material from a
+    /// committed one, so whatever a material change costs the GI caches a hover
+    /// would be charged too — for a state that will never be saved.
+    ///
+    /// MEASURED 2026-09-19 (ledger 804-805): the mirror's material term does not
+    /// move for a colour-only swap, so today this flag holds back little; the
+    /// cost a hover really pays is the engine's — a material-pointer change
+    /// re-attaches the item and invalidates the GI caches whole. A TEXTURED
+    /// preview does bump the (monotonic) generation while flagged, so the
+    /// falling edge needs an adopt. All three belong to MATERIAL-SWAP-GI-1.
+    ///
+    /// So the preview says so. While this is true the mirror neither arms nor
+    /// ADOPTS the material term: it keeps the signature it remembered before
+    /// the preview began, so the restore lands back on it and nothing has
+    /// changed as far as the debounce is concerned. A real apply ends the
+    /// preview FIRST (MaterialPreviewService), so its own signature move arms
+    /// the one re-solve it should.
+    ///
+    /// NEVER SERIALIZED and never true for longer than a gesture. A counter
+    /// rather than a bool so nested/overlapping previews cannot clear it early.
+    int materialPreviewDepth = 0;
+    bool materialPreviewActive() const { return materialPreviewDepth > 0; }
     /// The SAME shape for the cached point/spot shadow maps
     /// (ENGINE_CACHE_POLICY_SPEC P2): monotonic, never serialized, bumped by
     /// world.refreshShadows(). The mirror compares it against the value it last
@@ -910,6 +937,23 @@ public:
 	/// selects and grabs while the LEFT stick walks and turns; false swaps both
 	/// roles at once. ONE flag, because two would eventually disagree.
 	bool vrDominantRight = true;
+
+	/// BARE-HAND TRACKING: does a session in this project BIND the wearer's own
+	/// hands (lane HANDS-SWITCH-1; the owner, 2026-09-18, joint)?
+	///
+	/// OFF, and that is the decision rather than a shipping default waiting to be
+	/// flipped: bare-hand work is deferred until the controllers are right on the
+	/// hardware this project is smoked on, and WHICH of the two a wearer uses is
+	/// the AUTHOR'S choice for their project, not the runtime's for the moment.
+	/// With it off a session suggests no `ext/hand_interaction_ext` bindings, so
+	/// a wearer who puts a controller down is left holding nothing — which is
+	/// exactly what "controllers only" must mean — instead of being handed to a
+	/// half-finished bare-hand mode in the middle of a smoke.
+	///
+	/// It is read ONCE, when a session begins (`VrConfig::hands`): the bindings
+	/// are suggested at session creation and a runtime cannot be asked to rebind
+	/// them, so changing this mid-session changes nothing until the next one.
+	bool vrHands = false;
 
 	// ---- THE PLAYER (PLAYER-FLOOR-1) -----------------------------------
 	/// HIDE THE DEFAULT FLOOR IN THE PLAYER — a PROJECT setting (owner,

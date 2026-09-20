@@ -465,6 +465,30 @@ constexpr Ogre::uint32 kBackdropBit    = 1u << 7;
 // one of them (chain::helperBitsToDrop does).
 constexpr Ogre::uint32 kVrHelperBit    = 1u << 8;
 
+// THE HIDDEN-AREA MESH'S OWN CHANNEL (lane HAM-1, VR_SPEC §9). The SEVENTH use
+// of the inversion above, and the narrowest: exactly one object in the process
+// ever carries this bit — the mask the runtime handed over — and it carries it
+// INSTEAD OF kVisibleBit.
+//
+// WHAT THE INVERSION BUYS HERE. The mask is a depth-only draw at the NEAR
+// plane, so anything that renders it and then shades through it comes out
+// EMPTY: a probe face would capture black corners, a sky capture would
+// integrate them into the ambient, a planar mirror would lose a wedge, a shadow
+// map would be stamped with a wall one centimetre from the light. Every one of
+// those passes asks for kVisibleBit (the probe faces' `visibility_mask 0x1`,
+// the shadow nodes' shadowCasterChannels, OgrePlanar's allowlist, the GI
+// gathers' kGiGeometryBit), so not carrying kVisibleBit keeps the mask out of
+// all of them with no new rule.
+//
+// WHAT STILL NEEDS ONE is the VIEW CHAINS, whose scene passes are born holding
+// every RESERVED bit: `chain::helperBitsToDrop` takes this bit out of every
+// view's node UNLESS that view is a VR session's eye pair
+// (ChainDesc::hiddenAreaMask). So the desktop viewport, the Player's window, a
+// thumbnail, a preview and a user's screenshot cannot draw it even while a
+// session is live — which is the channel requirement HAM-1 was given, stated
+// where the bit is defined.
+constexpr Ogre::uint32 kVrMaskBit      = 1u << 9;
+
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
 // ---------------------------------------------------------------------------
@@ -889,6 +913,21 @@ struct ChainDesc {
     float ssaoScale = 1.0f;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower = 1.5f;
     float ssaoRadius = 2.0f;
+    /// THE DITHER'S OFF SWITCH, AND IT IS A DIAGNOSTIC, NOT A DIAL (lane
+    /// DITHER-1). The tonemap quad dithers its 8-bit write; this turns that
+    /// off so a suite can render the SAME picture both ways IN ONE PROCESS and
+    /// measure the difference, which is what makes hdr.dither's discrimination
+    /// arms real and what the --engine-selftest hash A/B rests on. There is no
+    /// project row and there will not be one: a dither is correctness.
+    ///
+    /// A UNIFORM, never a shape term (it is deliberately not in sameShape()) —
+    /// and per VIEW, pushed by applyViewGlobals immediately before that view's
+    /// passes execute, which is the same mechanism that lets two on-screen
+    /// views carry two exposures through one process-global material.
+    ///
+    /// The environment variable JAHSHAKA_NO_DITHER forces it on for the whole
+    /// process; it is read ONCE (chain::noDitherEnv) and ORed with this.
+    bool  ditherOff = false;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
     /// Does the screen-space MARCH contribute (PostFxDesc::ssrScreenMarch)?
@@ -1000,6 +1039,22 @@ struct ChainDesc {
     /// desktop window, the offscreen view a user's screenshot renders through —
     /// so nothing meant for a wearer reaches a picture that is not theirs.
     bool  vrHelpers = false;
+    /// Does THIS view draw the RUNTIME'S HIDDEN-AREA MESH (kVrMaskBit, lane
+    /// HAM-1)? True for the VR session's eye pair and false everywhere else,
+    /// which is what keeps a depth-only near-plane draw out of the desktop, the
+    /// mirror, a probe and a user's shot.
+    ///
+    /// It is the same mechanism as `helpers` and for the same reason — a
+    /// per-pass visibility mask on the view's own node, written by
+    /// `helperBitsToDrop`, never state on the object (one scene, many views).
+    /// GRAPH SHAPE (sameShape) — which is exactly why it is set ONCE, when the
+    /// session creates its view, and not when the mask mesh is built: the mesh
+    /// can only be built inside a frame (it needs the runtime's located fovs),
+    /// and a workspace rebuild there would re-attach the eye copy's own
+    /// listener at a seam no suite can see the far side of. With the channel
+    /// open and no mask built, nothing in the process carries the bit, so it
+    /// costs no pixel and no pass.
+    bool  hiddenAreaMask = false;
 
     // ---- INSTANCED STEREO (SPECS/VR_SPEC.md §4.3, phase 2) ----------------
     /// Render BOTH EYES in one pass into a target that is two eyes wide
@@ -1235,7 +1290,8 @@ bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef)
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
 /// THE METER'S PATTERN AND CLIPS (EXPOSURE-2). Uniforms on the histogram
 /// meter's compute jobs; only meaningful for the form that measures.
-void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent);
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent,
+               bool stereo);
 void setBloomThreshold(float minThreshold, float fullColourThreshold);
 void initSsao(Ogre::Root *root);
 void destroySsao(Ogre::Root *root);
@@ -1271,6 +1327,14 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc);
 //     on screen and offscreen), which fixes two pre-existing defects outright:
 //     two on-screen views no longer fight over one exposure, and SSAO no longer
 //     marches the FIRST view's projection in the second view's frame.
+/// Pushes the dither's diagnostic off switch onto the tonemap material
+/// (ChainDesc::ditherOff, ORed with the once-read JAHSHAKA_NO_DITHER). Called
+/// from applyViewGlobals; separate only so its teardown twin has a name.
+void setDither(bool off);
+/// Drops the cached tonemap parameter block. Called from destroySsao, i.e. from
+/// ~OgreEngine, because the cache is a SharedPtr into a material that is about
+/// to stop existing.
+void forgetDitherParams();
 void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc);
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                       unsigned viewWidth, unsigned viewHeight);
@@ -3073,6 +3137,10 @@ public:
     /// immediately (one empty() test) when nothing is parked, which is every
     /// frame after a scene has finished loading.
     void settleTextureResidency();
+    /// Whether the GI flush should wait for a voxel-input texture that is still
+    /// streaming (BOOTVOX-1). Counts the frames it has waited, so it is not
+    /// const. See the definition in OgreGi.cpp.
+    bool giVoxelTexturesPending();
     /// THE GI MOVEMENT SCAN, once per frame, run by its consumer (the
     /// probe budget) — which is EARLIER in the frame than
     /// any scene graph update, so it reads updated bounds. Same pass, same
@@ -3861,7 +3929,9 @@ private:
     /// resolution, (re)builds VctLighting and binds it to HlmsPbs. The voxelizer
     /// and lighting are recreated from scratch every time (see invalidateGiCaches).
     /// In hybrid mode also (re)builds the PCC probe grid.
-    void rebuildVct();
+    /// TRUE when the arm was actually (re)built (see the definition): the
+    /// chain-shape debt is cleared by a BUILD, never by a call.
+    bool rebuildVct();
     /// Builds the ParallaxCorrectedCubemapAuto probe grid over `region` — the
     /// scene's own fitted box — and binds it with distance-blended VCT specular
     /// (PccVctMinDistance). Every candidate probe photographs its surroundings
@@ -4074,9 +4144,14 @@ private:
         unsigned long long injectedAtLightSerial = 0;
         float        lastCpuMs = -1.0f;
         /// The camera position this cascade was last BUILT for. The scroll test
-        /// is quantize(cam, cell*stepCells) != quantize(builtCam, cell*stepCells)
-        /// — the pin's `consistentCascadeSteps` reading, which is what keeps two
-        /// cascades from stepping on different frames for the same metre.
+        /// quantises BOTH on an absolute world lattice of `step * (1 -
+        /// kStepHysteresis)` metres and requires the camera to be the band past
+        /// the plane it left (OgreGi.cpp) — the pin's `consistentCascadeSteps`
+        /// reading with the hysteresis added, which is what keeps two cascades
+        /// from stepping on different frames for the same metre AND what stops a
+        /// head swaying on a plane from thrashing the chain. Because the lattice
+        /// is absolute, `step()` is the SUPREMUM of the travel between rebuilds,
+        /// not the distance between them.
         Ogre::Vector3 builtCam = Ogre::Vector3::ZERO;
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
         float cell() const { return halfSize * 2.0f / float(resolution); }
@@ -4963,6 +5038,17 @@ private:
     /// slider drag into one re-voxelize when it stops WITHOUT running the
     /// light re-inject cadence a material cannot need.
     unsigned long long mGiMaterialGeneration      = 0;
+    /// BOOTVOX-1: how many consecutive frames the GI flush has waited for a
+    /// voxel-input texture, and the cap past which it builds anyway. One frame
+    /// or two is the normal case (the default scene's ground tile); the cap
+    /// exists so a decode that never completes cannot park GI for ever.
+    unsigned           mGiVoxelTextureWaitFrames  = 0u;
+    static const unsigned kGiVoxelTextureWaitFrames = 30u;
+    /// ...and whether the wait for THIS pending set has already been given up
+    /// on, so a texture that never becomes ready costs thirty deferrals ONCE
+    /// and not thirty per rebuild for the life of the scene. Cleared the moment
+    /// no voxel input is in flight.
+    bool               mGiVoxelTextureWaitGaveUp  = false;
     unsigned long long mGiBuiltMaterialGeneration = 0;
     /// THE PROBE CACHE's bookkeeping (ENGINE_CACHE_POLICY_SPEC P1). See
     /// staleProbeGrid and GiStatus: why the grid was last staled, a serial per
@@ -5154,6 +5240,22 @@ public:
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
     bool stereo() const { return mStereo; }
+    /// THE ONE-SESSION REFLECTION OVERRIDE (lane EYE-GRADE-1). The SSR row a
+    /// stereo view renders with is the PROJECT's — the mirror pushes it here
+    /// like it does into the desktop's view — and this is `vr.begin({
+    /// reflections:n})`'s measurement arm over it: -1 follows the project, 0/1/2
+    /// pin the row for as long as this view is stereo. Applied inside
+    /// `applyVrViewPolicy`, so it cannot be forgotten by a later push.
+    void setVrSsrOverride(int row);
+    int  vrSsrOverride() const { return mVrSsrOverride; }
+    /// HOW MANY TIMES THIS VIEW'S PER-FRAME CHAIN GLOBALS HAVE BEEN PUSHED
+    /// (chain::ViewGlobalsListener). The meter's uniforms, the auto exposure's
+    /// terms, the bloom threshold, the AO and SSR camera terms and every look's
+    /// parameters ride that push and NOTHING else — so a view whose count does
+    /// not climb is a view rendering with whatever the last workspace to update
+    /// happened to leave in the process-wide materials. @see globalsPushes.
+    void noteGlobalsPush() { ++mGlobalsPushes; }
+    unsigned long long globalsPushes() const override { return mGlobalsPushes; }
     /// THE TWO EYES THIS VIEW IS RENDERING, this frame (@see StereoEyeBasis).
     /// Pushed by the VR session every frame it locates them, dropped when the
     /// session ends; read by the ray-traced reflection so each eye's pixels get
@@ -5199,6 +5301,11 @@ public:
     bool helpersVisible() const override { return mHelpersVisible; }
     void setVrHelpersVisible(bool on) override;
     bool vrHelpersVisible() const override { return mVrHelpersVisible; }
+    /// THE RUNTIME'S HIDDEN-AREA MESH, for this view only (kVrMaskBit, lane
+    /// HAM-1). Engine-internal: the VR session is the only caller, and there is
+    /// no public View verb for it because no host has a reason to ask.
+    void setHiddenAreaMask(bool on);
+    bool hiddenAreaMask() const { return mHiddenAreaMask; }
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
     float measuredExposureScale() const override;
@@ -5433,6 +5540,17 @@ private:
     bool                       mStereo = false;
     bool                       mGiPriority = false;
     std::string                mCullCameraName;
+    /// THE SESSION'S ONE-RUN REFLECTION OVERRIDE (lane EYE-GRADE-1;
+    /// `vr.begin({reflections:n})`). -1 — every view but a session's — means
+    /// "whatever the project's row says", which is what the mirror pushes.
+    int                        mVrSsrOverride = -1;
+    /// @see noteGlobalsPush.
+    unsigned long long         mGlobalsPushes = 0;
+    /// WHAT THE VR POLICY LAST TOOK AWAY, as one number (looks * 4 + refraction
+    /// bit * 2 + distortion bit) — the latch behind the one log line that tells
+    /// an author why something they can see on the desktop is not in the
+    /// headset. size_t(-1) = nothing said yet.
+    size_t                     mVrPolicyDropped = size_t(-1);
     /// The located eyes of THIS frame (@see StereoEyeBasis). Not part of the
     /// chain's identity — they change every frame and change no pass.
     StereoEyeBasis             mStereoEyes[2];
@@ -5532,6 +5650,7 @@ private:
     /// ...and the VR channel (kVrHelperBit). Off everywhere but the session's
     /// own view, so nothing meant for a headset reaches a desktop picture.
     bool                       mVrHelpersVisible = false;
+    bool                       mHiddenAreaMask = false;
     /// Does this OFFSCREEN view get the LOD switch band anyway
     /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
     /// everywhere but the one suite that has to read what the band does.
@@ -5590,6 +5709,17 @@ void bootEnd(VrBoot *);
 VrSession *sessionBegin(VrBoot *, OgreEngine *, OgreScene *, const VrConfig &,
                         std::string &reason);
 void sessionEnd(VrSession *);
+/// IS THE LIVE SESSION'S PICTURE ENCODED EXACTLY ONCE between this renderer and
+/// the wearer's eye (lane EYE-GRADE-1)? False only while a session is running
+/// on a runtime that offered no _SRGB swapchain format and is therefore going
+/// to encode our display-ready bytes a SECOND time; true when no session runs.
+///
+/// PROCESS-WIDE, because a session is (`Engine::beginVrSession` refuses a
+/// second), and declared HERE rather than reached through the engine because
+/// the caller that needs it most is CHAIN code — a composite that dithers the
+/// final picture must stand down when the runtime is about to re-encode it,
+/// and the chain has no session pointer.
+bool colourEncodedOnce();
 }  // namespace vr
 
 /// THE PUMP, from the frame's point of view. `vrSessionBeginFrame` polls the
@@ -5643,6 +5773,10 @@ unsigned vrSessionBindingBlocks(const VrSession *, VrBindingBlock *out, unsigned
 /// IS THE RUNTIME REALLY TRACKING that hand's skeleton? (The injection refusal
 /// rule for joints: a wearer's own hand always wins over a script's.)
 bool    vrSessionHasLiveJoints(const VrSession *, int hand);
+/// WAS THIS SESSION ASKED FOR BARE HANDS (`VrConfig::hands`, lane
+/// HANDS-SWITCH-1)? False = a project on controllers: no hand bindings were
+/// suggested, no tracker exists, and no skeleton is reported from any source.
+bool    vrSessionHandsEnabled(const VrSession *);
 /// THE ONE READING OF `JAHSHAKA_VR_TEST_INJECT` (VR_INPUT_SPEC §2.4 I1), for
 /// the two places that enforce the refusal rule: the WRITE (Engine::
 /// vrInjectInput refuses one) and the per-frame READ (the session ignores and

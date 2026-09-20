@@ -1663,6 +1663,13 @@ bool OgreEngine::vrInjectInput(int hand, const VrHandState &state) {
 // the only source there can be.
 unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
     if (hand < 0 || hand >= int(VrHandCount)) return 0u;
+    // A LIVE SESSION WITH HANDS OFF HAS NO SKELETON TO REPORT (lane
+    // HANDS-SWITCH-1), and that includes an injected one: a project that asked
+    // for controllers must not be shown a script's fingers. With NO session at
+    // all the store below is still the only source there can be — which is what
+    // keeps the headless bare-hand suite driving the interaction rules on a box
+    // that has no fingers and no runtime.
+    if (mVrSession && !vrSessionHandsEnabled(mVrSession)) return 0u;
     if (mVrSession) {
         if (const unsigned n = vrSessionHandJoints(mVrSession, hand, out, count)) return n;
     }

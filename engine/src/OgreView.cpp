@@ -99,6 +99,11 @@ ChainDesc OgreView::chainDesc() const {
     // picture in this process — the desktop, a thumbnail, a preview, a
     // screenshot — is built with that channel masked out.
     d.vrHelpers  = mVrHelpersVisible;
+    // ...AND THE RUNTIME'S HIDDEN-AREA MESH (kVrMaskBit, lane HAM-1), set here
+    // beside the two helper channels and BEFORE the offscreen early-out for the
+    // same reason `stereo` is: the only view that ever asks for it is the VR
+    // session's eye pair, which is offscreen.
+    d.hiddenAreaMask = mHiddenAreaMask;
     // LETTERBOX (CAMERAS_SPEC §7.4) is a property of the CAMERA the host
     // pushed, not of the view — a camera that constrains its aspect does so in
     // every view that shows it. Unlike the effects below it is NOT cleared for
@@ -150,6 +155,17 @@ ChainDesc OgreView::chainDesc() const {
     d.ssaoScale      = mPostFx.ssaoScale;
     d.ssaoPower      = mPostFx.ssaoPower;
     d.ssaoRadius     = mPostFx.ssaoRadius;
+    // The dither's diagnostic off switch (a uniform, per view — see
+    // PostFxDesc::ditherOff). It sits BELOW the offscreen early-out with
+    // everything else the chain carries, which is right: an offscreen view
+    // with no chain has no tonemap quad and therefore no dither to turn off.
+    // ...AND THE EYE'S DITHER STANDS DOWN WHEN THE RUNTIME WILL ENCODE AGAIN (the
+    // lead, at the merge of EYE-GRADE-1 onto DITHER-1). The dither is sized for
+    // the LAST 8-bit write; on the UNORM-swapchain fallback the runtime re-encodes
+    // our bytes and stretches a half-code of noise ~13x in the darks — a visible
+    // grain where there was a band. On the _SRGB contract (every runtime seen so
+    // far) this term is false and the eye dithers like the desktop.
+    d.ditherOff      = mPostFx.ditherOff || (mStereo && !vr::colourEncodedOnce());
     d.smaaPreset     = mPostFx.smaaPreset;
     d.ssr            = mPostFx.ssr;
     // AND THE SOURCE THE ROW SELECTS, which this line was missing for one round
@@ -545,7 +561,49 @@ void OgreView::applyPip() {
     } JAH_CATCH(mError, );
 }
 
-void OgreView::setPostFx(const PostFxDesc &fx) {
+// THE PROJECT'S DESCRIPTION, THEN THE VR POLICY OVER IT (lane EYE-GRADE-1).
+//
+// A STEREO view is the picture somebody is standing in, and it is graded by the
+// project like every other view of that scene: `SceneMirror::applyViewEnvironment`
+// pushes the world's PostFxDesc (with the driving camera's lens over it) into
+// this view every frame, exactly as it does into the desktop's. What a
+// side-by-side eye pair cannot carry is filtered out HERE — in the one place
+// every push goes through, so no host can forget it and no later push can undo
+// it — by `applyVrViewPolicy`, whose header states the whole list and why.
+//
+// `postFx()` therefore reports the EFFECTIVE description, which is what
+// `vr.state().postFx` shows and what the suite asserts against the desktop's.
+void OgreView::setPostFx(const PostFxDesc &pushed) {
+    PostFxDesc fx = pushed;
+    if (mStereo) {
+        applyVrViewPolicy(fx, mVrSsrOverride);
+        // WHAT THE POLICY TOOK AWAY IS SAID OUT LOUD, ONCE PER CHANGE. Most of
+        // it is invisible to an author — nobody misses an SSAO they never saw
+        // in there — but three things are chosen on purpose in the World panel
+        // and are visible on the desktop: a LOOK, the REFRACTIONS row and the
+        // DISTORTION row. "Why is my glass not refracting in the headset" must
+        // be answerable from the log rather than from a header.
+        const size_t dropped = pushed.looks.size() - fx.looks.size();
+        const bool lostRefract = pushed.refractions && !fx.refractions;
+        const bool lostDistort = pushed.distortion && !fx.distortion;
+        const size_t state = dropped * 4u + (lostRefract ? 2u : 0u) + (lostDistort ? 1u : 0u);
+        if (state != mVrPolicyDropped) {
+            mVrPolicyDropped = state;
+            std::string what;
+            if (dropped)
+                what = std::to_string(dropped) + " of this project's " +
+                       std::to_string(pushed.looks.size()) + " look(s)";
+            if (lostRefract) what += (what.empty() ? "" : ", ") + std::string("refractions");
+            if (lostDistort) what += (what.empty() ? "" : ", ") + std::string("distortion");
+            if (!what.empty())
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka VR: " + what + " are not drawn in the headset - each of them "
+                    "reads the TARGET at a coordinate that is not this pixel's (a look's "
+                    "centre, a refraction's or a distortion's offset), and in a target "
+                    "holding two eyes side by side that coordinate crosses the seam into "
+                    "the other eye (jahshaka::engine::applyVrViewPolicy)");
+        }
+    }
     if (fx == mPostFx) return;   // hosts push per frame; the same value is free
     const ChainDesc before = chainDesc();
     mPostFx = fx;
@@ -556,6 +614,17 @@ void OgreView::setPostFx(const PostFxDesc &fx) {
     // ...and the one thing that is NOT a shape change but still lives in the
     // graph: the fixed tonemap's exposure clear.
     applyFixedExposure();
+    // THE DITHER'S OFF SWITCH, PUSHED HERE AS WELL AS PER FRAME, and the "as
+    // well" is load-bearing (lane DITHER-1). Everything else the chain tunes
+    // per view rides chain::ViewGlobalsListener, which OgreEngine arms once a
+    // frame for every view that is ENABLED — and the VR session's View is not:
+    // the session drives its own workspace and leaves the engine's loop out of
+    // it, so the eye picture receives no per-view push at all (not exposure,
+    // not the bloom threshold, not the AO camera terms, and not this). The
+    // tonemap's parameter is process-global, so a write here reaches the eyes
+    // whoever owns the view; it is debounced inside setDither and costs
+    // nothing when the value has not moved.
+    if (chainDesc().hdr) chain::setDither(chainDesc().ditherOff);
 }
 
 const PostFxDesc &OgreView::postFx() const { return mPostFx; }
@@ -797,10 +866,31 @@ bool OgreView::attachWorkspace() {
     } JAH_CATCH(mError, false);
 }
 
+void OgreView::setVrSsrOverride(int row) {
+    if (mVrSsrOverride == row) return;
+    mVrSsrOverride = row;
+    // Re-apply the policy to what this view is already carrying: the override is
+    // set before the first push in practice, but a view that never re-pushed
+    // would otherwise keep the row it was built with.
+    if (mStereo) setPostFx(mPostFx);
+}
+
 void OgreView::setStereo(bool on, const std::string &cullCamera) {
     if (mStereo == on && mCullCameraName == cullCamera) return;
     mStereo = on;
     mCullCameraName = cullCamera;
+    // THE POLICY FOLLOWS THE FLAG (lane EYE-GRADE-1). A view told it is stereo
+    // after its description was pushed — which is the order the session builds
+    // in — must re-filter what it is holding, or it would render one chain
+    // shape with a description the stereo target cannot carry until the next
+    // push arrived. Re-entering setPostFx here is safe: the policy is
+    // idempotent, so the guarded compare below drops the call when nothing
+    // moved.
+    if (on) {
+        PostFxDesc fx = mPostFx;
+        applyVrViewPolicy(fx, mVrSsrOverride);
+        mPostFx = fx;
+    }
     // The flag lives on the pass DEFINITIONS, so this is a definition rebuild
     // and not a live write — the same operation a shadow-node or an effect
     // change performs. It happens exactly twice per session (begin and end).
@@ -1068,6 +1158,17 @@ void OgreView::setHelpersVisible(bool on) {
 void OgreView::setVrHelpersVisible(bool on) {
     if (on == mVrHelpersVisible) return;
     mVrHelpersVisible = on;
+    rebuildWorkspaceDef();
+}
+
+// THE HIDDEN-AREA MESH'S CHANNEL, PER VIEW (kVrMaskBit, lane HAM-1). Graph
+// shape exactly like the two above, and the VR session is its only caller: it
+// opens the channel ONCE, when it creates its view and before the scene, so
+// this rebuild never happens on a live workspace. (Not when the MASK is built,
+// which is inside a frame — see the note at that call site.)
+void OgreView::setHiddenAreaMask(bool on) {
+    if (on == mHiddenAreaMask) return;
+    mHiddenAreaMask = on;
     rebuildWorkspaceDef();
 }
 

@@ -2202,6 +2202,193 @@ inline float giCascadeCell(const GiParams::GiCascadeDesc &c)
     return c.resolution > 0 ? c.halfSize * 2.0f / float(c.resolution) : 0.0f;
 }
 
+// ---- THE NEAR-FIELD GUARANTEE (CASCADE-STEP-1, owner 2026-09-18) -----------
+//
+// THE RULE, stated before the arithmetic: THE INNERMOST CASCADE GUARANTEES A
+// NEAR-FIELD RADIUS. Within `kGiNearFieldRadiusFraction` of its own half-size
+// around the head, the near field is always VOXELISED BY THAT CASCADE — its box
+// covers that radius at every moment of any walk, so the bounce a walker stands
+// in is built at its cell size and never at the coarser cascade's behind it.
+//
+// It is NOT a claim about every cone sample. A cone aimed outward leaves the
+// box and hands over to the coarser cascade by construction, carrying its age
+// across the hop (SEAM-1, ogre-patch 0066), which is what a cone aimed outward
+// should do. What the rule removes is the NEAR FIELD ITSELF changing resolution
+// as the walker moves — the hand-over arriving at the wearer's feet.
+//
+// WHY IT NEEDS A RULE, AND WHAT THE BOUND HONESTLY IS.
+//
+// The re-centre test runs on an ABSOLUTE lattice: the planes sit every
+// step*(1-h) metres of world space (h = kStepHysteresis) and the camera must be
+// h*step past the plane it left, so a re-centre comes anywhere between h*step
+// and step of travel from the camera the cascade was built for. `step` is the
+// SUPREMUM of that travel, never the distance between two rebuilds. Three more
+// terms sit on top of it:
+//
+//   * the re-centre QUANTISES the new centre onto the cascade's own cell
+//     lattice, which leaves it up to one cell below the head on each axis;
+//   * the test is a per-FRAME test — it fires on the first frame at which the
+//     camera has already crossed, so the head is up to one frame of travel
+//     (v*dt) past the threshold when the rebuild happens;
+//   * and a rebuild can be DEFERRED: the frame spends at most one cascade, and
+//     a field follow can own that slot, so each deferred frame is another v*dt.
+//
+//     off  =  step + cell + v*dt*(1 + deferrals)                 (per axis)
+//     r    =  halfSize - off                                     (the inscribed radius)
+//
+// The engine cannot know v, so the motion terms are bought with ONE CELL OF
+// SLACK. The STEP is chosen from
+//
+//     halfSize - step - 2*cell  >=  kGiNearFieldRadiusFraction * halfSize
+//
+// while `giCascadeGuaranteedRadius` reports the honest, motion-free
+// `halfSize - step - cell`: the reported radius therefore clears the required
+// one by about a cell, and that cell is the motion budget.
+//
+// WHAT THE SLACK BUYS, IN FRAMES — the number that makes this a walking-pace
+// guarantee and says so. At 1.4 m/s on the 60 Hz clock a frame is 0.0233 m:
+// Medium's margin (2.500 - 2.250 = 0.250 m) is ten frames and High's
+// (2.344 - 2.250 = 0.094 m) is four, which covers the frame the test costs plus
+// a follow or two owning the slot. At the editor's FLY speed of 15 m/s a frame
+// is 0.25 m: Medium spends its whole margin on a single frame and High is
+// 0.16 m inside the stated radius while the camera is still moving. THE
+// GUARANTEE IS FOR WALKING PACE, deliberately — a flight is a camera in
+// transit, and the only thing a cascade hand-over has to be invisible under is
+// a person moving at a person's speed. (Both numbers are measured in
+// spikes/cascade-step-1/MEASUREMENTS.txt; gi.cascades case 16b walks at 1.4 m/s
+// from a NON-lattice start so the coupled worst phase is in the measurement.)
+//
+// The hysteresis costs no radius at all: kStepHysteresis shrinks the test
+// lattice by the band and adds the band back on both sides (OgreGi.cpp), so the
+// supremum stays exactly `step` and not `(1 + h) * step` — measured, 2.637 m of
+// worst offset against a 2.656 m step before the slack landed.
+//
+// WHAT IT WAS BEFORE. The derived step was the pin's "every cascade steps the
+// same distance", floored at half the resolution — and that floor BOUND on the
+// innermost cascade at every tier but Low: 32 cells of a 64^3 5 m cascade is a
+// 5 m step, i.e. step == halfSize, i.e. r = -cell. NOTHING was guaranteed: a
+// wearer walking a straight line reached cascade 0's own face before it
+// re-centred, and the metre in front of their eyes was read from cascade 1 —
+// 3x coarser in the VR column (0.156 m -> 0.469 m). That is the artifact
+// CASCADE-STEP-1 removes; the owner's acceptance is "we should never notice a
+// change when walking around a scene".
+//
+// THE FRACTION is 0.45 of the half-size: 2.25 m of the 5 m inner cascade every
+// tier ships, about one and a half paces ahead of the walker and more than the
+// 2 m a room's near wall usually stands at. It is bought with rebuild
+// frequency, linearly — the step falls from halfSize to a little under half of
+// it, so cascade 0 re-voxelises about twice as often per metre walked, which is
+// +2 ms of GPU per metre and no frame's peak worth naming (MEASUREMENTS.txt).
+//
+// THE TABLE THE RULE PRODUCES (r = guaranteed / required, metres; every row of
+// every tier and both columns clears it, which gi.cascades case 16a asserts):
+//
+//   low    desktop  c0  2.344 m  r 2.500/2.250 | c1  5.000  r 14.375/9.000
+//   low    vr       c0  2.344    r 2.500/2.250 | c1 10.000  r  9.375/9.000 (pinned)
+//   medium desktop  c0  2.344    r 2.500/2.250 | c1  4.688  r  5.000/4.500
+//                   c2  7.031    r 7.500/6.750 | c3 15.000  r 43.125/27.000
+//   medium vr       c0  2.344    r 2.500/2.250 | c1  7.031  r  7.500/6.750
+//                   c2 30.000    r 28.125/27.000 (pinned)
+//   high   desktop  c0  2.578    r 2.344/2.250 | c1  5.156  r  4.688/4.500
+//                   c2  7.031    r 7.500/6.750 | c3 15.000  r 43.125/27.000
+//   high   vr       c0  2.578    r 2.344/2.250 | c1  7.031  r  7.500/6.750
+//                   c2 30.000    r 28.125/27.000 (pinned)
+//   (epic is high's table.)
+//
+// In cells, against what the derivation gave before this rule: Low c0 16 -> 15;
+// Medium c0 32 -> 15, c1 24 -> 15, c2 16 -> 15; High c0 64 -> 33, c1 48 -> 33,
+// c2 16 -> 15; every outermost cascade and every pinned step unchanged.
+inline constexpr float kGiNearFieldRadiusFraction = 0.45f;
+
+/// The near-field radius this cascade is REQUIRED to guarantee, in metres.
+inline float giNearFieldRadius(const GiParams::GiCascadeDesc &c)
+{
+    return kGiNearFieldRadiusFraction * c.halfSize;
+}
+
+/// The near-field radius this cascade DOES guarantee at the step it carries:
+/// `halfSize - step - cell`, in metres — the STILL-CAMERA bound, with the
+/// re-centre's supremum travel and the centre's cell quantisation in it and the
+/// motion terms (v*dt per frame the test costs and per frame a rebuild waits)
+/// deliberately NOT in it, because the engine cannot know v. The step is chosen
+/// with a cell of slack against the required radius (giNearFieldMaxStepCells)
+/// and that cell is the motion budget: at 1.4 m/s it is four to ten frames.
+/// Negative means the cascade guarantees nothing at all — the head can be
+/// outside the box before it re-centres. Meaningless on a row whose step is
+/// still 0 (not yet resolved).
+inline float giCascadeGuaranteedRadius(const GiParams::GiCascadeDesc &c)
+{
+    const float cell = giCascadeCell(c);
+    return c.halfSize - c.stepCells * cell - cell;
+}
+
+/// The most cells a cascade may step and still honour the rule, floored at one
+/// cell (a step below one cell re-centres the volume for a fraction of a voxel)
+/// and ceiled by the pin's own guard at half the resolution.
+///
+/// TWO cells are held back, not one: the first is the re-centre's own
+/// quantisation (it is in the guaranteed radius) and the second is the MOTION
+/// SLACK — the frame the per-frame test costs and the frames a deferred rebuild
+/// waits, which the engine cannot price because it does not know the camera's
+/// speed. One cell is 0.156 m at Medium and 0.078 m at High: ten and four
+/// frames of walking, against a bare margin of 0.016 m at High without it,
+/// which is less than ONE frame at 1.4 m/s.
+inline float giNearFieldMaxStepCells(const GiParams::GiCascadeDesc &c)
+{
+    const float cell = giCascadeCell(c);
+    if (cell <= 0.0f) return 1.0f;
+    const float metres = c.halfSize - giNearFieldRadius(c) - 2.0f * cell;
+    return std::max(1.0f, std::min(std::floor(metres / cell), float(c.resolution) * 0.5f));
+}
+
+/// RESOLVE THE DERIVED STEPS OF A WHOLE CHAIN, innermost first — the one place
+/// the step of a cascade nobody pinned is decided, so the renderer's chain and
+/// the chain a tooltip (world.tierTable) promises cannot drift.
+///
+/// A row that already carries a step (`stepCells > 0`) is PINNED and is left
+/// exactly as it is: a pinned step is the author's own statement and is held
+/// only by the pin's 1..resolution/2 guard, which the caller applies. Our own
+/// tier tables pin only the outermost cascade (the VR column's 16 cells) and
+/// they are checked against the rule by gi.cascades case 16a, not clamped
+/// here.
+///
+/// Every other row gets the pin's `autoCalculateStepSizes(4)` shape
+/// (OgreVctCascadedVoxelizer.cpp:131-161) written out here so it is ours to
+/// tune (A7) — every finer cascade steps the same DISTANCE as the outermost
+/// one, ceiled to whole cells and floored at half its resolution (the pin's own
+/// guard against a step that outruns the volume) — MET WITH the near-field rule
+/// above, which is a ceiling on it.
+///
+/// THE OUTERMOST CASCADE STEPS TWICE AS FAR AS THE REST (PHOTON_SPEC §7 E2 (1),
+/// "the outer stepCells raised"), and the reason is a measurement, not symmetry.
+/// The outermost cascade is the one that encloses the most geometry and resolves
+/// the least, so it is BY FAR the most expensive rebuild in the chain — on the
+/// 8,026-instance lattice it is 88.9 ms of GPU against cascade 0's 18.1, and
+/// even on the Showroom at Epic it is the row that peaks
+/// (spikes/photon-e2/BASELINE.md). Halving how often it runs halves that cost,
+/// and what it buys with the frames it skips is that its 60 m box sits up to
+/// 15 m off-centre instead of 7.5 — on a volume 120 m across, at 1.875 m per
+/// cell, which is a quarter of a cell of parallax on the far bounce. It still
+/// clears the near-field rule by a wide margin (43.1 m guaranteed against the
+/// 27.0 asked of it), which is why the ceiling never bites there.
+inline void giResolveCascadeSteps(GiParams::GiCascadeDesc *rows, int count)
+{
+    if (!rows || count <= 0) return;
+    static const float kOuterStepCells = 8.0f;   // the pin's own value is 4
+    static const float kInnerStepCells = 4.0f;
+    const float cellLast = giCascadeCell(rows[count - 1]);
+    for (int i = 0; i < count; ++i) {
+        if (rows[i].stepCells > 0.0f) continue;          // pinned: not ours to decide
+        const float cell = giCascadeCell(rows[i]);
+        if (cell <= 0.0f) continue;
+        float steps = (i + 1 == count) ? kOuterStepCells
+                                       : std::ceil(kInnerStepCells * cellLast / cell);
+        steps = std::max(1.0f, std::min(steps, float(rows[i].resolution) * 0.5f));
+        // THE NEAR-FIELD RULE IS A CEILING ON ALL OF IT.
+        rows[i].stepCells = std::min(steps, giNearFieldMaxStepCells(rows[i]));
+    }
+}
+
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
 /// "the renderer beats the request" contract as View::sampleCount() and
 /// Scene::activePlanarReflectors().
@@ -2478,6 +2665,21 @@ struct GiStatus {
         float cell = 0.0f;
         /// Metres of camera travel between re-centres (stepCells * cell).
         float step = 0.0f;
+        /// THE NEAR-FIELD RADIUS THIS CASCADE GUARANTEES, in metres:
+        /// `halfSize - step - cell` (Types.h's giCascadeGuaranteedRadius and
+        /// the rule above it). Inside it the near field is VOXELISED BY THIS
+        /// cascade at every moment of any walk — its box always covers that
+        /// radius — so the bounce a walker stands in is built at this cell size
+        /// and not at the coarser cascade's. It is not a claim about every cone
+        /// SAMPLE: a cone aimed outward leaves the box and hands over to the
+        /// coarser cascade by construction. Negative means the cascade
+        /// guarantees NOTHING — the camera can be outside the box before it
+        /// re-centres, which is what every tier but Low did before
+        /// CASCADE-STEP-1. The STILL-CAMERA bound: the motion terms are bought
+        /// with a cell of slack in the step instead (see the rule). The
+        /// assertable form (gi.cascades cases 16a and 16b, and
+        /// scripting.e2e.world_modes over both columns).
+        float guaranteedRadius = 0.0f;
         /// The world-space centre it is currently built at (quantised to its
         /// own lattice, so it is NOT the camera position).
         Vec3  centre;
@@ -2556,6 +2758,17 @@ struct GiStatus {
     /// no honest place to put it before one exists. Distinguishes "no view yet"
     /// from "the build failed", which both read as an empty `cascades` list.
     bool cascadesAwaitingCamera = false;
+    /// The arm is WANTED but has not been built because an ALBEDO or EMISSIVE
+    /// texture it would voxelise is still streaming (BOOTVOX-1). The voxeliser
+    /// copies exactly those two slots into its texture pool, so building now
+    /// stores the wrong colours and buys a second, full re-voxelisation the
+    /// moment the pixels land — which is what the shipped default scene paid on
+    /// every boot. The build happens on the frame the last one is resident, and
+    /// the wait is BOUNDED (30 deferrals) so a decode that never completes
+    /// cannot park GI: after that the arm is built without them and this reads
+    /// false again. The other half of `cascadesAwaitingCamera`'s question —
+    /// "the chain is empty, why?" — and true in the single-volume arm too.
+    bool awaitingVoxelTextures = false;
     /// WHICH COLUMN OF THE TIER TABLE THIS CHAIN WAS BUILT FROM (V1-RIG item 4):
     /// true when the view driving GI is the HEADSET'S, so the chain is the VR
     /// profile's (see GiViewProfile). It is a reading and not a request: the
@@ -2948,6 +3161,20 @@ enum class VrMirrorMode {
     Left,     ///< the left eye's half of the both-eyes target — the default
     Right,
     Both      ///< both halves, squeezed into the mirror's own aspect
+};
+
+/// WHAT IS ON THE DESKTOP RIGHT NOW (lane MIRROR-LIVE-1, the owner's F2 of the
+/// push-#50 smoke). `VrMirrorMode` is the WISH — which half of the headset's
+/// picture to copy — and this is the ANSWER for the frame that just ran:
+/// either the eye's copy (one render pipeline, the desktop View switched off)
+/// or the desktop's own live camera (the runtime wants no picture, so there is
+/// no eye to copy and the editor draws its own).
+///
+/// The rule that chooses between them is stated once, in
+/// `VrSession::setDesktopShowsEye`.
+enum class VrDesktopPicture {
+    Own = 0,  ///< the desktop View is drawing its own camera
+    Eye       ///< the desktop View is off and the mirror paints the headset's eye
 };
 
 /// What the runtime is and what it wants — filled once at boot (the identity
@@ -3349,14 +3576,17 @@ struct VrConfig {
     /// conservative answer.
     bool helpers = false;
     /// THE REFLECTION ROW THE HEADSET RENDERS WITH (lane REFLECT-VR-1), the
-    /// same 0/1/2 as `PostFxDesc::ssr` — 0 off, 1 half-resolution, 2 full.
+    /// same 0/1/2 as `PostFxDesc::ssr` — 0 off, 1 half-resolution, 2 full —
+    /// and since lane EYE-GRADE-1 an OVERRIDE rather than the value itself:
+    /// **-1, the default, means "whatever the project's World panel says"**.
     ///
-    /// IT IS THE HOST'S TO PASS, because the row is the PROJECT'S (the World
-    /// panel's SSR row, `iris::Scene::ssrMode`, which the mirror pushes into
-    /// the desktop view every frame) and this struct is the only channel a
-    /// session has to it: the session creates its own View inside the engine
-    /// and no mirror ever reaches it. Both Studio hosts pass the project's row,
-    /// so the wearer sees the reflections the author sees.
+    /// IT USED TO BE THE HOST'S TO PASS because the session's View was the one
+    /// view no mirror reached, so the project's row had no other channel. That
+    /// is no longer true — `SceneMirror::applyViewEnvironment` pushes the whole
+    /// of the project's post description into the session's view every frame —
+    /// so a host that says nothing gets the author's row by the ordinary route,
+    /// and this field is what `vr.begin({reflections:n})` sets: one session,
+    /// one measurement, nothing written to the project.
     ///
     /// The SOURCE is not a choice here: a stereo chain never marches in screen
     /// space (see `PostFxDesc::ssrScreenMarch`), so this row buys RAY-TRACED
@@ -3364,7 +3594,46 @@ struct VrConfig {
     /// `chain::build` declines to build the reflection stage when neither source
     /// can write it, so a machine with no ray queries does not even pay the
     /// prepass and renders exactly what it renders today.
-    int ssr = 0;
+    int ssr = -1;
+    /// THE RUNTIME'S HIDDEN-AREA MESH (lane HAM-1): mask out the corners of
+    /// each eye that the headset's own lenses never show, so no shading is
+    /// spent on them.
+    ///
+    /// ON BY DEFAULT and there is no host row for it: it costs nothing a wearer
+    /// can see (the pixels it removes are behind the lens barrel) and it is
+    /// bought from the runtime's own geometry (`XR_KHR_visibility_mask`), so a
+    /// runtime that answers no mask simply renders what it rendered before.
+    /// The flag exists so a MEASUREMENT can take the other arm in the same
+    /// process — the suite's mask-off control and the lane's own A/B — which is
+    /// the same reason `overrideEyeWidth` is here.
+    bool hiddenAreaMask = true;
+    /// DOES THIS SESSION BIND THE WEARER'S BARE HANDS (lane HANDS-SWITCH-1;
+    /// the owner, 2026-09-18, joint: bare-hand work is deferred until the
+    /// controllers are right, and hands-or-controllers is the AUTHOR'S choice
+    /// per project rather than the runtime's per moment)?
+    ///
+    /// OFF BY DEFAULT, and off means the session has no bare-hand route at all:
+    ///   * the `ext/hand_interaction_ext` suggested-binding block is NOT
+    ///     offered, so the runtime can never bind a hand profile for either
+    ///     hand — a wearer who puts a controller down is left holding nothing,
+    ///     which is what "controllers only" has to mean;
+    ///   * no `XrHandTrackerEXT` is created, so nothing asks the runtime for
+    ///     joints; and
+    ///   * no skeleton is reported or drawn, the test-injection route included
+    ///     (`Engine::vrHandJoints` answers 0 while such a session is live).
+    /// The controllers are untouched by it: the other three binding blocks are
+    /// offered exactly as before.
+    ///
+    /// THE HOST PASSES THE PROJECT'S OWN ROW (`iris::Scene::vrHands`, the World
+    /// panel's Hands switch and `world.vr({hands})`); `vr.begin({hands})`
+    /// overrides it for ONE session, which is what a suite and a measurement
+    /// need, exactly like `hiddenAreaMask` above.
+    ///
+    /// IT IS READ ONCE, at session creation: suggested bindings are attached to
+    /// the session's action sets before its first frame and no runtime can be
+    /// asked to rebind them, so there is nothing here for a mid-session change
+    /// to act on.
+    bool hands = false;
 };
 
 
@@ -3405,6 +3674,22 @@ struct VrStatus {
     /// — `head.valid` is false for as long as that is so.
     float              ipd = 0.0f;
     unsigned           eyeWidth = 0, eyeHeight = 0;   ///< what the chain renders per eye
+    /// THE COLOUR CONTRACT THIS SESSION IS UNDER (lane EYE-GRADE-1), reported
+    /// rather than only logged because it decides whether the wearer is looking
+    /// at the project's picture or at a picture a stop too bright.
+    ///
+    /// `swapchainFormat` is the Vulkan format the runtime gave us, by name
+    /// ("R8G8B8A8_SRGB"), and `colourEncodedOnce` is what it MEANS: the eye
+    /// target's bytes are display-encoded, so an _SRGB swapchain has the
+    /// runtime decode and re-encode them (an identity round trip, one encode
+    /// from radiance to the eye) while a UNORM one has it treat them as linear
+    /// and encode them a SECOND time. The second is a fallback for a runtime
+    /// that offers nothing better — loud in the log, visible here, and raised
+    /// to the user as a scene issue — and no runtime seen so far needs it.
+    ///
+    /// Empty / true with no session.
+    std::string        swapchainFormat;
+    bool               colourEncodedOnce = true;
     /// THE STEREO WARM-UP (VrConfig::warmUpFrames): how many warm-up frames
     /// this session has rendered, and what they cost in total. `warmUpFrames`
     /// reaching the configured number is the signal that the eyes are being
@@ -3414,6 +3699,15 @@ struct VrStatus {
     unsigned           warmUpFrames = 0;
     float              warmUpMs = 0.0f;
     VrMirrorMode       mirror = VrMirrorMode::None;
+    /// AND WHICH OF THE TWO PICTURES IS ACTUALLY ON THE DESKTOP (lane
+    /// MIRROR-LIVE-1). `mirror` above is the host's wish for the whole session;
+    /// this is what the last frame did with it, and it moves within one frame
+    /// of the runtime starting or stopping to ask for pictures. `Own` with a
+    /// mirror mode set means the runtime is not rendering (the headset is off
+    /// the head, the dashboard is up, tracking is gone) and the desktop has
+    /// taken its own camera back — which is what a person looking at the screen
+    /// at that moment needs to see.
+    VrDesktopPicture   mirrorShowing = VrDesktopPicture::Own;
     float              worldScale = 1.0f;
     /// Whether the per-eye PROJECTIONS differ, i.e. whether the runtime gave
     /// the two eyes different fovs. Monado's simulated HMD does not (both eyes
@@ -3455,6 +3749,24 @@ struct VrStatus {
     /// host that sees it climbing while nobody touched the headset is looking
     /// at a runtime problem, not at its own locomotion.
     unsigned long long spaceChanges = 0;
+
+    // ---- THE HIDDEN-AREA MESH (lane HAM-1) -------------------------------
+    /// WHERE THE MASK CAME FROM: "runtime" (the eye's own geometry through
+    /// `XR_KHR_visibility_mask`), "off" (the host asked for none —
+    /// `VrConfig::hiddenAreaMask` false) or "none" (the runtime has no mask to
+    /// give, which is what Monado's simulated HMD used to be read as and what
+    /// every runtime without the extension is). Empty with no session.
+    std::string        hiddenAreaSource;
+    /// THE FRACTION OF EACH EYE THE MASK COVERS, indexed by eye (0 = left),
+    /// measured on the geometry the runtime handed over: the sum of its
+    /// triangles' areas in the eye's own clip rectangle, which has area 4. It
+    /// is the number the saving is computed from (the pixels never shaded), and
+    /// it is the RUNTIME'S answer — a Quest Pro and a simulated HMD do not
+    /// report the same shape, so a measurement that does not carry this number
+    /// cannot be read on another headset.
+    float              hiddenAreaFraction[2] = { 0.0f, 0.0f };
+    /// ...and how many triangles that was, per eye. 0 = no mask on that eye.
+    unsigned           hiddenAreaTriangles[2] = { 0u, 0u };
 
     // ---- THE HANDS (phase 4) ---------------------------------------------
     /// WHERE THE WEARER'S HANDS ARE, in world space, through the rig exactly
@@ -3525,6 +3837,12 @@ struct VrStatus {
     /// It is a FALLBACK, never a replacement: a hand holding a controller is
     /// located by the controller.
     bool               handJoints = false;
+    /// WAS THIS SESSION ASKED TO BIND BARE HANDS (`VrConfig::hands`, lane
+    /// HANDS-SWITCH-1)? Reported because it is the one thing that explains the
+    /// two numbers above being three-of-three rather than four-of-four, and
+    /// because "is this project on hands or on controllers" is a question the
+    /// owner asks of a running session — `vr.state().hands.enabled`.
+    bool               handsEnabled = false;
 };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at
@@ -3904,6 +4222,24 @@ struct PostFxDesc {
     /// Contrast of the occlusion term, and how far in world units it looks.
     float ssaoPower = 1.5f;
     float ssaoRadius = 2.0f;
+    /// THE DITHER'S OFF SWITCH — A DIAGNOSTIC, NOT A DIAL (lane DITHER-1).
+    ///
+    /// The final grade quantises a floating-point picture to 8-bit display
+    /// codes, and that write is DITHERED: a deterministic, screen-space,
+    /// zero-mean offset of at most half a code, so a smooth gradient reads as
+    /// noise whose local mean follows it instead of as a staircase of contours
+    /// (the owner's "rippling in the ground plane while flying"). It is
+    /// correctness, so there is no project row for it and there will not be
+    /// one.
+    ///
+    /// THIS EXISTS SO A TEST CAN RENDER BOTH PICTURES IN ONE PROCESS. Every
+    /// arm of hdr.dither is measured against the same binary with this set,
+    /// and so is the --engine-selftest hash A/B. `JAHSHAKA_NO_DITHER` in the
+    /// environment forces it on process-wide (read once) for the arms that
+    /// cannot reach into a description — a rig shot, a selftest run.
+    ///
+    /// A uniform, not a graph term: setting it rebuilds no workspace.
+    bool  ditherOff = false;
     /// SMAA: -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra. Runs AFTER tonemapping.
     int   smaaPreset = -1;
     /// Screen-space reflections: 0 off, 1 half-resolution rays, 2 full.
@@ -4102,7 +4438,8 @@ struct PostFxDesc {
                bloomThreshold == o.bloomThreshold && bloomKnee == o.bloomKnee &&
                ssao == o.ssao &&
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
-               ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
+               ssaoRadius == o.ssaoRadius && ditherOff == o.ditherOff &&
+               smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
                ssrMaxDistance == o.ssrMaxDistance &&
                ssrThickness == o.ssrThickness &&
@@ -4118,6 +4455,135 @@ struct PostFxDesc {
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
 };
+
+/// ---------------------------------------------------------------------------
+/// THE VR VIEW POLICY — the project's post chain, minus what a side-by-side
+/// stereo target cannot carry (lane EYE-GRADE-1, 2026-09-18).
+///
+/// WHAT IT IS FOR. The picture in the headset is a VIEW OF THE PROJECT'S SCENE
+/// and is graded by the project, exactly like the desktop's: the exposure mode
+/// and its stops, the meter's pattern and its percentile clips, the looks
+/// stack, the reflection row, the refraction and distortion rows. Until this
+/// existed the session wrote its own PostFxDesc BY HAND — "because no mirror
+/// reaches a view the session made" — so the wearer got this struct's DEFAULTS
+/// whatever the author had chosen. Measured on the rig (spikes/smoke-50/f5b):
+/// `world.postFx({exposureEv})` swept from -2 to +4 moved the DESKTOP's sampled
+/// value 8 -> 255 and the EYE's 79 -> 77. The whole World panel was inert in
+/// the headset.
+///
+/// So `SceneMirror` now pushes the project's description into the session's
+/// view like it does into every other view of that scene, and THIS is what is
+/// applied on top of it — once, here, and nowhere else. Every entry is a
+/// structural fact or a measurement, never a taste:
+///
+///   * allowOffscreen — the eye pair is offscreen only because two eyes share
+///     one texture. It is not a thumbnail: it is the picture the wearer is
+///     standing in, and it keeps the chain (PostFxDesc::allowOffscreen).
+///   * bloom — the pin's bloom ladder is ONE 256x256 ping-pong for the WHOLE
+///     target and each blur is a 65-tap box (HDR/BoxBlurH_ps.glsl: +/-32 texels
+///     of 256, and the chain runs six horizontal passes of it). With the eyes
+///     side by side each eye owns 128 texels of that buffer, so one eye's
+///     highlights would smear across the whole of the other. Not a threshold
+///     away from working: a correct bloom needs the blur clamped at the seam
+///     (upstream media) or a ladder per eye plus a tonemap that selects one.
+///   * ssao — reconstructs a view-space position from depth through ONE
+///     camera's projection, and samples a hemisphere of neighbours. A stereo
+///     target has two projections and a seam; neither is repairable here.
+///   * smaaPreset — edge detection plus a blending-weight search that walks up
+///     to 16 texels horizontally, so each eye's inner edge would resolve
+///     against the other eye's picture. That is a <=16 px column per eye rather
+///     than the whole frame, which makes SMAA the first candidate for a
+///     per-eye pass — but a wrong column is still wrong, and MSAA is already
+///     pinned at 1 here, so nothing else is covering it.
+///   * ssrScreenMarch — the march walks the TARGET; see the field's own note.
+///     `chain::build` enforces it for any stereo chain whatever a host asked;
+///     this is the place that asks.
+///   * hzb — the depth pyramid is built from the view's own depth for a trace
+///     that does not exist yet, and a pyramid over a target holding two eyes
+///     would reduce across the seam like everything else here. Nothing asks
+///     for it today; it is cleared so that the day something does, it does not
+///     arrive in the headset first.
+///   * refractions, distortion — and this is the entry that was WRONG for one
+///     round (the Fable read's F2). Both are screen-space READS of the target:
+///     the pin's refraction piece samples the scene copy at `screenPosUv +
+///     offset` and falls back only at the FRAME's edges (`abs(screenPosUv * 2 -
+///     1) * 10 - 9`, Samples/Media/Hlms/Pbs/Any/Refractions_piece_ps.any), and
+///     the distortion composite warps by an offset the same way. In a target
+///     holding two eyes there is no fallback at the seam, so a refractive pane
+///     near an eye's nasal edge shows THE OTHER EYE through it — the identical
+///     reason ssao and smaa are here, and it does not matter that the material
+///     itself shades correctly per eye through the instanced-stereo pass
+///     buffer. Off until the sample is clamped to the eye's own half and the
+///     fallback moved to the eye's own edges (a media patch; lane
+///     STEREO-REFRACT-1). They were off in the hand-written descriptor this
+///     policy replaces, so no wearer loses anything they had.
+///   * looks — a look whose geometry is defined about the FRAME'S CENTRE reads
+///     that centre as the pair's inner edge, which is nowhere in either eye
+///     (see `stereoSafeLook`).
+///
+/// AND WHAT IS DELIBERATELY *NOT* HERE. MSAA is not a PostFxDesc field: the
+/// session pins `setSampleCount(1)` itself (HDR + MSAA segfaults this driver,
+/// OgreChain's own note) and the mirror never pushes a count into an offscreen
+/// view. The exposure (mode, stops, window), the meter's pattern and clips, the
+/// reflection row and the grade follow the project, whole.
+///
+/// `ssrOverride` is the ONE session-scoped override: -1 means "the project's
+/// row", 0/1/2 are `vr.begin({reflections:n})`'s measurement arm (VrConfig::ssr).
+inline bool stereoSafeLook(LookKind k) {
+    switch (k) {
+    // POINTWISE: every sample is the pixel's own texel, and no term is
+    // defined about the frame. Correct in both eyes as written.
+    case LookKind::Desaturate:
+    case LookKind::Posterize:
+        return true;
+    // A 3x3 UNSHARP MASK. Its only reach is one texel, so at the seam ONE
+    // column of each eye reads one column of the other — named rather than
+    // waved away, and kept: dropping an author's sharpening over one column of
+    // two thousand would be the larger error.
+    case LookKind::Sharpen:
+        return true;
+    // THE GRADE RIDES, ITS VIGNETTE DOES NOT (see applyVrViewPolicy, which
+    // zeroes p[3]): saturation, contrast and tint are pointwise; the vignette
+    // is the one term measured from the frame's centre.
+    case LookKind::FilmGrade:
+        return true;
+    // MEASURED FROM THE CENTRE, OR ACROSS THE WHOLE FRAME. RadialBlur samples
+    // along a line towards a centre (and one centre cannot serve two eyes);
+    // GlassWarp's ripple is a frame-wide pattern, so the same world point
+    // would ripple differently in the two eyes; OldMovie is a frame — jitter,
+    // vignette, scratches — and half a frame in each eye is not one.
+    case LookKind::RadialBlur:
+    case LookKind::GlassWarp:
+    case LookKind::OldMovie:
+    case LookKind::Count:
+        return false;
+    }
+    return false;
+}
+
+inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
+    fx.allowOffscreen = true;
+    fx.bloom          = false;
+    fx.ssao           = false;
+    fx.smaaPreset     = -1;
+    fx.ssrScreenMarch = false;
+    fx.hzb            = false;
+    fx.refractions    = false;
+    fx.distortion     = false;
+    if (ssrOverride >= 0) fx.ssr = ssrOverride;
+    if (!fx.looks.empty()) {
+        std::vector<LookDesc> kept;
+        kept.reserve(fx.looks.size());
+        for (const LookDesc &l : fx.looks) {
+            if (!stereoSafeLook(l.kind)) continue;
+            LookDesc copy = l;
+            // The film grade's vignette is its p[3] (LookKind::FilmGrade).
+            if (copy.kind == LookKind::FilmGrade) copy.p[3] = 0.0f;
+            kept.push_back(copy);
+        }
+        fx.looks.swap(kept);
+    }
+}
 
 /// What the renderer measured this frame (STATS_OVERLAY_SPEC.md §4).
 /// A POD, exactly like ShaderCacheStats — `app.renderStats()` is this struct.

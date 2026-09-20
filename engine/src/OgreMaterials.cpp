@@ -1910,6 +1910,13 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
                     for (auto &e : mMaterialsAwaitingTexture)
                         if (e.first == mat) { e.second = e.second || voxelInput; parked = true; break; }
                     if (!parked) mMaterialsAwaitingTexture.push_back({ mat, voxelInput });
+                    if (std::getenv("JAHSHAKA_GI_DEBUG"))
+                        Ogre::LogManager::getSingleton().logMessage(
+                            "Jahshaka GI: material " + std::to_string((unsigned long long)mat) +
+                            " waits for texture '" +
+                            (tit->second.texture ? tit->second.texture->getNameStr() : std::string("?")) +
+                            "' on slot " + std::to_string(int(slot)) +
+                            (voxelInput ? " (a VOXEL input)" : " (a probe input)"));
                 }
             }
             // A cutout's alpha comes from the albedo map: a new one is a new

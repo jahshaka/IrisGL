@@ -1500,6 +1500,24 @@ public:
     /// editor's loading cover (src/viewport/viewportcover.h) is on screen until
     /// this passes its threshold.
     virtual unsigned long long framesPresented() const = 0;
+    /// HOW MANY TIMES THIS VIEW'S PER-FRAME CHAIN GLOBALS HAVE BEEN PUSHED
+    /// (lane EYE-GRADE-1's fix round; the mechanism is one workspace listener
+    /// per view, firing immediately before that view's passes execute).
+    ///
+    /// WHY IT IS WORTH AN ACCESSOR. Most of the post chain is SHAPE — built
+    /// into the compositor graph — and a few values are written into the graph
+    /// the moment a host pushes them (the fixed exposure's clear colour). But
+    /// the METER's uniforms, the automatic exposure's terms, the bloom
+    /// threshold, the AO and SSR camera terms and every look's parameters are
+    /// PROCESS-WIDE material parameters, pushed per view per frame in that
+    /// listener, and a view whose count does not climb is a view rendering with
+    /// whatever the last workspace to update happened to leave in them. That is
+    /// invisible in a picture until two views disagree — which is exactly the
+    /// case a headset introduced — so it is countable rather than inferable.
+    ///
+    /// 0 for a view with no chain (every thumbnail, preview and pixel suite:
+    /// they have no effects, so no listener is ever created for them).
+    virtual unsigned long long globalsPushes() const = 0;
     /// Reads this View's rendered pixels back to the CPU. Offscreen Views only —
     /// returns false for on-screen windows. This is the thumbnail path, and what
     /// makes the engine testable without a window.

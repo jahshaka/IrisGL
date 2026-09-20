@@ -69,6 +69,15 @@ Mesh::Mesh()
 {
 	triMesh = nullptr;
 	numVerts = 0;
+	// UNINITIALISED UNTIL 2026-09-19 (lane STATS-1), in both of the ctors that
+	// do not parse a file: the assimp ctor and the .jmb bake reader both assign
+	// it, so every mesh the document normally holds was fine — but a mesh built
+	// in code (gizmo geometry, a line mesh, a test fixture) carried whatever was
+	// on the heap, and `numFaces` is now READ: the F3 readout and
+	// app.renderStats().sceneTriangles count a scene's triangles with it
+	// (src/services/scenestats.h). A garbage face count would have been a
+	// garbage readout, silently.
+	numFaces = 0;
 	usesIndexBuffer = false;
 }
 
@@ -186,6 +195,9 @@ Mesh::Mesh(void* data,int dataSize,int numElements,VertexLayout* vertexLayout)
 {
     triMesh = nullptr;
     numVerts = numElements;
+    // The caller knows the element count, not the face count — see the default
+    // ctor for why this is written rather than left.
+    numFaces = 0;
 
     auto vb = VertexBuffer::create(*vertexLayout);
     vb->setData(data, dataSize);
