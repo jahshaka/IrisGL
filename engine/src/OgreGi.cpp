@@ -19,6 +19,9 @@
 #include <limits>
 
 #include <OgreHlmsManager.h>
+#include <OgreAsyncTextureTicket.h>
+#include <OgreBitwise.h>
+#include <OgrePixelFormatGpuUtils.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -950,6 +953,136 @@ GiStatus OgreScene::giStatus() const {
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
         st.chainSweeps          = mGiChainSweeps;
         st.chainSettles         = mGiChainSettles;
+    } JAH_CATCH(mError, st);
+    return st;
+}
+
+// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — the test-and-tool
+// readback behind `Scene::giVoxelStats` and `world.giVoxelStats`.
+//
+// A TOTAL volume is a physical quantity (the surface radiance of the voxel,
+// times the store's normalisation k) in a FIXED-RANGE format, and PHOTON-M2's
+// F1 is the proof that whether it FITS cannot be read from the picture: a
+// clipped gather draws a picture that is simply dimmer, exactly like a scene
+// with less bounce in it. So the question is answered where it lives — in the
+// bytes.
+//
+// It blocks: `flushCommands()` (the sky/IBL rule — an AsyncTextureTicket reads
+// VRAM, and the injection's dispatches are only RECORDED until something
+// submits them) and then a synchronous download of the whole volume. Never on
+// a frame path; `traceRays` above is the same contract.
+GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
+    GiVoxelStats st;
+    st.cascade = cascadeIdx;
+    JAH_TRY {
+        Ogre::VctLighting *lighting = nullptr;
+        if (!mVctCascades.empty()) {
+            if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return st;
+            lighting = mVctCascades[size_t(cascadeIdx)].lighting;
+        } else if (cascadeIdx == 0) {
+            lighting = mVctLighting;
+        }
+        if (!lighting) return st;
+        Ogre::TextureGpu *total = lighting->getLightVoxelTextures()[0];
+        if (!total || total->getResidencyStatus() != Ogre::GpuResidency::Resident) return st;
+
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();
+        Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+
+        // ONE pass over a volume, for the total and (when the cascade bounces)
+        // for the DIRECT term beside it: the same walk answers "is the fixed
+        // point clipped" and "is the normalisation itself wrong", which are
+        // different defects with the same symptom.
+        struct Walk {
+            float     peak = 0.0f;
+            double    sum = 0.0;
+            long long lit = 0, atMax = 0, aboveOne = 0, count = 0;
+        };
+        const auto walk = [&](Ogre::TextureGpu *tex, Walk &w) -> bool {
+            const Ogre::PixelFormatGpu fmt = tex->getPixelFormat();
+            const bool isHalf = (fmt == Ogre::PFG_RGBA16_FLOAT);
+            const bool isByte = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB || fmt == Ogre::PFG_RGBA8_UNORM);
+            if (!isHalf && !isByte) return false;
+            const bool decodeSrgb = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB);
+            Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
+                tex->getWidth(), tex->getHeight(), tex->getDepth(),
+                Ogre::TextureTypes::Type3D, fmt);
+            bool ok = false;
+            // A plain try here, not JAH_CATCH: the macro RETURNS, and the
+            // ticket below it must be destroyed on every path.
+            try {
+                ticket->download(tex, 0u, true);
+                const Ogre::TextureBox box = ticket->map(0);
+                for (Ogre::uint32 z = 0; z < tex->getDepth(); ++z) {
+                    for (Ogre::uint32 y = 0; y < tex->getHeight(); ++y) {
+                        const void *row = box.at(0, y, z);
+                        for (Ogre::uint32 x = 0; x < tex->getWidth(); ++x) {
+                            float c[3];
+                            bool top = false;
+                            if (isHalf) {
+                                const Ogre::uint16 *p =
+                                    reinterpret_cast<const Ogre::uint16 *>(row) + size_t(x) * 4u;
+                                for (int i = 0; i < 3; ++i) c[i] = Ogre::Bitwise::halfToFloat(p[i]);
+                            } else {
+                                const Ogre::uint8 *p =
+                                    reinterpret_cast<const Ogre::uint8 *>(row) + size_t(x) * 4u;
+                                for (int i = 0; i < 3; ++i) {
+                                    if (p[i] == 255u) top = true;
+                                    const float v = float(p[i]) / 255.0f;
+                                    // THE STORE IS sRGB-ENCODED (the injection's
+                                    // toSRGB, an 8-bit volume's dark-end
+                                    // precision): the value the cone gather
+                                    // reads is the DECODE, so that is the value
+                                    // reported.
+                                    c[i] = decodeSrgb
+                                               ? (v <= 0.04045f ? v / 12.92f
+                                                                : std::pow((v + 0.055f) / 1.055f, 2.4f))
+                                               : v;
+                                }
+                            }
+                            const float m = std::max(std::max(c[0], c[1]), c[2]);
+                            ++w.count;
+                            if (m > 0.0f) { ++w.lit; w.sum += double(m); }
+                            if (m > w.peak) w.peak = m;
+                            if (top) ++w.atMax;
+                            if (m > 1.0f) ++w.aboveOne;
+                        }
+                    }
+                }
+                ticket->unmap();
+                ok = true;
+            } catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+              catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+            tm->destroyAsyncTextureTicket(ticket);
+            return ok;
+        };
+
+        Walk wt;
+        if (!walk(total, wt)) return st;
+        st.available = true;
+        st.width  = int(total->getWidth());
+        st.height = int(total->getHeight());
+        st.depth  = int(total->getDepth());
+        st.format = Ogre::PixelFormatGpuUtils::toString(total->getPixelFormat());
+        st.formatMax = (total->getPixelFormat() == Ogre::PFG_RGBA16_FLOAT) ? 0.0f : 1.0f;
+        st.multiplier = lighting->getCurrentBakingMultiplier();
+        st.peak = wt.peak;
+        st.meanLit = wt.lit ? wt.sum / double(wt.lit) : 0.0;
+        st.voxelsLit = wt.lit;
+        st.voxelsAtMax = wt.atMax;
+        st.voxels = wt.count;
+        st.voxelsAboveOne = wt.aboveOne;
+
+        // The DIRECT volume exists only on a cascade that bounces (ogre-patch
+        // 0076's D term). Its peak is the normalisation's own self-check.
+        if (Ogre::TextureGpu *direct = lighting->getLightDirectTexture()) {
+            Walk wd;
+            if (walk(direct, wd)) {
+                st.peakDirect = wd.peak;
+                st.directAtMax = wd.atMax;
+            }
+        }
     } JAH_CATCH(mError, st);
     return st;
 }

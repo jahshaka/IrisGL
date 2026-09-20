@@ -829,6 +829,23 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
+    /// readback of one cascade's light volume: its peak, its mean over lit
+    /// voxels and how many voxels sit on the storage format's top bin.
+    ///
+    /// It exists because the bounce's fixed point L = D + rho * G(L) is a
+    /// PHYSICAL quantity kept in a FIXED-RANGE store, and whether it fits
+    /// cannot be read from the picture — a clipped voxel draws a picture that
+    /// is merely dimmer, which is indistinguishable from a scene with less
+    /// bounce in it (the mechanism PHOTON-M2's F1 read as a "contraction").
+    /// So the guard that the store has headroom is a readback, and this is it.
+    ///
+    /// NOT a per-frame path, ever: it flushes the render system's commands and
+    /// BLOCKS on a download of the whole volume (8 MB at 128^3), exactly like
+    /// `traceRays` above. Answers `available = false` — and nothing else —
+    /// without a VCT arm, without that cascade, or on a device that refuses
+    /// the download.
+    virtual GiVoxelStats giVoxelStats(int cascade) { (void)cascade; return GiVoxelStats(); }
     /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
     /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
     ///
