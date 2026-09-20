@@ -524,17 +524,12 @@ public:
     void setGrid(bool visible, float spacing, GridPlane plane = GridPlane::Floor);
     bool gridVisible() const { return mGridVisible; }
 
-    /// How far the grid reaches from the origin, in world units (default 100 =
-    /// the editor's ±100 floor). A preview whose subject is a 170-unit-tall
+    /// How far the grid reaches, in world units (default 100 = the editor's
+    /// ±100 floor): where the shader grid has FADED TO NOTHING along the ray
+    /// (GridDesc::fadeDistance). A preview whose subject is a 170-unit-tall
     /// character needs a bigger one, or the "floor" is smaller than the thing
-    /// standing on it. Changing it rebuilds the grid meshes on the next sync.
+    /// standing on it.
     void setGridExtent(float extent);
-    /// HOW FAR ABOVE ITS OWN PLANE THE FLOOR GRID IS DRAWN, in world units
-    /// (GIZMO-2 item 5). The grid is a helper drawn WITH the depth test, so
-    /// geometry in front of it covers it; this lift is what keeps it from
-    /// z-fighting with a ground plane at the same height. Measured at the knee
-    /// of the curve — see syncGrid.
-    static constexpr float kGridFloorLift = 0.01f;
     /// Grid line colours (minor, major). Alpha is the line's opacity. The
     /// editor keeps its blue-grey default; the avatar preview asks for white,
     /// and the canonical axis views ask for a per-plane tint.
@@ -1703,22 +1698,11 @@ private:
     // Ground grid: one root node (dropped a hair below y=0 against z-fighting
     // with floor geometry) carrying a minor- and a major-line child.
     bool  mGridVisible = false;
-    /// The visibility last PUSHED to the grid's node, -1 = never. Same reason
-    /// as the GI boxes above: setNodeVisible is a subtree walk and the grid
-    /// node has two children.
-    int   mGridVisiblePushed = -1;
     GridPlane mGridPlane = GridPlane::Floor;
-    GridPlane mGridBuiltPlane = GridPlane::Floor;
     float mGridSpacing = 1.0f;
     float mGridExtent = 100.0f;
-    float mGridBuiltSpacing = -1.0f;                            // what the meshes were built for
-    float mGridBuiltExtent = -1.0f;
     jahshaka::engine::Colour mGridMinorColour{ 0.46f, 0.48f, 0.52f, 0.28f };
     jahshaka::engine::Colour mGridMajorColour{ 0.62f, 0.64f, 0.68f, 0.50f };
-    bool  mGridColoursDirty = false;
-    jahshaka::engine::NodeId mGridNode = 0, mGridMinorNode = 0, mGridMajorNode = 0;
-    jahshaka::engine::MeshId mGridMinorMesh = 0, mGridMajorMesh = 0;
-    jahshaka::engine::MaterialId mGridMinorMaterial = 0, mGridMajorMaterial = 0;
     // The ground's horizon (syncGroundHorizon). `mHorizonFloor` is the default
     // floor this walk found — a RAW pointer, valid only for the walk that set
     // it, which is why the sync reads it through mEntries and never dereferences

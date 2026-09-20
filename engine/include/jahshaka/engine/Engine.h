@@ -104,6 +104,12 @@ public:
     /// as they were: an unknown texture id, six faces that are not all the same
     /// size, or a compressed face format.
     virtual bool        setSky(const SkyDesc &) = 0;
+    /// THE SHADER-DRAWN EDITOR GRID (GridDesc). One quad per scene, drawn
+    /// analytically from the camera ray, a helper (never in probes, shadows,
+    /// reflectors, the Player or the Scene grade). IDEMPOTENT: an equal
+    /// description does nothing; a disabled one hides the quad. False (see
+    /// lastError()) when the grid material is not staged.
+    virtual bool        setGrid(const GridDesc &) = 0;
     /// THE SKY'S OWN AMBIENT, as the same 9x3 spherical harmonics setAmbientSh
     /// takes, integrated from the sky the backend just drew (SKY-GPU).
     ///
