@@ -954,6 +954,8 @@ GiStatus OgreScene::giStatus() const {
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
         st.chainSweeps          = mGiChainSweeps;
         st.chainSettles         = mGiChainSettles;
+        st.dragMovers           = int(mDragMovers.size());     // MOVER-1
+        st.dragMoverGestures    = mDragMoverGestures;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -1735,7 +1737,18 @@ void OgreScene::computeGiSignatures() const {
     };
     for (const Node *np : mItemNodes) {          // the item index, not the map (D4)
         const Ogre::Item *item = np->item;
-        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        // A PROMOTED DRAG MOVER STAYS IN THIS SIGNATURE (MOVER-1), and it has
+        // to. The host's settle gate measures STABILITY of exactly this hash:
+        // an object that dropped out of it while being dragged would make the
+        // scene look still from the mirror's side, and the full re-solve the
+        // gate fires after kGiStableFrames would land in the MIDDLE of the
+        // gesture — the hitch the whole mobility design exists to avoid. So the
+        // predicate is "bounces light, or is a mover because the user has hold
+        // of it", and at the gesture's end the hash is exactly the hash the
+        // same pose would have had without the promotion (which is what makes
+        // the at-rest picture identical under both rules).
+        const bool dragged = np->dragMover && np->shown;
+        if (!item || (!(item->getVisibilityFlags() & kGiGeometryBit) && !dragged)) continue;
         ++mGiAabbReads;
         const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
         const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
@@ -2290,6 +2303,64 @@ size_t OgreScene::markDirtyCascadesPending(GiStaleReason why) {
     return marked;
 }
 
+// THE END OF A DRAG GESTURE (MOVER-1) — where a dragged Still becomes still
+// world again and pays for the whole gesture at once.
+//
+// WHAT "STILL" MEANS HERE is the same thing it means to the probe deferral:
+// kProbeMotionSettleFrames ticks with no promoted mover moving. The clock is the
+// scene's GI tick and not a wall clock, for the reason every settle in this
+// engine counts frames (CLAUDE.md: a wall-clock settle measures nothing in this
+// engine).
+//
+// WHAT IT COSTS, and it is the whole trade: ONE cascade dirty box per mover —
+// the place it came to rest — so the chain re-voxelises it once, at the tier's
+// own one-cascade-per-frame budget, instead of once per frame of the drag. The
+// probe grid is staled ONCE here as well, with reason Mobility, because the
+// object is re-joining the capture set it left at the promotion: every probe
+// holding a photograph without it owes one capture, which is exactly what a
+// mobility flip has always cost (setNodeMovable's step 2) and is what the
+// deferred sweep would have spent at the end of the drag anyway.
+//
+// AND THE PICTURE AT REST IS THE PICTURE AT REST. Nothing here changes what the
+// scene looks like once the settle has run — the object is GI geometry again,
+// at its new pose, voxelised from scratch — which is the property gi.drag_mover
+// asserts by rendering the same frame under both rules.
+void OgreScene::endDragGestureIfStill() {
+    if (mDragMovers.empty()) return;
+    if (mDragMoverMoved) { mDragQuietTicks = 0; return; }
+    if (++mDragQuietTicks < kProbeMotionSettleFrames) return;
+    mDragQuietTicks = 0;
+    bool anyDemoted = false;
+    for (NodeId id : mDragMovers) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end()) continue;          // gone mid-gesture; nothing owed
+        Node &n = it->second;
+        if (!n.dragMover) continue;
+        n.dragMover = false;
+        n.scan.giMovedTick = 0;
+        applyNodeVisibilityFlags(n);
+        // The box it came to rest in. `scan.giBox` is where the walk last saw
+        // it, which is that box — the place it LEFT was re-voxelised at the
+        // promotion, so the chain owes only this one.
+        noteGiCascadeDirty(&n.scan.giBox);
+        anyDemoted = true;
+    }
+    mDragMovers.clear();
+    if (!anyDemoted) return;
+    ++mDragMoverGestures;
+    // ...AND THE GESTURE OWES ITS CLOSING WORK, ALL OF IT AT ONCE AND LAST
+    // (mDragSettleOwed's note has the measurement): one full at-rest light tick
+    // and one probe sweep, paid on the first frame the re-voxelisations have
+    // drained. NEITHER may be paid here, and that is the whole lesson of the
+    // measurement: a probe capture PHOTOGRAPHS the room as the voxels light it,
+    // so a sweep spent while the chain is still being rebuilt stores the room
+    // WITHOUT the object that has just come to rest — 161,318 pixels at up to
+    // 32/255 on the Mirror Room's dragged torus, stably, until something asked
+    // for another capture. The order is the physics: geometry, then light, then
+    // the photographs of it.
+    mDragSettleOwed = true;
+}
+
 // THE PER-CASCADE DIRTY PATH (PHOTON_SPEC G1) — what makes an EDIT under the
 // cascade arm affordable, and the counterpart of `refreshVctFast` for a chain.
 //
@@ -2672,6 +2743,7 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo)
     // scene: OgreEngine::renderOneFrame picks it, for the same reason the probe
     // budget must not be spent once per view.)
     mGiWalkedThisFrame = false;     // one GI walk per frame; the first consumer runs it
+    ++mGiTick;                      // the gesture clock (MOVER-1)
     // THE AUTHORITATIVE CAMERA, remembered: the Photon arm is built around it,
     // and a rebuild can arrive on a frame where no view has tracked yet.
     const bool firstCamera = !mGiCamPosKnown;
@@ -2727,6 +2799,9 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo)
             // The MONOLITHIC arm is deliberately unchanged here: one volume
             // cannot be re-voxelised per frame at any useful resolution, and
             // what to do there is the owner's call, not this lane's.
+            // THE GESTURE'S END (MOVER-1), before the marking below so the
+            // demotion's own box is spent by this same frame's scheduler.
+            endDragGestureIfStill();
             if (!mGiCascadeDirtyBoxes.empty() || mGiCascadeDirtyAll)
                 markDirtyCascadesPending(GiStaleReason::Moved);
         } JAH_CATCH(mError, );
@@ -2856,8 +2931,11 @@ void OgreScene::ensureGiWalk() {
         // The boxes are per frame by contract (walkItems clears them at its
         // head), so a skipped frame must publish "nothing moved" rather than
         // last frame's movers — otherwise a single move would stale the grid
-        // for ever.
+        // for ever. The drag-gesture flag (MOVER-1) is per frame for the same
+        // reason: a skipped walk is a frame in which nothing was written, which
+        // is exactly what the settle is counting.
         mGiMovedBoxes.clear();
+        mDragMoverMoved = false;
         mGiScanMicros = 0.0;
         return;
     }
@@ -2947,6 +3025,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
     bool firstGi = false;
     if (gi) {
         mGiMovedBoxes.clear();
+        mDragMoverMoved = false;       // per frame, like the boxes (MOVER-1)
         firstGi = !mGiScannedOnce;
         mGiScannedOnce = true;
     }
@@ -3005,7 +3084,21 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
         // the long path every frame. Each half's own record is the comparison,
         // and each is a handful of float compares.)
         if (gi) {
-            if (!(flags & kGiGeometryBit)) {
+            // A PROMOTED DRAG MOVER FIRST (MOVER-1). It carries kMovableBit and
+            // no kGiGeometryBit, so without this branch it would fall into the
+            // probe-only case below and stale the probe grid on every frame of
+            // the gesture — the exact cost the promotion removes. Its motion is
+            // nobody's input but the GESTURE'S OWN CLOCK: it is out of the
+            // voxel bounce, out of the probe captures and out of the cascade
+            // dirty list, and its box is tracked only so the settle knows when
+            // the drag stopped and what to re-voxelise once at the end.
+            if (n.dragMover) {
+                if (giAabbMoved(n.scan.giBox, a)) {
+                    n.scan.giBox = a;
+                    n.scan.giMovedTick = mGiTick;
+                    mDragMoverMoved = true;
+                }
+            } else if (!(flags & kGiGeometryBit)) {
                 // PROBE-ONLY geometry (P7): unlit, captured by the probe faces,
                 // never voxelized. Same quantized test, its own record, and a
                 // flag rather than a moved box — the voxel side must not hear of it.
@@ -3052,13 +3145,53 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
             } else if (giAabbMoved(n.scan.giBox, a)) {
                 Ogre::Aabb moved = n.scan.giBox;
                 moved.merge(a);
-                mGiMovedBoxes.push_back(moved);
-                // ...AND THE CASCADE CHAIN'S OWN RECORD (G1), which unlike
-                // `mGiMovedBoxes` (per frame, by contract) accumulates until the
-                // host's settle asks the chain to answer for it: the frame a
-                // drag is released is not the frame the box moved.
-                if (!mVctCascades.empty()) noteGiCascadeDirty(&moved);
-                n.scan.giBox = a;
+                // IS THIS A GESTURE? (MOVER-1, and the probe deferral's rule
+                // applied to the voxels.) A SECOND move inside the settle
+                // window is a drag; one move on its own is an edit — a scripted
+                // setPosition, a nudge, a paste — and an edit must be answered
+                // where it happens, which is what the branch below does. The
+                // window is measured in the scene's GI TICKS rather than in
+                // consecutive frames, because the editor renders about two
+                // frames per document edit and a dragged object's boxes
+                // therefore arrive on alternate frames (DRAG-1's measurement,
+                // which is why a consecutive-frames rule never fired).
+                const bool second = n.scan.giMovedTick &&
+                                    mGiTick - n.scan.giMovedTick <= kProbeMotionSettleFrames;
+                n.scan.giMovedTick = mGiTick;
+                if (mGi.dragMoverChannel && second && !mVctCascades.empty() && !n.movable) {
+                    // THE PROMOTION. The object leaves the still world for the
+                    // length of the gesture: one re-voxelisation HERE clears
+                    // the copy of it the cascades hold at its old pose (the
+                    // union box, so the place it came from and the place it is
+                    // now are both re-voxelised), and from this frame on its
+                    // motion costs the voxels nothing at all. What it gives up
+                    // is stated rather than hidden: it stops bouncing light
+                    // into the room and the room stops storing its shadow,
+                    // exactly as a Movable object does — it is LIT by the field
+                    // and the cones at its live pose, which is what makes the
+                    // drag read correctly instead of through a half-rebuilt
+                    // volume.
+                    //
+                    // THE PROBE GRID IS DELIBERATELY NOT STALED HERE. During a
+                    // gesture the probes hold the photograph they hold today
+                    // (the capture is deferred to the settle either way,
+                    // DRAG-1), and the object's DEPARTURE from the capture set
+                    // is answered once, at the demotion, with reason Mobility.
+                    n.scan.giBox = a;
+                    n.dragMover = true;
+                    mDragMovers.push_back(n.selfId);
+                    mDragMoverMoved = true;
+                    applyNodeVisibilityFlags(n);
+                    noteGiCascadeDirty(&moved);
+                } else {
+                    mGiMovedBoxes.push_back(moved);
+                    // ...AND THE CASCADE CHAIN'S OWN RECORD (G1), which unlike
+                    // `mGiMovedBoxes` (per frame, by contract) accumulates until the
+                    // host's settle asks the chain to answer for it: the frame a
+                    // drag is released is not the frame the box moved.
+                    if (!mVctCascades.empty()) noteGiCascadeDirty(&moved);
+                    n.scan.giBox = a;
+                }
             }
         }
         if (shadow) {
@@ -4888,6 +5021,28 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         for (const VctCascade &c : mVctCascades)
             if (c.pending) { pending = true; break; }
         if (!pending) payChainSettleStep();      // one injection, this frame
+    }
+    // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once
+    // everything else has: every re-voxelisation drained and the incremental
+    // settle finished. It is the same call the host's explicit Refresh makes —
+    // the full at-rest tick, at the scene's own bounce count, followed by the
+    // field's re-integration — and it is what makes the picture a gesture ends
+    // on identical to the picture the same pose reaches without the promotion.
+    // One per gesture, never one per frame.
+    if (mDragSettleOwed && !spent && mGiSettleStepsOwed == 0) {
+        bool pending = false;
+        for (const VctCascade &c : mVctCascades)
+            if (c.pending) { pending = true; break; }
+        if (!pending) {
+            mDragSettleOwed = false;
+            refreshGiLighting(false);
+            // ...AND ONLY NOW THE PHOTOGRAPHS. The object is GI geometry again,
+            // at its new pose, in a chain that has been re-voxelised and
+            // re-injected; this is the first frame a capture can hold the room
+            // as it actually is. The sweep drains at the tier's own budget like
+            // every other staleness — a rate, not a hitch.
+            staleProbeGrid(GiStaleReason::Mobility);
+        }
     }
 }
 

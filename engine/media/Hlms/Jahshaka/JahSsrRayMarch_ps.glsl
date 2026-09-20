@@ -106,6 +106,20 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// is the scale that turns the normalized corner back into view-space xy.
 	// chain::updateSsr pushes both every frame; see the ORTHOGRAPHIC note above.
 	uniform vec4 orthoParams;
+	// THE MARCH'S PHASE RULE (SSR-RINGS-1). x selects it:
+	//   0 = CHECKER, the shipped march exactly (the default): the crossing
+	//       test and the trust below both read the COARSE sample, and both
+	//       therefore carry the step's own phase.
+	//   1 = REFINED: a crossing is a SIGN CHANGE, and the thickness test and
+	//       the trust are evaluated at the REFINED crossing.
+	//   2 = DITHER: the SHIPPED hit rule with the two-value checkerboard
+	//       offset replaced by a 4x4 ordered (Bayer) phase — the minimal
+	//       candidate, which changes what a ray SAMPLES and nothing about
+	//       what counts as a hit.
+	// A uniform and not a property, for the reason orthoParams is one: it is
+	// uniform-coherent over the quad, and a permutation would recompile the
+	// marcher every time a project changed the row.
+	uniform vec4 marchParams;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -225,7 +239,22 @@ void main()
 	// reflection bands; with it neighbouring pixels sample between each other's
 	// steps and the banding reads as noise the confidence fade hides.
 	const vec2	pixel  = inPs.uv0 * rayBufferRes.xy;
-	const float jitter = fract( ( floor( pixel.x ) + floor( pixel.y ) ) * 0.5 );
+	float jitter = fract( ( floor( pixel.x ) + floor( pixel.y ) ) * 0.5 );
+	// ...OR SIXTEEN PHASES INSTEAD OF TWO (marchParams.x == 2). The two-value
+	// checkerboard is visible in the picture as a two-pixel dither along every
+	// boundary the march quantises — measured on the Showroom's glossy sphere,
+	// the autocorrelation of the reflection's own deficit peaks at 2 px before
+	// anything else. A 4x4 ordered matrix spreads that boundary over sixteen
+	// phases, which the resolve's 3x3 gather then averages: the arc becomes a
+	// ramp rather than an edge, at the price of a grain the checkerboard did not
+	// have. Nothing else changes — the phase is still an offset inside ONE step.
+	if( marchParams.x > 1.5 )
+	{
+		const ivec2 ip = ivec2( pixel ) & ivec2( 3 );
+		const int bayer[16] = int[16]( 0, 8, 2, 10, 12, 4, 14, 6,
+									   3, 11, 1, 9, 15, 7, 13, 5 );
+		jitter = float( bayer[ ip.y * 4 + ip.x ] ) * ( 1.0 / 16.0 );
+	}
 
 	float hit		= 0.0;
 	float travelled = maxDistance;
@@ -264,7 +293,25 @@ void main()
 			// is the whole reason SSR needs a thickness guess at all. The
 			// step's own length is added so a coarse march cannot straddle a
 			// legitimately thin hit.
-			const float crossTol = thickness + stepLen * 0.5;
+			// WHICH SAMPLE ANSWERS THE CROSSING TEST (SSR-RINGS-1).
+			//
+			// CHECKER (the shipped rule) asks the COARSE sample: the ray must
+			// land behind the surface by less than the tolerance, so whether a
+			// ray is a hit AT ALL depends on where its samples fell. Measured
+			// on the Showroom's glossy sphere: the accepted hit region covers
+			// 15.3 % of the crop at a 1.04 m step, 34.3 % at 0.13 m, and 58.4 %
+			// when the tolerance is widened instead — the nested crescents ARE
+			// that region's boundary, drawn hard because the resolve lets a
+			// trusted hit win outright.
+			//
+			// REFINED asks the crossing itself. `diff > 0` is a SIGN CHANGE: the
+			// ray was in front of the surface at the previous sample and is
+			// behind it at this one, which is a crossing whatever the phase. The
+			// refinement below already finds WHERE; the thickness question —
+			// did the ray pass close enough for the depth buffer to vouch for
+			// it — is then asked there, of a gap the step cannot explain,
+			// instead of at a sample up to a whole step past the surface.
+			const float crossTol = marchParams.x == 1.0 ? 1.0e9 : thickness + stepLen * 0.5;
 			if( diff > 0.0 && diff < crossTol )
 			{
 				// HOW MARGINAL THE CROSSING WAS, kept for the confidence below:
@@ -294,6 +341,11 @@ void main()
 				float lo = prevT;
 				float hi = t;
 				vec2  refined = uv;
+				// The depth error AT the best bound found so far. It starts at
+				// the coarse sample's, so a refinement that bails out early —
+				// off screen, or onto a pixel with no depth — falls back to
+				// exactly the number the shipped rule would have used.
+				float refinedDiff = diff;
 				for( int k = 0; k < 5; ++k )
 				{
 					const float mid = ( lo + hi ) * 0.5;
@@ -332,11 +384,29 @@ void main()
 					{
 						hi = mid;
 						refined = quv;
+						refinedDiff = q.z - qz;
 					}
 					else
 					{
 						lo = mid;
 					}
+				}
+				// THE THICKNESS TEST, AT THE CROSSING (marchParams.x >= 1).
+				// Five bisections put `hi` within 1/32 of a step of the true
+				// crossing, so `refinedDiff` is the part of the gap that is the
+				// WORLD's and not the march's — the only part the thickness
+				// guess was ever about. A crossing that fails it is a ray that
+				// passed BEHIND the object, through the part of the world no
+				// depth buffer describes, and the march goes on looking, exactly
+				// as it does today when the coarse tolerance rejects one.
+				if( marchParams.x == 1.0 )
+				{
+					if( refinedDiff >= thickness )
+					{
+						prevT = t;
+						continue;
+					}
+					hitDiff = refinedDiff / max( thickness, 1e-6 );
 				}
 				hitUv	  = refined;
 				travelled = hi;

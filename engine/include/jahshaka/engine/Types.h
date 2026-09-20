@@ -2054,6 +2054,36 @@ struct GiParams {
     /// only IMPORTED static meshes are baked with one (document primitives are
     /// not).
     bool      cascadeVoxelLod = true;
+    /// A DRAGGED STILL RIDES THE MOVER CHANNEL FOR THE LENGTH OF THE GESTURE
+    /// (MOVER-1, the render audit's PHOTON F3 second half). OFF by default:
+    /// this changes the picture WHILE an object is being dragged, so it is the
+    /// owner's decision and not a fix.
+    ///
+    /// WHAT IT IS FOR. A Still object that is being dragged stales the cascade
+    /// grid on every frame it moves, and the scheduler spends one cascade
+    /// re-voxelisation per frame answering it (~1.4 ms of CPU submission on the
+    /// Mirror Room) — and the frames in between are read through a volume that
+    /// holds the object in two places at once. With this on, the SECOND move
+    /// inside the settle window promotes the object onto the mover channel
+    /// Mobility already defines (kMovableBit, no kGiGeometryBit): the cascades
+    /// pay ONE re-voxelisation at the promotion, which clears the copy of it
+    /// they hold at its old pose, and nothing at all for the rest of the
+    /// gesture; at rest it goes back to being still world and pays ONE more.
+    ///
+    /// WHAT IT COSTS, stated rather than hidden: while it is dragged the object
+    /// bounces no light into the room and the room stores no shadow of it — it
+    /// is LIT by the irradiance field and the cones at its live pose, exactly
+    /// as every Movable object in the scene is. What it gains is that the
+    /// frames of the drag are read through a volume that is CONSISTENT, and
+    /// that the drag costs the voxels two re-voxelisations instead of one per
+    /// frame. THE PICTURE AT REST IS IDENTICAL either way, which gi.drag_mover
+    /// asserts by rendering it under both rules.
+    ///
+    /// CASCADES ONLY. The single-volume arm re-voxelises nothing during a drag
+    /// (its answer waits for the settle by construction), so there is nothing
+    /// there for this to save, and what that arm should do about the ghost it
+    /// keeps meanwhile is its own question.
+    bool      dragMoverChannel = false;
 
     /// "Is this the same GI configuration I last pushed?" Exact, like every
     /// other change guard here — and load-bearing rather than cosmetic: a GI
@@ -2086,6 +2116,7 @@ struct GiParams {
                probeSnapSidesMax == o.probeSnapSidesMax &&
                updateBudget == o.updateBudget &&
                cascadeVoxelLod == o.cascadeVoxelLod &&
+               dragMoverChannel == o.dragMoverChannel &&
                ddgi == o.ddgi &&
                testBoundsMin == o.testBoundsMin && testBoundsMax == o.testBoundsMax &&
                cascades == o.cascades && cascadeCount == o.cascadeCount &&
@@ -2850,6 +2881,18 @@ struct GiStatus {
     /// per burst of rebuilds. Cumulative over the scene's life; 0 in the
     /// single-volume arm, which has no chain to leave behind.
     long long chainSettles = 0;
+    /// HOW MANY OBJECTS ARE RIDING THE MOVER CHANNEL BECAUSE THEY ARE BEING
+    /// DRAGGED right now (MOVER-1, GiParams::dragMoverChannel). 0 in a still
+    /// scene, 0 for ever with the rule off, and normally 1 during a drag — it
+    /// is what the user has hold of. They are NOT in `mobility.movableItems`:
+    /// that is what the DOCUMENT resolved, and this is what the gesture
+    /// borrowed.
+    int dragMovers = 0;
+    /// ...and how many gestures have ENDED that way over the scene's life: one
+    /// per drag, never one per frame. With `dragMovers` it is the whole reading
+    /// — a number that climbs while nothing is being dragged is a defect, and a
+    /// drag that never ends is a promotion that never paid its re-voxelisation.
+    unsigned long long dragMoverGestures = 0;
     /// Scrolls where MORE THAN HALF of the cascade's volume was new — the
     /// second DIRTY_ALL guard, counted rather than acted on in the whole-rebuild
     /// arm. It is the reading that says whether an incremental (slab-shifting)
@@ -4348,6 +4391,34 @@ struct PostFxDesc {
     /// A straight multiplier on the composite confidence. 1.0 is physical —
     /// the reflection replaces the probe answer where the march is confident.
     float ssrIntensity = 1.0f;
+    /// WHICH SAMPLE ANSWERS THE MARCH'S TWO QUESTIONS (SSR-RINGS-1) — is this
+    /// a hit, and how much does the depth buffer vouch for it. The march walks
+    /// the ray in FIXED STEPS of `ssrMaxDistance / steps` (0.26 m at Full-Res
+    /// rays), and today both questions are answered at the coarse sample the
+    /// ray happened to land on, so both carry the step's own phase. Measured on
+    /// the Grand Showroom's glossy sphere (the nested crescents of SMOKE-41
+    /// item 1a): the accepted hit region covers 15.3 % of the crop at a 1.04 m
+    /// step, 29.5 % at the shipped 0.26 m, 34.3 % at 0.13 m and 58.4 % when the
+    /// thickness tolerance is widened instead — the crescents are that region's
+    /// BOUNDARY, and the resolve draws it hard because a trusted hit replaces
+    /// the probe's answer outright.
+    ///
+    ///   0 `checker` — the shipped march, exactly. THE DEFAULT: nothing that
+    ///     ships moves until a project asks for something else.
+    ///   1 `refined` — a crossing is a SIGN CHANGE (the ray was in front at the
+    ///     previous sample and is behind at this one), and both the thickness
+    ///     test and the trust are evaluated at the bisected crossing, which is
+    ///     within 1/32 of a step of the true one. The step stops deciding
+    ///     WHETHER a ray hit; it only decides how finely the ray is sampled.
+    ///   2 `dither` — the SHIPPED hit rule with a 4x4 ordered phase instead of
+    ///     the two-value checkerboard: the minimal candidate, which changes
+    ///     what a ray SAMPLES and nothing about what counts as a hit, so the
+    ///     reflection covers exactly what it covers today and only the
+    ///     boundary's 2 px stipple is spread over sixteen phases for the
+    ///     resolve's 3x3 gather to average. It trades an edge for a grain.
+    ///
+    /// It is a UNIFORM and not a graph change (ChainDesc::sameShape).
+    int   ssrMarchPhase = 0;
     /// THE REFLECTION ROUGHNESS CUTOFF, in PERCEPTUAL roughness (PHOTON_SPEC
     /// §7 R5; owner, ledger §426). ONE number for BOTH sources of a per-pixel
     /// reflection (lane SSR-3): below it the reflection is MARCHED in screen
@@ -4492,6 +4563,7 @@ struct PostFxDesc {
                smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
                ssrMaxDistance == o.ssrMaxDistance &&
+               ssrMarchPhase == o.ssrMarchPhase &&
                ssrThickness == o.ssrThickness &&
                reflectionRoughnessCutoff == o.reflectionRoughnessCutoff &&
                ssrIntensity == o.ssrIntensity &&

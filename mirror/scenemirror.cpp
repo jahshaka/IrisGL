@@ -6873,6 +6873,7 @@ void SceneMirror::applyViewPostFx(View *view, bool record)
         fx.ssaoRadius     = mSource->ssaoRadius;
         fx.smaaPreset     = mSource->smaaPreset;
         fx.ssr            = mSource->ssrMode;
+        fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
         // Percent in the document, a fraction in the renderer — one conversion,
         // here, so nothing downstream has to know which unit it is holding.
         fx.reflectionRoughnessCutoff = float(mSource->reflectionRoughnessCutoff) * 0.01f;
@@ -7171,6 +7172,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // and the tier's own decides — the same rule the engine states.
         gi.cascades = mSource->giCascades > 0;
         gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
+        gi.dragMoverChannel   = mSource->giDragMoverChannel > 0;
         gi.cascadeCount = 0;
         for (const iris::Vec3 &row : mSource->giCascadeSet) {
             if (gi.cascadeCount >= 8) break;

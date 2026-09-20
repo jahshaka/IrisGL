@@ -410,6 +410,15 @@ public:
     /// equals. 0 (the default) is no budget, which is the shipped arm exactly.
     /// The engine's own documentation for it is GiParams::cascadeInstanceCap.
     int giCascadeInstanceCap = 0;
+    /// A DRAGGED STILL RIDES THE MOVER CHANNEL FOR THE LENGTH OF THE GESTURE
+    /// (MOVER-1) — 0 (the default) is the shipped behaviour exactly. It changes
+    /// what a scene looks like WHILE an object is being dragged (the object
+    /// stops bouncing light into the room and is lit by the field and the cones
+    /// at its live pose), and nothing at all about what it looks like at rest,
+    /// so it is a per-project choice and not a tier row. The engine's own
+    /// documentation for it, with the costs on both sides, is
+    /// GiParams::dragMoverChannel.
+    int giDragMoverChannel = 0;
     /// THE GI UPDATE BUDGET (FIX WAVE B1, 2026-09-07) — probe re-captures the
     /// renderer may spend per frame, and the single "is GI live?" switch.
     ///
@@ -686,6 +695,15 @@ public:
     float ssaoRadius;        ///< world-space reach, in metres
     int   smaaPreset;        ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssrMode;           ///< 0 off, 1 half-res rays, 2 HQ
+    /// WHICH SAMPLE ANSWERS THE SCREEN-SPACE MARCH'S TWO QUESTIONS — is this a
+    /// hit, and how much does the depth buffer vouch for it (SSR-RINGS-1;
+    /// PostFxDesc::ssrMarchPhase carries the measurement). 0 `checker` is the
+    /// shipped march and the DEFAULT, 1 `refined` takes the step's own phase
+    /// out of both answers, 2 `dither` adds a sixteen-phase offset on top.
+    /// A per-project dial with NO tier column: the tiers say how much a
+    /// reflection may cost, and this says how the march decides — a question
+    /// the tier table has no opinion about (world.postFx, not world.override).
+    int   ssrMarch;
     /// THE REFLECTION ROUGHNESS CUTOFF, in PERCENT (5..100, default 40) —
     /// PHOTON_SPEC §7 R5, owner ledger §426. Above this roughness a reflection
     /// is a wide lobe, the probe's own prefiltered photograph is a good enough
