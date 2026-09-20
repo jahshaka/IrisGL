@@ -470,17 +470,8 @@ void SceneMirror::setSource(iris::ScenePtr scene)
         mSource->setGraphScene(iris::graph::stagingScene());
     }
     for (MeshId &m : mWireMeshes) { if (m) mTarget->destroyMesh(m); m = 0; }
-    if (mGridNode) {                    // removeNode reparents children, so drop them explicitly
-        if (mGridMinorNode) mTarget->removeNode(mGridMinorNode);
-        if (mGridMajorNode) mTarget->removeNode(mGridMajorNode);
-        mTarget->removeNode(mGridNode);
-        mGridNode = mGridMinorNode = mGridMajorNode = 0;
-    }
-    if (mGridMinorMesh) { mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
-    if (mGridMajorMesh) { mTarget->destroyMesh(mGridMajorMesh); mGridMajorMesh = 0; }
-    if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
-    if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
-    mGridBuiltSpacing = -1.0f;
+    // The grid is the engine's own quad (GRID-2): a disabled description hides it.
+    mTarget->setGrid(jahshaka::engine::GridDesc());
     // The ground's horizon: same discipline as the grid. Its MATERIAL is the
     // floor's own and belongs to mMaterials, which is swept below — dropping it
     // here would destroy the floor's material out from under the floor.
@@ -1969,114 +1960,36 @@ void SceneMirror::setGridExtent(float extent)
 
 void SceneMirror::setGridColours(const Colour &minor, const Colour &major)
 {
-    if (mGridMinorColour.r == minor.r && mGridMinorColour.g == minor.g &&
-        mGridMinorColour.b == minor.b && mGridMinorColour.a == minor.a &&
-        mGridMajorColour.r == major.r && mGridMajorColour.g == major.g &&
-        mGridMajorColour.b == major.b && mGridMajorColour.a == major.a)
-        return;
     mGridMinorColour = minor;
     mGridMajorColour = major;
-    // The engine has no "recolour this material" verb, so a change after the
-    // grid exists means new materials on the next sync.
-    mGridColoursDirty = mGridMinorMaterial != 0;
 }
 
+// THE GRID IS DRAWN BY A SHADER (GRID-2; owner review R5). It used to be two
+// LINE meshes rebuilt on every spacing or extent change, lifted 1 cm above the
+// floor because Vulkan applies no depth bias to lines and a 1 px line under
+// MSAA/SMAA is treated poorly (GIZMO-2 measured all of that). Now the mirror
+// describes the grid — plane, cell, colours, thickness, fade — and the engine
+// draws it analytically from the camera ray with the plane's own depth
+// (Types.h GridDesc, OgreGrid.cpp, JahGrid_ps.glsl): infinite, anti-aliased,
+// one pixel wide at every distance, never z-fighting the floor, covered by
+// whatever stands on it. setGrid is idempotent, so this pushes every sync and
+// the description's own operator== is the change guard.
 void SceneMirror::syncGrid()
 {
-    if (!mGridVisible) {
-        // Latched (MIRROR_SCALE lane): setNodeVisible is a subtree walk in the
-        // engine and the grid's node has two children, so a hidden grid cost
-        // three node writes a frame to stay hidden.
-        if (mGridNode && mGridVisiblePushed != 0) {
-            mTarget->setNodeVisible(mGridNode, false);
-            mGridVisiblePushed = 0;
-        }
-        return;
+    jahshaka::engine::GridDesc desc;
+    desc.enabled = mGridVisible;
+    switch (mGridPlane) {
+    case GridPlane::FrontXY: desc.plane = jahshaka::engine::GridDesc::Plane::FrontXY; break;
+    case GridPlane::SideYZ:  desc.plane = jahshaka::engine::GridDesc::Plane::SideYZ; break;
+    case GridPlane::Floor:   desc.plane = jahshaka::engine::GridDesc::Plane::Floor; break;
     }
-    if (mGridColoursDirty) {
-        if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); }
-        if (mGridMajorMesh) { mTarget->detachMesh(mGridMajorNode); }
-        if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
-        if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
-        mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
-        mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
-        if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
-        if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
-        mGridColoursDirty = false;
-    }
-    bool freshNode = false;
-    if (!mGridNode) {
-        mGridNode = mTarget->createNode();
-        if (!mGridNode) return;
-        freshNode = true;
-        mGridMinorNode = mTarget->createNode(mGridNode);
-        mGridMajorNode = mTarget->createNode(mGridNode);
-        // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b). The grid used to be
-        // baked into every reflection-probe capture — the single most visible
-        // thing wrong with a probe reflection in an editor scene. Marked on the
-        // LEAF nodes because that is where the Items hang; the helper flag is
-        // per node, not inherited.
-        mTarget->setNodeHelper(mGridMinorNode, true);
-        mTarget->setNodeHelper(mGridMajorNode, true);
-        // Unlit (never fogged), depth-tested (occluded by geometry), blended.
-        mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
-        mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
-    }
-    if (freshNode || mGridBuiltPlane != mGridPlane) {
-        // The mesh is authored in XZ; the node rotates it into the plane that
-        // faces the requesting view.
-        //
-        // THE FLOOR GRID SITS 1 cm ABOVE ITS PLANE (GIZMO-2 item 5, owner §370:
-        // "it should always be on top of the floor, but objects on top of it
-        // should cover it"), and the sign is the whole change: it used to sit
-        // 1 cm BELOW, so a ground plane occluded it — invisible from above
-        // (the axis views had to flip the sign by hand) and fighting with the
-        // ground wherever it poked through, which is the "merges with the
-        // floor" the owner reported.
-        //
-        // WHY A GEOMETRIC LIFT AND NOT A DEPTH BIAS, measured (GIZMO-2 round 2,
-        // tests/mirror/test_grid_floor.cpp): a macroblock depth bias does
-        // NOTHING for this grid, because Vulkan applies depth bias to POLYGONS
-        // and the grid is LINE primitives — the same scene renders
-        // byte-identically with mDepthBiasConstant at 0, 2, 16, 256 and
-        // 100,000, and a render-queue bump changes nothing either. What does
-        // work is distance: over a coplanar floor, 1 cm of lift takes the
-        // grid's visible pixels from 11,218 to 19,075 (the z-fight's dashed
-        // lines to solid ones) and 2 cm adds only 500 more — the knee is here.
-        // The cost, stated: something THINNER than 1 cm lying on the floor
-        // (a decal, a coin) is drawn under the grid rather than over it.
-        static const float s = 0.70710678f;   // sin/cos 45°: a 90° rotation
-        Vec3 pos(0, kGridFloorLift, 0);
-        Quat rot;                             // Floor: identity
-        switch (mGridPlane) {
-        case GridPlane::FrontXY: rot = Quat(s, 0, 0, s); break;
-        case GridPlane::SideYZ:  rot = Quat(0, 0, s, s); break;
-        case GridPlane::Floor: break;
-        }
-        mTarget->setNodeTransform(mGridNode, pos, rot, Vec3(1, 1, 1));
-        mGridBuiltPlane = mGridPlane;
-    }
-    if (mGridBuiltSpacing != mGridSpacing || mGridBuiltExtent != mGridExtent) {
-        if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
-        if (mGridMajorMesh) { mTarget->detachMesh(mGridMajorNode); mTarget->destroyMesh(mGridMajorMesh); mGridMajorMesh = 0; }
-        const float extent = mGridExtent;                // ±extent units of floor
-        int n = int(extent / mGridSpacing);              // lines each side of 0
-        n = std::min(n, 1000);                           // hard cap on line count
-        std::vector<Vec3> minor, major;
-        for (int i = -n; i <= n; ++i) {
-            const float p = float(i) * mGridSpacing;
-            std::vector<Vec3> &dst = (i % 10 == 0) ? major : minor;
-            dst.push_back(Vec3(p, 0, -extent)); dst.push_back(Vec3(p, 0, extent));
-            dst.push_back(Vec3(-extent, 0, p)); dst.push_back(Vec3(extent, 0, p));
-        }
-        mGridMinorMesh = mTarget->createLineMesh(minor, false);
-        mGridMajorMesh = mTarget->createLineMesh(major, false);
-        if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
-        if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
-        mGridBuiltSpacing = mGridSpacing;
-        mGridBuiltExtent = mGridExtent;
-    }
-    if (mGridVisiblePushed != 1) { mTarget->setNodeVisible(mGridNode, true); mGridVisiblePushed = 1; }
+    desc.spacing = mGridSpacing;
+    desc.majorEvery = 10;
+    desc.minorColour = mGridMinorColour;
+    desc.majorColour = mGridMajorColour;
+    desc.thicknessPx = 1.0f;
+    desc.fadeDistance = mGridExtent;
+    mTarget->setGrid(desc);
 }
 
 // ---- the ground's horizon ---------------------------------------------------

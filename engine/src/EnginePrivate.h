@@ -3817,6 +3817,12 @@ private:
     /// switched on and off, not created and destroyed).
     void applySunDisc(const SunDisc &sun);
     void destroySunDisc();
+    /// THE SHADER GRID (GRID-2, OgreGrid.cpp): the sun disc's mechanism — a
+    /// Rectangle2D whose fragment program intersects the camera ray with the
+    /// grid plane and writes that point's depth. A disabled grid hides the
+    /// quad (the grid is toggled every day, not created and destroyed).
+    bool setGrid(const GridDesc &) override;
+    void destroyGrid();
     /// Frees a node's billboard set and its datablock, in that order (the set
     /// references the datablock until it is destroyed). Safe to call twice.
     void releaseBillboards(Node &n);
@@ -4537,6 +4543,11 @@ private:
     /// own sky material clone: the parameters are per-scene).
     Ogre::Rectangle2D *mSunDisc = nullptr;
     Ogre::MaterialPtr  mSunDiscMaterial;
+    /// The grid's quad, its per-scene material clone and what was pushed last
+    /// (the idempotency guard, like mSkyDesc for the sky).
+    Ogre::Rectangle2D *mGrid = nullptr;
+    Ogre::MaterialPtr  mGridMaterial;
+    GridDesc           mGridDesc;
     /// Textures WE own for Ogre's sky renderable (the equirect Type2DArray copy /
     /// the converted cube). Null when the sky uses a host texture directly.
     Ogre::TextureGpu *mSkyOwnedTex = nullptr;

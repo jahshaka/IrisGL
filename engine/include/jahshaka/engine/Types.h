@@ -519,6 +519,56 @@ struct SunDisc {
     bool operator!=(const SunDisc &o) const { return !(*this == o); }
 };
 
+/// THE EDITOR'S GRID, DRAWN BY A SHADER (GRID-2, owner review R5: "the grid is a
+/// LINE mesh — MSAA/SMAA treat 1 px lines poorly and Vulkan line width is fixed
+/// at 1; the correct fix is a shader-drawn grid on the ground plane").
+///
+/// One screen quad per scene (the sun disc's mechanism): its fragment program
+/// intersects the camera ray with the grid PLANE through the world origin,
+/// draws the lines ANALYTICALLY from the plane point — anti-aliased through the
+/// pixel footprint, `thicknessPx` wide on screen wherever it stands — and writes
+/// the plane point's own depth, so the scene's geometry covers it exactly where
+/// it stands on the plane and a floor AT the plane never z-fights it (the depth
+/// is analytic; a one-part-in-ten-thousand bias toward the camera settles the
+/// coplanar case, which Vulkan honours here because this is a polygon, not a
+/// line). It is INFINITE: there is no extent and no line count; the minor
+/// lines fade out where a cell is narrower than a few pixels and everything
+/// fades to nothing by `fadeDistance` metres along the ray. A HELPER: the
+/// probes, the shadow node, the planar reflectors, the Player and the Scene
+/// grade never draw it.
+///
+/// IDEMPOTENT like setSky: a description equal to the live one does nothing.
+struct GridDesc {
+    bool  enabled = false;
+    /// The plane through the world origin: Floor is y = 0 (the ground), FrontXY
+    /// is z = 0, SideYZ is x = 0 — what the three axis views ask for.
+    enum class Plane : int { Floor = 0, FrontXY = 1, SideYZ = 2 };
+    Plane plane = Plane::Floor;
+    /// The cell, in world units (the translate snap size doubles as it).
+    float spacing = 1.0f;
+    /// Every Nth line is a major line, in `majorColour`.
+    int   majorEvery = 10;
+    /// Alpha in each colour is the line's own opacity at full strength.
+    Colour minorColour { 0.46f, 0.48f, 0.52f, 0.28f };
+    Colour majorColour { 0.62f, 0.64f, 0.68f, 0.50f };
+    /// Line width on screen, in pixels, at any distance.
+    float thicknessPx = 1.0f;
+    /// Where the whole grid has faded to nothing, in metres along the ray.
+    float fadeDistance = 100.0f;
+
+    bool operator==(const GridDesc &o) const {
+        if (enabled != o.enabled) return false;
+        if (!enabled) return true;
+        return plane == o.plane && spacing == o.spacing && majorEvery == o.majorEvery &&
+               minorColour.r == o.minorColour.r && minorColour.g == o.minorColour.g &&
+               minorColour.b == o.minorColour.b && minorColour.a == o.minorColour.a &&
+               majorColour.r == o.majorColour.r && majorColour.g == o.majorColour.g &&
+               majorColour.b == o.majorColour.b && majorColour.a == o.majorColour.a &&
+               thicknessPx == o.thicknessPx && fadeDistance == o.fadeDistance;
+    }
+    bool operator!=(const GridDesc &o) const { return !(*this == o); }
+};
+
 struct SkyDesc {
     /// NoSky removes the sky (the View's background shows through).
     SkyMode   mode = SkyMode::NoSky;

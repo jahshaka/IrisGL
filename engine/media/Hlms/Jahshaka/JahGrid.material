@@ -1,0 +1,77 @@
+// THE EDITOR'S GRID, DRAWN BY A SHADER (GRID-2; Types.h GridDesc).
+//
+// The sun disc's mechanism (JahSunDisc.material): a screen quad whose vertex
+// program derives the camera ray from the inverse view-projection; the fragment
+// program intersects that ray with the grid PLANE, draws the lines analytically
+// from the plane point, and writes the plane point's OWN depth so the scene's
+// geometry covers the grid exactly where it stands on the plane. Alpha-blended
+// over whatever was drawn before it at its queue; depth CHECK on, WRITE off.
+//
+// GLSL + Vulkan only, like every other material we own in this folder.
+
+vertex_program Jahshaka/Grid_vs_GLSL glsl
+{
+	source JahGrid_vs.glsl
+}
+vertex_program Jahshaka/Grid_vs_VK glslvk
+{
+	source JahGrid_vs.glsl
+}
+vertex_program Jahshaka/Grid_vs unified
+{
+	delegate Jahshaka/Grid_vs_GLSL
+	delegate Jahshaka/Grid_vs_VK
+
+	// `param_named_auto` in default_params is the form that works under Vulkan
+	// (a `param_named` in a program_ref is applied before the constant table
+	// exists — JahSunDisc.material has the story).
+	default_params
+	{
+		param_named_auto	rsDepthRange	rs_depth_range
+		param_named_auto	invViewProj		inverse_viewproj_matrix
+		param_named_auto	cameraPos		camera_position
+	}
+}
+
+fragment_program Jahshaka/Grid_ps_GLSL glsl
+{
+	source JahGrid_ps.glsl
+}
+fragment_program Jahshaka/Grid_ps_VK glslvk
+{
+	source JahGrid_ps.glsl
+}
+fragment_program Jahshaka/Grid_ps unified
+{
+	delegate Jahshaka/Grid_ps_GLSL
+	delegate Jahshaka/Grid_ps_VK
+
+	default_params
+	{
+		param_named_auto	rsDepthRange	rs_depth_range
+		param_named_auto	viewProj		viewproj_matrix
+		param_named_auto	cameraPos		camera_position
+	}
+}
+
+material Jahshaka/Grid
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write off
+			cull_hardware none
+			scene_blend alpha_blend
+
+			vertex_program_ref Jahshaka/Grid_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Grid_ps
+			{
+			}
+		}
+	}
+}

@@ -1428,6 +1428,7 @@ void OgreScene::destroy() {
         // (like VctLighting's) does not do.
         teardownPlanar();
         destroySky();   // also unbinds + destroys the reflection cubemap
+        destroyGrid();
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         mNodes.clear();
         mNodeByOgreId.clear();
