@@ -972,12 +972,30 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
     JAH_TRY {
-        invalidateGiCaches();
-        noteGiDatablockDied();  // VctMaterial caches conversions by raw datablock pointer
-        for (auto &kv : mNodes) if (kv.second.materialRef == id) detachItem(kv.first, kv.second);
+        // WHAT A DYING MATERIAL COSTS THE VOLUME IS THE GEOMETRY THAT WORE IT
+        // (MATERIAL-SWAP-GI-1). This used to invalidate the GI caches with no
+        // box, unconditionally — and a material nobody wears any more changes
+        // no voxel at all: the mirror reclaims a node's previous material the
+        // frame after a swap, so every hover preview paid a whole-chain
+        // re-voxelisation twice for two datablocks that were not in the volume.
+        // Items that DO wear it leave the volume here, so their boxes are what
+        // owes a rebuild. The by-pointer alias guard (noteGiDatablockDied) is
+        // independent of that and stays unconditional.
+        bool anyWorn = false;
+        for (auto &kv : mNodes) {
+            if (kv.second.materialRef != id) continue;
+            anyWorn = true;
+            if (kv.second.item && !it->second.unlit) {
+                Ogre::Aabb box = kv.second.item->getWorldAabbUpdated();
+                invalidateGiCaches(&box);
+            }
+            detachItem(kv.first, kv.second);
+        }
+        (void)anyWorn;   // worn by nothing: nothing in the volume changed
         Ogre::Hlms *hlms = hlmsFor(it->second);
-        if (hlms->getDatablock(Ogre::IdString(it->second.datablockName)))
-            hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
+        Ogre::HlmsDatablock *dying = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
+        noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (patch 0081)
+        if (dying) hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
         mMaterials.erase(it);
         return true;
     } JAH_CATCH(mError, false);

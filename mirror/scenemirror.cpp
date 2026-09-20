@@ -906,8 +906,15 @@ int SceneMirror::sync()
     // material / texture can only become unreferenced when an entry is released
     // or when an entry's reference to one CHANGES — every such site arms the
     // flag, and only then does the sweep run.
-    if (mReclaimPending) { MirrorStage s(mon, "mirror.reclaim");
-                           reclaimUnused(); mReclaimPending = false; }
+    // NOT DURING A HOVER PREVIEW (MATERIAL-SWAP-GI-1): the node's own material
+    // is unreferenced for exactly as long as the borrowed one is shown and comes
+    // back the moment the cursor moves on; reclaiming it in between destroyed
+    // and rebuilt a datablock per object crossed. The sweep waits for the
+    // gesture to end (materialPreviewDepth is the document's own flag).
+    if (mReclaimPending && !(mSource && mSource->materialPreviewDepth > 0)) {
+        MirrorStage s(mon, "mirror.reclaim");
+        reclaimUnused(); mReclaimPending = false;
+    }
     // LIVE TEXTURES (ADDENDUM A-1). AFTER the sweep, so a texture the sweep
     // just freed is not uploaded into; before the frame is drawn, because the
     // engine's upload records into the OPEN command buffer and therefore lands
@@ -3263,6 +3270,9 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         notePush(node, "castShadow");
     }
 
+    // The material-only swap the mesh branch decides and the tail of this
+    // function performs, once the new material is complete (MATERIAL-SWAP-GI-1).
+    MaterialId pendingSwap = 0;
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto *meshNode = static_cast<iris::MeshNode *>(node);
         // THE SCENE'S DEFAULT FLOOR, remembered for syncGroundHorizon. Recorded
@@ -3305,13 +3315,19 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         // crossing (Lit <-> Unlit / Distortion) and a normal map on a mesh
         // without tangents, and every refusal falls through to the re-attach
         // below, which is still the whole answer for a new mesh or a new rig.
+        //
+        // THE ORDER IS THE POINT: the new material's params and textures are
+        // pushed BEFORE the Item wears it (below, where every entry pushes
+        // them), and the swap itself runs after — a material whose voxel
+        // inputs change WHILE a GI-visible item wears it bumps the engine's
+        // material generation, which the mirror answers with a full re-solve;
+        // a material completed before it is worn bumps nothing, and the swap's
+        // own box-scoped rebuild is what the volume pays.
         if (mesh && e.hasMesh && e.meshPtr == mesh && !rigStale && e.materialPtr != material) {
-            const MaterialId swapMat = materialFor(material);
-            if (swapMat && mTarget->setNodeMaterial(e.node, swapMat)) {
-                notePush(node, "material swap");
-                ++mMaterialSwaps;
+            pendingSwap = materialFor(material);
+            if (pendingSwap) {
                 noteMaterialUser(node, e.materialPtr, material);
-                e.material = swapMat; e.materialPtr = material;
+                e.material = pendingSwap; e.materialPtr = material;
                 mReclaimPending = true;      // the old material may now be unreferenced
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // the family is the same; the model may not be
@@ -3510,6 +3526,21 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             e.pickablePushed = wantPickable;
             e.materialItemSerial = wantItemSerial;
             notePush(node, "pickable");
+        }
+    }
+
+    // THE DEFERRED MATERIAL SWAP (MATERIAL-SWAP-GI-1, see the mesh branch):
+    // the params and textures above completed the new material; the Item wears
+    // it now. A refusal (a family crossing, a normal map without tangents) is
+    // answered by the full re-attach, exactly as before this lane.
+    if (pendingSwap) {
+        if (mTarget->setNodeMaterial(e.node, pendingSwap)) {
+            notePush(node, "material swap");
+            ++mMaterialSwaps;
+        } else if (e.mesh && mTarget->attachMesh(e.node, e.mesh, pendingSwap)) {
+            notePush(node, "mesh attach");
+            ++mMeshAttaches;
+            e.pickablePushed = -1;   // a NEW Item carries the default query mask
         }
     }
 

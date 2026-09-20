@@ -11,6 +11,7 @@
 // every one of them is HISTORY, not a second live design. The `gi*` identifiers
 // keep their names by the rename's own mapping rule.
 #include "EnginePrivate.h"
+#include <Vct/OgreVctMaterial.h>
 
 #include <algorithm>
 #include <chrono>
@@ -2223,8 +2224,21 @@ void OgreScene::noteGiCascadeDirty(const Ogre::Aabb *box) {
 // silently paint the new material with the old one's colour. Only this needs a
 // voxeliser REPLACEMENT, and under cascades that replacement is spread one
 // cascade per frame (VctCascade::freshVoxels).
-void OgreScene::noteGiDatablockDied() {
-    for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
+void OgreScene::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
+    if (!dying) {
+        for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
+        return;
+    }
+    // Evict from every voxeliser that may hold it (the single volume's and each
+    // cascade's; cascade 0 may share the single one). Erasing an entry twice is
+    // a no-op. Nothing else moves: the voxels already hold the dead material's
+    // albedo where its items stood, and the items' own detach re-voxelised
+    // those boxes (destroyMaterial).
+    if (mVctVoxelizer && mVctVoxelizer->getVctMaterial())
+        mVctVoxelizer->getVctMaterial()->removeDatablock(dying);
+    for (VctCascade &c : mVctCascades)
+        if (c.voxelizer && c.voxelizer->getVctMaterial())
+            c.voxelizer->getVctMaterial()->removeDatablock(dying);
 }
 
 // The stale reasons by name, for the JAHSHAKA_GI_DEBUG log alone (the monitor
