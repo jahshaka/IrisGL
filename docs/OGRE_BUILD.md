@@ -1978,12 +1978,48 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     sharing one float value that lands on a tie), and the dither then moves
     25.08 %.
 
-THE STACK IS 0001-0079 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0080-vct-total-volume-is-a-float — THE VCT TOTAL VOLUME IS AN RGBA16F FLOAT
+    (lane PHOTON-M3, 2026-09-20), SOURCE + MEDIA: OgreVctLighting.{h,cpp} and
+    four VCT compute pieces (LightInjection, LightVctBounceInject, both
+    AnisotropicMipVctStep pieces); overlaps 0076/0077 on the reverse check. The
+    volume holds the fixed point of L = D + rho*G(L), which is unbounded — an 8-bit
+    sRGB store CLIPPED 3-26 % of the lit voxels in Showroom 2, Mirror Room and
+    World Background and showed 82 % of a white room's bounce. The TOTAL
+    (mLightVoxel[0..3] + mLightBounce) is now PFG_RGBA16_FLOAT; the DIRECT volume
+    (0076's D term) stays 8-bit sRGB because D is under the ceiling by
+    construction. The store encoding in the media follows the bound FORMAT
+    (jahStoreLight under `uav0_orig_pf_srgb`, jahStoreDirect under
+    `uav1_orig_pf_srgb`): an sRGB store keeps its encode, a float one is written
+    linear; every reader is a sampler read, so no reader changes. The total is NOT
+    TextureFlags::Reinterpretable: a reinterpretable 16F texture is created as its
+    format FAMILY (R16G16B16A16_UINT) and the mip chain's linear blit is then
+    invalid (VUID-vkCmdBlitImage-filter-02001, found by the validation suite).
+    `getLightDirectTexture()` lets the host measure the direct volume
+    (Scene::giVoxelStats). Measured: no frame cost (4.36 vs 4.44 ms), +36/+56 MB
+    resident. Numbers: spikes/photon-m3/MEASUREMENTS.md sections 2-7. The
+    selftest hashes moved (2aadbc10… / 0f084cec… after GRID-2 on top).
+
+  0081-vct-material-cache-evicts-a-dying-datablock — VctMaterial FORGETS A DYING
+    DATABLOCK (lane MATERIAL-SWAP-GI-1, 2026-09-20), SOURCE-only:
+    OgreVctMaterial.{h,cpp}, OgreVctVoxelizer.h; no overlap. The conversion cache
+    is keyed by the RAW datablock pointer across builds, so a datablock destroyed
+    and another created at the same address would alias the dead one's slot —
+    the host's only answer to any material death was a from-scratch
+    re-voxelisation of every volume (a hover preview's reclaim cost the world).
+    `VctMaterial::removeDatablock` erases the cache entry; `VctVoxelizer::
+    getVctMaterial` lets the host reach the cache (OgreGi's noteGiDatablockDied).
+    The bucket keeps the dead pointer in its membership set on purpose: slots are
+    numbered by that set's size, so erasing it would hand the next datablock a
+    live one's slot — one slot per death leaks until the VctMaterial is recreated
+    (a mode or quality change). With Scene::setNodeMaterial's in-place datablock
+    swap the hover's cascade rebuilds went [2,2,2,2] -> [0,0,0,2].
+
+THE STACK IS 0001-0081 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075 and 0078 are SOURCE-only (0062, 0065 and 0076 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078 and 0081 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
