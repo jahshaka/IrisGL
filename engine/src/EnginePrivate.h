@@ -909,6 +909,11 @@ struct ChainDesc {
     bool  bloom = false;            ///< rides the HDR node at ~zero marginal cost
     float bloomThreshold = 5.0f;    ///< bright-pass start, in the sample's units
     float bloomKnee = 2.0f;         ///< ramp WIDTH above it (A-6); 2.0 = the old hard-coded value
+    /// HOW MUCH of the blurred highlight the tonemap quad adds (0..2; 1 is the
+    /// picture this engine always drew). A UNIFORM, like the exposure and the
+    /// threshold next to it, and so deliberately NOT part of sameShape():
+    /// scrubbing the amount must not rebuild a compositor graph.
+    float bloomAmount = 1.0f;
     bool  ssao = false;
     float ssaoScale = 1.0f;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower = 1.5f;
@@ -1335,10 +1340,15 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc);
 /// (ChainDesc::ditherOff, ORed with the once-read JAHSHAKA_NO_DITHER). Called
 /// from applyViewGlobals; separate only so its teardown twin has a name.
 void setDither(bool off);
-/// Drops the cached tonemap parameter block. Called from destroySsao, i.e. from
-/// ~OgreEngine, because the cache is a SharedPtr into a material that is about
-/// to stop existing.
-void forgetDitherParams();
+/// HOW MUCH of the blurred highlight the tonemap quad adds (PostFxDesc::
+/// bloomAmount; ogre-patch 0082). A uniform on the same material as the dither,
+/// pushed from applyViewGlobals — and from OgreView::setPostFx, for the VR
+/// session's view, which the engine's per-frame loop never reaches.
+void setBloomAmount(float amount);
+/// Drops the cached tonemap parameter block (the dither's off switch and the
+/// bloom amount). Called from destroySsao, i.e. from ~OgreEngine, because the
+/// cache is a SharedPtr into a material that is about to stop existing.
+void forgetTonemapParams();
 void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc);
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                       unsigned viewWidth, unsigned viewHeight);

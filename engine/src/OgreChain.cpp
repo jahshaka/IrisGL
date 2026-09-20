@@ -2651,31 +2651,89 @@ bool noDitherEnv() {
 }
 /// The tonemap's parameter block, resolved ONCE. A by-name material load and a
 /// constant-table search per view per frame is the pattern ENGINE-SMALL-B took
-/// out of the GI arm; this is one shared material with one constant, so the
-/// lookup is done on first use and dropped in destroySsao (which is this file's
-/// material-state teardown, called from ~OgreEngine).
+/// out of the GI arm; this is one shared material carrying the two constants
+/// this file pushes into it (the dither's off switch and the bloom amount), so
+/// the lookup is done on first use and dropped in destroySsao (which is this
+/// file's material-state teardown, called from ~OgreEngine).
 Ogre::GpuProgramParametersSharedPtr gTonemapParams;
 bool  gTonemapResolved = false;
 bool  gTonemapHasDither = false;
+bool  gTonemapHasBloomAmount = false;
 float gDitherOffPushed = -1.0f;      // no value pushed yet
+float gBloomAmountPushed = -1.0f;    // ...nor here (a valid amount is >= 0)
+
+/// Resolves the tonemap quad's parameter block and the two constants this file
+/// pushes into it, ONCE. Both callers below need it and neither may resolve it
+/// twice: a by-name material load plus a constant-table search, per view per
+/// frame, is exactly the cost ENGINE-SMALL-B took out of the GI arm.
+void resolveTonemapParams() {
+    if (gTonemapResolved) return;
+    gTonemapResolved = true;
+    if (Ogre::Pass *pass = materialPass("HDR/FinalToneMapping")) {
+        if (pass->hasFragmentProgram()) gTonemapParams = pass->getFragmentProgramParameters();
+    }
+    gTonemapHasDither =
+        gTonemapParams && gTonemapParams->_findNamedConstantDefinition("jahDitherOff", false);
+    gTonemapHasBloomAmount =
+        gTonemapParams &&
+        gTonemapParams->_findNamedConstantDefinition("jahBloomAmountMinusOne", false);
+}
 }   // namespace
 
-void forgetDitherParams() {
+void forgetTonemapParams() {
     gTonemapParams.reset();
     gTonemapResolved = false;
     gTonemapHasDither = false;
+    gTonemapHasBloomAmount = false;
     gDitherOffPushed = -1.0f;
+    gBloomAmountPushed = -1.0f;
+}
+
+/// HOW MUCH BLOOM REACHES THE PICTURE (lane BLOOM-AMOUNT-1, ogre-patch 0082).
+///
+/// The composite is `picture += bloom * amount` and this pushes the amount. It
+/// is ONE multiply in the tonemap quad, not a change anywhere in the ladder,
+/// and the two reasons are in PostFxDesc::bloomAmount: the bright pass writes
+/// a UNORM target (a scale there would clip) that the tonemapper reads through
+/// a square (a scale there would be squared).
+///
+/// THE UNIFORM IS THE AMOUNT MINUS ONE so that the value a constant buffer
+/// nobody has written carries — zero — is the picture this engine drew before
+/// the amount existed. That is the same safety rule, for the same reason, as
+/// the dither's "off" spelling next door, and it is why the amount cannot
+/// silently disappear from a frame drawn through a path that does not push.
+void setBloomAmount(float amount) {
+    resolveTonemapParams();
+    if (!gTonemapHasBloomAmount) {
+        // Staged media that predates patch 0082: the amount is simply not
+        // there, the picture is the amount-1 one, and that is a correct
+        // picture. Said once, like the dither's own note, and by the same
+        // resolve-once flag so it cannot repeat per frame.
+        static bool said = false;
+        if (!said) {
+            said = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: the staged HDR media has no jahBloomAmountMinusOne - the Bloom "
+                "Amount dial does nothing (every scene renders at 1x). Re-run "
+                "irisgl/scripts/build-ogre.sh; patch 0082 is missing from this tree.");
+        }
+        return;
+    }
+    // Clamped to the document's own range rather than trusted: this is the
+    // last place the number is a number, and a negative amount would SUBTRACT
+    // light from the picture.
+    const float v = std::min(std::max(amount, 0.0f), 2.0f);
+    if (v == gBloomAmountPushed) return;   // debounced on the last value pushed
+    gBloomAmountPushed = v;
+    gTonemapParams->setNamedConstant("jahBloomAmountMinusOne", v - 1.0f);
 }
 
 void setDither(bool off) {
-    if (!gTonemapResolved) {
-        gTonemapResolved = true;
-        if (Ogre::Pass *pass = materialPass("HDR/FinalToneMapping")) {
-            if (pass->hasFragmentProgram()) gTonemapParams = pass->getFragmentProgramParameters();
-        }
-        gTonemapHasDither =
-            gTonemapParams && gTonemapParams->_findNamedConstantDefinition("jahDitherOff", false);
-        if (!gTonemapHasDither) {
+    resolveTonemapParams();
+    {
+        static bool said = false;
+        if (!gTonemapHasDither && !said) {
+            said = true;
             // Staged media that predates patch 0079. Say so ONCE — the picture
             // is the old banded one, which is a defect, not a crash.
             Ogre::LogManager::getSingleton().logMessage(
@@ -2812,7 +2870,7 @@ void destroySsao(Ogre::Root *root) {
     gSsaoNoise = nullptr;
     gSsaoInitialised = false;
     gSmaaPreset = -1;
-    forgetDitherParams();   // the tonemap params are a SharedPtr into a dying material
+    forgetTonemapParams();   // the tonemap params are a SharedPtr into a dying material
     if (!noise || !root) return;
     try {
         if (Ogre::Pass *pass = materialPass("SSAO/HS")) {
@@ -3078,9 +3136,16 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         if (!desc.tonemapFixed)
             setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent,
                      desc.stereo);
-        if (desc.bloom)
+        if (desc.bloom) {
             setBloomThreshold(desc.bloomThreshold,
                               desc.bloomThreshold + std::max(0.01f, desc.bloomKnee));
+            // WHICH pixels bloom (above), and HOW MUCH of the result is mixed
+            // in (here). Pushed only for a chain that HAS a bloom ladder: with
+            // bloom off the tonemapper's bloom input is a black texture and the
+            // amount cannot reach the picture, so writing it would only hand
+            // the next bloomed view somebody else's number for one frame.
+            setBloomAmount(desc.bloomAmount);
+        }
     }
     if (desc.ssao) {
         // initSsao is idempotent and process-wide (the hemisphere kernel and the

@@ -689,6 +689,14 @@ public:
     /// so an absolute row could offer a state it silently refuses. 2.0 is what
     /// the engine hard-coded before this existed.
     float bloomKnee;
+    /// HOW MUCH of the bloom reaches the picture: a multiplier on the blurred
+    /// highlight term, 0 to 2, and 1 is the amount this renderer has always
+    /// drawn (owner review R17). The threshold and the knee decide WHICH pixels
+    /// bloom; this decides how strongly the result is mixed in, and it is the
+    /// cheap one of the three — a uniform in the tonemap quad, so scrubbing it
+    /// rebuilds nothing. 0 renders the bloom-off picture with the chain still
+    /// standing; turning `bloomEnabled` off is what stops paying for it.
+    float bloomAmount;
     bool  ssaoEnabled;
     float ssaoScale;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower;         ///< contrast of the occlusion term

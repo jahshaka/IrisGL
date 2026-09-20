@@ -371,6 +371,7 @@ Scene::Scene()
     bloomEnabled = false;
     bloomThreshold = 5.0f;
     bloomKnee = 2.0f;   // the width the engine used to hard-code (A-6)
+    bloomAmount = 1.0f; // 1x = the bloom this renderer drew before the dial (R17)
     ssaoEnabled = false;
     ssaoScale = 1.0f;
     ssaoPower = 1.5f;
