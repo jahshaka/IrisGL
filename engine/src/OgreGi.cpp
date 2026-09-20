@@ -11,6 +11,7 @@
 // every one of them is HISTORY, not a second live design. The `gi*` identifiers
 // keep their names by the rename's own mapping rule.
 #include "EnginePrivate.h"
+#include <Vct/OgreVctMaterial.h>
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +20,9 @@
 #include <limits>
 
 #include <OgreHlmsManager.h>
+#include <OgreAsyncTextureTicket.h>
+#include <OgreBitwise.h>
+#include <OgrePixelFormatGpuUtils.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -27,6 +31,17 @@ namespace jahshaka { namespace engine { namespace detail {
 // wins); teardown only unbinds when the dying scene is the owner, so a takeover
 // never yanks the new owner's binding.
 static OgreScene *sVctBindingOwner = nullptr;
+
+// THE DIAGNOSTIC LATCH, READ ONCE (the lead's fix-round item 5). This file asked
+// `getenv("JAHSHAKA_GI_DEBUG")` at sixteen sites, several of them per cascade
+// per rebuild; the answer cannot change inside a process, so it is read on the
+// first call and kept. Function-local rather than a namespace-scope global so
+// the read happens on first use and not in a static initialiser whose order
+// against Ogre's own is nobody's to promise.
+static bool giDebug() {
+    static const bool on = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
+    return on;
+}
 
 static Ogre::HlmsPbs *hlmsPbs(Ogre::Root *root) {
     return static_cast<Ogre::HlmsPbs *>(root->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
@@ -217,6 +232,19 @@ void OgreScene::refreshGlobalIllumination() {
             // see which edit, and whether anything geometric moved at all. A
             // host that asks for a refresh gets the cheapest correct answer on
             // every arm, so the Player, the previews and a script get it too.
+            //
+            // AND AN EXPLICIT REFRESH CAN BE DEFERRED TOO — correcting what this
+            // comment and BOOTVOX-1's commit message both said (the lead's
+            // fix-round item 2). When there is no chain to mark, the answer is
+            // `rebuildVct`, which waits for a voxel input that is still
+            // streaming exactly as the automatic flush does: the refresh then
+            // lands on the frame those pixels arrive (bounded by
+            // `kGiVoxelTextureWaitFrames` deferrals), through the `mGiCachesDirty`
+            // flag the wait re-arms. That is the right answer and not a
+            // concession: a refresh that voxelised without the albedo would be
+            // the double build BOOTVOX-1 removed, asked for by hand. A refresh
+            // over a LIVE chain (the common case) is never deferred — it marks
+            // cascades or re-injects, and touches none of this.
             if (!mVctCascades.empty()) { if (!refreshCascadesFast()) rebuildVct(); }
             else if (!refreshVctFast()) rebuildVct();
         }
@@ -410,7 +438,7 @@ bool OgreScene::refreshVctFast() {
         // A fresh voxel arm is not a reuse of the voxels (the probes were
         // kept either way, and giStatus.rebuilds does not move).
         mGiReusedLastRefresh = !freshVoxels;
-        if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+        if (giDebug()) {
             const auto tEnd = std::chrono::steady_clock::now();
             const auto ms = [](std::chrono::steady_clock::time_point a,
                                std::chrono::steady_clock::time_point b) {
@@ -875,6 +903,16 @@ GiStatus OgreScene::giStatus() const {
             cs.resolution = int(c.resolution);
             cs.cell       = c.cell();
             cs.step       = c.step();
+            // THE NEAR-FIELD GUARANTEE THIS CASCADE IS ACHIEVING, in metres —
+            // THROUGH THE HEADER'S OWN FUNCTION, never a second copy of the
+            // formula here: the radius around the head inside which the near
+            // field is voxelised by THIS cascade (Types.h, where the derivation
+            // and what it does and does not include are written out).
+            GiParams::GiCascadeDesc shape;
+            shape.halfSize   = c.halfSize;
+            shape.resolution = int(c.resolution);
+            shape.stepCells  = c.stepCells;
+            cs.guaranteedRadius = giCascadeGuaranteedRadius(shape);
             cs.centre     = toV(c.centre);
             cs.rebuilds   = c.rebuilds;
             cs.pending    = c.pending;
@@ -902,6 +940,10 @@ GiStatus OgreScene::giStatus() const {
             st.cascades.push_back(cs);
         }
         st.cascadesAwaitingCamera = mGiCascadeAwaitingCamera;
+        // Reported as a STATE and not as a counter: what a reader wants to know
+        // is "is the arm waiting for pixels right now", and the frames it has
+        // waited are the wait's own business (see giVoxelTexturesPending).
+        st.awaitingVoxelTextures = mGiVoxelTextureWaitFrames > 0u;
         st.cascadeVoxelLod = mCascadeVoxelLod;
         // WHICH COLUMN OF THE TIER TABLE THE CHAIN CAME FROM (V1-RIG item 4) —
         // the chain's own record, so the MONOLITHIC arm (no chain at all) reads
@@ -914,6 +956,136 @@ GiStatus OgreScene::giStatus() const {
         st.chainSettles         = mGiChainSettles;
         st.dragMovers           = int(mDragMovers.size());     // MOVER-1
         st.dragMoverGestures    = mDragMoverGestures;
+    } JAH_CATCH(mError, st);
+    return st;
+}
+
+// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — the test-and-tool
+// readback behind `Scene::giVoxelStats` and `world.giVoxelStats`.
+//
+// A TOTAL volume is a physical quantity (the surface radiance of the voxel,
+// times the store's normalisation k) in a FIXED-RANGE format, and PHOTON-M2's
+// F1 is the proof that whether it FITS cannot be read from the picture: a
+// clipped gather draws a picture that is simply dimmer, exactly like a scene
+// with less bounce in it. So the question is answered where it lives — in the
+// bytes.
+//
+// It blocks: `flushCommands()` (the sky/IBL rule — an AsyncTextureTicket reads
+// VRAM, and the injection's dispatches are only RECORDED until something
+// submits them) and then a synchronous download of the whole volume. Never on
+// a frame path; `traceRays` above is the same contract.
+GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
+    GiVoxelStats st;
+    st.cascade = cascadeIdx;
+    JAH_TRY {
+        Ogre::VctLighting *lighting = nullptr;
+        if (!mVctCascades.empty()) {
+            if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return st;
+            lighting = mVctCascades[size_t(cascadeIdx)].lighting;
+        } else if (cascadeIdx == 0) {
+            lighting = mVctLighting;
+        }
+        if (!lighting) return st;
+        Ogre::TextureGpu *total = lighting->getLightVoxelTextures()[0];
+        if (!total || total->getResidencyStatus() != Ogre::GpuResidency::Resident) return st;
+
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();
+        Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+
+        // ONE pass over a volume, for the total and (when the cascade bounces)
+        // for the DIRECT term beside it: the same walk answers "is the fixed
+        // point clipped" and "is the normalisation itself wrong", which are
+        // different defects with the same symptom.
+        struct Walk {
+            float     peak = 0.0f;
+            double    sum = 0.0;
+            long long lit = 0, atMax = 0, aboveOne = 0, count = 0;
+        };
+        const auto walk = [&](Ogre::TextureGpu *tex, Walk &w) -> bool {
+            const Ogre::PixelFormatGpu fmt = tex->getPixelFormat();
+            const bool isHalf = (fmt == Ogre::PFG_RGBA16_FLOAT);
+            const bool isByte = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB || fmt == Ogre::PFG_RGBA8_UNORM);
+            if (!isHalf && !isByte) return false;
+            const bool decodeSrgb = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB);
+            Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
+                tex->getWidth(), tex->getHeight(), tex->getDepth(),
+                Ogre::TextureTypes::Type3D, fmt);
+            bool ok = false;
+            // A plain try here, not JAH_CATCH: the macro RETURNS, and the
+            // ticket below it must be destroyed on every path.
+            try {
+                ticket->download(tex, 0u, true);
+                const Ogre::TextureBox box = ticket->map(0);
+                for (Ogre::uint32 z = 0; z < tex->getDepth(); ++z) {
+                    for (Ogre::uint32 y = 0; y < tex->getHeight(); ++y) {
+                        const void *row = box.at(0, y, z);
+                        for (Ogre::uint32 x = 0; x < tex->getWidth(); ++x) {
+                            float c[3];
+                            bool top = false;
+                            if (isHalf) {
+                                const Ogre::uint16 *p =
+                                    reinterpret_cast<const Ogre::uint16 *>(row) + size_t(x) * 4u;
+                                for (int i = 0; i < 3; ++i) c[i] = Ogre::Bitwise::halfToFloat(p[i]);
+                            } else {
+                                const Ogre::uint8 *p =
+                                    reinterpret_cast<const Ogre::uint8 *>(row) + size_t(x) * 4u;
+                                for (int i = 0; i < 3; ++i) {
+                                    if (p[i] == 255u) top = true;
+                                    const float v = float(p[i]) / 255.0f;
+                                    // THE STORE IS sRGB-ENCODED (the injection's
+                                    // toSRGB, an 8-bit volume's dark-end
+                                    // precision): the value the cone gather
+                                    // reads is the DECODE, so that is the value
+                                    // reported.
+                                    c[i] = decodeSrgb
+                                               ? (v <= 0.04045f ? v / 12.92f
+                                                                : std::pow((v + 0.055f) / 1.055f, 2.4f))
+                                               : v;
+                                }
+                            }
+                            const float m = std::max(std::max(c[0], c[1]), c[2]);
+                            ++w.count;
+                            if (m > 0.0f) { ++w.lit; w.sum += double(m); }
+                            if (m > w.peak) w.peak = m;
+                            if (top) ++w.atMax;
+                            if (m > 1.0f) ++w.aboveOne;
+                        }
+                    }
+                }
+                ticket->unmap();
+                ok = true;
+            } catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+              catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+            tm->destroyAsyncTextureTicket(ticket);
+            return ok;
+        };
+
+        Walk wt;
+        if (!walk(total, wt)) return st;
+        st.available = true;
+        st.width  = int(total->getWidth());
+        st.height = int(total->getHeight());
+        st.depth  = int(total->getDepth());
+        st.format = Ogre::PixelFormatGpuUtils::toString(total->getPixelFormat());
+        st.formatMax = (total->getPixelFormat() == Ogre::PFG_RGBA16_FLOAT) ? 0.0f : 1.0f;
+        st.multiplier = lighting->getCurrentBakingMultiplier();
+        st.peak = wt.peak;
+        st.meanLit = wt.lit ? wt.sum / double(wt.lit) : 0.0;
+        st.voxelsLit = wt.lit;
+        st.voxelsAtMax = wt.atMax;
+        st.voxels = wt.count;
+        st.voxelsAboveOne = wt.aboveOne;
+
+        // The DIRECT volume exists only on a cascade that bounces (ogre-patch
+        // 0076's D term). Its peak is the normalisation's own self-check.
+        if (Ogre::TextureGpu *direct = lighting->getLightDirectTexture()) {
+            Walk wd;
+            if (walk(direct, wd)) {
+                st.peakDirect = wd.peak;
+                st.directAtMax = wd.atMax;
+            }
+        }
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -977,7 +1149,13 @@ void OgreScene::settleTextureResidency() {
         mMaterialsAwaitingTexture.pop_back();
     }
     if (stale) staleProbeGrid(GiStaleReason::Material);
-    if (bumpVoxels) ++mGiMaterialGeneration;
+    if (bumpVoxels) {
+        ++mGiMaterialGeneration;
+        if (giDebug())
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: material generation -> " + std::to_string(mGiMaterialGeneration) +
+                " (a voxel-input texture finished streaming)");
+    }
 }
 
 // WHAT A MATERIAL EDIT COSTS THE GI CACHES — THE ONE DEFINITION, so the single
@@ -1013,7 +1191,13 @@ void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
     bool bumpVoxels = false;
     if (!giMaterialChangeEffect(id, voxelInputsChanged, bumpVoxels)) return;
     staleProbeGrid(GiStaleReason::Material);
-    if (bumpVoxels) ++mGiMaterialGeneration;
+    if (bumpVoxels) {
+        ++mGiMaterialGeneration;
+        if (giDebug())
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: material generation -> " + std::to_string(mGiMaterialGeneration) +
+                " (material " + std::to_string((unsigned long long)id) + " changed a voxel input)");
+    }
 }
 
 void OgreScene::staleProbeGrid(GiStaleReason why) {
@@ -1896,7 +2080,7 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
     const Ogre::Aabb padded(region.mCenter, region.mHalfSize * kClampPad);
     const Ogre::Vector3 rmn = padded.getMinimum(), rmx = padded.getMaximum();
     const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
-    const bool debug = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
+    const bool debug = giDebug();
     mProbesClampedToRegion = 0;
     for (size_t i = 0; i < probes.size(); ++i) {
         Ogre::CubemapProbe *p = probes[i];
@@ -2053,8 +2237,40 @@ void OgreScene::noteGiCascadeDirty(const Ogre::Aabb *box) {
 // silently paint the new material with the old one's colour. Only this needs a
 // voxeliser REPLACEMENT, and under cascades that replacement is spread one
 // cascade per frame (VctCascade::freshVoxels).
-void OgreScene::noteGiDatablockDied() {
-    for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
+void OgreScene::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
+    if (!dying) {
+        for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
+        return;
+    }
+    // Evict from every voxeliser that may hold it (the single volume's and each
+    // cascade's; cascade 0 may share the single one). Erasing an entry twice is
+    // a no-op. Nothing else moves: the voxels already hold the dead material's
+    // albedo where its items stood, and the items' own detach re-voxelised
+    // those boxes (destroyMaterial).
+    if (mVctVoxelizer && mVctVoxelizer->getVctMaterial())
+        mVctVoxelizer->getVctMaterial()->removeDatablock(dying);
+    for (VctCascade &c : mVctCascades)
+        if (c.voxelizer && c.voxelizer->getVctMaterial())
+            c.voxelizer->getVctMaterial()->removeDatablock(dying);
+}
+
+// The stale reasons by name, for the JAHSHAKA_GI_DEBUG log alone (the monitor
+// has its own mapping to WorkReason, and the host's to a script string).
+static const char *giStaleReasonName(GiStaleReason r) {
+    switch (r) {
+    case GiStaleReason::None:     return "none";
+    case GiStaleReason::Rebuild:  return "rebuild";
+    case GiStaleReason::Refresh:  return "refresh";
+    case GiStaleReason::Moved:    return "moved";
+    case GiStaleReason::Light:    return "light";
+    case GiStaleReason::Material: return "material";
+    case GiStaleReason::Sky:      return "sky";
+    case GiStaleReason::Ambient:  return "ambient";
+    case GiStaleReason::Fog:      return "fog";
+    case GiStaleReason::Mobility: return "mobility";
+    case GiStaleReason::Camera:   return "camera";
+    }
+    return "?";
 }
 
 // The cascades the recorded dirty region can be seen from, marked `pending`.
@@ -2190,10 +2406,18 @@ bool OgreScene::refreshCascadesFast() {
         // `refreshVctFast`'s `freshVoxels`, spread over frames: every cascade
         // needs a voxeliser whose material cache has not already decided what
         // that datablock looks like.
-        if (mGiBuiltMaterialGeneration != mGiMaterialGeneration) {
+        const bool materialGen = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
+        if (materialGen) {
             for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
             mGiBuiltMaterialGeneration = mGiMaterialGeneration;
         }
+        // WHY this refresh is about to mark what it marks (BOOTVOX-1's
+        // diagnosis needed it and nothing reported it): the three inputs of
+        // `markDirtyCascadesPending`'s hit test, beside the reason. A refresh
+        // that marks the whole chain for a material generation reads very
+        // differently from one that marks two cascades for a box.
+        const bool dirtyAllNow = mGiCascadeDirtyAll;
+        const size_t dirtyBoxes = mGiCascadeDirtyBoxes.size();
         // (THE MOVERS ARE NOT RE-RECORDED HERE, round-2 F4. `walkItems` folds
         // every mover's box into the region as it finds it — once, at the one
         // place that knows a box moved — and re-reading `mGiMovedBoxes` on this
@@ -2238,13 +2462,88 @@ bool OgreScene::refreshCascadesFast() {
             mLastStaleReason = GiStaleReason::Refresh;
             ++mStaleSerial;
         }
-        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+        if (giDebug())
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka GI: cascade refresh marked " + std::to_string(marked) + " of " +
                 std::to_string(mVctCascades.size()) +
-                " cascades pending (one per frame); nothing was torn down");
+                " cascades pending (one per frame); nothing was torn down — reason " +
+                std::string(giStaleReasonName(mLastStaleReason)) +
+                ", dirtyAll " + (dirtyAllNow ? "yes" : "no") +
+                ", dirty boxes " + std::to_string(dirtyBoxes) +
+                ", material generation " + (materialGen ? "changed" : "same"));
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// A VOXEL INPUT THAT IS STILL STREAMING MEANS "BUILD LATER", NOT "BUILD TWICE"
+// (BOOTVOX-1, 2026-09-18, measured on the default scene at boot).
+//
+// THE DEFECT. The voxeliser reads a material's ALBEDO and EMISSIVE textures
+// (VctMaterial copies exactly those two into its texture pool), so voxelising
+// before they are resident stores the wrong albedo — and the engine knows it
+// does: `settleTextureResidency` bumps `mGiMaterialGeneration` when the pixels
+// arrive, and the next refresh gives every cascade a FRESH voxeliser through
+// `refreshCascadesFast`. On the DEFAULT SCENE that fired every single boot: the
+// ground's `tile.png` is bound on slot 0 (a voxel input) before it is
+// data-ready, the chain is built from scratch in that same frame, the texture
+// lands one frame later, and all four cascades were re-voxelised one per frame
+// — rebuilds 1 -> 2 on each of them (5.75 / 1.29 / 1.42 / 1.36 ms CPU, plus the
+// settle debt LAMPREST-3's incremental settle then owes), with the camera
+// perfectly still. That is where the self-test's "boot re-voxelisation" came
+// from; no phantom camera move was ever involved.
+//
+// THE RULE. The flush that BUILDS the arm waits for the voxel inputs it already
+// knows are in flight. `settleTextureResidency` runs earlier in the same frame
+// (OgreEngine::renderOneFrame), so the wait ends in the frame the last texture
+// lands and the build then reads it — one build, correct the first time. And
+// while the flush is owed, `updateGiTracking` does not run the cascade
+// scheduler either, so nothing is voxelised in the meantime.
+//
+// IT IS BOUNDED, because a texture that never becomes ready must not park GI
+// for ever (a decode that fails, a file that vanished): after
+// `kGiVoxelTextureWaitFrames` deferrals the arm is built anyway, which is
+// exactly the behaviour this replaces. The counter is per SCENE, it counts
+// DEFERRALS (the flush asks once per frame, so that is frames in the case this
+// exists for) and it resets the moment nothing is pending.
+//
+// ONLY THE AUTOMATIC FLUSH WAITS. `refreshGlobalIllumination` — the host asking
+// explicitly, which is what a script's `world.refreshGi()` and every suite that
+// asserts on the frame after it do — is answered immediately, as it always was.
+bool OgreScene::giVoxelTexturesPending() {
+    bool pending = false;
+    for (const auto &e : mMaterialsAwaitingTexture)
+        if (e.second) { pending = true; break; }        // .second = "a voxel input"
+    // NOTHING IN FLIGHT: the wait is over and the next one starts fresh.
+    if (!pending) {
+        mGiVoxelTextureWaitFrames = 0u;
+        mGiVoxelTextureWaitGaveUp = false;
+        return false;
+    }
+    // ...AND ONCE GIVEN UP ON THIS SET, GIVEN UP FOR GOOD (the lead's fix-round
+    // item 5). The cap used to reset the COUNTER and return false once, with the
+    // entry still parked — so every later from-scratch rebuild re-charged its
+    // own thirty frames against a texture that had already been waited out, and
+    // a decode that never completes would have deferred every rebuild of the
+    // session in bursts of thirty. The latch stands until the pending set is
+    // EMPTY again (the pixels arrived, or the material died), which is also when
+    // a genuinely new bind deserves its own budget.
+    //
+    // THE ENTRY IS LEFT PARKED ON PURPOSE: `settleTextureResidency` still owes
+    // the material generation bump if those pixels ever land, and that bump is
+    // what re-voxelises the chain with the albedo it was built without. Giving
+    // up on WAITING is not giving up on the texture.
+    if (mGiVoxelTextureWaitGaveUp) return false;
+    if (++mGiVoxelTextureWaitFrames > kGiVoxelTextureWaitFrames) {
+        if (giDebug())
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: a voxel-input texture never became ready in " +
+                std::to_string(kGiVoxelTextureWaitFrames) +
+                " frames — building the arm anyway, and not waiting again for this one");
+        mGiVoxelTextureWaitGaveUp = true;
+        mGiVoxelTextureWaitFrames = 0u;
+        return false;
+    }
+    return true;
 }
 
 void OgreScene::applyPendingGi() {
@@ -2266,8 +2565,16 @@ void OgreScene::applyPendingGi() {
             // box that can express it — the chain has to be built again from
             // the other column, exactly as a quality change is.
             if (mGiChainShapeDirty) {
-                mGiChainShapeDirty = false;
-                rebuildVct();
+                // THE DEBT IS PAID BY A BUILD, NOT BY A CALL (the lead's
+                // fix-round item 1). `rebuildVct` can come back having built
+                // nothing — no camera yet, or a voxel input still streaming
+                // (BOOTVOX-1) — and clearing the flag first left the chain in
+                // the OLD column with nothing to re-arm it: `updateGiTracking`
+                // raises this flag on a driver CHANGE only, so a session that
+                // began while an albedo was in flight kept the desktop's
+                // cascade set for its whole life. The flush itself stays armed
+                // through `mGiCachesDirty` either way.
+                if (rebuildVct()) mGiChainShapeDirty = false;
             } else if (mVctCascades.empty() || !refreshCascadesFast())
                 rebuildVct();  // fresh voxelizer over the LIVE scene
         }
@@ -3272,7 +3579,19 @@ float OgreScene::giRayMarchStepScale(bool inMotion) const {
 }
 
 
-void OgreScene::rebuildVct() {
+// TRUE WHEN THE ARM WAS ACTUALLY (RE)BUILT, and that is a contract a caller
+// depends on (the lead's fix-round item 1): `applyPendingGi` clears
+// `mGiChainShapeDirty` — the VR column's debt, which no dirty BOX can express —
+// only when a build really happened, because this function has three ways to
+// come back having built nothing (no camera yet, a voxel input still streaming,
+// nothing to voxelise). It used to clear the flag before calling, so a shape
+// rebuild that deferred left the chain in the old column with nothing left to
+// re-arm it: the next flush took the cheap `refreshCascadesFast` branch on the
+// live chain and the headset kept the desktop's cascade set. The two paths that
+// return false AFTER tearing the arm down need no flag: `teardownVct` clears the
+// shape debt itself, and every teardown is followed by a build from the current
+// table.
+bool OgreScene::rebuildVct() {
     // THE PHOTON ARM (GiParams::cascades): camera-centred cascades instead of
     // one scene-fitted box. The scene's own bounds are still computed — the
     // probe half below is placed in the room, not around the camera — but the
@@ -3304,9 +3623,18 @@ void OgreScene::rebuildVct() {
         mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
         teardownVct();
         mGiCascadeAwaitingCamera = true;
-        return;
+        return false;                    // nothing was built; see the return contract
     }
     mGiCascadeAwaitingCamera = false;
+
+    // AND IT WAITS FOR THE ALBEDO IT IS ABOUT TO VOXELISE (BOOTVOX-1), the same
+    // shape as the camera wait above and for the same reason: building now
+    // means building again. See giVoxelTexturesPending — the request stays
+    // armed through `mGiCachesDirty` and the flush retries on the frame the
+    // last voxel-input texture is resident. Whatever is bound stays bound
+    // while it waits (no teardown): a frame of the previous arm is a better
+    // answer than a frame of nothing.
+    if (giVoxelTexturesPending()) { mGiCachesDirty = true; return false; }
 
     ++mGiRebuilds;
     // THE MONITOR'S GI EVENT (§4.7 / §4.8). A rebuild is the single most
@@ -3324,7 +3652,8 @@ void OgreScene::rebuildVct() {
 
     Ogre::Vector3 mn, mx;
     const bool haveBounds = computeGiBounds(mn, mx);
-    if (!haveBounds && !cascadeArm) return;   // nothing to voxelize (yet); stay armed via mGi
+    if (!haveBounds && !cascadeArm)
+        return false;                        // nothing to voxelize (yet); stay armed via mGi
     const Ogre::Aabb aabb = haveBounds ? Ogre::Aabb::newFromExtents(mn, mx)
                                        : Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
 
@@ -3345,7 +3674,7 @@ void OgreScene::rebuildVct() {
         // is the same decision.
         if (!itemCount) work.cancel();
     }
-    if (!itemCount) { teardownVct(); return; }   // stay armed; next churn re-flags
+    if (!itemCount) { teardownVct(); return false; }   // stay armed; next churn re-flags
 
     hlmsPbs(mRoot)->setVctLighting(mVctLighting);
     sVctBindingOwner = this;
@@ -3408,12 +3737,13 @@ void OgreScene::rebuildVct() {
     // leaking 0.97 of the light through a 0.5 m wall), are history.)
     buildIrradianceField();
 
-    if (std::getenv("JAHSHAKA_GI_DEBUG"))
+    if (giDebug())
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka GI: voxelized " + std::to_string(itemCount) + " items at " +
             std::to_string(giVoxelResolution()) + "^3 over " + Ogre::StringConverter::toString(mn) +
             " .. " + Ogre::StringConverter::toString(mx) +
             (mPcc ? " (+PCC probe grid)" : ""));
+    return true;                             // the arm was built, from the CURRENT table
 }
 
 // THE VOXEL ARM — the voxelizer and the lighting over `aabb`, from the live GI
@@ -3541,9 +3871,13 @@ bool OgreScene::freshVoxelArm(const Ogre::Aabb &aabb) {
 //
 // THE SCHEDULER'S RULES, all of them:
 //   1. Each cascade owns a lattice: `cell = 2*halfSize/resolution`, and it
-//      re-centres when the camera crosses `stepCells` cells (the pin's
-//      `consistentCascadeSteps` test). The new centre is quantised to the CELL
-//      lattice, so the voxel grid never slides under the geometry.
+//      re-centres when the camera crosses a plane of the `stepCells` lattice
+//      (the pin's `consistentCascadeSteps` test). That lattice is ABSOLUTE
+//      world space, not a radius about the camera it was built for, so a
+//      re-centre arrives anywhere between the hysteresis band and a whole step
+//      of travel — `step` is the SUPREMUM of the travel, never the distance
+//      between two rebuilds. The new centre is quantised to the CELL lattice,
+//      so the voxel grid never slides under the geometry.
 //   2. AT MOST ONE cascade is re-voxelised per frame, innermost first. A
 //      cascade that owes a rebuild and did not get the frame carries it (the
 //      queue), and the queue is bounded: three owed rebuilds collapse into one,
@@ -3628,36 +3962,28 @@ std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
                                                         : GiViewProfile::Desktop);
         for (int i = 0; i < facts.cascadeCount; ++i) table.push_back(facts.cascades[i]);
     }
-    // THE STEP TABLE, when a row did not pin one: the pin's own
-    // `autoCalculateStepSizes(4)` shape (OgreVctCascadedVoxelizer.cpp:131-161)
-    // written out here so it is ours to tune (A7) — every finer cascade steps
-    // the same DISTANCE as the outermost one, ceiled to whole cells and floored
-    // at half its resolution (the pin's own guard against a step that outruns
-    // the volume).
+    // THE STEP TABLE, when a row did not pin one: `giResolveCascadeSteps`
+    // (Types.h) — the pin's `autoCalculateStepSizes(4)` shape met with THE
+    // NEAR-FIELD GUARANTEE (kGiNearFieldRadiusFraction, CASCADE-STEP-1), which
+    // is a ceiling on it. It lives in the header rather than here because
+    // `world.tierTable()` reports the resolved steps and the guaranteed radius
+    // a tier's chain would have, and a chain the renderer builds and a chain a
+    // tooltip promises must be one table (render audit A5) — the derivation is
+    // pure arithmetic on the row and needs no scene, no device and no Ogre.
     //
-    // THE OUTERMOST CASCADE STEPS TWICE AS FAR AS THE REST (PHOTON_SPEC §7
-    // E2 (1), "the outer stepCells raised"), and the reason is a measurement,
-    // not symmetry. The outermost cascade is the one that encloses the most
-    // geometry and resolves the least, so it is BY FAR the most expensive
-    // rebuild in the chain — on the 8,026-instance lattice it is 88.9 ms of GPU
-    // against cascade 0's 18.1, and even on the Showroom at Epic it is the row
-    // that peaks (spikes/photon-e2/BASELINE.md). Halving how often it runs
-    // halves that cost, and what it buys with the frames it skips is that its
-    // 60 m box sits up to 15 m off-centre instead of 7.5 — on a volume 120 m
-    // across, at 1.875 m per cell, which is a quarter of a cell of parallax on
-    // the far bounce. The INNER cascades are untouched, because they are what
-    // the eye is actually looking at and they are cheap.
-    static const float kOuterStepCells = 8.0f;   // the pin's own value is 4
-    static const float kInnerStepCells = 4.0f;
-    const float cellLast = table.back().halfSize * 2.0f / float(table.back().resolution);
-    for (size_t i = 0; i < table.size(); ++i) {
-        if (table[i].stepCells > 0.0f) continue;
-        const float cell = table[i].halfSize * 2.0f / float(table[i].resolution);
-        float steps = (i + 1u == table.size()) ? kOuterStepCells
-                                               : std::ceil(kInnerStepCells * cellLast / cell);
-        steps = std::max(1.0f, std::min(steps, float(table[i].resolution) * 0.5f));
-        table[i].stepCells = steps;
-    }
+    // WHAT THE RULE MOVED, exactly — every row not named here is arithmetically
+    // unchanged, in both columns:
+    //   Medium  c0  32 -> 16 cells   5.000 -> 2.500 m   r -0.156 -> 2.344
+    //           c1  24 -> 16 cells   7.500 -> 5.000 m   r  2.188 -> 4.688
+    //   High    c0  64 -> 34 cells   5.000 -> 2.656 m   r -0.078 -> 2.266
+    //           c1  48 -> 34 cells   7.500 -> 5.313 m   r  2.344 -> 4.531
+    // (Epic is High's table.) LOW WAS ALREADY COMPLIANT at every row and in
+    // both columns — its outermost cascade is only 20 m, so the "every cascade
+    // steps the outermost one's distance" rule already gave cascade 0 a 2.5 m
+    // step — and so is the outermost cascade of every tier, including the VR
+    // column's pinned 16 cells (60 m box, 30 m step, 28.125 m guaranteed
+    // against the 27.0 the rule asks of it).
+    giResolveCascadeSteps(table.data(), int(table.size()));
     return table;
 }
 
@@ -3796,13 +4122,20 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
                                 std::chrono::steady_clock::now() - tCascade).count());
         c.built = true;
         ++c.rebuilds;
+        // WHAT A BOOT COSTS, AND HOW OFTEN (BOOTVOX-1 needed it and nothing
+        // reported it per rebuild): giStatus carries only the LAST rebuild's
+        // cost, so a burst — a boot's, a teleport's — could not be added up.
+        if (giDebug())
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: cascade " + std::to_string(i) + " BUILT (rebuild #" +
+                std::to_string(c.rebuilds) + ") in " + std::to_string(c.lastCpuMs) + " ms CPU");
     }
 
     // The head IS cascade 0 — from here on every existing rule in this file
     // (binding, teardown, material generation, status) sees the arm it knows.
     } JAH_CATCH(mError, abandonCascadeChain());
     if (mVctCascades.empty() || !mVctCascades[0].lighting) return abandonCascadeChain();
-    if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+    if (giDebug()) {
         std::string row;
         for (size_t i = 0; i < mVctCascades.size(); ++i)
             row += (i ? " / " : "") + std::to_string(cascadeBounces(i));
@@ -4385,6 +4718,11 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     }
     c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0).count());
+    if (giDebug())
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: cascade " + std::to_string(idx) + (ok ? " re-voxelised" : " FAILED") +
+            " (rebuild #" + std::to_string(c.rebuilds) + ", reason " +
+            std::string(giStaleReasonName(reason)) + ") in " + std::to_string(c.lastCpuMs) + " ms CPU");
     if (!ok) {
         // The row STANDS (the frame really did spend that time) with no units:
         // nothing was voxelised. Logged once per scene — a cascade that throws
@@ -4900,7 +5238,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
             for (size_t ax = 0; ax < 3u; ++ax)
                 if (!(size[ax] > 0.05f * std::max(whole[ax], 1e-4f))) usable = false;
             if (usable) region = Ogre::Aabb::newFromExtents(mn, mx);
-            if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+            if (giDebug()) {
                 const auto toS = [](const Ogre::Vector3 &v) {
                     return Ogre::StringConverter::toString(v);
                 };
@@ -5084,7 +5422,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
         const Ogre::FastArray<float> &ratios = placement.getProbeDepthRatios();
         const Ogre::CubemapProbeVec &built = mPcc->getProbes();
         const Ogre::Vector3 H = region.mHalfSize, W = aabb.getSize();
-        const bool debugFit = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
+        const bool debugFit = giDebug();
         std::vector<Ogre::CubemapProbe *> drop;
         for (size_t i = 0; i < built.size(); ++i) {
             if ((i + 1u) * 6u > ratios.size()) break;      // no reading: keep it
@@ -5167,7 +5505,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
                 "Jahshaka GI: no probe grid — all " + std::to_string(mProbesDropped) +
                 " probes photographed nothing inside the lit volume, so reflections come "
                 "from the sky and cone tracing");
-            if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            if (giDebug())
                 Ogre::LogManager::getSingleton().logMessage(
                     "Jahshaka GI: probe placement " +
                     std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -5296,7 +5634,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // the shaded point (getProbeFade > 0, ForwardPlus_DecalsCubemaps_piece_ps),
     // so a shape that lost the room reads downstream as "reflections are black"
     // with probeCount and pccBound both still healthy.
-    if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+    if (giDebug()) {
         // THE PLACEMENT'S WALL COST, which is the number lane SKY-FALLBACK-1
         // moved: it covers the scout-resolution placement, the drop, the clamp,
         // the re-create at the real resolution and the survivors' single
@@ -5458,7 +5796,7 @@ bool OgreScene::reassertGiBinding() {
         pbs->setIrradianceField(mIfd);
         const bool owns = mVctLighting || mPcc || mIfd;
         sVctBindingOwner = owns ? this : nullptr;
-        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+        if (giDebug())
             Ogre::LogManager::getSingleton().logMessage(
                 std::string("Jahshaka GI: binding re-asserted (") +
                 (mVctLighting ? "vct " : "") + (mPcc ? "pcc " : "") + (mIfd ? "ifd" : "") +
@@ -5711,7 +6049,7 @@ void OgreScene::buildIrradianceField() {
             sVctBindingOwner = this;
         }
 
-        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+        if (giDebug())
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka GI: DDGI field " + std::to_string(settings.mNumProbes[0]) + "x" +
                 std::to_string(settings.mNumProbes[1]) + "x" +

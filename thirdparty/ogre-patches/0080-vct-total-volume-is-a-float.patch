@@ -1,0 +1,373 @@
+Jahshaka patch 0080: the VCT TOTAL volume is an RGBA16F float; the DIRECT volume
+stays 8-bit sRGB. (PHOTON-M3, 2026-09-20. SOURCE + MEDIA: every tree re-runs
+build-ogre.sh.)
+
+WHAT IT CHANGES
+  * VctLighting::createTextures / setAllowMultipleBounces / every UAV view of the
+    light voxels (the aniso mip jobs, the bounce, the injection): the TOTAL
+    (mLightVoxel[0..3] + mLightBounce) is PFG_RGBA16_FLOAT. mLightDirect (patch
+    0076's D term) stays PFG_RGBA8_UNORM_SRGB: D is <= the ceiling by construction
+    (VctLighting::update's auto multiplier).
+  * The total's textures are no longer TextureFlags::Reinterpretable: the flag
+    served the 8-bit store's UNORM UAV view over an sRGB texture; a float store's
+    UAV view is its own format. And a reinterpretable texture is created as its
+    format FAMILY (R16G16B16A16_UINT for 16F), on which the mip chain's linear
+    blit is invalid (VUID-vkCmdBlitImage-filter-02001) -- found by the validation
+    suite on the first gate. The direct volume keeps the flag with its 8-bit store.
+  * getLightDirectTexture(): a read-only accessor so a host can MEASURE the direct
+    volume (Scene::giVoxelStats does; it is how the numbers below were read).
+  * The media's store encoding follows the FORMAT instead of being hard-coded:
+    jahStoreLight() under the uav0_orig_pf_srgb property HlmsComputeJob derives
+    from the bound texture, in the injection, the bounce and both anisotropic mip
+    generators (nine write sites); jahStoreDirect() under uav1_orig_pf_srgb for
+    the direct term. An 8-bit sRGB store keeps its encode; a float one is written
+    linear (a format with no fixed range has no transfer function to apply, and
+    toSRGB of a value above 1 followed by a UNORM write is the clip this removes).
+    Every READ of the light voxels is a sampler read, hardware-decoded for _SRGB
+    and linear for 16F, so no reader changes.
+
+WHY (spikes/photon-m3/MEASUREMENTS.md, sections 2-7)
+  The volume holds the fixed point of L = D + rho * G(L), whose magnitude is
+  D / (1 - rho * f) and has no bound a fixed-range store can hold: measured 2.05x
+  the direct term in a closed room of albedo 0.79, 2.76x and still climbing at
+  albedo 1.0 (what every shipped sample's walls carry), 3.5x in World Background
+  as it ships. The 8-bit store clips 3-26 % of the lit voxels of the three
+  enclosed samples today, and shows 82 % of the white room's bounce light at four
+  bounces with a series whose increments collapse (0.30, 0.39) where the physics
+  says 0.65-0.70. A fixed headroom H does not fix it: the H a room needs is
+  unbounded, and every H costs the dark end (H = 2 rounds 0.65 % of the directly
+  lit voxels to black, H = 8 4.9 %) where the GI signal lives; the float store
+  holds 3.8 % more energy than the best H arm.
+
+COST (Showroom 2, 1080p, clocks locked, three ABAB rounds): the cone march reads
+  4.36 ms against 4.44-4.46 ms on the 8-bit store at High and Epic (the sampler
+  does no sRGB decode on a float volume), never more than 0.2 ms slower in any
+  round; VRAM +36 MB at High, +56 MB at Epic. The selftest poses move by exactly
+  one code on 1.4 % / 2.0 % of their pixels, brighter (the dark end no longer
+  rounds to black).
+
+diff --git a/Components/Hlms/Pbs/include/Vct/OgreVctLighting.h b/Components/Hlms/Pbs/include/Vct/OgreVctLighting.h
+index 7bf74a18f..eb09ad763 100644
+--- a/Components/Hlms/Pbs/include/Vct/OgreVctLighting.h
++++ b/Components/Hlms/Pbs/include/Vct/OgreVctLighting.h
+@@ -398,6 +398,12 @@ namespace Ogre
+         void setAmbient( const ColourValue &upperHemisphere, const ColourValue &lowerHemisphere );
+ 
+         TextureGpu **getLightVoxelTextures() { return mLightVoxel; }
++        /// JAHSHAKA PATCH: THE DIRECT TERM'S VOLUME (patch 0076's D term), or null
++        /// on a VctLighting that cannot bounce. Read-only, and it exists so a host
++        /// can MEASURE the store -- the normalisation's own self-check is "the
++        /// direct term is <= the ceiling by construction", and nothing outside this
++        /// class could see the volume to check it.
++        TextureGpu  *getLightDirectTexture() const { return mLightDirect; }
+         TextureGpu **getLightVoxelTextures( const size_t cascadeIdx );
+         uint32       getNumVoxelTextures() const { return mAnisotropic ? 4u : 1u; }
+ 
+diff --git a/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp b/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp
+index 632d47515..34bdbebff 100644
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp
+@@ -71,6 +71,21 @@ namespace Ogre
+ 
+     static const size_t c_maxCascades = 8u;
+ 
++    // JAHSHAKA PATCH 0080: THE FORMAT OF THE TOTAL VOLUME.
++    //
++    // The volume holds the fixed point of L = D + rho * G( L ). The DIRECT term D
++    // is normalised to <= 1 by VctLighting::update's auto multiplier; the FIXED
++    // POINT is not bounded by 1 at all -- it is D * sum( (rho*f)^i ), i.e. up to
++    // D / (1 - rho*f), which for a white enclosure has no useful bound (measured:
++    // 2.05x the direct term at albedo 0.79, 2.76x and climbing at albedo 1.0, 3.5x
++    // in a shipped sample). An 8-bit UNORM store clips it, per channel, which
++    // desaturates as it darkens and reads downstream exactly like a scene with
++    // less bounce in it; and every fixed headroom that clears one room costs the
++    // dark end, where the GI signal lives. So the total is a float. The direct
++    // volume (patch 0076) keeps its 8-bit sRGB store: D <= 1 by construction.
++    static PixelFormatGpu jahLightVoxelFormat() { return PFG_RGBA16_FLOAT; }
++    static PixelFormatGpu jahLightVoxelUavFormat() { return PFG_RGBA16_FLOAT; }
++    //-------------------------------------------------------------------------
+     VctLighting::VctLighting( IdType id, VctVoxelizerSourceBase *voxelizer, bool bAnisotropic ) :
+         IdObject( id ),
+         mSamplerblockTrilinear( 0 ),
+@@ -309,7 +324,15 @@ namespace Ogre
+ 
+         TextureGpuManager *textureManager = mVoxelizer->getTextureGpuManager();
+ 
+-        uint32 texFlags = TextureFlags::Uav | TextureFlags::Reinterpretable;
++        // JAHSHAKA PATCH 0080: NOT Reinterpretable. The flag existed for the 8-bit
++        // store, whose UAV view (RGBA8_UNORM) reinterpreted the sRGB texture; a float
++        // store's UAV view IS its format. And the flag is not free: a reinterpretable
++        // texture is created as its format FAMILY -- R16G16B16A16_UINT for 16F --
++        // and the mip chain's linear blit (_autogenerateMipmaps) is then invalid on
++        // an integer image (VUID-vkCmdBlitImage-filter-02001: the format has no
++        // linear-filter feature), so the coarse mips the cone gather reads would be
++        // undefined. The direct volume below keeps the flag with its 8-bit store.
++        uint32 texFlags = TextureFlags::Uav;
+ 
+         const bool bSdfQuality = shouldEnableSpecularSdfQuality();
+         if( !mAnisotropic || bSdfQuality )
+@@ -358,7 +381,7 @@ namespace Ogre
+                 texture->setResolution( widthAniso, heightAniso, depthAniso );
+                 texture->setNumMipmaps( numMipsAniso );
+             }
+-            texture->setPixelFormat( PFG_RGBA8_UNORM_SRGB );
++            texture->setPixelFormat( jahLightVoxelFormat() );  // JAHSHAKA PATCH 0080
+             texture->scheduleTransitionTo( GpuResidency::Resident );
+             mLightVoxel[i] = texture;
+ 
+@@ -384,7 +407,7 @@ namespace Ogre
+                 DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+                 uavSlot.access = ResourceAccess::Write;
+                 uavSlot.texture = mLightVoxel[i + 1u];
+-                uavSlot.pixelFormat = PFG_RGBA8_UNORM;
++                uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA PATCH 0080
+                 mAnisoGeneratorStep0->_setUavTexture( i, uavSlot );
+             }
+ 
+@@ -427,7 +450,7 @@ namespace Ogre
+                     uavSlot.access = ResourceAccess::Write;
+                     uavSlot.texture = mLightVoxel[axis + 1u];
+                     uavSlot.mipmapLevel = i + 1u;
+-                    uavSlot.pixelFormat = PFG_RGBA8_UNORM;
++                    uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA PATCH 0080
+                     mipJob->_setUavTexture( axis, uavSlot );
+                 }
+ 
+@@ -631,7 +654,7 @@ namespace Ogre
+         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+         uavSlot.access = ResourceAccess::Write;
+         uavSlot.texture = mLightBounce;
+-        uavSlot.pixelFormat = PFG_RGBA8_UNORM;
++        uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA PATCH 0080
+         mLightVctBounceInject->_setUavTexture( 0, uavSlot );
+     }
+     //-------------------------------------------------------------------------
+@@ -882,7 +905,7 @@ namespace Ogre
+         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+         uavSlot.access = ResourceAccess::Write;
+         uavSlot.texture = mLightBounce;
+-        uavSlot.pixelFormat = PFG_RGBA8_UNORM;
++        uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA PATCH 0080
+         mLightVctBounceInject->_setUavTexture( 0, uavSlot );
+ 
+         if( mAnisotropic )
+@@ -942,7 +965,8 @@ namespace Ogre
+         TextureGpuManager *textureManager = mVoxelizer->getTextureGpuManager();
+         if( bAllowMultipleBounces )
+         {
+-            uint32 texFlags = TextureFlags::Uav | TextureFlags::Reinterpretable;
++            // JAHSHAKA PATCH 0080: not Reinterpretable -- see createTextures.
++            uint32 texFlags = TextureFlags::Uav;
+             if( !mAnisotropic || shouldEnableSpecularSdfQuality() )
+                 texFlags |= TextureFlags::RenderToTexture | TextureFlags::AllowAutomipmaps;
+ 
+@@ -955,7 +979,7 @@ namespace Ogre
+             texture->setResolution( mLightVoxel[0]->getWidth(), mLightVoxel[0]->getHeight(),
+                                     mLightVoxel[0]->getDepth() );
+             texture->setNumMipmaps( mLightVoxel[0]->getNumMipmaps() );
+-            texture->setPixelFormat( PFG_RGBA8_UNORM_SRGB );
++            texture->setPixelFormat( jahLightVoxelFormat() );  // JAHSHAKA PATCH 0080
+             texture->scheduleTransitionTo( GpuResidency::Resident );
+             mLightBounce = texture;
+ 
+@@ -1050,7 +1074,7 @@ namespace Ogre
+         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+         uavSlot.access = ResourceAccess::Write;
+         uavSlot.texture = mLightVoxel[0];
+-        uavSlot.pixelFormat = PFG_RGBA8_UNORM;
++        uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA PATCH 0080
+         mLightInjectionJob->_setUavTexture( 0, uavSlot );
+ 
+         // JAHSHAKA PATCH 0076: THE SAME DISPATCH WRITES THE DIRECT TERM TWICE -- once
+diff --git a/Samples/Media/VCT/AnisotropicMipVctStep0_piece_cs.any b/Samples/Media/VCT/AnisotropicMipVctStep0_piece_cs.any
+index be69dbe35..cafb11ac5 100644
+--- a/Samples/Media/VCT/AnisotropicMipVctStep0_piece_cs.any
++++ b/Samples/Media/VCT/AnisotropicMipVctStep0_piece_cs.any
+@@ -23,6 +23,20 @@
+ 	}
+ 
+ 	@insertpiece( DeclSRgbFuncs )
++	// JAHSHAKA PATCH 0080: THE STORE'S ENCODING FOLLOWS ITS FORMAT.
++	// `uav0_orig_pf_srgb` is the property HlmsComputeJob derives from the pixel
++	// format of the texture actually bound, so this one branch covers both
++	// stores: an 8-bit UNORM_SRGB volume is written through the sRGB encode --
++	// which is the dark-end precision an 8-bit store lives on -- and a float one
++	// is written LINEAR. A format with no fixed range has no transfer function to
++	// apply, and encoding into one would throw away the headroom it is there for
++	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
++	// the UNORM write clamps it -- which is the clip this patch removes).
++	@property( uav0_orig_pf_srgb )
++		#define jahStoreLight( x ) toSRGB( x )
++	@else
++		#define jahStoreLight( x ) ( x )
++	@end
+ @end
+ 
+ @piece( BodyCS )
+@@ -78,6 +92,6 @@
+ 		@property( @dir == 1 || @dir == 3 || @dir == 5 )
+ 			outIUvw.x += p_higherMipHalfWidth;
+ 		@end
+-		OGRE_imageWrite3D4( outLightHigherMip@value(axis), outIUvw, toSRGB( accumVal.xyzw ) );
++		OGRE_imageWrite3D4( outLightHigherMip@value(axis), outIUvw, jahStoreLight( accumVal.xyzw ) );
+ 	@end
+ @end
+diff --git a/Samples/Media/VCT/AnisotropicMipVctStep1_piece_cs.any b/Samples/Media/VCT/AnisotropicMipVctStep1_piece_cs.any
+index 4f68da206..16ae49fb4 100644
+--- a/Samples/Media/VCT/AnisotropicMipVctStep1_piece_cs.any
++++ b/Samples/Media/VCT/AnisotropicMipVctStep1_piece_cs.any
+@@ -9,6 +9,20 @@
+ 
+ @piece( HeaderCS )
+ 	@insertpiece( DeclSRgbFuncs )
++	// JAHSHAKA PATCH 0080: THE STORE'S ENCODING FOLLOWS ITS FORMAT.
++	// `uav0_orig_pf_srgb` is the property HlmsComputeJob derives from the pixel
++	// format of the texture actually bound, so this one branch covers both
++	// stores: an 8-bit UNORM_SRGB volume is written through the sRGB encode --
++	// which is the dark-end precision an 8-bit store lives on -- and a float one
++	// is written LINEAR. A format with no fixed range has no transfer function to
++	// apply, and encoding into one would throw away the headroom it is there for
++	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
++	// the UNORM write clamps it -- which is the clip this patch removes).
++	@property( uav0_orig_pf_srgb )
++		#define jahStoreLight( x ) toSRGB( x )
++	@else
++		#define jahStoreLight( x ) ( x )
++	@end
+ @end
+ 
+ @piece( BodyCS )
+@@ -51,7 +65,7 @@
+ 			  samples[5] + samples[1] * (1.0f - samples[5].a) +
+ 			  samples[6] + samples[2] * (1.0f - samples[6].a) +
+ 			  samples[7] + samples[3] * (1.0f - samples[7].a) ) * 0.25f;
+-	OGRE_imageWrite3D4( outLightHigherMip0, negAxisDstIUvw, toSRGB( finalValue.xyzw ) );
++	OGRE_imageWrite3D4( outLightHigherMip0, negAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+ 
+ 	//+X
+ 	@foreach( 8, n )
+@@ -62,7 +76,7 @@
+ 			  samples[1] + samples[5] * (1.0f - samples[1].a) +
+ 			  samples[2] + samples[6] * (1.0f - samples[2].a) +
+ 			  samples[3] + samples[7] * (1.0f - samples[3].a) ) * 0.25f;
+-	OGRE_imageWrite3D4( outLightHigherMip0, posAxisDstIUvw, toSRGB( finalValue.xyzw ) );
++	OGRE_imageWrite3D4( outLightHigherMip0, posAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+ 
+ 	//-Y
+ 	@foreach( 8, n )
+@@ -73,7 +87,7 @@
+ 			  samples[3] + samples[1] * (1.0f - samples[3].a) +
+ 			  samples[7] + samples[5] * (1.0f - samples[7].a) +
+ 			  samples[6] + samples[4] * (1.0f - samples[6].a) ) * 0.25f;
+-	OGRE_imageWrite3D4( outLightHigherMip1, negAxisDstIUvw, toSRGB( finalValue.xyzw ) );
++	OGRE_imageWrite3D4( outLightHigherMip1, negAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+ 
+ 	//+Y
+ 	@foreach( 8, n )
+@@ -84,7 +98,7 @@
+ 			  samples[1] + samples[3] * (1.0f - samples[1].a) +
+ 			  samples[5] + samples[7] * (1.0f - samples[5].a) +
+ 			  samples[4] + samples[6] * (1.0f - samples[4].a) ) * 0.25f;
+-	OGRE_imageWrite3D4( outLightHigherMip1, posAxisDstIUvw, toSRGB( finalValue.xyzw ) );
++	OGRE_imageWrite3D4( outLightHigherMip1, posAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+ 
+ 	//-Z
+ 	@foreach( 8, n )
+@@ -95,7 +109,7 @@
+ 			  samples[3] + samples[2] * (1.0f - samples[3].a) +
+ 			  samples[5] + samples[4] * (1.0f - samples[5].a) +
+ 			  samples[7] + samples[6] * (1.0f - samples[7].a) ) * 0.25f;
+-	OGRE_imageWrite3D4( outLightHigherMip2, negAxisDstIUvw, toSRGB( finalValue.xyzw ) );
++	OGRE_imageWrite3D4( outLightHigherMip2, negAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+ 
+ 	//+Z
+ 	@foreach( 8, n )
+@@ -106,5 +120,5 @@
+ 			  samples[2] + samples[3] * (1.0f - samples[2].a) +
+ 			  samples[4] + samples[5] * (1.0f - samples[4].a) +
+ 			  samples[6] + samples[7] * (1.0f - samples[6].a) ) * 0.25f;
+-	OGRE_imageWrite3D4( outLightHigherMip2, posAxisDstIUvw, toSRGB( finalValue.xyzw ) );
++	OGRE_imageWrite3D4( outLightHigherMip2, posAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+ @end
+diff --git a/Samples/Media/VCT/LightInjection_piece_cs.any b/Samples/Media/VCT/LightInjection_piece_cs.any
+index 662d138de..b50a8859d 100644
+--- a/Samples/Media/VCT/LightInjection_piece_cs.any
++++ b/Samples/Media/VCT/LightInjection_piece_cs.any
+@@ -43,6 +43,28 @@
+ 
+ 	@insertpiece( DeclAreaLtcLightFuncs )
+ 	@insertpiece( DeclSRgbFuncs )
++	// JAHSHAKA PATCH 0080: THE STORE'S ENCODING FOLLOWS ITS FORMAT.
++	// `uav0_orig_pf_srgb` is the property HlmsComputeJob derives from the pixel
++	// format of the texture actually bound, so this one branch covers both
++	// stores: an 8-bit UNORM_SRGB volume is written through the sRGB encode --
++	// which is the dark-end precision an 8-bit store lives on -- and a float one
++	// is written LINEAR. A format with no fixed range has no transfer function to
++	// apply, and encoding into one would throw away the headroom it is there for
++	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
++	// the UNORM write clamps it -- which is the clip this patch removes).
++	@property( uav0_orig_pf_srgb )
++		#define jahStoreLight( x ) toSRGB( x )
++	@else
++		#define jahStoreLight( x ) ( x )
++	@end
++	// JAHSHAKA PATCH 0080: the DIRECT volume keeps its 8-bit sRGB store and so
++	// keeps its encode -- D is normalised to at most the ceiling by construction
++	// (VctLighting::update's auto multiplier), so nothing about it needs range.
++	@property( uav1_orig_pf_srgb )
++		#define jahStoreDirect( x ) toSRGB( x )
++	@else
++		#define jahStoreDirect( x ) ( x )
++	@end
+ @end
+ 
+ //in uvec3 gl_NumWorkGroups;
+@@ -204,11 +226,13 @@
+ 	blockColour *= p_bakingMultiplier;
+ 
+ 	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
+-	float4 injectedVoxel = toSRGB( float4( blockColour, albedoVal.w ) );
+-	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, injectedVoxel );
++	float4 injectedVoxel = float4( blockColour, albedoVal.w );
++	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( injectedVoxel ) );
+ 	// JAHSHAKA PATCH 0076: the same value, kept apart as the bounce iteration's
+ 	// D term. One extra image store; no copy and no second dispatch.
++	// JAHSHAKA PATCH 0080: encoded for ITS OWN format, which is not the total's
++	// any more -- the total may be float and this one is always 8-bit sRGB.
+ 	@property( vct_keep_direct )
+-		OGRE_imageWrite3D4( directVoxel, voxelCelUvw, injectedVoxel );
++		OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
+ 	@end
+ @end
+diff --git a/Samples/Media/VCT/LightVctBounceInject_piece_cs.any b/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
+index 56fbb7aa5..cc16c4fcf 100644
+--- a/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
++++ b/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
+@@ -252,6 +252,20 @@
+ 	}
+ 
+ 	@insertpiece( DeclSRgbFuncs )
++	// JAHSHAKA PATCH 0080: THE STORE'S ENCODING FOLLOWS ITS FORMAT.
++	// `uav0_orig_pf_srgb` is the property HlmsComputeJob derives from the pixel
++	// format of the texture actually bound, so this one branch covers both
++	// stores: an 8-bit UNORM_SRGB volume is written through the sRGB encode --
++	// which is the dark-end precision an 8-bit store lives on -- and a float one
++	// is written LINEAR. A format with no fixed range has no transfer function to
++	// apply, and encoding into one would throw away the headroom it is there for
++	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
++	// the UNORM write clamps it -- which is the clip this patch removes).
++	@property( uav0_orig_pf_srgb )
++		#define jahStoreLight( x ) toSRGB( x )
++	@else
++		#define jahStoreLight( x ) ( x )
++	@end
+ @end
+ 
+ //in uvec3 gl_NumWorkGroups;
+@@ -305,5 +319,5 @@
+ 	}
+ 
+ 	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
+-	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, toSRGB( currentLight ) );
++	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA PATCH 0080
+ @end

@@ -972,12 +972,30 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
     JAH_TRY {
-        invalidateGiCaches();
-        noteGiDatablockDied();  // VctMaterial caches conversions by raw datablock pointer
-        for (auto &kv : mNodes) if (kv.second.materialRef == id) detachItem(kv.first, kv.second);
+        // WHAT A DYING MATERIAL COSTS THE VOLUME IS THE GEOMETRY THAT WORE IT
+        // (MATERIAL-SWAP-GI-1). This used to invalidate the GI caches with no
+        // box, unconditionally — and a material nobody wears any more changes
+        // no voxel at all: the mirror reclaims a node's previous material the
+        // frame after a swap, so every hover preview paid a whole-chain
+        // re-voxelisation twice for two datablocks that were not in the volume.
+        // Items that DO wear it leave the volume here, so their boxes are what
+        // owes a rebuild. The by-pointer alias guard (noteGiDatablockDied) is
+        // independent of that and stays unconditional.
+        bool anyWorn = false;
+        for (auto &kv : mNodes) {
+            if (kv.second.materialRef != id) continue;
+            anyWorn = true;
+            if (kv.second.item && !it->second.unlit) {
+                Ogre::Aabb box = kv.second.item->getWorldAabbUpdated();
+                invalidateGiCaches(&box);
+            }
+            detachItem(kv.first, kv.second);
+        }
+        (void)anyWorn;   // worn by nothing: nothing in the volume changed
         Ogre::Hlms *hlms = hlmsFor(it->second);
-        if (hlms->getDatablock(Ogre::IdString(it->second.datablockName)))
-            hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
+        Ogre::HlmsDatablock *dying = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
+        noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (patch 0081)
+        if (dying) hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
         mMaterials.erase(it);
         return true;
     } JAH_CATCH(mError, false);
@@ -1063,6 +1081,61 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // above only disarmed the dead Item) — re-derive the plane from the new
         // geometry. A failure here is not fatal to attachMesh: the node simply
         // stops reflecting and lastError() says why.
+        if (mReflectors.count(id)) armReflector(id, n);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+// A MATERIAL SWAP ON A LIVE ITEM (MATERIAL-SWAP-GI-1). attachMesh is detach +
+// create + a box-less invalidateGiCaches ("new lit geometry must join the
+// volume"), and under the cascade chain a box-less invalidation is every
+// cascade, one per frame — which is what a hover preview cost twice per object
+// crossed (ledger §804-§805). Here nothing is created and nothing dies: the Item
+// changes its datablock, the rules a material decides for it are re-derived,
+// and the volume owes a re-voxelisation of THIS ITEM'S BOX only.
+bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
+    auto nit = mNodes.find(id); auto tit = mMaterials.find(matId);
+    if (nit == mNodes.end()) { mError = "setNodeMaterial: unknown node"; return false; }
+    if (tit == mMaterials.end()) { mError = "setNodeMaterial: unknown material"; return false; }
+    Node &n = nit->second;
+    if (!n.item || !n.meshRef) { mError = "setNodeMaterial: the node carries no mesh"; return false; }
+    if (n.materialRef == matId) return true;
+    auto mit = mMeshes.find(n.meshRef);
+    auto oit = mMaterials.find(n.materialRef);
+    if (mit == mMeshes.end() || oit == mMaterials.end()) {
+        mError = "setNodeMaterial: the item's mesh or material is gone — re-attach";
+        return false;
+    }
+    const MaterialRec &rec = tit->second;
+    const MaterialRec &old = oit->second;
+    // A family crossing is a different KIND of renderable (its own queue, its
+    // own visibility bit, its own blocks — setShadingModel has the story) and
+    // takes the full re-attach, as it always did.
+    if (rec.unlit != old.unlit || rec.distortion != old.distortion) {
+        mError = "setNodeMaterial: the swap crosses a shading family — re-attach";
+        return false;
+    }
+    if (!mit->second.hasTangents && materialUsesNormalMap(rec)) {
+        mError = "setNodeMaterial: mesh '" + mit->second.name +
+                 "' has no tangents and material " + std::to_string(matId) +
+                 " binds a normal map";
+        return false;
+    }
+    JAH_TRY {
+        n.item->setDatablock(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
+        markShadowShapeDirty(n);
+        n.item->setVisibilityFlags(itemVisibilityFlags(n, rec.unlit, rec.distortion));
+        n.item->setRenderQueueGroup(renderQueueFor(rec));
+        n.materialRef = matId;
+        if (!rec.unlit) {
+            // The voxels inside this box hold the old albedo; nothing died, so
+            // the destruction generation stays and the single-volume arm keeps
+            // its reuse — only the cascades the box reaches owe a rebuild (G1).
+            Ogre::Aabb box = n.item->getWorldAabbUpdated();
+            invalidateGiCaches(&box, true, false);
+        } else if (probeSeesItem(n)) {
+            staleProbeGrid(GiStaleReason::Moved);
+        }
         if (mReflectors.count(id)) armReflector(id, n);
         return true;
     } JAH_CATCH(mError, false);
@@ -1910,6 +1983,13 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
                     for (auto &e : mMaterialsAwaitingTexture)
                         if (e.first == mat) { e.second = e.second || voxelInput; parked = true; break; }
                     if (!parked) mMaterialsAwaitingTexture.push_back({ mat, voxelInput });
+                    if (std::getenv("JAHSHAKA_GI_DEBUG"))
+                        Ogre::LogManager::getSingleton().logMessage(
+                            "Jahshaka GI: material " + std::to_string((unsigned long long)mat) +
+                            " waits for texture '" +
+                            (tit->second.texture ? tit->second.texture->getNameStr() : std::string("?")) +
+                            "' on slot " + std::to_string(int(slot)) +
+                            (voxelInput ? " (a VOXEL input)" : " (a probe input)"));
                 }
             }
             // A cutout's alpha comes from the albedo map: a new one is a new

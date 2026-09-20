@@ -53,6 +53,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -107,6 +108,7 @@ VrSession *sessionBegin(VrBoot *, OgreEngine *, OgreScene *, const VrConfig &,
     return nullptr;
 }
 void sessionEnd(VrSession *) {}
+bool colourEncodedOnce() { return true; }   // no session is ever wrong about colour
 }  // namespace vr
 
 // The engine's four session entry points, for the same reason.
@@ -122,6 +124,7 @@ bool vrSessionHasBoundProfile(const VrSession *, int) { return false; }
 unsigned vrSessionHandJoints(const VrSession *, int, VrPose *, unsigned) { return 0u; }
 unsigned vrSessionBindingBlocks(const VrSession *, VrBindingBlock *, unsigned) { return 0u; }
 bool vrSessionHasLiveJoints(const VrSession *, int) { return false; }
+bool vrSessionHandsEnabled(const VrSession *) { return false; }
 bool vrSessionHaptic(VrSession *, int, float, float, std::string &error) {
     error = "this build has no OpenXR support";
     return false;
@@ -145,6 +148,21 @@ namespace {
 constexpr float kVrDefaultNear = 0.05f;
 constexpr float kVrDefaultFar = 1000.0f;
 
+/// HOW LONG THE DESKTOP KEEPS SHOWING THE EYE AFTER THE RUNTIME STOPS ASKING
+/// FOR PICTURES (lane MIRROR-LIVE-1) — the hysteresis of the rule stated on
+/// `VrSession::setDesktopShowsEye`, in frames of the runtime's own cadence.
+/// Six is 67 ms at 90 Hz: longer than any single-frame hiccup, shorter than the
+/// time it takes a person to lift a headset off their face. It applies ONLY
+/// while the session still has focus; a runtime that says the headset is not
+/// being worn hands the desktop back on the same frame.
+constexpr unsigned kDesktopHoldFrames = 6u;
+
+/// IS THE LIVE SESSION'S PICTURE ENCODED EXACTLY ONCE (`vr::colourEncodedOnce`,
+/// declared in EnginePrivate.h)? A file static because there is one session per
+/// process and the reader is chain code with no session pointer: raised when a
+/// session takes its swapchain format, lowered when that session dies.
+bool sColourEncodedOnce = true;
+
 void vrLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vrLog(const char *fmt, ...) {
     char buf[1024];
@@ -159,6 +177,32 @@ std::string xrResultName(XrInstance instance, XrResult r) {
     if (instance != XR_NULL_HANDLE && XR_SUCCEEDED(xrResultToString(instance, r, buf)))
         return buf;
     return std::to_string(int(r));
+}
+
+/// THE SWAPCHAIN FORMATS A RUNTIME MIGHT OFFER, BY NAME (lane EYE-GRADE-1).
+///
+/// Vulkan has no format-to-string in core and the loader's one is a validation-
+/// layer facility, so this is a small table of the formats a runtime plausibly
+/// offers for a colour swapchain — enough to make the once-per-session log line
+/// readable. Anything else is printed as its number, which is still findable in
+/// vulkan_core.h.
+std::string vkFormatName(int64_t f) {
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM:          return "R8G8B8A8_UNORM";
+    case VK_FORMAT_R8G8B8A8_SRGB:           return "R8G8B8A8_SRGB";
+    case VK_FORMAT_B8G8R8A8_UNORM:          return "B8G8R8A8_UNORM";
+    case VK_FORMAT_B8G8R8A8_SRGB:           return "B8G8R8A8_SRGB";
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "A2B10G10R10_UNORM_PACK32";
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return "A2R10G10B10_UNORM_PACK32";
+    case VK_FORMAT_R16G16B16A16_UNORM:      return "R16G16B16A16_UNORM";
+    case VK_FORMAT_R16G16B16A16_SFLOAT:     return "R16G16B16A16_SFLOAT";
+    case VK_FORMAT_R32G32B32A32_SFLOAT:     return "R32G32B32A32_SFLOAT";
+    case VK_FORMAT_D16_UNORM:               return "D16_UNORM";
+    case VK_FORMAT_D32_SFLOAT:              return "D32_SFLOAT";
+    case VK_FORMAT_X8_D24_UNORM_PACK32:     return "X8_D24_UNORM_PACK32";
+    default: break;
+    }
+    return std::to_string(f);
 }
 
 /// The standard OpenXR asymmetric projection in OGRE's convention ([-1,1]
@@ -249,6 +293,21 @@ unsigned vrTestStopAfterFrames() { return vrEnvFrames("JAHSHAKA_VR_TEST_STOP_AFT
 /// session like its two siblings.
 unsigned vrTestBlinkEvery() { return vrEnvFrames("JAHSHAKA_VR_TEST_BLINK_EVERY"); }
 
+/// ...AND HOW LONG EACH BLINK LASTS (`JAHSHAKA_VR_TEST_BLINK_FRAMES=N`, lane
+/// MIRROR-LIVE-1; 1 when unset, which is what the hook has always done).
+///
+/// The length is the whole question the desktop's rule asks (see
+/// `VrSession::setDesktopShowsEye`): ONE no-picture frame is a hiccup and must
+/// change nothing on the screen, while a STRETCH of them is a wearer who has
+/// lifted the headset and must give the desktop its own camera back. A hook
+/// that can only blink for one frame can prove half of that rule and not the
+/// other half, and the difference between the two halves is exactly the defect
+/// the owner found (a desktop frozen on the last eye).
+unsigned vrTestBlinkFrames() {
+    const unsigned n = vrEnvFrames("JAHSHAKA_VR_TEST_BLINK_FRAMES");
+    return n ? n : 1u;
+}
+
 }   // namespace
 
 // ===========================================================================
@@ -300,6 +359,12 @@ public:
     Ogre::VulkanExternalInstance      mExternalInstance;
     Ogre::VulkanExternalDevice        mExternalDevice;
     Ogre::VulkanDeviceCreationRequest mRequest;
+
+    /// THE EYE'S OWN MASK (lane HAM-1). Resolved only when the runtime
+    /// advertises `XR_KHR_visibility_mask` — the instance asks for the
+    /// extension above, and asking for one it does not advertise fails
+    /// xrCreateInstance outright.
+    PFN_xrGetVisibilityMaskKHR GetVisibilityMask = nullptr;
 
     PFN_xrGetVulkanGraphicsRequirements2KHR GetVulkanGraphicsRequirements2 = nullptr;
     PFN_xrCreateVulkanInstanceKHR           CreateVulkanInstance = nullptr;
@@ -472,6 +537,16 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
                           reinterpret_cast<PFN_xrVoidFunction *>(&GetVulkanGraphicsDevice2));
     xrGetInstanceProcAddr(mInstance, "xrCreateVulkanDeviceKHR",
                           reinterpret_cast<PFN_xrVoidFunction *>(&CreateVulkanDevice));
+    // The hidden-area mesh's one entry point (HAM-1). NOT fatal if it fails to
+    // resolve: a session without it renders the whole eye, which is what every
+    // session before this lane did.
+    if (mHasVisibilityMask) {
+        xrGetInstanceProcAddr(mInstance, "xrGetVisibilityMaskKHR",
+                              reinterpret_cast<PFN_xrVoidFunction *>(&GetVisibilityMask));
+        if (!GetVisibilityMask)
+            vrLog("the runtime advertises XR_KHR_visibility_mask but xrGetVisibilityMaskKHR "
+                  "did not resolve - no hidden-area mesh");
+    }
     if (!GetVulkanGraphicsRequirements2 || !CreateVulkanInstance || !GetVulkanGraphicsDevice2 ||
         !CreateVulkanDevice) {
         reason = "the XR_KHR_vulkan_enable2 entry points did not resolve";
@@ -684,6 +759,38 @@ private:
     /// The session's own View, on for a frame the runtime wants a picture for
     /// and off for one it does not (F4).
     void setSessionViewEnabled(bool on);
+    /// WHO PAINTS THE DESKTOP — the eye's copy or the desktop's own camera.
+    /// The rule and the state table are on the definition.
+    void setDesktopShowsEye(bool eye);
+    /// One frame the runtime did NOT accept (no picture, or no pose), counted
+    /// for the hysteresis and answered by the rule above.
+    void noteFrameWithoutEye();
+    /// Everything the eyes are derived from `mViews` — see the definition.
+    void applyEyeViews();
+    /// ONE STEREO WARM-UP FRAME (VrConfig::warmUpFrames, lane VR-WARMUP-1).
+    ///
+    /// Arms the frame the engine is about to render as a warm-up: writes a
+    /// SYNTHETIC pair of views (the rig's origin, a deliberately wide frustum,
+    /// the heading turned 180 degrees on every other frame), applies them
+    /// through `applyEyeViews` and switches the session's View on — with NO XR
+    /// frame open, so the engine's frame renders both eyes into the eye target
+    /// and `copyEyes` (which needs `mInFrame`) never submits them. Returns
+    /// with the frame owed to nobody: the runtime is not waited on, not begun
+    /// and not ended, and the wearer is still looking at the runtime's own
+    /// picture.
+    ///
+    /// WHY A WIDE FRUSTUM AND NOT THE RUNTIME'S. A warm-up frame is worth
+    /// exactly the permutations it draws, and culling is what decides that: the
+    /// runtime's own ~100-degree frustum from a head we cannot locate yet would
+    /// leave whatever is behind the wearer to compile on the frame they turn
+    /// round. Two frames of 85 degrees in every direction, opposite each other,
+    /// see the whole room. Nothing about WHICH shader gets built depends on the
+    /// frustum being plausible — only on what falls inside it.
+    void warmUpBeginFrame();
+    /// Closes the warm-up frame the engine has just rendered: charges its cost
+    /// (the whole engine frame, measured across the pump's two ends, which is
+    /// what the compile storm actually lands in) and counts it down.
+    void warmUpEndFrame();
     /// Has the Vulkan device gone? (F3 — the frame's commit is where a loss
     /// surfaces, and the engine's catch swallows it.)
     bool deviceLost() const;
@@ -709,9 +816,28 @@ private:
     void dropStereoQuads();
     /// Unregisters one quad's clone (not a restore — see its definition).
     void dropClone(StereoQuad &q);
+    // ---- THE HIDDEN-AREA MESH (lane HAM-1; VR_SPEC §9) --------------------
+    /// ASKS THE RUNTIME FOR THE MASK, once per session (and again on the
+    /// runtime's own change event). Kept RAW, in the tangent space the
+    /// extension defines, because the mapping into clip space needs the eye's
+    /// fov — which does not exist until a frame has been located.
+    void fetchHiddenAreaData();
+    /// Builds (or rebuilds) the masking mesh for THIS frame's fovs. A no-op on
+    /// every frame after the first — one fov compare per eye per frame.
+    void ensureHiddenAreaMesh();
+    void destroyHiddenAreaMesh();
     /// The one Vulkan routine: the two eye copies, recorded on the frame's own
     /// command buffer while the BarrierSolver still knows the target's state.
     void copyEyes();
+    /// THE SCALED EYE'S TRANSIENT IMAGE (the measurement path only —
+    /// VrConfig::overrideEyeWidth). Swapchain-sized and PFG_RGBA8_UNORM, i.e.
+    /// the SAME format as the eye target, so the blit into it converts nothing
+    /// and the copy out of it into the _SRGB swapchain stays a raw byte
+    /// transfer. Created on the first frame that needs it and destroyed with
+    /// the session; null (and the frame's copy skipped) if it cannot be made.
+    Ogre::TextureGpu *scaleImage(unsigned w, unsigned h);
+    void destroyScaleImage();
+    Ogre::TextureGpu *mScaleImage = nullptr;
     /// Everything that must be released before Ogre's objects go: the XR
     /// swapchains, the space and the session. Safe twice.
     void destroyXr();
@@ -779,6 +905,13 @@ public:
     /// THIS FRAME'S JOINTS for one hand (Engine::vrHandJoints), world space.
     /// Returns how many were written — 0 when that hand is not tracked.
     unsigned handJoints(int hand, VrPose *out, unsigned count) const {
+        // A SESSION WITH HANDS OFF HAS NO SKELETON (lane HANDS-SWITCH-1) — said
+        // HERE as well as at the engine's own accessor, because this is the
+        // rule and that is one caller of it: with no tracker created
+        // `mJointsValid` is false anyway today, but a reader of
+        // `vrSessionHandJoints` that arrives tomorrow must not have to know
+        // that to be correct.
+        if (!mConfig.hands) return 0u;
         if (hand < 0 || hand >= 2 || !mJointsValid[hand]) return 0u;
         if (out)
             for (unsigned j = 0; j < count && j < kVrHandJointCount; ++j)
@@ -798,6 +931,9 @@ public:
     bool hasLiveJoints(int hand) const {
         return hand >= 0 && hand < 2 && mJointsValid[hand] && !mInput[hand].fromInjection;
     }
+    /// WAS THIS SESSION ASKED FOR BARE HANDS (`VrConfig::hands`, lane
+    /// HANDS-SWITCH-1)? The project's row, latched at creation.
+    bool handsEnabled() const { return mConfig.hands; }
 private:
 
     VrBoot     *mBoot;
@@ -812,6 +948,9 @@ private:
     uint32_t    mAcquired[2] = { 0u, 0u };
     bool        mHasAcquired[2] = { false, false };
     int64_t     mSwapchainFormat = 0;
+    /// Is the picture encoded exactly ONCE between the renderer and the eye
+    /// (`VrStatus::colourEncodedOnce`)? False only on the UNORM fallback.
+    bool        mColourEncodedOnce = true;
 
     VrState     mState = VrState::Idle;
     bool        mRunning = false;     ///< between xrBeginSession and xrEndSession
@@ -826,6 +965,10 @@ private:
     /// "no picture", for as long as it lives — a doff, a dashboard, a lost
     /// tracking moment, repeated.
     unsigned    mTestBlinkEvery = vrTestBlinkEvery();
+    /// TEST ONLY (vrTestBlinkFrames): how many CONSECUTIVE frames each of those
+    /// blinks lasts, and how many of them are left in the blink now running.
+    unsigned    mTestBlinkFrames = vrTestBlinkFrames();
+    unsigned    mTestBlinkLeft = 0u;
     /// TEST ONLY (vrTestStopAfterFrames): ask the runtime to exit after this
     /// many accepted frames, once. Zero = never.
     unsigned    mTestStopAfter = vrTestStopAfterFrames();
@@ -854,7 +997,47 @@ private:
     Ogre::Quaternion mEyeWorldRot[2];
     bool        mHavePose = false;
     bool        mViewEnabled = true;
+    // ---- THE STEREO WARM-UP (VrConfig::warmUpFrames) ---------------------
+    /// How many warm-up frames are still owed; counts down to 0 and stays there
+    /// for the life of the session.
+    unsigned    mWarmUpLeft = 0;
+    unsigned    mWarmUpDone = 0;
+    float       mWarmUpMs = 0.0f;
+    /// Set by warmUpBeginFrame, cleared by warmUpEndFrame: the frame the engine
+    /// is rendering right now is a warm-up frame.
+    bool        mWarmUpFrame = false;
+    std::chrono::steady_clock::time_point mWarmUpStart;
     std::vector<StereoQuad> mStereoQuads;
+
+    // ---- THE HIDDEN-AREA MESH (lane HAM-1) --------------------------------
+    /// The runtime's own geometry, per eye, EXACTLY as it handed it over:
+    /// vertices in the view's tangent space (the plane z = -1, +Y up) and a
+    /// triangle index list. Empty = this eye has no mask.
+    struct HamData {
+        std::vector<float>    x, y;      ///< the tangent-space vertices, split
+        std::vector<uint32_t> idx;       ///< triangle list into them
+    };
+    HamData     mHamData[2];
+    /// The fovs the CURRENT mesh was built for. A runtime is free to change
+    /// them (and a canted or varifocal headset does), and the mapping from
+    /// tangent space into the eye's clip rectangle is exactly those four
+    /// tangents — so the mesh is rebuilt when they move.
+    XrFovf      mHamFov[2] = {};
+    bool        mHamBuilt = false;
+    /// The build that exists was made in a WARM-UP frame, against the
+    /// synthetic fov the warm-up renders with (VR-WARMUP-1) — it warmed the
+    /// mask's PSO, which is what a warm-up frame is for, but its geometry and
+    /// fractions are not the runtime's. The first located frame replaces it
+    /// (the fov "moves" to the real one), and the status reports no fraction
+    /// until then.
+    bool        mHamSynthetic = false;
+    Ogre::MeshPtr mHamMesh;
+    Ogre::Item *mHamItem = nullptr;
+    std::string mHamMeshName;
+    float       mHamFraction[2] = { 0.0f, 0.0f };
+    unsigned    mHamTriangles[2] = { 0u, 0u };
+    std::string mHamSource;              ///< "runtime", "off" or "none"
+
     OgreView   *mView = nullptr;
     Ogre::Camera *mCullCamera = nullptr;
 
@@ -869,6 +1052,15 @@ private:
     Ogre::Quaternion mOriginRot = Ogre::Quaternion::IDENTITY;
     float            mOriginYawDeg = 0.0f;
     OgreView   *mMirrorView = nullptr;
+    /// THE ANSWER TO "WHO PAINTS THE DESKTOP", and the two things it drives
+    /// (lane MIRROR-LIVE-1): `mShowEye` is the decision — the mirror quad is
+    /// built only while it is true — and `mDesktopViewOff` records that THIS
+    /// object switched the mirrored View off, so it can only ever switch back
+    /// what it took. `mFramesWithoutEye` counts consecutive frames the runtime
+    /// accepted no picture for, which is the hysteresis a blink rides out.
+    bool        mShowEye = false;
+    bool        mDesktopViewOff = false;
+    unsigned    mFramesWithoutEye = 0u;
     Ogre::CompositorWorkspace *mMirrorWorkspace = nullptr;
     std::vector<std::string> mMirrorNodeDefs;
     std::string mMirrorWorkspaceDef;
@@ -1023,28 +1215,111 @@ bool VrSession::create(std::string &reason) {
     mEngine->mVrInfo.space = spaceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "stage" : "local";
     vrLog("reference space: %s", mEngine->mVrInfo.space.c_str());
 
-    // THE SWAPCHAIN FORMAT, WITH NO SILENT FALLBACK (phase 1a fix round F4).
-    // The copy is a vkCmdCopyImage, which demands format COMPATIBILITY — the
-    // same texel block size — so a 4-byte eye target cannot be copied into
-    // Monado's first preference (R16G16B16A16_UNORM, 8 bytes). We ask for the
-    // UNORM 8-bit format because that is what this engine's own view targets
-    // are (OgreView::createRtt, PFG_RGBA8_UNORM) and what its windows are
-    // (VulkanWindow picks a non-sRGB format without the `gamma` param): the
-    // HlmsPbs pixel shader does the linear->gamma conversion ITSELF when the
-    // target is not sRGB (`@property( !hw_gamma_write ) outPs_colour0.xyz =
-    // sqrt( finalColour )`), so our bytes are already display-encoded and a
-    // pass-through is exactly right. Taking an _SRGB swapchain instead would
-    // ask the runtime to encode them a second time.
+    // ---- THE COLOUR CONTRACT WITH THE RUNTIME, STATED ONCE (lane EYE-GRADE-1,
+    //      2026-09-18; it was INVERTED from phase 1a to push #50) -------------
+    //
+    // WHAT OPENXR SAYS A SWAPCHAIN FORMAT MEANS. The runtime SAMPLES the image
+    // we hand it and composites it for the display. A format with an _SRGB
+    // suffix tells it "these bytes are display-encoded": the sampler decodes
+    // them to linear on the way in and the compositor re-encodes for the
+    // display, which is an identity round trip. A NON-sRGB (UNORM) format tells
+    // it the opposite — "these bytes ARE linear" — so it encodes them a SECOND
+    // time on the way out.
+    //
+    // WHAT WE HAND IT. The eye target is `PFG_RGBA8_UNORM` (OgreView::createRtt)
+    // and the chain writes a DISPLAY-REFERRED picture into it: with the target
+    // not sRGB, `hw_gamma_write` is off and the HlmsPbs pixel shader encodes
+    // itself (`outPs_colour0.xyz = sqrt( finalColour )`), and the HDR chain's
+    // composite writes the tonemapped, display-referred value (OgreChain's
+    // kLook* note: "the composite quad writes a DISPLAY-REFERRED value"). So our
+    // bytes are ENCODED, and the format that says so is the _SRGB one.
+    //
+    // MEASURED, because phase 1a's comment reasoned the other way round and was
+    // wrong (spikes/smoke-50/f5b): through Monado's XCB compositor the runtime's
+    // displayed picture was the sRGB DECODE of the bytes we submitted, across
+    // five sky levels — 28->3, 79->20, 95->29, 99->32, a red 164->95 — i.e. one
+    // encode too many, and the wearer saw a picture that was much too dark.
+    //
+    // THE COPY IS UNCHANGED AND STILL A RAW BYTE TRANSFER. `vkCmdCopyImage`
+    // converts nothing and requires only SIZE COMPATIBILITY, and
+    // R8G8B8A8_UNORM and R8G8B8A8_SRGB are the same 32-bit block: the same
+    // bytes land in the swapchain, and only the runtime's reading of them
+    // changes. That makes the chain of encodes exactly ONE from radiance to the
+    // wearer's eye — ours — with the runtime's decode and its display encode
+    // cancelling.
+    //
+    // ONE FORMAT ASKED FOR, AND ONLY ONE, because a raw copy fixes both halves
+    // of the contract:
+    //
+    //   * THE CHANNEL ORDER. `vkCmdCopyImage` moves BYTES. B8G8R8A8_SRGB is
+    //     size-compatible with our R8G8B8A8 eye target and the copy is legal,
+    //     and it would hand the wearer a picture with red and blue exchanged.
+    //     (A blit is not the way out either: `vkCmdBlitImage` CONVERTS, and
+    //     writing linear-read texels into an _SRGB destination encodes them —
+    //     the very second encode this change exists to remove.)
+    //   * THE WIDTH. Monado's first preference is R16G16B16A16_UNORM (8 bytes),
+    //     which is not copy-compatible at all and would need a blit or a quad.
+    //     A wider swapchain is also not obviously worth anything here — the eye
+    //     target is 8-bit, and WiVRn video-encodes 8 bits to the Quest — so
+    //     every offered format is ENUMERATED AND LOGGED and none of them is
+    //     taken on a guess.
+    //
+    // AND THE FALLBACK IS LOUD, NOT ABSENT. A runtime that offers no
+    // R8G8B8A8_SRGB at all would otherwise be a runtime this editor refuses to
+    // enter — a colour question taking VR away entirely — so the UNORM
+    // spelling is still taken when it is the only 8-bit RGBA on offer, with
+    // the consequence named in the log AND reported (`VrStatus::
+    // colourEncodedOnce`, `vr.state().colourEncodedOnce`, a scene issue the
+    // author can see): the picture reaches the wearer with one encode too many
+    // and reads about a stop too bright.
+    //
+    // Monado 25 offers the _SRGB form — measured on this box, fourteen formats
+    // logged — and so does WiVRn 26.9 on the owner's Quest Pro (his #51 smoke,
+    // 2026-09-19: thirteen formats, R8G8B8A8_SRGB among them and taken), so
+    // both runtimes this tree has met take the one-encode path. The properly
+    // correct answer for a runtime with no _SRGB 8-bit form
+    // — a DECODE quad into a 16-bit format the runtime then encodes once — is
+    // its own lane; this fallback is what keeps such a runtime usable and
+    // honest meanwhile.
     uint32_t fmtCount = 0;
     xrEnumerateSwapchainFormats(mSession, 0, &fmtCount, nullptr);
     std::vector<int64_t> formats(fmtCount);
     if (fmtCount) xrEnumerateSwapchainFormats(mSession, fmtCount, &fmtCount, formats.data());
+    {
+        // LOGGED ONCE PER SESSION (the lead's brief): what a runtime offers is
+        // the first thing anybody asks when a headset's colours are wrong, and
+        // it is not otherwise recoverable from a log.
+        std::string list;
+        for (int64_t f : formats) {
+            if (!list.empty()) list += ", ";
+            list += vkFormatName(f);
+        }
+        vrLog("swapchain formats offered by the runtime (%u): %s", fmtCount,
+              list.empty() ? "(none)" : list.c_str());
+    }
     mSwapchainFormat = 0;
+    mColourEncodedOnce = true;
+    sColourEncodedOnce = true;
     for (int64_t f : formats)
-        if (f == VK_FORMAT_R8G8B8A8_UNORM) { mSwapchainFormat = f; break; }
-    if (!mSwapchainFormat) {
-        reason = "the runtime does not offer VK_FORMAT_R8G8B8A8_UNORM (the eye target's format)";
-        return false;
+        if (f == int64_t(VK_FORMAT_R8G8B8A8_SRGB)) { mSwapchainFormat = f; break; }
+    if (mSwapchainFormat) {
+        vrLog("swapchain format: R8G8B8A8_SRGB (our display-encoded bytes, copied raw; the "
+              "runtime decodes and re-encodes them, so the picture reaching the wearer is "
+              "encoded exactly once)");
+    } else {
+        for (int64_t f : formats)
+            if (f == int64_t(VK_FORMAT_R8G8B8A8_UNORM)) { mSwapchainFormat = f; break; }
+        if (!mSwapchainFormat) {
+            reason = "the runtime offers no 8-bit RGBA swapchain format (R8G8B8A8_SRGB or "
+                     "R8G8B8A8_UNORM); the eye target is PFG_RGBA8_UNORM and the copy into "
+                     "the swapchain is a raw byte transfer";
+            return false;
+        }
+        mColourEncodedOnce = false;
+        sColourEncodedOnce = false;
+        vrLog("swapchain format: R8G8B8A8_UNORM - THIS RUNTIME OFFERS NO R8G8B8A8_SRGB, so it "
+              "will treat our display-encoded bytes as linear and encode them a SECOND time: "
+              "the wearer's picture will read about a stop too bright. Report this runtime.");
     }
 
     mEyeWidth  = mConfig.overrideEyeWidth  ? mConfig.overrideEyeWidth
@@ -1093,43 +1368,47 @@ bool VrSession::create(std::string &reason) {
     // engine that keeps the post chain (PostFxDesc::allowOffscreen) — because
     // it is not a thumbnail, it is the picture the user is standing in.
     //
-    // THE PHASE-2 PROFILE, stated here and nowhere else (VR_SPEC §9 item 6):
-    // HDR and its tonemap ON, MSAA at 1 (HDR + MSAA segfaults this driver —
-    // OgreChain.cpp's own note), SSAO / SMAA / SSR OFF because every one of
-    // them samples a neighbourhood and would read across the seam between the
-    // eyes, and ray-traced reflections off with SSR (they ride its chain).
+    // THE GRADE IS THE PROJECT'S AND IT IS NOT WRITTEN HERE (lane EYE-GRADE-1).
+    // Until this lane the phase-2 profile was a hand-written PostFxDesc at this
+    // line, on the reasoning that "no mirror reaches a view the session made" —
+    // and the consequence was that the wearer got the struct's DEFAULTS
+    // (automatic exposure across a +/-2.5 stop window) whatever the author had
+    // chosen in the World panel. `SceneMirror::applyViewEnvironment` pushes the
+    // project's description into this view every frame now, exactly as it does
+    // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what a
+    // side-by-side eye pair cannot carry — in ONE place, stated once, with the
+    // reason for every entry.
+    //
+    // WHAT IS SET HERE IS THE SESSION'S OWN, AND ONLY THAT:
+    //   * MSAA at 1. Not a PostFxDesc field: HDR + MSAA segfaults this driver
+    //     (OgreChain.cpp's own note), and the mirror never pushes a sample
+    //     count into an offscreen view, so this is the one statement of it.
+    //   * the reflection OVERRIDE, `vr.begin({reflections:n})`'s measurement
+    //     arm over the project's row (VrConfig::ssr; -1 = follow the project).
+    //   * an HDR base, which is what the view renders with for the frames
+    //     BEFORE a host's first environment push — the warm-up frames, and an
+    //     engine-only caller (tests/vr) that has no mirror at all. Every other
+    //     field is the struct's default and is replaced on the first push.
     View *v = mEngine->createOffscreenView("jahshaka-vr", mEyeWidth * 2u, mEyeHeight,
                                            Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
     if (!v) { reason = "createOffscreenView failed: " + mEngine->lastError(); return false; }
     mView = static_cast<OgreView *>(v);
-    PostFxDesc fx;
-    fx.allowOffscreen = true;
-    fx.hdr = true;
-    fx.bloom = false;
-    fx.ssao = false;
-    fx.smaaPreset = -1;
-    // REFLECTIONS IN THE HEADSET (lane REFLECT-VR-1). The row is the PROJECT'S —
-    // the World panel's SSR row, which the host passes in `VrConfig::ssr`
-    // because no mirror reaches a view the session made — and it selects the
-    // reflection's RESOLUTION and its prepass, exactly as on the desktop.
-    //
-    // WHAT IT DOES NOT SELECT IS THE SCREEN-SPACE MARCH, which is off here and
-    // structurally impossible in a stereo chain (PostFxDesc::ssrScreenMarch,
-    // and chain::build enforces it): the march walks the TARGET, and this
-    // target is two eyes side by side. Phase 2 read that correctly and
-    // concluded "so no reflections in VR", which is the line the owner saw the
-    // consequence of — a chrome sphere showing the room on the desktop and
-    // nothing in the headset. The rays have no such term: a ray is traced in
-    // the world from the eye that owns its pixel, so they answer per eye, and
-    // with the march off they answer ALL of it.
-    //
-    // SSAO and SMAA stay off for the reason phase 2 gave and it still holds:
-    // both are neighbourhood filters over the target, both would read across
-    // the seam, and neither has a per-eye form here yet.
-    fx.ssr = mConfig.ssr;
-    fx.ssrScreenMarch = false;
-    mView->setPostFx(fx);
+    // ORDER, AND IT IS WORTH A LINE (the Fable read's F8): the override and the
+    // base description are set BEFORE `setStereo`, because every one of these
+    // can rebuild the workspace DEFINITION and setStereo is the one that makes
+    // the shape stereo. Setting them after it rebuilt the definition up to
+    // three times on a session's first breath — the first cut of this lane did
+    // — where this order rebuilds once, into the shape the warm-up then
+    // compiles for. That matters beyond tidiness: `vr.warmup` asserts that no
+    // frame the runtime is SHOWN compiles a shader, and a warm-up that ran on a
+    // different chain shape from the wearer's would warm the wrong permutations.
     mView->setSampleCount(1u);
+    mView->setVrSsrOverride(mConfig.ssr);
+    {
+        PostFxDesc fx;
+        fx.hdr = true;
+        mView->setPostFx(fx);   // the policy is applied by setStereo, below
+    }
     mView->setStereo(true, "JahshakaVrCullCamera");
     // THE TWO HELPER CHANNELS (kVrHelperBit's two-bit rule, phase 4; owner
     // 2026-09-17). Until this lane the session's view simply INHERITED
@@ -1147,6 +1426,21 @@ bool VrSession::create(std::string &reason) {
     //     them as much as an author does.
     mView->setHelpersVisible(mConfig.helpers);
     mView->setVrHelpersVisible(true);
+    // ...AND THE MASK'S CHANNEL (kVrMaskBit, lane HAM-1), opened HERE — before
+    // the scene, with the two helper channels — and never touched again.
+    //
+    // WHY NOT WHEN THE MASK IS BUILT, which is the obvious place: the channel is
+    // a per-pass VISIBILITY MASK on this view's node, so flipping it REBUILDS
+    // the workspace (ChainDesc::sameShape) — and the mask can only be built on
+    // the first frame the runtime locates its eyes, i.e. INSIDE a frame. A
+    // rebuild there is survivable (`attachWorkspace` re-adds every workspace
+    // listener, the eye copy's included) but it is a seam nothing in this suite
+    // can see the far side of: a lost copy listener leaves the picture in the
+    // eye target perfect and the HEADSET black. Opening the channel at creation
+    // costs one bit in this view's own passes that nothing carries until the
+    // mask exists — no pixel, no pass, no rebuild — and the mask then appears
+    // and disappears as an ordinary scene object.
+    mView->setHiddenAreaMask(mConfig.hiddenAreaMask);
     // SHADOWS, WHICH THE HEADSET DID NOT HAVE (lane VR-4, found by the §3.4
     // measurement rather than by looking): `OgreView::mShadows` is FALSE by
     // default and every other host opts in explicitly — the editor viewport at
@@ -1187,14 +1481,30 @@ bool VrSession::create(std::string &reason) {
     // runtime that refused the action set is precisely the one whose wearer has
     // only hands.
     createHandTrackers();
+    // THE EYE'S OWN MASK (lane HAM-1). Asked for HERE, where the session
+    // exists, and built later — on the first frame the runtime locates, because
+    // the geometry it hands over is in the view's tangent space and the mapping
+    // into clip space is that eye's fov.
+    fetchHiddenAreaData();
 
+    // THE STEREO WARM-UP IS ARMED HERE AND SPENT ON THE SESSION'S FIRST FRAMES
+    // (VrConfig::warmUpFrames, lane VR-WARMUP-1). Not rendered here: at this
+    // moment the runtime has not begun running (no xrBeginSession has been
+    // answered with a SYNCHRONIZED state yet) and the HOST has not placed the
+    // rig — `Engine::setVrOrigin` is called right after `beginVrSession`, and a
+    // warm-up from the wrong place would draw the wrong room.
+    mWarmUpLeft = mConfig.warmUpFrames;
+    if (mWarmUpLeft)
+        vrLog("stereo warm-up armed: %u frame(s) at %ux%u per eye before the first "
+              "committed frame", mWarmUpLeft, mEyeWidth, mEyeHeight);
     vrLog("session created on the runtime's device");
     if (mTestNoRenderLeft)
         vrLog("TEST HOOK: the first %u frames will be answered 'no picture' "
               "(JAHSHAKA_VR_TEST_NO_RENDER_FRAMES)", mTestNoRenderLeft);
     if (mTestBlinkEvery)
-        vrLog("TEST HOOK: every %uth frame will be answered 'no picture' "
-              "(JAHSHAKA_VR_TEST_BLINK_EVERY)", mTestBlinkEvery);
+        vrLog("TEST HOOK: every %uth frame will be answered 'no picture', %u frame(s) at a "
+              "time (JAHSHAKA_VR_TEST_BLINK_EVERY / _BLINK_FRAMES)", mTestBlinkEvery,
+              mTestBlinkFrames);
     if (mTestStopAfter)
         vrLog("TEST HOOK: the runtime will be asked to exit after %u frames "
               "(JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES)", mTestStopAfter);
@@ -1389,7 +1699,15 @@ void VrSession::createActions() {
         return XR_SUCCEEDED(xrStringToPath(mBoot->mInstance, s.c_str(), &out));
     };
     for (const ProfileDesc &pd : kProfiles) {
-        if (pd.needsHandInteraction && !mBoot->mHasHandInteractionExt) continue;
+        // THE BARE-HAND BLOCK IS OPT-IN (lane HANDS-SWITCH-1): the project's
+        // Hands row has to be on AND the runtime has to have the extension. The
+        // extension may well be ENABLED on the instance either way — enabling
+        // it costs nothing and tells us nothing — but SUGGESTING these paths is
+        // the act that lets a runtime hand a wearer's session to their bare
+        // hands the moment they set a controller down, and that is the thing
+        // this row exists to refuse.
+        if (pd.needsHandInteraction && (!mBoot->mHasHandInteractionExt || !mConfig.hands))
+            continue;
         std::vector<XrActionSuggestedBinding> binds;
         bool built = true;
         auto add = [&](XrAction action, const char *suffix, int h) {
@@ -1474,11 +1792,13 @@ void VrSession::createActions() {
     // else's controller.
     for (int h = 0; h < 2; ++h) {
         // THREE SPACES PER HAND since stage 3: the grip, the aim, and the
-        // pinch. The third is created for every session, bound or not — an
-        // action space of an action no profile bound is legal and simply never
-        // locates, and creating it conditionally would mean a wearer who puts
-        // their controllers DOWN mid-session (the profile changes to hands
-        // then, and only then) had no pinch space to locate.
+        // pinch. The third is created for EVERY session, whether this project
+        // asked for bare hands or not (lane HANDS-SWITCH-1) — an action space
+        // of an action no profile bound is legal, costs one handle and simply
+        // never locates. Creating it conditionally would buy nothing and would
+        // put a second copy of the hands rule in a third place; the rule lives
+        // where the BINDINGS are suggested, which is what decides whether a
+        // pinch can ever be reported.
         XrAction actions[3] = { mHandPoseAction[h], mAimPoseAction[h], mManipPoseAction[h] };
         XrSpace *spaces[3] = { &mHandSpace[h], &mAimSpace[h], &mManipSpace[h] };
         for (int k = 0; k < 3; ++k) {
@@ -1509,6 +1829,15 @@ void VrSession::createActions() {
 // hand and per frame: a hand holding a controller is located by the controller,
 // and only a hand the controller route left invalid asks the tracker.
 void VrSession::createHandTrackers() {
+    // WHICH WAY THIS SESSION WENT, ONCE, IN WORDS (lane HANDS-SWITCH-1) — the
+    // one log line that answers "why are there no hands" (or "why are there").
+    // A project on controllers creates no tracker at all, so nothing in the
+    // frame loop ever asks the runtime for a joint.
+    vrLog("hands: %s for this session (the project's Hands row)%s",
+          mConfig.hands ? "ON" : "OFF",
+          mConfig.hands ? "" : " - no bare-hand bindings were suggested and no hand tracker "
+                               "is created; the controllers are unaffected");
+    if (!mConfig.hands) return;
     if (!mBoot->mSystemHandTracking || !mBoot->CreateHandTracker) return;
     if (mSession == XR_NULL_HANDLE) return;
     for (int h = 0; h < 2; ++h) {
@@ -1808,7 +2137,11 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
                 // and a sample that named a PROFILE keeps it: that is how the
                 // hand/controller half of stage 3 is driven with no runtime.
                 if (!in.manipPose.valid) in.manipPose = in.grip;
-                in.jointsTracked = mEngine->vrInjectedJoints(h, nullptr, 0u);
+                // ...AND ONLY WHERE THIS SESSION HAS HANDS AT ALL (lane
+                // HANDS-SWITCH-1): with the project's Hands row off there is no
+                // skeleton to track, whoever wrote it.
+                in.jointsTracked =
+                    mConfig.hands && mEngine->vrInjectedJoints(h, nullptr, 0u);
                 mHandValid[h] = in.grip.valid;
                 if (in.grip.valid) {
                     mHandPos[h] = Ogre::Vector3(in.grip.position.x, in.grip.position.y,
@@ -2000,6 +2333,12 @@ void VrSession::placeProxies() {
 // same reason: a smoke in a headset must never be looking at a script's hand.
 bool VrSession::jointsFor(int hand, VrPose out[kVrHandJointCount]) const {
     if (hand < 0 || hand >= 2) return false;
+    // A SESSION WITH HANDS OFF HAS NO SKELETON, from any source (lane
+    // HANDS-SWITCH-1) — the runtime's (there is no tracker to answer) and a
+    // TEST'S alike. The injection route is how bare hands are driven on a box
+    // with no fingers, so leaving it open here would mean a project that asked
+    // for controllers still drew a script's hand.
+    if (!mConfig.hands) return false;
     if (mJointsValid[hand]) {
         for (unsigned j = 0; j < kVrHandJointCount; ++j) out[j] = mJoints[hand][j];
         return true;
@@ -2269,6 +2608,21 @@ void VrSession::pollEvents() {
             // forever for an answer that changes when somebody moves their
             // hands. Read once at the attach, then on this event.
             mProfilesDirty = true;
+        } else if (ev.type == XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR) {
+            // THE LENSES MOVED, OR THE RUNTIME CHANGED ITS MIND (HAM-1). A
+            // Quest re-runs its own lens calibration, a runtime may switch
+            // between eye reliefs, and the extension exists precisely so the
+            // application does not cache the shape for ever. Re-asked here and
+            // rebuilt on the next located frame; the event names ONE eye and
+            // one view configuration, and both are re-read because the fetch
+            // asks for both eyes anyway.
+            auto *vm = reinterpret_cast<XrEventDataVisibilityMaskChangedKHR *>(&ev);
+            if (vm->viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {
+                vrLog("the runtime changed its visibility mask (eye %u) - re-asking",
+                      vm->viewIndex);
+                fetchHiddenAreaData();
+                destroyHiddenAreaMesh();   // ensureHiddenAreaMesh rebuilds it next frame
+            }
         } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             // THE RUNTIME RECENTRED THE ROOM UNDER THE WEARER (the Quest's
             // long-press, a guardian re-setup, a runtime that re-origins a
@@ -2339,17 +2693,40 @@ void VrSession::beginFrame() {
     // pose.
     mHandValid[0] = mHandValid[1] = false;
     mInput[0] = mInput[1] = VrHandState();
-    if (mState == VrState::Lost) { teardownMirror(); setSessionViewEnabled(false); return; }
+    if (mState == VrState::Lost) {
+        // THE DESKTOP TAKES ITS OWN CAMERA BACK, ON THIS FRAME
+        // (setDesktopShowsEye's table): there is no runtime left to draw an eye
+        // for, so a copy would be a still of the last one for ever.
+        setDesktopShowsEye(false);
+        teardownMirror(); setSessionViewEnabled(false); return;
+    }
     pollEvents();
     if (!mRunning) {
         // NOTHING HAS BEEN DRAWN INTO THE EYE TARGET YET, so a mirror would
         // paint black over the desktop's own picture. It appears when the
         // session starts producing frames and goes again when it stops.
+        setDesktopShowsEye(false);
         teardownMirror();
         setSessionViewEnabled(false);
         return;
     }
     syncMirror();
+
+    // ---- THE STEREO WARM-UP, BEFORE THE FIRST FRAME THE RUNTIME IS SHOWN ---
+    // (VrConfig::warmUpFrames; lane VR-WARMUP-1.)
+    //
+    // HERE, and not one line later: from this point on the function OWES the
+    // runtime a frame (xrWaitFrame paces it, xrBeginFrame opens it, xrEndFrame
+    // pays it), and a frame that takes 1.2 s to record is a frame the runtime
+    // waited 1.2 s for. Above it, nothing is owed and nothing is paced: the
+    // session simply does not submit for a frame or two while it builds what
+    // the eyes need, and the wearer keeps looking at the runtime's own picture.
+    //
+    // The warm-up runs only while the session is RUNNING, which is why it is
+    // below the `mRunning` gate: the rig has been placed by then (the host sets
+    // the origin right after `beginVrSession`), the scene is live, and the
+    // eye target exists at its final size.
+    if (mWarmUpLeft) { warmUpBeginFrame(); return; }
 
     XrFrameWaitInfo fwi{ XR_TYPE_FRAME_WAIT_INFO };
     mFrameState = XrFrameState{ XR_TYPE_FRAME_STATE };
@@ -2362,6 +2739,7 @@ void VrSession::beginFrame() {
         vrLog("xrWaitFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
         setSessionViewEnabled(false);
+        setDesktopShowsEye(false);      // no runtime, no eye to copy
         return;
     }
     if (mRefreshHz <= 0.0f && mFrameState.predictedDisplayPeriod > 0) {
@@ -2376,6 +2754,7 @@ void VrSession::beginFrame() {
         vrLog("xrBeginFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
         setSessionViewEnabled(false);
+        setDesktopShowsEye(false);      // no runtime, no eye to copy
         return;
     }
     mInFrame = true;
@@ -2401,8 +2780,12 @@ void VrSession::beginFrame() {
     // periodically instead of once: every Nth accepted frame is answered "no
     // picture", so the session's View goes off and on again, over and over, the
     // way a real runtime does through a doff or a dashboard.
-    if (mTestBlinkEvery && mFrames && (mFrames % mTestBlinkEvery) == 0ull)
+    if (mTestBlinkEvery && mFrames && !mTestBlinkLeft && (mFrames % mTestBlinkEvery) == 0ull)
+        mTestBlinkLeft = mTestBlinkFrames;   // a blink is 1 frame unless asked otherwise
+    if (mTestBlinkLeft) {
+        --mTestBlinkLeft;
         mFrameState.shouldRender = XR_FALSE;
+    }
     if (!mFrameState.shouldRender) {
         if (!mSaidNoRender) { vrLog("the runtime asks for NO picture (shouldRender=0) in state %d", int(mState)); mSaidNoRender = true; }
         // A FRAME IS STILL OWED, with no layers (the spec's contract, and what
@@ -2416,8 +2799,16 @@ void VrSession::beginFrame() {
         // was up. The XR frame is closed here (it is owed and it is paid), the
         // session's own View is switched off so nothing renders two eyes for a
         // picture nobody will see, and the frame goes ahead for everybody else.
+        //
+        // ...AND THE DESKTOP STOPS BEING A COPY OF AN EYE NOBODY IS DRAWING
+        // (lane MIRROR-LIVE-1). This is the owner's F2 exactly: on a real
+        // headset `shouldRender` goes 0 when the wearer LIFTS IT to look at the
+        // desk, and the mirror used to keep painting the last eye for ever. The
+        // rule (setDesktopShowsEye) rides out a blink and hands the desktop its
+        // own camera back for anything longer.
         endFrame();
         setSessionViewEnabled(false);
+        noteFrameWithoutEye();
         return;
     }
     mSaidNoRender = false;
@@ -2438,12 +2829,79 @@ void VrSession::beginFrame() {
         // No tracking this frame (the headset is off the head, the runtime is
         // still coming up). Draw no EYE rather than draw a lie — and, as above,
         // never stop the desktop's frame over it.
+        //
+        // The desktop follows the same rule as a no-picture frame: a moment of
+        // lost tracking is ridden out, a headset that has stopped being worn
+        // gets the editor's own camera back.
         endFrame();
         setSessionViewEnabled(false);
+        noteFrameWithoutEye();
         return;
     }
     mSaidNoPose = false;
     setSessionViewEnabled(true);
+    // THE RUNTIME IS DRAWING AGAIN: the desktop is the eye's copy from the
+    // first frame that has been DRAWN (setDesktopShowsEye refuses to hide a
+    // view with no mirror over it, which is what makes the first frames of a
+    // WiVRn session harmless).
+    mFramesWithoutEye = 0u;
+    setDesktopShowsEye(true);
+
+    // EVERYTHING THE EYES ARE DERIVED FROM IS ONE FUNCTION (lane VR-WARMUP-1),
+    // because the session needs to apply a pose that the runtime did NOT
+    // locate: the stereo warm-up renders the eyes from the rig's origin
+    // through a wide frustum before the first committed frame, and it must
+    // build the camera, VrData, the cull frustum and the screen quads by
+    // exactly the same arithmetic as a real frame or it would warm a chain
+    // shaped differently from the one the wearer gets.
+    applyEyeViews();
+    mHavePose = true;
+    // ...AND THE HANDS, at the SAME predicted display time as the views (phase
+    // 4). One time for every pose in a frame is what keeps a hand attached to
+    // the body it belongs to; locating them a millisecond apart is how a
+    // controller ends up lagging its own arm.
+    //
+    // AFTER the eye geometry rather than in the middle of it (VR-WARMUP-1's
+    // extraction): nothing in the cull camera, the corner rays or the screen
+    // quads reads a hand, and nothing a hand is placed from is written by
+    // them — the proxies are scene nodes, and culling happens later in the
+    // frame, when the render runs. The order between the two groups is free;
+    // the order INSIDE each is not, and neither moved.
+    const bool synced = locateHands(mFrameState.predictedDisplayTime);
+    // ...AND WHAT THE HANDS ARE DOING, UNCONDITIONALLY (finding 3). Same frame
+    // and the same sync the locate used: `synced` false means the controllers
+    // answer nothing this frame (no action set, or a sync the runtime refused),
+    // which is not the same as "there is nothing to report" — an INJECTED hand
+    // is reported through this call, and `focused` is read from the session's
+    // own state rather than left at a struct default.
+    readInput(mFrameState.predictedDisplayTime, synced);
+    // ...AND THE MARKERS THE HOST HUNG FOR THEM, MOVED INSIDE THIS FRAME
+    // (VR-4-FIX finding 4). The poses above did not exist until xrWaitFrame
+    // returned, which is inside this call — so a host pushing the proxies from
+    // its own tick can only ever push the frame before last's (measured: two
+    // frames, ~22 ms at 90 Hz). Placed here, a proxy is drawn exactly where the
+    // hand it stands for is this frame.
+    placeProxies();
+    ++mRendered;
+    return;
+}
+
+// ---------------------------------------------------------------------------
+// THE EYES, FROM `mViews` (lane VR-WARMUP-1's extraction — the body is
+// beginFrame's, moved, not rewritten).
+//
+// IN: `mViews[2]` (the runtime's located views, or the warm-up's synthetic
+// pair) plus the rig (`mOriginPos`/`mOriginRot`) and the world scale.
+// OUT: `mIpd`, the session View's camera pose and custom projection,
+// `mVrData` (both eyes' eye-to-head and reverse-Z projections), the
+// unconverted/converted projection pairs, the eyes' world poses and corner
+// rays, `mAsymmetricFov`, `mWorldHeadPos`/`mWorldHeadRot`, the cull camera and
+// the stereo screen quads.
+//
+// It deliberately does NOT touch `mHavePose`, `mRendered` or the hands: those
+// are statements about the RUNTIME having answered, and a warm-up frame is not
+// the runtime answering.
+void VrSession::applyEyeViews() {
 
     // ---- the pose, in three parts -----------------------------------------
     // THE HEAD is the midpoint of the two eyes, oriented like the left eye (the
@@ -2528,6 +2986,9 @@ void VrSession::beginFrame() {
     mEyeProjection[1] = proj[1];
     mEyeProjectionRS[0] = projRS[0];
     mEyeProjectionRS[1] = projRS[1];
+    // THE HIDDEN-AREA MESH (HAM-1), the first frame the eyes are located and
+    // again whenever the runtime moves a fov. One compare per eye otherwise.
+    ensureHiddenAreaMesh();
     mAsymmetricFov =
         std::fabs(mViews[0].fov.angleLeft - mViews[1].fov.angleLeft) > 1e-6f ||
         std::fabs(mViews[0].fov.angleRight - mViews[1].fov.angleRight) > 1e-6f ||
@@ -2592,31 +3053,11 @@ void VrSession::beginFrame() {
         }
         mView->setStereoEyes(eyes[0], eyes[1]);
     }
-    mHavePose = true;
     // WHERE THE WEARER'S HEAD ENDED UP, for the host that has to move them
     // (VrStatus::headPosition/headRotation). Reported in WORLD space, after the
     // rig, because that is the only frame a locomotion rule can reason in.
     mWorldHeadPos = worldHead;
     mWorldHeadRot = worldHeadRot;
-    // ...AND THE HANDS, at the SAME predicted display time as the views (phase
-    // 4). One time for every pose in a frame is what keeps a hand attached to
-    // the body it belongs to; locating them a millisecond apart is how a
-    // controller ends up lagging its own arm.
-    const bool synced = locateHands(mFrameState.predictedDisplayTime);
-    // ...AND WHAT THE HANDS ARE DOING, UNCONDITIONALLY (finding 3). Same frame
-    // and the same sync the locate used: `synced` false means the controllers
-    // answer nothing this frame (no action set, or a sync the runtime refused),
-    // which is not the same as "there is nothing to report" — an INJECTED hand
-    // is reported through this call, and `focused` is read from the session's
-    // own state rather than left at a struct default.
-    readInput(mFrameState.predictedDisplayTime, synced);
-    // ...AND THE MARKERS THE HOST HUNG FOR THEM, MOVED INSIDE THIS FRAME
-    // (VR-4-FIX finding 4). The poses above did not exist until xrWaitFrame
-    // returned, which is inside this call — so a host pushing the proxies from
-    // its own tick can only ever push the frame before last's (measured: two
-    // frames, ~22 ms at 90 Hz). Placed here, a proxy is drawn exactly where the
-    // hand it stands for is this frame.
-    placeProxies();
     // THE SECOND EYE'S FOUR CORNER RAYS (F2), in world space, from its own fov
     // and its own orientation — the same quantity SceneManager writes into the
     // sky quad's normals for a mono camera (OgreSceneManager.cpp:1487-1499),
@@ -2691,8 +3132,109 @@ void VrSession::beginFrame() {
     }
     // THE SCREEN QUADS, with the poses this frame located (F2).
     syncStereoQuads();
-    ++mRendered;
-    return;
+}
+
+// ---------------------------------------------------------------------------
+// THE STEREO WARM-UP (VrConfig::warmUpFrames; lane VR-WARMUP-1).
+//
+// THE JERK THIS REMOVES, measured by the rig on the pushed smoke build before
+// this existed (spikes/vr-jerk-1, spikes/vr-warmup-1): the session's SECOND
+// frame — the first the runtime asks a picture of — cost 1,179 ms cold and
+// 89 ms warm on the Grand Showroom, 889/920 ms cold and 20 ms warm on the
+// default scene, with `engine.record` holding all of it and the GPU at 0.1 ms.
+// Nothing in that frame is rendering: it is Hlms permutations being generated,
+// SPIR-V compiled and pipelines built, on the frame thread, at the instant the
+// wearer is first shown the world. At the Quest Pro's 62.5 Hz a 1,179 ms frame
+// is 73 repeated headset frames.
+//
+// WHY THE DESKTOP'S WARM-UP CANNOT PAY IT. `hlms_instanced_stereo` is a PASS
+// property (Hlms::preparePassHash reads `CompositorPassSceneDef::
+// mInstancedStereo`), so every shader the eyes need is a different shader from
+// the one the desktop compiled for the same object — measured: 783 ms on the
+// second VR frame after 200 mono frames in the same process. And even a fully
+// warm microcode cache paid 498 ms when the EYE SIZE changed, because two
+// permutations' generated source depends on the target. The only warm-up that
+// covers both is one that renders THIS session's chain, in stereo, at THIS
+// session's eye size — which is what this is.
+//
+// WHY NOT Ogre's own CompositorPassWarmUp (chain::warmUp, the route ogre-patch
+// 0016 unblocked). Two reasons, and the second is the deciding one:
+//   1. `Hlms::preparePassHash`, `HlmsPbs::preparePassHash` and
+//      `HlmsUnlit::preparePassHash` all read the instanced-stereo flag through
+//      `pass->getType() == PASS_SCENE` and a downcast to
+//      CompositorPassSceneDef. A PASS_WARM_UP pass is not PASS_SCENE and
+//      `CompositorPassWarmUpDef` has no such field, so upstream's warm-up
+//      pass can only ever compile the MONO permutation set — the one the eyes
+//      will not use. (Recorded for SPECS/OGRE_UPSTREAM_ISSUES.md; a patch
+//      giving the warm-up def the flag and letting the three readers honour it
+//      is ~20 SOURCE lines, and would still not answer (2).)
+//   2. `WarmUpHelper` shrinks every local texture and renders into a 4x4
+//      target BY DESIGN. That is exactly right for "which shader", and no help
+//      at all for the eye-size half of this defect, which is about the target.
+// A frame of the session's own chain answers both at once, needs no patch, and
+// cannot drift from the chain the wearer gets because it IS that chain.
+//
+// WHAT IT COSTS AND WHO PAYS IT: one or two frames at the start of the session,
+// while the runtime is still showing its own picture (WiVRn answers
+// `shouldRender = 0` for its first frames) and before this session has asked
+// the runtime for a frame at all. Nothing is submitted, nothing is mirrored,
+// no XR frame is opened and none is owed.
+void VrSession::warmUpBeginFrame() {
+    mWarmUpFrame = true;
+    mWarmUpStart = std::chrono::steady_clock::now();
+
+    // THE SYNTHETIC PAIR OF VIEWS. A runtime pose we have not got (no frame has
+    // been waited for, so nothing has been located) and do not need: the rig's
+    // own origin is a place we know is in the room, and 85 degrees in every
+    // direction is what makes the answer independent of where the wearer
+    // actually looks. `mWarmUpDone * 180` turns the second frame right round,
+    // so two frames between them see everything the room holds.
+    //
+    // The eyes are a real 64 mm apart because the IPD is not cosmetic here: it
+    // sets the cull camera's apex pull-back (applyEyeViews), and a zero
+    // separation would warm a frustum narrower than the one the eyes render.
+    const float kWarmUpFovDeg = 85.0f;
+    const float kWarmUpHalfIpd = 0.032f;
+    const float fov = float(Ogre::Degree(kWarmUpFovDeg).valueRadians());
+    const Ogre::Quaternion yaw(Ogre::Degree(float(mWarmUpDone) * 180.0f),
+                               Ogre::Vector3::UNIT_Y);
+    for (int eye = 0; eye < 2; ++eye) {
+        mViews[eye] = XrView{ XR_TYPE_VIEW };
+        mViews[eye].pose.orientation = { yaw.x, yaw.y, yaw.z, yaw.w };
+        const Ogre::Vector3 off =
+            yaw * Ogre::Vector3((eye == 0 ? -1.0f : 1.0f) * kWarmUpHalfIpd, 0.0f, 0.0f);
+        mViews[eye].pose.position = { off.x, off.y, off.z };
+        // XrFovf is (left, right, up, down) and the two horizontal angles are
+        // signed: left is negative, exactly as a runtime reports them.
+        mViews[eye].fov = { -fov, fov, fov, -fov };
+    }
+    // ...THROUGH THE SAME ARITHMETIC AS A REAL FRAME, which is the whole point
+    // of the extraction: the camera, VrData, the cull frustum and the stereo
+    // screen quads are built by the code the wearer's frames use, so the chain
+    // that warms is the chain that runs. `mHavePose` is deliberately NOT set —
+    // the runtime has located nothing, and `status().posesValid` must not claim
+    // otherwise.
+    applyEyeViews();
+    setSessionViewEnabled(true);
+    // AND THE MONITOR IS TOLD WHAT THIS FRAME IS (FrameCause::WarmUp), so a
+    // capture of a session start reads "warmup" on the expensive frames and
+    // "driver" on the wearer's. Consumed by the monitor's own beginFrame, which
+    // the engine opens a few lines after this call returns.
+    if (mEngine) mEngine->setNextFrameCause(FrameCause::WarmUp);
+}
+
+void VrSession::warmUpEndFrame() {
+    mWarmUpFrame = false;
+    const float ms = std::chrono::duration<float, std::milli>(
+                         std::chrono::steady_clock::now() - mWarmUpStart).count();
+    mWarmUpMs += ms;
+    ++mWarmUpDone;
+    if (mWarmUpLeft) --mWarmUpLeft;
+    vrLog("stereo warm-up frame %u: %.1f ms (%ux%u per eye, heading %.0f deg)",
+          mWarmUpDone, ms, mEyeWidth, mEyeHeight, float((mWarmUpDone - 1u) * 180u));
+    if (!mWarmUpLeft)
+        vrLog("stereo warm-up done: %u frame(s), %.1f ms - the eyes' permutations and "
+              "pipelines are built before the first committed frame", mWarmUpDone, mWarmUpMs);
 }
 
 /// HAS THE DEVICE GONE? (F3.) The frame that just ran may have thrown
@@ -2709,6 +3251,24 @@ bool VrSession::deviceLost() const {
 }
 
 void VrSession::endFrame() {
+    // A WARM-UP FRAME CLOSES HERE TOO, and it is the only close it gets: there
+    // is no XR frame to end (warmUpBeginFrame opened none), but the engine's
+    // frame — the one that just recorded the two eyes and built everything they
+    // needed — ends at this call, which is where its cost can be charged.
+    if (mWarmUpFrame) {
+        warmUpEndFrame();
+        // A DEVICE LOST INSIDE A WARM-UP FRAME ENDS THE SESSION LIKE ANY OTHER
+        // (lead review at merge): the warm-up is the biggest frame the session
+        // records, and the loss surfaces in its commit. The app's own latch
+        // ends the process regardless; this is for the engine-only suites and
+        // a host without it. No image was acquired, so nothing is released.
+        if (deviceLost()) {
+            vrLog("the Vulkan device was lost inside a warm-up frame - ending the session");
+            mState = VrState::Lost; mRunning = false;
+            setSessionViewEnabled(false);
+        }
+        return;
+    }
     if (!mInFrame) return;
     // A LOST DEVICE ENDS THE SESSION — IT DOES NOT KEEP SUBMITTING (F3).
     //
@@ -2782,6 +3342,42 @@ void VrSession::setSessionViewEnabled(bool on) {
 // the target is in RenderTarget and written: the barrier it emits carries the
 // right source scope, no `assumeTransition` repair is needed, and the copy
 // rides the frame's own submit instead of paying a second one.
+Ogre::TextureGpu *VrSession::scaleImage(unsigned w, unsigned h) {
+    if (mScaleImage && mScaleImage->getWidth() == w && mScaleImage->getHeight() == h)
+        return mScaleImage;
+    destroyScaleImage();
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::TextureGpuManager *tm =
+        root ? root->getRenderSystem()->getTextureGpuManager() : nullptr;
+    if (!tm) return nullptr;
+    std::string err;
+    JAH_TRY {
+        // RenderToTexture is what gives a Vulkan texture the transfer usage
+        // bits on both sides in this pin (VulkanTextureGpu's createInternal),
+        // which is all this image needs: it is never rendered into.
+        mScaleImage = tm->createTexture("JahshakaVrEyeScale", Ogre::GpuPageOutStrategy::Discard,
+                                        Ogre::TextureFlags::RenderToTexture,
+                                        Ogre::TextureTypes::Type2D);
+        mScaleImage->setResolution(w, h);
+        mScaleImage->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+        mScaleImage->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+        vrLog("eye scale image: %ux%u RGBA8_UNORM (the measurement override's scale happens "
+              "between two UNORM images, so the copy into the sRGB swapchain stays raw)", w, h);
+    } JAH_CATCH(err, (vrLog("eye scale image REFUSED (%s) - the measurement override's frames "
+                            "will not reach the runtime", err.c_str()),
+                      mScaleImage = nullptr, nullptr));
+    return mScaleImage;
+}
+
+void VrSession::destroyScaleImage() {
+    if (!mScaleImage) return;
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    if (root)
+        if (Ogre::TextureGpuManager *tm = root->getRenderSystem()->getTextureGpuManager())
+            tm->destroyTexture(mScaleImage);
+    mScaleImage = nullptr;
+}
+
 void VrSession::copyEyes() {
     OgreView *view = mView;
     if (!view) return;
@@ -2844,8 +3440,36 @@ void VrSession::copyEyes() {
                            dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         } else {
             // ONLY WHEN THE MEASUREMENT OVERRIDE IS IN USE (VrConfig::
-            // overrideEyeWidth): a copy cannot scale, so the eye is blitted.
-            // The product path never takes this branch.
+            // overrideEyeWidth): a copy cannot scale, so the eye is SCALED into
+            // a transient image of the swapchain's size and that image is
+            // copied. The product path never takes this branch.
+            //
+            // WHY NOT BLIT STRAIGHT INTO THE SWAPCHAIN, which is what this did
+            // until the Fable read's F3 caught it: `vkCmdBlitImage` CONVERTS.
+            // It reads the source through its format (UNORM: the raw byte as a
+            // linear value) and writes through the destination's — and the
+            // destination is now _SRGB, so the write ENCODES. That is exactly
+            // the second encode the whole of this lane removes, reintroduced on
+            // every `vr.begin({eyeWidth, eyeHeight})` arm: about a stop too
+            // bright, in a measurement whose entire purpose is to be comparable
+            // with the product path.
+            //
+            // So the scale happens UNORM -> UNORM (no conversion: the same
+            // format on both sides) and the result reaches the _SRGB swapchain
+            // through the same raw `vkCmdCopyImage` the product path uses. One
+            // encode, both paths. A mutable-format view of the runtime's image
+            // would be cheaper and is not portable — a runtime's swapchain
+            // images are rarely created with VK_IMAGE_CREATE_MUTABLE_FORMAT.
+            Ogre::TextureGpu *scale = scaleImage(scW, scH);
+            if (!scale) return;
+            const VkImage scaleImg =
+                static_cast<Ogre::VulkanTextureGpu *>(scale)->getFinalTextureName();
+            {
+                Ogre::ResourceTransitionArray t;
+                solver.resolveTransition(t, scale, Ogre::ResourceLayout::CopyDst,
+                                         Ogre::ResourceAccess::Write, 0);
+                vkRs->executeResourceTransition(t);
+            }
             VkImageBlit region{};
             region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             region.srcOffsets[0] = { int32_t(eye * mEyeWidth), 0, 0 };
@@ -2854,8 +3478,20 @@ void VrSession::copyEyes() {
             region.dstOffsets[0] = { 0, 0, 0 };
             region.dstOffsets[1] = { int32_t(scW), int32_t(scH), 1 };
             vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
+                           scaleImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
                            VK_FILTER_LINEAR);
+            {
+                Ogre::ResourceTransitionArray t;
+                solver.resolveTransition(t, scale, Ogre::ResourceLayout::CopySrc,
+                                         Ogre::ResourceAccess::Read, 0);
+                vkRs->executeResourceTransition(t);
+            }
+            VkImageCopy copy{};
+            copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.extent = { scW, scH, 1 };
+            vkCmdCopyImage(cmd, scaleImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
         }
 
         b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -2911,24 +3547,125 @@ void VrSession::teardownMirror() {
 }
 
 void VrSession::setMirrorView(OgreView *v) {
-    if (mMirrorView != v) teardownMirror();
+    // THE VIEW GOES BACK THE WAY IT CAME (lane MIRROR-LIVE-1). A host clears
+    // its mirror when it stops showing the page; the View it named is one this
+    // object may have switched OFF, and nothing else knows that. Restored
+    // before the pointer is forgotten — and only ever restored by whoever took
+    // it, which is what `mDesktopViewOff` records.
+    //
+    // It is deliberately set ENABLED and not to "whatever the host wants": the
+    // host's own answer (a hidden page, a stopped Player) is applied by the
+    // host on the very next line of its own teardown, and it wins. This only
+    // undoes what this object did.
+    if (mMirrorView != v) { setDesktopShowsEye(false); teardownMirror(); }
     mMirrorView = v;
+    mFramesWithoutEye = 0u;
     syncMirror();
 }
 
-/// THE MIRROR SHOWS THE LAST EYE PICTURE, AND WHILE THE SESSION VIEW IS OFF
-/// THAT PICTURE IS STALE (V2F-8, by design). The mirror is a quad over the eye
-/// TARGET, and that target is only rewritten by a frame the runtime asked for:
-/// when it asks for none — the headset is off the head, the dashboard is up,
-/// the runtime is paused — the session's own View is switched off for those
-/// frames (F4) and the mirror keeps painting the last eye that was drawn. That
-/// is the right answer for a mirror (a frozen last frame beats a black hole,
-/// and the desktop's own picture is still being drawn underneath it), and it is
-/// stated here so that "the mirror froze" is read as the runtime pausing rather
-/// than as the loop stopping — `vr.state()` says which.
+/// THE ONE RULE FOR WHO PAINTS THE DESKTOP DURING A SESSION (lane
+/// MIRROR-LIVE-1; the owner's finding F2 of the push-#50 smoke: "in the editor
+/// the 3D view is not the same as the VR view — a static image, or its own
+/// camera").
+///
+/// THE OWNER'S RULE IS ONE PIPELINE WHILE THE HEADSET IS WORN: the desktop is a
+/// COPY of the eye, so a frame costs two eyes and a blit instead of two eyes
+/// and a third render. That was already true — and it was also true when the
+/// runtime STOPPED asking for pictures, which is exactly the moment somebody
+/// looks at the desk: the wearer lifts the headset, the runtime drops out of
+/// FOCUSED and answers `shouldRender = 0`, the eye target stops being written
+/// and the mirror went on painting the last eye that was drawn. A frozen still,
+/// at the only moment anybody was looking at it.
+///
+/// So the mirror FOLLOWS THE RUNTIME, and this is the whole state table:
+///
+///   runtime            shouldRender  poses    who paints the desktop
+///   -----------------  ------------  -------  ------------------------------
+///   Lost / not running      -           -     own camera, at once
+///   Ready/Synchronized/     -           -     own camera, at once (nobody is
+///   Visible (not focused)                     wearing it, or another app has
+///                                             the wearer's attention)
+///   Focused                 0           -     the eye, for up to
+///   Focused                 1        invalid  kDesktopHoldFrames frames, then
+///                                             the own camera
+///   Focused                 1         valid   the eye, from the first frame
+///                                             that has been DRAWN
+///
+/// WHY THE HOLD, and why only while FOCUSED. A runtime skips single frames for
+/// reasons that are not "nobody is looking": a reprojection hiccup, a frame the
+/// compositor decided to reuse, WiVRn's first frames on a fresh session. Two
+/// pictures alternating at 90 Hz is worse than either, so a blink is ridden
+/// out — but ONLY while the session still has focus, because the states that
+/// mean the headset is off the head (VISIBLE, SYNCHRONIZED) are a statement,
+/// not a hiccup, and those hand the desktop back on the same frame.
+///
+/// The count is in FRAMES rather than milliseconds because it is the runtime's
+/// own cadence that is being ridden out, and that cadence IS the frame (the
+/// session paces the loop from xrWaitFrame): six frames is 67 ms at 90 Hz and
+/// 96 ms at 62.5 — long enough to swallow any hiccup measured, short enough
+/// that a person lifting the headset sees their editor before they have
+/// finished lifting it.
+///
+/// THE ENGINE OWNS THIS FLAG. The hosts used to switch the desktop View off
+/// themselves (a `mMirrorViewOff` bool in EditorVrPreview and PlayerVr, on a
+/// `status().rendered > 0` test), which put the decision in two places that
+/// could not see the runtime's answer for THIS frame. They now only name the
+/// view and read the result (`VrStatus::mirrorShowing`).
+void VrSession::setDesktopShowsEye(bool eye) {
+    // A session asked for no mirror (`mirror: "none"` — the desktop as a third,
+    // independent camera for somebody at the desk) never takes the desktop
+    // away, so there is nothing here to give back either.
+    const bool want = eye && mMirrorView && mConfig.mirror != VrMirrorMode::None;
+    mShowEye = want;
+    // Builds the quad when the eye paints and takes it down when it does not —
+    // in the same call, so the workspace and the enabled flag can never
+    // disagree for a frame.
+    syncMirror();
+    if (!mMirrorView) { mDesktopViewOff = false; return; }
+    // NEVER HIDE A VIEW NOBODY IS PAINTING OVER (VR-3b's rule, kept): the
+    // mirror exists only once a frame the runtime ASKED FOR has been drawn into
+    // the eye target. Until then the desktop keeps its own picture, which is
+    // also what makes a session that never renders harmless.
+    const bool off = want && mMirrorWorkspace != nullptr && mMirrorWorkspace->getEnabled();
+    if (off == mDesktopViewOff) return;
+    mDesktopViewOff = off;
+    mMirrorView->setEnabled(!off);
+    vrLog("the desktop now shows %s", off ? "the headset's eye" : "its own camera");
+}
+
+void VrSession::noteFrameWithoutEye() {
+    // The hold is only for a runtime that still has the wearer's attention;
+    // every other state hands the desktop back on this frame (the table above).
+    if (mFramesWithoutEye < ~0u) ++mFramesWithoutEye;
+    const bool hold = mState == VrState::Focused &&
+                      mFramesWithoutEye <= kDesktopHoldFrames;
+    // `mShowEye` and not `true`: a skipped frame can only KEEP a copy that is
+    // already up, never start one.
+    setDesktopShowsEye(hold && mShowEye);
+}
+
+/// THE MIRROR EXISTS ONLY WHILE THE RUNTIME IS DRAWING EYES (lane
+/// MIRROR-LIVE-1 — this used to read "a frozen last eye beats a black hole",
+/// which was V2F-8's design and the owner's F2 defect).
+///
+/// The mirror is a quad over the eye TARGET, and that target is only rewritten
+/// by a frame the runtime asked for. When it asks for none — the headset is off
+/// the head, the dashboard is up, the runtime is paused — there is no live eye
+/// to be a window onto, so the quad comes DOWN and the desktop View draws its
+/// own camera again (setDesktopShowsEye's rule and its hysteresis). The
+/// desktop is therefore never a still: it is the headset's picture while the
+/// headset is being worn, and the editor's own picture the moment it is not.
+/// `vr.state().mirror.showing` says which, live.
 void VrSession::syncMirror() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root || !mView) return;
+    // NOT WHILE THE SESSION IS WARMING UP (VR-WARMUP-1). A warm-up frame draws
+    // the room through an 85-degree frustum from the rig's origin — a correct
+    // thing to compile from and a nonsense thing to look at — and the mirror
+    // is a quad over that very target on the DESKTOP's picture. The mirror is
+    // built on the session's first real frame instead, one or two frames later,
+    // and the desktop never shows the warm-up.
+    if (mWarmUpLeft) return;
     // A camera IS required even though every pass in the mirror node is a quad:
     // CompositorWorkspace takes a default camera and dereferences it. A view
     // whose scene has not been set yet has none.
@@ -2963,9 +3700,9 @@ void VrSession::syncMirror() {
     // scene, line blocks and a white band in a loaded one, which is exactly
     // what the owner photographed. A mirror is a window onto the headset's
     // picture; with no picture yet there is nothing to be a window onto, so the
-    // desktop keeps its OWN (the host leaves its view drawing until the same
-    // moment — PlayerVr::step). From the first accepted frame on, the note
-    // above applies: a frozen last eye beats a black hole.
+    // desktop keeps its OWN. (The host no longer has a half of this rule: the
+    // engine owns the desktop View's flag since MIRROR-LIVE-1, so "there is no
+    // eye yet" and "the desktop draws its own" are one condition.)
     const bool wanted = mMirrorView && mRendered > 0ull &&
                         mConfig.mirror != VrMirrorMode::None && mView->targetTexture() &&
                         mMirrorView->targetTexture() && mMirrorView->camera();
@@ -2978,8 +3715,19 @@ void VrSession::syncMirror() {
     const unsigned gen = mMirrorView->workspaceGeneration() + mView->workspaceGeneration();
     Ogre::TextureGpu *const target = mMirrorView->targetTexture();
     if (mMirrorWorkspace && gen == mMirrorGeneration && target == mMirrorTarget &&
-        target->getWidth() == mMirrorW && target->getHeight() == mMirrorH)
+        target->getWidth() == mMirrorW && target->getHeight() == mMirrorH) {
+        // THE PER-FRAME FLIP IS A FLAG, NOT A REBUILD (lane MIRROR-LIVE-1).
+        // Whether the eye is painted this frame is `mShowEye` — the rule on
+        // setDesktopShowsEye — and it changes whenever a wearer lifts the
+        // headset and puts it back, which is a thing people do all day. A
+        // teardown and a rebuild of the quad's node definitions cost 2.3 ms on
+        // the rig, measured, ON EXACTLY THE FRAME the person is looking at the
+        // screen; a workspace's enabled flag costs nothing (it is what
+        // View::setEnabled does for the same reason). The definitions are kept
+        // for the life of the session and torn down with it.
+        mMirrorWorkspace->setEnabled(mShowEye);
         return;
+    }
     teardownMirror();
     if (!mMirrorView->workspace()) return;   // nothing to paint over yet
 
@@ -2994,8 +3742,11 @@ void VrSession::syncMirror() {
     Ogre::CompositorChannelVec targets;
     targets.push_back(mMirrorView->targetTexture());
     targets.push_back(mView->targetTexture());
+    // Created ENABLED only when the eye is what the desktop shows right now:
+    // a stretch of no-picture frames may build it (a resize, a chain rebuild on
+    // either side) while the desktop is drawing its own camera.
     mMirrorWorkspace = cm->addWorkspace(mScene->sceneManager(), targets, mMirrorView->camera(),
-                                        mMirrorWorkspaceDef, true);
+                                        mMirrorWorkspaceDef, mShowEye);
     mMirrorGeneration = gen;
     mMirrorTarget = target;
     mMirrorW = target->getWidth();
@@ -3017,9 +3768,21 @@ VrStatus VrSession::status() const {
     s.frames = mFrames;
     s.rendered = mRendered;
     s.ipd = mIpd;
+    s.warmUpFrames = mWarmUpDone;
+    s.warmUpMs = mWarmUpMs;
     s.eyeWidth = mEyeWidth;
     s.eyeHeight = mEyeHeight;
+    // THE COLOUR CONTRACT, REPORTED (lane EYE-GRADE-1's fix round). The log
+    // line is where a diagnosis starts; this is what a suite, the scene-issue
+    // bar and the eye dither can act on.
+    s.swapchainFormat = vkFormatName(mSwapchainFormat);
+    s.colourEncodedOnce = mColourEncodedOnce;
     s.mirror = mMirrorView ? mConfig.mirror : VrMirrorMode::None;
+    // THE WISH ABOVE, THE ANSWER HERE (lane MIRROR-LIVE-1). Read from the flag
+    // that really drives the two things a host can see — the mirror workspace
+    // and the desktop View's enabled bit — rather than recomputed, so
+    // `vr.state().mirror.showing` cannot disagree with the window.
+    s.mirrorShowing = mDesktopViewOff ? VrDesktopPicture::Eye : VrDesktopPicture::Own;
     s.worldScale = mConfig.worldScale;
     s.asymmetricFov = mAsymmetricFov;
     s.headPosition = Vec3(mWorldHeadPos.x, mWorldHeadPos.y, mWorldHeadPos.z);
@@ -3028,6 +3791,17 @@ VrStatus VrSession::status() const {
     s.origin = Vec3(mOriginPos.x, mOriginPos.y, mOriginPos.z);
     s.originYaw = mOriginYawDeg;
     s.spaceChanges = mSpaceChanges;
+    // THE HIDDEN-AREA MESH (HAM-1). `source` says where the shape came from and
+    // the fractions are the RUNTIME'S OWN answer, measured on the geometry it
+    // handed over — the number a saving is computed from, and the one that
+    // differs between a simulated HMD and a real headset.
+    s.hiddenAreaSource = mHamSource.empty() ? std::string("none") : mHamSource;
+    // A warm-up build's numbers are the synthetic fov's, not the runtime's:
+    // report nothing until the real build exists.
+    for (int e = 0; e < 2; ++e) {
+        s.hiddenAreaFraction[e] = mHamSynthetic ? 0.0f : mHamFraction[e];
+        s.hiddenAreaTriangles[e] = mHamSynthetic ? 0u : mHamTriangles[e];
+    }
     for (int h = 0; h < 2; ++h) {
         s.hands[h].valid = mHandValid[h];
         s.hands[h].position = Vec3(mHandPos[h].x, mHandPos[h].y, mHandPos[h].z);
@@ -3065,6 +3839,11 @@ VrStatus VrSession::status() const {
     s.bindingProfilesAccepted = mBindingProfilesAccepted;
     s.handActions = mHandActions;
     s.handJoints = mHandJoints;
+    // WHETHER THIS SESSION WAS ASKED FOR BARE HANDS AT ALL (lane
+    // HANDS-SWITCH-1) — the project's own row, latched at creation. It is what
+    // makes "three blocks offered, not four" legible instead of looking like a
+    // runtime that refused one.
+    s.handsEnabled = mConfig.hands;
     return s;
 }
 
@@ -3149,8 +3928,23 @@ VrSession::~VrSession() {
     // a pass holds a raw Camera* and destroying it first segfaults on the next
     // frame (the PiP lane's T6).
     destroyXr();
+    // THE DESKTOP GETS ITS PICTURE BACK BEFORE THE MIRROR GOES (lane
+    // MIRROR-LIVE-1): this object switched that View off, so this object
+    // switches it on again — whatever ends the session, and whoever forgot to.
+    // The host applies its own answer (a hidden page, a stopped Player) right
+    // after, and it wins.
+    setDesktopShowsEye(false);
     teardownMirror();
     dropStereoQuads();
+    // The mask's Item and its mesh, before the View and long before Root: a
+    // MeshPtr that outlives Root throws in the VaoManager.
+    destroyHiddenAreaMesh();
+    // ...and the measurement path's transient scale image, on the same terms.
+    destroyScaleImage();
+    // The process-wide colour latch belongs to a LIVE session (vr::
+    // colourEncodedOnce): a chain built after this one has ended must not be
+    // told a runtime is about to re-encode its picture.
+    sColourEncodedOnce = true;
     if (mView) {
         mView->removeWorkspaceListener(this);
         if (mView->camera()) mView->camera()->setVrData(nullptr);
@@ -3164,6 +3958,345 @@ VrSession::~VrSession() {
         mScene->sceneManager()->destroyCamera(mCullCamera);
         mCullCamera = nullptr;
     }
+}
+
+// ---------------------------------------------------------------------------
+// THE HIDDEN-AREA MESH (lane HAM-1; SPECS/VR_SPEC.md §9, V1-RIG's COST.txt §3)
+//
+// WHAT IT IS. A headset's lenses do not show the corners of the rectangle we
+// render: the eye is round, the barrel cuts it, and the nose takes a bite out
+// of the inner edge. Those pixels are shaded and then thrown away by the
+// runtime's own distortion. The fix is as old as VR: draw the shape they occupy
+// FIRST, depth-only, at the NEAR plane, so every later draw fails the depth
+// test there and nothing is ever shaded behind it.
+//
+// WHERE THE SHAPE COMES FROM, and this is the whole reason this is engine code
+// and not a config file: THE RUNTIME KNOWS IT. `XR_KHR_visibility_mask` hands
+// over a triangle mesh per eye for the headset that is actually plugged in —
+// WiVRn answers it for the owner's Quest Pro and Monado's simulated HMD answers
+// it on the rig (12 vertices, 4 triangles — an eighth along each edge, so 1/32
+// of the area, the 3.12 % the session logs). The pin also
+// ships `HiddenAreaMeshVrGenerator` + `HiddenAreaMeshVr.cfg`, which BUILDS a
+// shape from two circles and a nose radius per device name — but the only
+// enabled entry in that file is the Vive, so it answers for no headset we own
+// or test with. The runtime's own geometry is the source; there is no fallback
+// (see the report's "what was deliberately not built").
+//
+// THE SPACE THE VERTICES ARE IN is the view's TANGENT space: the plane z = -1
+// of that eye's frustum, +Y up, so a vertex (x, y) is a direction (x, y, -1).
+// Mapping it into that eye's clip rectangle is therefore exactly the eye's own
+// four tangents, which is the same quantity `projectionFromFov` builds the
+// projection from:
+//
+//     ndc.x = (2x - (tanR + tanL)) / (tanR - tanL)
+//     ndc.y = (2y - (tanU + tanD)) / (tanU - tanD)
+//
+// MEASURED, not assumed (the lane's probe against Monado): the mask's x extent
+// is 0.916331, which is tan(42.5 degrees) to six digits, and the simulated
+// HMD's horizontal fov is 85 degrees — i.e. the mask reaches EXACTLY the edge
+// of the view rectangle in tangent space, as the interpretation requires. The
+// engine logs both numbers every session so the reading can be re-checked on
+// any runtime.
+//
+// WHY ONE MESH FOR BOTH EYES. The vertex carries its eye INDEX in z and the
+// pin's own vertex program (`Ogre/VR/HiddenAreaMeshVr`, already in the staged
+// media — Samples/Media/2.0/scripts/materials/Common) writes it to
+// `gl_ViewportIndex`, so one draw covers both eyes' viewports. That needs
+// `VK_EXT_shader_viewport_index_layer`, which this driver has and which Ogre
+// enables whenever the device offers it (OgreVulkanDevice.cpp:1239); the
+// alternative is a draw per eye, and the fallback is that the mask is simply
+// not built. Geometry that spills past an eye's edge is cut by the pass's own
+// SCISSOR, which `chain::applyStereo` sets to the same half as the viewport.
+//
+// WHY IT DRAWS AT RENDER QUEUE 0 AND NOT IN A PASS OF ITS OWN. A pass of its
+// own runs its own cull (CompositorPassScene::execute calls
+// `_updateCullPhase01`; the pin culls per render-queue RANGE, so a queue-0-only
+// pass would walk queue 0 alone, and a pass can also reuse the previous cull's
+// data through `mReuseCullData`) plus a pass's own setup and target work, for
+// four triangles. An object in the first scene pass costs none of that — it is
+// simply the first thing drawn. So the mask is an object at queue 0 SUBGROUP 0, and the
+// sky (the only other tenant of queue 0) moved to subgroup 1 to be behind it
+// (OgreSky.cpp's tuneSkyRenderable says the same thing from the sky's side).
+// With SSR on, the pass that draws it first is the depth prepass, which is
+// where the depth belongs anyway.
+//
+// WHAT KEEPS IT OUT OF EVERY OTHER PICTURE is kVrMaskBit — carried INSTEAD OF
+// kVisibleBit, so no capture path can see it — plus `helperBitsToDrop`, which
+// takes the bit out of every view's node but a session's eye pair. See the
+// bit's own note in EnginePrivate.h.
+void VrSession::fetchHiddenAreaData() {
+    mHamData[0] = HamData();
+    mHamData[1] = HamData();
+    if (!mConfig.hiddenAreaMask) { mHamSource = "off"; return; }
+    mHamSource = "none";
+    if (!mBoot || !mBoot->GetVisibilityMask || mSession == XR_NULL_HANDLE) return;
+    for (uint32_t eye = 0; eye < 2u; ++eye) {
+        // The two-call pattern: counts first, then the fill. A runtime is
+        // entitled to answer zero (no mask for this eye), and that is not an
+        // error — it is a headset whose lenses show the whole rectangle.
+        XrVisibilityMaskKHR m{ XR_TYPE_VISIBILITY_MASK_KHR };
+        XrResult r = mBoot->GetVisibilityMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                             eye, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR,
+                                             &m);
+        if (XR_FAILED(r) || m.vertexCountOutput == 0u || m.indexCountOutput < 3u) {
+            vrLog("hidden-area mesh: eye %u has none (%s, %u vertices, %u indices)", eye,
+                  xrResultName(mBoot->mInstance, r).c_str(), m.vertexCountOutput,
+                  m.indexCountOutput);
+            continue;
+        }
+        std::vector<XrVector2f> verts(m.vertexCountOutput);
+        std::vector<uint32_t> idx(m.indexCountOutput);
+        m.vertexCapacityInput = uint32_t(verts.size());
+        m.indexCapacityInput = uint32_t(idx.size());
+        m.vertices = verts.data();
+        m.indices = idx.data();
+        r = mBoot->GetVisibilityMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye,
+                                     XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &m);
+        if (XR_FAILED(r)) {
+            vrLog("hidden-area mesh: eye %u refused the fill (%s)", eye,
+                  xrResultName(mBoot->mInstance, r).c_str());
+            continue;
+        }
+        // A triangle list, and nothing is trusted about it: an index past the
+        // vertex array takes the eye's mask away rather than reading memory.
+        const uint32_t tris = m.indexCountOutput / 3u;
+        bool sane = true;
+        for (uint32_t i = 0; i < tris * 3u; ++i)
+            if (idx[i] >= verts.size()) { sane = false; break; }
+        if (!sane) {
+            vrLog("hidden-area mesh: eye %u handed over an out-of-range index - ignored", eye);
+            continue;
+        }
+        mHamData[eye].x.resize(verts.size());
+        mHamData[eye].y.resize(verts.size());
+        float minx = verts[0].x, maxx = verts[0].x, miny = verts[0].y, maxy = verts[0].y;
+        for (size_t v = 0; v < verts.size(); ++v) {
+            mHamData[eye].x[v] = verts[v].x;
+            mHamData[eye].y[v] = verts[v].y;
+            minx = std::min(minx, verts[v].x); maxx = std::max(maxx, verts[v].x);
+            miny = std::min(miny, verts[v].y); maxy = std::max(maxy, verts[v].y);
+        }
+        mHamData[eye].idx.assign(idx.begin(), idx.begin() + tris * 3u);
+        mHamSource = "runtime";
+        vrLog("hidden-area mesh: eye %u %zu vertices, %u triangles, tangent bbox "
+              "x[%.6f %.6f] y[%.6f %.6f]", eye, verts.size(), tris,
+              double(minx), double(maxx), double(miny), double(maxy));
+    }
+}
+
+namespace {
+
+/// The area of ONE triangle clipped to the eye's clip rectangle [-1,1]^2,
+/// Sutherland-Hodgman against four half-planes then the shoelace formula.
+///
+/// WHY CLIP AT ALL. The number this feeds is `VrStatus::hiddenAreaFraction`,
+/// which is what a saving is computed from and what the suite compares against
+/// a PIXEL count — so geometry that spills past the eye's edge (the scissor
+/// throws those pixels away, see the note above) must not be counted as
+/// masked. A runtime whose mask stops exactly at the edge, like Monado's, is
+/// unaffected by this.
+double clippedTriangleArea(float ax, float ay, float bx, float by, float cx, float cy) {
+    float px[8] = { ax, bx, cx }, py[8] = { ay, by, cy };
+    int n = 3;
+    // Four edges: x >= -1, x <= 1, y >= -1, y <= 1.
+    for (int edge = 0; edge < 4; ++edge) {
+        float qx[8], qy[8];
+        int m = 0;
+        for (int i = 0; i < n && m < 7; ++i) {
+            const int j = (i + 1) % n;
+            const float vi = edge == 0 ? px[i] + 1.0f : edge == 1 ? 1.0f - px[i]
+                           : edge == 2 ? py[i] + 1.0f : 1.0f - py[i];
+            const float vj = edge == 0 ? px[j] + 1.0f : edge == 1 ? 1.0f - px[j]
+                           : edge == 2 ? py[j] + 1.0f : 1.0f - py[j];
+            if (vi >= 0.0f) { qx[m] = px[i]; qy[m] = py[i]; ++m; }
+            if ((vi >= 0.0f) != (vj >= 0.0f) && m < 7) {
+                const float t = vi / (vi - vj);
+                qx[m] = px[i] + t * (px[j] - px[i]);
+                qy[m] = py[i] + t * (py[j] - py[i]);
+                ++m;
+            }
+        }
+        n = m;
+        for (int i = 0; i < n; ++i) { px[i] = qx[i]; py[i] = qy[i]; }
+        if (n < 3) return 0.0;
+    }
+    double twice = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        twice += double(px[i]) * double(py[j]) - double(px[j]) * double(py[i]);
+    }
+    return std::fabs(twice) * 0.5;
+}
+
+bool sameFov(const XrFovf &a, const XrFovf &b) {
+    return std::fabs(a.angleLeft - b.angleLeft) < 1e-5f &&
+           std::fabs(a.angleRight - b.angleRight) < 1e-5f &&
+           std::fabs(a.angleUp - b.angleUp) < 1e-5f &&
+           std::fabs(a.angleDown - b.angleDown) < 1e-5f;
+}
+
+}   // namespace
+
+void VrSession::ensureHiddenAreaMesh() {
+    if (!mConfig.hiddenAreaMask) return;
+    if (mHamData[0].idx.empty() && mHamData[1].idx.empty()) return;   // nothing to build
+    if (mHamBuilt && sameFov(mHamFov[0], mViews[0].fov) && sameFov(mHamFov[1], mViews[1].fov))
+        return;                                                       // the common path
+    if (!mScene || !mScene->sceneManager()) return;
+    if (mHamBuilt && mHamSynthetic)
+        vrLog("hidden-area mesh: building for the runtime's fov (the warm-up build "
+              "used the synthetic one)");
+    else if (mHamBuilt)
+        vrLog("hidden-area mesh: the runtime's fov moved - rebuilding");
+    destroyHiddenAreaMesh();
+
+    // ONE triangle list, both eyes, xy in that eye's NDC and z = the eye index.
+    std::vector<float> vb;
+    size_t total = 0;
+    for (int eye = 0; eye < 2; ++eye) total += mHamData[eye].idx.size();
+    vb.reserve(total * 4u);
+    for (int eye = 0; eye < 2; ++eye) {
+        const HamData &d = mHamData[eye];
+        if (d.idx.empty()) continue;
+        const XrFovf &f = mViews[eye].fov;
+        const float l = std::tan(f.angleLeft), r = std::tan(f.angleRight);
+        const float dn = std::tan(f.angleDown), u = std::tan(f.angleUp);
+        const float w = r - l, h = u - dn;
+        if (!(w > 1e-6f) || !(h > 1e-6f)) {
+            // A frustum this degenerate cannot be mapped into; the eye keeps
+            // its whole rectangle rather than getting a mask of nonsense.
+            vrLog("hidden-area mesh: eye %d has a degenerate fov - skipped", eye);
+            continue;
+        }
+        double area = 0.0;
+        unsigned tris = 0;
+        for (size_t i = 0; i + 2 < d.idx.size(); i += 3) {
+            float nx[3], ny[3];
+            for (int c = 0; c < 3; ++c) {
+                const uint32_t v = d.idx[i + size_t(c)];
+                nx[c] = (2.0f * d.x[v] - (r + l)) / w;
+                ny[c] = (2.0f * d.y[v] - (u + dn)) / h;
+            }
+            area += clippedTriangleArea(nx[0], ny[0], nx[1], ny[1], nx[2], ny[2]);
+            ++tris;
+            for (int c = 0; c < 3; ++c) {
+                vb.push_back(nx[c]);
+                vb.push_back(ny[c]);
+                vb.push_back(float(eye));   // -> gl_ViewportIndex
+                vb.push_back(1.0f);
+            }
+        }
+        // The rectangle's own area is 4, so the fraction is area/4.
+        mHamFraction[eye] = float(area * 0.25);
+        mHamTriangles[eye] = tris;
+    }
+    if (vb.empty()) return;
+
+    try {
+        Ogre::Root *root = Ogre::Root::getSingletonPtr();
+        Ogre::VaoManager *vao =
+            root && root->getRenderSystem() ? root->getRenderSystem()->getVaoManager() : nullptr;
+        if (!vao) return;
+        // A UNIQUE NAME PER BUILD. A session may rebuild this (a runtime that
+        // changed its mask or its fov), and a MeshManager name is a name — a
+        // recycled one throws "already exists" (and the shader cache's own
+        // lesson from SHADERCACHE-2 is that a recycled name is worse than a
+        // new one).
+        static unsigned long long sHamSerial = 0ull;
+        mHamMeshName = "JahshakaVrHiddenArea/" + std::to_string(++sHamSerial);
+        mHamMesh = Ogre::MeshManager::getSingleton().createManual(
+            mHamMeshName, Ogre::ResourceGroupManager::INTERNAL_RESOURCE_GROUP_NAME);
+        Ogre::VertexElement2Vec elements;
+        elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_POSITION));
+        const size_t numVertices = vb.size() / 4u;
+        Ogre::VertexBufferPacked *vbuf =
+            vao->createVertexBuffer(elements, numVertices, Ogre::BT_IMMUTABLE, vb.data(), false);
+        Ogre::VertexBufferPackedVec buffers;
+        buffers.push_back(vbuf);
+        Ogre::VertexArrayObject *v =
+            vao->createVertexArrayObject(buffers, 0, Ogre::OT_TRIANGLE_LIST);
+        Ogre::SubMesh *sub = mHamMesh->createSubMesh();
+        sub->mVao[Ogre::VpNormal].push_back(v);
+        // The SHADOW pass's Vao is deliberately the same object (the pin's
+        // generator does this too): nothing ever renders this mesh into a
+        // shadow map — it carries no kVisibleBit and casts no shadows — but a
+        // SubMesh with an empty shadow Vao asserts inside Ogre the moment
+        // anything asks for one.
+        sub->mVao[Ogre::VpShadow].push_back(v);
+        sub->mMaterialName = "Ogre/VR/HiddenAreaMeshVr";
+        // INFINITE, and it must be: the vertices are in CLIP space and the
+        // object has no world transform at all, so a bounding box computed from
+        // them would cull the mask out of the frustum it covers. The pin's
+        // generator says the same thing in one line.
+        mHamMesh->_setBounds(Ogre::Aabb::BOX_INFINITE, false);
+
+        Ogre::SceneManager *sm = mScene->sceneManager();
+        mHamItem = sm->createItem(mHamMesh, Ogre::SCENE_DYNAMIC);
+        mHamItem->setCastShadows(false);
+        mHamItem->setRenderQueueGroup(0u);
+        // SUBGROUP 0 of queue 0, which is the ordering this whole feature rests
+        // on: the sky is at subgroup 1 (OgreSky.cpp) and the subgroup is the top
+        // field of the render queue's sort key.
+        mHamItem->getSubItem(0)->setRenderQueueSubGroup(0u);
+        // THE VERTICES ARE ALREADY IN CLIP SPACE. Identity projection is what
+        // makes the pin's vertex program a pass-through — and it is also what
+        // applies this backend's Y convention, because the `projection_matrix`
+        // auto-param for an identity-projection renderable is
+        // `_convertProjectionMatrix(IDENTITY)` with Y NEGATED when the render
+        // pass requires texture flipping, which every Vulkan target does
+        // (OgreAutoParamDataSource.cpp:341-364). So the mesh is built +Y up,
+        // Ogre's own convention, and lands right side up.
+        mHamItem->getSubItem(0)->setUseIdentityProjection(true);
+        // ITS OWN CHANNEL, INSTEAD OF kVisibleBit (kVrMaskBit's note): no probe
+        // face, sky capture, planar mirror, shadow map or GI gather can see it,
+        // and no view but a session's eye pair draws it.
+        mHamItem->setVisibilityFlags(kVrMaskBit);
+        sm->getRootSceneNode(Ogre::SCENE_DYNAMIC)->attachObject(mHamItem);
+        mHamFov[0] = mViews[0].fov;
+        mHamFov[1] = mViews[1].fov;
+        mHamBuilt = true;
+        mHamSynthetic = mWarmUpFrame;
+        vrLog("hidden-area mesh: built %zu triangles, masking %.2f %% of the left eye and "
+              "%.2f %% of the right (the runtime's own geometry)", numVertices / 3u,
+              double(mHamFraction[0] * 100.0f), double(mHamFraction[1] * 100.0f));
+        // The tangent-space reading, re-checkable on any runtime: the mask's own
+        // extent against the eye's edge in the same units (see the note above).
+        vrLog("hidden-area mesh: eye 0 tangents L%.6f R%.6f D%.6f U%.6f",
+              double(std::tan(mViews[0].fov.angleLeft)), double(std::tan(mViews[0].fov.angleRight)),
+              double(std::tan(mViews[0].fov.angleDown)), double(std::tan(mViews[0].fov.angleUp)));
+    } catch (Ogre::Exception &e) {
+        // NEVER FATAL. A session that cannot build the mask renders the whole
+        // eye, which is what every session before this lane did — and it says
+        // so, once, rather than taking VR away.
+        vrLog("the hidden-area mesh could not be built: %s", e.getFullDescription().c_str());
+        destroyHiddenAreaMesh();
+    } catch (std::exception &e) {
+        vrLog("the hidden-area mesh could not be built: %s", e.what());
+        destroyHiddenAreaMesh();
+    }
+}
+
+void VrSession::destroyHiddenAreaMesh() {
+    // ORDER: the Item first (it holds the Vaos through the mesh), then the
+    // mesh — and the mesh really is unloaded rather than just dropped, because
+    // a MeshPtr that outlives Root throws in the VaoManager (CLAUDE.md's rule).
+    if (mHamItem && mScene && mScene->sceneManager()) {
+        if (mHamItem->getParentSceneNode())
+            mHamItem->getParentSceneNode()->detachObject(mHamItem);
+        mScene->sceneManager()->destroyItem(mHamItem);
+    }
+    mHamItem = nullptr;
+    if (mHamMesh) {
+        Ogre::MeshManager::getSingleton().remove(mHamMesh);
+        mHamMesh.reset();
+    }
+    mHamMeshName.clear();
+    mHamBuilt = false;
+    mHamSynthetic = false;
+    mHamFraction[0] = mHamFraction[1] = 0.0f;
+    mHamTriangles[0] = mHamTriangles[1] = 0u;
+    // The VIEW's channel is NOT touched here: it was opened at creation and
+    // dies with the view (see the note there). Only the object goes.
 }
 
 // ---------------------------------------------------------------------------
@@ -3597,6 +4730,13 @@ VrSession *sessionBegin(VrBoot *boot, OgreEngine *engine, OgreScene *scene, cons
 
 void sessionEnd(VrSession *s) { delete s; }
 
+// THE COLOUR CONTRACT, PROCESS-WIDE (lane EYE-GRADE-1's fix round; declared in
+// EnginePrivate.h, where the reason it is not reached through the engine is
+// written out). The latch is raised by the session that takes a swapchain
+// format and lowered when that session dies, so a chain built after a session
+// has ended is never told the runtime is about to re-encode its picture.
+bool colourEncodedOnce() { return sColourEncodedOnce; }
+
 }  // namespace vr
 
 void vrSessionBeginFrame(VrSession *s) { if (s) s->beginFrame(); }
@@ -3627,6 +4767,7 @@ unsigned vrSessionBindingBlocks(const VrSession *s, VrBindingBlock *out, unsigne
 bool vrSessionHasLiveJoints(const VrSession *s, int hand) {
     return s && s->hasLiveJoints(hand);
 }
+bool vrSessionHandsEnabled(const VrSession *s) { return s && s->handsEnabled(); }
 bool vrSessionHaptic(VrSession *s, int hand, float amplitude01, float seconds,
                      std::string &error) {
     if (!s) { error = "vrHaptic: no session is running"; return false; }

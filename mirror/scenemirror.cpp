@@ -470,17 +470,8 @@ void SceneMirror::setSource(iris::ScenePtr scene)
         mSource->setGraphScene(iris::graph::stagingScene());
     }
     for (MeshId &m : mWireMeshes) { if (m) mTarget->destroyMesh(m); m = 0; }
-    if (mGridNode) {                    // removeNode reparents children, so drop them explicitly
-        if (mGridMinorNode) mTarget->removeNode(mGridMinorNode);
-        if (mGridMajorNode) mTarget->removeNode(mGridMajorNode);
-        mTarget->removeNode(mGridNode);
-        mGridNode = mGridMinorNode = mGridMajorNode = 0;
-    }
-    if (mGridMinorMesh) { mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
-    if (mGridMajorMesh) { mTarget->destroyMesh(mGridMajorMesh); mGridMajorMesh = 0; }
-    if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
-    if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
-    mGridBuiltSpacing = -1.0f;
+    // The grid is the engine's own quad (GRID-2): a disabled description hides it.
+    mTarget->setGrid(jahshaka::engine::GridDesc());
     // The ground's horizon: same discipline as the grid. Its MATERIAL is the
     // floor's own and belongs to mMaterials, which is swept below — dropping it
     // here would destroy the floor's material out from under the floor.
@@ -915,8 +906,15 @@ int SceneMirror::sync()
     // material / texture can only become unreferenced when an entry is released
     // or when an entry's reference to one CHANGES — every such site arms the
     // flag, and only then does the sweep run.
-    if (mReclaimPending) { MirrorStage s(mon, "mirror.reclaim");
-                           reclaimUnused(); mReclaimPending = false; }
+    // NOT DURING A HOVER PREVIEW (MATERIAL-SWAP-GI-1): the node's own material
+    // is unreferenced for exactly as long as the borrowed one is shown and comes
+    // back the moment the cursor moves on; reclaiming it in between destroyed
+    // and rebuilt a datablock per object crossed. The sweep waits for the
+    // gesture to end (materialPreviewDepth is the document's own flag).
+    if (mReclaimPending && !(mSource && mSource->materialPreviewDepth > 0)) {
+        MirrorStage s(mon, "mirror.reclaim");
+        reclaimUnused(); mReclaimPending = false;
+    }
     // LIVE TEXTURES (ADDENDUM A-1). AFTER the sweep, so a texture the sweep
     // just freed is not uploaded into; before the frame is drawn, because the
     // engine's upload records into the OPEN command buffer and therefore lands
@@ -1969,114 +1967,36 @@ void SceneMirror::setGridExtent(float extent)
 
 void SceneMirror::setGridColours(const Colour &minor, const Colour &major)
 {
-    if (mGridMinorColour.r == minor.r && mGridMinorColour.g == minor.g &&
-        mGridMinorColour.b == minor.b && mGridMinorColour.a == minor.a &&
-        mGridMajorColour.r == major.r && mGridMajorColour.g == major.g &&
-        mGridMajorColour.b == major.b && mGridMajorColour.a == major.a)
-        return;
     mGridMinorColour = minor;
     mGridMajorColour = major;
-    // The engine has no "recolour this material" verb, so a change after the
-    // grid exists means new materials on the next sync.
-    mGridColoursDirty = mGridMinorMaterial != 0;
 }
 
+// THE GRID IS DRAWN BY A SHADER (GRID-2; owner review R5). It used to be two
+// LINE meshes rebuilt on every spacing or extent change, lifted 1 cm above the
+// floor because Vulkan applies no depth bias to lines and a 1 px line under
+// MSAA/SMAA is treated poorly (GIZMO-2 measured all of that). Now the mirror
+// describes the grid — plane, cell, colours, thickness, fade — and the engine
+// draws it analytically from the camera ray with the plane's own depth
+// (Types.h GridDesc, OgreGrid.cpp, JahGrid_ps.glsl): infinite, anti-aliased,
+// one pixel wide at every distance, never z-fighting the floor, covered by
+// whatever stands on it. setGrid is idempotent, so this pushes every sync and
+// the description's own operator== is the change guard.
 void SceneMirror::syncGrid()
 {
-    if (!mGridVisible) {
-        // Latched (MIRROR_SCALE lane): setNodeVisible is a subtree walk in the
-        // engine and the grid's node has two children, so a hidden grid cost
-        // three node writes a frame to stay hidden.
-        if (mGridNode && mGridVisiblePushed != 0) {
-            mTarget->setNodeVisible(mGridNode, false);
-            mGridVisiblePushed = 0;
-        }
-        return;
+    jahshaka::engine::GridDesc desc;
+    desc.enabled = mGridVisible;
+    switch (mGridPlane) {
+    case GridPlane::FrontXY: desc.plane = jahshaka::engine::GridDesc::Plane::FrontXY; break;
+    case GridPlane::SideYZ:  desc.plane = jahshaka::engine::GridDesc::Plane::SideYZ; break;
+    case GridPlane::Floor:   desc.plane = jahshaka::engine::GridDesc::Plane::Floor; break;
     }
-    if (mGridColoursDirty) {
-        if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); }
-        if (mGridMajorMesh) { mTarget->detachMesh(mGridMajorNode); }
-        if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
-        if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
-        mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
-        mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
-        if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
-        if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
-        mGridColoursDirty = false;
-    }
-    bool freshNode = false;
-    if (!mGridNode) {
-        mGridNode = mTarget->createNode();
-        if (!mGridNode) return;
-        freshNode = true;
-        mGridMinorNode = mTarget->createNode(mGridNode);
-        mGridMajorNode = mTarget->createNode(mGridNode);
-        // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b). The grid used to be
-        // baked into every reflection-probe capture — the single most visible
-        // thing wrong with a probe reflection in an editor scene. Marked on the
-        // LEAF nodes because that is where the Items hang; the helper flag is
-        // per node, not inherited.
-        mTarget->setNodeHelper(mGridMinorNode, true);
-        mTarget->setNodeHelper(mGridMajorNode, true);
-        // Unlit (never fogged), depth-tested (occluded by geometry), blended.
-        mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
-        mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
-    }
-    if (freshNode || mGridBuiltPlane != mGridPlane) {
-        // The mesh is authored in XZ; the node rotates it into the plane that
-        // faces the requesting view.
-        //
-        // THE FLOOR GRID SITS 1 cm ABOVE ITS PLANE (GIZMO-2 item 5, owner §370:
-        // "it should always be on top of the floor, but objects on top of it
-        // should cover it"), and the sign is the whole change: it used to sit
-        // 1 cm BELOW, so a ground plane occluded it — invisible from above
-        // (the axis views had to flip the sign by hand) and fighting with the
-        // ground wherever it poked through, which is the "merges with the
-        // floor" the owner reported.
-        //
-        // WHY A GEOMETRIC LIFT AND NOT A DEPTH BIAS, measured (GIZMO-2 round 2,
-        // tests/mirror/test_grid_floor.cpp): a macroblock depth bias does
-        // NOTHING for this grid, because Vulkan applies depth bias to POLYGONS
-        // and the grid is LINE primitives — the same scene renders
-        // byte-identically with mDepthBiasConstant at 0, 2, 16, 256 and
-        // 100,000, and a render-queue bump changes nothing either. What does
-        // work is distance: over a coplanar floor, 1 cm of lift takes the
-        // grid's visible pixels from 11,218 to 19,075 (the z-fight's dashed
-        // lines to solid ones) and 2 cm adds only 500 more — the knee is here.
-        // The cost, stated: something THINNER than 1 cm lying on the floor
-        // (a decal, a coin) is drawn under the grid rather than over it.
-        static const float s = 0.70710678f;   // sin/cos 45°: a 90° rotation
-        Vec3 pos(0, kGridFloorLift, 0);
-        Quat rot;                             // Floor: identity
-        switch (mGridPlane) {
-        case GridPlane::FrontXY: rot = Quat(s, 0, 0, s); break;
-        case GridPlane::SideYZ:  rot = Quat(0, 0, s, s); break;
-        case GridPlane::Floor: break;
-        }
-        mTarget->setNodeTransform(mGridNode, pos, rot, Vec3(1, 1, 1));
-        mGridBuiltPlane = mGridPlane;
-    }
-    if (mGridBuiltSpacing != mGridSpacing || mGridBuiltExtent != mGridExtent) {
-        if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
-        if (mGridMajorMesh) { mTarget->detachMesh(mGridMajorNode); mTarget->destroyMesh(mGridMajorMesh); mGridMajorMesh = 0; }
-        const float extent = mGridExtent;                // ±extent units of floor
-        int n = int(extent / mGridSpacing);              // lines each side of 0
-        n = std::min(n, 1000);                           // hard cap on line count
-        std::vector<Vec3> minor, major;
-        for (int i = -n; i <= n; ++i) {
-            const float p = float(i) * mGridSpacing;
-            std::vector<Vec3> &dst = (i % 10 == 0) ? major : minor;
-            dst.push_back(Vec3(p, 0, -extent)); dst.push_back(Vec3(p, 0, extent));
-            dst.push_back(Vec3(-extent, 0, p)); dst.push_back(Vec3(extent, 0, p));
-        }
-        mGridMinorMesh = mTarget->createLineMesh(minor, false);
-        mGridMajorMesh = mTarget->createLineMesh(major, false);
-        if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
-        if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
-        mGridBuiltSpacing = mGridSpacing;
-        mGridBuiltExtent = mGridExtent;
-    }
-    if (mGridVisiblePushed != 1) { mTarget->setNodeVisible(mGridNode, true); mGridVisiblePushed = 1; }
+    desc.spacing = mGridSpacing;
+    desc.majorEvery = 10;
+    desc.minorColour = mGridMinorColour;
+    desc.majorColour = mGridMajorColour;
+    desc.thicknessPx = 1.0f;
+    desc.fadeDistance = mGridExtent;
+    mTarget->setGrid(desc);
 }
 
 // ---- the ground's horizon ---------------------------------------------------
@@ -3350,6 +3270,9 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         notePush(node, "castShadow");
     }
 
+    // The material-only swap the mesh branch decides and the tail of this
+    // function performs, once the new material is complete (MATERIAL-SWAP-GI-1).
+    MaterialId pendingSwap = 0;
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto *meshNode = static_cast<iris::MeshNode *>(node);
         // THE SCENE'S DEFAULT FLOOR, remembered for syncGroundHorizon. Recorded
@@ -3381,6 +3304,34 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         if (e.gpuSkinned && e.characterHost) {
             const auto cr = mCharacterRigs.constFind(e.characterHost);
             rigStale = cr == mCharacterRigs.constEnd() || cr->epoch != e.characterEpoch;
+        }
+        // A MATERIAL-ONLY CHANGE SWAPS IN PLACE (MATERIAL-SWAP-GI-1): the mesh
+        // is the same, the rig is the same, only the document's material
+        // pointer moved — a hover preview in and out, an Apply, a Customise.
+        // Re-attaching (detach + create) invalidated the GI caches with no box
+        // and every cascade re-voxelised, one per frame, twice per hovered
+        // object (ledger §804-§805). setNodeMaterial changes the Item's
+        // datablock and invalidates the item's OWN box; it refuses a family
+        // crossing (Lit <-> Unlit / Distortion) and a normal map on a mesh
+        // without tangents, and every refusal falls through to the re-attach
+        // below, which is still the whole answer for a new mesh or a new rig.
+        //
+        // THE ORDER IS THE POINT: the new material's params and textures are
+        // pushed BEFORE the Item wears it (below, where every entry pushes
+        // them), and the swap itself runs after — a material whose voxel
+        // inputs change WHILE a GI-visible item wears it bumps the engine's
+        // material generation, which the mirror answers with a full re-solve;
+        // a material completed before it is worn bumps nothing, and the swap's
+        // own box-scoped rebuild is what the volume pays.
+        if (mesh && e.hasMesh && e.meshPtr == mesh && !rigStale && e.materialPtr != material) {
+            pendingSwap = materialFor(material);
+            if (pendingSwap) {
+                noteMaterialUser(node, e.materialPtr, material);
+                e.material = pendingSwap; e.materialPtr = material;
+                mReclaimPending = true;      // the old material may now be unreferenced
+                e.texturesPushed = false;
+                e.shadingModelPushed = -1;   // the family is the same; the model may not be
+            }
         }
         if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh || rigStale)) {
             // ONE memo probe for the whole branch — materialFor reads the same
@@ -3449,6 +3400,7 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             if (!attached && m && mat) attached = mTarget->attachMesh(e.node, m, mat);
             if (attached) {
                 notePush(node, "mesh attach");
+                ++mMeshAttaches;
                 if (e.materialPtr != material) noteMaterialUser(node, e.materialPtr, material);
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
                 mReclaimPending = true;   // the old mesh/material may now be unreferenced
@@ -3574,6 +3526,21 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             e.pickablePushed = wantPickable;
             e.materialItemSerial = wantItemSerial;
             notePush(node, "pickable");
+        }
+    }
+
+    // THE DEFERRED MATERIAL SWAP (MATERIAL-SWAP-GI-1, see the mesh branch):
+    // the params and textures above completed the new material; the Item wears
+    // it now. A refusal (a family crossing, a normal map without tangents) is
+    // answered by the full re-attach, exactly as before this lane.
+    if (pendingSwap) {
+        if (mTarget->setNodeMaterial(e.node, pendingSwap)) {
+            notePush(node, "material swap");
+            ++mMaterialSwaps;
+        } else if (e.mesh && mTarget->attachMesh(e.node, e.mesh, pendingSwap)) {
+            notePush(node, "mesh attach");
+            ++mMeshAttaches;
+            e.pickablePushed = -1;   // a NEW Item carries the default query mask
         }
     }
 
@@ -6797,6 +6764,172 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// THE PER-VIEW HALF OF applyEnvironment (lane EYE-GRADE-1, 2026-09-18).
+//
+// WHY IT IS ITS OWN FUNCTION. Everything below is a property of a VIEW — the
+// shadow flag, the MSAA count, the whole post description with the driving
+// camera's lens over it — while everything else in applyEnvironment is a
+// property of the SCENE: the ambient spherical harmonics, the fog, the ray
+// tracing row, the GI configuration and its settle. A scene has one of those
+// and, since the headset, TWO views of it at once: the desktop's and the
+// session's eye pair, which used to be the one view in this engine that no
+// mirror reached (VrSession::create's old hand-written PostFxDesc, and the
+// owner's "the World panel does nothing in the headset").
+//
+// SO THE SECOND VIEW GETS THIS, AND NOT THE WHOLE FUNCTION. Calling
+// applyEnvironment twice a frame would be wrong rather than merely wasteful:
+// the GI block counts FRAMES of stability (`++mGiStableFrames`) and would reach
+// its window in half the frames it is meant to, so a drag would re-solve the
+// whole chain mid-gesture. One scene half per frame; one call per view.
+//
+// `driving` is the camera the view is drawn through, for the per-camera lens
+// (CAMERA_LENS_SPEC §4/§5). applyEnvironment passes none because it reads the
+// record applyCamera left for its view; a second view's host hands it in,
+// because nothing else knows which camera that view belongs to.
+//
+// `record` is what keeps a SECOND view from overwriting the mirror-level
+// records the FIRST one wrote — `mWorldPostFx` (the picture-in-picture inset's
+// base) and `mSunExposureGain` (the sun's night rule). They describe the view
+// the host calls applyEnvironment for, and only that one.
+void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &hostCamera)
+{
+    if (!mSource || !view) return;
+    // THE CAMERA THE SCENE IS RENDERED THROUGH, NOT THE ONE THE HOST HOLDS
+    // (the Fable read's F1). `applyCamera` resolves its host's camera through
+    // `Scene::renderCamera` — the three-term active-camera/possession rule —
+    // and a host that hands us its own camera instead would grade the eye with
+    // a DIFFERENT camera's lens than the desktop the moment the rule picks
+    // another one: an authored camera armed while playing, a possessed
+    // character's arm. That is the very disagreement this lane removes, and it
+    // would bite exactly where it hurts most — the rig is PLACED on
+    // renderCamera, so the wearer would be standing at the shot with somebody
+    // else's grade.
+    //
+    // Resolved HERE rather than in the two hosts, because applyCamera's own
+    // note says why: a second copy of a three-term rule is how a wearer ends up
+    // somewhere the picture never was. One rule, two callers.
+    iris::CameraNodePtr driving = hostCamera;
+    if (driving) driving = mSource->renderCamera(driving);
+    if (!driving) driving = hostCamera;
+    const bool cut = driving ? noteDrivingCamera(view, driving) : false;
+    applyViewPostFx(view, /*record=*/false);
+    // A CUT IS NOT A LIGHTING CHANGE — applyCamera's rule, which this path used
+    // to drop on the floor. The chain's automatic exposure adapts at ~75 %/s,
+    // so a cut to a differently exposed camera fades over one to two seconds in
+    // the headset while the desktop re-seeds and starts at the new grade. Two
+    // eyes ramping through an exposure the desktop already arrived at is worse
+    // than a desktop doing it: it is a whole-field brightness change with no
+    // cause the wearer can see. Re-seeded AFTER the description is pushed,
+    // because the seed is derived from it.
+    if (cut) view->resetExposureHistory();
+}
+
+void SceneMirror::applyViewPostFx(View *view, bool record)
+{
+    // World-panel Enable Shadows (used to be hardcoded on).
+    if (view->shadows() != mSource->shadowEnabled)
+        view->setShadows(mSource->shadowEnabled);
+    // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
+    // frame — the engine ignores a repeat of the value already REQUESTED (the
+    // achieved count may be clamped lower by the driver, so comparing against
+    // view->sampleCount() here would rebuild the target every frame).
+    //
+    // ON-SCREEN ONLY (POST_CHAIN_SPEC.md §7.3). Offscreen views — thumbnails,
+    // material previews, the asset and avatar viewers, screenshots and every
+    // pixel suite — stay at 1x so their readbacks are exact and reproducible.
+    // Pushing the scene's count to them was a latent inconsistency: harmless
+    // while scenes defaulted to 1x, and a whole-suite re-baseline the moment a
+    // World Mode set 4x.
+    if (!view->isOffscreen())
+        view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
+    // World panel post-processing chain (POST_CHAIN_SPEC.md §§3-7). Safe to push
+    // per frame: the engine ignores a repeat of the value already set, and only
+    // a change to an ENABLE flag rebuilds a workspace. Offscreen views (this
+    // includes thumbnails, previews and every pixel suite) discard it inside the
+    // engine, in one place — the host does not have to remember to.
+    {
+        PostFxDesc fx;
+        fx.hdr            = mSource->hdrEnabled;
+        // EXPOSURE: the world's statement, in the document's unit. The DRIVING
+        // CAMERA's block is layered over it below (applyCameraPostFx) and the
+        // whole thing is converted ONCE, there, by iris::lens::toChain — this
+        // is why nothing here touches fx.exposure*.
+        {
+            iris::ExposureDesc e{ mSource->exposureMode, mSource->exposure,
+                                  mSource->exposureMin, mSource->exposureMax };
+            e.metering = mSource->exposureMetering;
+            e.lowPercent = mSource->exposureMeterLowPercent;
+            e.highPercent = mSource->exposureMeterHighPercent;
+            applyExposure(e, fx);
+            applyMeter(e, fx);
+        }
+        fx.bloom          = mSource->bloomEnabled;
+        fx.bloomThreshold = mSource->bloomThreshold;
+        fx.bloomKnee      = mSource->bloomKnee;
+        fx.ssao           = mSource->ssaoEnabled;
+        fx.ssaoScale      = mSource->ssaoScale;
+        fx.ssaoPower      = mSource->ssaoPower;
+        fx.ssaoRadius     = mSource->ssaoRadius;
+        fx.smaaPreset     = mSource->smaaPreset;
+        fx.ssr            = mSource->ssrMode;
+        fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
+        // Percent in the document, a fraction in the renderer — one conversion,
+        // here, so nothing downstream has to know which unit it is holding.
+        fx.reflectionRoughnessCutoff = float(mSource->reflectionRoughnessCutoff) * 0.01f;
+        // Refraction "Auto" (the recommended default): the second scene pass and
+        // its full-res copy only enter the graph while the scene actually holds a
+        // refractive material, so the cost when unused is exactly zero. The flag
+        // is accumulated by sync() the same way mAnyShadowCaster is.
+        fx.refractions    = mSource->refractionsMode == 2 ||
+                            (mSource->refractionsMode == 1 && mAnyRefractive);
+        // Distortion, resolved the same way (POST_LOOKS_SPEC §5.3): 0 off,
+        // 1 auto (only while the scene holds a distortion material — the
+        // recommended default), 2 always.
+        fx.distortion     = mSource->distortionMode == 2 ||
+                            (mSource->distortionMode == 1 && mAnyDistortion);
+        fx.distortionStrength = mSource->distortionStrength;
+        // THE LOOKS STACK (POST_LOOKS_SPEC §4.1). The document's array, in its
+        // own order, minus the entries the user switched off — a disabled look
+        // stays in the document and out of the graph, which is what makes the
+        // panel's toggle free rather than a destructive edit.
+        fx.looks = resolveLooks(mSource->looks);
+        // THE DRIVING CAMERA'S OWN LOOK, layered over the world's
+        // (CAMERA_LENS_SPEC §4/§5 — applyCameraPostFx documents the model).
+        //
+        // IT HAS TO HAPPEN HERE AS WELL AS IN applyCamera, and the reason is
+        // performance rather than taste: hosts call applyEnvironment and then
+        // applyCamera every frame, and an enable-flag difference between the
+        // two descriptions is a WORKSPACE REBUILD. Pushing the world's flags
+        // here and the camera's a moment later would rebuild the chain TWICE
+        // PER FRAME for as long as a camera with a bloom override was driving.
+        // Substituting here makes the steady state one stable description that
+        // the engine's own "same value is free" check drops on arrival, and
+        // applyCamera's push then only ever does anything on the frame the
+        // camera actually changed.
+        //
+        // The record is a frame old (applyCamera writes it after this runs), so
+        // a CUT grades one frame late — 16 ms, and applyCamera corrects it in
+        // the same frame anyway. A view seen for the FIRST time has no record
+        // at all and gets the world's description, which is exactly right: the
+        // camera has not been applied to it yet.
+        // THE WORLD'S OWN DESCRIPTION, before any camera is layered over it.
+        // The picture-in-picture inset needs exactly this and not what the view
+        // ends up with: the inset is a DIFFERENT camera's shot, so inheriting
+        // the MAIN view's camera grade would hand the pipped camera the driving
+        // camera's exposure (applyPip layers the pipped camera over this).
+        if (record) mWorldPostFx = fx;
+        if (const iris::CameraNodePtr driving = drivingCameraFor(view))
+            if (cameraOverridesAnything(driving)) applyCameraPostFx(driving, fx);
+        // THE GRADE THE SUN'S NIGHT RULE DECIDES AGAINST (SKY-NIGHT-1), from
+        // the EFFECTIVE description — the camera's override included, since a
+        // shot that opens up two stops makes a disc this rule would otherwise
+        // have dropped worth twenty output codes.
+        if (record) mSunExposureGain = sunExposureGain(fx);
+        view->setPostFx(fx);
+    }
+}
+
 void SceneMirror::applyEnvironment(View *view, Engine *engine)
 {
     if (!mSource || !view) return;
@@ -6941,107 +7074,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mAmbientPushed = true;
         }
     }
-    // World-panel Enable Shadows (used to be hardcoded on).
-    if (view->shadows() != mSource->shadowEnabled)
-        view->setShadows(mSource->shadowEnabled);
-    // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
-    // frame — the engine ignores a repeat of the value already REQUESTED (the
-    // achieved count may be clamped lower by the driver, so comparing against
-    // view->sampleCount() here would rebuild the target every frame).
-    //
-    // ON-SCREEN ONLY (POST_CHAIN_SPEC.md §7.3). Offscreen views — thumbnails,
-    // material previews, the asset and avatar viewers, screenshots and every
-    // pixel suite — stay at 1x so their readbacks are exact and reproducible.
-    // Pushing the scene's count to them was a latent inconsistency: harmless
-    // while scenes defaulted to 1x, and a whole-suite re-baseline the moment a
-    // World Mode set 4x.
-    if (!view->isOffscreen())
-        view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
-    // World panel post-processing chain (POST_CHAIN_SPEC.md §§3-7). Safe to push
-    // per frame: the engine ignores a repeat of the value already set, and only
-    // a change to an ENABLE flag rebuilds a workspace. Offscreen views (this
-    // includes thumbnails, previews and every pixel suite) discard it inside the
-    // engine, in one place — the host does not have to remember to.
-    {
-        PostFxDesc fx;
-        fx.hdr            = mSource->hdrEnabled;
-        // EXPOSURE: the world's statement, in the document's unit. The DRIVING
-        // CAMERA's block is layered over it below (applyCameraPostFx) and the
-        // whole thing is converted ONCE, there, by iris::lens::toChain — this
-        // is why nothing here touches fx.exposure*.
-        {
-            iris::ExposureDesc e{ mSource->exposureMode, mSource->exposure,
-                                  mSource->exposureMin, mSource->exposureMax };
-            e.metering = mSource->exposureMetering;
-            e.lowPercent = mSource->exposureMeterLowPercent;
-            e.highPercent = mSource->exposureMeterHighPercent;
-            applyExposure(e, fx);
-            applyMeter(e, fx);
-        }
-        fx.bloom          = mSource->bloomEnabled;
-        fx.bloomThreshold = mSource->bloomThreshold;
-        fx.bloomKnee      = mSource->bloomKnee;
-        fx.ssao           = mSource->ssaoEnabled;
-        fx.ssaoScale      = mSource->ssaoScale;
-        fx.ssaoPower      = mSource->ssaoPower;
-        fx.ssaoRadius     = mSource->ssaoRadius;
-        fx.smaaPreset     = mSource->smaaPreset;
-        fx.ssr            = mSource->ssrMode;
-        fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
-        // Percent in the document, a fraction in the renderer — one conversion,
-        // here, so nothing downstream has to know which unit it is holding.
-        fx.reflectionRoughnessCutoff = float(mSource->reflectionRoughnessCutoff) * 0.01f;
-        // Refraction "Auto" (the recommended default): the second scene pass and
-        // its full-res copy only enter the graph while the scene actually holds a
-        // refractive material, so the cost when unused is exactly zero. The flag
-        // is accumulated by sync() the same way mAnyShadowCaster is.
-        fx.refractions    = mSource->refractionsMode == 2 ||
-                            (mSource->refractionsMode == 1 && mAnyRefractive);
-        // Distortion, resolved the same way (POST_LOOKS_SPEC §5.3): 0 off,
-        // 1 auto (only while the scene holds a distortion material — the
-        // recommended default), 2 always.
-        fx.distortion     = mSource->distortionMode == 2 ||
-                            (mSource->distortionMode == 1 && mAnyDistortion);
-        fx.distortionStrength = mSource->distortionStrength;
-        // THE LOOKS STACK (POST_LOOKS_SPEC §4.1). The document's array, in its
-        // own order, minus the entries the user switched off — a disabled look
-        // stays in the document and out of the graph, which is what makes the
-        // panel's toggle free rather than a destructive edit.
-        fx.looks = resolveLooks(mSource->looks);
-        // THE DRIVING CAMERA'S OWN LOOK, layered over the world's
-        // (CAMERA_LENS_SPEC §4/§5 — applyCameraPostFx documents the model).
-        //
-        // IT HAS TO HAPPEN HERE AS WELL AS IN applyCamera, and the reason is
-        // performance rather than taste: hosts call applyEnvironment and then
-        // applyCamera every frame, and an enable-flag difference between the
-        // two descriptions is a WORKSPACE REBUILD. Pushing the world's flags
-        // here and the camera's a moment later would rebuild the chain TWICE
-        // PER FRAME for as long as a camera with a bloom override was driving.
-        // Substituting here makes the steady state one stable description that
-        // the engine's own "same value is free" check drops on arrival, and
-        // applyCamera's push then only ever does anything on the frame the
-        // camera actually changed.
-        //
-        // The record is a frame old (applyCamera writes it after this runs), so
-        // a CUT grades one frame late — 16 ms, and applyCamera corrects it in
-        // the same frame anyway. A view seen for the FIRST time has no record
-        // at all and gets the world's description, which is exactly right: the
-        // camera has not been applied to it yet.
-        // THE WORLD'S OWN DESCRIPTION, before any camera is layered over it.
-        // The picture-in-picture inset needs exactly this and not what the view
-        // ends up with: the inset is a DIFFERENT camera's shot, so inheriting
-        // the MAIN view's camera grade would hand the pipped camera the driving
-        // camera's exposure (applyPip layers the pipped camera over this).
-        mWorldPostFx = fx;
-        if (const iris::CameraNodePtr driving = drivingCameraFor(view))
-            if (cameraOverridesAnything(driving)) applyCameraPostFx(driving, fx);
-        // THE GRADE THE SUN'S NIGHT RULE DECIDES AGAINST (SKY-NIGHT-1), from
-        // the EFFECTIVE description — the camera's override included, since a
-        // shot that opens up two stops makes a disc this rule would otherwise
-        // have dropped worth twenty output codes.
-        mSunExposureGain = sunExposureGain(fx);
-        view->setPostFx(fx);
-    }
+    // THE PER-VIEW HALF, which a second view of this scene gets on its own
+    // (applyViewEnvironment, above the definition): shadows, MSAA and the post
+    // chain. The records it writes — the inset's base description and the sun's
+    // exposure gain — belong to THIS view, the one the host asked about.
+    applyViewPostFx(view, /*record=*/true);
     // Fog panel: exponential distance fog (+ optional height layer) on lit
     // surfaces; the engine keeps unlit overlays and the sky unfogged, like the
     // legacy renderer. Cheap per-frame push WHILE THE STATE HOLDS — but the
@@ -7284,7 +7321,28 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // one-re-solve-on-settle debounce but NOT the cheap light re-inject
         // cadence (and its irradiance-field reset) — nothing a re-inject reads
         // changed. Every mode (Instant Radiosity re-traces on it too).
-        const quint64 matSig = mTarget->giMaterialSignature();
+        // A HOVER PREVIEW IS NOT A MATERIAL EDIT (MATERIAL-PREVIEW-1).
+        // The editor lends a mesh's material slot to whatever is being dragged
+        // over it and takes it back when the drag leaves; the document is never
+        // written and no undo step exists. The engine's material signature
+        // cannot tell the two apart. (Measured 2026-09-19, ledger 804-805: a
+        // colour-only swap does not move this term; a textured one does, and the
+        // engine re-voxelises on the re-attach either way — MATERIAL-SWAP-GI-1
+        // owns the rest, this gate's falling edge included.)
+        //
+        // The whole answer is here, at the ONE read: while the scene says a
+        // preview is on screen the material term reads as whatever was
+        // remembered before it began. Nothing can arm on it and — just as
+        // important — nothing can ADOPT it either (adoptSignature and the full
+        // push below both go through this), so the restore lands back on the
+        // remembered value and the debounce never saw a change at all. A real
+        // apply ends the preview BEFORE it pushes (MaterialPreviewService), so
+        // the commit's own signature move arms the one re-solve it is owed.
+        const auto readMaterialSignature = [&]() -> quint64 {
+            return mSource->materialPreviewActive() ? mGiMaterialSignature
+                                                    : mTarget->giMaterialSignature();
+        };
+        const quint64 matSig = readMaterialSignature();
         // Compared BY VALUE (GiParams::operator==, beside the struct — every
         // field setGlobalIllumination reads is in it, so a new field cannot fall
         // behind the comparison the way a lambda one file away did).
@@ -7323,7 +7381,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mGiMovableLightSignature = movableLightSig;
             mGiMovableLightsMoving = false;
             mGiMovableSettleOwed = false;
-            mGiMaterialSignature = mTarget->giMaterialSignature();
+            mGiMaterialSignature = readMaterialSignature();
             mGiPushed = true;
             mGiPendingRefresh = false;
             mGiPendingInject = false;
@@ -7421,7 +7479,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // second being the signature changing back).
             const auto adoptSignature = [&]() {
                 if (vctLike) mGiLightSignature = readEngineSignature();
-                mGiMaterialSignature = mTarget->giMaterialSignature();
+                mGiMaterialSignature = readMaterialSignature();
                 mGiPendingInject = false;
                 // A full re-solve IS the rest frame, at the full bounce count:
                 // the movable path's owed one would only redo it (F1).

@@ -104,6 +104,12 @@ public:
     /// as they were: an unknown texture id, six faces that are not all the same
     /// size, or a compressed face format.
     virtual bool        setSky(const SkyDesc &) = 0;
+    /// THE SHADER-DRAWN EDITOR GRID (GridDesc). One quad per scene, drawn
+    /// analytically from the camera ray, a helper (never in probes, shadows,
+    /// reflectors, the Player or the Scene grade). IDEMPOTENT: an equal
+    /// description does nothing; a disabled one hides the quad. False (see
+    /// lastError()) when the grid material is not staged.
+    virtual bool        setGrid(const GridDesc &) = 0;
     /// THE SKY'S OWN AMBIENT, as the same 9x3 spherical harmonics setAmbientSh
     /// takes, integrated from the sky the backend just drew (SKY-GPU).
     ///
@@ -360,6 +366,18 @@ public:
     /// attaching again replaces it. Mesh and material may be shared across nodes and
     /// survive the node.
     virtual bool        attachMesh(NodeId, MeshId, MaterialId) = 0;
+    /// A MATERIAL SWAP ON A LIVE ITEM (MATERIAL-SWAP-GI-1): the node keeps its
+    /// mesh, its Item and its rig; only the material changes, in place. What a
+    /// material decides for the Item (its render queue, its visibility family,
+    /// its shadow shape) is re-derived, and the GI caches are invalidated for
+    /// the ITEM'S BOX with nothing died — under a cascade chain only the
+    /// cascades that box reaches re-voxelise, where attachMesh (detach + create)
+    /// re-voxelises every cascade. False, with lastError(), when the swap
+    /// crosses a family the Item cannot carry in place (Lit <-> Unlit /
+    /// Distortion), when the node carries no mesh, or when the new material
+    /// binds a normal map the mesh has no tangents for — attachMesh is the
+    /// answer to every refusal. Idempotent for the material already worn.
+    virtual bool        setNodeMaterial(NodeId, MaterialId) = 0;
     virtual bool        detachMesh(NodeId) = 0;
     /// How many renderables this node actually carries right now.
     ///
@@ -829,6 +847,23 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
+    /// readback of one cascade's light volume: its peak, its mean over lit
+    /// voxels and how many voxels sit on the storage format's top bin.
+    ///
+    /// It exists because the bounce's fixed point L = D + rho * G(L) is a
+    /// PHYSICAL quantity kept in a FIXED-RANGE store, and whether it fits
+    /// cannot be read from the picture — a clipped voxel draws a picture that
+    /// is merely dimmer, which is indistinguishable from a scene with less
+    /// bounce in it (the mechanism PHOTON-M2's F1 read as a "contraction").
+    /// So the guard that the store has headroom is a readback, and this is it.
+    ///
+    /// NOT a per-frame path, ever: it flushes the render system's commands and
+    /// BLOCKS on a download of the whole volume (8 MB at 128^3), exactly like
+    /// `traceRays` above. Answers `available = false` — and nothing else —
+    /// without a VCT arm, without that cascade, or on a device that refuses
+    /// the download.
+    virtual GiVoxelStats giVoxelStats(int cascade) { (void)cascade; return GiVoxelStats(); }
     /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
     /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
     ///
@@ -1483,6 +1518,24 @@ public:
     /// editor's loading cover (src/viewport/viewportcover.h) is on screen until
     /// this passes its threshold.
     virtual unsigned long long framesPresented() const = 0;
+    /// HOW MANY TIMES THIS VIEW'S PER-FRAME CHAIN GLOBALS HAVE BEEN PUSHED
+    /// (lane EYE-GRADE-1's fix round; the mechanism is one workspace listener
+    /// per view, firing immediately before that view's passes execute).
+    ///
+    /// WHY IT IS WORTH AN ACCESSOR. Most of the post chain is SHAPE — built
+    /// into the compositor graph — and a few values are written into the graph
+    /// the moment a host pushes them (the fixed exposure's clear colour). But
+    /// the METER's uniforms, the automatic exposure's terms, the bloom
+    /// threshold, the AO and SSR camera terms and every look's parameters are
+    /// PROCESS-WIDE material parameters, pushed per view per frame in that
+    /// listener, and a view whose count does not climb is a view rendering with
+    /// whatever the last workspace to update happened to leave in them. That is
+    /// invisible in a picture until two views disagree — which is exactly the
+    /// case a headset introduced — so it is countable rather than inferable.
+    ///
+    /// 0 for a view with no chain (every thumbnail, preview and pixel suite:
+    /// they have no effects, so no listener is ever created for them).
+    virtual unsigned long long globalsPushes() const = 0;
     /// Reads this View's rendered pixels back to the CPU. Offscreen Views only —
     /// returns false for on-screen windows. This is the thumbnail path, and what
     /// makes the engine testable without a window.
