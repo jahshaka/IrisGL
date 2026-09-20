@@ -174,6 +174,12 @@ public:
     /// a light that really moves re-solves exactly once.
     quint64 giPushCount() const { return mGiPushCount; }
     quint64 giRefreshCount() const { return mGiRefreshCount; }
+    /// HOW MANY MATERIAL CHANGES the mirror answered IN PLACE (Scene::setNodeMaterial,
+/// MATERIAL-SWAP-GI-1) and how many by a full re-attach (a new mesh, a new rig,
+/// or a swap the engine refused). Test instruments: a hover in and out on a mesh
+/// is two swaps and no re-attach.
+    quint64 materialSwapCount() const { return mMaterialSwaps; }
+    quint64 meshAttachCount() const { return mMeshAttaches; }
     /// How many times the CHEAP light-only re-inject ran instead of a full
     /// re-solve (REFLECTIONS_ADOPTION_SPEC.md P2). During a light drag this is
     /// the counter that moves; giRefreshCount() stays still until the drag ends.
@@ -2010,6 +2016,7 @@ private:
     quint64 mVerifierVisits = 0;
     quint64 mVerifierCatches = 0;
     quint64 mVisitPushes = 0;
+    quint64 mMaterialSwaps = 0, mMeshAttaches = 0;
     /// The last global material revision this mirror folded in (§3.6): one
     /// relaxed atomic read is what a still frame pays to know that no material
     /// in the process has been written.

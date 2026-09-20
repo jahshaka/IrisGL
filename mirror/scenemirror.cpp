@@ -3309,6 +3309,7 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             const MaterialId swapMat = materialFor(material);
             if (swapMat && mTarget->setNodeMaterial(e.node, swapMat)) {
                 notePush(node, "material swap");
+                ++mMaterialSwaps;
                 noteMaterialUser(node, e.materialPtr, material);
                 e.material = swapMat; e.materialPtr = material;
                 mReclaimPending = true;      // the old material may now be unreferenced
@@ -3383,6 +3384,7 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             if (!attached && m && mat) attached = mTarget->attachMesh(e.node, m, mat);
             if (attached) {
                 notePush(node, "mesh attach");
+                ++mMeshAttaches;
                 if (e.materialPtr != material) noteMaterialUser(node, e.materialPtr, material);
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
                 mReclaimPending = true;   // the old mesh/material may now be unreferenced
