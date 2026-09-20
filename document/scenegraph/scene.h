@@ -411,14 +411,16 @@ public:
     /// The engine's own documentation for it is GiParams::cascadeInstanceCap.
     int giCascadeInstanceCap = 0;
     /// A DRAGGED STILL RIDES THE MOVER CHANNEL FOR THE LENGTH OF THE GESTURE
-    /// (MOVER-1) — 0 (the default) is the shipped behaviour exactly. It changes
-    /// what a scene looks like WHILE an object is being dragged (the object
-    /// stops bouncing light into the room and is lit by the field and the cones
-    /// at its live pose), and nothing at all about what it looks like at rest,
-    /// so it is a per-project choice and not a tier row. The engine's own
-    /// documentation for it, with the costs on both sides, is
-    /// GiParams::dragMoverChannel.
-    int giDragMoverChannel = 0;
+    /// (MOVER-1) — 1, ON, is the DEFAULT (owner, ledger §844). It changes what
+    /// a scene looks like WHILE an object is being dragged (the object stops
+    /// bouncing light into the room and is lit by the field and the cones at
+    /// its live pose) and NOTHING AT ALL about what it looks like at rest — the
+    /// two rules agree to 1/255 on the settled picture (PICTURES-1) — so what
+    /// it buys is a gesture that does not re-solve the room under the hand.
+    /// 0 is the older behaviour and stays available per project; it is a
+    /// per-project choice and not a tier row. The engine's own documentation
+    /// for it, with the costs on both sides, is GiParams::dragMoverChannel.
+    int giDragMoverChannel = 1;
     /// THE GI UPDATE BUDGET (FIX WAVE B1, 2026-09-07) — probe re-captures the
     /// renderer may spend per frame, and the single "is GI live?" switch.
     ///
@@ -705,9 +707,13 @@ public:
     int   ssrMode;           ///< 0 off, 1 half-res rays, 2 HQ
     /// WHICH SAMPLE ANSWERS THE SCREEN-SPACE MARCH'S TWO QUESTIONS — is this a
     /// hit, and how much does the depth buffer vouch for it (SSR-RINGS-1;
-    /// PostFxDesc::ssrMarchPhase carries the measurement). 0 `checker` is the
-    /// shipped march and the DEFAULT, 1 `refined` takes the step's own phase
-    /// out of both answers, 2 `dither` adds a sixteen-phase offset on top.
+    /// PostFxDesc::ssrMarchPhase carries the measurement). 1 `refined` is the
+    /// DEFAULT (owner, ledger §843): it takes the step's own phase out of both
+    /// answers — a crossing is a SIGN CHANGE, bisected — and draws one solid
+    /// reflection where the older rule drew five to eleven nested arcs, for
+    /// +0.67 ms at 4K and nothing measurable below it. 0 `checker` is the march
+    /// as it shipped before that call and stays selectable; 2 `dither` is the
+    /// shipped hit rule with a sixteen-phase offset on top.
     /// A per-project dial with NO tier column: the tiers say how much a
     /// reflection may cost, and this says how the march decides — a question
     /// the tier table has no opinion about (world.postFx, not world.override).

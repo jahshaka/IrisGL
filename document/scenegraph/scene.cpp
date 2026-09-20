@@ -309,7 +309,7 @@ Scene::Scene()
     giUpdateBudget = 1;         // one probe re-capture per frame (FIX WAVE B1)
     giPccGrid = iris::Vec3(3, 2, 3);
     giDdgi = -1;                // auto: no tier has been applied to this scene yet
-    giDragMoverChannel = 0;     // MOVER-1: the shipped behaviour (see scene.h)
+    giDragMoverChannel = 1;     // MOVER-1: ON by default (owner §844; see scene.h)
     giDdgiIntensity = 1.0f;     // the calibrated default; see scene.h
     giDdgiAmbient = 1.0f;       // the ambient fix on; see scene.h
     // The Photon quality tier this scene comes back at when GI is switched on
@@ -378,7 +378,12 @@ Scene::Scene()
     ssaoRadius = 2.0f;
     smaaPreset = -1;
     ssrMode = 0;
-    ssrMarch = 0;
+    // SSR march: `refined` is the DEFAULT (owner, ledger §843 — PICTURES-1's
+    // judgement): the bisected sign-change crossing draws one solid reflection
+    // where the shipped phase-carrying rule drew five to eleven nested arcs,
+    // for +0.67 ms at 4K and nothing measurable below it. `checker` stays
+    // selectable for a project that wants exactly the old picture.
+    ssrMarch = 1;
     reflectionRoughnessCutoff = 40;
     refractionsMode = 0;
     // Distortion defaults to AUTO: the pass costs nothing until a scene holds a
