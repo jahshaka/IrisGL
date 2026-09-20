@@ -3295,6 +3295,27 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             const auto cr = mCharacterRigs.constFind(e.characterHost);
             rigStale = cr == mCharacterRigs.constEnd() || cr->epoch != e.characterEpoch;
         }
+        // A MATERIAL-ONLY CHANGE SWAPS IN PLACE (MATERIAL-SWAP-GI-1): the mesh
+        // is the same, the rig is the same, only the document's material
+        // pointer moved — a hover preview in and out, an Apply, a Customise.
+        // Re-attaching (detach + create) invalidated the GI caches with no box
+        // and every cascade re-voxelised, one per frame, twice per hovered
+        // object (ledger §804-§805). setNodeMaterial changes the Item's
+        // datablock and invalidates the item's OWN box; it refuses a family
+        // crossing (Lit <-> Unlit / Distortion) and a normal map on a mesh
+        // without tangents, and every refusal falls through to the re-attach
+        // below, which is still the whole answer for a new mesh or a new rig.
+        if (mesh && e.hasMesh && e.meshPtr == mesh && !rigStale && e.materialPtr != material) {
+            const MaterialId swapMat = materialFor(material);
+            if (swapMat && mTarget->setNodeMaterial(e.node, swapMat)) {
+                notePush(node, "material swap");
+                noteMaterialUser(node, e.materialPtr, material);
+                e.material = swapMat; e.materialPtr = material;
+                mReclaimPending = true;      // the old material may now be unreferenced
+                e.texturesPushed = false;
+                e.shadingModelPushed = -1;   // the family is the same; the model may not be
+            }
+        }
         if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh || rigStale)) {
             // ONE memo probe for the whole branch — materialFor reads the same
             // entry, and the reference stays valid because nothing between here

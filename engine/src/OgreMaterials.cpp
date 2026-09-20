@@ -1068,6 +1068,61 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
     } JAH_CATCH(mError, false);
 }
 
+// A MATERIAL SWAP ON A LIVE ITEM (MATERIAL-SWAP-GI-1). attachMesh is detach +
+// create + a box-less invalidateGiCaches ("new lit geometry must join the
+// volume"), and under the cascade chain a box-less invalidation is every
+// cascade, one per frame — which is what a hover preview cost twice per object
+// crossed (ledger §804-§805). Here nothing is created and nothing dies: the Item
+// changes its datablock, the rules a material decides for it are re-derived,
+// and the volume owes a re-voxelisation of THIS ITEM'S BOX only.
+bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
+    auto nit = mNodes.find(id); auto tit = mMaterials.find(matId);
+    if (nit == mNodes.end()) { mError = "setNodeMaterial: unknown node"; return false; }
+    if (tit == mMaterials.end()) { mError = "setNodeMaterial: unknown material"; return false; }
+    Node &n = nit->second;
+    if (!n.item || !n.meshRef) { mError = "setNodeMaterial: the node carries no mesh"; return false; }
+    if (n.materialRef == matId) return true;
+    auto mit = mMeshes.find(n.meshRef);
+    auto oit = mMaterials.find(n.materialRef);
+    if (mit == mMeshes.end() || oit == mMaterials.end()) {
+        mError = "setNodeMaterial: the item's mesh or material is gone — re-attach";
+        return false;
+    }
+    const MaterialRec &rec = tit->second;
+    const MaterialRec &old = oit->second;
+    // A family crossing is a different KIND of renderable (its own queue, its
+    // own visibility bit, its own blocks — setShadingModel has the story) and
+    // takes the full re-attach, as it always did.
+    if (rec.unlit != old.unlit || rec.distortion != old.distortion) {
+        mError = "setNodeMaterial: the swap crosses a shading family — re-attach";
+        return false;
+    }
+    if (!mit->second.hasTangents && materialUsesNormalMap(rec)) {
+        mError = "setNodeMaterial: mesh '" + mit->second.name +
+                 "' has no tangents and material " + std::to_string(matId) +
+                 " binds a normal map";
+        return false;
+    }
+    JAH_TRY {
+        n.item->setDatablock(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
+        markShadowShapeDirty(n);
+        n.item->setVisibilityFlags(itemVisibilityFlags(n, rec.unlit, rec.distortion));
+        n.item->setRenderQueueGroup(renderQueueFor(rec));
+        n.materialRef = matId;
+        if (!rec.unlit) {
+            // The voxels inside this box hold the old albedo; nothing died, so
+            // the destruction generation stays and the single-volume arm keeps
+            // its reuse — only the cascades the box reaches owe a rebuild (G1).
+            Ogre::Aabb box = n.item->getWorldAabbUpdated();
+            invalidateGiCaches(&box, true, false);
+        } else if (probeSeesItem(n)) {
+            staleProbeGrid(GiStaleReason::Moved);
+        }
+        if (mReflectors.count(id)) armReflector(id, n);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
 bool OgreScene::detachMesh(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return false;

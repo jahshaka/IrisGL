@@ -2810,6 +2810,7 @@ public:
     void  applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &errors) const;
     std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
+    bool setNodeMaterial(NodeId, MaterialId) override;
     bool detachMesh(NodeId id) override;
     size_t itemCount(NodeId id) const override;
 
