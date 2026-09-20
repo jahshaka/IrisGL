@@ -1,0 +1,111 @@
+Jahshaka patch 0082 — the bloom composite takes an AMOUNT.
+
+MEDIA-only patch (`Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl`,
+one file, two hunks). THE PROCESS COST IS STATED RATHER THAN AVOIDED: Studio
+stages its media from the SOURCE tree (cmake/IncludeOgre.cmake), so every tree
+must reset its ogre-next submodule and re-run `irisgl/scripts/build-ogre.sh` —
+no engine recompile beyond the staging, but the loop must run.
+
+IT OVERLAPS PATCH 0079 (the dither), which is the only other patch that touches
+this file: 0082 adds a second member to the parameter block 0079 introduced and
+edits the line above it. The two apply in number order and nothing else in the
+stack goes near the HDR media, so the reverse-check's overlap class (CLAUDE.md)
+covers exactly this pair — a tree that already carries 0079 and 0082 must reset
+the submodule before `build-ogre.sh` rather than read the per-patch reverse
+check's complaint as "upstream changed the file".
+
+WHY (owner review 2026-09-18, item R17, lane BLOOM-AMOUNT-1): "bloom also needs
+a value setting next to its check box so we can change the amount of bloom from
+0 to 2x with current bloom being 1." The renderer had no strength term at all —
+`bloomThreshold` and `bloomKnee` decide WHICH pixels bloom, and nothing decided
+how much of the result reached the picture. The composite in this file was
+
+    vSample.xyz += fromSRGB( bloom ) * 16.0;
+
+and the amount is one multiply on that term.
+
+WHY HERE AND NOT IN THE LADDER, which is the whole engineering content of this
+patch. The obvious cheaper place is the bright pass, whose `brightThreshold`
+constant the host already writes (chain::setBloomThreshold) and whose vec4 has
+two unused components — no shader change at all if the amount could ride there.
+It cannot, twice over:
+
+  * THE BLUR TARGETS ARE R10G10B10A2_UNORM (OgreChain.cpp's own note on the
+    ping-pong: the pin's FP16 bloom is slower and this ladder is fixed at
+    256x256). A scale above 1 applied before that write CLIPS at 1.0, so "2x"
+    would brighten the dim half of a halo and do nothing at all to the part a
+    person actually looks at.
+  * THIS QUAD READS THE LADDER THROUGH `fromSRGB`, WHICH IS A SQUARE. A factor
+    of s applied upstream arrives as s² — 2x would be 4x, 0.5x would be 0.25x,
+    and the dial would not be a multiplier in any unit the user could reason
+    about.
+
+At the composite the multiply is linear in the radiance the bloom contributes,
+which is what "twice the bloom" has to mean, and it costs one multiply per
+pixel in a quad that already runs.
+
+THE UNIFORM IS THE AMOUNT MINUS ONE (`jahBloomAmountMinusOne`), following the
+rule patch 0079 set in this same parameter block: the SAFE value — the one a
+zero-filled constant buffer carries, i.e. any path that renders this material
+without the host having pushed anything — must be the picture this engine drew
+before the patch existed. Zero therefore means 1x. It is clamped in the shader
+to the document's own 0..2 range, so a garbage buffer cannot subtract light.
+
+AMOUNT 1 IS BYTE-IDENTICAL, by arithmetic and by measurement. `clamp(1.0 + 0.0,
+0.0, 2.0)` is exactly 1.0, `16.0 * 1.0` is exactly 16.0 in IEEE-754, so the
+multiplied term is bit for bit the term this line produced before — both
+--engine-selftest hashes are unchanged by this patch (the lane measured them:
+pose 1 2aadbc10ec831fd5e2fb4eba88d6e36e7abc008b960b6cda8e5f57e61ee6db29,
+pose 2 0f084cec87ff265e2852f8f5294def97eec3d6ffdbc7ec7251449f8190866573).
+Amount 0 makes the added term exactly zero, which is precisely what the
+bloom-OFF chain feeds this quad (a black bloom texture), so scrubbing to zero
+reaches the bloom-off picture without changing the compositor's shape.
+
+THE HOST SIDE is `PostFxDesc::bloomAmount` → `ChainDesc::bloomAmount` →
+`chain::setBloomAmount` (OgreChain.cpp), pushed per view from applyViewGlobals
+beside the threshold, and from OgreView::setPostFx for the VR session's view,
+which the engine's per-frame loop never reaches. A tree whose staged media
+predates this patch logs one line and renders every scene at 1x.
+
+VERIFIED: `git apply --check` against the pristine pin with 0001-0081 applied,
+and `git apply --reverse --check` after applying. The pixel evidence is
+tests/hdr bloom.amount (0 / 1 / 2 on a bright-emitter fixture, in one process).
+
+diff --git a/Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl b/Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl
+index 5fa8ac74e..0584b8a4a 100644
+--- a/Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl
++++ b/Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl
+@@ -65,6 +65,23 @@ vulkan( layout( ogre_P0 ) uniform Params { )
+ 	// clamped to "off", i.e. to the picture this engine drew before the
+ 	// dither existed. Neither failure can produce noise.
+ 	uniform float jahDitherOff;	// 0 = dither (normal), 1 = JAHSHAKA_NO_DITHER
++	// JAHSHAKA (patch 0082, lane BLOOM-AMOUNT-1): HOW MUCH of the blurred
++	// highlight this quad adds -- the World panel's Bloom Amount, 0 to 2,
++	// with 1 the picture this engine has always drawn.
++	//
++	// IT IS THE AMOUNT MINUS ONE, and that spelling is the same safety rule
++	// as jahDitherOff above: the value a constant buffer nobody has written
++	// carries is zero, and zero here means ONE -- the unscaled picture --
++	// rather than a frame with the bloom silently missing. A garbage value
++	// is clamped to the document's own range.
++	//
++	// AND IT IS APPLIED HERE, NOT IN THE LADDER. The bright pass writes an
++	// R10G10B10A2 UNORM target, so scaling it would CLIP at 1.0, and this
++	// quad reads that target through fromSRGB (a square), so a scale over
++	// there would arrive squared. At the composite the multiply is linear
++	// in the radiance the bloom adds, which is what "twice the bloom" has
++	// to mean.
++	uniform float jahBloomAmountMinusOne;	// 0 = 1x (normal), -1 = none, 1 = 2x
+ vulkan( }; )
+ 
+ void main()
+@@ -75,7 +92,8 @@ void main()
+ 
+ 	vSample.xyz *= fInvLumAvg;
+ 	vSample.xyz	+= fromSRGB( texture( vkSampler2D( bloomRt, samplerBilinear ),
+-									  inPs.uv0 ).xyz ) * 16.0;
++									  inPs.uv0 ).xyz ) *
++				   ( 16.0 * clamp( 1.0 + jahBloomAmountMinusOne, 0.0, 2.0 ) );
+ 	vSample.xyz  = FilmicTonemap( vSample.xyz ) / FilmicTonemap( W );
+ 	//vSample.xyz  = vSample.xyz / (1 + vSample.xyz); //Reinhard Simple
+ 	vSample.xyz  = ( vSample.xyz - 0.5 ) * 1.25 + 0.5 + 0.11;

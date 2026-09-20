@@ -6867,6 +6867,7 @@ void SceneMirror::applyViewPostFx(View *view, bool record)
         fx.bloom          = mSource->bloomEnabled;
         fx.bloomThreshold = mSource->bloomThreshold;
         fx.bloomKnee      = mSource->bloomKnee;
+        fx.bloomAmount    = mSource->bloomAmount;
         fx.ssao           = mSource->ssaoEnabled;
         fx.ssaoScale      = mSource->ssaoScale;
         fx.ssaoPower      = mSource->ssaoPower;
@@ -8208,6 +8209,7 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
     flag("bloom", fx.bloom);
     num("bloomThreshold", fx.bloomThreshold);
     num("bloomKnee", fx.bloomKnee);
+    num("bloomAmount", fx.bloomAmount);
     flag("ssao", fx.ssao);
     num("ssaoPower", fx.ssaoPower);
     num("ssaoRadius", fx.ssaoRadius);

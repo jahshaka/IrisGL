@@ -4264,6 +4264,28 @@ struct PostFxDesc {
     /// silently refuses. 2.0 is what the caller hard-coded before this row
     /// existed, so the default is byte-identical (ADDENDUM A-6).
     float bloomKnee = 2.0f;
+    /// HOW MUCH of the bloom reaches the picture — a plain multiplier on the
+    /// blurred highlight term where the tonemap quad adds it, 0 to 2, and 1 is
+    /// the amount this engine has always drawn (owner review R17, lane
+    /// BLOOM-AMOUNT-1). It is a UNIFORM, not graph shape: dragging it must
+    /// never rebuild a workspace (ChainDesc::sameShape does not read it, and
+    /// tests/hdr bloom_amount asserts the generation holds still), and it is
+    /// therefore the cheap dial the threshold and the knee are not — those two
+    /// decide WHICH pixels bloom, this one decides how strongly the result is
+    /// mixed in.
+    ///
+    /// 0 IS THE BLOOM-OFF PICTURE WITH THE CHAIN STILL BUILT: the term is
+    /// multiplied by zero, which is exactly what the bloom-off chain adds (it
+    /// feeds the tonemapper a black bloom texture), so a person can scrub to
+    /// nothing and back without a rebuild at either end. Turning `bloom` off is
+    /// still the way to stop PAYING for it — that is the graph change.
+    ///
+    /// THE ARITHMETIC IS IN THE PIXEL, NOT IN THE LADDER, deliberately: the
+    /// bright pass writes an R10G10B10A2_UNORM target and the tonemapper reads
+    /// it through a SQUARE (`fromSRGB`), so scaling the bright pass would clip
+    /// at 1.0 and would square the amount. At the composite it is linear in the
+    /// added radiance, which is what "2x the bloom" has to mean.
+    float bloomAmount = 1.0f;
     /// Screen-space ambient occlusion. Adds a normals G-buffer to the main pass.
     bool  ssao = false;
     /// AO buffer resolution, as a factor of the view (0.5 or 1.0). The tap count
@@ -4486,6 +4508,7 @@ struct PostFxDesc {
                meterLowPercent == o.meterLowPercent &&
                meterHighPercent == o.meterHighPercent && bloom == o.bloom &&
                bloomThreshold == o.bloomThreshold && bloomKnee == o.bloomKnee &&
+               bloomAmount == o.bloomAmount &&
                ssao == o.ssao &&
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
                ssaoRadius == o.ssaoRadius && ditherOff == o.ditherOff &&

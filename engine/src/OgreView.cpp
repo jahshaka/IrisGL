@@ -151,6 +151,7 @@ ChainDesc OgreView::chainDesc() const {
     d.bloom          = mPostFx.bloom && mPostFx.hdr;
     d.bloomThreshold = mPostFx.bloomThreshold;
     d.bloomKnee      = mPostFx.bloomKnee;
+    d.bloomAmount    = mPostFx.bloomAmount;
     d.ssao           = mPostFx.ssao;
     d.ssaoScale      = mPostFx.ssaoScale;
     d.ssaoPower      = mPostFx.ssaoPower;
@@ -625,6 +626,12 @@ void OgreView::setPostFx(const PostFxDesc &pushed) {
     // whoever owns the view; it is debounced inside setDither and costs
     // nothing when the value has not moved.
     if (chainDesc().hdr) chain::setDither(chainDesc().ditherOff);
+    // ...and the bloom amount, which is a uniform on the SAME material and is
+    // therefore unreachable by the same view for the same reason. It is inert
+    // in the headset today — applyVrViewPolicy turns bloom off in both eyes —
+    // so this line is what keeps the dial honest the day that policy changes,
+    // at the cost of one debounced float comparison per setPostFx.
+    if (chainDesc().hdr && chainDesc().bloom) chain::setBloomAmount(chainDesc().bloomAmount);
 }
 
 const PostFxDesc &OgreView::postFx() const { return mPostFx; }

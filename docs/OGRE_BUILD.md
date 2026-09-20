@@ -1978,11 +1978,44 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     sharing one float value that lands on a tie), and the dither then moves
     25.08 %.
 
-THE STACK IS 0001-0079 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0082-bloom-composite-takes-an-amount — THE BLOOM COMPOSITE TAKES AN AMOUNT
+    (lane BLOOM-AMOUNT-1, 2026-09-20), MEDIA-only, one file
+    (Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl),
+    OVERLAPS 0079 — it adds a second member to the parameter block the dither
+    introduced and edits the line above it, so a tree carrying both resets the
+    submodule before `build-ogre.sh` rather than reading the per-patch reverse
+    check's complaint as an upstream change. The owner asked (review R17) for
+    "a value setting next to its check box so we can change the amount of bloom
+    from 0 to 2x with current bloom being 1": the renderer had no strength term
+    at all — `bloomThreshold` and `bloomKnee` say WHICH pixels bloom and nothing
+    said how much of the blurred result reached the picture. The multiply is on
+    the composite (`vSample += fromSRGB(bloom) * (16.0 * amount)`) and NOT in
+    the ladder, for two reasons that are the whole content of the patch: the
+    blur targets are R10G10B10A2_UNORM, so a scale above 1 applied before them
+    CLIPS (the dim edge of a halo would brighten and its core would not move),
+    and this quad reads the ladder through `fromSRGB`, which is a SQUARE, so a
+    factor applied upstream arrives squared (2x would be 4x). The uniform is
+    `jahBloomAmountMinusOne`, following 0079's rule in the same block: the value
+    an unwritten constant buffer carries — zero — must be the picture this
+    engine drew before the patch, so zero means 1x; the shader clamps the sum to
+    the document's own 0..2. AMOUNT 1 IS BYTE-IDENTICAL (`clamp(1+0)` is exactly
+    1.0 and `16.0*1.0` is exactly 16.0), and both selftest hashes are unchanged:
+    pose 1 `2aadbc10…`, pose 2 `0f084cec…`. Amount 0 makes the added term
+    exactly zero, which is what the bloom-OFF chain feeds this quad (a black
+    texture), so the dial reaches the bloom-off picture with the compositor's
+    shape untouched. Host side: `PostFxDesc::bloomAmount` ->
+    `chain::setBloomAmount`, pushed per view beside the bloom threshold and from
+    `OgreView::setPostFx` for the VR session's view; staged media without the
+    patch logs one line and renders every scene at 1x. Guarded by
+    `hdr.bloom_amount` (six arms on one emitter fixture in one process,
+    including the RATIO that either wrong place for the multiply would fail and
+    the workspace generation that makes it a draggable dial).
+
+THE STACK IS 0001-0082 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075 and 0078 are SOURCE-only (0062, 0065 and 0076 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
