@@ -402,7 +402,18 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
             (haveShadowNode ? detail::OgreView::kProbeShadowNodeName : "NONE (a card's shadow"
                                                                       " term will be the"
                                                                       " prepass constant)"));
-    p->mShadowNodeRecalculation = Ogre::SHADOW_NODE_RECALCULATE;
+    // RECALCULATE, unless the A/B lever says otherwise. The lever exists because
+    // "what does a per-card shadow-node update COST" is the one question about
+    // this pass that cannot be answered by reading it — a shadow node update is
+    // a full caster pass, and the Grand Showroom's whole frame story was once a
+    // shadow node recalculated N times a frame. It is read ONCE per cache BUILD
+    // (not per card), so a measurement flips it by taking the card row off and
+    // on again, which is what `sc1b_measure showroom` does in one process; it
+    // is the same shape as `JAHSHAKA_GI_NO_REBUILD_SETTLE` and
+    // `JAHSHAKA_NO_DITHER`, and like them the SHIPPED arm is the one without it.
+    const bool noRecalc = std::getenv("JAH_CARD_NO_SHADOW_RECALC") != nullptr;
+    p->mShadowNodeRecalculation =
+        noRecalc ? Ogre::SHADOW_NODE_REUSE : Ogre::SHADOW_NODE_RECALCULATE;
     // ...AND THE FIT IS SHARED BY EVERY CARD CAPTURED IN ONE FRAME, which is a
     // MEASURED limitation and not a choice. `CompositorShadowNode::_update`
     // early-outs on "same camera, same workspace frame count"
@@ -960,6 +971,25 @@ void SurfaceCache::captureCard(CardRec &card) {
     // capture camera's own box, which is a metre or two of world, so a card's
     // shadow term is as sharp as the atlas can make it rather than as sharp as
     // the view's whole frustum allows.
+    //
+    // AND WHAT IT COSTS TODAY IS NOTHING, WHICH IS THE SAME FINDING FROM THE
+    // OTHER SIDE (`sc1b_measure showroom`, both arms in one process, twice, on
+    // a Showroom-2-shaped scene — 45 carded instances, a sun and THREE
+    // shadow-casting POINT lamps, i.e. eighteen cube faces a recalculation):
+    //
+    //     recalculate per card   0.3577 / 0.3335 ms a card
+    //     shadow node REUSED     0.3579 / 0.3422 ms a card
+    //     the difference        -0.0002 / -0.0087 ms a card
+    //
+    // A real per-card caster pass over that scene could not be free. It is free
+    // because it does not happen: `buildClosestLightList` early-outs on (same
+    // camera, same COMPOSITOR MANAGER frame count) and a hand-driven workspace
+    // never advances that count, so `SHADOW_NODE_RECALCULATE` here is very
+    // nearly a no-op — which is the same mechanism that makes every card after
+    // a frame's first read a flat 1.0 wherever the first card's fit does not
+    // reach. THE NUMBER PHASE 3 MUST CARRY: the cost of a CORRECT per-card fit
+    // is NOT paid by anything measured here, and it is a full caster pass per
+    // card when something finally makes it fire.
     const auto tA = std::chrono::steady_clock::now();
     {
         const CaptureFlag capturing;
