@@ -2934,6 +2934,9 @@ public:
     bool setGlobalIllumination(const GiParams &p) override;
     bool setGiTuning(const GiParams &p) override;
     void refreshGlobalIllumination() override;
+    /// OPEN_COVER_SPEC §2 A — see the boundary's note. Sticky, per scene.
+    void setLoading(bool loading) override { mSceneLoading = loading; }
+    bool isLoading() const override { return mSceneLoading; }
     GiStatus giStatus() const override;
     /// PHOTON-M3's readback: what the voxel lighting volume holds. Blocks on a
     /// flush and a whole-volume download — a test and tool path (Engine.h).
@@ -4024,6 +4027,12 @@ private:
     /// True for the duration of ONE `rebuildVct` call that is allowed to park
     /// after the cascade arm instead of running the probe stages inline.
     bool mGiStageBuild = false;
+    /// True while a stage is running, so the invalidation funnel does not
+    /// abandon the build the stage is making.
+    bool mInGiStage = false;
+    /// The host says a world of this scene is arriving and none of it is on
+    /// screen yet (Scene::setLoading). No FIRST-TIME arm build while it holds.
+    bool mSceneLoading = false;
     /// The volume the staged probe stages are relative to — `rebuildVct`'s
     /// `aabb`, kept because the stages run in later frames.
     Ogre::Aabb mGiStagedVolume;

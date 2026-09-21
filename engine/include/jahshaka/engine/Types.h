@@ -5449,15 +5449,16 @@ enum class FrameCause { Unknown, Driver, Scripted, Offscreen, WarmUp, Player };
 /// `editor.frame` — gets exactly the frame it always got, built to completion,
 /// with no streaming rule anywhere near it. Consumed by the next
 /// `renderOneFrame` and reset to `Complete`, like `FrameCause`.
+/// THE OTHER HALF — "nothing of this world is on screen yet" — is NOT a
+/// property of a frame and must not be modelled as one: a load is a stretch of
+/// many frames drawn from half a dozen places (the runner's slice boundaries,
+/// the cover's inline presents, the shader warm-up's 4x4 target, the project
+/// tile's offscreen shot), and a single one of them left at `Complete` builds
+/// the whole arm in the middle of the load. That is `Scene::setLoading`, a
+/// sticky flag the host raises for the length of the load.
 enum class FramePace {
     /// Do everything this frame needs, now. The default and the contract.
     Complete,
-    /// NOTHING OF THIS WORLD IS ON SCREEN YET — a frame drawn behind the
-    /// loading cover, or at an open runner's slice boundary. Start no heavy
-    /// first-time work at all: the request stays armed and a later frame takes
-    /// it. (A frame of a half-built world nobody can see is pure UI-thread
-    /// cost.)
-    Deferred,
     /// A DRIVER FRAME OF A WORLD THE USER CAN SEE that still owes first-time
     /// work: take ONE step of it and draw. Repeated once per frame until
     /// nothing is owed, which is what makes the world stream in.

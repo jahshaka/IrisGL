@@ -806,6 +806,28 @@ public:
     /// edit costs the cascades that can see it, one per frame — so callers may
     /// invoke this per edit.
     virtual void        refreshGlobalIllumination() = 0;
+
+    // ---- a world that is not on screen yet (OPEN_COVER_SPEC §2 A) ---------
+    /// THE LOAD IS A STRETCH, NOT A FRAME. While this is true the scene starts
+    /// no FIRST-TIME global-illumination build at all: the request stays armed
+    /// in the usual way and the first frame the user can actually see takes it.
+    /// A build already standing is untouched, and every cheap path (the
+    /// per-cascade dirty queue, a re-injection) runs exactly as it does
+    /// normally — what is refused is the from-scratch arm, which is the single
+    /// longest thing this engine does on the UI thread.
+    ///
+    /// WHY IT IS STICKY AND NOT A FRAME FLAG: a load draws frames from half a
+    /// dozen places — the open runner's slice boundaries, the loading cover's
+    /// inline presents, the shader warm-up's 4x4 target, the project tile's
+    /// offscreen shot — and ONE of them left at `FramePace::Complete` builds
+    /// the whole arm in the middle of the load (measured: it was the frame
+    /// after the warm-up set was recorded).
+    ///
+    /// The host raises it when a world starts arriving and lowers it when that
+    /// world is on screen. Default false, so an engine nobody tells is an
+    /// engine that behaves exactly as it always did.
+    virtual void        setLoading(bool loading) = 0;
+    virtual bool        isLoading() const = 0;
     /// The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2): re-injects the
     /// scene's lights into the EXISTING voxel volume and leaves the geometry
     /// alone. Orders of magnitude cheaper than the full call — no

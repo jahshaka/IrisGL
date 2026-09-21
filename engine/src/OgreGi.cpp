@@ -2150,6 +2150,16 @@ void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsC
                                  // rebuilds the whole arm from scratch — or,
                                  // under a cascade chain, marks the cascades the
                                  // change reaches and keeps everything else (G1)
+    // ...AND A STAGED BUILD DESCRIBES A SCENE THAT NO LONGER EXISTS
+    // (OPEN_COVER_SPEC §2 A). The stages run in later frames against the volume
+    // the CASCADE stage was fitted to, so a spawn between two of them would
+    // place the probe grid over the world as it was before the spawn — measured
+    // as `scripting.e2e.page_gi`'s 0 probes kept of 18 when a cube arrived after
+    // the chain. The flag above is already set; abandoning the stages is what
+    // makes the flush build from scratch rather than continue a stale plan.
+    // Never from INSIDE a stage: those legitimately touch the arm they are
+    // building.
+    if (!mInGiStage) abandonStagedGiBuild();
     // THE DESTRUCTION GENERATION (FIX WAVE B4). Bumped unconditionally, and
     // unconditionally is the point: every caller of this function either
     // destroys something the GI arms hold a raw pointer into, or wants a
@@ -2558,6 +2568,13 @@ bool OgreScene::giVoxelTexturesPending() {
 bool OgreScene::giBuildOwesWork() const { return mGiBuildStage != GiBuildStage::Idle; }
 
 bool OgreScene::stepStagedGiBuild() {
+    // A stage builds the very arm `invalidateGiCaches` watches; without this it
+    // would abandon itself half way through.
+    struct InStage {
+        bool &f;
+        explicit InStage(bool &b) : f(b) { f = true; }
+        ~InStage() { f = false; }
+    } inStage(mInGiStage);
     JAH_TRY {
         switch (mGiBuildStage) {
         case GiBuildStage::Idle:
@@ -2607,9 +2624,8 @@ void OgreScene::applyPendingGi() {
     // already built and bound, and what is owed is the probe grid and the
     // field, one frame at a time (OPEN_COVER_SPEC §2 A).
     if (mGiBuildStage != GiBuildStage::Idle) {
-        // Nothing of this world is on screen yet — a frame behind the loading
-        // cover or at an open runner's slice boundary. Spend nothing.
-        if (mFramePace == FramePace::Deferred) return;
+        // Nothing of this world is on screen yet: spend nothing (Scene::setLoading).
+        if (mSceneLoading) return;
         stepStagedGiBuild();
         // A `Complete` frame owes the WHOLE arm, however it was staged: a
         // thumbnail, a capture, a suite or a script's editor.frame must see the
@@ -2620,12 +2636,6 @@ void OgreScene::applyPendingGi() {
         return;
     }
     if (!mGiCachesDirty) return;
-    // A WORLD WITH NO ARM AT ALL, BEHIND THE COVER: stay armed and build
-    // nothing. The request survives in `mGiCachesDirty`, exactly as the camera
-    // and albedo waits leave it, and the first frame the user can see takes it.
-    if (mFramePace == FramePace::Deferred && mVctCascades.empty() && !mVctVoxelizer &&
-        (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid))
-        return;
     mGiCachesDirty = false;
     // A STREAMING FRAME BUILDS THE CHAIN AND PARKS (see rebuildVct's tail).
     const bool stage = (mFramePace == FramePace::Streaming);
@@ -3720,6 +3730,28 @@ bool OgreScene::rebuildVct() {
     // while it waits (no teardown): a frame of the previous arm is a better
     // answer than a frame of nothing.
     if (giVoxelTexturesPending()) { mGiCachesDirty = true; return false; }
+
+    // ...AND IT WAITS FOR THE WORLD TO BE ON SCREEN (OPEN_COVER_SPEC §2 A).
+    // The same shape as the two waits above and for a related reason: this is
+    // the longest single thing the engine does on the UI thread (1,025 ms on
+    // Grand Showroom 2), and doing it while a load is still installing spends
+    // it on a frame nobody can see — the loading cover's, the open runner's
+    // slice boundary, the shader warm-up's 4x4 target. Nothing is built, the
+    // request stays armed through `mGiCachesDirty`, and the first frame after
+    // the reveal takes it (one STAGE at a time when that frame says so).
+    //
+    // ONLY A FIRST arm: a scene that already has one keeps every cheap path
+    // while the next world loads, and a rebuild of a LIVE arm is not the cost
+    // this defers.
+    //
+    // IT IS HERE AND NOT AT THE FLUSH because `setGlobalIllumination` — which
+    // is how the mirror arms a freshly installed world — calls this function
+    // DIRECTLY, and a guard at `applyPendingGi` never saw it (measured: three
+    // gate reds whose common cause was the arm building inside the create).
+    if (mSceneLoading && mVctCascades.empty() && !mVctVoxelizer) {
+        mGiCachesDirty = true;
+        return false;
+    }
 
     ++mGiRebuilds;
     // THE MONITOR'S GI EVENT (§4.7 / §4.8). A rebuild is the single most
