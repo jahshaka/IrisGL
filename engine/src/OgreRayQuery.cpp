@@ -514,6 +514,14 @@ private:
         /// frame, a resize and a scene change all are.
         EyeBasisF prev[2];
         bool  havePrev = false;
+        /// HOW MANY CONSECUTIVE FRAMES THIS HISTORY HAS BEEN WRITTEN — the
+        /// VIEW's age, which is a different fact from a texel's sample count
+        /// (PAN-SMEAR-1). A pixel the camera has just turned onto has no
+        /// previous position on screen, and the shader must tell that apart
+        /// from a view that is two frames old: the second is what the filter's
+        /// warm-up exists for, the first is an ordinary frame of an ordinary
+        /// pan. Restarts with `havePrev`.
+        unsigned historyFrames = 0;
         /// Was the LAST recorded frame a stereo one? A view that changes shape
         /// (a session beginning or ending on it) has a history whose halves mean
         /// something else, so the mean starts again — the same rule as a resize.
@@ -2528,8 +2536,12 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h,
     }
     rv.imagesReady = false;
     rv.havePrev = false;
+    rv.historyFrames = 0;
     rv.w = w; rv.h = h;
-    const VkFormat formats[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32_SFLOAT };
+    // The second image is a PAIR: x = the surface's distance (the reprojection's
+    // validity test), y = the mean distance the rays in the mean travelled (what a
+    // moved camera's ray is compared against — rq_reflect.comp, PAN-SMEAR-1).
+    const VkFormat formats[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32_SFLOAT };
     for (int i = 0; i < 2; ++i) {
         if (!makeStorageImage(w, h, formats[0], rv.hist[i], err)) return false;
         if (!makeStorageImage(w, h, formats[1], rv.dist[i], err)) return false;
@@ -2994,7 +3006,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     } else {
         memset(pp.prevFwd, 0, sizeof(pp.prevFwd));
         memset(pp.prevFwd2, 0, sizeof(pp.prevFwd2));
+        rv.historyFrames = 0;
     }
+    // THE VIEW'S AGE, in frames of unbroken history (rq_reflect.comp's
+    // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
+    // stereo shape, exactly where the previous basis is withheld above).
+    pp.stereo[1] = float(std::min(rv.historyFrames, 4096u));
+    ++rv.historyFrames;
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
     rv.prev[1] = eyeB[1];

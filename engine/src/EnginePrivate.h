@@ -1410,8 +1410,11 @@ void initSmaa(Ogre::Root *root, int preset);
 /// the left-handed view→texture-space matrix the ray march projects with, plus
 /// the tuning the description carries. Built exactly like Ogre's own
 /// ScreenSpaceReflections::update — the matrix surgery there is not obvious and
-/// is not ours to reinvent.
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc);
+/// is not ours to reinvent. `reprojection` (may be null) is the view's
+/// frame-to-frame state, declared below beside applyViewGlobals.
+struct SsrReprojection;
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc,
+               SsrReprojection *reprojection = nullptr);
 // ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
 //
 // This was ONE function, `applyGlobals`, called once a frame from the primary
@@ -1449,8 +1452,22 @@ void setBloomAmount(float amount);
 /// cache is a SharedPtr into a material that is about to stop existing.
 void forgetTonemapParams();
 void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc);
+/// WHERE A VIEW'S PICTURE WAS ONE FRAME AGO (PAN-SMEAR-1): the world-to-image
+/// matrix the view's last frame was drawn with — image = (u, v, the depth
+/// buffer's own value). The screen-space reflection resolve reads the PREVIOUS
+/// frame's colour, and this is what lets it fetch that colour where the hit's
+/// world point WAS rather than where it is now. One per view, owned by the
+/// view's ViewGlobalsListener; `have` is false until a frame has been pushed.
+struct SsrReprojection {
+    Ogre::Matrix4 prevWorldToImage = Ogre::Matrix4::IDENTITY;
+    bool          have = false;
+};
+/// `reprojection` may be null (a caller with no frame-to-frame state — the VR
+/// session's one-off push): the resolve then fetches at the hit's own
+/// coordinate, which is exact for a still camera.
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight);
+                      unsigned viewWidth, unsigned viewHeight,
+                      SsrReprojection *reprojection = nullptr);
 
 /// The seed value the HDR adaptation history holds for a given exposure — the
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
@@ -1479,6 +1496,7 @@ public:
     void workspacePreUpdate(Ogre::CompositorWorkspace *) override;
     Ogre::Root *mRoot = nullptr;
     OgreView   *mView = nullptr;
+    SsrReprojection mSsrReprojection;
 };
 }   // namespace chain
 

@@ -1449,6 +1449,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->addQuadTextureSource(0, kSsrRays);
             q->addQuadTextureSource(1, kSsrShadowRough);
             q->addQuadTextureSource(2, kSsrPrev);
+            // The hit's own depth: what turns a hit coordinate back into a world
+            // point, so the history is read where that point WAS (PAN-SMEAR-1).
+            q->addQuadTextureSource(3, kDepth);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         }
     }
@@ -3086,7 +3089,7 @@ void initSmaa(Ogre::Root *root, int preset) {
 //      (VIEW_SPACE_CORNERS_NORMALIZED_LH) and therefore the whole march use.
 //   3. left-multiply by the clip→image matrix — the *0.5+0.5 and the y flip, so
 //      the shader divides by w and has a texture coordinate, full stop.
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection *reprojection) {
     if (!camera || desc.ssr <= 0) return;
     Ogre::Pass *march = materialPass("Jahshaka/SsrRayMarch");
     if (!march) return;
@@ -3145,11 +3148,43 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
     // hand over on one number. The value is `kRayReflectFeather` in
     // EnginePrivate.h - a shared constant rather than a literal here and another
     // in OgreRayQuery.cpp, which is how two halves drift apart.
-    if (Ogre::Pass *resolve = materialPass("Jahshaka/SsrResolve"))
-        resolve->getFragmentProgramParameters()->setNamedConstant(
-            "resolveParams",
-            Ogre::Vector4(desc.reflectionRoughnessCutoff, desc.ssrIntensity,
-                          kRayReflectFeather, 0.0f));
+    // THE REPROJECTION (PAN-SMEAR-1, the resolve's `reprojectMatrix`). World to
+    // image — (u, v, the depth buffer's own value) — is the render system's own
+    // projection (reverse-Z and its depth range included, so the number the
+    // resolve reads out of the depth buffer is the number this matrix produces)
+    // times the view, carried into texture space by the same clip-to-image map
+    // the march uses. The resolve is handed previous * inverse(current): ONE
+    // matrix, the identity while the camera is still, so a still frame is
+    // bit-for-bit the picture it was.
+    //
+    // A STEREO chain draws two eyes through one quad with one parameter block,
+    // and this camera is neither eye: it keeps the identity, which is the
+    // behaviour it had (per-eye reprojection belongs with the per-eye march).
+    Ogre::Matrix4 reproject = Ogre::Matrix4::IDENTITY;
+    if (reprojection && !desc.stereo) {
+        const Ogre::Matrix4 worldToImage =
+            kClipToImage * camera->getProjectionMatrixWithRSDepth() * camera->getViewMatrix(true);
+        if (reprojection->have) {
+            const Ogre::Matrix4 candidate = reprojection->prevWorldToImage * worldToImage.inverse();
+            bool finite = true;
+            for (int r = 0; r < 4 && finite; ++r)
+                for (int c = 0; c < 4; ++c)
+                    if (!std::isfinite(candidate[r][c])) { finite = false; break; }
+            if (finite) reproject = candidate;
+        }
+        reprojection->prevWorldToImage = worldToImage;
+        reprojection->have = true;
+    } else if (reprojection) {
+        reprojection->have = false;
+    }
+
+    if (Ogre::Pass *resolve = materialPass("Jahshaka/SsrResolve")) {
+        Ogre::GpuProgramParametersSharedPtr rp = resolve->getFragmentProgramParameters();
+        rp->setNamedConstant("resolveParams",
+                             Ogre::Vector4(desc.reflectionRoughnessCutoff, desc.ssrIntensity,
+                                           kRayReflectFeather, 0.0f));
+        rp->setNamedConstant("reprojectMatrix", reproject);
+    }
 }
 
 // ---- DISTORTION -----------------------------------------------------------
@@ -3202,7 +3237,7 @@ void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
 }
 
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight) {
+                      unsigned viewWidth, unsigned viewHeight, SsrReprojection *reprojection) {
     if (desc.hdr) {
         // The tonemap quad's 8-bit write is dithered (patch 0079); this pushes
         // only the diagnostic off switch, and the shader's default is
@@ -3236,7 +3271,8 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
                    unsigned(float(viewHeight) * desc.ssaoScale),
                    desc.ssaoRadius, desc.ssaoPower);
     }
-    if (marchesInScreenSpace(desc)) updateSsr(camera, desc);
+    if (marchesInScreenSpace(desc)) updateSsr(camera, desc, reprojection);
+    else if (reprojection) reprojection->have = false;
     if (!desc.looks.empty()) updateLooks(desc);
     if (desc.distortion) updateDistortion(desc);
 }
@@ -3264,7 +3300,7 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *) {
     // so two workspaces in one frame can carry two different exposures even
     // though the materials themselves are process-wide singletons.
     applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(),
-                     mView->width(), mView->height());
+                     mView->width(), mView->height(), &mSsrReprojection);
 }
 
 }   // namespace chain

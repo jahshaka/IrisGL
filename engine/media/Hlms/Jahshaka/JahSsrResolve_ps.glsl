@@ -107,6 +107,7 @@
 vulkan_layout( ogre_t0 ) uniform texture2D rayTexture;
 vulkan_layout( ogre_t1 ) uniform texture2D gBufShadowRoughness;
 vulkan_layout( ogre_t2 ) uniform texture2D prevFrame;
+vulkan_layout( ogre_t3 ) uniform texture2D depthTexture;
 
 vulkan( layout( ogre_s0 ) uniform sampler pointSampler );
 vulkan( layout( ogre_s2 ) uniform sampler linearSampler );
@@ -120,6 +121,12 @@ in block
 vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 rayBufferRes;		// auto texture_size 0: xy = the ray buffer's pixels
 	uniform vec4 prevFrameRes;		// auto texture_size 2: xy = the colour history's pixels
+	// WHERE THIS FRAME'S PICTURE WAS IN THE LAST ONE (PAN-SMEAR-1): maps an
+	// image point of this frame (uv, the depth buffer's own value, 1) to the
+	// same WORLD point's image point in the previous frame, as one matrix
+	// (previous world-to-image times the inverse of this frame's). The identity
+	// when the camera did not move, and when the view has no previous frame.
+	uniform mat4 reprojectMatrix;
 	uniform vec4 resolveParams;		// x roughness cutoff, y intensity,
 									// z the cutoff's feather, w unused
 vulkan( }; )
@@ -505,7 +512,43 @@ void main()
 		return;
 	}
 
-	const vec4 centreTap = ssrHistoryTap( ray.xy );
+	// THE HIT IS IN THIS FRAME'S PICTURE; THE COLOUR IS IN THE LAST ONE'S
+	// (PAN-SMEAR-1). The march finds where the reflected ray lands in the
+	// picture being drawn NOW, and the only lit colour there is, is the
+	// previous frame's. Fetching that colour at this frame's coordinate is right
+	// only while the camera is still: on a 1.5 degree-a-frame turn the two
+	// pictures are about seventeen pixels apart, so every reflection trailed its
+	// object by that much and tore along the object's silhouette. The hit's
+	// world point is recovered from the depth buffer at the hit and projected
+	// through the previous camera, and the colour is fetched where that point
+	// WAS. A static world is then exact under any camera motion; a moving
+	// OBJECT still trails by its own one frame of motion, as before.
+	//
+	// WHERE THE POINT WAS NOT IN THE PREVIOUS PICTURE there is no colour for it
+	// at all. The clamped fetch used to return the border texel's — somebody
+	// else's colour, stretched — and the honest answer is the one every other
+	// declined pixel gets: weight zero, which hands the pixel to the probe, the
+	// sky or the ray (patch 0036's composite). The fade to that edge is the
+	// same width as the march's own screen-edge fade, so the hand-over is a
+	// ramp and not a line.
+	const float hitDepth = texelFetch( vkSampler2D( depthTexture, pointSampler ),
+									   ivec2( ray.xy * prevFrameRes.xy ), 0 ).x;
+	const vec4	was		 = reprojectMatrix * vec4( ray.xy, hitDepth, 1.0 );
+	if( was.w <= 0.0 )
+	{
+		fragColour = vec4( 0.0 );
+		return;
+	}
+	const vec2	prevUv	 = was.xy / was.w;
+	const vec2	inside	 = min( prevUv, vec2( 1.0 ) - prevUv );
+	const float kHistoryEdgeFade = 0.03;
+	const float historyFade = smoothstep( 0.0, kHistoryEdgeFade, min( inside.x, inside.y ) );
+	if( historyFade <= 0.0 )
+	{
+		fragColour = vec4( 0.0 );
+		return;
+	}
+	const vec4 centreTap = ssrHistoryTap( prevUv );
 	vec3	   reflected  = centreTap.xyz;
 
 	// THE FIREFLY CLAMP, the second line of defence and the only one that also
@@ -532,10 +575,10 @@ void main()
 		// Each tap goes through ssrHistoryTap on its OWN, not after the
 		// average: one +Inf neighbour must not drag the other three to zero and
 		// collapse the ceiling this pixel is measured against.
-		const vec3	nbr = ( ssrHistoryTap( ray.xy + vec2( -t.x, -t.y ) ).xyz +
-							ssrHistoryTap( ray.xy + vec2( t.x, -t.y ) ).xyz +
-							ssrHistoryTap( ray.xy + vec2( -t.x, t.y ) ).xyz +
-							ssrHistoryTap( ray.xy + vec2( t.x, t.y ) ).xyz ) *
+		const vec3	nbr = ( ssrHistoryTap( prevUv + vec2( -t.x, -t.y ) ).xyz +
+							ssrHistoryTap( prevUv + vec2( t.x, -t.y ) ).xyz +
+							ssrHistoryTap( prevUv + vec2( -t.x, t.y ) ).xyz +
+							ssrHistoryTap( prevUv + vec2( t.x, t.y ) ).xyz ) *
 						  0.25;
 		// THE UNREPRESENTABLE SAMPLE TAKES THE NEIGHBOURHOOD, not a clamped
 		// version of itself (see ssrHistoryTap): the lobe stand-in the firefly
@@ -552,5 +595,5 @@ void main()
 			reflected *= ceiling / lum;
 	}
 
-	fragColour = vec4( reflected, weight );
+	fragColour = vec4( reflected, weight * historyFade );
 }
