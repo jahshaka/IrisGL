@@ -294,7 +294,8 @@ MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip) {
         // flag rather than assuming, so it has to be honest.
         rec.hasTangents = false;
         const size_t nv = points.size();
-        struct V { float px, py, pz, nx, ny, nz, u, v; };
+        struct V { float px = 0.f, py = 0.f, pz = 0.f, nx = 0.f, ny = 0.f, nz = 0.f,
+                         u = 0.f, v = 0.f; };
         V *verts = reinterpret_cast<V *>(OGRE_MALLOC_SIMD(sizeof(V) * nv, Ogre::MEMCATEGORY_GEOMETRY));
         Ogre::Vector3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
         for (size_t i = 0; i < nv; ++i) {
@@ -588,8 +589,9 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
             else { w[0] = 1.0f; w[1] = w[2] = w[3] = 0.0f; }   // unweighted: ride bone 0
         }
     }
-    struct V { float px, py, pz, nx, ny, nz, tx, ty, tz, tw, u, v; };
-    struct VS { V base; unsigned char bi[4]; float bw[4]; };
+    struct V { float px = 0.f, py = 0.f, pz = 0.f, nx = 0.f, ny = 0.f, nz = 0.f,
+                     tx = 0.f, ty = 0.f, tz = 0.f, tw = 0.f, u = 0.f, v = 0.f; };
+    struct VS { V base; unsigned char bi[4] = {}; float bw[4] = {}; };
     const size_t vertexBytes = skinned ? sizeof(VS) : sizeof(V);
     unsigned char *raw = reinterpret_cast<unsigned char *>(
         OGRE_MALLOC_SIMD(vertexBytes * nv, Ogre::MEMCATEGORY_GEOMETRY));

@@ -159,7 +159,7 @@ using namespace detail;
 // every logo and poster.
 namespace {
 
-struct Rgba { float r, g, b, a; };
+struct Rgba { float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f; };
 
 /// Bilinear sample of `src` in normalized [0,1] coordinates, with the source's
 /// single-channel (grayscale) images expanded to neutral RGB — the same defect

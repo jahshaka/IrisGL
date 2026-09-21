@@ -61,7 +61,8 @@ void OgreScene::setRefractionsActive(bool active) {
 // must still open, and a material silently falling back to the physically
 // accurate BRDF is the safe direction.
 static Ogre::PbsBrdf::PbsBrdf brdfFromName(const std::string &name, bool *known = nullptr) {
-    struct Row { const char *name; Ogre::PbsBrdf::PbsBrdf value; };
+    struct Row { const char *name = nullptr;
+                 Ogre::PbsBrdf::PbsBrdf value = Ogre::PbsBrdf::Default; };
     static const Row kRows[] = {
         { "Default",                            Ogre::PbsBrdf::Default },
         { "CookTorrance",                       Ogre::PbsBrdf::CookTorrance },

@@ -4399,7 +4399,8 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
     // the scroll, not follow it). Size in cells and distance order the rest.
     const float reach = c.halfSize + c.step();
     const Ogre::Aabb reachBox(c.centre, Ogre::Vector3(reach));
-    struct Ranked { bool reachable; float cells; float dist2; Ogre::Item *item; bool inside; };
+    struct Ranked { bool reachable = false; float cells = 0.0f; float dist2 = 0.0f;
+                    Ogre::Item *item = nullptr; bool inside = false; };
     std::vector<Ranked> ranked;
     ranked.reserve(mItemNodes.size());
     for (const Node *np : mItemNodes) {
