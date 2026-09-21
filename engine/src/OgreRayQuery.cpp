@@ -3011,8 +3011,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE VIEW'S AGE, in frames of unbroken history (rq_reflect.comp's
     // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
     // stereo shape, exactly where the previous basis is withheld above).
-    pp.stereo[1] = float(std::min(rv.historyFrames, 4096u));
-    ++rv.historyFrames;
+    pp.stereo[1] = float(rv.historyFrames);
+    if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
     rv.prev[1] = eyeB[1];

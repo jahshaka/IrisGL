@@ -447,8 +447,11 @@ vec3 skyRadiance( vec3 dir )
 /// `warmHeld` (DRAG-1, REFLECT F2 item 3) comes back 1.0 when a history texel
 /// WAS found at the reprojected pixel and had already passed the filter's
 /// warm-up (kWarmupFrames samples), but the distance test rejected it: the
-/// surface here MOVED. That is the one case where the renderer's confidence in
-/// showing a ray at all must not fall — see the count it seeds in main().
+/// surface here MOVED — and, in a view whose own history is warm, whenever
+/// there is simply no texel to reproject from (off the previous picture,
+/// behind the previous camera, a texel that never held an answer). Those are
+/// the cases where the renderer's confidence in showing a ray at all must not
+/// fall — see the count it seeds in main().
 /// WHERE THIS SURFACE WAS IN THE LAST FRAME'S PICTURE — of THIS EYE (lane
 /// REFLECT-VR-1). The reprojection runs entirely in the eye's own image and the
 /// result is mapped back onto the eye's own HALF of the history: an eye's
@@ -758,6 +761,17 @@ void main()
 	// it frame by frame, and that disagreement is the antialiased edge
 	// converging, not evidence of anything. (A pure turn moves no reflection on
 	// its surface — the eye has not moved — and the test is on position.)
+	//
+	// "MOVED" IS PARALLAX, NOT METRES. What changes a reflection is the angle the
+	// eye's step subtends at the thing reflected, and the threshold is the angle
+	// of half a trace pixel: below it the reflected image has not moved by
+	// anything this buffer can show. An absolute step would be permanently
+	// exceeded by a tracked VR head (a fraction of a millimetre of jitter every
+	// frame), which would leave every reflected silhouette single-sample for
+	// ever; at half a millimetre over two metres the parallax is a third of this
+	// threshold, and a 0.25 m slide is ten times over it. An ORTHOGRAPHIC view
+	// has one view direction for every pixel — a slide moves no reflection on
+	// its surface — so the rule does not apply to it at all.
 	float hitMean = hitT;
 	if( prev.w > 0.0 && wasHitT > 0.0 )
 	{
@@ -765,7 +779,10 @@ void main()
 		const float nearer = max( min( hitT, wasHitT ), 1e-3 );
 		const float apart  = abs( hitT - wasHitT ) / nearer;
 		const float wide   = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
-		if( dot( stepped, stepped ) > 1e-10 && apart > mix( 0.25, 4.0, wide ) )
+		const float eyePixels = float( p.stereo.x > 0.5 ? traceRes.x / 2 : traceRes.x );
+		const float halfPixelAngle = 0.5 * length( thisEye.rayRight ) / max( eyePixels, 1.0 );
+		const bool moved = thisEye.perspective > 0.5 && length( stepped ) > nearer * halfPixelAngle;
+		if( moved && apart > mix( 0.25, 4.0, wide ) )
 			blend = max( blend, mix( 1.0, 0.35, wide ) );
 		hitMean = mix( wasHitT, hitT, blend );
 	}
@@ -783,10 +800,10 @@ void main()
 	// (1/30) after about twenty frames rather than thirty. It does NOT cost
 	// correctness: the sample it starts from is this frame's own ray.
 	//
-	// A pixel with NO history at all is untouched — `warmHeld` is 0 there by
-	// construction — so a freshly created view (a graded screenshot's, which
-	// lives about two frames) still fades in exactly as before, which is the
-	// guarantee the warm-up exists for.
+	// A pixel of a YOUNG VIEW is untouched — `warmHeld` is 0 until the view's
+	// own history is kWarmupFrames old (`historyAt`) — so a freshly created view
+	// (a graded screenshot's, which lives about two frames) still fades in
+	// exactly as before, which is the guarantee the warm-up exists for.
 	const float seed = max( prev.w, warmHeld * kWarmupFrames );
 	const float count = min( seed + 1.0, 4096.0 );
 	imageStore( historyCur, tc, vec4( mean, count ) );

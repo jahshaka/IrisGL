@@ -29,12 +29,13 @@
 // reflection while it shades, so the reflection must exist BEFORE the colour
 // pass that would produce it — there is no ordering in which this frame's
 // colour is available. That is the one-frame lag every prepass-architecture SSR
-// carries, including Ogre's own sample's. Ours is the plainer version of it: no
-// reprojection matrix, so a moving CAMERA smears the reflection by a frame
-// rather than rejecting the disoccluded texels. Reflections of moving OBJECTS
-// are still per-frame, because the hit coordinates come from this frame's depth
-// and normals — which is the whole point of the technique and the thing no
-// baked probe can do at any cadence.
+// carries, including Ogre's own sample's. The fetch is REPROJECTED: the hit's
+// world point is projected through the previous camera (`reprojectMatrix`), so
+// a static world is exact under any camera motion, and a point that was not in
+// the previous picture is declined rather than given a border texel. What
+// still lags by a frame is a moving OBJECT's own motion. The hit coordinates
+// themselves come from this frame's depth and normals — which is the whole
+// point of the technique and the thing no baked probe can do at any cadence.
 //
 // WHY THE RAY BUFFER IS POINT-FETCHED, NINE TIMES. At half resolution it holds
 // texture COORDINATES, not a colour: hardware bilinear across a hit/miss
@@ -528,11 +529,13 @@ void main()
 	// at all. The clamped fetch used to return the border texel's — somebody
 	// else's colour, stretched — and the honest answer is the one every other
 	// declined pixel gets: weight zero, which hands the pixel to the probe, the
-	// sky or the ray (patch 0036's composite). The fade to that edge is the
-	// same width as the march's own screen-edge fade, so the hand-over is a
-	// ramp and not a line.
-	const float hitDepth = texelFetch( vkSampler2D( depthTexture, pointSampler ),
-									   ivec2( ray.xy * prevFrameRes.xy ), 0 ).x;
+	// sky or the ray (patch 0036's composite). The fade to that edge is a
+	// ramp over kHistoryEdgeFade of the picture, not a line; it is narrower than
+	// the march's own screen-edge fade because only a frame's worth of motion
+	// ever lands in it.
+	const float hitDepth =
+		texelFetch( vkSampler2D( depthTexture, pointSampler ),
+					min( ivec2( ray.xy * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) ), 0 ).x;
 	const vec4	was		 = reprojectMatrix * vec4( ray.xy, hitDepth, 1.0 );
 	if( was.w <= 0.0 )
 	{

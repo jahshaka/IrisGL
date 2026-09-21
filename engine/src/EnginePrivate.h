@@ -1410,11 +1410,10 @@ void initSmaa(Ogre::Root *root, int preset);
 /// the left-handed view→texture-space matrix the ray march projects with, plus
 /// the tuning the description carries. Built exactly like Ogre's own
 /// ScreenSpaceReflections::update — the matrix surgery there is not obvious and
-/// is not ours to reinvent. `reprojection` (may be null) is the view's
-/// frame-to-frame state, declared below beside applyViewGlobals.
+/// is not ours to reinvent. `reprojection` is the view's frame-to-frame state,
+/// declared below beside applyViewGlobals.
 struct SsrReprojection;
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc,
-               SsrReprojection *reprojection = nullptr);
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &reprojection);
 // ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
 //
 // This was ONE function, `applyGlobals`, called once a frame from the primary
@@ -1462,12 +1461,8 @@ struct SsrReprojection {
     Ogre::Matrix4 prevWorldToImage = Ogre::Matrix4::IDENTITY;
     bool          have = false;
 };
-/// `reprojection` may be null (a caller with no frame-to-frame state — the VR
-/// session's one-off push): the resolve then fetches at the hit's own
-/// coordinate, which is exact for a still camera.
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight,
-                      SsrReprojection *reprojection = nullptr);
+                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection);
 
 /// The seed value the HDR adaptation history holds for a given exposure — the
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
