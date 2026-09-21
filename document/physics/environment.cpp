@@ -393,6 +393,35 @@ void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
 	nodeTransforms.squeeze();
 }
 
+bool Environment::syncBodyToNode(const iris::SceneNodePtr &node)
+{
+	if (!node) return false;
+	btRigidBody *body = hashBodies.value(node->getGUID(), nullptr);
+	if (!body) return false;
+
+	const iris::Vec3 pos = node->getGlobalPosition();
+	const iris::Quat rot = node->getGlobalRotation();
+	btTransform world;
+	world.setIdentity();
+	world.setOrigin(btVector3(pos.x(), pos.y(), pos.z()));
+	world.setRotation(btQuaternion(rot.x(), rot.y(), rot.z(), rot.scalar()));
+	body->setWorldTransform(world);
+	// The MOTION STATE too, not just the transform: it is what the solver
+	// interpolates from, so a body whose transform alone was written snaps back
+	// to the interpolated pose on the very next step.
+	if (btMotionState *motion = body->getMotionState()) motion->setWorldTransform(world);
+	// A placed object starts at rest: the velocity it had before the hand took
+	// it is the solver's, not the user's, and keeping it would fling the object
+	// the moment it is let go.
+	body->setLinearVelocity(btVector3(0, 0, 0));
+	body->setAngularVelocity(btVector3(0, 0, 0));
+	body->clearForces();
+	// Bullet puts a body that has not moved for a while to sleep; one teleported
+	// under it would stay asleep at the new pose and never fall.
+	body->activate(true);
+	return true;
+}
+
 void Environment::restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node)
 {
 	for (auto &child : node->children()) {
