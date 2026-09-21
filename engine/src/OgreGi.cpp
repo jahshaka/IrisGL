@@ -215,6 +215,12 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         mGi.cards                = p.cards;
         mGi.cardBudgetTexels     = p.cardBudgetTexels;
         mGi.cardResidencyRadius  = p.cardResidencyRadius;
+        // THE SCREEN-PROBE GATHER'S ROW, for the same reason and with the same
+        // nothing-happens-here: `probeGatherWanted()` reads it, the VIEW
+        // re-checks its chain shape once a frame (syncReflectListener) and the
+        // Component allocates on the first frame it is on and gives everything
+        // back on the first frame it is off. Not one voxel is re-injected.
+        mGi.gather               = p.gather;
         if (mIfd) pushIfdState(mIfdProbeCounts);
         // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
         // moving it changes nothing at all until something else happens to
@@ -989,6 +995,12 @@ GiStatus OgreScene::giStatus() const {
         st.chainSettles         = mGiChainSettles;
         st.dragMovers           = int(mDragMovers.size());     // MOVER-1
         st.dragMoverGestures    = mDragMoverGestures;
+        // THE SCREEN-PROBE GATHER (GATHER-1a): the row resolved against the
+        // machine, and — where a view has drawn one — the grid it placed, the
+        // rays it traced and the GPU milliseconds the three jobs cost. Filled
+        // in OgreRayQuery.cpp, which is where the tier is; `on` false with
+        // every other field zero is the shipped state.
+        gatherStatusInto(st.gather);
     } JAH_CATCH(mError, st);
     return st;
 }

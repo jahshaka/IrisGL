@@ -2168,6 +2168,31 @@ struct GiParams {
     /// keeps meanwhile is its own question.
     bool      dragMoverChannel = false;
 
+    /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md). The diffuse
+    /// GI estimated once per 16x16 pixels by 64 hardware rays instead of once
+    /// per pixel by six voxel cones -- a ray is stopped by a TRIANGLE where a
+    /// cone is stopped by a VOXEL, which is the whole argument (measured: 18 to
+    /// 59 % less light through a thin wall, spikes/gather-0).
+    ///
+    /// `Auto` is OFF at every tier until the gather's picture is filtered and
+    /// temporally accumulated (the spec's phases 2 and 3): the phase-1 estimate
+    /// is correct and NOISY, so a tier may not select it yet. `On` turns it on
+    /// wherever the machine traces -- the same rule the reflections take: no
+    /// ray-query device, or a project whose ray row is Off, keeps exactly
+    /// today's picture (the cones and the field) and this row does nothing.
+    ///
+    /// It is GRAPH SHAPE as well as a switch: the probes read their surface
+    /// from the SSR prepass' depth and normals, so a view whose row is on
+    /// carries that prepass whether or not the SSR row asked for one
+    /// (`ChainDesc::probeGather`) -- and the VIEW re-checks that shape once a
+    /// frame, which is why this row is in `giTuningEqual` and NOT in
+    /// `operator==`, exactly like the card cache's row beside it. Nothing about
+    /// the GI CONFIGURATION changes when it moves: no volume is re-voxelised,
+    /// no probe is re-integrated, no atlas is rebuilt. Putting it in the
+    /// configuration comparison tore the whole cascade chain down and built it
+    /// again to turn a compute dispatch on -- which also made every A/B arm of
+    /// every suite compare ACROSS a GI rebuild (the lead's read).
+    GiToggle  gather = GiToggle::Auto;
     // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------
     //
     // WHY THEY LIVE ON GiParams AND NOT ON A STRUCT OF THEIR OWN: the cache is
@@ -2251,6 +2276,7 @@ struct GiParams {
                // with nothing torn down — and a host that only pushed on
                // `operator==` would swallow a radius change entirely, which is
                // the defect this line exists to prevent.
+               gather == o.gather &&
                cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
                cardResidencyRadius == o.cardResidencyRadius;
     }
@@ -2645,6 +2671,92 @@ inline void giResolveCascadeSteps(GiParams::GiCascadeDesc *rows, int count)
         rows[i].stepCells = std::min(steps, giNearFieldMaxStepCells(rows[i]));
     }
 }
+
+// ---------------------------------------------------------------------------
+// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md, phase 1).
+//
+// ONE PROBE PER N x N PIXELS traces a hemisphere of hardware rays and the
+// pixels of its cell read the integral back, so the diffuse-GI estimate is made
+// once per cell with RAYS instead of once per pixel with six voxel cones. The
+// switch is `GiParams::gather`; the numbers come back in `GiStatus::gather`;
+// `GatherTuning` is the test-and-tool door onto the knobs the tier otherwise
+// derives. With the row off nothing is allocated, nothing is dispatched, no
+// shader property is set and no pixel moves -- both selftest hashes, measured.
+
+/// THE KNOBS A TIER OTHERWISE DERIVES -- test and tool only (a measuring suite,
+/// a spike), never a document row and never a panel. Every zero means "take
+/// what the tier's quality row derives", so a default-constructed tuning is
+/// exactly the shipped configuration.
+struct GatherTuning {
+    /// Pixels per probe on both axes. The tier's own: 16 at Medium and High,
+    /// 8 at Epic (four times the probes).
+    unsigned probeStride = 0u;
+    /// The octahedral probe map's resolution; the probe traces octRes^2 rays,
+    /// one per texel, and 8 is the shipped value (64 rays). At most 8 -- one
+    /// ray is one thread of the trace's 8x8 workgroup.
+    unsigned octRes = 0u;
+    /// The near field's reach in world units. 0 = derive it from the cascade
+    /// chain's outermost box, which is what the reflection trace does.
+    float    rayLength = 0.0f;
+    /// How many ADAPTIVE probes a frame may add on top of the uniform grid
+    /// (one per cell at most, where the cell's pixels do not lie in the cell
+    /// probe's plane). Negative = the tier's; 0 = a uniform grid and nothing
+    /// else, which is the A/B that prices the adaptive pass.
+    int      adaptiveCap = -1;
+    /// THE DETERMINISM ARM. The sample sequence's only input is an integer hash
+    /// of (probe cell, ray, frame index); holding the frame term makes
+    /// consecutive frames of a still scene byte-identical.
+    bool     freezeFrameIndex = false;
+    /// THE FAR-TERM ARM. With it set, a ray that finds nothing inside
+    /// `rayLength` reads the sky directly instead of the outer cascades' voxel
+    /// radiance at its end point.
+    bool     farTermOff = false;
+    /// The probe sits at its cell's CENTRE instead of being jittered inside it
+    /// -- the A/B for what the jitter costs and buys.
+    bool     jitterOff = false;
+};
+
+/// What the gather did on the last drawn frame of this scene.
+struct GatherStatus {
+    /// The scene's row resolved ON: `GiParams::gather` is On and this machine
+    /// traces (a ray-capable device, the project's ray row not Off).
+    bool on = false;
+    /// ...and a view actually dispatched it. False with `on` true means no view
+    /// of this scene carries the prepass the probes read their surface from.
+    bool running = false;
+    unsigned stride = 0u, octRes = 0u, raysPerProbe = 0u;
+    /// The uniform grid, in probes.
+    unsigned probesX = 0u, probesY = 0u, probes = 0u;
+    /// ...and the adaptive probes the last frame appended, against its cap.
+    unsigned adaptive = 0u, adaptiveCap = 0u;
+    /// WHAT THE PLACEMENT JOB ASKED FOR, before the cap. `adaptive` is
+    /// `min(requested, cap)`, so a test that asserts `adaptive <= cap` asserts
+    /// an arithmetic identity and a test that asserts `adaptive == 0` under a
+    /// cap of 0 asserts another (the lead's read). This is the number the cap
+    /// is doing something TO: requested above cap is a frame that wanted more
+    /// probes than it was allowed.
+    unsigned adaptiveRequested = 0u;
+    unsigned long long raysPerFrame = 0ull;
+    /// The view the numbers below were measured on.
+    unsigned targetW = 0u, targetH = 0u;
+    /// Bytes of texture the gather holds resident: the octahedral radiance +
+    /// hit-distance atlas, the probe records and the full-resolution
+    /// irradiance target.
+    unsigned long long atlasBytes = 0ull;
+    /// GPU milliseconds per stage, read back several frames late through the
+    /// tier's own timestamp pool (negative = not measured yet), and the CPU
+    /// cost of RECORDING them on the thread that draws.
+    float placeMs = -1.0f;
+    float traceMs = -1.0f;
+    float integrateMs = -1.0f;
+    float cpuMs = -1.0f;
+    /// WHY IT IS NOT RUNNING, when `on` is true and `running` is false and the
+    /// reason is the engine's rather than the view's (no ray device, no
+    /// pipelines on this driver, no room for the atlas). Empty is "nothing went
+    /// wrong" — a row that silently does nothing is the worst of the three
+    /// outcomes.
+    std::string error;
+};
 
 // ---- SURFACE-CACHE phase 2: the capture cache's status and its knobs -------
 //
@@ -3156,6 +3268,9 @@ struct GiStatus {
     /// arm could save anything at this speed: a scroll that is already
     /// majority-dirty has nothing to shift.
     unsigned long long cascadeDirtyMajority = 0;
+    /// THE SCREEN-PROBE GATHER's own reading (see GatherStatus). `on` false is
+    /// the shipped state and every number below it is zero.
+    GatherStatus gather;
     /// THE SURFACE CACHE (SURFACE-CACHE-1b). Zeroed when no cache exists, which
     /// is every scene with `GiParams::cards` off.
     CardCacheStatus cards;
@@ -3392,66 +3507,6 @@ struct RayQueryStatus {
     /// GPU milliseconds of that dispatch, read back from a timestamp pair
     /// several frames later and never with a wait. -1 until measured.
     float reflectMs = -1.0f;
-};
-
-// ---------------------------------------------------------------------------
-// GATHER-0 — THE SCREEN-PROBE GATHER'S PHASE-0 SPIKE (2026-09-21).
-//
-// A MEASUREMENT SURFACE, NOT A FEATURE. (Its sibling, SURFACE-CACHE-0's card
-// block, stood here until SURFACE-CACHE-1b took the spike into a Component and
-// deleted it — `CardCacheStatus` above is what a shipped cache publishes
-// instead.) `SPECS/SCREEN_PROBE_GATHER_SPEC.md` section 10 records that not
-// one millisecond in its budget table is measured; section 7 phase 0 is the
-// lane that takes them. Every field here exists so a suite can PRINT them.
-// With `Scene::probeGatherSpike` never called the engine allocates nothing,
-// dispatches nothing, sets no shader property and draws exactly what it drew
-// before — both selftest hashes, measured.
-
-struct ProbeGatherSpikeDesc {
-    /// Arm or disarm. Disarming frees the atlases at the next safe point.
-    bool on = false;
-    /// Pixels per probe, both axes. 16 is the spec's High grid (8,160 probes
-    /// at 1080p); 8 is its Epic grid (4x the probes).
-    unsigned probeStride = 16u;
-    /// Rays each probe traces over its hemisphere. At most 64 (one per thread
-    /// of the trace's workgroup) and best left at a square number: the
-    /// directions are stratified over an 8x8 grid of the unit square.
-    unsigned raysPerProbe = 64u;
-    /// The near field's reach in world units. 0 = derive it from the cascade
-    /// chain's outermost box, which is what the reflection trace does.
-    float rayLength = 0.0f;
-    /// THE DETERMINISM ARM. The sample sequence's only input is a hash of
-    /// (probe cell, ray, frame index); holding the frame term makes two
-    /// consecutive frames of a still scene byte-identical, which is the
-    /// property section 5 asks a suite to assert.
-    bool freezeFrameIndex = false;
-    /// THE FAR-TERM ARM (section 10 item 6). With it set, a ray that finds
-    /// nothing inside `rayLength` reads the sky directly instead of the outer
-    /// cascades' voxel radiance at its end point — the A/B that prices what
-    /// the far term is worth to the picture.
-    bool farTermOff = false;
-};
-
-struct ProbeGatherSpikeResult {
-    bool ok = false;
-    std::string error;
-    bool armed = false;
-    unsigned probesX = 0u, probesY = 0u, probes = 0u;
-    unsigned raysPerProbe = 0u;
-    unsigned long long raysPerFrame = 0ull;
-    /// The view the numbers below were measured on.
-    unsigned targetW = 0u, targetH = 0u;
-    /// GPU milliseconds, per stage, read back several frames late through the
-    /// tier's own timestamp pool (negative = not measured yet).
-    float traceMs = -1.0f;
-    float integrateMs = -1.0f;
-    /// ...and the CPU cost of RECORDING both (the descriptor rewrite, the
-    /// parameter fill, the transitions), which is what a frame pays on the
-    /// thread that draws.
-    float cpuMs = -1.0f;
-    /// Bytes of texture the spike holds resident: the probe atlas plus the
-    /// full-resolution irradiance target.
-    unsigned long long vramBytes = 0ull;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback

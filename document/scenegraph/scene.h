@@ -503,6 +503,22 @@ public:
     /// shipped vct+medium samples come up with the field on).
     /// Only meaningful in the VCT modes: the field is fed by the voxel volume.
     int giDdgi = -1;
+    /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md). The diffuse
+    /// GI estimated once per 16x16 pixels by 64 hardware rays instead of once
+    /// per pixel by six voxel cones: a ray is stopped by a TRIANGLE where a cone
+    /// is stopped by a VOXEL, and a rectangular emitter over a plane says which
+    /// is right — the gather reads 1.03 of the closed-form irradiance where the
+    /// cones read 0.75 (gi.gather_reference).
+    ///
+    /// 0 = off, 1 = on, -1 = AUTO, which is OFF at every tier until the phase-1
+    /// estimate is filtered and temporally accumulated (the spec's phases 2 and
+    /// 3): it is correct and NOISY, so a tier may not select it yet. `On` traces
+    /// wherever the machine can and falls back silently where it cannot, exactly
+    /// as the project's ray row does — a machine with no ray query, or a project
+    /// whose ray row is Off, keeps today's picture and this row does nothing.
+    /// Only meaningful in the VCT modes: a gather ray's HIT is lit from the
+    /// voxel cascades.
+    int giGather = -1;
     /// The DDGI diffuse INTENSITY. Ours, not upstream's: binding a field turns
     /// the voxel-cone diffuse OFF and replaces it with the probes' — which is
     /// smoother and leak-free — and upstream's IrradianceFieldSettings carries

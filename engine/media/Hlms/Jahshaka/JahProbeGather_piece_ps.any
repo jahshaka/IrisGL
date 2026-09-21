@@ -60,5 +60,42 @@
 @piece( applyIrradianceVolumes )
 	float4 jahProbeGathered = OGRE_Load2D( jahProbeIrradiance, iFragCoord, 0 ).xyzw;
 	pixelData.envColourD += midf3_c( jahProbeGathered.xyz ) * midf_c( jahProbeGathered.w );
+	// ...AND THE PIXELS NO PROBE ANSWERED FOR GET THE SKY, which is what they had
+	// before the gather existed and what the spec's accounting promises them
+	// (section 3's last row). Without this line they get NOTHING: turning the
+	// gather on compiles the cone diffuse out of this shader
+	// (`vct_disable_diffuse` from the listener), and every fallback term of this
+	// renderer lives inside the irradiance field's own block -- so with the
+	// FIELD ABSENT a pixel whose probe was rejected by the plane test (a normal
+	// turn, a silhouette, thin geometry, the first frames of a view) rendered
+	// BLACK. Not dim: black, one pixel at a time, in exactly the configuration
+	// every gather suite measures, where a region MEAN hides it (the lead's
+	// read).
+	//
+	// It is the term the FIELD's own fallback applies, spelled the same way and
+	// weighted by the complement of the probe's coverage, so the two regimes
+	// hand over continuously and a pixel still gets exactly ONE diffuse-GI term:
+	// the gather's where a probe covered it, the unoccluded sky ambient where
+	// none did. With a field bound this piece is not the fallback -- the cage
+	// is, through ogre-patch 0086 -- so it is compiled out there.
+	@property( vct_num_probes && !irradiance_field )
+	{
+		const midf jahProbeUncovered = midf_c( 1.0 ) - midf_c( jahProbeGathered.w );
+		if( jahProbeUncovered > midf_c( 0.0 ) )
+		{
+		@property( vct_ambient_hemisphere )
+			float3 jahProbeAmbient = lerp( passBuf.vctProbeParams.ambientLowerHemi.xyz,
+										   passBuf.vctProbeParams.ambientUpperHemi.xyz,
+										   ambientWD );
+		@else
+			float3 jahProbeAmbient = passBuf.vctProbeParams.ambientUpperHemi.xyz;
+		@end
+			pixelData.envColourD.xyz += midf3_c( jahProbeAmbient ) *
+										( midf_c( passBuf.vctProbeParams.blendFade ) *
+										  midf_c( passBuf.vctProbeParams.multiplier ) *
+										  jahProbeUncovered );
+		}
+	}
+	@end
 @end
 @end

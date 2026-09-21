@@ -1,0 +1,121 @@
+Jahshaka patch 0086 - the irradiance field's cage can be DECLINED for a pixel.
+
+MEDIA patch (`Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any`). No Ogre
+recompile is needed for it, but Studio stages Hlms media from the SOURCE tree
+(`cmake/IncludeOgre.cmake`), so EVERY TREE MUST HAVE RUN THE PATCH LOOP -
+`irisgl/scripts/build-ogre.sh` - before its media is correct. It OVERLAPS patch
+0058 in this file (0058 added the five hooks inside the body; this one adds the
+gate around it), so the per-patch reverse check reports the familiar overlap
+false positive and a tree that carries 0058 must reset the submodule before the
+loop, as the stack's other overlaps already require.
+
+WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15; ledger sections 325
+and 937). GATHER-1a gives a pixel its diffuse GI from a SCREEN PROBE's rays, and
+the accounting rule this renderer has held since the field landed is that a
+pixel receives exactly ONE diffuse-GI term. Two halves of that rule a host can
+already reach from outside: the voxel-cone diffuse is compiled out by a pass
+property (`vct_disable_diffuse`, set from our Hlms listener), and the gather's
+own term is added at an insertion point. The third half - the field's
+eight-probe cage - is NOT reachable: patch 0058's five hooks are all INSIDE the
+cage body, so a host can add to the cage, modulate its scale and append terms
+after it, but cannot decline it. Subtracting the field's answer back out at the
+post hook is not the same thing and is not free: by then the eight irradiance
+fetches, the eight depth fetches and the Chebyshev test have been paid, and the
+two estimates have already been summed in a half-float.
+
+The alternatives were weighed and rejected. UNBINDING the field for gather
+passes is a process-wide `HlmsPbs::setIrradianceField` (the sVctBindingOwner
+trap) and would take it from the fallback pixels that need it in the same frame.
+Gating upstream's whole `applyIrradianceField` insertion at
+`800.PixelShader_piece_ps.any` behind a property is a coarser patch to a hotter
+file and would take the field from every pixel of the pass, not from the pixels
+a probe answered. RE-IMPLEMENTING the cage in our own piece is the copy-body
+liability 0058 removed.
+
+WHAT THE PATCH ADDS - one variable, one hook, two braces:
+
+  1. `float ifdCageEnabled = 1.0;` and `@insertpiece( custom_ps_ifdCageGate )`,
+     immediately after the prologue hook, so a host piece may set it with
+     `ifdGridPos`, `ifdSpaceNormal` and whatever the prologue declared in scope.
+  2. The eight-probe LOOP runs under `if( ifdCageEnabled != 0.0 )`. The body
+     keeps its own indentation deliberately: the patch is three added lines
+     rather than a re-indentation of fifty, and what the brace changes is
+     whether the cage runs, not what it computes.
+  3. The composite add runs under the same condition - with the cage declined
+     `sumIfdWeight` is zero and that line would divide by it. The RESOLVE hook
+     stays outside the branch, because a host declares its own quantities there
+     and reads them in the post hook, which must run for every pixel: the pixels
+     the field does not answer are exactly the ones a host's fallback is for.
+
+Left at one - every build that defines no piece for the new hook, which is every
+build today - the generated shader carries one constant initialisation and two
+branches on a compile-time-constant expression, and the picture is unchanged.
+
+VERIFICATION. `git apply --check` against the pin with the stack through 0058
+applied, and `git apply --reverse --check` after applying. Both selftest hashes
+are UNCHANGED with the hook undefined and with GATHER-1a's own piece defining it
+while the gather's row is off: pose 1
+777eb2f12a15811a75a0fda1e7c746acbf07a030fca69e658c3132ebc3ffa7be, pose 2
+c2c2b19f6c95351fbe6163b2036256fb240054e176dff87afe0e014fdf241d74.
+
+--- a/Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any
+@@ -126,6 +126,20 @@
+ 	// one line down for it; nothing between the two reads it.
+ 	@insertpiece( custom_ps_ifdCagePrologue )
+ 
++	// A HOST PIECE MAY DECLINE THE WHOLE CAGE FOR THIS PIXEL, which is the one thing
++	// no hook INSIDE this body can do. Every insertion point above and below runs
++	// within the cage's own arithmetic; a host that has already answered a pixel's
++	// diffuse GI by some other means -- a screen-probe gather, a lightmap, a cached
++	// surface -- can only subtract the field's answer back out afterwards, which is
++	// not the same thing: the eight probe fetches, the depth fetches and the
++	// Chebyshev test have all been paid by then, and the two terms have already been
++	// summed in a half-float.
++	//
++	// Left at one this is exactly what this piece always computed, and a build with
++	// no host piece for the hook below has one constant and one dead branch.
++	float ifdCageEnabled = 1.0;
++	@insertpiece( custom_ps_ifdCageGate )
++
+ 	float3 ifdGridProbeOrigin = trunc( ifdGridPos );
+ 
+ 	// ifdAlpha is how far from the floor( ifdGridPos ). on [0, 1] for each axis.
+@@ -135,6 +149,11 @@
+ 	float sumIfdWeight = 0;
+ 
+ 	// Iterate over adjacent probe cage
++	// ...UNLESS THE HOST DECLINED IT. The loop's body keeps its own indentation so
++	// that this is three added lines rather than a re-indentation of fifty: what the
++	// brace changes is whether the cage RUNS, not what it computes.
++	if( ifdCageEnabled != 0.0 )
++	{
+ 	for( int i = 0; i < 8; ++i )
+ 	//for( int i = 0; i < 1; ++i )
+ 	{
+@@ -217,6 +236,7 @@
+ 		// the same depth atlas, a debug counter).
+ 		@insertpiece( custom_ps_ifdCageProbe )
+ 	}
++	}
+ 
+ //	ifdIrradiance = ifdIrradiance * ifdIrradiance;
+ 
+@@ -227,7 +247,16 @@
+ 	float3 ifdIrradianceScale = float3( 1.0, 1.0, 1.0 );
+ 	@insertpiece( custom_ps_ifdCageResolve )
+ 
+-	pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight );
++	// THE COMPOSITE IS UNDER THE SAME CONDITION, and that is not tidiness: with the
++	// cage declined `sumIfdWeight` is zero and this line would divide by it. The
++	// resolve hook above stays OUTSIDE the branch on purpose -- a host declares its
++	// own quantities there and reads them in the post hook below, which runs for
++	// every pixel because the pixels the field does NOT answer are exactly the ones
++	// a host's fallback is for.
++	if( ifdCageEnabled != 0.0 )
++	{
++		pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight );
++	}
+ 
+ 	// ...and a host piece may add its own diffuse-GI terms after it (a fallback for
+ 	// the pixels the field faded out of, an ambient term the voxel volume swallowed),

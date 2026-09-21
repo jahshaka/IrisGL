@@ -183,6 +183,33 @@
 //
 // Inserted by upstream's piece with ifdGridPos and ifdSpaceNormal in scope and
 // before the cage is derived from them (ogre-patch 0058).
+// THE FIELD STANDS DOWN WHERE A SCREEN PROBE ANSWERED THE PIXEL
+// (GATHER-1a, ogre-patch 0086). THE ACCOUNTING RULE OF THIS FILE, in its third
+// and last half: a pixel receives exactly ONE diffuse-GI term. The voxel-cone
+// diffuse is compiled out by a pass property under the gather; the gather's own
+// term is added at upstream's irradiance-volumes insertion point; and the cage
+// below is declined here, for the pixels a probe covered and for no others. The
+// patch's hook is the only way to decline it -- every other insertion point in
+// this piece is INSIDE the body, and subtracting the field's answer back out
+// after paying for eight irradiance fetches, eight depth fetches and a
+// Chebyshev test is not the same thing.
+//
+// `w` OF THE GATHER'S TEXTURE IS ITS COVERAGE: one where a probe answered for
+// this pixel, zero where none did (rq_probe_integrate.comp). At phase 1 it is
+// exactly binary, so this is a switch; when phase 2's plane-weighted integrate
+// makes it a fraction, the field's contribution wants to be SCALED by the
+// complement rather than switched, which is a change to the patch's condition
+// and to this line together.
+//
+// The guard is the SIX TERMS the texture's own declaration carries, word for
+// word (JahFog_piece_vs_piece_ps.any): a piece that reads a texture declared
+// under a different condition is a compile error that loses the frame.
+@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+@piece( custom_ps_ifdCageGate )
+	ifdCageEnabled = 1.0 - saturate( OGRE_Load2D( jahProbeIrradiance, iFragCoord, 0 ).w );
+@end
+@end
+
 @piece( custom_ps_ifdCagePrologue )
 	// THE FOURTH THING THAT IS NOT UPSTREAM'S: THE SURFACE BIAS (ENGINE-6 item
 	// 1; PHOTON-S2 FINDINGS §5 item 2 and §7 item 1, recorded in
@@ -492,7 +519,22 @@
 	// geometry, it detects a SURFACE with no probe in front of it.
 	const float ifdFrontLo = 0.005;
 	const float ifdFrontHi = 0.05;
-	float ifdFrontFade = smoothstep( ifdFrontLo, ifdFrontHi, ifdFrontWeight / sumIfdWeight );
+	// THE DIVISOR CAN BE ZERO, and the guard has to be SCALE-FREE or it changes a
+	// shipped picture (the lead's read of GATHER-1a). This ratio is a SHARE --
+	// how much of the cage's weight comes from probes in front of the surface --
+	// and both terms carry the same crushed scale: a fully crushed cage sums to
+	// about 1e-17 (upstream's own 1e-6 weight floor, cubed by the trilinear
+	// product and divided by the 0.04 crush threshold), and its front share is
+	// crushed by exactly as much, so the RATIO is still 1 and the field fades to
+	// nothing deliberately. Flooring the DENOMINATOR at 1e-6 instead makes that
+	// ratio 1e-11, the confidence 0 and the fallback 1 -- the full cone diffuse
+	// or a flat ambient, leaking in exactly where this term exists to stop it,
+	// at every tier, with the gather nowhere in the frame. So: a zero divisor is
+	// "no front share to compute", which is a share of ONE (the cage said
+	// nothing; the clamp above it is what decides), and any non-zero divisor is
+	// used as it stands however small it is.
+	float ifdFrontFade = smoothstep( ifdFrontLo, ifdFrontHi,
+									 sumIfdWeight > 0.0 ? ifdFrontWeight / sumIfdWeight : 1.0 );
 	// The counts are absent only in a state the host cannot produce (the GI arm
 	// writes them before it binds the field); there, the box fade is skipped.
 	float ifdConfidence = min( ifdHaveCounts ? ifdEdgeFade : 1.0, ifdFrontFade );
@@ -530,6 +572,20 @@
 	const float ifdWeightLo = 0.0005;
 	const float ifdWeightHi = 0.0050;
 	float ifdWeightFade = smoothstep( ifdWeightLo, ifdWeightHi, sumIfdWeight );
+
+@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+	// ...AND WHERE THE CAGE WAS DECLINED, THE FIELD OWES NOTHING EITHER. Both
+	// terms of the post hook below are the field's own fallbacks -- what a pixel
+	// gets INSTEAD of the cage -- and a pixel a screen probe answered is not
+	// owed either of them. Saying it as "full confidence, no sky visibility"
+	// rather than with a third branch keeps the post hook's arithmetic exactly
+	// what it is for every other pixel.
+	if( ifdCageEnabled == 0.0 )
+	{
+		ifdConfidence = 1.0;
+		ifdSkyVis = 0.0;
+	}
+@end
 
 	// THE SCALE UPSTREAM'S COMPOSITE LINE APPLIES (ogre-patch 0058). Upstream
 	// writes
@@ -668,7 +724,7 @@
 	// DoAmbientLighting uses (AmbientLighting_piece_ps.any:66-67) — the
 	// left-handed cubemap frame with X flipped — because irradianceSH's
 	// coefficients are stored in that frame.
-	if( passBuf.jahIfd.y > 0.0 )
+	if( passBuf.jahIfd.y > 0.0 && sumIfdWeight > 0.0 )
 	{
 		float3 ifdWsNormal = mul( passBuf.invViewMatCubemap, pixelData.normal );
 		ifdWsNormal.x = -ifdWsNormal.x;

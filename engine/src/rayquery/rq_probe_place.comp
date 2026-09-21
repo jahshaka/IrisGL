@@ -1,0 +1,189 @@
+#version 460
+// THE SCREEN-PROBE GATHER, JOB 1 OF 3: WHERE THE PROBES GO
+// (GATHER-1a; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 2 item 1).
+//
+// ONE THREAD PER CELL of the uniform grid (one cell per NxN pixels of the
+// view). Each thread does two things and nothing else:
+//
+//   1. PLACES its cell's probe. The probe sits at a pixel inside the cell,
+//      JITTERED by an integer hash of (cell, frame) rather than pinned at the
+//      centre — a fixed probe samples the same 1/256th of the picture for ever
+//      and bakes its own aliasing into every frame, while a jittered one walks
+//      its cell and its error becomes noise a temporal filter can remove
+//      (phase 3's whole job). The surface under that pixel comes from the
+//      PREPASS' depth and normals, which is why the gather needs the prepass
+//      and why `ChainDesc::probeGather` exists.
+//
+//   2. ASKS WHETHER ONE PROBE IS ENOUGH for the cell, and appends a second
+//      where it is not. This is Lumen's adaptive placement in its smallest
+//      honest form: the cell's pixels are sampled on a coarse lattice and each
+//      is tested against the cell probe's PLANE (how far it lies off it, as a
+//      fraction of its own view distance — an angular tolerance, so one number
+//      works at every depth) and against its NORMAL. The pixel that fails
+//      worst gets a probe of its own, appended to the list through an atomic
+//      counter and capped per frame. A flat wall appends nothing; a railing, a
+//      silhouette or a step appends one per cell it crosses.
+//
+// WHAT THE ATOMIC DOES AND DOES NOT DECIDE (spec section 5 item 2). The
+// counter's ORDER is the scheduler's, so which SLOT a cell's adaptive probe
+// lands in varies run to run. Nothing reads a probe by slot: a cell records
+// its own adaptive probe's index in its record, every stochastic input of that
+// probe is keyed on its CELL and its frame, and the pixels that read it reach
+// it through the cell. So the picture is a pure function of (scene, frame) even
+// though the list's order is not — which is the property the determinism case
+// asserts.
+//
+// AND THE INDIRECT DISPATCH ARGUMENT IS WRITTEN HERE, by the same atomic:
+// `atomicMax( args.x, uniformProbes + slot + 1 )`. The count is only final when
+// every thread has finished, and a monotonic max over the appended indices
+// reaches exactly that value without a second dispatch to compute it (patch
+// 0032's count/work pair is the same shape in the Hlms; a raw compute job can
+// write its own arguments and needs no patch). The buffer is pre-set to
+// `uniformProbes` by a transfer before this job, so a frame that appends
+// nothing still dispatches the grid.
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+#define JAH_PROBE_PARAMS_BINDING 0
+#include "jah_probe_params.glsl"
+
+layout( set = 0, binding = 1 ) uniform sampler2D gBufNormals;
+layout( set = 0, binding = 2 ) uniform sampler2D sceneDepth;
+layout( std430, set = 0, binding = 3 ) buffer Records { JahProbeRecord r[]; } records;
+/// x = how many adaptive probes have been appended this frame; the three
+/// components after it are the trace's INDIRECT DISPATCH arguments.
+layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[3]; } counter;
+layout( std430, set = 0, binding = 5 ) buffer Args { uint x; uint y; uint z; } args;
+
+/// The surface a pixel drew, or `valid` false where it drew none (the sky, a
+/// pixel the prepass never touched).
+struct Surface { vec3 world; vec3 normal; float dist; bool valid; };
+
+Surface surfaceAt( vec2 pix )
+{
+	Surface s;
+	s.world = vec3( 0.0 );
+	s.normal = vec3( 0.0 );
+	s.dist = 0.0;
+	s.valid = false;
+	// CLAMPED TO THE IMAGE: the grid is a ceiling division, so the last cell of
+	// a row can reach past the target's edge, and a sampler's clamp would read
+	// the edge texel while the reconstruction claimed the outside position.
+	const vec2 uv = clamp( pix / vec2( p.resolution.zw ), vec2( 0.0 ), vec2( 0.999999 ) );
+	const float rawDepth = texture( sceneDepth, uv ).x;
+	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
+		return s;
+	vec3 normalVS = texture( gBufNormals, uv ).xyz * 2.0 - 1.0;
+	if( dot( normalVS, normalVS ) <= 1e-6 )
+		return s;
+	normalVS = normalize( normalVS );
+	s.normal = normalize( p.viewAxisX.xyz * normalVS.x + p.viewAxisY.xyz * normalVS.y +
+						  p.viewAxisZ.xyz * normalVS.z );
+	s.dist = jahViewDistance( rawDepth );
+	s.world = jahWorldAt( uv, s.dist );
+	s.valid = finite3( s.world ) && finite3( s.normal ) && finite1( s.dist );
+	return s;
+}
+
+void writeRecord( uint index, Surface s, float adaptiveLink )
+{
+	records.r[index].posW = vec4( s.world, s.valid ? 1.0 : 0.0 );
+	records.r[index].normalW = vec4( s.normal, adaptiveLink );
+	// The trace overwrites this; zeroing it here is what makes a probe that the
+	// trace declines (no surface) read as "no answer" rather than as last
+	// frame's answer at a place the camera has left.
+	records.r[index].irradiance = vec4( 0.0 );
+}
+
+void main()
+{
+	const ivec2 grid = ivec2( p.resolution.xy );
+	const ivec2 cell = ivec2( gl_GlobalInvocationID.xy );
+	if( any( greaterThanEqual( cell, grid ) ) )
+		return;
+	const uint index = uint( cell.y * grid.x + cell.x );
+	const float stride = max( p.knobs.x, 1.0 );
+	const uint frame = uint( p.knobs.z );
+
+	// ---- 1. THE PROBE'S PIXEL, jittered inside its own cell ---------------
+	vec2 offset = vec2( 0.5, 0.5 );
+	if( p.plane.w < 0.5 )
+	{
+		// The pixel CENTRE of a jittered texel, not a continuous position: the
+		// depth and normals are point-sampled, so a sub-pixel position would
+		// read one texel and claim another's place.
+		const vec2 j = jahSample2( cell, 0u, frame );
+		offset = floor( j * stride ) + 0.5;
+	}
+	else
+	{
+		offset = vec2( floor( stride * 0.5 ) + 0.5 );
+	}
+	const vec2 probePix = vec2( cell ) * stride + offset;
+	const Surface probe = surfaceAt( probePix );
+	if( !probe.valid )
+	{
+		// No surface under this probe: the record says so and the integrate
+		// hands its pixels back to whatever the pixel path already had. A probe
+		// on the sky is not an error, it is most of the border.
+		writeRecord( index, probe, 0.0 );
+		return;
+	}
+
+	// ---- 2. DOES ONE PROBE ANSWER FOR THIS CELL? --------------------------
+	// Four samples on the cell's own quarters, which is the coarsest lattice
+	// that can see a silhouette crossing a cell in either axis. More samples
+	// would find more detail and cost linearly; this pass exists to find the
+	// cells where ONE probe is plainly wrong, not to survey them.
+	float worstError = 0.0;
+	vec2 worstPix = probePix;
+	Surface worstSurface = probe;
+	const float planeTol = max( p.plane.x, 1e-4 );
+	const float normalTol = p.plane.y;
+	for( int i = 0; i < 4; ++i )
+	{
+		const vec2 q = vec2( float( i & 1 ), float( ( i >> 1 ) & 1 ) );
+		const vec2 pix = ( vec2( cell ) + ( q + 0.25 ) * 0.5 ) * stride + vec2( 0.5 );
+		const Surface s = surfaceAt( pix );
+		if( !s.valid )
+			continue;
+		// How far off the probe's plane this pixel lies, as a fraction of its
+		// own view distance, and how far its normal has turned.
+		const float offPlane = abs( dot( probe.normal, s.world - probe.world ) ) /
+							   max( s.dist, 1e-3 );
+		const float turn = max( 0.0, normalTol - dot( probe.normal, s.normal ) );
+		const float error = max( offPlane / planeTol, turn / max( 1.0 - normalTol, 1e-3 ) );
+		if( error > worstError )
+		{
+			worstError = error;
+			worstPix = pix;
+			worstSurface = s;
+		}
+	}
+
+	float adaptiveLink = 0.0;
+	const uint cap = uint( max( p.knobs3.y, 0.0 ) );
+	// THE DEMAND IS COUNTED WHATEVER THE BUDGET IS, and the budget decides only
+	// what is APPENDED. Counting inside `cap > 0` made the raw counter agree
+	// with the clamped one by construction -- a reading that cannot say whether
+	// a cap is costing anything, which is the one question a budget's reading
+	// exists to answer. One atomic per failing cell, on the cells that fail.
+	if( worstError > 1.0 )
+	{
+		const uint slot = atomicAdd( counter.appended, 1u );
+		if( slot < cap )
+		{
+			const uint adaptiveIndex = uint( p.knobs3.x ) + slot;
+			// ITS SOURCE CELL travels with it, in the same float the uniform
+			// records use for their link: the trace keys an adaptive probe's
+			// ray directions on the CELL it was placed for, never on the slot
+			// the atomic handed it (rq_probe_gather.comp's note).
+			writeRecord( adaptiveIndex, worstSurface, float( index + 1u ) );
+			adaptiveLink = float( adaptiveIndex + 1u );
+			// THE INDIRECT ARGUMENT, by a monotonic max — see the header.
+			atomicMax( args.x, adaptiveIndex + 1u );
+		}
+	}
+	writeRecord( index, probe, adaptiveLink );
+}

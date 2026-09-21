@@ -308,6 +308,7 @@ Scene::Scene()
     giUpdateBudget = 1;         // one probe re-capture per frame (FIX WAVE B1)
     giPccGrid = iris::Vec3(3, 2, 3);
     giDdgi = -1;                // auto: no tier has been applied to this scene yet
+    giGather = -1;              // auto = OFF until the gather is filtered (scene.h)
     giDragMoverChannel = 1;     // MOVER-1: ON by default (owner §844; see scene.h)
     giDdgiIntensity = 1.0f;     // the calibrated default; see scene.h
     giDdgiAmbient = 1.0f;       // the ambient fix on; see scene.h

@@ -7224,6 +7224,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // rebuilt sometimes and not others would be worse than one that always
         // does (recorded as a P2 tuning item, with the panel).
         gi.ddgi = toggle(mSource->giDdgi);
+        // THE SCREEN-PROBE GATHER's row, the same tri-state travel. It is GRAPH
+        // SHAPE on the engine's side (a gathering view carries the SSR prepass
+        // whether or not its SSR row asked for one — `ChainDesc::probeGather`),
+        // so it rides the change debounce with the rest of the configuration.
+        gi.gather = toggle(mSource->giGather);
         gi.ddgiIntensity = qBound(0.0f, mSource->giDdgiIntensity, 64.0f);
         gi.ddgiAmbient = qBound(0.0f, mSource->giDdgiAmbient, 8.0f);
         // EVERY LIGHT IS A VOXEL LIGHT. There is one GI arm now (PHOTON_SPEC
