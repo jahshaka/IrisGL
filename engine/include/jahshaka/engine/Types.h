@@ -3134,6 +3134,70 @@ struct RayQueryStatus {
     float reflectMs = -1.0f;
 };
 
+// ---- SURFACE-CACHE-0: the phase-0 design spike (2026-09-21) ----------------
+//
+// A MEASUREMENT SURFACE, NOT A FEATURE. `SPECS/SURFACE_CACHE_ASSESSMENT.md` §8
+// records three numbers as unmeasured — the per-capture cost on this pin, the
+// per-ray cost of reading a card instead of a voxel, and the picture the swap
+// makes — and §7 phase 0 is the lane that takes them. Every field below exists
+// so a suite can PRINT them; nothing in the renderer reads any of it, and with
+// `Scene::surfaceCardSpike` never called the engine allocates nothing, captures
+// nothing and draws exactly what it drew before.
+
+/// What the spike should do on this call.
+enum class SurfaceCardSpikeAction {
+    Build,    ///< (re)build the card set for `node` at `cardSize` and capture once
+    Capture,  ///< capture `rounds` more times, timing each round
+    ReadOn,   ///< the reflection ray job reads the cards at hits on that mesh
+    ReadOff,  ///< ...and back to the voxels (the A/B's only switch)
+    ArmInFrame,    ///< the capture workspace runs as part of every frame
+    DisarmInFrame, ///< ...and stops
+    Dump,     ///< write the six cards of every layer to `dumpPath`-<layer><n>.png
+    Destroy   ///< free everything the spike holds
+};
+
+struct SurfaceCardSpikeDesc {
+    SurfaceCardSpikeAction action = SurfaceCardSpikeAction::Build;
+    /// The node whose mesh is carded. Its WORLD transform is baked into the
+    /// cards (a card set is per INSTANCE in Lumen too), so a moved instance
+    /// needs a rebuild — which is the invalidation phase 2 would wire.
+    NodeId   node = 0;
+    unsigned cardSize = 128u;   ///< texels a side, per card
+    unsigned rounds = 1u;       ///< capture rounds to time (Capture only)
+    /// Dump only: the path PREFIX the card images are written under.
+    std::string dumpPath;
+};
+
+struct SurfaceCardSpikeResult {
+    bool ok = false;
+    std::string error;
+    unsigned cards = 0u;        ///< always 6 — Lumen's axis-aligned fallback shape
+    unsigned cardSize = 0u;
+    /// Triangles the capture rasterised per card pass (the mesh at the LOD the
+    /// card's texel size picks, when the mesh carries an Atom chain).
+    unsigned triangles = 0u;
+    /// THE NUMBER ARM A OF THE ASSESSMENT TURNS ON: wall milliseconds one
+    /// six-card capture round costs the CPU, and the per-pass figure beside it.
+    float cpuMsPerRound = -1.0f;
+    float cpuMsPerCard = -1.0f;
+    /// ...of which THIS much is the scratch scene's own graph walk, which a
+    /// shipped capture pays once a frame for every card set rather than once
+    /// per set (Root::renderOneFrame does it before any workspace runs). Stated
+    /// apart so the per-capture number is not inflated by it.
+    float graphMsPerRound = -1.0f;
+    /// ...and the same round's GPU milliseconds, when the build carries
+    /// JAH_GPU_TIMESTAMPS and the monitor is recording. Negative = not measured.
+    float gpuMsPerRound = -1.0f;
+    float gpuMsPerCard = -1.0f;
+    /// Bytes of texture the card set holds, resident.
+    unsigned long long vramBytes = 0ull;
+    /// A card texel's size in world units — what "10-20x finer than a voxel"
+    /// is measured against.
+    float texelWorld = 0.0f;
+    /// The TLAS instance custom index the set covers (the ray job's key).
+    unsigned itemSlot = 0u;
+};
+
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
 /// (PHOTON-M3), never a per-frame path: it flushes the render system's
 /// commands and blocks on a texture download of the whole 3D volume.

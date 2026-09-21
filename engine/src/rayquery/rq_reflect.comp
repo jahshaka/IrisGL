@@ -51,6 +51,12 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 /// repeats the last one into the unused slots (a descriptor array may not have
 /// holes).
 const int kMaxCascades = 4;
+/// SURFACE-CACHE-0: six axis-aligned cards, Lumen's fallback card shape and the
+/// assessment's S3 prototype. The C++ side's SurfaceCardSpike::kCards.
+const int kCards = 6;
+/// The environment term's pi (see cardRadiance) — the same constant the pixel
+/// path spells out at 200.BRDFs_piece_ps.any:305.
+const float kPi = 3.14159265;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
@@ -137,6 +143,32 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 prevRayRight2;
 	vec4 prevRayDown2;
 	vec4 prevFwd2;
+	/// ---- SURFACE-CACHE-0 — the phase-0 design spike (2026-09-21) --------
+	/// A MEASUREMENT SURFACE, not a feature: the whole block is zero and every
+	/// line below it is unreached unless `Scene::surfaceCardSpike` armed a card
+	/// set, which only tests/gi/test_gi_surface_cache_spike.cpp does.
+	///
+	/// x = 1 when the card set is bound and should be read; y = the TLAS
+	/// instance custom index it covers — `OgreScene::gatherRayInstances` writes
+	/// the scene's own item slot into `instanceCustomIndex`, which is what makes
+	/// "is this hit on the carded mesh" ONE INTEGER COMPARE at the hit and not a
+	/// lookup; z = the depth test's tolerance in world units; w = how far along
+	/// the card's normal the indirect term is sampled.
+	vec4 cardKnobs;
+	/// Per card: xyz = its outward world axis (the capture camera's +Z).
+	vec4 cardAxis[kCards];
+	/// ...and the three rows that take a WORLD position to (u, v, distance from
+	/// the card's plane): u = dot( rowU.xyz, P ) + rowU.w, and so on. Three dot
+	/// products, no matrix and no per-instance transform, because the cards were
+	/// captured in world space — a card set is per INSTANCE in Lumen too.
+	vec4 cardRowU[kCards];
+	vec4 cardRowV[kCards];
+	vec4 cardRowD[kCards];
+	/// xyz = the direction the sun's light TRAVELS, w = 1 when there is a sun.
+	vec4 cardSunDir;
+	/// xyz = the sun's radiance in the scene's own units (its diffuse colour
+	/// times its power scale, which is what HlmsPbs multiplies a surface by).
+	vec4 cardSunColour;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -234,6 +266,23 @@ layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
 layout( set = 0, binding = 13 ) uniform sampler3D voxelZ[kMaxCascades];
 layout( set = 0, binding = 14 ) uniform samplerCube skyCube;
+// ---- SURFACE-CACHE-0's card set (2026-09-21) -------------------------------
+// Five layers, six slices each. The first two are upstream's own prepass
+// G-buffer — the shading normal in the CARD CAMERA's view space, and (shadow,
+// GGX alpha) — which is why a capture is a prepass and why the sun's shadow
+// term costs the capture nothing. The last three are ours: the diffuse constant
+// (HlmsPbs keeps it pre-divided by pi, so this is kD and not the albedo), the
+// emissive radiance, and the card's own depth in world units.
+//
+// FIVE BINDINGS AND NOT A BINDLESS ARRAY, and the assessment's S3 concern is
+// exactly what that measures: this shape holds ONE card set. A thousand needs
+// either one atlas with a page table (Lumen's answer, phase 5) or a descriptor
+// indexing extension — see the report.
+layout( set = 0, binding = 15 ) uniform sampler2DArray cardNormal;
+layout( set = 0, binding = 16 ) uniform sampler2DArray cardShadowRough;
+layout( set = 0, binding = 17 ) uniform sampler2DArray cardAlbedo;
+layout( set = 0, binding = 18 ) uniform sampler2DArray cardEmissive;
+layout( set = 0, binding = 19 ) uniform sampler2DArray cardDepth;
 
 /// The same ceiling JahSsrResolve_ps.glsl and JahSsrHistory_ps.glsl hold the
 /// SSR loop to, and for the same reason: about twelve stops above white, six
@@ -481,6 +530,98 @@ vec3 voxelRadiance( vec3 hitPos, vec3 dir, float lobeAlpha, float t, out bool ok
 	return clamp( acc / max( accW, 1e-6 ), vec3( 0.0 ), vec3( kMaxRadiance ) );
 }
 
+/// SURFACE-CACHE-0 — THE HIT, LIT FROM ITS CARD (the phase-0 spike).
+///
+/// The shape is the assessment's S2 with the lighting done AT THE READ rather
+/// than in a lit atlas of its own: direct from the sun through the shadow term
+/// the capture already stored, indirect as ONE fetch of the cascade's radiance
+/// a card-normal's step off the surface, emissive straight through. That is the
+/// HARDER arm for cards — a shipped cache fetches one pre-lit texel — so the
+/// per-ray cost this measures is an upper bound and not a flattering one.
+///
+/// WHICH CARD. Lumen's rule: the cards whose outward axis FACES the incoming
+/// ray, weighted by how squarely they face it, and each one depth-tested — a
+/// card is a surface, not a decal, and a hit the card cannot see is a hit on
+/// some other part of the mesh. With no card covering the hit the caller falls
+/// back to the voxels, which is the same order Lumen uses.
+vec3 cardRadiance( vec3 hitPos, vec3 dir, out bool ok )
+{
+	ok = false;
+	vec3 acc = vec3( 0.0 );
+	float accW = 0.0;
+	for( int i = 0; i < kCards; ++i )
+	{
+		const float facing = dot( p.cardAxis[i].xyz, -dir );
+		if( facing <= 0.02 )
+			continue;						// this card looks the other way
+		const float u = dot( p.cardRowU[i].xyz, hitPos ) + p.cardRowU[i].w;
+		const float v = dot( p.cardRowV[i].xyz, hitPos ) + p.cardRowV[i].w;
+		if( u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0 )
+			continue;						// outside the card's own extent
+		const float d = dot( p.cardRowD[i].xyz, hitPos ) + p.cardRowD[i].w;
+		const vec3 uvw = vec3( u, v, float( i ) );
+		const float cd = textureLod( cardDepth, uvw, 0.0 ).x;
+		// A DEPTH OF ZERO IS AN EMPTY TEXEL, not a surface at the near plane:
+		// the capture clears to zero and only a drawn fragment writes its own
+		// distance, which is always past the card's margin.
+		if( cd <= 0.0 || !finite1( cd ) || abs( cd - d ) > p.cardKnobs.z )
+			continue;						// the card sees a different surface here
+		const vec3 nv = textureLod( cardNormal, uvw, 0.0 ).xyz * 2.0 - 1.0;
+		if( dot( nv, nv ) < 1e-6 )
+			continue;
+		// THE NORMAL COMES BACK OUT OF THE CARD CAMERA'S VIEW SPACE. Its three
+		// axes are already here: rowU runs along the camera's +x (scaled by
+		// 1/width), rowV along its -y, and the card's axis IS its +z.
+		const vec3 cx = normalize( p.cardRowU[i].xyz );
+		const vec3 cy = -normalize( p.cardRowV[i].xyz );
+		const vec3 n = normalize( cx * nv.x + cy * nv.y + p.cardAxis[i].xyz * nv.z );
+		// kD, WHICH IS WHAT THE CAPTURE STORED, AND WHY THE TWO HALVES OF THE
+		// LIGHT CARRY DIFFERENT FACTORS OF PI. HlmsPbs keeps a datablock's
+		// diffuse pre-divided by pi (OgreHlmsPbsDatablock::setDiffuse: kD =
+		// albedo/pi), so nothing below ever divides by pi again — but the two
+		// terms it multiplies are not the same kind of quantity:
+		//
+		//  * THE SUN IS A PUNCTUAL LIGHT. Its contribution to outgoing radiance
+		//    is kD * E * NdotL with E the light's own radiance, and that is what
+		//    HlmsPbs computes for a directional light (200.BRDFs_piece_ps.any's
+		//    note at :218, "we should divide Rd by PI, but it is already
+		//    included in kD"). No pi here.
+		//
+		//  * THE BOUNCE IS AN ENVIRONMENT TERM. `voxelRadiance` returns a MEAN
+		//    RADIANCE over a neighbourhood — exactly the quantity that reaches
+		//    `pixelData.envColourD` when the cone gather writes it
+		//    (Vct_piece_ps.any:973) — and integrating a Lambert BRDF against a
+		//    uniform hemisphere of radiance L gives albedo * L, i.e. kD * pi * L.
+		//    That pi is explicit in the pixel path
+		//    (200.BRDFs_piece_ps.any:305, `envColourD * pixelData.diffuse * PI`)
+		//    and it has to be explicit here, or a carded hit's bounce is 1/pi of
+		//    what the SAME surface shows on screen — a 3.14x error that would
+		//    read as "cards are darker than voxels" and be blamed on the cards.
+		const vec3 kD = textureLod( cardAlbedo, uvw, 0.0 ).xyz;
+		const vec3 emissive = textureLod( cardEmissive, uvw, 0.0 ).xyz;
+		const float shadow = textureLod( cardShadowRough, uvw, 0.0 ).x;
+		vec3 direct = vec3( 0.0 );
+		if( p.cardSunDir.w > 0.5 )
+			direct = p.cardSunColour.xyz *
+					 ( max( dot( n, -p.cardSunDir.xyz ), 0.0 ) * shadow );
+		bool vok = false;
+		// THE INDIRECT IS ONE FETCH OF THE CASCADE'S RADIANCE — the S2 shape,
+		// with no bounce loop. A wide lobe and a short distance, so the mip is
+		// the coarse one a hemisphere's worth of neighbourhood belongs in.
+		const vec3 indirect = voxelRadiance( hitPos + n * p.cardKnobs.w, n, 1.0, 4.0, vok );
+		const vec3 outgoing =
+			kD * ( direct + ( vok ? indirect * kPi : vec3( 0.0 ) ) ) + emissive;
+		if( !finite3( outgoing ) )
+			continue;
+		acc += outgoing * facing;
+		accW += facing;
+		ok = true;
+	}
+	if( !ok )
+		return vec3( 0.0 );
+	return clamp( acc / max( accW, 1e-6 ), vec3( 0.0 ), vec3( kMaxRadiance ) );
+}
+
 vec3 skyRadiance( vec3 dir )
 {
 	if( p.knobs2.z < 0.5 )
@@ -684,7 +825,16 @@ void main()
 		gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
 		const float t = rayQueryGetIntersectionTEXT( rq, true );
-		traced = voxelRadiance( world + worldN * bias + L * t, L, lobeAlpha, t, ok );
+		const vec3 hitPos = world + worldN * bias + L * t;
+		// SURFACE-CACHE-0: CARD FIRST, VOXEL WHERE NO CARD COVERS THE HIT —
+		// Lumen's own order. `p.cardKnobs.x` is zero in every build that has
+		// not armed the spike, so this is one compare against a constant and
+		// the picture is bit-for-bit what it was.
+		if( p.cardKnobs.x > 0.5 &&
+			rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) == int( p.cardKnobs.y ) )
+			traced = cardRadiance( hitPos, L, ok );
+		if( !ok )
+			traced = voxelRadiance( hitPos, L, lobeAlpha, t, ok );
 		// A HIT THE CACHE CANNOT SHADE IS NOT A MISS. The ray found geometry;
 		// the voxels simply do not reach it (outside every cascade, or a surface
 		// too thin for the grid). Returning the sky there would draw a hole in

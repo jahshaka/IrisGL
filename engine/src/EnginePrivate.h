@@ -225,6 +225,17 @@ class OgreEngine;
 /// engine can hold one and the frame can call it; nothing else in this header
 /// knows what a VkAccelerationStructure is.
 class RayQueryTier;
+/// SURFACE-CACHE-0's card set (the phase-0 design spike). Defined in
+/// SurfaceCardSpike.h, which only OgreSurfaceCards.cpp and OgreRayQuery.cpp
+/// include; a raw pointer here for the same reason `mRayTier` is one.
+class SurfaceCardSpike;
+/// True while SURFACE-CACHE-0's capture workspace is executing. The one
+/// question the Hlms listener asks before setting `jah_card_capture`; false in
+/// every frame that is not a spike capture, which is every frame.
+bool surfaceCardsCapturing();
+/// The card capture's workspace, for the monitor's listener walk. Defined in
+/// OgreSurfaceCards.cpp so that no other TU needs the spike's full type.
+Ogre::CompositorWorkspace *cardSpikeWorkspace(SurfaceCardSpike *spike);
 
 class OgreView;
 
@@ -2967,6 +2978,13 @@ public:
     /// OgreRayQuery.cpp — like gatherRayInstances below, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const override;
+    /// SURFACE-CACHE-0 (the phase-0 design spike, 2026-09-21). Defined in
+    /// OgreSurfaceCards.cpp. Null until a test asks for it; with it null the
+    /// scene is byte-for-byte the scene that shipped.
+    bool surfaceCardSpike(const SurfaceCardSpikeDesc &desc,
+                          SurfaceCardSpikeResult &out) override;
+    SurfaceCardSpike *cardSpike() const { return mCardSpike; }
+    SurfaceCardSpike *mCardSpike = nullptr;
     /// THE TRACED SET, walked out of `mItemNodes` — the scene's own item index,
     /// never `SceneManager::getMovableObjectIterator` (audit C-4: that list is
     /// where the editor's gizmo arrows and light icons come from, and the S3
@@ -2999,6 +3017,9 @@ public:
     /// rather than a new public getter: nothing outside the ray tier has any
     /// business with that counter, and it lives in the same TU as the walk.
     friend class RayQueryTier;
+    /// SURFACE-CACHE-0's card set reaches the scene's item table and its
+    /// SceneManager the same way and for the same reason (a spike lane).
+    friend class SurfaceCardSpike;
     bool reassertGiBinding() override;
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
