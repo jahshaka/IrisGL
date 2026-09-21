@@ -179,7 +179,9 @@ void decodeTexel(Ogre::PixelFormatGpu fmt, const void *src, float out[4]) {
 /// between this Component and the ray job, and a contract written in two places
 /// is a contract that drifts.
 struct CardGpuRec {
-    float uvScaleBias[4] = {};   ///< u = x*scale.x + bias.x ... the inset is IN these
+    /// atlasUV = uv * scale + bias, with the half-texel inset AND v's mirror
+    /// already in them (scale.y is negative — see `syncBuffers`).
+    float uvScaleBias[4] = {};
     float rowU[4] = {};          ///< dot(world, xyz) + w  ->  the card's u in [0,1]
     float rowV[4] = {};
     float rowD[4] = {};          ///< ...and the distance from the card's near plane
@@ -301,10 +303,32 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     // per card, because a camera is a node in the manager's graph and six
     // hundred of them would be six hundred nodes walked every frame. That is
     // the same reasoning that took the SCRATCH SceneManager out.
-    mCam = sm->createCamera(processUniqueName("cardCapture"), true, true);
-    mCam->setProjectionType(Ogre::PT_ORTHOGRAPHIC);
-    mCam->setFixedYawAxis(false);
-    mCam->setAutoAspectRatio(false);
+    // TWO CAPTURE CAMERAS, USED ALTERNATELY, AND THAT IS THE SHADOW FIX.
+    //
+    // The pin's shadow node caches per (camera, compositor-manager frame
+    // count): `buildClosestLightList` early-outs on
+    // `mLastCamera == newCamera && mLastFrame == currentFrameCount`
+    // (OgreCompositorShadowNode.cpp:342-352) and the casters box it computes
+    // there is cached with it (:454) — and a workspace driven BY HAND does not
+    // bump the manager's frame count, so with ONE camera every card after the
+    // frame's first reused the first card's light list AND its casters box,
+    // which is a box fitted to a different metre of the world under a mask
+    // that admits one object. Measured: the floor's shadow profile was exactly
+    // right when the budget captured everything in the first frame and a flat
+    // 1.0 at any budget that spread the captures.
+    //
+    // Alternating two cameras defeats the early-out on its first term, with no
+    // patch, no wide cull camera and no fit that is anybody's guess: every card
+    // gets its OWN light list and its OWN casters box, fitted to its own
+    // capture camera, which is the highest-quality answer available and the one
+    // the per-card recalculation was always meant to give.
+    for (unsigned i = 0; i < kCaptureCameras; ++i) {
+        mCam[i] = sm->createCamera(
+            processUniqueName(i ? "cardCaptureB" : "cardCaptureA"), true, true);
+        mCam[i]->setProjectionType(Ogre::PT_ORTHOGRAPHIC);
+        mCam[i]->setFixedYawAxis(false);
+        mCam[i]->setAutoAspectRatio(false);
+    }
     mNodeDef = processUniqueName("JahCardCaptureNode");
     mWsDef = processUniqueName("JahCardCaptureWs");
     Ogre::CompositorNodeDef *n = cm->addNodeDefinition(mNodeDef);
@@ -335,7 +359,9 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     // depth through three hook pieces under one pass property. No patch to the
     // pin (SURFACE-CACHE-0 proved it; the piece's header states the mechanism).
     p->mPrePassMode = Ogre::PrePassCreate;
-    p->mCameraName = Ogre::IdString(mCam->getName());
+    // The pass's camera is set per capture (`aimCamera` swaps it), so the
+      // definition names the first of the pair and the live pass is re-pointed.
+    p->mCameraName = Ogre::IdString(mCam[0]->getName());
     // ONE OBJECT, THROUGH AN INCLUDE CHANNEL. Ogre's visibility test is
     // any-bit-set, so "draw only this item" is expressible only as a bit the
     // item alone carries while the pass runs — `kCardSubjectBit`, granted by
@@ -344,6 +370,14 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     // (`viewportMask & ~RESERVED_VISIBILITY_FLAGS`) is zero and nothing leaks
     // through it (CLAUDE.md's RESERVED_VISIBILITY_FLAGS rule).
     p->mVisibilityMask = detail::kCardSubjectBit;
+    // AND A LIGHT MUST STILL REACH THIS PASS, which it does today for a reason
+    // worth writing down rather than relying on: `buildClosestLightList` culls
+    // the pass's lights through the VIEWPORT's visibility mask, which is this
+    // one — and every light in this engine is born with Ogre's all-bits
+    // default and nothing ever narrows it. The day something does, a light
+    // without bit 10 drops out of every capture and EVERY CARD'S SHADOW TERM
+    // GOES TO 1.0, silently, with no counter moving. If light visibility ever
+    // becomes a channel here, this mask grows the lights' bits with it.
     // THE SHADOW NODE IS THE SCENE'S, AND THAT IS THE POINT OF THIS PHASE. A
     // shadow node draws its casters through its own definition's mask
     // (`shadowCasterChannels`), which the pass mask above does not touch — so
@@ -421,7 +455,7 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     // where the monitor's listeners are already attached and where every other
     // engine cache spends its budget — because six cards need six different
     // camera poses and one workspace update cannot carry six.
-    mWs = cm->addWorkspace(sm, externals, mCam, mWsDef, false);
+    mWs = cm->addWorkspace(sm, externals, mCam[0], mWsDef, false);
     if (!mWs) { err = "surface cache: addWorkspace failed"; return false; }
     mWs->addListener(this);
     return true;
@@ -466,8 +500,10 @@ void SurfaceCache::destroyAll() {
     mCardBufferCpu.clear();
     mInstanceBufferCpu.clear();
     mTableDirty = false;
-    if (mCam && mSceneMgr) mSceneMgr->destroyCamera(mCam);
-    mCam = nullptr;
+    for (unsigned i = 0; i < kCaptureCameras; ++i) {
+        if (mCam[i] && mSceneMgr) mSceneMgr->destroyCamera(mCam[i]);
+        mCam[i] = nullptr;
+    }
     mSceneMgr = nullptr;
     if (Ogre::RenderSystem *rs = root->getRenderSystem()) {
         Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
@@ -501,6 +537,7 @@ bool SurfaceCache::allocRect(unsigned size, unsigned &x, unsigned &y) {
             y = unsigned(p / perSide) * kCardPageSize;
             return true;
         }
+        mAtlasFull = true;
         return false;
     }
     const unsigned slotsPerSide = kCardPageSize / size;
@@ -529,6 +566,7 @@ bool SurfaceCache::allocRect(unsigned size, unsigned &x, unsigned &y) {
         y = unsigned(p / perSide) * kCardPageSize;
         return true;
     }
+    mAtlasFull = true;
     return false;
 }
 
@@ -566,6 +604,7 @@ void SurfaceCache::releaseInstance(size_t idx) {
         CardRec &card = mCards[inst.firstCard + c];
         freeRect(card.atlasX, card.atlasY, card.size);
     }
+    mAtlasFull = false;
     mByNode.erase(inst.node);
     // The card block is left in place and the instance marked dead; the
     // compaction below rebuilds both vectors at once, which is O(n) per
@@ -591,6 +630,8 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
     const Ogre::Aabb box = cand.item->getWorldAabbUpdated();
     inst.centre = box.mCenter;
     inst.halfSize = box.mHalfSize;
+    inst.rotation = rot;
+    inst.scale = scale;
 
     unsigned made = 0u;
     for (const MeshCardDesc &c : *cand.cards) {
@@ -705,18 +746,49 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         // same path a destroyed or hidden object takes.
         if (inst.distance * inst.distance > r2) continue;
         inst.seen = true;
-        // THE TRANSFORM SIGNATURE. A card's rectangle is in WORLD space, so a
-        // moved instance's cards are wrong RECTANGLES, not merely stale
-        // pictures — they are freed and re-allocated, which is the one
-        // invalidation that is not "throw it back on the queue". The test is a
-        // tolerance on the world box, the same shape the GI item walk uses and
-        // for the same reason: a transform rewritten to the same value must not
-        // read as movement.
+        // THE TRANSFORM SIGNATURE, AND IT IS NOT THE BOX ALONE. A card's
+        // rectangle and its FRAME are in WORLD space and come from the node's
+        // derived orientation and scale — so a 90 degree turn of a crate, or
+        // ANY turn of a sphere, leaves the world AABB exactly where it was
+        // while every card now describes a different face. The box, the
+        // orientation and the scale are all part of the signature for that
+        // reason. A moved instance's cards are wrong RECTANGLES rather than
+        // stale pictures, so this is the one invalidation that frees and
+        // re-allocates instead of queueing. The tolerance is the GI item walk's
+        // shape, for its reason: a transform rewritten to the same value must
+        // not read as movement.
         const Ogre::Vector3 dc = box.mCenter - inst.centre, dh = box.mHalfSize - inst.halfSize;
         const float tol = 1e-4f * std::max(1.0f, box.mHalfSize.length());
-        if (dc.squaredLength() > tol * tol || dh.squaredLength() > tol * tol) {
+        const Ogre::Quaternion rot = cand.sceneNode ? cand.sceneNode->_getDerivedOrientation()
+                                                    : Ogre::Quaternion::IDENTITY;
+        const Ogre::Vector3 scale = cand.sceneNode ? cand.sceneNode->_getDerivedScale()
+                                                   : Ogre::Vector3::UNIT_SCALE;
+        // A quaternion and its negation are the same rotation, so the test is
+        // on |dot| — otherwise a re-authored pose that crosses the sign would
+        // re-allocate every card for nothing.
+        const bool turned = std::fabs(rot.Dot(inst.rotation)) < 1.0f - 1e-6f;
+        const bool rescaled = (scale - inst.scale).squaredLength() > tol * tol;
+        if (dc.squaredLength() > tol * tol || dh.squaredLength() > tol * tol || turned ||
+            rescaled) {
             ++mInvalidTransform;
             inst.seen = false;
+            continue;
+        }
+        // THE MATERIAL THE INSTANCE WEARS, re-read every frame — because the
+        // hover preview does not go through `noteMaterialChanged` at all.
+        // MATERIAL-SWAP-GI-1's in-place swap (`OgreScene::setNodeMaterial`)
+        // writes `n.materialRef` and swaps the datablock on the live Item
+        // WITHOUT destroying or editing a material, which is the whole point of
+        // it — so the only way the cache hears about a preview is by reading
+        // the candidate's material again. Without this a hovered wall keeps the
+        // old preset's albedo in the atlas for ever, an edit to the material it
+        // now wears never reaches it, and an edit to the one it dropped
+        // re-captures it for nothing.
+        if (inst.material != cand.material) {
+            inst.material = cand.material;
+            for (unsigned c = 0; c < inst.cardCount; ++c)
+                mCards[inst.firstCard + c].queued = true;
+            ++mInvalidMaterial;
         }
     }
     for (size_t i = 0; i < mInstances.size(); ++i) {
@@ -757,6 +829,19 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     //    to list first. That IS "allocation by distance": the radius decides
     //    who may hold pages and this order decides who gets them when the atlas
     //    cannot hold everyone.
+    //    AND A FULL ATLAS COSTS NOTHING TO DISCOVER, which is the difference
+    //    between a cache and a per-frame search. `pagesUsed` is counted ONCE
+    //    here, not once per arrival; the arrival loop stops on the first
+    //    `allocRect` that finds no room (`mAtlasFull`, set by the allocator
+    //    itself) rather than after the next SUCCESS; and a frame that cannot
+    //    place anything does not sort at all. Without this, a scene bigger than
+    //    the atlas re-scanned every unplaceable candidate against all 256 pages
+    //    and re-sorted them, every frame, for ever.
+    unsigned pagesUsed = 0u;
+    for (unsigned char o : mPageOwner) pagesUsed += (o != 0u) ? 1u : 0u;
+    mPagesUsed = pagesUsed;
+    if (pagesUsed * 8u >= mPageOwner.size() * 7u) return;   // 7/8 full: take no new work
+
     std::vector<const CardSceneView::Candidate *> arriving;
     arriving.reserve(view.candidates.size());
     for (const CardSceneView::Candidate &cand : view.candidates) {
@@ -766,6 +851,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         if ((box.mCenter - view.viewerPos).squaredLength() > r2) continue;
         arriving.push_back(&cand);
     }
+    if (arriving.empty()) return;
     const Ogre::Vector3 eye = view.viewerPos;
     std::sort(arriving.begin(), arriving.end(),
               [eye](const CardSceneView::Candidate *a, const CardSceneView::Candidate *b) {
@@ -774,15 +860,14 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                   if (da != db) return da < db;
                   return a->node < b->node;
               });
+    mAtlasFull = false;
     for (const CardSceneView::Candidate *cand : arriving) {
-        if (!buildCardsFor(*cand)) continue;
-        // THE ATLAS IS THE CEILING, and it is checked rather than discovered:
-        // `allocRect` failing mid-instance is handled, but stopping here keeps
-        // the last instance whole instead of half-carded.
-        unsigned used = 0u;
-        for (unsigned char o : mPageOwner) used += (o != 0u) ? 1u : 0u;
-        if (used * 8u >= mPageOwner.size() * 7u) break;   // 7/8 full: stop taking new work
+        buildCardsFor(*cand);
+        if (mAtlasFull) break;
     }
+    pagesUsed = 0u;
+    for (unsigned char o : mPageOwner) pagesUsed += (o != 0u) ? 1u : 0u;
+    mPagesUsed = pagesUsed;
 }
 
 // ---------------------------------------------------------------------------
@@ -790,17 +875,40 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
 // ---------------------------------------------------------------------------
 void SurfaceCache::aimCamera(const CardRec &card) {
     const float margin = captureMargin(card.halfDepth);
-    mCam->setOrthoWindow(std::max(2.0f * card.halfU, 1e-4f), std::max(2.0f * card.halfV, 1e-4f));
-    mCam->setNearClipDistance(0.001f);
-    mCam->setFarClipDistance(2.0f * card.halfDepth + 2.0f * margin + 0.01f);
-    mCam->setPosition(card.centre + card.d * (card.halfDepth + margin));
+    // ALTERNATE (see the pair's note in makeWorkspace): the shadow node's
+    // "same camera, same frame" early-out is what made cards 2..N of a frame
+    // reuse the first one's light list and casters box.
+    mCamTurn ^= 1u;
+    Ogre::Camera *cam = mCam[mCamTurn];
+    cam->setOrthoWindow(std::max(2.0f * card.halfU, 1e-4f), std::max(2.0f * card.halfV, 1e-4f));
+    cam->setNearClipDistance(0.001f);
+    cam->setFarClipDistance(2.0f * card.halfDepth + 2.0f * margin + 0.01f);
+    cam->setPosition(card.centre + card.d * (card.halfDepth + margin));
     // Ogre looks down -Z, so the card's OUTWARD axis is the camera's +Z. The
     // frame is right-handed (u x v = d, asserted by gi.card_capture), so
     // FromAxes builds a rotation and not a reflection — which is exactly why
     // the document's +Y row had to be fixed before this line could be written.
     Ogre::Quaternion q;
     q.FromAxes(card.u, card.v, card.d);
-    mCam->setOrientation(q);
+    cam->setOrientation(q);
+    // ...and the live pass is re-pointed at it. The camera is resolved in the
+    // pass's constructor from the definition's name, so a swap has to go
+    // through the pass object and not through the definition.
+    if (Ogre::CompositorNode *node =
+            mWs->getNodeSequence().empty() ? nullptr : mWs->getNodeSequence().front()) {
+        const Ogre::CompositorPassVec &passes = node->_getPasses();
+        if (!passes.empty() && passes[0]->getType() == Ogre::PASS_SCENE) {
+            auto *sp = static_cast<Ogre::CompositorPassScene *>(passes[0]);
+            // BOTH, and the cull one is the load-bearing half: the pass's
+            // constructor sets `mCullCamera = mCamera` when the definition
+            // names no cull camera, and it is the CULL camera the shadow node
+            // is fitted to (`CompositorPassScene.cpp:259`). Setting only the
+            // render camera would leave every card's shadow fitted to camera A
+            // for ever, which is the defect this pair exists to remove.
+            sp->_setCustomCamera(cam);
+            sp->_setCustomCullCamera(cam);
+        }
+    }
 }
 
 void SurfaceCache::captureCard(CardRec &card) {
@@ -922,11 +1030,18 @@ void SurfaceCache::syncBuffers() {
         // x + size - 0.5, so a filtered fetch at either edge can never reach a
         // neighbour's texels. That is Lumen's "0.5-texel border" expressed as
         // arithmetic instead of as wasted texels.
+        // ...AND v IS MIRRORED, because the capture camera's +Y is the card's
+        // +v while an image's row 0 is its TOP. `sampleCard` flips v when it
+        // turns a card parameter into an atlas texel; a record that did not
+        // would hand phase 4 an upside-down card, which is the kind of thing
+        // nobody sees until a picture is wrong for a reason no counter names.
+        // The flip is in the SCALE's sign and the BIAS's base row, so the
+        // shader still does one multiply-add.
         const float atlas = float(kCardAtlasSize);
         rec.uvScaleBias[0] = float(c.size - 1u) / atlas;
-        rec.uvScaleBias[1] = float(c.size - 1u) / atlas;
+        rec.uvScaleBias[1] = -float(c.size - 1u) / atlas;
         rec.uvScaleBias[2] = (float(c.atlasX) + 0.5f) / atlas;
-        rec.uvScaleBias[3] = (float(c.atlasY) + 0.5f) / atlas;
+        rec.uvScaleBias[3] = (float(c.atlasY + c.size) - 0.5f) / atlas;
         // u = dot(world, U)/(2 halfU) + (0.5 - dot(centre, U)/(2 halfU)), and
         // the same for v; the card frame is world-space, so there is no
         // per-instance matrix anywhere in the read.
@@ -1015,8 +1130,18 @@ void SurfaceCache::update(const CardSceneView &view) {
     // two frames for one instance and is not worth a second dirty set yet.
     if (view.lightSerial != mLightSerial) {
         for (CardRec &c : mCards) c.queued = true;
-        ++mInvalidLight;
+        // ONE PER GESTURE, NOT ONE PER FRAME — `gi.material_swap`'s model. A
+        // dragged lamp writes a new pose on every frame of the drag and every
+        // one of them genuinely stales the shadow term, so the QUEUEING is per
+        // frame and cannot be otherwise; what a counter is for is telling a
+        // drag from a defect, and a number that climbs by sixty for one gesture
+        // cannot. So the counter moves on the LEADING EDGE: the first frame
+        // whose signature differs after a frame whose signature did not.
+        if (!mLightMovingLastFrame) ++mInvalidLight;
+        mLightMovingLastFrame = true;
         mLightSerial = view.lightSerial;
+    } else {
+        mLightMovingLastFrame = false;
     }
 
     // THE QUEUE, IN LUMEN'S ORDER: priority = lastUsed - lastUpdated, drained
@@ -1079,8 +1204,7 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     if (!mBuilt) return;
     out.pageSize = kCardPageSize;
     out.pages = unsigned(mPageOwner.size());
-    out.pagesUsed = 0u;
-    for (unsigned char o : mPageOwner) out.pagesUsed += (o != 0u) ? 1u : 0u;
+    out.pagesUsed = mPagesUsed;
     out.bytesPerTexel = 0u;
     for (unsigned i = 0; i < kCardLayers; ++i)
         if (mAtlas[i])

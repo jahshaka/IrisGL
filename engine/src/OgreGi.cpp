@@ -207,6 +207,12 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         // radius gives pages back on that frame and a bigger budget captures
         // more of the queue on it. Nothing is torn down and no card is thrown
         // back on the queue — a budget is not a change to what a card HOLDS.
+        // ...AND THE ROW ITSELF. `updateSurfaceCache` builds the atlas on the
+        // first frame the row is on and frees it on the first frame it is off,
+        // so a toggle needs nothing from the GI configuration push — putting it
+        // there would tear down and re-voxelise the whole cascade chain to
+        // allocate a texture the next frame allocates anyway.
+        mGi.cards                = p.cards;
         mGi.cardBudgetTexels     = p.cardBudgetTexels;
         mGi.cardResidencyRadius  = p.cardResidencyRadius;
         if (mIfd) pushIfdState(mIfdProbeCounts);

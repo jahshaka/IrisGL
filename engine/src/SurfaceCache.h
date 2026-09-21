@@ -67,6 +67,7 @@
 #include "jahshaka/engine/Types.h"
 
 #include <Compositor/OgreCompositorWorkspaceListener.h>
+#include <OgreQuaternion.h>
 #include <OgreVector3.h>
 
 #include <string>
@@ -107,9 +108,21 @@ constexpr unsigned kCardPageSize = 128u;
 /// full size. Phase 5 (SURFACE-CACHE-2) is where this grows a page table and a
 /// feedback loop and stops being a fixed number.
 constexpr unsigned kCardAtlasSize = 2048u;
-/// The smallest card the allocator will cut. Below this the sub-allocation
-/// bookkeeping costs more than the texels it saves.
-constexpr unsigned kCardMinSize = 8u;
+/// THE SMALLEST CARD THE ALLOCATOR WILL CUT, and it is 16 because the
+/// sub-allocation mask says so: a page that cuts cards of side S holds
+/// (128/S)^2 slots, the free-slot mask is ONE uint64, and S = 16 is exactly 64
+/// slots. At 8 it would be 256 — `1ull << s` for s >= 64 is undefined
+/// behaviour, and on x86 the masked shift aliases slots 64..255 onto 0..63, so
+/// three quarters of every 8-texel page would read as permanently taken while
+/// every later allocation scanned all 256 pages looking for room. Any card
+/// under about 12.5 cm reaches that path. A smaller floor needs a wider mask,
+/// not a smaller constant.
+constexpr unsigned kCardMinSize = 16u;
+/// How many capture cameras the Component keeps and cycles between. TWO: the
+/// pin's shadow node caches its light list and its casters box per (camera,
+/// frame), and a hand-driven workspace does not advance the frame — so the
+/// cheapest way to give every card its own fit is to change the camera.
+constexpr unsigned kCaptureCameras = 2u;
 
 
 /// ONE CARD, ALLOCATED AND (perhaps) CAPTURED.
@@ -263,8 +276,12 @@ private:
         /// The three signatures, as they were when this instance's cards were
         /// last ALLOCATED (the transform one) or CAPTURED (the other two).
         unsigned long long transformSig = 0ull;
-        Ogre::Vector3 centre;        ///< the world AABB's centre, the transform signature's other half
+        /// THE TRANSFORM SIGNATURE, whole: the world box AND the frame the
+        /// cards were cut in. A turn leaves the box alone and moves every card.
+        Ogre::Vector3 centre;
         Ogre::Vector3 halfSize;
+        Ogre::Quaternion rotation;
+        Ogre::Vector3 scale{ 1.0f, 1.0f, 1.0f };
     };
 
     // ---- the atlas + the page allocator -----------------------------------
@@ -311,7 +328,10 @@ private:
     std::vector<unsigned> mInstanceBufferCpu;
     bool mTableDirty = false;
 
-    Ogre::Camera *mCam = nullptr;
+    /// TWO capture cameras, used alternately — the shadow node's per-camera
+    /// early-out is what a single one defeats itself on (OgreSurfaceCache.cpp).
+    Ogre::Camera *mCam[kCaptureCameras] = {};
+    unsigned mCamTurn = 0u;
     Ogre::CompositorWorkspace *mWs = nullptr;
     std::string mNodeDef, mWsDef;
 
@@ -326,7 +346,12 @@ private:
     std::vector<unsigned char> mPageOwner;   ///< 0 free, 1 whole, 2 sub-allocated
     std::vector<unsigned char> mPageSubSize; ///< the sub-card size this page cuts
     std::vector<unsigned char> mPageSubUsed; ///< how many sub-slots are taken
-    std::vector<unsigned long long> mPageSubMask;  ///< which ones (<= 64 slots: 8x8 of 16 in a 128 page)
+    std::vector<unsigned long long> mPageSubMask;  ///< which ones (64 slots exactly at kCardMinSize)
+    /// Counted once a frame, not once per arrival, and published as-is.
+    unsigned mPagesUsed = 0u;
+    /// Raised by `allocRect` the moment it finds no room, so the arrival loop
+    /// stops on the first failure instead of after the next success.
+    bool mAtlasFull = false;
 
     unsigned long long mFrame = 0ull;
     unsigned long long mCaptures = 0ull;
@@ -339,8 +364,10 @@ private:
     unsigned long long mInvalidTransform = 0ull;
     unsigned long long mInvalidMaterial = 0ull;
     unsigned long long mInvalidLight = 0ull;
-    /// The light serial as the last frame saw it.
+    /// The light signature as the last frame saw it, and whether it moved on
+    /// that frame (so `invalidLight` counts gestures and not frames).
     unsigned long long mLightSerial = 0ull;
+    bool mLightMovingLastFrame = false;
 };
 
 }   // namespace engine

@@ -1790,7 +1790,45 @@ void OgreScene::updateSurfaceCache() {
                                                  : facts.cardBudgetTexels;
     view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
                                                  : facts.cardResidencyRadius;
-    view.lightSerial = mGiLightWriteSerial;
+    // THE LIGHT SIGNATURE THE CACHE KEYS ON IS NOT `mGiLightWriteSerial`, and
+    // the difference is a slider drag. That serial bumps on EVERY `setLight`
+    // push and every light pose write, colour and intensity included — but the
+    // only thing a capture stores from a light is the SHADOW TERM, which a
+    // colour or an intensity cannot move. So the signature folded here is what
+    // a SHADOW depends on: `Node::lightShadowKey` (the LightDesc fields the
+    // shadow map depends on — type, range, spot cone, castShadows; colour and
+    // intensity deliberately absent, the same rule the lamp-map cache keeps),
+    // the light's derived POSE, and whether it is shown. A colour slider then
+    // costs the cache nothing at all, and a lamp that moves costs it exactly
+    // the cards whose shadows it could have changed.
+    //
+    // Over `mLightNodes`, which is the engine's own light index (a hint that is
+    // a superset), so this is a handful of quantised folds and not a walk of
+    // the node map.
+    unsigned long long lightSig = 1469598103934665603ull;
+    const auto fold = [&lightSig](unsigned long long v) {
+        lightSig ^= v;
+        lightSig *= 1099511628211ull;
+    };
+    const auto foldF = [&fold](float f) {
+        // Quantised to a millimetre / a thousandth: float noise below the
+        // tolerance the whole pipeline works to must not re-capture a card.
+        fold((unsigned long long)(long long)std::lround(double(f) * 1000.0));
+    };
+    for (NodeId lid : mLightNodes) {
+        auto lit = mNodes.find(lid);
+        if (lit == mNodes.end() || !lit->second.light) continue;
+        const Node &ln = lit->second;
+        fold(ln.lightShadowKey);
+        fold(ln.shown ? 1ull : 0ull);
+        if (ln.node) {
+            const Ogre::Vector3 p = ln.node->_getDerivedPosition();
+            const Ogre::Quaternion q = ln.node->_getDerivedOrientation();
+            foldF(p.x); foldF(p.y); foldF(p.z);
+            foldF(q.x); foldF(q.y); foldF(q.z); foldF(q.w);
+        }
+    }
+    view.lightSerial = lightSig;
 
     // THE CANDIDATE LIST — THE SCENE'S OWN WALK, handed over rather than
     // reached for. The predicate is the same one the voxel side uses, and each

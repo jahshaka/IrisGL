@@ -106,8 +106,9 @@ inline size_t lodLevelForWorldError(const std::vector<float> &errors, float allo
 /// A card is the DESCRIPTION of a capture, not a capture: where to stand an
 /// orthographic camera, how wide to make it, how deep to let it see and which
 /// LOD level to raster for it. The six axis directions and the (u, v) frame of
-/// each are restated in the engine at `kCardAxis` / `kCardAxisU` / `kCardAxisV`
-/// (OgreSurfaceCache.cpp) and a suite asserts the two tables agree and that
+/// each are THE CONTRACT below (`cardAxisDirection` / `cardAxisU` /
+/// `cardAxisV`), which the engine's capture caches as Ogre vectors and the
+/// document restates in `iris::MeshCard`; a suite asserts the two tables agree and that
 /// every frame is right-handed (u x v = the axis) — because the bake, the
 /// capture and the read all parameterise the same rectangle and a disagreement
 /// of one sign is a mirrored card nobody would see until phase 4.
@@ -2233,7 +2234,6 @@ struct GiParams {
                updateBudget == o.updateBudget &&
                cascadeVoxelLod == o.cascadeVoxelLod &&
                dragMoverChannel == o.dragMoverChannel &&
-               cards == o.cards &&
                ddgi == o.ddgi &&
                testBoundsMin == o.testBoundsMin && testBoundsMax == o.testBoundsMax &&
                cascades == o.cascades && cascadeCount == o.cascadeCount &&
@@ -2251,7 +2251,7 @@ struct GiParams {
                // with nothing torn down — and a host that only pushed on
                // `operator==` would swallow a radius change entirely, which is
                // the defect this line exists to prevent.
-               cardBudgetTexels == o.cardBudgetTexels &&
+               cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
                cardResidencyRadius == o.cardResidencyRadius;
     }
     /// The cascade table, compared only over the entries in USE — a table
@@ -2442,6 +2442,13 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // ...and the card budget halves, for the reason every VR row exists:
         // the frame is drawn twice and its budget is 11 ms, not 16.
         f.cardBudgetTexels /= 2u;
+        // ...WITH A FLOOR OF ONE WHOLE PAGE. A budget under 16,384 texels
+        // cannot pay for a single 128-texel card, and the drain lets the first
+        // card of a frame through unconditionally (a budget that could never
+        // buy anything would be a queue that never moves) — so a smaller number
+        // would not be a smaller budget, it would be a budget the code has to
+        // ignore. Low's VR row is the one that reaches it.
+        f.cardBudgetTexels = std::max(f.cardBudgetTexels, 16384u);
     }
     return f;
 }
