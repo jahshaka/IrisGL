@@ -600,6 +600,9 @@ public:
     /// Frees a view's gather resources (from ~ReflectPassListener, and when
     /// the spike is disarmed).
     void forgetGather(const ReflectPassListener *key);
+    /// Takes this listener's shader registration away the moment its pass
+    /// ends — the gather's binding is PASS-scoped (fix round, D2).
+    void releaseGatherBinding(const ReflectPassListener *key);
     /// The last measured numbers for a scene, for the spike's result struct.
     void gatherStatsInto(const OgreScene *scene, ProbeGatherSpikeResult &out) const;
 
@@ -1202,8 +1205,16 @@ void RayQueryTier::close() {
     mScenes.clear();
     for (auto &kv : mReflects) dropReflect(kv.second);
     mReflects.clear();
+    // GATHER-0 (fix round, D1): THE SHADER'S REGISTRATION DIES WITH THE
+    // TEXTURES IT NAMES. `dropGather` destroys every gather texture, and
+    // `FogHlmsListener`'s map is a plain pointer table the Hlms cannot see
+    // into — so a map left non-empty here makes the next colour pass bind a
+    // DESTROYED TextureGpu. Reachable: the no-rays switch flipped while a
+    // scene is armed takes `updateRayQuery`'s early return, so the frame-head
+    // clear never runs and this teardown is the only place left that knows.
     for (auto &kv : mGathers) dropGather(kv.second);
     mGathers.clear();
+    FogHlmsListener::clearProbeGather();
     for (ReflectImage *d : { &mDummyCube, &mDummyVolume, &mDummyArray }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
@@ -3565,9 +3576,23 @@ void RayQueryTier::dropGather(GatherView &gv) {
     gv.probeNeedsClear = false;
 }
 
+/// GATHER-0 (fix round, D2): the pass this listener registered for is over,
+/// so the registration is over. Through the tier because the SceneManager is
+/// the scene's private business and this file is the one that may see it.
+void RayQueryTier::releaseGatherBinding(const ReflectPassListener *key) {
+    auto it = mGathers.find(key);
+    if (it == mGathers.end() || !it->second.scene) return;
+    FogHlmsListener::setProbeGather(it->second.scene->mSceneMgr, nullptr);
+}
+
 void RayQueryTier::forgetGather(const ReflectPassListener *key) {
     auto it = mGathers.find(key);
     if (it == mGathers.end()) return;
+    // ...AND THE SHADER'S REGISTRATION WITH IT (fix round, D1): this view's
+    // irradiance texture is about to be retired, and the Hlms listener holds
+    // a raw pointer to it keyed by the scene's manager.
+    if (it->second.scene && it->second.scene->mSceneMgr)
+        FogHlmsListener::setProbeGather(it->second.scene->mSceneMgr, nullptr);
     dropGather(it->second);
     mGathers.erase(it);
 }
@@ -4068,6 +4093,20 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     mView->mEngine->mRayTier->recordGather(this, mView, pass);
 }
 
+/// GATHER-0 (fix round, D2). The registration made in `passPreExecute` names
+/// this view's full-resolution irradiance texture and is read by every colour
+/// pass of the same SceneManager; it is valid for exactly ONE pass — the one
+/// this listener runs in front of — so it is taken away the moment that pass
+/// is over. What this removes is a whole class of wrong pictures and two ways
+/// to lose a frame outright (see the declaration).
+void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
+    if (!pass || !mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
+    if (pass->getType() != Ogre::PASS_SCENE) return;
+    const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
+    if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
+    mView->mEngine->mRayTier->releaseGatherBinding(this);
+}
+
 void OgreView::dropReflectState() {
     if (!mReflectListener || !mEngine || !mEngine->mRayTier) return;
     // SUBMIT AND WAIT FIRST. A descriptor set may not be freed while a command
@@ -4160,11 +4199,14 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     // same (world.rayTracing's contract): no gather, no BLAS/TLAS for it. The
     // structures it may already hold were released when the row flipped
     // (OgreScene::setRayTracing → forgetRayQuery).
-    // GATHER-0: THE SPIKE'S SHADER BINDING IS A PER-FRAME, PER-VIEW FACT, and
-    // this is the one place in the frame where no view has drawn yet. Each
-    // gathering view re-registers its own irradiance texture in its
-    // passPreExecute, immediately before the pass that samples it; a view that
-    // does not gather must not inherit the previous one's.
+    // GATHER-0: A BACKSTOP, and only that since the fix round (D2). The
+    // registration is PASS-scoped — `ReflectPassListener::passPosExecute`
+    // takes it away as its own pass ends — so by the time a frame starts the
+    // map is already empty. This line stays because the map is process-wide
+    // state and a frame that begins with it non-empty is a bug this costs
+    // nothing to be immune to. NOTE it is NOT the teardown path: the early
+    // return above (the no-rays switch) skips it, which is why
+    // `RayQueryTier::close()` clears it too (D1).
     FogHlmsListener::clearProbeGather();
     for (OgreScene *s : drawn) {
         if (!s->rayTracingResolved()) continue;
@@ -4286,6 +4328,7 @@ void OgreView::dropReflectState() {}
 // before ray tracing existed.
 ReflectPassListener::~ReflectPassListener() {}
 void ReflectPassListener::passPreExecute(Ogre::CompositorPass *) {}
+void ReflectPassListener::passPosExecute(Ogre::CompositorPass *) {}
 void OgreView::syncReflectListener() {
     // No tier on this platform: the chain is built with `rayReflect` false by
     // construction (the predicate above answers false), so there is nothing to

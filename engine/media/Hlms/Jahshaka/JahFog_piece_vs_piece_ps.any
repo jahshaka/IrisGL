@@ -133,7 +133,12 @@
 			layout( ogre_s@value(jahSkyEnvProbe) ) uniform sampler jahSkyEnvSampler;
 		@end
 	@end
-	@property( jah_probe_gather && !hlms_prepass && !hlms_shadowcaster )
+	// The DECLARATION's guard must be the READ's guard exactly (fix round,
+	// D2): a texture declared where the piece does not read it is a dead
+	// uniform, but a piece that reads one that was not declared is a compile
+	// error that loses the frame. JahProbeGather_piece_ps.any carries the
+	// same six terms and the reason for each.
+	@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 		vulkan_layout( ogre_t@value(jahProbeIrradiance) ) uniform texture2D jahProbeIrradiance;
 	@end
 @end

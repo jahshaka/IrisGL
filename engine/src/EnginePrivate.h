@@ -266,6 +266,19 @@ public:
     /// fact to respect rather than a defect to work around.
     ~ReflectPassListener();
     void passPreExecute(Ogre::CompositorPass *pass) override;
+    /// GATHER-0 (fix round, D2): THE GATHER'S SHADER BINDING IS PASS-SCOPED,
+    /// NOT FRAME-SCOPED, and that is a correctness rule rather than tidiness.
+    /// The registration this listener makes in `passPreExecute` names a
+    /// FULL-RESOLUTION texture belonging to ONE view, and it is keyed by
+    /// SceneManager — so every later colour pass on that manager in the same
+    /// frame would inherit the property, the binding and `vct_disable_diffuse`
+    /// unless it is taken away the moment the pass it was made for is over: a
+    /// second View on the same scene (the Player IS one), an offscreen
+    /// screenshot view, a VR eye whose own gather was declined, a PCC probe
+    /// capture, a planar-reflection arm. Two of those cannot even COMPILE the
+    /// piece (a pass with no `hlms_screen_pos_int` has no `iFragCoord`, one
+    /// with no `needs_env_brdf` has no `envColourD`), which loses the frame.
+    void passPosExecute(Ogre::CompositorPass *pass) override;
     /// The view whose chain this listener rides. Never null while registered.
     OgreView   *mView = nullptr;
     /// ...and its Root, so the destructor can flush without reaching into the
