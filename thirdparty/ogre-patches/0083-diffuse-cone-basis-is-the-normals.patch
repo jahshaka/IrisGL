@@ -1,0 +1,158 @@
+Jahshaka patch 0083 — the diffuse cone basis is a function of the normal.
+
+MEDIA-only patch (one Hlms piece: Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any).
+Studio stages its media from the SOURCE tree (cmake/IncludeOgre.cmake), so every
+tree still has to re-run `irisgl/scripts/build-ogre.sh` to get it — no engine
+COMPILE is needed beyond the staging, which is the whole difference from a
+SOURCE patch. It OVERLAPS patches 0021, 0033, 0045, 0048, 0066 and 0070 in that
+one file: a tree that already carries those hits `build-ogre.sh`'s "Upstream
+changed the patched file" on a re-run, which is the documented per-patch
+reverse-check blind spot and NOT an upstream change. The cure is the recorded
+one — reset the submodule (`git -C irisgl/thirdparty/ogre-next checkout -- . &&
+git -C irisgl/thirdparty/ogre-next clean -fd`) and re-run the script.
+
+WHAT THE USER SEES (owner review 2026-09-18, screenshots 10 and 11): a hard
+DIAGONAL across one flat face of a cube, corner to corner, with a stippled GRAIN
+over it — a flat, uniformly lit, single-material quad shaded as two visibly
+different triangles.
+
+WHY. `applyVoxelConeTracing` traces six diffuse cones in TANGENT SPACE and needs
+a frame to put them in. Upstream handed it the frame that happened to be in
+scope:
+
+  * where the datablock has a normal map (`normal_map`, which every tangented
+    mesh in this tree generates) it is the MATERIAL's TBN — `normalize(
+    inPs.tangent )` and the binormal built from it. That is a per-VERTEX
+    attribute, authored for TEXTURING, and it has three properties that are all
+    fine for its own job and all wrong for this one: it is INTERPOLATED, so it
+    is a different function inside each of a quad's two triangles (they are
+    built from different vertex triples) — the diagonal; it is interpolated PER
+    PIXEL and renormalised, so it rotates continuously across a surface — the
+    grain; and it follows the UV authoring, so the same box turned on its own
+    axis gets a different frame — the same solid shades differently.
+  * everywhere else it is `generateTbn`, whose tangent is `OGRE_ddx( pos )`, and
+    whose own comment in this file says the result "isn't fully stable due to
+    how DDX works and due to floating point precision".
+
+Neither is a defect in ITS OWN job. The defect is that a cone DISTRIBUTION is
+not a tangent-space quantity at all: nothing about where the six cones should
+point depends on how the artist laid out the UVs. And the error is not small,
+because the cone set is not azimuthally symmetric against an ANISOTROPIC voxel
+field — the six directional volumes are sampled by three-axis blends, so
+rotating the frame about the normal changes which volumes each cone reads.
+
+MEASURED (lane CUBE-SHADE-1, 2026-09-21, a 2 m cube on the default ground at
+Epic, 1920x1080, the editor's own grade):
+
+  turning the cube 90 degrees about its own axis — the same solid, in the same
+  place, with the same world geometry and the same face normal:
+
+      before   92.9 % of the face's pixels move, worst 16/255, mean 4.8
+      after     2.96 %                          , worst  1/255  (the dither)
+
+  the high-frequency energy inside one triangle of the face (mean |p - the mean
+  of its two horizontal neighbours|, in display codes):
+
+      before   3.28        GI off (the floor)  0.51
+      after    0.49        GI+AO off           0.54
+
+  i.e. the grain is gone to the dither floor, and the diagonal with it.
+
+WHAT THIS PATCH DOES. `buildConeBasis( geomNormal )` — Frisvad's orthonormal
+basis (JGT 2012), continuous over the whole sphere but for the single direction
+(0,0,-1), where the branch returns a fixed frame instead of dividing by zero.
+The hairy-ball theorem says no continuous tangent field on the sphere exists, so
+SOME direction has to be special; a single POINT is the best available, and it
+was chosen over the branchless (Duff 2017) variant for exactly that reason —
+Duff's sign flip puts the discontinuity on the whole great circle n.z = 0, which
+in an axis-aligned scene contains the floor's normal and two of the four wall
+normals. Measured side by side on spheres, cylinders and a torus the two agree
+over 99.5 % of the frame; where they differ it is at their singular sets.
+
+The material's own TBN is untouched and goes on doing its one job (turning a
+tangent-space normal map into a world-space normal). `generateTbn` had exactly
+one call site, which is this one, and goes with it.
+
+--- a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+@@ -59,19 +59,43 @@
+ 		float travelled;
+ 	};
+ 
+-	/// Generates a TBN matrix when no tangent information is present using
+-	/// DDX information.
+-	/// Should only we used as a fallback as the result isn't fully stable due to how DDX works
+-	/// and due to floating point precision. It is possible for the TBN to change as you zoom-in
+-	/// to the triangle.
+-	INLINE float3x3 generateTbn( float3 geomNormal, float3 pos )
++	/// Jahshaka patch 0083: THE CONE BASIS IS A FUNCTION OF THE NORMAL AND OF
++	/// NOTHING ELSE. `buildConeBasis` returns an orthonormal frame whose third
++	/// axis is the geometric normal, built by Frisvad's method (JGT 2012): it is
++	/// continuous over the whole sphere except at the single direction
++	/// (0, 0, -1), where the branch below hands back a fixed frame rather than
++	/// dividing by zero.
++	///
++	/// The two frames this REPLACES were both unstable, and the instability is
++	/// visible because the diffuse cone set is not azimuthally symmetric against
++	/// an anisotropic voxel field: rotate the frame about the normal and the six
++	/// cones read different axis volumes.
++	///   * the material's TANGENT frame (what the normal_map permutations used):
++	///     a per-VERTEX attribute authored for texturing, interpolated from a
++	///     different vertex triple in each triangle of a quad, so one flat face
++	///     shaded as two triangles with a hard kink along its own diagonal, with
++	///     per-pixel grain across each, and the same box shaded differently after
++	///     being turned on its own axis.
++	///   * the DDX fallback (what the rest used), whose own comment above said it
++	///     "isn't fully stable due to how DDX works and due to floating point
++	///     precision".
++	INLINE float3x3 buildConeBasis( float3 geomNormal )
+ 	{
+-		float3 tangentX = OGRE_ddx( pos.xyz ).xyz;
+-		tangentX = normalize( tangentX );
+-
+-		float3 binormal = cross( geomNormal, tangentX ) ;
+-		float3x3 TBN = buildFloat3x3( tangentX, binormal, geomNormal );
+-		return TBN;
++		float3 tangentX;
++		float3 binormal;
++		if( geomNormal.z < -0.9999999 )
++		{
++			tangentX = float3( 0.0, -1.0, 0.0 );
++			binormal = float3( -1.0, 0.0, 0.0 );
++		}
++		else
++		{
++			float a = 1.0 / ( 1.0 + geomNormal.z );
++			float b = -geomNormal.x * geomNormal.y * a;
++			tangentX = float3( 1.0 - geomNormal.x * geomNormal.x * a, b, -geomNormal.x );
++			binormal = float3( b, 1.0 - geomNormal.y * geomNormal.y * a, -geomNormal.y );
++		}
++		return buildFloat3x3( tangentX, binormal, geomNormal );
+ 	}
+ 
+ 	@foreach( 2, n )
+@@ -790,9 +814,12 @@
+ @end
+ 
+ @piece( applyVoxelConeTracing )
+-	@property( !normal_map )
+-		float3x3 TBN = generateTbn( pixelData.geomNormal, inPs.pos );
+-	@end
++	// Jahshaka patch 0083: the cones get their own frame, the same one for every
++	// pixel of every surface that shares a normal. The outer scope's TBN (the
++	// material's, when it has a normal map) stays exactly what it is and keeps
++	// doing the one job it is for -- turning a tangent-space normal map into a
++	// world-space normal.
++	float3x3 jahConeBasis = buildConeBasis( float3( pixelData.geomNormal ) );
+ 
+ 	@property( use_parallax_correct_cubemaps )
+ 		float3 vctSpecPosVS = float3( 0, 0, 0 );
+@@ -811,7 +838,7 @@
+ 	@property( jah_sky_env_probe )
+ 					 jahEscapeColour, jahEscapeWeight, jahConeWeight,
+ 	@end
+-					 pixelData, inPs.pos, TBN,
++					 pixelData, inPs.pos, jahConeBasis,
+ 				@property( vct_ambient_hemisphere )
+ 					 ambientWD, ambientWS,
+ 				@end

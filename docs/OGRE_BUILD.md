@@ -2048,12 +2048,53 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     including the RATIO that either wrong place for the multiply would fail and
     the workspace generation that makes it a draggable dial).
 
+  0083-diffuse-cone-basis-is-the-normals — THE DIFFUSE CONE BASIS IS A FUNCTION
+    OF THE NORMAL (lane CUBE-SHADE-1, 2026-09-21), MEDIA-only, one file
+    (Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any), OVERLAPS 0021, 0033, 0045,
+    0048, 0066 and 0070 in that file — a tree carrying those resets the
+    submodule before `build-ogre.sh` rather than reading the per-patch reverse
+    check's complaint as an upstream change. The owner's review R8: a hard
+    DIAGONAL across one flat face of a cube, corner to corner, with a stippled
+    grain over it (screenshot 11), on a flat uniformly lit single-material quad.
+    `applyVoxelConeTracing` traced its six diffuse cones in whatever frame
+    happened to be in scope, which for every tangented mesh in this tree is the
+    MATERIAL's TBN — `normalize( inPs.tangent )`, a per-VERTEX attribute
+    authored for TEXTURING and interpolated from a different vertex triple
+    inside each triangle of a quad — and everywhere else `generateTbn`, whose
+    tangent is `OGRE_ddx( pos )` and whose own comment in the file said it "isn't
+    fully stable". A cone DISTRIBUTION is not a tangent-space quantity: nothing
+    about where six cones should point depends on the UV layout. And the error
+    is large, because the cone set is not azimuthally symmetric against an
+    ANISOTROPIC voxel field — rotating the frame about the normal changes which
+    of the six directional volumes each cone reads. Measured on a 2 m cube at
+    Epic, TURNING IT 90 DEGREES ABOUT ITS OWN AXIS (same solid, same place, same
+    face normal): 92.9 % of the face's pixels moved, worst 16/255, mean 4.8 —
+    1/255 (the dither) after. The per-pixel grain inside one triangle fell from
+    3.28 display codes of high-frequency energy to 0.49, which is what the same
+    face measures with GI off. `buildConeBasis( geomNormal )` is Frisvad's
+    orthonormal basis (JGT 2012): continuous over the whole sphere but for the
+    single direction (0,0,-1), where a branch returns a fixed frame instead of
+    dividing by zero. The hairy-ball theorem says some direction has to be
+    special; a POINT is the best available, and it was chosen over the
+    branchless (Duff 2017) variant for exactly that reason — Duff's sign flip
+    puts the discontinuity on the whole great circle n.z = 0, which in an
+    axis-aligned scene contains the floor's normal and two of the four wall
+    normals. Measured side by side on spheres, cylinders and a torus the two
+    agree over 99.5 % of the frame. The material's own TBN is untouched;
+    `generateTbn` had exactly one call site, this one, and goes with it. BOTH
+    SELFTEST HASHES: pose 1 `2aadbc10…` UNCHANGED (the default scene's ground
+    normal (0,1,0) happens to get the same frame from Frisvad as it got from its
+    own affine UV tangent), pose 2 `0f084cec…` -> `87b3e71e…` (63.8 % of pixels
+    by at most 2/255, 34,480 darker against 6,174 brighter; swapping the one
+    media file back reproduces `0f084cec…` byte for byte). Guarded by
+    `scripting.e2e.cube_shade`, whose first half is the 90/180-degree turn.
 
-THE STACK IS 0001-0082 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
+
+THE STACK IS 0001-0083 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078 and 0081 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
