@@ -701,7 +701,11 @@ public:
     bool  ssaoEnabled;
     float ssaoScale;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower;         ///< contrast of the occlusion term
-    float ssaoRadius;        ///< world-space reach, in metres
+    /// World-space reach of the AO march, in METRES, and a CONTACT scale by
+    /// default (0.35 m): the occlusion finer than a Photon voxel, which is the
+    /// only occlusion the cone trace does not already compute. The constructor
+    /// carries the measurement.
+    float ssaoRadius;
     int   smaaPreset;        ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssrMode;           ///< 0 off, 1 half-res rays, 2 HQ
     /// WHICH SAMPLE ANSWERS THE SCREEN-SPACE MARCH'S TWO QUESTIONS — is this a

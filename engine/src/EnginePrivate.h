@@ -2937,7 +2937,10 @@ public:
     // volume and add no light), so previews/thumbnails stay sane in practice.
     bool setGlobalIllumination(const GiParams &p) override;
     bool setGiTuning(const GiParams &p) override;
-    void refreshGlobalIllumination() override;
+    void refreshGlobalIllumination(GiRefreshReason reason) override;
+    /// OPEN_COVER_SPEC §2 A — see the boundary's note. Sticky, per scene.
+    void setLoading(bool loading) override { mSceneLoading = loading; }
+    bool isLoading() const override { return mSceneLoading; }
     GiStatus giStatus() const override;
     /// PHOTON-M3's readback: what the voxel lighting volume holds. Blocks on a
     /// flush and a whole-volume download — a test and tool path (Engine.h).
@@ -3955,6 +3958,18 @@ public:
     void addObjectCounts(ObjectCounts &out) const;
     /// Called by Engine::renderOneFrame before rendering.
     void applyPendingGi();
+    /// The flush proper — what applyPendingGi was before the staged machine.
+    void applyPendingGiFlush();
+    /// The pace of the frame being rendered (OPEN_COVER_SPEC §2.1):
+    /// Engine::renderOneFrame pushes it once per frame, to every scene.
+    void setFramePace(FramePace pace) { mFramePace = pace; }
+    /// Does this scene still owe a stage of a staged arm build? Read by
+    /// Engine::framePaceOwesWork.
+    bool giBuildOwesWork() const;
+    /// Is a deferred read of a texture's PIXELS owed this frame? True while the
+    /// sky's IBL convolution is pending — the one piece of per-frame work that
+    /// reads texture contents and cannot be asked twice (OPEN_COVER_SPEC §2 E).
+    bool iblReadPending() const { return mIblPending; }
     /// Called by Engine::renderOneFrame once the frame's GI work is decided and
     /// before it renders: records how many probes this frame re-captures
     /// (GiStatus::probeCapturesLastFrame). `drawn` = a View draws this scene
@@ -3986,6 +4001,77 @@ private:
     /// region are DROPPED, and a grid left with none is not built at all (the
     /// sky stays the reflection source). See the long note on the definition.
     void buildPcc(const Ogre::Aabb &region);
+
+    // ---- THE ARM, IN STAGES (SPECS/OPEN_COVER_SPEC.md §2 A) ---------------
+    //
+    // WHY THE ARM IS SPLIT AT ALL, and where the split had to go. A world's
+    // FIRST arm build is the single longest thing this engine does on the UI
+    // thread, and until this lane it happened inside ONE frame — measured on
+    // Grand Showroom 2 (quiet box, warm shader cache): 1,025 ms, of which the
+    // cascade chain is 57 ms and the PROBE PLACEMENT is 673 (scout 69, the
+    // placement fit 316, the re-create 19, the closing capture 269). A scene
+    // that keeps NO probes still pays 261 ms of it, every boot and every
+    // create, because the candidates are photographed before they are judged.
+    // So the unit of the split is a STAGE OF THE ARM, and the probe grid is
+    // three of the five; splitting the cascades instead would have moved 57 ms
+    // of a second.
+    //
+    // A `FramePace::Streaming` frame spends exactly one stage and then draws,
+    // so the world appears and its lighting arrives over the next few frames.
+    // A `Complete` frame runs all of them back to back, in this order, which
+    // is the order the un-staged function always ran them in — that is what
+    // keeps every suite, thumbnail, capture and selftest byte-identical.
+    enum class GiBuildStage : unsigned char {
+        Idle,          ///< no staged build in flight
+        ProbeScout,    ///< one photograph of the space, to place the grid in
+        ProbeFit,      ///< upstream's placement over every candidate, then keep/drop
+        ProbeFinish,   ///< clamp, re-create at the real resolution, the closing capture
+        Field          ///< the irradiance field and the volume bookkeeping
+    };
+    /// Where a staged build has got to. `Idle` outside one.
+    GiBuildStage mGiBuildStage = GiBuildStage::Idle;
+    /// True for the duration of ONE `rebuildVct` call that is allowed to park
+    /// after the cascade arm instead of running the probe stages inline.
+    bool mGiStageBuild = false;
+    /// True while a stage is running, so the invalidation funnel does not
+    /// abandon the build the stage is making.
+    bool mInGiStage = false;
+    /// The host says a world of this scene is arriving and none of it is on
+    /// screen yet (Scene::setLoading). No FIRST-TIME arm build while it holds.
+    bool mSceneLoading = false;
+    /// The volume the staged probe stages are relative to — `rebuildVct`'s
+    /// `aabb`, kept because the stages run in later frames.
+    Ogre::Aabb mGiStagedVolume;
+    /// The pace of the frame being rendered, pushed by the engine before the
+    /// per-scene work. `Complete` outside a streaming open.
+    FramePace mFramePace = FramePace::Complete;
+
+    /// Spends ONE stage of a staged arm build. Returns true when the build is
+    /// finished (the stage machine is back to Idle).
+    bool stepStagedGiBuild();
+    /// The probe grid's three stages. Each is `buildPcc`'s corresponding block,
+    /// verbatim; `buildPcc` itself is the three of them in a row.
+    void buildPccScout(const Ogre::Aabb &volume);
+    void buildPccFit();
+    void buildPccFinish();
+    /// Milliseconds since the last phase split; restarts the clock.
+    double pccPhaseSplit();
+    /// What the three probe stages share, because they run in three frames when
+    /// the build is staged. They were locals of the one function.
+    bool                 mPccStageOk = false;     ///< the scout found a buildable grid
+    Ogre::uint32         mPccNumProbes[3] = { 1u, 1u, 1u };
+    Ogre::uint32         mPccProbeRes = 0u;
+    Ogre::PixelFormatGpu mPccProbeFormat = Ogre::PFG_RGBA8_UNORM_SRGB;
+    std::string          mPccWorkspaceName;
+    /// scout, placement fit, keep/drop, re-create, closing capture.
+    double               mPccPhaseMs[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
+    std::chrono::steady_clock::time_point mPccPhaseClock;
+    /// Rewinds a staged build to its first stage because the world moved under
+    /// it. Idempotent; see the definition for why it rewinds and does not stop.
+    void restartStagedProbeBuild();
+    /// Unbinds (if this scene owns the binding) and deletes the probe grid.
+    void destroyProbeGrid();
+
 
     // ---- DDGI: the IrradianceField arm (GI_UNIFIED_SPEC.md §4 P1) ---------
     // Built INSIDE the VCT arm and owned by it: the field cone-traces
@@ -6238,6 +6324,8 @@ public:
     void noteMonitorEvent(const MonitorEvent &event) override;
     void noteHostStage(const std::string &name, float ms) override;
     void setNextFrameCause(FrameCause cause) override;
+    void setNextFramePace(FramePace pace) override;
+    bool framePaceOwesWork() const override;
     bool captureSnapshot(EngineSnapshot &out, const std::string &label,
                          Scene *scene = nullptr) const override;
     /// Attaches (or removes) the monitor's pass listener on every live
@@ -6536,6 +6624,9 @@ private:
     /// queues really did empty; false when the no-progress budget expired, in
     /// which case it has already logged the pending textures by name.
     bool drainTextureStreaming(double *msSpent = nullptr);
+    /// One collection pass with no wait — a streaming frame's half of the drain
+    /// (OPEN_COVER_SPEC §2 E).
+    void collectTextureStreaming();
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir;
     /// MUTABLE because the const readbacks (shadowStatus) report backend
@@ -6589,6 +6680,10 @@ private:
     std::unique_ptr<monitor::FrameMonitor> mMonitor;
     /// Set by the host for the NEXT frame only (Engine::setNextFrameCause).
     FrameCause mNextFrameCause = FrameCause::Driver;
+    /// What the next frame may put off (OPEN_COVER_SPEC §2.1). `Complete` is
+    /// the default and the value every frame is reset to, so only a host that
+    /// asks per frame ever gets anything else.
+    FramePace  mNextFramePace = FramePace::Complete;
 
     /// XID-2: latched the first frame the render system reports a lost device.
     bool mDeviceLost = false;
