@@ -225,6 +225,11 @@ MeshId OgreScene::createMesh(const MeshData &data) {
         // `Ogre::Item *` — the cascade voxeliser — reaches them (ATOM stage 1).
         if (!rec.lodErrors.empty() && rec.mesh)
             mLodErrorsByMesh[rec.mesh.get()] = rec.lodErrors;
+        // SURFACE-CACHE phase 1 -> 2: the same index for the mesh's CARDS. The
+        // list is the bake's, in mesh space, and it is stored whole — the cache
+        // is the only consumer and it re-derives everything world-side per
+        // instance, so nothing here is transformed or filtered.
+        if (!data.cards.empty() && rec.mesh) mCardsByMesh[rec.mesh.get()] = data.cards;
         mMeshes[++mNextMeshId] = std::move(rec);
         return mNextMeshId;
     } JAH_CATCH(mError, 0);
@@ -275,7 +280,7 @@ bool OgreScene::destroyMesh(MeshId id) {
     JAH_TRY {
         invalidateGiCaches();   // BEFORE the mesh dies: IR frees its by-VAO caches now
         for (auto &kv : mNodes) if (kv.second.meshRef == id) detachItem(kv.first, kv.second);
-        if (it->second.mesh) mLodErrorsByMesh.erase(it->second.mesh.get());
+        if (it->second.mesh) { mLodErrorsByMesh.erase(it->second.mesh.get()); mCardsByMesh.erase(it->second.mesh.get()); }
         it->second.mesh.reset();
         Ogre::MeshManager &mm = Ogre::MeshManager::getSingleton();
         if (mm.resourceExists(it->second.name)) mm.remove(it->second.name);

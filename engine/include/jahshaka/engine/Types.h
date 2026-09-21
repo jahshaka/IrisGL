@@ -100,6 +100,76 @@ inline size_t lodLevelForWorldError(const std::vector<float> &errors, float allo
     return level;
 }
 
+/// ONE SURFACE CARD, in the MESH'S OWN SPACE — the engine-facing copy of the
+/// document's `iris::MeshCard` (SURFACE-CACHE-1a).
+///
+/// A card is the DESCRIPTION of a capture, not a capture: where to stand an
+/// orthographic camera, how wide to make it, how deep to let it see and which
+/// LOD level to raster for it. The six axis directions and the (u, v) frame of
+/// each are THE CONTRACT below (`cardAxisDirection` / `cardAxisU` /
+/// `cardAxisV`), which the engine's capture caches as Ogre vectors and the
+/// document restates in `iris::MeshCard`; a suite asserts the two tables agree and that
+/// every frame is right-handed (u x v = the axis) — because the bake, the
+/// capture and the read all parameterise the same rectangle and a disagreement
+/// of one sign is a mirrored card nobody would see until phase 4.
+struct MeshCardDesc {
+    unsigned char axis = 0;       ///< 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z
+    unsigned char lodLevel = 0;   ///< the level whose baked error is under this card's texel
+    Vec3  origin;                 ///< the CENTRE of the card's box, mesh space
+    float halfU = 0.0f;           ///< half-sizes of the rectangle along the axis frame, metres
+    float halfV = 0.0f;
+    float halfDepth = 0.0f;       ///< half the depth range the capture must cover
+};
+
+/// THE SIX AXIS FRAMES — THE CONTRACT, in the one header both halves include.
+///
+/// The bake writes a card's rectangle in this frame; the capture stands its
+/// camera up from it; phase 4's read projects a world hit back through it. Three
+/// readers of one parameterisation is exactly the shape a sign error hides in.
+///
+/// THERE ARE TWO COPIES OF THIS TABLE AND THERE HAVE TO BE: the document half
+/// is `iris::MeshCard::axisDirection/axisU/axisV`, and a document header may not
+/// include an engine one (they are two libraries that never link each other).
+/// What there is instead of one copy is ONE GUARD — `meshbake.cards` includes
+/// both headers and asserts, axis by axis, that the two tables are equal and
+/// that every frame is RIGHT-HANDED (u x v = the axis). A drift between them is
+/// a mirrored card, which is invisible until something reads one.
+///
+/// (THE +Y ROW WAS THE ONE THAT WAS NOT, until SURFACE-CACHE-1b: its v was
+/// (0,0,1) against every other pair's shared v, and `u x v` came out as the
+/// NEGATED axis. A left-handed frame is not a wrong rectangle — the rect is
+/// centred, so no baked byte moved — but it is a reflection, and a capture
+/// camera built from a reflection is not a rotation at all.)
+inline Vec3 cardAxisDirection(unsigned axis) {
+    switch (axis) {
+    case 0: return Vec3{ 1, 0, 0 };
+    case 1: return Vec3{ -1, 0, 0 };
+    case 2: return Vec3{ 0, 1, 0 };
+    case 3: return Vec3{ 0, -1, 0 };
+    case 4: return Vec3{ 0, 0, 1 };
+    default: return Vec3{ 0, 0, -1 };
+    }
+}
+inline Vec3 cardAxisU(unsigned axis) {
+    switch (axis) {
+    case 0: return Vec3{ 0, 0, -1 };
+    case 1: return Vec3{ 0, 0, 1 };
+    case 2: return Vec3{ 1, 0, 0 };
+    case 3: return Vec3{ -1, 0, 0 };
+    case 4: return Vec3{ 1, 0, 0 };
+    default: return Vec3{ -1, 0, 0 };
+    }
+}
+inline Vec3 cardAxisV(unsigned axis) {
+    switch (axis) {
+    case 0:
+    case 1: return Vec3{ 0, 1, 0 };
+    case 2:
+    case 3: return Vec3{ 0, 0, -1 };
+    default: return Vec3{ 0, 1, 0 };
+    }
+}
+
 struct MeshData {
     std::vector<float>    positions;
     std::vector<float>    normals;
@@ -153,6 +223,19 @@ struct MeshData {
     //     it was measured on the picture, not argued).
     std::vector<std::vector<unsigned>> lodIndices;
     std::vector<float>                 lodErrors;
+
+    // ---- SURFACE-CACHE phase 1: the mesh's CARD LIST -----------------------
+    //
+    // Built at IMPORT by MeshBake beside the chain above (SURFACE-CACHE-1a) and
+    // handed across unchanged: the cards are in MESH SPACE, so one list serves
+    // every instance of the mesh at any transform, exactly as the LOD chain
+    // does. Empty for every mesh that gets none — a skinned mesh (its surface
+    // moves, so a card baked against the bind pose is a lie), a line mesh, a
+    // mesh with no usable area, a bake made before cards existed.
+    std::vector<MeshCardDesc> cards;
+    /// The fraction of the mesh's sampled surfels covered by at least one card,
+    /// as the generator measured it (occlusion included). 0 with no cards.
+    float cardCoverage = 0.0f;
 
     size_t vertexCount() const { return positions.size() / 3; }
     size_t triangleCount() const { return indices.size() / 3; }
@@ -2085,6 +2168,40 @@ struct GiParams {
     /// keeps meanwhile is its own question.
     bool      dragMoverChannel = false;
 
+    // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------
+    //
+    // WHY THEY LIVE ON GiParams AND NOT ON A STRUCT OF THEIR OWN: the cache is
+    // a Photon consumer — it captures the surfaces whose hits Photon's rays
+    // will light — and every other Photon dial is here, so a host pushes ONE
+    // configuration and the comparison below decides whether anything must be
+    // rebuilt. `cards` is deliberately in `operator==` (an atlas is allocated
+    // or freed by it); the BUDGET and the RADIUS are deliberately NOT — they
+    // are read per frame by the residency pass, exactly like the three tuning
+    // floats above, so dragging either of them re-captures nothing.
+    /// Off / Auto / On. AUTO is OFF at this phase and says so: nothing reads a
+    /// card until phase 4 (the ray hit), so capturing on a user's machine would
+    /// be pure cost. A suite and the monitor turn it On.
+    GiToggle  cards = GiToggle::Auto;
+    /// THE PER-FRAME TEXEL BUDGET — Lumen's shape (its capture budget is 512 x
+    /// 512 texels a frame) and the number the whole capture cadence is sized
+    /// by. 0 = the tier's own (kCardBudgetTexels below).
+    ///
+    /// WHY TEXELS AND NOT CARDS OR MILLISECONDS: a capture's CPU cost is the
+    /// PASS's fixed cost (SURFACE-CACHE-0 measured 0.042-0.057 ms per card pass
+    /// whatever the card's size), but its GPU cost and its memory traffic are
+    /// the texels — so a budget in cards would let one 128-texel card cost the
+    /// same as one 8-texel card, and a budget in milliseconds would be a wall
+    /// clock, which measures nothing in this engine (CLAUDE.md). Texels are the
+    /// thing that is actually spent, and they convert to milliseconds through a
+    /// number that was measured once.
+    int       cardBudgetTexels = 0;
+    /// THE RESIDENCY RADIUS in metres: an instance further than this from the
+    /// camera holds no pages at all. 0 = the tier's own (kCardResidencyRadius).
+    /// Lumen's equivalent is its 200 m "Lumen Scene View Distance"; ours is a
+    /// tier row because the atlas is a fixed 2k at this phase and the radius is
+    /// what keeps it from overflowing.
+    float     cardResidencyRadius = 0.0f;
+
     /// "Is this the same GI configuration I last pushed?" Exact, like every
     /// other change guard here — and load-bearing rather than cosmetic: a GI
     /// push is a teardown plus a re-voxelize plus (in the hybrid) every probe
@@ -2126,7 +2243,16 @@ struct GiParams {
     /// The three values `Scene::setGiTuning` pushes, compared on their own.
     bool giTuningEqual(const GiParams &o) const {
         return ddgiIntensity == o.ddgiIntensity && ddgiAmbient == o.ddgiAmbient &&
-               rayMarchStepScale == o.rayMarchStepScale;
+               rayMarchStepScale == o.rayMarchStepScale &&
+               // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
+               // They belong in THIS comparison and not in `operator==` for the
+               // same reason the three above do: the residency pass reads them
+               // every frame, so moving either takes effect on the next frame
+               // with nothing torn down — and a host that only pushed on
+               // `operator==` would swallow a radius change entirely, which is
+               // the defect this line exists to prevent.
+               cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
+               cardResidencyRadius == o.cardResidencyRadius;
     }
     /// The cascade table, compared only over the entries in USE — a table
     /// beyond `cascadeCount` is not part of the configuration.
@@ -2205,6 +2331,40 @@ struct GiQualityFacts {
     /// What `GiToggle::Auto` resolves to for the two expensive probe options.
     bool  probeHdrDefault = false;
     bool  probeShadowsDefault = false;
+    // ---- SURFACE-CACHE phase 2 ---------------------------------------------
+    /// THE CARD CACHE'S PER-FRAME TEXEL BUDGET at this tier. Lumen's own
+    /// capture budget is 512 x 512 = 262,144 texels a frame; ours is sized from
+    /// what was MEASURED on this pin, and the measurement is not the one phase
+    /// 0 took.
+    ///
+    /// SURFACE-CACHE-0 read 0.042-0.057 ms per card and sized this at twenty
+    /// cards to the millisecond. SURFACE-CACHE-1b re-measured it in the REAL
+    /// scene manager and read **0.33-0.37 ms per card** — and the difference is
+    /// not the real scene and not the shadow node (both were measured out: the
+    /// figure is flat from 16 items to 64, and recalculating the shadow node
+    /// once per card set instead of once per card moved it by nothing). It is
+    /// that phase 0 drove SIX cards through ONE `CompositorWorkspace::_update`
+    /// and this Component drives ONE, because six cards need six camera poses
+    /// and one update carries one. 0.32 ms of the 0.33 is that update's own
+    /// fixed cost; the five `vkCmdCopyImage` into the atlas are 0.013.
+    ///
+    /// So the budget is three cards to the millisecond, not twenty, and the
+    /// shipped default says so rather than promising a cadence the engine does
+    /// not have. THE HEADROOM IS NAMED AND MEASURED: 0.32 / 6 = 0.053 is
+    /// exactly phase 0's figure, so a capture node with N target passes under
+    /// per-pass execution masks — N cards of ONE instance per update, which
+    /// needs only the one subject bit — would buy back most of the difference
+    /// (~0.09 ms a card at N = 8). That is a lane of its own (the scratch has to
+    /// become a strip and a sub-page card needs an off-centre ortho window), and
+    /// it is a cost lane, not a correctness one.
+    unsigned cardBudgetTexels = 32768u;   // 2 cards a frame ~ 0.7 ms
+    /// THE RESIDENCY RADIUS, metres. Beyond it an instance holds no pages. It
+    /// is a tier row because the atlas is a fixed 2k at this phase: 256 pages
+    /// of 128 texels is about forty six-card sets at full size, so the radius
+    /// is what decides which forty. (Lumen's equivalent dial is 200 m at its
+    /// 4k atlas with a page table and streaming; ours has neither yet, and
+    /// pretending otherwise would just overflow the atlas silently.)
+    float    cardResidencyRadius = 30.0f;
 };
 
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
@@ -2226,6 +2386,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 2;
         f.voxelResolution = 32u;
         f.probeFaceSize   = 128u;
+        f.cardBudgetTexels = 16384u;    // 1 card a frame ~ 0.35 ms
+        f.cardResidencyRadius = 15.0f;
         break;
     case GiQuality::High:
         f.cascades[0] = {  5.0f, 128, 0.0f };
@@ -2239,6 +2401,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
         f.probeHdrDefault     = true;
         f.probeShadowsDefault = true;
+        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 1.0 ms on the measured cost
+        f.cardResidencyRadius = 60.0f;
         break;
     default:   // Medium: the same reach as High, at its own resolution
         f.cascades[0] = {  5.0f, 64, 0.0f };
@@ -2248,6 +2412,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 4;
         f.voxelResolution = 64u;
         f.probeFaceSize   = 256u;
+        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.7 ms
+        f.cardResidencyRadius = 30.0f;
         break;
     }
     // ---- THE VR COLUMN (GiViewProfile, above) ------------------------------
@@ -2273,6 +2439,16 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
             // is the one place a tier's physics lives.
             f.cascades[f.cascadeCount - 1].stepCells = 16.0f;
         }
+        // ...and the card budget halves, for the reason every VR row exists:
+        // the frame is drawn twice and its budget is 11 ms, not 16.
+        f.cardBudgetTexels /= 2u;
+        // ...WITH A FLOOR OF ONE WHOLE PAGE. A budget under 16,384 texels
+        // cannot pay for a single 128-texel card, and the drain lets the first
+        // card of a frame through unconditionally (a budget that could never
+        // buy anything would be a queue that never moves) — so a smaller number
+        // would not be a smaller budget, it would be a budget the code has to
+        // ignore. Low's VR row is the one that reaches it.
+        f.cardBudgetTexels = std::max(f.cardBudgetTexels, 16384u);
     }
     return f;
 }
@@ -2469,6 +2645,87 @@ inline void giResolveCascadeSteps(GiParams::GiCascadeDesc *rows, int count)
         rows[i].stepCells = std::min(steps, giNearFieldMaxStepCells(rows[i]));
     }
 }
+
+// ---- SURFACE-CACHE phase 2: the capture cache's status and its knobs -------
+//
+// THE STATE THE CACHE PUBLISHES. SURFACE-CACHE-0's `SurfaceCardSpikeDesc` /
+// `Result` / `Action` are DELETED with the spike they measured (their three
+// numbers are banked in spikes/surface-cache-0/FINDINGS.md): a measurement
+// surface on the public boundary for one test's benefit is exactly the debt
+// that lane recorded against itself. What replaces it is a STATUS — the same
+// shape every other engine cache publishes — plus the knobs on GiParams.
+
+/// ONE SAMPLE OF ONE CARD TEXEL, read back through an AsyncTextureTicket.
+///
+/// A TEST AND TOOL PATH, never a per-frame one: it flushes the render system's
+/// commands and downloads five one-texel boxes (CLAUDE.md's AsyncTextureTicket
+/// rule — a ticket taken over a target the open command buffer has only
+/// RECORDED into reads recycled VRAM). It is how a suite asks the one question
+/// a picture cannot answer about a card — "is this texel's shadow term
+/// occlusion by ANOTHER object" — and how the atlas is read channel by channel
+/// when a capture looks wrong.
+struct CardSample {
+    bool  ok = false;
+    float albedo[3] = { 0, 0, 0 };      ///< kD, i.e. the datablock's diffuse ALREADY divided by pi
+    float normal[3] = { 0, 0, 0 };      ///< the shading normal in the CARD's own view space
+    float emissive[3] = { 0, 0, 0 };    ///< radiance
+    float depth = 0.0f;                 ///< world units from the card's near plane; 0 = nothing captured there
+    float shadow = 0.0f;                ///< 1 = fully lit by the shadowed lights, 0 = fully occluded
+    float roughness = 0.0f;             ///< the GGX ALPHA (perceptual squared), through patch 0043's range
+};
+
+/// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model
+/// `gi.material_swap` set for the voxel side: a suite drives an edit and asserts
+/// what the renderer SPENT, not what it looks like.
+struct CardCacheStatus {
+    bool     built = false;             ///< the atlas exists
+    /// The atlas as built: `pages` pages of `pageSize` texels a side across the
+    /// five layers, `bytes` of VRAM, `bytesPerTexel` the deliberate format sum.
+    unsigned pageSize = 0u;
+    unsigned pages = 0u;
+    unsigned pagesUsed = 0u;
+    unsigned bytesPerTexel = 0u;
+    unsigned long long bytes = 0ull;
+    /// The emissive layer's format NAME, because it is chosen at runtime from
+    /// what the device can render to (RGB9E5 where it is a colour attachment,
+    /// R11G11B10F where it is not) and the choice must be visible.
+    std::string emissiveFormat;
+    /// Residency: instances inside the radius holding pages, and their cards.
+    unsigned instancesResident = 0u;
+    unsigned cardsResident = 0u;
+    float    residencyRadius = 0.0f;
+    /// The queue: cards waiting for a capture, and the texel budget a frame
+    /// spends on them.
+    unsigned queueLength = 0u;
+    unsigned budgetTexels = 0u;
+    /// What the LAST rendered frame spent: cards captured and texels written.
+    unsigned capturesLastFrame = 0u;
+    unsigned texelsLastFrame = 0u;
+    /// ...and the life of the cache, so a suite can difference across an edit.
+    unsigned long long captures = 0ull;
+    /// Why cards were thrown back on the queue, counted for the life of the
+    /// cache: a moved instance, a material edit, a light change, an arrival.
+    unsigned long long invalidTransform = 0ull;
+    unsigned long long invalidMaterial = 0ull;
+    unsigned long long invalidLight = 0ull;
+    /// CPU milliseconds the last frame's captures cost, measured around the
+    /// capture workspace's own update.
+    float captureMs = 0.0f;
+    /// ...split, because the two halves are different kinds of work and a lane
+    /// that wants to make a capture cheaper has to know which one it is: the
+    /// compositor workspace's own update (the pass set-up, the cull, the Hlms
+    /// pass buffer, the raster) against the five `vkCmdCopyImage` that move the
+    /// page into the atlas.
+    float captureWorkspaceMs = 0.0f;
+    float captureCopyMs = 0.0f;
+    /// PHASE 4's TABLES, as they stand: how many card records the GPU buffer
+    /// describes, and how many item slots the instance buffer is indexed over.
+    /// Nothing binds them yet (the reader is the ray hit at phase 4); they are
+    /// here so a suite can see that the layout the shader will read is being
+    /// maintained and not merely declared.
+    unsigned cardRecords = 0u;
+    unsigned instanceSlots = 0u;
+};
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
 /// "the renderer beats the request" contract as View::sampleCount() and
@@ -2899,6 +3156,9 @@ struct GiStatus {
     /// arm could save anything at this speed: a scroll that is already
     /// majority-dirty has nothing to shift.
     unsigned long long cascadeDirtyMajority = 0;
+    /// THE SURFACE CACHE (SURFACE-CACHE-1b). Zeroed when no cache exists, which
+    /// is every scene with `GiParams::cards` off.
+    CardCacheStatus cards;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------
@@ -3134,75 +3394,13 @@ struct RayQueryStatus {
     float reflectMs = -1.0f;
 };
 
-// ---- SURFACE-CACHE-0: the phase-0 design spike (2026-09-21) ----------------
-//
-// A MEASUREMENT SURFACE, NOT A FEATURE. `SPECS/SURFACE_CACHE_ASSESSMENT.md` §8
-// records three numbers as unmeasured — the per-capture cost on this pin, the
-// per-ray cost of reading a card instead of a voxel, and the picture the swap
-// makes — and §7 phase 0 is the lane that takes them. Every field below exists
-// so a suite can PRINT them; nothing in the renderer reads any of it, and with
-// `Scene::surfaceCardSpike` never called the engine allocates nothing, captures
-// nothing and draws exactly what it drew before.
-
-/// What the spike should do on this call.
-enum class SurfaceCardSpikeAction {
-    Build,    ///< (re)build the card set for `node` at `cardSize` and capture once
-    Capture,  ///< capture `rounds` more times, timing each round
-    ReadOn,   ///< the reflection ray job reads the cards at hits on that mesh
-    ReadOff,  ///< ...and back to the voxels (the A/B's only switch)
-    ArmInFrame,    ///< the capture workspace runs as part of every frame
-    DisarmInFrame, ///< ...and stops
-    Dump,     ///< write the six cards of every layer to `dumpPath`-<layer><n>.png
-    Destroy   ///< free everything the spike holds
-};
-
-struct SurfaceCardSpikeDesc {
-    SurfaceCardSpikeAction action = SurfaceCardSpikeAction::Build;
-    /// The node whose mesh is carded. Its WORLD transform is baked into the
-    /// cards (a card set is per INSTANCE in Lumen too), so a moved instance
-    /// needs a rebuild — which is the invalidation phase 2 would wire.
-    NodeId   node = 0;
-    unsigned cardSize = 128u;   ///< texels a side, per card
-    unsigned rounds = 1u;       ///< capture rounds to time (Capture only)
-    /// Dump only: the path PREFIX the card images are written under.
-    std::string dumpPath;
-};
-
-struct SurfaceCardSpikeResult {
-    bool ok = false;
-    std::string error;
-    unsigned cards = 0u;        ///< always 6 — Lumen's axis-aligned fallback shape
-    unsigned cardSize = 0u;
-    /// Triangles the capture rasterised per card pass (the mesh at the LOD the
-    /// card's texel size picks, when the mesh carries an Atom chain).
-    unsigned triangles = 0u;
-    /// THE NUMBER ARM A OF THE ASSESSMENT TURNS ON: wall milliseconds one
-    /// six-card capture round costs the CPU, and the per-pass figure beside it.
-    float cpuMsPerRound = -1.0f;
-    float cpuMsPerCard = -1.0f;
-    /// ...of which THIS much is the scratch scene's own graph walk, which a
-    /// shipped capture pays once a frame for every card set rather than once
-    /// per set (Root::renderOneFrame does it before any workspace runs). Stated
-    /// apart so the per-capture number is not inflated by it.
-    float graphMsPerRound = -1.0f;
-    /// ...and the same round's GPU milliseconds, when the build carries
-    /// JAH_GPU_TIMESTAMPS and the monitor is recording. Negative = not measured.
-    float gpuMsPerRound = -1.0f;
-    float gpuMsPerCard = -1.0f;
-    /// Bytes of texture the card set holds, resident.
-    unsigned long long vramBytes = 0ull;
-    /// A card texel's size in world units — what "10-20x finer than a voxel"
-    /// is measured against.
-    float texelWorld = 0.0f;
-    /// The TLAS instance custom index the set covers (the ray job's key).
-    unsigned itemSlot = 0u;
-};
-
 // ---------------------------------------------------------------------------
 // GATHER-0 — THE SCREEN-PROBE GATHER'S PHASE-0 SPIKE (2026-09-21).
 //
-// A MEASUREMENT SURFACE, NOT A FEATURE, exactly as the surface-card block
-// above is. `SPECS/SCREEN_PROBE_GATHER_SPEC.md` section 10 records that not
+// A MEASUREMENT SURFACE, NOT A FEATURE. (Its sibling, SURFACE-CACHE-0's card
+// block, stood here until SURFACE-CACHE-1b took the spike into a Component and
+// deleted it — `CardCacheStatus` above is what a shipped cache publishes
+// instead.) `SPECS/SCREEN_PROBE_GATHER_SPEC.md` section 10 records that not
 // one millisecond in its budget table is measured; section 7 phase 0 is the
 // lane that takes them. Every field here exists so a suite can PRINT them.
 // With `Scene::probeGatherSpike` never called the engine allocates nothing,

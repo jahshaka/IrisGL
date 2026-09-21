@@ -124,6 +124,13 @@ namespace Ogre { class CompositorPassSceneDef; class CompositorPassClearDef;
                  class CompositorPassScene; }
 
 namespace jahshaka { namespace engine {
+/// SURFACE-CACHE phase 2 — the capture Component (SurfaceCache.h). It is at
+/// ENGINE scope rather than in `detail` because it is a Component in the pin's
+/// own sense: a class built on the public Ogre API, the shape `VctLighting` and
+/// `IrradianceField` are built in, which a future consumer outside the backend
+/// may hold. Only OgreSurfaceCache.cpp and the scene's own TU need its
+/// definition.
+class SurfaceCache;
 // The backend's own namespace: these types and helpers are shared between the
 // TUs under engine/src and by nothing else (they used to live in one anonymous
 // namespace, when the backend was a single translation unit).
@@ -225,17 +232,15 @@ class OgreEngine;
 /// engine can hold one and the frame can call it; nothing else in this header
 /// knows what a VkAccelerationStructure is.
 class RayQueryTier;
-/// SURFACE-CACHE-0's card set (the phase-0 design spike). Defined in
-/// SurfaceCardSpike.h, which only OgreSurfaceCards.cpp and OgreRayQuery.cpp
-/// include; a raw pointer here for the same reason `mRayTier` is one.
-class SurfaceCardSpike;
-/// True while SURFACE-CACHE-0's capture workspace is executing. The one
-/// question the Hlms listener asks before setting `jah_card_capture`; false in
-/// every frame that is not a spike capture, which is every frame.
+/// True while the surface cache's capture workspace is executing. The one
+/// question the Hlms listener asks before setting `jah_card_capture` — false in
+/// every pass of every frame that is not a card capture, which is what keeps
+/// every other shader in the process byte-identical. Defined in
+/// OgreSurfaceCache.cpp so that no other TU needs the Component's full type.
 bool surfaceCardsCapturing();
-/// The card capture's workspace, for the monitor's listener walk. Defined in
-/// OgreSurfaceCards.cpp so that no other TU needs the spike's full type.
-Ogre::CompositorWorkspace *cardSpikeWorkspace(SurfaceCardSpike *spike);
+/// The card capture's workspace, for the monitor's listener walk. Null until a
+/// scene turns `GiParams::cards` on.
+Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache);
 
 class OgreView;
 
@@ -511,6 +516,31 @@ constexpr Ogre::uint32 kVrHelperBit    = 1u << 8;
 // session is live — which is the channel requirement HAM-1 was given, stated
 // where the bit is defined.
 constexpr Ogre::uint32 kVrMaskBit      = 1u << 9;
+
+// THE CARD CAPTURE'S SUBJECT CHANNEL (SURFACE-CACHE-1b). The EIGHTH bit, and
+// the only one that is not an inversion: it is ADDED to an Item's flags rather
+// than swapped for kVisibleBit, and it is added for the length of ONE capture
+// pass and taken away before that pass's `_update` returns.
+//
+// WHY IT HAS TO EXIST AT ALL. The surface cache captures one instance at a time
+// in the SCENE'S OWN SceneManager — the spike's scratch manager is the wrong
+// shipping shape (a registered manager costs a `updateSceneGraph()` and its
+// barrier every frame for as long as it lives, capturing or not) — so the
+// capture pass has to say "draw THIS object and nothing else". Ogre's
+// visibility test is ANY-BIT-SET, which cannot express an exclusion and cannot
+// express a singleton either; what it CAN express is a channel that exactly one
+// object is in, and that is this bit.
+//
+// WHAT IT DELIBERATELY DOES NOT REACH: the shadow node. A shadow node draws its
+// casters through `shadowCasterChannels(kind)` and not through the pass's mask,
+// so the whole still world keeps casting into the atlas while exactly one
+// object is shaded out of it — which is the entire reason a card's shadow term
+// is occlusion by OTHER objects and not the prepass's constant 1.0.
+//
+// NO OTHER PASS IN THE ENGINE NAMES IT, and none needs to: every view chain's
+// scene pass is born holding every RESERVED bit, so an item wearing this bit
+// for a moment is drawn by them exactly as it was.
+constexpr Ogre::uint32 kCardSubjectBit = 1u << 10;
 
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
@@ -3025,11 +3055,34 @@ public:
     /// OgreRayQuery.cpp — like gatherRayInstances below, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const override;
-    /// SURFACE-CACHE-0 (the phase-0 design spike, 2026-09-21). Defined in
-    /// OgreSurfaceCards.cpp. Null until a test asks for it; with it null the
-    /// scene is byte-for-byte the scene that shipped.
-    bool surfaceCardSpike(const SurfaceCardSpikeDesc &desc,
-                          SurfaceCardSpikeResult &out) override;
+    // ---- SURFACE-CACHE phase 2: the capture cache (SurfaceCache.h) --------
+    /// THE PER-FRAME PASS, called once per drawn scene from renderOneFrame —
+    /// after applyPendingGi (so a material or light edit has already bumped the
+    /// signatures this reads) and before Ogre's own workspaces run. It builds
+    /// the cache on the first frame `GiParams::cards` is on, tears it down when
+    /// the row goes off, and otherwise spends the tier's texel budget.
+    void updateSurfaceCache();
+    bool readCardTexel(NodeId node, unsigned card, float u, float v,
+                       CardSample &out) override;
+    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out) override;
+    bool dumpCardAtlas(const std::string &prefix, std::string &err) override;
+    const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
+    /// The cards the bake authored for an Ogre mesh, or null for a mesh that
+    /// has none (every skinned mesh, every line mesh, every model opened
+    /// without a bake). The same index shape as `mLodErrorsByMesh` and for the
+    /// same reason: all a cache holds is an `Ogre::Item *`.
+    const std::vector<MeshCardDesc> *meshCardsFor(const Ogre::Mesh *mesh) const {
+        auto it = mCardsByMesh.find(mesh);
+        return it == mCardsByMesh.end() ? nullptr : &it->second;
+    }
+    /// ...and its baked LOD errors, so a capture can re-derive the level at the
+    /// card's REAL texel rather than at the bake's nominal 128.
+    const std::vector<float> *lodErrorsFor(const Ogre::Mesh *mesh) const {
+        auto it = mLodErrorsByMesh.find(mesh);
+        return it == mLodErrorsByMesh.end() ? nullptr : &it->second;
+    }
+    unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
+    std::unique_ptr<SurfaceCache> mSurfaceCache;
     /// GATHER-0 (the phase-0 screen-probe gather spike, 2026-09-21). Defined
     /// in OgreRayQuery.cpp. The flag below is the WHOLE of its state on the
     /// scene: with it off the ray tier records no gather dispatch, the Hlms
@@ -3038,8 +3091,6 @@ public:
                           ProbeGatherSpikeResult &out) override;
     const ProbeGatherSpikeDesc &gatherSpikeDesc() const { return mGatherSpike; }
     ProbeGatherSpikeDesc mGatherSpike;
-    SurfaceCardSpike *cardSpike() const { return mCardSpike; }
-    SurfaceCardSpike *mCardSpike = nullptr;
     /// THE TRACED SET, walked out of `mItemNodes` — the scene's own item index,
     /// never `SceneManager::getMovableObjectIterator` (audit C-4: that list is
     /// where the editor's gizmo arrows and light icons come from, and the S3
@@ -3072,9 +3123,6 @@ public:
     /// rather than a new public getter: nothing outside the ray tier has any
     /// business with that counter, and it lives in the same TU as the walk.
     friend class RayQueryTier;
-    /// SURFACE-CACHE-0's card set reaches the scene's item table and its
-    /// SceneManager the same way and for the same reason (a spike lane).
-    friend class SurfaceCardSpike;
     bool reassertGiBinding() override;
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
@@ -4740,6 +4788,11 @@ private:
     /// inserts, destroyMesh and destroy() erase) rather than walked, because the
     /// cascade attach walks every item of the scene.
     std::unordered_map<const Ogre::Mesh *, std::vector<float>> mLodErrorsByMesh;
+    /// SURFACE-CACHE phase 1 -> 2: THE CARDS BY OGRE MESH, the same index and
+    /// for the same reason — a cache holds an `Ogre::Item *` and needs the card
+    /// list the bake authored for the mesh behind it. Only meshes that HAVE
+    /// cards are in it.
+    std::unordered_map<const Ogre::Mesh *, std::vector<MeshCardDesc>> mCardsByMesh;
     /// THE FAR-FIELD PROXY, AS APPLIED (ATOM stage 1): the scene's
     /// `GiParams::cascadeVoxelLod` met with the run-wide diagnostic latch,
     /// resolved once per `setGlobalIllumination` and reported as

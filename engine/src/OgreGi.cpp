@@ -11,6 +11,7 @@
 // every one of them is HISTORY, not a second live design. The `gi*` identifiers
 // keep their names by the rename's own mapping rule.
 #include "EnginePrivate.h"
+#include "SurfaceCache.h"   // SURFACE-CACHE phase 2: giStatus copies the Component's counters
 #include <Vct/OgreVctMaterial.h>
 
 #include <algorithm>
@@ -201,6 +202,19 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         mGi.ddgiIntensity     = p.ddgiIntensity;
         mGi.ddgiAmbient       = p.ddgiAmbient;
         mGi.rayMarchStepScale = p.rayMarchStepScale;
+        // THE CARD CACHE'S TWO PER-FRAME KNOBS. Written and nothing else: the
+        // residency pass reads them at the head of the next frame, so a smaller
+        // radius gives pages back on that frame and a bigger budget captures
+        // more of the queue on it. Nothing is torn down and no card is thrown
+        // back on the queue — a budget is not a change to what a card HOLDS.
+        // ...AND THE ROW ITSELF. `updateSurfaceCache` builds the atlas on the
+        // first frame the row is on and frees it on the first frame it is off,
+        // so a toggle needs nothing from the GI configuration push — putting it
+        // there would tear down and re-voxelise the whole cascade chain to
+        // allocate a texture the next frame allocates anyway.
+        mGi.cards                = p.cards;
+        mGi.cardBudgetTexels     = p.cardBudgetTexels;
+        mGi.cardResidencyRadius  = p.cardResidencyRadius;
         if (mIfd) pushIfdState(mIfdProbeCounts);
         // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
         // moving it changes nothing at all until something else happens to
@@ -819,6 +833,11 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
 GiStatus OgreScene::giStatus() const {
     GiStatus st;
     st.mode = mGi.mode;
+    // THE SURFACE CACHE (SURFACE-CACHE phase 2) — outside the try, because it
+    // touches no Ogre object of its own: it copies counters the Component holds
+    // and leaves the struct's zeroed defaults when there is no cache, which is
+    // every scene with the card row off.
+    if (mSurfaceCache) mSurfaceCache->fillStatus(st.cards);
     JAH_TRY {
         if (mPcc) st.probeCount = int(mPcc->getProbes().size());
         // "Bound" means the process-wide HlmsPbs is sampling THIS scene's arm.
@@ -1202,6 +1221,15 @@ bool OgreScene::giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged,
 }
 
 void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
+    // THE SURFACE CACHE'S ONE INVALIDATION HOOK (SURFACE-CACHE phase 2), and
+    // it is deliberately BEFORE the GI effect test: a card holds a picture of a
+    // surface, so ANY change to what that surface looks like stales it —
+    // including the ones `giMaterialChangeEffect` declines because they cannot
+    // move a VOXEL (a roughness edit, a normal map, a material nothing GI-lit
+    // wears yet). It throws the cards of the instances wearing THAT material
+    // back on the queue and frees no page; the counter model is
+    // `gi.material_swap`'s.
+    if (mSurfaceCache) mSurfaceCache->noteMaterialChanged(id);
     bool bumpVoxels = false;
     if (!giMaterialChangeEffect(id, voxelInputsChanged, bumpVoxels)) return;
     staleProbeGrid(GiStaleReason::Material);
@@ -6750,6 +6778,15 @@ void OgreScene::teardownGi() {
 // re-captures them a few at a time rather than the placement capturing the
 // whole grid inline.
 bool OgreScene::dropGiForShadowRebuild() {
+    // THE SURFACE CACHE'S CAPTURE WORKSPACE HOLDS ONE TOO (SURFACE-CACHE phase
+    // 2), on the SAME probe definition — a shadow-atlas rebuild removes that
+    // definition and creates it again, and a workspace left holding an instance
+    // of the removed one is risk R3's SEGV with a different owner. The cache is
+    // dropped WHOLE rather than re-created here: its atlas is a cache by
+    // definition, the next frame's `updateSurfaceCache` rebuilds it, and the
+    // residency pass re-queues everything inside the radius — which costs the
+    // tier's budget for a few frames and nothing else.
+    if (mSurfaceCache) mSurfaceCache.reset();
     // The shadowed PCC probes hold live CompositorShadowNodes on the probe
     // definition, one workspace each.
     if (!mPcc || !mPccShadowed) return false;
