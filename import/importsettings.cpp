@@ -46,7 +46,7 @@ QByteArray str(const QString &s)
     return out;
 }
 
-struct AxisName { const char *name; float x, y, z; };
+struct AxisName { const char *name = nullptr; float x = 0.0f, y = 0.0f, z = 0.0f; };
 const AxisName kAxes[] = {
     { "+X", 1, 0, 0 }, { "-X", -1, 0, 0 },
     { "+Y", 0, 1, 0 }, { "-Y", 0, -1, 0 },

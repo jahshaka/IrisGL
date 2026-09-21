@@ -90,8 +90,8 @@ enum class CameraExposureMode {
 enum class CameraPostKeyType { Toggle, Enum, Number, Stack };
 
 struct CameraPostKey {
-	const char *id;
-	CameraPostKeyType type;
+	const char *id = nullptr;
+	CameraPostKeyType type = CameraPostKeyType::Toggle;
 };
 
 /// The table, and its size. Stable order: the panel and the verbs report it

@@ -44,7 +44,7 @@ struct MeshMaterialData
     QColor specularColor;
     QColor ambientColor;
     QColor emissionColor;
-    float shininess;
+    float shininess = 0.0f;
 
     QString diffuseTexture;
     QString specularTexture;
@@ -135,13 +135,19 @@ class Mesh
 	IndexBufferPtr idxBuffer;
 
 public:
-    PrimitiveMode primitiveMode;
-    bool usesIndexBuffer;
+    // Triangles because that is what every construction site sets it to
+    // (meshbake.cpp:344, linemeshbuilder.cpp:28, gizmomeshes.cpp:97,
+    // translationgizmo.cpp:495) and what the bake writes back out.
+    PrimitiveMode primitiveMode = PrimitiveMode::Triangles;
+    // `usesIndexBuffer` is written by both constructors and so satisfies
+    // source.member_init without this — but Mesh(aiMesh*) writes it AFTER the
+    // `if (!mesh->HasPositions()) return;` early return (mesh.cpp:89/181), which
+    // is the exact shape the rule's `a helper can grow an early return` is about.
+    bool usesIndexBuffer = false;
 
     BoundingSphere boundingSphere;
 	AABB aabb;
 
-    VertexLayout* vertexLayout;
     int numVerts;
     int numFaces;
 

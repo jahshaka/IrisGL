@@ -19,7 +19,7 @@ class Plane
 {
 public:
     iris::Vec3 normal;
-    float d;
+    float d = 0.0f;
 
     Plane();
     Plane(iris::Vec3 planeNormal, float distance);

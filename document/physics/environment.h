@@ -48,7 +48,7 @@ struct PickingHandle
 {
 	btRigidBody *activeRigidBodyBeingManipulated = nullptr;
 	btTypedConstraint *activePickingConstraint = nullptr;
-	int	activeRigidBodySavedState;
+	int	activeRigidBodySavedState = 0;
 	btVector3 constraintOldPickingPosition;
 	btVector3 constraintHitPosition;
 	btScalar constraintOldPickingDistance;
@@ -128,6 +128,20 @@ public:
 	/// level, and a scene with no character has nothing to collide with.
 	void buildCollisionContent(const iris::SceneNodePtr &rootNode);
 
+	/// THE HAND HANDS THE BODY BACK (PLAY-SELECT-1). A node moved by the editor
+	/// while its simulation runs — the gizmo during play-in-place — is carrying a
+	/// pose Bullet knows nothing about: the body is still where the solver last
+	/// put it, and the first step after the gesture would teleport the object
+	/// back. This writes the NODE's world pose onto its body (and its motion
+	/// state), zeroes the velocities and the accumulated forces and wakes it, so
+	/// the object carries on from where it was put. False when the node has no
+	/// body in this world, which is the ordinary case for a moved prop.
+	///
+	/// It lives here because the rule "no bullet types outside Environment"
+	/// (this header's opening line) is the reason the viewport cannot do it
+	/// itself.
+	bool syncBodyToNode(const iris::SceneNodePtr &node);
+
 	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
 	void restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node);
 
@@ -147,11 +161,14 @@ public:
 	float getWorldGravity();
 
 private:
-    btCollisionConfiguration    *collisionConfig;
-    btDispatcher                *dispatcher;
-    btBroadphaseInterface       *broadphase;
-    btConstraintSolver          *solver;
-    btDynamicsWorld             *world;
+    // createPhysicsWorld() fills all five and destroyPhysicsWorld() empties them,
+    // both from the constructor's body — a helper, so these are nullptr of their
+    // own until it runs (and after a destroy that returns early).
+    btCollisionConfiguration    *collisionConfig = nullptr;
+    btDispatcher                *dispatcher = nullptr;
+    btBroadphaseInterface       *broadphase = nullptr;
+    btConstraintSolver          *solver = nullptr;
+    btDynamicsWorld             *world = nullptr;
 	
 	QHash<int, PickingHandle> pickingHandles;
 

@@ -752,8 +752,8 @@ float OgreView::measuredExposureScale() const {
         // a staging allocation on every one of those. A ticket is not a
         // SharedPtr, so the scope guard is the ownership.
         struct TicketScope {
-            Ogre::TextureGpuManager *tm;
-            Ogre::AsyncTextureTicket *ticket;
+            Ogre::TextureGpuManager *tm = nullptr;
+            Ogre::AsyncTextureTicket *ticket = nullptr;
             bool mapped = false;
             ~TicketScope() {
                 if (!ticket) return;

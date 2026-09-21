@@ -14,7 +14,7 @@ class Property;
 class PostProcess : public QEnableSharedFromThis<PostProcess>
 {
 public:
-    bool enabled;
+    bool enabled = false;
     QString name;
     QString displayName;
 

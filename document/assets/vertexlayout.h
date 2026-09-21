@@ -45,11 +45,11 @@ enum AttribType : int
 
 struct VertexAttribute
 {
-    VertexAttribUsage usage;
+    VertexAttribUsage usage = VertexAttribUsage::Position;
 
-    int type;// AttribTypeFloat, AttribTypeInt, ...
-    int count;//2 for vec2, 3 for vec3, etc
-    int sizeInBytes;
+    int type = 0;// AttribTypeFloat, AttribTypeInt, ...
+    int count = 0;//2 for vec2, 3 for vec3, etc
+    int sizeInBytes = 0;
 };
 
 class VertexLayout
