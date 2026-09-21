@@ -151,7 +151,7 @@ void SurfaceCardSpike::destroyAll() {
 bool SurfaceCardSpike::makeTextures(std::string &err) {
     Ogre::TextureGpuManager *tm =
         Ogre::Root::getSingleton().getRenderSystem()->getTextureGpuManager();
-    struct Spec { Ogre::TextureGpu **dst; const char *name; Ogre::PixelFormatGpu fmt; };
+    struct Spec { Ogre::TextureGpu **dst = nullptr; const char *name = nullptr; Ogre::PixelFormatGpu fmt = Ogre::PFG_UNKNOWN; };
     // THE CARD SET'S FIVE LAYERS. The first two are upstream's prepass G-buffer
     // in the formats our own SSR chain uses for it; the last three are ours.
     const Spec specs[] = {
@@ -385,7 +385,7 @@ bool SurfaceCardSpike::dump(const std::string &prefix, std::string &err) {
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     rs->flushCommands();
     Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
-    struct Layer { Ogre::TextureGpu *t; const char *name; float scale; };
+    struct Layer { Ogre::TextureGpu *t = nullptr; const char *name = nullptr; float scale = 1.0f; };
     // `scale` turns a layer into something an eye can read: the depth is metres
     // and the emissive is radiance, so both are divided by a stated number
     // rather than clipped silently.
