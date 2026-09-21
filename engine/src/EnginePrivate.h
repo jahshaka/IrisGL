@@ -2907,6 +2907,11 @@ public:
     // ---- Lights ----
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
+    /// MIRROR-LAMPSIG-1 — the host's word that a light's WORLD pose moved
+    /// (Engine.h carries the whole reason: an adopted node's transform never
+    /// reaches this interface). One counter bump; safe from any frame.
+    void noteLightsMoved() override { ++mGiLightWriteSerial; }
+    unsigned long long lightWriteSerial() const override { return mGiLightWriteSerial; }
 
     // ---- Decals (DECALS_SPEC.md; impl in OgreDecals.cpp) ----
     bool setDecal(NodeId id, const DecalDesc &d) override;

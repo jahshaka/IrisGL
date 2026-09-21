@@ -735,6 +735,36 @@ public:
     /// KEPT as the explicit counterpart of setLight: a node may stop being a light
     /// without being removed (the document changes a node's type in place).
     virtual bool        removeLight(NodeId) = 0;
+    /// A LIGHT MOVED AND ONLY THE HOST CAN KNOW IT (MIRROR-LAMPSIG-1).
+    ///
+    /// The renderer's voxel light injection reads each light's DERIVED pose at
+    /// the moment it runs, and two of its optimisations are keyed on "have the
+    /// lights changed since the injection I am about to trust?" — the in-motion
+    /// light tick, which skips a cascade a rebuild already injected with the
+    /// same lights, and the incremental settle, which restarts when a light
+    /// moves under it. Both read `lightWriteSerial()`.
+    ///
+    /// That serial can see `setLight` and a transform written THROUGH this
+    /// interface. It cannot see the case that matters most: since the scene
+    /// graph adoption the DOCUMENT's nodes ARE the renderer's nodes
+    /// (SPECS/SCENEGRAPH_SPEC.md D2), so a lamp that moves — dragged, carried
+    /// by a parent, driven by an animation — writes its transform straight into
+    /// the scene graph and this interface is never called at all: the light's
+    /// description did not change, so nothing is pushed, and the renderer's own
+    /// pose is correct while its serial stands still. The injection is then
+    /// skipped, or absorbed by a settle that believes it is finished, and the
+    /// bounce keeps the pose the lamp had at the last rebuild.
+    ///
+    /// So the mirror — the one thing that can see a document pose and a
+    /// renderer at the same time — says it. Idempotent and cheap (one counter);
+    /// call it on any frame in which any light's WORLD transform changed. A
+    /// spurious call costs one extra cascade injection on the next light tick;
+    /// a missing one costs a stale bounce for the length of a gesture.
+    virtual void        noteLightsMoved() = 0;
+    /// The counter `noteLightsMoved` (and every light write through this
+    /// interface) advances: monotonic, only ever compared for equality.
+    /// DIAGNOSTIC — the suites assert that a lamp that moved advanced it.
+    virtual unsigned long long lightWriteSerial() const = 0;
 
     // ---- Decals (DECALS_SPEC.md): a node may carry one projected-texture decal.
     // A decal is an oriented box that overwrites base colour / roughness /
