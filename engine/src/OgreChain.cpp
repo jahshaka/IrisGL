@@ -2012,6 +2012,60 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 }
 
 // ---------------------------------------------------------------------------
+// THE CLEAR-ONLY CHAIN OF A SCENE-LESS VIEW (lane STALE-VIEW-1). The rationale
+// is on the declaration; what follows is only what is specific to the graph.
+//
+// TWO PASSES, and the split is deliberate. The clear is a PASS_CLEAR and not a
+// scene pass with LoadAction::Clear, because there is no scene to give a scene
+// pass: on the window the clear's renderArea IS the whole attachment on Vulkan
+// (OgreVulkanRenderPassDescriptor.cpp:945), which is exactly what a background
+// wants. The second pass is a PASS_SCENE over the OVERLAY queues only — the
+// v1 overlay set is drawn by a RenderQueueListener on a SceneManager, so the
+// HUD needs one pass with one camera even with nothing in the world. Its scene
+// manager is the engine's blank one (OgreEngine::blankSceneManager): empty, no
+// worker threads, no Forward+, updated in the frame loop like any other scene
+// whose workspace runs.
+//
+// The visibility mask, the render-queue range and the store action are the
+// overlay pass' from the passthrough shape above, for the same reasons written
+// there; this chain has no letterbox, no inset and no helpers because it has no
+// picture for them to be part of.
+void buildBlank(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+                const Colour &background, bool overlays,
+                std::vector<std::string> &nodeDefsOut) {
+    const std::string nodeName = workspaceDef + "/Blank";
+    Ogre::CompositorNodeDef *n = cm->addNodeDefinition(nodeName);
+    nodeDefsOut.push_back(nodeName);
+    n->addTextureSourceName(kTargetChannel, 0, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
+    n->setNumTargetPass(1);
+    Ogre::CompositorTargetDef *t = n->addTargetPass(kTargetChannel);
+    t->setNumPasses(2);
+    {
+        auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+        c->setAllClearColours(toOgre(background));
+        c->setAllLoadActions(Ogre::LoadAction::Clear);
+        // Store, not StoreOrResolve: the overlay pass below still has to render
+        // into these samples (the note on kMultiWorkspaceStore).
+        c->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        c->mStoreActionDepth     = Ogre::StoreAction::Store;
+        c->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+        c->mProfilingId = "Jahshaka blank clear";
+    }
+    {
+        auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        p->mStoreActionColour[0] = kMultiWorkspaceStore;
+        p->mStoreActionDepth     = Ogre::StoreAction::DontCare;
+        p->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+        p->mFirstRQ = kOverlayRenderQueue;
+        p->mLastRQ  = 255u;
+        p->mVisibilityMask  = overlayVisibilityMask();
+        p->mIncludeOverlays = overlays;
+        p->mProfilingId = "Jahshaka blank overlays";
+    }
+    Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
+    workDef->connectExternal(0, nodeName, 0);
+}
+
 // THE VR MIRROR (VR_SPEC §4.3). See the declaration in EnginePrivate.h and the
 // material's own header for why this is a quad and not a blit.
 namespace {

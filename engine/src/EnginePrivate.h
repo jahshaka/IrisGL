@@ -271,6 +271,19 @@ public:
     /// fact to respect rather than a defect to work around.
     ~ReflectPassListener();
     void passPreExecute(Ogre::CompositorPass *pass) override;
+    /// GATHER-0 (fix round, D2): THE GATHER'S SHADER BINDING IS PASS-SCOPED,
+    /// NOT FRAME-SCOPED, and that is a correctness rule rather than tidiness.
+    /// The registration this listener makes in `passPreExecute` names a
+    /// FULL-RESOLUTION texture belonging to ONE view, and it is keyed by
+    /// SceneManager — so every later colour pass on that manager in the same
+    /// frame would inherit the property, the binding and `vct_disable_diffuse`
+    /// unless it is taken away the moment the pass it was made for is over: a
+    /// second View on the same scene (the Player IS one), an offscreen
+    /// screenshot view, a VR eye whose own gather was declined, a PCC probe
+    /// capture, a planar-reflection arm. Two of those cannot even COMPILE the
+    /// piece (a pass with no `hlms_screen_pos_int` has no `iFragCoord`, one
+    /// with no `needs_env_brdf` has no `envColourD`), which loses the frame.
+    void passPosExecute(Ogre::CompositorPass *pass) override;
     /// The view whose chain this listener rides. Never null while registered.
     OgreView   *mView = nullptr;
     /// ...and its Root, so the destructor can flush without reaching into the
@@ -1218,6 +1231,37 @@ struct ChainHandles {
 void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
            const ChainDesc &desc, std::vector<std::string> &nodeDefsOut,
            ChainHandles &handlesOut);
+/// THE CLEAR-ONLY CHAIN A VIEW OWNS AFTER ITS FIRST SCENE IS TAKEN AWAY (lane
+/// STALE-VIEW-1).
+///
+/// AFTER, and the word is exact: a view that has NEVER been bound has no
+/// workspace of any kind — `createView` attaches none, and the seam only ever
+/// runs when a scene arrives or leaves. That is deliberate and it is what
+/// thumbnails, previews and every pixel suite want: they are created, given a
+/// scene and rendered, and a clear before their first bind would be a frame of
+/// somebody's background in a picture nobody asked to have one. Studio has no
+/// path that shows a never-bound view, so the weaker invariant is the whole
+/// story today.
+///
+/// One clear to `background` and the overlay pass, and nothing else — there is
+/// no scene to draw, so there is no scene pass, no shadow node and no effect.
+///
+/// It exists because a View with NO WORKSPACE PRESENTS NOTHING, and a window
+/// that presents nothing keeps whatever frame the X server was last given.
+/// Measured on the rig against the unmodified base (spikes/stale-view-1/): in a
+/// load IN PLACE that is the one to two frames between the teardown and the
+/// moment the host's panel rebuild takes the window off screen — the ~700 ms
+/// the user then looks at is the host's own watermark over an unmapped window,
+/// which no engine can reach. The bigger half is the other defect with the same
+/// cause: the "No world open" panel, raised by every close, changed not one
+/// pixel.
+///
+/// `overlays` is the view's own entitlement (OgreView::overlaysAllowed) — the
+/// same gate the scene chain's overlay pass takes, so a view that may not draw
+/// the HUD does not start drawing it because its scene went away.
+void buildBlank(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+                const Colour &background, bool overlays,
+                std::vector<std::string> &nodeDefsOut);
 /// The inner rectangle for a letterboxed view: the largest `aspect`-shaped
 /// rectangle centred in a target of `targetAspect`. Normalised coordinates.
 void letterboxRect(float aspect, float targetAspect, float inner[4]);
@@ -2392,6 +2436,22 @@ public:
     static void        setSkyEnv(const Ogre::SceneManager *sm, const SkyEnvState &state);
     static SkyEnvState skyEnv(const Ogre::SceneManager *sm);
 
+    /// GATHER-0 — THE SCREEN-PROBE GATHER SPIKE'S PIXEL SIDE (2026-09-21).
+    ///
+    /// The ray tier registers the full-resolution irradiance texture it has
+    /// just written, immediately before the pass that shades with it; this
+    /// listener turns that into a PASS property (`jah_probe_gather`), a
+    /// claimed extra texture slot (`jahProbeIrradiance`) and one binding — the
+    /// same three-hook route the sky's env slot above rides, because there is
+    /// no other route into a PBS pass from outside.
+    ///
+    /// Registered PER SCENE MANAGER and cleared at the head of every frame
+    /// (OgreEngine::updateRayQuery), so a view that does not gather cannot
+    /// inherit the binding of one that does.
+    static void setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance);
+    static void clearProbeGather();
+    static Ogre::TextureGpu *probeGather(const Ogre::SceneManager *sm);
+
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
     /// because this may be called from any thread and must be a pure function
@@ -2414,6 +2474,11 @@ private:
     static Ogre::TextureGpu             *sPassSkyCube;                 // render thread only
     static const Ogre::HlmsSamplerblock *sPassSkySampler;              // render thread only
     static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
+    /// GATHER-0's registration and the pass's copy of it — the same
+    /// set-together-or-not-at-all rule as the sky's pair above.
+    static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
+    static Ogre::TextureGpu             *sPassProbeGather;             // render thread only
+    static const Ogre::HlmsSamplerblock *sPassProbeGatherSampler;      // render thread only
     static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static unsigned       sLightCountMismatches;                       // render thread only
     static unsigned       sMismatchLogged;                             // render thread only
@@ -3018,6 +3083,14 @@ public:
     }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     std::unique_ptr<SurfaceCache> mSurfaceCache;
+    /// GATHER-0 (the phase-0 screen-probe gather spike, 2026-09-21). Defined
+    /// in OgreRayQuery.cpp. The flag below is the WHOLE of its state on the
+    /// scene: with it off the ray tier records no gather dispatch, the Hlms
+    /// listener sets no property and no pixel moves.
+    bool probeGatherSpike(const ProbeGatherSpikeDesc &desc,
+                          ProbeGatherSpikeResult &out) override;
+    const ProbeGatherSpikeDesc &gatherSpikeDesc() const { return mGatherSpike; }
+    ProbeGatherSpikeDesc mGatherSpike;
     /// THE TRACED SET, walked out of `mItemNodes` — the scene's own item index,
     /// never `SceneManager::getMovableObjectIterator` (audit C-4: that list is
     /// where the editor's gizmo arrows and light icons come from, and the S3
@@ -5453,7 +5526,13 @@ public:
     NodeId cameraNode() const override { return mCameraNode; }
 
     /// Unbinds the scene: workspace and camera go, the scene itself survives.
-    void detachScene();
+    /// `takeBlank` = "and put the clear-only chain up in its place", which is
+    /// what a scene-less view owns (chain::buildBlank). FALSE from destroy()
+    /// only: this view is going away, and building a two-pass chain — and, in a
+    /// process that never lost a scene, the engine's blank SceneManager — to
+    /// tear it down one line later is work nobody can see. In particular it
+    /// kept ~OgreEngine from creating a SceneManager inside its own destructor.
+    void detachScene(bool takeBlank = true);
 
     void setCamera(const CameraDesc &c) override;
     void setEnabled(bool on) override;
@@ -5562,7 +5641,26 @@ public:
     bool giPriority() const { return mGiPriority; }
     /// Drops the live workspace (detaching its listeners first). Safe when
     /// there is none; returns whether one was actually dropped.
+    ///
+    /// INCLUDES THE CLEAR-ONLY WORKSPACE (lane STALE-VIEW-1): a scene-less view
+    /// owns one, it targets the same texture, and every caller of this pair is
+    /// about to change that texture or the definitions behind it — so both
+    /// kinds go through the one seam and the `hadWorkspace` answer means the
+    /// same thing for both.
     bool detachWorkspace();
+    /// THE CLEAR-ONLY WORKSPACE of a view with no scene bound (chain::buildBlank
+    /// says why it exists). Built by attachWorkspace when there is no scene,
+    /// dropped by detachWorkspace and replaced by the scene chain at the next
+    /// bind. Definitions are rebuilt with it, so a background change carries.
+    bool attachBlankWorkspace();
+    bool detachBlankWorkspace();
+    /// Removes the clear-only chain's definitions. Called from destroy() only —
+    /// every other path rebuilds them through attachBlankWorkspace.
+    void destroyBlankChain();
+    /// Is this view drawing its clear-only workspace THIS frame? Read by
+    /// OgreEngine::renderOneFrame, which must update the blank scene manager in
+    /// the same frame its workspace runs (the rule stated in that loop).
+    bool drawsBlank() const { return mEnabled && mBlankWorkspace != nullptr; }
     /// Compositor listeners this view re-attaches to every workspace it builds.
     /// The view does NOT own them: register at setup, unregister before the
     /// listener dies. Registering twice is a no-op.
@@ -5575,6 +5673,7 @@ public:
     unsigned workspaceGeneration() const override;
 
     unsigned long long framesPresented() const override;
+    unsigned long long blankFramesPresented() const override;
     bool warmUpShaders() override;
     /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts
     /// this frame if the view was actually part of it (enabled + workspace +
@@ -5850,6 +5949,15 @@ private:
     Ogre::Camera              *mCamera    = nullptr;
     Ogre::CompositorWorkspace *mWorkspace = nullptr;
     OgreScene                 *mScene     = nullptr;
+    /// The clear-only workspace, its camera on the engine's blank scene manager
+    /// and its definitions (chain::buildBlank). Live exactly while no scene is
+    /// bound; the camera is created once and outlives the workspace rebuilds.
+    Ogre::CompositorWorkspace *mBlankWorkspace = nullptr;
+    Ogre::Camera              *mBlankCamera    = nullptr;
+    std::string                mBlankWorkspaceDef;
+    std::vector<std::string>   mBlankNodeDefs;
+    /// @see View::blankFramesPresented.
+    unsigned long long         mBlankFramesPresented = 0;
     std::string                mName, mWorkspaceDef;
     /// Every node definition the chain builder made for this view, in creation
     /// order. Was a single std::string while the chain was one node — a
@@ -6086,6 +6194,10 @@ public:
 
     Scene *createScene(const std::string &name, unsigned workerThreads = 0) override;
     void *documentGraphScene() override;
+    /// The blank scene manager (@see mBlankScene), created on the first call.
+    /// Null only when the Hlms is not registered yet, which cannot happen on
+    /// the path that asks: a View exists by then.
+    Ogre::SceneManager *blankSceneManager();
     bool  isHeadless() const override { return mHeadless; }
 
     void destroyScene(Scene *scene) override;
@@ -6540,6 +6652,12 @@ private:
     /// The document's staging scene manager (SPECS/SCENEGRAPH_SPEC.md D2).
     /// Owned here so that it dies with the engine, before the Root.
     Ogre::SceneManager *mDocumentScene = nullptr;
+    /// THE BLANK SCENE MANAGER (lane STALE-VIEW-1): the empty world every
+    /// scene-less View's clear-only workspace runs against. One per process and
+    /// created on demand, in the shape mDocumentScene is created in and for the
+    /// same reason — a compositor workspace needs a SceneManager and a camera,
+    /// and nothing in here is ever culled, lit or drawn. @see blankSceneManager.
+    Ogre::SceneManager *mBlankScene = nullptr;
 #ifdef __linux__
     /// The host's X11 `Display*`, kept opaque (see X11Handle) — this TU never
     /// dereferences it, it only hands it back to Ogre.

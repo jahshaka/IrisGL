@@ -2196,13 +2196,36 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     `perf.epic_steady_state` / `perf.drag_mirror_room` / `perf.hide_soak` pass.
     BOTH SELFTEST HASHES MOVE, by design — the escape estimate is a different number everywhere.
 
+  0085-movable-object-lod-level-is-settable — A PASS MAY CHOOSE THE MESH LOD
+    LEVEL IT DRAWS (lane SURFACE-CACHE-1b, 2026-09-21), SOURCE, one file
+    (OgreMain/include/OgreMovableObject.h), one public inline setter beside
+    upstream's own `resetMeshLod()`. The surface cache captures one card per
+    compositor pass and the level it must raster is not a screen size: it is
+    the coarsest baked level whose simplifier error is below THE CARD'S OWN
+    TEXEL — the ATOM rule spent at a texel instead of at a pixel, the same
+    `lodLevelForWorldError` the cascade voxeliser spends at a cell through
+    0064. Upstream derives `mCurrentMeshLod` only through
+    `LodStrategy::lodUpdateImpl` / `SceneManager::updateAllLods`, which answers
+    a different question, and offers a caller exactly two doors: a reset to 0
+    and a read-only getter. The alternatives were a derived-class reach-in at a
+    protected member or an ortho camera with a hand-picked LOD bias chosen so
+    that upstream's screen-size formula happens to land on the level we want —
+    a workaround that lives only while the pin's internals stay put, and a lie
+    about what the number means. Nothing in the pin calls it; a pass whose
+    `mUpdateLodLists` is true recomputes the level and overwrites it, which is
+    what restores a view's own level on the same frame a capture borrowed the
+    object (the capture pass sets `mUpdateLodLists` false for the same reason).
+    OVERLAPS 0075 in that file (the LOD hysteresis band's `mHysteresisLod`), so
+    a tree carrying 0075 reads the usual per-patch reverse-check complaint and
+    resets the submodule before `build-ogre.sh` rather than reading it as an
+    upstream change.
 
-THE STACK IS 0001-0084 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
+THE STACK IS 0001-0085 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083/0084) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078 and 0081 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078, 0081 and 0085 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

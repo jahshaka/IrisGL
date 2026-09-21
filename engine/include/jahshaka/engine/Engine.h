@@ -934,6 +934,23 @@ public:
         err = "no surface cache in this build";
         return false;
     }
+    /// GATHER-0 — the phase-0 SCREEN-PROBE GATHER spike's one door
+    /// (2026-09-21, SPECS/SCREEN_PROBE_GATHER_SPEC.md section 7 phase 0).
+    ///
+    /// NOT A FEATURE AND NOT A TIER. Armed, it places one probe per N pixels
+    /// of every view this scene draws, traces 64 hardware rays per probe into
+    /// the ray tier's own structures, and writes the result into the diffuse
+    /// GI slot of the pixel shader in place of the cone/field answer — so a
+    /// suite can measure what SPECS/SCREEN_PROBE_GATHER_SPEC.md section 10
+    /// records as unmeasured: the trace's GPU cost, the integrate's, and the
+    /// picture the swap makes. Disarmed (the default, and what every build
+    /// that never calls this does) nothing is allocated, no dispatch is
+    /// recorded, no shader property is set and no pixel moves.
+    virtual bool probeGatherSpike(const ProbeGatherSpikeDesc &, ProbeGatherSpikeResult &out) {
+        out.ok = false;
+        out.error = "no probe-gather spike in this build";
+        return false;
+    }
     /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
     /// readback of one cascade's light volume: its peak, its mean over lit
     /// voxels and how many voxels sit on the storage format's top bin.
@@ -1605,6 +1622,24 @@ public:
     /// editor's loading cover (src/viewport/viewportcover.h) is on screen until
     /// this passes its threshold.
     virtual unsigned long long framesPresented() const = 0;
+    /// THE OTHER HALF OF THAT QUESTION (lane STALE-VIEW-1): how many frames this
+    /// View has drawn AND presented with NO SCENE BOUND — its background cleared
+    /// and whatever the host asked the HUD to draw over it, and nothing else.
+    ///
+    /// A View with no scene used to present NOTHING, so a window kept the last
+    /// frame it was given — the world that had just been torn down — and the
+    /// "No world open" panel a host raises over an empty viewport changed not
+    /// one pixel. A View whose scene has been TAKEN AWAY now owns a clear-only
+    /// workspace, and this counts what it puts on screen. (Taken away, not
+    /// "never bound": a view that has never had a scene has no workspace at
+    /// all, which is what makes a thumbnail's first frame its own — see
+    /// chain::buildBlank in the engine.)
+    ///
+    /// Monotonic for the life of the View (a scene bind does NOT reset it — the
+    /// question a caller asks across a load is "did the teardown reach the
+    /// screen", which is a difference across the load, not a state). It is the
+    /// number that says a load in place never showed the previous world.
+    virtual unsigned long long blankFramesPresented() const = 0;
     /// HOW MANY TIMES THIS VIEW'S PER-FRAME CHAIN GLOBALS HAVE BEEN PUSHED
     /// (lane EYE-GRADE-1's fix round; the mechanism is one workspace listener
     /// per view, firing immediately before that view's passes execute).

@@ -3387,6 +3387,66 @@ struct RayQueryStatus {
     float reflectMs = -1.0f;
 };
 
+// ---------------------------------------------------------------------------
+// GATHER-0 — THE SCREEN-PROBE GATHER'S PHASE-0 SPIKE (2026-09-21).
+//
+// A MEASUREMENT SURFACE, NOT A FEATURE. (Its sibling, SURFACE-CACHE-0's card
+// block, stood here until SURFACE-CACHE-1b took the spike into a Component and
+// deleted it — `CardCacheStatus` above is what a shipped cache publishes
+// instead.) `SPECS/SCREEN_PROBE_GATHER_SPEC.md` section 10 records that not
+// one millisecond in its budget table is measured; section 7 phase 0 is the
+// lane that takes them. Every field here exists so a suite can PRINT them.
+// With `Scene::probeGatherSpike` never called the engine allocates nothing,
+// dispatches nothing, sets no shader property and draws exactly what it drew
+// before — both selftest hashes, measured.
+
+struct ProbeGatherSpikeDesc {
+    /// Arm or disarm. Disarming frees the atlases at the next safe point.
+    bool on = false;
+    /// Pixels per probe, both axes. 16 is the spec's High grid (8,160 probes
+    /// at 1080p); 8 is its Epic grid (4x the probes).
+    unsigned probeStride = 16u;
+    /// Rays each probe traces over its hemisphere. At most 64 (one per thread
+    /// of the trace's workgroup) and best left at a square number: the
+    /// directions are stratified over an 8x8 grid of the unit square.
+    unsigned raysPerProbe = 64u;
+    /// The near field's reach in world units. 0 = derive it from the cascade
+    /// chain's outermost box, which is what the reflection trace does.
+    float rayLength = 0.0f;
+    /// THE DETERMINISM ARM. The sample sequence's only input is a hash of
+    /// (probe cell, ray, frame index); holding the frame term makes two
+    /// consecutive frames of a still scene byte-identical, which is the
+    /// property section 5 asks a suite to assert.
+    bool freezeFrameIndex = false;
+    /// THE FAR-TERM ARM (section 10 item 6). With it set, a ray that finds
+    /// nothing inside `rayLength` reads the sky directly instead of the outer
+    /// cascades' voxel radiance at its end point — the A/B that prices what
+    /// the far term is worth to the picture.
+    bool farTermOff = false;
+};
+
+struct ProbeGatherSpikeResult {
+    bool ok = false;
+    std::string error;
+    bool armed = false;
+    unsigned probesX = 0u, probesY = 0u, probes = 0u;
+    unsigned raysPerProbe = 0u;
+    unsigned long long raysPerFrame = 0ull;
+    /// The view the numbers below were measured on.
+    unsigned targetW = 0u, targetH = 0u;
+    /// GPU milliseconds, per stage, read back several frames late through the
+    /// tier's own timestamp pool (negative = not measured yet).
+    float traceMs = -1.0f;
+    float integrateMs = -1.0f;
+    /// ...and the CPU cost of RECORDING both (the descriptor rewrite, the
+    /// parameter fill, the transitions), which is what a frame pays on the
+    /// thread that draws.
+    float cpuMs = -1.0f;
+    /// Bytes of texture the spike holds resident: the probe atlas plus the
+    /// full-resolution irradiance target.
+    unsigned long long vramBytes = 0ull;
+};
+
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
 /// (PHOTON-M3), never a per-frame path: it flushes the render system's
 /// commands and blocks on a texture download of the whole 3D volume.

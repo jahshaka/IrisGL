@@ -144,7 +144,7 @@ namespace
 // re-bakes once, on purpose, by the BAKEKEY-1 rule — the bake's OUTPUT changed,
 // so the version is bumped rather than the commit carrying `bake-output:
 // unchanged`.
-constexpr int kFormatVersion = 10;
+constexpr int kFormatVersion = 11;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
