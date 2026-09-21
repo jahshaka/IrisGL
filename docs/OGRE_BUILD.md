@@ -2049,12 +2049,38 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     the workspace generation that makes it a draggable dial).
 
 
-THE STACK IS 0001-0082 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
-count under thirdparty/ogre-patches/ is the truth and this document tracks it).
+  0084-warm-up-skips-a-material-this-process-lacks — A WARM-UP SET WARMS WHAT
+    IT RECORDED OR NOTHING (lane ENGINE-SMALL-C, WARMUPSET-1, 2026-09-21),
+    SOURCE-only, one file (OgreMain/src/OgreVertexFormatWarmUp.cpp), no overlap
+    with any other patch. `VertexFormatWarmUpStorage::createWarmUp` applied each
+    recorded MATERIAL NAME through `Renderable::setDatablock( IdString )`, which
+    resolves via `HlmsManager::getDatablock()` — and that logs LML_CRITICAL and
+    returns the DEFAULT datablock for a name it cannot find. A recorded material
+    that is absent therefore warmed a DIFFERENT permutation and was counted as a
+    success. Measured on this tree: seven "Can't find HLMS datablock material"
+    lines and eight shaders compiled from the default datablock on EVERY warm
+    launch, none of them ever bound (the names decode to `pbr_18`, `unlit_21`,
+    `outline_31` — this host's per-process datablock counter). Now every name is
+    resolved with `getDatablockNoDefault()` first; a missing one is skipped and
+    counted, an entry whose materials are all missing is skipped BEFORE its
+    dummy buffers are built (it would otherwise leak its VAO and vertex
+    buffers), `destroyWarmUp` takes its SceneManager from any entry that spawned
+    something rather than only the last one, and a call that spawned nothing
+    frees the dummy skeleton while it still has a SceneManager to free it with.
+    One summary line replaces the per-material CRITICAL spam. NOT FIXED HERE:
+    with per-process datablock names a Jahshaka warm-up set can warm nothing at
+    all — the sound fix is host-side (record the material's recipe beside the
+    set, or give datablocks names that mean the same thing next session).
+    Moves no pixel; both selftest hashes unchanged.
+
+
+THE STACK IS 0001-0084 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
+count under thirdparty/ogre-patches/ is the truth and this document tracks it;
+0083 is claimed by the CUBE-SHADE-1 lane, which lands beside this one).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078 and 0081 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078, 0081 and 0084 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

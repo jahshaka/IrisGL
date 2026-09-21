@@ -1,0 +1,172 @@
+Jahshaka patch 0084: a warm-up set skips a material this process does not have,
+instead of warming the DEFAULT datablock and calling it a success
+(WARMUPSET-1, 2026-09-21; SOURCE: every tree re-runs build-ogre.sh).
+
+WHY. VertexFormatWarmUpStorage records, per vertex format, one representative
+MATERIAL NAME per Hlms hash, and createWarmUp applies those names to degenerate
+renderables so the permutations compile before the window opens.
+`Renderable::setDatablock( IdString )` resolves a name through
+HlmsManager::getDatablock(), which for a name it cannot find logs LML_CRITICAL
+and hands back the DEFAULT datablock. So a recorded material that is absent
+from this process does not fail: it silently warms a DIFFERENT permutation --
+one no draw in the session will use -- and the storage reports the compiles it
+caused as a successful warm-up.
+
+MEASURED on this host, whose datablock names are per-process counters
+("pbr_18", "unlit_21", "outline_31" -- decoded from the recorded IdString
+hashes): on EVERY warm launch, seven "Can't find HLMS datablock material" lines
+and eight shaders compiled from the default datablock, none of them ever bound;
+the next launch then loads those eight from the shader cache for ever. The
+count the host prints ("replayed the recorded warm-up set (8 shaders built)")
+was measuring the defect.
+
+WHAT IT DOES. createWarmUp resolves every recorded name with
+getDatablockNoDefault() FIRST. A missing one is skipped and counted; an entry
+whose materials are ALL missing is skipped before its dummy buffers are built
+(an entry that spawns nothing would leak its VAO and vertex buffers, which
+destroyWarmUp reaches through a spawned renderable). Two consequences of the
+skip are covered in the same hunk: destroyWarmUp takes its SceneManager from
+ANY entry that spawned something rather than only the last one, and a call that
+spawned nothing at all frees the dummy skeleton it may have created while it
+still has a SceneManager to free it with. One summary log line replaces the
+per-material CRITICAL spam, and it names the real precondition: a warm-up set
+records a material by NAME, so names that are not stable across runs warm
+nothing.
+
+NOT FIXED HERE, and reported upward: with per-process names a Jahshaka warm-up
+set can warm nothing at all. The sound fix is on the HOST side -- record the
+recipe (the material's own parameters) beside the set and recreate those
+datablocks before the replay, or give datablocks names that mean the same thing
+in the next process.
+
+diff --git a/OgreMain/src/OgreVertexFormatWarmUp.cpp b/OgreMain/src/OgreVertexFormatWarmUp.cpp
+index 1670ee856..ead0b5412 100644
+--- a/OgreMain/src/OgreVertexFormatWarmUp.cpp
++++ b/OgreMain/src/OgreVertexFormatWarmUp.cpp
+@@ -31,8 +31,10 @@ THE SOFTWARE.
+ #include "OgreVertexFormatWarmUp.h"
+ 
+ #include "Animation/OgreSkeletonManager.h"
++#include "OgreHlmsManager.h"
+ #include "OgreItem.h"
+ #include "OgreLogManager.h"
++#include "OgreRoot.h"
+ #include "OgreSceneManager.h"
+ #include "OgreSkeleton.h"
+ #include "OgreSubItem.h"
+@@ -380,9 +382,50 @@ void VertexFormatWarmUpStorage::createWarmUp( SceneManager *sceneManager )
+     FastArray<uint8> zeroData;
+     VertexBufferPackedVec vertexBuffers;
+ 
++    // A MATERIAL THIS PROCESS DOES NOT HAVE IS SKIPPED, NOT WARMED UP.
++    //
++    // `Renderable::setDatablock( IdString )` goes through
++    // HlmsManager::getDatablock(), which logs LML_CRITICAL and hands back the
++    // DEFAULT datablock for a name it cannot find -- so a recorded entry whose
++    // material is absent used to spawn a renderable wearing the default
++    // datablock and compile ITS permutation, which is not the permutation the
++    // recording was made for and which no draw in the session will use. The
++    // storage then reported those compiles as a successful warm-up.
++    //
++    // Measured on a host whose datablock names are per-process (Jahshaka,
++    // 2026-09-21): seven "Can't find HLMS datablock material" CRITICAL lines
++    // and eight shaders compiled on every warm launch, none of them ever bound.
++    //
++    // The whole ENTRY is tested before its dummy buffers are built, because an
++    // entry that spawns no renderable would otherwise leak its VAO and vertex
++    // buffers: destroyWarmUp() reaches them through `entry.renderables.back()`.
++    HlmsManager *hlmsManager = Root::getSingleton().getHlmsManager();
++    FastArray<HlmsDatablock *> entryDatablocks;
++    size_t numMissingMaterials = 0u;
++    size_t numMaterials = 0u;
++    size_t numSpawned = 0u;
++
+     SceneNode *rootNode = sceneManager->getRootSceneNode( SCENE_STATIC );
+     for( VertexFormatEntry &entry : mEntries )
+     {
++        numMaterials += entry.materials.size();
++
++        entryDatablocks.clear();
++        entryDatablocks.reserve( entry.materials.size() );
++        for( const VertexFormatEntry::MaterialRqId &material : entry.materials )
++        {
++            HlmsDatablock *datablock = hlmsManager->getDatablockNoDefault( material.name );
++            if( !datablock )
++                ++numMissingMaterials;
++            entryDatablocks.push_back( datablock );
++        }
++
++        bool bHasAnyMaterial = false;
++        for( HlmsDatablock *datablock : entryDatablocks )
++            bHasAnyMaterial |= datablock != 0;
++        if( !bHasAnyMaterial )
++            continue;  // Nothing to apply the vertex format to.
++
+         // Generate dummy buffers full of 0. We hold data for 3 vertices
+         // to avoid tripping any potential HW bug. Index buffers are not needed.
+         vertexBuffers.clear();
+@@ -424,8 +467,12 @@ void VertexFormatWarmUpStorage::createWarmUp( SceneManager *sceneManager )
+         const bool bHasSkeleton = entry.vertexFormats.hasSkeleton;
+ 
+         // Start spawning
+-        for( const VertexFormatEntry::MaterialRqId &material : entry.materials )
++        for( size_t i = 0u; i < entry.materials.size(); ++i )
+         {
++            HlmsDatablock *datablock = entryDatablocks[i];
++            if( !datablock )
++                continue;  // Counted above; see the comment at entryDatablocks.
++            const VertexFormatEntry::MaterialRqId &material = entry.materials[i];
+             WarmUpRenderable *renderable =
+                 new WarmUpRenderable( Ogre::Id::generateNewId<Ogre::MovableObject>(),
+                                       &sceneManager->_getEntityMemoryManager( Ogre::SCENE_STATIC ),
+@@ -433,10 +480,29 @@ void VertexFormatWarmUpStorage::createWarmUp( SceneManager *sceneManager )
+             if( bHasSkeleton )
+                 renderable->setupSkeleton( mSkeleton, &mBlendIndexToBoneIndexMap );
+             entry.renderables.push_back( renderable );
+-            renderable->setDatablock( material.name );
++            renderable->setDatablock( datablock );
+             rootNode->attachObject( renderable );
++            ++numSpawned;
+         }
+     }
++
++    // Nothing was spawned at all: the dummy skeleton this call may have created
++    // has no user and destroyWarmUp() -- which finds its SceneManager through a
++    // spawned renderable -- would not be able to reach one to free it with.
++    if( numSpawned == 0u )
++        destroySkeleton( sceneManager );
++
++    if( numMissingMaterials > 0u )
++    {
++        // ONE line, at the ordinary level, saying what happened and why it can
++        // happen at all -- instead of one CRITICAL line per missing material
++        // from deep inside HlmsManager, which says nothing about warm-ups.
++        LogManager::getSingleton().logMessage(
++            "VertexFormatWarmUpStorage: " + StringConverter::toString( numMissingMaterials ) +
++            " of " + StringConverter::toString( numMaterials ) +
++            " recorded material(s) do not exist in this process and were skipped. A warm-up set "
++            "records a material by NAME, so names that are not stable across runs warm nothing." );
++    }
+ }
+ //-----------------------------------------------------------------------------
+ void VertexFormatWarmUpStorage::destroyWarmUp()
+@@ -444,10 +510,17 @@ void VertexFormatWarmUpStorage::destroyWarmUp()
+     VaoManager *vaoManager = 0;
+     SceneManager *sceneManager = 0;
+ 
+-    if( !mEntries.empty() && !mEntries.back().renderables.empty() )
++    // ANY entry that spawned something will do, not just the last one: an entry
++    // whose recorded materials are all absent from this process spawns nothing
++    // (see createWarmUp), and reading only mEntries.back() would then leave
++    // both managers null while earlier entries still hold buffers to destroy.
++    for( VertexFormatEntry &entry : mEntries )
+     {
+-        sceneManager = mEntries.back().renderables.back()->_getManager();
++        if( entry.renderables.empty() )
++            continue;
++        sceneManager = entry.renderables.back()->_getManager();
+         vaoManager = sceneManager->getDestinationRenderSystem()->getVaoManager();
++        break;
+     }
+ 
+     for( VertexFormatEntry &entry : mEntries )
