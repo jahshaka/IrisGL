@@ -115,10 +115,29 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
         VERBATIM)
+    # GATHER-0's two jobs (the phase-0 screen-probe spike), same rule.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_probeGatherSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
+        COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_probeIntegrateSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_integrate.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_integrate.comp"
+        COMMENT "Compiling the screen-probe integrate at SPIR-V 1.4"
+        VERBATIM)
     add_custom_target(JahshakaRayQuerySpv
                       DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h")
+                              "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h")
     set(JAH_RQ_GEN_DIR "${JAH_RQ_GEN_DIR}" PARENT_SCOPE)
 endif()
 set(JAH_RAY_QUERY_OK "${JAH_RAY_QUERY_OK}" PARENT_SCOPE)

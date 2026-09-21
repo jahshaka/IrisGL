@@ -2362,6 +2362,22 @@ public:
     static void        setSkyEnv(const Ogre::SceneManager *sm, const SkyEnvState &state);
     static SkyEnvState skyEnv(const Ogre::SceneManager *sm);
 
+    /// GATHER-0 — THE SCREEN-PROBE GATHER SPIKE'S PIXEL SIDE (2026-09-21).
+    ///
+    /// The ray tier registers the full-resolution irradiance texture it has
+    /// just written, immediately before the pass that shades with it; this
+    /// listener turns that into a PASS property (`jah_probe_gather`), a
+    /// claimed extra texture slot (`jahProbeIrradiance`) and one binding — the
+    /// same three-hook route the sky's env slot above rides, because there is
+    /// no other route into a PBS pass from outside.
+    ///
+    /// Registered PER SCENE MANAGER and cleared at the head of every frame
+    /// (OgreEngine::updateRayQuery), so a view that does not gather cannot
+    /// inherit the binding of one that does.
+    static void setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance);
+    static void clearProbeGather();
+    static Ogre::TextureGpu *probeGather(const Ogre::SceneManager *sm);
+
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
     /// because this may be called from any thread and must be a pure function
@@ -2384,6 +2400,11 @@ private:
     static Ogre::TextureGpu             *sPassSkyCube;                 // render thread only
     static const Ogre::HlmsSamplerblock *sPassSkySampler;              // render thread only
     static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
+    /// GATHER-0's registration and the pass's copy of it — the same
+    /// set-together-or-not-at-all rule as the sky's pair above.
+    static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
+    static Ogre::TextureGpu             *sPassProbeGather;             // render thread only
+    static const Ogre::HlmsSamplerblock *sPassProbeGatherSampler;      // render thread only
     static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static unsigned       sLightCountMismatches;                       // render thread only
     static unsigned       sMismatchLogged;                             // render thread only
@@ -2965,6 +2986,14 @@ public:
     /// scene is byte-for-byte the scene that shipped.
     bool surfaceCardSpike(const SurfaceCardSpikeDesc &desc,
                           SurfaceCardSpikeResult &out) override;
+    /// GATHER-0 (the phase-0 screen-probe gather spike, 2026-09-21). Defined
+    /// in OgreRayQuery.cpp. The flag below is the WHOLE of its state on the
+    /// scene: with it off the ray tier records no gather dispatch, the Hlms
+    /// listener sets no property and no pixel moves.
+    bool probeGatherSpike(const ProbeGatherSpikeDesc &desc,
+                          ProbeGatherSpikeResult &out) override;
+    const ProbeGatherSpikeDesc &gatherSpikeDesc() const { return mGatherSpike; }
+    ProbeGatherSpikeDesc mGatherSpike;
     SurfaceCardSpike *cardSpike() const { return mCardSpike; }
     SurfaceCardSpike *mCardSpike = nullptr;
     /// THE TRACED SET, walked out of `mItemNodes` — the scene's own item index,

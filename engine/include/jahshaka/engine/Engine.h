@@ -915,6 +915,23 @@ public:
         out.error = "no surface-card spike in this build";
         return false;
     }
+    /// GATHER-0 — the phase-0 SCREEN-PROBE GATHER spike's one door
+    /// (2026-09-21, SPECS/SCREEN_PROBE_GATHER_SPEC.md section 7 phase 0).
+    ///
+    /// NOT A FEATURE AND NOT A TIER. Armed, it places one probe per N pixels
+    /// of every view this scene draws, traces 64 hardware rays per probe into
+    /// the ray tier's own structures, and writes the result into the diffuse
+    /// GI slot of the pixel shader in place of the cone/field answer — so a
+    /// suite can measure what SPECS/SCREEN_PROBE_GATHER_SPEC.md section 10
+    /// records as unmeasured: the trace's GPU cost, the integrate's, and the
+    /// picture the swap makes. Disarmed (the default, and what every build
+    /// that never calls this does) nothing is allocated, no dispatch is
+    /// recorded, no shader property is set and no pixel moves.
+    virtual bool probeGatherSpike(const ProbeGatherSpikeDesc &, ProbeGatherSpikeResult &out) {
+        out.ok = false;
+        out.error = "no probe-gather spike in this build";
+        return false;
+    }
     /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
     /// readback of one cascade's light volume: its peak, its mean over lit
     /// voxels and how many voxels sit on the storage format's top bin.

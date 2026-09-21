@@ -71,6 +71,9 @@
 #include "SurfaceCardSpike.h"
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
+// GATHER-0 — the phase-0 screen-probe gather spike's two jobs.
+#include "rayquery/rq_probe_gather_spv.h"
+#include "rayquery/rq_probe_integrate_spv.h"
 
 #include <algorithm>
 #include <chrono>
@@ -214,6 +217,18 @@ constexpr unsigned kSpikeCards = 6u;
 /// ...and the five layers a card set holds (normal, shadow+roughness, albedo,
 /// emissive, depth) — bindings 15..19.
 constexpr unsigned kSpikeCardBindings = 5u;
+
+/// GATHER-0 — the screen-probe gather spike's two jobs (2026-09-21).
+/// Bindings in rq_probe_gather.comp's set 0 and rq_probe_integrate.comp's.
+constexpr unsigned kGatherBindings = 10u;
+constexpr unsigned kGatherIntegrateBindings = 3u;
+/// The descriptor ring, for the same reason the reflection's has one: the set
+/// is rewritten every frame because every input can be recreated behind our
+/// back, and a set a command buffer still holds may not be rewritten.
+constexpr unsigned kGatherRing = 3u;
+/// One probe's threadgroup is 8x8 = 64 threads = 64 rays, the shader's
+/// `local_size`. The two must agree.
+constexpr unsigned kGatherRaysPerProbe = 64u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -418,6 +433,13 @@ private:
         /// reach here with the set still in flight (measured:
         /// VUID-vkFreeDescriptorSets-pDescriptorSets-00309).
         VkDescriptorSet set = VK_NULL_HANDLE;
+        /// ...and the pool it came from. Freeing a set into another pool is
+        /// invalid, and GATHER-0 brought a second one (audit: the old line
+        /// hard-coded mReflectPool).
+        VkDescriptorPool setPool = VK_NULL_HANDLE;
+        /// GATHER-0: an Ogre-owned texture (the gather's full-resolution
+        /// irradiance target) whose descriptor sets may still be in flight.
+        Ogre::TextureGpu *tex = nullptr;
         uint32_t frame = 0;
     };
     std::vector<Retired> mRetireBin;
@@ -426,6 +448,10 @@ private:
     void retireImage(ReflectImage &img);
     void retireView(VkImageView v);
     void retireSet(VkDescriptorSet set);
+    void retireSet(VkDescriptorSet set, VkDescriptorPool pool);
+    /// GATHER-0: an Ogre texture destroyed once the frames that could still be
+    /// sampling it have retired (the same bin as everything else here).
+    void retireTexture(Ogre::TextureGpu *&t);
     /// THE BLACK STAND-INS. Every descriptor in a set must be a real view,
     /// whether the shader reads it or not, and two of this pass' inputs can
     /// legitimately be absent: a scene with no captured environment cube (no
@@ -559,6 +585,70 @@ private:
     /// mTimedSceneSlots (and for the same round-3 reason).
     uint32_t              mReflectQuerySlots = 0;
     VkQueryPool           mReflectTimestamps = VK_NULL_HANDLE;
+
+    // ---- GATHER-0: THE SCREEN-PROBE GATHER SPIKE (phase 0) --------------
+    // Two more compute dispatches on the SAME frame command buffer and the
+    // SAME hook as the reflection trace — after the SSR prepass, before the
+    // opaque pass that shades. They exist to be measured and are recorded
+    // only while a scene has `Scene::probeGatherSpike` armed; with it
+    // disarmed not one of the objects below is created.
+public:
+    /// Records this frame's probe trace and integrate for one view. Silently
+    /// does nothing unless the view's scene has the spike armed.
+    void recordGather(const ReflectPassListener *key, OgreView *view,
+                      Ogre::CompositorPass *pass);
+    /// Frees a view's gather resources (from ~ReflectPassListener, and when
+    /// the spike is disarmed).
+    void forgetGather(const ReflectPassListener *key);
+    /// The last measured numbers for a scene, for the spike's result struct.
+    void gatherStatsInto(const OgreScene *scene, ProbeGatherSpikeResult &out) const;
+
+private:
+    struct GatherView {
+        VkDescriptorSet traceSets[kGatherRing] = {};
+        VkDescriptorSet integrateSets[kGatherRing] = {};
+        RawBuffer traceParams[kGatherRing], integrateParams[kGatherRing];
+        /// THE PROBE ATLAS — a raw image this file owns outright, like the
+        /// reflection's temporal mean and for the same reason: nothing but
+        /// these two compute passes ever touches it.
+        ReflectImage probe;
+        /// THE FULL-RESOLUTION IRRADIANCE, and this one IS an Ogre texture,
+        /// because HlmsPbs binds it through the listener's extra-texture slot
+        /// and HlmsPbs speaks TextureGpu.
+        Ogre::TextureGpu *irradiance = nullptr;
+        unsigned w = 0, h = 0, gridW = 0, gridH = 0, stride = 0;
+        bool targetsReady = false;
+        bool probeNeedsClear = false;
+        unsigned frame = 0;              ///< the sample sequence's input
+        OgreScene *scene = nullptr;
+        unsigned probes = 0, raysPerProbe = 0;
+        float traceMs = -1.0f, integrateMs = -1.0f, cpuMs = -1.0f;
+        unsigned long long vramBytes = 0ull;
+        unsigned querySlot = 0, queryBase = 0;
+        bool hasQueryBase = false;
+        struct Pending { unsigned frame = 0; bool live = false; };
+        Pending pending[kFramesInFlight];
+    };
+    bool makeGatherPipelines(std::string &err);
+    bool ensureGatherTargets(GatherView &gv, unsigned w, unsigned h, unsigned stride,
+                             std::string &err);
+    void clearGatherProbe(GatherView &gv, VkCommandBuffer cmd);
+    void dropGather(GatherView &gv);
+    void readGatherTimestamps(GatherView &gv);
+
+    std::unordered_map<const ReflectPassListener *, GatherView> mGathers;
+    VkDescriptorSetLayout mGatherTraceLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout mGatherIntegrateLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mGatherTracePipeLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mGatherIntegratePipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mGatherTracePipeline = VK_NULL_HANDLE;
+    VkPipeline            mGatherIntegratePipeline = VK_NULL_HANDLE;
+    VkShaderModule        mGatherTraceModule = VK_NULL_HANDLE;
+    VkShaderModule        mGatherIntegrateModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mGatherPool = VK_NULL_HANDLE;
+    VkQueryPool           mGatherTimestamps = VK_NULL_HANDLE;
+    uint32_t              mGatherQuerySlots = 0;
+    bool                  mGatherFailed = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -720,12 +810,26 @@ void RayQueryTier::retireView(VkImageView v) {
     mRetireBin.push_back(r);
 }
 
-void RayQueryTier::retireSet(VkDescriptorSet set) {
+void RayQueryTier::retireSet(VkDescriptorSet set) { retireSet(set, mReflectPool); }
+
+void RayQueryTier::retireSet(VkDescriptorSet set, VkDescriptorPool pool) {
     if (!set) return;
     Retired r;
     r.set = set;
+    r.setPool = pool;
     r.frame = frameNow();
     mRetireBin.push_back(r);
+}
+
+/// GATHER-0. An Ogre texture whose descriptor sets may still be in flight; the
+/// destroy is the manager's, the WAIT is this bin's.
+void RayQueryTier::retireTexture(Ogre::TextureGpu *&t) {
+    if (!t) return;
+    Retired r;
+    r.tex = t;
+    r.frame = frameNow();
+    mRetireBin.push_back(r);
+    t = nullptr;
 }
 
 void RayQueryTier::retireImage(ReflectImage &img) {
@@ -888,7 +992,10 @@ void RayQueryTier::drainRetired() {
         if (uint32_t(now - mRetireBin[i].frame) >= keep) {
             if (mRetireBin[i].as) mFn.destroyAccelerationStructure(mVk, mRetireBin[i].as, nullptr);
             dropBuffer(mRetireBin[i].buf);
-            if (mRetireBin[i].set) vkFreeDescriptorSets(mVk, mReflectPool, 1, &mRetireBin[i].set);
+            if (mRetireBin[i].set && mRetireBin[i].setPool)
+                vkFreeDescriptorSets(mVk, mRetireBin[i].setPool, 1, &mRetireBin[i].set);
+            if (mRetireBin[i].tex && mRs && mRs->getTextureGpuManager())
+                mRs->getTextureGpuManager()->destroyTexture(mRetireBin[i].tex);
             if (mRetireBin[i].view) vkDestroyImageView(mVk, mRetireBin[i].view, nullptr);
             if (mRetireBin[i].img.view) vkDestroyImageView(mVk, mRetireBin[i].img.view, nullptr);
             if (mRetireBin[i].img.image) vkDestroyImage(mVk, mRetireBin[i].img.image, nullptr);
@@ -1095,6 +1202,8 @@ void RayQueryTier::close() {
     mScenes.clear();
     for (auto &kv : mReflects) dropReflect(kv.second);
     mReflects.clear();
+    for (auto &kv : mGathers) dropGather(kv.second);
+    mGathers.clear();
     for (ReflectImage *d : { &mDummyCube, &mDummyVolume, &mDummyArray }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
@@ -1106,7 +1215,9 @@ void RayQueryTier::close() {
     for (Retired &r : mRetireBin) {
         if (r.as) mFn.destroyAccelerationStructure(mVk, r.as, nullptr);
         dropBuffer(r.buf);
-        if (r.set) vkFreeDescriptorSets(mVk, mReflectPool, 1, &r.set);
+        if (r.set && r.setPool) vkFreeDescriptorSets(mVk, r.setPool, 1, &r.set);
+        if (r.tex && mRs && mRs->getTextureGpuManager())
+            mRs->getTextureGpuManager()->destroyTexture(r.tex);
         if (r.view) vkDestroyImageView(mVk, r.view, nullptr);
         if (r.img.view) vkDestroyImageView(mVk, r.img.view, nullptr);
         if (r.img.image) vkDestroyImage(mVk, r.img.image, nullptr);
@@ -1128,6 +1239,23 @@ void RayQueryTier::close() {
     mReflectModule = VK_NULL_HANDLE; mReflectTimestamps = VK_NULL_HANDLE;
     mFilterPipeline = VK_NULL_HANDLE; mFilterModule = VK_NULL_HANDLE;
     mPointSampler = VK_NULL_HANDLE; mLinearSampler = VK_NULL_HANDLE;
+    // GATHER-0's objects.
+    if (mGatherPool) vkDestroyDescriptorPool(mVk, mGatherPool, nullptr);
+    if (mGatherTracePipeline) vkDestroyPipeline(mVk, mGatherTracePipeline, nullptr);
+    if (mGatherIntegratePipeline) vkDestroyPipeline(mVk, mGatherIntegratePipeline, nullptr);
+    if (mGatherTraceModule) vkDestroyShaderModule(mVk, mGatherTraceModule, nullptr);
+    if (mGatherIntegrateModule) vkDestroyShaderModule(mVk, mGatherIntegrateModule, nullptr);
+    if (mGatherTracePipeLayout) vkDestroyPipelineLayout(mVk, mGatherTracePipeLayout, nullptr);
+    if (mGatherIntegratePipeLayout) vkDestroyPipelineLayout(mVk, mGatherIntegratePipeLayout, nullptr);
+    if (mGatherTraceLayout) vkDestroyDescriptorSetLayout(mVk, mGatherTraceLayout, nullptr);
+    if (mGatherIntegrateLayout) vkDestroyDescriptorSetLayout(mVk, mGatherIntegrateLayout, nullptr);
+    if (mGatherTimestamps) vkDestroyQueryPool(mVk, mGatherTimestamps, nullptr);
+    mGatherPool = VK_NULL_HANDLE;
+    mGatherTracePipeline = VK_NULL_HANDLE; mGatherIntegratePipeline = VK_NULL_HANDLE;
+    mGatherTraceModule = VK_NULL_HANDLE; mGatherIntegrateModule = VK_NULL_HANDLE;
+    mGatherTracePipeLayout = VK_NULL_HANDLE; mGatherIntegratePipeLayout = VK_NULL_HANDLE;
+    mGatherTraceLayout = VK_NULL_HANDLE; mGatherIntegrateLayout = VK_NULL_HANDLE;
+    mGatherTimestamps = VK_NULL_HANDLE;
     if (mDescPool) vkDestroyDescriptorPool(mVk, mDescPool, nullptr);
     if (mPipeline) vkDestroyPipeline(mVk, mPipeline, nullptr);
     if (mPipeLayout) vkDestroyPipelineLayout(mVk, mPipeLayout, nullptr);
@@ -3159,6 +3287,728 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
 }
 
 // ---------------------------------------------------------------------------
+// GATHER-0 — THE SCREEN-PROBE GATHER SPIKE (phase 0 of
+// SPECS/SCREEN_PROBE_GATHER_SPEC.md; a MEASUREMENT SURFACE, not a feature).
+//
+// TWO DISPATCHES on the same hook and the same command buffer as the
+// reflection trace: `rq_probe_gather.comp` traces one probe per 16x16 pixels
+// (64 cosine-stratified rays each) into the SAME TLAS, and
+// `rq_probe_integrate.comp` fans the probe atlas out to a full-resolution
+// irradiance texture that HlmsPbs samples at its diffuse-GI slot. The point is
+// to MEASURE: the trace's GPU milliseconds, the integrate's, the CPU cost of
+// recording them, the VRAM, and the picture the swap makes against the
+// irradiance field — every one of which SCREEN_PROBE_GATHER_SPEC section 10
+// records as unmeasured.
+//
+// WHAT IT IS NOT: no spatial filter, no temporal accumulation, no adaptive
+// probes, no importance sampling, no card read, no stereo. Phases 1-3 are
+// those; this lane exists to price the two stages that all of them sit on.
+namespace {
+/// rq_probe_gather.comp's uniform block, MEMBER FOR MEMBER. std140 over
+/// vec4s only, so the C++ layout is the GLSL layout by construction.
+struct GatherParams {
+    float camPos[4] = {};
+    float rayTL[4] = {};
+    float rayRight[4] = {};
+    float rayDown[4] = {};
+    float fwd[4] = {};
+    float projParams[4] = {};
+    float resolution[4] = {};
+    float knobs[4] = {};
+    float knobs2[4] = {};
+    float skyColour[4] = {};
+    float flags[4] = {};
+    float viewAxisX[4] = {};
+    float viewAxisY[4] = {};
+    float viewAxisZ[4] = {};
+    float voxelOrigin[kMaxReflectCascades][4] = {};
+    float voxelInvSize[kMaxReflectCascades][4] = {};
+};
+/// ...and rq_probe_integrate.comp's, which needs two.
+struct GatherIntegrateParams {
+    float resolution[4] = {};
+    float knobs[4] = {};
+};
+}   // namespace
+
+bool RayQueryTier::makeGatherPipelines(std::string &err) {
+    // ---- the trace's set layout (rq_probe_gather.comp) ----
+    {
+        VkDescriptorSetLayoutBinding b[kGatherBindings] = {};
+        const VkDescriptorType types[kGatherBindings] = {
+            VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 0  tlas
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 1  params
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 2  normals
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 3  depth
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 4  probe atlas
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 5  voxelIso[]
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 6  voxelX[]
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 7  voxelY[]
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 8  voxelZ[]
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 9  sky cube
+        };
+        for (unsigned i = 0; i < kGatherBindings; ++i) {
+            b[i].binding = i;
+            b[i].descriptorType = types[i];
+            b[i].descriptorCount = (i >= 5u && i <= 8u) ? kMaxReflectCascades : 1u;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo sli{};
+        sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        sli.bindingCount = kGatherBindings;
+        sli.pBindings = b;
+        if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mGatherTraceLayout) != VK_SUCCESS) {
+            err = "rayquery/gather: vkCreateDescriptorSetLayout (trace) failed";
+            return false;
+        }
+    }
+    // ---- the integrate's ----
+    {
+        VkDescriptorSetLayoutBinding b[kGatherIntegrateBindings] = {};
+        const VkDescriptorType types[kGatherIntegrateBindings] = {
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,   // 0  params
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,    // 1  probe atlas (read)
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,    // 2  jahProbeIrradiance (write)
+        };
+        for (unsigned i = 0; i < kGatherIntegrateBindings; ++i) {
+            b[i].binding = i;
+            b[i].descriptorType = types[i];
+            b[i].descriptorCount = 1u;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo sli{};
+        sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        sli.bindingCount = kGatherIntegrateBindings;
+        sli.pBindings = b;
+        if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mGatherIntegrateLayout) !=
+            VK_SUCCESS) {
+            err = "rayquery/gather: vkCreateDescriptorSetLayout (integrate) failed";
+            return false;
+        }
+    }
+    const auto makeOne = [this](VkDescriptorSetLayout setLayout, const uint32_t *spv, size_t bytes,
+                                VkPipelineLayout &pipeLayout, VkShaderModule &module,
+                                VkPipeline &pipeline, const char *what, std::string &e) {
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &setLayout;
+        if (vkCreatePipelineLayout(mVk, &pli, nullptr, &pipeLayout) != VK_SUCCESS) {
+            e = std::string("rayquery/gather: vkCreatePipelineLayout (") + what + ") failed";
+            return false;
+        }
+        VkShaderModuleCreateInfo smi{};
+        smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smi.codeSize = bytes;
+        smi.pCode = spv;
+        if (vkCreateShaderModule(mVk, &smi, nullptr, &module) != VK_SUCCESS) {
+            e = std::string("rayquery/gather: vkCreateShaderModule (") + what + ") failed";
+            return false;
+        }
+        VkComputePipelineCreateInfo cpi{};
+        cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = module;
+        cpi.stage.pName = "main";
+        cpi.layout = pipeLayout;
+        if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipeline) !=
+            VK_SUCCESS) {
+            e = std::string("rayquery/gather: vkCreateComputePipelines (") + what + ") failed";
+            return false;
+        }
+        return true;
+    };
+    if (!makeOne(mGatherTraceLayout, krq_probeGatherSpv, sizeof(krq_probeGatherSpv),
+                 mGatherTracePipeLayout, mGatherTraceModule, mGatherTracePipeline, "trace", err))
+        return false;
+    if (!makeOne(mGatherIntegrateLayout, krq_probeIntegrateSpv, sizeof(krq_probeIntegrateSpv),
+                 mGatherIntegratePipeLayout, mGatherIntegrateModule, mGatherIntegratePipeline,
+                 "integrate", err))
+        return false;
+
+    const unsigned sets = kMaxTimedScenes * kGatherRing * 2u;   // trace + integrate
+    VkDescriptorPoolSize sizes[3] = {};
+    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    sizes[0].descriptorCount = sets;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    sizes[1].descriptorCount = sets;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    sizes[2].descriptorCount = sets * 3u;
+    VkDescriptorPoolSize sampled{};
+    sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sampled.descriptorCount = sets * (2u + 4u * kMaxReflectCascades + 1u);
+    VkDescriptorPoolSize all[4] = { sizes[0], sizes[1], sizes[2], sampled };
+    VkDescriptorPoolCreateInfo dpi{};
+    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = sets;
+    dpi.poolSizeCount = 4;
+    dpi.pPoolSizes = all;
+    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mGatherPool) != VK_SUCCESS) {
+        err = "rayquery/gather: vkCreateDescriptorPool failed";
+        return false;
+    }
+    if (mTimestampPeriod > 0.0f) {
+        VkQueryPoolCreateInfo qci{};
+        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        // FOUR per frame: the trace's pair and the integrate's, separately,
+        // because "GPU ms per stage" is exactly what this lane is for.
+        qci.queryCount = kMaxTimedScenes * kFramesInFlight * 4u;
+        vkCreateQueryPool(mVk, &qci, nullptr, &mGatherTimestamps);
+    }
+    return true;
+}
+
+bool RayQueryTier::ensureGatherTargets(GatherView &gv, unsigned w, unsigned h, unsigned stride,
+                                       std::string &err) {
+    if (gv.targetsReady && gv.w == w && gv.h == h && gv.stride == stride) return true;
+    retireImage(gv.probe);
+    retireTexture(gv.irradiance);
+    gv.targetsReady = false;
+    gv.w = w; gv.h = h; gv.stride = stride;
+    gv.gridW = (w + stride - 1u) / stride;
+    gv.gridH = (h + stride - 1u) / stride;
+    if (!gv.gridW || !gv.gridH) { err = "rayquery/gather: empty probe grid"; return false; }
+    if (!makeStorageImage(gv.gridW, gv.gridH, VK_FORMAT_R16G16B16A16_SFLOAT, gv.probe, err))
+        return false;
+    // THE FULL-RESOLUTION IRRADIANCE. `Uav` and nothing else: a UAV that is not
+    // a render target is born in VK_IMAGE_LAYOUT_GENERAL with the pin's own
+    // barrier (OgreVulkanTextureGpu.cpp), it carries SAMPLED usage because it
+    // is a texture, and it is NOT Reinterpretable — a float storage image
+    // viewed as its own format must not be (PHOTON-M3's trap: the family of
+    // every RGBA16 format is the UINT one).
+    Ogre::TextureGpuManager *tm = mRs->getTextureGpuManager();
+    static unsigned sSerial = 0u;
+    Ogre::TextureGpu *t = tm->createTexture(
+        "JahProbeIrradiance/" + std::to_string(++sSerial), Ogre::GpuPageOutStrategy::Discard,
+        Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+    t->setResolution(w, h, 1u);
+    t->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
+    t->setNumMipmaps(1u);
+    // RESIDENT FOR GOOD, never per frame — the 0071 lesson.
+    t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    gv.irradiance = t;
+    gv.vramBytes = (unsigned long long)gv.gridW * gv.gridH * 8ull +
+                   (unsigned long long)w * h * 8ull;
+    gv.targetsReady = true;
+    gv.probeNeedsClear = true;
+    return true;
+}
+
+void RayQueryTier::clearGatherProbe(GatherView &gv, VkCommandBuffer cmd) {
+    if (!gv.probeNeedsClear) return;
+    gv.probeNeedsClear = false;
+    // UNDEFINED -> GENERAL and zeroed: a probe texel of zero reads as "no
+    // probe here", which is what the integrate hands back to the pixel path.
+    VkImageMemoryBarrier b{};
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = gv.probe.image;
+    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.levelCount = 1;
+    b.subresourceRange.layerCount = 1;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &b);
+    VkClearColorValue zero{};
+    vkCmdClearColorImage(cmd, gv.probe.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1,
+                         &b.subresourceRange);
+    VkMemoryBarrier toCompute{};
+    toCompute.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toCompute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toCompute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &toCompute, 0, nullptr, 0, nullptr);
+}
+
+void RayQueryTier::readGatherTimestamps(GatherView &gv) {
+    if (!mGatherTimestamps || !gv.hasQueryBase) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (unsigned i = 0; i < kFramesInFlight; ++i) {
+        GatherView::Pending &pd = gv.pending[i];
+        // `< inFlight`, not `<=`: the ring is kFramesInFlight deep and a slot
+        // is REUSED after that many frames (the reflect path's lesson).
+        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
+        uint64_t v[8] = {};
+        const uint32_t base = gv.queryBase + i * 4u;
+        if (vkGetQueryPoolResults(mVk, mGatherTimestamps, base, 4, sizeof(v), v,
+                                  sizeof(uint64_t) * 2u,
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
+            VK_SUCCESS) {
+            if (v[1] && v[3] && v[2] >= v[0])
+                gv.traceMs = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
+            if (v[5] && v[7] && v[6] >= v[4])
+                gv.integrateMs = float(double(v[6] - v[4]) * double(mTimestampPeriod) * 1e-6);
+        }
+        pd.live = false;
+    }
+}
+
+void RayQueryTier::dropGather(GatherView &gv) {
+    for (unsigned i = 0; i < kGatherRing; ++i) {
+        retireSet(gv.traceSets[i], mGatherPool);
+        retireSet(gv.integrateSets[i], mGatherPool);
+        gv.traceSets[i] = VK_NULL_HANDLE;
+        gv.integrateSets[i] = VK_NULL_HANDLE;
+        retire(gv.traceParams[i]);
+        retire(gv.integrateParams[i]);
+    }
+    retireImage(gv.probe);
+    retireTexture(gv.irradiance);
+    if (gv.hasQueryBase) mGatherQuerySlots &= ~(uint32_t(1) << gv.querySlot);
+    gv.hasQueryBase = false;
+    gv.targetsReady = false;
+    gv.probeNeedsClear = false;
+}
+
+void RayQueryTier::forgetGather(const ReflectPassListener *key) {
+    auto it = mGathers.find(key);
+    if (it == mGathers.end()) return;
+    dropGather(it->second);
+    mGathers.erase(it);
+}
+
+void RayQueryTier::gatherStatsInto(const OgreScene *scene, ProbeGatherSpikeResult &out) const {
+    for (const auto &kv : mGathers) {
+        if (kv.second.scene != scene || !kv.second.targetsReady) continue;
+        out.probesX = kv.second.gridW;
+        out.probesY = kv.second.gridH;
+        out.probes = kv.second.probes;
+        out.raysPerProbe = kv.second.raysPerProbe;
+        out.raysPerFrame = (unsigned long long)kv.second.probes * kv.second.raysPerProbe;
+        out.targetW = kv.second.w;
+        out.targetH = kv.second.h;
+        out.traceMs = kv.second.traceMs;
+        out.integrateMs = kv.second.integrateMs;
+        out.cpuMs = kv.second.cpuMs;
+        out.vramBytes = kv.second.vramBytes;
+        return;
+    }
+}
+
+void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
+                                Ogre::CompositorPass *pass) {
+    if (!isOpen() || mGatherFailed || !view || !pass) return;
+    OgreScene *scene = view->ogreScene();
+    Ogre::Camera *cam = view->camera();
+    if (!scene || !cam) return;
+    // THE ENVIRONMENT ARM, the shape of `JAH_R5_MONO_EYES` and `JAH_RQ_NO_MULT`
+    // beside it and read ONCE per process for the same reason. It exists so the
+    // spike can be measured ON A REAL PROJECT — the Grand Showroom 2, opened by
+    // the app — without a scripting verb, a panel row or a line of Studio code,
+    // none of which a phase-0 spike should own. `JAH_GATHER_SPIKE=<stride>`
+    // arms every scene at that probe stride; `JAH_GATHER_LOG=1` prints the
+    // per-stage milliseconds to the Ogre log every 120 frames.
+    static const char *sEnvArm = std::getenv("JAH_GATHER_SPIKE");
+    static const bool sEnvLog = std::getenv("JAH_GATHER_LOG") != nullptr;
+    ProbeGatherSpikeDesc desc = scene->gatherSpikeDesc();
+    if (sEnvArm && !desc.on) {
+        desc.on = true;
+        const int stride = std::atoi(sEnvArm);
+        desc.probeStride = stride > 1 ? unsigned(stride) : 16u;
+        if (const char *r = std::getenv("JAH_GATHER_RAYS")) {
+            const int n = std::atoi(r);
+            if (n > 0) desc.raysPerProbe = unsigned(n);
+        }
+        desc.farTermOff = std::getenv("JAH_GATHER_NO_FAR") != nullptr;
+        desc.freezeFrameIndex = std::getenv("JAH_GATHER_FREEZE") != nullptr;
+    }
+    if (!desc.on) {
+        // DISARMED IS FREE, and it also has to be CLEAN: a view that was
+        // gathering and stopped must give its atlases back and stop binding
+        // its texture to the shader.
+        if (mGathers.count(key)) forgetGather(key);
+        return;
+    }
+    auto sceneIt = mScenes.find(scene);
+    if (sceneIt == mScenes.end()) return;
+    SceneAs &sa = sceneIt->second;
+    if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) return;
+    // ONE EYE ONLY (phase 0). A stereo target is two images in one texture and
+    // the probe grid would have to be split at the seam exactly as the
+    // reflection's is; that is phase 7's arm and measuring it here would
+    // measure a wrong picture.
+    if (view->stereo()) return;
+
+    const auto cpuStart = Clock::now();
+    if (!mGatherTracePipeline) {
+        std::string err;
+        if (!makeGatherPipelines(err)) {
+            mGatherFailed = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: the screen-probe gather spike is off — " + err);
+            return;
+        }
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: the screen-probe gather SPIKE is armed (GATHER-0, a measurement "
+            "surface) — the diffuse GI of every covered pixel comes from probe rays");
+    }
+
+    // THE CHAIN'S TEXTURES, by the names OgreChain.cpp declares them under —
+    // the same two the reflection trace reads, and for the same reason: the
+    // probe's surface is the one its block's centre pixel drew.
+    Ogre::TextureGpu *normalTex = nullptr, *depthTex = nullptr;
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    if (!node) return;
+    try {
+        normalTex = node->getDefinedTexture(Ogre::IdString("jahGBufNormals"));
+        depthTex = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+    } catch (Ogre::Exception &) { return; }
+    if (!normalTex || !depthTex) return;
+    const unsigned fullW = depthTex->getWidth(), fullH = depthTex->getHeight();
+    if (!fullW || !fullH) return;
+
+    // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
+    Ogre::TextureGpu *vox[kMaxReflectCascades][4] = {};
+    Ogre::Vector3 voxOrigin[kMaxReflectCascades], voxSize[kMaxReflectCascades],
+                  voxCell[kMaxReflectCascades];
+    float voxMultiplier[kMaxReflectCascades] = {};
+    unsigned voxCount = 0;
+    bool anisotropic = false;
+    const auto takeVolume = [&](Ogre::VctLighting *lighting, Ogre::VctVoxelizer *voxelizer) {
+        if (voxCount >= kMaxReflectCascades || !lighting || !voxelizer) return;
+        Ogre::TextureGpu **tex = lighting->getLightVoxelTextures();
+        if (!tex || !tex[0]) return;
+        const bool aniso = lighting->isAnisotropic() && tex[1] && tex[2] && tex[3];
+        if (voxCount == 0) anisotropic = aniso;
+        else if (anisotropic != aniso) return;
+        for (int i = 0; i < 4; ++i) vox[voxCount][i] = tex[i] ? tex[i] : tex[0];
+        voxOrigin[voxCount] = voxelizer->getVoxelOrigin();
+        voxSize[voxCount] = voxelizer->getVoxelSize();
+        voxCell[voxCount] = voxelizer->getVoxelCellSize();
+        const float baking = lighting->getCurrentBakingMultiplier();
+        voxMultiplier[voxCount] =
+            baking > 1e-6f ? lighting->mMultiplier / baking : lighting->mMultiplier;
+        ++voxCount;
+    };
+    if (!scene->mVctCascades.empty()) {
+        for (const OgreScene::VctCascade &c : scene->mVctCascades)
+            if (c.built) takeVolume(c.lighting, c.voxelizer);
+    } else {
+        takeVolume(scene->mVctLighting, scene->mVctVoxelizer);
+    }
+    Ogre::TextureGpu *skyTex = scene->mReflectionTex;
+
+    GatherView &gv = mGathers[key];
+    gv.scene = scene;
+    readGatherTimestamps(gv);
+    if (!gv.hasQueryBase && mGatherTimestamps) {
+        for (unsigned s = 0; s < kMaxTimedScenes; ++s) {
+            if (mGatherQuerySlots & (uint32_t(1) << s)) continue;
+            mGatherQuerySlots |= uint32_t(1) << s;
+            gv.querySlot = s;
+            gv.queryBase = s * kFramesInFlight * 4u;
+            gv.hasQueryBase = true;
+            break;
+        }
+    }
+    std::string err;
+    const unsigned stride = std::min(std::max(desc.probeStride, 2u), 64u);
+    if (!ensureDummyImages(err) || !ensureGatherTargets(gv, fullW, fullH, stride, err)) {
+        mGatherFailed = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: the screen-probe gather spike is off — " + err);
+        return;
+    }
+    const unsigned ring = gv.frame % kGatherRing;
+    if (!gv.traceParams[ring].buffer &&
+        !makeBuffer(sizeof(GatherParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
+                    gv.traceParams[ring], err))
+        return;
+    if (!gv.integrateParams[ring].buffer &&
+        !makeBuffer(sizeof(GatherIntegrateParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
+                    gv.integrateParams[ring], err))
+        return;
+    if (!gv.traceSets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mGatherPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mGatherTraceLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &gv.traceSets[ring]) != VK_SUCCESS) {
+            gv.traceSets[ring] = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    if (!gv.integrateSets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mGatherPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mGatherIntegrateLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &gv.integrateSets[ring]) != VK_SUCCESS) {
+            gv.integrateSets[ring] = VK_NULL_HANDLE;
+            return;
+        }
+    }
+
+    // ---- THE PARAMETERS ----------------------------------------------------
+    GatherParams pp{};
+    const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
+    const Ogre::Vector3 camPos = cam->getDerivedPosition();
+    const Ogre::Quaternion q = cam->getDerivedOrientation();
+    const Ogre::Vector3 fwd = q * Ogre::Vector3::NEGATIVE_UNIT_Z;
+    const Ogre::Vector3 right = q * Ogre::Vector3::UNIT_X;
+    const Ogre::Vector3 up = q * Ogre::Vector3::UNIT_Y;
+    Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
+    cam->getFrustumExtents(fl, fr, ft, fb,
+                           ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
+    put3(pp.camPos, camPos, ortho ? 0.0f : 1.0f);
+    put3(pp.rayTL, right * fl + up * ft + (ortho ? Ogre::Vector3::ZERO : fwd), 0.0f);
+    put3(pp.rayRight, right * (fr - fl), 0.0f);
+    put3(pp.rayDown, up * (fb - ft), 0.0f);
+    put3(pp.fwd, fwd, 0.0f);
+    put3(pp.viewAxisX, right, 0.0f);
+    put3(pp.viewAxisY, up, 0.0f);
+    put3(pp.viewAxisZ, -fwd, 0.0f);          // Ogre's view space looks down -Z
+    const Ogre::Vector2 projAB = cam->getProjectionParamsAB();
+    pp.projParams[0] = projAB.x;
+    pp.projParams[1] = projAB.y;
+    pp.projParams[2] = cam->getFarClipDistance();
+    pp.resolution[0] = float(gv.gridW); pp.resolution[1] = float(gv.gridH);
+    pp.resolution[2] = float(fullW);     pp.resolution[3] = float(fullH);
+    pp.knobs[0] = float(stride);
+    // THE NEAR FIELD'S REACH. The same derivation the reflection trace makes —
+    // long enough to cross the lit volume a hit is shaded from, bounded by the
+    // camera's far plane — because a gather ray that outruns the cache finds
+    // geometry nothing can colour, which this shader draws BLACK.
+    {
+        const float reach = voxCount ? voxSize[voxCount - 1u].length() : 0.0f;
+        const float derived = std::min(cam->getFarClipDistance(), std::max(reach, 50.0f));
+        pp.knobs[1] = desc.rayLength > 0.0f ? desc.rayLength : derived;
+    }
+    // THE SAMPLE SEQUENCE'S ONLY INPUT, and the determinism arm that holds it.
+    pp.knobs[2] = desc.freezeFrameIndex ? 0.0f : float(gv.frame & 0xFFFFu);
+    pp.knobs[3] = float(voxCount);
+    pp.knobs2[0] = anisotropic ? 1.0f : 0.0f;
+    pp.knobs2[1] = voxCount ? std::max(0.01f, 0.5f * voxCell[0].length()) : 0.02f;
+    pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
+    const unsigned rays = std::min(std::max(desc.raysPerProbe, 1u), kGatherRaysPerProbe);
+    pp.knobs2[3] = float(rays);
+    pp.flags[0] = desc.farTermOff ? 1.0f : 0.0f;
+    for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, scene->mSkySh[i] * 0.282095f);
+    for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
+        const unsigned src = c < voxCount ? c : (voxCount ? voxCount - 1u : 0u);
+        const Ogre::Vector3 sz = voxCount ? voxSize[src] : Ogre::Vector3(1.0f);
+        const Ogre::Vector3 og = voxCount ? voxOrigin[src] : Ogre::Vector3::ZERO;
+        const Ogre::Vector3 cl = voxCount ? voxCell[src] : Ogre::Vector3(1.0f);
+        pp.voxelOrigin[c][0] = og.x; pp.voxelOrigin[c][1] = og.y; pp.voxelOrigin[c][2] = og.z;
+        pp.voxelOrigin[c][3] = voxCount ? voxMultiplier[src] : 1.0f;
+        pp.voxelInvSize[c][0] = sz.x > 0.0f ? 1.0f / sz.x : 0.0f;
+        pp.voxelInvSize[c][1] = sz.y > 0.0f ? 1.0f / sz.y : 0.0f;
+        pp.voxelInvSize[c][2] = sz.z > 0.0f ? 1.0f / sz.z : 0.0f;
+        pp.voxelInvSize[c][3] = std::max(std::max(cl.x, cl.y), cl.z);
+    }
+    memcpy(gv.traceParams[ring].mapped, &pp, sizeof(pp));
+    GatherIntegrateParams ip{};
+    ip.resolution[0] = float(gv.gridW); ip.resolution[1] = float(gv.gridH);
+    ip.resolution[2] = float(fullW);    ip.resolution[3] = float(fullH);
+    ip.knobs[0] = float(stride);
+    memcpy(gv.integrateParams[ring].mapped, &ip, sizeof(ip));
+
+    // ---- THE DESCRIPTOR SETS, rewritten every frame ------------------------
+    // Uncached views, retired: the reflection path's measured trap (a cached
+    // view of a texture recreated at the same address is a view of a dead
+    // image) applies here word for word.
+    const auto sampledView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot =
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = t;
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    const auto uavView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetUav::TextureSlot slot =
+            Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = t;
+        slot.access = Ogre::ResourceAccess::ReadWrite;
+        slot.pixelFormat = t->getPixelFormat();
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+    asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asWrite.accelerationStructureCount = 1;
+    asWrite.pAccelerationStructures = &sa.tlas;
+    VkDescriptorBufferInfo ub{};
+    ub.buffer = gv.traceParams[ring].buffer;
+    ub.range = sizeof(GatherParams);
+    VkDescriptorImageInfo sampled[2] = {}, probeStore{}, volumes[4][kMaxReflectCascades] = {}, sky{};
+    Ogre::TextureGpu *const sampledSrc[2] = { normalTex, depthTex };
+    for (int i = 0; i < 2; ++i) {
+        sampled[i].sampler = mPointSampler;
+        sampled[i].imageView = sampledView(sampledSrc[i]);
+        sampled[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    probeStore.imageView = gv.probe.view;
+    probeStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    for (int axis = 0; axis < 4; ++axis)
+        for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
+            const unsigned src = c < voxCount ? c : (voxCount ? voxCount - 1u : 0u);
+            Ogre::TextureGpu *t = voxCount ? vox[src][axis] : nullptr;
+            volumes[axis][c].sampler = mLinearSampler;
+            volumes[axis][c].imageView = t ? sampledView(t) : mDummyVolume.view;
+            volumes[axis][c].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (!volumes[axis][c].imageView) return;
+        }
+    sky.sampler = mLinearSampler;
+    sky.imageView = skyTex ? sampledView(skyTex) : mDummyCube.view;
+    sky.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!sky.imageView || !probeStore.imageView) return;
+
+    VkWriteDescriptorSet w[kGatherBindings] = {};
+    for (unsigned i = 0; i < kGatherBindings; ++i) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = gv.traceSets[ring];
+        w[i].dstBinding = i;
+        w[i].descriptorCount = 1;
+    }
+    w[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    w[0].pNext = &asWrite;
+    w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    w[1].pBufferInfo = &ub;
+    for (int i = 0; i < 2; ++i) {
+        w[2 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[2 + i].pImageInfo = &sampled[i];
+    }
+    w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[4].pImageInfo = &probeStore;
+    for (int axis = 0; axis < 4; ++axis) {
+        w[5 + axis].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[5 + axis].descriptorCount = kMaxReflectCascades;
+        w[5 + axis].pImageInfo = volumes[axis];
+    }
+    w[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[9].pImageInfo = &sky;
+    vkUpdateDescriptorSets(mVk, kGatherBindings, w, 0, nullptr);
+
+    VkDescriptorBufferInfo iub{};
+    iub.buffer = gv.integrateParams[ring].buffer;
+    iub.range = sizeof(GatherIntegrateParams);
+    VkDescriptorImageInfo istore[2] = {};
+    istore[0].imageView = gv.probe.view;
+    istore[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    istore[1].imageView = uavView(gv.irradiance);
+    istore[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!istore[1].imageView) return;
+    VkWriteDescriptorSet iw[kGatherIntegrateBindings] = {};
+    for (unsigned i = 0; i < kGatherIntegrateBindings; ++i) {
+        iw[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        iw[i].dstSet = gv.integrateSets[ring];
+        iw[i].dstBinding = i;
+        iw[i].descriptorCount = 1;
+    }
+    iw[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    iw[0].pBufferInfo = &iub;
+    iw[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    iw[1].pImageInfo = &istore[0];
+    iw[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    iw[2].pImageInfo = &istore[1];
+    vkUpdateDescriptorSets(mVk, kGatherIntegrateBindings, iw, 0, nullptr);
+
+    // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER ----------------------------
+    // Before the command buffer is taken, for the reason recorded at the
+    // reflection's own transition block: executeResourceTransition closes
+    // every encoder and the queue may roll over to a new command buffer.
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, gv.irradiance, Ogre::ResourceLayout::Uav,
+                                 Ogre::ResourceAccess::ReadWrite, computeStage);
+        for (Ogre::TextureGpu *t : { normalTex, depthTex })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        for (unsigned c = 0; c < voxCount; ++c)
+            for (int axis = 0; axis < 4; ++axis)
+                if (vox[c][axis])
+                    solver.resolveTransition(trans, vox[c][axis], Ogre::ResourceLayout::Texture,
+                                             Ogre::ResourceAccess::Read, computeStage);
+        if (skyTex)
+            solver.resolveTransition(trans, skyTex, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+
+    // ---- THE TWO DISPATCHES ------------------------------------------------
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
+    clearDummyImages(cmd);
+    clearGatherProbe(gv, cmd);
+    const bool timed = mGatherTimestamps && gv.hasQueryBase;
+    const uint32_t qbase = gv.queryBase + (gv.frame % kFramesInFlight) * 4u;
+    if (timed) {
+        vkCmdResetQueryPool(cmd, mGatherTimestamps, qbase, 4);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mGatherTimestamps, qbase);
+    }
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGatherTracePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGatherTracePipeLayout, 0, 1,
+                            &gv.traceSets[ring], 0, nullptr);
+    // ONE WORKGROUP PER PROBE — the trace's 64 threads ARE its 64 rays.
+    vkCmdDispatch(cmd, gv.gridW, gv.gridH, 1u);
+    if (timed)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mGatherTimestamps,
+                            qbase + 1u);
+    {
+        VkMemoryBarrier probesReady{};
+        probesReady.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        probesReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        probesReady.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &probesReady, 0, nullptr,
+                             0, nullptr);
+    }
+    if (timed)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mGatherTimestamps, qbase + 2u);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGatherIntegratePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGatherIntegratePipeLayout, 0, 1,
+                            &gv.integrateSets[ring], 0, nullptr);
+    vkCmdDispatch(cmd, (fullW + 7u) / 8u, (fullH + 7u) / 8u, 1u);
+    if (timed) {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mGatherTimestamps,
+                            qbase + 3u);
+        GatherView::Pending &pd = gv.pending[gv.frame % kFramesInFlight];
+        pd.frame = frameNow();
+        pd.live = true;
+    }
+    // ...AND NOW THE PIXEL SHADER READS IT. The transition to a sampled layout
+    // is ours to ask for: the scene pass that follows does not know this
+    // texture exists (it arrives through the Hlms listener's extra slot, not
+    // through the compositor), so nobody else would order the barrier.
+    {
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, gv.irradiance, Ogre::ResourceLayout::Texture,
+                                 Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        mRs->executeResourceTransition(trans);
+    }
+    // THE PROPERTY AND THE TEXTURE ARE SET TOGETHER OR NOT AT ALL — the same
+    // rule the sky's env slot states: a slot claimed by getNumExtraPassTextures
+    // and left unbound is an undefined descriptor.
+    FogHlmsListener::setProbeGather(scene->mSceneMgr, gv.irradiance);
+    gv.probes = gv.gridW * gv.gridH;
+    gv.raysPerProbe = rays;
+    gv.cpuMs = float(msSince(cpuStart));
+    ++gv.frame;
+    if (sEnvLog && (gv.frame % 120u) == 0u) {
+        char line[320];
+        std::snprintf(line, sizeof(line),
+                      "GATHER-0: %ux%u probes (%u) x %u rays = %u over %ux%u — trace %.4f ms, "
+                      "integrate %.4f ms, record %.4f ms CPU, %.2f MB",
+                      gv.gridW, gv.gridH, gv.probes, gv.raysPerProbe, gv.probes * gv.raysPerProbe,
+                      gv.w, gv.h, double(gv.traceMs), double(gv.integrateMs), double(gv.cpuMs),
+                      double(gv.vramBytes) / (1024.0 * 1024.0));
+        Ogre::LogManager::getSingleton().logMessage(line);
+    }
+}
+
+// ---------------------------------------------------------------------------
 /// A DESTRUCTOR MAY NOT THROW — it is implicitly `noexcept`, so an exception
 /// leaving it is `std::terminate`, and this one submits to the GPU (lane VR-3b,
 /// 2026-09-17; the owner's WiVRn smoke died exactly here). The chain was:
@@ -3182,6 +4032,7 @@ ReflectPassListener::~ReflectPassListener() {
         Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
         if (rs && !rs->isDeviceLost()) rs->flushCommands();
         mView->mEngine->mRayTier->forgetReflect(this);
+        mView->mEngine->mRayTier->forgetGather(this);
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener could not be flushed away cleanly (" +
@@ -3191,11 +4042,13 @@ ReflectPassListener::~ReflectPassListener() {
         // by an address that is about to be freed and the next view allocated at
         // it inherits a stranger's images.
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
     } catch (...) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener's teardown threw a non-Ogre exception",
             Ogre::LML_CRITICAL);
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
     }
 }
 
@@ -3209,6 +4062,10 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
     if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
     mView->mEngine->mRayTier->recordReflect(this, mView, pass);
+    // GATHER-0 rides the SAME hook, and it has to: the probe's surface is the
+    // prepass' depth and normals, and the pixel that reads the gather's answer
+    // is shaded by the very pass this listener runs in front of.
+    mView->mEngine->mRayTier->recordGather(this, mView, pass);
 }
 
 void OgreView::dropReflectState() {
@@ -3220,6 +4077,7 @@ void OgreView::dropReflectState() {
     // chain, so the flush costs nothing that was not already being paid.
     if (mRoot && mRoot->getRenderSystem()) mRoot->getRenderSystem()->flushCommands();
     mEngine->mRayTier->forgetReflect(mReflectListener.get());
+    mEngine->mRayTier->forgetGather(mReflectListener.get());
 }
 
 void OgreView::syncReflectListener() {
@@ -3302,10 +4160,38 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     // same (world.rayTracing's contract): no gather, no BLAS/TLAS for it. The
     // structures it may already hold were released when the row flipped
     // (OgreScene::setRayTracing → forgetRayQuery).
+    // GATHER-0: THE SPIKE'S SHADER BINDING IS A PER-FRAME, PER-VIEW FACT, and
+    // this is the one place in the frame where no view has drawn yet. Each
+    // gathering view re-registers its own irradiance texture in its
+    // passPreExecute, immediately before the pass that samples it; a view that
+    // does not gather must not inherit the previous one's.
+    FogHlmsListener::clearProbeGather();
     for (OgreScene *s : drawn) {
         if (!s->rayTracingResolved()) continue;
         mRayTier->updateScene(s);
     }
+}
+
+// ---------------------------------------------------------------------------
+/// GATHER-0's one door (Engine.h). Arming it records two compute dispatches in
+/// every frame this scene's views draw; disarming frees what they hold at the
+/// next frame each view records. Nothing else in the engine reads the flag.
+bool OgreScene::probeGatherSpike(const ProbeGatherSpikeDesc &desc, ProbeGatherSpikeResult &out) {
+    out = ProbeGatherSpikeResult();
+    if (!mEngine) { out.error = "no engine"; return false; }
+    if (desc.on && !mEngine->rayQueryAvailable()) {
+        out.error = "this device has no hardware ray query";
+        return false;
+    }
+    if (desc.on && !rayTracingResolved()) {
+        out.error = "the scene's ray-tracing row is off";
+        return false;
+    }
+    mGatherSpike = desc;
+    out.armed = desc.on;
+    out.ok = true;
+    if (mEngine->mRayTier) mEngine->mRayTier->gatherStatsInto(this, out);
+    return true;
 }
 
 void OgreEngine::shutdownRayQuery() {
@@ -3386,6 +4272,11 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
 }
 void OgreScene::gatherRayInstances(RayInstanceSink &) const {}
 void OgreScene::forgetRayQuery() {}
+bool OgreScene::probeGatherSpike(const ProbeGatherSpikeDesc &, ProbeGatherSpikeResult &out) {
+    out.ok = false;
+    out.error = "this build has no hardware ray-query tier";
+    return false;
+}
 bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}
 

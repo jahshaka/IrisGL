@@ -1,0 +1,44 @@
+#version 460
+// GATHER-0 — THE NAKED INTEGRATE (phase 0 of SCREEN_PROBE_GATHER_SPEC.md).
+//
+// One thread per PIXEL. The probe whose 16x16 block the pixel belongs to is
+// the only one it reads — NEAREST, with no plane weights, no four-probe
+// bilinear and no filter, which is the phase-0 contract: what is being
+// measured here is the cost of the read and the SHAPE of the answer, not its
+// quality. A pixel therefore takes the diffuse GI of the surface its block's
+// CENTRE pixel drew, which is exactly right in the interior of a flat surface
+// and exactly wrong across a silhouette — the blockiness a reader sees in the
+// sheet is that, and phase 2's plane-weighted four-probe integrate is what
+// removes it.
+//
+// The output is `jahProbeIrradiance`: rgb = the mean radiance over the
+// cosine-weighted hemisphere (what HlmsPbs's `envColourD` is — see the trace
+// shader's header), w = 1 where a probe answered and 0 where none did. The
+// pixel piece multiplies by w, so a no-probe pixel keeps whatever the field
+// or the cones already gave it. That IS the fallback rule of spec section 2
+// item 8, in its simplest possible form.
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform Params
+{
+	/// xy = the probe grid in probes, zw = the full-resolution target size.
+	vec4 resolution;
+	/// x = the probe stride in pixels. y/z/w reserved.
+	vec4 knobs;
+} p;
+
+layout( rgba16f, set = 0, binding = 1 ) uniform readonly image2D probeRadiance;
+layout( rgba16f, set = 0, binding = 2 ) uniform image2D probeIrradiance;
+
+void main()
+{
+	const ivec2 full = ivec2( p.resolution.zw );
+	const ivec2 pix = ivec2( gl_GlobalInvocationID.xy );
+	if( any( greaterThanEqual( pix, full ) ) )
+		return;
+	const ivec2 grid = ivec2( p.resolution.xy );
+	const float stride = max( p.knobs.x, 1.0 );
+	const ivec2 cell = clamp( ivec2( vec2( pix ) / stride ), ivec2( 0 ), grid - 1 );
+	const vec4 probe = imageLoad( probeRadiance, cell );
+	imageStore( probeIrradiance, pix, probe.w > 0.5 ? probe : vec4( 0.0 ) );
+}

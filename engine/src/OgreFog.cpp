@@ -43,6 +43,10 @@ std::map<const Ogre::SceneManager *, FogHlmsListener::SkyEnvState>
                                                FogHlmsListener::sSkyEnv;      // render thread only
 Ogre::TextureGpu             *FogHlmsListener::sPassSkyCube    = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sPassSkySampler = nullptr;     // render thread only
+std::map<const Ogre::SceneManager *, Ogre::TextureGpu *>
+                              FogHlmsListener::sProbeGather;                  // render thread only
+Ogre::TextureGpu             *FogHlmsListener::sPassProbeGather = nullptr;    // render thread only
+const Ogre::HlmsSamplerblock *FogHlmsListener::sPassProbeGatherSampler = nullptr;  // render thread
 
 FogHlmsListener gFogListener;
 
@@ -105,17 +109,42 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
     // so the same property set always yields the same shader.
     {
         static const Ogre::IdString kSkyEnvProbe("jah_sky_env_probe");
+        static const Ogre::IdString kProbeGather("jah_probe_gather");
         static const Ogre::IdString kSet0End("set0_texture_slot_end");
         static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
-        if (hlms->_getProperty(tid, kSkyEnvProbe) && !hlms->_getProperty(tid, kShadowCaster)) {
-            const Ogre::int32 slot = hlms->_getProperty(tid, kSet0End) - 1;
-            if (slot >= 0)
-                hlms->_setTextureReg(tid, Ogre::PixelShader, "jahSkyEnvProbe", slot);
+        if (!hlms->_getProperty(tid, kShadowCaster)) {
+            const bool sky = hlms->_getProperty(tid, kSkyEnvProbe) != 0;
+            const bool gather = hlms->_getProperty(tid, kProbeGather) != 0;
+            const Ogre::int32 extras = (sky ? 1 : 0) + (gather ? 1 : 0);
+            // The extras are the LAST registers of set 0 (HlmsPbs reserved
+            // them with `texUnit += getNumExtraPassTextures()` immediately
+            // before writing set0_texture_slot_end), in the fixed order that
+            // function states: sky, then gather.
+            Ogre::int32 slot = hlms->_getProperty(tid, kSet0End) - extras;
+            if (slot >= 0) {
+                if (sky) hlms->_setTextureReg(tid, Ogre::PixelShader, "jahSkyEnvProbe", slot++);
+                if (gather)
+                    hlms->_setTextureReg(tid, Ogre::PixelShader, "jahProbeIrradiance", slot++);
+            }
         }
     }
     static const Ogre::IdString kIrradianceField("irradiance_field");
     static const Ogre::IdString kVctNumProbes("vct_num_probes");
     static const Ogre::IdString kVctDisableDiffuse("vct_disable_diffuse");
+    {
+        // GATHER-0: WHERE THE GATHER ANSWERS, THE CONES MUST NOT ALSO ANSWER.
+        // The six cone marches per pixel and the probe's 64 rays estimate the
+        // SAME integral; adding them is that integral twice. This is the whole
+        // of spec section 3's first row, in its phase-0 form — and it is the
+        // switch that makes the measured arms comparable at all. Cache-safe:
+        // derived from a pass property already in the merged set.
+        static const Ogre::IdString kProbeGather("jah_probe_gather");
+        static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
+        if (hlms->_getProperty(tid, kProbeGather) && !hlms->_getProperty(tid, kShadowCaster)) {
+            hlms->_setProperty(tid, kVctDisableDiffuse, 1);
+            return;
+        }
+    }
     if (!hlms->_getProperty(tid, kIrradianceField)) return;
     if (hlms->_getProperty(tid, kVctNumProbes) <= 1) return;
     hlms->_setProperty(tid, kVctDisableDiffuse, 0);
@@ -133,7 +162,16 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
 Ogre::uint16 FogHlmsListener::getNumExtraPassTextures(const Ogre::HlmsPropertyVec &properties,
                                                       bool casterPass) const {
     static const Ogre::IdString kSkyEnvProbe("jah_sky_env_probe");
-    return (!casterPass && Ogre::Hlms::getProperty(properties, kSkyEnvProbe) != 0) ? 1u : 0u;
+    static const Ogre::IdString kProbeGather("jah_probe_gather");
+    if (casterPass) return 0u;
+    // TWO POSSIBLE EXTRAS, AND THE ORDER IS FIXED: the sky's cube first, the
+    // gather's irradiance second. Three places must agree about it — this
+    // count, the registers claimed in propertiesMergedPreGenerationStep, and
+    // the bindings emitted in hlmsTypeChanged — so it is stated once, here.
+    Ogre::uint16 n = 0u;
+    if (Ogre::Hlms::getProperty(properties, kSkyEnvProbe) != 0) ++n;
+    if (Ogre::Hlms::getProperty(properties, kProbeGather) != 0) ++n;
+    return n;
 }
 
 void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *commandBuffer,
@@ -141,9 +179,20 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
     // The pair is set together in preparePassHash or not at all: a slot claimed
     // by getNumExtraPassTextures and left unbound is an undefined descriptor,
     // and the two conditions must therefore be the SAME condition.
-    if (casterPass || !sPassSkyCube || !sPassSkySampler || !commandBuffer) return;
-    *commandBuffer->addCommand<Ogre::CbTexture>() =
-        Ogre::CbTexture(Ogre::uint16(texUnit), sPassSkyCube, sPassSkySampler);
+    if (casterPass || !commandBuffer) return;
+    size_t unit = texUnit;
+    if (sPassSkyCube && sPassSkySampler) {
+        *commandBuffer->addCommand<Ogre::CbTexture>() =
+            Ogre::CbTexture(Ogre::uint16(unit), sPassSkyCube, sPassSkySampler);
+        ++unit;
+    }
+    // GATHER-0's irradiance, second in the fixed order (see
+    // getNumExtraPassTextures).
+    if (sPassProbeGather && sPassProbeGatherSampler) {
+        *commandBuffer->addCommand<Ogre::CbTexture>() =
+            Ogre::CbTexture(Ogre::uint16(unit), sPassProbeGather, sPassProbeGatherSampler);
+        ++unit;
+    }
 }
 
 void FogHlmsListener::setSkyEnv(const Ogre::SceneManager *sm, const SkyEnvState &state) {
@@ -155,6 +204,18 @@ void FogHlmsListener::setSkyEnv(const Ogre::SceneManager *sm, const SkyEnvState 
 FogHlmsListener::SkyEnvState FogHlmsListener::skyEnv(const Ogre::SceneManager *sm) {
     auto it = sSkyEnv.find(sm);
     return it == sSkyEnv.end() ? SkyEnvState() : it->second;
+}
+
+// GATHER-0 — the screen-probe gather spike's registration (see the header).
+void FogHlmsListener::setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance) {
+    if (!sm) return;
+    if (!irradiance) { sProbeGather.erase(sm); return; }
+    sProbeGather[sm] = irradiance;
+}
+void FogHlmsListener::clearProbeGather() { sProbeGather.clear(); }
+Ogre::TextureGpu *FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
+    auto it = sProbeGather.find(sm);
+    return it == sProbeGather.end() ? nullptr : it->second;
 }
 
 void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
@@ -200,6 +261,33 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             sPassSkyCube = sky.cube;
             sPassSkySampler = sampler;
             hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_sky_env_probe", 1);
+        }
+    }
+    // GATHER-0 — THE SCREEN-PROBE GATHER SPIKE (2026-09-21). The same three
+    // decisions in one place as the sky's slot above: the PROPERTY (which
+    // makes the pixel piece exist and participates in the pass hash), the
+    // TEXTURE, and the SAMPLER — set together or not at all.
+    //
+    // `sProbeGather` is empty in every build that never arms the spike and on
+    // every frame of one that has disarmed it, so this is one map lookup on a
+    // colour pass and nothing else changes anywhere.
+    sPassProbeGather = nullptr;
+    sPassProbeGatherSampler = nullptr;
+    if (hlms && !casterPass && sceneManager && !sProbeGather.empty()) {
+        Ogre::TextureGpu *gather = probeGather(sceneManager);
+        if (gather) {
+            // A POINT sampler: the piece reads the texel under the fragment,
+            // never between two of them. The samplerblock is the Hlms
+            // manager's own reference-counted one, released at the pass's end
+            // by nobody — it is a shared block, borrowed exactly as the sky's
+            // trilinear one is.
+            Ogre::HlmsSamplerblock ref;
+            ref.setFiltering(Ogre::TFO_NONE);
+            ref.setAddressingMode(Ogre::TAM_CLAMP);
+            sPassProbeGatherSampler =
+                hlms->getHlmsManager()->getSamplerblock(ref);
+            sPassProbeGather = gather;
+            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_probe_gather", 1);
         }
     }
     if (casterPass || !shadowNode || !hlms) return;
