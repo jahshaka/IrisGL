@@ -1603,6 +1603,24 @@ public:
     /// editor's loading cover (src/viewport/viewportcover.h) is on screen until
     /// this passes its threshold.
     virtual unsigned long long framesPresented() const = 0;
+    /// THE OTHER HALF OF THAT QUESTION (lane STALE-VIEW-1): how many frames this
+    /// View has drawn AND presented with NO SCENE BOUND — its background cleared
+    /// and whatever the host asked the HUD to draw over it, and nothing else.
+    ///
+    /// A View with no scene used to present NOTHING, so a window kept the last
+    /// frame it was given — the world that had just been torn down — and the
+    /// "No world open" panel a host raises over an empty viewport changed not
+    /// one pixel. A View whose scene has been TAKEN AWAY now owns a clear-only
+    /// workspace, and this counts what it puts on screen. (Taken away, not
+    /// "never bound": a view that has never had a scene has no workspace at
+    /// all, which is what makes a thumbnail's first frame its own — see
+    /// chain::buildBlank in the engine.)
+    ///
+    /// Monotonic for the life of the View (a scene bind does NOT reset it — the
+    /// question a caller asks across a load is "did the teardown reach the
+    /// screen", which is a difference across the load, not a state). It is the
+    /// number that says a load in place never showed the previous world.
+    virtual unsigned long long blankFramesPresented() const = 0;
     /// HOW MANY TIMES THIS VIEW'S PER-FRAME CHAIN GLOBALS HAVE BEEN PUSHED
     /// (lane EYE-GRADE-1's fix round; the mechanism is one workspace listener
     /// per view, firing immediately before that view's passes execute).

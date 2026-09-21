@@ -1201,6 +1201,37 @@ struct ChainHandles {
 void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
            const ChainDesc &desc, std::vector<std::string> &nodeDefsOut,
            ChainHandles &handlesOut);
+/// THE CLEAR-ONLY CHAIN A VIEW OWNS AFTER ITS FIRST SCENE IS TAKEN AWAY (lane
+/// STALE-VIEW-1).
+///
+/// AFTER, and the word is exact: a view that has NEVER been bound has no
+/// workspace of any kind — `createView` attaches none, and the seam only ever
+/// runs when a scene arrives or leaves. That is deliberate and it is what
+/// thumbnails, previews and every pixel suite want: they are created, given a
+/// scene and rendered, and a clear before their first bind would be a frame of
+/// somebody's background in a picture nobody asked to have one. Studio has no
+/// path that shows a never-bound view, so the weaker invariant is the whole
+/// story today.
+///
+/// One clear to `background` and the overlay pass, and nothing else — there is
+/// no scene to draw, so there is no scene pass, no shadow node and no effect.
+///
+/// It exists because a View with NO WORKSPACE PRESENTS NOTHING, and a window
+/// that presents nothing keeps whatever frame the X server was last given.
+/// Measured on the rig against the unmodified base (spikes/stale-view-1/): in a
+/// load IN PLACE that is the one to two frames between the teardown and the
+/// moment the host's panel rebuild takes the window off screen — the ~700 ms
+/// the user then looks at is the host's own watermark over an unmapped window,
+/// which no engine can reach. The bigger half is the other defect with the same
+/// cause: the "No world open" panel, raised by every close, changed not one
+/// pixel.
+///
+/// `overlays` is the view's own entitlement (OgreView::overlaysAllowed) — the
+/// same gate the scene chain's overlay pass takes, so a view that may not draw
+/// the HUD does not start drawing it because its scene went away.
+void buildBlank(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+                const Colour &background, bool overlays,
+                std::vector<std::string> &nodeDefsOut);
 /// The inner rectangle for a letterboxed view: the largest `aspect`-shaped
 /// rectangle centred in a target of `targetAspect`. Normalised coordinates.
 void letterboxRect(float aspect, float targetAspect, float inner[4]);
@@ -5442,7 +5473,13 @@ public:
     NodeId cameraNode() const override { return mCameraNode; }
 
     /// Unbinds the scene: workspace and camera go, the scene itself survives.
-    void detachScene();
+    /// `takeBlank` = "and put the clear-only chain up in its place", which is
+    /// what a scene-less view owns (chain::buildBlank). FALSE from destroy()
+    /// only: this view is going away, and building a two-pass chain — and, in a
+    /// process that never lost a scene, the engine's blank SceneManager — to
+    /// tear it down one line later is work nobody can see. In particular it
+    /// kept ~OgreEngine from creating a SceneManager inside its own destructor.
+    void detachScene(bool takeBlank = true);
 
     void setCamera(const CameraDesc &c) override;
     void setEnabled(bool on) override;
@@ -5551,7 +5588,26 @@ public:
     bool giPriority() const { return mGiPriority; }
     /// Drops the live workspace (detaching its listeners first). Safe when
     /// there is none; returns whether one was actually dropped.
+    ///
+    /// INCLUDES THE CLEAR-ONLY WORKSPACE (lane STALE-VIEW-1): a scene-less view
+    /// owns one, it targets the same texture, and every caller of this pair is
+    /// about to change that texture or the definitions behind it — so both
+    /// kinds go through the one seam and the `hadWorkspace` answer means the
+    /// same thing for both.
     bool detachWorkspace();
+    /// THE CLEAR-ONLY WORKSPACE of a view with no scene bound (chain::buildBlank
+    /// says why it exists). Built by attachWorkspace when there is no scene,
+    /// dropped by detachWorkspace and replaced by the scene chain at the next
+    /// bind. Definitions are rebuilt with it, so a background change carries.
+    bool attachBlankWorkspace();
+    bool detachBlankWorkspace();
+    /// Removes the clear-only chain's definitions. Called from destroy() only —
+    /// every other path rebuilds them through attachBlankWorkspace.
+    void destroyBlankChain();
+    /// Is this view drawing its clear-only workspace THIS frame? Read by
+    /// OgreEngine::renderOneFrame, which must update the blank scene manager in
+    /// the same frame its workspace runs (the rule stated in that loop).
+    bool drawsBlank() const { return mEnabled && mBlankWorkspace != nullptr; }
     /// Compositor listeners this view re-attaches to every workspace it builds.
     /// The view does NOT own them: register at setup, unregister before the
     /// listener dies. Registering twice is a no-op.
@@ -5564,6 +5620,7 @@ public:
     unsigned workspaceGeneration() const override;
 
     unsigned long long framesPresented() const override;
+    unsigned long long blankFramesPresented() const override;
     bool warmUpShaders() override;
     /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts
     /// this frame if the view was actually part of it (enabled + workspace +
@@ -5839,6 +5896,15 @@ private:
     Ogre::Camera              *mCamera    = nullptr;
     Ogre::CompositorWorkspace *mWorkspace = nullptr;
     OgreScene                 *mScene     = nullptr;
+    /// The clear-only workspace, its camera on the engine's blank scene manager
+    /// and its definitions (chain::buildBlank). Live exactly while no scene is
+    /// bound; the camera is created once and outlives the workspace rebuilds.
+    Ogre::CompositorWorkspace *mBlankWorkspace = nullptr;
+    Ogre::Camera              *mBlankCamera    = nullptr;
+    std::string                mBlankWorkspaceDef;
+    std::vector<std::string>   mBlankNodeDefs;
+    /// @see View::blankFramesPresented.
+    unsigned long long         mBlankFramesPresented = 0;
     std::string                mName, mWorkspaceDef;
     /// Every node definition the chain builder made for this view, in creation
     /// order. Was a single std::string while the chain was one node — a
@@ -6075,6 +6141,10 @@ public:
 
     Scene *createScene(const std::string &name, unsigned workerThreads = 0) override;
     void *documentGraphScene() override;
+    /// The blank scene manager (@see mBlankScene), created on the first call.
+    /// Null only when the Hlms is not registered yet, which cannot happen on
+    /// the path that asks: a View exists by then.
+    Ogre::SceneManager *blankSceneManager();
     bool  isHeadless() const override { return mHeadless; }
 
     void destroyScene(Scene *scene) override;
@@ -6529,6 +6599,12 @@ private:
     /// The document's staging scene manager (SPECS/SCENEGRAPH_SPEC.md D2).
     /// Owned here so that it dies with the engine, before the Root.
     Ogre::SceneManager *mDocumentScene = nullptr;
+    /// THE BLANK SCENE MANAGER (lane STALE-VIEW-1): the empty world every
+    /// scene-less View's clear-only workspace runs against. One per process and
+    /// created on demand, in the shape mDocumentScene is created in and for the
+    /// same reason — a compositor workspace needs a SceneManager and a camera,
+    /// and nothing in here is ever culled, lit or drawn. @see blankSceneManager.
+    Ogre::SceneManager *mBlankScene = nullptr;
 #ifdef __linux__
     /// The host's X11 `Display*`, kept opaque (see X11Handle) — this TU never
     /// dereferences it, it only hands it back to Ogre.

@@ -268,6 +268,31 @@ void *OgreEngine::documentGraphScene() {
     } JAH_CATCH(mLastError, nullptr);
 }
 
+// THE BLANK WORLD (lane STALE-VIEW-1). A compositor workspace needs a
+// SceneManager and a camera, and a View with no scene has neither — so the
+// clear-only chain a scene-less View owns (chain::buildBlank) runs against this
+// one. It holds nothing, ever: no item, no light, no forward+ setup. The only
+// pass that names it renders the OVERLAY queues, which are screen-space, and
+// the only object it owns is one camera per View that has ever lost a scene.
+//
+// ZERO WORKER THREADS, for exactly the reason mDocumentScene takes zero
+// (THREADING_ADOPTION_SPEC.md P5): at 0 Ogre sets mForceMainThread and runs the
+// parallel passes inline with no barrier and no thread. An empty world updated
+// once a frame through an inline pass is free; a thread pool for it would not be.
+Ogre::SceneManager *OgreEngine::blankSceneManager() {
+    if (mBlankScene) return mBlankScene;
+    if (!mHlmsRegistered) { mLastError = "blankSceneManager: Hlms unavailable"; return nullptr; }
+    JAH_TRY {
+        mBlankScene = mRoot->createSceneManager(Ogre::ST_GENERIC, 0u,
+                                                processUniqueName("jahshaka-blank"));
+        // The engine-drawn overlay's render-queue half is per SceneManager
+        // (STATS_OVERLAY_SPEC §2.1) — and this manager exists precisely so the
+        // HUD still has somewhere to draw when the world is gone.
+        hud::attach(mBlankScene);
+        return mBlankScene;
+    } JAH_CATCH(mLastError, nullptr);
+}
+
 Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) {
     if (!mHlmsRegistered) {
         mLastError = "createScene('" + name + "'): no View exists yet — create a View first";
@@ -1026,6 +1051,16 @@ void OgreEngine::renderOneFrame() {
         // enabled flag, so one snapshot is honest.
         std::vector<OgreScene *> updated;
         scenesFeedingEnabledViews(updated);
+        // ...AND THE BLANK WORLD, when a scene-less View is drawing its
+        // clear-only workspace this frame (lane STALE-VIEW-1). This is the
+        // "a future feature that creates a workspace not owned by a View has to
+        // extend scenesFeedingEnabledViews" case, answered in its own variable
+        // because the blank manager is not an OgreScene and takes part in
+        // nothing else: it is updated and cleared with the others, below, and
+        // that is all the rule asks.
+        Ogre::SceneManager *blankUpdated = nullptr;
+        for (auto &v : mViews)
+            if (v->drawsBlank()) { blankUpdated = blankSceneManager(); break; }
         const auto drawnThisFrame = [&updated](const OgreScene *s) {
             return std::find(updated.begin(), updated.end(), s) != updated.end();
         };
@@ -1195,6 +1230,7 @@ void OgreEngine::renderOneFrame() {
                     std::unique_ptr<monitor::Stage> st;
                     if (monitor::live()) st.reset(new monitor::Stage("engine.sceneGraph"));
                     for (OgreScene *s : updated) s->sceneManager()->updateSceneGraph();
+                    if (blankUpdated) blankUpdated->updateSceneGraph();
                 }
                 // THE LAMP-MAP CACHE, second half: here and nowhere earlier. The
                 // scene graph has just made every world AABB and light pose this
@@ -1233,6 +1269,7 @@ void OgreEngine::renderOneFrame() {
                 }
                 if (monRendered) {
                     for (OgreScene *s : updated) s->sceneManager()->clearFrameData();
+                    if (blankUpdated) blankUpdated->clearFrameData();
                     // MIRRORS OgreRoot.cpp:1123 EXACTLY. `Root::renderOneFrame`
                     // is the only place upstream samples FrameStats, so skipping
                     // it would zero fps/frameMs/p95/p99/best/worst in
@@ -2476,6 +2513,11 @@ OgreEngine::~OgreEngine() {
     // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock
     // the font created. An OverlaySystem outliving Root is the same class of
     // bug as a MeshPtr outliving Root.
+    // The blank world's render-queue listener comes off with the scenes' (each
+    // removed its own in OgreScene::destroy) and BEFORE the OverlaySystem that
+    // owns it dies; the manager itself goes with mDocumentScene below. Its
+    // cameras are already gone — every View destroyed above took its own.
+    if (mBlankScene) { try { hud::detach(mBlankScene); } catch (...) {} }
     try { hud::destroySystem(); } catch (...) {}
     try {
         // The document's staging manager goes with the rest of the scenes and
@@ -2483,6 +2525,8 @@ OgreEngine::~OgreEngine() {
         // iris::graph tests Ogre::Root's liveness on every call.
         if (mDocumentScene && mRoot) mRoot->destroySceneManager(mDocumentScene);
         mDocumentScene = nullptr;
+        if (mBlankScene && mRoot) mRoot->destroySceneManager(mBlankScene);
+        mBlankScene = nullptr;
     } catch (...) {}
     try {
         if (mNullWindow && mRoot) mRoot->getRenderSystem()->destroyRenderWindow(mNullWindow);
