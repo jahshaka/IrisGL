@@ -51,7 +51,6 @@
 #include <OgrePrerequisites.h>
 #include <OgreHlmsSamplerblock.h>
 #include <OgreRectangle2D2.h>
-#include <OgreVertexFormatWarmUp.h>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -2907,6 +2906,11 @@ public:
     // ---- Lights ----
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
+    /// MIRROR-LAMPSIG-1 — the host's word that a light's WORLD pose moved
+    /// (Engine.h carries the whole reason: an adopted node's transform never
+    /// reaches this interface). One counter bump; safe from any frame.
+    void noteLightsMoved() override { ++mGiLightWriteSerial; }
+    unsigned long long lightWriteSerial() const override { return mGiLightWriteSerial; }
 
     // ---- Decals (DECALS_SPEC.md; impl in OgreDecals.cpp) ----
     bool setDecal(NodeId id, const DecalDesc &d) override;
@@ -6289,10 +6293,6 @@ public:
     /// The persistent shader cache (SHADER_CACHE_SPEC.md). Loaded inside the
     /// first createView() -> ensureHlms(); saved on clean teardown and whenever
     /// the host says a compile burst has settled.
-    bool recordWarmUpSet(Scene * = nullptr) override;
-    bool saveWarmUpSet(const std::string &file) override;
-    unsigned applyWarmUpSet(const std::string &file, Scene * = nullptr) override;
-
     ShaderCacheStats shaderCacheStats() const override;
     // The log bridge (SESSION_LOG_SPEC F3-B) — OgreLogBridge.cpp.
     void setLogSink(Engine::LogSink sink) override;
@@ -6634,11 +6634,6 @@ private:
     /// threw must not look like a status call that found nothing.
     mutable std::string mLastError;
     ShaderCache     mShaderCache;
-    /// The process's recorded permutation set (SHADER_CACHE_SPEC §2.7b).
-    /// PROCESS-wide because Ogre's analyze() accumulates and its entries are
-    /// private — accumulating in one storage IS the merge. Held by pointer so
-    /// the Ogre type stays out of every other TU's view of this header.
-    std::unique_ptr<Ogre::VertexFormatWarmUpStorage> mWarmUpSet;
     std::vector<std::unique_ptr<OgreScene>> mScenes;
     /// THE SHADOW CACHE'S PER-FRAME SCRATCH (clean-2 lane, 2026-09-13).
     /// applyShadowCache and applyShadowCacheDirties run every frame for ever

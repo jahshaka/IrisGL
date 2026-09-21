@@ -735,6 +735,36 @@ public:
     /// KEPT as the explicit counterpart of setLight: a node may stop being a light
     /// without being removed (the document changes a node's type in place).
     virtual bool        removeLight(NodeId) = 0;
+    /// A LIGHT MOVED AND ONLY THE HOST CAN KNOW IT (MIRROR-LAMPSIG-1).
+    ///
+    /// The renderer's voxel light injection reads each light's DERIVED pose at
+    /// the moment it runs, and two of its optimisations are keyed on "have the
+    /// lights changed since the injection I am about to trust?" — the in-motion
+    /// light tick, which skips a cascade a rebuild already injected with the
+    /// same lights, and the incremental settle, which restarts when a light
+    /// moves under it. Both read `lightWriteSerial()`.
+    ///
+    /// That serial can see `setLight` and a transform written THROUGH this
+    /// interface. It cannot see the case that matters most: since the scene
+    /// graph adoption the DOCUMENT's nodes ARE the renderer's nodes
+    /// (SPECS/SCENEGRAPH_SPEC.md D2), so a lamp that moves — dragged, carried
+    /// by a parent, driven by an animation — writes its transform straight into
+    /// the scene graph and this interface is never called at all: the light's
+    /// description did not change, so nothing is pushed, and the renderer's own
+    /// pose is correct while its serial stands still. The injection is then
+    /// skipped, or absorbed by a settle that believes it is finished, and the
+    /// bounce keeps the pose the lamp had at the last rebuild.
+    ///
+    /// So the mirror — the one thing that can see a document pose and a
+    /// renderer at the same time — says it. Idempotent and cheap (one counter);
+    /// call it on any frame in which any light's WORLD transform changed. A
+    /// spurious call costs one extra cascade injection on the next light tick;
+    /// a missing one costs a stale bounce for the length of a gesture.
+    virtual void        noteLightsMoved() = 0;
+    /// The counter `noteLightsMoved` (and every light write through this
+    /// interface) advances: monotonic, only ever compared for equality.
+    /// DIAGNOSTIC — the suites assert that a lamp that moved advanced it.
+    virtual unsigned long long lightWriteSerial() const = 0;
 
     // ---- Decals (DECALS_SPEC.md): a node may carry one projected-texture decal.
     // A decal is an oriented box that overwrites base colour / roughness /
@@ -2542,34 +2572,16 @@ public:
     /// Deletes every cached file. The next launch is cold. Always safe: the
     /// running process keeps its in-memory shaders.
     virtual bool clearShaderCache() = 0;
-    // ---- Recorded warm-up sets (SHADER_CACHE_SPEC.md §2.7b / phase 3) ----
-    // Unreal's ".rec" recordings, our shape. A warm-up SET is not shaders and
-    // not SPIR-V — it is the list of {vertex format, render queue, one
-    // representative material per distinct shader} a scene actually used. That
-    // makes it small, and unlike the microcode and pipeline blobs it is
-    // platform- and driver-independent, so it is the only one of these
-    // artifacts that could ever be shipped.
-    //
-    // The point of the indirection: applying a set compiles every permutation
-    // in it against DEGENERATE 4-vertex buffers, so nothing is loaded from disk
-    // and nothing reaches VRAM. A recorded session's shaders can be rebuilt
-    // without its meshes, its skeletons or its textures.
-
-    /// Adds everything `scene` currently draws to this process's warm-up set,
-    /// or EVERY LIVE SCENE when `scene` is null. ACCUMULATES — call it for
-    /// every scene a session touches and the set is their union, which is what
-    /// makes "merging recordings" a no-op rather than a tool. Duplicate
-    /// permutations are folded by the engine.
-    virtual bool recordWarmUpSet(Scene * = nullptr) = 0;
-    /// Writes the accumulated set. False if nothing has been recorded or the
-    /// file cannot be written.
-    virtual bool saveWarmUpSet(const std::string &file) = 0;
-    /// Loads a set and compiles every permutation in it, using `scene` as the
-    /// host for the degenerate renderables it creates (null = the first live
-    /// scene; they exist for one frame and are destroyed again, so any will
-    /// do). Returns how many shaders were built — 0 is a legitimate answer on a
-    /// warm cache. The scene is left exactly as it was found.
-    virtual unsigned applyWarmUpSet(const std::string &file, Scene * = nullptr) = 0;
+    // ---- Recorded warm-up sets: DELETED (WARMUPSET-2, 2026-09-21) --------
+    // `recordWarmUpSet` / `saveWarmUpSet` / `applyWarmUpSet` are gone, and so
+    // is the file they wrote. A warm-up SET records one representative MATERIAL
+    // NAME per permutation and resolves it by name in the NEXT process — and
+    // this engine names datablocks from a process-unique counter ("pbr_18",
+    // "unlit_21"), so a recorded name could never resolve: measured, seven
+    // "Can't find HLMS datablock" lines and eight shaders compiled for the
+    // DEFAULT datablock on every warm launch, none of them ever bound. What
+    // warms this renderer is the per-scene PSO precache (`View::warmUpShaders`)
+    // and the persistent shader cache, both untouched.
 
     /// The startup progress counter's source: shaders compiled so far, shaders
     /// served from the cache so far, and how many the last saved run needed in

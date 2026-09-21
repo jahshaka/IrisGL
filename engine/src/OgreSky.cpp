@@ -1143,8 +1143,30 @@ void OgreScene::tuneSkyRenderable() {
 
 Ogre::TextureGpu *OgreScene::makeSkyArrayTexture(Ogre::TextureGpu *src) {
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    // A RECYCLED NAME, like every other texture this file creates (SKYARRAY-LEAK-1;
+    // the recycling rule and its cost are at the head of this file and at
+    // recycledName() in EnginePrivate.h). This was the one site left on
+    // processUniqueName, and it burned a name that can never be used again on
+    // EVERY sky application: measured on this tree, one `world.sky(...)` call
+    // costs FOUR of them (the scene applies the sky once per push and the
+    // copy is remade each time), 181 names in a 60-change script, 138 in a few
+    // minutes of the owner's 2026-09-18 smoke — where they finally showed up
+    // as "Cannot locate resource skyarray_NN" (ledger §769).
+    //
+    // WHY A DEAD NAME IS LOUD AT ALL, and why recycling answers it: Ogre's v1
+    // TextureUnitState — the sky material's — keeps the texture's NAME beside
+    // the pointer, and `notifyTextureChanged(Deleted)` nulls the pointer and
+    // KEEPS the name (OgreTextureUnitState.cpp:1347-1364), as does the
+    // `_unload` any material reload runs (`cleanFramePtrs`). The next
+    // `ensureLoaded` re-resolves that name against the resource GROUPS —
+    // `findTextureNoThrow` first — which for a manual texture that no longer
+    // exists is a FileNotFoundException, a CRITICAL log line and
+    // `mTextureLoadFailed = true` (the layer renders blank from then on).
+    // With the name recycled the lookup finds the sky array that is live NOW,
+    // which is the texture that TU wants; and the pool stays at one or two
+    // slots instead of growing for the life of the process.
     Ogre::TextureGpu *dst = tm->createTexture(
-        processUniqueName("skyarray"), Ogre::GpuPageOutStrategy::Discard,
+        recycledName("skyarray"), Ogre::GpuPageOutStrategy::Discard,
         Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2DArray);
     dst->setResolution(src->getWidth(), src->getHeight(), 1u);
     dst->setPixelFormat(src->getPixelFormat());

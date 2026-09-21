@@ -7235,9 +7235,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             const auto *n = static_cast<const iris::SceneNode *>(l);
             return std::find(mMovableLights.begin(), mMovableLights.end(), n) != mMovableLights.end();
         };
+        quint64 lightPoseSig = 0;
         if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
             mGiChainMemo.clear();          // capacity kept; contents are per call
-            Hasher h, m;
+            Hasher h, m, p;
             for (const auto &l : mSource->lights) {
                 if (l.isNull()) continue;
                 // THE SKY LIGHT IS NOT A VOXEL LIGHT (audit A F3). It never
@@ -7251,12 +7252,31 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 // Photon's cascades, the whole chain) for a change that was
                 // already applied the cheap way.
                 if (l->lightType == iris::LightType::Sky) continue;
+                const quint64 pose = worldTrsSignatureMemo(l->graphNode(), mGiChainMemo);
                 Hasher &into = movingLamp(l.data()) ? m : h;
-                into << worldTrsSignatureMemo(l->graphNode(), mGiChainMemo)
-                     << lightGiParamSignature(l.data());
+                into << pose << lightGiParamSignature(l.data());
+                // ...AND EVERY LAMP'S POSE, STILL OR MOVING, IN ONE THIRD HASH
+                // (MIRROR-LAMPSIG-1). The two hashes above are POLICY keys —
+                // one arms the settle, the other the mover cadence — and the
+                // split is the whole of decision O2. This one is a FACT: did
+                // any light in this scene move? It is the only thing that can
+                // tell the renderer so, because a document node's transform is
+                // written into the scene graph the renderer itself owns and
+                // never travels through `Scene`'s interface (Engine.h's
+                // noteLightsMoved says it at length).
+                p << pose;
             }
             lightSig = h.h;
             movableLightSig = m.h;
+            lightPoseSig = p.h;
+        }
+        // THE RENDERER IS TOLD, ON THE FRAME IT HAPPENS. Before the GI push
+        // below, so a re-solve or a light tick issued in this same frame is
+        // already looking at the new serial; and only on a real change, so a
+        // still scene costs one 64-bit compare.
+        if (lightPoseSig != mGiLightPoseSignature) {
+            mGiLightPoseSignature = lightPoseSig;
+            mTarget->noteLightsMoved();
         }
         // ---- RE-FIT ON EXIT (LIGHTING_FIX fix 2) ---------------------------
         //

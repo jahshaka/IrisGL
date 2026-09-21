@@ -2049,6 +2049,18 @@ private:
     /// settle is pending at all.
     quint64 mGiMovableLightSignature = 0;
     bool    mGiMovableLightsMoving = false;
+    /// EVERY LAMP'S WORLD POSE, IN ONE HASH (MIRROR-LAMPSIG-1) — a FACT, not a
+    /// policy key like the two signatures around it: while the two above decide
+    /// what the mirror does, this one decides only whether the RENDERER is told
+    /// that a light moved (Scene::noteLightsMoved). It has to exist separately
+    /// because the renderer cannot find out for itself: a document node's
+    /// transform is written into the scene graph the renderer owns, so no
+    /// engine verb is called at all when a lamp is dragged, carried by a parent
+    /// or animated — the light's DESCRIPTION is unchanged and the mirror
+    /// rightly pushes nothing. Still lamps are in it beside movable ones: a
+    /// still lamp being dragged is re-injected on the same cheap cadence while
+    /// its settle window is open.
+    quint64 mGiLightPoseSignature = 0;
     /// ...AND THE REST FRAME IT OWES (round-2 review F1). A cadence tick taken
     /// while the lamp was moving injects at ONE bounce and the coarse ray march
     /// (Scene::refreshGiLighting's `inMotion`), which is right while it moves
