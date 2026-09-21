@@ -6,10 +6,13 @@
 // This is the seam decided in VIEWPORT_MIGRATION_PLAN.md: Studio keeps
 // iris::Scene/SceneNode/MeshNode/LightNode as its document model (the property
 // panels, hierarchy widget, undo commands, reader/writer all talk to it) and the
-// engine renders a mirror of it. Every frame sync() walks the document, creates
-// engine nodes for new document nodes, removes engine nodes for vanished ones,
-// and pushes local transforms and visibility. Meshes are converted once from the
-// document's CPU vertex buffers and cached per iris::Mesh.
+// engine renders a mirror of it. Every frame sync() reads what changed in the
+// document, ADOPTS the document's own scene nodes into the engine scene (there
+// is one hierarchy and it is Ogre's — nodegraph.h — so a transform is never
+// pushed), releases the entries of vanished nodes, and pushes content:
+// effective visibility, pickability, meshes, materials, lights, the world.
+// Meshes are converted once from the document's CPU vertex buffers and cached
+// per iris::Mesh.
 //
 // The document→engine bridge — the ONE component that knows both sides
 // (document types AND the engine abstraction). Lives in the IrisGL repo
