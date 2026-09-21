@@ -26,6 +26,8 @@ For more information see the LICENSE file
 #include "import/importflags.h"
 #include "import/clipnaming.h"
 #include "import/scenesource.h"
+#include "import/importsettings.h"   // kDefaultMaxCards
+#include "import/meshbake.h"        // the card generator, shared with the importer
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
@@ -394,7 +396,38 @@ MeshPtr Mesh::loadMesh(QString filePath)
 		meshObj->addSkeletalAnimation(animName, anims[animName]);
 	}
 
-	return publishMesh(filePath, MeshPtr(meshObj));
+	MeshPtr made(meshObj);
+
+	// SURFACE CARDS FOR A MESH THAT NEVER GOES THROUGH AN IMPORT
+	// (SURFACE-CACHE-1a; SPECS/SURFACE_CACHE_ASSESSMENT.md §4 item 3).
+	//
+	// This function is how the SHIPPED PRIMITIVES are born — src/data/
+	// primitives.h's twelve .obj files, the Ground, the avatar's cube, the
+	// preview spheres — and a primitive has no library row, no import record
+	// and therefore no bake: `buildLodChain` has one caller and it is inside
+	// the assimp import, which is why every sample still renders one LOD level.
+	// A card list has to exist for those meshes too or the surface cache would
+	// have nothing to say about the objects every sample scene is built from.
+	//
+	// So the generator runs HERE, at creation, at the default budget — the same
+	// function the importer calls, never a second implementation of it — and it
+	// runs on the mesh AFTER its chain, for the reason buildCards states (a
+	// card names the level its texel picks). The chain is built here too: these
+	// meshes are 12 to ~2,000 triangles.
+	//
+	// THE LOD CHAIN IS DELIBERATELY *NOT* BUILT HERE. A primitive has none
+	// today (NANITE_SPEC §7.2b: every sample renders one level), giving it one
+	// would change which triangles the renderer draws at a distance, and that
+	// is ATOM's decision to make and ATOM's picture to move — not a side effect
+	// of the surface cache. So a primitive's cards all name level 0, which is
+	// the truth about a mesh with one level, and they will name a real level
+	// the day the chain arrives here.
+	//
+	// A SKINNED file loaded through this function gets no cards at all
+	// (buildCards refuses a skeleton).
+	MeshBake::buildCards(made, kDefaultMaxCards);
+
+	return publishMesh(filePath, made);
 }
 
 void Mesh::pinLoadPaths(const QStringList &paths)

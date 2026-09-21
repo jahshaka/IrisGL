@@ -76,6 +76,13 @@ namespace iris
 /// the clips and the materials imported. That is what a raw path with no
 /// library row behind it gets, and what every row imported before the import
 /// dialog carries.
+/// Epic's own default card budget per mesh ("Max Lumen Mesh Cards"), and ours.
+/// ONE definition, read by the settings record, by the transform and by every
+/// caller of MeshBake::buildCards that has no record to read.
+constexpr int kDefaultMaxCards = 12;
+/// The format's and the generator's ceiling — the reader refuses a blob above it.
+constexpr int kMaxCardsCeiling = 64;
+
 struct ImportTransform
 {
     /// The user's uniform scale (> 0). Composed with the unit terms below.
@@ -119,6 +126,17 @@ struct ImportTransform
     /// consumer's default material, and the bake records no material record.
     bool materials = true;
 
+    /// SURFACE CARDS (SPECS/SURFACE_CACHE_ASSESSMENT.md §7 phase 1): how many
+    /// axis-aligned capture cards the bake may author per mesh. 12 is Epic's
+    /// own default ("Max Lumen Mesh Cards"); 0 means no cards at all. Clamped
+    /// to 64 by the generator and by the bake format.
+    ///
+    /// It is a BUILD knob like `skeleton` and `clips` — it changes what is
+    /// built out of a parse, never the parse — and it is in the bake key,
+    /// because two imports of one file at different card budgets are two
+    /// different bakes.
+    int maxCards = kDefaultMaxCards;
+
     /// True when `name` survives the clip filter.
     bool wantsClip(const QString &name) const;
 
@@ -130,7 +148,8 @@ struct ImportTransform
     bool overridesUnit() const { return unitOverride > 0.0; }
     bool buildsEverything() const
     {
-        return skeleton && clips && clipNames.isEmpty() && materials;
+        return skeleton && clips && clipNames.isEmpty() && materials
+               && maxCards == kDefaultMaxCards;
     }
     bool isIdentity() const
     {
@@ -227,6 +246,7 @@ public:
     bool clips = true;                          ///< false = import no clips at all
     QStringList clipNames;                      ///< non-empty = only these clips
     MaterialMode materials = MaterialMode::Import;
+    int maxCards = kDefaultMaxCards;            ///< surface cards per mesh (0..64); see ImportTransform::maxCards
 };
 
 }   // namespace iris
