@@ -118,11 +118,28 @@
 // It exists only in a pass that claimed the slot, which is only a colour pass
 // of a scene whose probe grid has taken the env-probe slot. Every other shader
 // in the tree is byte-identical to a build without this file's block.
-@property( jah_sky_env_probe )
+// GATHER-0 (2026-09-21) shares this piece, and MUST: `custom_ps_uniformDeclaration`
+// may be defined ONCE per permutation, and both the sky's extra slot and the
+// screen-probe gather's can be live in the same pass. So the two declarations
+// live in one definition, each under its own property, and the file that owns
+// the piece is this one. The gather's register is claimed beside the sky's in
+// FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
+// getNumExtraPassTextures states.
+@property( jah_sky_env_probe || jah_probe_gather )
 @piece( custom_ps_uniformDeclaration )
-	vulkan_layout( ogre_t@value(jahSkyEnvProbe) ) midf_tex uniform textureCube jahSkyEnvProbe;
-	@property( syntax == glslvk )
-		layout( ogre_s@value(jahSkyEnvProbe) ) uniform sampler jahSkyEnvSampler;
+	@property( jah_sky_env_probe )
+		vulkan_layout( ogre_t@value(jahSkyEnvProbe) ) midf_tex uniform textureCube jahSkyEnvProbe;
+		@property( syntax == glslvk )
+			layout( ogre_s@value(jahSkyEnvProbe) ) uniform sampler jahSkyEnvSampler;
+		@end
+	@end
+	// The DECLARATION's guard must be the READ's guard exactly (fix round,
+	// D2): a texture declared where the piece does not read it is a dead
+	// uniform, but a piece that reads one that was not declared is a compile
+	// error that loses the frame. JahProbeGather_piece_ps.any carries the
+	// same six terms and the reason for each.
+	@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+		vulkan_layout( ogre_t@value(jahProbeIrradiance) ) uniform texture2D jahProbeIrradiance;
 	@end
 @end
 @end

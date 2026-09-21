@@ -1,0 +1,64 @@
+#include "/media/matias/Datos/SyntaxHighlightingMisc.h"
+
+// GATHER-0 — THE SCREEN-PROBE GATHER'S PIXEL SIDE (phase 0, 2026-09-21).
+//
+// ONE TEXEL FETCH, at the diffuse-GI slot of the PBS pixel shader. The compute
+// pair in irisgl/engine/src/rayquery/ has already written this pixel's block
+// probe into `jahProbeIrradiance`; what arrives here is the MEAN RADIANCE over
+// the cosine-weighted hemisphere, which is exactly what `envColourD` is (the
+// BRDF multiplies it by kD and by pi, 200.BRDFs_piece_ps.any:305). So the
+// whole pixel side is an add, and the weight is the probe's own coverage: 1
+// where a probe answered, 0 where none did — and where none did the pixel
+// keeps whatever the irradiance field or the cones already gave it, which is
+// the fallback rule of the spec's section 2 item 8 in its simplest form.
+//
+// WHY THIS PIECE IS `applyIrradianceVolumes`. It is upstream's own insertion
+// point immediately after the environment cubemaps and before the ambient
+// composite — inside the lighting body, after `envColourD` is zeroed, where
+// every other diffuse-GI source adds itself — and it is EMPTY in this engine,
+// because nothing here ever binds an Ogre IrradianceVolume (the piece is
+// defined only under the `irradiance_volumes` property, which is never set).
+// Taking it costs no patch. It is also a SPIKE'S shape and not a shipping one:
+// phase 2 puts the read where the spec says, behind the cage-guard hook of
+// patch 0085, and this piece goes away with the rest of the spike.
+//
+// THE GUARD IS SIX TERMS AND EVERY ONE OF THEM EARNS ITS PLACE, two of them
+// because a missing one does not draw the wrong picture, it LOSES THE FRAME
+// (fix round, D2):
+//
+//   jah_probe_gather      the pass property, set by
+//                         FogHlmsListener::preparePassHash only while a scene
+//                         has the spike armed and only for the pass the
+//                         gather was recorded in front of.
+//   hlms_screen_pos_int   IS THE ONE THAT DECIDES WHETHER `iFragCoord` EXISTS.
+//                         The pin sets it for a PrePassUse pass and for a
+//                         refractions pass and for nothing else
+//                         (OgreHlms.cpp), so a probe capture, a planar arm or
+//                         a plain forward pass that somehow reached this
+//                         property would fail to COMPILE on an undeclared
+//                         identifier and take its frame with it.
+//   needs_env_brdf        ...and this one decides whether `envColourD`
+//                         exists at all: upstream declares and zeroes it
+//                         under that property alone
+//                         (800.PixelShader_piece_ps.any).
+//   !hlms_prepass         the lighting body does not exist there and the
+//                         texture register is not claimed.
+//   !hlms_shadowcaster    same.
+//   !irradiance_volumes   a second definition of one piece is a parse error,
+//                         and this file must not be the one that finds out.
+//
+// THE ACCOUNTING RULE, stated because the spike does not enforce all of it
+// (fix round, H3). A pixel gets exactly ONE diffuse-GI term. The listener
+// compiles the cone diffuse out under this property (`vct_disable_diffuse`),
+// which is the half a host can do from outside; the IRRADIANCE FIELD's own
+// cage still adds its term if a field is bound, so an armed scene with
+// `ddgi` ON would shade TWO of them. Phase 0 avoids it by measuring with the
+// field off (`world.gi({ddgi:"off"})` / `GiToggle::Off`) in every arm; GATHER-1
+// owns the real answer, which is the cage-guard hook of ogre-patch 0085.
+
+@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+@piece( applyIrradianceVolumes )
+	float4 jahProbeGathered = OGRE_Load2D( jahProbeIrradiance, iFragCoord, 0 ).xyzw;
+	pixelData.envColourD += midf3_c( jahProbeGathered.xyz ) * midf_c( jahProbeGathered.w );
+@end
+@end
