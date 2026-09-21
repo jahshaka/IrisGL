@@ -43,6 +43,7 @@
 // SPV_KHR_ray_query documents), like rq_rays.comp beside it: Ogre's own GLSL
 // path never sets a target environment, so this never goes through it.
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -288,7 +289,9 @@ layout( set = 0, binding = 19 ) uniform sampler2DArray cardDepth;
 /// SSR loop to, and for the same reason: about twelve stops above white, six
 /// below the half-float format's own ceiling. A reflection clamped here is
 /// still white after any exposure the tonemapper arrives at.
-const float kMaxRadiance = 1024.0;
+/// ...and it lives in the shared hit header now, with the two NaN predicates
+/// and the voxel/sky functions this file used to own outright (GATHER-1a):
+/// `kMaxRadiance`, `finite1`, `finite3`, `jahVoxelRadiance`, `jahSkyRadiance`.
 /// HOW MANY SAMPLES THE FILTER'S CONFIDENCE RAMP WANTS before it composites a
 /// traced reflection at full weight. Declared in BOTH stages because the two
 /// are separate GLSL translation units sharing one descriptor set, and the
@@ -296,11 +299,19 @@ const float kMaxRadiance = 1024.0;
 /// rq_reflect_filter.comp's kWarmupFrames. Change one, change the other.
 const float kWarmupFrames = 8.0;
 
-/// IS THIS A NUMBER? `x == x` IS NOT A NaN TEST IN THIS TREE (CLAUDE.md, lane
-/// HDR-1, measured on NVIDIA 595.84): the compiler folds a self-equality to
-/// true. The bits are the test — exponent all-ones is Inf or NaN.
-bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
-bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
+/// THE SHARED HIT HEADER — `kMaxRadiance`, the two NaN predicates (`x == x` is
+/// not a NaN test in this tree: CLAUDE.md, HDR-1), `jahVoxelRadiance` and
+/// `jahSkyRadiance`. It reads this file's own bindings through the macros
+/// below, so nothing about the descriptor set moved when the functions did
+/// (GATHER-1a; the gather traces the same cache and two consumers of one cache
+/// that can disagree about what a voxel MEANS is a defect waiting to happen).
+#define JAH_VOX_COUNT       int( p.knobs.w )
+#define JAH_VOX_ANISO       ( p.knobs2.x > 0.5 )
+#define JAH_VOX_ORIGIN( c )  p.voxelOrigin[c]
+#define JAH_VOX_INVSIZE( c ) p.voxelInvSize[c]
+#define JAH_SKY_ON          ( p.knobs2.z > 0.5 )
+#define JAH_SKY_COLOUR      p.skyColour.xyz
+#include "jah_rq_hit.glsl"
 
 /// Metres along the camera's forward axis, with and without reverse Z — the
 /// same line JahSsrRayMarch_ps.glsl uses, from Camera::getProjectionParamsAB().
@@ -443,91 +454,26 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 /// it travelled.
 vec3 voxelRadiance( vec3 hitPos, vec3 dir, float lobeAlpha, float t, out bool ok )
 {
-	ok = false;
-	const int count = int( p.knobs.w );
-	// HOW WIDE THE HAND-OVER BAND IS, in cells of the cascade being left. Three
-	// DIRECTIONAL texels (a directional texel is two cells: the anisotropic
-	// textures are half resolution on two axes with both signs packed into the
-	// third), which is the narrowest band that can hide a 2x texel step and the
-	// widest that cannot reach a cascade's own centre.
-	const float kBlendCells = 6.0;
-	// The mean's sample count at its floor — see (3) above.
-	const float meanSamples = 1.0 / max( p.knobs2.w, 1e-3 );
+	// THE MIP IS CHOSEN FOR THE LOBE, and this wrapper is where that choice is
+	// made — the shared function takes a FOOTPRINT in world units and knows
+	// nothing about specular lobes. `textureLod(..., 0.0)` made every ray read
+	// the finest directional mip, so a rough reflection paid for the
+	// anisotropic chain and never read it. What is NOT taken is the WHOLE lobe
+	// footprint: the temporal mean already averages up to N samples of the lobe
+	// (N = 1/knobs2.w, the mean's memory floor), so pre-filtering the whole lobe
+	// on top of that would blur it twice. The honest footprint for ONE
+	// stochastic sample is the spacing BETWEEN the samples the mean holds, which
+	// for N samples spread over the lobe goes as 1/sqrt(N).
+	//
+	// A MIRROR takes LOD 0, the containing cascade WHOLE and no crossfade at
+	// all: a crossfade of two texel sizes is still a blur and a mirror is the
+	// one surface that must not be blurred. (LOD 0 is still two cells, so this
+	// does not sharpen a mirror; only hit lighting can.)
 	const float kMirrorAlphaHere = 0.01;
-	vec3 acc = vec3( 0.0 );
-	float accW = 0.0;
-	for( int c = 0; c < count; ++c )
-	{
-		if( accW >= 0.999 )
-			break;
-		const vec3 pos = hitPos + dir * ( 0.5 * p.voxelInvSize[c].w );
-		const vec3 ls = ( pos - p.voxelOrigin[c].xyz ) * p.voxelInvSize[c].xyz;
-		if( any( lessThan( ls, vec3( 0.0 ) ) ) || any( greaterThan( ls, vec3( 1.0 ) ) ) )
-			continue;					// not this cascade's business; try the next one out
-		// The mip for this cascade's own texel size. `voxelInvSize[c].w` is the
-		// cell in world units; a directional texel is two of them.
-		const float texel = 2.0 * max( p.voxelInvSize[c].w, 1e-6 );
-		float lod = 0.0;
-		if( lobeAlpha > kMirrorAlphaHere )
-		{
-			const float footprint = 2.0 * t * lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
-			lod = clamp( log2( max( footprint, texel ) / texel ), 0.0, 6.0 );
-		}
-		vec4 s;
-		if( p.knobs2.x > 0.5 )
-		{
-			vec3 isNegative;
-			isNegative.x = dir.x < 0.0 ? 0.5 : 0.0;
-			isNegative.y = dir.y < 0.0 ? 0.5 : 0.0;
-			isNegative.z = dir.z < 0.0 ? 0.5 : 0.0;
-			vec3 uvw = ls;
-			uvw.x = clamp( uvw.x, 0.0, 1.0 ) * 0.5;
-			const vec4 xc = textureLod( voxelX[c], uvw + vec3( isNegative.x, 0.0, 0.0 ), lod );
-			const vec4 yc = textureLod( voxelY[c], uvw + vec3( isNegative.y, 0.0, 0.0 ), lod );
-			const vec4 zc = textureLod( voxelZ[c], uvw + vec3( isNegative.z, 0.0, 0.0 ), lod );
-			const vec3 w = dir * dir;
-			s = w.x * xc + w.y * yc + w.z * zc;
-		}
-		else
-		{
-			// Low tier: VctLighting was built without the anisotropic chains and
-			// slot 0 carries every mip. Directionally averaged, and the honest
-			// answer available.
-			s = textureLod( voxelIso[c], ls, lod );
-		}
-		if( s.w <= 0.02 || !finite3( s.xyz ) || !finite1( s.w ) )
-			continue;					// this cascade holds nothing here
-		// HOW MUCH OF THE ANSWER THIS CASCADE OWNS. One inside its box, falling
-		// to zero over the last kBlendCells of it — and a MIRROR takes the
-		// containing cascade whole, because a crossfade of two texel sizes is
-		// still a blur and a mirror is the one surface that must not be blurred.
-		float w = 1.0;
-		if( lobeAlpha > kMirrorAlphaHere )
-		{
-			const vec3 e = min( ls, vec3( 1.0 ) - ls );
-			const float edge = min( min( e.x, e.y ), e.z );
-			// A cell expressed in this cascade's normalised space: cell (world)
-			// times 1/size (world) on the widest axis.
-			const vec3 invSz = p.voxelInvSize[c].xyz;
-			const float cellLS = p.voxelInvSize[c].w *
-								 max( max( invSz.x, invSz.y ), invSz.z );
-			w = clamp( edge / max( kBlendCells * cellLS, 1e-6 ), 0.0, 1.0 );
-		}
-		w = min( w, 1.0 - accW );
-		if( w <= 0.0 )
-			continue;
-		// (1) the cascade's own radiance multiplier, undoing the bake's
-		// normalisation exactly as the pixel path does.
-		acc += ( s.xyz / s.w ) * ( w * max( p.voxelOrigin[c].w, 0.0 ) );
-		accW += w;
-		ok = true;
-	}
-	if( !ok )
-		return vec3( 0.0 );
-	// Whatever weight the chain could actually answer for is the whole answer:
-	// a hit in the last cascade's outermost band has nothing further out to fade
-	// into, and normalising there is "this is all there is", not a hole.
-	return clamp( acc / max( accW, 1e-6 ), vec3( 0.0 ), vec3( kMaxRadiance ) );
+	const bool mirror = lobeAlpha <= kMirrorAlphaHere;
+	const float meanSamples = 1.0 / max( p.knobs2.w, 1e-3 );
+	const float footprint = 2.0 * t * lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
+	return jahVoxelRadiance( hitPos, dir, footprint, mirror, ok );
 }
 
 /// SURFACE-CACHE-0 — THE HIT, LIT FROM ITS CARD (the phase-0 spike).
@@ -624,15 +570,7 @@ vec3 cardRadiance( vec3 hitPos, vec3 dir, out bool ok )
 
 vec3 skyRadiance( vec3 dir )
 {
-	if( p.knobs2.z < 0.5 )
-		return p.skyColour.xyz;
-	// OGRE SAMPLES CUBEMAPS LEFT-HANDED (the shader negates z; HlmsPbs:2327 does
-	// the same flip) — the sky/IBL adoption's hard-won fact, and the reason a
-	// world-space direction cannot be handed to this cube unchanged.
-	const vec4 s = textureLod( skyCube, vec3( dir.x, dir.y, -dir.z ), 0.0 );
-	if( !finite3( s.xyz ) )
-		return p.skyColour.xyz;
-	return clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+	return jahSkyRadiance( dir );
 }
 
 /// THE TEMPORAL MEAN'S PREVIOUS VALUE, reprojected and VALIDATED. The history

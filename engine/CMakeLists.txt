@@ -30,6 +30,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSurfaceCards.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVrSession.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
@@ -101,9 +102,11 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_reflectSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
@@ -115,27 +118,50 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
         VERBATIM)
-    # GATHER-0's two jobs (the phase-0 screen-probe spike), same rule.
+    # THE SCREEN-PROBE GATHER'S THREE JOBS (GATHER-1a), same rule plus ONE
+    # addition: `-I src/rayquery/include`, so the hit-radiance functions and the
+    # parameter block are SHARED with the reflection trace rather than copied
+    # (spec section 10 item 7 — glslang resolves `#include` under
+    # GL_GOOGLE_include_directive, which each shader requires). The headers are
+    # named in DEPENDS or a change to one would not rebuild the SPIR-V.
+    set(JAH_RQ_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
+    set(JAH_RQ_HEADERS "${JAH_RQ_INCLUDE}/jah_rq_hit.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_probe_params.glsl")
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_probePlaceSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_place.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_place.comp"
+                ${JAH_RQ_HEADERS}
+        COMMENT "Compiling the screen-probe placement job at SPIR-V 1.4"
+        VERBATIM)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
                 --vn krq_probeGatherSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
+                ${JAH_RQ_HEADERS}
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
                 --vn krq_probeIntegrateSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_integrate.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_integrate.comp"
+                ${JAH_RQ_HEADERS}
         COMMENT "Compiling the screen-probe integrate at SPIR-V 1.4"
         VERBATIM)
     add_custom_target(JahshakaRayQuerySpv
                       DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h")
     set(JAH_RQ_GEN_DIR "${JAH_RQ_GEN_DIR}" PARENT_SCOPE)

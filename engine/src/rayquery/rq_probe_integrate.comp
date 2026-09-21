@@ -1,34 +1,43 @@
 #version 460
-// GATHER-0 — THE NAKED INTEGRATE (phase 0 of SCREEN_PROBE_GATHER_SPEC.md).
+// THE SCREEN-PROBE GATHER, JOB 3 OF 3: BACK TO THE PIXELS
+// (GATHER-1a; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 2 item 7, phase 1's
+// half of it).
 //
-// One thread per PIXEL. The probe whose 16x16 block the pixel belongs to is
-// the only one it reads — NEAREST, with no plane weights, no four-probe
-// bilinear and no filter, which is the phase-0 contract: what is being
-// measured here is the cost of the read and the SHAPE of the answer, not its
-// quality. A pixel therefore takes the diffuse GI of the surface its block's
-// CENTRE pixel drew, which is exactly right in the interior of a flat surface
-// and exactly wrong across a silhouette — the blockiness a reader sees in the
-// sheet is that, and phase 2's plane-weighted four-probe integrate is what
-// removes it.
+// ONE THREAD PER PIXEL. The pixel takes the answer of ONE probe — its own
+// cell's, or that cell's ADAPTIVE probe where that one lies closer to the
+// pixel's plane. That is the whole of phase 1's read, deliberately: the
+// three-by-three filter in probe space, the SH record and the four-probe
+// plane-weighted interpolation are phase 2, and building them here would mean
+// measuring the trace through an estimator nobody has gated yet. So the
+// picture at phase 1 is BLOCKY at the probe stride and NOISY at 64 rays, and
+// the suites assert MEANS and DETERMINISM rather than smoothness.
 //
-// The output is `jahProbeIrradiance`: rgb = the mean radiance over the
-// cosine-weighted hemisphere (what HlmsPbs's `envColourD` is — see the trace
-// shader's header), w = 1 where a probe answered and 0 where none did. The
-// pixel piece multiplies by w, so a no-probe pixel keeps whatever the field
-// or the cones already gave it. That IS the fallback rule of spec section 2
-// item 8, in its simplest possible form.
+// WHAT THE PLANE TEST DECIDES. A cell's two probes describe two surfaces; the
+// pixel belongs to one of them. Choosing by distance to the PLANE (and by
+// normal agreement) rather than by distance in pixels is what keeps a bounce
+// on the side of a silhouette it belongs to — "leaks confined to the plane",
+// which is the property the whole probe shape exists for. A pixel that agrees
+// with NEITHER probe gets no answer at all (w = 0) and keeps whatever the
+// field or the cones already gave it, which is the fallback rule of spec
+// section 2 item 8 in its simplest form.
+//
+// THE OUTPUT is `jahProbeIrradiance`: rgb = the mean radiance over the
+// cosine-weighted hemisphere (what `envColourD` is — see the trace's header),
+// w = 1 where a probe answered and 0 where none did. The pixel piece
+// multiplies by w and the irradiance field's cage stands down where w is 1
+// (ogre-patch 0086), so a pixel gets exactly ONE diffuse-GI term in every
+// regime.
+#extension GL_GOOGLE_include_directive : require
+
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
-layout( set = 0, binding = 0 ) uniform Params
-{
-	/// xy = the probe grid in probes, zw = the full-resolution target size.
-	vec4 resolution;
-	/// x = the probe stride in pixels. y/z/w reserved.
-	vec4 knobs;
-} p;
+#define JAH_PROBE_PARAMS_BINDING 0
+#include "jah_probe_params.glsl"
 
-layout( rgba16f, set = 0, binding = 1 ) uniform readonly image2D probeRadiance;
-layout( rgba16f, set = 0, binding = 2 ) uniform image2D probeIrradiance;
+layout( std430, set = 0, binding = 1 ) readonly buffer Records { JahProbeRecord r[]; } records;
+layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
+layout( set = 0, binding = 3 ) uniform sampler2D sceneDepth;
+layout( rgba16f, set = 0, binding = 4 ) uniform image2D probeIrradiance;
 
 void main()
 {
@@ -39,6 +48,67 @@ void main()
 	const ivec2 grid = ivec2( p.resolution.xy );
 	const float stride = max( p.knobs.x, 1.0 );
 	const ivec2 cell = clamp( ivec2( vec2( pix ) / stride ), ivec2( 0 ), grid - 1 );
-	const vec4 probe = imageLoad( probeRadiance, cell );
-	imageStore( probeIrradiance, pix, probe.w > 0.5 ? probe : vec4( 0.0 ) );
+	const uint index = uint( cell.y * grid.x + cell.x );
+
+	// The pixel's own surface, from the same prepass the probes were placed on.
+	const vec2 uv = ( vec2( pix ) + 0.5 ) / vec2( full );
+	const float rawDepth = texture( sceneDepth, uv ).x;
+	vec3 pixelNormal = vec3( 0.0 );
+	vec3 pixelWorld = vec3( 0.0 );
+	float pixelDist = 0.0;
+	bool pixelValid = false;
+	if( rawDepth > 0.0 && rawDepth < 1.0 )
+	{
+		vec3 normalVS = texture( gBufNormals, uv ).xyz * 2.0 - 1.0;
+		if( dot( normalVS, normalVS ) > 1e-6 )
+		{
+			normalVS = normalize( normalVS );
+			pixelNormal = normalize( p.viewAxisX.xyz * normalVS.x + p.viewAxisY.xyz * normalVS.y +
+									 p.viewAxisZ.xyz * normalVS.z );
+			pixelDist = jahViewDistance( rawDepth );
+			pixelWorld = jahWorldAt( uv, pixelDist );
+			pixelValid = finite3( pixelWorld ) && finite3( pixelNormal ) && finite1( pixelDist );
+		}
+	}
+	if( !pixelValid )
+	{
+		// The sky, or a pixel the prepass never drew. No probe answers for it —
+		// and nothing should: it has no hemisphere.
+		imageStore( probeIrradiance, pix, vec4( 0.0 ) );
+		return;
+	}
+
+	const float planeTol = max( p.plane.x, 1e-4 ) * max( pixelDist, 1e-3 );
+	const float normalTol = p.plane.y;
+
+	vec4 best = vec4( 0.0 );
+	float bestError = 1e30;
+	// The cell's own probe, then its adaptive twin if it has one.
+	for( int k = 0; k < 2; ++k )
+	{
+		uint probeIndex = index;
+		if( k == 1 )
+		{
+			const float link = records.r[index].normalW.w;
+			if( link < 0.5 )
+				break;
+			probeIndex = uint( link ) - 1u;
+		}
+		const vec4 posW = records.r[probeIndex].posW;
+		const vec4 normalW = records.r[probeIndex].normalW;
+		const vec4 irr = records.r[probeIndex].irradiance;
+		if( posW.w < 0.5 || irr.w < 0.5 )
+			continue;
+		if( dot( normalW.xyz, pixelNormal ) < normalTol )
+			continue;
+		const float offPlane = abs( dot( normalW.xyz, pixelWorld - posW.xyz ) );
+		if( offPlane > planeTol )
+			continue;
+		if( offPlane < bestError )
+		{
+			bestError = offPlane;
+			best = vec4( irr.xyz, 1.0 );
+		}
+	}
+	imageStore( probeIrradiance, pix, best );
 }

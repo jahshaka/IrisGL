@@ -49,6 +49,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     chain::build(mRoot->getCompositorManager2(), mWorkspaceDef, chainDesc(), mNodeDefs,
                  mChainHandles);
     mChainRayReflect = chainDesc().rayReflect;
+    mChainProbeGather = chainDesc().probeGather;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -196,6 +197,17 @@ ChainDesc OgreView::chainDesc() const {
     // every pixel, `ssr == 1` (High) one in four, exactly as the march does —
     // which is why the row is a scale factor here too and not a second setting.
     d.rayReflect     = d.ssr > 0 && mScene && mScene->rayReflectionsWanted();
+    // THE SCREEN-PROBE GATHER (GATHER-1a), and the reason it is not `&& d.ssr`:
+    // the gather needs the PREPASS, not the reflection row. A project whose
+    // gather row is on gets the prepass in every view that draws its scene,
+    // whatever its SSR row says — which is the whole of `ChainDesc::probeGather`
+    // (the note there). Like `rayReflect` it reads the machine through the
+    // scene's resolved row and never the document directly, and like it this
+    // line is BELOW the offscreen early-out: an offscreen view that did not opt
+    // in (`PostFxDesc::allowOffscreen`) has no prepass and therefore no gather,
+    // so every thumbnail, preview and pixel suite keeps the colours that make
+    // it assertable.
+    d.probeGather    = mScene && mScene->probeGatherWanted();
     d.refractions    = mPostFx.refractions;
     // DISTORTION (POST_LOOKS_SPEC §5.3), below the offscreen early-out with the
     // rest: a distortion object is invisible in the passthrough shape anyway (it
@@ -1297,6 +1309,7 @@ void OgreView::rebuildWorkspaceDef() {
         chain::destroy(cm, mWorkspaceDef, mNodeDefs);
         chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs, mChainHandles);
         mChainRayReflect = chainDesc().rayReflect;
+        mChainProbeGather = chainDesc().probeGather;
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }

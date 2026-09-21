@@ -970,6 +970,12 @@ GiStatus OgreScene::giStatus() const {
         st.chainSettles         = mGiChainSettles;
         st.dragMovers           = int(mDragMovers.size());     // MOVER-1
         st.dragMoverGestures    = mDragMoverGestures;
+        // THE SCREEN-PROBE GATHER (GATHER-1a): the row resolved against the
+        // machine, and — where a view has drawn one — the grid it placed, the
+        // rays it traced and the GPU milliseconds the three jobs cost. Filled
+        // in OgreRayQuery.cpp, which is where the tier is; `on` false with
+        // every other field zero is the shipped state.
+        gatherStatusInto(st.gather);
     } JAH_CATCH(mError, st);
     return st;
 }

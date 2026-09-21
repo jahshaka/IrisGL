@@ -509,8 +509,8 @@ bool ChainDesc::anyEffect() const {
     // A stack of looks is an effect on its own: the LDR filters need the post
     // shape (they read a finished image out of a texture), and nothing else in
     // the description has to be on for that to be true.
-    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || refractions || distortion || hzb ||
-           !looks.empty();
+    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || refractions ||
+           distortion || hzb || !looks.empty();
 }
 
 bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
@@ -536,7 +536,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
-           a.rayReflect == b.rayReflect &&
+           a.rayReflect == b.rayReflect && a.probeGather == b.probeGather &&
            a.refractions == b.refractions &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
@@ -953,6 +953,17 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // no picture at the end of it (a machine with no ray queries, or a project
     // whose ray row is Off, renders exactly what it renders today).
     const bool ssr = desc.ssr > 0 && (ssrMarch || desc.rayReflect);
+    // ...AND THE PREPASS IS NOT THE SSR ROW'S ALONE SINCE THE SCREEN-PROBE
+    // GATHER (GATHER-1a). Everything the prepass produces — the normals
+    // G-buffer, the packed shadow/roughness, the shared depth, and the
+    // PrePassUse mode that declares `iFragCoord` in the shading pass — is what
+    // a gather needs to place its probes and to read their answer back. So the
+    // TRAVERSAL runs for `ssr || probeGather`, while the reflection TEXTURE,
+    // the march, the resolve and the colour history stay the SSR row's: a
+    // gather-only chain composites no reflection at all (the pin sets
+    // `hlms_use_ssr` only where the pass carries an ssr texture, and this one
+    // hands it none).
+    const bool prepass = ssr || desc.probeGather;
 
     // The scene target. RGBA16_FLOAT whenever HDR is on — that is the whole
     // point: light values above 1.0 survive to the tonemapper. Without HDR the
@@ -961,7 +972,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     {
         auto *td = addTex(n, kRt0, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         td->depthBufferId = 1u;                      // the scene needs depth
-        td->preferDepthTexture = desc.ssao || ssr;   // sampled by the AO/SSR passes
+        td->preferDepthTexture = desc.ssao || prepass;   // sampled by the AO/SSR/gather passes
         syncRtvDepth(n, kRt0, td);
     }
 
@@ -1055,7 +1066,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // a named attachment it can borrow, and the opaque pass has to STORE it.
     // ...and the HZB, which is nothing BUT a consumer of the scene depth: it
     // cannot read a depth buffer the compositor picked out of a pool.
-    const bool namedDepth = desc.ssao || ssr || desc.refractions || desc.distortion ||
+    const bool namedDepth = desc.ssao || prepass || desc.refractions || desc.distortion ||
                             desc.hzb;
     if (namedDepth) {
         auto *td = addTex(n, kDepth, Ogre::PFG_D32_FLOAT);
@@ -1069,12 +1080,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // content is identical (HlmsPbs emits `pixelData.normal * 0.5 + 0.5` in both
     // paths, 800.PixelShader_piece_ps.any:978 vs :988), and asking the main pass
     // for a second attachment it does not need is pure bandwidth.
-    if (desc.ssao || ssr) {
+    if (desc.ssao || prepass) {
         auto *td = addTex(n, kGBufNormals, Ogre::PFG_R10G10B10A2_UNORM);
         syncRtvDepth(n, kGBufNormals, td);
     }
 
-    if (ssr) {
+    if (prepass) {
         // The prepass' SECOND G-buffer: HlmsPbs writes the shadow term in x and
         // roughness in y, packed as (r - 0.02) * 1.02040816. RG16_UNORM is the
         // sample's own format for it and there is no reason to differ.
@@ -1095,6 +1106,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             rtv->stencilAttachment.textureName = kDepth;
             rtv->preferDepthTexture = true;
         }
+        // ...AND EVERYTHING BELOW IS THE SSR ROW'S OWN, not the prepass'
+        // (GATHER-1a): a gather-only chain has a prepass and no reflection at
+        // all, and declaring a full-resolution RGBA16F nothing writes and
+        // nothing reads would cost 16 MB at 1080p for the shape of the code.
+        if (ssr) {
         // The march's output: hit coordinates, not colour. RGBA16_UNORM because
         // every channel is a [0,1] quantity (two texture coordinates and two
         // fades) and 16 bits of a UV is a quarter of a pixel at 16K.
@@ -1141,6 +1157,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                               desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
+        }   // if (ssr)
     }
 
     // THE HZB (NANITE_SPEC §4.3). Declared beside SSAO's depth downscale because
@@ -1286,7 +1303,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         Ogre::RenderTargetViewEntry colour0;
         colour0.textureName = kRt0;
         rtv->colourAttachments.push_back(colour0);
-        if (desc.ssao && !ssr) {
+        if (desc.ssao && !prepass) {
             Ogre::RenderTargetViewEntry colour1;
             colour1.textureName = kGBufNormals;
             rtv->colourAttachments.push_back(colour1);
@@ -1346,7 +1363,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // deletes the entire `use_prepass_msaa` half of upstream's recipe: no
     // explicit-resolve G-buffers, no depth resolve, no per-subsample coverage
     // test in the Pbs shader.
-    if (ssr) {
+    if (prepass) {
         // The colour history, seeded ONCE. Without this the first frame's
         // resolve samples an Undefined texture; with it, the first frame simply
         // reflects black and the second is correct.
@@ -1375,7 +1392,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // probe/sky answer alone". One full-target clear of an RGBA16F — at a
         // Quest Pro's two eyes, 82 MB of writes, about a sixth of a
         // millisecond — against a march, a resolve and a history copy.
-        else {
+        //
+        // ...and a GATHER-ONLY chain (the SSR row off, GATHER-1a) declares no
+        // reflection texture at all, so there is nothing to clear: `ssr` here
+        // and not `prepass`.
+        else if (ssr) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrReflection);
             t->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
@@ -1460,35 +1481,40 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // own value already in the buffer — clearing it here would throw that
         // away and the frame would come out empty. Loading it also buys exact
         // early-Z for free, which is most of what pays for the extra traversal.
-        if (ssr) p->mLoadActionDepth = Ogre::LoadAction::Load;
+        if (prepass) p->mLoadActionDepth = Ogre::LoadAction::Load;
         // Plain Store, at every effect combination: upstream's recipe needs
         // "store_and_resolve" here because its refractive pass renders into a
         // MULTISAMPLE clone while sampling the resolved original, and at 1x
         // (ChainDesc) those are the same image.
         p->mStoreActionColour[0] = Ogre::StoreAction::Store;
-        if (desc.ssao && !ssr) p->mStoreActionColour[1] = Ogre::StoreAction::Store;
+        if (desc.ssao && !prepass) p->mStoreActionColour[1] = Ogre::StoreAction::Store;
         // Depth survives the pass: SSAO marches it, refraction copies it, the
         // refractive pass depth-tests against it — and so does the DISTORTION
         // pass, which is the whole reason haze can hide behind a wall. The VUID
         // lesson below applies verbatim: DontCare makes the contents UNDEFINED,
         // not "kept but unpromised".
-        p->mStoreActionDepth   = (desc.ssao || ssr || desc.refractions || desc.distortion ||
+        p->mStoreActionDepth   = (desc.ssao || prepass || desc.refractions || desc.distortion ||
                                   desc.hzb)
                                      ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
         p->mStoreActionStencil = Ogre::StoreAction::DontCare;
         // Ignored in a prepass mode (the flag's own documentation says so), and
         // with SSR on the RTV has one colour attachment anyway.
-        p->mGenNormalsGBuf = desc.ssao && !ssr;
-        if (ssr) {
+        p->mGenNormalsGBuf = desc.ssao && !prepass;
+        if (prepass) {
             // THE COMPOSITE. Two G-buffers, the depth (only the MSAA path's
             // shader reads it, but the sample passes it and so do we), and the
             // reflection. This one call is what puts `hlms_use_ssr` into every
-            // HlmsPbs shader of this pass.
+            // HlmsPbs shader of this pass — and what puts `hlms_screen_pos_int`
+            // into it, i.e. what declares `iFragCoord`, which is why a
+            // gather-only chain makes the same call with NO reflection texture:
+            // the pin raises `hlms_use_ssr` only where one is bound
+            // (OgreHlms.cpp), so the composite is compiled out and the gather's
+            // own piece still has the fragment coordinate it reads with.
             Ogre::IdStringVec prePassTextures;
             prePassTextures.push_back(Ogre::IdString(kGBufNormals));
             prePassTextures.push_back(Ogre::IdString(kSsrShadowRough));
             p->setUseDepthPrePass(prePassTextures, Ogre::IdString(kDepth),
-                                  Ogre::IdString(kSsrReflection));
+                                  ssr ? Ogre::IdString(kSsrReflection) : Ogre::IdString());
         }
         p->mFirstRQ = 0u;
         // Stop before the refractive queue only when there IS a refraction pass
@@ -1591,7 +1617,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // is a knife edge — i.e. the SKY, which came out as blocks of
             // recycled-VRAM noise under the Epic chain (2026-09-03 defect lane;
             // sky_stays_smooth_under_the_post_chain is the pixel gate).
-            p->mStoreActionDepth = (desc.ssao || ssr || desc.distortion)
+            p->mStoreActionDepth = (desc.ssao || prepass || desc.distortion)
                                        ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             // The shadow node was already computed for this camera by the opaque

@@ -1,343 +1,196 @@
 #version 460
-// GATHER-0 — THE NAKED SCREEN-PROBE TRACE (phase 0 of
-// SPECS/SCREEN_PROBE_GATHER_SPEC.md; a MEASUREMENT SURFACE, not a feature).
+// THE SCREEN-PROBE GATHER, JOB 2 OF 3: THE TRACE
+// (GATHER-1a; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 2 items 2-4).
 //
-// WHAT IT IS, in one sentence: one probe per 16x16 pixels of the view, each
-// tracing 64 cosine-stratified hardware rays over the hemisphere of the
-// surface that pixel drew, so the diffuse-GI integral is estimated ONCE PER
-// 256 PIXELS with rays instead of once per pixel with six voxel cones.
+// ONE WORKGROUP PER PROBE, one THREAD per ray, one ray per texel of the
+// probe's octahedral map. The workgroup is 8x8, so a probe traces at most 64
+// rays; the map's resolution is the tier's (8 at High and Epic, 6 at Medium).
 //
-// THE PHYSICS, and the one line that decides the units. A pixel's diffuse GI
-// is E(n) = INTEGRAL L(w) max(0, n.w) dw. HlmsPbs consumes it as
-// `envColourD`, which its BRDF multiplies by kD (= albedo/pi) and by pi
-// (200.BRDFs_piece_ps.any:305) — so `envColourD` is E/pi, i.e. the MEAN
-// radiance over the cosine-weighted hemisphere. With COSINE-DISTRIBUTED
-// directions the estimator of E/pi is exactly the arithmetic mean of the
-// sampled radiances: no weight, no pi, nothing to get wrong twice.
+// THE PHYSICS, and the line that decides the units. A pixel's diffuse GI is
+// E(n) = INTEGRAL L(w) max(0, n.w) dw. HlmsPbs consumes it as `envColourD`,
+// which its BRDF multiplies by kD (= albedo/pi) and by pi
+// (200.BRDFs_piece_ps.any:305) — so `envColourD` is E/pi, the mean radiance
+// over the cosine-weighted hemisphere. This job estimates it as a QUADRATURE
+// over the octahedral map with the EXACT solid angle of each texel
+// (jahOctSolidAngle, whose derivation is at its definition):
 //
-// WHAT IS DELIBERATELY ABSENT (this is phase 0): no spatial filter, no
-// temporal accumulation, no adaptive probes, no importance sampling, no
-// screen trace, no card read. The picture WILL be noisy and blocky at 16 px.
-// Phases 1-3 buy exactly that back; what this shader exists to measure is
-// the cost of the trace, the cost of the integrate, and the SHAPE of the
-// answer (how much light leaks through a thin wall when the estimate is a
-// ray rather than a cone through a voxel).
+//     E/pi = SUM( L_i * cos_i * dOmega_i ) / SUM( cos_i * dOmega_i )
+//
+// The denominator is pi by construction and is summed rather than assumed for
+// one reason worth the register: with the directions JITTERED inside their
+// texels it is pi plus the estimator's own noise, and dividing by the noise
+// that the numerator carries cancels it — a constant-radiance hemisphere reads
+// exactly that radiance, every frame, instead of wobbling by two per cent. It
+// is a ratio estimator: exact for a uniform environment, O(1/N) biased for a
+// varying one, and far quieter than the raw sum on the axis the analytic gate
+// measures (the MAGNITUDE).
+//
+// WHAT THE ATLAS IS FOR. Every ray also stores its own radiance and its hit
+// DISTANCE into the probe's 8x8 block of the atlas. Nothing reads it at phase
+// 1 — the integrate takes the reduced irradiance out of the probe's record —
+// and it exists because phases 2 and 3 are the filter in probe space, the
+// plane-weighted interpolation and the temporal reprojection, and every one of
+// them reads radiance PER DIRECTION with the distance beside it. Writing it
+// costs one store per ray.
+//
+// THE HIT'S RADIANCE, in Lumen's order minus the card (that is phase 5, and it
+// arrives as one more branch here): the cascade VOXEL where the chain holds
+// something, the FAR TERM (the outer cascades at the ray's end point) where the
+// ray outran the near field, the SKY where nothing holds anything. And a hit
+// the cascades cannot shade is BLACK, never sky — the ray found geometry and
+// the cache does not reach it; handing it the sky would light the probe THROUGH
+// the object, which is the leak this whole program exists to remove. Black is
+// an underestimate of a surface's bounce and an exact statement about its
+// occlusion (the lead's decision, ledger sections 937/938).
 //
 // DETERMINISM (spec section 5). Every stochastic input is an integer hash of
-// (probe cell, ray index, frame index) — PCG, the idiom rq_reflect.comp
-// already uses. No clock, no subgroup id, no atomic: the 64 rays are reduced
-// in shared memory by a FIXED-ORDER tree, so the float sum is bit-repeatable.
-// With the frame term held (the spike's `freezeFrameIndex`) two consecutive
-// frames of a still scene are byte-identical.
-//
-// WHY voxelRadiance AND skyRadiance ARE COPIED HERE from rq_reflect.comp
-// rather than shared: the CMake rule compiles each .comp as a single file
-// with no include path (irisgl/engine/CMakeLists.txt), so glslang has no
-// `-I` to resolve a shared header with. Sharing them is a build-rule change
-// phase 1 should make (spec section 10 item 7) — this file states the
-// duplication rather than hiding it.
+// (probe cell, ray, frame). The 64 partial sums are reduced by a FIXED-ORDER
+// shared-memory tree — not an atomic, not a subgroup reduction, both of which
+// make the sum's order the scheduler's and a float sum whose order is the
+// scheduler's is not reproducible (patch 0065's lesson in its smallest form).
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
 
-// 64 threads = 64 rays = ONE PROBE per workgroup, which is the spec's shape:
-// the rays of one probe share the probe's surface, so its depth and normal
-// are reconstructed once per group and not once per ray.
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
-const int kMaxCascades = 4;
-const float kPi = 3.14159265;
-const float kMaxRadiance = 1024.0;
+#define JAH_PROBE_PARAMS_BINDING 1
+#include "jah_probe_params.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( std430, set = 0, binding = 2 ) buffer Records { JahProbeRecord r[]; } records;
+/// THE PROBE ATLAS: one 8x8 block per probe, rgb = the radiance arriving along
+/// that texel's direction, a = how far away it came from (-1 = nothing inside
+/// the near field).
+layout( rgba16f, set = 0, binding = 3 ) uniform image2D probeAtlas;
+layout( set = 0, binding = 4 ) uniform sampler3D voxelIso[kMaxCascades];
+layout( set = 0, binding = 5 ) uniform sampler3D voxelX[kMaxCascades];
+layout( set = 0, binding = 6 ) uniform sampler3D voxelY[kMaxCascades];
+layout( set = 0, binding = 7 ) uniform sampler3D voxelZ[kMaxCascades];
+layout( set = 0, binding = 8 ) uniform samplerCube skyCube;
 
-layout( set = 0, binding = 1 ) uniform Params
-{
-	/// xyz = the camera in world space, w = 1 perspective / 0 orthographic.
-	vec4 camPos;
-	/// The world-space ray basis of the 0..1 image (rq_reflect.comp's).
-	vec4 rayTL;
-	vec4 rayRight;
-	vec4 rayDown;
-	vec4 fwd;
-	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe).
-	vec4 projParams;
-	/// xy = the PROBE GRID in probes, zw = the full-resolution target size.
-	vec4 resolution;
-	/// x = the probe stride in pixels, y = the ray's maximum length in world
-	/// units, z = the frame index (the sample sequence's only input),
-	/// w = how many cascades are bound.
-	vec4 knobs;
-	/// x = 1 when the voxel textures carry the anisotropic slots, y = the
-	/// surface bias in world units, z = 1 when a sky cubemap is bound,
-	/// w = how many rays each probe traces (<= 64).
-	vec4 knobs2;
-	/// The colour an escaping ray reads when no sky cubemap is bound.
-	vec4 skyColour;
-	/// THE MEASUREMENT ARMS, and nothing else lives here. x = 1 stands the FAR
-	/// TERM down (a ray with no hit inside tMax reads the sky directly), which
-	/// is the A/B that prices spec section 10 item 6 — what the outer
-	/// cascades' voxel at tMax is worth to the picture. y/z/w reserved.
-	vec4 flags;
-	/// The VIEW space's three axes in world space.
-	vec4 viewAxisX;
-	vec4 viewAxisY;
-	vec4 viewAxisZ;
-	/// Per cascade: xyz = the voxel box's world origin, w = the cascade's
-	/// radiance multiplier (the bake's normalisation undone — DRAG-1).
-	vec4 voxelOrigin[kMaxCascades];
-	/// Per cascade: xyz = 1 / the box's world size, w = one cell in world units.
-	vec4 voxelInvSize[kMaxCascades];
-} p;
+#define JAH_VOX_COUNT       int( p.knobs.w )
+#define JAH_VOX_ANISO       ( p.knobs2.x > 0.5 )
+#define JAH_VOX_ORIGIN( c )  p.voxelOrigin[c]
+#define JAH_VOX_INVSIZE( c ) p.voxelInvSize[c]
+#define JAH_SKY_ON          ( p.knobs2.z > 0.5 )
+#define JAH_SKY_COLOUR      p.skyColour.xyz
+#include "jah_rq_hit.glsl"
 
-layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
-layout( set = 0, binding = 3 ) uniform sampler2D sceneDepth;
-/// THE PROBE ATLAS, one texel per probe: rgb = the mean radiance over the
-/// cosine-weighted hemisphere (i.e. E/pi, what envColourD wants), w = 1 when
-/// this probe sits on a surface at all.
-layout( rgba16f, set = 0, binding = 4 ) uniform image2D probeRadiance;
-layout( set = 0, binding = 5 ) uniform sampler3D voxelIso[kMaxCascades];
-layout( set = 0, binding = 6 ) uniform sampler3D voxelX[kMaxCascades];
-layout( set = 0, binding = 7 ) uniform sampler3D voxelY[kMaxCascades];
-layout( set = 0, binding = 8 ) uniform sampler3D voxelZ[kMaxCascades];
-layout( set = 0, binding = 9 ) uniform samplerCube skyCube;
-
-/// IS THIS A NUMBER? `x == x` is not a NaN test in this tree (CLAUDE.md,
-/// HDR-1): the compiler folds a self-equality to true. The bits are the test.
-bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
-bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
-
-float viewDistance( float rawDepth )
-{
-	if( p.camPos.w < 0.5 )
-		return abs( ( rawDepth - p.projParams.x ) / p.projParams.y );
-	return p.projParams.y / ( rawDepth - p.projParams.x );
-}
-
-vec3 worldAt( vec2 uv, float dist )
-{
-	const vec3 plane = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
-	if( p.camPos.w < 0.5 )
-		return p.camPos.xyz + plane + p.fwd.xyz * dist;
-	return p.camPos.xyz + plane * dist;
-}
-
-uint pcg( uint v )
-{
-	uint state = v * 747796405u + 2891336453u;
-	uint word = ( ( state >> ( ( state >> 28u ) + 4u ) ) ^ state ) * 277803737u;
-	return ( word >> 22u ) ^ word;
-}
-/// The jitter of ONE ray of ONE probe in ONE frame. The three indices enter
-/// the same hash with distinct odd multipliers, which is the idiom beside it.
-vec2 sample2( ivec2 cell, uint ray, uint frame )
-{
-	const uint h = pcg( uint( cell.x ) * 1973u + uint( cell.y ) * 9277u + ray * 20749u +
-						frame * 26699u );
-	return vec2( float( h & 0xFFFFu ) / 65536.0, float( h >> 16u ) / 65536.0 );
-}
-
-/// THE HIT'S RADIANCE FROM THE CASCADE VOXELS — rq_reflect.comp's function
-/// with ONE change: the mip is chosen from an explicit world-space FOOTPRINT
-/// rather than from a specular lobe's alpha, because a gather ray's footprint
-/// is the solid angle it represents (2*pi/N) and not a GGX lobe. Everything
-/// else — the anisotropic slot blend in the ray direction, the cascade
-/// crossfade over six cells, the multiplier that undoes the bake's
-/// normalisation — is the same arithmetic, deliberately, so the two consumers
-/// of the voxel cache cannot disagree about what a voxel means.
-vec3 voxelRadiance( vec3 hitPos, vec3 dir, float footprint, out bool ok )
-{
-	ok = false;
-	const int count = int( p.knobs.w );
-	const float kBlendCells = 6.0;
-	vec3 acc = vec3( 0.0 );
-	float accW = 0.0;
-	for( int c = 0; c < count; ++c )
-	{
-		if( accW >= 0.999 )
-			break;
-		const vec3 pos = hitPos + dir * ( 0.5 * p.voxelInvSize[c].w );
-		const vec3 ls = ( pos - p.voxelOrigin[c].xyz ) * p.voxelInvSize[c].xyz;
-		if( any( lessThan( ls, vec3( 0.0 ) ) ) || any( greaterThan( ls, vec3( 1.0 ) ) ) )
-			continue;
-		const float texel = 2.0 * max( p.voxelInvSize[c].w, 1e-6 );
-		const float lod = clamp( log2( max( footprint, texel ) / texel ), 0.0, 6.0 );
-		vec4 s;
-		if( p.knobs2.x > 0.5 )
-		{
-			vec3 isNegative;
-			isNegative.x = dir.x < 0.0 ? 0.5 : 0.0;
-			isNegative.y = dir.y < 0.0 ? 0.5 : 0.0;
-			isNegative.z = dir.z < 0.0 ? 0.5 : 0.0;
-			vec3 uvw = ls;
-			uvw.x = clamp( uvw.x, 0.0, 1.0 ) * 0.5;
-			const vec4 xc = textureLod( voxelX[c], uvw + vec3( isNegative.x, 0.0, 0.0 ), lod );
-			const vec4 yc = textureLod( voxelY[c], uvw + vec3( isNegative.y, 0.0, 0.0 ), lod );
-			const vec4 zc = textureLod( voxelZ[c], uvw + vec3( isNegative.z, 0.0, 0.0 ), lod );
-			const vec3 w = dir * dir;
-			s = w.x * xc + w.y * yc + w.z * zc;
-		}
-		else
-		{
-			s = textureLod( voxelIso[c], ls, lod );
-		}
-		if( s.w <= 0.02 || !finite3( s.xyz ) || !finite1( s.w ) )
-			continue;
-		const vec3 e = min( ls, vec3( 1.0 ) - ls );
-		const float edge = min( min( e.x, e.y ), e.z );
-		const vec3 invSz = p.voxelInvSize[c].xyz;
-		const float cellLS = p.voxelInvSize[c].w * max( max( invSz.x, invSz.y ), invSz.z );
-		float w = clamp( edge / max( kBlendCells * cellLS, 1e-6 ), 0.0, 1.0 );
-		w = min( w, 1.0 - accW );
-		if( w <= 0.0 )
-			continue;
-		acc += ( s.xyz / s.w ) * ( w * max( p.voxelOrigin[c].w, 0.0 ) );
-		accW += w;
-		ok = true;
-	}
-	if( !ok )
-		return vec3( 0.0 );
-	return clamp( acc / max( accW, 1e-6 ), vec3( 0.0 ), vec3( kMaxRadiance ) );
-}
-
-vec3 skyRadiance( vec3 dir )
-{
-	if( p.knobs2.z < 0.5 )
-		return p.skyColour.xyz;
-	// Ogre samples cubemaps LEFT-HANDED (the sky/IBL adoption's fact).
-	const vec4 s = textureLod( skyCube, vec3( dir.x, dir.y, -dir.z ), 0.0 );
-	if( !finite3( s.xyz ) )
-		return p.skyColour.xyz;
-	return clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
-}
-
-/// THE 64 PARTIAL SUMS, reduced in a FIXED ORDER. Not an atomic add and not a
-/// subgroup reduction: both make the sum's order the scheduler's, and a
-/// floating-point sum whose order is the scheduler's is not reproducible
-/// (patch 0065's lesson, in its smallest form).
-shared vec3 gSum[64];
+/// The weighted radiance (xyz) and the weight (w), reduced in a fixed order.
+shared vec4 gSum[64];
 
 void main()
 {
-	const ivec2 grid = ivec2( p.resolution.xy );
-	const ivec2 cell = ivec2( gl_WorkGroupID.xy );
-	if( any( greaterThanEqual( cell, grid ) ) )
-		return;
+	const uint probe = gl_WorkGroupID.x;
 	const uint lane = gl_LocalInvocationIndex;
-	const uint rays = uint( clamp( p.knobs2.w, 1.0, 64.0 ) );
+	const int octRes = int( clamp( p.knobs2.w, 1.0, float( kOctResMax ) ) );
+	const uint rays = uint( octRes * octRes );
+
+	const vec4 posW = records.r[probe].posW;
+	const vec4 normalW = records.r[probe].normalW;
+	const bool onSurface = posW.w > 0.5;
+
+	// THE PROBE'S CELL IS WHAT THE SAMPLE SEQUENCE IS KEYED ON, NEVER ITS LIST
+	// SLOT, and this is the line that makes the adaptive pass deterministic. An
+	// adaptive probe's slot is the atomic's choice and changes run to run; its
+	// CELL is written into its record by the thread that appended it. A uniform
+	// probe's index IS its cell. So the same scene at the same frame draws the
+	// same picture whatever order the appends happened in — the property spec
+	// section 5 item 2 asks for, made true here rather than hoped for.
+	const int gridW = max( int( p.resolution.x ), 1 );
+	const uint uniformProbes = uint( max( p.knobs3.x, 0.0 ) );
+	const bool adaptive = probe >= uniformProbes;
+	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
+	const ivec2 cell = ivec2( int( cellIndex ) % gridW, int( cellIndex ) / gridW );
 	const uint frame = uint( p.knobs.z );
+	// ...and the two probes of one cell are decorrelated by a constant, so the
+	// second is not a second sample of the same 64 directions.
+	const uint sequence = adaptive ? 4096u : 0u;
 
-	// ---- THE PROBE. Its screen point is the CENTRE of its own 16x16 block,
-	// fixed (phase 0 places no probe adaptively and jitters no position: what
-	// moves between frames is the ray set, nothing else).
-	const ivec2 fullRes = ivec2( p.resolution.zw );
-	const float stride = max( p.knobs.x, 1.0 );
-	const vec2 probePix = ( vec2( cell ) + 0.5 ) * stride;
-	const vec2 uv = probePix / vec2( fullRes );
+	// The atlas block, which exists whether or not the probe answered: a block
+	// left holding an older frame's radiance would be read by phase 2's filter
+	// as this frame's.
+	const int atlasCols = max( int( p.knobs3.z ), 1 );
+	const ivec2 block = ivec2( int( probe ) % atlasCols, int( probe ) / atlasCols ) * kOctResMax;
+	const ivec2 texel = ivec2( int( lane ) % kOctResMax, int( lane ) / kOctResMax );
 
-	const float rawDepth = texture( sceneDepth, uv ).x;
-	vec3 worldN = vec3( 0.0 );
-	vec3 world = vec3( 0.0 );
-	bool onSurface = false;
-	if( rawDepth > 0.0 && rawDepth < 1.0 )
+	vec4 contribution = vec4( 0.0 );
+	vec4 atlasTexel = vec4( 0.0, 0.0, 0.0, -1.0 );
+
+	if( onSurface && lane < rays )
 	{
-		vec3 normalVS = texture( gBufNormals, uv ).xyz * 2.0 - 1.0;
-		if( dot( normalVS, normalVS ) > 1e-6 )
-		{
-			normalVS = normalize( normalVS );
-			worldN = normalize( p.viewAxisX.xyz * normalVS.x + p.viewAxisY.xyz * normalVS.y +
-								p.viewAxisZ.xyz * normalVS.z );
-			world = worldAt( uv, viewDistance( rawDepth ) );
-			onSurface = finite3( world ) && finite3( worldN );
-		}
-	}
+		const vec3 n = normalW.xyz;
+		vec3 T, B;
+		jahTangentFrame( n, T, B );
 
-	if( !onSurface )
-	{
-		// No surface under this probe: the atlas texel says so and the
-		// integrate hands its pixels back to whatever the pixel path already
-		// had. A probe on the sky is not an error, it is most of the border.
-		if( lane == 0u )
-			imageStore( probeRadiance, cell, vec4( 0.0 ) );
-		return;
-	}
-
-	// A tangent frame around the surface normal (Duff et al., branchless) —
-	// the same one rq_reflect.comp builds, for the same reason.
-	const float sg = worldN.z >= 0.0 ? 1.0 : -1.0;
-	const float a0 = -1.0 / ( sg + worldN.z );
-	const float b0 = worldN.x * worldN.y * a0;
-	const vec3 T = vec3( 1.0 + sg * worldN.x * worldN.x * a0, sg * b0, -sg * worldN.x );
-	const vec3 B = vec3( b0, sg + worldN.y * worldN.y * a0, -worldN.y );
-
-	vec3 radiance = vec3( 0.0 );
-	if( lane < rays )
-	{
-		// ---- THE DIRECTION. STRATIFIED over an 8x8 grid of the unit square,
-		// one stratum per lane, jittered inside it by the (cell, ray, frame)
-		// hash; then Malley's map, which turns a uniform square into a
-		// COSINE-weighted hemisphere. Cosine weighting is not decoration: it
-		// is what makes the mean of the samples the quantity envColourD is
-		// (see the header), and it puts the samples where the cosine puts the
-		// energy.
-		const uint sx = lane & 7u, sy = lane >> 3u;
-		const vec2 j = sample2( cell, lane, frame );
-		const vec2 u = ( vec2( float( sx ), float( sy ) ) + j ) * 0.125;
-		const float r = sqrt( clamp( u.x, 0.0, 1.0 ) );
-		const float phi = 6.28318531 * u.y;
-		const vec3 dLocal = vec3( r * cos( phi ), r * sin( phi ),
-								  sqrt( max( 0.0, 1.0 - u.x ) ) );
-		const vec3 dir = normalize( T * dLocal.x + B * dLocal.y + worldN * dLocal.z );
+		// ---- THE DIRECTION. One octahedral texel, jittered inside itself.
+		// Stratification is the variance reduction that costs nothing: the 64
+		// rays cover the hemisphere once each rather than clustering, and the
+		// jitter inside the texel is what makes the estimate UNBIASED rather
+		// than a fixed quadrature that would alias a small bright source in
+		// and out as the probe moves.
+		const ivec2 t = ivec2( int( lane ) % octRes, int( lane ) / octRes );
+		const vec2 j = jahSample2( cell, sequence + lane + 1u, frame );
+		const vec2 uv = ( vec2( t ) + j ) / float( octRes );
+		const vec3 octPoint = jahOctPoint( uv );
+		const float invR = 1.0 / max( length( octPoint ), 1e-6 );
+		const vec3 dLocal = octPoint * invR;
+		const vec3 dir = normalize( T * dLocal.x + B * dLocal.y + n * dLocal.z );
+		// The cosine IS the local z (the frame is built around the normal), and
+		// the solid angle is the texel's exact one.
+		const float weight = max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) );
 
 		const float bias = p.knobs2.y;
 		const float maxT = p.knobs.y;
+		const vec3 origin = posW.xyz + n * bias;
 		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, world + worldN * bias,
-							   bias, dir, maxT );
+		rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, origin, bias, dir, maxT );
 		while( rayQueryProceedEXT( rq ) ) {}
 
+		// THE RAY'S FOOTPRINT AT ITS HIT. One of `rays` directions covers a
+		// solid angle 2*pi/rays, whose half-angle has tan ~ sqrt(2/rays) at
+		// these counts; the mip that matches it is the one whose texel is that
+		// wide at distance t. A gather ray reading the FINEST mip would alias
+		// exactly as a cone march with no cone does.
+		const float spread = sqrt( 2.0 / float( rays ) );
+		vec3 radiance = vec3( 0.0 );
+		float distance = -1.0;
 		bool ok = false;
 		if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
 			gl_RayQueryCommittedIntersectionTriangleEXT )
 		{
-			const float t = rayQueryGetIntersectionTEXT( rq, true );
-			const vec3 hitPos = world + worldN * bias + dir * t;
-			// THE RAY'S FOOTPRINT AT THE HIT. One of `rays` directions covers
-			// a solid angle 2*pi/rays, whose half-angle has tan ~ sqrt(2/rays)
-			// at these counts; the mip that matches it is the one whose texel
-			// is that wide at distance t. A gather ray reading the FINEST mip
-			// would alias exactly as a cone march with no cone does.
-			const float spread = sqrt( 2.0 / float( rays ) );
-			radiance = voxelRadiance( hitPos, dir, max( t * spread, 1e-4 ), ok );
-			// A HIT THE CASCADES CANNOT SHADE IS BLACK, NOT SKY. The ray found
-			// geometry; the voxel cache does not reach it. Handing it the sky
-			// would light the probe THROUGH the object, which is the leak this
-			// whole program exists to remove. Black is an underestimate of a
-			// surface's bounce and an exact statement about its occlusion.
+			const float tHit = rayQueryGetIntersectionTEXT( rq, true );
+			distance = tHit;
+			radiance = jahVoxelRadiance( origin + dir * tHit, dir, max( tHit * spread, 1e-4 ),
+										 false, ok );
 			if( !ok )
-				radiance = vec3( 0.0 );
+				radiance = vec3( 0.0 );   // a hit the cascades cannot shade is BLACK
 		}
 		else
 		{
-			// ---- THE FAR TERM (spec section 2 item 4), then the sky. A ray
-			// with no hit inside tMax either escaped the world or merely
-			// outran the near field: the outer cascades are asked what stands
-			// at its end point, in its own direction, and only where they hold
-			// nothing does the sky answer. The two cases are not
-			// distinguishable from the query — a miss IS "nothing within
-			// tMax" — and they do not need to be: an escaping ray's end point
-			// is empty space, which the volumes report as empty.
-			const float spread = sqrt( 2.0 / float( rays ) );
+			// ---- THE FAR TERM, then the sky. A ray with no hit inside tMax
+			// either escaped the world or merely outran the near field: the
+			// outer cascades are asked what stands at its end point, in its own
+			// direction, and only where they hold nothing does the sky answer.
+			// The two cases are not distinguishable from the query — a miss IS
+			// "nothing within tMax" — and they do not need to be: an escaping
+			// ray's end point is empty space, which the volumes report as empty.
 			bool farOk = false;
 			vec3 far = vec3( 0.0 );
-			if( p.flags.x < 0.5 )
-				far = voxelRadiance( world + dir * maxT, dir,
-									 max( maxT * spread, 1e-4 ), farOk );
-			radiance = farOk ? far : skyRadiance( dir );
+			if( p.plane.z < 0.5 )
+				far = jahVoxelRadiance( origin + dir * maxT, dir, max( maxT * spread, 1e-4 ),
+										false, farOk );
+			radiance = farOk ? far : jahSkyRadiance( dir );
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );
+		contribution = vec4( radiance * weight, weight );
+		atlasTexel = vec4( radiance, distance );
 	}
 
-	gSum[lane] = radiance;
+	imageStore( probeAtlas, block + texel, atlasTexel );
+
+	gSum[lane] = contribution;
 	// The fixed-order tree: lane k adds lane k+s for s = 32, 16, 8, 4, 2, 1.
 	// Six barriers, one deterministic sum.
 	for( uint s = 32u; s > 0u; s >>= 1u )
@@ -349,8 +202,10 @@ void main()
 	barrier();
 	if( lane == 0u )
 	{
-		const vec3 mean = gSum[0] / float( rays );
-		imageStore( probeRadiance, cell,
-					vec4( clamp( mean, vec3( 0.0 ), vec3( kMaxRadiance ) ), 1.0 ) );
+		vec4 answer = vec4( 0.0 );
+		if( gSum[0].w > 1e-6 )
+			answer = vec4( clamp( gSum[0].xyz / gSum[0].w, vec3( 0.0 ), vec3( kMaxRadiance ) ),
+						   1.0 );
+		records.r[probe].irradiance = answer;
 	}
 }

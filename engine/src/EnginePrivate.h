@@ -991,6 +991,21 @@ struct ChainDesc {
     /// it. Nothing else about the chain moves, and with it false every texture,
     /// pass and pixel is exactly what it was.
     bool  rayReflect = false;
+    /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md phase 1), and
+    /// it is here for ONE reason: the gather's probes read their surface from
+    /// the PREPASS' depth and normals, and the pixels that read the gather's
+    /// answer back are shaded by a pass that must be in `PrePassUse` mode (that
+    /// is what declares `iFragCoord`). So the prepass runs for `ssr ||
+    /// probeGather` -- a second geometry traversal a gather view pays whether
+    /// or not its SSR row asked for one.
+    ///
+    /// Nothing else about the graph moves: the reflection texture, the march,
+    /// the resolve and the colour history are all still the SSR row's, and a
+    /// gather-only chain composites no reflection at all (`hlms_use_ssr` is set
+    /// by the pin only when the pass carries an ssr texture, which this one
+    /// does not). Set by the VIEW from the scene's resolved row, exactly as
+    /// `rayReflect` is.
+    bool  probeGather = false;
     bool  refractions = false;
 
     // ---- The hierarchical depth pyramid (SPECS/NANITE_SPEC.md §4.3) ----
@@ -3030,14 +3045,21 @@ public:
     /// scene is byte-for-byte the scene that shipped.
     bool surfaceCardSpike(const SurfaceCardSpikeDesc &desc,
                           SurfaceCardSpikeResult &out) override;
-    /// GATHER-0 (the phase-0 screen-probe gather spike, 2026-09-21). Defined
-    /// in OgreRayQuery.cpp. The flag below is the WHOLE of its state on the
-    /// scene: with it off the ray tier records no gather dispatch, the Hlms
-    /// listener sets no property and no pixel moves.
-    bool probeGatherSpike(const ProbeGatherSpikeDesc &desc,
-                          ProbeGatherSpikeResult &out) override;
-    const ProbeGatherSpikeDesc &gatherSpikeDesc() const { return mGatherSpike; }
-    ProbeGatherSpikeDesc mGatherSpike;
+    /// THE SCREEN-PROBE GATHER (GATHER-1a). Both are defined in
+    /// OgreRayQuery.cpp — like `gatherRayInstances` below, so that not one line
+    /// of the ray tier lives in a TU that does not include Vulkan — and both
+    /// answer for the SCENE, not for a view: the row is the project's and the
+    /// machine's, and every view of the scene that carries a prepass gathers.
+    ///
+    /// With the row off the tier records no dispatch, the Component allocates
+    /// nothing, the Hlms listener sets no property and no pixel moves.
+    bool probeGatherWanted() const;
+    void gatherStatusInto(GatherStatus &out) const;
+    /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
+    /// "what the tier derives", so the default is the shipped configuration.
+    void setGatherTuning(const GatherTuning &t) override { mGatherTuning = t; }
+    const GatherTuning &gatherTuning() const { return mGatherTuning; }
+    GatherTuning mGatherTuning;
     SurfaceCardSpike *cardSpike() const { return mCardSpike; }
     SurfaceCardSpike *mCardSpike = nullptr;
     /// THE TRACED SET, walked out of `mItemNodes` — the scene's own item index,
@@ -5933,6 +5955,10 @@ private:
     /// live view, so the shape is re-checked once a frame in
     /// syncReflectListener rather than only when a host pushes a PostFxDesc.
     bool                       mChainRayReflect = false;
+    /// ...and what `ChainDesc::probeGather` was (GATHER-1a): the gather's row
+    /// is the scene's, so the shape is re-checked once a frame beside the
+    /// reflection's (OgreView::syncReflectListener).
+    bool                       mChainProbeGather = false;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.
