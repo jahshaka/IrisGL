@@ -374,7 +374,24 @@ Scene::Scene()
     ssaoEnabled = false;
     ssaoScale = 1.0f;
     ssaoPower = 1.5f;
-    ssaoRadius = 2.0f;
+    // A CONTACT SCALE, NOT A ROOM SCALE (lane CUBE-SHADE-1, measured; it was
+    // 2.0 m until 2026-09-21). Screen-space AO is the occlusion Photon cannot
+    // resolve -- everything finer than a voxel of the innermost cascade, which
+    // is centimetres. Everything COARSER than that the cone trace already
+    // computes, in world space, from the actual geometry, so a metre-scale AO
+    // radius is a second, cruder copy of a term the frame already carries.
+    //
+    // And the copy is applied in the wrong place: the AO multiply is a
+    // full-screen multiply of the FINAL colour (SSAO_Apply_ps.glsl), so it
+    // darkens DIRECT sunlight as well as the ambient it is a model of.
+    // Measured on a 4 m cube lit by the sun alone -- no Sky Light, no GI, no
+    // shadow on the face -- at 1920x1080 in the editor's own grade: at 2.0 m
+    // the wall's pure sunlight was cut by up to 35/255 (60 %) at the base and
+    // the cut reached 1.55 m UP the wall; at 0.35 m the same cut is 23/255 in
+    // the bottom 20 cm and nothing above it, which is where a contact shadow
+    // belongs. (The multiply itself is still wrong and is recorded for its own
+    // lane; this number is how far the wrongness reaches.)
+    ssaoRadius = 0.35f;
     smaaPreset = -1;
     ssrMode = 0;
     // SSR march: `refined` is the DEFAULT (owner, ledger §843 — PICTURES-1's
