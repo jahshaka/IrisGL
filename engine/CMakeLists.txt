@@ -30,6 +30,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSurfaceCards.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVrSession.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 
