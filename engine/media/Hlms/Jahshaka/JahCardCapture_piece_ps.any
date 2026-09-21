@@ -1,0 +1,142 @@
+// SURFACE-CACHE-0 (a design SPIKE, 2026-09-21) — THE CARD CAPTURE'S EXTRA
+// G-BUFFER TARGETS, written from HlmsPbs with NO patch to the pin.
+//
+// WHAT THIS FILE IS MEASURING. The assessment (SPECS/SURFACE_CACHE_ASSESSMENT.md
+// §8 item 5) records as UNVERIFIED whether a four-target capture from a PBS
+// material can be written through the existing HlmsListener hooks or whether it
+// needs a numbered patch. This file is the answer: it needs NO patch. Two hook
+// pieces that upstream's own GLSL template inserts -- `custom_ps_output_types`
+// (immediately after the built-in fragment outputs, so the running
+// render-target-index counter keeps counting) and `custom_ps_posExecution` (inside main(), after
+// DefaultBodyPS, where `pixelData` is still in scope because the body is a
+// PIECE and not a function) -- plus one pass property set by our own
+// HlmsListener are enough to add three more MRT attachments and fill them.
+//
+// THE PASS IS A PREPASS. `Ogre::PrePassCreate` already gives a capture two of
+// the four channels a card wants, exactly and for free:
+//
+//     location 0  outNormals          the shading normal, *0.5+0.5
+//     location 1  outShadowRoughness  x = the shadow term, y = the GGX alpha
+//                                     (the term is a CONSTANT 1.0 wherever the
+//                                     pass has no shadow-casting light -- the
+//                                     spike's capture scene has none, so this
+//                                     channel's plumbing is proven and its
+//                                     content is not; OgreSurfaceCards.cpp's
+//                                     makeWorkspace says what phase 2 must do)
+//
+// and it computes no lighting at all, which is what makes a capture cheap. What
+// it does NOT compute is the albedo (upstream skips SampleDiffuseMap in a
+// prepass -- there is nothing in a prepass that wants it) or the emissive
+// (computed inside the lit block). So this file adds:
+//
+//     location 2  outCardAlbedo       the diffuse albedo, linear
+//     location 3  outCardEmissive     the emissive radiance
+//     location 4  outCardDepth        VIEW-SPACE distance from the card plane,
+//                                     in world units -- the depth test at the
+//                                     read, and the one channel that makes a
+//                                     card a surface rather than a decal
+//
+// ...and gets the albedo by inserting upstream's own SampleDiffuseMap at
+// `custom_ps_posMaterialLoad`, which is after UnpackTextureIndices (the piece
+// needs texIndex_diffuseIdx) and before the template's own gated insertion, so
+// a capture samples it exactly once and a normal pass is untouched.
+//
+// SPELLED OUT AND NOT ABBREVIATED, because the Hlms parser reads directives
+// inside comments (CLAUDE.md, lane SSR-1): there is no at-sign directive in any
+// comment of this file. AND THE TRAP IS WIDER THAN THE RECORDED FORM — it is
+// not only the block directives. `parseCounter` runs over a LIBRARY file's
+// own text (the part outside every piece) before anything is generated, so a
+// counter written in a COMMENT of a library file INCREMENTS THE REAL COUNTER:
+// one such comment here, naming the render-target counter, shifted every
+// fragment output location in the whole PBS shader by one and the scene
+// rendered BLACK with nothing in any log. Measured on this lane, 2026-09-21.
+//
+// EVERY PIECE HERE IS INERT WITHOUT `jah_card_capture`, which only our listener
+// sets and only while a capture workspace is executing. With it unset the
+// generated shader is byte-identical to a build without this file -- which is
+// what keeps both selftest hashes where they are.
+
+// THE GUARD IS OUTSIDE THE PIECE, NOT INSIDE IT, and that is not style: the
+// Hlms parser collects pieces at LIBRARY PARSE time and refuses a second
+// definition of a name outright ("already defined"), which is a parse error
+// that silently drops the OTHER file's piece for every permutation — the whole
+// scene renders black. JahVct_piece_ps.any defines `custom_ps_posMaterialLoad`
+// under its own property for the prepass-USE case, so both definitions are
+// guarded and no permutation can ever see two.
+//
+// ...AND EVERY GUARD HERE CARRIES `hlms_prepass` AS WELL, not only the property.
+// A capture IS a prepass and nothing else ever sets the property, so the extra
+// term changes no shader that exists today -- but it is what makes the file
+// safe against the one mistake that would reintroduce the black scene: a pass
+// that is not a prepass generating the capture permutation, whose
+// `custom_ps_posExecution` would then collide at library-parse time with
+// JahFog_piece_vs_piece_ps.any's definition of the same name (that file's own
+// guard is `!hlms_prepass`, so the prepass term is exactly its complement).
+@property( jah_card_capture && hlms_prepass )
+@piece( custom_ps_output_types )
+		#define outPs_cardAlbedo outCardAlbedo
+		#define outPs_cardEmissive outCardEmissive
+		#define outPs_cardDepth outCardDepth
+		layout(location = @counter(rtv_target)) out vec4 outCardAlbedo;
+		layout(location = @counter(rtv_target)) out vec4 outCardEmissive;
+		layout(location = @counter(rtv_target)) out float outCardDepth;
+@end
+@end
+
+// THE ALBEDO A PREPASS DOES NOT SAMPLE. Upstream gates SampleDiffuseMap on
+// `!hlms_prepass || alpha_test || hlms_alpha_hash`; a capture wants it in a
+// prepass, so it is inserted here -- once, and only under our property, so the
+// alpha-tested case that ALREADY samples it does not sample it twice.
+// AND NOT WHERE THE MATERIAL HAS DETAIL DIFFUSE MAPS. This hook is upstream's
+// `custom_ps_posMaterialLoad`, which sits BEFORE LoadDetailWeights and
+// SampleDetailMaps (800.PixelShader_piece_ps.any:824 against :826 and :828),
+// while SampleDiffuseMap's own body blends the detail layers: it reads the
+// detail weights and the detail samples, neither of which exists yet at this
+// point. A material with a detail diffuse layer would therefore FAIL TO COMPILE
+// in a capture, and a thrown Hlms compile inside the capture workspace is worse
+// than a failed capture (see CaptureFlag in OgreSurfaceCards.cpp). Such a
+// material's card takes the base colour without its detail layers, which is a
+// STATED limitation of this spike rather than a silent one: phase 2's capture
+// belongs at a hook after the detail maps, or upstream's own gate belongs
+// widened by a numbered patch.
+@property( jah_card_capture && hlms_prepass && !alpha_test && !hlms_alpha_hash && !detail_maps_diffuse )
+@piece( custom_ps_posMaterialLoad )
+		@insertpiece( SampleDiffuseMap )
+@end
+@end
+
+@property( jah_card_capture && hlms_prepass )
+@piece( custom_ps_posExecution )
+		@property( hlms_normal || hlms_qtangent )
+			outCardAlbedo = vec4( float3( pixelData.diffuse.xyz ), 1.0 );
+			// THE EMISSIVE, recomputed rather than read: upstream accumulates it
+			// straight into finalColour inside the lit block, so a prepass never
+			// produces a value this could copy. The constant is the material's
+			// own; the MAP is sampled the same way the lit block samples it.
+			@property( emissive_map )
+				outCardEmissive = vec4( float3( SampleEmissive(
+						textureMaps@value( emissive_map_idx ),
+						samplerState@value(emissive_map_sampler),
+						UV_EMISSIVE( inPs.uv@value(uv_emissive).xy ),
+						texIndex_emissiveMapIdx ).xyz )
+					@property( emissive_constant ) * float3( material.emissive.xyz ) @end
+					, 1.0 );
+			@end
+			@property( !emissive_map && emissive_constant )
+				outCardEmissive = vec4( float3( material.emissive.xyz ), 1.0 );
+			@end
+			@property( !emissive_map && !emissive_constant )
+				outCardEmissive = vec4( 0.0, 0.0, 0.0, 1.0 );
+			@end
+			// Ogre's view space looks down -Z, so the distance from the capture
+			// camera's plane is the negated view-space z. An ORTHOGRAPHIC
+			// capture camera makes that a linear world-unit distance along the
+			// card's own axis, which is exactly what the read depth-tests with.
+			outCardDepth = -inPs.pos.z;
+		@else
+			outCardAlbedo = vec4( 0.0, 0.0, 0.0, 1.0 );
+			outCardEmissive = vec4( 0.0, 0.0, 0.0, 1.0 );
+			outCardDepth = 0.0;
+		@end
+@end
+@end

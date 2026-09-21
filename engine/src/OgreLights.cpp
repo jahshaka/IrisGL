@@ -404,6 +404,14 @@ void OgreScene::shadowWorkspaces(ShadowNodeKind kind,
 
 void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
                                   std::vector<std::string> *owners) const {
+    // SURFACE-CACHE-0 (the phase-0 design spike): the card capture's workspace,
+    // so the monitor's per-pass CPU and GPU milliseconds cover it. Null in every
+    // process that has not armed the spike.
+    if (mCardSpike)
+        if (Ogre::CompositorWorkspace *ws = cardSpikeWorkspace(mCardSpike)) {
+            out.push_back(ws);
+            if (owners) owners->push_back("cardspike");
+        }
     // UNCONDITIONAL, unlike shadowWorkspaces: the monitor wants every pass a
     // planar mirror or a probe executes, not only the shadowed ones.
     if (mPlanar) {

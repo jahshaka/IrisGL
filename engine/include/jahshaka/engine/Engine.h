@@ -900,6 +900,21 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// SURFACE-CACHE-0 — the phase-0 DESIGN SPIKE's one door (2026-09-21).
+    ///
+    /// NOT A FEATURE AND NOT A TIER: it captures one mesh instance's six
+    /// axis-aligned cards and, on request, makes the reflection ray job read
+    /// them at hits on that mesh instead of the cascade's voxels — so a suite
+    /// can measure the three numbers `SPECS/SURFACE_CACHE_ASSESSMENT.md` §8
+    /// records as unverified. Default-implemented as "this build has no spike",
+    /// which is what every engine but the Ogre one answers, and what the whole
+    /// engine answers until the call is made: nothing is allocated, nothing is
+    /// captured and no pixel moves.
+    virtual bool surfaceCardSpike(const SurfaceCardSpikeDesc &, SurfaceCardSpikeResult &out) {
+        out.ok = false;
+        out.error = "no surface-card spike in this build";
+        return false;
+    }
     /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
     /// readback of one cascade's light volume: its peak, its mean over lit
     /// voxels and how many voxels sit on the storage format's top bin.
