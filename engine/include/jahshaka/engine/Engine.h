@@ -2474,6 +2474,11 @@ public:
     /// `Streaming` frame would take a step of? The host reads it to decide how
     /// long to keep asking (and, in phase 2b, to draw the indicator).
     virtual bool framePaceOwesWork() const = 0;
+    /// WHAT THE WORLD STILL OWES, for the loading indicator (§2.1 / §3, lane
+    /// OPEN-COVER-2b) — see `StreamingWork` for what each field means and for
+    /// why this is not `shaderCacheStats()`. Cheap enough to read once a frame
+    /// while a world arrives; every field is a counter kept for another reason.
+    virtual StreamingWork streamingWork() const = 0;
 
     /// THE ENGINE, AT ONE INSTANT (§4.8) — every GI parameter and what it
     /// resolved to, the probe grid, the shadow setup with per-light cache
