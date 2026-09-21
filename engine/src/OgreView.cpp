@@ -991,11 +991,15 @@ void OgreView::destroyBlankChain() {
     detachBlankWorkspace();
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mBlankWorkspaceDef, mBlankNodeDefs);
-        if (mBlankCamera && mEngine) {
-            if (Ogre::SceneManager *sm = mEngine->blankSceneManager())
+        // A CAMERA IS THE ONLY EVIDENCE THIS VIEW EVER HAD A CLEAR-ONLY CHAIN,
+        // and it is what the null test is for: asking the engine for the blank
+        // manager here would CREATE one for a view that never used it (a
+        // getter that allocates, in a teardown path).
+        if (mBlankCamera) {
+            if (Ogre::SceneManager *sm = mEngine ? mEngine->blankSceneManager() : nullptr)
                 sm->destroyCamera(mBlankCamera);
+            mBlankCamera = nullptr;
         }
-        mBlankCamera = nullptr;
     } JAH_CATCH(mError, );
 }
 
@@ -1058,7 +1062,7 @@ void OgreView::notePresented() {
 
 unsigned long long OgreView::blankFramesPresented() const { return mBlankFramesPresented; }
 
-void OgreView::detachScene() {
+void OgreView::detachScene(bool takeBlank) {
     JAH_TRY {
         detachWorkspace();
         // The inset's camera belongs to the scene that is going away, and its
@@ -1074,8 +1078,8 @@ void OgreView::detachScene() {
         // STALE-VIEW-1). Without it this view would present nothing until a
         // scene was bound again, and a window that presents nothing keeps the
         // frame the X server was last given — the world that has just been torn
-        // down. See chain::buildBlank.
-        attachWorkspace();
+        // down. See chain::buildBlank. (Not on the way out: see `takeBlank`.)
+        if (takeBlank) attachWorkspace();
     } JAH_CATCH(mError, );
 }
 
@@ -1571,10 +1575,11 @@ bool OgreView::warmUpShaders() {
 }
 
 void OgreView::destroy() {
-    detachScene();
-    // detachScene has just put the clear-only chain up (it is what a scene-less
-    // view owns); this view is going away, so it comes straight back down —
-    // workspace, definitions and the camera on the engine's blank manager.
+    // NO CLEAR-ONLY CHAIN ON THE WAY OUT (`takeBlank`): building one here — and
+    // with it, in a process that never lost a scene, the engine's blank
+    // SceneManager, from inside ~OgreEngine — only to destroy it on the next
+    // line is work nobody can see. Whatever this view already had comes down.
+    detachScene(false);
     destroyBlankChain();
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);

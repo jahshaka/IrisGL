@@ -1591,11 +1591,13 @@ public:
     /// and whatever the host asked the HUD to draw over it, and nothing else.
     ///
     /// A View with no scene used to present NOTHING, so a window kept the last
-    /// frame it was given: opening a world while one was already on screen left
-    /// the PREVIOUS world frozen there for the length of the load, and the "No
-    /// world open" panel — raised by every close — changed not one pixel. A
-    /// scene-less View now owns a clear-only workspace, and this counts what it
-    /// puts on screen.
+    /// frame it was given — the world that had just been torn down — and the
+    /// "No world open" panel a host raises over an empty viewport changed not
+    /// one pixel. A View whose scene has been TAKEN AWAY now owns a clear-only
+    /// workspace, and this counts what it puts on screen. (Taken away, not
+    /// "never bound": a view that has never had a scene has no workspace at
+    /// all, which is what makes a thumbnail's first frame its own — see
+    /// chain::buildBlank in the engine.)
     ///
     /// Monotonic for the life of the View (a scene bind does NOT reset it — the
     /// question a caller asks across a load is "did the teardown reach the

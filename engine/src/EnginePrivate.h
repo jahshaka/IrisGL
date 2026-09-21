@@ -1188,17 +1188,30 @@ struct ChainHandles {
 void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
            const ChainDesc &desc, std::vector<std::string> &nodeDefsOut,
            ChainHandles &handlesOut);
-/// THE CLEAR-ONLY CHAIN A VIEW OWNS WHILE NO SCENE IS BOUND (lane STALE-VIEW-1).
+/// THE CLEAR-ONLY CHAIN A VIEW OWNS AFTER ITS FIRST SCENE IS TAKEN AWAY (lane
+/// STALE-VIEW-1).
+///
+/// AFTER, and the word is exact: a view that has NEVER been bound has no
+/// workspace of any kind — `createView` attaches none, and the seam only ever
+/// runs when a scene arrives or leaves. That is deliberate and it is what
+/// thumbnails, previews and every pixel suite want: they are created, given a
+/// scene and rendered, and a clear before their first bind would be a frame of
+/// somebody's background in a picture nobody asked to have one. Studio has no
+/// path that shows a never-bound view, so the weaker invariant is the whole
+/// story today.
 ///
 /// One clear to `background` and the overlay pass, and nothing else — there is
 /// no scene to draw, so there is no scene pass, no shadow node and no effect.
 ///
 /// It exists because a View with NO WORKSPACE PRESENTS NOTHING, and a window
-/// that presents nothing keeps whatever frame the X server was last given:
-/// opening a world while the editor page already showed one left the PREVIOUS
-/// world frozen on screen for the length of the load (measured on the rig: 903
-/// ms of a warm Grand Showroom 2 open, byte-identical to the frame before it),
-/// and the "No world open" panel, raised by every close, changed not one pixel.
+/// that presents nothing keeps whatever frame the X server was last given.
+/// Measured on the rig against the unmodified base (spikes/stale-view-1/): in a
+/// load IN PLACE that is the one to two frames between the teardown and the
+/// moment the host's panel rebuild takes the window off screen — the ~700 ms
+/// the user then looks at is the host's own watermark over an unmapped window,
+/// which no engine can reach. The bigger half is the other defect with the same
+/// cause: the "No world open" panel, raised by every close, changed not one
+/// pixel.
 ///
 /// `overlays` is the view's own entitlement (OgreView::overlaysAllowed) — the
 /// same gate the scene chain's overlay pass takes, so a view that may not draw
@@ -5418,7 +5431,13 @@ public:
     NodeId cameraNode() const override { return mCameraNode; }
 
     /// Unbinds the scene: workspace and camera go, the scene itself survives.
-    void detachScene();
+    /// `takeBlank` = "and put the clear-only chain up in its place", which is
+    /// what a scene-less view owns (chain::buildBlank). FALSE from destroy()
+    /// only: this view is going away, and building a two-pass chain — and, in a
+    /// process that never lost a scene, the engine's blank SceneManager — to
+    /// tear it down one line later is work nobody can see. In particular it
+    /// kept ~OgreEngine from creating a SceneManager inside its own destructor.
+    void detachScene(bool takeBlank = true);
 
     void setCamera(const CameraDesc &c) override;
     void setEnabled(bool on) override;
