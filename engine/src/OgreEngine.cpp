@@ -801,6 +801,14 @@ void OgreEngine::renderOneFrame() {
             monitor::gMonitor->beginFrame(mShadowFrame + 1ull, mNextFrameCause, onscreen);
         }
         mNextFrameCause = FrameCause::Driver;
+        // WHAT THIS FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1), consumed exactly
+        // like the cause and reset to `Complete` — so a caller that sets
+        // nothing renders the frame it always did. Pushed to every scene here,
+        // once, because the decisions it changes are per scene (the GI arm's
+        // staged build) and per frame (the texture drain below).
+        const FramePace pace = mNextFramePace;
+        mNextFramePace = FramePace::Complete;
+        for (auto &sc : mScenes) sc->setFramePace(pace);
         std::unique_ptr<monitor::Stage> monPre;
         if (monitor::live()) {
             monPre.reset(new monitor::Stage("engine.pre"));
@@ -831,7 +839,36 @@ void OgreEngine::renderOneFrame() {
         // `waitForStreamingCompletion()`, whose loop can never end if a load
         // request cannot complete; drainTextureStreaming is the same drain with
         // a no-progress deadline and a diagnostic. See its definition.
-        if (monitor::live()) {
+        // ...AND A STREAMING FRAME DOES NOT WAIT FOR IT (OPEN_COVER_SPEC §2 E).
+        // The drain is 25-61 ms per frame while a world's textures arrive, and
+        // on a DRIVER frame of a world the user is already looking at the honest
+        // answer is to draw the fallback and let `settleTextureResidency` swap
+        // the real one in a frame or two later — which is the streaming the
+        // owner asked for. Every other frame keeps the wait, so suites,
+        // thumbnails, captures and scripted frames stay deterministic.
+        //
+        // IT IS NOT THE ARM'S WAIT. BOOTVOX-1's `giVoxelTexturesPending` is a
+        // different question asked in a different place (OgreGi.cpp), and it
+        // still holds the arm back until the albedo it voxelises is resident —
+        // skipping the drain makes that wait last a frame or two longer, never
+        // less careful.
+        // ...AND ONLY WHEN NOTHING DEFERRED IS ABOUT TO READ A TEXTURE'S PIXELS.
+        // `applyPendingIbl` convolves the sky's source cube and is a LATCH — it
+        // clears its flag on entry — so handing it a cube that has not streamed
+        // in is a wrong reflection for the life of that sky, not a slow frame.
+        // The GI arm asks the same question for itself (BOOTVOX-1) and is safe
+        // either way.
+        bool streamTextures = (pace == FramePace::Streaming);
+        if (streamTextures)
+            for (auto &sc : mScenes)
+                if (sc->iblReadPending()) { streamTextures = false; break; }
+        if (streamTextures) {
+            // COLLECT WITHOUT WAITING: one pass of the same `_update(true)` the
+            // drain's loop makes, so every texture that HAS landed becomes
+            // resident this frame and nothing blocks on the ones that have not.
+            monitor::Stage st("engine.texturestep");
+            collectTextureStreaming();
+        } else if (monitor::live()) {
             monitor::Stage st("engine.texturewait");
             double ms = 0.0;
             // The pending set BEFORE the drain and after it: what this frame
@@ -1847,6 +1884,16 @@ size_t countPendingTextures(Ogre::TextureGpuManager *tm, std::string *namesOut) 
     return pending;
 }
 }   // namespace
+
+// ONE COLLECTION PASS, NO WAIT (OPEN_COVER_SPEC §2 E). The drain below is a
+// loop around this same call with a no-progress deadline; a streaming frame
+// wants the progress and not the deadline, because the frame it would block is
+// a frame of a world the user is already looking at.
+void OgreEngine::collectTextureStreaming() {
+    Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
+    if (!tm) return;
+    try { tm->_update(true); } catch (...) {}
+}
 
 bool OgreEngine::drainTextureStreaming(double *msSpent) {
     // THE BOUNDED DRAIN — what `waitForStreamingCompletion` should have been.

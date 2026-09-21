@@ -245,6 +245,11 @@ void OgreScene::refreshGlobalIllumination() {
             // the double build BOOTVOX-1 removed, asked for by hand. A refresh
             // over a LIVE chain (the common case) is never deferred — it marks
             // cascades or re-injects, and touches none of this.
+            // AN EXPLICIT REFRESH FINISHES A STAGED BUILD FIRST (OPEN_COVER_SPEC
+            // §2 A). The host asking by hand — `world.refreshGi()`, and every
+            // suite that asserts on the frame after it — is promised the whole
+            // answer, and a half-placed probe grid is not one.
+            while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
             if (!mVctCascades.empty()) { if (!refreshCascadesFast()) rebuildVct(); }
             else if (!refreshVctFast()) rebuildVct();
         }
@@ -2546,9 +2551,89 @@ bool OgreScene::giVoxelTexturesPending() {
     return true;
 }
 
+// ONE STAGE OF A STAGED ARM BUILD (OPEN_COVER_SPEC §2 A). Returns true when the
+// build is finished. Each stage is a whole, self-contained piece of the arm —
+// never half of a GPU resource — so a scene torn down between two of them is in
+// exactly the state `teardownVct` already knows how to unwind.
+bool OgreScene::giBuildOwesWork() const { return mGiBuildStage != GiBuildStage::Idle; }
+
+bool OgreScene::stepStagedGiBuild() {
+    JAH_TRY {
+        switch (mGiBuildStage) {
+        case GiBuildStage::Idle:
+            return true;
+        case GiBuildStage::ProbeScout:
+            buildPccScout(mGiStagedVolume);
+            // The scout is also the refusal: no probe workspace, no camera, no
+            // grid. Skip straight to the field rather than placing nothing.
+            mGiBuildStage = mPccStageOk ? GiBuildStage::ProbeFit : GiBuildStage::Field;
+            return false;
+        case GiBuildStage::ProbeFit:
+            buildPccFit();
+            // `buildPccFit` deletes the grid when every candidate photographed
+            // nothing (the sky is then the reflection), and there is nothing
+            // left for stage 3 to finish.
+            mGiBuildStage = mPcc ? GiBuildStage::ProbeFinish : GiBuildStage::Field;
+            if (!mPcc) applyReflectionToAll();
+            return false;
+        case GiBuildStage::ProbeFinish:
+            buildPccFinish();
+            applyReflectionToAll();
+            mGiBuildStage = GiBuildStage::Field;
+            return false;
+        case GiBuildStage::Field: {
+            const auto tField = std::chrono::steady_clock::now();
+            buildIrradianceField();
+            const double msField = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - tField).count();
+            if (monitor::live())
+                monitor::noteCacheWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
+                                       "vct.field.build", 1u, float(msField));
+            if (giDebug())
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka GI: irradiance field built in " + std::to_string(msField) +
+                    " ms (staged) — the arm is complete");
+            mGiBuildStage = GiBuildStage::Idle;
+            return true;
+        }
+        }
+        return true;
+    } JAH_CATCH(mError, (mGiBuildStage = GiBuildStage::Idle, true));
+}
+
 void OgreScene::applyPendingGi() {
+    // A STAGED ARM BUILD IN FLIGHT OWNS THIS FLUSH, and it is read before
+    // `mGiCachesDirty` because the stages are not a dirty flag: the chain is
+    // already built and bound, and what is owed is the probe grid and the
+    // field, one frame at a time (OPEN_COVER_SPEC §2 A).
+    if (mGiBuildStage != GiBuildStage::Idle) {
+        // Nothing of this world is on screen yet — a frame behind the loading
+        // cover or at an open runner's slice boundary. Spend nothing.
+        if (mFramePace == FramePace::Deferred) return;
+        stepStagedGiBuild();
+        // A `Complete` frame owes the WHOLE arm, however it was staged: a
+        // thumbnail, a capture, a suite or a script's editor.frame must see the
+        // finished picture, which is the rule that keeps every pixel gate and
+        // both selftest hashes untouched.
+        if (mFramePace == FramePace::Complete)
+            while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
+        return;
+    }
     if (!mGiCachesDirty) return;
+    // A WORLD WITH NO ARM AT ALL, BEHIND THE COVER: stay armed and build
+    // nothing. The request survives in `mGiCachesDirty`, exactly as the camera
+    // and albedo waits leave it, and the first frame the user can see takes it.
+    if (mFramePace == FramePace::Deferred && mVctCascades.empty() && !mVctVoxelizer &&
+        (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid))
+        return;
     mGiCachesDirty = false;
+    // A STREAMING FRAME BUILDS THE CHAIN AND PARKS (see rebuildVct's tail).
+    const bool stage = (mFramePace == FramePace::Streaming);
+    struct StageFlag {
+        bool &f;
+        explicit StageFlag(bool &b, bool v) : f(b) { f = v; }
+        ~StageFlag() { f = false; }
+    } stageFlag(mGiStageBuild, stage);
     JAH_TRY {
         if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
             // A STRUCTURAL CHANGE UNDER THE CHAIN IS NOT A CHAIN REBUILD (G1).
@@ -3701,12 +3786,24 @@ bool OgreScene::rebuildVct() {
         // stands. The cascade arm changes where the BOUNCE is computed and
         // nothing about where the probes live.
         mGiProbeRegion = aabb;
-        buildPcc(mGiProbeRegion);
-        // The probe grid now owns the shader's one env-probe slot, so the IBL
-        // cubemap must come OFF every datablock — see the long note at
-        // OgreScene::reflectionTexForDatablocks (OgreSky.cpp). Unconditional:
-        // applyReflectionToAll is a no-op walk when there is no sky reflection.
-        applyReflectionToAll();
+        // STAGED, WHEN THE FRAME ASKED FOR IT (OPEN_COVER_SPEC §2 A). The
+        // cascade arm above is 57 ms and the probe grid below is 673 on Grand
+        // Showroom 2, so this is where a streaming open parks: the world draws
+        // with the chain it has, and the next three streaming frames spend one
+        // probe stage each. `Complete` — every other caller — falls straight
+        // through and builds the grid in this call, as it always did.
+        if (mGiStageBuild) {
+            mGiStagedVolume = aabb;
+            mGiBuildStage = GiBuildStage::ProbeScout;
+        } else {
+            buildPcc(mGiProbeRegion);
+            // The probe grid now owns the shader's one env-probe slot, so the
+            // IBL cubemap must come OFF every datablock — see the long note at
+            // OgreScene::reflectionTexForDatablocks (OgreSky.cpp). Unconditional:
+            // applyReflectionToAll is a no-op walk when there is no sky
+            // reflection.
+            applyReflectionToAll();
+        }
     }
     // LAST, not beside `mGiLitVolume = aabb` above: the hysteresis floor inside
     // giItemBounds must see the same record the lit volume was fitted against or
@@ -3735,7 +3832,28 @@ bool OgreScene::rebuildVct() {
     // the two hooks that were missing — `setFieldVolume` and `setVctLighting` —
     // and the refusal, and the measured cost it quoted (plain cone diffuse
     // leaking 0.97 of the light through a 0.5 m wall), are history.)
+    // ...AND THE FIELD IS THE LAST STAGE, for the same reason (§2 A). When the
+    // probe stages are staged it rides behind them; when the scene has no probe
+    // grid at all it is a stage of its own, because a cold field is 45 ms of
+    // compute-shader compile.
+    if (mGiStageBuild) {
+        if (mGiBuildStage == GiBuildStage::Idle) mGiBuildStage = GiBuildStage::Field;
+        if (giDebug())
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: arm staged — the chain is built, the probe grid and the "
+                "irradiance field follow one frame at a time");
+        return true;                     // the chain IS built; the stages owe the rest
+    }
+    const auto tField = std::chrono::steady_clock::now();
     buildIrradianceField();
+    const double msField = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - tField).count();
+    if (monitor::live())
+        monitor::noteCacheWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
+                               "vct.field.build", 1u, float(msField));
+    if (giDebug())
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: irradiance field built in " + std::to_string(msField) + " ms");
 
     if (giDebug())
         Ogre::LogManager::getSingleton().logMessage(
@@ -5075,7 +5193,62 @@ void OgreScene::teardownExtraCascades() {
     mVctCascades.clear();
 }
 
+// THE PLACEMENT'S FIVE PHASES, FILED AS CACHE ROWS (OPEN_COVER_SPEC A(4)).
+// `CacheKind::Probe / "placement"` used to carry a unit count and ms -1 — "the
+// time is already inside the pass records" — which is true of a probe CAPTURE
+// that a compositor pass renders and false of everything else this call does:
+// the scout, upstream's placement fit, the keep/drop readback and the grid's
+// re-create at the real resolution are UI-thread work no pass record can see.
+// Measured on Grand Showroom 2 they are the largest single item in the whole
+// arm, so they get rows with real milliseconds and the capture keeps its -1.
+static void notePlacementPhases(double msScout, double msPlace, double msDrop,
+                                double msRecreate, double msCapture,
+                                unsigned candidates, unsigned kept)
+{
+    if (!monitor::live()) return;
+    monitor::noteCacheWork(CacheKind::Probe, WorkReason::Build, 0, "placement.scout",
+                           1u, float(msScout));
+    monitor::noteCacheWork(CacheKind::Probe, WorkReason::Build, 0, "placement.fit",
+                           candidates, float(msPlace));
+    monitor::noteCacheWork(CacheKind::Probe, WorkReason::Build, 0, "placement.keepDrop",
+                           candidates, float(msDrop));
+    if (msRecreate > 0.0)
+        monitor::noteCacheWork(CacheKind::Probe, WorkReason::Build, 0, "placement.recreate",
+                               kept, float(msRecreate));
+    if (msCapture > 0.0)
+        monitor::noteCacheWork(CacheKind::Probe, WorkReason::Build, 0, "placement.capture",
+                               kept, float(msCapture));
+}
+
+// THE PROBE GRID, WHOLE — the three stages back to back, which is the order and
+// the code the single function always ran. Every caller but the streaming flush
+// (OPEN_COVER_SPEC §2 A) uses this, so a complete frame builds the grid exactly
+// as it did before the split.
 void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
+    buildPccScout(litVolume);
+    if (!mPccStageOk) return;
+    buildPccFit();
+    buildPccFinish();
+}
+
+// Milliseconds since the last phase split, and restarts the clock. A member
+// rather than a lambda because the three stages run in three different frames
+// when the build is staged.
+double OgreScene::pccPhaseSplit() {
+    const auto now = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(now - mPccPhaseClock).count();
+    mPccPhaseClock = now;
+    return ms;
+}
+
+// STAGE 1 OF THE PROBE GRID: WHERE IT GOES (OPEN_COVER_SPEC §2 A). One
+// photograph of the space from the middle of the scene's own box, and the
+// knobs the other two stages read. 69-84 ms measured. Leaves mPccStageOk
+// false when the grid cannot be built at all — this stage's only refusal.
+void OgreScene::buildPccScout(const Ogre::Aabb &litVolume) {
+    mPccStageOk = false;
+    mGiStagedVolume = litVolume;
+    for (double &v : mPccPhaseMs) v = 0.0;
     // BY VALUE, and it has to be: the caller passes `mGiProbeRegion` itself and
     // this function assigns that member below, so a reference would alias — the
     // volume every measurement here is relative to would silently become the
@@ -5083,6 +5256,12 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // having seen nothing, because its span was divided by the region instead
     // of by the volume).
     const Ogre::Aabb aabb = litVolume;
+    // THE PLACEMENT'S PHASES, TIMED (OPEN_COVER_SPEC A(4); lane OPEN-COVER-2a).
+    // `probe placement` reported ONE number and the bundle reported -1, so the
+    // 770 ms this call costs on Grand Showroom 2 could not be attributed to any
+    // of its five phases. Each is a monitor CacheScope of its own — the same
+    // instrument the cascades already carry — so a capture names the phase.
+    mPccPhaseClock = std::chrono::steady_clock::now();
     // The probe GRID is (re)placed here: every probe workspace in the scene is
     // destroyed and rebuilt, which is why the monitor re-syncs its listeners
     // every frame rather than once.
@@ -5124,11 +5303,11 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // probe (the numbers are at the constant's declaration).
     const bool wantShadows =
         resolveToggle(mGi.probeShadows, giQualityFacts(mGi.quality).probeShadowsDefault);
-    const char *probeWorkspace = "JahshakaPccProbeWorkspace";
+    mPccWorkspaceName = "JahshakaPccProbeWorkspace";
     if (wantShadows) {
         if (cm->hasWorkspaceDefinition("JahshakaPccProbeWorkspaceShadows") &&
             cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName)) {
-            probeWorkspace = "JahshakaPccProbeWorkspaceShadows";
+            mPccWorkspaceName = "JahshakaPccProbeWorkspaceShadows";
             mPccShadowed = true;
         } else {
             Ogre::LogManager::getSingleton().logMessage(
@@ -5140,8 +5319,9 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     mGiCamera->setPosition(aabb.mCenter);
 
     const auto clampProbes = [](int n) { return Ogre::uint32(std::min(std::max(n, 1), 8)); };
-    Ogre::uint32 numProbes[3] = { clampProbes(mGi.pccProbesX), clampProbes(mGi.pccProbesY),
-                                  clampProbes(mGi.pccProbesZ) };
+    mPccNumProbes[0] = clampProbes(mGi.pccProbesX);
+    mPccNumProbes[1] = clampProbes(mGi.pccProbesY);
+    mPccNumProbes[2] = clampProbes(mGi.pccProbesZ);
 
     // ---- WHERE THE PROBES LIVE: ONE PHOTOGRAPH (lane R5-ROOM, 2026-09-15) --
     //
@@ -5251,32 +5431,9 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
         }
         scoutPcc.destroyAllProbes();
     }
+    mPccPhaseMs[0] = pccPhaseSplit();
     mGiProbeRegion = region;
     mGiCamera->setPosition(region.mCenter);
-
-    mPcc = new Ogre::ParallaxCorrectedCubemapAuto(
-        Ogre::Id::generateNewId<Ogre::ParallaxCorrectedCubemapAuto>(),
-        mRoot, mSceneMgr, cm->getWorkspaceDefinition(probeWorkspace));
-
-    Ogre::PccPerPixelGridPlacement placement;
-    placement.setParallaxCorrectedCubemapAuto(mPcc);
-    placement.setNumProbes(numProbes);
-    placement.setFullRegion(region);
-    // PLACEMENT KNOBS (P3c). All three were previously left at the pin's ctor
-    // defaults — overlap 1.5 by inheritance rather than by choice, and the snap
-    // tolerances never touched at all. They are now OURS and set explicitly, so
-    // an upstream default change shows up as a diff instead of as moved probes.
-    // The overlap default is 1.25 (upstream's own sample's value): fewer probe
-    // volumes over each point, which is cheaper on the Forward+ cubemap slots.
-    // Its old workaround value is worth naming — before ogre-patch 0017, MORE
-    // overlapping probes meant a DARKER reflection (the count division), so a
-    // large overlap was quietly paying for itself in the wrong currency. With
-    // 0017 the choice is purely about blend smoothness.
-    placement.setOverlap(Ogre::Vector3(std::max(0.01f, mGi.probeOverlap)));
-    placement.setSnapDeviationError(Ogre::Vector3(std::max(0.0f, mGi.probeSnapDeviation)));
-    placement.setSnapSides(Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMin)),
-                           Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMax)));
-
     // Quality -> probe face resolution (the probe render + memory knob), and
     // the per-scene override that now sits beside it in the World panel
     // (owner, 2026-09-13 Q4: "yes halve it but add it to the world settings").
@@ -5331,13 +5488,49 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // buildEnd reads it back through TextureBox::getColourAt with the bind
     // texture's own format. The cost is 2x the probe VRAM, hence the High gate.
     mPccHdr = resolveToggle(mGi.probeHdr, giQualityFacts(mGi.quality).probeHdrDefault);
-    const Ogre::PixelFormatGpu probeFormat =
-        mPccHdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM_SRGB;
+    mPccProbeFormat = mPccHdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM_SRGB;
     const float diag = region.getSize().length();
     // ...REMEMBERED, because a shadow-atlas rebuild re-creates the probe
     // workspaces (and so their cameras) without re-placing the grid (G2).
     mProbeCamNear = std::max(0.02f, diag * 0.001f);
     mProbeCamFar  = std::max(1.0f, diag * 2.0f);
+    mPccProbeRes = probeRes;
+    mPccStageOk = true;
+}
+
+// STAGE 2 OF THE PROBE GRID: THE PLACEMENT AND THE JUDGEMENT. Upstream's
+// PccPerPixelGridPlacement over every candidate at the scout resolution, then
+// the per-probe keep/drop. 186-316 ms measured, the largest single stage.
+void OgreScene::buildPccFit() {
+    if (!mPccStageOk) return;
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    const Ogre::Aabb aabb = mGiStagedVolume;
+    const Ogre::Aabb region = mGiProbeRegion;
+    mPccPhaseClock = std::chrono::steady_clock::now();
+
+    mPcc = new Ogre::ParallaxCorrectedCubemapAuto(
+        Ogre::Id::generateNewId<Ogre::ParallaxCorrectedCubemapAuto>(),
+        mRoot, mSceneMgr, cm->getWorkspaceDefinition(mPccWorkspaceName.c_str()));
+
+    Ogre::PccPerPixelGridPlacement placement;
+    placement.setParallaxCorrectedCubemapAuto(mPcc);
+    placement.setNumProbes(mPccNumProbes);
+    placement.setFullRegion(region);
+    // PLACEMENT KNOBS (P3c). All three were previously left at the pin's ctor
+    // defaults — overlap 1.5 by inheritance rather than by choice, and the snap
+    // tolerances never touched at all. They are now OURS and set explicitly, so
+    // an upstream default change shows up as a diff instead of as moved probes.
+    // The overlap default is 1.25 (upstream's own sample's value): fewer probe
+    // volumes over each point, which is cheaper on the Forward+ cubemap slots.
+    // Its old workaround value is worth naming — before ogre-patch 0017, MORE
+    // overlapping probes meant a DARKER reflection (the count division), so a
+    // large overlap was quietly paying for itself in the wrong currency. With
+    // 0017 the choice is purely about blend smoothness.
+    placement.setOverlap(Ogre::Vector3(std::max(0.01f, mGi.probeOverlap)));
+    placement.setSnapDeviationError(Ogre::Vector3(std::max(0.0f, mGi.probeSnapDeviation)));
+    placement.setSnapSides(Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMin)),
+                           Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMax)));
+
     const auto tPlace = std::chrono::steady_clock::now();
     // THE PLACEMENT RUNS AT THE SCOUT'S RESOLUTION (lane SKY-FALLBACK-1; the
     // debt R5-ROOM recorded). Everything buildStart/buildEnd consume is ONE
@@ -5359,7 +5552,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // frees the array slices a dropped probe was holding: `destroyProbe` deletes
     // the object, but the array was sized at `getMaxNumProbes()` here, so the
     // dropped candidates' slices stayed allocated for the life of the grid.
-    placement.buildStart(kProbeScoutResolution, mGiCamera, probeFormat,
+    placement.buildStart(kProbeScoutResolution, mGiCamera, mPccProbeFormat,
                          mProbeCamNear, mProbeCamFar);
     // buildEnd's CLOSING RE-CAPTURE IS DEFERRED, not skipped (patch 0047's flag;
     // second read, 2026-09-15). Upstream ends the fit by re-rendering every
@@ -5374,6 +5567,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // is about to throw away have been thrown away, and before their shapes
     // have been clamped. So it happens below instead, over the survivors, once.
     placement.buildEnd(false);   // reads probe depth back and re-fits probe shapes
+    mPccPhaseMs[1] = pccPhaseSplit();
     // ---- WHICH OF THESE PROBES IS WORTH BUILDING (lane R5-ROOM) ------------
     //
     // The rule this replaced measured the SCENE — facing slabs, covering faces,
@@ -5506,13 +5700,18 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
                 "Jahshaka GI: no probe grid — all " + std::to_string(mProbesDropped) +
                 " probes photographed nothing inside the lit volume, so reflections come "
                 "from the sky and cone tracing");
+            mPccPhaseMs[2] = pccPhaseSplit();
+            notePlacementPhases(mPccPhaseMs[0], mPccPhaseMs[1], mPccPhaseMs[2], 0.0, 0.0,
+                                unsigned(mProbesDropped), 0u);
             if (giDebug())
                 Ogre::LogManager::getSingleton().logMessage(
                     "Jahshaka GI: probe placement " +
                     std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::steady_clock::now() - tPlace).count()) +
                     " ms — " + std::to_string(mProbesDropped) + " candidates at " +
-                    std::to_string(kProbeScoutResolution) + " px, 0 kept");
+                    std::to_string(kProbeScoutResolution) + " px, 0 kept — scout " +
+                    std::to_string(mPccPhaseMs[0]) + " place " + std::to_string(mPccPhaseMs[1]) +
+                    " drop " + std::to_string(mPccPhaseMs[2]) + " ms");
             // BY POINTER IDENTITY, like teardownVct's unbind: the process-wide
             // HlmsPbs binding may belong to ANOTHER scene, and clearing it from
             // here would blank that scene's reflections for a grid this one
@@ -5577,6 +5776,19 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // are the probe's OWN boxes coming back. The clamp therefore still runs
     // BEFORE this block, exactly where it always did, and the geometry the
     // shader sees is bit-for-bit what it was.
+    mPccPhaseMs[2] = pccPhaseSplit();
+}
+
+// STAGE 3 OF THE PROBE GRID: THE GRID THE SHADER SAMPLES. The survivors'
+// shapes clamped, the grid re-created at the real resolution, and one closing
+// capture each. 288 ms measured on a 32-probe grid at 512 px.
+void OgreScene::buildPccFinish() {
+    if (!mPccStageOk || !mPcc) return;
+    const Ogre::Aabb region = mGiProbeRegion;
+    const Ogre::uint32 probeRes = mPccProbeRes;
+    const Ogre::PixelFormatGpu probeFormat = mPccProbeFormat;
+    const float diag = region.getSize().length();
+    mPccPhaseClock = std::chrono::steady_clock::now();
     clampProbeShapesToRegion(region);
     {
         const Ogre::CubemapProbeVec &kept = mPcc->getProbes();
@@ -5599,7 +5811,13 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // see the difference. gi.probe_open asserts this against the tier's size.
     mPccCaptureSize = mPcc->getBindTexture() ? int(mPcc->getBindTexture()->getWidth())
                                              : int(probeRes);
+    mPccPhaseMs[3] = pccPhaseSplit();
     mPcc->updateAllDirtyProbes();
+    mPccPhaseMs[4] = pccPhaseSplit();
+    notePlacementPhases(mPccPhaseMs[0], mPccPhaseMs[1], mPccPhaseMs[2], mPccPhaseMs[3],
+                        mPccPhaseMs[4],
+                        unsigned(mProbesDropped + int(mPcc->getProbes().size())),
+                        unsigned(mPcc->getProbes().size()));
     // EVERY probe renders in the INLINE stage from now on (B2 point 2). Set once,
     // here, rather than flipped as probes come and go: in automatic mode this
     // selects a render stage, not an amount of work, and the budget already
@@ -5643,19 +5861,23 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
         // CANDIDATE.
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka GI: probe placement " +
-            std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now() - tPlace).count()) +
+            std::to_string(mPccPhaseMs[0] + mPccPhaseMs[1] + mPccPhaseMs[2] +
+                           mPccPhaseMs[3] + mPccPhaseMs[4]) +
             " ms — " + std::to_string(mProbesDropped + int(mPcc->getProbes().size())) +
             " candidates at " + std::to_string(kProbeScoutResolution) + " px, " +
             std::to_string(mPcc->getProbes().size()) + " kept at " +
-            std::to_string(probeRes) + " px");
+            std::to_string(probeRes) + " px — scout " + std::to_string(mPccPhaseMs[0]) +
+            " place " + std::to_string(mPccPhaseMs[1]) + " drop " + std::to_string(mPccPhaseMs[2]) +
+            " recreate " + std::to_string(mPccPhaseMs[3]) + " capture " +
+            std::to_string(mPccPhaseMs[4]) + " ms");
         Ogre::LogManager &lm = Ogre::LogManager::getSingleton();
         const auto toS = [](const Ogre::Vector3 &v) {
             return Ogre::StringConverter::toString(v);
         };
         lm.logMessage("Jahshaka GI: PCC region " + toS(region.getMinimum()) + " .. " +
-                      toS(region.getMaximum()) + " grid " + std::to_string(numProbes[0]) + "x" +
-                      std::to_string(numProbes[1]) + "x" + std::to_string(numProbes[2]) +
+                      toS(region.getMaximum()) + " grid " + std::to_string(mPccNumProbes[0]) + "x" +
+                      std::to_string(mPccNumProbes[1]) + "x" +
+                      std::to_string(mPccNumProbes[2]) +
                       " res " + std::to_string(probeRes) +
                       (mPccHdr ? " RGBA16F" : " RGBA8_SRGB") +
                       (mPccShadowed ? " shadowed" : " unshadowed") +
@@ -6251,6 +6473,12 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
 }
 
 void OgreScene::teardownVct() {
+    // A STAGED BUILD IS OVER (OPEN_COVER_SPEC §2 A): the arm it was filling in
+    // is about to stop existing, so the stages it still owed describe nothing.
+    // Every one of them is whole — a stage never leaves half a GPU resource —
+    // so abandoning is all that is needed; the unwinding below is the same as
+    // for an arm nobody staged.
+    abandonStagedGiBuild();
     // THE DDGI FIELD DIES FIRST (spike §8, verified across all four shapes: GI
     // off under a bound field, a refresh under one, a rebuild over a refreshed
     // arm, and the Engine destroyed with one live). It holds a raw VctLighting*

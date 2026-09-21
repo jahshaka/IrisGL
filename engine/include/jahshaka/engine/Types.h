@@ -5433,6 +5433,37 @@ struct FrameStage {
 /// saw from one the owner watched.
 enum class FrameCause { Unknown, Driver, Scripted, Offscreen, WarmUp, Player };
 
+/// WHAT THIS FRAME MAY PUT OFF (SPECS/OPEN_COVER_SPEC.md §2.1, lane OPEN-COVER-2a).
+///
+/// Opening or creating a world used to hand ONE frame every first-time cost the
+/// world has — the GI arm built from scratch, the probe grid placed, the frame's
+/// own texture drain — and that frame is on the UI thread, so the window froze
+/// for as long as it took (measured: 1,025 ms on Grand Showroom 2, of which the
+/// probe placement alone is 673). The work is not avoidable; doing all of it in
+/// one frame is.
+///
+/// So a caller may say what kind of frame this is, and the engine spreads the
+/// first-time work accordingly. THE DEFAULT IS `Complete`, and that is the
+/// whole safety argument: a caller that never asks — every offscreen readback,
+/// every thumbnail, every pixel suite, the selftest, the VR pump, a script's
+/// `editor.frame` — gets exactly the frame it always got, built to completion,
+/// with no streaming rule anywhere near it. Consumed by the next
+/// `renderOneFrame` and reset to `Complete`, like `FrameCause`.
+enum class FramePace {
+    /// Do everything this frame needs, now. The default and the contract.
+    Complete,
+    /// NOTHING OF THIS WORLD IS ON SCREEN YET — a frame drawn behind the
+    /// loading cover, or at an open runner's slice boundary. Start no heavy
+    /// first-time work at all: the request stays armed and a later frame takes
+    /// it. (A frame of a half-built world nobody can see is pure UI-thread
+    /// cost.)
+    Deferred,
+    /// A DRIVER FRAME OF A WORLD THE USER CAN SEE that still owes first-time
+    /// work: take ONE step of it and draw. Repeated once per frame until
+    /// nothing is owed, which is what makes the world stream in.
+    Streaming
+};
+
 /// EVERYTHING ONE `renderOneFrame` DID. One of these per frame while a capture
 /// runs; the host drains them with `takeFrameRecords` and writes them to
 /// `frames.jsonl`.

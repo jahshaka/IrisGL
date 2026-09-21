@@ -2441,6 +2441,17 @@ public:
     /// so analysis can tell a frame nobody saw from one the owner watched.
     virtual void setNextFrameCause(FrameCause cause) = 0;
 
+    // ---- streaming a world in (SPECS/OPEN_COVER_SPEC.md §2.1) -------------
+    /// What the NEXT frame may put off — see `FramePace`. Consumed by the next
+    /// `renderOneFrame` and reset to `Complete`, so a host that sets nothing
+    /// renders complete frames exactly as it always did. Monitor-independent:
+    /// this changes what the frame DOES, not what it records.
+    virtual void setNextFramePace(FramePace pace) = 0;
+    /// Does any scene feeding an enabled view still owe first-time work that a
+    /// `Streaming` frame would take a step of? The host reads it to decide how
+    /// long to keep asking (and, in phase 2b, to draw the indicator).
+    virtual bool framePaceOwesWork() const = 0;
+
     /// THE ENGINE, AT ONE INSTANT (§4.8) — every GI parameter and what it
     /// resolved to, the probe grid, the shadow setup with per-light cache
     /// state, the light list, the object/VRAM/Hlms census, the texture
