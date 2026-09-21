@@ -249,8 +249,8 @@ public:
     /// is how a picker starts saying one thing and rendering another
     /// (PUBLISH_AUDIT #4 was exactly that, on alphaMode).
     struct BrdfName {
-        const char *engineName;   ///< what crosses the engine boundary
-        const char *displayName;  ///< what the picker shows
+        const char *engineName = nullptr;   ///< what crosses the engine boundary
+        const char *displayName = nullptr;  ///< what the picker shows
     };
     static const QVector<BrdfName> &brdfNames();
     /// The engine-boundary name for a stored index; "Default" for any index

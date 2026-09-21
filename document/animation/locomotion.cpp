@@ -252,8 +252,8 @@ namespace
 {
 struct RolePatterns
 {
-    ClipRole role;
-    const char *words[8];
+    ClipRole role = ClipRole::Idle;
+    const char *words[8] = {};
 };
 
 /// RESOLUTION ORDER, and it is the whole trick (§7.4): `land` before

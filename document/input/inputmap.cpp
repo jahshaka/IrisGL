@@ -22,7 +22,7 @@ namespace {
 /// QKeySequence spells a BARE modifier as "Shift+" / "Ctrl+" (it treats the
 /// value as a modifier with no key), which does not round-trip. Sprint's
 /// default is a bare modifier, so the table is load-bearing, not cosmetic.
-struct NamedKey { int key; const char *name; };
+struct NamedKey { int key = 0; const char *name = nullptr; };
 const NamedKey kNamedKeys[] = {
     { Qt::Key_Shift,   "Shift"   },
     { Qt::Key_Control, "Ctrl"    },

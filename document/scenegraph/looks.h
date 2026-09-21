@@ -70,10 +70,10 @@ enum class LookKind
 /// written for.
 struct LookParamDef
 {
-    const char *id;
-    float       defaultValue;
-    float       minValue;
-    float       maxValue;
+    const char *id = nullptr;
+    float       defaultValue = 0.0f;
+    float       minValue = 0.0f;
+    float       maxValue = 0.0f;
 };
 
 /// One look. `params[0]` is ALWAYS the amount, and every look is an exact
@@ -81,10 +81,10 @@ struct LookParamDef
 /// reason "a look at zero" and "no look" are the same picture.
 struct LookDef
 {
-    const char         *id;       ///< stable, script-facing and stored ("desaturate")
-    LookKind            kind;
-    const LookParamDef *params;
-    int                 paramCount;   ///< <= 8 (the engine's LookDesc::p)
+    const char         *id = nullptr; ///< stable, script-facing and stored ("desaturate")
+    LookKind            kind = LookKind::Desaturate;
+    const LookParamDef *params = nullptr;
+    int                 paramCount = 0;   ///< <= 8 (the engine's LookDesc::p)
 };
 
 /// The catalogue, in the order the panel offers looks in (not the order of any

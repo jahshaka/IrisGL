@@ -492,17 +492,17 @@ float smoothTowards(float current, float target, float speed, float dt);
 // a hard-coded lens choice inside a verb is not.
 
 struct FilmbackPreset {
-    const char *name;
-    float sensorWidth;    ///< mm
-    float sensorHeight;   ///< mm
-    float squeeze;        ///< 1.0 except for anamorphic entries
+    const char *name = nullptr;
+    float sensorWidth = 0.0f;    ///< mm
+    float sensorHeight = 0.0f;   ///< mm
+    float squeeze = 1.0f;        ///< 1.0 except for anamorphic entries
 };
 
 struct LensPreset {
-    const char *name;
-    float focalMm;
-    float minFStop;       ///< the widest aperture this lens is offered at
-    const char *note;     ///< a human hint ("ultra wide", "portrait")
+    const char *name = nullptr;
+    float focalMm = 0.0f;
+    float minFStop = 0.0f;       ///< the widest aperture this lens is offered at
+    const char *note = nullptr;  ///< a human hint ("ultra wide", "portrait")
 };
 
 /// The tables and their sizes. Stable order — the verbs report them as-is.

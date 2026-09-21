@@ -1328,9 +1328,9 @@ private:
     /// is what mirror.scale's "every authored property moves the fingerprint"
     /// case (driven from PbrMaterial's own property rows) exists to catch.
     struct TextureBind {
-        jahshaka::engine::PbrTextureSlot slot;
+        jahshaka::engine::PbrTextureSlot slot = jahshaka::engine::PbrTextureSlot::Albedo;
         QString path;
-        bool srgb;
+        bool srgb = false;
     };
     struct MaterialSync {
         bool                          hasPbr = false;

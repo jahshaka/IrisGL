@@ -1098,7 +1098,12 @@ private:
     }
 
     float m[4][4]; // column-major, m[column][row]
-    int flagBits;
+    // The one member of this class that is NOT left to the Uninitialized
+    // overload: `m` is storage a caller is about to fill, `flagBits` is the
+    // claim about what is in it, and every constructor writes General or
+    // Identity (setToIdentity does, out of Mat4()'s body — which is a helper,
+    // so it is not a value this member has of its own).
+    int flagBits = General;
 };
 
 inline bool fuzzyCompare(const Mat4 &m1, const Mat4 &m2) noexcept
