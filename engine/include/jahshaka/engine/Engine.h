@@ -900,19 +900,38 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
-    /// SURFACE-CACHE-0 — the phase-0 DESIGN SPIKE's one door (2026-09-21).
+    /// SURFACE-CACHE phase 2 — the card cache's TEST AND TOOL readbacks.
     ///
-    /// NOT A FEATURE AND NOT A TIER: it captures one mesh instance's six
-    /// axis-aligned cards and, on request, makes the reflection ray job read
-    /// them at hits on that mesh instead of the cascade's voxels — so a suite
-    /// can measure the three numbers `SPECS/SURFACE_CACHE_ASSESSMENT.md` §8
-    /// records as unverified. Default-implemented as "this build has no spike",
-    /// which is what every engine but the Ogre one answers, and what the whole
-    /// engine answers until the call is made: nothing is allocated, nothing is
-    /// captured and no pixel moves.
-    virtual bool surfaceCardSpike(const SurfaceCardSpikeDesc &, SurfaceCardSpikeResult &out) {
-        out.ok = false;
-        out.error = "no surface-card spike in this build";
+    /// The cache itself has no verb: it is configured through
+    /// `GiParams::cards` / `cardBudgetTexels` / `cardResidencyRadius` and it
+    /// reports through `GiStatus::cards`, like every other engine cache. What
+    /// needs a door of its own is READING a captured texel, because the one
+    /// question a picture cannot answer about a card — "is this texel's shadow
+    /// term occlusion by ANOTHER object?" — is answered by a number in the
+    /// atlas and by nothing else.
+    ///
+    /// `card` is an index into the node's mesh's card list; (u, v) are the
+    /// card's own parameters in [0, 1]. Both readbacks flush the render
+    /// system's commands first (the AsyncTextureTicket rule) and block.
+    virtual bool readCardTexel(NodeId, unsigned /*card*/, float /*u*/, float /*v*/,
+                               CardSample &out) {
+        out = CardSample();
+        return false;
+    }
+    /// ...and the question PHASE 4 asks at a ray's hit, answered on the CPU:
+    /// what does the cache hold at this WORLD POINT, on a surface facing this
+    /// way? Lumen's own order — the cards facing the normal, projected with
+    /// three dot products, depth-tested against their own stored depth, the
+    /// squarest one wins. False when no card covers the point, which is the
+    /// answer that hands a hit back to the voxels.
+    virtual bool readCardAt(const Vec3 & /*world*/, const Vec3 & /*normal*/, CardSample &out) {
+        out = CardSample();
+        return false;
+    }
+    /// Writes every layer of every RESIDENT card to `<prefix>-<layer><n>.png`.
+    /// A tool path for reading a capture channel by channel.
+    virtual bool dumpCardAtlas(const std::string & /*prefix*/, std::string &err) {
+        err = "no surface cache in this build";
         return false;
     }
     /// THE SCREEN-PROBE GATHER'S TUNING -- TEST AND TOOL ONLY

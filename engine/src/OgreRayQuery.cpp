@@ -68,7 +68,6 @@
 #include "Vao/OgreVulkanVaoManager.h"
 
 #include "rayquery/rq_rays_spv.h"
-#include "SurfaceCardSpike.h"
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
@@ -212,13 +211,7 @@ constexpr unsigned kMaxReflectCascades = 4u;
 /// rewritten every frame (every input can be recreated behind our back).
 constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0.
-constexpr unsigned kReflectBindings = 20u;
-/// SURFACE-CACHE-0's six axis cards (SurfaceCardSpike::kCards, the shader's
-/// kCards). A spike constant: nothing but the spike's five bindings reads it.
-constexpr unsigned kSpikeCards = 6u;
-/// ...and the five layers a card set holds (normal, shadow+roughness, albedo,
-/// emissive, depth) — bindings 15..19.
-constexpr unsigned kSpikeCardBindings = 5u;
+constexpr unsigned kReflectBindings = 15u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -453,9 +446,6 @@ private:
     bool ensureDummyImages(std::string &err);
     void clearDummyImages(VkCommandBuffer cmd);
     ReflectImage mDummyCube, mDummyVolume;
-    /// SURFACE-CACHE-0's stand-in: a 1x1 six-slice 2D ARRAY for the five card
-    /// bindings whenever no card set is armed.
-    ReflectImage mDummyArray;
     bool mDummiesReady = false;
     bool mDummiesNeedClear = false;
     bool makeStorageImage(unsigned w, unsigned h, VkFormat fmt, ReflectImage &out,
@@ -851,11 +841,10 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
     struct Spec { ReflectImage *img = nullptr; VkImageType type = VK_IMAGE_TYPE_2D;
                   VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D; uint32_t layers = 0;
                   VkImageCreateFlags flags = 0; };
-    const Spec specs[3] = {
+    const Spec specs[2] = {
         { &mDummyCube, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_CUBE, 6u,
           VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT },
         { &mDummyVolume, VK_IMAGE_TYPE_3D, VK_IMAGE_VIEW_TYPE_3D, 1u, 0u },
-        { &mDummyArray, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY, kSpikeCards, 0u },
     };
     for (const Spec &sp : specs) {
         VkImageCreateInfo ici{};
@@ -908,9 +897,9 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
 void RayQueryTier::clearDummyImages(VkCommandBuffer cmd) {
     if (!mDummiesNeedClear) return;
     mDummiesNeedClear = false;
-    ReflectImage *imgs[3] = { &mDummyCube, &mDummyVolume, &mDummyArray };
-    const uint32_t layers[3] = { 6u, 1u, kSpikeCards };
-    for (int i = 0; i < 3; ++i) {
+    ReflectImage *imgs[2] = { &mDummyCube, &mDummyVolume };
+    const uint32_t layers[2] = { 6u, 1u };
+    for (int i = 0; i < 2; ++i) {
         VkImageSubresourceRange range{};
         range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         range.levelCount = 1;
@@ -1215,7 +1204,10 @@ void RayQueryTier::close() {
     // return, so the frame-head clear never runs and this teardown is the only
     // place left that knows.
     if (mGather) { mGather->close(); delete mGather; mGather = nullptr; }
-    for (ReflectImage *d : { &mDummyCube, &mDummyVolume, &mDummyArray }) {
+    // (`mDummyArray` — SURFACE-CACHE-0's 1x1x6 stand-in for the card spike's
+    // five bindings — went with the spike at SURFACE-CACHE-1b; nothing in the
+    // gather or the reflect job binds a 2D ARRAY.)
+    for (ReflectImage *d : { &mDummyCube, &mDummyVolume }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
         if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
@@ -2364,15 +2356,6 @@ struct ReflectParams {
     float prevRayRight2[4] = {};
     float prevRayDown2[4] = {};
     float prevFwd2[4] = {};
-    /// SURFACE-CACHE-0 — the phase-0 design spike's card block (2026-09-21).
-    /// Zero in every frame that has not armed a card set, which is every frame.
-    float cardKnobs[4] = {};
-    float cardAxis[kSpikeCards][4] = {};
-    float cardRowU[kSpikeCards][4] = {};
-    float cardRowV[kSpikeCards][4] = {};
-    float cardRowD[kSpikeCards][4] = {};
-    float cardSunDir[4] = {};
-    float cardSunColour[4] = {};
 };
 
 void put3(float *dst, const Ogre::Vector3 &v, float w) {
@@ -2399,15 +2382,6 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 12 voxelY[]
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 13 voxelZ[]
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 14 sky cube
-        // SURFACE-CACHE-0's card set (the spike). Bound to a 1x1x6 stand-in
-        // whenever no card set is armed, which is always outside the spike's
-        // own suite — a null descriptor in a set the shader MAY index is
-        // undefined behaviour, not a black sample.
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 15 cardNormal
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 16 cardShadowRough
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 17 cardAlbedo
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 cardEmissive
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 19 cardDepth
     };
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
@@ -3007,46 +2981,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         memset(pp.prevFwd, 0, sizeof(pp.prevFwd));
         memset(pp.prevFwd2, 0, sizeof(pp.prevFwd2));
     }
-    // ---- SURFACE-CACHE-0's card block (the phase-0 design spike) -----------
-    // Every number here is zero unless a test armed a card set, and the shader
-    // reads none of it with `cardKnobs.x` at zero — one compare against a
-    // constant per hit, so a build with the spike present renders exactly the
-    // picture it rendered without it (both selftest hashes, measured).
-    const SurfaceCardSpike *cards = scene->cardSpike();
-    if (cards && cards->ready() && cards->cardsEnabled()) {
-        pp.cardKnobs[0] = 1.0f;
-        pp.cardKnobs[1] = float(cards->itemSlot());
-        pp.cardKnobs[2] = cards->depthTolerance();
-        pp.cardKnobs[3] = voxCount ? std::max(0.01f, voxCell[0].length()) : 0.05f;
-        for (unsigned c = 0; c < kSpikeCards; ++c) {
-            const SurfaceCardSpike::CardXform &xf = cards->xform(c);
-            memcpy(pp.cardAxis[c], xf.axis, sizeof(xf.axis));
-            memcpy(pp.cardRowU[c], xf.rowU, sizeof(xf.rowU));
-            memcpy(pp.cardRowV[c], xf.rowV, sizeof(xf.rowV));
-            memcpy(pp.cardRowD[c], xf.rowD, sizeof(xf.rowD));
-        }
-        // THE SUN, as the card's direct light. The first directional light of
-        // the scene — the same "first directional is the sun" rule the editor
-        // states — and its radiance in the units HlmsPbs multiplies a surface
-        // by: the diffuse colour times the power scale.
-        const Ogre::Light *sun = nullptr;
-        for (NodeId id : scene->mLightNodes) {
-            auto it = scene->mNodes.find(id);
-            if (it == scene->mNodes.end() || !it->second.light) continue;
-            if (it->second.light->getType() != Ogre::Light::LT_DIRECTIONAL) continue;
-            sun = it->second.light;
-            break;
-        }
-        if (sun) {
-            const Ogre::Vector3 dir = sun->getDerivedDirection();
-            put3(pp.cardSunDir, dir, 1.0f);
-            const Ogre::ColourValue col = sun->getDiffuseColour() * sun->getPowerScale();
-            pp.cardSunColour[0] = col.r; pp.cardSunColour[1] = col.g;
-            pp.cardSunColour[2] = col.b; pp.cardSunColour[3] = 0.0f;
-        }
-    }
-    const SurfaceCardSpike *cardsBound =
-        (cards && cards->ready() && cards->cardsEnabled()) ? cards : nullptr;
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
     rv.prev[1] = eyeB[1];
@@ -3126,25 +3060,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     sky.sampler = mLinearSampler;
     sky.imageView = skyTex ? sampledView(skyTex) : mDummyCube.view;
     sky.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    // SURFACE-CACHE-0's five card bindings. POINT-SAMPLED: a card is a surface
-    // and its depth channel is a distance, and a bilinear fetch across a
-    // silhouette would blend a depth from the object with a depth from the
-    // empty texel next to it — which is exactly the test that is meant to
-    // reject the hit.
-    VkDescriptorImageInfo cardInfo[kSpikeCardBindings] = {};
-    {
-        Ogre::TextureGpu *const cardTex[kSpikeCardBindings] = {
-            cardsBound ? cardsBound->normalTex() : nullptr, cardsBound ? cardsBound->shadowRoughTex() : nullptr,
-            cardsBound ? cardsBound->albedoTex() : nullptr, cardsBound ? cardsBound->emissiveTex() : nullptr,
-            cardsBound ? cardsBound->depthTex() : nullptr
-        };
-        for (unsigned i = 0; i < kSpikeCardBindings; ++i) {
-            cardInfo[i].sampler = mPointSampler;
-            cardInfo[i].imageView = cardTex[i] ? sampledView(cardTex[i]) : mDummyArray.view;
-            cardInfo[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            if (!cardInfo[i].imageView) { bail("a card view is null"); return; }
-        }
-    }
     // EVERY DESCRIPTOR MUST BE A REAL VIEW — a null one in a set the shader may
     // index is undefined behaviour, not a black sample — which is what the 1x1
     // black stand-ins above are for. A slot still empty here is a failure to
@@ -3180,10 +3095,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     w[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[14].pImageInfo = &sky;
-    for (unsigned i = 0; i < kSpikeCardBindings; ++i) {
-        w[15 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[15 + i].pImageInfo = &cardInfo[i];
-    }
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -3219,16 +3130,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             for (int axis = 0; axis < 4; ++axis)
                 if (vox[c][axis])
                     solver.resolveTransition(trans, vox[c][axis], Ogre::ResourceLayout::Texture,
-                                             Ogre::ResourceAccess::Read, computeStage);
-        // SURFACE-CACHE-0: the card atlases were last written by a render pass
-        // of the capture workspace, so they need the same transition every
-        // other sampled input here gets.
-        if (cardsBound)
-            for (Ogre::TextureGpu *t : { cardsBound->normalTex(), cardsBound->shadowRoughTex(),
-                                         cardsBound->albedoTex(), cardsBound->emissiveTex(),
-                                         cardsBound->depthTex() })
-                if (t)
-                    solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                              Ogre::ResourceAccess::Read, computeStage);
         if (skyTex)
             solver.resolveTransition(trans, skyTex, Ogre::ResourceLayout::Texture,

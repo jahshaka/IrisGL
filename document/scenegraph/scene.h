@@ -409,6 +409,29 @@ public:
     /// equals. 0 (the default) is no budget, which is the shipped arm exactly.
     /// The engine's own documentation for it is GiParams::cascadeInstanceCap.
     int giCascadeInstanceCap = 0;
+    /// THE SURFACE CACHE (SURFACE-CACHE phase 2) — three per-project rows.
+    ///
+    /// `giCards` takes the same three-state spelling every other GI toggle in
+    /// this struct takes — 0 OFF, 1 ON, anything else (-1) AUTO — and AUTO IS
+    /// OFF at this phase
+    /// and says so: nothing READS a card until phase 4 (the ray hit), so a
+    /// machine that captured them would be paying for pictures nobody looks at.
+    /// The row exists now because the cache is built now and a suite, a
+    /// measurement and the render monitor all need to turn it on.
+    ///
+    /// `giCardBudgetTexels` is the per-frame CAPTURE budget in TEXELS —
+    /// Lumen's own shape (its capture budget is 512 x 512 a frame) — and 0 is
+    /// "the quality tier's own". Texels rather than cards, because a 16-texel
+    /// card and a 128-texel card are not the same work; texels rather than
+    /// milliseconds, because a wall clock measures nothing in this engine.
+    ///
+    /// `giCardRadius` is the residency radius in metres: an instance further
+    /// than this from the camera holds no atlas pages at all. 0 is the tier's.
+    /// The engine's own documentation for all three is GiParams::cards /
+    /// cardBudgetTexels / cardResidencyRadius.
+    int giCards = 0;
+    int giCardBudgetTexels = 0;
+    float giCardRadius = 0.0f;
     /// A DRAGGED STILL RIDES THE MOVER CHANNEL FOR THE LENGTH OF THE GESTURE
     /// (MOVER-1) — 1, ON, is the DEFAULT (owner, ledger §844). It changes what
     /// a scene looks like WHILE an object is being dragged (the object stops

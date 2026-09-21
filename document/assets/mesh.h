@@ -161,6 +161,25 @@ struct MeshCard
     /// direction (u x v = the axis direction), so a card's (u, v) parameters
     /// mean the same thing in the bake, in the capture and at the read — there
     /// is no per-card rotation to store or to get wrong.
+    ///
+    /// THE +Y ROW WAS LEFT-HANDED UNTIL SURFACE-CACHE-1b (2026-09-21), and the
+    /// sentence above was the only place that said otherwise: axis 2 had
+    /// u = (1,0,0) with v = (0,0,1), whose cross product is (0,-1,0) — the
+    /// NEGATED axis, and the only one of the six that disagreed. Every other
+    /// pair shares its v and mirrors its u (+X/-X share (0,1,0), +Z/-Z share
+    /// (0,1,0)); +Y/-Y did not, which is exactly the shape of the mistake.
+    /// v for +Y is now (0,0,-1), matching -Y, so the six frames are uniform and
+    /// every one is right-handed — asserted by the convention case in
+    /// `gi.card_capture`, which is what would have caught it.
+    ///
+    /// NO BAKED BYTE MOVES WITH THIS, and that is arithmetic rather than hope:
+    /// a card's rectangle is stored as a CENTRE (`origin`) and two SYMMETRIC
+    /// half-sizes, and `MeshBake::fromBounds` computes the centre as
+    /// `U*(uMin+uMax)/2 + V*(vMin+vMax)/2 + D*(...)` over the surfels' own
+    /// min/max — flip the sign of V and the min and the max swap, so the
+    /// centre is the same world point and the half is the same length. The
+    /// clustering, the coverage raster and the LOD pick read the frame the same
+    /// way on both sides of the flip. Hence `bake-output: unchanged`.
     static Vec3 axisU(int axis)
     {
         switch (axis) {
@@ -177,7 +196,7 @@ struct MeshCard
         switch (axis) {
         case 0:
         case 1: return Vec3(0, 1, 0);
-        case 2: return Vec3(0, 0, 1);
+        case 2:
         case 3: return Vec3(0, 0, -1);
         default: return Vec3(0, 1, 0);
         }

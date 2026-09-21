@@ -1,10 +1,10 @@
-// SURFACE-CACHE-0 (a design SPIKE, 2026-09-21) — THE CARD CAPTURE'S EXTRA
-// G-BUFFER TARGETS, written from HlmsPbs with NO patch to the pin.
+// SURFACE-CACHE — THE CARD CAPTURE'S EXTRA G-BUFFER TARGETS, written from
+// HlmsPbs with NO patch to the pin.
 //
-// WHAT THIS FILE IS MEASURING. The assessment (SPECS/SURFACE_CACHE_ASSESSMENT.md
-// §8 item 5) records as UNVERIFIED whether a four-target capture from a PBS
-// material can be written through the existing HlmsListener hooks or whether it
-// needs a numbered patch. This file is the answer: it needs NO patch. Two hook
+// WHAT THIS FILE IS. Phase 0 (SURFACE-CACHE-0) wrote it to answer the
+// assessment's §8 item 5 — whether a multi-target capture from a PBS material
+// needs a numbered patch — and phase 2's Component (SurfaceCache.h) is its
+// shipping consumer, unchanged: the answer was NO patch. Two hook
 // pieces that upstream's own GLSL template inserts -- `custom_ps_output_types`
 // (immediately after the built-in fragment outputs, so the running
 // render-target-index counter keeps counting) and `custom_ps_posExecution` (inside main(), after
@@ -52,9 +52,10 @@
 // rendered BLACK with nothing in any log. Measured on this lane, 2026-09-21.
 //
 // EVERY PIECE HERE IS INERT WITHOUT `jah_card_capture`, which only our listener
-// sets and only while a capture workspace is executing. With it unset the
-// generated shader is byte-identical to a build without this file -- which is
-// what keeps both selftest hashes where they are.
+// sets and only while the surface cache's capture workspace is executing. With
+// it unset the generated shader is byte-identical to a build without this file
+// -- which is what keeps both selftest hashes where they are, and what makes a
+// scene with the card row off cost exactly what it cost before.
 
 // THE GUARD IS OUTSIDE THE PIECE, NOT INSIDE IT, and that is not style: the
 // Hlms parser collects pieces at LIBRARY PARSE time and refuses a second

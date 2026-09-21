@@ -227,13 +227,13 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // flipping the row recompile rather than silently keep the old shader.
     if (hlms && !casterPass && sceneManager && lookup(sceneManager).atmosphere)
         hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_fog_atmo", 1);
-    // SURFACE-CACHE-0 (the phase-0 design spike, 2026-09-21). The capture
-    // workspace's five-target G-buffer is written by JahCardCapture_piece_ps.any
-    // under this ONE pass property, and this is where it is set — the same hook
-    // and the same shape as `jah_fog_atmo` above. It is true only while
-    // SurfaceCardSpike::captureRound is inside `_update()`, i.e. never in a
-    // frame, so every other pass generates the shader it generated before this
-    // lane existed and both selftest hashes are unmoved.
+    // SURFACE-CACHE phase 2. The capture workspace's five-target G-buffer is
+    // written by JahCardCapture_piece_ps.any under this ONE pass property, and
+    // this is where it is set — the same hook and the same shape as
+    // `jah_fog_atmo` above. It is true only while the surface cache's capture
+    // workspace is inside its own `_update()`, so every OTHER pass in the
+    // process generates the shader it generated before this lane existed and
+    // both selftest hashes are unmoved.
     if (hlms && !casterPass && surfaceCardsCapturing())
         hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_card_capture", 1);
     // THE SKY'S ENVIRONMENT SLOT, decided here and read twice afterwards: by

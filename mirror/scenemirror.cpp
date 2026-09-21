@@ -5264,6 +5264,26 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
         out.lodIndices.emplace_back(level.constBegin(), level.constEnd());
         out.lodErrors.push_back(mesh->lodErrors.at(i));
     }
+
+    // SURFACE-CACHE phase 1 -> phase 2: the mesh's CARD LIST, handed across as
+    // it was baked. Cards are in MESH SPACE and the V flip above moves no
+    // vertex and no axis of the mesh's own frame, so — exactly like the LOD
+    // chain — nothing here is remapped. A mesh with no cards (every skinned
+    // mesh, every line mesh, every model opened without a bake) carries an
+    // empty vector, which is what the engine's cache reads as "this instance
+    // has no cards" and skips.
+    out.cardCoverage = mesh->cardCoverage;
+    out.cards.reserve(size_t(mesh->cards.size()));
+    for (const iris::MeshCard &c : mesh->cards) {
+        jahshaka::engine::MeshCardDesc d;
+        d.axis = static_cast<unsigned char>(c.axis);
+        d.lodLevel = static_cast<unsigned char>(c.lodLevel);
+        d.origin = jahshaka::engine::Vec3{ c.origin.x(), c.origin.y(), c.origin.z() };
+        d.halfU = c.halfU;
+        d.halfV = c.halfV;
+        d.halfDepth = c.halfDepth;
+        out.cards.push_back(d);
+    }
     return out.indices.size() >= 3;
 }
 
@@ -7175,6 +7195,13 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.cascades = mSource->giCascades > 0;
         gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
         gi.dragMoverChannel   = mSource->giDragMoverChannel > 0;
+        // THE SURFACE CACHE's three rows, pushed as they are authored. `cards`
+        // is a GiToggle and AUTO resolves to OFF in the engine at this phase
+        // (nothing reads a card until the ray hit does), so the document row
+        // and the engine's answer agree without the mirror deciding anything.
+        gi.cards = toggle(mSource->giCards);
+        gi.cardBudgetTexels = qMax(0, mSource->giCardBudgetTexels);
+        gi.cardResidencyRadius = qMax(0.0f, mSource->giCardRadius);
         gi.cascadeCount = 0;
         for (const iris::Vec3 &row : mSource->giCascadeSet) {
             if (gi.cascadeCount >= 8) break;
