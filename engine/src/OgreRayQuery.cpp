@@ -1211,6 +1211,12 @@ void RayQueryTier::close() {
     // switch flipped while a scene is gathering takes `updateRayQuery`'s early
     // return, so the frame-head clear never runs and this teardown is the only
     // place left that knows.
+    // THE BIN'S DESCRIPTOR SETS GO FIRST. A set the gather retired on a RESIZE
+    // sits in `mRetireBin` naming the gather's OWN pool, and `close()` below
+    // destroys that pool — freeing the set afterwards would hand Vulkan a dead
+    // handle. The device is idle here, so nothing still reads them.
+    for (Retired &r : mRetireBin)
+        if (r.set && r.setPool) { vkFreeDescriptorSets(mVk, r.setPool, 1, &r.set); r.set = VK_NULL_HANDLE; }
     if (mGather) { mGather->close(); delete mGather; mGather = nullptr; }
     // (`mDummyArray` — SURFACE-CACHE-0's 1x1x6 stand-in for the card spike's
     // five bindings — went with the spike at SURFACE-CACHE-1b; nothing in the
