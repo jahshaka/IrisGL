@@ -2736,6 +2736,8 @@ struct GatherStatus {
     float traceMs = -1.0f;
     float integrateMs = -1.0f;
     float cpuMs = -1.0f;
+};
+
 // ---- SURFACE-CACHE phase 2: the capture cache's status and its knobs -------
 //
 // THE STATE THE CACHE PUBLISHES. SURFACE-CACHE-0's `SurfaceCardSpikeDesc` /
