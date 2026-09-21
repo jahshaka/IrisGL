@@ -1638,17 +1638,17 @@ void VrSession::createActions() {
     // spelled out rather than assumed.
     // =======================================================================
     struct ProfileDesc {
-        const char *profile;
+        const char *profile = nullptr;
         /// The MANIPULATION pose's path, or nullptr where the profile has none
         /// (every controller: a fist's manipulation frame IS its grip).
-        const char *manip;
-        const char *select;       ///< nullptr = unbound on this profile
-        const char *grab;
-        const char *menu[2];      ///< per hand; nullptr = unbound
-        const char *stick;
-        const char *stickClick;
-        const char *haptic;
-        bool        needsHandInteraction;
+        const char *manip = nullptr;
+        const char *select = nullptr;   ///< nullptr = unbound on this profile
+        const char *grab = nullptr;
+        const char *menu[2] = {};       ///< per hand; nullptr = unbound
+        const char *stick = nullptr;
+        const char *stickClick = nullptr;
+        const char *haptic = nullptr;
+        bool        needsHandInteraction = false;
     };
     static const ProfileDesc kProfiles[] = {
         { "/interaction_profiles/khr/simple_controller", nullptr,

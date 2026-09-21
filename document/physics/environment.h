@@ -48,7 +48,7 @@ struct PickingHandle
 {
 	btRigidBody *activeRigidBodyBeingManipulated = nullptr;
 	btTypedConstraint *activePickingConstraint = nullptr;
-	int	activeRigidBodySavedState;
+	int	activeRigidBodySavedState = 0;
 	btVector3 constraintOldPickingPosition;
 	btVector3 constraintHitPosition;
 	btScalar constraintOldPickingDistance;
@@ -147,11 +147,14 @@ public:
 	float getWorldGravity();
 
 private:
-    btCollisionConfiguration    *collisionConfig;
-    btDispatcher                *dispatcher;
-    btBroadphaseInterface       *broadphase;
-    btConstraintSolver          *solver;
-    btDynamicsWorld             *world;
+    // createPhysicsWorld() fills all five and destroyPhysicsWorld() empties them,
+    // both from the constructor's body — a helper, so these are nullptr of their
+    // own until it runs (and after a destroy that returns early).
+    btCollisionConfiguration    *collisionConfig = nullptr;
+    btDispatcher                *dispatcher = nullptr;
+    btBroadphaseInterface       *broadphase = nullptr;
+    btConstraintSolver          *solver = nullptr;
+    btDynamicsWorld             *world = nullptr;
 	
 	QHash<int, PickingHandle> pickingHandles;
 

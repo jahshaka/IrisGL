@@ -80,38 +80,38 @@ public:
     }
 
     // ---- legacy authoring fields (serialized since 2016, unchanged meanings) --
-    float particlesPerSecond;
-    float speed;
+    float particlesPerSecond = 24.0f;
+    float speed = 12.0f;
     iris::Texture2DPtr texture;
 
-    bool dissipate, dissipateInv;
-    bool randomRotation;
-    bool useAdditive;
+    bool dissipate = true, dissipateInv = false;
+    bool randomRotation = true;
+    bool useAdditive = true;
 
-    float gravityComplement;
-    float lifeLength;
-    float particleScale;
+    float gravityComplement = 0.0f;
+    float lifeLength = 1.0f;
+    float particleScale = 1.0f;
 
-    int maxParticles;
+    int maxParticles = 0;
 
     /// Spread around the mean, in ABSOLUTE units (speedError = 0.5 means
     /// speed +/- 0.5). The setters below take a FRACTION, which is what the
     /// panel's "Random ..." sliders have always sent.
-    float speedError, lifeError, scaleError;
+    float speedError = 0.0f, lifeError = 0.0f, scaleError = 0.0f;
 
     // ---- ParticleFX2 authoring (PARTICLES_FX2_SPEC.md) -----------------------
-    ParticleEmitterShape shape;
+    ParticleEmitterShape shape = ParticleEmitterShape::Point;
     /// Box: width/height/depth. Cylinder/Ellipsoid/Ring: radii. Point: unused.
     iris::Vec3 extents;
     /// HollowEllipsoid / Ring: the hole, as a fraction of `extents` in [0, 1).
     iris::Vec3 innerExtents;
     /// Emission cone half-angle around the node's +Y, in degrees. 0 = a beam.
-    float coneAngle;
+    float coneAngle = 0.0f;
     /// Per-particle emission colour, picked between the two at birth. This is
     /// the FLAT tint; the ramp below is what changes over a particle's life.
     QColor emitColourStart, emitColourEnd;
     /// Bursts. duration 0 = emit forever.
-    float burstDuration, burstRepeatDelay, startDelay;
+    float burstDuration = 0.0f, burstRepeatDelay = 0.0f, startDelay = 0.0f;
 
     /// Colour over life, up to 6 keys. Empty = no ramp (particles keep the
     /// emission colour). This is the single lever that turns quads into fire.
@@ -132,7 +132,7 @@ public:
     /// affector at all (the mirror omits it, the turbulence rule).
     QColor colourFade1, colourFade2;
     /// Switch to stage 2 when a particle has this many SECONDS of life left.
-    float colourFadeSwitch;
+    float colourFadeSwitch = 0.0f;
     /// A 1-D ramp image sampled across life (the classic fire gradient). A
     /// RESOLVED PATH, not a guid: the renderer's affector loads it by name
     /// through the resource system, so the document resolves it like every
@@ -144,21 +144,21 @@ public:
     /// `scaleRateMultiply`. 0 (additive) / 1 (multiplicative) are neutral and
     /// the mirror then omits the affector. Distinct from `scaleKeys`, which
     /// authors absolute sizes at life fractions.
-    float scaleRate;
-    bool  scaleRateMultiply;
+    float scaleRate = 0.0f;
+    bool  scaleRateMultiply = false;
 
     /// Random velocity perturbation each frame. 0 = off (and the engine then
     /// omits the affector entirely, which is not free to add).
-    float turbulence;
+    float turbulence = 0.0f;
     /// A constant world-space force on top of gravity: wind, buoyancy, updraft.
     iris::Vec3 wind;
     /// Spin, degrees per second, picked per particle in [min, max].
-    float rotationSpeedMin, rotationSpeedMax;
+    float rotationSpeedMin = 0.0f, rotationSpeedMax = 0.0f;
 
-    ParticleOrientation orientation;
+    ParticleOrientation orientation = ParticleOrientation::Billboard;
     /// Alpha-blended systems only: stochastic (order-independent) transparency.
     /// Ignored when `useAdditive`, which needs no sorting at all.
-    bool alphaHash;
+    bool alphaHash = true;
     /// A DISTORTION emitter (POST_LOOKS_SPEC §5.3 4b): the particles draw no
     /// colour; they warp what is behind them through the view's distortion
     /// pass, reading `texture` as the displacement map and each particle's
@@ -170,7 +170,7 @@ public:
     /// The preset this emitter was last stamped from, purely so the UI can show
     /// it. Editing any field afterwards does NOT reset it to Custom — the
     /// preset is a starting point, not a mode.
-    ParticlePreset preset;
+    ParticlePreset preset = ParticlePreset::Custom;
 
     // (The particle simulation clock is NOT here. The renderer has one
     // frame-time source for the whole process, so a per-emitter clock cannot

@@ -410,8 +410,8 @@ std::size_t liveNodeCount();
 /// and the ray parameter at which the ray entered its world AABB.
 struct RayCandidate
 {
-    SceneNode *node;
-    float distance;
+    SceneNode *node = nullptr;
+    float distance = 0.0f;
 };
 
 /// True when `s` holds query-able geometry at all. A document that no mirror

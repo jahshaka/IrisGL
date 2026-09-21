@@ -1362,7 +1362,7 @@ void OgreScene::applyPendingIbl() {
     // A cube we own is scratch: once the convolution has read it, its (mipped,
     // full-size) VRAM is dead weight until the next sky change.
     struct FreeSource {
-        OgreScene *self;
+        OgreScene *self = nullptr;
         ~FreeSource() {
             if (!self->mIblSourceOwned || !self->mIblSourceTex) return;
             try {

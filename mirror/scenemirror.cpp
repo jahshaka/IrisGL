@@ -4656,7 +4656,8 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // rule that makes I-2's cache-key fix load-bearing: a detail DIFFUSE map is
     // an sRGB colour and a detail NORMAL map is linear data, and nothing stops
     // a user binding the same file to both.
-    struct Slot { QLatin1StringView name; PbrTextureSlot slot; bool srgb; };
+    struct Slot { QLatin1StringView name; PbrTextureSlot slot = PbrTextureSlot::Albedo;
+                  bool srgb = false; };
     static const Slot kSlots[] = {
         { QLatin1StringView("u_baseColorMap"),  PbrTextureSlot::Albedo,    true  },
         { QLatin1StringView("u_diffuseTexture"), PbrTextureSlot::Albedo,   true  },

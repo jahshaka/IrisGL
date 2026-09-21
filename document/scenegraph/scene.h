@@ -32,7 +32,6 @@ For more information see the LICENSE file
 #include <QJsonObject>
 
 class QMediaPlayer;
-class QMediaPlaylist;
 
 namespace iris
 {
@@ -158,7 +157,7 @@ struct PickingResult
     iris::SceneNodePtr hitNode;
     iris::Vec3 hitPoint;
 
-    float distanceFromStartSqrd;
+    float distanceFromStartSqrd = 0.0f;
     /// The TriMesh triangle that was hit. Reported since both ray walks became
     /// one implementation (audit F13): this half of the pair used to drop it
     /// while the other half depended on it.
@@ -209,16 +208,16 @@ enum class GiQuality : int
 struct SkyRealistic
 {
 	/// How much atmosphere the ray travels through — the blue's depth.
-	float density;
+	float density = 0.25f;
 	/// How fast the colour changes with altitude — the horizon's spread.
-	float diffusion;
+	float diffusion = 2.0f;
 	/// The lowest point the sky is drawn at; raises the band in a sunset.
-	float horizon;
+	float horizon = 0.025f;
 	/// The sky's own colour before absorption, as a colour a user PICKS
 	/// (decoded sRGB->linear at the boundary, like every other one).
 	QColor skyColour;
 	/// Multiplies the whole sky (HDR).
-	float power;
+	float power = 1.5f;
 	/// THE AIR THE SUNLIGHT TRAVELS THROUGH — the atmosphere's turbidity, and
 	/// the ONLY thing that decides the sun's colour (lane SKY-DENSITY-1).
 	///
@@ -235,7 +234,7 @@ struct SkyRealistic
 	/// the SKY's own defaults were fitted to (SKY-TUNE-1), so the two describe
 	/// the same air. Below 1 the aerosol term would amplify rather than absorb;
 	/// it is held there. OgreSky.cpp::atmosphereSunTint carries the model.
-	float sunHaze;
+	float sunHaze = 2.5f;
 
 	// THE SKY HAS NO SUN OF ITS OWN (SKY_LIGHT_SPEC.md §3, owner decision D15).
 	// The analytic sky's sun DIRECTION comes from the scene's sun — the first
@@ -1113,8 +1112,6 @@ public:
 	// (STABILITY_PROGRAM_SPEC Lane 6a; see scene.cpp ensureMediaPlayer()).
 	QMediaPlayer* mediaPlayer;
 	void ensureMediaPlayer();
-	// a playlist is needed to play looping sounds
-	QMediaPlaylist* playList;
 	QString ambientMusicPath;
 	float ambientMusicVolume;
 

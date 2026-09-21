@@ -3432,7 +3432,7 @@ enum : unsigned { kVrHandJointCount = 26 };
 /// the FAN from the wrist out to the five metacarpals, which is the palm. The
 /// palm JOINT (0) is deliberately not in it: it is the middle of the hand, not
 /// an end of anything, and it is what a controller's grip pose stands in for.
-struct VrHandBone { unsigned char from, to; };
+struct VrHandBone { unsigned char from = 0, to = 0; };
 enum : unsigned { kVrHandBoneCount = 24 };
 inline constexpr VrHandBone kVrHandBones[kVrHandBoneCount] = {
     // the palm: the wrist out to each metacarpal

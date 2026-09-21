@@ -1955,7 +1955,7 @@ public:
     ~TextureCache();
 
 private:
-    struct FileRec { std::string name; unsigned long long bytes; std::string hash; };
+    struct FileRec { std::string name; unsigned long long bytes = 0; std::string hash; };
     bool readManifest(std::vector<FileRec> &out) const;
     bool writeManifest(const std::vector<FileRec> &files) const;
     void wipe() const;
@@ -2086,7 +2086,7 @@ public:
     ~ShaderCache();
 
 private:
-    struct Entry { std::string name; unsigned long long bytes; std::string hash; };
+    struct Entry { std::string name; unsigned long long bytes = 0; std::string hash; };
     /// One dispatched save: the serialized layers, waiting for the writer
     /// thread. `blobs` is parallel to `names`; `compileCount` is the counter
     /// reading this write makes true once it lands.
@@ -4851,7 +4851,7 @@ private:
     void unindexDecalNode(Node &n);
     /// ONE WALK, TWO CONSUMERS (walkItems, via runItemWalk): the GI movement
     /// records and the frame's caster changes, from the same pass.
-    struct ShadowChange { Ogre::Aabb box; Ogre::uint32 channels; };
+    struct ShadowChange { Ogre::Aabb box; Ogre::uint32 channels = 0; };
     void walkItems(bool gi, bool shadow, bool fresh);
     std::vector<ShadowChange> mShadowChanges;
     std::vector<ShadowChange> mShadowVanished;   ///< casters whose Item died since the last walk
@@ -6285,7 +6285,7 @@ private:
     /// OgreVulkanXcbWindow.cpp) — spelled without Xlib so this header stays
     /// X11-free. `Display*` is an opaque pointer and `Window` is `XID` =
     /// `unsigned long`; same sizes, same alignments, same order.
-    struct X11Handle { void *display; unsigned long window; };
+    struct X11Handle { void *display = nullptr; unsigned long window = 0; };
 #endif
 
     bool viewNameTaken(const std::string &name);
@@ -6559,10 +6559,10 @@ private:
     /// reflected camera, a probe's capture camera (fixed at the probe centre).
     /// `hasEye` is false when the workspace has no default camera.
     struct ShadowInstance {
-        Ogre::CompositorShadowNode *node;
-        ShadowNodeKind              kind;
+        Ogre::CompositorShadowNode *node = nullptr;
+        ShadowNodeKind              kind = ShadowNodeKind::View;
         Ogre::Vector3               eye;
-        bool                        hasEye;
+        bool                        hasEye = false;
     };
     std::vector<ShadowInstance>              mShadowInstScratch;
     std::vector<Ogre::Light *>               mShadowWantScratch;
@@ -6578,7 +6578,8 @@ private:
     /// records into a capture's frame (1 view + 2 reflect + 32 probe), 32 of
     /// them for instances that will not render this frame at all. One record
     /// per lamp per frame instead, with `units` = the instances marked.
-    struct ProbeMark { unsigned long long node; WorkReason reason; unsigned instances; };
+    struct ProbeMark { unsigned long long node = 0; WorkReason reason = WorkReason::None;
+                       unsigned instances = 0; };
     std::vector<ProbeMark> mShadowProbeMarks;
     void noteShadowMapWork(ShadowNodeKind kind, WorkReason reason, unsigned long long node,
                            const char *kindName);

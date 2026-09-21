@@ -1830,7 +1830,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             }
             // The sample's exact ping-pong: V, H, V, H, then four more H passes.
             // Reproduced rather than "improved" — the widths are tuned together.
-            struct Blur { const char *target, *src, *material; };
+            struct Blur { const char *target = nullptr, *src = nullptr, *material = nullptr; };
             const Blur blurs[] = {
                 { kBlur1, kBlur0, "HDR/BoxBlurH" }, { kBlur0, kBlur1, "HDR/BoxBlurV" },
                 { kBlur1, kBlur0, "HDR/BoxBlurH" }, { kBlur0, kBlur1, "HDR/BoxBlurV" },

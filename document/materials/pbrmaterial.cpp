@@ -860,7 +860,7 @@ void PbrMaterial::createProperties()
     // the "u_*Map" sampler names used as Material::textures keys). Declaring
     // them is what makes SceneWriter persist the maps and SceneReader restore
     // them — without these, PBR texture maps did not survive a scene save/load.
-    struct MapDef { const char *display; const char *name; };
+    struct MapDef { const char *display = nullptr; const char *name = nullptr; };
     static const MapDef kMaps[] = {
         { "Base Color Map", "baseColorMap" },
         { "Normal Map",     "normalMap"    },
@@ -924,7 +924,8 @@ void PbrMaterial::createProperties()
         // renders Vec2 rows, but material.set, the reader and the graph baker
         // all address rows by a single name with a scalar value, and a Vec2 key
         // would be the one row a script could not write like the others.
-        struct Scalar { const char *suffix; const char *label; float value; float lo; float hi; };
+        struct Scalar { const char *suffix = nullptr; const char *label = nullptr;
+                        float value = 0.0f; float lo = 0.0f; float hi = 0.0f; };
         const Scalar scalars[] = {
             { "OffsetU",      "Offset U",      detail[layer].offsetU,      -8.0f, 8.0f },
             { "OffsetV",      "Offset V",      detail[layer].offsetV,      -8.0f, 8.0f },

@@ -22,7 +22,7 @@ struct TriangleIntersectionResult
 {
     int triangleIndex;
     iris::Vec3 hitPoint;
-    float t;//distance along length of the segment
+    float t = 0.0f;//distance along length of the segment
 
     TriangleIntersectionResult()
     {

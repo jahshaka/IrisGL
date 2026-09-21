@@ -730,8 +730,9 @@ void RayQueryTier::retireImage(ReflectImage &img) {
 bool RayQueryTier::ensureDummyImages(std::string &err) {
     if (mDummiesReady) return true;
     const VkFormat fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
-    struct Spec { ReflectImage *img; VkImageType type; VkImageViewType viewType; uint32_t layers;
-                  VkImageCreateFlags flags; };
+    struct Spec { ReflectImage *img = nullptr; VkImageType type = VK_IMAGE_TYPE_2D;
+                  VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D; uint32_t layers = 0;
+                  VkImageCreateFlags flags = 0; };
     const Spec specs[2] = {
         { &mDummyCube, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_CUBE, 6u,
           VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT },
@@ -1200,7 +1201,7 @@ struct InstanceWriter final : public RayInstanceSink {
     /// the instances that must have their reference patched once they do.
     std::vector<Ogre::MeshPtr> newMeshes;
     std::unordered_map<const Ogre::Mesh *, unsigned> newIndexOf;
-    struct Patch { unsigned instance; unsigned newMesh; };
+    struct Patch { unsigned instance = 0; unsigned newMesh = 0; };
     std::vector<Patch> patches;
 
     void hash(unsigned long long v) {
@@ -2050,7 +2051,7 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
         dropBuffer(rayBuf);
         return false;
     }
-    struct Params { uint32_t counts[4]; } params{};
+    struct Params { uint32_t counts[4] = {}; } params{};
     params.counts[0] = uint32_t(count);
     if (!makeBuffer(sizeof(params), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
         dropBuffer(rayBuf);
@@ -2193,43 +2194,43 @@ namespace {
 /// order and nothing is reordered for packing (every member is a vec4 or an
 /// array of them, which std140 lays out identically to C).
 struct ReflectParams {
-    float camPos[4];
-    float rayTL[4];
-    float rayRight[4];
-    float rayDown[4];
-    float fwd[4];
-    float projParams[4];
-    float resolution[4];
-    float knobs[4];
-    float knobs2[4];
-    float skyColour[4];
-    float viewAxisX[4];
-    float viewAxisY[4];
-    float viewAxisZ[4];
-    float voxelOrigin[kMaxReflectCascades][4];
-    float voxelInvSize[kMaxReflectCascades][4];
-    float prevCamPos[4];
-    float prevRayTL[4];
-    float prevRayRight[4];
-    float prevRayDown[4];
-    float prevFwd[4];
+    float camPos[4] = {};
+    float rayTL[4] = {};
+    float rayRight[4] = {};
+    float rayDown[4] = {};
+    float fwd[4] = {};
+    float projParams[4] = {};
+    float resolution[4] = {};
+    float knobs[4] = {};
+    float knobs2[4] = {};
+    float skyColour[4] = {};
+    float viewAxisX[4] = {};
+    float viewAxisY[4] = {};
+    float viewAxisZ[4] = {};
+    float voxelOrigin[kMaxReflectCascades][4] = {};
+    float voxelInvSize[kMaxReflectCascades][4] = {};
+    float prevCamPos[4] = {};
+    float prevRayTL[4] = {};
+    float prevRayRight[4] = {};
+    float prevRayDown[4] = {};
+    float prevFwd[4] = {};
     /// THE SECOND EYE (lane REFLECT-VR-1). `stereo.x` is 1 when the target
     /// carries two eyes side by side, and then everything above is the LEFT
     /// eye's over the left half and everything here is the RIGHT eye's over the
     /// right half. Appended rather than folded into an array of two: the block
     /// above is what a mono view writes and what every reader of this file
     /// already knows, and std140 lays the tail out identically either way.
-    float stereo[4];
-    float camPos2[4];
-    float rayTL2[4];
-    float rayRight2[4];
-    float rayDown2[4];
-    float fwd2[4];
-    float prevCamPos2[4];
-    float prevRayTL2[4];
-    float prevRayRight2[4];
-    float prevRayDown2[4];
-    float prevFwd2[4];
+    float stereo[4] = {};
+    float camPos2[4] = {};
+    float rayTL2[4] = {};
+    float rayRight2[4] = {};
+    float rayDown2[4] = {};
+    float fwd2[4] = {};
+    float prevCamPos2[4] = {};
+    float prevRayTL2[4] = {};
+    float prevRayRight2[4] = {};
+    float prevRayDown2[4] = {};
+    float prevFwd2[4] = {};
 };
 
 void put3(float *dst, const Ogre::Vector3 &v, float w) {

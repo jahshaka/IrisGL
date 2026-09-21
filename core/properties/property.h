@@ -149,7 +149,7 @@ struct TextureProperty : public Property
 {
     QString value;
     QString toggleValue;
-    bool toggle;
+    bool toggle = false;
 
     TextureProperty () {
         type = PropertyType::Texture;

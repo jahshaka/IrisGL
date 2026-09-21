@@ -86,7 +86,6 @@ Mesh::Mesh(aiMesh* mesh, bool withBones)
 {
     triMesh = new TriMesh();
 
-    this->vertexLayout = nullptr;
     numVerts = mesh->mNumFaces*3;
     numFaces = mesh->mNumFaces;
 
