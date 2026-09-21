@@ -2044,79 +2044,16 @@ void OgreEngine::setShadowMeshOptimization(bool on) { Ogre::Mesh::msOptimizeForS
 bool OgreEngine::shadowMeshOptimization() const { return Ogre::Mesh::msOptimizeForShadowMapping; }
 
 // ---------------------------------------------------------------------------
-// Recorded warm-up sets (SHADER_CACHE_SPEC.md §2.7b / phase 3) — Unreal's
-// ".rec" recordings.
-//
-// The storage is PROCESS-wide, not per scene, and that is what makes "merge the
-// recordings" a non-problem: Ogre's analyze() ACCUMULATES into the same entry
-// vector and de-duplicates by the 48-bit {Hlms hash, render queue} key, so
-// recording every scene a session opens and saving once IS the merged set.
-// (loadFrom, by contrast, CLEARS — so merging FILES would mean re-implementing
-// Ogre's serialization format, which is exactly the second source of truth this
-// whole program avoids.)
-bool OgreEngine::recordWarmUpSet(Scene *scene) {
-    JAH_TRY {
-        if (!mWarmUpSet) mWarmUpSet.reset(new Ogre::VertexFormatWarmUpStorage);
-        if (scene) {
-            mWarmUpSet->analyze(static_cast<OgreScene *>(scene)->sceneManager());
-        } else {
-            // Null = every live scene. The host does not keep a scene registry
-            // and should not have to grow one just to say "record the session".
-            if (mScenes.empty()) { mLastError = "recordWarmUpSet: no scenes"; return false; }
-            for (auto &s : mScenes) mWarmUpSet->analyze(s->sceneManager());
-        }
-        return true;
-    } JAH_CATCH(mLastError, false);
-}
-
-bool OgreEngine::saveWarmUpSet(const std::string &file) {
-    if (!mWarmUpSet) { mLastError = "saveWarmUpSet: nothing has been recorded"; return false; }
-    JAH_TRY {
-        // Through a real fstream rather than an Archive: the set lands beside
-        // the shader cache, in a directory we own outright, and Ogre's Archive
-        // API would need the folder registered as a resource location.
-        std::fstream *fs = OGRE_NEW_T(std::fstream, Ogre::MEMCATEGORY_GENERAL)(
-            file.c_str(), std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
-        Ogre::DataStreamPtr out(OGRE_NEW Ogre::FileStreamDataStream(file, fs, 0, true));
-        mWarmUpSet->saveTo(out);
-        out->close();
-        return true;
-    } JAH_CATCH(mLastError, false);
-}
-
-unsigned OgreEngine::applyWarmUpSet(const std::string &file, Scene *scene) {
-    // Null = the first live scene. The degenerate renderables live for exactly
-    // one frame and are destroyed again, so any scene will do, and a host that
-    // just wants "warm this session up" should not have to pick one.
-    auto *s = static_cast<OgreScene *>(scene);
-    if (!s && !mScenes.empty()) s = mScenes.front().get();
-    if (!s) { mLastError = "applyWarmUpSet: no scene to warm up in"; return 0u; }
-    unsigned before = 0, cached = 0, expected = 0;
-    mShaderCache.progress(before, cached, expected);
-    JAH_TRY {
-        std::ifstream probe(file, std::ios::binary);
-        if (!probe) { mLastError = "applyWarmUpSet: no such file: " + file; return 0u; }
-        probe.close();
-        std::ifstream *is = OGRE_NEW_T(std::ifstream, Ogre::MEMCATEGORY_GENERAL)(
-            file.c_str(), std::ios::in | std::ios::binary);
-        Ogre::DataStreamPtr in(OGRE_NEW Ogre::FileStreamDataStream(file, is, true));
-        // A SEPARATE storage from the recording one: loadFrom clears, and
-        // wiping this session's accumulated recording just because we warmed
-        // from a previous one would lose everything opened before now.
-        Ogre::VertexFormatWarmUpStorage loaded;
-        loaded.loadFrom(in);
-        in->close();
-        // createWarmUp builds degenerate 4-vertex buffers in the recorded
-        // formats and applies the recorded materials to them — no mesh, no
-        // skeleton, no texture is loaded. One frame is what compiles them.
-        loaded.createWarmUp(s->sceneManager());
-        renderOneFrame();
-        loaded.destroyWarmUp();
-    } JAH_CATCH(mLastError, 0u);
-    unsigned after = 0;
-    mShaderCache.progress(after, cached, expected);
-    return after > before ? after - before : 0u;
-}
+// RECORDED WARM-UP SETS ARE GONE (WARMUPSET-2, 2026-09-21). The three verbs
+// that recorded, saved and replayed a `VertexFormatWarmUpStorage` lived here.
+// A set identifies each permutation by one representative MATERIAL NAME and
+// resolves that name in the NEXT process; this engine names its datablocks from
+// a process-unique counter, so the names never resolved and the replay warmed
+// the DEFAULT datablock instead — measured at seven "Can't find HLMS datablock"
+// lines and eight never-bound shaders per warm launch. Deleted rather than
+// repaired on the owner's word. The per-scene PSO precache
+// (`View::warmUpShaders`) and the persistent shader cache are what warm this
+// renderer, and neither went anywhere.
 
 ShaderCacheStats OgreEngine::shaderCacheStats() const {
     return mShaderCache.stats(mRoot);
