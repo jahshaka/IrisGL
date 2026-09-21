@@ -2196,12 +2196,41 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     `perf.epic_steady_state` / `perf.drag_mirror_room` / `perf.hide_soak` pass.
     BOTH SELFTEST HASHES MOVE, by design — the escape estimate is a different number everywhere.
 
+  0086-irradiance-field-cage-can-be-declined — THE FIELD'S EIGHT-PROBE CAGE CAN
+    BE DECLINED FOR A PIXEL (lane GATHER-1a, 2026-09-21), MEDIA-only, one file
+    (Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any), OVERLAPS 0058 in
+    that file — a tree carrying 0058 (every tree) resets the submodule before
+    `build-ogre.sh` rather than reading the per-patch reverse check's complaint
+    as an upstream change.
+    THE ACCOUNTING RULE of this renderer is that a pixel receives exactly ONE
+    diffuse-GI term, and the screen-probe gather (SCREEN_PROBE_GATHER_SPEC phase
+    1) gives a covered pixel its own. Two of the three terms a host can already
+    stand down from outside: the voxel-cone diffuse through the pass property
+    `vct_disable_diffuse`, and its own term at an insertion point. The field's
+    cage it could NOT: patch 0058's five hooks are all INSIDE the cage body, so a
+    host may add to the cage, scale it and append after it, but not decline it —
+    and subtracting the answer back out at the post hook is not the same thing,
+    because by then eight irradiance fetches, eight depth fetches and a Chebyshev
+    test have been paid and the two estimates have been summed in a half-float.
+    ONE VARIABLE, ONE HOOK, TWO BRACES: `float ifdCageEnabled = 1.0` and
+    `custom_ps_ifdCageGate` after the prologue hook; the eight-probe loop and the
+    composite add each under `if( ifdCageEnabled != 0.0 )` (the composite for a
+    second reason — with the cage declined `sumIfdWeight` is zero and that line
+    would divide by it). The RESOLVE hook stays outside the branch: a host
+    declares its own quantities there and reads them in the post hook, which must
+    run for every pixel, because the pixels the field does not answer are exactly
+    the ones a host's fallback is for. The loop's body keeps its own indentation
+    so the patch is three added lines rather than a re-indentation of fifty.
+    Left at one — every build that defines no piece for the hook — the generated
+    shader carries one constant and two branches on a compile-time constant, and
+    BOTH SELFTEST HASHES ARE UNCHANGED (777eb2f1… / c2c2b19f…).
 
-THE STACK IS 0001-0084 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
+
+THE STACK IS 0001-0086 WITHOUT 0023 AND WITHOUT 0085 IF SURFACE-CACHE-1b HAS NOT LANDED (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083/0084) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083/0084/0086) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078 and 0081 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,

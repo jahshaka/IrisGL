@@ -872,13 +872,32 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                              nullptr);
     }
 
-    if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeLayout, 0, 1,
-                            &v.placeSets[ring], 0, nullptr);
-    vkCmdDispatch(cmd, (v.gridW + 7u) / 8u, (v.gridH + 7u) / 8u, 1u);
-    if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 1u);
+    // ...AND THE FRAME MONITOR'S OWN ROWS BESIDE THEM (`gather.place`,
+    // `gather.trace`, `gather.integrate`). The timestamps above are what
+    // `giStatus().gather` reports; these are what a monitor CAPTURE shows,
+    // beside `vct.cascadeN` and `ifd.build` — the same instrument the rest of
+    // the GI work reports through, so a capture of a gathering frame accounts
+    // for all of it. They cost nothing while the monitor is off (`gMonitor` null
+    // is the constructor's first line).
+    //
+    // THE REASON IS `Camera` AND NOT `None`, which the monitor reads as "no
+    // recorded input change" — its redundant-work value. A screen probe is a
+    // VIEW-DEPENDENT estimate, like the planar reflector's render beside it in
+    // the same enum: it is re-made every frame because the thing it describes is
+    // the picture, not because nothing told it to stop.
+    {
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0,
+                                         "gather.place", rs);
+        work.setUnits(v.uniformProbes);
+        if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeLayout, 0, 1,
+                                &v.placeSets[ring], 0, nullptr);
+        vkCmdDispatch(cmd, (v.gridW + 7u) / 8u, (v.gridH + 7u) / 8u, 1u);
+        if (timed)
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps,
+                                qbase + 1u);
+    }
     {
         // The records and the argument buffer the trace is about to read — and
         // the argument buffer is read by the INDIRECT stage, which is not the
@@ -910,6 +929,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                              &b, 0, nullptr, 0, nullptr);
     }
 
+    detail::monitor::CacheScope traceWork(CacheKind::Gi, WorkReason::Camera, 0,
+                                          "gather.trace", rs);
+    traceWork.setUnits(v.uniformProbes + v.adaptiveLast);
     if (timed)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 2u);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTracePipeline);
@@ -921,6 +943,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     vkCmdDispatchIndirect(cmd, v.args, 0);
     if (timed)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 3u);
+    traceWork.close();
     {
         VkMemoryBarrier b{};
         b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -931,6 +954,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                              nullptr);
     }
 
+    detail::monitor::CacheScope integrateWork(CacheKind::Gi, WorkReason::Camera, 0,
+                                              "gather.integrate", rs);
+    integrateWork.setUnits(in.width * in.height / 1000u);
     if (timed)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 4u);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeline);
@@ -946,6 +972,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         pd.frame = mHost.gatherFrameNow();
         pd.live = true;
     }
+    integrateWork.close();
 
     // ...AND NOW THE PIXEL SHADER READS IT. The transition to a sampled layout
     // is ours to ask for: the scene pass that follows does not know this texture
