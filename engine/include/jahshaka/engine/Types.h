@@ -2184,7 +2184,14 @@ struct GiParams {
     /// It is GRAPH SHAPE as well as a switch: the probes read their surface
     /// from the SSR prepass' depth and normals, so a view whose row is on
     /// carries that prepass whether or not the SSR row asked for one
-    /// (`ChainDesc::probeGather`).
+    /// (`ChainDesc::probeGather`) -- and the VIEW re-checks that shape once a
+    /// frame, which is why this row is in `giTuningEqual` and NOT in
+    /// `operator==`, exactly like the card cache's row beside it. Nothing about
+    /// the GI CONFIGURATION changes when it moves: no volume is re-voxelised,
+    /// no probe is re-integrated, no atlas is rebuilt. Putting it in the
+    /// configuration comparison tore the whole cascade chain down and built it
+    /// again to turn a compute dispatch on -- which also made every A/B arm of
+    /// every suite compare ACROSS a GI rebuild (the lead's read).
     GiToggle  gather = GiToggle::Auto;
     // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------
     //
@@ -2252,7 +2259,6 @@ struct GiParams {
                updateBudget == o.updateBudget &&
                cascadeVoxelLod == o.cascadeVoxelLod &&
                dragMoverChannel == o.dragMoverChannel &&
-               gather == o.gather &&
                ddgi == o.ddgi &&
                testBoundsMin == o.testBoundsMin && testBoundsMax == o.testBoundsMax &&
                cascades == o.cascades && cascadeCount == o.cascadeCount &&
@@ -2270,6 +2276,7 @@ struct GiParams {
                // with nothing torn down — and a host that only pushed on
                // `operator==` would swallow a radius change entirely, which is
                // the defect this line exists to prevent.
+               gather == o.gather &&
                cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
                cardResidencyRadius == o.cardResidencyRadius;
     }
@@ -2722,6 +2729,13 @@ struct GatherStatus {
     unsigned probesX = 0u, probesY = 0u, probes = 0u;
     /// ...and the adaptive probes the last frame appended, against its cap.
     unsigned adaptive = 0u, adaptiveCap = 0u;
+    /// WHAT THE PLACEMENT JOB ASKED FOR, before the cap. `adaptive` is
+    /// `min(requested, cap)`, so a test that asserts `adaptive <= cap` asserts
+    /// an arithmetic identity and a test that asserts `adaptive == 0` under a
+    /// cap of 0 asserts another (the lead's read). This is the number the cap
+    /// is doing something TO: requested above cap is a frame that wanted more
+    /// probes than it was allowed.
+    unsigned adaptiveRequested = 0u;
     unsigned long long raysPerFrame = 0ull;
     /// The view the numbers below were measured on.
     unsigned targetW = 0u, targetH = 0u;
@@ -2736,6 +2750,12 @@ struct GatherStatus {
     float traceMs = -1.0f;
     float integrateMs = -1.0f;
     float cpuMs = -1.0f;
+    /// WHY IT IS NOT RUNNING, when `on` is true and `running` is false and the
+    /// reason is the engine's rather than the view's (no ray device, no
+    /// pipelines on this driver, no room for the atlas). Empty is "nothing went
+    /// wrong" — a row that silently does nothing is the worst of the three
+    /// outcomes.
+    std::string error;
 };
 
 // ---- SURFACE-CACHE phase 2: the capture cache's status and its knobs -------

@@ -107,6 +107,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
@@ -126,6 +127,7 @@ if(JAH_RAY_QUERY_OK)
     # named in DEPENDS or a change to one would not rebuild the SPIR-V.
     set(JAH_RQ_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
     set(JAH_RQ_HEADERS "${JAH_RQ_INCLUDE}/jah_rq_hit.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
                        "${JAH_RQ_INCLUDE}/jah_probe_params.glsl")
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"

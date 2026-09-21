@@ -207,7 +207,11 @@ ChainDesc OgreView::chainDesc() const {
     // in (`PostFxDesc::allowOffscreen`) has no prepass and therefore no gather,
     // so every thumbnail, preview and pixel suite keeps the colours that make
     // it assertable.
-    d.probeGather    = mScene && mScene->probeGatherWanted();
+    // ...AND NOT IN A STEREO VIEW (the lead's read): the Component declines a
+    // stereo target at this phase (the probe grid would have to be split at the
+    // eye seam — the spec's phase 7), so without this term a VR eye would pay a
+    // second geometry traversal every frame for a prepass nothing then reads.
+    d.probeGather    = mScene && mScene->probeGatherWanted() && !mStereo;
     d.refractions    = mPostFx.refractions;
     // DISTORTION (POST_LOOKS_SPEC §5.3), below the offscreen early-out with the
     // rest: a distortion object is invisible in the passthrough shape anyway (it

@@ -245,9 +245,12 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     }
 
     auto *rs = static_cast<Ogre::VulkanRenderSystem *>(mHost.gatherRenderSystem());
-    if (rs && rs->getVulkanDevice())
+    if (rs && rs->getVulkanDevice()) {
         mTimestampPeriod =
             rs->getVulkanDevice()->mDeviceProperties.limits.timestampPeriod * 1.0f;
+        mMaxWorkGroupX =
+            rs->getVulkanDevice()->mDeviceProperties.limits.maxComputeWorkGroupCount[0];
+    }
     if (mTimestampPeriod > 0.0f) {
         VkQueryPoolCreateInfo qci{};
         qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
@@ -363,6 +366,16 @@ void ScreenProbeGather::drop(View &v) {
     v.hasQueryBase = false;
     v.targetsReady = false;
     v.atlasNeedsClear = false;
+    // ...AND THE IN-FLIGHT RECORDS GO WITH THE BUFFERS THEY NAME. A resize frees
+    // the readback ring and the timestamp slot; leaving `pending[]` live would
+    // make the next `readPending` read a slot of a buffer that no longer exists
+    // (and a query range this view no longer owns). The frame counter goes back
+    // to zero for the same reason: it indexes both rings.
+    for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i] = View::Pending();
+    v.frame = 0u;
+    v.adaptiveLast = 0u;
+    v.adaptiveAsked = 0u;
+    v.placeMs = v.traceMs = v.integrateMs = v.cpuMs = -1.0f;
 }
 
 void ScreenProbeGather::readPending(View &v) {
@@ -379,6 +392,7 @@ void ScreenProbeGather::readPending(View &v) {
             // The shader's counter keeps counting past the cap (an atomicAdd
             // cannot un-count), so what a frame actually APPENDED is the
             // smaller of the two.
+            v.adaptiveAsked = appended;
             v.adaptiveLast = std::min(appended, v.adaptiveCap);
         }
     }
@@ -463,7 +477,20 @@ void ScreenProbeGather::close() {
     for (auto &kv : mViews) {
         if (kv.second.sceneMgr)
             detail::FogHlmsListener::setProbeGather(kv.second.sceneMgr, nullptr);
-        drop(kv.second);
+        // NOT `drop()` HERE, AND THE DIFFERENCE IS A USE-AFTER-FREE (the lead's
+        // read). `drop` RETIRES a view's descriptor sets into the host's bin,
+        // which frees them later with `vkFreeDescriptorSets(pool, …)` — and the
+        // pool is destroyed four lines below, so the flush at the end of the
+        // tier's own close() would free sets out of a pool that no longer
+        // exists. At close the device is idle and the retire window is not
+        // needed for anything: `vkDestroyDescriptorPool` frees every set it
+        // ever handed out, so the sets are simply DROPPED here and the buffers,
+        // images and textures — which the pool does not own — take the bin as
+        // usual.
+        View &v = kv.second;
+        for (unsigned i = 0; i < kRing; ++i)
+            v.placeSets[i] = v.traceSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
+        drop(v);
     }
     mViews.clear();
     // Belt and braces: a registration keyed by a manager whose view never came
@@ -494,6 +521,7 @@ void ScreenProbeGather::close() {
 }
 
 void ScreenProbeGather::statsInto(const detail::OgreScene *scene, GatherStatus &out) const {
+    out.error = mLastError;
     for (const auto &kv : mViews) {
         const View &v = kv.second;
         if (v.scene != scene || !v.targetsReady) continue;
@@ -505,6 +533,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, GatherStatus &
         out.probesY = v.gridH;
         out.probes = v.uniformProbes;
         out.adaptive = v.adaptiveLast;
+        out.adaptiveRequested = v.adaptiveAsked;
         out.adaptiveCap = v.adaptiveCap;
         out.raysPerFrame =
             (unsigned long long)(v.uniformProbes + v.adaptiveLast) * out.raysPerProbe;
@@ -529,6 +558,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         std::string err;
         if (!makePipelines(err)) {
             mFailed = true;
+            mLastError = err;
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka: the screen-probe gather is off on this device — " + err);
             return;
@@ -577,11 +607,21 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
 
     std::string err;
     if (!ensureTargets(v, in, stride, octRes, adaptiveCap, err)) {
-        mFailed = true;
+        // NOT A PROCESS-WIDE LATCH (the lead's read). A failure to allocate this
+        // view's targets is about THIS view at THIS size — a resize, a second
+        // view, a moment of VRAM pressure — and latching `mFailed` turned it
+        // into "no scene gathers again until the app restarts", with no reason
+        // anywhere a caller could read. The reason is published, the view is
+        // dropped, and the next frame that asks for a different size may try
+        // again. Only the PIPELINES (below) latch, because a device that cannot
+        // compile them this minute cannot compile them next minute either.
+        mLastError = err;
         Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: the screen-probe gather is off — " + err);
+            "Jahshaka: the screen-probe gather could not allocate its targets — " + err);
+        drop(v);
         return;
     }
+    mLastError.clear();
 
     const unsigned ring = v.frame % kRing;
     if (!v.params[ring] &&
@@ -851,6 +891,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // ---- THE THREE DISPATCHES ----------------------------------------------
     VkCommandBuffer cmd = mHost.gatherFrameCmd();
     if (!cmd) return;
+    // THE BLACK STAND-INS THIS FRAME BOUND, out of UNDEFINED. With the SSR row
+    // off the reflection trace never runs and never clears them, and every
+    // descriptor slot a scene cannot fill (no sky cube, no voxel arm) points at
+    // one — `gi.gather_reference` is exactly that chain.
+    mHost.gatherClearDummies(cmd);
     clearAtlas(v, cmd);
     const bool timed = mTimestamps && v.hasQueryBase;
     const uint32_t qbase = v.queryBase + (v.frame % kFramesInFlight) * kQueriesPerFrame;
@@ -859,7 +904,24 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // The frame's counters: the adaptive count to zero, and the trace's
     // indirect arguments to the uniform grid (the placement job raises x by an
     // atomic max for every adaptive probe it appends).
-    const uint32_t argsInit[4] = { v.uniformProbes, 1u, 1u, 0u };
+    // ONE WORKGROUP PER PROBE ON X, AND X HAS A CEILING. Vulkan guarantees only
+    // 65,535 work groups on a dimension (`maxComputeWorkGroupCount[0]`; this
+    // device allows 2^31, but the number a shipped tier may rely on is the
+    // guarantee) and Epic at 4K would ask for 162,000. The probe count is
+    // CLAMPED here rather than folded to two dimensions, which would change the
+    // shader's index arithmetic for a case no tier reaches today: 1080p Epic is
+    // 32,400 probes and the clamp is 65,535, so nothing this lane ships comes
+    // near it. A frame that hits it traces the probes it can and says so once.
+    const uint32_t maxGroups = mMaxWorkGroupX ? mMaxWorkGroupX : 65535u;
+    if (v.uniformProbes > maxGroups && !mSaidWorkGroupClamp) {
+        mSaidWorkGroupClamp = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: the screen-probe grid asks for " + std::to_string(v.uniformProbes) +
+            " work groups and this device allows " + std::to_string(maxGroups) +
+            " — the gather traces the first " + std::to_string(maxGroups) +
+            " probes of each frame (a coarser stride is the cure)");
+    }
+    const uint32_t argsInit[4] = { std::min(v.uniformProbes, maxGroups), 1u, 1u, 0u };
     vkCmdFillBuffer(cmd, v.counter, 0, 16, 0u);
     vkCmdUpdateBuffer(cmd, v.args, 0, sizeof(argsInit), argsInit);
     {

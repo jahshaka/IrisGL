@@ -164,7 +164,12 @@ void main()
 
 	float adaptiveLink = 0.0;
 	const uint cap = uint( max( p.knobs3.y, 0.0 ) );
-	if( worstError > 1.0 && cap > 0u )
+	// THE DEMAND IS COUNTED WHATEVER THE BUDGET IS, and the budget decides only
+	// what is APPENDED. Counting inside `cap > 0` made the raw counter agree
+	// with the clamped one by construction -- a reading that cannot say whether
+	// a cap is costing anything, which is the one question a budget's reading
+	// exists to answer. One atomic per failing cell, on the cells that fail.
+	if( worstError > 1.0 )
 	{
 		const uint slot = atomicAdd( counter.appended, 1u );
 		if( slot < cap )

@@ -637,6 +637,14 @@ public:
         volume = mDummyVolume.view;
         return cube && volume;
     }
+    /// ...AND THE STAND-INS MUST BE CLEARED BY WHOEVER BINDS THEM FIRST (the
+    /// lead's read). `clearDummyImages` used to have ONE caller — the reflection
+    /// trace — which returns early when the SSR row is off, so a GATHER-ONLY
+    /// chain bound a 1x1 cube and volume that had never left UNDEFINED as
+    /// SHADER_READ_ONLY. `gi.gather_reference` runs exactly that configuration
+    /// (`ssr = 0`). It is a no-op after the first frame that calls it, and it is
+    /// safe to call twice in one frame — the flag is cleared by the first.
+    void gatherClearDummies(VkCommandBuffer cmd) override { clearDummyImages(cmd); }
     VkSampler gatherPointSampler() const override { return mPointSampler; }
     VkSampler gatherLinearSampler() const override { return mLinearSampler; }
 

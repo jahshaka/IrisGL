@@ -96,6 +96,9 @@ public:
     /// The black stand-ins for the voxel volumes and the sky cube a scene may
     /// legitimately not have. Recorded (cleared once) by the tier.
     virtual bool gatherDummies(VkImageView &cube, VkImageView &volume, std::string &err) = 0;
+    /// ...and the transition that takes them out of UNDEFINED, which only the
+    /// FIRST pass to bind them can order (see the tier's note).
+    virtual void gatherClearDummies(VkCommandBuffer cmd) = 0;
     virtual VkSampler gatherPointSampler() const = 0;
     virtual VkSampler gatherLinearSampler() const = 0;
 };
@@ -212,6 +215,7 @@ private:
         bool atlasNeedsClear = false;
         unsigned frame = 0u;             ///< the sample sequence's input
         unsigned adaptiveLast = 0u;      ///< read back from the counter, a frame late
+        unsigned adaptiveAsked = 0u;     ///< ...before the cap clamped it
         unsigned long long vramBytes = 0ull;
 
         unsigned querySlot = 0u, queryBase = 0u;
@@ -250,7 +254,15 @@ private:
     float mTimestampPeriod = 0.0f;
     /// The pipelines could not be made on this device: say so ONCE and take the
     /// fallback picture (the cones and the field) for the rest of the process.
+    /// A failed ALLOCATION does not latch — see `record`.
     bool mFailed = false;
+    /// ...and why, for `GiStatus::gather.error`: a row that silently does
+    /// nothing is the worst of the three outcomes.
+    std::string mLastError;
+    /// This device's guaranteed work-group ceiling on X (0 until the pipelines
+    /// are made), and whether the clamp has been said once.
+    uint32_t mMaxWorkGroupX = 0u;
+    bool mSaidWorkGroupClamp = false;
 };
 
 #endif   // JAH_RAY_QUERY

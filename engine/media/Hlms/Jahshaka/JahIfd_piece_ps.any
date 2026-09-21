@@ -519,10 +519,22 @@
 	// geometry, it detects a SURFACE with no probe in front of it.
 	const float ifdFrontLo = 0.005;
 	const float ifdFrontHi = 0.05;
-	// The divisor is guarded because it CAN be zero: every trilinear weight of the
-	// cage tiny, and -- since ogre-patch 0086 -- a cage that never ran at all.
+	// THE DIVISOR CAN BE ZERO, and the guard has to be SCALE-FREE or it changes a
+	// shipped picture (the lead's read of GATHER-1a). This ratio is a SHARE --
+	// how much of the cage's weight comes from probes in front of the surface --
+	// and both terms carry the same crushed scale: a fully crushed cage sums to
+	// about 1e-17 (upstream's own 1e-6 weight floor, cubed by the trilinear
+	// product and divided by the 0.04 crush threshold), and its front share is
+	// crushed by exactly as much, so the RATIO is still 1 and the field fades to
+	// nothing deliberately. Flooring the DENOMINATOR at 1e-6 instead makes that
+	// ratio 1e-11, the confidence 0 and the fallback 1 -- the full cone diffuse
+	// or a flat ambient, leaking in exactly where this term exists to stop it,
+	// at every tier, with the gather nowhere in the frame. So: a zero divisor is
+	// "no front share to compute", which is a share of ONE (the cage said
+	// nothing; the clamp above it is what decides), and any non-zero divisor is
+	// used as it stands however small it is.
 	float ifdFrontFade = smoothstep( ifdFrontLo, ifdFrontHi,
-									 ifdFrontWeight / max( sumIfdWeight, 0.000001 ) );
+									 sumIfdWeight > 0.0 ? ifdFrontWeight / sumIfdWeight : 1.0 );
 	// The counts are absent only in a state the host cannot produce (the GI arm
 	// writes them before it binds the field); there, the box fade is skipped.
 	float ifdConfidence = min( ifdHaveCounts ? ifdEdgeFade : 1.0, ifdFrontFade );

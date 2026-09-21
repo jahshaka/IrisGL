@@ -112,7 +112,14 @@ void main()
 	// as this frame's.
 	const int atlasCols = max( int( p.knobs3.z ), 1 );
 	const ivec2 block = ivec2( int( probe ) % atlasCols, int( probe ) / atlasCols ) * kOctResMax;
-	const ivec2 texel = ivec2( int( lane ) % kOctResMax, int( lane ) / kOctResMax );
+	// THE TEXEL IS THE OCTAHEDRAL COORDINATE, not the lane's position in an 8x8
+	// block, and the two are the same thing only at octRes 8. At Medium
+	// (octRes 6) a lane's direction is (lane % 6, lane / 6) while its store was
+	// (lane % 8, lane / 8), so the map was written scrambled -- invisible at
+	// phase 1, where nothing reads the atlas, and wrong the moment phase 2's
+	// filter does (the lead's read). The block is 8x8 whatever the resolution;
+	// the unused texels are cleared below by the same store.
+	const ivec2 texel = ivec2( int( lane ) % octRes, int( lane ) / octRes );
 
 	vec4 contribution = vec4( 0.0 );
 	vec4 atlasTexel = vec4( 0.0, 0.0, 0.0, -1.0 );
@@ -188,7 +195,14 @@ void main()
 		atlasTexel = vec4( radiance, distance );
 	}
 
-	imageStore( probeAtlas, block + texel, atlasTexel );
+	// The lanes past octRes*octRes have no direction of their own; they clear the
+	// 8x8 block's padding so a reader never finds an older frame's radiance in
+	// it. (At octRes 8 there are none.)
+	imageStore( probeAtlas,
+				block + ( lane < rays ? texel
+									  : ivec2( int( lane ) % kOctResMax,
+											   int( lane ) / kOctResMax ) ),
+				atlasTexel );
 
 	gSum[lane] = contribution;
 	// The fixed-order tree: lane k adds lane k+s for s = 32, 16, 8, 4, 2, 1.

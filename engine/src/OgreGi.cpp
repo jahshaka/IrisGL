@@ -215,6 +215,12 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         mGi.cards                = p.cards;
         mGi.cardBudgetTexels     = p.cardBudgetTexels;
         mGi.cardResidencyRadius  = p.cardResidencyRadius;
+        // THE SCREEN-PROBE GATHER'S ROW, for the same reason and with the same
+        // nothing-happens-here: `probeGatherWanted()` reads it, the VIEW
+        // re-checks its chain shape once a frame (syncReflectListener) and the
+        // Component allocates on the first frame it is on and gives everything
+        // back on the first frame it is off. Not one voxel is re-injected.
+        mGi.gather               = p.gather;
         if (mIfd) pushIfdState(mIfdProbeCounts);
         // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
         // moving it changes nothing at all until something else happens to
