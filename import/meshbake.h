@@ -210,6 +210,32 @@ public:
     /// Pure CPU, no assimp, no engine; safe from any thread.
     static void buildLodChain(const MeshPtr &mesh);
 
+    /// SURFACE-CACHE phase 1 (SPECS/SURFACE_CACHE_ASSESSMENT.md §7): build
+    /// `mesh`'s SURFACE CARD LIST, in place — `cards` + `cardCoverage`, or both
+    /// cleared when the mesh gets none (it is skinned, it is not triangles, it
+    /// has no area, or `maxCards` is zero).
+    ///
+    /// MUST RUN AFTER buildLodChain on the same mesh: a card records the LOD
+    /// level its own texel picks, and a mesh with no chain yet would have every
+    /// card name level 0.
+    ///
+    /// `maxCards` is the budget (ImportTransform::maxCards, default 12 — Epic's
+    /// "Max Lumen Mesh Cards"); it is clamped to the format's ceiling of 64.
+    /// Public for the same reason buildLodChain is: the card list is a PRODUCT
+    /// of the bake with its own policy, and a caller that builds an iris::Mesh
+    /// by other means — a document PRIMITIVE, which never goes through an
+    /// import (Mesh::loadMesh), a procedural mesh, a re-bake path — must be
+    /// able to ask for the cards the importer would have produced rather than
+    /// grow a second implementation of them.
+    /// Pure CPU, no assimp, no engine; safe from any thread.
+    static void buildCards(const MeshPtr &mesh, int maxCards);
+
+    /// The capture resolution a baked card's LOD level was chosen for (Lumen's
+    /// 128-texel page). Phase 2's atlas owns the page size it actually
+    /// allocates; this is the number the BAKE assumed, so the two can be
+    /// compared instead of silently disagreeing.
+    static int cardCaptureResolution();
+
     /// Build the bake from an ALREADY PARSED scene (the import side pays no
     /// second parse). `extractDir` is handed to MaterialHelper exactly as
     /// loadAsSceneFragment would.

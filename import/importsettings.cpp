@@ -147,7 +147,8 @@ ImportSettings ImportSettings::fromJson(const QJsonObject &record, QString *erro
                                        QStringLiteral("scale"),   QStringLiteral("axes"),
                                        QStringLiteral("rotate"),  QStringLiteral("translate"),
                                        QStringLiteral("skeleton"),QStringLiteral("clips"),
-                                       QStringLiteral("materials") };
+                                       QStringLiteral("materials"),
+                                       QStringLiteral("maxCards") };
     const auto refuse = [&](const QString &why) {
         if (errorOut && errorOut->isEmpty()) *errorOut = why;
         return ImportSettings();
@@ -244,6 +245,16 @@ ImportSettings ImportSettings::fromJson(const QJsonObject &record, QString *erro
         else return refuse(QStringLiteral("unknown materials mode '%1' (import, none)").arg(mode));
     }
 
+    if (record.contains(QStringLiteral("maxCards"))) {
+        const QJsonValue v = record.value(QStringLiteral("maxCards"));
+        const double asked = v.toDouble(-1.0);
+        if (!v.isDouble() || asked != std::floor(asked) || asked < 0.0
+            || asked > double(kMaxCardsCeiling))
+            return refuse(QStringLiteral("'maxCards' must be a whole number from 0 to %1")
+                              .arg(kMaxCardsCeiling));
+        out.maxCards = int(asked);
+    }
+
     if (record.contains(QStringLiteral("version"))) {
         const int version = record.value(QStringLiteral("version")).toInt(kVersion);
         if (version != kVersion)
@@ -279,6 +290,7 @@ QJsonObject ImportSettings::toJson() const
     }
     out[QStringLiteral("materials")] = materials == MaterialMode::None
                                            ? QStringLiteral("none") : QStringLiteral("import");
+    out[QStringLiteral("maxCards")] = maxCards;
     return out;
 }
 
@@ -302,6 +314,7 @@ QByteArray ImportSettings::canonicalJson() const
     }
     out += ",\"materials\":";
     out += materials == MaterialMode::None ? "\"none\"" : "\"import\"";
+    out += ",\"maxCards\":" + QByteArray::number(maxCards);
     out += ",\"rotate\":[" + num(rotate[0]) + ',' + num(rotate[1]) + ',' + num(rotate[2]) + "],";
     out += "\"scale\":" + num(scale) + ',';
     out += QByteArray("\"skeleton\":") + (skeleton ? "true" : "false") + ',';
@@ -382,6 +395,7 @@ ImportTransform ImportSettings::transform(double declaredUnitScale) const
     out.clips = clips;
     out.clipNames = clipNames;
     out.materials = materials == MaterialMode::Import;
+    out.maxCards = maxCards;
     return out;
 }
 

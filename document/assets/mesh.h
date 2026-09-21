@@ -123,6 +123,88 @@ enum class PrimitiveMode
 	LineStrip
 };
 
+/// ONE SURFACE CARD — an axis-aligned orthographic capture rectangle over a
+/// patch of the mesh's surface, in the MESH'S OWN SPACE (SURFACE-CACHE phase 1,
+/// SPECS/SURFACE_CACHE_ASSESSMENT.md §2/§7).
+///
+/// A card is not geometry and not a texture: it is the DESCRIPTION of a capture
+/// that phase 2 will run — where to put an orthographic camera, how wide to
+/// make it, how deep to let it see, and which LOD level of the mesh to raster
+/// for it. Lumen's shape exactly (surfels clustered, each cluster one
+/// axis-aligned direction, a 6-face box when clustering has nothing to say);
+/// the list is built ONCE at import, in the bake, beside the LOD chain.
+///
+/// EVERYTHING IS IN MESH SPACE and stays there: an instance's world transform
+/// is applied by whoever captures, so one mesh's card list serves every
+/// instance of it, at any scale, exactly as the LOD chain does.
+struct MeshCard
+{
+    /// The six axis directions a card can look FROM, in this order:
+    /// 0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z. The capture camera sits
+    /// on the `+axisDirection()` side of `origin` and looks back along it, so a
+    /// surface whose normal has a POSITIVE dot with `axisDirection()` faces the
+    /// card.
+    static constexpr int kAxisCount = 6;
+
+    static Vec3 axisDirection(int axis)
+    {
+        switch (axis) {
+        case 0: return Vec3(1, 0, 0);
+        case 1: return Vec3(-1, 0, 0);
+        case 2: return Vec3(0, 1, 0);
+        case 3: return Vec3(0, -1, 0);
+        case 4: return Vec3(0, 0, 1);
+        default: return Vec3(0, 0, -1);
+        }
+    }
+    /// The card plane's basis. Fixed per axis and right-handed with the axis
+    /// direction (u x v = the axis direction), so a card's (u, v) parameters
+    /// mean the same thing in the bake, in the capture and at the read — there
+    /// is no per-card rotation to store or to get wrong.
+    static Vec3 axisU(int axis)
+    {
+        switch (axis) {
+        case 0: return Vec3(0, 0, -1);
+        case 1: return Vec3(0, 0, 1);
+        case 2: return Vec3(1, 0, 0);
+        case 3: return Vec3(-1, 0, 0);
+        case 4: return Vec3(1, 0, 0);
+        default: return Vec3(-1, 0, 0);
+        }
+    }
+    static Vec3 axisV(int axis)
+    {
+        switch (axis) {
+        case 0:
+        case 1: return Vec3(0, 1, 0);
+        case 2: return Vec3(0, 0, 1);
+        case 3: return Vec3(0, 0, -1);
+        default: return Vec3(0, 1, 0);
+        }
+    }
+
+    /// 0..5 — one of the six directions above.
+    quint8 axis = 0;
+    /// The LOD level (0 = the authored geometry, i = `lodIndices[i - 1]`) whose
+    /// simplifier error is below this card's TEXEL — the same rule ATOM-2's
+    /// voxeliser picks a level by, with the card texel in the cell's place.
+    quint8 lodLevel = 0;
+    /// The CENTRE of the card's box, mesh space. The capture's near plane is
+    /// `origin + axisDirection(axis) * halfDepth`, its far plane
+    /// `origin - axisDirection(axis) * halfDepth`.
+    Vec3 origin;
+    /// Half-sizes of the capture rectangle along `axisU` and `axisV`, metres.
+    float halfU = 0.0f;
+    float halfV = 0.0f;
+    /// Half the depth range the capture must cover, metres.
+    float halfDepth = 0.0f;
+    /// The fraction of the mesh's sampled surfels THIS card sees — facing it,
+    /// inside its rectangle and its depth range, and not hidden behind nearer
+    /// surface of the same mesh. Cards overlap, so these do not sum to the
+    /// mesh's own `cardCoverage`.
+    float coverage = 0.0f;
+};
+
 // CPU-side mesh: geometry buffers, skeleton, animations, bounds and the picking
 // TriMesh. The GL half (VAO/draw) died with the legacy renderer at step 14; the
 // engine mirror converts these buffers into engine meshes each time one changes.
@@ -171,6 +253,26 @@ public:
     /// level fine enough for a voxel of that size".
     QVector<QVector<quint32>> lodIndices;
     QVector<float>            lodErrors;
+
+    /// SURFACE-CACHE phase 1 — the mesh's card list, built at IMPORT by
+    /// MeshBake (beside the chain above) and carried in the .jmb bake, and
+    /// built at CREATION for a primitive (Mesh::loadMesh). Empty for every mesh
+    /// that gets none: a skinned mesh (its surface moves, so a card baked
+    /// against the bind pose is a lie — Epic's own limit), a line mesh, a mesh
+    /// with no usable area, or a bake produced before cards existed.
+    ///
+    /// Nothing reads a card yet: the capture is phase 2 and the read is
+    /// phase 4. What this list is, is the BUDGET those phases spend — the cost
+    /// of a capture is fixed per card (SURFACE-CACHE-0's measurement), so the
+    /// number and the shape of the cards authored here is the number and the
+    /// shape of the work they will do.
+    QVector<MeshCard> cards;
+
+    /// The fraction of the mesh's sampled surfels covered by AT LEAST ONE card
+    /// — the quality of the list above, measured by the generator against the
+    /// real surface (occlusion included) and carried so a consumer never has to
+    /// re-derive it. 0 when there are no cards.
+    float cardCoverage = 0.0f;
 
     /// CPU-side geometry, read-only. The engine mirror and importers convert from
     /// these.

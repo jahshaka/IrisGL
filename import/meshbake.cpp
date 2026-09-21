@@ -133,7 +133,18 @@ namespace
 // the trailing LOD block change for most library assets. (`meshbake.cpp` is in
 // the producer hash and would re-bake every library on its own; the bump is what
 // makes the reason readable, and it is the version an old .jmb is rejected by.)
-constexpr int kFormatVersion = 9;
+// v10 (2026-09-21, SURFACE-CACHE-1a, the surface cache's phase 1): every mesh
+// now carries a CARD LIST — the axis-aligned orthographic captures phase 2 will
+// run and phase 4 will read (document/assets/mesh.h MeshCard, the generator
+// beside the LOD chain below). It is a new trailing block on every mesh, so
+// every .jmb written before today is a shorter blob than this build reads and
+// is rejected by this line; and the import record gained `maxCards`, which is
+// part of the bake key through ImportSettings (an import at a different card
+// budget is a different bake, exactly as a different scale is). Every library
+// re-bakes once, on purpose, by the BAKEKEY-1 rule — the bake's OUTPUT changed,
+// so the version is bumped rather than the commit carrying `bake-output:
+// unchanged`.
+constexpr int kFormatVersion = 10;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -332,6 +343,18 @@ void writeMesh(QDataStream &s, const MeshPtr &mesh)
         s << QByteArray(reinterpret_cast<const char *>(idx.constData()),
                         idx.size() * int(sizeof(quint32)));
     }
+
+    // SURFACE-CACHE phase 1's trailing block (format v10). `cardCount` is zero
+    // for every mesh that gets no cards — a skinned one, a line mesh, a mesh
+    // with no area — which costs four bytes and one float, and is the honest
+    // answer rather than a fabricated box.
+    s << qint32(mesh->cards.size()) << float(mesh->cardCoverage);
+    for (const MeshCard &card : mesh->cards) {
+        s << quint8(card.axis) << quint8(card.lodLevel);
+        writeVec3(s, card.origin);
+        s << float(card.halfU) << float(card.halfV) << float(card.halfDepth)
+          << float(card.coverage);
+    }
 }
 
 MeshPtr readMesh(QDataStream &s, bool *okOut)
@@ -416,6 +439,40 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
         mesh->lodIndices.append(idx);
         mesh->lodErrors.append(error);
     }
+
+    // SURFACE-CACHE phase 1's trailing block (format v10). Every field is
+    // checked: a card whose axis is not one of the six, whose rectangle is not
+    // a positive finite size, whose LOD level names a level the mesh does not
+    // carry, or whose coverage is not a fraction, would be captured into an
+    // atlas by phase 2 and read at a ray hit by phase 4 — refuse the blob and
+    // parse instead, which is what every other malformed field here does.
+    qint32 cardCount = 0; float cardCoverage = 0.0f;
+    s >> cardCount >> cardCoverage;
+    if (s.status() != QDataStream::Ok || cardCount < 0 || cardCount > kMaxCardsCeiling
+        || !std::isfinite(cardCoverage) || cardCoverage < 0.0f || cardCoverage > 1.0f) {
+        *okOut = false; return MeshPtr();
+    }
+    for (qint32 i = 0; i < cardCount; ++i) {
+        quint8 axis = 0, lodLevel = 0;
+        s >> axis >> lodLevel;
+        MeshCard card;
+        card.axis = axis;
+        card.lodLevel = lodLevel;
+        card.origin = readVec3(s);
+        s >> card.halfU >> card.halfV >> card.halfDepth >> card.coverage;
+        if (s.status() != QDataStream::Ok || axis >= MeshCard::kAxisCount
+            || int(lodLevel) > mesh->lodIndices.size()
+            || !std::isfinite(card.origin.x()) || !std::isfinite(card.origin.y())
+            || !std::isfinite(card.origin.z())
+            || !(card.halfU > 0.0f) || !(card.halfV > 0.0f) || !(card.halfDepth > 0.0f)
+            || !std::isfinite(card.halfU) || !std::isfinite(card.halfV)
+            || !std::isfinite(card.halfDepth)
+            || !std::isfinite(card.coverage) || card.coverage < 0.0f || card.coverage > 1.0f) {
+            *okOut = false; return MeshPtr();
+        }
+        mesh->cards.append(card);
+    }
+    mesh->cardCoverage = cardCount > 0 ? cardCoverage : 0.0f;
 
     // THE PICKING MESH IS REBUILT, NOT STORED. It is positions + indices with
     // one cross product per triangle — cheaper to recompute than to read, and
@@ -909,9 +966,719 @@ void build(const MeshPtr &mesh)
 
 }   // namespace lodchain
 
+// ---------------------------------------------------------------------------
+// SURFACE-CACHE phase 1 — THE CARD GENERATOR (SPECS/SURFACE_CACHE_ASSESSMENT.md
+// §2, §4, §7 phase 1; the phase-0 measurement in
+// ~/Developer/spikes/surface-cache-0/FINDINGS.md).
+//
+// A CARD is an axis-aligned orthographic capture of a patch of this mesh's
+// surface (document/assets/mesh.h MeshCard). Phase 2 captures each card into an
+// atlas; phase 4 lights a ray hit from the card under it instead of from the
+// cascade's voxel. Neither exists yet — what this builds is the LIST, and the
+// list is the BUDGET those phases spend: SURFACE-CACHE-0 measured the capture's
+// cost as FIXED PER CARD (0.042-0.057 ms of CPU, 9-11 us of GPU, 352 KB at
+// 128^2), so the number and the shape of the cards decided here IS the cost of
+// the cache.
+//
+// THE SHAPE IS LUMEN'S, and every step of it is here for a reason that can be
+// stated:
+//
+//   1. SURFELS, area-weighted. The thing a card must cover is SURFACE, not
+//      vertices and not triangles: a mesh with one enormous floor triangle and
+//      ten thousand tiny ones in a corner would be clustered entirely in the
+//      corner by any per-triangle scheme. The sampling is STRATIFIED over the
+//      cumulative-area array and the barycentric coordinates come from a van
+//      der Corput pair, so there is no random number anywhere in this file and
+//      "deterministic with a fixed seed" is stronger than asked: there is no
+//      seed. A surfel carries the GEOMETRIC normal of its triangle, because the
+//      capture rasters geometry and a shading normal can point somewhere the
+//      surface does not face.
+//
+//   2. CLUSTERING — K-means on position + normal, with the normal term taken to
+//      the only value a CARD can honour. Lumen clusters surfels on position and
+//      normal and turns each cluster into ONE axis-aligned direction. A card
+//      HAS one axis, so two surfels whose dominant axes differ can never share
+//      a card usefully however close they are: the normal term's weight, for
+//      axis-aligned cards, is effectively infinite. So the surfels are first
+//      partitioned by their dominant axis (the six-way assignment IS the normal
+//      term) and K-means then runs on POSITION inside each bucket. That is the
+//      same algorithm with the weight that the card's own geometry forces, and
+//      it cannot produce the failure a finite weight can — a cluster whose mean
+//      normal points between two axes, whose card then faces neither half of it.
+//
+//   3. ONE CARD PER CLUSTER: the cluster's bounding rectangle in the card
+//      plane, its depth range along the axis, both grown by a margin (the
+//      surfels are samples of a surface, not its corners), and the LOD LEVEL
+//      whose error is below the card's own texel — ATOM-2's rule
+//      (`lodLevelForWorldError`, jahshaka/engine/Types.h) with the card texel
+//      in the cell's place.
+//
+//   4. THE 6-FACE BOX FALLBACK, and it is a MEASUREMENT, not a guess. Lumen
+//      falls back to the box for "meshes that yield few clusters". Rather than
+//      guess what "few" is, the generator measures the clustered list's
+//      coverage against the real surface; if it is below `kGoodCoverage` the
+//      box is built too, measured the same way, and the better list wins. On a
+//      cube the two lists ARE the same six cards, which is why the suite can
+//      assert the box exactly there.
+//
+//   5. COVERAGE IS MEASURED WITH OCCLUSION. A surfel is covered by a card when
+//      it FACES the card, lies inside its rectangle and depth range, AND is the
+//      nearest surface of the mesh along the card's ray — which is what the
+//      capture will actually record. Without the last term coverage is 1.0 by
+//      construction (every surfel is inside the card built around it) and the
+//      >= 0.9 gate measures nothing. The occlusion term is a small CPU depth
+//      raster of the mesh into the card's frame at `kCoverageResolution`.
+//
+// WHAT GETS NO CARDS: a skinned mesh (its surface moves, so a card baked
+// against the bind pose is a lie — Epic's own limit, and the reason a skinned
+// hit keeps reading the voxel fallback), a mesh that is not triangles, and a
+// mesh with no usable area. Empty is an honest answer and costs four bytes.
+namespace cards {
+
+/// THE KNOBS, in one place, with the reason each exists. These are BAKE INPUTS
+/// — meshbake.cpp is hashed into the producer id, so editing any of them
+/// re-bakes every library by itself.
+constexpr int   kCaptureResolution  = 128;    ///< Lumen's page size: the texel a card's LOD level is chosen for. Phase 2 splits cards larger than this; the LEVEL is what the bake owes.
+constexpr int   kCoverageResolution = 64;     ///< the depth raster coverage is measured on. Half the capture's: coverage is a quality number, not the picture.
+constexpr int   kMinSurfels         = 256;    ///< a 12-triangle cube still needs enough samples to show six faces.
+constexpr int   kMaxSurfels         = 4096;   ///< and K-means is O(surfels x cards x iterations): this is the ceiling the bake time is bounded by.
+constexpr int   kSurfelsPerTriangle = 2;      ///< between the two, a mesh gets this many per triangle.
+constexpr int   kKMeansIterations   = 12;     ///< Lloyd converges long before this on 3-D position clusters; it is a bound, not a target.
+constexpr float kFacingMin          = 0.10f;  ///< below this a surface is too edge-on for its card to record it usefully (84 degrees).
+constexpr float kMarginFraction     = 0.02f;  ///< a card is grown by this fraction of the mesh extent: surfels are samples of a surface, not its corners.
+constexpr float kDepthTolerance     = 1.5f;   ///< coverage depth test, in card texels, divided by how squarely the surfel faces the card (a slope moves more depth per texel).
+constexpr float kMinSplitGain       = 0.001f; ///< a split must cover at least one more surfel in a thousand — it must DO something. It is deliberately tiny: the thing that stops the budget being spent is kGoodCoverage below, not this. A bigger threshold looked reasonable and was measurably wrong: on a self-occluding mesh one extra card gains a fraction of a percent and the NEXT one gains two, so a per-split toll of half a percent stopped the star at 0.797 where the budget could reach 0.85.
+constexpr float kClusterDepthWeight = 4.0f;   ///< K-means runs in the CARD'S OWN frame with DEPTH weighted this much above the two in-plane axes. Measured, not guessed: a hemisphere's +Y bucket holds the dome AND the up-facing floor cap under it, and on unweighted position the two farthest points are opposite RIM points — the split separates the cap from itself and buys nothing (coverage stuck at 0.667, 512 of 835 surfels in that one bucket unseen). Two patches at the same (u,v) and DIFFERENT depth are the ones one card cannot both capture; two at different (u,v) and the same depth are captured fine by one. Depth is what a split is FOR.
+constexpr float kGoodCoverage       = 0.90f;  ///< below this the 6-face box is built and measured too, and the better list wins.
+constexpr int   kCoverageMaxTriangles = 50000; ///< above this the coverage raster uses the COARSEST baked level instead of the authored geometry, with the level's own error added to the tolerance — the bake must not grow with the model.
+
+struct Surfel
+{
+    Vec3 pos;
+    Vec3 nrm;
+    int axis = 0;
+};
+
+/// The dominant one of the six axis directions for a normal, and its dot.
+int dominantAxis(const Vec3 &n, float *dotOut)
+{
+    const float c[3] = { n.x(), n.y(), n.z() };
+    int best = 0; float bestDot = -2.0f;
+    for (int a = 0; a < 3; ++a) {
+        if (c[a] > bestDot)  { bestDot = c[a];  best = a * 2; }
+        if (-c[a] > bestDot) { bestDot = -c[a]; best = a * 2 + 1; }
+    }
+    if (dotOut) *dotOut = bestDot;
+    return best;
+}
+
+/// The van der Corput radical inverse — the low-discrepancy sequence that
+/// replaces a random number generator here. `index` is the surfel's own index,
+/// so the k-th surfel of a mesh is the k-th surfel of that mesh forever.
+float radicalInverse(unsigned index, unsigned base)
+{
+    float result = 0.0f, f = 1.0f / float(base);
+    while (index > 0) { result += f * float(index % base); index /= base; f /= float(base); }
+    return result;
+}
+
+/// THE ONE LOD RULE (jahshaka/engine/Types.h `lodLevelForWorldError`), restated
+/// here because the bake is document-side and links no engine: the coarsest
+/// level whose error is STRICTLY below what the consumer can afford. The card's
+/// consumer affords its own texel.
+int levelForTexel(const MeshPtr &mesh, float texel)
+{
+    if (!(texel > 0.0f)) return 0;
+    int level = 0;
+    for (int i = 0; i < mesh->lodErrors.size() && i < mesh->lodIndices.size(); ++i) {
+        if (!(mesh->lodErrors.at(i) < texel)) break;   // errors are non-decreasing
+        level = i + 1;
+    }
+    return level;
+}
+
+/// The mesh's AABB projected onto a card axis's plane — the limit a card's
+/// rectangle is clamped to.
+void planeLimits(int axis, const Vec3 &lo, const Vec3 &hi,
+                 float *uMin, float *uMax, float *vMin, float *vMax,
+                 float *dMin = nullptr, float *dMax = nullptr)
+{
+    const Vec3 U = MeshCard::axisU(axis);
+    const Vec3 V = MeshCard::axisV(axis);
+    const Vec3 D = MeshCard::axisDirection(axis);
+    *uMin = FLT_MAX; *uMax = -FLT_MAX; *vMin = FLT_MAX; *vMax = -FLT_MAX;
+    float dLo = FLT_MAX, dHi = -FLT_MAX;
+    for (int corner = 0; corner < 8; ++corner) {
+        const Vec3 p((corner & 1) ? hi.x() : lo.x(),
+                     (corner & 2) ? hi.y() : lo.y(),
+                     (corner & 4) ? hi.z() : lo.z());
+        const float u = Vec3::dotProduct(p, U);
+        const float v = Vec3::dotProduct(p, V);
+        const float d = Vec3::dotProduct(p, D);
+        *uMin = std::min(*uMin, u); *uMax = std::max(*uMax, u);
+        *vMin = std::min(*vMin, v); *vMax = std::max(*vMax, v);
+        dLo = std::min(dLo, d); dHi = std::max(dHi, d);
+    }
+    if (dMin) *dMin = dLo;
+    if (dMax) *dMax = dHi;
+}
+
+/// A card built around a set of points, in the card's own frame.
+///
+/// The rectangle is grown by `margin` (surfels are SAMPLES of a surface, not
+/// its corners, so the bounding box of the samples always falls short of it)
+/// and then CLAMPED TO THE MESH'S OWN BOX in the card's plane: a card wider
+/// than the object it captures spends texels on empty space, and the clamp is
+/// what makes a convex mesh's card list the exact 6-face box rather than a box
+/// plus a margin. The DEPTH margin is deliberately NOT clamped — it is the
+/// capture's standoff, and a near plane sitting exactly on the surface is a
+/// z-fight, not a tight fit.
+MeshCard fromBounds(int axis, float uMin, float uMax, float vMin, float vMax,
+                    float dMin, float dMax, float margin,
+                    const Vec3 &lo, const Vec3 &hi)
+{
+    float uLo, uHi, vLo, vHi;
+    planeLimits(axis, lo, hi, &uLo, &uHi, &vLo, &vHi);
+    uMin = std::max(uMin - margin, uLo); uMax = std::min(uMax + margin, uHi);
+    vMin = std::max(vMin - margin, vLo); vMax = std::min(vMax + margin, vHi);
+
+    MeshCard card;
+    card.axis = quint8(axis);
+    const Vec3 U = MeshCard::axisU(axis);
+    const Vec3 V = MeshCard::axisV(axis);
+    const Vec3 D = MeshCard::axisDirection(axis);
+    card.origin = U * ((uMin + uMax) * 0.5f) + V * ((vMin + vMax) * 0.5f)
+                  + D * ((dMin + dMax) * 0.5f);
+    // A degenerate rectangle (a mesh with no extent in one axis) still has to
+    // be a positive size: the reader refuses a card that is not.
+    card.halfU = std::max((uMax - uMin) * 0.5f, margin);
+    card.halfV = std::max((vMax - vMin) * 0.5f, margin);
+    card.halfDepth = (dMax - dMin) * 0.5f + margin;
+    return card;
+}
+
+/// The depth raster + the surfel test, for ONE card: fills `seen` (one bit per
+/// surfel) and returns this card's own coverage fraction.
+float measure(const MeshCard &card, const std::vector<Surfel> &surfels,
+              const float *positions, int posComps, const std::vector<unsigned> &indices,
+              float extraTolerance, std::vector<char> *seen)
+{
+    const Vec3 U = MeshCard::axisU(card.axis);
+    const Vec3 V = MeshCard::axisV(card.axis);
+    const Vec3 D = MeshCard::axisDirection(card.axis);
+    const float width = card.halfU * 2.0f, height = card.halfV * 2.0f;
+    const float depth = card.halfDepth * 2.0f;
+    if (!(width > 0.0f) || !(height > 0.0f) || !(depth > 0.0f)) return 0.0f;
+
+    const int R = kCoverageResolution;
+    // Depth from the card's NEAR plane, growing away from the camera; FLT_MAX =
+    // nothing there.
+    std::vector<float> zbuf(size_t(R) * size_t(R), FLT_MAX);
+    const float uOrigin = Vec3::dotProduct(card.origin, U) - card.halfU;
+    const float vOrigin = Vec3::dotProduct(card.origin, V) - card.halfV;
+    const float dNear   = Vec3::dotProduct(card.origin, D) + card.halfDepth;
+
+    const auto project = [&](const Vec3 &p, float *su, float *sv, float *sd) {
+        *su = (Vec3::dotProduct(p, U) - uOrigin) / width * float(R);
+        *sv = (Vec3::dotProduct(p, V) - vOrigin) / height * float(R);
+        *sd = dNear - Vec3::dotProduct(p, D);
+    };
+
+    // A plain scanline-free bounding-box raster with barycentric depth. Nothing
+    // is culled: an orthographic capture records the nearest surface whatever
+    // its facing, so a back face that occludes must occlude here too.
+    for (size_t t = 0; t + 2 < indices.size(); t += 3) {
+        Vec3 p[3];
+        float x[3], y[3], z[3];
+        for (int k = 0; k < 3; ++k) {
+            const float *v = positions + size_t(indices[t + size_t(k)]) * size_t(posComps);
+            p[k] = Vec3(v[0], v[1], v[2]);
+            project(p[k], &x[k], &y[k], &z[k]);
+        }
+        const float area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+        if (std::fabs(area) < 1e-9f) continue;
+        int x0 = int(std::floor(std::min(std::min(x[0], x[1]), x[2])));
+        int x1 = int(std::ceil (std::max(std::max(x[0], x[1]), x[2])));
+        int y0 = int(std::floor(std::min(std::min(y[0], y[1]), y[2])));
+        int y1 = int(std::ceil (std::max(std::max(y[0], y[1]), y[2])));
+        x0 = std::max(x0, 0); y0 = std::max(y0, 0);
+        x1 = std::min(x1, R - 1); y1 = std::min(y1, R - 1);
+        bool wrote = false;
+        for (int py = y0; py <= y1; ++py) {
+            for (int px = x0; px <= x1; ++px) {
+                const float cx = float(px) + 0.5f, cy = float(py) + 0.5f;
+                float w0 = ((x[1] - cx) * (y[2] - cy) - (x[2] - cx) * (y[1] - cy)) / area;
+                float w1 = ((x[2] - cx) * (y[0] - cy) - (x[0] - cx) * (y[2] - cy)) / area;
+                float w2 = 1.0f - w0 - w1;
+                if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+                wrote = true;
+                const float zz = w0 * z[0] + w1 * z[1] + w2 * z[2];
+                // THE CARD'S OWN NEAR AND FAR PLANES CLIP, exactly as the
+                // capture's orthographic frustum will. This is not a detail: it
+                // is the whole mechanism by which a SECOND card on the same
+                // axis, at a nearer depth range, can see surface the first one
+                // cannot — which is how Lumen's clusters cover a concave mesh,
+                // and without it splitting a bucket gains nothing and the
+                // greedy loop below correctly refuses to spend on it.
+                if (zz < 0.0f || zz > depth) continue;
+                float &slot = zbuf[size_t(py) * size_t(R) + size_t(px)];
+                if (zz < slot) slot = zz;
+            }
+        }
+        // A TRIANGLE SMALLER THAN A TEXEL COVERS NO PIXEL CENTRE, AND MUST STILL
+        // OCCUPY ITS TEXEL. This is a coverage raster, not a picture: a dense
+        // mesh's triangles are routinely finer than 1/64 of the card, so a
+        // centre-sampled raster leaves most texels written by the one triangle
+        // in N that happened to contain a centre — and a texel nothing wrote is
+        // read below as "no surface here", which marks the surfels standing on
+        // it UNCOVERED. Measured on the grid fixture: that, and not the
+        // subsampler, is what made coverage fall with triangle count (1.000 at
+        // 28.8k triangles against 0.399 at 259k), because thinning a
+        // centre-sampled raster empties texels in direct proportion. Splatting
+        // the centroid of a triangle that wrote nothing makes the depth buffer
+        // dense whatever the density is, and it costs one test per triangle.
+        if (!wrote) {
+            const float cx = (x[0] + x[1] + x[2]) / 3.0f;
+            const float cy = (y[0] + y[1] + y[2]) / 3.0f;
+            if (cx >= 0.0f && cy >= 0.0f && cx < float(R) && cy < float(R)) {
+                const float zz = (z[0] + z[1] + z[2]) / 3.0f;
+                if (zz >= 0.0f && zz <= depth) {
+                    float &slot = zbuf[size_t(cy) * size_t(R) + size_t(cx)];
+                    if (zz < slot) slot = zz;
+                }
+            }
+        }
+    }
+
+    const float texel = std::max(width, height) / float(R);
+    int covered = 0;
+    for (size_t i = 0; i < surfels.size(); ++i) {
+        const Surfel &s = surfels[i];
+        const float facing = Vec3::dotProduct(s.nrm, D);
+        if (facing <= kFacingMin) continue;
+        float su, sv, sd;
+        project(s.pos, &su, &sv, &sd);
+        if (su < 0.0f || sv < 0.0f || su >= float(R) || sv >= float(R)) continue;
+        if (sd < -1e-4f || sd > depth + 1e-4f) continue;
+        const float front = zbuf[size_t(sv) * size_t(R) + size_t(su)];
+        if (front == FLT_MAX) continue;
+        // A surface leaning away from the card moves more depth across one
+        // texel, so the tolerance is the texel divided by how squarely it faces.
+        const float tol = kDepthTolerance * texel / facing + extraTolerance;
+        if (sd - front > tol) continue;          // something nearer is in the way
+        ++covered;
+        if (seen) (*seen)[i] = 1;
+    }
+    return surfels.empty() ? 0.0f : float(covered) / float(surfels.size());
+}
+
+/// The union coverage of a whole list, filling each card's own `coverage`.
+float measureList(QVector<MeshCard> *list, const std::vector<Surfel> &surfels,
+                  const float *positions, int posComps, const std::vector<unsigned> &indices,
+                  float extraTolerance, std::vector<char> *seenOut = nullptr)
+{
+    std::vector<char> seen(surfels.size(), 0);
+    for (MeshCard &card : *list)
+        card.coverage = measure(card, surfels, positions, posComps, indices, extraTolerance, &seen);
+    if (seenOut) *seenOut = seen;
+    if (surfels.empty()) return 0.0f;
+    size_t n = 0;
+    for (char c : seen) n += size_t(c != 0);
+    return float(n) / float(surfels.size());
+}
+
+void build(const MeshPtr &mesh, int maxCards)
+{
+    if (mesh.isNull()) return;
+    mesh->cards.clear();
+    mesh->cardCoverage = 0.0f;
+    if (maxCards <= 0) return;                            // "no cards" is a legal request
+    maxCards = std::min(maxCards, kMaxCardsCeiling);
+    if (!mesh->getSkeleton().isNull()) return;            // a card on a bind pose is a lie
+    if (mesh->primitiveMode != PrimitiveMode::Triangles) return;
+
+    int posComps = 3; size_t nv = 0;
+    const float *positions = lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return;
+    std::vector<unsigned> indices(reinterpret_cast<const unsigned *>(ib->data),
+                                  reinterpret_cast<const unsigned *>(ib->data) +
+                                      size_t(ib->dataSize) / sizeof(unsigned));
+    if (indices.size() < 3 || indices.size() % 3 != 0) return;
+    for (unsigned i : indices) if (size_t(i) >= nv) return;
+
+    const auto vertexAt = [&](unsigned i) {
+        const float *v = positions + size_t(i) * size_t(posComps);
+        return Vec3(v[0], v[1], v[2]);
+    };
+
+    // ---- 1. surfels ------------------------------------------------------
+    const size_t triCount = indices.size() / 3;
+    std::vector<float> cumulative(triCount + 1, 0.0f);
+    for (size_t t = 0; t < triCount; ++t) {
+        const Vec3 a = vertexAt(indices[t * 3]);
+        const Vec3 b = vertexAt(indices[t * 3 + 1]);
+        const Vec3 c = vertexAt(indices[t * 3 + 2]);
+        const float area = Vec3::crossProduct(b - a, c - a).length() * 0.5f;
+        cumulative[t + 1] = cumulative[t] + (std::isfinite(area) ? area : 0.0f);
+    }
+    const float totalArea = cumulative.back();
+    if (!(totalArea > 0.0f)) return;                      // no area: nothing to card
+
+    const size_t sampleCount = size_t(std::clamp<long long>(
+        (long long)triCount * kSurfelsPerTriangle, kMinSurfels, kMaxSurfels));
+    std::vector<Surfel> surfels;
+    surfels.reserve(sampleCount);
+    for (size_t k = 0; k < sampleCount; ++k) {
+        const float target = (float(k) + 0.5f) / float(sampleCount) * totalArea;
+        const size_t t = size_t(std::upper_bound(cumulative.begin() + 1, cumulative.end(), target)
+                                - cumulative.begin() - 1);
+        if (t >= triCount) continue;
+        const Vec3 a = vertexAt(indices[t * 3]);
+        const Vec3 b = vertexAt(indices[t * 3 + 1]);
+        const Vec3 c = vertexAt(indices[t * 3 + 2]);
+        const Vec3 n = Vec3::crossProduct(b - a, c - a).normalized();
+        if (n.lengthSquared() < 0.5f) continue;           // a degenerate triangle has no facing
+        const float r1 = radicalInverse(unsigned(k) + 1u, 2u);
+        const float r2 = radicalInverse(unsigned(k) + 1u, 3u);
+        const float su = std::sqrt(r1);
+        Surfel s;
+        s.pos = a * (1.0f - su) + b * (su * (1.0f - r2)) + c * (su * r2);
+        s.nrm = n;
+        float dot = 0.0f;
+        s.axis = dominantAxis(n, &dot);
+        surfels.push_back(s);
+    }
+    if (surfels.size() < 8) return;
+
+    // The mesh's own extent — the margin's unit and the card's minimum size.
+    Vec3 lo = surfels.front().pos, hi = surfels.front().pos;
+    for (unsigned i : indices) {
+        const Vec3 p = vertexAt(i);
+        lo = Vec3(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()), std::min(lo.z(), p.z()));
+        hi = Vec3(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()), std::max(hi.z(), p.z()));
+    }
+    const Vec3 size = hi - lo;
+    const float extent = std::max(std::max(size.x(), size.y()), size.z());
+    if (!(extent > 0.0f)) return;
+    // Half the mean spacing between surfels, so a card never ends exactly on the
+    // last sample it happened to draw.
+    const float spacing = std::sqrt(totalArea / float(surfels.size())) * 0.5f;
+    const float margin = std::max(kMarginFraction * extent, spacing);
+
+    // THE GEOMETRY THE COVERAGE RASTER RUNS OVER, AND ITS HARD CEILING.
+    //
+    // The raster is the expensive half of this function and it is charged per
+    // TRIANGLE PER CARD PER ROUND: `measureList` walks every card, and the
+    // greedy loop below calls it once per round. At twelve cards and a dozen
+    // rounds an unbounded raster is 144 x the mesh's triangle count in setups —
+    // seconds on the import worker and, through Preferences' bake-all and
+    // Mesh::loadMesh, seconds ON THE UI THREAD. So the ceiling below is a rule,
+    // not an optimisation, and it is applied in TWO steps because the first one
+    // does not always fire:
+    //
+    //   1. the COARSEST BAKED LEVEL, when the mesh has a chain — the geometry a
+    //      far-field capture would use anyway, and its own simplifier error is
+    //      added to the depth tolerance because the level's surface really does
+    //      sit that far from the authored one;
+    //   2. a UNIFORM STRIDE through whatever step 1 left, when that is STILL
+    //      above the ceiling. Step 1 misses two whole classes and they are not
+    //      rare: a mesh whose topology stopped the simplifier before it shed
+    //      anything (`kAcceptRatio`, documented by ATOM-1) has no chain at all,
+    //      and NEITHER DOES ANY MESH BORN THROUGH `Mesh::loadMesh` — which is
+    //      every primitive and every model a caller loads outside the import.
+    //      Those took the full index list, per card, per round.
+    //
+    // WHY THE SUBSAMPLE IS A GOLDEN-RATIO SEQUENCE AND NOT A UNIFORM STRIDE —
+    // MEASURED, because a uniform stride was written first and it was WRONG.
+    // A mesh is periodic: a triangulated grid alternates two triangle
+    // orientations per quad, a lathed primitive repeats per segment. A stride
+    // is a periodic sampler, so the two periods beat — a stride of 2 on the
+    // grid fixture kept the SAME triangle of every quad and half the surface
+    // was never rastered at all. Coverage on a fixture that reads 1.000 whole
+    // fell to 0.735 at 64.8k triangles, 0.694 at 135k and 0.399 at 259k. The
+    // selection below keeps triangle t when the low 32 bits of t x 2654435761
+    // fall under a threshold: that multiplier is 2^32/phi, so consecutive t
+    // walk a golden-ratio Weyl sequence, which is equidistributed and cannot
+    // align with ANY mesh period. Same fixture, same ceiling: 1.000 / 1.000 /
+    // 1.000, and the cost still flat.
+    //
+    // WHAT IT COSTS ANYWAY, stated honestly rather than as "conservative": a
+    // dropped triangle can be a surfel's OWN, which leaves that texel empty and
+    // the surfel UNcovered (an under-count), and it can be an OCCLUDER, which
+    // leaves a hidden surfel looking visible (an over-count). The reason the
+    // number stays usable is density — the subsample only engages above
+    // `kCoverageMaxTriangles` triangles projected into a 64 x 64 raster, i.e.
+    // hundreds of triangles per texel, and keeping one in N of hundreds still
+    // fills every texel the silhouette covers. The tolerance is NOT widened for
+    // it: dropping a triangle moves no surface, unlike taking a LOD level.
+    const std::vector<unsigned> *rasterIndices = &indices;
+    std::vector<unsigned> coarse;
+    float extraTolerance = 0.0f;
+    if (triCount > size_t(kCoverageMaxTriangles)) {
+        if (!mesh->lodIndices.isEmpty()) {
+            const QVector<quint32> &level = mesh->lodIndices.last();
+            coarse.assign(level.constBegin(), level.constEnd());
+            extraTolerance = mesh->lodErrors.isEmpty() ? 0.0f : mesh->lodErrors.last();
+        }
+        const std::vector<unsigned> &source = coarse.empty() ? indices : coarse;
+        const size_t sourceTris = source.size() / 3;
+        if (sourceTris > size_t(kCoverageMaxTriangles)) {
+            const quint32 threshold = quint32(double(kCoverageMaxTriangles)
+                                              / double(sourceTris) * 4294967296.0);
+            std::vector<unsigned> kept;
+            kept.reserve(size_t(kCoverageMaxTriangles) * 3 + 3);
+            for (size_t t = 0; t < sourceTris; ++t) {
+                if (quint32(quint32(t) * 2654435761u) >= threshold) continue;
+                kept.push_back(source[t * 3]);
+                kept.push_back(source[t * 3 + 1]);
+                kept.push_back(source[t * 3 + 2]);
+            }
+            if (kept.size() >= 3) coarse.swap(kept);
+        }
+        if (!coarse.empty()) rasterIndices = &coarse;
+    }
+
+    // ---- 2/3. the clustered list, and the budget spent only where it BUYS
+    // something -------------------------------------------------------------
+    //
+    // THE RULE: one card per non-empty axis bucket, then a second card in a
+    // bucket only when the list MEASURABLY misses surface without it.
+    //
+    // Epic's number is a CEILING ("Lumen only places 12 Cards on a mesh, but
+    // you can increase that amount"), not a quota to fill, and spending it
+    // blindly is the expensive mistake here: a card is a capture pass forever
+    // after (0.05 ms of CPU and 352 KB at 128^2, SURFACE-CACHE-0), so twelve
+    // cards on a CUBE — which is what a proportional split of the budget gives,
+    // two per face — costs double for a coverage of 0.992 against 0.992.
+    // Splitting a patch in its own plane buys coverage only where the patch
+    // OCCLUDES ITSELF; where it does not, one card records the same heightfield
+    // with the same texels. (Card RESOLUTION is not a reason to split either:
+    // Lumen splits a card into 128-texel pages at CAPTURE time, which is phase
+    // 2's decision and not a thing the bake can know the atlas's page size for.)
+    //
+    // So the loop below is greedy and MEASURED: it gives the bucket with the
+    // most surfels that nothing currently sees one more card, keeps the result
+    // only if the union coverage moved by more than `kMinSplitGain`, and stops
+    // at the budget, at `kGoodCoverage`, or the first time a split stops paying.
+    std::vector<std::vector<size_t>> bucket(MeshCard::kAxisCount);
+    for (size_t i = 0; i < surfels.size(); ++i) bucket[size_t(surfels[i].axis)].push_back(i);
+
+    // Build the whole card list for a given per-bucket card count. Pure
+    // function of the quota, so the greedy loop can try one and throw it away.
+    // `seenHint`, when given, is the CURRENT coverage of the surfels: the LAST
+    // centre of a bucket that is gaining a card is then seeded at the centroid
+    // of that bucket's UNSEEN surfels instead of by farthest-point. Farthest
+    // point puts a new boundary where the bucket's SPREAD is, which is very
+    // often not where the misses are — on the star it split arms that were
+    // already covered, the candidate gained nothing, and the bucket was retired
+    // with a third of its surface unseen at eight cards of a budget of twelve.
+    const auto listFor = [&](const std::vector<int> &quota,
+                             const std::vector<char> *seenHint = nullptr) {
+        QVector<MeshCard> list;
+        for (int a = 0; a < MeshCard::kAxisCount; ++a) {
+            const std::vector<size_t> &members = bucket[size_t(a)];
+            const int k = std::min(quota[size_t(a)], int(members.size()));
+            if (k <= 0 || members.empty()) continue;
+            const Vec3 U = MeshCard::axisU(a);
+            const Vec3 V = MeshCard::axisV(a);
+            const Vec3 D = MeshCard::axisDirection(a);
+
+            // K-means IN THE CARD'S OWN FRAME — (u, v, depth * kClusterDepthWeight)
+            // — inside the bucket (the normal term IS the bucket).
+            // Farthest-point seeding: deterministic, and it puts the first
+            // centres where the spread is instead of where an index happens to
+            // start.
+            std::vector<Vec3> feature(members.size());
+            for (size_t m = 0; m < members.size(); ++m) {
+                const Vec3 &p = surfels[members[m]].pos;
+                feature[m] = Vec3(Vec3::dotProduct(p, U), Vec3::dotProduct(p, V),
+                                  Vec3::dotProduct(p, D) * kClusterDepthWeight);
+            }
+            std::vector<Vec3> centroid;
+            {
+                Vec3 mean;
+                for (const Vec3 &f : feature) mean = mean + f;
+                mean = mean / float(feature.size());
+                size_t first = 0; float best = -1.0f;
+                for (size_t m = 0; m < feature.size(); ++m) {
+                    const float d = (feature[m] - mean).lengthSquared();
+                    if (d > best) { best = d; first = m; }
+                }
+                std::vector<size_t> centres{ first };
+                std::vector<float> nearest(feature.size(), FLT_MAX);
+                while (int(centres.size()) < k) {
+                    size_t pick = 0; float far = -1.0f;
+                    for (size_t m = 0; m < feature.size(); ++m) {
+                        const float d = (feature[m] - feature[centres.back()]).lengthSquared();
+                        nearest[m] = std::min(nearest[m], d);
+                        if (nearest[m] > far) { far = nearest[m]; pick = m; }
+                    }
+                    if (!(far > 0.0f)) break;
+                    centres.push_back(pick);
+                }
+                for (size_t m : centres) centroid.push_back(feature[m]);
+                // The ADDED centre goes where the misses are.
+                if (seenHint && centroid.size() >= 2) {
+                    Vec3 missMean; int missCount = 0;
+                    for (size_t m = 0; m < members.size(); ++m)
+                        if (!(*seenHint)[members[m]]) { missMean = missMean + feature[m]; ++missCount; }
+                    if (missCount > 0) centroid.back() = missMean / float(missCount);
+                }
+            }
+
+            std::vector<int> assign(members.size(), 0);
+            for (int iter = 0; iter < kKMeansIterations; ++iter) {
+                bool moved = false;
+                for (size_t m = 0; m < members.size(); ++m) {
+                    int pick = 0; float bestD = FLT_MAX;
+                    for (size_t c = 0; c < centroid.size(); ++c) {
+                        const float d = (feature[m] - centroid[c]).lengthSquared();
+                        if (d < bestD) { bestD = d; pick = int(c); }
+                    }
+                    if (assign[m] != pick) { assign[m] = pick; moved = true; }
+                }
+                std::vector<Vec3> sum(centroid.size());
+                std::vector<int> count(centroid.size(), 0);
+                for (size_t m = 0; m < members.size(); ++m) {
+                    sum[size_t(assign[m])] = sum[size_t(assign[m])] + feature[m];
+                    ++count[size_t(assign[m])];
+                }
+                for (size_t c = 0; c < centroid.size(); ++c)
+                    if (count[c] > 0) centroid[c] = sum[c] / float(count[c]);
+                if (!moved) break;
+            }
+
+            for (size_t c = 0; c < centroid.size(); ++c) {
+                float uMin = FLT_MAX, uMax = -FLT_MAX, vMin = FLT_MAX, vMax = -FLT_MAX;
+                float dMin = FLT_MAX, dMax = -FLT_MAX;
+                int n = 0;
+                for (size_t m = 0; m < members.size(); ++m) {
+                    if (assign[m] != int(c)) continue;
+                    const Vec3 &p = surfels[members[m]].pos;
+                    const float u = Vec3::dotProduct(p, U);
+                    const float v = Vec3::dotProduct(p, V);
+                    const float d = Vec3::dotProduct(p, D);
+                    uMin = std::min(uMin, u); uMax = std::max(uMax, u);
+                    vMin = std::min(vMin, v); vMax = std::max(vMax, v);
+                    dMin = std::min(dMin, d); dMax = std::max(dMax, d);
+                    ++n;
+                }
+                if (n == 0) continue;
+                list.append(fromBounds(a, uMin, uMax, vMin, vMax, dMin, dMax, margin, lo, hi));
+            }
+        }
+        return list;
+    };
+
+    // One card each, biggest buckets first while the budget allows. A face with
+    // no card at all is a hole; a face with a second card is a luxury.
+    std::vector<int> quota(MeshCard::kAxisCount, 0);
+    {
+        std::vector<int> order;
+        for (int a = 0; a < MeshCard::kAxisCount; ++a)
+            if (!bucket[size_t(a)].empty()) order.push_back(a);
+        std::stable_sort(order.begin(), order.end(), [&](int l, int r) {
+            return bucket[size_t(l)].size() > bucket[size_t(r)].size();
+        });
+        int left = maxCards;
+        for (int a : order) { if (left <= 0) break; quota[size_t(a)] = 1; --left; }
+    }
+
+    QVector<MeshCard> clustered = listFor(quota);
+    std::vector<char> seen(surfels.size(), 0);
+    float coverage = measureList(&clustered, surfels, positions, posComps, *rasterIndices,
+                                 extraTolerance, &seen);
+    // A bucket whose split did not pay is not tried again — but the LOOP does
+    // not stop there: another axis may still have surface nothing sees. Each
+    // round costs exactly one measurement, and there are at most six refusals
+    // plus (maxCards - buckets) acceptances, so the whole loop is bounded.
+    std::vector<char> exhausted(MeshCard::kAxisCount, 0);
+    while (clustered.size() < maxCards && coverage < kGoodCoverage) {
+        // The bucket holding the most surfels nothing sees yet.
+        int worst = -1; size_t missing = 0;
+        for (int a = 0; a < MeshCard::kAxisCount; ++a) {
+            if (exhausted[size_t(a)]) continue;
+            if (quota[size_t(a)] >= int(bucket[size_t(a)].size())) continue;
+            size_t miss = 0;
+            for (size_t i : bucket[size_t(a)]) miss += size_t(seen[i] == 0);
+            if (miss > missing) { missing = miss; worst = a; }
+        }
+        if (worst < 0 || missing == 0) break;
+        std::vector<int> tryQuota = quota;
+        ++tryQuota[size_t(worst)];
+        QVector<MeshCard> candidate = listFor(tryQuota, &seen);
+        std::vector<char> candidateSeen(surfels.size(), 0);
+        const float gained = measureList(&candidate, surfels, positions, posComps, *rasterIndices,
+                                         extraTolerance, &candidateSeen);
+        if (gained <= coverage + kMinSplitGain) { exhausted[size_t(worst)] = 1; continue; }
+        quota = tryQuota;
+        clustered = candidate;
+        seen = candidateSeen;
+        coverage = gained;
+    }
+
+
+    // ---- 4. the 6-face box, ALWAYS measured against the clustered list ---
+    //
+    // Lumen falls back to the box for "meshes that yield few clusters". Rather
+    // than guess what "few" is, both lists are measured the same way and the
+    // better one wins — and the box is measured even when the clustered list
+    // already passes, because it is sometimes BOTH better and smaller (a torus:
+    // six box cards see 0.983 of it, seven clustered ones 0.909). Measuring it
+    // only on a failure made the answer non-monotonic in the budget, which a
+    // user raising `maxCards` would rightly read as a bug.
+    QVector<MeshCard> best = clustered;
+    float bestCoverage = coverage;
+    if (maxCards >= MeshCard::kAxisCount) {
+        QVector<MeshCard> box;
+        for (int a = 0; a < MeshCard::kAxisCount; ++a) {
+            float uMin, uMax, vMin, vMax, dMin, dMax;
+            planeLimits(a, lo, hi, &uMin, &uMax, &vMin, &vMax, &dMin, &dMax);
+            box.append(fromBounds(a, uMin, uMax, vMin, vMax, dMin, dMax, margin, lo, hi));
+        }
+        const float boxCoverage = measureList(&box, surfels, positions, posComps, *rasterIndices,
+                                              extraTolerance);
+        // Strictly better coverage wins; so does the same coverage for FEWER
+        // cards, because a card is a capture pass forever after.
+        if (boxCoverage > bestCoverage
+            || (boxCoverage >= bestCoverage - kMinSplitGain && box.size() < best.size())) {
+            best = box;
+            bestCoverage = boxCoverage;
+        }
+    }
+
+    // ---- the LOD level each card's texel picks (ATOM-2's rule) ----------
+    for (MeshCard &card : best) {
+        const float texel = std::max(card.halfU, card.halfV) * 2.0f / float(kCaptureResolution);
+        card.lodLevel = quint8(levelForTexel(mesh, texel));
+    }
+
+    // ORDER IS PART OF THE OUTPUT (the bake must be byte-deterministic): axis
+    // first, then the card's own origin, so two runs of the same mesh produce
+    // the same list in the same order whatever the clustering visited first.
+    std::stable_sort(best.begin(), best.end(), [](const MeshCard &l, const MeshCard &r) {
+        if (l.axis != r.axis) return l.axis < r.axis;
+        if (l.origin.x() != r.origin.x()) return l.origin.x() < r.origin.x();
+        if (l.origin.y() != r.origin.y()) return l.origin.y() < r.origin.y();
+        return l.origin.z() < r.origin.z();
+    });
+
+    mesh->cards = best;
+    mesh->cardCoverage = bestCoverage;
+}
+
+}   // namespace cards
+
+
 }   // namespace
 
 void MeshBake::buildLodChain(const MeshPtr &mesh) { lodchain::build(mesh); }
+
+void MeshBake::buildCards(const MeshPtr &mesh, int maxCards) { cards::build(mesh, maxCards); }
+
+int MeshBake::cardCaptureResolution() { return cards::kCaptureResolution; }
 
 MeshBake::Model MeshBake::buildFromScene(const SceneSource &source, const QString &filePath,
                                          const QString &fingerprint, const QString &extractDir,
@@ -949,6 +1716,10 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
         // gets no chain — which is the same "no LOD" behaviour the tree has
         // today, and one more reason a bake is worth having.
         MeshBake::buildLodChain(mesh);
+        // SURFACE-CACHE phase 1: the card list, built from the chain (a card
+        // names the level its texel picks), so the order of these two lines is
+        // load-bearing.
+        MeshBake::buildCards(mesh, xf.maxCards);
         model.meshes.append(mesh);
 
         const unsigned aiMatIndex = m->mMaterialIndex;
