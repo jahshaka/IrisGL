@@ -31,7 +31,6 @@ For more information see the LICENSE file
 #include <QSet>
 
 #include <QtMultimedia/QMediaPlayer>
-// #include <QtMultimedia/QMediaPlaylist>
 
 namespace iris
 {
@@ -473,8 +472,6 @@ Scene::Scene()
 	// put the Qt multimedia backend on the startup path of every process that
 	// ever makes a Scene, which is all of them.
 	mediaPlayer = nullptr;
-    // playList = new QMediaPlaylist();
-    // playList->setPlaybackMode(QMediaPlaylist::Loop);
 }
 
 // Build the ambient-music player on first play, not in the constructor.
@@ -536,11 +533,6 @@ void Scene::startPlayingAmbientMusic()
 {
 	ensureMediaPlayer();
 	mediaPlayer->stop();
-	//mediaPlayer = new QMediaPlayer();
-    // playList->removeMedia(0);
-    // //playList = new QMediaPlaylist();
-    // playList->addMedia(QUrl::fromLocalFile(ambientMusicPath));
-    // mediaPlayer->setPlaylist(playList);
 	mediaPlayer->play();
 }
 

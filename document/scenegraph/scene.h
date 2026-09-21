@@ -32,7 +32,6 @@ For more information see the LICENSE file
 #include <QJsonObject>
 
 class QMediaPlayer;
-class QMediaPlaylist;
 
 namespace iris
 {
