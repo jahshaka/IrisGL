@@ -2,8 +2,9 @@
 // the teardown helpers. Meshes, materials, sky, GI and particles live in their
 // own translation units.
 #include "EnginePrivate.h"
-// SURFACE-CACHE-0: `delete mCardSpike` in destroy() needs the complete type.
-#include "SurfaceCardSpike.h"
+// SURFACE-CACHE phase 2: the cache is a unique_ptr member and the per-frame
+// pass lives here, so this TU needs the Component's complete type.
+#include "SurfaceCache.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -1414,17 +1415,16 @@ void OgreScene::destroy() {
     // the process-wide reflection re-bind — see the note there.
     mDestroying = true;
     JAH_TRY {
-        // SURFACE-CACHE-0's card set BEFORE EVERYTHING, and the order is not
-        // tidiness: the spike holds a scratch SceneManager whose one Item's
-        // SubItems LINK this scene's datablocks, and the material loop below
-        // destroys every one of them. `~HlmsDatablock` asserts on a datablock
-        // that still has linked renderables (OgreHlmsDatablock.cpp:205), so a
-        // scene torn down with a live card set takes the assert and leaks the
-        // scratch manager, the five atlases and the capture workspace all the
-        // way to Root::shutdown. It goes first, before even the ray tier: it
-        // owns nothing the tier owns and everything it owns is younger.
-        delete mCardSpike;
-        mCardSpike = nullptr;
+        // THE SURFACE CACHE BEFORE EVERYTHING, and the order is not tidiness.
+        // It holds a CAMERA in this SceneManager, a workspace over this
+        // manager and five resident atlases; the manager and every camera in it
+        // die further down this function, and a workspace whose SceneManager
+        // has gone is a dangling update. The spike this replaced had a stronger
+        // version of the same rule (its scratch Item LINKED this scene's
+        // datablocks, so a late teardown took `~HlmsDatablock`'s linked-
+        // renderable assert) and the regression case that proved it — the exit
+        // code after a passing suite — still guards the order.
+        mSurfaceCache.reset();
         // THE RAY TIER'S STRUCTURES FOR THIS SCENE, FIRST. They are keyed by
         // this object's ADDRESS and they hold MeshPtrs, so leaving them behind
         // would pin this scene's geometry for the process's life and let the
@@ -1472,6 +1472,7 @@ void OgreScene::destroy() {
         }
         mMeshes.clear();
         mLodErrorsByMesh.clear();
+        mCardsByMesh.clear();
         mRoot->destroySceneManager(mSceneMgr);
         // AFTER the SceneManager, deliberately. Particle definitions are freed
         // only by ~ParticleSystemManager2 (there is no destroyParticleSystemDef),
@@ -1736,6 +1737,108 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
     // OFF is a COST guarantee, not only a picture: the ray structures this
     // scene holds are released now, and updateRayQuery skips it from here.
     if (wasOn && mode == RayTracingMode::Off) forgetRayQuery();
+}
+
+
+// ---------------------------------------------------------------------------
+// SURFACE-CACHE phase 2 — the cache's frame, and its two readbacks
+// ---------------------------------------------------------------------------
+//
+// WHERE THIS RUNS AND WHY. Once per DRAWN scene from `renderOneFrame`, right
+// after `applyPendingGi` — so a material edit or a light write has already
+// bumped the signatures the cache compares — and before Ogre's own workspaces.
+// That is "in the frame" in the sense that matters: the monitor's per-pass
+// listeners are attached at the frame's head, the GPU work goes into this
+// frame's command buffer, and the capture's cost is visible where every other
+// engine cache's cost is.
+void OgreScene::updateSurfaceCache() {
+    // AUTO IS OFF AT THIS PHASE, and it says so rather than quietly capturing:
+    // nothing reads a card until phase 4 (the ray hit), so a user's machine
+    // would be paying for pictures nobody looks at. A suite and the monitor
+    // turn the row On.
+    const bool want = mGi.cards == GiToggle::On;
+    if (!want) {
+        if (mSurfaceCache) mSurfaceCache.reset();
+        return;
+    }
+    if (!mSceneMgr) return;
+    if (!mSurfaceCache) {
+        mSurfaceCache.reset(new SurfaceCache());
+        std::string err;
+        if (!mSurfaceCache->build(mSceneMgr, err)) {
+            // A cache that cannot be built is a reported failure and not a
+            // crash: the row stays on, the cache stays null, and the status
+            // says `built` false.
+            if (!err.empty()) mError = err;
+            mSurfaceCache.reset();
+            return;
+        }
+    }
+    // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
+    // does, and waits for one the same way: `mGiCamPos` is the authoritative
+    // view's last tracked position and is the ORIGIN until a frame has tracked
+    // one. Capturing around the origin and then re-capturing everything on the
+    // first tracked frame is the defect the chain already learned (audit B3).
+    if (!mGiCamPosKnown) return;
+
+    const GiQualityFacts facts =
+        giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop);
+    CardSceneView view;
+    view.sceneMgr = mSceneMgr;
+    view.viewerPos = mGiCamPos;
+    view.budgetTexels = mGi.cardBudgetTexels > 0 ? unsigned(mGi.cardBudgetTexels)
+                                                 : facts.cardBudgetTexels;
+    view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
+                                                 : facts.cardResidencyRadius;
+    view.lightSerial = mGiLightWriteSerial;
+
+    // THE CANDIDATE LIST — THE SCENE'S OWN WALK, handed over rather than
+    // reached for. The predicate is the same one the voxel side uses, and each
+    // clause is the same statement it makes there:
+    //   * `kGiGeometryBit` — a surface that BOUNCES light. It excludes the sky,
+    //     unlit overlays, line meshes, billboards, helpers and backdrops for
+    //     free, and it excludes a MOVER, which is the point: a card set is
+    //     stored lighting, and a mover is the engine's word for "not part of
+    //     the room's stored lighting".
+    //   * `shown` — a hidden object photographs nothing.
+    //   * a baked card list — every skinned mesh, every line mesh and every
+    //     model opened without a bake has none, and gets none here.
+    // The radius itself is the cache's; this walk hands over everything that
+    // COULD be resident and lets the Component decide who is.
+    view.candidates.reserve(mItemNodes.size());
+    for (Node *n : mItemNodes) {
+        if (!n || !n->item || !n->node || !n->shown) continue;
+        if (!(n->item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        const std::vector<MeshCardDesc> *cards = meshCardsFor(n->item->getMesh().get());
+        if (!cards || cards->empty()) continue;
+        CardSceneView::Candidate c;
+        c.node = n->selfId;
+        c.itemSlot = n->itemSlot;
+        c.item = n->item;
+        c.sceneNode = n->node;
+        c.material = n->materialRef;
+        c.cards = cards;
+        c.lodErrors = lodErrorsFor(n->item->getMesh().get());
+        view.candidates.push_back(c);
+    }
+    mSurfaceCache->update(view);
+}
+
+bool OgreScene::readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) {
+    out = CardSample();
+    if (!mSurfaceCache) return false;
+    return mSurfaceCache->readTexel(node, card, u, v, out);
+}
+
+bool OgreScene::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out) {
+    out = CardSample();
+    if (!mSurfaceCache) return false;
+    return mSurfaceCache->readAt(toOgre(world), toOgre(normal), out);
+}
+
+bool OgreScene::dumpCardAtlas(const std::string &prefix, std::string &err) {
+    if (!mSurfaceCache) { err = "the surface cache is not built"; return false; }
+    return mSurfaceCache->dump(prefix, err);
 }
 
 }}}  // namespace jahshaka::engine::detail

@@ -1046,6 +1046,13 @@ void OgreEngine::renderOneFrame() {
                 // polled in that same frame.
                 s->pollSkyShRead();
                 s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
+                // SURFACE-CACHE phase 2, after the pendings and before any
+                // workspace runs: the cache reads the material generation and
+                // the light write serial that applyPendingGi may just have
+                // moved, and it drives its own capture workspace by hand, which
+                // has to happen while the frame's command buffer is open and
+                // the monitor's listeners are attached.
+                s->updateSurfaceCache();
             }
         // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
         // applyGlobals in two). The MSAA resolve weights and the SMAA preset
