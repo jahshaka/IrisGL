@@ -410,10 +410,7 @@ MeshPtr Mesh::loadMesh(QString filePath)
 	// have nothing to say about the objects every sample scene is built from.
 	//
 	// So the generator runs HERE, at creation, at the default budget — the same
-	// function the importer calls, never a second implementation of it — and it
-	// runs on the mesh AFTER its chain, for the reason buildCards states (a
-	// card names the level its texel picks). The chain is built here too: these
-	// meshes are 12 to ~2,000 triangles.
+	// function the importer calls, never a second implementation of it.
 	//
 	// THE LOD CHAIN IS DELIBERATELY *NOT* BUILT HERE. A primitive has none
 	// today (NANITE_SPEC §7.2b: every sample renders one level), giving it one

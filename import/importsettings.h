@@ -80,7 +80,9 @@ namespace iris
 /// ONE definition, read by the settings record, by the transform and by every
 /// caller of MeshBake::buildCards that has no record to read.
 constexpr int kDefaultMaxCards = 12;
-/// The format's and the generator's ceiling — the reader refuses a blob above it.
+/// The format's and the generator's ceiling — ONE definition, read by the
+/// settings record's validation, by MeshBake::buildCards's clamp and by the
+/// .jmb reader that refuses a blob above it. It had three copies for a day.
 constexpr int kMaxCardsCeiling = 64;
 
 struct ImportTransform
