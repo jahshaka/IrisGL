@@ -22,8 +22,13 @@
 //
 //     location 0  outNormals          the shading normal, in the CAPTURE
 //                                     camera's view space
-//     location 1  outShadowRoughness  x = the SUN'S SHADOW TERM sampled from
-//                                     the shadow atlas, y = the GGX alpha
+//     location 1  outShadowRoughness  x = the shadow term, y = the GGX alpha
+//
+// ...where "the shadow term" is where a shadow term WOULD arrive. In this spike
+// the scratch scene has no lights, so the prepass writes its constant 1.0 and
+// NOTHING HERE MEASURES SHADOWING — the long note in makeWorkspace says why and
+// what phase 2 must do instead. The channel and its plumbing are real; its
+// content is not yet.
 //
 // ...and computes no lighting at all, which is what makes a capture cheap. The
 // other three — albedo, emissive and the card's own depth — are added by
@@ -70,9 +75,26 @@ namespace {
 
 /// THE CAPTURE PASS'S PROPERTY, and the whole of the "is a capture running"
 /// state. Render-thread only, exactly like `FogHlmsListener`'s own maps: the
-/// capture workspace is updated inline from `captureRound()`, so the flag is
-/// set and cleared around one `_update()` on the one thread that renders.
+/// capture workspace is updated from the one thread that renders, and the flag
+/// is set and cleared around one `_update()`.
 bool gCapturing = false;
+
+/// ...AND IT IS CLEARED ON EVERY PATH OUT, WHICH IS NOT TIDINESS. A capture
+/// compiles a shader permutation, and an Hlms compile failure THROWS through
+/// `_update()`. A hand-cleared flag left set by that throw is not a lost
+/// measurement, it is a BROKEN PROCESS: `jah_card_capture` then holds for every
+/// later pass, so every pass generates the capture permutation, and the capture
+/// permutation's `custom_ps_posExecution` collides at library-parse time with
+/// the fog piece's definition of the same name — which is the "@piece already
+/// defined" parse error whose symptom is the whole scene rendering BLACK with
+/// nothing in any log (this lane learned that symptom the other way round).
+/// One throw would make every frame afterwards black. Hence a guard.
+struct CaptureFlag {
+    CaptureFlag() { gCapturing = true; }
+    ~CaptureFlag() { gCapturing = false; }
+    CaptureFlag(const CaptureFlag &) = delete;
+    CaptureFlag &operator=(const CaptureFlag &) = delete;
+};
 
 /// The six card axes, in the order the atlases' slices hold them.
 const Ogre::Vector3 kAxis[SurfaceCardSpike::kCards] = {
@@ -204,11 +226,26 @@ bool SurfaceCardSpike::makeWorkspace(std::string &err) {
         // computed and the shadow term arrives for free.
         p->mPrePassMode = Ogre::PrePassCreate;
         p->mCameraName = Ogre::IdString(mCam[c]->getName());
-        // THE SHADOW ATLAS. Named so the capture's `fShadow` is a real shadow
-        // term rather than 1 everywhere — the brief's "direct light from the
-        // sun through the shadow atlas". `recalculate` for the same reason
-        // LocalCubemaps gives: Ogre cannot tell that this camera looks at the
-        // world from somewhere new.
+        // THE SHADOW ATLAS IS NAMED, BUT IT PRODUCES NOTHING HERE — said out
+        // loud, because the opposite is the easy thing to believe. A shadow
+        // node draws from ITS OWN SceneManager's light list and this scratch
+        // manager has no lights at all; with no shadow-casting light
+        // `hlms_pssm_splits` is unset and the prepass writes its CONSTANT
+        // branch, `outPs_shadowRoughness = (1.0, roughness)`
+        // (800.PixelShader_piece_ps.any:1103-1105) — which is exactly what the
+        // captured cards read back, 1.0 everywhere. And it could not be
+        // otherwise even with a light copied in: a card's shadow term is
+        // occlusion by OTHER objects, and a one-item scratch scene can only
+        // ever self-shadow.
+        //
+        // So "the sun's shadow term is free at capture" is NOT a finding of
+        // this spike. Phase 2 has two honest routes: capture in the REAL scene
+        // manager (a visibility channel or a render-queue range selecting the
+        // one item, sharing the view's shadow node), or take shadowing from the
+        // phase-3 lighting job instead of from the capture. The node is named
+        // here so the pass's shape matches what phase 2 would build, and
+        // `recalculate` for the reason LocalCubemaps gives (Ogre cannot tell
+        // that this camera looks at the world from somewhere new).
         if (cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName))
             p->mShadowNode = Ogre::IdString(OgreView::kProbeShadowNodeName);
         p->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
@@ -394,23 +431,42 @@ void SurfaceCardSpike::setArmed(bool on) {
     if (mWs) mWs->setEnabled(on);
 }
 
+// THE IN-FRAME BRACKET. `workspacePosUpdate` is NOT called when the workspace's
+// update throws, so the pair alone has the same defect the scope guard above
+// exists for — the flag would stay set for the life of the process. The
+// SceneManager's own per-frame hook cannot help (it runs before any workspace),
+// so the honest bracket is: the pre callback arms the flag, the post callback
+// disarms it, and EVERY OTHER ENTRY POINT THAT CAN OBSERVE A LEAKED FLAG clears
+// it defensively — which is what `Scene::surfaceCardSpike` does on the way in,
+// and what the next capture's own guard does.
 void SurfaceCardSpike::workspacePreUpdate(Ogre::CompositorWorkspace *) { gCapturing = true; }
 void SurfaceCardSpike::workspacePosUpdate(Ogre::CompositorWorkspace *) { gCapturing = false; }
 
 float SurfaceCardSpike::captureRound(float *graphMsOut) {
     if (!mWs) return -1.0f;
     const auto tg = std::chrono::steady_clock::now();
-    gCapturing = true;
-    // THE SCRATCH SCENE'S GRAPH IS UPDATED BY NOBODY ELSE. `Root::renderOneFrame`
-    // walks the scene managers it knows are drawing and calls this; a workspace
-    // driven by hand is outside that walk, and without it the one Item's world
+    const CaptureFlag capturing;
+    // THE SCRATCH SCENE'S GRAPH IS UPDATED BY NOBODY ELSE WHEN NO FRAME RUNS.
+    // `Root::renderOneFrame` calls `updateSceneGraph()` on EVERY REGISTERED
+    // SceneManager (OgreRoot.cpp:1104-1110 — every one, not only the ones that
+    // draw), so inside a frame the scratch scene is walked for us; a workspace
+    // driven BY HAND between frames is outside that, and without it the Item's
     // transform and AABB are never derived — the capture culls an object that is
     // still at the origin with a zero box and every card comes back EMPTY, with
     // nothing in any log. (Measured on this lane before it was here.)
+    //
+    // AND THAT SAME LINE OF UPSTREAM'S IS WHY A SCRATCH SceneManager PER CARD
+    // SET IS THE WRONG SHIPPING SHAPE: a live one costs a graph walk and its
+    // barrier EVERY FRAME for as long as it exists, whether or not it captures,
+    // so a thousand card sets would be a thousand managers walked per frame.
+    // Phase 2 captures in the REAL scene manager (a visibility channel or a
+    // render-queue range selecting the one item). Here there is exactly one
+    // scratch scene at a time and it is the cheapest way to bound the capture's
+    // cull to one object, which is all the measurement is about.
     mScratch->updateSceneGraph();
     // ...AND IT IS TIMED APART FROM THE CAPTURE, because a shipped capture pays
-    // it ONCE A FRAME for every card set it captures (Root::renderOneFrame walks
-    // the scene managers before any workspace runs), while this spike drives one
+    // it ONCE A FRAME for every card set (Root::renderOneFrame walks every
+    // registered manager before any workspace runs), while this spike drives one
     // workspace by hand. Charging it to every round would price a capture at the
     // cost of a scene-graph walk it does not really own.
     const auto t0 = std::chrono::steady_clock::now();
@@ -420,7 +476,6 @@ float SurfaceCardSpike::captureRound(float *graphMsOut) {
     mWs->_beginUpdate(false);
     mWs->_update();
     mWs->_endUpdate(false);
-    gCapturing = false;
     return float(std::chrono::duration<double, std::milli>(
                      std::chrono::steady_clock::now() - t0).count());
 }
@@ -428,6 +483,12 @@ float SurfaceCardSpike::captureRound(float *graphMsOut) {
 // ---------------------------------------------------------------------------
 bool OgreScene::surfaceCardSpike(const SurfaceCardSpikeDesc &desc, SurfaceCardSpikeResult &out) {
     out = SurfaceCardSpikeResult();
+    // A LEAKED FLAG IS CLEARED AT THE DOOR (see CaptureFlag's note): if an
+    // in-frame capture's workspace threw, `workspacePosUpdate` never ran and
+    // `jah_card_capture` is still set — which would make every pass in the
+    // process generate the capture permutation. Nothing outside a capture is
+    // ever allowed to see it true, and this is the one call a host can make.
+    gCapturing = false;
     JAH_TRY {
         switch (desc.action) {
         case SurfaceCardSpikeAction::Destroy:

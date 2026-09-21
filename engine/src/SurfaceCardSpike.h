@@ -38,6 +38,30 @@ namespace detail {
 
 class OgreScene;
 
+/// WHAT A COMPONENT WOULD NOT DO — the debt this shape carries, recorded here
+/// rather than rediscovered at phase 2 (a spike is allowed these; a shipped
+/// `jahshaka::engine::SurfaceCache` is not):
+///
+///   * `SurfaceCardSpikeDesc`/`Result`/`Action` sit on the PUBLIC engine
+///     boundary (`Types.h`) for one test's benefit. A Component's own state
+///     belongs behind a verb, not in the document-facing header.
+///   * `OgreScene` grants this class FRIENDSHIP to reach its item table and its
+///     SceneManager. A Component takes what it needs as arguments.
+///   * FIVE FIXED BINDINGS and 27 `vec4` of parameters hold exactly ONE card
+///     set. The shipping shape is one atlas binding per layer plus an SSBO of
+///     card rects indexed by the instance slot (the report's §2).
+///   * `recordReflect` walks the scene's light list EVERY FRAME to find the sun
+///     for the card's direct term. A lighting job owns that, once.
+///   * `gCapturing` is a PROCESS-GLOBAL bool. It works because one capture runs
+///     at a time on one thread; a Component with a budget would have several.
+///   * A node whose `itemSlot` is npos is recorded as slot 0, which ALIASES the
+///     real slot 0. Harmless here (the spike cards one node of a fixture whose
+///     items all have slots) and wrong in general: the key needs its own
+///     "no slot" value.
+///   * A SCRATCH SceneManager per card set costs a graph walk every frame for
+///     its whole life (see OgreSurfaceCards.cpp's note) — phase 2 captures in
+///     the real scene.
+///
 /// One mesh instance's six axis-aligned cards, captured and resident.
 ///
 /// IT IS ITS OWN WORKSPACE LISTENER, and that is what lets a capture run INSIDE
@@ -94,8 +118,13 @@ public:
         float rowD[4] = { 0, 0, 0, 0 };
     };
     const CardXform &xform(unsigned i) const { return mXform[i]; }
-    /// The depth tolerance a hit is accepted within: one card texel's world
-    /// size, which is the finest thing the card can resolve.
+    /// The depth tolerance a hit is accepted within: TWO card texels' world
+    /// size. One texel is the finest thing a card can resolve, and two is that
+    /// with a texel of slack either side of the sample — a hit lands anywhere
+    /// inside its texel and the ray's own surface bias has already moved it off
+    /// the surface, so a one-texel window rejects hits the card does see. (The
+    /// factor and this sentence must agree; they did not, and the comment was
+    /// the wrong one.)
     float depthTolerance() const { return mTexelWorld * 2.0f; }
     float texelWorld() const { return mTexelWorld; }
 

@@ -54,6 +54,9 @@ const int kMaxCascades = 4;
 /// SURFACE-CACHE-0: six axis-aligned cards, Lumen's fallback card shape and the
 /// assessment's S3 prototype. The C++ side's SurfaceCardSpike::kCards.
 const int kCards = 6;
+/// The environment term's pi (see cardRadiance) — the same constant the pixel
+/// path spells out at 200.BRDFs_piece_ps.any:305.
+const float kPi = 3.14159265;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
@@ -572,9 +575,28 @@ vec3 cardRadiance( vec3 hitPos, vec3 dir, out bool ok )
 		const vec3 cx = normalize( p.cardRowU[i].xyz );
 		const vec3 cy = -normalize( p.cardRowV[i].xyz );
 		const vec3 n = normalize( cx * nv.x + cy * nv.y + p.cardAxis[i].xyz * nv.z );
-		// kD, WHICH IS WHAT THE CAPTURE STORED. HlmsPbs keeps a datablock's
-		// diffuse pre-divided by pi (OgreHlmsPbsDatablock::setDiffuse), so this
-		// texel is albedo/pi and the Lambert term below needs no pi of its own.
+		// kD, WHICH IS WHAT THE CAPTURE STORED, AND WHY THE TWO HALVES OF THE
+		// LIGHT CARRY DIFFERENT FACTORS OF PI. HlmsPbs keeps a datablock's
+		// diffuse pre-divided by pi (OgreHlmsPbsDatablock::setDiffuse: kD =
+		// albedo/pi), so nothing below ever divides by pi again — but the two
+		// terms it multiplies are not the same kind of quantity:
+		//
+		//  * THE SUN IS A PUNCTUAL LIGHT. Its contribution to outgoing radiance
+		//    is kD * E * NdotL with E the light's own radiance, and that is what
+		//    HlmsPbs computes for a directional light (200.BRDFs_piece_ps.any's
+		//    note at :218, "we should divide Rd by PI, but it is already
+		//    included in kD"). No pi here.
+		//
+		//  * THE BOUNCE IS AN ENVIRONMENT TERM. `voxelRadiance` returns a MEAN
+		//    RADIANCE over a neighbourhood — exactly the quantity that reaches
+		//    `pixelData.envColourD` when the cone gather writes it
+		//    (Vct_piece_ps.any:973) — and integrating a Lambert BRDF against a
+		//    uniform hemisphere of radiance L gives albedo * L, i.e. kD * pi * L.
+		//    That pi is explicit in the pixel path
+		//    (200.BRDFs_piece_ps.any:305, `envColourD * pixelData.diffuse * PI`)
+		//    and it has to be explicit here, or a carded hit's bounce is 1/pi of
+		//    what the SAME surface shows on screen — a 3.14x error that would
+		//    read as "cards are darker than voxels" and be blamed on the cards.
 		const vec3 kD = textureLod( cardAlbedo, uvw, 0.0 ).xyz;
 		const vec3 emissive = textureLod( cardEmissive, uvw, 0.0 ).xyz;
 		const float shadow = textureLod( cardShadowRough, uvw, 0.0 ).x;
@@ -587,7 +609,8 @@ vec3 cardRadiance( vec3 hitPos, vec3 dir, out bool ok )
 		// with no bounce loop. A wide lobe and a short distance, so the mip is
 		// the coarse one a hemisphere's worth of neighbourhood belongs in.
 		const vec3 indirect = voxelRadiance( hitPos + n * p.cardKnobs.w, n, 1.0, 4.0, vok );
-		const vec3 outgoing = kD * ( direct + ( vok ? indirect : vec3( 0.0 ) ) ) + emissive;
+		const vec3 outgoing =
+			kD * ( direct + ( vok ? indirect * kPi : vec3( 0.0 ) ) ) + emissive;
 		if( !finite3( outgoing ) )
 			continue;
 		acc += outgoing * facing;

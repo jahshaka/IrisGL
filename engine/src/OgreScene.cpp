@@ -2,6 +2,8 @@
 // the teardown helpers. Meshes, materials, sky, GI and particles live in their
 // own translation units.
 #include "EnginePrivate.h"
+// SURFACE-CACHE-0: `delete mCardSpike` in destroy() needs the complete type.
+#include "SurfaceCardSpike.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -1412,6 +1414,17 @@ void OgreScene::destroy() {
     // the process-wide reflection re-bind — see the note there.
     mDestroying = true;
     JAH_TRY {
+        // SURFACE-CACHE-0's card set BEFORE EVERYTHING, and the order is not
+        // tidiness: the spike holds a scratch SceneManager whose one Item's
+        // SubItems LINK this scene's datablocks, and the material loop below
+        // destroys every one of them. `~HlmsDatablock` asserts on a datablock
+        // that still has linked renderables (OgreHlmsDatablock.cpp:205), so a
+        // scene torn down with a live card set takes the assert and leaks the
+        // scratch manager, the five atlases and the capture workspace all the
+        // way to Root::shutdown. It goes first, before even the ray tier: it
+        // owns nothing the tier owns and everything it owns is younger.
+        delete mCardSpike;
+        mCardSpike = nullptr;
         // THE RAY TIER'S STRUCTURES FOR THIS SCENE, FIRST. They are keyed by
         // this object's ADDRESS and they hold MeshPtrs, so leaving them behind
         // would pin this scene's geometry for the process's life and let the
