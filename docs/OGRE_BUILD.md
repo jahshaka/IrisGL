@@ -2139,11 +2139,69 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     triangulation.
 
 
-THE STACK IS 0001-0083 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0084-vct-escape-reads-both-axis-halves — THE VOXEL OCCUPANCY THE AMBIENT RIDES
+    IS A PROPERTY OF THE CELL, NOT OF THE CONE (lane CLIFF-32-1, 2026-09-21),
+    MEDIA-only, one file (Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any), OVERLAPS
+    0021, 0033, 0045, 0048, 0066, 0070 and 0083 in that file (it amends one
+    sentence of 0021's own comment) — a tree carrying those resets the submodule
+    before `build-ogre.sh` rather than reading the per-patch reverse check's
+    complaint as an upstream change. LATTICE-1's finding 2: a surface reads 8-9
+    display codes BRIGHTER for standing more than 32 m from the world origin.
+    Translate a whole scene AND its camera together by an exact multiple of every
+    cascade's cell — so that not one voxel and not one light moves inside any
+    volume, which LATTICE-1 proved (voxelsLit 16384/18660/4548/2960 and meanLit
+    to six decimals, identical at every arm) — and the cube's shaded face 60 m
+    out is 8.82/255 brighter than the same face at the origin, a STEP at 32 m and
+    flat to 180 m.
+    `isNegative` picks which of the two composites packed into an anisotropic
+    axis texture — the one accumulated towards +axis or the one towards -axis — a
+    sample reads, from the SIGN of that component of the cone's direction. For
+    the COLOUR composite that is right and self-healing: the sample is weighted
+    by `dirLSSquared`, so as a component goes to zero the half it chose stops
+    mattering. Patch 0021's ESCAPE estimate is `min( escapeX, escapeY, escapeZ )`
+    and a `min` carries no weight — it gives an axis whose direction component is
+    ZERO the same authority as the axis the cone travels down, and on every
+    axis-aligned surface in the world two of the three components ARE zero. Zero
+    in exact arithmetic; in the shader they are the last bits of a round trip
+    (the normal is interpolated in VIEW space, carried out through
+    `invViewMatCubemap` to build the cone frame — patch 0083 — carried back, and
+    rotated into probe space), and every rotation in it is built from the view
+    matrix, which is a function of where the camera stands IN THE WORLD.
+    MEASURED: `isNegative.y` for the first diffuse cone reads 0.5 on 100 % of the
+    cube face's pixels at the origin and flips on 50.5 % of them (11,321 of
+    22,400) with the scene 60 m out; the cone's `alpha`, its step count, its lod,
+    its `travelled`, its start position in every cascade and every voxel it
+    samples are IDENTICAL between the two arms to the last readable bit, while
+    the escape weight — which is exactly what the sky's ambient rides
+    (`light.w`) — moves by 26/255.
+    THE FIX IS TO STOP ASKING THE CONE: the two halves of one axis texture are
+    two measurements of the same cells composited in opposite directions, and
+    their mean is the direction-free reading `min3` was always after (0021
+    derived it as "the cell's mean occupancy up to the compositing"). Each half
+    is still a COMPOSITE, so a wall one voxel thick still reports 1 along its own
+    normal at every mip and the sealed-room leak the main volume's
+    mean-occupancy alpha had stays shut; and it is continuous in the direction,
+    so no last bit of a matrix can move a picture again. The face's dependence on
+    the world origin: 8.823 -> 0.109 of a code at 60 m, 7.589 -> 0.104 at 120 m,
+    0.746 -> 0.105 at 30 m (8x8-smoothed mean over the face, max 1). Guarded by
+    `scripting.e2e.lattice_placement`'s translation arms (60 and 120 m, bar
+    3/255, measured 1; 15/255 without the patch). SIX alpha fetches per
+    anisotropic step instead of three, on the diffuse cones and on the specular
+    one (the two marches share the loop; the specular cone's `escapeAlpha` is
+    carried but never read downstream, so those three buy nothing and removing
+    them is a follow-up, not a rider on a fix); the frame cost is below the
+    instrument — Showroom 2 at Epic, four runs of 600 scripted frames per
+    process, clocks locked, read 11.45-11.61 and 10.92-11.35 ms/frame in two
+    patched processes against 10.98-11.03 in the base one, and
+    `perf.epic_steady_state` / `perf.drag_mirror_room` / `perf.hide_soak` pass.
+    BOTH SELFTEST HASHES MOVE, by design — the escape estimate is a different number everywhere.
+
+
+THE STACK IS 0001-0084 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083/0084) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078 and 0081 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
