@@ -3997,6 +3997,8 @@ public:
     unsigned materialsAwaitingTexture() const {
         return unsigned(mMaterialsAwaitingTexture.size());
     }
+    /// Whole-arm rebuilds this scene has done — `StreamingWork::giRebuilds`.
+    unsigned long long giRebuildCount() const { return mGiRebuilds; }
     /// Is a deferred read of a texture's PIXELS owed this frame? True while the
     /// sky's IBL convolution is pending — the one piece of per-frame work that
     /// reads texture contents and cannot be asked twice (OPEN_COVER_SPEC §2 E).

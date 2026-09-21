@@ -5512,12 +5512,21 @@ struct StreamingWork {
     /// Materials bound to a texture whose pixels have not landed yet: they draw
     /// with a fallback until `settleTextureResidency` swaps the real one in.
     unsigned   materialsAwaitingTexture = 0;
-    /// The texture manager still has file loads in flight.
-    bool       texturesStreaming = false;
-    /// `ShaderCacheStats::compiledThisRun` and `::expectedShaders`, without the
-    /// directory scan — see the note above.
+    /// `ShaderCacheStats::compiledThisRun`, without the directory scan — see
+    /// the note above. A RUNNING TOTAL for the process: a caller that wants
+    /// "did the last frame compile anything" differences it across frames.
+    ///
+    /// `expectedShaders` is deliberately NOT here. It is the PREVIOUS
+    /// session's whole total — everything it compiled or read from the cache,
+    /// boot included — so as a denominator for "how far through this load are
+    /// we" it is not merely imprecise, it is a different quantity.
     unsigned   shadersCompiled = 0;
-    unsigned   shadersExpected = 0;
+    /// WHOLE-ARM GI REBUILDS this process has done, staged and unstaged alike
+    /// (`OgreScene::rebuildVct`'s own counter, summed over the live scenes).
+    /// Differenced across a frame it is the honest answer to "did the lighting
+    /// arm run in that frame", which the stage counter above cannot give: a
+    /// `Complete` frame builds the WHOLE arm and never touches a stage.
+    unsigned long long giRebuilds = 0;
 };
 
 /// EVERYTHING ONE `renderOneFrame` DID. One of these per frame while a capture

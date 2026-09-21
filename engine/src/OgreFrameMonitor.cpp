@@ -806,10 +806,10 @@ StreamingWork OgreEngine::streamingWork() const
             out.giStage = sc->giBuildStage();
         }
         out.materialsAwaitingTexture += sc->materialsAwaitingTexture();
+        out.giRebuilds += sc->giRebuildCount();
     }
-    out.texturesStreaming = !texturesDoneStreaming();
-    unsigned fromCache = 0u;
-    mShaderCache.progress(out.shadersCompiled, fromCache, out.shadersExpected);
+    unsigned fromCache = 0u, expected = 0u;
+    mShaderCache.progress(out.shadersCompiled, fromCache, expected);
     return out;
 }
 
