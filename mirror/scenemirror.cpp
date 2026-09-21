@@ -7519,7 +7519,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             } else if (mGiPendingRefresh && mGiStableFrames >= kGiStableFrames) {
                 mGiPendingRefresh = false;
                 mGiStableFrames = 0;
-                mTarget->refreshGlobalIllumination();
+                // A SETTLE, NOT A PERSON ASKING (OPEN_COVER_SPEC §2 A, fix round
+                // item 4): the engine takes the cheapest correct step and never
+                // drains a staged first build into this one frame.
+                mTarget->refreshGlobalIllumination(
+                    jahshaka::engine::GiRefreshReason::Settle);
                 ++mGiRefreshCount;
                 adoptSignature();
             } else if ((mGiPendingRefresh && mGiPendingInject) || mGiMovableLightsMoving ||

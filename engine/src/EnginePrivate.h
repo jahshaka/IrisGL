@@ -2933,7 +2933,7 @@ public:
     // volume and add no light), so previews/thumbnails stay sane in practice.
     bool setGlobalIllumination(const GiParams &p) override;
     bool setGiTuning(const GiParams &p) override;
-    void refreshGlobalIllumination() override;
+    void refreshGlobalIllumination(GiRefreshReason reason) override;
     /// OPEN_COVER_SPEC §2 A — see the boundary's note. Sticky, per scene.
     void setLoading(bool loading) override { mSceneLoading = loading; }
     bool isLoading() const override { return mSceneLoading; }
@@ -3954,6 +3954,8 @@ public:
     void addObjectCounts(ObjectCounts &out) const;
     /// Called by Engine::renderOneFrame before rendering.
     void applyPendingGi();
+    /// The flush proper — what applyPendingGi was before the staged machine.
+    void applyPendingGiFlush();
     /// The pace of the frame being rendered (OPEN_COVER_SPEC §2.1):
     /// Engine::renderOneFrame pushes it once per frame, to every scene.
     void setFramePace(FramePace pace) { mFramePace = pace; }
@@ -4060,8 +4062,11 @@ private:
     /// scout, placement fit, keep/drop, re-create, closing capture.
     double               mPccPhaseMs[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
     std::chrono::steady_clock::time_point mPccPhaseClock;
-    /// Abandons a staged build (a teardown, a scene close). Idempotent.
-    void abandonStagedGiBuild() { mGiBuildStage = GiBuildStage::Idle; }
+    /// Rewinds a staged build to its first stage because the world moved under
+    /// it. Idempotent; see the definition for why it rewinds and does not stop.
+    void restartStagedProbeBuild();
+    /// Unbinds (if this scene owns the binding) and deletes the probe grid.
+    void destroyProbeGrid();
 
 
     // ---- DDGI: the IrradianceField arm (GI_UNIFIED_SPEC.md §4 P1) ---------

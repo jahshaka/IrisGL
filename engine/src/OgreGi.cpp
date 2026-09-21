@@ -214,7 +214,7 @@ bool OgreScene::setGiTuning(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
-void OgreScene::refreshGlobalIllumination() {
+void OgreScene::refreshGlobalIllumination(GiRefreshReason reason) {
     JAH_TRY {
         // THE HOST ASKED, EXPLICITLY. Recorded before the arm runs so that
         // whatever it does carries `Refresh` as its reason rather than whatever
@@ -246,10 +246,19 @@ void OgreScene::refreshGlobalIllumination() {
             // over a LIVE chain (the common case) is never deferred — it marks
             // cascades or re-injects, and touches none of this.
             // AN EXPLICIT REFRESH FINISHES A STAGED BUILD FIRST (OPEN_COVER_SPEC
-            // §2 A). The host asking by hand — `world.refreshGi()`, and every
-            // suite that asserts on the frame after it — is promised the whole
-            // answer, and a half-placed probe grid is not one.
-            while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
+            // §2 A). The host asking by hand — `world.refreshGi()`, a quality
+            // change, and every suite that asserts on the frame after it — is
+            // promised the whole answer, and a half-placed probe grid is not
+            // one.
+            //
+            // A SETTLE IS NOT THAT ASK (fix round item 4). The mirror also
+            // arrives here when a drag stopped moving, and draining the machine
+            // there lands every remaining stage in ONE driver frame — the whole
+            // block back, ~700 ms on Grand Showroom 2, for a gesture that ended
+            // inside the streaming window. A settle over a staged build marks
+            // what it can and lets the stages keep their own pace.
+            if (reason == GiRefreshReason::Explicit)
+                while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
             if (!mVctCascades.empty()) { if (!refreshCascadesFast()) rebuildVct(); }
             else if (!refreshVctFast()) rebuildVct();
         }
@@ -2151,15 +2160,14 @@ void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsC
                                  // under a cascade chain, marks the cascades the
                                  // change reaches and keeps everything else (G1)
     // ...AND A STAGED BUILD DESCRIBES A SCENE THAT NO LONGER EXISTS
-    // (OPEN_COVER_SPEC §2 A). The stages run in later frames against the volume
-    // the CASCADE stage was fitted to, so a spawn between two of them would
-    // place the probe grid over the world as it was before the spawn — measured
-    // as `scripting.e2e.page_gi`'s 0 probes kept of 18 when a cube arrived after
-    // the chain. The flag above is already set; abandoning the stages is what
-    // makes the flush build from scratch rather than continue a stale plan.
-    // Never from INSIDE a stage: those legitimately touch the arm they are
-    // building.
-    if (!mInGiStage) abandonStagedGiBuild();
+    // (OPEN_COVER_SPEC §2 A). The stages run in later frames against the box the
+    // SCOUT was fitted to, so a spawn between two of them would place the probe
+    // grid over the world as it was before the spawn — measured as
+    // `scripting.e2e.page_gi`'s 0 probes kept of 18 when a cube arrived after
+    // the chain. So the machine REWINDS to its first stage and re-photographs
+    // the space; it does NOT stop. Never from INSIDE a stage: those legitimately
+    // touch the arm they are building.
+    if (!mInGiStage) restartStagedProbeBuild();
     // THE DESTRUCTION GENERATION (FIX WAVE B4). Bumped unconditionally, and
     // unconditionally is the point: every caller of this function either
     // destroys something the GI arms hold a raw pointer into, or wants a
@@ -2416,6 +2424,20 @@ bool OgreScene::refreshCascadesFast() {
     if (mVctCascades.empty() || !mVctCascades[0].built || !mVctCascades[0].lighting)
         return false;
     if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
+    // A CHAIN IS NOT A WHOLE ARM WHEN THE REST OF IT IS STILL OWED (fix round
+    // item 1's belt). This path keeps a LIVE arm cheap, and a hybrid with no
+    // probe grid — and no record of having dropped every candidate, which is a
+    // BUILT state (`refreshVctFast` says so in the same words) — or a scene
+    // that wants an irradiance field and has none is not one. Refusing forces
+    // the caller's `rebuildVct`, which is the only thing that can finish it.
+    //
+    // ONLY WHILE NO BUILD IS STAGED: between two stages this is exactly the
+    // state the machine is walking through on purpose, and refusing there would
+    // rebuild the 57 ms chain on every edit inside the window.
+    if (mGiBuildStage == GiBuildStage::Idle) {
+        if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbesDropped) return false;
+        if (ddgiWanted() && !mIfd) return false;
+    }
     JAH_TRY {
         // A MATERIAL PARAMETER THE VOXELISER READ HAS CHANGED. Same rule as
         // `refreshVctFast`'s `freshVoxels`, spread over frames: every cascade
@@ -2567,6 +2589,34 @@ bool OgreScene::giVoxelTexturesPending() {
 // exactly the state `teardownVct` already knows how to unwind.
 bool OgreScene::giBuildOwesWork() const { return mGiBuildStage != GiBuildStage::Idle; }
 
+// A STAGED BUILD WHOSE WORLD MOVED REWINDS — IT DOES NOT STOP (fix round item 1).
+//
+// The first cut of this simply set the machine to `Idle`, and its comment said
+// that made the flush build from scratch. It did not, and the hole was total:
+// the CHAIN is live by then, so the flush takes `refreshCascadesFast`, which
+// refuses only on a missing cascade 0 or the wrong mode — `rebuildVct` never
+// ran again. The scene was left with its cascades, NO probe grid, NO irradiance
+// field and `applyReflectionToAll` never called, for the rest of its life: sky
+// reflections and cone diffuse where a hybrid was asked for. Every caller of
+// `invalidateGiCaches` reached it inside the three-to-five frame window a
+// streaming build occupies — a node destroyed, a mesh or material destroyed, a
+// bounds exclusion, a mobility heal, and a primitive ADDED, which is exactly
+// `project.create` followed by `scene.addPrimitive`.
+//
+// The rewind is the cheap correct answer, and the reason it is cheap is that
+// the chain is NOT stale: `invalidateGiCaches` marks every cascade's item set
+// and the flush's own dirty path spends them one per frame (G1). What went
+// stale is the box the probes were about to be placed in, and that box is
+// re-fitted by the scout — so the 57 ms chain is not paid again for an edit.
+void OgreScene::restartStagedProbeBuild() {
+    if (mGiBuildStage == GiBuildStage::Idle) return;
+    // A grid `buildPccFit` created and `buildPccFinish` never bound is an
+    // orphan the moment we rewind past it (item 2).
+    destroyProbeGrid();
+    mGiBuildStage = GiBuildStage::ProbeScout;
+    mGiCachesDirty = true;      // the cascades still owe their marks
+}
+
 bool OgreScene::stepStagedGiBuild() {
     // A stage builds the very arm `invalidateGiCaches` watches; without this it
     // would abandon itself half way through.
@@ -2579,12 +2629,22 @@ bool OgreScene::stepStagedGiBuild() {
         switch (mGiBuildStage) {
         case GiBuildStage::Idle:
             return true;
-        case GiBuildStage::ProbeScout:
-            buildPccScout(mGiStagedVolume);
+        case GiBuildStage::ProbeScout: {
+            // THE BOX IS RE-FITTED HERE, never carried from the cascade stage:
+            // an edit between two stages rewinds the machine to THIS one, and
+            // the whole point of the rewind is that the grid is placed in the
+            // world as it is now (`restartStagedProbeBuild`).
+            Ogre::Vector3 mn, mx;
+            if (!computeGiBounds(mn, mx)) {      // nothing to place a grid in
+                mGiBuildStage = GiBuildStage::Field;
+                return false;
+            }
+            buildPccScout(Ogre::Aabb::newFromExtents(mn, mx));
             // The scout is also the refusal: no probe workspace, no camera, no
             // grid. Skip straight to the field rather than placing nothing.
             mGiBuildStage = mPccStageOk ? GiBuildStage::ProbeFit : GiBuildStage::Field;
             return false;
+        }
         case GiBuildStage::ProbeFit:
             buildPccFit();
             // `buildPccFit` deletes the grid when every candidate photographed
@@ -2615,17 +2675,31 @@ bool OgreScene::stepStagedGiBuild() {
         }
         }
         return true;
-    } JAH_CATCH(mError, (mGiBuildStage = GiBuildStage::Idle, true));
+    // A STAGE THAT THREW LEAVES THE MACHINE IDLE WITH AN UNFINISHED ARM, and
+    // that is the one state `refreshCascadesFast`'s belt below exists for: the
+    // next flush sees a hybrid with no grid, refuses the cheap path and builds
+    // from scratch.
+    } JAH_CATCH(mError, (destroyProbeGrid(), mGiBuildStage = GiBuildStage::Idle,
+                         mGiCachesDirty = true, true));
 }
 
 void OgreScene::applyPendingGi() {
-    // A STAGED ARM BUILD IN FLIGHT OWNS THIS FLUSH, and it is read before
-    // `mGiCachesDirty` because the stages are not a dirty flag: the chain is
-    // already built and bound, and what is owed is the probe grid and the
-    // field, one frame at a time (OPEN_COVER_SPEC §2 A).
-    if (mGiBuildStage != GiBuildStage::Idle) {
-        // Nothing of this world is on screen yet: spend nothing (Scene::setLoading).
-        if (mSceneLoading) return;
+    // NOTHING OF THIS WORLD IS ON SCREEN YET: spend nothing at all
+    // (Scene::setLoading). The ordinary flush below is gated on the same thing
+    // inside `rebuildVct`; this is the staged machine's half.
+    const bool staged = (mGiBuildStage != GiBuildStage::Idle);
+    if (staged && mSceneLoading) return;
+    // THE ORDINARY FLUSH RUNS FIRST, AND IT RUNS WHILE A BUILD IS STAGED — the
+    // first cut returned early here and that was a second hole of the same
+    // family as item 1: the CHAIN is live between two stages, so an edit that
+    // arrives in the window still has to reach it, and the cascades' dirty
+    // marks are made on this path (`refreshCascadesFast` -> the one-per-frame
+    // queue). It is cheap by construction: over a live chain it marks or
+    // re-injects and never rebuilds.
+    applyPendingGiFlush();
+    // ...then ONE stage of the staged build. Re-read, because the flush may
+    // have rewound the machine (an edit) or built the arm outright.
+    if (mGiBuildStage != GiBuildStage::Idle && !mSceneLoading) {
         stepStagedGiBuild();
         // A `Complete` frame owes the WHOLE arm, however it was staged: a
         // thumbnail, a capture, a suite or a script's editor.frame must see the
@@ -2633,8 +2707,11 @@ void OgreScene::applyPendingGi() {
         // both selftest hashes untouched.
         if (mFramePace == FramePace::Complete)
             while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
-        return;
     }
+}
+
+// The flush proper — what `applyPendingGi` was before the staged machine.
+void OgreScene::applyPendingGiFlush() {
     if (!mGiCachesDirty) return;
     mGiCachesDirty = false;
     // A STREAMING FRAME BUILDS THE CHAIN AND PARKS (see rebuildVct's tail).
@@ -5252,6 +5329,41 @@ static void notePlacementPhases(double msScout, double msPlace, double msDrop,
                                kept, float(msCapture));
 }
 
+// THE PROBE GRID, GONE — unbound if this scene owns the binding, then deleted,
+// with every reading that described it put back to "none".
+//
+// BY POINTER IDENTITY, like teardownVct's unbind: the process-wide HlmsPbs
+// binding may belong to ANOTHER scene, and clearing it from here would blank
+// that scene's reflections for a grid this one never built. (This scene's own
+// pointer is the one being deleted.)
+//
+// TWO CALLERS, and the second is why it is a function (fix round item 2): the
+// "every candidate photographed nothing" path, which always had this code, and
+// `restartStagedProbeBuild`, where a grid that `buildPccFit` CREATED and
+// `buildPccFinish` never bound would otherwise be orphaned — still registered
+// with Root and the CompositorManager2 as a listener by its own `setEnabled`,
+// still holding three 32 px textures, reported by `giStatus().probeCount` with
+// `pccBound` false, and re-captured at 32 px by the budget every frame once
+// something marked it stale.
+void OgreScene::destroyProbeGrid() {
+    if (!mPcc) return;
+    {
+        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+        if (pbs->getParallaxCorrectedCubemap() == mPcc) {
+            pbs->setParallaxCorrectedCubemap(nullptr);
+            // The env slot's occupancy is a PROCESS-WIDE question
+            // (reflectionTexForDatablocks' note): every scene's datablocks may
+            // take their own sky cube back now.
+            if (mEngine) mEngine->reapplyReflectionsAllScenes();
+        }
+    }
+    delete mPcc; mPcc = nullptr;
+    mProbeSlots.clear();
+    mProbeUpdatesPerFrame = 0;
+    mPccCaptureSize = 0;
+    mPccHdr = mPccShadowed = false;
+}
+
 // THE PROBE GRID, WHOLE — the three stages back to back, which is the order and
 // the code the single function always ran. Every caller but the streaming flush
 // (OPEN_COVER_SPEC §2 A) uses this, so a complete frame builds the grid exactly
@@ -5744,25 +5856,7 @@ void OgreScene::buildPccFit() {
                     std::to_string(kProbeScoutResolution) + " px, 0 kept — scout " +
                     std::to_string(mPccPhaseMs[0]) + " place " + std::to_string(mPccPhaseMs[1]) +
                     " drop " + std::to_string(mPccPhaseMs[2]) + " ms");
-            // BY POINTER IDENTITY, like teardownVct's unbind: the process-wide
-            // HlmsPbs binding may belong to ANOTHER scene, and clearing it from
-            // here would blank that scene's reflections for a grid this one
-            // never built. (This scene's own pointer is the one being deleted.)
-            {
-                Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-                if (pbs->getParallaxCorrectedCubemap() == mPcc) {
-                    pbs->setParallaxCorrectedCubemap(nullptr);
-                    // The env slot's occupancy is a PROCESS-WIDE question
-                    // (reflectionTexForDatablocks' note): every scene's
-                    // datablocks may take their own sky cube back now.
-                    if (mEngine) mEngine->reapplyReflectionsAllScenes();
-                }
-            }
-            delete mPcc; mPcc = nullptr;
-            mProbeSlots.clear();
-            mProbeUpdatesPerFrame = 0;
-            mPccCaptureSize = 0;
-            mPccHdr = mPccShadowed = false;
+            destroyProbeGrid();
             return;
         }
         if (mProbesDropped)
@@ -5770,6 +5864,26 @@ void OgreScene::buildPccFit() {
                 "Jahshaka GI: " + std::to_string(mProbesDropped) + " of " +
                 std::to_string(mProbesDropped + int(mPcc->getProbes().size())) +
                 " probes saw nothing inside the lit volume and were dropped");
+    }
+    // THE SURVIVORS ARE QUIET UNTIL STAGE 3 BINDS THEM (fix round item 3).
+    //
+    // `buildEnd` re-publishes every probe through `CubemapProbe::set`, which
+    // raises `mDirty` unconditionally, and a probe is born with upstream's
+    // `mNumIterations` of 8. When the three stages ran back to back that state
+    // lived for microseconds; STAGED, it survives to the end of the frame, and
+    // `ParallaxCorrectedCubemapAuto::frameStarted` then collects every dirty
+    // probe and renders all of them — 32 probes x 6 faces of full scene passes
+    // — at the SCOUT's 32 px, for a grid that stage 3 is about to re-create at
+    // the tier's size and capture properly. Pure waste, inside the "fit"
+    // number.
+    //
+    // Cleared here rather than paused: `latchProbeCaptures` writes `mPaused`
+    // every frame from "is anyone looking at this scene", so a pause set here
+    // would be undone before the frame ends. Stage 3's own `set()` raises
+    // `mDirty` again for the one capture that is not waste.
+    for (Ogre::CubemapProbe *p : mPcc->getProbes()) {
+        p->mNumIterations = 1u;
+        p->mDirty = false;
     }
     // ...AND THE SURVIVORS' SHAPES ARE CLAMPED, and then the grid is RE-CREATED
     // at the kept count and the REAL resolution (lane SKY-FALLBACK-1, second
@@ -6507,10 +6621,11 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
 void OgreScene::teardownVct() {
     // A STAGED BUILD IS OVER (OPEN_COVER_SPEC §2 A): the arm it was filling in
     // is about to stop existing, so the stages it still owed describe nothing.
-    // Every one of them is whole — a stage never leaves half a GPU resource —
-    // so abandoning is all that is needed; the unwinding below is the same as
-    // for an arm nobody staged.
-    abandonStagedGiBuild();
+    // STOPPED, not rewound — the caller is tearing the whole arm down and the
+    // build that follows starts from the beginning anyway. Every stage is whole,
+    // so there is never half a GPU resource to unwind; the grid this function
+    // deletes below is the same one a rewind would have deleted.
+    mGiBuildStage = GiBuildStage::Idle;
     // THE DDGI FIELD DIES FIRST (spike §8, verified across all four shapes: GI
     // off under a bound field, a refresh under one, a rebuild over a refreshed
     // arm, and the Engine destroyed with one live). It holds a raw VctLighting*

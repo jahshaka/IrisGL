@@ -805,7 +805,8 @@ public:
     /// cheapest correct arm for what actually changed — under a cascade chain an
     /// edit costs the cascades that can see it, one per frame — so callers may
     /// invoke this per edit.
-    virtual void        refreshGlobalIllumination() = 0;
+    virtual void        refreshGlobalIllumination(
+        GiRefreshReason reason = GiRefreshReason::Explicit) = 0;
 
     // ---- a world that is not on screen yet (OPEN_COVER_SPEC §2 A) ---------
     /// THE LOAD IS A STRETCH, NOT A FRAME. While this is true the scene starts

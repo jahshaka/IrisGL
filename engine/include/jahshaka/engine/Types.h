@@ -5456,6 +5456,16 @@ enum class FrameCause { Unknown, Driver, Scripted, Offscreen, WarmUp, Player };
 /// tile's offscreen shot), and a single one of them left at `Complete` builds
 /// the whole arm in the middle of the load. That is `Scene::setLoading`, a
 /// sticky flag the host raises for the length of the load.
+/// WHO ASKED FOR A GI REFRESH (SPECS/OPEN_COVER_SPEC.md §2 A, fix round item 4).
+/// `Explicit` is a person or a script — `world.refreshGi()`, a quality change,
+/// a suite asserting on the next frame — and is promised the WHOLE answer, so a
+/// staged arm build is finished on the spot. `Settle` is the mirror noticing
+/// the scene stopped moving; it is worth the cheapest correct step and nothing
+/// more, because draining a staged build there would put the whole block back
+/// into one frame (~700 ms on Grand Showroom 2) for a drag that ended inside
+/// the streaming window.
+enum class GiRefreshReason { Explicit, Settle };
+
 enum class FramePace {
     /// Do everything this frame needs, now. The default and the contract.
     Complete,
