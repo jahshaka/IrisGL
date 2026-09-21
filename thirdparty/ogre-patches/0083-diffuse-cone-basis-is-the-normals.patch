@@ -1,0 +1,275 @@
+Jahshaka patch 0083 — the diffuse cone basis is a function of the normal, in the
+world.
+
+MEDIA-only patch (one Hlms piece: Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any).
+Studio stages its media from the SOURCE tree (cmake/IncludeOgre.cmake), so every
+tree still has to re-run `irisgl/scripts/build-ogre.sh` to get it — no engine
+COMPILE is needed beyond the staging, which is the whole difference from a
+SOURCE patch. It OVERLAPS patches 0021, 0033, 0045, 0048, 0066 and 0070 in that
+one file: a tree that already carries those hits `build-ogre.sh`'s "Upstream
+changed the patched file" on a re-run, which is the documented per-patch
+reverse-check blind spot and NOT an upstream change. The cure is the recorded
+one — reset the submodule (`git -C irisgl/thirdparty/ogre-next checkout -- . &&
+git -C irisgl/thirdparty/ogre-next clean -fd`) and re-run the script.
+
+WHAT THE USER SEES (owner review 2026-09-18, screenshots 10 and 11): a hard
+DIAGONAL across one flat face of a cube, corner to corner, with a stippled GRAIN
+over it — a flat, uniformly lit, single-material quad shaded as two visibly
+different triangles.
+
+WHY. `applyVoxelConeTracing` traces six diffuse cones in TANGENT SPACE and needs
+a frame to put them in. Upstream handed it whichever frame happened to be in
+scope:
+
+  * where the datablock has a normal map (`normal_map`, which every tangented
+    mesh in this tree generates) it is the MATERIAL's TBN — `normalize(
+    inPs.tangent )` and the binormal built from it. That is a per-VERTEX
+    attribute, authored for TEXTURING, and it has three properties that are all
+    fine for its own job and all wrong for this one: it is INTERPOLATED, so it
+    is a different function inside each of a quad's two triangles (they are
+    built from different vertex triples) — the diagonal; it is interpolated PER
+    PIXEL and renormalised, so it rotates continuously across a surface — the
+    grain; and it follows the UV authoring, so the same box turned on its own
+    axis gets a different frame — the same solid shades differently.
+  * everywhere else it is `generateTbn`, whose tangent is `OGRE_ddx( pos )`, and
+    whose own comment in this file says the result "isn't fully stable due to
+    how DDX works and due to floating point precision".
+
+Neither is a defect in ITS OWN job. The defect is that a cone DISTRIBUTION is
+not a tangent-space quantity at all: nothing about where the six cones should
+point depends on how the artist laid out the UVs. And the error is not small,
+because the cone set is not azimuthally symmetric against an ANISOTROPIC voxel
+field — the six directional volumes are sampled by three-axis blends, so
+rotating the frame about the normal changes which volumes each cone reads.
+
+MEASURED (lane CUBE-SHADE-1, 2026-09-21, a 4 m cube on the default ground at
+Epic, 1920x1080, the editor's own grade):
+
+  turning the cube 90 degrees about its own axis — the same solid, in the same
+  place, with the same world geometry and the same face normal:
+
+      before   92.9 % of the face's pixels move, worst 16/255, mean 4.8
+      after     2.96 %                          , worst  1/255  (the dither)
+
+  the high-frequency energy inside one triangle of the face (mean |p - the mean
+  of its two horizontal neighbours|, in display codes):
+
+      before   3.28        GI off (the floor)  0.51
+      after    0.49        GI+AO off           0.54
+
+  i.e. the grain is gone to the dither floor, and the diagonal with it.
+
+AND THE FRAME IS ANCHORED IN THE WORLD, WHICH IS THE SECOND HALF OF THE FIX.
+Everything in this shader is in VIEW space — the vertex shader multiplies the
+normal by worldView, and VctLighting's xform is voxel * view^-1 — so a frame
+built from `pixelData.geomNormal` as it stands is a frame that TURNS WITH THE
+CAMERA. Frisvad's construction is not rotation-equivariant, so the six cones
+would swing about the normal as the head moves: a slow swim of the bounce while
+orbiting, and a moving picture on every head turn in VR. That would be a worse
+defect than the one this patch is here to fix, and it is not one the material
+tangent frame had — a tangent is a world-attached vertex attribute that merely
+arrives rotated into view space.
+
+`passBuf.invViewMatCubemap` is the inverse view rotation (with Ogre's
+left-handed cubemap z flip) and lives in every non-caster Pbs pass buffer, which
+is exactly the set of passes this piece runs in. Read vector-first it takes a
+view-space direction into that camera-independent space — the same line the
+env-probe piece uses a few hundred lines below — and read matrix-first it brings
+one back, the matrix being orthogonal. The frame is built out there and composed
+back in ONCE, so the cone loop and every other reader of the matrix are
+untouched, at a cost of two 3x3 products per pixel.
+
+  measured, the image-centre probe on a VERTICAL face 0.5 m above the floor,
+  with the camera orbiting the point it looks at so that the world point, its
+  normal, its neighbours and its voxels are identical at every yaw, each read
+  DRAINED until two consecutive reads agree to a quarter of a code:
+
+      camera yaw    0 deg     +30 deg   -30 deg   back to 0 (the floor)
+      stock          59.16     55.09     53.37     57.16   -> worst 5.79 (2.00)
+      view-anchored  59.16     54.09     53.37     57.16   -> worst 5.79 (2.00)
+      world-anchored 81.88     80.88     80.88     80.88   -> worst 1.00 (1.00)
+
+  Two honest notes on that table. The view-anchored arm is NOT separable from
+  stock at 30 degrees: the residual both of them carry is the cascade's own
+  re-centring as the camera position moves, and it is larger than the frame's
+  contribution at this angle, so the magnitude of the temporal artefact is NOT
+  established by this measurement — the argument for anchoring is structural,
+  and the stability of the third row is what it buys. And a ZERO-YAW camera
+  cannot see the difference at all: with no yaw the view x-axis IS world x, so
+  for every axis-aligned surface the view-space normal has x = 0 and Frisvad's
+  tangent comes out along world x either way. That is exactly why the selftest's
+  pose 1 — the camera that has never moved — is byte-identical under this patch
+  while the yawed pose 2 is not.
+
+WHAT THIS PATCH DOES. `buildConeBasis( n )` is Frisvad's orthonormal basis
+(JGT 2012), continuous over the whole sphere but for ONE direction, where a
+branch returns a fixed frame instead of dividing by zero.
+
+THE SPECIAL DIRECTION IS A WORLD AXIS, AND THAT IS A MEASUREMENT, NOT A
+DEFAULT. The hairy-ball theorem says some direction has to be special; now that
+the frame is world-anchored, that is a fixed direction OF THE WORLD, so it is a
+real choice. The obvious one is to steer it onto a body diagonal, which no
+axis-aligned surface has: a fixed pre-rotation of the space does it in four
+lines. That was built and measured, and it COSTS LIGHT. The six cones of an
+axis-aligned surface then all point at odd angles, where every sample is a
+three-way blend of the anisotropic voxel volumes instead of a near-direct read
+of one, and the bounce comes out systematically dimmer:
+
+    gi.field_follows' own bar — the red a wall bounces onto grey ground beyond
+    cascade 0, against a GI-off control of 0.0000:
+
+        stock cone basis                  0.0174   (suite passes)
+        world-anchored, on the axes       0.0174   (suite passes)
+        world-anchored, body diagonal     0.0105   (suite REDS, bar 0.012)
+
+    i.e. forty per cent of the bounce, on every surface in every scene. The
+    default scene's selftest said the same thing more quietly: with the body
+    diagonal, 44,781 of the 44,786 pixels that moved got DARKER.
+
+So the axes stay. The price is stated rather than hidden: the special direction
+is a world axis, so a surface whose normal is within a hair of it takes the
+branch's fixed frame while its neighbours take a rapidly turning one. The two
+properties cannot be separated — "the frame is axis-aligned for axis normals"
+and "the reference direction is an axis" are the same statement — so this is a
+trade, made on the side the measurement points to. Duff's branchless variant is
+refused for a reason that survives either choice: its sign flip makes the
+discontinuity a whole GREAT CIRCLE instead of a point.
+
+THE OTHER TRADE, STATED. A world-anchored frame is invariant under camera
+motion and NOT under rotating the whole scene about an axis; a view-anchored one
+is the reverse. Cameras move every frame and whole scenes are rotated never, so
+this is the side to be on — but it is a choice, not a free lunch, and the
+hairy-ball residue is where it is paid.
+
+The material's own TBN is untouched and goes on doing its one job (turning a
+tangent-space normal map into a world-space normal). `generateTbn` had exactly
+one call site, which is this one, and goes with it.
+
+--- a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+@@ -59,19 +59,68 @@
+ 		float travelled;
+ 	};
+ 
+-	/// Generates a TBN matrix when no tangent information is present using
+-	/// DDX information.
+-	/// Should only we used as a fallback as the result isn't fully stable due to how DDX works
+-	/// and due to floating point precision. It is possible for the TBN to change as you zoom-in
+-	/// to the triangle.
+-	INLINE float3x3 generateTbn( float3 geomNormal, float3 pos )
++	/// Jahshaka patch 0083: THE CONE BASIS IS A FUNCTION OF THE NORMAL AND OF
++	/// NOTHING ELSE. `buildConeBasis` returns an orthonormal frame whose third
++	/// axis is `n`, built by Frisvad's method (JGT 2012) -- continuous over the
++	/// whole sphere but for ONE direction, where the branch below hands back a
++	/// fixed frame instead of dividing by zero.
++	///
++	/// `n` is expected in a CAMERA-INDEPENDENT space (the caller hands it the
++	/// normal taken to cubemap space), because a frame is only worth building
++	/// once it cannot turn with the head.
++	///
++	/// AND IT IS BUILT ABOUT THAT SPACE'S OWN AXES, which is a decision that was
++	/// measured rather than argued. Frisvad's construction is written about
++	/// (0,0,1) and its one special direction is the antipode, so a fixed
++	/// pre-rotation would move that direction anywhere -- onto a body diagonal,
++	/// say, which no axis-aligned surface has. That was tried, and it COSTS
++	/// LIGHT: the six cones of an axis-aligned surface then all point at odd
++	/// angles, where every sample is a three-way blend of the anisotropic voxel
++	/// volumes instead of a near-direct read of one, and the bounce comes out
++	/// systematically dimmer. Measured on gi.field_follows' own bar -- the red a
++	/// wall bounces onto grey ground beyond cascade 0 -- 0.0174 with the axes,
++	/// 0.0105 with the body diagonal: forty per cent of the bounce, gone, on
++	/// every surface in every scene.
++	///
++	/// WHAT THAT BUYS AND WHAT IT COSTS. Keeping the axes keeps the common case
++	/// (walls, floors, ceilings) on the voxel volumes' own axes. The price is
++	/// that the special direction is a world axis: a surface whose normal is
++	/// within a hair of it takes the branch's fixed frame while its neighbours
++	/// take a rapidly turning one. The two properties cannot be separated --
++	/// "the frame is axis-aligned for axis normals" and "the reference direction
++	/// is an axis" are the same statement -- so this is a trade, and it is made
++	/// on the side the measurement points to.
++	///
++	/// The two frames this REPLACES were both unstable, and the instability is
++	/// visible because the diffuse cone set is not azimuthally symmetric against
++	/// an anisotropic voxel field: rotate the frame about the normal and the six
++	/// cones read different axis volumes.
++	///   * the material's TANGENT frame (what the normal_map permutations used):
++	///     a per-VERTEX attribute authored for texturing, interpolated from a
++	///     different vertex triple in each triangle of a quad, so one flat face
++	///     shaded as two triangles with a hard kink along its own diagonal, with
++	///     per-pixel grain across each, and the same box shaded differently after
++	///     being turned on its own axis.
++	///   * the DDX fallback (what the rest used), whose own comment above said it
++	///     "isn't fully stable due to how DDX works and due to floating point
++	///     precision".
++	INLINE float3x3 buildConeBasis( float3 n )
+ 	{
+-		float3 tangentX = OGRE_ddx( pos.xyz ).xyz;
+-		tangentX = normalize( tangentX );
+-
+-		float3 binormal = cross( geomNormal, tangentX ) ;
+-		float3x3 TBN = buildFloat3x3( tangentX, binormal, geomNormal );
+-		return TBN;
++		float3 t;
++		float3 b;
++		if( n.z < -0.9999999 )
++		{
++			t = float3( 0.0, -1.0, 0.0 );
++			b = float3( -1.0, 0.0, 0.0 );
++		}
++		else
++		{
++			float a = 1.0 / ( 1.0 + n.z );
++			float c = -n.x * n.y * a;
++			t = float3( 1.0 - n.x * n.x * a, c, -n.x );
++			b = float3( c, 1.0 - n.y * n.y * a, -n.y );
++		}
++		return buildFloat3x3( t, b, n );
+ 	}
+ 
+ 	@foreach( 2, n )
+@@ -790,9 +839,32 @@
+ @end
+ 
+ @piece( applyVoxelConeTracing )
+-	@property( !normal_map )
+-		float3x3 TBN = generateTbn( pixelData.geomNormal, inPs.pos );
+-	@end
++	// Jahshaka patch 0083: the cones get their own frame, and THE FRAME IS
++	// ANCHORED IN THE WORLD, not in the camera.
++	//
++	// Everything in this shader is in VIEW space -- the vertex shader
++	// multiplies the normal by worldView, and the voxel transform
++	// (VctLighting's xform = voxel * view^-1) takes view-space directions to
++	// voxel space -- so a frame built from `pixelData.geomNormal` as it stands
++	// would turn about the normal with the camera's own rotation. For a level
++	// camera the floor's tangent would simply BE the camera's right vector, and
++	// the bounce would swim as you orbit and move on every head turn in VR.
++	// That is a worse defect than the one this patch is here to fix, and it is
++	// not one the material tangent frame had: a tangent is a world-attached
++	// vertex attribute that merely arrives rotated into view space.
++	//
++	// `passBuf.invViewMatCubemap` is the inverse view rotation (with Ogre's
++	// left-handed cubemap z flip) and is in every non-caster Pbs pass buffer,
++	// which is exactly the set of passes this piece runs in. Read
++	// vector-first it takes a view-space direction to that camera-independent
++	// space -- the same line the env-probe piece uses a few hundred lines below
++	// -- and read matrix-first it brings one back, the matrix being orthogonal.
++	// So the frame is built out there and composed back in ONCE, which leaves
++	// the cone loop and every other reader of this matrix untouched.
++	float3x3 jahConeToView = passBuf.invViewMatCubemap;
++	float3x3 jahConeBasis =
++		mul( jahConeToView,
++			 buildConeBasis( mul( float3( pixelData.geomNormal ), jahConeToView ) ) );
+ 
+ 	@property( use_parallax_correct_cubemaps )
+ 		float3 vctSpecPosVS = float3( 0, 0, 0 );
+@@ -811,7 +883,7 @@
+ 	@property( jah_sky_env_probe )
+ 					 jahEscapeColour, jahEscapeWeight, jahConeWeight,
+ 	@end
+-					 pixelData, inPs.pos, TBN,
++					 pixelData, inPs.pos, jahConeBasis,
+ 				@property( vct_ambient_hemisphere )
+ 					 ambientWD, ambientWS,
+ 				@end
