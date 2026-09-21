@@ -842,7 +842,15 @@ bool OgreView::setScene(Scene *scene) {
 bool OgreView::attachWorkspace() {
     JAH_TRY {
         if (mWorkspace) return true;
-        if (!mScene || !mCamera) return false;
+        // NO SCENE MEANS THE CLEAR-ONLY CHAIN, not "no workspace at all" (lane
+        // STALE-VIEW-1). The seam is the seam: every caller that dropped a
+        // workspace and asks for it back — a definition rebuild, a resize, an
+        // MSAA change, the shadow-atlas swap, detachScene itself — gets back
+        // whichever chain this view is entitled to right now.
+        if (!mScene || !mCamera) return attachBlankWorkspace();
+        // ...and a scene bind replaces the clear-only chain rather than stacking
+        // a second workspace on the same target.
+        detachBlankWorkspace();
         Ogre::TextureGpu *t = target();
         if (!t) return false;
         mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
@@ -912,7 +920,9 @@ void OgreView::setStereo(bool on, const std::string &cullCamera) {
 }
 
 bool OgreView::detachWorkspace() {
-    if (!mWorkspace) return false;
+    // The clear-only chain targets the same texture and answers the same
+    // question (see the declaration); a view never has both.
+    if (!mWorkspace) return detachBlankWorkspace();
     // THE REFLECTION TRACE HOLDS THIS CHAIN'S TEXTURES (PHOTON_SPEC §7 R5).
     // Everything below is about to destroy them; see dropReflectState().
     dropReflectState();
@@ -930,6 +940,63 @@ bool OgreView::detachWorkspace() {
         mWorkspace = nullptr;
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// ---------------------------------------------------------------------------
+// THE CLEAR-ONLY WORKSPACE (chain::buildBlank; lane STALE-VIEW-1). Reached only
+// through attachWorkspace/detachWorkspace above, so it obeys the same seam every
+// other workspace in this engine does.
+bool OgreView::attachBlankWorkspace() {
+    if (mBlankWorkspace) return true;
+    JAH_TRY {
+        Ogre::TextureGpu *t = target();
+        if (!t || !mEngine) return false;
+        Ogre::SceneManager *sm = mEngine->blankSceneManager();
+        if (!sm) return false;
+        if (!mBlankCamera) {
+            // ONE CAMERA, FOR THE LIFE OF THE VIEW. It is created on a scene
+            // manager that outlives every scene, so — unlike the scene chain's
+            // camera — it survives the binds and there is nothing to churn.
+            // Nothing is ever drawn through it: the only pass that names it
+            // renders the overlay queues, which are screen-space.
+            mBlankCamera = sm->createCamera(mName + "/BlankCamera");
+            mBlankCamera->setAutoAspectRatio(true);
+        }
+        if (mBlankWorkspaceDef.empty()) mBlankWorkspaceDef = mName + "/BlankWorkspace";
+        // REBUILT EVERY TIME, because the two things the chain is made of can
+        // both have moved since the last one: the view's BACKGROUND (the clear
+        // colour) and its overlay entitlement. A definition rebuild of two
+        // passes costs nothing, and it keeps setBackground's contract —
+        // "rebuildWorkspaceDef and the next frame has the new colour" — true
+        // for a scene-less view as well.
+        chain::destroy(mRoot->getCompositorManager2(), mBlankWorkspaceDef, mBlankNodeDefs);
+        chain::buildBlank(mRoot->getCompositorManager2(), mBlankWorkspaceDef, mBackground,
+                          overlaysAllowed(), mBlankNodeDefs);
+        mBlankWorkspace = mRoot->getCompositorManager2()->addWorkspace(
+            sm, t, mBlankCamera, mBlankWorkspaceDef, mEnabled);
+        return mBlankWorkspace != nullptr;
+    } JAH_CATCH(mError, false);
+}
+
+bool OgreView::detachBlankWorkspace() {
+    if (!mBlankWorkspace) return false;
+    JAH_TRY {
+        mRoot->getCompositorManager2()->removeWorkspace(mBlankWorkspace);
+        mBlankWorkspace = nullptr;
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+void OgreView::destroyBlankChain() {
+    detachBlankWorkspace();
+    JAH_TRY {
+        chain::destroy(mRoot->getCompositorManager2(), mBlankWorkspaceDef, mBlankNodeDefs);
+        if (mBlankCamera && mEngine) {
+            if (Ogre::SceneManager *sm = mEngine->blankSceneManager())
+                sm->destroyCamera(mBlankCamera);
+        }
+        mBlankCamera = nullptr;
+    } JAH_CATCH(mError, );
 }
 
 void OgreView::syncGlobalsListener() {
@@ -981,7 +1048,15 @@ void OgreView::notePresented() {
     // compositor, and a view with no scene or no workspace draws nothing. Only
     // frames that really put this view's pixels on the target count.
     if (mEnabled && mWorkspace && mScene) { ++mFramesPresented; ++mWorkspaceFramesPresented; }
+    // ...and the other half (View::blankFramesPresented): the frames this view
+    // put on screen with NO scene bound — its background and the HUD over it.
+    // Counted separately and never reset, because it answers a different
+    // question: not "are there pixels of THIS world yet" but "did the teardown
+    // reach the screen at all".
+    else if (mEnabled && mBlankWorkspace && !mScene) ++mBlankFramesPresented;
 }
+
+unsigned long long OgreView::blankFramesPresented() const { return mBlankFramesPresented; }
 
 void OgreView::detachScene() {
     JAH_TRY {
@@ -995,6 +1070,12 @@ void OgreView::detachScene() {
         mCameraNode = 0;
         mScene  = nullptr;
         mFramesPresented = 0;
+        // AND THE CLEAR-ONLY CHAIN TAKES OVER, in the same call (lane
+        // STALE-VIEW-1). Without it this view would present nothing until a
+        // scene was bound again, and a window that presents nothing keeps the
+        // frame the X server was last given — the world that has just been torn
+        // down. See chain::buildBlank.
+        attachWorkspace();
     } JAH_CATCH(mError, );
 }
 
@@ -1142,6 +1223,9 @@ void OgreView::setEnabled(bool on) {
     mEnabled = on;
     JAH_TRY {
         if (mWorkspace) mWorkspace->setEnabled(on);
+        // ...and so does the clear-only one: a hidden viewport must not clear
+        // pixels it does not own.
+        if (mBlankWorkspace) mBlankWorkspace->setEnabled(on);
         // The inset rides the view: a disabled view that still ran its second
         // workspace would draw an inset onto a frame nobody else touched.
         if (mPipWorkspace) mPipWorkspace->setEnabled(on);
@@ -1488,6 +1572,10 @@ bool OgreView::warmUpShaders() {
 
 void OgreView::destroy() {
     detachScene();
+    // detachScene has just put the clear-only chain up (it is what a scene-less
+    // view owns); this view is going away, so it comes straight back down —
+    // workspace, definitions and the camera on the engine's blank manager.
+    destroyBlankChain();
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
         // Same reason as the MSAA recreate: destroying a render window destroys
