@@ -385,13 +385,13 @@ Scene::Scene()
     // And the copy is applied in the wrong place: the AO multiply is a
     // full-screen multiply of the FINAL colour (SSAO_Apply_ps.glsl), so it
     // darkens DIRECT sunlight as well as the ambient it is a model of.
-    // Measured on a 2 m cube lit by the sun alone -- no Sky Light, no GI, no
+    // Measured on a 4 m cube lit by the sun alone -- no Sky Light, no GI, no
     // shadow on the face -- at 1920x1080 in the editor's own grade: at 2.0 m
-    // the wall's pure sunlight was cut by up to 35/255 (60 %) and the cut
-    // reached 1.35 m up a 2 m wall; at 0.35 m it is 23/255 in the bottom
-    // 16 cm, which is where a contact shadow belongs. (The multiply itself is
-    // still wrong and is recorded for its own lane; this number is how far the
-    // wrongness reaches.)
+    // the wall's pure sunlight was cut by up to 35/255 (60 %) at the base and
+    // the cut reached 1.55 m UP the wall; at 0.35 m the same cut is 23/255 in
+    // the bottom 20 cm and nothing above it, which is where a contact shadow
+    // belongs. (The multiply itself is still wrong and is recorded for its own
+    // lane; this number is how far the wrongness reaches.)
     ssaoRadius = 0.35f;
     smaaPreset = -1;
     ssrMode = 0;

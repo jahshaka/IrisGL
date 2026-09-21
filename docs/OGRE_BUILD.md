@@ -2049,9 +2049,9 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     the workspace generation that makes it a draggable dial).
 
   0083-diffuse-cone-basis-is-the-normals — THE DIFFUSE CONE BASIS IS A FUNCTION
-    OF THE NORMAL (lane CUBE-SHADE-1, 2026-09-21), MEDIA-only, one file
-    (Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any), OVERLAPS 0021, 0033, 0045,
-    0048, 0066 and 0070 in that file — a tree carrying those resets the
+    OF THE NORMAL, IN THE WORLD (lane CUBE-SHADE-1, 2026-09-21), MEDIA-only, one
+    file (Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any), OVERLAPS 0021, 0033,
+    0045, 0048, 0066 and 0070 in that file — a tree carrying those resets the
     submodule before `build-ogre.sh` rather than reading the per-patch reverse
     check's complaint as an upstream change. The owner's review R8: a hard
     DIAGONAL across one flat face of a cube, corner to corner, with a stippled
@@ -2066,28 +2066,77 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     about where six cones should point depends on the UV layout. And the error
     is large, because the cone set is not azimuthally symmetric against an
     ANISOTROPIC voxel field — rotating the frame about the normal changes which
-    of the six directional volumes each cone reads. Measured on a 2 m cube at
+    of the six directional volumes each cone reads. Measured on a 4 m cube at
     Epic, TURNING IT 90 DEGREES ABOUT ITS OWN AXIS (same solid, same place, same
     face normal): 92.9 % of the face's pixels moved, worst 16/255, mean 4.8 —
     1/255 (the dither) after. The per-pixel grain inside one triangle fell from
     3.28 display codes of high-frequency energy to 0.49, which is what the same
-    face measures with GI off. `buildConeBasis( geomNormal )` is Frisvad's
-    orthonormal basis (JGT 2012): continuous over the whole sphere but for the
-    single direction (0,0,-1), where a branch returns a fixed frame instead of
-    dividing by zero. The hairy-ball theorem says some direction has to be
-    special; a POINT is the best available, and it was chosen over the
-    branchless (Duff 2017) variant for exactly that reason — Duff's sign flip
-    puts the discontinuity on the whole great circle n.z = 0, which in an
-    axis-aligned scene contains the floor's normal and two of the four wall
-    normals. Measured side by side on spheres, cylinders and a torus the two
-    agree over 99.5 % of the frame. The material's own TBN is untouched;
-    `generateTbn` had exactly one call site, this one, and goes with it. BOTH
-    SELFTEST HASHES: pose 1 `2aadbc10…` UNCHANGED (the default scene's ground
-    normal (0,1,0) happens to get the same frame from Frisvad as it got from its
-    own affine UV tangent), pose 2 `0f084cec…` -> `87b3e71e…` (63.8 % of pixels
-    by at most 2/255, 34,480 darker against 6,174 brighter; swapping the one
-    media file back reproduces `0f084cec…` byte for byte). Guarded by
-    `scripting.e2e.cube_shade`, whose first half is the 90/180-degree turn.
+    face measures with GI off.
+    THE FRAME IS ANCHORED IN THE WORLD, which is the second half of the fix and
+    the one the lane's first cut got wrong. Everything in this shader is in VIEW
+    space (the vertex shader multiplies the normal by worldView; VctLighting's
+    xform is voxel * view^-1), so a frame built from `pixelData.geomNormal` as
+    it stands turns about the normal with the camera — a swim while orbiting and
+    a moving picture on every VR head turn, which the material tangent frame,
+    being a world-attached attribute, never had. `passBuf.invViewMatCubemap` (in
+    every non-caster Pbs pass buffer) takes the normal out to a
+    camera-independent space vector-first and brings the frame back matrix-first,
+    the matrix being orthogonal; the frame is composed back in ONCE so the cone
+    loop is untouched, at two 3x3 products per pixel. Measured with the camera
+    ORBITING the point it looks at — same world point, same normal, same voxels,
+    each read drained until two consecutive reads agree to a quarter of a code —
+    worst move over +-30 degrees of yaw, same-pose floor in brackets: stock
+    5.79 (2.00), view-anchored 5.79 (2.00), world-anchored 1.00 (1.00). The
+    view-anchored arm is NOT separable from stock at that angle (the residual
+    both carry is the cascade's own re-centring as the camera position moves), so
+    the magnitude of the temporal artefact is not established by that table; the
+    argument for anchoring is structural and the third row's stability is what it
+    buys. A ZERO-YAW camera cannot see the difference at all — with no yaw the
+    view x-axis IS world x, so every axis-aligned surface's view-space normal has
+    x = 0 and Frisvad's tangent lands on world x either way, which is why pose 1
+    of the selftest is byte-identical under this patch and the yawed pose 2 is
+    not.
+    `buildConeBasis( n )` is Frisvad's orthonormal basis (JGT 2012) — continuous
+    over the sphere but for ONE direction, where a branch returns a fixed frame
+    instead of dividing by zero — and it is built about the SPACE'S OWN AXES,
+    which is a measurement rather than a default. The hairy-ball theorem says
+    some direction must be special, and once the frame is world-anchored that is
+    a fixed direction OF THE WORLD, so it is a real choice. Steering it onto a
+    body diagonal (a fixed pre-rotation, four lines) was built and measured and
+    COSTS LIGHT: the six cones of an axis-aligned surface then all point at odd
+    angles, where every sample is a three-way blend of the anisotropic voxel
+    volumes instead of a near-direct read of one. On `gi.field_follows`' own bar
+    — the red a wall bounces onto grey ground beyond cascade 0, against a GI-off
+    control of 0.0000 — stock reads 0.0174, world-anchored on the axes 0.0174,
+    and world-anchored on a body diagonal 0.0105, which REDS the suite (bar
+    0.012): forty per cent of the bounce, on every surface in every scene. So
+    the axes stay, and the price is stated rather than hidden — the special
+    direction is a world axis, so a normal within a hair of it takes the
+    branch's fixed frame while its neighbours take a rapidly turning one, and
+    the two properties cannot be separated ("the frame is axis-aligned for axis
+    normals" and "the reference direction is an axis" are the same statement).
+    Duff's branchless variant is refused for a reason that survives either
+    choice: its sign flip makes the discontinuity a great CIRCLE, not a point.
+    THE OTHER TRADE: a world-anchored frame is invariant under camera motion and
+    not under rotating a whole scene about an axis; a view-anchored one is the
+    reverse, and cameras move every frame where whole scenes are rotated never.
+    The material's own TBN is untouched; `generateTbn` had exactly one call
+    site, this one, and goes with it.
+    BOTH SELFTEST HASHES ARE UNCHANGED — pose 1 `2aadbc10…`, pose 2 `0f084cec…`,
+    zero pixels of either — which is the strongest thing this entry says. The
+    default scene's ground gets the same frame from the world-anchored Frisvad
+    construction as it got from its own affine UV tangent, in EVERY pose
+    including the yawed one, so the patch is a no-op exactly where the old frame
+    already happened to be right and a fix where it was not. (The lane's first
+    cut built the frame in VIEW space and moved 63.8 % of the yawed pose's
+    pixels; that is what camera dependence looks like in a hash.) Guarded by
+    `scripting.e2e.cube_shade`: one flat face must read as ONE surface across its
+    own diagonal (worst per-height spread over five probe columns 3.00/255
+    against 8.07 on the stock frame), and turning the cube about its own axis
+    must barely move it (3.07/255 against 7.07). Neither residual is the frame —
+    the turned orientation's five columns read identically at every height — and
+    both are handed to LATTICE-1 as the VOXELISER's own dependence on a mesh's
+    triangulation.
 
 
 THE STACK IS 0001-0083 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
