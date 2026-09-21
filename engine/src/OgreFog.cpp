@@ -277,17 +277,34 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         Ogre::TextureGpu *gather = probeGather(sceneManager);
         if (gather) {
             // A POINT sampler: the piece reads the texel under the fragment,
-            // never between two of them. The samplerblock is the Hlms
-            // manager's own reference-counted one, released at the pass's end
-            // by nobody — it is a shared block, borrowed exactly as the sky's
-            // trilinear one is.
-            Ogre::HlmsSamplerblock ref;
-            ref.setFiltering(Ogre::TFO_NONE);
-            ref.setAddressingMode(Ogre::TAM_CLAMP);
-            sPassProbeGatherSampler =
-                hlms->getHlmsManager()->getSamplerblock(ref);
-            sPassProbeGather = gather;
-            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_probe_gather", 1);
+            // never between two of them.
+            //
+            // ACQUIRED ONCE PER MANAGER, NOT ONCE PER PASS, and that is not
+            // tidiness: `HlmsManager::getSamplerblock` takes a REFERENCE and
+            // `HlmsSamplerblock::mRefCount` is a uint16 (OgreHlmsDatablock.h),
+            // so acquiring one per colour pass per frame wraps the counter to
+            // zero in about six minutes of drawing and destroys a block that
+            // is bound. One reference is taken for the manager's life — the
+            // manager dies with Root, and the pointer is re-fetched if a new
+            // one ever appears.
+            static const Ogre::HlmsManager *sSamplerOwner = nullptr;
+            static const Ogre::HlmsSamplerblock *sGatherSampler = nullptr;
+            Ogre::HlmsManager *mgr = hlms->getHlmsManager();
+            if (mgr && sSamplerOwner != mgr) {
+                Ogre::HlmsSamplerblock ref;
+                ref.setFiltering(Ogre::TFO_NONE);
+                ref.setAddressingMode(Ogre::TAM_CLAMP);
+                sGatherSampler = mgr->getSamplerblock(ref);
+                sSamplerOwner = mgr;
+            }
+            // THE PAIR IS SET TOGETHER OR NOT AT ALL: a slot claimed by
+            // getNumExtraPassTextures and left unbound is an undefined
+            // descriptor, so no sampler means no property either.
+            if (sGatherSampler) {
+                sPassProbeGatherSampler = sGatherSampler;
+                sPassProbeGather = gather;
+                hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_probe_gather", 1);
+            }
         }
     }
     if (casterPass || !shadowNode || !hlms) return;
