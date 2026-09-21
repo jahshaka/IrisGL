@@ -782,6 +782,37 @@ bool OgreEngine::framePaceOwesWork() const
     return false;
 }
 
+// WHAT THE WORLD STILL OWES, FOR THE ONE LINE THAT SAYS SO (§2.1, §3, lane
+// OPEN-COVER-2b). The same scenes `framePaceOwesWork` walks, with the counts
+// instead of the verdict — so the host's indicator and its slow-frame line read
+// the same state the pace rule reads, and cannot drift from it.
+//
+// EVERY FIELD IS ALREADY KEPT. Nothing here computes anything: the arm's stage
+// is the scene's own state machine, the texture term is the list
+// `settleTextureResidency` spends, and the shader pair comes from the cache's
+// `progress()` — DELIBERATELY not from `shaderCacheStats()`, which stats every
+// file in the cache directory to report its size and is therefore a once-a-load
+// call, not a once-a-frame one.
+StreamingWork OgreEngine::streamingWork() const
+{
+    StreamingWork out;
+    for (const auto &sc : mScenes) {
+        // The stage reported is the FURTHEST-BEHIND scene's: there is one world
+        // arriving at a time in this application, and a second scene that owes
+        // nothing must not overwrite the one that does.
+        const unsigned left = sc->giBuildStagesLeft();
+        if (left > out.giStagesLeft) {
+            out.giStagesLeft = left;
+            out.giStage = sc->giBuildStage();
+        }
+        out.materialsAwaitingTexture += sc->materialsAwaitingTexture();
+        out.giRebuilds += sc->giRebuildCount();
+    }
+    unsigned fromCache = 0u, expected = 0u;
+    mShaderCache.progress(out.shadersCompiled, fromCache, expected);
+    return out;
+}
+
 // EVERY LIVE WORKSPACE THIS ENGINE CAN REACH, once a frame.
 //
 // Same shape and same reason as the shadow counters' re-attach: workspaces are

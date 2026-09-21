@@ -5475,6 +5475,60 @@ enum class FramePace {
     Streaming
 };
 
+/// WHICH STAGE OF A WORLD'S FIRST LIGHTING ARM IS STILL OWED
+/// (SPECS/OPEN_COVER_SPEC.md §2 A). The public mirror of the scene's own stage
+/// machine, in the order the stages run; `None` means no staged build is in
+/// flight. It exists so the HOST can name what a frame spent — the loading
+/// indicator's "lighting…" and the slow-frame line's cause — without a monitor
+/// capture running and without reaching into the engine's private types.
+enum class GiArmStage : unsigned char {
+    None,
+    ProbeScout,    ///< one photograph of the space, to place the grid in
+    ProbeFit,      ///< the placement over every candidate, then keep/drop
+    ProbeFinish,   ///< clamp, re-create at the real resolution, the closing capture
+    Field          ///< the irradiance field and the volume bookkeeping
+};
+
+/// WHAT A WORLD STILL OWES WHILE IT STREAMS IN (SPECS/OPEN_COVER_SPEC.md §2.1,
+/// §3, lane OPEN-COVER-2b). The reading behind the loading indicator — one line
+/// at the bottom of the viewport while a world fills in — and behind
+/// `editor.viewportState().pending`.
+///
+/// CHEAP BY CONTRACT, because the host reads it once per frame while a world
+/// arrives: every field is a counter or a flag already kept for another reason.
+/// In particular it is NOT `shaderCacheStats()`, which stats every file in the
+/// shader-cache directory to report its size — fine once, not once a frame.
+///
+/// HONEST ABOUT WHAT CANNOT BE COUNTED: a PSO is generated when a renderable is
+/// first DRAWN, so "shaders still to compile" is not a number anything can
+/// know. `shadersCompiled` is the running total for this process, and a host
+/// that wants "is it still compiling" differences it across frames.
+struct StreamingWork {
+    /// Stages of the staged first arm build still to run, summed over every
+    /// scene (0 = none owed). 4 the moment a build is staged, then 3, 2, 1.
+    unsigned   giStagesLeft = 0;
+    /// The stage that will run NEXT — what "lighting…" is actually doing.
+    GiArmStage giStage = GiArmStage::None;
+    /// Materials bound to a texture whose pixels have not landed yet: they draw
+    /// with a fallback until `settleTextureResidency` swaps the real one in.
+    unsigned   materialsAwaitingTexture = 0;
+    /// `ShaderCacheStats::compiledThisRun`, without the directory scan — see
+    /// the note above. A RUNNING TOTAL for the process: a caller that wants
+    /// "did the last frame compile anything" differences it across frames.
+    ///
+    /// `expectedShaders` is deliberately NOT here. It is the PREVIOUS
+    /// session's whole total — everything it compiled or read from the cache,
+    /// boot included — so as a denominator for "how far through this load are
+    /// we" it is not merely imprecise, it is a different quantity.
+    unsigned   shadersCompiled = 0;
+    /// WHOLE-ARM GI REBUILDS this process has done, staged and unstaged alike
+    /// (`OgreScene::rebuildVct`'s own counter, summed over the live scenes).
+    /// Differenced across a frame it is the honest answer to "did the lighting
+    /// arm run in that frame", which the stage counter above cannot give: a
+    /// `Complete` frame builds the WHOLE arm and never touches a stage.
+    unsigned long long giRebuilds = 0;
+};
+
 /// EVERYTHING ONE `renderOneFrame` DID. One of these per frame while a capture
 /// runs; the host drains them with `takeFrameRecords` and writes them to
 /// `frames.jsonl`.

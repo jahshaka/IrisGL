@@ -3966,6 +3966,39 @@ public:
     /// Does this scene still owe a stage of a staged arm build? Read by
     /// Engine::framePaceOwesWork.
     bool giBuildOwesWork() const;
+    /// HOW MUCH of a staged arm build is still owed, and which stage is next
+    /// (OPEN_COVER_SPEC §2.1, lane OPEN-COVER-2b). The public mirror of
+    /// `mGiBuildStage`, which names the stage that will run NEXT — so `Field`
+    /// is one stage from done and `ProbeScout` is four. Inline and const: this
+    /// is read once per frame while a world streams in, by the indicator and by
+    /// the slow-frame line that names what a frame spent.
+    unsigned giBuildStagesLeft() const {
+        switch (mGiBuildStage) {
+        case GiBuildStage::Idle:        return 0u;
+        case GiBuildStage::ProbeScout:  return 4u;
+        case GiBuildStage::ProbeFit:    return 3u;
+        case GiBuildStage::ProbeFinish: return 2u;
+        case GiBuildStage::Field:       return 1u;
+        }
+        return 0u;
+    }
+    GiArmStage giBuildStage() const {
+        switch (mGiBuildStage) {
+        case GiBuildStage::Idle:        return GiArmStage::None;
+        case GiBuildStage::ProbeScout:  return GiArmStage::ProbeScout;
+        case GiBuildStage::ProbeFit:    return GiArmStage::ProbeFit;
+        case GiBuildStage::ProbeFinish: return GiArmStage::ProbeFinish;
+        case GiBuildStage::Field:       return GiArmStage::Field;
+        }
+        return GiArmStage::None;
+    }
+    /// Materials whose bound texture has not finished streaming — the entries
+    /// `settleTextureResidency` spends. The indicator's "textures" term.
+    unsigned materialsAwaitingTexture() const {
+        return unsigned(mMaterialsAwaitingTexture.size());
+    }
+    /// Whole-arm rebuilds this scene has done — `StreamingWork::giRebuilds`.
+    unsigned long long giRebuildCount() const { return mGiRebuilds; }
     /// Is a deferred read of a texture's PIXELS owed this frame? True while the
     /// sky's IBL convolution is pending — the one piece of per-frame work that
     /// reads texture contents and cannot be asked twice (OPEN_COVER_SPEC §2 E).
@@ -6326,6 +6359,7 @@ public:
     void setNextFrameCause(FrameCause cause) override;
     void setNextFramePace(FramePace pace) override;
     bool framePaceOwesWork() const override;
+    StreamingWork streamingWork() const override;
     bool captureSnapshot(EngineSnapshot &out, const std::string &label,
                          Scene *scene = nullptr) const override;
     /// Attaches (or removes) the monitor's pass listener on every live
