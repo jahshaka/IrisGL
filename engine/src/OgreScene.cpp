@@ -592,6 +592,7 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     // carries kHelperBit alone.
     if (n.item) n.item->setVisibilityFlags(
                     itemVisibilityFlags(n, n.materialUnlit, n.materialDistortion));
+    if (n.item) markGpuSlotDirty(n);   // the table's flags word follows the channels
     // ...AND A CASCADE CHAIN HOLDS ITS OWN COPY OF THAT DECISION (audit D2).
     // Each cascade's voxeliser is given the GI item set ONCE and re-selects
     // only when it flips between empty and non-empty (rule 1), so an object
@@ -981,7 +982,10 @@ void OgreScene::setNodeLightMask(NodeId id, unsigned mask) {
     // the Item it creates, which is also what makes the mask survive the Item
     // rebuild a material swap performs.
     it->second.lightMask = Ogre::uint32(mask);
-    if (it->second.item) it->second.item->setLightMask(Ogre::uint32(mask));
+    if (it->second.item) {
+        it->second.item->setLightMask(Ogre::uint32(mask));
+        markGpuSlotDirty(it->second);   // the table carries the light mask (ids.z)
+    }
     // Deliberately NOT pushed to billboards or particle systems: a PFX2
     // definition is pooled and shared between nodes (mParticleDefPool), so a
     // per-node mask on one would silently mask every node recycling it.
@@ -1005,7 +1009,10 @@ void OgreScene::setNodeCastShadow(NodeId id, bool on) {
     if (it == mNodes.end()) return;
     const bool changed = it->second.castShadow != on;
     it->second.castShadow = on;
-    if (it->second.item) it->second.item->setCastShadows(on);
+    if (it->second.item) {
+        it->second.item->setCastShadows(on);
+        markGpuSlotDirty(it->second);   // the caster bit of the flags word
+    }
     // A caster that just appeared or vanished is exactly what the lamp-map
     // cache exists to notice.
     if (changed && it->second.item) markShadowShapeDirty(it->second);
@@ -1432,6 +1439,11 @@ void OgreScene::destroy() {
         // someone else's items. Defined in OgreRayQuery.cpp — like every other
         // line of the tier — so no TU without Vulkan ever sees it.
         forgetRayQuery();
+        // THE GPU SCENE'S TABLES, with the ray tier and for the same two
+        // reasons: they are `UavBufferPacked`s, which must be destroyed while
+        // this tree's VaoManager is alive, and the mesh table HOLDS MeshPtrs —
+        // and a MeshPtr outliving Root throws in VaoManager (trap 1).
+        mGpuScene.destroy();
         // FIRST, before anything else in this scene goes: the overlay system's
         // render-queue listener is registered on THIS SceneManager, and the
         // teardown order the component needs is
@@ -1471,7 +1483,7 @@ void OgreScene::destroy() {
             if (mm.resourceExists(kv.second.name)) mm.remove(kv.second.name);
         }
         mMeshes.clear();
-        mLodErrorsByMesh.clear();
+        mMeshIdByOgreMesh.clear();
         mCardsByMesh.clear();
         mRoot->destroySceneManager(mSceneMgr);
         // AFTER the SceneManager, deliberately. Particle definitions are freed
@@ -1546,6 +1558,11 @@ void OgreScene::detachItem(NodeId id, Node &n) {
         // input and nothing else — no voxel ever held it.
         else if (probeSeesItem(n)) staleProbeGrid(GiStaleReason::Moved);
         unindexItemNode(n);   // the item walk: a caster leaving is a change
+        // THE MESH TABLE'S REFERENCE, before the Item that held it dies.
+        if (n.gpuMeshSlot != 0xFFFFFFFFu) {
+            releaseGpuMesh(n.item->getMesh().get());
+            n.gpuMeshSlot = 0xFFFFFFFFu;
+        }
         n.item->detachFromParent(); mSceneMgr->destroyItem(n.item); n.item = nullptr;
         // AND THE CLIPS (S16, SMOKE_FIX_SPEC_2026_09_11 §1.1). The
         // SkeletonInstance belongs to the Item and has just died with it, while
@@ -1856,7 +1873,7 @@ void OgreScene::updateSurfaceCache() {
         c.sceneNode = n->node;
         c.material = n->materialRef;
         c.cards = cards;
-        c.lodErrors = lodErrorsFor(n->item->getMesh().get());
+        c.lodBounds = lodBoundsFor(n->item->getMesh().get());
         view.candidates.push_back(c);
     }
     mSurfaceCache->update(view);

@@ -345,6 +345,22 @@ public:
     /// with no baked chain are unaffected by any value.
     virtual void        setLodBias(float bias) = 0;
     virtual float       lodBias() const = 0;
+    /// DIAGNOSTIC: the SHAPE of a mesh's LOD and shadow VAO lists (ATOM P1's
+    /// AT-A11). `levels` is how many LOD levels the mesh has and
+    /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the
+    /// corresponding normal one — i.e. how many shrunk position-only VAOs this
+    /// mesh pays for. The shape the engine builds is 1 (level 0 optimized, the
+    /// coarse levels aliased) or 0 (nothing to optimize, everything aliased); it
+    /// was `levels` before ogre-patch 0088 made a MIXED list legal to destroy.
+    /// False for an unknown mesh. Exists because that shape is Ogre-internal, it
+    /// is VRAM per mesh forever, and a suite has to be able to see it.
+    virtual bool        meshVaoShape(MeshId mesh, unsigned &levels,
+                                     unsigned &shadowIndependent) const = 0;
+    /// WHICH LEVEL EVERY DRAWN OBJECT IS ON (ATOM P1's readout). One row per node
+    /// that carries an Item, in node order; see `ObjectLodDesc` for what `level`
+    /// means and for the one thing it cannot promise. Cheap: it reads a byte and
+    /// a VAO's primitive count per object and allocates the vector.
+    virtual void        objectLods(std::vector<ObjectLodDesc> &out) const = 0;
     /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
     /// text. Empty (lastError()) for an unknown material.
     ///
@@ -900,6 +916,24 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
+    /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
+    /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
+    /// which flushes the render system's recorded commands first and is
+    /// therefore a suite's verb and never a frame's.
+    virtual GpuSceneStatus gpuSceneStatus() const { return GpuSceneStatus(); }
+    virtual bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
+        (void)slot; (void)out; return false;
+    }
+    virtual bool gpuSceneDeviceEntries(unsigned first, unsigned count,
+                                       std::vector<GpuSceneEntry> &out) {
+        (void)first; (void)count; out.clear(); return false;
+    }
+    /// Runs the dirty scan NOW and records its cost in
+    /// `GpuSceneStatus::lastScanMicros`. A suite's verb: the scan is
+    /// epoch-gated and idempotent, so this measures the same walk a frame
+    /// would run, with the timing that a frame deliberately does not pay.
+    virtual void measureGpuSceneScan(bool graphIsCurrent) { (void)graphIsCurrent; }
     /// SURFACE-CACHE phase 2 — the card cache's TEST AND TOOL readbacks.
     ///
     /// The cache itself has no verb: it is configured through

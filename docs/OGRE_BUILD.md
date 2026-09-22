@@ -2130,12 +2130,60 @@ beside `engine/media`, so a MEDIA patch must be applied in the tree even though 
     1.0); fixture B's B1/B2 MOVE — the pillar authored at 3.0 now lights the floor.
 
 
-THE STACK IS 0001-0087 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0088-mixed-shadow-vao-list-is-legal — A MIXED SHADOW-MAPPING VAO LIST IS LEGAL
+    (lane ATOM-BAKE-1, ATOM P1's AT-A11, 2026-09-22), SOURCE-only, one file
+    (OgreMain/src/OgreSubMesh2.cpp) that NO other patch in the stack touches, so
+    it cannot overlap and needs no reset of its own. (Numbered 0087 while the lane
+    was in flight; VOXEL-CLIP-1 claimed that slot at merge.)
+    THE PIN DEFECT, recorded 2026-09-15 and dodged on our side until now
+    (SPECS/OGRE_UPSTREAM_ISSUES.md, "A MIXED shadow-VAO list is a double free"):
+    `SubMesh::destroyShadowMappingVaos` decides ALIAS-versus-INDEPENDENT for the
+    WHOLE shadow list from one test on entry 0, so a list with an optimized VAO at
+    level 0 and the normal VAOs aliased above it reads as fully independent — the
+    aliased entries are destroyed here and again by `~SubMesh`, throwing "Vertex
+    Buffer has already been destroyed or doesn't belong to this VaoManager" on the
+    first mesh destroy after an import. The fix is the alias test PER ENTRY: erase
+    from the shadow list every entry that is also an entry of the normal list,
+    then destroy what is left. Bit-for-bit the old behaviour for both pure shapes
+    (all-aliased erases everything, all-independent erases nothing) and correct
+    for the mixed one; no state is stored, so nothing can drift out of sync, and
+    the lists are one entry per LOD level so the search is a few pointer compares.
+    WHAT IT BUYS THE HOST: `buildMeshV2` builds ONE optimized (shrunk,
+    position-only) shadow VAO for level 0 and ALIASES the normal VAOs for the
+    coarse levels, instead of an independent index buffer and VertexArrayObject
+    per level per mesh. The optimized form exists to stream 12 bytes per vertex
+    instead of 48, and its value is proportional to the vertex fetch a pass
+    actually does — a level that halves its triangles each step does a vanishing
+    share of it, while the per-level buffers cost VRAM forever.
+
+  0089-voxelizer-reports-queued-index-count — A VOXELIZER CAN BE ASKED WHAT IT
+    BOUND (lane ATOM-BAKE-1, ATOM P1's AT-A12, 2026-09-22), SOURCE-only, one file
+    (Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h), OVERLAPS 0061, 0062,
+    0064 and 0065 in that file — a tree carrying them (every tree) resets the
+    submodule before `build-ogre.sh` rather than reading the per-patch reverse
+    check's complaint as an upstream change.
+    `VctVoxelizer` sizes every raster dispatch by `QueuedInstance::numIndices`,
+    filled in `placeItemsInBuckets` from `getLodVao( subMesh, lodLevel )` — the
+    level patch 0064 keys the mesh entry by AND the clamp it applies. Nothing
+    reported that number, so a host wanting to know how much geometry a volume
+    holds had to walk the mesh's VAOs from outside and re-implement the clamp:
+    a PREDICTION that agrees only while the two copies agree and that counts
+    geometry for items the region declined. ONE const accessor,
+    `getQueuedIndexCount()`, summing over the buckets (not `mItems` — the buckets
+    are what the dispatches iterate). No state, no behaviour change, nothing
+    computed at build time. It is the missing third of 0065's
+    `getNumBuckets()` / `getNumOctants()`. DELIBERATELY MINIMAL: the CPU count is
+    what makes `gi.cascade_lod` case 4 a reading today and a GPU reading replaces
+    it in ATOM-VOXEL-1 (SPECS/atom/A5_VOXELISER_RESIDENT_DESIGN.md §1.4) — nothing
+    else is built on it.
+
+
+THE STACK IS 0001-0089 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083/0084/0086) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078, 0081 and 0085 are SOURCE-only (0062, 0065, 0076, 0080 and 0087 are SOURCE + media — 0087's media half is a comment; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078, 0081, 0085, 0088 and 0089 are SOURCE-only (0062, 0065, 0076, 0080 and 0087 are SOURCE + media — 0087's media half is a comment; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
