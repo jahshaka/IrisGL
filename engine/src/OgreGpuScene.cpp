@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
 
 namespace jahshaka {
 namespace engine {
@@ -443,6 +444,11 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     std::memcpy(&out.boundsMax[3], &flags, sizeof(uint32_t));
     out.ids[0] = uint32_t(n.selfId);
     out.ids[2] = uint32_t(n.lightMask);
+    // THE RAY LEVEL (AT-A8r) travels with the entry rather than being poked
+    // into the mirror: every write to this table goes through one composer, so
+    // a slot re-staged for any other reason keeps the level it was given.
+    if (n.itemSlot != size_t(-1) && n.itemSlot < mRayLevel.size())
+        out.ids[3] = mRayLevel[n.itemSlot];
 }
 
 /// A SEAM THAT CHANGED WHAT THE TABLE SAYS WITHOUT MOVING ANYTHING. The
@@ -486,10 +492,25 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
         const Ogre::SubMesh *sub = rec.mesh->getSubMesh(0);
         const Ogre::VertexArrayObjectArray &vaos = sub->mVao[Ogre::VpNormal];
         levelCount = uint32_t(vaos.size());
+        // THE LEVEL'S BOUND TRAVELS WITH ITS RANGE (ATOM-SUBSTRATE-1): without
+        // it no shader can WALK the level rule — see GpuMeshLevel. `lodBounds`
+        // holds levels 1..N-1 (the authored level has no error against itself),
+        // so level l reads index l-1 and level 0 keeps its honest 0.
+        const std::vector<float> &bounds = rec.lodBounds;
         for (uint32_t l = 0; l < levelCount && l < detail::GpuScene::kLevelsPerMesh; ++l) {
             if (!vaos[l]) continue;
             levels[l].firstIndex = vaos[l]->getPrimitiveStart();
             levels[l].indexCount = vaos[l]->getPrimitiveCount();
+            // A MISSING BOUND IS INFINITE, NEVER ZERO. Level 0 is honestly 0 (the
+            // authored geometry has no error against itself), but a level the
+            // bake measured no bound for — a mesh carrying more VAOs than
+            // `lodBounds` entries — would read `0 < allowed` as FREE and the
+            // GLSL walk would run all the way to the coarsest level it can see.
+            // The CPU rule cannot: it caps at `bounds.size()`. FLT_MAX makes the
+            // device's walk stop where the host's does.
+            levels[l].bound = l == 0u ? 0.0f
+                              : (size_t(l - 1u) < bounds.size() ? bounds[l - 1u]
+                                                               : std::numeric_limits<float>::max());
         }
         if (!vaos.empty() && vaos[0]) {
             desc.counts[0] = uint32_t(vaos[0]->getVertexBuffers().empty()
@@ -643,6 +664,109 @@ void OgreScene::ensureGpuSceneTimed(bool graphIsCurrent) const {
 }
 
 // ---------------------------------------------------------------------------
+// THE RAY LEVEL (ATOM P3's SUB-ERROR, AT-A8r) — the level a BLAS should be
+// built from, and the hysteresis that keeps the build rare.
+//
+// THE RULE IS THE QUALITY CURRENCY'S, with the ray's own sample. A ray traced
+// from the camera through a pixel diverges exactly as that pixel's footprint
+// does, so "the ray footprint at the instance's distance" IS
+// `sampleFootprintPerspective(d, proj[1][1], height)` — the same number the
+// view's LOD strategy spends, and the tolerance is ONE of them. Four consumers,
+// one derivation (Types.h): the view in pixels, the cascade in cells, the card
+// in texels, the ray in footprints.
+//
+// WHY THE ANSWER IS STICKY. Rebuilding a bottom-level structure is not a
+// per-frame cost anybody wants at 8,001 instances, so the level is not a
+// function of the live distance but of the distance it was LAST EVALUATED at:
+// the rule is asked again only when the instance has moved into a band twice as
+// far or half as near. Between those crossings the answer cannot change and no
+// distance test is even close to one — which is why the walk below is a compare
+// against one float per slot and nothing else.
+//
+// WHAT IT IS NOT: a draw-time LOD. The picture's level is Ogre's own strategy
+// per pass (OgreMesh.cpp), evaluated every frame with no hysteresis but with
+// patch 0075's band; this is the RAY tier's, evaluated at build time, and the
+// two are allowed to differ — a shadow ray does not need the silhouette the eye
+// does.
+void OgreScene::forgetRayLevel(uint32_t slot) {
+    if (slot < mRayLevel.size()) mRayLevel[slot] = 0u;
+    if (slot < mRayEvalDistance.size()) mRayEvalDistance[slot] = -1.0f;
+}
+
+void OgreScene::updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, float viewportHeight) {
+    if (!mGpuScene.live()) return;
+    const float footprintPerMetre = sampleFootprintPerspective(1.0f, projScaleY, viewportHeight);
+    if (!(footprintPerMetre > 0.0f)) return;
+    const uint32_t n = mGpuScene.slotCount();
+    if (!n) return;
+    // A STILL CAMERA IN A STILL SCENE RUNS NOTHING. The eye is compared
+    // exactly: it is the same float3 the view wrote, not a derived quantity, so
+    // "did not move" is a memcmp and not a tolerance.
+    const bool eyeMoved = mRayEyeValid == false || eye != mRayEye;
+    const bool tableMoved = mGpuScans != mRayLevelScanSeen;
+    if (!eyeMoved && !tableMoved) return;
+    mRayEye = eye;
+    mRayEyeValid = true;
+    mRayLevelScanSeen = mGpuScans;
+    ++mRayLevelWalks;
+
+    if (mRayEvalDistance.size() < n) mRayEvalDistance.resize(n, -1.0f);
+    if (mRayLevel.size() < n) mRayLevel.resize(n, 0u);
+    const detail::GpuInstance *mirror = mGpuScene.mirrorData();
+    for (uint32_t i = 0; i < n; ++i) {
+        const detail::GpuInstance &e = mirror[i];
+        uint32_t meshIndex = 0u;
+        std::memcpy(&meshIndex, &e.boundsMin[3], sizeof(uint32_t));
+        if (meshIndex == detail::GpuScene::kNoMesh) continue;
+        const Ogre::MeshPtr &mesh = mGpuScene.meshAt(meshIndex);
+        if (!mesh) continue;
+        const std::vector<float> *bounds = lodBoundsFor(mesh.get());
+        if (!bounds || bounds->empty()) continue;   // no chain: level 0 for ever
+
+        // The distance Ogre's own strategies use: to the bounding SPHERE, whose
+        // world radius is the local one times the largest axis scale (the rows
+        // of the 3x4 world matrix are those axes).
+        const Ogre::Vector3 centre(0.5f * (e.boundsMin[0] + e.boundsMax[0]),
+                                   0.5f * (e.boundsMin[1] + e.boundsMax[1]),
+                                   0.5f * (e.boundsMin[2] + e.boundsMax[2]));
+        float scale = 0.0f;
+        for (int r = 0; r < 3; ++r) {
+            const float *row = &e.world[r * 4];
+            const float len = std::sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2]);
+            scale = std::max(scale, len);
+        }
+        if (!(scale > 0.0f) || !std::isfinite(scale)) continue;
+        const float radius = float(mesh->getBoundingSphereRadius()) * scale;
+        const float d = std::max(0.0f, float((centre - eye).length()) - radius);
+
+        const float was = mRayEvalDistance[i];
+        // THE 2x BAND. A never-evaluated slot (-1) always evaluates; a slot at
+        // distance 0 would make every band degenerate, so it re-evaluates only
+        // when it leaves 0.
+        if (was >= 0.0f && d <= was * 2.0f && d * 2.0f >= was) continue;
+        mRayEvalDistance[i] = d;
+        ++mRayLevelEvals;
+        // THE CURRENCY, with the ray's sample: ONE footprint of tolerance, the
+        // footprint being the pixel this ray was cast through, grown to the
+        // instance's distance. `sampleFootprintPerspective` is called with the
+        // real distance so the reader sees the derivation rather than a
+        // pre-multiplied constant; the multiply is the same either way.
+        const float allowed = allowedWorldError(
+            kRayFootprintTolerance, sampleFootprintPerspective(d, projScaleY, viewportHeight),
+            scale);
+        const uint32_t want = uint32_t(lodLevelForWorldError(*bounds, allowed, bounds->size()));
+        if (want == mRayLevel[i]) continue;
+        ++mRayLevelRefits;
+        mRayLevel[i] = want;
+        // THE TABLE IS WRITTEN THROUGH THE MIRROR'S OWN PATH: the slot is
+        // re-staged from its node (so `prevWorld` keeps the one rule it has)
+        // and the dirty list carries it to the device with the frame's other
+        // writes. A direct poke into the mirror would not be copied at all.
+        if (i < mItemNodes.size() && mItemNodes[i]) markGpuSlotDirty(*mItemNodes[i]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // THE TEST AND TOOL DOOR.
 namespace {
 void toPublic(const detail::GpuInstance &in, GpuSceneEntry &out) {
@@ -656,6 +780,7 @@ void toPublic(const detail::GpuInstance &in, GpuSceneEntry &out) {
     std::memcpy(&out.flags, &in.boundsMax[3], sizeof(unsigned));
     out.nodeId = in.ids[0];
     out.lightMask = in.ids[2];
+    out.rayLevel = in.ids[3];
 }
 }  // namespace
 
@@ -674,6 +799,9 @@ GpuSceneStatus OgreScene::gpuSceneStatus() const {
     st.aabbReads = mGpuAabbReads;
     st.lastCopyMs = mGpuScene.lastCopyMs();
     st.lastScanMicros = mGpuScanMicros;
+    st.rayLevelEvals = mRayLevelEvals;
+    st.rayLevelRefits = mRayLevelRefits;
+    st.rayLevelWalks = mRayLevelWalks;
     return st;
 }
 

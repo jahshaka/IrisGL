@@ -81,7 +81,14 @@ struct GpuInstance {
     float    prevWorld[12] = {};
     float    boundsMin[4] = {};  ///< xyz world AABB min; [3] = mesh table index (bit-cast uint)
     float    boundsMax[4] = {};  ///< xyz world AABB max; [3] = the flags word (bit-cast uint)
-    uint32_t ids[4] = {};        ///< x = the engine NodeId, y = material bucket (P6), z = light mask, w = 0
+    /// x = the engine NodeId, y = material bucket (P6), z = light mask,
+    /// w = THE RAY LEVEL (ATOM P3's SUB-ERROR, AT-A8r): the mesh level this
+    /// instance's bottom-level acceleration structure should be built from,
+    /// re-evaluated only when the instance's distance from the camera changes by
+    /// 2x (the hysteresis is what keeps a BLAS refit rare — `OgreScene::
+    /// rayLevelFor`). ITS CONSUMER IS P4: the ray tier still builds every BLAS
+    /// from level 0 today, and this field is the rule's answer waiting for it.
+    uint32_t ids[4] = {};
     uint32_t pad[4] = {};
 };
 static_assert(sizeof(GpuInstance) == 160, "the GPU instance table's stride is a contract");
@@ -118,12 +125,31 @@ enum GpuInstanceFlag : uint32_t {
     kGpuGiExcluded = 1u << 9,   ///< excluded from the GI bounds fit
 };
 
-/// The per-(mesh, level) index range Atom P3's selection and P4's voxeliser
-/// read: the first index and the index count of that level, of submesh 0.
+/// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the
+/// index range of that level (of submesh 0) AND THE LEVEL'S MEASURED BOUND,
+/// which is what makes the level RULE evaluable on the device.
+///
+/// THE BOUND IS HERE BECAUSE P3 FOUND THE TABLE COULD NOT ANSWER WITHOUT IT
+/// (ATOM-SUBSTRATE-1, 2026-09-22). `GpuMesh` carries only the level-0 bound —
+/// which is 0 by definition — so a shader holding these tables could decide
+/// "level 0 or coarser" and no more: `lodLevelForWorldError` WALKS the bounds
+/// and there was nothing to walk. The bound belongs beside the range it
+/// selects, so the row grew from 8 to 16 bytes rather than a second table
+/// appearing next to this one. `bound` is `MeshData::lodBounds[level-1]` — the
+/// measured two-sided distance of this level's surface from the authored one,
+/// IN THE MESH'S OWN UNITS — and it is 0 for level 0, which is the honest value
+/// and also exactly what makes the walk's first comparison free.
+///
+/// `reserved` is 0 and is the room P4's widening needs: a draw command's
+/// `vertexOffset` (the level's start in a pooled vertex buffer, which nothing
+/// writes until the device addresses are filled) or a per-submesh dimension.
 struct GpuMeshLevel {
     uint32_t firstIndex = 0;
     uint32_t indexCount = 0;
+    float    bound = 0.0f;
+    uint32_t reserved = 0;
 };
+static_assert(sizeof(GpuMeshLevel) == 16, "the GPU level table's stride is a contract");
 
 class GpuScene {
 public:
