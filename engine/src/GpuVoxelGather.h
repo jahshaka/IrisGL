@@ -28,9 +28,10 @@
 // dispatches.
 //
 // THE READOUT (A5b §3). What a rebuild voxelised is counted on the device, as it is
-// written, into a 32-word block, and read back ONE FRAME LATE through an
-// AsyncTicket that is harvested when its transfer is done — never waited on. It is
-// the truth the CPU prediction it replaces could only approximate.
+// written, into a 32-word block, and read back through an AsyncTicket that is
+// REQUESTED AT THE NEXT FRAME'S START (never inside a rebuild: see markReadoutOwed)
+// and harvested when its transfer is done — never waited on, except by giStatus.
+// It is the truth the CPU prediction it replaces could only approximate.
 //
 // NO VULKAN HERE (the GPU scene's rule): the buffers are Ogre `UavBufferPacked`s,
 // bound to `HlmsComputeJob`s.
@@ -114,8 +115,18 @@ public:
     uint64_t recordCapacity() const { return mRecordCapacity; }
     uint32_t rangeCapacity() const { return mRangeCapacity; }
 
+    /// The gather wrote a readout nobody has asked the device for yet. NOT requested
+    /// at the gather: Ogre's readRequest COMMITS the command buffer, and a commit in
+    /// the middle of a rebuild left a GPU bubble inside it (measured on Showroom 2:
+    /// +2-4 ms per cascade rebuild on the monitor's GPU pair, +0.3-0.5 ms CPU). It is
+    /// requested at the start of the next frame's GI work (`serviceReadout`), where
+    /// the command buffer holds nothing yet, or on demand by giStatus.
+    void markReadoutOwed() { mReadoutOwed = true; }
+    bool readoutOwed() const { return mReadoutOwed; }
+    /// Frame start: collect a finished readout; issue an owed one.
+    void serviceReadout();
     /// Queues the readout's download (after the gather's dispatches, in the same
-    /// command stream) — NON-blocking.
+    /// command stream) — NON-blocking, but it commits the command buffer.
     void requestReadout();
     /// Takes the queued readout if its transfer is done; returns whether it did.
     /// Never waits: a caller that asks too early keeps the previous reading.
@@ -140,6 +151,7 @@ private:
     uint32_t mRangeCapacity = 0;
     uint32_t mMaskCapacity = 0;
     Ogre::AsyncTicketPtr mTicket;
+    bool mReadoutOwed = false;
     VoxelReading mReading;
 };
 

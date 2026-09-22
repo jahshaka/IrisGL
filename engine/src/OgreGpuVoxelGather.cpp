@@ -94,7 +94,13 @@ bool VoxelFeed::ensure(Ogre::VaoManager *vao, uint64_t recordCapacity, uint32_t 
     return mParams && mWork && mRanges && mRecords && mReadout && mMask;
 }
 
+void VoxelFeed::serviceReadout() {
+    harvest();
+    if (mReadoutOwed && !mTicket) requestReadout();
+}
+
 void VoxelFeed::requestReadout() {
+    mReadoutOwed = false;
     if (!mReadout) return;
     // THE ORDER IS THE COMMAND STREAM'S: the copy is recorded after the write job, and
     // Ogre's download path charges a UAV source with SHADER_WRITE from every stage
@@ -135,6 +141,7 @@ bool VoxelFeed::harvest() {
 
 void VoxelFeed::noteEmpty() {
     mTicket.reset();
+    mReadoutOwed = false;
     mReading = VoxelReading();
     mReading.valid = true;
 }
@@ -283,7 +290,7 @@ bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxe
         dispatchGatherImpl(rs, hc, count);
         dispatchGatherImpl(rs, hc, scan);
         dispatchGatherImpl(rs, hc, write);
-        feed.requestReadout();
+        feed.markReadoutOwed();
         unbindGather(count, scan, write);
     }
     catch (Ogre::Exception &e) {

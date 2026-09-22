@@ -4619,6 +4619,7 @@ private:
     /// is waited for (its work is already submitted - the ticket commits). For
     /// giStatus, a diagnostic; nothing per-frame reads it.
     static const detail::VoxelReading &currentReading(detail::VoxelFeed *feed);
+    void serviceVoxelReadouts();
     /// Destroys a chain that never finished building (nothing is bound yet, so
     /// cascade 0 belongs to it too). Returns 0 — it is a JAH_CATCH value.
     size_t abandonCascadeChain();

@@ -227,8 +227,19 @@ bool OgreScene::gatherAndBuild(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxe
 const detail::VoxelReading &OgreScene::currentReading(detail::VoxelFeed *feed) {
     static const detail::VoxelReading kNone;
     if (!feed) return kNone;
+    // ON DEMAND: an owed readout is requested now (the ticket commits the command
+    // buffer and map() waits on its fence - a diagnostic's cost, never a frame's).
+    if (feed->readoutOwed()) { feed->harvest(); feed->requestReadout(); }
     if (!feed->harvest()) feed->harvestBlocking();
     return feed->reading();
+}
+
+/// FRAME START: every feed's finished readout is collected and an owed one is
+/// requested while the frame's command buffer holds nothing (VoxelFeed::markReadoutOwed).
+void OgreScene::serviceVoxelReadouts() {
+    if (mVctFeed) mVctFeed->serviceReadout();
+    for (VctCascade &c : mVctCascades)
+        if (c.feed) c.feed->serviceReadout();
 }
 
 static bool giDebug() {
@@ -3122,6 +3133,7 @@ void OgreScene::forwardPlusLightCensus(unsigned &lights, unsigned &budget) const
 }
 
 void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) {
+    serviceVoxelReadouts();     // before any of this frame's GI work is recorded
     // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
     // places the chain is the one that reads it, and in a session that is the
     // headset's — five times the pixels for half the frame. A change of driver
