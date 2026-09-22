@@ -139,13 +139,27 @@ void OgreScene::queueAllGiMaterials() {
 void OgreScene::convertPendingMaterials() {
     Ogre::VctMaterial *store = vctMaterialStore();
     if (!store) return;
+    // A SLOT IS RE-COMPOSED ONLY WHEN ITS WORD CHANGES. A from-scratch arm queues
+    // every GI slot and a refresh re-reads every row, but a datablock that keeps its
+    // (pool, slot) leaves the table exactly as it is - so a rebuild of a still scene
+    // copies nothing into the GPU scene (gi.voxel_feed asserts it).
+    const detail::GpuInstance *mirror = mGpuScene.live() ? mGpuScene.mirrorData() : nullptr;
+    const auto restageIfChanged = [&](const Node &n) {
+        if (n.itemSlot == size_t(-1) || !n.item || !n.item->getNumSubItems()) return;
+        const Ogre::VctMaterial::DatablockConversionResult *r =
+            store->lookupDatablock(n.item->getSubItem(0)->getDatablock());
+        const uint32_t word = r ? ((r->bucketIdx << 16u) | (r->slotIdx & 0xFFFFu))
+                                : detail::GpuScene::kNoMaterialWord;
+        if (!mirror || n.itemSlot >= mItemNodes.size() || mirror[n.itemSlot].ids[1] != word)
+            markGpuSlotDirty(n);
+    };
     if (mVctMaterialRefreshOwed) {
         mVctMaterialRefreshOwed = false;
         Ogre::FastArray<Ogre::HlmsDatablock *> moved;
         store->refreshAll(&moved);
         if (!moved.empty())
             for (const Node *np : mItemNodes)
-                if (np->item && (np->item->getVisibilityFlags() & kGiGeometryBit)) markGpuSlotDirty(*np);
+                if (np->item && (np->item->getVisibilityFlags() & kGiGeometryBit)) restageIfChanged(*np);
     }
     if (mVctPendingMaterialSlots.empty()) return;
     std::vector<uint32_t> pending;
@@ -157,7 +171,7 @@ void OgreScene::convertPendingMaterials() {
         Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
         if (!db) continue;
         if (!store->lookupDatablock(db)) store->addDatablock(db);
-        markGpuSlotDirty(n);
+        restageIfChanged(n);
     }
 }
 
@@ -1132,6 +1146,8 @@ GiStatus OgreScene::giStatus() const {
             cs.lastCpuMs  = c.lastCpuMs;
             cs.voxelLevels = rd.histogram;          // partitions per level, attach set
             cs.voxelTriangles = (long long)(rd.indexTotal / 3u);
+            cs.voxelRecords   = (long long)rd.records;
+            cs.voxelOverflow  = (long long)rd.overflow;
             // WHAT THE REBUILD COST IN DISPATCHES (ogre-patch 0065): counted by the
             // voxeliser's last build() - one per store bucket per octant, 0 when it
             // only cleared. A dispatch is sized by the whole octant, so this is the
