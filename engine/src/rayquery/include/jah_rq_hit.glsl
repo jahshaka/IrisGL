@@ -41,6 +41,25 @@
 
 #include "jah_rq_finite.glsl"
 
+// THE READ ITSELF IS THE ONE VOXEL RADIANCE READER'S (PHOTON-READER-1): the
+// anisotropic three-axis blend, the isotropic slot at Low, the footprint's mip
+// and the usable-sample guard live in jah_voxel_sample.glsl, which the pixel
+// shader's cone march, the bounce job and the irradiance field read too. This
+// file keeps what is the HIT's own: which cascade answers, the step into the
+// hit's cell, the six-cell crossfade, the multiplier and the opacity divide.
+// The ray jobs declare combined sampler arrays under the names below, so the
+// sample macros default to them.
+#ifndef JAH_VOX_HAS_ANISO
+#define JAH_VOX_HAS_ANISO 1
+#endif
+#ifndef JAH_VOX_SAMPLE_ISO
+#define JAH_VOX_SAMPLE_ISO( c, u, l ) textureLod( voxelIso[c], u, l )
+#define JAH_VOX_SAMPLE_X( c, u, l ) textureLod( voxelX[c], u, l )
+#define JAH_VOX_SAMPLE_Y( c, u, l ) textureLod( voxelY[c], u, l )
+#define JAH_VOX_SAMPLE_Z( c, u, l ) textureLod( voxelZ[c], u, l )
+#endif
+#include "jah_voxel_sample.glsl"
+
 const float kMaxRadiance = 1024.0;
 
 /// The radiance leaving `hitPos` towards where the ray came from, read out of
@@ -80,30 +99,9 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		const float texel = 2.0 * max( invSize.w, 1e-6 );
 		float lod = 0.0;
 		if( !mirror )
-			lod = clamp( log2( max( footprint, texel ) / texel ), 0.0, 6.0 );
-		vec4 s;
-		if( JAH_VOX_ANISO )
-		{
-			vec3 isNegative;
-			isNegative.x = dir.x < 0.0 ? 0.5 : 0.0;
-			isNegative.y = dir.y < 0.0 ? 0.5 : 0.0;
-			isNegative.z = dir.z < 0.0 ? 0.5 : 0.0;
-			vec3 uvw = ls;
-			uvw.x = clamp( uvw.x, 0.0, 1.0 ) * 0.5;
-			const vec4 xc = textureLod( voxelX[c], uvw + vec3( isNegative.x, 0.0, 0.0 ), lod );
-			const vec4 yc = textureLod( voxelY[c], uvw + vec3( isNegative.y, 0.0, 0.0 ), lod );
-			const vec4 zc = textureLod( voxelZ[c], uvw + vec3( isNegative.z, 0.0, 0.0 ), lod );
-			const vec3 w = dir * dir;
-			s = w.x * xc + w.y * yc + w.z * zc;
-		}
-		else
-		{
-			// Low tier: VctLighting was built without the anisotropic chains and
-			// slot 0 carries every mip. Directionally averaged, and the honest
-			// answer available.
-			s = textureLod( voxelIso[c], ls, lod );
-		}
-		if( s.w <= 0.02 || !finite3( s.xyz ) || !finite1( s.w ) )
+			lod = jahVoxelFootprintLod( footprint, texel );
+		const vec4 s = jahVoxelSample( c, ls, dir, lod );
+		if( !jahVoxelSampleUsable( s ) )
 			continue;					// this cascade holds nothing here
 		float w = 1.0;
 		if( !mirror )
