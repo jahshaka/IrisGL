@@ -2095,13 +2095,47 @@ beside `engine/media`, so a MEDIA patch must be applied in the tree even though 
     shader carries one constant and two branches on a compile-time constant, and
     BOTH SELFTEST HASHES ARE UNCHANGED (777eb2f1… / c2c2b19f…).
 
+  0087-voxel-emissive-is-a-float — THE EMISSIVE VOXEL STORE IS AN RGBA16F FLOAT
+    (PHOTON phase A, lane VOXEL-CLIP-1, 2026-09-22), SOURCE + MEDIA but the media
+    half is a COMMENT ONLY: two files, one functional line
+    (`VctVoxelizer::createVoxelTextures`: `mEmissiveVox->setPixelFormat(
+    PFG_RGBA16_FLOAT )` instead of `PFG_RGBA8_UNORM`) plus a note in
+    `Samples/Media/VCT/Voxelizer_piece_cs.any`'s D3D11-without-typed-UAV-loads
+    branch. OVERLAPS 0062/0065/0081 in the .cpp and 0065 in the .any, so every
+    tree resets the submodule before `build-ogre.sh`.
+    ALBEDO IS A RATIO, EMISSIVE IS A RADIANCE. Albedo's UNORM store is exact by
+    definition; emissive has no upper bound worth naming, and this was the one
+    place the engine still clipped it. VctMaterial already carried it as four
+    floats, the order-independent merge accumulates it on a fixed-point grid
+    clamped at 16.0 per contribution (0065) and the LIT volume has been a float
+    since 0080 — but the final `imageWrite` went into a UNORM8 texel, so an
+    emitter authored at 3.0 was stored as exactly 1.0 and `LightInjection` seeds
+    the radiance volume off that texel (`blockColour = emissiveVal.xyz`): two
+    thirds of the energy lost into the bounces, the field, the cones and the ray
+    hits, silently. Measured before/after on tests/rtreflect's lamp arm (a perfect
+    mirror is a radiometer): 0.333x of the emitter's radiance before, 1.00x after.
+    NOTHING ELSE NEEDED CHANGING, and that is worth writing down: the GLSL image
+    declaration takes its format qualifier from an inserted piece HlmsComputeJob
+    generates from the BOUND TEXTURE (`uav4_pf_type`), the typed-UAV write is a
+    float4 either way, `ComputeTools::clearUavFloat` clears any non-integer format
+    (a 64-bit 3D clear is fine — 0065's device-loss note is about a 128-bit one),
+    every reader loads it as a sampled `texture3D`, and `VoxelizedMeshCache` takes
+    the format through `copyParametersFrom`. The commented-out `layout (rgba8)`
+    lines in `Voxelizer_cs.glsl` are upstream's dead notes and are left alone.
+    THE HEADROOM RULE IS NOW ONE CONSTANT: `VOXEL_MERGE_CLAMP` (16.0) is the
+    documented ceiling per contribution; there is no silent clip at 1.0 left.
+    COST at High on Showroom 2: the emissive volumes 18.00 -> 36.00 MB (the whole
+    VCT texture set 365 -> 383 MB); a cascade rebuild's CPU unchanged at ~2.05 ms.
+    HASHES: poses 1 and 2 UNCHANGED (the default scene authors no emissive above
+    1.0); fixture B's B1/B2 MOVE — the pillar authored at 3.0 now lights the floor.
 
-THE STACK IS 0001-0086 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
+
+THE STACK IS 0001-0087 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083/0084/0086) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078, 0081 and 0085 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078, 0081 and 0085 are SOURCE-only (0062, 0065, 0076, 0080 and 0087 are SOURCE + media — 0087's media half is a comment; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

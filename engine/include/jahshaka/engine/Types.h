@@ -3573,6 +3573,23 @@ struct GiVoxelStats {
     /// 8-bit store would have CLIPPED. It is the measurement that says whether
     /// the format's range is being used or merely provided.
     long long voxelsAboveOne = 0;
+
+    /// THE SOURCE, beside the lit volumes above (VOXEL-CLIP-1). The lit volume
+    /// is what the cones read; the EMISSIVE VOXEL STORE is what the injection
+    /// SEEDS it from, so a clip there cannot be told from a dim emitter anywhere
+    /// downstream. These read the voxeliser's own emissive volume, in SCENE
+    /// RADIANCE (no normalisation: the voxeliser writes the material's emissive
+    /// as authored — `multiplier` does not apply to them).
+    ///
+    /// `emissiveFormat` is empty when this cascade has no voxeliser to read.
+    /// `peakEmissive` is the largest channel in the volume — for a scene with
+    /// one emitter, its authored radiance. `emissiveAtMax` counts texels on a
+    /// UNORM store's top bin, which IS the clip, and `emissiveAboveOne` counts
+    /// what an 8-bit store could not have held.
+    std::string emissiveFormat;
+    float peakEmissive = 0.0f;
+    long long emissiveAtMax = 0;
+    long long emissiveAboveOne = 0;
 };
 
 // ---------------------------------------------------------------------------

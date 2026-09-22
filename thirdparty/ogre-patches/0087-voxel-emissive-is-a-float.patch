@@ -1,0 +1,133 @@
+Jahshaka patch 0087: the EMISSIVE voxel store is an RGBA16F float, so an emitter
+authored above 1.0 reaches the light injection intact. (PHOTON phase A,
+VOXEL-CLIP-1, 2026-09-22. SOURCE + MEDIA: every tree resets the submodule and
+re-runs build-ogre.sh.)
+
+WHAT IT CHANGES
+  * VctVoxelizer::createVoxelTextures: mEmissiveVox is PFG_RGBA16_FLOAT instead
+    of PFG_RGBA8_UNORM. That is the whole functional change -- ONE line.
+  * Voxelizer_piece_cs.any: a COMMENT ONLY, in the D3D11-without-typed-UAV-loads
+    branch, saying why that branch keeps packing UNORM8 and what a D3D11 port has
+    to fix. No code in any shader moves.
+
+WHY (SPECS/photon/A2_VOXEL_CLIP_DESIGN.md)
+  Albedo is a ratio and lives in [0, 1] by definition. EMISSIVE is a radiance --
+  W/(m^2 sr) -- and a lamp, a screen or a sky panel is authored above 1.0 as a
+  matter of course. Every other stage of this engine already carried it honestly:
+  VctMaterial stores four floats per datablock (shaderMaterial.emissive[i] =
+  emissiveCol[i]), our order-independent merge accumulates it on a fixed-point
+  grid whose per-contribution clamp is 16.0 (patch 0065), and the lit volume has
+  been a float since patch 0080. The one clip left was the final store, and it
+  was total: an emitter at radiance 3.0 was written as exactly 1.0, and
+  LightInjection seeds the radiance volume straight off that texel
+  (blockColour = emissiveVal.xyz), so a third of the emitter's energy entered the
+  bounces, the irradiance field, the diffuse cones and the ray hits -- with no
+  hitch, no log line, and a picture that merely looks dimmer. Measured before this
+  patch on tests/rtreflect's lamp arm: a PERFECT MIRROR showing an emitter of
+  radiance 3.0 read 0.333x of it, i.e. exactly 1.0, when radiance is invariant
+  along a ray and it must read 3.0.
+
+  RGBA16_FLOAT and not 32: half carries 65504 with an 11-bit mantissa, finer than
+  the merge's own 1/4096 grid everywhere in [0, 16]. So the HEADROOM RULE is now
+  stated by ONE constant: VOXEL_MERGE_CLAMP (16.0) in Voxelizer_piece_cs.any is
+  the documented ceiling per contribution, beyond which the merge saturates. There
+  is no silent clip at 1.0 anywhere in the chain.
+
+WHY NOTHING ELSE MOVES (verified at this pin, and it is worth writing down)
+  * The GLSL image declaration carries NO hard-coded format qualifier:
+    Voxelizer_cs.glsl declares voxelEmissiveTex through an inserted piece that
+    HlmsComputeJob generates from the BOUND TEXTURE's pixel format
+    (OgreHlmsComputeJob.cpp setProperties: uav4_pf_type ->
+    VulkanPixelFormatToShaderType::getPixelFormatType -> "rgba16f"). The
+    commented-out layout lines further down that file naming rgba8 are upstream's
+    own dead notes and are deliberately left alone.
+  * The typed-UAV write is a float4 in both cases (OGRE_imageWrite3D4 of
+    voxelMergeEmissive's result), so no shader text changes.
+  * ComputeTools::clearUavFloat asserts only that the format is NOT INTEGER and
+    dispatches Compute/Tools/ClearUav, which declares its UAV from the same
+    generated pieces -- a float 3D clear of any non-integer format. (Unlike patch
+    0065's MergeAccum note: it is a 128-bit clear that loses the device on this
+    driver, not a float one. 64 bits clears correctly; measured.)
+  * Every READER loads it as a sampled texture (LightInjection_cs.glsl:
+    uniform texture3D voxelEmissiveTex, read by texelFetch), which returns floats
+    whatever the store.
+  * VoxelizedMeshCache's cached copies take the format through
+    copyParametersFrom(voxelizer.getEmissiveVox()).
+
+COST (Showroom 2 at High, this rig, Xvfb 1920x1080, one chain of four cascades)
+  VRAM: the emissive volumes go from 18.00 MB to 36.00 MB (2 x 128^3 at 8 -> 16 MB
+  and 2 x 64^3 at 1 -> 2 MB); the whole VCT texture set 365 MB -> 383 MB.
+  A cascade rebuild (voxelise + the first light injection: the gi/vct.cascadeN
+  cache-work row of a perf.capture, eight rebuilds of the chain per run, forced by
+  a camera teleport away and back): CPU 2.05 ms mean before, 1.63 ms after, and a
+  SECOND patched run read 1.33 ms -- so the change is BELOW this instrument's
+  run-to-run spread and no cost increase is measurable. The GPU halves move the
+  same way (6.5 / 4.2 / 3.6 ms), as do rows this patch cannot touch
+  (gi/ifd.converge 3.02 / 1.92 ms), which is what says it is the environment:
+  the clocks are not locked under Xvfb and each arm is a different process.
+  Mechanically there is no reason to expect one -- the write is one imageStore per
+  covered voxel and the dispatch is bound by the triangle walk.
+
+diff --git a/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp b/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
+index 96f1c3834..6d4bc9612 100644
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
+@@ -907,7 +907,34 @@ namespace Ogre
+             textures[i]->scheduleTransitionTo( GpuResidency::OnStorage );
+ 
+         mAlbedoVox->setPixelFormat( PFG_RGBA8_UNORM );
+-        mEmissiveVox->setPixelFormat( PFG_RGBA8_UNORM );
++        // JAHSHAKA PATCH 0087: THE EMISSIVE VOXEL IS A FLOAT.
++        //
++        // Albedo is a RATIO and lives in [0, 1] by definition, so its UNORM store
++        // above is exact. EMISSIVE is a RADIANCE -- W/(m^2 sr), no upper bound
++        // worth naming -- and this store was the one place it was clipped: the
++        // material store carries it as four honest floats (VctMaterial:
++        // shaderMaterial.emissive[i] = emissiveCol[i]) and the merge accumulates
++        // it on a fixed-point grid clamped at 16.0 per contribution (patch 0065),
++        // but the final imageWrite went into a UNORM8 texel, so an emitter
++        // authored at 3.0 was stored as exactly 1.0 and the light injection seeded
++        // the radiance volume from that (LightInjection_piece_cs.any:
++        // blockColour = emissiveVal.xyz) -- a third of the energy, entering the
++        // bounces, the irradiance field, the cones and the ray hits, with nothing
++        // in any log and a picture that merely looks dimmer.
++        //
++        // RGBA16_FLOAT and not 32: half carries 65504 with 11 bits of mantissa,
++        // which is finer than the merge's own 1/4096 grid everywhere in [0, 16] --
++        // the grid's clamp, not the format, is now the documented ceiling.
++        //
++        // NOTHING ELSE MOVES. The GLSL image declaration carries no hard-coded
++        // format: HlmsComputeJob generates the layout qualifier from the bound
++        // texture (uav4_pf_type, OgreHlmsComputeJob.cpp), the typed-UAV write is a
++        // float4 either way, ComputeTools::clearUavFloat clears any non-integer
++        // format, and every reader loads through a sampled texture3D. The one
++        // backend that cannot follow is D3D11 WITHOUT typed UAV loads, whose
++        // branch packs the texel into a single uint -- see the note beside it in
++        // Voxelizer_piece_cs.any.
++        mEmissiveVox->setPixelFormat( PFG_RGBA16_FLOAT );
+         mNormalVox->setPixelFormat( PFG_R10G10B10A2_UNORM );
+         if( hasTypedUavs )
+             mAccumValVox->setPixelFormat( PFG_R16_UINT );
+diff --git a/Samples/Media/VCT/Voxelizer_piece_cs.any b/Samples/Media/VCT/Voxelizer_piece_cs.any
+index 09d049a06..8f0d572d0 100644
+--- a/Samples/Media/VCT/Voxelizer_piece_cs.any
++++ b/Samples/Media/VCT/Voxelizer_piece_cs.any
+@@ -539,6 +539,18 @@
+ 			OGRE_imageWrite3D4( voxelEmissiveTex, voxelCelUvw, voxelEmissive );
+ 			OGRE_imageWrite3D1( voxelAccumVal, voxelCelUvw, uint4( totalTris, 0, 0, 0 ) );
+ 		@else
++			// JAHSHAKA PATCH 0087: THE BRANCH THAT CANNOT FOLLOW THE FLOAT STORE.
++			// This is D3D11 without typed UAV loads, where each texel is packed
++			// into ONE 32-bit uint, and the emissive volume is now RGBA16_FLOAT
++			// (64 bits per texel, OgreVctVoxelizer.cpp createVoxelTextures): a
++			// half pair per channel needs two uints, so this path would need the
++			// volume declared as a two-component uint image to carry it. It is
++			// left packing UNORM8 deliberately -- this tree ships Vulkan only,
++			// the GLSL and Metal paths take the branch above, and a silent
++			// half-written texel would be worse than a documented ceiling. A
++			// D3D11 port fixes this line together with the image declaration in
++			// Voxelizer_cs.hlsl; the emissive clip at 1.0 is what it inherits
++			// until then.
+ 			OGRE_imageWrite3D4( voxelAlbedoTex, voxelCelUvw, packUnorm4x8( voxelAlbedo ) );
+ 			OGRE_imageWrite3D4( voxelNormalTex, voxelCelUvw, packUnormRGB10A2( voxelNormal ) );
+ 			OGRE_imageWrite3D4( voxelEmissiveTex, voxelCelUvw, packUnorm4x8( voxelEmissive ) );
