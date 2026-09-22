@@ -3303,12 +3303,19 @@ struct GiStatus {
         std::vector<int> lodLevels;
         /// WHICH LEVELS THE VOXELISER ACTUALLY SPENT (ATOM P4 / AT-A10), read off
         /// the voxeliser after build() rather than predicted before it:
-        /// `voxelLevels[L]` = queued INSTANCES (submesh partitions) voxelised at
-        /// level L. It is the pair of `lodLevels`, which is what the cascade
-        /// ASKED for, and the two agree now that the level is the ITEM's: the
-        /// voxeliser used to collapse a shared mesh onto its finest request, so
-        /// one mesh instanced near and far was voxelised twice at the near level
-        /// and no host-side histogram could say so.
+        /// `voxelLevels[L]` = SUBMESH PARTITIONS voxelised at level L.
+        ///
+        /// IT IS NOT THE SAME UNIT AS `lodLevels`, which counts ITEMS. The
+        /// voxeliser splits a submesh's index range into partitions (2,001
+        /// indices by default) so a voxel can reject a whole partition by its
+        /// AABB, so a mesh over 667 triangles or with several submeshes
+        /// contributes several entries here for one item there. The two agree
+        /// PER LEVEL — which levels are non-zero, and the counts too for meshes
+        /// under one partition — and that is the comparison worth making: a
+        /// level present in one and absent from the other means the voxeliser
+        /// clamped the request. Before the level became the ITEM's, the
+        /// voxeliser collapsed a shared mesh onto its finest request and no
+        /// host-side histogram could say so.
         std::vector<int> voxelLevels;
         /// HOW MANY TRIANGLES THE ATTACH SET HANDS THIS CASCADE at those levels
         /// — the currency of a voxelisation, since the raster dispatch is sized

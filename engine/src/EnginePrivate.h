@@ -4486,8 +4486,10 @@ private:
         /// THE LEVELS THE VOXELISER ACTUALLY SPENT (ATOM P4 / AT-A10) - a READING,
         /// taken off the voxeliser after every `build()` through
         /// `VctVoxelizer::getLevelHistogram()`. The pair of `lodLevels` above,
-        /// which is the request; they agree now that the level is per instance,
-        /// and a disagreement from here on means the voxeliser clamped.
+        /// which is the request - but in PARTITIONS, not items (see
+        /// GiStatus::CascadeStatus::voxelLevels): which LEVELS are non-zero must
+        /// match, the counts only for meshes under one partition. A level present
+        /// in one and absent from the other means the voxeliser clamped.
         std::vector<int> voxelLevels;
         /// THE TRIANGLES THE VOXELISER ACTUALLY HOLDS — a READING, taken off the
         /// voxeliser after every `build()` through ogre-patch 0089's
