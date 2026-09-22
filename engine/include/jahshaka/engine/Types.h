@@ -2113,16 +2113,13 @@ struct GiParams {
     /// media/Hlms/Jahshaka/JahIfd_piece_ps.any, so changing it is a const-buffer
     /// write and never a shader rebuild).
     ///
-    /// 1.0 is upstream's raw brightness, and it is also the CALIBRATED default:
-    /// measured on the gi.modes room, the field's red bounce at 1.0 is 0.145
-    /// against the VCT diffuse's 0.169 that it replaces — 86%, the same visual
-    /// class, no trim needed. (The P0 spike's "~13x dimmer" reading was an
-    /// artifact of the pass-buffer misalignment described on
-    /// the pass-buffer under-report (fixed by ogre-patch 0050), which was collapsing every irradiance
-    /// lookup onto one texel; it is corrected here and the number does not
-    /// survive it. GI_UNIFIED_SPEC addendum item 2 should be read with that in
-    /// mind.) The knob stays because the two terms are different integrals and
-    /// a scene may want the trim; clamped to [0, 64], and 0 is a legitimate
+    /// 1.0 is the field's own answer, untrimmed: since PHOTON-READER-1 the
+    /// field's probe rays march the same cascade chain through the same voxel
+    /// reader as the cone diffuse it replaces (jah_voxel_march.glsl), so the two
+    /// are one integral of one radiance field and differ only in how it is
+    /// integrated (144 rays per probe, blended over the probe cage, against six
+    /// cones per pixel). Nothing is calibrated into it. It stays a dial because a
+    /// scene may want a stylistic trim; clamped to [0, 64], and 0 is a legitimate
     /// "field bound, contributing nothing" for A/B measurement.
     float     ddgiIntensity = 1.0f;
     /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Photon ambient fix's one dial
@@ -2135,12 +2132,13 @@ struct GiParams {
     /// cone-traced diffuse's `ambient * escapeFraction`, and binding a field
     /// deletes that branch — so with DDGI on, ambient light inside the volume
     /// came from nowhere: 15-25% darker mid-ground on OPEN scenes, sealed rooms
-    /// unaffected. This scales the replacement: the scene's SH ambient times a
-    /// sky-visibility fraction read out of the field's OWN depth atlas (one tap
-    /// per cage probe along the surface normal; a probe whose ray left the
-    /// volume without hitting anything votes "sky").
+    /// unaffected. This scales the replacement: the scene's SH ambient times the
+    /// probes' SKY VISIBILITY - the escape fraction their rays measured in the
+    /// voxel march, stored in the field's depth atlas beside the depth moments
+    /// and read at the surface normal over the probe cage (PHOTON-READER-1; the
+    /// definition is on JahIfd_piece_ps.any).
     ///
-    /// 1.0 is the honest reconstruction and the default. 0 removes the term
+    /// 1.0 is the measured term and the default. 0 removes the term
     /// entirely — through a UNIFORM shader branch, so it is also exactly "DDGI
     /// as it behaved before this fix", which is what makes the A/B in
     /// gi.ddgi_ambient (and the sealed-room invariance assertion) possible.
