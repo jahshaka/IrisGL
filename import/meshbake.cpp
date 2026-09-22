@@ -2055,8 +2055,8 @@ void build(const MeshPtr &mesh, int maxCards)
     // TRIANGLE PER CARD PER ROUND: `measureList` walks every card, and the
     // greedy loop below calls it once per round. At twelve cards and a dozen
     // rounds an unbounded raster is 144 x the mesh's triangle count in setups —
-    // seconds on the import worker and, through Preferences' bake-all and
-    // Mesh::loadMesh, seconds ON THE UI THREAD. So the ceiling below is a rule,
+    // seconds on the import worker and, through Preferences' bake-all, seconds ON
+    // THE UI THREAD. So the ceiling below is a rule,
     // not an optimisation, and it is applied in TWO steps because the first one
     // does not always fire:
     //
@@ -2068,9 +2068,9 @@ void build(const MeshPtr &mesh, int maxCards)
     //      above the ceiling. Step 1 misses two whole classes and they are not
     //      rare: a mesh whose topology stopped the simplifier before it shed
     //      anything (`kAcceptRatio`, documented by ATOM-1) has no chain at all,
-    //      and NEITHER DOES ANY MESH BORN THROUGH `Mesh::loadMesh` — which is
-    //      every primitive and every model a caller loads outside the import.
-    //      Those took the full index list, per card, per round.
+    //      and neither does a mesh built outside the bake and handed to this
+    //      generator directly (a procedural mesh, a suite). Those took the full
+    //      index list, per card, per round.
     //
     // WHY THE SUBSAMPLE IS A GOLDEN-RATIO SEQUENCE AND NOT A UNIFORM STRIDE —
     // MEASURED, because a uniform stride was written first and it was WRONG.
