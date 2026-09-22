@@ -12,10 +12,11 @@
 #
 # or let the build do it — irisgl/CMakeLists.txt invokes it at configure time,
 # before add_subdirectory() of the vendored tree, so a fresh clone cannot
-# silently build unpatched sources.  (Ogre-Next differs only in its hook:
-# irisgl/scripts/build-ogre.sh applies irisgl/thirdparty/ogre-patches/, because
-# Ogre is an out-of-tree prerequisite build we do not drive from this project's
-# configure step.)
+# silently build unpatched sources.  (Ogre-Next is NOT patched at all any more:
+# since 2026-09-22 its submodule is our fork, github.com/jahshaka/ogre-next
+# branch `jahshaka`, and our engine changes are commits on it — see
+# irisgl/docs/OGRE_BUILD.md.  assimp keeps a patch stack because it is compiled
+# by our own build and upstream is a release tag we track, not a fork we carry.)
 #
 # Idempotent: a patch that reverse-applies cleanly is already in, and is
 # skipped.  A patch that neither applies nor reverse-applies is a hard error —
