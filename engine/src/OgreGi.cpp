@@ -1024,11 +1024,14 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
     st.cascade = cascadeIdx;
     JAH_TRY {
         Ogre::VctLighting *lighting = nullptr;
+        Ogre::VctVoxelizer *voxelizer = nullptr;
         if (!mVctCascades.empty()) {
             if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return st;
             lighting = mVctCascades[size_t(cascadeIdx)].lighting;
+            voxelizer = mVctCascades[size_t(cascadeIdx)].voxelizer;
         } else if (cascadeIdx == 0) {
             lighting = mVctLighting;
+            voxelizer = mVctVoxelizer;
         }
         if (!lighting) return st;
         Ogre::TextureGpu *total = lighting->getLightVoxelTextures()[0];
@@ -1129,6 +1132,27 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
             if (walk(direct, wd)) {
                 st.peakDirect = wd.peak;
                 st.directAtMax = wd.atMax;
+            }
+        }
+
+        // AND THE SOURCE THE INJECTION SEEDS FROM (VOXEL-CLIP-1, ogre-patch
+        // 0087): the voxeliser's EMISSIVE volume, in scene radiance. The lit
+        // volumes above are the injection's OUTPUT, and an emitter clipped on
+        // its way in is indistinguishable there from a dimmer emitter — the
+        // same argument that put the volumes in this readback in the first
+        // place, one stage earlier. No normalisation: the voxeliser writes the
+        // material's emissive as authored.
+        if (voxelizer) {
+            Ogre::TextureGpu *emissive = voxelizer->getEmissiveVox();
+            if (emissive && emissive->getResidencyStatus() == Ogre::GpuResidency::Resident) {
+                st.emissiveFormat =
+                    Ogre::PixelFormatGpuUtils::toString(emissive->getPixelFormat());
+                Walk we;
+                if (walk(emissive, we)) {
+                    st.peakEmissive = we.peak;
+                    st.emissiveAtMax = we.atMax;
+                    st.emissiveAboveOne = we.aboveOne;
+                }
             }
         }
     } JAH_CATCH(mError, st);
