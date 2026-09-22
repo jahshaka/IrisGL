@@ -6,6 +6,7 @@
 #include <OgreViewport.h>
 #include <OgreLodStrategyPrivate.inl>
 
+#include <algorithm>
 #include <unordered_map>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -535,6 +536,25 @@ void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
         }
         out.push_back(d);
     }
+}
+
+// The VAO-list SHAPE, for the suite that has to see what ogre-patch 0087 bought
+// (AT-A11). Counting the shadow entries that are NOT in the normal list is the same
+// test the patched `destroyShadowMappingVaos` makes, which is the point: the number
+// this reports is the number of VAOs and index buffers the mesh really owns.
+bool OgreScene::meshVaoShape(MeshId mesh, unsigned &levels, unsigned &shadowIndependent) const {
+    levels = 0;
+    shadowIndependent = 0;
+    const auto it = mMeshes.find(mesh);
+    if (it == mMeshes.end() || !it->second.mesh || it->second.mesh->getNumSubMeshes() == 0)
+        return false;
+    const Ogre::SubMesh *sub = it->second.mesh->getSubMesh(0);
+    levels = unsigned(sub->mVao[Ogre::VpNormal].size());
+    for (Ogre::VertexArrayObject *v : sub->mVao[Ogre::VpShadow]) {
+        const auto &normal = sub->mVao[Ogre::VpNormal];
+        if (std::find(normal.begin(), normal.end(), v) == normal.end()) ++shadowIndependent;
+    }
+    return true;
 }
 
 void OgreScene::setLodBias(float bias) {

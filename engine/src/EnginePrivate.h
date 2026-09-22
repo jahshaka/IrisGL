@@ -2952,6 +2952,8 @@ public:
     void  setLodBias(float bias) override;
     float lodBias() const override { return mLodBias; }
     void  objectLods(std::vector<ObjectLodDesc> &out) const override;
+    bool  meshVaoShape(MeshId mesh, unsigned &levels,
+                       unsigned &shadowIndependent) const override;
     /// Writes `errors` (level 1 first, a length in mesh units each) into
     /// `mesh`'s LOD value array at the current bias. Patch 0059 added the
     /// setter this needs.

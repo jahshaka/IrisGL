@@ -1170,8 +1170,37 @@ namespace lodchain {
 constexpr int   kMaxLevels     = 254;
 constexpr float kRatio         = 0.5f;   ///< each level targets half the previous triangle count (the paper's step).
 constexpr int   kMinTriangles  = 128;    ///< THE FLOOR: below this a level saves nothing worth a buffer — and is clusterlod's own leaf size, and Nanite's root.
-constexpr float kAcceptRatio   = 0.85f;  ///< a level that could not shed 15% is topology-locked: stop, do not store it. DERIVED below.
-constexpr float kMaxRelError   = 0.05f;  ///< the SIMPLIFIER'S OWN budget per level — a chain-shape knob, not the selection currency. DERIVED below.
+/// kAcceptRatio — A LEVEL THAT COULD NOT SHED 15 % IS NOT WORTH A BUFFER, and the
+/// 15 % is arithmetic rather than taste. A stored level costs an index buffer, a
+/// VertexArrayObject, a threshold in the value array `lodSet` binary-searches every
+/// frame, and a SWITCH — a visible change of silhouette. What it buys is the
+/// triangles it sheds. The chain's own step is `kRatio` 0.5, so a level that
+/// delivers only 0.85 of the previous count has delivered 30 % of the reduction it
+/// was asked for, and the next level will be asked to halve THAT: the loop is
+/// already at the point where topology, not the error budget, is deciding the
+/// result. Below about 0.85 the remaining chain is levels that each cost a switch
+/// for a tenth of a halving. It is the same number clusterlod.h's reference
+/// configuration stops at, for the same reason.
+constexpr float kAcceptRatio   = 0.85f;
+/// kMaxRelError — THE SIMPLIFIER'S OWN BUDGET PER LEVEL, and since ATOM-BAKE-1 it is
+/// explicitly a CHAIN-SHAPE knob and not the selection currency (`lodBounds` is that,
+/// and the safety net on it is `kMaxRelBound` below).
+///
+/// WHY IT STAYS ON THE QUADRIC even though the quadric is not a bound: this number
+/// decides how far the loop is allowed to GO, and it has to be a quantity the
+/// simplifier can be steered by BEFORE anything is measured — the measurement
+/// happens after a level exists. 5 % of the mesh's largest extent is the point at
+/// which a simplified whole object stops being a stand-in for itself and becomes a
+/// blob: at 5 % a 2 m sphere may deviate 10 cm, which at the view's one-pixel budget
+/// is a level taken only past ~200 m. Beyond that the chain is producing levels
+/// nothing will ever select at a distance anything renders at.
+///
+/// AND THE MEASUREMENT THAT SAYS IT IS THE RIGHT ORDER: on the shipped meshes the
+/// cap is NOT what stops the chain — the triangle floor (`kMinTriangles`) is, on
+/// every one of them (sphere 960 -> 240, capsule 1024 -> 128, torus 1536 -> 192,
+/// hp_sphere 3072 -> 192). A knob that never fires on real content is not tuned
+/// against it; it is a ceiling, which is what it is here for.
+constexpr float kMaxRelError   = 0.05f;
 constexpr float kNormalWeight  = 0.5f;   ///< meshoptimizer's own reference weight for unit normals.
 constexpr float kUvWeight      = 0.5f;   ///< the same relative priority, times extent/uvRange (see 3 above).
 

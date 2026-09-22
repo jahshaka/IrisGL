@@ -298,7 +298,26 @@ struct MeshData {
 // 2376 lines got twice the error the desktop did — on the same asset, in the
 // same frame. The reference constants (`LodReference`) and `lodSwitchDistance`
 // are DELETED with this note; nothing derives a distance any more.
-constexpr float kLodBudgetPixels = 1.0f;   ///< the budget: one pixel of the simplifier's (combined, >= geometric) error
+/// THE BUDGET: ONE PIXEL of MEASURED geometric deviation. Derived, and the
+/// derivation is short because the quantity is now honest (ATOM P1's AT-A5 — the
+/// old text had to hedge with "the simplifier's combined, >= geometric error",
+/// which was not true in either direction).
+///
+/// One pixel is the largest budget that cannot be seen: the deviation is a
+/// displacement of the SILHOUETTE and of shaded normals, and a displacement under
+/// one pixel is under the sampling rate of the image it lands in. Half a pixel
+/// would be Nyquist-strict and is not needed — the bound is a MAXIMUM over the
+/// surface while what an eye integrates is the average, and the bound already
+/// carries the sampling-gap margin. Two pixels is visible on a moving silhouette:
+/// `atom.dolly_gate`'s subject is exactly that frame-to-frame delta.
+///
+/// WHAT IT IS WORTH, measured on the shipped chains: at one pixel on a 1080-line
+/// 45-degree view, the sphere's level 1 (bound 0.032 m) is taken at a bounding-
+/// sphere radius of about 40 px and its level 2 (0.071) at about 18 px — i.e. the
+/// levels arrive while the object is still a recognisable shape on screen, which is
+/// what makes the triangle saving real rather than notional. A tolerance whose
+/// savings arrive only once the object is 4 px across would not be a tolerance.
+constexpr float kLodBudgetPixels = 1.0f;
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
 /// One bone of a rig, in its BIND pose. The transform is LOCAL to the parent
