@@ -1490,6 +1490,30 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // expensive form is correct. It reports its own monitor stage,
         // `engine.gpuscene`.
         for (OgreScene *s : drawn) s->ensureGpuScene(/*graphIsCurrent=*/true);
+        // THE RAY LEVEL (ATOM P3's AT-A8r), immediately after the table it
+        // writes into and before the ray tier that will one day read it. The
+        // eye and the projection come from the FIRST ENABLED VIEW that draws
+        // this scene — the same set `scenesFeedingEnabledViews` built, in the
+        // same order — because the rule's sample is a ray cast through that
+        // view's pixel. A scene drawn by several views takes the first; the
+        // level is a build-time choice with a 2x band around it, not a
+        // per-view one, and a second view's answer would differ only where the
+        // band already tolerates the difference.
+        for (OgreScene *s : drawn) {
+            for (auto &v : mViews) {
+                if (!v || !v->isEnabled() || v->scene() != s) continue;
+                Ogre::Camera *cam = v->camera();
+                if (!cam || cam->getProjectionType() != Ogre::PT_PERSPECTIVE) break;
+                // THE VIEW'S HEIGHT, not the camera's last viewport: an
+                // offscreen camera reports NO viewport between passes (measured
+                // 2026-09-22 — it is what made this pass silently never run),
+                // and the height the currency wants is the target's.
+                const float h = float(v->height());
+                s->updateRayLevels(cam->getDerivedPosition(),
+                                   float(cam->getProjectionMatrix()[1][1]), h);
+                break;
+            }
+        }
         {
             const auto rqStart = std::chrono::steady_clock::now();
             updateRayQuery(drawn);

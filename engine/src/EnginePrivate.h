@@ -21,6 +21,7 @@
 // MeshPtrs and hands out UavBufferPackeds — but it knows nothing of Vulkan and
 // nothing of OgreScene's Node, which is what keeps it bindable from an
 // HlmsComputeJob and buildable on a platform with no ray queries.
+#include "GpuCull.h"
 #include "GpuScene.h"
 
 #include <OgreRoot.h>
@@ -5158,6 +5159,11 @@ private:
     /// const, and a facility that only a non-const path can refresh would put
     /// the const-cast at every call site instead of here.
     mutable detail::GpuScene mGpuScene;
+    /// ATOM P3's CULL — its result buffers, sized to the table's capacity and
+    /// grown with it (GpuCull.h). Owned per SCENE because that is what the
+    /// tables it reads are owned by; a consumer that wants two culls of one
+    /// scene in a frame is stage 3's problem and gets a second instance.
+    detail::GpuCull mGpuCull;
     mutable bool mGpuSceneRefused = false;   ///< create() said no (headless); do not retry
     mutable std::vector<uint32_t> mGpuDirty;    ///< this update's slots (kept, not reallocated)
     mutable std::vector<uint32_t> mGpuForced;   ///< explicit marks since the last update
@@ -5166,6 +5172,21 @@ private:
     mutable unsigned long long mGpuScans = 0ull;      ///< dirty scans run, ever
     mutable unsigned long long mGpuAabbReads = 0ull;  ///< world AABBs the scan asked for, ever
     mutable double mGpuScanMicros = 0.0;
+    // --- THE RAY LEVEL (ATOM P3's AT-A8r; OgreGpuScene.cpp) ----------------
+    /// The level each slot's bottom-level structure should be built from, and
+    /// the DISTANCE that answer was computed at (-1 = never). The second array
+    /// is the hysteresis: the rule is asked again only when the live distance
+    /// leaves the 2x band around the recorded one. Both are indexed by item
+    /// slot and both are cleared for a slot the index frees or renumbers, so a
+    /// recycled slot never inherits the dead object's band.
+    std::vector<uint32_t> mRayLevel;
+    std::vector<float>    mRayEvalDistance;
+    Ogre::Vector3 mRayEye = Ogre::Vector3::ZERO;
+    bool mRayEyeValid = false;
+    unsigned long long mRayLevelScanSeen = 0ull;   ///< the scan count the last walk saw
+    unsigned long long mRayLevelEvals = 0ull;
+    unsigned long long mRayLevelRefits = 0ull;
+    unsigned long long mRayLevelWalks = 0ull;
     /// THE ONE PLACE the per-item predicates are computed (GpuInstanceFlag).
     Ogre::uint32 gpuFlagsFor(const Node &n) const;
     /// A seam that changed what a slot's entry SAYS without moving anything —
@@ -5173,6 +5194,19 @@ private:
     /// The movement epoch cannot see those (a furniture visibility write is
     /// deliberately not scene movement, VR-SCAN-1), so they say so by name.
     void markGpuSlotDirty(const Node &n);
+public:
+    /// THE RAY LEVEL'S PASS (ATOM P3's AT-A8r). Called once per frame per drawn
+    /// scene with the eye and the projection of the view that draws it; runs
+    /// nothing when neither the camera nor the table moved.
+    void updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, float viewportHeight);
+    /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
+    /// null (or a request with hzbLevels 0) is the frustum-only mode.
+    bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
+                    GpuCullResult &out);
+private:
+    /// A slot left the index or was renumbered: its ray-level band is no longer
+    /// about the object that now lives there.
+    void forgetRayLevel(uint32_t slot);
     void composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
                             detail::GpuInstance &out) const;
     /// The mesh table entry for an attached mesh, reference-counted per attach.
@@ -6630,7 +6664,9 @@ public:
     bool textureMemory(std::vector<TextureMemoryEntry> &out) const override;
     bool reclaimMemory(MemoryStats *before, MemoryStats *after) override;
     // ---- Photon shared infrastructure (OgreCompute.cpp) ----
-    bool indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe &out) override;
+    bool gpuCull(Scene *scene, View *view, const GpuCullRequest &request, bool readBack,
+                 GpuCullResult &out) override;
+    bool fillCullView(View *view, GpuCullRequest &out) const override;
     bool hzbStatus(View *view, HzbStatus &out) const override;
     bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                       unsigned &width, unsigned &height) override;

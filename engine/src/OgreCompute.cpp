@@ -1,28 +1,23 @@
-// PHOTON SHARED INFRASTRUCTURE — GPU-DRIVEN COMPUTE DISPATCH
-// (SPECS/NANITE_SPEC.md §4.2; SPECS/research/LUMEN_SUPPORTING_TECH_2026-09-13.md §6;
-//  ogre-patch 0032).
+// ATOM P3 / PHOTON SHARED INFRASTRUCTURE — the compute substrate's VIEW half
+// (SPECS/atom/A4_SUBSTRATE_CULL_DESIGN.md sections 1-2; NANITE_SPEC section 4.2-4.3;
+//  ogre-patch 0032 and 0027).
 //
-// WHY THIS EXISTS. Every Lumen-shaped stage narrows its work as it goes: screen
-// traces that miss are compacted into a shorter list, that list is re-traced,
-// what misses again is compacted once more. Epic's own words: "it was essential
-// that we utilize indirect dispatch where supported", worth up to a 50% tracing
-// speedup. Without it every later pass has to be dispatched at its WORST CASE
-// from the CPU, because the CPU cannot know how many items survived.
+// TWO THINGS LIVE HERE and they share one reason: both need a VIEW.
 //
-// The pin had no such thing: the only dispatch in the Vulkan render system was
-// vkCmdDispatch with CPU-side group counts, and HlmsComputeJob's
-// "thread_groups_based_on_texture/uav" is CPU-side arithmetic over a resource's
-// DIMENSIONS, not over anything the GPU computed. Patch 0032 adds
-// HlmsComputeJob::setIndirectDispatchBuffer + RenderSystem::_dispatchIndirect,
-// implemented on Vulkan as vkCmdDispatchIndirect plus the one barrier the
-// BarrierSolver cannot express (compute SHADER_WRITE -> INDIRECT_COMMAND_READ at
-// the DRAW_INDIRECT stage).
+//   * `OgreEngine::gpuCull` — the boundary's entry into ATOM's generic cull. The
+//     chain itself is OgreGpuCull.cpp, beside the tables it reads; what this file
+//     contributes is finding the view's depth pyramid.
+//   * The pyramid's own readbacks (`hzbStatus`, `readHzbLevel`) — so a suite can
+//     ASSERT the reduction texel by texel rather than trust it.
 //
-// WHAT IS IN THIS FILE. Only the PROOF: the capability has no consumer yet, and
-// the arms it exists for are not built. `indirectDispatchProbe` runs the smallest
-// honest two-job chain — count survivors, dispatch one group per survivor — and
-// reports numbers a suite can assert. It allocates, dispatches, reads back and
-// frees; it renders nothing and leaves no state behind.
+// WHAT WAS HERE AND IS GONE (ATOM-SUBSTRATE-1, 2026-09-22): `indirectDispatchProbe`
+// and its three compute jobs `Jahshaka/IndirectCount`, `IndirectWork` and
+// `IndirectWorkCpu`. They were the PROOF of patch 0032 while it had no consumer;
+// it has one now, and the cull's job 3 makes the same claim on the same device
+// with real work behind it — the survivor count is written by a compute shader,
+// the next dispatch is sized from it, and `engine.gpu_cull` asserts the groups
+// that ran at 0, 7 and 4,096 survivors exactly as `compute.indirect_dispatch`
+// did. A proof with a consumer is the consumer's suite.
 #include "EnginePrivate.h"
 
 #include <OgreHlmsCompute.h>
@@ -30,7 +25,9 @@
 #include <OgreHlmsManager.h>
 #include <OgreRenderSystem.h>
 #include <OgreResourceTransition.h>
+#include <OgreCamera.h>
 #include <OgreRoot.h>
+#include <OgreViewport.h>
 #include <OgreTextureGpu.h>
 #include <OgreTextureGpuManager.h>
 #include <OgreAsyncTextureTicket.h>
@@ -41,6 +38,7 @@
 #include <Vao/OgreVaoManager.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -49,230 +47,98 @@ namespace jahshaka { namespace engine {
 namespace detail {
 
 namespace {
+/// Defined below, beside the pyramid's own readbacks: the live `jahHzb` of a
+/// view's workspace, or null.
+Ogre::TextureGpu *findHzbTexture(OgreView *view);
+}   // namespace
 
-/// The input list's length. 4096 items = 64 counting groups of 64 threads, and
-/// 4096 is the largest case the brief asks for, so one size serves every case.
-constexpr unsigned kListLength = 4096u;
-/// Must match "Jahshaka/IndirectCount"'s threads_per_group in JahshakaCompute.material.json.
-constexpr unsigned kCountThreadsPerGroup = 64u;
-
-/// A UAV buffer slot, filled in. Ogre wants one of these per binding.
-Ogre::DescriptorSetUav::BufferSlot bufferSlot(Ogre::UavBufferPacked *buffer,
-                                             Ogre::ResourceAccess::ResourceAccess access) {
-    Ogre::DescriptorSetUav::BufferSlot slot = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
-    slot.buffer = buffer;
-    slot.offset = 0;
-    slot.sizeBytes = 0;   // to the end
-    slot.access = access;
-    return slot;
-}
-
-/// Reads a whole UAV buffer back to the CPU. `readRequest` records the download
-/// and the ticket's map() waits on the fence Ogre took for it — that is the
-/// documented route (Vao/OgreBufferPacked.h:264) and it covers the compute write
-/// for us: VulkanQueue::prepareForDownload charges a BP_TYPE_UAV source with
-/// SHADER_WRITE from every shader stage before the copy.
-void readBack(Ogre::UavBufferPacked *buffer, std::vector<Ogre::uint32> &out) {
-    out.assign(buffer->getNumElements(), 0u);
-    Ogre::AsyncTicketPtr ticket = buffer->readRequest(0, buffer->getNumElements());
-    const void *mapped = ticket->map();
-    std::memcpy(out.data(), mapped, out.size() * sizeof(Ogre::uint32));
-    ticket->unmap();
-}
-
-/// How many leading slots of a stamp buffer were written, and what they say.
-/// The consumer job writes gl_NumWorkGroups.x into its own group's slot, so a
-/// run of N identical non-zero values followed by zeros IS the group count, and
-/// the value is what the GPU read out of the argument buffer.
-void tallyStamps(const std::vector<Ogre::uint32> &stamps, unsigned &ranOut, unsigned &seenOut) {
-    ranOut = 0u;
-    seenOut = 0u;
-    for (Ogre::uint32 v : stamps) {
-        if (v == 0u) break;
-        if (seenOut == 0u) seenOut = v;
-        ++ranOut;
-    }
-}
-
-/// Clears every binding the probe makes. Safe on a job that was never bound, and
-/// it must stay that way: the failure path calls it at any point in the sequence.
-void unbindProbeJobs(Ogre::HlmsComputeJob *countJob, Ogre::HlmsComputeJob *workJob,
-                     Ogre::HlmsComputeJob *cpuJob) {
-    const Ogre::DescriptorSetUav::BufferSlot empty =
-        Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
-    if (countJob) {
-        countJob->_setUavBuffer(0, empty);
-        countJob->_setUavBuffer(1, empty);
-    }
-    if (workJob) {
-        workJob->_setUavBuffer(0, empty);
-        workJob->setIndirectDispatchBuffer(0);
-    }
-    if (cpuJob) cpuJob->_setUavBuffer(0, empty);
-}
-
-/// Frees whatever was created, in reverse order. Nulls are skipped, so it serves
-/// a partial failure as well as a complete run.
-void destroyProbeBuffers(Ogre::VaoManager *vao, Ogre::UavBufferPacked *srcBuf,
-                         Ogre::UavBufferPacked *argBuf, Ogre::UavBufferPacked *outIndirect,
-                         Ogre::UavBufferPacked *outCpu, Ogre::UavBufferPacked *outNoBarrier) {
-    if (outNoBarrier) vao->destroyUavBuffer(outNoBarrier);
-    if (outCpu) vao->destroyUavBuffer(outCpu);
-    if (outIndirect) vao->destroyUavBuffer(outIndirect);
-    if (argBuf) vao->destroyUavBuffer(argBuf);
-    if (srcBuf) vao->destroyUavBuffer(srcBuf);
-}
-
-}  // namespace
-
-bool OgreEngine::indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe &out) {
-    out = IndirectDispatchProbe();
-    if (!mRoot) return false;
-    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
-    if (!rs) return false;
-    out.supported = rs->supportsIndirectDispatch();
-    if (!out.supported) return false;
-    if (survivors > kListLength) survivors = kListLength;
-
-    Ogre::VaoManager *vao = rs->getVaoManager();
-    Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
-    if (!vao || !hc) return false;
-
-    Ogre::HlmsComputeJob *countJob = hc->findComputeJobNoThrow("Jahshaka/IndirectCount");
-    // TWO DEFINITIONS OF THE SAME SHADER, deliberately. `Jahshaka/IndirectWork`
-    // declares no thread_groups at all, so its CPU-side count is zero and it can
-    // only compile because patch 0032 relaxes that requirement for an indirectly
-    // dispatched job — the relaxation is therefore EXERCISED by every run of this
-    // probe rather than merely present in the patch. `Jahshaka/IndirectWorkCpu`
-    // carries a real count and is the control.
-    Ogre::HlmsComputeJob *workJob = hc->findComputeJobNoThrow("Jahshaka/IndirectWork");
-    Ogre::HlmsComputeJob *cpuJob = hc->findComputeJobNoThrow("Jahshaka/IndirectWorkCpu");
-    if (!countJob || !workJob || !cpuJob) {
-        mLastError = "engine: the indirect-dispatch compute jobs are missing — "
-                     "media/Hlms/Jahshaka/JahshakaCompute.material.json is not staged";
+/// ATOM P3's ENTRY POINT from the boundary. The work is in OgreGpuCull.cpp
+/// beside the tables it reads; what lives here is the VIEW half — finding the
+/// depth pyramid the request wants to test against, which is this file's own
+/// `findHzbTexture` below.
+///
+/// THE PYRAMID IT BINDS IS THE ONE THAT IS THERE. Called before a frame, that is
+/// the PREVIOUS frame's: the seed pass rewrites mip 0 inside the frame's own
+/// compositor graph, so until that pass runs the texture still holds the last
+/// completed frame's closest-depth chain. That ORDERING is the design's
+/// previous-frame contract, and it costs nothing — a `jahHzbPrev` copy would pay
+/// mip 0's whole bandwidth (half the build's measured 0.045 ms at 1080p) to
+/// deliver what the order of operations already delivers. What the consumer owes
+/// in exchange is the matching matrix, which is why `viewProj` is in the request
+/// and not taken from the camera here.
+bool OgreEngine::gpuCull(Scene *scene, View *view, const GpuCullRequest &request, bool readBack,
+                         GpuCullResult &out) {
+    out = GpuCullResult();
+    OgreScene *s = static_cast<OgreScene *>(scene);
+    if (!s || !mRoot) return false;
+    Ogre::TextureGpu *hzb = request.hzbLevels ? findHzbTexture(static_cast<OgreView *>(view))
+                                              : nullptr;
+    if (request.hzbLevels && !hzb) {
+        mLastError = "gpuCull: the request asks for the depth pyramid and this view builds none "
+                     "(PostFxDesc::hzb)";
         return false;
     }
+    return s->runGpuCull(request, hzb, readBack, out);
+}
 
-    Ogre::UavBufferPacked *srcBuf = 0;
-    Ogre::UavBufferPacked *argBuf = 0;
-    Ogre::UavBufferPacked *outIndirect = 0;
-    Ogre::UavBufferPacked *outCpu = 0;
-    Ogre::UavBufferPacked *outNoBarrier = 0;
+/// THE VIEW HALF OF A REQUEST — every convention in one place (Engine.h).
+///
+/// THE PROJECTION IS THE ONE THE DEPTH BUFFER HAS: `getProjectionMatrixWithRSDepth`
+/// carries the render system's own z range, which on Vulkan at this pin is
+/// REVERSE-Z in [0, w] — and the pyramid is a copy of that buffer, so a cull
+/// testing against it must project the same way. Its y is UP in clip space (the
+/// flip lives in Ogre's NEGATIVE viewport height — the stage-0 spike's finding
+/// 2.4), and the shader inverts y when it turns NDC into texels because the
+/// attachment's row 0 is the top.
+///
+/// THE SIX PLANES are read off the rows of that matrix (Gribb/Hartmann), so they
+/// are right whatever the projection is and inherit no convention of Ogre's
+/// frustum classes. Note which two the z rows give under Vulkan's [0, w]:
+/// `row2` alone is one of them and `row3 - row2` the other, NOT the [-w, w]
+/// pair a GL-era derivation would write — and under reverse-Z the first is the
+/// FAR plane, which changes nothing about the volume they bound together.
+bool OgreEngine::fillCullView(View *view, GpuCullRequest &out) const {
+    OgreView *v = static_cast<OgreView *>(view);
+    if (!v) return false;
+    Ogre::Camera *cam = v->camera();
+    if (!cam) return false;
 
-    JAH_TRY {
-        // The input list: `survivors` non-zero entries, the rest zero.
-        std::vector<Ogre::uint32> src(kListLength, 0u);
-        for (unsigned i = 0; i < survivors; ++i) src[i] = 1u;
-        // The dispatch arguments: x counted by the GPU, y and z seeded to 1 so a
-        // count of N means N groups and not N*0*0; [3] is the count again, for
-        // the readback (reading the argument itself would not prove the GPU used it).
-        Ogre::uint32 args[4] = { 0u, 1u, 1u, 0u };
-        std::vector<Ogre::uint32> zeros(kListLength, 0u);
+    const Ogre::Matrix4 vpm = cam->getProjectionMatrixWithRSDepth() * cam->getViewMatrix();
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) out.viewProj[r * 4 + c] = float(vpm[r][c]);
 
-        srcBuf = vao->createUavBuffer(kListLength, sizeof(Ogre::uint32), 0, src.data(), false);
-        argBuf = vao->createUavBuffer(4u, sizeof(Ogre::uint32), 0, args, false);
-        outIndirect = vao->createUavBuffer(kListLength, sizeof(Ogre::uint32), 0, zeros.data(), false);
-        outCpu = vao->createUavBuffer(kListLength, sizeof(Ogre::uint32), 0, zeros.data(), false);
-        outNoBarrier = vao->createUavBuffer(kListLength, sizeof(Ogre::uint32), 0, zeros.data(), false);
-
-        Ogre::BarrierSolver &solver = rs->getBarrierSolver();
-
-        // ---- job A: count the survivors, write the group count ----------------
-        countJob->_setUavBuffer(0, bufferSlot(srcBuf, Ogre::ResourceAccess::Read));
-        countJob->_setUavBuffer(1, bufferSlot(argBuf, Ogre::ResourceAccess::ReadWrite));
-        countJob->setNumThreadGroups(kListLength / kCountThreadsPerGroup, 1u, 1u);
-        {
-            Ogre::ResourceTransitionArray &rt = solver.getNewResourceTransitionsArrayTmp();
-            countJob->analyzeBarriers(rt);
-            rs->executeResourceTransition(rt);
+    const int rows[6] = { 0, 0, 1, 1, 2, 2 };
+    const float signs[6] = { +1.0f, -1.0f, +1.0f, -1.0f, 0.0f, -1.0f };
+    for (int p = 0; p < 6; ++p) {
+        float pl[4];
+        for (int c = 0; c < 4; ++c) {
+            const float w = signs[p] == 0.0f ? 0.0f : float(vpm[3][c]);
+            pl[c] = w + signs[p] * float(vpm[rows[p]][c]);
         }
-        hc->dispatch(countJob, 0, 0);
-
-        // ---- job B: one group per survivor, dispatched FROM THE GPU ------------
-        workJob->_setUavBuffer(0, bufferSlot(outIndirect, Ogre::ResourceAccess::Write));
-        workJob->setIndirectDispatchBuffer(argBuf, 0u);
-        {
-            Ogre::ResourceTransitionArray &rt = solver.getNewResourceTransitionsArrayTmp();
-            workJob->analyzeBarriers(rt);
-            rs->executeResourceTransition(rt);
-        }
-        hc->dispatch(workJob, 0, 0);
-
-        std::vector<Ogre::uint32> stamps;
-        readBack(outIndirect, stamps);
-        tallyStamps(stamps, out.groupsRan, out.groupsSeen);
-
-        std::vector<Ogre::uint32> argsBack;
-        readBack(argBuf, argsBack);
-        out.groupsRequested = argsBack.size() > 3u ? argsBack[3] : 0u;
-
-        // ---- the control: the SAME SHADER, sized from the CPU ------------------
-        // WITH ONE ASYMMETRY WORTH RECORDING: a CPU-sized dispatch cannot express
-        // "run nothing". Ogre refuses to compile a job whose num_thread_groups
-        // multiply to zero (HlmsCompute::compileShader), so the CPU-side
-        // equivalent of an empty list is the HOST BRANCHING and not dispatching
-        // at all — which is exactly the branch a GPU-driven pipeline does not
-        // get to take, because the CPU does not know the list is empty. The
-        // control below therefore skips the dispatch at zero and compares
-        // against the untouched (zeroed) buffer, which is the honest comparison.
-        cpuJob->_setUavBuffer(0, bufferSlot(outCpu, Ogre::ResourceAccess::Write));
-        if (out.groupsRequested > 0u) {
-            cpuJob->setNumThreadGroups(out.groupsRequested, 1u, 1u);
-            Ogre::ResourceTransitionArray &rt = solver.getNewResourceTransitionsArrayTmp();
-            cpuJob->analyzeBarriers(rt);
-            rs->executeResourceTransition(rt);
-            hc->dispatch(cpuJob, 0, 0);
-        }
-
-        std::vector<Ogre::uint32> cpuStamps;
-        readBack(outCpu, cpuStamps);
-        unsigned cpuSeen = 0u;
-        tallyStamps(cpuStamps, out.groupsRanCpuSized, cpuSeen);
-        out.matchesCpuSized = (cpuStamps == stamps);
-
-        // ---- the control for the BARRIER --------------------------------------
-        // Re-count into a freshly zeroed argument buffer and dispatch off it with
-        // the barrier suppressed, back to back, so the hazard is as tight as it
-        // can be made. Whatever comes back is reported, never asserted: a driver
-        // that happens to win the race proves nothing about the next one.
-        {
-            Ogre::uint32 reset[4] = { 0u, 1u, 1u, 0u };
-            argBuf->upload(reset, 0, 4u);
-
-            Ogre::ResourceTransitionArray &rt = solver.getNewResourceTransitionsArrayTmp();
-            countJob->analyzeBarriers(rt);
-            rs->executeResourceTransition(rt);
-            hc->dispatch(countJob, 0, 0);
-
-            workJob->_setUavBuffer(0, bufferSlot(outNoBarrier, Ogre::ResourceAccess::Write));
-            workJob->setIndirectDispatchBuffer(argBuf, 0u, /*issueBarrier*/ false);
-            Ogre::ResourceTransitionArray &rt2 = solver.getNewResourceTransitionsArrayTmp();
-            workJob->analyzeBarriers(rt2);
-            rs->executeResourceTransition(rt2);
-            hc->dispatch(workJob, 0, 0);
-
-            std::vector<Ogre::uint32> nbStamps;
-            readBack(outNoBarrier, nbStamps);
-            unsigned nbSeen = 0u;
-            tallyStamps(nbStamps, out.groupsRanNoBarrier, nbSeen);
-            out.noBarrierDiffered = (nbStamps != stamps);
-        }
-
-        unbindProbeJobs(countJob, workJob, cpuJob);
-        destroyProbeBuffers(vao, srcBuf, argBuf, outIndirect, outCpu, outNoBarrier);
-        return true;
+        if (signs[p] == 0.0f)
+            for (int c = 0; c < 4; ++c) pl[c] = float(vpm[2][c]);
+        const float n = std::sqrt(pl[0] * pl[0] + pl[1] * pl[1] + pl[2] * pl[2]);
+        for (int c = 0; c < 4; ++c) out.planes[p * 4 + c] = n > 0.0f ? pl[c] / n : pl[c];
     }
-    catch (Ogre::Exception &e) {
-        // THE SAME UNBIND ON THE FAILURE PATH. The jobs outlive this call (they
-        // live in HlmsCompute) and their descriptor sets hold RAW pointers, so a
-        // throw between binding and freeing would otherwise leave three UAV slots
-        // and an indirect-dispatch buffer pointing at freed memory — and the next
-        // caller of this probe, or of those jobs, would dereference them.
-        mLastError = e.getFullDescription();
-        unbindProbeJobs(countJob, workJob, cpuJob);
-        destroyProbeBuffers(vao, srcBuf, argBuf, outIndirect, outCpu, outNoBarrier);
-        return false;
-    }
+
+    const Ogre::Vector3 eye = cam->getDerivedPosition();
+    out.eye[0] = float(eye.x);
+    out.eye[1] = float(eye.y);
+    out.eye[2] = float(eye.z);
+    // The currency's two terms come from the ORDINARY projection: proj[1][1] is
+    // the same in both (the RS-depth form differs in the z row only), and the
+    // height is the pass's target.
+    out.projScaleY = float(cam->getProjectionMatrix()[1][1]);
+    // THE VIEW'S OWN HEIGHT, not the camera's last viewport: an offscreen view's
+    // camera reports no viewport outside a pass (measured — `getLastViewport()`
+    // is null between frames), and the number the currency wants is the height
+    // of the target this request's pass renders into, which the View knows for
+    // certain.
+    out.viewportHeight = float(v->height());
+    HzbStatus hst;
+    out.hzbLevels = const_cast<OgreEngine *>(this)->hzbStatus(view, hst) && hst.built ? hst.levels
+                                                                                     : 0u;
+    return out.viewportHeight > 0.0f;
 }
 
 

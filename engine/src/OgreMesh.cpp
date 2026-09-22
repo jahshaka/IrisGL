@@ -117,6 +117,23 @@ private:
     /// of distance); for an orthographic camera, the world length of one pixel
     /// outright. Constant across a pass, so it is computed once per
     /// `lodUpdateImpl` rather than per object.
+    ///
+    /// THE ARITHMETIC IS THE QUALITY CURRENCY'S (Types.h, SUB-ERROR): one
+    /// sample's world footprint at one metre, times the budget in samples. It
+    /// used to be spelled out here; the spelling is now shared with the
+    /// cascade, the card and the GPU cull, and `engine.lod_rule_parity` holds
+    /// the GLSL copy to it.
+    ///
+    /// WHAT IT STILL DOES NOT DO, and it is a defect of the strategy rather
+    /// than of the currency: it passes no `meshToWorldScale`. Ogre's LOD values
+    /// are per MESH (`applyLodValues`, which writes `MeshData::lodBounds`
+    /// straight in) and the strategy's value is a WORLD length, so a 10x-scaled
+    /// instance is compared against a bound measured in mesh units and takes a
+    /// level whose real deviation is ten times what it asked for. The cascade's
+    /// call (`OgreScene::cascadeVoxelLod`) and the GPU cull both divide by the
+    /// instance's scale; this one cannot without moving the picture of every
+    /// scaled instance, so the fix is a lane with a pixel gate of its own.
+    /// (ATOM-SUBSTRATE-1 finding, 2026-09-22.)
     static Ogre::Real worldPerPixel(const Ogre::Camera *camera)
     {
         // A pass whose camera has never been given a viewport cannot be
@@ -128,12 +145,14 @@ private:
         if (!(height > 0.0f)) return Ogre::Real(0);
         if (camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC) {
             const Ogre::Real orthoH = camera->getOrthoWindowHeight();
-            return orthoH > 0.0f ? (orthoH * kLodBudgetPixels / height) : Ogre::Real(0);
+            return allowedWorldError(kLodBudgetPixels,
+                                     sampleFootprintOrtho(float(orthoH), float(height)));
         }
         const Ogre::Matrix4 &proj = camera->getProjectionMatrix();
         const Ogre::Real p11 = proj[1][1];
-        if (!(p11 > 0.0f)) return Ogre::Real(0);
-        return Ogre::Real(2) * kLodBudgetPixels / (p11 * height);
+        // One metre of distance: the per-object value multiplies this by its own.
+        return allowedWorldError(
+            kLodBudgetPixels, sampleFootprintPerspective(1.0f, float(p11), float(height)));
     }
 };
 

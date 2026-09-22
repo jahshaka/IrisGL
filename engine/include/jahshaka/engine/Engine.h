@@ -2621,20 +2621,36 @@ public:
 
     // ---- PHOTON SHARED INFRASTRUCTURE (SPECS/NANITE_SPEC.md §4.2-§4.3) ----
 
-    /// Runs the indirect-dispatch chain once and reports what the GPU did
-    /// (IndirectDispatchProbe says what each field means). `survivors` is how
-    /// many entries of a 4096-long input list are non-zero, i.e. how many thread
-    /// groups the second job must end up running.
+    /// ATOM P3: RUNS THE GENERIC CULL over a scene's GPU table and reports what
+    /// the GPU decided (`GpuCullRequest` / `GpuCullResult` carry the contract).
     ///
-    /// This is the PROOF of ogre-patch 0032 and, for now, its only caller: the
-    /// capability exists for the Photon arms, which are not built yet. It
-    /// allocates three small UAV buffers, dispatches twice, reads back and frees
-    /// everything again, so it is safe to call at any time — but it is a
-    /// measurement, not a render path.
+    /// `view` supplies the depth pyramid when the request asks for one, and the
+    /// pyramid it binds is THE ONE THAT IS THERE — which, called before a frame,
+    /// is the PREVIOUS frame's (the seed rewrites mip 0 in the frame's own
+    /// compositor graph, so until it runs the texture still holds the last
+    /// completed frame's pyramid). That ordering IS the design's
+    /// previous-frame contract; the request's `viewProj` must be the matrix that
+    /// pyramid was built with.
     ///
-    /// False means the jobs are missing (unstaged media) or the backend cannot
-    /// do it; `out.supported` distinguishes the two.
-    virtual bool indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe &out) = 0;
+    /// `readBack` fills the result's vectors, which flushes the command buffer
+    /// and stalls on the copies: a suite and a spike path, never a frame.
+    ///
+    /// False means no compute (`out.supported` false) or a failure whose reason
+    /// is in `takeLastError()`. It allocates its result buffers once per scene
+    /// and grows them with the table, never per call.
+    virtual bool gpuCull(Scene *scene, View *view, const GpuCullRequest &request,
+                         bool readBack, GpuCullResult &out) = 0;
+
+    /// FILLS THE VIEW HALF OF A CULL REQUEST from a view's live camera: the
+    /// row-major view-projection, the six frustum planes, the eye, the two terms
+    /// of the quality currency (proj[1][1] and the target height) and the depth
+    /// pyramid's level count when the view builds one. The consumer sets the
+    /// predicates, the tolerance and the mode; everything here is a CONVENTION —
+    /// which projection carries the depth buffer's own z range, which sign a
+    /// plane's normal has, which way a Vulkan viewport's height points — and a
+    /// host has no business re-deriving any of it. False when the view has no
+    /// camera or no viewport yet.
+    virtual bool fillCullView(View *view, GpuCullRequest &out) const = 0;
 
     /// What pyramid `view` is building, if any (HzbStatus). Cheap: reads the
     /// live texture's shape, renders nothing. False when the view has none.
