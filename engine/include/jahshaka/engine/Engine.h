@@ -2732,6 +2732,23 @@ public:
     /// There is ONE sink per process: every Scene and View holds a reference to
     /// the Engine's string, so this drains all of them.
     virtual std::string takeLastError() = 0;
+
+    /// THE ONE VOXEL READER'S PARITY HARNESS (PHOTON-READER-1). Marches `cones`
+    /// through `scene`'s bound cascade chain TWICE - in a FRAGMENT shader and in
+    /// a COMPUTE job, both built from the one reader's source files
+    /// (jah_voxel_{sample,march,parity}.glsl) - and returns both answers. The
+    /// pixel shader's cones are a fragment stage and the irradiance field's
+    /// probe rays a compute stage; identical answers here are what "the field
+    /// and the cones read one radiance field the same way" means at the bit
+    /// level. At most 64 cones and the chain's first four cascades.
+    ///
+    /// A MEASUREMENT: it renders a quad, dispatches a job, flushes the command
+    /// buffer and stalls on both readbacks - a suite, never a frame. False when
+    /// the scene has no voxel lighting bound or the harness media is missing
+    /// (the reason in takeLastError()).
+    virtual bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
+                                   std::vector<VoxelReaderAnswer> &fragment,
+                                   std::vector<VoxelReaderAnswer> &compute) = 0;
 };
 
 }}  // namespace jahshaka::engine

@@ -2,9 +2,12 @@
 # (PHOTON-READER-1: the one voxel radiance reader).
 #
 #   cmake -DPIECE=<name> -DOUT=<file.any> -DIN0=<a.glsl> [-DIN1=<b.glsl> ... -DIN7=] -P WrapHlmsPiece.cmake
+#   cmake -DRAW=1 -DOUT=<file.glsl> -DIN0=... -P WrapHlmsPiece.cmake
 #
 # The output is the piece header naming <name>, every input verbatim in the
-# order given, the piece end. The inputs are the ONE source (they are also
+# order given, the piece end - or, with RAW, the inputs alone, concatenated
+# (a plain GLSL program built from the same source, e.g. the parity suite's
+# fragment half). The inputs are the ONE source (they are also
 # compiled offline by glslang through #include), so nothing is ever hand-copied
 # into Hlms media.
 #
@@ -12,8 +15,8 @@
 # its directive mark wherever it finds it, comments included (a stray one has
 # rendered whole scenes black with nothing in any log — DOCS/traps/ENGINE.md),
 # so an input that contains the character anywhere fails the BUILD.
-if(NOT PIECE OR NOT OUT OR NOT IN0)
-    message(FATAL_ERROR "WrapHlmsPiece: PIECE, OUT and IN0 are required")
+if((NOT PIECE AND NOT RAW) OR NOT OUT OR NOT IN0)
+    message(FATAL_ERROR "WrapHlmsPiece: PIECE (or RAW), OUT and IN0 are required")
 endif()
 # Numbered, not a list: a custom command's arguments reach a shell, where a list
 # separator is a pipe or a statement end.
@@ -33,4 +36,8 @@ foreach(_in IN LISTS _inputs)
     endif()
     string(APPEND _body "${_text}\n")
 endforeach()
-file(WRITE "${OUT}" "@piece( ${PIECE} )\n${_body}@end\n")
+if(RAW)
+    file(WRITE "${OUT}" "${_body}")
+else()
+    file(WRITE "${OUT}" "@piece( ${PIECE} )\n${_body}@end\n")
+endif()

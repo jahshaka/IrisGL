@@ -3413,6 +3413,10 @@ public:
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
+    /// The head of the scene's voxel chain (cascade 0's VctLighting, which holds
+    /// the extra cascades), or null when no voxel GI is built. For measuring
+    /// harnesses (Engine::voxelReaderParity), never for ownership.
+    Ogre::VctLighting *voxelLighting() const { return mVctLighting; }
 
     /// The backend light behind a document node id, and the reverse lookup.
     /// Both exist for the shadow-map work (SHADOW_TOOLING_SPEC.md §4.3): the
@@ -6686,6 +6690,10 @@ public:
     bool hzbStatus(View *view, HzbStatus &out) const override;
     bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                       unsigned &width, unsigned &height) override;
+    // ---- The one voxel reader's parity harness (OgreVoxelReaderParity.cpp) ----
+    bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
+                           std::vector<VoxelReaderAnswer> &fragment,
+                           std::vector<VoxelReaderAnswer> &compute) override;
     // ---- The render-loop monitor (OgreFrameMonitor.cpp) ----
     void setFrameMonitor(MonitorLevel level) override;
     MonitorLevel frameMonitor() const override;

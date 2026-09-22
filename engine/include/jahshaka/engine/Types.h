@@ -6432,4 +6432,30 @@ struct GpuSceneStatus {
     unsigned long long rayLevelWalks = 0;
 };
 
+/// ONE CONE FOR THE ONE VOXEL READER'S PARITY HARNESS (PHOTON-READER-1;
+/// Engine::voxelReaderParity, engine.voxel_reader_parity). Everything is in the
+/// normalised space of cascade 0 of the scene's chain, as the reader's callers
+/// hand it (the pixel shader after its own start bias, the irradiance field's
+/// probe rays from the probe's position).
+struct VoxelReaderCone {
+    Vec3     posLS;                  ///< where the march starts
+    Vec3     dirLS;                  ///< unit direction
+    Vec3     biasDirLS;              ///< the hop's bias direction (zero: a point in free space)
+    float    tanHalfAngle = 0.577f;  ///< the diffuse cone set's half angle
+    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 4 lod step, 8 gap along the cone)
+    unsigned cascade = 0u;           ///< which cascade the point reads take
+    float    lod = 0.0f;             ///< ...at which mip
+};
+
+/// Every answer the reader gives for one cone, as raw floats (compared bit for
+/// bit by the suite): the march's colour/alpha, its escape opacity, its age in
+/// cascade 0's units, the cascade it stopped in and its age there, the ray
+/// hit's read at the cone's start and the march's own read of the same point.
+struct VoxelReaderAnswer {
+    float march[4];     ///< colour.rgb, alpha
+    float escape[4];    ///< escapeAlpha, travelledC0, lastCascade, travelled
+    float hitRead[4];   ///< jahVoxelSample (what jah_rq_hit.glsl calls)
+    float marchRead[4]; ///< the march's spelling of the same read
+};
+
 }}  // namespace jahshaka::engine
