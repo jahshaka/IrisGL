@@ -74,10 +74,10 @@ const char *const kWorkspaceName = "Jahshaka/VoxelReaderParity/Workspace";
 /// The inputs, in the layout both halves declare (the compute half's UAV struct
 /// and the fragment half's uniform block).
 struct ParityParams {
-    float chainInvRes[8][4];
-    float chainFromPrev[14][4];
-    float cones[kTexels][4];
-    float counts[4];
+    float chainInvRes[8][4] = {};
+    float chainFromPrev[14][4] = {};
+    float cones[kTexels][4] = {};
+    float counts[4] = {};
 };
 
 void toAnswers(const float *texels, size_t numCones, std::vector<VoxelReaderAnswer> &out) {

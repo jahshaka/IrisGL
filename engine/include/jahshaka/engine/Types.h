@@ -6452,10 +6452,10 @@ struct VoxelReaderCone {
 /// cascade 0's units, the cascade it stopped in and its age there, the ray
 /// hit's read at the cone's start and the march's own read of the same point.
 struct VoxelReaderAnswer {
-    float march[4];     ///< colour.rgb, alpha
-    float escape[4];    ///< escapeAlpha, travelledC0, lastCascade, travelled
-    float hitRead[4];   ///< jahVoxelSample (what jah_rq_hit.glsl calls)
-    float marchRead[4]; ///< the march's spelling of the same read
+    float march[4] = {};     ///< colour.rgb, alpha
+    float escape[4] = {};    ///< escapeAlpha, travelledC0, lastCascade, travelled
+    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls)
+    float marchRead[4] = {}; ///< the march's spelling of the same read
 };
 
 }}  // namespace jahshaka::engine
