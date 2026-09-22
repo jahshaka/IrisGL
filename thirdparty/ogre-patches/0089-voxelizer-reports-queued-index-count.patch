@@ -1,0 +1,80 @@
+Jahshaka patch 0089 - a voxelizer can be ASKED what it bound.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after pulling
+this. It touches `Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h`, which
+patches 0061, 0062, 0064 and 0065 also touch; this one applies AFTER all four and
+its single hunk sits below theirs. A tree that carries any of them and fails
+`build-ogre.sh` with "upstream changed the patched file" is seeing the known
+overlap false positive (CLAUDE.md): reset the ogre-next submodule and re-run the
+whole stack.
+
+THE MISSING READING. `VctVoxelizer` sizes every raster dispatch by
+`QueuedInstance::numIndices`, filled in `placeItemsInBuckets` from
+`getLodVao( subMesh, lodLevel )` - the LOD level patch 0064 keys the mesh entry by,
+AND the clamp that patch applies to it. Nothing in the class reports that number.
+A host that wants to know how much geometry a volume holds therefore has to walk
+the mesh's VAOs from outside and re-implement the same clamp, which is a
+PREDICTION: it agrees with the voxelizer only for as long as the two copies of the
+clamp agree, and it counts geometry for an item the region declined. Jahshaka's
+`GiStatus::CascadeStatus::voxelTriangles` was exactly that prediction (ATOM
+inventory row AT-A12) and `gi.cascade_lod` asserted it against itself.
+
+THE SHAPE. One const accessor, `getQueuedIndexCount()`, summing
+`numIndices` over the buckets' queued instances. The buckets and not `mItems`,
+because the buckets are what the dispatches iterate: an item the region declined
+contributes nothing, which is the honest answer to "what does this volume hold".
+Nothing is stored and nothing is computed at build time - the walk is over a few
+hundred entries at most and a host reads it once per rebuild, beside
+`getNumBuckets()` / `getNumOctants()` (patch 0065), which it is the missing third
+of.
+
+WHAT DOES NOT CHANGE. No behaviour: the class computes nothing new and no existing
+member moves. Upstream's samples and every existing caller are untouched.
+
+VERIFICATION. `git apply --check` on a tree carrying 0001-0088 and
+`git apply --reverse --check` after applying; `build-ogre.sh` re-run in the lane
+worktree. The suite is `gi.cascade_lod`, whose case 4 now asserts a READBACK of
+what the voxelizer holds rather than the host's own prediction of it.
+
+--- a/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
++++ b/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
+@@ -438,6 +438,39 @@
+         /// report it (Jahshaka: GiStatus::CascadeStatus::voxelDispatches).
+         size_t getNumBuckets() const { return mBuckets.size(); }
+         size_t getNumOctants() const { return mOctants.size(); }
++
++        /// JAHSHAKA PATCH 0089 - HOW MANY INDICES THE LAST build() ACTUALLY BOUND.
++        ///
++        /// `QueuedInstance::numIndices` is what sizes each raster dispatch, and it
++        /// is filled in `placeItemsInBuckets` from `getLodVao( subMesh, lodLevel )`
++        /// (patch 0064) - i.e. from the LOD LEVEL this voxelizer resolved and
++        /// CLAMPED for itself. Summing it is therefore a READING of the geometry
++        /// the volume holds, where a host walking the mesh's VAOs from outside can
++        /// only ever produce a prediction that re-implements the clamp and drifts
++        /// from it (Jahshaka: GiStatus::CascadeStatus::voxelTriangles used to be
++        /// exactly that prediction).
++        ///
++        /// Counted over the buckets and not over `mItems`, because the buckets are
++        /// what the dispatches iterate: an item the region declined contributes
++        /// nothing here, which is the honest answer.
++        size_t getQueuedIndexCount() const
++        {
++            size_t total = 0u;
++            VoxelizerBucketMap::const_iterator itor = mBuckets.begin();
++            VoxelizerBucketMap::const_iterator endt = mBuckets.end();
++            while( itor != endt )
++            {
++                FastArray<QueuedInstance>::const_iterator itInst = itor->second.queuedInst.begin();
++                FastArray<QueuedInstance>::const_iterator enInst = itor->second.queuedInst.end();
++                while( itInst != enInst )
++                {
++                    total += itInst->numIndices;
++                    ++itInst;
++                }
++                ++itor;
++            }
++            return total;
++        }
+     public:
+         /// JAHSHAKA PATCH 0081: the voxeliser's material cache, so a host can
+         /// evict a dying datablock (VctMaterial::removeDatablock) instead of

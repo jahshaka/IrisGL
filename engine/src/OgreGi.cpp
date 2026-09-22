@@ -967,6 +967,8 @@ GiStatus OgreScene::giStatus() const {
                                 : 0;
             cs.lastCpuMs  = c.lastCpuMs;
             cs.lodLevels  = c.lodLevels;    // what the attach set was voxelised at
+            // A READING of what the voxeliser bound at the last build, not a CPU
+            // prediction of it (AT-A12, ogre-patch 0089's getQueuedIndexCount).
             cs.voxelTriangles = c.lodTriangles;
             // WHAT THE REBUILD COST IN DISPATCHES (ogre-patch 0065): read live off
             // the voxeliser, which keeps its bucket map after build(). A bucket is
@@ -4372,6 +4374,8 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.items = cascadeGeometryCount(c);
         setCascadeItems(c, c.items > 0u);
         c.voxelizer->build(mSceneMgr);
+        // THE READING, taken where the buckets exist (ogre-patch 0089).
+        c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
         c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
                                            c.voxelizer, anisotropic);
         const Ogre::uint32 extraBounces =
@@ -4701,7 +4705,7 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
 // of a mesh a cascade voxelises, and this is it.
 //
 // THE RULE IS NOT RESTATED HERE. It is `lodLevelForWorldError` (Types.h, beside
-// MeshData::lodErrors, which is the other caller): the COARSEST baked level
+// MeshData::lodBounds, which is the other caller): the COARSEST baked level
 // whose error is below the size the consumer samples at. What this function
 // owns is the two terms that turn a cascade into that size:
 //
@@ -4715,7 +4719,7 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
 //     so a mesh simplified to a 7 mm error is free of charge there and costs a
 //     quarter of the raster dispatch.
 //   * AND IT IS MEASURED IN THE MESH'S OWN UNITS, because the baked errors are
-//     (MeshData::lodErrors). The item carries the scale that takes one to the
+//     (MeshData::lodBounds). The item carries the scale that takes one to the
 //     other, so the cell is divided by it — a 10x-scaled mesh has 10x the
 //     world-space error for the same level, and dividing is what keeps the
 //     comparison honest for both. The LARGEST axis of the derived scale is
@@ -4738,10 +4742,10 @@ unsigned OgreScene::cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item)
     // a switch nothing can name — the defect the NO_RAY_QUERY shape avoids by
     // meeting the request once and reporting the answer.
     if (!mCascadeVoxelLod || !item) return 0u;
-    if (mLodErrorsByMesh.empty()) return 0u;               // the common scene, in one branch
+    if (mMeshIdByOgreMesh.empty()) return 0u;              // the common scene, in one branch
     const Ogre::Mesh *mesh = item->getMesh().get();
-    const auto it = mLodErrorsByMesh.find(mesh);
-    if (it == mLodErrorsByMesh.end() || it->second.empty()) return 0u;
+    const std::vector<float> *bounds = lodBoundsFor(mesh);
+    if (!bounds || bounds->empty()) return 0u;
     float scale = 1.0f;
     if (const Ogre::Node *node = item->getParentNode()) {
         const Ogre::Vector3 s = node->_getDerivedScale();
@@ -4749,7 +4753,7 @@ unsigned OgreScene::cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item)
     }
     if (!(scale > 0.0f) || !std::isfinite(scale)) return 0u;
     const float sizeInMeshUnits = (c.cell() * kCascadeLodCellFraction) / scale;
-    return unsigned(lodLevelForWorldError(it->second, sizeInMeshUnits, it->second.size()));
+    return unsigned(lodLevelForWorldError(*bounds, sizeInMeshUnits, bounds->size()));
 }
 
 void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
@@ -4795,9 +4799,9 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
     // and a per-item reading would claim a level nothing was spent at.
     //
     // Hence: MIN over the wanted set per mesh first, then one pass that spends
-    // that level AND books the histogram from it, so `lodLevels` /
-    // `lodTriangles` describe what the voxeliser HOLDS — which is what their
-    // comment in EnginePrivate.h promises and what `gi.cascade_lod` asserts.
+    // that level AND books the histogram from it, so `lodLevels` describes what
+    // the voxeliser was ASKED for. `lodTriangles` is no longer booked here at all
+    // — it is READ off the voxeliser after `build()` (AT-A12, patch 0089).
     std::unordered_map<const Ogre::Mesh *, unsigned> effective;
     effective.reserve(wanted.size());
     for (Ogre::Item *item : wanted) {
@@ -4823,18 +4827,21 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
         if (c.lodLevels.size() <= size_t(lod)) c.lodLevels.resize(size_t(lod) + 1u, 0);
         ++c.lodLevels[lod];
         c.voxelizer->addItem(item, false, 0u, lod);
-        // The geometry that level actually is — the same clamp ogre-patch 0064
-        // makes inside the voxeliser, so the reading cannot claim a level the
-        // mesh does not have.
-        if (mesh) {
-            for (unsigned si = 0; si < mesh->getNumSubMeshes(); ++si) {
-                const auto &vaos = mesh->getSubMesh(si)->mVao[Ogre::VpNormal];
-                if (vaos.empty()) continue;
-                const size_t pick = std::min(size_t(lod), vaos.size() - 1u);
-                c.lodTriangles += (long long)(vaos[pick]->getPrimitiveCount() / 3u);
-            }
-        }
     }
+    // WHAT THE VOXELISER HOLDS, READ OFF THE VOXELISER (ATOM inventory row
+    // AT-A12, ogre-patch 0089). This used to walk each mesh's VAOs here and sum
+    // `getPrimitiveCount()` at the level it had just asked for, re-applying patch
+    // 0064's own clamp to do it: a PREDICTION, in a second copy of the clamp
+    // (AT-DUP), that also counted geometry for items the region declined.
+    // `getQueuedIndexCount()` is the sum of `QueuedInstance::numIndices` over the
+    // buckets — the very numbers that size the raster dispatches — so this is a
+    // reading, and `gi.cascade_lod`'s case 4 asserts a reading.
+    //
+    // AFTER the addItem loop and not inside it, because the buckets are filled by
+    // `build()`... which is why the number is refreshed there too: see
+    // rebuildCascade. Here it is the count the LAST build left, which for a fresh
+    // attach is zero until the build runs.
+    c.lodTriangles = 0;
     c.attachedItems.swap(wanted);
     c.itemsAttached = true;
 }
@@ -4920,6 +4927,8 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "OgreScene::rebuildCascade");
             }
             c.voxelizer->build(mSceneMgr);
+            // THE READING, taken where the buckets exist (ogre-patch 0089).
+            c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
             // ...and only once the build has SUCCEEDED does the lighting start
             // reading the replacement (the swap re-creates its light voxels and
             // re-registers its texture listeners). A build that threw leaves the

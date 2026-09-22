@@ -345,6 +345,22 @@ public:
     /// with no baked chain are unaffected by any value.
     virtual void        setLodBias(float bias) = 0;
     virtual float       lodBias() const = 0;
+    /// DIAGNOSTIC: the SHAPE of a mesh's LOD and shadow VAO lists (ATOM P1's
+    /// AT-A11). `levels` is how many LOD levels the mesh has and
+    /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the
+    /// corresponding normal one — i.e. how many shrunk position-only VAOs this
+    /// mesh pays for. The shape the engine builds is 1 (level 0 optimized, the
+    /// coarse levels aliased) or 0 (nothing to optimize, everything aliased); it
+    /// was `levels` before ogre-patch 0088 made a MIXED list legal to destroy.
+    /// False for an unknown mesh. Exists because that shape is Ogre-internal, it
+    /// is VRAM per mesh forever, and a suite has to be able to see it.
+    virtual bool        meshVaoShape(MeshId mesh, unsigned &levels,
+                                     unsigned &shadowIndependent) const = 0;
+    /// WHICH LEVEL EVERY DRAWN OBJECT IS ON (ATOM P1's readout). One row per node
+    /// that carries an Item, in node order; see `ObjectLodDesc` for what `level`
+    /// means and for the one thing it cannot promise. Cheap: it reads a byte and
+    /// a VAO's primitive count per object and allocates the vector.
+    virtual void        objectLods(std::vector<ObjectLodDesc> &out) const = 0;
     /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
     /// text. Empty (lastError()) for an unknown material.
     ///

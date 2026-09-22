@@ -70,31 +70,39 @@ using MaterialId = unsigned int;
 // `kCascadeLodCellFraction` in OgreGi.cpp). A far-field proxy: a fraction of
 // the distance. The CONSTANTS are the things to measure; the rule is arithmetic.
 //
-// `errors[i]` is level i+1's simplifier error as a LENGTH in the same units as
-// `cellSize` (see MeshData::lodErrors), and the errors are non-decreasing, so
-// the first level that fails the test ends the walk. The answer is 0 — the
-// authored geometry — whenever even level 1 is too coarse, and whenever the
-// size is not a positive finite number.
+// `bounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0, as a
+// LENGTH in the same units as `cellSize` (see MeshData::lodBounds), and the
+// bounds are non-decreasing, so the first level that fails the test ends the
+// walk. The answer is 0 — the authored geometry — whenever even level 1 is too
+// coarse, and whenever the size is not a positive finite number.
 //
-// WHY "BELOW THE ALLOWED ERROR" IS THE WHOLE RULE: the baked error is the worst
-// distance a level's surface may sit from the authored one, so a consumer that
-// cannot see a difference of `allowed` cannot see that level either. What
-// `allowed` IS belongs to the consumer and to nobody else — and the two shipped
+// WHY "BELOW THE ALLOWED DEVIATION" IS THE WHOLE RULE: the baked bound is how
+// far a level's surface is measured to sit from the authored one, so a consumer
+// that cannot see a difference of `allowed` cannot see that level either. What
+// `allowed` IS belongs to the consumer and to nobody else — and the shipped
 // consumers have measured it, which is the only way this number was ever going
 // to be right (the old text claimed "a sample of its own resolution" for the
-// voxeliser and was wrong by two orders of magnitude; see OgreGi.cpp). The
-// baked error is the COMBINED position+attribute quadric error, which is >= the
-// pure geometric one, so every answer here is conservative (a finer level than
-// geometry alone needs).
+// voxeliser and was wrong by two orders of magnitude; see OgreGi.cpp).
+//
+// THE ARRAY IS `lodBounds` AND NOT `lodErrors` SINCE ATOM-BAKE-1 (ATOM P1's
+// AT-A5), and the difference is the whole point of that lane. What used to be
+// passed here was meshoptimizer's `result_error` — a running max over
+// area-weighted MEAN quadric errors, mixed with attribute deviation, documented
+// by its own author as an approximation — under a comment in this file promising
+// it was "the worst distance a level's surface may sit from the authored one".
+// It was not, and four consumers leaned on the promise. What is passed now is a
+// sampled Hausdorff distance MEASURED at bake time between the two surfaces,
+// with the sampling-gap margin applied (irisgl/import/meshbake.cpp, the block
+// headed THE MEASURED BOUND). `lodErrors` still exists and no consumer reads it.
 //
 // `levelsAvailable` caps the answer at the levels the consumer actually has —
 // the document's index lists, or the VAOs the engine built from them.
-inline size_t lodLevelForWorldError(const std::vector<float> &errors, float allowed,
+inline size_t lodLevelForWorldError(const std::vector<float> &bounds, float allowed,
                                    size_t levelsAvailable) {
     if (!(allowed > 0.0f)) return 0;
     size_t level = 0;
-    for (size_t i = 0; i < errors.size() && i < levelsAvailable; ++i) {
-        if (!(errors[i] < allowed)) break;    // errors are non-decreasing
+    for (size_t i = 0; i < bounds.size() && i < levelsAvailable; ++i) {
+        if (!(bounds[i] < allowed)) break;    // bounds are non-decreasing
         level = i + 1;
     }
     return level;
@@ -205,24 +213,29 @@ struct MeshData {
     // (the VAO is matched on {opType, indexBufferVbo, indexType, vertexBuffers},
     // so a per-level vertex remap would break the auto-instancing merge).
     //
-    // `lodErrors[i]` is level i+1's SIMPLIFIER error as a LENGTH IN MESH UNITS —
-    // meshoptimizer's combined position + attribute (UV, normal) quadric error,
-    // which is >= the pure geometric error (the second read of ATOM-1): every
-    // consumer that compares it with a world-space size is CONSERVATIVE (a finer
-    // level than the geometry alone would need). A true geometric bound is a
-    // recorded follow-up;
-    // monotonically non-decreasing. It is the currency of the whole program,
-    // and every consumer spends it the same way — by stating the world-space
-    // deviation IT can afford and taking the coarsest level below it:
+    // `lodBounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0, as
+    // a LENGTH IN MESH UNITS: a sampled Hausdorff estimate taken at bake time
+    // with the sampling-gap margin applied (ATOM P1's AT-A5 — before it, what
+    // stood here was the simplifier's own quadric relabelled as a bound, and it
+    // was not one). Monotonically non-decreasing. It is the currency of the whole
+    // program, and every consumer spends it the same way — by stating the
+    // world-space deviation IT can afford and taking the coarsest level below it:
     //   * the VIEW turns a PIXEL budget into that deviation at its own live
     //     lens and viewport height (`kLodBudgetPixels`, and the strategy in
-    //     OgreMesh.cpp), and
+    //     OgreMesh.cpp),
     //   * a VOXELISER turns its own CELL into it through a measured fraction
     //     (`kCascadeLodCellFraction` in OgreGi.cpp — a binary occupancy test
     //     moves its boundary with the deviation, so the fraction is small and
-    //     it was measured on the picture, not argued).
+    //     it was measured on the picture, not argued), and
+    //   * a CARD turns its own texel into it, at bake time.
+    //
+    // `lodErrors[i]` is what the SIMPLIFIER claimed about that level. NO CONSUMER
+    // READS IT: it is carried across the boundary so a diagnostic (the render
+    // monitor, a bake report) can show both numbers side by side, which is how
+    // the margin on the measurement stays honest.
     std::vector<std::vector<unsigned>> lodIndices;
     std::vector<float>                 lodErrors;
+    std::vector<float>                 lodBounds;
 
     // ---- SURFACE-CACHE phase 1: the mesh's CARD LIST -----------------------
     //
@@ -239,22 +252,18 @@ struct MeshData {
 
     size_t vertexCount() const { return positions.size() / 3; }
     size_t triangleCount() const { return indices.size() / 3; }
-    /// Levels including level 0 — always at least 1.
-    size_t lodLevelCount() const { return lodIndices.size() + 1; }
-    /// The index list of a level; level 0 is `indices`. Out-of-range clamps to
-    /// the coarsest level rather than reading past the end.
-    const std::vector<unsigned> &lodLevelIndices(size_t level) const {
-        if (level == 0 || lodIndices.empty()) return indices;
-        return lodIndices[std::min(level, lodIndices.size()) - 1];
-    }
     /// The COARSEST level that still stands in for this mesh when the consumer
     /// can afford a world-space deviation of `allowed` —
     /// THE RULE ITSELF IS `lodLevelForWorldError` ABOVE, stated once and shared
     /// with the engine's voxeliser (OgreScene::cascadeVoxelLod). This overload
     /// is the document-side convenience: it clamps to the levels this mesh
     /// actually carries.
+    /// (`lodLevelCount` and `lodLevelIndices` used to sit here and are DELETED —
+    /// ATOM inventory row AT-DEAD: their only callers were the suite that tested
+    /// them. `lodIndices` is public and the engine's own level walk is
+    /// `buildMeshV2`'s `accepted` list, which never went through either.)
     size_t lodForWorldError(float allowed) const {
-        return lodLevelForWorldError(lodErrors, allowed, lodIndices.size());
+        return lodLevelForWorldError(lodBounds, allowed, lodIndices.size());
     }
     bool hasSkinData() const {
         return !blendIndices.empty() && blendIndices.size() == vertexCount() * 4 &&
@@ -289,7 +298,26 @@ struct MeshData {
 // 2376 lines got twice the error the desktop did — on the same asset, in the
 // same frame. The reference constants (`LodReference`) and `lodSwitchDistance`
 // are DELETED with this note; nothing derives a distance any more.
-constexpr float kLodBudgetPixels = 1.0f;   ///< the budget: one pixel of the simplifier's (combined, >= geometric) error
+/// THE BUDGET: ONE PIXEL of MEASURED geometric deviation. Derived, and the
+/// derivation is short because the quantity is now honest (ATOM P1's AT-A5 — the
+/// old text had to hedge with "the simplifier's combined, >= geometric error",
+/// which was not true in either direction).
+///
+/// One pixel is the largest budget that cannot be seen: the deviation is a
+/// displacement of the SILHOUETTE and of shaded normals, and a displacement under
+/// one pixel is under the sampling rate of the image it lands in. Half a pixel
+/// would be Nyquist-strict and is not needed — the bound is a MAXIMUM over the
+/// surface while what an eye integrates is the average, and the bound already
+/// carries the sampling-gap margin. Two pixels is visible on a moving silhouette:
+/// that frame-to-frame delta is ATOM-BAKE-2's dolly gate's subject.
+///
+/// WHAT IT IS WORTH, measured on the shipped chains: at one pixel on a 1080-line
+/// 45-degree view, the sphere's level 1 (bound 0.032 m) is taken at a bounding-
+/// sphere radius of about 40 px and its level 2 (0.071) at about 18 px — i.e. the
+/// levels arrive while the object is still a recognisable shape on screen, which is
+/// what makes the triangle saving real rather than notional. A tolerance whose
+/// savings arrive only once the object is 4 px across would not be a tolerance.
+constexpr float kLodBudgetPixels = 1.0f;
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
 /// One bone of a rig, in its BIND pose. The transform is LOCAL to the parent
@@ -5104,6 +5132,29 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
         fx.looks.swap(kept);
     }
 }
+
+/// WHAT LEVEL ONE OBJECT IS ACTUALLY DRAWING (ATOM P1's readout, the gap OWN-TRI
+/// left). The chain could not be SEEN working: `submittedTriangles` says the
+/// scene shed triangles, and nothing said which object took which level.
+///
+/// `level` is the Item's own `mCurrentMeshLod` — what the LOD strategy last
+/// wrote, i.e. what the render queue will index its VAO list with. `levels` is
+/// how many that mesh has (1 = no chain), and `triangles` is what that level's
+/// VAOs really hold, summed over the sub-meshes.
+///
+/// THE HONESTY NOTE: `mCurrentMeshLod` is one slot per object and EVERY pass that
+/// updates LOD lists writes it — a planar reflector's mirrored camera, a PiP
+/// inset, a probe cube face, a thumbnail. So this is "the level the last LOD
+/// update chose", which in an ordinary editor frame is the main view's and in a
+/// frame that also rendered a mirror may be the mirror's. A per-pass reading
+/// would need a per-pass slot in the pin, which is a patch and not a diagnostic.
+struct ObjectLodDesc {
+    NodeId             node = 0;
+    std::string        name;
+    unsigned           level = 0;
+    unsigned           levels = 1;
+    unsigned long long triangles = 0;
+};
 
 /// What the renderer measured this frame (STATS_OVERLAY_SPEC.md §4).
 /// A POD, exactly like ShaderCacheStats — `app.renderStats()` is this struct.

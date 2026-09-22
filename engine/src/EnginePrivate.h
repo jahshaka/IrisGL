@@ -2951,10 +2951,13 @@ public:
     /// ATOM stage 1: the scene-wide LOD dial (OgreMesh.cpp).
     void  setLodBias(float bias) override;
     float lodBias() const override { return mLodBias; }
+    void  objectLods(std::vector<ObjectLodDesc> &out) const override;
+    bool  meshVaoShape(MeshId mesh, unsigned &levels,
+                       unsigned &shadowIndependent) const override;
     /// Writes `errors` (level 1 first, a length in mesh units each) into
     /// `mesh`'s LOD value array at the current bias. Patch 0059 added the
     /// setter this needs.
-    void  applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &errors) const;
+    void  applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &bounds) const;
     std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
     bool setNodeMaterial(NodeId, MaterialId) override;
@@ -3097,17 +3100,20 @@ public:
     const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
     /// has none (every skinned mesh, every line mesh, every model opened
-    /// without a bake). The same index shape as `mLodErrorsByMesh` and for the
-    /// same reason: all a cache holds is an `Ogre::Item *`.
+    /// without a bake). Indexed by `Ogre::Mesh *` because all a cache holds is
+    /// an `Ogre::Item *`.
     const std::vector<MeshCardDesc> *meshCardsFor(const Ogre::Mesh *mesh) const {
         auto it = mCardsByMesh.find(mesh);
         return it == mCardsByMesh.end() ? nullptr : &it->second;
     }
-    /// ...and its baked LOD errors, so a capture can re-derive the level at the
-    /// card's REAL texel rather than at the bake's nominal 128.
-    const std::vector<float> *lodErrorsFor(const Ogre::Mesh *mesh) const {
-        auto it = mLodErrorsByMesh.find(mesh);
-        return it == mLodErrorsByMesh.end() ? nullptr : &it->second;
+    /// ...and its baked LOD BOUNDS, for a consumer that holds only an
+    /// `Ogre::Item *` (the cascade voxeliser). THROUGH THE RECORD, never a second
+    /// copy of the array (AT-DUP): `mMeshIdByOgreMesh` is an index.
+    const std::vector<float> *lodBoundsFor(const Ogre::Mesh *mesh) const {
+        auto id = mMeshIdByOgreMesh.find(mesh);
+        if (id == mMeshIdByOgreMesh.end()) return nullptr;
+        auto rec = mMeshes.find(id->second);
+        return rec == mMeshes.end() ? nullptr : &rec->second.lodBounds;
     }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     std::unique_ptr<SurfaceCache> mSurfaceCache;
@@ -3706,13 +3712,19 @@ private:
         /// DIFFERENT map has to be refused rather than silently re-target the
         /// first node's weights.
         std::vector<Ogre::uint16> blendToRig;
-        /// ATOM stage 1: the per-level geometric errors this mesh was built
-        /// with (a length in mesh units, level 1 first — level 0 has none).
-        /// Empty for a mesh with no LOD chain, which is most of them. Kept so a
-        /// LOD-bias change can re-derive the mesh's switch distances without
-        /// rebuilding a buffer: the Items hold a POINTER to the Ogre mesh's
-        /// value array, so rewriting that array in place moves every instance.
-        std::vector<float> lodErrors;
+        /// ATOM stage 1: the per-level MEASURED BOUNDS this mesh was built with
+        /// (a length in mesh units, level 1 first — level 0 has none). Empty for
+        /// a mesh with no LOD chain, which is most of them. Kept so a LOD-bias
+        /// change can re-derive the mesh's switch distances without rebuilding a
+        /// buffer: the Items hold a POINTER to the Ogre mesh's value array, so
+        /// rewriting that array in place moves every instance.
+        ///
+        /// THIS IS THE ONLY COPY (ATOM inventory row AT-DUP). There used to be a
+        /// second one in `mLodErrorsByMesh`, a whole vector per mesh duplicated
+        /// so that a consumer holding only an `Ogre::Item *` could reach it; that
+        /// map is now an INDEX to this record (`mMeshIdByOgreMesh`) and the data
+        /// lives here alone.
+        std::vector<float> lodBounds;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),
@@ -4453,7 +4465,14 @@ private:
         /// voxeliser, so it describes what the voxeliser HOLDS and not what a
         /// walk would decide now. `{N}` for a scene with no baked LOD chains.
         std::vector<int> lodLevels;
-        /// The triangles those levels add up to, counted in the same walk.
+        /// THE TRIANGLES THE VOXELISER ACTUALLY HOLDS — a READING, taken off the
+        /// voxeliser after every `build()` through ogre-patch 0089's
+        /// `getQueuedIndexCount()` (the sum of `QueuedInstance::numIndices`, which
+        /// is what sizes each raster dispatch). It was a CPU prediction until
+        /// ATOM-BAKE-1 (inventory row AT-A12): a walk of each mesh's VAOs at the
+        /// level just requested, re-applying patch 0064's clamp in a second copy
+        /// of it and counting items the region had declined. 0 between an attach
+        /// and the build that follows it, which is honest — nothing is bound yet.
         long long lodTriangles = 0;
         /// This cascade's queued rebuild came from the JUMP guard, not from an
         /// ordinary scroll — i.e. nothing of its old volume was reusable.
@@ -4815,14 +4834,17 @@ private:
     NodeId              mVrHandBoneNode[2][kVrHandBoneCount] = {};
     unsigned            mVrHandBones[2] = { 0u, 0u };
     std::map<MeshId, MeshRec> mMeshes;
-    /// ATOM stage 1: THE LOD ERRORS BY OGRE MESH — the one lookup that takes an
-    /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the baked
-    /// per-level errors `createMesh` was given. Only meshes that HAVE a chain
-    /// are in it, which is a small minority, so a miss is the common case and
-    /// means "no chain, level 0". Maintained beside `mMeshes` (createMesh
-    /// inserts, destroyMesh and destroy() erase) rather than walked, because the
-    /// cascade attach walks every item of the scene.
-    std::unordered_map<const Ogre::Mesh *, std::vector<float>> mLodErrorsByMesh;
+    /// ATOM stage 1: THE MESH RECORD BY OGRE MESH — the one lookup that takes an
+    /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the `MeshRec`
+    /// `createMesh` filled, and through it to the baked per-level bounds. Only
+    /// meshes that HAVE a chain are in it, which is a small minority, so a miss
+    /// is the common case and means "no chain, level 0". Maintained beside
+    /// `mMeshes` (createMesh inserts, destroyMesh and destroy() erase) rather
+    /// than walked, because the cascade attach walks every item of the scene.
+    ///
+    /// AN INDEX AND NOT A COPY (AT-DUP): it used to hold the error vector itself,
+    /// so every chained mesh carried its levels twice and the two could drift.
+    std::unordered_map<const Ogre::Mesh *, MeshId> mMeshIdByOgreMesh;
     /// SURFACE-CACHE phase 1 -> 2: THE CARDS BY OGRE MESH, the same index and
     /// for the same reason — a cache holds an `Ogre::Item *` and needs the card
     /// list the bake authored for the mesh behind it. Only meshes that HAVE
