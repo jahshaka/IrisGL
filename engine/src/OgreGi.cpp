@@ -39,6 +39,18 @@ static OgreScene *sVctBindingOwner = nullptr;
 // first call and kept. Function-local rather than a namespace-scope global so
 // the read happens on first use and not in a static initialiser whose order
 // against Ogre's own is nobody's to promise.
+/// THE (mesh, level) HISTOGRAM THE VOXELISER SPENT, read off it after a build
+/// (ATOM P4 / AT-A10). One helper because there are TWO build sites and a reading
+/// taken at only one of them is worse than none - which is exactly the bug
+/// gi.cascade_lod caught. A template only because VctCascade is a member type of
+/// OgreScene and this is file scope.
+template <typename CascadeT>
+static void readVoxelLevels(CascadeT &c) {
+    Ogre::FastArray<Ogre::uint32> hist;
+    if (c.voxelizer) c.voxelizer->getLevelHistogram(hist);
+    c.voxelLevels.assign(hist.begin(), hist.end());
+}
+
 static bool giDebug() {
     static const bool on = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
     return on;
@@ -402,7 +414,7 @@ bool OgreScene::refreshVctFast() {
                 const bool inSet = item && (item->getVisibilityFlags() & kGiGeometryBit) != 0u;
                 const bool held  = mVctItemIds.count(kv.first) != 0u;
                 if (inSet == held) continue;
-                if (inSet) { mVctVoxelizer->addItem(item, false); mVctItemIds.insert(kv.first); }
+                if (inSet) { mVctVoxelizer->addItem(item); mVctItemIds.insert(kv.first); }
                 else       { if (item) mVctVoxelizer->removeItem(item);
                              mVctItemIds.erase(kv.first); }
             }
@@ -966,7 +978,8 @@ GiStatus OgreScene::giStatus() const {
                                                               : int(cascadeAttachCount(c)))
                                 : 0;
             cs.lastCpuMs  = c.lastCpuMs;
-            cs.lodLevels  = c.lodLevels;    // what the attach set was voxelised at
+            cs.lodLevels  = c.lodLevels;    // what the attach set ASKED for
+            cs.voxelLevels = c.voxelLevels;  // what the voxeliser SPENT (AT-A10)
             // A READING of what the voxeliser bound at the last build, not a CPU
             // prediction of it (AT-A12, ogre-patch 0089's getQueuedIndexCount).
             cs.voxelTriangles = c.lodTriangles;
@@ -4094,7 +4107,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
         Ogre::Item *item = kv.second.item;
         // PBR items only — the same set IR traces (never sky/overlays/billboards).
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        mVctVoxelizer->addItem(item, false);
+        mVctVoxelizer->addItem(item);
         mVctItemIds.insert(kv.first);        // what the reuse arm compares against (B4)
         ++itemCount;
     }
@@ -4402,6 +4415,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         return 0;
     }
 
+
     // BUILT OUTERMOST FIRST, and the order is load-bearing rather than a
     // preference: a cascade's multi-bounce pass reads the cascades OUTSIDE it
     // (`addCascade` gives cascade i the chain i+1..N-1), so the coarse volumes
@@ -4424,8 +4438,12 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.items = cascadeGeometryCount(c);
         setCascadeItems(c, c.items > 0u);
         c.voxelizer->build(mSceneMgr);
-        // THE READING, taken where the buckets exist (ogre-patch 0089).
+        // THE READINGS, taken where the buckets exist. BOTH of them, at BOTH build
+        // sites: `lodTriangles` alone here left `voxelLevels` empty on the chain's
+        // first build, which reads as "nothing was voxelised" rather than as the
+        // truth (gi.cascade_lod caught it).
         c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
+        readVoxelLevels(c);
         c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
                                            c.voxelizer, anisotropic);
         const Ogre::uint32 extraBounces =
@@ -4832,6 +4850,7 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
         c.itemsStale = false;
         c.attachedItems.clear();
         c.lodLevels.clear();
+        c.voxelLevels.clear();
         c.lodTriangles = 0;
         return;
     }
@@ -4844,44 +4863,31 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
     c.itemsStale = false;
     c.lodLevels.clear();
     c.lodTriangles = 0;
-    // THE LEVEL IS A PROPERTY OF THE MESH, NOT OF THE ITEM, and resolving that
-    // is the whole of this first pass (ATOM-2 round-1 F1). ogre-patch 0064
-    // keeps the level on the voxeliser's MESH entry, because the buffers are
-    // downloaded, converted and indexed ONCE for every item that shares the
-    // mesh, and when items disagree the FINEST request wins. So two instances
-    // of one mesh at different scales — which ask for different levels, since
-    // the baked error is in mesh units — are both voxelised at the finer one,
-    // and a per-item reading would claim a level nothing was spent at.
+    // `voxelLevels` is NOT cleared here. It is written by the build, and this
+    // function runs on every attach check: clearing it beside `lodLevels` - which
+    // is cleared and refilled in the same breath - emptied the reading on any
+    // frame that re-selected the set without triggering a rebuild.
+    // THE LEVEL IS THE ITEM'S (ATOM P4 / AT-A10). It used to be the MESH's inside
+    // the voxeliser — the geometry was downloaded, repacked and indexed ONCE per
+    // mesh, so items that disagreed were all voxelised at the FINEST request, and
+    // this loop had to MIN over the wanted set per mesh first so the histogram
+    // described what was really spent. Nothing is downloaded any more (the
+    // voxeliser's compute shader reads each instance's own level through its
+    // geometry row), so the min pass and the `effective` map are DELETED: each
+    // item asks for the level its own world error allows and pays for it.
     //
-    // Hence: MIN over the wanted set per mesh first, then one pass that spends
-    // that level AND books the histogram from it, so `lodLevels` describes what
-    // the voxeliser was ASKED for. `lodTriangles` is no longer booked here at all
-    // — it is READ off the voxeliser after `build()` (AT-A12, patch 0089).
-    std::unordered_map<const Ogre::Mesh *, unsigned> effective;
-    effective.reserve(wanted.size());
+    // The booking happens beside the call and not after it because `addItem`
+    // cannot report a refusal — it returns void, and the one case it refuses (a
+    // mesh with no index buffer, which it logs) cannot reach a cascade: the GI
+    // geometry channel only ever carries indexed lit meshes.
+    //
+    // `lodLevels` is still what the voxeliser was ASKED for; what it actually
+    // voxelised at is `getLevelHistogram()`, asserted by gi.voxel_resident.
     for (Ogre::Item *item : wanted) {
-        const Ogre::Mesh *mesh = item->getMesh().get();
-        if (!mesh) continue;
         const unsigned lod = cascadeVoxelLod(c, item);
-        const auto it = effective.find(mesh);
-        if (it == effective.end()) effective.emplace(mesh, lod);
-        else if (lod < it->second) it->second = lod;
-    }
-    for (Ogre::Item *item : wanted) {
-        // The ATOM hook's answer, resolved per mesh above and SPENT here through
-        // ogre-patch 0064's fourth argument (the pin's `addItem` read the finest
-        // VAO and took no level). The booking happens beside the call and not
-        // after it because `addItem` cannot report a refusal — it returns void,
-        // and the one case it refuses (a mesh with no index buffer, which it
-        // logs) cannot reach a cascade: the GI geometry channel only ever
-        // carries indexed lit meshes. If that ever changes, 0064 grows a return
-        // value and this books on it.
-        const Ogre::Mesh *mesh = item->getMesh().get();
-        const auto it = mesh ? effective.find(mesh) : effective.end();
-        const unsigned lod = it != effective.end() ? it->second : 0u;
         if (c.lodLevels.size() <= size_t(lod)) c.lodLevels.resize(size_t(lod) + 1u, 0);
         ++c.lodLevels[lod];
-        c.voxelizer->addItem(item, false, 0u, lod);
+        c.voxelizer->addItem(item, 0u, lod);
     }
     // WHAT THE VOXELISER HOLDS, READ OFF THE VOXELISER (ATOM inventory row
     // AT-A12, ogre-patch 0089). This used to walk each mesh's VAOs here and sum
@@ -4982,8 +4988,9 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "OgreScene::rebuildCascade");
             }
             c.voxelizer->build(mSceneMgr);
-            // THE READING, taken where the buckets exist (ogre-patch 0089).
+            // THE READINGS, taken where the buckets exist.
             c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
+            readVoxelLevels(c);
             // ...and only once the build has SUCCEEDED does the lighting start
             // reading the replacement (the swap re-creates its light voxels and
             // re-registers its texture listeners). A build that threw leaves the

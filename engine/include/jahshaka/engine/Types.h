@@ -3301,6 +3301,15 @@ struct GiStatus {
         /// mesh's baked error, never by the camera: the LOD bias
         /// (Scene::setLodBias) moves what is DRAWN and must not move this.
         std::vector<int> lodLevels;
+        /// WHICH LEVELS THE VOXELISER ACTUALLY SPENT (ATOM P4 / AT-A10), read off
+        /// the voxeliser after build() rather than predicted before it:
+        /// `voxelLevels[L]` = queued INSTANCES (submesh partitions) voxelised at
+        /// level L. It is the pair of `lodLevels`, which is what the cascade
+        /// ASKED for, and the two agree now that the level is the ITEM's: the
+        /// voxeliser used to collapse a shared mesh onto its finest request, so
+        /// one mesh instanced near and far was voxelised twice at the near level
+        /// and no host-side histogram could say so.
+        std::vector<int> voxelLevels;
         /// HOW MANY TRIANGLES THE ATTACH SET HANDS THIS CASCADE at those levels
         /// — the currency of a voxelisation, since the raster dispatch is sized
         /// by the index count and not by the object count. It is the attach set

@@ -4483,6 +4483,12 @@ private:
         /// voxeliser, so it describes what the voxeliser HOLDS and not what a
         /// walk would decide now. `{N}` for a scene with no baked LOD chains.
         std::vector<int> lodLevels;
+        /// THE LEVELS THE VOXELISER ACTUALLY SPENT (ATOM P4 / AT-A10) - a READING,
+        /// taken off the voxeliser after every `build()` through
+        /// `VctVoxelizer::getLevelHistogram()`. The pair of `lodLevels` above,
+        /// which is the request; they agree now that the level is per instance,
+        /// and a disagreement from here on means the voxeliser clamped.
+        std::vector<int> voxelLevels;
         /// THE TRIANGLES THE VOXELISER ACTUALLY HOLDS — a READING, taken off the
         /// voxeliser after every `build()` through ogre-patch 0089's
         /// `getQueuedIndexCount()` (the sum of `QueuedInstance::numIndices`, which
