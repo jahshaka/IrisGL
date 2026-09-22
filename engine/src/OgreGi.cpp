@@ -1323,6 +1323,11 @@ void OgreScene::settleTextureResidency() {
     if (stale) staleProbeGrid(GiStaleReason::Material);
     if (bumpVoxels) {
         ++mGiMaterialGeneration;
+        // THE CACHED CONVERSION IS STALE, and this is the signal that says so: a voxel
+        // input on a material a GI-visible item wears has changed. The in-place rebuild
+        // paths never pass through an arm, so the clear has to happen here or the store
+        // would hand the next build the row it converted before the change.
+        if (mVctMaterialStore) mVctMaterialStore->clearConversions();
         if (giDebug())
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka GI: material generation -> " + std::to_string(mGiMaterialGeneration) +
@@ -1374,6 +1379,7 @@ void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
     staleProbeGrid(GiStaleReason::Material);
     if (bumpVoxels) {
         ++mGiMaterialGeneration;
+        if (mVctMaterialStore) mVctMaterialStore->clearConversions();   // see the sibling above
         if (giDebug())
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka GI: material generation -> " + std::to_string(mGiMaterialGeneration) +
@@ -4170,6 +4176,12 @@ bool OgreScene::rebuildVct() {
 // voxelizer: its VctMaterial caches every datablock's conversion by raw pointer
 // for its whole life, which is the rule this file's header is about.
 size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
+    // A FROM-SCRATCH ARM CONVERTS EVERY MATERIAL AGAIN (the VCT lifecycle's own rule).
+    // The store outlives rebuilds now, and `addDatablock` returns a cached row without
+    // re-reading the datablock, so without this a material whose parameters changed
+    // since its first conversion would keep the old row for the rest of the scene's
+    // life. Cleared, never destroyed: live voxelisers hold the pointer.
+    if (mVctMaterialStore) mVctMaterialStore->clearConversions();
     // Quality -> voxel volume resolution (the memory/compute knob: 32^3 =~ fast
     // preview, 128^3 =~ crisp indirect shadows) and anisotropic cone mips.
     const Ogre::uint32 res = giVoxelResolution();
@@ -4454,6 +4466,8 @@ void OgreScene::applyCascadeAmbient(Ogre::VctLighting *lighting) {
 }
 
 size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
+    // The same rule as buildVoxelArm's: a from-scratch chain re-converts.
+    if (mVctMaterialStore) mVctMaterialStore->clearConversions();
     const std::vector<GiParams::GiCascadeDesc> table = resolveCascadeTable();
     if (table.empty()) return 0;
     const bool anisotropic = mGi.quality != GiQuality::Low;
