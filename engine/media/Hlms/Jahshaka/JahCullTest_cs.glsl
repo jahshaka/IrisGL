@@ -28,19 +28,6 @@
 // turns reverse depth off tests the other way instead of inverting the answer.
 @insertpiece( SetCrossPlatformSettings )
 
-@property( syntax == glsl )
-	#define ogre_U0 binding = 0
-	#define ogre_U1 binding = 1
-	#define ogre_U2 binding = 2
-	#define ogre_U3 binding = 3
-	#define ogre_U4 binding = 4
-	#define ogre_U5 binding = 5
-	// PAST THE SIX BUFFERS, not at 0: these macros are the whole binding
-	// declaration (no set index), so a texture at `binding = 0` lands on the
-	// same (set, binding) as the first UAV buffer and the read returns nothing.
-	#define ogre_t0 binding = 6
-@end
-
 // ---- the request ---------------------------------------------------------
 // One small buffer, written once per request by the consumer. Rows, not a
 // matrix, for the reason the table's own world transform is rows.
@@ -88,6 +75,16 @@ layout( std430, ogre_U3 ) readonly restrict buffer levelLayout { GpuMeshLevel le
 layout( std430, ogre_U4 ) writeonly restrict buffer visLayout { uint visible[]; };
 layout( std430, ogre_U5 ) writeonly restrict buffer lvlLayout { uint outLevel[]; };
 
+// THE PYRAMID THIS READS IS A FARTHEST-DEPTH CHAIN, not a closest-depth one, and
+// the difference is the whole correctness of the test (ATOM-SUBSTRATE-1 fix
+// round): a level must hold the FARTHEST depth of its footprint, so that
+// "everything under this rectangle is nearer than me" is a sound conclusion. A
+// closest-depth level makes a texel that is half wall and half sky report the
+// wall, and an object visible through the sky half is then culled. The chain's
+// reduce direction is a property of its job (`hzb_farthest`) and the engine
+// builds the farthest chain for a cull; a screen-space trace wanting the
+// closest chain asks for its own build.
+//
 // THE PYRAMID IS A PERMUTATION, not an always-bound slot: a job that declares a
 // texture unit and has nothing in it segfaults in Ogre's own descriptor-set
 // validity check (HlmsComputeJob::_calculateNumThreadGroupsBasedOnSetting ->
@@ -244,33 +241,42 @@ void main()
 			vec2 t0 = vec2( ( lo.x * 0.5 + 0.5 ) * size.x, ( 0.5 - hi.y * 0.5 ) * size.y );
 			vec2 t1 = vec2( ( hi.x * 0.5 + 0.5 ) * size.x, ( 0.5 - lo.y * 0.5 ) * size.y );
 			vec2 rect = max( t1 - t0, vec2( 0.0 ) );
-			// THE MIP WHERE THE RECTANGLE IS AT MOST 4x4 TEXELS, so four
-			// fetches cover it whatever its aspect.
+			// THE MIP WHERE THE RECTANGLE SPANS AT MOST 2 TEXELS PER AXIS, so
+			// the four CORNER fetches below cover every texel it touches.
+			// (`/4.0` here would pick a level where the rectangle is 4 texels
+			// wide and the four corners leave up to 12 of its 16 texels
+			// unsampled — a hierarchical test that reads only the corners of
+			// its own footprint can reject something visible in the middle.)
 			float widest = max( rect.x, rect.y );
-			int mip = int( ceil( log2( max( widest, 1.0 ) / 4.0 ) ) );
+			int mip = int( ceil( log2( max( widest, 1.0 ) / 2.0 ) ) );
 			mip = clamp( mip, 0, int( params.hzb.x ) - 1 );
 			ivec2 mipSize = ivec2( max( ivec2( params.hzb.yz ) >> mip, ivec2( 1 ) ) );
 			ivec2 a = clamp( ivec2( floor( t0 / float( 1 << mip ) ) ), ivec2( 0 ), mipSize - 1 );
 			ivec2 b = clamp( ivec2( floor( t1 / float( 1 << mip ) ) ), ivec2( 0 ), mipSize - 1 );
 
-			// The CLOSEST depth recorded anywhere under the rectangle is the
-			// one to beat; taking the far side of the four is what keeps the
-			// test conservative when the rectangle straddles more than one.
-			float closestUnder = params.hzb.w != 0u ? 1.0e30 : -1.0e30;
+			// THE FARTHEST DEPTH ANYWHERE UNDER THE RECTANGLE is the one to
+			// beat. Each texel already holds the farthest of ITS footprint, so
+			// over the four it is the farthest of those — the smallest value
+			// under reverse-Z. Anything nearer than that, anywhere under the
+			// rectangle, would be a surface this object could still be seen
+			// past, which is why the extreme and not an average is right.
+			float farthestUnder = params.hzb.w != 0u ? 1.0e30 : -1.0e30;
 			for( int yy = 0; yy < 2; ++yy )
 			{
 				for( int xx = 0; xx < 2; ++xx )
 				{
 					ivec2 uv = ivec2( xx == 0 ? a.x : b.x, yy == 0 ? a.y : b.y );
 					float d = texelFetch( hzbTexture, uv, mip ).x;
-					closestUnder = params.hzb.w != 0u ? min( closestUnder, d )
-													 : max( closestUnder, d );
+					farthestUnder = params.hzb.w != 0u ? min( farthestUnder, d )
+													  : max( farthestUnder, d );
 				}
 			}
-			// OCCLUDED when the whole box is FARTHER than the nearest surface
-			// the pyramid recorded under it. In reverse-Z farther is smaller.
-			bool occluded = params.hzb.w != 0u ? ( nearest < closestUnder )
-											   : ( nearest > closestUnder );
+			// OCCLUDED when even the box's NEAREST point is farther than the
+			// FARTHEST thing drawn under it: every pixel of the rectangle then
+			// already holds something in front of this object. In reverse-Z
+			// farther is smaller.
+			bool occluded = params.hzb.w != 0u ? ( nearest < farthestUnder )
+											   : ( nearest > farthestUnder );
 			if( occluded )
 				return;
 		}

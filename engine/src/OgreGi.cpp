@@ -3231,9 +3231,11 @@ void OgreScene::unindexItemNode(Node &n) {
         } else {
             mGpuScene.onSlotFreed(uint32_t(i));
         }
-        // The ray level's hysteresis band belongs to the OBJECT, not to the
-        // slot number (ATOM P3's AT-A8r): whatever lands here next must be
-        // evaluated afresh instead of inheriting a dead neighbour's distance.
+        // THE RAY LEVEL IS KEYED BY SLOT and the slots have just been
+        // renumbered (ATOM P3's AT-A8r), so both ends of the swap are cleared:
+        // whatever lands in either is evaluated afresh instead of inheriting
+        // the distance band of the object that used to be there. (The band
+        // cannot travel with the object: nothing here indexes by object.)
         forgetRayLevel(uint32_t(i));
         forgetRayLevel(uint32_t(mItemNodes.size()));
     }

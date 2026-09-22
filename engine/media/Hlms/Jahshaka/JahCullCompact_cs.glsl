@@ -28,13 +28,6 @@
 // there without a second pass and without anybody knowing which one it was.
 @insertpiece( SetCrossPlatformSettings )
 
-@property( syntax == glsl )
-	#define ogre_U0 binding = 0
-	#define ogre_U1 binding = 1
-	#define ogre_U2 binding = 2
-	#define ogre_U3 binding = 3
-@end
-
 // THE WHOLE REQUEST STRUCT, not a uvec4 at offset 0. The first version of this
 // file declared `uvec4 limits` and read the instance count out of it, which is
 // `planes[0]` reinterpreted — a bug that LOOKS like it works, because a real

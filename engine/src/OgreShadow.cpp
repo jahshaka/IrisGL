@@ -1503,7 +1503,11 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
             for (auto &v : mViews) {
                 if (!v || !v->isEnabled() || v->scene() != s) continue;
                 Ogre::Camera *cam = v->camera();
-                if (!cam || cam->getProjectionType() != Ogre::PT_PERSPECTIVE) break;
+                // CONTINUE, not break: a scene whose FIRST enabled view is
+                // orthographic (a preview, a card capture) still has a
+                // perspective one behind it, and breaking here would leave the
+                // whole scene's ray levels unevaluated for ever.
+                if (!cam || cam->getProjectionType() != Ogre::PT_PERSPECTIVE) continue;
                 // THE VIEW'S HEIGHT, not the camera's last viewport: an
                 // offscreen camera reports NO viewport between passes (measured
                 // 2026-09-22 — it is what made this pass silently never run),

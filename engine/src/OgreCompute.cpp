@@ -14,10 +14,13 @@
 // and its three compute jobs `Jahshaka/IndirectCount`, `IndirectWork` and
 // `IndirectWorkCpu`. They were the PROOF of patch 0032 while it had no consumer;
 // it has one now, and the cull's job 3 makes the same claim on the same device
-// with real work behind it — the survivor count is written by a compute shader,
-// the next dispatch is sized from it, and `engine.gpu_cull` asserts the groups
-// that ran at 0, 7 and 4,096 survivors exactly as `compute.indirect_dispatch`
-// did. A proof with a consumer is the consumer's suite.
+// with real work behind it: the survivor count is written by a compute shader
+// and the next dispatch is sized from it. `engine.gpu_cull` asserts the
+// GPU-written count and the groups that ran at 0, 7 and the whole table — the
+// same three shapes (empty, an arbitrary small count no host arithmetic could
+// predict, and the worst case) that `compute.indirect_dispatch` used, over real
+// instances instead of a synthetic list. A proof with a consumer is the
+// consumer's suite.
 #include "EnginePrivate.h"
 
 #include <OgreHlmsCompute.h>
@@ -135,9 +138,12 @@ bool OgreEngine::fillCullView(View *view, GpuCullRequest &out) const {
     // of the target this request's pass renders into, which the View knows for
     // certain.
     out.viewportHeight = float(v->height());
+    // THE PYRAMID IS ONLY OFFERED WHEN IT HOLDS SOMETHING. A pyramid that has
+    // been BUILT but never written is an uninitialised allocation, and a cull
+    // against it would reject geometry on the strength of another texture's
+    // leftovers.
     HzbStatus hst;
-    out.hzbLevels = const_cast<OgreEngine *>(this)->hzbStatus(view, hst) && hst.built ? hst.levels
-                                                                                     : 0u;
+    out.hzbLevels = hzbStatus(view, hst) && hst.built && hst.primed ? hst.levels : 0u;
     return out.viewportHeight > 0.0f;
 }
 
@@ -186,6 +192,14 @@ bool OgreEngine::hzbStatus(View *view, HzbStatus &out) const {
         out.height = tex->getHeight();
         Ogre::RenderSystem *rs = mRoot->getRenderSystem();
         out.reverseDepth = rs && rs->isReverseDepth();
+        OgreView *v = static_cast<OgreView *>(view);
+        out.farthest = v->postFx().hzbFarthest;
+        // PRIMED = a frame has been PRESENTED with the chain that owns this
+        // texture. The texture exists from the build and holds whatever the
+        // allocation last did until the seed pass of a presented frame writes
+        // mip 0; the per-workspace counter is reset by every chain rebuild,
+        // which is exactly the event that invalidates the contents again.
+        out.primed = v->workspaceFramesPresented() > 0ull;
         return true;
     }
     catch (...) { out = HzbStatus(); return false; }

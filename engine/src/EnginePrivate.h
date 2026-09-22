@@ -1037,6 +1037,10 @@ struct ChainDesc {
     /// resize would leave passes addressing mips that no longer exist). 0 when
     /// the pyramid is off.
     unsigned hzbLevels = 0u;
+    /// WHICH DEPTH EACH LEVEL KEEPS (PostFxDesc::hzbFarthest carries the
+    /// argument). It is part of the graph's identity because it is a shader
+    /// PROPERTY of the reduce job, i.e. a different permutation.
+    bool  hzbFarthest = true;
 
     // ---- Distortion (POST_LOOKS_SPEC.md §5.3) ----
     /// The RESOLVED flag (the host has already answered "auto" against whether
@@ -5803,6 +5807,10 @@ public:
     unsigned workspaceGeneration() const override;
 
     unsigned long long framesPresented() const override;
+    /// Frames presented since THIS WORKSPACE was built (reset by every chain
+    /// rebuild) — what says whether a compute pass of the chain has ever run,
+    /// which is how `HzbStatus::primed` is answered.
+    unsigned long long workspaceFramesPresented() const { return mWorkspaceFramesPresented; }
     unsigned long long blankFramesPresented() const override;
     bool warmUpShaders() override;
     /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts

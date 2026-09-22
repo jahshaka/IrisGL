@@ -23,15 +23,6 @@
 //     command that would draw the wrong triangles.
 @insertpiece( SetCrossPlatformSettings )
 
-@property( syntax == glsl )
-	#define ogre_U0 binding = 0
-	#define ogre_U1 binding = 1
-	#define ogre_U2 binding = 2
-	#define ogre_U3 binding = 3
-	#define ogre_U4 binding = 4
-	#define ogre_U5 binding = 5
-@end
-
 struct GpuMeshLevel
 {
 	uint  firstIndex;

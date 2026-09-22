@@ -2,11 +2,12 @@
 // SPECS/atom/A4_SUBSTRATE_CULL_DESIGN.md section 1.1).
 //
 // WHY IT IS A CLASS AND NOT THREE LOCALS. The job never allocates per frame:
-// every buffer here is sized to the GPU scene's slot CAPACITY and grows with it
-// by doubling, exactly as the table it reads does, so a cull in a frame costs
-// one small upload and three dispatches and no Vulkan allocation at all. The
-// probe this replaces created and destroyed five buffers per call, which was
-// right for a proof and wrong for a substrate.
+// every buffer here is sized to the GPU scene's slot CAPACITY — the quantity
+// that DOUBLES (64, 128, 256...) and then stands still, never the slot COUNT,
+// which moves on every attach — so a cull in a frame costs one small upload and
+// three dispatches and no Vulkan allocation at all, and a grow happens as often
+// as the table's own does. The probe this replaces created and destroyed five
+// buffers per call, which was right for a proof and wrong for a substrate.
 //
 // NO VULKAN HERE EITHER (the same rule the GPU scene keeps): the results are
 // Ogre `UavBufferPacked`s, which an `HlmsComputeJob` binds as SSBOs and Vulkan

@@ -75,6 +75,12 @@ void GpuCull::destroy() {
     mCapacity = 0u;
 }
 
+/// `slotCapacity` IS THE TABLE'S CAPACITY AND NOT ITS COUNT, and the difference
+/// is a re-create per request: the GPU scene's capacity doubles (64, 128, 256...)
+/// and stands still between grows, while its COUNT moves every time an item is
+/// attached — sizing to the count would destroy and rebuild all six buffers on
+/// the first request after any attach, which is exactly the per-frame allocation
+/// the header promises never happens.
 bool GpuCull::ensure(Ogre::VaoManager *vao, uint32_t slotCapacity, std::string &err) {
     if (!vao) {
         err = "gpucull: no VaoManager (the NULL render system) — the cull is unsupported";
@@ -202,7 +208,8 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
     const uint32_t instances = mGpuScene.slotCount();
     out.instances = instances;
     std::string err;
-    if (!mGpuCull.ensure(rs->getVaoManager(), std::max(instances, 1u), err)) {
+    // THE TABLE'S CAPACITY, not this request's instance count (see `ensure`).
+    if (!mGpuCull.ensure(rs->getVaoManager(), std::max(mGpuScene.slotCapacity(), 1u), err)) {
         mError = err;
         out.supported = false;
         return false;

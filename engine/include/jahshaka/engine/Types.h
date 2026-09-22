@@ -116,9 +116,10 @@ using MaterialId = unsigned int;
 // other way (a deviation expressed in samples), and it is what a cull's shader
 // computes because the GPU has the bound and wants the count.
 //
-// THE GLSL TWIN of the three functions below lives in
-// media/Hlms/Jahshaka/JahCullCommon_piece_cs.glsl and `engine.lod_rule_parity`
-// asserts the two agree to 1e-4 over 10,000 random triples. There are two
+// THE GLSL TWIN of the three functions below lives in the cull's own job 1,
+// media/Hlms/Jahshaka/JahCullTest_cs.glsl (`jahSampleFootprint`,
+// `jahAllowedWorldError`, `jahLevelForAllowed`), and `engine.lod_rule_parity`
+// asserts the two agree over 10,000 evaluations of that shader on the device. There are two
 // copies because a compute shader cannot include a C++ header; there is one
 // RULE because the suite fails when they drift.
 
@@ -5057,7 +5058,8 @@ struct PostFxDesc {
     ///
     /// Builds a closest-depth mip chain of the scene depth once per frame, right
     /// after the opaque pass: mip 0 is the depth buffer, and each level after it
-    /// holds the CLOSEST depth of its footprint in the level above, down to 1x1.
+    /// holds the FARTHEST (or, on request, the closest — see `hzbFarthest`) depth
+    /// of its footprint in the level above, down to 1x1.
     /// A stackless screen-space trace walks it instead of stepping pixel by
     /// pixel — Epic measure the compaction that rides on it at up to a 50%
     /// tracing speedup — and nothing in this engine reads it YET.
@@ -5067,6 +5069,20 @@ struct PostFxDesc {
     /// offscreen view — an offscreen capture is where a trace will be measured,
     /// and the pyramid changes no pixel of the picture either way.
     bool  hzb = false;
+    /// WHICH DEPTH EACH LEVEL KEEPS, and the two readers of a pyramid want
+    /// opposite answers (ATOM-SUBSTRATE-1, 2026-09-22):
+    ///
+    ///   true  (the default, and the only build anything asks for today) — the
+    ///         FARTHEST depth of a footprint, which is the ONLY direction an
+    ///         occlusion cull can be conservative with: "my nearest point is
+    ///         behind this level" then proves every pixel under it is already
+    ///         covered. With the closest depth, a texel that is half wall and
+    ///         half sky reports the wall and an object seen through the sky half
+    ///         is culled — geometry lost.
+    ///   false — the CLOSEST depth, what a stackless screen-space trace wants so
+    ///         it can skip a region it cannot have hit yet. Photon's gather asks
+    ///         for it when it lands; nothing reads it today.
+    bool  hzbFarthest = true;
 
     /// THE offscreen opt-in. Offscreen Views ignore every flag above unless this
     /// is set, because their exact colours are what thumbnails, previews and the
@@ -5098,7 +5114,7 @@ struct PostFxDesc {
                distortionStrength == o.distortionStrength &&
                tonemapFixed == o.tonemapFixed &&
                exposureScale == o.exposureScale &&
-               looks == o.looks && hzb == o.hzb &&
+               looks == o.looks && hzb == o.hzb && hzbFarthest == o.hzbFarthest &&
                allowOffscreen == o.allowOffscreen;
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
@@ -5216,6 +5232,7 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     fx.smaaPreset     = -1;
     fx.ssrScreenMarch = false;
     fx.hzb            = false;
+    fx.hzbFarthest    = true;
     fx.refractions    = false;
     fx.distortion     = false;
     if (ssrOverride >= 0) fx.ssr = ssrOverride;
@@ -5724,10 +5741,19 @@ struct HzbStatus {
     /// Mip 0's size — the view's own, since the pyramid is full resolution.
     unsigned width = 0, height = 0;
     /// Which way is CLOSE (RenderSystem::isReverseDepth). True — the Vulkan
-    /// default at this pin — means the near plane is 1 and a level holds the
-    /// MAXIMUM of its footprint. Reported rather than assumed because the
-    /// reduction operator flips with it.
+    /// default at this pin — means the near plane is 1. Reported rather than
+    /// assumed because the reduction operator flips with it.
     bool reverseDepth = true;
+    /// WHICH DEPTH THE LEVELS KEEP (PostFxDesc::hzbFarthest). A reader must know:
+    /// an occlusion test is only sound against the FARTHEST chain.
+    bool farthest = true;
+    /// HAS ANYTHING BEEN WRITTEN INTO IT YET? The texture exists from the moment
+    /// the chain is built, and holds UNDEFINED CONTENT until the seed pass of a
+    /// presented frame fills mip 0 — and again after every chain rebuild, which
+    /// resets this. A consumer that culled against an unwritten pyramid would be
+    /// testing against whatever the allocation last held; `fillCullView` refuses
+    /// to ask for the pyramid until this is true.
+    bool primed = false;
 };
 
 /// Where a corner-anchored readout sits in a View.

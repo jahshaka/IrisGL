@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
 
 namespace jahshaka {
 namespace engine {
@@ -500,7 +501,16 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
             if (!vaos[l]) continue;
             levels[l].firstIndex = vaos[l]->getPrimitiveStart();
             levels[l].indexCount = vaos[l]->getPrimitiveCount();
-            levels[l].bound = (l > 0u && size_t(l - 1u) < bounds.size()) ? bounds[l - 1u] : 0.0f;
+            // A MISSING BOUND IS INFINITE, NEVER ZERO. Level 0 is honestly 0 (the
+            // authored geometry has no error against itself), but a level the
+            // bake measured no bound for — a mesh carrying more VAOs than
+            // `lodBounds` entries — would read `0 < allowed` as FREE and the
+            // GLSL walk would run all the way to the coarsest level it can see.
+            // The CPU rule cannot: it caps at `bounds.size()`. FLT_MAX makes the
+            // device's walk stop where the host's does.
+            levels[l].bound = l == 0u ? 0.0f
+                              : (size_t(l - 1u) < bounds.size() ? bounds[l - 1u]
+                                                               : std::numeric_limits<float>::max());
         }
         if (!vaos.empty() && vaos[0]) {
             desc.counts[0] = uint32_t(vaos[0]->getVertexBuffers().empty()

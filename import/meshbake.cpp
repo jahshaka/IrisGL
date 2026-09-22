@@ -1776,12 +1776,6 @@ int dominantAxis(const Vec3 &n, float *dotOut)
 /// level whose BOUND is STRICTLY below what the consumer can afford. The card's
 /// consumer affords its own texel.
 ///
-/// IN THE QUALITY CURRENCY's words (Types.h, ATOM P3's SUB-ERROR) this is
-/// `allowedWorldError( tolerance = 1 sample, footprint = the card's texel )`:
-/// the card is a sampler like a view and like a cascade, its sample is a texel,
-/// and it tolerates one. The multiply is the identity, which is why it is
-/// written out rather than called — the engine header is not linkable here.
-///
 /// `lodBounds` and NOT `lodErrors` since ATOM-BAKE-1 (AT-A5): the simplifier's
 /// number is an estimate and a card that trusted it captured a level whose real
 /// surface sits further from the authored one than the texel it was chosen for.
