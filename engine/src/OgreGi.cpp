@@ -48,6 +48,52 @@ static OgreScene *sVctBindingOwner = nullptr;
 /// mesh attaches. Ogre's destroy is DELAYED, so the dispatch did not fault - it read
 /// freed VRAM and hung the channel: NVRM Xid 109 CTX SWITCH TIMEOUT, device lost, on
 /// the selftest's second scene. Binding per build costs one pointer store.
+/// THE ONE MATERIAL STORE A CHAIN SHARES (A5b §2, decision (a)).
+///
+/// Every voxeliser used to `new` its own, which made a material's (pool, slot) a
+/// PER-CASCADE fact — `findFreeBucketFor` fills buckets in insertion order and no two
+/// cascades see the same attach set in the same order — so nothing scene-wide could
+/// name a material, which is precisely what one word per instance in the GPU scene's
+/// table has to do. One store also means one conversion per datablock instead of one
+/// per cascade, one set of pool const buffers, one texture pool, one by-pointer alias
+/// cache and one eviction.
+///
+/// LIFETIME: created here, before any voxeliser asks for it, and destroyed in
+/// `destroyVctMaterialStore` AFTER every voxeliser is gone. Measured at the code
+/// (A5b's lifetime check): the ONLY reader of `getTexturePool()` is the voxeliser's
+/// own dispatch binding — no `VctLighting` touches it — so "outlive every voxeliser"
+/// is the whole constraint.
+Ogre::VctMaterial *OgreScene::vctMaterialStore() {
+    if (!mVctMaterialStore && mRoot) {
+        mVctMaterialStore = new Ogre::VctMaterial(
+            Ogre::Id::generateNewId<Ogre::VctMaterial>(),
+            mRoot->getRenderSystem()->getVaoManager(), mRoot->getCompositorManager2(),
+            mRoot->getRenderSystem()->getTextureGpuManager());
+    }
+    return mVctMaterialStore;
+}
+
+void OgreScene::destroyVctMaterialStore() {
+    // AFTER every voxeliser: they hold a pointer they do not own, and a dispatch that
+    // outlived its pool is the hazard this shape exists to remove.
+    if (!mVctMaterialStore) return;
+    mVctMaterialStore->destroyTempResources();   // idempotent; a throw may have skipped it
+    delete mVctMaterialStore;
+    mVctMaterialStore = nullptr;
+}
+
+/// THE CHAIN'S BRACKET. The store's temp resources are a 64x64 render target, a dummy
+/// camera and two workspaces under FIXED names, so exactly one pair must wrap ALL the
+/// builds of one rebuild. Two cascades inside one bracket cannot collide: the builds
+/// are sequential on the render thread and share the one store's resources. Both halves
+/// are idempotent, so a rebuild that throws between them cannot poison the next.
+void OgreScene::beginVctMaterialBracket() {
+    if (Ogre::VctMaterial *store = vctMaterialStore()) store->initTempResources(mSceneMgr);
+}
+void OgreScene::endVctMaterialBracket() {
+    if (mVctMaterialStore) mVctMaterialStore->destroyTempResources();
+}
+
 void OgreScene::bindGeometrySource(Ogre::VctVoxelizer *v) {
     ensureGpuTables();
     // THE ROWS MUST BE ON THE DEVICE, NOT MERELY IN THE MIRROR. `GpuScene::update`
@@ -465,7 +511,9 @@ bool OgreScene::refreshVctFast() {
                 mVctVoxelizer->dividideOctants(1u, 1u, 1u);
             }
             bindGeometrySource(mVctVoxelizer);
+            beginVctMaterialBracket();
             mVctVoxelizer->build(mSceneMgr);
+            endVctMaterialBracket();
             applyVctAmbient();
             const Ogre::uint32 extraBounces =
                 Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
@@ -2389,11 +2437,9 @@ void OgreScene::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
     // a no-op. Nothing else moves: the voxels already hold the dead material's
     // albedo where its items stood, and the items' own detach re-voxelised
     // those boxes (destroyMaterial).
-    if (mVctVoxelizer && mVctVoxelizer->getVctMaterial())
-        mVctVoxelizer->getVctMaterial()->removeDatablock(dying);
-    for (VctCascade &c : mVctCascades)
-        if (c.voxelizer && c.voxelizer->getVctMaterial())
-            c.voxelizer->getVctMaterial()->removeDatablock(dying);
+    // ONE STORE, ONE EVICTION (A5b §2). This used to be the head voxeliser's store and
+    // then every cascade's, one by one, because each owned its own cache.
+    if (mVctMaterialStore) mVctMaterialStore->removeDatablock(dying);
 }
 
 // The stale reasons by name, for the JAHSHAKA_GI_DEBUG log alone (the monitor
@@ -4137,7 +4183,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     mVctVoxelizer = new Ogre::VctVoxelizer(
         Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
         mRoot->getRenderSystem(), mRoot->getHlmsManager(),
-        true /*correctAreaLightShadows*/);
+        true /*correctAreaLightShadows*/, vctMaterialStore());
     mVctVoxelizer->setResolution(res, res, res);
     mVctVoxelizer->setRegionToVoxelize(false, aabb);
 
@@ -4159,7 +4205,9 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
 
     mVctVoxelizer->dividideOctants(1u, 1u, 1u);
     bindGeometrySource(mVctVoxelizer);
+    beginVctMaterialBracket();
     mVctVoxelizer->build(mSceneMgr);
+    endVctMaterialBracket();
 
     mVctLighting = new Ogre::VctLighting(
         Ogre::Id::generateNewId<Ogre::VctLighting>(), mVctVoxelizer, anisotropic);
@@ -4434,7 +4482,8 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         // an area light's shadow is legible.
         c.voxelizer = new Ogre::VctVoxelizer(Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
                                              mRoot->getRenderSystem(), mRoot->getHlmsManager(),
-                                             i == 0u /*correctAreaLightShadows*/);
+                                             i == 0u /*correctAreaLightShadows*/,
+                                             vctMaterialStore());
         c.voxelizer->setResolution(c.resolution, c.resolution, c.resolution);
         recentreCascade(c, camPos);
     }
@@ -4479,7 +4528,9 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.items = cascadeGeometryCount(c);
         setCascadeItems(c, c.items > 0u);
         bindGeometrySource(c.voxelizer);
+        beginVctMaterialBracket();
         c.voxelizer->build(mSceneMgr);
+        endVctMaterialBracket();
         // THE READINGS, taken where the buckets exist. BOTH of them, at BOTH build
         // sites: `lodTriangles` alone here left `voxelLevels` empty on the chain's
         // first build, which reads as "nothing was voxelised" rather than as the
@@ -4990,7 +5041,8 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
             JAH_TRY {
                 fresh = new Ogre::VctVoxelizer(
                     Ogre::Id::generateNewId<Ogre::VctVoxelizer>(), mRoot->getRenderSystem(),
-                    mRoot->getHlmsManager(), idx == 0u /*correctAreaLightShadows*/);
+                    mRoot->getHlmsManager(), idx == 0u /*correctAreaLightShadows*/,
+                    vctMaterialStore());
                 fresh->setResolution(c.resolution, c.resolution, c.resolution);
                 fresh->setRegionToVoxelize(false, Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
                 fresh->dividideOctants(1u, 1u, 1u);
@@ -5030,7 +5082,9 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "OgreScene::rebuildCascade");
             }
             bindGeometrySource(c.voxelizer);
-        c.voxelizer->build(mSceneMgr);
+            beginVctMaterialBracket();
+            c.voxelizer->build(mSceneMgr);
+            endVctMaterialBracket();
             // THE READINGS, taken where the buckets exist.
             c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
             readVoxelLevels(c);
@@ -6852,6 +6906,11 @@ void OgreScene::teardownVct() {
     // so the vector's [0] is already dangling and teardownExtraCascades knows
     // not to touch it). After the head, which is the order the arm requires.
     teardownExtraCascades();
+    // ...and LAST, the one material store they all shared (A5b §2). Its texture pool is
+    // bound into the shared compute jobs' descriptors by every dispatch, so it may not
+    // die while a voxeliser can still be dispatched — which, after the two lines above,
+    // none can.
+    destroyVctMaterialStore();
     // THE THREE CASCADE COUNTERS ARE NOT RESET HERE (audit B9). Types.h calls
     // them cumulative and every reading that spans a re-solve — an edit, a
     // settle, a shadow-atlas rebuild, all of which tear the arm down — depended

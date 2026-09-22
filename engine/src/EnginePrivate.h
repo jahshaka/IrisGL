@@ -119,7 +119,8 @@
 // clear pass that owns the inset's background colour (chain::PipHandles).
 // Forward-declared rather than included so the pass-def headers stay where they
 // belong — inside the .cpp files that build passes.
-namespace Ogre { class CompositorPassSceneDef; class CompositorPassClearDef;
+namespace Ogre { class VctMaterial;   // A5b §2: the one store a chain shares
+                 class CompositorPassSceneDef; class CompositorPassClearDef;
                  class CompositorPassQuadDef; class CompositorPassDef;
                  // Bone attachments (AVATAR_RIG_PERF_SPEC §4): a Node record
                  // holds a TagPoint*, and only OgreSockets.cpp does anything
@@ -5170,8 +5171,17 @@ private:
     /// will ask for it (the GI signatures, when V2-1 makes that affordable) are
     /// const, and a facility that only a non-const path can refresh would put
     /// the const-cast at every call site instead of here.
+    /// THE ONE MATERIAL STORE THE WHOLE CHAIN SHARES (A5b §2) and its bracket.
+    /// Created lazily before the first voxeliser, destroyed after the last.
+    Ogre::VctMaterial *vctMaterialStore();
+    void destroyVctMaterialStore();
+    void beginVctMaterialBracket();
+    void endVctMaterialBracket();
+
     void bindGeometrySource(Ogre::VctVoxelizer *v);
     uint32_t geomRowBaseFor(const Ogre::Item *item, unsigned level) const;
+
+    Ogre::VctMaterial *mVctMaterialStore = nullptr;
 
     mutable detail::GpuScene mGpuScene;
     /// Said once: a mesh with more submeshes than the geometry row table holds
