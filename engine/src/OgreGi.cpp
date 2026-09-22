@@ -3180,6 +3180,7 @@ void OgreScene::indexItemNode(Node &n) {
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
+    markGpuSlotDirty(n);            // a newborn slot has no entry in the table yet
 }
 
 void OgreScene::indexDecalNode(Node &n) {
@@ -3214,6 +3215,24 @@ void OgreScene::unindexItemNode(Node &n) {
     last->itemSlot = i;
     mItemNodes.pop_back();
     n.itemSlot = size_t(-1);
+    // THE GPU SCENE'S HALF OF THE SWAP-REMOVE, in the one place the swap
+    // happens. TWO CASES, and the second is the one that bites: when the dying
+    // item was NOT the tail, the tail's entry travels into the freed slot and
+    // that slot is re-composed this frame; when it WAS the tail, nothing moves
+    // in and the entry it leaves must be CLEARED — otherwise the next attach
+    // lands in a slot that is still "born" and inherits the dead object's world
+    // as its PREVIOUS world, i.e. a newborn reprojecting out of another
+    // object's grave. Either way the freed entry is copied to the device, so the
+    // region past `slotCount()` never holds a traceable ghost.
+    if (mGpuScene.live()) {
+        if (last != &n) {
+            mGpuScene.onSlotMoved(uint32_t(mItemNodes.size()), uint32_t(i));
+            mGpuForced.push_back(uint32_t(i));
+        } else {
+            mGpuScene.onSlotFreed(uint32_t(i));
+        }
+    }
+    mGpuScene.setSlotCount(uint32_t(mItemNodes.size()));
 }
 
 // THE ITEM WALK — the GI movement scan (FIX WAVE B3, engine half) and the

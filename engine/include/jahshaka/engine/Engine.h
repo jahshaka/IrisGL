@@ -916,6 +916,24 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
+    /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
+    /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
+    /// which flushes the render system's recorded commands first and is
+    /// therefore a suite's verb and never a frame's.
+    virtual GpuSceneStatus gpuSceneStatus() const { return GpuSceneStatus(); }
+    virtual bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
+        (void)slot; (void)out; return false;
+    }
+    virtual bool gpuSceneDeviceEntries(unsigned first, unsigned count,
+                                       std::vector<GpuSceneEntry> &out) {
+        (void)first; (void)count; out.clear(); return false;
+    }
+    /// Runs the dirty scan NOW and records its cost in
+    /// `GpuSceneStatus::lastScanMicros`. A suite's verb: the scan is
+    /// epoch-gated and idempotent, so this measures the same walk a frame
+    /// would run, with the timing that a frame deliberately does not pay.
+    virtual void measureGpuSceneScan(bool graphIsCurrent) { (void)graphIsCurrent; }
     /// SURFACE-CACHE phase 2 — the card cache's TEST AND TOOL readbacks.
     ///
     /// The cache itself has no verb: it is configured through

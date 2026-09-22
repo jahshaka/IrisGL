@@ -6157,4 +6157,54 @@ struct EngineSnapshot {
     std::vector<CompositorWorkspaceInfo> workspaces;
 };
 
+// --- THE GPU SCENE (SPECS/atom/A3_GPU_SCENE_SLICE_DESIGN.md) ----------------
+//
+// The scene's description as it lives ON THE DEVICE: one entry per item slot,
+// written for the CHANGED subset each frame, read by the ray tier's instance
+// job, by Atom's cull and by Photon's reprojection. These two structs are the
+// TEST AND TOOL door onto it — the tables themselves are engine-private, and
+// nothing in the application reads them.
+
+/// ONE SLOT'S ENTRY, as the device holds it. `world` and `prevWorld` are
+/// ROW-MAJOR 3x4 (twelve floats: three rows of four).
+struct GpuSceneEntry {
+    float world[12] = {};
+    float prevWorld[12] = {};
+    float boundsMin[3] = {};
+    float boundsMax[3] = {};
+    /// Its mesh's place in the mesh table, or 0xFFFFFFFF for a slot with no
+    /// geometry.
+    unsigned meshIndex = 0xFFFFFFFFu;
+    /// The predicate bits ONE place computes: 1 visible, 2 caster, 4 mover,
+    /// 8 GI-visible, 16 alpha-tested, 32 skinned, 64 overlay, 128 RAY-TRACED
+    /// (the traced set), 256 drag mover, 512 GI-bounds-excluded.
+    unsigned flags = 0u;
+    unsigned nodeId = 0u;
+    unsigned lightMask = 0u;
+};
+
+/// WHAT THE TABLES HOLD AND WHAT KEEPING THEM COSTS. Every count is cumulative
+/// over the scene's life except `lastDirty` / `lastCopyMs`, which are the last
+/// update's.
+struct GpuSceneStatus {
+    /// False where there are no tables at all — the NULL render system's
+    /// headless boot, where every consumer keeps its CPU path.
+    bool     live = false;
+    /// Live item slots (the dense item index's length). NOT named `slots`: that
+    /// is one of Qt's moc keywords (`#define slots`), and this header is included
+    /// by Qt translation units.
+    unsigned slotCount = 0;
+    unsigned capacity = 0;    ///< slots the table can hold before the next grow
+    unsigned meshEntries = 0; ///< entries in the mesh table
+    unsigned lastDirty = 0;   ///< slots the last update wrote
+    unsigned long long writes = 0;     ///< slot writes, ever
+    unsigned long long copyRuns = 0;   ///< device copies issued, ever (one per contiguous run)
+    unsigned long long updates = 0;    ///< updates that copied anything, ever
+    unsigned long long grows = 0;      ///< instance-table doublings, ever
+    unsigned long long scans = 0;      ///< dirty scans run, ever
+    unsigned long long aabbReads = 0;  ///< world AABBs the scan asked Ogre for, ever
+    double   lastCopyMs = 0.0;         ///< CPU cost of the last update's staging + copies
+    double   lastScanMicros = 0.0;     ///< ...of the last TIMED scan (0 when never timed)
+};
+
 }}  // namespace jahshaka::engine

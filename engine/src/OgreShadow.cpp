@@ -1480,6 +1480,16 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // account for the frame within 5% (`monitor_passes_sum_to_the_frame`),
         // and this work is real CPU inside renderOneFrame that belongs to no
         // compositor pass — unattributed, it read as frame time nobody spent.
+        // THE GPU SCENE, immediately before its first reader and for the same
+        // reason the ray tier runs here: this is the frame's one point where the
+        // scene graph is current and nothing has rendered. `graphIsCurrent` is
+        // what makes the compare a cached read instead of a recompute up every
+        // parent chain (1.0 ms against 3.0 at 8,001 items, measured), and this
+        // is the ONLY caller today — the GI signature walk was deliberately not
+        // converted, because it is read BEFORE the frame where only the
+        // expensive form is correct. It reports its own monitor stage,
+        // `engine.gpuscene`.
+        for (OgreScene *s : drawn) s->ensureGpuScene(/*graphIsCurrent=*/true);
         {
             const auto rqStart = std::chrono::steady_clock::now();
             updateRayQuery(drawn);
