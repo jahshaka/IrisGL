@@ -2,13 +2,18 @@
 // (ENGINE V2's V2-2, pulled forward into phase A of the Atom and Photon builds;
 // SPECS/atom/A3_GPU_SCENE_SLICE_DESIGN.md, contract §3's first row).
 //
-// WHY IT EXISTS. Three separate CPU walks over the scene's items used to
-// re-derive the same facts every frame a thing moved: the ray tier's instance
-// array (3.4-4.0 ms at 8,001 instances in Debug), the GI orchestrator's
-// per-item box signatures, and the voxeliser's per-instance feed. Each of them
-// wants "world transform, previous world transform, bounds, which mesh, which
-// predicates hold" — so those facts are written ONCE, into two resident device
-// buffers, for the slots that CHANGED, and every consumer reads the table.
+// WHY IT EXISTS. Three separate CPU walks over the scene's items re-derive the
+// same facts every frame a thing moves: the ray tier's instance array (3.4-4.0
+// ms at 8,001 instances in Debug), the GI orchestrator's per-item box
+// signatures, and the voxeliser's per-instance feed. Each wants "world
+// transform, previous world transform, bounds, which mesh, which predicates
+// hold" — so those facts are written ONCE, into resident device buffers, for
+// the slots that CHANGED, and the consumers read the table. THE RAY TIER IS
+// CONVERTED; the GI signature walk and the voxeliser's feed are NOT, and the
+// reason is measured (see `ensureGpuScene`'s `graphIsCurrent`): the GI
+// signatures are read BEFORE the frame, where the compare costs 2.3 ms at 8,001
+// instead of 0.6 ms, so converting that reader today would make the slice a
+// smaller win. It waits for ENGINE V2's journal (V2-1).
 //
 // THE INTERFACE IS DELIBERATELY ONE FUNCTION: `update(dirtySlots, epoch)`.
 // Today's caller finds the dirty slots with a per-item compare (OgreScene::
@@ -35,6 +40,7 @@
 
 #include <OgreMesh2.h>
 #include <OgrePrerequisites.h>
+#include <Vao/OgreStagingBuffer.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -57,6 +63,13 @@ namespace detail {
 /// `world` and `prevWorld` are ROW-MAJOR 3x4 — the top three rows of Ogre's own
 /// `Matrix4`, which is also exactly `VkTransformMatrixKHR`'s layout, so one
 /// memcpy serves the table AND the TLAS instance the ray job writes.
+///
+/// THE GLSL SIDE MUST DECLARE THEM AS `vec4 world[3]` (row i in element i), NOT
+/// as `mat3x4`: a GLSL matrix in std430 is COLUMN-major, so a shader written
+/// with `mat3x4` would read this table transposed — silently, and correctly for
+/// a pure translation, which is the worst way to find out. The struct is copied
+/// to the device as RAW BYTES; C++ and GLSL agree because every member is a
+/// vec4-sized lane and nothing is padded.
 ///
 /// THE TWO PACKED INTEGERS. `boundsMin[3]` carries the MESH TABLE INDEX and
 /// `boundsMax[3]` the FLAGS WORD, both bit-cast into the float lane (a shader
@@ -133,13 +146,32 @@ public:
     /// keeps every entry already in it.
     void ensureSlots(uint32_t count);
     uint32_t slotCapacity() const { return mSlotCapacity; }
+    /// THE BOUND EVERY READER MUST USE. The buffer is `slotCapacity()` entries
+    /// long and only the first `slotCount()` of them describe live items: the
+    /// tail between the two holds whatever the last scene state left there. A
+    /// freed slot IS cleared and copied (see `onSlotFreed`), so the tail reads
+    /// as an empty entry rather than as a ghost — but a reader that iterates to
+    /// the capacity is reading memory that means nothing, and a compute job must
+    /// take the count as a parameter.
     uint32_t slotCount() const { return mSlotCount; }
     void setSlotCount(uint32_t n);
 
     /// Writes one slot's entry into the CPU mirror. `prevWorld` is taken from
     /// the mirror's own current world — so it is EXACTLY the last frame's — and
     /// the caller never supplies it. Born slots have prevWorld = world.
+    ///
+    /// A SLOT IS STAGED AT MOST ONCE PER UPDATE, and that is load-bearing rather
+    /// than tidy: seven seams call `markGpuSlotDirty` and two of them fire on one
+    /// event (an attach marks through `indexItemNode` and again through the
+    /// attach), so a second stage in the same update would read the world the
+    /// first had just written and set `prevWorld` to THIS frame's pose — erasing
+    /// the motion of anything that moved in the same frame. The second call is
+    /// dropped (`mStagedAt`).
     void stage(uint32_t slot, const GpuInstance &in);
+    /// Has this slot already been staged in the update now being assembled?
+    bool stagedThisUpdate(uint32_t slot) const {
+        return slot < mSlotCapacity && mStagedAt[slot] == mUpdateSerial;
+    }
 
     /// THE ONE WRITE PATH. Copies the staged slots to the device with one
     /// staging map per frame and one copy per CONTIGUOUS RUN of slots, and
@@ -158,12 +190,18 @@ public:
     /// in a Debug build (which is the daily driver) an accessor call per item is
     /// a measurable part of the walk.
     const GpuInstance *mirrorData() const { return mMirror.data(); }
-    const std::vector<GpuInstance> &mirror() const { return mMirror; }
 
     /// A REMOVAL SWAPPED `from` INTO `to`. The ONE place the swap-remove is
     /// handled for the table: the mirror entry moves and `to` is re-copied this
     /// frame (the caller adds it to the dirty list).
     void onSlotMoved(uint32_t from, uint32_t to);
+    /// A SLOT IS NO LONGER LIVE. The LAST item in the index has no swap partner,
+    /// so nothing moves into its place and the entry it leaves behind must be
+    /// cleared — otherwise the next attach lands in a slot that is still "born"
+    /// and takes the DEAD object's world as its previous world, which is a
+    /// motion vector out of another object's grave. Cleared in the mirror AND
+    /// queued for the device, so the tail past `slotCount()` is never a ghost.
+    void onSlotFreed(uint32_t slot);
 
     // --- the mesh table ----------------------------------------------------
     /// Find-or-create this mesh's entry, reference-counted. `levels` holds up to
@@ -176,28 +214,23 @@ public:
                          const GpuMeshLevel *levels, uint32_t levelCount);
     /// The mesh an entry names, or a null pointer.
     const Ogre::MeshPtr &meshAt(uint32_t index) const;
+    uint32_t meshEntryCount() const { return uint32_t(mMeshEntries.size()); }
     /// Drops one reference; the entry is FREED (and the index recycled) with the
     /// last one.
     void releaseMesh(const Ogre::Mesh *mesh);
     /// The index of a mesh already in the table, or npos.
     uint32_t meshIndex(const Ogre::Mesh *mesh) const;
     static constexpr uint32_t kNoMesh = 0xFFFFFFFFu;
-    /// How many entries are live, and how many references one holds (the ray
-    /// tier's eviction reads the second: a mesh nothing points at any more).
-    uint32_t meshEntryCount() const { return uint32_t(mMeshEntries.size()); }
-    uint32_t meshRefCount(uint32_t index) const;
-    const GpuMesh &meshEntry(uint32_t index) const { return mMeshMirror[index]; }
-    /// The device addresses of a mesh's geometry, filled by the one component
-    /// that can take them (the ray tier's BLAS description).
-    void setMeshAddresses(uint32_t index, uint64_t positionAddress, uint64_t indexAddress);
 
     // --- what the readers bind --------------------------------------------
+    // The three buffers ARE the facility: `instanceBuffer` is what the test and
+    // tool readback downloads and what Atom P3's cull will bind as a UAV, and
+    // the mesh and level tables are P3's and P4's selection inputs. They are
+    // `UavBufferPacked`s rather than raw Vulkan buffers precisely so an
+    // `HlmsComputeJob` can take them with no render-system knowledge.
     Ogre::UavBufferPacked *instanceBuffer() const { return mInstanceBuffer; }
     Ogre::UavBufferPacked *meshBuffer() const { return mMeshBuffer; }
     Ogre::UavBufferPacked *levelBuffer() const { return mLevelBuffer; }
-    /// Bumped whenever a buffer HANDLE changes (a grow). A reader holding a
-    /// descriptor set rewrites it when this moves.
-    unsigned long long generation() const { return mGeneration; }
 
     // --- what it cost (the frame monitor's row and the suite's assertions) --
     unsigned long long writes() const { return mWrites; }        ///< slot writes, ever
@@ -223,6 +256,14 @@ private:
     /// paying inside a frame).
     std::vector<GpuInstance> mMirror;
     std::vector<unsigned char> mBorn;  ///< 0 = this slot has never been staged
+    /// THE UPDATE THIS SLOT WAS LAST STAGED IN — the stamp that replaces every
+    /// membership SEARCH in the write path. A linear `std::find` over the dirty
+    /// list per slot is O(N^2) on exactly the case that matters: one parent with
+    /// N children dragged for two frames running makes both the dirty set and
+    /// the previous frame's mover set N long (64 million compares per frame at
+    /// 8,000 children). A stamp answers the same question in one load.
+    std::vector<uint32_t> mStagedAt;
+    uint32_t mUpdateSerial = 1u;   ///< never 0: 0 is "never staged"
     uint32_t mSlotCapacity = 0;
     uint32_t mSlotCount = 0;
 
@@ -241,9 +282,22 @@ private:
 
     /// The slots this frame's copy must also close (prevWorld = world).
     std::vector<uint32_t> mMovedLastFrame;
-    std::vector<uint32_t> mCopySet;  ///< scratch, kept to avoid a per-frame allocation
-
-    unsigned long long mGeneration = 1ull;
+    /// Slots freed since the last update: cleared in the mirror and owed a copy,
+    /// so the device never holds a dead item's entry past `slotCount()`.
+    std::vector<uint32_t> mFreedSlots;
+    // Scratch kept between updates so a frame allocates nothing: the copy set,
+    // its contiguous runs, and the staging destinations those runs become.
+    std::vector<uint32_t> mCopySet;
+    struct Run {
+        uint32_t first = 0, count = 0;
+    };
+    std::vector<Run> mRuns;
+    std::vector<Ogre::StagingBuffer::Destination> mDests;
+    /// The VaoManager frame the last close ran in. The previous frame's movers
+    /// are closed ONCE PER FRAME, not once per CALL: two updates inside one
+    /// frame (a pre-frame reader and the frame's own pass) must not close
+    /// `prevWorld` before the frame that reads it has rendered.
+    uint32_t mLastCloseFrame = 0xFFFFFFFFu;
     unsigned long long mWrites = 0ull, mCopies = 0ull, mUpdates = 0ull, mGrows = 0ull;
     unsigned long long mEpoch = 0ull;
     double mLastCopyMs = 0.0;

@@ -1046,10 +1046,10 @@ void SurfaceCache::captureCard(CardRec &card) {
 // price of the layout being decided HERE, by the code that allocates the rects,
 // rather than guessed by the code that reads them.
 //
-// THE KEY IS FREE: `OgreScene::gatherRayInstances` already writes the scene's
-// own item slot into each TLAS instance's `instanceCustomIndex`, so "which
-// cards belong to this hit" is one indexed fetch of `mInstanceBuffer` and no
-// lookup at all.
+// THE KEY IS FREE: the ray tier writes the scene's own ITEM SLOT into each
+// TLAS instance's `instanceCustomIndex` (it reads the GPU scene's table, whose
+// index IS that slot), so "which cards belong to this hit" is one indexed
+// fetch of `mInstanceBuffer` and no lookup at all.
 void SurfaceCache::syncBuffers() {
     if (!mTableDirty) return;
     mTableDirty = false;

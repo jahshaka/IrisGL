@@ -17,8 +17,10 @@
 //     MeshManager::removeAll -> Root. A MeshPtr outliving Root hits a dead VaoManager.
 //   * No Ogre exception may escape: every virtual is wrapped and translated.
 #include "jahshaka/engine/Engine.h"
-// THE GPU SCENE's tables (A3 slice): a plain-C++ header — no Ogre types in its
-// interface beyond the two forward declarations it needs.
+// THE GPU SCENE's tables (A3 slice). Engine-private and Ogre-aware — it holds
+// MeshPtrs and hands out UavBufferPackeds — but it knows nothing of Vulkan and
+// nothing of OgreScene's Node, which is what keeps it bindable from an
+// HlmsComputeJob and buildable on a platform with no ray queries.
 #include "GpuScene.h"
 
 #include <OgreRoot.h>
@@ -3122,9 +3124,13 @@ public:
     GatherTuning mGatherTuning;
     // --- THE GPU SCENE (A3_GPU_SCENE_SLICE_DESIGN.md; GpuScene.h) -----------
     /// Brings the device-side instance and mesh tables up to date for this
-    /// frame's movement epoch. IDEMPOTENT and epoch-gated: whoever reads the
-    /// table first in a frame pays for the update and everyone after it is free
-    /// (the same shape as `ensureGiWalk`). Defined in OgreGpuScene.cpp.
+    /// frame's movement epoch. Epoch-gated, and the FRAME's pass is the one that
+    /// consumes the epoch: a caller before the frame runs on derived transforms
+    /// `updateSceneGraph` has not recomputed, so it may not stop the frame's own
+    /// pass (a parent's children would never reach the table). Today the ONLY
+    /// caller is the frame, immediately before the ray tier reads the table;
+    /// the GI signature walk is NOT converted (see GpuScene.h's header for the
+    /// measurement that says why). Defined in OgreGpuScene.cpp.
     /// `graphIsCurrent` = `updateSceneGraph` has already run for this frame, so
     /// every node's cached derived transform is this frame's and the compare is a
     /// cached read. The frame path passes true; a reader BEFORE the frame (the GI
@@ -5147,8 +5153,10 @@ private:
     void indexItemNode(Node &n);
     void unindexItemNode(Node &n);
     // --- the GPU scene's state (OgreGpuScene.cpp) --------------------------
-    /// The tables. Mutable because two of the readers are const — the GI
-    /// signatures, which the mirror asks for before the frame.
+    /// The tables. Mutable because `ensureGpuScene` is const: the readers that
+    /// will ask for it (the GI signatures, when V2-1 makes that affordable) are
+    /// const, and a facility that only a non-const path can refresh would put
+    /// the const-cast at every call site instead of here.
     mutable detail::GpuScene mGpuScene;
     mutable bool mGpuSceneRefused = false;   ///< create() said no (headless); do not retry
     mutable std::vector<uint32_t> mGpuDirty;    ///< this update's slots (kept, not reallocated)
@@ -5165,7 +5173,8 @@ private:
     /// The movement epoch cannot see those (a furniture visibility write is
     /// deliberately not scene movement, VR-SCAN-1), so they say so by name.
     void markGpuSlotDirty(const Node &n);
-    void composeGpuInstance(const Node &n, detail::GpuInstance &out) const;
+    void composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
+                            detail::GpuInstance &out) const;
     /// The mesh table entry for an attached mesh, reference-counted per attach.
     uint32_t acquireGpuMesh(const MeshRec &rec);
     void releaseGpuMesh(const Ogre::Mesh *mesh);

@@ -26,9 +26,10 @@
 //    sync model could not be lifted, and this is what replaces it. The one
 //    exception is `traceBlocking` below, the TOOL/TEST path, which says so in
 //    its own comment.
-//  * THE TRACED SET COMES FROM THE SCENE'S ITEM INDEX, never from
-//    `SceneManager::getMovableObjectIterator` (audit C-4: the spike traced the
-//    editor's gizmo arrows and light icons). See OgreScene::gatherRayInstances.
+//  * THE TRACED SET COMES FROM THE GPU SCENE'S TABLE, which is indexed by the
+//    scene's own item slot — never from `SceneManager::getMovableObjectIterator`
+//    (audit C-4: the spike traced the editor's gizmo arrows and light icons).
+//    See `writeRayInstances` below and GpuScene.h.
 //
 // WHAT IT NEEDS FROM THE PIN (patches-only law):
 //   * 0038 — the instance at Vulkan 1.2 when the loader allows, the seven

@@ -78,6 +78,10 @@ void GpuScene::destroy() {
     mVao = nullptr;
     mMirror.clear();
     mBorn.clear();
+    mStagedAt.clear();
+    mFreedSlots.clear();
+    mRuns.clear();
+    mDests.clear();
     mMeshMirror.clear();
     mLevelMirror.clear();
     mMeshEntries.clear();
@@ -93,11 +97,11 @@ void GpuScene::growTo(uint32_t capacity) {
     const uint32_t want = roundUpPow2(capacity, std::max(kInitialSlots, mSlotCapacity ? mSlotCapacity : kInitialSlots));
     mMirror.resize(want);
     mBorn.resize(want, 0u);
+    mStagedAt.resize(want, 0u);
     if (mInstanceBuffer) {
         mVao->destroyUavBuffer(mInstanceBuffer);
         mInstanceBuffer = nullptr;
         ++mGrows;
-        ++mGeneration;
     }
     mInstanceBuffer = mVao->createUavBuffer(want, sizeof(GpuInstance), 0, mMirror.data(), false);
     mSlotCapacity = want;
@@ -111,7 +115,6 @@ void GpuScene::growMeshTable(uint32_t capacity) {
     if (mMeshBuffer) {
         mVao->destroyUavBuffer(mMeshBuffer);
         mMeshBuffer = nullptr;
-        ++mGeneration;
     }
     if (mLevelBuffer) {
         mVao->destroyUavBuffer(mLevelBuffer);
@@ -135,6 +138,10 @@ void GpuScene::setSlotCount(uint32_t n) {
 void GpuScene::stage(uint32_t slot, const GpuInstance &in) {
     if (slot >= mSlotCapacity) ensureSlots(slot + 1u);
     if (slot >= mSlotCapacity) return;
+    // ONCE PER UPDATE (see the header): a second stage would read the world the
+    // first just wrote and call it the PREVIOUS world.
+    if (mStagedAt[slot] == mUpdateSerial) return;
+    mStagedAt[slot] = mUpdateSerial;
     GpuInstance &dst = mMirror[slot];
     // THE PREVIOUS WORLD IS THE MIRROR'S OWN CURRENT WORLD, which is what makes
     // it exactly the last frame's and never a frame older. A slot seen for the
@@ -144,10 +151,21 @@ void GpuScene::stage(uint32_t slot, const GpuInstance &in) {
     const bool born = mBorn[slot] != 0u;
     float prev[12];
     std::memcpy(prev, born ? dst.world : in.world, sizeof(prev));
-    dst = in;
+    // A RAW-BYTE COPY, deliberately: this struct's bytes are what reaches the
+    // device, so it is copied the way the staging buffer copies it and nothing
+    // here may ever become a type with a non-trivial assignment.
+    std::memcpy(&dst, &in, sizeof(GpuInstance));
     std::memcpy(dst.prevWorld, prev, sizeof(prev));
     mBorn[slot] = 1u;
     ++mWrites;
+}
+
+void GpuScene::onSlotFreed(uint32_t slot) {
+    if (slot >= mSlotCapacity) return;
+    std::memset(&mMirror[slot], 0, sizeof(GpuInstance));
+    mBorn[slot] = 0u;
+    mStagedAt[slot] = 0u;
+    mFreedSlots.push_back(slot);
 }
 
 void GpuScene::onSlotMoved(uint32_t from, uint32_t to) {
@@ -156,10 +174,10 @@ void GpuScene::onSlotMoved(uint32_t from, uint32_t to) {
     // move in the world, only in the index), so `prevWorld` travels with it —
     // a reprojection of the object that was renumbered must not read the
     // previous pose of the object that DIED in that slot.
-    mMirror[to] = mMirror[from];
+    std::memcpy(&mMirror[to], &mMirror[from], sizeof(GpuInstance));
     mBorn[to] = mBorn[from];
-    mBorn[from] = 0u;
-    std::memset(&mMirror[from], 0, sizeof(GpuInstance));
+    mStagedAt[to] = 0u;      // it must be re-staged/copied this update
+    onSlotFreed(from);       // ...and the tail it came from is cleared and copied
 }
 
 void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long long epoch) {
@@ -180,21 +198,60 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long lon
         ++mCopies;
     }
 
+    mCopySet.clear();
+    mCopySet.insert(mCopySet.end(), dirtySlots.begin(), dirtySlots.end());
+    // FREED SLOTS RIDE ALONG. A slot past `slotCount()` still occupies device
+    // memory, and a dead item's entry left there is a ghost a reader that got
+    // its bound wrong would trace. Clearing costs one entry per removal.
+    for (uint32_t slot : mFreedSlots)
+        if (slot < mSlotCapacity && !stagedThisUpdate(slot)) mCopySet.push_back(slot);
+    mFreedSlots.clear();
+
     // LAST FRAME'S MOVERS THAT DID NOT MOVE AGAIN. Their previous pose is now
     // their current one; without this a mover that stops carries a stale
     // `prevWorld` for one frame and every reprojection reads one frame of
     // motion that did not happen. It costs one entry per stopped mover, once.
-    mCopySet.clear();
-    mCopySet.insert(mCopySet.end(), dirtySlots.begin(), dirtySlots.end());
-    for (uint32_t slot : mMovedLastFrame) {
-        if (slot >= mSlotCapacity || !mBorn[slot]) continue;
-        if (std::find(dirtySlots.begin(), dirtySlots.end(), slot) != dirtySlots.end()) continue;
-        GpuInstance &e = mMirror[slot];
-        if (std::memcmp(e.prevWorld, e.world, sizeof(e.world)) == 0) continue;
-        std::memcpy(e.prevWorld, e.world, sizeof(e.world));
-        mCopySet.push_back(slot);
+    //
+    // ONCE PER FRAME, NOT ONCE PER CALL: `update` can run twice in one frame (a
+    // reader before the frame and the frame's own pass), and closing on the
+    // second call would erase the motion the frame is about to render. The
+    // VaoManager's frame counter is the engine's own "a frame has passed" —
+    // there is no wall clock here.
+    const uint32_t vaoFrame = mVao->getFrameCount();
+    const bool closeNow = vaoFrame != mLastCloseFrame;
+    if (closeNow) {
+        for (uint32_t slot : mMovedLastFrame) {
+            if (slot >= mSlotCapacity || !mBorn[slot]) continue;
+            // THE STAMP, NOT A SEARCH (the O(N^2) a group drag used to pay).
+            if (mStagedAt[slot] == mUpdateSerial) continue;
+            GpuInstance &e = mMirror[slot];
+            if (std::memcmp(e.prevWorld, e.world, sizeof(e.world)) == 0) continue;
+            std::memcpy(e.prevWorld, e.world, sizeof(e.world));
+            mCopySet.push_back(slot);
+        }
+        mMovedLastFrame.assign(dirtySlots.begin(), dirtySlots.end());
+        mLastCloseFrame = vaoFrame;
+    } else {
+        // The frame's second pass: its dirty slots JOIN the set still owed a
+        // close rather than replacing it. BOUNDED: a host that ran many updates
+        // inside one frame would otherwise grow this without limit, so it is
+        // collapsed once it passes twice the slot count.
+        for (uint32_t slot : dirtySlots) mMovedLastFrame.push_back(slot);
+        if (mMovedLastFrame.size() > size_t(mSlotCapacity) * 2u) {
+            std::sort(mMovedLastFrame.begin(), mMovedLastFrame.end());
+            mMovedLastFrame.erase(std::unique(mMovedLastFrame.begin(), mMovedLastFrame.end()),
+                                  mMovedLastFrame.end());
+        }
     }
-    mMovedLastFrame.assign(dirtySlots.begin(), dirtySlots.end());
+
+    // THE UPDATE IS OVER: the next one is a new stamp generation. Bumped here
+    // and not at the top, because `stage()` runs BEFORE `update()` is called
+    // (the caller composes, stages, then hands over the list).
+    ++mUpdateSerial;
+    if (mUpdateSerial == 0u) {       // wrap: no stamp may alias the new serial
+        std::fill(mStagedAt.begin(), mStagedAt.end(), 0u);
+        mUpdateSerial = 1u;
+    }
 
     if (mCopySet.empty()) return;   // A STILL FRAME COPIES NOTHING AT ALL.
 
@@ -207,35 +264,30 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long lon
     // THE RUN COALESCER. Sorted slots collapse into contiguous runs, and a run
     // is one copy — a scene whose whole item list moved is ONE copy, a scene
     // with one mover is one copy of 160 bytes.
-    struct Run {
-        uint32_t first = 0, count = 0;
-    };
-    std::vector<Run> runs;
-    runs.reserve(mCopySet.size());
+    mRuns.clear();
     for (uint32_t slot : mCopySet) {
-        if (!runs.empty() && runs.back().first + runs.back().count == slot)
-            ++runs.back().count;
+        if (!mRuns.empty() && mRuns.back().first + mRuns.back().count == slot)
+            ++mRuns.back().count;
         else
-            runs.push_back(Run{ slot, 1u });
+            mRuns.push_back(Run{ slot, 1u });
     }
 
     size_t bytes = 0;
-    for (const Run &r : runs) bytes += size_t(r.count) * sizeof(GpuInstance);
+    for (const Run &r : mRuns) bytes += size_t(r.count) * sizeof(GpuInstance);
     Ogre::StagingBuffer *sb = mVao->getStagingBuffer(bytes, true);
     unsigned char *dst = static_cast<unsigned char *>(sb->map(bytes));
-    Ogre::StagingBuffer::DestinationVec dests;
-    dests.reserve(runs.size());
+    mDests.clear();
     size_t srcOffset = 0;
-    for (const Run &r : runs) {
+    for (const Run &r : mRuns) {
         const size_t len = size_t(r.count) * sizeof(GpuInstance);
         std::memcpy(dst + srcOffset, &mMirror[r.first], len);
-        dests.push_back(Ogre::StagingBuffer::Destination(
+        mDests.push_back(Ogre::StagingBuffer::Destination(
             mInstanceBuffer, size_t(r.first) * sizeof(GpuInstance), srcOffset, len));
         srcOffset += len;
     }
-    sb->unmap(dests);
+    sb->unmap(&mDests[0], mDests.size());
     sb->removeReferenceCount();
-    mCopies += runs.size();
+    mCopies += mRuns.size();
     ++mUpdates;
     mLastCopyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -314,20 +366,6 @@ const Ogre::MeshPtr &GpuScene::meshAt(uint32_t index) const {
     return index < mMeshEntries.size() ? mMeshEntries[index].mesh : kNone;
 }
 
-uint32_t GpuScene::meshRefCount(uint32_t index) const {
-    return index < mMeshEntries.size() ? mMeshEntries[index].refs : 0u;
-}
-
-void GpuScene::setMeshAddresses(uint32_t index, uint64_t positionAddress, uint64_t indexAddress) {
-    if (index >= mMeshMirror.size()) return;
-    GpuMesh &m = mMeshMirror[index];
-    m.positionAddress[0] = uint32_t(positionAddress & 0xFFFFFFFFull);
-    m.positionAddress[1] = uint32_t(positionAddress >> 32);
-    m.indexAddress[0] = uint32_t(indexAddress & 0xFFFFFFFFull);
-    m.indexAddress[1] = uint32_t(indexAddress >> 32);
-    mMeshDirty = true;
-}
-
 // ===========================================================================
 // THE SCENE'S HALF: who is dirty, and what one entry says.
 // ===========================================================================
@@ -374,18 +412,26 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     return f;
 }
 
-/// ONE ENTRY, from the node. The only expensive line is the world AABB (a
-/// parent-chain walk that recomputes a whole SIMD block), which is exactly why
-/// this runs for CHANGED slots only.
-void OgreScene::composeGpuInstance(const Node &n, detail::GpuInstance &out) const {
+/// ONE ENTRY, from the node.
+///
+/// THE TRANSFORM IS HANDED IN, not fetched again. The scan has just compared
+/// this very matrix; re-fetching it through `_getFullTransformUpdated` would be
+/// a second root recursion per dirty slot AND would only agree with what was
+/// compared while no node in the chain disables inheritance (OgreNode.cpp:365-395
+/// against :449-482 take different paths) — a bit-difference there would stage an
+/// entry that does not match the value the compare will see next frame, and the
+/// slot would be dirty for ever.
+///
+/// The BOUNDS follow the same rule: with the graph already updated,
+/// `getWorldAabb()` is the cached read and `getWorldAabbUpdated()` is a third
+/// recursion for the same answer.
+void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
+                                   detail::GpuInstance &out) const {
     out = detail::GpuInstance();
     Ogre::Item *item = n.item;
     if (!item) return;
-    if (Ogre::Node *pn = item->getParentNode()) {
-        const Ogre::Matrix4 &m = pn->_getFullTransformUpdated();
-        std::memcpy(out.world, &m[0][0], sizeof(out.world));
-    }
-    const Ogre::Aabb a = item->getWorldAabbUpdated();
+    std::memcpy(out.world, &world[0][0], sizeof(out.world));
+    const Ogre::Aabb a = graphIsCurrent ? item->getWorldAabb() : item->getWorldAabbUpdated();
     const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
     for (int i = 0; i < 3; ++i) {
         out.boundsMin[i] = mn[i];
@@ -498,23 +544,41 @@ void OgreScene::ensureGpuScene(bool graphIsCurrent) const {
         }
         return;
     }
-    mGpuEpoch = epoch;
-    mGpuEpochValid = true;
+    const auto tScan = std::chrono::steady_clock::now();
+    // THE EPOCH IS ONLY CONSUMED BY A SCAN THAT COULD SEE THE TRUTH. A reader
+    // BEFORE the frame runs on derived transforms `updateSceneGraph` has not
+    // recomputed yet; if such a pass marked the epoch spent, the frame's own
+    // pass would skip — and every CHILD of a moved parent would silently never
+    // reach the table (measured: a parent with 8,000 children staged nothing at
+    // all). So only the frame's form consumes it, and the epoch is held exactly
+    // as the caster walk holds it: valid only where a host counter makes it
+    // meaningful (OgreGi.cpp's ensureShadowWalk).
+    if (graphIsCurrent) {
+        mGpuEpoch = epoch;
+        mGpuEpochValid = detail::gTransformWriteCounter != nullptr;
+    }
 
     mGpuScene.setSlotCount(uint32_t(mItemNodes.size()));
     mGpuDirty.clear();
     detail::GpuInstance cand;
     // THE EXPLICIT MARKS FIRST: a seam that changed a flags word without moving
-    // anything, and every newborn slot.
+    // anything, and every newborn slot. A slot marked TWICE (seven seams, two of
+    // which fire on one attach) is staged once — `stage` drops the second — and
+    // must therefore not enter the dirty list twice either.
     for (uint32_t slot : mGpuForced) {
         if (slot >= mItemNodes.size()) continue;
-        composeGpuInstance(*mItemNodes[slot], cand);
+        if (mGpuScene.stagedThisUpdate(slot)) continue;
+        const Node &n = *mItemNodes[slot];
+        Ogre::Node *pn = n.item ? n.item->getParentNode() : nullptr;
+        if (!pn) continue;
+        const Ogre::Matrix4 &m =
+            graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
+        composeGpuInstance(n, m, graphIsCurrent, cand);
         mGpuScene.stage(slot, cand);
         mGpuDirty.push_back(slot);
     }
     mGpuForced.clear();
     if (epochMoved) {
-        const size_t forced = mGpuDirty.size();
         const detail::GpuInstance *mirror = mGpuScene.mirrorData();
         for (size_t i = 0, e = mItemNodes.size(); i < e; ++i) {
             const Node &n = *mItemNodes[i];
@@ -527,12 +591,13 @@ void OgreScene::ensureGpuScene(bool graphIsCurrent) const {
             // `_getFullTransformUpdated` RECOMPUTES the derived transform up the
             // parent chain unconditionally (Ogre-Next keeps no per-node dirty
             // bit — `updateAllTransforms` recomputes the whole graph by depth
-            // level every frame). MEASURED at 8,001 items in Debug: 1.0 ms for
-            // the cached read against 3.0 ms for the recomputing one. So the
-            // frame path, which runs AFTER `updateSceneGraph`, reads the cache;
-            // a reader BEFORE the frame — the GI signatures, asked by the mirror
-            // after it has written this frame's transforms — must recompute, and
-            // pays exactly what the walk it replaces paid for the same reason.
+            // level every frame). MEASURED at 8,001 items in Debug: 0.7 ms for
+            // the cached read against 2.3-2.5 ms for the recomputing one. So the
+            // frame path, which runs AFTER `updateSceneGraph`, reads the cache.
+            // The recomputing form exists for a reader BEFORE the frame — the GI
+            // signature walk would be one, and is deliberately NOT converted
+            // today for exactly this three-fold cost (GpuScene.h's header); the
+            // suite measures both forms so the decision stays visible.
             const Ogre::Matrix4 &m =
                 graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
             bool dirty = std::memcmp(&m[0][0], was.world, sizeof(was.world)) != 0;
@@ -547,28 +612,34 @@ void OgreScene::ensureGpuScene(bool graphIsCurrent) const {
                 dirty = gpuFlagsFor(n) != wasFlags;
             }
             if (!dirty) continue;
-            if (std::find(mGpuDirty.begin(), mGpuDirty.begin() + long(forced), uint32_t(i)) !=
-                mGpuDirty.begin() + long(forced))
-                continue;
-            composeGpuInstance(n, cand);
+            // THE STAMP, NOT A SEARCH: a slot the marks already staged is
+            // skipped in one load. The linear scan this replaces was O(marks)
+            // per dirty slot.
+            if (mGpuScene.stagedThisUpdate(uint32_t(i))) continue;
+            composeGpuInstance(n, m, graphIsCurrent, cand);
             mGpuScene.stage(uint32_t(i), cand);
             mGpuDirty.push_back(uint32_t(i));
             ++mGpuAabbReads;
         }
     }
     mGpuScene.update(mGpuDirty, epoch);
-    mGpuScanMicros = 0.0;
     ++mGpuScans;
+    // ALWAYS TIMED, and reported as its own MONITOR STAGE. This is real CPU
+    // inside renderOneFrame that belongs to no compositor pass — 0.6-0.7 ms at
+    // 8,001 items — and unattributed it reads as frame time nobody spent (the
+    // stages are exclusive and must account for the frame within 5 %). A
+    // steady_clock pair against a walk of that size is noise.
+    mGpuScanMicros =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tScan).count();
+    if (monitor::live()) monitor::gMonitor->stage("engine.gpuscene", mGpuScanMicros / 1000.0);
 }
 
-/// The measured scan, for the suite and the premise: the SAME walk, timed. Kept
-/// apart from `ensureGpuScene` so timing never rides in a hot path that does
-/// not ask for it.
+/// The scan with its cost recorded for a caller that wants the number without a
+/// frame — the suite's premise table, which needs the PRE-FRAME form's cost and
+/// has nowhere else to take it. `ensureGpuScene` times itself, so this only
+/// forces the pass.
 void OgreScene::ensureGpuSceneTimed(bool graphIsCurrent) const {
-    const auto t0 = std::chrono::steady_clock::now();
     ensureGpuScene(graphIsCurrent);
-    mGpuScanMicros =
-        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 }
 
 // ---------------------------------------------------------------------------
