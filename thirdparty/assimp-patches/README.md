@@ -1,10 +1,11 @@
 # Jahshaka's patches for the vendored assimp
 
 `irisgl/thirdparty/assimp` is upstream `assimp/assimp`, pinned to a **release
-tag**. It is vendored, never edited in place, and never committed to — exactly
-the Ogre-Next law (`irisgl/thirdparty/ogre-patches/`). Everything we need to
-change lives here as a numbered, self-documenting patch file, and the submodule
-working tree ends up in the **applied-not-committed** state.
+tag**. It is vendored, never edited in place, and never committed to. Everything
+we need to change lives here as a numbered, self-documenting patch file, and the
+submodule working tree ends up in the **applied-not-committed** state. (Ogre-Next
+used to work the same way; since 2026-09-22 it is a FORK instead —
+`irisgl/docs/OGRE_BUILD.md`. assimp is not, for the reason below.)
 
 ## How they get applied
 
@@ -46,11 +47,12 @@ eight `M` lines `git -C irisgl/thirdparty/assimp status` shows in every
 configured tree are this state and nothing else; `git -C irisgl/thirdparty/assimp
 checkout -- .` followed by a reconfigure recreates them exactly.
 
-Ogre-Next uses the same law with a different hook: `irisgl/scripts/build-ogre.sh`
-applies `ogre-patches/`, because Ogre is an out-of-tree prerequisite build that
-this project's configure step does not drive. assimp is compiled by our own
-build every time, so our own configure is the natural hook — and a missed manual
-step there would produce a *crashing importer*, not a missing library.
+Ogre-Next answered the same question differently: it is an out-of-tree
+prerequisite build with 88 patches' worth of our own engine work, so it became a
+FORK (`github.com/jahshaka/ogre-next`, branch `jahshaka`) and `build-ogre.sh` has
+nothing to apply. assimp is a handful of hunks on a release tag, compiled by our
+own build every time, so our own configure is the natural hook — and a missed
+manual step there would produce a *crashing importer*, not a missing library.
 
 ## Bumping the pin
 
