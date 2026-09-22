@@ -1328,7 +1328,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 // the cost audit C's P3 item names (4-6 ms of CPU for 8,026 instances in the
 // spike's naive form).
 namespace {
-struct InstanceWriter final : public RayInstanceSink {
+struct InstanceWriter final {
     VkAccelerationStructureInstanceKHR *dst = nullptr;
     unsigned capacity = 0;
     unsigned count = 0;
@@ -1365,8 +1365,12 @@ struct InstanceWriter final : public RayInstanceSink {
     size_t lastSlot = 0;
     bool lastFound = false;
 
-    void add(const Ogre::MeshPtr &meshPtr, const Ogre::Matrix4 &xform, unsigned mask,
-             unsigned customIndex) override {
+    /// One traced instance. `world` is the GPU scene's own twelve floats — a
+    /// ROW-MAJOR 3x4, which is exactly `VkTransformMatrixKHR`'s layout, so the
+    /// transform is ONE memcpy and no longer twelve loads out of an Ogre
+    /// Matrix4 (the table already did that conversion once, for everybody).
+    void add(const Ogre::MeshPtr &meshPtr, const float *world, unsigned mask,
+             unsigned customIndex) {
         const Ogre::Mesh *mesh = meshPtr.get();
         const unsigned idx = count++;
         if (idx >= capacity) { ++overflow; return; }
@@ -1381,13 +1385,7 @@ struct InstanceWriter final : public RayInstanceSink {
         // Assembled here and copied as one 64-byte store, the mapping is only
         // ever written, linearly.
         VkAccelerationStructureInstanceKHR inst{};
-        // ROW-MAJOR 3x4, which is exactly Ogre's own layout for the top three
-        // rows of a Matrix4 — no transpose, no conversion. operator[] hands
-        // back the ROW pointer, so this is three calls and twelve plain loads.
-        for (int r = 0; r < 3; ++r) {
-            const Ogre::Real *row = xform[r];
-            for (int c = 0; c < 4; ++c) inst.transform.matrix[r][c] = float(row[c]);
-        }
+        std::memcpy(&inst.transform.matrix[0][0], world, 12u * sizeof(float));
         inst.instanceCustomIndex = customIndex & 0xFFFFFFu;
         inst.mask = mask & 0xFFu;
         inst.instanceShaderBindingTableRecordOffset = 0;
@@ -1427,60 +1425,54 @@ struct InstanceWriter final : public RayInstanceSink {
 };
 }   // namespace
 
-/// THE TRACED SET. Walked out of the scene's own item index once per update.
+/// THE TRACED SET, READ OUT OF THE GPU SCENE'S TABLE (A3 slice §1.3).
 ///
-/// WHAT IS IN: every Item that draws real world geometry — it carries
-/// kVisibleBit or kMovableBit, it is shown, it is below the overlay queues, it
-/// has a mesh with triangles.
+/// WHAT CHANGED AND WHY. This used to be `OgreScene::gatherRayInstances`: a walk
+/// of the scene's item index that re-asked Ogre, per item, every question the
+/// table now answers — the visibility flags, the render queue, the skeleton, the
+/// mesh, and a loop over every sub-item's datablock for an alpha test — and then
+/// read the node's full world transform. Measured at 3.4-4.0 ms for 8,001
+/// instances in a Debug build (inventory LAT-L8 / F11-WALKS). Every one of those
+/// predicates is now precomputed into the flags word by the ONE place that
+/// computes them (`OgreScene::gpuFlagsFor`), and the transform is already in the
+/// exact layout an instance descriptor takes, so this loop is a flags test and a
+/// memcpy per slot and asks Ogre nothing at all.
 ///
-/// WHAT IS OUT, and why each exclusion is load-bearing:
-///   * EDITOR FURNITURE (kHelperBit), the BACKDROP (kBackdropBit — the 2 km
-///     horizon plane), the SUN DISC (kSunDiscBit) and DISTORTION objects
-///     (kDistortionBit). Each of these carries its own channel INSTEAD OF
-///     kVisibleBit precisely so that captures can exclude it; a gizmo arrow in
-///     the acceleration structure is what the S3 spike shipped and audit C-4
-///     caught.
-///   * THE OVERLAY QUEUES (rq >= kOverlayRenderQueue): unlit, depth-test off,
-///     never part of the world.
-///   * SKINNED ITEMS (audit C-5). A BLAS reads the mesh's own vertex buffer,
-///     which holds the BIND POSE — a walking character would cast a T-pose
-///     shadow and reflect as a T-pose. They stay on the shadow atlas (D3's
-///     complement makes that free) until R4 builds a GPU skin cache.
-///   * ALPHA-TESTED DATABLOCKS (audit C-16). Every BLAS here is
-///     VK_GEOMETRY_OPAQUE_BIT_KHR and the rays use gl_RayFlagsOpaqueEXT,
-///     because without ray-tracing PIPELINES there is no any-hit shader; a
-///     cut-out leaf would intersect as a solid quad. The follow-up that would
-///     retire this is VK_EXT_opacity_micromap (native on Ada) — recorded in
-///     SPECS/LATER_OPTIMISATIONS.md.
-void OgreScene::gatherRayInstances(RayInstanceSink &sink) const {
-    const Ogre::uint32 casterChannels = allShadowCasterChannels();
-    for (const Node *np : mItemNodes) {
-        const Node &n = *np;
-        Ogre::Item *item = n.item;
-        if (!item || !n.shown) continue;
-        const Ogre::uint32 flags = item->getVisibilityFlags();
-        if (!(flags & (kVisibleBit | kMovableBit))) continue;
-        if (item->getRenderQueueGroup() >= kOverlayRenderQueue) continue;
-        if (item->getSkeletonInstance()) continue;              // C-5
-        const Ogre::MeshPtr &mesh = item->getMesh();
+/// WHAT IS IN AND WHAT IS OUT has not moved a bit: `kGpuRayTraced` IS the old
+/// conjunction — carries kVisibleBit or kMovableBit, shown, below the overlay
+/// queues, not skinned (a BLAS reads the mesh's bind pose, so a walking
+/// character would cast a T-pose shadow: audit C-5), not alpha-tested (every
+/// BLAS is VK_GEOMETRY_OPAQUE_BIT_KHR and the rays use gl_RayFlagsOpaqueEXT, so
+/// a cut-out leaf would intersect as a solid quad: audit C-16), and it has a
+/// mesh. Editor furniture, the backdrop, the sun disc and distortion objects
+/// carry their own channel INSTEAD of kVisibleBit precisely so captures can
+/// exclude them, and they fail the first test.
+///
+/// THE PER-CONSUMER MASKS are the same three bits (audit C-15): bit 0 a shadow
+/// caster, bit 1 a mover, bit 2 still world. A sun-contact ray (R3) tests bit 0,
+/// a "what does this probe see of the world that stands still" ray (R2) tests
+/// bit 2, a reflection (R5) tests everything.
+///
+/// `instanceCustomIndex` is the SLOT, which is what it always was — and now it
+/// is also the index of this instance's entry in the table, so a hit shader can
+/// read the object's bounds, its previous transform and its mesh with one fetch.
+static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
+    const detail::GpuScene &gs = scene->gpuScene();
+    if (!gs.live()) return;
+    const detail::GpuInstance *mirror = gs.mirrorData();
+    const uint32_t slots = gs.slotCount();
+    for (uint32_t i = 0; i < slots; ++i) {
+        const detail::GpuInstance &e = mirror[i];
+        Ogre::uint32 flags;
+        std::memcpy(&flags, &e.boundsMax[3], sizeof(flags));
+        if (!(flags & detail::kGpuRayTraced)) continue;
+        Ogre::uint32 meshIndex;
+        std::memcpy(&meshIndex, &e.boundsMin[3], sizeof(meshIndex));
+        const Ogre::MeshPtr &mesh = gs.meshAt(meshIndex);
         if (!mesh) continue;
-        bool alphaTested = false;
-        for (size_t i = 0, e = item->getNumSubItems(); i < e && !alphaTested; ++i) {
-            const Ogre::HlmsDatablock *db = item->getSubItem(i)->getDatablock();
-            if (db && db->getAlphaTest() != Ogre::CMPF_ALWAYS_PASS) alphaTested = true;
-        }
-        if (alphaTested) continue;                              // C-16
-        Ogre::Node *node = item->getParentNode();
-        if (!node) continue;
-        // PER-CONSUMER MASKS (audit C-15): bit 0 a shadow caster, bit 1 a
-        // mover, bit 2 still world. A sun-contact ray (R3) tests bit 0; a
-        // "what does this probe see of the room that stands still" ray (R2)
-        // tests bit 2; a reflection (R5) tests everything.
-        unsigned mask = 0u;
-        if (item->getCastShadows() && (flags & casterChannels)) mask |= 0x01u;
-        mask |= (flags & kMovableBit) ? 0x02u : 0x04u;
-        sink.add(mesh, node->_getFullTransform(), mask,
-                 n.itemSlot == size_t(-1) ? 0u : unsigned(n.itemSlot));
+        unsigned mask = (flags & detail::kGpuCaster) ? 0x01u : 0x00u;
+        mask |= (flags & detail::kGpuMover) ? 0x02u : 0x04u;
+        w.add(mesh, e.world, mask, i);
     }
 }
 
@@ -2024,7 +2016,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                           size_t(sa.slot) * sa.instanceCapacity
                     : nullptr;
         const Clock::time_point tGather = Clock::now();
-        scene->gatherRayInstances(w);
+        writeRayInstances(scene, w);
         gatherMs += msSince(tGather);
 
         if (w.count > sa.instanceCapacity || !sa.instances.mapped) {
@@ -3633,7 +3625,6 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
     hits.clear();
     return false;
 }
-void OgreScene::gatherRayInstances(RayInstanceSink &) const {}
 void OgreScene::forgetRayQuery() {}
 bool OgreScene::probeGatherWanted() const { return false; }
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }

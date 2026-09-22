@@ -3180,6 +3180,7 @@ void OgreScene::indexItemNode(Node &n) {
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
+    markGpuSlotDirty(n);            // a newborn slot has no entry in the table yet
 }
 
 void OgreScene::indexDecalNode(Node &n) {
@@ -3214,6 +3215,15 @@ void OgreScene::unindexItemNode(Node &n) {
     last->itemSlot = i;
     mItemNodes.pop_back();
     n.itemSlot = size_t(-1);
+    // THE GPU SCENE'S HALF OF THE SWAP-REMOVE, in the one place the swap
+    // happens: the table's entry travels with the item that was renumbered and
+    // the freed tail is cleared. Re-copied this frame (the slot is marked), so
+    // nothing downstream can read the dead item's pose out of a live slot.
+    if (mGpuScene.live() && last != &n) {
+        mGpuScene.onSlotMoved(uint32_t(mItemNodes.size()), uint32_t(i));
+        mGpuForced.push_back(uint32_t(i));
+    }
+    mGpuScene.setSlotCount(uint32_t(mItemNodes.size()));
 }
 
 // THE ITEM WALK — the GI movement scan (FIX WAVE B3, engine half) and the

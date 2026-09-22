@@ -29,6 +29,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSockets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuScene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSurfaceCache.cpp

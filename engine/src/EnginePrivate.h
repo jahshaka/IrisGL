@@ -17,6 +17,9 @@
 //     MeshManager::removeAll -> Root. A MeshPtr outliving Root hits a dead VaoManager.
 //   * No Ogre exception may escape: every virtual is wrapped and translated.
 #include "jahshaka/engine/Engine.h"
+// THE GPU SCENE's tables (A3 slice): a plain-C++ header — no Ogre types in its
+// interface beyond the two forward declarations it needs.
+#include "GpuScene.h"
 
 #include <OgreRoot.h>
 #include <OgreAbiUtils.h>
@@ -289,28 +292,6 @@ public:
     /// ...and its Root, so the destructor can flush without reaching into the
     /// view's privates.
     Ogre::Root *mRoot = nullptr;
-};
-
-/// Where the traced set is WRITTEN. `OgreScene::gatherRayInstances` walks the
-/// scene's item index once and hands each traceable Item to the sink, which
-/// (in the product path) writes the transform straight into a persistently
-/// mapped instance buffer — no intermediate vector, which is the whole point:
-/// the CPU-side per-instance gather is the cost that scales (S3 measured
-/// 4-6 ms at 8,026 instances doing it the naive way).
-struct RayInstanceSink {
-    virtual ~RayInstanceSink() = default;
-    /// One traceable Item. `xform` is the node's full world transform (Ogre
-    /// row-major; the top 3x4 is what an instance descriptor takes verbatim).
-    /// `mask` is the instance mask a consumer's rays test against (bit 0 = a
-    /// shadow caster, bit 1 = a mover, bit 2 = still world — audit C-15's
-    /// per-consumer masks). `customIndex` is the node's slot in the scene's
-    /// item index, so a hit names the object that was hit.
-    /// The mesh is passed as a STRONG reference: a bottom-level structure is
-    /// built over the mesh's own vertex and index buffers, so the tier holds
-    /// the mesh alive for as long as it holds the structure (and drops both
-    /// before Root is deleted — the MeshPtr rule).
-    virtual void add(const Ogre::MeshPtr &mesh, const Ogre::Matrix4 &xform, unsigned mask,
-                     unsigned customIndex) = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -3083,9 +3064,16 @@ public:
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade) override;
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
-    /// OgreRayQuery.cpp — like gatherRayInstances below, so that not one line
+    /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const override;
+    GpuSceneStatus gpuSceneStatus() const override;
+    bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
+    bool gpuSceneDeviceEntries(unsigned first, unsigned count,
+                               std::vector<GpuSceneEntry> &out) override;
+    void measureGpuSceneScan(bool graphIsCurrent) override {
+        ensureGpuSceneTimed(graphIsCurrent);
+    }
     // ---- SURFACE-CACHE phase 2: the capture cache (SurfaceCache.h) --------
     /// THE PER-FRAME PASS, called once per drawn scene from renderOneFrame —
     /// after applyPendingGi (so a material or light edit has already bumped the
@@ -3118,7 +3106,7 @@ public:
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     std::unique_ptr<SurfaceCache> mSurfaceCache;
     /// THE SCREEN-PROBE GATHER (GATHER-1a). Both are defined in
-    /// OgreRayQuery.cpp — like `gatherRayInstances` below, so that not one line
+    /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan — and both
     /// answer for the SCENE, not for a view: the row is the project's and the
     /// machine's, and every view of the scene that carries a prepass gathers.
@@ -3132,15 +3120,30 @@ public:
     void setGatherTuning(const GatherTuning &t) override { mGatherTuning = t; }
     const GatherTuning &gatherTuning() const { return mGatherTuning; }
     GatherTuning mGatherTuning;
-    /// THE TRACED SET, walked out of `mItemNodes` — the scene's own item index,
-    /// never `SceneManager::getMovableObjectIterator` (audit C-4: that list is
-    /// where the editor's gizmo arrows and light icons come from, and the S3
-    /// spike traced them). The predicate is documented at the definition; what
-    /// it excludes is load-bearing: helpers, backdrops, the sun disc, the
-    /// overlay queues, SKINNED Items (bind-pose geometry until R4 gives them a
-    /// skin cache) and alpha-tested datablocks (no any-hit without ray-tracing
-    /// pipelines — a cut-out leaf would intersect as a solid quad).
-    void gatherRayInstances(RayInstanceSink &sink) const;
+    // --- THE GPU SCENE (A3_GPU_SCENE_SLICE_DESIGN.md; GpuScene.h) -----------
+    /// Brings the device-side instance and mesh tables up to date for this
+    /// frame's movement epoch. IDEMPOTENT and epoch-gated: whoever reads the
+    /// table first in a frame pays for the update and everyone after it is free
+    /// (the same shape as `ensureGiWalk`). Defined in OgreGpuScene.cpp.
+    /// `graphIsCurrent` = `updateSceneGraph` has already run for this frame, so
+    /// every node's cached derived transform is this frame's and the compare is a
+    /// cached read. The frame path passes true; a reader BEFORE the frame (the GI
+    /// signatures, which the mirror asks for after writing this frame's
+    /// transforms) passes false and pays Ogre's recompute, exactly as the walk it
+    /// replaces did. MEASURED at 8,001 items in Debug: 1.0 ms vs 3.0 ms.
+    void ensureGpuScene(bool graphIsCurrent) const;
+    /// The same walk with its cost recorded in `mGpuScanMicros` — the suite's
+    /// and the premise's measurement, never a hot path.
+    void ensureGpuSceneTimed(bool graphIsCurrent) const;
+    /// Creates the tables (idempotent). Called by the first attach as well as
+    /// by the first frame, because an Item can arrive before either.
+    void ensureGpuTables() const;
+    const detail::GpuScene &gpuScene() const { return mGpuScene; }
+    detail::GpuScene &gpuScene() { return mGpuScene; }
+    unsigned long long gpuScans() const { return mGpuScans; }
+    unsigned long long gpuAabbReads() const { return mGpuAabbReads; }
+    double gpuScanMicros() const { return mGpuScanMicros; }
+
     /// DROP THIS SCENE'S acceleration structures (OgreScene::destroy calls it).
     /// A no-op when the tier never held any. Defined in OgreRayQuery.cpp.
     void forgetRayQuery();
@@ -3463,6 +3466,10 @@ private:
         NodeId           selfId = 0;
         /// This node's place in OgreScene::mItemNodes, or npos (no Item).
         size_t           itemSlot = size_t(-1);
+        /// ...and its MESH's place in the GPU scene's mesh table (GpuScene.h),
+        /// acquired at attach and released at detach. kNoMesh until geometry
+        /// arrives, which is what an instance entry with no mesh reads as.
+        uint32_t         gpuMeshSlot = 0xFFFFFFFFu;
         /// ...and in OgreScene::mDecalNodes (a decal is not an Item, and a
         /// decal node usually carries no Item at all, so the movement scan
         /// would never see it — clean-2 lane, 2026-09-13).
@@ -5139,6 +5146,29 @@ private:
     std::vector<Node *> mItemNodes;
     void indexItemNode(Node &n);
     void unindexItemNode(Node &n);
+    // --- the GPU scene's state (OgreGpuScene.cpp) --------------------------
+    /// The tables. Mutable because two of the readers are const — the GI
+    /// signatures, which the mirror asks for before the frame.
+    mutable detail::GpuScene mGpuScene;
+    mutable bool mGpuSceneRefused = false;   ///< create() said no (headless); do not retry
+    mutable std::vector<uint32_t> mGpuDirty;    ///< this update's slots (kept, not reallocated)
+    mutable std::vector<uint32_t> mGpuForced;   ///< explicit marks since the last update
+    mutable unsigned long long mGpuEpoch = 0ull;
+    mutable bool mGpuEpochValid = false;
+    mutable unsigned long long mGpuScans = 0ull;      ///< dirty scans run, ever
+    mutable unsigned long long mGpuAabbReads = 0ull;  ///< world AABBs the scan asked for, ever
+    mutable double mGpuScanMicros = 0.0;
+    /// THE ONE PLACE the per-item predicates are computed (GpuInstanceFlag).
+    Ogre::uint32 gpuFlagsFor(const Node &n) const;
+    /// A seam that changed what a slot's entry SAYS without moving anything —
+    /// a visibility, light-mask, cast-shadow, render-queue or material write.
+    /// The movement epoch cannot see those (a furniture visibility write is
+    /// deliberately not scene movement, VR-SCAN-1), so they say so by name.
+    void markGpuSlotDirty(const Node &n);
+    void composeGpuInstance(const Node &n, detail::GpuInstance &out) const;
+    /// The mesh table entry for an attached mesh, reference-counted per attach.
+    uint32_t acquireGpuMesh(const MeshRec &rec);
+    void releaseGpuMesh(const Ogre::Mesh *mesh);
     /// THE DECAL INDEX, the same shape and for the same reason: the probes
     /// capture decals (they are projected in the Forward+ pass that renders the
     /// cube faces), so a decal that moves, arrives or leaves is a probe input.

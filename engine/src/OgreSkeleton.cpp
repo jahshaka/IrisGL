@@ -313,6 +313,8 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         // Item is born casting (Scene::setNodeCastShadow).
         n.item->setCastShadows(n.castShadow);
         n.item->setRenderQueueGroup(renderQueueFor(tit->second));
+        n.gpuMeshSlot = acquireGpuMesh(mit->second);   // the GPU scene's mesh table
+        markGpuSlotDirty(n);
         n.node->attachObject(n.item);   // also hands the skeleton its parent node
         // A NODE THAT IS HIDDEN STAYS HIDDEN when it is given geometry:
         // SceneNode::setVisible only walks the objects attached AT THE TIME, so

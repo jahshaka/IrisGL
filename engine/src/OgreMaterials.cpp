@@ -19,8 +19,10 @@ void OgreScene::refileItems(MaterialId id, const MaterialRec &m) {
     noteShadowScanInput();          // the caster predicate reads the render queue
     const Ogre::uint8 rq = renderQueueFor(m);
     for (auto &kv : mNodes)
-        if (kv.second.materialRef == id && kv.second.item)
+        if (kv.second.materialRef == id && kv.second.item) {
             kv.second.item->setRenderQueueGroup(rq);
+            markGpuSlotDirty(kv.second);
+        }
 }
 
 Ogre::Hlms *OgreScene::hlmsFor(const MaterialRec &m) const {
@@ -1042,6 +1044,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // on its own that a cutout just landed on a quad. Said here.
         markShadowShapeDirty(n);
         indexItemNode(n);   // the item walk's index (walkItems)
+        n.gpuMeshSlot = acquireGpuMesh(mit->second);   // the GPU scene's mesh table
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
         // line meshes must neither bounce nor occlude the radiosity rays.
         n.item->setVisibilityFlags(
@@ -1127,6 +1130,7 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         markShadowShapeDirty(n);
         n.item->setVisibilityFlags(itemVisibilityFlags(n, rec.unlit, rec.distortion));
         n.item->setRenderQueueGroup(renderQueueFor(rec));
+        markGpuSlotDirty(n);   // its flags word and its queue just changed
         n.materialRef = matId;
         if (!rec.unlit) {
             // The voxels inside this box hold the old albedo; nothing died, so
