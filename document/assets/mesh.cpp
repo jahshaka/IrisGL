@@ -23,12 +23,7 @@ For more information see the LICENSE file
 #include "core/logger.h"
 
 #include "assimp/postprocess.h"
-#include "import/importflags.h"
 #include "import/clipnaming.h"
-#include "import/scenesource.h"
-#include "import/importsettings.h"   // kDefaultMaxCards
-#include "import/meshbake.h"        // the card generator, shared with the importer
-#include "assimp/Importer.hpp"
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
 
@@ -42,10 +37,6 @@ For more information see the LICENSE file
 #include "core/geometry/aabb.h"
 
 #include <functional>
-#include <QHash>
-#include <QMutex>
-#include <QSet>
-#include <QWeakPointer>
 
 namespace iris
 {
@@ -263,190 +254,17 @@ bool Mesh::hasSkeletalAnimations()
     return skeletalAnimations.count() != 0;
 }
 
-namespace {
-
-// THE PARSE CACHE (ADD-1, 2026-09-15).
-//
-// THE MEASUREMENT: every `scene.addPrimitive` ran assimp over the primitive's
-// .obj again — 2 ms for a cube, 15 for a sphere, 16 for a teapot, per add, for
-// geometry that is a compiled-in resource and byte-identical every time. The
-// owner's 64-sphere script paid 15 ms of its per-add cost on nothing but
-// re-reading one file sixty-four times. And because the engine mirror keys its
-// engine meshes by the DOCUMENT Mesh pointer, sixty-four parses also meant
-// sixty-four v2 vertex buffers uploaded for one sphere.
-//
-// SHARING A MeshPtr BETWEEN NODES IS ALREADY THE MODEL, not a new idea: node
-// duplication has always handed the duplicate the same MeshPtr
-// (SceneNode::createDuplicate -> MeshNode::setMesh(getMesh())), and a Mesh is
-// immutable after construction — the importers fill one and nothing edits it
-// afterwards. The one piece of per-node state that lives on a mesh, the
-// SKELETON, is already CLONED per node by MeshNode::adoptSkeletonFromMesh
-// (GPU_SKINNING_SPEC §7), so two nodes of one rig cannot fight over a pose.
-// That is why this needs no copy-on-write: there is nothing to copy on, and the
-// one thing that would have needed it was solved before this cache existed.
-//
-// WEAK, NOT STRONG, references: the cache must not be what keeps a mesh alive.
-// A scene that drops its last sphere frees the geometry, and the next add
-// parses it again — correct, and no session-long growth from a user importing
-// a hundred models. A strong cache would be a leak with a nice name.
-QMutex &meshCacheMutex()
-{
-    static QMutex m;
-    return m;
-}
-
-QHash<QString, QWeakPointer<Mesh>> &meshCache()
-{
-    static QHash<QString, QWeakPointer<Mesh>> c;
-    return c;
-}
-
-/// The paths whose parse is HELD for the life of the process (Mesh::
-/// pinLoadPaths), and the strong references that hold them. Guarded by
-/// meshCacheMutex like the cache itself.
-QSet<QString> &pinnedPaths()
-{
-    static QSet<QString> p;
-    return p;
-}
-
-QHash<QString, MeshPtr> &pinnedMeshes()
-{
-    static QHash<QString, MeshPtr> m;
-    return m;
-}
-
-MeshPtr cachedMesh(const QString &filePath)
-{
-    QMutexLocker lock(&meshCacheMutex());
-    const auto it = meshCache().constFind(filePath);
-    if (it == meshCache().constEnd()) return MeshPtr();
-    return it.value().lock();
-}
-
-/// Publishes a freshly parsed mesh, and answers with the one to USE: another
-/// thread may have parsed the same file meanwhile (imports run off the UI
-/// thread), and both copies are correct — the one already published wins so
-/// the sharing stays maximal.
-MeshPtr publishMesh(const QString &filePath, const MeshPtr &parsed)
-{
-    QMutexLocker lock(&meshCacheMutex());
-    auto &cache = meshCache();
-    const auto it = cache.constFind(filePath);
-    if (it != cache.constEnd()) {
-        if (MeshPtr hit = it.value().lock()) return hit;
-    }
-    // Expired entries hold nothing, but they are still keys; drop them here
-    // rather than growing a table of names for meshes nobody has any more.
-    for (auto e = cache.begin(); e != cache.end();) {
-        if (e.value().isNull()) e = cache.erase(e);
-        else ++e;
-    }
-    cache.insert(filePath, parsed.toWeakRef());
-    // A PINNED path keeps its parse (Mesh::pinLoadPaths says why): the strong
-    // reference is taken here, on the first real load, and released only by
-    // clearLoadCache or by the process ending.
-    if (pinnedPaths().contains(filePath)) pinnedMeshes().insert(filePath, parsed);
-    return parsed;
-}
-
-}   // namespace
-
-MeshPtr Mesh::loadMesh(QString filePath)
-{
-	// PARSED ONCE PER FILE, SHARED BY EVERY NODE THAT ASKS (see the cache above).
-	if (MeshPtr hit = cachedMesh(filePath)) return hit;
-
-	// legacy -- update TODO
-	Assimp::Importer importer;
-	const aiScene *scene;
-
-	QFile file(filePath);
-	if (!file.exists())
-	{
-		irisLog("model " + filePath + " does not exists");
-		return MeshPtr();
-	}
-
-	// A resource path reads from memory WITH its extension as the format hint
-	// (readSceneFile says why — a leading comment block used to make the
-	// default scene's ground unloadable).
-	scene = readSceneFile(importer, filePath, iris::ImportFlags::Canonical);
-
-	if (!scene) {
-		irisLog("model " + filePath + ": error parsing file");
-		return MeshPtr();
-	}
-
-	if (scene->mNumMeshes <= 0) {
-		irisLog("model " + filePath + ": scene has no meshes");
-		return MeshPtr();
-	}
-
-	auto mesh = scene->mMeshes[0];
-	auto meshObj = new Mesh(scene->mMeshes[0]);
-	auto skel = extractSkeleton(mesh, scene);
-
-	if (!!skel)
-		meshObj->setSkeleton(skel);
-
-	auto anims = extractAnimations(scene);
-	for (auto animName : anims.keys())
-	{
-		meshObj->addSkeletalAnimation(animName, anims[animName]);
-	}
-
-	MeshPtr made(meshObj);
-
-	// SURFACE CARDS FOR A MESH THAT NEVER GOES THROUGH AN IMPORT
-	// (SURFACE-CACHE-1a; SPECS/SURFACE_CACHE_ASSESSMENT.md §4 item 3).
-	//
-	// This function is how the SHIPPED PRIMITIVES are born — src/data/
-	// primitives.h's twelve .obj files, the Ground, the avatar's cube, the
-	// preview spheres — and a primitive has no library row, no import record
-	// and therefore no bake: `buildLodChain` has one caller and it is inside
-	// the assimp import, which is why every sample still renders one LOD level.
-	// A card list has to exist for those meshes too or the surface cache would
-	// have nothing to say about the objects every sample scene is built from.
-	//
-	// So the generator runs HERE, at creation, at the default budget — the same
-	// function the importer calls, never a second implementation of it.
-	//
-	// THE LOD CHAIN IS DELIBERATELY *NOT* BUILT HERE. A primitive has none
-	// today (NANITE_SPEC §7.2b: every sample renders one level), giving it one
-	// would change which triangles the renderer draws at a distance, and that
-	// is ATOM's decision to make and ATOM's picture to move — not a side effect
-	// of the surface cache. So a primitive's cards all name level 0, which is
-	// the truth about a mesh with one level, and they will name a real level
-	// the day the chain arrives here.
-	//
-	// A SKINNED file loaded through this function gets no cards at all
-	// (buildCards refuses a skeleton).
-	MeshBake::buildCards(made, kDefaultMaxCards);
-
-	return publishMesh(filePath, made);
-}
-
-void Mesh::pinLoadPaths(const QStringList &paths)
-{
-    QMutexLocker lock(&meshCacheMutex());
-    for (const QString &path : paths) pinnedPaths().insert(path);
-}
-
-void Mesh::clearLoadCache()
-{
-    QMutexLocker lock(&meshCacheMutex());
-    meshCache().clear();
-    pinnedMeshes().clear();
-}
-
-int Mesh::loadCacheSize()
-{
-    QMutexLocker lock(&meshCacheMutex());
-    int n = 0;
-    for (const auto &w : std::as_const(meshCache())) if (!w.isNull()) ++n;
-    return n;
-}
+// (THE PARSE CACHE, `loadMesh`, the PIN and `clearLoadCache` are DELETED —
+// ATOM P2, 2026-09-22. The shipped primitives, the Ground, the avatar's cube and
+// the preview spheres were the only things that ever took that route: an assimp
+// parse of a Qt resource per file, a weak cache with a pin over the shipped
+// paths, and `MeshBake::buildCards` AT CREATION — ~6 ms on the thread that draws
+// per added node — with the LOD chain deliberately withheld. They are baked
+// library assets now, imported once through the one pipeline
+// (jahshaka/src/services/primitiveassets.h), so every one of them carries the
+// chain, the cards that name real levels, the SDF and the measured bounds that
+// an imported model has, and nothing in the product parses a model outside an
+// import.)
 
 SkeletonPtr Mesh::extractSkeleton(const aiMesh *mesh, const aiScene *scene)
 {

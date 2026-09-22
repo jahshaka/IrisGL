@@ -446,10 +446,17 @@ beside `engine/media`, so a MEDIA patch must be applied in the tree even though 
     dispatched job has none by definition. The threads-per-group half is
     untouched.
 
-    MEASURED by `compute.indirect_dispatch`: at 0, 7 and 4096 survivors the
-    count the counting job wrote, the number of groups that ran and the count
-    the groups read all agree, and the output is byte-identical to a CPU-sized
-    dispatch of the same job. With `issueBarrier = false`, Vulkan
+    MEASURED, since ATOM P3, by `engine.gpu_cull` — the substrate that consumes
+    this patch (`Jahshaka/CullDraws` is dispatched off a count a compute shader
+    wrote). It asserts the survivor count the GPU wrote, the thread-group count
+    it derived from it and one draw command per survivor. The original proof
+    suite `compute.indirect_dispatch` and its three jobs were DELETED with that
+    lane: a capability with a consumer is tested through its consumer.
+    (That suite's own numbers, kept for the record in
+    ~/Developer/spikes/atom-substrate-1/probe-trio-baseline.txt: at 0, 7 and
+    4096 survivors the count the counting job wrote, the number of groups that
+    ran and the count the groups read all agreed, and the output was
+    byte-identical to a CPU-sized dispatch of the same job.) With `issueBarrier = false`, Vulkan
     synchronization validation reports SYNC-HAZARD-READ-AFTER-WRITE at
     `vkCmdDispatchIndirect` naming exactly the missing access/stage pair; with
     the barrier the layer is silent. (The data hazard itself did not reproduce

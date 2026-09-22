@@ -48,16 +48,18 @@ struct Counts
     int    mainThreadParses = 0;   ///< FILE parses on the thread QCoreApplication lives on
     double mainThreadMs     = 0.0;
     /// Main-thread parses of a QT RESOURCE (":/..." / "qrc:/..."), counted
-    /// apart because they are a different animal: a built-in primitive is a
-    /// few kilobytes compiled into the binary, and no prewarm can hoist it
-    /// because every caller asks for it by name.
+    /// apart because they are a different animal: a few kilobytes compiled into
+    /// the binary, which no prewarm can hoist because the caller asks for it by
+    /// name.
     ///
-    /// NOT "once per process" unless somebody PINS it: iris::Mesh's load cache
-    /// holds WEAK references by design (a cache that kept every imported model
-    /// alive would be a leak with a nice name), so a world that closes drops
-    /// its primitives and the next open parses them again — measured at 1-4
-    /// parses and 17-95 ms per open before iris::Mesh::pinLoadPaths, which the
-    /// shell uses to hold exactly the shipped primitives and nothing else.
+    /// AN OPEN MAKES NONE since ATOM P2: the shipped primitives, the Ground and
+    /// the Teapot are baked library assets (jahshaka/src/services/
+    /// primitiveassets.h) read from the store like any imported model, and
+    /// `Mesh::loadMesh`, its weak cache and the pin over it are deleted. (Before
+    /// that a world that closed dropped its primitives and the next open
+    /// re-parsed them here: 1-4 parses and 17-95 ms per open of a shipped
+    /// sample.) What still lands on this counter is a preview dock's own
+    /// furniture, parsed once per process (jahshaka/src/bridge/previewmesh.h).
     int    mainThreadResourceParses = 0;
     double mainThreadResourceMs     = 0.0;
     int    workerParses     = 0;   ///< parses that ran on any other thread

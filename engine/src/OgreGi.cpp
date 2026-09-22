@@ -3255,6 +3255,13 @@ void OgreScene::unindexItemNode(Node &n) {
         } else {
             mGpuScene.onSlotFreed(uint32_t(i));
         }
+        // THE RAY LEVEL IS KEYED BY SLOT and the slots have just been
+        // renumbered (ATOM P3's AT-A8r), so both ends of the swap are cleared:
+        // whatever lands in either is evaluated afresh instead of inheriting
+        // the distance band of the object that used to be there. (The band
+        // cannot travel with the object: nothing here indexes by object.)
+        forgetRayLevel(uint32_t(i));
+        forgetRayLevel(uint32_t(mItemNodes.size()));
     }
     mGpuScene.setSlotCount(uint32_t(mItemNodes.size()));
 }
@@ -4795,7 +4802,12 @@ unsigned OgreScene::cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item)
         scale = std::max(std::max(std::fabs(s.x), std::fabs(s.y)), std::fabs(s.z));
     }
     if (!(scale > 0.0f) || !std::isfinite(scale)) return 0u;
-    const float sizeInMeshUnits = (c.cell() * kCascadeLodCellFraction) / scale;
+    // THE CASCADE'S CASE OF THE QUALITY CURRENCY (Types.h, SUB-ERROR): one
+    // SAMPLE here is a cell, the tolerance is `kCascadeLodCellFraction` of one,
+    // and the mesh's own scale takes the answer into the units the baked bounds
+    // are measured in. The arithmetic is the same multiply it always was — the
+    // vocabulary is what changed, and `gi.cascade_lod` is the proof of it.
+    const float sizeInMeshUnits = allowedWorldError(kCascadeLodCellFraction, c.cell(), scale);
     return unsigned(lodLevelForWorldError(*bounds, sizeInMeshUnits, bounds->size()));
 }
 
