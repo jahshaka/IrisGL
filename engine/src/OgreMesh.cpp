@@ -63,10 +63,12 @@ public:
                             const Ogre::Camera *camera) const override
     {
         const Ogre::Real perPixel = worldPerPixel(camera) * camera->_getLodBiasInverse();
-        if (camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC) return perPixel;
+        const Ogre::Real meshUnits = meshUnitsPerWorldUnit(object->getLocalRadius(),
+                                                           object->getWorldRadius());
+        if (camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC) return perPixel * meshUnits;
         const Ogre::Real d = object->getWorldAabb().mCenter.distance(camera->getDerivedPosition()) -
                              object->getWorldRadius();
-        return std::max(d, Ogre::Real(0)) * perPixel;
+        return std::max(d, Ogre::Real(0)) * perPixel * meshUnits;
     }
 
     void lodUpdateImpl(const size_t numNodes, Ogre::ObjectData objData,
@@ -76,16 +78,36 @@ public:
         OGRE_ALIGNED_DECL(Ogre::Real, lodValues[ARRAY_PACKED_REALS], OGRE_SIMD_ALIGNMENT);
         const Ogre::Real perPixel = worldPerPixel(camera) * camera->_getLodBiasInverse() * bias;
 
+        // THE INSTANCE'S SCALE, PACK BY PACK (ATOM-RESUMES-1 item 1). Ogre's
+        // `advanceLodPack()` carries the owner, the world AABB and the WORLD
+        // radius and NOT the local one (Math/Array/OgreObjectData.h) — no
+        // upstream strategy ever needed a mesh-space quantity — so this walk
+        // advances that one pointer itself. It is valid and in step with the
+        // rest: `SceneManager::updateAllLodsThread` fills the whole ObjectData
+        // from the memory manager and advances EVERY pointer together
+        // (`advancePack`) before handing the range over, and `objData` arrives
+        // BY VALUE, so this is our own copy of a public member of a public
+        // struct — nothing private is reached into and no pin change is owed.
+        const Ogre::Real *RESTRICT_ALIAS localRadiusPtr = objData.mLocalRadius;
+
         // ORTHOGRAPHIC: one pixel is the same world length everywhere in the
-        // frustum, so the allowed error does not depend on the object at all
-        // and the distance term must NOT enter — an orthographic view that
-        // simplified what is far from the camera would be a plain defect.
+        // frustum, so the allowed error does not depend on the object's
+        // DISTANCE at all and that term must NOT enter — an orthographic view
+        // that simplified what is far from the camera would be a plain defect.
+        // It does depend on the object's SCALE, like every other pass: the
+        // thresholds are mesh units.
         if (camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC) {
             const Ogre::ArrayReal flat(Ogre::Mathlib::SetAll(perPixel));
             for (size_t i = 0; i < numNodes; i += ARRAY_PACKED_REALS) {
-                CastArrayToReal(lodValues, flat);
+                const Ogre::ArrayReal *RESTRICT_ALIAS localRadius =
+                    reinterpret_cast<const Ogre::ArrayReal * RESTRICT_ALIAS>(localRadiusPtr);
+                const Ogre::ArrayReal *RESTRICT_ALIAS worldRadius =
+                    reinterpret_cast<const Ogre::ArrayReal * RESTRICT_ALIAS>(objData.mWorldRadius);
+                const Ogre::ArrayReal v = flat * meshUnitsPerWorldUnit(*localRadius, *worldRadius);
+                CastArrayToReal(lodValues, v);
                 lodSet(objData, lodValues, hysteresis);
                 objData.advanceLodPack();
+                localRadiusPtr += ARRAY_PACKED_REALS;
             }
             return;
         }
@@ -98,20 +120,67 @@ public:
         for (size_t i = 0; i < numNodes; i += ARRAY_PACKED_REALS) {
             Ogre::ArrayReal *RESTRICT_ALIAS worldRadius =
                 reinterpret_cast<Ogre::ArrayReal * RESTRICT_ALIAS>(objData.mWorldRadius);
+            const Ogre::ArrayReal *RESTRICT_ALIAS localRadius =
+                reinterpret_cast<const Ogre::ArrayReal * RESTRICT_ALIAS>(localRadiusPtr);
             // The SAME quantity the distance strategy computes — the distance
             // from the bounding SPHERE — turned into a world error by one
-            // scalar the whole pass shares.
+            // scalar the whole pass shares, and then into the MESH's own units
+            // by this instance's scale, because that is what the thresholds are
+            // measured in (`applyLodValues`, below).
             Ogre::ArrayReal v = objData.mWorldAabb->mCenter.distance(cameraPos) - (*worldRadius);
-            v = Ogre::Mathlib::Max(v, zero) * scale;
+            v = Ogre::Mathlib::Max(v, zero) * scale * meshUnitsPerWorldUnit(*localRadius, *worldRadius);
             CastArrayToReal(lodValues, v);
             // The band is THIS PASS'S (ogre-patch 0075): the value is the same
             // arithmetic for every pass, the band is not.
             lodSet(objData, lodValues, hysteresis);
             objData.advanceLodPack();
+            localRadiusPtr += ARRAY_PACKED_REALS;
         }
     }
 
 private:
+    /// MESH UNITS PER WORLD UNIT for one instance — the `meshToWorldScale`
+    /// divisor of the quality currency (`allowedWorldError`, Types.h), read
+    /// straight off the bounds Ogre already maintains.
+    ///
+    /// `mWorldRadius = mLocalRadius * max(derivedScale.x, .y, .z)` — verified in
+    /// the pin at `MovableObject::updateAllBounds` (OgreMovableObject.cpp:418-422,
+    /// `*worldRadius = (*localRadius) * parentScale.getMaxComponent()`) and at
+    /// its single-object twin `updateSingleWorldRadius` (:356-362) — so this
+    /// ratio IS 1 / (largest axis scale), which is exactly the quantity the GPU
+    /// cull derives from the longest row of its 3x4 world matrix
+    /// (JahCullTest_cs.glsl) and the cascade passes to `allowedWorldError`.
+    /// Reading it off the radii costs one divide per PACK and needs no transform.
+    ///
+    /// A zero world radius (a point object, or one whose bounds have never been
+    /// updated) answers 1: there is no scale to read, and the alternative is an
+    /// infinity that would pin every such object to the coarsest level.
+    static Ogre::Real meshUnitsPerWorldUnit(Ogre::Real localRadius, Ogre::Real worldRadius)
+    {
+        return worldRadius > Ogre::Real(1e-6) ? localRadius / worldRadius : Ogre::Real(1);
+    }
+
+#if ARRAY_PACKED_REALS > 1
+    /// The packed form of the same expression. The divisor is FLOORED before
+    /// the divide, so no lane can produce an infinity of its own, and the
+    /// select is `CmovRobust` (a true bitwise select) and NOT `Cmov4`: THE
+    /// PADDING LANES OF A PACK CARRY WHATEVER THE ARRAY MEMORY MANAGER LEFT
+    /// THERE (measured: a 500-instance scene aborted this suite on Cmov4's
+    /// "Passing NaN values" assertion in a Debug engine), and a select that
+    /// arithmetics its two arguments together — which is what Cmov4 does,
+    /// `arg2 + ((arg1 - arg2) & mask)` — spreads one lane's NaN over the whole
+    /// register. A padding lane's value is meaningless either way: its owner is
+    /// a dummy object whose level nothing draws.
+    static Ogre::ArrayReal meshUnitsPerWorldUnit(Ogre::ArrayReal localRadius,
+                                                 Ogre::ArrayReal worldRadius)
+    {
+        const Ogre::ArrayReal safe = Ogre::Mathlib::Max(worldRadius, Ogre::Mathlib::fEpsilon);
+        return Ogre::Mathlib::CmovRobust(
+            localRadius / safe, Ogre::Mathlib::ONE,
+            Ogre::Mathlib::CompareGreater(worldRadius, Ogre::Mathlib::fEpsilon));
+    }
+#endif
+
     /// The world-space error one metre of view distance can hide at this
     /// camera's projection and its render target's height (a length per metre
     /// of distance); for an orthographic camera, the world length of one pixel
@@ -124,16 +193,19 @@ private:
     /// cascade, the card and the GPU cull, and `engine.lod_rule_parity` holds
     /// the GLSL copy to it.
     ///
-    /// WHAT IT STILL DOES NOT DO, and it is a defect of the strategy rather
-    /// than of the currency: it passes no `meshToWorldScale`. Ogre's LOD values
-    /// are per MESH (`applyLodValues`, which writes `MeshData::lodBounds`
-    /// straight in) and the strategy's value is a WORLD length, so a 10x-scaled
-    /// instance is compared against a bound measured in mesh units and takes a
-    /// level whose real deviation is ten times what it asked for. The cascade's
-    /// call (`OgreScene::cascadeVoxelLod`) and the GPU cull both divide by the
-    /// instance's scale; this one cannot without moving the picture of every
-    /// scaled instance, so the fix is a lane with a pixel gate of its own.
-    /// (ATOM-SUBSTRATE-1 finding, 2026-09-22.)
+    /// IT CARRIES NO `meshToWorldScale` AND IT MUST NOT: the divisor is the
+    /// INSTANCE'S, not the pass's, so it is applied per object in the loops
+    /// above (`meshUnitsPerWorldUnit`). Ogre's LOD values are per MESH
+    /// (`applyLodValues`, which writes `MeshData::lodBounds` straight in) and
+    /// this value is a WORLD length, so a 10x-scaled instance compared against
+    /// a bound measured in mesh units used to take a level whose real deviation
+    /// was ten times what it asked for — the cascade (`OgreScene::cascadeVoxelLod`)
+    /// and the GPU cull always divided by the instance's scale and the strategy
+    /// did not (ATOM-SUBSTRATE-1 finding, 2026-09-22; fixed by ATOM-RESUMES-1
+    /// item 1, which also made the strategy the third copy under
+    /// `engine.lod_rule_parity`). A scaled instance's picture MOVES with the
+    /// fix, and correctly so: an unscaled one's does not, because the ratio is
+    /// exactly 1 there.
     static Ogre::Real worldPerPixel(const Ogre::Camera *camera)
     {
         // A pass whose camera has never been given a viewport cannot be
