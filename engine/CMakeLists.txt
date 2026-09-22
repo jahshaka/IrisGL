@@ -110,6 +110,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_voxel_sample.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
@@ -130,6 +131,7 @@ if(JAH_RAY_QUERY_OK)
     # named in DEPENDS or a change to one would not rebuild the SPIR-V.
     set(JAH_RQ_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
     set(JAH_RQ_HEADERS "${JAH_RQ_INCLUDE}/jah_rq_hit.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_voxel_sample.glsl"
                        "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
                        "${JAH_RQ_INCLUDE}/jah_probe_params.glsl")
     add_custom_command(
@@ -388,6 +390,20 @@ file(GLOB_RECURSE _hlms_inputs CONFIGURE_DEPENDS
      "${OGRE_NEXT_IBL_MEDIA_DIR}/*" "${OGRE_NEXT_IFD_MEDIA_DIR}/*"
      "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*")
 list(APPEND _hlms_inputs "${OGRE_NEXT_DEBUGPACK_ZIP}")
+# THE ONE VOXEL RADIANCE READER (PHOTON-READER-1). Two plain-GLSL files are the
+# only source of the cone march and the voxel read: the ray jobs include them
+# through glslang (`-I src/rayquery/include`), and the three Hlms consumers —
+# the pixel shader's cones, the bounce-injection job, the irradiance field's
+# generation job — insert them as two library pieces this step WRAPS them into
+# at staging (`JahVoxelSample` = the finite test + the sample file, then
+# `JahVoxelMarch`). Generated, never hand-copied; the wrapper also fails the
+# build if either file carries the Hlms directive mark (the at-sign rule).
+set(JAH_VOXEL_READER_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
+set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl")
+set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
+list(APPEND _hlms_inputs ${JAH_VOXEL_READER_SOURCES} "${JAH_WRAP_HLMS_PIECE}")
 add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${JAHSHAKA_MEDIA_DIR}/Hlms"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HLMS_SOURCE_DIR}/Common" "${JAHSHAKA_MEDIA_DIR}/Hlms/Common"
@@ -399,6 +415,15 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     # would be parsed alongside its replacement and fail as a duplicate @piece.
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka" "${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka"
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelSample
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelSample_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
+            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelMarch
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelMarch_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMMON_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Common"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HDR_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/HDR"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SSAO_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SSAO"
