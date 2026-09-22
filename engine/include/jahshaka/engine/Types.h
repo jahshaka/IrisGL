@@ -2824,8 +2824,9 @@ struct GatherTuning {
     /// one per texel, and 8 is the shipped value (64 rays). At most 8 -- one
     /// ray is one thread of the trace's 8x8 workgroup.
     unsigned octRes = 0u;
-    /// The near field's reach in world units. 0 = derive it from the cascade
-    /// chain's outermost box, which is what the reflection trace does.
+    /// The ray's length in world units. 0 = derive it: half the outermost
+    /// cascade's extent (the lit volume's inscribed radius), under the
+    /// camera's far plane.
     float    rayLength = 0.0f;
     /// How many ADAPTIVE probes a frame may add on top of the uniform grid
     /// (one per cell at most, where the cell's pixels do not lie in the cell
@@ -2836,10 +2837,6 @@ struct GatherTuning {
     /// of (probe cell, ray, frame index); holding the frame term makes
     /// consecutive frames of a still scene byte-identical.
     bool     freezeFrameIndex = false;
-    /// THE FAR-TERM ARM. With it set, a ray that finds nothing inside
-    /// `rayLength` reads the sky directly instead of the outer cascades' voxel
-    /// radiance at its end point.
-    bool     farTermOff = false;
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
     bool     jitterOff = false;
