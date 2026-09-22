@@ -93,21 +93,22 @@ struct GpuInstance {
 };
 static_assert(sizeof(GpuInstance) == 160, "the GPU instance table's stride is a contract");
 
-/// ONE MESH, std430, 64 bytes, indexed by the mesh table index.
+/// ONE MESH, std430, 48 bytes, indexed by the mesh table index.
 ///
-/// The two device ADDRESSES are filled by whoever can take them — today the ray
-/// tier, when it builds a mesh's bottom-level structure (`GpuScene::
-/// setMeshAddresses`). They are zero on a build with no ray-query tier, which is
-/// honest: a device address is a Vulkan fact and the only consumers of it are
-/// Vulkan jobs.
+/// `positionAddress` and `indexAddress` USED TO BE HERE AND ARE DELETED (ATOM
+/// P4b). Nothing ever wrote them, and ATOM-VOXEL-1 found out why they could not
+/// be written: a LOD level is its OWN `IndexBufferPacked` with its own device
+/// address, so one address per MESH cannot name a level's indices — and the
+/// consumer that wanted them (the voxeliser's compute shader) needs the layout
+/// beside the address anyway. Both now live in the GEOMETRY ROW table below, one
+/// row per (mesh, level, submesh). A3 §1.1's "GpuMesh carries the pool's device
+/// addresses" is amended by A5b §1.
 struct GpuMesh {
-    uint32_t positionAddress[2] = {};  ///< the vertex pool's device address + this buffer's start
-    uint32_t indexAddress[2] = {};
     uint32_t counts[4] = {};  ///< x vertices, y level-0 indices, z level count, w submesh count
     float    localBoundsMin[4] = {};
     float    localBoundsMax[4] = {};  ///< [3] = the level-0 LOD bound (ATOM-BAKE-1's honest error)
 };
-static_assert(sizeof(GpuMesh) == 64, "the GPU mesh table's stride is a contract");
+static_assert(sizeof(GpuMesh) == 48, "the GPU mesh table's stride is a contract");
 
 /// THE FLAGS WORD — the predicates every consumer used to recompute for itself.
 /// ONE place writes them (`OgreScene::gpuFlagsFor`); nobody else asks the
@@ -140,14 +141,18 @@ enum GpuInstanceFlag : uint32_t {
 /// IN THE MESH'S OWN UNITS — and it is 0 for level 0, which is the honest value
 /// and also exactly what makes the walk's first comparison free.
 ///
-/// `reserved` is 0 and is the room P4's widening needs: a draw command's
-/// `vertexOffset` (the level's start in a pooled vertex buffer, which nothing
-/// writes until the device addresses are filled) or a per-submesh dimension.
+/// `geomRow` (ATOM P4b, was `reserved`) IS THE SUBMESH DIMENSION: the GEOMETRY
+/// ROW of (this mesh, this level, SUBMESH 0). The rows of one level are
+/// contiguous, so submesh s is `geomRow + s` — which is how a shader holding
+/// only this table reaches a submesh's vertex and index addresses. `kNoGeomRow`
+/// when this (mesh, level) has no readable geometry, which a consumer must test:
+/// it is the honest state of a mesh without a float3 position, without an index
+/// buffer, or on a device with no buffer device addresses.
 struct GpuMeshLevel {
     uint32_t firstIndex = 0;
     uint32_t indexCount = 0;
     float    bound = 0.0f;
-    uint32_t reserved = 0;
+    uint32_t geomRow = 0xFFFFFFFFu;
 };
 static_assert(sizeof(GpuMeshLevel) == 16, "the GPU level table's stride is a contract");
 
@@ -157,6 +162,24 @@ public:
     /// this (six on the deepest shipped chain); a mesh with more is CLAMPED and
     /// says so once in the log rather than writing past its stride.
     static constexpr uint32_t kLevelsPerMesh = 8u;
+    /// Submeshes per mesh entry in the GEOMETRY ROW table. Every mesh this engine
+    /// bakes has exactly one; a mesh with more than this is CLAMPED and says so
+    /// once, like the level bound above.
+    static constexpr uint32_t kSubmeshesPerMesh = 8u;
+    /// A geometry row is `Ogre::VctVoxelizer::GeometryRow` — 12 words, 48 bytes.
+    /// THE FORMAT IS OGRE'S ON PURPOSE (the shader that reads it is Ogre's), so
+    /// this header does not name the type and no consumer of GpuScene.h drags in
+    /// HlmsPbs; the writer (`OgreScene::acquireGpuMesh`) hands over 48 bytes.
+    static constexpr uint32_t kGeomRowWords = 12u;
+    static constexpr uint32_t kGeomRowsPerMesh = kLevelsPerMesh * kSubmeshesPerMesh;
+    static constexpr uint32_t kNoGeomRow = 0xFFFFFFFFu;
+
+    /// The row index of (mesh entry, level, submesh). The rows of ONE LEVEL are
+    /// contiguous, which is the contract `GpuMeshLevel::geomRow` relies on: a
+    /// shader that has the level's row can reach submesh s at `geomRow + s`.
+    static uint32_t geomRowIndex(uint32_t meshIndex, uint32_t level, uint32_t submesh) {
+        return meshIndex * kGeomRowsPerMesh + level * kSubmeshesPerMesh + submesh;
+    }
 
     ~GpuScene();
 
@@ -257,6 +280,35 @@ public:
     Ogre::UavBufferPacked *instanceBuffer() const { return mInstanceBuffer; }
     Ogre::UavBufferPacked *meshBuffer() const { return mMeshBuffer; }
     Ogre::UavBufferPacked *levelBuffer() const { return mLevelBuffer; }
+    /// THE GEOMETRY ROW TABLE (ATOM P4b): the vertex and index device addresses and
+    /// the vertex layout of every (mesh, level, submesh) the scene holds, written
+    /// ONCE at attach. The voxeliser binds it for every dispatch
+    /// (`VctVoxelizer::setGeometrySource`) instead of re-describing the world's
+    /// geometry on the CPU per build; phase D's raster decode reads the same rows.
+    Ogre::UavBufferPacked *geomBuffer() const { return mGeomBuffer; }
+
+    /// Writes one geometry row (48 bytes, the caller's `GeometryRow`) into the
+    /// mirror and queues it for the device. Called from `acquireMesh`'s caller
+    /// while it still holds the mesh; a row nobody writes stays zero, and
+    /// `GpuMeshLevel::geomRow` is what says whether it means anything.
+    void stageGeomRow(uint32_t rowIndex, const void *row48Bytes);
+    /// Points a level entry at its submesh-0 geometry row. Separate from
+    /// `acquireMesh` because a row's index depends on the ENTRY's index, which
+    /// acquireMesh is the thing that decides.
+    void setLevelGeomRow(uint32_t meshIndex, uint32_t level, uint32_t rowIndex);
+    /// UPLOADS THE GEOMETRY ROWS IF ANY ARE OWED, NOW. `update()` does it once per
+    /// frame with the rest of the tables, but a GI rebuild reads the rows OUTSIDE a
+    /// frame's dirty scan — and a row that has not reached the device is a ZERO
+    /// address, which a shader dereferences and the channel hangs on (Xid 109). Any
+    /// consumer that binds the table before a dispatch calls this first.
+    void flushGeomRows();
+    /// What `setLevelGeomRow` left there, clamped: kNoGeomRow for a level with no
+    /// readable geometry or a mesh entry that does not exist.
+    uint32_t levelGeomRow(uint32_t meshIndex, uint32_t level) const {
+        const size_t at = size_t(meshIndex) * kLevelsPerMesh + level;
+        if (level >= kLevelsPerMesh || at >= mLevelMirror.size()) return kNoGeomRow;
+        return mLevelMirror[at].geomRow;
+    }
 
     // --- what it cost (the frame monitor's row and the suite's assertions) --
     unsigned long long writes() const { return mWrites; }        ///< slot writes, ever
@@ -275,6 +327,7 @@ private:
     Ogre::UavBufferPacked *mInstanceBuffer = nullptr;
     Ogre::UavBufferPacked *mMeshBuffer = nullptr;
     Ogre::UavBufferPacked *mLevelBuffer = nullptr;
+    Ogre::UavBufferPacked *mGeomBuffer = nullptr;
 
     /// THE CPU MIRROR — authoritative. The device table is a copy of it, never
     /// the other way round: nothing here ever reads the device buffer back (the
@@ -295,6 +348,10 @@ private:
 
     std::vector<GpuMesh> mMeshMirror;
     std::vector<GpuMeshLevel> mLevelMirror;
+    /// The geometry rows as RAW WORDS (see kGeomRowWords): 12 per row,
+    /// kGeomRowsPerMesh rows per mesh entry.
+    std::vector<uint32_t> mGeomMirror;
+    bool mGeomDirty = false;
     struct MeshEntry {
         Ogre::MeshPtr mesh;
         uint32_t refs = 0;

@@ -51,10 +51,12 @@ struct GpuInstance
 	uvec4 pad;
 };
 
+// 48 bytes since ATOM P4b: `positionAddress`/`indexAddress` are DELETED. One index
+// address per MESH cannot name a LEVEL's indices (each level is its own
+// IndexBufferPacked), so the addresses moved to the geometry ROW table, one row per
+// (mesh, level, submesh), reached through GpuMeshLevel::geomRow.
 struct GpuMesh
 {
-	uvec2 positionAddress;
-	uvec2 indexAddress;
 	uvec4 counts;           // x vertices, y level-0 indices, z LEVEL COUNT, w submeshes
 	vec4  localBoundsMin;
 	vec4  localBoundsMax;   // w = the level-0 bound, which is 0 by definition
@@ -65,7 +67,7 @@ struct GpuMeshLevel
 	uint  firstIndex;
 	uint  indexCount;
 	float bound;            // the level's MEASURED deviation, in MESH units
-	uint  reserved;
+	uint  geomRow;          // the GEOMETRY ROW of submesh 0; submesh s is geomRow + s
 };
 
 layout( std430, ogre_U0 ) readonly restrict buffer paramsLayout { CullParams params; };

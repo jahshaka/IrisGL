@@ -39,6 +39,44 @@ static OgreScene *sVctBindingOwner = nullptr;
 // first call and kept. Function-local rather than a namespace-scope global so
 // the read happens on first use and not in a static initialiser whose order
 // against Ogre's own is nobody's to promise.
+/// EVERY VOXELISER READS THE SCENE'S GEOMETRY ROW TABLE (ATOM P4b), and it is bound
+/// IMMEDIATELY BEFORE EVERY BUILD, never once at construction.
+///
+/// THAT IS NOT TIDINESS, IT IS THE BUG THIS LANE ALREADY PAID FOR: `growMeshTable`
+/// DESTROYS and re-creates the row buffer when the mesh table doubles (32 entries,
+/// then 64...), so a pointer taken at construction is dangling the moment the 33rd
+/// mesh attaches. Ogre's destroy is DELAYED, so the dispatch did not fault - it read
+/// freed VRAM and hung the channel: NVRM Xid 109 CTX SWITCH TIMEOUT, device lost, on
+/// the selftest's second scene. Binding per build costs one pointer store.
+void OgreScene::bindGeometrySource(Ogre::VctVoxelizer *v) {
+    ensureGpuTables();
+    // THE ROWS MUST BE ON THE DEVICE, NOT MERELY IN THE MIRROR. `GpuScene::update`
+    // uploads them once per frame with the other tables, but a GI rebuild runs outside
+    // that scan: a row still only in the mirror is read as a ZERO ADDRESS, and the
+    // voxelise shader dereferences it. Measured: NVRM Xid 109 CTX SWITCH TIMEOUT and a
+    // lost device on the selftest's second scene.
+    mGpuScene.flushGeomRows();
+    if (v) v->setGeometrySource(mGpuScene.geomBuffer());
+}
+
+/// THE HOST'S ROW for (this item's mesh, this level, submesh 0), or kNoGeomRow. The
+/// level table holds it (`GpuMeshLevel::geomRow`), written once at attach.
+uint32_t OgreScene::geomRowBaseFor(const Ogre::Item *item, unsigned level) const {
+    // THE REFUSAL HOOK MOVED WITH THE ROWS. `JAH_VCT_REFUSE_GEOMETRY` used to be read
+    // inside the voxeliser's per-build describe; rows are written ONCE AT ATTACH now,
+    // so arming the hook after a mesh is attached could no longer reach it. Read here
+    // it still produces exactly the state it names — items queued, no geometry rows,
+    // which is what a device with no buffer device addresses is in for the whole scene
+    // — and gi.voxel_resident's case 5 keeps proving that path builds and does not
+    // crash. Read per call, like the cascade fault hooks: a getenv against a rebuild
+    // that costs milliseconds is not a cost anyone can measure.
+    if (std::getenv("JAH_VCT_REFUSE_GEOMETRY")) return detail::GpuScene::kNoGeomRow;
+    if (!item || !mGpuScene.live()) return detail::GpuScene::kNoGeomRow;
+    const uint32_t meshIdx = mGpuScene.meshIndex(item->getMesh().get());
+    if (meshIdx == detail::GpuScene::kNoMesh) return detail::GpuScene::kNoGeomRow;
+    return mGpuScene.levelGeomRow(meshIdx, level);
+}
+
 /// THE (mesh, level) HISTOGRAM THE VOXELISER SPENT, read off it after a build
 /// (ATOM P4 / AT-A10). One helper because there are TWO build sites and a reading
 /// taken at only one of them is worse than none - which is exactly the bug
@@ -414,7 +452,8 @@ bool OgreScene::refreshVctFast() {
                 const bool inSet = item && (item->getVisibilityFlags() & kGiGeometryBit) != 0u;
                 const bool held  = mVctItemIds.count(kv.first) != 0u;
                 if (inSet == held) continue;
-                if (inSet) { mVctVoxelizer->addItem(item); mVctItemIds.insert(kv.first); }
+                if (inSet) { mVctVoxelizer->addItem(item, 0u, 0u, geomRowBaseFor(item, 0u));
+                             mVctItemIds.insert(kv.first); }
                 else       { if (item) mVctVoxelizer->removeItem(item);
                              mVctItemIds.erase(kv.first); }
             }
@@ -425,6 +464,7 @@ bool OgreScene::refreshVctFast() {
                 mVctVoxelizer->setRegionToVoxelize(false, aabb);
                 mVctVoxelizer->dividideOctants(1u, 1u, 1u);
             }
+            bindGeometrySource(mVctVoxelizer);
             mVctVoxelizer->build(mSceneMgr);
             applyVctAmbient();
             const Ogre::uint32 extraBounces =
@@ -4107,7 +4147,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
         Ogre::Item *item = kv.second.item;
         // PBR items only — the same set IR traces (never sky/overlays/billboards).
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        mVctVoxelizer->addItem(item);
+        mVctVoxelizer->addItem(item, 0u, 0u, geomRowBaseFor(item, 0u));
         mVctItemIds.insert(kv.first);        // what the reuse arm compares against (B4)
         ++itemCount;
     }
@@ -4118,6 +4158,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     }
 
     mVctVoxelizer->dividideOctants(1u, 1u, 1u);
+    bindGeometrySource(mVctVoxelizer);
     mVctVoxelizer->build(mSceneMgr);
 
     mVctLighting = new Ogre::VctLighting(
@@ -4437,6 +4478,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.voxelizer->dividideOctants(1u, 1u, 1u);
         c.items = cascadeGeometryCount(c);
         setCascadeItems(c, c.items > 0u);
+        bindGeometrySource(c.voxelizer);
         c.voxelizer->build(mSceneMgr);
         // THE READINGS, taken where the buckets exist. BOTH of them, at BOTH build
         // sites: `lodTriangles` alone here left `voxelLevels` empty on the chain's
@@ -4887,7 +4929,7 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
         const unsigned lod = cascadeVoxelLod(c, item);
         if (c.lodLevels.size() <= size_t(lod)) c.lodLevels.resize(size_t(lod) + 1u, 0);
         ++c.lodLevels[lod];
-        c.voxelizer->addItem(item, 0u, lod);
+        c.voxelizer->addItem(item, 0u, lod, geomRowBaseFor(item, lod));
     }
     // WHAT THE VOXELISER HOLDS, READ OFF THE VOXELISER (ATOM inventory row
     // AT-A12, ogre-patch 0089). This used to walk each mesh's VAOs here and sum
@@ -4987,7 +5029,8 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "JAH_GI_CASCADE_FAULT: forced cascade build failure",
                                 "OgreScene::rebuildCascade");
             }
-            c.voxelizer->build(mSceneMgr);
+            bindGeometrySource(c.voxelizer);
+        c.voxelizer->build(mSceneMgr);
             // THE READINGS, taken where the buckets exist.
             c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
             readVoxelLevels(c);

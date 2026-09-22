@@ -20,6 +20,8 @@
 #include "EnginePrivate.h"
 #include "GpuScene.h"
 
+#include "Vct/OgreVctVoxelizer.h"
+
 #include <OgreLogManager.h>
 #include <OgreMesh2.h>
 #include <Vao/OgreAsyncTicket.h>
@@ -74,8 +76,9 @@ void GpuScene::destroy() {
         if (mInstanceBuffer) mVao->destroyUavBuffer(mInstanceBuffer);
         if (mMeshBuffer) mVao->destroyUavBuffer(mMeshBuffer);
         if (mLevelBuffer) mVao->destroyUavBuffer(mLevelBuffer);
+        if (mGeomBuffer) mVao->destroyUavBuffer(mGeomBuffer);
     }
-    mInstanceBuffer = mMeshBuffer = mLevelBuffer = nullptr;
+    mInstanceBuffer = mMeshBuffer = mLevelBuffer = mGeomBuffer = nullptr;
     mVao = nullptr;
     mMirror.clear();
     mBorn.clear();
@@ -84,6 +87,7 @@ void GpuScene::destroy() {
     mRuns.clear();
     mDests.clear();
     mMeshMirror.clear();
+    mGeomMirror.clear();
     mLevelMirror.clear();
     mMeshEntries.clear();
     mFreeMeshSlots.clear();
@@ -113,6 +117,12 @@ void GpuScene::growMeshTable(uint32_t capacity) {
     const uint32_t want = roundUpPow2(capacity, std::max(kInitialMeshes, mMeshCapacity ? mMeshCapacity : kInitialMeshes));
     mMeshMirror.resize(want);
     mLevelMirror.resize(size_t(want) * kLevelsPerMesh);
+    // THE GEOMETRY ROWS grow with the mesh table and by the same doubling: one block
+    // of kGeomRowsPerMesh rows per mesh entry, so a row's index is arithmetic
+    // (`geomRowIndex`) and no allocator is needed. 48 B x 64 rows = 3 KB per mesh
+    // entry, which is nothing beside what it replaced (a re-described table per
+    // cascade per build, and before that a full copy of the world's geometry).
+    mGeomMirror.resize(size_t(want) * kGeomRowsPerMesh * kGeomRowWords, 0u);
     if (mMeshBuffer) {
         mVao->destroyUavBuffer(mMeshBuffer);
         mMeshBuffer = nullptr;
@@ -121,10 +131,39 @@ void GpuScene::growMeshTable(uint32_t capacity) {
         mVao->destroyUavBuffer(mLevelBuffer);
         mLevelBuffer = nullptr;
     }
+    if (mGeomBuffer) {
+        mVao->destroyUavBuffer(mGeomBuffer);
+        mGeomBuffer = nullptr;
+    }
     mMeshBuffer = mVao->createUavBuffer(want, sizeof(GpuMesh), 0, mMeshMirror.data(), false);
     mLevelBuffer = mVao->createUavBuffer(size_t(want) * kLevelsPerMesh, sizeof(GpuMeshLevel), 0,
                                          mLevelMirror.data(), false);
+    mGeomBuffer = mVao->createUavBuffer(size_t(want) * kGeomRowsPerMesh,
+                                        kGeomRowWords * sizeof(uint32_t), 0, mGeomMirror.data(),
+                                        false);
+    mGeomDirty = false;   // the create above uploaded the mirror
     mMeshCapacity = want;
+}
+
+void GpuScene::flushGeomRows() {
+    if (!mGeomDirty || !mGeomBuffer || mGeomMirror.empty()) return;
+    mGeomBuffer->upload(mGeomMirror.data(), 0, mGeomMirror.size() / kGeomRowWords);
+    mGeomDirty = false;
+    ++mCopies;
+}
+
+void GpuScene::setLevelGeomRow(uint32_t meshIndex, uint32_t level, uint32_t rowIndex) {
+    const size_t at = size_t(meshIndex) * kLevelsPerMesh + level;
+    if (level >= kLevelsPerMesh || at >= mLevelMirror.size()) return;
+    mLevelMirror[at].geomRow = rowIndex;
+    mLevelDirty = true;
+}
+
+void GpuScene::stageGeomRow(uint32_t rowIndex, const void *row48Bytes) {
+    const size_t at = size_t(rowIndex) * kGeomRowWords;
+    if (at + kGeomRowWords > mGeomMirror.size()) return;   // no such mesh entry
+    std::memcpy(mGeomMirror.data() + at, row48Bytes, kGeomRowWords * sizeof(uint32_t));
+    mGeomDirty = true;
 }
 
 void GpuScene::ensureSlots(uint32_t count) {
@@ -198,6 +237,11 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long lon
         mLevelDirty = false;
         ++mCopies;
     }
+    // AND THE GEOMETRY ROWS, for the same reason in one more step: a level entry's
+    // `geomRow` must name a row that already holds addresses before anything reads it.
+    // Uploaded WHOLE and only when a mesh arrived or left — a mesh's rows never change
+    // while it lives, so this is once per attach batch and never per frame.
+    flushGeomRows();
 
     mCopySet.clear();
     mCopySet.insert(mCopySet.end(), dirtySlots.begin(), dirtySlots.end());
@@ -481,13 +525,18 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
     desc.localBoundsMax[3] = 0.0f;
     desc.counts[3] = uint32_t(rec.mesh->getNumSubMeshes());
 
-    // SUBMESH 0's CHAIN. A mesh with several submeshes has one index range per
-    // (submesh, level) and this table holds the FIRST submesh's — which is what
-    // every mesh this engine bakes has exactly one of. Atom P4's voxeliser,
-    // which reads per-(mesh, level) ranges, is where the multi-submesh widening
-    // belongs (it needs a submesh dimension in the table, not a guess here).
+    // SUBMESH 0's CHAIN in the level table, and the GEOMETRY ROWS of every
+    // (level, submesh) beside it. `GpuMeshLevel::geomRow` is submesh 0's row and the
+    // rows of one level are contiguous, so a shader reaches submesh s at `geomRow + s`
+    // (GpuScene::geomRowIndex is the one place that arithmetic lives).
     detail::GpuMeshLevel levels[detail::GpuScene::kLevelsPerMesh];
     uint32_t levelCount = 0u;
+    struct StagedRow {
+        uint32_t level, submesh;
+        Ogre::VctVoxelizer::GeometryRow row;
+    };
+    std::vector<StagedRow> rows;
+    bool levelHasBase[detail::GpuScene::kLevelsPerMesh] = {};
     if (rec.mesh->getNumSubMeshes() > 0) {
         const Ogre::SubMesh *sub = rec.mesh->getSubMesh(0);
         const Ogre::VertexArrayObjectArray &vaos = sub->mVao[Ogre::VpNormal];
@@ -518,8 +567,54 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
                                           : vaos[0]->getVertexBuffers()[0]->getNumElements());
             desc.counts[1] = vaos[0]->getPrimitiveCount();
         }
+
+        // THE ROWS, DESCRIBED ONCE PER MESH (ATOM P4b). The voxeliser used to do this
+        // for every mesh in the volume on EVERY build of EVERY cascade — a CPU walk over
+        // the scene's geometry per rebuild, for data that cannot change while a mesh
+        // lives. `describeGeometryRow` is Ogre's because the shader that reads the row
+        // is Ogre's, and it refuses (with one log line) a (level, submesh) it cannot
+        // read in place: no index buffer, no float3 position, an unaligned stride, or a
+        // device with no buffer device addresses.
+        const uint32_t submeshes =
+            std::min(uint32_t(rec.mesh->getNumSubMeshes()), detail::GpuScene::kSubmeshesPerMesh);
+        if (uint32_t(rec.mesh->getNumSubMeshes()) > detail::GpuScene::kSubmeshesPerMesh &&
+            !mWarnedGeomSubmeshes) {
+            mWarnedGeomSubmeshes = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "WARNING: a mesh has more submeshes than the GPU geometry table holds (" +
+                std::to_string(rec.mesh->getNumSubMeshes()) + " > " +
+                std::to_string(detail::GpuScene::kSubmeshesPerMesh) +
+                "); the extra submeshes will not bounce light");
+        }
+        Ogre::VaoManager *vaoMgr =
+            mRoot ? mRoot->getRenderSystem()->getVaoManager() : nullptr;
+        for (uint32_t l = 0; vaoMgr && l < levelCount && l < detail::GpuScene::kLevelsPerMesh; ++l) {
+            for (uint32_t sm = 0; sm < submeshes; ++sm) {
+                Ogre::VctVoxelizer::GeometryRow row;
+                if (!Ogre::VctVoxelizer::describeGeometryRow(rec.mesh, l, sm, vaoMgr, row))
+                    continue;
+                rows.push_back(StagedRow{ l, sm, row });
+                if (sm == 0u) levelHasBase[l] = true;
+            }
+        }
     }
-    return mGpuScene.acquireMesh(rec.mesh, desc, levels, levelCount);
+
+    const uint32_t index = mGpuScene.acquireMesh(rec.mesh, desc, levels, levelCount);
+    if (index == detail::GpuScene::kNoMesh) return index;
+
+    // The rows, now that the entry's index — and therefore every row's index — is known.
+    for (const StagedRow &sr : rows) {
+        mGpuScene.stageGeomRow(detail::GpuScene::geomRowIndex(index, sr.level, sr.submesh),
+                               &sr.row);
+    }
+    // A LEVEL'S BASE IS SUBMESH 0's ROW, and only when submesh 0 really has one: the
+    // contract is `geomRow + s`, so a level whose first submesh was refused has no
+    // usable base and must stay kNoGeomRow rather than point into another level's block.
+    for (uint32_t l = 0; l < levelCount && l < detail::GpuScene::kLevelsPerMesh; ++l) {
+        if (levelHasBase[l])
+            mGpuScene.setLevelGeomRow(index, l, detail::GpuScene::geomRowIndex(index, l, 0u));
+    }
+    return index;
 }
 
 void OgreScene::releaseGpuMesh(const Ogre::Mesh *mesh) {

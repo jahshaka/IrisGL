@@ -5170,7 +5170,13 @@ private:
     /// will ask for it (the GI signatures, when V2-1 makes that affordable) are
     /// const, and a facility that only a non-const path can refresh would put
     /// the const-cast at every call site instead of here.
+    void bindGeometrySource(Ogre::VctVoxelizer *v);
+    uint32_t geomRowBaseFor(const Ogre::Item *item, unsigned level) const;
+
     mutable detail::GpuScene mGpuScene;
+    /// Said once: a mesh with more submeshes than the geometry row table holds
+    /// (GpuScene::kSubmeshesPerMesh). Every mesh this engine bakes has one.
+    mutable bool mWarnedGeomSubmeshes = false;
     /// ATOM P3's CULL — its result buffers, sized to the table's capacity and
     /// grown with it (GpuCull.h). Owned per SCENE because that is what the
     /// tables it reads are owned by; a consumer that wants two culls of one
