@@ -506,6 +506,37 @@ void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<floa
     mesh->_setLodValues(values);
 }
 
+// WHICH LEVEL EVERY DRAWN OBJECT IS ON (ATOM P1's readout — the gap OWN-TRI left).
+// `mCurrentMeshLod` is the byte the render queue indexes the VAO list with, so this
+// reads the DECISION and not a re-derivation of it: there is no camera here, no
+// threshold walk and no bias — asking the strategy again from outside would be a
+// second answer that could disagree with the picture.
+void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
+    out.clear();
+    out.reserve(mNodes.size());
+    for (const auto &kv : mNodes) {
+        const Ogre::Item *item = kv.second.item;
+        if (!item) continue;
+        const Ogre::Mesh *mesh = item->getMesh().get();
+        if (!mesh || mesh->getNumSubMeshes() == 0) continue;
+        ObjectLodDesc d;
+        d.node = kv.first;
+        d.name = item->getName();
+        d.level = unsigned(item->getCurrentMeshLod());
+        d.levels = unsigned(mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size());
+        if (d.levels == 0) d.levels = 1;
+        for (unsigned si = 0; si < mesh->getNumSubMeshes(); ++si) {
+            const auto &vaos = mesh->getSubMesh(si)->mVao[Ogre::VpNormal];
+            if (vaos.empty()) continue;
+            // The clamp is the render queue's own: a level past the end of a
+            // sub-mesh's list draws its coarsest.
+            const size_t pick = std::min(size_t(d.level), vaos.size() - 1u);
+            d.triangles += (unsigned long long)(vaos[pick]->getPrimitiveCount() / 3u);
+        }
+        out.push_back(d);
+    }
+}
+
 void OgreScene::setLodBias(float bias) {
     if (!(bias >= 0.0f)) bias = 0.0f;
     if (bias == mLodBias) return;

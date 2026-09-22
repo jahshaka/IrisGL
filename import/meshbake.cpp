@@ -1224,6 +1224,35 @@ constexpr int   kBoundBigTriangles = 100000; ///< above this a mesh has more sur
 constexpr int   kBoundSamplesBig   = 8192;   ///< ...so it gets twice as many.
 constexpr float kBoundMargin       = 1.25f;  ///< the sampling gap, above.
 constexpr int   kBoundGridRes      = 32;     ///< cells per axis of the nearest-surface grid (32^3 over the mesh's own box).
+constexpr size_t kBoundMaxVertexProbes = 200000; ///< the vertex walk's ceiling (see twoSidedDistance): a bake may not become a distance-field build.
+
+/// AND A FLOOR AT THE ARITHMETIC'S OWN NOISE. A bound is a distance measured
+/// between two surfaces stored as 32-bit floats, so a claim finer than that
+/// arithmetic can resolve is not a measurement — it is noise with a units label.
+///
+/// DERIVED, from the case that found it. `ground.obj` is a 100 m FLAT grid: every
+/// level of it is exactly coplanar with level 0, so its true geometric deviation
+/// is ZERO. The sampler returned 0.000054 to 0.000177 — four to fifteen ULPs at
+/// 100 m, where float eps is 1.19e-5 — and an independent sampling eight times as
+/// dense returned a value 0.8 % different, because the two were comparing noise.
+/// `closestOnTriangle` solves for barycentric coordinates through differences of
+/// products, which loses about an order of magnitude of ULPs to cancellation, so
+/// the resolution of this whole measurement is ~100 ULPs of the COORDINATE SCALE:
+/// 1e-5 of the extent (84 ULPs at 100 m, and float eps is 1.19e-7 relative).
+/// Below that the honest answer is "as close as these coordinates can say".
+///
+/// IT TOUCHES NOTHING THAT IS NOT DEGENERATE. Every curved shipped mesh sits three
+/// to four orders of magnitude above its own floor (the sphere's floor is 2e-5
+/// against a level-1 bound of 0.032); the floor only ever fires where the true
+/// deviation really is zero — which is exactly where a relative margin cannot
+/// help, because there is nothing to be a fraction of.
+///
+/// AND IT MAKES THE ANSWER HONEST DOWNSTREAM rather than optimistic: a consumer
+/// dividing by a 5e-5 bound would be told the coarsest floor level is free at any
+/// distance on the strength of a number the geometry cannot support. It IS free at
+/// any distance — the floor really is flat — and the floored bound says so while
+/// remaining a length the format can be trusted about.
+constexpr float kBoundFloorRel     = 1e-5f;
 
 /// AND THE ONE SAFETY NET ON THE MEASUREMENT, deliberately generous: a level
 /// whose measured surface may sit a QUARTER of the whole object away is not a
@@ -1239,23 +1268,57 @@ constexpr float kMaxRelBound   = 0.25f;
 /// THE MEASURED TWO-SIDED DISTANCE between two index lists over ONE vertex
 /// buffer (every level of a chain shares the vertices, ATOM rule 1), before the
 /// margin. `gridA` must be the grid of `a`, `gridB` of `b`.
+///
+/// TWO SAMPLE SETS PER SIDE, AND THE SECOND ONE IS NOT OPTIONAL — it was added
+/// after the acceptance suite caught its absence, which is the best reason a line
+/// of code can have.
+///
+///   * AREA SAMPLES cover the surface evenly and are what an average deviation
+///     needs.
+///   * EVERY VERTEX of the index list, because a HAUSDORFF distance between two
+///     piecewise-linear surfaces is attained at a vertex or on an edge, never in
+///     the middle of a facet: simplification MOVES AND REMOVES VERTICES, so the
+///     worst deviation sits exactly where the area sampler is least likely to
+///     land. THE MEASUREMENT: the default floor (`ground.obj`, a flat 100 m grid)
+///     deviates NOWHERE except at its rim, where a coarse level cuts a corner.
+///     Area sampling alone measured 0.000054 for level 1 — and an independent
+///     sampling eight times as dense found a worse point, because the worst point
+///     is a single rim vertex and 4096 samples over 100 m never hit it. A
+///     multiplicative margin cannot save an estimate whose true maximum lives on
+///     a feature of measure zero; measuring the vertices can, and does.
+///
+/// The vertex walk is O(vertices) queries, which is the same order as loading the
+/// mesh, and it is capped so a million-vertex model cannot turn the bake into a
+/// distance-field build.
 float twoSidedDistance(const float *positions, int posComps,
                        const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
                        const std::vector<unsigned> &b, const surface::TriangleGrid &gridB,
                        size_t samples)
 {
-    std::vector<surface::Sample> pts;
     float worst = 0.0f;
-    if (surface::sample(positions, posComps, a, samples, &pts) > 0.0f)
-        for (const surface::Sample &s : pts) {
-            const float d = gridB.closest(s.pos);
+    std::vector<surface::Sample> pts;
+    const auto measureOneWay = [&](const std::vector<unsigned> &from,
+                                   const surface::TriangleGrid &against) {
+        if (surface::sample(positions, posComps, from, samples, &pts) > 0.0f)
+            for (const surface::Sample &s : pts) {
+                const float d = against.closest(s.pos);
+                if (std::isfinite(d)) worst = std::max(worst, d);
+            }
+        // ...and the vertices, distinct, in index order (deterministic).
+        std::vector<unsigned> verts(from.begin(), from.end());
+        std::sort(verts.begin(), verts.end());
+        verts.erase(std::unique(verts.begin(), verts.end()), verts.end());
+        const size_t step = verts.size() > kBoundMaxVertexProbes
+                                ? (verts.size() + kBoundMaxVertexProbes - 1) / kBoundMaxVertexProbes
+                                : 1;
+        for (size_t i = 0; i < verts.size(); i += step) {
+            const float *v = positions + size_t(verts[i]) * size_t(posComps);
+            const float d = against.closest(Vec3(v[0], v[1], v[2]));
             if (std::isfinite(d)) worst = std::max(worst, d);
         }
-    if (surface::sample(positions, posComps, b, samples, &pts) > 0.0f)
-        for (const surface::Sample &s : pts) {
-            const float d = gridA.closest(s.pos);
-            if (std::isfinite(d)) worst = std::max(worst, d);
-        }
+    };
+    measureOneWay(a, gridB);
+    measureOneWay(b, gridA);
     return worst;
 }
 
@@ -1401,7 +1464,8 @@ void build(const MeshPtr &mesh)
         // level (a coarser level can happen to land closer at the points these
         // samples fall on), so the running max is taken — which over-states, i.e.
         // errs towards a FINER level than needed, which is the safe direction.
-        const float bound = std::max(boundSoFar, measured);
+        const float bound = std::max(std::max(boundSoFar, measured),
+                                     extent > 0.0f ? extent * kBoundFloorRel : 0.0f);
         // The safety net (`kMaxRelBound`): this level's surface may sit further
         // from the object than a quarter of the object. Not a stand-in — stop.
         if (extent > 0.0f && bound > extent * kMaxRelBound) break;
@@ -2420,6 +2484,100 @@ void MeshBake::buildLodChain(const MeshPtr &mesh) { lodchain::build(mesh); }
 void MeshBake::buildCards(const MeshPtr &mesh, int maxCards) { cards::build(mesh, maxCards); }
 
 void MeshBake::buildSdf(const MeshPtr &mesh) { sdf::build(mesh); }
+
+bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *worstRatioOut)
+{
+    if (worstRatioOut) *worstRatioOut = 0.0;
+    if (mesh.isNull() || mesh->lodIndices.isEmpty()) return true;
+    if (mesh->lodBounds.size() != mesh->lodIndices.size()) return false;
+    int posComps = 3; size_t nv = 0;
+    const float *positions =
+        lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return false;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return false;
+    std::vector<unsigned> base(reinterpret_cast<const unsigned *>(ib->data),
+                               reinterpret_cast<const unsigned *>(ib->data) +
+                                   size_t(ib->dataSize) / sizeof(unsigned));
+    if (base.size() < 3 || base.size() % 3 != 0) return false;
+
+    Vec3 lo(positions[0], positions[1], positions[2]), hi = lo;
+    for (size_t v = 0; v < nv; ++v) {
+        const float *p = positions + v * size_t(posComps);
+        lo = Vec3(std::min(lo.x(), p[0]), std::min(lo.y(), p[1]), std::min(lo.z(), p[2]));
+        hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
+    }
+    surface::TriangleGrid baseGrid;
+    baseGrid.build(positions, posComps, base, lo, hi, lodchain::kBoundGridRes);
+    const size_t dense =
+        size_t(std::max(1, densityMultiple)) *
+        size_t(base.size() / 3 > size_t(lodchain::kBoundBigTriangles)
+                   ? lodchain::kBoundSamplesBig : lodchain::kBoundSamples);
+
+    for (int k = 0; k < mesh->lodIndices.size(); ++k) {
+        const QVector<quint32> &levelQ = mesh->lodIndices.at(k);
+        std::vector<unsigned> level(levelQ.constBegin(), levelQ.constEnd());
+        surface::TriangleGrid levelGrid;
+        levelGrid.build(positions, posComps, level, lo, hi, lodchain::kBoundGridRes);
+        const float measured = lodchain::twoSidedDistance(positions, posComps, level, levelGrid,
+                                                          base, baseGrid, dense);
+        // A float comparison of two lengths measured the same way: one part in a
+        // million of the stored value is the round-off, not a tolerance on the
+        // claim.
+        const float stored = mesh->lodBounds.at(k);
+        if (worstRatioOut && stored > 0.0f)
+            *worstRatioOut = std::max(*worstRatioOut, double(measured) / double(stored));
+        if (measured > stored * (1.0f + 1e-6f) + 1e-9f) return false;
+    }
+    return true;
+}
+
+bool MeshBake::checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut, int *probedOut)
+{
+    if (worstCellsOut) *worstCellsOut = 0.0;
+    if (probedOut) *probedOut = 0;
+    if (mesh.isNull() || mesh->sdf.isEmpty()) return false;
+    int posComps = 3; size_t nv = 0;
+    const float *positions =
+        lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return false;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return false;
+    std::vector<unsigned> indices(reinterpret_cast<const unsigned *>(ib->data),
+                                  reinterpret_cast<const unsigned *>(ib->data) +
+                                      size_t(ib->dataSize) / sizeof(unsigned));
+    if (indices.size() < 3 || indices.size() % 3 != 0) return false;
+
+    Vec3 lo(positions[0], positions[1], positions[2]), hi = lo;
+    for (size_t v = 0; v < nv; ++v) {
+        const float *p = positions + v * size_t(posComps);
+        lo = Vec3(std::min(lo.x(), p[0]), std::min(lo.y(), p[1]), std::min(lo.z(), p[2]));
+        hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
+    }
+    surface::TriangleGrid grid;
+    grid.build(positions, posComps, indices, lo, hi, lodchain::kBoundGridRes);
+
+    const MeshSdf &f = mesh->sdf;
+    double worst = 0.0;
+    int probed = 0;
+    const float band = f.cell * sdf::kExactBand;
+    for (int z = 0; z < int(f.dim[2]); ++z)
+        for (int y = 0; y < int(f.dim[1]); ++y)
+            for (int x = 0; x < int(f.dim[0]); ++x) {
+                const float stored = f.distanceAt(x, y, z);
+                if (std::fabs(stored) > band) continue;      // outside the exact band
+                const Vec3 p = f.origin + Vec3(float(x) * f.cell, float(y) * f.cell,
+                                               float(z) * f.cell);
+                const float exact = grid.closest(p);
+                if (!std::isfinite(exact)) continue;
+                ++probed;
+                worst = std::max(worst, double(std::fabs(std::fabs(stored) - exact)) /
+                                            double(f.cell));
+            }
+    if (worstCellsOut) *worstCellsOut = worst;
+    if (probedOut) *probedOut = probed;
+    return worst <= 1.0;
+}
 
 int MeshBake::cardCaptureResolution() { return cards::kCaptureResolution; }
 

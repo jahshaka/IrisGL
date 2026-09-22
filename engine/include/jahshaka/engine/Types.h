@@ -5114,6 +5114,29 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     }
 }
 
+/// WHAT LEVEL ONE OBJECT IS ACTUALLY DRAWING (ATOM P1's readout, the gap OWN-TRI
+/// left). The chain could not be SEEN working: `submittedTriangles` says the
+/// scene shed triangles, and nothing said which object took which level.
+///
+/// `level` is the Item's own `mCurrentMeshLod` — what the LOD strategy last
+/// wrote, i.e. what the render queue will index its VAO list with. `levels` is
+/// how many that mesh has (1 = no chain), and `triangles` is what that level's
+/// VAOs really hold, summed over the sub-meshes.
+///
+/// THE HONESTY NOTE: `mCurrentMeshLod` is one slot per object and EVERY pass that
+/// updates LOD lists writes it — a planar reflector's mirrored camera, a PiP
+/// inset, a probe cube face, a thumbnail. So this is "the level the last LOD
+/// update chose", which in an ordinary editor frame is the main view's and in a
+/// frame that also rendered a mirror may be the mirror's. A per-pass reading
+/// would need a per-pass slot in the pin, which is a patch and not a diagnostic.
+struct ObjectLodDesc {
+    NodeId             node = 0;
+    std::string        name;
+    unsigned           level = 0;
+    unsigned           levels = 1;
+    unsigned long long triangles = 0;
+};
+
 /// What the renderer measured this frame (STATS_OVERLAY_SPEC.md §4).
 /// A POD, exactly like ShaderCacheStats — `app.renderStats()` is this struct.
 ///

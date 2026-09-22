@@ -345,6 +345,11 @@ public:
     /// with no baked chain are unaffected by any value.
     virtual void        setLodBias(float bias) = 0;
     virtual float       lodBias() const = 0;
+    /// WHICH LEVEL EVERY DRAWN OBJECT IS ON (ATOM P1's readout). One row per node
+    /// that carries an Item, in node order; see `ObjectLodDesc` for what `level`
+    /// means and for the one thing it cannot promise. Cheap: it reads a byte and
+    /// a VAO's primitive count per object and allocates the vector.
+    virtual void        objectLods(std::vector<ObjectLodDesc> &out) const = 0;
     /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
     /// text. Empty (lastError()) for an unknown material.
     ///

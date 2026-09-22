@@ -247,6 +247,32 @@ public:
     /// Pure CPU, no assimp, no engine; safe from any thread.
     static void buildSdf(const MeshPtr &mesh);
 
+    /// VERIFICATION, and it exists for the same reason `producerHashOf` does: the
+    /// claim has to be TESTABLE without re-running the thing that made it.
+    ///
+    /// `checkLodBounds` re-measures every level of `mesh` against level 0 with
+    /// `densityMultiple` times as many samples as the bake used, and answers
+    /// whether every measured distance is inside the stored `lodBounds[k]`. It is
+    /// NOT the bake's own function called again: a different sample COUNT moves
+    /// every stratum and the low-discrepancy index is the sample number, so no
+    /// sample of the dense set coincides with one of the bake's. A margin that
+    /// pays for a sampling gap has to survive a finer gap, and this is what
+    /// measures that. False for a mesh with no chain is impossible — a mesh with
+    /// no chain trivially passes.
+    /// `worstRatioOut` receives the largest (dense measurement / stored bound) seen,
+    /// so a failure reports a number instead of a boolean.
+    static bool checkLodBounds(const MeshPtr &mesh, int densityMultiple = 8,
+                               double *worstRatioOut = nullptr);
+
+    /// ...and whether `mesh`'s SDF agrees with LEVEL 0's surface. Walks the cells
+    /// inside the field's exact band, compares each stored distance with the exact
+    /// nearest-surface distance, and answers whether the worst disagreement is
+    /// under ONE CELL. `worstCellsOut` receives that worst disagreement in cells
+    /// and `probedOut` how many cells were in the band (a field whose band is
+    /// empty has proven nothing, which is why the suite asserts the count too).
+    static bool checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut = nullptr,
+                                       int *probedOut = nullptr);
+
     /// The capture resolution a baked card's LOD level was chosen for (Lumen's
     /// 128-texel page). Phase 2's atlas owns the page size it actually
     /// allocates; this is the number the BAKE assumed, so the two can be
