@@ -166,8 +166,10 @@ layout( rgba16f, set = 0, binding = 7 ) uniform image2D historyCur;
 /// ...and the distance beside it, which is what makes the reprojection a TEST
 /// rather than a hope: the surface found at the reprojected pixel is the same
 /// surface only if it was the same distance away.
-layout( r32f, set = 0, binding = 8 ) uniform readonly  image2D historyDistPrev;
-layout( r32f, set = 0, binding = 9 ) uniform image2D historyDistCur;
+// x = the surface's distance (all this pass reads), y = the mean distance the
+// rays in the mean travelled (rq_reflect.comp's).
+layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2D historyDistPrev;
+layout( rg32f, set = 0, binding = 9 ) uniform image2D historyDistCur;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];

@@ -127,6 +127,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// needs to know which eye it belongs to — one branch on the x coordinate,
 	/// no second descriptor set, no second history ring, and the seam falls on
 	/// a block boundary by construction (the C++ side sizes the trace so).
+	///
+	/// y = THE VIEW'S AGE: how many consecutive frames this history has been
+	/// written (0 on a first frame, a resize, a scene bind). See `historyAt`.
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;
@@ -228,8 +231,8 @@ layout( rgba16f, set = 0, binding = 7 ) uniform image2D historyCur;
 /// ...and the distance beside it, which is what makes the reprojection a TEST
 /// rather than a hope: the surface found at the reprojected pixel is the same
 /// surface only if it was the same distance away.
-layout( r32f, set = 0, binding = 8 ) uniform readonly  image2D historyDistPrev;
-layout( r32f, set = 0, binding = 9 ) uniform image2D historyDistCur;
+layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2D historyDistPrev;
+layout( rg32f, set = 0, binding = 9 ) uniform image2D historyDistCur;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
@@ -444,30 +447,60 @@ vec3 skyRadiance( vec3 dir )
 /// `warmHeld` (DRAG-1, REFLECT F2 item 3) comes back 1.0 when a history texel
 /// WAS found at the reprojected pixel and had already passed the filter's
 /// warm-up (kWarmupFrames samples), but the distance test rejected it: the
-/// surface here MOVED. That is the one case where the renderer's confidence in
-/// showing a ray at all must not fall — see the count it seeds in main().
+/// surface here MOVED — and, in a view whose own history is warm, whenever
+/// there is simply no texel to reproject from (off the previous picture,
+/// behind the previous camera, a texel that never held an answer). Those are
+/// the cases where the renderer's confidence in showing a ray at all must not
+/// fall — see the count it seeds in main().
 /// WHERE THIS SURFACE WAS IN THE LAST FRAME'S PICTURE — of THIS EYE (lane
 /// REFLECT-VR-1). The reprojection runs entirely in the eye's own image and the
 /// result is mapped back onto the eye's own HALF of the history: an eye's
 /// temporal mean may never be read from the other eye's texels, whose radiance
 /// belongs to a different camera and whose distances belong to different
 /// silhouettes.
-vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float warmHeld )
+vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float warmHeld,
+				out float wasHitT )
 {
 	warmHeld = 0.0;
+	wasHitT = 0.0;
+	// A SURFACE THE CAMERA HAS JUST TURNED ONTO (PAN-SMEAR-1). It was behind the
+	// previous camera or outside its picture, so there is no texel to reproject
+	// from — and that used to read as "no history at all", the fresh-view case:
+	// the count restarted at one and the filter faded the ray in from the probe
+	// over kWarmupFrames. On a steady pan every column the turn reveals spent
+	// eight frames in that fade, so the leading side of a glossy floor carried
+	// a band eight columns wide showing the probe's answer instead of the
+	// ray's — measured at 21 codes against the settled frame on a silver
+	// floor at 1.5 degrees a frame, and zero with the rays off.
+	//
+	// It is the same case as the distance rejection below, and gets the same
+	// answer: this frame's ray is the honest sample for a surface that is new
+	// to the screen, and the renderer's confidence in showing a ray at all must
+	// not fall because the CAMERA moved. What the warm-up protects is a view
+	// that is itself young (a graded screenshot's lives about two frames) —
+	// that is a fact about the VIEW, so it is read from the view's age and not
+	// inferred from a missing texel.
+	const float viewIsWarm = p.stereo.y >= kWarmupFrames ? 1.0 : 0.0;
 	const vec3 d = world - before.camPos;
 	const float z = dot( d, before.fwd );
 	if( z <= 0.0 )
-		return vec4( 0.0 );				// behind the camera it was
+	{
+		warmHeld = viewIsWarm;			// behind the camera it was
+		return vec4( 0.0 );
+	}
 	const vec3 plane = before.perspective < 0.5 ? d - before.fwd * z : d / z;
 	const vec3 q = plane - before.rayTL;
 	const vec2 uv = vec2( dot( q, before.rayRight ) / dot( before.rayRight, before.rayRight ),
 						  dot( q, before.rayDown ) / dot( before.rayDown, before.rayDown ) );
 	if( any( lessThan( uv, vec2( 0.0 ) ) ) || any( greaterThanEqual( uv, vec2( 1.0 ) ) ) )
+	{
+		warmHeld = viewIsWarm;			// outside the previous picture it was
 		return vec4( 0.0 );
+	}
 	const ivec2 pc = clamp( ivec2( eyeGlobalUv( uv, eye ) * vec2( traceRes ) ),
 							ivec2( 0 ), traceRes - 1 );
-	const float wasDist = imageLoad( historyDistPrev, pc ).x;
+	const vec2 wasPair = imageLoad( historyDistPrev, pc ).xy;
+	const float wasDist = wasPair.x;
 	const float dist = z;   // what THIS surface's distance was last frame
 	// 5 % of the distance: far enough not to reject a surface the camera merely
 	// moved along, tight enough that a silhouette's far side is a different
@@ -489,11 +522,23 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 			if( finite1( hj.w ) && hj.w >= kWarmupFrames )
 				warmHeld = 1.0;
 		}
+		// ...AND A TEXEL THAT HELD NO ANSWER AT ALL (PAN-SMEAR-1): floor that a
+		// sideways move has just brought out from behind a pillar reprojects
+		// onto the PILLAR, which is too rough to trace and has never stored a
+		// distance. That read as a fresh pixel and faded in over the warm-up,
+		// once per revealed column — the stepped trail beside every occluder
+		// while the camera slides (4.4 codes over the floor on the pillar
+		// fixture). It is the case at the top of this function again: the view
+		// is warm, the surface is merely new to this pixel.
+		warmHeld = max( warmHeld, viewIsWarm );
 		return vec4( 0.0 );
 	}
 	const vec4 h = imageLoad( historyPrev, pc );
 	if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
 		return vec4( 0.0 );
+	// HOW FAR AWAY the thing in this mean was (the second channel): what main()
+	// compares this frame's ray against when the camera has moved.
+	wasHitT = finite1( wasPair.y ) ? max( wasPair.y, 0.0 ) : 0.0;
 	return vec4( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), h.w );
 }
 
@@ -604,7 +649,8 @@ void main()
 	// throttles the ray to an eighth for eight frames afterwards. A glossy lobe
 	// grazing the voxel volume's edge would never converge at all.
 	float warmHeld;
-	const vec4 prev = historyAt( eyeBefore( eye ), eye, world, traceRes, warmHeld );
+	float wasHitT;
+	const vec4 prev = historyAt( eyeBefore( eye ), eye, world, traceRes, warmHeld, wasHitT );
 
 	// THE RAY. The origin is lifted off its own surface along the NORMAL rather
 	// than along the ray, so a grazing reflection cannot re-enter the surface it
@@ -618,10 +664,14 @@ void main()
 
 	vec3 traced;
 	bool ok = false;
+	// How far this frame's ray went: the hit's distance, or — for a ray that
+	// left the scene — a length no hit can have.
+	float hitT = maxT * 2.0;
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
 		gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
 		const float t = rayQueryGetIntersectionTEXT( rq, true );
+		hitT = t;
 		traced = voxelRadiance( world + worldN * bias + L * t, L, lobeAlpha, t, ok );
 		// A HIT THE CACHE CANNOT SHADE IS NOT A MISS. The ray found geometry;
 		// the voxels simply do not reach it (outside every cascade, or a surface
@@ -638,7 +688,7 @@ void main()
 			// writes a zero distance and the filter skips it this frame, which
 			// is the honest "hand it back to the probe".
 			imageStore( historyCur, tc, prev );
-			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, 0.0, 0.0, 0.0 ) );
+			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
 			return;
 		}
 	}
@@ -656,7 +706,7 @@ void main()
 		// writes a zero distance and the filter skips it this frame, which
 		// is the honest "hand it back to the probe".
 		imageStore( historyCur, tc, prev );
-		imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, 0.0, 0.0, 0.0 ) );
+		imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
 		return;
 	}
 	traced = clamp( traced, vec3( 0.0 ), vec3( kMaxRadiance ) );
@@ -691,6 +741,51 @@ void main()
 	// 1: a mirror in a two-frame view would show 2.8 % probe, and a
 	// perceptual-0.08 surface 30 % of it on its first frame.
 	blend = max( blend, 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ) );
+	// THE SURFACE IS THE SAME; WHAT IT REFLECTS IS NOT (PAN-SMEAR-1). The
+	// reprojection above validates the SURFACE — same floor, same distance — and
+	// under a camera that TRANSLATES that is not enough for any lobe, only
+	// fastest to show on a sharp one: the floor beside a pillar's reflection was
+	// reflecting the pillar a frame ago and reflects the sky now, its history
+	// passes the distance test, and thirty frames of pillar drain out of the
+	// mean one frame at a time — a stepped coloured trail behind every
+	// reflection while the camera slides (3.4 codes over the floor on the pillar
+	// fixture, after the two warm-up cases above were closed).
+	//
+	// The evidence that the reflected thing changed is in the ray itself: it
+	// went a different DISTANCE than the rays in the mean did. So the mean keeps
+	// the mean of that distance beside the surface's, and a moved camera whose
+	// ray disagrees with it by more than the lobe could explain gives the memory
+	// up — whole on a sharp lobe, most of it on a wide one, whose single sample
+	// is noise and whose ghost is already a blur. ONLY WHEN THE CAMERA MOVED:
+	// under a still camera the rays at a reflection's edge land on both sides of
+	// it frame by frame, and that disagreement is the antialiased edge
+	// converging, not evidence of anything. (A pure turn moves no reflection on
+	// its surface — the eye has not moved — and the test is on position.)
+	//
+	// "MOVED" IS PARALLAX, NOT METRES. What changes a reflection is the angle the
+	// eye's step subtends at the thing reflected, and the threshold is the angle
+	// of half a trace pixel: below it the reflected image has not moved by
+	// anything this buffer can show. An absolute step would be permanently
+	// exceeded by a tracked VR head (a fraction of a millimetre of jitter every
+	// frame), which would leave every reflected silhouette single-sample for
+	// ever; at half a millimetre over two metres the parallax is a third of this
+	// threshold, and a 0.25 m slide is ten times over it. An ORTHOGRAPHIC view
+	// has one view direction for every pixel — a slide moves no reflection on
+	// its surface — so the rule does not apply to it at all.
+	float hitMean = hitT;
+	if( prev.w > 0.0 && wasHitT > 0.0 )
+	{
+		const vec3 stepped = thisEye.camPos - eyeBefore( eye ).camPos;
+		const float nearer = max( min( hitT, wasHitT ), 1e-3 );
+		const float apart  = abs( hitT - wasHitT ) / nearer;
+		const float wide   = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
+		const float eyePixels = float( p.stereo.x > 0.5 ? traceRes.x / 2 : traceRes.x );
+		const float halfPixelAngle = 0.5 * length( thisEye.rayRight ) / max( eyePixels, 1.0 );
+		const bool moved = thisEye.perspective > 0.5 && length( stepped ) > nearer * halfPixelAngle;
+		if( moved && apart > mix( 0.25, 4.0, wide ) )
+			blend = max( blend, mix( 1.0, 0.35, wide ) );
+		hitMean = mix( wasHitT, hitT, blend );
+	}
 	const vec3 mean = mix( prev.xyz, traced, blend );
 	// THE COUNT, AND THE ONE PLACE IT IS SEEDED (DRAG-1). Ordinarily it is
 	// exactly "how many samples are in this mean", which is what the blend
@@ -705,14 +800,14 @@ void main()
 	// (1/30) after about twenty frames rather than thirty. It does NOT cost
 	// correctness: the sample it starts from is this frame's own ray.
 	//
-	// A pixel with NO history at all is untouched — `warmHeld` is 0 there by
-	// construction — so a freshly created view (a graded screenshot's, which
-	// lives about two frames) still fades in exactly as before, which is the
-	// guarantee the warm-up exists for.
+	// A pixel of a YOUNG VIEW is untouched — `warmHeld` is 0 until the view's
+	// own history is kWarmupFrames old (`historyAt`) — so a freshly created view
+	// (a graded screenshot's, which lives about two frames) still fades in
+	// exactly as before, which is the guarantee the warm-up exists for.
 	const float seed = max( prev.w, warmHeld * kWarmupFrames );
 	const float count = min( seed + 1.0, 4096.0 );
 	imageStore( historyCur, tc, vec4( mean, count ) );
-	imageStore( historyDistCur, tc, vec4( dist, 0.0, 0.0, 0.0 ) );
+	imageStore( historyDistCur, tc, vec4( dist, hitMean, 0.0, 0.0 ) );
 
 	// THE COMPOSITE IS THE FILTER PASS' (round C). This shader now ends at the
 	// temporal mean: `rq_reflect_filter.comp` reads it back through a
