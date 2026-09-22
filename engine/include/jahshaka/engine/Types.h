@@ -156,6 +156,23 @@ inline float allowedWorldError(float tolerance, float footprint, float meshToWor
     return tolerance * footprint / meshToWorldScale;
 }
 
+/// `meshToWorldScale` FROM A TRANSFORM: the largest axis scale of a ROW-MAJOR 3x4
+/// world matrix (twelve floats, the GPU scene's and VkTransformMatrixKHR's layout)
+/// is its longest COLUMN. M = T R S, so column j is R times axis j times s_j and its
+/// length is exactly s_j; a ROW mixes the scales through the rotation and, under a
+/// rotation times a non-uniform scale, is shorter than the largest s_j - which
+/// divides the allowance by too small a scale and picks a coarser level than the
+/// tolerance permits. The shaders' twin is `jahWorldMaxAxisScale`
+/// (JahLevelRule_piece_cs.any); engine.lod_rule_parity holds the two together.
+inline float worldMaxAxisScale(const float *rowMajor3x4) {
+    float s = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        const float x = rowMajor3x4[c], y = rowMajor3x4[4 + c], z = rowMajor3x4[8 + c];
+        s = std::max(s, std::sqrt(x * x + y * y + z * z));
+    }
+    return s;
+}
+
 /// THE SAME RELATION READ BACKWARDS: how many samples of deviation a bound of
 /// `bound` mesh-units shows at this footprint. A cull's shader computes this and
 /// compares it against the tolerance; a report prints it. 0 footprint (a pass
@@ -2763,8 +2780,8 @@ inline float giNearFieldMaxStepCells(const GiParams::GiCascadeDesc &c)
 /// they are checked against the rule by gi.cascades case 16a, not clamped
 /// here.
 ///
-/// Every other row gets the pin's `autoCalculateStepSizes(4)` shape
-/// (OgreVctCascadedVoxelizer.cpp:131-161) written out here so it is ours to
+/// Every other row gets upstream's `VctCascadedVoxelizer::autoCalculateStepSizes(4)`
+/// shape (that class is not in our fork since ATOM-VOXEL-2) written out here so it is ours to
 /// tune (A7) — every finer cascade steps the same DISTANCE as the outermost
 /// one, ceiled to whole cells and floored at half its resolution (the pin's own
 /// guard against a step that outruns the volume) — MET WITH the near-field rule

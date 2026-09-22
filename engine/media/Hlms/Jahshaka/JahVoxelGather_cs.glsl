@@ -99,6 +99,8 @@ layout( std430, ogre_U9 ) readonly restrict buffer maskLayout { uint budgetMask[
 #define JAH_READ_RECORDS 19u
 #define JAH_READ_OVERFLOW 20u
 
+@insertpiece( JahLevelRuleScale )
+
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
 		local_size_z = @value( threads_per_group_z ) ) in;
@@ -167,9 +169,7 @@ void main()
 	uint level = 0u;
 	if( ( params.counts.w & JAH_FLAG_LOD ) != 0u && levelCount > 1u )
 	{
-		float scale = max( max( length( vec3( r0.x, r1.x, r2.x ) ),
-								length( vec3( r0.y, r1.y, r2.y ) ) ),
-						   length( vec3( r0.z, r1.z, r2.z ) ) );
+		float scale = jahWorldMaxAxisScale( r0, r1, r2 );
 		float allowed = jahAllowedWorldError( params.lod.y, params.lod.x, scale );
 		level = jahLevelForAllowed( meshIndex, levelCount, allowed );
 	}

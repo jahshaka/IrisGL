@@ -106,6 +106,8 @@ layout( std430, ogre_U5 ) writeonly restrict buffer lvlLayout { uint outLevel[];
 // Levels per mesh in the range table (GpuScene::kLevelsPerMesh).
 #define JAH_LEVELS_PER_MESH 8u
 
+@insertpiece( JahLevelRuleScale )
+
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
 		local_size_z = @value( threads_per_group_z ) ) in;
@@ -190,12 +192,10 @@ void main()
 
 	// ---- the level (mode >= 1 reads it; it costs one walk either way) -----
 	vec3 centre = 0.5 * ( bMin.xyz + bMax.xyz );
-	// The largest axis scale of the instance's transform: the rows of the 3x4
-	// world matrix ARE those axes, which is the same quantity Ogre derives its
-	// world bounding-sphere radius with.
-	float scale = 0.0;
-	for( int r = 0; r < 3; ++r )
-		scale = max( scale, length( instances[slot].world[r].xyz ) );
+	// The largest axis scale of the instance's transform - the longest COLUMN of
+	// the row-major 3x4 (JahLevelRule_piece_cs.any says why not a row).
+	float scale = jahWorldMaxAxisScale( instances[slot].world[0], instances[slot].world[1],
+										instances[slot].world[2] );
 
 	uint levelCount = meshes[meshIndex].counts.z;
 	if( params.lod.x > 0.0 && scale > 0.0 && levelCount > 1u )

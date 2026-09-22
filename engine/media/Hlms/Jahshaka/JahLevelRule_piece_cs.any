@@ -1,0 +1,19 @@
+// THE LEVEL RULE'S SCALE, ONE DEFINITION for every compute job that picks a mesh
+// level on the device (the GPU cull, the voxel gather). Its C++ twin is
+// jahshaka::engine::worldMaxAxisScale in Types.h, and engine.lod_rule_parity holds
+// the two together.
+//
+// THE LONGEST COLUMN, NOT THE LONGEST ROW. The GPU scene stores the world transform
+// as a ROW-MAJOR 3x4, M = T R S, whose COLUMN j is R times the j-th axis times s_j:
+// its length is exactly s_j, the scale along the mesh's own axis j. A ROW mixes the
+// three scales through the rotation, and under rotation times non-uniform scale its
+// length is smaller than the largest s_j - the level rule then divides by too small a
+// scale and picks a coarser level than the tolerance permits.
+@piece( JahLevelRuleScale )
+	float jahWorldMaxAxisScale( vec4 r0, vec4 r1, vec4 r2 )
+	{
+		return max( max( length( vec3( r0.x, r1.x, r2.x ) ),
+						 length( vec3( r0.y, r1.y, r2.y ) ) ),
+					length( vec3( r0.z, r1.z, r2.z ) ) );
+	}
+@end

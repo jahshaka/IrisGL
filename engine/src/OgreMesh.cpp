@@ -130,7 +130,7 @@ private:
     /// straight in) and the strategy's value is a WORLD length, so a 10x-scaled
     /// instance is compared against a bound measured in mesh units and takes a
     /// level whose real deviation is ten times what it asked for. The cascade's
-    /// call (`OgreScene::cascadeVoxelLod`) and the GPU cull both divide by the
+    /// rule (the voxel gather, `OgreScene::cascadeGatherInputs`) and the GPU cull both divide by the
     /// instance's scale; this one cannot without moving the picture of every
     /// scaled instance, so the fix is a lane with a pixel gate of its own.
     /// (ATOM-SUBSTRATE-1 finding, 2026-09-22.)

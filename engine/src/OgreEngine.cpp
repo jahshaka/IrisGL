@@ -2829,11 +2829,10 @@ void OgreEngine::registerCommonMaterials() {
                                // The VCT LightInjection compute job includes PBS pieces (area-light
                                // LTC) by bare file name through the resource system.
                                "Hlms/Pbs/Any",
-                               // VCT voxelizer/lighting compute jobs (Voxelizer.material.json —
-                               // it also declares the ImageVoxelizer jobs, whose sources live in
-                               // the subfolder) and the IBL specular integrator the PCC probe
-                               // workspace's ibl_specular pass wants (falls back to mips if absent).
-                               "VCT", "VCT/ImageVoxelizer",
+                               // VCT voxelizer/lighting compute jobs (Voxelizer.material.json)
+                               // and the IBL specular integrator the PCC probe workspace's
+                               // ibl_specular pass wants (falls back to mips if absent).
+                               "VCT",
                                "Compute/Tools", "Compute/Tools/Any", "Compute/Tools/GLSL",
                                "Compute/Tools/HLSL", "Compute/Tools/Metal",
                                "Compute/Algorithms/IBL",

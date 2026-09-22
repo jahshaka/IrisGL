@@ -576,18 +576,17 @@ bool OgreScene::refreshVctFast() {
         // Timed for the JAHSHAKA_GI_DEBUG log: the settle frame's cost is the
         // owner's "no hitches" number (CPU side, submission included).
         const auto tStart = std::chrono::steady_clock::now();
-        // A MATERIAL the voxelizer converted has changed since it was built
-        // (P7): its VctMaterial cache would re-voxelize the old colour, so the
-        // voxel half is rebuilt fresh — under the SAME probe grid.
-        const bool freshVoxels = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
+        // A MATERIAL the voxeliser read has changed since it was built (P7). NOT a
+        // fresh voxeliser any more (A5b fix round): the shared store re-reads its
+        // rows in place (mVctMaterialRefreshOwed, set with the generation), so the
+        // same voxeliser re-runs below, under the SAME probe grid.
+        const bool materialChanged = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
         // ONE ROW FOR THE REFRESH'S VOXEL HALF (ENGINE-5 item 2): re-voxelise +
         // re-inject, with the reason that staled the volume. `units` is the
         // item count the voxeliser walked.
         monitor::CacheScope voxelWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
                                       "vct.refresh", mRoot->getRenderSystem());
-        if (freshVoxels) {
-            if (!freshVoxelArm(aabb)) { voxelWork.cancel(); return false; }   // the caller rebuilds
-        } else {
+        {
             // THE ITEM SET IS NOT HELD (ATOM P4b). The reuse arm used to keep
             // `mVctItemIds` and compare it against the scene every refresh (an
             // O(N) set walk: add what gained kGiGeometryBit, remove what lost
@@ -661,7 +660,8 @@ bool OgreScene::refreshVctFast() {
         }
         // A fresh voxel arm is not a reuse of the voxels (the probes were
         // kept either way, and giStatus.rebuilds does not move).
-        mGiReusedLastRefresh = !freshVoxels;
+        mGiReusedLastRefresh = true;
+        mGiBuiltMaterialGeneration = mGiMaterialGeneration;
         if (giDebug()) {
             const auto tEnd = std::chrono::steady_clock::now();
             const auto ms = [](std::chrono::steady_clock::time_point a,
@@ -670,7 +670,8 @@ bool OgreScene::refreshVctFast() {
             };
             Ogre::LogManager::getSingleton().logMessage(
                 std::string("Jahshaka GI: refresh ") +
-                (freshVoxels ? "re-voxelized FRESH (a material changed)" : "REUSED the voxel arm") +
+                (materialChanged ? "REUSED the voxel arm, materials re-read in place"
+                                 : "REUSED the voxel arm") +
                 " (" + std::to_string(giItems) + " items, probe grid staled) in " +
                 ms(tStart, tEnd) + " ms: voxels + injection " + ms(tStart, tVoxels) +
                 " ms, irradiance field " + ms(tVoxels, tEnd) + " ms");
@@ -2507,7 +2508,12 @@ void OgreScene::noteGiCascadeDirty(const Ogre::Aabb *box) {
 // colour - the eviction below is what prevents it (ogre-patch 0081).
 void OgreScene::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
     if (!dying) {
-        for (VctCascade &c : mVctCascades) c.freshVoxels = true;
+        // A TEXTURE a converted material bound died (the caller cannot name a
+        // datablock): the store's texture pool is re-copied by the owed refresh
+        // (VctMaterial::refreshAll forgets its by-pointer slice cache), and every
+        // cascade re-voxelises in place.
+        mVctMaterialRefreshOwed = true;
+        mGiCascadeDirtyAll = true;
         return;
     }
     // Evict from every voxeliser that may hold it (the single volume's and each
@@ -2548,7 +2554,7 @@ size_t OgreScene::markDirtyCascadesPending(GiStaleReason why) {
         // corner, or a light REMOVAL that moved no geometry, must not mark the
         // whole chain - the removed light's bounce would vanish cascade by
         // cascade over N frames.
-        bool hit = mGiCascadeDirtyAll || c.freshVoxels;
+        bool hit = mGiCascadeDirtyAll;
         if (!hit) {
             const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
             for (const Ogre::Aabb &d : mGiCascadeDirtyBoxes)
@@ -2676,13 +2682,13 @@ bool OgreScene::refreshCascadesFast() {
         if (ddgiWanted() && !mIfd) return false;
     }
     JAH_TRY {
-        // A MATERIAL PARAMETER THE VOXELISER READ HAS CHANGED. Same rule as
-        // `refreshVctFast`'s `freshVoxels`, spread over frames: every cascade
-        // needs a voxeliser whose material cache has not already decided what
-        // that datablock looks like.
+        // A MATERIAL PARAMETER THE VOXELISER READ HAS CHANGED.
         const bool materialGen = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
         if (materialGen) {
-            for (VctCascade &c : mVctCascades) c.freshVoxels = true;
+            // A PLAIN DIRTY HIT (A5b fix round): the store re-reads the edited rows in
+            // place at the next build, so every cascade owes a rebuild of the SAME
+            // voxeliser - spread one per frame like any other dirty region.
+            mGiCascadeDirtyAll = true;
             mGiBuiltMaterialGeneration = mGiMaterialGeneration;
         }
         // WHY this refresh is about to mark what it marks (BOOTVOX-1's
@@ -4234,10 +4240,9 @@ bool OgreScene::rebuildVct() {
 }
 
 // THE VOXEL ARM — the voxelizer and the lighting over `aabb`, from the live GI
-// items. rebuildVct's first half, shared with freshVoxelArm (the material-edit
-// re-solve, P7), so the two can never build the arm differently. Always a NEW
-// voxelizer: its VctMaterial caches every datablock's conversion by raw pointer
-// for its whole life, which is the rule this file's header is about.
+// items. rebuildVct's first half. (freshVoxelArm, the material-edit re-solve that
+// built a whole NEW voxeliser and lighting, is DELETED - A5b fix round: the shared
+// store re-reads its rows in place and the reuse arm re-runs the same voxeliser.)
 size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     // A FROM-SCRATCH ARM RE-READS EVERY MATERIAL (the VCT lifecycle's own rule): the
     // store outlives rebuilds, so the refresh is owed and every GI slot is queued - a
@@ -4288,28 +4293,6 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     return itemCount;
 }
 
-// THE MATERIAL-EDIT RE-SOLVE (P7). A material edit destroys nothing, so the
-// destruction-generation rule does not apply and the probe grid — whose shapes
-// come from the room's geometry, not its colours — stays exactly as placed. But
-// the voxelizer's VctMaterial holds each datablock's conversion from the moment
-// it first saw it, so re-running THAT voxelizer would re-voxelize the old
-// albedo. So the voxel half is rebuilt fresh: the irradiance field first (it
-// holds the old VctLighting), then the lighting, then the voxelizer, then
-// buildVoxelArm. The HlmsPbs pointer follows the new lighting only if it was
-// pointing at the old one — a background scene must not snatch the binding
-// (refreshVctFast's own rule).
-bool OgreScene::freshVoxelArm(const Ogre::Aabb &aabb) {
-    teardownIrradianceField();
-    Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-    const bool wasBound = mVctLighting && pbs->getVctLighting() == mVctLighting;
-    if (wasBound) pbs->setVctLighting(nullptr);
-    delete mVctLighting;  mVctLighting = nullptr;
-    delete mVctVoxelizer; mVctVoxelizer = nullptr;
-    if (!buildVoxelArm(aabb)) return false;
-    if (wasBound) pbs->setVctLighting(mVctLighting);
-    return true;
-}
-
 // ===========================================================================
 // PHOTON — THE CAMERA-CENTRED CASCADE SCHEDULER (PHOTON_SPEC.md P0)
 // ===========================================================================
@@ -4326,8 +4309,9 @@ bool OgreScene::freshVoxelArm(const Ogre::Aabb &aabb) {
 // spikes/photon-s1 §4.2: the horizon reads exactly the GI-off value, so there
 // is no wall of darkness at the boundary).
 //
-// Ogre-Next HAS a cascade manager (`VctCascadedVoxelizer`) and we do not use
-// it. Three measured reasons (spikes/photon-s1):
+// Upstream Ogre-Next HAS a cascade manager (`VctCascadedVoxelizer`); we never used
+// it, and since ATOM-VOXEL-2 it (with `VctImageVoxelizer`) is deleted from our
+// fork. Three measured reasons (spikes/photon-s1):
 //   * it hard-wires `VctImageVoxelizer`, which reproduces NONE of the
 //     rasteriser's bounce at any cache resolution (§2: 0 % in the big scene,
 //     3.6-6.2 % at 64^3 in the small one, 195-261 % at 128^3 — the error
@@ -4479,7 +4463,8 @@ static inline long long jahQuantAxis(float pos, float size) {
 // The pin gives a coarser cascade MORE bounces — `round(sqrt((b+1) * cellRatio
 // - 1))`, which is 1/2/4/8 at Epic's three bounces — and calls it a brightness
 // stabilisation: "as cell volume increases, we get darker results ... more
-// bounces means brighter cascade" (OgreVctCascadedVoxelizer.cpp:470-486). It is
+// bounces means brighter cascade" (upstream's VctCascadedVoxelizer::update, not in
+// our fork). It is
 // not physics. A bounce is a TRANSPORT step: it adds light everywhere, in
 // proportion to what is already there, and cannot recover the occlusion a
 // bigger cell loses (a coarse cell over-occludes a thin wall — that is a
@@ -4539,7 +4524,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.resolution = Ogre::uint32(table[i].resolution);
         c.stepCells  = table[i].stepCells;
         // `correctAreaLightShadows` on the INNERMOST cascade only, which is the
-        // pin's own recommendation (VctCascadeSetting's header): it is a
+        // upstream's own recommendation (its VctCascadeSetting, not in our fork): it is a
         // per-cascade memory and time cost and the near field is the only place
         // an area light's shadow is legible.
         c.voxelizer = new Ogre::VctVoxelizer(Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
@@ -4854,36 +4839,13 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     // which puts the placement back and leaves the rebuild owed.
     // The body is a lambda because JAH_CATCH RETURNS: the bookkeeping below has
     // to run either way, and a failure has to be answerable rather than silent.
-    // A REPLACEMENT VOXELISER, WHEN ONE IS OWED (G1; VctCascade::freshVoxels). Built and swapped in HERE rather than by a chain rebuild: the
-    // lighting object — and with it every raw `mExtraCascades` pointer the
-    // cascades inside this one hold — survives untouched, so a material edit
-    // costs one cascade per frame instead of the whole chain in one. The old
-    // voxeliser stays alive until the swap has happened, because the lighting
-    // de-registers its texture listeners from it.
-    Ogre::VctVoxelizer *retired = nullptr;
-    bool swapped = false;             // the lighting is reading the replacement
-    if (c.freshVoxels) {
-        Ogre::VctVoxelizer *fresh = nullptr;
-        const bool made = [&]() -> bool {
-            JAH_TRY {
-                fresh = new Ogre::VctVoxelizer(
-                    Ogre::Id::generateNewId<Ogre::VctVoxelizer>(), mRoot->getRenderSystem(),
-                    mRoot->getHlmsManager(), idx == 0u /*correctAreaLightShadows*/,
-                    vctMaterialStore());
-                fresh->setResolution(c.resolution, c.resolution, c.resolution);
-                fresh->setRegionToVoxelize(Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
-                fresh->dividideOctants(1u, 1u, 1u);
-                return true;
-            } JAH_CATCH(mError, false);
-        }();
-        if (!made) {
-            delete fresh;                // half-built, and nothing has adopted it
-            work.setUnits(0);
-            return false;                // the caller puts the placement back and retries
-        }
-        retired = c.voxelizer;
-        c.voxelizer = fresh;
-    }
+    // (A MATERIAL EDIT IS A PLAIN DIRTY HIT NOW, A5b fix round. It used to buy this
+    // cascade a REPLACEMENT voxeliser - new volumes, swapped into the lighting -
+    // because each voxeliser owned a material cache keyed by raw pointer. The chain
+    // shares one store, refreshed IN PLACE (VctMaterial::refreshAll) and evicted on
+    // a death (0081), so the rebuild below re-reads the edited rows into the same
+    // voxeliser.)
+    bool built = false;               // the volumes on the GPU describe the NEW placement
     const auto attempt = [&]() -> bool {
         JAH_TRY {
             mSceneMgr->updateSceneGraph();
@@ -4906,22 +4868,15 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
             if (!c.feed) c.feed.reset(new detail::VoxelFeed());
             std::vector<uint32_t> mask;
             gatherAndBuild(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask));
-            // ...and only once the build has SUCCEEDED does the lighting start
-            // reading the replacement (the swap re-creates its light voxels and
-            // re-registers its texture listeners). A build that threw leaves the
-            // lighting pointed at voxels that are still correct.
-            if (retired) {
-                c.lighting->setVoxelizer(c.voxelizer);
-                swapped = true;             // FROM HERE THE OLD VOXELISER IS DEAD WEIGHT
-            }
+            built = true;
             // THE SECOND FAULT ARM (round-2 F1): everything above this line can
-            // throw BEFORE the swap and everything below it AFTER, and the two
-            // failure paths are opposites — one puts the replacement back in the
-            // bin, the other commits it. Both are proven by the suite.
+            // throw BEFORE the volumes describe the new placement and everything
+            // below it AFTER, and the two failure paths are opposites - one puts
+            // the placement back, the other keeps it. Both are proven by the suite.
             if (const char *fault = std::getenv("JAH_GI_CASCADE_FAULT_POST")) {
                 if (std::strtol(fault, nullptr, 10) == (long)idx)
                     OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
-                                "JAH_GI_CASCADE_FAULT_POST: forced failure after the swap",
+                                "JAH_GI_CASCADE_FAULT_POST: forced failure after the build",
                                 "OgreScene::rebuildCascade");
             }
             applyCascadeAmbient(c.lighting);
@@ -4937,37 +4892,12 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
         } JAH_CATCH(mError, false);
     };
     const bool ok = attempt();
-    if (retired) {
-        if (ok || swapped) {
-            // THE SWAP IS COMMITTED — and on the FAILURE branch that is a
-            // decision, not an accident (round-2 F1). Everything that can throw
-            // after the swap (`applyCascadeAmbient`, `VctLighting::update`'s
-            // dispatch — the VK_ERROR_OUT_OF_DEVICE_MEMORY class is real on this
-            // box) throws with the replacement's `build()` ALREADY SUCCEEDED, so
-            // the voxels on the GPU are correct and current for the new
-            // placement and only the light INJECTION is missing. Putting the old
-            // voxeliser back instead would (i) run `checkTextures()` a second
-            // time on a device that has just failed, (ii) leave the lighting
-            // holding light voxels that call has just destroyed and re-created
-            // EMPTY, over the old voxels — a black cascade rather than a
-            // slightly stale one — and (iii) add a second throwing operation to
-            // a failure path. Deleting the replacement while the lighting points
-            // at it, which is what this branch used to do, is a use-after-free
-            // on the next frame's `fillConstBufferData`.
-            delete retired;                       // the lighting no longer reads it
-            c.freshVoxels = false;                // the material cache IS fresh now
-            if (idx == 0u) mVctVoxelizer = c.voxelizer;   // the head's alias follows
-            // ...and the caller must NOT put the placement back: the region the
-            // shader reads live is the one these voxels were built for.
-            if (!ok && placementCommitted) *placementCommitted = true;
-        } else {
-            // A THROW BEFORE THE SWAP. The lighting still reads `retired`, so
-            // the old voxeliser is still the one the shader samples and the
-            // replacement — which may have thrown half-built — goes.
-            delete c.voxelizer;
-            c.voxelizer = retired;
-        }
-    }
+    // A THROW AFTER THE BUILD (the ambient push, `VctLighting::update`'s dispatch -
+    // the VK_ERROR_OUT_OF_DEVICE_MEMORY class is real on this box) leaves volumes
+    // that are correct and current for the NEW placement with only the light
+    // injection missing: the caller must NOT put the placement back, because the
+    // region the shader reads live is the one these voxels were built for.
+    if (!ok && built && placementCommitted) *placementCommitted = true;
     c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0).count());
     if (giDebug())
@@ -5148,8 +5078,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         const GiStaleReason reason = c.jumped ? GiStaleReason::Rebuild : c.pendingReason;
         if (!rebuildCascade(i, reason, &placementCommitted)) {
             // ...UNLESS THE CASCADE KEPT IT (round-2 F1). A rebuild that failed
-            // AFTER its replacement voxeliser was swapped in has current voxels
-            // for the NEW box; putting the old box back would describe them
+            // AFTER its build succeeded has current voxels for the NEW box; putting the old box back would describe them
             // wrong, which is exactly the defect the revert exists to prevent,
             // pointing the other way.
             if (!placementCommitted) {
@@ -6597,9 +6526,10 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
     JAH_TRY {
         // THE BINDING FIRST, AND UNCONDITIONALLY (ogre-patch 0044's second
         // half). Cascade 0's lighting re-creates its light voxel textures
-        // whenever it is moved to a replacement voxeliser — which is exactly
-        // what a material edit under a chain does (G1's `freshVoxels` arm) —
-        // and the field bound those textures once, by pointer, at initialize().
+        // whenever it is moved to another voxeliser (VctLighting::setVoxelizer;
+        // no path in this file does that since the A5b fix round deleted the
+        // material-edit replacement, but the binding costs nothing to keep
+        // exact) and the field bound those textures once, by pointer, at initialize().
         // Re-binding costs five descriptor writes on a rebuild frame; deciding
         // whether it is needed would mean comparing raw pointers that may have
         // been recycled, which is the defect class patch 0041 exists for.

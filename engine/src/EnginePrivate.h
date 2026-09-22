@@ -4405,12 +4405,7 @@ private:
     /// (F5: one probe stale and one material-generation bump per frame,
     /// however many textures arrived together).
     bool giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged, bool &bumpVoxels) const;
-    /// P6/P7: the reuse arm's variant for a MATERIAL change — a fresh voxelizer
-    /// and lighting (VctMaterial's by-pointer cache must go) under the SAME
-    /// probe grid, whose shapes a material edit cannot move. Returns false
-    /// when it could not build (the caller falls back to rebuildVct).
-    bool freshVoxelArm(const Ogre::Aabb &aabb);
-    /// The voxelizer + lighting half of rebuildVct, shared with freshVoxelArm:
+    /// The voxelizer + lighting half of rebuildVct:
     /// builds mVctVoxelizer/mVctLighting over `aabb` from the live GI items.
     /// Returns the item count (0 = nothing built, both left null).
     size_t buildVoxelArm(const Ogre::Aabb &aabb);
@@ -4419,7 +4414,8 @@ private:
     //
     // N camera-centred rasterising VctVoxelizer + VctLighting pairs, chained
     // through VctLighting::addCascade on the innermost one, scheduled BY US.
-    // Upstream's VctCascadedVoxelizer is not used and cannot be: it hard-wires
+    // Upstream's VctCascadedVoxelizer was never used and is deleted from our fork
+    // (ATOM-VOXEL-2, with VctImageVoxelizer): it hard-wired
     // VctImageVoxelizer (measured in spikes/photon-s1 to reproduce none of the
     // rasteriser's bounce), it rebuilds every dirty cascade in one frame with
     // no budget, and its buildRelative has no guard against a camera jump
@@ -4457,15 +4453,6 @@ private:
         /// attached any more (the gather re-reads every predicate from the GPU
         /// scene on every rebuild), so there is no set to hold, stale or compare.
         std::unique_ptr<detail::VoxelFeed> feed;
-        /// A REPLACEMENT VOXELISER IS OWED (G1). Serviced one cascade per frame by
-        /// `rebuildCascade`, which swaps it into the EXISTING lighting
-        /// (`VctLighting::setVoxelizer`, ogre-patch 0037) so the chain's raw
-        /// `mExtraCascades` pointers never dangle. NOTE (ATOM P4b): its original
-        /// reason - a per-voxeliser material cache keyed by raw pointer - is gone;
-        /// the chain shares ONE store, refreshed in place (`VctMaterial::refreshAll`)
-        /// and evicted on a death (0081), and a voxeliser holds no Item*. The flag
-        /// is still correct but no longer necessary; deleting it is its own change.
-        bool         freshVoxels = false;
         /// WHAT THIS CASCADE VOXELISED - items, attach set, levels, triangles - is
         /// no longer a CPU member: it is the feed's READOUT, counted on the device
         /// as the records were written and read by giStatus (`VoxelFeed::reading`).
@@ -5538,12 +5525,10 @@ private:
     /// THE MATERIAL GENERATION (ENGINE_CACHE_POLICY_SPEC P7). Bumped when a
     /// parameter the VOXELIZER reads (albedo, emissive, alpha, workflow, the
     /// albedo/emissive maps) changes on a material that GI geometry uses.
-    /// VctMaterial converts each datablock ONCE and caches the result by
-    /// pointer for the voxelizer's lifetime (OgreVctMaterial.cpp addDatablock:
-    /// a cache hit never re-reads the colour), so the reuse arm would re-voxelize
-    /// the OLD albedo for ever. refreshVctFast compares the generation it built
-    /// the voxel arm at and, when it moved, builds a FRESH voxelizer and
-    /// lighting under the probes it keeps (freshVoxelArm). Reported as its
+    /// A voxel input on a material a GI item wears changed. The bump marks the
+    /// shared store's in-place refresh owed (VctMaterial::refreshAll re-reads every
+    /// row and re-copies the texture pool), and the arms re-run the SAME voxelisers:
+    /// the reuse arm for the single volume, a dirty hit on every cascade. Reported as its
     /// own term (giMaterialSignature), so the host's debounce coalesces a
     /// slider drag into one re-voxelize when it stops WITHOUT running the
     /// light re-inject cadence a material cannot need.

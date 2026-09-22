@@ -936,17 +936,12 @@ void OgreScene::updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, floa
         if (!bounds || bounds->empty()) continue;   // no chain: level 0 for ever
 
         // The distance Ogre's own strategies use: to the bounding SPHERE, whose
-        // world radius is the local one times the largest axis scale (the rows
-        // of the 3x4 world matrix are those axes).
+        // world radius is the local one times the largest axis scale - the longest
+        // COLUMN of the row-major 3x4 (worldMaxAxisScale says why not a row).
         const Ogre::Vector3 centre(0.5f * (e.boundsMin[0] + e.boundsMax[0]),
                                    0.5f * (e.boundsMin[1] + e.boundsMax[1]),
                                    0.5f * (e.boundsMin[2] + e.boundsMax[2]));
-        float scale = 0.0f;
-        for (int r = 0; r < 3; ++r) {
-            const float *row = &e.world[r * 4];
-            const float len = std::sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2]);
-            scale = std::max(scale, len);
-        }
+        const float scale = worldMaxAxisScale(e.world);
         if (!(scale > 0.0f) || !std::isfinite(scale)) continue;
         const float radius = float(mesh->getBoundingSphereRadius()) * scale;
         const float d = std::max(0.0f, float((centre - eye).length()) - radius);
