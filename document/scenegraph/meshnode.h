@@ -141,7 +141,6 @@ public:
 
     static SceneNodePtr loadAsAnimatedModel(QString path);
 
-    void setMesh(QString source);
     void setMesh(MeshPtr mesh);
 
     MeshPtr getMesh();
