@@ -230,6 +230,23 @@ public:
     /// Pure CPU, no assimp, no engine; safe from any thread.
     static void buildCards(const MeshPtr &mesh, int maxCards);
 
+    /// ATOM P2 / SUB-S5-SDF: build `mesh`'s SIGNED DISTANCE FIELD, in place —
+    /// `sdf`, or an empty field when the mesh gets none (it is skinned, it is not
+    /// triangles, or it has no extent).
+    ///
+    /// MUST RUN AFTER buildLodChain on the same mesh: the field's cell size is
+    /// floored at four times LEVEL 1's measured bound, so that the field is never
+    /// finer than the geometry is honest (document/assets/mesh.h MeshSdf). A mesh
+    /// with no chain gets the resolution ceiling instead, which is correct — a
+    /// mesh the simplifier could not touch has no coarser truth to respect.
+    ///
+    /// Public for the same reason buildLodChain and buildCards are: it is a
+    /// PRODUCT of the bake with its own policy, and a caller that builds an
+    /// iris::Mesh by other means must be able to ask for the field the importer
+    /// would have produced rather than grow a second implementation of it.
+    /// Pure CPU, no assimp, no engine; safe from any thread.
+    static void buildSdf(const MeshPtr &mesh);
+
     /// The capture resolution a baked card's LOD level was chosen for (Lumen's
     /// 128-texel page). Phase 2's atlas owns the page size it actually
     /// allocates; this is the number the BAKE assumed, so the two can be

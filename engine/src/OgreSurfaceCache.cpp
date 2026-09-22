@@ -696,18 +696,25 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
                 r.centre = originW + uW * ((2.0f * su2 + 1.0f - float(splitU)) * r.halfU)
                            + vW * ((2.0f * sv2 + 1.0f - float(splitV)) * r.halfV);
                 r.size = oneSize;
-                // THE LOD LEVEL, RE-DERIVED AGAINST THE CARD'S REAL TEXEL —
-                // not taken from the bake's `lodLevel`, which was computed
-                // against a nominal 128. The rule is ATOM's own, stated once:
-                // the coarsest level whose baked error is below the deviation
-                // this consumer can afford, and a capture can afford one of its
-                // own texels. The baked value is the fallback when the engine
-                // holds no error list for the mesh.
-                const float texel = 2.0f * std::max(r.halfU, r.halfV) / float(r.size);
+                // THE LOD LEVEL IS THE BAKE'S, AND THE BAKE'S ALONE (ATOM
+                // inventory row AT-CARDLOD). It used to be RE-DERIVED here
+                // against the card's real atlas texel, with the baked
+                // `MeshCard::lodLevel` kept as a fallback — one number with two
+                // producers that could disagree, and after ATOM-BAKE-1 they
+                // would have disagreed for a second reason: the bake picks the
+                // level from the MEASURED bound and this site had only the array
+                // it was handed. The rule (`lodLevelForWorldError` over
+                // `lodBounds`, with the card's texel as the allowed deviation) is
+                // computed once, at bake time, by `cards::levelForTexel`.
+                //
+                // WHAT THAT COSTS, stated rather than hidden: the bake chooses
+                // for its nominal 128-texel page (`MeshBake::cardCaptureResolution`)
+                // and this atlas may split a card to a different size, so a split
+                // card can draw a level chosen for a slightly coarser texel. The
+                // page size is the atlas's to publish and the bake's to assume,
+                // and `gi.card_capture` asserts the two agree — which is the
+                // check that a re-derivation quietly made impossible.
                 r.lodLevel = c.lodLevel;
-                if (cand.lodErrors && !cand.lodErrors->empty())
-                    r.lodLevel = static_cast<unsigned char>(
-                        lodLevelForWorldError(*cand.lodErrors, texel, cand.lodErrors->size()));
                 if (!allocRect(r.size, r.atlasX, r.atlasY)) {
                     // The atlas is full. Everything allocated so far stands;
                     // this instance simply holds fewer cards, and the status's

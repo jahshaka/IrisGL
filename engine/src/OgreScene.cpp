@@ -1471,7 +1471,7 @@ void OgreScene::destroy() {
             if (mm.resourceExists(kv.second.name)) mm.remove(kv.second.name);
         }
         mMeshes.clear();
-        mLodErrorsByMesh.clear();
+        mMeshIdByOgreMesh.clear();
         mCardsByMesh.clear();
         mRoot->destroySceneManager(mSceneMgr);
         // AFTER the SceneManager, deliberately. Particle definitions are freed
@@ -1856,7 +1856,7 @@ void OgreScene::updateSurfaceCache() {
         c.sceneNode = n->node;
         c.material = n->materialRef;
         c.cards = cards;
-        c.lodErrors = lodErrorsFor(n->item->getMesh().get());
+        c.lodBounds = lodBoundsFor(n->item->getMesh().get());
         view.candidates.push_back(c);
     }
     mSurfaceCache->update(view);
