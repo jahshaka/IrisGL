@@ -222,13 +222,71 @@ public:
     /// `maxCards` is the budget (ImportTransform::maxCards, default 12 — Epic's
     /// "Max Lumen Mesh Cards"); it is clamped to the format's ceiling of 64.
     /// Public for the same reason buildLodChain is: the card list is a PRODUCT
-    /// of the bake with its own policy, and a caller that builds an iris::Mesh
-    /// by other means — a document PRIMITIVE, which never goes through an
-    /// import (Mesh::loadMesh), a procedural mesh, a re-bake path — must be
-    /// able to ask for the cards the importer would have produced rather than
-    /// grow a second implementation of them.
+    /// of the bake with its own policy, and a caller that builds an iris::Mesh by
+    /// other means — a procedural mesh, a re-bake path, a suite — must be able to
+    /// ask for the cards the importer would have produced rather than grow a
+    /// second implementation of them.
     /// Pure CPU, no assimp, no engine; safe from any thread.
     static void buildCards(const MeshPtr &mesh, int maxCards);
+
+    /// ATOM P2 / SUB-S5-SDF: build `mesh`'s SIGNED DISTANCE FIELD, in place —
+    /// `sdf`, or an empty field when the mesh gets none (it is skinned, it is not
+    /// triangles, or it has no extent).
+    ///
+    /// MUST RUN AFTER buildLodChain on the same mesh: the field's cell size is
+    /// floored at four times LEVEL 1's measured bound, so that the field is never
+    /// finer than the geometry is honest (document/assets/mesh.h MeshSdf). A mesh
+    /// with no chain gets the resolution ceiling instead, which is correct — a
+    /// mesh the simplifier could not touch has no coarser truth to respect.
+    ///
+    /// Public for the same reason buildLodChain and buildCards are: it is a
+    /// PRODUCT of the bake with its own policy, and a caller that builds an
+    /// iris::Mesh by other means must be able to ask for the field the importer
+    /// would have produced rather than grow a second implementation of it.
+    /// Pure CPU, no assimp, no engine; safe from any thread.
+    static void buildSdf(const MeshPtr &mesh);
+
+    /// VERIFICATION, and it exists for the same reason `producerHashOf` does: the
+    /// claim has to be TESTABLE without re-running the thing that made it.
+    ///
+    /// `checkLodBounds` re-measures every level of `mesh` against level 0 by AREA
+    /// SAMPLING ALONE, with `densityMultiple` times as many samples as the bake
+    /// used, and answers whether every measured distance is inside the stored
+    /// `lodBounds[k]`.
+    ///
+    /// WHAT IT IS AND IS NOT. It is not an independent derivation of the bound: the
+    /// bake's maximum comes from the REMOVED BASE VERTICES, computed exactly, and
+    /// any check that walked them too would reproduce that term bit for bit and
+    /// pass by construction. Dropping them is what leaves the sampling-gap margin
+    /// exposed — so this is a REGRESSION CHECK on the margin and on the whole
+    /// pipeline (sampler, grid, floor, monotonicity), at a sample count and a set
+    /// of strata the bake never used. A mesh with no chain trivially passes.
+    /// `worstRatioOut` receives the largest (dense measurement / stored bound) seen,
+    /// so a failure reports a number instead of a boolean.
+    static bool checkLodBounds(const MeshPtr &mesh, int densityMultiple = 8,
+                               double *worstRatioOut = nullptr);
+
+    /// ...and whether `mesh`'s SDF agrees with LEVEL 0's surface. Walks the cells
+    /// inside the field's exact band, compares each stored distance with the exact
+    /// nearest-surface distance, and answers whether the worst disagreement is
+    /// under ONE CELL. `worstCellsOut` receives that worst disagreement in cells
+    /// and `probedOut` how many cells were in the band (a field whose band is
+    /// empty has proven nothing, which is why the suite asserts the count too).
+    static bool checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut = nullptr,
+                                       int *probedOut = nullptr);
+
+    /// ...and whether every cell the GEOMETRY says is OUTSIDE has a POSITIVE stored
+    /// distance. A separate check because `checkSdfAgainstSurface` compares
+    /// MAGNITUDES and is therefore blind to the one defect the field's normal can
+    /// have: at a convex feature sharper than a right angle the nearest point of an
+    /// exterior cell lies ON that feature, and a single face normal there can face
+    /// away from the cell — so the cell reads inside. Inside/outside is decided here
+    /// WITHOUT the field, by ray parity along +X through level 0's triangles, so
+    /// the field is judged against the geometry and not against itself. Cells the
+    /// parity test cannot answer (a ray grazing an edge) are skipped, as are cells
+    /// within a cell of the surface, where the true sign is genuinely ambiguous.
+    static bool checkSdfExteriorSign(const MeshPtr &mesh, int *probedOut = nullptr,
+                                     int *wrongOut = nullptr);
 
     /// The capture resolution a baked card's LOD level was chosen for (Lumen's
     /// 128-texel page). Phase 2's atlas owns the page size it actually

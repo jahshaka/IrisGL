@@ -70,31 +70,107 @@ using MaterialId = unsigned int;
 // `kCascadeLodCellFraction` in OgreGi.cpp). A far-field proxy: a fraction of
 // the distance. The CONSTANTS are the things to measure; the rule is arithmetic.
 //
-// `errors[i]` is level i+1's simplifier error as a LENGTH in the same units as
-// `cellSize` (see MeshData::lodErrors), and the errors are non-decreasing, so
-// the first level that fails the test ends the walk. The answer is 0 — the
-// authored geometry — whenever even level 1 is too coarse, and whenever the
-// size is not a positive finite number.
+// `bounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0, as a
+// LENGTH in the same units as `cellSize` (see MeshData::lodBounds), and the
+// bounds are non-decreasing, so the first level that fails the test ends the
+// walk. The answer is 0 — the authored geometry — whenever even level 1 is too
+// coarse, and whenever the size is not a positive finite number.
 //
-// WHY "BELOW THE ALLOWED ERROR" IS THE WHOLE RULE: the baked error is the worst
-// distance a level's surface may sit from the authored one, so a consumer that
-// cannot see a difference of `allowed` cannot see that level either. What
-// `allowed` IS belongs to the consumer and to nobody else — and the two shipped
+// WHY "BELOW THE ALLOWED DEVIATION" IS THE WHOLE RULE: the baked bound is how
+// far a level's surface is measured to sit from the authored one, so a consumer
+// that cannot see a difference of `allowed` cannot see that level either. What
+// `allowed` IS belongs to the consumer and to nobody else — and the shipped
 // consumers have measured it, which is the only way this number was ever going
 // to be right (the old text claimed "a sample of its own resolution" for the
-// voxeliser and was wrong by two orders of magnitude; see OgreGi.cpp). The
-// baked error is the COMBINED position+attribute quadric error, which is >= the
-// pure geometric one, so every answer here is conservative (a finer level than
-// geometry alone needs).
+// voxeliser and was wrong by two orders of magnitude; see OgreGi.cpp).
+//
+// THE ARRAY IS `lodBounds` AND NOT `lodErrors` SINCE ATOM-BAKE-1 (ATOM P1's
+// AT-A5), and the difference is the whole point of that lane. What used to be
+// passed here was meshoptimizer's `result_error` — a running max over
+// area-weighted MEAN quadric errors, mixed with attribute deviation, documented
+// by its own author as an approximation — under a comment in this file promising
+// it was "the worst distance a level's surface may sit from the authored one".
+// It was not, and four consumers leaned on the promise. What is passed now is a
+// sampled Hausdorff distance MEASURED at bake time between the two surfaces,
+// with the sampling-gap margin applied (irisgl/import/meshbake.cpp, the block
+// headed THE MEASURED BOUND). `lodErrors` still exists and no consumer reads it.
 //
 // `levelsAvailable` caps the answer at the levels the consumer actually has —
 // the document's index lists, or the VAOs the engine built from them.
-inline size_t lodLevelForWorldError(const std::vector<float> &errors, float allowed,
+//
+// ---- THE QUALITY CURRENCY (ATOM P3's SUB-ERROR) ---------------------------
+//
+// THE THREE CONSUMERS SPOKE THREE DIALECTS OF ONE SENTENCE. The view said
+// "pixels at proj[1][1] and a viewport height", the cascade said "1/256 of a
+// cell", the surface card said "a card texel". They are the same statement:
+//
+//     a level stands in for the authored mesh when its measured deviation is
+//     smaller than the SAMPLE the consumer takes.
+//
+// So there is ONE derivation and it has two halves, `sampleFootprint*` (how big
+// one sample is, in world metres, where the object is) and `allowedWorldError`
+// (how many of those samples of deviation this consumer tolerates). Everything
+// else — the cascade's 1/256, the card's one texel, the view's one pixel — is a
+// TOLERANCE in sample units, which is the number worth arguing about, and the
+// arithmetic around it is shared. `pixelError` is the same relation read the
+// other way (a deviation expressed in samples), and it is what a cull's shader
+// computes because the GPU has the bound and wants the count.
+//
+// THE GLSL TWIN of the three functions below lives in the cull's own job 1,
+// media/Hlms/Jahshaka/JahCullTest_cs.glsl (`jahSampleFootprint`,
+// `jahAllowedWorldError`, `jahLevelForAllowed`), and `engine.lod_rule_parity`
+// asserts the two agree over 10,000 evaluations of that shader on the device. There are two
+// copies because a compute shader cannot include a C++ header; there is one
+// RULE because the suite fails when they drift.
+
+/// THE WORLD SIZE OF ONE SAMPLE of a PERSPECTIVE view, at an object whose
+/// nearest surface is `distanceToSurface` metres away (Ogre's own
+/// `distance(worldAabbCentre, eye) - worldRadius`, clamped at 0).
+/// `projScaleY` is proj[1][1]; `viewportHeight` is the pass's own target height.
+/// This is clusterlod.h's projection inverted, and it is what `worldPerPixel`
+/// in OgreMesh.cpp's LOD strategy multiplies by.
+inline float sampleFootprintPerspective(float distanceToSurface, float projScaleY,
+                                        float viewportHeight) {
+    if (!(projScaleY > 0.0f) || !(viewportHeight > 0.0f)) return 0.0f;
+    return distanceToSurface * 2.0f / (projScaleY * viewportHeight);
+}
+
+/// The same for an ORTHOGRAPHIC view: one sample is the ortho window's height
+/// divided by the target's, and it does not depend on distance.
+inline float sampleFootprintOrtho(float orthoWindowHeight, float viewportHeight) {
+    if (!(viewportHeight > 0.0f)) return 0.0f;
+    return orthoWindowHeight / viewportHeight;
+}
+
+/// WHAT A CONSUMER MAY AFFORD, in the units the BAKED BOUNDS are measured in.
+///
+/// `tolerance` is in SAMPLES (the view's pixel budget, the cascade's fraction of
+/// a cell, the card's texel count); `footprint` is the world size of one sample
+/// at the object; `meshToWorldScale` is the largest axis scale of the instance's
+/// transform, because `MeshData::lodBounds` are measured in the MESH's own units
+/// and a 10x-scaled instance shows ten times that deviation in the world.
+inline float allowedWorldError(float tolerance, float footprint, float meshToWorldScale = 1.0f) {
+    if (!(tolerance > 0.0f) || !(footprint > 0.0f)) return 0.0f;
+    if (!(meshToWorldScale > 0.0f)) return 0.0f;
+    return tolerance * footprint / meshToWorldScale;
+}
+
+/// THE SAME RELATION READ BACKWARDS: how many samples of deviation a bound of
+/// `bound` mesh-units shows at this footprint. A cull's shader computes this and
+/// compares it against the tolerance; a report prints it. 0 footprint (a pass
+/// with no measurable projection) answers 0, which reads as "no error", and the
+/// level walk's `allowed <= 0` guard is what keeps that case on level 0.
+inline float pixelError(float bound, float footprint, float meshToWorldScale = 1.0f) {
+    if (!(footprint > 0.0f)) return 0.0f;
+    return bound * meshToWorldScale / footprint;
+}
+
+inline size_t lodLevelForWorldError(const std::vector<float> &bounds, float allowed,
                                    size_t levelsAvailable) {
     if (!(allowed > 0.0f)) return 0;
     size_t level = 0;
-    for (size_t i = 0; i < errors.size() && i < levelsAvailable; ++i) {
-        if (!(errors[i] < allowed)) break;    // errors are non-decreasing
+    for (size_t i = 0; i < bounds.size() && i < levelsAvailable; ++i) {
+        if (!(bounds[i] < allowed)) break;    // bounds are non-decreasing
         level = i + 1;
     }
     return level;
@@ -205,24 +281,29 @@ struct MeshData {
     // (the VAO is matched on {opType, indexBufferVbo, indexType, vertexBuffers},
     // so a per-level vertex remap would break the auto-instancing merge).
     //
-    // `lodErrors[i]` is level i+1's SIMPLIFIER error as a LENGTH IN MESH UNITS —
-    // meshoptimizer's combined position + attribute (UV, normal) quadric error,
-    // which is >= the pure geometric error (the second read of ATOM-1): every
-    // consumer that compares it with a world-space size is CONSERVATIVE (a finer
-    // level than the geometry alone would need). A true geometric bound is a
-    // recorded follow-up;
-    // monotonically non-decreasing. It is the currency of the whole program,
-    // and every consumer spends it the same way — by stating the world-space
-    // deviation IT can afford and taking the coarsest level below it:
+    // `lodBounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0, as
+    // a LENGTH IN MESH UNITS: a sampled Hausdorff estimate taken at bake time
+    // with the sampling-gap margin applied (ATOM P1's AT-A5 — before it, what
+    // stood here was the simplifier's own quadric relabelled as a bound, and it
+    // was not one). Monotonically non-decreasing. It is the currency of the whole
+    // program, and every consumer spends it the same way — by stating the
+    // world-space deviation IT can afford and taking the coarsest level below it:
     //   * the VIEW turns a PIXEL budget into that deviation at its own live
     //     lens and viewport height (`kLodBudgetPixels`, and the strategy in
-    //     OgreMesh.cpp), and
+    //     OgreMesh.cpp),
     //   * a VOXELISER turns its own CELL into it through a measured fraction
     //     (`kCascadeLodCellFraction` in OgreGi.cpp — a binary occupancy test
     //     moves its boundary with the deviation, so the fraction is small and
-    //     it was measured on the picture, not argued).
+    //     it was measured on the picture, not argued), and
+    //   * a CARD turns its own texel into it, at bake time.
+    //
+    // `lodErrors[i]` is what the SIMPLIFIER claimed about that level. NO CONSUMER
+    // READS IT: it is carried across the boundary so a diagnostic (the render
+    // monitor, a bake report) can show both numbers side by side, which is how
+    // the margin on the measurement stays honest.
     std::vector<std::vector<unsigned>> lodIndices;
     std::vector<float>                 lodErrors;
+    std::vector<float>                 lodBounds;
 
     // ---- SURFACE-CACHE phase 1: the mesh's CARD LIST -----------------------
     //
@@ -239,22 +320,18 @@ struct MeshData {
 
     size_t vertexCount() const { return positions.size() / 3; }
     size_t triangleCount() const { return indices.size() / 3; }
-    /// Levels including level 0 — always at least 1.
-    size_t lodLevelCount() const { return lodIndices.size() + 1; }
-    /// The index list of a level; level 0 is `indices`. Out-of-range clamps to
-    /// the coarsest level rather than reading past the end.
-    const std::vector<unsigned> &lodLevelIndices(size_t level) const {
-        if (level == 0 || lodIndices.empty()) return indices;
-        return lodIndices[std::min(level, lodIndices.size()) - 1];
-    }
     /// The COARSEST level that still stands in for this mesh when the consumer
     /// can afford a world-space deviation of `allowed` —
     /// THE RULE ITSELF IS `lodLevelForWorldError` ABOVE, stated once and shared
     /// with the engine's voxeliser (OgreScene::cascadeVoxelLod). This overload
     /// is the document-side convenience: it clamps to the levels this mesh
     /// actually carries.
+    /// (`lodLevelCount` and `lodLevelIndices` used to sit here and are DELETED —
+    /// ATOM inventory row AT-DEAD: their only callers were the suite that tested
+    /// them. `lodIndices` is public and the engine's own level walk is
+    /// `buildMeshV2`'s `accepted` list, which never went through either.)
     size_t lodForWorldError(float allowed) const {
-        return lodLevelForWorldError(lodErrors, allowed, lodIndices.size());
+        return lodLevelForWorldError(lodBounds, allowed, lodIndices.size());
     }
     bool hasSkinData() const {
         return !blendIndices.empty() && blendIndices.size() == vertexCount() * 4 &&
@@ -289,7 +366,34 @@ struct MeshData {
 // 2376 lines got twice the error the desktop did — on the same asset, in the
 // same frame. The reference constants (`LodReference`) and `lodSwitchDistance`
 // are DELETED with this note; nothing derives a distance any more.
-constexpr float kLodBudgetPixels = 1.0f;   ///< the budget: one pixel of the simplifier's (combined, >= geometric) error
+/// THE BUDGET: ONE PIXEL of MEASURED geometric deviation. Derived, and the
+/// derivation is short because the quantity is now honest (ATOM P1's AT-A5 — the
+/// old text had to hedge with "the simplifier's combined, >= geometric error",
+/// which was not true in either direction).
+///
+/// One pixel is the largest budget that cannot be seen: the deviation is a
+/// displacement of the SILHOUETTE and of shaded normals, and a displacement under
+/// one pixel is under the sampling rate of the image it lands in. Half a pixel
+/// would be Nyquist-strict and is not needed — the bound is a MAXIMUM over the
+/// surface while what an eye integrates is the average, and the bound already
+/// carries the sampling-gap margin. Two pixels is visible on a moving silhouette:
+/// that frame-to-frame delta is ATOM-BAKE-2's dolly gate's subject.
+///
+/// WHAT IT IS WORTH, measured on the shipped chains: at one pixel on a 1080-line
+/// 45-degree view, the sphere's level 1 (bound 0.032 m) is taken at a bounding-
+/// sphere radius of about 40 px and its level 2 (0.071) at about 18 px — i.e. the
+/// levels arrive while the object is still a recognisable shape on screen, which is
+/// what makes the triangle saving real rather than notional. A tolerance whose
+/// savings arrive only once the object is 4 px across would not be a tolerance.
+constexpr float kLodBudgetPixels = 1.0f;
+
+/// THE RAY TIER'S TOLERANCE, in ray footprints (ATOM P3's AT-A8r). ONE, and the
+/// reason it is not the eye's half or double: a ray is cast through a pixel, so
+/// its footprint IS that pixel's, and a deviation under one footprint cannot
+/// change which surface the ray finds. The tier that spends it — the bottom-
+/// level structures — is P4's; this lane lands the rule and the per-instance
+/// answer in `GpuInstance.ids.w`.
+constexpr float kRayFootprintTolerance = 1.0f;
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
 /// One bone of a rig, in its BIND pose. The transform is LOCAL to the parent
@@ -2391,6 +2495,28 @@ struct GiQualityFacts {
     /// 4k atlas with a page table and streaming; ours has neither yet, and
     /// pretending otherwise would just overflow the atlas silently.)
     float    cardResidencyRadius = 30.0f;
+    // ---- THE ATOM COLUMN (ATOM P3's SUB-ERROR) -----------------------------
+    /// THE TIER'S GEOMETRIC TOLERANCE, in SAMPLES of whatever is sampling —
+    /// pixels for a view, cells for a cascade. It is the `tolerance` argument of
+    /// the quality currency (`allowedWorldError`, beside `lodLevelForWorldError`
+    /// at the top of this header) and the only dial in the whole level rule that
+    /// is a matter of taste rather than arithmetic.
+    ///
+    /// WHAT CONSUMES IT TODAY: `CullRequest::pixelTolerance` — the GPU cull's
+    /// level output — and nothing else. The SHIPPED draw path stays on
+    /// `kLodBudgetPixels` (one pixel) at every tier, deliberately: wiring the
+    /// tier in would move the picture of every Low-tier scene, which is a lane
+    /// with a pixel gate of its own and not this one.
+    ///
+    /// THE NUMBERS ARE PROVISIONAL AND SAY SO. `kLodBudgetPixels`' derivation
+    /// (one pixel is the largest deviation that cannot be seen) is the Medium
+    /// row; Low doubles it and High halves it. The honest floor — the tolerance
+    /// below which the triangle saving falls under measurement — is A1's
+    /// draw-call/vertex-bound instrument's to fix, and until it has, 0.5 is a
+    /// claim about the eye and not about the renderer. Epic shares High's row
+    /// because `GiQuality` is three-valued (it is the RESOLUTION dial; Epic
+    /// changes no resolution) and the design gives the two the same tolerance.
+    float    pixelTolerance = 1.0f;
 };
 
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
@@ -2414,6 +2540,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeFaceSize   = 128u;
         f.cardBudgetTexels = 16384u;    // 1 card a frame ~ 0.35 ms
         f.cardResidencyRadius = 15.0f;
+        f.pixelTolerance = 2.0f;        // the Atom column; see the field
         break;
     case GiQuality::High:
         f.cascades[0] = {  5.0f, 128, 0.0f };
@@ -2429,6 +2556,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeShadowsDefault = true;
         f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 1.0 ms on the measured cost
         f.cardResidencyRadius = 60.0f;
+        f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         break;
     default:   // Medium: the same reach as High, at its own resolution
         f.cascades[0] = {  5.0f, 64, 0.0f };
@@ -2440,6 +2568,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeFaceSize   = 256u;
         f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.7 ms
         f.cardResidencyRadius = 30.0f;
+        f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
         break;
     }
     // ---- THE VR COLUMN (GiViewProfile, above) ------------------------------
@@ -3573,6 +3702,23 @@ struct GiVoxelStats {
     /// 8-bit store would have CLIPPED. It is the measurement that says whether
     /// the format's range is being used or merely provided.
     long long voxelsAboveOne = 0;
+
+    /// THE SOURCE, beside the lit volumes above (VOXEL-CLIP-1). The lit volume
+    /// is what the cones read; the EMISSIVE VOXEL STORE is what the injection
+    /// SEEDS it from, so a clip there cannot be told from a dim emitter anywhere
+    /// downstream. These read the voxeliser's own emissive volume, in SCENE
+    /// RADIANCE (no normalisation: the voxeliser writes the material's emissive
+    /// as authored — `multiplier` does not apply to them).
+    ///
+    /// `emissiveFormat` is empty when this cascade has no voxeliser to read.
+    /// `peakEmissive` is the largest channel in the volume — for a scene with
+    /// one emitter, its authored radiance. `emissiveAtMax` counts texels on a
+    /// UNORM store's top bin, which IS the clip, and `emissiveAboveOne` counts
+    /// what an 8-bit store could not have held.
+    std::string emissiveFormat;
+    float peakEmissive = 0.0f;
+    long long emissiveAtMax = 0;
+    long long emissiveAboveOne = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -4929,7 +5075,8 @@ struct PostFxDesc {
     ///
     /// Builds a closest-depth mip chain of the scene depth once per frame, right
     /// after the opaque pass: mip 0 is the depth buffer, and each level after it
-    /// holds the CLOSEST depth of its footprint in the level above, down to 1x1.
+    /// holds the FARTHEST (or, on request, the closest — see `hzbFarthest`) depth
+    /// of its footprint in the level above, down to 1x1.
     /// A stackless screen-space trace walks it instead of stepping pixel by
     /// pixel — Epic measure the compaction that rides on it at up to a 50%
     /// tracing speedup — and nothing in this engine reads it YET.
@@ -4939,6 +5086,20 @@ struct PostFxDesc {
     /// offscreen view — an offscreen capture is where a trace will be measured,
     /// and the pyramid changes no pixel of the picture either way.
     bool  hzb = false;
+    /// WHICH DEPTH EACH LEVEL KEEPS, and the two readers of a pyramid want
+    /// opposite answers (ATOM-SUBSTRATE-1, 2026-09-22):
+    ///
+    ///   true  (the default, and the only build anything asks for today) — the
+    ///         FARTHEST depth of a footprint, which is the ONLY direction an
+    ///         occlusion cull can be conservative with: "my nearest point is
+    ///         behind this level" then proves every pixel under it is already
+    ///         covered. With the closest depth, a texel that is half wall and
+    ///         half sky reports the wall and an object seen through the sky half
+    ///         is culled — geometry lost.
+    ///   false — the CLOSEST depth, what a stackless screen-space trace wants so
+    ///         it can skip a region it cannot have hit yet. Photon's gather asks
+    ///         for it when it lands; nothing reads it today.
+    bool  hzbFarthest = true;
 
     /// THE offscreen opt-in. Offscreen Views ignore every flag above unless this
     /// is set, because their exact colours are what thumbnails, previews and the
@@ -4970,7 +5131,7 @@ struct PostFxDesc {
                distortionStrength == o.distortionStrength &&
                tonemapFixed == o.tonemapFixed &&
                exposureScale == o.exposureScale &&
-               looks == o.looks && hzb == o.hzb &&
+               looks == o.looks && hzb == o.hzb && hzbFarthest == o.hzbFarthest &&
                allowOffscreen == o.allowOffscreen;
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
@@ -5088,6 +5249,7 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     fx.smaaPreset     = -1;
     fx.ssrScreenMarch = false;
     fx.hzb            = false;
+    fx.hzbFarthest    = true;
     fx.refractions    = false;
     fx.distortion     = false;
     if (ssrOverride >= 0) fx.ssr = ssrOverride;
@@ -5104,6 +5266,29 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
         fx.looks.swap(kept);
     }
 }
+
+/// WHAT LEVEL ONE OBJECT IS ACTUALLY DRAWING (ATOM P1's readout, the gap OWN-TRI
+/// left). The chain could not be SEEN working: `submittedTriangles` says the
+/// scene shed triangles, and nothing said which object took which level.
+///
+/// `level` is the Item's own `mCurrentMeshLod` — what the LOD strategy last
+/// wrote, i.e. what the render queue will index its VAO list with. `levels` is
+/// how many that mesh has (1 = no chain), and `triangles` is what that level's
+/// VAOs really hold, summed over the sub-meshes.
+///
+/// THE HONESTY NOTE: `mCurrentMeshLod` is one slot per object and EVERY pass that
+/// updates LOD lists writes it — a planar reflector's mirrored camera, a PiP
+/// inset, a probe cube face, a thumbnail. So this is "the level the last LOD
+/// update chose", which in an ordinary editor frame is the main view's and in a
+/// frame that also rendered a mirror may be the mirror's. A per-pass reading
+/// would need a per-pass slot in the pin, which is a patch and not a diagnostic.
+struct ObjectLodDesc {
+    NodeId             node = 0;
+    std::string        name;
+    unsigned           level = 0;
+    unsigned           levels = 1;
+    unsigned long long triangles = 0;
+};
 
 /// What the renderer measured this frame (STATS_OVERLAY_SPEC.md §4).
 /// A POD, exactly like ShaderCacheStats — `app.renderStats()` is this struct.
@@ -5466,41 +5651,98 @@ struct EngineThreading {
     unsigned hlmsThreads = 1;
 };
 
-/// GPU-DRIVEN COMPUTE DISPATCH, measured (ogre-patch 0032; suite
-/// compute.indirect_dispatch). Photon's shared infrastructure, not a feature: a
-/// compaction pass writes how many thread groups the next pass needs and the
-/// next pass runs exactly that many, instead of being dispatched at its worst
-/// case from the CPU. The pin had only vkCmdDispatch with CPU-side counts.
+/// ---- ATOM P3: THE GENERIC GPU CULL (SPECS/atom/A4_SUBSTRATE_CULL_DESIGN.md) --
 ///
-/// One call runs the whole two-job chain for one input size and reports what
-/// came back, so a suite asserts numbers rather than trusting a log line.
-struct IndirectDispatchProbe {
-    /// The render system implements it at all (false on every backend but
-    /// Vulkan, and on the NULL render system). Everything below is 0 then.
+/// WHAT A CONSUMER ASKS FOR. One request per pass: a camera, its frustum, the
+/// predicates an instance must satisfy, optionally the depth pyramid to test
+/// against, and how much of the chain to run. The answer is device buffers the
+/// consumer binds — no host ever learns the survivor count unless it asks.
+///
+/// ITS FIRST READER IS A SUITE, deliberately (contract section 3): the substrate
+/// is written once, before the programs that stand on it (Photon's ray tiles at
+/// GA-2, Atom's own clustered draw at stage 3). Nothing shipped reads a cull
+/// result today, which is why this lane moves no pixel.
+struct GpuCullRequest {
+    /// THE MATRIX THAT MATCHES THE PYRAMID. Row-major, row i in element i (the
+    /// GPU scene's own convention — a column-major read is silently right for a
+    /// pure translation, which is the worst way to find out). When `hzbLevels`
+    /// is non-zero this must be the view-projection the bound pyramid was BUILT
+    /// with, not necessarily this frame's.
+    float viewProj[16] = {};
+    /// The six frustum planes, INWARD-pointing and normalised: (a, b, c, d) with
+    /// a point inside satisfying dot(n, p) + d >= 0.
+    float planes[24] = {};
+    /// The camera position the level rule measures distances from.
+    float eye[3] = {};
+    /// proj[1][1] and the pass's target height — the two terms the quality
+    /// currency needs to turn a distance into a sample footprint (Types.h,
+    /// `sampleFootprintPerspective`).
+    float projScaleY = 0.0f;
+    float viewportHeight = 0.0f;
+    /// GpuInstance flag predicates (GpuSceneEntry::flags documents the bits):
+    /// every required bit must be set and no forbidden bit may be.
+    unsigned flagsRequired = 0u, flagsForbidden = 0u;
+    /// 0 = frustum only. Otherwise the number of mip levels in the pyramid to
+    /// test against, which the engine takes from the view's own HzbStatus.
+    unsigned hzbLevels = 0u;
+    /// The level rule's input, in SAMPLES (the tier's Atom column,
+    /// `GiQualityFacts::pixelTolerance`, times the session's lodBias). 0 keeps
+    /// every survivor on level 0.
+    float pixelTolerance = 0.0f;
+    /// 0 = survivors only; 1 = + the per-instance level; 2 = + one
+    /// VkDrawIndexedIndirectCommand per survivor.
+    unsigned mode = 0u;
+    /// MEASUREMENT ONLY, and 0 in every real request: after the functional run,
+    /// each job is dispatched this many more times over the buffers it already
+    /// filled and the wall clock of a flush of them, minus an empty flush's own
+    /// cost, is divided by the count. There are no per-dispatch GPU timestamps
+    /// outside a compositor pass at this pin (patch 0027's samples are keyed to
+    /// passes and arrive two frames late), so the three `*Ms` fields are that
+    /// SLOPE: an upper bound that includes the per-dispatch driver cost, which
+    /// is the number to compare a CPU cull against anyway.
+    unsigned measureIterations = 0u;
+};
+
+/// WHAT THE CHAIN DID, and what it cost. The buffers themselves stay on the
+/// device; these are the numbers a suite asserts and a report prints, plus the
+/// readbacks a suite asks for explicitly.
+struct GpuCullResult {
+    /// False when there is no compute at all (the NULL render system) or the
+    /// jobs are missing because the media is not staged. Every consumer keeps
+    /// its CPU path then — there is no half-answer.
     bool supported = false;
-    /// What the COUNTING job decided, read back from the argument buffer. Equals
-    /// the number of non-zero entries in the input list it was given.
-    unsigned groupsRequested = 0;
-    /// How many groups the indirectly-dispatched job actually ran, counted from
-    /// the output buffer (one stamped slot per group).
-    unsigned groupsRan = 0;
-    /// What those groups saw as gl_NumWorkGroups.x — the count the GPU read out
-    /// of the buffer, which must equal groupsRequested. 0 when none ran.
-    unsigned groupsSeen = 0;
-    /// The same job dispatched the ordinary way, from a CPU-side count. The
-    /// control: the two output buffers must be identical.
-    unsigned groupsRanCpuSized = 0;
-    /// True when the CPU-sized run and the indirect run produced byte-identical
-    /// output buffers.
-    bool matchesCpuSized = false;
-    /// THE CONTROL FOR THE BARRIER. The same chain run once more with the
-    /// compute-write -> indirect-read barrier suppressed
-    /// (HlmsComputeJob::setIndirectDispatchBuffer's issueBarrier = false). A
-    /// difference proves the barrier is load-bearing on this driver; agreement
-    /// proves nothing either way (the hazard is real whether or not this GPU
-    /// happens to lose the race), which is why the barrier is unconditional.
-    unsigned groupsRanNoBarrier = 0;
-    bool     noBarrierDiffered = false;
+    /// Instances the request was evaluated over: the GPU scene's `slotCount()`,
+    /// which is THE bound every reader of that table must use.
+    unsigned instances = 0;
+    /// THE COUNT THE GPU WROTE, read back from the count buffer.
+    unsigned survivors = 0;
+    /// The thread-group count job 2 left for job 3, i.e. what the indirect
+    /// dispatch ran: ceil(survivors / 64). 0 when the mode did not reach job 3.
+    unsigned indirectGroups = 0;
+    /// Draw commands job 3 wrote (mode 2), counted from the buffer rather than
+    /// assumed: it must equal `survivors`.
+    unsigned draws = 0;
+    /// Survivors whose mesh has more than one submesh — the commands above
+    /// describe submesh 0 only, because the level table does (GpuScene.h). A
+    /// non-zero number here is a FINDING for the consumer, not an error.
+    unsigned multiSubmeshSurvivors = 0;
+    /// The three jobs' GPU milliseconds, when the device has timestamps
+    /// (negative = not measured, never faked as 0).
+    double testMs = -1.0, compactMs = -1.0, drawsMs = -1.0;
+    /// What the HOST spent: writing the request and dispatching. The design's
+    /// claim is that this is ~0 — a small uniform write — and it is measured
+    /// rather than asserted.
+    double requestMs = 0.0;
+    /// The readbacks, filled only when the caller asked for them (they flush the
+    /// command buffer and stall, so they belong in a suite and never in a
+    /// frame). `survivorSlots` is a SET: its order is the workgroups' atomic
+    /// arrival order and is not stable between runs.
+    std::vector<unsigned> survivorSlots;
+    /// Per-SLOT level (not per survivor), as job 1 wrote it.
+    std::vector<unsigned> levels;
+    /// Five uints per draw: indexCount, instanceCount, firstIndex,
+    /// vertexOffset, firstInstance.
+    std::vector<unsigned> drawCommands;
 };
 
 /// THE HIERARCHICAL DEPTH PYRAMID, as built (PostFxDesc::hzb; NANITE_SPEC
@@ -5516,10 +5758,19 @@ struct HzbStatus {
     /// Mip 0's size — the view's own, since the pyramid is full resolution.
     unsigned width = 0, height = 0;
     /// Which way is CLOSE (RenderSystem::isReverseDepth). True — the Vulkan
-    /// default at this pin — means the near plane is 1 and a level holds the
-    /// MAXIMUM of its footprint. Reported rather than assumed because the
-    /// reduction operator flips with it.
+    /// default at this pin — means the near plane is 1. Reported rather than
+    /// assumed because the reduction operator flips with it.
     bool reverseDepth = true;
+    /// WHICH DEPTH THE LEVELS KEEP (PostFxDesc::hzbFarthest). A reader must know:
+    /// an occlusion test is only sound against the FARTHEST chain.
+    bool farthest = true;
+    /// HAS ANYTHING BEEN WRITTEN INTO IT YET? The texture exists from the moment
+    /// the chain is built, and holds UNDEFINED CONTENT until the seed pass of a
+    /// presented frame fills mip 0 — and again after every chain rebuild, which
+    /// resets this. A consumer that culled against an unwritten pyramid would be
+    /// testing against whatever the allocation last held; `fillCullView` refuses
+    /// to ask for the pyramid until this is true.
+    bool primed = false;
 };
 
 /// Where a corner-anchored readout sits in a View.
@@ -6104,6 +6355,70 @@ struct EngineSnapshot {
     std::vector<SnapshotLight> lights;
     std::vector<ProbeInfo>     probes;
     std::vector<CompositorWorkspaceInfo> workspaces;
+};
+
+// --- THE GPU SCENE (SPECS/atom/A3_GPU_SCENE_SLICE_DESIGN.md) ----------------
+//
+// The scene's description as it lives ON THE DEVICE: one entry per item slot,
+// written for the CHANGED subset each frame, read by the ray tier's instance
+// job, by Atom's cull and by Photon's reprojection. These two structs are the
+// TEST AND TOOL door onto it — the tables themselves are engine-private, and
+// nothing in the application reads them.
+
+/// ONE SLOT'S ENTRY, as the device holds it. `world` and `prevWorld` are
+/// ROW-MAJOR 3x4 (twelve floats: three rows of four).
+struct GpuSceneEntry {
+    float world[12] = {};
+    float prevWorld[12] = {};
+    float boundsMin[3] = {};
+    float boundsMax[3] = {};
+    /// Its mesh's place in the mesh table, or 0xFFFFFFFF for a slot with no
+    /// geometry.
+    unsigned meshIndex = 0xFFFFFFFFu;
+    /// The predicate bits ONE place computes: 1 visible, 2 caster, 4 mover,
+    /// 8 GI-visible, 16 alpha-tested, 32 skinned, 64 overlay, 128 RAY-TRACED
+    /// (the traced set), 256 drag mover, 512 GI-bounds-excluded.
+    unsigned flags = 0u;
+    unsigned nodeId = 0u;
+    unsigned lightMask = 0u;
+    /// THE RAY LEVEL (`GpuInstance.ids.w`, ATOM P3's AT-A8r): the mesh level
+    /// this instance's bottom-level structure should be built from at its
+    /// current distance. 0 until a camera has been seen; its consumer is P4.
+    unsigned rayLevel = 0u;
+};
+
+/// WHAT THE TABLES HOLD AND WHAT KEEPING THEM COSTS. Every count is cumulative
+/// over the scene's life except `lastDirty` / `lastCopyMs`, which are the last
+/// update's.
+struct GpuSceneStatus {
+    /// False where there are no tables at all — the NULL render system's
+    /// headless boot, where every consumer keeps its CPU path.
+    bool     live = false;
+    /// Live item slots (the dense item index's length). NOT named `slots`: that
+    /// is one of Qt's moc keywords (`#define slots`), and this header is included
+    /// by Qt translation units.
+    unsigned slotCount = 0;
+    unsigned capacity = 0;    ///< slots the table can hold before the next grow
+    unsigned meshEntries = 0; ///< entries in the mesh table
+    unsigned lastDirty = 0;   ///< slots the last update wrote
+    unsigned long long writes = 0;     ///< slot writes, ever
+    unsigned long long copyRuns = 0;   ///< device copies issued, ever (one per contiguous run)
+    unsigned long long updates = 0;    ///< updates that copied anything, ever
+    unsigned long long grows = 0;      ///< instance-table doublings, ever
+    unsigned long long scans = 0;      ///< dirty scans run, ever
+    unsigned long long aabbReads = 0;  ///< world AABBs the scan asked Ogre for, ever
+    double   lastCopyMs = 0.0;         ///< CPU cost of the last update's staging + copies
+    double   lastScanMicros = 0.0;     ///< ...of the last TIMED scan (0 when never timed)
+    // ---- THE RAY LEVEL's own cost (ATOM P3, AT-A8r) ------------------------
+    /// Slots whose ray level was RE-EVALUATED, ever: the 2x distance band was
+    /// left and the rule was asked again.
+    unsigned long long rayLevelEvals = 0;
+    /// ...of those, the ones whose ANSWER CHANGED — one BLAS refit each, and
+    /// the number the hysteresis exists to keep small.
+    unsigned long long rayLevelRefits = 0;
+    /// Walks of the ray-level pass (one per frame in which the camera or the
+    /// scene moved; a still frame runs none).
+    unsigned long long rayLevelWalks = 0;
 };
 
 }}  // namespace jahshaka::engine

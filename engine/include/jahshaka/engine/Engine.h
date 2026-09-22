@@ -345,6 +345,22 @@ public:
     /// with no baked chain are unaffected by any value.
     virtual void        setLodBias(float bias) = 0;
     virtual float       lodBias() const = 0;
+    /// DIAGNOSTIC: the SHAPE of a mesh's LOD and shadow VAO lists (ATOM P1's
+    /// AT-A11). `levels` is how many LOD levels the mesh has and
+    /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the
+    /// corresponding normal one — i.e. how many shrunk position-only VAOs this
+    /// mesh pays for. The shape the engine builds is 1 (level 0 optimized, the
+    /// coarse levels aliased) or 0 (nothing to optimize, everything aliased); it
+    /// was `levels` before ogre-patch 0088 made a MIXED list legal to destroy.
+    /// False for an unknown mesh. Exists because that shape is Ogre-internal, it
+    /// is VRAM per mesh forever, and a suite has to be able to see it.
+    virtual bool        meshVaoShape(MeshId mesh, unsigned &levels,
+                                     unsigned &shadowIndependent) const = 0;
+    /// WHICH LEVEL EVERY DRAWN OBJECT IS ON (ATOM P1's readout). One row per node
+    /// that carries an Item, in node order; see `ObjectLodDesc` for what `level`
+    /// means and for the one thing it cannot promise. Cheap: it reads a byte and
+    /// a VAO's primitive count per object and allocates the vector.
+    virtual void        objectLods(std::vector<ObjectLodDesc> &out) const = 0;
     /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
     /// text. Empty (lastError()) for an unknown material.
     ///
@@ -900,6 +916,24 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
+    /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
+    /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
+    /// which flushes the render system's recorded commands first and is
+    /// therefore a suite's verb and never a frame's.
+    virtual GpuSceneStatus gpuSceneStatus() const { return GpuSceneStatus(); }
+    virtual bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
+        (void)slot; (void)out; return false;
+    }
+    virtual bool gpuSceneDeviceEntries(unsigned first, unsigned count,
+                                       std::vector<GpuSceneEntry> &out) {
+        (void)first; (void)count; out.clear(); return false;
+    }
+    /// Runs the dirty scan NOW and records its cost in
+    /// `GpuSceneStatus::lastScanMicros`. A suite's verb: the scan is
+    /// epoch-gated and idempotent, so this measures the same walk a frame
+    /// would run, with the timing that a frame deliberately does not pay.
+    virtual void measureGpuSceneScan(bool graphIsCurrent) { (void)graphIsCurrent; }
     /// SURFACE-CACHE phase 2 — the card cache's TEST AND TOOL readbacks.
     ///
     /// The cache itself has no verb: it is configured through
@@ -2587,20 +2621,36 @@ public:
 
     // ---- PHOTON SHARED INFRASTRUCTURE (SPECS/NANITE_SPEC.md §4.2-§4.3) ----
 
-    /// Runs the indirect-dispatch chain once and reports what the GPU did
-    /// (IndirectDispatchProbe says what each field means). `survivors` is how
-    /// many entries of a 4096-long input list are non-zero, i.e. how many thread
-    /// groups the second job must end up running.
+    /// ATOM P3: RUNS THE GENERIC CULL over a scene's GPU table and reports what
+    /// the GPU decided (`GpuCullRequest` / `GpuCullResult` carry the contract).
     ///
-    /// This is the PROOF of ogre-patch 0032 and, for now, its only caller: the
-    /// capability exists for the Photon arms, which are not built yet. It
-    /// allocates three small UAV buffers, dispatches twice, reads back and frees
-    /// everything again, so it is safe to call at any time — but it is a
-    /// measurement, not a render path.
+    /// `view` supplies the depth pyramid when the request asks for one, and the
+    /// pyramid it binds is THE ONE THAT IS THERE — which, called before a frame,
+    /// is the PREVIOUS frame's (the seed rewrites mip 0 in the frame's own
+    /// compositor graph, so until it runs the texture still holds the last
+    /// completed frame's pyramid). That ordering IS the design's
+    /// previous-frame contract; the request's `viewProj` must be the matrix that
+    /// pyramid was built with.
     ///
-    /// False means the jobs are missing (unstaged media) or the backend cannot
-    /// do it; `out.supported` distinguishes the two.
-    virtual bool indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe &out) = 0;
+    /// `readBack` fills the result's vectors, which flushes the command buffer
+    /// and stalls on the copies: a suite and a spike path, never a frame.
+    ///
+    /// False means no compute (`out.supported` false) or a failure whose reason
+    /// is in `takeLastError()`. It allocates its result buffers once per scene
+    /// and grows them with the table, never per call.
+    virtual bool gpuCull(Scene *scene, View *view, const GpuCullRequest &request,
+                         bool readBack, GpuCullResult &out) = 0;
+
+    /// FILLS THE VIEW HALF OF A CULL REQUEST from a view's live camera: the
+    /// row-major view-projection, the six frustum planes, the eye, the two terms
+    /// of the quality currency (proj[1][1] and the target height) and the depth
+    /// pyramid's level count when the view builds one. The consumer sets the
+    /// predicates, the tolerance and the mode; everything here is a CONVENTION —
+    /// which projection carries the depth buffer's own z range, which sign a
+    /// plane's normal has, which way a Vulkan viewport's height points — and a
+    /// host has no business re-deriving any of it. False when the view has no
+    /// camera or no viewport yet.
+    virtual bool fillCullView(View *view, GpuCullRequest &out) const = 0;
 
     /// What pyramid `view` is building, if any (HzbStatus). Cheap: reads the
     /// live texture's shape, renders nothing. False when the view has none.

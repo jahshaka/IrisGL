@@ -596,16 +596,6 @@ public:
     /// acted on and asks the renderer to re-render every cached map once per
     /// bump.
     quint64 shadowRefreshSerial = 0;
-    /// ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the scene-wide LOD dial, pushed
-    /// by the mirror. 1 is the reference — a mesh swaps to a coarser baked level
-    /// where that level's geometric error reaches one pixel at the reference
-    /// projection; larger swaps earlier, and 0 PINS every object at its finest
-    /// level. NEVER SERIALIZED, deliberately: it is a debugging and measurement
-    /// dial (a pixel test asserts one level at a time by sweeping it), not a
-    /// property of the world. The user-facing quality tier that will set it
-    /// lands with the tier tables, not here.
-    float lodBias = 1.0f;
-
     // anti-aliasing: MSAA sample count for the scene's viewport — 1 (off), 2, 4
     // or 8 (rendered by the engine viewport only; the driver may clamp).
     int antiAliasing;

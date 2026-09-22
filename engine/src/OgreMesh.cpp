@@ -6,6 +6,8 @@
 #include <OgreViewport.h>
 #include <OgreLodStrategyPrivate.inl>
 
+#include <string>
+#include <algorithm>
 #include <unordered_map>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -115,6 +117,23 @@ private:
     /// of distance); for an orthographic camera, the world length of one pixel
     /// outright. Constant across a pass, so it is computed once per
     /// `lodUpdateImpl` rather than per object.
+    ///
+    /// THE ARITHMETIC IS THE QUALITY CURRENCY'S (Types.h, SUB-ERROR): one
+    /// sample's world footprint at one metre, times the budget in samples. It
+    /// used to be spelled out here; the spelling is now shared with the
+    /// cascade, the card and the GPU cull, and `engine.lod_rule_parity` holds
+    /// the GLSL copy to it.
+    ///
+    /// WHAT IT STILL DOES NOT DO, and it is a defect of the strategy rather
+    /// than of the currency: it passes no `meshToWorldScale`. Ogre's LOD values
+    /// are per MESH (`applyLodValues`, which writes `MeshData::lodBounds`
+    /// straight in) and the strategy's value is a WORLD length, so a 10x-scaled
+    /// instance is compared against a bound measured in mesh units and takes a
+    /// level whose real deviation is ten times what it asked for. The cascade's
+    /// call (`OgreScene::cascadeVoxelLod`) and the GPU cull both divide by the
+    /// instance's scale; this one cannot without moving the picture of every
+    /// scaled instance, so the fix is a lane with a pixel gate of its own.
+    /// (ATOM-SUBSTRATE-1 finding, 2026-09-22.)
     static Ogre::Real worldPerPixel(const Ogre::Camera *camera)
     {
         // A pass whose camera has never been given a viewport cannot be
@@ -126,12 +145,14 @@ private:
         if (!(height > 0.0f)) return Ogre::Real(0);
         if (camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC) {
             const Ogre::Real orthoH = camera->getOrthoWindowHeight();
-            return orthoH > 0.0f ? (orthoH * kLodBudgetPixels / height) : Ogre::Real(0);
+            return allowedWorldError(kLodBudgetPixels,
+                                     sampleFootprintOrtho(float(orthoH), float(height)));
         }
         const Ogre::Matrix4 &proj = camera->getProjectionMatrix();
         const Ogre::Real p11 = proj[1][1];
-        if (!(p11 > 0.0f)) return Ogre::Real(0);
-        return Ogre::Real(2) * kLodBudgetPixels / (p11 * height);
+        // One metre of distance: the per-object value multiplies this by its own.
+        return allowedWorldError(
+            kLodBudgetPixels, sampleFootprintPerspective(1.0f, float(p11), float(height)));
     }
 };
 
@@ -199,6 +220,33 @@ MeshId OgreScene::createMesh(const MeshData &data) {
     if (data.indices.empty() || data.indices.size() % 3 != 0)     { mError = "createMesh: indices must be triangles"; return 0; }
     const size_t nv = data.vertexCount();
     for (unsigned i : data.indices) if (i >= nv) { mError = "createMesh: index out of range"; return 0; }
+    // THE LOD LEVELS ARE VALIDATED HERE AND NOWHERE ELSE (ATOM inventory row
+    // AT-DUP as amended by the lane's audit). `buildMeshV2` used to re-walk every
+    // index of every level and silently END THE CHAIN at the first bad one; 1.7
+    // deleted that because the BAKE is the validator and a bake cannot deliver a
+    // malformed level (`MeshBake::readMesh` refuses the blob). But `createMesh` is
+    // a PUBLIC boundary and three suites hand-build `lodIndices`, so the deletion
+    // left a hand-built level going straight to the GPU as an out-of-range index
+    // buffer — a driver fault, not a message. One O(indices) pass per upload, the
+    // same price level 0 already pays, and the answer is a REFUSAL with a reason.
+    for (size_t L = 0; L < data.lodIndices.size(); ++L) {
+        const std::vector<unsigned> &level = data.lodIndices[L];
+        if (level.empty() || level.size() % 3 != 0) {
+            mError = "createMesh: LOD level " + std::to_string(L + 1) +
+                     " is not a positive whole number of triangles";
+            return 0;
+        }
+        for (unsigned i : level)
+            if (i >= nv) {
+                mError = "createMesh: LOD level " + std::to_string(L + 1) +
+                         " names vertex " + std::to_string(i) + " of " + std::to_string(nv);
+                return 0;
+            }
+    }
+    if (!data.lodBounds.empty() && data.lodBounds.size() != data.lodIndices.size()) {
+        mError = "createMesh: one bound per LOD level, or none at all";
+        return 0;
+    }
     if (!data.normals.empty() && data.normals.size() != data.positions.size()) { mError = "createMesh: normals count mismatch"; return 0; }
     if (!data.uvs.empty() && data.uvs.size() != nv * 2) { mError = "createMesh: uv count mismatch"; return 0; }
     if (!data.blendIndices.empty() && !data.hasSkinData()) {
@@ -213,24 +261,28 @@ MeshId OgreScene::createMesh(const MeshData &data) {
             rec.maxBlendIndex = std::max(rec.maxBlendIndex, unsigned(b));
         rec.mesh = buildMeshV2(rec.name, data, data.dynamic ? &rec.interleaved : nullptr);
         // ATOM stage 1: kept so a LOD-bias change can re-derive the switch
-        // distances. Exactly as many entries as the mesh got extra VAOs —
-        // buildMeshV2 may have stopped early on a malformed level.
-        if (!data.lodErrors.empty() && rec.mesh && rec.mesh->getNumSubMeshes() > 0) {
+        // distances. Exactly as many entries as the mesh got extra VAOs — which
+        // is every level it was given, since the levels were validated above and
+        // `buildMeshV2` no longer drops any.
+        if (!data.lodBounds.empty() && rec.mesh && rec.mesh->getNumSubMeshes() > 0) {
             const size_t levels = rec.mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size();
             if (levels > 1)
-                rec.lodErrors.assign(data.lodErrors.begin(),
-                                     data.lodErrors.begin() + ptrdiff_t(std::min(levels - 1, data.lodErrors.size())));
+                rec.lodBounds.assign(data.lodBounds.begin(),
+                                     data.lodBounds.begin() + ptrdiff_t(std::min(levels - 1, data.lodBounds.size())));
         }
-        // ...and the by-Ogre-mesh index, which is how a consumer holding only an
-        // `Ogre::Item *` — the cascade voxeliser — reaches them (ATOM stage 1).
-        if (!rec.lodErrors.empty() && rec.mesh)
-            mLodErrorsByMesh[rec.mesh.get()] = rec.lodErrors;
         // SURFACE-CACHE phase 1 -> 2: the same index for the mesh's CARDS. The
         // list is the bake's, in mesh space, and it is stored whole — the cache
         // is the only consumer and it re-derives everything world-side per
         // instance, so nothing here is transformed or filtered.
         if (!data.cards.empty() && rec.mesh) mCardsByMesh[rec.mesh.get()] = data.cards;
+        // ...and the by-Ogre-mesh INDEX, which is how a consumer holding only an
+        // `Ogre::Item *` — the cascade voxeliser — reaches the record (ATOM stage
+        // 1). An index and not a copy of the bounds (AT-DUP), which is why it is
+        // filled after the record is in the map.
+        const bool chained = !rec.lodBounds.empty() && rec.mesh;
+        Ogre::Mesh *const ogreMesh = rec.mesh.get();
         mMeshes[++mNextMeshId] = std::move(rec);
+        if (chained) mMeshIdByOgreMesh[ogreMesh] = mNextMeshId;
         return mNextMeshId;
     } JAH_CATCH(mError, 0);
 }
@@ -280,7 +332,7 @@ bool OgreScene::destroyMesh(MeshId id) {
     JAH_TRY {
         invalidateGiCaches();   // BEFORE the mesh dies: IR frees its by-VAO caches now
         for (auto &kv : mNodes) if (kv.second.meshRef == id) detachItem(kv.first, kv.second);
-        if (it->second.mesh) { mLodErrorsByMesh.erase(it->second.mesh.get()); mCardsByMesh.erase(it->second.mesh.get()); }
+        if (it->second.mesh) { mMeshIdByOgreMesh.erase(it->second.mesh.get()); mCardsByMesh.erase(it->second.mesh.get()); }
         it->second.mesh.reset();
         Ogre::MeshManager &mm = Ogre::MeshManager::getSingleton();
         if (mm.resourceExists(it->second.name)) mm.remove(it->second.name);
@@ -341,22 +393,32 @@ namespace {
 ///
 /// Returns null when there is nothing to gain (the caller then aliases the main
 /// VAO, which is Ogre's "useSameVaos" fallback).
-/// The optimized shadow VAOs: a position-only (plus blend indices/weights)
-/// vertex buffer with duplicate vertices merged, and ONE VAO PER LOD LEVEL over
-/// it — `levels` is the same accepted level list the normal VAOs were built
-/// from, level 0 first. An EMPTY return means "no optimized form", and the
-/// caller aliases the normal VAOs for every level instead.
+/// The optimized shadow VAO: a position-only (plus blend indices/weights) vertex
+/// buffer with duplicate vertices merged, and ONE VAO over it — LEVEL 0's. An
+/// EMPTY return means "no optimized form", and the caller aliases the normal VAOs
+/// for every level instead.
 ///
-/// Why one per level rather than just level 0:
-/// SubMesh::destroyShadowMappingVaos tests only
-/// `mVao[VpNormal][0] == mVao[VpShadow][0]` to decide whether the shadow list
-/// is an ALIAS of the normal one. A MIXED list — an independent VAO at 0 and
-/// aliases above it — reads as independent, so it destroys the aliased entries,
-/// and the SubMesh destructor then destroys the same VAOs and their shared
-/// vertex buffer a second time: "Vertex Buffer has already been destroyed or
-/// doesn't belong to this VaoManager", thrown on the first mesh destroy after
-/// an import (measured 2026-09-15, by the suite that came with this feature).
-/// The pin's shape is all-aliased or all-independent; we give it one of the two.
+/// ONE, NOT ONE PER LEVEL, SINCE ogre-patch 0088 (ATOM inventory row AT-A11).
+/// `SubMesh::destroyShadowMappingVaos` used to decide ALIAS-versus-INDEPENDENT
+/// for the whole shadow list from one test on entry 0, so a MIXED list — an
+/// independent VAO at 0 and aliases above it — read as independent: it destroyed
+/// the aliased entries and `~SubMesh` destroyed the same VAOs and their shared
+/// vertex buffer a second time ("Vertex Buffer has already been destroyed or
+/// doesn't belong to this VaoManager", measured 2026-09-15 by the suite that came
+/// with this feature). Only the two pure shapes were legal, so this built one
+/// independent VAO per level to stay inside one of them. Patch 0088 makes the
+/// alias test per entry, and the mixed list — which is the shape a LOD chain
+/// wants — is legal.
+///
+/// WHY THE MIXED LIST IS THE RIGHT SHAPE, and not merely the newly-allowed one:
+/// the optimized form exists so a shadow pass streams 12 bytes per vertex instead
+/// of 48, and its value is proportional to the vertex fetch the pass actually
+/// does. Each level halves its triangles, so the coarse levels of every mesh in a
+/// scene together account for a vanishing share of that fetch — while an
+/// independent index buffer and VertexArrayObject per level per mesh is VRAM for
+/// the life of the mesh. So level 0 gets the shrunk buffer and the coarse levels
+/// alias their own normal VAOs (the CALLER does the aliasing — this function
+/// returns the one VAO it built).
 std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
     Ogre::VaoManager *vaoMgr, const MeshData &data, const std::vector<float> &blendW,
     bool skinned, const std::vector<const std::vector<unsigned> *> &levels) {
@@ -431,13 +493,12 @@ std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
         return {};
     }
 
-    // The index type follows the SHADOW vertex count, which can only shrink —
-    // and it is the SAME for every level, or the levels would not share a
-    // vaoName and each would cost its own draw command in the shadow pass.
+    // The index type follows the SHADOW vertex count, which can only shrink.
     std::vector<Ogre::VertexArrayObject *> out;
     Ogre::VertexBufferPackedVec shadowVbufs;
     shadowVbufs.push_back(vbuf);
-    for (const std::vector<unsigned> *level : levels) {
+    {
+        const std::vector<unsigned> *level = levels.front();   // LEVEL 0, and only it
         const size_t count = level->size();
         Ogre::IndexBufferPacked *ibuf = nullptr;
         if (uniqueCount <= 65535u) {
@@ -460,12 +521,13 @@ std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
 
 }   // namespace
 
-void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &errors) const {
-    // THE THRESHOLDS ARE THE BAKED ERRORS THEMSELVES (ATOM-3 A1). The strategy's
-    // per-object value is the world-space error that view can afford
-    // (JahWorldErrorLodStrategy, above), so `lodSet`'s `lower_bound - 1` over
-    // this array IS `lodLevelForWorldError` — one rule, no second copy of it,
-    // and no reference projection baked into a distance.
+void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &bounds) const {
+    // THE THRESHOLDS ARE THE BAKED BOUNDS THEMSELVES (ATOM-3 A1, and the bound
+    // rather than the simplifier's error since ATOM-BAKE-1's AT-A5). The
+    // strategy's per-object value is the world-space deviation that view can
+    // afford (JahWorldErrorLodStrategy, above), so `lodSet`'s `lower_bound - 1`
+    // over this array IS `lodLevelForWorldError` — one rule, no second copy of
+    // it, and no reference projection baked into a distance.
     //
     // THE BIAS DIVIDES THEM, which is the same dial it always was seen from the
     // other side: a bias above 1 shrinks every threshold, so a given view
@@ -479,7 +541,7 @@ void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<floa
     Ogre::Mesh::LodValueArray values;
     values.push_back(Ogre::LodStrategyManager::getSingleton().getDefaultStrategy()->getBaseValue());
     float previous = values[0];
-    for (float error : errors) {
+    for (float error : bounds) {
         // Monotonic by construction (the bake accumulates), but a blob that is
         // not strictly increasing would make a level unreachable rather than
         // wrong — nudge instead of trusting.
@@ -493,6 +555,56 @@ void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<floa
     mesh->_setLodValues(values);
 }
 
+// WHICH LEVEL EVERY DRAWN OBJECT IS ON (ATOM P1's readout — the gap OWN-TRI left).
+// `mCurrentMeshLod` is the byte the render queue indexes the VAO list with, so this
+// reads the DECISION and not a re-derivation of it: there is no camera here, no
+// threshold walk and no bias — asking the strategy again from outside would be a
+// second answer that could disagree with the picture.
+void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
+    out.clear();
+    out.reserve(mNodes.size());
+    for (const auto &kv : mNodes) {
+        const Ogre::Item *item = kv.second.item;
+        if (!item) continue;
+        const Ogre::Mesh *mesh = item->getMesh().get();
+        if (!mesh || mesh->getNumSubMeshes() == 0) continue;
+        ObjectLodDesc d;
+        d.node = kv.first;
+        d.name = item->getName();
+        d.level = unsigned(item->getCurrentMeshLod());
+        d.levels = unsigned(mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size());
+        if (d.levels == 0) d.levels = 1;
+        for (unsigned si = 0; si < mesh->getNumSubMeshes(); ++si) {
+            const auto &vaos = mesh->getSubMesh(si)->mVao[Ogre::VpNormal];
+            if (vaos.empty()) continue;
+            // The clamp is the render queue's own: a level past the end of a
+            // sub-mesh's list draws its coarsest.
+            const size_t pick = std::min(size_t(d.level), vaos.size() - 1u);
+            d.triangles += (unsigned long long)(vaos[pick]->getPrimitiveCount() / 3u);
+        }
+        out.push_back(d);
+    }
+}
+
+// The VAO-list SHAPE, for the suite that has to see what ogre-patch 0088 bought
+// (AT-A11). Counting the shadow entries that are NOT in the normal list is the same
+// test the patched `destroyShadowMappingVaos` makes, which is the point: the number
+// this reports is the number of VAOs and index buffers the mesh really owns.
+bool OgreScene::meshVaoShape(MeshId mesh, unsigned &levels, unsigned &shadowIndependent) const {
+    levels = 0;
+    shadowIndependent = 0;
+    const auto it = mMeshes.find(mesh);
+    if (it == mMeshes.end() || !it->second.mesh || it->second.mesh->getNumSubMeshes() == 0)
+        return false;
+    const Ogre::SubMesh *sub = it->second.mesh->getSubMesh(0);
+    levels = unsigned(sub->mVao[Ogre::VpNormal].size());
+    for (Ogre::VertexArrayObject *v : sub->mVao[Ogre::VpShadow]) {
+        const auto &normal = sub->mVao[Ogre::VpNormal];
+        if (std::find(normal.begin(), normal.end(), v) == normal.end()) ++shadowIndependent;
+    }
+    return true;
+}
+
 void OgreScene::setLodBias(float bias) {
     if (!(bias >= 0.0f)) bias = 0.0f;
     if (bias == mLodBias) return;
@@ -501,8 +613,8 @@ void OgreScene::setLodBias(float bias) {
     // so rewriting the arrays in place moves every instance in the scene with
     // no rebuild and no re-attach. The array LENGTH never changes here.
     for (auto &kv : mMeshes) {
-        if (kv.second.lodErrors.empty() || !kv.second.mesh) continue;
-        applyLodValues(kv.second.mesh, kv.second.lodErrors);
+        if (kv.second.lodBounds.empty() || !kv.second.mesh) continue;
+        applyLodValues(kv.second.mesh, kv.second.lodBounds);
     }
 }
 
@@ -673,20 +785,23 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     // drawing the bind pose. The bake builds no chain for a skinned mesh
     // either; this is the second lock on the same door.
     //
-    // `accepted` is the ONE list both VAO lists are built from — a malformed
-    // level ends the chain there, and the two lists must not disagree about
-    // where: the render queue indexes both with one mCurrentMeshLod.
+    // `accepted` is the ONE list both VAO lists are built from — the two lists
+    // must not disagree about how long the chain is: the render queue indexes
+    // both with one mCurrentMeshLod.
+    //
+    // THE LEVELS ARE NOT VALIDATED HERE (ATOM inventory row AT-DUP). There is ONE
+    // validator on this path and it is `createMesh`, at the public boundary, where
+    // a malformed level becomes a refusal with a reason instead of a driver fault.
+    // This function used to walk every index of every level AGAIN and silently end
+    // the chain at the first bad one — a second validator, with a different
+    // remedy, over data the first one has already refused. What is still asserted
+    // is the one thing this function owns: that the chain's LENGTH matches the
+    // number of bounds it will publish as switch thresholds.
     std::vector<const std::vector<unsigned> *> accepted;
     accepted.push_back(&data.indices);
-    if (!data.dynamic && data.lodErrors.size() == data.lodIndices.size()) {
-        for (const std::vector<unsigned> &level : data.lodIndices) {
-            if (level.size() < 3 || level.size() % 3 != 0) break;
-            bool bad = false;
-            for (unsigned i : level) if (i >= nv) { bad = true; break; }
-            if (bad) break;
+    if (!data.dynamic && data.lodBounds.size() == data.lodIndices.size())
+        for (const std::vector<unsigned> &level : data.lodIndices)
             accepted.push_back(&level);
-        }
-    }
     for (size_t L = 1; L < accepted.size(); ++L) {
         const std::vector<unsigned> &level = *accepted[L];
         Ogre::IndexBufferPacked *lodIbuf = nullptr;
@@ -733,11 +848,17 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     std::vector<Ogre::VertexArrayObject *> shadowVaos;
     if (Ogre::Mesh::msOptimizeForShadowMapping && !data.dynamic)
         shadowVaos = buildShadowVaos(vaoMgr, data, blendW, skinned, accepted);
-    if (shadowVaos.size() == accepted.size()) {
-        for (Ogre::VertexArrayObject *v : shadowVaos) sub->mVao[Ogre::VpShadow].push_back(v);
+    if (shadowVaos.size() == 1) {
+        // THE MIXED LIST (ogre-patch 0088): the shrunk VAO for level 0, and every
+        // coarse level ALIASING its own normal VAO. Correct geometry at every
+        // level — a shadow pass at level k still draws level k's triangles — for
+        // one shadow vertex buffer and one shadow index buffer per mesh instead
+        // of one per level.
+        sub->mVao[Ogre::VpShadow].push_back(shadowVaos.front());
+        for (size_t L = 1; L < sub->mVao[Ogre::VpNormal].size(); ++L)
+            sub->mVao[Ogre::VpShadow].push_back(sub->mVao[Ogre::VpNormal][L]);
     } else {
-        // ALL-ALIASED, the pin's other legal shape (buildShadowVaos says why a
-        // mixed list is a double free).
+        // ALL-ALIASED, when there is no optimized form to build at all.
         for (Ogre::VertexArrayObject *v : sub->mVao[Ogre::VpNormal])
             sub->mVao[Ogre::VpShadow].push_back(v);
     }
@@ -750,9 +871,9 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     // switch DISTANCES, ascending, with 0 first. Set before any Item exists:
     // Item::_initialise caches this array's address.
     if (accepted.size() > 1) {
-        std::vector<float> errors(data.lodErrors.begin(),
-                                  data.lodErrors.begin() + ptrdiff_t(accepted.size() - 1));
-        applyLodValues(mesh, errors);
+        std::vector<float> bounds(data.lodBounds.begin(),
+                                  data.lodBounds.begin() + ptrdiff_t(accepted.size() - 1));
+        applyLodValues(mesh, bounds);
     }
     const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
     mesh->_setBounds(aabb, false);

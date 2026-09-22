@@ -29,6 +29,9 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSockets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuScene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSurfaceCache.cpp
@@ -249,35 +252,39 @@ endfunction()
 # --- Shader-cache fingerprint terms (SHADER_CACHE_SPEC.md §4.2) --------------
 # Two things no hash inside Ogre can see, baked in at configure time:
 #
-#  * JAHSHAKA_OGRE_PATCH_SERIES — a hash of irisgl/thirdparty/ogre-patches/*.patch
-#    plus the submodule's pinned SHA. Four of our patches change SHADER media and
-#    the rest change engine C++; a re-run of build-ogre.sh with a new patch
-#    produces a different .so and identical Ogre-side hashes, so without this term
-#    a stale cache would look perfectly valid to Ogre and load.
+#  * JAHSHAKA_OGRE_FORK_COMMIT — the ogre-next submodule's HEAD sha. Since the
+#    fork (2026-09-22) that ONE value is the whole identity of the engine source:
+#    our changes are commits on github.com/jahshaka/ogre-next `jahshaka`, media and
+#    C++ alike, so a different engine is a different sha and nothing else can vary.
+#    It replaces the old JAHSHAKA_OGRE_PATCH_SERIES (a fold of the 88 patch files'
+#    hashes plus the pin), which had exactly this job while the source was
+#    "upstream's commit + a directory of patches". Ogre's own hashes cannot see
+#    either: a media-only change produces identical Ogre-side hashes, so without
+#    this term a stale cache looks perfectly valid and loads.
 #  * JAHSHAKA_ENGINE_BUILD_ID — a hash of the engine's OWN sources. This TU set
 #    decides which Hlms properties are set, which datablocks exist and which
 #    listener extends the pass buffer. Editing OgreEngine.cpp changes what
 #    shaders mean without changing one byte of any template.
 #
 # Configure-time, not build-time: both are inputs to a cache whose only failure
-# mode is "used a stale entry", and CMake re-configures whenever these files
-# change (the glob is CONFIGURE_DEPENDS and the source list is explicit).
-set(_ogre_patch_dir "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ogre-patches")
-set(_fp_blob "")
-file(GLOB _ogre_patches CONFIGURE_DEPENDS "${_ogre_patch_dir}/*.patch")
-foreach(_p IN LISTS _ogre_patches)
-    file(SHA256 "${_p}" _h)
-    get_filename_component(_n "${_p}" NAME)
-    string(APPEND _fp_blob "${_n}:${_h};")
-endforeach()
-# The pin itself: a patch series applied to a different upstream commit is a
-# different engine. `git ls-tree` reads the gitlink without needing the
-# submodule to be checked out at all.
-execute_process(COMMAND git ls-tree HEAD thirdparty/ogre-next
-                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
-                OUTPUT_VARIABLE _ogre_pin ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
-string(APPEND _fp_blob "pin:${_ogre_pin};")
-string(SHA256 _ogre_patch_series "${_fp_blob}")
+# mode is "used a stale entry", and CMake re-configures whenever these files change.
+#
+# HEAD, not the recorded gitlink: the sha that must fence the cache is the one the
+# engine was BUILT from. A lane that commits on the fork and builds before bumping
+# the pin (the normal order) would otherwise get a cache fingerprint that still
+# claims the old engine. `git -C thirdparty/ogre-next rev-parse HEAD` says what is
+# actually there; a checkout so broken that it answers nothing falls back to the
+# gitlink, and an unconfigurable "unknown" is better than a silently shared key.
+execute_process(COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ogre-next" rev-parse HEAD
+                OUTPUT_VARIABLE _ogre_fork_commit ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _ogre_fork_commit)
+    execute_process(COMMAND git ls-tree HEAD thirdparty/ogre-next
+                    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+                    OUTPUT_VARIABLE _ogre_fork_commit ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif()
+if(NOT _ogre_fork_commit)
+    set(_ogre_fork_commit "unknown")
+endif()
 
 # JAHSHAKA_ENGINE_BUILD_ID IS GENERATED AT BUILD TIME, not here (LIGHTING_FIX
 # fix 10 / F5). It used to be a configure-time `file(SHA256 ...)` fold, which
@@ -308,14 +315,14 @@ add_custom_target(JahshakaEngineBuildId DEPENDS "${_build_id_header}")
 # Exported so tests/engine's sanitised (ASan) copy of the same sources compiles
 # against the same generated header rather than a second, stale value.
 set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${JAHSHAKA_ENGINE_BUILD_ID_DIR}" PARENT_SCOPE)
-set(JAHSHAKA_OGRE_PATCH_SERIES "${_ogre_patch_series}" PARENT_SCOPE)
+set(JAHSHAKA_OGRE_FORK_COMMIT "${_ogre_fork_commit}" PARENT_SCOPE)
 
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)
 jahshaka_engine_ray_query(JahshakaEngine)
 jahshaka_engine_vr(JahshakaEngine)
 target_compile_definitions(JahshakaEngine PRIVATE
-    JAHSHAKA_OGRE_PATCH_SERIES="${_ogre_patch_series}")
+    JAHSHAKA_OGRE_FORK_COMMIT="${_ogre_fork_commit}")
 target_include_directories(JahshakaEngine
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${JAHSHAKA_ENGINE_BUILD_ID_DIR})
@@ -397,6 +404,17 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SSAO_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SSAO"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SMAA_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SMAA"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_VCT_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/VCT"
+    # ...MINUS THE IMAGE VOXELIZER (ATOM inventory row AT-VCTIMG). `VctImageVoxelizer`
+    # is the sibling class that caches a voxelized MESH in a texture cache; it
+    # reproduces none of the cascade chain's properties, it is deliberately not on
+    # our path (OgreGi.cpp says why), it is the one voxeliser patch 0064 declined
+    # to teach about LOD levels, and `VCT/ImageVoxelizer` + `VCT/VoxelPartialClear`
+    # have exactly one caller between them and it is that class. Its media is
+    # therefore staged for nothing. `copy_directory` has no exclude, so the folder
+    # is removed after the copy; the two job DEFINITIONS stay in
+    # Voxelizer.material.json (upstream's file, unpatched — a job nobody creates
+    # never opens its shader).
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/VCT/ImageVoxelizer"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Tools"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IBL_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IBL"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IFD_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IrradianceFields"

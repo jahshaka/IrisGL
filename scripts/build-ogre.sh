@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Builds Ogre-Next (IrisGL's engine backend) from the pinned submodule, with
-# Jahshaka's patches applied. Run ONCE per machine (and again after a submodule
-# bump); the normal IrisGL/Jahshaka build links the installed result and never
-# recompiles Ogre.
+# Builds Ogre-Next (IrisGL's engine backend) from the pinned submodule — which is
+# OUR FORK, github.com/jahshaka/ogre-next, branch `jahshaka`: our changes to the
+# engine are commits on it, so there is nothing to apply here. Run ONCE per tree
+# (and again after a submodule bump); the normal IrisGL/Jahshaka build links the
+# installed result and never recompiles Ogre.
 #
 #   ./scripts/build-ogre.sh              # build + install with defaults
 #   OGRE_PREFIX=/opt/ogre ./scripts/build-ogre.sh
@@ -21,13 +22,12 @@ SRC="${OGRE_SOURCE:-$REPO_ROOT/thirdparty/ogre-next}"
 # PER-TREE INSTALL (owner decree 2026-09-06: "we should not have a shared
 # engine"). The install lives beside its source inside THIS tree, so every
 # checkout and every worktree is self-contained: no cross-lane mutation of a
-# shared artifact, no stale-install ambiguity, and a worktree that patches its
-# submodule gets exactly the engine it patched. The engine builds in ~2-3 min
+# shared artifact, no stale-install ambiguity, and a worktree that moves its
+# submodule pin gets exactly the engine that pin names. The engine builds in ~2-3 min
 # on this class of machine — the old shared install's rationale (expensive
 # builds) is dead. OGRE_PREFIX still overrides for special layouts (the macOS
 # workspace keeps its own convention until its docs migrate).
 PREFIX="${OGRE_PREFIX:-$REPO_ROOT/thirdparty/ogre-next-install}"
-PATCHES="$REPO_ROOT/thirdparty/ogre-patches"
 if [ "$(uname -s)" = "Darwin" ]; then
     JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
     # macOS: Vulkan via MoltenVK (LunarG SDK — source its setup-env.sh first).
@@ -89,22 +89,39 @@ fi
     exit 1
 }
 
-# --- Apply Jahshaka's patches (idempotent: skip any already applied) ---------
-# Each patch documents itself; updating Ogre = bump the submodule pin, re-run
-# this script, and fix whichever patch no longer applies (that failure is the
-# signal upstream touched our files — review their change, adapt the patch).
-for p in "$PATCHES"/*.patch; do
-    if git -C "$SRC" apply --reverse --check "$p" 2>/dev/null; then
-        echo "patch already applied: $(basename "$p")"
-    elif git -C "$SRC" apply --check "$p" 2>/dev/null; then
-        git -C "$SRC" apply "$p"
-        echo "patch applied: $(basename "$p")"
-    else
-        echo "PATCH DOES NOT APPLY: $(basename "$p")" >&2
-        echo "Upstream changed the patched file. Diff their change and adapt the patch." >&2
-        exit 1
-    fi
-done
+# --- The source must be OUR fork, not upstream -------------------------------
+# There is no patch stack any more (2026-09-22): the 88 numbered patches became 26
+# file-family commits on the fork's `jahshaka` branch, proven byte-identical to the
+# applied stack (SPECS/OGRE_FORK_DESIGN.md; docs/OGRE_BUILD.md carries the
+# NUMBER -> commit index for the comments across the tree that still cite numbers).
+# An engine change is now a commit on `jahshaka` plus a pin bump here; an upstream
+# bump is `git fetch upstream && git merge upstream/master` ON `jahshaka`, where git
+# resolves the conflicts a patch replay used to fail at.
+#
+# THE ONE MISTAKE THIS SCRIPT STILL HAS TO REFUSE: building a commit that does NOT
+# carry our work — upstream's `master`, or a submodule left detached at the old pin
+# after a bad merge. It compiles, links, installs, runs, and renders a different
+# picture, with no other symptom (the ABI cookie cannot see it: same Ogre version,
+# same options). So HEAD must be a DESCENDANT of the conversion tag.
+ANCHOR_TAG=jahshaka-stack-v1
+ANCHOR_SHA=c290052ded9ca202f333239a0cb263c1c04cb71e   # what $ANCHOR_TAG points at
+anchor="$(git -C "$SRC" rev-parse -q --verify "refs/tags/$ANCHOR_TAG^{commit}" || true)"
+[ -n "$anchor" ] || anchor="$(git -C "$SRC" rev-parse -q --verify "$ANCHOR_SHA^{commit}" || true)"
+[ -n "$anchor" ] || {
+    echo "This ogre-next checkout has neither the tag $ANCHOR_TAG nor the commit it names," >&2
+    echo "so it cannot be our fork. Fetch it:" >&2
+    echo "  git -C $SRC fetch --tags https://github.com/jahshaka/ogre-next.git jahshaka" >&2
+    exit 1
+}
+if ! git -C "$SRC" merge-base --is-ancestor "$anchor" HEAD 2>/dev/null; then
+    echo "REFUSING TO BUILD: $SRC is at $(git -C "$SRC" rev-parse --short HEAD), which is NOT a" >&2
+    echo "descendant of $ANCHOR_TAG ($(echo "$ANCHOR_SHA" | cut -c1-9)) — i.e. it does not carry Jahshaka's" >&2
+    echo "engine work. That is almost always a submodule checked out on upstream's master, or" >&2
+    echo "one left behind by a merge. Put it on the pin the superproject records:" >&2
+    echo "  git -C $REPO_ROOT submodule update --init thirdparty/ogre-next" >&2
+    exit 1
+fi
+echo "Ogre source: $(git -C "$SRC" rev-parse --short HEAD) (fork jahshaka, descendant of $ANCHOR_TAG)"
 
 # --- Configure + build + install --------------------------------------------
 # The component set is pinned EXPLICITLY (every OGRE_BUILD_COMPONENT_* that the
@@ -240,7 +257,8 @@ if command -v ccache >/dev/null 2>&1 && [ "${JAH_NO_CCACHE:-0}" != "1" ]; then
     CCACHE_FLAGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
 fi
 
-# GPU TIMESTAMPS (ogre-patch 0027) — DEV BUILDS ONLY, the first of the two
+# GPU TIMESTAMPS (was ogre-patch 0027, now the fork's M03 commit) — DEV BUILDS
+# ONLY, the first of the two
 # off-switches the owner asked for (RENDER_LOOP_MONITOR_SPEC D3, 2026-09-12).
 # Without it the Vulkan render system's initGPUProfiling /
 # beginGPUSampleProfile / endGPUSampleProfile compile to upstream's empty stubs

@@ -371,12 +371,13 @@ void ShaderCache::configure(const std::string &dir, const std::string &appBuildI
       // The app's build identity. Our C++ decides which Hlms properties get set
       // and which datablocks exist; no hash inside Ogre can see that.
       << "|app=" << mAppBuildId
-      // The engine library's own build identity, and the Ogre patch series that
-      // produced the .so. Patches 0009/0010/0011 change SHADER BEHAVIOUR while
-      // leaving every Ogre-side hash untouched — without this term, re-running
-      // build-ogre.sh with a new patch leaves a cache Ogre considers perfect.
+      // The engine library's own build identity, and the commit of our Ogre fork
+      // that produced the .so and staged the media. An engine-side change to a
+      // shader piece changes SHADER BEHAVIOUR while leaving every Ogre-side hash
+      // untouched — without this term, re-running build-ogre.sh on a new fork
+      // commit leaves a cache Ogre considers perfect.
       << "|engine=" << JAHSHAKA_ENGINE_BUILD_ID
-      << "|patches=" << JAHSHAKA_OGRE_PATCH_SERIES
+      << "|ogre=" << JAHSHAKA_OGRE_FORK_COMMIT
       // Belt and braces over the staged templates (see hashTree).
       << "|media=" << hashTree(mMediaDir + "Hlms")
       // Ogre rejects a cache across these three anyway; failing here is faster

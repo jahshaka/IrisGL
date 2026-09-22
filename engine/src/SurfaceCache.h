@@ -181,7 +181,10 @@ struct CardSceneView {
         Ogre::Node *sceneNode = nullptr;
         MaterialId material = 0;
         const std::vector<MeshCardDesc> *cards = nullptr;
-        const std::vector<float> *lodErrors = nullptr;
+        /// The mesh's baked LOD BOUNDS. Carried for the cache's own diagnostics
+        /// and for a future consumer; the CARD'S LEVEL is not derived from it —
+        /// the bake owns that number (AT-CARDLOD, see OgreSurfaceCache.cpp).
+        const std::vector<float> *lodBounds = nullptr;
     };
     std::vector<Candidate> candidates;
 };

@@ -124,6 +124,7 @@ ChainDesc OgreView::chainDesc() const {
     // width()/height() (the target's real size) and not from mWidth/mHeight.
     d.hzb        = mPostFx.hzb;
     d.hzbLevels  = d.hzb ? hzbLevelsFor(width(), height()) : 0u;
+    d.hzbFarthest = mPostFx.hzbFarthest;
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and

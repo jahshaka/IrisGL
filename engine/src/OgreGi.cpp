@@ -967,6 +967,8 @@ GiStatus OgreScene::giStatus() const {
                                 : 0;
             cs.lastCpuMs  = c.lastCpuMs;
             cs.lodLevels  = c.lodLevels;    // what the attach set was voxelised at
+            // A READING of what the voxeliser bound at the last build, not a CPU
+            // prediction of it (AT-A12, ogre-patch 0089's getQueuedIndexCount).
             cs.voxelTriangles = c.lodTriangles;
             // WHAT THE REBUILD COST IN DISPATCHES (ogre-patch 0065): read live off
             // the voxeliser, which keeps its bucket map after build(). A bucket is
@@ -1024,11 +1026,14 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
     st.cascade = cascadeIdx;
     JAH_TRY {
         Ogre::VctLighting *lighting = nullptr;
+        Ogre::VctVoxelizer *voxelizer = nullptr;
         if (!mVctCascades.empty()) {
             if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return st;
             lighting = mVctCascades[size_t(cascadeIdx)].lighting;
+            voxelizer = mVctCascades[size_t(cascadeIdx)].voxelizer;
         } else if (cascadeIdx == 0) {
             lighting = mVctLighting;
+            voxelizer = mVctVoxelizer;
         }
         if (!lighting) return st;
         Ogre::TextureGpu *total = lighting->getLightVoxelTextures()[0];
@@ -1129,6 +1134,27 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
             if (walk(direct, wd)) {
                 st.peakDirect = wd.peak;
                 st.directAtMax = wd.atMax;
+            }
+        }
+
+        // AND THE SOURCE THE INJECTION SEEDS FROM (VOXEL-CLIP-1, ogre-patch
+        // 0087): the voxeliser's EMISSIVE volume, in scene radiance. The lit
+        // volumes above are the injection's OUTPUT, and an emitter clipped on
+        // its way in is indistinguishable there from a dimmer emitter — the
+        // same argument that put the volumes in this readback in the first
+        // place, one stage earlier. No normalisation: the voxeliser writes the
+        // material's emissive as authored.
+        if (voxelizer) {
+            Ogre::TextureGpu *emissive = voxelizer->getEmissiveVox();
+            if (emissive && emissive->getResidencyStatus() == Ogre::GpuResidency::Resident) {
+                st.emissiveFormat =
+                    Ogre::PixelFormatGpuUtils::toString(emissive->getPixelFormat());
+                Walk we;
+                if (walk(emissive, we)) {
+                    st.peakEmissive = we.peak;
+                    st.emissiveAtMax = we.atMax;
+                    st.emissiveAboveOne = we.aboveOne;
+                }
             }
         }
     } JAH_CATCH(mError, st);
@@ -3178,6 +3204,7 @@ void OgreScene::indexItemNode(Node &n) {
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
+    markGpuSlotDirty(n);            // a newborn slot has no entry in the table yet
 }
 
 void OgreScene::indexDecalNode(Node &n) {
@@ -3212,6 +3239,31 @@ void OgreScene::unindexItemNode(Node &n) {
     last->itemSlot = i;
     mItemNodes.pop_back();
     n.itemSlot = size_t(-1);
+    // THE GPU SCENE'S HALF OF THE SWAP-REMOVE, in the one place the swap
+    // happens. TWO CASES, and the second is the one that bites: when the dying
+    // item was NOT the tail, the tail's entry travels into the freed slot and
+    // that slot is re-composed this frame; when it WAS the tail, nothing moves
+    // in and the entry it leaves must be CLEARED — otherwise the next attach
+    // lands in a slot that is still "born" and inherits the dead object's world
+    // as its PREVIOUS world, i.e. a newborn reprojecting out of another
+    // object's grave. Either way the freed entry is copied to the device, so the
+    // region past `slotCount()` never holds a traceable ghost.
+    if (mGpuScene.live()) {
+        if (last != &n) {
+            mGpuScene.onSlotMoved(uint32_t(mItemNodes.size()), uint32_t(i));
+            mGpuForced.push_back(uint32_t(i));
+        } else {
+            mGpuScene.onSlotFreed(uint32_t(i));
+        }
+        // THE RAY LEVEL IS KEYED BY SLOT and the slots have just been
+        // renumbered (ATOM P3's AT-A8r), so both ends of the swap are cleared:
+        // whatever lands in either is evaluated afresh instead of inheriting
+        // the distance band of the object that used to be there. (The band
+        // cannot travel with the object: nothing here indexes by object.)
+        forgetRayLevel(uint32_t(i));
+        forgetRayLevel(uint32_t(mItemNodes.size()));
+    }
+    mGpuScene.setSlotCount(uint32_t(mItemNodes.size()));
 }
 
 // THE ITEM WALK — the GI movement scan (FIX WAVE B3, engine half) and the
@@ -4372,6 +4424,8 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.items = cascadeGeometryCount(c);
         setCascadeItems(c, c.items > 0u);
         c.voxelizer->build(mSceneMgr);
+        // THE READING, taken where the buckets exist (ogre-patch 0089).
+        c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
         c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
                                            c.voxelizer, anisotropic);
         const Ogre::uint32 extraBounces =
@@ -4701,7 +4755,7 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
 // of a mesh a cascade voxelises, and this is it.
 //
 // THE RULE IS NOT RESTATED HERE. It is `lodLevelForWorldError` (Types.h, beside
-// MeshData::lodErrors, which is the other caller): the COARSEST baked level
+// MeshData::lodBounds, which is the other caller): the COARSEST baked level
 // whose error is below the size the consumer samples at. What this function
 // owns is the two terms that turn a cascade into that size:
 //
@@ -4715,7 +4769,7 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
 //     so a mesh simplified to a 7 mm error is free of charge there and costs a
 //     quarter of the raster dispatch.
 //   * AND IT IS MEASURED IN THE MESH'S OWN UNITS, because the baked errors are
-//     (MeshData::lodErrors). The item carries the scale that takes one to the
+//     (MeshData::lodBounds). The item carries the scale that takes one to the
 //     other, so the cell is divided by it — a 10x-scaled mesh has 10x the
 //     world-space error for the same level, and dividing is what keeps the
 //     comparison honest for both. The LARGEST axis of the derived scale is
@@ -4738,18 +4792,23 @@ unsigned OgreScene::cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item)
     // a switch nothing can name — the defect the NO_RAY_QUERY shape avoids by
     // meeting the request once and reporting the answer.
     if (!mCascadeVoxelLod || !item) return 0u;
-    if (mLodErrorsByMesh.empty()) return 0u;               // the common scene, in one branch
+    if (mMeshIdByOgreMesh.empty()) return 0u;              // the common scene, in one branch
     const Ogre::Mesh *mesh = item->getMesh().get();
-    const auto it = mLodErrorsByMesh.find(mesh);
-    if (it == mLodErrorsByMesh.end() || it->second.empty()) return 0u;
+    const std::vector<float> *bounds = lodBoundsFor(mesh);
+    if (!bounds || bounds->empty()) return 0u;
     float scale = 1.0f;
     if (const Ogre::Node *node = item->getParentNode()) {
         const Ogre::Vector3 s = node->_getDerivedScale();
         scale = std::max(std::max(std::fabs(s.x), std::fabs(s.y)), std::fabs(s.z));
     }
     if (!(scale > 0.0f) || !std::isfinite(scale)) return 0u;
-    const float sizeInMeshUnits = (c.cell() * kCascadeLodCellFraction) / scale;
-    return unsigned(lodLevelForWorldError(it->second, sizeInMeshUnits, it->second.size()));
+    // THE CASCADE'S CASE OF THE QUALITY CURRENCY (Types.h, SUB-ERROR): one
+    // SAMPLE here is a cell, the tolerance is `kCascadeLodCellFraction` of one,
+    // and the mesh's own scale takes the answer into the units the baked bounds
+    // are measured in. The arithmetic is the same multiply it always was — the
+    // vocabulary is what changed, and `gi.cascade_lod` is the proof of it.
+    const float sizeInMeshUnits = allowedWorldError(kCascadeLodCellFraction, c.cell(), scale);
+    return unsigned(lodLevelForWorldError(*bounds, sizeInMeshUnits, bounds->size()));
 }
 
 void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
@@ -4795,9 +4854,9 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
     // and a per-item reading would claim a level nothing was spent at.
     //
     // Hence: MIN over the wanted set per mesh first, then one pass that spends
-    // that level AND books the histogram from it, so `lodLevels` /
-    // `lodTriangles` describe what the voxeliser HOLDS — which is what their
-    // comment in EnginePrivate.h promises and what `gi.cascade_lod` asserts.
+    // that level AND books the histogram from it, so `lodLevels` describes what
+    // the voxeliser was ASKED for. `lodTriangles` is no longer booked here at all
+    // — it is READ off the voxeliser after `build()` (AT-A12, patch 0089).
     std::unordered_map<const Ogre::Mesh *, unsigned> effective;
     effective.reserve(wanted.size());
     for (Ogre::Item *item : wanted) {
@@ -4823,18 +4882,21 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
         if (c.lodLevels.size() <= size_t(lod)) c.lodLevels.resize(size_t(lod) + 1u, 0);
         ++c.lodLevels[lod];
         c.voxelizer->addItem(item, false, 0u, lod);
-        // The geometry that level actually is — the same clamp ogre-patch 0064
-        // makes inside the voxeliser, so the reading cannot claim a level the
-        // mesh does not have.
-        if (mesh) {
-            for (unsigned si = 0; si < mesh->getNumSubMeshes(); ++si) {
-                const auto &vaos = mesh->getSubMesh(si)->mVao[Ogre::VpNormal];
-                if (vaos.empty()) continue;
-                const size_t pick = std::min(size_t(lod), vaos.size() - 1u);
-                c.lodTriangles += (long long)(vaos[pick]->getPrimitiveCount() / 3u);
-            }
-        }
     }
+    // WHAT THE VOXELISER HOLDS, READ OFF THE VOXELISER (ATOM inventory row
+    // AT-A12, ogre-patch 0089). This used to walk each mesh's VAOs here and sum
+    // `getPrimitiveCount()` at the level it had just asked for, re-applying patch
+    // 0064's own clamp to do it: a PREDICTION, in a second copy of the clamp
+    // (AT-DUP), that also counted geometry for items the region declined.
+    // `getQueuedIndexCount()` is the sum of `QueuedInstance::numIndices` over the
+    // buckets — the very numbers that size the raster dispatches — so this is a
+    // reading, and `gi.cascade_lod`'s case 4 asserts a reading.
+    //
+    // AFTER the addItem loop and not inside it, because the buckets are filled by
+    // `build()`... which is why the number is refreshed there too: see
+    // rebuildCascade. Here it is the count the LAST build left, which for a fresh
+    // attach is zero until the build runs.
+    c.lodTriangles = 0;
     c.attachedItems.swap(wanted);
     c.itemsAttached = true;
 }
@@ -4920,6 +4982,8 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "OgreScene::rebuildCascade");
             }
             c.voxelizer->build(mSceneMgr);
+            // THE READING, taken where the buckets exist (ogre-patch 0089).
+            c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
             // ...and only once the build has SUCCEEDED does the lighting start
             // reading the replacement (the swap re-creates its light voxels and
             // re-registers its texture listeners). A build that threw leaves the

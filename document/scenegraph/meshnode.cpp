@@ -164,23 +164,20 @@ bool MeshNode::setPropertyValue(QString valueName, const QVariant &value)
     return SceneNode::setPropertyValue(valueName, value);
 }
 
-void MeshNode::setMesh(QString source)
-{
-    mesh = Mesh::loadMesh(source);
-    meshPath = source;
-    meshIndex = 0;
-    adoptSkeletonFromMesh();
-    // CONTENT (DIRTY_SET_MIRROR_SPEC §3.1). Nothing reported a mesh or
-    // material swap before the dirty set — the mirror noticed one by comparing
-    // the pointers it kept, once per node per frame, forever.
-    notifyChanged(NodeChange::Content);
-}
-
-//should not be used on plain scene meshes
+// (`setMesh(QString)` is DELETED — ATOM P2, 2026-09-22. It called
+// `Mesh::loadMesh`, i.e. it PARSED a model file inside a document setter, and the
+// only things that reached it were the built-ins: a shipped resource path per
+// primitive. Those are baked library assets now and the caller resolves the asset
+// (jahshaka/src/services/primitiveassets.h), so a mesh arrives here as a MeshPtr
+// like every imported model's does, and `meshPath` is set by whoever knows what
+// reference the document should store.)
 void MeshNode::setMesh(MeshPtr mesh)
 {
     this->mesh = mesh;
     adoptSkeletonFromMesh();
+    // CONTENT (DIRTY_SET_MIRROR_SPEC §3.1). Nothing reported a mesh or
+    // material swap before the dirty set — the mirror noticed one by comparing
+    // the pointers it kept, once per node per frame, forever.
     notifyChanged(NodeChange::Content);
 }
 

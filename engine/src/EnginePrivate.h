@@ -17,6 +17,12 @@
 //     MeshManager::removeAll -> Root. A MeshPtr outliving Root hits a dead VaoManager.
 //   * No Ogre exception may escape: every virtual is wrapped and translated.
 #include "jahshaka/engine/Engine.h"
+// THE GPU SCENE's tables (A3 slice). Engine-private and Ogre-aware — it holds
+// MeshPtrs and hands out UavBufferPackeds — but it knows nothing of Vulkan and
+// nothing of OgreScene's Node, which is what keeps it bindable from an
+// HlmsComputeJob and buildable on a platform with no ray queries.
+#include "GpuCull.h"
+#include "GpuScene.h"
 
 #include <OgreRoot.h>
 #include <OgreAbiUtils.h>
@@ -289,28 +295,6 @@ public:
     /// ...and its Root, so the destructor can flush without reaching into the
     /// view's privates.
     Ogre::Root *mRoot = nullptr;
-};
-
-/// Where the traced set is WRITTEN. `OgreScene::gatherRayInstances` walks the
-/// scene's item index once and hands each traceable Item to the sink, which
-/// (in the product path) writes the transform straight into a persistently
-/// mapped instance buffer — no intermediate vector, which is the whole point:
-/// the CPU-side per-instance gather is the cost that scales (S3 measured
-/// 4-6 ms at 8,026 instances doing it the naive way).
-struct RayInstanceSink {
-    virtual ~RayInstanceSink() = default;
-    /// One traceable Item. `xform` is the node's full world transform (Ogre
-    /// row-major; the top 3x4 is what an instance descriptor takes verbatim).
-    /// `mask` is the instance mask a consumer's rays test against (bit 0 = a
-    /// shadow caster, bit 1 = a mover, bit 2 = still world — audit C-15's
-    /// per-consumer masks). `customIndex` is the node's slot in the scene's
-    /// item index, so a hit names the object that was hit.
-    /// The mesh is passed as a STRONG reference: a bottom-level structure is
-    /// built over the mesh's own vertex and index buffers, so the tier holds
-    /// the mesh alive for as long as it holds the structure (and drops both
-    /// before Root is deleted — the MeshPtr rule).
-    virtual void add(const Ogre::MeshPtr &mesh, const Ogre::Matrix4 &xform, unsigned mask,
-                     unsigned customIndex) = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1037,10 @@ struct ChainDesc {
     /// resize would leave passes addressing mips that no longer exist). 0 when
     /// the pyramid is off.
     unsigned hzbLevels = 0u;
+    /// WHICH DEPTH EACH LEVEL KEEPS (PostFxDesc::hzbFarthest carries the
+    /// argument). It is part of the graph's identity because it is a shader
+    /// PROPERTY of the reduce job, i.e. a different permutation.
+    bool  hzbFarthest = true;
 
     // ---- Distortion (POST_LOOKS_SPEC.md §5.3) ----
     /// The RESOLVED flag (the host has already answered "auto" against whether
@@ -2951,10 +2939,13 @@ public:
     /// ATOM stage 1: the scene-wide LOD dial (OgreMesh.cpp).
     void  setLodBias(float bias) override;
     float lodBias() const override { return mLodBias; }
+    void  objectLods(std::vector<ObjectLodDesc> &out) const override;
+    bool  meshVaoShape(MeshId mesh, unsigned &levels,
+                       unsigned &shadowIndependent) const override;
     /// Writes `errors` (level 1 first, a length in mesh units each) into
     /// `mesh`'s LOD value array at the current bias. Patch 0059 added the
     /// setter this needs.
-    void  applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &errors) const;
+    void  applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &bounds) const;
     std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
     bool setNodeMaterial(NodeId, MaterialId) override;
@@ -3080,9 +3071,16 @@ public:
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade) override;
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
-    /// OgreRayQuery.cpp — like gatherRayInstances below, so that not one line
+    /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const override;
+    GpuSceneStatus gpuSceneStatus() const override;
+    bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
+    bool gpuSceneDeviceEntries(unsigned first, unsigned count,
+                               std::vector<GpuSceneEntry> &out) override;
+    void measureGpuSceneScan(bool graphIsCurrent) override {
+        ensureGpuSceneTimed(graphIsCurrent);
+    }
     // ---- SURFACE-CACHE phase 2: the capture cache (SurfaceCache.h) --------
     /// THE PER-FRAME PASS, called once per drawn scene from renderOneFrame —
     /// after applyPendingGi (so a material or light edit has already bumped the
@@ -3097,22 +3095,25 @@ public:
     const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
     /// has none (every skinned mesh, every line mesh, every model opened
-    /// without a bake). The same index shape as `mLodErrorsByMesh` and for the
-    /// same reason: all a cache holds is an `Ogre::Item *`.
+    /// without a bake). Indexed by `Ogre::Mesh *` because all a cache holds is
+    /// an `Ogre::Item *`.
     const std::vector<MeshCardDesc> *meshCardsFor(const Ogre::Mesh *mesh) const {
         auto it = mCardsByMesh.find(mesh);
         return it == mCardsByMesh.end() ? nullptr : &it->second;
     }
-    /// ...and its baked LOD errors, so a capture can re-derive the level at the
-    /// card's REAL texel rather than at the bake's nominal 128.
-    const std::vector<float> *lodErrorsFor(const Ogre::Mesh *mesh) const {
-        auto it = mLodErrorsByMesh.find(mesh);
-        return it == mLodErrorsByMesh.end() ? nullptr : &it->second;
+    /// ...and its baked LOD BOUNDS, for a consumer that holds only an
+    /// `Ogre::Item *` (the cascade voxeliser). THROUGH THE RECORD, never a second
+    /// copy of the array (AT-DUP): `mMeshIdByOgreMesh` is an index.
+    const std::vector<float> *lodBoundsFor(const Ogre::Mesh *mesh) const {
+        auto id = mMeshIdByOgreMesh.find(mesh);
+        if (id == mMeshIdByOgreMesh.end()) return nullptr;
+        auto rec = mMeshes.find(id->second);
+        return rec == mMeshes.end() ? nullptr : &rec->second.lodBounds;
     }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     std::unique_ptr<SurfaceCache> mSurfaceCache;
     /// THE SCREEN-PROBE GATHER (GATHER-1a). Both are defined in
-    /// OgreRayQuery.cpp — like `gatherRayInstances` below, so that not one line
+    /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan — and both
     /// answer for the SCENE, not for a view: the row is the project's and the
     /// machine's, and every view of the scene that carries a prepass gathers.
@@ -3126,15 +3127,34 @@ public:
     void setGatherTuning(const GatherTuning &t) override { mGatherTuning = t; }
     const GatherTuning &gatherTuning() const { return mGatherTuning; }
     GatherTuning mGatherTuning;
-    /// THE TRACED SET, walked out of `mItemNodes` — the scene's own item index,
-    /// never `SceneManager::getMovableObjectIterator` (audit C-4: that list is
-    /// where the editor's gizmo arrows and light icons come from, and the S3
-    /// spike traced them). The predicate is documented at the definition; what
-    /// it excludes is load-bearing: helpers, backdrops, the sun disc, the
-    /// overlay queues, SKINNED Items (bind-pose geometry until R4 gives them a
-    /// skin cache) and alpha-tested datablocks (no any-hit without ray-tracing
-    /// pipelines — a cut-out leaf would intersect as a solid quad).
-    void gatherRayInstances(RayInstanceSink &sink) const;
+    // --- THE GPU SCENE (A3_GPU_SCENE_SLICE_DESIGN.md; GpuScene.h) -----------
+    /// Brings the device-side instance and mesh tables up to date for this
+    /// frame's movement epoch. Epoch-gated, and the FRAME's pass is the one that
+    /// consumes the epoch: a caller before the frame runs on derived transforms
+    /// `updateSceneGraph` has not recomputed, so it may not stop the frame's own
+    /// pass (a parent's children would never reach the table). Today the ONLY
+    /// caller is the frame, immediately before the ray tier reads the table;
+    /// the GI signature walk is NOT converted (see GpuScene.h's header for the
+    /// measurement that says why). Defined in OgreGpuScene.cpp.
+    /// `graphIsCurrent` = `updateSceneGraph` has already run for this frame, so
+    /// every node's cached derived transform is this frame's and the compare is a
+    /// cached read. The frame path passes true; a reader BEFORE the frame (the GI
+    /// signatures, which the mirror asks for after writing this frame's
+    /// transforms) passes false and pays Ogre's recompute, exactly as the walk it
+    /// replaces did. MEASURED at 8,001 items in Debug: 1.0 ms vs 3.0 ms.
+    void ensureGpuScene(bool graphIsCurrent) const;
+    /// The same walk with its cost recorded in `mGpuScanMicros` — the suite's
+    /// and the premise's measurement, never a hot path.
+    void ensureGpuSceneTimed(bool graphIsCurrent) const;
+    /// Creates the tables (idempotent). Called by the first attach as well as
+    /// by the first frame, because an Item can arrive before either.
+    void ensureGpuTables() const;
+    const detail::GpuScene &gpuScene() const { return mGpuScene; }
+    detail::GpuScene &gpuScene() { return mGpuScene; }
+    unsigned long long gpuScans() const { return mGpuScans; }
+    unsigned long long gpuAabbReads() const { return mGpuAabbReads; }
+    double gpuScanMicros() const { return mGpuScanMicros; }
+
     /// DROP THIS SCENE'S acceleration structures (OgreScene::destroy calls it).
     /// A no-op when the tier never held any. Defined in OgreRayQuery.cpp.
     void forgetRayQuery();
@@ -3457,6 +3477,10 @@ private:
         NodeId           selfId = 0;
         /// This node's place in OgreScene::mItemNodes, or npos (no Item).
         size_t           itemSlot = size_t(-1);
+        /// ...and its MESH's place in the GPU scene's mesh table (GpuScene.h),
+        /// acquired at attach and released at detach. kNoMesh until geometry
+        /// arrives, which is what an instance entry with no mesh reads as.
+        uint32_t         gpuMeshSlot = 0xFFFFFFFFu;
         /// ...and in OgreScene::mDecalNodes (a decal is not an Item, and a
         /// decal node usually carries no Item at all, so the movement scan
         /// would never see it — clean-2 lane, 2026-09-13).
@@ -3706,13 +3730,19 @@ private:
         /// DIFFERENT map has to be refused rather than silently re-target the
         /// first node's weights.
         std::vector<Ogre::uint16> blendToRig;
-        /// ATOM stage 1: the per-level geometric errors this mesh was built
-        /// with (a length in mesh units, level 1 first — level 0 has none).
-        /// Empty for a mesh with no LOD chain, which is most of them. Kept so a
-        /// LOD-bias change can re-derive the mesh's switch distances without
-        /// rebuilding a buffer: the Items hold a POINTER to the Ogre mesh's
-        /// value array, so rewriting that array in place moves every instance.
-        std::vector<float> lodErrors;
+        /// ATOM stage 1: the per-level MEASURED BOUNDS this mesh was built with
+        /// (a length in mesh units, level 1 first — level 0 has none). Empty for
+        /// a mesh with no LOD chain, which is most of them. Kept so a LOD-bias
+        /// change can re-derive the mesh's switch distances without rebuilding a
+        /// buffer: the Items hold a POINTER to the Ogre mesh's value array, so
+        /// rewriting that array in place moves every instance.
+        ///
+        /// THIS IS THE ONLY COPY (ATOM inventory row AT-DUP). There used to be a
+        /// second one in `mLodErrorsByMesh`, a whole vector per mesh duplicated
+        /// so that a consumer holding only an `Ogre::Item *` could reach it; that
+        /// map is now an INDEX to this record (`mMeshIdByOgreMesh`) and the data
+        /// lives here alone.
+        std::vector<float> lodBounds;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),
@@ -4453,7 +4483,14 @@ private:
         /// voxeliser, so it describes what the voxeliser HOLDS and not what a
         /// walk would decide now. `{N}` for a scene with no baked LOD chains.
         std::vector<int> lodLevels;
-        /// The triangles those levels add up to, counted in the same walk.
+        /// THE TRIANGLES THE VOXELISER ACTUALLY HOLDS — a READING, taken off the
+        /// voxeliser after every `build()` through ogre-patch 0089's
+        /// `getQueuedIndexCount()` (the sum of `QueuedInstance::numIndices`, which
+        /// is what sizes each raster dispatch). It was a CPU prediction until
+        /// ATOM-BAKE-1 (inventory row AT-A12): a walk of each mesh's VAOs at the
+        /// level just requested, re-applying patch 0064's clamp in a second copy
+        /// of it and counting items the region had declined. 0 between an attach
+        /// and the build that follows it, which is honest — nothing is bound yet.
         long long lodTriangles = 0;
         /// This cascade's queued rebuild came from the JUMP guard, not from an
         /// ordinary scroll — i.e. nothing of its old volume was reusable.
@@ -4815,14 +4852,17 @@ private:
     NodeId              mVrHandBoneNode[2][kVrHandBoneCount] = {};
     unsigned            mVrHandBones[2] = { 0u, 0u };
     std::map<MeshId, MeshRec> mMeshes;
-    /// ATOM stage 1: THE LOD ERRORS BY OGRE MESH — the one lookup that takes an
-    /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the baked
-    /// per-level errors `createMesh` was given. Only meshes that HAVE a chain
-    /// are in it, which is a small minority, so a miss is the common case and
-    /// means "no chain, level 0". Maintained beside `mMeshes` (createMesh
-    /// inserts, destroyMesh and destroy() erase) rather than walked, because the
-    /// cascade attach walks every item of the scene.
-    std::unordered_map<const Ogre::Mesh *, std::vector<float>> mLodErrorsByMesh;
+    /// ATOM stage 1: THE MESH RECORD BY OGRE MESH — the one lookup that takes an
+    /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the `MeshRec`
+    /// `createMesh` filled, and through it to the baked per-level bounds. Only
+    /// meshes that HAVE a chain are in it, which is a small minority, so a miss
+    /// is the common case and means "no chain, level 0". Maintained beside
+    /// `mMeshes` (createMesh inserts, destroyMesh and destroy() erase) rather
+    /// than walked, because the cascade attach walks every item of the scene.
+    ///
+    /// AN INDEX AND NOT A COPY (AT-DUP): it used to hold the error vector itself,
+    /// so every chained mesh carried its levels twice and the two could drift.
+    std::unordered_map<const Ogre::Mesh *, MeshId> mMeshIdByOgreMesh;
     /// SURFACE-CACHE phase 1 -> 2: THE CARDS BY OGRE MESH, the same index and
     /// for the same reason — a cache holds an `Ogre::Item *` and needs the card
     /// list the bake authored for the mesh behind it. Only meshes that HAVE
@@ -5117,6 +5157,65 @@ private:
     std::vector<Node *> mItemNodes;
     void indexItemNode(Node &n);
     void unindexItemNode(Node &n);
+    // --- the GPU scene's state (OgreGpuScene.cpp) --------------------------
+    /// The tables. Mutable because `ensureGpuScene` is const: the readers that
+    /// will ask for it (the GI signatures, when V2-1 makes that affordable) are
+    /// const, and a facility that only a non-const path can refresh would put
+    /// the const-cast at every call site instead of here.
+    mutable detail::GpuScene mGpuScene;
+    /// ATOM P3's CULL — its result buffers, sized to the table's capacity and
+    /// grown with it (GpuCull.h). Owned per SCENE because that is what the
+    /// tables it reads are owned by; a consumer that wants two culls of one
+    /// scene in a frame is stage 3's problem and gets a second instance.
+    detail::GpuCull mGpuCull;
+    mutable bool mGpuSceneRefused = false;   ///< create() said no (headless); do not retry
+    mutable std::vector<uint32_t> mGpuDirty;    ///< this update's slots (kept, not reallocated)
+    mutable std::vector<uint32_t> mGpuForced;   ///< explicit marks since the last update
+    mutable unsigned long long mGpuEpoch = 0ull;
+    mutable bool mGpuEpochValid = false;
+    mutable unsigned long long mGpuScans = 0ull;      ///< dirty scans run, ever
+    mutable unsigned long long mGpuAabbReads = 0ull;  ///< world AABBs the scan asked for, ever
+    mutable double mGpuScanMicros = 0.0;
+    // --- THE RAY LEVEL (ATOM P3's AT-A8r; OgreGpuScene.cpp) ----------------
+    /// The level each slot's bottom-level structure should be built from, and
+    /// the DISTANCE that answer was computed at (-1 = never). The second array
+    /// is the hysteresis: the rule is asked again only when the live distance
+    /// leaves the 2x band around the recorded one. Both are indexed by item
+    /// slot and both are cleared for a slot the index frees or renumbers, so a
+    /// recycled slot never inherits the dead object's band.
+    std::vector<uint32_t> mRayLevel;
+    std::vector<float>    mRayEvalDistance;
+    Ogre::Vector3 mRayEye = Ogre::Vector3::ZERO;
+    bool mRayEyeValid = false;
+    unsigned long long mRayLevelScanSeen = 0ull;   ///< the scan count the last walk saw
+    unsigned long long mRayLevelEvals = 0ull;
+    unsigned long long mRayLevelRefits = 0ull;
+    unsigned long long mRayLevelWalks = 0ull;
+    /// THE ONE PLACE the per-item predicates are computed (GpuInstanceFlag).
+    Ogre::uint32 gpuFlagsFor(const Node &n) const;
+    /// A seam that changed what a slot's entry SAYS without moving anything —
+    /// a visibility, light-mask, cast-shadow, render-queue or material write.
+    /// The movement epoch cannot see those (a furniture visibility write is
+    /// deliberately not scene movement, VR-SCAN-1), so they say so by name.
+    void markGpuSlotDirty(const Node &n);
+public:
+    /// THE RAY LEVEL'S PASS (ATOM P3's AT-A8r). Called once per frame per drawn
+    /// scene with the eye and the projection of the view that draws it; runs
+    /// nothing when neither the camera nor the table moved.
+    void updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, float viewportHeight);
+    /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
+    /// null (or a request with hzbLevels 0) is the frustum-only mode.
+    bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
+                    GpuCullResult &out);
+private:
+    /// A slot left the index or was renumbered: its ray-level band is no longer
+    /// about the object that now lives there.
+    void forgetRayLevel(uint32_t slot);
+    void composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
+                            detail::GpuInstance &out) const;
+    /// The mesh table entry for an attached mesh, reference-counted per attach.
+    uint32_t acquireGpuMesh(const MeshRec &rec);
+    void releaseGpuMesh(const Ogre::Mesh *mesh);
     /// THE DECAL INDEX, the same shape and for the same reason: the probes
     /// capture decals (they are projected in the Forward+ pass that renders the
     /// cube faces), so a decal that moves, arrives or leaves is a probe input.
@@ -5708,6 +5807,10 @@ public:
     unsigned workspaceGeneration() const override;
 
     unsigned long long framesPresented() const override;
+    /// Frames presented since THIS WORKSPACE was built (reset by every chain
+    /// rebuild) — what says whether a compute pass of the chain has ever run,
+    /// which is how `HzbStatus::primed` is answered.
+    unsigned long long workspaceFramesPresented() const { return mWorkspaceFramesPresented; }
     unsigned long long blankFramesPresented() const override;
     bool warmUpShaders() override;
     /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts
@@ -6569,7 +6672,9 @@ public:
     bool textureMemory(std::vector<TextureMemoryEntry> &out) const override;
     bool reclaimMemory(MemoryStats *before, MemoryStats *after) override;
     // ---- Photon shared infrastructure (OgreCompute.cpp) ----
-    bool indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe &out) override;
+    bool gpuCull(Scene *scene, View *view, const GpuCullRequest &request, bool readBack,
+                 GpuCullResult &out) override;
+    bool fillCullView(View *view, GpuCullRequest &out) const override;
     bool hzbStatus(View *view, HzbStatus &out) const override;
     bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                       unsigned &width, unsigned &height) override;

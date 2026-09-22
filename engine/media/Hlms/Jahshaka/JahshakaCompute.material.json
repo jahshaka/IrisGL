@@ -1,30 +1,31 @@
 {
 	"compute" :
 	{
-		"Jahshaka/IndirectCount" :
+		"Jahshaka/CullTest" :
 		{
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
-			"source" : "JahIndirectCount_cs",
+			"source" : "JahCullTest_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all"],
-			"uav_units" : 2
+			"textures" : [ {} ],
+			"uav_units" : 6
 		},
 
-		"Jahshaka/IndirectWork" :
+		"Jahshaka/CullCompact" :
 		{
-			"threads_per_group" : [1, 1, 1],
-			"source" : "JahIndirectWork_cs",
-			"pieces" : ["CrossPlatformSettings_piece_all"],
-			"uav_units" : 1
-		},
-
-		"Jahshaka/IndirectWorkCpu" :
-		{
-			"threads_per_group" : [1, 1, 1],
+			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
-			"source" : "JahIndirectWork_cs",
+			"source" : "JahCullCompact_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all"],
-			"uav_units" : 1
+			"uav_units" : 4
+		},
+
+		"Jahshaka/CullDraws" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"source" : "JahCullDraws_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 6
 		},
 
 		"Jahshaka/HdrMeterClear" :

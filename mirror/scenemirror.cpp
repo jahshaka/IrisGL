@@ -5257,12 +5257,18 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
     // mesh with no chain (every skinned mesh, every mesh too small to simplify,
     // and every model opened without a bake) carries empty vectors, which is
     // what the engine already does today.
-    const int levels = std::min(mesh->lodIndices.size(), mesh->lodErrors.size());
+    // Each level carries BOTH lengths: `lodBounds` (the measured two-sided
+    // distance, which is what every consumer selects on — ATOM P1's AT-A5) and
+    // `lodErrors` (what the simplifier claimed, a diagnostic). A level missing
+    // either one ends the chain here rather than crossing half-described.
+    const int levels = std::min(std::min(mesh->lodIndices.size(), mesh->lodErrors.size()),
+                                mesh->lodBounds.size());
     for (int i = 0; i < levels; ++i) {
         const QVector<quint32> &level = mesh->lodIndices.at(i);
         if (level.size() < 3 || level.size() % 3 != 0) break;
         out.lodIndices.emplace_back(level.constBegin(), level.constEnd());
         out.lodErrors.push_back(mesh->lodErrors.at(i));
+        out.lodBounds.push_back(mesh->lodBounds.at(i));
     }
 
     // SURFACE-CACHE phase 1 -> phase 2: the mesh's CARD LIST, handed across as
@@ -7020,11 +7026,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         if (budget > 0 && engine->shadowMapBudget() != budget)
             engine->setShadowMapBudget(budget);
     }
-    // ATOM stage 1: the LOD dial. A plain push of the document value — the
-    // engine re-derives every mesh's switch distances in place when it changes,
-    // so this costs nothing on the frames it does not move.
-    if (mTarget && mTarget->lodBias() != mSource->lodBias)
-        mTarget->setLodBias(mSource->lodBias);
+    // (ATOM's LOD dial used to be pushed from here. It is a SESSION dial now
+    // and not a document value — inventory row AT-A14: `Scene::lodBias` had no
+    // reader and no writer on disk, so it was a measurement knob living in the
+    // document. `editor.setLodBias` writes the engine scene directly.)
     // AMBIENT IS THE SKY LIGHT, AND NOTHING ELSE (SKY_LIGHT_SPEC.md §2, owner
     // decision D14). There is one path and one seam: the sky's own
     // cosine-convolved integral, scaled by the scene's Sky Light — its

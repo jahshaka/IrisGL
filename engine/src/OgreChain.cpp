@@ -530,6 +530,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
     // written onto the pass definitions.
     if (a.lodHysteresis != b.lodHysteresis) return false;
     return a.distortion == b.distortion && a.hzb == b.hzb && a.hzbLevels == b.hzbLevels &&
+           a.hzbFarthest == b.hzbFarthest &&
            a.shadows == b.shadows && a.hdr == b.hdr && a.bloom == b.bloom &&
            a.tonemapFixed == b.tonemapFixed &&
            a.letterbox == b.letterbox &&
@@ -1559,6 +1560,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // pyramid instead of an inverted one.
             Ogre::RenderSystem *rs = root.getRenderSystem();
             reduce->setProperty("hzb_reverse_z", (rs && rs->isReverseDepth()) ? 1 : 0);
+            // WHICH DEPTH A LEVEL KEEPS — the request's, not a constant. The
+            // farthest chain is the only one an occlusion cull can be
+            // conservative against (PostFxDesc::hzbFarthest carries why).
+            reduce->setProperty("hzb_farthest", desc.hzbFarthest ? 1 : 0);
 
             {
                 Ogre::CompositorTargetDef *t = n->addTargetPass("");

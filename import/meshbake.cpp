@@ -17,7 +17,9 @@ For more information see the LICENSE file
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include <QCryptographicHash>
@@ -144,7 +146,19 @@ namespace
 // re-bakes once, on purpose, by the BAKEKEY-1 rule — the bake's OUTPUT changed,
 // so the version is bumped rather than the commit carrying `bake-output:
 // unchanged`.
-constexpr int kFormatVersion = 11;
+// v12 (2026-09-22, ATOM-BAKE-1, ATOM P1's AT-A5 + P2's AT-A4): THE LEVEL ERROR
+// IS MEASURED, NOT CLAIMED, and EVERY ASSET IS BAKED. Each level of the chain
+// now carries a second length beside the simplifier's — `lodBounds`, a sampled
+// two-sided distance between that level and level 0 — and it is the one every
+// consumer reads (the view's pixel rule, the cascade's cell rule, the card's
+// texel rule). The simplifier's own number stays as a diagnostic. Every mesh
+// also carries a SIGNED DISTANCE FIELD (a mesh-relative int8 grid, jump-flooded
+// over the level-0 soup) as a new trailing block; nothing reads it yet. Two new
+// trailing blocks and a card level that can now name a different level: every
+// .jmb written before today is rejected by this line, on purpose, and every
+// library re-bakes once (the BAKEKEY-1 rule — the bake's OUTPUT changed, so the
+// version is bumped rather than the commit carrying `bake-output: unchanged`).
+constexpr int kFormatVersion = 12;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -335,11 +349,15 @@ void writeMesh(QDataStream &s, const MeshPtr &mesh)
     // levels ABOVE level 0 — zero for every mesh that has no chain, which is
     // most of them, and costs four bytes. Each level is {indexCount, error,
     // indices}; the indices name the vertex buffers written above, unchanged.
-    const int levels = std::min(mesh->lodIndices.size(), mesh->lodErrors.size());
+    // (format v12: each level gains its MEASURED BOUND beside the simplifier's
+    // error — the length every consumer reads. Both are written so the bake can
+    // be asked what the simplifier claimed as well as what the surface measures.)
+    const int levels = std::min(std::min(mesh->lodIndices.size(), mesh->lodErrors.size()),
+                                mesh->lodBounds.size());
     s << qint32(levels);
     for (int i = 0; i < levels; ++i) {
         const QVector<quint32> &idx = mesh->lodIndices.at(i);
-        s << qint32(idx.size()) << float(mesh->lodErrors.at(i));
+        s << qint32(idx.size()) << float(mesh->lodErrors.at(i)) << float(mesh->lodBounds.at(i));
         s << QByteArray(reinterpret_cast<const char *>(idx.constData()),
                         idx.size() * int(sizeof(quint32)));
     }
@@ -354,6 +372,16 @@ void writeMesh(QDataStream &s, const MeshPtr &mesh)
         writeVec3(s, card.origin);
         s << float(card.halfU) << float(card.halfV) << float(card.halfDepth)
           << float(card.coverage);
+    }
+
+    // ATOM P2's trailing block (format v12) — the SIGNED DISTANCE FIELD. Three
+    // zero dimensions for every mesh that gets none (skinned, not triangles, no
+    // extent), which costs six bytes and an empty QByteArray.
+    const MeshSdf &field = mesh->sdf;
+    s << quint16(field.dim[0]) << quint16(field.dim[1]) << quint16(field.dim[2]);
+    if (!field.isEmpty()) {
+        writeVec3(s, field.origin);
+        s << float(field.cell) << float(field.scale) << field.values;
     }
 }
 
@@ -424,13 +452,21 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
     s >> levels;
     if (s.status() != QDataStream::Ok || levels < 0 || levels > 32) { *okOut = false; return MeshPtr(); }
     const int vertexCount = positionFloats / 3;
+    float previousBound = 0.0f;
     for (qint32 i = 0; i < levels; ++i) {
-        qint32 indexCount = 0; float error = 0.0f;
-        s >> indexCount >> error;
+        qint32 indexCount = 0; float error = 0.0f; float bound = 0.0f;
+        s >> indexCount >> error >> bound;
         QByteArray levelBytes;
         s >> levelBytes;
         if (s.status() != QDataStream::Ok || indexCount < 3 || indexCount % 3 != 0 ||
             levelBytes.size() != indexCount * int(sizeof(quint32))) { *okOut = false; return MeshPtr(); }
+        // THE BOUND IS THE SELECTION CURRENCY, so a blob that is not a positive
+        // finite non-decreasing length is refused rather than read: the one rule
+        // walks the array and stops at the first level it cannot afford, which is
+        // only the right answer for a sorted array (see Mesh::lodBounds).
+        if (!std::isfinite(error) || error < 0.0f || !std::isfinite(bound) ||
+            !(bound > 0.0f) || bound < previousBound) { *okOut = false; return MeshPtr(); }
+        previousBound = bound;
         QVector<quint32> idx(indexCount);
         std::memcpy(idx.data(), levelBytes.constData(), size_t(levelBytes.size()));
         // A level that names a vertex the mesh does not have would draw
@@ -438,6 +474,7 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
         for (quint32 v : idx) if (int(v) >= vertexCount) { *okOut = false; return MeshPtr(); }
         mesh->lodIndices.append(idx);
         mesh->lodErrors.append(error);
+        mesh->lodBounds.append(bound);
     }
 
     // SURFACE-CACHE phase 1's trailing block (format v10). Every field is
@@ -473,6 +510,32 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
         mesh->cards.append(card);
     }
     mesh->cardCoverage = cardCount > 0 ? cardCoverage : 0.0f;
+
+    // ATOM P2's trailing block (format v12) — the SIGNED DISTANCE FIELD. Every
+    // field is checked for the same reason the cards are: a consumer reads this
+    // as geometry, and a grid whose byte count does not match its dimensions, or
+    // whose cell is not a positive finite length, would be read as a surface that
+    // is not there. Refuse the blob and parse instead.
+    {
+        quint16 dx = 0, dy = 0, dz = 0;
+        s >> dx >> dy >> dz;
+        if (s.status() != QDataStream::Ok) { *okOut = false; return MeshPtr(); }
+        if (dx || dy || dz) {
+            if (dx == 0 || dy == 0 || dz == 0 || dx > MeshSdf::kMaxDim || dy > MeshSdf::kMaxDim ||
+                dz > MeshSdf::kMaxDim) { *okOut = false; return MeshPtr(); }
+            MeshSdf field;
+            field.dim[0] = dx; field.dim[1] = dy; field.dim[2] = dz;
+            field.origin = readVec3(s);
+            s >> field.cell >> field.scale >> field.values;
+            if (s.status() != QDataStream::Ok || !(field.cell > 0.0f) ||
+                !std::isfinite(field.cell) || !(field.scale > 0.0f) ||
+                !std::isfinite(field.scale) ||
+                !std::isfinite(field.origin.x()) || !std::isfinite(field.origin.y()) ||
+                !std::isfinite(field.origin.z()) ||
+                field.values.size() != field.cellCount()) { *okOut = false; return MeshPtr(); }
+            mesh->sdf = field;
+        }
+    }
 
     // THE PICKING MESH IS REBUILT, NOT STORED. It is positions + indices with
     // one cross product per triangle — cheaper to recompute than to read, and
@@ -750,6 +813,372 @@ bool findMeshNodeTransform(const aiNode *node, unsigned meshIndex,
 }
 
 
+// ---- THE SURFACE: one sampler, one nearest-surface query -------------------
+//
+// ATOM-BAKE-1 (ATOM P1's AT-A5). Two products of the bake need to treat a mesh
+// as a SURFACE rather than as a list of triangles — the card generator (which
+// surfels it) and the LOD chain's honest error (which measures a distance
+// between two of its levels) — and the surface sampler was written inside the
+// card generator first. It lives HERE now, once, because a second stratified
+// area sampler would be a second definition of "a point of this mesh".
+namespace surface {
+
+/// One sample of a triangle soup: a point on it, and the GEOMETRIC normal of
+/// the triangle it came from (the shading normal can point somewhere the
+/// surface does not face, and both consumers here raster or measure geometry).
+struct Sample
+{
+    Vec3 pos;
+    Vec3 nrm;
+};
+
+/// The van der Corput radical inverse — the low-discrepancy sequence that
+/// replaces a random number generator here. `index` is the sample's own index,
+/// so the k-th sample of a mesh is the k-th sample of that mesh forever: this
+/// file contains no seed, which is stronger than "deterministic with a fixed
+/// seed".
+float radicalInverse(unsigned index, unsigned base)
+{
+    float result = 0.0f, f = 1.0f / float(base);
+    while (index > 0) { result += f * float(index % base); index /= base; f /= float(base); }
+    return result;
+}
+
+/// THE ONE STRATIFIED AREA SAMPLER.
+///
+/// What both consumers must cover is SURFACE, not vertices and not triangles: a
+/// mesh with one enormous floor triangle and ten thousand tiny ones in a corner
+/// would be sampled entirely in the corner by any per-triangle scheme. So the
+/// triangle is chosen by a STRATIFIED walk of the cumulative-area array and the
+/// barycentric coordinates come from a van der Corput pair.
+///
+/// Returns the soup's total area; fills `out` with AT MOST `count` samples (a
+/// degenerate triangle contributes none — it has no facing, and a sample with no
+/// normal is not a sample of a surface).
+float sample(const float *positions, int posComps, const std::vector<unsigned> &indices,
+             size_t count, std::vector<Sample> *out)
+{
+    out->clear();
+    const size_t triCount = indices.size() / 3;
+    if (triCount == 0 || count == 0 || !positions || posComps < 3) return 0.0f;
+
+    const auto vertexAt = [&](unsigned i) {
+        const float *v = positions + size_t(i) * size_t(posComps);
+        return Vec3(v[0], v[1], v[2]);
+    };
+
+    std::vector<float> cumulative(triCount + 1, 0.0f);
+    for (size_t t = 0; t < triCount; ++t) {
+        const Vec3 a = vertexAt(indices[t * 3]);
+        const Vec3 b = vertexAt(indices[t * 3 + 1]);
+        const Vec3 c = vertexAt(indices[t * 3 + 2]);
+        const float area = Vec3::crossProduct(b - a, c - a).length() * 0.5f;
+        cumulative[t + 1] = cumulative[t] + (std::isfinite(area) ? area : 0.0f);
+    }
+    const float totalArea = cumulative.back();
+    if (!(totalArea > 0.0f)) return 0.0f;
+
+    out->reserve(count);
+    for (size_t k = 0; k < count; ++k) {
+        const float target = (float(k) + 0.5f) / float(count) * totalArea;
+        const size_t t = size_t(std::upper_bound(cumulative.begin() + 1, cumulative.end(), target)
+                                - cumulative.begin() - 1);
+        if (t >= triCount) continue;
+        const Vec3 a = vertexAt(indices[t * 3]);
+        const Vec3 b = vertexAt(indices[t * 3 + 1]);
+        const Vec3 c = vertexAt(indices[t * 3 + 2]);
+        const Vec3 n = Vec3::crossProduct(b - a, c - a).normalized();
+        if (n.lengthSquared() < 0.5f) continue;   // a degenerate triangle has no facing
+        const float r1 = radicalInverse(unsigned(k) + 1u, 2u);
+        const float r2 = radicalInverse(unsigned(k) + 1u, 3u);
+        const float su = std::sqrt(r1);
+        Sample s;
+        s.pos = a * (1.0f - su) + b * (su * (1.0f - r2)) + c * (su * r2);
+        s.nrm = n;
+        out->push_back(s);
+    }
+    return totalArea;
+}
+
+/// The nearest point of one triangle to `p` (Ericson, Real-Time Collision
+/// Detection §5.1.5 — the seven-region form, no square roots inside it).
+Vec3 closestOnTriangle(const Vec3 &p, const Vec3 &a, const Vec3 &b, const Vec3 &c)
+{
+    const Vec3 ab = b - a, ac = c - a, ap = p - a;
+    const float d1 = Vec3::dotProduct(ab, ap), d2 = Vec3::dotProduct(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+
+    const Vec3 bp = p - b;
+    const float d3 = Vec3::dotProduct(ab, bp), d4 = Vec3::dotProduct(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float denom = d1 - d3;
+        return a + ab * (std::fabs(denom) > 0.0f ? d1 / denom : 0.0f);
+    }
+
+    const Vec3 cp = p - c;
+    const float d5 = Vec3::dotProduct(ab, cp), d6 = Vec3::dotProduct(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float denom = d2 - d6;
+        return a + ac * (std::fabs(denom) > 0.0f ? d2 / denom : 0.0f);
+    }
+
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float denom = (d4 - d3) + (d5 - d6);
+        return b + (c - b) * (std::fabs(denom) > 0.0f ? (d4 - d3) / denom : 0.0f);
+    }
+
+    const float denom = va + vb + vc;
+    if (!(std::fabs(denom) > 0.0f)) return a;
+    return a + ab * (vb / denom) + ac * (vc / denom);
+}
+
+/// THE ANGLE THIS TRIANGLE SUBTENDS AT `q`, a point on it — the weight of the
+/// ANGLE-WEIGHTED PSEUDONORMAL (Baerentzen & Aanaes, "Signed distance computation
+/// using the angle weighted pseudonormal").
+///
+/// WHY A SIGNED DISTANCE FIELD CANNOT USE A FACE NORMAL. The sign of a point is
+/// `dot(p - q, n)` where `n` is the surface normal AT `q`, and when `q` is on an
+/// EDGE or a VERTEX there is no single face normal there — there are several, and
+/// picking one of them is wrong for every point in the wedge between the others.
+/// On a convex edge sharper than a right angle the error changes the SIGN: an
+/// exterior point near a cone's tip, a pyramid's apex or a wedge's spine has its
+/// nearest point on that feature, and the one face whose normal happens to be
+/// picked can face away from it, so the point reads INSIDE. The angle-weighted sum
+/// is the normal field whose sign is correct for every exterior point — that is
+/// the theorem the paper proves, and it is why the weights are angles and not
+/// areas.
+///
+///   * `q` interior to the face — one face, the whole 2*pi of directions: the face
+///     normal, weight 2*pi.
+///   * `q` on an edge — the two faces sharing it each subtend pi.
+///   * `q` at a vertex — each incident face subtends its own INTERIOR ANGLE there,
+///     which is the term that makes an asymmetric corner come out right.
+float angleWeightAt(const Vec3 &q, const Vec3 &a, const Vec3 &b, const Vec3 &c, float eps)
+{
+    const float da = (q - a).length(), db = (q - b).length(), dc = (q - c).length();
+    const auto interiorAngle = [](const Vec3 &at, const Vec3 &u, const Vec3 &v) {
+        const Vec3 e1 = (u - at).normalized(), e2 = (v - at).normalized();
+        const float d = std::clamp(Vec3::dotProduct(e1, e2), -1.0f, 1.0f);
+        return std::acos(d);
+    };
+    if (da <= eps) return interiorAngle(a, b, c);
+    if (db <= eps) return interiorAngle(b, a, c);
+    if (dc <= eps) return interiorAngle(c, a, b);
+    // On an edge? The distance from `q` to the line through that edge is zero, and
+    // `q` is inside the segment (it is a closest point, so it cannot be outside).
+    const auto onSegment = [&](const Vec3 &u, const Vec3 &v) {
+        const Vec3 e = v - u;
+        const float len2 = e.lengthSquared();
+        if (!(len2 > 0.0f)) return false;
+        const float s = std::clamp(Vec3::dotProduct(q - u, e) / len2, 0.0f, 1.0f);
+        return ((u + e * s) - q).length() <= eps;
+    };
+    const float kPi = 3.14159265358979323846f;
+    if (onSegment(a, b) || onSegment(b, c) || onSegment(c, a)) return kPi;
+    return 2.0f * kPi;
+}
+
+/// A UNIFORM GRID OVER A TRIANGLE SOUP, and the EXACT nearest-surface query over
+/// it. Never a brute-force loop: the bound measurement asks this thousands of
+/// times per level and the SDF asks it per seeded cell.
+///
+/// Each triangle is filed in every cell its own AABB touches, so a query is a
+/// shell walk outwards from the query point's cell that stops as soon as the
+/// NEXT shell cannot hold anything closer than the best hit so far. That last
+/// clause is what makes the answer EXACT and not approximate — it is the same
+/// number the brute-force loop would return, found without visiting most of the
+/// mesh. (A cell at Chebyshev ring distance s from the query point's own cell
+/// cannot contain a point nearer than (s - 1) * cell, because the query point is
+/// somewhere inside its own cell.)
+class TriangleGrid
+{
+public:
+    /// `res` is the ceiling on cells per axis; the cell is CUBIC (the largest
+    /// axis divided by `res`) so the ring bound above is one length and not
+    /// three.
+    void build(const float *positions, int posComps, const std::vector<unsigned> &indices,
+               const Vec3 &lo, const Vec3 &hi, int res)
+    {
+        mPositions = positions;
+        mPosComps = posComps;
+        mIndices = &indices;
+        mLo = lo;
+        mTriCount = indices.size() / 3;
+        const Vec3 size = hi - lo;
+        const float extent = std::max(std::max(size.x(), size.y()), size.z());
+        mCell = extent > 0.0f ? extent / float(std::max(res, 1)) : 1.0f;
+        for (int a = 0; a < 3; ++a) {
+            const float s = a == 0 ? size.x() : (a == 1 ? size.y() : size.z());
+            mDim[a] = std::clamp(int(std::floor(s / mCell)) + 1, 1, std::max(res, 1));
+        }
+        mCells.assign(size_t(mDim[0]) * size_t(mDim[1]) * size_t(mDim[2]), {});
+        mStamp.assign(mTriCount, 0u);
+        mGeneration = 0u;
+
+        for (size_t t = 0; t < mTriCount; ++t) {
+            Vec3 tlo = vertexAt((*mIndices)[t * 3]), thi = tlo;
+            for (int k = 1; k < 3; ++k) {
+                const Vec3 v = vertexAt((*mIndices)[t * 3 + size_t(k)]);
+                tlo = Vec3(std::min(tlo.x(), v.x()), std::min(tlo.y(), v.y()), std::min(tlo.z(), v.z()));
+                thi = Vec3(std::max(thi.x(), v.x()), std::max(thi.y(), v.y()), std::max(thi.z(), v.z()));
+            }
+            int c0[3], c1[3];
+            cellOf(tlo, c0);
+            cellOf(thi, c1);
+            for (int z = c0[2]; z <= c1[2]; ++z)
+                for (int y = c0[1]; y <= c1[1]; ++y)
+                    for (int x = c0[0]; x <= c1[0]; ++x)
+                        mCells[index(x, y, z)].push_back(unsigned(t));
+        }
+    }
+
+    bool empty() const { return mTriCount == 0; }
+
+    /// The nearest point of the soup to `p`, and — when `normalOut` is asked for —
+    /// the ANGLE-WEIGHTED PSEUDONORMAL there (see `angleWeightAt`: a face normal is
+    /// the wrong answer on an edge or a vertex, and on a convex feature sharper
+    /// than a right angle it gets the SIGN wrong). Returns the distance, or
+    /// infinity for an empty soup.
+    ///
+    /// The tie set is collected as the walk goes and resolved at the end, because
+    /// `best` only stops shrinking when the walk stops: a candidate is kept when it
+    /// is within `eps` of the best SO FAR, and the final pass drops whatever the
+    /// eventual best left behind. The scratch vector is a member so the hundreds of
+    /// thousands of queries a bake makes allocate once.
+    float closest(const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr) const
+    {
+        if (mTriCount == 0) return std::numeric_limits<float>::infinity();
+        int base[3];
+        cellOf(p, base);
+        ++mGeneration;
+        mTies.clear();
+        float best = std::numeric_limits<float>::infinity();
+        Vec3 bestPoint, bestNormal(0, 1, 0);
+        const int maxRing = std::max(std::max(mDim[0], mDim[1]), mDim[2]);
+        for (int ring = 0; ring <= maxRing; ++ring) {
+            // The stop rule, and the whole reason this is exact: nothing in ring
+            // `ring` can beat `best` once (ring - 1) * cell already exceeds it.
+            if (ring > 0 && float(ring - 1) * mCell > best) break;
+            bool any = false;
+            for (int z = base[2] - ring; z <= base[2] + ring; ++z) {
+                if (z < 0 || z >= mDim[2]) continue;
+                for (int y = base[1] - ring; y <= base[1] + ring; ++y) {
+                    if (y < 0 || y >= mDim[1]) continue;
+                    for (int x = base[0] - ring; x <= base[0] + ring; ++x) {
+                        if (x < 0 || x >= mDim[0]) continue;
+                        // Only the SHELL, not the solid block: the interior was
+                        // scanned by the earlier rings.
+                        if (ring > 0 && std::abs(x - base[0]) != ring &&
+                            std::abs(y - base[1]) != ring && std::abs(z - base[2]) != ring)
+                            continue;
+                        any = true;
+                        for (unsigned t : mCells[index(x, y, z)]) {
+                            if (mStamp[t] == mGeneration) continue;   // filed in several cells
+                            mStamp[t] = mGeneration;
+                            const Vec3 a = vertexAt((*mIndices)[size_t(t) * 3]);
+                            const Vec3 b = vertexAt((*mIndices)[size_t(t) * 3 + 1]);
+                            const Vec3 c = vertexAt((*mIndices)[size_t(t) * 3 + 2]);
+                            const Vec3 q = closestOnTriangle(p, a, b, c);
+                            const float d = (q - p).length();
+                            const float eps = tieEps(d);
+                            if (normalOut) {
+                                // THE TIE SET IS THE NEAREST FEATURE'S FACES AND
+                                // NOTHING ELSE, and bounding it is not tidiness —
+                                // it is the difference between 0.4 s and 9 s of
+                                // bake on `endlessplane.obj`. A cell high above a
+                                // large flat mesh is nearly equidistant from
+                                // THOUSANDS of its triangles, so "within eps of the
+                                // best so far" collected the mesh; an angle weight
+                                // (an acos and two normalises) per collected
+                                // triangle per cell then dominated everything.
+                                // A strictly nearer hit RESTARTS the set, since the
+                                // feature has changed; `kMaxTies` is generous for
+                                // the real cases — the faces around one vertex.
+                                if (d < best - eps) mTies.clear();
+                                if (d <= best + eps && mTies.size() < kMaxTies)
+                                    mTies.push_back({ q, a, b, c, d });
+                            }
+                            if (d < best) { best = d; bestPoint = q; }
+                        }
+                    }
+                }
+            }
+            (void)any;
+        }
+        if (normalOut) {
+            // The angle-weighted sum over every triangle that really is nearest.
+            const float eps = tieEps(best);
+            Vec3 sum(0, 0, 0);
+            for (const Tie &tie : mTies) {
+                if (tie.d > best + eps) continue;
+                const Vec3 n = Vec3::crossProduct(tie.b - tie.a, tie.c - tie.a).normalized();
+                if (n.lengthSquared() < 0.5f) continue;
+                sum = sum + n * angleWeightAt(tie.q, tie.a, tie.b, tie.c, eps);
+            }
+            const float len = sum.length();
+            if (len > 0.0f) bestNormal = sum / len;
+            *normalOut = bestNormal;
+        }
+        if (pointOut) *pointOut = bestPoint;
+        return best;
+    }
+
+    float cell() const { return mCell; }
+
+    /// The tolerance that decides "the same nearest feature". Two faces sharing an
+    /// edge give analytically equal distances to a point on it and differ only by
+    /// round-off, so the test has to be a tolerance; it is tied to the CELL (the
+    /// coordinate scale) with a term in the distance itself for far queries.
+    /// Genuinely distinct surfaces at the same distance are a medial-axis point,
+    /// where the sign is ill-defined however it is computed.
+    float tieEps(float d) const { return std::max(mCell * 1e-4f, std::fabs(d) * 1e-4f); }
+
+private:
+    Vec3 vertexAt(unsigned i) const
+    {
+        const float *v = mPositions + size_t(i) * size_t(mPosComps);
+        return Vec3(v[0], v[1], v[2]);
+    }
+    void cellOf(const Vec3 &p, int out[3]) const
+    {
+        const float c[3] = { p.x() - mLo.x(), p.y() - mLo.y(), p.z() - mLo.z() };
+        for (int a = 0; a < 3; ++a)
+            out[a] = std::clamp(int(std::floor(c[a] / mCell)), 0, mDim[a] - 1);
+    }
+    size_t index(int x, int y, int z) const
+    {
+        return (size_t(z) * size_t(mDim[1]) + size_t(y)) * size_t(mDim[0]) + size_t(x);
+    }
+
+    const float *mPositions = nullptr;
+    int mPosComps = 3;
+    const std::vector<unsigned> *mIndices = nullptr;
+    size_t mTriCount = 0;
+    Vec3 mLo;
+    float mCell = 1.0f;
+    int mDim[3] = { 1, 1, 1 };
+    std::vector<std::vector<unsigned>> mCells;
+    mutable std::vector<unsigned> mStamp;
+    mutable unsigned mGeneration = 0;
+    /// One candidate nearest feature: where on the triangle, the triangle, and how
+    /// far. Kept only while a caller asks for a normal.
+    struct Tie { Vec3 q, a, b, c; float d = 0.0f; };
+    /// The faces meeting at one vertex, with room to spare. A nearest FEATURE is a
+    /// face (1), an edge (2) or a vertex (its incident faces); anything beyond this
+    /// is a near-equidistant crowd that contributes nothing to a pseudonormal.
+    static constexpr size_t kMaxTies = 32;
+    mutable std::vector<Tie> mTies;
+};
+
+}   // namespace surface
+
 // ---- ATOM stage 1: the automatic LOD chain ---------------------------------
 //
 // SPECS/NANITE_SPEC.md §7. The artist authors nothing: the machine simplifies
@@ -839,10 +1268,215 @@ namespace lodchain {
 constexpr int   kMaxLevels     = 254;
 constexpr float kRatio         = 0.5f;   ///< each level targets half the previous triangle count (the paper's step).
 constexpr int   kMinTriangles  = 128;    ///< THE FLOOR: below this a level saves nothing worth a buffer — and is clusterlod's own leaf size, and Nanite's root.
-constexpr float kAcceptRatio   = 0.85f;  ///< a level that could not shed 15% is topology-locked: stop, do not store it.
-constexpr float kMaxRelError   = 0.05f;  ///< and stop once the error passes 5% of the mesh extent — beyond that it is a blob, not the object.
+/// kAcceptRatio — A LEVEL THAT COULD NOT SHED 15 % IS NOT WORTH A BUFFER, and the
+/// 15 % is arithmetic rather than taste. A stored level costs an index buffer, a
+/// VertexArrayObject, a threshold in the value array `lodSet` binary-searches every
+/// frame, and a SWITCH — a visible change of silhouette. What it buys is the
+/// triangles it sheds. The chain's own step is `kRatio` 0.5, so a level that
+/// delivers only 0.85 of the previous count has delivered 30 % of the reduction it
+/// was asked for, and the next level will be asked to halve THAT: the loop is
+/// already at the point where topology, not the error budget, is deciding the
+/// result. Below about 0.85 the remaining chain is levels that each cost a switch
+/// for a tenth of a halving. It is the same number clusterlod.h's reference
+/// configuration stops at, for the same reason.
+constexpr float kAcceptRatio   = 0.85f;
+/// kMaxRelError — THE SIMPLIFIER'S OWN BUDGET PER LEVEL, and since ATOM-BAKE-1 it is
+/// explicitly a CHAIN-SHAPE knob and not the selection currency (`lodBounds` is that,
+/// and the safety net on it is `kMaxRelBound` below).
+///
+/// WHY IT STAYS ON THE QUADRIC even though the quadric is not a bound: this number
+/// decides how far the loop is allowed to GO, and it has to be a quantity the
+/// simplifier can be steered by BEFORE anything is measured — the measurement
+/// happens after a level exists. 5 % of the mesh's largest extent is the point at
+/// which a simplified whole object stops being a stand-in for itself and becomes a
+/// blob: at 5 % a 2 m sphere may deviate 10 cm, which at the view's one-pixel budget
+/// is a level taken only past ~200 m. Beyond that the chain is producing levels
+/// nothing will ever select at a distance anything renders at.
+///
+/// AND THE MEASUREMENT THAT SAYS IT IS THE RIGHT ORDER: on the shipped meshes the
+/// cap is NOT what stops the chain — the triangle floor (`kMinTriangles`) is, on
+/// every one of them (sphere 960 -> 240, capsule 1024 -> 128, torus 1536 -> 192,
+/// hp_sphere 3072 -> 192). A knob that never fires on real content is not tuned
+/// against it; it is a ceiling, which is what it is here for.
+constexpr float kMaxRelError   = 0.05f;
 constexpr float kNormalWeight  = 0.5f;   ///< meshoptimizer's own reference weight for unit normals.
 constexpr float kUvWeight      = 0.5f;   ///< the same relative priority, times extent/uvRange (see 3 above).
+
+// ---- THE MEASURED BOUND (ATOM P1's AT-A5) ---------------------------------
+//
+// WHAT WAS WRONG. `lodErrors[k]` is meshoptimizer's `result_error` under
+// `meshopt_SimplifyErrorAbsolute`, and it is an ESTIMATE, not a bound — verified
+// by reading the simplifier rather than by reading the promise:
+//
+//   * the contract says so: "result_error ... will contain the resulting
+//     (relative/absolute) error after simplification" (meshoptimizer.h:511), and
+//     `meshopt_simplify`'s own header calls the metric an approximation;
+//   * mechanically it is a RUNNING MAX over per-collapse quadric errors
+//     (simplifier.cpp:1622, `result_error = max(result_error, c.error)`), and
+//     `quadricError` (simplifier.cpp:776) is an AREA-WEIGHTED MEAN of squared
+//     plane distances normalised by the accumulated weight (`* 1/Q.w`) — a mean
+//     over merged planes, not a supremum over the surface;
+//   * a max over passes does not compose: a vertex collapsed in one pass and
+//     again in the next accumulates displacement while only the larger SINGLE
+//     step is recorded;
+//   * with attributes the number is not even a length — `quadricError`'s
+//     attribute overload deliberately does not normalise by `Q.w` and mixes in
+//     UV and normal deviation (simplifier.cpp:784-800).
+//
+// Our own comment in Types.h promised the opposite ("the worst distance a
+// level's surface may sit from the authored one"), and FOUR consumers lean on
+// that promise: the view's pixel-error rule, the cascade's cell rule, the card's
+// texel rule and (P4) the ray tier.
+//
+// WHAT IS STORED INSTEAD. After a level is accepted the bake MEASURES a
+// two-sided sampled distance between level k and LEVEL 0 — a sampled Hausdorff
+// estimate — and that is what every consumer reads (`lodBounds`). `lodErrors`
+// stays, unread by any consumer, as the diagnostic it always was: "what the
+// simplifier said".
+//
+// BOTH DIRECTIONS, because one of them is blind. d(k -> 0) alone misses a level
+// that DELETED a feature: every surviving point can sit on level 0 while a whole
+// spike is gone. d(0 -> k) alone misses a level that ADDED surface where there
+// was none. The bound is the max of the two, which is what a Hausdorff distance
+// is.
+//
+// THE MARGIN IS THE SAMPLING GAP, and it is the honest part of this. N samples
+// of a surface cannot see a deviation whose footprint is smaller than the mean
+// sample spacing, so the measured maximum under-states the true one; 1.25 is the
+// factor applied for it. It is NOT a safety pad for the method — the method is
+// exact per sample (surface::TriangleGrid's query is the brute-force answer) —
+// it pays for the sample count alone, which is why it travels with N.
+constexpr int   kBoundSamples      = 4096;   ///< samples per level PER DIRECTION.
+constexpr int   kBoundBigTriangles = 100000; ///< above this a mesh has more surface than 4096 samples resolve...
+constexpr int   kBoundSamplesBig   = 8192;   ///< ...so it gets twice as many.
+constexpr float kBoundMargin       = 1.25f;  ///< the sampling gap, above.
+
+/// CELLS PER AXIS OF THE NEAREST-SURFACE GRID, AS A FUNCTION OF THE TRIANGLE
+/// COUNT. A fixed 32 was wrong in the expensive direction: the grid's query cost
+/// is the triangles it has to test per shell, so at one million triangles a 32^3
+/// grid holds ~30 triangles per cell and every one of the tens of thousands of
+/// queries walks all of them. Roughly ONE TRIANGLE PER CELL is what makes the
+/// shell walk O(1) per query, and that is the cube root of the count. Clamped to
+/// [32, 128]: below 32 the grid cannot localise anything, and 128^3 is 2 M cells
+/// of index vectors, which is the most a per-mesh scratch structure may cost.
+inline int boundGridRes(size_t triangles)
+{
+    const double cube = std::cbrt(double(std::max<size_t>(triangles, 1)));
+    return std::clamp(int(cube), 32, 128);
+}
+
+/// AND A FLOOR AT THE ARITHMETIC'S OWN NOISE. A bound is a distance measured
+/// between two surfaces stored as 32-bit floats, so a claim finer than that
+/// arithmetic can resolve is not a measurement — it is noise with a units label.
+///
+/// DERIVED, from the case that found it. `ground.obj` is a 100 m FLAT grid: every
+/// level of it is exactly coplanar with level 0, so its true geometric deviation
+/// is ZERO. The sampler returned 0.000054 to 0.000177 — four to fifteen ULPs at
+/// 100 m, where float eps is 1.19e-5 — and an independent sampling eight times as
+/// dense returned a value 0.8 % different, because the two were comparing noise.
+/// `closestOnTriangle` solves for barycentric coordinates through differences of
+/// products, which loses about an order of magnitude of ULPs to cancellation, so
+/// the resolution of this whole measurement is ~100 ULPs of the COORDINATE SCALE:
+/// 1e-5 of the extent (84 ULPs at 100 m, and float eps is 1.19e-7 relative).
+/// Below that the honest answer is "as close as these coordinates can say".
+///
+/// IT TOUCHES NOTHING THAT IS NOT DEGENERATE. Every curved shipped mesh sits three
+/// to four orders of magnitude above its own floor (the sphere's floor is 2e-5
+/// against a level-1 bound of 0.032); the floor only ever fires where the true
+/// deviation really is zero — which is exactly where a relative margin cannot
+/// help, because there is nothing to be a fraction of.
+///
+/// AND IT MAKES THE ANSWER HONEST DOWNSTREAM rather than optimistic: a consumer
+/// dividing by a 5e-5 bound would be told the coarsest floor level is free at any
+/// distance on the strength of a number the geometry cannot support. It IS free at
+/// any distance — the floor really is flat — and the floored bound says so while
+/// remaining a length the format can be trusted about.
+constexpr float kBoundFloorRel     = 1e-5f;
+
+/// AND THE ONE SAFETY NET ON THE MEASUREMENT, deliberately generous: a level
+/// whose measured surface may sit a QUARTER of the whole object away is not a
+/// stand-in for it by any reading, and storing it would hand the far-field a
+/// blob that the one rule would still happily select at distance. It is set far
+/// above `kMaxRelError` on purpose — the chain's SHAPE stays the simplifier's
+/// decision (so measuring the bound did not silently shorten every chain in the
+/// library), and this only ever fires on a mesh whose quadric under-states real
+/// deviation by 5x or more. ATOM-BAKE-1 measured it firing on 0 of the shipped
+/// meshes; if it ever fires it is the interesting thing in the bake log.
+constexpr float kMaxRelBound   = 0.25f;
+
+/// THE MEASURED TWO-SIDED DISTANCE between two index lists over ONE vertex
+/// buffer (every level of a chain shares the vertices, ATOM rule 1), before the
+/// margin. `gridA` must be the grid of `a`, `gridB` of `b`.
+///
+/// TWO SAMPLE SETS, AND THE SECOND ONE IS THE MAXIMUM — it was added after the
+/// acceptance suite caught its absence and then CORRECTED after the lane's audit
+/// read what it was actually measuring.
+///
+///   * AREA SAMPLES, both ways, cover the surfaces evenly and are what an average
+///     deviation needs.
+///   * AND THE BASE VERTICES THE LEVEL NO LONGER HAS. A Hausdorff distance between
+///     two piecewise-linear surfaces is attained at a vertex or on an edge, never
+///     in the middle of a facet, and `meshopt_simplify` REMOVES vertices without
+///     ever moving one (its output is an index list over the ORIGINAL vertex
+///     buffer — ATOM rule 1, one vertex buffer and N index buffers). So the whole
+///     of the worst case sits on the vertices level 0 has and level k does not,
+///     and those are the only points this walk needs: a vertex level k still USES
+///     is a vertex of one of its own triangles, whose distance to level k is
+///     exactly zero.
+///
+///     THE FIRST CUT WALKED BOTH DIRECTIONS AND CAPPED THE WALK, and both were
+///     wrong. Level k's own vertices against level 0 measured 0 every single time
+///     (they are level-0 vertices, on level-0 triangles); and the walk that DID
+///     matter — level 0's vertices against level k — was strided past a 200 000
+///     probe cap, so a million-vertex mesh probed one vertex in five and the
+///     margin cannot cover a SKIPPED vertex, only an unsampled facet. The set
+///     difference is the fix in both directions at once: no dead loop, no stride,
+///     and it is SMALLER than either walk was (a halving step removes about half
+///     the vertices, and only those are queried).
+///
+/// `includeRemovedVertices` exists for the acceptance suite, which measures
+/// AREA-ONLY on purpose so that it exercises the sampling-gap margin instead of
+/// reproducing the exact term the bake already took a maximum over
+/// (`MeshBake::checkLodBounds`).
+float twoSidedDistance(const float *positions, int posComps,
+                       const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
+                       const std::vector<unsigned> &b, const surface::TriangleGrid &gridB,
+                       size_t samples, bool includeRemovedVertices = true)
+{
+    float worst = 0.0f;
+    std::vector<surface::Sample> pts;
+    const auto areaOneWay = [&](const std::vector<unsigned> &from,
+                                const surface::TriangleGrid &against) {
+        if (surface::sample(positions, posComps, from, samples, &pts) > 0.0f)
+            for (const surface::Sample &s : pts) {
+                const float d = against.closest(s.pos);
+                if (std::isfinite(d)) worst = std::max(worst, d);
+            }
+    };
+    areaOneWay(a, gridB);
+    areaOneWay(b, gridA);
+    if (!includeRemovedVertices) return worst;
+
+    // THE VERTICES `b` (level 0) HAS AND `a` (the level) DOES NOT, against the
+    // level's own surface. Sorted-unique both sides, then one set_difference —
+    // deterministic, allocation-bounded by the vertex count, no stride.
+    std::vector<unsigned> base(b.begin(), b.end());
+    std::sort(base.begin(), base.end());
+    base.erase(std::unique(base.begin(), base.end()), base.end());
+    std::vector<unsigned> kept(a.begin(), a.end());
+    std::sort(kept.begin(), kept.end());
+    kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+    std::vector<unsigned> removed;
+    removed.reserve(base.size());
+    std::set_difference(base.begin(), base.end(), kept.begin(), kept.end(),
+                        std::back_inserter(removed));
+    for (unsigned v : removed) {
+        const float *p = positions + size_t(v) * size_t(posComps);
+        const float d = gridA.closest(Vec3(p[0], p[1], p[2]));
+        if (std::isfinite(d)) worst = std::max(worst, d);
+    }
+    return worst;
+}
 
 /// The first vertex buffer carrying `usage`, as floats: pointer, component
 /// count and how many vertices it holds. Null when the mesh has no such buffer.
@@ -868,6 +1502,7 @@ void build(const MeshPtr &mesh)
     if (mesh.isNull()) return;
     mesh->lodIndices.clear();
     mesh->lodErrors.clear();
+    mesh->lodBounds.clear();
     if (!mesh->getSkeleton().isNull()) return;           // static meshes only, stage 1
     if (mesh->primitiveMode != PrimitiveMode::Triangles) return;
 
@@ -925,8 +1560,26 @@ void build(const MeshPtr &mesh)
         }
     }
 
+    // THE NEAREST-SURFACE GRID OVER LEVEL 0, built ONCE for the whole chain —
+    // every level is measured against the AUTHORED geometry and never against
+    // its predecessor, because what a consumer of level k needs to know is how
+    // far k may sit from what the artist made, not from level k-1. (Composing
+    // consecutive distances would be an upper bound of an upper bound: correct
+    // and needlessly loose, and it is not what any consumer asks.)
+    Vec3 lo(positions[0], positions[1], positions[2]), hi = lo;
+    for (size_t v = 0; v < nv; ++v) {
+        const float *p = positions + v * size_t(posComps);
+        lo = Vec3(std::min(lo.x(), p[0]), std::min(lo.y(), p[1]), std::min(lo.z(), p[2]));
+        hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
+    }
+    surface::TriangleGrid baseGrid;
+    baseGrid.build(positions, posComps, base, lo, hi, boundGridRes(base.size() / 3));
+    const size_t boundSamples = base.size() / 3 > size_t(kBoundBigTriangles)
+                                    ? size_t(kBoundSamplesBig) : size_t(kBoundSamples);
+
     std::vector<unsigned> prev = base;
     float accumulated = 0.0f;
+    float boundSoFar = 0.0f;
     for (int level = 0; level < kMaxLevels; ++level) {
         size_t target = size_t(float(prev.size()) * kRatio);
         target -= target % 3;
@@ -953,13 +1606,54 @@ void build(const MeshPtr &mesh)
         if (extent > 0.0f && error > extent * kMaxRelError) break;
 
         out.resize(n);
+
+        // THE MEASUREMENT (AT-A5). Level `out` against level 0, both ways.
+        surface::TriangleGrid levelGrid;
+        levelGrid.build(positions, posComps, out, lo, hi, boundGridRes(out.size() / 3));
+        const float measured =
+            twoSidedDistance(positions, posComps, out, levelGrid, base, baseGrid, boundSamples) *
+            kBoundMargin;
+        // MONOTONE NON-DECREASING BY CONSTRUCTION, and that is a requirement and
+        // not a tidy-up: `lodLevelForWorldError` walks the array and stops at the
+        // FIRST level it cannot afford, which is only the right answer for a
+        // sorted array. A sampled maximum is not guaranteed to rise with the
+        // level (a coarser level can happen to land closer at the points these
+        // samples fall on), so the running max is taken — which over-states, i.e.
+        // errs towards a FINER level than needed, which is the safe direction.
+        // THE TWO TERMS, SEPARATELY, behind a run-wide latch (the idiom every
+        // measurable rule in this tree carries). It is how the margin and the vertex
+        // walk are re-checked without a build, and what it measured is why the
+        // vertex walk exists: on `endlessplane.obj` the removed vertices raise the
+        // level-2 bound from 4.589 to 60.033 — THIRTEEN TIMES — because a flat mesh
+        // deviates only where its RIM was cut, which no area sampler will land on.
+        // On smooth meshes they add 1.008x to 1.046x, i.e. almost nothing, which is
+        // the other half of the honest statement.
+        if (std::getenv("JAH_BAKE_BOUND_TERMS")) {
+            surface::TriangleGrid g2;
+            g2.build(positions, posComps, out, lo, hi, boundGridRes(out.size() / 3));
+            const float areaOnly = twoSidedDistance(positions, posComps, out, g2, base, baseGrid,
+                                                    boundSamples, false) * kBoundMargin;
+            irisLog(QStringLiteral("bound terms: level %1  area-only %2  with-removed-verts %3  "
+                                   "verts add %4x")
+                        .arg(mesh->lodIndices.size() + 1)
+                        .arg(double(areaOnly), 0, 'f', 6).arg(double(measured), 0, 'f', 6)
+                        .arg(areaOnly > 0.0f ? double(measured) / double(areaOnly) : 0.0, 0, 'f', 3));
+        }
+        const float bound = std::max(std::max(boundSoFar, measured),
+                                     extent > 0.0f ? extent * kBoundFloorRel : 0.0f);
+        // The safety net (`kMaxRelBound`): this level's surface may sit further
+        // from the object than a quarter of the object. Not a stand-in — stop.
+        if (extent > 0.0f && bound > extent * kMaxRelBound) break;
+
         QVector<quint32> levelIndices;
         levelIndices.resize(int(n));
         std::memcpy(levelIndices.data(), out.data(), n * sizeof(unsigned));
         mesh->lodIndices.append(levelIndices);
         mesh->lodErrors.append(error);
+        mesh->lodBounds.append(bound);
 
         accumulated = error;
+        boundSoFar = bound;
         prev.swap(out);
     }
 }
@@ -1052,6 +1746,11 @@ constexpr float kClusterDepthWeight = 4.0f;   ///< K-means runs in the CARD'S OW
 constexpr float kGoodCoverage       = 0.90f;  ///< below this the 6-face box is built and measured too, and the better list wins.
 constexpr int   kCoverageMaxTriangles = 50000; ///< above this the coverage raster uses the COARSEST baked level instead of the authored geometry, with the level's own error added to the tolerance — the bake must not grow with the model.
 
+/// A SURFEL is a surface::Sample plus the one card axis that can record it.
+/// (The sampler itself moved out of this file's card half in ATOM-BAKE-1 — see
+/// `namespace surface` above: the LOD chain's honest error samples the same
+/// surface the same way, and two samplers would be two definitions of "a point
+/// of this mesh".)
 struct Surfel
 {
     Vec3 pos;
@@ -1072,26 +1771,24 @@ int dominantAxis(const Vec3 &n, float *dotOut)
     return best;
 }
 
-/// The van der Corput radical inverse — the low-discrepancy sequence that
-/// replaces a random number generator here. `index` is the surfel's own index,
-/// so the k-th surfel of a mesh is the k-th surfel of that mesh forever.
-float radicalInverse(unsigned index, unsigned base)
-{
-    float result = 0.0f, f = 1.0f / float(base);
-    while (index > 0) { result += f * float(index % base); index /= base; f /= float(base); }
-    return result;
-}
-
 /// THE ONE LOD RULE (jahshaka/engine/Types.h `lodLevelForWorldError`), restated
 /// here because the bake is document-side and links no engine: the coarsest
-/// level whose error is STRICTLY below what the consumer can afford. The card's
+/// level whose BOUND is STRICTLY below what the consumer can afford. The card's
 /// consumer affords its own texel.
+///
+/// `lodBounds` and NOT `lodErrors` since ATOM-BAKE-1 (AT-A5): the simplifier's
+/// number is an estimate and a card that trusted it captured a level whose real
+/// surface sits further from the authored one than the texel it was chosen for.
+/// AND THIS IS THE CARD'S ONLY PRODUCER (AT-CARDLOD): the capture used to
+/// re-derive the level from the card's real atlas texel and keep the baked value
+/// as a fallback, so one number had two producers that could disagree. The bake
+/// owns it.
 int levelForTexel(const MeshPtr &mesh, float texel)
 {
     if (!(texel > 0.0f)) return 0;
     int level = 0;
-    for (int i = 0; i < mesh->lodErrors.size() && i < mesh->lodIndices.size(); ++i) {
-        if (!(mesh->lodErrors.at(i) < texel)) break;   // errors are non-decreasing
+    for (int i = 0; i < mesh->lodBounds.size() && i < mesh->lodIndices.size(); ++i) {
+        if (!(mesh->lodBounds.at(i) < texel)) break;   // bounds are non-decreasing
         level = i + 1;
     }
     return level;
@@ -1314,40 +2011,25 @@ void build(const MeshPtr &mesh, int maxCards)
     };
 
     // ---- 1. surfels ------------------------------------------------------
+    // THE SHARED SAMPLER (`namespace surface`), not a second one: the same
+    // stratified area walk, the same van der Corput barycentrics, the same
+    // geometric normal, the same skip of a degenerate triangle. A surfel is that
+    // sample plus the one card axis that can record it.
     const size_t triCount = indices.size() / 3;
-    std::vector<float> cumulative(triCount + 1, 0.0f);
-    for (size_t t = 0; t < triCount; ++t) {
-        const Vec3 a = vertexAt(indices[t * 3]);
-        const Vec3 b = vertexAt(indices[t * 3 + 1]);
-        const Vec3 c = vertexAt(indices[t * 3 + 2]);
-        const float area = Vec3::crossProduct(b - a, c - a).length() * 0.5f;
-        cumulative[t + 1] = cumulative[t] + (std::isfinite(area) ? area : 0.0f);
-    }
-    const float totalArea = cumulative.back();
-    if (!(totalArea > 0.0f)) return;                      // no area: nothing to card
-
     const size_t sampleCount = size_t(std::clamp<long long>(
         (long long)triCount * kSurfelsPerTriangle, kMinSurfels, kMaxSurfels));
+    std::vector<surface::Sample> samples;
+    const float totalArea =
+        surface::sample(positions, posComps, indices, sampleCount, &samples);
+    if (!(totalArea > 0.0f)) return;                       // no area: nothing to card
     std::vector<Surfel> surfels;
-    surfels.reserve(sampleCount);
-    for (size_t k = 0; k < sampleCount; ++k) {
-        const float target = (float(k) + 0.5f) / float(sampleCount) * totalArea;
-        const size_t t = size_t(std::upper_bound(cumulative.begin() + 1, cumulative.end(), target)
-                                - cumulative.begin() - 1);
-        if (t >= triCount) continue;
-        const Vec3 a = vertexAt(indices[t * 3]);
-        const Vec3 b = vertexAt(indices[t * 3 + 1]);
-        const Vec3 c = vertexAt(indices[t * 3 + 2]);
-        const Vec3 n = Vec3::crossProduct(b - a, c - a).normalized();
-        if (n.lengthSquared() < 0.5f) continue;           // a degenerate triangle has no facing
-        const float r1 = radicalInverse(unsigned(k) + 1u, 2u);
-        const float r2 = radicalInverse(unsigned(k) + 1u, 3u);
-        const float su = std::sqrt(r1);
+    surfels.reserve(samples.size());
+    for (const surface::Sample &sm : samples) {
         Surfel s;
-        s.pos = a * (1.0f - su) + b * (su * (1.0f - r2)) + c * (su * r2);
-        s.nrm = n;
+        s.pos = sm.pos;
+        s.nrm = sm.nrm;
         float dot = 0.0f;
-        s.axis = dominantAxis(n, &dot);
+        s.axis = dominantAxis(sm.nrm, &dot);
         surfels.push_back(s);
     }
     if (surfels.size() < 8) return;
@@ -1373,8 +2055,8 @@ void build(const MeshPtr &mesh, int maxCards)
     // TRIANGLE PER CARD PER ROUND: `measureList` walks every card, and the
     // greedy loop below calls it once per round. At twelve cards and a dozen
     // rounds an unbounded raster is 144 x the mesh's triangle count in setups —
-    // seconds on the import worker and, through Preferences' bake-all and
-    // Mesh::loadMesh, seconds ON THE UI THREAD. So the ceiling below is a rule,
+    // seconds on the import worker and, through Preferences' bake-all, seconds ON
+    // THE UI THREAD. So the ceiling below is a rule,
     // not an optimisation, and it is applied in TWO steps because the first one
     // does not always fire:
     //
@@ -1386,9 +2068,9 @@ void build(const MeshPtr &mesh, int maxCards)
     //      above the ceiling. Step 1 misses two whole classes and they are not
     //      rare: a mesh whose topology stopped the simplifier before it shed
     //      anything (`kAcceptRatio`, documented by ATOM-1) has no chain at all,
-    //      and NEITHER DOES ANY MESH BORN THROUGH `Mesh::loadMesh` — which is
-    //      every primitive and every model a caller loads outside the import.
-    //      Those took the full index list, per card, per round.
+    //      and neither does a mesh built outside the bake and handed to this
+    //      generator directly (a procedural mesh, a suite). Those took the full
+    //      index list, per card, per round.
     //
     // WHY THE SUBSAMPLE IS A GOLDEN-RATIO SEQUENCE AND NOT A UNIFORM STRIDE —
     // MEASURED, because a uniform stride was written first and it was WRONG.
@@ -1420,7 +2102,7 @@ void build(const MeshPtr &mesh, int maxCards)
         if (!mesh->lodIndices.isEmpty()) {
             const QVector<quint32> &level = mesh->lodIndices.last();
             coarse.assign(level.constBegin(), level.constEnd());
-            extraTolerance = mesh->lodErrors.isEmpty() ? 0.0f : mesh->lodErrors.last();
+            extraTolerance = mesh->lodBounds.isEmpty() ? 0.0f : mesh->lodBounds.last();
         }
         const std::vector<unsigned> &source = coarse.empty() ? indices : coarse;
         const size_t sourceTris = source.size() / 3;
@@ -1671,12 +2353,528 @@ void build(const MeshPtr &mesh, int maxCards)
 
 }   // namespace cards
 
+// ---------------------------------------------------------------------------
+// ATOM P2 / SUB-S5-SDF — THE PER-MESH SIGNED DISTANCE FIELD.
+//
+// A third product of the one bake step, beside the chain and the cards
+// (document/assets/mesh.h MeshSdf carries what it is and why the sign of an open
+// mesh is a pseudo-normal). This is HOW.
+//
+//   1. THE GRID IS MESH-RELATIVE AND CUBIC, and its cell is the coarser of two
+//      things: the largest axis divided by the resolution ceiling, and FOUR
+//      TIMES LEVEL 1'S MEASURED BOUND. The second term is the whole reason the
+//      field is built after the chain: a field finer than the surface is honest
+//      is recording detail the bake has already declined to promise. Four,
+//      because a distance field is read by trilinear interpolation and a feature
+//      needs about two cells on each side of it to survive one.
+//
+//   2. A JUMP FLOOD FOR THE DISTANCE (the design's word, and the right one for a
+//      DISTANCE: the cost is then independent of the triangle count). Seeded from
+//      the TRIANGLES, because a query per cell would BE the answer and make the
+//      flood decoration; log2(dim) passes then halve the step and let each cell
+//      adopt the nearest seed any neighbour knows about. NO NORMAL IS CARRIED.
+//
+//   3. THE BAND IS EXACT. Every cell within `kExactBand` cells of the surface
+//      re-asks the grid for its own nearest point and the ANGLE-WEIGHTED
+//      PSEUDONORMAL there, so the ZERO CROSSING — the only part a consumer reads
+//      for a surface distance, and the only part a suite can check — is the
+//      brute-force answer in magnitude AND in sign.
+//
+//   4. AND THE SIGN IS FLOODED OUTWARDS, which is the one sound way to sign a far
+//      cell. A sign changes only by crossing the surface, the surface is entirely
+//      inside the band, and the band is thicker than one cell — so a breadth-first
+//      sweep from the band carries the sign to every cell and cannot skip the
+//      crossing. Carrying a NORMAL through the distance flood instead is what the
+//      first cut did, and it is unsound: a far cell inherits the normal of its
+//      SEED's nearest point, not of its own. MEASURED on `cone.obj` — eight
+//      exterior cells read NEGATIVE because a cell outside the base rim inherited
+//      the normal of a cell under the base. Asking EVERY cell exactly fixes the
+//      sign and costs 8.8 s on `endlessplane.obj` (a far cell's shell walk is
+//      stopped only by its own distance, so it is unbounded by construction);
+//      flooding the sign is exact where it matters and one sweep everywhere else.
+namespace sdf {
+
+/// THE KNOBS, in one place, with the reason each exists. BAKE INPUTS: editing any
+/// of them re-bakes every library by itself (meshbake.cpp is in the producer
+/// hash).
+constexpr int   kMinRes         = 16;    ///< a field below this cannot hold a shape at all; a thin axis is padded up to it.
+constexpr int   kMaxRes         = MeshSdf::kMaxDim;   ///< and the format's ceiling, stated once beside the struct.
+constexpr int   kPadCells       = 2;     ///< cells of OUTSIDE band around the mesh's box, so the field has an exterior to be positive in.
+constexpr float kCellPerBound   = 4.0f;  ///< the cell is at least this many times level 1's measured bound (see 1 above).
+/// ...AND AT LEAST THE MESH'S OWN TRIANGLE SCALE, which is what a mesh with NO
+/// CHAIN has instead of a bound. MEASURED, because the first cut did not have
+/// this term and it was the whole bake's cost: a mesh the simplifier could not
+/// reduce has no `lodBounds`, fell through to the resolution ceiling, and a
+/// TWELVE-TRIANGLE CUBE was given a 64^3 field — 262 144 cells and 41 million
+/// jump-flood neighbour tests to describe six planes, 1.45 SECONDS per primitive
+/// (cone 1.83 s, wedge 1.73 s, cylinder 1.66 s), which is what blew
+/// `meshbake.roundtrip`'s 120 s timeout. The RMS triangle edge
+/// `sqrt(2 * area / triangles)` is the honest statement of what resolution that
+/// mesh's geometry actually carries, and at 1.0 of it the same cube gets 16^3 and
+/// costs single-digit milliseconds.
+constexpr float kCellPerEdge    = 1.0f;
+constexpr float kRangeCells     = 8.0f;  ///< `scale`: the distance |value| == 127 stands for, in cells. Beyond it the field saturates and only the sign is meaningful.
+/// THE BAND `checkSdfAgainstSurface` JUDGES THE ZERO CROSSING IN, in cells. Every
+/// cell is exact now (see 2 above), so this is no longer a policy of the generator
+/// — it is the width of the region the suite asserts to within one cell, which is
+/// the region a consumer reads for a surface distance rather than for occupancy.
+constexpr float kExactBand      = 2.5f;
+
+
+void build(const MeshPtr &mesh)
+{
+    if (mesh.isNull()) return;
+    mesh->sdf = MeshSdf();
+    if (!mesh->getSkeleton().isNull()) return;         // the surface moves: a baked field would be a lie
+    if (mesh->primitiveMode != PrimitiveMode::Triangles) return;
+
+    int posComps = 3; size_t nv = 0;
+    const float *positions = lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return;
+    std::vector<unsigned> indices(reinterpret_cast<const unsigned *>(ib->data),
+                                  reinterpret_cast<const unsigned *>(ib->data) +
+                                      size_t(ib->dataSize) / sizeof(unsigned));
+    if (indices.size() < 3 || indices.size() % 3 != 0) return;
+    for (unsigned i : indices) if (size_t(i) >= nv) return;
+
+    Vec3 lo(positions[0], positions[1], positions[2]), hi = lo;
+    for (size_t v = 0; v < nv; ++v) {
+        const float *p = positions + v * size_t(posComps);
+        lo = Vec3(std::min(lo.x(), p[0]), std::min(lo.y(), p[1]), std::min(lo.z(), p[2]));
+        hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
+    }
+    const Vec3 size = hi - lo;
+    const float extent = std::max(std::max(size.x(), size.y()), size.z());
+    if (!(extent > 0.0f)) return;
+
+    // (1) THE RESOLUTION, in three steps, and every step has one job.
+    //
+    //   a. HOW FINE THE GEOMETRY IS HONEST TO. Two terms, the coarser winning:
+    //      four times level 1's measured bound (a field finer than the surface is
+    //      honest records detail the bake has declined to promise), and the mesh's
+    //      own RMS triangle edge (what a mesh with NO chain has instead — see
+    //      `kCellPerEdge`, which is a measurement, not a guess).
+    //   b. THE CEILING. The largest axis plus its pad must fit in `kMaxRes`.
+    //   c. AND THE FIT. Once the dimensions are clamped, the cubic cell is
+    //      RE-DERIVED from them so the mesh's box exactly fills the interior on
+    //      its longest axis and the grid is CENTRED on the box. Without this step
+    //      a coarse honest cell met the `kMinRes` floor and produced a grid many
+    //      times the size of the object, sitting off to one side of it.
+    float honestCell = 0.0f;
+    if (!mesh->lodBounds.isEmpty())
+        honestCell = mesh->lodBounds.first() * kCellPerBound;
+    {
+        const auto vertexAt = [&](unsigned i) {
+            const float *v = positions + size_t(i) * size_t(posComps);
+            return Vec3(v[0], v[1], v[2]);
+        };
+        double area = 0.0;
+        const size_t triCount = indices.size() / 3;
+        for (size_t tri = 0; tri < triCount; ++tri) {
+            const Vec3 a = vertexAt(indices[tri * 3]);
+            const Vec3 b = vertexAt(indices[tri * 3 + 1]);
+            const Vec3 c = vertexAt(indices[tri * 3 + 2]);
+            const float f = Vec3::crossProduct(b - a, c - a).length() * 0.5f;
+            if (std::isfinite(f)) area += double(f);
+        }
+        if (triCount > 0 && area > 0.0)
+            honestCell = std::max(honestCell,
+                                  kCellPerEdge * float(std::sqrt(2.0 * area / double(triCount))));
+    }
+    const int span = std::max(kMaxRes - 1 - 2 * kPadCells, 1);
+    float cell = std::max(extent / float(span), honestCell);
+    if (!(cell > 0.0f)) return;
+
+    quint16 dim[3] = { 0, 0, 0 };
+    for (int a = 0; a < 3; ++a) {
+        const float s = a == 0 ? size.x() : (a == 1 ? size.y() : size.z());
+        const int need = int(std::floor(s / cell)) + 1 + 2 * kPadCells;
+        dim[a] = quint16(std::clamp(need, kMinRes, kMaxRes));
+    }
+    // (c) the fit: the cubic cell the clamped dimensions can actually carry.
+    cell = 0.0f;
+    for (int a = 0; a < 3; ++a) {
+        const float s = a == 0 ? size.x() : (a == 1 ? size.y() : size.z());
+        const int interior = std::max(int(dim[a]) - 1 - 2 * kPadCells, 1);
+        cell = std::max(cell, s / float(interior));
+    }
+    if (!(cell > 0.0f)) return;
+    // ...and the grid centred on the mesh's box.
+    Vec3 origin;
+    {
+        float o[3];
+        for (int a = 0; a < 3; ++a) {
+            const float s = a == 0 ? size.x() : (a == 1 ? size.y() : size.z());
+            const float l = a == 0 ? lo.x() : (a == 1 ? lo.y() : lo.z());
+            o[a] = l - (float(int(dim[a]) - 1) * cell - s) * 0.5f;
+        }
+        origin = Vec3(o[0], o[1], o[2]);
+    }
+    const size_t count = size_t(dim[0]) * size_t(dim[1]) * size_t(dim[2]);
+
+    surface::TriangleGrid grid;
+    grid.build(positions, posComps, indices, lo, hi,
+               lodchain::boundGridRes(indices.size() / 3));
+
+    const auto centreOf = [&](size_t x, size_t y, size_t z) {
+        return origin + Vec3(float(x) * cell, float(y) * cell, float(z) * cell);
+    };
+    const auto at = [&](size_t x, size_t y, size_t z) {
+        return (z * size_t(dim[1]) + y) * size_t(dim[0]) + x;
+    };
+
+    // (2) THE DISTANCE, FLOODED. Seeded from the TRIANGLES (a query per cell would
+    // BE the answer and make the flood decoration), then log2(dim) jump-flood
+    // passes. This gives every cell a distance without a query — and NOTHING ELSE:
+    // no normal is carried, because a normal cannot be.
+    const size_t triCount = indices.size() / 3;
+    std::vector<Vec3> seed(count);
+    std::vector<float> dist(count, std::numeric_limits<float>::infinity());
+    std::vector<char> has(count, 0);
+    {
+        const auto vertexAt = [&](unsigned i) {
+            const float *v = positions + size_t(i) * size_t(posComps);
+            return Vec3(v[0], v[1], v[2]);
+        };
+        for (size_t tri = 0; tri < triCount; ++tri) {
+            const Vec3 a = vertexAt(indices[tri * 3]);
+            const Vec3 b = vertexAt(indices[tri * 3 + 1]);
+            const Vec3 c = vertexAt(indices[tri * 3 + 2]);
+            Vec3 tlo(std::min(std::min(a.x(), b.x()), c.x()),
+                     std::min(std::min(a.y(), b.y()), c.y()),
+                     std::min(std::min(a.z(), b.z()), c.z()));
+            Vec3 thi(std::max(std::max(a.x(), b.x()), c.x()),
+                     std::max(std::max(a.y(), b.y()), c.y()),
+                     std::max(std::max(a.z(), b.z()), c.z()));
+            int c0[3], c1[3];
+            for (int ax = 0; ax < 3; ++ax) {
+                const float o = ax == 0 ? origin.x() : (ax == 1 ? origin.y() : origin.z());
+                const float l = ax == 0 ? tlo.x() : (ax == 1 ? tlo.y() : tlo.z());
+                const float h = ax == 0 ? thi.x() : (ax == 1 ? thi.y() : thi.z());
+                c0[ax] = std::clamp(int(std::floor((l - o) / cell)) - 1, 0, int(dim[ax]) - 1);
+                c1[ax] = std::clamp(int(std::floor((h - o) / cell)) + 1, 0, int(dim[ax]) - 1);
+            }
+            for (int z = c0[2]; z <= c1[2]; ++z)
+                for (int y = c0[1]; y <= c1[1]; ++y)
+                    for (int x = c0[0]; x <= c1[0]; ++x) {
+                        const size_t i = at(size_t(x), size_t(y), size_t(z));
+                        const Vec3 p = centreOf(size_t(x), size_t(y), size_t(z));
+                        const Vec3 q = surface::closestOnTriangle(p, a, b, c);
+                        const float d = (q - p).length();
+                        if (d < dist[i]) { dist[i] = d; seed[i] = q; has[i] = 1; }
+                    }
+        }
+    }
+    const int maxDim = std::max(std::max(int(dim[0]), int(dim[1])), int(dim[2]));
+    for (int step = maxDim / 2; step >= 1; step /= 2) {
+        std::vector<Vec3> nextSeed = seed;
+        std::vector<float> nextDist = dist;
+        std::vector<char> nextHas = has;
+        for (int z = 0; z < int(dim[2]); ++z)
+            for (int y = 0; y < int(dim[1]); ++y)
+                for (int x = 0; x < int(dim[0]); ++x) {
+                    const size_t self = at(size_t(x), size_t(y), size_t(z));
+                    const Vec3 p = centreOf(size_t(x), size_t(y), size_t(z));
+                    for (int dz = -1; dz <= 1; ++dz)
+                        for (int dy = -1; dy <= 1; ++dy)
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                if (!dx && !dy && !dz) continue;
+                                const int nx = x + dx * step, ny = y + dy * step, nz = z + dz * step;
+                                if (nx < 0 || ny < 0 || nz < 0 || nx >= int(dim[0]) ||
+                                    ny >= int(dim[1]) || nz >= int(dim[2])) continue;
+                                const size_t other = at(size_t(nx), size_t(ny), size_t(nz));
+                                if (!has[other]) continue;
+                                const float d = (seed[other] - p).length();
+                                if (d < nextDist[self]) {
+                                    nextDist[self] = d; nextSeed[self] = seed[other]; nextHas[self] = 1;
+                                }
+                            }
+                }
+        seed.swap(nextSeed); dist.swap(nextDist); has.swap(nextHas);
+    }
+
+    // (3) THE BAND IS EXACT, AND THE BAND IS WHERE THE ZERO SET IS. Every cell
+    // within `kExactBand` cells re-asks the grid for its own nearest point and the
+    // ANGLE-WEIGHTED PSEUDONORMAL there, so both its magnitude and its SIGN are the
+    // brute-force answer (`surface::angleWeightAt` says why a face normal is not,
+    // and how it flips the sign at a cone tip or a wedge spine).
+    const float scale = cell * kRangeCells;
+    const float band = cell * kExactBand;
+    std::vector<float> signedValue(count, 0.0f);
+    std::vector<char> known(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+        if (!has[i] || dist[i] > band) continue;
+        const size_t x = i % size_t(dim[0]);
+        const size_t y = (i / size_t(dim[0])) % size_t(dim[1]);
+        const size_t z = i / (size_t(dim[0]) * size_t(dim[1]));
+        const Vec3 p = centreOf(x, y, z);
+        Vec3 nearest, normal(0, 1, 0);
+        const float d = grid.closest(p, &nearest, &normal);
+        if (!std::isfinite(d)) continue;
+        const float side = Vec3::dotProduct(p - nearest, normal);
+        signedValue[i] = side < 0.0f ? -d : d;
+        known[i] = 1;
+    }
+
+    // (4) AND THE SIGN IS FLOODED OUTWARDS, WHICH IS SOUND AND A NORMAL IS NOT.
+    //
+    // THE ARGUMENT, because this is the step that replaced a defect: a signed
+    // distance changes sign only by crossing the surface, and the surface lies
+    // ENTIRELY inside the band computed above — which is at least two cells thick on
+    // each side. A 6-connected step moves ONE cell, so no path from an outside cell
+    // to an inside cell can get past the band without entering it. Therefore a
+    // breadth-first sweep from the band's cells carries the sign correctly to every
+    // cell, with no query and no possibility of inheriting the wrong surface.
+    //
+    // WHAT THIS REPLACED, measured: carrying the angle-weighted NORMAL through the
+    // flood and signing with it gave `cone.obj` EIGHT exterior cells reading
+    // negative (`checkSdfExteriorSign`), because a cell outside the base rim
+    // inherited the normal of a cell under the base. Asking every cell exactly
+    // instead fixed the sign and cost 8.8 SECONDS on `endlessplane.obj` — a far
+    // cell's shell walk is unbounded by construction, since its own best distance is
+    // what stops it. Flooding the SIGN is exact where it matters, sound everywhere,
+    // and costs one sweep.
+    {
+        std::vector<size_t> frontier;
+        frontier.reserve(count);
+        for (size_t i = 0; i < count; ++i) if (known[i]) frontier.push_back(i);
+        const int dimX = int(dim[0]), dimY = int(dim[1]), dimZ = int(dim[2]);
+        while (!frontier.empty()) {
+            std::vector<size_t> next;
+            for (size_t i : frontier) {
+                const int x = int(i % size_t(dimX));
+                const int y = int((i / size_t(dimX)) % size_t(dimY));
+                const int z = int(i / (size_t(dimX) * size_t(dimY)));
+                const float sign = signedValue[i] < 0.0f ? -1.0f : 1.0f;
+                const int off[6][3] = { {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1} };
+                for (const auto &o : off) {
+                    const int nx = x + o[0], ny = y + o[1], nz = z + o[2];
+                    if (nx < 0 || ny < 0 || nz < 0 || nx >= dimX || ny >= dimY || nz >= dimZ)
+                        continue;
+                    const size_t j = at(size_t(nx), size_t(ny), size_t(nz));
+                    if (known[j]) continue;
+                    // The magnitude is the flood's (it saturates out here anyway);
+                    // the SIGN is this neighbour's, by the argument above.
+                    const float magnitude = has[j] ? dist[j] : scale;
+                    signedValue[j] = sign * magnitude;
+                    known[j] = 1;
+                    next.push_back(j);
+                }
+            }
+            frontier.swap(next);
+        }
+    }
+
+    QByteArray values(int(count), 0);
+    char *out = values.data();
+    for (size_t i = 0; i < count; ++i) {
+        // A cell the sweep never reached has no surface anywhere near it; OUTSIDE is
+        // the honest answer and it saturates.
+        const float v = known[i] ? signedValue[i] : scale;
+        const float clamped = std::clamp(v / scale, -1.0f, 1.0f);
+        out[int(i)] = static_cast<char>(
+            static_cast<signed char>(std::lround(clamped * 127.0f)));
+    }
+
+    mesh->sdf.dim[0] = dim[0];
+    mesh->sdf.dim[1] = dim[1];
+    mesh->sdf.dim[2] = dim[2];
+    mesh->sdf.origin = origin;
+    mesh->sdf.cell = cell;
+    mesh->sdf.scale = scale;
+    mesh->sdf.values = values;
+}
+
+}   // namespace sdf
+
 
 }   // namespace
 
 void MeshBake::buildLodChain(const MeshPtr &mesh) { lodchain::build(mesh); }
 
 void MeshBake::buildCards(const MeshPtr &mesh, int maxCards) { cards::build(mesh, maxCards); }
+
+void MeshBake::buildSdf(const MeshPtr &mesh) { sdf::build(mesh); }
+
+bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *worstRatioOut)
+{
+    if (worstRatioOut) *worstRatioOut = 0.0;
+    if (mesh.isNull() || mesh->lodIndices.isEmpty()) return true;
+    if (mesh->lodBounds.size() != mesh->lodIndices.size()) return false;
+    int posComps = 3; size_t nv = 0;
+    const float *positions =
+        lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return false;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return false;
+    std::vector<unsigned> base(reinterpret_cast<const unsigned *>(ib->data),
+                               reinterpret_cast<const unsigned *>(ib->data) +
+                                   size_t(ib->dataSize) / sizeof(unsigned));
+    if (base.size() < 3 || base.size() % 3 != 0) return false;
+
+    Vec3 lo(positions[0], positions[1], positions[2]), hi = lo;
+    for (size_t v = 0; v < nv; ++v) {
+        const float *p = positions + v * size_t(posComps);
+        lo = Vec3(std::min(lo.x(), p[0]), std::min(lo.y(), p[1]), std::min(lo.z(), p[2]));
+        hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
+    }
+    surface::TriangleGrid baseGrid;
+    baseGrid.build(positions, posComps, base, lo, hi, lodchain::boundGridRes(base.size() / 3));
+    const size_t dense =
+        size_t(std::max(1, densityMultiple)) *
+        size_t(base.size() / 3 > size_t(lodchain::kBoundBigTriangles)
+                   ? lodchain::kBoundSamplesBig : lodchain::kBoundSamples);
+
+    for (int k = 0; k < mesh->lodIndices.size(); ++k) {
+        const QVector<quint32> &levelQ = mesh->lodIndices.at(k);
+        std::vector<unsigned> level(levelQ.constBegin(), levelQ.constEnd());
+        surface::TriangleGrid levelGrid;
+        levelGrid.build(positions, posComps, level, lo, hi,
+                        lodchain::boundGridRes(level.size() / 3));
+        const float measured = lodchain::twoSidedDistance(positions, posComps, level, levelGrid,
+                                                          base, baseGrid, dense);
+        // A float comparison of two lengths measured the same way: one part in a
+        // million of the stored value is the round-off, not a tolerance on the
+        // claim.
+        const float stored = mesh->lodBounds.at(k);
+        if (worstRatioOut && stored > 0.0f)
+            *worstRatioOut = std::max(*worstRatioOut, double(measured) / double(stored));
+        if (measured > stored * (1.0f + 1e-6f) + 1e-9f) return false;
+    }
+    return true;
+}
+
+bool MeshBake::checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut, int *probedOut)
+{
+    if (worstCellsOut) *worstCellsOut = 0.0;
+    if (probedOut) *probedOut = 0;
+    if (mesh.isNull() || mesh->sdf.isEmpty()) return false;
+    int posComps = 3; size_t nv = 0;
+    const float *positions =
+        lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return false;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return false;
+    std::vector<unsigned> indices(reinterpret_cast<const unsigned *>(ib->data),
+                                  reinterpret_cast<const unsigned *>(ib->data) +
+                                      size_t(ib->dataSize) / sizeof(unsigned));
+    if (indices.size() < 3 || indices.size() % 3 != 0) return false;
+
+    Vec3 lo(positions[0], positions[1], positions[2]), hi = lo;
+    for (size_t v = 0; v < nv; ++v) {
+        const float *p = positions + v * size_t(posComps);
+        lo = Vec3(std::min(lo.x(), p[0]), std::min(lo.y(), p[1]), std::min(lo.z(), p[2]));
+        hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
+    }
+    surface::TriangleGrid grid;
+    grid.build(positions, posComps, indices, lo, hi,
+               lodchain::boundGridRes(indices.size() / 3));
+
+    const MeshSdf &f = mesh->sdf;
+    double worst = 0.0;
+    int probed = 0;
+    const float band = f.cell * sdf::kExactBand;
+    for (int z = 0; z < int(f.dim[2]); ++z)
+        for (int y = 0; y < int(f.dim[1]); ++y)
+            for (int x = 0; x < int(f.dim[0]); ++x) {
+                const float stored = f.distanceAt(x, y, z);
+                if (std::fabs(stored) > band) continue;      // outside the exact band
+                const Vec3 p = f.origin + Vec3(float(x) * f.cell, float(y) * f.cell,
+                                               float(z) * f.cell);
+                const float exact = grid.closest(p);
+                if (!std::isfinite(exact)) continue;
+                ++probed;
+                worst = std::max(worst, double(std::fabs(std::fabs(stored) - exact)) /
+                                            double(f.cell));
+            }
+    if (worstCellsOut) *worstCellsOut = worst;
+    if (probedOut) *probedOut = probed;
+    return worst <= 1.0;
+}
+
+bool MeshBake::checkSdfExteriorSign(const MeshPtr &mesh, int *probedOut, int *wrongOut)
+{
+    if (probedOut) *probedOut = 0;
+    if (wrongOut) *wrongOut = 0;
+    if (mesh.isNull() || mesh->sdf.isEmpty()) return false;
+    int posComps = 3; size_t nv = 0;
+    const float *positions =
+        lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return false;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return false;
+    std::vector<unsigned> indices(reinterpret_cast<const unsigned *>(ib->data),
+                                  reinterpret_cast<const unsigned *>(ib->data) +
+                                      size_t(ib->dataSize) / sizeof(unsigned));
+    if (indices.size() < 3 || indices.size() % 3 != 0) return false;
+    const auto vertexAt = [&](unsigned i) {
+        const float *v = positions + size_t(i) * size_t(posComps);
+        return Vec3(v[0], v[1], v[2]);
+    };
+
+    // RAY PARITY ALONG +X, and the ONLY thing it is asked is "is this point
+    // outside": an even crossing count is outside for a closed mesh. A ray that
+    // grazes an edge or a vertex is UNANSWERABLE rather than wrong, so such a cell
+    // is skipped (reported through `probedOut`, which the suite asserts is large).
+    const MeshSdf &f = mesh->sdf;
+    int probed = 0, wrong = 0;
+    const size_t triCount = indices.size() / 3;
+    for (int z = 0; z < int(f.dim[2]); ++z)
+        for (int y = 0; y < int(f.dim[1]); ++y)
+            for (int x = 0; x < int(f.dim[0]); ++x) {
+                const float stored = f.distanceAt(x, y, z);
+                // Within a cell of the surface the true sign is ambiguous at this
+                // resolution; beyond saturation the magnitude says nothing but the
+                // SIGN still must be right, so those cells are kept.
+                if (std::fabs(stored) <= f.cell) continue;
+                const Vec3 p = f.origin + Vec3(float(x) * f.cell, float(y) * f.cell,
+                                               float(z) * f.cell);
+                int crossings = 0;
+                bool ambiguous = false;
+                for (size_t tri = 0; tri < triCount && !ambiguous; ++tri) {
+                    const Vec3 a = vertexAt(indices[tri * 3]);
+                    const Vec3 b = vertexAt(indices[tri * 3 + 1]);
+                    const Vec3 c = vertexAt(indices[tri * 3 + 2]);
+                    // Moeller-Trumbore against the +X ray, with the degenerate and
+                    // near-edge cases declared ambiguous instead of guessed.
+                    const Vec3 e1 = b - a, e2 = c - a;
+                    const Vec3 dir(1.0f, 0.0f, 0.0f);
+                    const Vec3 pv = Vec3::crossProduct(dir, e2);
+                    const float det = Vec3::dotProduct(e1, pv);
+                    if (std::fabs(det) < 1e-12f) continue;          // parallel: no crossing
+                    const float inv = 1.0f / det;
+                    const Vec3 tv = p - a;
+                    const float u = Vec3::dotProduct(tv, pv) * inv;
+                    const Vec3 qv = Vec3::crossProduct(tv, e1);
+                    const float v = Vec3::dotProduct(dir, qv) * inv;
+                    const float w = 1.0f - u - v;
+                    if (u < -1e-5f || v < -1e-5f || w < -1e-5f) continue;   // outside the face
+                    if (u < 1e-4f || v < 1e-4f || w < 1e-4f) { ambiguous = true; break; }
+                    const float tHit = Vec3::dotProduct(e2, qv) * inv;
+                    if (tHit < 1e-5f) continue;                     // behind the origin
+                    ++crossings;
+                }
+                if (ambiguous) continue;
+                const bool outside = (crossings % 2) == 0;
+                if (!outside) continue;                             // only the exterior is judged
+                ++probed;
+                if (!(stored > 0.0f)) {
+                    ++wrong;
+                    if (wrong <= 8)
+                        irisLog(QStringLiteral("sdf sign: exterior cell (%1,%2,%3) reads %4 "
+                                               "(%5 cells from the surface, band %6)")
+                                    .arg(x).arg(y).arg(z)
+                                    .arg(double(stored), 0, 'f', 6)
+                                    .arg(double(std::fabs(stored) / f.cell), 0, 'f', 2)
+                                    .arg(double(sdf::kExactBand), 0, 'f', 1));
+                }
+            }
+    if (probedOut) *probedOut = probed;
+    if (wrongOut) *wrongOut = wrong;
+    return wrong == 0;
+}
 
 int MeshBake::cardCaptureResolution() { return cards::kCaptureResolution; }
 
@@ -1720,6 +2918,10 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
         // names the level its texel picks), so the order of these two lines is
         // load-bearing.
         MeshBake::buildCards(mesh, xf.maxCards);
+        // ATOM P2 / SUB-S5-SDF: the signed distance field, also built from the
+        // chain (its cell may not be finer than level 1's measured bound), so it
+        // comes third and the order of all three lines is load-bearing.
+        MeshBake::buildSdf(mesh);
         model.meshes.append(mesh);
 
         const unsigned aiMatIndex = m->mMaterialIndex;

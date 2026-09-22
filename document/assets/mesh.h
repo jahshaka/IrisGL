@@ -224,6 +224,69 @@ struct MeshCard
     float coverage = 0.0f;
 };
 
+/// THE PER-MESH SIGNED DISTANCE FIELD — a bake product (ATOM P2, SUB-S5-SDF),
+/// in the MESH'S OWN SPACE like the cards and for the same reason: one field
+/// serves every instance at any transform.
+///
+/// WHAT IT IS: a uniform grid of int8 distances, jump-flooded at IMPORT over
+/// LEVEL 0's triangle soup, negative inside and positive outside. `scale` is the
+/// distance `|value| == 127` stands for, so a cell's distance in mesh units is
+/// `value / 127 * scale`, saturating beyond it — the sign stays right out there,
+/// which is all a coarse occupancy test needs, and the band near the surface is
+/// where the resolution goes.
+///
+/// WHY THE RESOLUTION IS TIED TO THE CHAIN: the cell can never be finer than the
+/// geometry is HONEST (`meshbake.cpp`'s `kSdfCellPerBound`, four times level 1's
+/// measured bound). A field finer than the surface it was measured from would
+/// record detail the bake has already said it cannot promise.
+///
+/// THE SIGN OF AN OPEN MESH is the nearest triangle's geometric normal, not a
+/// ray-parity test, so a plane or a hemisphere gets a two-sided OFFSET field
+/// rather than a refusal. That is the honest answer for geometry with no inside:
+/// a consumer reading occupancy off such a mesh is asking the wrong question,
+/// and a consumer reading short-range occlusion or a distance to the surface —
+/// which is every consumer named in SUB-S5-SDF — gets exactly what it wants.
+///
+/// NOTHING READS IT YET. The consumers are Photon's (coarse-cascade occupancy by
+/// min-composite, the field's short-range occlusion, the far occluder past the
+/// last cascade) and they arrive in their own phases; this is the PRODUCT, baked
+/// once under the same format bump as the measured LOD bound.
+struct MeshSdf
+{
+    /// The FORMAT's ceiling on cells per axis, here beside the struct for the
+    /// same reason MeshCard::kAxisCount is: the bake's reader has to refuse a
+    /// bigger grid, and the generator has to stay under the same number.
+    /// 64^3 int8 = 256 KB, the most a per-mesh product may cost.
+    static constexpr int kMaxDim = 64;
+
+    /// Cells per axis. All three zero = this mesh has no field (skinned, not
+    /// triangles, no area) — which costs six bytes and is an honest answer.
+    quint16 dim[3] = { 0, 0, 0 };
+    /// The CENTRE of cell (0, 0, 0), mesh space.
+    Vec3 origin;
+    /// The cell's edge, metres. CUBIC on purpose: a distance field with
+    /// anisotropic cells is not a distance field.
+    float cell = 0.0f;
+    /// The distance `|value| == 127` represents, metres.
+    float scale = 0.0f;
+    /// dim[0]*dim[1]*dim[2] int8 values, x fastest, then y, then z.
+    QByteArray values;
+
+    bool isEmpty() const { return dim[0] == 0 || dim[1] == 0 || dim[2] == 0 || values.isEmpty(); }
+    int cellCount() const { return int(dim[0]) * int(dim[1]) * int(dim[2]); }
+    /// The signed distance stored for one cell, in mesh units. 0 for a cell out
+    /// of range or a mesh with no field.
+    float distanceAt(int x, int y, int z) const
+    {
+        if (isEmpty() || x < 0 || y < 0 || z < 0 || x >= int(dim[0]) || y >= int(dim[1]) ||
+            z >= int(dim[2]))
+            return 0.0f;
+        const int i = (z * int(dim[1]) + y) * int(dim[0]) + x;
+        if (i >= values.size()) return 0.0f;
+        return float(static_cast<signed char>(values.at(i))) / 127.0f * scale;
+    }
+};
+
 // CPU-side mesh: geometry buffers, skeleton, animations, bounds and the picking
 // TriMesh. The GL half (VAO/draw) died with the legacy renderer at step 14; the
 // engine mirror converts these buffers into engine meshes each time one changes.
@@ -264,14 +327,28 @@ public:
     /// purpose: one vertex buffer, N index buffers is what keeps every level of
     /// a mesh inside ONE draw call downstream (finding B).
     ///
-    /// `lodErrors[i]` is that level's SIMPLIFIER error (position + attribute
-    /// quadrics combined, >= the geometric error) as a LENGTH in mesh
-    /// units, monotonically non-decreasing. It is the currency the whole
-    /// program is judged in: divided by the view distance it is a screen-space
-    /// error, and compared against a world-space cell size it answers "is this
-    /// level fine enough for a voxel of that size".
+    /// `lodBounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0 —
+    /// a sampled Hausdorff estimate with the sampling-gap margin applied — as a
+    /// LENGTH in mesh units, monotonically non-decreasing. THIS is the currency
+    /// the whole program is judged in and the only one any consumer reads:
+    /// divided by the view distance it is a screen-space error, and compared
+    /// against a world-space cell size it answers "is this level fine enough for
+    /// a voxel of that size". The measurement is `meshbake.cpp`'s
+    /// `lodchain::twoSidedDistance`; the one selection rule over it is
+    /// `lodLevelForWorldError` (jahshaka/engine/Types.h).
+    ///
+    /// `lodErrors[i]` is what the SIMPLIFIER said about that level — its
+    /// combined position+attribute quadric. It is a DIAGNOSTIC and nothing
+    /// reads it to choose a level (ATOM P1's AT-A5): it is an estimate, not a
+    /// bound, and the reasons are listed at the measurement in meshbake.cpp.
+    /// Kept because "what the simplifier claimed" beside "what the surface
+    /// measures" is how the margin and the knobs stay honest.
+    ///
+    /// Both arrays have one entry per level above 0 and the same length as
+    /// `lodIndices`.
     QVector<QVector<quint32>> lodIndices;
     QVector<float>            lodErrors;
+    QVector<float>            lodBounds;
 
     /// SURFACE-CACHE phase 1 — the mesh's card list, built at IMPORT by
     /// MeshBake (beside the chain above) and carried in the .jmb bake, and
@@ -293,6 +370,11 @@ public:
     /// re-derive it. 0 when there are no cards.
     float cardCoverage = 0.0f;
 
+    /// ATOM P2 / SUB-S5-SDF — the mesh's signed distance field, built at IMPORT
+    /// by MeshBake beside the chain and the cards (see MeshSdf above). Empty for
+    /// every mesh that gets none.
+    MeshSdf sdf;
+
     /// CPU-side geometry, read-only. The engine mirror and importers convert from
     /// these.
     const QList<VertexBufferPtr>& getVertexBuffers() const { return vertexBuffers; }
@@ -311,37 +393,17 @@ public:
     QMap<QString, SkeletalAnimationPtr> getSkeletalAnimations();
     bool hasSkeletalAnimations();
 
-    /// Loads (or ANSWERS FROM THE PARSE CACHE) the first mesh of a model file.
-    ///
-    /// Two nodes that name the same file get the SAME Mesh — the geometry is
-    /// immutable after construction and node duplication has always shared a
-    /// MeshPtr, so this is the model the document already had, applied to the
-    /// path that was re-parsing a primitive's .obj on every add (ADD-1). The
-    /// cache holds WEAK references: it never keeps a mesh alive, and a file
-    /// whose last node is gone is parsed again next time.
-    static MeshPtr loadMesh(QString filePath);
-    /// PINS these paths: once parsed, a pinned model is held for the life of
-    /// the process instead of being let go with its last node.
-    ///
-    /// The weak cache above is right for CONTENT — a hundred imported models
-    /// must not be kept alive by a cache — and wrong for the handful of models
-    /// that are compiled into the binary and reappear in every world the user
-    /// opens. Those were re-parsed on the UI thread on every open, after every
-    /// close dropped them: measured 1-4 parses and 17-95 ms per open of a
-    /// shipped sample (OPEN-ASSIMP-1). The shell pins exactly the built-in
-    /// primitives; nothing else in the tree calls this, and an unpinned path
-    /// keeps the weak behaviour untouched.
-    ///
-    /// Registering a path does NOT parse it: the first real load does, and the
-    /// strong reference is taken then. Safe from any thread, idempotent.
-    static void pinLoadPaths(const QStringList &paths);
-    /// Forgets every cached parse, pinned models included. For tests and for a
-    /// tool that has just rewritten a model file on disk; nothing in the
-    /// editor needs it. The pin REGISTRATIONS survive — they are a statement
-    /// about which paths are shipped, not a cache.
-    static void clearLoadCache();
-    /// How many parses the cache is currently able to answer from.
-    static int loadCacheSize();
+    // (`loadMesh`, `pinLoadPaths`, `clearLoadCache` and `loadCacheSize` are
+    // DELETED — ATOM P2, 2026-09-22. They were how the twelve primitives, the
+    // Ground, the avatar's cube and the preview spheres were born: an assimp
+    // parse of a Qt resource on first use, a weak cache with a pin over it for
+    // the shipped paths, and the surface-card generator run AT CREATION for ~6 ms
+    // per node on the thread that draws — with no LOD chain, because a chain was
+    // "ATOM's decision to make". Those meshes are BAKED LIBRARY ASSETS now
+    // (jahshaka/src/services/primitiveassets.h): one import, one bake, a real
+    // chain, and the document holds a reference to the asset like it does for
+    // every model a user imports. A Mesh is built from a parsed scene (the
+    // importers) or read from a bake; nothing loads one from a path.)
     static SkeletonPtr extractSkeleton(const aiMesh* mesh, const aiScene* scene);
     static QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene *scene, QString source = "");
 
