@@ -222,11 +222,10 @@ public:
     /// `maxCards` is the budget (ImportTransform::maxCards, default 12 — Epic's
     /// "Max Lumen Mesh Cards"); it is clamped to the format's ceiling of 64.
     /// Public for the same reason buildLodChain is: the card list is a PRODUCT
-    /// of the bake with its own policy, and a caller that builds an iris::Mesh
-    /// by other means — a document PRIMITIVE, which never goes through an
-    /// import (Mesh::loadMesh), a procedural mesh, a re-bake path — must be
-    /// able to ask for the cards the importer would have produced rather than
-    /// grow a second implementation of them.
+    /// of the bake with its own policy, and a caller that builds an iris::Mesh by
+    /// other means — a procedural mesh, a re-bake path, a suite — must be able to
+    /// ask for the cards the importer would have produced rather than grow a
+    /// second implementation of them.
     /// Pure CPU, no assimp, no engine; safe from any thread.
     static void buildCards(const MeshPtr &mesh, int maxCards);
 

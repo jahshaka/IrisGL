@@ -393,37 +393,17 @@ public:
     QMap<QString, SkeletalAnimationPtr> getSkeletalAnimations();
     bool hasSkeletalAnimations();
 
-    /// Loads (or ANSWERS FROM THE PARSE CACHE) the first mesh of a model file.
-    ///
-    /// Two nodes that name the same file get the SAME Mesh — the geometry is
-    /// immutable after construction and node duplication has always shared a
-    /// MeshPtr, so this is the model the document already had, applied to the
-    /// path that was re-parsing a primitive's .obj on every add (ADD-1). The
-    /// cache holds WEAK references: it never keeps a mesh alive, and a file
-    /// whose last node is gone is parsed again next time.
-    static MeshPtr loadMesh(QString filePath);
-    /// PINS these paths: once parsed, a pinned model is held for the life of
-    /// the process instead of being let go with its last node.
-    ///
-    /// The weak cache above is right for CONTENT — a hundred imported models
-    /// must not be kept alive by a cache — and wrong for the handful of models
-    /// that are compiled into the binary and reappear in every world the user
-    /// opens. Those were re-parsed on the UI thread on every open, after every
-    /// close dropped them: measured 1-4 parses and 17-95 ms per open of a
-    /// shipped sample (OPEN-ASSIMP-1). The shell pins exactly the built-in
-    /// primitives; nothing else in the tree calls this, and an unpinned path
-    /// keeps the weak behaviour untouched.
-    ///
-    /// Registering a path does NOT parse it: the first real load does, and the
-    /// strong reference is taken then. Safe from any thread, idempotent.
-    static void pinLoadPaths(const QStringList &paths);
-    /// Forgets every cached parse, pinned models included. For tests and for a
-    /// tool that has just rewritten a model file on disk; nothing in the
-    /// editor needs it. The pin REGISTRATIONS survive — they are a statement
-    /// about which paths are shipped, not a cache.
-    static void clearLoadCache();
-    /// How many parses the cache is currently able to answer from.
-    static int loadCacheSize();
+    // (`loadMesh`, `pinLoadPaths`, `clearLoadCache` and `loadCacheSize` are
+    // DELETED — ATOM P2, 2026-09-22. They were how the twelve primitives, the
+    // Ground, the avatar's cube and the preview spheres were born: an assimp
+    // parse of a Qt resource on first use, a weak cache with a pin over it for
+    // the shipped paths, and the surface-card generator run AT CREATION for ~6 ms
+    // per node on the thread that draws — with no LOD chain, because a chain was
+    // "ATOM's decision to make". Those meshes are BAKED LIBRARY ASSETS now
+    // (jahshaka/src/services/primitiveassets.h): one import, one bake, a real
+    // chain, and the document holds a reference to the asset like it does for
+    // every model a user imports. A Mesh is built from a parsed scene (the
+    // importers) or read from a bake; nothing loads one from a path.)
     static SkeletonPtr extractSkeleton(const aiMesh* mesh, const aiScene* scene);
     static QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene *scene, QString source = "");
 
