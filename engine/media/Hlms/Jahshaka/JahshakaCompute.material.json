@@ -28,6 +28,33 @@
 			"uav_units" : 6
 		},
 
+		"Jahshaka/VoxelGatherCount" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"source" : "JahVoxelGather_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 10,
+			"properties" : { "gather_write" : 0 }
+		},
+
+		"Jahshaka/VoxelGatherScan" :
+		{
+			"threads_per_group" : [1, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahVoxelGatherScan_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 3
+		},
+
+		"Jahshaka/VoxelGatherWrite" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"source" : "JahVoxelGather_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 10,
+			"properties" : { "gather_write" : 1 }
+		},
+
 		"Jahshaka/HdrMeterClear" :
 		{
 			"threads_per_group" : [64, 1, 1],

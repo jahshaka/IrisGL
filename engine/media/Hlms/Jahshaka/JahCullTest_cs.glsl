@@ -62,12 +62,17 @@ struct GpuMesh
 	vec4  localBoundsMax;   // w = the level-0 bound, which is 0 by definition
 };
 
+// 32 bytes since ATOM P4b: the partition range beside the index range.
 struct GpuMeshLevel
 {
 	uint  firstIndex;
 	uint  indexCount;
 	float bound;            // the level's MEASURED deviation, in MESH units
 	uint  geomRow;          // the GEOMETRY ROW of submesh 0; submesh s is geomRow + s
+	uint  partBase;
+	uint  partCount;
+	uint  pad0;
+	uint  pad1;
 };
 
 layout( std430, ogre_U0 ) readonly restrict buffer paramsLayout { CullParams params; };

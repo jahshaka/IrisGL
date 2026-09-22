@@ -53,8 +53,9 @@ using MaterialId = unsigned int;
 // ---- ATOM stage 1: THE LEVEL THAT STANDS IN FOR A MESH AT A GIVEN SIZE -----
 //
 // THE RULE, written ONCE and cited from all of its callers
-// (`MeshData::lodForWorldError` below; `OgreScene::cascadeVoxelLod` in
-// irisgl/engine/src/OgreGi.cpp, which spends it on Photon's cascades; and the
+// (`MeshData::lodForWorldError` below; the voxel gather's `jahLevelForAllowed`
+// in irisgl/engine/media/Hlms/Jahshaka/JahVoxelGather_cs.glsl, which spends it on
+// Photon's cascades on the device (terms from OgreScene::cascadeGatherInputs); and the
 // engine's view LOD strategy in OgreMesh.cpp, which is the same `lower_bound`
 // over the same errors done four-wide in Ogre's own SoA loop):
 //
@@ -323,7 +324,7 @@ struct MeshData {
     /// The COARSEST level that still stands in for this mesh when the consumer
     /// can afford a world-space deviation of `allowed` —
     /// THE RULE ITSELF IS `lodLevelForWorldError` ABOVE, stated once and shared
-    /// with the engine's voxeliser (OgreScene::cascadeVoxelLod). This overload
+    /// with the engine's voxel gather (OgreScene::cascadeGatherInputs). This overload
     /// is the document-side convenience: it clamps to the levels this mesh
     /// actually carries.
     /// (`lodLevelCount` and `lodLevelIndices` used to sit here and are DELETED —
@@ -2229,7 +2230,7 @@ struct GiParams {
     /// THE FAR-FIELD PROXY: a cascade voxelises the BAKED LOD LEVEL that fits
     /// its own cell (ATOM stage 1's hand-off, SPECS/NANITE_SPEC.md §7 — the
     /// rule is `lodLevelForWorldError` and the site is
-    /// OgreScene::cascadeVoxelLod). True (the default) spends the chain; false
+    /// OgreScene::cascadeGatherInputs, applied by the gather). True (the default) spends the chain; false
     /// voxelises every cascade at the authored level, which is what the arm did
     /// before ogre-patch 0064 existed.
     ///

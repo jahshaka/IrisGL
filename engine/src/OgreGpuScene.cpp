@@ -20,7 +20,9 @@
 #include "EnginePrivate.h"
 #include "GpuScene.h"
 
+#include "Vct/OgreVctMaterial.h"
 #include "Vct/OgreVctVoxelizer.h"
+#include <Vao/OgreTexBufferPacked.h>
 
 #include <OgreLogManager.h>
 #include <OgreMesh2.h>
@@ -77,8 +79,14 @@ void GpuScene::destroy() {
         if (mMeshBuffer) mVao->destroyUavBuffer(mMeshBuffer);
         if (mLevelBuffer) mVao->destroyUavBuffer(mLevelBuffer);
         if (mGeomBuffer) mVao->destroyUavBuffer(mGeomBuffer);
+        if (mPartBuffer) mVao->destroyTexBuffer(mPartBuffer);
+        if (mPartAabbBuffer) mVao->destroyUavBuffer(mPartAabbBuffer);
     }
     mInstanceBuffer = mMeshBuffer = mLevelBuffer = mGeomBuffer = nullptr;
+    mPartBuffer = nullptr;
+    mPartAabbBuffer = nullptr;
+    mPartCount = mPartCapacity = 0;
+    mPartitionsDirty = true;
     mVao = nullptr;
     mMirror.clear();
     mBorn.clear();
@@ -143,6 +151,80 @@ void GpuScene::growMeshTable(uint32_t capacity) {
                                         false);
     mGeomDirty = false;   // the create above uploaded the mirror
     mMeshCapacity = want;
+}
+
+bool GpuScene::ensurePartitions(Ogre::HlmsManager *hlmsManager, Ogre::RenderSystem *renderSystem,
+                                uint32_t partitionIndices) {
+    if (!mPartitionsDirty || !mVao || !partitionIndices) return false;
+    // A partition's AABB is computed FROM POSITIONS READ THROUGH THE ROWS, so the
+    // rows must be on the device first (the Xid 109 lesson of this lane: a row still
+    // only in the mirror is a zero address).
+    flushGeomRows();
+
+    // ONE COMPACT LIST, rebuilt whole. It is O(mesh entries x levels) and runs only
+    // when the mesh set changed, so a free-list allocator for variable-length runs
+    // would buy nothing but a place for bugs.
+    std::vector<uint32_t> parts;     // 4 words per partition
+    uint32_t count = 0;
+    for (uint32_t e = 0; e < uint32_t(mMeshEntries.size()); ++e) {
+        const bool live = mMeshEntries[e].refs > 0u;
+        for (uint32_t l = 0; l < kLevelsPerMesh; ++l) {
+            GpuMeshLevel &lv = mLevelMirror[size_t(e) * kLevelsPerMesh + l];
+            lv.partBase = count;
+            lv.partCount = 0;
+            if (!live || lv.geomRow == kNoGeomRow || !lv.indexCount) continue;
+            const uint32_t n = (lv.indexCount + partitionIndices - 1u) / partitionIndices;
+            for (uint32_t j = 0; j < n; ++j) {
+                const uint32_t first = lv.firstIndex + j * partitionIndices;
+                const uint32_t num = std::min(lv.indexCount - j * partitionIndices, partitionIndices);
+                parts.push_back(lv.geomRow);
+                parts.push_back(first);
+                parts.push_back(num);
+                parts.push_back(0u);
+            }
+            lv.partCount = n;
+            count += n;
+        }
+    }
+    mLevelDirty = true;
+    mPartCount = count;
+    mPartitionsDirty = false;
+    // The level table carries partBase/partCount now; the gather reads it.
+    if (mLevelBuffer && !mLevelMirror.empty()) {
+        mLevelBuffer->upload(mLevelMirror.data(), 0, mLevelMirror.size());
+        mLevelDirty = false;
+        ++mCopies;
+    }
+    if (!count) return true;
+
+    // GROWN BY DOUBLING like every other table here, never shrunk: a scene that
+    // loses meshes keeps the capacity it will probably want again.
+    if (count > mPartCapacity) {
+        if (mPartBuffer) mVao->destroyTexBuffer(mPartBuffer);
+        if (mPartAabbBuffer) mVao->destroyUavBuffer(mPartAabbBuffer);
+        uint32_t cap = std::max(mPartCapacity, 256u);
+        while (cap < count) cap *= 2u;
+        mPartBuffer = mVao->createTexBuffer(Ogre::PFG_RGBA32_UINT, size_t(cap) * 4u * sizeof(uint32_t),
+                                            Ogre::BT_DEFAULT, nullptr, false);
+        mPartAabbBuffer = mVao->createUavBuffer(cap, 8u * sizeof(float), 0, nullptr, false);
+        mPartCapacity = cap;
+    }
+    mPartBuffer->upload(parts.data(), 0, parts.size() * sizeof(uint32_t));
+    ++mCopies;
+    Ogre::VctVoxelizer::computePartitionAabbs(hlmsManager, renderSystem, mGeomBuffer, mPartBuffer,
+                                              mPartAabbBuffer, count);
+    return true;
+}
+
+uint64_t GpuScene::recordBound() const {
+    uint64_t bound = 0;
+    for (uint32_t e = 0; e < uint32_t(mMeshEntries.size()); ++e) {
+        const uint32_t refs = mMeshEntries[e].refs;
+        if (!refs) continue;
+        // LEVEL 0 IS THE FINEST, so its partition count bounds every level's.
+        bound += uint64_t(refs) * mLevelMirror[size_t(e) * kLevelsPerMesh].partCount;
+    }
+    return bound;
 }
 
 void GpuScene::flushGeomRows() {
@@ -366,6 +448,7 @@ uint32_t GpuScene::acquireMesh(const Ogre::MeshPtr &meshPtr, const GpuMesh &desc
     }
     mMeshEntries[index].mesh = meshPtr;
     mMeshEntries[index].refs = 1u;
+    mPartitionsDirty = true;      // a NEW mesh: its levels have no partitions yet
     mMeshIndex[mesh] = index;
     mMeshMirror[index] = desc;
     const uint32_t take = std::min(levelCount, kLevelsPerMesh);
@@ -396,6 +479,7 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
     mMeshEntries[index] = MeshEntry();
     mMeshIndex.erase(it);
     mFreeMeshSlots.push_back(index);
+    mPartitionsDirty = true;      // the last reference: its partitions go with it
     // THE ENTRY IS ZEROED, not left behind: a slot recycled to a different mesh
     // must never be readable as the dead one's geometry (the VctMaterial
     // by-pointer aliasing lesson, DOCS/traps/ENGINE.md).
@@ -457,6 +541,38 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     return f;
 }
 
+/// THE MATERIAL WORD (ATOM P4b) — `gpuFlagsFor`'s sibling, and the ONE place
+/// GpuInstance::ids.y is decided: {pool : 16 | slot : 16} of the item's material in
+/// the chain's shared VctMaterial store.
+///
+/// A LOOKUP, NEVER A CONVERSION. Converting can render a texture into the store's
+/// pool and needs the store's temp resources, which exist only inside a GI build's
+/// bracket; this runs in the per-frame dirty scan. So a datablock the store has not
+/// seen yet answers "none" here, and the slot is QUEUED: the next GI build converts
+/// it inside its bracket and marks the slot, and the scan re-composes it with the
+/// real word before that build gathers. The voxel gather skips an instance whose
+/// word is "none" — for at most the one rebuild in which it was attached.
+///
+/// SUB-ITEM 0's DATABLOCK, because the word is one per instance: every mesh this
+/// engine builds has one submesh (buildMeshV2), and the geometry rows the gather
+/// reads are submesh 0's too.
+uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const {
+    if (!n.item || !n.item->getNumSubItems() || !mVctMaterialStore)
+        return detail::GpuScene::kNoMaterialWord;
+    const Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
+    if (!db) return detail::GpuScene::kNoMaterialWord;
+    const Ogre::VctMaterial::DatablockConversionResult *r = mVctMaterialStore->lookupDatablock(db);
+    if (!r) {
+        // Only a GI-visible item is worth converting: nothing else is ever gathered.
+        if ((flags & detail::kGpuGiVisible) && n.itemSlot != size_t(-1))
+            mVctPendingMaterialSlots.push_back(uint32_t(n.itemSlot));
+        return detail::GpuScene::kNoMaterialWord;
+    }
+    // Sixteen bits each: a pool holds 1,024 rows (VctMaterial's const-buffer size), and
+    // 65,535 pools is 67 million materials.
+    return (r->bucketIdx << 16u) | (r->slotIdx & 0xFFFFu);
+}
+
 /// ONE ENTRY, from the node.
 ///
 /// THE TRANSFORM IS HANDED IN, not fetched again. The scan has just compared
@@ -487,6 +603,7 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     std::memcpy(&out.boundsMin[3], &meshIndex, sizeof(uint32_t));
     std::memcpy(&out.boundsMax[3], &flags, sizeof(uint32_t));
     out.ids[0] = uint32_t(n.selfId);
+    out.ids[1] = gpuMaterialWordFor(n, flags);
     out.ids[2] = uint32_t(n.lightMask);
     // THE RAY LEVEL (AT-A8r) travels with the entry rather than being poked
     // into the mirror: every write to this table goes through one composer, so
