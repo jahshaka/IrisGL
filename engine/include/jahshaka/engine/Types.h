@@ -309,7 +309,7 @@ struct MeshData {
 /// would be Nyquist-strict and is not needed — the bound is a MAXIMUM over the
 /// surface while what an eye integrates is the average, and the bound already
 /// carries the sampling-gap margin. Two pixels is visible on a moving silhouette:
-/// `atom.dolly_gate`'s subject is exactly that frame-to-frame delta.
+/// that frame-to-frame delta is ATOM-BAKE-2's dolly gate's subject.
 ///
 /// WHAT IT IS WORTH, measured on the shipped chains: at one pixel on a 1080-line
 /// 45-degree view, the sphere's level 1 (bound 0.032 m) is taken at a bounding-

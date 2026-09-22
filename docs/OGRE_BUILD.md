@@ -2095,10 +2095,11 @@ beside `engine/media`, so a MEDIA patch must be applied in the tree even though 
     shader carries one constant and two branches on a compile-time constant, and
     BOTH SELFTEST HASHES ARE UNCHANGED (777eb2f1… / c2c2b19f…).
 
-  0087-mixed-shadow-vao-list-is-legal — A MIXED SHADOW-MAPPING VAO LIST IS LEGAL
+  0088-mixed-shadow-vao-list-is-legal — A MIXED SHADOW-MAPPING VAO LIST IS LEGAL
     (lane ATOM-BAKE-1, ATOM P1's AT-A11, 2026-09-22), SOURCE-only, one file
     (OgreMain/src/OgreSubMesh2.cpp) that NO other patch in the stack touches, so
-    it cannot overlap and needs no reset of its own.
+    it cannot overlap and needs no reset of its own. (Numbered 0087 while the lane
+    was in flight; VOXEL-CLIP-1 claimed that slot at merge.)
     THE PIN DEFECT, recorded 2026-09-15 and dodged on our side until now
     (SPECS/OGRE_UPSTREAM_ISSUES.md, "A MIXED shadow-VAO list is a double free"):
     `SubMesh::destroyShadowMappingVaos` decides ALIAS-versus-INDEPENDENT for the
@@ -2120,7 +2121,7 @@ beside `engine/media`, so a MEDIA patch must be applied in the tree even though 
     actually does — a level that halves its triangles each step does a vanishing
     share of it, while the per-level buffers cost VRAM forever.
 
-  0088-voxelizer-reports-queued-index-count — A VOXELIZER CAN BE ASKED WHAT IT
+  0089-voxelizer-reports-queued-index-count — A VOXELIZER CAN BE ASKED WHAT IT
     BOUND (lane ATOM-BAKE-1, ATOM P1's AT-A12, 2026-09-22), SOURCE-only, one file
     (Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h), OVERLAPS 0061, 0062,
     0064 and 0065 in that file — a tree carrying them (every tree) resets the
@@ -2142,12 +2143,12 @@ beside `engine/media`, so a MEDIA patch must be applied in the tree even though 
     else is built on it.
 
 
-THE STACK IS 0001-0088 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
+THE STACK IS 0001-0089 WITHOUT 0023 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077/0079/0082/0083/0084/0086) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078, 0081, 0085, 0087 and 0088 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075, 0078, 0081, 0085, 0088 and 0089 are SOURCE-only (0062, 0065, 0076 and 0080 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

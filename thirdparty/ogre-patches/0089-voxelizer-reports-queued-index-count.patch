@@ -1,4 +1,4 @@
-Jahshaka patch 0088 - a voxelizer can be ASKED what it bound.
+Jahshaka patch 0089 - a voxelizer can be ASKED what it bound.
 
 SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after pulling
 this. It touches `Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h`, which
@@ -31,7 +31,7 @@ of.
 WHAT DOES NOT CHANGE. No behaviour: the class computes nothing new and no existing
 member moves. Upstream's samples and every existing caller are untouched.
 
-VERIFICATION. `git apply --check` on a tree carrying 0001-0087 and
+VERIFICATION. `git apply --check` on a tree carrying 0001-0088 and
 `git apply --reverse --check` after applying; `build-ogre.sh` re-run in the lane
 worktree. The suite is `gi.cascade_lod`, whose case 4 now asserts a READBACK of
 what the voxelizer holds rather than the host's own prediction of it.
@@ -43,7 +43,7 @@ what the voxelizer holds rather than the host's own prediction of it.
          size_t getNumBuckets() const { return mBuckets.size(); }
          size_t getNumOctants() const { return mOctants.size(); }
 +
-+        /// JAHSHAKA PATCH 0088 - HOW MANY INDICES THE LAST build() ACTUALLY BOUND.
++        /// JAHSHAKA PATCH 0089 - HOW MANY INDICES THE LAST build() ACTUALLY BOUND.
 +        ///
 +        /// `QueuedInstance::numIndices` is what sizes each raster dispatch, and it
 +        /// is filled in `placeItemsInBuckets` from `getLodVao( subMesh, lodLevel )`

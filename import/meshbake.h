@@ -250,15 +250,18 @@ public:
     /// VERIFICATION, and it exists for the same reason `producerHashOf` does: the
     /// claim has to be TESTABLE without re-running the thing that made it.
     ///
-    /// `checkLodBounds` re-measures every level of `mesh` against level 0 with
-    /// `densityMultiple` times as many samples as the bake used, and answers
-    /// whether every measured distance is inside the stored `lodBounds[k]`. It is
-    /// NOT the bake's own function called again: a different sample COUNT moves
-    /// every stratum and the low-discrepancy index is the sample number, so no
-    /// sample of the dense set coincides with one of the bake's. A margin that
-    /// pays for a sampling gap has to survive a finer gap, and this is what
-    /// measures that. False for a mesh with no chain is impossible — a mesh with
-    /// no chain trivially passes.
+    /// `checkLodBounds` re-measures every level of `mesh` against level 0 by AREA
+    /// SAMPLING ALONE, with `densityMultiple` times as many samples as the bake
+    /// used, and answers whether every measured distance is inside the stored
+    /// `lodBounds[k]`.
+    ///
+    /// WHAT IT IS AND IS NOT. It is not an independent derivation of the bound: the
+    /// bake's maximum comes from the REMOVED BASE VERTICES, computed exactly, and
+    /// any check that walked them too would reproduce that term bit for bit and
+    /// pass by construction. Dropping them is what leaves the sampling-gap margin
+    /// exposed — so this is a REGRESSION CHECK on the margin and on the whole
+    /// pipeline (sampler, grid, floor, monotonicity), at a sample count and a set
+    /// of strata the bake never used. A mesh with no chain trivially passes.
     /// `worstRatioOut` receives the largest (dense measurement / stored bound) seen,
     /// so a failure reports a number instead of a boolean.
     static bool checkLodBounds(const MeshPtr &mesh, int densityMultiple = 8,
@@ -272,6 +275,19 @@ public:
     /// empty has proven nothing, which is why the suite asserts the count too).
     static bool checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut = nullptr,
                                        int *probedOut = nullptr);
+
+    /// ...and whether every cell the GEOMETRY says is OUTSIDE has a POSITIVE stored
+    /// distance. A separate check because `checkSdfAgainstSurface` compares
+    /// MAGNITUDES and is therefore blind to the one defect the field's normal can
+    /// have: at a convex feature sharper than a right angle the nearest point of an
+    /// exterior cell lies ON that feature, and a single face normal there can face
+    /// away from the cell — so the cell reads inside. Inside/outside is decided here
+    /// WITHOUT the field, by ray parity along +X through level 0's triangles, so
+    /// the field is judged against the geometry and not against itself. Cells the
+    /// parity test cannot answer (a ray grazing an edge) are skipped, as are cells
+    /// within a cell of the surface, where the true sign is genuinely ambiguous.
+    static bool checkSdfExteriorSign(const MeshPtr &mesh, int *probedOut = nullptr,
+                                     int *wrongOut = nullptr);
 
     /// The capture resolution a baked card's LOD level was chosen for (Lumen's
     /// 128-texel page). Phase 2's atlas owns the page size it actually

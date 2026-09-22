@@ -968,7 +968,7 @@ GiStatus OgreScene::giStatus() const {
             cs.lastCpuMs  = c.lastCpuMs;
             cs.lodLevels  = c.lodLevels;    // what the attach set was voxelised at
             // A READING of what the voxeliser bound at the last build, not a CPU
-            // prediction of it (AT-A12, ogre-patch 0088's getQueuedIndexCount).
+            // prediction of it (AT-A12, ogre-patch 0089's getQueuedIndexCount).
             cs.voxelTriangles = c.lodTriangles;
             // WHAT THE REBUILD COST IN DISPATCHES (ogre-patch 0065): read live off
             // the voxeliser, which keeps its bucket map after build(). A bucket is
@@ -4374,7 +4374,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.items = cascadeGeometryCount(c);
         setCascadeItems(c, c.items > 0u);
         c.voxelizer->build(mSceneMgr);
-        // THE READING, taken where the buckets exist (ogre-patch 0088).
+        // THE READING, taken where the buckets exist (ogre-patch 0089).
         c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
         c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
                                            c.voxelizer, anisotropic);
@@ -4801,7 +4801,7 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
     // Hence: MIN over the wanted set per mesh first, then one pass that spends
     // that level AND books the histogram from it, so `lodLevels` describes what
     // the voxeliser was ASKED for. `lodTriangles` is no longer booked here at all
-    // — it is READ off the voxeliser after `build()` (AT-A12, patch 0088).
+    // — it is READ off the voxeliser after `build()` (AT-A12, patch 0089).
     std::unordered_map<const Ogre::Mesh *, unsigned> effective;
     effective.reserve(wanted.size());
     for (Ogre::Item *item : wanted) {
@@ -4829,7 +4829,7 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
         c.voxelizer->addItem(item, false, 0u, lod);
     }
     // WHAT THE VOXELISER HOLDS, READ OFF THE VOXELISER (ATOM inventory row
-    // AT-A12, ogre-patch 0088). This used to walk each mesh's VAOs here and sum
+    // AT-A12, ogre-patch 0089). This used to walk each mesh's VAOs here and sum
     // `getPrimitiveCount()` at the level it had just asked for, re-applying patch
     // 0064's own clamp to do it: a PREDICTION, in a second copy of the clamp
     // (AT-DUP), that also counted geometry for items the region declined.
@@ -4927,7 +4927,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "OgreScene::rebuildCascade");
             }
             c.voxelizer->build(mSceneMgr);
-            // THE READING, taken where the buckets exist (ogre-patch 0088).
+            // THE READING, taken where the buckets exist (ogre-patch 0089).
             c.lodTriangles = (long long)(c.voxelizer->getQueuedIndexCount() / 3u);
             // ...and only once the build has SUCCEEDED does the lighting start
             // reading the replacement (the swap re-creates its light voxels and

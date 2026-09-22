@@ -4466,7 +4466,7 @@ private:
         /// walk would decide now. `{N}` for a scene with no baked LOD chains.
         std::vector<int> lodLevels;
         /// THE TRIANGLES THE VOXELISER ACTUALLY HOLDS — a READING, taken off the
-        /// voxeliser after every `build()` through ogre-patch 0088's
+        /// voxeliser after every `build()` through ogre-patch 0089's
         /// `getQueuedIndexCount()` (the sum of `QueuedInstance::numIndices`, which
         /// is what sizes each raster dispatch). It was a CPU prediction until
         /// ATOM-BAKE-1 (inventory row AT-A12): a walk of each mesh's VAOs at the

@@ -6,6 +6,7 @@
 #include <OgreViewport.h>
 #include <OgreLodStrategyPrivate.inl>
 
+#include <string>
 #include <algorithm>
 #include <unordered_map>
 
@@ -200,6 +201,33 @@ MeshId OgreScene::createMesh(const MeshData &data) {
     if (data.indices.empty() || data.indices.size() % 3 != 0)     { mError = "createMesh: indices must be triangles"; return 0; }
     const size_t nv = data.vertexCount();
     for (unsigned i : data.indices) if (i >= nv) { mError = "createMesh: index out of range"; return 0; }
+    // THE LOD LEVELS ARE VALIDATED HERE AND NOWHERE ELSE (ATOM inventory row
+    // AT-DUP as amended by the lane's audit). `buildMeshV2` used to re-walk every
+    // index of every level and silently END THE CHAIN at the first bad one; 1.7
+    // deleted that because the BAKE is the validator and a bake cannot deliver a
+    // malformed level (`MeshBake::readMesh` refuses the blob). But `createMesh` is
+    // a PUBLIC boundary and three suites hand-build `lodIndices`, so the deletion
+    // left a hand-built level going straight to the GPU as an out-of-range index
+    // buffer — a driver fault, not a message. One O(indices) pass per upload, the
+    // same price level 0 already pays, and the answer is a REFUSAL with a reason.
+    for (size_t L = 0; L < data.lodIndices.size(); ++L) {
+        const std::vector<unsigned> &level = data.lodIndices[L];
+        if (level.empty() || level.size() % 3 != 0) {
+            mError = "createMesh: LOD level " + std::to_string(L + 1) +
+                     " is not a positive whole number of triangles";
+            return 0;
+        }
+        for (unsigned i : level)
+            if (i >= nv) {
+                mError = "createMesh: LOD level " + std::to_string(L + 1) +
+                         " names vertex " + std::to_string(i) + " of " + std::to_string(nv);
+                return 0;
+            }
+    }
+    if (!data.lodBounds.empty() && data.lodBounds.size() != data.lodIndices.size()) {
+        mError = "createMesh: one bound per LOD level, or none at all";
+        return 0;
+    }
     if (!data.normals.empty() && data.normals.size() != data.positions.size()) { mError = "createMesh: normals count mismatch"; return 0; }
     if (!data.uvs.empty() && data.uvs.size() != nv * 2) { mError = "createMesh: uv count mismatch"; return 0; }
     if (!data.blendIndices.empty() && !data.hasSkinData()) {
@@ -214,8 +242,9 @@ MeshId OgreScene::createMesh(const MeshData &data) {
             rec.maxBlendIndex = std::max(rec.maxBlendIndex, unsigned(b));
         rec.mesh = buildMeshV2(rec.name, data, data.dynamic ? &rec.interleaved : nullptr);
         // ATOM stage 1: kept so a LOD-bias change can re-derive the switch
-        // distances. Exactly as many entries as the mesh got extra VAOs —
-        // buildMeshV2 may have stopped early on a malformed level.
+        // distances. Exactly as many entries as the mesh got extra VAOs — which
+        // is every level it was given, since the levels were validated above and
+        // `buildMeshV2` no longer drops any.
         if (!data.lodBounds.empty() && rec.mesh && rec.mesh->getNumSubMeshes() > 0) {
             const size_t levels = rec.mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size();
             if (levels > 1)
@@ -350,7 +379,7 @@ namespace {
 /// EMPTY return means "no optimized form", and the caller aliases the normal VAOs
 /// for every level instead.
 ///
-/// ONE, NOT ONE PER LEVEL, SINCE ogre-patch 0087 (ATOM inventory row AT-A11).
+/// ONE, NOT ONE PER LEVEL, SINCE ogre-patch 0088 (ATOM inventory row AT-A11).
 /// `SubMesh::destroyShadowMappingVaos` used to decide ALIAS-versus-INDEPENDENT
 /// for the whole shadow list from one test on entry 0, so a MIXED list — an
 /// independent VAO at 0 and aliases above it — read as independent: it destroyed
@@ -358,7 +387,7 @@ namespace {
 /// vertex buffer a second time ("Vertex Buffer has already been destroyed or
 /// doesn't belong to this VaoManager", measured 2026-09-15 by the suite that came
 /// with this feature). Only the two pure shapes were legal, so this built one
-/// independent VAO per level to stay inside one of them. Patch 0087 makes the
+/// independent VAO per level to stay inside one of them. Patch 0088 makes the
 /// alias test per entry, and the mixed list — which is the shape a LOD chain
 /// wants — is legal.
 ///
@@ -538,7 +567,7 @@ void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
     }
 }
 
-// The VAO-list SHAPE, for the suite that has to see what ogre-patch 0087 bought
+// The VAO-list SHAPE, for the suite that has to see what ogre-patch 0088 bought
 // (AT-A11). Counting the shadow entries that are NOT in the normal list is the same
 // test the patched `destroyShadowMappingVaos` makes, which is the point: the number
 // this reports is the number of VAOs and index buffers the mesh really owns.
@@ -741,16 +770,13 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     // must not disagree about how long the chain is: the render queue indexes
     // both with one mCurrentMeshLod.
     //
-    // THE LEVELS ARE NOT RE-VALIDATED HERE (ATOM inventory row AT-DUP). The bake
-    // is the validator — `MeshBake::readMesh` refuses a level whose index count
-    // is not a positive multiple of three, whose indices name a vertex the mesh
-    // does not have, or whose bound is not a positive finite non-decreasing
-    // length, and returns an INVALID model rather than a repaired one; the mirror
-    // ends the chain at the first level missing either length. Walking every
-    // index of every level again here was a second validator over data that
-    // cannot reach this point malformed, at O(indices) per mesh per upload, and
-    // two validators that disagree are worse than one. What is still asserted is
-    // the one thing this function owns: that the chain's LENGTH matches the
+    // THE LEVELS ARE NOT VALIDATED HERE (ATOM inventory row AT-DUP). There is ONE
+    // validator on this path and it is `createMesh`, at the public boundary, where
+    // a malformed level becomes a refusal with a reason instead of a driver fault.
+    // This function used to walk every index of every level AGAIN and silently end
+    // the chain at the first bad one — a second validator, with a different
+    // remedy, over data the first one has already refused. What is still asserted
+    // is the one thing this function owns: that the chain's LENGTH matches the
     // number of bounds it will publish as switch thresholds.
     std::vector<const std::vector<unsigned> *> accepted;
     accepted.push_back(&data.indices);
@@ -804,7 +830,7 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     if (Ogre::Mesh::msOptimizeForShadowMapping && !data.dynamic)
         shadowVaos = buildShadowVaos(vaoMgr, data, blendW, skinned, accepted);
     if (shadowVaos.size() == 1) {
-        // THE MIXED LIST (ogre-patch 0087): the shrunk VAO for level 0, and every
+        // THE MIXED LIST (ogre-patch 0088): the shrunk VAO for level 0, and every
         // coarse level ALIASING its own normal VAO. Correct geometry at every
         // level — a shadow pass at level k still draws level k's triangles — for
         // one shadow vertex buffer and one shadow index buffer per mesh instead

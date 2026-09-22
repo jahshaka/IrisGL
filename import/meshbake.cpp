@@ -939,6 +939,52 @@ Vec3 closestOnTriangle(const Vec3 &p, const Vec3 &a, const Vec3 &b, const Vec3 &
     return a + ab * (vb / denom) + ac * (vc / denom);
 }
 
+/// THE ANGLE THIS TRIANGLE SUBTENDS AT `q`, a point on it — the weight of the
+/// ANGLE-WEIGHTED PSEUDONORMAL (Baerentzen & Aanaes, "Signed distance computation
+/// using the angle weighted pseudonormal").
+///
+/// WHY A SIGNED DISTANCE FIELD CANNOT USE A FACE NORMAL. The sign of a point is
+/// `dot(p - q, n)` where `n` is the surface normal AT `q`, and when `q` is on an
+/// EDGE or a VERTEX there is no single face normal there — there are several, and
+/// picking one of them is wrong for every point in the wedge between the others.
+/// On a convex edge sharper than a right angle the error changes the SIGN: an
+/// exterior point near a cone's tip, a pyramid's apex or a wedge's spine has its
+/// nearest point on that feature, and the one face whose normal happens to be
+/// picked can face away from it, so the point reads INSIDE. The angle-weighted sum
+/// is the normal field whose sign is correct for every exterior point — that is
+/// the theorem the paper proves, and it is why the weights are angles and not
+/// areas.
+///
+///   * `q` interior to the face — one face, the whole 2*pi of directions: the face
+///     normal, weight 2*pi.
+///   * `q` on an edge — the two faces sharing it each subtend pi.
+///   * `q` at a vertex — each incident face subtends its own INTERIOR ANGLE there,
+///     which is the term that makes an asymmetric corner come out right.
+float angleWeightAt(const Vec3 &q, const Vec3 &a, const Vec3 &b, const Vec3 &c, float eps)
+{
+    const float da = (q - a).length(), db = (q - b).length(), dc = (q - c).length();
+    const auto interiorAngle = [](const Vec3 &at, const Vec3 &u, const Vec3 &v) {
+        const Vec3 e1 = (u - at).normalized(), e2 = (v - at).normalized();
+        const float d = std::clamp(Vec3::dotProduct(e1, e2), -1.0f, 1.0f);
+        return std::acos(d);
+    };
+    if (da <= eps) return interiorAngle(a, b, c);
+    if (db <= eps) return interiorAngle(b, a, c);
+    if (dc <= eps) return interiorAngle(c, a, b);
+    // On an edge? The distance from `q` to the line through that edge is zero, and
+    // `q` is inside the segment (it is a closest point, so it cannot be outside).
+    const auto onSegment = [&](const Vec3 &u, const Vec3 &v) {
+        const Vec3 e = v - u;
+        const float len2 = e.lengthSquared();
+        if (!(len2 > 0.0f)) return false;
+        const float s = std::clamp(Vec3::dotProduct(q - u, e) / len2, 0.0f, 1.0f);
+        return ((u + e * s) - q).length() <= eps;
+    };
+    const float kPi = 3.14159265358979323846f;
+    if (onSegment(a, b) || onSegment(b, c) || onSegment(c, a)) return kPi;
+    return 2.0f * kPi;
+}
+
 /// A UNIFORM GRID OVER A TRIANGLE SOUP, and the EXACT nearest-surface query over
 /// it. Never a brute-force loop: the bound measurement asks this thousands of
 /// times per level and the SDF asks it per seeded cell.
@@ -995,14 +1041,24 @@ public:
 
     bool empty() const { return mTriCount == 0; }
 
-    /// The nearest point of the soup to `p` and its triangle's geometric normal.
-    /// Returns the distance, or infinity for an empty soup.
+    /// The nearest point of the soup to `p`, and — when `normalOut` is asked for —
+    /// the ANGLE-WEIGHTED PSEUDONORMAL there (see `angleWeightAt`: a face normal is
+    /// the wrong answer on an edge or a vertex, and on a convex feature sharper
+    /// than a right angle it gets the SIGN wrong). Returns the distance, or
+    /// infinity for an empty soup.
+    ///
+    /// The tie set is collected as the walk goes and resolved at the end, because
+    /// `best` only stops shrinking when the walk stops: a candidate is kept when it
+    /// is within `eps` of the best SO FAR, and the final pass drops whatever the
+    /// eventual best left behind. The scratch vector is a member so the hundreds of
+    /// thousands of queries a bake makes allocate once.
     float closest(const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr) const
     {
         if (mTriCount == 0) return std::numeric_limits<float>::infinity();
         int base[3];
         cellOf(p, base);
         ++mGeneration;
+        mTies.clear();
         float best = std::numeric_limits<float>::infinity();
         Vec3 bestPoint, bestNormal(0, 1, 0);
         const int maxRing = std::max(std::max(mDim[0], mDim[1]), mDim[2]);
@@ -1031,24 +1087,58 @@ public:
                             const Vec3 c = vertexAt((*mIndices)[size_t(t) * 3 + 2]);
                             const Vec3 q = closestOnTriangle(p, a, b, c);
                             const float d = (q - p).length();
-                            if (d < best) {
-                                best = d;
-                                bestPoint = q;
-                                const Vec3 n = Vec3::crossProduct(b - a, c - a).normalized();
-                                if (n.lengthSquared() > 0.5f) bestNormal = n;
+                            const float eps = tieEps(d);
+                            if (normalOut) {
+                                // THE TIE SET IS THE NEAREST FEATURE'S FACES AND
+                                // NOTHING ELSE, and bounding it is not tidiness —
+                                // it is the difference between 0.4 s and 9 s of
+                                // bake on `endlessplane.obj`. A cell high above a
+                                // large flat mesh is nearly equidistant from
+                                // THOUSANDS of its triangles, so "within eps of the
+                                // best so far" collected the mesh; an angle weight
+                                // (an acos and two normalises) per collected
+                                // triangle per cell then dominated everything.
+                                // A strictly nearer hit RESTARTS the set, since the
+                                // feature has changed; `kMaxTies` is generous for
+                                // the real cases — the faces around one vertex.
+                                if (d < best - eps) mTies.clear();
+                                if (d <= best + eps && mTies.size() < kMaxTies)
+                                    mTies.push_back({ q, a, b, c, d });
                             }
+                            if (d < best) { best = d; bestPoint = q; }
                         }
                     }
                 }
             }
             (void)any;
         }
+        if (normalOut) {
+            // The angle-weighted sum over every triangle that really is nearest.
+            const float eps = tieEps(best);
+            Vec3 sum(0, 0, 0);
+            for (const Tie &tie : mTies) {
+                if (tie.d > best + eps) continue;
+                const Vec3 n = Vec3::crossProduct(tie.b - tie.a, tie.c - tie.a).normalized();
+                if (n.lengthSquared() < 0.5f) continue;
+                sum = sum + n * angleWeightAt(tie.q, tie.a, tie.b, tie.c, eps);
+            }
+            const float len = sum.length();
+            if (len > 0.0f) bestNormal = sum / len;
+            *normalOut = bestNormal;
+        }
         if (pointOut) *pointOut = bestPoint;
-        if (normalOut) *normalOut = bestNormal;
         return best;
     }
 
     float cell() const { return mCell; }
+
+    /// The tolerance that decides "the same nearest feature". Two faces sharing an
+    /// edge give analytically equal distances to a point on it and differ only by
+    /// round-off, so the test has to be a tolerance; it is tied to the CELL (the
+    /// coordinate scale) with a term in the distance itself for far queries.
+    /// Genuinely distinct surfaces at the same distance are a medial-axis point,
+    /// where the sign is ill-defined however it is computed.
+    float tieEps(float d) const { return std::max(mCell * 1e-4f, std::fabs(d) * 1e-4f); }
 
 private:
     Vec3 vertexAt(unsigned i) const
@@ -1077,6 +1167,14 @@ private:
     std::vector<std::vector<unsigned>> mCells;
     mutable std::vector<unsigned> mStamp;
     mutable unsigned mGeneration = 0;
+    /// One candidate nearest feature: where on the triangle, the triangle, and how
+    /// far. Kept only while a caller asks for a normal.
+    struct Tie { Vec3 q, a, b, c; float d = 0.0f; };
+    /// The faces meeting at one vertex, with room to spare. A nearest FEATURE is a
+    /// face (1), an edge (2) or a vertex (its incident faces); anything beyond this
+    /// is a near-equidistant crowd that contributes nothing to a pseudonormal.
+    static constexpr size_t kMaxTies = 32;
+    mutable std::vector<Tie> mTies;
 };
 
 }   // namespace surface
@@ -1252,8 +1350,20 @@ constexpr int   kBoundSamples      = 4096;   ///< samples per level PER DIRECTIO
 constexpr int   kBoundBigTriangles = 100000; ///< above this a mesh has more surface than 4096 samples resolve...
 constexpr int   kBoundSamplesBig   = 8192;   ///< ...so it gets twice as many.
 constexpr float kBoundMargin       = 1.25f;  ///< the sampling gap, above.
-constexpr int   kBoundGridRes      = 32;     ///< cells per axis of the nearest-surface grid (32^3 over the mesh's own box).
-constexpr size_t kBoundMaxVertexProbes = 200000; ///< the vertex walk's ceiling (see twoSidedDistance): a bake may not become a distance-field build.
+
+/// CELLS PER AXIS OF THE NEAREST-SURFACE GRID, AS A FUNCTION OF THE TRIANGLE
+/// COUNT. A fixed 32 was wrong in the expensive direction: the grid's query cost
+/// is the triangles it has to test per shell, so at one million triangles a 32^3
+/// grid holds ~30 triangles per cell and every one of the tens of thousands of
+/// queries walks all of them. Roughly ONE TRIANGLE PER CELL is what makes the
+/// shell walk O(1) per query, and that is the cube root of the count. Clamped to
+/// [32, 128]: below 32 the grid cannot localise anything, and 128^3 is 2 M cells
+/// of index vectors, which is the most a per-mesh scratch structure may cost.
+inline int boundGridRes(size_t triangles)
+{
+    const double cube = std::cbrt(double(std::max<size_t>(triangles, 1)));
+    return std::clamp(int(cube), 32, 128);
+}
 
 /// AND A FLOOR AT THE ARITHMETIC'S OWN NOISE. A bound is a distance measured
 /// between two surfaces stored as 32-bit floats, so a claim finer than that
@@ -1298,56 +1408,73 @@ constexpr float kMaxRelBound   = 0.25f;
 /// buffer (every level of a chain shares the vertices, ATOM rule 1), before the
 /// margin. `gridA` must be the grid of `a`, `gridB` of `b`.
 ///
-/// TWO SAMPLE SETS PER SIDE, AND THE SECOND ONE IS NOT OPTIONAL — it was added
-/// after the acceptance suite caught its absence, which is the best reason a line
-/// of code can have.
+/// TWO SAMPLE SETS, AND THE SECOND ONE IS THE MAXIMUM — it was added after the
+/// acceptance suite caught its absence and then CORRECTED after the lane's audit
+/// read what it was actually measuring.
 ///
-///   * AREA SAMPLES cover the surface evenly and are what an average deviation
-///     needs.
-///   * EVERY VERTEX of the index list, because a HAUSDORFF distance between two
-///     piecewise-linear surfaces is attained at a vertex or on an edge, never in
-///     the middle of a facet: simplification MOVES AND REMOVES VERTICES, so the
-///     worst deviation sits exactly where the area sampler is least likely to
-///     land. THE MEASUREMENT: the default floor (`ground.obj`, a flat 100 m grid)
-///     deviates NOWHERE except at its rim, where a coarse level cuts a corner.
-///     Area sampling alone measured 0.000054 for level 1 — and an independent
-///     sampling eight times as dense found a worse point, because the worst point
-///     is a single rim vertex and 4096 samples over 100 m never hit it. A
-///     multiplicative margin cannot save an estimate whose true maximum lives on
-///     a feature of measure zero; measuring the vertices can, and does.
+///   * AREA SAMPLES, both ways, cover the surfaces evenly and are what an average
+///     deviation needs.
+///   * AND THE BASE VERTICES THE LEVEL NO LONGER HAS. A Hausdorff distance between
+///     two piecewise-linear surfaces is attained at a vertex or on an edge, never
+///     in the middle of a facet, and `meshopt_simplify` REMOVES vertices without
+///     ever moving one (its output is an index list over the ORIGINAL vertex
+///     buffer — ATOM rule 1, one vertex buffer and N index buffers). So the whole
+///     of the worst case sits on the vertices level 0 has and level k does not,
+///     and those are the only points this walk needs: a vertex level k still USES
+///     is a vertex of one of its own triangles, whose distance to level k is
+///     exactly zero.
 ///
-/// The vertex walk is O(vertices) queries, which is the same order as loading the
-/// mesh, and it is capped so a million-vertex model cannot turn the bake into a
-/// distance-field build.
+///     THE FIRST CUT WALKED BOTH DIRECTIONS AND CAPPED THE WALK, and both were
+///     wrong. Level k's own vertices against level 0 measured 0 every single time
+///     (they are level-0 vertices, on level-0 triangles); and the walk that DID
+///     matter — level 0's vertices against level k — was strided past a 200 000
+///     probe cap, so a million-vertex mesh probed one vertex in five and the
+///     margin cannot cover a SKIPPED vertex, only an unsampled facet. The set
+///     difference is the fix in both directions at once: no dead loop, no stride,
+///     and it is SMALLER than either walk was (a halving step removes about half
+///     the vertices, and only those are queried).
+///
+/// `includeRemovedVertices` exists for the acceptance suite, which measures
+/// AREA-ONLY on purpose so that it exercises the sampling-gap margin instead of
+/// reproducing the exact term the bake already took a maximum over
+/// (`MeshBake::checkLodBounds`).
 float twoSidedDistance(const float *positions, int posComps,
                        const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
                        const std::vector<unsigned> &b, const surface::TriangleGrid &gridB,
-                       size_t samples)
+                       size_t samples, bool includeRemovedVertices = true)
 {
     float worst = 0.0f;
     std::vector<surface::Sample> pts;
-    const auto measureOneWay = [&](const std::vector<unsigned> &from,
-                                   const surface::TriangleGrid &against) {
+    const auto areaOneWay = [&](const std::vector<unsigned> &from,
+                                const surface::TriangleGrid &against) {
         if (surface::sample(positions, posComps, from, samples, &pts) > 0.0f)
             for (const surface::Sample &s : pts) {
                 const float d = against.closest(s.pos);
                 if (std::isfinite(d)) worst = std::max(worst, d);
             }
-        // ...and the vertices, distinct, in index order (deterministic).
-        std::vector<unsigned> verts(from.begin(), from.end());
-        std::sort(verts.begin(), verts.end());
-        verts.erase(std::unique(verts.begin(), verts.end()), verts.end());
-        const size_t step = verts.size() > kBoundMaxVertexProbes
-                                ? (verts.size() + kBoundMaxVertexProbes - 1) / kBoundMaxVertexProbes
-                                : 1;
-        for (size_t i = 0; i < verts.size(); i += step) {
-            const float *v = positions + size_t(verts[i]) * size_t(posComps);
-            const float d = against.closest(Vec3(v[0], v[1], v[2]));
-            if (std::isfinite(d)) worst = std::max(worst, d);
-        }
     };
-    measureOneWay(a, gridB);
-    measureOneWay(b, gridA);
+    areaOneWay(a, gridB);
+    areaOneWay(b, gridA);
+    if (!includeRemovedVertices) return worst;
+
+    // THE VERTICES `b` (level 0) HAS AND `a` (the level) DOES NOT, against the
+    // level's own surface. Sorted-unique both sides, then one set_difference —
+    // deterministic, allocation-bounded by the vertex count, no stride.
+    std::vector<unsigned> base(b.begin(), b.end());
+    std::sort(base.begin(), base.end());
+    base.erase(std::unique(base.begin(), base.end()), base.end());
+    std::vector<unsigned> kept(a.begin(), a.end());
+    std::sort(kept.begin(), kept.end());
+    kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+    std::vector<unsigned> removed;
+    removed.reserve(base.size());
+    std::set_difference(base.begin(), base.end(), kept.begin(), kept.end(),
+                        std::back_inserter(removed));
+    for (unsigned v : removed) {
+        const float *p = positions + size_t(v) * size_t(posComps);
+        const float d = gridA.closest(Vec3(p[0], p[1], p[2]));
+        if (std::isfinite(d)) worst = std::max(worst, d);
+    }
     return worst;
 }
 
@@ -1446,7 +1573,7 @@ void build(const MeshPtr &mesh)
         hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
     }
     surface::TriangleGrid baseGrid;
-    baseGrid.build(positions, posComps, base, lo, hi, kBoundGridRes);
+    baseGrid.build(positions, posComps, base, lo, hi, boundGridRes(base.size() / 3));
     const size_t boundSamples = base.size() / 3 > size_t(kBoundBigTriangles)
                                     ? size_t(kBoundSamplesBig) : size_t(kBoundSamples);
 
@@ -1482,7 +1609,7 @@ void build(const MeshPtr &mesh)
 
         // THE MEASUREMENT (AT-A5). Level `out` against level 0, both ways.
         surface::TriangleGrid levelGrid;
-        levelGrid.build(positions, posComps, out, lo, hi, kBoundGridRes);
+        levelGrid.build(positions, posComps, out, lo, hi, boundGridRes(out.size() / 3));
         const float measured =
             twoSidedDistance(positions, posComps, out, levelGrid, base, baseGrid, boundSamples) *
             kBoundMargin;
@@ -1493,6 +1620,25 @@ void build(const MeshPtr &mesh)
         // level (a coarser level can happen to land closer at the points these
         // samples fall on), so the running max is taken — which over-states, i.e.
         // errs towards a FINER level than needed, which is the safe direction.
+        // THE TWO TERMS, SEPARATELY, behind a run-wide latch (the idiom every
+        // measurable rule in this tree carries). It is how the margin and the vertex
+        // walk are re-checked without a build, and what it measured is why the
+        // vertex walk exists: on `endlessplane.obj` the removed vertices raise the
+        // level-2 bound from 4.589 to 60.033 — THIRTEEN TIMES — because a flat mesh
+        // deviates only where its RIM was cut, which no area sampler will land on.
+        // On smooth meshes they add 1.008x to 1.046x, i.e. almost nothing, which is
+        // the other half of the honest statement.
+        if (std::getenv("JAH_BAKE_BOUND_TERMS")) {
+            surface::TriangleGrid g2;
+            g2.build(positions, posComps, out, lo, hi, boundGridRes(out.size() / 3));
+            const float areaOnly = twoSidedDistance(positions, posComps, out, g2, base, baseGrid,
+                                                    boundSamples, false) * kBoundMargin;
+            irisLog(QStringLiteral("bound terms: level %1  area-only %2  with-removed-verts %3  "
+                                   "verts add %4x")
+                        .arg(mesh->lodIndices.size() + 1)
+                        .arg(double(areaOnly), 0, 'f', 6).arg(double(measured), 0, 'f', 6)
+                        .arg(areaOnly > 0.0f ? double(measured) / double(areaOnly) : 0.0, 0, 'f', 3));
+        }
         const float bound = std::max(std::max(boundSoFar, measured),
                                      extent > 0.0f ? extent * kBoundFloorRel : 0.0f);
         // The safety net (`kMaxRelBound`): this level's surface may sit further
@@ -2222,20 +2368,30 @@ void build(const MeshPtr &mesh, int maxCards)
 //      because a distance field is read by trilinear interpolation and a feature
 //      needs about two cells on each side of it to survive one.
 //
-//   2. A JUMP FLOOD, not a query per cell (the design's word, and the right one:
-//      the cost is then independent of the triangle count). Seeded cells are the
-//      ones a triangle's own box touches, with the EXACT closest point of the
-//      triangles in that cell; log2(dim) passes then halve the step and let each
-//      cell adopt the nearest seed any neighbour knows about.
+//   2. A JUMP FLOOD FOR THE DISTANCE (the design's word, and the right one for a
+//      DISTANCE: the cost is then independent of the triangle count). Seeded from
+//      the TRIANGLES, because a query per cell would BE the answer and make the
+//      flood decoration; log2(dim) passes then halve the step and let each cell
+//      adopt the nearest seed any neighbour knows about. NO NORMAL IS CARRIED.
 //
-//   3. AND AN EXACT REFINE OF THE BAND. A jump flood is approximate — a cell can
-//      end up holding a seed that is near but not nearest. Every cell whose
-//      flooded distance is inside `kSdfExactBand` cells is therefore re-asked
-//      EXACTLY through the same nearest-surface grid the LOD bound uses, so the
-//      zero crossing — the only part of the field the suite can check and the
-//      only part short-range occlusion reads — is the brute-force answer. Beyond
-//      the band the flood's answer stands and saturates, where being a few
-//      percent long costs nothing a min-composite can see.
+//   3. THE BAND IS EXACT. Every cell within `kExactBand` cells of the surface
+//      re-asks the grid for its own nearest point and the ANGLE-WEIGHTED
+//      PSEUDONORMAL there, so the ZERO CROSSING — the only part a consumer reads
+//      for a surface distance, and the only part a suite can check — is the
+//      brute-force answer in magnitude AND in sign.
+//
+//   4. AND THE SIGN IS FLOODED OUTWARDS, which is the one sound way to sign a far
+//      cell. A sign changes only by crossing the surface, the surface is entirely
+//      inside the band, and the band is thicker than one cell — so a breadth-first
+//      sweep from the band carries the sign to every cell and cannot skip the
+//      crossing. Carrying a NORMAL through the distance flood instead is what the
+//      first cut did, and it is unsound: a far cell inherits the normal of its
+//      SEED's nearest point, not of its own. MEASURED on `cone.obj` — eight
+//      exterior cells read NEGATIVE because a cell outside the base rim inherited
+//      the normal of a cell under the base. Asking EVERY cell exactly fixes the
+//      sign and costs 8.8 s on `endlessplane.obj` (a far cell's shell walk is
+//      stopped only by its own distance, so it is unbounded by construction);
+//      flooding the sign is exact where it matters and one sweep everywhere else.
 namespace sdf {
 
 /// THE KNOBS, in one place, with the reason each exists. BAKE INPUTS: editing any
@@ -2258,7 +2414,12 @@ constexpr float kCellPerBound   = 4.0f;  ///< the cell is at least this many tim
 /// costs single-digit milliseconds.
 constexpr float kCellPerEdge    = 1.0f;
 constexpr float kRangeCells     = 8.0f;  ///< `scale`: the distance |value| == 127 stands for, in cells. Beyond it the field saturates and only the sign is meaningful.
-constexpr float kExactBand      = 2.5f;  ///< cells: inside this the flood's answer is replaced by the exact one (see 3 above).
+/// THE BAND `checkSdfAgainstSurface` JUDGES THE ZERO CROSSING IN, in cells. Every
+/// cell is exact now (see 2 above), so this is no longer a policy of the generator
+/// — it is the width of the region the suite asserts to within one cell, which is
+/// the region a consumer reads for a surface distance rather than for occupancy.
+constexpr float kExactBand      = 2.5f;
+
 
 void build(const MeshPtr &mesh)
 {
@@ -2354,7 +2515,8 @@ void build(const MeshPtr &mesh)
     const size_t count = size_t(dim[0]) * size_t(dim[1]) * size_t(dim[2]);
 
     surface::TriangleGrid grid;
-    grid.build(positions, posComps, indices, lo, hi, lodchain::kBoundGridRes);
+    grid.build(positions, posComps, indices, lo, hi,
+               lodchain::boundGridRes(indices.size() / 3));
 
     const auto centreOf = [&](size_t x, size_t y, size_t z) {
         return origin + Vec3(float(x) * cell, float(y) * cell, float(z) * cell);
@@ -2363,38 +2525,23 @@ void build(const MeshPtr &mesh)
         return (z * size_t(dim[1]) + y) * size_t(dim[0]) + x;
     };
 
-    // (2) THE SEED PASS WALKS THE TRIANGLES, NOT THE CELLS, and that is the whole
-    // reason this is a jump flood at all. Asking every cell for its exact nearest
-    // surface would BE the answer — the flood would be decoration, and the bake
-    // would pay 64^3 exact queries per mesh for it (measured: it dominated the
-    // bake and blew `meshbake.roundtrip`'s timeout). Instead each triangle seeds
-    // the cells its own box touches, grown by one cell, which is O(triangles) and
-    // fills exactly the band around the surface; the flood carries those seeds
-    // outwards to everything else.
+    // (2) THE DISTANCE, FLOODED. Seeded from the TRIANGLES (a query per cell would
+    // BE the answer and make the flood decoration), then log2(dim) jump-flood
+    // passes. This gives every cell a distance without a query — and NOTHING ELSE:
+    // no normal is carried, because a normal cannot be.
+    const size_t triCount = indices.size() / 3;
     std::vector<Vec3> seed(count);
-    // THE NORMAL TRAVELS WITH THE SEED, and it has to: the SIGN of a cell is
-    // `dot(cell - nearestPoint, normalThere)`, and outside the exact band there is
-    // no query to recover a normal from. Deriving it from the seed direction
-    // instead (`p - seed`, normalised) makes every far cell POSITIVE by
-    // construction, which silently loses the whole interior of any closed mesh
-    // thicker than the band — so the flood carries the nearest TRIANGLE's
-    // geometric normal beside the nearest point, and the sign is right everywhere
-    // the flood reaches.
-    std::vector<Vec3> seedNormal(count, Vec3(0, 1, 0));
-    std::vector<float> seedDist(count, std::numeric_limits<float>::infinity());
+    std::vector<float> dist(count, std::numeric_limits<float>::infinity());
     std::vector<char> has(count, 0);
     {
         const auto vertexAt = [&](unsigned i) {
             const float *v = positions + size_t(i) * size_t(posComps);
             return Vec3(v[0], v[1], v[2]);
         };
-        const size_t triCount = indices.size() / 3;
         for (size_t tri = 0; tri < triCount; ++tri) {
             const Vec3 a = vertexAt(indices[tri * 3]);
             const Vec3 b = vertexAt(indices[tri * 3 + 1]);
             const Vec3 c = vertexAt(indices[tri * 3 + 2]);
-            Vec3 faceNormal = Vec3::crossProduct(b - a, c - a).normalized();
-            if (faceNormal.lengthSquared() < 0.5f) continue;   // degenerate: no side to be on
             Vec3 tlo(std::min(std::min(a.x(), b.x()), c.x()),
                      std::min(std::min(a.y(), b.y()), c.y()),
                      std::min(std::min(a.z(), b.z()), c.z()));
@@ -2416,83 +2563,120 @@ void build(const MeshPtr &mesh)
                         const Vec3 p = centreOf(size_t(x), size_t(y), size_t(z));
                         const Vec3 q = surface::closestOnTriangle(p, a, b, c);
                         const float d = (q - p).length();
-                        if (d < seedDist[i]) {
-                            seedDist[i] = d; seed[i] = q; seedNormal[i] = faceNormal; has[i] = 1;
-                        }
+                        if (d < dist[i]) { dist[i] = d; seed[i] = q; has[i] = 1; }
                     }
         }
     }
-
     const int maxDim = std::max(std::max(int(dim[0]), int(dim[1])), int(dim[2]));
     for (int step = maxDim / 2; step >= 1; step /= 2) {
         std::vector<Vec3> nextSeed = seed;
-        std::vector<Vec3> nextNormal = seedNormal;
+        std::vector<float> nextDist = dist;
         std::vector<char> nextHas = has;
         for (int z = 0; z < int(dim[2]); ++z)
             for (int y = 0; y < int(dim[1]); ++y)
                 for (int x = 0; x < int(dim[0]); ++x) {
                     const size_t self = at(size_t(x), size_t(y), size_t(z));
                     const Vec3 p = centreOf(size_t(x), size_t(y), size_t(z));
-                    float best = nextHas[self] ? (nextSeed[self] - p).length()
-                                               : std::numeric_limits<float>::infinity();
                     for (int dz = -1; dz <= 1; ++dz)
                         for (int dy = -1; dy <= 1; ++dy)
                             for (int dx = -1; dx <= 1; ++dx) {
                                 if (!dx && !dy && !dz) continue;
                                 const int nx = x + dx * step, ny = y + dy * step, nz = z + dz * step;
                                 if (nx < 0 || ny < 0 || nz < 0 || nx >= int(dim[0]) ||
-                                    ny >= int(dim[1]) || nz >= int(dim[2]))
-                                    continue;
+                                    ny >= int(dim[1]) || nz >= int(dim[2])) continue;
                                 const size_t other = at(size_t(nx), size_t(ny), size_t(nz));
                                 if (!has[other]) continue;
                                 const float d = (seed[other] - p).length();
-                                if (d < best) {
-                                    best = d;
-                                    nextSeed[self] = seed[other];
-                                    nextNormal[self] = seedNormal[other];
-                                    nextHas[self] = 1;
+                                if (d < nextDist[self]) {
+                                    nextDist[self] = d; nextSeed[self] = seed[other]; nextHas[self] = 1;
                                 }
                             }
                 }
-        seed.swap(nextSeed);
-        seedNormal.swap(nextNormal);
-        has.swap(nextHas);
+        seed.swap(nextSeed); dist.swap(nextDist); has.swap(nextHas);
     }
 
-    // (3) distance + sign. THE EXACT QUERY IS PAID ONLY INSIDE THE BAND: a cell
-    // whose flooded distance is within `kExactBand` cells of the surface is
-    // re-asked exactly, because that band IS the zero crossing and the only part
-    // of the field a consumer reads for occlusion or a surface distance. Outside
-    // it the flood's answer stands, where a few percent long costs a
-    // min-composite nothing, and the value saturates anyway.
-    //
-    // THE SIGN needs the nearest triangle's geometric normal, so the band's exact
-    // query returns it; outside the band the sign comes from the flood's own seed
-    // point, whose normal is recovered with ONE more exact query only when the
-    // cell is unreachable by the flood (no seed at all — a mesh with no surface,
-    // which returned above).
+    // (3) THE BAND IS EXACT, AND THE BAND IS WHERE THE ZERO SET IS. Every cell
+    // within `kExactBand` cells re-asks the grid for its own nearest point and the
+    // ANGLE-WEIGHTED PSEUDONORMAL there, so both its magnitude and its SIGN are the
+    // brute-force answer (`surface::angleWeightAt` says why a face normal is not,
+    // and how it flips the sign at a cone tip or a wedge spine).
     const float scale = cell * kRangeCells;
+    const float band = cell * kExactBand;
+    std::vector<float> signedValue(count, 0.0f);
+    std::vector<char> known(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+        if (!has[i] || dist[i] > band) continue;
+        const size_t x = i % size_t(dim[0]);
+        const size_t y = (i / size_t(dim[0])) % size_t(dim[1]);
+        const size_t z = i / (size_t(dim[0]) * size_t(dim[1]));
+        const Vec3 p = centreOf(x, y, z);
+        Vec3 nearest, normal(0, 1, 0);
+        const float d = grid.closest(p, &nearest, &normal);
+        if (!std::isfinite(d)) continue;
+        const float side = Vec3::dotProduct(p - nearest, normal);
+        signedValue[i] = side < 0.0f ? -d : d;
+        known[i] = 1;
+    }
+
+    // (4) AND THE SIGN IS FLOODED OUTWARDS, WHICH IS SOUND AND A NORMAL IS NOT.
+    //
+    // THE ARGUMENT, because this is the step that replaced a defect: a signed
+    // distance changes sign only by crossing the surface, and the surface lies
+    // ENTIRELY inside the band computed above — which is at least two cells thick on
+    // each side. A 6-connected step moves ONE cell, so no path from an outside cell
+    // to an inside cell can get past the band without entering it. Therefore a
+    // breadth-first sweep from the band's cells carries the sign correctly to every
+    // cell, with no query and no possibility of inheriting the wrong surface.
+    //
+    // WHAT THIS REPLACED, measured: carrying the angle-weighted NORMAL through the
+    // flood and signing with it gave `cone.obj` EIGHT exterior cells reading
+    // negative (`checkSdfExteriorSign`), because a cell outside the base rim
+    // inherited the normal of a cell under the base. Asking every cell exactly
+    // instead fixed the sign and cost 8.8 SECONDS on `endlessplane.obj` — a far
+    // cell's shell walk is unbounded by construction, since its own best distance is
+    // what stops it. Flooding the SIGN is exact where it matters, sound everywhere,
+    // and costs one sweep.
+    {
+        std::vector<size_t> frontier;
+        frontier.reserve(count);
+        for (size_t i = 0; i < count; ++i) if (known[i]) frontier.push_back(i);
+        const int dimX = int(dim[0]), dimY = int(dim[1]), dimZ = int(dim[2]);
+        while (!frontier.empty()) {
+            std::vector<size_t> next;
+            for (size_t i : frontier) {
+                const int x = int(i % size_t(dimX));
+                const int y = int((i / size_t(dimX)) % size_t(dimY));
+                const int z = int(i / (size_t(dimX) * size_t(dimY)));
+                const float sign = signedValue[i] < 0.0f ? -1.0f : 1.0f;
+                const int off[6][3] = { {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1} };
+                for (const auto &o : off) {
+                    const int nx = x + o[0], ny = y + o[1], nz = z + o[2];
+                    if (nx < 0 || ny < 0 || nz < 0 || nx >= dimX || ny >= dimY || nz >= dimZ)
+                        continue;
+                    const size_t j = at(size_t(nx), size_t(ny), size_t(nz));
+                    if (known[j]) continue;
+                    // The magnitude is the flood's (it saturates out here anyway);
+                    // the SIGN is this neighbour's, by the argument above.
+                    const float magnitude = has[j] ? dist[j] : scale;
+                    signedValue[j] = sign * magnitude;
+                    known[j] = 1;
+                    next.push_back(j);
+                }
+            }
+            frontier.swap(next);
+        }
+    }
+
     QByteArray values(int(count), 0);
     char *out = values.data();
-    for (size_t z = 0; z < dim[2]; ++z)
-        for (size_t y = 0; y < dim[1]; ++y)
-            for (size_t x = 0; x < dim[0]; ++x) {
-                const size_t i = at(x, y, z);
-                const Vec3 p = centreOf(x, y, z);
-                if (!has[i]) { out[i] = 127; continue; }   // the flood never reached it
-                float d = (seed[i] - p).length();
-                Vec3 nearest = seed[i];
-                Vec3 normal = seedNormal[i];
-                if (d <= cell * kExactBand) {
-                    const float exact = grid.closest(p, &nearest, &normal);
-                    if (std::isfinite(exact)) d = exact;
-                }
-                const float side = Vec3::dotProduct(p - nearest, normal);
-                const float signedDistance = side < 0.0f ? -d : d;
-                const float clamped = std::clamp(signedDistance / scale, -1.0f, 1.0f);
-                out[i] = static_cast<char>(
-                    static_cast<signed char>(std::lround(clamped * 127.0f)));
-            }
+    for (size_t i = 0; i < count; ++i) {
+        // A cell the sweep never reached has no surface anywhere near it; OUTSIDE is
+        // the honest answer and it saturates.
+        const float v = known[i] ? signedValue[i] : scale;
+        const float clamped = std::clamp(v / scale, -1.0f, 1.0f);
+        out[int(i)] = static_cast<char>(
+            static_cast<signed char>(std::lround(clamped * 127.0f)));
+    }
 
     mesh->sdf.dim[0] = dim[0];
     mesh->sdf.dim[1] = dim[1];
@@ -2537,7 +2721,7 @@ bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *
         hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
     }
     surface::TriangleGrid baseGrid;
-    baseGrid.build(positions, posComps, base, lo, hi, lodchain::kBoundGridRes);
+    baseGrid.build(positions, posComps, base, lo, hi, lodchain::boundGridRes(base.size() / 3));
     const size_t dense =
         size_t(std::max(1, densityMultiple)) *
         size_t(base.size() / 3 > size_t(lodchain::kBoundBigTriangles)
@@ -2547,7 +2731,8 @@ bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *
         const QVector<quint32> &levelQ = mesh->lodIndices.at(k);
         std::vector<unsigned> level(levelQ.constBegin(), levelQ.constEnd());
         surface::TriangleGrid levelGrid;
-        levelGrid.build(positions, posComps, level, lo, hi, lodchain::kBoundGridRes);
+        levelGrid.build(positions, posComps, level, lo, hi,
+                        lodchain::boundGridRes(level.size() / 3));
         const float measured = lodchain::twoSidedDistance(positions, posComps, level, levelGrid,
                                                           base, baseGrid, dense);
         // A float comparison of two lengths measured the same way: one part in a
@@ -2584,7 +2769,8 @@ bool MeshBake::checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut
         hi = Vec3(std::max(hi.x(), p[0]), std::max(hi.y(), p[1]), std::max(hi.z(), p[2]));
     }
     surface::TriangleGrid grid;
-    grid.build(positions, posComps, indices, lo, hi, lodchain::kBoundGridRes);
+    grid.build(positions, posComps, indices, lo, hi,
+               lodchain::boundGridRes(indices.size() / 3));
 
     const MeshSdf &f = mesh->sdf;
     double worst = 0.0;
@@ -2606,6 +2792,88 @@ bool MeshBake::checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut
     if (worstCellsOut) *worstCellsOut = worst;
     if (probedOut) *probedOut = probed;
     return worst <= 1.0;
+}
+
+bool MeshBake::checkSdfExteriorSign(const MeshPtr &mesh, int *probedOut, int *wrongOut)
+{
+    if (probedOut) *probedOut = 0;
+    if (wrongOut) *wrongOut = 0;
+    if (mesh.isNull() || mesh->sdf.isEmpty()) return false;
+    int posComps = 3; size_t nv = 0;
+    const float *positions =
+        lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return false;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return false;
+    std::vector<unsigned> indices(reinterpret_cast<const unsigned *>(ib->data),
+                                  reinterpret_cast<const unsigned *>(ib->data) +
+                                      size_t(ib->dataSize) / sizeof(unsigned));
+    if (indices.size() < 3 || indices.size() % 3 != 0) return false;
+    const auto vertexAt = [&](unsigned i) {
+        const float *v = positions + size_t(i) * size_t(posComps);
+        return Vec3(v[0], v[1], v[2]);
+    };
+
+    // RAY PARITY ALONG +X, and the ONLY thing it is asked is "is this point
+    // outside": an even crossing count is outside for a closed mesh. A ray that
+    // grazes an edge or a vertex is UNANSWERABLE rather than wrong, so such a cell
+    // is skipped (reported through `probedOut`, which the suite asserts is large).
+    const MeshSdf &f = mesh->sdf;
+    int probed = 0, wrong = 0;
+    const size_t triCount = indices.size() / 3;
+    for (int z = 0; z < int(f.dim[2]); ++z)
+        for (int y = 0; y < int(f.dim[1]); ++y)
+            for (int x = 0; x < int(f.dim[0]); ++x) {
+                const float stored = f.distanceAt(x, y, z);
+                // Within a cell of the surface the true sign is ambiguous at this
+                // resolution; beyond saturation the magnitude says nothing but the
+                // SIGN still must be right, so those cells are kept.
+                if (std::fabs(stored) <= f.cell) continue;
+                const Vec3 p = f.origin + Vec3(float(x) * f.cell, float(y) * f.cell,
+                                               float(z) * f.cell);
+                int crossings = 0;
+                bool ambiguous = false;
+                for (size_t tri = 0; tri < triCount && !ambiguous; ++tri) {
+                    const Vec3 a = vertexAt(indices[tri * 3]);
+                    const Vec3 b = vertexAt(indices[tri * 3 + 1]);
+                    const Vec3 c = vertexAt(indices[tri * 3 + 2]);
+                    // Moeller-Trumbore against the +X ray, with the degenerate and
+                    // near-edge cases declared ambiguous instead of guessed.
+                    const Vec3 e1 = b - a, e2 = c - a;
+                    const Vec3 dir(1.0f, 0.0f, 0.0f);
+                    const Vec3 pv = Vec3::crossProduct(dir, e2);
+                    const float det = Vec3::dotProduct(e1, pv);
+                    if (std::fabs(det) < 1e-12f) continue;          // parallel: no crossing
+                    const float inv = 1.0f / det;
+                    const Vec3 tv = p - a;
+                    const float u = Vec3::dotProduct(tv, pv) * inv;
+                    const Vec3 qv = Vec3::crossProduct(tv, e1);
+                    const float v = Vec3::dotProduct(dir, qv) * inv;
+                    const float w = 1.0f - u - v;
+                    if (u < -1e-5f || v < -1e-5f || w < -1e-5f) continue;   // outside the face
+                    if (u < 1e-4f || v < 1e-4f || w < 1e-4f) { ambiguous = true; break; }
+                    const float tHit = Vec3::dotProduct(e2, qv) * inv;
+                    if (tHit < 1e-5f) continue;                     // behind the origin
+                    ++crossings;
+                }
+                if (ambiguous) continue;
+                const bool outside = (crossings % 2) == 0;
+                if (!outside) continue;                             // only the exterior is judged
+                ++probed;
+                if (!(stored > 0.0f)) {
+                    ++wrong;
+                    if (wrong <= 8)
+                        irisLog(QStringLiteral("sdf sign: exterior cell (%1,%2,%3) reads %4 "
+                                               "(%5 cells from the surface, band %6)")
+                                    .arg(x).arg(y).arg(z)
+                                    .arg(double(stored), 0, 'f', 6)
+                                    .arg(double(std::fabs(stored) / f.cell), 0, 'f', 2)
+                                    .arg(double(sdf::kExactBand), 0, 'f', 1));
+                }
+            }
+    if (probedOut) *probedOut = probed;
+    if (wrongOut) *wrongOut = wrong;
+    return wrong == 0;
 }
 
 int MeshBake::cardCaptureResolution() { return cards::kCaptureResolution; }

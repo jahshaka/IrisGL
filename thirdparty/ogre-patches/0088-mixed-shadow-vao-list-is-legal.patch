@@ -1,4 +1,4 @@
-Jahshaka patch 0087 - a MIXED shadow-mapping VAO list is legal.
+Jahshaka patch 0088 - a MIXED shadow-mapping VAO list is legal.
 
 SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after pulling
 this. It touches `OgreMain/src/OgreSubMesh2.cpp`, which NO other patch in the
@@ -37,7 +37,7 @@ nothing can fall out of sync with the lists themselves; the lists are one entry
 per LOD level, so the linear search is a handful of pointer compares.
 `<algorithm>` is already in scope through OgreStdHeaders.h.
 
-VERIFICATION. `git apply --check` on a tree carrying 0001-0086 and
+VERIFICATION. `git apply --check` on a tree carrying 0001-0087 and
 `git apply --reverse --check` after applying; `build-ogre.sh` re-run in the lane
 worktree. Suites: `meshbake.shadow_vao_alias` (a chained mesh holds ONE optimized
 shadow VAO and its coarse levels alias the normal ones) and `test_engine_recreate`
@@ -52,7 +52,7 @@ pixel suite, since the geometry a coarse shadow level draws is unchanged.
      {
 -        if( mVao[VpNormal].empty() || mVao[VpShadow].empty() || mVao[VpNormal][0] == mVao[VpShadow][0] )
 -            mVao[VpShadow].clear();  // Using the same Vaos for both shadow mapping and regular rendering
-+        // JAHSHAKA PATCH 0087: THE ALIAS TEST IS PER ENTRY, NOT PER LIST.
++        // JAHSHAKA PATCH 0088: THE ALIAS TEST IS PER ENTRY, NOT PER LIST.
 +        //
 +        // The test this replaced read `mVao[VpNormal][0] == mVao[VpShadow][0]` and
 +        // decided for the WHOLE list from it, so only two shapes were legal: every

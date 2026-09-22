@@ -351,7 +351,7 @@ public:
     /// corresponding normal one — i.e. how many shrunk position-only VAOs this
     /// mesh pays for. The shape the engine builds is 1 (level 0 optimized, the
     /// coarse levels aliased) or 0 (nothing to optimize, everything aliased); it
-    /// was `levels` before ogre-patch 0087 made a MIXED list legal to destroy.
+    /// was `levels` before ogre-patch 0088 made a MIXED list legal to destroy.
     /// False for an unknown mesh. Exists because that shape is Ogre-internal, it
     /// is VRAM per mesh forever, and a suite has to be able to see it.
     virtual bool        meshVaoShape(MeshId mesh, unsigned &levels,
