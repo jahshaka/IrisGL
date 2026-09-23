@@ -3521,20 +3521,11 @@ struct GiStatus {
     /// Probes in the field (the product of the three per-axis counts). 0 when
     /// there is no field.
     int    ifdProbes = 0;
-    /// Every probe in the field has been integrated at least once since the
-    /// last build or reset. A bound field is ALWAYS converged on the frame it
-    /// binds (the build converges it in one dispatch) and on the frame it is
-    /// re-placed under a cascade chain (a follow converges it whole); it reads
-    /// false while a progressive re-converge is in flight — after
-    /// `refreshGiLighting`, or after cascade 0 re-voxelised at the same place.
-    bool   ifdConverged = false;
-    /// Probes the field is re-integrating per frame while a re-converge is in
-    /// flight — the resolved figure, derived from `GiParams::updateBudget` and
-    /// then clamped to the engine's dispatch rule (see OgreGi.cpp
-    /// ifdProbesPerFrame: a dispatch of fewer rays than one thread group is an
-    /// UNCAUGHT THROW in a release-built engine, so the clamp is mandatory).
-    /// 0 when the budget is 0 (paused: nothing re-converges) or when there is
-    /// no field.
+    /// Probes the field integrates per frame while a pass is in flight - the
+    /// resolved figure, `GiParams::updateBudget` x the field / 8 frames, rounded
+    /// up to a power of two (OgreGi.cpp ifdProbesPerFrame). 0 when the budget is 0
+    /// (paused: nothing progresses; every event's own pass runs inline) or when
+    /// there is no field.
     int    ifdProbesPerFrame = 0;
     /// WHERE THE FIELD IS: the corners of the volume its probe grid spans, as
     /// the engine placed it (the field enlarges that volume by one probe block
@@ -3560,9 +3551,31 @@ struct GiStatus {
     /// How the follows split (PHOTON-WRITER-1): `ifdScrolls` moved the window and
     /// kept every probe that stayed in it; `ifdReplacements` re-placed the whole
     /// field (a resize, or a jump of the whole grid or more - nothing to keep).
-    /// ifdFollows = ifdScrolls + ifdReplacements. Reset by a build.
+    /// ifdFollows = ifdScrolls + ifdReplacements. A re-placement counts ONCE,
+    /// however many frames its slabs take (PHOTON-FIELD-ROTATE-1: they are the
+    /// "ifd.replace" monitor rows). Reset by a build.
     unsigned long long ifdScrolls = 0;
     unsigned long long ifdReplacements = 0;
+    /// THE FIELD'S ESTIMATOR (PHOTON-FIELD-ROTATE-1): a probe's value is the mean of
+    /// its integrations, each under a fresh random rotation of its ray set, until it
+    /// holds `ifdTargetSamples`; every event (a build, a follow, a light change) owes
+    /// the field `ifdTargetSamples - 1` whole-grid refinements after its own pass, run
+    /// at the update budget, and `ifdRefinesOwed` counts the passes not yet
+    /// finished, the running one included (so `ifdRefinesOwed < ifdTargetSamples`
+    /// = every probe holds a sample). 0 = converged: the field costs nothing until
+    /// the next event. A PAUSED field (budget 0) has a target of 1: every event's
+    /// own pass runs inline and nothing is owed after it.
+    unsigned ifdTargetSamples = 0;
+    unsigned ifdRefinesOwed = 0;
+    /// GI IS AT REST (PHOTON-FIELD-ROTATE-1): nothing this scene's GI owes will
+    /// change the picture - no rebuild or re-voxelisation pending (the flush, a
+    /// staged build, a cascade step, a chain-shape change, a dirty box), no light
+    /// tick or settle injection owed, no field follow owed, and the irradiance
+    /// field's passes all done (refinements included, unless the budget is paused).
+    /// THE one settle predicate: a screenshot, the selftest's poses and every
+    /// "the picture has stopped moving" check wait on it, in frames. True with
+    /// GI off. (Reflection-probe captures are `staleProbes`, separately.)
+    bool giAtRest = true;
 
     // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
     // Reflection probes are re-captured only while STALE. These say what the

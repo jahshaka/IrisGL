@@ -3,6 +3,8 @@
 // own translation units.
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"
+
+#include <cmath>
 // SURFACE-CACHE phase 2: the cache is a unique_ptr member and the per-frame
 // pass lives here, so this TU needs the Component's complete type.
 #include "SurfaceCache.h"
@@ -156,6 +158,19 @@ void OgreScene::setAmbientSh(const float sh[27]) {
     // capture is lit by it. Compared by value, because the host re-pushes the
     // ambient every time a page takes the screen back and that must cost no
     // re-capture. (setAmbient funnels through here, so both are covered.)
+    // GUARDED AT THE SOURCE (PHOTON-FIELD-ROTATE-1, F5): a non-finite coefficient,
+    // or a negative constant band (the mean radiance - the higher bands are signed
+    // by nature), is refused with one log line and the previous SH kept: every probe
+    // ray's escape reads these, and the field's mean would carry a bad value.
+    for (int i = 0; i < 27; ++i) {
+        if (!std::isfinite(sh[i]) || (i < 3 && sh[i] < 0.0f)) {
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: an ambient SH with a non-finite or negative-mean coefficient (" +
+                std::to_string(i) + " = " + std::to_string(sh[i]) +
+                ") was refused; the previous SH stands");
+            return;
+        }
+    }
     if (!mAmbientShKnown || std::memcmp(sh, mLastAmbientSh, sizeof mLastAmbientSh) != 0) {
         std::memcpy(mLastAmbientSh, sh, sizeof mLastAmbientSh);
         mAmbientShKnown = true;
@@ -227,6 +242,15 @@ void OgreScene::setAmbientSh(const float sh[27]) {
 // (Sky Light intensity 1, white) generates the identical shader it always did
 // and renders the identical pixels.
 void OgreScene::setEnvironmentLight(const Colour &gain) {
+    // THE FIELD'S PER-CHANNEL INPUTS ARE GUARDED AT THE SOURCE (PHOTON-FIELD-ROTATE-1,
+    // F5): a non-finite gain would reach every probe ray's escape and the field's
+    // running mean would carry it until the next change. Refused, the previous gain
+    // kept, one log line. (A negative channel is clamped to 0 below, as before.)
+    if (!std::isfinite(gain.r) || !std::isfinite(gain.g) || !std::isfinite(gain.b)) {
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: a non-finite environment-light gain was refused; the previous gain stands");
+        return;
+    }
     const Colour c(std::max(gain.r, 0.0f), std::max(gain.g, 0.0f), std::max(gain.b, 0.0f), 1.0f);
     // Rec.709 luminance; the weights sum to exactly 1.0f in float, so a white
     // gain of 1 is exactly 1.0f and HlmsPbs sets no envmap_scale property.
