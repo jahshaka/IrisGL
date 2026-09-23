@@ -6581,8 +6581,13 @@ void OgreScene::updateIrradianceField() {
         {
             // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
             // budget's turn, one batch of probes a frame, so `Sweep` is its
-            // reason: nothing changed, this is the cache catching up.
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "ifd.converge",
+            // reason: nothing changed, this is the cache catching up. A
+            // RE-PLACEMENT's slabs (PHOTON-FIELD-ROTATE-1 part 3: the work has no
+            // history) are filed as "ifd.replace", a change's as "ifd.converge".
+            const bool replacing =
+                mIfd->getWorkMode() == Ogre::IrradianceField::IntegrateFresh;
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0,
+                                     replacing ? "ifd.replace" : "ifd.converge",
                                      mRoot->getRenderSystem());
             mIfd->update(batch);
             work.setUnits(batch);
@@ -6682,25 +6687,37 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
         // THE SCROLL REFUSED (a resize, or a jump of the whole grid or more on
         // an axis - a teleport, a headset re-centred far away): nothing of the
         // window is kept, so the field is RE-PLACED onto cascade 0's box from
-        // scratch - offset 0, every probe integrated in this frame - exactly
-        // once; the window's origin is then cascade 0's own, and the next step
-        // scrolls from there.
-        // (setFieldVolume makes the work the whole grid with NO history: every probe
-        // stands somewhere new.)
+        // scratch - offset 0 - exactly once; the window's origin is then cascade
+        // 0's own, and the next step scrolls from there.
+        //
+        // A JUMP WITHOUT A HITCH (PHOTON-FIELD-ROTATE-1 part 3). The whole grid used
+        // to be integrated in this frame (8,192 probes: 10.7 ms of GPU at two rays,
+        // 96 % of a VR frame). setFieldVolume makes the work the whole grid with NO
+        // history and INVALIDATES every probe (its count cleared to 0), so the
+        // re-placement is integrated like any other pass: in SLABS of the budget's
+        // probes a frame (ifdProbesPerFrame; the work list's slowest axis, z, so a
+        // slab is whole z-planes), by updateIrradianceField, from the next frame on.
+        // Until a probe's first integration the pixel's reader gives it no weight,
+        // and a cage with no valid probe hands its pixel to the cone term (the
+        // reader's fallback, JahIfd_piece_ps.any) - never the old placement's
+        // values, which describe another place. A PAUSED budget converges inline.
         mIfd->setFieldVolume(origin, size);
         mIfdVolumeOrigin = origin;
         mIfdVolumeSize   = size;
         ++mIfdFollows;
         ++mIfdReplacements;
         pushIfdState(mIfdProbeCounts);                  // the window's offset is 0 again
-        {
-            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                     mRoot->getRenderSystem());
-            mIfd->update(mIfdTotalProbes);
-            mIfdProbesDone = mIfdTotalProbes;
-            work.setUnits(mIfdTotalProbes);
+        mIfdProbesDone = 0u;
+        if (!mIfdProbesPerFrame) {
+            {
+                monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                         mRoot->getRenderSystem());
+                mIfd->update(mIfdTotalProbes);
+                mIfdProbesDone = mIfdTotalProbes;
+                work.setUnits(mIfdTotalProbes);
+            }
+            ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
         }
-        if (!mIfdProbesPerFrame) ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
     } JAH_CATCH(mError, );
 }
 
