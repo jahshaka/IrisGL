@@ -903,6 +903,25 @@ struct SunDisc {
 /// A DISABLED LAYER IS NO LAYER: nothing is created, no pass property is set,
 /// no Hlms shader changes — every picture of a scene without one is the picture
 /// it was before the layer existed (the 0048 pattern).
+///
+/// WHAT IT COSTS, MEASURED (spikes/clouds-2d-1/, 2026-09-23, Debug, Xvfb, one
+/// process, paired arms, a six-primitive scene whose still frame is ~0.6 ms GPU —
+/// so carry the ABSOLUTE numbers, not a percentage of that frame):
+///   * the layer's own draw (the quad, the clouded disc, the ground-shadow
+///     lookup), coverage 0.5 against the layer off, clocks locked 2100-2550 MHz:
+///     +0.06 / +0.15 / +0.07 ms GPU per frame over three pairs (median frames);
+///     the UI-thread CPU difference was inside its noise (±0.4 ms);
+///   * ONE environment re-capture, downstream included: 26.4 ms GPU and 45.7 ms
+///     UI-thread CPU in total — the capture is small; the new SH re-stales the
+///     whole probe grid (re-captured at the budget's one probe per frame) and
+///     re-sweeps the irradiance field. On a scene with more probes it is more.
+///     The scroll therefore re-captures every 600 drawn frames (OgreSky.cpp).
+///
+/// A HAZARD, BY DESIGN: the sheet is SUN-LIT, so the sun is in its look — with a
+/// layer on, a COLOUR or GRADIENT sky (which never depended on the sun) re-captures
+/// the environment and re-stales the probe grid on every frame the sun moves (a
+/// drag, a keyframed sun), a cost class those skies never paid; the realistic sky
+/// always did. The probe budget caps the probe half at one probe per frame.
 struct CloudLayerDesc {
     bool      enabled = false;
     /// 0 (clear) .. 1 (overcast): the fraction of the field that is cloud.
