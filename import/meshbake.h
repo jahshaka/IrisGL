@@ -285,6 +285,12 @@ public:
         int    monotoneFixes = 0;      ///< groups whose measured error was raised to a child's
         int    sphereFixes = 0;        ///< groups whose sphere was grown to contain a child's
         int    measuredBelowEstimate = 0;  ///< groups where the measurement came in under clusterlod's number
+        int    localFallbacks = 0;     ///< term-1 samples the group's local soup could not answer (exact either way)
+        /// IN: the REFERENCE measurement — term 1 against the WHOLE level-0 grid and
+        /// every area sample's plain nearest distance (no early out) — which the
+        /// shipped path (a local soup + max-only queries) is exact against;
+        /// atom.cluster_cut asserts the two agree.
+        bool   referenceMeasure = false;
         double buildMs = 0.0;          ///< clodBuild alone
         double measureMs = 0.0;        ///< the per-group measurement + provenance
         bool   wantRegions = false;

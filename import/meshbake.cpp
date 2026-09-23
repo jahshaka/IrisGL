@@ -1172,8 +1172,14 @@ public:
     /// `triangleOut` receives the index (in the soup's own order) of the triangle
     /// the nearest point lies on — the cluster DAG's region assignment asks which
     /// simplified triangle a level-0 triangle now stands under.
+    ///
+    /// `stopAtOrBelow` >= 0 turns the query into "is anything within this?": the
+    /// walk returns the first distance at or below it, which is NOT the nearest
+    /// — only for a caller taking a MAXIMUM of distances whose running value is
+    /// that threshold, where no such answer can move the maximum (the cluster
+    /// DAG's area terms). Never with a point, a normal or a triangle asked for.
     float closest(const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr,
-                  unsigned *triangleOut = nullptr) const
+                  unsigned *triangleOut = nullptr, float stopAtOrBelow = -1.0f) const
     {
         if (mTriCount == 0) return std::numeric_limits<float>::infinity();
         int base[3];
@@ -1228,6 +1234,7 @@ public:
                                     mTies.push_back({ q, a, b, c, d });
                             }
                             if (d < best) { best = d; bestPoint = q; bestTri = t; }
+                            if (d <= stopAtOrBelow) return d;
                         }
                     }
                 }
@@ -1254,6 +1261,30 @@ public:
     }
 
     float cell() const { return mCell; }
+
+    /// Every triangle (by its index in the soup) whose AABB may touch the box
+    /// [lo, hi]: the union of the cells the box covers, each triangle once. A
+    /// SUPERSET of the triangles that intersect the box — never a subset, because
+    /// a triangle is filed in every cell its own AABB touches and both boxes clamp
+    /// to the grid the same way — which is what makes a local soup built from it
+    /// exact for any query whose nearest surface lies inside the box.
+    void collect(const Vec3 &lo, const Vec3 &hi, std::vector<unsigned> &out) const
+    {
+        out.clear();
+        if (mTriCount == 0) return;
+        int c0[3], c1[3];
+        cellOf(lo, c0);
+        cellOf(hi, c1);
+        ++mGeneration;
+        for (int z = c0[2]; z <= c1[2]; ++z)
+            for (int y = c0[1]; y <= c1[1]; ++y)
+                for (int x = c0[0]; x <= c1[0]; ++x)
+                    for (unsigned t : mCells[index(x, y, z)]) {
+                        if (mStamp[t] == mGeneration) continue;
+                        mStamp[t] = mGeneration;
+                        out.push_back(t);
+                    }
+    }
 
     /// The tolerance that decides "the same nearest feature". Two faces sharing an
     /// edge give analytically equal distances to a point on it and differ only by
@@ -2883,20 +2914,20 @@ constexpr int kGroupSamplesMin = 512;
 
 using Variant = MeshBake::ClusterDagVariant;
 
-/// THE MEASUREMENT'S PICK (tests/atom/cluster_config_measure.cpp `configs`; the
-/// table is in ~/Developer/spikes/atom-cluster-1/config-measure.txt): PERMISSIVE,
+/// THE MEASUREMENT'S PICK (tests/atom/cluster_config_measure.cpp `configs`; its
+/// table is ~/Developer/spikes/atom-cluster-1/config-measure.txt): PERMISSIVE,
 /// NOTHING PROTECTED — the seams are paid for in the error, exactly stage 1's
 /// measured choice for the chain (rule 4 above `lodchain`), and the opposite of
 /// clusterlod.h's default pairing (permissive + a UV protect mask). Judged by the
 /// cut's triangle count at seven equal measured bounds (0.05 % to 5 % of the
-/// extent) over the eleven shipped meshes that get a DAG: the mean of cut /
-/// level-0 is 0.627 here, 0.647 with the UV seams protected (the header's
-/// pairing, and the same with normals too), 0.665 strict, 0.669 regularised —
-/// and 0.658 for the chain at the same bounds. The difference is the dragon,
-/// whose UV seams are a third of its vertices: at 1 % of its extent protecting
-/// them draws 21,754 triangles and charging them 10,588. Changing this re-bakes
-/// every library twice over: meshbake.cpp is in the producer hash, and the
-/// blob's config record no longer matches.
+/// extent); the file's aggregate — the mean of cut / level-0 over its 13 meshes
+/// (the 11 shipped ones with a DAG + the round and the box 40 m bar) x 7 bounds —
+/// is 0.5311 here, 0.5483 with the UV seams protected (the same with normals too),
+/// 0.5630 strict, 0.5762 regularised, and 0.5589 for the chain at the same bounds.
+/// The difference is the dragon, whose UV seams are a third of its vertices: at
+/// 1 % of its extent protecting them draws 21,754 triangles and charging them
+/// 10,588. Changing this re-bakes every library twice over: meshbake.cpp is in the
+/// producer hash, and the blob's config record no longer matches.
 constexpr Variant kShipped = Variant::PermissiveCharged;
 
 Variant resolve(Variant v) { return v == Variant::Shipped ? kShipped : v; }
@@ -2969,14 +3000,49 @@ Vec3 vertexOf(const float *positions, int posComps, unsigned v)
     return Vec3(p[0], p[1], p[2]);
 }
 
+/// CELLS ALONG THE LONGEST AXIS for a grid over a GROUP-sized soup — sized by the
+/// soup's own triangles, not by `lodchain::boundGridRes`'s cube root. The grid's
+/// cells are cubic (the longest axis over this number), so a cube-root count on a
+/// long thin box — a slice of a 40 m bar — gives cells as wide as the bar and every
+/// query walks a whole ring of it. The cell here is the soup's mean triangle size
+/// (sqrt of area / count: about one triangle per occupied cell, the shell walk's
+/// O(1)), grown until the whole box holds at most 2^18 cells (the most a per-group
+/// scratch grid may cost). The query stays EXACT at any resolution; only its cost
+/// moves.
+int soupGridRes(const float *positions, int posComps, const std::vector<unsigned> &idx,
+                const Vec3 &lo, const Vec3 &hi)
+{
+    const size_t tris = idx.size() / 3;
+    const Vec3 size = hi - lo;
+    const float longest = std::max(std::max(size.x(), size.y()), size.z());
+    if (tris == 0 || !(longest > 0.0f)) return 1;
+    double area = 0.0;
+    for (size_t t = 0; t < tris; ++t) {
+        const Vec3 a = vertexOf(positions, posComps, idx[t * 3]);
+        const Vec3 b = vertexOf(positions, posComps, idx[t * 3 + 1]);
+        const Vec3 c = vertexOf(positions, posComps, idx[t * 3 + 2]);
+        area += double(Vec3::crossProduct(b - a, c - a).length()) * 0.5;
+    }
+    double cell = std::sqrt(std::max(area, 1e-30) / double(tris));
+    const auto cellsFor = [&](double c) {
+        const double nx = std::floor(double(size.x()) / c) + 1.0, ny = std::floor(double(size.y()) / c) + 1.0,
+                     nz = std::floor(double(size.z()) / c) + 1.0;
+        return nx * ny * nz;
+    };
+    cell = std::max(cell, double(longest) / 4096.0);
+    while (cellsFor(cell) > double(1u << 18)) cell *= 1.25;
+    return std::clamp(int(std::ceil(double(longest) / cell)), 1, 4096);
+}
+
 void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant)
 {
     if (mesh.isNull()) return;
     mesh->clusterDag = MeshClusterDag();
     if (stats) {
-        const bool want = stats->wantRegions;
+        const bool want = stats->wantRegions, reference = stats->referenceMeasure;
         *stats = MeshBake::ClusterDagStats();
         stats->wantRegions = want;
+        stats->referenceMeasure = reference;
     }
     if (!mesh->getSkeleton().isNull()) return;     // static meshes only, as the chain
     if (mesh->primitiveMode != PrimitiveMode::Triangles) return;
@@ -3144,6 +3210,9 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     std::vector<int> keptOwner(nv, -1), removedOwner(nv, -1);
     std::vector<unsigned> inRegion(nv, 0u), keptStamp(nv, 0u);
     std::vector<surface::Sample> pts;
+    std::vector<unsigned> soupTris, soupIdx;
+    surface::TriangleGrid gridL;
+    size_t fallbacks = 0;
     for (size_t g = 0; g < groups.size(); ++g) {
         if (groups[g].simplified.error == FLT_MAX || outputs[g].empty()) continue;   // terminal
         const unsigned here = ++stamp;
@@ -3162,9 +3231,10 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                 if (inRegion[v] != here) { inRegion[v] = here; regionV.push_back(v); }
         if (regionV.empty() || simplifiedIdx.empty()) continue;
 
-        // The grid over S spans the group, not the mesh: a group is a small patch
+        // The grid over S spans the group, not the mesh (a group is a small patch
         // of a large mesh, and a grid over the mesh's box would file the patch
-        // into a handful of cells and walk all of it per query.
+        // into a handful of cells and walk all of it per query), and its cell is
+        // S's own triangle size (`soupGridRes`), not a cube root of its count.
         Vec3 glo = vertexOf(positions, posComps, simplifiedIdx[0]), ghi = glo;
         for (const std::vector<unsigned> *list : { &regionV, &simplifiedIdx })
             for (unsigned v : *list) {
@@ -3174,7 +3244,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             }
         surface::TriangleGrid gridS;
         gridS.build(positions, posComps, simplifiedIdx, glo, ghi,
-                    lodchain::boundGridRes(simplifiedIdx.size() / 3));
+                    soupGridRes(positions, posComps, simplifiedIdx, glo, ghi));
 
         // THE MEASUREMENT, in the chain's three terms (`lodchain::twoSidedDistance`
         // states why each exists), each on the side that needs no provenance or
@@ -3188,14 +3258,48 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         //      can sit on a border, half under a neighbour's surface, and the
         //      first cut of this term read that as 0.014 of deviation on the 20k
         //      sphere where its vertices measured 0.001 — the staircase again.)
+        //
+        // TERM 1's LEVEL-0 SIDE IS A LOCAL SOUP, and it is EXACT, not an
+        // approximation. The whole-mesh grid's cell is the mesh extent over its
+        // resolution, so on a long thin import one cell holds a whole slice of the
+        // mesh and every query walks it (the audit's finding: 20.8 s for a 25,664-
+        // triangle 40 m bar, ~1 ms per triangle). The samples all lie on S, inside
+        // the group's box; the level-0 triangles whose AABB touches that box grown
+        // by `reach` are gathered from the whole-mesh grid's cells into a grid of
+        // the group's own size. A sample whose local answer is within `reach` has
+        // its true nearest triangle in the soup (anything nearer than `reach` to a
+        // point in the box touches the grown box), so the local answer IS the
+        // whole-mesh answer, bit for bit; a sample whose local answer exceeds
+        // `reach` asks the whole-mesh grid instead. `reach` is a tenth of the
+        // group's box diagonal plus the arithmetic floor: far above any group's
+        // error on every shipped mesh, so the fallback is the rare case.
         float worst = 0.0f;
         const size_t sTris = simplifiedIdx.size() / 3;
         if (surface::sample(positions, posComps, simplifiedIdx,
-                            std::clamp(sTris * 2u, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f)
+                            std::clamp(sTris * 2u, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f) {
+            const float reach = (ghi - glo).length() * 0.1f + floorLen;
+            const Vec3 grow(reach, reach, reach);
+            const bool whole = stats && stats->referenceMeasure;
+            if (!whole) {
+                baseGrid.collect(glo - grow, ghi + grow, soupTris);
+                soupIdx.clear();
+                for (unsigned t : soupTris)
+                    soupIdx.insert(soupIdx.end(), { base[t * 3], base[t * 3 + 1], base[t * 3 + 2] });
+                gridL.build(positions, posComps, soupIdx, glo - grow, ghi + grow,
+                            soupGridRes(positions, posComps, soupIdx, glo - grow, ghi + grow));
+            }
             for (const surface::Sample &sp : pts) {
-                const float d = baseGrid.closest(sp.pos);
+                // Only the MAXIMUM is wanted, so a sample that has anything within
+                // the running maximum stops looking (`stopAtOrBelow`).
+                float d = whole ? baseGrid.closest(sp.pos)       // the reference: plain nearest
+                                : gridL.closest(sp.pos, nullptr, nullptr, nullptr, worst);
+                if (!whole && !(d <= reach)) {
+                    d = baseGrid.closest(sp.pos, nullptr, nullptr, nullptr, worst);
+                    ++fallbacks;
+                }
                 if (std::isfinite(d)) worst = std::max(worst, d);
             }
+        }
         const float termS = worst;
         for (unsigned v : regionV) {
             removedOwner[v] = -1;
@@ -3218,7 +3322,9 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             surface::sample(positions, posComps, lostIdx,
                             std::clamp(lostIdx.size() / 3, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f)
             for (const surface::Sample &sp : pts) {
-                const float d = gridS.closest(sp.pos);
+                const float d = (stats && stats->referenceMeasure)
+                                    ? gridS.closest(sp.pos)
+                                    : gridS.closest(sp.pos, nullptr, nullptr, nullptr, worst);
                 if (std::isfinite(d)) worst = std::max(worst, d);
             }
         measured[g] = std::max(worst * lodchain::kBoundMargin, floorLen);
@@ -3305,6 +3411,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         stats->monotoneFixes = monotoneFixes;
         stats->sphereFixes = sphereFixes;
         stats->measuredBelowEstimate = belowEstimate;
+        stats->localFallbacks = int(fallbacks);
         stats->buildMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
         stats->measureMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
         if (stats->wantRegions) {
@@ -3576,7 +3683,20 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
         MeshBake::buildSdf(mesh);
         // ATOM stage 2: the cluster DAG. Independent of the three above (it
         // simplifies level 0 itself), so its place in the order is free.
-        MeshBake::buildClusterDag(mesh);
+        // ONE LOG LINE per mesh that gets a DAG, with the bake's two FIX COUNTS:
+        // a group error raised to a child's, or a sphere grown to contain a
+        // child's, is the bake correcting its own measurement, and a count that is
+        // suddenly large is the thing to see (shipped content: 0-3 per mesh, 17
+        // spheres on the dragon).
+        MeshBake::ClusterDagStats dagStats;
+        MeshBake::buildClusterDag(mesh, &dagStats);
+        if (dagStats.clusters > 0)
+            irisLog(QStringLiteral("mesh bake: cluster DAG %1 (mesh %2): %3 clusters, %4 groups, depth %5; "
+                                   "fixes: %6 monotone, %7 sphere; %8 ms")
+                        .arg(QFileInfo(filePath).fileName()).arg(i).arg(dagStats.clusters)
+                        .arg(dagStats.groups).arg(dagStats.depth).arg(dagStats.monotoneFixes)
+                        .arg(dagStats.sphereFixes)
+                        .arg(dagStats.buildMs + dagStats.measureMs, 0, 'f', 1));
         model.meshes.append(mesh);
 
         const unsigned aiMatIndex = m->mMaterialIndex;

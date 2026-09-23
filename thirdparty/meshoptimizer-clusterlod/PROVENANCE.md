@@ -29,9 +29,11 @@ screen error (0..1, multiply by screen height for pixels) =
 
 `irisgl/engine/src/OgreMesh.cpp` (`OgreScene::applyLodValues` + `Types.h::lodSwitchDistance`) inverts that formula to turn a baked
 per-level error into the distance at which the level becomes acceptable, and cites this file. The
-header itself is **NOT COMPILED** by stage 1 — no TU defines `CLUSTERLOD_IMPLEMENTATION` yet. It is
-here because stage 2 (the cluster DAG) calls `clodBuild`/`clodLocalIndices` and must call the
-*pinned* version, and because the formula our code inverts has to be readable next to its source.
+header is **COMPILED since ATOM stage 2** (lane ATOM-CLUSTER-1, 2026-09-23): exactly one TU defines
+`CLUSTERLOD_IMPLEMENTATION` — `irisgl/import/clusterlod.cpp` — with zero warnings under GCC 15.2 (also clean
+at `-Wall -Wextra`), and the mesh bake (`import/meshbake.cpp`, `clusterdag::build`) calls `clodBuild` and
+`clodLocalIndices` to write every mesh's cluster DAG. The header is in the bake's producer hash
+(`irisgl/CMakeLists.txt`), so re-copying it re-bakes every library.
 
 **Vendored, never edit** — the rule that covers `thirdparty/{assimp,bullet3,zip,ogre-next,meshoptimizer}`
 covers this copy too. A change we need becomes a patch beside it, never an edit in place.
