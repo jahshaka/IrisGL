@@ -5250,6 +5250,10 @@ public:
     /// scene with the eye and the projection of the view that draws it; runs
     /// nothing when neither the camera nor the table moved.
     void updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, float viewportHeight);
+    /// How many times the rule has CHANGED a slot's level, ever. The ray tier
+    /// adds it to its movement epoch (a still scene whose camera crossed a band
+    /// owes one instance write: the near copy's BLAS changed).
+    unsigned long long rayLevelRefits() const { return mRayLevelRefits; }
     /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
     /// null (or a request with hzbLevels 0) is the frustum-only mode.
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,

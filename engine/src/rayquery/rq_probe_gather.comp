@@ -35,21 +35,24 @@
 //
 // THE HIT'S RADIANCE, in Lumen's order minus the card (that is phase 5, and it
 // arrives as one more branch here): the cascade VOXEL where the ray hit
-// something, the SKY where it hit nothing inside tMax. There is no far term
-// between them -- no read of the outer cascades at a MISSED ray's end point --
-// and the reason is measured (PHOTON-GAFAR-1, spikes/photon-gafar-1): at the
-// old length (the outer box's diagonal) the end point lay in no cascade and the
-// read never answered, and at a length short enough for it to answer it reads a coarse mip
-// of whatever surface lies within a mip's reach of empty space and moves the
-// picture AWAY from the long-ray reference (open sky, High: 44.6 % of pixels
-// moved, 3.9/255 averaged over the frame, worst 72/255 -- where the sky alone
-// at the same length moves 0.2 % by 1/255). The length is at
-// OgreScreenProbeGather.cpp's `reach`. And a hit
-// the cascades cannot shade is BLACK, never sky — the ray found geometry and
-// the cache does not reach it; handing it the sky would light the probe THROUGH
-// the object, which is the leak this whole program exists to remove. Black is
-// an underestimate of a surface's bounce and an exact statement about its
-// occlusion (the lead's decision, ledger sections 937/938).
+// something, the SKY where it hit nothing. TWO QUERIES, ONE TLAS (ATOM-FARBLAS-1,
+// A5b section 4): the ray first traces the NEAR copies (mask 0x0F) out to its
+// near length -- the lit volume's inscribed radius, OgreScreenProbeGather.cpp's
+// `reach`, inside which every hit is one the cascades can shade -- and a ray that
+// ESCAPES it traces again, from that length to the far plane, against the FAR
+// copies alone (mask 0x10: every object once more, over its mesh's coarsest
+// level). The coarse level is the far field's geometry: beyond the near length a
+// ray's footprint is wider than the chain's coarsest bound, and no read of the
+// voxels at a missed ray's end point stands in for it (that read moved the
+// picture AWAY from the long-ray reference and is gone, PHOTON-GAFAR-1). A ray
+// that hits near pays one query; only an escaping ray pays the second. The far
+// query is off when the far plane lies inside the near length (p.knobs3.w = 0).
+// A hit the cascades cannot shade -- near or far -- is BLACK, never sky: the ray
+// found geometry and the cache does not reach it; handing it the sky would
+// light the probe THROUGH the object, which is the leak this whole program
+// exists to remove. Black is an underestimate of a surface's bounce and an
+// exact statement about its occlusion (the lead's decision, ledger sections
+// 937/938).
 //
 // DETERMINISM (spec section 5). Every stochastic input is an integer hash of
 // (probe cell, ray, frame). The 64 partial sums are reduced by a FIXED-ORDER
@@ -67,8 +70,8 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 layout( std430, set = 0, binding = 2 ) buffer Records { JahProbeRecord r[]; } records;
 /// THE PROBE ATLAS: one 8x8 block per probe, rgb = the radiance arriving along
-/// that texel's direction, a = how far away it came from (-1 = nothing inside
-/// the near field).
+/// that texel's direction, a = how far away it came from (-1 = the ray hit
+/// nothing, near or far: the sky).
 layout( rgba16f, set = 0, binding = 3 ) uniform image2D probeAtlas;
 layout( set = 0, binding = 4 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 5 ) uniform sampler3D voxelX[kMaxCascades];
@@ -157,10 +160,31 @@ void main()
 
 		const float bias = p.knobs2.y;
 		const float maxT = p.knobs.y;
+		const float farT = p.knobs3.w;
 		const vec3 origin = posW.xyz + n * bias;
+		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, origin, bias, dir, maxT );
+		rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, origin, bias, dir, maxT );
 		while( rayQueryProceedEXT( rq ) ) {}
+		bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) ==
+				   gl_RayQueryCommittedIntersectionTriangleEXT;
+		float tHit = hit ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;
+		// THE FAR QUERY, for an escaping ray only: the far copies (kRayMaskFar),
+		// from the near length to the far plane. The same origin and direction,
+		// so the far segment starts exactly where the near one ended.
+		if( !hit && farT > maxT )
+		{
+			rayQueryEXT rqFar;
+			rayQueryInitializeEXT( rqFar, tlas, gl_RayFlagsOpaqueEXT, 0x10u, origin, maxT, dir,
+								   farT );
+			while( rayQueryProceedEXT( rqFar ) ) {}
+			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) ==
+				gl_RayQueryCommittedIntersectionTriangleEXT )
+			{
+				hit = true;
+				tHit = rayQueryGetIntersectionTEXT( rqFar, true );
+			}
+		}
 
 		// THE RAY'S FOOTPRINT AT ITS HIT. One of `rays` directions covers a
 		// solid angle 2*pi/rays, whose half-angle has tan ~ sqrt(2/rays) at
@@ -171,10 +195,8 @@ void main()
 		vec3 radiance = vec3( 0.0 );
 		float distance = -1.0;
 		bool ok = false;
-		if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
-			gl_RayQueryCommittedIntersectionTriangleEXT )
+		if( hit )
 		{
-			const float tHit = rayQueryGetIntersectionTEXT( rq, true );
 			distance = tHit;
 			radiance = jahVoxelRadiance( origin + dir * tHit, dir, max( tHit * spread, 1e-4 ),
 										 false, ok );
@@ -183,9 +205,8 @@ void main()
 		}
 		else
 		{
-			// ---- THE SKY. Nothing inside tMax: tMax is the lit volume's
-			// inscribed radius and no measured hit lies beyond it in a way the
-			// picture can see, so a miss is an escape.
+			// ---- THE SKY. Nothing near and nothing far (or the far query off):
+			// the ray escaped the world.
 			radiance = jahSkyRadiance( dir );
 		}
 		if( !finite3( radiance ) )

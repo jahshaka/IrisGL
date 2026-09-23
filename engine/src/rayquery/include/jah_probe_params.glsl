@@ -43,7 +43,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 knobs2;
 	/// x = how many UNIFORM probes there are (the grid), y = how many ADAPTIVE
 	/// probes a frame may add, z = how many probes a row of the atlas holds,
-	/// w = unused.
+	/// w = THE FAR QUERY's end (the far plane, world units; ATOM-FARBLAS-1) --
+	/// 0, or anything not beyond knobs.y, is the far query off.
 	vec4 knobs3;
 	/// THE ADAPTIVE TEST and the two arms. x = how far a cell's pixel may lie
 	/// off its probe's plane before the cell wants a second probe, as a

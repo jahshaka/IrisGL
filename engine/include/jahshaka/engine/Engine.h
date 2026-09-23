@@ -1007,8 +1007,12 @@ public:
     /// here; this one submits its own command buffer and BLOCKS on a fence.
     ///
     /// `rays` is 12 floats per ray — origin.xyz, tMin, direction.xyz, tMax,
-    /// instance mask (bit 0 casters, bit 1 movers, bit 2 still world; 0xFF =
-    /// everything), and three unused. `hits` comes back as 4 floats per ray:
+    /// instance mask (Types.h `kRayMask*`: bit 0 casters, bit 1 movers, bit 2
+    /// still world, bit 3 every near copy, bit 4 the FAR copies over each mesh's
+    /// coarsest level), and three unused. A ray traces ONE field: the far copies
+    /// when its mask names bit 4 and none of bits 0-3, otherwise the near
+    /// copies under `mask & kRayMaskNearField` (so 0xFF = the whole near
+    /// field). `hits` comes back as 4 floats per ray:
     /// distance to the first hit (< 0 = miss), the hit node's index in the
     /// scene's item order, the hit triangle's index, and 1 or 0.
     ///

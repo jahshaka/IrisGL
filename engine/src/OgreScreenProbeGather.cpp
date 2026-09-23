@@ -691,10 +691,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     //     208 m agrees within +-1 % in interleaved rounds (a traversal through
     //     empty space is cheap), so the length is set by what a ray can use,
     //     not by what it costs.
-    // The old length was the DIAGONAL, i.e. a miss's end point lay outside
-    // every cascade; the far term that read the cascades there never fired and
-    // is deleted with this (see rq_probe_gather.comp). The floor for a chain
-    // with no cascades and the camera's far plane as the ceiling are kept.
+    // The old length was the DIAGONAL. What lies BEYOND this length is not the
+    // near trace's business: an escaping ray traces the far copies (the coarse
+    // levels) from here to the far plane (knobs3.w below, ATOM-FARBLAS-1). The
+    // floor for a chain with no cascades and the camera's far plane as the
+    // ceiling are kept.
     {
         float reach = 0.0f;
         if (in.cascadeCount) {
@@ -715,6 +716,14 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.knobs3[0] = float(v.uniformProbes);
     pp.knobs3[1] = float(adaptiveCap);
     pp.knobs3[2] = float(v.atlasCols);
+    // THE FAR QUERY (ATOM-FARBLAS-1, A5b section 4): an escaping ray traces the
+    // FAR copies (each mesh's coarsest level, mask kRayMaskFar) from the near
+    // length out to the camera's far plane. Off under the tuning's A/B, and off
+    // by construction when the far plane is not beyond the near length.
+    {
+        const float farPlane = in.farClip > 0.0f ? in.farClip : 1000.0f;
+        pp.knobs3[3] = (!in.tuning.farQueryOff && farPlane > pp.knobs[1]) ? farPlane : 0.0f;
+    }
     pp.plane[0] = kPlaneTolerance;
     pp.plane[1] = kNormalTolerance;
     pp.plane[3] = in.tuning.jitterOff ? 1.0f : 0.0f;

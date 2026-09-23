@@ -658,7 +658,9 @@ void main()
 	const float bias = p.knobs2.y;
 	const float maxT = p.knobs.y;
 	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, world + worldN * bias,
+	// NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): a reflection traces the
+	// level the ray rule chose, never the far field's coarse copies (A5b §4).
+	rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, world + worldN * bias,
 						   bias, L, maxT );
 	while( rayQueryProceedEXT( rq ) ) {}
 
