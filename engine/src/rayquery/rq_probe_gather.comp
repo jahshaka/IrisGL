@@ -217,7 +217,7 @@ void main()
 		{
 			// ---- THE SKY. Nothing near and nothing far (or the far query off):
 			// the ray escaped the world.
-			radiance = jahSkyRadiance( dir );
+			radiance = jahSkyRadiance( dir, spread );	// at the ray's own footprint (GA-SKY)
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );

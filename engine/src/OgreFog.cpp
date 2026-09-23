@@ -43,6 +43,9 @@ std::map<const Ogre::SceneManager *, FogHlmsListener::SkyEnvState>
                                                FogHlmsListener::sSkyEnv;      // render thread only
 Ogre::TextureGpu             *FogHlmsListener::sPassSkyCube    = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sPassSkySampler = nullptr;     // render thread only
+Ogre::HlmsManager            *FogHlmsListener::sSamplerMgr     = nullptr;     // render thread only
+const Ogre::HlmsSamplerblock *FogHlmsListener::sEnvSampler     = nullptr;     // render thread only
+const Ogre::HlmsSamplerblock *FogHlmsListener::sGatherSampler  = nullptr;     // render thread only
 std::map<const Ogre::SceneManager *, Ogre::TextureGpu *>
                               FogHlmsListener::sProbeGather;                  // render thread only
 Ogre::TextureGpu             *FogHlmsListener::sPassProbeGather = nullptr;    // render thread only
@@ -105,10 +108,10 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
     //
     // Cache-safe, which this hook's documentation is strict about: the register
     // is derived from `set0_texture_slot_end`, a property already in the merged
-    // set, and `jah_sky_env_probe` is a PASS property set in preparePassHash,
+    // set, and `jah_env` is a PASS property set in preparePassHash,
     // so the same property set always yields the same shader.
     {
-        static const Ogre::IdString kSkyEnvProbe("jah_sky_env_probe");
+        static const Ogre::IdString kSkyEnvProbe("jah_env");
         static const Ogre::IdString kProbeGather("jah_probe_gather");
         static const Ogre::IdString kSet0End("set0_texture_slot_end");
         static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
@@ -122,7 +125,7 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
             // function states: sky, then gather.
             Ogre::int32 slot = hlms->_getProperty(tid, kSet0End) - extras;
             if (slot >= 0) {
-                if (sky) hlms->_setTextureReg(tid, Ogre::PixelShader, "jahSkyEnvProbe", slot++);
+                if (sky) hlms->_setTextureReg(tid, Ogre::PixelShader, "jahEnvCube", slot++);
                 if (gather)
                     hlms->_setTextureReg(tid, Ogre::PixelShader, "jahProbeIrradiance", slot++);
             }
@@ -161,7 +164,7 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
 // is what keeps the default scene's selftest hash where it is.
 Ogre::uint16 FogHlmsListener::getNumExtraPassTextures(const Ogre::HlmsPropertyVec &properties,
                                                       bool casterPass) const {
-    static const Ogre::IdString kSkyEnvProbe("jah_sky_env_probe");
+    static const Ogre::IdString kSkyEnvProbe("jah_env");
     static const Ogre::IdString kProbeGather("jah_probe_gather");
     if (casterPass) return 0u;
     // TWO POSSIBLE EXTRAS, AND THE ORDER IS FIXED: the sky's cube first, the
@@ -197,7 +200,10 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
 
 void FogHlmsListener::setSkyEnv(const Ogre::SceneManager *sm, const SkyEnvState &state) {
     if (!sm) return;
-    if (!state.cube || state.gain <= 0.0f) { sSkyEnv.erase(sm); return; }
+    if (!state.cube || (state.gain[0] <= 0.0f && state.gain[1] <= 0.0f && state.gain[2] <= 0.0f)) {
+        sSkyEnv.erase(sm);
+        return;
+    }
     sSkyEnv[sm] = state;
 }
 
@@ -236,31 +242,39 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // both selftest hashes are unmoved.
     if (hlms && !casterPass && surfaceCardsCapturing())
         hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_card_capture", 1);
-    // THE SKY'S ENVIRONMENT SLOT, decided here and read twice afterwards: by
+    // THE ENVIRONMENT'S SLOT (PHOTON-ENV-1; first claimed by ogre-patch 0048 for
+    // the probe-array pass alone), decided here and read twice afterwards: by
     // getNumExtraPassTextures (through the PROPERTY, on any thread) and by
     // hlmsTypeChanged (through sPassSkyCube, on this one).
     //
-    // `hlms_enable_cubemaps_auto` is HlmsPbs's own pass property, set a few
-    // lines earlier in the same call (OgreHlmsPbs.cpp:1820-1828) for a bound
-    // automatic PCC that is not itself capturing. It is precisely the condition
-    // under which the env-probe slot holds the probe cube ARRAY and the sky
-    // cubemap is off every datablock — so this fires there and nowhere else. A
-    // probe CAPTURE pass does not set it (the probes photograph the sky as
-    // drawn), and neither does any pass of a scene with no grid.
+    // CLAIMED WHEREVER SOMETHING IN THE PASS READS IT: a bound voxel volume (every
+    // cone's escape reads the environment — Vct_piece_ps.any, jah_environment.glsl)
+    // or an automatic PCC holding the env-probe slot (its no-probe fallback;
+    // `hlms_enable_cubemaps_auto` is HlmsPbs's own pass property, set for a bound
+    // PCC that is not itself capturing). Both are set earlier in the same
+    // HlmsPbs::preparePassHash call. A scene with neither — or with no cube, or a
+    // Sky Light at zero gain (setSkyEnv drops the state) — claims nothing, and its
+    // shaders are those of a build without the slot.
+    //
+    // ITS OWN SAMPLER, acquired ONCE per manager and never per pass (the
+    // samplerblock reference count is a uint16 — DOCS/traps/ENGINE.md): the slot
+    // exists without a PCC now, so the PCC's block cannot be borrowed.
     sPassSkyCube = nullptr;
     sPassSkySampler = nullptr;
-    if (hlms && !casterPass && sceneManager && sPbs) {
+    if (hlms && !casterPass && sceneManager) {
         static const Ogre::IdString kCubemapsAuto("hlms_enable_cubemaps_auto");
+        static const Ogre::IdString kVctNumProbes("vct_num_probes");
         const SkyEnvState sky = skyEnv(sceneManager);
-        Ogre::ParallaxCorrectedCubemapBase *pcc = sPbs->getParallaxCorrectedCubemap();
-        // The samplerblock is the PCC's own trilinear one, borrowed rather than
-        // owned: this slot exists only while that PCC does, so its lifetime is
-        // exactly right and nothing of ours has to be released at teardown.
-        const Ogre::HlmsSamplerblock *sampler = pcc ? pcc->getBindTrilinearSamplerblock() : nullptr;
-        if (sky.cube && sampler && hlms->_getProperty(Ogre::Hlms::kNoTid, kCubemapsAuto)) {
-            sPassSkyCube = sky.cube;
-            sPassSkySampler = sampler;
-            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_sky_env_probe", 1);
+        const bool reader = hlms->_getProperty(Ogre::Hlms::kNoTid, kCubemapsAuto) != 0 ||
+                            hlms->_getProperty(Ogre::Hlms::kNoTid, kVctNumProbes) > 0;
+        if (sky.cube && reader) {
+            const Ogre::HlmsSamplerblock *envSampler =
+                acquireSampler(hlms->getHlmsManager(), true);
+            if (envSampler) {
+                sPassSkyCube = sky.cube;
+                sPassSkySampler = envSampler;
+                hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_env", 1);
+            }
         }
     }
     // GATHER-0 — THE SCREEN-PROBE GATHER SPIKE (2026-09-21). The same three
@@ -284,24 +298,15 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             // `HlmsSamplerblock::mRefCount` is a uint16 (OgreHlmsDatablock.h),
             // so acquiring one per colour pass per frame wraps the counter to
             // zero in about six minutes of drawing and destroys a block that
-            // is bound. One reference is taken for the manager's life — the
-            // manager dies with Root, and the pointer is re-fetched if a new
-            // one ever appears.
-            static const Ogre::HlmsManager *sSamplerOwner = nullptr;
-            static const Ogre::HlmsSamplerblock *sGatherSampler = nullptr;
-            Ogre::HlmsManager *mgr = hlms->getHlmsManager();
-            if (mgr && sSamplerOwner != mgr) {
-                Ogre::HlmsSamplerblock ref;
-                ref.setFiltering(Ogre::TFO_NONE);
-                ref.setAddressingMode(Ogre::TAM_CLAMP);
-                sGatherSampler = mgr->getSamplerblock(ref);
-                sSamplerOwner = mgr;
-            }
+            // is bound. One reference is taken for the manager's life and
+            // given back by releaseSamplers (~OgreEngine, before Root).
+            const Ogre::HlmsSamplerblock *gatherSampler =
+                acquireSampler(hlms->getHlmsManager(), false);
             // THE PAIR IS SET TOGETHER OR NOT AT ALL: a slot claimed by
             // getNumExtraPassTextures and left unbound is an undefined
             // descriptor, so no sampler means no property either.
-            if (sGatherSampler) {
-                sPassProbeGatherSampler = sGatherSampler;
+            if (gatherSampler) {
+                sPassProbeGatherSampler = gatherSampler;
                 sPassProbeGather = gather;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_probe_gather", 1);
             }
@@ -421,14 +426,12 @@ FogHlmsListener::IfdState FogHlmsListener::ifdState(const Ogre::SceneManager *sm
     // Not zeros: a scene that has a field bound but never pushed state
     // (impossible today — the arm writes it before it binds) must still render
     // at the calibrated brightness rather than at upstream's raw one. GiParams
-    // is the single source of both numbers. The probe counts stay 0, which
-    // makes the sky-visibility threshold 0 and every depth sample "sky" — so
-    // the ambient dial is what has to be trusted to be 0 in that state, and it
-    // is: the arm writes the counts and the dial in the same call.
+    // is the single source of that number. The probe counts stay 0, which
+    // JahIfd reads as "no counts" and leaves the cage unclamped (upstream's
+    // behaviour).
     IfdState fallback;
     const GiParams defaults;
     fallback.intensity = defaults.ddgiIntensity;
-    fallback.ambient = 0.0f;
     return fallback;
 }
 
@@ -441,6 +444,37 @@ FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
 
 void FogHlmsListener::setPbs(Ogre::HlmsPbs *pbs) { sPbs = pbs; }
 
+// ONE REFERENCE PER MANAGER, TAKEN ON FIRST USE AND GIVEN BACK BY
+// releaseSamplers. A manager other than the one holding the references (which
+// only a missed release could leave) is answered by releasing the old pair
+// first rather than by trusting a pointer compare.
+const Ogre::HlmsSamplerblock *FogHlmsListener::acquireSampler(Ogre::HlmsManager *mgr,
+                                                              bool trilinear) {
+    if (!mgr) return nullptr;
+    if (sSamplerMgr && sSamplerMgr != mgr) releaseSamplers();
+    sSamplerMgr = mgr;
+    const Ogre::HlmsSamplerblock *&slot = trilinear ? sEnvSampler : sGatherSampler;
+    if (!slot) {
+        Ogre::HlmsSamplerblock ref;
+        ref.setFiltering(trilinear ? Ogre::TFO_TRILINEAR : Ogre::TFO_NONE);
+        ref.setAddressingMode(Ogre::TAM_CLAMP);
+        slot = mgr->getSamplerblock(ref);
+    }
+    return slot;
+}
+
+void FogHlmsListener::releaseSamplers() {
+    if (sSamplerMgr) {
+        if (sEnvSampler)    sSamplerMgr->destroySamplerblock(sEnvSampler);
+        if (sGatherSampler) sSamplerMgr->destroySamplerblock(sGatherSampler);
+    }
+    sSamplerMgr = nullptr;
+    sEnvSampler = sGatherSampler = nullptr;
+    sPassSkySampler = sPassProbeGatherSampler = nullptr;
+    sPassSkyCube = nullptr;
+    sPassProbeGather = nullptr;
+}
+
 Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool, bool,
                                                 Ogre::SceneManager *) const {
     // Constant, fog on or off, caster or not: the shader's struct may be SHORTER
@@ -451,8 +485,8 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // written always, because this hook cannot know which materials the pass
     // will draw, and sixteen unconditional bytes are cheaper than a size that
     // varies per pass.
-    // Plus jahSky (lane SKY-FALLBACK-1): the sky cube's gain and mip count,
-    // declared only by a pass that claimed the sky's extra texture slot.
+    // Plus jahEnv (PHOTON-ENV-1): the environment cube's gain per channel and
+    // mip count, declared only by a pass that claimed the environment's slot.
     //
     // Nothing here compensates for the irradiance field's block any more: its
     // own getConstBufferSize() under-reported by one float4 until ogre-patch
@@ -492,31 +526,28 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     // The DDGI block, same four-float alignment rule. Read by
     // media/Hlms/Jahshaka/JahIfd_piece_ps.any, which only exists in the
     // generated shader while an IrradianceField is bound: x scales the field's
-    // irradiance, y scales the ambient sky-visibility term (0 removes it
-    // through a uniform branch), zw are the field's Y and Z probe counts, which
-    // upstream's own IrradianceField block does not carry and the visibility
-    // threshold needs.
+    // irradiance (the sky its probes see included, PHOTON-ENV-1), y is
+    // reserved, zw are the field's Y and Z probe counts, which upstream's own
+    // IrradianceField block does not carry and the cage clamp needs.
     const IfdState ifd = ifdState(sceneManager);
     *passBufferPtr++ = ifd.intensity;
-    *passBufferPtr++ = ifd.ambient;
+    *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
-    // jahSky (SKY-FALLBACK-1): x = the Sky Light's gain for the sky cube, y =
-    // that cube's own mip count for the roughness->LOD map, zw reserved. Both
-    // are written unconditionally like every field above — the shader declares
-    // them only when it claimed the slot, and a buffer longer than the struct
-    // is fine (a struct longer than the buffer is not).
+    // jahEnv (PHOTON-ENV-1): rgb = the environment light's gain per channel on
+    // the cube, w = the cube's own mip count. Written unconditionally like every
+    // field above — the shader declares it only when it claimed the slot, and a
+    // buffer longer than the struct is fine (a struct longer than the buffer is
+    // not).
     //
-    // The gain does NOT ride passBuf.ambientUpperHemi.w: that pass scale is
-    // pinned to 1.0 while a PCC is bound, because it also multiplies the probe
-    // samples and a probe photographs real radiance (envmapScaleForPass's
-    // note). One scale cannot serve both occupants of one pass, so the sky's
-    // own slot carries its own scale.
+    // The gain does NOT ride passBuf.ambientUpperHemi.w: that pass scale is one
+    // channel, and it is pinned to 1.0 while a PCC is bound because it also
+    // multiplies the probe samples (envmapScaleForPass's note).
     const SkyEnvState sky = skyEnv(sceneManager);
-    *passBufferPtr++ = sky.cube ? sky.gain : 0.0f;
+    *passBufferPtr++ = sky.cube ? sky.gain[0] : 0.0f;
+    *passBufferPtr++ = sky.cube ? sky.gain[1] : 0.0f;
+    *passBufferPtr++ = sky.cube ? sky.gain[2] : 0.0f;
     *passBufferPtr++ = sky.cube ? sky.numMipmaps : 1.0f;
-    *passBufferPtr++ = 0.0f;
-    *passBufferPtr++ = 0.0f;
     return passBufferPtr;
 }
 

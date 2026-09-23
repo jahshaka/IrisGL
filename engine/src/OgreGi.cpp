@@ -392,8 +392,8 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
-// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). Three constants, no
-// rebuild: `ddgiIntensity` and `ddgiAmbient` are shader constants the field's
+// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). Constants, no
+// rebuild: `ddgiIntensity` is a shader constant the field's
 // listener reads (pushIfdState), `rayMarchStepScale` is read by the NEXT light
 // injection (giRayMarchStepScale), and none of the three is geometry. So this
 // writes them and, when a field is bound, re-pushes its constants — nothing is
@@ -403,7 +403,6 @@ bool OgreScene::setGiTuning(const GiParams &p) {
     JAH_TRY {
         const bool marchMoved = p.rayMarchStepScale != mGi.rayMarchStepScale;
         mGi.ddgiIntensity     = p.ddgiIntensity;
-        mGi.ddgiAmbient       = p.ddgiAmbient;
         mGi.rayMarchStepScale = p.rayMarchStepScale;
         // THE CARD CACHE'S TWO PER-FRAME KNOBS. Written and nothing else: the
         // residency pass reads them at the head of the next frame, so a smaller
@@ -602,7 +601,7 @@ bool OgreScene::refreshVctFast() {
             }
             if (!mVctFeed) mVctFeed.reset(new detail::VoxelFeed());
             gatherAndBuild(*mVctFeed, mVctVoxelizer, VoxelGatherInputs());
-            applyVctAmbient();
+            applyVctEnvironment();
             const Ogre::uint32 extraBounces =
                 Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
             mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
@@ -707,17 +706,23 @@ void OgreScene::noteChainSettled() {
 // changed underneath it (and so `chainCleanNow` can tell the same thing about a
 // finished one).
 void OgreScene::noteSettleInputs() {
-    mGiSettleSerial     = mGiLightWriteSerial;
-    mGiSettleAmbient[0] = mAmbientRadiance[0];
-    mGiSettleAmbient[1] = mAmbientRadiance[1];
+    mGiSettleSerial = mGiLightWriteSerial;
 }
 
-bool OgreScene::settleInputsUnchanged() const {
-    const auto same = [](const Colour &a, const Colour &b) {
-        return a.r == b.r && a.g == b.g && a.b == b.b;
-    };
-    return same(mGiSettleAmbient[0], mAmbientRadiance[0]) &&
-           same(mGiSettleAmbient[1], mAmbientRadiance[1]);
+// A BOUNCING CHAIN WHOSE ENVIRONMENT CHANGED IS OWED A SETTLE (PHOTON-ENV-1). The
+// bounce job reads the environment where its cones escape, so the voxels hold a
+// sky; a still scene whose only edit is its sky (or its Sky Light) has no light
+// write and no geometry change to re-inject it, and this is what does — the
+// scheduler's own incremental settle, one injection a frame, outermost first.
+// Nothing is owed without a bounce pass (one bounce: the voxels hold the direct
+// light only and the pixel reads the environment itself) or without a chain
+// (a single volume re-injects on its next light tick).
+void OgreScene::oweEnvironmentSettle() {
+    const size_t n = mVctCascades.size();
+    if (n < 2u || mGi.numBounces <= 1) return;
+    mGiSettleCascades  = n;
+    mGiSettleStepsOwed = kAtRestSweeps * int(n);
+    noteSettleInputs();
 }
 
 
@@ -754,7 +759,7 @@ void OgreScene::payChainSettleStep() {
         // right: nothing finishes while the scene is still changing, and the
         // mirror's own at-rest tick — which fires one frame after the motion
         // ends and clears the debt outright — is what finishes a light gesture.
-        if (mGiSettleSerial != mGiLightWriteSerial || !settleInputsUnchanged()) {
+        if (mGiSettleSerial != mGiLightWriteSerial) {
             mGiSettleStepsOwed = kAtRestSweeps * int(n);
             noteSettleInputs();
         }
@@ -793,7 +798,7 @@ void OgreScene::payChainSettleStep() {
 // try/catch.)
 void OgreScene::injectCascade(size_t i, bool coarse) {
     if (i >= mVctCascades.size() || !mVctCascades[i].lighting) return;
-    applyCascadeAmbient(mVctCascades[i].lighting);
+    applyCascadeEnvironment(mVctCascades[i].lighting);
     mVctCascades[i].lighting->update(mSceneMgr, coarse ? 0u : cascadeBounces(i),
                                      1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                                      giRayMarchStepScale(coarse));
@@ -2789,6 +2794,25 @@ bool OgreScene::refreshCascadesFast() {
 // ONLY THE AUTOMATIC FLUSH WAITS. `refreshGlobalIllumination` — the host asking
 // explicitly, which is what a script's `world.refreshGi()` and every suite that
 // asserts on the frame after it do — is answered immediately, as it always was.
+// THE FIRST ARM WAITS FOR ITS SKY (PHOTON-ENV-1 audit F7). Pending = the capture
+// is queued (it runs after updateSceneGraph in THIS frame), its convolution is
+// queued (applyPendingIbl, the top of the next), or its SH read is in flight.
+// A first build only: a live chain meets a sky change through
+// noteEnvironmentChanged's settle, which is the cheap path for an edit. Bounded
+// like the albedo wait — a scene whose capture never runs (it is never drawn)
+// must not park its GI for ever — and a sky-less scene waits for nothing.
+bool OgreScene::giEnvironmentPending() {
+    const bool firstArm = mVctCascades.empty() && !mVctVoxelizer;
+    const bool pending = firstArm && mSkyDesc.mode != SkyMode::NoSky &&
+                         (mSkyCapturePending || mIblPending || mSkyShTicket != nullptr);
+    if (!pending || mGiEnvWaitFrames >= kGiEnvWaitFrames) {
+        mGiEnvWaitFrames = 0u;
+        return false;
+    }
+    ++mGiEnvWaitFrames;
+    return true;
+}
+
 bool OgreScene::giVoxelTexturesPending() {
     bool pending = false;
     for (const auto &e : mMaterialsAwaitingTexture)
@@ -4073,6 +4097,16 @@ bool OgreScene::rebuildVct() {
     // answer than a frame of nothing.
     if (giVoxelTexturesPending()) { mGiCachesDirty = true; return false; }
 
+    // ...AND FOR THE SKY IT WILL READ (PHOTON-ENV-1 audit F7). The bounce
+    // injection reads the environment where its cones escape, so a first chain
+    // built before its sky's capture and convolution have landed is built over
+    // no sky, and the cube's arrival a frame later (noteEnvironmentChanged) owes
+    // it a whole settle — on EVERY boot of a sky + bounce + chain scene
+    // (measured by gi.chain_converge case 0: one settle per boot before this
+    // wait, none after). Same shape as the albedo wait, the same bound; see
+    // giEnvironmentPending.
+    if (giEnvironmentPending()) { mGiCachesDirty = true; return false; }
+
     // ...AND IT WAITS FOR THE WORLD TO BE ON SCREEN (OPEN_COVER_SPEC §2 A).
     // The same shape as the two waits above and for a related reason: this is
     // the longest single thing the engine does on the UI thread (1,025 ms on
@@ -4281,11 +4315,9 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     const Ogre::uint32 extraBounces =
         Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
     mVctLighting->setAllowMultipleBounces(extraBounces > 0u);
-    // The scene's ambient, BEFORE the first update(): the pair is read when the
-    // probe const buffer is filled, and a volume built with black hemispheres
-    // shows a black ambient for the frame between build and the next ambient
-    // push. See applyVctAmbient (OgreScene.cpp) for why it is a genuine pair.
-    applyVctAmbient();
+    // The environment, BEFORE the first update(): the bounce job reads it
+    // (applyVctEnvironment, OgreScene.cpp).
+    applyVctEnvironment();
     mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                          giRayMarchStepScale(false));
     // The materials this build read are the ones in force NOW.
@@ -4485,18 +4517,6 @@ Ogre::uint32 OgreScene::cascadeBounces(size_t idx) const {
     return Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
 }
 
-// The ambient pair into ONE cascade's lighting (rule 4 above). applyVctAmbient
-// pushes into the head; this is the same push, aimed.
-void OgreScene::applyCascadeAmbient(Ogre::VctLighting *lighting) {
-    if (!lighting) return;
-    JAH_TRY {
-        static const float kHemiEpsilon = 1e-6f;
-        const Colour &u = mAmbientRadiance[0], &l = mAmbientRadiance[1];
-        lighting->setAmbient(Ogre::ColourValue(u.r, u.g, u.b + kHemiEpsilon, 1.0f),
-                             Ogre::ColourValue(l.r, l.g, l.b, 1.0f));
-    } JAH_CATCH(mError, );
-}
-
 size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
     // The same rule as buildVoxelArm's: a from-scratch chain re-reads every material.
     mVctMaterialRefreshOwed = true;
@@ -4578,7 +4598,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
             for (size_t j = i + 1u; j < table.size(); ++j)
                 c.lighting->addCascade(mVctCascades[j].lighting);
         }
-        applyCascadeAmbient(c.lighting);
+        applyCascadeEnvironment(c.lighting);
         c.lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                            giRayMarchStepScale(false));
         c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
@@ -4879,7 +4899,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "JAH_GI_CASCADE_FAULT_POST: forced failure after the build",
                                 "OgreScene::rebuildCascade");
             }
-            applyCascadeAmbient(c.lighting);
+            applyCascadeEnvironment(c.lighting);
             c.lighting->update(mSceneMgr, cascadeBounces(idx), 1.0f /*thinWallCounter*/,
                                true /*autoMultiplier*/, giRayMarchStepScale(false));
             // ...AND THAT IS THE MOVING TICK'S ANSWER TOO (DRAG-1): this cascade
@@ -6376,8 +6396,7 @@ void OgreScene::buildIrradianceField() {
                 std::to_string(settings.mNumProbes[2]) + " (" + std::to_string(total) +
                 " probes) over " + Ogre::StringConverter::toString(origin) + " size " +
                 Ogre::StringConverter::toString(size) + ", intensity " +
-                std::to_string(mGi.ddgiIntensity) + ", ambient " +
-                std::to_string(mGi.ddgiAmbient) + ", re-converge " +
+                std::to_string(mGi.ddgiIntensity) + ", re-converge " +
                 std::to_string(mIfdProbesPerFrame) + " probes/frame");
     } JAH_CATCH(mError, );
 }
@@ -6385,7 +6404,6 @@ void OgreScene::buildIrradianceField() {
 void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
     FogHlmsListener::IfdState st;
     st.intensity  = std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f));
-    st.ambient    = std::max(0.0f, std::min(mGi.ddgiAmbient, 8.0f));
     st.numProbesY = float(numProbes[1]);
     st.numProbesZ = float(numProbes[2]);
     FogHlmsListener::setIfdState(mSceneMgr, st);

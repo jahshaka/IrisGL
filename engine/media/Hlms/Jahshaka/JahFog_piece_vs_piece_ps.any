@@ -59,9 +59,9 @@
 //                                          carry a generated piece)
 //   [12..15] the DDGI block                (declared only while an
 //                                          IrradianceField is bound)
-//   [16..19] the sky's environment slot    (declared only by a pass that
-//                                          claimed the sky's extra texture
-//                                          slot -- ogre-patch 0048)
+//   [16..19] the environment's gain + mips (declared only by a pass that
+//                                          claimed the environment's extra
+//                                          texture slot -- jah_env)
 // A material with a piece therefore has to declare PADDING for the fog fields
 // when the fog is off, or its clock would read the fog colour — and the same
 // rule one field further out: anything declaring jahIfd must first declare
@@ -78,7 +78,7 @@
 		float4 jahFogColour;	// rgb = fog colour (linear), w = height-layer density (0 = off)
 		float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w unused
 	@end
-	@property( jah_shader_clock || irradiance_field || jah_sky_env_probe )
+	@property( jah_shader_clock || irradiance_field || jah_env )
 		@property( !hlms_fog )
 			float4 jahFogColourUnused;
 			float4 jahFogHeightUnused;
@@ -87,25 +87,29 @@
 	@end
 	@property( irradiance_field )
 		float4 jahIfd;			// JahIfd_piece_ps.any: x = DDGI diffuse intensity,
-								// y = ambient sky-visibility strength, zw = the field's
+								// y reserved (the field carries the sky itself since
+								// PHOTON-ENV-1), zw = the field's
 								// Y and Z probe counts (upstream's own block carries
 								// only Nx and Nx*Ny, and the visibility threshold
 								// needs all three axes)
 	@end
-	@property( jah_sky_env_probe )
+	@property( jah_env )
 		@property( !irradiance_field )
 			float4 jahIfdUnused;
 		@end
-		float4 jahSky;			// ogre-patch 0048 (lane SKY-FALLBACK-1): x = the sky
-								// cube's gain (the Sky Light's), y = that cube's own
-								// mip count for the roughness-to-LOD map, zw reserved.
-								// The gain cannot ride ambientUpperHemi.w: that pass
-								// scale is pinned to 1.0 while a probe grid is bound,
-								// because it also scales the probe samples.
+		float4 jahEnv;			// THE ONE ENVIRONMENT (PHOTON-ENV-1): rgb = the cube's
+								// gain per channel (the Sky Light's intensity times its
+								// tint), w = the cube's own mip count. The gain cannot
+								// ride ambientUpperHemi.w: that pass scale is a single
+								// channel, and it is pinned to 1.0 while a probe grid is
+								// bound because it also scales the probe samples.
 	@end
 @end
 
-// THE SKY'S OWN ENVIRONMENT TEXTURE (ogre-patch 0048, lane SKY-FALLBACK-1).
+// THE ENVIRONMENT CUBE (PHOTON-ENV-1; first claimed by ogre-patch 0048, lane
+// SKY-FALLBACK-1, for the probe-array pass alone). Every escape in the pixel
+// shader reads it now -- the voxel cones' (jah_environment.glsl through
+// Vct_piece_ps.any) and the probe-array pass's no-probe fallback.
 //
 // Declared here rather than in upstream's PixelShader_ps.glsl because upstream
 // offers the hook: custom_ps_uniformDeclaration sits immediately after the
@@ -115,9 +119,9 @@
 // FogHlmsListener::propertiesMergedPreGenerationStep, and the sampler shares
 // the index (CbTexture binds both at one unit).
 //
-// It exists only in a pass that claimed the slot, which is only a colour pass
-// of a scene whose probe grid has taken the env-probe slot. Every other shader
-// in the tree is byte-identical to a build without this file's block.
+// It exists only in a pass that claimed the slot: a colour pass of a scene that
+// has an environment cube lit by its Sky Light AND a reader of it (a voxel
+// volume bound, or a probe grid holding the env-probe slot).
 // GATHER-0 (2026-09-21) shares this piece, and MUST: `custom_ps_uniformDeclaration`
 // may be defined ONCE per permutation, and both the sky's extra slot and the
 // screen-probe gather's can be live in the same pass. So the two declarations
@@ -125,12 +129,12 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_sky_env_probe || jah_probe_gather )
+@property( jah_env || jah_probe_gather )
 @piece( custom_ps_uniformDeclaration )
-	@property( jah_sky_env_probe )
-		vulkan_layout( ogre_t@value(jahSkyEnvProbe) ) midf_tex uniform textureCube jahSkyEnvProbe;
+	@property( jah_env )
+		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
 		@property( syntax == glslvk )
-			layout( ogre_s@value(jahSkyEnvProbe) ) uniform sampler jahSkyEnvSampler;
+			layout( ogre_s@value(jahEnvCube) ) uniform sampler jahEnvSampler;
 		@end
 	@end
 	// The DECLARATION's guard must be the READ's guard exactly (fix round,

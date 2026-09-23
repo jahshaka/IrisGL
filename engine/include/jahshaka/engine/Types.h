@@ -2307,38 +2307,6 @@ struct GiParams {
     /// scene may want a stylistic trim; clamped to [0, 64], and 0 is a legitimate
     /// "field bound, contributing nothing" for A/B measurement.
     float     ddgiIntensity = 1.0f;
-    /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Photon ambient fix's one dial
-    /// (GI_UNIFIED_SPEC.md ADDENDUM CORRECTION; the mechanism is documented at
-    /// length on media/Hlms/Jahshaka/JahIfd_piece_ps.any).
-    ///
-    /// WHAT IT RESTORES. Inside a VCT volume the shader's own ambient term is
-    /// gated off (`if( vctSpecular.w == 0 )`, a gate upstream commented the
-    /// volume test out of, so it never fires). The only live ambient was the
-    /// cone-traced diffuse's `ambient * escapeFraction`, and binding a field
-    /// deletes that branch — so with DDGI on, ambient light inside the volume
-    /// came from nowhere: 15-25% darker mid-ground on OPEN scenes, sealed rooms
-    /// unaffected. This scales the replacement: the scene's SH ambient times the
-    /// probes' SKY VISIBILITY - the escape fraction their rays measured in the
-    /// voxel march, stored in the field's depth atlas beside the depth moments
-    /// and read at the surface normal over the probe cage (PHOTON-READER-1; the
-    /// definition is on JahIfd_piece_ps.any).
-    ///
-    /// 1.0 is the measured term and the default. 0 removes the term
-    /// entirely — through a UNIFORM shader branch, so it is also exactly "DDGI
-    /// as it behaved before this fix", which is what makes the A/B in
-    /// gi.ddgi_ambient (and the sealed-room invariance assertion) possible.
-    /// Above 1 it is a stylistic sky-fill trim, like ddgiIntensity is for the
-    /// bounce; clamped to [0, 8].
-    ///
-    /// It is DELIBERATELY not folded into ddgiIntensity: that one scales
-    /// bounced light and this one scales ambient, they are different integrals,
-    /// and folding them would make "turn the fix off" impossible without also
-    /// turning the field's own contribution off.
-    ///
-    /// Ignored when no field is bound (nothing to correct: outside a VCT scene
-    /// the shader's ambient is live, and inside one without a field the cone
-    /// diffuse still carries it).
-    float     ddgiAmbient = 1.0f;
 
     // ---- PHOTON: camera-centred voxel cascades (PHOTON_SPEC P0) -------------
 
@@ -2522,11 +2490,11 @@ struct GiParams {
     /// it here. (The mirror hand-wrote this comparison over 24 fields; keeping
     /// it beside the struct is what makes "add a field" a one-place edit.)
     ///
-    /// THE THREE TUNING FLOATS ARE DELIBERATELY ABSENT (PHOTON_SPEC §7 E2 (8),
-    /// audit A F6): `ddgiIntensity`, `ddgiAmbient` and `rayMarchStepScale` are
+    /// THE TUNING FLOATS ARE DELIBERATELY ABSENT (PHOTON_SPEC §7 E2 (8),
+    /// audit A F6): `ddgiIntensity` and `rayMarchStepScale` are
     /// read per frame, so they take effect through `Scene::setGiTuning` without
     /// a rebuild — and while they were IN this comparison every tick of those
-    /// three sliders was a from-scratch teardown and re-voxelisation (N of them
+    /// sliders was a from-scratch teardown and re-voxelisation (N of them
     /// under a cascade chain). `giTuningEqual` is their comparison; a host
     /// pushes on `!(a == b)` for the configuration and on `!a.giTuningEqual(b)`
     /// for the tuning.
@@ -2550,9 +2518,9 @@ struct GiParams {
                cascadeInstanceCap == o.cascadeInstanceCap &&
                cascadeSetEqual(o);
     }
-    /// The three values `Scene::setGiTuning` pushes, compared on their own.
+    /// The values `Scene::setGiTuning` pushes, compared on their own.
     bool giTuningEqual(const GiParams &o) const {
-        return ddgiIntensity == o.ddgiIntensity && ddgiAmbient == o.ddgiAmbient &&
+        return ddgiIntensity == o.ddgiIntensity &&
                rayMarchStepScale == o.rayMarchStepScale &&
                // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
                // They belong in THIS comparison and not in `operator==` for the
@@ -6647,6 +6615,26 @@ struct VoxelReaderAnswer {
     float escape[4] = {};    ///< escapeAlpha, travelledC0, lastCascade, travelled
     float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls) where the march's first sample lands
     float marchRead[4] = {}; ///< the march at zero length: one march step onto that point
+};
+
+/// ONE CONE FOR THE ENVIRONMENT'S CONE-LOOKUP HARNESS (PHOTON-ENV-1;
+/// Engine::environmentCones, gi.env_cone): a WORLD direction and the cone's
+/// half-angle as its tangent — exactly what jahEnvCone takes.
+struct EnvironmentConeQuery {
+    Vec3  dirWorld;              ///< unit direction, world axes
+    float tanHalfAngle = 0.577f; ///< the six-cone diffuse set's half angle
+};
+
+/// What the harness answers for one cone, linear radiance with the Sky Light's
+/// gain NOT applied (the lookup and its reference see the same raw cube):
+/// `lookup` is jahEnvCone (the prefiltered chain at the cone's mip), and
+/// `reference` is the mean of the cube's FINEST mip over 64 directions spread
+/// uniformly over the cone's solid angle (the cone integral the lookup stands
+/// in for).
+struct EnvironmentConeAnswer {
+    float lookup[3] = {};
+    float reference[3] = {};
+    float lod = 0.0f;            ///< the mip the lookup read
 };
 
 }}  // namespace jahshaka::engine

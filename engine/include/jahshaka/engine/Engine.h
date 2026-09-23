@@ -68,11 +68,15 @@ public:
     /// the sky a BACKDROP — still drawn, still visible behind the scene,
     /// reflecting nothing into it.
     ///
-    /// It is a SCALAR because the pin's is: the value rides
-    /// `ambientUpperHemi.w` and HlmsPbs broadcasts it over the three channels
-    /// (`envS.xyz *= midf3_c( passBuf.ambientUpperHemi.w )`). A host with a
-    /// TINTED environment light should therefore pass its luminance and accept
-    /// that the tint shows in the diffuse half only.
+    /// PER CHANNEL (the Sky Light's intensity times its linear tint — the same
+    /// gain the host multiplied the SH coefficients by): THE ONE ENVIRONMENT
+    /// (PHOTON-ENV-1) is one source for every escape — the voxel cones', the
+    /// rays' miss, the bounce injection's and the probe-array pass's no-probe
+    /// fallback all read the cube times this gain, so a tinted sky lights
+    /// through a cone exactly as it lights through the SH. ONE place cannot
+    /// follow the tint: HlmsPbs' own env-probe sample outside every volume rides
+    /// the pin's SCALAR envmapScale (`ambientUpperHemi.w`, broadcast over the
+    /// channels), which gets the gain's Rec.709 luminance.
     ///
     /// NOT APPLIED WHILE PARALLAX-CORRECTED PROBES ARE BOUND. A probe is a
     /// photograph of the scene's real radiance — mostly of GEOMETRY lit by the
@@ -80,7 +84,7 @@ public:
     /// out because its skylight was turned down. The gate is about the SKY, and
     /// under PCC the sky reaches a surface only through what a probe captured.
     /// 1.0 is the default, and the value is clamped at zero.
-    virtual void        setEnvironmentLightScale(float gain) = 0;
+    virtual void        setEnvironmentLight(const Colour &gain) = 0;
     /// Exponential distance fog (+ optional height layer) on lit (PBR) surfaces —
     /// see FogDesc for the model. Unlit overlays (gizmos, wires, billboards) and
     /// the sky are never fogged. Off by default, and OFF IS EXACT: a disabled
@@ -828,9 +832,9 @@ public:
     /// document saved with a future mode keeps loading).
     virtual bool        setGlobalIllumination(const GiParams &) = 0;
     /// THE TUNING PUSH — the GI values that take effect WITHOUT a rebuild
-    /// (PHOTON_SPEC §7 E2 (8), audit A F6). `ddgiIntensity`, `ddgiAmbient` and
-    /// `rayMarchStepScale` are read per frame (the first two by the irradiance
-    /// field's shader constants, the third by the next light injection), so
+    /// (PHOTON_SPEC §7 E2 (8), audit A F6). `ddgiIntensity` and
+    /// `rayMarchStepScale` are read per frame (the first by the irradiance
+    /// field's shader constants, the second by the next light injection), so
     /// moving one is a constant write and not a re-solve — and they are
     /// deliberately OUT of `GiParams::operator==` so that a host comparing by
     /// value does not see a slider tick as a configuration change. Before this,
@@ -2753,6 +2757,18 @@ public:
     virtual bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
                                    std::vector<VoxelReaderAnswer> &fragment,
                                    std::vector<VoxelReaderAnswer> &compute) = 0;
+
+    /// THE ENVIRONMENT'S CONE LOOKUP, MEASURED (PHOTON-ENV-1). Evaluates the one
+    /// environment's cone lookup (jah_environment.glsl's jahEnvCone) for every
+    /// query on `scene`'s environment cube — the disc-free sky capture,
+    /// GGX-prefiltered — beside a 64-direction integral of the cube's finest mip
+    /// over the same cone, in one compute job built from the shared file. At most
+    /// 64 queries. A MEASUREMENT (dispatch, flush, stall on a readback) — a
+    /// suite, never a frame. False when the scene has no environment cube yet
+    /// (a sky's capture and convolution land a frame or two after setSky) or the
+    /// harness media is missing (the reason in takeLastError()).
+    virtual bool environmentCones(Scene *scene, const std::vector<EnvironmentConeQuery> &queries,
+                                  std::vector<EnvironmentConeAnswer> &out) = 0;
 };
 
 }}  // namespace jahshaka::engine
