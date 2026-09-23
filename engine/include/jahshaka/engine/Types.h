@@ -2616,27 +2616,23 @@ struct GiQualityFacts {
     /// what was MEASURED on this pin, and the measurement is not the one phase
     /// 0 took.
     ///
-    /// SURFACE-CACHE-0 read 0.042-0.057 ms per card and sized this at twenty
-    /// cards to the millisecond. SURFACE-CACHE-1b re-measured it in the REAL
-    /// scene manager and read **0.33-0.37 ms per card** — and the difference is
-    /// not the real scene and not the shadow node (both were measured out: the
-    /// figure is flat from 16 items to 64, and recalculating the shadow node
-    /// once per card set instead of once per card moved it by nothing). It is
-    /// that phase 0 drove SIX cards through ONE `CompositorWorkspace::_update`
-    /// and this Component drives ONE, because six cards need six camera poses
-    /// and one update carries one. 0.32 ms of the 0.33 is that update's own
-    /// fixed cost; the five `vkCmdCopyImage` into the atlas are 0.013.
+    /// THE NUMBER IT STANDS ON (PHOTON-CARDS-1, SC-1b-ITEM8): **0.18-0.20 ms a
+    /// card**, CPU, with the shadow fit FIRING — `sc1b_measure showroom`, a
+    /// Showroom-2-shaped scene (45 carded instances, a sun, three shadowed point
+    /// lamps), all arms in one process: 0.218 ms a card at one card per
+    /// workspace update, 0.200 at three, 0.184 at a full batch of eight. About
+    /// 0.13 of it is the card's own PSSM fit (three caster passes over the
+    /// still world; 0.053-0.076 with nothing casting), because the capture now
+    /// runs inside Ogre's frame with the frame's light list and a camera per
+    /// pass — the 0.33 ms this row was first sized on was a hand-driven
+    /// workspace update per card whose fit never fired (its light list was
+    /// empty). The capture's shadow node is PSSM-only (kCardShadowNodeName):
+    /// with the probe node's point-lamp cubes it was ~1.0 ms a card.
     ///
-    /// So the budget is three cards to the millisecond, not twenty, and the
-    /// shipped default says so rather than promising a cadence the engine does
-    /// not have. THE HEADROOM IS NAMED AND MEASURED: 0.32 / 6 = 0.053 is
-    /// exactly phase 0's figure, so a capture node with N target passes under
-    /// per-pass execution masks — N cards of ONE instance per update, which
-    /// needs only the one subject bit — would buy back most of the difference
-    /// (~0.09 ms a card at N = 8). That is a lane of its own (the scratch has to
-    /// become a strip and a sub-page card needs an off-centre ortho window), and
-    /// it is a cost lane, not a correctness one.
-    unsigned cardBudgetTexels = 32768u;   // 2 cards a frame ~ 0.7 ms
+    /// So the rows keep the milliseconds they were given — ~0.4 / ~0.6 /
+    /// ~1.0 ms a frame — and buy two, three and five cards with them. One
+    /// workspace update carries at most eight (`kCaptureBatch`).
+    unsigned cardBudgetTexels = 49152u;   // 3 cards a frame ~ 0.6 ms
     /// THE RESIDENCY RADIUS, metres. Beyond it an instance holds no pages. It
     /// is a tier row because the atlas is a fixed 2k at this phase: 256 pages
     /// of 128 texels is about forty six-card sets at full size, so the radius
@@ -2644,6 +2640,22 @@ struct GiQualityFacts {
     /// 4k atlas with a page table and streaming; ours has neither yet, and
     /// pretending otherwise would just overflow the atlas silently.)
     float    cardResidencyRadius = 30.0f;
+    /// THE LIT CARD'S PER-FRAME BUDGET (PHOTON-CARDS-1, SC-1c), in atlas TEXELS
+    /// relit a frame by the `Jahshaka/CardLight` job — a second budget beside the
+    /// capture's, because a light's colour or intensity changes every card's
+    /// radiance and no card's picture. Lumen's own direct-lighting budget, 1024
+    /// square, is the ceiling; the rows are a quarter, an eighth and a sixteenth
+    /// of it, NOT YET MEASURED in GPU milliseconds (that needs the clocks locked
+    /// — the lead's measurement): a capture's cards are relit the frame they
+    /// land, inside this budget, and a light write relights the resident set
+    /// over as many frames as it takes.
+    unsigned cardLightTexels = 131072u;
+    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (six cones
+    /// over the chain) per texel, spent when a card is captured and when the
+    /// chain re-injects. Lumen's own indirect budget, 512 square, is the
+    /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
+    /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
+    unsigned cardIndirectTexels = 32768u;
     // ---- THE ATOM COLUMN (ATOM P3's SUB-ERROR) -----------------------------
     /// THE TIER'S GEOMETRIC TOLERANCE, in SAMPLES of whatever is sampling —
     /// pixels for a view, cells for a cascade. It is the `tolerance` argument of
@@ -2687,8 +2699,10 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 2;
         f.voxelResolution = 32u;
         f.probeFaceSize   = 128u;
-        f.cardBudgetTexels = 16384u;    // 1 card a frame ~ 0.35 ms
+        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
         f.cardResidencyRadius = 15.0f;
+        f.cardLightTexels = 65536u;     // 4 pages a frame
+        f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.pixelTolerance = 2.0f;        // the Atom column; see the field
         break;
     case GiQuality::High:
@@ -2703,8 +2717,10 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
         f.probeHdrDefault     = true;
         f.probeShadowsDefault = true;
-        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 1.0 ms on the measured cost
+        f.cardBudgetTexels = 81920u;    // 5 cards a frame ~ 1.0 ms on the measured cost
         f.cardResidencyRadius = 60.0f;
+        f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
+        f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         break;
     default:   // Medium: the same reach as High, at its own resolution
@@ -2715,8 +2731,10 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 4;
         f.voxelResolution = 64u;
         f.probeFaceSize   = 256u;
-        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.7 ms
+        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.6 ms
         f.cardResidencyRadius = 30.0f;
+        f.cardLightTexels = 131072u;    // 8 pages a frame
+        f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
         break;
     }
@@ -2753,6 +2771,9 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // would not be a smaller budget, it would be a budget the code has to
         // ignore. Low's VR row is the one that reaches it.
         f.cardBudgetTexels = std::max(f.cardBudgetTexels, 16384u);
+        // ...and the relight budget with it, on the same floor for the same reason.
+        f.cardLightTexels = std::max(f.cardLightTexels / 2u, 16384u);
+        f.cardIndirectTexels = std::max(f.cardIndirectTexels / 2u, 16384u);
     }
     return f;
 }
@@ -3063,6 +3084,15 @@ struct CardSample {
     float depth = 0.0f;                 ///< world units from the card's near plane; 0 = nothing captured there
     float shadow = 0.0f;                ///< 1 = fully lit by the shadowed lights, 0 = fully occluded
     float roughness = 0.0f;             ///< the GGX ALPHA (perceptual squared), through patch 0043's range
+    /// THE LIT CARD (the sixth layer, `Jahshaka/CardLight`): the texel's
+    /// outgoing diffuse radiance — direct from the scene's lights (the sun
+    /// through `shadow`) plus the indirect below plus the emissive. 0 until
+    /// the card has been relit.
+    float radiance[3] = { 0, 0, 0 };
+    /// ...and its cached INDIRECT half alone (the voxel march from the texel x
+    /// kD x pi x the diffuse energy factor — BRDF_EnvMap's arithmetic); 0 until
+    /// the card's indirect has been marched.
+    float indirect[3] = { 0, 0, 0 };
 };
 
 /// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model
@@ -3116,6 +3146,33 @@ struct CardCacheStatus {
     /// maintained and not merely declared.
     unsigned cardRecords = 0u;
     unsigned instanceSlots = 0u;
+    /// THE LIT CARD (PHOTON-CARDS-1): the Radiance layer's format name (chosen
+    /// from what the device can store to from a compute job — R11G11B10F, else
+    /// RGBA16F), the relight budget in texels a frame, what the last frame
+    /// relit (cards, texels), the relights for the life of the cache, the light
+    /// writes that changed only a card's RADIANCE (a colour, an intensity — no
+    /// recapture), and the CPU milliseconds the last frame's relight dispatch
+    /// cost to record.
+    std::string radianceFormat;
+    unsigned lightBudgetTexels = 0u;
+    unsigned relitLastFrame = 0u;
+    unsigned relitTexelsLastFrame = 0u;
+    unsigned long long relights = 0ull;
+    unsigned long long invalidRadiance = 0ull;
+    float lightMs = 0.0f;
+    /// THE INDIRECT HALF's own budget and counters: cards and texels whose
+    /// voxel march ran last frame, marches for the life of the cache, the
+    /// re-injections that staled the resident set's indirect (one per burst),
+    /// and whether the last relight had a chain to march at all.
+    unsigned indirectBudgetTexels = 0u;
+    unsigned indirectLastFrame = 0u;
+    unsigned indirectTexelsLastFrame = 0u;
+    unsigned long long indirectRelights = 0ull;
+    unsigned long long invalidIndirect = 0ull;
+    bool indirectOn = false;
+    /// Lights the relight job could not hold (past its 64) at the last relight;
+    /// the engine log says so once per cache.
+    unsigned lightsDropped = 0u;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same

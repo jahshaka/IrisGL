@@ -1769,11 +1769,10 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 //
 // WHERE THIS RUNS AND WHY. Once per DRAWN scene from `renderOneFrame`, right
 // after `applyPendingGi` — so a material edit or a light write has already
-// bumped the signatures the cache compares — and before Ogre's own workspaces.
-// That is "in the frame" in the sense that matters: the monitor's per-pass
-// listeners are attached at the frame's head, the GPU work goes into this
-// frame's command buffer, and the capture's cost is visible where every other
-// engine cache's cost is.
+// bumped the signatures the cache compares — and before Root's frame. It
+// PLANS (residency, invalidation, this frame's batch); the capture executes
+// inside Root's frame, after `updateSceneGraph`, as the first workspace in the
+// manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
 void OgreScene::updateSurfaceCache() {
     // AUTO IS OFF AT THIS PHASE, and it says so rather than quietly capturing:
     // nothing reads a card until phase 4 (the ray hit), so a user's machine
@@ -1852,6 +1851,78 @@ void OgreScene::updateSurfaceCache() {
         }
     }
     view.lightSerial = lightSig;
+    // THE RADIANCE SIGNATURE: the shadow signature above plus everything a
+    // card's LIT radiance depends on and its capture does not — the colour,
+    // the power, the reach and the cone. A colour slider costs the cache a
+    // relight of the resident set (the `Jahshaka/CardLight` job, under its own
+    // budget) and not one capture. The lights themselves are handed over for
+    // the job's light list (below).
+    unsigned long long radianceSig = lightSig;
+    for (NodeId lid : mLightNodes) {
+        auto lit = mNodes.find(lid);
+        if (lit == mNodes.end() || !lit->second.light) continue;
+        const Ogre::Light *l = lit->second.light;
+        const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
+        const auto foldR = [&radianceSig](float f) {
+            radianceSig ^= (unsigned long long)(long long)std::lround(double(f) * 1000.0);
+            radianceSig *= 1099511628211ull;
+        };
+        foldR(c.r); foldR(c.g); foldR(c.b);
+        foldR(l->getAttenuationRange()); foldR(l->getAttenuationLinear());
+        foldR(l->getAttenuationQuadric());
+        foldR(l->getSpotlightInnerAngle().valueRadians());
+        foldR(l->getSpotlightOuterAngle().valueRadians());
+        foldR(l->getSpotlightFalloff());
+        // ...and the light itself, for the relight job: EVERY light node,
+        // world space, unculled — the frame's global list is culled against
+        // the frame's cameras, and a card lights surfaces off screen.
+        view.lights.push_back(lit->second.light);
+    }
+    view.radianceSerial = radianceSig;
+    view.lightBudgetTexels = facts.cardLightTexels;
+    // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0
+    // VctLighting the pass buffer is filled from), and THE RE-INJECTION
+    // SIGNATURE — folded ONLY from what moves when an injection LANDS, never
+    // from the write-time serials (a light write or a material generation
+    // bumps at the WRITE, and a dragged light re-marched the whole resident set
+    // against voxels that had not moved, every frame): the chain's settles, each
+    // cascade's rebuilds and lattice cell, the VctLighting objects themselves,
+    // the single volume's own landed-injection count (OgreGi.cpp), and the
+    // environment the escapes read (below).
+    view.vct = mVctLighting;
+    view.indirectBudgetTexels = facts.cardIndirectTexels;
+    {
+        unsigned long long sig = 1469598103934665603ull;
+        const auto foldI = [&sig](unsigned long long v) {
+            sig ^= v;
+            sig *= 1099511628211ull;
+        };
+        foldI((unsigned long long)mGiChainSettles);
+        foldI(mGiMonoInjections);
+        // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
+        // injection at all: noteEnvironmentChanged hands the new sky to every
+        // VctLighting at once (applyVctEnvironment) and the pixel reads it the
+        // same frame, so the card's escape must too. The values
+        // applyCascadeEnvironment hands over, quantised.
+        {
+            const Ogre::TextureGpu *cube =
+                (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
+            foldI((unsigned long long)(uintptr_t)cube);
+            const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
+            for (float g : gain) foldI((unsigned long long)(long long)std::lround(double(g) * 1e4));
+            for (int k = 0; k < 27; ++k)
+                foldI((unsigned long long)(long long)std::lround(double(mLastAmbientSh[k]) * 1e4));
+        }
+        foldI((unsigned long long)(uintptr_t)mVctLighting);
+        for (const VctCascade &c : mVctCascades) {
+            foldI((unsigned long long)(uintptr_t)c.lighting);
+            foldI(c.rebuilds);
+            foldI((unsigned long long)c.latticeX);
+            foldI((unsigned long long)c.latticeY);
+            foldI((unsigned long long)c.latticeZ);
+        }
+        view.indirectSerial = sig;
+    }
 
     // THE CANDIDATE LIST — THE SCENE'S OWN WALK, handed over rather than
     // reached for. The predicate is the same one the voxel side uses, and each

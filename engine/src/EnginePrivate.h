@@ -5557,6 +5557,7 @@ private:
     unsigned long long mGiInjectionCountFrame = ~0ull;
     unsigned           mGiInjectionsThisFrame = 0;
     unsigned           mGiInjectionsPeak      = 0;
+    unsigned long long mGiMonoInjections      = 0;   ///< the single volume's landed injections (the surface cache's indirect signature; counted in injectCascade)
     /// EVERY WRITE A LIGHT INJECTION WOULD READ (DRAG-1 round 2, F5): a light's
     /// parameters (setLight), its POSE (setNodeTransform on a node that owns
     /// one — a movable lamp never stales the probe grid, so nothing else sees
@@ -5890,6 +5891,9 @@ public:
     /// PBS variants (numShadowMapLights differs from the main view's), compiled
     /// once and disk-cached, exactly like the reflect node's.
     static constexpr const char *kProbeShadowNodeName = "JahshakaProbeShadowNode";
+    /// The FOURTH shadow node: the surface cache's card capture only — the sun's
+    /// PSSM at the probe resolution, nothing else (why: DOCS/traps/ENGINE.md, "CARD SHADOW NODE").
+    static constexpr const char *kCardShadowNodeName = "JahshakaCardShadowNode";
 
     // ---- The workspace seam (POST_CHAIN_SPEC.md; the planar-reflection lane
     //      depends on it) ---------------------------------------------------

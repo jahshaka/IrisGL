@@ -849,6 +849,10 @@ bool OgreScene::injectCascade(size_t i) {
     lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                      giRayMarchStepScale());
     stamp = frame;
+    // The single volume's LANDED injections — the surface cache's indirect
+    // signature (PHOTON-CARDS-1; a chain folds its cascades' rebuild counts and
+    // settles instead). Counted here, inside the one writer, never at a caller.
+    if (!chain) ++mGiMonoInjections;
     if (mGiInjectionCountFrame != frame) {
         mGiInjectionCountFrame = frame;
         mGiInjectionsThisFrame = 0;

@@ -425,11 +425,14 @@ void PassListener::passPreExecute(Ogre::CompositorPass *pass) {
     // three shadow nodes are named constants, so "this is a probe's shadow map
     // pass" is a fact and not a guess.
     f.rec.bucket = PassBucket::Other;
+    static const Ogre::IdString cardShadowNodeId(OgreView::kCardShadowNodeName);
     if (node) {
         const Ogre::IdString id = node->getName();
         if (id == shadowNodeId(ShadowNodeKind::View))         f.rec.bucket = PassBucket::ShadowView;
         else if (id == shadowNodeId(ShadowNodeKind::Reflect)) f.rec.bucket = PassBucket::ShadowReflect;
         else if (id == shadowNodeId(ShadowNodeKind::Probe))   f.rec.bucket = PassBucket::ShadowProbe;
+        // The card capture's node draws the probe kind's casters (EnginePrivate.h).
+        else if (id == cardShadowNodeId)                      f.rec.bucket = PassBucket::ShadowProbe;
         else f.rec.bucket = sceneKind ? PassBucket::Main : PassBucket::Post;
     }
     if (sceneKind) f.rec.shadowMs = 0.0f;   // a scene pass answers the split; see below

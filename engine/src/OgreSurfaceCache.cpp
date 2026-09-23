@@ -7,6 +7,15 @@
 
 #include <OgreCamera.h>
 #include <OgreItem.h>
+#include <OgreLight.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreHlmsManager.h>
+#include <OgreHlmsPbs.h>
+#include <Vct/OgreVctLighting.h>
+#include <Vct/OgreVctVoxelizerSourceBase.h>
+#include <OgreDescriptorSetTexture.h>
+#include <OgreDescriptorSetUav.h>
 #include <OgreMesh2.h>
 #include <OgreLogManager.h>
 #include <OgreRoot.h>
@@ -22,6 +31,8 @@
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/OgreCompositorWorkspace.h>
 #include <Compositor/OgreCompositorWorkspaceDef.h>
+#include <Compositor/Pass/OgreCompositorPass.h>
+#include <Compositor/Pass/OgreCompositorPassDef.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 
@@ -40,26 +51,17 @@ using detail::processUniqueName;
 namespace {
 
 /// THE CAPTURE'S PASS PROPERTY, and the whole of "is a capture running".
-/// Render-thread only, exactly like `FogHlmsListener`'s own maps: the capture
-/// workspace is driven from the one thread that renders and the flag is set and
-/// cleared around one `_update()`.
+/// Render-thread only, exactly like `FogHlmsListener`'s own maps: set by the
+/// capture workspace's `workspacePreUpdate` and cleared by its
+/// `workspacePosUpdate` — AND cleared unconditionally at every frame's head
+/// (`allWorkspacesBeforeBeginUpdate`), which is not tidiness. A capture
+/// compiles a shader permutation and an Hlms compile failure THROWS through
+/// the workspace's `_update()`; a flag left set by that throw would make every
+/// later pass generate the capture permutation, whose `custom_ps_posExecution`
+/// collides at library-parse time with the fog piece's definition of the same
+/// name — the "already defined" parse error whose only symptom is the whole
+/// scene rendering BLACK with nothing in any log.
 bool gCapturing = false;
-
-/// ...AND IT IS CLEARED ON EVERY PATH OUT, WHICH IS NOT TIDINESS (the rule
-/// SURFACE-CACHE-0 learned and this Component inherits). A capture compiles a
-/// shader permutation and an Hlms compile failure THROWS through `_update()`.
-/// A flag left set by that throw is not a lost capture, it is a BROKEN PROCESS:
-/// `jah_card_capture` would then hold for every later pass, every pass would
-/// generate the capture permutation, and that permutation's
-/// `custom_ps_posExecution` collides at library-parse time with the fog piece's
-/// definition of the same name — the "already defined" parse error whose only
-/// symptom is the whole scene rendering BLACK with nothing in any log.
-struct CaptureFlag {
-    CaptureFlag() { gCapturing = true; }
-    ~CaptureFlag() { gCapturing = false; }
-    CaptureFlag(const CaptureFlag &) = delete;
-    CaptureFlag &operator=(const CaptureFlag &) = delete;
-};
 
 /// THE SIX AXIS FRAMES, read from THE CONTRACT (Types.h's cardAxisDirection /
 /// cardAxisU / cardAxisV — the one table the bake, the capture and phase 4's
@@ -262,12 +264,17 @@ bool SurfaceCache::makeAtlas(std::string &err) {
 
         // ...and the page-sized SCRATCH the capture actually renders into, in
         // the SAME format so the copy is a straight vkCmdCopyImage (a copy
-        // cannot convert, which is why the fallback above moves both).
+        // cannot convert, which is why the fallback above moves both). ONE
+        // SLICE PER PASS OF THE BATCH: pass i renders into slice i, so a
+        // workspace update carries `kCaptureBatch` cards and each pass's clear
+        // is exact — the attachment is the slice's own view, so the
+        // whole-attachment `renderArea` (SurfaceCache.h) clears that slice and
+        // nothing a sibling pass wrote.
         Ogre::TextureGpu *s =
             tm->createTexture(processUniqueName((std::string(name[i]) + "Scr").c_str()),
                               Ogre::GpuPageOutStrategy::Discard,
-                              Ogre::TextureFlags::RenderToTexture, Ogre::TextureTypes::Type2D);
-        s->setResolution(kCardPageSize, kCardPageSize, 1u);
+                              Ogre::TextureFlags::RenderToTexture, Ogre::TextureTypes::Type2DArray);
+        s->setResolution(kCardPageSize, kCardPageSize, kCaptureBatch);
         s->setPixelFormat(fmt[i]);
         s->setNumMipmaps(1u);
         s->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
@@ -281,6 +288,35 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     mScratchDepth->setNumMipmaps(1u);
     mScratchDepth->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
 
+    // THE SIXTH LAYER, RADIANCE (PHOTON-CARDS-1, SC-1c): what a hit will read.
+    // Written by the `Jahshaka/CardLight` compute job and by nothing else, so it
+    // is a UAV — never a render target, never a copy destination. R11G11B10F is
+    // four bytes of unsigned HDR (radiance is never negative) when the device
+    // can STORE to it from a compute job; RGBA16F otherwise, and the status
+    // says which. +16 MB at 2048 square.
+    mRadianceFormatName = "R11G11B10F";
+    Ogre::PixelFormatGpu radFmt = Ogre::PFG_R11G11B10_FLOAT;
+    if (!tm->checkSupport(radFmt, Ogre::TextureTypes::Type2D, Ogre::TextureFlags::Uav)) {
+        radFmt = Ogre::PFG_RGBA16_FLOAT;
+        mRadianceFormatName = "RGBA16F";
+    }
+    mRadiance = tm->createTexture(processUniqueName("cardRadiance"), Ogre::GpuPageOutStrategy::Discard,
+                                  Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+    mRadiance->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
+    mRadiance->setPixelFormat(radFmt);
+    mRadiance->setNumMipmaps(1u);
+    mRadiance->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    // ...and THE CACHED INDIRECT HALF, the march's answer per texel (Lumen's
+    // IndirectLighting atlas): the expensive half is recomputed only when the
+    // chain re-injects, and a direct-only relight reads it back. Same format,
+    // read and written by the same job. +16 MB.
+    mIndirect = tm->createTexture(processUniqueName("cardIndirect"), Ogre::GpuPageOutStrategy::Discard,
+                                  Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+    mIndirect->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
+    mIndirect->setPixelFormat(radFmt);
+    mIndirect->setNumMipmaps(1u);
+    mIndirect->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+
     const unsigned pagesPerSide = kCardAtlasSize / kCardPageSize;
     const size_t pages = size_t(pagesPerSide) * pagesPerSide;
     mPageOwner.assign(pages, 0u);
@@ -291,40 +327,33 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     return true;
 }
 
-bool SurfaceCache::makeScratch(std::string &) { return true; }
-
 bool SurfaceCache::makeWorkspace(std::string &err) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::CompositorManager2 *cm = root->getCompositorManager2();
     Ogre::SceneManager *sm = mSceneMgr;
     if (!sm) { err = "surface cache: the scene has no SceneManager"; return false; }
 
-    // THE CAPTURE CAMERA LIVES IN THE SCENE BEING CACHED — one camera, re-aimed
-    // per card, because a camera is a node in the manager's graph and six
-    // hundred of them would be six hundred nodes walked every frame. That is
-    // the same reasoning that took the SCRATCH SceneManager out.
-    // TWO CAPTURE CAMERAS, USED ALTERNATELY, AND THAT IS THE SHADOW FIX.
+    // ONE CAPTURE CAMERA PER PASS OF THE BATCH, living in the scene being
+    // cached (a camera is a node in the manager's graph, so there are
+    // `kCaptureBatch` of them and not one per card). Pass i is bound to camera
+    // i for the life of the workspace, and the camera is re-aimed at its card
+    // each frame. A camera of its own per pass is also what gives every card
+    // its OWN shadow fit: the pin's shadow node caches its light list and its
+    // casters box per (camera, frame) (`buildClosestLightList`'s early-out,
+    // OgreCompositorShadowNode.cpp:345), and no two passes of one update share
+    // a camera.
     //
-    // The pin's shadow node caches per (camera, compositor-manager frame
-    // count): `buildClosestLightList` early-outs on
-    // `mLastCamera == newCamera && mLastFrame == currentFrameCount`
-    // (OgreCompositorShadowNode.cpp:342-352) and the casters box it computes
-    // there is cached with it (:454) — and a workspace driven BY HAND does not
-    // bump the manager's frame count, so with ONE camera every card after the
-    // frame's first reused the first card's light list AND its casters box,
-    // which is a box fitted to a different metre of the world under a mask
-    // that admits one object. Measured: the floor's shadow profile was exactly
-    // right when the budget captured everything in the first frame and a flat
-    // 1.0 at any budget that spread the captures.
-    //
-    // Alternating two cameras defeats the early-out on its first term, with no
-    // patch, no wide cull camera and no fit that is anybody's guess: every card
-    // gets its OWN light list and its OWN casters box, fitted to its own
-    // capture camera, which is the highest-quality answer available and the one
-    // the per-card recalculation was always meant to give.
-    for (unsigned i = 0; i < kCaptureCameras; ++i) {
-        mCam[i] = sm->createCamera(
-            processUniqueName(i ? "cardCaptureB" : "cardCaptureA"), true, true);
+    // NOT LIGHT-COLLECTING CAMERAS (`isVisible` false). A visible camera is in
+    // the frame's light cull (SceneManager::buildLightList): these were made
+    // "cubemap" cameras, culled by a box of half their far clip — and one no
+    // batch has used yet sits at the origin with Ogre's 100,000 far clip, a box
+    // that put EVERY light of the scene in the frame's global list for as long
+    // as the card row was on (measured, PHOTON-CARDS-1 round 2). A capture
+    // lights nothing: its one light is the sun's PSSM term, and directional
+    // lights enter the list unculled.
+    for (unsigned i = 0; i < kCaptureBatch; ++i) {
+        mCam[i] = sm->createCamera(processUniqueName(("cardCapture" + std::to_string(i)).c_str()),
+                                   false, false);
         mCam[i]->setProjectionType(Ogre::PT_ORTHOGRAPHIC);
         mCam[i]->setFixedYawAxis(false);
         mCam[i]->setAutoAspectRatio(false);
@@ -338,122 +367,93 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     for (unsigned i = 0; i < kCardLayers + 1u; ++i)
         n->addTextureSourceName(chan[i], i, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
 
-    Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView("cardRtv");
-    for (unsigned i = 0; i < kCardLayers; ++i) {
-        Ogre::RenderTargetViewEntry e;
-        e.textureName = chan[i];
-        rtv->colourAttachments.push_back(e);
-    }
-    rtv->depthAttachment.textureName = chan[kCardLayers];
-    rtv->stencilAttachment.textureName = chan[kCardLayers];
-    rtv->preferDepthTexture = true;
-
-    n->setNumTargetPass(1u);
-    Ogre::CompositorTargetDef *t = n->addTargetPass("cardRtv");
-    t->setNumPasses(1u);
-    auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
-    // THE PREPASS IS THE CAPTURE. `Ogre::PrePassCreate` writes the shading
-    // normal and (the shadow term, the GGX alpha) exactly, computes no lighting
-    // at all — which is what makes a capture cheap — and
-    // JahCardCapture_piece_ps.any adds albedo, emissive and the card's own
-    // depth through three hook pieces under one pass property. No patch to the
-    // pin (SURFACE-CACHE-0 proved it; the piece's header states the mechanism).
-    p->mPrePassMode = Ogre::PrePassCreate;
-    // The pass's camera is set per capture (`aimCamera` swaps it), so the
-      // definition names the first of the pair and the live pass is re-pointed.
-    p->mCameraName = Ogre::IdString(mCam[0]->getName());
-    // ONE OBJECT, THROUGH AN INCLUDE CHANNEL. Ogre's visibility test is
-    // any-bit-set, so "draw only this item" is expressible only as a bit the
-    // item alone carries while the pass runs — `kCardSubjectBit`, granted by
-    // captureCard() and taken away again before the pass's own `_update`
-    // returns. The mask is a single LOW bit, so `cullFrustum`'s second term
-    // (`viewportMask & ~RESERVED_VISIBILITY_FLAGS`) is zero and nothing leaks
-    // through it (CLAUDE.md's RESERVED_VISIBILITY_FLAGS rule).
-    p->mVisibilityMask = detail::kCardSubjectBit;
-    // AND A LIGHT MUST STILL REACH THIS PASS, which it does today for a reason
-    // worth writing down rather than relying on: `buildClosestLightList` culls
-    // the pass's lights through the VIEWPORT's visibility mask, which is this
-    // one — and every light in this engine is born with Ogre's all-bits
-    // default and nothing ever narrows it. The day something does, a light
-    // without bit 10 drops out of every capture and EVERY CARD'S SHADOW TERM
-    // GOES TO 1.0, silently, with no counter moving. If light visibility ever
-    // becomes a channel here, this mask grows the lights' bits with it.
-    // THE SHADOW NODE IS THE SCENE'S, AND THAT IS THE POINT OF THIS PHASE. A
-    // shadow node draws its casters through its own definition's mask
-    // (`shadowCasterChannels`), which the pass mask above does not touch — so
-    // the whole still world casts into the atlas while exactly one object is
-    // shaded out of it, and a card's shadow term becomes occlusion by OTHER
-    // objects instead of the prepass's constant 1.0.
-    //
-    // THE PROBE NODE, not the view's: a CompositorShadowNode is per WORKSPACE,
-    // so this workspace allocates one of whatever it names. The view's atlas is
-    // 2048x7168 D32 = 56 MB at the High tier; the probe node is a quarter of
-    // that (3.5-5.5 MB) with the same PSSM + focused layout, and its caster
-    // channel is the STILL world, which is exactly what a card is.
+    // The same shadow node every pass names; a CompositorShadowNode is per
+    // WORKSPACE, so the batch shares one instance and each pass re-fits it.
     const bool haveShadowNode =
-        cm->hasShadowNodeDefinition(detail::OgreView::kProbeShadowNodeName);
-    if (haveShadowNode)
-        p->mShadowNode = Ogre::IdString(detail::OgreView::kProbeShadowNodeName);
-    // The same switch the GI arm logs under (JAHSHAKA_GI_DEBUG), read once.
+        cm->hasShadowNodeDefinition(detail::OgreView::kCardShadowNodeName);
     static const bool debugLog = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
     if (debugLog)
         Ogre::LogManager::getSingleton().logMessage(
             std::string("Jahshaka cards: capture shadow node ") +
-            (haveShadowNode ? detail::OgreView::kProbeShadowNodeName : "NONE (a card's shadow"
+            (haveShadowNode ? detail::OgreView::kCardShadowNodeName : "NONE (a card's shadow"
                                                                       " term will be the"
                                                                       " prepass constant)"));
-    // RECALCULATE, unless the A/B lever says otherwise. The lever exists because
-    // "what does a per-card shadow-node update COST" is the one question about
-    // this pass that cannot be answered by reading it — a shadow node update is
-    // a full caster pass, and the Grand Showroom's whole frame story was once a
-    // shadow node recalculated N times a frame. It is read ONCE per cache BUILD
-    // (not per card), so a measurement flips it by taking the card row off and
-    // on again, which is what `sc1b_measure showroom` does in one process; it
-    // is the same shape as `JAHSHAKA_GI_NO_REBUILD_SETTLE` and
-    // `JAHSHAKA_NO_DITHER`, and like them the SHIPPED arm is the one without it.
-    const bool noRecalc = std::getenv("JAH_CARD_NO_SHADOW_RECALC") != nullptr;
-    p->mShadowNodeRecalculation =
-        noRecalc ? Ogre::SHADOW_NODE_REUSE : Ogre::SHADOW_NODE_RECALCULATE;
-    // ...AND THE FIT IS SHARED BY EVERY CARD CAPTURED IN ONE FRAME, which is a
-    // MEASURED limitation and not a choice. `CompositorShadowNode::_update`
-    // early-outs on "same camera, same workspace frame count"
-    // (OgreCompositorShadowNode.cpp:345), and this Component drives one
-    // workspace with one camera — so the FIRST card of a frame fits the atlas
-    // to its own box and every later card of that frame samples that fit.
-    //
-    // WHAT IT COSTS, measured on `gi.card_shadow`'s fixture: with a budget that
-    // captures the whole resident set in one frame the profile across the
-    // floor is exactly the crate's footprint (1.00 / 0.57 / 0.00 / 0.52 / 1.00
-    // at x = 0/+1/+2/+3/+4); with the shipped three-cards-a-frame budget, the
-    // cards captured after the frame's first read a flat 1.0 wherever the
-    // first card's fit does not reach them.
-    //
-    // WHAT THE FIX IS, and why it is not here: a cull camera of its own, wide
-    // enough to cover the residency region, so one fit serves every card of
-    // every frame (the pin fits the node to the pass's CULL camera,
-    // CompositorPassScene.cpp:259, and `mCullCameraName` is a definition field
-    // that exists for exactly this). This lane BUILT that and measured it
-    // producing a flat 1.0 in both the wide and the per-card arm — something
-    // else about a separate cull camera is in the way — so it is handed over
-    // named and reproducible rather than shipped half-understood. PHASE 3 owns
-    // the light list and is where a card's lighting stops being the capture's
-    // business anyway.
-    p->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
-    p->setAllLoadActions(Ogre::LoadAction::Clear);
-    for (unsigned i = 0; i < kCardLayers; ++i) p->mStoreActionColour[i] = Ogre::StoreAction::Store;
-    p->mStoreActionDepth = Ogre::StoreAction::DontCare;
-    p->mStoreActionStencil = Ogre::StoreAction::DontCare;
-    p->mFirstRQ = 0u;
-    p->mLastRQ = 200u;
-    p->mIncludeOverlays = false;
-    // THE LOD LISTS ARE NOT RE-DERIVED BY THIS PASS. The level a card is
-    // captured at is the card's OWN (`MeshCardDesc::lodLevel`, re-derived
-    // against the card's real texel), written straight onto the Item through
-    // patch 0085's setter — so a pass that recomputed LOD from this ortho
-    // camera would immediately undo it, and the view's own pass restores the
-    // view's level the same frame because ITS `mUpdateLodLists` is true.
-    p->mUpdateLodLists = false;
-    p->mProfilingId = "Jahshaka card capture";
+
+    n->setNumTargetPass(kCaptureBatch);
+    for (unsigned b = 0; b < kCaptureBatch; ++b) {
+        // PASS b RENDERS INTO SLICE b of every scratch layer.
+        const std::string rtvName = "cardRtv" + std::to_string(b);
+        Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(rtvName);
+        for (unsigned i = 0; i < kCardLayers; ++i) {
+            Ogre::RenderTargetViewEntry e;
+            e.textureName = chan[i];
+            e.slice = static_cast<Ogre::uint16>(b);
+            rtv->colourAttachments.push_back(e);
+        }
+        rtv->depthAttachment.textureName = chan[kCardLayers];
+        rtv->stencilAttachment.textureName = chan[kCardLayers];
+        rtv->preferDepthTexture = true;
+
+        Ogre::CompositorTargetDef *t = n->addTargetPass(rtvName);
+        t->setNumPasses(1u);
+        auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        mPassDef[b] = p;
+        // THE PREPASS IS THE CAPTURE. `Ogre::PrePassCreate` writes the shading
+        // normal and (the shadow term, the GGX alpha) exactly, computes no
+        // lighting at all — which is what makes a capture cheap — and
+        // JahCardCapture_piece_ps.any adds albedo, emissive and the card's own
+        // depth through three hook pieces under one pass property.
+        p->mPrePassMode = Ogre::PrePassCreate;
+        p->mCameraName = Ogre::IdString(mCam[b]->getName());
+        // WHICH SLOT OF THE BATCH THIS PASS IS — how the per-pass listener
+        // (`passPreExecute`) finds the card whose subject it grants.
+        p->mIdentifier = kCardPassIdentifier + b;
+        // THE BATCH'S GATE: pass b runs iff bit b of the workspace's execution
+        // mask is set, and `update()` sets exactly the low N bits for an
+        // N-card batch. Ogre's mask is a uint8, which is why kCaptureBatch is 8.
+        p->mExecutionMask = static_cast<Ogre::uint8>(1u << b);
+        // ONE OBJECT, THROUGH AN INCLUDE CHANNEL. Ogre's visibility test is
+        // any-bit-set, so "draw only this item" is expressible only as a bit the
+        // item alone carries while the pass runs — `kCardSubjectBit`, granted in
+        // passPreExecute and taken away in passPosExecute. The mask is a single
+        // LOW bit, so `cullFrustum`'s second term (`viewportMask &
+        // ~RESERVED_VISIBILITY_FLAGS`) is zero and nothing leaks through it.
+        //
+        // AND A LIGHT MUST STILL REACH THIS PASS: `buildClosestLightList` culls
+        // the pass's lights through the VIEWPORT's visibility mask, which is this
+        // one — every light in this engine is born with Ogre's all-bits default
+        // and nothing narrows it. The day something does, a light without bit 10
+        // drops out of every capture and EVERY CARD'S SHADOW TERM GOES TO 1.0.
+        p->mVisibilityMask = detail::kCardSubjectBit;
+        // THE SHADOW NODE: the card node (OgreView::kCardShadowNodeName — the
+        // sun's PSSM at the probe resolution and nothing else, because the
+        // prepass writes the directional term alone; the STILL world as its
+        // casters, which is exactly what a card is), RECALCULATED PER PASS:
+        // every pass has its own camera, so every card gets its own fit.
+        if (haveShadowNode) {
+            p->mShadowNode = Ogre::IdString(detail::OgreView::kCardShadowNodeName);
+            p->mShadowNodeRecalculation = Ogre::SHADOW_NODE_RECALCULATE;
+        }
+        // NO FORWARD+ FOR A PREPASS: the capture computes no lighting, and a
+        // clustered light grid is built per CAMERA — eight of them a frame for
+        // nothing.
+        p->mEnableForwardPlus = false;
+        p->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
+        p->setAllLoadActions(Ogre::LoadAction::Clear);
+        for (unsigned i = 0; i < kCardLayers; ++i)
+            p->mStoreActionColour[i] = Ogre::StoreAction::Store;
+        p->mStoreActionDepth = Ogre::StoreAction::DontCare;
+        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        p->mFirstRQ = 0u;
+        p->mLastRQ = 200u;
+        p->mIncludeOverlays = false;
+        // THE LOD LISTS ARE NOT RE-DERIVED BY THIS PASS. The level a card is
+        // captured at is the card's OWN (`MeshCardDesc::lodLevel`), written
+        // straight onto the Item through patch 0085's setter in passPreExecute —
+        // a pass that recomputed LOD from this ortho camera would undo it.
+        p->mUpdateLodLists = false;
+        p->mProfilingId = "Jahshaka card capture";
+    }
 
     Ogre::CompositorWorkspaceDef *wd = cm->addWorkspaceDefinition(mWsDef);
     for (unsigned i = 0; i < kCardLayers + 1u; ++i) wd->connectExternal(i, mNodeDef, i);
@@ -461,14 +461,34 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     for (unsigned i = 0; i < kCardLayers; ++i)
         externals.push_back(mScratch[unsigned(kShaderOrder[i])]);
     externals.push_back(mScratchDepth);
-    // DISABLED: this workspace is never part of Ogre's own frame loop. It is
-    // driven by hand from the scene's per-frame pass — inside renderOneFrame,
-    // where the monitor's listeners are already attached and where every other
-    // engine cache spends its budget — because six cards need six different
-    // camera poses and one workspace update cannot carry six.
-    mWs = cm->addWorkspace(sm, externals, mCam[0], mWsDef, false);
+    // THE CAPTURE RUNS INSIDE OGRE'S OWN FRAME, AND THAT IS THE SHADOW FIX
+    // (PHOTON-CARDS-1 §1.1, measured). This workspace used to be driven BY HAND
+    // from the engine's pre-frame hook — BEFORE `Root::renderOneFrame` runs the
+    // frame's `updateSceneGraph()` and after the previous frame's
+    // `clearFrameData()` emptied the manager's GLOBAL LIGHT LIST. So every
+    // capture but those of a frame that happened to follow a hand-driven graph
+    // update (a GI rebuild's) saw ZERO lights: no shadow-casting light, no
+    // shadow map, a flat 1.0. Measured on `gi.card_shadow`'s fixture at the High
+    // budget: 93 of 96 captures read an empty light list, and the three that
+    // did not were exactly the first frame's. (The ortho-PSSM hypothesis was
+    // measured too — a focused technique, a perspective cull camera, a wide cull
+    // camera: all flat 1.0, because there was no light to fit.)
+    //
+    // So the workspace is ENABLED and sits FIRST in the manager's list: it
+    // runs after the frame's scene-graph update and light list, before the
+    // views, every frame — and does nothing on a frame that planned no batch,
+    // because its execution mask is then zero (`update()` sets it; the
+    // listener clears it after the copies). A frame whose scene is not drawn
+    // never calls `update()`, so it captures nothing.
+    mWs = cm->addWorkspace(sm, externals, mCam[0], mWsDef, true, 0);
     if (!mWs) { err = "surface cache: addWorkspace failed"; return false; }
+    mWs->setExecutionMask(0u);
     mWs->addListener(this);
+    // ...AND THE MANAGER'S FRAME HEAD, where the capture flag is cleared
+    // unconditionally: a capture that threw inside `_update` never reaches its
+    // `workspacePosUpdate`, and a flag left set is not a lost capture but a
+    // broken process (every later pass would generate the capture permutation).
+    cm->addListener(this);
     return true;
 }
 
@@ -495,7 +515,11 @@ void SurfaceCache::destroyAll() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root) return;
     Ogre::CompositorManager2 *cm = root->getCompositorManager2();
-    if (mWs) { cm->removeWorkspace(mWs); mWs = nullptr; }
+    if (mWs) {
+        cm->removeListener(this);
+        cm->removeWorkspace(mWs);
+        mWs = nullptr;
+    }
     if (!mWsDef.empty() && cm->hasWorkspaceDefinition(mWsDef)) cm->removeWorkspaceDefinition(mWsDef);
     if (!mNodeDef.empty() && cm->hasNodeDefinition(mNodeDef)) cm->removeNodeDefinition(mNodeDef);
     mWsDef.clear();
@@ -505,13 +529,23 @@ void SurfaceCache::destroyAll() {
                                     : nullptr) {
         if (mCardBuffer) { vao->destroyUavBuffer(mCardBuffer); mCardBuffer = nullptr; }
         if (mInstanceBuffer) { vao->destroyUavBuffer(mInstanceBuffer); mInstanceBuffer = nullptr; }
+        if (mRelightBuffer) { vao->destroyUavBuffer(mRelightBuffer); mRelightBuffer = nullptr; }
+        if (mLightBuffer) { vao->destroyUavBuffer(mLightBuffer); mLightBuffer = nullptr; }
+        if (mGiBuffer) { vao->destroyUavBuffer(mGiBuffer); mGiBuffer = nullptr; }
     }
     mCardRecords = 0u;
     mInstanceSlots = 0u;
     mCardBufferCpu.clear();
     mInstanceBufferCpu.clear();
     mTableDirty = false;
-    for (unsigned i = 0; i < kCaptureCameras; ++i) {
+    mBatch.clear();
+    mRelight.clear();
+    mRelightMode.clear();
+    mLights.clear();
+    mVct = nullptr;
+    mLightJob = nullptr;
+    for (unsigned i = 0; i < kCaptureBatch; ++i) mPassDef[i] = nullptr;
+    for (unsigned i = 0; i < kCaptureBatch; ++i) {
         if (mCam[i] && mSceneMgr) mSceneMgr->destroyCamera(mCam[i]);
         mCam[i] = nullptr;
     }
@@ -523,6 +557,8 @@ void SurfaceCache::destroyAll() {
             if (mScratch[i]) { tm->destroyTexture(mScratch[i]); mScratch[i] = nullptr; }
         }
         if (mScratchDepth) { tm->destroyTexture(mScratchDepth); mScratchDepth = nullptr; }
+        if (mRadiance) { tm->destroyTexture(mRadiance); mRadiance = nullptr; }
+        if (mIndirect) { tm->destroyTexture(mIndirect); mIndirect = nullptr; }
     }
 }
 
@@ -727,6 +763,7 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
                     return true;
                 }
                 r.queued = true;
+                r.surfaceStale = true;   // a new rect: its indirect has never been marched
                 r.lastUsed = mFrame;
                 r.lastUpdated = 0ull;
                 mCards.push_back(r);
@@ -805,7 +842,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         if (inst.material != cand.material) {
             inst.material = cand.material;
             for (unsigned c = 0; c < inst.cardCount; ++c)
-                mCards[inst.firstCard + c].queued = true;
+                mCards[inst.firstCard + c].queued = mCards[inst.firstCard + c].surfaceStale = true;
             ++mInvalidMaterial;
         }
     }
@@ -891,145 +928,534 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
 // ---------------------------------------------------------------------------
 // The capture
 // ---------------------------------------------------------------------------
-void SurfaceCache::aimCamera(const CardRec &card) {
+void SurfaceCache::aimCamera(const CardRec &card, unsigned slot) {
     const float margin = captureMargin(card.halfDepth);
-    // ALTERNATE (see the pair's note in makeWorkspace): the shadow node's
-    // "same camera, same frame" early-out is what made cards 2..N of a frame
-    // reuse the first one's light list and casters box.
-    mCamTurn ^= 1u;
-    Ogre::Camera *cam = mCam[mCamTurn];
+    Ogre::Camera *cam = mCam[slot];
     cam->setOrthoWindow(std::max(2.0f * card.halfU, 1e-4f), std::max(2.0f * card.halfV, 1e-4f));
     cam->setNearClipDistance(0.001f);
     cam->setFarClipDistance(2.0f * card.halfDepth + 2.0f * margin + 0.01f);
     cam->setPosition(card.centre + card.d * (card.halfDepth + margin));
     // Ogre looks down -Z, so the card's OUTWARD axis is the camera's +Z. The
     // frame is right-handed (u x v = d, asserted by gi.card_capture), so
-    // FromAxes builds a rotation and not a reflection — which is exactly why
-    // the document's +Y row had to be fixed before this line could be written.
+    // FromAxes builds a rotation and not a reflection.
     Ogre::Quaternion q;
     q.FromAxes(card.u, card.v, card.d);
     cam->setOrientation(q);
-    // ...and the live pass is re-pointed at it. The camera is resolved in the
-    // pass's constructor from the definition's name, so a swap has to go
-    // through the pass object and not through the definition.
-    if (Ogre::CompositorNode *node =
-            mWs->getNodeSequence().empty() ? nullptr : mWs->getNodeSequence().front()) {
-        const Ogre::CompositorPassVec &passes = node->_getPasses();
-        if (!passes.empty() && passes[0]->getType() == Ogre::PASS_SCENE) {
-            auto *sp = static_cast<Ogre::CompositorPassScene *>(passes[0]);
-            // BOTH, and the cull one is the load-bearing half: the pass's
-            // constructor sets `mCullCamera = mCamera` when the definition
-            // names no cull camera, and it is the CULL camera the shadow node
-            // is fitted to (`CompositorPassScene.cpp:259`). Setting only the
-            // render camera would leave every card's shadow fitted to camera A
-            // for ever, which is the defect this pair exists to remove.
-            sp->_setCustomCamera(cam);
-            sp->_setCustomCullCamera(cam);
+    // THE VIEWPORT IS THE CARD'S OWN TEXELS. The copy moves the scratch's
+    // top-left `size` square into the atlas, so a card smaller than a page must
+    // be RENDERED into exactly that square — rendered across the whole page, a
+    // 32-texel card's copy took the top-left eighth of its own picture
+    // (PHOTON-CARDS-1, measured: `gi.card_capture`'s sub-page arm). The pass
+    // reads its definition's rectangle at every execution, and the definition
+    // is this Component's own.
+    const float frac = float(card.size) / float(kCardPageSize);
+    Ogre::CompositorPassDef::ViewportRect &vp = mPassDef[slot]->mVpRect[0];
+    vp.mVpLeft = vp.mVpTop = vp.mVpScissorLeft = vp.mVpScissorTop = 0.0f;
+    vp.mVpWidth = vp.mVpHeight = vp.mVpScissorWidth = vp.mVpScissorHeight = frac;
+}
+
+// ---------------------------------------------------------------------------
+// The batch, as Ogre's frame executes it
+// ---------------------------------------------------------------------------
+//
+// `update()` PLANS: it picks this frame's cards in Lumen's order under the
+// texel budget (at most `kCaptureBatch`), aims camera i at card i and sets the
+// low N bits of the workspace's execution mask. Ogre then EXECUTES the
+// workspace inside its own frame (makeWorkspace says why that is the shadow
+// fix), and these four hooks do the per-card work around each pass and the
+// copies after the last one.
+void SurfaceCache::allWorkspacesBeforeBeginUpdate() { gCapturing = false; }
+
+void SurfaceCache::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
+    if (ws != mWs) return;
+    // A BATCH PLANNED FOR ANOTHER FRAME NEVER RUNS. `update()` plans and this
+    // frame executes; a frame that did not plan (its scene is not drawn, so
+    // `update()` never ran) must not replay the last plan against items that
+    // may have died since.
+    if (mBatchFrame != Ogre::Root::getSingleton().getCompositorManager2()->getFrameCount()) {
+        mBatch.clear();
+        mRelight.clear();
+            mWs->setExecutionMask(0u);
+    }
+    if (mBatch.empty()) return;
+    gCapturing = true;
+    mBatchStart = std::chrono::steady_clock::now();
+}
+
+void SurfaceCache::passPreExecute(Ogre::CompositorPass *pass) {
+    const Ogre::uint32 id = pass->getDefinition()->mIdentifier;
+    if (id < kCardPassIdentifier || id >= kCardPassIdentifier + kCaptureBatch) return;
+    const unsigned slot = id - kCardPassIdentifier;
+    if (slot >= mBatch.size()) return;
+    CardRec &card = mCards[mBatch[slot]];
+    InstanceRec &inst = mInstances[card.instance];
+    if (!inst.item) return;
+    // THE INCLUDE CHANNEL, for the length of one pass and no longer — granted
+    // HERE, before the pass updates its shadow node, because the node fits its
+    // casters box under the pass's own visibility mask. The item keeps every
+    // bit it had; the capture bit is ADDED and taken away in passPosExecute.
+    mSubjectFlags = inst.item->getVisibilityFlags();
+    mSubjectLod = inst.item->getCurrentMeshLod();
+    inst.item->setVisibilityFlags(mSubjectFlags | detail::kCardSubjectBit);
+    // THE CARD'S OWN LOD (patch 0085): the level is a capture DECISION (the
+    // bake's, spent at the card's texel), and upstream keeps the member
+    // protected with only a "reset to 0" door.
+    inst.item->_setCurrentMeshLod(card.lodLevel);
+}
+
+void SurfaceCache::passPosExecute(Ogre::CompositorPass *pass) {
+    const Ogre::uint32 id = pass->getDefinition()->mIdentifier;
+    if (id < kCardPassIdentifier || id >= kCardPassIdentifier + kCaptureBatch) return;
+    const unsigned slot = id - kCardPassIdentifier;
+    if (slot >= mBatch.size()) return;
+    InstanceRec &inst = mInstances[mCards[mBatch[slot]].instance];
+    if (!inst.item) return;
+    inst.item->setVisibilityFlags(mSubjectFlags);
+    inst.item->_setCurrentMeshLod(mSubjectLod);
+}
+
+void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
+    if (ws != mWs) return;
+    gCapturing = false;
+    if (mBatch.empty()) {
+        relightCards();
+        return;
+    }
+    const auto tB = std::chrono::steady_clock::now();
+    // ...AND INTO THE ATLAS, after the whole batch: five small copies a card,
+    // from its own slice of the scratch (the reason the scratch exists at all
+    // is in SurfaceCache.h — this pin's render-pass clear is whole-target).
+    for (unsigned slot = 0; slot < mBatch.size(); ++slot) {
+        CardRec &card = mCards[mBatch[slot]];
+        for (unsigned i = 0; i < kCardLayers; ++i) {
+            Ogre::TextureBox src = mScratch[i]->getEmptyBox(0);
+            src.width = card.size;
+            src.height = card.size;
+            src.sliceStart = slot;
+            src.numSlices = 1u;
+            Ogre::TextureBox dst = mAtlas[i]->getEmptyBox(0);
+            dst.x = card.atlasX;
+            dst.y = card.atlasY;
+            dst.width = card.size;
+            dst.height = card.size;
+            mScratch[i]->copyTo(mAtlas[i], dst, 0, src, 0);
+        }
+        card.queued = false;
+        card.lastUpdated = mFrame;
+        ++mCaptures;
+        ++mCapturesLastFrame;
+        mTexelsLastFrame += card.size * card.size;
+    }
+    const auto tC = std::chrono::steady_clock::now();
+    mWsMs = float(std::chrono::duration<double, std::milli>(tB - mBatchStart).count());
+    mCopyMs = float(std::chrono::duration<double, std::milli>(tC - tB).count());
+    mCaptureMs = mWsMs + mCopyMs;
+    mBatch.clear();
+    mWs->setExecutionMask(0u);
+    // ...and the cards just captured are relit from their new texels, in the
+    // same frame, before anything could read them.
+    relightCards();
+}
+
+// ---------------------------------------------------------------------------
+// THE LIT CARD (PHOTON-CARDS-1, SC-1c) — the sixth layer
+// ---------------------------------------------------------------------------
+//
+// A texel's radiance = the scene's lights through HlmsPbs's own diffuse lobe
+// (the sun through the captured shadow term) + the pixel's own diffuse GI
+// marched from the texel (the one voxel reader, the one environment at each
+// escape; cached in the seventh layer, `mIndirect`, under its own budget) +
+// its emissive; the job and every
+// statement about what it includes and what it does not are in
+// media/Hlms/Jahshaka/JahCardLight_cs.glsl. THE LIGHT LIST IS WRITTEN HERE, on
+// the CPU, in world space: the Forward+ list the pixel shader binds is built
+// per CAMERA in that camera's view space (clusters of a screen), which is
+// meaningless for a card texel anywhere in the world — so the job gets the
+// pass buffer's own light layout, in world coordinates, from the scene's
+// lights (the shape VctLighting's own light injection takes).
+namespace {
+/// The most cards one frame relights (the relight list's size, 80 B a card).
+constexpr unsigned kMaxRelights = 1024u;
+/// The most lights the job sums (80 B a light after a 16 B count).
+constexpr unsigned kMaxCardLights = 64u;
+constexpr unsigned kRelightFloats = 20u;
+/// The chain's parameter block (CardGiParams in the shader): chainInvRes[8],
+/// chainFromPrev[14], the volume's origin and inverse size, the counts, the
+/// environment's gain and mips, its nine SH coefficients — 35 vec4.
+constexpr unsigned kGiParamFloats = 35u * 4u;
+constexpr unsigned kMaxCardCascades = 8u;
+constexpr unsigned kLightFloats = 20u;
+}   // namespace
+
+void SurfaceCache::planRelights(const CardSceneView &view) {
+    mRelight.clear();
+    mRelightMode.clear();
+    mLights = view.lights;
+    mVct = view.vct;
+    // THE RADIANCE SIGNATURE: a light write that changed what a card's
+    // DIRECT radiance depends on relights every resident card and recaptures
+    // none. A write that also moved a shadow queued the cards for capture
+    // above, and a queued card is relit after its capture, not before it.
+    if (view.radianceSerial != mRadianceSerial) {
+        for (CardRec &c : mCards) c.relight = true;
+        if (!mRadianceMovingLastFrame) ++mInvalidRadiance;   // one per gesture
+        mRadianceMovingLastFrame = true;
+        mRadianceSerial = view.radianceSerial;
+    } else {
+        mRadianceMovingLastFrame = false;
+    }
+    // THE INDIRECT SIGNATURE: the chain re-injected (a light tick, a settle, a
+    // cascade rebuild, a material generation) — the INDIRECT half of every
+    // resident card is stale, under its own budget; the direct half is not.
+    if (view.indirectSerial != mIndirectSerial) {
+        for (CardRec &c : mCards) c.relightIndirect = true;
+        if (!mIndirectMovingLastFrame) ++mInvalidIndirect;
+        mIndirectMovingLastFrame = true;
+        mIndirectSerial = view.indirectSerial;
+    } else {
+        mIndirectMovingLastFrame = false;
+    }
+    if (!mRadiance) return;
+    // The cards captured THIS frame: their direct half is stale. Their
+    // INDIRECT half is stale only when the capture changed the SURFACE — a new
+    // rect, or a material (the kD, the normal, the roughness the march and its
+    // lobe read). A capture a light write asked for changed the shadow term
+    // alone, so the cached indirect stands (a dragged light recaptures every
+    // frame and must not re-march against voxels that did not move).
+    for (unsigned idx : mBatch) {
+        CardRec &c = mCards[idx];
+        c.relight = true;
+        if (c.surfaceStale) {
+            c.relightIndirect = true;
+            c.indirectValid = false;
+            c.surfaceStale = false;
+        }
+    }
+    const auto ready = [this](unsigned i) {
+        const CardRec &c = mCards[i];
+        const bool thisFrame = std::find(mBatch.begin(), mBatch.end(), i) != mBatch.end();
+        return thisFrame || (!c.queued && c.lastUpdated);
+    };
+    const auto oldestFirst = [this](std::vector<unsigned> &v, bool indirect) {
+        std::sort(v.begin(), v.end(), [this, indirect](unsigned a, unsigned b) {
+            const unsigned long long ka = indirect ? mCards[a].lastIndirect : mCards[a].lastRelit;
+            const unsigned long long kb = indirect ? mCards[b].lastIndirect : mCards[b].lastRelit;
+            if (ka != kb) return ka < kb;
+            return a < b;
+        });
+    };
+    std::vector<char> taken(mCards.size(), 0);
+
+    // 1. THE INDIRECT LIST (the march; it recomputes the direct half too):
+    //    this frame's captures first, then the stalest, under the INDIRECT
+    //    budget.
+    {
+        std::vector<unsigned> want;
+        for (unsigned idx : mBatch)
+            if (mCards[idx].relightIndirect) want.push_back(idx);
+        std::vector<unsigned> rest;
+        for (unsigned i = 0; i < mCards.size(); ++i)
+            if (mCards[i].relightIndirect && ready(i) &&
+                std::find(mBatch.begin(), mBatch.end(), i) == mBatch.end())
+                rest.push_back(i);
+        oldestFirst(rest, true);
+        want.insert(want.end(), rest.begin(), rest.end());
+        unsigned spent = 0u;
+        for (unsigned idx : want) {
+            const unsigned cost = mCards[idx].size * mCards[idx].size;
+            if (spent && spent + cost > mIndirectBudget) break;
+            if (mRelight.size() >= kMaxRelights) break;
+            mRelight.push_back(idx);
+            mRelightMode.push_back(1u);
+            taken[idx] = 1;
+            spent += cost;
+        }
+    }
+    // 2. THE DIRECT LIST: every other card whose direct half is stale, under
+    //    the DIRECT budget — its indirect read back from the cached layer, or
+    //    zero while it has none (a fresh capture the march has not reached).
+    {
+        std::vector<unsigned> want;
+        for (unsigned idx : mBatch)
+            if (!taken[idx]) want.push_back(idx);
+        std::vector<unsigned> rest;
+        for (unsigned i = 0; i < mCards.size(); ++i)
+            if (!taken[i] && mCards[i].relight && ready(i) &&
+                std::find(mBatch.begin(), mBatch.end(), i) == mBatch.end())
+                rest.push_back(i);
+        oldestFirst(rest, false);
+        want.insert(want.end(), rest.begin(), rest.end());
+        unsigned spent = 0u;
+        for (unsigned idx : want) {
+            const unsigned cost = mCards[idx].size * mCards[idx].size;
+            if (spent && spent + cost > mLightBudget) break;
+            if (mRelight.size() >= kMaxRelights) break;
+            mRelight.push_back(idx);
+            mRelightMode.push_back(mCards[idx].indirectValid ? 0u : 2u);
+            spent += cost;
         }
     }
 }
 
-void SurfaceCache::captureCard(CardRec &card) {
-    if (!mWs || card.instance >= mInstances.size()) return;
-    InstanceRec &inst = mInstances[card.instance];
-    if (!inst.item) return;
+void SurfaceCache::relightCards() {
+    if (mRelight.empty() || !mRadiance) { mLights.clear(); mVct = nullptr; return; }
+    const auto t0 = std::chrono::steady_clock::now();
+    Ogre::Root &root = Ogre::Root::getSingleton();
+    Ogre::RenderSystem *rs = root.getRenderSystem();
+    Ogre::HlmsCompute *hc = root.getHlmsManager()->getComputeHlms();
+    if (!mLightJob) mLightJob = hc ? hc->findComputeJobNoThrow("Jahshaka/CardLight") : nullptr;
+    if (!mLightJob) { mRelight.clear(); mLights.clear(); mVct = nullptr; return; }
+    Ogre::VaoManager *vao = rs->getVaoManager();
 
-    aimCamera(card);
+    // ---- THE RELIGHT LIST: each card's capture frame, as the job unprojects it.
+    mRelightCpu.assign(size_t(kMaxRelights) * kRelightFloats, 0.0f);
+    for (size_t i = 0; i < mRelight.size(); ++i) {
+        const CardRec &c = mCards[mRelight[i]];
+        float *r = &mRelightCpu[i * kRelightFloats];
+        const Ogre::Vector3 cam = c.centre + c.d * (c.halfDepth + captureMargin(c.halfDepth));
+        r[0] = float(c.atlasX); r[1] = float(c.atlasY); r[2] = float(c.size);
+        r[3] = float(mRelightMode[i]);
+        r[4] = cam.x; r[5] = cam.y; r[6] = cam.z; r[7] = 0.0f;
+        // The ortho window aimCamera gives the capture, and the same clamp.
+        r[8] = c.u.x; r[9] = c.u.y; r[10] = c.u.z; r[11] = std::max(2.0f * c.halfU, 1e-4f);
+        r[12] = c.v.x; r[13] = c.v.y; r[14] = c.v.z; r[15] = std::max(2.0f * c.halfV, 1e-4f);
+        r[16] = c.d.x; r[17] = c.d.y; r[18] = c.d.z; r[19] = 0.0f;
+    }
 
-    // THE INCLUDE CHANNEL, for the length of one pass and no longer. The item
-    // keeps every bit it had; the capture bit is ADDED, so the object's place
-    // in every other pass of the frame is untouched even if something throws
-    // before the restore (the restore is a scope guard for that reason).
-    const Ogre::uint32 wasFlags = inst.item->getVisibilityFlags();
-    const unsigned char wasLod = inst.item->getCurrentMeshLod();
-    struct Restore {
-        Ogre::Item *item = nullptr;
-        Ogre::uint32 flags = 0u;
-        unsigned char lod = 0u;
-        ~Restore() {
-            item->setVisibilityFlags(flags);
-            item->_setCurrentMeshLod(lod);
+    // ---- THE LIGHTS, in world space, in the pass buffer's layout, from the
+    // SCENE — every light node, handed over by OgreScene::updateSurfaceCache —
+    // and NEVER from the frame's global list: that list is culled against the
+    // frame's visible cameras, and a card lights a surface OFF screen (the
+    // reader is a ray hit), so a lamp no camera sees this frame must still
+    // light it. ONE source, the sun included: the one light whose visibility is
+    // the captured shadow term is the light the capture's shadow node gave its
+    // PSSM maps, which is the frame's rule applied to the same list — the first
+    // visible shadow-casting directional light in creation order
+    // (SceneManager::quickSortDirectionalLights: casters first, then by id).
+    const Ogre::Light *sun = nullptr;
+    for (const Ogre::Light *l : mLights) {
+        if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL || !l->getCastShadows() ||
+            !l->getVisible())
+            continue;
+        if (!sun || l->getId() < sun->getId()) sun = l;
+    }
+    mLightCpu.assign(4u + size_t(kMaxCardLights) * kLightFloats, 0.0f);
+    unsigned numLights = 0u;
+    unsigned dropped = 0u;
+    for (const Ogre::Light *l : mLights) {
+        if (!l || !l->getVisible()) continue;
+        const Ogre::Light::LightTypes type = l->getType();
+        if (type != Ogre::Light::LT_DIRECTIONAL && type != Ogre::Light::LT_POINT &&
+            type != Ogre::Light::LT_SPOTLIGHT)
+            continue;   // area lights: not summed (JahCardLight_cs.glsl says so)
+        if (numLights >= kMaxCardLights) { ++dropped; continue; }
+        float *o = &mLightCpu[4u + size_t(numLights) * kLightFloats];
+        const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
+        if (type == Ogre::Light::LT_DIRECTIONAL) {
+            const Ogre::Vector3 toLight = -l->getDerivedDirection();
+            o[0] = toLight.x; o[1] = toLight.y; o[2] = toLight.z; o[3] = 0.0f;
+        } else {
+            const Ogre::Vector3 p = l->getParentNode()->_getDerivedPosition();
+            o[0] = p.x; o[1] = p.y; o[2] = p.z;
+            o[3] = type == Ogre::Light::LT_POINT ? 1.0f : 2.0f;
         }
-    } restore{ inst.item, wasFlags, wasLod };
-    inst.item->setVisibilityFlags(wasFlags | detail::kCardSubjectBit);
-    // THE CARD'S OWN LOD (patch 0085). `mCurrentMeshLod` is what every pass
-    // draws and upstream keeps it protected with only a "reset to 0" door, so
-    // the setter is a numbered patch rather than a reach-in: the level is a
-    // capture DECISION (Atom's chain, spent at the card's texel) and a pass
-    // that recomputed it from this ortho camera would answer a question nobody
-    // asked.
-    inst.item->_setCurrentMeshLod(card.lodLevel);
+        o[4] = c.r; o[5] = c.g; o[6] = c.b; o[7] = (l == sun) ? 1.0f : 0.0f;
+        const float range = l->getAttenuationRange();
+        o[8] = range; o[9] = l->getAttenuationLinear(); o[10] = l->getAttenuationQuadric();
+        o[11] = range > 0.0f ? 1.0f / range : 0.0f;   // patch 0018's fade, as light0Buf writes it
+        const Ogre::Vector3 sd = l->getDerivedDirection();
+        o[12] = sd.x; o[13] = sd.y; o[14] = sd.z; o[15] = 0.0f;
+        const float inner = l->getSpotlightInnerAngle().valueRadians();
+        const float outer = l->getSpotlightOuterAngle().valueRadians();
+        const float denom = std::cos(inner * 0.5f) - std::cos(outer * 0.5f);
+        o[16] = std::fabs(denom) > 1e-6f ? 1.0f / denom : 1e6f;
+        o[17] = std::cos(outer * 0.5f);
+        o[18] = l->getSpotlightFalloff();
+        o[19] = 0.0f;
+        ++numLights;
+    }
+    // A LIGHT THE JOB CANNOT HOLD is counted every frame and SAID once per cache.
+    mLightsDropped = dropped;
+    if (dropped && !mLightsDroppedLogged) {
+        mLightsDroppedLogged = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka cards: " + std::to_string(dropped) + " light(s) beyond the card relight's " +
+            std::to_string(kMaxCardLights) + " were not summed into the card radiance");
+    }
+    const Ogre::uint32 count[4] = { numLights, 0u, 0u, 0u };
+    std::memcpy(mLightCpu.data(), count, sizeof(count));
 
-    // THE SHADOW NODE IS RECALCULATED PER CARD, AND THAT IS MEASURED RATHER
-    // THAN ASSUMED. The Grand Showroom's own defect was a shadow node
-    // recalculated N times a frame for one picture, so the obvious saving here
-    // is "once per card SET, since the six cards of an instance look at the
-    // same place" — and this lane BUILT that and then took it out, for two
-    // reasons. It is WRONG: a card wider than a page is SPLIT, so one
-    // instance's cards look at up to sixteen different places and a fit made
-    // for the first leaves the rest reading an atlas that does not cover them
-    // (measured: the floor's shadow went back to a flat 1.0). And it saves
-    // NOTHING: the per-card cost was 0.3734 ms with the saving and 0.3356
-    // without it, i.e. inside the run-to-run spread — the capture's cost is the
-    // workspace UPDATE's own fixed cost and not the shadow node's (see
-    // `GiQualityFacts::cardBudgetTexels` for where that number comes from).
-    //
-    // What the per-card fit BUYS is quality: the PSSM splits are fitted to the
-    // capture camera's own box, which is a metre or two of world, so a card's
-    // shadow term is as sharp as the atlas can make it rather than as sharp as
-    // the view's whole frustum allows.
-    //
-    // AND WHAT IT COSTS TODAY IS NOTHING, WHICH IS THE SAME FINDING FROM THE
-    // OTHER SIDE (`sc1b_measure showroom`, both arms in one process, twice, on
-    // a Showroom-2-shaped scene — 45 carded instances, a sun and THREE
-    // shadow-casting POINT lamps, i.e. eighteen cube faces a recalculation):
-    //
-    //     recalculate per card   0.3577 / 0.3335 ms a card
-    //     shadow node REUSED     0.3579 / 0.3422 ms a card
-    //     the difference        -0.0002 / -0.0087 ms a card
-    //
-    // A real per-card caster pass over that scene could not be free. It is free
-    // because it does not happen: `buildClosestLightList` early-outs on (same
-    // camera, same COMPOSITOR MANAGER frame count) and a hand-driven workspace
-    // never advances that count, so `SHADOW_NODE_RECALCULATE` here is very
-    // nearly a no-op — which is the same mechanism that makes every card after
-    // a frame's first read a flat 1.0 wherever the first card's fit does not
-    // reach. THE NUMBER PHASE 3 MUST CARRY: the cost of a CORRECT per-card fit
-    // is NOT paid by anything measured here, and it is a full caster pass per
-    // card when something finally makes it fire.
-    const auto tA = std::chrono::steady_clock::now();
+    const size_t relightElems = kMaxRelights * kRelightFloats / 4u;   // vec4s
+    const size_t lightElems = 1u + size_t(kMaxCardLights) * kLightFloats / 4u;
+    if (!mRelightBuffer)
+        mRelightBuffer = vao->createUavBuffer(relightElems, 16u, 0, mRelightCpu.data(), false);
+    else
+        mRelightBuffer->upload(mRelightCpu.data(), 0, mRelight.size() * kRelightFloats / 4u);
+    if (!mLightBuffer)
+        mLightBuffer = vao->createUavBuffer(lightElems, 16u, 0, mLightCpu.data(), false);
+    else
+        mLightBuffer->upload(mLightCpu.data(), 0, 1u + size_t(numLights) * kLightFloats / 4u);
+
+    // ---- THE CHAIN AND THE ENVIRONMENT, from the one VctLighting every reader
+    // takes them from (the pixel's pass buffer is filled from the same calls).
+    Ogre::VctLighting *vct = mVct;
+    unsigned numCascades = 0u;
+    bool aniso = false;
+    Ogre::TextureGpu *envCube = nullptr;
+    mGiCpu.assign(kGiParamFloats, 0.0f);
+    if (vct && vct->getLightVoxelTextures() && vct->getLightVoxelTextures()[0]) {
+        const size_t chainLen = vct->getNumCascades();
+        numCascades = unsigned(std::min<size_t>(chainLen, kMaxCardCascades));
+        aniso = vct->isAnisotropic();
+        std::vector<float> invRes(4u * chainLen, 0.0f);
+        std::vector<float> fromPrev(8u * std::max<size_t>(chainLen, 1u), 0.0f);
+        vct->getCascadeChainParams(invRes.data(), fromPrev.data());
+        float *g = mGiCpu.data();
+        std::memcpy(g, invRes.data(), 4u * numCascades * sizeof(float));            // chainInvRes[8]
+        std::memcpy(g + 32u, fromPrev.data(),
+                    8u * (numCascades ? numCascades - 1u : 0u) * sizeof(float));    // chainFromPrev[14]
+        const Ogre::Vector3 origin = vct->getVoxelizer()->getVoxelOrigin();
+        const Ogre::Vector3 size = vct->getVoxelizer()->getVoxelSize();
+        g[88] = origin.x; g[89] = origin.y; g[90] = origin.z;
+        g[92] = 1.0f / size.x; g[93] = 1.0f / size.y; g[94] = 1.0f / size.z;
+        g[96] = float(numCascades);
+        g[97] = vct->getFinalMultiplier();
+        envCube = vct->getEnvironmentCube();
+        const float *gain = vct->getEnvironmentGain();
+        g[100] = gain[0]; g[101] = gain[1]; g[102] = gain[2];
+        g[103] = envCube ? float(envCube->getNumMipmaps()) : 1.0f;
+        const float *sh = vct->getEnvironmentSh();
+        for (unsigned k = 0; k < 9u; ++k) {
+            g[104u + 4u * k] = sh[3u * k];
+            g[105u + 4u * k] = sh[3u * k + 1u];
+            g[106u + 4u * k] = sh[3u * k + 2u];
+        }
+    }
+    mIndirectOnLastRelight = numCascades > 0u;
+    if (!mGiBuffer)
+        mGiBuffer = vao->createUavBuffer(kGiParamFloats / 4u, 16u, 0, mGiCpu.data(), false);
+    else
+        mGiBuffer->upload(mGiCpu.data(), 0, kGiParamFloats / 4u);
+
+    // ---- THE DISPATCH: the job is shared process-wide by name, so every
+    // binding is set here and released after the dispatch is recorded.
+    if (mLightJob->getProperty("hlms_num_vct_cascades") != Ogre::int32(numCascades))
+        mLightJob->setProperty("hlms_num_vct_cascades", Ogre::int32(numCascades));
+    if (mLightJob->getProperty("vct_anisotropic") != (aniso ? 1 : 0))
+        mLightJob->setProperty("vct_anisotropic", aniso ? 1 : 0);
+    if (mLightJob->getProperty("jah_env") != (envCube ? 1 : 0))
+        mLightJob->setProperty("jah_env", envCube ? 1 : 0);
+    // THE STORE'S ROUNDING follows the layer's format (jahCardRound): the
+    // pre-scale is R11G11B10F's, and the RGBA16F fallback stores unrounded.
     {
-        const CaptureFlag capturing;
-        mWs->_validateFinalTarget();
-        mWs->_beginUpdate(false);
-        mWs->_update();
-        mWs->_endUpdate(false);
+        const Ogre::int32 round = mRadiance->getPixelFormat() == Ogre::PFG_R11G11B10_FLOAT ? 1 : 0;
+        if (mLightJob->getProperty("jah_card_round_r11g11b10") != round)
+            mLightJob->setProperty("jah_card_round_r11g11b10", round);
     }
-    const auto tB = std::chrono::steady_clock::now();
-
-    // ...AND INTO THE ATLAS. Five small copies — the reason the scratch exists
-    // at all is in SurfaceCache.h (this pin's render-pass clear is whole-target,
-    // so a page-scissored capture would wipe the atlas).
+    // THE PIXEL'S CONE SET (Vct_piece_ps.any's `vct_cone_dirs`, which HlmsPbs
+    // sets from getVctFullConeCount): the card's indirect is the pixel's
+    // integral, so it walks the pixel's cones.
+    {
+        auto *pbs = static_cast<Ogre::HlmsPbs *>(root.getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+        const Ogre::int32 cones = (pbs && pbs->getVctFullConeCount()) ? 6 : 4;
+        if (mLightJob->getProperty("vct_cone_dirs") != cones)
+            mLightJob->setProperty("vct_cone_dirs", cones);
+    }
+    const unsigned kinds = aniso ? 4u : 1u;
+    const unsigned vctUnits = numCascades ? kinds * numCascades + (envCube ? 1u : 0u) : 0u;
+    const unsigned order[kCardLayers] = { unsigned(CardLayer::Albedo), unsigned(CardLayer::Normal),
+                                          unsigned(CardLayer::Depth), unsigned(CardLayer::Emissive),
+                                          unsigned(CardLayer::ShadowRough) };
+    mLightJob->setNumTexUnits(Ogre::uint8(kCardLayers + vctUnits));
     for (unsigned i = 0; i < kCardLayers; ++i) {
-        Ogre::TextureBox src = mScratch[i]->getEmptyBox(0);
-        src.width = card.size;
-        src.height = card.size;
-        Ogre::TextureBox dst = mAtlas[i]->getEmptyBox(0);
-        dst.x = card.atlasX;
-        dst.y = card.atlasY;
-        dst.width = card.size;
-        dst.height = card.size;
-        mScratch[i]->copyTo(mAtlas[i], dst, 0, src, 0);
+        Ogre::DescriptorSetTexture2::TextureSlot slot(
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+        slot.texture = mAtlas[order[i]];
+        mLightJob->setTexture(Ogre::uint8(i), slot, nullptr, false);
+    }
+    if (numCascades) {
+        // The chain's volumes, per kind then per cascade (the pixel's and the
+        // parity harness's order), the trilinear sampler on the first — the
+        // shader's `vSmp` — and the environment cube last.
+        Ogre::uint8 unit = Ogre::uint8(kCardLayers);
+        for (unsigned kind = 0; kind < kinds; ++kind)
+            for (unsigned c = 0; c < numCascades; ++c, ++unit) {
+                Ogre::DescriptorSetTexture2::TextureSlot slot(
+                    Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+                slot.texture = vct->getLightVoxelTextures(c)[kind];
+                if (unit == kCardLayers)
+                    mLightJob->setTexture(unit, slot, vct->getBindTrilinearSamplerblock());
+                else
+                    mLightJob->setTexture(unit, slot, nullptr, false);
+            }
+        if (envCube) {
+            Ogre::DescriptorSetTexture2::TextureSlot slot(
+                Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+            slot.texture = envCube;
+            mLightJob->setTexture(unit, slot, nullptr, false);
+        }
+    }
+    const auto bufSlot = [](Ogre::UavBufferPacked *b, Ogre::ResourceAccess::ResourceAccess a) {
+        Ogre::DescriptorSetUav::BufferSlot slot(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        slot.buffer = b;
+        slot.offset = 0;
+        slot.sizeBytes = 0;
+        slot.access = a;
+        return slot;
+    };
+    mLightJob->_setUavBuffer(0u, bufSlot(mRelightBuffer, Ogre::ResourceAccess::Read));
+    mLightJob->_setUavBuffer(1u, bufSlot(mLightBuffer, Ogre::ResourceAccess::Read));
+    {
+        Ogre::DescriptorSetUav::TextureSlot uav(Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        uav.texture = mRadiance;
+        uav.access = Ogre::ResourceAccess::Write;
+        uav.pixelFormat = mRadiance->getPixelFormat();
+        mLightJob->_setUavTexture(3u, uav);
+        uav.texture = mIndirect;
+        uav.access = Ogre::ResourceAccess::ReadWrite;
+        uav.pixelFormat = mIndirect->getPixelFormat();
+        mLightJob->_setUavTexture(4u, uav);
+    }
+    mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
+    mLightJob->setThreadsPerGroup(8u, 8u, 1u);
+    mLightJob->setNumThreadGroups(kCardPageSize / 8u, kCardPageSize / 8u, unsigned(mRelight.size()));
+    {
+        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+        mLightJob->analyzeBarriers(rt);
+        rs->executeResourceTransition(rt);
+        hc->dispatch(mLightJob, nullptr, nullptr);
+    }
+    {
+        const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+        mLightJob->_setUavBuffer(0u, empty);
+        mLightJob->_setUavBuffer(1u, empty);
+        mLightJob->_setUavBuffer(2u, empty);
+        mLightJob->_setUavTexture(3u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->_setUavTexture(4u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->setNumTexUnits(0u);
     }
 
-    const auto tC = std::chrono::steady_clock::now();
-    mWsMs += float(std::chrono::duration<double, std::milli>(tB - tA).count());
-    mCopyMs += float(std::chrono::duration<double, std::milli>(tC - tB).count());
-    card.queued = false;
-    card.lastUpdated = mFrame;
-    ++mCaptures;
-    ++mCapturesLastFrame;
-    mTexelsLastFrame += card.size * card.size;
+    for (size_t i = 0; i < mRelight.size(); ++i) {
+        CardRec &c = mCards[mRelight[i]];
+        c.relight = false;
+        c.lastRelit = mFrame;
+        ++mRelights;
+        ++mRelitLastFrame;
+        mRelitTexelsLastFrame += c.size * c.size;
+        if (mRelightMode[i] == 1u) {
+            c.relightIndirect = false;
+            c.indirectValid = true;
+            c.lastIndirect = mFrame;
+            ++mIndirectRelights;
+            ++mIndirectLastFrame;
+            mIndirectTexelsLastFrame += c.size * c.size;
+        }
+    }
+    mRelight.clear();
+    mRelightMode.clear();
+    mLights.clear();
+    mVct = nullptr;
+    mLightMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,7 +1570,14 @@ void SurfaceCache::update(const CardSceneView &view) {
     mCaptureMs = 0.0f;
     mWsMs = 0.0f;
     mCopyMs = 0.0f;
+    mRelitLastFrame = 0u;
+    mRelitTexelsLastFrame = 0u;
+    mIndirectLastFrame = 0u;
+    mIndirectTexelsLastFrame = 0u;
+    mLightMs = 0.0f;
     mBudget = view.budgetTexels;
+    mLightBudget = view.lightBudgetTexels;
+    mIndirectBudget = view.indirectBudgetTexels;
     mRadius = view.radius;
 
     refreshResidency(view);
@@ -1202,35 +1635,38 @@ void SurfaceCache::update(const CardSceneView &view) {
     // a 128-texel card are not the same work on the GPU or on the bus). A card
     // whose texels do not fit ENDS the frame's draining rather than being
     // skipped, so the priority order is honoured exactly and the budget is a
-    // ceiling the frame never goes over.
-    const auto t0 = std::chrono::steady_clock::now();
+    // ceiling the frame never goes over — and so is the batch: one workspace
+    // update carries at most `kCaptureBatch` cards.
+    //
+    // THIS PLANS; Ogre's frame executes (the workspace is enabled and first in
+    // the manager's list — makeWorkspace), and `workspacePosUpdate` marks the
+    // cards captured once their copies are recorded.
+    mBatch.clear();
     unsigned spent = 0u;
-    size_t drained = 0;
     for (unsigned idx : mQueue) {
         const unsigned cost = mCards[idx].size * mCards[idx].size;
         if (spent && spent + cost > view.budgetTexels) break;
-        captureCard(mCards[idx]);
+        if (mBatch.size() >= kCaptureBatch) break;
+        aimCamera(mCards[idx], unsigned(mBatch.size()));
+        mBatch.push_back(idx);
         spent += cost;
-        ++drained;
         if (spent >= view.budgetTexels) break;
     }
-    mCaptureMs = drained ? float(std::chrono::duration<double, std::milli>(
-                                     std::chrono::steady_clock::now() - t0).count())
-                         : 0.0f;
-    mQueue.erase(mQueue.begin(), mQueue.begin() + ptrdiff_t(drained));
+    mBatchFrame = Ogre::Root::getSingleton().getCompositorManager2()->getFrameCount();
+    mWs->setExecutionMask(static_cast<Ogre::uint8>((1u << mBatch.size()) - 1u));
+    planRelights(view);
 }
 
 void SurfaceCache::noteMaterialChanged(MaterialId material) {
     bool any = false;
     for (const InstanceRec &inst : mInstances) {
         if (!inst.cardCount || inst.material != material) continue;
-        for (unsigned c = 0; c < inst.cardCount; ++c) mCards[inst.firstCard + c].queued = true;
+        for (unsigned c = 0; c < inst.cardCount; ++c)
+            mCards[inst.firstCard + c].queued = mCards[inst.firstCard + c].surfaceStale = true;
         any = true;
     }
     if (any) ++mInvalidMaterial;
 }
-void SurfaceCache::workspacePreUpdate(Ogre::CompositorWorkspace *) { gCapturing = true; }
-void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *) { gCapturing = false; }
 
 // ---------------------------------------------------------------------------
 // What it publishes
@@ -1252,8 +1688,28 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
         bytes += bytesOf(mScratch[i]);
     }
     bytes += bytesOf(mScratchDepth);
+    bytes += bytesOf(mRadiance);
+    bytes += bytesOf(mIndirect);
+    if (mRadiance)
+        out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mRadiance->getPixelFormat());
+    if (mIndirect)
+        out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mIndirect->getPixelFormat());
     out.bytes = bytes;
     out.emissiveFormat = mEmissiveFormatName;
+    out.radianceFormat = mRadianceFormatName;
+    out.lightBudgetTexels = mLightBudget;
+    out.relitLastFrame = mRelitLastFrame;
+    out.relitTexelsLastFrame = mRelitTexelsLastFrame;
+    out.relights = mRelights;
+    out.invalidRadiance = mInvalidRadiance;
+    out.lightsDropped = mLightsDropped;
+    out.indirectBudgetTexels = mIndirectBudget;
+    out.indirectLastFrame = mIndirectLastFrame;
+    out.indirectTexelsLastFrame = mIndirectTexelsLastFrame;
+    out.indirectRelights = mIndirectRelights;
+    out.invalidIndirect = mInvalidIndirect;
+    out.indirectOn = mIndirectOnLastRelight;
+    out.lightMs = mLightMs;
     out.instancesResident = 0u;
     for (const InstanceRec &i : mInstances) out.instancesResident += i.cardCount ? 1u : 0u;
     out.cardsResident = unsigned(mCards.size());
@@ -1317,7 +1773,34 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
         tk->unmap();
         tm->destroyAsyncTextureTicket(tk);
     }
+    // ...and the SIXTH layer, the lit card's radiance.
+    float rad[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (mRadiance) {
+        Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(
+            1u, 1u, 1u, Ogre::TextureTypes::Type2D, mRadiance->getPixelFormat());
+        Ogre::TextureBox src = mRadiance->getEmptyBox(0);
+        src.x = tx; src.y = ty; src.width = 1u; src.height = 1u;
+        tk->download(mRadiance, 0, true, &src, true);
+        const Ogre::TextureBox box = tk->map(0);
+        decodeTexel(mRadiance->getPixelFormat(), box.at(0, 0, 0), rad);
+        tk->unmap();
+        tm->destroyAsyncTextureTicket(tk);
+    }
+    float ind[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (mIndirect && rec.indirectValid) {
+        Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(
+            1u, 1u, 1u, Ogre::TextureTypes::Type2D, mIndirect->getPixelFormat());
+        Ogre::TextureBox src = mIndirect->getEmptyBox(0);
+        src.x = tx; src.y = ty; src.width = 1u; src.height = 1u;
+        tk->download(mIndirect, 0, true, &src, true);
+        const Ogre::TextureBox box = tk->map(0);
+        decodeTexel(mIndirect->getPixelFormat(), box.at(0, 0, 0), ind);
+        tk->unmap();
+        tm->destroyAsyncTextureTicket(tk);
+    }
     for (int k = 0; k < 3; ++k) {
+        out.radiance[k] = rad[k];
+        out.indirect[k] = ind[k];
         out.albedo[k] = vals[unsigned(CardLayer::Albedo)][k];
         // The normal is stored *0.5+0.5, as the prepass writes it.
         out.normal[k] = vals[unsigned(CardLayer::Normal)][k] * 2.0f - 1.0f;
@@ -1376,22 +1859,26 @@ bool SurfaceCache::dump(const std::string &prefix, std::string &err) const {
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     rs->flushCommands();
     Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
-    const char *name[kCardLayers] = { "albedo", "normal", "depth", "emissive", "shadowrough" };
+    // The five captured layers and the sixth, the radiance.
+    const char *name[kCardLayers + 1] = { "albedo", "normal", "depth", "emissive", "shadowrough",
+                                          "radiance" };
     // `scale` turns a layer into something an eye can read: the depth is metres
-    // and the emissive is radiance, so both are divided by a stated number
-    // rather than clipped silently.
-    const float scale[kCardLayers] = { 1.0f, 1.0f, 0.2f, 0.25f, 1.0f };
+    // and the emissive and the radiance are radiance, so they are divided by a
+    // stated number rather than clipped silently.
+    const float scale[kCardLayers + 1] = { 1.0f, 1.0f, 0.2f, 0.25f, 1.0f, 0.25f };
     std::vector<unsigned char> rgba(size_t(kCardAtlasSize) * kCardAtlasSize * 4u);
-    for (unsigned i = 0; i < kCardLayers; ++i) {
+    for (unsigned i = 0; i < kCardLayers + 1u; ++i) {
+        Ogre::TextureGpu *layer = i < kCardLayers ? mAtlas[i] : mRadiance;
+        if (!layer) continue;
         Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(
             kCardAtlasSize, kCardAtlasSize, 1u, Ogre::TextureTypes::Type2D,
-            mAtlas[i]->getPixelFormat());
-        tk->download(mAtlas[i], 0, true, nullptr, true);
+            layer->getPixelFormat());
+        tk->download(layer, 0, true, nullptr, true);
         const Ogre::TextureBox box = tk->map(0);
         for (unsigned y = 0; y < kCardAtlasSize; ++y)
             for (unsigned x = 0; x < kCardAtlasSize; ++x) {
                 float px[4];
-                decodeTexel(mAtlas[i]->getPixelFormat(), box.at(x, y, 0), px);
+                decodeTexel(layer->getPixelFormat(), box.at(x, y, 0), px);
                 const float vv[4] = { px[0] * scale[i], px[1] * scale[i], px[2] * scale[i], 1.0f };
                 unsigned char *o = &rgba[(size_t(y) * kCardAtlasSize + x) * 4u];
                 for (int k = 0; k < 4; ++k)
