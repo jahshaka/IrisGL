@@ -105,6 +105,9 @@ void OgreScene::applyVctEnvironment() {
 
 void OgreScene::applyCascadeEnvironment(Ogre::VctLighting *lighting) {
     if (!lighting) return;
+    // THE CLOUD LAYER'S SHADOW ON THE INJECTION (CLOUDS-2D-2), bound or cleared
+    // on the shared job for THIS volume, beside its environment.
+    bindCloudInjection(lighting);
     JAH_TRY {
         Ogre::TextureGpu *cube = (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
         lighting->setEnvironment(cube,
@@ -1884,6 +1887,19 @@ void OgreScene::updateSurfaceCache() {
         // world space, unculled — the frame's global list is culled against
         // the frame's cameras, and a card lights surfaces off screen.
         view.lights.push_back(lit->second.light);
+    }
+    // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected
+    // with, and its serial in the radiance signature — a layer change or a
+    // scroll capture relights the resident cards (and recaptures none).
+    radianceSig ^= mCloudGiSerial;
+    radianceSig *= 1099511628211ull;
+    if (mCloudGiState.field) {
+        const FogHlmsListener::CloudShadowState &cs = mCloudGiState;
+        view.cloudField = cs.field;
+        view.cloudMap[0] = cs.invTile;  view.cloudMap[1] = cs.strength;
+        view.cloudMap[2] = cs.scroll[0]; view.cloudMap[3] = cs.scroll[1];
+        view.cloudSun[0] = cs.sunThrow[0]; view.cloudSun[1] = cs.sunThrow[1];
+        view.cloudSun[2] = cs.altitude;    view.cloudSun[3] = cs.invMuSun;
     }
     view.radianceSerial = radianceSig;
     view.lightBudgetTexels = facts.cardLightTexels;

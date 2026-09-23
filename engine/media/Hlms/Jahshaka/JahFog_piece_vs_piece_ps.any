@@ -104,6 +104,29 @@
 								// channel, and it is pinned to 1.0 while a probe grid is
 								// bound because it also scales the probe samples.
 	@end
+	@property( jah_cloud_shadow )
+		// THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1), the LAST members, so
+		// everything before them is padded when its own feature is absent --
+		// the same declare-everything-before-you rule as the blocks above.
+		@property( !jah_shader_clock && !irradiance_field && !jah_env )
+			@property( !hlms_fog )
+				float4 jahCloudPadFogColour;
+				float4 jahCloudPadFogHeight;
+			@end
+			float4 jahCloudPadClock;
+		@end
+		@property( !irradiance_field && !jah_env )
+			float4 jahCloudPadIfd;
+		@end
+		@property( !jah_env )
+			float4 jahCloudPadEnv;
+		@end
+		float4 jahCloudInvView0;	// the pass camera's view-to-world transform, rows
+		float4 jahCloudInvView1;	// x, y and z (the pixel shader has only the
+		float4 jahCloudInvView2;	// view-space position of the fragment)
+		float4 jahCloudMap;			// x = 1 / tile (1/m), y = shadow strength, zw = scroll (m)
+		float4 jahCloudSun;			// xy = toSun.xz / toSun.y, z = altitude (m), w = 1 / mu_s
+	@end
 @end
 
 // THE ENVIRONMENT CUBE (PHOTON-ENV-1; first claimed by ogre-patch 0048, lane
@@ -129,7 +152,7 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_env || jah_probe_gather )
+@property( jah_env || jah_probe_gather || jah_cloud_shadow )
 @piece( custom_ps_uniformDeclaration )
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
@@ -145,7 +168,72 @@
 	@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 		vulkan_layout( ogre_t@value(jahProbeIrradiance) ) uniform texture2D jahProbeIrradiance;
 	@end
+	// THE CLOUD FIELD (CLOUDS-2D-1): the layer's vertical optical depth, one
+	// tile of it, wrapping. Declared wherever the pass claimed its slot; read
+	// only by the shadow term below, whose guard is narrower (a prepass or a
+	// material that receives no shadow declares it and never reads it).
+	@property( jah_cloud_shadow )
+		vulkan_layout( ogre_t@value(jahCloudField) ) uniform texture2D jahCloudField;
+		@property( syntax == glslvk )
+			layout( ogre_s@value(jahCloudField) ) uniform sampler jahCloudSampler;
+		@end
+	@end
 @end
+@end
+
+// THE CLOUD LAYER'S SHADOW ON THE GROUND (CLOUDS-2D-1; SPECS/CLOUDS_ASSESSMENT.md
+// section 3.3). The sun's term is multiplied by the fraction of its beam that
+// crosses the cloud sheet unscattered on the way to this pixel: the sun ray
+// from the pixel meets the sheet (altitude jahCloudSun.z) at the pixel's world
+// xz thrown towards the sun by (altitude - y) / tan(elevation), and there the
+// beam crosses exp( -tau / mu_s ) of it -- the SAME field and the same
+// Beer-Lambert slab the layer in the sky is drawn with.
+//
+// THE HOOK is the sun's own shadow factor: upstream multiplies the FIRST
+// shadow-casting directional light's term by the piece named
+// DarkenWithShadowFirstLight (Pbs/Any/ShadowMapping_piece_ps.any), and this
+// library folder is parsed after that one, so the piece is replaced here by
+// the same factor times the cloud's. That is Terra's pattern (its shadow map
+// scales the same term) without claiming custom_ps_preLights, which the
+// material graph's generated pieces own per datablock and a second
+// definition of would fail to compile. The guard is the original piece's
+// guard plus our pass property, so a pass with no cloud layer generates
+// exactly the source it generated before this lane.
+//
+// A MATERIAL THAT RECEIVES NO SHADOWS is shaded all the same (the fix round's
+// F2): upstream leaves the first-light piece undefined for it, so the same
+// multiply is defined there on its own -- the sheet's transmittance is what it
+// is, whatever the material says about shadow maps. And a SUN THAT CASTS NO
+// SHADOW is drawn in upstream's non-caster directional loop, whose factor is
+// the fork's custom_ps_darkenNonCasterDirectional hook: every directional light
+// without a shadow map crosses the sheet along the SUN's throw (the one sun is
+// what the map is thrown for; a second directional is an approximation). The
+// // ambient is NOT scaled: the sheet is
+// kilometres up, so the sky a ground point sees through it varies over a
+// kernel as wide as the altitude -- uniform across any scene -- and that
+// uniform part is already in the ambient, because the environment capture
+// photographs the sheet.
+@property( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+@piece( custom_ps_functions )
+#define JAH_CLOUD_TAU( uv ) OGRE_SampleLevel( jahCloudField, jahCloudSampler, uv, 0.0 ).x
+@insertpiece( JahCloudShadow )
+midf jahCloudSunTransmittance( float3 viewPos )
+{
+	const float3 jahWp = float3( dot( passBuf.jahCloudInvView0.xyz, viewPos ) + passBuf.jahCloudInvView0.w,
+								 dot( passBuf.jahCloudInvView1.xyz, viewPos ) + passBuf.jahCloudInvView1.w,
+								 dot( passBuf.jahCloudInvView2.xyz, viewPos ) + passBuf.jahCloudInvView2.w );
+	return midf_c( jahCloudTransmittance( jahWp, passBuf.jahCloudMap, passBuf.jahCloudSun ) );
+}
+@end
+@property( hlms_lights_directional )
+	@property( receive_shadows && hlms_num_shadow_map_lights )
+		@undefpiece( DarkenWithShadowFirstLight )
+		@piece( DarkenWithShadowFirstLight )* ( fShadow * jahCloudSunTransmittance( inPs.pos.xyz ) )@end
+	@else
+		@piece( DarkenWithShadowFirstLight )* jahCloudSunTransmittance( inPs.pos.xyz )@end
+	@end
+@end
+@piece( custom_ps_darkenNonCasterDirectional )* jahCloudSunTransmittance( inPs.pos.xyz )@end
 @end
 
 @property( hlms_fog )

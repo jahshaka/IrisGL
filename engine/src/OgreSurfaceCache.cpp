@@ -1095,7 +1095,7 @@ constexpr unsigned kRelightFloats = 20u;
 /// The chain's parameter block (CardGiParams in the shader): chainInvRes[8],
 /// chainFromPrev[14], the volume's origin and inverse size, the counts, the
 /// environment's gain and mips, its nine SH coefficients — 35 vec4.
-constexpr unsigned kGiParamFloats = 35u * 4u;
+constexpr unsigned kGiParamFloats = 37u * 4u;   // ... + the cloud shadow's map and sun (CLOUDS-2D-2)
 constexpr unsigned kMaxCardCascades = 8u;
 constexpr unsigned kLightFloats = 20u;
 }   // namespace
@@ -1105,6 +1105,8 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
     mRelightMode.clear();
     mLights = view.lights;
     mVct = view.vct;
+    mCloudField = view.cloudField;
+    for (int k = 0; k < 4; ++k) { mCloudMap[k] = view.cloudMap[k]; mCloudSun[k] = view.cloudSun[k]; }
     // THE RADIANCE SIGNATURE: a light write that changed what a card's
     // DIRECT radiance depends on relights every resident card and recaptures
     // none. A write that also moved a shadow queued the cards for capture
@@ -1345,6 +1347,12 @@ void SurfaceCache::relightCards() {
             g[106u + 4u * k] = sh[3u * k + 2u];
         }
     }
+    // THE CLOUD SHADOW (CLOUDS-2D-2): the pixel's own map and throw, the last
+    // two vec4s of the block (JahCardLight_cs.glsl's CardGiParams).
+    for (int k = 0; k < 4; ++k) {
+        mGiCpu[140u + unsigned(k)] = mCloudMap[k];
+        mGiCpu[144u + unsigned(k)] = mCloudSun[k];
+    }
     mIndirectOnLastRelight = numCascades > 0u;
     if (!mGiBuffer)
         mGiBuffer = vao->createUavBuffer(kGiParamFloats / 4u, 16u, 0, mGiCpu.data(), false);
@@ -1377,10 +1385,23 @@ void SurfaceCache::relightCards() {
     }
     const unsigned kinds = aniso ? 4u : 1u;
     const unsigned vctUnits = numCascades ? kinds * numCascades + (envCube ? 1u : 0u) : 0u;
+    // THE CLOUD FIELD, the LAST texture unit (after the chain and the
+    // environment), with the field's own wrapped sampler.
+    const Ogre::HlmsSamplerblock *cloudWrap = mCloudField
+        ? detail::FogHlmsListener::acquireWrapSampler(root.getHlmsManager()) : nullptr;
+    const bool cloud = mCloudField && cloudWrap;
+    if (mLightJob->getProperty("jah_cloud_shadow") != (cloud ? 1 : 0))
+        mLightJob->setProperty("jah_cloud_shadow", cloud ? 1 : 0);
     const unsigned order[kCardLayers] = { unsigned(CardLayer::Albedo), unsigned(CardLayer::Normal),
                                           unsigned(CardLayer::Depth), unsigned(CardLayer::Emissive),
                                           unsigned(CardLayer::ShadowRough) };
-    mLightJob->setNumTexUnits(Ogre::uint8(kCardLayers + vctUnits));
+    mLightJob->setNumTexUnits(Ogre::uint8(kCardLayers + vctUnits + (cloud ? 1u : 0u)));
+    if (cloud) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot(
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+        slot.texture = mCloudField;
+        mLightJob->setTexture(Ogre::uint8(kCardLayers + vctUnits), slot, cloudWrap);
+    }
     for (unsigned i = 0; i < kCardLayers; ++i) {
         Ogre::DescriptorSetTexture2::TextureSlot slot(
             Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());

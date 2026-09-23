@@ -250,6 +250,63 @@ struct SkyRealistic
 	static SkyRealistic defaults();
 };
 
+/// THE 2D CLOUD LAYER (CLOUDS-2D-1; SPECS/CLOUDS_ASSESSMENT.md option C0,
+/// HDRP's Cloud Layer as the model). ONE sheet of cloud at a fixed altitude,
+/// drawn by the renderer OVER the colour, gradient and realistic skies and
+/// captured with them into the scene's environment (the Sky Light's ambient
+/// and every reflection), with a top-down transmittance map that shades the
+/// sun's light on the ground. It is not a volume: there is no parallax inside
+/// it and the camera never enters it (the volumetric program is parked,
+/// SPECS/VOLUMETRIC_CLOUDS_SPEC.md). An equirectangular or cubemap sky carries
+/// its own painted clouds and the layer is not drawn over it.
+///
+/// OFF BY DEFAULT, and a scene whose layer is at the default writes NO
+/// `clouds` key at all (SceneWriter) — so no shipped sample, fixture or
+/// selftest pose changes by one byte until an author turns it on.
+struct CloudLayer
+{
+	/// The layer is drawn, captured and casts its shadow only while this is on.
+	bool enabled = false;
+	/// How much of the sky the cloud field covers, 0 (clear) .. 1 (overcast).
+	float coverage = 0.5f;
+	/// Optical thickness multiplier, 0 .. 4: how opaque a covered patch is,
+	/// and therefore how dark its underside and its shadow are.
+	float density = 1.0f;
+	/// Wind speed in metres per SECOND OF SCENE TIME (the renderer's fixed
+	/// clock — a paused scene holds its clouds still), 0 .. 100.
+	float speed = 10.0f;
+	/// The heading the wind blows TOWARDS, degrees about +Y from +X towards
+	/// -Z (a compass that turns the way the editor's yaw does), 0 .. 360.
+	float direction = 0.0f;
+	/// The layer's altitude in metres, 500 .. 8000 — THE ALTITUDE LOOK: how
+	/// the sheet converges to the horizon over a curved earth (a low layer
+	/// fills the sky, a high one stays overhead), and how far the ground
+	/// shadow is thrown sideways by a low sun.
+	float altitude = 2000.0f;
+	/// How strongly the layer shades the sun's light on the ground, 0 .. 1
+	/// (1 = the transmittance the layer actually has).
+	float shadow = 1.0f;
+	/// An optional WEATHER MAP — an image asset guid whose red channel scales
+	/// the coverage over one tile of the layer (white = clouds allowed,
+	/// black = clear). Empty = none.
+	QString weatherMapGuid;
+
+	bool operator==(const CloudLayer &o) const {
+		return enabled == o.enabled && coverage == o.coverage && density == o.density &&
+		       speed == o.speed && direction == o.direction && altitude == o.altitude &&
+		       shadow == o.shadow && weatherMapGuid == o.weatherMapGuid;
+	}
+	bool operator!=(const CloudLayer &o) const { return !(*this == o); }
+
+	/// Every dial held inside its band (the verb, the reader and the panel
+	/// share this one clamp).
+	static CloudLayer clamped(CloudLayer c);
+	/// The file's form. `fromJson` gives an ABSENT key the constructor's value
+	/// (the reader-defaults law).
+	QJsonObject toJson() const;
+	static CloudLayer fromJson(const QJsonObject &o);
+};
+
 class Scene: public QEnableSharedFromThis<Scene>
 {
     QSharedPointer<Environment> environment;
@@ -313,6 +370,13 @@ public:
     // Two fields the renderer never read: the engine clears to the SKY, and
     // whether there is a sky is `skyType`. Neither was ever serialized.)
     Texture2DPtr skyTexture;
+    /// THE CLOUD LAYER (CloudLayer above). Serialized as the scene's `clouds`
+    /// block — and only when it differs from the default.
+    CloudLayer clouds;
+    /// The layer's weather map, RESOLVED from `clouds.weatherMapGuid` by
+    /// whoever set the guid (the reader, world.clouds). Runtime only, like
+    /// `skyTexture`: the guid is the fact, this is its loaded pixels.
+    Texture2DPtr cloudWeatherMap;
     QColor skyColor;
 	QColor gradientTop;
 	QColor gradientMid;

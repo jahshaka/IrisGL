@@ -1,0 +1,80 @@
+// THE CLOUD LAYER'S PROGRAMS (CLOUDS-2D-1). In a *.program file so that every
+// material that names them -- JahClouds.material -- finds them defined,
+// whatever order the archive lists the material files in.
+//
+// GLSL + Vulkan only, like every other program we own in this folder.
+
+fragment_program Jahshaka/CloudLayer_ps_GLSL glsl
+{
+	source JahCloudLayer_ps.glsl
+	// JahCloudLayer.glsl, the one copy of the sheet's geometry.
+	enable_include_header true
+	default_params
+	{
+		param_named cloudField int 0
+	}
+}
+fragment_program Jahshaka/CloudLayer_ps_VK glslvk
+{
+	source JahCloudLayer_ps.glsl
+	// JahCloudLayer.glsl, the one copy of the sheet's geometry.
+	enable_include_header true
+}
+fragment_program Jahshaka/CloudLayer_ps unified
+{
+	delegate Jahshaka/CloudLayer_ps_GLSL
+	delegate Jahshaka/CloudLayer_ps_VK
+	// Per CAMERA: the sheet is met where THIS camera's ray crosses it. The
+	// rest is pushed by OgreScene::applyCloudLayer (no param_named defaults in
+	// a program_ref: under Vulkan they are applied before the constant table
+	// exists and break the pass -- DOCS/traps/ENGINE.md).
+	default_params
+	{
+		param_named_auto	cameraPos	camera_position
+	}
+}
+
+fragment_program Jahshaka/SunDiscClouded_ps_GLSL glsl
+{
+	source JahSunDiscClouded_ps.glsl
+	// JahCloudLayer.glsl, the one copy of the sheet's geometry.
+	enable_include_header true
+	default_params
+	{
+		param_named cloudField int 0
+	}
+}
+fragment_program Jahshaka/SunDiscClouded_ps_VK glslvk
+{
+	source JahSunDiscClouded_ps.glsl
+	// JahCloudLayer.glsl, the one copy of the sheet's geometry.
+	enable_include_header true
+}
+fragment_program Jahshaka/SunDiscClouded_ps unified
+{
+	delegate Jahshaka/SunDiscClouded_ps_GLSL
+	delegate Jahshaka/SunDiscClouded_ps_VK
+	default_params
+	{
+		param_named_auto	cameraPos	camera_position
+	}
+}
+
+fragment_program Jahshaka/CloudBake_ps_GLSL glsl
+{
+	source JahCloudBake_ps.glsl
+	default_params
+	{
+		param_named cloudNoise int 0
+		param_named cloudWeather int 1
+	}
+}
+fragment_program Jahshaka/CloudBake_ps_VK glslvk
+{
+	source JahCloudBake_ps.glsl
+}
+fragment_program Jahshaka/CloudBake_ps unified
+{
+	delegate Jahshaka/CloudBake_ps_GLSL
+	delegate Jahshaka/CloudBake_ps_VK
+}

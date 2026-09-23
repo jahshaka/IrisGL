@@ -46,6 +46,39 @@ const Ogre::HlmsSamplerblock *FogHlmsListener::sEnvSampler     = nullptr;     //
 const Ogre::HlmsSamplerblock *FogHlmsListener::sGatherSampler  = nullptr;     // render thread only
 std::map<const Ogre::SceneManager *, Ogre::TextureGpu *>
                               FogHlmsListener::sProbeGather;                  // render thread only
+std::map<const Ogre::SceneManager *, FogHlmsListener::CloudShadowState>
+                              FogHlmsListener::sCloudShadow;                  // render thread only
+const Ogre::HlmsSamplerblock *FogHlmsListener::sCloudSampler = nullptr;       // render thread only
+
+namespace {
+// THE EXTRA PASS TEXTURES, IN THEIR ONE FIXED ORDER (the sky's environment,
+// then the gather's irradiance, then the cloud field — CLOUDS-2D-1). Three
+// places must agree about it: the count (getNumExtraPassTextures), the
+// registers (propertiesMergedPreGenerationStep) and the bindings
+// (hlmsTypeChanged). They all walk THIS table, so a fourth slot is one row
+// here and one texture in hlmsTypeChanged's list, never three hand-kept
+// sequences of arithmetic.
+struct ExtraPassSlot {
+    const char *property = nullptr;   // the PASS property that claims the slot
+    const char *reg = nullptr;        // the register name the piece declares it at
+};
+constexpr ExtraPassSlot kExtraPassSlots[] = {
+    { "jah_env",          "jahEnvCube" },
+    { "jah_probe_gather", "jahProbeIrradiance" },
+    { "jah_cloud_shadow", "jahCloudField" },
+};
+constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
+/// The slot's property as a hashed IdString, hashed once (these run per
+/// renderable hash, not per frame).
+const Ogre::IdString &extraSlotProperty(size_t i) {
+    static const Ogre::IdString ids[kNumExtraPassSlots] = {
+        Ogre::IdString(kExtraPassSlots[0].property),
+        Ogre::IdString(kExtraPassSlots[1].property),
+        Ogre::IdString(kExtraPassSlots[2].property),
+    };
+    return ids[i];
+}
+}   // namespace
 
 FogHlmsListener gFogListener;
 
@@ -107,24 +140,23 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
     // set, and `jah_env` is a PASS property set in preparePassHash,
     // so the same property set always yields the same shader.
     {
-        static const Ogre::IdString kSkyEnvProbe("jah_env");
-        static const Ogre::IdString kProbeGather("jah_probe_gather");
         static const Ogre::IdString kSet0End("set0_texture_slot_end");
         static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
         if (!hlms->_getProperty(tid, kShadowCaster)) {
-            const bool sky = hlms->_getProperty(tid, kSkyEnvProbe) != 0;
-            const bool gather = hlms->_getProperty(tid, kProbeGather) != 0;
-            const Ogre::int32 extras = (sky ? 1 : 0) + (gather ? 1 : 0);
+            bool claimed[kNumExtraPassSlots];
+            Ogre::int32 extras = 0;
+            for (size_t i = 0; i < kNumExtraPassSlots; ++i) {
+                claimed[i] = hlms->_getProperty(tid, extraSlotProperty(i)) != 0;
+                if (claimed[i]) ++extras;
+            }
             // The extras are the LAST registers of set 0 (HlmsPbs reserved
             // them with `texUnit += getNumExtraPassTextures()` immediately
-            // before writing set0_texture_slot_end), in the fixed order that
-            // function states: sky, then gather.
+            // before writing set0_texture_slot_end), in kExtraPassSlots' order.
             Ogre::int32 slot = hlms->_getProperty(tid, kSet0End) - extras;
-            if (slot >= 0) {
-                if (sky) hlms->_setTextureReg(tid, Ogre::PixelShader, "jahEnvCube", slot++);
-                if (gather)
-                    hlms->_setTextureReg(tid, Ogre::PixelShader, "jahProbeIrradiance", slot++);
-            }
+            if (slot >= 0)
+                for (size_t i = 0; i < kNumExtraPassSlots; ++i)
+                    if (claimed[i])
+                        hlms->_setTextureReg(tid, Ogre::PixelShader, kExtraPassSlots[i].reg, slot++);
         }
     }
     static const Ogre::IdString kIrradianceField("irradiance_field");
@@ -160,16 +192,13 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
 // is what keeps the default scene's selftest hash where it is.
 Ogre::uint16 FogHlmsListener::getNumExtraPassTextures(const Ogre::HlmsPropertyVec &properties,
                                                       bool casterPass) const {
-    static const Ogre::IdString kSkyEnvProbe("jah_env");
-    static const Ogre::IdString kProbeGather("jah_probe_gather");
     if (casterPass) return 0u;
-    // TWO POSSIBLE EXTRAS, AND THE ORDER IS FIXED: the sky's cube first, the
-    // gather's irradiance second. Three places must agree about it — this
-    // count, the registers claimed in propertiesMergedPreGenerationStep, and
-    // the bindings emitted in hlmsTypeChanged — so it is stated once, here.
+    // THE EXTRAS AND THEIR ORDER are kExtraPassSlots' (the top of this file):
+    // this count, the registers claimed in propertiesMergedPreGenerationStep
+    // and the bindings emitted in hlmsTypeChanged all walk that one table.
     Ogre::uint16 n = 0u;
-    if (Ogre::Hlms::getProperty(properties, kSkyEnvProbe) != 0) ++n;
-    if (Ogre::Hlms::getProperty(properties, kProbeGather) != 0) ++n;
+    for (size_t i = 0; i < kNumExtraPassSlots; ++i)
+        if (Ogre::Hlms::getProperty(properties, extraSlotProperty(i)) != 0) ++n;
     return n;
 }
 
@@ -181,17 +210,21 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
     // the datablock's creator: its own pass's copy, never another host's.
     if (casterPass || !commandBuffer || !datablock || !datablock->getCreator()) return;
     const PassBinds &pb = sPass[datablock->getCreator()->getType()];
+    // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance,
+    // the cloud field. Each pair was set together in preparePassHash with its
+    // property, or not at all.
+    const struct { Ogre::TextureGpu *tex; const Ogre::HlmsSamplerblock *sampler; } bound[] = {
+        { pb.skyCube, pb.skySampler },
+        { pb.probeGather, pb.probeGatherSampler },
+        { pb.cloudField, pb.cloudSampler },
+    };
+    static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
+                  "one binding per extra pass slot, in kExtraPassSlots' order");
     size_t unit = texUnit;
-    if (pb.skyCube && pb.skySampler) {
+    for (const auto &b : bound) {
+        if (!b.tex || !b.sampler) continue;
         *commandBuffer->addCommand<Ogre::CbTexture>() =
-            Ogre::CbTexture(Ogre::uint16(unit), pb.skyCube, pb.skySampler);
-        ++unit;
-    }
-    // GATHER-0's irradiance, second in the fixed order (see
-    // getNumExtraPassTextures).
-    if (pb.probeGather && pb.probeGatherSampler) {
-        *commandBuffer->addCommand<Ogre::CbTexture>() =
-            Ogre::CbTexture(Ogre::uint16(unit), pb.probeGather, pb.probeGatherSampler);
+            Ogre::CbTexture(Ogre::uint16(unit), b.tex, b.sampler);
         ++unit;
     }
 }
@@ -312,6 +345,23 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             }
         }
     }
+    // THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1) — the same three decisions
+    // as the two slots above, set together or not at all. `sCloudShadow` is
+    // empty in every scene without a layer, so this is one map test per colour
+    // pass and nothing else anywhere.
+    pb.cloudField = nullptr;
+    pb.cloudSampler = nullptr;
+    if (hlms && !casterPass && sceneManager && !sCloudShadow.empty()) {
+        const CloudShadowState cloud = cloudShadow(sceneManager);
+        if (cloud.field) {
+            const Ogre::HlmsSamplerblock *wrap = acquireWrapSampler(hlms->getHlmsManager());
+            if (wrap) {
+                pb.cloudField = cloud.field;
+                pb.cloudSampler = wrap;
+                hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_cloud_shadow", 1);
+            }
+        }
+    }
     if (casterPass || !shadowNode || !hlms) return;
     // ONLY WHERE AN ASSIGNMENT CHANGED (clean-2 lane, 2026-09-13). A node can
     // only ENTER the broken state when setLightFixedToShadowMap is called on
@@ -403,10 +453,20 @@ void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
     // ...and the sky cube, for the same recycled-pointer reason. The texture it
     // names dies with the scene.
     sSkyEnv.erase(sm);
-    for (PassBinds &pb : sPass) {
-        pb.skyCube = nullptr;
-        pb.skySampler = nullptr;
-    }
+    // Every host's pass copy, whole (its textures may name this scene's).
+    for (PassBinds &pb : sPass) pb = PassBinds();
+    sCloudShadow.erase(sm);
+}
+
+void FogHlmsListener::setCloudShadow(const Ogre::SceneManager *sm, const CloudShadowState &state) {
+    if (!sm) return;
+    if (!state.field || state.strength <= 0.0f) { sCloudShadow.erase(sm); return; }
+    sCloudShadow[sm] = state;
+}
+
+FogHlmsListener::CloudShadowState FogHlmsListener::cloudShadow(const Ogre::SceneManager *sm) {
+    auto it = sCloudShadow.find(sm);
+    return it == sCloudShadow.end() ? CloudShadowState() : it->second;
 }
 
 void FogHlmsListener::setSceneTime(const Ogre::SceneManager *sm, float seconds) {
@@ -448,6 +508,19 @@ FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
 // releaseSamplers. A manager other than the one holding the references (which
 // only a missed release could leave) is answered by releasing the old pair
 // first rather than by trusting a pointer compare.
+const Ogre::HlmsSamplerblock *FogHlmsListener::acquireWrapSampler(Ogre::HlmsManager *mgr) {
+    if (!mgr) return nullptr;
+    if (sSamplerMgr && sSamplerMgr != mgr) releaseSamplers();
+    sSamplerMgr = mgr;
+    if (!sCloudSampler) {
+        Ogre::HlmsSamplerblock ref;
+        ref.setFiltering(Ogre::TFO_TRILINEAR);
+        ref.setAddressingMode(Ogre::TAM_WRAP);
+        sCloudSampler = mgr->getSamplerblock(ref);
+    }
+    return sCloudSampler;
+}
+
 const Ogre::HlmsSamplerblock *FogHlmsListener::acquireSampler(Ogre::HlmsManager *mgr,
                                                               bool trilinear) {
     if (!mgr) return nullptr;
@@ -467,9 +540,10 @@ void FogHlmsListener::releaseSamplers() {
     if (sSamplerMgr) {
         if (sEnvSampler)    sSamplerMgr->destroySamplerblock(sEnvSampler);
         if (sGatherSampler) sSamplerMgr->destroySamplerblock(sGatherSampler);
+        if (sCloudSampler)  sSamplerMgr->destroySamplerblock(sCloudSampler);
     }
     sSamplerMgr = nullptr;
-    sEnvSampler = sGatherSampler = nullptr;
+    sEnvSampler = sGatherSampler = sCloudSampler = nullptr;
     for (PassBinds &pb : sPass) pb = PassBinds();
 }
 
@@ -494,7 +568,9 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // collide with our first float4. That correction depended on HlmsPbs
     // filling the field's block BEFORE calling this listener; the size is
     // simply right now.
-    return 20u * sizeof(float);
+    // Plus the cloud layer's ground shadow (CLOUDS-2D-1): five float4, the
+    // last members, declared only by a pass that claimed the cloud field.
+    return 40u * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool, bool,
@@ -547,6 +623,33 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = sky.cube ? sky.gain[1] : 0.0f;
     *passBufferPtr++ = sky.cube ? sky.gain[2] : 0.0f;
     *passBufferPtr++ = sky.cube ? sky.numMipmaps : 1.0f;
+    // THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1): the pass camera's
+    // view-to-world rows (the pixel shader holds only the view-space position),
+    // then the field's mapping and the sun's throw. Zeros without a layer —
+    // no shader of such a pass declares them.
+    {
+        const CloudShadowState cloud =
+            sCloudShadow.empty() ? CloudShadowState() : cloudShadow(sceneManager);
+        const Ogre::Camera *cam = sceneManager->getCamerasInProgress().renderingCamera;
+        if (cloud.field && cam) {
+            // The same view matrix HlmsPbs::preparePassBuffer wrote into
+            // passBuf.view for this pass (OgreHlmsPbs.cpp: getVrViewMatrix(0)),
+            // inverted: `inPs.pos` is in THAT space.
+            const Ogre::Matrix4 inv = cam->getVrViewMatrix(0).inverseAffine();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) *passBufferPtr++ = float(inv[r][c]);
+            *passBufferPtr++ = cloud.invTile;
+            *passBufferPtr++ = cloud.strength;
+            *passBufferPtr++ = cloud.scroll[0];
+            *passBufferPtr++ = cloud.scroll[1];
+            *passBufferPtr++ = cloud.sunThrow[0];
+            *passBufferPtr++ = cloud.sunThrow[1];
+            *passBufferPtr++ = cloud.altitude;
+            *passBufferPtr++ = cloud.invMuSun;
+        } else {
+            for (int i = 0; i < 20; ++i) *passBufferPtr++ = 0.0f;
+        }
+    }
     return passBufferPtr;
 }
 

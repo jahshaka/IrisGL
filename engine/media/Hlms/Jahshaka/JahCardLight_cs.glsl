@@ -76,6 +76,7 @@ vulkan_layout( ogre_t2 ) uniform texture2D cardDepth;
 vulkan_layout( ogre_t3 ) uniform texture2D cardEmissive;
 vulkan_layout( ogre_t4 ) uniform texture2D cardShadowRough;
 
+@set( jahCloudUnit, 5 )
 @property( hlms_num_vct_cascades )
 	@pset( vctTexUnit, 5 )
 	@psub( uses_array_bindings, hlms_num_vct_cascades, 1 )
@@ -92,7 +93,15 @@ vulkan_layout( ogre_t4 ) uniform texture2D cardShadowRough;
 	@end
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(vctTexUnit) ) uniform textureCube envCube;
+		@add( vctTexUnit, 1 )
 	@end
+	@set( jahCloudUnit, vctTexUnit )
+@end
+// THE CLOUD LAYER'S FIELD (CLOUDS-2D-2), the last unit: the host binds it, with
+// its wrapped sampler, only while a 2D cloud layer shades the sun.
+@property( jah_cloud_shadow )
+	vulkan_layout( ogre_t@value(jahCloudUnit) ) uniform texture2D cloudField;
+	vulkan( layout( ogre_s@value(jahCloudUnit) ) uniform sampler cloudSmp );
 @end
 
 // ONE CARD TO RELIGHT. rect = (atlasX, atlasY, size, mode); camPos = the
@@ -147,6 +156,8 @@ struct CardGiParams
 	vec4 counts;			// x = cascades, y = the decode multiplier
 	vec4 envGainMips;		// xyz = the Sky Light's gain on the cube, w = its mips
 	vec4 envSh[9];			// the environment's nine SH coefficients, world axes
+	vec4 cloudMap;			// the cloud shadow: 1 / tile, strength, scroll xz (CLOUDS-2D-2)
+	vec4 cloudSun;			// ...and the sun's throw xz, the altitude, 1 / mu_s
 };
 layout( std430, ogre_U2 ) readonly restrict buffer giLayout { CardGiParams gp; };
 
@@ -254,6 +265,10 @@ vec3 jahCardRound( vec3 v )
 
 @insertpiece( JahBrdf )
 @insertpiece( JahDiffuseAlbedo )
+@property( jah_cloud_shadow )
+	#define JAH_CLOUD_TAU( uv ) textureLod( sampler2D( cloudField, cloudSmp ), uv, 0.0 ).x
+	@insertpiece( JahCloudShadow )
+@end
 
 // BRDF_Default's diffuse at V = N (NdotV = 1, so viewScatter is 1), times NdotL.
 float jahCardDiffuse( vec3 N, vec3 L, float perceptualRoughness )
@@ -320,6 +335,12 @@ void main()
 				}
 			}
 			float visibility = l.diffuse.w > 0.5 ? sr.x : 1.0;
+@property( jah_cloud_shadow )
+			// A DIRECTIONAL LIGHT CROSSES THE CLOUD SHEET (CLOUDS-2D-2): the
+			// pixel's own factor, at this texel's world point.
+			if( type < 0.5 )
+				visibility *= jahCloudTransmittance( P, gp.cloudMap, gp.cloudSun );
+@end
 			direct += l.diffuse.xyz * ( jahCardDiffuse( N, L, perceptualRoughness ) * atten * visibility );
 		}
 

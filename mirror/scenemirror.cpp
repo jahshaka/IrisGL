@@ -515,6 +515,9 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mDecalTextures.clear();
     mTarget->setSky(SkyDesc());   // no sky — which also clears the reflection cubemap
     for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
+    if (mCloudWeatherTexture) mTarget->destroyTexture(mCloudWeatherTexture);
+    mCloudWeatherTexture = 0;
+    mCloudWeatherPath.clear();
     mSkySource = SkySource();
     mSkyDesc = SkyDesc();
     for (float &c : mSkyAmbientSh) c = 0.0f;
@@ -8013,6 +8016,7 @@ void SceneMirror::applySky(View *view)
             }
         }
     }
+    applyCloudLayer();
     // IDEMPOTENT (the assertion mirror.document_to_engine's sky-idempotency case
     // makes): an unchanged description costs one comparison inside the engine —
     // no upload, no cube rebuild, no IBL reconvolution, no workspace churn.
@@ -8028,6 +8032,79 @@ void SceneMirror::applySky(View *view)
         // for instead of being 2.3x brighter than it.
         const iris::LinearColor c = iris::linearOf(mSource->skyColor);
         view->setBackground(Colour(c.r, c.g, c.b, 1.0f));
+    }
+}
+
+// THE CLOUD LAYER (CLOUDS-2D-1), rebuilt from the document every frame like the
+// sun disc and dropped by the engine's own comparison. It rides the sky
+// description because the engine draws it as part of the sky and captures it
+// with it; it is NOT part of the SkySource signature — a cloud edit must never
+// rebuild the sky.
+//
+// DRAWN OVER THE COLOUR, GRADIENT AND REALISTIC SKIES ONLY. A photograph —
+// equirect or cubemap — has its own clouds painted in, and a sheet over it
+// would be a second weather; the World panel says so and disables the rows.
+//
+// THE SUN THAT LIGHTS THE SHEET is the scene's sun light, in the renderer's own
+// units: the light reaches a surface as colour x intensity x pi (HlmsPbs'
+// power scale — OgreScene::setLight) and a white card facing it reflects that
+// much radiance, so its IRRADIANCE is pi times that again. Times the same
+// atmosphere tint the light itself gets, so a low sun lights the sheet the
+// colour it lights the ground. Above the sheet the beam has crossed less air
+// than on the ground; the difference is not modelled (one sun, one colour).
+void SceneMirror::applyCloudLayer()
+{
+    CloudLayerDesc &cl = mSkyDesc.clouds;
+    cl = CloudLayerDesc();
+    const iris::CloudLayer &doc = mSource->clouds;
+    const bool imageSky = mSource->skyType == iris::SkyType::EQUIRECTANGULAR ||
+                          mSource->skyType == iris::SkyType::CUBEMAP;
+    // The weather map's pixels follow its FILE, uploaded once per change.
+    const QString weatherPath = (doc.enabled && !imageSky && !doc.weatherMapGuid.isEmpty() &&
+                                 mSource->cloudWeatherMap)
+                                    ? mSource->cloudWeatherMap->source : QString();
+    if (weatherPath != mCloudWeatherPath) {
+        if (mCloudWeatherTexture) mTarget->destroyTexture(mCloudWeatherTexture);
+        mCloudWeatherTexture = 0;
+        mCloudWeatherPath = weatherPath;
+        if (!weatherPath.isEmpty()) {
+            // DATA, not a colour: uploaded linear (srgb false), and held at a
+            // size that covers one 16 km tile with no waste (a larger map adds
+            // nothing the 1024^2 field could keep).
+            QImage img(weatherPath);
+            if (!img.isNull()) {
+                if (img.width() > 1024 || img.height() > 1024)
+                    img = img.scaled(1024, 1024, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                img = img.convertToFormat(QImage::Format_RGBA8888);
+                mCloudWeatherTexture = mTarget->createTexture(unsigned(img.width()),
+                                                              unsigned(img.height()),
+                                                              img.constBits(), false);
+            }
+        }
+    }
+    if (!doc.enabled || imageSky) return;
+    cl.enabled = true;
+    cl.coverage = doc.coverage;
+    cl.density = doc.density;
+    cl.altitude = doc.altitude;
+    cl.shadow = doc.shadow;
+    // The heading the wind blows TOWARDS, from +X turning towards -Z.
+    const float heading = doc.direction * float(M_PI) / 180.0f;
+    cl.wind[0] = doc.speed * std::cos(heading);
+    cl.wind[1] = -doc.speed * std::sin(heading);
+    cl.weatherMap = mCloudWeatherTexture;
+    const auto sunLight = mSource->sunLight();
+    if (sunLight && sunLight->isVisibleInScene()) {
+        const iris::Vec3 travel = sunLight->getLightDir();
+        if (travel.lengthSquared() > 1e-12f) {
+            const iris::Vec3 toSun = -travel.normalized();
+            cl.hasSun = true;
+            cl.sunDir[0] = toSun.x(); cl.sunDir[1] = toSun.y(); cl.sunDir[2] = toSun.z();
+            const iris::LinearColor c = iris::linearOf(sunLight->color);
+            const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
+            const float k = std::max(0.0f, sunLight->intensity) * float(M_PI * M_PI);
+            cl.sunIrradiance = Colour(c.r * k * tint.r, c.g * k * tint.g, c.b * k * tint.b, 1.0f);
+        }
     }
 }
 

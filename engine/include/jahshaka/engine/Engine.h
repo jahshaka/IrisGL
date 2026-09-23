@@ -155,6 +155,20 @@ public:
     virtual bool        skyAmbientSh(float out[27]) const = 0;
     /// The description currently in force (default-constructed = no sky).
     virtual SkyDesc     sky() const = 0;
+    /// THE CLOUD LAYER'S LIVE STATE (SkyDesc::clouds; CloudStatus says what each
+    /// field means). A scene that never enabled the layer answers "off".
+    virtual CloudStatus cloudStatus() const { return CloudStatus(); }
+    /// THE SKY AS A PICTURE (CLOUDS-2D-1's export bake): renders the bound sky
+    /// AND its cloud layer — exactly what the environment capture renders — into
+    /// a `faceSize`^2 cube and resamples it into a `width` x `height` lat-long
+    /// image, row 0 at the zenith, u = 0 at -X going through -Z (the viewer's
+    /// equirect convention, gltfexporter's stitchCubemapToEquirect), as
+    /// sRGB-encoded RGBA8 of the linear radiance times `exposure`, clamped.
+    /// Synchronous — a GPU wait; an export-time call, never a frame-time one.
+    /// False with no sky bound (or headless).
+    virtual bool        renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize,
+                                          float exposure, std::vector<unsigned char> &rgba)
+    { (void)width; (void)height; (void)faceSize; (void)exposure; (void)rgba; return false; }
     /// THE ATMOSPHERE'S TINT ON A LIGHT COMING FROM `toSun` (SUN_FOLLOWS_
     /// ATMOSPHERE, lane ENGINE-7 item 6). White (1,1,1) unless the scene's sky
     /// IS the analytic atmosphere — every other sky is a picture, and a picture

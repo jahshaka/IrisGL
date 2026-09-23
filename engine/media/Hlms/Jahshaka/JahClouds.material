@@ -1,0 +1,102 @@
+// THE CLOUD LAYER'S MATERIALS (CLOUDS-2D-1; programs in JahClouds.program and
+// JahSunDisc.program).
+//
+// GLSL + Vulkan only, like every other material we own in this folder.
+
+// THE LAYER: a full-screen quad at render queue 0, subgroup 2 -- after the sky
+// quad (subgroup 1) and inside the environment capture's range (queue 0,
+// visibility 0x1; JahshakaSkyCapture.compositor). PREMULTIPLIED over the sky:
+// the shader writes the scattered light in rgb and the sheet's opacity in a,
+// so the sky behind keeps (1 - opacity) of itself. Depth CHECK on, depth WRITE
+// off, at the far plane: the scene drawn afterwards covers it exactly as it
+// covers the sky.
+material Jahshaka/CloudLayer
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write off
+			cull_hardware none
+			scene_blend one one_minus_src_alpha
+
+			vertex_program_ref Jahshaka/SunDisc_vs
+			{
+			}
+			fragment_program_ref Jahshaka/CloudLayer_ps
+			{
+			}
+
+			// The field TILES, and is read towards the horizon at a steep
+			// angle: wrapped, trilinear, anisotropic.
+			texture_unit cloudField
+			{
+				tex_address_mode	wrap
+				filtering			anisotropic
+				max_anisotropy		8
+			}
+		}
+	}
+}
+
+// THE SUN DISC THROUGH THE LAYER: JahSunDisc.material's pass, dimmed by the
+// sheet (see JahSunDiscClouded_ps.glsl). Additive, like the disc.
+material Jahshaka/SunDiscClouded
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write off
+			cull_hardware none
+			scene_blend add
+
+			vertex_program_ref Jahshaka/SunDisc_vs
+			{
+			}
+			fragment_program_ref Jahshaka/SunDiscClouded_ps
+			{
+			}
+			texture_unit cloudField
+			{
+				tex_address_mode	wrap
+				filtering			anisotropic
+				max_anisotropy		8
+			}
+		}
+	}
+}
+
+// THE FIELD BAKE: one full-target quad, no depth.
+material Jahshaka/CloudBake
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+			fragment_program_ref Jahshaka/CloudBake_ps
+			{
+			}
+			// The noise TILES; the weather map covers one tile and wraps with it.
+			texture_unit cloudNoise
+			{
+				tex_address_mode	wrap
+				filtering			bilinear
+			}
+			texture_unit cloudWeather
+			{
+				tex_address_mode	wrap
+				filtering			bilinear
+			}
+		}
+	}
+}

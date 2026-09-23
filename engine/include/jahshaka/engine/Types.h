@@ -891,6 +891,114 @@ struct SunDisc {
     bool operator!=(const SunDisc &o) const { return !(*this == o); }
 };
 
+/// THE 2D CLOUD LAYER (CLOUDS-2D-1; SPECS/CLOUDS_ASSESSMENT.md option C0 —
+/// HDRP's Cloud Layer as the model). One sheet of cloud at `altitude` metres,
+/// drawn as a screen quad at render queue 0 OVER the bound sky (the sun disc's
+/// shape) and therefore inside the sky capture's range: the ambient SH, the
+/// reflection cube and every Photon estimator that reads the one environment
+/// see it with no further work. A top-down TRANSMITTANCE map of the same field
+/// shades the first directional light's term in HlmsPbs (the listener's extra
+/// pass texture — Terra's shadow pattern).
+///
+/// A DISABLED LAYER IS NO LAYER: nothing is created, no pass property is set,
+/// no Hlms shader changes — every picture of a scene without one is the picture
+/// it was before the layer existed (the 0048 pattern).
+///
+/// WHAT IT COSTS, MEASURED (spikes/clouds-2d-1/, 2026-09-23, Debug, Xvfb, one
+/// process, paired arms, a six-primitive scene whose still frame is ~0.6 ms GPU —
+/// so carry the ABSOLUTE numbers, not a percentage of that frame):
+///   * the layer's own draw (the quad, the clouded disc, the ground-shadow
+///     lookup), coverage 0.5 against the layer off, clocks locked 2100-2550 MHz:
+///     +0.06 / +0.15 / +0.07 ms GPU per frame over three pairs (median frames);
+///     the UI-thread CPU difference was inside its noise (±0.4 ms);
+///   * ONE environment re-capture, downstream included: 26.4 ms GPU and 45.7 ms
+///     UI-thread CPU in total — the capture is small; the new SH re-stales the
+///     whole probe grid (re-captured at the budget's one probe per frame) and
+///     re-sweeps the irradiance field. On a scene with more probes it is more.
+///     The scroll therefore re-captures every 600 drawn frames (OgreSky.cpp).
+///
+/// A HAZARD, BY DESIGN: the sheet is SUN-LIT, so the sun is in its look — with a
+/// layer on, a COLOUR or GRADIENT sky (which never depended on the sun) re-captures
+/// the environment and re-stales the probe grid on every frame the sun moves (a
+/// drag, a keyframed sun), a cost class those skies never paid; the realistic sky
+/// always did. The probe budget caps the probe half at one probe per frame.
+struct CloudLayerDesc {
+    bool      enabled = false;
+    /// 0 (clear) .. 1 (overcast): the fraction of the field that is cloud.
+    float     coverage = 0.5f;
+    /// Optical thickness multiplier, 0 .. 4.
+    float     density = 1.0f;
+    /// The layer's altitude in metres (the curved-earth projection and the
+    /// sideways throw of the ground shadow under a low sun).
+    float     altitude = 2000.0f;
+    /// 0 .. 1: how much of the layer's transmittance reaches the sun's light
+    /// on the ground (1 = all of it).
+    float     shadow = 1.0f;
+    /// Wind, world metres per second of SCENE time along x and z. The scroll is
+    /// the engine's own fixed clock (the frame deltas the host pushes), so a
+    /// paused scene holds still and a scripted frame is reproducible.
+    float     wind[2] = { 0.0f, 0.0f };
+    /// An optional weather map (its red channel scales the coverage over one
+    /// tile of the layer); 0 = none. Sampled as data, never sRGB-decoded.
+    TextureId weatherMap = 0;
+    /// THE SUN THAT LIGHTS THE LAYER: the direction TOWARDS it and its
+    /// irradiance in the renderer's units (the first directional light's
+    /// colour x tint x intensity x pi x pi — what a white Lambert plate facing
+    /// it reflects is that over pi). No sun = lit by the sky alone.
+    bool      hasSun = false;
+    float     sunDir[3] = { 0.0f, 1.0f, 0.0f };
+    Colour    sunIrradiance { 0.0f, 0.0f, 0.0f, 1.0f };
+
+    /// The inputs of the baked density / transmittance field. A change here
+    /// re-bakes it; anything else is a uniform write.
+    bool sameField(const CloudLayerDesc &o) const {
+        if (enabled != o.enabled) return false;
+        if (!enabled) return true;
+        return coverage == o.coverage && density == o.density && weatherMap == o.weatherMap;
+    }
+    /// Everything the CAPTURED sky depends on (the field, the look and the
+    /// light) — a change re-captures the environment. The wind and the shadow
+    /// strength are not in it: neither moves a sky pixel at a given time.
+    bool sameLook(const CloudLayerDesc &o) const {
+        if (!sameField(o)) return false;
+        if (!enabled) return true;
+        return altitude == o.altitude && hasSun == o.hasSun &&
+               sunDir[0] == o.sunDir[0] && sunDir[1] == o.sunDir[1] && sunDir[2] == o.sunDir[2] &&
+               sunIrradiance.r == o.sunIrradiance.r && sunIrradiance.g == o.sunIrradiance.g &&
+               sunIrradiance.b == o.sunIrradiance.b;
+    }
+    bool operator==(const CloudLayerDesc &o) const {
+        if (!sameLook(o)) return false;
+        if (!enabled) return true;
+        return shadow == o.shadow && wind[0] == o.wind[0] && wind[1] == o.wind[1];
+    }
+    bool operator!=(const CloudLayerDesc &o) const { return !(*this == o); }
+};
+
+/// What the cloud layer is DOING in a scene (world.clouds().live).
+struct CloudStatus {
+    /// The layer quad exists and is visible (enabled, over a sky it may draw on).
+    bool     drawn = false;
+    /// Why not, when not: "off", "noSky", "media". (The engine never hears of a
+    /// layer the mirror keeps off an image sky; world.clouds composes "imageSky"
+    /// from the document for that case.)
+    std::string reason;
+    /// Captures of the sky environment the layer has asked for: on a change
+    /// (`changeCaptures`) and while it scrolls (`scrollCaptures`), over the
+    /// scene's life.
+    unsigned changeCaptures = 0;
+    unsigned scrollCaptures = 0;
+    /// Frames the layer's clock advanced (one per drawn frame with wind and a
+    /// non-zero frame delta, never more).
+    unsigned clockTicks = 0;
+    /// Frames between two scroll captures (0 = no scroll captures: still wind).
+    unsigned capturePeriodFrames = 0;
+    /// How many times the density / transmittance field has been baked.
+    unsigned fieldBakes = 0;
+    /// The layer's scroll offset in metres (x, z) at the last frame drawn.
+    float    scroll[2] = { 0.0f, 0.0f };
+};
+
 /// THE EDITOR'S GRID, DRAWN BY A SHADER (GRID-2, owner review R5: "the grid is a
 /// LINE mesh — MSAA/SMAA treat 1 px lines poorly and Vulkan line width is fixed
 /// at 1; the correct fix is a shader-drawn grid on the ground plane").
@@ -983,9 +1091,13 @@ struct SkyDesc {
     /// half: it changes every time the sun light is rotated, and re-uploading
     /// the sky or rebuilding the IBL cubemap for that would be absurd.
     SunDisc   sun;
+    /// THE CLOUD LAYER (CloudLayerDesc above), a FOURTH independent half: drawn
+    /// as part of the sky and captured with it, but a cloud edit must not tear
+    /// the sky down, and a wind change must not even re-capture it.
+    CloudLayerDesc clouds;
 
     bool operator==(const SkyDesc &o) const {
-        return sameSky(o) && sameReflections(o) && sun == o.sun;
+        return sameSky(o) && sameReflections(o) && sun == o.sun && clouds == o.clouds;
     }
     bool operator!=(const SkyDesc &o) const { return !(*this == o); }
 
