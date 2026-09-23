@@ -975,7 +975,7 @@ public:
     /// Every zero of `GatherTuning` means "what the tier derives", so the
     /// default is the shipped configuration and a suite overrides one knob at a
     /// time -- the probe stride, the ray count, the adaptive budget, the
-    /// determinism arm that holds the frame index, the far-term arm. It is not
+    /// determinism arm that holds the frame index, the ray length. It is not
     /// a document row and never reaches a panel: a person tunes the TIER.
     virtual void setGatherTuning(const GatherTuning &) {}
 

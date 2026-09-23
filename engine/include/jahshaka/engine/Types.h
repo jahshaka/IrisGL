@@ -53,8 +53,9 @@ using MaterialId = unsigned int;
 // ---- ATOM stage 1: THE LEVEL THAT STANDS IN FOR A MESH AT A GIVEN SIZE -----
 //
 // THE RULE, written ONCE and cited from all of its callers
-// (`MeshData::lodForWorldError` below; `OgreScene::cascadeVoxelLod` in
-// irisgl/engine/src/OgreGi.cpp, which spends it on Photon's cascades; and the
+// (`MeshData::lodForWorldError` below; the voxel gather's `jahLevelForAllowed`
+// in irisgl/engine/media/Hlms/Jahshaka/JahVoxelGather_cs.glsl, which spends it on
+// Photon's cascades on the device (terms from OgreScene::cascadeGatherInputs); and the
 // engine's view LOD strategy in OgreMesh.cpp, which is the same `lower_bound`
 // over the same errors done four-wide in Ogre's own SoA loop):
 //
@@ -153,6 +154,23 @@ inline float allowedWorldError(float tolerance, float footprint, float meshToWor
     if (!(tolerance > 0.0f) || !(footprint > 0.0f)) return 0.0f;
     if (!(meshToWorldScale > 0.0f)) return 0.0f;
     return tolerance * footprint / meshToWorldScale;
+}
+
+/// `meshToWorldScale` FROM A TRANSFORM: the largest axis scale of a ROW-MAJOR 3x4
+/// world matrix (twelve floats, the GPU scene's and VkTransformMatrixKHR's layout)
+/// is its longest COLUMN. M = T R S, so column j is R times axis j times s_j and its
+/// length is exactly s_j; a ROW mixes the scales through the rotation and, under a
+/// rotation times a non-uniform scale, is shorter than the largest s_j - which
+/// divides the allowance by too small a scale and picks a coarser level than the
+/// tolerance permits. The shaders' twin is `jahWorldMaxAxisScale`
+/// (JahLevelRule_piece_cs.any); engine.lod_rule_parity holds the two together.
+inline float worldMaxAxisScale(const float *rowMajor3x4) {
+    float s = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        const float x = rowMajor3x4[c], y = rowMajor3x4[4 + c], z = rowMajor3x4[8 + c];
+        s = std::max(s, std::sqrt(x * x + y * y + z * z));
+    }
+    return s;
 }
 
 /// THE SAME RELATION READ BACKWARDS: how many samples of deviation a bound of
@@ -323,7 +341,7 @@ struct MeshData {
     /// The COARSEST level that still stands in for this mesh when the consumer
     /// can afford a world-space deviation of `allowed` —
     /// THE RULE ITSELF IS `lodLevelForWorldError` ABOVE, stated once and shared
-    /// with the engine's voxeliser (OgreScene::cascadeVoxelLod). This overload
+    /// with the engine's voxel gather (OgreScene::cascadeGatherInputs). This overload
     /// is the document-side convenience: it clamps to the levels this mesh
     /// actually carries.
     /// (`lodLevelCount` and `lodLevelIndices` used to sit here and are DELETED —
@@ -2215,13 +2233,11 @@ struct GiParams {
     /// its budget on the buildings and the inner one on the crates.
     ///
     /// 0 (the default) is NO BUDGET, and it is the shipped arm exactly: the
-    /// attach set is the whole size-filtered scene, attached once, and Ogre's
-    /// own region cull decides what each build voxelises (the attach-once rule
-    /// in OgreGi.cpp, which exists because re-selecting drops the voxeliser's
-    /// mesh bookkeeping and re-uploads every buffer). A budget necessarily
-    /// gives that up for the cascades it binds, because WHICH objects are
-    /// nearest changes as the cascade scrolls — so it re-selects only when the
-    /// chosen set actually differs from the one attached.
+    /// attach set is the whole size-filtered scene and the gather's per-partition
+    /// cull decides what each build voxelises, on the device. A budget is the one
+    /// input still computed on the CPU (its ranking is a partial sort): the pick
+    /// is re-made at every rebuild of a cascade it binds and handed to the gather
+    /// as a bit per instance slot.
     ///
     /// `GiStatus::cascades[].items` reports what each cascade voxelised and
     /// `[].attached` what it holds, so a budget that is biting is a reading.
@@ -2229,7 +2245,7 @@ struct GiParams {
     /// THE FAR-FIELD PROXY: a cascade voxelises the BAKED LOD LEVEL that fits
     /// its own cell (ATOM stage 1's hand-off, SPECS/NANITE_SPEC.md §7 — the
     /// rule is `lodLevelForWorldError` and the site is
-    /// OgreScene::cascadeVoxelLod). True (the default) spends the chain; false
+    /// OgreScene::cascadeGatherInputs, applied by the gather). True (the default) spends the chain; false
     /// voxelises every cascade at the authored level, which is what the arm did
     /// before ogre-patch 0064 existed.
     ///
@@ -2764,8 +2780,8 @@ inline float giNearFieldMaxStepCells(const GiParams::GiCascadeDesc &c)
 /// they are checked against the rule by gi.cascades case 16a, not clamped
 /// here.
 ///
-/// Every other row gets the pin's `autoCalculateStepSizes(4)` shape
-/// (OgreVctCascadedVoxelizer.cpp:131-161) written out here so it is ours to
+/// Every other row gets upstream's `VctCascadedVoxelizer::autoCalculateStepSizes(4)`
+/// shape (that class is not in our fork since ATOM-VOXEL-2) written out here so it is ours to
 /// tune (A7) — every finer cascade steps the same DISTANCE as the outermost
 /// one, ceiled to whole cells and floored at half its resolution (the pin's own
 /// guard against a step that outruns the volume) — MET WITH the near-field rule
@@ -2824,8 +2840,9 @@ struct GatherTuning {
     /// one per texel, and 8 is the shipped value (64 rays). At most 8 -- one
     /// ray is one thread of the trace's 8x8 workgroup.
     unsigned octRes = 0u;
-    /// The near field's reach in world units. 0 = derive it from the cascade
-    /// chain's outermost box, which is what the reflection trace does.
+    /// The ray's length in world units. 0 = derive it: half the outermost
+    /// cascade's extent (the lit volume's inscribed radius), under the
+    /// camera's far plane.
     float    rayLength = 0.0f;
     /// How many ADAPTIVE probes a frame may add on top of the uniform grid
     /// (one per cell at most, where the cell's pixels do not lie in the cell
@@ -2836,10 +2853,6 @@ struct GatherTuning {
     /// of (probe cell, ray, frame index); holding the frame term makes
     /// consecutive frames of a still scene byte-identical.
     bool     freezeFrameIndex = false;
-    /// THE FAR-TERM ARM. With it set, a ray that finds nothing inside
-    /// `rayLength` reads the sky directly instead of the outer cascades' voxel
-    /// radiance at its end point.
-    bool     farTermOff = false;
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
     bool     jitterOff = false;
@@ -3271,18 +3284,22 @@ struct GiStatus {
         /// so owing two is the same as owing one. Non-zero only while the
         /// camera is outrunning the scheduler.
         int   pending = 0;
-        /// How many GI items this cascade's LAST REBUILD voxelised: the ones
-        /// inside its box that are big enough to fill half a voxel of it,
-        /// re-counted on every rebuild — so it follows the cascade as it
-        /// scrolls, and reads 0 for one standing in empty space. A coarse
-        /// cascade declines sub-voxel objects — it cannot represent them, and
-        /// they are what a whole re-voxelisation spends its time on.
+        /// THE READINGS BELOW ARE THE DEVICE'S OWN COUNTS (ATOM P4b, A5b §3): the
+        /// gather that writes the voxeliser's records on the GPU counts as it
+        /// writes, into a small readout collected without a stall and read here.
+        /// Nothing on the CPU walks the scene to produce them.
+        ///
+        /// How many GI items this cascade's LAST GATHER put into its box: the
+        /// ones with at least one partition inside it that are big enough to
+        /// fill half a voxel of it — so it follows the cascade as it scrolls,
+        /// and reads 0 for one standing in empty space. A coarse cascade
+        /// declines sub-voxel objects: it cannot represent them.
         int   items = 0;
-        /// How many GI items this cascade's voxeliser HOLDS — the attach set.
-        /// Without an instance budget (`GiParams::cascadeInstanceCap` 0) that is
-        /// the whole size-filtered scene and `items` is the part of it this
-        /// cascade's box reached; with a budget it is at most the budget, and
-        /// the two together say whether the budget is biting and on what.
+        /// How many GI items passed every predicate of that gather — the attach
+        /// set: the GI channel, rule 2's size floor and, with an instance budget
+        /// (`GiParams::cascadeInstanceCap` > 0), the budget's pick. Without a
+        /// budget that is the whole size-filtered scene and `items` is the part
+        /// of it this cascade's box reached.
         int   attached = 0;
         /// CPU milliseconds of that same rebuild (the submission cost on the
         /// frame's own thread). The GPU half is NOT here and cannot be: a
@@ -3290,38 +3307,43 @@ struct GiStatus {
         /// where a two-frame-late number belongs — the monitor's `vct.cascadeN`
         /// cacheWork rows (ogre-patch 0027).
         float lastCpuMs = -1.0f;
-        /// WHICH MESH LOD LEVELS THIS CASCADE ATTACHED (ATOM stage 1's
-        /// hand-off): a histogram over the attach set, `lodLevels[L]` items at
-        /// level L, index 0 the authored geometry. Never empty once a cascade
-        /// has attached anything, and `{N}` — everything at level 0 — for a
-        /// scene of meshes with no baked chain, which is every scene built from
-        /// document primitives.
+        /// WHICH MESH LOD LEVELS THE ATTACH SET TOOK (ATOM stage 1's hand-off,
+        /// ATOM P4 / AT-A10): `voxelLevels[L]` = SUBMESH PARTITIONS at level L,
+        /// index 0 the authored geometry, trailing zeros trimmed. A partition is
+        /// a 2,001-index run of a level (the voxeliser rejects a whole partition
+        /// by its AABB), so a mesh over 667 triangles contributes several
+        /// entries for one item; for a scene of meshes with no baked chain it is
+        /// `{N}` at level 0.
         ///
-        /// The level a cascade takes is decided by ITS OWN CELL and by the
-        /// mesh's baked error, never by the camera: the LOD bias
-        /// (Scene::setLodBias) moves what is DRAWN and must not move this.
-        std::vector<int> lodLevels;
+        /// The level is decided by THIS CASCADE'S CELL and the mesh's baked
+        /// error, never by the camera: the LOD bias (Scene::setLodBias) moves
+        /// what is DRAWN and must not move this. (`lodLevels`, the CPU's REQUEST
+        /// histogram in items, is DELETED: nothing on the CPU decides a level.)
+        std::vector<int> voxelLevels;
         /// HOW MANY TRIANGLES THE ATTACH SET HANDS THIS CASCADE at those levels
         /// — the currency of a voxelisation, since the raster dispatch is sized
         /// by the index count and not by the object count. It is the attach set
-        /// (what the voxeliser holds) and not the enclosed set, so it is the
-        /// pair of `attached` rather than of `items`, and it is the number the
-        /// far-field proxy moves: the same cascade with the LOD chain off reads
-        /// the authored total.
+        /// and not the enclosed set, so it is the pair of `attached` rather than
+        /// of `items`, and it is the number the far-field proxy moves: the same
+        /// cascade with the LOD chain off reads the authored total.
         long long voxelTriangles = 0;
-        /// HOW MANY COMPUTE DISPATCHES THAT REBUILD COST (ogre-patch 0065).
-        ///
-        /// The voxeliser groups the instances it holds into BUCKETS by what a
-        /// dispatch binds — the vertex format, the index width, whether a
-        /// texture pool is needed, and WHICH MATERIAL POOL the material is in —
-        /// and issues one dispatch per bucket per octant, each sized by the
-        /// whole volume however few instances the bucket holds. So this is the
-        /// number that says whether a cascade is paying for its MATERIAL COUNT
-        /// rather than for its geometry: a scene that shares materials reads a
-        /// handful whatever its size, and one whose every object owns a material
-        /// reads one dispatch per pool of them. `voxelTriangles` is the geometry
-        /// half of the same rebuild's bill.
+        /// HOW MANY COMPUTE DISPATCHES THE LAST BUILD ISSUED (ogre-patch 0065):
+        /// one per material pool of the chain's shared store per octant, each
+        /// sized by the whole volume however few records the pool holds (the
+        /// count is a loop bound read on the device). So this says whether a
+        /// cascade is paying for the MATERIAL COUNT rather than its geometry: a
+        /// scene that shares materials reads a handful whatever its size.
+        /// `voxelTriangles` is the geometry half of the same bill. 0 when the
+        /// build only cleared the volume (no instance source).
         long long voxelDispatches = 0;
+        /// THE RECORDS THE GATHER WROTE for this cascade: one per (instance,
+        /// partition) whose world box reaches the cascade's box - what the
+        /// voxelise dispatches loop over. The per-partition cull is the device's.
+        long long voxelRecords = 0;
+        /// Records the gather DROPPED for want of capacity. Must be 0: the
+        /// capacity is a bound (every instance at its finest level's partition
+        /// count), so a non-zero here is a defect, and it is logged critically.
+        long long voxelOverflow = 0;
     };
     /// The live cascade chain, innermost first. Empty unless
     /// GiParams::cascades built one.

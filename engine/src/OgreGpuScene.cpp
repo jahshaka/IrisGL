@@ -20,6 +20,10 @@
 #include "EnginePrivate.h"
 #include "GpuScene.h"
 
+#include "Vct/OgreVctMaterial.h"
+#include "Vct/OgreVctVoxelizer.h"
+#include <Vao/OgreTexBufferPacked.h>
+
 #include <OgreLogManager.h>
 #include <OgreMesh2.h>
 #include <Vao/OgreAsyncTicket.h>
@@ -74,8 +78,15 @@ void GpuScene::destroy() {
         if (mInstanceBuffer) mVao->destroyUavBuffer(mInstanceBuffer);
         if (mMeshBuffer) mVao->destroyUavBuffer(mMeshBuffer);
         if (mLevelBuffer) mVao->destroyUavBuffer(mLevelBuffer);
+        if (mGeomBuffer) mVao->destroyUavBuffer(mGeomBuffer);
+        if (mPartBuffer) mVao->destroyTexBuffer(mPartBuffer);
+        if (mPartAabbBuffer) mVao->destroyUavBuffer(mPartAabbBuffer);
     }
-    mInstanceBuffer = mMeshBuffer = mLevelBuffer = nullptr;
+    mInstanceBuffer = mMeshBuffer = mLevelBuffer = mGeomBuffer = nullptr;
+    mPartBuffer = nullptr;
+    mPartAabbBuffer = nullptr;
+    mPartCount = mPartCapacity = 0;
+    mPartitionsDirty = true;
     mVao = nullptr;
     mMirror.clear();
     mBorn.clear();
@@ -84,6 +95,7 @@ void GpuScene::destroy() {
     mRuns.clear();
     mDests.clear();
     mMeshMirror.clear();
+    mGeomMirror.clear();
     mLevelMirror.clear();
     mMeshEntries.clear();
     mFreeMeshSlots.clear();
@@ -113,6 +125,12 @@ void GpuScene::growMeshTable(uint32_t capacity) {
     const uint32_t want = roundUpPow2(capacity, std::max(kInitialMeshes, mMeshCapacity ? mMeshCapacity : kInitialMeshes));
     mMeshMirror.resize(want);
     mLevelMirror.resize(size_t(want) * kLevelsPerMesh);
+    // THE GEOMETRY ROWS grow with the mesh table and by the same doubling: one block
+    // of kGeomRowsPerMesh rows per mesh entry, so a row's index is arithmetic
+    // (`geomRowIndex`) and no allocator is needed. 48 B x 64 rows = 3 KB per mesh
+    // entry, which is nothing beside what it replaced (a re-described table per
+    // cascade per build, and before that a full copy of the world's geometry).
+    mGeomMirror.resize(size_t(want) * kGeomRowsPerMesh * kGeomRowWords, 0u);
     if (mMeshBuffer) {
         mVao->destroyUavBuffer(mMeshBuffer);
         mMeshBuffer = nullptr;
@@ -121,10 +139,113 @@ void GpuScene::growMeshTable(uint32_t capacity) {
         mVao->destroyUavBuffer(mLevelBuffer);
         mLevelBuffer = nullptr;
     }
+    if (mGeomBuffer) {
+        mVao->destroyUavBuffer(mGeomBuffer);
+        mGeomBuffer = nullptr;
+    }
     mMeshBuffer = mVao->createUavBuffer(want, sizeof(GpuMesh), 0, mMeshMirror.data(), false);
     mLevelBuffer = mVao->createUavBuffer(size_t(want) * kLevelsPerMesh, sizeof(GpuMeshLevel), 0,
                                          mLevelMirror.data(), false);
+    mGeomBuffer = mVao->createUavBuffer(size_t(want) * kGeomRowsPerMesh,
+                                        kGeomRowWords * sizeof(uint32_t), 0, mGeomMirror.data(),
+                                        false);
+    mGeomDirty = false;   // the create above uploaded the mirror
     mMeshCapacity = want;
+}
+
+bool GpuScene::ensurePartitions(Ogre::HlmsManager *hlmsManager, Ogre::RenderSystem *renderSystem,
+                                uint32_t partitionIndices) {
+    if (!mPartitionsDirty || !mVao || !partitionIndices) return false;
+    // A partition's AABB is computed FROM POSITIONS READ THROUGH THE ROWS, so the
+    // rows must be on the device first (the Xid 109 lesson of this lane: a row still
+    // only in the mirror is a zero address).
+    flushGeomRows();
+
+    // ONE COMPACT LIST, rebuilt whole. It is O(mesh entries x levels) and runs only
+    // when the mesh set changed, so a free-list allocator for variable-length runs
+    // would buy nothing but a place for bugs.
+    std::vector<uint32_t> parts;     // 4 words per partition
+    uint32_t count = 0;
+    for (uint32_t e = 0; e < uint32_t(mMeshEntries.size()); ++e) {
+        const bool live = mMeshEntries[e].refs > 0u;
+        for (uint32_t l = 0; l < kLevelsPerMesh; ++l) {
+            GpuMeshLevel &lv = mLevelMirror[size_t(e) * kLevelsPerMesh + l];
+            lv.partBase = count;
+            lv.partCount = 0;
+            if (!live || lv.geomRow == kNoGeomRow || !lv.indexCount) continue;
+            const uint32_t n = (lv.indexCount + partitionIndices - 1u) / partitionIndices;
+            for (uint32_t j = 0; j < n; ++j) {
+                const uint32_t first = lv.firstIndex + j * partitionIndices;
+                const uint32_t num = std::min(lv.indexCount - j * partitionIndices, partitionIndices);
+                parts.push_back(lv.geomRow);
+                parts.push_back(first);
+                parts.push_back(num);
+                parts.push_back(0u);
+            }
+            lv.partCount = n;
+            count += n;
+        }
+    }
+    mLevelDirty = true;
+    mPartCount = count;
+    mPartitionsDirty = false;
+    // The level table carries partBase/partCount now; the gather reads it.
+    if (mLevelBuffer && !mLevelMirror.empty()) {
+        mLevelBuffer->upload(mLevelMirror.data(), 0, mLevelMirror.size());
+        mLevelDirty = false;
+        ++mCopies;
+    }
+    if (!count) return true;
+
+    // GROWN BY DOUBLING like every other table here, never shrunk: a scene that
+    // loses meshes keeps the capacity it will probably want again.
+    if (count > mPartCapacity) {
+        if (mPartBuffer) mVao->destroyTexBuffer(mPartBuffer);
+        if (mPartAabbBuffer) mVao->destroyUavBuffer(mPartAabbBuffer);
+        uint32_t cap = std::max(mPartCapacity, 256u);
+        while (cap < count) cap *= 2u;
+        mPartBuffer = mVao->createTexBuffer(Ogre::PFG_RGBA32_UINT, size_t(cap) * 4u * sizeof(uint32_t),
+                                            Ogre::BT_DEFAULT, nullptr, false);
+        mPartAabbBuffer = mVao->createUavBuffer(cap, 8u * sizeof(float), 0, nullptr, false);
+        mPartCapacity = cap;
+    }
+    mPartBuffer->upload(parts.data(), 0, parts.size() * sizeof(uint32_t));
+    ++mCopies;
+    Ogre::VctVoxelizer::computePartitionAabbs(hlmsManager, renderSystem, mGeomBuffer, mPartBuffer,
+                                              mPartAabbBuffer, count);
+    return true;
+}
+
+uint64_t GpuScene::recordBound() const {
+    uint64_t bound = 0;
+    for (uint32_t e = 0; e < uint32_t(mMeshEntries.size()); ++e) {
+        const uint32_t refs = mMeshEntries[e].refs;
+        if (!refs) continue;
+        // LEVEL 0 IS THE FINEST, so its partition count bounds every level's.
+        bound += uint64_t(refs) * mLevelMirror[size_t(e) * kLevelsPerMesh].partCount;
+    }
+    return bound;
+}
+
+void GpuScene::flushGeomRows() {
+    if (!mGeomDirty || !mGeomBuffer || mGeomMirror.empty()) return;
+    mGeomBuffer->upload(mGeomMirror.data(), 0, mGeomMirror.size() / kGeomRowWords);
+    mGeomDirty = false;
+    ++mCopies;
+}
+
+void GpuScene::setLevelGeomRow(uint32_t meshIndex, uint32_t level, uint32_t rowIndex) {
+    const size_t at = size_t(meshIndex) * kLevelsPerMesh + level;
+    if (level >= kLevelsPerMesh || at >= mLevelMirror.size()) return;
+    mLevelMirror[at].geomRow = rowIndex;
+    mLevelDirty = true;
+}
+
+void GpuScene::stageGeomRow(uint32_t rowIndex, const void *row48Bytes) {
+    const size_t at = size_t(rowIndex) * kGeomRowWords;
+    if (at + kGeomRowWords > mGeomMirror.size()) return;   // no such mesh entry
+    std::memcpy(mGeomMirror.data() + at, row48Bytes, kGeomRowWords * sizeof(uint32_t));
+    mGeomDirty = true;
 }
 
 void GpuScene::ensureSlots(uint32_t count) {
@@ -198,6 +319,11 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long lon
         mLevelDirty = false;
         ++mCopies;
     }
+    // AND THE GEOMETRY ROWS, for the same reason in one more step: a level entry's
+    // `geomRow` must name a row that already holds addresses before anything reads it.
+    // Uploaded WHOLE and only when a mesh arrived or left — a mesh's rows never change
+    // while it lives, so this is once per attach batch and never per frame.
+    flushGeomRows();
 
     mCopySet.clear();
     mCopySet.insert(mCopySet.end(), dirtySlots.begin(), dirtySlots.end());
@@ -322,6 +448,7 @@ uint32_t GpuScene::acquireMesh(const Ogre::MeshPtr &meshPtr, const GpuMesh &desc
     }
     mMeshEntries[index].mesh = meshPtr;
     mMeshEntries[index].refs = 1u;
+    mPartitionsDirty = true;      // a NEW mesh: its levels have no partitions yet
     mMeshIndex[mesh] = index;
     mMeshMirror[index] = desc;
     const uint32_t take = std::min(levelCount, kLevelsPerMesh);
@@ -352,6 +479,7 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
     mMeshEntries[index] = MeshEntry();
     mMeshIndex.erase(it);
     mFreeMeshSlots.push_back(index);
+    mPartitionsDirty = true;      // the last reference: its partitions go with it
     // THE ENTRY IS ZEROED, not left behind: a slot recycled to a different mesh
     // must never be readable as the dead one's geometry (the VctMaterial
     // by-pointer aliasing lesson, DOCS/traps/ENGINE.md).
@@ -413,6 +541,38 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     return f;
 }
 
+/// THE MATERIAL WORD (ATOM P4b) — `gpuFlagsFor`'s sibling, and the ONE place
+/// GpuInstance::ids.y is decided: {pool : 16 | slot : 16} of the item's material in
+/// the chain's shared VctMaterial store.
+///
+/// A LOOKUP, NEVER A CONVERSION. Converting can render a texture into the store's
+/// pool and needs the store's temp resources, which exist only inside a GI build's
+/// bracket; this runs in the per-frame dirty scan. So a datablock the store has not
+/// seen yet answers "none" here, and the slot is QUEUED: the next GI build converts
+/// it inside its bracket and marks the slot, and the scan re-composes it with the
+/// real word before that build gathers. The voxel gather skips an instance whose
+/// word is "none" — for at most the one rebuild in which it was attached.
+///
+/// SUB-ITEM 0's DATABLOCK, because the word is one per instance: every mesh this
+/// engine builds has one submesh (buildMeshV2), and the geometry rows the gather
+/// reads are submesh 0's too.
+uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const {
+    if (!n.item || !n.item->getNumSubItems() || !mVctMaterialStore)
+        return detail::GpuScene::kNoMaterialWord;
+    const Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
+    if (!db) return detail::GpuScene::kNoMaterialWord;
+    const Ogre::VctMaterial::DatablockConversionResult *r = mVctMaterialStore->lookupDatablock(db);
+    if (!r) {
+        // Only a GI-visible item is worth converting: nothing else is ever gathered.
+        if ((flags & detail::kGpuGiVisible) && n.itemSlot != size_t(-1))
+            mVctPendingMaterialSlots.push_back(uint32_t(n.itemSlot));
+        return detail::GpuScene::kNoMaterialWord;
+    }
+    // Sixteen bits each: a pool holds 1,024 rows (VctMaterial's const-buffer size), and
+    // 65,535 pools is 67 million materials.
+    return (r->bucketIdx << 16u) | (r->slotIdx & 0xFFFFu);
+}
+
 /// ONE ENTRY, from the node.
 ///
 /// THE TRANSFORM IS HANDED IN, not fetched again. The scan has just compared
@@ -443,6 +603,7 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     std::memcpy(&out.boundsMin[3], &meshIndex, sizeof(uint32_t));
     std::memcpy(&out.boundsMax[3], &flags, sizeof(uint32_t));
     out.ids[0] = uint32_t(n.selfId);
+    out.ids[1] = gpuMaterialWordFor(n, flags);
     out.ids[2] = uint32_t(n.lightMask);
     // THE RAY LEVEL (AT-A8r) travels with the entry rather than being poked
     // into the mirror: every write to this table goes through one composer, so
@@ -481,13 +642,18 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
     desc.localBoundsMax[3] = 0.0f;
     desc.counts[3] = uint32_t(rec.mesh->getNumSubMeshes());
 
-    // SUBMESH 0's CHAIN. A mesh with several submeshes has one index range per
-    // (submesh, level) and this table holds the FIRST submesh's — which is what
-    // every mesh this engine bakes has exactly one of. Atom P4's voxeliser,
-    // which reads per-(mesh, level) ranges, is where the multi-submesh widening
-    // belongs (it needs a submesh dimension in the table, not a guess here).
+    // SUBMESH 0's CHAIN in the level table, and the GEOMETRY ROWS of every
+    // (level, submesh) beside it. `GpuMeshLevel::geomRow` is submesh 0's row and the
+    // rows of one level are contiguous, so a shader reaches submesh s at `geomRow + s`
+    // (GpuScene::geomRowIndex is the one place that arithmetic lives).
     detail::GpuMeshLevel levels[detail::GpuScene::kLevelsPerMesh];
     uint32_t levelCount = 0u;
+    struct StagedRow {
+        uint32_t level = 0u, submesh = 0u;
+        Ogre::VctVoxelizer::GeometryRow row;
+    };
+    std::vector<StagedRow> rows;
+    bool levelHasBase[detail::GpuScene::kLevelsPerMesh] = {};
     if (rec.mesh->getNumSubMeshes() > 0) {
         const Ogre::SubMesh *sub = rec.mesh->getSubMesh(0);
         const Ogre::VertexArrayObjectArray &vaos = sub->mVao[Ogre::VpNormal];
@@ -518,8 +684,54 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
                                           : vaos[0]->getVertexBuffers()[0]->getNumElements());
             desc.counts[1] = vaos[0]->getPrimitiveCount();
         }
+
+        // THE ROWS, DESCRIBED ONCE PER MESH (ATOM P4b). The voxeliser used to do this
+        // for every mesh in the volume on EVERY build of EVERY cascade — a CPU walk over
+        // the scene's geometry per rebuild, for data that cannot change while a mesh
+        // lives. `describeGeometryRow` is Ogre's because the shader that reads the row
+        // is Ogre's, and it refuses (with one log line) a (level, submesh) it cannot
+        // read in place: no index buffer, no float3 position, an unaligned stride, or a
+        // device with no buffer device addresses.
+        const uint32_t submeshes =
+            std::min(uint32_t(rec.mesh->getNumSubMeshes()), detail::GpuScene::kSubmeshesPerMesh);
+        if (uint32_t(rec.mesh->getNumSubMeshes()) > detail::GpuScene::kSubmeshesPerMesh &&
+            !mWarnedGeomSubmeshes) {
+            mWarnedGeomSubmeshes = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "WARNING: a mesh has more submeshes than the GPU geometry table holds (" +
+                std::to_string(rec.mesh->getNumSubMeshes()) + " > " +
+                std::to_string(detail::GpuScene::kSubmeshesPerMesh) +
+                "); the extra submeshes will not bounce light");
+        }
+        Ogre::VaoManager *vaoMgr =
+            mRoot ? mRoot->getRenderSystem()->getVaoManager() : nullptr;
+        for (uint32_t l = 0; vaoMgr && l < levelCount && l < detail::GpuScene::kLevelsPerMesh; ++l) {
+            for (uint32_t sm = 0; sm < submeshes; ++sm) {
+                Ogre::VctVoxelizer::GeometryRow row;
+                if (!Ogre::VctVoxelizer::describeGeometryRow(rec.mesh, l, sm, vaoMgr, row))
+                    continue;
+                rows.push_back(StagedRow{ l, sm, row });
+                if (sm == 0u) levelHasBase[l] = true;
+            }
+        }
     }
-    return mGpuScene.acquireMesh(rec.mesh, desc, levels, levelCount);
+
+    const uint32_t index = mGpuScene.acquireMesh(rec.mesh, desc, levels, levelCount);
+    if (index == detail::GpuScene::kNoMesh) return index;
+
+    // The rows, now that the entry's index — and therefore every row's index — is known.
+    for (const StagedRow &sr : rows) {
+        mGpuScene.stageGeomRow(detail::GpuScene::geomRowIndex(index, sr.level, sr.submesh),
+                               &sr.row);
+    }
+    // A LEVEL'S BASE IS SUBMESH 0's ROW, and only when submesh 0 really has one: the
+    // contract is `geomRow + s`, so a level whose first submesh was refused has no
+    // usable base and must stay kNoGeomRow rather than point into another level's block.
+    for (uint32_t l = 0; l < levelCount && l < detail::GpuScene::kLevelsPerMesh; ++l) {
+        if (levelHasBase[l])
+            mGpuScene.setLevelGeomRow(index, l, detail::GpuScene::geomRowIndex(index, l, 0u));
+    }
+    return index;
 }
 
 void OgreScene::releaseGpuMesh(const Ogre::Mesh *mesh) {
@@ -724,17 +936,12 @@ void OgreScene::updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, floa
         if (!bounds || bounds->empty()) continue;   // no chain: level 0 for ever
 
         // The distance Ogre's own strategies use: to the bounding SPHERE, whose
-        // world radius is the local one times the largest axis scale (the rows
-        // of the 3x4 world matrix are those axes).
+        // world radius is the local one times the largest axis scale - the longest
+        // COLUMN of the row-major 3x4 (worldMaxAxisScale says why not a row).
         const Ogre::Vector3 centre(0.5f * (e.boundsMin[0] + e.boundsMax[0]),
                                    0.5f * (e.boundsMin[1] + e.boundsMax[1]),
                                    0.5f * (e.boundsMin[2] + e.boundsMax[2]));
-        float scale = 0.0f;
-        for (int r = 0; r < 3; ++r) {
-            const float *row = &e.world[r * 4];
-            const float len = std::sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2]);
-            scale = std::max(scale, len);
-        }
+        const float scale = worldMaxAxisScale(e.world);
         if (!(scale > 0.0f) || !std::isfinite(scale)) continue;
         const float radius = float(mesh->getBoundingSphereRadius()) * scale;
         const float d = std::max(0.0f, float((centre - eye).length()) - radius);

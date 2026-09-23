@@ -30,8 +30,10 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuScene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuVoxelGather.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuVoxelGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSurfaceCache.cpp
@@ -403,18 +405,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HDR_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/HDR"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SSAO_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SSAO"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SMAA_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SMAA"
+    # VCT is WIPED first, like Hlms/Jahshaka: the fork deleted the image voxeliser,
+    # the per-voxeliser AABB job and the partial clear (ATOM P4b), and a file
+    # copy_directory left behind would still be staged beside the JSON that no
+    # longer names it.
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/VCT"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_VCT_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/VCT"
-    # ...MINUS THE IMAGE VOXELIZER (ATOM inventory row AT-VCTIMG). `VctImageVoxelizer`
-    # is the sibling class that caches a voxelized MESH in a texture cache; it
-    # reproduces none of the cascade chain's properties, it is deliberately not on
-    # our path (OgreGi.cpp says why), it is the one voxeliser patch 0064 declined
-    # to teach about LOD levels, and `VCT/ImageVoxelizer` + `VCT/VoxelPartialClear`
-    # have exactly one caller between them and it is that class. Its media is
-    # therefore staged for nothing. `copy_directory` has no exclude, so the folder
-    # is removed after the copy; the two job DEFINITIONS stay in
-    # Voxelizer.material.json (upstream's file, unpatched — a job nobody creates
-    # never opens its shader).
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/VCT/ImageVoxelizer"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Tools"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IBL_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IBL"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IFD_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IrradianceFields"

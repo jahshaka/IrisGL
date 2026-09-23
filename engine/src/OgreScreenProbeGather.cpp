@@ -676,18 +676,33 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.resolution[2] = float(in.width);
     pp.resolution[3] = float(in.height);
     pp.knobs[0] = float(stride);
-    // THE NEAR FIELD'S REACH. The same derivation the reflection trace makes —
-    // long enough to cross the lit volume a hit is shaded from, bounded by the
-    // camera's far plane — because a gather ray that outruns the cache finds
-    // geometry nothing can colour, which the trace draws BLACK.
+    // THE RAY'S LENGTH = THE LIT VOLUME'S INSCRIBED RADIUS: half the outer
+    // cascade's extent (PHOTON-GAFAR-1, measured; spikes/photon-gafar-1). A hit
+    // closer than that to the volume's centre is one the cascades can shade; a
+    // hit beyond the outer box is one they cannot, which the trace draws BLACK,
+    // and a miss is the sky. The sweep that decided it (the shader's own ray set
+    // on the CPU against the same TLAS, frozen-frame pictures against the old
+    // full-DIAGONAL length, open sky / showroom / sealed box x Medium / High /
+    // Epic, outer half extent 60 m at every tier):
+    //   * hits the half extent loses: 0.011-0.017 % of rays in the open sky,
+    //     0 in the showroom (max hit 54 m) and the box (14 m);
+    //   * the picture: 0-487 of 230,400 px move, by 1-2/255 (the bar is 1 %);
+    //   * the cost: none measurable -- the gather's GPU time at 60, 104 and
+    //     208 m agrees within +-1 % in interleaved rounds (a traversal through
+    //     empty space is cheap), so the length is set by what a ray can use,
+    //     not by what it costs.
+    // The old length was the DIAGONAL, i.e. a miss's end point lay outside
+    // every cascade; the far term that read the cascades there never fired and
+    // is deleted with this (see rq_probe_gather.comp). The floor for a chain
+    // with no cascades and the camera's far plane as the ceiling are kept.
     {
         float reach = 0.0f;
         if (in.cascadeCount) {
             const float *s = in.voxelSize[in.cascadeCount - 1u];
-            reach = std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+            reach = 0.5f * std::min(s[0], std::min(s[1], s[2]));
         }
         const float derived = std::min(in.farClip > 0.0f ? in.farClip : 1000.0f,
-                                       std::max(reach, 50.0f));
+                                       reach > 0.0f ? reach : 50.0f);
         pp.knobs[1] = in.tuning.rayLength > 0.0f ? in.tuning.rayLength : derived;
     }
     // THE SAMPLE SEQUENCE'S ONLY INPUT, and the determinism arm that holds it.
@@ -702,7 +717,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.knobs3[2] = float(v.atlasCols);
     pp.plane[0] = kPlaneTolerance;
     pp.plane[1] = kNormalTolerance;
-    pp.plane[2] = in.tuning.farTermOff ? 1.0f : 0.0f;
     pp.plane[3] = in.tuning.jitterOff ? 1.0f : 0.0f;
     for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, in.skyColour[i]);
     for (unsigned c = 0; c < kGatherMaxCascades; ++c) {

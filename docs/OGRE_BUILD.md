@@ -130,14 +130,14 @@ fully applied tree. Every commit message carries its members' rationale verbatim
 | 0061 | voxelizer-octants-follow-the-region | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial |
 | 0062 | voxel-merge-and-dispatch-order | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial + `155a56bf8` M22 MEDIA: the VCT compute media — **RETIRED into its group (0065 superseded it; only the bucket key survives)** |
 | 0063 | microcode-cache-for-reflected-array-bindings | `5bfe24cd9` M06 SOURCE: microcode cache for reflected array bindings |
-| 0064 | voxelizer-lod-level | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial |
-| 0065 | order-independent-voxel-merge | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial + `155a56bf8` M22 MEDIA: the VCT compute media |
+| 0064 | voxelizer-lod-level | `ad452604a` M15 — **SUPERSEDED by `0338ca7f2` (ATOM P4): the level is the ITEM's; `getLodVao(subMesh, level)` survives, `QueuedMesh::lodLevel` and "finest wins" are gone** |
+| 0065 | order-independent-voxel-merge | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial + `155a56bf8` M22 MEDIA: the VCT compute media — rebased onto `0338ca7f2`/`c4c80b5f7` (ATOM P4: the voxeliser reads the raster's geometry) |
 | 0066 | vct-cascade-march-carries-the-cone | `8f09c0cd4` M21 MEDIA: the VCT pixel piece |
 | 0067 | delayed-blocks-wait-for-their-frame | `b028638c1` M05 SOURCE: vulkan Vao + staging lifetime |
 | 0068 | external-device-renders-and-is-created-honestly | `d014b064f` M02 SOURCE: vulkan device — creation, features, external device, device loss + `1bccc3f93` M03 SOURCE: vulkan render system |
 | 0069 | device-loss-must-not-abort-from-a-destructor | `b028638c1` M05 SOURCE: vulkan Vao + staging lifetime |
 | 0070 | vct-cone-start-bias-is-one-cell | `8f09c0cd4` M21 MEDIA: the VCT pixel piece + `155a56bf8` M22 MEDIA: the VCT compute media |
-| 0071 | the-merge-accumulator-stays-resident | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial |
+| 0071 | the-merge-accumulator-stays-resident | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial — rebased onto `0338ca7f2`/`c4c80b5f7` (ATOM P4: the voxeliser reads the raster's geometry) |
 | 0072 | a-lost-device-ends-the-session | `d014b064f` M02 SOURCE: vulkan device — creation, features, external device, device loss + `1bccc3f93` M03 SOURCE: vulkan render system |
 | 0073 | swapchain-rebuild-retires-its-semaphore | `1a64cd1d8` M04 SOURCE: vulkan window / swapchain |
 | 0074 | cascade-continuation-composites-once | `8f09c0cd4` M21 MEDIA: the VCT pixel piece + `155a56bf8` M22 MEDIA: the VCT compute media |
@@ -147,7 +147,7 @@ fully applied tree. Every commit message carries its members' rationale verbatim
 | 0078 | custom-projection-publishes-its-frustum-extents | `6130df9d1` M11 SOURCE: OgreMain correctness singles |
 | 0079 | final-grade-is-dithered | `feab041c6` M24 MEDIA: HDR + final grade |
 | 0080 | vct-total-volume-is-a-float | `ae2ed529f` M14 SOURCE: VctLighting + `155a56bf8` M22 MEDIA: the VCT compute media |
-| 0081 | vct-material-cache-evicts-a-dying-datablock | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial |
+| 0081 | vct-material-cache-evicts-a-dying-datablock | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial — rebased onto `0338ca7f2`/`c4c80b5f7` (ATOM P4: the voxeliser reads the raster's geometry) |
 | 0082 | bloom-composite-takes-an-amount | `feab041c6` M24 MEDIA: HDR + final grade |
 | 0083 | diffuse-cone-basis-is-the-normals | `8f09c0cd4` M21 MEDIA: the VCT pixel piece |
 | 0084 | vct-escape-reads-both-axis-halves | `8f09c0cd4` M21 MEDIA: the VCT pixel piece |
@@ -155,4 +155,4 @@ fully applied tree. Every commit message carries its members' rationale verbatim
 | 0086 | irradiance-field-cage-can-be-declined | `b6c409c1f` M23 MEDIA: the irradiance-field piece |
 | 0087 | voxel-emissive-is-a-float | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial + `155a56bf8` M22 MEDIA: the VCT compute media |
 | 0088 | mixed-shadow-vao-list-is-legal | `5230c9390` M09 SOURCE: LOD + mesh v2 |
-| 0089 | voxelizer-reports-queued-index-count | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial |
+| 0089 | voxelizer-reports-queued-index-count | `ad452604a` M15 SOURCE: VctVoxelizer + VctMaterial — rebased onto `0338ca7f2`/`c4c80b5f7` (ATOM P4: the voxeliser reads the raster's geometry) |

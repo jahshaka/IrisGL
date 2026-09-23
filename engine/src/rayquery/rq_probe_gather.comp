@@ -34,9 +34,17 @@
 // costs one store per ray.
 //
 // THE HIT'S RADIANCE, in Lumen's order minus the card (that is phase 5, and it
-// arrives as one more branch here): the cascade VOXEL where the chain holds
-// something, the FAR TERM (the outer cascades at the ray's end point) where the
-// ray outran the near field, the SKY where nothing holds anything. And a hit
+// arrives as one more branch here): the cascade VOXEL where the ray hit
+// something, the SKY where it hit nothing inside tMax. There is no far term
+// between them -- no read of the outer cascades at a MISSED ray's end point --
+// and the reason is measured (PHOTON-GAFAR-1, spikes/photon-gafar-1): at the
+// old length (the outer box's diagonal) the end point lay in no cascade and the
+// read never answered, and at a length short enough for it to answer it reads a coarse mip
+// of whatever surface lies within a mip's reach of empty space and moves the
+// picture AWAY from the long-ray reference (open sky, High: 44.6 % of pixels
+// moved, 3.9/255 averaged over the frame, worst 72/255 -- where the sky alone
+// at the same length moves 0.2 % by 1/255). The length is at
+// OgreScreenProbeGather.cpp's `reach`. And a hit
 // the cascades cannot shade is BLACK, never sky — the ray found geometry and
 // the cache does not reach it; handing it the sky would light the probe THROUGH
 // the object, which is the leak this whole program exists to remove. Black is
@@ -175,19 +183,10 @@ void main()
 		}
 		else
 		{
-			// ---- THE FAR TERM, then the sky. A ray with no hit inside tMax
-			// either escaped the world or merely outran the near field: the
-			// outer cascades are asked what stands at its end point, in its own
-			// direction, and only where they hold nothing does the sky answer.
-			// The two cases are not distinguishable from the query — a miss IS
-			// "nothing within tMax" — and they do not need to be: an escaping
-			// ray's end point is empty space, which the volumes report as empty.
-			bool farOk = false;
-			vec3 far = vec3( 0.0 );
-			if( p.plane.z < 0.5 )
-				far = jahVoxelRadiance( origin + dir * maxT, dir, max( maxT * spread, 1e-4 ),
-										false, farOk );
-			radiance = farOk ? far : jahSkyRadiance( dir );
+			// ---- THE SKY. Nothing inside tMax: tMax is the lit volume's
+			// inscribed radius and no measured hit lies beyond it in a way the
+			// picture can see, so a miss is an escape.
+			radiance = jahSkyRadiance( dir );
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );

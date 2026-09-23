@@ -745,12 +745,12 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
     }
 
     JAH_TRY {
-        // BEFORE the datablock pointer dies: VctMaterial caches its conversions
-        // by raw datablock pointer, and a recycled address would alias. Under a
-        // cascade chain that is the ONE case a kept voxeliser cannot survive, so
-        // it is recorded separately (G1) and answered one cascade per frame.
+        // BEFORE the datablock pointer dies: the GI material store keys its
+        // conversions by raw datablock pointer, so the dying one is EVICTED by
+        // name (a recycled address would alias, and the store's in-place refresh
+        // would read freed memory).
         invalidateGiCaches();
-        noteGiDatablockDied();
+        noteGiDatablockDied(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
 
         // Remember who was rendering with this material, then take the
         // renderables down. attachMesh below rebuilds each one from scratch,
