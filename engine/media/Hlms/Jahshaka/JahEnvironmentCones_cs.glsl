@@ -28,7 +28,15 @@ layout( local_size_x = @value( threads_per_group_x ),
 #define JAH_ENV_SAMPLE( d, l ) textureLod( samplerCube( envCube, envSmp ), d, l ).xyz
 #define JAH_ENV_MIPS params.counts.y
 #define JAH_ENV_GAIN vec3( 1.0 )
-#define JAH_ENV_SH( n ) vec3( 0.0 )
+#define JAH_ENV_SH_C0 vec3( 0.0 )
+#define JAH_ENV_SH_C1 vec3( 0.0 )
+#define JAH_ENV_SH_C2 vec3( 0.0 )
+#define JAH_ENV_SH_C3 vec3( 0.0 )
+#define JAH_ENV_SH_C4 vec3( 0.0 )
+#define JAH_ENV_SH_C5 vec3( 0.0 )
+#define JAH_ENV_SH_C6 vec3( 0.0 )
+#define JAH_ENV_SH_C7 vec3( 0.0 )
+#define JAH_ENV_SH_C8 vec3( 0.0 )
 @insertpiece( JahEnvironment )
 
 void main()

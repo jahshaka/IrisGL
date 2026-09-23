@@ -71,7 +71,17 @@
 #define JAH_ENV_SAMPLE( d, l ) textureLod( skyCube, d, l ).xyz
 #define JAH_ENV_MIPS float( textureQueryLevels( skyCube ) )
 #define JAH_ENV_GAIN JAH_SKY_COLOUR
-#define JAH_ENV_SH( n ) JAH_SKY_COLOUR
+// With no cube the environment is FLAT here (the host's constant band): the
+// only coefficient the ray jobs are handed.
+#define JAH_ENV_SH_C0 JAH_SKY_COLOUR
+#define JAH_ENV_SH_C1 vec3( 0.0 )
+#define JAH_ENV_SH_C2 vec3( 0.0 )
+#define JAH_ENV_SH_C3 vec3( 0.0 )
+#define JAH_ENV_SH_C4 vec3( 0.0 )
+#define JAH_ENV_SH_C5 vec3( 0.0 )
+#define JAH_ENV_SH_C6 vec3( 0.0 )
+#define JAH_ENV_SH_C7 vec3( 0.0 )
+#define JAH_ENV_SH_C8 vec3( 0.0 )
 #include "jah_environment.glsl"
 
 const float kMaxRadiance = 1024.0;

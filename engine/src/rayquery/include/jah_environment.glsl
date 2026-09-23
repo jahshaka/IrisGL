@@ -29,9 +29,13 @@
 //                              (the caller's own texture and sampler)
 //     JAH_ENV_MIPS             float: the cube's mip count
 //     JAH_ENV_GAIN             vec3: the Sky Light's gain on the cube
-//     JAH_ENV_SH( n )          vec3: the SH irradiance lookup for a WORLD-axis
-//                              direction n, already carrying the Sky Light's gain
-//                              (the engine pushes gain-scaled coefficients)
+//     JAH_ENV_SH_C0 .. JAH_ENV_SH_C8
+//                              vec3: the environment's nine SH coefficients in
+//                              the engine's WORLD basis {1, y, z, x, xy, yz,
+//                              3z^2 - 1, zx, x^2 - y^2} (Scene::setAmbientSh's
+//                              order), already carrying the Sky Light's gain:
+//                              the COSINE-CONVOLVED irradiance over pi, which is
+//                              what the engine pushes and HlmsPbs evaluates
 //
 // Every direction handed to this file is in WORLD axes. Ogre samples cubemaps
 // LEFT-HANDED (the sky/IBL adoption's fact): the flip is written once, here.
@@ -39,16 +43,18 @@
 #ifndef JAH_ENVIRONMENT_GLSL
 #define JAH_ENVIRONMENT_GLSL
 
-/// The nine-band evaluation in the engine's WORLD basis {1, y, z, x, xy, yz,
-/// 3z^2 - 1, zx, x^2 - y^2} (Scene::setAmbientSh's documented order), for a
-/// caller that holds the coefficients itself (the compute jobs; a caller may
-/// bind JAH_ENV_SH to it). The pixel shader reads HlmsPbs's own copy instead,
-/// which is stored in HlmsPbs's frame.
-vec3 jahEnvShWorld( vec3 n, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4, vec3 c5, vec3 c6,
-					vec3 c7, vec3 c8 )
+/// The nine-band evaluation in the engine's WORLD basis, with a scale per BAND.
+/// The coefficients are the cosine-convolved irradiance over pi (band l scaled
+/// by A_l / pi: 1, 2/3, 1/4 — Ramamoorthi and Hanrahan), so (1, 1) evaluates
+/// the IRRADIANCE a normal receives, and (3/2, 4) undoes the convolution and
+/// evaluates the RADIANCE arriving from a direction (band-limited to two bands).
+vec3 jahEnvShEval( vec3 n, float k1, float k2 )
 {
-	return c0 + c1 * n.y + c2 * n.z + c3 * n.x + c4 * ( n.x * n.y ) + c5 * ( n.y * n.z ) +
-		   c6 * ( 3.0 * n.z * n.z - 1.0 ) + c7 * ( n.z * n.x ) + c8 * ( n.x * n.x - n.y * n.y );
+	return JAH_ENV_SH_C0 +
+		   k1 * ( JAH_ENV_SH_C1 * n.y + JAH_ENV_SH_C2 * n.z + JAH_ENV_SH_C3 * n.x ) +
+		   k2 * ( JAH_ENV_SH_C4 * ( n.x * n.y ) + JAH_ENV_SH_C5 * ( n.y * n.z ) +
+				  JAH_ENV_SH_C6 * ( 3.0 * n.z * n.z - 1.0 ) + JAH_ENV_SH_C7 * ( n.z * n.x ) +
+				  JAH_ENV_SH_C8 * ( n.x * n.x - n.y * n.y ) );
 }
 
 /// THE CONE'S LOBE ON THE PREFILTERED CHAIN — the aperture to roughness mapping.
@@ -96,7 +102,12 @@ float jahEnvLodForCone( float tanHalfAngle )
 /// What a CONE of half-angle atan( tanHalfAngle ) about `dirWorld` sees of the
 /// environment: radiance. With no cube bound (a scene with no sky, lit by a
 /// flat or hemisphere ambient) the environment IS its SH, and the cone reads
-/// the SH in its own direction.
+/// the RADIANCE the SH describes in its own direction — the coefficients
+/// de-convolved, NOT the irradiance: a set of cones that each read the
+/// irradiance at its own axis and are then weighted by the cosine convolves the
+/// sky twice (measured: a hemisphere ambient's zenith band came back at 0.63 of
+/// itself through the six cones, and the voxel volume's face stepped against the
+/// SH outside it).
 vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 {
 	if( JAH_ENV_CUBE_ON )
@@ -105,7 +116,7 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 		return max( JAH_ENV_SAMPLE( d, jahEnvLodForCone( tanHalfAngle ) ), vec3( 0.0 ) ) *
 			   JAH_ENV_GAIN;
 	}
-	return max( JAH_ENV_SH( dirWorld ), vec3( 0.0 ) );
+	return max( jahEnvShEval( dirWorld, 1.5, 4.0 ), vec3( 0.0 ) );
 }
 
 /// The diffuse environment for a surface whose normal is `nWorld`: the cosine
@@ -113,7 +124,7 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 /// surface of albedo 1 would reflect).
 vec3 jahEnvIrradiance( vec3 nWorld )
 {
-	return max( JAH_ENV_SH( nWorld ), vec3( 0.0 ) );
+	return max( jahEnvShEval( nWorld, 1.0, 1.0 ), vec3( 0.0 ) );
 }
 
 #endif   // JAH_ENVIRONMENT_GLSL
