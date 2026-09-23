@@ -24,6 +24,9 @@
 // descriptor set; this lane makes one twin per PBS datablock — merging the
 // datablocks of one bucket into one twin is the S3-DRAW optimisation).
 //
+// WHAT IT IS TOLD. Everything PBS is told, through `tellEveryHlms` (OgreEngine.cpp)
+// — never a setter of its own that could disagree with PBS's.
+//
 // NOTHING IN THE PRODUCT DRAWS THROUGH IT YET (S3-DRAW binds it to the id pass);
 // its consumer is `engine.atom_parity`, over a hand-made id buffer.
 //
@@ -53,6 +56,23 @@ class UavBufferPacked;
 namespace jahshaka {
 namespace engine {
 namespace detail {
+
+/// THE ONE FUNCTION every PBS-family host is told through (D1 §1; OgreEngine.cpp).
+/// PBS is the source of truth — every engine site tells HlmsPbs — and this copies
+/// what PBS holds onto every other PBS-family host at the moment that host reads it
+/// (registration, and the head of each pass: `HlmsAtom::analyzeBarriers` /
+/// `preparePassHash`). Asking PBS at the moment of use rather than mirroring each
+/// call site is what makes the two hosts impossible to disagree.
+void tellEveryHlms(Ogre::HlmsManager *manager);
+/// What tellEveryHlms could not relay at this pin, and a count of relays — read by
+/// engine.atom_parity (the grid asserts its configuration is inside what is relayed).
+struct AtomRelayGaps {
+    bool pccUnrelayed = false;   ///< PBS holds a PCC; its two blend distances have no getter
+    bool ltcUnknown = false;     ///< whether PBS loaded the LTC matrix has no getter
+    unsigned long long relays = 0ull;
+    Ogre::uint8 iblMips[Ogre::HLMS_MAX] = {};   ///< the IBL mip count relayed, per host type
+};
+const AtomRelayGaps &atomRelayGaps();
 
 /// The id image's two words (R32G32_UINT), the contract between whatever WRITES the
 /// id buffer (the hand-made one of engine.atom_parity today, S3-DRAW's id pass

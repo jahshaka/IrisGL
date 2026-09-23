@@ -273,7 +273,7 @@ void HlmsAtom::uploadBucketTable() {
 }
 
 // ---------------------------------------------------------------------------
-// THE PASS
+// THE PASS: every entry point asks PBS what it holds first (tellEveryHlms).
 // ---------------------------------------------------------------------------
 void HlmsAtom::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
                                Ogre::ResourceTransitionArray &resourceTransitions,
@@ -281,6 +281,10 @@ void HlmsAtom::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
     // NOTHING TO DECODE, NOTHING TO DO: every registered Hlms is asked this for
     // every scene pass of the frame, and this host draws only through its twins.
     if (mTwins.empty()) return;
+    // THE FIRST THING A PASS ASKS OF US READS THE VOXEL AND FIELD TEXTURES — so the
+    // pointers must be PBS's current ones BEFORE, never after: a VctLighting PBS was
+    // told to drop may already be deleted.
+    tellEveryHlms(mHlmsManager);
     Ogre::HlmsPbs::analyzeBarriers(barrierSolver, resourceTransitions, renderingCamera, bCasterPass);
     if (bCasterPass) return;
     // WHAT THE DECODE READS, declared to Ogre's solver like every other pass input:
@@ -310,6 +314,7 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
         return Ogre::HlmsCache();
     }
     mPassSkipped = false;
+    tellEveryHlms(mHlmsManager);
     uploadBucketTable();
     return Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
 }

@@ -2412,12 +2412,6 @@ public:
     static void     setIfdState(const Ogre::SceneManager *sm, const IfdState &state);
     static IfdState ifdState(const Ogre::SceneManager *sm);
 
-    /// Hands the listener the HlmsPbs singleton it queries on the render thread
-    /// for the state of the pass being built (which PCC owns the env-probe
-    /// slot). Global, not per scene, because the binding is. Asking HlmsPbs
-    /// itself rather than keeping a mirror is what makes the two impossible to
-    /// disagree.
-    static void setPbs(Ogre::HlmsPbs *pbs);
     /// THE LISTENER'S OWN SAMPLERBLOCKS DIE WITH THE ENGINE (PHOTON-ENV-1 audit
     /// F10). The environment slot's trilinear block and the gather's point
     /// block are each acquired ONCE per HlmsManager (a uint16 reference count
@@ -2495,23 +2489,31 @@ public:
                          const Ogre::HlmsDatablock *datablock, size_t texUnit) override;
 
 private:
-    /// The sky cube of the pass BEING BUILT, and the samplerblock to bind it
-    /// with — both decided in preparePassHash and read in hlmsTypeChanged, on
-    /// the render thread, within one pass. Set together or not at all: a slot
-    /// claimed by getNumExtraPassTextures and left unbound is an undefined
-    /// descriptor.
-    static Ogre::TextureGpu             *sPassSkyCube;                 // render thread only
-    static const Ogre::HlmsSamplerblock *sPassSkySampler;              // render thread only
+    /// What the pass BEING BUILT binds in the listener's extra slots — the sky
+    /// cube and the gather's irradiance, each with its samplerblock — decided in
+    /// preparePassHash and read in hlmsTypeChanged, on the render thread, within
+    /// one pass. Set together or not at all: a slot claimed by
+    /// getNumExtraPassTextures and left unbound is an undefined descriptor.
+    ///
+    /// ONE PER Hlms HOST, indexed by the Hlms type (ATOM-S3-PARITY): the listener
+    /// is set on every PBS-family host (tellEveryHlms), `RenderQueue::
+    /// renderPassPrepare` runs preparePassHash on EVERY registered Hlms of a pass
+    /// in turn, and a single shared copy was overwritten by whichever host ran
+    /// last — a host whose pass properties differed would have left another's
+    /// claimed slot unbound.
+    struct PassBinds {
+        Ogre::TextureGpu             *skyCube = nullptr;
+        const Ogre::HlmsSamplerblock *skySampler = nullptr;
+        Ogre::TextureGpu             *probeGather = nullptr;
+        const Ogre::HlmsSamplerblock *probeGatherSampler = nullptr;
+    };
+    static PassBinds sPass[Ogre::HLMS_MAX];                            // render thread only
     static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
-    /// GATHER-0's registration and the pass's copy of it — the same
-    /// set-together-or-not-at-all rule as the sky's pair above.
+    /// GATHER-0's registration (the pass's copy of it is PassBinds::probeGather).
     static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
-    static Ogre::TextureGpu             *sPassProbeGather;             // render thread only
-    static const Ogre::HlmsSamplerblock *sPassProbeGatherSampler;      // render thread only
     static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only
     static const Ogre::HlmsSamplerblock *sEnvSampler;                  // render thread only
     static const Ogre::HlmsSamplerblock *sGatherSampler;               // render thread only
-    static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static unsigned       sLightCountMismatches;                       // render thread only
     static unsigned       sMismatchLogged;                             // render thread only
     /// Shadow nodes whose slot assignment changed this frame — see

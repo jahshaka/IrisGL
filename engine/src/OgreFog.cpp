@@ -35,21 +35,17 @@ namespace jahshaka { namespace engine { namespace detail {
 std::map<const Ogre::SceneManager *, FogState> FogHlmsListener::sFogState;   // render thread only
 std::map<const Ogre::SceneManager *, float>    FogHlmsListener::sSceneTime;  // render thread only
 std::map<const Ogre::SceneManager *, FogHlmsListener::IfdState> FogHlmsListener::sIfdState;  // render thread only
-Ogre::HlmsPbs                                 *FogHlmsListener::sPbs = nullptr;
 unsigned                                       FogHlmsListener::sLightCountMismatches = 0;
 unsigned                                       FogHlmsListener::sMismatchLogged = 0;
 std::vector<const Ogre::CompositorShadowNode *> FogHlmsListener::sAssignmentChanged;  // render thread only
 std::map<const Ogre::SceneManager *, FogHlmsListener::SkyEnvState>
                                                FogHlmsListener::sSkyEnv;      // render thread only
-Ogre::TextureGpu             *FogHlmsListener::sPassSkyCube    = nullptr;     // render thread only
-const Ogre::HlmsSamplerblock *FogHlmsListener::sPassSkySampler = nullptr;     // render thread only
+FogHlmsListener::PassBinds FogHlmsListener::sPass[Ogre::HLMS_MAX];          // render thread only
 Ogre::HlmsManager            *FogHlmsListener::sSamplerMgr     = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sEnvSampler     = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sGatherSampler  = nullptr;     // render thread only
 std::map<const Ogre::SceneManager *, Ogre::TextureGpu *>
                               FogHlmsListener::sProbeGather;                  // render thread only
-Ogre::TextureGpu             *FogHlmsListener::sPassProbeGather = nullptr;    // render thread only
-const Ogre::HlmsSamplerblock *FogHlmsListener::sPassProbeGatherSampler = nullptr;  // render thread
 
 FogHlmsListener gFogListener;
 
@@ -178,22 +174,24 @@ Ogre::uint16 FogHlmsListener::getNumExtraPassTextures(const Ogre::HlmsPropertyVe
 }
 
 void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *commandBuffer,
-                                      const Ogre::HlmsDatablock *, size_t texUnit) {
+                                      const Ogre::HlmsDatablock *datablock, size_t texUnit) {
     // The pair is set together in preparePassHash or not at all: a slot claimed
     // by getNumExtraPassTextures and left unbound is an undefined descriptor,
-    // and the two conditions must therefore be the SAME condition.
-    if (casterPass || !commandBuffer) return;
+    // and the two conditions must therefore be the SAME condition. The host is
+    // the datablock's creator: its own pass's copy, never another host's.
+    if (casterPass || !commandBuffer || !datablock || !datablock->getCreator()) return;
+    const PassBinds &pb = sPass[datablock->getCreator()->getType()];
     size_t unit = texUnit;
-    if (sPassSkyCube && sPassSkySampler) {
+    if (pb.skyCube && pb.skySampler) {
         *commandBuffer->addCommand<Ogre::CbTexture>() =
-            Ogre::CbTexture(Ogre::uint16(unit), sPassSkyCube, sPassSkySampler);
+            Ogre::CbTexture(Ogre::uint16(unit), pb.skyCube, pb.skySampler);
         ++unit;
     }
     // GATHER-0's irradiance, second in the fixed order (see
     // getNumExtraPassTextures).
-    if (sPassProbeGather && sPassProbeGatherSampler) {
+    if (pb.probeGather && pb.probeGatherSampler) {
         *commandBuffer->addCommand<Ogre::CbTexture>() =
-            Ogre::CbTexture(Ogre::uint16(unit), sPassProbeGather, sPassProbeGatherSampler);
+            Ogre::CbTexture(Ogre::uint16(unit), pb.probeGather, pb.probeGatherSampler);
         ++unit;
     }
 }
@@ -245,7 +243,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // THE ENVIRONMENT'S SLOT (PHOTON-ENV-1; first claimed by ogre-patch 0048 for
     // the probe-array pass alone), decided here and read twice afterwards: by
     // getNumExtraPassTextures (through the PROPERTY, on any thread) and by
-    // hlmsTypeChanged (through sPassSkyCube, on this one).
+    // hlmsTypeChanged (through this host's PassBinds, on this one).
     //
     // CLAIMED WHEREVER SOMETHING IN THE PASS READS IT: a bound voxel volume (every
     // cone's escape reads the environment — Vct_piece_ps.any, jah_environment.glsl)
@@ -259,8 +257,10 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // ITS OWN SAMPLER, acquired ONCE per manager and never per pass (the
     // samplerblock reference count is a uint16 — DOCS/traps/ENGINE.md): the slot
     // exists without a PCC now, so the PCC's block cannot be borrowed.
-    sPassSkyCube = nullptr;
-    sPassSkySampler = nullptr;
+    PassBinds unused;
+    PassBinds &pb = hlms ? sPass[hlms->getType()] : unused;
+    pb.skyCube = nullptr;
+    pb.skySampler = nullptr;
     if (hlms && !casterPass && sceneManager) {
         static const Ogre::IdString kCubemapsAuto("hlms_enable_cubemaps_auto");
         static const Ogre::IdString kVctNumProbes("vct_num_probes");
@@ -271,8 +271,8 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             const Ogre::HlmsSamplerblock *envSampler =
                 acquireSampler(hlms->getHlmsManager(), true);
             if (envSampler) {
-                sPassSkyCube = sky.cube;
-                sPassSkySampler = envSampler;
+                pb.skyCube = sky.cube;
+                pb.skySampler = envSampler;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_env", 1);
             }
         }
@@ -285,8 +285,8 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // `sProbeGather` is empty in every build that never arms the spike and on
     // every frame of one that has disarmed it, so this is one map lookup on a
     // colour pass and nothing else changes anywhere.
-    sPassProbeGather = nullptr;
-    sPassProbeGatherSampler = nullptr;
+    pb.probeGather = nullptr;
+    pb.probeGatherSampler = nullptr;
     if (hlms && !casterPass && sceneManager && !sProbeGather.empty()) {
         Ogre::TextureGpu *gather = probeGather(sceneManager);
         if (gather) {
@@ -306,8 +306,8 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             // getNumExtraPassTextures and left unbound is an undefined
             // descriptor, so no sampler means no property either.
             if (gatherSampler) {
-                sPassProbeGatherSampler = gatherSampler;
-                sPassProbeGather = gather;
+                pb.probeGatherSampler = gatherSampler;
+                pb.probeGather = gather;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_probe_gather", 1);
             }
         }
@@ -403,8 +403,10 @@ void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
     // ...and the sky cube, for the same recycled-pointer reason. The texture it
     // names dies with the scene.
     sSkyEnv.erase(sm);
-    sPassSkyCube = nullptr;
-    sPassSkySampler = nullptr;
+    for (PassBinds &pb : sPass) {
+        pb.skyCube = nullptr;
+        pb.skySampler = nullptr;
+    }
 }
 
 void FogHlmsListener::setSceneTime(const Ogre::SceneManager *sm, float seconds) {
@@ -442,8 +444,6 @@ FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
     return p;
 }
 
-void FogHlmsListener::setPbs(Ogre::HlmsPbs *pbs) { sPbs = pbs; }
-
 // ONE REFERENCE PER MANAGER, TAKEN ON FIRST USE AND GIVEN BACK BY
 // releaseSamplers. A manager other than the one holding the references (which
 // only a missed release could leave) is answered by releasing the old pair
@@ -470,9 +470,7 @@ void FogHlmsListener::releaseSamplers() {
     }
     sSamplerMgr = nullptr;
     sEnvSampler = sGatherSampler = nullptr;
-    sPassSkySampler = sPassProbeGatherSampler = nullptr;
-    sPassSkyCube = nullptr;
-    sPassProbeGather = nullptr;
+    for (PassBinds &pb : sPass) pb = PassBinds();
 }
 
 Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool, bool,

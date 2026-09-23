@@ -2648,7 +2648,9 @@ void OgreEngine::ensureHlms() {
     // material decode, a derived HlmsPbs on the Terra pattern, registered BESIDE
     // PBS and in the same breath: window -> registerHlms -> scene manager is the
     // startup-order trap, and this is the registerHlms step. Nothing in the
-    // product draws through it yet (S3-DRAW binds it to the id pass). Its pass provider — the engine's ONE CompositorPassProvider,
+    // product draws through it yet (S3-DRAW binds it to the id pass); it is TOLD
+    // everything PBS is told by tellEveryHlms below and at the head of each of its
+    // passes. Its pass provider — the engine's ONE CompositorPassProvider,
     // multiplexed on customId — is installed here too, before any workspace
     // definition could name a custom pass.
     HlmsAtom::getDefaultPaths(mainPath, libPaths);
@@ -2659,13 +2661,6 @@ void OgreEngine::ensureHlms() {
             OGRE_NEW HlmsAtom(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
     AtomPassProvider::install(mRoot->getCompositorManager2());
-    // The pass-buffer listener asks HlmsPbs, on the render thread, for the state
-    // of the pass it is building: which PCC owns the env-probe slot (the sky
-    // cube's register, SKY-FALLBACK-1). Asking the Hlms itself rather than
-    // mirroring the state in a flag of ours is what makes the two impossible to
-    // disagree.
-    FogHlmsListener::setPbs(
-        static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)));
     // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;
     // Scene::setAmbient converts the flat/hemisphere pair exactly). The mode is a
     // property of the HlmsPbs INSTANCE, not of a scene, so it cannot be chosen
@@ -2728,12 +2723,15 @@ void OgreEngine::ensureHlms() {
     // billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
-    // generated shader (and its properties) there, for EVERY PBS-family host.
-    // Diagnostic only.
+    // generated shader (and its properties) there, for EVERY PBS-family host (a
+    // debug output path is not readable back off an Hlms, so it is the one thing
+    // tellEveryHlms cannot relay). Diagnostic only.
     if (const char *dbg = std::getenv("JAHSHAKA_HLMS_DEBUG_DIR")) {
         mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setDebugOutputPath(true, true, dbg);
         mRoot->getHlmsManager()->getHlms(HlmsAtom::kType)->setDebugOutputPath(true, true, dbg);
     }
+    // ...and every other PBS-family host now knows what PBS was just told.
+    tellEveryHlms(mRoot->getHlmsManager());
     // THE CACHE LOAD GOES HERE and nowhere else (SHADER_CACHE_SPEC §4.3 rule 5):
     // after BOTH registerHlms calls — HlmsDiskCache::applyTo needs the Hlms
     // instances to exist — and before registerCommonMaterials(), which parses
@@ -2837,6 +2835,110 @@ void OgreEngine::ensureHlms() {
     // here, rather than on the first frame of a world open.
     hud::build(mRoot);
     createShadowNode();
+}
+
+// ---------------------------------------------------------------------------
+// tellEveryHlms — THE ONE FUNCTION every PBS-family host is told through
+// (ATOM-S3-PARITY; SPECS/atom/D1 section 1; HlmsAtom.h).
+//
+// WHAT PBS IS TOLD TODAY, by every site that asks the HlmsManager for HLMS_PBS
+// (grepped at the lane's base; the list is the relay below, one row per setter):
+//   registerHlms (here)   the listener (fog, the environment's slot, the gather),
+//                         the ambient mode (SH), the non-caster directional budget,
+//                         static-branching lights (and the per-pixel shadow receive
+//                         it forces)
+//   OgreGi.cpp            setVctLighting, setIrradianceField,
+//                         setParallaxCorrectedCubemap (pointer + two distances)
+//   OgreSky.cpp           _notifyIblSpecMipmap / resetIblSpecMipmap(0)
+//   OgreLights.cpp        setAreaLightForwardSettings, setAreaLightMasks,
+//                         setLightProfilesTexture, loadLtcMatrix
+//   OgrePlanar.cpp        setPlanarReflections
+//   OgreShadow.cpp        setShadowSettings (the PCF kernel)
+//
+// WHY A RELAY AND NOT A ROUTE. Those sites live in files other lanes own, so they
+// keep telling PBS, and PBS is the source of truth: this copies what PBS HOLDS onto
+// every other host at the moment that host reads it (registration, and the head of
+// each of its passes — HlmsAtom::analyzeBarriers/preparePassHash). The engine's own
+// rule for the listener ("asking the Hlms itself rather than mirroring the state in a
+// flag of ours is what makes the two impossible to disagree") is the same argument.
+// It is also what makes a pointer PBS was told to DROP (a VctLighting about to be
+// deleted) unreachable from the other host: the relay runs before the host reads.
+//
+// WHAT THE PIN DOES NOT LET IT READ, stated rather than guessed:
+//   * the PCC's two blend distances (no getter on HlmsPbs) — a PCC bound to PBS is
+//     NOT relayed; the host keeps none and `atomRelayGaps().pccUnrelayed` says so.
+//     Closing it is a getter in a fork commit or the site's own route (S3-DRAW).
+//   * the LTC matrix (no getter) — area lights are not on the day-one decode list;
+//     `ltcUnknown` is always reported.
+//   * the IBL mip count (no getter) — relayed as the value PBS's own automatic rule
+//     yields (resetIblSpecMipmap(0): the largest reflection texture any PBS datablock
+//     binds, and the PCC's), which is how the engine drives it.
+namespace {
+AtomRelayGaps gRelayGaps;
+}  // namespace
+
+const AtomRelayGaps &atomRelayGaps() { return gRelayGaps; }
+
+void tellEveryHlms(Ogre::HlmsManager *manager) {
+    if (!manager) return;
+    auto *pbs = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HLMS_PBS));
+    if (!pbs) return;
+    for (int t = Ogre::HLMS_LOW_LEVEL + 1; t < Ogre::HLMS_MAX; ++t) {
+        if (t == Ogre::HLMS_PBS) continue;
+        auto *host = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HlmsTypes(t)));
+        if (!host) continue;   // Unlit and anything else that is not PBS-family
+        if (host->getListener() != pbs->getListener()) host->setListener(pbs->getListener());
+        if (host->getAmbientLightMode() != pbs->getAmbientLightMode())
+            host->setAmbientLightMode(pbs->getAmbientLightMode());
+        if (host->getMaxNonCasterDirectionalLights() != pbs->getMaxNonCasterDirectionalLights())
+            host->setMaxNonCasterDirectionalLights(pbs->getMaxNonCasterDirectionalLights());
+        if (host->getStaticBranchingLights() != pbs->getStaticBranchingLights())
+            host->setStaticBranchingLights(pbs->getStaticBranchingLights());
+        if (host->getShadowReceiversInPixelShader() != pbs->getShadowReceiversInPixelShader())
+            host->setShadowReceiversInPixelShader(pbs->getShadowReceiversInPixelShader());
+        if (host->getAreaLightsApproxLimit() != pbs->getAreaLightsApproxLimit() ||
+            host->getAreaLightsLtcLimit() != pbs->getAreaLightsLtcLimit())
+            host->setAreaLightForwardSettings(pbs->getAreaLightsApproxLimit(),
+                                              pbs->getAreaLightsLtcLimit());
+        if (host->getShadowFilter() != pbs->getShadowFilter())
+            host->setShadowSettings(pbs->getShadowFilter());
+        if (host->getEsmK() != pbs->getEsmK()) host->setEsmK(pbs->getEsmK());
+        if (host->getVctLighting() != pbs->getVctLighting()) host->setVctLighting(pbs->getVctLighting());
+        if (host->getVctFullConeCount() != pbs->getVctFullConeCount())
+            host->setVctFullConeCount(pbs->getVctFullConeCount());
+        if (host->getIrradianceField() != pbs->getIrradianceField())
+            host->setIrradianceField(pbs->getIrradianceField());
+        if (host->getIrradianceVolume() != pbs->getIrradianceVolume())
+            host->setIrradianceVolume(pbs->getIrradianceVolume());
+        if (host->getAreaLightMasks() != pbs->getAreaLightMasks())
+            host->setAreaLightMasks(pbs->getAreaLightMasks());
+        if (host->getLightProfilesTexture() != pbs->getLightProfilesTexture())
+            host->setLightProfilesTexture(pbs->getLightProfilesTexture());
+#ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
+        if (host->getPlanarReflections() != pbs->getPlanarReflections())
+            host->setPlanarReflections(pbs->getPlanarReflections());
+#endif
+        // THE PCC: not relayable at this pin (see above) — the host holds none.
+        gRelayGaps.pccUnrelayed = pbs->getParallaxCorrectedCubemap() != nullptr;
+        if (host->getParallaxCorrectedCubemap()) host->setParallaxCorrectedCubemap(nullptr);
+        gRelayGaps.ltcUnknown = true;
+        // THE IBL MIP COUNT, as PBS's automatic rule derives it.
+        float mips = 1.0f;
+        for (const auto &kv : pbs->getDatablockMap()) {
+            const auto *db = static_cast<const Ogre::HlmsPbsDatablock *>(kv.second.datablock);
+            if (const Ogre::TextureGpu *refl = db ? db->getTexture(Ogre::PBSM_REFLECTION) : nullptr)
+                mips = std::max(mips, float(refl->getNumMipmaps()));
+        }
+        if (Ogre::ParallaxCorrectedCubemapBase *pcc = pbs->getParallaxCorrectedCubemap())
+            if (Ogre::TextureGpu *bind = pcc->getBindTexture())
+                mips = std::max(mips, float(bind->getNumMipmaps()));
+        const auto relayedMips = Ogre::uint8(std::min(mips, 255.0f));
+        if (gRelayGaps.iblMips[t] != relayedMips) {
+            gRelayGaps.iblMips[t] = relayedMips;
+            host->resetIblSpecMipmap(relayedMips);
+        }
+        ++gRelayGaps.relays;
+    }
 }
 
 void OgreEngine::registerCommonMaterials() {
