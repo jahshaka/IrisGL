@@ -2616,27 +2616,23 @@ struct GiQualityFacts {
     /// what was MEASURED on this pin, and the measurement is not the one phase
     /// 0 took.
     ///
-    /// SURFACE-CACHE-0 read 0.042-0.057 ms per card and sized this at twenty
-    /// cards to the millisecond. SURFACE-CACHE-1b re-measured it in the REAL
-    /// scene manager and read **0.33-0.37 ms per card** — and the difference is
-    /// not the real scene and not the shadow node (both were measured out: the
-    /// figure is flat from 16 items to 64, and recalculating the shadow node
-    /// once per card set instead of once per card moved it by nothing). It is
-    /// that phase 0 drove SIX cards through ONE `CompositorWorkspace::_update`
-    /// and this Component drives ONE, because six cards need six camera poses
-    /// and one update carries one. 0.32 ms of the 0.33 is that update's own
-    /// fixed cost; the five `vkCmdCopyImage` into the atlas are 0.013.
+    /// THE NUMBER IT STANDS ON (PHOTON-CARDS-1, SC-1b-ITEM8): **0.18-0.20 ms a
+    /// card**, CPU, with the shadow fit FIRING — `sc1b_measure showroom`, a
+    /// Showroom-2-shaped scene (45 carded instances, a sun, three shadowed point
+    /// lamps), all arms in one process: 0.218 ms a card at one card per
+    /// workspace update, 0.200 at three, 0.184 at a full batch of eight. About
+    /// 0.13 of it is the card's own PSSM fit (three caster passes over the
+    /// still world; 0.053-0.076 with nothing casting), because the capture now
+    /// runs inside Ogre's frame with the frame's light list and a camera per
+    /// pass — the 0.33 ms this row was first sized on was a hand-driven
+    /// workspace update per card whose fit never fired (its light list was
+    /// empty). The capture's shadow node is PSSM-only (kCardShadowNodeName):
+    /// with the probe node's point-lamp cubes it was ~1.0 ms a card.
     ///
-    /// So the budget is three cards to the millisecond, not twenty, and the
-    /// shipped default says so rather than promising a cadence the engine does
-    /// not have. THE HEADROOM IS NAMED AND MEASURED: 0.32 / 6 = 0.053 is
-    /// exactly phase 0's figure, so a capture node with N target passes under
-    /// per-pass execution masks — N cards of ONE instance per update, which
-    /// needs only the one subject bit — would buy back most of the difference
-    /// (~0.09 ms a card at N = 8). That is a lane of its own (the scratch has to
-    /// become a strip and a sub-page card needs an off-centre ortho window), and
-    /// it is a cost lane, not a correctness one.
-    unsigned cardBudgetTexels = 32768u;   // 2 cards a frame ~ 0.7 ms
+    /// So the rows keep the milliseconds they were given — ~0.4 / ~0.6 /
+    /// ~1.0 ms a frame — and buy two, three and five cards with them. One
+    /// workspace update carries at most eight (`kCaptureBatch`).
+    unsigned cardBudgetTexels = 49152u;   // 3 cards a frame ~ 0.6 ms
     /// THE RESIDENCY RADIUS, metres. Beyond it an instance holds no pages. It
     /// is a tier row because the atlas is a fixed 2k at this phase: 256 pages
     /// of 128 texels is about forty six-card sets at full size, so the radius
@@ -2687,7 +2683,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 2;
         f.voxelResolution = 32u;
         f.probeFaceSize   = 128u;
-        f.cardBudgetTexels = 16384u;    // 1 card a frame ~ 0.35 ms
+        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
         f.cardResidencyRadius = 15.0f;
         f.pixelTolerance = 2.0f;        // the Atom column; see the field
         break;
@@ -2703,7 +2699,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
         f.probeHdrDefault     = true;
         f.probeShadowsDefault = true;
-        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 1.0 ms on the measured cost
+        f.cardBudgetTexels = 81920u;    // 5 cards a frame ~ 1.0 ms on the measured cost
         f.cardResidencyRadius = 60.0f;
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         break;
@@ -2715,7 +2711,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 4;
         f.voxelResolution = 64u;
         f.probeFaceSize   = 256u;
-        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.7 ms
+        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.6 ms
         f.cardResidencyRadius = 30.0f;
         f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
         break;

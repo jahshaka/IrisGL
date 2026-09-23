@@ -1081,12 +1081,13 @@ void OgreEngine::renderOneFrame() {
                 // polled in that same frame.
                 s->pollSkyShRead();
                 s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
-                // SURFACE-CACHE phase 2, after the pendings and before any
-                // workspace runs: the cache reads the material generation and
-                // the light write serial that applyPendingGi may just have
-                // moved, and it drives its own capture workspace by hand, which
-                // has to happen while the frame's command buffer is open and
-                // the monitor's listeners are attached.
+                // SURFACE-CACHE, after the pendings: the cache reads the
+                // material generation and the light write serial that
+                // applyPendingGi may just have moved, and PLANS this frame's
+                // capture batch. The capture itself runs inside Root's frame
+                // (its workspace is enabled and first in the manager's list),
+                // after the frame's scene-graph update and light list — the
+                // light list a capture planned here used to run without.
                 s->updateSurfaceCache();
             }
         // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
@@ -2926,6 +2927,12 @@ void OgreEngine::createShadowNode() {
                         std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps),
                         mShadowPerMapClears, probeRes / 2u);
     }
+    // The CARD-CAPTURE node (OgreView::kCardShadowNodeName has the numbers):
+    // the sun's PSSM at the probe resolution, no focused maps, one whole-atlas
+    // clear — instantiated once per scene whose surface cache is on.
+    if (!cm->hasShadowNodeDefinition(OgreView::kCardShadowNodeName))
+        buildShadowNode(OgreView::kCardShadowNodeName, probeShadowResolution(mShadowResolution), 0u,
+                        false, 0u);
 }
 
 }  // namespace detail

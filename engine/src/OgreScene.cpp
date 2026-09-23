@@ -1766,11 +1766,10 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 //
 // WHERE THIS RUNS AND WHY. Once per DRAWN scene from `renderOneFrame`, right
 // after `applyPendingGi` — so a material edit or a light write has already
-// bumped the signatures the cache compares — and before Ogre's own workspaces.
-// That is "in the frame" in the sense that matters: the monitor's per-pass
-// listeners are attached at the frame's head, the GPU work goes into this
-// frame's command buffer, and the capture's cost is visible where every other
-// engine cache's cost is.
+// bumped the signatures the cache compares — and before Root's frame. It
+// PLANS (residency, invalidation, this frame's batch); the capture executes
+// inside Root's frame, after `updateSceneGraph`, as the first workspace in the
+// manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
 void OgreScene::updateSurfaceCache() {
     // AUTO IS OFF AT THIS PHASE, and it says so rather than quietly capturing:
     // nothing reads a card until phase 4 (the ray hit), so a user's machine

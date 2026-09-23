@@ -5814,6 +5814,21 @@ public:
     /// PBS variants (numShadowMapLights differs from the main view's), compiled
     /// once and disk-cached, exactly like the reflect node's.
     static constexpr const char *kProbeShadowNodeName = "JahshakaProbeShadowNode";
+    /// The FOURTH shadow node: the SURFACE CACHE's card capture only
+    /// (OgreSurfaceCache.cpp) — the probe node's resolution with the SUN's
+    /// three PSSM splits and NOTHING else (no focused maps, no scratch cube).
+    ///
+    /// WHY PSSM-ONLY (PHOTON-CARDS-1, measured with `sc1b_measure`, one process
+    /// per arm, Showroom-2-shaped: 45 carded instances, a sun, three shadowed
+    /// point lamps): the capture is a PREPASS, and the prepass writes exactly
+    /// one shadow term — the directional light's PSSM term (upstream's
+    /// `outPs_shadowRoughness`, which writes a constant 1.0 without PSSM). So a
+    /// point lamp's cube faces re-rendered for every card are pure waste: with
+    /// the probe node the per-card cost was 0.95-1.01 ms, with the lamps'
+    /// shadows off 0.20-0.22 ms, and with nothing casting 0.07-0.08 ms. A lamp's
+    /// shadow on a card is the traced residue's (PHOTON P5), not the capture's.
+    /// Casters: the probe kind's (the still world — what a card is).
+    static constexpr const char *kCardShadowNodeName = "JahshakaCardShadowNode";
 
     // ---- The workspace seam (POST_CHAIN_SPEC.md; the planar-reflection lane
     //      depends on it) ---------------------------------------------------

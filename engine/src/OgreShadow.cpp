@@ -285,7 +285,9 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     const ShadowNodeKind kind =
         Ogre::IdString(name) == Ogre::IdString(OgreView::kReflectShadowNodeName) ? ShadowNodeKind::Reflect
         : Ogre::IdString(name) == Ogre::IdString(OgreView::kProbeShadowNodeName) ? ShadowNodeKind::Probe
-                                                                                  : ShadowNodeKind::View;
+        // The card capture draws the probe kind's casters: the still world.
+        : Ogre::IdString(name) == Ogre::IdString(OgreView::kCardShadowNodeName) ? ShadowNodeKind::Probe
+                                                                                 : ShadowNodeKind::View;
     const Ogre::uint32 casterMask = shadowCasterChannels(kind);
     const Ogre::uint8 directionalMask = Ogre::uint8(1u << Ogre::Light::LT_DIRECTIONAL);
     const Ogre::uint8 pointMask       = Ogre::uint8(1u << Ogre::Light::LT_POINT);
@@ -489,6 +491,10 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, b
             cm->removeShadowNodeDefinition(OgreView::kReflectShadowNodeName);
         if (cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName))
             cm->removeShadowNodeDefinition(OgreView::kProbeShadowNodeName);
+        // (the surface cache that instantiates the card node was dropped with
+        // the GI arm above — dropGiForShadowRebuild — and rebuilds next frame)
+        if (cm->hasShadowNodeDefinition(OgreView::kCardShadowNodeName))
+            cm->removeShadowNodeDefinition(OgreView::kCardShadowNodeName);
         createShadowNode();
         for (OgreView *v : rebuilt) v->recreateWorkspaceAfterShadowRebuild();
         for (OgreScene *s : planarRebuilt) s->recreatePlanarAfterShadowRebuild();

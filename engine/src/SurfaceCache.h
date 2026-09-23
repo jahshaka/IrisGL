@@ -70,6 +70,7 @@
 #include <OgreQuaternion.h>
 #include <OgreVector3.h>
 
+#include <chrono>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -118,11 +119,14 @@ constexpr unsigned kCardAtlasSize = 2048u;
 /// under about 12.5 cm reaches that path. A smaller floor needs a wider mask,
 /// not a smaller constant.
 constexpr unsigned kCardMinSize = 16u;
-/// How many capture cameras the Component keeps and cycles between. TWO: the
-/// pin's shadow node caches its light list and its casters box per (camera,
-/// frame), and a hand-driven workspace does not advance the frame — so the
-/// cheapest way to give every card its own fit is to change the camera.
-constexpr unsigned kCaptureCameras = 2u;
+/// THE BATCH: how many cards ONE capture-workspace update carries — one
+/// PASS_SCENE, one camera and one scratch slice each (CARD-BATCH-1). Eight
+/// because the batch is gated by the workspace's execution mask, one bit a
+/// pass, and Ogre's execution mask is a uint8.
+constexpr unsigned kCaptureBatch = 8u;
+/// The `CompositorPassDef::mIdentifier` of pass b of the batch is this + b —
+/// how the per-pass listener knows which card a pass is capturing.
+constexpr unsigned kCardPassIdentifier = 0x4A434300u;   // 'JCC\0'
 
 
 /// ONE CARD, ALLOCATED AND (perhaps) CAPTURED.
@@ -264,7 +268,13 @@ public:
     /// (`jah_card_capture`) is set from this and from nothing else.
     static bool capturing();
 
+    /// THE BATCH'S HOOKS (OgreSurfaceCache.cpp, "The batch, as Ogre's frame
+    /// executes it"): the frame-head flag reset, the timing, the per-pass
+    /// subject grant, and the copies after the last pass.
+    void allWorkspacesBeforeBeginUpdate() override;
     void workspacePreUpdate(Ogre::CompositorWorkspace *) override;
+    void passPreExecute(Ogre::CompositorPass *) override;
+    void passPosExecute(Ogre::CompositorPass *) override;
     void workspacePosUpdate(Ogre::CompositorWorkspace *) override;
 
 private:
@@ -306,8 +316,9 @@ private:
     void refreshResidency(const CardSceneView &view);
     void releaseInstance(size_t idx);
     bool buildCardsFor(const CardSceneView::Candidate &cand);
-    void captureCard(CardRec &card);
-    void aimCamera(const CardRec &card);
+    /// Aims batch slot `slot`'s camera at `card` (the pass bound to it runs
+    /// later this frame, inside Ogre's own workspace update).
+    void aimCamera(const CardRec &card, unsigned slot);
     /// Rebuilds the two GPU tables from `mCards` / `mInstances` and uploads
     /// them. Called only when the ALLOCATION changed — never per capture.
     void syncBuffers();
@@ -331,17 +342,25 @@ private:
     std::vector<unsigned> mInstanceBufferCpu;
     bool mTableDirty = false;
 
-    /// TWO capture cameras, used alternately — the shadow node's per-camera
-    /// early-out is what a single one defeats itself on (OgreSurfaceCache.cpp).
-    Ogre::Camera *mCam[kCaptureCameras] = {};
-    unsigned mCamTurn = 0u;
+    /// ONE capture camera per pass of the batch, bound for life.
+    Ogre::Camera *mCam[kCaptureBatch] = {};
+    /// THIS FRAME'S BATCH: indices into mCards, slot i = pass i. Planned by
+    /// `update()`, executed by Ogre's frame, consumed by `workspacePosUpdate`.
+    std::vector<unsigned> mBatch;
+    /// The compositor frame the batch was planned for — a batch never runs in
+    /// any other frame.
+    size_t mBatchFrame = size_t(-1);
+    std::chrono::steady_clock::time_point mBatchStart;
+    /// The subject's flags and LOD as they were before its pass.
+    Ogre::uint32 mSubjectFlags = 0u;
+    unsigned char mSubjectLod = 0u;
     Ogre::CompositorWorkspace *mWs = nullptr;
     std::string mNodeDef, mWsDef;
 
     std::vector<InstanceRec> mInstances;
     std::vector<CardRec> mCards;
     std::unordered_map<NodeId, size_t> mByNode;
-    /// The capture queue: indices into mCards, re-sorted each frame.
+    /// The capture queue: indices into mCards, rebuilt and sorted each frame.
     std::vector<unsigned> mQueue;
 
     /// The page grid. `mPageUsed[p]` is 0 for free, kCardPageSize for a whole
