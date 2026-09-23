@@ -59,20 +59,15 @@ namespace detail {
 
 /// THE ONE FUNCTION every PBS-family host is told through (D1 §1; OgreEngine.cpp).
 /// PBS is the source of truth — every engine site tells HlmsPbs — and this copies
-/// what PBS holds onto every other PBS-family host at the moment that host reads it
-/// (registration, and the head of each pass: `HlmsAtom::analyzeBarriers` /
-/// `preparePassHash`). Asking PBS at the moment of use rather than mirroring each
-/// call site is what makes the two hosts impossible to disagree.
-void tellEveryHlms(Ogre::HlmsManager *manager);
-/// What tellEveryHlms could not relay at this pin, and a count of relays — read by
-/// engine.atom_parity (the grid asserts its configuration is inside what is relayed).
-struct AtomRelayGaps {
-    bool pccUnrelayed = false;   ///< PBS holds a PCC; its two blend distances have no getter
-    bool ltcUnknown = false;     ///< whether PBS loaded the LTC matrix has no getter
-    unsigned long long relays = 0ull;
-    Ogre::uint8 iblMips[Ogre::HLMS_MAX] = {};   ///< the IBL mip count relayed, per host type
-};
-const AtomRelayGaps &atomRelayGaps();
+/// what PBS holds onto every other PBS-family host: at registration (`force`) and
+/// once per frame before a host's first read (HlmsAtom's analyzeBarriers /
+/// preparePassHash). Nothing is left unrelayed at this pin.
+void tellEveryHlms(Ogre::HlmsManager *manager, bool force = false);
+
+/// The registered HlmsAtom's forgetDecodeTwinOf — a no-op before registration, after
+/// Root, or for a datablock that is not PBS's. The one call every PBS-datablock
+/// destruction site makes (OgreMaterials.cpp, OgreScene.cpp).
+void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs);
 
 /// The id image's two words (R32G32_UINT), the contract between whatever WRITES the
 /// id buffer (the hand-made one of engine.atom_parity today, S3-DRAW's id pass
@@ -136,6 +131,11 @@ public:
     /// Destroys every twin (and the bucket table). Called before the PBS datablocks
     /// they point at can die.
     void destroyDecodeTwins();
+    /// A PBS DATABLOCK IS DYING: its twin (if any) dies with it, BEFORE it — a twin
+    /// keeps the PBS datablock's pointer (fillBuffersForV2 binds its pool) and the
+    /// twin map is keyed by it, so a recycled address would find a stale twin. Every
+    /// engine site that destroys a PBS datablock calls `forgetDecodeTwinOf` first.
+    void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs);
     size_t decodeTwinCount() const { return mTwins.size(); }
 
     /// THE MATERIAL WORD of a PBS datablock: {pool index : 16 | slot : 16} in HlmsPbs's

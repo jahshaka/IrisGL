@@ -2,6 +2,7 @@
 // the teardown helpers. Meshes, materials, sky, GI and particles live in their
 // own translation units.
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"
 // SURFACE-CACHE phase 2: the cache is a unique_ptr member and the per-frame
 // pass lives here, so this TU needs the Component's complete type.
 #include "SurfaceCache.h"
@@ -1476,8 +1477,10 @@ void OgreScene::destroy() {
         releaseQueueDepthAnchor();
         for (auto &kv : mMaterials) {
             Ogre::Hlms *hlms = hlmsFor(kv.second);
-            if (hlms->getDatablock(Ogre::IdString(kv.second.datablockName)))
+            if (Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(kv.second.datablockName))) {
+                forgetDecodeTwinOf(db);   // its decode twin dies first (HlmsAtom.h)
                 hlms->destroyDatablock(Ogre::IdString(kv.second.datablockName));
+            }
         }
         mMaterials.clear();
         for (auto &kv : mTextures) releaseTextureRec(kv.second);
@@ -1689,8 +1692,10 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     }
     if (!n.datablockName.empty()) {
         auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
-        if (hlmsPbs->getDatablock(Ogre::IdString(n.datablockName)))
+        if (Ogre::HlmsDatablock *db = hlmsPbs->getDatablock(Ogre::IdString(n.datablockName))) {
+            forgetDecodeTwinOf(db);   // its decode twin dies first (HlmsAtom.h)
             hlmsPbs->destroyDatablock(Ogre::IdString(n.datablockName));
+        }
         n.datablockName.clear();
     }
     if (n.node) { mSceneMgr->destroySceneNode(n.node); n.node = nullptr; }

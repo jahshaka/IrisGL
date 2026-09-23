@@ -2649,8 +2649,8 @@ void OgreEngine::ensureHlms() {
     // PBS and in the same breath: window -> registerHlms -> scene manager is the
     // startup-order trap, and this is the registerHlms step. Nothing in the
     // product draws through it yet (S3-DRAW binds it to the id pass); it is TOLD
-    // everything PBS is told by tellEveryHlms below and at the head of each of its
-    // passes. Its pass provider — the engine's ONE CompositorPassProvider,
+    // everything PBS is told by tellEveryHlms below and once per frame before its
+    // first read. Its pass provider — the engine's ONE CompositorPassProvider,
     // multiplexed on customId — is installed here too, before any workspace
     // definition could name a custom pass.
     HlmsAtom::getDefaultPaths(mainPath, libPaths);
@@ -2724,14 +2724,13 @@ void OgreEngine::ensureHlms() {
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
     // generated shader (and its properties) there, for EVERY PBS-family host (a
-    // debug output path is not readable back off an Hlms, so it is the one thing
-    // tellEveryHlms cannot relay). Diagnostic only.
+    // debug output path is not relayed by tellEveryHlms). Diagnostic only.
     if (const char *dbg = std::getenv("JAHSHAKA_HLMS_DEBUG_DIR")) {
         mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setDebugOutputPath(true, true, dbg);
         mRoot->getHlmsManager()->getHlms(HlmsAtom::kType)->setDebugOutputPath(true, true, dbg);
     }
     // ...and every other PBS-family host now knows what PBS was just told.
-    tellEveryHlms(mRoot->getHlmsManager());
+    tellEveryHlms(mRoot->getHlmsManager(), true);
     // THE CACHE LOAD GOES HERE and nowhere else (SHADER_CACHE_SPEC §4.3 rule 5):
     // after BOTH registerHlms calls — HlmsDiskCache::applyTo needs the Hlms
     // instances to exist — and before registerCommonMaterials(), which parses
@@ -2857,30 +2856,25 @@ void OgreEngine::ensureHlms() {
 //
 // WHY A RELAY AND NOT A ROUTE. Those sites live in files other lanes own, so they
 // keep telling PBS, and PBS is the source of truth: this copies what PBS HOLDS onto
-// every other host at the moment that host reads it (registration, and the head of
-// each of its passes — HlmsAtom::analyzeBarriers/preparePassHash). The engine's own
-// rule for the listener ("asking the Hlms itself rather than mirroring the state in a
-// flag of ours is what makes the two impossible to disagree") is the same argument.
-// It is also what makes a pointer PBS was told to DROP (a VctLighting about to be
-// deleted) unreachable from the other host: the relay runs before the host reads.
+// every other host. A NEW engine site that tells PBS reaches every host for free; a
+// new HlmsPbs SETTER without a getter is the one thing it cannot see (the fork adds
+// the getter with the setter — ATOM-S3-PARITY added the four that were missing).
 //
-// WHAT THE PIN DOES NOT LET IT READ, stated rather than guessed:
-//   * the PCC's two blend distances (no getter on HlmsPbs) — a PCC bound to PBS is
-//     NOT relayed; the host keeps none and `atomRelayGaps().pccUnrelayed` says so.
-//     Closing it is a getter in a fork commit or the site's own route (S3-DRAW).
-//   * the LTC matrix (no getter) — area lights are not on the day-one decode list;
-//     `ltcUnknown` is always reported.
-//   * the IBL mip count (no getter) — relayed as the value PBS's own automatic rule
-//     yields (resetIblSpecMipmap(0): the largest reflection texture any PBS datablock
-//     binds, and the PCC's), which is how the engine drives it.
+// WHEN: at registration (forced), and ONCE PER FRAME (keyed on Root's frame number)
+// the first time a host reads it — HlmsAtom's analyzeBarriers/preparePassHash, which
+// run before any of its draws. Every engine setter runs on the update thread before
+// or after renderOneFrame, never between two passes of one frame, so a pointer PBS
+// was told to DROP (a VctLighting about to be deleted) is off every host before the
+// next frame's first read. Unchanged state costs one compare per field.
 namespace {
-AtomRelayGaps gRelayGaps;
+unsigned long sRelayFrame = ~0ul;
 }  // namespace
 
-const AtomRelayGaps &atomRelayGaps() { return gRelayGaps; }
-
-void tellEveryHlms(Ogre::HlmsManager *manager) {
+void tellEveryHlms(Ogre::HlmsManager *manager, bool force) {
     if (!manager) return;
+    const unsigned long frame = Ogre::Root::getSingleton().getNextFrameNumber();
+    if (!force && frame == sRelayFrame) return;
+    sRelayFrame = frame;
     auto *pbs = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HLMS_PBS));
     if (!pbs) return;
     for (int t = Ogre::HLMS_LOW_LEVEL + 1; t < Ogre::HLMS_MAX; ++t) {
@@ -2918,26 +2912,20 @@ void tellEveryHlms(Ogre::HlmsManager *manager) {
         if (host->getPlanarReflections() != pbs->getPlanarReflections())
             host->setPlanarReflections(pbs->getPlanarReflections());
 #endif
-        // THE PCC: not relayable at this pin (see above) — the host holds none.
-        gRelayGaps.pccUnrelayed = pbs->getParallaxCorrectedCubemap() != nullptr;
-        if (host->getParallaxCorrectedCubemap()) host->setParallaxCorrectedCubemap(nullptr);
-        gRelayGaps.ltcUnknown = true;
-        // THE IBL MIP COUNT, as PBS's automatic rule derives it.
-        float mips = 1.0f;
-        for (const auto &kv : pbs->getDatablockMap()) {
-            const auto *db = static_cast<const Ogre::HlmsPbsDatablock *>(kv.second.datablock);
-            if (const Ogre::TextureGpu *refl = db ? db->getTexture(Ogre::PBSM_REFLECTION) : nullptr)
-                mips = std::max(mips, float(refl->getNumMipmaps()));
-        }
-        if (Ogre::ParallaxCorrectedCubemapBase *pcc = pbs->getParallaxCorrectedCubemap())
-            if (Ogre::TextureGpu *bind = pcc->getBindTexture())
-                mips = std::max(mips, float(bind->getNumMipmaps()));
-        const auto relayedMips = Ogre::uint8(std::min(mips, 255.0f));
-        if (gRelayGaps.iblMips[t] != relayedMips) {
-            gRelayGaps.iblMips[t] = relayedMips;
-            host->resetIblSpecMipmap(relayedMips);
-        }
-        ++gRelayGaps.relays;
+        // THE PCC and its two blend distances, exactly as PBS was given them (fork
+        // getters, ATOM-S3-PARITY).
+        if (host->getParallaxCorrectedCubemap() != pbs->getParallaxCorrectedCubemap() ||
+            host->getPccVctMinDistance() != pbs->getPccVctMinDistance() ||
+            host->getPccVctMaxDistance() != pbs->getPccVctMaxDistance())
+            host->setParallaxCorrectedCubemap(pbs->getParallaxCorrectedCubemap(),
+                                              pbs->getPccVctMinDistance(), pbs->getPccVctMaxDistance());
+        // THE LTC MATRIX: loaded once and never unloaded (OgreLights.cpp); the host
+        // retrieves the same pooled textures.
+        if (pbs->getLtcMatrixTexture() && !host->getLtcMatrixTexture()) host->loadLtcMatrix();
+        // THE IBL MIP COUNT PBS uploads, READ (PBS stays in its automatic mode; the host
+        // is forced to PBS's value).
+        if (host->getMaxSpecIblMipmap() != pbs->getMaxSpecIblMipmap())
+            host->resetIblSpecMipmap(Ogre::uint8(std::min(255.0f, std::max(1.0f, pbs->getMaxSpecIblMipmap()))));
     }
 }
 

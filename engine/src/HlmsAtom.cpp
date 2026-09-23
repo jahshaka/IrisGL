@@ -230,6 +230,27 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std
     return twin;
 }
 
+void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
+    auto it = mTwinOfPbs.find(pbs);
+    if (it == mTwinOfPbs.end()) return;
+    Ogre::HlmsPbsDatablock *twin = it->second;
+    mTwinOfPbs.erase(it);
+    mTwins.erase(twin);
+    // A decode draw may still carry the twin; the owner detaches its renderables
+    // before it destroys materials (the grid's arm does), and Ogre asserts on a
+    // datablock with linked renderables.
+    if (twin && twin->getNameStr()) destroyDatablock(twin->getName());
+    mBucketDirty = true;
+}
+
+void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
+    if (!pbs || !pbs->getCreator() || pbs->getCreator()->getType() != Ogre::HLMS_PBS) return;
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
+    if (auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr)
+        atom->forgetDecodeTwinOf(pbs);
+}
+
 void HlmsAtom::destroyDecodeTwins() {
     for (auto &kv : mTwins) {
         if (kv.second.twin && kv.second.twin->getNameStr())
@@ -273,7 +294,7 @@ void HlmsAtom::uploadBucketTable() {
 }
 
 // ---------------------------------------------------------------------------
-// THE PASS: every entry point asks PBS what it holds first (tellEveryHlms).
+// THE PASS: the first read of a frame asks PBS what it holds (tellEveryHlms, once per frame).
 // ---------------------------------------------------------------------------
 void HlmsAtom::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
                                Ogre::ResourceTransitionArray &resourceTransitions,

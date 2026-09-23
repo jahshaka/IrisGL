@@ -1,6 +1,7 @@
 // Materials (PBR, unlit, outline), textures and the mesh/material attachment
 // verbs that bind them onto a node.
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"
 #include <cmath>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -764,8 +765,10 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         }
 
         Ogre::Hlms *oldHlms = hlmsFor(rec);
-        if (oldHlms->getDatablock(Ogre::IdString(rec.datablockName)))
+        if (Ogre::HlmsDatablock *old = oldHlms->getDatablock(Ogre::IdString(rec.datablockName))) {
+            forgetDecodeTwinOf(old);   // its decode twin dies first (HlmsAtom.h)
             oldHlms->destroyDatablock(Ogre::IdString(rec.datablockName));
+        }
 
         // A FRESH NAME, not the old one reused. Datablock names are IdStrings
         // in a per-Hlms registry and also key the shader cache's per-datablock
@@ -998,6 +1001,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
         Ogre::Hlms *hlms = hlmsFor(it->second);
         Ogre::HlmsDatablock *dying = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
         noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (patch 0081)
+        forgetDecodeTwinOf(dying);    // its decode twin dies first (HlmsAtom.h)
         if (dying) hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
         mMaterials.erase(it);
         return true;
