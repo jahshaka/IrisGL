@@ -20,11 +20,9 @@
 // world transform the ray query hands back, one cross product. A row the scene
 // never staged reads zero addresses and the function says so.
 //
-// THE DECODE IS THE VOXELISER'S (Samples/Media/VCT/VoxelGeometry_piece_cs.any,
-// geomIndex / geomPosition — the same row, the same 4-byte-aligned uint and
-// float references built from uvec2 addresses): that piece is Hlms media and
-// this file is compiled offline by glslang, so the few lines are the second
-// copy of that decode, stated.
+// THE DECODE IS THE VOXELISER'S, THE ONE TEXT: jah_geom_rows.glsl (GeometryRow,
+// geomIndex, geomPosition), which the voxeliser's jobs insert as the piece
+// JahGeomRows and this file includes. What is here is the normal.
 //
 // HOW A CALLER BINDS IT: JAH_GEOM_SLOTS (uint, entries in the per-slot table),
 // JAH_GEOM_ROW_OF(slot) (uint, 0xFFFFFFFF = no row), JAH_GEOM_LANE(row, k)
@@ -36,32 +34,7 @@
 #ifndef JAH_RQ_GEOM_GLSL
 #define JAH_RQ_GEOM_GLSL
 
-layout( buffer_reference, std430, buffer_reference_align = 4 ) readonly buffer JahGeomFloats
-{
-	float v[];
-};
-layout( buffer_reference, std430, buffer_reference_align = 4 ) readonly buffer JahGeomUints
-{
-	uint v[];
-};
-
-uint jahGeomIndex( uvec4 addr, uvec4 layout1, uint element )
-{
-	// layout1.y: index ELEMENTS skipped by flooring the address to 4 bytes.
-	element += layout1.y;
-	JahGeomUints idx = JahGeomUints( addr.zw );
-	if( ( layout1.x & 1u ) != 0u )
-		return idx.v[element];
-	const uint packed = idx.v[element >> 1u];
-	return ( ( element & 1u ) != 0u ) ? ( packed >> 16u ) : ( packed & 0xFFFFu );
-}
-
-vec3 jahGeomPosition( uvec4 addr, uvec4 layout0, uint vertex )
-{
-	JahGeomFloats pos = JahGeomFloats( addr.xy );
-	const uint lane = ( vertex * layout0.x + layout0.y ) >> 2u;
-	return vec3( pos.v[lane], pos.v[lane + 1u], pos.v[lane + 2u] );
-}
+#include "jah_geom_rows.glsl"
 
 /// The hit triangle's geometric normal in WORLD space, turned to face the ray's
 /// origin (against `dir`). False when the slot has no geometry row.
@@ -75,16 +48,17 @@ bool jahHitGeometricNormal( uint slot, uint geometryIndex, uint primitive, mat4x
 	if( row == 0xFFFFFFFFu )
 		return false;
 	row += geometryIndex;
-	const uvec4 addr = JAH_GEOM_LANE( row, 0u );
-	const uvec4 layout0 = JAH_GEOM_LANE( row, 1u );
-	const uvec4 layout1 = JAH_GEOM_LANE( row, 2u );
-	if( ( addr.x | addr.y ) == 0u || ( addr.z | addr.w ) == 0u )
+	GeometryRow g;
+	g.addresses = JAH_GEOM_LANE( row, 0u );
+	g.layout0 = JAH_GEOM_LANE( row, 1u );
+	g.layout1 = JAH_GEOM_LANE( row, 2u );
+	if( ( g.addresses.x | g.addresses.y ) == 0u || ( g.addresses.z | g.addresses.w ) == 0u )
 		return false;
 	vec3 w[3];
 	for( uint k = 0u; k < 3u; ++k )
 	{
-		const uint vtx = jahGeomIndex( addr, layout1, primitive * 3u + k );
-		w[k] = objectToWorld * vec4( jahGeomPosition( addr, layout0, vtx ), 1.0 );
+		const uint vtx = geomIndex( g, primitive * 3u + k );
+		w[k] = objectToWorld * vec4( geomPosition( g, vtx ), 1.0 );
 	}
 	const vec3 c = cross( w[1] - w[0], w[2] - w[0] );
 	const float len = length( c );

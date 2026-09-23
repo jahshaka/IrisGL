@@ -120,6 +120,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
@@ -134,6 +135,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
@@ -427,6 +429,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
@@ -460,6 +463,13 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelCones
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelCones_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE GEOMETRY ROW DECODE (PHOTON-CARDS-2): the vertex/index reads through a
+    # geometry row's device addresses - the voxeliser's two jobs insert it, the
+    # ray jobs' hit normal (jah_rq_geom.glsl) includes it.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahGeomRows
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahGeomRows_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE ONE ENVIRONMENT (PHOTON-ENV-1): what every escape sees — the cone
     # lookup on the prefiltered sky chain and the SH irradiance, one file, read
