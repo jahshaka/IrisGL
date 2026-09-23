@@ -2456,9 +2456,10 @@ struct GiParams {
     // or freed by it); the BUDGET and the RADIUS are deliberately NOT — they
     // are read per frame by the residency pass, exactly like the three tuning
     // floats above, so dragging either of them re-captures nothing.
-    /// Off / Auto / On. AUTO is OFF at this phase and says so: nothing reads a
-    /// card until phase 4 (the ray hit), so capturing on a user's machine would
-    /// be pure cost. A suite and the monitor turn it On.
+    /// Off / Auto / On. AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): a card's reader
+    /// is the reflection trace's hit, so the cache runs exactly where that
+    /// trace does (the scene's ray row resolved against the machine) and costs
+    /// nothing elsewhere. A suite and the monitor force it On.
     GiToggle  cards = GiToggle::Auto;
     /// THE PER-FRAME TEXEL BUDGET — Lumen's shape (its capture budget is 512 x
     /// 512 texels a frame) and the number the whole capture cadence is sized
@@ -2594,6 +2595,29 @@ enum class GiViewProfile {
 
 /// It is a pure function of the quality dial and the view profile: no scene, no
 /// device, no Ogre.
+/// THE CARD READ'S FOOTPRINT GATE (PHOTON-CARDS-2 fix round, audit F2 — the
+/// lead's decision; the currency SC-2's page mips will select a level on). A
+/// reflection ray's hit reads the surface-cache card only while the sample's
+/// footprint at the hit (2 t alpha / sqrt(N), the spacing between the samples
+/// the temporal mean holds) is at most this many of the card's texels; a wider
+/// footprint reads the voxels, prefiltered at its own mip.
+///
+/// MEASURED (2026-09-23, spikes/photon-cards-2/sweepB): the selftest's fixture B
+/// (the glossy 0.2 floor reflecting the pillars — where the ungated card read
+/// showed its speckle) shot at the Viewport grade with the gate at k = 0 (the
+/// voxel read everywhere) .. infinity; the floor's speckle as the mean
+/// |pixel - its 3x3 median|: 0.532 codes at k = 0, 0.531 / 0.530 / 0.538 at
+/// k = 1 / 2 / 4 (x1.01 — the card read's sharpness in 2,862 / 5,747 / 13,102
+/// pixels, no new speckle), 0.675 at k = 8 (x1.27) and 0.703 ungated (x1.32).
+/// So k = 4, the widest footprint inside the lead's x1.2 bar. (gi.rt_reflect's
+/// 0.3-rough arm, the audit's first recipe, `test_rt_reflect --footprint-sweep`,
+/// never crosses: in a WARM view the temporal mean hides the card's noise
+/// above ~7 texels and the voxel's bias is the larger error there; below 4
+/// texels both follow the near-mirror per-frame sampling. The speckle is a
+/// young-view, SPATIAL property — two consecutive screenshots are identical —
+/// which is why the gate is set on the picture that showed it.)
+constexpr float kCardFootprintTexels = 4.0f;
+
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as
     /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
@@ -3090,9 +3114,44 @@ struct CardSample {
     /// the card has been relit.
     float radiance[3] = { 0, 0, 0 };
     /// ...and its cached INDIRECT half alone (the voxel march from the texel x
-    /// kD x pi x the diffuse energy factor — BRDF_EnvMap's arithmetic); 0 until
-    /// the card's indirect has been marched.
+    /// kD x pi x the lobe's albedo jahDiffuseAlbedo at V = N — BRDF_EnvMap's
+    /// arithmetic); 0 until the card's indirect has been marched.
     float indirect[3] = { 0, 0, 0 };
+    /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from
+    /// readCardTexel), and whether its radiance carries a marched indirect
+    /// half — what gi.card_read_parity holds the ray job's own pick to.
+    int      card = -1;
+    unsigned texelX = 0u, texelY = 0u;
+    bool     lit = false;
+};
+
+/// ONE QUESTION FOR THE RAY JOB'S CARD READ (Engine::cardReadParity): a world
+/// point on `node`'s surface and the direction the read treats as "facing"
+/// (the ray job passes the reversed ray direction — jah_rq_card.glsl says why).
+struct CardReadQuery {
+    Vec3   position;
+    Vec3   facing;
+    NodeId node = 0;
+    /// A TRACED question: `position` is a ray's origin and `facing` its
+    /// direction; the job traces the scene's TLAS (near copies, as the
+    /// reflection does), takes the instance from the hit and the facing from
+    /// the hit triangle's geometric normal — the reflection's hit path whole
+    /// but the lighting. `node` is ignored.
+    bool   trace = false;
+};
+/// ...and the ray job's answer: the card and texel its GLSL picked, whether the
+/// card was lit, and the radiance it would return (0 when not `ok`).
+struct CardReadPick {
+    bool     ok = false;
+    bool     lit = false;
+    int      card = -1;
+    unsigned texelX = 0u, texelY = 0u;
+    float    radiance[3] = { 0, 0, 0 };
+    /// A traced question's hit: whether the ray hit, where, and the geometric
+    /// normal the job rebuilt there (the facing it asked the pick with).
+    bool     hit = false;
+    float    hitPoint[3] = { 0, 0, 0 };
+    float    hitNormal[3] = { 0, 0, 0 };
 };
 
 /// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model
@@ -3139,11 +3198,9 @@ struct CardCacheStatus {
     /// page into the atlas.
     float captureWorkspaceMs = 0.0f;
     float captureCopyMs = 0.0f;
-    /// PHASE 4's TABLES, as they stand: how many card records the GPU buffer
-    /// describes, and how many item slots the instance buffer is indexed over.
-    /// Nothing binds them yet (the reader is the ray hit at phase 4); they are
-    /// here so a suite can see that the layout the shader will read is being
-    /// maintained and not merely declared.
+    /// THE RAY READ'S TABLES, as they stand: how many card records the GPU
+    /// buffer describes, and how many item slots the instance buffer is indexed
+    /// over — what the reflection trace's card read (jah_rq_card.glsl) binds.
     unsigned cardRecords = 0u;
     unsigned instanceSlots = 0u;
     /// THE LIT CARD (PHOTON-CARDS-1): the Radiance layer's format name (chosen

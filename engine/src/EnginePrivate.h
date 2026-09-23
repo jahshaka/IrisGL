@@ -3144,7 +3144,8 @@ public:
     void updateSurfaceCache();
     bool readCardTexel(NodeId node, unsigned card, float u, float v,
                        CardSample &out) override;
-    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out) override;
+    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
+                    NodeId onlyNode = 0) override;
     bool dumpCardAtlas(const std::string &prefix, std::string &err) override;
     const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
@@ -6854,6 +6855,9 @@ public:
     bool hzbStatus(View *view, HzbStatus &out) const override;
     bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                       unsigned &width, unsigned &height) override;
+    // ---- The ray job's card read, asked directly (OgreRayQuery.cpp) ----
+    bool cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
+                        std::vector<CardReadPick> &out) override;
     // ---- The one voxel reader's parity harness (OgreVoxelReaderParity.cpp) ----
     bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
                            std::vector<VoxelReaderAnswer> &fragment,

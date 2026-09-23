@@ -20,18 +20,28 @@
 // this frame whose march did not fit the indirect budget yet).
 //
 // DIRECT = the sum over the scene's lights of HlmsPbs's own BRDF_Default
-// diffuse lobe, TRANSCRIBED from 200.BRDFs_piece_ps.any (BRDF_Default, the
-// normalised Disney diffuse: energyBias, energyFactor, fd90, lightScatter,
-// viewScatter) and the light loops of 800.PixelShader_piece_ps.any
-// (DoDirectionalLights / DoPointLights / DoSpotLights: the attenuation
-// 1 / (0.5 + (linear + quadratic d) d), the range fade of patch 0018, the spot
-// cone) — the same arithmetic `pbsDirect()` in test_gi_field_energy.cpp writes
-// out in C++, so a test can hold this to that closed form.
+// diffuse lobe — jahDisneyDiffuse, the fork's JahBrdf piece
+// (Hlms/Pbs/Any/JahBrdf_piece_all.any), the SAME function BRDF_Default calls —
+// with the light terms of 800.PixelShader_piece_ps.any's DoPointLights /
+// DoSpotLights (the attenuation 1 / (0.5 + (linear + quadratic d) d), the
+// range fade of fork change 0018, the spot cone) as JahBrdf's
+// jahLightAttenuation / jahSpotAttenuation. (800.PixelShader still spells
+// those two terms out inline at each of its light loops: the pixel side of
+// that pair is not converged yet.) `pbsDirect()` in test_gi_field_energy.cpp
+// writes the same arithmetic out in C++, so a test holds this to that closed
+// form.
 //
-// THE VIEW DIRECTION IS THE NORMAL. A cached texel is read from any direction,
-// so it stores the view-INDEPENDENT diffuse: V = N makes the lobe's one
-// view-dependent factor (viewScatter, which multiplies (1 - NdotV)^5) exactly
-// 1. The specular lobe is not cached (Lumen's rule: the surface cache is a
+// A TEXEL IS READ FROM EVERY DIRECTION (a reflection ray's hit, a gather's),
+// so it stores a view-INDEPENDENT diffuse. The INDIRECT half takes the lobe's
+// HEMISPHERICAL mean albedo, jahDiffuseAlbedoHemi(r) — the bounce job's
+// convention for the same "read from everywhere" situation (the voxel re-emits
+// the same mean), so a card and a voxel hold one quantity (PHOTON-CARDS-2 audit
+// F4, the lead's decision). THE DIRECT half keeps V = N (viewScatter = 1):
+// fd90 there depends on the half vector of each outgoing direction, so its
+// hemispherical mean has no closed form this file can write in one line; its
+// mean over outgoing directions is 1 + (fd90 - 1) / 21 of V = N's, at most 7 %
+// off at r = 1 and exact at r = 0 — stated, the one convention still split.
+// The specular lobe is not cached (Lumen's rule: the surface cache is a
 // diffuse store).
 //
 // VISIBILITY. The SUN's is the stored shadow term (the capture's PSSM term of
@@ -40,22 +50,21 @@
 // visibility is the traced residue's, where rays exist (PHOTON P5). Area
 // lights are not summed (their LTC path is not transcribed). Stated, all three.
 //
-// INDIRECT = THE PIXEL'S OWN DIFFUSE GI, from the texel: the ONE voxel reader
-// (JahVoxelSample + JahVoxelMarch, jah_voxel_march.glsl) walked over the
-// cones of Vct_piece_ps.any's computeVctProbe — the same cone set, the same
-// weights, the same world-anchored frame (patch 0083's buildConeBasis in the
-// cubemap frame), the same one-cell bias along the normal (patch 0070) — and
-// each cone's escape reading the ONE environment (JahEnvironment's
-// jahEnvCone) at the cone's aperture. Decoded exactly as the pixel decodes it
-// — the voxels' share times the volume's multiplier, the environment's share
-// as radiance — and turned into outgoing radiance exactly as BRDF_EnvMap
-// does: envColourD x diffuse x pi x the diffuse lobe's energy factor
-// (the piece jahDiffuseEnergyFactor, 200.BRDFs_piece_ps.any, WRITTEN OUT
-// here because a compute job cannot reach the Pbs library's pieces). Two
-// terms the pixel has that the card does not, stated: BRDF_EnvMap's
-// envBRDF.z (the LTC table's third channel, bound only once a scene holds an
-// area light; 1 otherwise, which is what this is) and a diffuse fresnel
-// (PbsBrdf::Default carries none).
+// INDIRECT = THE PIXEL'S OWN DIFFUSE GI, from the texel: the ONE diffuse
+// cone integrator (JahVoxelCones, jah_voxel_cones.glsl — the frame, the cone
+// set, the weights, the start bias, the escape weight; the same TEXT the
+// pixel's computeVctProbe and the bounce job run) over the ONE voxel reader
+// (JahVoxelSample + JahVoxelMarch) and the ONE environment (JahEnvironment).
+// Decoded exactly as the pixel decodes it — the voxels' share times the
+// volume's multiplier, the environment's share as radiance — and turned into
+// outgoing radiance as BRDF_EnvMap does, envColourD x diffuse x pi x the lobe's
+// albedo, with the albedo taken as its HEMISPHERICAL mean jahDiffuseAlbedoHemi
+// (the fork's JahDiffuseAlbedo piece; above) where the pixel takes it at its own
+// view angle. One term the pixel has that the card does not, stated: a
+// diffuse fresnel (fresnelD — PbsBrdf::Default carries none; the
+// SeparateDiffuseFresnel BRDFs do, and their card is brighter by 1 - F).
+// And the frame is built on the STORED shading normal where the pixel builds
+// it on the geometric one (they differ under a normal map).
 //
 // No at-sign in any comment of this file (the Hlms parser reads them).
 @insertpiece( SetCrossPlatformSettings )
@@ -186,110 +195,73 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_ENV_SH_C8 gp.envSh[8].xyz
 	@insertpiece( JahEnvironment )
 
-	// Vct_piece_ps.any's buildConeBasis (patch 0083), unchanged.
-	mat3 jahCardConeBasis( vec3 n )
-	{
-		vec3 t;
-		vec3 b;
-		if( n.z < -0.9999999 )
-		{
-			t = vec3( 0.0, -1.0, 0.0 );
-			b = vec3( -1.0, 0.0, 0.0 );
-		}
-		else
-		{
-			float a = 1.0 / ( 1.0 + n.z );
-			float c = -n.x * n.y * a;
-			t = vec3( 1.0 - n.x * n.x * a, c, -n.x );
-			b = vec3( c, 1.0 - n.y * n.y * a, -n.y );
-		}
-		return mat3( t, b, n );
-	}
+	// THE ONE DIFFUSE CONE INTEGRATOR (JahVoxelCones): the frame is built from
+	// the texel's WORLD normal (jahConeBasisWorld: the pixel's cubemap-frame
+	// construction, brought back to world axes), a world direction reaches the
+	// volume's normalised space through the box, and the environment is read in
+	// world axes as it is.
+	@property( vct_cone_dirs == 6 )
+		#define JAH_CONES_SIX 1
+	@else
+		#define JAH_CONES_SIX 0
+	@end
+	#define JAH_CONES_TO_LS( d ) normalize( ( d ) * gp.volumeInvSize.xyz )
+	#define JAH_CONES_TO_WORLD( d ) ( d )
+	@insertpiece( JahVoxelCones )
 
 	// THE PIXEL'S DIFFUSE GI at world point P with normal N: envColourD, i.e.
 	// the voxels' share times the multiplier plus the environment's share.
 	vec3 jahCardEnvColourD( vec3 P, vec3 N )
 	{
 		vec3 posLS = ( P - gp.volumeOrigin.xyz ) * gp.volumeInvSize.xyz;
-		// A world direction in the volume's normalised space (toVctProbeSpaceDir).
 		vec3 dirLS = normalize( N * gp.volumeInvSize.xyz );
-		vec3 biasDirLS = dirLS;
-		posLS += biasDirLS * gp.chainInvRes[0].xyz;
-
-		// The frame is built in the cubemap frame (z flipped), as the pixel
-		// builds it from invViewMatCubemap, and brought back to the world.
-		vec3 nC = vec3( N.x, N.y, -N.z );
-		mat3 basisC = jahCardConeBasis( nC );
-
-		// THE PIXEL'S CONE SET, whichever it is: HlmsPbs's `vct_cone_dirs` (6 with
-		// setVctFullConeCount, else 4 — the engine leaves it at 4), copied onto
-		// this job by the host so the two sets cannot drift.
-@property( vct_cone_dirs == 6 )
-		const int kCones = 6;
-		const vec3 coneDirs[6] = vec3[6]( vec3( 0.0, 0.0, 1.0 ),
-										  vec3( 0.866025, 0.0, 0.5 ),
-										  vec3( 0.267617, 0.823639, 0.5 ),
-										  vec3( -0.700629, 0.509037, 0.5 ),
-										  vec3( -0.700629, -0.509037, 0.5 ),
-										  vec3( 0.267617, -0.823639, 0.5 ) );
-		const float coneWeights[6] = float[6]( 0.25, 0.15, 0.15, 0.15, 0.15, 0.15 );
-		const float coneAngleTan = 0.577;
-		const uint coneFlags = 0u;
-@else
-		const int kCones = 4;
-		const vec3 coneDirs[4] = vec3[4]( vec3( 0.707107, 0.0, 0.707107 ),
-										  vec3( 0.0, 0.707107, 0.707107 ),
-										  vec3( -0.707107, 0.0, 0.707107 ),
-										  vec3( 0.0, -0.707107, 0.707107 ) );
-		const float coneWeights[4] = float[4]( 0.25, 0.25, 0.25, 0.25 );
-		const float coneAngleTan = 0.98269;
-		const uint coneFlags = JAH_MARCH_LODSTEP;
-@end
-
-		vec3 light = vec3( 0.0, 0.0, 0.0 );
-		vec3 envD = vec3( 0.0, 0.0, 0.0 );
-		for( int i = 0; i < kCones; ++i )
-		{
-			vec3 dC = basisC * coneDirs[i];
-			vec3 dirWorld = vec3( dC.x, dC.y, -dC.z );
-			vec3 dir = normalize( dirWorld * gp.volumeInvSize.xyz );
-			JahConeResult result = jahConeMarch( posLS, dir, coneAngleTan, biasDirLS, dirLS,
-												 coneFlags );
-			light += coneWeights[i] * result.colour;
-			envD += coneWeights[i] * ( 1.0 - min( 1.0, result.escapeAlpha / 0.95 ) ) *
-					jahEnvCone( dirWorld, coneAngleTan );
-		}
+		vec3 biasDirLS = jahConeBiasDir( dirLS );
+		posLS = jahConeStart( posLS, biasDirLS );
+		vec3 light;
+		vec3 envD;
+		jahDiffuseCones( posLS, biasDirLS, dirLS, jahConeBasisWorld( N ), light, envD );
 		return light * gp.counts.y + envD;
 	}
 @end
 
-// THE STORE ROUNDS. The device converts a float into R11G11B10F by
+// THE STORE ROUNDS TO NEAREST. The device converts a float into R11G11B10F by
 // TRUNCATION (measured: 0.50829 stored as 0.5), so a channel lost up to one
-// whole mantissa step — 1/64 on red and green, 1/32 (3 %) on blue. Scaling by
-// one plus half a step first makes the truncation a round to nearest: half a
-// step at most. Only on that format (the host's property): the RGBA16F
-// fallback stores unrounded.
+// whole mantissa step — 6 mantissa bits on red and green, 5 on blue. Adding
+// HALF A STEP of the target format to the float's own bits first — bit 16 for
+// red and green (23 - 6 - 1), bit 17 for blue (23 - 5 - 1) — makes the
+// truncation a round to nearest in EVERY octave (a carry into the exponent is
+// the octave's own round-up): half a step at most. What stood here was a
+// constant pre-scale, v x (1 + 1/128, 1 + 1/128, 1 + 1/64): half a step only at
+// the BOTTOM of an octave, a whole step at its top — it read blue 1.1-1.5 %
+// HIGH on gi.card_lighting's crate top (a value at 1.6 x its octave's floor).
+// Below the format's smallest normal (2^-14) its step is absolute and this adds
+// less than half of it: a radiance under 6e-5, stated. Only on that format (the
+// host's property): the RGBA16F fallback stores unrounded.
 vec3 jahCardRound( vec3 v )
 {
 @property( jah_card_round_r11g11b10 )
-	return v * vec3( 1.0 + 1.0 / 128.0, 1.0 + 1.0 / 128.0, 1.0 + 1.0 / 64.0 );
+	// Clamped to [0, the format's largest finite value] (65024 on red and green,
+	// 64512 on blue) before the add: +Inf's bits plus half a step are a NaN
+	// pattern (audit F8), and so is the largest FLOAT's; the format's own maximum
+	// stays finite through the add and stores as itself.
+	const uvec3 bits = floatBitsToUint( clamp( v, vec3( 0.0, 0.0, 0.0 ),
+											   vec3( 65024.0, 65024.0, 64512.0 ) ) );
+	return uintBitsToFloat( bits + uvec3( 0x10000u, 0x10000u, 0x20000u ) );
 @else
 	return v;
 @end
 }
 
-// BRDF_Default's diffuse at V = N, times NdotL (200.BRDFs_piece_ps.any).
+@insertpiece( JahBrdf )
+@insertpiece( JahDiffuseAlbedo )
+
+// BRDF_Default's diffuse at V = N (NdotV = 1, so viewScatter is 1), times NdotL.
 float jahCardDiffuse( vec3 N, vec3 L, float perceptualRoughness )
 {
 	float NdotL = clamp( dot( N, L ), 0.0, 1.0 );
 	vec3 H = normalize( L + N );
 	float VdotH = clamp( dot( N, H ), 0.0, 1.0 );
-	float energyBias = perceptualRoughness * 0.5;
-	float energyFactor = mix( 1.0, 1.0 / 1.51, perceptualRoughness );
-	float fd90 = energyBias + 2.0 * VdotH * VdotH * perceptualRoughness;
-	float lightScatter = 1.0 + ( fd90 - 1.0 ) * pow( 1.0 - NdotL, 5.0 );
-	// viewScatter = 1.0 + ( fd90 - 1.0 ) * pow( 1.0 - NdotV, 5.0 ) = 1 at V = N.
-	return NdotL * lightScatter * energyFactor;
+	return NdotL * jahDisneyDiffuse( NdotL, 1.0, VdotH, perceptualRoughness );
 }
 
 void main()
@@ -338,15 +310,13 @@ void main()
 				if( d > l.attenuation.x || d <= 0.0 )
 					continue;
 				L *= 1.0 / d;
-				atten = 1.0 / ( 0.5 + ( l.attenuation.y + l.attenuation.z * d ) * d );
-				atten *= max( ( l.attenuation.x - d ) * l.attenuation.w, 0.0 );
+				atten = jahLightAttenuation( d, l.attenuation );
 				if( type > 1.5 )
 				{
 					float spotCosAngle = dot( -L, l.spotDirection.xyz );
 					if( spotCosAngle < l.spotParams.y )
 						continue;
-					float spotAtten = clamp( ( spotCosAngle - l.spotParams.y ) * l.spotParams.x, 0.0, 1.0 );
-					atten *= pow( spotAtten, l.spotParams.z );
+					atten *= jahSpotAttenuation( spotCosAngle, l.spotParams.xyz );
 				}
 			}
 			float visibility = l.diffuse.w > 0.5 ? sr.x : 1.0;
@@ -358,9 +328,10 @@ void main()
 		if( ( mode & 1u ) != 0u )
 		{
 @property( hlms_num_vct_cascades )
-			// BRDF_EnvMap: envColourD x diffuse x pi x jahDiffuseEnergyFactor.
+			// BRDF_EnvMap's envColourD x diffuse x pi x the lobe's albedo, at its
+			// hemispherical mean (the bounce's convention; the header says why).
 			indirect = jahCardEnvColourD( P, N ) * kD * 3.141592654 *
-					   mix( 1.0, 1.0 / 1.51, perceptualRoughness );
+					   jahDiffuseAlbedoHemi( perceptualRoughness );
 @end
 		}
 		else if( ( mode & 2u ) == 0u )

@@ -175,22 +175,28 @@ void decodeTexel(Ogre::PixelFormatGpu fmt, const void *src, float out[4]) {
     Ogre::PixelFormatGpuUtils::unpackColour(out, fmt, src);
 }
 
-/// ONE CARD AS THE GPU WILL READ IT (phase 4). std430, 48 bytes: the atlas rect
-/// in UV with the HALF-TEXEL INSET already applied, the world frame's three
-/// rows, and the instance key. Built here because the layout is a contract
-/// between this Component and the ray job, and a contract written in two places
-/// is a contract that drifts.
+/// ONE CARD AS THE RAY JOB READS IT (PHOTON-CARDS-2; rayquery/include/jah_rq_card.glsl's
+/// JahCardRecord). std430, 80 bytes: the world frame's three rows, the axis and
+/// the texel, and the atlas rect with the card's two flags. Built here because
+/// the layout is a contract between this Component and the ray job, and a
+/// contract written in two places is a contract that drifts.
+///
+/// THE RECT IS IN TEXELS, not in UV: the read is texel-exact (the atlas has no
+/// mips) and picks the texel by the same integer rule `sampleCard` does, so
+/// gi.card_read_parity can ask for the same texel on both sides.
 struct CardGpuRec {
-    /// atlasUV = uv * scale + bias, with the half-texel inset AND v's mirror
-    /// already in them (scale.y is negative — see `syncBuffers`).
-    float uvScaleBias[4] = {};
     float rowU[4] = {};          ///< dot(world, xyz) + w  ->  the card's u in [0,1]
     float rowV[4] = {};
     float rowD[4] = {};          ///< ...and the distance from the card's near plane
     float axis[4] = {};          ///< xyz = the outward world axis, w = the card's texel, metres
-    unsigned key[4] = {};        ///< x = the item slot (instanceCustomIndex), y..w reserved
+    /// x, y = the rect's corner in the atlas, z = its size in texels, w = the
+    /// flags: kGpuCardCaptured (captured at least once), kGpuCardLit (its
+    /// radiance carries a marched indirect half — `indirectValid`).
+    unsigned atlas[4] = {};
 };
-static_assert(sizeof(CardGpuRec) == 96u, "the card record's layout is a contract with phase 4");
+static_assert(sizeof(CardGpuRec) == 80u, "the card record's layout is a contract with the ray job");
+constexpr unsigned kGpuCardCaptured = 1u;
+constexpr unsigned kGpuCardLit = 2u;
 
 }   // namespace
 
@@ -1019,6 +1025,9 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     gCapturing = false;
     if (mBatch.empty()) {
         relightCards();
+        // A card's flags moved (its indirect half marched): the ray read,
+        // later in this frame, must see it.
+        syncBuffers();
         return;
     }
     const auto tB = std::chrono::steady_clock::now();
@@ -1041,6 +1050,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
             mScratch[i]->copyTo(mAtlas[i], dst, 0, src, 0);
         }
         card.queued = false;
+        if (!card.lastUpdated) mTableDirty = true;   // its first capture: readable now
         card.lastUpdated = mFrame;
         ++mCaptures;
         ++mCapturesLastFrame;
@@ -1053,8 +1063,11 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     mBatch.clear();
     mWs->setExecutionMask(0u);
     // ...and the cards just captured are relit from their new texels, in the
-    // same frame, before anything could read them.
+    // same frame, before anything could read them — and the table carries
+    // their flags (captured; indirect stale or marched) before the ray read,
+    // later in this frame, looks.
     relightCards();
+    syncBuffers();
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,6 +1140,7 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
         c.relight = true;
         if (c.surfaceStale) {
             c.relightIndirect = true;
+            if (c.indirectValid) mTableDirty = true;   // the ray read falls back to the voxels
             c.indirectValid = false;
             c.surfaceStale = false;
         }
@@ -1444,6 +1458,7 @@ void SurfaceCache::relightCards() {
         mRelitTexelsLastFrame += c.size * c.size;
         if (mRelightMode[i] == 1u) {
             c.relightIndirect = false;
+            if (!c.indirectValid) mTableDirty = true;  // the ray read takes the card from here
             c.indirectValid = true;
             c.lastIndirect = mFrame;
             ++mIndirectRelights;
@@ -1459,18 +1474,13 @@ void SurfaceCache::relightCards() {
 }
 
 // ---------------------------------------------------------------------------
-// The two GPU tables — PHASE 4's contract, built now so that phase 4 ports a
-// read and does not invent a layout.
+// The two GPU tables — what the ray job's card read binds (PHOTON-CARDS-2,
+// rq_reflect.comp through jah_rq_card.glsl).
 // ---------------------------------------------------------------------------
 //
-// NOTHING BINDS THESE TODAY and that is stated rather than hidden: the reader
-// is the reflection ray job at phase 4, and SURFACE-CACHE-0 measured what that
-// read costs (+3.1 µs over a 36,864-ray dispatch) with a hand-rolled five-
-// binding version whose debt was exactly this — "five FIXED bindings and 27
-// vec4 hold exactly ONE card set". What they cost meanwhile is two buffers of
-// 384 KB and 16 KB and one rebuild per residency change, which is the honest
-// price of the layout being decided HERE, by the code that allocates the rects,
-// rather than guessed by the code that reads them.
+// Rebuilt when the ALLOCATION changes and when a card's two flags do (its
+// first capture; its indirect half going stale or being marched) — never per
+// capture otherwise. Two buffers of 320 KB and 16 KB.
 //
 // THE KEY IS FREE: the ray tier writes the scene's own ITEM SLOT into each
 // TLAS instance's `instanceCustomIndex` (it reads the GPU scene's table, whose
@@ -1482,29 +1492,13 @@ void SurfaceCache::syncBuffers() {
     Ogre::VaoManager *vao = Ogre::Root::getSingleton().getRenderSystem()->getVaoManager();
     if (!vao) return;
 
-    // 24 floats a record = the 96 bytes CardGpuRec declares.
+    // 20 floats a record = the 80 bytes CardGpuRec declares.
+    constexpr size_t kCardGpuFloats = sizeof(CardGpuRec) / sizeof(float);
     const unsigned records = std::min(unsigned(mCards.size()), kCardRecordCeiling);
-    mCardBufferCpu.assign(size_t(kCardRecordCeiling) * 24u, 0.0f);
+    mCardBufferCpu.assign(size_t(kCardRecordCeiling) * kCardGpuFloats, 0.0f);
     for (unsigned i = 0; i < records; ++i) {
         const CardRec &c = mCards[i];
         CardGpuRec rec = {};
-        // THE HALF-TEXEL INSET IS IN THESE TWO LINES and nowhere else: a card
-        // parameter u in [0, 1] maps to atlas texel CENTRES, from x + 0.5 to
-        // x + size - 0.5, so a filtered fetch at either edge can never reach a
-        // neighbour's texels. That is Lumen's "0.5-texel border" expressed as
-        // arithmetic instead of as wasted texels.
-        // ...AND v IS MIRRORED, because the capture camera's +Y is the card's
-        // +v while an image's row 0 is its TOP. `sampleCard` flips v when it
-        // turns a card parameter into an atlas texel; a record that did not
-        // would hand phase 4 an upside-down card, which is the kind of thing
-        // nobody sees until a picture is wrong for a reason no counter names.
-        // The flip is in the SCALE's sign and the BIAS's base row, so the
-        // shader still does one multiply-add.
-        const float atlas = float(kCardAtlasSize);
-        rec.uvScaleBias[0] = float(c.size - 1u) / atlas;
-        rec.uvScaleBias[1] = -float(c.size - 1u) / atlas;
-        rec.uvScaleBias[2] = (float(c.atlasX) + 0.5f) / atlas;
-        rec.uvScaleBias[3] = (float(c.atlasY + c.size) - 0.5f) / atlas;
         // u = dot(world, U)/(2 halfU) + (0.5 - dot(centre, U)/(2 halfU)), and
         // the same for v; the card frame is world-space, so there is no
         // per-instance matrix anywhere in the read.
@@ -1520,11 +1514,11 @@ void SurfaceCache::syncBuffers() {
         rec.rowD[3] = plane.dotProduct(c.d);
         rec.axis[0] = c.d.x; rec.axis[1] = c.d.y; rec.axis[2] = c.d.z;
         rec.axis[3] = 2.0f * std::max(c.halfU, c.halfV) / float(c.size);   // the card's texel, metres
-        const unsigned slot = mInstances[c.instance].itemSlot == size_t(-1)
-                                  ? 0xFFFFFFFFu
-                                  : unsigned(mInstances[c.instance].itemSlot);
-        rec.key[0] = slot;
-        std::memcpy(&mCardBufferCpu[size_t(i) * 24u], &rec, sizeof(rec));
+        rec.atlas[0] = c.atlasX;
+        rec.atlas[1] = c.atlasY;
+        rec.atlas[2] = c.size;
+        rec.atlas[3] = (c.lastUpdated ? kGpuCardCaptured : 0u) | (c.indirectValid ? kGpuCardLit : 0u);
+        std::memcpy(&mCardBufferCpu[size_t(i) * kCardGpuFloats], &rec, sizeof(rec));
     }
     mCardRecords = records;
 
@@ -1730,6 +1724,14 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.instanceSlots = mInstanceSlots;
 }
 
+long SurfaceCache::itemSlotOf(NodeId node) const {
+    auto it = mByNode.find(node);
+    if (it == mByNode.end()) return -1;
+    const InstanceRec &inst = mInstances[it->second];
+    if (!inst.cardCount || inst.itemSlot == size_t(-1)) return -1;
+    return long(inst.itemSlot);
+}
+
 bool SurfaceCache::readTexel(NodeId node, unsigned card, float u, float v,
                              CardSample &out) const {
     out = CardSample();
@@ -1809,22 +1811,35 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
     out.depth = vals[unsigned(CardLayer::Depth)][0];
     out.shadow = vals[unsigned(CardLayer::ShadowRough)][0];
     out.roughness = vals[unsigned(CardLayer::ShadowRough)][1];
+    out.texelX = tx;
+    out.texelY = ty;
+    out.lit = rec.indirectValid;
     out.ok = true;
     return true;
 }
 
 bool SurfaceCache::readAt(const Ogre::Vector3 &world, const Ogre::Vector3 &normal,
-                          CardSample &out) const {
+                          CardSample &out, NodeId onlyNode) const {
     out = CardSample();
     if (!mBuilt) return false;
     Ogre::Vector3 n = normal;
     if (n.squaredLength() < 1e-12f) return false;
     n.normalise();
+    // ONE INSTANCE'S CARDS when asked — the ray read's own scope (it knows the
+    // hit instance), so the parity suite compares like with like.
+    unsigned first = 0u, count = unsigned(mCards.size());
+    if (onlyNode) {
+        auto it = mByNode.find(onlyNode);
+        if (it == mByNode.end()) return false;
+        first = mInstances[it->second].firstCard;
+        count = mInstances[it->second].cardCount;
+    }
 
     const CardRec *best = nullptr;
     float bestFacing = 0.05f;   // a card edge-on to the surface says nothing
     float bestU = 0.0f, bestV = 0.0f;
-    for (const CardRec &c : mCards) {
+    for (unsigned ci = first; ci < first + count; ++ci) {
+        const CardRec &c = mCards[ci];
         if (!c.size || !c.lastUpdated) continue;          // never captured
         const float facing = c.d.dotProduct(n);
         if (facing <= bestFacing) continue;
@@ -1851,7 +1866,9 @@ bool SurfaceCache::readAt(const Ogre::Vector3 &world, const Ogre::Vector3 &norma
         bestV = v;
     }
     if (!best) return false;
-    return sampleCard(*best, bestU, bestV, out);
+    if (!sampleCard(*best, bestU, bestV, out)) return false;
+    out.card = int(best - mCards.data());
+    return true;
 }
 
 bool SurfaceCache::dump(const std::string &prefix, std::string &err) const {
