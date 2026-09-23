@@ -1,0 +1,38 @@
+// THE SCREEN-RAY VERTEX PROGRAM (SPECS/SKY_LIGHT_SPEC.md §3; moved out of
+// JahSunDisc.material by CLOUDS-2D-1). Three materials draw a full-screen quad
+// whose fragment program needs the camera ray through each pixel: the sun
+// disc, the cloud layer (JahClouds.material) and the disc seen through the
+// cloud layer. A *.program file is parsed before every *.material file, so a
+// program defined HERE exists for all of them whatever order the archive
+// lists the material files in. The VR session recognises the quads that need
+// an eye by this program's name (OgreVrSession.cpp syncStereoQuads) — which is
+// why the cloud layer uses it rather than a copy under another name.
+//
+// GLSL + Vulkan only, like every other program we own in this folder.
+
+vertex_program Jahshaka/SunDisc_vs_GLSL glsl
+{
+	source JahSunDisc_vs.glsl
+}
+vertex_program Jahshaka/SunDisc_vs_VK glslvk
+{
+	source JahSunDisc_vs.glsl
+}
+vertex_program Jahshaka/SunDisc_vs unified
+{
+	delegate Jahshaka/SunDisc_vs_GLSL
+	delegate Jahshaka/SunDisc_vs_VK
+
+	// The three auto-params Ogre fills per CAMERA. `param_named_auto` in a
+	// program's default_params is the form that works under Vulkan (a plain
+	// `param_named` in a program_ref is applied before the constant table
+	// exists and fails with "setting of constant failed", which leaves the
+	// whole pass broken and the quad silently undrawn).
+	default_params
+	{
+		param_named_auto	rsDepthRange	rs_depth_range
+		param_named_auto	invViewProj		inverse_viewproj_matrix
+		param_named_auto	cameraPos		camera_position
+	}
+}
+

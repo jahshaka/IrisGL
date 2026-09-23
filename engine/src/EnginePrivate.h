@@ -2421,6 +2421,29 @@ public:
     /// which a pointer compared against a dead one would never notice.
     static void releaseSamplers();
     static const Ogre::HlmsSamplerblock *acquireSampler(Ogre::HlmsManager *mgr, bool trilinear);
+    /// The cloud field's block: trilinear and WRAPPED (the field tiles), taken
+    /// once per manager like the two above and released with them.
+    static const Ogre::HlmsSamplerblock *acquireWrapSampler(Ogre::HlmsManager *mgr);
+
+    /// THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1): the third extra pass
+    /// texture on the same three-hook route as the sky's environment and the
+    /// gather (`jah_cloud_shadow`, register `jahCloudField`), plus the members
+    /// JahFog_piece_vs_piece_ps.any appends LAST to the pass-buffer extension.
+    /// Registered per scene by OgreScene::applyCloudLayer; a scene with no layer
+    /// (or a shadow strength of 0) registers nothing, sets no property and
+    /// generates exactly the shaders it generated before the layer existed.
+    struct CloudShadowState {
+        /// The baked optical-depth field (R16F, one tile), or null = no shadow.
+        Ogre::TextureGpu *field = nullptr;
+        float invTile = 0.0f;        // 1 / the tile's size in metres
+        float strength = 0.0f;       // 0..1
+        float scroll[2] = { 0.0f, 0.0f };   // metres, this frame
+        float altitude = 0.0f;       // metres
+        float sunThrow[2] = { 0.0f, 0.0f }; // toSun.xz / toSun.y
+        float invMuSun = 1.0f;       // 1 / toSun.y (clamped)
+    };
+    static void             setCloudShadow(const Ogre::SceneManager *sm, const CloudShadowState &state);
+    static CloudShadowState cloudShadow(const Ogre::SceneManager *sm);
 
     /// THE SKY'S OWN ENVIRONMENT SLOT (lane SKY-FALLBACK-1, PHOTON_SPEC §7).
     ///
@@ -2506,11 +2529,17 @@ private:
         const Ogre::HlmsSamplerblock *skySampler = nullptr;
         Ogre::TextureGpu             *probeGather = nullptr;
         const Ogre::HlmsSamplerblock *probeGatherSampler = nullptr;
+        Ogre::TextureGpu             *cloudField = nullptr;           // CLOUDS-2D-1
+        const Ogre::HlmsSamplerblock *cloudSampler = nullptr;
     };
     static PassBinds sPass[Ogre::HLMS_MAX];                            // render thread only
     static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
     /// GATHER-0's registration (the pass's copy of it is PassBinds::probeGather).
     static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
+    /// The cloud field per SceneManager (CLOUDS-2D-1); the pass's copy of it is
+    /// PassBinds::cloudField.
+    static std::map<const Ogre::SceneManager *, CloudShadowState> sCloudShadow;  // render thread
+    static const Ogre::HlmsSamplerblock *sCloudSampler;                // render thread only
     static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only
     static const Ogre::HlmsSamplerblock *sEnvSampler;                  // render thread only
     static const Ogre::HlmsSamplerblock *sGatherSampler;               // render thread only
@@ -2855,11 +2884,19 @@ public:
     void integrateSkyShFromCube(Ogre::TextureGpu *cube);
     void integrateSkyShNow(Ogre::TextureGpu *cube);
     void issueSkyShRead(Ogre::TextureGpu *cube);
-    void integrateSkyShFromBox(const Ogre::TextureBox &box);
+    /// `out` = the 27 coefficients (the scene's mSkySh unless told otherwise).
+    void integrateSkyShFromBox(const Ogre::TextureBox &box, float *out = nullptr);
+    /// Renders the capture workspace into a new cube (OgreSky.cpp says who).
+    Ogre::TextureGpu *renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips);
     /// Called at the top of every frame this scene is drawn in: counts the
     /// gesture's clock and, if the pending read has landed, integrates it.
     /// Never blocks.
     void pollSkyShRead();
+    /// Once per drawn frame (OgreEngine, beside pollSkyShRead): advances the
+    /// layer's own clock by the frame delta the host pushed, writes the scroll
+    /// into the layer, the disc and the ground shadow, and runs the capture
+    /// cadence while the layer scrolls.
+    void updateCloudLayer();
     /// The read itself. `force` maps unconditionally — a capture about to
     /// replace the ticket takes its answer first, and by then the copy is a
     /// frame old and free (see the note in OgreSky.cpp).
@@ -4146,6 +4183,57 @@ private:
     /// switched on and off, not created and destroyed).
     void applySunDisc(const SunDisc &sun);
     void destroySunDisc();
+    // ---- THE CLOUD LAYER (CLOUDS-2D-1; OgreSky.cpp, "THE CLOUD LAYER") -----
+    /// Creates (once), shows, hides and parameterises the layer from
+    /// mSkyDesc.clouds; `fieldChanged` queues a re-bake of the field.
+    void applyCloudLayer(bool fieldChanged);
+    void destroyCloudLayer();
+    /// The sun disc's material follows the layer: the clouded variant while a
+    /// layer is drawn (the disc is dimmed by the sheet in front of it), its own
+    /// otherwise — so a scene without a layer draws exactly the disc it drew.
+    void syncSunDiscClouds();
+    /// Renders the pending field bake, INSIDE a frame (it is a render pass):
+    /// called at the head of applyPendingSkyCapture, so a capture queued by
+    /// the same change photographs the new field.
+    void bakeCloudField();
+    CloudStatus cloudStatus() const override;
+    bool renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize, float exposure,
+                           std::vector<unsigned char> &rgba) override;
+    /// Is the layer on screen: enabled, and a sky to draw over.
+    bool cloudLayerDrawn() const;
+    Ogre::Rectangle2D *mCloudQuad = nullptr;
+    Ogre::MaterialPtr  mCloudMaterial;          // per-scene clone of Jahshaka/CloudLayer
+    Ogre::MaterialPtr  mCloudBakeMaterial;      // Jahshaka/CloudBake itself (the bake binds per render)
+    Ogre::MaterialPtr  mSunDiscCloudMaterial;   // ...of Jahshaka/SunDiscClouded
+    Ogre::TextureGpu  *mCloudNoise = nullptr;   // 256^2 RGBA8, fixed seed, ManualTexture
+    Ogre::TextureGpu  *mCloudField = nullptr;   // 1024^2 R16F optical depth, one tile
+    Ogre::Camera      *mCloudBakeCamera = nullptr;
+    bool     mCloudFieldPending = false;
+    /// The layer's own clock: the sum of the frame deltas of the frames this
+    /// scene was drawn in (the engine has no wall clock).
+    double   mCloudClock = 0.0;
+    float    mCloudScroll[2] = { 0.0f, 0.0f };
+    /// Drawn frames since the last capture the layer's scroll asked for.
+    unsigned mCloudFramesSinceCapture = 0u;
+    /// A capture requested by the SCROLL takes the asynchronous SH read even
+    /// when it is not part of a gesture (integrateSkyShFromCube).
+    bool     mSkyCaptureAsyncOnce = false;
+    /// THE CLEAR SKY THE SHEET IS LIT BY. The sheet's sky-light term must not
+    /// read the environment capture it is itself IN (a feedback whose answer
+    /// depends on the edit history, and which ran an overcast deck to a
+    /// saturated copy of its own colour at a low sun): it reads a capture of
+    /// the same sky with the sheet hidden — taken only when the SKY changes
+    /// (never on the sheet's own edits or scroll), synchronously for a lone
+    /// change and through a ticket read at the next frame's top during a
+    /// gesture, exactly like the environment's own SH.
+    void captureCloudClearSky();
+    void readCloudClearTicket(bool force);
+    void pushCloudAmbient();
+    bool     mCloudClearPending = false;
+    bool     mCloudClearValid = false;
+    float    mCloudClearMean[3] = { 0.0f, 0.0f, 0.0f };
+    Ogre::AsyncTextureTicket *mCloudClearTicket = nullptr;
+    CloudStatus mCloudStatus;
     /// THE SHADER GRID (GRID-2, OgreGrid.cpp): the sun disc's mechanism — a
     /// Rectangle2D whose fragment program intersects the camera ray with the
     /// grid plane and writes that point's depth. A disabled grid hides the
