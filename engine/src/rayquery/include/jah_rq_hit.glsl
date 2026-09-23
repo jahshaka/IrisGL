@@ -3,7 +3,9 @@
 //
 // This file holds the two functions that turn a ray's outcome into radiance:
 // `jahVoxelRadiance`, which reads the cascade chain's light volumes at a hit,
-// and `jahSkyRadiance`, which answers an escaping one. They used to exist twice
+// and `jahSkyRadiance`, which answers an escaping one through the ONE
+// ENVIRONMENT (jah_environment.glsl — the disc-free sky cube at the ray's own
+// footprint, PHOTON-ENV-1's GA-SKY). They used to exist twice
 // — once in rq_reflect.comp and once, copied, in rq_probe_gather.comp — and two
 // consumers of one cache that can disagree about what a voxel MEANS is exactly
 // the class of defect the voxel program keeps finding. The CMake rule passes
@@ -20,11 +22,15 @@
 //                                 cascade's radiance multiplier (the bake's
 //                                 normalisation undone — DRAG-1)
 //     JAH_VOX_INVSIZE(c)   vec4   xyz = 1/the box's world size, w = one cell
-//     JAH_SKY_ON           bool   a sky cubemap is bound
-//     JAH_SKY_COLOUR       vec3   ...and the flat colour when it is not
+//     JAH_SKY_ON           bool   the environment cube is bound
+//     JAH_SKY_COLOUR       vec3   with the cube bound, the environment light's
+//                                 gain on it (the Sky Light's intensity times
+//                                 its tint); with none, the environment's own
+//                                 flat radiance (the SH's constant band) — the
+//                                 host hands whichever of the two applies
 //
-// ...and the sampler arrays `voxelIso/voxelX/voxelY/voxelZ` and the cube
-// `skyCube`, under those names, with kMaxCascades entries.
+// ...and the sampler arrays `voxelIso/voxelX/voxelY/voxelZ` and the combined
+// cube sampler `skyCube`, under those names, with kMaxCascades entries.
 //
 // THE ARITHMETIC IS rq_reflect.comp's, UNCHANGED, and the long rationale for
 // every term of it lives at the call site in that file (the anisotropic slot
@@ -40,6 +46,43 @@
 #define JAH_RQ_HIT_GLSL
 
 #include "jah_rq_finite.glsl"
+
+// THE READ ITSELF IS THE ONE VOXEL RADIANCE READER'S (PHOTON-READER-1): the
+// anisotropic three-axis blend, the isotropic slot at Low, the footprint's mip
+// and the usable-sample guard live in jah_voxel_sample.glsl, which the pixel
+// shader's cone march, the bounce job and the irradiance field read too. This
+// file keeps what is the HIT's own: which cascade answers, the step into the
+// hit's cell, the six-cell crossfade, the multiplier and the opacity divide.
+// The ray jobs declare combined sampler arrays under the names below, so the
+// sample macros default to them.
+#ifndef JAH_VOX_HAS_ANISO
+#define JAH_VOX_HAS_ANISO 1
+#endif
+#ifndef JAH_VOX_SAMPLE_ISO
+#define JAH_VOX_SAMPLE_ISO( c, u, l ) textureLod( voxelIso[c], u, l )
+#define JAH_VOX_SAMPLE_X( c, u, l ) textureLod( voxelX[c], u, l )
+#define JAH_VOX_SAMPLE_Y( c, u, l ) textureLod( voxelY[c], u, l )
+#define JAH_VOX_SAMPLE_Z( c, u, l ) textureLod( voxelZ[c], u, l )
+#endif
+#include "jah_voxel_sample.glsl"
+
+// THE ONE ENVIRONMENT, bound to the ray jobs' own names.
+#define JAH_ENV_CUBE_ON JAH_SKY_ON
+#define JAH_ENV_SAMPLE( d, l ) textureLod( skyCube, d, l ).xyz
+#define JAH_ENV_MIPS float( textureQueryLevels( skyCube ) )
+#define JAH_ENV_GAIN JAH_SKY_COLOUR
+// With no cube the environment is FLAT here (the host's constant band): the
+// only coefficient the ray jobs are handed.
+#define JAH_ENV_SH_C0 JAH_SKY_COLOUR
+#define JAH_ENV_SH_C1 vec3( 0.0 )
+#define JAH_ENV_SH_C2 vec3( 0.0 )
+#define JAH_ENV_SH_C3 vec3( 0.0 )
+#define JAH_ENV_SH_C4 vec3( 0.0 )
+#define JAH_ENV_SH_C5 vec3( 0.0 )
+#define JAH_ENV_SH_C6 vec3( 0.0 )
+#define JAH_ENV_SH_C7 vec3( 0.0 )
+#define JAH_ENV_SH_C8 vec3( 0.0 )
+#include "jah_environment.glsl"
 
 const float kMaxRadiance = 1024.0;
 
@@ -80,30 +123,9 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		const float texel = 2.0 * max( invSize.w, 1e-6 );
 		float lod = 0.0;
 		if( !mirror )
-			lod = clamp( log2( max( footprint, texel ) / texel ), 0.0, 6.0 );
-		vec4 s;
-		if( JAH_VOX_ANISO )
-		{
-			vec3 isNegative;
-			isNegative.x = dir.x < 0.0 ? 0.5 : 0.0;
-			isNegative.y = dir.y < 0.0 ? 0.5 : 0.0;
-			isNegative.z = dir.z < 0.0 ? 0.5 : 0.0;
-			vec3 uvw = ls;
-			uvw.x = clamp( uvw.x, 0.0, 1.0 ) * 0.5;
-			const vec4 xc = textureLod( voxelX[c], uvw + vec3( isNegative.x, 0.0, 0.0 ), lod );
-			const vec4 yc = textureLod( voxelY[c], uvw + vec3( isNegative.y, 0.0, 0.0 ), lod );
-			const vec4 zc = textureLod( voxelZ[c], uvw + vec3( isNegative.z, 0.0, 0.0 ), lod );
-			const vec3 w = dir * dir;
-			s = w.x * xc + w.y * yc + w.z * zc;
-		}
-		else
-		{
-			// Low tier: VctLighting was built without the anisotropic chains and
-			// slot 0 carries every mip. Directionally averaged, and the honest
-			// answer available.
-			s = textureLod( voxelIso[c], ls, lod );
-		}
-		if( s.w <= 0.02 || !finite3( s.xyz ) || !finite1( s.w ) )
+			lod = jahVoxelFootprintLod( footprint, texel );
+		const vec4 s = jahVoxelSample( c, ls, dir, lod );
+		if( !jahVoxelSampleUsable( s ) )
 			continue;					// this cascade holds nothing here
 		float w = 1.0;
 		if( !mirror )
@@ -130,16 +152,22 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 	return clamp( acc / max( accW, 1e-6 ), vec3( 0.0 ), vec3( kMaxRadiance ) );
 }
 
-/// What an escaping ray sees.
-vec3 jahSkyRadiance( vec3 dir )
+/// What an escaping ray sees: the environment in its direction, AT ITS OWN
+/// FOOTPRINT (GA-SKY). `tanHalfAngle` is the half-angle of the solid angle the
+/// ray stands for — one of a probe's N directions covers 2 pi / N, a
+/// reflection's stochastic sample the spacing between the samples its mean
+/// holds — and the cone lookup reads the prefiltered chain at the mip whose lobe
+/// matches it: mip 0 for a mirror, and never the finest mip for a ray that
+/// stands for a wide solid angle (reading it aliases exactly as a cone march
+/// with no cone does). The cube carries no sun disc (the disc is the direct
+/// sun, a light — the capture excludes it), so a miss cannot count the sun a
+/// second time.
+vec3 jahSkyRadiance( vec3 dir, float tanHalfAngle )
 {
-	if( !JAH_SKY_ON )
-		return JAH_SKY_COLOUR;
-	// Ogre samples cubemaps LEFT-HANDED (the sky/IBL adoption's fact).
-	const vec4 s = textureLod( skyCube, vec3( dir.x, dir.y, -dir.z ), 0.0 );
-	if( !finite3( s.xyz ) )
-		return JAH_SKY_COLOUR;
-	return clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+	const vec3 s = jahEnvCone( dir, tanHalfAngle );
+	if( !finite3( s ) )
+		return vec3( 0.0 );
+	return clamp( s, vec3( 0.0 ), vec3( kMaxRadiance ) );
 }
 
 #endif   // JAH_RQ_HIT_GLSL

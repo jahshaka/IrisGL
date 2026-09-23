@@ -2390,23 +2390,24 @@ public:
     /// DDGI REPLACES voxel-cone diffuse rather than adding to it, and
     /// upstream's IrradianceFieldSettings has no intensity knob.
     /// media/Hlms/Jahshaka/JahIfd_piece_ps.any multiplies upstream's
-    /// accumulated irradiance by `intensity` (1.0 = upstream's own brightness)
-    /// and adds `ambient` x the sky visibility it derives from the depth atlas.
+    /// accumulated irradiance by `intensity` (1.0 = upstream's own brightness).
     /// Defaults to GiParams' defaults so a scene that never pushes state still
     /// reads sane values.
     struct IfdState {
         /// GiParams::ddgiIntensity, clamped.
         float intensity = 1.0f;
-        /// GiParams::ddgiAmbient, clamped. 0 removes the ambient term through a
-        /// uniform branch — the A/B the gate needs.
-        float ambient = 1.0f;
         /// The field's probe counts on Y and Z. Upstream's own render params
         /// carry only Nx and Nx*Ny (OgreIrradianceField.cpp:812-813) and the
-        /// sky-visibility threshold needs all three axes, so the two missing
+        /// cage clamp needs all three axes, so the two missing
         /// numbers ride our own float4 instead of a patch that would move the
         /// engine ABI.
         float numProbesY = 0.0f;
         float numProbesZ = 0.0f;
+        /// THE FIELD'S WINDOW (PHOTON-WRITER-1): the slot of the window's first
+        /// probe per axis (IrradianceField::getWindowOffset), packed x + 128 y +
+        /// 16384 z - exact in a float, each below the 128-probe axis cap - for
+        /// the reader's JahFieldWindow modulo (JahIfd_piece_ps.any).
+        float windowOffsetPacked = 0.0f;
     };
     static void     setIfdState(const Ogre::SceneManager *sm, const IfdState &state);
     static IfdState ifdState(const Ogre::SceneManager *sm);
@@ -2417,6 +2418,15 @@ public:
     /// itself rather than keeping a mirror is what makes the two impossible to
     /// disagree.
     static void setPbs(Ogre::HlmsPbs *pbs);
+    /// THE LISTENER'S OWN SAMPLERBLOCKS DIE WITH THE ENGINE (PHOTON-ENV-1 audit
+    /// F10). The environment slot's trilinear block and the gather's point
+    /// block are each acquired ONCE per HlmsManager (a uint16 reference count
+    /// — never per pass) and released here, from ~OgreEngine before Root:
+    /// the listener is a process global and outlives the manager, and a second
+    /// Engine's manager can land at the same address (test_engine_recreate),
+    /// which a pointer compared against a dead one would never notice.
+    static void releaseSamplers();
+    static const Ogre::HlmsSamplerblock *acquireSampler(Ogre::HlmsManager *mgr, bool trilinear);
 
     /// THE SKY'S OWN ENVIRONMENT SLOT (lane SKY-FALLBACK-1, PHOTON_SPEC §7).
     ///
@@ -2441,11 +2451,12 @@ public:
         /// is "this scene has no sky reflection", which is also what a Sky
         /// Light at zero gain means (the sky goes out by not being BOUND).
         Ogre::TextureGpu *cube = nullptr;
-        /// The Sky Light's gain. It rides here and NOT in
-        /// `passBuf.ambientUpperHemi.w` because that pass scale is 1.0 while a
-        /// PCC is bound, deliberately (envmapScaleForPass: a probe photographs
-        /// real radiance and must not be scaled by the skylight dial).
-        float gain = 1.0f;
+        /// The Sky Light's gain per channel (PHOTON-ENV-1: every escape reads
+        /// the cube at it). It rides here and NOT in `passBuf.ambientUpperHemi.w`
+        /// because that pass scale is one channel and is 1.0 while a PCC is
+        /// bound, deliberately (envmapScaleForPass: a probe photographs real
+        /// radiance and must not be scaled by the skylight dial).
+        float gain[3] = { 1.0f, 1.0f, 1.0f };
         /// The cube's own mip count, for the roughness->LOD map. NOT
         /// `passBuf.envMapNumMipmaps`: that is a MAX over every bound
         /// reflection texture and belongs to the probe array here.
@@ -2497,6 +2508,9 @@ private:
     static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
     static Ogre::TextureGpu             *sPassProbeGather;             // render thread only
     static const Ogre::HlmsSamplerblock *sPassProbeGatherSampler;      // render thread only
+    static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only
+    static const Ogre::HlmsSamplerblock *sEnvSampler;                  // render thread only
+    static const Ogre::HlmsSamplerblock *sGatherSampler;               // render thread only
     static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static unsigned       sLightCountMismatches;                       // render thread only
     static unsigned       sMismatchLogged;                             // render thread only
@@ -2701,6 +2715,17 @@ void retainSharedTexture(Ogre::TextureGpu *tex);
 bool releaseSharedTexture(Ogre::TextureGpu *tex);
 void resetSharedTextures();
 
+/// Returns an index buffer that belongs to no VAO to the VaoManager that made it
+/// (MeshRec::clusterStream). At namespace scope, not nested in the record: a
+/// nested deleter is not yet default-constructible where the record's own
+/// implicit constructor is formed.
+struct IndexBufferRelease {
+    Ogre::VaoManager *vaoManager;
+    IndexBufferRelease() : vaoManager(nullptr) {}
+    explicit IndexBufferRelease(Ogre::VaoManager *m) : vaoManager(m) {}
+    void operator()(Ogre::IndexBufferPacked *b) const;
+};
+
 class OgreScene final : public Scene {
 public:
     OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
@@ -2711,7 +2736,7 @@ public:
 
     void setAmbient(const Colour &upper, const Colour &lower) override;
     void setAmbientSh(const float sh[27]) override;
-    void setEnvironmentLightScale(float gain) override;
+    void setEnvironmentLight(const Colour &gain) override;
 
     void setFog(const FogDesc &desc) override;
     /// Creates the scene's AtmosphereNpr (fog only — the sky quad is created and
@@ -2906,12 +2931,24 @@ public:
     /// reflection cubemap. Called once per frame by the engine, like applyPendingGi.
     void applyPendingIbl();
     Ogre::TextureGpu *mReflectionTex = nullptr;   // prefiltered cube on PBSM_REFLECTION
-    /// The environment light's gain (Scene::setEnvironmentLightScale). Rides
-    /// `ambientUpperHemi.w`, which is HlmsPbs' envmapScale, so it scales
-    /// everything in the env-probe slot — the sky cube and a material's own
-    /// reflection override alike. 1.0 is "exactly the cube's radiance", which
-    /// is what every scene rendered before this existed, and at exactly 1.0
-    /// HlmsPbs does not even set the `envmap_scale` shader property.
+    /// THE ONE ENVIRONMENT AS THE RAY JOBS BIND IT (PHOTON-ENV-1): the cube (null
+    /// while there is none or the Sky Light is out) and ONE colour whose meaning
+    /// follows it — with the cube, the environment light's gain on it; without,
+    /// the environment's flat radiance (the SH's constant band, gain applied).
+    /// jah_rq_hit.glsl's JAH_SKY_COLOUR contract.
+    struct RayEnvironment {
+        Ogre::TextureGpu *cube = nullptr;
+        float colour[3] = { 0.0f, 0.0f, 0.0f };
+    };
+    RayEnvironment rayEnvironment() const;
+    /// The environment light's gain per channel (Scene::setEnvironmentLight):
+    /// what every escape multiplies the environment cube by (the pass's `jahEnv`
+    /// slot, the bounce job, the ray jobs).
+    Colour mEnvLightGain { 1.0f, 1.0f, 1.0f, 1.0f };
+    /// ...and its Rec.709 luminance, the one number HlmsPbs' own env-probe
+    /// sample can carry: it rides `ambientUpperHemi.w` (envmapScale), which
+    /// scales everything in the env-probe slot. At exactly 1.0 HlmsPbs does not
+    /// even set the `envmap_scale` shader property.
     float mEnvLightScale = 1.0f;
     void destroySky();
     bool removeNode(NodeId id) override;
@@ -2944,6 +2981,18 @@ public:
     void  objectLods(std::vector<ObjectLodDesc> &out) const override;
     bool  meshVaoShape(MeshId mesh, unsigned &levels,
                        unsigned &shadowIndependent) const override;
+    /// ATOM stage 2: a mesh's CLUSTER STREAM and the DAG tables it indexes, as
+    /// the engine holds them (MeshRec::clusterStream). ENGINE-PRIVATE, not on the
+    /// Scene interface: its consumer is stage 3's cut, and until then the cluster
+    /// suites' harness (tests/atom/cluster_draw.*) reads it to prove the upload.
+    /// False for an unknown mesh; `stream` null for a mesh with no DAG.
+    struct ClusterStreamView {
+        Ogre::Mesh *mesh = nullptr;
+        Ogre::IndexBufferPacked *stream = nullptr;
+        const std::vector<MeshCluster> *clusters = nullptr;
+        const std::vector<MeshClusterGroup> *groups = nullptr;
+    };
+    bool clusterStreamOf(MeshId mesh, ClusterStreamView &out) const;
     /// Writes `errors` (level 1 first, a length in mesh units each) into
     /// `mesh`'s LOD value array at the current bias. Patch 0059 added the
     /// setter this needs.
@@ -3072,6 +3121,7 @@ public:
     /// PHOTON-M3's readback: what the voxel lighting volume holds. Blocks on a
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade) override;
+    bool giFieldAtlas(GiFieldAtlas &out) override;
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
@@ -3362,6 +3412,7 @@ public:
     /// streaming (BOOTVOX-1). Counts the frames it has waited, so it is not
     /// const. See the definition in OgreGi.cpp.
     bool giVoxelTexturesPending();
+    bool giEnvironmentPending();
     /// THE GI MOVEMENT SCAN, once per frame, run by its consumer (the
     /// probe budget) — which is EARLIER in the frame than
     /// any scene graph update, so it reads updated bounds. Same pass, same
@@ -3415,6 +3466,10 @@ public:
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
+    /// The head of the scene's voxel chain (cascade 0's VctLighting, which holds
+    /// the extra cascades), or null when no voxel GI is built. For measuring
+    /// harnesses (Engine::voxelReaderParity), never for ownership.
+    Ogre::VctLighting *voxelLighting() const { return mVctLighting; }
 
     /// The backend light behind a document node id, and the reverse lookup.
     /// Both exist for the shadow-map work (SHADOW_TOOLING_SPEC.md §4.3): the
@@ -3745,6 +3800,21 @@ private:
         /// map is now an INDEX to this record (`mMeshIdByOgreMesh`) and the data
         /// lives here alone.
         std::vector<float> lodBounds;
+        /// ATOM stage 2: the mesh's CLUSTER STREAM — every cluster of its DAG,
+        /// triangles concatenated in cluster order (`MeshData::clusterIndices`),
+        /// one IMMUTABLE index buffer over the SAME vertex buffer as the levels,
+        /// in the SAME index type as level 0, so a cluster is the contiguous
+        /// range [firstIndex, firstIndex + indexCount) of it. Bound to no VAO and
+        /// drawn by nothing in the product yet: it is stage 3's input (its GPU
+        /// cut issues one indexed draw per cluster range), uploaded now so the
+        /// cut has a stream to name. Null for a mesh with no DAG. Owned here:
+        /// the deleter returns it to the VaoManager when the record dies (every
+        /// record dies with its scene, before Root).
+        std::unique_ptr<Ogre::IndexBufferPacked, IndexBufferRelease> clusterStream;
+        /// The DAG's tables, kept beside the stream they index (stage 3 uploads
+        /// them to the GPU; a suite reads them to check the stream).
+        std::vector<MeshCluster>      clusters;
+        std::vector<MeshClusterGroup> clusterGroups;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),
@@ -4041,8 +4111,11 @@ private:
     /// 32-bit indices. v1 meshes silently render nothing on Vulkan, so only this path
     /// exists. Every mesh carries tangents: HlmsPbs refuses to render a normal-mapped
     /// datablock on a mesh without them (throws, object falls back to flat grey).
+    /// `clusterStreamOut` receives the mesh's CLUSTER STREAM (MeshRec::clusterStream)
+    /// when the data carries a DAG and the mesh is static; null otherwise.
     Ogre::MeshPtr buildMeshV2(const std::string &name, const MeshData &data,
-                              std::vector<float> *interleavedOut = nullptr);
+                              std::vector<float> *interleavedOut = nullptr,
+                              Ogre::IndexBufferPacked **clusterStreamOut = nullptr);
     /// The six WORLD-axis faces (+X,-X,+Y,-Y,+Z,-Z, seen from inside) as ONE Ogre
     /// cubemap. Ogre samples cubemaps LEFT-handed — HlmsPbs negates the view
     /// matrix' Z column ("Cubemaps are left-handed", OgreHlmsPbs.cpp:2327) and
@@ -4495,6 +4568,14 @@ private:
         /// cascade 0, is the whole drag. The tick skips only when this still
         /// equals the scene's current light-write serial.
         unsigned long long injectedAtLightSerial = 0;
+        /// THE ONE-WRITER LATCH (PHOTON-WRITER-1): the writer frame
+        /// (`giWriterFrame()`) this cascade was last injected in. `injectCascade`
+        /// refuses a second injection of one cascade inside one frame. The two
+        /// fields above STAY beside it because they say something a per-frame
+        /// latch cannot: "a rebuild has injected this cascade since the last
+        /// MOVING TICK", and the ticks run every few frames, so that fact spans
+        /// frames.
+        unsigned long long injectedFrame = ~0ull;
         float        lastCpuMs = -1.0f;
         /// The camera position this cascade was last BUILT for. The scroll test
         /// quantises BOTH on an absolute world lattice of `step * (1 -
@@ -4535,19 +4616,45 @@ private:
     /// when the chain cannot answer at all (no chain, or nothing built yet), in
     /// which case the caller takes the from-scratch `rebuildVct`.
     bool refreshCascadesFast();
-    /// ONE DEFINITION OF AN AT-REST CASCADE INJECTION, shared by the light tick
-    /// and the incremental settle (LAMPREST-3 fix round).
-    void injectCascade(size_t i, bool coarse);
+    /// THE ONE WRITER (PHOTON-WRITER-1): the ONLY call to
+    /// `VctLighting::update` in the engine. Cascade `i` of the chain, or — with no
+    /// chain — the single volume as the arm's one "cascade" (i = 0). The
+    /// environment first, then the injection at the document's own bounce count
+    /// with the scene's own ray march: one answer per volume, whoever asks
+    /// (DRAG-1's rule, stated once). FALSE, and nothing written, when this
+    /// cascade has already been injected in this writer frame — the latch is
+    /// what makes "two writers on one volume in one frame" (render audit F3)
+    /// impossible rather than avoided; a refusal is counted
+    /// (GiStatus::chainInjectionRefusals) and every caller that can be refused
+    /// leaves its work owed rather than dropped.
+    bool injectCascade(size_t i);
+    /// Whether cascade `i` (or the single volume, i = 0) was injected in the
+    /// current writer frame.
+    bool injectedThisFrame(size_t i) const;
+    /// THE WRITER FRAME: Ogre's frame number, which moves inside
+    /// `_updateAllRenderTargets` — after every GI entry point of a frame (the
+    /// mirror's push, `updateGi`, `applyPendingGi`) and before the next frame's.
+    unsigned long long giWriterFrame() const;
+    /// The chain's light tick, run at the writer point (refreshGiLighting owes
+    /// it under a chain; updateCascades runs it after the frame's rebuild).
+    void runChainTick(bool inMotion);
+    /// The tick the host asked for this frame under a chain, not yet run.
+    enum class GiTickOwed { None = 0, Moving = 1, Rest = 2 };
+    GiTickOwed mGiTickOwed = GiTickOwed::None;
+    /// Owe the chain an at-rest settle over its current inputs (a rebuild, an
+    /// environment change, a refused tick): one sweep = n injections, paid
+    /// one per frame by the scheduler, outermost first.
+    void oweChainSettle();
     /// The field re-integrates once, after the LAST injection of a tick or of a
     /// settle — never per injection.
     void reintegrateFieldAfterInjection();
     /// One injection of an owed settle, out of the scheduler's frame slot.
     void payChainSettleStep();
-    /// Remember / compare the lights and ambient an owed settle's steps must all
-    /// see: a light that moves mid-settle restarts it (a settle that mixed two
-    /// lamp poses is the fixed point of neither).
+    /// Remember the light-write serial an owed settle's steps must all see: a
+    /// light that moves mid-settle — or an environment that changes, which moves
+    /// the same serial (noteEnvironmentChanged) — restarts it (a settle that
+    /// mixed two inputs is the fixed point of neither).
     void noteSettleInputs();
-    bool settleInputsUnchanged() const;
     /// Record the chain as settled for the inputs it was injected with.
     void noteChainSettled();
 
@@ -4613,25 +4720,47 @@ private:
     /// Re-centres one cascade's region on ITS cell lattice around `camPos` and
     /// records the camera it was placed for. Does not voxelise.
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
-    /// The ambient pair into ONE cascade's lighting (applyVctAmbient, aimed).
-    void applyCascadeAmbient(Ogre::VctLighting *lighting);
+    /// The environment into ONE cascade's bounce (applyVctEnvironment, aimed).
+    void applyCascadeEnvironment(Ogre::VctLighting *lighting);
     /// Extra bounce passes for cascade `idx` — the DOCUMENT's own count, on
     /// every cascade alike (PHOTON-M1 retired the pin's "a coarser cell gets
     /// more bounces" stabilisation: a bounce adds energy, it does not recover
     /// occlusion). 0 when the document asks for a single indirect bounce,
     /// which is the default.
     Ogre::uint32 cascadeBounces(size_t idx) const;
-    /// HOW MANY INJECTION PASSES AN AT-REST TICK SPENDS over a cascade chain
-    /// (LAMPREST-2). A re-injection is one Jacobi iteration of the chain's
-    /// coupled radiance, so the tick has to iterate until the answer stops
-    /// depending on the state it started from: measured, two passes leave
-    /// 4/255 of that history in the sealed room scripting.e2e.movable_lamp_rest
-    /// uses and three leave none, with three, four and six passes producing the
-    /// same picture. The moving tick stays at one pass. `JAHSHAKA_GI_SWEEPS`
-    /// overrides it for the suite that pins the measurement.
-    static constexpr int kAtRestSweeps = 3;
-    /// What the last light tick actually spent (GiStatus::chainSweeps).
-    int mGiChainSweeps = 0;
+    /// HOW MANY INJECTION SWEEPS AN AT-REST TICK SPENDS over a cascade chain:
+    /// ONE, and it is DERIVED (PHOTON-WRITER-1 SWEEPS-3; render audit F13).
+    ///
+    /// The chain's radiance is the fixed point of
+    ///     L_i = D_i + rho * G_i(L_i, L_{i+1}, ..., L_{N-1})
+    /// where cascade i's bounce cones read its OWN volume and the cascades
+    /// OUTSIDE it (`VctLighting::addCascade` gives cascade i the chain
+    /// i+1..N-1) and never one inside it: the coupling is TRIANGULAR. Within a
+    /// cascade, `VctLighting::update` rebuilds the light from scratch every
+    /// time: the injection dispatch writes the direct term D_i over the whole
+    /// volume, and each bounce pass writes direct + rho * G(total) from the
+    /// volume the previous pass wrote (ogre-patch 0076's Jacobi form, the
+    /// direct volume kept beside it) — so one injection of cascade i is a
+    /// function of its voxels, the lights, the environment and the CURRENT
+    /// light of cascades i+1..N-1, and of NOTHING the volume held before.
+    /// Swept OUTERMOST FIRST (the tick's order, the settle's order), cascade
+    /// N-1 reads nothing outside itself and is final after its injection;
+    /// cascade N-2 then reads a final N-1 and is final; and so on inward. One
+    /// sweep IS the fixed point, exactly, and a second sweep can change no byte
+    /// unless an INWARD coupling exists (an outer cascade reading an inner one,
+    /// or a volume reading its own previous contents).
+    ///
+    /// THE PROOF IS A MEASUREMENT OF BYTES: gi.chain_converge (the sealed room,
+    /// Medium and High) and gi.chain_converge_scenes (the default scene and
+    /// Showroom 2, High and Epic) hash every cascade's light volumes after one
+    /// at-rest sweep from a perturbed history and after a second one — equal,
+    /// per cascade, everywhere (and a lamp that travelled leaves the bytes the
+    /// same lamp jumped there leaves). The three sweeps LAMPREST-2 measured
+    /// were needed BEFORE patch 0067 (a recycled Vulkan block aliased a frame
+    /// in flight) and ogre-patch 0076 (the bounce re-gathered the total and
+    /// added to it: history-dependent by construction); neither is true now.
+    /// The moving tick is one sweep by the same argument.
+    static constexpr int kAtRestSweeps = 1;
     /// A CASCADE REBUILD LEFT THE CHAIN OFF ITS FIXED POINT (LAMPREST-3). A
     /// rebuild injects ONE cascade once, over the radiance it held somewhere
     /// else, and the mirror's cadence never ticks for a camera walk — so the
@@ -4641,23 +4770,18 @@ private:
     /// a walk that returned to its own starting pose).
     ///
     /// THE DEBT IS A COUNT OF INJECTIONS, NOT A FLAG, and it is paid ONE PER
-    /// FRAME out of the scheduler's own one-slot budget: the at-rest tick is
-    /// kAtRestSweeps passes over every cascade (twelve sequential injections at
-    /// Medium, 12.0-12.9 ms in Debug on the rig) and spending that in ONE frame
-    /// is a whole frame at 90 Hz — a hitch, for a picture that is only owed
-    /// because the camera moved. Spread over frames, in the SAME order the tick
-    /// uses (sweeps outer, cascades outermost-first), it leaves the same bytes
-    /// (verified by sha256 of the light voxels) for ~1 ms a frame, the rebuild
-    /// queue keeps priority, and a walk that never ends never starves: it keeps
-    /// paying one cheap injection per idle slot.
+    /// FRAME out of the scheduler's own one-slot budget: the at-rest tick is one
+    /// sweep over every cascade (n injections, outermost first) and spreading it
+    /// keeps a frame that only owes it because the camera moved at one cheap
+    /// injection. In the tick's own order it leaves the tick's bytes, the
+    /// rebuild queue keeps priority, and a walk that never ends never starves.
     int    mGiSettleStepsOwed = 0;
     /// The cascade count the debt was raised against — a chain that changed
     /// shape under an unfinished settle abandons it rather than injecting a
     /// cascade the sequence no longer describes.
     size_t mGiSettleCascades = 0;
-    /// The light-write serial and ambient the running settle was raised with.
+    /// The light-write serial the running settle was raised with.
     unsigned long long mGiSettleSerial = 0;
-    Colour             mGiSettleAmbient[2];
     /// How many of those settles this scene has paid (GiStatus::chainSettles) —
     /// cumulative, so a suite can assert "one per gesture, not one per frame"
     /// from outside.
@@ -4673,6 +4797,13 @@ private:
     /// belongs in the mirror, which owns the signature.)
     /// The irradiance field's pass-buffer block (JahIfd_piece_ps.any).
     void          pushIfdState(const Ogre::uint32 numProbes[3]);
+    /// THE FIELD SCROLLS (PHOTON-WRITER-1, FIELD-SCROLL): moves the field's window
+    /// onto cascade 0's new box by whole probe spacings and integrates only the
+    /// planes that entered it (IrradianceField::scrollWindow). False when the move
+    /// keeps nothing (a jump of the whole grid, or a resize) - the caller then
+    /// re-places and converges the whole field.
+    bool          scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::Vector3 &size,
+                                        GiStaleReason reason);
     /// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1). Called by the
     /// cascade scheduler whenever cascade 0 has been re-placed or re-voxelised:
     /// moves the field's volume onto cascade 0's voxel box (ogre-patch 0044's
@@ -4688,9 +4819,10 @@ private:
     /// the probe round-robin can never disagree about what moved.
     static float giAabbQuantum(const Ogre::Aabb &a);
     static bool  giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after);
-    /// The VCT light-injection ray-march step scale to use (FIX WAVE B5): the
-    /// document's at-rest value, raised on the cheap in-motion re-injection.
-    float giRayMarchStepScale(bool inMotion) const;
+    /// The VCT light-injection ray-march step scale (the document's value, at
+    /// least 1). ONE value: the moving tick's coarse march went with the one
+    /// writer (a volume's radiance must not depend on which path injected it).
+    float giRayMarchStepScale() const;
     /// THE REUSE ARM (FIX WAVE B4). Re-runs the EXISTING voxelizer and lighting
     /// over the live scene instead of tearing the arm down and building a new
     /// one, and re-dirties the probes without re-running the placement pass.
@@ -4753,9 +4885,15 @@ private:
     void noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic);
     /// True when the document typed a bounds box by hand (min != max).
     bool giBoundsExplicit() const;
-    /// Pushes mAmbientRadiance into the VCT arm (no-op without one). Called on
-    /// every ambient change and whenever the arm is (re)built.
-    void applyVctAmbient();
+    /// Pushes the environment (cube, gain, SH) into every cascade's bounce job
+    /// (no-op without a VCT arm). Called before every VctLighting::update and on
+    /// every environment change.
+    void applyVctEnvironment();
+    /// The environment's cube, gain or coefficients changed: the injection's
+    /// serial moves and a bouncing chain re-settles (PHOTON-ENV-1).
+    void noteEnvironmentChanged();
+    /// The environment cube the last push saw (its identity, to notice a swap).
+    Ogre::TextureGpu *mEnvCubeSeen = nullptr;
     /// Unbinds from HlmsPbs (when this scene owns the binding) and deletes the
     /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
     /// must run BEFORE the SceneManager dies.
@@ -5024,6 +5162,12 @@ private:
     /// last build (GiStatus::ifdFollows) — the counter the follow suite reads,
     /// and the honest answer to "is the field tracking the chain at all".
     unsigned long long                mIfdFollows = 0;
+    /// The probes the last scroll integrated in its step frame (GiStatus::ifdScrollProbes).
+    unsigned                          mIfdScrolledProbes = 0;
+    /// ...and how the follows split: window scrolls (the kept probes stand) and
+    /// whole re-placements (a resize or a jump of the whole grid; nothing kept).
+    unsigned long long                mIfdScrolls = 0;
+    unsigned long long                mIfdReplacements = 0;
     /// A FIELD FOLLOW OWED TO THE NEXT FRAME, AND WHY IT IS NOT PAID ON THE
     /// FRAME THAT MOVED THE CASCADE (lane V1-RIG item 2, LATER_OPTIMISATIONS
     /// L11, measured).
@@ -5090,10 +5234,6 @@ private:
     /// noteGiAutoVolume: a fit over fewer than two items is not a population,
     /// and must not arm the hysteresis floor.
     mutable size_t mGiLastItemCount = 0;
-    /// The scene's ambient hemisphere pair in RADIANCE units — what VctLighting
-    /// wants, which is NOT what setAmbient hands the SH path in the flat case
-    /// (that one carries HlmsPbs' 1/pi). [0] = upper, [1] = lower.
-    Colour     mAmbientRadiance[2] = { Colour(0, 0, 0, 1), Colour(0, 0, 0, 1) };
     /// The Forward+ depth-slice range currently in force, and the frame counter
     /// that rate-limits re-deriving it (fix 8). Seeded with the values
     /// createScene passes to setForwardClustered.
@@ -5205,6 +5345,20 @@ public:
     /// scene with the eye and the projection of the view that draws it; runs
     /// nothing when neither the camera nor the table moved.
     void updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, float viewportHeight);
+    /// How many times the rule has CHANGED a slot's level, ever. The ray tier
+    /// adds it to its movement epoch (a still scene whose camera crossed a band
+    /// owes one instance write: the near copy's BLAS changed).
+    unsigned long long rayLevelRefits() const { return mRayLevelRefits; }
+    /// THE RULE'S LEVEL FOR A SLOT, as the walk left it THIS frame. The ray
+    /// tier's writer reads this and NOT `GpuInstance::ids[3]`: the walk runs
+    /// after the table's scan, so the mirror's copy of the word is restaged only
+    /// by the NEXT frame's scan — and a writer reading it would build the TLAS
+    /// with the previous level on exactly the frame the epoch said it changed,
+    /// then skip the following (still) frame (ATOM-FARBLAS-1 audit F1). `ids.w`
+    /// stays in the table for the device-side instance writer A3 §1.3 owes.
+    uint32_t rayLevelOf(uint32_t slot) const {
+        return slot < mRayLevel.size() ? mRayLevel[slot] : 0u;
+    }
     /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
     /// null (or a request with hzbLevels 0) is the frustum-only mode.
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
@@ -5392,10 +5546,17 @@ private:
     /// CEILING a frame may spend on stale probes. Reported by giStatus; what a
     /// frame actually spent is mProbeCapturesLastFrame.
     int mProbeUpdatesPerFrame = 0;
-    /// How many CASCADES the last in-motion light tick actually injected
-    /// (DRAG-1): the chain's size minus the cascades a rebuild had already
-    /// injected since the previous tick. 0 in the single-volume arm.
-    unsigned mGiChainInjections = 0;
+    /// THE ONE WRITER'S BOOKS (PHOTON-WRITER-1). The single volume's latch (a
+    /// chain keeps one per cascade, VctCascade::injectedFrame); the injections a
+    /// latch refused (GiStatus::chainInjectionRefusals — 0 is the invariant);
+    /// and the injections spent in the current writer frame and the most any one
+    /// frame has spent (GiStatus::chainInjectionsPeakFrame — at most the chain's
+    /// size once a tick is one sweep).
+    unsigned long long mGiSingleInjectedFrame = ~0ull;
+    unsigned long long mGiInjectionRefusals   = 0;
+    unsigned long long mGiInjectionCountFrame = ~0ull;
+    unsigned           mGiInjectionsThisFrame = 0;
+    unsigned           mGiInjectionsPeak      = 0;
     /// EVERY WRITE A LIGHT INJECTION WOULD READ (DRAG-1 round 2, F5): a light's
     /// parameters (setLight), its POSE (setNodeTransform on a node that owns
     /// one — a movable lamp never stales the probe grid, so nothing else sees
@@ -5544,6 +5705,11 @@ private:
     /// and not thirty per rebuild for the life of the scene. Cleared the moment
     /// no voxel input is in flight.
     bool               mGiVoxelTextureWaitGaveUp  = false;
+    /// Deferrals of a first arm waiting for its sky (giEnvironmentPending); the
+    /// capture, convolution and SH read land within three drawn frames, so eight
+    /// is a bound for a scene that is never drawn, not a budget.
+    unsigned           mGiEnvWaitFrames = 0u;
+    static const unsigned kGiEnvWaitFrames = 8u;
     unsigned long long mGiBuiltMaterialGeneration = 0;
     /// THE PROBE CACHE's bookkeeping (ENGINE_CACHE_POLICY_SPEC P1). See
     /// staleProbeGrid and GiStatus: why the grid was last staled, a serial per
@@ -6682,6 +6848,13 @@ public:
     bool hzbStatus(View *view, HzbStatus &out) const override;
     bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                       unsigned &width, unsigned &height) override;
+    // ---- The one voxel reader's parity harness (OgreVoxelReaderParity.cpp) ----
+    bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
+                           std::vector<VoxelReaderAnswer> &fragment,
+                           std::vector<VoxelReaderAnswer> &compute) override;
+    // ---- The environment's cone lookup, measured (OgreEnvironmentCones.cpp) ----
+    bool environmentCones(Scene *scene, const std::vector<EnvironmentConeQuery> &queries,
+                          std::vector<EnvironmentConeAnswer> &out) override;
     // ---- The render-loop monitor (OgreFrameMonitor.cpp) ----
     void setFrameMonitor(MonitorLevel level) override;
     MonitorLevel frameMonitor() const override;

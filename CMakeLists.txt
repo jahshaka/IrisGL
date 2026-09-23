@@ -172,6 +172,10 @@ set(SRCS
     import/meshprewarm.cpp
     import/parsecensus.cpp
     import/meshbake.cpp
+    # ATOM stage 2: the ONE TU that compiles clusterlod.h's implementation
+    # (vendored copy, thirdparty/meshoptimizer-clusterlod/, pinned at meshoptimizer
+    # v1.2 = 9d9890c73011d75920af614485296d1e03e95448 — PROVENANCE.md beside it).
+    import/clusterlod.cpp
     import/importflags.cpp
     import/importsettings.cpp
     import/scenesource.cpp
@@ -405,12 +409,28 @@ endif()
 #       MESHOPTIMIZER_VERSION plus every signature we call. They are vendored,
 #       so they change only when someone deliberately moves the pin — exactly
 #       when a re-bake is wanted.
+#   thirdparty/meshoptimizer-clusterlod/clusterlod.h and the four library files
+#       it drives — ADDED by ATOM stage 2 (lane ATOM-CLUSTER-1, 2026-09-23). The
+#       bake now writes a CLUSTER DAG, and its bytes are clodBuild's output:
+#       the header (the whole algorithm — partition, lock, simplify, re-split)
+#       plus clusterizer.cpp (the meshlet builder), partition.cpp (the group
+#       partitioner), spatialorder.cpp (partition sort) and meshletutils.cpp
+#       (cluster bounds, local indices, meshlet optimisation) — every file a
+#       DAG byte passes through, and nothing else. indexgenerator.cpp is NOT
+#       here: its position remap is an equality test with one answer.
+#       import/clusterlod.cpp is not either: it is three include lines and a
+#       define, and cannot change a byte without the header changing.
 set(_mesh_bake_hashed_sources
     import/meshbake.cpp
     import/meshbake.h
     import/materialhelper.cpp
     thirdparty/meshoptimizer/src/meshoptimizer.h
-    thirdparty/meshoptimizer/src/simplifier.cpp)
+    thirdparty/meshoptimizer/src/simplifier.cpp
+    thirdparty/meshoptimizer-clusterlod/clusterlod.h
+    thirdparty/meshoptimizer/src/clusterizer.cpp
+    thirdparty/meshoptimizer/src/partition.cpp
+    thirdparty/meshoptimizer/src/spatialorder.cpp
+    thirdparty/meshoptimizer/src/meshletutils.cpp)
 # A CONFIGURE-TIME hash goes STALE (found by this lane's own suite, 2026-09-15):
 # editing import/meshbake.cpp does not re-run CMake, so the compiled-in term
 # kept describing the PREVIOUS contents of the file until something unrelated

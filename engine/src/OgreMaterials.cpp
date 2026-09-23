@@ -1939,7 +1939,7 @@ Ogre::TextureGpu *OgreScene::reflectionTexFor(const MaterialRec &rec) const {
     // gate has to live here as well: the scale is a pass value and a pass can
     // hold both kinds of material, so the only per-material lever is the
     // binding. Rebinding happens on the zero edge only
-    // (OgreScene::setEnvironmentLightScale).
+    // (OgreScene::setEnvironmentLight).
     if (mEnvLightScale <= 0.0f) return nullptr;
     return mReflectionTex;
 }

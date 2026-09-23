@@ -224,6 +224,38 @@ struct ReflectImage {
     VkImageView    view = VK_NULL_HANDLE;
 };
 
+/// ONE BOTTOM-LEVEL STRUCTURE PER (MESH, LEVEL) — ATOM-FARBLAS-1, A5b §4. A mesh
+/// used to have exactly one, over level 0. Now every instance is written TWICE
+/// into the one TLAS: a NEAR copy over the level the ray rule chose for it
+/// (`GpuInstance::ids[3]`, AT-A8r) and a FAR copy over the mesh's COARSEST level,
+/// so the table is keyed by the level too. A mesh with one level asks for (mesh,
+/// 0) twice and gets ONE structure — the "no second build" of the decision falls
+/// out of the key rather than being a special case.
+struct BlasKey {
+    const Ogre::Mesh *mesh = nullptr;
+    uint32_t level = 0;
+    bool operator==(const BlasKey &o) const { return mesh == o.mesh && level == o.level; }
+};
+struct BlasKeyHash {
+    size_t operator()(const BlasKey &k) const {
+        return std::hash<const void *>()(k.mesh) ^ (size_t(k.level) * 0x9E3779B97F4A7C15ull);
+    }
+};
+/// What a gather asks to have built: the mesh (HELD, see Blas::mesh) and the level.
+struct BlasWant {
+    Ogre::MeshPtr mesh;
+    uint32_t level = 0;
+};
+
+/// THE COARSEST LEVEL a mesh carries — the chain's last (ATOM-BAKE-1's
+/// 128-triangle floor), 0 for a mesh with no chain. Read off the VAO list the
+/// draw indexes, which is the list a BLAS is built from.
+inline uint32_t coarsestLevelOf(const Ogre::Mesh *mesh) {
+    if (!mesh || mesh->getNumSubMeshes() == 0) return 0u;
+    const size_t n = mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size();
+    return n > 1u ? uint32_t(n - 1u) : 0u;
+}
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -272,6 +304,8 @@ private:
         /// buffers would be built over recycled VRAM, and the cache is keyed by
         /// the raw pointer, which a freed-and-reallocated Mesh would alias.
         Ogre::MeshPtr mesh;
+        /// The mesh LEVEL this structure was built from (BlasKey).
+        uint32_t level = 0;
         /// Compaction state machine: 0 = built, size not asked; 1 = size query
         /// written, waiting; 2 = compacted (or declined).
         unsigned compactState = 0;
@@ -284,7 +318,7 @@ private:
     };
 
     struct SceneAs {
-        std::unordered_map<const Ogre::Mesh *, size_t> blasOfMesh;
+        std::unordered_map<BlasKey, size_t, BlasKeyHash> blasOf;
         std::vector<Blas> blas;
 
         VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
@@ -294,11 +328,20 @@ private:
         /// never passes through an intermediate vector.
         RawBuffer instances;
         unsigned  instanceCapacity = 0;
-        unsigned  instanceCount = 0;
+        unsigned  instanceCount = 0;      ///< near + far copies: what the TLAS holds
+        unsigned  farInstanceCount = 0;   ///< ...of which the far copies
+        /// The widest coarse-vs-fine gap of the set this TLAS was written from
+        /// (world units): the gather's far query starts this far BEFORE its near
+        /// length (audit F2). Held with the TLAS, so a still frame keeps it.
+        float     farOverlap = 0.0f;
+        /// The coarsest level's bound per GpuScene mesh index (with the mesh it
+        /// was read for), so the writer asks the mesh records once per mesh.
+        std::vector<std::pair<const Ogre::Mesh *, float>> coarseBound;
         unsigned  slot = 0;
 
-        /// The gate: nothing moved and no item changed since the last update,
-        /// so there is nothing to record. Same epoch the caster walk uses.
+        /// The gate: nothing moved, no item changed and no instance's RAY LEVEL
+        /// changed since the last update, so there is nothing to record. The
+        /// caster walk's epoch plus the ray rule's refit count.
         unsigned long long lastEpoch = 0;
         bool haveEpoch = false;
         /// The traced set's shape (count + BLAS identities), so a changed set
@@ -334,7 +377,7 @@ private:
     VkDeviceAddress addressOf(VkBuffer b) const;
     bool makePipeline(std::string &err);
 
-    bool ensureBlas(SceneAs &sa, const std::vector<Ogre::MeshPtr> &meshes, VkCommandBuffer cmd,
+    bool ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants, VkCommandBuffer cmd,
                     unsigned &built, std::string &err);
     /// True when it actually recorded a compaction copy this frame.
     bool runCompaction(SceneAs &sa, VkCommandBuffer cmd);
@@ -780,11 +823,11 @@ void RayQueryTier::evictStaleBlas(SceneAs &sa) {
         Blas &bl = sa.blas[i];
         if (!bl.as || bl.compactState == 1u) continue;        // a size query is still owed
         if (bl.lastSeen == 0u || uint32_t(now - bl.lastSeen) < kEvictAfterFrames) continue;
-        // The slot stays (indices are referenced by blasOfMesh and by the
+        // The slot stays (indices are referenced by blasOf and by the
         // instance patches); only its contents go, and the map entry with them,
         // so the next sighting rebuilds into a fresh slot.
-        for (auto it = sa.blasOfMesh.begin(); it != sa.blasOfMesh.end();) {
-            if (it->second == i) it = sa.blasOfMesh.erase(it); else ++it;
+        for (auto it = sa.blasOf.begin(); it != sa.blasOf.end();) {
+            if (it->second == i) it = sa.blasOf.erase(it); else ++it;
         }
         retire(bl.as, bl.storage);
         bl.mesh.reset();
@@ -1287,7 +1330,7 @@ void RayQueryTier::close() {
 /// finding 2) every destroyed preview or thumbnail scene left its structures,
 /// its instance buffer and the MeshPtrs it holds alive for the process's life
 /// under a dangling key, and a recycled OgreScene ADDRESS inherited a dead
-/// scene's structures: a TLAS built for someone else's items, a blasOfMesh
+/// scene's structures: a TLAS built for someone else's items, a blasOf
 /// pointing at meshes this scene never had, and an epoch that made the tier
 /// think nothing had moved. That is exactly the aliasing the held MeshPtr
 /// exists to prevent, arriving by another door.
@@ -1334,22 +1377,29 @@ struct InstanceWriter final {
     unsigned capacity = 0;
     unsigned count = 0;
     unsigned overflow = 0;
+    /// How many of `count` are FAR copies (mask kRayMaskFar).
+    unsigned farCount = 0;
+    /// The widest coarse-vs-fine gap over the traced set, world units (F2),
+    /// and the per-mesh-index cache of the coarsest bound it is built from.
+    float maxCoarseBound = 0.0f;
+    std::vector<std::pair<const Ogre::Mesh *, float>> *coarseBound = nullptr;
     unsigned long long signature = 1469598103934665603ull;   // FNV-1a offset basis
     /// THE SIGNATURE IS ONLY EVER READ TO DECIDE REFIT-vs-REBUILD. A rebuild is
     /// the default (NVIDIA's own guidance for a TLAS, and 0.2-0.35 ms even at
     /// 8,000 instances), so with the refit off there is nothing to compare and
     /// three FNV rounds per instance are pure cost.
     bool wantSignature = false;
-    std::unordered_map<const Ogre::Mesh *, size_t> *blasOfMesh = nullptr;
+    std::unordered_map<BlasKey, size_t, BlasKeyHash> *blasOf = nullptr;
     const std::vector<VkDeviceAddress> *blasAddress = nullptr;
     /// Slots referenced by this gather, so a BLAS nothing points at any more can
     /// be evicted (finding 5).
     std::vector<unsigned char> *seen = nullptr;
-    /// Meshes seen this gather that have no BLAS yet, in first-seen order, and
-    /// the instances that must have their reference patched once they do.
-    std::vector<Ogre::MeshPtr> newMeshes;
-    std::unordered_map<const Ogre::Mesh *, unsigned> newIndexOf;
-    struct Patch { unsigned instance = 0; unsigned newMesh = 0; };
+    /// (mesh, level)s seen this gather that have no BLAS yet, in first-seen
+    /// order, and the instances that must have their reference patched once they
+    /// do.
+    std::vector<BlasWant> newBlas;
+    std::unordered_map<BlasKey, unsigned, BlasKeyHash> newIndexOf;
+    struct Patch { unsigned instance = 0; unsigned newBlas = 0; };
     std::vector<Patch> patches;
 
     void hash(unsigned long long v) {
@@ -1357,23 +1407,25 @@ struct InstanceWriter final {
         signature *= 1099511628211ull;
     }
 
-    /// ONE-ENTRY MESH MEMO. The map lookup below was 8,001 hash lookups per
-    /// gather on the lattice; consecutive instances almost always share a mesh
-    /// (that scene is 8,001 instances of 22 meshes), so remembering the last
-    /// one answers nearly all of them with a pointer compare. It is a pure
-    /// cache — a miss falls through to the map and gives the same answer.
-    const Ogre::Mesh *lastMesh = nullptr;
-    size_t lastSlot = 0;
-    bool lastFound = false;
+    /// ONE-ENTRY MEMO PER COPY KIND (0 near, 1 far). The map lookup below was
+    /// 8,001 hash lookups per gather on the lattice; consecutive instances
+    /// almost always share a mesh (that scene is 8,001 instances of 22 meshes),
+    /// so remembering the last key answers nearly all of them with a compare.
+    /// ONE memo per kind because the writer alternates near and far for every
+    /// slot — a single memo would miss on every call. A pure cache: a miss
+    /// falls through to the map and gives the same answer.
+    struct Memo { BlasKey key; size_t slot = 0; bool found = false; };
+    Memo memo[2];
 
-    /// One traced instance. `world` is the GPU scene's own twelve floats — a
+    /// One instance descriptor. `world` is the GPU scene's own twelve floats — a
     /// ROW-MAJOR 3x4, which is exactly `VkTransformMatrixKHR`'s layout, so the
     /// transform is ONE memcpy and no longer twelve loads out of an Ogre
     /// Matrix4 (the table already did that conversion once, for everybody).
-    void add(const Ogre::MeshPtr &meshPtr, const float *world, unsigned mask,
-             unsigned customIndex) {
-        const Ogre::Mesh *mesh = meshPtr.get();
+    void add(const Ogre::MeshPtr &meshPtr, uint32_t level, bool far, const float *world,
+             unsigned mask, unsigned customIndex) {
+        const BlasKey key{ meshPtr.get(), level };
         const unsigned idx = count++;
+        if (far) ++farCount;
         if (idx >= capacity) { ++overflow; return; }
         // BUILD IT ON THE STACK, STORE IT ONCE. `dst` points into HOST-VISIBLE
         // device memory, which on this driver is WRITE-COMBINED: it streams
@@ -1393,27 +1445,28 @@ struct InstanceWriter final {
         inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         inst.accelerationStructureReference = 0;
 
-        if (mesh == lastMesh && lastFound) {
-            inst.accelerationStructureReference = (*blasAddress)[lastSlot];
-            if (seen && lastSlot < seen->size()) (*seen)[lastSlot] = 1u;
-            if (wantSignature) { hash(1ull + lastSlot); hash(customIndex); hash(mask); }
+        Memo &m = memo[far ? 1 : 0];
+        if (m.found && m.key == key) {
+            inst.accelerationStructureReference = (*blasAddress)[m.slot];
+            if (seen && m.slot < seen->size()) (*seen)[m.slot] = 1u;
+            if (wantSignature) { hash(1ull + m.slot); hash(customIndex); hash(mask); }
             std::memcpy(&dst[idx], &inst, sizeof(inst));
             return;
         }
-        auto it = blasOfMesh->find(mesh);
-        if (it != blasOfMesh->end()) {
-            lastMesh = mesh; lastSlot = it->second; lastFound = true;
+        auto it = blasOf->find(key);
+        if (it != blasOf->end()) {
+            m.key = key; m.slot = it->second; m.found = true;
             if (seen && it->second < seen->size()) (*seen)[it->second] = 1u;
             inst.accelerationStructureReference = (*blasAddress)[it->second];
             if (wantSignature) hash(1ull + it->second);
         } else {
-            lastMesh = nullptr; lastFound = false;
-            auto nit = newIndexOf.find(mesh);
+            m.found = false;
+            auto nit = newIndexOf.find(key);
             unsigned ni;
             if (nit == newIndexOf.end()) {
-                ni = unsigned(newMeshes.size());
-                newMeshes.push_back(meshPtr);
-                newIndexOf.emplace(mesh, ni);
+                ni = unsigned(newBlas.size());
+                newBlas.push_back({ meshPtr, level });
+                newIndexOf.emplace(key, ni);
             } else {
                 ni = nit->second;
             }
@@ -1449,14 +1502,24 @@ struct InstanceWriter final {
 /// carry their own channel INSTEAD of kVisibleBit precisely so captures can
 /// exclude them, and they fail the first test.
 ///
-/// THE PER-CONSUMER MASKS are the same three bits (audit C-15): bit 0 a shadow
-/// caster, bit 1 a mover, bit 2 still world. A sun-contact ray (R3) tests bit 0,
-/// a "what does this probe see of the world that stands still" ray (R2) tests
-/// bit 2, a reflection (R5) tests everything.
+/// EVERY TRACED OBJECT IS WRITTEN TWICE (ATOM-FARBLAS-1, A5b §4 — ONE TLAS with
+/// explicit masks; the two-TLAS alternative was rejected on cost: it doubles the
+/// build and refit every frame and puts the near/far split in a binding instead
+/// of a bit). The masks (Types.h, `kRayMask*`):
 ///
-/// `instanceCustomIndex` is the SLOT, which is what it always was — and now it
-/// is also the index of this instance's entry in the table, so a hit shader can
-/// read the object's bounds, its previous transform and its mesh with one fetch.
+///   * THE NEAR COPY over the level the RAY RULE chose (`GpuInstance::ids[3]`,
+///     AT-A8r, `OgreScene::updateRayLevels`; clamped to the chain), carrying the
+///     per-consumer bits of audit C-15 — bit 0 a shadow caster, bit 1 a mover,
+///     bit 2 still world — AND bit 3, "near". A near launch traces 0x0F.
+///   * THE FAR COPY over the mesh's COARSEST level, carrying bit 4 ALONE. Only a
+///     launch that asks for the far field (the gather's second query, past its
+///     near length) sees it; no near launch can hit a far copy, so no ray is
+///     answered twice by one object.
+///
+/// `instanceCustomIndex` is the SLOT on BOTH copies — the index of the object's
+/// entry in the table, so a hit shader reads the object's bounds, its previous
+/// transform and its mesh with one fetch whichever copy it hit; the copy is told
+/// apart by the MASK the launch asked with, never by the index.
 static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
     const detail::GpuScene &gs = scene->gpuScene();
     if (!gs.live()) return;
@@ -1471,9 +1534,34 @@ static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
         std::memcpy(&meshIndex, &e.boundsMin[3], sizeof(meshIndex));
         const Ogre::MeshPtr &mesh = gs.meshAt(meshIndex);
         if (!mesh) continue;
-        unsigned mask = (flags & detail::kGpuCaster) ? 0x01u : 0x00u;
-        mask |= (flags & detail::kGpuMover) ? 0x02u : 0x04u;
-        w.add(mesh, e.world, mask, i);
+        unsigned mask = kRayMaskNear;
+        mask |= (flags & detail::kGpuCaster) ? kRayMaskCaster : 0u;
+        mask |= (flags & detail::kGpuMover) ? kRayMaskMover : kRayMaskStill;
+        const uint32_t coarsest = coarsestLevelOf(mesh.get());
+        const uint32_t nearLevel = std::min(scene->rayLevelOf(i), coarsest);
+        w.add(mesh, nearLevel, false, e.world, mask, i);
+        w.add(mesh, coarsest, true, e.world, kRayMaskFar, i);
+        // THE HAND-OVER'S WIDTH (audit F2): how far, in world units, a far copy's
+        // surface may lie from its fine one — the coarsest level's measured bound
+        // grown by the instance's largest axis scale. The gather starts its far
+        // query that much BEFORE the near length, so a coarse surface inside it
+        // whose fine surface lies just outside cannot be passed by both queries.
+        // The bound is cached per MESH TABLE INDEX (checked against the mesh
+        // pointer, so a recycled index re-reads): a lookup through the scene's
+        // mesh records per instance doubled this loop on the lattice, whose
+        // consecutive instances cycle through eleven meshes.
+        if (coarsest > 0u) {
+            if (meshIndex >= w.coarseBound->size()) w.coarseBound->resize(meshIndex + 1u);
+            auto &cached = (*w.coarseBound)[meshIndex];
+            if (cached.first != mesh.get()) {
+                const std::vector<float> *b = scene->lodBoundsFor(mesh.get());
+                cached = { mesh.get(), (b && !b->empty()) ? b->back() : 0.0f };
+            }
+            if (cached.second > 0.0f) {
+                const float grown = cached.second * worldMaxAxisScale(e.world);
+                if (std::isfinite(grown) && grown > w.maxCoarseBound) w.maxCoarseBound = grown;
+            }
+        }
     }
 }
 
@@ -1494,12 +1582,18 @@ struct MeshGeometry {
     unsigned triangles = 0;
 };
 
-bool describeMesh(const Ogre::Mesh *mesh, RayQueryTier *, MeshGeometry &out,
+/// `level` picks the VAO of the mesh's LOD chain (clamped to what a submesh
+/// carries): every level shares level 0's vertex buffer and owns its own index
+/// buffer (OgreMesh.cpp), so a level's BLAS is the same arithmetic over a
+/// different index range.
+bool describeMesh(const Ogre::Mesh *mesh, uint32_t level, MeshGeometry &out,
                   VkDeviceAddress (*addressOf)(void *, VkBuffer), void *self) {
     for (unsigned s = 0, e = unsigned(mesh->getNumSubMeshes()); s < e; ++s) {
         const Ogre::SubMesh *sub = mesh->getSubMesh(s);
         if (!sub || sub->mVao[Ogre::VpNormal].empty()) continue;
-        Ogre::VertexArrayObject *vao = sub->mVao[Ogre::VpNormal][0];
+        const size_t levels = sub->mVao[Ogre::VpNormal].size();
+        Ogre::VertexArrayObject *vao =
+            sub->mVao[Ogre::VpNormal][std::min<size_t>(level, levels - 1u)];
         // ONLY INDEXED TRIANGLE LISTS. Everything this engine builds is one
         // (buildMeshV2), and a strip or an unindexed draw would need its own
         // geometry shape; skipping is the honest answer, not a silent wrong
@@ -1551,25 +1645,27 @@ bool describeMesh(const Ogre::Mesh *mesh, RayQueryTier *, MeshGeometry &out,
 }
 }   // namespace
 
-bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<Ogre::MeshPtr> &meshes,
+bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants,
                               VkCommandBuffer cmd, unsigned &built, std::string &err) {
     built = 0;
     struct Job {
         Ogre::MeshPtr mesh;
+        uint32_t level = 0;
         MeshGeometry geo;
         VkAccelerationStructureBuildGeometryInfoKHR build{};
         VkAccelerationStructureBuildSizesInfoKHR sizes{};
         size_t slot = 0;
     };
     std::vector<Job> jobs;
-    jobs.reserve(meshes.size());
+    jobs.reserve(wants.size());
     auto addrThunk = [](void *self, VkBuffer b) -> VkDeviceAddress {
         return static_cast<RayQueryTier *>(self)->addressOf(b);
     };
-    for (const Ogre::MeshPtr &mesh : meshes) {
+    for (const BlasWant &want : wants) {
         Job j;
-        j.mesh = mesh;
-        if (!describeMesh(mesh.get(), this, j.geo, addrThunk, this)) continue;
+        j.mesh = want.mesh;
+        j.level = want.level;
+        if (!describeMesh(want.mesh.get(), want.level, j.geo, addrThunk, this)) continue;
         j.build.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
         j.build.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
         // FAST TRACE + ALLOW COMPACTION: a mesh's BLAS is built once and traced
@@ -1611,6 +1707,7 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<Ogre::MeshPtr> &mes
         Blas bl;
         bl.triangles = j.geo.triangles;
         bl.mesh = j.mesh;
+        bl.level = j.level;
         if (!makeBuffer(j.sizes.accelerationStructureSize,
                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, true,
                         bl.storage, err)) {
@@ -1643,7 +1740,7 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<Ogre::MeshPtr> &mes
         // mBlas.size()` while mBlas was still empty, gave every mesh slot 0,
         // and rendered the world as copies of the first mesh).
         j.slot = sa.blas.size();
-        sa.blasOfMesh[j.mesh.get()] = j.slot;
+        sa.blasOf[BlasKey{ j.mesh.get(), j.level }] = j.slot;
         sa.blas.push_back(std::move(bl));
         builds.push_back(j.build);
         rangePtrs.push_back(j.geo.ranges.data());
@@ -1941,7 +2038,13 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // "could anything a traced instance depends on have changed?". A still
     // frame therefore records nothing at all, which is what makes a 60 Hz
     // editor with an alive TLAS cost nothing at rest.
-    const unsigned long long epoch = scene->shadowEpoch();
+    //
+    // ...PLUS THE RAY RULE'S REFITS (ATOM-FARBLAS-1): the near copy's level is
+    // the rule's answer, and the rule moves with the CAMERA, which is not scene
+    // movement — so a still scene whose eye crossed a 2x band must still write
+    // its instances once. Both counters only ever grow, so their sum is an
+    // epoch too.
+    const unsigned long long epoch = scene->shadowEpoch() + scene->rayLevelRefits();
     const bool moved = !sa.haveEpoch || epoch != sa.lastEpoch;
     // THIS SCENE'S OWN timestamp range, handed out once. Past the budget a
     // scene simply reports no GPU milliseconds — a thumbnail scene's timings
@@ -2003,7 +2106,8 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     std::string err;
     for (int attempt = 0; attempt < 2; ++attempt) {
         InstanceWriter w;
-        w.blasOfMesh = &sa.blasOfMesh;
+        w.blasOf = &sa.blasOf;
+        w.coarseBound = &sa.coarseBound;
         std::vector<VkDeviceAddress> addresses;
         addresses.reserve(sa.blas.size());
         for (const Blas &bl : sa.blas) addresses.push_back(bl.address);
@@ -2054,11 +2158,11 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         pend.live = timed;
 
         unsigned built = 0;
-        if (!w.newMeshes.empty()) {
+        if (!w.newBlas.empty()) {
             if (timed)
                 vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 0);
             monitor::CacheScope scope(CacheKind::Gi, WorkReason::Added, 0, "rq.blas", mRs);
-            if (!ensureBlas(sa, w.newMeshes, cmd, built, err)) {
+            if (!ensureBlas(sa, w.newBlas, cmd, built, err)) {
                 Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
                 scope.cancel();
                 // The TLAS goes with the failure: compaction may already have
@@ -2078,12 +2182,15 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             // Patch the instances that referenced a structure that did not
             // exist when they were written.
             for (const InstanceWriter::Patch &p : w.patches) {
-                auto it = sa.blasOfMesh.find(w.newMeshes[p.newMesh].get());
-                if (it == sa.blasOfMesh.end()) continue;
+                const BlasWant &want = w.newBlas[p.newBlas];
+                auto it = sa.blasOf.find(BlasKey{ want.mesh.get(), want.level });
+                if (it == sa.blasOf.end()) continue;
                 w.dst[p.instance].accelerationStructureReference = sa.blas[it->second].address;
             }
         }
         sa.instanceCount = w.count;
+        sa.farInstanceCount = w.farCount;
+        sa.farOverlap = w.maxCoarseBound;
         // REBUILD IS THE DEFAULT, refit the optimisation (NVIDIA's own guidance
         // for a TLAS: "consider PREFER_FAST_TRACE and perform only rebuilds").
         // A refit is only ever taken when the SET is identical — same
@@ -2108,7 +2215,18 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 sa.st.enabled = false;
                 return;
             }
-            scope.setUnits(sa.instanceCount);
+            // THE TRACED SET, not the TLAS's 2N: a per-unit cost that halved
+            // silently when every object gained a far copy would be a lie (F6).
+            // The far copies are their own row's units, beside it.
+            scope.setUnits(sa.instanceCount - sa.farInstanceCount);
+        }
+        {
+            // Zero-width by construction — the far copies are built by the SAME
+            // command as the near ones, so this row carries their COUNT and no
+            // time of its own.
+            monitor::CacheScope far(CacheKind::Gi, refit ? WorkReason::Moved : WorkReason::Rebuild,
+                                    0, "rq.tlas.far", nullptr);
+            far.setUnits(sa.farInstanceCount);
         }
         if (timed)
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 3);
@@ -2122,13 +2240,26 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     sa.haveEpoch = true;
     evictStaleBlas(sa);
     sa.st.gatherMs = float(gatherMs);
-    sa.st.blasCount = int(sa.blas.size());
-    sa.st.instances = int(sa.instanceCount);
+    // LIVE structures only: an evicted slot keeps its place in the vector (the
+    // index is referenced by the table) but holds nothing (F6).
+    sa.st.blasCount = 0;
+    for (const Blas &bl : sa.blas)
+        if (bl.as) ++sa.st.blasCount;
+    // THE TRACED SET is the near copies; the far copies are the same objects
+    // again (A5b §4), counted apart so a reader can tell the two halves.
+    sa.st.instances = int(sa.instanceCount - sa.farInstanceCount);
+    sa.st.farInstances = int(sa.farInstanceCount);
     sa.st.triangles = 0;
     sa.st.blasBytes = 0;
+    sa.st.levelBlasCount = 0;
+    sa.st.levelBlasBytes = 0;
     for (const Blas &bl : sa.blas) {
         sa.st.triangles += int(bl.triangles);
         sa.st.blasBytes += bl.storage.size;
+        if (bl.as && bl.level > 0u) {
+            ++sa.st.levelBlasCount;
+            sa.st.levelBlasBytes += bl.storage.size;
+        }
     }
 }
 
@@ -2766,7 +2897,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // and in an open scene that is the whole answer. A HIT with no cache behind
     // it is what the shader declines (see its note) — it hands the pixel back
     // to the probe, which is the honest fallback.
-    Ogre::TextureGpu *skyTex = scene->mReflectionTex;
+    // THE ONE ENVIRONMENT (PHOTON-ENV-1): the Sky Light's cube and gain, or the
+    // flat environment when there is no cube (OgreScene::rayEnvironment).
+    const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();
+    Ogre::TextureGpu *skyTex = rayEnv.cube;
 
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
@@ -2950,10 +3084,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.knobs2[1] = voxCount ? std::max(0.01f, 0.5f * voxCell[0].length()) : 0.02f;
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
     pp.knobs2[3] = kReflectHistoryFloor;
-    // The sky's own average, for a scene with no captured cube at all. Band 0 of
-    // the sky SH is the mean radiance over the sphere (Y00 = 0.282095), which is
-    // the honest constant answer when there is no direction-dependent one.
-    for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, scene->mSkySh[i] * 0.282095f);
+    // The cube's gain, or the flat environment with no cube (jah_rq_hit.glsl's
+    // JAH_SKY_COLOUR contract).
+    for (int i = 0; i < 3; ++i) pp.skyColour[i] = rayEnv.colour[i];
     for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
         const unsigned src = c < voxCount ? c : (voxCount ? voxCount - 1u : 0u);
         const Ogre::Vector3 sz = voxCount ? voxSize[src] : Ogre::Vector3(1.0f);
@@ -3275,6 +3408,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.quality = scene->giParams().quality;
     in.epicRow = view->postFx().ssr >= 2;
     in.tuning = scene->gatherTuning();
+    in.farOverlap = sa.farOverlap;
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
     const auto takeVolume = [&](Ogre::VctLighting *lighting, Ogre::VctVoxelizer *voxelizer) {
@@ -3303,8 +3437,12 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     } else {
         takeVolume(scene->mVctLighting, scene->mVctVoxelizer);
     }
-    in.sky = scene->mReflectionTex;
-    for (int i = 0; i < 3; ++i) in.skyColour[i] = std::max(0.0f, scene->mSkySh[i] * 0.282095f);
+    {
+        // THE ONE ENVIRONMENT (PHOTON-ENV-1; OgreScene::rayEnvironment).
+        const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();
+        in.sky = rayEnv.cube;
+        for (int i = 0; i < 3; ++i) in.skyColour[i] = rayEnv.colour[i];
+    }
 
     // ---- the camera's basis (rq_reflect.comp's reconstruction) -------------
     const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;

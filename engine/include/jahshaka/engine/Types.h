@@ -194,6 +194,141 @@ inline size_t lodLevelForWorldError(const std::vector<float> &bounds, float allo
     return level;
 }
 
+// ---- ATOM stage 2: THE CLUSTER CUT (lane ATOM-CLUSTER-1) -------------------
+//
+// SPECS/atom/B2_CLUSTER_DAG_DESIGN.md §2. The mesh's CLUSTER DAG is a bake
+// product (irisgl/import/meshbake.cpp `clusterdag`, document/assets/mesh.h
+// `iris::MeshClusterDag`) handed across as the two tables below plus one global
+// index stream (`MeshData::clusterIndices`). Nothing in the product draws it yet:
+// stage 3's GPU cut is the consumer, and the proof that the rule below selects
+// ONE crack-free cut lives in the test harness (tests/atom/cluster_draw.*).
+//
+// THE RULE IS clusterlod.h's RENDER TEST (its lines 129-133), with the MEASURED
+// group error in the quality currency's units:
+//
+//     a cluster is DRAWN iff its own group is NOT affordable
+//                        and (it is level 0, or its `refined` group IS affordable)
+//
+// and a group is AFFORDABLE when its measured error is STRICTLY below what the
+// consumer can afford at that group — `allowedWorldError` at the group's own
+// distance, exactly the level walk's comparison (`lodLevelForWorldError`), so a
+// mesh whose DAG and chain agree on an error agree on the answer. The distance
+// is the currency's: from the eye to the group's SPHERE (centre transformed by
+// the instance, radius times the instance's largest axis scale), clamped at 0.
+//
+// WHY IT IS ONE CUT: the bake makes every group's error at least every child
+// group's, and every group's sphere contain every child group's — so a group
+// that is affordable has only affordable children, and the drawn clusters are
+// exactly one frontier through the DAG. `atom.cluster_cut` asserts it over the
+// shipped meshes; `atom.cluster_crack` renders it.
+//
+// THE GLSL TWIN is media/Hlms/Jahshaka/JahClusterCut.glsl (`jahClusterGroupAllowed`,
+// `jahClusterDrawn`); `engine.lod_rule_parity`'s fourth copy runs it on the device
+// over the shipped meshes' DAGs and compares the drawn set with `clusterCut`'s.
+// A change here that is not made there fails that suite.
+
+/// One cluster of a mesh's DAG. `firstIndex`/`indexCount` are the cluster's
+/// contiguous range of `MeshData::clusterIndices` (and of the engine's uploaded
+/// cluster stream); the sphere is the header's culling bound, mesh space.
+struct MeshCluster {
+    unsigned firstIndex = 0;
+    unsigned indexCount = 0;
+    int      group = -1;       ///< the group this cluster is a MEMBER of
+    int      refined = -1;     ///< the group whose simplification PRODUCED it; -1 = level 0
+    float    centre[3] = { 0.0f, 0.0f, 0.0f };
+    float    radius = 0.0f;
+};
+
+/// One group of a mesh's DAG. `error` is the MEASURED two-sided distance of the
+/// group's simplified geometry from the level-0 surface it stands for — mesh
+/// units, monotone up the DAG, `FLT_MAX` for a terminal group (never affordable).
+/// `estimate` is clusterlod.h's own number, a diagnostic nothing selects on.
+struct MeshClusterGroup {
+    int   depth = 0;
+    float centre[3] = { 0.0f, 0.0f, 0.0f };
+    float radius = 0.0f;
+    float error = 0.0f;
+    float estimate = 0.0f;
+};
+
+/// ONE INSTANCE AS ONE VIEW SEES IT — everything the cut reads that is not the
+/// DAG. `worldRow` is the instance's 3x4 transform as three ROWS (the GPU scene
+/// table's own layout); `scale` is its largest axis scale, the currency's
+/// `meshToWorldScale`, supplied by the caller exactly as the cull derives it.
+struct ClusterCutView {
+    float worldRow[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f },
+                             { 0.0f, 1.0f, 0.0f, 0.0f },
+                             { 0.0f, 0.0f, 1.0f, 0.0f } };
+    float scale = 1.0f;
+    float eye[3] = { 0.0f, 0.0f, 0.0f };
+    float tolerance = 0.0f;       ///< samples (the view's pixel budget)
+    float projScaleY = 0.0f;      ///< proj[1][1]
+    float viewportHeight = 0.0f;  ///< the pass's target height
+};
+
+/// What the consumer can afford AT ONE GROUP, in mesh units. The arithmetic is
+/// spelled operation for operation the way the GLSL twin spells it.
+inline float clusterGroupAllowed(const MeshClusterGroup &g, const ClusterCutView &v) {
+    const float cx = v.worldRow[0][0] * g.centre[0] + v.worldRow[0][1] * g.centre[1] +
+                     v.worldRow[0][2] * g.centre[2] + v.worldRow[0][3];
+    const float cy = v.worldRow[1][0] * g.centre[0] + v.worldRow[1][1] * g.centre[1] +
+                     v.worldRow[1][2] * g.centre[2] + v.worldRow[1][3];
+    const float cz = v.worldRow[2][0] * g.centre[0] + v.worldRow[2][1] * g.centre[1] +
+                     v.worldRow[2][2] * g.centre[2] + v.worldRow[2][3];
+    const float dx = cx - v.eye[0], dy = cy - v.eye[1], dz = cz - v.eye[2];
+    const float d = std::max(0.0f, std::sqrt(dx * dx + dy * dy + dz * dz) - g.radius * v.scale);
+    return allowedWorldError(v.tolerance,
+                             sampleFootprintPerspective(d, v.projScaleY, v.viewportHeight), v.scale);
+}
+
+/// THE COMPARISON, once: the level walk's strictness (a bound EQUAL to what is
+/// afforded is not taken), so `allowed <= 0` affords nothing and the cut is level 0.
+inline bool clusterGroupAffordable(float error, float allowed) {
+    return allowed > 0.0f && error < allowed;
+}
+
+/// THE RENDER TEST over per-group answers (`affordable[g]` for every group).
+inline bool clusterDrawn(const MeshCluster &c, const std::vector<unsigned char> &affordable) {
+    if (affordable[size_t(c.group)]) return false;
+    return c.refined < 0 || affordable[size_t(c.refined)] != 0;
+}
+
+/// The cut from per-group answers: the drawn clusters' indices, in cluster
+/// order, into `out` (cleared). Returns the number of TRIANGLES drawn.
+inline size_t clusterCutFromAffordable(const std::vector<MeshCluster> &clusters,
+                                       const std::vector<unsigned char> &affordable,
+                                       std::vector<unsigned> &out) {
+    out.clear();
+    size_t triangles = 0;
+    for (size_t i = 0; i < clusters.size(); ++i)
+        if (clusterDrawn(clusters[i], affordable)) {
+            out.push_back(unsigned(i));
+            triangles += clusters[i].indexCount / 3u;
+        }
+    return triangles;
+}
+
+/// THE CUT FOR ONE INSTANCE IN ONE VIEW — each group's own distance.
+inline size_t clusterCut(const std::vector<MeshClusterGroup> &groups,
+                         const std::vector<MeshCluster> &clusters, const ClusterCutView &view,
+                         std::vector<unsigned> &out) {
+    std::vector<unsigned char> affordable(groups.size(), 0);
+    for (size_t g = 0; g < groups.size(); ++g)
+        affordable[g] = clusterGroupAffordable(groups[g].error, clusterGroupAllowed(groups[g], view)) ? 1 : 0;
+    return clusterCutFromAffordable(clusters, affordable, out);
+}
+
+/// THE CUT AT ONE ALLOWED ERROR FOR EVERY GROUP (a threshold sweep, and the
+/// comparison with the chain at the same `allowed`).
+inline size_t clusterCutAtAllowed(const std::vector<MeshClusterGroup> &groups,
+                                  const std::vector<MeshCluster> &clusters, float allowed,
+                                  std::vector<unsigned> &out) {
+    std::vector<unsigned char> affordable(groups.size(), 0);
+    for (size_t g = 0; g < groups.size(); ++g)
+        affordable[g] = clusterGroupAffordable(groups[g].error, allowed) ? 1 : 0;
+    return clusterCutFromAffordable(clusters, affordable, out);
+}
+
 /// ONE SURFACE CARD, in the MESH'S OWN SPACE — the engine-facing copy of the
 /// document's `iris::MeshCard` (SURFACE-CACHE-1a).
 ///
@@ -336,6 +471,19 @@ struct MeshData {
     /// as the generator measured it (occlusion included). 0 with no cards.
     float cardCoverage = 0.0f;
 
+    // ---- ATOM stage 2: the mesh's CLUSTER DAG (see `clusterCut` above) -----
+    //
+    // Built at IMPORT by MeshBake beside the chain; the mirror expands the bake's
+    // meshlet-local form into ONE global index stream, all clusters' triangles
+    // concatenated in cluster order, so a cluster is the contiguous range
+    // [firstIndex, firstIndex + indexCount) of `clusterIndices`. `buildMeshV2`
+    // uploads that stream as one extra index buffer per mesh (the input of stage
+    // 3's cut). All three empty for a mesh with no DAG — every skinned mesh, and
+    // every mesh under 256 triangles, which is one cluster, i.e. level 0.
+    std::vector<unsigned>         clusterIndices;
+    std::vector<MeshCluster>      clusters;
+    std::vector<MeshClusterGroup> clusterGroups;
+
     size_t vertexCount() const { return positions.size() / 3; }
     size_t triangleCount() const { return indices.size() / 3; }
     /// The COARSEST level that still stands in for this mesh when the consumer
@@ -408,10 +556,29 @@ constexpr float kLodBudgetPixels = 1.0f;
 /// THE RAY TIER'S TOLERANCE, in ray footprints (ATOM P3's AT-A8r). ONE, and the
 /// reason it is not the eye's half or double: a ray is cast through a pixel, so
 /// its footprint IS that pixel's, and a deviation under one footprint cannot
-/// change which surface the ray finds. The tier that spends it — the bottom-
-/// level structures — is P4's; this lane lands the rule and the per-instance
-/// answer in `GpuInstance.ids.w`.
+/// change which surface the ray finds. The tier that spends it is the ray
+/// tier's NEAR copy of every instance (ATOM-FARBLAS-1): its bottom-level
+/// structure is built from the level this rule leaves in `GpuInstance.ids.w`.
 constexpr float kRayFootprintTolerance = 1.0f;
+
+/// THE RAY INSTANCE MASK (ATOM-FARBLAS-1, A5b §4). ONE top-level structure holds
+/// every traced object TWICE: a NEAR copy over the level the ray rule chose,
+/// carrying the per-consumer bits (audit C-15) plus `kRayMaskNear`, and a FAR
+/// copy over the mesh's coarsest level carrying `kRayMaskFar` ALONE. A launch
+/// names what it may hit with its cull mask, so the split costs a bit, not a
+/// second structure:
+///   * near launches (reflections, a probe gather ray inside its near length,
+///     a sun-contact ray) trace `kRayMaskNearField` or a subset of its bits;
+///   * the gather's far query (a ray that escaped its near length) traces
+///     `kRayMaskFar` from the near end to the far plane.
+/// No near launch can hit a far copy and the far launch hits nothing else, so
+/// one object never answers one ray twice.
+constexpr unsigned kRayMaskCaster = 0x01u;   ///< casts a shadow
+constexpr unsigned kRayMaskMover = 0x02u;    ///< the document says it moves
+constexpr unsigned kRayMaskStill = 0x04u;    ///< still world (not a mover)
+constexpr unsigned kRayMaskNear = 0x08u;     ///< every near copy
+constexpr unsigned kRayMaskFar = 0x10u;      ///< every far copy, and nothing else
+constexpr unsigned kRayMaskNearField = kRayMaskCaster | kRayMaskMover | kRayMaskStill | kRayMaskNear;
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
 /// One bone of a rig, in its BIND pose. The transform is LOCAL to the parent
@@ -2131,49 +2298,15 @@ struct GiParams {
     /// media/Hlms/Jahshaka/JahIfd_piece_ps.any, so changing it is a const-buffer
     /// write and never a shader rebuild).
     ///
-    /// 1.0 is upstream's raw brightness, and it is also the CALIBRATED default:
-    /// measured on the gi.modes room, the field's red bounce at 1.0 is 0.145
-    /// against the VCT diffuse's 0.169 that it replaces — 86%, the same visual
-    /// class, no trim needed. (The P0 spike's "~13x dimmer" reading was an
-    /// artifact of the pass-buffer misalignment described on
-    /// the pass-buffer under-report (fixed by ogre-patch 0050), which was collapsing every irradiance
-    /// lookup onto one texel; it is corrected here and the number does not
-    /// survive it. GI_UNIFIED_SPEC addendum item 2 should be read with that in
-    /// mind.) The knob stays because the two terms are different integrals and
-    /// a scene may want the trim; clamped to [0, 64], and 0 is a legitimate
+    /// 1.0 is the field's own answer, untrimmed: since PHOTON-READER-1 the
+    /// field's probe rays march the same cascade chain through the same voxel
+    /// reader as the cone diffuse it replaces (jah_voxel_march.glsl), so the two
+    /// are one integral of one radiance field and differ only in how it is
+    /// integrated (144 rays per probe, blended over the probe cage, against six
+    /// cones per pixel). Nothing is calibrated into it. It stays a dial because a
+    /// scene may want a stylistic trim; clamped to [0, 64], and 0 is a legitimate
     /// "field bound, contributing nothing" for A/B measurement.
     float     ddgiIntensity = 1.0f;
-    /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Photon ambient fix's one dial
-    /// (GI_UNIFIED_SPEC.md ADDENDUM CORRECTION; the mechanism is documented at
-    /// length on media/Hlms/Jahshaka/JahIfd_piece_ps.any).
-    ///
-    /// WHAT IT RESTORES. Inside a VCT volume the shader's own ambient term is
-    /// gated off (`if( vctSpecular.w == 0 )`, a gate upstream commented the
-    /// volume test out of, so it never fires). The only live ambient was the
-    /// cone-traced diffuse's `ambient * escapeFraction`, and binding a field
-    /// deletes that branch — so with DDGI on, ambient light inside the volume
-    /// came from nowhere: 15-25% darker mid-ground on OPEN scenes, sealed rooms
-    /// unaffected. This scales the replacement: the scene's SH ambient times a
-    /// sky-visibility fraction read out of the field's OWN depth atlas (one tap
-    /// per cage probe along the surface normal; a probe whose ray left the
-    /// volume without hitting anything votes "sky").
-    ///
-    /// 1.0 is the honest reconstruction and the default. 0 removes the term
-    /// entirely — through a UNIFORM shader branch, so it is also exactly "DDGI
-    /// as it behaved before this fix", which is what makes the A/B in
-    /// gi.ddgi_ambient (and the sealed-room invariance assertion) possible.
-    /// Above 1 it is a stylistic sky-fill trim, like ddgiIntensity is for the
-    /// bounce; clamped to [0, 8].
-    ///
-    /// It is DELIBERATELY not folded into ddgiIntensity: that one scales
-    /// bounced light and this one scales ambient, they are different integrals,
-    /// and folding them would make "turn the fix off" impossible without also
-    /// turning the field's own contribution off.
-    ///
-    /// Ignored when no field is bound (nothing to correct: outside a VCT scene
-    /// the shader's ambient is live, and inside one without a field the cone
-    /// diffuse still carries it).
-    float     ddgiAmbient = 1.0f;
 
     // ---- PHOTON: camera-centred voxel cascades (PHOTON_SPEC P0) -------------
 
@@ -2357,11 +2490,11 @@ struct GiParams {
     /// it here. (The mirror hand-wrote this comparison over 24 fields; keeping
     /// it beside the struct is what makes "add a field" a one-place edit.)
     ///
-    /// THE THREE TUNING FLOATS ARE DELIBERATELY ABSENT (PHOTON_SPEC §7 E2 (8),
-    /// audit A F6): `ddgiIntensity`, `ddgiAmbient` and `rayMarchStepScale` are
+    /// THE TUNING FLOATS ARE DELIBERATELY ABSENT (PHOTON_SPEC §7 E2 (8),
+    /// audit A F6): `ddgiIntensity` and `rayMarchStepScale` are
     /// read per frame, so they take effect through `Scene::setGiTuning` without
     /// a rebuild — and while they were IN this comparison every tick of those
-    /// three sliders was a from-scratch teardown and re-voxelisation (N of them
+    /// sliders was a from-scratch teardown and re-voxelisation (N of them
     /// under a cascade chain). `giTuningEqual` is their comparison; a host
     /// pushes on `!(a == b)` for the configuration and on `!a.giTuningEqual(b)`
     /// for the tuning.
@@ -2385,9 +2518,9 @@ struct GiParams {
                cascadeInstanceCap == o.cascadeInstanceCap &&
                cascadeSetEqual(o);
     }
-    /// The three values `Scene::setGiTuning` pushes, compared on their own.
+    /// The values `Scene::setGiTuning` pushes, compared on their own.
     bool giTuningEqual(const GiParams &o) const {
-        return ddgiIntensity == o.ddgiIntensity && ddgiAmbient == o.ddgiAmbient &&
+        return ddgiIntensity == o.ddgiIntensity &&
                rayMarchStepScale == o.rayMarchStepScale &&
                // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
                // They belong in THIS comparison and not in `operator==` for the
@@ -2856,6 +2989,10 @@ struct GatherTuning {
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
     bool     jitterOff = false;
+    /// THE FAR QUERY OFF (ATOM-FARBLAS-1): a ray that escapes its near length
+    /// reads the sky directly instead of tracing the far copies (the coarse
+    /// levels) out to the far plane -- the A/B that prices the far field.
+    bool     farQueryOff = false;
 };
 
 /// What the gather did on the last drawn frame of this scene.
@@ -3185,10 +3322,21 @@ struct GiStatus {
     /// leak-free diffuse actually is.
     Vec3 ifdMin;
     Vec3 ifdMax;
-    /// How many times the field has been re-placed onto cascade 0 since the
-    /// last build: 0 in the single-volume arm and on a still camera, one per
-    /// cascade-0 step while walking. Reset by a build, never by a scroll.
+    /// How many times the field has followed cascade 0 since the last build
+    /// (ifdScrolls + ifdReplacements, below): 0 in the single-volume arm and on a
+    /// still camera, one per cascade-0 step while walking. Reset by a build.
     unsigned long long ifdFollows = 0;
+    /// THE FIELD SCROLLS (PHOTON-WRITER-1): how many probes the LAST follow
+    /// integrated in its step frame — the planes that entered the window, not
+    /// the field (0 before any scroll; a re-placement's whole convergence does
+    /// not count here).
+    unsigned ifdScrollProbes = 0;
+    /// How the follows split (PHOTON-WRITER-1): `ifdScrolls` moved the window and
+    /// kept every probe that stayed in it; `ifdReplacements` re-placed the whole
+    /// field (a resize, or a jump of the whole grid or more - nothing to keep).
+    /// ifdFollows = ifdScrolls + ifdReplacements. Reset by a build.
+    unsigned long long ifdScrolls = 0;
+    unsigned long long ifdReplacements = 0;
 
     // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
     // Reflection probes are re-captured only while STALE. These say what the
@@ -3383,17 +3531,6 @@ struct GiStatus {
     /// Cascade rebuilds SKIPPED because the frame's budget (one per frame) was
     /// already spent. Cumulative; it is the queue pressure reading.
     unsigned long long cascadeDeferrals = 0;
-    /// HOW MANY INJECTION PASSES THE LAST LIGHT TICK SPENT over the cascade
-    /// chain (LAMPREST-2). Re-injecting a chain is one Jacobi iteration of its
-    /// coupled radiance — each cascade reads the ones outside it and the volume
-    /// it is injecting into — so an AT-REST tick iterates until the answer stops
-    /// depending on the state it started from (measured: two passes left 4/255
-    /// of that history in the movable-lamp room, three left none, and three,
-    /// four and six produce the same picture), while a MOVING tick spends
-    /// exactly one, because that answer is replaced a few frames later by
-    /// construction. 1 in the single-volume arm, which is not an iteration at
-    /// all, and 0 before any injection.
-    int chainSweeps = 0;
     /// HOW MANY POST-REBUILD SETTLES this scene has paid (LAMPREST-3): a
     /// cascade rebuild injects one cascade once, over the radiance it held
     /// where it used to stand, so the chain owes an at-rest injection
@@ -3401,6 +3538,16 @@ struct GiStatus {
     /// per burst of rebuilds. Cumulative over the scene's life; 0 in the
     /// single-volume arm, which has no chain to leave behind.
     long long chainSettles = 0;
+    /// THE ONE WRITER (PHOTON-WRITER-1). Every write to a voxel volume's light
+    /// goes through one engine function, and a volume is injected AT MOST ONCE
+    /// per frame. `chainInjectionRefusals` counts the second injections that
+    /// latch refused over the scene's life (the work is left owed, never
+    /// dropped) — 0 is the invariant, and a non-zero reading names a path
+    /// that asked twice. `chainInjectionsPeakFrame` is the most injections any
+    /// ONE frame has spent: at most the chain's size (a from-scratch build or
+    /// an at-rest tick injects every cascade once).
+    unsigned long long chainInjectionRefusals = 0;
+    unsigned chainInjectionsPeakFrame = 0;
     /// HOW MANY OBJECTS ARE RIDING THE MOVER CHANNEL BECAUSE THEY ARE BEING
     /// DRAGGED right now (MOVER-1, GiParams::dragMoverChannel). 0 in a still
     /// scene, 0 for ever with the rule off, and normally 1 during a drag — it
@@ -3606,14 +3753,24 @@ struct RayQueryStatus {
     /// is `Scene::rayTracingResolved()`, which ANDs this with the project's own
     /// state (iris::Scene::rayTracing, the World panel's row).
     bool enabled = false;
-    /// Bottom-level structures held — one per unique mesh in the traced set.
+    /// Bottom-level structures held — one per unique (mesh, level) the traced
+    /// set asks for: the near copies' levels and every mesh's coarsest.
     int  blasCount = 0;
-    /// Instances in the top-level structure: the traced set's size. It is NOT
-    /// the scene's Item count — editor helpers, backdrops, the sun disc,
+    /// The traced set's size: the NEAR copies in the top-level structure. It is
+    /// NOT the scene's Item count — editor helpers, backdrops, the sun disc,
     /// overlay-queue objects, SKINNED Items (they would trace at bind pose
     /// until R4) and alpha-tested ones (no any-hit without ray-tracing
     /// pipelines) are all out.
     int  instances = 0;
+    /// The FAR copies (ATOM-FARBLAS-1): the same objects again over their
+    /// meshes' coarsest levels, mask `kRayMaskFar`. The top-level structure
+    /// holds `instances + farInstances`.
+    int  farInstances = 0;
+    /// Of `blasCount` / `blasBytes`: the structures built from a level ABOVE 0
+    /// (every chained mesh's coarsest, and any near level the ray rule
+    /// coarsened) — the memory the far field and the rule add.
+    int  levelBlasCount = 0;
+    unsigned long long levelBlasBytes = 0;
     /// Triangles in the bottom-level structures (unique geometry, not
     /// instanced).
     int  triangles = 0;
@@ -3678,6 +3835,22 @@ struct RayQueryStatus {
 /// a float one: unbounded), so `peak` against `formatMax` and `voxelsAtMax`
 /// against `voxelsLit` are the whole question. Multiply by
 /// `1 / multiplier` for scene radiance.
+/// THE IRRADIANCE FIELD'S ATLASES, AS BYTES (PHOTON-WRITER-1) — a TEST AND TOOL
+/// readback (Scene::giFieldAtlas): the irradiance and depth-moment atlases
+/// exactly as the GPU holds them, with what it takes to find one probe's tile.
+/// A probe's tile is its SLOT (the window's modulo: slot = (window-local +
+/// windowOffset) mod probes), at column (slot * bordered) mod width, row
+/// ((slot * bordered) / width) * bordered, `bordered` texels square.
+struct GiFieldAtlas {
+    bool available = false;
+    unsigned probes[3] = { 0u, 0u, 0u };
+    unsigned windowOffset[3] = { 0u, 0u, 0u };
+    unsigned irradWidth = 0, irradHeight = 0, irradBordered = 0, irradBytesPerTexel = 0;
+    std::vector<unsigned char> irradiance;
+    unsigned depthWidth = 0, depthHeight = 0, depthBordered = 0, depthBytesPerTexel = 0;
+    std::vector<unsigned char> depth;
+};
+
 struct GiVoxelStats {
     /// False when there is nothing to read: no VCT arm on this scene, no such
     /// cascade, a headless stand-in, or a download this device refused. Every
@@ -3741,6 +3914,14 @@ struct GiVoxelStats {
     float peakEmissive = 0.0f;
     long long emissiveAtMax = 0;
     long long emissiveAboveOne = 0;
+
+    /// THE BYTES (PHOTON-WRITER-1): a 64-bit FNV-1a hash over the raw bytes of
+    /// every light volume a reader of this cascade samples — the total and, on
+    /// an anisotropic tier, the three axis volumes (mip 0 of each), in that
+    /// order — as 16 hex digits. Two readings are equal exactly when the
+    /// volumes are byte-identical: it is the instrument of the proof that one
+    /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
+    std::string lightDigest;
 };
 
 // ---------------------------------------------------------------------------
@@ -6404,8 +6585,8 @@ struct GpuSceneEntry {
     unsigned nodeId = 0u;
     unsigned lightMask = 0u;
     /// THE RAY LEVEL (`GpuInstance.ids.w`, ATOM P3's AT-A8r): the mesh level
-    /// this instance's bottom-level structure should be built from at its
-    /// current distance. 0 until a camera has been seen; its consumer is P4.
+    /// this instance's NEAR bottom-level structure is built from at its
+    /// current distance. 0 until a camera has been seen.
     unsigned rayLevel = 0u;
 };
 
@@ -6441,6 +6622,53 @@ struct GpuSceneStatus {
     /// Walks of the ray-level pass (one per frame in which the camera or the
     /// scene moved; a still frame runs none).
     unsigned long long rayLevelWalks = 0;
+};
+
+/// ONE CONE FOR THE ONE VOXEL READER'S PARITY HARNESS (PHOTON-READER-1;
+/// Engine::voxelReaderParity, engine.voxel_reader_parity). Everything is in the
+/// normalised space of cascade 0 of the scene's chain, as the reader's callers
+/// hand it (the pixel shader after its own start bias, the irradiance field's
+/// probe rays from the probe's position).
+struct VoxelReaderCone {
+    Vec3     posLS;                  ///< where the march starts
+    Vec3     dirLS;                  ///< unit direction
+    Vec3     biasDirLS;              ///< the hop's bias direction (zero: a point in free space)
+    float    tanHalfAngle = 0.577f;  ///< the diffuse cone set's half angle
+    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 4 lod step, 8 gap along the cone, 16 no escape)
+    unsigned cascade = 0u;           ///< which cascade the point reads take
+    float    lod = 0.0f;             ///< ...at which mip
+};
+
+/// Every answer the reader gives for one cone, as raw floats (compared bit for
+/// bit by the suite): the march's colour/alpha, its escape opacity, its age in
+/// cascade 0's units, the cascade it stopped in and its age there, the ray
+/// hit's read where the march's first sample lands and the march's own one-step
+/// read of it.
+struct VoxelReaderAnswer {
+    float march[4] = {};     ///< colour.rgb, alpha
+    float escape[4] = {};    ///< escapeAlpha, travelledC0, lastCascade, travelled
+    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls) where the march's first sample lands
+    float marchRead[4] = {}; ///< the march at zero length: one march step onto that point
+};
+
+/// ONE CONE FOR THE ENVIRONMENT'S CONE-LOOKUP HARNESS (PHOTON-ENV-1;
+/// Engine::environmentCones, gi.env_cone): a WORLD direction and the cone's
+/// half-angle as its tangent — exactly what jahEnvCone takes.
+struct EnvironmentConeQuery {
+    Vec3  dirWorld;              ///< unit direction, world axes
+    float tanHalfAngle = 0.577f; ///< the six-cone diffuse set's half angle
+};
+
+/// What the harness answers for one cone, linear radiance with the Sky Light's
+/// gain NOT applied (the lookup and its reference see the same raw cube):
+/// `lookup` is jahEnvCone (the prefiltered chain at the cone's mip), and
+/// `reference` is the mean of the cube's FINEST mip over 64 directions spread
+/// uniformly over the cone's solid angle (the cone integral the lookup stands
+/// in for).
+struct EnvironmentConeAnswer {
+    float lookup[3] = {};
+    float reference[3] = {};
+    float lod = 0.0f;            ///< the mip the lookup read
 };
 
 }}  // namespace jahshaka::engine

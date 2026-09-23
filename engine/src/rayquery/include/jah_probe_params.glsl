@@ -43,7 +43,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 knobs2;
 	/// x = how many UNIFORM probes there are (the grid), y = how many ADAPTIVE
 	/// probes a frame may add, z = how many probes a row of the atlas holds,
-	/// w = unused.
+	/// w = THE FAR QUERY's end (the far plane, world units; ATOM-FARBLAS-1) --
+	/// 0, or anything not beyond knobs.y, is the far query off.
 	vec4 knobs3;
 	/// THE ADAPTIVE TEST and the two arms. x = how far a cell's pixel may lie
 	/// off its probe's plane before the cell wants a second probe, as a
@@ -51,7 +52,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// fifty metres away is allowed to be fifty times further off the plane
 	/// than one at a metre, which is what makes one number work at every
 	/// depth); y = the smallest normal agreement (a dot product) that still
-	/// counts as the same surface; z = unused; w = 1 puts the probe at its
+	/// counts as the same surface; z = THE FAR QUERY'S tMin (the near length
+	/// less the widest coarse-vs-fine gap, ATOM-FARBLAS-1 audit F2); w = 1 puts the probe at its
 	/// cell's centre instead of jittering it inside the cell.
 	vec4 plane;
 	/// The colour an escaping ray reads when no sky cubemap is bound.

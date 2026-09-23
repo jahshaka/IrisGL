@@ -246,6 +246,62 @@ public:
     /// Pure CPU, no assimp, no engine; safe from any thread.
     static void buildSdf(const MeshPtr &mesh);
 
+    /// ATOM stage 2 (SPECS/atom/B2_CLUSTER_DAG_DESIGN.md §1): build `mesh`'s
+    /// CLUSTER DAG, in place — `clusterDag`, or an empty one when the mesh gets
+    /// none (skinned, not triangles, or under two leaf clusters of triangles).
+    ///
+    /// Independent of the chain (it simplifies level 0 itself) and of the cards
+    /// and the field; buildFromScene runs it last. Public for the reason the
+    /// other three products are: a caller that builds an iris::Mesh by other
+    /// means — a procedural fixture, a suite — must get the DAG the importer
+    /// would have produced, not a second implementation of it.
+    /// Pure CPU, no assimp, no engine; safe from any thread.
+    ///
+    /// `variant` exists for the ONE measurement that chose the shipped config
+    /// (tests/atom/cluster_config_measure.cpp); every other caller takes the
+    /// default, which is the only config a bake is ever written with — the blob
+    /// records it, and a blob written under another is refused and re-baked.
+    enum class ClusterDagVariant {
+        Shipped,               ///< what the bake writes (see meshbake.cpp, clusterdag::config)
+        DefaultProtectUv,      ///< clodDefaultConfig(128), permissive, UV seams PROTECTED (the header's pairing)
+        DefaultProtectAll,     ///< ...normal AND UV discontinuities protected
+        PermissiveCharged,     ///< permissive, NOTHING protected: seams paid for in the error (stage 1's choice)
+        RegularizedProtectUv,  ///< DefaultProtectUv + simplify_regularize
+        Strict,                ///< non-permissive, permissive only as a fallback (seams locked by topology)
+        Count
+    };
+    /// What one build did, for the report and the suites. `clusterRegions`
+    /// (filled only when asked) is the PROVENANCE the measurement computed: for
+    /// every cluster, the level-0 triangles (indices into the mesh's index list,
+    /// divided by 3) it stands for — the regions of one group's outputs partition
+    /// the union of its members' regions, which is what makes "exactly one cut
+    /// covers every level-0 triangle" checkable (atom.cluster_cut).
+    struct ClusterDagStats
+    {
+        int    clusters = 0;
+        int    groups = 0;
+        int    depth = 0;              ///< max group depth + 1
+        int    terminalGroups = 0;
+        int    monotoneFixes = 0;      ///< groups whose measured error was raised to a child's
+        int    sphereFixes = 0;        ///< groups whose sphere was grown to contain a child's
+        int    measuredBelowEstimate = 0;  ///< groups where the measurement came in under clusterlod's number
+        int    localFallbacks = 0;     ///< term-1 samples the group's local soup could not answer (exact either way)
+        /// IN: the REFERENCE measurement — term 1 against the WHOLE level-0 grid and
+        /// every area sample's plain nearest distance (no early out) — which the
+        /// shipped path (a local soup + max-only queries) is exact against;
+        /// atom.cluster_cut asserts the two agree.
+        bool   referenceMeasure = false;
+        double buildMs = 0.0;          ///< clodBuild alone
+        double measureMs = 0.0;        ///< the per-group measurement + provenance
+        bool   wantRegions = false;
+        QVector<QVector<quint32>> clusterRegions;
+    };
+    static void buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats = nullptr,
+                                ClusterDagVariant variant = ClusterDagVariant::Shipped);
+    /// The variant the bake writes (the measurement's pick).
+    static ClusterDagVariant shippedClusterDagVariant();
+    static const char *clusterDagVariantName(ClusterDagVariant variant);
+
     /// VERIFICATION, and it exists for the same reason `producerHashOf` does: the
     /// claim has to be TESTABLE without re-running the thing that made it.
     ///

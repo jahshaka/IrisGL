@@ -311,7 +311,6 @@ Scene::Scene()
     giGather = -1;              // auto = OFF until the gather is filtered (scene.h)
     giDragMoverChannel = 1;     // MOVER-1: ON by default (owner §844; see scene.h)
     giDdgiIntensity = 1.0f;     // the calibrated default; see scene.h
-    giDdgiAmbient = 1.0f;       // the ambient fix on; see scene.h
     // The Photon quality tier this scene comes back at when GI is switched on
     // (GI_UNIFIED_SPEC P2, owner decision D2 — new scenes are Epic). GI itself
     // stays OFF here: a bare document renders nothing until a tier is applied,
