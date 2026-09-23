@@ -2794,6 +2794,25 @@ bool OgreScene::refreshCascadesFast() {
 // ONLY THE AUTOMATIC FLUSH WAITS. `refreshGlobalIllumination` — the host asking
 // explicitly, which is what a script's `world.refreshGi()` and every suite that
 // asserts on the frame after it do — is answered immediately, as it always was.
+// THE FIRST ARM WAITS FOR ITS SKY (PHOTON-ENV-1 audit F7). Pending = the capture
+// is queued (it runs after updateSceneGraph in THIS frame), its convolution is
+// queued (applyPendingIbl, the top of the next), or its SH read is in flight.
+// A first build only: a live chain meets a sky change through
+// noteEnvironmentChanged's settle, which is the cheap path for an edit. Bounded
+// like the albedo wait — a scene whose capture never runs (it is never drawn)
+// must not park its GI for ever — and a sky-less scene waits for nothing.
+bool OgreScene::giEnvironmentPending() {
+    const bool firstArm = mVctCascades.empty() && !mVctVoxelizer;
+    const bool pending = firstArm && mSkyDesc.mode != SkyMode::NoSky &&
+                         (mSkyCapturePending || mIblPending || mSkyShTicket != nullptr);
+    if (!pending || mGiEnvWaitFrames >= kGiEnvWaitFrames) {
+        mGiEnvWaitFrames = 0u;
+        return false;
+    }
+    ++mGiEnvWaitFrames;
+    return true;
+}
+
 bool OgreScene::giVoxelTexturesPending() {
     bool pending = false;
     for (const auto &e : mMaterialsAwaitingTexture)
@@ -4077,6 +4096,16 @@ bool OgreScene::rebuildVct() {
     // while it waits (no teardown): a frame of the previous arm is a better
     // answer than a frame of nothing.
     if (giVoxelTexturesPending()) { mGiCachesDirty = true; return false; }
+
+    // ...AND FOR THE SKY IT WILL READ (PHOTON-ENV-1 audit F7). The bounce
+    // injection reads the environment where its cones escape, so a first chain
+    // built before its sky's capture and convolution have landed is built over
+    // no sky, and the cube's arrival a frame later (noteEnvironmentChanged) owes
+    // it a whole settle — on EVERY boot of a sky + bounce + chain scene
+    // (measured by gi.chain_converge case 0: one settle per boot before this
+    // wait, none after). Same shape as the albedo wait, the same bound; see
+    // giEnvironmentPending.
+    if (giEnvironmentPending()) { mGiCachesDirty = true; return false; }
 
     // ...AND IT WAITS FOR THE WORLD TO BE ON SCREEN (OPEN_COVER_SPEC §2 A).
     // The same shape as the two waits above and for a related reason: this is

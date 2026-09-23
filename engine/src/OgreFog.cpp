@@ -43,6 +43,9 @@ std::map<const Ogre::SceneManager *, FogHlmsListener::SkyEnvState>
                                                FogHlmsListener::sSkyEnv;      // render thread only
 Ogre::TextureGpu             *FogHlmsListener::sPassSkyCube    = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sPassSkySampler = nullptr;     // render thread only
+Ogre::HlmsManager            *FogHlmsListener::sSamplerMgr     = nullptr;     // render thread only
+const Ogre::HlmsSamplerblock *FogHlmsListener::sEnvSampler     = nullptr;     // render thread only
+const Ogre::HlmsSamplerblock *FogHlmsListener::sGatherSampler  = nullptr;     // render thread only
 std::map<const Ogre::SceneManager *, Ogre::TextureGpu *>
                               FogHlmsListener::sProbeGather;                  // render thread only
 Ogre::TextureGpu             *FogHlmsListener::sPassProbeGather = nullptr;    // render thread only
@@ -265,19 +268,11 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         const bool reader = hlms->_getProperty(Ogre::Hlms::kNoTid, kCubemapsAuto) != 0 ||
                             hlms->_getProperty(Ogre::Hlms::kNoTid, kVctNumProbes) > 0;
         if (sky.cube && reader) {
-            static const Ogre::HlmsManager *sEnvSamplerOwner = nullptr;
-            static const Ogre::HlmsSamplerblock *sEnvSampler = nullptr;
-            Ogre::HlmsManager *mgr = hlms->getHlmsManager();
-            if (mgr && sEnvSamplerOwner != mgr) {
-                Ogre::HlmsSamplerblock ref;
-                ref.setFiltering(Ogre::TFO_TRILINEAR);
-                ref.setAddressingMode(Ogre::TAM_CLAMP);
-                sEnvSampler = mgr->getSamplerblock(ref);
-                sEnvSamplerOwner = mgr;
-            }
-            if (sEnvSampler) {
+            const Ogre::HlmsSamplerblock *envSampler =
+                acquireSampler(hlms->getHlmsManager(), true);
+            if (envSampler) {
                 sPassSkyCube = sky.cube;
-                sPassSkySampler = sEnvSampler;
+                sPassSkySampler = envSampler;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_env", 1);
             }
         }
@@ -303,24 +298,15 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             // `HlmsSamplerblock::mRefCount` is a uint16 (OgreHlmsDatablock.h),
             // so acquiring one per colour pass per frame wraps the counter to
             // zero in about six minutes of drawing and destroys a block that
-            // is bound. One reference is taken for the manager's life — the
-            // manager dies with Root, and the pointer is re-fetched if a new
-            // one ever appears.
-            static const Ogre::HlmsManager *sSamplerOwner = nullptr;
-            static const Ogre::HlmsSamplerblock *sGatherSampler = nullptr;
-            Ogre::HlmsManager *mgr = hlms->getHlmsManager();
-            if (mgr && sSamplerOwner != mgr) {
-                Ogre::HlmsSamplerblock ref;
-                ref.setFiltering(Ogre::TFO_NONE);
-                ref.setAddressingMode(Ogre::TAM_CLAMP);
-                sGatherSampler = mgr->getSamplerblock(ref);
-                sSamplerOwner = mgr;
-            }
+            // is bound. One reference is taken for the manager's life and
+            // given back by releaseSamplers (~OgreEngine, before Root).
+            const Ogre::HlmsSamplerblock *gatherSampler =
+                acquireSampler(hlms->getHlmsManager(), false);
             // THE PAIR IS SET TOGETHER OR NOT AT ALL: a slot claimed by
             // getNumExtraPassTextures and left unbound is an undefined
             // descriptor, so no sampler means no property either.
-            if (sGatherSampler) {
-                sPassProbeGatherSampler = sGatherSampler;
+            if (gatherSampler) {
+                sPassProbeGatherSampler = gatherSampler;
                 sPassProbeGather = gather;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_probe_gather", 1);
             }
@@ -457,6 +443,37 @@ FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
 }
 
 void FogHlmsListener::setPbs(Ogre::HlmsPbs *pbs) { sPbs = pbs; }
+
+// ONE REFERENCE PER MANAGER, TAKEN ON FIRST USE AND GIVEN BACK BY
+// releaseSamplers. A manager other than the one holding the references (which
+// only a missed release could leave) is answered by releasing the old pair
+// first rather than by trusting a pointer compare.
+const Ogre::HlmsSamplerblock *FogHlmsListener::acquireSampler(Ogre::HlmsManager *mgr,
+                                                              bool trilinear) {
+    if (!mgr) return nullptr;
+    if (sSamplerMgr && sSamplerMgr != mgr) releaseSamplers();
+    sSamplerMgr = mgr;
+    const Ogre::HlmsSamplerblock *&slot = trilinear ? sEnvSampler : sGatherSampler;
+    if (!slot) {
+        Ogre::HlmsSamplerblock ref;
+        ref.setFiltering(trilinear ? Ogre::TFO_TRILINEAR : Ogre::TFO_NONE);
+        ref.setAddressingMode(Ogre::TAM_CLAMP);
+        slot = mgr->getSamplerblock(ref);
+    }
+    return slot;
+}
+
+void FogHlmsListener::releaseSamplers() {
+    if (sSamplerMgr) {
+        if (sEnvSampler)    sSamplerMgr->destroySamplerblock(sEnvSampler);
+        if (sGatherSampler) sSamplerMgr->destroySamplerblock(sGatherSampler);
+    }
+    sSamplerMgr = nullptr;
+    sEnvSampler = sGatherSampler = nullptr;
+    sPassSkySampler = sPassProbeGatherSampler = nullptr;
+    sPassSkyCube = nullptr;
+    sPassProbeGather = nullptr;
+}
 
 Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool, bool,
                                                 Ogre::SceneManager *) const {

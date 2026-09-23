@@ -2413,6 +2413,15 @@ public:
     /// itself rather than keeping a mirror is what makes the two impossible to
     /// disagree.
     static void setPbs(Ogre::HlmsPbs *pbs);
+    /// THE LISTENER'S OWN SAMPLERBLOCKS DIE WITH THE ENGINE (PHOTON-ENV-1 audit
+    /// F10). The environment slot's trilinear block and the gather's point
+    /// block are each acquired ONCE per HlmsManager (a uint16 reference count
+    /// — never per pass) and released here, from ~OgreEngine before Root:
+    /// the listener is a process global and outlives the manager, and a second
+    /// Engine's manager can land at the same address (test_engine_recreate),
+    /// which a pointer compared against a dead one would never notice.
+    static void releaseSamplers();
+    static const Ogre::HlmsSamplerblock *acquireSampler(Ogre::HlmsManager *mgr, bool trilinear);
 
     /// THE SKY'S OWN ENVIRONMENT SLOT (lane SKY-FALLBACK-1, PHOTON_SPEC §7).
     ///
@@ -2494,6 +2503,9 @@ private:
     static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
     static Ogre::TextureGpu             *sPassProbeGather;             // render thread only
     static const Ogre::HlmsSamplerblock *sPassProbeGatherSampler;      // render thread only
+    static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only
+    static const Ogre::HlmsSamplerblock *sEnvSampler;                  // render thread only
+    static const Ogre::HlmsSamplerblock *sGatherSampler;               // render thread only
     static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static unsigned       sLightCountMismatches;                       // render thread only
     static unsigned       sMismatchLogged;                             // render thread only
@@ -3371,6 +3383,7 @@ public:
     /// streaming (BOOTVOX-1). Counts the frames it has waited, so it is not
     /// const. See the definition in OgreGi.cpp.
     bool giVoxelTexturesPending();
+    bool giEnvironmentPending();
     /// THE GI MOVEMENT SCAN, once per frame, run by its consumer (the
     /// probe budget) — which is EARLIER in the frame than
     /// any scene graph update, so it reads updated bounds. Same pass, same
@@ -5561,6 +5574,11 @@ private:
     /// and not thirty per rebuild for the life of the scene. Cleared the moment
     /// no voxel input is in flight.
     bool               mGiVoxelTextureWaitGaveUp  = false;
+    /// Deferrals of a first arm waiting for its sky (giEnvironmentPending); the
+    /// capture, convolution and SH read land within three drawn frames, so eight
+    /// is a bound for a scene that is never drawn, not a budget.
+    unsigned           mGiEnvWaitFrames = 0u;
+    static const unsigned kGiEnvWaitFrames = 8u;
     unsigned long long mGiBuiltMaterialGeneration = 0;
     /// THE PROBE CACHE's bookkeeping (ENGINE_CACHE_POLICY_SPEC P1). See
     /// staleProbeGrid and GiStatus: why the grid was last staled, a serial per

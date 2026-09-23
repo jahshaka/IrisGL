@@ -76,8 +76,9 @@ vec3 jahEnvShEval( vec3 n, float k1, float k2 )
 /// probe ray 0.7 / 1.2 %, a 0.1 rad specular cone 1.0 / 2.3 %, noon / low sun).
 /// The GGX moment is numerical (400,000 stratified samples per roughness, 801
 /// roughnesses; its maximum is exactly 1/3, at r = 1), tabulated below against
-/// s = sqrt( M / (1/3) ), on which r is close to linear. A cone wider than the
-/// widest lobe the chain holds reads r = 1.
+/// s = sqrt( M / (1/3) ), on which r is close to linear. (For a cone below a
+/// hemisphere s stays under sqrt( 0.9 ), so the lookup never reaches r = 1: the
+/// widest lobe a cone reads is r ~ 0.87.)
 float jahEnvRoughnessForCone( float tanHalfAngle )
 {
 	const float kLut[17] = float[17]( 0.0000, 0.0999, 0.1518, 0.1966, 0.2384, 0.2790,
@@ -115,6 +116,22 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 		const vec3 d = vec3( dirWorld.x, dirWorld.y, -dirWorld.z );
 		return max( JAH_ENV_SAMPLE( d, jahEnvLodForCone( tanHalfAngle ) ), vec3( 0.0 ) ) *
 			   JAH_ENV_GAIN;
+	}
+	return max( jahEnvShEval( dirWorld, 1.5, 4.0 ), vec3( 0.0 ) );
+}
+
+/// What a GGX LOBE of perceptual roughness `r` about `dirWorld` sees of the
+/// environment: the prefiltered chain at exactly the mip the convolution stored r
+/// at, (N - 1) r (2 - r) — the same mip HlmsPbs reads for that roughness outside
+/// every volume. With no cube, the radiance the SH describes in that direction.
+vec3 jahEnvLobe( vec3 dirWorld, float r )
+{
+	if( JAH_ENV_CUBE_ON )
+	{
+		const float rr = clamp( r, 0.0, 1.0 );
+		const float lod = max( JAH_ENV_MIPS - 1.0, 0.0 ) * rr * ( 2.0 - rr );
+		const vec3 d = vec3( dirWorld.x, dirWorld.y, -dirWorld.z );
+		return max( JAH_ENV_SAMPLE( d, lod ), vec3( 0.0 ) ) * JAH_ENV_GAIN;
 	}
 	return max( jahEnvShEval( dirWorld, 1.5, 4.0 ), vec3( 0.0 ) );
 }

@@ -2556,6 +2556,9 @@ OgreEngine::~OgreEngine() {
     // Both log listeners are registered on Ogre's default log, which Root owns.
     mShaderCache.detachCounters();
     detachLogBridge();
+    // The pass listener's samplerblock references go back to the manager that
+    // gave them (PHOTON-ENV-1 audit F10) — it dies with Root.
+    try { FogHlmsListener::releaseSamplers(); } catch (...) {}
     delete mRoot;
     mRoot = nullptr;
     // ...and now, with Root gone, the instance and device the OpenXR runtime
