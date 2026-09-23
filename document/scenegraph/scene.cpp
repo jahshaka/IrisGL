@@ -206,6 +206,49 @@ QColor skyColourFromJson(const QJsonObject &o, const QColor &fallback)
 }
 }   // namespace
 
+CloudLayer CloudLayer::clamped(CloudLayer c)
+{
+    c.coverage  = qBound(0.0f,   c.coverage,  1.0f);
+    c.density   = qBound(0.0f,   c.density,   4.0f);
+    c.speed     = qBound(0.0f,   c.speed,     100.0f);
+    c.direction = std::fmod(std::fmod(c.direction, 360.0f) + 360.0f, 360.0f);
+    c.altitude  = qBound(500.0f, c.altitude,  8000.0f);
+    c.shadow    = qBound(0.0f,   c.shadow,    1.0f);
+    return c;
+}
+
+QJsonObject CloudLayer::toJson() const
+{
+    QJsonObject o;
+    o.insert("enabled",   enabled);
+    o.insert("coverage",  double(coverage));
+    o.insert("density",   double(density));
+    o.insert("speed",     double(speed));
+    o.insert("direction", double(direction));
+    o.insert("altitude",  double(altitude));
+    o.insert("shadow",    double(shadow));
+    if (!weatherMapGuid.isEmpty()) o.insert("weatherMap", weatherMapGuid);
+    return o;
+}
+
+CloudLayer CloudLayer::fromJson(const QJsonObject &o)
+{
+    // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law):
+    // every default below is the constructor's own value, read off a default
+    // instance rather than spelled a second time.
+    const CloudLayer d;
+    CloudLayer c;
+    c.enabled   = o.value("enabled").toBool(d.enabled);
+    c.coverage  = float(o.value("coverage").toDouble(d.coverage));
+    c.density   = float(o.value("density").toDouble(d.density));
+    c.speed     = float(o.value("speed").toDouble(d.speed));
+    c.direction = float(o.value("direction").toDouble(d.direction));
+    c.altitude  = float(o.value("altitude").toDouble(d.altitude));
+    c.shadow    = float(o.value("shadow").toDouble(d.shadow));
+    c.weatherMapGuid = o.value("weatherMap").toString(d.weatherMapGuid);
+    return clamped(c);
+}
+
 SkyRealistic Scene::clampSkyRealistic(SkyRealistic r)
 {
     // The panel rows' own ranges, in the DOCUMENT: a value a dial cannot
