@@ -1084,7 +1084,7 @@ void OgreEngine::renderOneFrame() {
                 s->pollSkyShRead();
                 // THE CLOUD LAYER'S FRAME (CLOUDS-2D-1): its clock, its scroll
                 // and its capture cadence — before the capture below it may ask for.
-                s->updateCloudLayer();
+                s->tickCloudClock();
                 s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
                 // SURFACE-CACHE, after the pendings: the cache reads the
                 // material generation and the light write serial that

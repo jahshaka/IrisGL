@@ -216,7 +216,7 @@ bool OgreScene::setSky(const SkyDesc &desc) {
     // sun that lights it) re-captures the environment, immediately, and stales
     // the probe grid, which photographs the sky; the WIND and the shadow
     // strength move no sky pixel at a given time and cost a uniform write. The
-    // scroll's own re-captures are the cadence's (updateCloudLayer), not this.
+    // scroll's own re-captures are the cadence's (tickCloudClock), not this.
     if (!(mSkyDesc.clouds == desc.clouds)) {
         const bool fieldChanged = !mSkyDesc.clouds.sameField(desc.clouds);
         const bool lookChanged = !mSkyDesc.clouds.sameLook(desc.clouds);
@@ -931,7 +931,7 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
     // every capture takes the synchronous path, so the A/B is a run of the
     // shipped binary and not a build.
     static const bool forceSync = std::getenv("JAHSHAKA_SKY_SH_SYNC") != nullptr;
-    // A capture the cloud layer's SCROLL asked for (updateCloudLayer) is not a
+    // A capture the cloud layer's SCROLL asked for (tickCloudClock) is not a
     // gesture but it is PERIODIC, and its ambient trailing by one more frame
     // is invisible, so it takes the no-wait read too: the cadence costs the
     // capture's GPU work and never a GPU->CPU stall on the UI thread.
@@ -2054,8 +2054,12 @@ bool OgreScene::cloudLayerDrawn() const {
 
 void OgreScene::applyCloudLayer(bool fieldChanged) {
     const CloudLayerDesc &c = mSkyDesc.clouds;
-    mCloudStatus.capturePeriodFrames =
+    const unsigned period =
         (c.enabled && (c.wind[0] != 0.0f || c.wind[1] != 0.0f)) ? cloudCapturePeriod() : 0u;
+    // A wind that STARTS starts its period: the first scroll capture is one
+    // period after the sheet began to move, never whatever an earlier wind left.
+    if (period && !mCloudStatus.capturePeriodFrames) mCloudFramesSinceCapture = 0u;
+    mCloudStatus.capturePeriodFrames = period;
     if (!c.enabled || mSkyDesc.mode == SkyMode::NoSky) {
         // HIDDEN, NOT DESTROYED (the disc's rule): the layer is switched on and
         // off from a World row, and its field is 2 MB that a switch back on
@@ -2219,16 +2223,20 @@ void OgreScene::bakeCloudField() {
     Ogre::LogManager::getSingleton().logMessage("Jahshaka: cloud field bake failed: " + mError);
 }
 
-void OgreScene::updateCloudLayer() {
+// THE LAYER'S CLOCK, ONCE PER DRAWN FRAME AND FROM NOWHERE ELSE (OgreEngine's
+// renderOneFrame; the fix round's F1: this used to live inside the constant
+// push, which setSky also runs on every look change — a dragged sun over the
+// realistic sky ticked it three times a frame). The frame delta the host
+// pushed for this frame (the document's SimulationClock through
+// Engine::setFixedFrameDelta — zero on a paused scene, a fixed 1/60 grid under
+// a script). Then the constants for the frame.
+void OgreScene::tickCloudClock() {
     if (!cloudLayerDrawn()) return;
     const CloudLayerDesc &c = mSkyDesc.clouds;
-    // THE LAYER'S CLOCK: the frame delta the host pushed for this frame (the
-    // document's SimulationClock through Engine::setFixedFrameDelta — zero on
-    // a paused scene, a fixed 1/60 grid under a script). Reading it here, once
-    // per drawn frame, keeps two views of one scene in step.
     const double dt = double(Ogre::ControllerManager::getSingleton().getFrameDelay());
     const bool scrolling = (c.wind[0] != 0.0f || c.wind[1] != 0.0f);
     if (scrolling && dt > 0.0) {
+        ++mCloudStatus.clockTicks;
         mCloudClock += dt;
         // The capture cadence, in drawn frames that actually moved the sheet.
         if (++mCloudFramesSinceCapture >= cloudCapturePeriod()) {
@@ -2238,6 +2246,14 @@ void OgreScene::updateCloudLayer() {
             ++mCloudStatus.scrollCaptures;
         }
     }
+    updateCloudLayer();
+}
+
+// THE LAYER'S CONSTANTS for the current clock: pushes only, advances nothing —
+// safe to run on any edit.
+void OgreScene::updateCloudLayer() {
+    if (!cloudLayerDrawn()) return;
+    const CloudLayerDesc &c = mSkyDesc.clouds;
     // The scroll, wrapped to the tile in DOUBLE so a long session keeps its
     // float precision (the field tiles; only the offset within a tile matters).
     for (int i = 0; i < 2; ++i) {

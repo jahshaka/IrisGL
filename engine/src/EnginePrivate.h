@@ -2897,6 +2897,9 @@ public:
     /// into the layer, the disc and the ground shadow, and runs the capture
     /// cadence while the layer scrolls.
     void updateCloudLayer();
+    /// ...and the one per-frame advance of the layer's clock and capture
+    /// cadence (renderOneFrame only), which then pushes the constants.
+    void tickCloudClock();
     /// The read itself. `force` maps unconditionally — a capture about to
     /// replace the ticket takes its answer first, and by then the copy is a
     /// frame old and free (see the note in OgreSky.cpp).

@@ -200,14 +200,18 @@
 // guard plus our pass property, so a pass with no cloud layer generates
 // exactly the source it generated before this lane.
 //
-// WHAT IT DOES NOT SHADE, stated: a material that receives no shadows (as
-// for every shadow), and a sun that casts none (no directional shadow map =
-// no first-light factor to scale). The ambient is NOT scaled: the sheet is
+// A MATERIAL THAT RECEIVES NO SHADOWS is shaded all the same (the fix round's
+// F2): upstream leaves the first-light piece undefined for it, so the same
+// multiply is defined there on its own -- the sheet's transmittance is what it
+// is, whatever the material says about shadow maps. A SUN THAT CASTS NO SHADOW
+// is not reached by this hook at all: it is drawn in upstream's non-caster
+// directional loop, which inserts no piece (a fork hook, reported). The
+// ambient is NOT scaled: the sheet is
 // kilometres up, so the sky a ground point sees through it varies over a
 // kernel as wide as the altitude -- uniform across any scene -- and that
 // uniform part is already in the ambient, because the environment capture
 // photographs the sheet.
-@property( jah_cloud_shadow && receive_shadows && hlms_num_shadow_map_lights && hlms_lights_directional && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+@property( jah_cloud_shadow && hlms_lights_directional && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
 @piece( custom_ps_functions )
 midf jahCloudSunTransmittance( float3 viewPos )
 {
@@ -221,8 +225,12 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	return midf_c( lerp( 1.0, jahT, passBuf.jahCloudMap.y ) );
 }
 @end
-@undefpiece( DarkenWithShadowFirstLight )
-@piece( DarkenWithShadowFirstLight )* ( fShadow * jahCloudSunTransmittance( inPs.pos.xyz ) )@end
+@property( receive_shadows && hlms_num_shadow_map_lights )
+	@undefpiece( DarkenWithShadowFirstLight )
+	@piece( DarkenWithShadowFirstLight )* ( fShadow * jahCloudSunTransmittance( inPs.pos.xyz ) )@end
+@else
+	@piece( DarkenWithShadowFirstLight )* jahCloudSunTransmittance( inPs.pos.xyz )@end
+@end
 @end
 
 @property( hlms_fog )

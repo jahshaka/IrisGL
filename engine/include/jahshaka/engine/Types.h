@@ -960,13 +960,18 @@ struct CloudLayerDesc {
 struct CloudStatus {
     /// The layer quad exists and is visible (enabled, over a sky it may draw on).
     bool     drawn = false;
-    /// Why not, when not: "off", "imageSky", "noSky", "media".
+    /// Why not, when not: "off", "noSky", "media". (The engine never hears of a
+    /// layer the mirror keeps off an image sky; world.clouds composes "imageSky"
+    /// from the document for that case.)
     std::string reason;
     /// Captures of the sky environment the layer has asked for: on a change
     /// (`changeCaptures`) and while it scrolls (`scrollCaptures`), over the
     /// scene's life.
     unsigned changeCaptures = 0;
     unsigned scrollCaptures = 0;
+    /// Frames the layer's clock advanced (one per drawn frame with wind and a
+    /// non-zero frame delta, never more).
+    unsigned clockTicks = 0;
     /// Frames between two scroll captures (0 = no scroll captures: still wind).
     unsigned capturePeriodFrames = 0;
     /// How many times the density / transmittance field has been baked.
