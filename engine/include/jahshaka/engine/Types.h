@@ -3326,6 +3326,11 @@ struct GiStatus {
     /// last build: 0 in the single-volume arm and on a still camera, one per
     /// cascade-0 step while walking. Reset by a build, never by a scroll.
     unsigned long long ifdFollows = 0;
+    /// THE FIELD SCROLLS (PHOTON-WRITER-1): how many probes the LAST follow
+    /// integrated in its step frame — the planes that entered the window, not
+    /// the field (0 before any scroll; a re-placement's whole convergence does
+    /// not count here).
+    unsigned ifdScrollProbes = 0;
 
     // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
     // Reflection probes are re-captured only while STALE. These say what the
@@ -3824,6 +3829,22 @@ struct RayQueryStatus {
 /// a float one: unbounded), so `peak` against `formatMax` and `voxelsAtMax`
 /// against `voxelsLit` are the whole question. Multiply by
 /// `1 / multiplier` for scene radiance.
+/// THE IRRADIANCE FIELD'S ATLASES, AS BYTES (PHOTON-WRITER-1) — a TEST AND TOOL
+/// readback (Scene::giFieldAtlas): the irradiance and depth-moment atlases
+/// exactly as the GPU holds them, with what it takes to find one probe's tile.
+/// A probe's tile is its SLOT (the window's modulo: slot = (window-local +
+/// windowOffset) mod probes), at column (slot * bordered) mod width, row
+/// ((slot * bordered) / width) * bordered, `bordered` texels square.
+struct GiFieldAtlas {
+    bool available = false;
+    unsigned probes[3] = { 0u, 0u, 0u };
+    unsigned windowOffset[3] = { 0u, 0u, 0u };
+    unsigned irradWidth = 0, irradHeight = 0, irradBordered = 0, irradBytesPerTexel = 0;
+    std::vector<unsigned char> irradiance;
+    unsigned depthWidth = 0, depthHeight = 0, depthBordered = 0, depthBytesPerTexel = 0;
+    std::vector<unsigned char> depth;
+};
+
 struct GiVoxelStats {
     /// False when there is nothing to read: no VCT arm on this scene, no such
     /// cascade, a headless stand-in, or a download this device refused. Every

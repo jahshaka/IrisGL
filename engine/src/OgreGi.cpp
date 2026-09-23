@@ -1102,6 +1102,7 @@ GiStatus OgreScene::giStatus() const {
             st.ifdMax = toV(mIfdVolumeOrigin + mIfdVolumeSize);
         }
         st.ifdFollows = mIfdFollows;
+        st.ifdScrollProbes = mIfdScrolledProbes;
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
         st.probeCapturesDeferred  = mProbeCapturesDeferred;
@@ -1199,6 +1200,49 @@ GiStatus OgreScene::giStatus() const {
 // VRAM, and the injection's dispatches are only RECORDED until something
 // submits them) and then a synchronous download of the whole volume. Never on
 // a frame path; `traceRays` above is the same contract.
+bool OgreScene::giFieldAtlas(GiFieldAtlas &out) {
+    out = GiFieldAtlas();
+    if (!mIfd || mIfdTotalProbes == 0u) return false;
+    JAH_TRY {
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();
+        Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+        const auto grab = [&](Ogre::TextureGpu *tex, std::vector<unsigned char> &bytes,
+                              unsigned &w, unsigned &h, unsigned &bpp) -> bool {
+            if (!tex || tex->getResidencyStatus() != Ogre::GpuResidency::Resident) return false;
+            Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
+                tex->getWidth(), tex->getHeight(), 1u, Ogre::TextureTypes::Type2D,
+                tex->getPixelFormat());
+            bool ok = false;
+            try {
+                ticket->download(tex, 0u, true);
+                const Ogre::TextureBox box = ticket->map(0);
+                w = tex->getWidth(); h = tex->getHeight(); bpp = unsigned(box.bytesPerPixel);
+                bytes.resize(size_t(w) * h * bpp);
+                for (unsigned y = 0; y < h; ++y)
+                    std::memcpy(&bytes[size_t(y) * w * bpp], box.at(0, y, 0), size_t(w) * bpp);
+                ticket->unmap();
+                ok = true;
+            } catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+            tm->destroyAsyncTextureTicket(ticket);
+            return ok;
+        };
+        if (!grab(mIfd->getIrradianceTex(), out.irradiance, out.irradWidth, out.irradHeight,
+                  out.irradBytesPerTexel) ||
+            !grab(mIfd->getDepthVarianceTex(), out.depth, out.depthWidth, out.depthHeight,
+                  out.depthBytesPerTexel))
+            return false;
+        for (int a = 0; a < 3; ++a) {
+            out.probes[a] = mIfdProbeCounts[a];
+            out.windowOffset[a] = mIfd->getWindowOffset()[a];
+        }
+        out.irradBordered = unsigned(kIfdIrradRes) + 2u;
+        out.depthBordered = unsigned(kIfdDepthRes) + 2u;
+        out.available = true;
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
 GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
     GiVoxelStats st;
     st.cascade = cascadeIdx;
@@ -4914,11 +4958,17 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "JAH_GI_CASCADE_FAULT_POST: forced failure after the build",
                                 "OgreScene::rebuildCascade");
             }
-            // Nothing injects a chain cascade before the scheduler's rebuild in
-            // a frame (the host's tick is owed and runs after it), so the one
-            // writer cannot refuse this — a refusal would leave re-voxelised
-            // volumes lit for the old ones, which is why it is an error and not
-            // a skip here.
+            // A RE-VOXELISED CASCADE IS A NEW VOXEL STATE, and the one-writer
+            // latch is per state: an injection earlier in this writer frame (a
+            // from-scratch build the host asked for between frames, at the
+            // placement this rebuild has just left) lit voxels that no longer
+            // exist, so the latch is re-armed for the volume the build just wrote
+            // (the same rule refreshVctFast keeps for the single volume). Within
+            // a frame nothing else injects a cascade before the scheduler's
+            // rebuild (the host's tick is owed and runs after it), so a refusal
+            // here would be a new path, and it is an error rather than a skip:
+            // it would leave re-voxelised volumes lit for the old ones.
+            c.injectedFrame = ~0ull;
             if (!injectCascade(idx))
                 OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
                             "a rebuilt cascade was refused its injection",
@@ -6365,6 +6415,7 @@ void OgreScene::buildIrradianceField() {
         mIfdVolumeSize   = size;
         for (size_t i = 0; i < 3u; ++i) mIfdProbeCounts[i] = settings.mNumProbes[i];
         mIfdFollows = 0;
+        mIfdScrolledProbes = 0;
         mIfdTotalProbes    = total;
         mIfdProbesDone     = 0u;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
@@ -6430,6 +6481,10 @@ void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
     st.intensity  = std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f));
     st.numProbesY = float(numProbes[1]);
     st.numProbesZ = float(numProbes[2]);
+    if (mIfd) {
+        const Ogre::uint32 *o = mIfd->getWindowOffset();
+        st.windowOffsetPacked = float(o[0] + 128u * o[1] + 16384u * o[2]);
+    }
     FogHlmsListener::setIfdState(mSceneMgr, st);
 }
 
@@ -6443,6 +6498,7 @@ void OgreScene::teardownIrradianceField() {
     mIfdVolumeOrigin = mIfdVolumeSize = Ogre::Vector3::ZERO;
     mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
     mIfdFollows = 0;
+    mIfdScrolledProbes = 0;
     if (!mIfd) return;
     JAH_TRY {
         // Pointer identity, not sVctBindingOwner: the owner flag says who bound
@@ -6579,37 +6635,97 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
 
         const Ogre::Vector3 origin = c0.voxelizer->getVoxelOrigin();
         const Ogre::Vector3 size   = c0.voxelizer->getVoxelSize();
-        const float tol = 1e-4f;
-        const bool resized = std::fabs(size.x - mIfdVolumeSize.x) > tol ||
-                             std::fabs(size.y - mIfdVolumeSize.y) > tol ||
-                             std::fabs(size.z - mIfdVolumeSize.z) > tol;
-        const bool moved = resized ||
-                           std::fabs(origin.x - mIfdVolumeOrigin.x) > tol ||
-                           std::fabs(origin.y - mIfdVolumeOrigin.y) > tol ||
-                           std::fabs(origin.z - mIfdVolumeOrigin.z) > tol;
-        if (moved) {
-            mIfd->setFieldVolume(origin, size);
-            mIfdVolumeOrigin = origin;
-            mIfdVolumeSize   = size;
-            ++mIfdFollows;
-        }
 
-        // RE-INTEGRATE. `reset()` rewinds the counter and keeps the atlases,
-        // which is what makes the progressive case safe and the whole case
-        // correct (the whole case overwrites every probe in this dispatch).
+        // THE FIELD SCROLLS (PHOTON-WRITER-1, FIELD-SCROLL; LATER_OPTIMISATIONS L11).
+        // A cascade-0 step used to re-place the field and re-integrate ALL of it in
+        // the step frame (8,192 probes at High - the frame a headset drops). The
+        // field is a toroidal window over a probe lattice fixed in the world now:
+        // the step moves the window by whole probe spacings, the planes that stay
+        // inside keep their atlas tiles and their values, and only the planes that
+        // entered are integrated here (scrollIrradianceField). A resize or a jump
+        // of the whole grid keeps nothing and re-places the field as before.
+        if (scrollIrradianceField(origin, size, reason)) return;
+
+        const float tol = 1e-4f;    } JAH_CATCH(mError, );
+}
+
+bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::Vector3 &size,
+                                      GiStaleReason reason) {
+    const float tol = 1e-4f;
+    if (std::fabs(size.x - mIfdVolumeSize.x) > tol || std::fabs(size.y - mIfdVolumeSize.y) > tol ||
+        std::fabs(size.z - mIfdVolumeSize.z) > tol)
+        return false;                                   // a resize keeps nothing
+    // THE MOVE IN WHOLE SPACINGS. The field's window lives on its own lattice
+    // (the spacing of the enlarged volume over the probe counts), so cascade 0's
+    // new box is met to the nearest spacing: the window follows the chain to
+    // within half a spacing, and the lattice under it never moves.
+    const Ogre::Vector3 spacing = mIfd->getProbeSpacing();
+    Ogre::int32 d[3];
+    bool any = false;
+    for (int a = 0; a < 3; ++a) {
+        const double moveSp = double(origin[a] - mIfdVolumeOrigin[a]) / double(spacing[a]);
+        d[a] = Ogre::int32(std::lround(moveSp));
+        if (std::llabs((long long)d[a]) >= (long long)mIfdProbeCounts[a]) return false;   // keeps nothing
+        any = any || d[a] != 0;
+    }
+    if (!any) {
+        // In place (a re-voxelisation where the field already stands): the
+        // radiance changed, the probes did not move - progressive, over the
+        // converged atlas, exactly as a light move re-integrates.
         mIfd->reset();
-        mIfdProbesDone   = 0u;
-        // ...and a PAUSED budget (updateBudget 0) converges inline for the same
-        // reason the light path does: nothing would ever spend the counter down,
-        // so a reset there would freeze the field half-updated for ever.
-        if (moved || !mIfdProbesPerFrame) {
-            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0,
-                                     "ifd.follow", mRoot->getRenderSystem());
+        mIfdProbesDone = 0u;
+        if (!mIfdProbesPerFrame) {
+            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                     mRoot->getRenderSystem());
             mIfd->update(mIfdTotalProbes);
             mIfdProbesDone = mIfdTotalProbes;
             work.setUnits(mIfdTotalProbes);
         }
-    } JAH_CATCH(mError, );
+        return true;
+    }
+    // `JAHSHAKA_GI_FIELD_NO_SCROLL`, for MEASUREMENT only: the same snapped window,
+    // re-placed WHOLE (offset 0, every probe integrated in the step frame) — the
+    // behaviour the scroll replaced, on the same lattice, so gi.field_scroll can
+    // walk one path both ways in one process and compare the pictures.
+    if (std::getenv("JAHSHAKA_GI_FIELD_NO_SCROLL")) {
+        Ogre::Vector3 target = mIfdVolumeOrigin;
+        for (int a = 0; a < 3; ++a) target[a] += float(d[a]) * spacing[a];
+        mIfd->setFieldVolume(target, size);
+        mIfd->reset();
+        mIfdVolumeOrigin = target;
+        ++mIfdFollows;
+        pushIfdState(mIfdProbeCounts);
+        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                 mRoot->getRenderSystem());
+        mIfd->update(mIfdTotalProbes);
+        mIfdProbesDone = mIfdTotalProbes;
+        work.setUnits(mIfdTotalProbes);
+        return true;
+    }
+    // A whole re-integration still running (a settle's, a light's) is restarted
+    // after the scroll's own planes: the kept probes it had not reached still owe it.
+    const bool progressivePending = mIfdProbesDone < mIfdTotalProbes;
+    mIfd->scrollWindow(d);
+    for (int a = 0; a < 3; ++a) mIfdVolumeOrigin[a] += float(d[a]) * spacing[a];
+    ++mIfdFollows;
+    pushIfdState(mIfdProbeCounts);                      // the reader's modulo offset
+    {
+        // THE STEP FRAME'S WHOLE COST: the entered planes, inline, before any
+        // pass reads them (their tiles held the planes that left).
+        const Ogre::uint32 entered = mIfd->getWorkProbeCount();
+        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                 mRoot->getRenderSystem());
+        mIfd->update(entered);
+        work.setUnits(entered);
+        mIfdScrolledProbes = entered;
+    }
+    if (progressivePending) {
+        mIfd->reset();
+        mIfdProbesDone = 0u;
+    } else {
+        mIfdProbesDone = mIfdTotalProbes;
+    }
+    return true;
 }
 
 void OgreScene::teardownVct() {

@@ -2403,6 +2403,11 @@ public:
         /// engine ABI.
         float numProbesY = 0.0f;
         float numProbesZ = 0.0f;
+        /// THE FIELD'S WINDOW (PHOTON-WRITER-1): the slot of the window's first
+        /// probe per axis (IrradianceField::getWindowOffset), packed x + 128 y +
+        /// 16384 z - exact in a float, each below the 128-probe axis cap - for
+        /// the reader's JahFieldWindow modulo (JahIfd_piece_ps.any).
+        float windowOffsetPacked = 0.0f;
     };
     static void     setIfdState(const Ogre::SceneManager *sm, const IfdState &state);
     static IfdState ifdState(const Ogre::SceneManager *sm);
@@ -3116,6 +3121,7 @@ public:
     /// PHOTON-M3's readback: what the voxel lighting volume holds. Blocks on a
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade) override;
+    bool giFieldAtlas(GiFieldAtlas &out) override;
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
@@ -4794,6 +4800,13 @@ private:
     /// belongs in the mirror, which owns the signature.)
     /// The irradiance field's pass-buffer block (JahIfd_piece_ps.any).
     void          pushIfdState(const Ogre::uint32 numProbes[3]);
+    /// THE FIELD SCROLLS (PHOTON-WRITER-1, FIELD-SCROLL): moves the field's window
+    /// onto cascade 0's new box by whole probe spacings and integrates only the
+    /// planes that entered it (IrradianceField::scrollWindow). False when the move
+    /// keeps nothing (a jump of the whole grid, or a resize) - the caller then
+    /// re-places and converges the whole field.
+    bool          scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::Vector3 &size,
+                                        GiStaleReason reason);
     /// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1). Called by the
     /// cascade scheduler whenever cascade 0 has been re-placed or re-voxelised:
     /// moves the field's volume onto cascade 0's voxel box (ogre-patch 0044's
@@ -5152,6 +5165,8 @@ private:
     /// last build (GiStatus::ifdFollows) — the counter the follow suite reads,
     /// and the honest answer to "is the field tracking the chain at all".
     unsigned long long                mIfdFollows = 0;
+    /// The probes the last scroll integrated in its step frame (GiStatus::ifdScrollProbes).
+    unsigned                          mIfdScrolledProbes = 0;
     /// A FIELD FOLLOW OWED TO THE NEXT FRAME, AND WHY IT IS NOT PAID ON THE
     /// FRAME THAT MOVED THE CASCADE (lane V1-RIG item 2, LATER_OPTIMISATIONS
     /// L11, measured).

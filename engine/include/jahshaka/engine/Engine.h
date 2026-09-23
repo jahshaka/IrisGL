@@ -1000,6 +1000,11 @@ public:
     /// without a VCT arm, without that cascade, or on a device that refuses
     /// the download.
     virtual GiVoxelStats giVoxelStats(int cascade) { (void)cascade; return GiVoxelStats(); }
+    /// THE IRRADIANCE FIELD'S ATLASES (PHOTON-WRITER-1) — a TEST AND TOOL readback
+    /// (flushes and BLOCKS on a download of both atlases, never a frame path):
+    /// the proof that a scrolled field kept the probes that stayed in its window
+    /// byte for byte. False without a bound field.
+    virtual bool giFieldAtlas(GiFieldAtlas &out) { out = GiFieldAtlas(); return false; }
     /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
     /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
     ///

@@ -411,6 +411,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_diffuse_albedo.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
 set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
@@ -450,6 +451,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahDiffuseAlbedo
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahDiffuseAlbedo_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_diffuse_albedo.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE IRRADIANCE FIELD'S WINDOW (PHOTON-WRITER-1): which atlas tile holds which
+    # probe, for the field's generation and integration jobs and the pixel's reader.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahFieldWindow
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahFieldWindow_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # engine.voxel_reader_parity (tests/compute): the harness body as a piece
     # for its compute half, and its fragment half as a plain GLSL program built
