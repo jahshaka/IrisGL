@@ -186,7 +186,7 @@ void main()
 			// ---- THE SKY. Nothing inside tMax: tMax is the lit volume's
 			// inscribed radius and no measured hit lies beyond it in a way the
 			// picture can see, so a miss is an escape.
-			radiance = jahSkyRadiance( dir );
+			radiance = jahSkyRadiance( dir, spread );	// at the ray's own footprint (GA-SKY)
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );

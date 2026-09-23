@@ -83,16 +83,12 @@
 		const midf jahProbeUncovered = midf_c( 1.0 ) - midf_c( jahProbeGathered.w );
 		if( jahProbeUncovered > midf_c( 0.0 ) )
 		{
-		@property( vct_ambient_hemisphere )
-			float3 jahProbeAmbient = lerp( passBuf.vctProbeParams.ambientLowerHemi.xyz,
-										   passBuf.vctProbeParams.ambientUpperHemi.xyz,
-										   ambientWD );
-		@else
-			float3 jahProbeAmbient = passBuf.vctProbeParams.ambientUpperHemi.xyz;
-		@end
+			// The environment's diffuse lookup for this normal (the SH, the
+			// cosine convolution of the sky -- jah_environment.glsl), in radiance.
+			float3 jahProbeAmbient =
+				jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) );
 			pixelData.envColourD.xyz += midf3_c( jahProbeAmbient ) *
 										( midf_c( passBuf.vctProbeParams.blendFade ) *
-										  midf_c( passBuf.vctProbeParams.multiplier ) *
 										  jahProbeUncovered );
 		}
 	}

@@ -71,74 +71,73 @@ void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
                           (upper.b - lower.b) * 0.5f * kFlat };
     float sh[27] = { 0 };
     for (int c = 0; c < 3; ++c) { sh[c] = c0[c]; sh[3 + c] = c1[c]; }
-    // AND THAT IS THE VALUE THE VCT ARM GETS TOO — setAmbientSh derives
-    // mAmbientRadiance from these very coefficients (c0 +- c1 is the pair back
-    // again) and pushes it, so this function ends here. It used to overwrite
-    // that pair with the UNSCALED one (LIGHTING_FIX fix 3), on the argument
-    // that "VctLighting has no such split, so the darkened value would make a
-    // VCT scene pi times darker than the same scene without VCT". That
-    // argument is wrong in its premise and it was the owner's black rectangle
-    // (ledger 177 defect A, gi.volume_edge):
-    //
-    //   * this engine forces HlmsPbs::AmbientSh, so a scene WITHOUT VCT renders
-    //     a flat ambient through the SH arm above — i.e. through kFlat, the
-    //     DARKENED value. That is what "the same scene without VCT" actually
-    //     looks like, and what every pixel suite, the selftest hash and every
-    //     authored scene were calibrated against;
-    //   * VctLighting's ambient is used in exactly the same convention the SH
-    //     arm is in: `light.xyz += ambient * light.w` lands in envColourD
-    //     (Vct_piece_ps.any:470-477 -> :613), which the BRDF multiplies by pi
-    //     against a kD carrying 1/pi. Radiance in, radiance out, same units.
-    //
-    // So the unscaled pair made a flat ambient pi times BRIGHTER the moment a
-    // voxel volume was bound — measured at 3.25x on an unlit slab — and the two
-    // values met at the edge of the field's confidence region, where the
-    // irradiance field's fallback hands out the VCT pair and its reconstruction
-    // hands out the SH one (JahIfd_piece_ps.any). One ambient, one convention,
-    // no edge.
+    // AND THAT IS THE ENVIRONMENT EVERY READER SEES (PHOTON-ENV-1): a scene with
+    // no sky cube has no environment but these coefficients, and every escape —
+    // the voxel cones', the bounce's, the field's fallback — reads the SH in its
+    // own direction (jah_environment.glsl). One ambient, one convention: the
+    // same numbers the SH arm renders outside a volume (ledger 177 defect A was
+    // a second, unscaled copy of this pair handed to the VCT arm).
     setAmbientSh(sh);
 }
 
-// THE VCT AMBIENT (LIGHTING_FIX fix 3 / F-V1). Ogre's VctLighting is born with
-// both hemispheres at BLACK (OgreVctLighting.cpp:106-107) and nothing in this
-// engine ever set them, so every surface inside a VCT volume lost the scene's
-// ambient entirely: the PBS ambient pieces are wrapped in
-// `if( vctSpecular.w == 0 )` — "only use ambient lighting if the object is
-// outside any VCT probe" (AmbientLighting_piece_ps.any) — and the replacement
-// inside the volume is VctLighting's own pair. Zero in, zero out. It is also
-// why probe captures came out brighter than the world they sampled (F-V3): the
-// capture pass and the main pass disagreed about the ambient term.
+// THE ENVIRONMENT, INTO EVERY CASCADE'S BOUNCE (PHOTON-ENV-1). The pixel shader
+// reads the environment from its own pass slot (FogHlmsListener, `jah_env`); the
+// one other reader is each VctLighting's BOUNCE job, which runs inside
+// VctLighting::update and sees the sky where a bounce cone escapes. It gets the
+// cube the pass gets (none while the Sky Light is out — the sky goes dark by not
+// being bound), the per-channel gain, and the SH coefficients in WORLD axes.
 //
-// ALWAYS A GENUINE PAIR. `VctLighting::needsAmbientHemisphere()` is a memcmp of
-// the two colours (OgreVctLighting.cpp:1010-1013) and its result becomes the
-// `vct_ambient_sphere` shader property (OgreHlmsPbs.cpp:1777) — so an ambient
-// whose upper and lower happen to be equal for one frame of a colour drag
-// compiles a DIFFERENT shader for that frame and back again on the next. The
-// epsilon below costs nothing visually (it is 1e-6 of radiance) and pins the
-// variant, which is worth far more than the exactness it gives up.
-void OgreScene::applyVctAmbient() {
+// It REPLACES the hemisphere pair this function used to push (upstream's
+// VctLighting::setAmbient, `ambientUpperHemi/LowerHemi` in the probe pass
+// buffer, and the `vct_ambient_hemisphere` variant its epsilon existed to pin):
+// the pair was a two-band pole approximation of the SH that every escape was
+// filled with. Called before every VctLighting::update, and whenever the
+// environment's cube, gain or coefficients change.
+void OgreScene::applyVctEnvironment() {
     if (!mVctLighting) return;
+    applyCascadeEnvironment(mVctLighting);
+    // EVERY CASCADE, not just the head (PHOTON_SPEC P0 rule 4): each cascade's
+    // bounce job reads its own copy. Cascade 0 is mVctLighting and was just done.
+    for (size_t i = 1; i < mVctCascades.size(); ++i)
+        applyCascadeEnvironment(mVctCascades[i].lighting);
+}
+
+void OgreScene::applyCascadeEnvironment(Ogre::VctLighting *lighting) {
+    if (!lighting) return;
     JAH_TRY {
-        static const float kHemiEpsilon = 1e-6f;
-        const Colour &u = mAmbientRadiance[0], &l = mAmbientRadiance[1];
-        mVctLighting->setAmbient(
-            Ogre::ColourValue(u.r, u.g, u.b + kHemiEpsilon, 1.0f),
-            Ogre::ColourValue(l.r, l.g, l.b, 1.0f));
-        // EVERY CASCADE, not just the head (PHOTON_SPEC P0 rule 4). Upstream's
-        // cascade manager never pushes the ambient into any cascade and the
-        // room renders 2,2,2 as a result (spikes/photon-s1 §4.3): binding a
-        // VctLighting suppresses HlmsPbs' own ambient scene-wide, so a cascade
-        // with black hemispheres contributes darkness where it should
-        // contribute the sky. Cascade 0 is mVctLighting and was just done.
-        for (size_t i = 1; i < mVctCascades.size(); ++i)
-            applyCascadeAmbient(mVctCascades[i].lighting);
-        if (std::getenv("JAHSHAKA_GI_DEBUG"))
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: vct ambient upper " + std::to_string(u.r) + "," + std::to_string(u.g) +
-                "," + std::to_string(u.b) + " lower " + std::to_string(l.r) + "," +
-                std::to_string(l.g) + "," + std::to_string(l.b) + " hemi=" +
-                (mVctLighting->needsAmbientHemisphere() ? "1" : "0"));
+        Ogre::TextureGpu *cube = (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
+        lighting->setEnvironment(cube,
+                                 Ogre::ColourValue(mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b, 1.0f),
+                                 mLastAmbientSh);
     } JAH_CATCH(mError, );
+}
+
+OgreScene::RayEnvironment OgreScene::rayEnvironment() const {
+    RayEnvironment env;
+    if (mReflectionTex && mEnvLightScale > 0.0f) {
+        env.cube = mReflectionTex;
+        env.colour[0] = mEnvLightGain.r;
+        env.colour[1] = mEnvLightGain.g;
+        env.colour[2] = mEnvLightGain.b;
+    } else {
+        // The constant band IS the mean radiance in this basis (irradianceSH's
+        // first term): what a direction-free environment answers.
+        for (int i = 0; i < 3; ++i) env.colour[i] = std::max(0.0f, mLastAmbientSh[i]);
+    }
+    return env;
+}
+
+// THE ENVIRONMENT CHANGED UNDER THE VOXELS (PHOTON-ENV-1). The bounce injection
+// reads it (an escaping bounce cone sees the sky), so a change is what a light
+// write is to an injection: the serial every injection and every incremental
+// settle trusts moves, the in-motion tick stops skipping cascades injected
+// before it, and an owed settle restarts over the new environment. A chain that
+// is bouncing (more than one bounce) is owed a settle outright — nothing else
+// would re-inject a still scene whose only change was its sky.
+void OgreScene::noteEnvironmentChanged() {
+    ++mGiLightWriteSerial;
+    applyVctEnvironment();
+    oweEnvironmentSettle();
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {
@@ -150,6 +149,8 @@ void OgreScene::setAmbientSh(const float sh[27]) {
         std::memcpy(mLastAmbientSh, sh, sizeof mLastAmbientSh);
         mAmbientShKnown = true;
         staleProbeGrid(GiStaleReason::Ambient);          // a no-op before a grid exists
+        // ...and the bounce injection reads the environment (PHOTON-ENV-1).
+        noteEnvironmentChanged();
         // (The irradiance field owes nothing here: a VOXEL-fed probe cone-traces
         // the volume live, so the new ambient reaches it on its next integration
         // without a re-arm. The re-arm that used to stand here existed for the
@@ -188,15 +189,6 @@ void OgreScene::setAmbientSh(const float sh[27]) {
         // already gathered from another source of information".
         const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
         mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, envmapScaleForPass(), 0u);
-        // The VCT arm's own copy of the same ambient, in RADIANCE units — which
-        // is what the coefficients already are, for a sky push and for
-        // setAmbient's scaled pair alike: f(n) = c0 + c1 * n.y, so the poles
-        // are c0 +- c1. ONE ambient reaches both arms, through here (ledger 177
-        // defect A: setAmbient used to overwrite this with an unscaled pair,
-        // which made a flat ambient pi times brighter inside a VCT scene).
-        mAmbientRadiance[0] = Colour(sh[0] + sh[3], sh[1] + sh[4], sh[2] + sh[5], 1.0f);
-        mAmbientRadiance[1] = Colour(sh[0] - sh[3], sh[1] - sh[4], sh[2] - sh[5], 1.0f);
-        applyVctAmbient();
     } JAH_CATCH(mError, );
 }
 
@@ -223,11 +215,18 @@ void OgreScene::setAmbientSh(const float sh[27]) {
 // `envmap_scale` property only `if( envMapScale != 1.0f )`, so a default scene
 // (Sky Light intensity 1, white) generates the identical shader it always did
 // and renders the identical pixels.
-void OgreScene::setEnvironmentLightScale(float gain) {
-    const float g = gain > 0.0f ? gain : 0.0f;
-    if (g == mEnvLightScale) return;
+void OgreScene::setEnvironmentLight(const Colour &gain) {
+    const Colour c(std::max(gain.r, 0.0f), std::max(gain.g, 0.0f), std::max(gain.b, 0.0f), 1.0f);
+    // Rec.709 luminance; the weights sum to exactly 1.0f in float, so a white
+    // gain of 1 is exactly 1.0f and HlmsPbs sets no envmap_scale property.
+    const float g = 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
+    if (c.r == mEnvLightGain.r && c.g == mEnvLightGain.g && c.b == mEnvLightGain.b) return;
     const bool wasLit = mEnvLightScale > 0.0f;
+    mEnvLightGain = c;
     mEnvLightScale = g;
+    // Every escape reads the environment at this gain, the bounce injection
+    // included: what the voxels hold changes with it.
+    noteEnvironmentChanged();
     // CROSSING ZERO UNBINDS THE SKY CUBE, it does not merely scale it by zero
     // (reflectionTexFor carries that gate). Rebinding is what makes "no Sky
     // Light, no sky reflection" EXACT even in a pass whose scale has to stay at
@@ -252,17 +251,26 @@ void OgreScene::refreshEnvmapScale() {
     // This function is the one place every edge that can move the sky's
     // environment passes through: a sky rebuild and a PCC transition reach it
     // via applyReflectionToAllImpl, and a Sky Light gain change between two
-    // non-zero values reaches it directly (setEnvironmentLightScale's else
+    // non-zero values reaches it directly (setEnvironmentLight's else
     // branch). The listener holds the cube for the passes where the env-probe
     // slot is the probe array's — see FogHlmsListener::SkyEnvState.
     {
         FogHlmsListener::SkyEnvState sky;
         if (mReflectionTex && mEnvLightScale > 0.0f) {
             sky.cube = mReflectionTex;
-            sky.gain = mEnvLightScale;
+            sky.gain[0] = mEnvLightGain.r;
+            sky.gain[1] = mEnvLightGain.g;
+            sky.gain[2] = mEnvLightGain.b;
             sky.numMipmaps = float(mReflectionTex->getNumMipmaps());
         }
         FogHlmsListener::setSkyEnv(mSceneMgr, sky);
+        // ...and the same cube to every cascade's bounce (the cube's identity is
+        // what changes on this funnel's edges; its contents move with the SH,
+        // which notes the change itself).
+        if (sky.cube != mEnvCubeSeen) {
+            mEnvCubeSeen = sky.cube;
+            noteEnvironmentChanged();
+        }
     }
     // Re-push what we already hold rather than waiting for the next ambient
     // edit. setAmbientSh's own change guard compares the COEFFICIENTS, which

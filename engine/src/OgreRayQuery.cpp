@@ -2766,7 +2766,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // and in an open scene that is the whole answer. A HIT with no cache behind
     // it is what the shader declines (see its note) — it hands the pixel back
     // to the probe, which is the honest fallback.
-    Ogre::TextureGpu *skyTex = scene->mReflectionTex;
+    // THE ONE ENVIRONMENT (PHOTON-ENV-1): the Sky Light's cube and gain, or the
+    // flat environment when there is no cube (OgreScene::rayEnvironment).
+    const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();
+    Ogre::TextureGpu *skyTex = rayEnv.cube;
 
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
@@ -2950,10 +2953,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.knobs2[1] = voxCount ? std::max(0.01f, 0.5f * voxCell[0].length()) : 0.02f;
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
     pp.knobs2[3] = kReflectHistoryFloor;
-    // The sky's own average, for a scene with no captured cube at all. Band 0 of
-    // the sky SH is the mean radiance over the sphere (Y00 = 0.282095), which is
-    // the honest constant answer when there is no direction-dependent one.
-    for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, scene->mSkySh[i] * 0.282095f);
+    // The cube's gain, or the flat environment with no cube (jah_rq_hit.glsl's
+    // JAH_SKY_COLOUR contract).
+    for (int i = 0; i < 3; ++i) pp.skyColour[i] = rayEnv.colour[i];
     for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
         const unsigned src = c < voxCount ? c : (voxCount ? voxCount - 1u : 0u);
         const Ogre::Vector3 sz = voxCount ? voxSize[src] : Ogre::Vector3(1.0f);
@@ -3303,8 +3305,12 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     } else {
         takeVolume(scene->mVctLighting, scene->mVctVoxelizer);
     }
-    in.sky = scene->mReflectionTex;
-    for (int i = 0; i < 3; ++i) in.skyColour[i] = std::max(0.0f, scene->mSkySh[i] * 0.282095f);
+    {
+        // THE ONE ENVIRONMENT (PHOTON-ENV-1; OgreScene::rayEnvironment).
+        const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();
+        in.sky = rayEnv.cube;
+        for (int i = 0; i < 3; ++i) in.skyColour[i] = rayEnv.colour[i];
+    }
 
     // ---- the camera's basis (rq_reflect.comp's reconstruction) -------------
     const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;

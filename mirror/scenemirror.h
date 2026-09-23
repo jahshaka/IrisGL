@@ -1683,11 +1683,11 @@ private:
     // from these (equal => fixed, different => hemisphere), so pushing an
     // unchanged value every frame is not free.
     bool mAmbientPushed = false;
-    /// The environment light's gain, pushed on change beside the coefficients
-    /// (SMOKE-ENGINE-1 item 2). Separate from mAmbientPushed because the two
-    /// move independently: a sky change moves the coefficients and not the
-    /// gain, a Sky Light intensity change moves both.
-    float mLastEnvScale = 0.0f;
+    /// The environment light's gain per channel, pushed on change beside the
+    /// coefficients (SMOKE-ENGINE-1 item 2; PHOTON-ENV-1). Separate from
+    /// mAmbientPushed because the two move independently: a sky change moves
+    /// the coefficients and not the gain, a Sky Light intensity change moves both.
+    jahshaka::engine::Colour mLastEnvGain { 0.0f, 0.0f, 0.0f, 1.0f };
     bool mEnvScalePushed = false;
     float mLastAmbientSh[27] = { 0.0f };
     /// THE SKY'S OWN LIGHT (SKY_LIGHT_SPEC.md §2), READ FROM THE ENGINE

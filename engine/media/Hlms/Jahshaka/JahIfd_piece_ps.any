@@ -573,14 +573,12 @@
 @property( vct_disable_diffuse )
 	if( ifdFallbackAmbient > 0.0 )
 	{
-	@property( vct_ambient_hemisphere )
-		float3 ifdAmbientOutside = lerp( passBuf.vctProbeParams.ambientLowerHemi.xyz,
-										 passBuf.vctProbeParams.ambientUpperHemi.xyz, ambientWD );
-	@else
-		float3 ifdAmbientOutside = passBuf.vctProbeParams.ambientUpperHemi.xyz;
-	@end
+		// The environment's diffuse lookup for this normal (the SH, the cosine
+		// convolution of the sky -- jah_environment.glsl), in radiance: what an
+		// unoccluded surface out here had before the field existed.
+		float3 ifdAmbientOutside =
+			jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) );
 		pixelData.envColourD.xyz += ifdAmbientOutside * ( passBuf.vctProbeParams.blendFade *
-														 passBuf.vctProbeParams.multiplier *
 														 ifdFallbackAmbient );
 	}
 @else
@@ -614,21 +612,17 @@
 
 @property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
 	// AND THE AMBIENT THE VOLUME SWALLOWED, times the sky visibility above.
-	// envColourD ONLY: the VCT specular path still adds its own ambient to
-	// envColourS (Vct_piece_ps.any's specular branch), and touching that would
-	// count it twice. The world-space normal transform is the one
-	// DoAmbientLighting uses (AmbientLighting_piece_ps.any:66-67) — the
-	// left-handed cubemap frame with X flipped — because irradianceSH's
-	// coefficients are stored in that frame.
+	// envColourD ONLY: the VCT specular cone reads the environment at its own
+	// escape (Vct_piece_ps.any's specular branch), and touching that would count
+	// it twice. The environment's diffuse lookup for the normal
+	// (jah_environment.glsl: the SH, camera-independent world axes).
 	if( passBuf.jahIfd.y > 0.0 && sumIfdWeight > 0.0 )
 	{
-		float3 ifdWsNormal = mul( passBuf.invViewMatCubemap, pixelData.normal );
-		ifdWsNormal.x = -ifdWsNormal.x;
 		// x ifdConfidence (P9): this term is the field's own answer about how
 		// much sky the pixel can see, so it fades out with the field and the
 		// VCT ambient fallback above takes over. Inside the field the factor is
 		// exactly 1.
-		pixelData.envColourD.xyz += irradianceSH( ifdWsNormal PASSBUF_ARG ) *
+		pixelData.envColourD.xyz += jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) ) *
 									( passBuf.jahIfd.y * ifdSkyVis * ifdConfidence *
 									  ifdWeightFade / sumIfdWeight );
 	}

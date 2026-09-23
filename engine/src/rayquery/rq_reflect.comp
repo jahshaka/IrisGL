@@ -430,9 +430,17 @@ vec3 voxelRadiance( vec3 hitPos, vec3 dir, float lobeAlpha, float t, out bool ok
 	return jahVoxelRadiance( hitPos, dir, footprint, mirror, ok );
 }
 
-vec3 skyRadiance( vec3 dir )
+/// An escaping sample, read at the SAME honest footprint as a hit (GA-SKY): the
+/// spacing between the samples the temporal mean holds, as a half-angle —
+/// lobeAlpha / sqrt(N) — and a mirror (lobeAlpha at or below the mirror cut)
+/// reads the environment's finest mip.
+vec3 skyRadiance( vec3 dir, float lobeAlpha )
 {
-	return jahSkyRadiance( dir );
+	const float kMirrorAlphaHere = 0.01;
+	const float meanSamples = 1.0 / max( p.knobs2.w, 1e-3 );
+	const float tanHalf = lobeAlpha <= kMirrorAlphaHere ? 0.0
+														: lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
+	return jahSkyRadiance( dir, tanHalf );
 }
 
 /// THE TEMPORAL MEAN'S PREVIOUS VALUE, reprojected and VALIDATED. The history
@@ -694,7 +702,7 @@ void main()
 	}
 	else
 	{
-		traced = skyRadiance( L );		// route C: the escape
+		traced = skyRadiance( L, lobeAlpha );		// route C: the escape
 		ok = true;
 	}
 	if( !finite3( traced ) )

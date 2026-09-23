@@ -6468,4 +6468,24 @@ struct VoxelReaderAnswer {
     float marchRead[4] = {}; ///< the march at zero length: one march step onto that point
 };
 
+/// ONE CONE FOR THE ENVIRONMENT'S CONE-LOOKUP HARNESS (PHOTON-ENV-1;
+/// Engine::environmentCones, gi.env_cone): a WORLD direction and the cone's
+/// half-angle as its tangent — exactly what jahEnvCone takes.
+struct EnvironmentConeQuery {
+    Vec3  dirWorld;              ///< unit direction, world axes
+    float tanHalfAngle = 0.577f; ///< the six-cone diffuse set's half angle
+};
+
+/// What the harness answers for one cone, linear radiance with the Sky Light's
+/// gain NOT applied (the lookup and its reference see the same raw cube):
+/// `lookup` is jahEnvCone (the prefiltered chain at the cone's mip), and
+/// `reference` is the mean of the cube's FINEST mip over 64 directions spread
+/// uniformly over the cone's solid angle (the cone integral the lookup stands
+/// in for).
+struct EnvironmentConeAnswer {
+    float lookup[3] = {};
+    float reference[3] = {};
+    float lod = 0.0f;            ///< the mip the lookup read
+};
+
 }}  // namespace jahshaka::engine

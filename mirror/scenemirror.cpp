@@ -7050,43 +7050,37 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // that asked for it, exactly like the IBL convolution.
         const bool hasSky = mTarget->skyAmbientSh(mSkyAmbientSh);
         const auto skyLight = mSource->skyLight();
-        // The SPECULAR half of the same light (SMOKE-ENGINE-1 item 2). The
-        // coefficients below carry the sky's DIFFUSE contribution scaled by
-        // this light; its reflection in a mirror is sampled from the captured
-        // cube instead and used to arrive unscaled, so the sky went on
-        // reflecting into a scene it was lighting not at all. One scalar closes
-        // it, and it has to be a scalar: the pin's envmapScale rides
-        // `ambientUpperHemi.w` and HlmsPbs broadcasts it over the channels, so a
-        // TINTED Sky Light tints the diffuse half and scales the specular half
-        // by the tint's LUMINANCE. Exactly 1.0 for the default (white, intensity
-        // 1), which is the value at which HlmsPbs does not even set the
-        // `envmap_scale` property — so no shipped scene's pixels move.
+        // The CUBE half of the same light (SMOKE-ENGINE-1 item 2; PHOTON-ENV-1).
+        // The coefficients below carry the sky's DIFFUSE contribution scaled by
+        // this light; everything that reads the sky's CUBE — a mirror's
+        // reflection, and every escape of the voxel cones, the rays and the
+        // bounce — reads it at the same per-channel gain, pushed beside them
+        // (Engine.h, setEnvironmentLight; the engine derives the luminance the
+        // pin's scalar envmapScale needs).
         //
         // NO SKY LIGHT IS 0, on the same predicate the coefficients use
         // (skyLight() is the first VISIBLE one), so hiding it takes the
         // reflections with it. `hasSky` is deliberately NOT in this condition:
-        // with no sky there is no cube bound and the scale is moot, and making
+        // with no sky there is no cube bound and the gain is moot, and making
         // it 0 for one frame while the capture lands would flicker every
         // reflection in the scene on a sky change.
-        float envScale = 0.0f;
+        Colour envGain(0.0f, 0.0f, 0.0f, 1.0f);
         if (skyLight) {
             const iris::LinearColor tint = iris::linearOf(skyLight->color);
             const float gain[3] = { tint.r * skyLight->intensity,
                                     tint.g * skyLight->intensity,
                                     tint.b * skyLight->intensity };
-            // Rec.709 luminance, the same weights the renderer uses everywhere
-            // else; they sum to exactly 1.0f in float, so a white light at
-            // intensity 1 is exactly 1.0f and not a neighbour of it.
-            envScale = 0.2126f * gain[0] + 0.7152f * gain[1] + 0.0722f * gain[2];
+            envGain = Colour(gain[0], gain[1], gain[2], 1.0f);
             if (hasSky) {
                 for (int i = 0; i < 9; ++i)
                     for (int c = 0; c < 3; ++c)
                         sh[i * 3 + c] = mSkyAmbientSh[i * 3 + c] * gain[c];
             }
         }
-        if (!mEnvScalePushed || envScale != mLastEnvScale) {
-            mTarget->setEnvironmentLightScale(envScale);
-            mLastEnvScale = envScale;
+        if (!mEnvScalePushed || envGain.r != mLastEnvGain.r || envGain.g != mLastEnvGain.g ||
+            envGain.b != mLastEnvGain.b) {
+            mTarget->setEnvironmentLight(envGain);
+            mLastEnvGain = envGain;
             mEnvScalePushed = true;
         }
         // Push on CHANGE only. The coefficients feed a pass buffer that HlmsPbs
@@ -7280,10 +7274,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 if (l.isNull()) continue;
                 // THE SKY LIGHT IS NOT A VOXEL LIGHT (audit A F3). It never
                 // becomes an Ogre::Light at all: its colour and intensity reach
-                // the renderer as the scene's ambient SH (applyEnvironment ->
-                // setAmbientSh -> applyVctAmbient), which is pushed into every
-                // voxel volume directly and stales the probe grid with its own
-                // reason. Hashing it here made releasing its intensity slider —
+                // the renderer as the scene's environment (applyEnvironment ->
+                // setAmbientSh + setEnvironmentLight), which the engine hands to
+                // every pass and every cascade's bounce itself — re-settling a
+                // bouncing chain on its own (OgreScene::noteEnvironmentChanged)
+                // — and which stales the probe grid with its own reason. Hashing it here made releasing its intensity slider —
                 // or hiding it, the documented way to switch ambient off — arm
                 // the settle and fire a whole from-scratch GI re-solve (under
                 // Photon's cascades, the whole chain) for a change that was

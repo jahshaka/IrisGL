@@ -30,6 +30,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVoxelReaderParity.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreEnvironmentCones.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuScene.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuVoxelGather.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
@@ -115,6 +116,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_voxel_sample.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_environment.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
@@ -136,6 +138,7 @@ if(JAH_RAY_QUERY_OK)
     set(JAH_RQ_HEADERS "${JAH_RQ_INCLUDE}/jah_rq_hit.glsl"
                        "${JAH_RQ_INCLUDE}/jah_voxel_sample.glsl"
                        "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_environment.glsl"
                        "${JAH_RQ_INCLUDE}/jah_probe_params.glsl")
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
@@ -406,6 +409,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
 set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
@@ -429,6 +433,14 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelMarch
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelMarch_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE ONE ENVIRONMENT (PHOTON-ENV-1): what every escape sees — the cone
+    # lookup on the prefiltered sky chain and the SH irradiance, one file, read
+    # by the pixel shader's cones, the probe-array fallback, the bounce job and
+    # (through glslang) the ray jobs' miss.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahEnvironment
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahEnvironment_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # engine.voxel_reader_parity (tests/compute): the harness body as a piece
     # for its compute half, and its fragment half as a plain GLSL program built

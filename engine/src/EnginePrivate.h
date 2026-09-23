@@ -2441,11 +2441,12 @@ public:
         /// is "this scene has no sky reflection", which is also what a Sky
         /// Light at zero gain means (the sky goes out by not being BOUND).
         Ogre::TextureGpu *cube = nullptr;
-        /// The Sky Light's gain. It rides here and NOT in
-        /// `passBuf.ambientUpperHemi.w` because that pass scale is 1.0 while a
-        /// PCC is bound, deliberately (envmapScaleForPass: a probe photographs
-        /// real radiance and must not be scaled by the skylight dial).
-        float gain = 1.0f;
+        /// The Sky Light's gain per channel (PHOTON-ENV-1: every escape reads
+        /// the cube at it). It rides here and NOT in `passBuf.ambientUpperHemi.w`
+        /// because that pass scale is one channel and is 1.0 while a PCC is
+        /// bound, deliberately (envmapScaleForPass: a probe photographs real
+        /// radiance and must not be scaled by the skylight dial).
+        float gain[3] = { 1.0f, 1.0f, 1.0f };
         /// The cube's own mip count, for the roughness->LOD map. NOT
         /// `passBuf.envMapNumMipmaps`: that is a MAX over every bound
         /// reflection texture and belongs to the probe array here.
@@ -2711,7 +2712,7 @@ public:
 
     void setAmbient(const Colour &upper, const Colour &lower) override;
     void setAmbientSh(const float sh[27]) override;
-    void setEnvironmentLightScale(float gain) override;
+    void setEnvironmentLight(const Colour &gain) override;
 
     void setFog(const FogDesc &desc) override;
     /// Creates the scene's AtmosphereNpr (fog only — the sky quad is created and
@@ -2906,12 +2907,24 @@ public:
     /// reflection cubemap. Called once per frame by the engine, like applyPendingGi.
     void applyPendingIbl();
     Ogre::TextureGpu *mReflectionTex = nullptr;   // prefiltered cube on PBSM_REFLECTION
-    /// The environment light's gain (Scene::setEnvironmentLightScale). Rides
-    /// `ambientUpperHemi.w`, which is HlmsPbs' envmapScale, so it scales
-    /// everything in the env-probe slot — the sky cube and a material's own
-    /// reflection override alike. 1.0 is "exactly the cube's radiance", which
-    /// is what every scene rendered before this existed, and at exactly 1.0
-    /// HlmsPbs does not even set the `envmap_scale` shader property.
+    /// THE ONE ENVIRONMENT AS THE RAY JOBS BIND IT (PHOTON-ENV-1): the cube (null
+    /// while there is none or the Sky Light is out) and ONE colour whose meaning
+    /// follows it — with the cube, the environment light's gain on it; without,
+    /// the environment's flat radiance (the SH's constant band, gain applied).
+    /// jah_rq_hit.glsl's JAH_SKY_COLOUR contract.
+    struct RayEnvironment {
+        Ogre::TextureGpu *cube = nullptr;
+        float colour[3] = { 0.0f, 0.0f, 0.0f };
+    };
+    RayEnvironment rayEnvironment() const;
+    /// The environment light's gain per channel (Scene::setEnvironmentLight):
+    /// what every escape multiplies the environment cube by (the pass's `jahEnv`
+    /// slot, the bounce job, the ray jobs).
+    Colour mEnvLightGain { 1.0f, 1.0f, 1.0f, 1.0f };
+    /// ...and its Rec.709 luminance, the one number HlmsPbs' own env-probe
+    /// sample can carry: it rides `ambientUpperHemi.w` (envmapScale), which
+    /// scales everything in the env-probe slot. At exactly 1.0 HlmsPbs does not
+    /// even set the `envmap_scale` shader property.
     float mEnvLightScale = 1.0f;
     void destroySky();
     bool removeNode(NodeId id) override;
@@ -4547,11 +4560,11 @@ private:
     void reintegrateFieldAfterInjection();
     /// One injection of an owed settle, out of the scheduler's frame slot.
     void payChainSettleStep();
-    /// Remember / compare the lights and ambient an owed settle's steps must all
-    /// see: a light that moves mid-settle restarts it (a settle that mixed two
-    /// lamp poses is the fixed point of neither).
+    /// Remember the light-write serial an owed settle's steps must all see: a
+    /// light that moves mid-settle — or an environment that changes, which moves
+    /// the same serial (noteEnvironmentChanged) — restarts it (a settle that
+    /// mixed two inputs is the fixed point of neither).
     void noteSettleInputs();
-    bool settleInputsUnchanged() const;
     /// Record the chain as settled for the inputs it was injected with.
     void noteChainSettled();
 
@@ -4617,8 +4630,11 @@ private:
     /// Re-centres one cascade's region on ITS cell lattice around `camPos` and
     /// records the camera it was placed for. Does not voxelise.
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
-    /// The ambient pair into ONE cascade's lighting (applyVctAmbient, aimed).
-    void applyCascadeAmbient(Ogre::VctLighting *lighting);
+    /// The environment into ONE cascade's bounce (applyVctEnvironment, aimed).
+    void applyCascadeEnvironment(Ogre::VctLighting *lighting);
+    /// A bouncing chain whose environment changed owes an at-rest settle
+    /// (noteEnvironmentChanged; OgreGi.cpp owns the settle's arithmetic).
+    void oweEnvironmentSettle();
     /// Extra bounce passes for cascade `idx` — the DOCUMENT's own count, on
     /// every cascade alike (PHOTON-M1 retired the pin's "a coarser cell gets
     /// more bounces" stabilisation: a bounce adds energy, it does not recover
@@ -4659,9 +4675,8 @@ private:
     /// shape under an unfinished settle abandons it rather than injecting a
     /// cascade the sequence no longer describes.
     size_t mGiSettleCascades = 0;
-    /// The light-write serial and ambient the running settle was raised with.
+    /// The light-write serial the running settle was raised with.
     unsigned long long mGiSettleSerial = 0;
-    Colour             mGiSettleAmbient[2];
     /// How many of those settles this scene has paid (GiStatus::chainSettles) —
     /// cumulative, so a suite can assert "one per gesture, not one per frame"
     /// from outside.
@@ -4757,9 +4772,15 @@ private:
     void noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic);
     /// True when the document typed a bounds box by hand (min != max).
     bool giBoundsExplicit() const;
-    /// Pushes mAmbientRadiance into the VCT arm (no-op without one). Called on
-    /// every ambient change and whenever the arm is (re)built.
-    void applyVctAmbient();
+    /// Pushes the environment (cube, gain, SH) into every cascade's bounce job
+    /// (no-op without a VCT arm). Called before every VctLighting::update and on
+    /// every environment change.
+    void applyVctEnvironment();
+    /// The environment's cube, gain or coefficients changed: the injection's
+    /// serial moves and a bouncing chain re-settles (PHOTON-ENV-1).
+    void noteEnvironmentChanged();
+    /// The environment cube the last push saw (its identity, to notice a swap).
+    Ogre::TextureGpu *mEnvCubeSeen = nullptr;
     /// Unbinds from HlmsPbs (when this scene owns the binding) and deletes the
     /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
     /// must run BEFORE the SceneManager dies.
@@ -5094,10 +5115,6 @@ private:
     /// noteGiAutoVolume: a fit over fewer than two items is not a population,
     /// and must not arm the hysteresis floor.
     mutable size_t mGiLastItemCount = 0;
-    /// The scene's ambient hemisphere pair in RADIANCE units — what VctLighting
-    /// wants, which is NOT what setAmbient hands the SH path in the flat case
-    /// (that one carries HlmsPbs' 1/pi). [0] = upper, [1] = lower.
-    Colour     mAmbientRadiance[2] = { Colour(0, 0, 0, 1), Colour(0, 0, 0, 1) };
     /// The Forward+ depth-slice range currently in force, and the frame counter
     /// that rate-limits re-deriving it (fix 8). Seeded with the values
     /// createScene passes to setForwardClustered.
@@ -6690,6 +6707,9 @@ public:
     bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
                            std::vector<VoxelReaderAnswer> &fragment,
                            std::vector<VoxelReaderAnswer> &compute) override;
+    // ---- The environment's cone lookup, measured (OgreEnvironmentCones.cpp) ----
+    bool environmentCones(Scene *scene, const std::vector<EnvironmentConeQuery> &queries,
+                          std::vector<EnvironmentConeAnswer> &out) override;
     // ---- The render-loop monitor (OgreFrameMonitor.cpp) ----
     void setFrameMonitor(MonitorLevel level) override;
     MonitorLevel frameMonitor() const override;

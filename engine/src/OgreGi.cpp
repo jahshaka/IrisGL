@@ -602,7 +602,7 @@ bool OgreScene::refreshVctFast() {
             }
             if (!mVctFeed) mVctFeed.reset(new detail::VoxelFeed());
             gatherAndBuild(*mVctFeed, mVctVoxelizer, VoxelGatherInputs());
-            applyVctAmbient();
+            applyVctEnvironment();
             const Ogre::uint32 extraBounces =
                 Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
             mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
@@ -707,17 +707,23 @@ void OgreScene::noteChainSettled() {
 // changed underneath it (and so `chainCleanNow` can tell the same thing about a
 // finished one).
 void OgreScene::noteSettleInputs() {
-    mGiSettleSerial     = mGiLightWriteSerial;
-    mGiSettleAmbient[0] = mAmbientRadiance[0];
-    mGiSettleAmbient[1] = mAmbientRadiance[1];
+    mGiSettleSerial = mGiLightWriteSerial;
 }
 
-bool OgreScene::settleInputsUnchanged() const {
-    const auto same = [](const Colour &a, const Colour &b) {
-        return a.r == b.r && a.g == b.g && a.b == b.b;
-    };
-    return same(mGiSettleAmbient[0], mAmbientRadiance[0]) &&
-           same(mGiSettleAmbient[1], mAmbientRadiance[1]);
+// A BOUNCING CHAIN WHOSE ENVIRONMENT CHANGED IS OWED A SETTLE (PHOTON-ENV-1). The
+// bounce job reads the environment where its cones escape, so the voxels hold a
+// sky; a still scene whose only edit is its sky (or its Sky Light) has no light
+// write and no geometry change to re-inject it, and this is what does — the
+// scheduler's own incremental settle, one injection a frame, outermost first.
+// Nothing is owed without a bounce pass (one bounce: the voxels hold the direct
+// light only and the pixel reads the environment itself) or without a chain
+// (a single volume re-injects on its next light tick).
+void OgreScene::oweEnvironmentSettle() {
+    const size_t n = mVctCascades.size();
+    if (n < 2u || mGi.numBounces <= 1) return;
+    mGiSettleCascades  = n;
+    mGiSettleStepsOwed = kAtRestSweeps * int(n);
+    noteSettleInputs();
 }
 
 
@@ -754,7 +760,7 @@ void OgreScene::payChainSettleStep() {
         // right: nothing finishes while the scene is still changing, and the
         // mirror's own at-rest tick — which fires one frame after the motion
         // ends and clears the debt outright — is what finishes a light gesture.
-        if (mGiSettleSerial != mGiLightWriteSerial || !settleInputsUnchanged()) {
+        if (mGiSettleSerial != mGiLightWriteSerial) {
             mGiSettleStepsOwed = kAtRestSweeps * int(n);
             noteSettleInputs();
         }
@@ -793,7 +799,7 @@ void OgreScene::payChainSettleStep() {
 // try/catch.)
 void OgreScene::injectCascade(size_t i, bool coarse) {
     if (i >= mVctCascades.size() || !mVctCascades[i].lighting) return;
-    applyCascadeAmbient(mVctCascades[i].lighting);
+    applyCascadeEnvironment(mVctCascades[i].lighting);
     mVctCascades[i].lighting->update(mSceneMgr, coarse ? 0u : cascadeBounces(i),
                                      1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                                      giRayMarchStepScale(coarse));
@@ -4281,11 +4287,9 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     const Ogre::uint32 extraBounces =
         Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
     mVctLighting->setAllowMultipleBounces(extraBounces > 0u);
-    // The scene's ambient, BEFORE the first update(): the pair is read when the
-    // probe const buffer is filled, and a volume built with black hemispheres
-    // shows a black ambient for the frame between build and the next ambient
-    // push. See applyVctAmbient (OgreScene.cpp) for why it is a genuine pair.
-    applyVctAmbient();
+    // The environment, BEFORE the first update(): the bounce job reads it
+    // (applyVctEnvironment, OgreScene.cpp).
+    applyVctEnvironment();
     mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                          giRayMarchStepScale(false));
     // The materials this build read are the ones in force NOW.
@@ -4485,18 +4489,6 @@ Ogre::uint32 OgreScene::cascadeBounces(size_t idx) const {
     return Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
 }
 
-// The ambient pair into ONE cascade's lighting (rule 4 above). applyVctAmbient
-// pushes into the head; this is the same push, aimed.
-void OgreScene::applyCascadeAmbient(Ogre::VctLighting *lighting) {
-    if (!lighting) return;
-    JAH_TRY {
-        static const float kHemiEpsilon = 1e-6f;
-        const Colour &u = mAmbientRadiance[0], &l = mAmbientRadiance[1];
-        lighting->setAmbient(Ogre::ColourValue(u.r, u.g, u.b + kHemiEpsilon, 1.0f),
-                             Ogre::ColourValue(l.r, l.g, l.b, 1.0f));
-    } JAH_CATCH(mError, );
-}
-
 size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
     // The same rule as buildVoxelArm's: a from-scratch chain re-reads every material.
     mVctMaterialRefreshOwed = true;
@@ -4578,7 +4570,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
             for (size_t j = i + 1u; j < table.size(); ++j)
                 c.lighting->addCascade(mVctCascades[j].lighting);
         }
-        applyCascadeAmbient(c.lighting);
+        applyCascadeEnvironment(c.lighting);
         c.lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                            giRayMarchStepScale(false));
         c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
@@ -4879,7 +4871,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "JAH_GI_CASCADE_FAULT_POST: forced failure after the build",
                                 "OgreScene::rebuildCascade");
             }
-            applyCascadeAmbient(c.lighting);
+            applyCascadeEnvironment(c.lighting);
             c.lighting->update(mSceneMgr, cascadeBounces(idx), 1.0f /*thinWallCounter*/,
                                true /*autoMultiplier*/, giRayMarchStepScale(false));
             // ...AND THAT IS THE MOVING TICK'S ANSWER TOO (DRAG-1): this cascade
