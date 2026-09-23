@@ -1679,6 +1679,15 @@ private:
     /// reclaimUnused does not free what the engine's sky is sampling.
     jahshaka::engine::TextureId mSkyTexture = 0;
     jahshaka::engine::TextureId mSkyFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
+    /// THE CLOUD LAYER'S WEATHER MAP (CLOUDS-2D-1), uploaded from its decoded
+    /// pixels (a plain 2D texture: the engine's file-loaded textures are pool
+    /// SLICES, which the layer's bake cannot sample as a texture2D), and the
+    /// file it came from — its signature. Owned here, like the sky faces.
+    jahshaka::engine::TextureId mCloudWeatherTexture = 0;
+    QString mCloudWeatherPath;
+    /// Builds SkyDesc::clouds from the document (applySky, every frame; the
+    /// engine drops an unchanged description).
+    void applyCloudLayer();
     // Last ambient pair actually pushed. Ogre picks its ambient shader variant
     // from these (equal => fixed, different => hemisphere), so pushing an
     // unchanged value every frame is not free.
