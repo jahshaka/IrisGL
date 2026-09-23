@@ -649,7 +649,7 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
     detail::GpuMeshLevel levels[detail::GpuScene::kLevelsPerMesh];
     uint32_t levelCount = 0u;
     struct StagedRow {
-        uint32_t level, submesh;
+        uint32_t level = 0u, submesh = 0u;
         Ogre::VctVoxelizer::GeometryRow row;
     };
     std::vector<StagedRow> rows;

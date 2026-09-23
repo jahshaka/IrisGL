@@ -197,7 +197,7 @@ bool OgreScene::gatherAndBuild(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxe
     // the store's pool, and build() binds that pool.
     beginVctMaterialBracket();
     struct BracketClose {
-        OgreScene *s;
+        OgreScene *s = nullptr;
         ~BracketClose() { s->endVctMaterialBracket(); }
     } close{ this };
     convertPendingMaterials();
