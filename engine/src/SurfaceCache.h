@@ -82,6 +82,9 @@ class Camera;
 class CompositorWorkspace;
 class UavBufferPacked;
 class Item;
+class Light;
+class HlmsComputeJob;
+class CompositorPassSceneDef;
 class Node;
 class SceneManager;
 class TextureGpu;
@@ -90,7 +93,9 @@ class TextureGpu;
 namespace jahshaka {
 namespace engine {
 
-/// THE FIVE LAYERS, and the order every table here is in.
+/// THE FIVE CAPTURED LAYERS, and the order every table here is in. (The
+/// SIXTH, `Radiance`, is not captured — the `Jahshaka/CardLight` job writes it
+/// from these five and the scene's lights; it is its own member, `mRadiance`.)
 enum class CardLayer : unsigned {
     Albedo = 0,       ///< RGBA8_UNORM — kD, the datablock's diffuse ALREADY divided by pi
     Normal = 1,       ///< RGBA8_UNORM — the shading normal in the card's view space, *0.5+0.5
@@ -151,6 +156,10 @@ struct CardRec {
     unsigned long long lastUsed = 0ull;
     unsigned long long lastUpdated = 0ull;
     bool queued = false;         ///< waiting for a capture
+    /// THE LIT CARD: its radiance is stale (captured since it was relit, or a
+    /// light's radiance signature moved), and the frame it was last relit.
+    bool relight = false;
+    unsigned long long lastRelit = 0ull;
 };
 
 /// WHAT THE CACHE IS HANDED EACH FRAME, and the reason it is handed anything at
@@ -173,6 +182,15 @@ struct CardSceneView {
     /// there is nothing to be precise about: a light write stales every card's
     /// shadow term, and the counter is where a suite sees it.
     unsigned long long lightSerial = 0ull;
+    /// THE RADIANCE SIGNATURE (PHOTON-CARDS-1): `lightSerial` plus what only a
+    /// card's LIT radiance depends on (colour, power, reach, cone) — a change
+    /// relights the resident set and recaptures nothing.
+    unsigned long long radianceSerial = 0ull;
+    /// The scene's lights, for the relight job's light list (written inside
+    /// the frame, where their derived transforms are this frame's).
+    std::vector<Ogre::Light *> lights;
+    /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
+    unsigned lightBudgetTexels = 0u;
 
     /// ONE CANDIDATE — an item inside the radius that may hold cards. The
     /// scene's own predicate decides membership (still-world GI geometry,
@@ -317,8 +335,14 @@ private:
     void releaseInstance(size_t idx);
     bool buildCardsFor(const CardSceneView::Candidate &cand);
     /// Aims batch slot `slot`'s camera at `card` (the pass bound to it runs
-    /// later this frame, inside Ogre's own workspace update).
+    /// later this frame, inside Ogre's own workspace update) and fits the
+    /// pass's viewport to the card's texels.
     void aimCamera(const CardRec &card, unsigned slot);
+    /// THE LIT CARD: plans this frame's relight list under the light budget
+    /// (update), and records the job over it (workspacePosUpdate, after the
+    /// capture's copies, with the frame's lights).
+    void planRelights(const CardSceneView &view);
+    void relightCards();
     /// Rebuilds the two GPU tables from `mCards` / `mInstances` and uploads
     /// them. Called only when the ALLOCATION changed — never per capture.
     void syncBuffers();
@@ -329,6 +353,28 @@ private:
     Ogre::TextureGpu *mAtlas[kCardLayers] = {};
     Ogre::TextureGpu *mScratch[kCardLayers] = {};
     Ogre::TextureGpu *mScratchDepth = nullptr;
+    /// THE SIXTH LAYER: radiance, written by the `Jahshaka/CardLight` job (a UAV,
+    /// never a render target, never a copy destination).
+    Ogre::TextureGpu *mRadiance = nullptr;
+    std::string mRadianceFormatName;
+    /// The relight job and its two per-frame tables: the cards to relight
+    /// (80 bytes each) and the scene's lights in world space (a 16-byte count,
+    /// then 80 bytes a light).
+    Ogre::HlmsComputeJob *mLightJob = nullptr;
+    Ogre::UavBufferPacked *mRelightBuffer = nullptr;
+    Ogre::UavBufferPacked *mLightBuffer = nullptr;
+    std::vector<unsigned> mRelight;          ///< this frame's relight list: indices into mCards
+    std::vector<Ogre::Light *> mLights;      ///< this frame's lights (valid inside the frame)
+    std::vector<float> mRelightCpu, mLightCpu;
+    unsigned long long mRadianceSerial = 0ull;
+    bool mRadianceMovingLastFrame = false;
+    unsigned mLightBudget = 0u;
+    unsigned mRelitLastFrame = 0u, mRelitTexelsLastFrame = 0u;
+    unsigned long long mRelights = 0ull;
+    unsigned long long mInvalidRadiance = 0ull;
+    float mLightMs = 0.0f;
+    /// The batch's pass definitions (ours), for the per-card viewport.
+    Ogre::CompositorPassSceneDef *mPassDef[kCaptureBatch] = {};
     Ogre::PixelFormatGpu mEmissiveFormat;
     std::string mEmissiveFormatName;
 

@@ -2640,6 +2640,16 @@ struct GiQualityFacts {
     /// 4k atlas with a page table and streaming; ours has neither yet, and
     /// pretending otherwise would just overflow the atlas silently.)
     float    cardResidencyRadius = 30.0f;
+    /// THE LIT CARD'S PER-FRAME BUDGET (PHOTON-CARDS-1, SC-1c), in atlas TEXELS
+    /// relit a frame by the `Jahshaka/CardLight` job — a second budget beside the
+    /// capture's, because a light's colour or intensity changes every card's
+    /// radiance and no card's picture. Lumen's own direct-lighting budget, 1024
+    /// square, is the ceiling; the rows are a quarter, an eighth and a sixteenth
+    /// of it, NOT YET MEASURED in GPU milliseconds (that needs the clocks locked
+    /// — the lead's measurement): a capture's cards are relit the frame they
+    /// land, inside this budget, and a light write relights the resident set
+    /// over as many frames as it takes.
+    unsigned cardLightTexels = 131072u;
     // ---- THE ATOM COLUMN (ATOM P3's SUB-ERROR) -----------------------------
     /// THE TIER'S GEOMETRIC TOLERANCE, in SAMPLES of whatever is sampling —
     /// pixels for a view, cells for a cascade. It is the `tolerance` argument of
@@ -2685,6 +2695,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeFaceSize   = 128u;
         f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
         f.cardResidencyRadius = 15.0f;
+        f.cardLightTexels = 65536u;     // 4 pages a frame
         f.pixelTolerance = 2.0f;        // the Atom column; see the field
         break;
     case GiQuality::High:
@@ -2701,6 +2712,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeShadowsDefault = true;
         f.cardBudgetTexels = 81920u;    // 5 cards a frame ~ 1.0 ms on the measured cost
         f.cardResidencyRadius = 60.0f;
+        f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         break;
     default:   // Medium: the same reach as High, at its own resolution
@@ -2713,6 +2725,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeFaceSize   = 256u;
         f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.6 ms
         f.cardResidencyRadius = 30.0f;
+        f.cardLightTexels = 131072u;    // 8 pages a frame
         f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
         break;
     }
@@ -2749,6 +2762,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // would not be a smaller budget, it would be a budget the code has to
         // ignore. Low's VR row is the one that reaches it.
         f.cardBudgetTexels = std::max(f.cardBudgetTexels, 16384u);
+        // ...and the relight budget with it, on the same floor for the same reason.
+        f.cardLightTexels = std::max(f.cardLightTexels / 2u, 16384u);
     }
     return f;
 }
@@ -3059,6 +3074,10 @@ struct CardSample {
     float depth = 0.0f;                 ///< world units from the card's near plane; 0 = nothing captured there
     float shadow = 0.0f;                ///< 1 = fully lit by the shadowed lights, 0 = fully occluded
     float roughness = 0.0f;             ///< the GGX ALPHA (perceptual squared), through patch 0043's range
+    /// THE LIT CARD (the sixth layer, `Jahshaka/CardLight`): the texel's
+    /// outgoing diffuse radiance — direct from the scene's lights (the sun
+    /// through `shadow`) plus the emissive. 0 until the card has been relit.
+    float radiance[3] = { 0, 0, 0 };
 };
 
 /// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model
@@ -3112,6 +3131,20 @@ struct CardCacheStatus {
     /// maintained and not merely declared.
     unsigned cardRecords = 0u;
     unsigned instanceSlots = 0u;
+    /// THE LIT CARD (PHOTON-CARDS-1): the Radiance layer's format name (chosen
+    /// from what the device can store to from a compute job — R11G11B10F, else
+    /// RGBA16F), the relight budget in texels a frame, what the last frame
+    /// relit (cards, texels), the relights for the life of the cache, the light
+    /// writes that changed only a card's RADIANCE (a colour, an intensity — no
+    /// recapture), and the CPU milliseconds the last frame's relight dispatch
+    /// cost to record.
+    std::string radianceFormat;
+    unsigned lightBudgetTexels = 0u;
+    unsigned relitLastFrame = 0u;
+    unsigned relitTexelsLastFrame = 0u;
+    unsigned long long relights = 0ull;
+    unsigned long long invalidRadiance = 0ull;
+    float lightMs = 0.0f;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same

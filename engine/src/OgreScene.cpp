@@ -1848,6 +1848,32 @@ void OgreScene::updateSurfaceCache() {
         }
     }
     view.lightSerial = lightSig;
+    // THE RADIANCE SIGNATURE: the shadow signature above plus everything a
+    // card's LIT radiance depends on and its capture does not — the colour,
+    // the power, the reach and the cone. A colour slider costs the cache a
+    // relight of the resident set (the `Jahshaka/CardLight` job, under its own
+    // budget) and not one capture. The lights themselves are handed over for
+    // the job's light list, which the cache writes inside the frame.
+    unsigned long long radianceSig = lightSig;
+    for (NodeId lid : mLightNodes) {
+        auto lit = mNodes.find(lid);
+        if (lit == mNodes.end() || !lit->second.light) continue;
+        const Ogre::Light *l = lit->second.light;
+        const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
+        const auto foldR = [&radianceSig](float f) {
+            radianceSig ^= (unsigned long long)(long long)std::lround(double(f) * 1000.0);
+            radianceSig *= 1099511628211ull;
+        };
+        foldR(c.r); foldR(c.g); foldR(c.b);
+        foldR(l->getAttenuationRange()); foldR(l->getAttenuationLinear());
+        foldR(l->getAttenuationQuadric());
+        foldR(l->getSpotlightInnerAngle().valueRadians());
+        foldR(l->getSpotlightOuterAngle().valueRadians());
+        foldR(l->getSpotlightFalloff());
+        view.lights.push_back(lit->second.light);
+    }
+    view.radianceSerial = radianceSig;
+    view.lightBudgetTexels = facts.cardLightTexels;
 
     // THE CANDIDATE LIST — THE SCENE'S OWN WALK, handed over rather than
     // reached for. The predicate is the same one the voxel side uses, and each

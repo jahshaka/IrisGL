@@ -135,6 +135,16 @@
 			"uav_units" : 1
 		},
 
+		"Jahshaka/CardLight" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [16, 16, 1],
+			"source" : "JahCardLight_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
+			"inform_shader_of_texture_data_change" : true,
+			"uav_units" : 3
+		},
+
 		"Jahshaka/HzbReduce" :
 		{
 			"threads_per_group" : [8, 8, 1],
