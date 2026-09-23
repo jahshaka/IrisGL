@@ -59,8 +59,8 @@ namespace {
 // here and one texture in hlmsTypeChanged's list, never three hand-kept
 // sequences of arithmetic.
 struct ExtraPassSlot {
-    const char *property;   // the PASS property that claims the slot
-    const char *reg;        // the register name the piece declares it at
+    const char *property = nullptr;   // the PASS property that claims the slot
+    const char *reg = nullptr;        // the register name the piece declares it at
 };
 constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_env",          "jahEnvCube" },
