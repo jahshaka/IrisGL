@@ -14,10 +14,10 @@
 // at the group's own distance, which is the chain's level walk's comparison.
 //
 // NOTHING IN THE PRODUCT INCLUDES THIS PIECE YET. Stage 3's GPU cut will, from
-// the cull (JahCullTest_cs.glsl); that job carries its own copy of the currency
-// (jahSampleFootprint, jahAllowedWorldError), so the two functions here are named
-// apart from it — when stage 3 includes this piece there, those two move here and
-// the cull calls these.
+// the cull. It spends the ONE currency — jahSampleFootprint / jahAllowedWorldError
+// in JahLevelRule_piece_cs.any (piece JahLevelRuleCurrency) — so an includer
+// inserts that piece first, and the instance's scale is the caller's
+// jahWorldMaxAxisScale (the longest COLUMN, the same piece's JahLevelRuleScale).
 //
 // THE TABLES' LAYOUT IS A CONTRACT with the C++ that uploads them (a std430
 // struct of vec4s, no padding surprises):
@@ -42,22 +42,6 @@ struct JahCluster
 	vec4  sphere;
 };
 
-// One sample's world footprint at d metres of a perspective view.
-float jahCutFootprint( float d, float projScaleY, float viewportHeight )
-{
-	if( !( projScaleY > 0.0 ) || !( viewportHeight > 0.0 ) )
-		return 0.0;
-	return d * 2.0 / ( projScaleY * viewportHeight );
-}
-
-// What a consumer may afford of it, in MESH units (the divide by the scale).
-float jahCutAllowed( float tolerance, float footprint, float meshToWorldScale )
-{
-	if( !( tolerance > 0.0 ) || !( footprint > 0.0 ) || !( meshToWorldScale > 0.0 ) )
-		return 0.0;
-	return tolerance * footprint / meshToWorldScale;
-}
-
 // What the consumer can afford AT ONE GROUP: the distance from the eye to the
 // group's sphere, transformed by the instance, spelled operation for operation as
 // clusterGroupAllowed spells it.
@@ -71,7 +55,7 @@ float jahClusterGroupAllowed( vec4 sphere, vec4 row0, vec4 row1, vec4 row2, floa
 	float dy = cy - eye.y;
 	float dz = cz - eye.z;
 	float d = max( 0.0, sqrt( dx * dx + dy * dy + dz * dz ) - sphere.w * scale );
-	return jahCutAllowed( tolerance, jahCutFootprint( d, projScaleY, viewportHeight ), scale );
+	return jahAllowedWorldError( tolerance, jahSampleFootprint( d, projScaleY, viewportHeight ), scale );
 }
 
 // THE COMPARISON, once: allowed of zero affords nothing (the cut is level 0).

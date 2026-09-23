@@ -113,22 +113,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 		local_size_z = @value( threads_per_group_z ) ) in;
 
 // ---- THE QUALITY CURRENCY, GLSL half (Types.h has the C++ half) -----------
-// One sample's world footprint at `d` metres of a perspective view...
-float jahSampleFootprint( float d, float projScaleY, float viewportHeight )
-{
-	if( projScaleY <= 0.0 || viewportHeight <= 0.0 )
-		return 0.0;
-	return d * 2.0 / ( projScaleY * viewportHeight );
-}
-
-// ...and what a consumer may afford of it, in the units the BAKED bounds are
-// measured in (the mesh's own, hence the divide by the instance's scale).
-float jahAllowedWorldError( float tolerance, float footprint, float meshToWorldScale )
-{
-	if( tolerance <= 0.0 || footprint <= 0.0 || meshToWorldScale <= 0.0 )
-		return 0.0;
-	return tolerance * footprint / meshToWorldScale;
-}
+// jahSampleFootprint + jahAllowedWorldError: ONE definition, in
+// JahLevelRule_piece_cs.any, shared with the voxel gather and the cluster cut.
+@insertpiece( JahLevelRuleCurrency )
 
 // THE LEVEL WALK, identical to lodLevelForWorldError: the COARSEST level whose
 // bound is STRICTLY below what the consumer affords, the bounds being

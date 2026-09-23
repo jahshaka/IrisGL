@@ -105,13 +105,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
 		local_size_z = @value( threads_per_group_z ) ) in;
 
-// What a consumer may afford, in the units the BAKED bounds are measured in.
-float jahAllowedWorldError( float tolerance, float footprint, float meshToWorldScale )
-{
-	if( tolerance <= 0.0 || footprint <= 0.0 || meshToWorldScale <= 0.0 )
-		return 0.0;
-	return tolerance * footprint / meshToWorldScale;
-}
+// What a consumer may afford, in the units the BAKED bounds are measured in —
+// ONE definition, in JahLevelRule_piece_cs.any (shared with the cull).
+@insertpiece( JahLevelRuleCurrency )
 
 // The COARSEST level whose bound is STRICTLY below what the consumer affords, the
 // bounds being non-decreasing so the first failure ends the walk.
