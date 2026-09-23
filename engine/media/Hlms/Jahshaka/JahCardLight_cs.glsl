@@ -216,16 +216,24 @@ layout( local_size_x = @value( threads_per_group_x ),
 	}
 @end
 
-// THE STORE ROUNDS. The device converts a float into R11G11B10F by
+// THE STORE ROUNDS TO NEAREST. The device converts a float into R11G11B10F by
 // TRUNCATION (measured: 0.50829 stored as 0.5), so a channel lost up to one
-// whole mantissa step — 1/64 on red and green, 1/32 (3 %) on blue. Scaling by
-// one plus half a step first makes the truncation a round to nearest: half a
-// step at most. Only on that format (the host's property): the RGBA16F
-// fallback stores unrounded.
+// whole mantissa step — 6 mantissa bits on red and green, 5 on blue. Adding
+// HALF A STEP of the target format to the float's own bits first — bit 16 for
+// red and green (23 - 6 - 1), bit 17 for blue (23 - 5 - 1) — makes the
+// truncation a round to nearest in EVERY octave (a carry into the exponent is
+// the octave's own round-up): half a step at most. What stood here was a
+// constant pre-scale, v x (1 + 1/128, 1 + 1/128, 1 + 1/64): half a step only at
+// the BOTTOM of an octave, a whole step at its top — it read blue 1.1-1.5 %
+// HIGH on gi.card_lighting's crate top (a value at 1.6 x its octave's floor).
+// Below the format's smallest normal (2^-14) its step is absolute and this adds
+// less than half of it: a radiance under 6e-5, stated. Only on that format (the
+// host's property): the RGBA16F fallback stores unrounded.
 vec3 jahCardRound( vec3 v )
 {
 @property( jah_card_round_r11g11b10 )
-	return v * vec3( 1.0 + 1.0 / 128.0, 1.0 + 1.0 / 128.0, 1.0 + 1.0 / 64.0 );
+	const uvec3 bits = floatBitsToUint( max( v, vec3( 0.0, 0.0, 0.0 ) ) );
+	return uintBitsToFloat( bits + uvec3( 0x10000u, 0x10000u, 0x20000u ) );
 @else
 	return v;
 @end
