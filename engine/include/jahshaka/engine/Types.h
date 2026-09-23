@@ -2131,16 +2131,13 @@ struct GiParams {
     /// media/Hlms/Jahshaka/JahIfd_piece_ps.any, so changing it is a const-buffer
     /// write and never a shader rebuild).
     ///
-    /// 1.0 is upstream's raw brightness, and it is also the CALIBRATED default:
-    /// measured on the gi.modes room, the field's red bounce at 1.0 is 0.145
-    /// against the VCT diffuse's 0.169 that it replaces — 86%, the same visual
-    /// class, no trim needed. (The P0 spike's "~13x dimmer" reading was an
-    /// artifact of the pass-buffer misalignment described on
-    /// the pass-buffer under-report (fixed by ogre-patch 0050), which was collapsing every irradiance
-    /// lookup onto one texel; it is corrected here and the number does not
-    /// survive it. GI_UNIFIED_SPEC addendum item 2 should be read with that in
-    /// mind.) The knob stays because the two terms are different integrals and
-    /// a scene may want the trim; clamped to [0, 64], and 0 is a legitimate
+    /// 1.0 is the field's own answer, untrimmed: since PHOTON-READER-1 the
+    /// field's probe rays march the same cascade chain through the same voxel
+    /// reader as the cone diffuse it replaces (jah_voxel_march.glsl), so the two
+    /// are one integral of one radiance field and differ only in how it is
+    /// integrated (144 rays per probe, blended over the probe cage, against six
+    /// cones per pixel). Nothing is calibrated into it. It stays a dial because a
+    /// scene may want a stylistic trim; clamped to [0, 64], and 0 is a legitimate
     /// "field bound, contributing nothing" for A/B measurement.
     float     ddgiIntensity = 1.0f;
     /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Photon ambient fix's one dial
@@ -2153,12 +2150,13 @@ struct GiParams {
     /// cone-traced diffuse's `ambient * escapeFraction`, and binding a field
     /// deletes that branch — so with DDGI on, ambient light inside the volume
     /// came from nowhere: 15-25% darker mid-ground on OPEN scenes, sealed rooms
-    /// unaffected. This scales the replacement: the scene's SH ambient times a
-    /// sky-visibility fraction read out of the field's OWN depth atlas (one tap
-    /// per cage probe along the surface normal; a probe whose ray left the
-    /// volume without hitting anything votes "sky").
+    /// unaffected. This scales the replacement: the scene's SH ambient times the
+    /// probes' SKY VISIBILITY - the escape fraction their rays measured in the
+    /// voxel march, stored in the field's depth atlas beside the depth moments
+    /// and read at the surface normal over the probe cage (PHOTON-READER-1; the
+    /// definition is on JahIfd_piece_ps.any).
     ///
-    /// 1.0 is the honest reconstruction and the default. 0 removes the term
+    /// 1.0 is the measured term and the default. 0 removes the term
     /// entirely — through a UNIFORM shader branch, so it is also exactly "DDGI
     /// as it behaved before this fix", which is what makes the A/B in
     /// gi.ddgi_ambient (and the sealed-room invariance assertion) possible.
@@ -6441,6 +6439,33 @@ struct GpuSceneStatus {
     /// Walks of the ray-level pass (one per frame in which the camera or the
     /// scene moved; a still frame runs none).
     unsigned long long rayLevelWalks = 0;
+};
+
+/// ONE CONE FOR THE ONE VOXEL READER'S PARITY HARNESS (PHOTON-READER-1;
+/// Engine::voxelReaderParity, engine.voxel_reader_parity). Everything is in the
+/// normalised space of cascade 0 of the scene's chain, as the reader's callers
+/// hand it (the pixel shader after its own start bias, the irradiance field's
+/// probe rays from the probe's position).
+struct VoxelReaderCone {
+    Vec3     posLS;                  ///< where the march starts
+    Vec3     dirLS;                  ///< unit direction
+    Vec3     biasDirLS;              ///< the hop's bias direction (zero: a point in free space)
+    float    tanHalfAngle = 0.577f;  ///< the diffuse cone set's half angle
+    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 4 lod step, 8 gap along the cone, 16 no escape)
+    unsigned cascade = 0u;           ///< which cascade the point reads take
+    float    lod = 0.0f;             ///< ...at which mip
+};
+
+/// Every answer the reader gives for one cone, as raw floats (compared bit for
+/// bit by the suite): the march's colour/alpha, its escape opacity, its age in
+/// cascade 0's units, the cascade it stopped in and its age there, the ray
+/// hit's read where the march's first sample lands and the march's own one-step
+/// read of it.
+struct VoxelReaderAnswer {
+    float march[4] = {};     ///< colour.rgb, alpha
+    float escape[4] = {};    ///< escapeAlpha, travelledC0, lastCascade, travelled
+    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls) where the march's first sample lands
+    float marchRead[4] = {}; ///< the march at zero length: one march step onto that point
 };
 
 }}  // namespace jahshaka::engine

@@ -48,98 +48,50 @@
 // piece is wrapped in `if( vctSpecular.w == 0 )` and upstream commented the
 // volume-local blend out, hardcoding blend = 1.0, so vctSpecular.w is never
 // zero and DoAmbientLighting can never fire while VctLighting is bound. The
-// only live ambient in a VCT scene was the cone-traced diffuse's own
+// only live ambient in a VCT scene is the cone-traced diffuse's own
 // `light.xyz += ambient * light.w` — ambient times the ESCAPE FRACTION of its
 // cones, i.e. ambient weighted by how much sky the surface can see. Binding an
-// irradiance field sets VctDisableDiffuse, which deletes that whole branch, and
-// the field's own generation job computes the same escape fraction and THROWS
-// IT AWAY (IrradianceFieldGenFromVct_piece_cs.any: `alpha` is local to
-// voxelConeTraceDiff and never returned). So with DDGI on, ambient light inside
-// the volume comes from nowhere: measured as a 15-25% darker mid-ground on open
-// scenes, and correctly zero in sealed rooms, which is why it reads as "flat"
-// rather than as "broken".
+// irradiance field sets VctDisableDiffuse, which deletes that whole branch, so
+// with DDGI on the ambient inside the volume has to come from the field.
 //
-// THE PROXY, and why it is a proxy. We cannot recover the cones' escape
-// fraction (it is thrown away inside a compute job we do not patch), but the
-// field's DEPTH atlas already answers the same question: it stores, per probe
-// and per octahedral direction, how far the generation rays travelled, in
-// probe-grid units. A ray that hit nothing exits the march at the loop's own
-// limit (`while( dist < 1.414213562f && alpha < 0.95 )`) and its stored
-// distance is `1.414213562 * dot( abs( dir ), numProbes )` — the exact
-// expression the job uses to convert march distance into the units the pixel
-// shader compares against. Anything shorter means the ray hit geometry.
+// HOW MUCH SKY THIS POINT SEES — THE ONE DEFINITION (PHOTON-READER-1). It is the
+// ESCAPE FRACTION of the voxel march, `1 - min( 1, opacity / 0.95 )`: the share
+// of a cone or ray the voxels did not stop. Both sides march through the one
+// voxel radiance reader (jah_voxel_march.glsl / jah_voxel_sample.glsl — the
+// pixel's cones, the bounce job and the field's generation job). The pixel's
+// cones weight their six escapes into `light.w`; the field's generation job
+// stores each probe ray's escape in the DEPTH atlas's third channel, the
+// integration job convolves it over the same cosine lobe as the depth moments,
+// and this file reads it at the pixel's normal from every probe of the cage,
+// weighted exactly as the irradiance is. So `ifdSkyVis` is the cage's
+// trilinear, visibility-weighted reading of the escape its probes' rays
+// actually measured, integrated by 144 cosine-distributed rays per probe
+// instead of six cones per pixel. The OPACITY differs by what starts where: a
+// cone that starts ON a surface uses the march's occupancy estimate (it would
+// otherwise occlude itself in its own cell), a probe ray starts in free space
+// and uses its own composite, which for a ray crossing a wall is the
+// transmittance (IrradianceFieldGenFromVct_piece_cs.any says why, measured).
+// There is no model in it any more: the Chebyshev proxy that reconstructed an
+// escape from the depth moments (a two-point mixture at a fitted escape
+// distance, a 0.9 scale, a 0.3 knee) is deleted with the march that threw the
+// real escape away. A sealed room's rays all stop in its walls, so its interior
+// probes store exactly zero.
 //
-// WHAT A DEPTH TEXEL ACTUALLY HOLDS — corrected 2026-09-09 (spikes/rayon2 S1), and
-// the correction is the whole design. The first version of this file claimed
-// a texel was ONE ray at our settings (depthRes 12, raysPerPixel 1). It is
-// not: upstream's generation workspace runs `IrradianceField/Integration/Depth`
-// after every generation dispatch (IrradianceField.compositor), and that job
-// convolves the depth atlas with a COSINE LOBE over the whole hemisphere —
-// `fillIntegrationWeights` weights every texel whose direction has a positive
-// dot with the texel being written, normalised (OgreIrradianceField.cpp:365).
-// Both channels get it. So a depth texel is the cosine-weighted MEAN distance
-// over the hemisphere around its direction, and the second channel is the
-// cosine-weighted mean of the SQUARED distances. That single fact explains the
-// old single-tap defect exactly: comparing a hemisphere mean against the
-// escape distance of the ONE direction at its centre. On an anisotropic probe
-// grid (32x8x32 is the shape our fit gives a room) the escape distance of the
-// rays tilted toward the dense axes is up to four times the straight-up one,
-// so a floor-at-a-wall-foot whose hemisphere is half bricked up still averaged
-// ABOVE the straight-up threshold and read as fully open: the +17-point corner
-// over-brightening the first build record fenced.
-//
-// THE TEST, now. Two things follow from the atlas being a moment pair:
-//
-//   1. The threshold must be the INTEGRATED escape distance — what the texel
-//      would hold if every ray in its lobe escaped: E_int(d) = 1.414213562 *
-//      dot( A(d), numProbes ), where A_i(d) is the cosine-lobe mean of |w_i|
-//      around d. Computed exactly for the 12x12 octahedral grid with upstream's
-//      own weights (corner directions for the weights, texel centres for the
-//      rays, exactly as the C++ does it) it is well fitted per axis by
-//      A_i(d) = 0.396 + 0.275 * d_i^2 (aligned 0.67, transverse 0.40 — the
-//      continuous values are 2/3 and 4/(3 pi); the fit's worst error over all
-//      144 texels is 5% absolute). The script that derived it is recorded in
-//      the lane report; kIfdDepthRes = 12 is the constant it stands on.
-//
-//   2. Given a mean and a mean-square, the escape FRACTION is a two-point
-//      mixture problem — rays that escaped (at E_int) and rays that hit (at
-//      something shorter) — and its closed form is the DDGI paper's own
-//      Chebyshev visibility test evaluated at the escape distance:
-//          f = var / ( (E - mean)^2 + var ),   var = meanSq - mean^2
-//      (1 when mean >= E). Sanity: all rays hit at one distance -> var 0 ->
-//      f 0 (the sealed room); half escape, half hit near -> f 1/2; all escape
-//      -> 1. Real hit distances spread, which leaves a sealed room a small
-//      residual f (measured 0.17 at the worst pixel of gi.ddgi_ambient's
-//      room), so a knee below which f is ZERO keeps the sealed-room invariance
-//      exact rather than merely small — the constants are just below.
-//
-// TAPS: ONE, along the field-space normal, and that is a measured decision
-// (build record, spikes/rayon2 S1). The atlas already integrates the pixel's cosine
-// hemisphere, so a tap tilted away from the normal has a lobe that dips below
-// the surface's own horizon and reads its own floor as occlusion: upstream's
-// 6-cone diffuse set on a tangent frame around the normal (the machinery is
-// kept below, the count is a literal in the foreach) darkened OPEN floor to
-// 53% of the cone reference against 85% for the single tap, and bought no
-// corner shape for it (-3.5 against -6.6 points from the reference, both
-// inside the gate). Over a pre-integrated atlas, more taps is a double blur.
-//
-// WHAT IT IS NOT. Still a proxy: the mixture model is exact only for
-// two-valued distributions, the threshold is a fit, and the depth atlas is
-// bilinear over 12x12 texels. It is gated on `ambient_sh` — the only ambient
-// mode this engine ever sets (OgreEngine::ensureHlms forces HlmsPbs::AmbientSh),
-// so the hemisphere and fixed branches of DoAmbientLighting are unreachable
-// here and deliberately not reproduced; an engine that stopped forcing
-// AmbientSh would silently lose this term rather than get a wrong one. The
-// MONOCHROME SH variant is excluded for the same reason and one more: its
-// irradianceSH returns a scalar, so the term would not even compile there.
+// The ambient itself is the scene's SH irradiance at the pixel's normal, gated
+// on `ambient_sh` — the only ambient mode this engine ever sets
+// (OgreEngine::ensureHlms forces HlmsPbs::AmbientSh). The MONOCHROME SH variant
+// is excluded: its irradianceSH returns a scalar, so the term would not compile.
+// (That the cones' ambient is the 2-band hemisphere pair and this one the full
+// SH is the environment's question — one sky term for every escape — not the
+// escape's.)
 //
 // THE DIAL is `GiParams::ddgiAmbient`, riding jahIfd.y beside the intensity, and
 // 0 turns the whole term off through a UNIFORM branch — so "DDGI without the
-// fix" is not a rebuild, it is a const-buffer write, which is what lets the
+// sky term" is not a rebuild, it is a const-buffer write, which is what lets the
 // suite A/B it and what makes the sealed-room invariance assertion meaningful.
 // jahIfd.zw carry the field's Y and Z probe counts, which upstream's own render
 // params do NOT contain (only Nx and Nx*Ny reach the shader,
-// OgreIrradianceField.cpp:812-813) and the threshold above needs all three.
+// OgreIrradianceField.cpp:812-813); the cage clamp below needs all three.
 //
 // THE THIRD THING THAT IS NOT UPSTREAM'S: THE FIELD'S EDGE
 // (ENGINE_CACHE_POLICY_SPEC.md P9, re-scoped 2026-09-13; the owner's report was
@@ -282,8 +234,7 @@
 	//
 	//   ifdMaxProbe  the last legal probe index on each axis. Upstream's own
 	//                render params carry only Nx and Nx*Ny, so Y and Z ride
-	//                jahIfd.zw (the same two floats the sky-visibility
-	//                threshold uses). When they are absent -- the host pushed no
+	//                jahIfd.zw. When they are absent -- the host pushed no
 	//                IFD state, which cannot happen today because the arm writes
 	//                the state before it binds -- the bound is set beyond any
 	//                real grid, and every line below reduces to upstream's
@@ -298,42 +249,9 @@
 	// shading surface (P9; the fade after the loop says what it is for).
 	float ifdFrontWeight = 0;
 @property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
-	// OURS: the cage-weighted sky visibility, and everything the taps need
-	// that does not change per probe. A tangent frame around the field-space
-	// normal (the axis least aligned with it seeds the cross product), the
-	// three probe counts the threshold needs (upstream's render params carry
-	// only Nx and Nx*Ny; Y and Z ride jahIfd.zw), and the tap set.
+	// OURS: the cage-weighted sky visibility (the header: the stored escape of
+	// the probes' rays, read per cage probe below).
 	float ifdSkyVis = 0;
-	float3 ifdVisT = abs( ifdSpaceNormal.x ) < 0.9 ? float3( 1.0, 0.0, 0.0 ) : float3( 0.0, 1.0, 0.0 );
-	ifdVisT = normalize( cross( ifdVisT, ifdSpaceNormal ) );
-	float3 ifdVisB = cross( ifdSpaceNormal, ifdVisT );
-	float3 ifdNumProbes = float3( passBuf.irradianceField.numProbesAggregated.x,
-								  passBuf.jahIfd.z, passBuf.jahIfd.w );
-	// CALIBRATION, two constants, both measured (build record, spikes/rayon2 S1):
-	// ifdVisEscapeScale scales the integrated escape distance so that OPEN
-	// FLOOR reads 1 -- the rays whose cone footprint grazes the floor exit the
-	// march early, and they are the near-horizontal ones carrying the largest
-	// escape distances, so the integrated mean of a fully open lobe sits a
-	// little below the all-escaped value. ifdVisKnee: a Chebyshev escape
-	// fraction at or below it is ZERO (a short smoothstep ramp above it, no
-	// re-stretch), which is what keeps a sealed room bit-identical with the
-	// term on: the room's residual (hit distances spread, so var > 0) measured
-	// under the knee with margin.
-	const float ifdVisEscapeScale = 0.9;
-	const float ifdVisKnee = 0.3;
-	const float ifdVisKneeRamp = 0.1;
-	float3 ifdVisDirs[6] =
-		OGRE_ARRAY_START( float3 )
-			float3( 0.0, 0.0, 1.0 ),
-			float3( 0.866025, 0.0, 0.5 ),
-			float3( 0.267617, 0.823639, 0.5 ),
-			float3( -0.700629, 0.509037, 0.5 ),
-			float3( -0.700629, -0.509037, 0.5 ),
-			float3( 0.267617, -0.823639, 0.5 )
-		OGRE_ARRAY_END;
-	// Weights for the tap count in use (1): the centre tap alone. The 6-tap
-	// set is 0.25, 0.15, 0.15, 0.15, 0.15, 0.15.
-	float ifdVisWeights[6] = OGRE_ARRAY_START( float ) 1.0, 0.15, 0.15, 0.15, 0.15, 0.15 OGRE_ARRAY_END;
 @end
 @end
 
@@ -385,39 +303,17 @@
 		// is probe classification (RTXGI-style), which this lane does not do.
 
 @property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
-		// OURS: the sky-visibility taps for this cage probe. The branch is
-		// UNIFORM (jahIfd.y is a pass constant), so with the dial at 0 not one
-		// instruction of this executes and the frame is bit-identical to a
-		// build without the term.
+		// OURS: this cage probe's stored escape at the pixel's normal (the depth
+		// atlas's third channel — the header), weighted exactly as its irradiance
+		// is. The branch is UNIFORM (jahIfd.y is a pass constant), so with the dial
+		// at 0 not one instruction of this executes.
 		if( passBuf.jahIfd.y > 0.0 )
 		{
-			float ifdProbeVis = 0.0;
-			@foreach( 1, t )
-			{
-				float3 ifdTapDir = ifdVisT * ifdVisDirs[@t].x + ifdVisB * ifdVisDirs[@t].y +
-								   ifdSpaceNormal * ifdVisDirs[@t].z;
-				float2 ifdVisUV = getIrradianceFieldXY(
-					ifdTapDir, probeIdx, passBuf.irradianceField.depthBorderedRes,
-					passBuf.irradianceField.depthFullWidth,
-					passBuf.irradianceField.depthInvFullResolution );
-				float2 ifdVisMoments = OGRE_SampleLevel( ifdDepth, ifdSampler, ifdVisUV, 0 ).xy;
-				// The integrated escape distance for this tap's lobe (header,
-				// item 1), then the Chebyshev test at it (item 2).
-				float3 ifdVisA = float3( 0.396, 0.396, 0.396 ) + 0.275 * ifdTapDir * ifdTapDir;
-				// THE PROBES' MISS DISTANCE: a probe stores a miss at the cone
-				// march limit, 1.414 x dot( |dir|, numProbes ).
-				float ifdVisEscape = 1.414213562 * ifdVisEscapeScale * dot( ifdVisA, ifdNumProbes );
-				float ifdVisU = ifdVisMoments.x / ifdVisEscape;
-				float ifdVisV = ifdVisMoments.y / ( ifdVisEscape * ifdVisEscape );
-				float ifdVisVar = max( ifdVisV - ifdVisU * ifdVisU, 0.0 );
-				float ifdVisMiss = 1.0 - ifdVisU;
-				float ifdVisF = ifdVisMiss <= 0.0 ? 1.0 :
-								ifdVisVar / ( ifdVisMiss * ifdVisMiss + ifdVisVar + 1e-8 );
-				ifdVisF *= smoothstep( ifdVisKnee, ifdVisKnee + ifdVisKneeRamp, ifdVisF );
-				ifdProbeVis += ifdVisWeights[@t] * ifdVisF;
-			}
-			@end
-			ifdSkyVis += weight * ifdProbeVis;
+			float2 ifdVisUV = getIrradianceFieldXY(
+				ifdSpaceNormal, probeIdx, passBuf.irradianceField.depthBorderedRes,
+				passBuf.irradianceField.depthFullWidth,
+				passBuf.irradianceField.depthInvFullResolution );
+			ifdSkyVis += weight * OGRE_SampleLevel( ifdDepth, ifdSampler, ifdVisUV, 0 ).z;
 		}
 @end
 @end
@@ -483,13 +379,13 @@
 	// 107 -> 110 monotonically over that half spacing on both the low and the
 	// high face, with the dark line gone.
 	//
-	// IT HIDES THE EDGE; IT DOES NOT EQUALISE THE INTEGRALS. The field
-	// integrates cascade 0 and throws the escape away, the cones integrate the
-	// whole chain and take the sky as their escape, and the two answers differ
-	// by a few 8-bit levels on an open floor (4-6/255 here) whatever the ramp
-	// does. The fix for THAT is one voxel reader -- the field integrating the
-	// same chain the cones walk (ENGINE_V2_SPEC part 2 / the render audit's
-	// synthesis phase 2.1) -- and it is not this file.
+	// IT HIDES THE EDGE; THE ONE READER EQUALISES THE INTEGRALS. The field used
+	// to integrate cascade 0 alone and throw the escape away while the cones
+	// walked the whole chain and took the sky as their escape (4-6/255 apart on
+	// an open floor whatever the ramp did). Since PHOTON-READER-1 both march the
+	// same chain through the same reader and both weight the sky by the same
+	// escape, so what is left between them is the integration (144 rays per
+	// probe against six cones per pixel) and the environment term.
 	float3 ifdQ = ifdProbeCounts / ( ifdProbeCounts + float3( 2.0, 2.0, 2.0 ) );
 	float3 ifdInside = min( ifdGridPos - ifdQ, ( ifdProbeCounts - ifdQ ) - ifdGridPos );
 	// `ifdInside` is the signed distance to the nearest authored face in PROBE
@@ -592,8 +488,8 @@
 	//     pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight );
 	// with the scale at one, and we set it to jahIfd.x -- the DDGI diffuse
 	// intensity the host writes into the pass buffer (JahshakaEngine's
-	// FogHlmsListener; the default is calibrated against the pre-DDGI VCT diffuse,
-	// GiParams::ddgiIntensity) -- times the confidence and the weight fade above.
+	// FogHlmsListener; GiParams::ddgiIntensity, 1 = the field's own answer) --
+	// times the confidence and the weight fade above.
 	// At intensity 1 inside the field every factor is exactly 1 and the line is
 	// bit-for-bit what it always was.
 	//
