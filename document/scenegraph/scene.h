@@ -412,12 +412,12 @@ public:
     /// THE SURFACE CACHE (SURFACE-CACHE phase 2) — three per-project rows.
     ///
     /// `giCards` takes the same three-state spelling every other GI toggle in
-    /// this struct takes — 0 OFF, 1 ON, anything else (-1) AUTO — and AUTO IS
-    /// OFF at this phase
-    /// and says so: nothing READS a card until phase 4 (the ray hit), so a
-    /// machine that captured them would be paying for pictures nobody looks at.
-    /// The row exists now because the cache is built now and a suite, a
-    /// measurement and the render monitor all need to turn it on.
+    /// this struct takes — 0 OFF, 1 ON, anything else (-1) AUTO — and the
+    /// DEFAULT IS AUTO (PHOTON-CARDS-2): the engine resolves Auto to "on exactly
+    /// where the reflection trace runs" (a ray's hit reads the card first), so a
+    /// machine without rays pays nothing. The World Mode table's `giCards` row
+    /// writes Off at Low and Medium (no ray tier there) and Auto at High and Epic.
+    /// SceneReader's absent-key default is this constructor's (the trap).
     ///
     /// `giCardBudgetTexels` is the per-frame CAPTURE budget in TEXELS —
     /// Lumen's own shape (its capture budget is 512 x 512 a frame) — and 0 is
@@ -429,7 +429,7 @@ public:
     /// than this from the camera holds no atlas pages at all. 0 is the tier's.
     /// The engine's own documentation for all three is GiParams::cards /
     /// cardBudgetTexels / cardResidencyRadius.
-    int giCards = 0;
+    int giCards = -1;
     int giCardBudgetTexels = 0;
     float giCardRadius = 0.0f;
     /// A DRAGGED STILL RIDES THE MOVER CHANNEL FOR THE LENGTH OF THE GESTURE
