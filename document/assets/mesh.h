@@ -287,6 +287,76 @@ struct MeshSdf
     }
 };
 
+/// THE PER-MESH CLUSTER DAG — a bake product (ATOM stage 2, lane ATOM-CLUSTER-1;
+/// SPECS/atom/B2_CLUSTER_DAG_DESIGN.md §1), beside the LOD chain and not instead of
+/// it: the chain stays the product the voxeliser, the cards, the far BLAS and the
+/// cull's per-object path read, and this is the input stage 3's GPU cut reads.
+///
+/// WHAT IT IS: meshoptimizer's `clodBuild` run on LEVEL 0 (the vendored
+/// `thirdparty/meshoptimizer-clusterlod/clusterlod.h`). Level 0 is split into
+/// CLUSTERS of at most 128 triangles; neighbouring clusters are merged into GROUPS,
+/// each group is simplified to half and re-split, and the loop repeats until one
+/// cluster is left. Every cluster is a member of exactly one group (`group`) and
+/// was produced by exactly one group's simplification (`refined`, -1 for a
+/// level-0 cluster). THE RENDER TEST is the header's own (clusterlod.h:129-133),
+/// stated once in C++ in jahshaka/engine/Types.h (`clusterCut`) and once in GLSL
+/// (JahClusterCut.glsl): a cluster is drawn iff its own group's error is NOT
+/// affordable and its `refined` group's IS (or it is level 0).
+///
+/// THE ERROR THE RULE READS IS MEASURED, not the simplifier's estimate — exactly
+/// ATOM P1's AT-A5 finding for the chain's levels, applied per group: `error` is
+/// the sampled two-sided distance x1.25 between the group's simplified geometry
+/// and the LEVEL-0 surface it stands for, in mesh units (the same currency as
+/// `Mesh::lodBounds`), forced MONOTONE at bake (a group's error is never below
+/// any child group's). `estimate` is clusterlod.h's own number, kept as the
+/// diagnostic `lodErrors` is. A TERMINAL group (the root, or a group the
+/// simplifier could not reduce) carries FLT_MAX in both — it is never affordable.
+///
+/// THE ON-DISK SHAPE IS MESHLET-LOCAL (`clodLocalIndices`): per cluster a slice of
+/// `vertices` (the mesh vertices it uses) and a slice of `triangles` (three 8-bit
+/// indices into that slice per triangle). The engine hand-off expands it to one
+/// global index stream (irisgl/mirror/scenemirror.cpp toMeshData).
+///
+/// EMPTY for every mesh that gets none: a skinned mesh, a line mesh, and a mesh
+/// under two leaf clusters' worth of triangles (256) — which is exactly one
+/// cluster, i.e. level 0 itself, so a DAG would add nothing.
+struct MeshClusterDag
+{
+    struct Cluster
+    {
+        quint32 vertexOffset = 0;     ///< first entry of this cluster in `vertices`
+        quint32 triangleOffset = 0;   ///< first TRIANGLE of this cluster in `triangles` (3 bytes each)
+        quint16 vertexCount = 0;
+        quint16 triangleCount = 0;
+        qint32  group = -1;           ///< the group this cluster is a MEMBER of
+        qint32  refined = -1;         ///< the group whose simplification PRODUCED it; -1 = level 0
+        float   centre[3] = { 0.0f, 0.0f, 0.0f };   ///< culling sphere, mesh space
+        float   radius = 0.0f;
+    };
+    struct Group
+    {
+        qint32 depth = 0;             ///< the DAG level the group was formed at
+        float  centre[3] = { 0.0f, 0.0f, 0.0f };    ///< the simplified bounds' sphere, mesh space —
+        float  radius = 0.0f;         ///< ...grown at bake to CONTAIN every child group's sphere
+        float  error = 0.0f;          ///< MEASURED, mesh units, monotone; FLT_MAX = terminal
+        float  estimate = 0.0f;       ///< clusterlod.h's own error (a diagnostic); FLT_MAX = terminal
+    };
+
+    QVector<Cluster> clusters;
+    QVector<Group>   groups;
+    QVector<quint32> vertices;        ///< per-cluster local -> mesh vertex, concatenated
+    QByteArray       triangles;       ///< 8-bit local indices, 3 per triangle, concatenated
+
+    bool isEmpty() const { return clusters.isEmpty(); }
+    int  triangleCount() const { return triangles.size() / 3; }
+    /// The mesh-vertex index of corner `k` (0..2) of local triangle `t` of cluster `c`.
+    quint32 vertexOf(const Cluster &c, int t, int k) const
+    {
+        const quint8 local = quint8(triangles.at(int(c.triangleOffset + quint32(t)) * 3 + k));
+        return vertices.at(int(c.vertexOffset) + int(local));
+    }
+};
+
 // CPU-side mesh: geometry buffers, skeleton, animations, bounds and the picking
 // TriMesh. The GL half (VAO/draw) died with the legacy renderer at step 14; the
 // engine mirror converts these buffers into engine meshes each time one changes.
@@ -374,6 +444,10 @@ public:
     /// by MeshBake beside the chain and the cards (see MeshSdf above). Empty for
     /// every mesh that gets none.
     MeshSdf sdf;
+
+    /// ATOM stage 2 — the mesh's CLUSTER DAG, built at IMPORT by MeshBake beside
+    /// the chain (see MeshClusterDag above). Empty for every mesh that gets none.
+    MeshClusterDag clusterDag;
 
     /// CPU-side geometry, read-only. The engine mirror and importers convert from
     /// these.

@@ -34,8 +34,11 @@ For more information see the LICENSE file
 
 // ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the LOD chain is built HERE, once, at
 // import. Vendored at thirdparty/meshoptimizer, pinned to the release tag v1.2;
-// this is the ONLY translation unit in the tree that includes it.
+// this and import/clusterlod.cpp (the one TU that compiles clusterlod.h's
+// implementation, ATOM stage 2) are the only translation units that include it.
 #include "meshoptimizer.h"
+#include "thirdparty/meshoptimizer-clusterlod/clusterlod.h"
+#include <chrono>
 
 #include "core/geometry/trimesh.h"
 #include "core/logger.h"
@@ -158,7 +161,14 @@ namespace
 // .jmb written before today is rejected by this line, on purpose, and every
 // library re-bakes once (the BAKEKEY-1 rule — the bake's OUTPUT changed, so the
 // version is bumped rather than the commit carrying `bake-output: unchanged`).
-constexpr int kFormatVersion = 12;
+// v13 (2026-09-23, ATOM-CLUSTER-1, ATOM stage 2): EVERY MESH CARRIES A CLUSTER
+// DAG beside its chain — clodBuild's clusters and groups over level 0, stored
+// meshlet-local, each group with its MEASURED error beside clusterlod's own
+// estimate, and the config the DAG was built under (a blob built under another
+// config is refused). A new trailing block on every mesh: every .jmb written
+// before today is rejected by this line, on purpose, and every library re-bakes
+// once (the BAKEKEY-1 rule — the output changed, so the version is bumped).
+constexpr int kFormatVersion = 13;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -314,6 +324,104 @@ SkeletonPtr readSkeleton(QDataStream &s, bool *okOut)
     return skel;
 }
 
+// ---- the cluster DAG (format v13) -------------------------------------------
+//
+// Declared ahead of the builder that fills it (`clusterdag`, further down):
+// the CONFIG RECORD is the builder's, and the reader refuses a blob written
+// under any other.
+namespace clusterdag { QVector<float> shippedConfigRecord(); }
+
+void writeClusterDag(QDataStream &s, const MeshClusterDag &dag)
+{
+    s << qint32(dag.clusters.size());
+    if (dag.isEmpty()) return;
+    const QVector<float> record = clusterdag::shippedConfigRecord();
+    s << qint32(record.size());
+    for (float f : record) s << f;
+    s << qint32(dag.groups.size());
+    for (const MeshClusterDag::Group &g : dag.groups) {
+        s << qint32(g.depth) << g.centre[0] << g.centre[1] << g.centre[2] << g.radius
+          << g.error << g.estimate;
+    }
+    for (const MeshClusterDag::Cluster &c : dag.clusters) {
+        s << quint32(c.vertexOffset) << quint32(c.triangleOffset) << quint16(c.vertexCount)
+          << quint16(c.triangleCount) << qint32(c.group) << qint32(c.refined)
+          << c.centre[0] << c.centre[1] << c.centre[2] << c.radius;
+    }
+    s << QByteArray(reinterpret_cast<const char *>(dag.vertices.constData()),
+                    dag.vertices.size() * int(sizeof(quint32)));
+    s << dag.triangles;
+}
+
+/// Every field is checked, for the reason the chain's levels are: a consumer
+/// reads this as geometry and as a SELECTION RULE. A range outside its arrays,
+/// a local index past its cluster's vertices, a vertex the mesh does not have, a
+/// link to a group that does not exist, a non-finite sphere or error, or an
+/// error that FALLS from a child group to its parent (the rule is only
+/// crack-free over a monotone DAG) — each refuses the blob, and a blob written
+/// under another config is refused too, so the asset re-bakes.
+bool readClusterDag(QDataStream &s, int vertexCount, MeshClusterDag *out)
+{
+    *out = MeshClusterDag();
+    qint32 clusterCount = 0;
+    s >> clusterCount;
+    if (s.status() != QDataStream::Ok || clusterCount < 0 || clusterCount > (1 << 24)) return false;
+    if (clusterCount == 0) return true;
+    qint32 recordSize = 0;
+    s >> recordSize;
+    const QVector<float> expected = clusterdag::shippedConfigRecord();
+    if (s.status() != QDataStream::Ok || recordSize != expected.size()) return false;
+    for (qint32 i = 0; i < recordSize; ++i) {
+        float f = 0.0f;
+        s >> f;
+        if (f != expected.at(i)) return false;
+    }
+    qint32 groupCount = 0;
+    s >> groupCount;
+    if (s.status() != QDataStream::Ok || groupCount < 1 || groupCount > clusterCount) return false;
+    const auto finite = [](float f) { return std::isfinite(f); };
+    out->groups.resize(groupCount);
+    for (MeshClusterDag::Group &g : out->groups) {
+        s >> g.depth >> g.centre[0] >> g.centre[1] >> g.centre[2] >> g.radius >> g.error >> g.estimate;
+        if (s.status() != QDataStream::Ok || g.depth < 0 || !finite(g.centre[0]) ||
+            !finite(g.centre[1]) || !finite(g.centre[2]) || !finite(g.radius) || g.radius < 0.0f ||
+            !finite(g.error) || !(g.error > 0.0f) || !finite(g.estimate) || g.estimate < 0.0f)
+            return false;
+    }
+    out->clusters.resize(clusterCount);
+    for (MeshClusterDag::Cluster &c : out->clusters) {
+        s >> c.vertexOffset >> c.triangleOffset >> c.vertexCount >> c.triangleCount >> c.group >>
+            c.refined >> c.centre[0] >> c.centre[1] >> c.centre[2] >> c.radius;
+        if (s.status() != QDataStream::Ok || c.group < 0 || c.group >= groupCount ||
+            c.refined < -1 || c.refined >= groupCount || c.refined == c.group ||
+            c.vertexCount == 0 || c.vertexCount > 256 || c.triangleCount == 0 ||
+            !finite(c.centre[0]) || !finite(c.centre[1]) || !finite(c.centre[2]) ||
+            !finite(c.radius) || c.radius < 0.0f)
+            return false;
+    }
+    QByteArray vertexBytes;
+    s >> vertexBytes >> out->triangles;
+    if (s.status() != QDataStream::Ok || vertexBytes.size() % int(sizeof(quint32)) != 0 ||
+        out->triangles.size() % 3 != 0)
+        return false;
+    out->vertices.resize(vertexBytes.size() / int(sizeof(quint32)));
+    std::memcpy(out->vertices.data(), vertexBytes.constData(), size_t(vertexBytes.size()));
+    for (quint32 v : out->vertices) if (int(v) >= vertexCount) return false;
+    const quint64 triCount = quint64(out->triangles.size() / 3);
+    for (const MeshClusterDag::Cluster &c : out->clusters) {
+        if (quint64(c.vertexOffset) + c.vertexCount > quint64(out->vertices.size()) ||
+            quint64(c.triangleOffset) + c.triangleCount > triCount)
+            return false;
+        const uchar *t = reinterpret_cast<const uchar *>(out->triangles.constData()) +
+                         size_t(c.triangleOffset) * 3u;
+        for (int k = 0; k < int(c.triangleCount) * 3; ++k)
+            if (t[k] >= c.vertexCount) return false;
+        if (c.refined >= 0 && out->groups.at(c.group).error < out->groups.at(c.refined).error)
+            return false;   // not monotone: the cut would not be one cut
+    }
+    return true;
+}
+
 // ---- meshes ----------------------------------------------------------------
 
 void writeMesh(QDataStream &s, const MeshPtr &mesh)
@@ -383,6 +491,11 @@ void writeMesh(QDataStream &s, const MeshPtr &mesh)
         writeVec3(s, field.origin);
         s << float(field.cell) << float(field.scale) << field.values;
     }
+
+    // ATOM stage 2's trailing block (format v13) — the CLUSTER DAG. A zero
+    // cluster count for every mesh that gets none (skinned, not triangles, under
+    // two leaves of triangles), which costs four bytes.
+    writeClusterDag(s, mesh->clusterDag);
 }
 
 MeshPtr readMesh(QDataStream &s, bool *okOut)
@@ -536,6 +649,9 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
             mesh->sdf = field;
         }
     }
+
+    // ATOM stage 2's trailing block (format v13) — the CLUSTER DAG.
+    if (!readClusterDag(s, vertexCount, &mesh->clusterDag)) { *okOut = false; return MeshPtr(); }
 
     // THE PICKING MESH IS REBUILT, NOT STORED. It is positions + indices with
     // one cross product per triangle — cheaper to recompute than to read, and
@@ -1052,7 +1168,12 @@ public:
     /// is within `eps` of the best SO FAR, and the final pass drops whatever the
     /// eventual best left behind. The scratch vector is a member so the hundreds of
     /// thousands of queries a bake makes allocate once.
-    float closest(const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr) const
+    ///
+    /// `triangleOut` receives the index (in the soup's own order) of the triangle
+    /// the nearest point lies on — the cluster DAG's region assignment asks which
+    /// simplified triangle a level-0 triangle now stands under.
+    float closest(const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr,
+                  unsigned *triangleOut = nullptr) const
     {
         if (mTriCount == 0) return std::numeric_limits<float>::infinity();
         int base[3];
@@ -1060,6 +1181,7 @@ public:
         ++mGeneration;
         mTies.clear();
         float best = std::numeric_limits<float>::infinity();
+        unsigned bestTri = 0u;
         Vec3 bestPoint, bestNormal(0, 1, 0);
         const int maxRing = std::max(std::max(mDim[0], mDim[1]), mDim[2]);
         for (int ring = 0; ring <= maxRing; ++ring) {
@@ -1105,7 +1227,7 @@ public:
                                 if (d <= best + eps && mTies.size() < kMaxTies)
                                     mTies.push_back({ q, a, b, c, d });
                             }
-                            if (d < best) { best = d; bestPoint = q; }
+                            if (d < best) { best = d; bestPoint = q; bestTri = t; }
                         }
                     }
                 }
@@ -1127,6 +1249,7 @@ public:
             *normalOut = bestNormal;
         }
         if (pointOut) *pointOut = bestPoint;
+        if (triangleOut) *triangleOut = bestTri;
         return best;
     }
 
@@ -2689,10 +2812,539 @@ void build(const MeshPtr &mesh)
 
 }   // namespace sdf
 
+// ---- ATOM stage 2: THE CLUSTER DAG (lane ATOM-CLUSTER-1) ------------------
+//
+// SPECS/atom/B2_CLUSTER_DAG_DESIGN.md §1, and the verified facts about the
+// vendored header in SPECS/NANITE_SPEC.md §2c. A SECOND product of the same
+// bake, beside the chain and not instead of it: the chain is what the
+// voxeliser, the cards, the far BLAS and the cull's per-object path read; the
+// DAG is what stage 3's GPU cut will read. Nothing in the product draws it yet
+// (the lead's shaping decision in the design's preamble).
+//
+// WHAT IS BUILT. `clodBuild` (thirdparty/meshoptimizer-clusterlod/clusterlod.h,
+// compiled once in import/clusterlod.cpp) on LEVEL 0: 128-triangle leaf
+// clusters, groups of about sixteen neighbours merged, each group simplified to
+// half and re-split, until one cluster is left. The header hands every group to
+// the callback with the clusters that are its MEMBERS; a cluster's `refined` is
+// the group whose simplification produced it. Stored meshlet-local
+// (`clodLocalIndices`): per cluster a slice of mesh vertices and three 8-bit
+// indices per triangle into it.
+//
+// WHAT IS MEASURED, AND WHY clusterlod's OWN ERROR IS NOT THE ONE THE RULE READS.
+// `clodGroup::simplified.error` is `meshopt_simplify`'s `result_error` pushed
+// through the header's monotone merge — the same quadric ESTIMATE that ATOM P1's
+// AT-A5 measured the chain's levels against and found is not a bound (the reasons
+// are listed above `lodchain::twoSidedDistance`). So each group's error is
+// MEASURED exactly the way a chain level's is: the sampled two-sided distance
+// (area samples both ways, plus the removed level-0 vertices against the
+// simplified surface, exactly) between the group's SIMPLIFIED geometry — the
+// clusters whose `refined` is this group — and the LEVEL-0 triangles it stands
+// for, times the same sampling-gap margin, floored at the same arithmetic noise.
+// The header's number is stored beside it as a diagnostic.
+//
+// "THE LEVEL-0 TRIANGLES IT STANDS FOR" IS PROVENANCE, and it is computed, not
+// assumed. A leaf cluster stands for its own triangles. A group stands for the
+// union of its members. A group's simplified output is re-split into clusters,
+// and each of those stands for the part of that union that is NEAREST it — every
+// level-0 triangle of the union is given to the output cluster whose surface is
+// closest to its centroid. Group boundaries are LOCKED through the whole build
+// (the header's `lockBoundary`), so an output's boundary is its group's boundary
+// and the nearest-surface split is the honest partition. It is a partition by
+// construction (each triangle goes to exactly one output), which is what makes
+// atom.cluster_cut's "exactly one cut covers every level-0 triangle" checkable.
+//
+// TWO MONOTONICITIES ARE ENFORCED, and both are what make the per-cluster rule
+// CRACK-FREE rather than tidy. The rule draws a cluster iff its group is not
+// affordable and its `refined` group is; for that to select exactly one cut, a
+// group that is affordable must have every CHILD group (the `refined` of each of
+// its members) affordable too. Affordable is `error < allowed(distance to the
+// group's sphere)`, so it needs (1) error(parent) >= error(child) — a sampled
+// maximum is not guaranteed to rise, so the bake raises it and COUNTS the fix —
+// and (2) the parent's sphere CONTAINS the child's, so the parent is never
+// further from the eye than the child (the header merges spheres
+// conservatively; the bake asserts it in float and grows the radius where
+// rounding says otherwise, and counts that too).
+namespace clusterdag {
+
+/// THE LEAF: at most 128 triangles and 128 vertices per cluster —
+/// `clodDefaultConfig(128)`, Nanite's own leaf, and the chain's triangle floor
+/// (`lodchain::kMinTriangles`) is the same number for the same reason.
+constexpr int kMaxTriangles = 128;
+/// A mesh with fewer than two leaves' worth of triangles is ONE cluster, i.e.
+/// level 0 itself: a DAG would add a buffer and a rule for nothing.
+constexpr int kMinTrianglesForDag = 2 * kMaxTriangles;
+/// Area samples per group per direction: two per simplified triangle (S -> level
+/// 0) and one per level-0 facet that lost a corner (level 0 -> S), at least 512
+/// and at most the chain's own per-level budget — so a group is sampled at least
+/// as densely as the chain samples a whole level (the dragon's chain takes 4096
+/// samples over 68,220 triangles), and the exact term, the removed vertices, is
+/// walked in full either way.
+constexpr int kGroupSamplesMin = 512;
+
+using Variant = MeshBake::ClusterDagVariant;
+
+/// THE MEASUREMENT'S PICK (tests/atom/cluster_config_measure.cpp `configs`; the
+/// table is in ~/Developer/spikes/atom-cluster-1/config-measure.txt): PERMISSIVE,
+/// NOTHING PROTECTED — the seams are paid for in the error, exactly stage 1's
+/// measured choice for the chain (rule 4 above `lodchain`), and the opposite of
+/// clusterlod.h's default pairing (permissive + a UV protect mask). Judged by the
+/// cut's triangle count at seven equal measured bounds (0.05 % to 5 % of the
+/// extent) over the eleven shipped meshes that get a DAG: the mean of cut /
+/// level-0 is 0.627 here, 0.647 with the UV seams protected (the header's
+/// pairing, and the same with normals too), 0.665 strict, 0.669 regularised —
+/// and 0.658 for the chain at the same bounds. The difference is the dragon,
+/// whose UV seams are a third of its vertices: at 1 % of its extent protecting
+/// them draws 21,754 triangles and charging them 10,588. Changing this re-bakes
+/// every library twice over: meshbake.cpp is in the producer hash, and the
+/// blob's config record no longer matches.
+constexpr Variant kShipped = Variant::PermissiveCharged;
+
+Variant resolve(Variant v) { return v == Variant::Shipped ? kShipped : v; }
+
+clodConfig configFor(Variant v)
+{
+    clodConfig c = clodDefaultConfig(size_t(kMaxTriangles));
+    switch (resolve(v)) {
+    case Variant::RegularizedProtectUv:
+        c.simplify_regularize = true;
+        break;
+    case Variant::Strict:
+        c.simplify_permissive = false;
+        c.simplify_fallback_permissive = true;
+        break;
+    default:
+        break;
+    }
+    return c;
+}
+
+/// Which attributes are PROTECTED (their discontinuities may not be collapsed
+/// across). Attribute K of the interleaved buffer is bit K: the normal's three
+/// components first when the mesh has normals, then the UV's two.
+unsigned protectMaskFor(Variant v, bool normals, bool uvs)
+{
+    const unsigned nBits = normals ? 0x7u : 0u;
+    const unsigned uvShift = normals ? 3u : 0u;
+    const unsigned uvBits = uvs ? (0x3u << uvShift) : 0u;
+    switch (resolve(v)) {
+    case Variant::DefaultProtectUv:
+    case Variant::RegularizedProtectUv:
+        return uvBits;
+    case Variant::DefaultProtectAll:
+        return nBits | uvBits;
+    default:
+        return 0u;
+    }
+}
+
+/// THE CONFIG RECORD the blob carries: every field of `clodConfig` and the
+/// protect policy, in declaration order, as floats (every value is a small
+/// integer, a flag or a float, so the representation is exact). A blob whose
+/// record is not this build's is REFUSED, so a config change invalidates bakes
+/// on its own — not only through the producer hash.
+QVector<float> configRecord(Variant v)
+{
+    const clodConfig c = configFor(v);
+    const Variant r = resolve(v);
+    const float protect = r == Variant::DefaultProtectAll ? 2.0f
+                        : (r == Variant::DefaultProtectUv || r == Variant::RegularizedProtectUv) ? 1.0f
+                        : 0.0f;
+    return QVector<float>{
+        float(c.max_vertices), float(c.min_triangles), float(c.max_triangles),
+        float(c.partition_spatial), float(c.partition_sort), float(c.partition_size),
+        float(c.cluster_spatial), c.cluster_fill_weight, c.cluster_split_factor,
+        c.simplify_ratio, c.simplify_threshold,
+        c.simplify_error_merge_previous, c.simplify_error_merge_additive,
+        c.simplify_error_factor_sloppy, c.simplify_error_edge_limit,
+        float(c.simplify_permissive), float(c.simplify_fallback_permissive),
+        float(c.simplify_fallback_sloppy), float(c.simplify_regularize),
+        float(c.optimize_bounds), float(c.optimize_clusters), float(c.optimize_clusters_level),
+        protect, float(kMaxTriangles), lodchain::kNormalWeight, lodchain::kUvWeight,
+        lodchain::kBoundMargin, lodchain::kBoundFloorRel };
+}
+
+Vec3 vertexOf(const float *positions, int posComps, unsigned v)
+{
+    const float *p = positions + size_t(v) * size_t(posComps);
+    return Vec3(p[0], p[1], p[2]);
+}
+
+void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant)
+{
+    if (mesh.isNull()) return;
+    mesh->clusterDag = MeshClusterDag();
+    if (stats) {
+        const bool want = stats->wantRegions;
+        *stats = MeshBake::ClusterDagStats();
+        stats->wantRegions = want;
+    }
+    if (!mesh->getSkeleton().isNull()) return;     // static meshes only, as the chain
+    if (mesh->primitiveMode != PrimitiveMode::Triangles) return;
+
+    int posComps = 3; size_t nv = 0;
+    const float *positions = lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return;
+    std::vector<unsigned> base(reinterpret_cast<const unsigned *>(ib->data),
+                               reinterpret_cast<const unsigned *>(ib->data) +
+                                   size_t(ib->dataSize) / sizeof(unsigned));
+    if (base.size() < 3 || base.size() % 3 != 0) return;
+    for (unsigned i : base) if (size_t(i) >= nv) return;
+    const size_t baseTris = base.size() / 3;
+    if (baseTris < size_t(kMinTrianglesForDag)) return;
+
+    // THE ATTRIBUTE METRIC IS THE CHAIN'S (rule 3 above `lodchain`): normals at
+    // meshoptimizer's reference weight, UVs at a weight DERIVED from the mesh's
+    // own extent and UV range. The interleaving [nx ny nz][u v] is also what the
+    // protect mask's bit numbering assumes (`protectMaskFor`).
+    int nrmComps = 3; size_t nrmCount = 0;
+    const float *normals = lodchain::attribData(mesh, VertexAttribUsage::Normal, &nrmComps, &nrmCount);
+    if (normals && nrmCount < nv) normals = nullptr;
+    int uvComps = 2; size_t uvCount = 0;
+    const float *uvs = lodchain::attribData(mesh, VertexAttribUsage::TexCoord0, &uvComps, &uvCount);
+    if (uvs && (uvCount < nv || uvComps < 2)) uvs = nullptr;
+    const size_t posStride = sizeof(float) * size_t(posComps);
+    const float extent = meshopt_simplifyScale(positions, nv, posStride);
+
+    const size_t attrCount = (normals ? 3u : 0u) + (uvs ? 2u : 0u);
+    std::vector<float> attribs, weights;
+    if (attrCount) {
+        attribs.assign(nv * attrCount, 0.0f);
+        weights.assign(attrCount, lodchain::kNormalWeight);
+        float umin = FLT_MAX, umax = -FLT_MAX, vmin = FLT_MAX, vmax = -FLT_MAX;
+        for (size_t v = 0; v < nv; ++v) {
+            float *dst = &attribs[v * attrCount];
+            if (normals) { for (int c = 0; c < 3; ++c) dst[c] = normals[v * size_t(nrmComps) + size_t(c)]; dst += 3; }
+            if (uvs) {
+                const float u = uvs[v * size_t(uvComps)], w = uvs[v * size_t(uvComps) + 1];
+                dst[0] = u; dst[1] = w;
+                umin = std::min(umin, u); umax = std::max(umax, u);
+                vmin = std::min(vmin, w); vmax = std::max(vmax, w);
+            }
+        }
+        if (uvs) {
+            float range = std::max(umax - umin, vmax - vmin);
+            if (!(range > 1e-6f)) range = 1.0f;
+            const float uvWeight = lodchain::kUvWeight * (extent > 0.0f ? extent : 1.0f) / range;
+            weights[attrCount - 2] = uvWeight;
+            weights[attrCount - 1] = uvWeight;
+        }
+    }
+
+    clodMesh cm = {};
+    cm.indices = base.data();
+    cm.index_count = base.size();
+    cm.vertex_count = nv;
+    cm.vertex_positions = positions;
+    cm.vertex_positions_stride = posStride;
+    cm.vertex_attributes = attrCount ? attribs.data() : nullptr;
+    cm.vertex_attributes_stride = sizeof(float) * attrCount;
+    cm.vertex_lock = nullptr;
+    cm.attribute_weights = attrCount ? weights.data() : nullptr;
+    cm.attribute_count = attrCount;
+    cm.attribute_protect_mask = protectMaskFor(variant, normals != nullptr, uvs != nullptr);
+
+    // ---- the build ------------------------------------------------------
+    struct RawCluster
+    {
+        std::vector<unsigned> indices;
+        int group = -1;
+        int refined = -1;
+        clodBounds bounds = {};
+    };
+    std::vector<RawCluster> raw;
+    std::vector<clodGroup> groups;
+    const auto t0 = std::chrono::steady_clock::now();
+    clodBuild(configFor(variant), cm,
+              [&](clodGroup group, const clodCluster *clusters, size_t count) -> int {
+                  const int id = int(groups.size());
+                  groups.push_back(group);
+                  for (size_t i = 0; i < count; ++i) {
+                      RawCluster rc;
+                      rc.indices.assign(clusters[i].indices, clusters[i].indices + clusters[i].index_count);
+                      rc.group = id;
+                      rc.refined = clusters[i].refined;
+                      rc.bounds = clusters[i].bounds;
+                      raw.push_back(std::move(rc));
+                  }
+                  return id;
+              });
+    const auto t1 = std::chrono::steady_clock::now();
+    if (raw.empty() || groups.empty()) return;
+
+    // ---- provenance + the measured error ---------------------------------
+    std::vector<std::vector<int>> members(groups.size()), outputs(groups.size());
+    for (size_t c = 0; c < raw.size(); ++c) {
+        if (raw[c].group < 0 || raw[c].group >= int(groups.size())) return;   // the header broke its contract
+        if (raw[c].refined >= int(groups.size())) return;
+        members[size_t(raw[c].group)].push_back(int(c));
+        if (raw[c].refined >= 0) outputs[size_t(raw[c].refined)].push_back(int(c));
+    }
+
+    // THE PROVENANCE IS OF VERTICES. `meshopt_simplify` never moves a vertex and
+    // never makes one, so at every depth a level-0 vertex is either KEPT (some
+    // cluster still uses it) or REMOVED, and a removed vertex stands under the
+    // cluster whose surface is nearest it. So each cluster carries the level-0
+    // vertices it stands for: its OWN vertices, plus every vertex its group
+    // removed — now or at any depth below — that is nearest its surface. A
+    // group's region is the union of its members'; the measurement below walks
+    // it, and hands every removed vertex on to exactly one output cluster.
+    //
+    // A KEPT vertex on a group border belongs to both sides and costs nothing
+    // (it is ON both surfaces); that is what keeps the measurement free of the
+    // STAIRCASE a triangle provenance has (measured and replaced: a level-0
+    // triangle given to the output nearest its centroid leaves level-0 triangles
+    // on the far side of every simplified border edge, which at the next depth
+    // read as deviation — the 20k sphere's depth-1 groups measured 0.011 against
+    // clusterlod's 0.0006, and the DAG could not coarsen below a quarter of the
+    // triangles until 1.4 % of the extent where the chain was at an eighth by
+    // 0.5 %; and a triangle given to the owner of a removed corner let a vertex
+    // on a thin feature name a cluster across the gap).
+    //
+    // `regionOwn` is the same walk with every vertex given to ONE cluster (a
+    // kept vertex to the first output using it): a PARTITION of level 0 at every
+    // depth, reported to the suites (a level-0 triangle belongs where its first
+    // corner does) so "exactly one cut covers every triangle" can be counted.
+    std::vector<std::vector<unsigned>> regionAll(raw.size()), regionOwn(raw.size());
+    std::vector<unsigned> vertexStamp(nv, 0u), ownStamp(nv, 0u);
+    unsigned stamp = 1;
+    const auto ownVertices = [&](size_t c, std::vector<unsigned> &out) {
+        ++stamp;
+        for (unsigned v : raw[c].indices)
+            if (vertexStamp[v] != stamp) { vertexStamp[v] = stamp; out.push_back(v); }
+    };
+    for (size_t c = 0; c < raw.size(); ++c) {
+        if (raw[c].refined != -1) continue;
+        ownVertices(c, regionAll[c]);
+        for (unsigned v : raw[c].indices)
+            if (!ownStamp[v]) { ownStamp[v] = 1; regionOwn[c].push_back(v); }
+    }
+    // Level-0 triangles by their first corner, for the area term and the stats.
+    std::vector<std::vector<unsigned>> trisByAnchor(nv);
+    for (size_t t = 0; t < baseTris; ++t) trisByAnchor[base[t * 3]].push_back(unsigned(t));
+
+    // The WHOLE level-0 surface, once: the simplified geometry is measured
+    // against it (the "did it add surface" direction needs no provenance).
+    Vec3 mlo = vertexOf(positions, posComps, base[0]), mhi = mlo;
+    for (unsigned v : base) {
+        const Vec3 p = vertexOf(positions, posComps, v);
+        mlo = Vec3(std::min(mlo.x(), p.x()), std::min(mlo.y(), p.y()), std::min(mlo.z(), p.z()));
+        mhi = Vec3(std::max(mhi.x(), p.x()), std::max(mhi.y(), p.y()), std::max(mhi.z(), p.z()));
+    }
+    surface::TriangleGrid baseGrid;
+    baseGrid.build(positions, posComps, base, mlo, mhi, lodchain::boundGridRes(baseTris));
+
+    const size_t samplesCap = baseTris > size_t(lodchain::kBoundBigTriangles)
+                                  ? size_t(lodchain::kBoundSamplesBig) : size_t(lodchain::kBoundSamples);
+    const float floorLen = extent > 0.0f ? extent * lodchain::kBoundFloorRel : 0.0f;
+
+    std::vector<float> measured(groups.size(), FLT_MAX);
+    int belowEstimate = 0;
+    std::vector<int> keptOwner(nv, -1), removedOwner(nv, -1);
+    std::vector<unsigned> inRegion(nv, 0u), keptStamp(nv, 0u);
+    std::vector<surface::Sample> pts;
+    for (size_t g = 0; g < groups.size(); ++g) {
+        if (groups[g].simplified.error == FLT_MAX || outputs[g].empty()) continue;   // terminal
+        const unsigned here = ++stamp;
+        // S: the group's simplified output, and who keeps which vertex.
+        std::vector<unsigned> simplifiedIdx, ownerOfTri;
+        for (int o : outputs[g]) {
+            const std::vector<unsigned> &idx = raw[size_t(o)].indices;
+            simplifiedIdx.insert(simplifiedIdx.end(), idx.begin(), idx.end());
+            ownerOfTri.insert(ownerOfTri.end(), idx.size() / 3, unsigned(o));
+            for (unsigned v : idx) if (keptStamp[v] != here) { keptStamp[v] = here; keptOwner[v] = o; }
+        }
+        // R: the level-0 vertices the members stand for.
+        std::vector<unsigned> regionV;
+        for (int m : members[g])
+            for (unsigned v : regionAll[size_t(m)])
+                if (inRegion[v] != here) { inRegion[v] = here; regionV.push_back(v); }
+        if (regionV.empty() || simplifiedIdx.empty()) continue;
+
+        // The grid over S spans the group, not the mesh: a group is a small patch
+        // of a large mesh, and a grid over the mesh's box would file the patch
+        // into a handful of cells and walk all of it per query.
+        Vec3 glo = vertexOf(positions, posComps, simplifiedIdx[0]), ghi = glo;
+        for (const std::vector<unsigned> *list : { &regionV, &simplifiedIdx })
+            for (unsigned v : *list) {
+                const Vec3 p = vertexOf(positions, posComps, v);
+                glo = Vec3(std::min(glo.x(), p.x()), std::min(glo.y(), p.y()), std::min(glo.z(), p.z()));
+                ghi = Vec3(std::max(ghi.x(), p.x()), std::max(ghi.y(), p.y()), std::max(ghi.z(), p.z()));
+            }
+        surface::TriangleGrid gridS;
+        gridS.build(positions, posComps, simplifiedIdx, glo, ghi,
+                    lodchain::boundGridRes(simplifiedIdx.size() / 3));
+
+        // THE MEASUREMENT, in the chain's three terms (`lodchain::twoSidedDistance`
+        // states why each exists), each on the side that needs no provenance or
+        // the provenance that has no staircase:
+        //   1. area samples of S against the WHOLE level-0 surface;
+        //   2. every REMOVED vertex of R against S, exactly — where the maximum of
+        //      the level-0 -> S direction lives (a kept vertex is on S: zero);
+        //   3. area samples of the level-0 facets that LOST ALL THREE corners here
+        //      or below against S — the facets between the removed vertices.
+        //      (Not every facet with a removed corner: a facet with a KEPT corner
+        //      can sit on a border, half under a neighbour's surface, and the
+        //      first cut of this term read that as 0.014 of deviation on the 20k
+        //      sphere where its vertices measured 0.001 — the staircase again.)
+        float worst = 0.0f;
+        const size_t sTris = simplifiedIdx.size() / 3;
+        if (surface::sample(positions, posComps, simplifiedIdx,
+                            std::clamp(sTris * 2u, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f)
+            for (const surface::Sample &sp : pts) {
+                const float d = baseGrid.closest(sp.pos);
+                if (std::isfinite(d)) worst = std::max(worst, d);
+            }
+        const float termS = worst;
+        for (unsigned v : regionV) {
+            removedOwner[v] = -1;
+            if (keptStamp[v] == here) continue;                 // KEPT: on S, distance 0
+            unsigned tri = 0u;
+            const float d = gridS.closest(vertexOf(positions, posComps, v), nullptr, nullptr, &tri);
+            if (std::isfinite(d)) worst = std::max(worst, d);
+            removedOwner[v] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);
+        }
+        const float termV = worst;
+        std::vector<unsigned> lostIdx;
+        for (unsigned v : regionV)
+            for (unsigned t : trisByAnchor[v]) {
+                const unsigned b = base[t * 3 + 1], c = base[t * 3 + 2];
+                if (inRegion[b] != here || inRegion[c] != here) continue;
+                if (keptStamp[v] == here || keptStamp[b] == here || keptStamp[c] == here) continue;
+                lostIdx.insert(lostIdx.end(), { v, b, c });
+            }
+        if (!lostIdx.empty() &&
+            surface::sample(positions, posComps, lostIdx,
+                            std::clamp(lostIdx.size() / 3, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f)
+            for (const surface::Sample &sp : pts) {
+                const float d = gridS.closest(sp.pos);
+                if (std::isfinite(d)) worst = std::max(worst, d);
+            }
+        measured[g] = std::max(worst * lodchain::kBoundMargin, floorLen);
+        if (measured[g] < groups[g].simplified.error) ++belowEstimate;
+        if (std::getenv("JAH_BAKE_DAG_TERMS"))
+            irisLog(QStringLiteral("dag terms: group %1 depth %2  R %3 verts  S %4 tris  S->L0 %5  "
+                                   "removed verts %6  lost facets %7  estimate %8")
+                        .arg(g).arg(groups[g].depth).arg(regionV.size()).arg(sTris)
+                        .arg(double(termS), 0, 'g', 4).arg(double(termV), 0, 'g', 4)
+                        .arg(double(worst), 0, 'g', 4).arg(double(groups[g].simplified.error), 0, 'g', 4));
+
+        // HAND ON: every output carries its own vertices plus the removed ones
+        // nearest it; the partition gives each kept vertex to its first user.
+        for (int o : outputs[g]) ownVertices(size_t(o), regionAll[size_t(o)]);
+        for (unsigned v : regionV)
+            if (removedOwner[v] >= 0) regionAll[size_t(removedOwner[v])].push_back(v);
+        for (int m : members[g])
+            for (unsigned v : regionOwn[size_t(m)]) {
+                const int o = keptStamp[v] == here ? keptOwner[v] : removedOwner[v];
+                if (o >= 0) regionOwn[size_t(o)].push_back(v);
+            }
+    }
+
+    // ---- the two monotonicities (children always have LOWER ids) ---------
+    MeshClusterDag dag;
+    dag.groups.resize(int(groups.size()));
+    int monotoneFixes = 0, sphereFixes = 0, terminal = 0, maxDepth = 0;
+    for (size_t g = 0; g < groups.size(); ++g) {
+        MeshClusterDag::Group &out = dag.groups[int(g)];
+        const clodGroup &src = groups[g];
+        out.depth = src.depth;
+        maxDepth = std::max(maxDepth, src.depth);
+        for (int k = 0; k < 3; ++k) out.centre[k] = src.simplified.center[k];
+        out.radius = src.simplified.radius;
+        out.estimate = src.simplified.error;
+        out.error = measured[g];
+        if (out.error == FLT_MAX) ++terminal;
+        for (int m : members[g]) {
+            const int child = raw[size_t(m)].refined;
+            if (child < 0) continue;
+            const MeshClusterDag::Group &cg = dag.groups[child];
+            if (out.error != FLT_MAX && out.error < cg.error) { out.error = cg.error; ++monotoneFixes; }
+            const float dx = out.centre[0] - cg.centre[0], dy = out.centre[1] - cg.centre[1],
+                        dz = out.centre[2] - cg.centre[2];
+            const float need = std::sqrt(dx * dx + dy * dy + dz * dz) + cg.radius;
+            if (out.radius < need) {
+                // Grown with a relative hair of slack so the float evaluation at
+                // the rule can never see the child poke out again.
+                out.radius = need * (1.0f + 1e-6f);
+                ++sphereFixes;
+            }
+        }
+    }
+
+    // ---- meshlet-local storage -------------------------------------------
+    dag.clusters.resize(int(raw.size()));
+    std::vector<unsigned> localVerts;
+    std::vector<unsigned char> localTris;
+    for (size_t c = 0; c < raw.size(); ++c) {
+        const std::vector<unsigned> &idx = raw[c].indices;
+        localVerts.assign(idx.size(), 0u);
+        localTris.assign(idx.size(), 0u);
+        const size_t unique = clodLocalIndices(localVerts.data(), localTris.data(), idx.data(), idx.size());
+        MeshClusterDag::Cluster &out = dag.clusters[int(c)];
+        out.vertexOffset = quint32(dag.vertices.size());
+        out.triangleOffset = quint32(dag.triangles.size() / 3);
+        out.vertexCount = quint16(unique);
+        out.triangleCount = quint16(idx.size() / 3);
+        out.group = raw[c].group;
+        out.refined = raw[c].refined;
+        for (int k = 0; k < 3; ++k) out.centre[k] = raw[c].bounds.center[k];
+        out.radius = raw[c].bounds.radius;
+        for (size_t i = 0; i < unique; ++i) dag.vertices.append(quint32(localVerts[i]));
+        dag.triangles.append(reinterpret_cast<const char *>(localTris.data()), int(idx.size()));
+    }
+    mesh->clusterDag = dag;
+    const auto t2 = std::chrono::steady_clock::now();
+
+    if (stats) {
+        stats->clusters = int(raw.size());
+        stats->groups = int(groups.size());
+        stats->depth = maxDepth + 1;
+        stats->terminalGroups = terminal;
+        stats->monotoneFixes = monotoneFixes;
+        stats->sphereFixes = sphereFixes;
+        stats->measuredBelowEstimate = belowEstimate;
+        stats->buildMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        stats->measureMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        if (stats->wantRegions) {
+            stats->clusterRegions.resize(int(raw.size()));
+            for (size_t c = 0; c < raw.size(); ++c) {
+                QVector<quint32> &out = stats->clusterRegions[int(c)];
+                for (unsigned v : regionOwn[c])
+                    for (unsigned t : trisByAnchor[v]) out.append(quint32(t));
+            }
+        }
+    }
+}
+
+QVector<float> shippedConfigRecord() { return configRecord(kShipped); }
+
+}   // namespace clusterdag
+
 
 }   // namespace
 
 void MeshBake::buildLodChain(const MeshPtr &mesh) { lodchain::build(mesh); }
+
+void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, ClusterDagVariant variant)
+{
+    clusterdag::build(mesh, stats, variant);
+}
+
+MeshBake::ClusterDagVariant MeshBake::shippedClusterDagVariant() { return clusterdag::kShipped; }
+
+const char *MeshBake::clusterDagVariantName(ClusterDagVariant variant)
+{
+    switch (clusterdag::resolve(variant)) {
+    case ClusterDagVariant::DefaultProtectUv:     return "default+protect-uv";
+    case ClusterDagVariant::DefaultProtectAll:    return "default+protect-nrm+uv";
+    case ClusterDagVariant::PermissiveCharged:    return "permissive-charged";
+    case ClusterDagVariant::RegularizedProtectUv: return "regularized+protect-uv";
+    case ClusterDagVariant::Strict:               return "strict(fallback-permissive)";
+    default:                                      return "?";
+    }
+}
 
 void MeshBake::buildCards(const MeshPtr &mesh, int maxCards) { cards::build(mesh, maxCards); }
 
@@ -2922,6 +3574,9 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
         // chain (its cell may not be finer than level 1's measured bound), so it
         // comes third and the order of all three lines is load-bearing.
         MeshBake::buildSdf(mesh);
+        // ATOM stage 2: the cluster DAG. Independent of the three above (it
+        // simplifies level 0 itself), so its place in the order is free.
+        MeshBake::buildClusterDag(mesh);
         model.meshes.append(mesh);
 
         const unsigned aiMatIndex = m->mMaterialIndex;
