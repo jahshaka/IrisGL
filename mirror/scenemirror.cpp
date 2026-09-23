@@ -5290,6 +5290,48 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
         d.halfDepth = c.halfDepth;
         out.cards.push_back(d);
     }
+
+    // ATOM stage 2: the CLUSTER DAG, EXPANDED. The bake stores it meshlet-local
+    // (8-bit triangle corners into a per-cluster vertex slice — the on-disk
+    // shape); the engine wants ONE global index stream in which a cluster is a
+    // contiguous range, because that is what an indexed draw of a cluster (a
+    // `setPrimitiveRange`, or stage 3's indirect command with its firstIndex)
+    // reads — an index buffer cannot hold an 8-bit local index plus a base. The
+    // V flip above moves no vertex, so nothing is remapped. A DAG that is
+    // malformed here (it cannot be: the bake's reader refuses one) is dropped
+    // whole rather than handed across half-described.
+    const iris::MeshClusterDag &dag = mesh->clusterDag;
+    if (!dag.isEmpty()) {
+        out.clusterIndices.reserve(size_t(dag.triangleCount()) * 3u);
+        out.clusters.reserve(size_t(dag.clusters.size()));
+        bool ok = true;
+        for (const iris::MeshClusterDag::Cluster &c : dag.clusters) {
+            jahshaka::engine::MeshCluster e;
+            e.firstIndex = unsigned(out.clusterIndices.size());
+            e.indexCount = unsigned(c.triangleCount) * 3u;
+            e.group = c.group;
+            e.refined = c.refined;
+            for (int k = 0; k < 3; ++k) e.centre[k] = c.centre[k];
+            e.radius = c.radius;
+            for (int t = 0; t < int(c.triangleCount) && ok; ++t)
+                for (int k = 0; k < 3; ++k) {
+                    const quint32 v = dag.vertexOf(c, t, k);
+                    if (size_t(v) >= nv) { ok = false; break; }
+                    out.clusterIndices.push_back(unsigned(v));
+                }
+            out.clusters.push_back(e);
+        }
+        for (const iris::MeshClusterDag::Group &g : dag.groups) {
+            jahshaka::engine::MeshClusterGroup e;
+            e.depth = g.depth;
+            for (int k = 0; k < 3; ++k) e.centre[k] = g.centre[k];
+            e.radius = g.radius;
+            e.error = g.error;
+            e.estimate = g.estimate;
+            out.clusterGroups.push_back(e);
+        }
+        if (!ok) { out.clusterIndices.clear(); out.clusters.clear(); out.clusterGroups.clear(); }
+    }
     return out.indices.size() >= 3;
 }
 

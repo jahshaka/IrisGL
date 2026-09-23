@@ -2701,6 +2701,17 @@ void retainSharedTexture(Ogre::TextureGpu *tex);
 bool releaseSharedTexture(Ogre::TextureGpu *tex);
 void resetSharedTextures();
 
+/// Returns an index buffer that belongs to no VAO to the VaoManager that made it
+/// (MeshRec::clusterStream). At namespace scope, not nested in the record: a
+/// nested deleter is not yet default-constructible where the record's own
+/// implicit constructor is formed.
+struct IndexBufferRelease {
+    Ogre::VaoManager *vaoManager;
+    IndexBufferRelease() : vaoManager(nullptr) {}
+    explicit IndexBufferRelease(Ogre::VaoManager *m) : vaoManager(m) {}
+    void operator()(Ogre::IndexBufferPacked *b) const;
+};
+
 class OgreScene final : public Scene {
 public:
     OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
@@ -2944,6 +2955,18 @@ public:
     void  objectLods(std::vector<ObjectLodDesc> &out) const override;
     bool  meshVaoShape(MeshId mesh, unsigned &levels,
                        unsigned &shadowIndependent) const override;
+    /// ATOM stage 2: a mesh's CLUSTER STREAM and the DAG tables it indexes, as
+    /// the engine holds them (MeshRec::clusterStream). ENGINE-PRIVATE, not on the
+    /// Scene interface: its consumer is stage 3's cut, and until then the cluster
+    /// suites' harness (tests/atom/cluster_draw.*) reads it to prove the upload.
+    /// False for an unknown mesh; `stream` null for a mesh with no DAG.
+    struct ClusterStreamView {
+        Ogre::Mesh *mesh = nullptr;
+        Ogre::IndexBufferPacked *stream = nullptr;
+        const std::vector<MeshCluster> *clusters = nullptr;
+        const std::vector<MeshClusterGroup> *groups = nullptr;
+    };
+    bool clusterStreamOf(MeshId mesh, ClusterStreamView &out) const;
     /// Writes `errors` (level 1 first, a length in mesh units each) into
     /// `mesh`'s LOD value array at the current bias. Patch 0059 added the
     /// setter this needs.
@@ -3749,6 +3772,21 @@ private:
         /// map is now an INDEX to this record (`mMeshIdByOgreMesh`) and the data
         /// lives here alone.
         std::vector<float> lodBounds;
+        /// ATOM stage 2: the mesh's CLUSTER STREAM — every cluster of its DAG,
+        /// triangles concatenated in cluster order (`MeshData::clusterIndices`),
+        /// one IMMUTABLE index buffer over the SAME vertex buffer as the levels,
+        /// in the SAME index type as level 0, so a cluster is the contiguous
+        /// range [firstIndex, firstIndex + indexCount) of it. Bound to no VAO and
+        /// drawn by nothing in the product yet: it is stage 3's input (its GPU
+        /// cut issues one indexed draw per cluster range), uploaded now so the
+        /// cut has a stream to name. Null for a mesh with no DAG. Owned here:
+        /// the deleter returns it to the VaoManager when the record dies (every
+        /// record dies with its scene, before Root).
+        std::unique_ptr<Ogre::IndexBufferPacked, IndexBufferRelease> clusterStream;
+        /// The DAG's tables, kept beside the stream they index (stage 3 uploads
+        /// them to the GPU; a suite reads them to check the stream).
+        std::vector<MeshCluster>      clusters;
+        std::vector<MeshClusterGroup> clusterGroups;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),
@@ -4045,8 +4083,11 @@ private:
     /// 32-bit indices. v1 meshes silently render nothing on Vulkan, so only this path
     /// exists. Every mesh carries tangents: HlmsPbs refuses to render a normal-mapped
     /// datablock on a mesh without them (throws, object falls back to flat grey).
+    /// `clusterStreamOut` receives the mesh's CLUSTER STREAM (MeshRec::clusterStream)
+    /// when the data carries a DAG and the mesh is static; null otherwise.
     Ogre::MeshPtr buildMeshV2(const std::string &name, const MeshData &data,
-                              std::vector<float> *interleavedOut = nullptr);
+                              std::vector<float> *interleavedOut = nullptr,
+                              Ogre::IndexBufferPacked **clusterStreamOut = nullptr);
     /// The six WORLD-axis faces (+X,-X,+Y,-Y,+Z,-Z, seen from inside) as ONE Ogre
     /// cubemap. Ogre samples cubemaps LEFT-handed — HlmsPbs negates the view
     /// matrix' Z column ("Cubemaps are left-handed", OgreHlmsPbs.cpp:2327) and
