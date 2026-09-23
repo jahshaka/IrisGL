@@ -342,15 +342,22 @@ static const Ogre::uint8 kIfdIrradRes  = 6u;
 // at 1.52x, integration after integration; the old kIfdRaysPerPixel = 2 paid twice
 // the rays for another aliasing. gi.field_thin_wall, gi.field_alias.)
 //
-// THE TARGET, DERIVED: K = ceil((sigma / 0.05)^2), sigma the relative standard
-// deviation of ONE integration where the field is hardest - a source of about one
-// ray's solid angle (gi.field_alias's one-voxel wall: 0.33 / 0.35 / 0.33 at its three
-// offsets on the GPU, 0.38-0.41 simulated) - so the converged mean's standard error
-// is 5 % there: sigma 0.40 -> 64. An ordinary lit room's probes read 2 % (median) per
-// integration, so everywhere else the field is converged long before K. The cost is
-// time, not frames: K whole-grid passes at the update budget after an event (about
-// 8 K frames at budget 1), a pass skipping every probe already at K.
-static const Ogre::uint32 kIfdTargetSamples = 64u;
+// THE TARGET, DERIVED FROM THE STORE THE RAYS READ: the estimator need not be more
+// precise than what it integrates. The field's hardest case - a source of about one
+// ray's solid angle, gi.field_thin_wall's one-voxel wall - is uncertain THROUGH THE
+// STORE by the trilinear half-cell at its envelope's edge: 1 - ((n-1)/n)^2 = 0.160 of
+// its irradiance at n = 12 cells. K is the smallest sample count whose two-sigma
+// error sits inside that: K = ceil((2 sigma / 0.160)^2) with sigma = 0.40, one
+// integration's relative standard deviation there (0.33-0.35 measured on the GPU,
+// 0.38-0.41 simulated) -> 25. (A 5 % target would be 64: 2.5x the refinement for a
+// precision the store cannot show.) An ordinary lit room's probes read 2 % (median)
+// per integration, so everywhere else the field is converged long before K. The
+// cost is time, not frames: K whole-grid passes at the update budget after an event
+// (about 8 K = 200 frames at budget 1), a pass skipping every probe already at K.
+// Every event's own pass - a build's included - is the first sample everywhere
+// (unbiased, every probe valid); a PAUSED field (budget 0) refines nothing and
+// stays at that sample.
+static const Ogre::uint32 kIfdTargetSamples = 25u;
 // A LIGHT CHANGE REPLACES (keep 0): the history integrated the OLD light, so the
 // first integration after a change is the probe's value - the latency of the old
 // re-converge (one pass) - and the refinements then average the new light. What the
@@ -370,23 +377,6 @@ static const Ogre::uint32 kIfdKeepOnChange  = 0u;
 // the batch is rounded UP to a power of two so it always divides the field.
 static const Ogre::uint32 kIfdConvergeFrames = 8u;
 
-// THE FIELD'S REFINEMENTS, RUN NOW (PHOTON-FIELD-ROTATE-1): every whole-grid
-// refinement the field owes after its current work, each in one dispatch. The
-// paused budget's arm of every event (nothing progressive would ever run them); a
-// refinement skips the probes that already hold the target, so after a scroll only
-// the entered planes cost anything.
-static void ifdRefineInline(Ogre::IrradianceField *ifd, Ogre::uint32 totalProbes,
-                            Ogre::RenderSystem *rs)
-{
-    if (!ifd || !ifd->isWorkDone() || !ifd->getRefinesOwed()) return;
-    monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "ifd.refine.inline", rs);
-    unsigned passes = 0;
-    while (ifd->beginOwedRefinement()) {
-        ifd->update(totalProbes);
-        ++passes;
-    }
-    work.setUnits(passes);
-}
 
 
 /// How far this probe's fitted SHAPE reaches past its own AREA (its share of
@@ -933,7 +923,6 @@ void OgreScene::reintegrateFieldAfterInjection() {
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
-            ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
         }
     }}
 
@@ -6477,8 +6466,14 @@ void OgreScene::buildIrradianceField() {
         // over the PREVIOUS converged atlas and so has nothing ugly to show.
         mIfd->update(mIfdTotalProbes);
         mIfdProbesDone = mIfdTotalProbes;
-        // ...and at a PAUSED budget the refinements too (nothing would ever run them).
-        if (!mIfdProbesPerFrame) ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
+        // THE FIRST SAMPLE, NOT THE MEAN (PHOTON-FIELD-ROTATE-1). The field is a mean
+        // over rotated integrations now: this pass is its first sample everywhere -
+        // unbiased, every probe valid, so "bound" is still a whole field - and the
+        // kIfdTargetSamples - 1 refinements it owes run at the update budget
+        // (updateIrradianceField; GiStatus::ifdRefinesOwed reaches 0 when the field
+        // has CONVERGED and stops). Paying them here was measured: 64 passes inline
+        // blocked a new project's thumbnail build for 1.8 s at Epic
+        // (threading.newproject_stall).
 
         // Our two scalars, and the two probe counts the shader's sky-visibility
         // threshold needs but upstream's own IrradianceField block does not
@@ -6700,7 +6695,8 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
         // Until a probe's first integration the pixel's reader gives it no weight,
         // and a cage with no valid probe hands its pixel to the cone term (the
         // reader's fallback, JahIfd_piece_ps.any) - never the old placement's
-        // values, which describe another place. A PAUSED budget converges inline.
+        // values, which describe another place. A PAUSED budget integrates the whole
+        // placement inline (one sample a probe; a paused field refines nothing).
         mIfd->setFieldVolume(origin, size);
         mIfdVolumeOrigin = origin;
         mIfdVolumeSize   = size;
@@ -6716,7 +6712,6 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
-            ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
         }
     } JAH_CATCH(mError, );
 }
@@ -6754,7 +6749,6 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
-            ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
         }
         return true;
     }
@@ -6777,7 +6771,6 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
             mIfdProbesDone = mIfdTotalProbes;
             work.setUnits(mIfdTotalProbes);
         }
-        if (!mIfdProbesPerFrame) ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
         return true;
     }
     // A whole re-integration still running (a settle's, a light's) is restarted
@@ -6803,9 +6796,8 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
         mIfdProbesDone = 0u;
     } else {
         mIfdProbesDone = mIfdTotalProbes;
-        // The entered planes' refinements (the kept probes hold the target and a
-        // refinement skips them): progressive at the budget, inline when paused.
-        if (!mIfdProbesPerFrame) ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
+        // The entered planes' refinements run at the budget (the kept probes that
+        // hold the target are skipped); a paused field refines nothing.
     }
     return true;
 }
