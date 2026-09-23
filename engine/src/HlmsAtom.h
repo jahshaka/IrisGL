@@ -1,0 +1,233 @@
+// HLMS ATOM — the visibility buffer's material decode, a DERIVED HlmsPbs on Ogre's
+// own Terra pattern (SPECS/atom/D1_HLMS_ATOM_AND_VISBUF_DESIGN.md §0/§1; the
+// stage-0 proof: spikes/atom-stage0/FINDINGS.md §2).
+//
+// WHAT IT IS. A second Hlms whose pixel shader INSERTS PBS's own pieces, so the
+// lighting exists ONCE: every piece PBS includes — Ogre's and Photon's (the voxel
+// cones, the irradiance field, the gather's read, the environment) — is a library
+// of this Hlms too, and a lighting term that lands later as a piece reaches both
+// hosts by construction. What it replaces is EXACTLY ONE upstream piece,
+// `LoadMaterial` (the material index comes from the id buffer, not from a per-draw
+// flat interpolant), plus `DeclareObjLightMask` under the fine-light-mask property
+// (the same fact for the light mask, FINDINGS Q2). Upstream's `DefaultBodyPS` runs
+// unchanged over a LOCAL `inPs` the decode prologue fills.
+//
+// WHAT A DECODE DRAW IS. One full-screen triangle (`AtomDecodeRenderable`) whose
+// datablock is a DECODE TWIN of a PBS datablock (`decodeTwinFor`): the twin carries
+// the PBS datablock's textures and flags, so it generates the same shader
+// permutation and binds the same texture descriptor set, and HlmsAtom binds the PBS
+// datablock's CONST-BUFFER POOL in place of the twin's own — so the id buffer's
+// material word (`GpuInstance::raster[0]`, {pool:16 | slot:16} of the PBS
+// datablock) addresses the PBS material directly. A pixel whose material is not
+// one this twin serves is discarded (the bucket table), so one twin = one decode
+// pass = one BUCKET (FINDINGS Q1: a bucket is one shader permutation x one texture
+// descriptor set; this lane makes one twin per PBS datablock — merging the
+// datablocks of one bucket into one twin is the S3-DRAW optimisation).
+//
+// WHAT IT IS TOLD. Everything PBS is told, through `tellEveryHlms` (OgreEngine.cpp)
+// — never a setter of its own that could disagree with PBS's.
+//
+// NOTHING IN THE PRODUCT DRAWS THROUGH IT YET (S3-DRAW binds it to the id pass);
+// its consumer is `engine.atom_parity`, over a hand-made id buffer.
+//
+// Ogre-private: included only by the engine's Ogre TUs and by tests that reach
+// past the public API (tests/atom).
+#ifndef JAHSHAKA_ENGINE_HLMSATOM_H
+#define JAHSHAKA_ENGINE_HLMSATOM_H
+
+#include <OgreHlmsPbs.h>
+#include <OgreMovableObject.h>
+#include <OgreRenderable.h>
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace Ogre {
+class HlmsManager;
+class HlmsPbsDatablock;
+class HlmsSamplerblock;
+class ReadOnlyBufferPacked;
+class TextureGpu;
+class UavBufferPacked;
+}  // namespace Ogre
+
+namespace jahshaka {
+namespace engine {
+namespace detail {
+
+/// THE ONE FUNCTION every PBS-family host is told through (D1 §1; OgreEngine.cpp).
+/// PBS is the source of truth — every engine site tells HlmsPbs — and this copies
+/// what PBS holds onto every other PBS-family host: at registration (`force`) and
+/// once per frame before a host's first read (HlmsAtom's analyzeBarriers /
+/// preparePassHash). Nothing is left unrelayed at this pin.
+void tellEveryHlms(Ogre::HlmsManager *manager, bool force = false);
+
+/// The registered HlmsAtom's forgetDecodeTwinOf — a no-op before registration, after
+/// Root, or for a datablock that is not PBS's. The one call every PBS-datablock
+/// destruction site makes (OgreMaterials.cpp, OgreScene.cpp).
+void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs);
+
+/// The id image's two words (R32G32_UINT), the contract between whatever WRITES the
+/// id buffer (the hand-made one of engine.atom_parity today, S3-DRAW's id pass
+/// tomorrow) and the decode:
+///   x = the GPU scene's ITEM SLOT (bits 0-23) | the mesh LEVEL (bits 24-26);
+///       0xFFFFFFFF = nothing covers this pixel
+///   y = the TRIANGLE, counted from the first index of (that level, submesh 0)'s
+///       range (`GpuMeshLevel::firstIndex`)
+/// Submesh 0 only, like the voxel gather: every mesh the engine bakes has one.
+struct AtomId {
+    static constexpr uint32_t kEmpty = 0xFFFFFFFFu;
+    static constexpr uint32_t kSlotBits = 24u;
+    static constexpr uint32_t kSlotMask = (1u << kSlotBits) - 1u;
+    static constexpr uint32_t kLevelMask = 0x7u;
+    static uint32_t pack(uint32_t slot, uint32_t level) {
+        return (slot & kSlotMask) | ((level & kLevelMask) << kSlotBits);
+    }
+};
+
+class HlmsAtom final : public Ogre::HlmsPbs {
+public:
+    static constexpr Ogre::HlmsTypes kType = Ogre::HLMS_USER0;
+    static const char *const kTypeName;  ///< "Atom"
+
+    HlmsAtom(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders);
+    ~HlmsAtom() override;
+
+    /// PBS's library list, then the engine's own pieces (Hlms/Jahshaka, at the SAME
+    /// position the engine gives them on PBS), then Hlms/Atom/Any; the data folder is
+    /// Hlms/Atom/<syntax>. Terra's getDefaultPaths, with our folder last.
+    static void getDefaultPaths(Ogre::String &outDataFolderPath,
+                                Ogre::StringVector &outLibraryFoldersPaths);
+
+    /// What the decode reads, set by whoever records the decode pass, immediately
+    /// before it (the GPU scene's tables are RE-CREATED when they grow — never cache
+    /// them across an attach, DOCS/traps/ENGINE.md). Null members decode nothing.
+    struct DecodeSource {
+        Ogre::TextureGpu *ids = nullptr;              ///< R32G32_UINT, the AtomId words
+        Ogre::UavBufferPacked *instances = nullptr;   ///< GpuScene::instanceBuffer()
+        Ogre::UavBufferPacked *levels = nullptr;      ///< GpuScene::levelBuffer()
+        Ogre::UavBufferPacked *geomRows = nullptr;    ///< GpuScene::geomBuffer()
+    };
+    void setDecodeSource(const DecodeSource &src);
+    const DecodeSource &decodeSource() const { return mSource; }
+    /// Decode draws recorded with NO source set (every member null or some) — each
+    /// such draw binds the host's own EMPTY stand-ins (an id image that names nothing,
+    /// zero-length tables), so it shades no pixel instead of dereferencing whatever a
+    /// previous pass left in those slots. Counted, and logged once with the camera.
+    unsigned long long sourcelessDraws() const { return mSourcelessDraws; }
+
+    /// THE DECODE TWIN of a PBS datablock: created on first request (a JSON round
+    /// trip through Ogre's own serialiser, so every permutation-relevant field —
+    /// textures, samplers, workflow, BRDF, maps, uv sets — is Ogre's copy, not a
+    /// list of ours), its macroblock replaced by the decode's (no depth test or
+    /// write, CULL_NONE: a full-screen triangle's winding is not the scene's —
+    /// FINDINGS §2.4 (3)). Returns null when `pbs` is not a PBS datablock or the
+    /// round trip fails (`err` says why). Idempotent. A datablock with a
+    /// per-datablock custom piece is refused: the JSON cannot carry it, and such a
+    /// material stays on stock HlmsPbs (D1 §1's front-end list).
+    Ogre::HlmsPbsDatablock *decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std::string &err);
+    /// Destroys every twin (and the bucket table). Called before the PBS datablocks
+    /// they point at can die.
+    void destroyDecodeTwins();
+    /// A PBS DATABLOCK IS DYING: its twin (if any) dies with it, BEFORE it — a twin
+    /// keeps the PBS datablock's pointer (fillBuffersForV2 binds its pool) and the
+    /// twin map is keyed by it, so a recycled address would find a stale twin. Every
+    /// engine site that destroys a PBS datablock calls `forgetDecodeTwinOf` first.
+    void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs);
+    size_t decodeTwinCount() const { return mTwins.size(); }
+
+    /// THE MATERIAL WORD of a PBS datablock: {pool index : 16 | slot : 16} in HlmsPbs's
+    /// const-buffer pool — what `GpuInstance::raster[0]` carries and what the decode's
+    /// LoadMaterial indexes. 0xFFFFFFFF for anything that is not a PBS datablock.
+    static uint32_t materialWordOf(const Ogre::HlmsDatablock *pbs);
+    static constexpr uint32_t kNoMaterialWord = 0xFFFFFFFFu;
+
+    Ogre::uint32 fillBuffersForV2(const Ogre::HlmsCache *cache,
+                                  const Ogre::QueuedRenderable &queuedRenderable, bool casterPass,
+                                  Ogre::uint32 lastCacheHash,
+                                  Ogre::CommandBuffer *commandBuffer) override;
+    void analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
+                         Ogre::ResourceTransitionArray &resourceTransitions,
+                         Ogre::Camera *renderingCamera, const bool bCasterPass) override;
+    Ogre::HlmsCache preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
+                                    bool dualParaboloid, Ogre::SceneManager *sceneManager) override;
+    /// PBS's half reads pass state only its preparePassHash sets (the prepass MSAA
+    /// depth texture, which HlmsPbs's constructor leaves UNINITIALISED — measured: a
+    /// crash under the validation layer's heap once the pass was skipped). A pass this
+    /// host skipped runs only the buffer manager's half.
+    void postCommandBufferExecution(Ogre::CommandBuffer *commandBuffer) override;
+
+    /// Registers of the reserved read-only buffers (mReservedTexBufferSlots): PBS's
+    /// worldMatBuf is slot 0, then ours.
+    static constexpr Ogre::uint8 kInstanceBufSlot = 1u;
+    static constexpr Ogre::uint8 kLevelBufSlot = 2u;
+    static constexpr Ogre::uint8 kGeomRowBufSlot = 3u;
+    static constexpr Ogre::uint8 kBucketBufSlot = 4u;
+    static constexpr Ogre::uint8 kReservedBufSlots = 5u;
+
+protected:
+    Ogre::Hlms::PropertiesMergeStatus notifyPropertiesMergedPreGenerationStep(
+        size_t tid, Ogre::PiecesMap *inOutPieces) override;
+    void setupRootLayout(Ogre::RootLayout &rootLayout, size_t tid) override;
+
+private:
+    void uploadBucketTable();
+
+    void ensureStandIns();
+
+    DecodeSource mSource;
+    const Ogre::HlmsSamplerblock *mPointSampler = nullptr;
+    /// The stand-ins a sourceless draw binds (see sourcelessDraws).
+    Ogre::TextureGpu *mEmptyIds = nullptr;
+    Ogre::ReadOnlyBufferPacked *mEmptyBuf = nullptr;
+    unsigned long long mSourcelessDraws = 0ull;
+    /// The last pass's preparePassHash was skipped (no twins): PBS's pass state is
+    /// not this pass's.
+    bool mPassSkipped = true;
+
+    struct Twin {
+        Ogre::HlmsPbsDatablock *pbs = nullptr;
+        Ogre::HlmsPbsDatablock *twin = nullptr;
+        uint32_t pbsWord = kNoMaterialWord;
+    };
+    /// Keyed by the TWIN (what a draw carries).
+    std::unordered_map<const Ogre::HlmsDatablock *, Twin> mTwins;
+    std::unordered_map<const Ogre::HlmsDatablock *, Ogre::HlmsPbsDatablock *> mTwinOfPbs;
+    /// THE BUCKET TABLE: for each PBS material word (pool * slotsPerPool + slot),
+    /// 1 + the twin's slot in THIS Hlms's pool, 0 = no twin. The decode discards a
+    /// pixel whose entry is not its own draw's twin slot + 1.
+    Ogre::ReadOnlyBufferPacked *mBucketBuf = nullptr;
+    std::vector<uint32_t> mBucketMirror;
+    bool mBucketDirty = true;
+    uint32_t mTwinSerial = 0u;
+};
+
+/// ONE FULL-SCREEN TRIANGLE drawn through Ogre's own RenderQueue (Ogre's
+/// Samples/2.0/ApiUsage/CustomRenderable is the template), so `preparePassHash` has
+/// bound the pass buffer, the lights, the shadow atlas and the Forward Clustered grid
+/// for it by the time it draws. Its streams exist so HlmsAtom derives the same vertex
+/// properties (hlms_normal, hlms_tangent4, hlms_uv_count) the geometry it decodes has;
+/// the vertex shader consumes every one of them.
+class AtomDecodeRenderable final : public Ogre::MovableObject, public Ogre::Renderable {
+public:
+    AtomDecodeRenderable(Ogre::IdType id, Ogre::ObjectMemoryManager *objectMemoryManager,
+                         Ogre::SceneManager *manager, Ogre::uint8 renderQueueId);
+    ~AtomDecodeRenderable() override;
+
+    const Ogre::String &getMovableType() const override;
+    const Ogre::LightList &getLights() const override;
+    void getRenderOperation(Ogre::v1::RenderOperation &op, bool casterPass) override;
+    void getWorldTransforms(Ogre::Matrix4 *xform) const override;
+    bool getCastsShadows() const override;
+
+private:
+    Ogre::VertexArrayObject *mVao = nullptr;
+};
+
+}  // namespace detail
+}  // namespace engine
+}  // namespace jahshaka
+
+#endif  // JAHSHAKA_ENGINE_HLMSATOM_H

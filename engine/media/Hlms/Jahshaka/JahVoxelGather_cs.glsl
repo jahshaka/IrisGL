@@ -38,7 +38,7 @@ struct GpuInstance
 	vec4  boundsMin;    // xyz world AABB min; w = the mesh table index, bit-cast
 	vec4  boundsMax;    // xyz world AABB max; w = the flags word, bit-cast
 	uvec4 ids;          // y = the material word (pool, slot)
-	uvec4 pad;
+	uvec4 raster;       // x = the PBS material word, y = the tangent byte offset (GpuScene.h)
 };
 
 struct GpuMesh

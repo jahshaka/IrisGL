@@ -6645,6 +6645,14 @@ struct GpuSceneEntry {
     /// this instance's NEAR bottom-level structure is built from at its
     /// current distance. 0 until a camera has been seen.
     unsigned rayLevel = 0u;
+    /// THE PBS MATERIAL WORD (`GpuInstance.raster.x`, ATOM-S3-PARITY): {pool : 16 |
+    /// slot : 16} of the item's material in the PBS const-buffer pool — what the
+    /// visibility-buffer decode indexes materials with. 0xFFFFFFFF when the item's
+    /// material is not a PBS one.
+    unsigned pbsMaterialWord = 0xFFFFFFFFu;
+    /// The byte offset of the item mesh's float4 tangent in its vertex
+    /// (`GpuInstance.raster.y`), 0xFFFFFFFF when it has none.
+    unsigned tangentOffset = 0xFFFFFFFFu;
 };
 
 /// WHAT THE TABLES HOLD AND WHAT KEEPING THEM COSTS. Every count is cumulative

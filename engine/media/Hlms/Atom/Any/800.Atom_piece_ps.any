@@ -1,0 +1,453 @@
+// HLMS ATOM - THE DECODE (irisgl/engine/src/HlmsAtom.h; SPECS/atom/D1 section 1).
+//
+// CAUTION, the trap this tree has paid for three times: the Hlms parser reads its
+// directives INSIDE comments, every kind. No at-sign appears in any comment in this
+// file; every directive is named in words.
+//
+// What is here:
+//   AtomDeclDecode      the id image, the GPU scene's tables, the geometry reader,
+//                       the struct that stands in for the vertex-to-pixel block and
+//                       the stable barycentric evaluation.
+//   AtomDecodePrologue  one pixel's (item slot, level, triangle) turned into the
+//                       interpolants the rasteriser would have produced for it.
+//   LoadMaterial        REPLACED: the material is the id buffer's, not the draw's.
+//   DeclareObjLightMask REPLACED under the fine-light-mask property, same reason.
+//
+// What is NOT here is the point: every lighting piece - Ogre's and the engine's
+// (the voxel cones, the irradiance field, the gather, the environment) - is PBS's,
+// inserted unchanged through upstream's DefaultBodyPS, because every one of them
+// reads its inputs through the structure named inPs, which this file supplies as an
+// ordinary local variable.
+
+@piece( AtomDeclDecode )
+	// Upstream's matrix unpackers are inserted by the vertex header only. They are
+	// plain macros; inserting the same two pieces here keeps the unpacking upstream's.
+	@insertpiece( Common_Matrix_DeclLoadOgreFloat4x3 )
+	@insertpiece( Common_Matrix_DeclUnpackMatrix4x4 )
+
+	// THE ID IMAGE (R32G32_UINT): x = item slot, bits 0-23, and the level, bits
+	// 24-26; y = the triangle within that level's index range (HlmsAtom.h, AtomId).
+	vulkan_layout( ogre_t@value(atomIdTex) ) uniform utexture2D atomIdTex;
+
+	// THE GPU SCENE'S TABLES, read-only views of the engine's own buffers
+	// (irisgl/engine/src/GpuScene.h is the contract for every stride below).
+	//   instances: 10 uint4 per GpuInstance (world 0-2, prevWorld 3-5, boundsMin 6
+	//              with the mesh index in w, boundsMax 7 with the flags in w, ids 8,
+	//              raster 9 = the PBS material word, the tangent byte offset)
+	//   levels:    2 uint4 per GpuMeshLevel (firstIndex, indexCount, bound, geomRow)
+	//   geomRows:  3 uint4 per geometry row (Ogre's VctVoxelizer GeometryRow)
+	//   buckets:   1 uint per PBS (pool, slot) - 1 + the twin slot that serves it
+	ReadOnlyBufferU( @value(atomInstanceBuf), uint4, atomInstances );
+	ReadOnlyBufferU( @value(atomLevelBuf), uint4, atomLevels );
+	ReadOnlyBufferU( @value(atomGeomRowBuf), uint4, atomGeomRows );
+	ReadOnlyBufferU( @value(atomBucketBuf), uint, atomBuckets );
+
+	// THE GEOMETRY, READ WHERE THE RASTER KEEPS IT: the vertex and index buffers the
+	// engine draws, through the device addresses of the GPU scene's geometry rows
+	// (the uvec2 reference form: shaderInt64 is not an enabled device feature). The
+	// same reads as Ogre's VoxelGeometry piece for the voxeliser, which is a compute
+	// piece and not insertable into a pixel shader; the ROW FORMAT is Ogre's.
+	layout( buffer_reference, std430, buffer_reference_align = 4 ) readonly buffer AtomFloatRef
+	{
+		float v[];
+	};
+	layout( buffer_reference, std430, buffer_reference_align = 4 ) readonly buffer AtomUintRef
+	{
+		uint v[];
+	};
+	#define ATOM_GEOM_INDEX32 0x0001u
+	#define ATOM_GEOM_NORMAL_MASK 0x0070u
+	#define ATOM_GEOM_NORMAL_FLOAT3 0x0010u
+	#define ATOM_GEOM_UV_MASK 0x0700u
+	#define ATOM_GEOM_UV_FLOAT2 0x0100u
+	#define ATOM_GEOM_UV_HALF2 0x0200u
+	#define ATOM_NO_OFFSET 0xFFFFFFFFu
+
+	uint atomIndex( uint4 addr, uint4 lay1, uint element )
+	{
+		uint e = element + lay1.y;
+		AtomUintRef idx = AtomUintRef( addr.zw );
+		if( ( lay1.x & ATOM_GEOM_INDEX32 ) != 0u )
+			return idx.v[e];
+		uint packed = idx.v[e >> 1u];
+		return ( ( e & 0x01u ) != 0u ) ? ( packed >> 16u ) : ( packed & 0xFFFFu );
+	}
+	float4 atomLanes4( uint4 addr, uint4 lay0, uint vertexIdx, uint byteOffset )
+	{
+		AtomFloatRef f = AtomFloatRef( addr.xy );
+		uint lane = ( vertexIdx * lay0.x + byteOffset ) >> 2u;
+		return float4( f.v[lane], f.v[lane + 1u], f.v[lane + 2u], f.v[lane + 3u] );
+	}
+	float3 atomLanes3( uint4 addr, uint4 lay0, uint vertexIdx, uint byteOffset )
+	{
+		AtomFloatRef f = AtomFloatRef( addr.xy );
+		uint lane = ( vertexIdx * lay0.x + byteOffset ) >> 2u;
+		return float3( f.v[lane], f.v[lane + 1u], f.v[lane + 2u] );
+	}
+	float2 atomUv( uint4 addr, uint4 lay0, uint4 lay1, uint vertexIdx )
+	{
+		uint fmt = lay1.x & ATOM_GEOM_UV_MASK;
+		uint lane = ( vertexIdx * lay0.x + lay0.w ) >> 2u;
+		if( fmt == ATOM_GEOM_UV_FLOAT2 )
+		{
+			AtomFloatRef f = AtomFloatRef( addr.xy );
+			return float2( f.v[lane], f.v[lane + 1u] );
+		}
+		if( fmt == ATOM_GEOM_UV_HALF2 )
+		{
+			AtomUintRef u = AtomUintRef( addr.xy );
+			return unpackHalf2x16( u.v[lane] );
+		}
+		return float2( 0.0, 0.0 );
+	}
+
+	// THE INTERPOLANT BLOCK AS A STRUCT. Upstream's own piece, with the two
+	// interpolation macros pointed at a plain declaration for its duration - a struct
+	// member cannot carry the flat qualifier. Nothing is retyped: the member list is
+	// upstream's, so it cannot drift from what the pieces read.
+	#undef INTERPOLANT
+	#undef FLAT_INTERPOLANT
+	#define INTERPOLANT( decl, bindingPoint ) decl
+	#define FLAT_INTERPOLANT( decl, bindingPoint ) decl
+	struct AtomPsIn
+	{
+	@insertpiece( VStoPS_block )
+	};
+	#undef INTERPOLANT
+	#undef FLAT_INTERPOLANT
+	#define INTERPOLANT( decl, bindingPoint ) decl
+	#define FLAT_INTERPOLANT( decl, bindingPoint ) flat decl
+
+	// Upstream's normal adjugates live in the VERTEX header and are not reachable
+	// from a pixel shader; the same two functions under the same property. A MEDIA
+	// patch moving them into a Common piece deletes this block (FINDINGS section 4,
+	// atom-common-adjugate - the S3-DRAW fork commit).
+	@property( hlms_accurate_non_uniform_normal_scaling )
+		midf3x3 atomAdjugate3x3( midf3x3 m )
+		{
+			const midf3 r0 = getMatrixRow( m, 0 ).xyz;
+			const midf3 r1 = getMatrixRow( m, 1 ).xyz;
+			const midf3 r2 = getMatrixRow( m, 2 ).xyz;
+			return buildFloat3x3( cross( r1.xyz, r2.xyz ), cross( r2.xyz, r0.xyz ),
+								  cross( r0.xyz, r1.xyz ) );
+		}
+		midf3x3 atomAdjugate4x3( ogre_float4x3 m )
+		{
+			const midf3 r0 = midf3_c( getMatrixRow( m, 0 ).xyz );
+			const midf3 r1 = midf3_c( getMatrixRow( m, 1 ).xyz );
+			const midf3 r2 = midf3_c( getMatrixRow( m, 2 ).xyz );
+			return buildFloat3x3( cross( r1.xyz, r2.xyz ), cross( r2.xyz, r0.xyz ),
+								  cross( r0.xyz, r1.xyz ) );
+		}
+	@else
+		midf3x3 atomAdjugate3x3( midf3x3 m ) { return m; }
+		midf3x3 atomAdjugate4x3( ogre_float4x3 m ) { return toMidf3x3( m ); }
+	@end
+
+	// THE STABLE BARYCENTRIC FORM (stage 0's one numerical debt, FINDINGS 2.6).
+	//
+	// What the hardware interpolates at a pixel centre is the perspective-correct
+	// weight of each vertex computed from its SCREEN-SPACE EDGE FUNCTIONS, in fixed
+	// point, over vertices SNAPPED to the sub-pixel grid (subPixelPrecisionBits = 8 on
+	// both devices this engine runs on). The stage-0 form evaluated the same weights
+	// in normalised device space as a ratio of two small differences of large numbers,
+	// and where a triangle is seen edge-on its screen area collapses and that ratio
+	// loses its digits: the tail was the NORMAL at grazing incidence, the position
+	// exact. So the evaluation here is the rasteriser's:
+	//   1. every vertex to framebuffer pixels, snapped to 1/256 of a pixel exactly as
+	//      the rasteriser snaps it. Which way y runs is the PASS's: Ogre's Vulkan
+	//      viewport has a NEGATIVE height (y flipped in the viewport transform,
+	//      FINDINGS 2.4 (4)), but a render pass that requires texture flipping gets
+	//      the pass buffer's projection row negated instead (HlmsPbs::
+	//      preparePassBuffer) and says so in the forward-plus flip property -
+	//      measured: an offscreen target is such a pass, and reading it the other
+	//      way decodes every pixel against its vertical mirror;
+	//   2. the three edge functions taken RELATIVE TO THE PIXEL CENTRE - the operands
+	//      are then exact small multiples of 1/256 - and each two-by-two determinant
+	//      computed by Kahan's difference of products (one fused multiply-add
+	//      recovers the rounding of the other product), so an edge function is exact
+	//      to about one unit in its last place however thin the triangle;
+	//   3. the perspective correction the hardware applies: weight_i = e_i / w_i over
+	//      the sum, and the clip w at the pixel = sum e / sum( e_i / w_i ).
+	// The uv gradients come from the same three edge functions of the TRIANGLE'S OWN
+	// PLANE evaluated one pixel right and one pixel down - what a helper invocation of
+	// the rasterised triangle computes - never from the quad of this full-screen draw,
+	// whose neighbours may belong to other triangles.
+	float atomDiffOfProducts( float a, float b, float c, float d )
+	{
+		precise float w = c * d;
+		precise float e = fma( -c, d, w );
+		precise float f = fma( a, b, -w );
+		precise float r = f + e;
+		return r;
+	}
+	struct AtomBary
+	{
+		float3 w;
+		float clipW;
+	};
+	AtomBary atomBarycentric( float2 s0, float2 s1, float2 s2, float3 invW, float2 p )
+	{
+		float2 a0 = s0 - p;
+		float2 a1 = s1 - p;
+		float2 a2 = s2 - p;
+		float e0 = atomDiffOfProducts( a1.x, a2.y, a1.y, a2.x );
+		float e1 = atomDiffOfProducts( a2.x, a0.y, a2.y, a0.x );
+		float e2 = atomDiffOfProducts( a0.x, a1.y, a0.y, a1.x );
+		float area = e0 + e1 + e2;
+		float3 pw = float3( e0, e1, e2 ) * invW;
+		float sum = pw.x + pw.y + pw.z;
+		AtomBary b;
+		float invSum = 1.0 / ( abs( sum ) > 1e-30 ? sum : 1e-30 );
+		b.w = pw * invSum;
+		b.clipW = area * invSum;
+		return b;
+	}
+	float2 atomToPixels( float4 c, float2 res )
+	{
+		float2 ndc = c.xy / c.w;
+		@property( hlms_forwardplus_flipY )
+			float2 fb = float2( ( ndc.x * 0.5 + 0.5 ) * res.x, ( 0.5 + ndc.y * 0.5 ) * res.y );
+		@else
+			float2 fb = float2( ( ndc.x * 0.5 + 0.5 ) * res.x, ( 0.5 - ndc.y * 0.5 ) * res.y );
+		@end
+		return round( fb * 256.0 ) * ( 1.0 / 256.0 );
+	}
+@end
+
+@piece( AtomDecodePrologue )
+	// EVERY READ BELOW IS IN RANGE WHATEVER THIS PIXEL'S ID SAYS, AND A DISCARD IS
+	// NOT RELIED ON TO STOP ANYTHING. A discarded lane can live on as a HELPER
+	// invocation - the body below takes derivatives, and a quad needs all four lanes -
+	// and a helper executes the loads that follow the discard with the values it had
+	// (measured: the RTX hung, CTX SWITCH TIMEOUT, only without the validation layer's
+	// instrumentation, and with every table read already bounds-TESTED before a
+	// discard). So every table index is CLAMPED into its table, every device-address
+	// read sits behind the validity flag's BRANCH, the invalid path fills the same
+	// interpolants with harmless values, and the discard comes last.
+	AtomPsIn inPs;
+	float2 atomDdxUV = float2( 0.0, 0.0 );
+	float2 atomDdyUV = float2( 0.0, 0.0 );
+	uint atomMaterialSlot = 0u;
+	uint atomLightMask = 0u;
+	{
+		// CLAMPED TO THE IMAGE: robustness is not enabled on this engine's device, so an
+		// out-of-range fetch is undefined, and a draw without a source reads the host's
+		// 1x1 stand-in.
+		ivec2 atomXY = min( ivec2( gl_FragCoord.xy ), textureSize( atomIdTex, 0 ) - ivec2( 1, 1 ) );
+		uint2 atomIds = texelFetch( atomIdTex, atomXY, 0 ).xy;
+		bool atomOk = atomIds.x != 0xFFFFFFFFu;
+
+		// The tables' lengths (every stand-in holds at least one whole entry of each).
+		uint atomInstCount = uint( atomInstances.length() ) / 10u;
+		uint atomLevelCount = uint( atomLevels.length() ) / 2u;
+		uint atomRowCount = uint( atomGeomRows.length() ) / 3u;
+		uint atomBucketCount = uint( atomBuckets.length() );
+		atomOk = atomOk && atomInstCount > 0u && atomLevelCount > 0u && atomRowCount > 0u &&
+				 atomBucketCount > 0u;
+
+		uint atomSlotRaw = atomIds.x & 0x00FFFFFFu;
+		atomOk = atomOk && atomSlotRaw < atomInstCount;
+		uint atomI = min( atomSlotRaw, max( atomInstCount, 1u ) - 1u ) * 10u;
+		uint atomLevel = ( atomIds.x >> 24u ) & 0x7u;
+		uint atomTri = atomIds.y;
+
+		uint4 atomRaster = atomInstances[atomI + 9u];
+		uint atomWord = atomRaster.x;
+		atomOk = atomOk && atomWord != 0xFFFFFFFFu;
+
+		// THE BUCKET: this draw serves the materials whose table entry is its own twin's
+		// slot plus one; every other pixel belongs to another decode draw.
+		uint atomBucketAt = ( atomWord >> 16u ) * @value(atomSlotsPerPool)u + ( atomWord & 0xFFFFu );
+		atomOk = atomOk && atomBucketAt < atomBucketCount && ( atomWord & 0xFFFFu ) < @value(atomSlotsPerPool)u;
+		uint atomBucket = atomBuckets[min( atomBucketAt, max( atomBucketCount, 1u ) - 1u )];
+		atomOk = atomOk && atomBucket == ( worldMaterialIdx[inAtom.drawId].x & 0x1FFu ) + 1u;
+
+		uint atomMesh = atomInstances[atomI + 6u].w;
+		uint atomLevelAtRaw = atomMesh * 8u + atomLevel;
+		atomOk = atomOk && atomLevelAtRaw < atomLevelCount;
+		uint4 atomLevelRow = atomLevels[min( atomLevelAtRaw, max( atomLevelCount, 1u ) - 1u ) * 2u];
+		// The triangle is compared as a COUNT, never as atomTri * 3: a wrapped product of
+		// a garbage id would pass the test and address past the index buffer.
+		atomOk = atomOk && atomLevelRow.w < atomRowCount && atomTri < atomLevelRow.y / 3u;
+		uint atomRowAt = min( atomLevelRow.w, max( atomRowCount, 1u ) - 1u ) * 3u;
+		uint4 atomAddr = atomGeomRows[atomRowAt];
+		uint4 atomLay0 = atomGeomRows[atomRowAt + 1u];
+		uint4 atomLay1 = atomGeomRows[atomRowAt + 2u];
+		atomOk = atomOk && ( atomAddr.x | atomAddr.y ) != 0u && ( atomAddr.z | atomAddr.w ) != 0u &&
+				 ( atomLay1.x & ATOM_GEOM_NORMAL_MASK ) == ATOM_GEOM_NORMAL_FLOAT3;
+
+		ogre_float4x3 atomWorld = makeOgreFloat4x3( uintBitsToFloat( atomInstances[atomI + 0u] ),
+													uintBitsToFloat( atomInstances[atomI + 1u] ),
+													uintBitsToFloat( atomInstances[atomI + 2u] ) );
+		// An invalid lane's clamped entry may be a CLEARED slot (a zero matrix): its
+		// normal would normalise to NaN, and a helper lane's NaN reaches its valid
+		// neighbours through the body's quad derivatives (measured: the normal-map
+		// path's min() at silhouettes, under the layer's sanitiser). So an invalid lane
+		// carries the identity instead.
+		if( !atomOk )
+			atomWorld = makeOgreFloat4x3( float4( 1.0, 0.0, 0.0, 0.0 ), float4( 0.0, 1.0, 0.0, 0.0 ),
+										  float4( 0.0, 0.0, 1.0, 0.0 ) );
+
+		// THE TRIANGLE, read from the raster's own buffers - behind the flag's branch.
+		float3 p0 = float3( 0.0, 0.0, 0.0 ), p1 = float3( 1.0, 0.0, 0.0 ), p2 = float3( 0.0, 1.0, 0.0 );
+		float3 n0 = float3( 0.0, 0.0, 1.0 ), n1 = n0, n2 = n0;
+		float4 t0 = float4( 1.0, 0.0, 0.0, 1.0 ), t1 = t0, t2 = t0;
+		float2 uvA = float2( 0.0, 0.0 ), uvB = uvA, uvC = uvA;
+		if( atomOk )
+		{
+			uint atomFirst = atomLevelRow.x + atomTri * 3u;
+			uint vi0 = atomIndex( atomAddr, atomLay1, atomFirst );
+			uint vi1 = atomIndex( atomAddr, atomLay1, atomFirst + 1u );
+			uint vi2 = atomIndex( atomAddr, atomLay1, atomFirst + 2u );
+			p0 = atomLanes3( atomAddr, atomLay0, vi0, atomLay0.y );
+			p1 = atomLanes3( atomAddr, atomLay0, vi1, atomLay0.y );
+			p2 = atomLanes3( atomAddr, atomLay0, vi2, atomLay0.y );
+			n0 = atomLanes3( atomAddr, atomLay0, vi0, atomLay0.z );
+			n1 = atomLanes3( atomAddr, atomLay0, vi1, atomLay0.z );
+			n2 = atomLanes3( atomAddr, atomLay0, vi2, atomLay0.z );
+			if( atomRaster.y != ATOM_NO_OFFSET )
+			{
+				t0 = atomLanes4( atomAddr, atomLay0, vi0, atomRaster.y );
+				t1 = atomLanes4( atomAddr, atomLay0, vi1, atomRaster.y );
+				t2 = atomLanes4( atomAddr, atomLay0, vi2, atomRaster.y );
+			}
+			uvA = atomUv( atomAddr, atomLay0, atomLay1, vi0 );
+			uvB = atomUv( atomAddr, atomLay0, atomLay1, vi1 );
+			uvC = atomUv( atomAddr, atomLay0, atomLay1, vi2 );
+		}
+
+		// The vertex shader's own order: world, then the pass's viewProj - never a
+		// premultiplied matrix (P-A's comparison trap).
+		float3 w0 = mul( float4( p0, 1.0 ), atomWorld );
+		float3 w1 = mul( float4( p1, 1.0 ), atomWorld );
+		float3 w2 = mul( float4( p2, 1.0 ), atomWorld );
+		float4 c0 = mul( float4( w0, 1.0 ), passBuf.viewProj );
+		float4 c1 = mul( float4( w1, 1.0 ), passBuf.viewProj );
+		float4 c2 = mul( float4( w2, 1.0 ), passBuf.viewProj );
+
+		float2 atomRes = float2( textureSize( atomIdTex, 0 ) );
+		float2 s0 = atomToPixels( c0, atomRes );
+		float2 s1 = atomToPixels( c1, atomRes );
+		float2 s2 = atomToPixels( c2, atomRes );
+		float3 atomInvW = float3( 1.0 / c0.w, 1.0 / c1.w, 1.0 / c2.w );
+		float2 atomPix = gl_FragCoord.xy;
+		AtomBary b = atomBarycentric( s0, s1, s2, atomInvW, atomPix );
+		// AN ID THAT DOES NOT NAME A TRIANGLE COVERING THIS PIXEL IS NEVER SHADED: weights
+		// far outside the triangle or a non-finite clip w (tested on the BITS - a
+		// self-comparison is folded away on this stack) would hand PBS's pieces a position
+		// anywhere, and the clustered light loop indexes its grid with it. A covering id's
+		// weights sit in [0, 1] up to the rasteriser's own tie-breaking.
+		atomOk = atomOk && ( floatBitsToUint( b.clipW ) & 0x7FFFFFFFu ) < 0x7F800000u && b.clipW > 0.0 &&
+				 all( lessThan( floatBitsToUint( b.w ) & uvec3( 0x7FFFFFFFu ), uvec3( 0x7F800000u ) ) ) &&
+				 all( greaterThanEqual( b.w, float3( -0.25, -0.25, -0.25 ) ) ) &&
+				 all( lessThanEqual( b.w, float3( 1.25, 1.25, 1.25 ) ) );
+		if( !atomOk )
+		{
+			// The harmless interpolants a helper lane carries into the body: the first
+			// vertex of a unit triangle in front of the camera, nothing extrapolated.
+			b.w = float3( 1.0, 0.0, 0.0 );
+			b.clipW = 1.0;
+			w0 = float3( 0.0, 0.0, 0.0 );
+			n0 = float3( 0.0, 0.0, 1.0 );
+			t0 = float4( 1.0, 0.0, 0.0, 1.0 );
+			uvA = float2( 0.0, 0.0 );
+		}
+		atomMaterialSlot = atomOk ? ( atomWord & 0xFFFFu ) : 0u;
+		atomLightMask = atomInstances[atomI + 8u].z;
+
+		@property( hlms_uv_count )
+			float2 atomUv0 = b.w.x * uvA + b.w.y * uvB + b.w.z * uvC;
+			if( atomOk )
+			{
+				AtomBary bx = atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 1.0, 0.0 ) );
+				AtomBary by = atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 0.0, 1.0 ) );
+				atomDdxUV = ( bx.w.x * uvA + bx.w.y * uvB + bx.w.z * uvC ) - atomUv0;
+				atomDdyUV = ( by.w.x * uvA + by.w.y * uvB + by.w.z * uvC ) - atomUv0;
+				// A neighbour step that lands on the triangle's plane horizon (a silhouette
+				// seen edge-on) has no finite weights: no gradient there, never a NaN one
+				// (measured under the validation layer's sanitiser - a NaN gradient reached
+				// a min() in the normal-map path at silhouette pixels).
+				if( any( greaterThanEqual( floatBitsToUint( float4( atomDdxUV, atomDdyUV ) ) & uvec4( 0x7FFFFFFFu ),
+										   uvec4( 0x7F800000u ) ) ) )
+				{
+					atomDdxUV = float2( 0.0, 0.0 );
+					atomDdyUV = float2( 0.0, 0.0 );
+				}
+			}
+			inPs.uv0 = atomUv0;
+		@end
+
+		@property( hlms_normal || hlms_qtangent )
+			// worldView as the vertex shader has it: the pass's view after the world.
+			float3 v0 = mul( float4( w0, 1.0 ), passBuf.view ).xyz;
+			float3 v1 = mul( float4( w1, 1.0 ), passBuf.view ).xyz;
+			float3 v2 = mul( float4( w2, 1.0 ), passBuf.view ).xyz;
+			inPs.pos = atomOk ? ( b.w.x * v0 + b.w.y * v1 + b.w.z * v2 ) : float3( 0.0, 0.0, -1.0 );
+			// The normal is transformed PER VERTEX and then interpolated, unnormalised,
+			// exactly as the rasteriser hands it over; the pieces normalise it. The
+			// matrix is the vertex shader's worldView (Ogre's view * world): with this
+			// tree's mul() the GLSL form of that product is world's times view's.
+			midf3x3 atomViewAdj = toMidf3x3( passBuf.view );
+			midf3x3 atomNormalMat = atomAdjugate3x3( mul( toMidf3x3( atomWorld ), atomViewAdj ) );
+			inPs.normal = midf3_c( b.w.x * mul( midf3_c( n0 ), atomNormalMat ) +
+								   b.w.y * mul( midf3_c( n1 ), atomNormalMat ) +
+								   b.w.z * mul( midf3_c( n2 ), atomNormalMat ) );
+			@property( normal_map )
+				midf3x3 atomTangentMat = mul( toMidf3x3( atomWorld ), atomViewAdj );
+				inPs.tangent = midf3_c( b.w.x * mul( midf3_c( t0.xyz ), atomTangentMat ) +
+										b.w.y * mul( midf3_c( t1.xyz ), atomTangentMat ) +
+										b.w.z * mul( midf3_c( t2.xyz ), atomTangentMat ) );
+				@property( hlms_qtangent || hlms_tangent4 )
+					// A flat interpolant takes the PROVOKING vertex, the first.
+					inPs.biNormalReflection = sign( midf( t0.w ) );
+				@end
+			@end
+		@end
+		@property( hlms_num_shadow_map_lights && !hlms_all_point_lights && shadows_receive_on_ps )
+			inPs.worldPos = b.w.x * w0 + b.w.y * w1 + b.w.z * w2;
+			@property( hlms_normal || hlms_qtangent )
+				// Normalised PER VERTEX in the vertex shader (the normal-offset bias
+				// needs a unit vector), then interpolated as it is.
+				midf3x3 atomWorldAdj = atomAdjugate4x3( atomWorld );
+				inPs.worldNorm = midf3_c( b.w.x * normalize( mul( midf3_c( n0 ), atomWorldAdj ) ) +
+										  b.w.y * normalize( mul( midf3_c( n1 ), atomWorldAdj ) ) +
+										  b.w.z * normalize( mul( midf3_c( n2 ), atomWorldAdj ) ) );
+			@end
+		@end
+		@property( hlms_pssm_splits )
+			inPs.depth = b.clipW;
+		@end
+		@property( !lower_gpu_overhead )
+			inPs.drawId = ushort( inAtom.drawId );
+		@end
+		if( !atomOk )
+			discard;
+	}
+
+	// EVERY MATERIAL FETCH OF EVERY UPSTREAM PIECE, redirected to the gradient form:
+	// upstream routes them all through this macro and ships the gradient form beside
+	// it (Common/GLSL/CrossPlatformSettings_piece_all.glsl). The gradient handed over
+	// is that of the uv the piece actually samples: the base-map uv modifier (the
+	// engine's affine UV transform) is applied to the pixel's uv and to the uv one
+	// analytic step away, so any affine modifier is honoured without a copy of it.
+	#undef OGRE_SampleArray2DF16
+	#define OGRE_SampleArray2DF16( tex, samplerState, uv, arrayIdx ) OGRE_SampleArray2DGradF16( tex, samplerState, uv, arrayIdx, ( UV_DIFFUSE( inPs.uv0.xy + atomDdxUV ) - UV_DIFFUSE( inPs.uv0.xy ) ), ( UV_DIFFUSE( inPs.uv0.xy + atomDdyUV ) - UV_DIFFUSE( inPs.uv0.xy ) ) )
+@end
+
+// THE ONE REPLACED PIECE. Upstream reads the material index from the per-draw
+// instance table through a flat interpolant; a decode draw has one draw and many
+// materials, so the index is the id buffer's - the PBS datablock's slot in the PBS
+// pool HlmsAtom bound at materialArray. Everything downstream is unchanged.
+@undefpiece( LoadMaterial )
+@piece( LoadMaterial )
+	ushort materialId = ushort( atomMaterialSlot );
+	#define material materialArray[materialId]
+@end
+
+// The light mask is the same kind of fact (FINDINGS Q2): the object's, from the GPU
+// scene, never the full-screen draw's.
+@property( hlms_fine_light_mask || hlms_forwardplus_fine_light_mask )
+	@undefpiece( DeclareObjLightMask )
+	@piece( DeclareObjLightMask )uint objLightMask = atomLightMask;@end
+@end

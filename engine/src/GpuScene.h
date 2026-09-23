@@ -102,7 +102,26 @@ struct GpuInstance {
     /// converts it and re-composes the slot. Written by ONE place,
     /// `OgreScene::gpuMaterialWordFor`, `gpuFlagsFor`'s sibling.
     uint32_t ids[4] = {};
-    uint32_t pad[4] = {};
+    /// THE RASTER WORDS (ATOM-S3-PARITY) — what the visibility buffer's decode
+    /// (HlmsAtom, Hlms/Atom) needs of an instance beyond the geometry rows:
+    ///   x = THE PBS MATERIAL WORD, {pool : 16 | slot : 16} of sub-item 0's datablock
+    ///       in HlmsPbs's const-buffer pool (`HlmsAtom::materialWordOf`) — the index
+    ///       the decode's LoadMaterial reads `materialArray` with, exactly as the
+    ///       rasterised draw of the same item would. 0xFFFFFFFF for an item whose
+    ///       datablock is not HlmsPbs's (unlit furniture), which the decode skips.
+    ///   y = the byte offset of the float4 VES_TANGENT in the vertex, 0xFFFFFFFF
+    ///       when the mesh has none. It rides HERE because the geometry row is
+    ///       Ogre's format (VctVoxelizer::GeometryRow) and has no tangent lane at
+    ///       this pin; a fork commit giving the row one moves it there.
+    ///   zw = 0.
+    /// Written by ONE place, `OgreScene::composeGpuInstance`, beside the ids — at
+    /// attach and at a material change (both mark the slot).
+    ///
+    /// The mirrors of this struct (JahCullTest_cs, JahVoxelGather_cs) name the lane
+    /// `raster` too; neither reads it.
+    /// Defaults to "no material, no tangent": a CLEARED slot (onSlotFreed) names no
+    /// material the decode could shade with.
+    uint32_t raster[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0u, 0u };
 };
 static_assert(sizeof(GpuInstance) == 160, "the GPU instance table's stride is a contract");
 
