@@ -601,11 +601,12 @@ bool OgreScene::refreshVctFast() {
             }
             if (!mVctFeed) mVctFeed.reset(new detail::VoxelFeed());
             gatherAndBuild(*mVctFeed, mVctVoxelizer, VoxelGatherInputs());
-            applyVctEnvironment();
-            const Ogre::uint32 extraBounces =
-                Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-            mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                                 giRayMarchStepScale(false));
+            // The re-voxelised volume's light, through the one writer. A NEW
+            // VOXEL STATE: an injection earlier in this frame (the host's tick
+            // runs before this flush) lit voxels that no longer exist, so the
+            // latch is re-armed for the volume the build just wrote.
+            mGiSingleInjectedFrame = ~0ull;
+            injectCascade(0);
         }
         const auto tVoxels = std::chrono::steady_clock::now();
         const unsigned giItems = countGiItems();
@@ -718,8 +719,16 @@ void OgreScene::noteSettleInputs() {
 // light only and the pixel reads the environment itself) or without a chain
 // (a single volume re-injects on its next light tick).
 void OgreScene::oweEnvironmentSettle() {
+    if (mGi.numBounces <= 1) return;
+    oweChainSettle();
+}
+
+// THE DEBT, raised in one place: a rebuild, an environment change and a tick
+// the one-writer latch refused all owe the same thing — the chain's at-rest
+// answer over its current inputs.
+void OgreScene::oweChainSettle() {
     const size_t n = mVctCascades.size();
-    if (n < 2u || mGi.numBounces <= 1) return;
+    if (n < 2u) return;
     mGiSettleCascades  = n;
     mGiSettleStepsOwed = kAtRestSweeps * int(n);
     noteSettleInputs();
@@ -759,21 +768,21 @@ void OgreScene::payChainSettleStep() {
         // right: nothing finishes while the scene is still changing, and the
         // mirror's own at-rest tick — which fires one frame after the motion
         // ends and clears the debt outright — is what finishes a light gesture.
-        if (mGiSettleSerial != mGiLightWriteSerial) {
-            mGiSettleStepsOwed = kAtRestSweeps * int(n);
-            noteSettleInputs();
-        }
+        if (mGiSettleSerial != mGiLightWriteSerial) oweChainSettle();
         const int total = kAtRestSweeps * int(n);
         unsigned injections = 0;
         // A cascade with no lighting is skipped exactly as the tick skips it,
         // and without spending the frame: the loop walks on to the next step.
+        // A cascade ALREADY INJECTED THIS FRAME (the mirror's tick ran before
+        // the scheduler) is not injected twice: the step waits for the next
+        // frame, unspent, so the sequence stays the tick's own.
         while (mGiSettleStepsOwed > 0 && injections == 0u) {
             const int step = total - mGiSettleStepsOwed;
             const size_t i = n - 1u - size_t(step % int(n));
+            if (mVctCascades[i].lighting && injectedThisFrame(i)) break;
             --mGiSettleStepsOwed;
             if (!mVctCascades[i].lighting) continue;
-            injectCascade(i, false /*coarse: a settle is the at-rest answer*/);
-            ++injections;
+            if (injectCascade(i)) ++injections;
         }
         work.setUnits(injections);
         if (mGiSettleStepsOwed == 0) {
@@ -788,20 +797,64 @@ void OgreScene::payChainSettleStep() {
     } JAH_CATCH(mError, );
 }
 
-// ONE DEFINITION OF AN AT-REST CASCADE INJECTION (LAMPREST-3 fix round). Two
-// paths inject a cascade over the voxels that are already there — the light
-// tick above and the scheduler's INCREMENTAL SETTLE below — and the whole point
-// of the settle is that the bytes it leaves are the bytes the whole tick would
-// have left, so there must be exactly one place that says what an injection is.
-// (The rebuild's closing injection is the same three lines with its own bounce
-// count; it lives in `rebuildCascade` because it is part of the rebuild's
-// try/catch.)
-void OgreScene::injectCascade(size_t i, bool coarse) {
-    if (i >= mVctCascades.size() || !mVctCascades[i].lighting) return;
-    applyCascadeEnvironment(mVctCascades[i].lighting);
-    mVctCascades[i].lighting->update(mSceneMgr, coarse ? 0u : cascadeBounces(i),
-                                     1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                                     giRayMarchStepScale(coarse));
+// THE ONE WRITER (PHOTON-WRITER-1; render audit F3/F13). Every write to a voxel
+// volume's light in this engine is this function: the from-scratch arm's
+// closing injection, a cascade rebuild's, the single volume's re-voxelisation,
+// the light tick (moving and at rest) and the incremental settle. What an
+// injection IS therefore has one definition — the environment the bounce job
+// reads where its cones escape, then `VctLighting::update` at the document's
+// own bounce count with the scene's own ray march — and no path can hand a
+// volume a different answer from another (DRAG-1: the flicker was two writers
+// with two answers alternating on cascade 0).
+//
+// THE LATCH. A volume is injected at most once per writer frame. The second
+// injection of one cascade in one frame was always one of two things: WASTED
+// (a tick over voxels a rebuild is about to replace in the same frame) or a
+// symptom of two paths not knowing about each other (F3's residue). So it is
+// refused here, counted, and every caller that can meet a refusal keeps its
+// work OWED rather than dropped: the scheduler leaves a latched cascade's
+// rebuild pending, the settle leaves its step unspent, and a refused tick owes
+// the chain a settle. A refusal is not asserted in Debug on purpose: Debug is
+// the daily driver, and an owed injection one frame late is a correct picture
+// one frame late, whereas an abort is not a picture at all; `gi.one_writer`
+// asserts the counter stays 0 on a drag + settle.
+unsigned long long OgreScene::giWriterFrame() const {
+    return (unsigned long long)mRoot->getNextFrameNumber();
+}
+
+bool OgreScene::injectedThisFrame(size_t i) const {
+    const unsigned long long frame = giWriterFrame();
+    if (!mVctCascades.empty())
+        return i < mVctCascades.size() && mVctCascades[i].injectedFrame == frame;
+    return i == 0u && mGiSingleInjectedFrame == frame;
+}
+
+bool OgreScene::injectCascade(size_t i, bool laterPass) {
+    const bool chain = !mVctCascades.empty();
+    Ogre::VctLighting *lighting =
+        chain ? (i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr)
+              : (i == 0u ? mVctLighting : nullptr);
+    if (!lighting) return false;
+    unsigned long long &stamp = chain ? mVctCascades[i].injectedFrame : mGiSingleInjectedFrame;
+    const unsigned long long frame = giWriterFrame();
+    if (stamp == frame && !laterPass) {
+        ++mGiInjectionRefusals;
+        if (mGiInjectionRefusals == 1u)
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: the one-writer latch refused a second injection of cascade " +
+                std::to_string(i) + " in one frame (left owed; GiStatus::chainInjectionRefusals)");
+        return false;
+    }
+    applyCascadeEnvironment(lighting);
+    lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
+                     giRayMarchStepScale());
+    stamp = frame;
+    if (mGiInjectionCountFrame != frame) {
+        mGiInjectionCountFrame = frame;
+        mGiInjectionsThisFrame = 0;
+    }
+    mGiInjectionsPeak = std::max(mGiInjectionsPeak, ++mGiInjectionsThisFrame);
+    return true;
 }
 
 // THE FIELD IS AN INTEGRAL OF THE CHAIN, so it re-integrates after the chain's
@@ -847,189 +900,125 @@ void OgreScene::reintegrateFieldAfterInjection() {
         }
     }}
 
+// THE LIGHT TICK, ASKED FOR. Under a CHAIN the tick is not run here: it is OWED
+// and run by the cascade scheduler at the frame's one writer point
+// (updateCascades), AFTER the frame's rebuild. That order is the one-writer rule
+// made structural (PHOTON-WRITER-1): the host's tick arrives before the render
+// (the mirror's push), the scheduler's rebuild inside it, and a tick that ran
+// first injected a cascade over voxels the rebuild then replaced — a wasted
+// injection at best, and the latch would have had to refuse the rebuild's own
+// (whose volume MUST be lit). Run after the rebuild, the tick skips the cascade
+// the rebuild has just injected (the latch; while moving that IS the answer, at
+// rest it owes the chain a settle) and injects the others once each: a frame
+// never injects a cascade twice and never more than the chain's size.
+// A moving and an at-rest request in one frame run as the at-rest tick (it is
+// the superset). The single volume has no scheduler and nothing to order: its
+// tick runs here, now.
 bool OgreScene::refreshGiLighting(bool inMotion) {
     JAH_TRY {
         if (!mVctLighting || !mVctVoxelizer) return false;
+        if (!mVctCascades.empty()) {
+            const GiTickOwed ask = inMotion ? GiTickOwed::Moving : GiTickOwed::Rest;
+            if (int(ask) > int(mGiTickOwed)) mGiTickOwed = ask;
+            return true;
+        }
         mSceneMgr->updateSceneGraph();
-        // ONE ANSWER PER VOLUME, WHOEVER COMPUTES IT — the single volume under
-        // the same rule DRAG-1 gave the chain (PHOTON-M2, F-D).
-        //
-        // What stood here dropped the moving tick to ZERO extra bounces and the
-        // coarse (2x) ray march, on the argument that a frame thrown away a few
-        // frames later does not need the refinement. The chain was written that
-        // way too, and DRAG-1 measured what it costs: the rebuild path injects
-        // the SAME volume at the document's full bounce count with the scene's
-        // own march (rebuildVct's closing `VctLighting::update`, and
-        // buildVct's), so the two paths hand the one volume two different
-        // answers and the picture STEPS between them as the drag alternates
-        // rebuild frames and tick frames — the owner's "the reflected lights
-        // flicker when the sphere is moved". A volume's radiance must not depend
-        // on which path last injected it.
-        //
-        // THE COST, in the only unit that matters: one extra bounce dispatch per
-        // TICK per bounce past the first (the ticks run on the drag's cadence,
-        // not per frame), each 0.1-0.3 ms at 128^3 (S1 §3 — injection is the
-        // cheap half; it is VOXELISATION that costs). The earlier reading quoted
-        // here, 5.37 ms against 4.83 for a tick PLUS ITS READ-BACK FRAME at
-        // three bounces, is the same 0.5 ms and it buys a moving picture that
-        // matches the one the settle leaves.
-        //
-        // `JAHSHAKA_GI_LEGACY_MOVING_TICK` restores the old behaviour for
-        // measurement, exactly as it does for the chain below.
-        const bool legacyTick = std::getenv("JAHSHAKA_GI_LEGACY_MOVING_TICK") != nullptr;
-        const bool coarseTick = inMotion && legacyTick;
-        const Ogre::uint32 extraBounces =
-            coarseTick ? 0u : Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
         {
-            // THE LIGHT-ONLY TICK (ENGINE-5 item 2). The cheap path a drag runs
-            // every few frames: one injection dispatch per bounce over the
-            // voxels that are already there. `units` = bounces actually run.
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0,
                                      inMotion ? "vct.light.moving" : "vct.light",
                                      mRoot->getRenderSystem());
-            if (mVctCascades.size() > 1u) {
-                // EVERY CASCADE, OUTERMOST FIRST — a light move changes the
-                // radiance in all of them, and a chain where only the head was
-                // re-injected would bounce yesterday's light in from outside.
-                // Injection is the cheap half (0.1-0.3 ms per cascade, S1 §3);
-                // it is the VOXELISATION that is expensive, and nothing here
-                // re-voxelises.
-                //
-                // TO THE FIXED POINT AT REST, and it is the mathematics
-                // rather than caution. A chain's radiance is a FIXED POINT over
-                // coupled volumes: each cascade's injection reads the ones
-                // outside it AND the volume it is injecting into, so one pass is
-                // one Jacobi iteration from whatever the volumes happened to
-                // hold. A from-scratch solve starts from EMPTY volumes and a
-                // re-injection starts from the previous light's answer, so a
-                // tick that stops short leaves the two in different places —
-                // and "short" is not two passes but THREE, measured
-                // (LAMPREST-2, spikes/lamprest-2): in the sealed room
-                // scripting.e2e.movable_lamp_rest uses, a lamp that travelled
-                // and came to rest reads 4/255 away from the same lamp jumped
-                // and re-solved at TWO passes, 0/255 at three, and the picture
-                // is then the SAME picture at three, four and six passes (a
-                // 25-probe mean of 77.16 at every one of them) — which is what
-                // a fixed point means and what says three is enough rather than
-                // lucky. WHY NOT MEASURE IT PER TICK: the only instrument is a
-                // read-back of the light voxels, and a read-back submits the
-                // command buffer and waits — measured at 5-10 ms of CPU per
-                // at-rest tick against the ~1 ms the passes themselves cost, so
-                // measuring costs more than the pass it would save. The count is
-                // measured ONCE, here, and `JAHSHAKA_GI_SWEEPS` re-measures it.
-                //
-                // WHILE SOMETHING IS MOVING it stays at one pass: that answer is
-                // thrown away a few frames later by construction, and the
-                // at-rest tick is the one the user is left looking at (the same
-                // rule that gives the moving pass 0 bounces and the coarse ray
-                // march).
-                int sweeps = inMotion ? 1 : kAtRestSweeps;
-                if (!inMotion) {
-                    // THE DIAGNOSTIC THE SUITE DRIVES (gi.chain_converge): the
-                    // number above is a measurement, so it has to be possible to
-                    // re-measure it — and to prove, from outside, that one pass
-                    // fewer really does leave the tick's answer depending on
-                    // where it started.
-                    if (const char *e = std::getenv("JAHSHAKA_GI_SWEEPS")) {
-                        const long v = std::strtol(e, nullptr, 10);
-                        if (v >= 1 && v <= 32) sweeps = int(v);
-                    }
-                }
-                mGiChainSweeps = sweeps;
-                // HOW MANY CASCADE INJECTIONS THIS TICK ACTUALLY RAN, reported
-                // as the work row's `units` (DRAG-1). It is the only reading
-                // from which "the tick skipped the cascade the scheduler had
-                // already injected" can be asserted from outside — the row's
-                // presence cannot say it, because the tick still covers the
-                // cascades the rebuild did not. A chain of four with cascade 0
-                // rebuilt this frame reads 3.
-                unsigned injections = 0;
-                // ONE ANSWER PER CASCADE, WHOEVER COMPUTES IT (DRAG-1,
-                // REFLECT F2). What stood here injected EVERY cascade at ZERO
-                // bounces with the coarse (2x) ray march whenever `inMotion`,
-                // while the cascade scheduler was simultaneously rebuilding
-                // cascade 0 EVERY frame at its FULL bounce count with the
-                // scene's own ray march (rebuildCascade's closing
-                // `VctLighting::update`). Two different answers for one volume,
-                // ten frames apart: the reflected radiance of every lit surface
-                // in the room dropped to its zero-bounce value on frames 10,
-                // 20, 30 ... and came back on the next rebuild — the owner's
-                // "the reflected lights flicker when the sphere is moved", with
-                // a 10-frame period. The outer cascades, which the scheduler
-                // defers behind cascade 0 for the whole drag, had no rebuild to
-                // come back on and simply STAYED at the zero-bounce answer
-                // until the settle, so the drag also ended with a step.
-                //
-                // Both halves are the same mistake — a cascade's radiance must
-                // not depend on which path last injected it — and the cure is
-                // one rule: UNDER A CHAIN the moving tick computes exactly what
-                // a rebuild computes (the cascade's own bounce count, the
-                // scene's own ray march), and SKIPS any cascade a rebuild has
-                // already injected since the last tick, because that cascade
-                // already holds that answer.
-                //
-                // THE COST, measured in dispatches rather than guessed: during
-                // a drag the scheduler rebuilds cascade 0 every frame, so the
-                // tick skips it and pays the outer three. At Epic (two extra
-                // bounce passes per cascade since PHOTON-M1 retired the pin's
-                // 1/2/4/8 stabilisation) that is 3 + 6 = 9 injection
-                // dispatches every ten frames against the 4 it used to pay —
-                // about one extra dispatch per frame, 0.1-0.3 ms each (S1 §3,
-                // injection being the cheap half; it is VOXELISATION that
-                // costs) — and it buys a far field that follows the drag
-                // instead of freezing at zero bounces until the settle.
-                //
-                // AT REST NOTHING IS SKIPPED and nothing is reduced: the
-                // at-rest tick is the fixed-point iteration over the coupled
-                // volumes (kAtRestSweeps above), and it is the frame the user
-                // is left looking at.
-                // The same measurement switch as the probe deferral's
-                // (JAHSHAKA_PROBE_NO_MOTION_DEFER): with it set, the moving
-                // tick goes back to zero bounces and the coarse march on every
-                // cascade, which is the behaviour this rule replaced. (Read
-                // once, above: the single volume answers to it too since
-                // PHOTON-M2's F-D.)
-                const bool chainMotion = inMotion && !legacyTick;
-                for (int sweep = 0; sweep < sweeps; ++sweep) {
-                    for (size_t i = mVctCascades.size(); i--; ) {
-                        if (!mVctCascades[i].lighting) continue;
-                        // ...AND ONLY WHILE THE LIGHTS IT WAS INJECTED WITH
-                        // ARE STILL THE SCENE'S (F5): a lamp that moved since
-                        // the rebuild makes the rebuild's answer stale, and this
-                        // tick is the only thing that would fix it before that
-                        // cascade's next rebuild — which for an outer cascade
-                        // deferred behind cascade 0 is the whole drag.
-                        if (chainMotion && mVctCascades[i].injectedSinceTick &&
-                            mVctCascades[i].injectedAtLightSerial == mGiLightWriteSerial)
-                            continue;
-                        injectCascade(i, inMotion && legacyTick /*coarse*/);
-                        ++injections;
-                    }
-                }
-                // The skip is per TICK, not for ever: a cascade that was
-                // rebuilt before this tick has paid for this tick, and owes the
-                // next one unless it is rebuilt again.
-                for (VctCascade &c : mVctCascades) c.injectedSinceTick = false;
-                work.setUnits(injections);
-                mGiChainInjections = injections;
-            } else {
-                mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/,
-                                     true /*autoMultiplier*/, giRayMarchStepScale(coarseTick));
-                mGiChainSweeps = 1;      // the single volume is not an iteration
-            }
-            // (The chain branch has already reported its own count above: how
-            // many CASCADES it injected, which is the number DRAG-1's suite
-            // reads. This is the single volume's bounce count.)
-            if (mVctCascades.size() <= 1u) work.setUnits(extraBounces + 1u);
+            // The single volume is not an iteration: one injection, the one
+            // writer's, at the document's bounce count.
+            injectCascade(0);
+            mGiChainSweeps = 1;
+            work.setUnits(cascadeBounces(0) + 1u);
         }
         reintegrateFieldAfterInjection();
-        // WHOEVER PAYS THE INJECTION PAYS THE DEBT (fix round item 3). An
-        // at-rest tick over the chain IS the settle the scheduler owes, so an
-        // unfinished incremental one is abandoned here rather than run on top of
-        // the answer this tick has just computed.
-        if (!inMotion && mVctCascades.size() > 1u) noteChainSettled();
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// THE CHAIN'S LIGHT TICK, run at the writer point (updateCascades) or by the
+// drag's own settle there.
+void OgreScene::runChainTick(bool inMotion) {
+    JAH_TRY {
+        if (mVctCascades.empty()) return;
+        mSceneMgr->updateSceneGraph();
+        bool refused = false;
+        {
+            // THE LIGHT-ONLY TICK (ENGINE-5 item 2). The cheap path a drag runs
+            // every few frames: one injection dispatch per bounce over the
+            // voxels that are already there. `units` = injections actually run.
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0,
+                                     inMotion ? "vct.light.moving" : "vct.light",
+                                     mRoot->getRenderSystem());
+            // EVERY CASCADE, OUTERMOST FIRST — a light move changes the radiance
+            // in all of them, and a chain where only the head was re-injected
+            // would bounce yesterday's light in from outside. Injection is the
+            // cheap half (0.1-0.3 ms per cascade, S1 §3); it is the
+            // VOXELISATION that is expensive, and nothing here re-voxelises.
+            //
+            // ONE ANSWER PER VOLUME, WHOEVER COMPUTES IT (DRAG-1, PHOTON-M2 F-D):
+            // every injection is `injectCascade`, the call a rebuild ends with,
+            // so the moving tick, the at-rest tick and the rebuild hand a volume
+            // one answer. (The moving tick's zero-bounce coarse march and its
+            // measurement switch went with the one writer: nothing measured with
+            // them any more.)
+            //
+            // THE AT-REST PASS COUNT is `kAtRestSweeps` (EnginePrivate.h, where
+            // it is stated); `JAHSHAKA_GI_SWEEPS` re-measures it.
+            int sweeps = inMotion ? 1 : kAtRestSweeps;
+            if (!inMotion) {
+                if (const char *e = std::getenv("JAHSHAKA_GI_SWEEPS")) {
+                    const long v = std::strtol(e, nullptr, 10);
+                    if (v >= 1 && v <= 32) sweeps = int(v);
+                }
+            }
+            mGiChainSweeps = sweeps;
+            // HOW MANY CASCADE INJECTIONS THIS TICK ACTUALLY RAN, reported as the
+            // work row's `units` (DRAG-1): a chain of four with cascade 0 rebuilt
+            // since the last moving tick reads 3.
+            unsigned injections = 0;
+            for (int sweep = 0; sweep < sweeps; ++sweep) {
+                for (size_t i = mVctCascades.size(); i--; ) {
+                    if (!mVctCascades[i].lighting) continue;
+                    // WHILE MOVING, a cascade a REBUILD has injected since the
+                    // last tick already holds this tick's answer — the same
+                    // injection, over current voxels — as long as the lights it
+                    // was injected with are still the scene's (F5). This skip
+                    // spans frames (ticks run every few), so it is the rebuild's
+                    // flag and not the per-frame latch.
+                    if (inMotion && mVctCascades[i].injectedSinceTick &&
+                        mVctCascades[i].injectedAtLightSerial == mGiLightWriteSerial)
+                        continue;
+                    // ...and a cascade the rebuild injected THIS frame is the
+                    // latch's, not a refusal: that is the order working.
+                    if (sweep == 0 && injectedThisFrame(i)) {
+                        if (!inMotion) refused = true;   // it read stale outer light
+                        continue;
+                    }
+                    if (injectCascade(i, sweep > 0)) ++injections;
+                    else refused = true;
+                }
+            }
+            // The skip is per TICK, not for ever: a cascade that was rebuilt
+            // before this tick has paid for this tick, and owes the next one
+            // unless it is rebuilt again.
+            for (VctCascade &c : mVctCascades) c.injectedSinceTick = false;
+            work.setUnits(injections);
+        }
+        reintegrateFieldAfterInjection();
+        // WHOEVER PAYS THE INJECTION PAYS THE DEBT (LAMPREST-3 fix round item 3).
+        // An at-rest tick over the chain IS the settle the scheduler owes, so an
+        // unfinished incremental one is abandoned rather than run on top of the
+        // answer this tick has just computed — UNLESS a cascade was not injected
+        // by it (the frame's rebuild injected it first, before this tick's outer
+        // cascades), in which case the chain is owed its settle.
+        if (!inMotion && mVctCascades.size() > 1u) {
+            if (refused) oweChainSettle();
+            else         noteChainSettled();
+        }
+    } JAH_CATCH(mError, );
 }
 
 GiStatus OgreScene::giStatus() const {
@@ -1186,6 +1175,8 @@ GiStatus OgreScene::giStatus() const {
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
         st.chainSweeps          = mGiChainSweeps;
+        st.chainInjectionRefusals   = mGiInjectionRefusals;
+        st.chainInjectionsPeakFrame = mGiInjectionsPeak;
         st.chainSettles         = mGiChainSettles;
         st.dragMovers           = int(mDragMovers.size());     // MOVER-1
         st.dragMoverGestures    = mDragMoverGestures;
@@ -4026,17 +4017,11 @@ bool OgreScene::giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after) {
 // shadowed, and `rayMarchStepScale` is how coarsely (FIX WAVE B5). Upstream:
 // bigger is faster and starts losing shadows; below 1.0 trips an assert.
 //
-// The document's value is the AT-REST one and defaults to 1.0, i.e. nothing
-// changes for a scene that never touches it. The engine raises it on ONE path:
-// the cheap re-injection that runs every few frames WHILE something is being
-// dragged (refreshGiLighting). That injection exists so bounced light follows
-// the drag; it is replaced by a full re-solve the moment the drag stops, so
-// spending less time on it is exactly the right trade — and it is the only
-// place in the engine where "this answer is about to be thrown away" is true.
-float OgreScene::giRayMarchStepScale(bool inMotion) const {
-    static const float kMotionRayMarchStepScale = 2.0f;
-    const float rest = std::max(1.0f, mGi.rayMarchStepScale);
-    return inMotion ? std::max(rest, kMotionRayMarchStepScale) : rest;
+// The document's value, default 1.0, on EVERY injection: the moving tick used
+// to raise it to 2 (and drop its bounces), which handed a volume a different
+// answer from the rebuild beside it — the one writer (PHOTON-WRITER-1) has one.
+float OgreScene::giRayMarchStepScale() const {
+    return std::max(1.0f, mGi.rayMarchStepScale);
 }
 
 
@@ -4312,14 +4297,11 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
         Ogre::Id::generateNewId<Ogre::VctLighting>(), mVctVoxelizer, anisotropic);
     // Document bounces are total (1 = one indirect bounce, which light injection
     // itself provides); VctLighting counts the extra propagation passes.
-    const Ogre::uint32 extraBounces =
-        Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-    mVctLighting->setAllowMultipleBounces(extraBounces > 0u);
-    // The environment, BEFORE the first update(): the bounce job reads it
-    // (applyVctEnvironment, OgreScene.cpp).
-    applyVctEnvironment();
-    mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                         giRayMarchStepScale(false));
+    mVctLighting->setAllowMultipleBounces(cascadeBounces(0) > 0u);
+    // A NEW VOLUME: nothing has injected it, whatever this frame did to the one
+    // it replaces. Then the first injection, through the one writer.
+    mGiSingleInjectedFrame = ~0ull;
+    injectCascade(0);
     // The materials this build read are the ones in force NOW.
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
     return itemCount;
@@ -4531,6 +4513,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
 
     mVctCascades.clear();
     mVctCascades.resize(table.size());
+    mGiTickOwed = GiTickOwed::None;      // every cascade is injected by this build
     // WHICH COLUMN OF THE TIER TABLE THIS CHAIN IS (V1-RIG fix round item 4).
     // Recorded at the build and not read back from the driver flag: the flag is
     // a live reading of who is driving and the CHAIN is what was built, and the
@@ -4598,9 +4581,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
             for (size_t j = i + 1u; j < table.size(); ++j)
                 c.lighting->addCascade(mVctCascades[j].lighting);
         }
-        applyCascadeEnvironment(c.lighting);
-        c.lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                           giRayMarchStepScale(false));
+        injectCascade(i);                 // a fresh VctCascade: never latched
         c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - tCascade).count());
         c.built = true;
@@ -4899,12 +4880,17 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
                                 "JAH_GI_CASCADE_FAULT_POST: forced failure after the build",
                                 "OgreScene::rebuildCascade");
             }
-            applyCascadeEnvironment(c.lighting);
-            c.lighting->update(mSceneMgr, cascadeBounces(idx), 1.0f /*thinWallCounter*/,
-                               true /*autoMultiplier*/, giRayMarchStepScale(false));
-            // ...AND THAT IS THE MOVING TICK'S ANSWER TOO (DRAG-1): this cascade
-            // has just been injected at its full bounce count with the scene's
-            // own ray march, which is exactly what refreshGiLighting would
+            // Nothing injects a chain cascade before the scheduler's rebuild in
+            // a frame (the host's tick is owed and runs after it), so the one
+            // writer cannot refuse this — a refusal would leave re-voxelised
+            // volumes lit for the old ones, which is why it is an error and not
+            // a skip here.
+            if (!injectCascade(idx))
+                OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
+                            "a rebuilt cascade was refused its injection",
+                            "OgreScene::rebuildCascade");
+            // ...AND THAT IS THE MOVING TICK'S ANSWER TOO (DRAG-1): the one
+            // writer's injection, which is exactly what refreshGiLighting would
             // compute for it, so the next in-motion tick skips it. See the tick.
             c.injectedSinceTick = true;
             c.injectedAtLightSerial = mGiLightWriteSerial;
@@ -5211,10 +5197,18 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // drives it so the suite proves the defect it guards against rather than
     // asserting a number that happens to pass (13.00/255 with it set, 0.00
     // without, measured on that suite's room).
-    if (rebuilt && mVctCascades.size() > 1u) {
-        mGiSettleCascades  = mVctCascades.size();
-        mGiSettleStepsOwed = kAtRestSweeps * int(mGiSettleCascades);
-        noteSettleInputs();          // the lights and ambient these steps must all see
+    if (rebuilt && mVctCascades.size() > 1u)
+        oweChainSettle();            // the lights and environment these steps must all see
+
+    // ---- 2b. THE HOST'S LIGHT TICK, AFTER THE REBUILD (the one writer) ------
+    // (PHOTON-WRITER-1; refreshGiLighting says why it is owed rather than run.)
+    // After the rebuild so the tick never lights voxels the rebuild replaces,
+    // and before the settle step so the step finds the cascades it would inject
+    // already injected this frame and waits.
+    if (mGiTickOwed != GiTickOwed::None) {
+        const bool rest = mGiTickOwed == GiTickOwed::Rest;
+        mGiTickOwed = GiTickOwed::None;
+        runChainTick(!rest);
     }
     if (!spent && mGiSettleStepsOwed > 0 && !std::getenv("JAHSHAKA_GI_NO_REBUILD_SETTLE")) {
         bool pending = false;
@@ -5231,11 +5225,13 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // One per gesture, never one per frame.
     if (mDragSettleOwed && !spent && mGiSettleStepsOwed == 0) {
         bool pending = false;
-        for (const VctCascade &c : mVctCascades)
-            if (c.pending) { pending = true; break; }
+        // ...and on a frame nothing has injected yet: the drag settle is a
+        // whole at-rest tick, and the one writer injects a cascade once a frame.
+        for (size_t i = 0; i < mVctCascades.size(); ++i)
+            if (mVctCascades[i].pending || injectedThisFrame(i)) { pending = true; break; }
         if (!pending) {
             mDragSettleOwed = false;
-            refreshGiLighting(false);
+            runChainTick(false);
             // ...AND ONLY NOW THE PHOTOGRAPHS. The object is GI geometry again,
             // at its new pose, in a chain that has been re-voxelised and
             // re-injected; this is the first frame a capture can hold the room
@@ -6626,6 +6622,8 @@ void OgreScene::teardownVct() {
     // which has just been injected by its own build.
     mGiSettleStepsOwed = 0;
     mGiSettleCascades  = 0;
+    // ...AND NO LIGHT TICK: the next chain's build injects every cascade.
+    mGiTickOwed = GiTickOwed::None;
     // ...AND IT OWES NO FIELD FOLLOW (V1-RIG item 2): the debt names a field
     // and a cascade that are about to stop existing, and whatever chain comes
     // next converges its field WHOLE in `buildIrradianceField`.

@@ -3538,6 +3538,16 @@ struct GiStatus {
     /// per burst of rebuilds. Cumulative over the scene's life; 0 in the
     /// single-volume arm, which has no chain to leave behind.
     long long chainSettles = 0;
+    /// THE ONE WRITER (PHOTON-WRITER-1). Every write to a voxel volume's light
+    /// goes through one engine function, and a volume is injected AT MOST ONCE
+    /// per frame. `chainInjectionRefusals` counts the second injections that
+    /// latch refused over the scene's life (the work is left owed, never
+    /// dropped) — 0 is the invariant, and a non-zero reading names a path
+    /// that asked twice. `chainInjectionsPeakFrame` is the most injections any
+    /// ONE frame has spent: at most the chain's size (a from-scratch build or
+    /// an at-rest tick injects every cascade once).
+    unsigned long long chainInjectionRefusals = 0;
+    unsigned chainInjectionsPeakFrame = 0;
     /// HOW MANY OBJECTS ARE RIDING THE MOVER CHANNEL BECAUSE THEY ARE BEING
     /// DRAGGED right now (MOVER-1, GiParams::dragMoverChannel). 0 in a still
     /// scene, 0 for ever with the rule off, and normally 1 during a drag — it

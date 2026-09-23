@@ -4562,6 +4562,14 @@ private:
         /// cascade 0, is the whole drag. The tick skips only when this still
         /// equals the scene's current light-write serial.
         unsigned long long injectedAtLightSerial = 0;
+        /// THE ONE-WRITER LATCH (PHOTON-WRITER-1): the writer frame
+        /// (`giWriterFrame()`) this cascade was last injected in. `injectCascade`
+        /// refuses a second injection of one cascade inside one frame. The two
+        /// fields above STAY beside it because they say something a per-frame
+        /// latch cannot: "a rebuild has injected this cascade since the last
+        /// MOVING TICK", and the ticks run every few frames, so that fact spans
+        /// frames.
+        unsigned long long injectedFrame = ~0ull;
         float        lastCpuMs = -1.0f;
         /// The camera position this cascade was last BUILT for. The scroll test
         /// quantises BOTH on an absolute world lattice of `step * (1 -
@@ -4602,9 +4610,37 @@ private:
     /// when the chain cannot answer at all (no chain, or nothing built yet), in
     /// which case the caller takes the from-scratch `rebuildVct`.
     bool refreshCascadesFast();
-    /// ONE DEFINITION OF AN AT-REST CASCADE INJECTION, shared by the light tick
-    /// and the incremental settle (LAMPREST-3 fix round).
-    void injectCascade(size_t i, bool coarse);
+    /// THE ONE WRITER (PHOTON-WRITER-1): the ONLY call to
+    /// `VctLighting::update` in the engine. Cascade `i` of the chain, or — with no
+    /// chain — the single volume as the arm's one "cascade" (i = 0). The
+    /// environment first, then the injection at the document's own bounce count
+    /// with the scene's own ray march: one answer per volume, whoever asks
+    /// (DRAG-1's rule, stated once). FALSE, and nothing written, when this
+    /// cascade has already been injected in this writer frame — the latch is
+    /// what makes "two writers on one volume in one frame" (render audit F3)
+    /// impossible rather than avoided; a refusal is counted
+    /// (GiStatus::chainInjectionRefusals) and every caller that can be refused
+    /// leaves its work owed rather than dropped.
+    /// `laterPass`: the at-rest tick's second and later sweeps, which re-inject
+    /// by construction (removed with the sweeps).
+    bool injectCascade(size_t i, bool laterPass = false);
+    /// Whether cascade `i` (or the single volume, i = 0) was injected in the
+    /// current writer frame.
+    bool injectedThisFrame(size_t i) const;
+    /// THE WRITER FRAME: Ogre's frame number, which moves inside
+    /// `_updateAllRenderTargets` — after every GI entry point of a frame (the
+    /// mirror's push, `updateGi`, `applyPendingGi`) and before the next frame's.
+    unsigned long long giWriterFrame() const;
+    /// The chain's light tick, run at the writer point (refreshGiLighting owes
+    /// it under a chain; updateCascades runs it after the frame's rebuild).
+    void runChainTick(bool inMotion);
+    /// The tick the host asked for this frame under a chain, not yet run.
+    enum class GiTickOwed { None = 0, Moving = 1, Rest = 2 };
+    GiTickOwed mGiTickOwed = GiTickOwed::None;
+    /// Owe the chain an at-rest settle over its current inputs (a rebuild, an
+    /// environment change, a refused tick): `kAtRestSweeps × n` injections, paid
+    /// one per frame by the scheduler, outermost first.
+    void oweChainSettle();
     /// The field re-integrates once, after the LAST injection of a tick or of a
     /// settle — never per injection.
     void reintegrateFieldAfterInjection();
@@ -4757,9 +4793,10 @@ private:
     /// the probe round-robin can never disagree about what moved.
     static float giAabbQuantum(const Ogre::Aabb &a);
     static bool  giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after);
-    /// The VCT light-injection ray-march step scale to use (FIX WAVE B5): the
-    /// document's at-rest value, raised on the cheap in-motion re-injection.
-    float giRayMarchStepScale(bool inMotion) const;
+    /// The VCT light-injection ray-march step scale (the document's value, at
+    /// least 1). ONE value: the moving tick's coarse march went with the one
+    /// writer (a volume's radiance must not depend on which path injected it).
+    float giRayMarchStepScale() const;
     /// THE REUSE ARM (FIX WAVE B4). Re-runs the EXISTING voxelizer and lighting
     /// over the live scene instead of tearing the arm down and building a new
     /// one, and re-dirties the probes without re-running the placement pass.
@@ -5477,10 +5514,17 @@ private:
     /// CEILING a frame may spend on stale probes. Reported by giStatus; what a
     /// frame actually spent is mProbeCapturesLastFrame.
     int mProbeUpdatesPerFrame = 0;
-    /// How many CASCADES the last in-motion light tick actually injected
-    /// (DRAG-1): the chain's size minus the cascades a rebuild had already
-    /// injected since the previous tick. 0 in the single-volume arm.
-    unsigned mGiChainInjections = 0;
+    /// THE ONE WRITER'S BOOKS (PHOTON-WRITER-1). The single volume's latch (a
+    /// chain keeps one per cascade, VctCascade::injectedFrame); the injections a
+    /// latch refused (GiStatus::chainInjectionRefusals — 0 is the invariant);
+    /// and the injections spent in the current writer frame and the most any one
+    /// frame has spent (GiStatus::chainInjectionsPeakFrame — at most the chain's
+    /// size once a tick is one sweep).
+    unsigned long long mGiSingleInjectedFrame = ~0ull;
+    unsigned long long mGiInjectionRefusals   = 0;
+    unsigned long long mGiInjectionCountFrame = ~0ull;
+    unsigned           mGiInjectionsThisFrame = 0;
+    unsigned           mGiInjectionsPeak      = 0;
     /// EVERY WRITE A LIGHT INJECTION WOULD READ (DRAG-1 round 2, F5): a light's
     /// parameters (setLight), its POSE (setNodeTransform on a node that owns
     /// one — a movable lamp never stales the probe grid, so nothing else sees
