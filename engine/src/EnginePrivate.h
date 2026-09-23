@@ -23,6 +23,7 @@
 // HlmsComputeJob and buildable on a platform with no ray queries.
 #include "GpuCull.h"
 #include "GpuScene.h"
+#include "GpuVoxelGather.h"
 
 #include <OgreRoot.h>
 #include <OgreAbiUtils.h>
@@ -119,7 +120,8 @@
 // clear pass that owns the inset's background colour (chain::PipHandles).
 // Forward-declared rather than included so the pass-def headers stay where they
 // belong — inside the .cpp files that build passes.
-namespace Ogre { class CompositorPassSceneDef; class CompositorPassClearDef;
+namespace Ogre { class VctMaterial;   // A5b §2: the one store a chain shares
+                 class CompositorPassSceneDef; class CompositorPassClearDef;
                  class CompositorPassQuadDef; class CompositorPassDef;
                  // Bone attachments (AVATAR_RIG_PERF_SPEC §4): a Node record
                  // holds a TagPoint*, and only OgreSockets.cpp does anything
@@ -4123,10 +4125,10 @@ private:
     /// The mean of the CENTRES of the GI items that fit inside `maxEdge` —
     /// "everything that is not scenery". False when the scene is only scenery.
     bool giContentCentre(float maxEdge, Ogre::Vector3 &centre) const;
-    /// Ogre::VctVoxelizer caches raw pointers twice over: addItem keeps raw
-    /// Item* until removeAllItems, and VctMaterial caches conversions by raw
-    /// datablock pointer across builds. So every geometry/material/texture
-    /// destroy path calls this BEFORE the object actually dies. The rebuild
+    /// The GI arms hold by-pointer state (the material store's conversions, keyed
+    /// on the datablock pointer; Instant Radiosity's caches), so every
+    /// geometry/material/texture destroy path calls this BEFORE the object
+    /// actually dies. The rebuild
     /// still happens ONCE at frame time (bursty destroys = one rebuild); the
     /// flush tears the whole arm down and re-voxelizes from the LIVE scene — or,
     /// under a cascade chain, marks only the cascades the change reaches (G1) —
@@ -4144,16 +4146,14 @@ private:
     /// voxeliser. A visibility edge destroys nothing at all: the Item, its
     /// mesh, its datablock and every pointer the GI arms hold are alive and
     /// unchanged — only the item SET the voxels should describe has changed,
-    /// and the reuse arm answers that by re-selecting (see refreshVctFast) and
-    /// the chain by `itemsStale` at each cascade's next rebuild. So a hide
-    /// became MORE expensive than a delete, which is upside down.
+    /// and every build's gather reads that set off the GPU scene's flags. So a
+    /// hide must not cost more than a delete.
     void invalidateGiCachesForVisibility(const Ogre::Aabb *where) {
         invalidateGiCaches(where, true, false);
     }
     /// `geometryVoxelsChanged == false` says NOTHING A VOXEL HOLDS MOVED — a
     /// LIGHT left the scene. The destruction generation still moves (Instant
-    /// Radiosity's by-pointer caches, the single arm's reuse rule) and the
-    /// cascades still re-select their item sets, but no cascade owes a
+    /// Radiosity's by-pointer caches, the single arm's reuse rule), but no cascade owes a
     /// RE-VOXELISATION: a light is answered by a re-injection, which is what the
     /// dirty path does when nothing geometric is marked (G1).
     void invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged,
@@ -4405,12 +4405,7 @@ private:
     /// (F5: one probe stale and one material-generation bump per frame,
     /// however many textures arrived together).
     bool giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged, bool &bumpVoxels) const;
-    /// P6/P7: the reuse arm's variant for a MATERIAL change — a fresh voxelizer
-    /// and lighting (VctMaterial's by-pointer cache must go) under the SAME
-    /// probe grid, whose shapes a material edit cannot move. Returns false
-    /// when it could not build (the caller falls back to rebuildVct).
-    bool freshVoxelArm(const Ogre::Aabb &aabb);
-    /// The voxelizer + lighting half of rebuildVct, shared with freshVoxelArm:
+    /// The voxelizer + lighting half of rebuildVct:
     /// builds mVctVoxelizer/mVctLighting over `aabb` from the live GI items.
     /// Returns the item count (0 = nothing built, both left null).
     size_t buildVoxelArm(const Ogre::Aabb &aabb);
@@ -4419,7 +4414,8 @@ private:
     //
     // N camera-centred rasterising VctVoxelizer + VctLighting pairs, chained
     // through VctLighting::addCascade on the innermost one, scheduled BY US.
-    // Upstream's VctCascadedVoxelizer is not used and cannot be: it hard-wires
+    // Upstream's VctCascadedVoxelizer was never used and is deleted from our fork
+    // (ATOM-VOXEL-2, with VctImageVoxelizer): it hard-wired
     // VctImageVoxelizer (measured in spikes/photon-s1 to reproduce none of the
     // rasteriser's bounce), it rebuilds every dirty cascade in one frame with
     // no budget, and its buildRelative has no guard against a camera jump
@@ -4429,6 +4425,14 @@ private:
     // object bound to HlmsPbs — so every existing binding, teardown, status
     // and irradiance-field rule keeps working unchanged; mVctCascades[0]
     // mirrors those two pointers and 1..N-1 are owned here.
+    /// What a voxel gather is asked (GpuVoxelGather.h's params, in engine terms).
+    struct VoxelGatherInputs {
+        float cell = 0.0f;          ///< the volume's cell, metres (the level rule's sample)
+        float tolerance = 0.0f;     ///< kCascadeLodCellFraction; 0 = level 0 always
+        float minExtent = 0.0f;     ///< rule 2's floor; 0 = keep everything
+        bool  lod = false;          ///< walk the level rule
+        const std::vector<uint32_t> *budgetMask = nullptr;   ///< the budget's pick, or none
+    };
     struct VctCascade {
         Ogre::VctVoxelizer *voxelizer = nullptr;   ///< owned, except [0]
         Ogre::VctLighting  *lighting  = nullptr;   ///< owned, except [0]
@@ -4440,27 +4444,18 @@ private:
         long long    latticeX = 0, latticeY = 0, latticeZ = 0;
         Ogre::Vector3 centre = Ogre::Vector3::ZERO;
         bool         built   = false;
-        /// Whether this cascade's voxeliser currently holds the GI items. A
-        /// cascade standing in empty space holds none (setCascadeItems).
-        bool         itemsAttached = false;
-        /// The SET it holds is out of date — an object entered or left the GI
-        /// geometry channel (audit D2). Re-derived at this cascade's next
-        /// rebuild, never immediately: nothing about the picture is wrong until
-        /// the cascade re-voxelises anyway.
-        bool         itemsStale = false;
-        /// THIS CASCADE'S VOXELISER ITSELF IS UNSAFE OR STALE (G1). `VctMaterial`
-        /// converts each datablock once and caches the result by RAW POINTER for
-        /// the voxeliser's whole life, so a material parameter that changed — or
-        /// a datablock that died and whose address may be recycled — can only be
-        /// answered by a NEW voxeliser. Serviced one cascade per frame by
-        /// `rebuildCascade`, which swaps the replacement into the EXISTING
-        /// lighting (`VctLighting::setVoxelizer`, ogre-patch 0037) so the
-        /// chain's raw `mExtraCascades` pointers never dangle.
-        bool         freshVoxels = false;
-        /// How many GI items THIS cascade's last rebuild voxelised — inside its
-        /// box and big enough to fill half a voxel of it, re-counted on every
-        /// rebuild (the attach set is bigger and deliberately so: rule 1).
-        unsigned     items = 0;
+        /// THIS CASCADE'S FEED (ATOM P4b): the records a gather writes on the
+        /// device and this cascade's voxeliser reads, the ranges, and the readout
+        /// of what it voxelised. ONE PER CASCADE so a rebuild can never overwrite
+        /// records another cascade's recorded dispatches are about to read. Owned
+        /// by pointer so the vector of cascades can move without copying buffers.
+        /// `itemsAttached`, `itemsStale` and `attachedItems` are GONE: nothing is
+        /// attached any more (the gather re-reads every predicate from the GPU
+        /// scene on every rebuild), so there is no set to hold, stale or compare.
+        std::unique_ptr<detail::VoxelFeed> feed;
+        /// WHAT THIS CASCADE VOXELISED - items, attach set, levels, triangles - is
+        /// no longer a CPU member: it is the feed's READOUT, counted on the device
+        /// as the records were written and read by giStatus (`VoxelFeed::reading`).
         /// This cascade is BEHIND the camera and owes a rebuild — a flag, not a
         /// queue: a rebuild always happens at the CURRENT camera, so owing two
         /// of them is the same as owing one.
@@ -4470,36 +4465,6 @@ private:
         /// when the dirty path marked it (G1), so a capture can separate the
         /// cost of walking around a scene from the cost of changing it.
         GiStaleReason pendingReason = GiStaleReason::Camera;
-        /// WHAT THE VOXELISER HOLDS, in attach order (PHOTON_SPEC E2 (1)).
-        /// Empty without an instance budget — the set is then the whole
-        /// size-filtered scene and cannot change without an edge, so there is
-        /// nothing to remember. Under a budget it is the pick, and comparing it
-        /// against the next pick is what keeps a scroll that changed nobody's
-        /// rank from re-uploading every mesh buffer.
-        std::vector<Ogre::Item *> attachedItems;
-        /// THE LEVELS THE ATTACH SET WAS VOXELISED AT (ATOM stage 1), as a
-        /// histogram: `lodLevels[L]` items at level L. Filled by
-        /// setCascadeItems at the one site that hands geometry to the
-        /// voxeliser, so it describes what the voxeliser HOLDS and not what a
-        /// walk would decide now. `{N}` for a scene with no baked LOD chains.
-        std::vector<int> lodLevels;
-        /// THE LEVELS THE VOXELISER ACTUALLY SPENT (ATOM P4 / AT-A10) - a READING,
-        /// taken off the voxeliser after every `build()` through
-        /// `VctVoxelizer::getLevelHistogram()`. The pair of `lodLevels` above,
-        /// which is the request - but in PARTITIONS, not items (see
-        /// GiStatus::CascadeStatus::voxelLevels): which LEVELS are non-zero must
-        /// match, the counts only for meshes under one partition. A level present
-        /// in one and absent from the other means the voxeliser clamped.
-        std::vector<int> voxelLevels;
-        /// THE TRIANGLES THE VOXELISER ACTUALLY HOLDS — a READING, taken off the
-        /// voxeliser after every `build()` through ogre-patch 0089's
-        /// `getQueuedIndexCount()` (the sum of `QueuedInstance::numIndices`, which
-        /// is what sizes each raster dispatch). It was a CPU prediction until
-        /// ATOM-BAKE-1 (inventory row AT-A12): a walk of each mesh's VAOs at the
-        /// level just requested, re-applying patch 0064's clamp in a second copy
-        /// of it and counting items the region had declined. 0 between an attach
-        /// and the build that follows it, which is honest — nothing is bound yet.
-        long long lodTriangles = 0;
         /// This cascade's queued rebuild came from the JUMP guard, not from an
         /// ordinary scroll — i.e. nothing of its old volume was reusable.
         /// Cleared when the rebuild is serviced, and counted there, so the
@@ -4594,14 +4559,9 @@ private:
     /// moved — a light leaving the scene — which is what makes that a
     /// re-injection and nothing else.
     void noteGiCascadeDirty(const Ogre::Aabb *box);
-    /// A DATABLOCK OR TEXTURE THE VOXELISERS' MATERIAL CACHE HOLDS IS DYING.
-    /// Under cascades, marks every cascade for a voxeliser REPLACEMENT, spent
-    /// one per frame — see VctCascade::freshVoxels. A strictly narrower thing
-    /// than `invalidateGiCaches`: a dead Item or Mesh is answered by re-selecting
-    /// a voxeliser's item set (`removeAllItems` drops every raw `Item*` and every
-    /// cached mesh in one call), while only a dead DATABLOCK or TEXTURE can
-    /// outlive that, because `VctMaterial` keys its conversion cache on the
-    /// datablock POINTER and a recycled address would alias.
+    /// A DATABLOCK OR TEXTURE THE MATERIAL STORE HOLDS IS DYING. `VctMaterial`
+    /// keys its conversions on the datablock POINTER and a recycled address
+    /// would alias.
     /// THE BY-POINTER ALIAS GUARD (MATERIAL-SWAP-GI-1, patch 0081): VctMaterial
     /// caches conversions by raw datablock pointer across builds, so a dying
     /// datablock is EVICTED from every live voxeliser's cache — no volume is
@@ -4623,25 +4583,30 @@ private:
     void updateCascades(const Ogre::Vector3 &camPos);
     /// Destroys cascades 1..N-1 (cascade 0 is teardownVct's own business).
     void teardownExtraCascades();
-    /// How many GI items this cascade would voxelise reach into its box — the
-    /// per-rebuild count `GiStatus::cascades[].items` reports, and (as
-    /// `count > 0`) the answer to "may this cascade be built with items
-    /// attached at all", which Ogre cannot be asked.
-    unsigned cascadeGeometryCount(const VctCascade &c) const;
-    /// How many items this cascade's voxeliser HOLDS with no instance budget
-    /// (GiStatus::cascades[].attached's other half).
-    unsigned cascadeAttachCount(const VctCascade &c) const;
-    /// The same walk, and (with `keep`) the set to ATTACH — the instance
-    /// budget's selection when `GiParams::cascadeInstanceCap` is set.
-    unsigned selectCascadeItems(const VctCascade &c, std::vector<Ogre::Item *> *keep) const;
-    /// WHICH mesh LOD a cascade voxelises an item at (ATOM-1). 0 until the
-    /// levels exist; the rule and what it is waiting for are at the definition.
-    unsigned cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item) const;
-    /// Attaches or detaches the SIZE-FILTERED GI item set on one cascade's
-    /// voxeliser (whole, never box-filtered: Ogre culls it to the region per
-    /// build). A cascade with nothing in its box builds an EMPTY volume instead
-    /// of throwing (the pin's zero-thread-group refusal).
-    void setCascadeItems(VctCascade &c, bool attach);
+    /// THE INSTANCE BUDGET'S PICK (GiParams::cascadeInstanceCap > 0) as a bit per
+    /// instance slot, for the gather to test. The ONE CPU walk left on the voxel
+    /// path, and only when the opt-in budget is on: its ranking (reach, size in
+    /// cells, distance) is a partial sort, and a GPU top-K was not in this lane.
+    void budgetMaskFor(const VctCascade &c, std::vector<uint32_t> &mask) const;
+    /// What one cascade's gather is asked: rule 2's floor, the level rule's terms,
+    /// the budget's pick (filled into `mask` when a budget is on).
+    VoxelGatherInputs cascadeGatherInputs(const VctCascade &c, std::vector<uint32_t> &mask) const;
+    /// ONE VOXEL BUILD, fed on the device (ATOM P4b): the owed material work inside
+    /// the store's bracket, the GPU scene brought current, the partitions, the
+    /// gather, and the voxeliser's build over what the gather wrote.
+    bool gatherAndBuild(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxelizer,
+                        const VoxelGatherInputs &in);
+    /// How many items carry the GI geometry channel (the arms' existence test).
+    unsigned countGiItems() const;
+    /// The three gather jobs over the GPU scene into `feed`, and the voxeliser bound
+    /// to it (OgreGpuVoxelGather.cpp).
+    bool runVoxelGather(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxelizer,
+                        const VoxelGatherInputs &in);
+    /// A feed's reading, current: a finished readout is taken, one still in flight
+    /// is waited for (its work is already submitted - the ticket commits). For
+    /// giStatus, a diagnostic; nothing per-frame reads it.
+    static const detail::VoxelReading &currentReading(detail::VoxelFeed *feed);
+    void serviceVoxelReadouts();
     /// Destroys a chain that never finished building (nothing is bound yet, so
     /// cascade 0 belongs to it too). Returns 0 — it is a JAH_CATCH value.
     size_t abandonCascadeChain();
@@ -5170,7 +5135,36 @@ private:
     /// will ask for it (the GI signatures, when V2-1 makes that affordable) are
     /// const, and a facility that only a non-const path can refresh would put
     /// the const-cast at every call site instead of here.
+    /// THE ONE MATERIAL STORE THE WHOLE CHAIN SHARES (A5b §2) and its bracket.
+    /// Created lazily before the first voxeliser, destroyed after the last.
+    Ogre::VctMaterial *vctMaterialStore();
+    void destroyVctMaterialStore();
+    void beginVctMaterialBracket();
+    void endVctMaterialBracket();
+
+    void bindGeometrySource(Ogre::VctVoxelizer *v);
+    uint32_t gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const;
+    /// Inside a GI build's bracket: the owed store refresh, then every pending slot's
+    /// datablock converted and its slot marked for re-composition.
+    void convertPendingMaterials();
+    /// A from-scratch arm: every GI-visible slot queued for conversion (the store may
+    /// not have seen any of them - GI was off, or the store is new).
+    void queueAllGiMaterials();
+
+    Ogre::VctMaterial *mVctMaterialStore = nullptr;
+    /// Slots whose material word is "none" because the store had not converted their
+    /// datablock when the scan composed them (gpuMaterialWordFor). Mutable because the
+    /// composer is const; drained by the next GI build, inside its bracket.
+    mutable std::vector<uint32_t> mVctPendingMaterialSlots;
+    /// A material's voxel inputs may have changed (an edit, a texture that finished
+    /// streaming, a from-scratch arm): the next GI build re-reads EVERY converted
+    /// datablock in place (VctMaterial::refreshAll) before it gathers.
+    bool mVctMaterialRefreshOwed = false;
+
     mutable detail::GpuScene mGpuScene;
+    /// Said once: a mesh with more submeshes than the geometry row table holds
+    /// (GpuScene::kSubmeshesPerMesh). Every mesh this engine bakes has one.
+    mutable bool mWarnedGeomSubmeshes = false;
     /// ATOM P3's CULL — its result buffers, sized to the table's capacity and
     /// grown with it (GpuCull.h). Owned per SCENE because that is what the
     /// tables it reads are owned by; a consumer that wants two culls of one
@@ -5531,12 +5525,10 @@ private:
     /// THE MATERIAL GENERATION (ENGINE_CACHE_POLICY_SPEC P7). Bumped when a
     /// parameter the VOXELIZER reads (albedo, emissive, alpha, workflow, the
     /// albedo/emissive maps) changes on a material that GI geometry uses.
-    /// VctMaterial converts each datablock ONCE and caches the result by
-    /// pointer for the voxelizer's lifetime (OgreVctMaterial.cpp addDatablock:
-    /// a cache hit never re-reads the colour), so the reuse arm would re-voxelize
-    /// the OLD albedo for ever. refreshVctFast compares the generation it built
-    /// the voxel arm at and, when it moved, builds a FRESH voxelizer and
-    /// lighting under the probes it keeps (freshVoxelArm). Reported as its
+    /// A voxel input on a material a GI item wears changed. The bump marks the
+    /// shared store's in-place refresh owed (VctMaterial::refreshAll re-reads every
+    /// row and re-copies the texture pool), and the arms re-run the SAME voxelisers:
+    /// the reuse arm for the single volume, a dirty hit on every cascade. Reported as its
     /// own term (giMaterialSignature), so the host's debounce coalesces a
     /// slider drag into one re-voxelize when it stops WITHOUT running the
     /// light re-inject cadence a material cannot need.
@@ -5592,7 +5584,11 @@ private:
     /// size: measured at **79 ms of CPU per refresh** on the 8,404-node lattice
     /// (PHOTON_SPEC P0 §6.4), i.e. five frames' worth of budget spent deciding
     /// that nothing had been added.
-    std::unordered_set<NodeId> mVctItemIds;
+    /// THE SINGLE VOLUME'S FEED (ATOM P4b) - the chain's cascades carry their own.
+    /// `mVctItemIds` (the reuse arm's record of the GI set, and the O(N) set compare
+    /// it fed) is DELETED: the gather re-reads every predicate from the GPU scene on
+    /// every build, so there is no set to hold or compare.
+    std::unique_ptr<detail::VoxelFeed> mVctFeed;
     /// Live decals in THIS scene. The SceneManager-level atlas binding is
     /// driven off the count (see refreshDecalBindings).
     unsigned            mDecalCount = 0;

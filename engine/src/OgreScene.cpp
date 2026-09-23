@@ -585,7 +585,6 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     // A STRUCTURAL INPUT to the GI scans and the two signatures: which channel
     // an object is in decides whether they read it at all (clean-2 lane).
     noteSceneTransformWrite();
-    const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
     // The material's unlit-ness was recorded when the geometry attached, so a
     // lit mesh that is marked helper and then unmarked gets its kGiGeometryBit
     // back. Reading it off the item's CURRENT flags could not do that: a helper
@@ -593,17 +592,9 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     if (n.item) n.item->setVisibilityFlags(
                     itemVisibilityFlags(n, n.materialUnlit, n.materialDistortion));
     if (n.item) markGpuSlotDirty(n);   // the table's flags word follows the channels
-    // ...AND A CASCADE CHAIN HOLDS ITS OWN COPY OF THAT DECISION (audit D2).
-    // Each cascade's voxeliser is given the GI item set ONCE and re-selects
-    // only when it flips between empty and non-empty (rule 1), so an object
-    // that stops being GI geometry — a Soft play-time promotion to a mover, a
-    // hide, a helper flag — stayed in every voxeliser and was re-voxelised AT
-    // ITS LIVE POSE on the next scroll: the exact opposite of the single arm's
-    // ghost, and of "movers never dirty a cascade". Marking the selection stale
-    // costs nothing now; each cascade re-derives its set at its next rebuild.
-    const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
-    if (giBefore != giAfter)
-        for (VctCascade &c : mVctCascades) c.itemsStale = true;
+    // (A CASCADE CHAIN NO LONGER HOLDS ITS OWN COPY OF THAT DECISION, audit D2:
+    // the gather reads the flags word the line above re-stages, at every build,
+    // so a hide or a helper flag leaves every cascade's next rebuild by itself.)
     // THE TWO-BIT RULE REACHES BILLBOARDS TOO (VR-4-FIX finding 9): a helper
     // billboard set — an icon, and a phase-4b hit marker if it is built as one
     // — carries kVrHelperBit beside kHelperBit exactly as an Item does, or the

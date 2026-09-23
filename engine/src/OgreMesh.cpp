@@ -199,13 +199,14 @@ private:
     /// (`applyLodValues`, which writes `MeshData::lodBounds` straight in) and
     /// this value is a WORLD length, so a 10x-scaled instance compared against
     /// a bound measured in mesh units used to take a level whose real deviation
-    /// was ten times what it asked for — the cascade (`OgreScene::cascadeVoxelLod`)
-    /// and the GPU cull always divided by the instance's scale and the strategy
-    /// did not (ATOM-SUBSTRATE-1 finding, 2026-09-22; fixed by ATOM-RESUMES-1
-    /// item 1, which also made the strategy the third copy under
-    /// `engine.lod_rule_parity`). A scaled instance's picture MOVES with the
-    /// fix, and correctly so: an unscaled one's does not, because the ratio is
-    /// exactly 1 there.
+    /// was ten times what it asked for — the cascade's rule (the voxel gather,
+    /// `OgreScene::cascadeGatherInputs`) and the GPU cull always divided by the
+    /// instance's scale and the strategy did not (ATOM-SUBSTRATE-1 finding,
+    /// 2026-09-22; fixed by ATOM-RESUMES-1 item 1, which also made the strategy
+    /// the third copy under `engine.lod_rule_parity`; the scale is the longest
+    /// COLUMN everywhere since ATOM-VOXEL-2 — `worldMaxAxisScale`). A scaled
+    /// instance's picture MOVES with the fix, and correctly so: an unscaled
+    /// one's does not, because the ratio is exactly 1 there.
     static Ogre::Real worldPerPixel(const Ogre::Camera *camera)
     {
         // A pass whose camera has never been given a viewport cannot be
