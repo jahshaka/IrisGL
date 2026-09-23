@@ -461,10 +461,10 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
 // ---------------------------------------------------------------------------
 namespace {
 struct FsVertex {
-    float px, py, pz;      // POSITION: clip-space xy
-    float nx, ny, nz;      // NORMAL
-    float tx, ty, tz, tw;  // TANGENT4
-    float u, v;            // UV0
+    float px = 0, py = 0, pz = 0;              // POSITION: clip-space xy
+    float nx = 0, ny = 0, nz = 0;              // NORMAL
+    float tx = 0, ty = 0, tz = 0, tw = 0;      // TANGENT4
+    float u = 0, v = 0;                        // UV0
 };
 // Clip space, z = 0, w = 1: the decode neither tests nor writes depth (the twin's
 // macroblock says so); the id image alone decides coverage.
