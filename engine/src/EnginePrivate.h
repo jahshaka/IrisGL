@@ -5143,11 +5143,6 @@ private:
     Ogre::uint32                      mIfdTotalProbes     = 0;
     Ogre::uint32                      mIfdProbesDone      = 0;
     Ogre::uint32                      mIfdProbesPerFrame  = 0;
-    /// The smallest batch that still dispatches at least one compute work
-    /// group. Below it, `HlmsCompute::compileShader` throws at frame time and
-    /// nothing catches it (spike §4) — so it is a floor the engine enforces,
-    /// not a number it reports.
-    Ogre::uint32                      mIfdMinProbes       = 0;
     /// THE VOLUME THE FIELD IS PLACED OVER, as asked for (the field enlarges it
     /// by one probe block per side for itself). Recorded so the scheduler can
     /// tell a cascade-0 re-placement from a plain re-voxelisation at the same

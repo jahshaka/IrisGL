@@ -345,18 +345,20 @@ static const Ogre::uint8 kIfdIrradRes  = 6u;
 // THE TARGET, DERIVED FROM THE STORE THE RAYS READ: the estimator need not be more
 // precise than what it integrates. The field's hardest case - a source of about one
 // ray's solid angle, gi.field_thin_wall's one-voxel wall - is uncertain THROUGH THE
-// STORE by the trilinear half-cell at its envelope's edge: 1 - ((n-1)/n)^2 = 0.160 of
-// its irradiance at n = 12 cells. K is the smallest sample count whose two-sigma
-// error sits inside that: K = ceil((2 sigma / 0.160)^2) with sigma = 0.40, one
-// integration's relative standard deviation there (0.33-0.35 measured on the GPU,
-// 0.38-0.41 simulated) -> 25. (A 5 % target would be 64: 2.5x the refinement for a
-// precision the store cannot show.) An ordinary lit room's probes read 2 % (median)
-// per integration, so everywhere else the field is converged long before K. The
-// cost is time, not frames: K whole-grid passes at the update budget after an event
+// STORE by the trilinear half-cell at its envelope's edge: e = 1 - ((n-1)/n)^2 =
+// 0.1597 of its irradiance at n = 12 cells (a MODEL of the edge: a symmetric blur of a
+// box keeps its integral; the compositing at the edge is what breaks that). K is the
+// smallest count whose two-sigma error sits inside it, K = ceil((2 sigma / e)^2).
+// THE CONVENTION, stated honestly: sigma is the MEASURED worst of one sample on that
+// fixture - 0.389 on the GPU (gi.field_alias, which re-derives it: 24) - and 25 is
+// that derivation plus one sample of margin. At the simulated 0.40 the same formula
+// gives 26 (25.1 rounded up), so 25 covers sigma <= 0.399. An ordinary lit room's
+// probes read 2 % (median) per sample and are converged long before K; they pay the
+// K passes anyway (a per-probe variance stop is the recorded saving, F7). The cost
+// is time, not frames: K whole-grid passes at the update budget after an event
 // (about 8 K = 200 frames at budget 1), a pass skipping every probe already at K.
 // Every event's own pass - a build's included - is the first sample everywhere
-// (unbiased, every probe valid); a PAUSED field (budget 0) refines nothing and
-// stays at that sample.
+// (unbiased, every probe valid); a PAUSED field (budget 0) targets one sample.
 static const Ogre::uint32 kIfdTargetSamples = 25u;
 // A LIGHT CHANGE REPLACES (keep 0): the history integrated the OLD light, so the
 // first integration after a change is the probe's value - the latency of the old
@@ -1116,7 +1118,6 @@ GiStatus OgreScene::giStatus() const {
         // HlmsPbs pointer, not against what was requested or who bound last.
         st.ifdBound          = mIfd && pbs->getIrradianceField() == mIfd;
         st.ifdProbes         = int(mIfdTotalProbes);
-        st.ifdConverged      = mIfd && mIfdProbesDone >= mIfdTotalProbes;
         st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
         if (mIfd) {
             st.ifdMin = toV(mIfdVolumeOrigin);
@@ -1129,6 +1130,18 @@ GiStatus OgreScene::giStatus() const {
         st.ifdTargetSamples = mIfd ? unsigned(mIfd->getTargetSamples()) : 0u;
         st.ifdRefinesOwed   = mIfd ? unsigned(mIfd->getRefinesOwed() +
                                               (mIfd->isWorkDone() ? 0u : 1u)) : 0u;
+        {
+            // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest).
+            bool cascadePending = mGiCascadeDirtyAll || !mGiCascadeDirtyBoxes.empty();
+            for (const VctCascade &c : mVctCascades) cascadePending = cascadePending || c.pending > 0;
+            const bool rebuildPending = mGiCachesDirty || mGiChainShapeDirty ||
+                                        mGiBuildStage != GiBuildStage::Idle || cascadePending;
+            const bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None;
+            const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
+                                   (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes ||
+                                    (mIfdProbesPerFrame > 0u && st.ifdRefinesOwed > 0u));
+            st.giAtRest = !rebuildPending && !injectionOwed && !fieldBusy;
+        }
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
         st.probeCapturesDeferred  = mProbeCapturesDeferred;
@@ -6392,6 +6405,9 @@ void OgreScene::buildIrradianceField() {
             if (n >= 1 && n <= 4096) targetSamples = Ogre::uint32(n);
         }
         const bool rotateRays = std::getenv("JAHSHAKA_GI_FIELD_STATIC") == nullptr;
+        // A PAUSED budget integrates nothing progressively, so its target is the one
+        // sample every event's own pass writes inline: it owes nothing after it.
+        if (mGi.updateBudget <= 0) targetSamples = 1u;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
         // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM — whichever arm
@@ -6448,9 +6464,6 @@ void OgreScene::buildIrradianceField() {
         mIfdTotalProbes    = total;
         mIfdProbesDone     = 0u;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
-        // One work group per probe (PHOTON-FIELD-ROTATE-1): any batch dispatches, so
-        // the old dispatch floor is 1 and nothing reads it.
-        mIfdMinProbes      = 1u;
 
         // CONVERGE NOW, in one dispatch, BEFORE binding. Two reasons and both
         // are load-bearing. (1) A freshly created atlas holds whatever the
@@ -6524,7 +6537,7 @@ void OgreScene::teardownIrradianceField() {
     // a field, so a debt outliving its field could only be paid into the next
     // one — which converges WHOLE at its build and owes nothing.
     mIfdFollowOwed = 0;
-    mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = mIfdMinProbes = 0u;
+    mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = 0u;
     mIfdVolumeOrigin = mIfdVolumeSize = Ogre::Vector3::ZERO;
     mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
     mIfdFollows = 0;
@@ -6623,7 +6636,7 @@ void OgreScene::updateIrradianceField() {
 // budget's frames (1,024 a frame at budget 1). What it buys is that the frame
 // which moved the field is already showing the right answer; measured with the
 // progressive policy forced, the field is never converged at all while the
-// camera keeps walking (`ifdConverged` false for the whole 100 m), so every
+// camera keeps walking (the field never converged for the whole 100 m), so every
 // frame of a walk would carry a mixture of two placements. In a uniform scene
 // that mixture is invisible (the lane measured 0.0 % difference on the suite's
 // ground band, both policies); the size of the error is exactly how much the
