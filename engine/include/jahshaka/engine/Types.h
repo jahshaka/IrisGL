@@ -2650,6 +2650,12 @@ struct GiQualityFacts {
     /// land, inside this budget, and a light write relights the resident set
     /// over as many frames as it takes.
     unsigned cardLightTexels = 131072u;
+    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (six cones
+    /// over the chain) per texel, spent when a card is captured and when the
+    /// chain re-injects. Lumen's own indirect budget, 512 square, is the
+    /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
+    /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
+    unsigned cardIndirectTexels = 32768u;
     // ---- THE ATOM COLUMN (ATOM P3's SUB-ERROR) -----------------------------
     /// THE TIER'S GEOMETRIC TOLERANCE, in SAMPLES of whatever is sampling —
     /// pixels for a view, cells for a cascade. It is the `tolerance` argument of
@@ -2696,6 +2702,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
         f.cardResidencyRadius = 15.0f;
         f.cardLightTexels = 65536u;     // 4 pages a frame
+        f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.pixelTolerance = 2.0f;        // the Atom column; see the field
         break;
     case GiQuality::High:
@@ -2713,6 +2720,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardBudgetTexels = 81920u;    // 5 cards a frame ~ 1.0 ms on the measured cost
         f.cardResidencyRadius = 60.0f;
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
+        f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         break;
     default:   // Medium: the same reach as High, at its own resolution
@@ -2726,6 +2734,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.6 ms
         f.cardResidencyRadius = 30.0f;
         f.cardLightTexels = 131072u;    // 8 pages a frame
+        f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
         break;
     }
@@ -2764,6 +2773,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardBudgetTexels = std::max(f.cardBudgetTexels, 16384u);
         // ...and the relight budget with it, on the same floor for the same reason.
         f.cardLightTexels = std::max(f.cardLightTexels / 2u, 16384u);
+        f.cardIndirectTexels = std::max(f.cardIndirectTexels / 2u, 16384u);
     }
     return f;
 }
@@ -3076,8 +3086,13 @@ struct CardSample {
     float roughness = 0.0f;             ///< the GGX ALPHA (perceptual squared), through patch 0043's range
     /// THE LIT CARD (the sixth layer, `Jahshaka/CardLight`): the texel's
     /// outgoing diffuse radiance — direct from the scene's lights (the sun
-    /// through `shadow`) plus the emissive. 0 until the card has been relit.
+    /// through `shadow`) plus the indirect below plus the emissive. 0 until
+    /// the card has been relit.
     float radiance[3] = { 0, 0, 0 };
+    /// ...and its cached INDIRECT half alone (the voxel march from the texel x
+    /// kD x pi x the diffuse energy factor — BRDF_EnvMap's arithmetic); 0 until
+    /// the card's indirect has been marched.
+    float indirect[3] = { 0, 0, 0 };
 };
 
 /// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model
@@ -3145,6 +3160,16 @@ struct CardCacheStatus {
     unsigned long long relights = 0ull;
     unsigned long long invalidRadiance = 0ull;
     float lightMs = 0.0f;
+    /// THE INDIRECT HALF's own budget and counters: cards and texels whose
+    /// voxel march ran last frame, marches for the life of the cache, the
+    /// re-injections that staled the resident set's indirect (one per burst),
+    /// and whether the last relight had a chain to march at all.
+    unsigned indirectBudgetTexels = 0u;
+    unsigned indirectLastFrame = 0u;
+    unsigned indirectTexelsLastFrame = 0u;
+    unsigned long long indirectRelights = 0ull;
+    unsigned long long invalidIndirect = 0ull;
+    bool indirectOn = false;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same

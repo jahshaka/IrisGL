@@ -140,9 +140,16 @@
 			"threads_per_group" : [8, 8, 1],
 			"thread_groups" : [16, 16, 1],
 			"source" : "JahCardLight_cs",
-			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any"],
 			"inform_shader_of_texture_data_change" : true,
-			"uav_units" : 3
+			"uav_units" : 5,
+			"properties" :
+			{
+				"vct_anisotropic" : 0,
+				"hlms_num_vct_cascades" : 0,
+				"jah_env" : 0,
+				"vct_cone_dirs" : 4
+			}
 		},
 
 		"Jahshaka/HzbReduce" :

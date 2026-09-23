@@ -1874,6 +1874,35 @@ void OgreScene::updateSurfaceCache() {
     }
     view.radianceSerial = radianceSig;
     view.lightBudgetTexels = facts.cardLightTexels;
+    // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0
+    // VctLighting the pass buffer is filled from), and THE RE-INJECTION
+    // SIGNATURE — every path that re-injects the chain moves one of these: a
+    // light tick follows a light write (mGiLightWriteSerial), a settle counts
+    // itself (mGiChainSettles), a rebuild counts itself (mGiRebuilds and each
+    // cascade's own), a voxel-input edit bumps the material generation, and a
+    // scroll re-centres a cascade (its lattice cell).
+    view.vct = mVctLighting;
+    view.indirectBudgetTexels = facts.cardIndirectTexels;
+    {
+        unsigned long long sig = 1469598103934665603ull;
+        const auto foldI = [&sig](unsigned long long v) {
+            sig ^= v;
+            sig *= 1099511628211ull;
+        };
+        foldI(mGiLightWriteSerial);
+        foldI((unsigned long long)mGiChainSettles);
+        foldI(mGiRebuilds);
+        foldI(mGiMaterialGeneration);
+        foldI((unsigned long long)(uintptr_t)mVctLighting);
+        for (const VctCascade &c : mVctCascades) {
+            foldI((unsigned long long)(uintptr_t)c.lighting);
+            foldI(c.rebuilds);
+            foldI((unsigned long long)c.latticeX);
+            foldI((unsigned long long)c.latticeY);
+            foldI((unsigned long long)c.latticeZ);
+        }
+        view.indirectSerial = sig;
+    }
 
     // THE CANDIDATE LIST — THE SCENE'S OWN WALK, handed over rather than
     // reached for. The predicate is the same one the voxel side uses, and each

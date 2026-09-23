@@ -11,6 +11,9 @@
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
+#include <OgreHlmsPbs.h>
+#include <Vct/OgreVctLighting.h>
+#include <Vct/OgreVctVoxelizerSourceBase.h>
 #include <OgreDescriptorSetTexture.h>
 #include <OgreDescriptorSetUav.h>
 #include <OgreMesh2.h>
@@ -303,6 +306,16 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     mRadiance->setPixelFormat(radFmt);
     mRadiance->setNumMipmaps(1u);
     mRadiance->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    // ...and THE CACHED INDIRECT HALF, the march's answer per texel (Lumen's
+    // IndirectLighting atlas): the expensive half is recomputed only when the
+    // chain re-injects, and a direct-only relight reads it back. Same format,
+    // read and written by the same job. +16 MB.
+    mIndirect = tm->createTexture(processUniqueName("cardIndirect"), Ogre::GpuPageOutStrategy::Discard,
+                                  Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+    mIndirect->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
+    mIndirect->setPixelFormat(radFmt);
+    mIndirect->setNumMipmaps(1u);
+    mIndirect->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
 
     const unsigned pagesPerSide = kCardAtlasSize / kCardPageSize;
     const size_t pages = size_t(pagesPerSide) * pagesPerSide;
@@ -511,6 +524,7 @@ void SurfaceCache::destroyAll() {
         if (mInstanceBuffer) { vao->destroyUavBuffer(mInstanceBuffer); mInstanceBuffer = nullptr; }
         if (mRelightBuffer) { vao->destroyUavBuffer(mRelightBuffer); mRelightBuffer = nullptr; }
         if (mLightBuffer) { vao->destroyUavBuffer(mLightBuffer); mLightBuffer = nullptr; }
+        if (mGiBuffer) { vao->destroyUavBuffer(mGiBuffer); mGiBuffer = nullptr; }
     }
     mCardRecords = 0u;
     mInstanceSlots = 0u;
@@ -519,7 +533,9 @@ void SurfaceCache::destroyAll() {
     mTableDirty = false;
     mBatch.clear();
     mRelight.clear();
+    mRelightMode.clear();
     mLights.clear();
+    mVct = nullptr;
     mLightJob = nullptr;
     for (unsigned i = 0; i < kCaptureBatch; ++i) mPassDef[i] = nullptr;
     for (unsigned i = 0; i < kCaptureBatch; ++i) {
@@ -535,6 +551,7 @@ void SurfaceCache::destroyAll() {
         }
         if (mScratchDepth) { tm->destroyTexture(mScratchDepth); mScratchDepth = nullptr; }
         if (mRadiance) { tm->destroyTexture(mRadiance); mRadiance = nullptr; }
+        if (mIndirect) { tm->destroyTexture(mIndirect); mIndirect = nullptr; }
     }
 }
 
@@ -1038,7 +1055,10 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
 // ---------------------------------------------------------------------------
 //
 // A texel's radiance = the scene's lights through HlmsPbs's own diffuse lobe
-// (the sun through the captured shadow term) + its emissive; the job and every
+// (the sun through the captured shadow term) + the pixel's own diffuse GI
+// marched from the texel (the one voxel reader, the one environment at each
+// escape; cached in the seventh layer, `mIndirect`, under its own budget) +
+// its emissive; the job and every
 // statement about what it includes and what it does not are in
 // media/Hlms/Jahshaka/JahCardLight_cs.glsl. THE LIGHT LIST IS WRITTEN HERE, on
 // the CPU, in world space: the Forward+ list the pixel shader binds is built
@@ -1052,16 +1072,23 @@ constexpr unsigned kMaxRelights = 1024u;
 /// The most lights the job sums (80 B a light after a 16 B count).
 constexpr unsigned kMaxCardLights = 64u;
 constexpr unsigned kRelightFloats = 20u;
+/// The chain's parameter block (CardGiParams in the shader): chainInvRes[8],
+/// chainFromPrev[14], the volume's origin and inverse size, the counts, the
+/// environment's gain and mips, its nine SH coefficients — 35 vec4.
+constexpr unsigned kGiParamFloats = 35u * 4u;
+constexpr unsigned kMaxCardCascades = 8u;
 constexpr unsigned kLightFloats = 20u;
 }   // namespace
 
 void SurfaceCache::planRelights(const CardSceneView &view) {
     mRelight.clear();
+    mRelightMode.clear();
     mLights = view.lights;
+    mVct = view.vct;
     // THE RADIANCE SIGNATURE: a light write that changed what a card's
-    // RADIANCE depends on relights every resident card and recaptures none. A
-    // write that also moved a shadow queued the cards for capture above, and a
-    // queued card is relit after its capture, not before it.
+    // DIRECT radiance depends on relights every resident card and recaptures
+    // none. A write that also moved a shadow queued the cards for capture
+    // above, and a queued card is relit after its capture, not before it.
     if (view.radianceSerial != mRadianceSerial) {
         for (CardRec &c : mCards) c.relight = true;
         if (!mRadianceMovingLastFrame) ++mInvalidRadiance;   // one per gesture
@@ -1070,47 +1097,98 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
     } else {
         mRadianceMovingLastFrame = false;
     }
+    // THE INDIRECT SIGNATURE: the chain re-injected (a light tick, a settle, a
+    // cascade rebuild, a material generation) — the INDIRECT half of every
+    // resident card is stale, under its own budget; the direct half is not.
+    if (view.indirectSerial != mIndirectSerial) {
+        for (CardRec &c : mCards) c.relightIndirect = true;
+        if (!mIndirectMovingLastFrame) ++mInvalidIndirect;
+        mIndirectMovingLastFrame = true;
+        mIndirectSerial = view.indirectSerial;
+    } else {
+        mIndirectMovingLastFrame = false;
+    }
     if (!mRadiance) return;
-    // THE BUDGET IN TEXELS, like the capture's: the cards captured THIS frame
-    // first (their texels are new), then the stale ones in Lumen's order
-    // (longest since relit first). A card still waiting for its capture is not
-    // relit — its texels are about to be replaced.
-    unsigned spent = 0u;
-    const auto take = [&](unsigned idx) {
-        const unsigned cost = mCards[idx].size * mCards[idx].size;
-        if (spent && spent + cost > mLightBudget) return false;
-        if (mRelight.size() >= kMaxRelights) return false;
-        mRelight.push_back(idx);
-        spent += cost;
-        return true;
-    };
+    // The cards captured THIS frame: new texels, both halves stale, the old
+    // indirect meaningless.
     for (unsigned idx : mBatch) {
-        mCards[idx].relight = true;
-        if (!take(idx)) return;
+        CardRec &c = mCards[idx];
+        c.relight = true;
+        c.relightIndirect = true;
+        c.indirectValid = false;
     }
-    std::vector<unsigned> stale;
-    for (unsigned i = 0; i < mCards.size(); ++i) {
+    const auto ready = [this](unsigned i) {
         const CardRec &c = mCards[i];
-        if (!c.relight || c.queued || !c.lastUpdated) continue;
-        stale.push_back(i);
+        const bool thisFrame = std::find(mBatch.begin(), mBatch.end(), i) != mBatch.end();
+        return thisFrame || (!c.queued && c.lastUpdated);
+    };
+    const auto oldestFirst = [this](std::vector<unsigned> &v, bool indirect) {
+        std::sort(v.begin(), v.end(), [this, indirect](unsigned a, unsigned b) {
+            const unsigned long long ka = indirect ? mCards[a].lastIndirect : mCards[a].lastRelit;
+            const unsigned long long kb = indirect ? mCards[b].lastIndirect : mCards[b].lastRelit;
+            if (ka != kb) return ka < kb;
+            return a < b;
+        });
+    };
+    std::vector<char> taken(mCards.size(), 0);
+
+    // 1. THE INDIRECT LIST (the march; it recomputes the direct half too):
+    //    this frame's captures first, then the stalest, under the INDIRECT
+    //    budget.
+    {
+        std::vector<unsigned> want(mBatch.begin(), mBatch.end());
+        std::vector<unsigned> rest;
+        for (unsigned i = 0; i < mCards.size(); ++i)
+            if (mCards[i].relightIndirect && ready(i) &&
+                std::find(mBatch.begin(), mBatch.end(), i) == mBatch.end())
+                rest.push_back(i);
+        oldestFirst(rest, true);
+        want.insert(want.end(), rest.begin(), rest.end());
+        unsigned spent = 0u;
+        for (unsigned idx : want) {
+            const unsigned cost = mCards[idx].size * mCards[idx].size;
+            if (spent && spent + cost > mIndirectBudget) break;
+            if (mRelight.size() >= kMaxRelights) break;
+            mRelight.push_back(idx);
+            mRelightMode.push_back(1u);
+            taken[idx] = 1;
+            spent += cost;
+        }
     }
-    std::sort(stale.begin(), stale.end(), [this](unsigned a, unsigned b) {
-        if (mCards[a].lastRelit != mCards[b].lastRelit)
-            return mCards[a].lastRelit < mCards[b].lastRelit;
-        return a < b;
-    });
-    for (unsigned idx : stale)
-        if (!take(idx)) break;
+    // 2. THE DIRECT LIST: every other card whose direct half is stale, under
+    //    the DIRECT budget — its indirect read back from the cached layer, or
+    //    zero while it has none (a fresh capture the march has not reached).
+    {
+        std::vector<unsigned> want;
+        for (unsigned idx : mBatch)
+            if (!taken[idx]) want.push_back(idx);
+        std::vector<unsigned> rest;
+        for (unsigned i = 0; i < mCards.size(); ++i)
+            if (!taken[i] && mCards[i].relight && ready(i) &&
+                std::find(mBatch.begin(), mBatch.end(), i) == mBatch.end())
+                rest.push_back(i);
+        oldestFirst(rest, false);
+        want.insert(want.end(), rest.begin(), rest.end());
+        unsigned spent = 0u;
+        for (unsigned idx : want) {
+            const unsigned cost = mCards[idx].size * mCards[idx].size;
+            if (spent && spent + cost > mLightBudget) break;
+            if (mRelight.size() >= kMaxRelights) break;
+            mRelight.push_back(idx);
+            mRelightMode.push_back(mCards[idx].indirectValid ? 0u : 2u);
+            spent += cost;
+        }
+    }
 }
 
 void SurfaceCache::relightCards() {
-    if (mRelight.empty() || !mRadiance) { mLights.clear(); return; }
+    if (mRelight.empty() || !mRadiance) { mLights.clear(); mVct = nullptr; return; }
     const auto t0 = std::chrono::steady_clock::now();
     Ogre::Root &root = Ogre::Root::getSingleton();
     Ogre::RenderSystem *rs = root.getRenderSystem();
     Ogre::HlmsCompute *hc = root.getHlmsManager()->getComputeHlms();
     if (!mLightJob) mLightJob = hc ? hc->findComputeJobNoThrow("Jahshaka/CardLight") : nullptr;
-    if (!mLightJob) { mRelight.clear(); mLights.clear(); return; }
+    if (!mLightJob) { mRelight.clear(); mLights.clear(); mVct = nullptr; return; }
     Ogre::VaoManager *vao = rs->getVaoManager();
 
     // ---- THE RELIGHT LIST: each card's capture frame, as the job unprojects it.
@@ -1119,7 +1197,8 @@ void SurfaceCache::relightCards() {
         const CardRec &c = mCards[mRelight[i]];
         float *r = &mRelightCpu[i * kRelightFloats];
         const Ogre::Vector3 cam = c.centre + c.d * (c.halfDepth + captureMargin(c.halfDepth));
-        r[0] = float(c.atlasX); r[1] = float(c.atlasY); r[2] = float(c.size); r[3] = 0.0f;
+        r[0] = float(c.atlasX); r[1] = float(c.atlasY); r[2] = float(c.size);
+        r[3] = float(mRelightMode[i]);
         r[4] = cam.x; r[5] = cam.y; r[6] = cam.z; r[7] = 0.0f;
         // The ortho window aimCamera gives the capture, and the same clamp.
         r[8] = c.u.x; r[9] = c.u.y; r[10] = c.u.z; r[11] = std::max(2.0f * c.halfU, 1e-4f);
@@ -1188,17 +1267,97 @@ void SurfaceCache::relightCards() {
     else
         mLightBuffer->upload(mLightCpu.data(), 0, 1u + size_t(numLights) * kLightFloats / 4u);
 
+    // ---- THE CHAIN AND THE ENVIRONMENT, from the one VctLighting every reader
+    // takes them from (the pixel's pass buffer is filled from the same calls).
+    Ogre::VctLighting *vct = mVct;
+    unsigned numCascades = 0u;
+    bool aniso = false;
+    Ogre::TextureGpu *envCube = nullptr;
+    mGiCpu.assign(kGiParamFloats, 0.0f);
+    if (vct && vct->getLightVoxelTextures() && vct->getLightVoxelTextures()[0]) {
+        const size_t chainLen = vct->getNumCascades();
+        numCascades = unsigned(std::min<size_t>(chainLen, kMaxCardCascades));
+        aniso = vct->isAnisotropic();
+        std::vector<float> invRes(4u * chainLen, 0.0f);
+        std::vector<float> fromPrev(8u * std::max<size_t>(chainLen, 1u), 0.0f);
+        vct->getCascadeChainParams(invRes.data(), fromPrev.data());
+        float *g = mGiCpu.data();
+        std::memcpy(g, invRes.data(), 4u * numCascades * sizeof(float));            // chainInvRes[8]
+        std::memcpy(g + 32u, fromPrev.data(),
+                    8u * (numCascades ? numCascades - 1u : 0u) * sizeof(float));    // chainFromPrev[14]
+        const Ogre::Vector3 origin = vct->getVoxelizer()->getVoxelOrigin();
+        const Ogre::Vector3 size = vct->getVoxelizer()->getVoxelSize();
+        g[88] = origin.x; g[89] = origin.y; g[90] = origin.z;
+        g[92] = 1.0f / size.x; g[93] = 1.0f / size.y; g[94] = 1.0f / size.z;
+        g[96] = float(numCascades);
+        g[97] = vct->getFinalMultiplier();
+        envCube = vct->getEnvironmentCube();
+        const float *gain = vct->getEnvironmentGain();
+        g[100] = gain[0]; g[101] = gain[1]; g[102] = gain[2];
+        g[103] = envCube ? float(envCube->getNumMipmaps()) : 1.0f;
+        const float *sh = vct->getEnvironmentSh();
+        for (unsigned k = 0; k < 9u; ++k) {
+            g[104u + 4u * k] = sh[3u * k];
+            g[105u + 4u * k] = sh[3u * k + 1u];
+            g[106u + 4u * k] = sh[3u * k + 2u];
+        }
+    }
+    mIndirectOnLastRelight = numCascades > 0u;
+    if (!mGiBuffer)
+        mGiBuffer = vao->createUavBuffer(kGiParamFloats / 4u, 16u, 0, mGiCpu.data(), false);
+    else
+        mGiBuffer->upload(mGiCpu.data(), 0, kGiParamFloats / 4u);
+
     // ---- THE DISPATCH: the job is shared process-wide by name, so every
     // binding is set here and released after the dispatch is recorded.
+    if (mLightJob->getProperty("hlms_num_vct_cascades") != Ogre::int32(numCascades))
+        mLightJob->setProperty("hlms_num_vct_cascades", Ogre::int32(numCascades));
+    if (mLightJob->getProperty("vct_anisotropic") != (aniso ? 1 : 0))
+        mLightJob->setProperty("vct_anisotropic", aniso ? 1 : 0);
+    if (mLightJob->getProperty("jah_env") != (envCube ? 1 : 0))
+        mLightJob->setProperty("jah_env", envCube ? 1 : 0);
+    // THE PIXEL'S CONE SET (Vct_piece_ps.any's `vct_cone_dirs`, which HlmsPbs
+    // sets from getVctFullConeCount): the card's indirect is the pixel's
+    // integral, so it walks the pixel's cones.
+    {
+        auto *pbs = static_cast<Ogre::HlmsPbs *>(root.getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+        const Ogre::int32 cones = (pbs && pbs->getVctFullConeCount()) ? 6 : 4;
+        if (mLightJob->getProperty("vct_cone_dirs") != cones)
+            mLightJob->setProperty("vct_cone_dirs", cones);
+    }
+    const unsigned kinds = aniso ? 4u : 1u;
+    const unsigned vctUnits = numCascades ? kinds * numCascades + (envCube ? 1u : 0u) : 0u;
     const unsigned order[kCardLayers] = { unsigned(CardLayer::Albedo), unsigned(CardLayer::Normal),
                                           unsigned(CardLayer::Depth), unsigned(CardLayer::Emissive),
                                           unsigned(CardLayer::ShadowRough) };
-    mLightJob->setNumTexUnits(Ogre::uint8(kCardLayers));
+    mLightJob->setNumTexUnits(Ogre::uint8(kCardLayers + vctUnits));
     for (unsigned i = 0; i < kCardLayers; ++i) {
         Ogre::DescriptorSetTexture2::TextureSlot slot(
             Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
         slot.texture = mAtlas[order[i]];
         mLightJob->setTexture(Ogre::uint8(i), slot, nullptr, false);
+    }
+    if (numCascades) {
+        // The chain's volumes, per kind then per cascade (the pixel's and the
+        // parity harness's order), the trilinear sampler on the first — the
+        // shader's `vSmp` — and the environment cube last.
+        Ogre::uint8 unit = Ogre::uint8(kCardLayers);
+        for (unsigned kind = 0; kind < kinds; ++kind)
+            for (unsigned c = 0; c < numCascades; ++c, ++unit) {
+                Ogre::DescriptorSetTexture2::TextureSlot slot(
+                    Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+                slot.texture = vct->getLightVoxelTextures(c)[kind];
+                if (unit == kCardLayers)
+                    mLightJob->setTexture(unit, slot, vct->getBindTrilinearSamplerblock());
+                else
+                    mLightJob->setTexture(unit, slot, nullptr, false);
+            }
+        if (envCube) {
+            Ogre::DescriptorSetTexture2::TextureSlot slot(
+                Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+            slot.texture = envCube;
+            mLightJob->setTexture(unit, slot, nullptr, false);
+        }
     }
     const auto bufSlot = [](Ogre::UavBufferPacked *b, Ogre::ResourceAccess::ResourceAccess a) {
         Ogre::DescriptorSetUav::BufferSlot slot(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
@@ -1215,8 +1374,13 @@ void SurfaceCache::relightCards() {
         uav.texture = mRadiance;
         uav.access = Ogre::ResourceAccess::Write;
         uav.pixelFormat = mRadiance->getPixelFormat();
-        mLightJob->_setUavTexture(2u, uav);
+        mLightJob->_setUavTexture(3u, uav);
+        uav.texture = mIndirect;
+        uav.access = Ogre::ResourceAccess::ReadWrite;
+        uav.pixelFormat = mIndirect->getPixelFormat();
+        mLightJob->_setUavTexture(4u, uav);
     }
+    mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
     mLightJob->setThreadsPerGroup(8u, 8u, 1u);
     mLightJob->setNumThreadGroups(kCardPageSize / 8u, kCardPageSize / 8u, unsigned(mRelight.size()));
     {
@@ -1229,20 +1393,32 @@ void SurfaceCache::relightCards() {
         const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
         mLightJob->_setUavBuffer(0u, empty);
         mLightJob->_setUavBuffer(1u, empty);
-        mLightJob->_setUavTexture(2u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->_setUavBuffer(2u, empty);
+        mLightJob->_setUavTexture(3u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->_setUavTexture(4u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->setNumTexUnits(0u);
     }
 
-    for (unsigned idx : mRelight) {
-        CardRec &c = mCards[idx];
+    for (size_t i = 0; i < mRelight.size(); ++i) {
+        CardRec &c = mCards[mRelight[i]];
         c.relight = false;
         c.lastRelit = mFrame;
         ++mRelights;
         ++mRelitLastFrame;
         mRelitTexelsLastFrame += c.size * c.size;
+        if (mRelightMode[i] == 1u) {
+            c.relightIndirect = false;
+            c.indirectValid = true;
+            c.lastIndirect = mFrame;
+            ++mIndirectRelights;
+            ++mIndirectLastFrame;
+            mIndirectTexelsLastFrame += c.size * c.size;
+        }
     }
     mRelight.clear();
+    mRelightMode.clear();
     mLights.clear();
+    mVct = nullptr;
     mLightMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
@@ -1360,9 +1536,12 @@ void SurfaceCache::update(const CardSceneView &view) {
     mCopyMs = 0.0f;
     mRelitLastFrame = 0u;
     mRelitTexelsLastFrame = 0u;
+    mIndirectLastFrame = 0u;
+    mIndirectTexelsLastFrame = 0u;
     mLightMs = 0.0f;
     mBudget = view.budgetTexels;
     mLightBudget = view.lightBudgetTexels;
+    mIndirectBudget = view.indirectBudgetTexels;
     mRadius = view.radius;
 
     refreshResidency(view);
@@ -1473,8 +1652,11 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     }
     bytes += bytesOf(mScratchDepth);
     bytes += bytesOf(mRadiance);
+    bytes += bytesOf(mIndirect);
     if (mRadiance)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mRadiance->getPixelFormat());
+    if (mIndirect)
+        out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mIndirect->getPixelFormat());
     out.bytes = bytes;
     out.emissiveFormat = mEmissiveFormatName;
     out.radianceFormat = mRadianceFormatName;
@@ -1483,6 +1665,12 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.relitTexelsLastFrame = mRelitTexelsLastFrame;
     out.relights = mRelights;
     out.invalidRadiance = mInvalidRadiance;
+    out.indirectBudgetTexels = mIndirectBudget;
+    out.indirectLastFrame = mIndirectLastFrame;
+    out.indirectTexelsLastFrame = mIndirectTexelsLastFrame;
+    out.indirectRelights = mIndirectRelights;
+    out.invalidIndirect = mInvalidIndirect;
+    out.indirectOn = mIndirectOnLastRelight;
     out.lightMs = mLightMs;
     out.instancesResident = 0u;
     for (const InstanceRec &i : mInstances) out.instancesResident += i.cardCount ? 1u : 0u;
@@ -1560,8 +1748,21 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
         tk->unmap();
         tm->destroyAsyncTextureTicket(tk);
     }
+    float ind[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (mIndirect && rec.indirectValid) {
+        Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(
+            1u, 1u, 1u, Ogre::TextureTypes::Type2D, mIndirect->getPixelFormat());
+        Ogre::TextureBox src = mIndirect->getEmptyBox(0);
+        src.x = tx; src.y = ty; src.width = 1u; src.height = 1u;
+        tk->download(mIndirect, 0, true, &src, true);
+        const Ogre::TextureBox box = tk->map(0);
+        decodeTexel(mIndirect->getPixelFormat(), box.at(0, 0, 0), ind);
+        tk->unmap();
+        tm->destroyAsyncTextureTicket(tk);
+    }
     for (int k = 0; k < 3; ++k) {
         out.radiance[k] = rad[k];
+        out.indirect[k] = ind[k];
         out.albedo[k] = vals[unsigned(CardLayer::Albedo)][k];
         // The normal is stored *0.5+0.5, as the prepass writes it.
         out.normal[k] = vals[unsigned(CardLayer::Normal)][k] * 2.0f - 1.0f;

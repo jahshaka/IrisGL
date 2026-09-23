@@ -84,6 +84,7 @@ class UavBufferPacked;
 class Item;
 class Light;
 class HlmsComputeJob;
+class VctLighting;
 class CompositorPassSceneDef;
 class Node;
 class SceneManager;
@@ -160,6 +161,11 @@ struct CardRec {
     /// light's radiance signature moved), and the frame it was last relit.
     bool relight = false;
     unsigned long long lastRelit = 0ull;
+    /// ...and its INDIRECT half: stale (captured since, or the chain
+    /// re-injected), present at all in the cached layer, and when last marched.
+    bool relightIndirect = false;
+    bool indirectValid = false;
+    unsigned long long lastIndirect = 0ull;
 };
 
 /// WHAT THE CACHE IS HANDED EACH FRAME, and the reason it is handed anything at
@@ -191,6 +197,13 @@ struct CardSceneView {
     std::vector<Ogre::Light *> lights;
     /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
     unsigned lightBudgetTexels = 0u;
+    /// THE INDIRECT HALF: the chain the march reads (the scene's cascade-0
+    /// VctLighting — the same object the pixel's pass buffer is filled from;
+    /// null when GI is not the voxel arm, and the indirect is then zero), the
+    /// signature that says it re-injected, and its own budget.
+    Ogre::VctLighting *vct = nullptr;
+    unsigned long long indirectSerial = 0ull;
+    unsigned indirectBudgetTexels = 0u;
 
     /// ONE CANDIDATE — an item inside the radius that may hold cards. The
     /// scene's own predicate decides membership (still-world GI geometry,
@@ -364,6 +377,22 @@ private:
     Ogre::UavBufferPacked *mRelightBuffer = nullptr;
     Ogre::UavBufferPacked *mLightBuffer = nullptr;
     std::vector<unsigned> mRelight;          ///< this frame's relight list: indices into mCards
+    /// ...and each entry's mode (JahCardLight_cs.glsl): 1 march the indirect,
+    /// 0 read it back, 2 none yet.
+    std::vector<unsigned> mRelightMode;
+    /// THE CACHED INDIRECT HALF (a UAV, R11G11B10F like the radiance), the
+    /// chain's parameter block, and this frame's chain.
+    Ogre::TextureGpu *mIndirect = nullptr;
+    Ogre::UavBufferPacked *mGiBuffer = nullptr;
+    std::vector<float> mGiCpu;
+    Ogre::VctLighting *mVct = nullptr;
+    unsigned long long mIndirectSerial = 0ull;
+    bool mIndirectMovingLastFrame = false;
+    unsigned mIndirectBudget = 0u;
+    unsigned mIndirectLastFrame = 0u, mIndirectTexelsLastFrame = 0u;
+    unsigned long long mIndirectRelights = 0ull;
+    unsigned long long mInvalidIndirect = 0ull;
+    bool mIndirectOnLastRelight = false;
     std::vector<Ogre::Light *> mLights;      ///< this frame's lights (valid inside the frame)
     std::vector<float> mRelightCpu, mLightCpu;
     unsigned long long mRadianceSerial = 0ull;
