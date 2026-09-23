@@ -2595,6 +2595,29 @@ enum class GiViewProfile {
 
 /// It is a pure function of the quality dial and the view profile: no scene, no
 /// device, no Ogre.
+/// THE CARD READ'S FOOTPRINT GATE (PHOTON-CARDS-2 fix round, audit F2 — the
+/// lead's decision; the currency SC-2's page mips will select a level on). A
+/// reflection ray's hit reads the surface-cache card only while the sample's
+/// footprint at the hit (2 t alpha / sqrt(N), the spacing between the samples
+/// the temporal mean holds) is at most this many of the card's texels; a wider
+/// footprint reads the voxels, prefiltered at its own mip.
+///
+/// MEASURED (2026-09-23, spikes/photon-cards-2/sweepB): the selftest's fixture B
+/// (the glossy 0.2 floor reflecting the pillars — where the ungated card read
+/// showed its speckle) shot at the Viewport grade with the gate at k = 0 (the
+/// voxel read everywhere) .. infinity; the floor's speckle as the mean
+/// |pixel - its 3x3 median|: 0.532 codes at k = 0, 0.531 / 0.530 / 0.538 at
+/// k = 1 / 2 / 4 (x1.01 — the card read's sharpness in 2,862 / 5,747 / 13,102
+/// pixels, no new speckle), 0.675 at k = 8 (x1.27) and 0.703 ungated (x1.32).
+/// So k = 4, the widest footprint inside the lead's x1.2 bar. (gi.rt_reflect's
+/// 0.3-rough arm, the audit's first recipe, `test_rt_reflect --footprint-sweep`,
+/// never crosses: in a WARM view the temporal mean hides the card's noise
+/// above ~7 texels and the voxel's bias is the larger error there; below 4
+/// texels both follow the near-mirror per-frame sampling. The speckle is a
+/// young-view, SPATIAL property — two consecutive screenshots are identical —
+/// which is why the gate is set on the picture that showed it.)
+constexpr float kCardFootprintTexels = 4.0f;
+
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as
     /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
@@ -3109,6 +3132,12 @@ struct CardReadQuery {
     Vec3   position;
     Vec3   facing;
     NodeId node = 0;
+    /// A TRACED question: `position` is a ray's origin and `facing` its
+    /// direction; the job traces the scene's TLAS (near copies, as the
+    /// reflection does), takes the instance from the hit and the facing from
+    /// the hit triangle's geometric normal — the reflection's hit path whole
+    /// but the lighting. `node` is ignored.
+    bool   trace = false;
 };
 /// ...and the ray job's answer: the card and texel its GLSL picked, whether the
 /// card was lit, and the radiance it would return (0 when not `ok`).
@@ -3118,6 +3147,11 @@ struct CardReadPick {
     int      card = -1;
     unsigned texelX = 0u, texelY = 0u;
     float    radiance[3] = { 0, 0, 0 };
+    /// A traced question's hit: whether the ray hit, where, and the geometric
+    /// normal the job rebuilt there (the facing it asked the pick with).
+    bool     hit = false;
+    float    hitPoint[3] = { 0, 0, 0 };
+    float    hitNormal[3] = { 0, 0, 0 };
 };
 
 /// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model

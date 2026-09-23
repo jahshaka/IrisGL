@@ -28,15 +28,20 @@
 // with one level), so the read is TEXEL-EXACT whatever the footprint: the
 // page's own mip chain is SC-2's.
 //
-// WHICH DIRECTION "FACES". The CPU reference takes the surface normal. A ray
-// query's committed hit carries no normal — the triangle's vertices are not
-// readable from the acceleration structure without VK_KHR_ray_tracing_position_fetch
-// (a device feature this pin does not enable) — so the reflection passes the
-// REVERSED RAY DIRECTION. That is the side of the surface the ray sees: a card
-// facing away from the ray can never be the one it hit, and among the cards
-// that face it the depth rule leaves only those that captured the hit surface
-// itself (a point on a box's top is not the first surface along any side
-// card's axis, except within two texels of the edge).
+// WHICH DIRECTION "FACES": the hit surface's GEOMETRIC normal, as the CPU
+// reference takes the surface normal. The reflection rebuilds it from the hit
+// triangle (jah_rq_geom.glsl — the GPU scene's geometry rows); the reversed ray
+// it used before let a NEIGHBOUR face's card win within two texels of an edge at
+// more than 45 degrees of incidence, and rejected the true card past 87.
+//
+// THE FOOTPRINT GATE (the lead's decision; the currency SC-2's page mips will
+// select on): the card is read only when the sample's footprint at the hit —
+// the caller's, in metres — is at most JAH_CARD_FOOTPRINT_TEXELS of the picked
+// card's texels. A wider footprint is a lobe a texel-exact read would alias
+// (one stochastic sample per frame landing on one texel where the voxel read is
+// prefiltered at the footprint's mip: speckle in a young view); those samples
+// read the voxels until a page carries mips. k is Types.h's
+// kCardFootprintTexels, with the measurement that chose it.
 //
 // TWO LIMITS OF THE CARD'S RADIANCE, stated (the CARDS-1 audit's F7 and F8):
 //   * a card whose indirect half has not been marched yet (freshly captured —
@@ -54,6 +59,7 @@
 //     JAH_CARD_SLOTS              uint   instance-table entries bound (0 = no
 //                                        cache: every pick fails)
 //     JAH_CARD_RECORDS            uint   card records bound
+//     JAH_CARD_FOOTPRINT_TEXELS   float  the footprint gate, in card texels
 //     JAH_CARD_INSTANCE(slot)     uvec4  (firstCard, cardCount, 0, 0)
 //     JAH_CARD_DEPTH(texel)       float  the Depth layer at an atlas texel
 //     JAH_CARD_RADIANCE(texel)    vec3   the Radiance layer at an atlas texel
@@ -130,14 +136,15 @@ JahCardPick jahCardPick( uint slot, vec3 hitPos, vec3 facingDir )
 }
 
 /// THE RADIANCE LEAVING A HIT, FROM ITS CARD. `ok` is false when no card of
-/// the instance describes the point, or when the one that does has not had its
-/// indirect half marched yet — the caller then reads the voxels. `footprint`
-/// (world metres) is accepted for the day the pages carry mips (SC-2) and is
-/// unused: the atlas is read texel-exact.
+/// the instance describes the point, when the one that does has not had its
+/// indirect half marched yet, or when `footprint` (world metres) is wider than
+/// JAH_CARD_FOOTPRINT_TEXELS of that card's texels — the caller then reads the
+/// voxels. The atlas is read texel-exact (no mips until SC-2).
 vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, float footprint, out bool ok )
 {
 	const JahCardPick pick = jahCardPick( slot, hitPos, facingDir );
-	ok = pick.ok && pick.lit;
+	ok = pick.ok && pick.lit &&
+		 footprint <= float( JAH_CARD_FOOTPRINT_TEXELS ) * jahCards[pick.card].axis.w;
 	if( !ok )
 		return vec3( 0.0 );
 	return JAH_CARD_RADIANCE( pick.texel );

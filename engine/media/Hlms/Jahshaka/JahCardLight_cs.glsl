@@ -31,10 +31,17 @@
 // writes the same arithmetic out in C++, so a test holds this to that closed
 // form.
 //
-// THE VIEW DIRECTION IS THE NORMAL. A cached texel is read from any direction,
-// so it stores the view-INDEPENDENT diffuse: V = N makes the lobe's one
-// view-dependent factor (viewScatter, which multiplies (1 - NdotV)^5) exactly
-// 1. The specular lobe is not cached (Lumen's rule: the surface cache is a
+// A TEXEL IS READ FROM EVERY DIRECTION (a reflection ray's hit, a gather's),
+// so it stores a view-INDEPENDENT diffuse. The INDIRECT half takes the lobe's
+// HEMISPHERICAL mean albedo, jahDiffuseAlbedoHemi(r) — the bounce job's
+// convention for the same "read from everywhere" situation (the voxel re-emits
+// the same mean), so a card and a voxel hold one quantity (PHOTON-CARDS-2 audit
+// F4, the lead's decision). THE DIRECT half keeps V = N (viewScatter = 1):
+// fd90 there depends on the half vector of each outgoing direction, so its
+// hemispherical mean has no closed form this file can write in one line; its
+// mean over outgoing directions is 1 + (fd90 - 1) / 21 of V = N's, at most 7 %
+// off at r = 1 and exact at r = 0 — stated, the one convention still split.
+// The specular lobe is not cached (Lumen's rule: the surface cache is a
 // diffuse store).
 //
 // VISIBILITY. The SUN's is the stored shadow term (the capture's PSSM term of
@@ -50,9 +57,10 @@
 // (JahVoxelSample + JahVoxelMarch) and the ONE environment (JahEnvironment).
 // Decoded exactly as the pixel decodes it — the voxels' share times the
 // volume's multiplier, the environment's share as radiance — and turned into
-// outgoing radiance exactly as BRDF_EnvMap does: envColourD x diffuse x pi x
-// the lobe's directional albedo jahDiffuseAlbedo (the fork's JahDiffuseAlbedo
-// piece) at V = N. One term the pixel has that the card does not, stated: a
+// outgoing radiance as BRDF_EnvMap does, envColourD x diffuse x pi x the lobe's
+// albedo, with the albedo taken as its HEMISPHERICAL mean jahDiffuseAlbedoHemi
+// (the fork's JahDiffuseAlbedo piece; above) where the pixel takes it at its own
+// view angle. One term the pixel has that the card does not, stated: a
 // diffuse fresnel (fresnelD — PbsBrdf::Default carries none; the
 // SeparateDiffuseFresnel BRDFs do, and their card is brighter by 1 - F).
 // And the frame is built on the STORED shading normal where the pixel builds
@@ -232,7 +240,12 @@ layout( local_size_x = @value( threads_per_group_x ),
 vec3 jahCardRound( vec3 v )
 {
 @property( jah_card_round_r11g11b10 )
-	const uvec3 bits = floatBitsToUint( max( v, vec3( 0.0, 0.0, 0.0 ) ) );
+	// Clamped to [0, the format's largest finite value] (65024 on red and green,
+	// 64512 on blue) before the add: +Inf's bits plus half a step are a NaN
+	// pattern (audit F8), and so is the largest FLOAT's; the format's own maximum
+	// stays finite through the add and stores as itself.
+	const uvec3 bits = floatBitsToUint( clamp( v, vec3( 0.0, 0.0, 0.0 ),
+											   vec3( 65024.0, 65024.0, 64512.0 ) ) );
 	return uintBitsToFloat( bits + uvec3( 0x10000u, 0x10000u, 0x20000u ) );
 @else
 	return v;
@@ -315,10 +328,10 @@ void main()
 		if( ( mode & 1u ) != 0u )
 		{
 @property( hlms_num_vct_cascades )
-			// BRDF_EnvMap: envColourD x diffuse x pi x jahDiffuseAlbedo( NdotV, r ),
-			// at V = N.
+			// BRDF_EnvMap's envColourD x diffuse x pi x the lobe's albedo, at its
+			// hemispherical mean (the bounce's convention; the header says why).
 			indirect = jahCardEnvColourD( P, N ) * kD * 3.141592654 *
-					   jahDiffuseAlbedo( 1.0, perceptualRoughness );
+					   jahDiffuseAlbedoHemi( perceptualRoughness );
 @end
 		}
 		else if( ( mode & 2u ) == 0u )

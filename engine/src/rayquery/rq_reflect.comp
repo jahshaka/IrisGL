@@ -44,6 +44,8 @@
 // path never sets a target environment, so this never goes through it.
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -144,7 +146,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// ---- THE SURFACE CACHE (PHOTON-CARDS-2) ------------------------------
 	/// x = the instance-table entries bound (0 = the scene holds no cache: the
 	/// card read declines every hit and the voxels answer, as before), y = the
-	/// card records bound.
+	/// card records bound, z = the footprint gate in card texels
+	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
 	vec4 cards;
 } p;
 
@@ -278,7 +282,18 @@ const float kWarmupFrames = 8.0;
 #include "jah_rq_card_bindings.glsl"
 #define JAH_CARD_SLOTS   uint( p.cards.x )
 #define JAH_CARD_RECORDS uint( p.cards.y )
+#define JAH_CARD_FOOTPRINT_TEXELS p.cards.z
 #include "jah_rq_card.glsl"
+
+/// THE HIT'S GEOMETRIC NORMAL (the card pick's facing): the per-slot row table
+/// the tier writes with the TLAS (binding 19) and the GPU scene's geometry rows
+/// (binding 20, three uvec4 lanes a row).
+layout( std430, set = 0, binding = 19 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 20 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+#define JAH_GEOM_SLOTS uint( p.cards.w )
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
 
 /// Metres along the camera's forward axis, with and without reverse Z — the
 /// same line JahSsrRayMarch_ps.glsl uses, from Camera::getProjectionParamsAB().
@@ -365,12 +380,13 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 /// TLAS's instanceCustomIndex = the item slot, the pick, the through-the-wall
 /// rule, the texel) and takes the card's radiance whole — weight 1, no
 /// crossfade: a card texel is a surface's own answer, not a filtered volume.
-/// The facing direction handed to the pick is the REVERSED RAY (the hit's
-/// normal is not in the acceleration structure; the header there says why that
-/// is sound). The read is texel-exact whatever the lobe's footprint — the atlas
-/// has no mips (the page mip chain is SC-2's), so a rough reflection's
-/// variance is the temporal mean's and the spatial filter's, as the voxel read's
-/// finest mip was.
+/// The facing direction handed to the pick is the hit triangle's GEOMETRIC
+/// normal (jah_rq_geom.glsl), so a hit near a box's edge reads its own face's
+/// card. The read is texel-exact (the atlas has no mips until SC-2), so it is
+/// taken only while the sample's FOOTPRINT is at most k card texels (Types.h
+/// kCardFootprintTexels, measured): a wider lobe's one sample per frame on one
+/// texel is speckle in a young view where the voxels' read is prefiltered at the
+/// footprint's own mip.
 ///
 /// THE VOXELS answer where no card does: an instance with no cards, a point no
 /// card of it describes, a scene without a cache — and a card whose indirect
@@ -440,10 +456,18 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 ///
 /// `lobeAlpha` is the GGX alpha of the surface the ray left and `t` the distance
 /// it travelled.
-vec3 hitRadiance( uint slot, vec3 hitPos, vec3 dir, float lobeAlpha, float t, out bool ok )
+vec3 hitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float lobeAlpha, float t,
+				  out bool ok )
 {
+	const float meanSamples0 = 1.0 / max( p.knobs2.w, 1e-3 );
+	// THE SAMPLE'S FOOTPRINT AT THE HIT (the spacing between the samples the mean
+	// holds; below): the card is read only while it is at most k card texels
+	// (jahCardRadiance's gate) — a wider lobe reads the prefiltered voxels.
 	{
-		const vec3 card = jahCardRadiance( slot, hitPos, -dir, 0.0, ok );
+		const float cardFootprint = lobeAlpha <= 0.01
+										? 0.0
+										: 2.0 * t * lobeAlpha / sqrt( max( meanSamples0, 1.0 ) );
+		const vec3 card = jahCardRadiance( slot, hitPos, hitNormal, cardFootprint, ok );
 		if( ok )
 			return card;
 	}
@@ -721,8 +745,12 @@ void main()
 	{
 		const float t = rayQueryGetIntersectionTEXT( rq, true );
 		hitT = t;
-		traced = hitRadiance( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) ),
-							  world + worldN * bias + L * t, L, lobeAlpha, t, ok );
+		const uint hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+		vec3 hitN;
+		jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
+							   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
+							   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
+		traced = hitRadiance( hitSlot, world + worldN * bias + L * t, hitN, L, lobeAlpha, t, ok );
 		// A HIT THE CACHE CANNOT SHADE IS NOT A MISS. The ray found geometry;
 		// the voxels simply do not reach it (outside every cascade, or a surface
 		// too thin for the grid). Returning the sky there would draw a hole in

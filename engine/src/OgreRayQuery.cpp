@@ -217,8 +217,12 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 19u;
+constexpr unsigned kReflectBindings = 21u;
 constexpr unsigned kReflectCardBinding = 15u;
+/// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
+/// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
+/// rows (20) — rq_reflect.comp through jah_rq_geom.glsl.
+constexpr unsigned kReflectGeomBinding = 19u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -349,6 +353,11 @@ private:
         /// The coarsest level's bound per GpuScene mesh index (with the mesh it
         /// was read for), so the writer asks the mesh records once per mesh.
         std::vector<std::pair<const Ogre::Mesh *, float>> coarseBound;
+        /// THE GEOMETRY ROW OF EACH SLOT'S NEAR COPY (PHOTON-CARDS-2 fix round):
+        /// GpuScene::geomRowIndex(mesh, the level its near BLAS was built from,
+        /// submesh 0), 0xFFFFFFFF for a slot not traced — what the reflection
+        /// rebuilds a hit's geometric normal from. Written with the instances.
+        std::vector<uint32_t> geomRowOfSlot;
         unsigned  slot = 0;
 
         /// The gate: nothing moved, no item changed and no instance's RAY LEVEL
@@ -558,6 +567,9 @@ private:
         /// is rewritten EVERY frame and there is one per frame in flight.
         VkDescriptorSet sets[kReflectRing] = {};
         RawBuffer       params[kReflectRing];
+        /// THE PER-SLOT GEOMETRY ROW the scene's TLAS was written with, copied
+        /// per frame in flight (the scene's vector moves under a later frame).
+        RawBuffer       geomRowOfSlot[kReflectRing];
         /// The temporal mean and the distance beside it, ping-ponged: read from
         /// [frame & 1], written to [~frame & 1]. See rq_reflect.comp's note on
         /// why one buffer is a race.
@@ -1425,6 +1437,8 @@ struct InstanceWriter final {
     /// and the per-mesh-index cache of the coarsest bound it is built from.
     float maxCoarseBound = 0.0f;
     std::vector<std::pair<const Ogre::Mesh *, float>> *coarseBound = nullptr;
+    /// The per-slot geometry row of the near copy (SceneAs::geomRowOfSlot).
+    std::vector<uint32_t> *geomRowOfSlot = nullptr;
     unsigned long long signature = 1469598103934665603ull;   // FNV-1a offset basis
     /// THE SIGNATURE IS ONLY EVER READ TO DECIDE REFIT-vs-REBUILD. A rebuild is
     /// the default (NVIDIA's own guidance for a TLAS, and 0.2-0.35 ms even at
@@ -1567,6 +1581,7 @@ static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
     if (!gs.live()) return;
     const detail::GpuInstance *mirror = gs.mirrorData();
     const uint32_t slots = gs.slotCount();
+    if (w.geomRowOfSlot) w.geomRowOfSlot->assign(slots, detail::GpuScene::kNoGeomRow);
     for (uint32_t i = 0; i < slots; ++i) {
         const detail::GpuInstance &e = mirror[i];
         Ogre::uint32 flags;
@@ -1583,6 +1598,10 @@ static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
         const uint32_t nearLevel = std::min(scene->rayLevelOf(i), coarsest);
         w.add(mesh, nearLevel, false, e.world, mask, i);
         w.add(mesh, coarsest, true, e.world, kRayMaskFar, i);
+        // The near copy's geometry, as the GPU scene's rows name it (a level the
+        // mesh has no row for reads zero addresses there, which the shader tests).
+        if (w.geomRowOfSlot && nearLevel < detail::GpuScene::kLevelsPerMesh)
+            (*w.geomRowOfSlot)[i] = detail::GpuScene::geomRowIndex(meshIndex, nearLevel, 0u);
         // THE HAND-OVER'S WIDTH (audit F2): how far, in world units, a far copy's
         // surface may lie from its fine one — the coarsest level's measured bound
         // grown by the instance's largest axis scale. The gather starts its far
@@ -2150,6 +2169,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         InstanceWriter w;
         w.blasOf = &sa.blasOf;
         w.coarseBound = &sa.coarseBound;
+        w.geomRowOfSlot = &sa.geomRowOfSlot;
         std::vector<VkDeviceAddress> addresses;
         addresses.reserve(sa.blas.size());
         for (const Blas &bl : sa.blas) addresses.push_back(bl.address);
@@ -2492,13 +2512,14 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
 
     // ---- the harness pipeline, once ------------------------------------------
     if (!mCardParityPipeline) {
-        const VkDescriptorType types[7] = {
+        const VkDescriptorType types[10] = {
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER };
-        VkDescriptorSetLayoutBinding b[7] = {};
-        for (unsigned i = 0; i < 7u; ++i) {
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER };
+        VkDescriptorSetLayoutBinding b[10] = {};
+        for (unsigned i = 0; i < 10u; ++i) {
             b[i].binding = i;
             b[i].descriptorType = types[i];
             b[i].descriptorCount = 1;
@@ -2506,7 +2527,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         }
         VkDescriptorSetLayoutCreateInfo sli{};
         sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        sli.bindingCount = 7;
+        sli.bindingCount = 10;
         sli.pBindings = b;
         VkPipelineLayoutCreateInfo pli{};
         pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -2516,18 +2537,20 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         smi.codeSize = sizeof(krq_cardParitySpv);
         smi.pCode = krq_cardParitySpv;
-        VkDescriptorPoolSize sizes[3] = {};
+        VkDescriptorPoolSize sizes[4] = {};
         sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        sizes[0].descriptorCount = 4;
+        sizes[0].descriptorCount = 6;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         sizes[1].descriptorCount = 2;
         sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[2].descriptorCount = 1;
+        sizes[3].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        sizes[3].descriptorCount = 1;
         VkDescriptorPoolCreateInfo dpi{};
         dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         dpi.maxSets = 1;
-        dpi.poolSizeCount = 3;
+        dpi.poolSizeCount = 4;
         dpi.pPoolSizes = sizes;
         if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCardParitySetLayout) != VK_SUCCESS ||
             vkCreatePipelineLayout(mVk, &pli, nullptr, &mCardParityPipeLayout) != VK_SUCCESS ||
@@ -2569,6 +2592,20 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     Ogre::UavBufferPacked *instances = cache->instanceBuffer();
     Ogre::TextureGpu *depth = cache->depthLayer();
     Ogre::TextureGpu *radiance = cache->radianceLayer();
+    // THE TRACED QUESTIONS' INPUTS: the scene's TLAS and the hit-normal tables
+    // the reflection binds (the per-slot row copy, the GPU scene's rows).
+    auto sceneIt = mScenes.find(scene);
+    SceneAs *sa = sceneIt != mScenes.end() && sceneIt->second.tlas ? &sceneIt->second : nullptr;
+    detail::GpuScene &gpuScn = scene->gpuScene();
+    if (gpuScn.live()) gpuScn.flushGeomRows();
+    Ogre::UavBufferPacked *geomRows = gpuScn.live() ? gpuScn.geomBuffer() : nullptr;
+    const uint32_t geomSlots = (sa && geomRows) ? uint32_t(sa->geomRowOfSlot.size()) : 0u;
+    // The job's layout names the TLAS, so every dispatch binds one (a descriptor
+    // a shader uses statically must be valid even when no question traces).
+    if (!sa) {
+        err = "cardReadParity: the scene has no acceleration structure yet (render a frame with rays on)";
+        return false;
+    }
     {
         const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
         Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
@@ -2578,6 +2615,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
                                      Ogre::ResourceAccess::Read, computeStage);
         for (Ogre::UavBufferPacked *b : { table, instances })
             solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
+        if (geomSlots) solver.resolveTransition(trans, geomRows, Ogre::ResourceAccess::Read, computeStage);
         mRs->executeResourceTransition(trans);
     }
     mRs->flushCommands();
@@ -2586,7 +2624,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     RawBuffer qBuf, aBuf, ubo;
     if (!makeBuffer(n * 8u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, qBuf, err))
         return false;
-    if (!makeBuffer(n * 8u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, aBuf, err)) {
+    if (!makeBuffer(n * 16u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, aBuf, err)) {
         dropBuffer(qBuf);
         return false;
     }
@@ -2607,9 +2645,9 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
             q[i * 8u + 4] = queries[i].facing.x;
             q[i * 8u + 5] = queries[i].facing.y;
             q[i * 8u + 6] = queries[i].facing.z;
-            q[i * 8u + 7] = 0.0f;
+            q[i * 8u + 7] = queries[i].trace ? 1.0f : 0.0f;
         }
-        const uint32_t counts[4] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), 0u };
+        const uint32_t counts[4] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), geomSlots };
         std::memcpy(ubo.mapped, counts, sizeof(counts));
     }
 
@@ -2650,8 +2688,32 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     VkDescriptorBufferInfo ub{};
     ub.buffer = ubo.buffer;
     ub.range = 4u * sizeof(uint32_t);
-    VkWriteDescriptorSet writes[7] = {};
-    for (int i = 0; i < 7; ++i) {
+    // 7-9: the TLAS (the scene's, or none when no question traces — a
+    // descriptor must still be valid, so the stand-in is only for 8/9), the
+    // per-slot rows (copied now), the GPU scene's rows.
+    RawBuffer rowBuf;
+    VkDescriptorBufferInfo geomBufs[2] = {};
+    if (geomSlots &&
+        makeBuffer(VkDeviceSize(geomSlots) * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                   false, rowBuf, err)) {
+        std::memcpy(rowBuf.mapped, sa->geomRowOfSlot.data(), size_t(geomSlots) * sizeof(uint32_t));
+        geomBufs[0].buffer = rowBuf.buffer;
+        geomBufs[0].range = VK_WHOLE_SIZE;
+        auto *gbi = static_cast<Ogre::VulkanBufferInterface *>(geomRows->getBufferInterface());
+        geomBufs[1].buffer = gbi->getVboName();
+        geomBufs[1].offset = VkDeviceSize(geomRows->_getFinalBufferStart()) * geomRows->getBytesPerElement();
+        geomBufs[1].range = geomRows->getTotalSizeBytes();
+    } else {
+        if (!ensureDummyImages(err)) { dropBuffer(qBuf); dropBuffer(aBuf); dropBuffer(ubo); return false; }
+        for (VkDescriptorBufferInfo &g : geomBufs) { g.buffer = mDummyStorage.buffer; g.range = VK_WHOLE_SIZE; }
+    }
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+    asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asWrite.accelerationStructureCount = 1;
+    asWrite.pAccelerationStructures = &sa->tlas;
+    const unsigned nWrites = 10u;
+    VkWriteDescriptorSet writes[10] = {};
+    for (int i = 0; i < 10; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = uint32_t(i);
@@ -2667,7 +2729,13 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     }
     writes[6].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     writes[6].pBufferInfo = &ub;
-    vkUpdateDescriptorSets(mVk, 7, writes, 0, nullptr);
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    writes[7].pNext = &asWrite;
+    for (int i = 0; i < 2; ++i) {
+        writes[8 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[8 + i].pBufferInfo = &geomBufs[i];
+    }
+    vkUpdateDescriptorSets(mVk, nWrites, writes, 0, nullptr);
 
     VkCommandPoolCreateInfo pci{};
     pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -2711,13 +2779,16 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         const uint32_t *a = static_cast<const uint32_t *>(aBuf.mapped);
         for (size_t i = 0; i < n; ++i) {
             CardReadPick &p = out[i];
-            const uint32_t flags = a[i * 8u + 0];
-            p.ok = (flags & 1u) != 0u;
-            p.lit = (flags & 2u) != 0u;
-            p.card = p.ok ? int(a[i * 8u + 1]) : -1;
-            p.texelX = a[i * 8u + 2];
-            p.texelY = a[i * 8u + 3];
-            std::memcpy(p.radiance, &a[i * 8u + 4], 3u * sizeof(float));
+            const uint32_t *r = &a[i * 16u];
+            p.ok = (r[0] & 1u) != 0u;
+            p.lit = (r[0] & 2u) != 0u;
+            p.hit = (r[0] & 4u) != 0u;
+            p.card = p.ok ? int(r[1]) : -1;
+            p.texelX = r[2];
+            p.texelY = r[3];
+            std::memcpy(p.radiance, &r[4], 3u * sizeof(float));
+            std::memcpy(p.hitPoint, &r[8], 3u * sizeof(float));
+            std::memcpy(p.hitNormal, &r[12], 3u * sizeof(float));
         }
     } else {
         err = "cardReadParity: the job did not complete (submit or device-lost wait failed)";
@@ -2728,6 +2799,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     vkFreeDescriptorSets(mVk, mCardParityPool, 1, &set);
     for (VkImageView v : views)
         if (v) vkDestroyImageView(mVk, v, nullptr);
+    dropBuffer(rowBuf);
     dropBuffer(qBuf);
     dropBuffer(aBuf);
     dropBuffer(ubo);
@@ -2822,9 +2894,19 @@ struct ReflectParams {
     float prevRayDown2[4] = {};
     float prevFwd2[4] = {};
     /// THE SURFACE CACHE (PHOTON-CARDS-2): x = the instance-table entries bound
-    /// (0 = no cache — the card read declines every hit), y = the card records.
+    /// (0 = no cache — the card read declines every hit), y = the card records,
+    /// z = the footprint gate in card texels (kCardFootprintTexels), w = the
+    /// per-slot geometry-row entries bound (0 = the hit's normal is the ray's).
     float cards[4] = {};
 };
+
+/// The card read's footprint gate (Types.h kCardFootprintTexels).
+/// `JAHSHAKA_CARD_FOOTPRINT_K` is a MEASUREMENT switch, not a mode: the sweep
+/// that chose the constant (test_rt_reflect --footprint-sweep) sets it per arm.
+float cardFootprintTexels() {
+    if (const char *e = std::getenv("JAHSHAKA_CARD_FOOTPRINT_K")) return float(std::atof(e));
+    return kCardFootprintTexels;
+}
 
 void put3(float *dst, const Ogre::Vector3 &v, float w) {
     dst[0] = v.x; dst[1] = v.y; dst[2] = v.z; dst[3] = w;
@@ -2854,6 +2936,8 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 16 the card instance table
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 17 the card Depth layer
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 the card Radiance layer
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 19 the per-slot geometry row
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 20 the geometry rows
     };
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
@@ -2932,7 +3016,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sizes[3].descriptorCount = sets * (3u + 4u * kMaxReflectCascades + 1u + 2u);
     sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[4].descriptorCount = sets * 2u;
+    sizes[4].descriptorCount = sets * 4u;
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -3068,6 +3152,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
         retireSet(rv.sets[i]);
         rv.sets[i] = VK_NULL_HANDLE;
         retire(rv.params[i]);
+        retire(rv.geomRowOfSlot[i]);
     }
     for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.dist[i]); }
     if (rv.hasQueryBase) mReflectQuerySlots &= ~(uint32_t(1) << rv.querySlot);
@@ -3479,6 +3564,27 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.stereo[1] = float(rv.historyFrames);
     pp.cards[0] = cardsBound ? float(cardCache->instanceSlots()) : 0.0f;
     pp.cards[1] = cardsBound ? float(cardCache->cardRecords()) : 0.0f;
+    pp.cards[2] = cardFootprintTexels();
+    // ---- THE HIT'S GEOMETRIC NORMAL: the per-slot row table (a copy per frame in
+    // flight) and the GPU scene's geometry rows, flushed first (a row staged but
+    // not uploaded is a zero address - the trap file's GPU SCENE TABLES rule) and
+    // the table pointer re-read here, never cached across a frame.
+    detail::GpuScene &gpuScn = scene->gpuScene();
+    if (gpuScn.live()) gpuScn.flushGeomRows();
+    Ogre::UavBufferPacked *geomRows = gpuScn.live() ? gpuScn.geomBuffer() : nullptr;
+    uint32_t geomSlots = geomRows ? uint32_t(sa.geomRowOfSlot.size()) : 0u;
+    if (geomSlots) {
+        RawBuffer &rb = rv.geomRowOfSlot[ring];
+        const VkDeviceSize want = VkDeviceSize(geomSlots) * sizeof(uint32_t);
+        if (rb.buffer && rb.size < want) retire(rb);
+        if (!rb.buffer &&
+            !makeBuffer(std::max<VkDeviceSize>(want, 1024u), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                        false, rb, err))
+            geomSlots = 0u;
+        else
+            std::memcpy(rb.mapped, sa.geomRowOfSlot.data(), size_t(want));
+    }
+    pp.cards[3] = float(geomSlots);
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -3627,6 +3733,23 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             return;
         }
     }
+    // THE HIT'S GEOMETRIC NORMAL (19, 20): the tables, or the stand-in with zero
+    // slots bound (the shader then faces the reversed ray).
+    VkDescriptorBufferInfo geomBufs[2] = {};
+    if (geomSlots) {
+        geomBufs[0].buffer = rv.geomRowOfSlot[ring].buffer;
+        geomBufs[0].range = VK_WHOLE_SIZE;
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(geomRows->getBufferInterface());
+        geomBufs[1].buffer = bi->getVboName();
+        geomBufs[1].offset = VkDeviceSize(geomRows->_getFinalBufferStart()) * geomRows->getBytesPerElement();
+        geomBufs[1].range = geomRows->getTotalSizeBytes();
+    } else {
+        for (VkDescriptorBufferInfo &g : geomBufs) { g.buffer = mDummyStorage.buffer; g.range = VK_WHOLE_SIZE; }
+    }
+    for (int i = 0; i < 2; ++i) {
+        w[kReflectGeomBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[kReflectGeomBinding + i].pBufferInfo = &geomBufs[i];
+    }
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -3676,6 +3799,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             for (Ogre::UavBufferPacked *b : { cardTable, cardInstances })
                 solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
         }
+        if (geomSlots)
+            solver.resolveTransition(trans, geomRows, Ogre::ResourceAccess::Read, computeStage);
         mRs->executeResourceTransition(trans);
     }
 
