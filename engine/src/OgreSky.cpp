@@ -1881,7 +1881,7 @@ void OgreScene::destroySky() {
 // read (no GPU wait). A capture is not free downstream: a new SH re-captures the
 // probes that read it, re-integrates the irradiance field and relights the
 // surface cache's indirect half (the environment is in its signature). The
-// period below is set from that measured cost (spikes/clouds-2d-1/, CADENCE).
+// period below is set from that measured cost.
 namespace {
 constexpr float    kCloudTileMetres   = 16000.0f;   // one tile of the field, in world metres
 constexpr Ogre::uint32 kCloudFieldSize = 1024u;     // ~16 m a texel: shadows soft, cells resolved
@@ -1889,7 +1889,19 @@ constexpr Ogre::uint32 kCloudNoiseSize = 256u;
 constexpr float    kCloudTauFull      = 32.0f;      // a full column's optical depth at density 1 (a thick stratocumulus deck; its base transmits ~22 % diffusely)
 constexpr float    kCloudSlabMetres   = 1000.0f;    // the sheet's thickness the self-shadow crosses
 constexpr float    kCloudFadeMetres   = 60000.0f;   // the distance the far sheet fades over
-constexpr unsigned kCloudCaptureFrames = 90u;       // the scroll's re-capture period (CADENCE)
+// THE SCROLL'S RE-CAPTURE PERIOD, SET FROM ITS MEASURED DOWNSTREAM COST
+// (spikes/clouds-2d-1/cadence/, 2026-09-23: Debug, Xvfb, one process, three
+// interleaved still/scroll pairs of 240 frames at a forced period of 10, the
+// default tier — probe grid + irradiance field, cards off at every shipped
+// tier). ONE scroll capture costs 26.4 ms of GPU and 45.7 ms of UI-thread CPU
+// in total — 28.8 and 16.7 still frames — almost none of it the capture: a new
+// SH stales the probe grid ("ambient", its whole grid re-captured at the
+// budget's one probe a frame) and re-sweeps the irradiance field. At 90 frames
+// that is +32 % GPU / +18 % CPU amortised; at 600 it is +4.8 % / +2.8 %. A
+// sheet at 10 m/s moves 100 m in those 10 s against a field of kilometre
+// cells, so the ambient it photographs has not moved; a parameter change
+// still re-captures at once.
+constexpr unsigned kCloudCaptureFrames = 600u;
 /// The period in force: kCloudCaptureFrames, unless the run-wide measurement
 /// latch JAHSHAKA_CLOUD_CAPTURE_FRAMES names another (read once — the A/B of
 /// the cadence is a run of the shipped binary, like JAHSHAKA_SKY_SH_SYNC).
