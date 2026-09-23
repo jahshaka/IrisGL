@@ -330,6 +330,13 @@ private:
         unsigned  instanceCapacity = 0;
         unsigned  instanceCount = 0;      ///< near + far copies: what the TLAS holds
         unsigned  farInstanceCount = 0;   ///< ...of which the far copies
+        /// The widest coarse-vs-fine gap of the set this TLAS was written from
+        /// (world units): the gather's far query starts this far BEFORE its near
+        /// length (audit F2). Held with the TLAS, so a still frame keeps it.
+        float     farOverlap = 0.0f;
+        /// The coarsest level's bound per GpuScene mesh index (with the mesh it
+        /// was read for), so the writer asks the mesh records once per mesh.
+        std::vector<std::pair<const Ogre::Mesh *, float>> coarseBound;
         unsigned  slot = 0;
 
         /// The gate: nothing moved, no item changed and no instance's RAY LEVEL
@@ -1372,6 +1379,10 @@ struct InstanceWriter final {
     unsigned overflow = 0;
     /// How many of `count` are FAR copies (mask kRayMaskFar).
     unsigned farCount = 0;
+    /// The widest coarse-vs-fine gap over the traced set, world units (F2),
+    /// and the per-mesh-index cache of the coarsest bound it is built from.
+    float maxCoarseBound = 0.0f;
+    std::vector<std::pair<const Ogre::Mesh *, float>> *coarseBound = nullptr;
     unsigned long long signature = 1469598103934665603ull;   // FNV-1a offset basis
     /// THE SIGNATURE IS ONLY EVER READ TO DECIDE REFIT-vs-REBUILD. A rebuild is
     /// the default (NVIDIA's own guidance for a TLAS, and 0.2-0.35 ms even at
@@ -1527,9 +1538,30 @@ static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
         mask |= (flags & detail::kGpuCaster) ? kRayMaskCaster : 0u;
         mask |= (flags & detail::kGpuMover) ? kRayMaskMover : kRayMaskStill;
         const uint32_t coarsest = coarsestLevelOf(mesh.get());
-        const uint32_t nearLevel = std::min(e.ids[3], coarsest);
+        const uint32_t nearLevel = std::min(scene->rayLevelOf(i), coarsest);
         w.add(mesh, nearLevel, false, e.world, mask, i);
         w.add(mesh, coarsest, true, e.world, kRayMaskFar, i);
+        // THE HAND-OVER'S WIDTH (audit F2): how far, in world units, a far copy's
+        // surface may lie from its fine one — the coarsest level's measured bound
+        // grown by the instance's largest axis scale. The gather starts its far
+        // query that much BEFORE the near length, so a coarse surface inside it
+        // whose fine surface lies just outside cannot be passed by both queries.
+        // The bound is cached per MESH TABLE INDEX (checked against the mesh
+        // pointer, so a recycled index re-reads): a lookup through the scene's
+        // mesh records per instance doubled this loop on the lattice, whose
+        // consecutive instances cycle through eleven meshes.
+        if (coarsest > 0u) {
+            if (meshIndex >= w.coarseBound->size()) w.coarseBound->resize(meshIndex + 1u);
+            auto &cached = (*w.coarseBound)[meshIndex];
+            if (cached.first != mesh.get()) {
+                const std::vector<float> *b = scene->lodBoundsFor(mesh.get());
+                cached = { mesh.get(), (b && !b->empty()) ? b->back() : 0.0f };
+            }
+            if (cached.second > 0.0f) {
+                const float grown = cached.second * worldMaxAxisScale(e.world);
+                if (std::isfinite(grown) && grown > w.maxCoarseBound) w.maxCoarseBound = grown;
+            }
+        }
     }
 }
 
@@ -2075,6 +2107,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         InstanceWriter w;
         w.blasOf = &sa.blasOf;
+        w.coarseBound = &sa.coarseBound;
         std::vector<VkDeviceAddress> addresses;
         addresses.reserve(sa.blas.size());
         for (const Blas &bl : sa.blas) addresses.push_back(bl.address);
@@ -2157,6 +2190,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         }
         sa.instanceCount = w.count;
         sa.farInstanceCount = w.farCount;
+        sa.farOverlap = w.maxCoarseBound;
         // REBUILD IS THE DEFAULT, refit the optimisation (NVIDIA's own guidance
         // for a TLAS: "consider PREFER_FAST_TRACE and perform only rebuilds").
         // A refit is only ever taken when the SET is identical — same
@@ -2181,7 +2215,18 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 sa.st.enabled = false;
                 return;
             }
-            scope.setUnits(sa.instanceCount);
+            // THE TRACED SET, not the TLAS's 2N: a per-unit cost that halved
+            // silently when every object gained a far copy would be a lie (F6).
+            // The far copies are their own row's units, beside it.
+            scope.setUnits(sa.instanceCount - sa.farInstanceCount);
+        }
+        {
+            // Zero-width by construction — the far copies are built by the SAME
+            // command as the near ones, so this row carries their COUNT and no
+            // time of its own.
+            monitor::CacheScope far(CacheKind::Gi, refit ? WorkReason::Moved : WorkReason::Rebuild,
+                                    0, "rq.tlas.far", nullptr);
+            far.setUnits(sa.farInstanceCount);
         }
         if (timed)
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 3);
@@ -2195,7 +2240,11 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     sa.haveEpoch = true;
     evictStaleBlas(sa);
     sa.st.gatherMs = float(gatherMs);
-    sa.st.blasCount = int(sa.blas.size());
+    // LIVE structures only: an evicted slot keeps its place in the vector (the
+    // index is referenced by the table) but holds nothing (F6).
+    sa.st.blasCount = 0;
+    for (const Blas &bl : sa.blas)
+        if (bl.as) ++sa.st.blasCount;
     // THE TRACED SET is the near copies; the far copies are the same objects
     // again (A5b §4), counted apart so a reader can tell the two halves.
     sa.st.instances = int(sa.instanceCount - sa.farInstanceCount);
@@ -3357,6 +3406,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.quality = scene->giParams().quality;
     in.epicRow = view->postFx().ssr >= 2;
     in.tuning = scene->gatherTuning();
+    in.farOverlap = sa.farOverlap;
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
     const auto takeVolume = [&](Ogre::VctLighting *lighting, Ogre::VctVoxelizer *voxelizer) {

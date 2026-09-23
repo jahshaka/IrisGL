@@ -5254,6 +5254,16 @@ public:
     /// adds it to its movement epoch (a still scene whose camera crossed a band
     /// owes one instance write: the near copy's BLAS changed).
     unsigned long long rayLevelRefits() const { return mRayLevelRefits; }
+    /// THE RULE'S LEVEL FOR A SLOT, as the walk left it THIS frame. The ray
+    /// tier's writer reads this and NOT `GpuInstance::ids[3]`: the walk runs
+    /// after the table's scan, so the mirror's copy of the word is restaged only
+    /// by the NEXT frame's scan — and a writer reading it would build the TLAS
+    /// with the previous level on exactly the frame the epoch said it changed,
+    /// then skip the following (still) frame (ATOM-FARBLAS-1 audit F1). `ids.w`
+    /// stays in the table for the device-side instance writer A3 §1.3 owes.
+    uint32_t rayLevelOf(uint32_t slot) const {
+        return slot < mRayLevel.size() ? mRayLevel[slot] : 0u;
+    }
     /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
     /// null (or a request with hzbLevels 0) is the frustum-only mode.
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,

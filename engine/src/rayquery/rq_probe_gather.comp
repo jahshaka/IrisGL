@@ -47,6 +47,12 @@
 // picture AWAY from the long-ray reference and is gone, PHOTON-GAFAR-1). A ray
 // that hits near pays one query; only an escaping ray pays the second. The far
 // query is off when the far plane lies inside the near length (p.knobs3.w = 0).
+// WHAT A FAR HIT IS WORTH TODAY: the cascades end at the near length, so a far
+// hit is almost always outside every cascade and reads BLACK (below) until the
+// surface cards shade it (CARDS-2). Until then the far query buys OCCLUSION --
+// the sky no longer leaks through distant geometry -- and nothing else; its cost
+// (+17-33 % of the gather in open sky at High/Epic, spikes/atom-farblas-1) is
+// paid for that alone.
 // A hit the cascades cannot shade -- near or far -- is BLACK, never sky: the ray
 // found geometry and the cache does not reach it; handing it the sky would
 // light the probe THROUGH the object, which is the leak this whole program
@@ -170,13 +176,17 @@ void main()
 				   gl_RayQueryCommittedIntersectionTriangleEXT;
 		float tHit = hit ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;
 		// THE FAR QUERY, for an escaping ray only: the far copies (kRayMaskFar),
-		// from the near length to the far plane. The same origin and direction,
-		// so the far segment starts exactly where the near one ended.
+		// from p.plane.z to the far plane. The same origin and direction; the far
+		// segment starts BEFORE the near one ended by the widest coarse-vs-fine
+		// gap of the traced set (audit F2), so a coarse surface just inside the
+		// near length whose fine one lies just outside is not passed by both
+		// queries. A coarse hit in the overlap is honest: the near query has
+		// already proved no fine surface lies there.
 		if( !hit && farT > maxT )
 		{
 			rayQueryEXT rqFar;
-			rayQueryInitializeEXT( rqFar, tlas, gl_RayFlagsOpaqueEXT, 0x10u, origin, maxT, dir,
-								   farT );
+			rayQueryInitializeEXT( rqFar, tlas, gl_RayFlagsOpaqueEXT, 0x10u, origin, p.plane.z,
+								   dir, farT );
 			while( rayQueryProceedEXT( rqFar ) ) {}
 			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) ==
 				gl_RayQueryCommittedIntersectionTriangleEXT )

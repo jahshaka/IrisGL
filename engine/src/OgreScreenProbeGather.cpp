@@ -723,6 +723,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     {
         const float farPlane = in.farClip > 0.0f ? in.farClip : 1000.0f;
         pp.knobs3[3] = (!in.tuning.farQueryOff && farPlane > pp.knobs[1]) ? farPlane : 0.0f;
+        // ...and it STARTS `farOverlap` before the near length (audit F2): a
+        // coarse surface just inside the near length whose fine surface lies
+        // just outside it would otherwise be passed by both queries — the ray
+        // would see through the object. A coarse hit in that overlap is honest:
+        // the near query has already proved no fine surface lies inside it.
+        pp.plane[2] = std::max(pp.knobs2[1], pp.knobs[1] - std::max(0.0f, in.farOverlap));
     }
     pp.plane[0] = kPlaneTolerance;
     pp.plane[1] = kNormalTolerance;

@@ -52,7 +52,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// fifty metres away is allowed to be fifty times further off the plane
 	/// than one at a metre, which is what makes one number work at every
 	/// depth); y = the smallest normal agreement (a dot product) that still
-	/// counts as the same surface; z = unused; w = 1 puts the probe at its
+	/// counts as the same surface; z = THE FAR QUERY'S tMin (the near length
+	/// less the widest coarse-vs-fine gap, ATOM-FARBLAS-1 audit F2); w = 1 puts the probe at its
 	/// cell's centre instead of jittering it inside the cell.
 	vec4 plane;
 	/// The colour an escaping ray reads when no sky cubemap is bound.
