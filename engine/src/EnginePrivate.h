@@ -5481,6 +5481,7 @@ private:
     /// (DRAG-1): the chain's size minus the cascades a rebuild had already
     /// injected since the previous tick. 0 in the single-volume arm.
     unsigned mGiChainInjections = 0;
+    unsigned long long mGiMonoInjections = 0;   ///< the single volume's landed injections (the surface cache's indirect signature)
     /// EVERY WRITE A LIGHT INJECTION WOULD READ (DRAG-1 round 2, F5): a light's
     /// parameters (setLight), its POSE (setNodeTransform on a node that owns
     /// one — a movable lamp never stales the probe grid, so nothing else sees
@@ -5814,20 +5815,8 @@ public:
     /// PBS variants (numShadowMapLights differs from the main view's), compiled
     /// once and disk-cached, exactly like the reflect node's.
     static constexpr const char *kProbeShadowNodeName = "JahshakaProbeShadowNode";
-    /// The FOURTH shadow node: the SURFACE CACHE's card capture only
-    /// (OgreSurfaceCache.cpp) — the probe node's resolution with the SUN's
-    /// three PSSM splits and NOTHING else (no focused maps, no scratch cube).
-    ///
-    /// WHY PSSM-ONLY (PHOTON-CARDS-1, measured with `sc1b_measure`, one process
-    /// per arm, Showroom-2-shaped: 45 carded instances, a sun, three shadowed
-    /// point lamps): the capture is a PREPASS, and the prepass writes exactly
-    /// one shadow term — the directional light's PSSM term (upstream's
-    /// `outPs_shadowRoughness`, which writes a constant 1.0 without PSSM). So a
-    /// point lamp's cube faces re-rendered for every card are pure waste: with
-    /// the probe node the per-card cost was 0.95-1.01 ms, with the lamps'
-    /// shadows off 0.20-0.22 ms, and with nothing casting 0.07-0.08 ms. A lamp's
-    /// shadow on a card is the traced residue's (PHOTON P5), not the capture's.
-    /// Casters: the probe kind's (the still world — what a card is).
+    /// The FOURTH shadow node: the surface cache's card capture only — the sun's
+    /// PSSM at the probe resolution, nothing else (why: DOCS/traps/ENGINE.md, "CARD SHADOW NODE").
     static constexpr const char *kCardShadowNodeName = "JahshakaCardShadowNode";
 
     // ---- The workspace seam (POST_CHAIN_SPEC.md; the planar-reflection lane

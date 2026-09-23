@@ -606,6 +606,7 @@ bool OgreScene::refreshVctFast() {
                 Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
             mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                                  giRayMarchStepScale(false));
+            ++mGiMonoInjections;
         }
         const auto tVoxels = std::chrono::steady_clock::now();
         const unsigned giItems = countGiItems();
@@ -1015,6 +1016,7 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             } else {
                 mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/,
                                      true /*autoMultiplier*/, giRayMarchStepScale(coarseTick));
+                ++mGiMonoInjections;
                 mGiChainSweeps = 1;      // the single volume is not an iteration
             }
             // (The chain branch has already reported its own count above: how
@@ -4320,6 +4322,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     applyVctEnvironment();
     mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                          giRayMarchStepScale(false));
+    ++mGiMonoInjections;
     // The materials this build read are the ones in force NOW.
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
     return itemCount;

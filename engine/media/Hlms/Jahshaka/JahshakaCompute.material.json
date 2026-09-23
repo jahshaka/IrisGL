@@ -148,7 +148,8 @@
 				"vct_anisotropic" : 0,
 				"hlms_num_vct_cascades" : 0,
 				"jah_env" : 0,
-				"vct_cone_dirs" : 4
+				"vct_cone_dirs" : 4,
+				"jah_card_round_r11g11b10" : 0
 			}
 		},
 

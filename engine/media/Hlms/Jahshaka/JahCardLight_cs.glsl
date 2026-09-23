@@ -267,10 +267,15 @@ layout( local_size_x = @value( threads_per_group_x ),
 // TRUNCATION (measured: 0.50829 stored as 0.5), so a channel lost up to one
 // whole mantissa step — 1/64 on red and green, 1/32 (3 %) on blue. Scaling by
 // one plus half a step first makes the truncation a round to nearest: half a
-// step at most. (Harmless on the RGBA16F fallback, a 10-bit mantissa.)
+// step at most. Only on that format (the host's property): the RGBA16F
+// fallback stores unrounded.
 vec3 jahCardRound( vec3 v )
 {
+@property( jah_card_round_r11g11b10 )
 	return v * vec3( 1.0 + 1.0 / 128.0, 1.0 + 1.0 / 128.0, 1.0 + 1.0 / 64.0 );
+@else
+	return v;
+@end
 }
 
 // BRDF_Default's diffuse at V = N, times NdotL (200.BRDFs_piece_ps.any).

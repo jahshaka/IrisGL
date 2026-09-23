@@ -3170,6 +3170,9 @@ struct CardCacheStatus {
     unsigned long long indirectRelights = 0ull;
     unsigned long long invalidIndirect = 0ull;
     bool indirectOn = false;
+    /// Lights the relight job could not hold (past its 64) at the last relight;
+    /// the engine log says so once per cache.
+    unsigned lightsDropped = 0u;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same

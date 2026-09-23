@@ -164,6 +164,9 @@ struct CardRec {
     /// ...and its INDIRECT half: stale (captured since, or the chain
     /// re-injected), present at all in the cached layer, and when last marched.
     bool relightIndirect = false;
+    /// The next capture changes the SURFACE (a new rect, a material), not only
+    /// the shadow term — so it re-marches the indirect too.
+    bool surfaceStale = false;
     bool indirectValid = false;
     unsigned long long lastIndirect = 0ull;
 };
@@ -192,9 +195,6 @@ struct CardSceneView {
     /// card's LIT radiance depends on (colour, power, reach, cone) — a change
     /// relights the resident set and recaptures nothing.
     unsigned long long radianceSerial = 0ull;
-    /// The scene's lights, for the relight job's light list (written inside
-    /// the frame, where their derived transforms are this frame's).
-    std::vector<Ogre::Light *> lights;
     /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
     unsigned lightBudgetTexels = 0u;
     /// THE INDIRECT HALF: the chain the march reads (the scene's cascade-0
@@ -330,7 +330,6 @@ private:
 
     // ---- the atlas + the page allocator -----------------------------------
     bool makeAtlas(std::string &err);
-    bool makeScratch(std::string &err);
     bool makeWorkspace(std::string &err);
     /// One card, one (u, v) in [0, 1], five layers, through an
     /// AsyncTextureTicket. The one place a card parameter becomes an atlas
@@ -393,7 +392,9 @@ private:
     unsigned long long mIndirectRelights = 0ull;
     unsigned long long mInvalidIndirect = 0ull;
     bool mIndirectOnLastRelight = false;
-    std::vector<Ogre::Light *> mLights;      ///< this frame's lights (valid inside the frame)
+    /// Lights past kMaxCardLights last relight, and whether the cache has said so.
+    unsigned mLightsDropped = 0u;
+    bool mLightsDroppedLogged = false;
     std::vector<float> mRelightCpu, mLightCpu;
     unsigned long long mRadianceSerial = 0ull;
     bool mRadianceMovingLastFrame = false;

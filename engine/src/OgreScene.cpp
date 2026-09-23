@@ -1852,8 +1852,7 @@ void OgreScene::updateSurfaceCache() {
     // card's LIT radiance depends on and its capture does not — the colour,
     // the power, the reach and the cone. A colour slider costs the cache a
     // relight of the resident set (the `Jahshaka/CardLight` job, under its own
-    // budget) and not one capture. The lights themselves are handed over for
-    // the job's light list, which the cache writes inside the frame.
+    // budget) and not one capture.
     unsigned long long radianceSig = lightSig;
     for (NodeId lid : mLightNodes) {
         auto lit = mNodes.find(lid);
@@ -1870,17 +1869,18 @@ void OgreScene::updateSurfaceCache() {
         foldR(l->getSpotlightInnerAngle().valueRadians());
         foldR(l->getSpotlightOuterAngle().valueRadians());
         foldR(l->getSpotlightFalloff());
-        view.lights.push_back(lit->second.light);
     }
     view.radianceSerial = radianceSig;
     view.lightBudgetTexels = facts.cardLightTexels;
     // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0
     // VctLighting the pass buffer is filled from), and THE RE-INJECTION
-    // SIGNATURE — every path that re-injects the chain moves one of these: a
-    // light tick follows a light write (mGiLightWriteSerial), a settle counts
-    // itself (mGiChainSettles), a rebuild counts itself (mGiRebuilds and each
-    // cascade's own), a voxel-input edit bumps the material generation, and a
-    // scroll re-centres a cascade (its lattice cell).
+    // SIGNATURE — folded ONLY from what moves when an injection LANDS, never
+    // from the write-time serials (a light write or a material generation
+    // bumps at the WRITE, and a dragged light re-marched the whole resident set
+    // against voxels that had not moved, every frame): the chain's settles, each
+    // cascade's rebuilds and lattice cell, the VctLighting objects themselves,
+    // the single volume's own landed-injection count (OgreGi.cpp), and the
+    // environment the escapes read (below).
     view.vct = mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
     {
@@ -1889,10 +1889,22 @@ void OgreScene::updateSurfaceCache() {
             sig ^= v;
             sig *= 1099511628211ull;
         };
-        foldI(mGiLightWriteSerial);
         foldI((unsigned long long)mGiChainSettles);
-        foldI(mGiRebuilds);
-        foldI(mGiMaterialGeneration);
+        foldI(mGiMonoInjections);
+        // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
+        // injection at all: noteEnvironmentChanged hands the new sky to every
+        // VctLighting at once (applyVctEnvironment) and the pixel reads it the
+        // same frame, so the card's escape must too. The values
+        // applyCascadeEnvironment hands over, quantised.
+        {
+            const Ogre::TextureGpu *cube =
+                (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
+            foldI((unsigned long long)(uintptr_t)cube);
+            const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
+            for (float g : gain) foldI((unsigned long long)(long long)std::lround(double(g) * 1e4));
+            for (int k = 0; k < 27; ++k)
+                foldI((unsigned long long)(long long)std::lround(double(mLastAmbientSh[k]) * 1e4));
+        }
         foldI((unsigned long long)(uintptr_t)mVctLighting);
         for (const VctCascade &c : mVctCascades) {
             foldI((unsigned long long)(uintptr_t)c.lighting);
