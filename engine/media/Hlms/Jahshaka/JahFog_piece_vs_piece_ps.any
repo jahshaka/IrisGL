@@ -203,34 +203,37 @@
 // A MATERIAL THAT RECEIVES NO SHADOWS is shaded all the same (the fix round's
 // F2): upstream leaves the first-light piece undefined for it, so the same
 // multiply is defined there on its own -- the sheet's transmittance is what it
-// is, whatever the material says about shadow maps. A SUN THAT CASTS NO SHADOW
-// is not reached by this hook at all: it is drawn in upstream's non-caster
-// directional loop, which inserts no piece (a fork hook, reported). The
-// ambient is NOT scaled: the sheet is
+// is, whatever the material says about shadow maps. And a SUN THAT CASTS NO
+// SHADOW is drawn in upstream's non-caster directional loop, whose factor is
+// the fork's custom_ps_darkenNonCasterDirectional hook: every directional light
+// without a shadow map crosses the sheet along the SUN's throw (the one sun is
+// what the map is thrown for; a second directional is an approximation). The
+// // ambient is NOT scaled: the sheet is
 // kilometres up, so the sky a ground point sees through it varies over a
 // kernel as wide as the altitude -- uniform across any scene -- and that
 // uniform part is already in the ambient, because the environment capture
 // photographs the sheet.
-@property( jah_cloud_shadow && hlms_lights_directional && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+@property( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
 @piece( custom_ps_functions )
+#define JAH_CLOUD_TAU( uv ) OGRE_SampleLevel( jahCloudField, jahCloudSampler, uv, 0.0 ).x
+@insertpiece( JahCloudShadow )
 midf jahCloudSunTransmittance( float3 viewPos )
 {
 	const float3 jahWp = float3( dot( passBuf.jahCloudInvView0.xyz, viewPos ) + passBuf.jahCloudInvView0.w,
 								 dot( passBuf.jahCloudInvView1.xyz, viewPos ) + passBuf.jahCloudInvView1.w,
 								 dot( passBuf.jahCloudInvView2.xyz, viewPos ) + passBuf.jahCloudInvView2.w );
-	const float2 jahAt = jahWp.xz + passBuf.jahCloudSun.xy * max( passBuf.jahCloudSun.z - jahWp.y, 0.0 );
-	const float2 jahUv = ( jahAt + passBuf.jahCloudMap.zw ) * passBuf.jahCloudMap.x;
-	const float jahTau = OGRE_SampleLevel( jahCloudField, jahCloudSampler, jahUv, 0.0 ).x;
-	const float jahT = exp( -jahTau * passBuf.jahCloudSun.w );
-	return midf_c( lerp( 1.0, jahT, passBuf.jahCloudMap.y ) );
+	return midf_c( jahCloudTransmittance( jahWp, passBuf.jahCloudMap, passBuf.jahCloudSun ) );
 }
 @end
-@property( receive_shadows && hlms_num_shadow_map_lights )
-	@undefpiece( DarkenWithShadowFirstLight )
-	@piece( DarkenWithShadowFirstLight )* ( fShadow * jahCloudSunTransmittance( inPs.pos.xyz ) )@end
-@else
-	@piece( DarkenWithShadowFirstLight )* jahCloudSunTransmittance( inPs.pos.xyz )@end
+@property( hlms_lights_directional )
+	@property( receive_shadows && hlms_num_shadow_map_lights )
+		@undefpiece( DarkenWithShadowFirstLight )
+		@piece( DarkenWithShadowFirstLight )* ( fShadow * jahCloudSunTransmittance( inPs.pos.xyz ) )@end
+	@else
+		@piece( DarkenWithShadowFirstLight )* jahCloudSunTransmittance( inPs.pos.xyz )@end
+	@end
 @end
+@piece( custom_ps_darkenNonCasterDirectional )* jahCloudSunTransmittance( inPs.pos.xyz )@end
 @end
 
 @property( hlms_fog )
