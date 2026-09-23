@@ -1,0 +1,56 @@
+#version 460
+// gi.card_read_parity's GPU half (PHOTON-CARDS-2): the ray job's card read —
+// jah_rq_card.glsl, the SAME include rq_reflect.comp reads — asked at a list of
+// world points, its pick written out for the suite to hold against the CPU's
+// SurfaceCache::readAt. A test-only job: nothing in a frame dispatches it
+// (RayQueryTier::cardPickBlocking records it on its own command buffer and
+// stalls on the answer). The bindings are the card read's four, named exactly
+// as rq_reflect.comp names them.
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+
+/// One question: xyz = the world point, w = the item slot (as a float's bits);
+/// facing.xyz = the direction the read treats as "facing".
+struct Query
+{
+	vec4 pos;
+	vec4 facing;
+};
+layout( std430, set = 0, binding = 0 ) readonly buffer QueryBuf { Query queries[]; };
+/// One answer: x = ok | lit << 1, y = the card, zw = the atlas texel; then
+/// the radiance the read returns.
+struct Answer
+{
+	uvec4 pick;
+	vec4 radiance;
+};
+layout( std430, set = 0, binding = 1 ) writeonly buffer AnswerBuf { Answer answers[]; };
+
+#define JAH_CARD_BINDING_BASE 2
+#include "jah_rq_card_bindings.glsl"
+
+layout( set = 0, binding = 6 ) uniform Counts
+{
+	uvec4 counts;	///< x = queries, y = instance slots bound, z = card records bound
+} cnt;
+
+#define JAH_CARD_SLOTS cnt.counts.y
+#define JAH_CARD_RECORDS cnt.counts.z
+#include "jah_rq_card.glsl"
+
+void main()
+{
+	const uint i = gl_GlobalInvocationID.x;
+	if( i >= cnt.counts.x )
+		return;
+	const Query q = queries[i];
+	const JahCardPick pick = jahCardPick( floatBitsToUint( q.pos.w ), q.pos.xyz, q.facing.xyz );
+	Answer a;
+	a.pick = uvec4( ( pick.ok ? 1u : 0u ) | ( pick.lit ? 2u : 0u ), pick.card,
+					uint( pick.texel.x ), uint( pick.texel.y ) );
+	bool ok;
+	a.radiance = vec4( jahCardRadiance( floatBitsToUint( q.pos.w ), q.pos.xyz, q.facing.xyz, 0.0, ok ),
+					   ok ? 1.0 : 0.0 );
+	answers[i] = a;
+}

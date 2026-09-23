@@ -141,6 +141,11 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 prevRayRight2;
 	vec4 prevRayDown2;
 	vec4 prevFwd2;
+	/// ---- THE SURFACE CACHE (PHOTON-CARDS-2) ------------------------------
+	/// x = the instance-table entries bound (0 = the scene holds no cache: the
+	/// card read declines every hit and the voxels answer, as before), y = the
+	/// card records bound.
+	vec4 cards;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -267,6 +272,14 @@ const float kWarmupFrames = 8.0;
 #define JAH_SKY_COLOUR      p.skyColour.xyz
 #include "jah_rq_hit.glsl"
 
+/// THE SURFACE CACHE the hits read FIRST (PHOTON-CARDS-2, SC-1d): the card
+/// table, the instance table, the Depth and Radiance layers, at bindings 15-18.
+#define JAH_CARD_BINDING_BASE 15
+#include "jah_rq_card_bindings.glsl"
+#define JAH_CARD_SLOTS   uint( p.cards.x )
+#define JAH_CARD_RECORDS uint( p.cards.y )
+#include "jah_rq_card.glsl"
+
 /// Metres along the camera's forward axis, with and without reverse Z — the
 /// same line JahSsrRayMarch_ps.glsl uses, from Camera::getProjectionParamsAB().
 float viewDistance( float rawDepth )
@@ -318,8 +331,8 @@ vec2 sample2( ivec2 pix, uint frame )
 /// dropped outright: it is 1 at normal incidence and falls off at grazing
 /// angles, so a grazing reflection is slightly too bright, which is the same
 /// approximation the probe path this replaces makes. Correcting it needs the
-/// hit's own normal, which costs a per-instance geometry table (see
-/// voxelRadiance).
+/// hit's own normal, which the acceleration structure does not hand back (see
+/// jah_rq_card.glsl on VK_KHR_ray_tracing_position_fetch).
 ///
 /// At alpha 0 it returns the surface normal exactly, which is why a mirror
 /// traces the mirror direction with no noise at all.
@@ -340,8 +353,29 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 	return normalize( vec3( alpha * Nh.x, alpha * Nh.y, max( 0.0, Nh.z ) ) );
 }
 
-/// THE RADIANCE AT A HIT, FROM THE PHOTON VOXELS (route A, PHOTON_SPEC §7 R5
-/// item 4; the R1 hit-radiance spike's verdict, ledger §359).
+/// THE RADIANCE AT A HIT — THE CARD FIRST, THE VOXELS WHERE NO CARD ANSWERS
+/// (PHOTON-CARDS-2, SC-1d; F1-HITRES).
+///
+/// THE CARD. The surface cache holds, for every carded instance near the
+/// camera, the lit radiance of its surface at the atlas's texel pitch — a
+/// 2 m panel on a 128 page is 1.6 cm a texel, where the finest voxel a mirror
+/// can read is two 7.8 cm cells (15.6 cm) wide. That width was the mirror band's
+/// banding: every hit shaded from a 15.6 cm cell. So a hit asks the card of its
+/// own instance first (`jahCardRadiance`, jah_rq_card.glsl: the instance by the
+/// TLAS's instanceCustomIndex = the item slot, the pick, the through-the-wall
+/// rule, the texel) and takes the card's radiance whole — weight 1, no
+/// crossfade: a card texel is a surface's own answer, not a filtered volume.
+/// The facing direction handed to the pick is the REVERSED RAY (the hit's
+/// normal is not in the acceleration structure; the header there says why that
+/// is sound). The read is texel-exact whatever the lobe's footprint — the atlas
+/// has no mips (the page mip chain is SC-2's), so a rough reflection's
+/// variance is the temporal mean's and the spatial filter's, as the voxel read's
+/// finest mip was.
+///
+/// THE VOXELS answer where no card does: an instance with no cards, a point no
+/// card of it describes, a scene without a cache — and a card whose indirect
+/// half has not been marched yet (it would read a black bounce; the header
+/// there says why that happens). Their read, unchanged:
 ///
 /// The anisotropic slots and not slot 0, because the spike measured exactly
 /// what slot 0 costs: it is the voxel's radiance averaged over every direction,
@@ -406,8 +440,13 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 ///
 /// `lobeAlpha` is the GGX alpha of the surface the ray left and `t` the distance
 /// it travelled.
-vec3 voxelRadiance( vec3 hitPos, vec3 dir, float lobeAlpha, float t, out bool ok )
+vec3 hitRadiance( uint slot, vec3 hitPos, vec3 dir, float lobeAlpha, float t, out bool ok )
 {
+	{
+		const vec3 card = jahCardRadiance( slot, hitPos, -dir, 0.0, ok );
+		if( ok )
+			return card;
+	}
 	// THE MIP IS CHOSEN FOR THE LOBE, and this wrapper is where that choice is
 	// made — the shared function takes a FOOTPRINT in world units and knows
 	// nothing about specular lobes. `textureLod(..., 0.0)` made every ray read
@@ -682,7 +721,8 @@ void main()
 	{
 		const float t = rayQueryGetIntersectionTEXT( rq, true );
 		hitT = t;
-		traced = voxelRadiance( world + worldN * bias + L * t, L, lobeAlpha, t, ok );
+		traced = hitRadiance( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) ),
+							  world + worldN * bias + L * t, L, lobeAlpha, t, ok );
 		// A HIT THE CACHE CANNOT SHADE IS NOT A MISS. The ray found geometry;
 		// the voxels simply do not reach it (outside every cascade, or a surface
 		// too thin for the grid). Returning the sky there would draw a hole in

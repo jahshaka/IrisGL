@@ -58,6 +58,7 @@
 #include <Vao/OgreVertexBufferPacked.h>
 #include <Vao/OgreIndexBufferPacked.h>
 #include <Vao/OgreVaoManager.h>
+#include <Vao/OgreUavBufferPacked.h>
 
 #if JAH_RAY_QUERY
 
@@ -71,11 +72,13 @@
 #include "rayquery/rq_rays_spv.h"
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
+#include "rayquery/rq_card_parity_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
 // jobs, its atlases and its pipelines live in OgreScreenProbeGather.cpp; this
 // file is its HOST (the device, the retire window, the frame's command buffer,
 // the TLAS) and the one that is friends with the scene it reads.
 #include "ScreenProbeGather.h"
+#include "SurfaceCache.h"
 
 #include <algorithm>
 #include <chrono>
@@ -211,8 +214,11 @@ constexpr unsigned kMaxReflectCascades = 4u;
 /// command buffer that has not retired may not be rewritten, and this set is
 /// rewritten every frame (every input can be recreated behind our back).
 constexpr unsigned kReflectRing = 3u;
-/// Bindings in rq_reflect.comp's set 0.
-constexpr unsigned kReflectBindings = 15u;
+/// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
+/// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
+/// card table, the instance table, the Depth and Radiance layers).
+constexpr unsigned kReflectBindings = 19u;
+constexpr unsigned kReflectCardBinding = 15u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -291,6 +297,12 @@ public:
     /// comes back as {t (<0 = miss), customIndex, primitiveIndex, hit?1:0}.
     bool traceBlocking(OgreScene *scene, const std::vector<float> &rays,
                        std::vector<float> &hits, std::string &err);
+    /// gi.card_read_parity's GPU half (PHOTON-CARDS-2): the reflection's card
+    /// read (jah_rq_card.glsl) asked at `queries` through a test-only job
+    /// (rq_card_parity.comp) over the scene's own surface cache. Flushes
+    /// Ogre's commands, submits, stalls — a suite, never a frame.
+    bool cardPickBlocking(OgreScene *scene, const std::vector<CardReadQuery> &queries,
+                          std::vector<CardReadPick> &out, std::string &err);
 
     RayQueryStatus status(const OgreScene *scene) const;
 
@@ -489,7 +501,12 @@ private:
     /// cleared once, and left in SHADER_READ_ONLY_OPTIMAL for the process' life.
     bool ensureDummyImages(std::string &err);
     void clearDummyImages(VkCommandBuffer cmd);
-    ReflectImage mDummyCube, mDummyVolume;
+    /// ...and the card read's (PHOTON-CARDS-2): a scene without a surface cache
+    /// binds a 1x1 black 2D image for the two atlas layers and a 256-byte
+    /// storage buffer for the two tables, with ZERO instance slots in the
+    /// parameters, so the read declines every hit without touching them.
+    ReflectImage mDummyCube, mDummyVolume, mDummyFlat;
+    RawBuffer mDummyStorage;
     bool mDummiesReady = false;
     bool mDummiesNeedClear = false;
     bool makeStorageImage(unsigned w, unsigned h, VkFormat fmt, ReflectImage &out,
@@ -608,6 +625,15 @@ private:
     VkPipeline            mFilterPipeline = VK_NULL_HANDLE;
     VkShaderModule        mFilterModule = VK_NULL_HANDLE;
     VkDescriptorPool      mReflectPool = VK_NULL_HANDLE;
+    /// gi.card_read_parity's harness (cardPickBlocking), made on first use.
+    VkDescriptorSetLayout mCardParitySetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mCardParityPipeLayout = VK_NULL_HANDLE;
+    VkShaderModule        mCardParityModule = VK_NULL_HANDLE;
+    VkPipeline            mCardParityPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool      mCardParityPool = VK_NULL_HANDLE;
+    /// Its own point sampler: the reflection's are made with the reflection
+    /// pipeline, which a scene without an SSR chain never builds.
+    VkSampler             mCardParitySampler = VK_NULL_HANDLE;
     VkSampler             mPointSampler = VK_NULL_HANDLE;
     VkSampler             mLinearSampler = VK_NULL_HANDLE;
     /// The pipeline could not be made on this device; say so ONCE and take the
@@ -901,10 +927,11 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
     struct Spec { ReflectImage *img = nullptr; VkImageType type = VK_IMAGE_TYPE_2D;
                   VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D; uint32_t layers = 0;
                   VkImageCreateFlags flags = 0; };
-    const Spec specs[2] = {
+    const Spec specs[3] = {
         { &mDummyCube, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_CUBE, 6u,
           VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT },
         { &mDummyVolume, VK_IMAGE_TYPE_3D, VK_IMAGE_VIEW_TYPE_3D, 1u, 0u },
+        { &mDummyFlat, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, 1u, 0u },
     };
     for (const Spec &sp : specs) {
         VkImageCreateInfo ici{};
@@ -949,6 +976,10 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
             return false;
         }
     }
+    if (!mDummyStorage.buffer &&
+        !makeBuffer(256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, mDummyStorage, err))
+        return false;
+    std::memset(mDummyStorage.mapped, 0, 256u);
     mDummiesReady = true;
     mDummiesNeedClear = true;
     return true;
@@ -957,9 +988,9 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
 void RayQueryTier::clearDummyImages(VkCommandBuffer cmd) {
     if (!mDummiesNeedClear) return;
     mDummiesNeedClear = false;
-    ReflectImage *imgs[2] = { &mDummyCube, &mDummyVolume };
-    const uint32_t layers[2] = { 6u, 1u };
-    for (int i = 0; i < 2; ++i) {
+    ReflectImage *imgs[3] = { &mDummyCube, &mDummyVolume, &mDummyFlat };
+    const uint32_t layers[3] = { 6u, 1u, 1u };
+    for (int i = 0; i < 3; ++i) {
         VkImageSubresourceRange range{};
         range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         range.levelCount = 1;
@@ -1273,12 +1304,13 @@ void RayQueryTier::close() {
     // (`mDummyArray` — SURFACE-CACHE-0's 1x1x6 stand-in for the card spike's
     // five bindings — went with the spike at SURFACE-CACHE-1b; nothing in the
     // gather or the reflect job binds a 2D ARRAY.)
-    for (ReflectImage *d : { &mDummyCube, &mDummyVolume }) {
+    for (ReflectImage *d : { &mDummyCube, &mDummyVolume, &mDummyFlat }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
         if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
         *d = ReflectImage();
     }
+    dropBuffer(mDummyStorage);
     mDummiesReady = false;
     mDummiesNeedClear = false;
     for (Retired &r : mRetireBin) {
@@ -1293,6 +1325,16 @@ void RayQueryTier::close() {
         if (r.img.memory) vkFreeMemory(mVk, r.img.memory, nullptr);
     }
     mRetireBin.clear();
+    if (mCardParityPool) vkDestroyDescriptorPool(mVk, mCardParityPool, nullptr);
+    if (mCardParitySampler) vkDestroySampler(mVk, mCardParitySampler, nullptr);
+    mCardParitySampler = VK_NULL_HANDLE;
+    if (mCardParityPipeline) vkDestroyPipeline(mVk, mCardParityPipeline, nullptr);
+    if (mCardParityModule) vkDestroyShaderModule(mVk, mCardParityModule, nullptr);
+    if (mCardParityPipeLayout) vkDestroyPipelineLayout(mVk, mCardParityPipeLayout, nullptr);
+    if (mCardParitySetLayout) vkDestroyDescriptorSetLayout(mVk, mCardParitySetLayout, nullptr);
+    mCardParityPool = VK_NULL_HANDLE; mCardParityPipeline = VK_NULL_HANDLE;
+    mCardParityModule = VK_NULL_HANDLE; mCardParityPipeLayout = VK_NULL_HANDLE;
+    mCardParitySetLayout = VK_NULL_HANDLE;
     if (mReflectPool) vkDestroyDescriptorPool(mVk, mReflectPool, nullptr);
     if (mReflectPipeline) vkDestroyPipeline(mVk, mReflectPipeline, nullptr);
     if (mFilterPipeline) vkDestroyPipeline(mVk, mFilterPipeline, nullptr);
@@ -2430,6 +2472,283 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
     return ok;
 }
 
+// gi.card_read_parity — the reflection's card read, asked directly
+// ---------------------------------------------------------------------------
+// The same include the trace reads (jah_rq_card.glsl) behind the same four
+// bindings (jah_rq_card_bindings.glsl, here at base 2), dispatched once over a
+// list of points on its own command buffer, the picks read back. The suite
+// holds them against SurfaceCache::readAt, the CPU reference.
+bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardReadQuery> &queries,
+                                    std::vector<CardReadPick> &out, std::string &err) {
+    out.clear();
+    if (!isOpen()) { err = "cardReadParity: the ray tier is not open"; return false; }
+    const SurfaceCache *cache = scene ? scene->mSurfaceCache.get() : nullptr;
+    if (!cache || !cache->cardBuffer() || !cache->instanceBuffer() || !cache->depthLayer() ||
+        !cache->radianceLayer() || !cache->cardRecords()) {
+        err = "cardReadParity: the scene holds no built surface cache";
+        return false;
+    }
+    if (queries.empty()) { err = "cardReadParity: no queries"; return false; }
+
+    // ---- the harness pipeline, once ------------------------------------------
+    if (!mCardParityPipeline) {
+        const VkDescriptorType types[7] = {
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER };
+        VkDescriptorSetLayoutBinding b[7] = {};
+        for (unsigned i = 0; i < 7u; ++i) {
+            b[i].binding = i;
+            b[i].descriptorType = types[i];
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo sli{};
+        sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        sli.bindingCount = 7;
+        sli.pBindings = b;
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &mCardParitySetLayout;
+        VkShaderModuleCreateInfo smi{};
+        smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smi.codeSize = sizeof(krq_cardParitySpv);
+        smi.pCode = krq_cardParitySpv;
+        VkDescriptorPoolSize sizes[3] = {};
+        sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sizes[0].descriptorCount = 4;
+        sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sizes[1].descriptorCount = 2;
+        sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        sizes[2].descriptorCount = 1;
+        VkDescriptorPoolCreateInfo dpi{};
+        dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        dpi.maxSets = 1;
+        dpi.poolSizeCount = 3;
+        dpi.pPoolSizes = sizes;
+        if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCardParitySetLayout) != VK_SUCCESS ||
+            vkCreatePipelineLayout(mVk, &pli, nullptr, &mCardParityPipeLayout) != VK_SUCCESS ||
+            vkCreateShaderModule(mVk, &smi, nullptr, &mCardParityModule) != VK_SUCCESS ||
+            vkCreateDescriptorPool(mVk, &dpi, nullptr, &mCardParityPool) != VK_SUCCESS) {
+            err = "cardReadParity: the harness pipeline could not be made";
+            return false;
+        }
+        VkComputePipelineCreateInfo cpi{};
+        cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = mCardParityModule;
+        cpi.stage.pName = "main";
+        cpi.layout = mCardParityPipeLayout;
+        if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mCardParityPipeline) !=
+            VK_SUCCESS) {
+            err = "cardReadParity: vkCreateComputePipelines failed";
+            return false;
+        }
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = VK_LOD_CLAMP_NONE;
+        if (vkCreateSampler(mVk, &si, nullptr, &mCardParitySampler) != VK_SUCCESS) {
+            err = "cardReadParity: vkCreateSampler failed";
+            return false;
+        }
+    }
+
+    // ---- THE INPUTS IN THEIR READ LAYOUTS, AND EVERYTHING OGRE RECORDED FIRST.
+    // The atlas's Depth layer and the Radiance UAV as textures, the two tables
+    // as buffers — through Ogre's own solver (its bookkeeping stays true: the
+    // harness changes no layout) — then the flush that submits the captures,
+    // the relight and the table uploads ahead of this job.
+    Ogre::UavBufferPacked *table = cache->cardBuffer();
+    Ogre::UavBufferPacked *instances = cache->instanceBuffer();
+    Ogre::TextureGpu *depth = cache->depthLayer();
+    Ogre::TextureGpu *radiance = cache->radianceLayer();
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        for (Ogre::TextureGpu *t : { depth, radiance })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        for (Ogre::UavBufferPacked *b : { table, instances })
+            solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    mRs->flushCommands();
+
+    const size_t n = queries.size();
+    RawBuffer qBuf, aBuf, ubo;
+    if (!makeBuffer(n * 8u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, qBuf, err))
+        return false;
+    if (!makeBuffer(n * 8u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, aBuf, err)) {
+        dropBuffer(qBuf);
+        return false;
+    }
+    if (!makeBuffer(4u * sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
+        dropBuffer(qBuf);
+        dropBuffer(aBuf);
+        return false;
+    }
+    {
+        float *q = static_cast<float *>(qBuf.mapped);
+        for (size_t i = 0; i < n; ++i) {
+            const long slot = cache->itemSlotOf(queries[i].node);
+            const uint32_t slotBits = slot < 0 ? 0xFFFFFFFFu : uint32_t(slot);
+            q[i * 8u + 0] = queries[i].position.x;
+            q[i * 8u + 1] = queries[i].position.y;
+            q[i * 8u + 2] = queries[i].position.z;
+            std::memcpy(&q[i * 8u + 3], &slotBits, sizeof(slotBits));
+            q[i * 8u + 4] = queries[i].facing.x;
+            q[i * 8u + 5] = queries[i].facing.y;
+            q[i * 8u + 6] = queries[i].facing.z;
+            q[i * 8u + 7] = 0.0f;
+        }
+        const uint32_t counts[4] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), 0u };
+        std::memcpy(ubo.mapped, counts, sizeof(counts));
+    }
+
+    VkDescriptorSetAllocateInfo dai{};
+    dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dai.descriptorPool = mCardParityPool;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &mCardParitySetLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(mVk, &dai, &set) != VK_SUCCESS) {
+        err = "cardReadParity: vkAllocateDescriptorSets failed";
+        dropBuffer(qBuf); dropBuffer(aBuf); dropBuffer(ubo);
+        return false;
+    }
+    VkDescriptorBufferInfo bufs[4] = {};
+    bufs[0].buffer = qBuf.buffer; bufs[0].range = VK_WHOLE_SIZE;
+    bufs[1].buffer = aBuf.buffer; bufs[1].range = VK_WHOLE_SIZE;
+    Ogre::UavBufferPacked *const tables[2] = { table, instances };
+    for (int i = 0; i < 2; ++i) {
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(tables[i]->getBufferInterface());
+        bufs[2 + i].buffer = bi->getVboName();
+        bufs[2 + i].offset = VkDeviceSize(tables[i]->_getFinalBufferStart()) *
+                             tables[i]->getBytesPerElement();
+        bufs[2 + i].range = tables[i]->getTotalSizeBytes();
+    }
+    VkImageView views[2] = {};
+    VkDescriptorImageInfo imgs[2] = {};
+    Ogre::TextureGpu *const layers[2] = { depth, radiance };
+    for (int i = 0; i < 2; ++i) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot =
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = layers[i];
+        views[i] = static_cast<Ogre::VulkanTextureGpu *>(layers[i])->createView(slot, false);
+        imgs[i].sampler = mCardParitySampler;
+        imgs[i].imageView = views[i];
+        imgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    VkDescriptorBufferInfo ub{};
+    ub.buffer = ubo.buffer;
+    ub.range = 4u * sizeof(uint32_t);
+    VkWriteDescriptorSet writes[7] = {};
+    for (int i = 0; i < 7; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = uint32_t(i);
+        writes[i].descriptorCount = 1;
+    }
+    for (int i = 0; i < 4; ++i) {
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &bufs[i];
+    }
+    for (int i = 0; i < 2; ++i) {
+        writes[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[4 + i].pImageInfo = &imgs[i];
+    }
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[6].pBufferInfo = &ub;
+    vkUpdateDescriptorSets(mVk, 7, writes, 0, nullptr);
+
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.queueFamilyIndex = mDev->mGraphicsQueue.getFamilyIdx();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    vkCreateCommandPool(mVk, &pci, nullptr, &pool);
+    VkCommandBufferAllocateInfo cai{};
+    cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cai.commandPool = pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(mVk, &cai, &cmd);
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCardParityPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCardParityPipeLayout, 0, 1, &set,
+                            0, nullptr);
+    vkCmdDispatch(cmd, uint32_t((n + 63u) / 64u), 1, 1);
+    VkMemoryBarrier toHost{};
+    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toHost.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                         1, &toHost, 0, nullptr, 0, nullptr);
+    vkEndCommandBuffer(cmd);
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    vkCreateFence(mVk, &fci, nullptr, &fence);
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    bool ok = vkQueueSubmit(mDev->mGraphicsQueue.mQueue, 1, &si, fence) == VK_SUCCESS;
+    if (ok) ok = vkWaitForFences(mVk, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    if (ok) {
+        out.resize(n);
+        const uint32_t *a = static_cast<const uint32_t *>(aBuf.mapped);
+        for (size_t i = 0; i < n; ++i) {
+            CardReadPick &p = out[i];
+            const uint32_t flags = a[i * 8u + 0];
+            p.ok = (flags & 1u) != 0u;
+            p.lit = (flags & 2u) != 0u;
+            p.card = p.ok ? int(a[i * 8u + 1]) : -1;
+            p.texelX = a[i * 8u + 2];
+            p.texelY = a[i * 8u + 3];
+            std::memcpy(p.radiance, &a[i * 8u + 4], 3u * sizeof(float));
+        }
+    } else {
+        err = "cardReadParity: the job did not complete (submit or device-lost wait failed)";
+    }
+    vkDestroyFence(mVk, fence, nullptr);
+    vkFreeCommandBuffers(mVk, pool, 1, &cmd);
+    vkDestroyCommandPool(mVk, pool, nullptr);
+    vkFreeDescriptorSets(mVk, mCardParityPool, 1, &set);
+    for (VkImageView v : views)
+        if (v) vkDestroyImageView(mVk, v, nullptr);
+    dropBuffer(qBuf);
+    dropBuffer(aBuf);
+    dropBuffer(ubo);
+    return ok;
+}
+
+bool OgreEngine::cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
+                                std::vector<CardReadPick> &out) {
+    out.clear();
+    if (!mRayTier || !mRayTier->isOpen()) {
+        mLastError = "cardReadParity: the ray tier is not open (no ray-query device, or rays off)";
+        return false;
+    }
+    std::string err;
+    if (!mRayTier->cardPickBlocking(static_cast<OgreScene *>(scene), queries, out, err)) {
+        mLastError = err;
+        return false;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // R5 — RAY-TRACED REFLECTIONS. The consumer, in the same TU as the structures.
 //
@@ -2502,6 +2821,9 @@ struct ReflectParams {
     float prevRayRight2[4] = {};
     float prevRayDown2[4] = {};
     float prevFwd2[4] = {};
+    /// THE SURFACE CACHE (PHOTON-CARDS-2): x = the instance-table entries bound
+    /// (0 = no cache — the card read declines every hit), y = the card records.
+    float cards[4] = {};
 };
 
 void put3(float *dst, const Ogre::Vector3 &v, float w) {
@@ -2528,6 +2850,10 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 12 voxelY[]
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 13 voxelZ[]
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 14 sky cube
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 15 the card table
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 16 the card instance table
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 17 the card Depth layer
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 the card Radiance layer
     };
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
@@ -2596,7 +2922,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     // Sized for kMaxTimedScenes views' worth of rings, which is the same ceiling
     // the timestamp pool uses and far more views than a product frame draws.
     const unsigned sets = kMaxTimedScenes * kReflectRing;
-    VkDescriptorPoolSize sizes[4] = {};
+    VkDescriptorPoolSize sizes[5] = {};
     sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     sizes[0].descriptorCount = sets;
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -2604,12 +2930,14 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     sizes[2].descriptorCount = sets * 5u;
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[3].descriptorCount = sets * (3u + 4u * kMaxReflectCascades + 1u);
+    sizes[3].descriptorCount = sets * (3u + 4u * kMaxReflectCascades + 1u + 2u);
+    sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sizes[4].descriptorCount = sets * 2u;
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     dpi.maxSets = sets;
-    dpi.poolSizeCount = 4;
+    dpi.poolSizeCount = 5;
     dpi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mReflectPool) != VK_SUCCESS) {
         err = "rayquery/reflect: vkCreateDescriptorPool failed";
@@ -2901,6 +3229,17 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // flat environment when there is no cube (OgreScene::rayEnvironment).
     const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();
     Ogre::TextureGpu *skyTex = rayEnv.cube;
+    // ---- THE SURFACE CACHE THE HITS READ FIRST (PHOTON-CARDS-2, SC-1d) -------
+    // Its two tables and two atlas layers, when the scene holds a built cache
+    // (OgreScene::updateSurfaceCache — the `cards` row); without one the read
+    // is bound to the stand-ins with zero slots and every hit reads the voxels.
+    const SurfaceCache *cardCache = scene->mSurfaceCache.get();
+    Ogre::UavBufferPacked *cardTable = cardCache ? cardCache->cardBuffer() : nullptr;
+    Ogre::UavBufferPacked *cardInstances = cardCache ? cardCache->instanceBuffer() : nullptr;
+    Ogre::TextureGpu *cardDepth = cardCache ? cardCache->depthLayer() : nullptr;
+    Ogre::TextureGpu *cardRadiance = cardCache ? cardCache->radianceLayer() : nullptr;
+    const bool cardsBound = cardTable && cardInstances && cardDepth && cardRadiance &&
+                            cardCache->cardRecords() > 0u;
 
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
@@ -3138,6 +3477,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
     // stereo shape, exactly where the previous basis is withheld above).
     pp.stereo[1] = float(rv.historyFrames);
+    pp.cards[0] = cardsBound ? float(cardCache->instanceSlots()) : 0.0f;
+    pp.cards[1] = cardsBound ? float(cardCache->cardRecords()) : 0.0f;
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -3253,6 +3594,39 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     w[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[14].pImageInfo = &sky;
+    // THE CARD READ'S FOUR (15-18): the cache's own, or the stand-ins.
+    VkDescriptorBufferInfo cardBufs[2] = {};
+    VkDescriptorImageInfo cardImgs[2] = {};
+    {
+        Ogre::UavBufferPacked *const bufs[2] = { cardTable, cardInstances };
+        for (int i = 0; i < 2; ++i) {
+            if (cardsBound) {
+                auto *bi = static_cast<Ogre::VulkanBufferInterface *>(bufs[i]->getBufferInterface());
+                cardBufs[i].buffer = bi->getVboName();
+                cardBufs[i].offset = VkDeviceSize(bufs[i]->_getFinalBufferStart()) *
+                                     bufs[i]->getBytesPerElement();
+                cardBufs[i].range = bufs[i]->getTotalSizeBytes();
+            } else {
+                cardBufs[i].buffer = mDummyStorage.buffer;
+                cardBufs[i].range = VK_WHOLE_SIZE;
+            }
+            w[kReflectCardBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w[kReflectCardBinding + i].pBufferInfo = &cardBufs[i];
+        }
+        Ogre::TextureGpu *const layers[2] = { cardDepth, cardRadiance };
+        for (int i = 0; i < 2; ++i) {
+            cardImgs[i].sampler = mPointSampler;
+            cardImgs[i].imageView = cardsBound ? sampledView(layers[i]) : mDummyFlat.view;
+            cardImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            w[kReflectCardBinding + 2 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[kReflectCardBinding + 2 + i].pImageInfo = &cardImgs[i];
+        }
+        if (!cardImgs[0].imageView || !cardImgs[1].imageView || !cardBufs[0].buffer ||
+            !cardBufs[1].buffer) {
+            bail("a card-read binding is null");
+            return;
+        }
+    }
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -3292,6 +3666,16 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         if (skyTex)
             solver.resolveTransition(trans, skyTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
+        // THE CARD READ'S INPUTS: the Radiance layer the CardLight job wrote
+        // (a UAV) and the Depth layer the capture copied into, read as
+        // textures; the two tables syncBuffers uploaded, read as buffers.
+        if (cardsBound) {
+            for (Ogre::TextureGpu *t : { cardDepth, cardRadiance })
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+            for (Ogre::UavBufferPacked *b : { cardTable, cardInstances })
+                solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
+        }
         mRs->executeResourceTransition(trans);
     }
 
@@ -3769,6 +4153,12 @@ bool OgreScene::probeGatherWanted() const { return false; }
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
 bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}
+bool OgreEngine::cardReadParity(Scene *, const std::vector<CardReadQuery> &,
+                                std::vector<CardReadPick> &out) {
+    out.clear();
+    mLastError = "cardReadParity: no ray-query tier on this platform";
+    return false;
+}
 
 // R5 takes the same road: with no tier there is nothing to hook, so the
 // listener is never created and `jahSsrReflection` holds what the screen-space

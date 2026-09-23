@@ -1774,11 +1774,13 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 // inside Root's frame, after `updateSceneGraph`, as the first workspace in the
 // manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
 void OgreScene::updateSurfaceCache() {
-    // AUTO IS OFF AT THIS PHASE, and it says so rather than quietly capturing:
-    // nothing reads a card until phase 4 (the ray hit), so a user's machine
-    // would be paying for pictures nobody looks at. A suite and the monitor
-    // turn the row On.
-    const bool want = mGi.cards == GiToggle::On;
+    // AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): the reader of a card is the
+    // reflection trace's hit (rq_reflect.comp, jah_rq_card.glsl), so the cache
+    // is on exactly where that trace runs — the World row resolved against the
+    // machine (`rayReflectionsWanted`) — and costs nothing where it cannot be
+    // read. On forces it (a suite, the monitor); Off refuses it.
+    const bool want = mGi.cards == GiToggle::On ||
+                      (mGi.cards == GiToggle::Auto && rayReflectionsWanted());
     if (!want) {
         if (mSurfaceCache) mSurfaceCache.reset();
         return;
@@ -1962,10 +1964,11 @@ bool OgreScene::readCardTexel(NodeId node, unsigned card, float u, float v, Card
     return mSurfaceCache->readTexel(node, card, u, v, out);
 }
 
-bool OgreScene::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out) {
+bool OgreScene::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
+                           NodeId onlyNode) {
     out = CardSample();
     if (!mSurfaceCache) return false;
-    return mSurfaceCache->readAt(toOgre(world), toOgre(normal), out);
+    return mSurfaceCache->readAt(toOgre(world), toOgre(normal), out, onlyNode);
 }
 
 bool OgreScene::dumpCardAtlas(const std::string &prefix, std::string &err) {

@@ -22,7 +22,8 @@
 //     transform epoch, the material generation, the light write serial.
 //   * A PER-FRAME TEXEL BUDGET with Lumen's priority, `lastUsed - lastUpdated`.
 //   * THE CARD RECT TABLE and its SSBO, indexed by the item slot the TLAS
-//     already carries as `instanceCustomIndex` — the key phase 4 reads with.
+//     already carries as `instanceCustomIndex` — the key the reflection
+//     trace's card read (rq_reflect.comp, jah_rq_card.glsl) looks a hit up by.
 //
 // WHY THE CAPTURE IS IN THE REAL SCENE MANAGER, and it is the whole reason this
 // lane exists rather than an extension of the spike's shape. SURFACE-CACHE-0
@@ -257,18 +258,23 @@ public:
     /// AsyncTextureTicket (flushCommands first).
     bool readTexel(NodeId node, unsigned card, float u, float v, CardSample &out) const;
     /// TEST AND TOOL: what the cache holds AT A WORLD POINT on a surface whose
-    /// outward normal is `normal` — the question PHASE 4's read asks at a ray's
-    /// hit, answered here on the CPU.
+    /// outward normal is `normal` — the question the ray job's read asks at a
+    /// hit (jah_rq_card.glsl, the GPU port), answered here on the CPU as its
+    /// reference (gi.card_read_parity).
     ///
-    /// It is Lumen's own order and it is written once, here, so that phase 4
-    /// ports an algorithm rather than invents one: take the cards whose outward
+    /// It is Lumen's own order: take the cards whose outward
     /// axis faces the normal, project the point into each with three dot
     /// products (the cards are captured in WORLD space, so there is no
     /// per-instance matrix), reject a card the point falls outside, reject one
     /// whose stored depth disagrees with the point's own distance from the card
     /// plane by more than a texel or two (this is what stops a card being read
     /// THROUGH a wall), and keep the one that faces the normal most squarely.
-    bool readAt(const Ogre::Vector3 &world, const Ogre::Vector3 &normal, CardSample &out) const;
+    /// `onlyNode` (0 = every card) restricts the pick to one instance's cards —
+    /// the scope the ray job's read has (it knows the hit instance). The ray
+    /// job's port is rayquery/include/jah_rq_card.glsl; this stays as its test
+    /// reference (gi.card_read_parity).
+    bool readAt(const Ogre::Vector3 &world, const Ogre::Vector3 &normal, CardSample &out,
+                NodeId onlyNode = 0) const;
     /// TEST AND TOOL: every resident card's every layer as a PNG.
     bool dump(const std::string &prefix, std::string &err) const;
 
@@ -289,15 +295,23 @@ public:
     void noteMaterialChanged(MaterialId material);
 
     Ogre::CompositorWorkspace *workspace() const { return mWs; }
-    /// THE TWO BUFFERS PHASE 4 BINDS (and nothing binds today — see their
-    /// comment at `syncBuffers`). `cardBuffer` holds one 96-byte record per
-    /// allocated card, in the exact layout the shader will read; `instanceBuffer`
-    /// is indexed by the ITEM SLOT the TLAS already carries as
+    /// THE TWO BUFFERS THE RAY JOB'S CARD READ BINDS (rq_reflect.comp through
+    /// jah_rq_card.glsl; see `syncBuffers`). `cardBuffer` holds one 80-byte
+    /// record per allocated card, in the exact layout the shader reads;
+    /// `instanceBuffer` is indexed by the ITEM SLOT the TLAS already carries as
     /// `instanceCustomIndex`, and each entry is (firstCard, cardCount, 0, 0).
     Ogre::UavBufferPacked *cardBuffer() const { return mCardBuffer; }
     Ogre::UavBufferPacked *instanceBuffer() const { return mInstanceBuffer; }
-    /// How many card records the buffer currently describes.
+    /// How many card records the buffer currently describes, and how many
+    /// instance slots the instance table holds.
     unsigned cardRecords() const { return mCardRecords; }
+    unsigned instanceSlots() const { return mInstanceSlots; }
+    /// ...and the two atlas layers the read samples: the captured Depth (the
+    /// through-the-wall test) and the lit Radiance.
+    Ogre::TextureGpu *depthLayer() const { return mAtlas[unsigned(CardLayer::Depth)]; }
+    Ogre::TextureGpu *radianceLayer() const { return mRadiance; }
+    /// The item slot of a node's instance, or -1 when it holds no cards.
+    long itemSlotOf(NodeId node) const;
     /// Is a capture executing right now? The Hlms listener's pass property
     /// (`jah_card_capture`) is set from this and from nothing else.
     static bool capturing();

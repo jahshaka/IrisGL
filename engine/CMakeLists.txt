@@ -117,7 +117,22 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_voxel_sample.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_environment.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
+        VERBATIM)
+    # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
+    # asked at a list of points - a test-only job, same rule.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                --vn krq_cardParitySpv -o "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
+        COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
     add_custom_command(
@@ -174,6 +189,7 @@ if(JAH_RAY_QUERY_OK)
                       DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h")

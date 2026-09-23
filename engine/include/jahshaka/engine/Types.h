@@ -2456,9 +2456,10 @@ struct GiParams {
     // or freed by it); the BUDGET and the RADIUS are deliberately NOT — they
     // are read per frame by the residency pass, exactly like the three tuning
     // floats above, so dragging either of them re-captures nothing.
-    /// Off / Auto / On. AUTO is OFF at this phase and says so: nothing reads a
-    /// card until phase 4 (the ray hit), so capturing on a user's machine would
-    /// be pure cost. A suite and the monitor turn it On.
+    /// Off / Auto / On. AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): a card's reader
+    /// is the reflection trace's hit, so the cache runs exactly where that
+    /// trace does (the scene's ray row resolved against the machine) and costs
+    /// nothing elsewhere. A suite and the monitor force it On.
     GiToggle  cards = GiToggle::Auto;
     /// THE PER-FRAME TEXEL BUDGET — Lumen's shape (its capture budget is 512 x
     /// 512 texels a frame) and the number the whole capture cadence is sized
@@ -3090,9 +3091,33 @@ struct CardSample {
     /// the card has been relit.
     float radiance[3] = { 0, 0, 0 };
     /// ...and its cached INDIRECT half alone (the voxel march from the texel x
-    /// kD x pi x the diffuse energy factor — BRDF_EnvMap's arithmetic); 0 until
-    /// the card's indirect has been marched.
+    /// kD x pi x the lobe's albedo jahDiffuseAlbedo at V = N — BRDF_EnvMap's
+    /// arithmetic); 0 until the card's indirect has been marched.
     float indirect[3] = { 0, 0, 0 };
+    /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from
+    /// readCardTexel), and whether its radiance carries a marched indirect
+    /// half — what gi.card_read_parity holds the ray job's own pick to.
+    int      card = -1;
+    unsigned texelX = 0u, texelY = 0u;
+    bool     lit = false;
+};
+
+/// ONE QUESTION FOR THE RAY JOB'S CARD READ (Engine::cardReadParity): a world
+/// point on `node`'s surface and the direction the read treats as "facing"
+/// (the ray job passes the reversed ray direction — jah_rq_card.glsl says why).
+struct CardReadQuery {
+    Vec3   position;
+    Vec3   facing;
+    NodeId node = 0;
+};
+/// ...and the ray job's answer: the card and texel its GLSL picked, whether the
+/// card was lit, and the radiance it would return (0 when not `ok`).
+struct CardReadPick {
+    bool     ok = false;
+    bool     lit = false;
+    int      card = -1;
+    unsigned texelX = 0u, texelY = 0u;
+    float    radiance[3] = { 0, 0, 0 };
 };
 
 /// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model
@@ -3139,11 +3164,9 @@ struct CardCacheStatus {
     /// page into the atlas.
     float captureWorkspaceMs = 0.0f;
     float captureCopyMs = 0.0f;
-    /// PHASE 4's TABLES, as they stand: how many card records the GPU buffer
-    /// describes, and how many item slots the instance buffer is indexed over.
-    /// Nothing binds them yet (the reader is the ray hit at phase 4); they are
-    /// here so a suite can see that the layout the shader will read is being
-    /// maintained and not merely declared.
+    /// THE RAY READ'S TABLES, as they stand: how many card records the GPU
+    /// buffer describes, and how many item slots the instance buffer is indexed
+    /// over — what the reflection trace's card read (jah_rq_card.glsl) binds.
     unsigned cardRecords = 0u;
     unsigned instanceSlots = 0u;
     /// THE LIT CARD (PHOTON-CARDS-1): the Radiance layer's format name (chosen

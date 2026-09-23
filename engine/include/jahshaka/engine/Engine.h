@@ -956,13 +956,16 @@ public:
         out = CardSample();
         return false;
     }
-    /// ...and the question PHASE 4 asks at a ray's hit, answered on the CPU:
-    /// what does the cache hold at this WORLD POINT, on a surface facing this
-    /// way? Lumen's own order — the cards facing the normal, projected with
-    /// three dot products, depth-tested against their own stored depth, the
-    /// squarest one wins. False when no card covers the point, which is the
-    /// answer that hands a hit back to the voxels.
-    virtual bool readCardAt(const Vec3 & /*world*/, const Vec3 & /*normal*/, CardSample &out) {
+    /// ...and the question a ray's hit asks, answered on the CPU: what does
+    /// the cache hold at this WORLD POINT, on a surface facing this way?
+    /// Lumen's own order — the cards facing the normal, projected with three
+    /// dot products, depth-tested against their own stored depth, the squarest
+    /// one wins. False when no card covers the point, which is the answer that
+    /// hands a hit back to the voxels. `onlyNode` (0 = every card) restricts
+    /// the pick to one instance's cards, the ray job's own scope. The ray job's
+    /// GPU port of this read is held to it by gi.card_read_parity.
+    virtual bool readCardAt(const Vec3 & /*world*/, const Vec3 & /*normal*/, CardSample &out,
+                            NodeId /*onlyNode*/ = 0) {
         out = CardSample();
         return false;
     }
@@ -2762,6 +2765,18 @@ public:
     virtual bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
                                    std::vector<VoxelReaderAnswer> &fragment,
                                    std::vector<VoxelReaderAnswer> &compute) = 0;
+
+    /// THE RAY JOB'S CARD READ, ASKED DIRECTLY (PHOTON-CARDS-2,
+    /// gi.card_read_parity). The reflection trace reads a hit's radiance from
+    /// the surface cache first (rayquery/include/jah_rq_card.glsl); this runs
+    /// that same read, through the same bindings, in a test-only compute job at
+    /// each query's point, facing and instance, and returns the card and atlas
+    /// texel it picked — which a suite holds against `Scene::readCardAt`, the
+    /// CPU reference. A MEASUREMENT (flush, dispatch, stall) — a suite, never a
+    /// frame. False without a ray-query device or a built surface cache (the
+    /// reason in takeLastError()).
+    virtual bool cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
+                                std::vector<CardReadPick> &out) = 0;
 
     /// THE ENVIRONMENT'S CONE LOOKUP, MEASURED (PHOTON-ENV-1). Evaluates the one
     /// environment's cone lookup (jah_environment.glsl's jahEnvCone) for every
