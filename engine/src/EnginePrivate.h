@@ -4621,9 +4621,7 @@ private:
     /// impossible rather than avoided; a refusal is counted
     /// (GiStatus::chainInjectionRefusals) and every caller that can be refused
     /// leaves its work owed rather than dropped.
-    /// `laterPass`: the at-rest tick's second and later sweeps, which re-inject
-    /// by construction (removed with the sweeps).
-    bool injectCascade(size_t i, bool laterPass = false);
+    bool injectCascade(size_t i);
     /// Whether cascade `i` (or the single volume, i = 0) was injected in the
     /// current writer frame.
     bool injectedThisFrame(size_t i) const;
@@ -4638,7 +4636,7 @@ private:
     enum class GiTickOwed { None = 0, Moving = 1, Rest = 2 };
     GiTickOwed mGiTickOwed = GiTickOwed::None;
     /// Owe the chain an at-rest settle over its current inputs (a rebuild, an
-    /// environment change, a refused tick): `kAtRestSweeps × n` injections, paid
+    /// environment change, a refused tick): one sweep = n injections, paid
     /// one per frame by the scheduler, outermost first.
     void oweChainSettle();
     /// The field re-integrates once, after the LAST injection of a tick or of a
@@ -4727,17 +4725,39 @@ private:
     /// occlusion). 0 when the document asks for a single indirect bounce,
     /// which is the default.
     Ogre::uint32 cascadeBounces(size_t idx) const;
-    /// HOW MANY INJECTION PASSES AN AT-REST TICK SPENDS over a cascade chain
-    /// (LAMPREST-2). A re-injection is one Jacobi iteration of the chain's
-    /// coupled radiance, so the tick has to iterate until the answer stops
-    /// depending on the state it started from: measured, two passes leave
-    /// 4/255 of that history in the sealed room scripting.e2e.movable_lamp_rest
-    /// uses and three leave none, with three, four and six passes producing the
-    /// same picture. The moving tick stays at one pass. `JAHSHAKA_GI_SWEEPS`
-    /// overrides it for the suite that pins the measurement.
-    static constexpr int kAtRestSweeps = 3;
-    /// What the last light tick actually spent (GiStatus::chainSweeps).
-    int mGiChainSweeps = 0;
+    /// HOW MANY INJECTION SWEEPS AN AT-REST TICK SPENDS over a cascade chain:
+    /// ONE, and it is DERIVED (PHOTON-WRITER-1 SWEEPS-3; render audit F13).
+    ///
+    /// The chain's radiance is the fixed point of
+    ///     L_i = D_i + rho * G_i(L_i, L_{i+1}, ..., L_{N-1})
+    /// where cascade i's bounce cones read its OWN volume and the cascades
+    /// OUTSIDE it (`VctLighting::addCascade` gives cascade i the chain
+    /// i+1..N-1) and never one inside it: the coupling is TRIANGULAR. Within a
+    /// cascade, `VctLighting::update` rebuilds the light from scratch every
+    /// time: the injection dispatch writes the direct term D_i over the whole
+    /// volume, and each bounce pass writes direct + rho * G(total) from the
+    /// volume the previous pass wrote (ogre-patch 0076's Jacobi form, the
+    /// direct volume kept beside it) — so one injection of cascade i is a
+    /// function of its voxels, the lights, the environment and the CURRENT
+    /// light of cascades i+1..N-1, and of NOTHING the volume held before.
+    /// Swept OUTERMOST FIRST (the tick's order, the settle's order), cascade
+    /// N-1 reads nothing outside itself and is final after its injection;
+    /// cascade N-2 then reads a final N-1 and is final; and so on inward. One
+    /// sweep IS the fixed point, exactly, and a second sweep can change no byte
+    /// unless an INWARD coupling exists (an outer cascade reading an inner one,
+    /// or a volume reading its own previous contents).
+    ///
+    /// THE PROOF IS A MEASUREMENT OF BYTES: gi.chain_converge (the sealed room,
+    /// Medium and High) and gi.chain_converge_scenes (the default scene and
+    /// Showroom 2, High and Epic) hash every cascade's light volumes after one
+    /// at-rest sweep from a perturbed history and after a second one — equal,
+    /// per cascade, everywhere (and a lamp that travelled leaves the bytes the
+    /// same lamp jumped there leaves). The three sweeps LAMPREST-2 measured
+    /// were needed BEFORE patch 0067 (a recycled Vulkan block aliased a frame
+    /// in flight) and ogre-patch 0076 (the bounce re-gathered the total and
+    /// added to it: history-dependent by construction); neither is true now.
+    /// The moving tick is one sweep by the same argument.
+    static constexpr int kAtRestSweeps = 1;
     /// A CASCADE REBUILD LEFT THE CHAIN OFF ITS FIXED POINT (LAMPREST-3). A
     /// rebuild injects ONE cascade once, over the radiance it held somewhere
     /// else, and the mirror's cadence never ticks for a camera walk — so the
@@ -4747,15 +4767,11 @@ private:
     /// a walk that returned to its own starting pose).
     ///
     /// THE DEBT IS A COUNT OF INJECTIONS, NOT A FLAG, and it is paid ONE PER
-    /// FRAME out of the scheduler's own one-slot budget: the at-rest tick is
-    /// kAtRestSweeps passes over every cascade (twelve sequential injections at
-    /// Medium, 12.0-12.9 ms in Debug on the rig) and spending that in ONE frame
-    /// is a whole frame at 90 Hz — a hitch, for a picture that is only owed
-    /// because the camera moved. Spread over frames, in the SAME order the tick
-    /// uses (sweeps outer, cascades outermost-first), it leaves the same bytes
-    /// (verified by sha256 of the light voxels) for ~1 ms a frame, the rebuild
-    /// queue keeps priority, and a walk that never ends never starves: it keeps
-    /// paying one cheap injection per idle slot.
+    /// FRAME out of the scheduler's own one-slot budget: the at-rest tick is one
+    /// sweep over every cascade (n injections, outermost first) and spreading it
+    /// keeps a frame that only owes it because the camera moved at one cheap
+    /// injection. In the tick's own order it leaves the tick's bytes, the
+    /// rebuild queue keeps priority, and a walk that never ends never starves.
     int    mGiSettleStepsOwed = 0;
     /// The cascade count the debt was raised against — a chain that changed
     /// shape under an unfinished settle abandons it rather than injecting a

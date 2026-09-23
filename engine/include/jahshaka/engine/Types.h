@@ -3520,17 +3520,6 @@ struct GiStatus {
     /// Cascade rebuilds SKIPPED because the frame's budget (one per frame) was
     /// already spent. Cumulative; it is the queue pressure reading.
     unsigned long long cascadeDeferrals = 0;
-    /// HOW MANY INJECTION PASSES THE LAST LIGHT TICK SPENT over the cascade
-    /// chain (LAMPREST-2). Re-injecting a chain is one Jacobi iteration of its
-    /// coupled radiance — each cascade reads the ones outside it and the volume
-    /// it is injecting into — so an AT-REST tick iterates until the answer stops
-    /// depending on the state it started from (measured: two passes left 4/255
-    /// of that history in the movable-lamp room, three left none, and three,
-    /// four and six produce the same picture), while a MOVING tick spends
-    /// exactly one, because that answer is replaced a few frames later by
-    /// construction. 1 in the single-volume arm, which is not an iteration at
-    /// all, and 0 before any injection.
-    int chainSweeps = 0;
     /// HOW MANY POST-REBUILD SETTLES this scene has paid (LAMPREST-3): a
     /// cascade rebuild injects one cascade once, over the radiance it held
     /// where it used to stand, so the chain owes an at-rest injection
@@ -3898,6 +3887,14 @@ struct GiVoxelStats {
     float peakEmissive = 0.0f;
     long long emissiveAtMax = 0;
     long long emissiveAboveOne = 0;
+
+    /// THE BYTES (PHOTON-WRITER-1): a 64-bit FNV-1a hash over the raw bytes of
+    /// every light volume a reader of this cascade samples — the total and, on
+    /// an anisotropic tier, the three axis volumes (mip 0 of each), in that
+    /// order — as 16 hex digits. Two readings are equal exactly when the
+    /// volumes are byte-identical: it is the instrument of the proof that one
+    /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
+    std::string lightDigest;
 };
 
 // ---------------------------------------------------------------------------

@@ -332,7 +332,12 @@ static const Ogre::uint32 kIfdTotalProbes = 8192u;
 // measurement attached, not a default to drift.
 static const Ogre::uint8 kIfdDepthRes  = 12u;
 static const Ogre::uint8 kIfdIrradRes  = 6u;
-static const Ogre::uint16 kIfdRaysPerPixel = 1u;
+// ONE RAY PER DEPTH TEXEL — the settings' own default, and MEASURED, not kept
+// (PHOTON-WRITER-1 IFD-RAYS, gi.ddgi_edge's leak room, one process, unlocked
+// clocks so ratios only): 1 / 2 / 4 rays per texel moved the through-slab leak
+// 12.17 / 12.18 / 12.18 codes (flat), the bounded roof 0.55 at all three, the
+// interior floor 0.409 / 0.413 / 0.417 lum, for a re-converge costing 1 : 1.26 :
+// 1.54. The knob that held it (a constant nothing varied) is deleted.
 
 // HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
 // 1. The P0 spike's cost table is the argument for converging FAST rather than
@@ -737,7 +742,7 @@ void OgreScene::oweChainSettle() {
 
 // ONE INJECTION OF AN OWED SETTLE (LAMPREST-3 fix round item 2), out of the
 // scheduler's own one-slot-per-frame budget and in the EXACT order the whole
-// tick uses: sweeps outermost, cascades OUTERMOST-FIRST inside each. That order
+// tick uses: cascades OUTERMOST-FIRST. That order
 // is why the bytes agree — the same injections, over the same voxels, in the
 // same sequence — and it is verified as such (sha256 of every cascade's light
 // voxel texture after an incremental settle against the same scene after one
@@ -829,7 +834,7 @@ bool OgreScene::injectedThisFrame(size_t i) const {
     return i == 0u && mGiSingleInjectedFrame == frame;
 }
 
-bool OgreScene::injectCascade(size_t i, bool laterPass) {
+bool OgreScene::injectCascade(size_t i) {
     const bool chain = !mVctCascades.empty();
     Ogre::VctLighting *lighting =
         chain ? (i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr)
@@ -837,7 +842,7 @@ bool OgreScene::injectCascade(size_t i, bool laterPass) {
     if (!lighting) return false;
     unsigned long long &stamp = chain ? mVctCascades[i].injectedFrame : mGiSingleInjectedFrame;
     const unsigned long long frame = giWriterFrame();
-    if (stamp == frame && !laterPass) {
+    if (stamp == frame) {
         ++mGiInjectionRefusals;
         if (mGiInjectionRefusals == 1u)
             Ogre::LogManager::getSingleton().logMessage(
@@ -930,7 +935,6 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             // The single volume is not an iteration: one injection, the one
             // writer's, at the document's bounce count.
             injectCascade(0);
-            mGiChainSweeps = 1;
             work.setUnits(cascadeBounces(0) + 1u);
         }
         reintegrateFieldAfterInjection();
@@ -965,41 +969,33 @@ void OgreScene::runChainTick(bool inMotion) {
             // measurement switch went with the one writer: nothing measured with
             // them any more.)
             //
-            // THE AT-REST PASS COUNT is `kAtRestSweeps` (EnginePrivate.h, where
-            // it is stated); `JAHSHAKA_GI_SWEEPS` re-measures it.
-            int sweeps = inMotion ? 1 : kAtRestSweeps;
-            if (!inMotion) {
-                if (const char *e = std::getenv("JAHSHAKA_GI_SWEEPS")) {
-                    const long v = std::strtol(e, nullptr, 10);
-                    if (v >= 1 && v <= 32) sweeps = int(v);
-                }
-            }
-            mGiChainSweeps = sweeps;
+            // ONE SWEEP, at rest as while moving: it IS the chain's fixed point
+            // (derived beside kAtRestSweeps, EnginePrivate.h; proved byte for byte
+            // by gi.chain_converge).
+            //
             // HOW MANY CASCADE INJECTIONS THIS TICK ACTUALLY RAN, reported as the
             // work row's `units` (DRAG-1): a chain of four with cascade 0 rebuilt
             // since the last moving tick reads 3.
             unsigned injections = 0;
-            for (int sweep = 0; sweep < sweeps; ++sweep) {
-                for (size_t i = mVctCascades.size(); i--; ) {
-                    if (!mVctCascades[i].lighting) continue;
-                    // WHILE MOVING, a cascade a REBUILD has injected since the
-                    // last tick already holds this tick's answer — the same
-                    // injection, over current voxels — as long as the lights it
-                    // was injected with are still the scene's (F5). This skip
-                    // spans frames (ticks run every few), so it is the rebuild's
-                    // flag and not the per-frame latch.
-                    if (inMotion && mVctCascades[i].injectedSinceTick &&
-                        mVctCascades[i].injectedAtLightSerial == mGiLightWriteSerial)
-                        continue;
-                    // ...and a cascade the rebuild injected THIS frame is the
-                    // latch's, not a refusal: that is the order working.
-                    if (sweep == 0 && injectedThisFrame(i)) {
-                        if (!inMotion) refused = true;   // it read stale outer light
-                        continue;
-                    }
-                    if (injectCascade(i, sweep > 0)) ++injections;
-                    else refused = true;
+            for (size_t i = mVctCascades.size(); i--; ) {
+                if (!mVctCascades[i].lighting) continue;
+                // WHILE MOVING, a cascade a REBUILD has injected since the last
+                // tick already holds this tick's answer — the same injection,
+                // over current voxels — as long as the lights it was injected
+                // with are still the scene's (F5). This skip spans frames (ticks
+                // run every few), so it is the rebuild's flag and not the
+                // per-frame latch.
+                if (inMotion && mVctCascades[i].injectedSinceTick &&
+                    mVctCascades[i].injectedAtLightSerial == mGiLightWriteSerial)
+                    continue;
+                // ...and a cascade the rebuild injected THIS frame is the latch's,
+                // not a refusal: that is the order working.
+                if (injectedThisFrame(i)) {
+                    if (!inMotion) refused = true;   // it read the outer light before this tick
+                    continue;
                 }
+                if (injectCascade(i)) ++injections;
+                else refused = true;
             }
             // The skip is per TICK, not for ever: a cascade that was rebuilt
             // before this tick has paid for this tick, and owes the next one
@@ -1174,7 +1170,6 @@ GiStatus OgreScene::giStatus() const {
         st.cascadeFullRebuilds = mCascadeFullRebuilds;
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
-        st.chainSweeps          = mGiChainSweeps;
         st.chainInjectionRefusals   = mGiInjectionRefusals;
         st.chainInjectionsPeakFrame = mGiInjectionsPeak;
         st.chainSettles         = mGiChainSettles;
@@ -1309,6 +1304,46 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
         st.voxelsAtMax = wt.atMax;
         st.voxels = wt.count;
         st.voxelsAboveOne = wt.aboveOne;
+
+        // THE BYTES of every light volume a reader samples (the total, then the
+        // anisotropic axes), hashed raw — the one-sweep proof's instrument.
+        {
+            Ogre::uint64 h = 1469598103934665603ull;
+            bool all = true;
+            const size_t volumes = lighting->isAnisotropic() ? 4u : 1u;
+            for (size_t v = 0; v < volumes && all; ++v) {
+                Ogre::TextureGpu *tex = lighting->getLightVoxelTextures()[v];
+                if (!tex || tex->getResidencyStatus() != Ogre::GpuResidency::Resident) {
+                    all = false;
+                    break;
+                }
+                Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
+                    tex->getWidth(), tex->getHeight(), tex->getDepth(),
+                    Ogre::TextureTypes::Type3D, tex->getPixelFormat());
+                try {
+                    ticket->download(tex, 0u, true);
+                    const Ogre::TextureBox box = ticket->map(0);
+                    const size_t rowBytes = size_t(tex->getWidth()) * box.bytesPerPixel;
+                    for (Ogre::uint32 z = 0; z < tex->getDepth(); ++z)
+                        for (Ogre::uint32 y = 0; y < tex->getHeight(); ++y) {
+                            const Ogre::uint8 *row =
+                                reinterpret_cast<const Ogre::uint8 *>(box.at(0, y, z));
+                            for (size_t b = 0; b < rowBytes; ++b) {
+                                h ^= row[b];
+                                h *= 1099511628211ull;
+                            }
+                        }
+                    ticket->unmap();
+                } catch (Ogre::Exception &e) { mError = e.getFullDescription(); all = false; }
+                  catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); all = false; }
+                tm->destroyAsyncTextureTicket(ticket);
+            }
+            if (all) {
+                char buf[17];
+                std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
+                st.lightDigest = buf;
+            }
+        }
 
         // The DIRECT volume exists only on a cascade that bounces (ogre-patch
         // 0076's D term). Its peak is the normalisation's own self-check.
@@ -3852,8 +3887,7 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
         mProbeMotionRun = 1;
         mProbeMotionQuietFrames = 0;
     }
-    // THE DIAGNOSTIC THE MEASUREMENT DRIVES, the same shape as
-    // JAHSHAKA_GI_SWEEPS above: this deferral is a claim about cost and about
+    // THE DIAGNOSTIC THE MEASUREMENT DRIVES: this deferral is a claim about cost and about
     // the picture at the drag's end, and both claims have to be checkable from
     // outside against the behaviour it replaced, in ONE binary at one pose.
     // Read per frame rather than cached because a test arms it between frames,
@@ -5164,8 +5198,8 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // million, so the fixed point is not in doubt: the scrolled chain was the
     // wrong one.
     //
-    // THE RULE. A rebuild raises a DEBT of injections — `kAtRestSweeps` passes
-    // over every cascade, twelve of them at Medium — and the scheduler pays it
+    // THE RULE. A rebuild raises a DEBT of injections — one sweep over every
+    // cascade, outermost first — and the scheduler pays it
     // ONE INJECTION PER FRAME out of the same one-slot budget the rebuilds come
     // from, the rebuild queue keeping priority. It is not a settle "at the
     // stop": there is no camera-still gate at all, deliberately. THE VR CASE IS
@@ -5180,21 +5214,16 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // else moved. With no gate, a walk that never ends keeps paying one cheap
     // injection per idle slot and never starves.
     //
-    // THE COST, measured: one whole at-rest tick is 12.0-12.9 ms in Debug on
-    // the rig (four cascades x three passes; 0.9 ms of it the field), which in
-    // ONE frame is a whole frame at 90 Hz and most of one at 60 — a hitch under
-    // the no-hitch law, and the reason the settle is spread. Per frame it is one
-    // injection, ~1 ms. THE BYTES ARE THE SAME: the steps run in the tick's own
-    // order (sweeps outer, cascades outermost-first), which is verified by
-    // sha256 of every cascade's light voxels against the same scene settled by
-    // one whole `refreshGiLighting(false)`.
+    // THE COST: spread, one injection a frame (~1 ms in Debug) instead of the
+    // whole at-rest tick in one frame. THE BYTES ARE THE SAME: the steps run in
+    // the tick's own order (cascades outermost-first), and one sweep IS the
+    // fixed point (kAtRestSweeps, EnginePrivate.h; gi.chain_converge).
     //
     // The single-volume arm owes nothing: its rebuild injects the one volume at
     // the document's own bounce count, which IS what the tick would compute.
     //
-    // `JAHSHAKA_GI_NO_REBUILD_SETTLE` stands the rule down for measurement, the
-    // same way `JAHSHAKA_GI_SWEEPS` re-measures the pass count: gi.chain_converge
-    // drives it so the suite proves the defect it guards against rather than
+    // `JAHSHAKA_GI_NO_REBUILD_SETTLE` stands the rule down for measurement:
+    // gi.chain_converge drives it so the suite proves the defect it guards against rather than
     // asserting a number that happens to pass (13.00/255 with it set, 0.00
     // without, measured on that suite's room).
     if (rebuilt && mVctCascades.size() > 1u)
@@ -6286,7 +6315,6 @@ void OgreScene::buildIrradianceField() {
 
     JAH_TRY {
         Ogre::IrradianceFieldSettings settings;
-        settings.mNumRaysPerPixel        = kIfdRaysPerPixel;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
         // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM — whichever arm
