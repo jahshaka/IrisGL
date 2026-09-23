@@ -392,8 +392,8 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
-// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). Three constants, no
-// rebuild: `ddgiIntensity` and `ddgiAmbient` are shader constants the field's
+// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). Constants, no
+// rebuild: `ddgiIntensity` is a shader constant the field's
 // listener reads (pushIfdState), `rayMarchStepScale` is read by the NEXT light
 // injection (giRayMarchStepScale), and none of the three is geometry. So this
 // writes them and, when a field is bound, re-pushes its constants — nothing is
@@ -403,7 +403,6 @@ bool OgreScene::setGiTuning(const GiParams &p) {
     JAH_TRY {
         const bool marchMoved = p.rayMarchStepScale != mGi.rayMarchStepScale;
         mGi.ddgiIntensity     = p.ddgiIntensity;
-        mGi.ddgiAmbient       = p.ddgiAmbient;
         mGi.rayMarchStepScale = p.rayMarchStepScale;
         // THE CARD CACHE'S TWO PER-FRAME KNOBS. Written and nothing else: the
         // residency pass reads them at the head of the next frame, so a smaller
@@ -6368,8 +6367,7 @@ void OgreScene::buildIrradianceField() {
                 std::to_string(settings.mNumProbes[2]) + " (" + std::to_string(total) +
                 " probes) over " + Ogre::StringConverter::toString(origin) + " size " +
                 Ogre::StringConverter::toString(size) + ", intensity " +
-                std::to_string(mGi.ddgiIntensity) + ", ambient " +
-                std::to_string(mGi.ddgiAmbient) + ", re-converge " +
+                std::to_string(mGi.ddgiIntensity) + ", re-converge " +
                 std::to_string(mIfdProbesPerFrame) + " probes/frame");
     } JAH_CATCH(mError, );
 }
@@ -6377,7 +6375,6 @@ void OgreScene::buildIrradianceField() {
 void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
     FogHlmsListener::IfdState st;
     st.intensity  = std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f));
-    st.ambient    = std::max(0.0f, std::min(mGi.ddgiAmbient, 8.0f));
     st.numProbesY = float(numProbes[1]);
     st.numProbesZ = float(numProbes[2]);
     FogHlmsListener::setIfdState(mSceneMgr, st);

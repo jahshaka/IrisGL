@@ -7229,7 +7229,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // so it rides the change debounce with the rest of the configuration.
         gi.gather = toggle(mSource->giGather);
         gi.ddgiIntensity = qBound(0.0f, mSource->giDdgiIntensity, 64.0f);
-        gi.ddgiAmbient = qBound(0.0f, mSource->giDdgiAmbient, 8.0f);
         // EVERY LIGHT IS A VOXEL LIGHT. There is one GI arm now (PHOTON_SPEC
         // E2 (4) deleted Instant Radiosity, which traced from ONE driving light
         // and therefore hashed only that one): the voxel injection reads every
@@ -7425,7 +7424,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // scripting.e2e.screenshot_grades lost a grade change that arrived
             // in the same frame as a tuning value.)
             mLastGi.ddgiIntensity     = gi.ddgiIntensity;
-            mLastGi.ddgiAmbient       = gi.ddgiAmbient;
             mLastGi.rayMarchStepScale = gi.rayMarchStepScale;
         }
         if (!mGiPushed || gi != mLastGi) {

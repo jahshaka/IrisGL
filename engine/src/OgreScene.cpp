@@ -133,11 +133,15 @@ OgreScene::RayEnvironment OgreScene::rayEnvironment() const {
 // settle trusts moves, the in-motion tick stops skipping cascades injected
 // before it, and an owed settle restarts over the new environment. A chain that
 // is bouncing (more than one bounce) is owed a settle outright — nothing else
-// would re-inject a still scene whose only change was its sky.
+// would re-inject a still scene whose only change was its sky. And the
+// irradiance field re-integrates: its probe rays read the environment where
+// they escape, so its atlas holds the sky (progressively, over the converged
+// data — the field never flashes).
 void OgreScene::noteEnvironmentChanged() {
     ++mGiLightWriteSerial;
     applyVctEnvironment();
     oweEnvironmentSettle();
+    if (mIfd) reintegrateFieldAfterInjection();
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {

@@ -39,56 +39,16 @@
 // "my override does nothing"). Every directive is therefore named in WORDS
 // above, never written with its at-sign.
 //
-// THE SECOND THING THAT IS NOT UPSTREAM'S: THE AMBIENT SKY-VISIBILITY TERM
-// (the Photon ambient fix; GI_UNIFIED_SPEC.md ADDENDUM CORRECTION, and the
-// ledger entries "Vct_piece_ps.any: volume-local ambient blend commented out"
-// and "IrradianceField nits" in SPECS/OGRE_UPSTREAM_ISSUES.md).
+// THE SKY IS IN THE FIELD (PHOTON-ENV-1). The field's generation job gives
+// every probe ray that escapes the voxels the ONE ENVIRONMENT in its direction at
+// its own aperture (jahEnvCone, jah_environment.glsl), weighted by the ray's
+// escape fraction `1 - min( 1, opacity / 0.95 )`, and the cosine integration
+// carries it into the irradiance atlas beside the bounce: a probe's irradiance
+// IS the sky it sees plus the light the voxels hold, one integral, and this file
+// reads nothing else. The read-time `SH x sky visibility` term that stood here
+// (and its dial, and the escape channel of the depth atlas it read) is gone: a
+// sealed room's interior rays all stop in its walls, so its probes hold no sky.
 //
-// THE GAP. Inside a VCT volume the PBS ambient term is dead: every ambient
-// piece is wrapped in `if( vctSpecular.w == 0 )` and upstream commented the
-// volume-local blend out, hardcoding blend = 1.0, so vctSpecular.w is never
-// zero and DoAmbientLighting can never fire while VctLighting is bound. The
-// only live ambient in a VCT scene is the cone-traced diffuse's own
-// `light.xyz += ambient * light.w` — ambient times the ESCAPE FRACTION of its
-// cones, i.e. ambient weighted by how much sky the surface can see. Binding an
-// irradiance field sets VctDisableDiffuse, which deletes that whole branch, so
-// with DDGI on the ambient inside the volume has to come from the field.
-//
-// HOW MUCH SKY THIS POINT SEES — THE ONE DEFINITION (PHOTON-READER-1). It is the
-// ESCAPE FRACTION of the voxel march, `1 - min( 1, opacity / 0.95 )`: the share
-// of a cone or ray the voxels did not stop. Both sides march through the one
-// voxel radiance reader (jah_voxel_march.glsl / jah_voxel_sample.glsl — the
-// pixel's cones, the bounce job and the field's generation job). The pixel's
-// cones weight their six escapes into `light.w`; the field's generation job
-// stores each probe ray's escape in the DEPTH atlas's third channel, the
-// integration job convolves it over the same cosine lobe as the depth moments,
-// and this file reads it at the pixel's normal from every probe of the cage,
-// weighted exactly as the irradiance is. So `ifdSkyVis` is the cage's
-// trilinear, visibility-weighted reading of the escape its probes' rays
-// actually measured, integrated by 144 cosine-distributed rays per probe
-// instead of six cones per pixel. The OPACITY differs by what starts where: a
-// cone that starts ON a surface uses the march's occupancy estimate (it would
-// otherwise occlude itself in its own cell), a probe ray starts in free space
-// and uses its own composite, which for a ray crossing a wall is the
-// transmittance (IrradianceFieldGenFromVct_piece_cs.any says why, measured).
-// There is no model in it any more: the Chebyshev proxy that reconstructed an
-// escape from the depth moments (a two-point mixture at a fitted escape
-// distance, a 0.9 scale, a 0.3 knee) is deleted with the march that threw the
-// real escape away. A sealed room's rays all stop in its walls, so its interior
-// probes store exactly zero.
-//
-// The ambient itself is the scene's SH irradiance at the pixel's normal, gated
-// on `ambient_sh` — the only ambient mode this engine ever sets
-// (OgreEngine::ensureHlms forces HlmsPbs::AmbientSh). The MONOCHROME SH variant
-// is excluded: its irradianceSH returns a scalar, so the term would not compile.
-// (That the cones' ambient is the 2-band hemisphere pair and this one the full
-// SH is the environment's question — one sky term for every escape — not the
-// escape's.)
-//
-// THE DIAL is `GiParams::ddgiAmbient`, riding jahIfd.y beside the intensity, and
-// 0 turns the whole term off through a UNIFORM branch — so "DDGI without the
-// sky term" is not a rebuild, it is a const-buffer write, which is what lets the
-// suite A/B it and what makes the sealed-room invariance assertion meaningful.
 // jahIfd.zw carry the field's Y and Z probe counts, which upstream's own render
 // params do NOT contain (only Nx and Nx*Ny reach the shader,
 // OgreIrradianceField.cpp:812-813); the cage clamp below needs all three.
@@ -248,11 +208,6 @@
 	// How much of the cage's final weight comes from probes IN FRONT of the
 	// shading surface (P9; the fade after the loop says what it is for).
 	float ifdFrontWeight = 0;
-@property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
-	// OURS: the cage-weighted sky visibility (the header: the stored escape of
-	// the probes' rays, read per cage probe below).
-	float ifdSkyVis = 0;
-@end
 @end
 
 // ---- THE CAGE'S PROBE INDICES, CLAMPED TO THE GRID ---------------------
@@ -301,21 +256,6 @@
 		// no threshold on it can separate them from an interior floor. The
 		// probes that answer such a pixel are inside geometry; recognising them
 		// is probe classification (RTXGI-style), which this lane does not do.
-
-@property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
-		// OURS: this cage probe's stored escape at the pixel's normal (the depth
-		// atlas's third channel — the header), weighted exactly as its irradiance
-		// is. The branch is UNIFORM (jahIfd.y is a pass constant), so with the dial
-		// at 0 not one instruction of this executes.
-		if( passBuf.jahIfd.y > 0.0 )
-		{
-			float2 ifdVisUV = getIrradianceFieldXY(
-				ifdSpaceNormal, probeIdx, passBuf.irradianceField.depthBorderedRes,
-				passBuf.irradianceField.depthFullWidth,
-				passBuf.irradianceField.depthInvFullResolution );
-			ifdSkyVis += weight * OGRE_SampleLevel( ifdDepth, ifdSampler, ifdVisUV, 0 ).z;
-		}
-@end
 @end
 
 // ---- HOW MUCH THE FIELD IS TRUSTED, AND THE SCALE IT IS GIVEN ----------
@@ -473,14 +413,11 @@
 	// ...AND WHERE THE CAGE WAS DECLINED, THE FIELD OWES NOTHING EITHER. Both
 	// terms of the post hook below are the field's own fallbacks -- what a pixel
 	// gets INSTEAD of the cage -- and a pixel a screen probe answered is not
-	// owed either of them. Saying it as "full confidence, no sky visibility"
-	// rather than with a third branch keeps the post hook's arithmetic exactly
-	// what it is for every other pixel.
+	// owed either of them. Saying it as "full confidence" rather than with a
+	// third branch keeps the post hook's arithmetic exactly what it is for every
+	// other pixel.
 	if( ifdCageEnabled == 0.0 )
-	{
 		ifdConfidence = 1.0;
-		ifdSkyVis = 0.0;
-	}
 @end
 
 	// THE SCALE UPSTREAM'S COMPOSITE LINE APPLIES (ogre-patch 0058). Upstream
@@ -496,35 +433,24 @@
 	// ...TIMES THE VOXEL VOLUME'S OWN DECODE MULTIPLIER (PHOTON-M2, F-C), which
 	// is the unit that was missing from this line.
 	//
-	// The field's atlas holds the mean of RAW LIGHT-VOXEL SAMPLES: the Gen job
-	// cone-traces the voxel volume and stores the average with no scale of its
-	// own (IrradianceFieldGenFromVct_piece_cs.any's BodyCS: `diffuse.xyz *=
-	// invNumRaysPerIrradiancePixel`, straight into a R10G10B10A2_UNORM atlas).
-	// Those samples are NORMALISED: the light injection scales everything by
+	// The field's atlas holds the mean of LIGHT-VOXEL SAMPLES IN THE VOLUME'S
+	// STORED UNITS: the light injection scales everything by
 	// `bakingMultiplier = PI / D_max`, D_max being the brightest light in the
-	// scene (VctLighting::update's autoMultiplier), precisely so an 8-bit volume
-	// can hold them. The cone-traced diffuse undoes that on the way out --
-	// `light.xyz * blendWeight` with blendWeight carrying
-	// `vctProbeParams.multiplier` = D_max / PI (Vct_piece_ps.any) -- and so does
-	// the fallback ambient in this very file. THE FIELD'S PATH DID NOT.
+	// scene (VctLighting::update's autoMultiplier), and the Gen job stores the
+	// ray average with no scale of its own — the sky an escaping ray reads is
+	// divided by the same decode multiplier before it is added
+	// (IrradianceField::update, envGainMips / envSh). The cone-traced diffuse
+	// undoes the normalisation on the way out (`vctProbeParams.multiplier` =
+	// D_max / PI, Vct_piece_ps.any), and so does this line: ONE unit convention
+	// for the voxels, the cones and the field. (PHOTON-M2 measured what the
+	// missing multiplier cost: a field 13.4x too bright under a 0.03 lamp.)
 	//
-	// So the field's diffuse was the right picture times 1 / (D_max / PI): a
-	// scene whose brightest lamp was dim got a field PI/D_max times TOO BRIGHT
-	// (and clipped, the atlas being UNORM), and a scene with a bright lamp got
-	// one too dark. MEASURED on a closed room with one lamp, field-lit mean
-	// against cone-lit mean at the same pose (spikes/photon-m2, m2-field.js):
-	// lamp intensity 0.03 -> 13.4x, 0.12 -> 4.1x, 0.5 -> 1.6x -- i.e. the ratio
-	// tracked 1/D_max, capped by the atlas ceiling, exactly as the algebra says.
-	// This is also the whole of finding F-C (ledger §659): under 0075 the CONES
-	// answered one more bounce pass with +0.15 and the FIELD with +0.03, because
-	// at that scene's brightness the field's probes were pinned at the UNORM
-	// ceiling (measured: 253-255 of 255) and could not answer anything. The
-	// suites never saw it because their lamps are intensity ~1, where the factor
-	// is ~1.
-	//
-	// It belongs HERE and not in the Gen job: the atlas is UNORM, so the
-	// normalised form is the only one it can hold without clipping, and this is
-	// the same place and the same constant the cone path applies.
+	// THE ATLAS IS RGBA16_FLOAT since PHOTON-ENV-1 (it was R10G10B10A2_UNORM, and
+	// that ceiling — radiance D_max / PI, i.e. 1.0 in a scene with no light — is
+	// what a sky brighter than the brightest lamp clipped against once the sky
+	// entered the atlas; PHOTON-M2's F-C, probes pinned at 253-255 of 255, was the
+	// same ceiling). The normalisation is therefore no longer a range device; it
+	// stays because it is the voxels' own unit and the field is their integral.
 	// GUARDED (the lead, from the Fable read at merge): `irradiance_field` is set
 	// from the field alone while `vctProbeParams` exists only with a VctLighting
 	// bound. Every path today tears the field down before the volume, so the
@@ -560,15 +486,13 @@
 	// 0 inside the field) and nothing that scales with anything where it is.
 	//
 	// NOT DOUBLE-COUNTED, and here is the whole accounting. envColourD receives
-	// exactly one diffuse-GI term in every regime: the field's irradiance x
-	// confidence, plus our sky-visibility ambient x confidence (below), plus
-	// this x (1 - confidence). At confidence 1 this line contributes zero and
-	// the frame is what it was; at confidence 0 the two field terms contribute
-	// zero and the pixel gets precisely the term VctDisableDiffuse took from
-	// it. DoAmbientLighting is not involved in either regime -- it is gated on
-	// `vctSpecular.w == 0` and upstream hardcodes that blend to 1 while VCT is
-	// bound (AmbientLighting_piece_ps.any:64-72), which is the gap this file's
-	// sky-visibility term exists to fill in the first place.
+	// exactly one diffuse-GI term in every regime: the field's irradiance (the
+	// bounce AND the sky its probes' rays escape to) x confidence, plus this x
+	// (1 - confidence). At confidence 1 this line contributes zero; at confidence
+	// 0 the field contributes zero and the pixel gets precisely the term
+	// VctDisableDiffuse took from it. DoAmbientLighting is not involved in either
+	// regime -- it is gated on `vctSpecular.w == 0`, which upstream never sets
+	// while VCT is bound (AmbientLighting_piece_ps.any).
 	float ifdFallbackAmbient = 1.0 - ifdConfidence;
 @property( vct_disable_diffuse )
 	if( ifdFallbackAmbient > 0.0 )
@@ -598,35 +522,18 @@
 	// Hlms listener re-opens the gate HlmsPbs closes for any bound field -- see
 	// FogHlmsListener::propertiesMergedPreGenerationStep) and the two terms are
 	// blended by the field's confidence: the field inside cascade 0, the cones
-	// outside it, never both. That is the same hand-off the sky-visibility term
-	// above already makes, and it keeps the accounting this file's header
-	// states -- envColourD receives exactly ONE diffuse-GI term in every regime.
+	// outside it, never both -- envColourD receives exactly ONE diffuse-GI term
+	// in every regime.
 	//
-	// `vctDiffuse` is the cone block's result, and it is already ambient-aware:
-	// the escape weight it accumulates (light.w) multiplies the hemisphere pair
-	// inside it, so the ring gets precisely the picture it had before any field
-	// existed, weighted out as the pixel enters the field's reach.
+	// `vctDiffuse` is the cone block's result, and it already carries the sky:
+	// every cone's escape reads the one environment in its own direction
+	// (Vct_piece_ps.any), as every probe ray of the field does, so the ring gets
+	// precisely the picture it had before any field existed, weighted out as the
+	// pixel enters the field's reach.
 	pixelData.envColourD.xyz += vctDiffuse.xyz * ifdFallbackAmbient;
 @end
 @end
 
-@property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
-	// AND THE AMBIENT THE VOLUME SWALLOWED, times the sky visibility above.
-	// envColourD ONLY: the VCT specular cone reads the environment at its own
-	// escape (Vct_piece_ps.any's specular branch), and touching that would count
-	// it twice. The environment's diffuse lookup for the normal
-	// (jah_environment.glsl: the SH, camera-independent world axes).
-	if( passBuf.jahIfd.y > 0.0 && sumIfdWeight > 0.0 )
-	{
-		// x ifdConfidence (P9): this term is the field's own answer about how
-		// much sky the pixel can see, so it fades out with the field and the
-		// VCT ambient fallback above takes over. Inside the field the factor is
-		// exactly 1.
-		pixelData.envColourD.xyz += jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) ) *
-									( passBuf.jahIfd.y * ifdSkyVis * ifdConfidence *
-									  ifdWeightFade / sumIfdWeight );
-	}
-@end
 @end
 
 @end

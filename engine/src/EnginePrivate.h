@@ -2390,19 +2390,15 @@ public:
     /// DDGI REPLACES voxel-cone diffuse rather than adding to it, and
     /// upstream's IrradianceFieldSettings has no intensity knob.
     /// media/Hlms/Jahshaka/JahIfd_piece_ps.any multiplies upstream's
-    /// accumulated irradiance by `intensity` (1.0 = upstream's own brightness)
-    /// and adds `ambient` x the sky visibility it derives from the depth atlas.
+    /// accumulated irradiance by `intensity` (1.0 = upstream's own brightness).
     /// Defaults to GiParams' defaults so a scene that never pushes state still
     /// reads sane values.
     struct IfdState {
         /// GiParams::ddgiIntensity, clamped.
         float intensity = 1.0f;
-        /// GiParams::ddgiAmbient, clamped. 0 removes the ambient term through a
-        /// uniform branch — the A/B the gate needs.
-        float ambient = 1.0f;
         /// The field's probe counts on Y and Z. Upstream's own render params
         /// carry only Nx and Nx*Ny (OgreIrradianceField.cpp:812-813) and the
-        /// sky-visibility threshold needs all three axes, so the two missing
+        /// cage clamp needs all three axes, so the two missing
         /// numbers ride our own float4 instead of a patch that would move the
         /// engine ABI.
         float numProbesY = 0.0f;

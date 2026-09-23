@@ -440,14 +440,12 @@ FogHlmsListener::IfdState FogHlmsListener::ifdState(const Ogre::SceneManager *sm
     // Not zeros: a scene that has a field bound but never pushed state
     // (impossible today — the arm writes it before it binds) must still render
     // at the calibrated brightness rather than at upstream's raw one. GiParams
-    // is the single source of both numbers. The probe counts stay 0, which
-    // makes the sky-visibility threshold 0 and every depth sample "sky" — so
-    // the ambient dial is what has to be trusted to be 0 in that state, and it
-    // is: the arm writes the counts and the dial in the same call.
+    // is the single source of that number. The probe counts stay 0, which
+    // JahIfd reads as "no counts" and leaves the cage unclamped (upstream's
+    // behaviour).
     IfdState fallback;
     const GiParams defaults;
     fallback.intensity = defaults.ddgiIntensity;
-    fallback.ambient = 0.0f;
     return fallback;
 }
 
@@ -511,13 +509,12 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     // The DDGI block, same four-float alignment rule. Read by
     // media/Hlms/Jahshaka/JahIfd_piece_ps.any, which only exists in the
     // generated shader while an IrradianceField is bound: x scales the field's
-    // irradiance, y scales the ambient sky-visibility term (0 removes it
-    // through a uniform branch), zw are the field's Y and Z probe counts, which
-    // upstream's own IrradianceField block does not carry and the visibility
-    // threshold needs.
+    // irradiance (the sky its probes see included, PHOTON-ENV-1), y is
+    // reserved, zw are the field's Y and Z probe counts, which upstream's own
+    // IrradianceField block does not carry and the cage clamp needs.
     const IfdState ifd = ifdState(sceneManager);
     *passBufferPtr++ = ifd.intensity;
-    *passBufferPtr++ = ifd.ambient;
+    *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
     // jahEnv (PHOTON-ENV-1): rgb = the environment light's gain per channel on
