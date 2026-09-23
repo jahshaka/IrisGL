@@ -22,8 +22,9 @@ layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
 /// One ray. `origin.w` is tMin, `dir.w` is tMax, `mask.x` is the instance mask
-/// the ray tests against (the per-consumer masks audit C-15 asks for: bit 0 a
-/// shadow caster, bit 1 a mover, bit 2 still world; 0xFF = everything).
+/// the ray asks for (Types.h `kRayMask*`: bit 0 a shadow caster, bit 1 a mover,
+/// bit 2 still world — audit C-15's per-consumer masks — bit 3 every NEAR copy,
+/// bit 4 the FAR copies over each mesh's coarsest level, ATOM-FARBLAS-1).
 struct Ray
 {
     vec4  origin;
@@ -50,8 +51,17 @@ void main()
 
     const Ray ray = rays.r[id];
 
+    // ONE FIELD PER RAY. Every object is in the TLAS twice (a near copy and a
+    // far copy, A5b §4), so a mask naming both would let one object answer one
+    // ray twice at two slightly different surfaces. A record asks for the FAR
+    // copies by naming bit 4 and none of bits 0-3; anything else is a near ray
+    // and keeps only its near bits (0xFF = the whole near field).
+    const uint kNearField = 0x0Fu, kFar = 0x10u;
+    const uint asked = ray.mask.x;
+    const uint cull = ( asked & kNearField ) != 0u ? ( asked & kNearField ) : ( asked & kFar );
+
     rayQueryEXT rq;
-    rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, ray.mask.x, ray.origin.xyz,
+    rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, cull, ray.origin.xyz,
                            ray.origin.w, ray.dir.xyz, ray.dir.w );
     // OPAQUE, ALWAYS (audit C-16): every BLAS this tier builds carries
     // VK_GEOMETRY_OPAQUE_BIT_KHR and alpha-tested datablocks are kept OUT of the

@@ -89,8 +89,9 @@ struct GpuInstance {
     /// instance's bottom-level acceleration structure should be built from,
     /// re-evaluated only when the instance's distance from the camera changes by
     /// 2x (the hysteresis is what keeps a BLAS refit rare — `OgreScene::
-    /// rayLevelFor`). ITS CONSUMER IS P4: the ray tier still builds every BLAS
-    /// from level 0 today, and this field is the rule's answer waiting for it.
+    /// updateRayLevels`). ITS CONSUMER IS THE RAY TIER'S NEAR COPY (ATOM-FARBLAS-1,
+    /// `writeRayInstances`): the instance's near BLAS is built from this level,
+    /// its far copy from the mesh's coarsest.
     ///
     /// y = THE MATERIAL WORD (ATOM P4b): {pool : 16 | slot : 16} in the chain's ONE
     /// shared `VctMaterial` store — the bucket whose const buffer holds this item's

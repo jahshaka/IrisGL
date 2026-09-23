@@ -134,6 +134,11 @@ struct GatherInputs {
     float rayTL[3] = {}, rayRight[3] = {}, rayDown[3] = {}, fwd[3] = {};
     float viewAxisX[3] = {}, viewAxisY[3] = {}, viewAxisZ[3] = {};
     float projA = 0.0f, projB = 0.0f, farClip = 0.0f;
+    /// THE FAR QUERY'S HAND-OVER WIDTH (world units, ATOM-FARBLAS-1 audit F2):
+    /// the widest gap between a traced mesh's coarsest level and its fine one,
+    /// at its instance's scale. The far query starts that far before the near
+    /// length.
+    float farOverlap = 0.0f;
 
     unsigned width = 0u, height = 0u;
 

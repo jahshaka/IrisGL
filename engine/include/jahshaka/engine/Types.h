@@ -556,10 +556,29 @@ constexpr float kLodBudgetPixels = 1.0f;
 /// THE RAY TIER'S TOLERANCE, in ray footprints (ATOM P3's AT-A8r). ONE, and the
 /// reason it is not the eye's half or double: a ray is cast through a pixel, so
 /// its footprint IS that pixel's, and a deviation under one footprint cannot
-/// change which surface the ray finds. The tier that spends it — the bottom-
-/// level structures — is P4's; this lane lands the rule and the per-instance
-/// answer in `GpuInstance.ids.w`.
+/// change which surface the ray finds. The tier that spends it is the ray
+/// tier's NEAR copy of every instance (ATOM-FARBLAS-1): its bottom-level
+/// structure is built from the level this rule leaves in `GpuInstance.ids.w`.
 constexpr float kRayFootprintTolerance = 1.0f;
+
+/// THE RAY INSTANCE MASK (ATOM-FARBLAS-1, A5b §4). ONE top-level structure holds
+/// every traced object TWICE: a NEAR copy over the level the ray rule chose,
+/// carrying the per-consumer bits (audit C-15) plus `kRayMaskNear`, and a FAR
+/// copy over the mesh's coarsest level carrying `kRayMaskFar` ALONE. A launch
+/// names what it may hit with its cull mask, so the split costs a bit, not a
+/// second structure:
+///   * near launches (reflections, a probe gather ray inside its near length,
+///     a sun-contact ray) trace `kRayMaskNearField` or a subset of its bits;
+///   * the gather's far query (a ray that escaped its near length) traces
+///     `kRayMaskFar` from the near end to the far plane.
+/// No near launch can hit a far copy and the far launch hits nothing else, so
+/// one object never answers one ray twice.
+constexpr unsigned kRayMaskCaster = 0x01u;   ///< casts a shadow
+constexpr unsigned kRayMaskMover = 0x02u;    ///< the document says it moves
+constexpr unsigned kRayMaskStill = 0x04u;    ///< still world (not a mover)
+constexpr unsigned kRayMaskNear = 0x08u;     ///< every near copy
+constexpr unsigned kRayMaskFar = 0x10u;      ///< every far copy, and nothing else
+constexpr unsigned kRayMaskNearField = kRayMaskCaster | kRayMaskMover | kRayMaskStill | kRayMaskNear;
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
 /// One bone of a rig, in its BIND pose. The transform is LOCAL to the parent
@@ -3002,6 +3021,10 @@ struct GatherTuning {
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
     bool     jitterOff = false;
+    /// THE FAR QUERY OFF (ATOM-FARBLAS-1): a ray that escapes its near length
+    /// reads the sky directly instead of tracing the far copies (the coarse
+    /// levels) out to the far plane -- the A/B that prices the far field.
+    bool     farQueryOff = false;
 };
 
 /// What the gather did on the last drawn frame of this scene.
@@ -3752,14 +3775,24 @@ struct RayQueryStatus {
     /// is `Scene::rayTracingResolved()`, which ANDs this with the project's own
     /// state (iris::Scene::rayTracing, the World panel's row).
     bool enabled = false;
-    /// Bottom-level structures held — one per unique mesh in the traced set.
+    /// Bottom-level structures held — one per unique (mesh, level) the traced
+    /// set asks for: the near copies' levels and every mesh's coarsest.
     int  blasCount = 0;
-    /// Instances in the top-level structure: the traced set's size. It is NOT
-    /// the scene's Item count — editor helpers, backdrops, the sun disc,
+    /// The traced set's size: the NEAR copies in the top-level structure. It is
+    /// NOT the scene's Item count — editor helpers, backdrops, the sun disc,
     /// overlay-queue objects, SKINNED Items (they would trace at bind pose
     /// until R4) and alpha-tested ones (no any-hit without ray-tracing
     /// pipelines) are all out.
     int  instances = 0;
+    /// The FAR copies (ATOM-FARBLAS-1): the same objects again over their
+    /// meshes' coarsest levels, mask `kRayMaskFar`. The top-level structure
+    /// holds `instances + farInstances`.
+    int  farInstances = 0;
+    /// Of `blasCount` / `blasBytes`: the structures built from a level ABOVE 0
+    /// (every chained mesh's coarsest, and any near level the ray rule
+    /// coarsened) — the memory the far field and the rule add.
+    int  levelBlasCount = 0;
+    unsigned long long levelBlasBytes = 0;
     /// Triangles in the bottom-level structures (unique geometry, not
     /// instanced).
     int  triangles = 0;
@@ -6550,8 +6583,8 @@ struct GpuSceneEntry {
     unsigned nodeId = 0u;
     unsigned lightMask = 0u;
     /// THE RAY LEVEL (`GpuInstance.ids.w`, ATOM P3's AT-A8r): the mesh level
-    /// this instance's bottom-level structure should be built from at its
-    /// current distance. 0 until a camera has been seen; its consumer is P4.
+    /// this instance's NEAR bottom-level structure is built from at its
+    /// current distance. 0 until a camera has been seen.
     unsigned rayLevel = 0u;
 };
 
