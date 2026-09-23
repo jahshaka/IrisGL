@@ -117,9 +117,11 @@ struct GpuInstance {
     /// Written by ONE place, `OgreScene::composeGpuInstance`, beside the ids — at
     /// attach and at a material change (both mark the slot).
     ///
-    /// (The mirrors of this struct in JahCullTest_cs / JahVoxelGather_cs still call
-    /// the lane `pad`; the bytes are identical and neither reads it.)
-    uint32_t raster[4] = {};
+    /// The mirrors of this struct (JahCullTest_cs, JahVoxelGather_cs) name the lane
+    /// `raster` too; neither reads it.
+    /// Defaults to "no material, no tangent": a CLEARED slot (onSlotFreed) names no
+    /// material the decode could shade with.
+    uint32_t raster[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0u, 0u };
 };
 static_assert(sizeof(GpuInstance) == 160, "the GPU instance table's stride is a contract");
 
