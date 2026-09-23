@@ -1852,7 +1852,8 @@ void OgreScene::updateSurfaceCache() {
     // card's LIT radiance depends on and its capture does not — the colour,
     // the power, the reach and the cone. A colour slider costs the cache a
     // relight of the resident set (the `Jahshaka/CardLight` job, under its own
-    // budget) and not one capture.
+    // budget) and not one capture. The lights themselves are handed over for
+    // the job's light list (below).
     unsigned long long radianceSig = lightSig;
     for (NodeId lid : mLightNodes) {
         auto lit = mNodes.find(lid);
@@ -1869,6 +1870,10 @@ void OgreScene::updateSurfaceCache() {
         foldR(l->getSpotlightInnerAngle().valueRadians());
         foldR(l->getSpotlightOuterAngle().valueRadians());
         foldR(l->getSpotlightFalloff());
+        // ...and the light itself, for the relight job: EVERY light node,
+        // world space, unculled — the frame's global list is culled against
+        // the frame's cameras, and a card lights surfaces off screen.
+        view.lights.push_back(lit->second.light);
     }
     view.radianceSerial = radianceSig;
     view.lightBudgetTexels = facts.cardLightTexels;

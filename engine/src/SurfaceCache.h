@@ -197,6 +197,9 @@ struct CardSceneView {
     unsigned long long radianceSerial = 0ull;
     /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
     unsigned lightBudgetTexels = 0u;
+    /// EVERY light of the scene, world space, no culling — the relight job's
+    /// light list and its sun (a card lights surfaces no camera sees).
+    std::vector<Ogre::Light *> lights;
     /// THE INDIRECT HALF: the chain the march reads (the scene's cascade-0
     /// VctLighting — the same object the pixel's pass buffer is filled from;
     /// null when GI is not the voxel arm, and the indirect is then zero), the
@@ -379,6 +382,7 @@ private:
     /// ...and each entry's mode (JahCardLight_cs.glsl): 1 march the indirect,
     /// 0 read it back, 2 none yet.
     std::vector<unsigned> mRelightMode;
+    std::vector<Ogre::Light *> mLights;      ///< this frame's scene lights (valid inside the frame)
     /// THE CACHED INDIRECT HALF (a UAV, R11G11B10F like the radiance), the
     /// chain's parameter block, and this frame's chain.
     Ogre::TextureGpu *mIndirect = nullptr;

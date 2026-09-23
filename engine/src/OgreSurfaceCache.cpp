@@ -342,9 +342,18 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     // casters box per (camera, frame) (`buildClosestLightList`'s early-out,
     // OgreCompositorShadowNode.cpp:345), and no two passes of one update share
     // a camera.
+    //
+    // NOT LIGHT-COLLECTING CAMERAS (`isVisible` false). A visible camera is in
+    // the frame's light cull (SceneManager::buildLightList): these were made
+    // "cubemap" cameras, culled by a box of half their far clip — and one no
+    // batch has used yet sits at the origin with Ogre's 100,000 far clip, a box
+    // that put EVERY light of the scene in the frame's global list for as long
+    // as the card row was on (measured, PHOTON-CARDS-1 round 2). A capture
+    // lights nothing: its one light is the sun's PSSM term, and directional
+    // lights enter the list unculled.
     for (unsigned i = 0; i < kCaptureBatch; ++i) {
         mCam[i] = sm->createCamera(processUniqueName(("cardCapture" + std::to_string(i)).c_str()),
-                                   true, true);
+                                   false, false);
         mCam[i]->setProjectionType(Ogre::PT_ORTHOGRAPHIC);
         mCam[i]->setFixedYawAxis(false);
         mCam[i]->setAutoAspectRatio(false);
@@ -532,6 +541,7 @@ void SurfaceCache::destroyAll() {
     mBatch.clear();
     mRelight.clear();
     mRelightMode.clear();
+    mLights.clear();
     mVct = nullptr;
     mLightJob = nullptr;
     for (unsigned i = 0; i < kCaptureBatch; ++i) mPassDef[i] = nullptr;
@@ -1080,6 +1090,7 @@ constexpr unsigned kLightFloats = 20u;
 void SurfaceCache::planRelights(const CardSceneView &view) {
     mRelight.clear();
     mRelightMode.clear();
+    mLights = view.lights;
     mVct = view.vct;
     // THE RADIANCE SIGNATURE: a light write that changed what a card's
     // DIRECT radiance depends on relights every resident card and recaptures
@@ -1187,13 +1198,13 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
 }
 
 void SurfaceCache::relightCards() {
-    if (mRelight.empty() || !mRadiance) { mVct = nullptr; return; }
+    if (mRelight.empty() || !mRadiance) { mLights.clear(); mVct = nullptr; return; }
     const auto t0 = std::chrono::steady_clock::now();
     Ogre::Root &root = Ogre::Root::getSingleton();
     Ogre::RenderSystem *rs = root.getRenderSystem();
     Ogre::HlmsCompute *hc = root.getHlmsManager()->getComputeHlms();
     if (!mLightJob) mLightJob = hc ? hc->findComputeJobNoThrow("Jahshaka/CardLight") : nullptr;
-    if (!mLightJob) { mRelight.clear(); mVct = nullptr; return; }
+    if (!mLightJob) { mRelight.clear(); mLights.clear(); mVct = nullptr; return; }
     Ogre::VaoManager *vao = rs->getVaoManager();
 
     // ---- THE RELIGHT LIST: each card's capture frame, as the job unprojects it.
@@ -1211,25 +1222,27 @@ void SurfaceCache::relightCards() {
         r[16] = c.d.x; r[17] = c.d.y; r[18] = c.d.z; r[19] = 0.0f;
     }
 
-    // ---- THE LIGHTS, in world space, in the pass buffer's layout. THE SUN —
-    // the one light whose visibility is the captured shadow term — is the
-    // light the capture's shadow node gave its PSSM maps: the first
-    // shadow-casting directional light of the frame's global list (which Ogre
-    // sorts casters first; the list is valid here, inside the frame).
-    // THE SAME LIST IS THE JOB'S LIGHT LIST: the frame's global list, which
-    // SceneManager::buildLightList fills from every light the scene's light
-    // mask admits, culled against the frame's visible cameras (a point or spot
-    // light outside every one of them is not in it this frame).
-    const Ogre::LightListInfo &gl = mSceneMgr->getGlobalLightList();
+    // ---- THE LIGHTS, in world space, in the pass buffer's layout, from the
+    // SCENE — every light node, handed over by OgreScene::updateSurfaceCache —
+    // and NEVER from the frame's global list: that list is culled against the
+    // frame's visible cameras, and a card lights a surface OFF screen (the
+    // reader is a ray hit), so a lamp no camera sees this frame must still
+    // light it. ONE source, the sun included: the one light whose visibility is
+    // the captured shadow term is the light the capture's shadow node gave its
+    // PSSM maps, which is the frame's rule applied to the same list — the first
+    // visible shadow-casting directional light in creation order
+    // (SceneManager::quickSortDirectionalLights: casters first, then by id).
     const Ogre::Light *sun = nullptr;
-    for (const Ogre::Light *l : gl.lights) {
-        if (l->getType() != Ogre::Light::LT_DIRECTIONAL) break;
-        if (l->getCastShadows()) { sun = l; break; }
+    for (const Ogre::Light *l : mLights) {
+        if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL || !l->getCastShadows() ||
+            !l->getVisible())
+            continue;
+        if (!sun || l->getId() < sun->getId()) sun = l;
     }
     mLightCpu.assign(4u + size_t(kMaxCardLights) * kLightFloats, 0.0f);
     unsigned numLights = 0u;
     unsigned dropped = 0u;
-    for (const Ogre::Light *l : gl.lights) {
+    for (const Ogre::Light *l : mLights) {
         if (!l || !l->getVisible()) continue;
         const Ogre::Light::LightTypes type = l->getType();
         if (type != Ogre::Light::LT_DIRECTIONAL && type != Ogre::Light::LT_POINT &&
@@ -1440,6 +1453,7 @@ void SurfaceCache::relightCards() {
     }
     mRelight.clear();
     mRelightMode.clear();
+    mLights.clear();
     mVct = nullptr;
     mLightMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
