@@ -408,6 +408,7 @@ set(JAH_VOXEL_READER_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
 set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
@@ -434,6 +435,13 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelMarch
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelMarch_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE ONE DIFFUSE CONE INTEGRATOR (PHOTON-CARDS-2): the cone frame, the cone
+    # sets, the start bias and the escape weight - read by the pixel shader's
+    # cones, the bounce-injection job and the surface cache's card job.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelCones
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelCones_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE ONE ENVIRONMENT (PHOTON-ENV-1): what every escape sees — the cone
     # lookup on the prefiltered sky chain and the SH irradiance, one file, read
