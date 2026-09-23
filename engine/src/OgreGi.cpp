@@ -332,12 +332,20 @@ static const Ogre::uint32 kIfdTotalProbes = 8192u;
 // measurement attached, not a default to drift.
 static const Ogre::uint8 kIfdDepthRes  = 12u;
 static const Ogre::uint8 kIfdIrradRes  = 6u;
-// ONE RAY PER DEPTH TEXEL — the settings' own default, and MEASURED, not kept
-// (PHOTON-WRITER-1 IFD-RAYS, gi.ddgi_edge's leak room, one process, unlocked
-// clocks so ratios only): 1 / 2 / 4 rays per texel moved the through-slab leak
-// 12.17 / 12.18 / 12.18 codes (flat), the bounded roof 0.55 at all three, the
-// interior floor 0.409 / 0.413 / 0.417 lum, for a re-converge costing 1 : 1.26 :
-// 1.54. The knob that held it (a constant nothing varied) is deleted.
+// TWO RAYS PER DEPTH TEXEL, MEASURED (PHOTON-WRITER-1 fix round, IFD-RAYS). The
+// probe rays cross the voxels at aperture zero (a cone over-occludes grazing
+// directions), and a ray does not prefilter: over the static direction set (the
+// field fills its directions once, never rotated) a small emitter falls between
+// rays or on one, deterministically. Measured on a one-voxel-thick emissive wall
+// 0.8 m square at four probe spacings, three lateral offsets, against its
+// analytic irradiance (spikes/photon-writer-1/ifd-rays-tan0.txt): the probe's
+// reading over analytic spread 1.84-3.55 at 1 ray, 2.65-3.24 at 2, the same at 4,
+// 2.18-2.25 at 16 (a constant factor of the fixture's units; frame to frame the
+// bytes are identical at every count). 2 beats 1 far past the floor and 4 buys
+// nothing over 2; the step frame's follow costs 2.25 ms against 1.19 at 1 ray
+// (gi.field_scroll, one process each, unlocked clocks). The earlier "flat"
+// reading was taken with the cone, which prefilters - not a witness for rays.
+static const Ogre::uint16 kIfdRaysPerPixel = 2u;
 
 // HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
 // 1. The P0 spike's cost table is the argument for converging FAST rather than
@@ -715,19 +723,6 @@ void OgreScene::noteSettleInputs() {
     mGiSettleSerial = mGiLightWriteSerial;
 }
 
-// A BOUNCING CHAIN WHOSE ENVIRONMENT CHANGED IS OWED A SETTLE (PHOTON-ENV-1). The
-// bounce job reads the environment where its cones escape, so the voxels hold a
-// sky; a still scene whose only edit is its sky (or its Sky Light) has no light
-// write and no geometry change to re-inject it, and this is what does — the
-// scheduler's own incremental settle, one injection a frame, outermost first.
-// Nothing is owed without a bounce pass (one bounce: the voxels hold the direct
-// light only and the pixel reads the environment itself) or without a chain
-// (a single volume re-injects on its next light tick).
-void OgreScene::oweEnvironmentSettle() {
-    if (mGi.numBounces <= 1) return;
-    oweChainSettle();
-}
-
 // THE DEBT, raised in one place: a rebuild, an environment change and a tick
 // the one-writer latch refused all owe the same thing — the chain's at-rest
 // answer over its current inputs.
@@ -1103,6 +1098,8 @@ GiStatus OgreScene::giStatus() const {
         }
         st.ifdFollows = mIfdFollows;
         st.ifdScrollProbes = mIfdScrolledProbes;
+        st.ifdScrolls = mIfdScrolls;
+        st.ifdReplacements = mIfdReplacements;
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
         st.probeCapturesDeferred  = mProbeCapturesDeferred;
@@ -6365,6 +6362,7 @@ void OgreScene::buildIrradianceField() {
 
     JAH_TRY {
         Ogre::IrradianceFieldSettings settings;
+        settings.mNumRaysPerPixel        = kIfdRaysPerPixel;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
         // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM — whichever arm
@@ -6416,6 +6414,7 @@ void OgreScene::buildIrradianceField() {
         for (size_t i = 0; i < 3u; ++i) mIfdProbeCounts[i] = settings.mNumProbes[i];
         mIfdFollows = 0;
         mIfdScrolledProbes = 0;
+        mIfdScrolls = mIfdReplacements = 0;
         mIfdTotalProbes    = total;
         mIfdProbesDone     = 0u;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
@@ -6499,6 +6498,7 @@ void OgreScene::teardownIrradianceField() {
     mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
     mIfdFollows = 0;
     mIfdScrolledProbes = 0;
+    mIfdScrolls = mIfdReplacements = 0;
     if (!mIfd) return;
     JAH_TRY {
         // Pointer identity, not sVctBindingOwner: the owner flag says who bound
@@ -6646,7 +6646,25 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
         // of the whole grid keeps nothing and re-places the field as before.
         if (scrollIrradianceField(origin, size, reason)) return;
 
-        const float tol = 1e-4f;    } JAH_CATCH(mError, );
+        // THE SCROLL REFUSED (a resize, or a jump of the whole grid or more on
+        // an axis - a teleport, a headset re-centred far away): nothing of the
+        // window is kept, so the field is RE-PLACED onto cascade 0's box from
+        // scratch - offset 0, every probe integrated in this frame - exactly
+        // once; the window's origin is then cascade 0's own, and the next step
+        // scrolls from there.
+        mIfd->setFieldVolume(origin, size);
+        mIfd->reset();
+        mIfdVolumeOrigin = origin;
+        mIfdVolumeSize   = size;
+        ++mIfdFollows;
+        ++mIfdReplacements;
+        pushIfdState(mIfdProbeCounts);                  // the window's offset is 0 again
+        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                 mRoot->getRenderSystem());
+        mIfd->update(mIfdTotalProbes);
+        mIfdProbesDone = mIfdTotalProbes;
+        work.setUnits(mIfdTotalProbes);
+    } JAH_CATCH(mError, );
 }
 
 bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::Vector3 &size,

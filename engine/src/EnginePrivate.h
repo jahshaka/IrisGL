@@ -4722,9 +4722,6 @@ private:
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
     /// The environment into ONE cascade's bounce (applyVctEnvironment, aimed).
     void applyCascadeEnvironment(Ogre::VctLighting *lighting);
-    /// A bouncing chain whose environment changed owes an at-rest settle
-    /// (noteEnvironmentChanged; OgreGi.cpp owns the settle's arithmetic).
-    void oweEnvironmentSettle();
     /// Extra bounce passes for cascade `idx` — the DOCUMENT's own count, on
     /// every cascade alike (PHOTON-M1 retired the pin's "a coarser cell gets
     /// more bounces" stabilisation: a bounce adds energy, it does not recover
@@ -5167,6 +5164,10 @@ private:
     unsigned long long                mIfdFollows = 0;
     /// The probes the last scroll integrated in its step frame (GiStatus::ifdScrollProbes).
     unsigned                          mIfdScrolledProbes = 0;
+    /// ...and how the follows split: window scrolls (the kept probes stand) and
+    /// whole re-placements (a resize or a jump of the whole grid; nothing kept).
+    unsigned long long                mIfdScrolls = 0;
+    unsigned long long                mIfdReplacements = 0;
     /// A FIELD FOLLOW OWED TO THE NEXT FRAME, AND WHY IT IS NOT PAID ON THE
     /// FRAME THAT MOVED THE CASCADE (lane V1-RIG item 2, LATER_OPTIMISATIONS
     /// L11, measured).

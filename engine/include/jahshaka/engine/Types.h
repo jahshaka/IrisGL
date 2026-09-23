@@ -3322,15 +3322,21 @@ struct GiStatus {
     /// leak-free diffuse actually is.
     Vec3 ifdMin;
     Vec3 ifdMax;
-    /// How many times the field has been re-placed onto cascade 0 since the
-    /// last build: 0 in the single-volume arm and on a still camera, one per
-    /// cascade-0 step while walking. Reset by a build, never by a scroll.
+    /// How many times the field has followed cascade 0 since the last build
+    /// (ifdScrolls + ifdReplacements, below): 0 in the single-volume arm and on a
+    /// still camera, one per cascade-0 step while walking. Reset by a build.
     unsigned long long ifdFollows = 0;
     /// THE FIELD SCROLLS (PHOTON-WRITER-1): how many probes the LAST follow
     /// integrated in its step frame — the planes that entered the window, not
     /// the field (0 before any scroll; a re-placement's whole convergence does
     /// not count here).
     unsigned ifdScrollProbes = 0;
+    /// How the follows split (PHOTON-WRITER-1): `ifdScrolls` moved the window and
+    /// kept every probe that stayed in it; `ifdReplacements` re-placed the whole
+    /// field (a resize, or a jump of the whole grid or more - nothing to keep).
+    /// ifdFollows = ifdScrolls + ifdReplacements. Reset by a build.
+    unsigned long long ifdScrolls = 0;
+    unsigned long long ifdReplacements = 0;
 
     // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
     // Reflection probes are re-captured only while STALE. These say what the

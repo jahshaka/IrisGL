@@ -140,7 +140,10 @@ OgreScene::RayEnvironment OgreScene::rayEnvironment() const {
 void OgreScene::noteEnvironmentChanged() {
     ++mGiLightWriteSerial;
     applyVctEnvironment();
-    oweEnvironmentSettle();
+    // A BOUNCING chain is owed a settle (the bounce job reads the environment
+    // where its cones escape); with one bounce the voxels hold the direct light
+    // only and the pixel reads the environment itself.
+    if (mGi.numBounces > 1) oweChainSettle();
     if (mIfd) reintegrateFieldAfterInjection();
 }
 
