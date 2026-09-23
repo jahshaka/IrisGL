@@ -20,6 +20,9 @@
 #include <OgreTextureUnitState.h>
 #include <OgreMaterialManager.h>
 #include <OgreControllerManager.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreShaderParams.h>
 #include <OgreStagingTexture.h>
 #include <OgreAsyncTextureTicket.h>
 #include <cstring>
@@ -2069,6 +2072,7 @@ void OgreScene::applyCloudLayer(bool fieldChanged) {
         mCloudStatus.drawn = false;
         mCloudStatus.reason = !c.enabled ? "off" : "noSky";
         syncSunDiscClouds();
+        snapshotCloudGi();
         return;
     }
     JAH_TRY {
@@ -2168,6 +2172,7 @@ void OgreScene::applyCloudLayer(bool fieldChanged) {
     } JAH_CATCH(mError, );
     updateCloudLayer();   // the scroll, the SH term and the ground shadow, now
     syncSunDiscClouds();
+    snapshotCloudGi();    // the voxels' and the cards' copy (CLOUDS-2D-2)
 }
 
 void OgreScene::bakeCloudField() {
@@ -2217,6 +2222,8 @@ void OgreScene::bakeCloudField() {
         // the layout a sampler expects (handOverForSampling's header).
         handOverForSampling(mRoot, mCloudField);
         ++mCloudStatus.fieldBakes;
+        // THE FIELD'S PIXELS CHANGED: the voxels and the cards read them.
+        snapshotCloudGi(true);
         return;
     } JAH_CATCH(mError, );
     if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
@@ -2244,6 +2251,9 @@ void OgreScene::tickCloudClock() {
             mSkyCaptureAsyncOnce = true;
             requestSkyCapture();
             ++mCloudStatus.scrollCaptures;
+            updateCloudLayer();
+            snapshotCloudGi();   // the GI inputs follow the scroll at the capture's cadence
+            return;
         }
     }
     updateCloudLayer();
@@ -2397,6 +2407,10 @@ void OgreScene::syncSunDiscClouds() {
 
 void OgreScene::destroyCloudLayer() {
     FogHlmsListener::setCloudShadow(mSceneMgr, FogHlmsListener::CloudShadowState());
+    // The GI copy goes with it (no re-injection here: the scene is being torn
+    // down or its sky replaced, and both re-inject on their own).
+    mCloudGiState = FogHlmsListener::CloudShadowState();
+    ++mCloudGiSerial;
     if (mCloudQuad) { mSceneMgr->destroyRectangle2D(mCloudQuad); mCloudQuad = nullptr; }
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     // The clones keep their units: a destroyed texture nulls itself out of every
@@ -2494,6 +2508,69 @@ bool OgreScene::renderSkyEquirect(unsigned width, unsigned height, unsigned face
     if (ticket) { try { tm->destroyAsyncTextureTicket(ticket); } catch (...) {} }
     if (cube) { try { destroyRecycled(tm, cube); } catch (...) {} }
     return ok;
+}
+
+
+// ---------------------------------------------------------------------------
+// THE CLOUD SHADOW ON THE VOXELS AND THE CARDS (CLOUDS-2D-2)
+// ---------------------------------------------------------------------------
+// The pixel's direct sun is darkened by the sheet (JahFog); so must every other
+// estimate of the SAME direct term be, or the bounce under an overcast is lit
+// by a clear sun: the voxel light injection (fork media, LightInjection) and
+// the surface cache's card relight (JahCardLight) read the same field through
+// the same function (the piece JahCloudShadow), at their own world points.
+void OgreScene::snapshotCloudGi(bool fieldRebaked) {
+    FogHlmsListener::CloudShadowState st;
+    // NOT BEFORE THE FIELD HOLDS ITS PIXELS: an injection runs at the writer
+    // point, which can come before this frame's bake — a voxel read through an
+    // unbaked field reads whatever the allocation held. The bake re-snapshots.
+    if (cloudLayerDrawn() && !mCloudFieldPending) st = FogHlmsListener::cloudShadow(mSceneMgr);
+    const FogHlmsListener::CloudShadowState &o = mCloudGiState;
+    const bool same = st.field == o.field && st.invTile == o.invTile &&
+                      st.strength == o.strength && st.scroll[0] == o.scroll[0] &&
+                      st.scroll[1] == o.scroll[1] && st.altitude == o.altitude &&
+                      st.sunThrow[0] == o.sunThrow[0] && st.sunThrow[1] == o.sunThrow[1] &&
+                      st.invMuSun == o.invMuSun;
+    if (same && !(fieldRebaked && st.field)) return;
+    mCloudGiState = st;
+    ++mCloudGiSerial;
+    // The voxels hold the direct term, so a change re-injects them (the light
+    // tick's path: one injection over the voxels already there, or an owed tick
+    // under a chain); the field re-integrates from them.
+    if (mVctLighting) refreshGiLighting(false);
+}
+
+void OgreScene::bindCloudInjection(Ogre::VctLighting *lighting) {
+    Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow("VCT/LightInjection") : nullptr;
+    if (!job) return;
+    JAH_TRY {
+        const FogHlmsListener::CloudShadowState &st = mCloudGiState;
+        const Ogre::HlmsSamplerblock *wrap =
+            st.field ? FogHlmsListener::acquireWrapSampler(mRoot->getHlmsManager()) : nullptr;
+        const bool on = st.field && wrap && lighting && lighting->getVoxelizer();
+        // CHANGE-GUARDED: setNumTexUnits invalidates the PSO hash whatever it is
+        // told, and a scene without a layer must leave the job exactly as the
+        // fork's JSON built it (three textures, the property 0).
+        const Ogre::uint8 units = on ? 4u : 3u;
+        if (job->getNumTexUnits() != units) job->setNumTexUnits(units);
+        if (job->getProperty("jah_cloud_shadow") != (on ? 1 : 0))
+            job->setProperty("jah_cloud_shadow", on ? 1 : 0);
+        if (!on) return;
+        Ogre::DescriptorSetTexture2::TextureSlot slot(
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+        slot.texture = st.field;
+        job->setTexture(3u, slot, wrap);
+        Ogre::ShaderParams &params = job->getShaderParams("default");
+        const Ogre::Vector3 origin = lighting->getVoxelizer()->getVoxelOrigin();
+        if (Ogre::ShaderParams::Param *p = params.findParameter("jahCloudMap"))
+            p->setManualValue(Ogre::Vector4(st.invTile, st.strength, st.scroll[0], st.scroll[1]));
+        if (Ogre::ShaderParams::Param *p = params.findParameter("jahCloudSun"))
+            p->setManualValue(Ogre::Vector4(st.sunThrow[0], st.sunThrow[1], st.altitude, st.invMuSun));
+        if (Ogre::ShaderParams::Param *p = params.findParameter("jahCloudOrigin"))
+            p->setManualValue(Ogre::Vector4(origin.x, origin.y, origin.z, 0.0f));
+        params.setDirty();
+    } JAH_CATCH(mError, );
 }
 
 }}}  // namespace jahshaka::engine::detail

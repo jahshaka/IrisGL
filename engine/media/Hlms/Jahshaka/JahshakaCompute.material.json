@@ -140,7 +140,7 @@
 			"threads_per_group" : [8, 8, 1],
 			"thread_groups" : [16, 16, 1],
 			"source" : "JahCardLight_cs",
-			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahBrdf_piece_all.any", "JahDiffuseAlbedo_piece_all.any"],
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahBrdf_piece_all.any", "JahDiffuseAlbedo_piece_all.any", "JahCloudShadow_piece_all.any"],
 			"inform_shader_of_texture_data_change" : true,
 			"uav_units" : 5,
 			"properties" :
@@ -149,7 +149,8 @@
 				"hlms_num_vct_cascades" : 0,
 				"jah_env" : 0,
 				"vct_cone_dirs" : 4,
-				"jah_card_round_r11g11b10" : 0
+				"jah_card_round_r11g11b10" : 0,
+				"jah_cloud_shadow" : 0
 			}
 		},
 

@@ -207,6 +207,12 @@ struct CardSceneView {
     /// signature that says it re-injected, and its own budget.
     Ogre::VctLighting *vct = nullptr;
     unsigned long long indirectSerial = 0ull;
+    /// THE CLOUD LAYER'S SHADOW (CLOUDS-2D-2): the field and its mapping the
+    /// pixel's direct sun is darkened by (JahCloudShadow's cloudMap / cloudSun),
+    /// null when no layer shades the sun. Its change is in `radianceSerial`.
+    Ogre::TextureGpu *cloudField = nullptr;
+    float cloudMap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float cloudSun[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     unsigned indirectBudgetTexels = 0u;
 
     /// ONE CANDIDATE — an item inside the radius that may hold cards. The
@@ -403,6 +409,10 @@ private:
     Ogre::UavBufferPacked *mGiBuffer = nullptr;
     std::vector<float> mGiCpu;
     Ogre::VctLighting *mVct = nullptr;
+    /// This frame's cloud shadow (CardSceneView's), for the relight.
+    Ogre::TextureGpu *mCloudField = nullptr;
+    float mCloudMap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float mCloudSun[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     unsigned long long mIndirectSerial = 0ull;
     bool mIndirectMovingLastFrame = false;
     unsigned mIndirectBudget = 0u;

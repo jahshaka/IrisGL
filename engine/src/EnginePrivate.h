@@ -4232,6 +4232,22 @@ private:
     void captureCloudClearSky();
     void readCloudClearTicket(bool force);
     void pushCloudAmbient();
+    // ---- CLOUDS-2D-2: the sheet's shadow on the voxels and the cards ----------
+    /// The cloud shadow the GI inputs read — the pixel's state, SNAPSHOT on a
+    /// change of the layer and at each scroll capture (the environment's own
+    /// cadence), never per frame: a voxel re-injection and a card relight are
+    /// the downstream cost the cadence was measured for. A change re-injects
+    /// the lighting (refreshGiLighting) and moves mCloudGiSerial, which the
+    /// cards' radiance signature folds.
+    FogHlmsListener::CloudShadowState mCloudGiState;
+    unsigned long long mCloudGiSerial = 0ull;
+    /// `fieldRebaked`: the field's pixels changed under the same pointer.
+    void snapshotCloudGi(bool fieldRebaked = false);
+    /// Binds (or clears) the cloud field and its parameters on the shared
+    /// "VCT/LightInjection" job for THIS volume — called before every
+    /// VctLighting::update (applyCascadeEnvironment), because the job is shared
+    /// by name process-wide and the state in force is whoever set it last.
+    void bindCloudInjection(Ogre::VctLighting *lighting);
     bool     mCloudClearPending = false;
     bool     mCloudClearValid = false;
     float    mCloudClearMean[3] = { 0.0f, 0.0f, 0.0f };
