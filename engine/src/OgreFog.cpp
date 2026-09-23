@@ -526,12 +526,13 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     // The DDGI block, same four-float alignment rule. Read by
     // media/Hlms/Jahshaka/JahIfd_piece_ps.any, which only exists in the
     // generated shader while an IrradianceField is bound: x scales the field's
-    // irradiance (the sky its probes see included, PHOTON-ENV-1), y is
-    // reserved, zw are the field's Y and Z probe counts, which upstream's own
+    // irradiance (the sky its probes see included, PHOTON-ENV-1), y is the
+    // field's window offset, packed (PHOTON-WRITER-1's scroll: the reader's
+    // modulo), zw are the field's Y and Z probe counts, which upstream's own
     // IrradianceField block does not carry and the cage clamp needs.
     const IfdState ifd = ifdState(sceneManager);
     *passBufferPtr++ = ifd.intensity;
-    *passBufferPtr++ = 0.0f;
+    *passBufferPtr++ = ifd.windowOffsetPacked;     // the field's window (PHOTON-WRITER-1)
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
     // jahEnv (PHOTON-ENV-1): rgb = the environment light's gain per channel on

@@ -87,8 +87,8 @@
 	@end
 	@property( irradiance_field )
 		float4 jahIfd;			// JahIfd_piece_ps.any: x = DDGI diffuse intensity,
-								// y reserved (the field carries the sky itself since
-								// PHOTON-ENV-1), zw = the field's
+								// y = the field's window offset, packed x + 128 y +
+								// 16384 z (PHOTON-WRITER-1's scroll), zw = the field's
 								// Y and Z probe counts (upstream's own block carries
 								// only Nx and Nx*Ny, and the visibility threshold
 								// needs all three axes)
