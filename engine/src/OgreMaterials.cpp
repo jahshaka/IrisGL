@@ -1296,11 +1296,16 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 // moves to Image2::uploadTo — which copies the very levels
                 // generateMipmaps just produced, bilinear filter and all. This
                 // is a change of transport, not of pixels.
+                //
+                // A ONE-SLICE Type2DArray, not a Type2D: HlmsPbs and HlmsUnlit declare
+                // every material map `texture2DArray`, and a 2D view in that slot is
+                // VUID-vkCmdDrawIndexed-viewType-07752 on every draw (ATOM-S3-PARITY).
+                // The file-loaded path's pool slices already are arrays.
                 Ogre::TextureGpu *tex = tm->createTexture(processUniqueName("gray"),
                                                           Ogre::GpuPageOutStrategy::Discard,
                                                           Ogre::TextureFlags::ManualTexture,
-                                                          Ogre::TextureTypes::Type2D);
-                tex->setResolution(w, h);
+                                                          Ogre::TextureTypes::Type2DArray);
+                tex->setResolution(w, h, 1u);
                 tex->setNumMipmaps(rgba.getNumMipmaps());
                 tex->setPixelFormat(rgba.getPixelFormat());
                 // Immediate residency and NO notifyDataIsReady(): _transitionTo
@@ -1457,9 +1462,14 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         // (pbr_texture_scale_tiles_uvs; file-loaded/batched textures are fine) —
         // fixing it means teaching the cubemap path to copy from pool slices,
         // then batching these like loadTexture does.
+        //
+        // A ONE-SLICE Type2DArray, not a Type2D: HlmsPbs and HlmsUnlit declare every
+        // material map `texture2DArray`, and a 2D view in that slot is
+        // VUID-vkCmdDrawIndexed-viewType-07752 on every draw (ATOM-S3-PARITY). Slice 0
+        // is the image; updateTexture rewrites the same slice.
         Ogre::TextureGpu *tex = tm->createTexture(name, Ogre::GpuPageOutStrategy::Discard,
-                                                  Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2D);
-        tex->setResolution(w, h);
+                                                  Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2DArray);
+        tex->setResolution(w, h, 1u);
         const Ogre::uint8 numMips =
             mipmaps ? Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h) : 1u;
         tex->setNumMipmaps(std::max<Ogre::uint8>(1u, numMips));
