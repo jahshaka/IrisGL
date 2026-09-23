@@ -319,6 +319,30 @@ MeshId OgreScene::createMesh(const MeshData &data) {
         mError = "createMesh: one bound per LOD level, or none at all";
         return 0;
     }
+    // ATOM stage 2: THE CLUSTER DAG, validated here for the chain's reason — this
+    // is the public boundary, and a cluster range outside its stream, an index
+    // past the vertices or a link to a group that does not exist would reach the
+    // GPU as a fault (stage 3) instead of a refusal with a reason. All three
+    // tables are present together or not at all.
+    if (!data.clusters.empty() || !data.clusterGroups.empty() || !data.clusterIndices.empty()) {
+        if (data.clusters.empty() || data.clusterGroups.empty() || data.clusterIndices.empty() ||
+            data.clusterIndices.size() % 3 != 0) {
+            mError = "createMesh: a cluster DAG needs clusters, groups and a whole-triangle stream";
+            return 0;
+        }
+        for (unsigned i : data.clusterIndices)
+            if (i >= nv) { mError = "createMesh: the cluster stream names vertex " + std::to_string(i); return 0; }
+        const long long groups = (long long)data.clusterGroups.size();
+        for (size_t c = 0; c < data.clusters.size(); ++c) {
+            const MeshCluster &cl = data.clusters[c];
+            if (cl.indexCount == 0 || cl.indexCount % 3 != 0 ||
+                (unsigned long long)cl.firstIndex + cl.indexCount > data.clusterIndices.size() ||
+                cl.group < 0 || cl.group >= groups || cl.refined < -1 || cl.refined >= groups) {
+                mError = "createMesh: cluster " + std::to_string(c) + " is out of its tables";
+                return 0;
+            }
+        }
+    }
     if (!data.normals.empty() && data.normals.size() != data.positions.size()) { mError = "createMesh: normals count mismatch"; return 0; }
     if (!data.uvs.empty() && data.uvs.size() != nv * 2) { mError = "createMesh: uv count mismatch"; return 0; }
     if (!data.blendIndices.empty() && !data.hasSkinData()) {
@@ -331,7 +355,15 @@ MeshId OgreScene::createMesh(const MeshData &data) {
         rec.hasSkinData = data.hasSkinData();
         for (unsigned char b : data.blendIndices)
             rec.maxBlendIndex = std::max(rec.maxBlendIndex, unsigned(b));
-        rec.mesh = buildMeshV2(rec.name, data, data.dynamic ? &rec.interleaved : nullptr);
+        Ogre::IndexBufferPacked *clusterStream = nullptr;
+        rec.mesh = buildMeshV2(rec.name, data, data.dynamic ? &rec.interleaved : nullptr,
+                               &clusterStream);
+        if (clusterStream) {
+            rec.clusterStream = std::unique_ptr<Ogre::IndexBufferPacked, IndexBufferRelease>(
+                clusterStream, IndexBufferRelease(mRoot->getRenderSystem()->getVaoManager()));
+            rec.clusters = data.clusters;
+            rec.clusterGroups = data.clusterGroups;
+        }
         // ATOM stage 1: kept so a LOD-bias change can re-derive the switch
         // distances. Exactly as many entries as the mesh got extra VAOs — which
         // is every level it was given, since the levels were validated above and
@@ -447,7 +479,7 @@ MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip) {
         const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
         rec.mesh->_setBounds(aabb, false);
         rec.mesh->_setBoundingSphereRadius(std::max(aabb.getRadius(), 0.001f));
-        mMeshes[++mNextMeshId] = rec;
+        mMeshes[++mNextMeshId] = std::move(rec);
         return mNextMeshId;
     } JAH_CATCH(mError, 0);
 }
@@ -677,6 +709,17 @@ bool OgreScene::meshVaoShape(MeshId mesh, unsigned &levels, unsigned &shadowInde
     return true;
 }
 
+bool OgreScene::clusterStreamOf(MeshId mesh, ClusterStreamView &out) const {
+    out = ClusterStreamView();
+    const auto it = mMeshes.find(mesh);
+    if (it == mMeshes.end()) return false;
+    out.mesh = it->second.mesh.get();
+    out.stream = it->second.clusterStream.get();
+    out.clusters = &it->second.clusters;
+    out.groups = &it->second.clusterGroups;
+    return true;
+}
+
 void OgreScene::setLodBias(float bias) {
     if (!(bias >= 0.0f)) bias = 0.0f;
     if (bias == mLodBias) return;
@@ -690,8 +733,14 @@ void OgreScene::setLodBias(float bias) {
     }
 }
 
+void IndexBufferRelease::operator()(Ogre::IndexBufferPacked *b) const {
+    if (b && vaoManager) vaoManager->destroyIndexBuffer(b);
+}
+
 Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &data,
-                                     std::vector<float> *interleavedOut) {
+                                     std::vector<float> *interleavedOut,
+                                     Ogre::IndexBufferPacked **clusterStreamOut) {
+    if (clusterStreamOut) *clusterStreamOut = nullptr;
     const size_t nv = data.vertexCount(), ni = data.indices.size();
     std::vector<float> normals = data.normals;
     if (normals.empty()) {
@@ -892,6 +941,39 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
         }
         sub->mVao[Ogre::VpNormal].push_back(
             vaoMgr->createVertexArrayObject(vbufs, lodIbuf, Ogre::OT_TRIANGLE_LIST));
+    }
+
+    // ---- ATOM stage 2: the CLUSTER STREAM ----------------------------------
+    //
+    // ONE extra index buffer per mesh: every cluster of the DAG, triangles
+    // concatenated in cluster order, so a cluster is a contiguous
+    // [firstIndex, indexCount) range of it (MeshData::clusterIndices, expanded
+    // from the bake's meshlet-local form by the mirror). SAME vertex buffer, SAME
+    // index type as level 0 — the rule the chain's levels follow, and for the
+    // same reason: stage 3's GPU cut draws cluster ranges out of this buffer
+    // against `vbuf`, and one vertex buffer + one index type is what lets those
+    // draws share the levels' vaoName. The meshlet-local form (a vertex base plus
+    // 8-bit corners) is what the BAKE keeps on disk; an index buffer cannot hold
+    // it, so the stream is expanded here and the choice is stated: the expanded
+    // form is what an indexed draw reads, which is what stage 3's cut issues.
+    //
+    // Not for a dynamic (CPU-skinned) mesh — the bake gives such a mesh no DAG,
+    // and this is the second lock on that door, as for the levels.
+    if (clusterStreamOut && !data.dynamic && !data.clusterIndices.empty()) {
+        const std::vector<unsigned> &stream = data.clusterIndices;
+        if (nv <= 65535u) {
+            Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(
+                OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * stream.size(), Ogre::MEMCATEGORY_GEOMETRY));
+            for (size_t i = 0; i < stream.size(); ++i) idx[i] = Ogre::uint16(stream[i]);
+            *clusterStreamOut = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_16BIT,
+                                                          Ogre::uint32(stream.size()), Ogre::BT_IMMUTABLE, idx, true);
+        } else {
+            Ogre::uint32 *idx = reinterpret_cast<Ogre::uint32 *>(
+                OGRE_MALLOC_SIMD(sizeof(Ogre::uint32) * stream.size(), Ogre::MEMCATEGORY_GEOMETRY));
+            for (size_t i = 0; i < stream.size(); ++i) idx[i] = stream[i];
+            *clusterStreamOut = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_32BIT,
+                                                          Ogre::uint32(stream.size()), Ogre::BT_IMMUTABLE, idx, true);
+        }
     }
 
     // Shadow-caster VAO optimization (POST_CHAIN_SPEC.md §11). Aliasing the SAME

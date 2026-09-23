@@ -176,6 +176,141 @@ inline size_t lodLevelForWorldError(const std::vector<float> &bounds, float allo
     return level;
 }
 
+// ---- ATOM stage 2: THE CLUSTER CUT (lane ATOM-CLUSTER-1) -------------------
+//
+// SPECS/atom/B2_CLUSTER_DAG_DESIGN.md §2. The mesh's CLUSTER DAG is a bake
+// product (irisgl/import/meshbake.cpp `clusterdag`, document/assets/mesh.h
+// `iris::MeshClusterDag`) handed across as the two tables below plus one global
+// index stream (`MeshData::clusterIndices`). Nothing in the product draws it yet:
+// stage 3's GPU cut is the consumer, and the proof that the rule below selects
+// ONE crack-free cut lives in the test harness (tests/atom/cluster_draw.*).
+//
+// THE RULE IS clusterlod.h's RENDER TEST (its lines 129-133), with the MEASURED
+// group error in the quality currency's units:
+//
+//     a cluster is DRAWN iff its own group is NOT affordable
+//                        and (it is level 0, or its `refined` group IS affordable)
+//
+// and a group is AFFORDABLE when its measured error is STRICTLY below what the
+// consumer can afford at that group — `allowedWorldError` at the group's own
+// distance, exactly the level walk's comparison (`lodLevelForWorldError`), so a
+// mesh whose DAG and chain agree on an error agree on the answer. The distance
+// is the currency's: from the eye to the group's SPHERE (centre transformed by
+// the instance, radius times the instance's largest axis scale), clamped at 0.
+//
+// WHY IT IS ONE CUT: the bake makes every group's error at least every child
+// group's, and every group's sphere contain every child group's — so a group
+// that is affordable has only affordable children, and the drawn clusters are
+// exactly one frontier through the DAG. `atom.cluster_cut` asserts it over the
+// shipped meshes; `atom.cluster_crack` renders it.
+//
+// THE GLSL TWIN is media/Hlms/Jahshaka/JahClusterCut.glsl (`jahClusterGroupAllowed`,
+// `jahClusterDrawn`); `engine.lod_rule_parity`'s fourth copy runs it on the device
+// over the shipped meshes' DAGs and compares the drawn set with `clusterCut`'s.
+// A change here that is not made there fails that suite.
+
+/// One cluster of a mesh's DAG. `firstIndex`/`indexCount` are the cluster's
+/// contiguous range of `MeshData::clusterIndices` (and of the engine's uploaded
+/// cluster stream); the sphere is the header's culling bound, mesh space.
+struct MeshCluster {
+    unsigned firstIndex = 0;
+    unsigned indexCount = 0;
+    int      group = -1;       ///< the group this cluster is a MEMBER of
+    int      refined = -1;     ///< the group whose simplification PRODUCED it; -1 = level 0
+    float    centre[3] = { 0.0f, 0.0f, 0.0f };
+    float    radius = 0.0f;
+};
+
+/// One group of a mesh's DAG. `error` is the MEASURED two-sided distance of the
+/// group's simplified geometry from the level-0 surface it stands for — mesh
+/// units, monotone up the DAG, `FLT_MAX` for a terminal group (never affordable).
+/// `estimate` is clusterlod.h's own number, a diagnostic nothing selects on.
+struct MeshClusterGroup {
+    int   depth = 0;
+    float centre[3] = { 0.0f, 0.0f, 0.0f };
+    float radius = 0.0f;
+    float error = 0.0f;
+    float estimate = 0.0f;
+};
+
+/// ONE INSTANCE AS ONE VIEW SEES IT — everything the cut reads that is not the
+/// DAG. `worldRow` is the instance's 3x4 transform as three ROWS (the GPU scene
+/// table's own layout); `scale` is its largest axis scale, the currency's
+/// `meshToWorldScale`, supplied by the caller exactly as the cull derives it.
+struct ClusterCutView {
+    float worldRow[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f },
+                             { 0.0f, 1.0f, 0.0f, 0.0f },
+                             { 0.0f, 0.0f, 1.0f, 0.0f } };
+    float scale = 1.0f;
+    float eye[3] = { 0.0f, 0.0f, 0.0f };
+    float tolerance = 0.0f;       ///< samples (the view's pixel budget)
+    float projScaleY = 0.0f;      ///< proj[1][1]
+    float viewportHeight = 0.0f;  ///< the pass's target height
+};
+
+/// What the consumer can afford AT ONE GROUP, in mesh units. The arithmetic is
+/// spelled operation for operation the way the GLSL twin spells it.
+inline float clusterGroupAllowed(const MeshClusterGroup &g, const ClusterCutView &v) {
+    const float cx = v.worldRow[0][0] * g.centre[0] + v.worldRow[0][1] * g.centre[1] +
+                     v.worldRow[0][2] * g.centre[2] + v.worldRow[0][3];
+    const float cy = v.worldRow[1][0] * g.centre[0] + v.worldRow[1][1] * g.centre[1] +
+                     v.worldRow[1][2] * g.centre[2] + v.worldRow[1][3];
+    const float cz = v.worldRow[2][0] * g.centre[0] + v.worldRow[2][1] * g.centre[1] +
+                     v.worldRow[2][2] * g.centre[2] + v.worldRow[2][3];
+    const float dx = cx - v.eye[0], dy = cy - v.eye[1], dz = cz - v.eye[2];
+    const float d = std::max(0.0f, std::sqrt(dx * dx + dy * dy + dz * dz) - g.radius * v.scale);
+    return allowedWorldError(v.tolerance,
+                             sampleFootprintPerspective(d, v.projScaleY, v.viewportHeight), v.scale);
+}
+
+/// THE COMPARISON, once: the level walk's strictness (a bound EQUAL to what is
+/// afforded is not taken), so `allowed <= 0` affords nothing and the cut is level 0.
+inline bool clusterGroupAffordable(float error, float allowed) {
+    return allowed > 0.0f && error < allowed;
+}
+
+/// THE RENDER TEST over per-group answers (`affordable[g]` for every group).
+inline bool clusterDrawn(const MeshCluster &c, const std::vector<unsigned char> &affordable) {
+    if (affordable[size_t(c.group)]) return false;
+    return c.refined < 0 || affordable[size_t(c.refined)] != 0;
+}
+
+/// The cut from per-group answers: the drawn clusters' indices, in cluster
+/// order, into `out` (cleared). Returns the number of TRIANGLES drawn.
+inline size_t clusterCutFromAffordable(const std::vector<MeshCluster> &clusters,
+                                       const std::vector<unsigned char> &affordable,
+                                       std::vector<unsigned> &out) {
+    out.clear();
+    size_t triangles = 0;
+    for (size_t i = 0; i < clusters.size(); ++i)
+        if (clusterDrawn(clusters[i], affordable)) {
+            out.push_back(unsigned(i));
+            triangles += clusters[i].indexCount / 3u;
+        }
+    return triangles;
+}
+
+/// THE CUT FOR ONE INSTANCE IN ONE VIEW — each group's own distance.
+inline size_t clusterCut(const std::vector<MeshClusterGroup> &groups,
+                         const std::vector<MeshCluster> &clusters, const ClusterCutView &view,
+                         std::vector<unsigned> &out) {
+    std::vector<unsigned char> affordable(groups.size(), 0);
+    for (size_t g = 0; g < groups.size(); ++g)
+        affordable[g] = clusterGroupAffordable(groups[g].error, clusterGroupAllowed(groups[g], view)) ? 1 : 0;
+    return clusterCutFromAffordable(clusters, affordable, out);
+}
+
+/// THE CUT AT ONE ALLOWED ERROR FOR EVERY GROUP (a threshold sweep, and the
+/// comparison with the chain at the same `allowed`).
+inline size_t clusterCutAtAllowed(const std::vector<MeshClusterGroup> &groups,
+                                  const std::vector<MeshCluster> &clusters, float allowed,
+                                  std::vector<unsigned> &out) {
+    std::vector<unsigned char> affordable(groups.size(), 0);
+    for (size_t g = 0; g < groups.size(); ++g)
+        affordable[g] = clusterGroupAffordable(groups[g].error, allowed) ? 1 : 0;
+    return clusterCutFromAffordable(clusters, affordable, out);
+}
+
 /// ONE SURFACE CARD, in the MESH'S OWN SPACE — the engine-facing copy of the
 /// document's `iris::MeshCard` (SURFACE-CACHE-1a).
 ///
@@ -317,6 +452,19 @@ struct MeshData {
     /// The fraction of the mesh's sampled surfels covered by at least one card,
     /// as the generator measured it (occlusion included). 0 with no cards.
     float cardCoverage = 0.0f;
+
+    // ---- ATOM stage 2: the mesh's CLUSTER DAG (see `clusterCut` above) -----
+    //
+    // Built at IMPORT by MeshBake beside the chain; the mirror expands the bake's
+    // meshlet-local form into ONE global index stream, all clusters' triangles
+    // concatenated in cluster order, so a cluster is the contiguous range
+    // [firstIndex, firstIndex + indexCount) of `clusterIndices`. `buildMeshV2`
+    // uploads that stream as one extra index buffer per mesh (the input of stage
+    // 3's cut). All three empty for a mesh with no DAG — every skinned mesh, and
+    // every mesh under 256 triangles, which is one cluster, i.e. level 0.
+    std::vector<unsigned>         clusterIndices;
+    std::vector<MeshCluster>      clusters;
+    std::vector<MeshClusterGroup> clusterGroups;
 
     size_t vertexCount() const { return positions.size() / 3; }
     size_t triangleCount() const { return indices.size() / 3; }
