@@ -19,6 +19,7 @@
 // TLAS build or a compute job recorded last frame keeps reading valid memory.
 #include "EnginePrivate.h"
 #include "GpuScene.h"
+#include "HlmsAtom.h"
 
 #include "Vct/OgreVctMaterial.h"
 #include "Vct/OgreVctVoxelizer.h"
@@ -26,6 +27,9 @@
 
 #include <OgreLogManager.h>
 #include <OgreMesh2.h>
+#include <OgreSubItem.h>
+#include <OgreSubMesh2.h>
+#include <Vao/OgreVertexArrayObject.h>
 #include <Vao/OgreAsyncTicket.h>
 #include <Vao/OgreStagingBuffer.h>
 #include <Vao/OgreUavBufferPacked.h>
@@ -610,6 +614,26 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     // a slot re-staged for any other reason keeps the level it was given.
     if (n.itemSlot != size_t(-1) && n.itemSlot < mRayLevel.size())
         out.ids[3] = mRayLevel[n.itemSlot];
+    // THE RASTER WORDS (see GpuInstance::raster): sub-item 0's PBS material word, and
+    // the tangent's place in the vertex of the mesh's level-0 VAO — submesh 0, like
+    // every other geometry fact this table carries.
+    out.raster[0] = detail::HlmsAtom::kNoMaterialWord;
+    out.raster[1] = 0xFFFFFFFFu;
+    if (item->getNumSubItems()) {
+        const Ogre::SubItem *sub = item->getSubItem(0);
+        out.raster[0] = detail::HlmsAtom::materialWordOf(sub->getDatablock());
+        const Ogre::VertexArrayObjectArray &vaos = sub->getSubMesh()->mVao[Ogre::VpNormal];
+        if (!vaos.empty() && vaos[0]) {
+            size_t posSource = 0u, posOffset = 0u, tanSource = 0u, tanOffset = 0u;
+            const Ogre::VertexElement2 *pos =
+                vaos[0]->findBySemantic(Ogre::VES_POSITION, posSource, posOffset);
+            const Ogre::VertexElement2 *tan =
+                vaos[0]->findBySemantic(Ogre::VES_TANGENT, tanSource, tanOffset);
+            if (pos && tan && tan->mType == Ogre::VET_FLOAT4 && tanSource == posSource &&
+                (tanOffset & 3u) == 0u)
+                out.raster[1] = uint32_t(tanOffset);
+        }
+    }
 }
 
 /// A SEAM THAT CHANGED WHAT THE TABLE SAYS WITHOUT MOVING ANYTHING. The
@@ -988,6 +1012,8 @@ void toPublic(const detail::GpuInstance &in, GpuSceneEntry &out) {
     out.nodeId = in.ids[0];
     out.lightMask = in.ids[2];
     out.rayLevel = in.ids[3];
+    out.pbsMaterialWord = in.raster[0];
+    out.tangentOffset = in.raster[1];
 }
 }  // namespace
 

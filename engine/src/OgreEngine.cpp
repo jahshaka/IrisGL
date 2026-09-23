@@ -4,6 +4,8 @@
 // engine/src/ is the only directory that includes Ogre; the shared declarations
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
+#include "AtomPass.h"
+#include "HlmsAtom.h"
 
 #include <set>
 #include <unistd.h>
@@ -2642,6 +2644,21 @@ void OgreEngine::ensureHlms() {
         mRoot->getHlmsManager()->registerHlms(
             OGRE_NEW Ogre::HlmsPbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
+    // HLMS ATOM (ATOM-S3-PARITY; SPECS/atom/D1 section 1) — the visibility buffer's
+    // material decode, a derived HlmsPbs on the Terra pattern, registered BESIDE
+    // PBS and in the same breath: window -> registerHlms -> scene manager is the
+    // startup-order trap, and this is the registerHlms step. Nothing in the
+    // product draws through it yet (S3-DRAW binds it to the id pass). Its pass provider — the engine's ONE CompositorPassProvider,
+    // multiplexed on customId — is installed here too, before any workspace
+    // definition could name a custom pass.
+    HlmsAtom::getDefaultPaths(mainPath, libPaths);
+    {
+        Ogre::ArchiveVec libs;
+        for (const auto &p : libPaths) libs.push_back(am.load(mMediaDir + p, "FileSystem", true));
+        mRoot->getHlmsManager()->registerHlms(
+            OGRE_NEW HlmsAtom(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
+    }
+    AtomPassProvider::install(mRoot->getCompositorManager2());
     // The pass-buffer listener asks HlmsPbs, on the render thread, for the state
     // of the pass it is building: which PCC owns the env-probe slot (the sky
     // cube's register, SKY-FALLBACK-1). Asking the Hlms itself rather than
@@ -2711,9 +2728,12 @@ void OgreEngine::ensureHlms() {
     // billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
-    // generated shader (and its properties) there. Diagnostic only.
-    if (const char *dbg = std::getenv("JAHSHAKA_HLMS_DEBUG_DIR"))
+    // generated shader (and its properties) there, for EVERY PBS-family host.
+    // Diagnostic only.
+    if (const char *dbg = std::getenv("JAHSHAKA_HLMS_DEBUG_DIR")) {
         mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setDebugOutputPath(true, true, dbg);
+        mRoot->getHlmsManager()->getHlms(HlmsAtom::kType)->setDebugOutputPath(true, true, dbg);
+    }
     // THE CACHE LOAD GOES HERE and nowhere else (SHADER_CACHE_SPEC §4.3 rule 5):
     // after BOTH registerHlms calls — HlmsDiskCache::applyTo needs the Hlms
     // instances to exist — and before registerCommonMaterials(), which parses

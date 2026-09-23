@@ -35,6 +35,10 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuVoxelGather.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomPass.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomPass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuVoxelGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
@@ -394,7 +398,8 @@ file(GLOB_RECURSE _hlms_inputs CONFIGURE_DEPENDS
      "${OGRE_NEXT_SMAA_MATERIALS_DIR}/*"
      "${OGRE_NEXT_VCT_MEDIA_DIR}/*" "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}/*"
      "${OGRE_NEXT_IBL_MEDIA_DIR}/*" "${OGRE_NEXT_IFD_MEDIA_DIR}/*"
-     "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*")
+     "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*"
+     "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Atom/*")
 list(APPEND _hlms_inputs "${OGRE_NEXT_DEBUGPACK_ZIP}")
 # THE ONE VOXEL RADIANCE READER (PHOTON-READER-1). Two plain-GLSL files are the
 # only source of the cone march and the voxel read: the ray jobs include them
@@ -426,6 +431,10 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     # would be parsed alongside its replacement and fail as a duplicate @piece.
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka" "${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka"
+    # HLMS ATOM's data folder and its one library (ATOM-S3-PARITY), wiped first for
+    # the same reason: Hlms/Atom/Any is a library path.
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Hlms/Atom"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Atom" "${JAHSHAKA_MEDIA_DIR}/Hlms/Atom"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelSample
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelSample_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
