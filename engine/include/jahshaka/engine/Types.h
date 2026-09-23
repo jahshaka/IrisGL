@@ -3394,6 +3394,15 @@ struct GiStatus {
     /// ifdFollows = ifdScrolls + ifdReplacements. Reset by a build.
     unsigned long long ifdScrolls = 0;
     unsigned long long ifdReplacements = 0;
+    /// THE FIELD'S ESTIMATOR (PHOTON-FIELD-ROTATE-1): a probe's value is the mean of
+    /// its integrations, each under a fresh random rotation of its ray set, until it
+    /// holds `ifdTargetSamples`; every event (a build, a follow, a light change) owes
+    /// the field `ifdTargetSamples - 1` whole-grid refinements after its own pass, run
+    /// at the update budget (inline when paused), and `ifdRefinesOwed` counts the
+    /// passes not yet finished, the running one included. 0 = converged: the field
+    /// costs nothing until the next event.
+    unsigned ifdTargetSamples = 0;
+    unsigned ifdRefinesOwed = 0;
 
     // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
     // Reflection probes are re-captured only while STALE. These say what the

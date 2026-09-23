@@ -332,20 +332,32 @@ static const Ogre::uint32 kIfdTotalProbes = 8192u;
 // measurement attached, not a default to drift.
 static const Ogre::uint8 kIfdDepthRes  = 12u;
 static const Ogre::uint8 kIfdIrradRes  = 6u;
-// TWO RAYS PER DEPTH TEXEL, MEASURED (PHOTON-WRITER-1 fix round, IFD-RAYS). The
-// probe rays cross the voxels at aperture zero (a cone over-occludes grazing
-// directions), and a ray does not prefilter: over the static direction set (the
-// field fills its directions once, never rotated) a small emitter falls between
-// rays or on one, deterministically. Measured on a one-voxel-thick emissive wall
-// 0.8 m square at four probe spacings, three lateral offsets, against its
-// analytic irradiance (spikes/photon-writer-1/ifd-rays-tan0.txt): the probe's
-// reading over analytic spread 1.84-3.55 at 1 ray, 2.65-3.24 at 2, the same at 4,
-// 2.18-2.25 at 16 (a constant factor of the fixture's units; frame to frame the
-// bytes are identical at every count). 2 beats 1 far past the floor and 4 buys
-// nothing over 2; the step frame's follow costs 2.25 ms against 1.19 at 1 ray
-// (gi.field_scroll, one process each, unlocked clocks). The earlier "flat"
-// reading was taken with the cone, which prefilters - not a witness for rays.
-static const Ogre::uint16 kIfdRaysPerPixel = 2u;
+// THE FIELD'S ESTIMATOR (PHOTON-FIELD-ROTATE-1). Ogre's field settings keep ONE ray
+// per depth texel (their default: 144 rays a probe at depthRes 12) in a spherical-
+// Fibonacci set rotated per integration, every texel integrating every ray (DDGI's
+// estimator), and a probe's value is the MEAN of its integrations until it holds
+// kIfdTargetSamples. (Upstream's per-texel rays over-read a one-voxel emissive wall
+// 1.7x even at 256 rays a texel - the octahedral texels are not equal solid angle -
+// and any FIXED set aliases on top: the Fibonacci set unrotated reads the same wall
+// at 1.52x, integration after integration; the old kIfdRaysPerPixel = 2 paid twice
+// the rays for another aliasing. gi.field_thin_wall, gi.field_alias.)
+//
+// THE TARGET, DERIVED: K = ceil((sigma / 0.05)^2), sigma the relative standard
+// deviation of ONE integration where the field is hardest - a source of about one
+// ray's solid angle (gi.field_alias's one-voxel wall: 0.33 / 0.35 / 0.33 at its three
+// offsets on the GPU, 0.38-0.41 simulated) - so the converged mean's standard error
+// is 5 % there: sigma 0.40 -> 64. An ordinary lit room's probes read 2 % (median) per
+// integration, so everywhere else the field is converged long before K. The cost is
+// time, not frames: K whole-grid passes at the update budget after an event (about
+// 8 K frames at budget 1), a pass skipping every probe already at K.
+static const Ogre::uint32 kIfdTargetSamples = 64u;
+// A LIGHT CHANGE REPLACES (keep 0): the history integrated the OLD light, so the
+// first integration after a change is the probe's value - the latency of the old
+// re-converge (one pass) - and the refinements then average the new light. What the
+// field shows in between is one integration's noise: 2 % median on the leak room
+// (gi.field_alias item 5); keeping k samples would divide that by sqrt(k + 1) at the
+// price of showing the old light at weight k / (k + j) for j more integrations.
+static const Ogre::uint32 kIfdKeepOnChange  = 0u;
 
 // HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
 // 1. The P0 spike's cost table is the argument for converging FAST rather than
@@ -357,6 +369,24 @@ static const Ogre::uint16 kIfdRaysPerPixel = 2u;
 // showing stale bounce for two seconds. Higher budgets scale it linearly, and
 // the batch is rounded UP to a power of two so it always divides the field.
 static const Ogre::uint32 kIfdConvergeFrames = 8u;
+
+// THE FIELD'S REFINEMENTS, RUN NOW (PHOTON-FIELD-ROTATE-1): every whole-grid
+// refinement the field owes after its current work, each in one dispatch. The
+// paused budget's arm of every event (nothing progressive would ever run them); a
+// refinement skips the probes that already hold the target, so after a scroll only
+// the entered planes cost anything.
+static void ifdRefineInline(Ogre::IrradianceField *ifd, Ogre::uint32 totalProbes,
+                            Ogre::RenderSystem *rs)
+{
+    if (!ifd || !ifd->isWorkDone() || !ifd->getRefinesOwed()) return;
+    monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "ifd.refine.inline", rs);
+    unsigned passes = 0;
+    while (ifd->beginOwedRefinement()) {
+        ifd->update(totalProbes);
+        ++passes;
+    }
+    work.setUnits(passes);
+}
 
 
 /// How far this probe's fitted SHAPE reaches past its own AREA (its share of
@@ -896,11 +926,14 @@ void OgreScene::reintegrateFieldAfterInjection() {
         mIfdProbesDone = 0u;
         // Paused budget: the field converges inline (5 ms of GPU).
         if (!mIfdProbesPerFrame) {
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.converge.inline",
-                                     mRoot->getRenderSystem());
-            mIfd->update(mIfdTotalProbes);
-            mIfdProbesDone = mIfdTotalProbes;
-            work.setUnits(mIfdTotalProbes);
+            {
+                monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.converge.inline",
+                                         mRoot->getRenderSystem());
+                mIfd->update(mIfdTotalProbes);
+                mIfdProbesDone = mIfdTotalProbes;
+                work.setUnits(mIfdTotalProbes);
+            }
+            ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
         }
     }}
 
@@ -1104,6 +1137,9 @@ GiStatus OgreScene::giStatus() const {
         st.ifdScrollProbes = mIfdScrolledProbes;
         st.ifdScrolls = mIfdScrolls;
         st.ifdReplacements = mIfdReplacements;
+        st.ifdTargetSamples = mIfd ? unsigned(mIfd->getTargetSamples()) : 0u;
+        st.ifdRefinesOwed   = mIfd ? unsigned(mIfd->getRefinesOwed() +
+                                              (mIfd->isWorkDone() ? 0u : 1u)) : 0u;
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
         st.probeCapturesDeferred  = mProbeCapturesDeferred;
@@ -6325,36 +6361,24 @@ Ogre::uint32 OgreScene::ifdProbesPerFrame(const Ogre::IrradianceFieldSettings &s
     // happen on the paused path.
     if (updateBudget <= 0 || totalProbes == 0u) return 0u;
 
-    // Upstream's dispatch arithmetic, reproduced because the engine must obey
-    // it rather than hope (OgreIrradianceField::update, and spike §4):
-    //     rays        = ppf * depthRes^2 * raysPerPixel
-    //     tpg         = alignToNextMultiple( 128, raysPerIrradiancePixel )
-    //     workGroups  = rays / tpg              <-- INTEGER division
-    // `rays < tpg` therefore dispatches ZERO work groups, which throws inside
-    // HlmsCompute::compileShader and — uncaught, at frame time — terminates the
-    // process. The OGRE_ASSERT_LOW that would have caught it in a debug Ogre is
-    // compiled out of ours. `rays % tpg == 0` is the softer rule (a leftover
-    // silently mis-sizes the dispatch; measured harmless at this pin, obeyed
-    // anyway).
-    const Ogre::uint32 tpg =
-        Ogre::alignToNextMultiple<Ogre::uint32>(128u, settings.getNumRaysPerIrradiancePixel());
-    const Ogre::uint32 raysPerProbe = Ogre::uint32(settings.mDepthProbeResolution) *
-                                      settings.mDepthProbeResolution * settings.mNumRaysPerPixel;
-    if (!raysPerProbe) return 0u;
+    // ONE WORK GROUP PER PROBE (PHOTON-FIELD-ROTATE-1): the generation job's
+    // dispatch is the batch's probe count, so every batch of one or more probes
+    // dispatches (upstream's ray-count arithmetic could dispatch zero groups and
+    // throw at frame time; that floor is gone with it).
+    (void)settings;
 
     // The budget's meaning here: at budget 1 the field re-converges in
     // kIfdConvergeFrames frames, and the cost scales linearly with the dial
     // like every other GI budget. Rounded UP to a power of two so the batch
-    // always divides a power-of-two field exactly — which is what guarantees
-    // the LAST batch is the same size as every other one, and therefore that
-    // the crash floor below holds for every dispatch and not just the first.
+    // always divides a power-of-two field exactly (the last batch is the same
+    // size as every other one). One pass over the field is ONE sample per probe;
+    // the refinements the field owes after it (kIfdTargetSamples) run at the
+    // same rate.
     Ogre::uint64 desired =
         (Ogre::uint64(totalProbes) * Ogre::uint64(updateBudget) + kIfdConvergeFrames - 1u) /
         kIfdConvergeFrames;
     Ogre::uint32 ppf = 1u;
     while (Ogre::uint64(ppf) < desired && ppf < totalProbes) ppf <<= 1u;
-    while (Ogre::uint64(ppf) * raysPerProbe < tpg && ppf < totalProbes) ppf <<= 1u;   // the floor
-    while (ppf < totalProbes && (Ogre::uint64(ppf) * raysPerProbe) % tpg != 0u) ppf <<= 1u;
     if (ppf > totalProbes) ppf = totalProbes;
     return ppf;
 }
@@ -6366,7 +6390,19 @@ void OgreScene::buildIrradianceField() {
 
     JAH_TRY {
         Ogre::IrradianceFieldSettings settings;
-        settings.mNumRaysPerPixel        = kIfdRaysPerPixel;
+        // `JAHSHAKA_GI_FIELD_RAYS` (rays per depth texel), `_SAMPLES` (the target
+        // sample count) and `_STATIC` (no rotation) are MEASUREMENT switches, like
+        // `JAHSHAKA_GI_FIELD_NO_SCROLL`: gi.field_alias drives the arms in one process.
+        if (const char *r = std::getenv("JAHSHAKA_GI_FIELD_RAYS")) {
+            const int n = std::atoi(r);
+            if (n >= 1 && n <= 7) settings.mNumRaysPerPixel = Ogre::uint16(n);   // <= 1024 rays a probe
+        }
+        Ogre::uint32 targetSamples = kIfdTargetSamples;
+        if (const char *k = std::getenv("JAHSHAKA_GI_FIELD_SAMPLES")) {
+            const int n = std::atoi(k);
+            if (n >= 1 && n <= 4096) targetSamples = Ogre::uint32(n);
+        }
+        const bool rotateRays = std::getenv("JAHSHAKA_GI_FIELD_STATIC") == nullptr;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
         // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM — whichever arm
@@ -6409,6 +6445,7 @@ void OgreScene::buildIrradianceField() {
         // atlases for the new settings on its own. Upstream's own instruction
         // for "major changes to VctLighting" is exactly this call.
         if (!mIfd) mIfd = new Ogre::IrradianceField(mRoot, mSceneMgr);
+        mIfd->setIntegrationPolicy(targetSamples, kIfdKeepOnChange, rotateRays);
         mIfd->initialize(settings, origin, size, mVctLighting);
         // WHERE THE FIELD IS, recorded as asked for (the field enlarges it by a
         // probe block per side for itself): the scheduler compares against this
@@ -6422,16 +6459,9 @@ void OgreScene::buildIrradianceField() {
         mIfdTotalProbes    = total;
         mIfdProbesDone     = 0u;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
-        mIfdMinProbes      = 0u;
-        {
-            // The smallest batch that still dispatches at least one work group.
-            const Ogre::uint32 tpg = Ogre::alignToNextMultiple<Ogre::uint32>(
-                128u, settings.getNumRaysPerIrradiancePixel());
-            const Ogre::uint32 raysPerProbe = Ogre::uint32(settings.mDepthProbeResolution) *
-                                              settings.mDepthProbeResolution *
-                                              settings.mNumRaysPerPixel;
-            mIfdMinProbes = raysPerProbe ? Ogre::uint32((tpg + raysPerProbe - 1u) / raysPerProbe) : 1u;
-        }
+        // One work group per probe (PHOTON-FIELD-ROTATE-1): any batch dispatches, so
+        // the old dispatch floor is 1 and nothing reads it.
+        mIfdMinProbes      = 1u;
 
         // CONVERGE NOW, in one dispatch, BEFORE binding. Two reasons and both
         // are load-bearing. (1) A freshly created atlas holds whatever the
@@ -6447,6 +6477,8 @@ void OgreScene::buildIrradianceField() {
         // over the PREVIOUS converged atlas and so has nothing ugly to show.
         mIfd->update(mIfdTotalProbes);
         mIfdProbesDone = mIfdTotalProbes;
+        // ...and at a PAUSED budget the refinements too (nothing would ever run them).
+        if (!mIfdProbesPerFrame) ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
 
         // Our two scalars, and the two probe counts the shader's sky-visibility
         // threshold needs but upstream's own IrradianceField block does not
@@ -6528,27 +6560,24 @@ void OgreScene::updateIrradianceField() {
     // all — which is also what keeps the zero-work-group abort unreachable on
     // this path.
     if (!mIfdProbesPerFrame) return;
-    if (mIfdProbesDone >= mIfdTotalProbes) return;              // converged
+    if (mIfdProbesDone >= mIfdTotalProbes) {
+        // THE FIRST SAMPLE IS EVERYWHERE; THE FIELD REFINES (PHOTON-FIELD-ROTATE-1).
+        // Each whole-grid refinement gives every probe below the target one more
+        // sample under a new ray rotation, at the budget's rate; the field stops
+        // (and costs nothing) once none is owed.
+        JAH_TRY {
+            if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) return;   // converged
+            const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, mIfd->getWorkRemaining());
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "ifd.refine",
+                                     mRoot->getRenderSystem());
+            mIfd->update(batch);
+            work.setUnits(batch);
+        } JAH_CATCH(mError, );
+        return;
+    }
     JAH_TRY {
         const Ogre::uint32 remaining = mIfdTotalProbes - mIfdProbesDone;
         const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, remaining);
-        // THE CRASH FLOOR, checked at the dispatch rather than trusted from the
-        // arithmetic that chose the batch. It cannot fire as things stand — the
-        // batch and the field are both powers of two, so the batch divides the
-        // field and every dispatch is a full batch — and it is here because the
-        // failure it guards is not a glitch but an uncaught throw at frame time
-        // that takes the process with it (spike §4; the guarding assert is
-        // compiled out of our Ogre). Declaring the field converged leaves a few
-        // probes on their previous data, which is wrong pixels; dispatching
-        // would be no pixels at all.
-        if (batch < mIfdMinProbes) {
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: DDGI re-converge stopped " + std::to_string(remaining) +
-                " probes short — a batch of " + std::to_string(batch) +
-                " is below the dispatch floor of " + std::to_string(mIfdMinProbes));
-            mIfdProbesDone = mIfdTotalProbes;
-            return;
-        }
         {
             // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
             // budget's turn, one batch of probes a frame, so `Sweep` is its
@@ -6656,18 +6685,22 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
         // scratch - offset 0, every probe integrated in this frame - exactly
         // once; the window's origin is then cascade 0's own, and the next step
         // scrolls from there.
+        // (setFieldVolume makes the work the whole grid with NO history: every probe
+        // stands somewhere new.)
         mIfd->setFieldVolume(origin, size);
-        mIfd->reset();
         mIfdVolumeOrigin = origin;
         mIfdVolumeSize   = size;
         ++mIfdFollows;
         ++mIfdReplacements;
         pushIfdState(mIfdProbeCounts);                  // the window's offset is 0 again
-        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                 mRoot->getRenderSystem());
-        mIfd->update(mIfdTotalProbes);
-        mIfdProbesDone = mIfdTotalProbes;
-        work.setUnits(mIfdTotalProbes);
+        {
+            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                     mRoot->getRenderSystem());
+            mIfd->update(mIfdTotalProbes);
+            mIfdProbesDone = mIfdTotalProbes;
+            work.setUnits(mIfdTotalProbes);
+        }
+        if (!mIfdProbesPerFrame) ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
     } JAH_CATCH(mError, );
 }
 
@@ -6697,11 +6730,14 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
         mIfd->reset();
         mIfdProbesDone = 0u;
         if (!mIfdProbesPerFrame) {
-            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                     mRoot->getRenderSystem());
-            mIfd->update(mIfdTotalProbes);
-            mIfdProbesDone = mIfdTotalProbes;
-            work.setUnits(mIfdTotalProbes);
+            {
+                monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                         mRoot->getRenderSystem());
+                mIfd->update(mIfdTotalProbes);
+                mIfdProbesDone = mIfdTotalProbes;
+                work.setUnits(mIfdTotalProbes);
+            }
+            ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
         }
         return true;
     }
@@ -6713,15 +6749,18 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
         Ogre::Vector3 target = mIfdVolumeOrigin;
         for (int a = 0; a < 3; ++a) target[a] += float(d[a]) * spacing[a];
         mIfd->setFieldVolume(target, size);
-        mIfd->reset();
         mIfdVolumeOrigin = target;
         ++mIfdFollows;
+        ++mIfdReplacements;     // ifdFollows = ifdScrolls + ifdReplacements, this arm included
         pushIfdState(mIfdProbeCounts);
-        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                 mRoot->getRenderSystem());
-        mIfd->update(mIfdTotalProbes);
-        mIfdProbesDone = mIfdTotalProbes;
-        work.setUnits(mIfdTotalProbes);
+        {
+            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                     mRoot->getRenderSystem());
+            mIfd->update(mIfdTotalProbes);
+            mIfdProbesDone = mIfdTotalProbes;
+            work.setUnits(mIfdTotalProbes);
+        }
+        if (!mIfdProbesPerFrame) ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
         return true;
     }
     // A whole re-integration still running (a settle's, a light's) is restarted
@@ -6730,6 +6769,7 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
     mIfd->scrollWindow(d);
     for (int a = 0; a < 3; ++a) mIfdVolumeOrigin[a] += float(d[a]) * spacing[a];
     ++mIfdFollows;
+    ++mIfdScrolls;              // (never counted before PHOTON-FIELD-ROTATE-1: the status read 0)
     pushIfdState(mIfdProbeCounts);                      // the reader's modulo offset
     {
         // THE STEP FRAME'S WHOLE COST: the entered planes, inline, before any
@@ -6746,6 +6786,9 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
         mIfdProbesDone = 0u;
     } else {
         mIfdProbesDone = mIfdTotalProbes;
+        // The entered planes' refinements (the kept probes hold the target and a
+        // refinement skips them): progressive at the budget, inline when paused.
+        if (!mIfdProbesPerFrame) ifdRefineInline(mIfd, mIfdTotalProbes, mRoot->getRenderSystem());
     }
     return true;
 }
