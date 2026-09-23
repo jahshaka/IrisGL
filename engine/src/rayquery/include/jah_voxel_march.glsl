@@ -89,6 +89,14 @@ const uint JAH_MARCH_SPECULAR = 1u;	///< maxLod 11 per cascade, the mip from the
 const uint JAH_MARCH_SDF = 2u;		///< the specular empty-space skip (a single volume only, as upstream)
 const uint JAH_MARCH_LODSTEP = 4u;	///< the four-cone diffuse set's fixed mip step
 const uint JAH_MARCH_GAP_ALONG_DIR = 8u;	///< the hop's step back is measured along the cone, not along the bias direction
+/// The caller never reads `escapeAlpha` (the bounce job; the field's probe rays, whose
+/// escape is their own composite): the occupancy estimate's six alpha fetches per
+/// anisotropic step are skipped, and `escapeAlpha` comes back equal to `alpha`.
+const uint JAH_MARCH_NO_ESCAPE = 16u;
+/// Stop after the FIRST sample (the parity harness's "the march at zero length":
+/// what the march reads at a point, against the ray hit's read of it). No consumer
+/// passes it.
+const uint JAH_MARCH_ONE_STEP = 32u;
 
 struct JahConeResult
 {
@@ -136,6 +144,7 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 #else
 	bool aniso = false;
 #endif
+	bool oneStepTaken = false;
 	while( alpha < 0.95 &&
 		   abs( nextPosLS - 0.5 ).x <= threshold &&
 		   abs( nextPosLS - 0.5 ).y <= threshold &&
@@ -184,10 +193,13 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 			lodLevel += 1.0;
 		else
 			lodLevel = log2( diameter * resolution );
+		oneStepTaken = true;
+		if( ( flags & JAH_MARCH_ONE_STEP ) != 0u )
+			break;
 	}
 
 #if JAH_VOX_HAS_ANISO
-	if( aniso )
+	if( aniso && !( ( flags & JAH_MARCH_ONE_STEP ) != 0u && oneStepTaken ) )
 	{
 		while( alpha < 0.95 &&
 			   lodLevel < maxLod &&
@@ -204,7 +216,8 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 
 			color += sampleColour.xyz * a;
 			alpha += a * sampleColour.w;
-			escapeAlpha += ( 1.0 - escapeAlpha ) * jahVoxelOccupancy( c, sampleUVW, lodLevel );
+			if( ( flags & JAH_MARCH_NO_ESCAPE ) == 0u )
+				escapeAlpha += ( 1.0 - escapeAlpha ) * jahVoxelOccupancy( c, sampleUVW, lodLevel );
 
 			dist += diameter * 0.5;
 			travelled += diameter * 0.5;
@@ -214,6 +227,8 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 				lodLevel += 1.0;
 			else
 				lodLevel = log2( diameter * resolution );
+			if( ( flags & JAH_MARCH_ONE_STEP ) != 0u )
+				break;
 		}
 	}
 #endif
@@ -221,7 +236,7 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 	JahConeResult result;
 	result.colour = color;
 	result.alpha = alpha;
-	result.escapeAlpha = escapeAlpha;
+	result.escapeAlpha = ( flags & JAH_MARCH_NO_ESCAPE ) != 0u ? alpha : escapeAlpha;
 	result.lodLevel = lodLevel;
 	result.posLS = nextPosLS;
 	result.travelled = travelled;

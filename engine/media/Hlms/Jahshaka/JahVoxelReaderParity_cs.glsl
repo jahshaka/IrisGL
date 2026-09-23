@@ -28,6 +28,7 @@ struct ParityParams
 	vec4 chainFromPrev[14];
 	vec4 cones[256];
 	vec4 counts;
+	vec4 sdf;
 };
 layout( std430, ogre_U0 ) readonly restrict buffer paramsLayout { ParityParams params; };
 layout( std430, ogre_U1 ) writeonly restrict buffer outLayout { vec4 answers[]; };
@@ -53,6 +54,8 @@ layout( local_size_x = @value( threads_per_group_x ),
 #define JAH_VOX_MAXLOD( c ) params.chainInvRes[c].w
 #define JAH_VOX_FROM_PREV_SCALE( c ) params.chainFromPrev[( (c) - 1 ) * 2]
 #define JAH_VOX_FROM_PREV_OFFSET( c ) params.chainFromPrev[( (c) - 1 ) * 2 + 1]
+#define JAH_VOX_SDF_MAXMIP params.sdf.x
+#define JAH_VOX_SDF_FACTOR params.sdf.y
 #define JAH_PARITY_CONE( i ) params.cones[i]
 
 @insertpiece( JahVoxelSample )

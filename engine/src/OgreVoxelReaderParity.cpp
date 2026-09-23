@@ -78,6 +78,7 @@ struct ParityParams {
     float chainFromPrev[14][4] = {};
     float cones[kTexels][4] = {};
     float counts[4] = {};
+    float sdf[4] = {};
 };
 
 void toAnswers(const float *texels, size_t numCones, std::vector<VoxelReaderAnswer> &out) {
@@ -187,6 +188,11 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         params.counts[0] = float(cones.size());
         params.counts[1] = float(numCascades);
         params.counts[2] = aniso ? 1.0f : 0.0f;
+        // The specular empty-space skip's two parameters, at the values
+        // VctLighting's pass buffer gives a 64^3 volume (the harness exercises the
+        // branch; its numbers are not the subject).
+        params.sdf[0] = 7.0f;
+        params.sdf[1] = 16.0f;
 
         // The volumes, per kind then per cascade (the generation job's order).
         const unsigned kinds = aniso ? 4u : 1u;
@@ -252,6 +258,7 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         fp->setNamedConstant("chainFromPrev", &params.chainFromPrev[0][0], 14u, 4u);
         fp->setNamedConstant("cones", &params.cones[0][0], kTexels, 4u);
         fp->setNamedConstant("counts", &params.counts[0], 1u, 4u);
+        fp->setNamedConstant("sdf", &params.sdf[0], 1u, 4u);
 
         target = tm->createTexture("Jahshaka/VoxelReaderParity/Target",
                                    Ogre::GpuPageOutStrategy::Discard,

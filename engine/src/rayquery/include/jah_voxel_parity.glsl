@@ -10,6 +10,7 @@
 //     JAH_PARITY_CONE(i)   vec4: the i-th of four float4s per cone -
 //                          (posLS, tanHalfAngle), (dirLS, flags),
 //                          (biasDirLS, cascade), (lod, 0, 0, 0)
+//     JAH_VOX_SDF_FACTOR, JAH_VOX_SDF_MAXMIP  (the specular empty-space skip)
 //
 // No character of this file may be the Hlms directive mark (the compute half
 // inserts it as the piece JahVoxelParity).
@@ -21,11 +22,11 @@
 ///   [0] the march's colour and alpha
 ///   [1] its escape opacity, its age in cascade 0's units, the cascade it
 ///       stopped in, its age in that cascade's units
-///   [2] the RAY HIT's read at the cone's start (jahVoxelSample - what
-///       jah_rq_hit.glsl calls)
-///   [3] the MARCH's read of the same point, spelled the way the march spells
-///       it (the directional read on its folded coordinate, or the isotropic
-///       slot)
+///   [2] the RAY HIT's read (jahVoxelSample - what jah_rq_hit.glsl calls) at the
+///       point the march's FIRST sample lands on, at the cone's mip
+///   [3] THE MARCH AT ZERO LENGTH: one march step (JAH_MARCH_ONE_STEP) from a
+///       start one march step behind that point - what the march itself reads
+///       there, through its own loops
 vec4 jahParityAnswer( int cone, int part )
 {
 	vec4 c0 = JAH_PARITY_CONE( 4 * cone + 0 );
@@ -34,15 +35,17 @@ vec4 jahParityAnswer( int cone, int part )
 	vec4 c3 = JAH_PARITY_CONE( 4 * cone + 3 );
 	uint flags = uint( c1.w );
 	int cascade = int( c2.w );
-	if( part == 2 )
-		return jahVoxelSample( cascade, c0.xyz, c1.xyz, c3.x );
-	if( part == 3 )
+	if( part >= 2 )
 	{
-#if JAH_VOX_HAS_ANISO
-		if( JAH_VOX_ANISO )
-			return jahVoxelSampleAniso( cascade, jahVoxelAnisoUvw( c0.xyz ), c1.xyz, c3.x );
-#endif
-		return JAH_VOX_SAMPLE_ISO( cascade, c0.xyz, c3.x );
+		// The march's own first-sample arithmetic (jahConeMarchCascade), spelled
+		// the same way so the two reads land on the same bits of position.
+		float step0 = dot( abs( c1.xyz ), JAH_VOX_INVRES( cascade ) );
+		vec3 at = c0.xyz + step0 * c1.xyz;
+		if( part == 2 )
+			return jahVoxelSample( cascade, at, c1.xyz, c3.x );
+		JahConeResult one = jahConeMarchCascade( cascade, c0.xyz, c1.xyz, 0.0, c3.x, 0.0, 0.0,
+												 0.0, JAH_MARCH_ONE_STEP );
+		return vec4( one.colour, one.alpha );
 	}
 	JahConeResult r = jahConeMarch( c0.xyz, c1.xyz, c0.w, c2.xyz, c2.xyz, flags );
 	if( part == 0 )

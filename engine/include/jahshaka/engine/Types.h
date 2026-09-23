@@ -6442,7 +6442,7 @@ struct VoxelReaderCone {
     Vec3     dirLS;                  ///< unit direction
     Vec3     biasDirLS;              ///< the hop's bias direction (zero: a point in free space)
     float    tanHalfAngle = 0.577f;  ///< the diffuse cone set's half angle
-    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 4 lod step, 8 gap along the cone)
+    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 4 lod step, 8 gap along the cone, 16 no escape)
     unsigned cascade = 0u;           ///< which cascade the point reads take
     float    lod = 0.0f;             ///< ...at which mip
 };
@@ -6450,12 +6450,13 @@ struct VoxelReaderCone {
 /// Every answer the reader gives for one cone, as raw floats (compared bit for
 /// bit by the suite): the march's colour/alpha, its escape opacity, its age in
 /// cascade 0's units, the cascade it stopped in and its age there, the ray
-/// hit's read at the cone's start and the march's own read of the same point.
+/// hit's read where the march's first sample lands and the march's own one-step
+/// read of it.
 struct VoxelReaderAnswer {
     float march[4] = {};     ///< colour.rgb, alpha
     float escape[4] = {};    ///< escapeAlpha, travelledC0, lastCascade, travelled
-    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls)
-    float marchRead[4] = {}; ///< the march's spelling of the same read
+    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls) where the march's first sample lands
+    float marchRead[4] = {}; ///< the march at zero length: one march step onto that point
 };
 
 }}  // namespace jahshaka::engine

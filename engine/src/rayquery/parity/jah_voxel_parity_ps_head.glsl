@@ -42,6 +42,7 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 chainFromPrev[14];
 	uniform vec4 cones[256];
 	uniform vec4 counts;	// x = cones, y = cascades, z = anisotropic
+	uniform vec4 sdf;		// x = the SDF skip's max mip, y = its factor
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -60,4 +61,6 @@ out vec4 fragColour;
 #define JAH_VOX_MAXLOD( c ) chainInvRes[c].w
 #define JAH_VOX_FROM_PREV_SCALE( c ) chainFromPrev[( (c) - 1 ) * 2]
 #define JAH_VOX_FROM_PREV_OFFSET( c ) chainFromPrev[( (c) - 1 ) * 2 + 1]
+#define JAH_VOX_SDF_MAXMIP sdf.x
+#define JAH_VOX_SDF_FACTOR sdf.y
 #define JAH_PARITY_CONE( i ) cones[i]
