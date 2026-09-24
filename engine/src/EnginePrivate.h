@@ -546,6 +546,7 @@ constexpr float        kPssmSplitPadding  = 1.0f;
 constexpr float        kPssmSplitBlend    = 0.125f;
 constexpr float        kPssmSplitFade     = 0.313f;
 constexpr Ogre::uint32 kPssmStableSplits  = 2u;
+constexpr float        kPssmConstantBiasScale = 0.3f;   ///< the sun's constant bias x 0.3 (OgreShadow.cpp's table)
 /// The engine's hard ceiling on focused (point/spot) shadow maps, whatever a
 /// host asks for (SHADOW_TOOLING_SPEC D1). The bound is VRAM and shadow passes,
 /// not the pass buffer — a mapped caster costs ~112 B there.

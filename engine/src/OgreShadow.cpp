@@ -268,6 +268,27 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         td->splitFade       = kPssmSplitFade;
         td->numSplits       = numSplits;
         td->numStableSplits = kPssmStableSplits;
+        // THE SUN'S CONSTANT BIAS (PHOTON-RAYS-1 fix round, F3). Upstream leaves
+        // it at HlmsDatablock::mShadowConstantBias 0.01 x this scale 1.0, applied
+        // in WORLD UNITS along the light (ShadowCaster_piece_vs.any: bias x
+        // depthRange.y), then x the split's auto factor 1 + 100 x orthoSize /
+        // shadowFarDistance — 4-18 cm at the splits a 5-30 m view uses, which is
+        // the light the map left under every thin caster (gi.sun_contact's board:
+        // 44 mm at 5.2 m, 157 mm under 5 cm at 15 m, 165-185 mm at 30 m). A D32
+        // atlas does not need it; the slope is the receiver's normal-offset bias's
+        // to carry (168 texels x its auto factor, untouched).
+        //   scale  board leak 5.2 / 15 / 30 m    acne, selftest fixture B's glossy
+        //                                         plane under a 52-degree sun
+        //   1.0    6.0 / 23.6 / 25-28 px          none (the old picture)
+        //   0.5    1.5 /  7.6-8.1 / 12-13 px      38 px moved, 5 > 4 codes
+        //   0.3    0.0 /  1.3-1.7 /  6.1-6.6 px   58 px moved, 9 > 4 codes (edges)
+        //   0.2    —                              1,150 px moved, 23 > 4: faint rings
+        //   0.1    0.0 /  0.0 / 0.0-0.2 px        3,428 px moved, 333 > 4: visible acne
+        // (the matte floor and the sphere lattice show no acne down to 0.01; the
+        // glossy plane is the bound). 0.3 = the lowest value without visible acne.
+        // Directional (PSSM) maps only: the focused point/spot maps were not
+        // measured and keep upstream's.
+        if (technique == Ogre::SHADOWMAP_PSSM) td->constantBiasScale = kPssmConstantBiasScale;
     };
     for (unsigned j = 0u; j < 3u; ++j)
         addMap(0u, j, plan.pssm[j], Ogre::SHADOWMAP_PSSM, 3u);
