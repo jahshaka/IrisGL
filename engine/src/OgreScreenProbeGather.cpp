@@ -17,8 +17,13 @@
 //                            arguments; PHOTON-GATHER-1b).
 //   rq_probe_integrate.comp  one thread per pixel: the four grid probes and the
 //                            cell's adaptive twin, weighted by the plane test,
-//                            each SH evaluated at the pixel's own normal, into
+//                            each SH evaluated at the pixel's own normal, then
+//                            the pixel HISTORY (PHOTON-GATHER-1c: reprojected,
+//                            validated, the count-in-history mean), into
 //                            `jahProbeIrradiance`.
+//
+// WHAT IS PING-PONGED (PHOTON-GATHER-1c): the pixel history's two pairs —
+// `View::flip` names this frame's half of each.
 //
 // THE BOUNDARY THIS FILE KEEPS. It speaks Vulkan and Ogre and knows nothing
 // about the scene graph: everything it needs about the frame arrives in
@@ -48,6 +53,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -74,8 +80,8 @@ constexpr unsigned kQueriesPerFrame = 8u;
 
 constexpr unsigned kPlaceBindings = 6u;
 constexpr unsigned kTraceBindings = 9u;
-constexpr unsigned kFilterBindings = 4u;
-constexpr unsigned kIntegrateBindings = 5u;
+constexpr unsigned kFilterBindings = 3u;
+constexpr unsigned kIntegrateBindings = 9u;
 
 /// One probe's record: ten vec4s — position, normal, the irradiance at its own
 /// normal and the SH9 (27 floats in seven vec4s; see JahProbeRecord in the
@@ -109,7 +115,34 @@ struct GatherParams {
     float voxelOrigin[kGatherMaxCascades][4] = {};
     float voxelInvSize[kGatherMaxCascades][4] = {};
     float knobs4[4] = {};
+    float prevCamPos[4] = {};
+    float prevRayTL[4] = {};
+    float prevRayRight[4] = {};
+    float prevRayDown[4] = {};
+    float prevFwd[4] = {};
+    float knobs5[4] = {};
 };
+
+/// THE PIXEL HISTORY'S BLEND FLOOR (PHOTON-GATHER-1c item 1): the smallest
+/// weight a new frame takes once the running mean has that many frames in it —
+/// a new frame's share is 1/n until n reaches it, then 1/kHistoryFrames. It is
+/// the trade between stillness and lag, both measured by gi.gather_stable on the
+/// Showroom-2-shaped room: at 10 (Lumen's own default for its screen-probe
+/// history) a still view steps by at most 1/255 at every sampled pixel after the
+/// warm-up (9/255 with each frame alone), and a lamp switched off is within one
+/// code of its settled picture 16 frames later (0 with each frame alone).
+constexpr float kHistoryFrames = 10.0f;
+
+/// Does a tuning change CHANGE THE ESTIMATOR? Every field but the readback (a
+/// test door that only copies the answer out). A changed estimator is a new
+/// history: its first frame takes its own estimate whole, so an A/B across a
+/// tuning push is never an average of its two arms.
+bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
+    return a.probeStride == b.probeStride && a.octRes == b.octRes && a.rayLength == b.rayLength &&
+           a.adaptiveCap == b.adaptiveCap && a.freezeFrameIndex == b.freezeFrameIndex &&
+           a.jitterOff == b.jitterOff && a.farQueryOff == b.farQueryOff &&
+           a.shBands == b.shBands && a.filterOff == b.filterOff;
+}
 
 /// THE ADAPTIVE TEST'S TWO TOLERANCES, and why they are constants rather than
 /// rows. `kPlaneTolerance` is how far a cell's pixel may lie off its probe's
@@ -210,7 +243,6 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 records
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 2 the raw atlas
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 3 the filtered atlas
         };
         if (!makeLayout(kFilterBindings, t, nullptr, mFilterLayout, "filter")) return false;
     }
@@ -221,6 +253,10 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 normals
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 depth
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 irradiance
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 last frame's history
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 this frame's history
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 last frame's history geometry
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 8 this frame's history geometry
         };
         if (!makeLayout(kIntegrateBindings, t, nullptr, mIntegrateLayout, "integrate")) return false;
     }
@@ -273,9 +309,9 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
 
     // PER VIEW AND RING SLOT, four sets: place (1 uniform, 3 storage buffers,
     // 2 sampled), trace (1 AS, 1 uniform, 1 storage buffer, 1 storage image,
-    // 4 x cascades + 1 sampled), filter (1 uniform, 1 storage buffer, 2 storage
-    // images), integrate (1 uniform, 1 storage buffer, 2 sampled, 1 storage
-    // image).
+    // 4 x cascades + 1 sampled), filter (1 uniform, 1 storage buffer, 1 storage
+    // image), integrate (1 uniform, 1 storage buffer, 2 sampled, 5 storage
+    // images).
     const unsigned groups = kMaxTimedViews * kRing;
     const unsigned sets = groups * 4u;
     VkDescriptorPoolSize sizes[4] = {};
@@ -286,7 +322,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     sizes[2].descriptorCount = groups * 6u;
     sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[3].descriptorCount = groups * 4u;
+    sizes[3].descriptorCount = groups * 7u;
     VkDescriptorPoolSize sampled{};
     sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sampled.descriptorCount = groups * (2u + 4u * kGatherMaxCascades + 1u + 2u);
@@ -348,13 +384,19 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, VK_FORMAT_R16G16B16A16_SFLOAT, v.atlas,
                                v.atlasMemory, v.atlasView, err))
         return false;
-    if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, VK_FORMAT_R16G16B16A16_SFLOAT, v.filtered,
-                               v.filteredMemory, v.filteredView, err))
-        return false;
     if (!mHost.gatherMakeBuffer(VkDeviceSize(total) * kRecordBytes,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, v.records,
                                 v.recordsMemory, nullptr, err))
         return false;
+    for (unsigned k = 0; k < 2u; ++k) {
+        // THE PIXEL HISTORY PAIR at the target's resolution (rq_probe_integrate.comp).
+        if (!mHost.gatherMakeImage(in.width, in.height, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                   v.history[k], v.historyMemory[k], v.historyView[k], err))
+            return false;
+        if (!mHost.gatherMakeImage(in.width, in.height, VK_FORMAT_R32_UINT, v.historyGeom[k],
+                                   v.historyGeomMemory[k], v.historyGeomView[k], err))
+            return false;
+    }
     if (!mHost.gatherMakeBuffer(64u,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -391,11 +433,15 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     v.irradiance = t;
 
-    v.vramBytes = 2ull * v.atlasW * v.atlasH * 8ull +
+    // The atlas, the records, the irradiance target (8 bytes a pixel) and the
+    // pixel history's two pairs (8 + 4 bytes a pixel each).
+    v.vramBytes = 1ull * v.atlasW * v.atlasH * 8ull +
                   (unsigned long long)total * kRecordBytes +
-                  (unsigned long long)in.width * in.height * 8ull;
+                  (unsigned long long)in.width * in.height * (8ull + 2ull * 12ull);
     v.targetsReady = true;
     v.atlasNeedsClear = true;
+    v.age = 0u;
+    v.flip = 0u;
     return true;
 }
 
@@ -412,6 +458,17 @@ void ScreenProbeGather::drop(View &v) {
         v.paramsMapped[i] = nullptr;
     }
     mHost.gatherRetireBuffer(v.records, v.recordsMemory);
+    for (unsigned k = 0; k < 2u; ++k) {
+        mHost.gatherRetireImage(v.history[k], v.historyMemory[k], v.historyView[k]);
+        v.history[k] = VK_NULL_HANDLE;
+        v.historyMemory[k] = VK_NULL_HANDLE;
+        v.historyView[k] = VK_NULL_HANDLE;
+        mHost.gatherRetireImage(v.historyGeom[k], v.historyGeomMemory[k], v.historyGeomView[k]);
+        v.historyGeom[k] = VK_NULL_HANDLE;
+        v.historyGeomMemory[k] = VK_NULL_HANDLE;
+        v.historyGeomView[k] = VK_NULL_HANDLE;
+    }
+    v.age = 0u;
     mHost.gatherRetireBuffer(v.counter, v.counterMemory);
     mHost.gatherRetireBuffer(v.args, v.argsMemory);
     mHost.gatherRetireBuffer(v.readback, v.readbackMemory);
@@ -428,10 +485,6 @@ void ScreenProbeGather::drop(View &v) {
     v.atlas = VK_NULL_HANDLE;
     v.atlasMemory = VK_NULL_HANDLE;
     v.atlasView = VK_NULL_HANDLE;
-    mHost.gatherRetireImage(v.filtered, v.filteredMemory, v.filteredView);
-    v.filtered = VK_NULL_HANDLE;
-    v.filteredMemory = VK_NULL_HANDLE;
-    v.filteredView = VK_NULL_HANDLE;
     if (v.irradiance) mHost.gatherRetireTexture(v.irradiance);
     v.irradiance = nullptr;
     if (v.hasQueryBase) mQuerySlots &= ~(uint32_t(1) << v.querySlot);
@@ -517,24 +570,29 @@ void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
     // UNDEFINED -> GENERAL and zeroed. A probe block of zero radiance at a
     // distance of zero is what an untraced probe reads as, which is what the
     // integrate hands back to the pixel path.
-    // Both atlases: the raw one and the filtered one.
-    VkImageMemoryBarrier b[2] = {};
-    for (int i = 0; i < 2; ++i) {
+    // Every image: the atlas and both history pairs (a zero history word is "no
+    // surface", which every distance test rejects — though nothing reads them
+    // before the view's age says so).
+    const VkImage images[5] = { v.atlas, v.history[0], v.history[1], v.historyGeom[0],
+                                v.historyGeom[1] };
+    VkImageMemoryBarrier b[5] = {};
+    for (int i = 0; i < 5; ++i) {
         b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
         b[i].srcQueueFamilyIndex = b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b[i].image = i == 0 ? v.atlas : v.filtered;
+        b[i].image = images[i];
         b[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         b[i].subresourceRange.levelCount = 1;
         b[i].subresourceRange.layerCount = 1;
         b[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 2, b);
+                         0, nullptr, 0, nullptr, 5, b);
     VkClearColorValue zero{};
-    vkCmdClearColorImage(cmd, v.atlas, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &b[0].subresourceRange);
-    vkCmdClearColorImage(cmd, v.filtered, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &b[1].subresourceRange);
+    for (int i = 0; i < 5; ++i)
+        vkCmdClearColorImage(cmd, images[i], VK_IMAGE_LAYOUT_GENERAL, &zero, 1,
+                             &b[i].subresourceRange);
     VkMemoryBarrier toCompute{};
     toCompute.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     toCompute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -637,6 +695,8 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, GatherStatus &
         out.filterMs = v.filterMs;
         out.integrateMs = v.integrateMs;
         out.cpuMs = v.cpuMs;
+        out.temporal = v.lastTemporal;
+        out.historyAge = v.age;
         out.irradiance = v.irrHost;
         out.irradianceW = v.irrHost.empty() ? 0u : v.w;
         out.irradianceH = v.irrHost.empty() ? 0u : v.h;
@@ -687,6 +747,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     octRes = std::min(std::max(octRes, 1u), kGatherOctResMax);
 
     View &v = mViews[key];
+    // A SCENE BIND IS A NEW VIEW for the histories: nothing in them is this
+    // scene's.
+    if (v.scene != in.scene) v.age = 0u;
     v.scene = in.scene;
     v.sceneMgr = in.sceneMgr;
     readPending(v);
@@ -719,6 +782,30 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         return;
     }
     mLastError.clear();
+
+    // ---- THE PIXEL HISTORY'S INPUTS (PHOTON-GATHER-1c) -----------------------
+    // THE MEASUREMENT LEVER, read at every frame so a suite drives both arms in
+    // one process: each frame's estimate alone, no history read or written.
+    const bool temporal = std::getenv("JAHSHAKA_GATHER_NO_TEMPORAL") == nullptr;
+    // The history restarts when it would otherwise average two estimators: the
+    // history switched back on (its images were not written meanwhile), or a
+    // tuning field that changes the estimator (an A/B arm).
+    if (temporal && !v.temporalLast) v.age = 0u;
+    if (!sameEstimator(in.tuning, v.tuningLast)) v.age = 0u;
+    v.temporalLast = temporal;
+    v.tuningLast = in.tuning;
+    if (v.age == 0u) {
+        // Nothing reads it at age 0; this frame's basis keeps the block finite.
+        const auto put3w = [](float dst[4], const float src[3], float w) {
+            dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = w;
+        };
+        std::memcpy(v.prevCamPos, in.camPos, sizeof(v.prevCamPos));
+        put3w(v.prevRayTL, in.rayTL, 0.0f);
+        put3w(v.prevRayRight, in.rayRight, 0.0f);
+        put3w(v.prevRayDown, in.rayDown, 0.0f);
+        put3w(v.prevFwd, in.fwd, 0.0f);
+    }
+    const unsigned cur = v.flip & 1u, prev = cur ^ 1u;   // the history pair's halves
 
     const unsigned ring = v.frame % kRing;
     if (!v.params[ring] &&
@@ -852,6 +939,16 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
     pp.knobs4[1] = kWeightFloor;
     pp.knobs4[2] = in.tuning.filterOff ? 0.0f : 1.0f;
+    // PHOTON-GATHER-1c: the previous camera, the view's age, the history's floor,
+    // the lever.
+    std::memcpy(pp.prevCamPos, v.prevCamPos, sizeof(pp.prevCamPos));
+    std::memcpy(pp.prevRayTL, v.prevRayTL, sizeof(pp.prevRayTL));
+    std::memcpy(pp.prevRayRight, v.prevRayRight, sizeof(pp.prevRayRight));
+    std::memcpy(pp.prevRayDown, v.prevRayDown, sizeof(pp.prevRayDown));
+    std::memcpy(pp.prevFwd, v.prevFwd, sizeof(pp.prevFwd));
+    pp.knobs5[0] = float(std::min(v.age, 65535u));
+    pp.knobs5[1] = 1.0f / kHistoryFrames;
+    pp.knobs5[2] = temporal ? 1.0f : 0.0f;
     std::memcpy(v.paramsMapped[ring], &pp, sizeof(pp));
 
     // ---- THE DESCRIPTOR SETS, rewritten every frame ------------------------
@@ -962,11 +1059,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
 
     {   // the filter set
-        VkDescriptorImageInfo filterRaw{}, filterOut{};
+        VkDescriptorImageInfo filterRaw{};
         filterRaw.imageView = v.atlasView;
         filterRaw.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        filterOut.imageView = v.filteredView;
-        filterOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet w[kFilterBindings] = {};
         for (unsigned i = 0; i < kFilterBindings; ++i) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -980,8 +1075,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[1].pBufferInfo = &recordsInfo;
         w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[2].pImageInfo = &filterRaw;
-        w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        w[3].pImageInfo = &filterOut;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kFilterBindings, w, 0, nullptr);
     }
 
@@ -1015,6 +1108,15 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[3].pImageInfo = &depth;
         w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[4].pImageInfo = &irradianceStore;
+        VkDescriptorImageInfo hist[4] = {};
+        const VkImageView histViews[4] = { v.historyView[prev], v.historyView[cur],
+                                           v.historyGeomView[prev], v.historyGeomView[cur] };
+        for (unsigned k = 0; k < 4u; ++k) {
+            hist[k].imageView = histViews[k];
+            hist[k].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            w[5 + k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[5 + k].pImageInfo = &hist[k];
+        }
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 
@@ -1270,6 +1372,18 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // and left unbound is an undefined descriptor. The registration is
     // PASS-SCOPED and `releaseBinding` takes it away when the pass ends.
     detail::FogHlmsListener::setProbeGather(in.sceneMgr, v.irradiance);
+    // ...AND THIS FRAME BECOMES THE PREVIOUS ONE: its camera, its half of each
+    // pair, one more frame of age.
+    std::memcpy(v.prevCamPos, in.camPos, sizeof(v.prevCamPos));
+    for (int i = 0; i < 3; ++i) {
+        v.prevRayTL[i] = in.rayTL[i];
+        v.prevRayRight[i] = in.rayRight[i];
+        v.prevRayDown[i] = in.rayDown[i];
+        v.prevFwd[i] = in.fwd[i];
+    }
+    v.flip ^= 1u;
+    ++v.age;
+    v.lastTemporal = temporal;
     v.cpuMs = float(msSince(cpuStart));
     ++v.frame;
 }

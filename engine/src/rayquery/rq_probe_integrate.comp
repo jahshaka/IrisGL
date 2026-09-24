@@ -26,6 +26,60 @@
 // where none did. A pixel gets exactly ONE diffuse-GI term in every regime.
 //
 // DETERMINISM: the five taps are read and summed in ONE FIXED ORDER.
+//
+// THE PIXEL HISTORY (PHOTON-GATHER-1c item 1; C2 design section 2). The answer
+// above is one frame's estimate — 64 jittered rays a probe, a jittered probe a
+// cell — and a pixel's irradiance is a quantity of its SURFACE POINT alone: the
+// integrand E(x, n) = INTEGRAL L cos has no view vector in it, so the value at a
+// world point does not change when the camera does. That is what makes a
+// temporal mean at pixel resolution both possible and cheap: last frame's mean
+// at THIS surface point is found through the previous camera
+// (jah_reproject.glsl, rq_reflect.comp's arithmetic, one text), VALIDATED as
+// the same surface — its stored distance within the 5 % test AND its stored
+// normal within the gather's own same-surface tolerance (p.plane.y, the plane
+// test's) — and blended with this frame's estimate by the COUNT kept in the
+// history (a true running mean while young, then a floor so it follows a
+// changing scene). NEVER A NEIGHBOURHOOD CLAMP: a clamp to this frame's local
+// range is a statement that the history is WRONG wherever it disagrees with
+// one noisy frame, which throws away exactly the averaging the history exists
+// for; the surface tests are the only rejection.
+//
+// WHAT THE HISTORY HOLDS, per pixel, in two ping-ponged pairs (a pixel reads the
+// mean at its reprojected coordinate while its neighbours write theirs — one
+// image would make that a race):
+//   radiance  rgba16f   rgb = the mean of (E/pi x coverage), a = the mean
+//                       COVERAGE — PREMULTIPLIED, so a pixel a probe answers on
+//                       some frames and not others (the jittered probes, a
+//                       plane test at its tolerance) holds the answered frames'
+//                       mean irradiance at the FRACTION of frames that answered,
+//                       and hands the rest to the fallback smoothly instead of
+//                       flickering between the two estimators frame by frame;
+//                       and a pixel no probe answers any more fades to the
+//                       fallback at the history's own rate.
+//   geometry  r32ui     the surface's view distance (half), its normal
+//                       (octahedral, 5 + 5 bits — the test is at 25 degrees)
+//                       and the count (6 bits).
+// THE BUILDER'S NOTES (C2 design, section 2): the history is in IRRADIANCE
+// space at the pixel — the atlas' re-weighting (note a) is inside the unbiased
+// quadrature the SH was projected with, the atlas' hit distances (note b) never
+// enter it (its distance is the SURFACE's), and the SH anchor (note c) is
+// evaluated before it: the history averages E/pi, never coefficients.
+//
+// RULE 5 (PAN-SMEAR-1), point by point. (1) A pixel new to the screen — off the
+// previous picture, behind the previous camera, reprojected onto a texel that
+// held no surface — restarts its mean from this frame's estimate at FULL
+// weight: there is no warm-up fade anywhere in this history (the ray tier's
+// eight-frame fade exists because one GGX ray is not an estimate of a lobe; a
+// gather pixel's first frame is a 9-probe, 576-ray filtered estimate), so no
+// band can form on the side a pan turns toward. (2) The VIEW'S AGE (p.knobs5.x)
+// decides whether the previous images hold anything at all — a first frame, a
+// resize, a scene bind never read them. (3) "What the ray reached": a
+// reflection's history must validate what it REFLECTS because the reflected
+// point moves with the eye; a diffuse pixel's hemisphere does not depend on the
+// eye, so the SURFACE test is the whole validation — the one view-dependent
+// input left (the camera-centred cascades that shade a hit) moves by a cascade
+// step, which is exactly what a temporal mean is for (gi.gather_motion measures
+// the truck and the yaw).
 #extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
@@ -37,6 +91,51 @@ layout( std430, set = 0, binding = 1 ) readonly buffer Records { JahProbeRecord 
 layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
 layout( set = 0, binding = 3 ) uniform sampler2D sceneDepth;
 layout( rgba16f, set = 0, binding = 4 ) uniform image2D probeIrradiance;
+/// THE PIXEL HISTORY, ping-ponged (see the header): the previous frame's pair,
+/// read at the reprojected coordinate, and this frame's, written at this pixel.
+layout( rgba16f, set = 0, binding = 5 ) uniform readonly image2D historyPrev;
+layout( rgba16f, set = 0, binding = 6 ) uniform writeonly image2D historyCur;
+layout( r32ui, set = 0, binding = 7 ) uniform readonly uimage2D historyGeomPrev;
+layout( r32ui, set = 0, binding = 8 ) uniform writeonly uimage2D historyGeomCur;
+
+#include "jah_reproject.glsl"
+
+/// The history's count saturates here (6 bits); the blend reads it only up to
+/// 1 / the floor, which is far below.
+const uint kHistoryCountMax = 63u;
+
+/// THE HISTORY'S GEOMETRY WORD: the view distance as a half (its 11-bit
+/// mantissa is 0.05 % — a hundred times finer than the 5 % test), the normal
+/// as an octahedral pair at 5 bits each (about 3 degrees; the test is at 25),
+/// and the count. Zero is "no surface here", which the distance test rejects.
+vec2 octEncode( vec3 n )
+{
+	vec2 o = n.xy / max( abs( n.x ) + abs( n.y ) + abs( n.z ), 1e-6 );
+	if( n.z < 0.0 )
+		o = ( 1.0 - abs( o.yx ) ) * vec2( o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0 );
+	return o;
+}
+vec3 octDecode( vec2 o )
+{
+	vec3 n = vec3( o, 1.0 - abs( o.x ) - abs( o.y ) );
+	if( n.z < 0.0 )
+		n.xy = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 );
+	return normalize( n );
+}
+uint packGeom( float dist, vec3 n, uint count )
+{
+	const uint d = packHalf2x16( vec2( dist, 0.0 ) ) & 0xFFFFu;
+	const uvec2 q = uvec2( clamp( round( ( octEncode( n ) * 0.5 + 0.5 ) * 31.0 ), vec2( 0.0 ),
+								  vec2( 31.0 ) ) );
+	return d | ( q.x << 16u ) | ( q.y << 21u ) | ( min( count, kHistoryCountMax ) << 26u );
+}
+void unpackGeom( uint g, out float dist, out vec3 n, out uint count )
+{
+	dist = unpackHalf2x16( g & 0xFFFFu ).x;
+	n = octDecode( vec2( float( ( g >> 16u ) & 31u ), float( ( g >> 21u ) & 31u ) ) / 31.0 * 2.0 -
+				   1.0 );
+	count = g >> 26u;
+}
 
 /// E/pi of probe `i` at the unit normal n, reading only the vec4s of the SH
 /// the bands need straight from the buffer (4 bands = three vec4, 9 = seven):
@@ -94,11 +193,18 @@ void main()
 			pixelValid = finite3( pixelWorld ) && finite3( pixelNormal ) && finite1( pixelDist );
 		}
 	}
+	const bool temporal = p.knobs5.z > 0.5;
 	if( !pixelValid )
 	{
 		// The sky, or a pixel the prepass never drew. No probe answers for it —
-		// and nothing should: it has no hemisphere.
+		// and nothing should: it has no hemisphere. Its history is "no surface"
+		// (a zero word fails every distance test).
 		imageStore( probeIrradiance, pix, vec4( 0.0 ) );
+		if( temporal )
+		{
+			imageStore( historyCur, pix, vec4( 0.0 ) );
+			imageStore( historyGeomCur, pix, uvec4( 0u ) );
+		}
 		return;
 	}
 
@@ -155,5 +261,60 @@ void main()
 	vec4 answer = vec4( 0.0 );
 	if( wsum >= weightFloor )
 		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( 1024.0 ) ), 1.0 );
-	imageStore( probeIrradiance, pix, answer );
+	if( !temporal )
+	{
+		// THE MEASUREMENT LEVER (JAHSHAKA_GATHER_NO_TEMPORAL): this frame's
+		// estimate alone, and no history is read or written.
+		imageStore( probeIrradiance, pix, answer );
+		return;
+	}
+
+	// ---- THE PIXEL HISTORY (see the header) ---------------------------------
+	vec4 prev = vec4( 0.0 );
+	uint prevCount = 0u;
+	if( p.knobs5.x >= 1.0 )
+	{
+		vec2 was;
+		float z;
+		if( jahReproject( pixelWorld, p.prevCamPos.xyz, p.prevCamPos.w, p.prevRayTL.xyz,
+						  p.prevRayRight.xyz, p.prevRayDown.xyz, p.prevFwd.xyz, was, z ) == 0 )
+		{
+			const ivec2 pc = clamp( ivec2( was * vec2( full ) ), ivec2( 0 ), full - 1 );
+			float wasDist;
+			vec3 wasNormal;
+			uint wasCount;
+			unpackGeom( imageLoad( historyGeomPrev, pc ).x, wasDist, wasNormal, wasCount );
+			// THE SAME SURFACE: the same distance (the 5 % test) AND the same
+			// facing (the gather's own same-surface tolerance, the plane test's
+			// normal dot). A corner or a crease reprojects onto a surface at the
+			// same distance facing elsewhere, which the distance alone would pass.
+			if( wasCount > 0u && jahSameDistance( wasDist, z ) &&
+				dot( wasNormal, pixelNormal ) >= p.plane.y )
+			{
+				const vec4 h = imageLoad( historyPrev, pc );
+				if( finite3( h.xyz ) && finite1( h.w ) )
+				{
+					prev = clamp( h, vec4( 0.0 ), vec4( 1024.0, 1024.0, 1024.0, 1.0 ) );
+					prevCount = wasCount;
+				}
+			}
+		}
+	}
+	// THE COUNT-IN-HISTORY IDIOM (rq_reflect.comp): 1/n while the mean is young
+	// — a true running mean, the fastest unbiased convergence — with a floor so
+	// it keeps following a scene that changes. A pixel with no usable history
+	// (count 0) takes this frame's estimate whole.
+	const float floorBlend = clamp( p.knobs5.y, 1.0 / float( kHistoryCountMax ), 1.0 );
+	const float blend = prevCount > 0u ? max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend )
+									   : 1.0;
+	const vec4 mean = mix( prev, vec4( answer.xyz * answer.w, answer.w ), blend );
+	imageStore( historyCur, pix, mean );
+	imageStore( historyGeomCur, pix, uvec4( packGeom( pixelDist, pixelNormal, prevCount + 1u ) ) );
+	// The pixel's answer: the answered frames' mean irradiance at the fraction
+	// of frames that answered (the piece and the field's cage are both linear in
+	// the coverage, so a fraction hands that share to the fallback).
+	vec4 outV = vec4( 0.0 );
+	if( mean.w > 1e-3 )
+		outV = vec4( clamp( mean.xyz / mean.w, vec3( 0.0 ), vec3( 1024.0 ) ), mean.w );
+	imageStore( probeIrradiance, pix, outV );
 }

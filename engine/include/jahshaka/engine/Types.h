@@ -3170,6 +3170,14 @@ struct GatherTuning {
     bool     filterOff = false;
 };
 
+// THE PIXEL HISTORY'S MEASUREMENT LEVER (PHOTON-GATHER-1c item 3) is an
+// ENVIRONMENT variable, not a tuning field: `JAHSHAKA_GATHER_NO_TEMPORAL` set
+// makes every gathering view publish each frame's estimate alone (no history
+// read or written), read at every frame so a suite drives both arms in one
+// process (setenv / unsetenv). It is the frozen-frame rule's pair: a frozen frame
+// index makes consecutive frames the same estimate; this makes each frame's
+// picture that frame's estimate.
+
 /// What the gather did on the last drawn frame of this scene.
 struct GatherStatus {
     /// The scene's row resolved ON: `GiParams::gather` is On and this machine
@@ -3206,6 +3214,12 @@ struct GatherStatus {
     float cpuMs = -1.0f;
     /// ...and the FILTER in probe space (PHOTON-GATHER-1b), its own dispatch.
     float filterMs = -1.0f;
+    /// THE PIXEL HISTORY (PHOTON-GATHER-1c): whether it ran on the last frame
+    /// (false under `JAHSHAKA_GATHER_NO_TEMPORAL`) and the view's age
+    /// (consecutive frames it has been written; 0 on a first frame, a resize, a
+    /// scene bind, a tuning change).
+    bool temporal = false;
+    unsigned historyAge = 0u;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's
     /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
     /// mean radiance over the cosine-weighted hemisphere of the pixel's own

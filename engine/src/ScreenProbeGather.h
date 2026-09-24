@@ -15,8 +15,8 @@
 // buffer, the black stand-ins every empty descriptor takes. The gather owns an
 // ALGORITHM: where probes go, what they trace, what an atlas holds, what a
 // pixel reads. Those are two lifetimes and two rates of change — phases 2 and 3
-// add a filter, an SH record, history pairs and importance sampling, none of
-// which the tier has an opinion about — so they are two objects, and what
+// added a filter, an SH record and a pixel history, none of which the tier has
+// an opinion about — so they are two objects, and what
 // passes between them is this file: a small service interface (`Host`) and a
 // per-frame input record the tier fills from the scene it is friends with.
 //
@@ -24,10 +24,13 @@
 // in probe space (the 3x3 neighbourhood, weighted by plane and hit-distance
 // agreement), projected onto SH9 per probe, and every pixel reads its four grid
 // probes and its cell's adaptive twin weighted by the plane test, each
-// evaluated at the pixel's own normal. WHAT IS STILL ABSENT: temporal
-// accumulation and importance sampling (phase 3, PHOTON-GATHER-1c), the card
-// read at the hit, stereo — so the row stays `GiToggle::Auto` = OFF at every
-// tier until PHOTON-GATHER-1d.
+// evaluated at the pixel's own normal. SINCE PHASE 3 (PHOTON-GATHER-1c): a
+// full-resolution pixel HISTORY behind the integrate (reprojected through the
+// previous camera, validated on distance and normal, the count-in-history
+// running mean). The trace stays the stratified sampler: reprojected importance
+// sampling was measured and refused (spikes/photon-gather-1c). WHAT IS STILL
+// ABSENT: the card read at the hit, stereo — so the row stays `GiToggle::Auto` =
+// OFF at every tier until PHOTON-GATHER-1d.
 #pragma once
 
 #include "jahshaka/engine/Types.h"
@@ -214,11 +217,30 @@ private:
         VkImage atlas = VK_NULL_HANDLE;
         VkDeviceMemory atlasMemory = VK_NULL_HANDLE;
         VkImageView atlasView = VK_NULL_HANDLE;
-        /// THE FILTERED ATLAS (PHOTON-GATHER-1b): the same layout as the raw
-        /// one, written by the filter; the raw one is kept for phase 3.
-        VkImage filtered = VK_NULL_HANDLE;
-        VkDeviceMemory filteredMemory = VK_NULL_HANDLE;
-        VkImageView filteredView = VK_NULL_HANDLE;
+        /// THE PIXEL HISTORY (PHOTON-GATHER-1c), full resolution, ping-ponged:
+        /// `history` rgba16f (premultiplied mean E/pi, mean coverage) and
+        /// `historyGeom` r32ui (distance, normal, count) — rq_probe_integrate.comp
+        /// says what each bit is.
+        VkImage history[2] = {};
+        VkDeviceMemory historyMemory[2] = {};
+        VkImageView historyView[2] = {};
+        VkImage historyGeom[2] = {};
+        VkDeviceMemory historyGeomMemory[2] = {};
+        VkImageView historyGeomView[2] = {};
+        /// Which of the pair is THIS frame's.
+        unsigned flip = 0u;
+        /// THE VIEW'S AGE: consecutive frames the history has been written
+        /// (0 = the previous images hold nothing and are never read).
+        unsigned age = 0u;
+        /// ...and what makes it restart besides new targets: the history
+        /// switched back on, or a GatherTuning field that changes the estimator.
+        bool temporalLast = false;
+        GatherTuning tuningLast;
+        /// What the last recorded frame ran with (GatherStatus).
+        bool lastTemporal = false;
+        /// THE PREVIOUS FRAME'S CAMERA, in the five vectors the shaders invert.
+        float prevCamPos[4] = {}, prevRayTL[4] = {}, prevRayRight[4] = {}, prevRayDown[4] = {},
+              prevFwd[4] = {};
         Ogre::TextureGpu *irradiance = nullptr;
 
         const detail::OgreScene *scene = nullptr;
