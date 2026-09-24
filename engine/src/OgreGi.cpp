@@ -767,6 +767,7 @@ void OgreScene::oweChainSettle(size_t top) {
     mGiSettleCascades  = n;
     mGiSettleTop       = top;
     mGiSettleStepsOwed = kAtRestSweeps * int(top + 1u);
+    mGiSettlePayableFrames = 0;          // a restarted debt restarts its timing
     noteSettleInputs();
 }
 
@@ -5354,8 +5355,13 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // rebuild's own injection read the cascades outside it as they stand, so
     // the cascades inside it are what read a light that has since changed. A
     // rebuild of cascade 0 therefore owes nothing.
-    if (rebuilt && mVctCascades.size() > 1u && staleTop >= 0)
-        oweChainSettle(size_t(staleTop));
+    // A rebuild that owes nothing new (cascade 0's) still RESTARTS the timing
+    // of a debt already owed, exactly as the whole sweep restarted on every
+    // rebuild (the payment's note below).
+    if (rebuilt && mVctCascades.size() > 1u) {
+        if (staleTop >= 0) oweChainSettle(size_t(staleTop));
+        else               mGiSettlePayableFrames = 0;
+    }
 
     // ---- 2b. THE HOST'S LIGHT TICK, AFTER THE REBUILD (the one writer) ------
     // (PHOTON-WRITER-1; refreshGiLighting says why it is owed rather than run.)
@@ -5371,7 +5377,24 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         bool pending = false;
         for (const VctCascade &c : mVctCascades)
             if (c.pending) { pending = true; break; }
-        if (!pending) payChainSettleStep();      // one injection, this frame
+        // THE SETTLE KEEPS THE WHOLE SWEEP'S TIMING (PHOTON-GATHER-1b item 6).
+        // A debt restarts whenever something owes it again (every rebuild), so
+        // the whole-chain sweep this replaced could only FINISH after the chain's
+        // size in payable frames with no rebuild between — never inside a fast
+        // walk, where a cascade re-voxelises every few frames. A partial debt of
+        // top+1 steps paid on the first payable frames would finish between two
+        // rebuilds instead, and every finished settle re-integrates the
+        // irradiance field (its running mean restarted): measured, 22 field
+        // restarts in gi.field_follows' 200-frame walk against the base's 0.
+        // So the steps are paid on the LAST top+1 of those frames: the settle
+        // finishes exactly when the whole sweep would have — same timing, fewer
+        // injections.
+        const int n = int(mVctCascades.size());
+        if (!pending) {
+            ++mGiSettlePayableFrames;
+            if (mGiSettlePayableFrames >= kAtRestSweeps * n - mGiSettleStepsOwed + 1)
+                payChainSettleStep();            // one injection, this frame
+        }
     }
     // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once
     // everything else has: every re-voxelisation drained and the incremental

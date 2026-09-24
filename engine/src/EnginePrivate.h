@@ -4896,6 +4896,11 @@ private:
     int    mGiSettleStepsOwed = 0;
     /// ...and the outermost cascade that sweep starts at (PHOTON-GATHER-1b).
     size_t mGiSettleTop = 0;
+    /// ...and how many frames that could pay a step have passed since the debt
+    /// was last (re)started: the steps are paid on the last top+1 of the
+    /// chain's size in such frames, so a partial settle finishes exactly when a
+    /// whole sweep would have (the scheduler's note says why).
+    int    mGiSettlePayableFrames = 0;
     /// The cascade count the debt was raised against — a chain that changed
     /// shape under an unfinished settle abandons it rather than injecting a
     /// cascade the sequence no longer describes.
