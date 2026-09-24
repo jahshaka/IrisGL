@@ -3227,6 +3227,14 @@ struct GatherTuning {
     /// stopped validating would show. gi.gather_motion drives it to prove its
     /// disocclusion bar discriminates that defect.
     bool     historyValidationOff = false;
+    /// THE REST OFF (PHOTON-GATHER-1d) — a MEASUREMENT door, never shipped: the
+    /// view never counts a rest frame, so there is no rest mean and no hold and
+    /// every frame is the pixel history's. A still view HOLDS one N-sample mean
+    /// (GatherStatus::settled), so averaging its frames reads that one draw; a
+    /// suite that averages a still view's frames to read the ESTIMATOR's mean
+    /// (gi.gather_reference, gi.gather_plane) or that measures the history's own
+    /// floor at rest (gi.gather_stable's trade) sets it.
+    bool     restOff = false;
 };
 
 // THE PIXEL HISTORY'S MEASUREMENT LEVER (PHOTON-GATHER-1c item 3) is an
@@ -3287,17 +3295,27 @@ struct GatherStatus {
     bool temporal = false;
     unsigned historyAge = 0u;
     /// THE SETTLED HISTORY (PHOTON-GATHER-1d; the term `GiStatus::giAtRest`
-    /// carries). `lightingAge` = the gathered frames since the scene's LIGHTING
-    /// last changed — a light write, an injection landing (a chain settle, a
-    /// cascade rebuild or step, the single volume's own) — the moment a history
-    /// starts owing a step; `settleFrames` = N, the frames a step of
-    /// `kGatherSettleCodes` display codes takes to fall under one code through
-    /// the history's EMA, N = ceil( ln(1/D) / ln(1 - 1/historyFrames) ) (16 at the
-    /// shipped 10 frames); `settled` = the history is at least N frames old AND
-    /// the lighting has held for N (true when the history does not run). A
-    /// YOUNG VIEW (a two-frame screenshot) is NOT settled: it shows the raw
-    /// estimate — up to 9/255 of probe noise on a Showroom-shaped room.
-    unsigned lightingAge = 0u;
+    /// carries). `restFrames` = the consecutive gathered frames at REST: the
+    /// camera unmoved, the scene's lighting unchanged (a light write, an
+    /// injection landing — a chain settle, a cascade rebuild or step, the single
+    /// volume's own), the scene's geometry unmoved and the surface cache idle,
+    /// the estimator unchanged; `settleFrames` = N, the frames a step of
+    /// `kGatherSettleCodes` display codes takes to fall under one code through the
+    /// history's EMA, N = ceil( ln(1/D) / ln(1 - 1/historyFrames) ) (16 at the
+    /// shipped 10 frames), and the length of the REST MEAN: at rest the answer is
+    /// handed over from the EMA to a true mean of the rest frames alone over N
+    /// frames, IS that mean at the N-th and is then HELD (nothing is dispatched)
+    /// — so a still picture is a function of the scene and the camera and not of
+    /// its history or of how long it was waited for, and two screenshots of it
+    /// agree byte for byte. The held picture is ONE N-sample mean: where a probe's
+    /// estimate is noisy (a small bright source at a grazing angle) it keeps that
+    /// draw's error until something moves. The pixel history is written with the
+    /// handed-over value, so a camera that starts moving again continues from the
+    /// rest mean without a pop. `settled` =
+    /// restFrames >= N (true when the history does not run). A YOUNG VIEW (a
+    /// two-frame screenshot) is NOT settled: it shows the raw estimate — up to
+    /// 9/255 of probe noise on a Showroom-shaped room.
+    unsigned restFrames = 0u;
     unsigned settleFrames = 0u;
     bool settled = true;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's

@@ -97,6 +97,12 @@ layout( rgba16f, set = 0, binding = 5 ) uniform readonly image2D historyPrev;
 layout( rgba16f, set = 0, binding = 6 ) uniform writeonly image2D historyCur;
 layout( r32ui, set = 0, binding = 7 ) uniform readonly uimage2D historyGeomPrev;
 layout( r32ui, set = 0, binding = 8 ) uniform writeonly uimage2D historyGeomCur;
+/// THE REST MEAN (PHOTON-GATHER-1d): at rest — the camera, the lighting and the
+/// scene held still (p.knobs6.x = the rest frame k >= 1) — a TRUE MEAN of the rest
+/// frames' estimates, restarted at the first rest frame, premultiplied by
+/// coverage like the history. The same pixel reads and writes it (the camera has
+/// not moved, so there is no reprojection and no race): one image, not a pair.
+layout( rgba16f, set = 0, binding = 9 ) uniform image2D restMean;
 
 #include "jah_reproject.glsl"
 
@@ -204,6 +210,8 @@ void main()
 		{
 			imageStore( historyCur, pix, vec4( 0.0 ) );
 			imageStore( historyGeomCur, pix, uvec4( 0u ) );
+			if( p.knobs6.x >= 1.0 )
+				imageStore( restMean, pix, vec4( 0.0 ) );
 		}
 		return;
 	}
@@ -312,7 +320,31 @@ void main()
 	const float floorBlend = clamp( p.knobs5.y, 1.0 / float( kHistoryCountMax ), 1.0 );
 	const float blend = prevCount > 0u ? max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend )
 									   : 1.0;
-	const vec4 mean = mix( prev, vec4( answer.xyz * answer.w, answer.w ), blend );
+	vec4 mean = mix( prev, vec4( answer.xyz * answer.w, answer.w ), blend );
+	// ---- AT REST, THE REST MEAN (PHOTON-GATHER-1d) ------------------------------
+	// The history above is an EMA past its tenth frame, and an EMA never stops:
+	// its state is a function of EVERY frame it has seen, so two pictures of one
+	// still scene — a screenshot after a long settle and one after a short one —
+	// differ, and a still view flickers by the floor's share of each frame's
+	// noise forever. At rest the answer becomes a true mean of the rest frames
+	// alone (restarted at the first, weight 1/k at the k-th: the sample sequence
+	// is the rest frame's own index, so the mean is a function of the scene and
+	// the camera and of nothing that happened before), handed over from the EMA
+	// linearly over N frames (p.knobs6.y, the settle; no pop when a camera
+	// stops), and at k = N the answer IS that mean — after which the host holds
+	// the frame and dispatches nothing (OgreScreenProbeGather.cpp): a still view
+	// costs the gather nothing. THE HISTORY IS WRITTEN WITH THE HANDED-OVER
+	// VALUE, so when the camera moves again the EMA continues from the rest mean
+	// and not from the older EMA state it would otherwise pop back to.
+	const float restK = p.knobs6.x;
+	if( restK >= 1.0 )
+	{
+		const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
+		const vec4 rest = restK < 1.5 ? sample1
+									  : mix( imageLoad( restMean, pix ), sample1, 1.0 / restK );
+		imageStore( restMean, pix, rest );
+		mean = mix( mean, rest, clamp( restK / max( p.knobs6.y, 1.0 ), 0.0, 1.0 ) );
+	}
 	imageStore( historyCur, pix, mean );
 	imageStore( historyGeomCur, pix, uvec4( packGeom( pixelDist, pixelNormal, prevCount + 1u ) ) );
 	// The pixel's answer: the answered frames' mean irradiance at the fraction

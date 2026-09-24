@@ -4652,7 +4652,7 @@ void RayQueryTier::forgetGather(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
-    if (mGather) mGather->statsInto(scene, scene->giLightingSerial(), out);
+    if (mGather) mGather->statsInto(scene, scene->gatherRestKey(), out);
 }
 
 void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
@@ -4706,7 +4706,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
                               scene->giParams().epicTier)
                    .gather;
     in.tuning = scene->gatherTuning();
-    in.lightingSerial = scene->giLightingSerial();
+    in.restKey = scene->gatherRestKey();
     in.farOverlap = sa.farOverlap;
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
@@ -5650,6 +5650,30 @@ bool OgreScene::probeGatherWanted() const {
         break;
     }
     return rayTracingResolved();
+}
+
+/// THE GATHER'S REST KEY (PHOTON-GATHER-1d): everything the gather's answer
+/// depends on besides the camera — the lighting (giLightingSerial: a light
+/// write, an injection landing), the geometry (the ray tier's own gate: the
+/// movement epoch and the ray rule's refits) and the surface cache the hits read
+/// first (its captures and relights). A frame whose key and camera equal the
+/// last frame's is a REST frame (ScreenProbeGather: the rest mean, the hold).
+unsigned long long OgreScene::gatherRestKey() const {
+    unsigned long long key = 1469598103934665603ull;
+    const auto fold = [&key](unsigned long long v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    fold(giLightingSerial());
+    fold(shadowEpoch() + rayLevelRefits());
+    if (mSurfaceCache) {
+        CardCacheStatus cs;
+        mSurfaceCache->fillStatus(cs);
+        fold(cs.captures);
+        fold(cs.relights);
+        fold(cs.indirectRelights);
+    }
+    return key;
 }
 
 /// The gather's numbers for `GiStatus`.

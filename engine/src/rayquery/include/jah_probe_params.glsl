@@ -101,6 +101,11 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
 	/// Read by the trace alone.
 	vec4 cards;
+	/// THE REST MEAN (PHOTON-GATHER-1d, rq_probe_integrate.comp): x = the rest
+	/// frame k (0 = the camera, the lighting or the scene moved this frame — not
+	/// at rest; k >= 1 = the k-th consecutive frame at rest), y = K, the rest
+	/// frames after which the answer IS the rest mean and the host holds.
+	vec4 knobs6;
 } p;
 
 /// ONE PROBE'S RECORD — where it sits, what it faces, what it integrated.

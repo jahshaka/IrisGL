@@ -162,10 +162,11 @@ struct GatherInputs {
     /// the view's SSR row (GA-TIERROW). ...and the test door's overrides.
     GiGatherFacts facts;
     GatherTuning tuning;
-    /// THE SCENE'S LIGHTING SERIAL (OgreScene::giLightingSerial): moves on a
-    /// light write and wherever an injection LANDS. The view counts the frames
-    /// since it last moved — the second half of the settled history.
-    unsigned long long lightingSerial = 0ull;
+    /// THE SCENE'S REST KEY (OgreScene::gatherRestKey): moves on a light write,
+    /// wherever an injection LANDS, when the scene's geometry moves and when the
+    /// surface cache captures or relights. With the camera's basis it decides
+    /// whether this frame is a REST frame (the rest mean, then the hold).
+    unsigned long long restKey = 0ull;
 
     /// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e) — the
     /// scene's two tables and two atlas layers, bound as the reflection trace
@@ -206,10 +207,10 @@ public:
     /// A view's listener is going away, or its scene has disarmed.
     void forget(const void *key);
     /// The last frame's numbers for a scene.
-    /// `lightingSerial` is the scene's CURRENT lighting serial: a view whose
-    /// last frame saw another one owes its history a step it has not begun to
-    /// take, so it is not settled (a light write between two frames).
-    void statsInto(const detail::OgreScene *scene, unsigned long long lightingSerial,
+    /// `restKey` is the scene's CURRENT rest key: a view whose last frame saw
+    /// another one has not begun the rest its picture owes, so it is not settled
+    /// (a light write between two frames).
+    void statsInto(const detail::OgreScene *scene, unsigned long long restKey,
                    GatherStatus &out) const;
     /// Is anything at all held for this key?
     bool holds(const void *key) const { return mViews.count(key) != 0; }
@@ -270,9 +271,17 @@ private:
         /// THE VIEW'S AGE: consecutive frames the history has been written
         /// (0 = the previous images hold nothing and are never read).
         unsigned age = 0u;
-        /// ...and the frames since the scene's lighting serial last moved.
-        unsigned lightingAge = 0u;
-        unsigned long long lightingSerial = 0ull;
+        /// THE REST (PHOTON-GATHER-1d): consecutive frames with the camera, the
+        /// scene's rest key and the estimator unchanged, and the key the last
+        /// frame saw. Past N (settleFramesOf) the view HOLDS: nothing is dispatched.
+        unsigned restFrames = 0u;
+        unsigned long long restKey = 0ull;
+        /// THE REST MEAN, full resolution (rq_probe_integrate.comp): a true mean
+        /// of the rest frames, premultiplied by coverage. One image — at rest a
+        /// pixel reads and writes only itself.
+        VkImage restMean = VK_NULL_HANDLE;
+        VkDeviceMemory restMeanMemory = VK_NULL_HANDLE;
+        VkImageView restMeanView = VK_NULL_HANDLE;
         /// The history's EMA floor in frames, as the last frame ran it.
         unsigned historyFramesLast = 10u;
         /// Ogre's frame number of the last frame this view recorded — which of
@@ -318,6 +327,9 @@ private:
             bool live = false;
             bool irradiance = false;     ///< this slot of the readback ring was written
             unsigned gatherFrame = 0u;   ///< ...by this gather frame
+            /// A HELD frame (the rest, PHOTON-GATHER-1d): only the readback was
+            /// recorded — no counter copy and no timestamps to read back.
+            bool held = false;
         };
         Pending pending[3];
         float placeMs = -1.0f, traceMs = -1.0f, filterMs = -1.0f, integrateMs = -1.0f, cpuMs = -1.0f;
@@ -329,6 +341,10 @@ private:
     void drop(View &v);
     /// The timestamps AND the adaptive count of the frames that have retired.
     void readPending(View &v);
+    /// A HELD frame (PHOTON-GATHER-1d): the view has been at rest for N frames,
+    /// its answer IS the rest mean, and nothing is dispatched — the irradiance
+    /// is re-bound (and copied out when the readback door asks).
+    void hold(View &v, const GatherInputs &in, bool temporal);
     void clearAtlas(View &v, VkCommandBuffer cmd);
 
     GatherHost &mHost;

@@ -3356,6 +3356,9 @@ public:
     /// from what moves when an injection LANDS (the chain's settles, the single
     /// volume's injections, each cascade's rebuilds and lattice cell).
     unsigned long long giLightingSerial() const;
+    /// ...and the gather's REST KEY (OgreRayQuery.cpp): that serial, the
+    /// geometry's movement epoch and the surface cache's captures and relights.
+    unsigned long long gatherRestKey() const;
     void gatherStatusInto(GatherStatus &out) const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.
