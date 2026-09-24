@@ -1648,7 +1648,7 @@ void OgreScene::destroyReflection() {
 void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 
 // THE ENV-PROBE SLOT HAS ONE OCCUPANT (found the hard way, 2026-09-07, the
-// reflections P3/P6 lane; it is why `reflectionTexForDatablocks()` exists at all
+// reflections P3/P6 lane; it is why `probeGridBound()` gates `reflectionTexFor`
 // rather than every site just reading mReflectionTex).
 //
 // The PBS pixel shader has exactly ONE env-probe texture, `texEnvProbeMap`. An
@@ -1708,23 +1708,20 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // while a grid exists, exactly as before. Closing that needs a per-datablock
 // environment texture, which this pin does not have.
 //
-// AND THE QUESTION IS PROCESS-WIDE, NOT PER SCENE (lane SKY-FALLBACK-1, second
-// read; this was a live defect on main). `HlmsPbs` is a singleton and it sets
-// `parallax_correct_cubemaps` — and therefore makes `texEnvProbeMap` a cube
-// ARRAY — for EVERY scene's pass while ANY grid is bound (OgreHlmsPbs.cpp:1820-
-// 1828). Testing this scene's own `mPcc` therefore answered the wrong question:
-// a SECOND scene (a preview, a thumbnail, the avatar module) whose materials
-// kept their manual sky cube generated `SampleEnvProbe` against a cube array,
-// which does not compile, and its objects did not draw at all. That is the
-// avatar preview's black character — measured, r3 g3 b4 with two shader-compile
-// exceptions in the log, and previously misread as the missing sky.
+// THE QUESTION IS THIS SCENE'S (PHOTON-SCENE-SWITCH-1). `HlmsPbs` sets
+// `parallax_correct_cubemaps` — and therefore makes `texEnvProbeMap` a cube ARRAY
+// — for every pass that runs with a PCC bound (OgreHlmsPbs.cpp:1820-1828), and
+// since the binding became per pass (SceneGiBinding) only THIS scene's passes run
+// with this scene's grid. So the answer is "does this scene's binding hold a
+// grid": its datablocks drop their manual cube when it does, and no other
+// scene's are touched. (While the binding was process-wide the question was too,
+// and every grid transition walked every scene — a preview whose materials kept
+// their sky cube generated `SampleEnvProbe` against a cube array and drew
+// nothing: the avatar preview's black character, r3 g3 b4. gi.pcc_second_scene
+// guards both halves.) The scene keeps its sky either way: under a grid its own
+// sky cube reaches its materials through the pass-level slot below (the state is
+// per SceneManager — FogHlmsListener::SkyEnvState).
 //
-// So it asks HlmsPbs. The scene keeps its sky either way: with a grid bound
-// anywhere, the pass property fires in THAT scene's passes too, so its own sky
-// cube reaches its materials through the pass-level slot below (the state is
-// per SceneManager — FogHlmsListener::SkyEnvState). Every site that binds or
-// unbinds a grid calls OgreEngine::reapplyReflectionsAllScenes so the binding
-// follows the singleton for every scene, not just the one that changed.
 // THE ROUGHNESS-TO-LOD MAP AFTER A PROBE TRANSITION (lane SKY-FALLBACK-1,
 // second read). `passBuf.envMapNumMipmaps` is ONE number for the whole pass and
 // `_notifyIblSpecMipmap` only ever GROWS it.
@@ -1735,8 +1732,9 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // mapped its roughness against a chain it does not have. The scene-wide walk
 // this lane added would spread one scene's transition to all of them.
 //
-// SO IT RUNS ON THE TRANSITION AND NOWHERE ELSE, which is the whole of the fix
-// and was measured the hard way. Putting it inside applyReflectionToAllImpl —
+// SO IT RUNS ON THIS SCENE'S TRANSITION AND NOWHERE ELSE
+// (noteProbeGridBindingChanged), which is the whole of the fix and was measured
+// the hard way. Putting it inside applyReflectionToAllImpl —
 // which every sky build, gain edge and material edit funnels through — changes
 // scenes that never had a grid at all: `scripting.e2e.ssr_mirror`'s "SSR is
 // still in this picture" bar fell 11 -> 7 against a bar of 8, reproducibly at
@@ -1760,13 +1758,9 @@ void OgreScene::renotifyReflectionMipmaps() {
     } JAH_CATCH(mError, );
 }
 
-bool OgreScene::anyProbeGridBound() const {
-    auto *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-    return pbs && pbs->getParallaxCorrectedCubemap() != nullptr;
-}
-
-Ogre::TextureGpu *OgreScene::reflectionTexForDatablocks() const {
-    return anyProbeGridBound() ? nullptr : mReflectionTex;
+void OgreScene::noteProbeGridBindingChanged() {
+    applyReflectionToAll();
+    renotifyReflectionMipmaps();
 }
 
 void OgreScene::applyReflectionToAllImpl() {

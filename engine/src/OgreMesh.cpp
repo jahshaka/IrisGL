@@ -501,32 +501,27 @@ namespace {
 ///
 /// Returns null when there is nothing to gain (the caller then aliases the main
 /// VAO, which is Ogre's "useSameVaos" fallback).
-/// The optimized shadow VAO: a position-only (plus blend indices/weights) vertex
-/// buffer with duplicate vertices merged, and ONE VAO over it — LEVEL 0's. An
-/// EMPTY return means "no optimized form", and the caller aliases the normal VAOs
-/// for every level instead.
+/// The optimized shadow VAOs: ONE position-only (plus blend indices/weights)
+/// vertex buffer with duplicate vertices merged, and one VAO PER LOD LEVEL over it
+/// (each with its own remapped index buffer). An EMPTY return means "no optimized
+/// form", and the caller aliases the normal VAOs for every level instead.
 ///
-/// ONE, NOT ONE PER LEVEL, SINCE ogre-patch 0088 (ATOM inventory row AT-A11).
-/// `SubMesh::destroyShadowMappingVaos` used to decide ALIAS-versus-INDEPENDENT
-/// for the whole shadow list from one test on entry 0, so a MIXED list — an
-/// independent VAO at 0 and aliases above it — read as independent: it destroyed
-/// the aliased entries and `~SubMesh` destroyed the same VAOs and their shared
-/// vertex buffer a second time ("Vertex Buffer has already been destroyed or
-/// doesn't belong to this VaoManager", measured 2026-09-15 by the suite that came
-/// with this feature). Only the two pure shapes were legal, so this built one
-/// independent VAO per level to stay inside one of them. Patch 0088 makes the
-/// alias test per entry, and the mixed list — which is the shape a LOD chain
-/// wants — is legal.
-///
-/// WHY THE MIXED LIST IS THE RIGHT SHAPE, and not merely the newly-allowed one:
-/// the optimized form exists so a shadow pass streams 12 bytes per vertex instead
-/// of 48, and its value is proportional to the vertex fetch the pass actually
-/// does. Each level halves its triangles, so the coarse levels of every mesh in a
-/// scene together account for a vanishing share of that fetch — while an
-/// independent index buffer and VertexArrayObject per level per mesh is VRAM for
-/// the life of the mesh. So level 0 gets the shrunk buffer and the coarse levels
-/// alias their own normal VAOs (the CALLER does the aliasing — this function
-/// returns the one VAO it built).
+/// EVERY LEVEL, NEVER A MIXED LIST (PHOTON-SCENE-SWITCH-1, measured). Ogre builds
+/// ONE pipeline per renderable per pass and takes its vertex layout from the FIRST
+/// VAO of the pass's list (`Hlms::createShaderCacheEntry`, OgreHlms.cpp:2939-2942 —
+/// upstream's own TODO: "Should we allow Vaos with different vertex formats on
+/// LODs?"). A list holding the shrunk VAO at level 0 and the NORMAL VAOs above it
+/// (the ATOM AT-A11 shape) therefore drew every coarse level into the shadow map
+/// through a 12-byte position-only layout over a 48-byte vertex buffer: garbage
+/// caster geometry whose shape depended on where the buffer landed in the pool.
+/// `gi.sun_contact_both` measured it — the sphere lattice's map cast 37,777
+/// darkened px in its own process, 9 px after another scene had drawn, and 22,090
+/// (the true shadow, every level's own triangles) with the shadow optimisation
+/// off. All levels shrunk is also upstream's shape
+/// (`VertexShadowMapHelper::optimizeForShadowMapping`: one independent VAO per
+/// level), and `SubMesh::destroyVaos` destroys a vertex buffer shared by several
+/// VAOs once. The price is one index buffer per coarse level, each a fraction of
+/// level 0's.
 std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
     Ogre::VaoManager *vaoMgr, const MeshData &data, const std::vector<float> &blendW,
     bool skinned, const std::vector<const std::vector<unsigned> *> &levels) {
@@ -590,7 +585,6 @@ std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
     std::memcpy(vertexData, unique.data(), stride * uniqueCount);
 
     Ogre::VertexBufferPacked *vbuf = nullptr;
-    Ogre::IndexBufferPacked *ibuf = nullptr;
     try {
         vbuf = vaoMgr->createVertexBuffer(decl, Ogre::uint32(uniqueCount), Ogre::BT_IMMUTABLE,
                                           vertexData, true);
@@ -602,11 +596,11 @@ std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
     }
 
     // The index type follows the SHADOW vertex count, which can only shrink.
+    // One VAO per level, every one over the same shrunk vertex buffer.
     std::vector<Ogre::VertexArrayObject *> out;
     Ogre::VertexBufferPackedVec shadowVbufs;
     shadowVbufs.push_back(vbuf);
-    {
-        const std::vector<unsigned> *level = levels.front();   // LEVEL 0, and only it
+    for (const std::vector<unsigned> *level : levels) {
         const size_t count = level->size();
         Ogre::IndexBufferPacked *ibuf = nullptr;
         if (uniqueCount <= 65535u) {
@@ -694,10 +688,10 @@ void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
     }
 }
 
-// The VAO-list SHAPE, for the suite that has to see what ogre-patch 0088 bought
-// (AT-A11). Counting the shadow entries that are NOT in the normal list is the same
-// test the patched `destroyShadowMappingVaos` makes, which is the point: the number
-// this reports is the number of VAOs and index buffers the mesh really owns.
+// The VAO-list SHAPE (AT-A11; PHOTON-SCENE-SWITCH-1). Counting the shadow entries
+// that are NOT in the normal list is the same test the patched
+// `destroyShadowMappingVaos` makes (ogre-patch 0088), which is the point: the number
+// this reports is the number of shadow VAOs and index buffers the mesh really owns.
 bool OgreScene::meshVaoShape(MeshId mesh, unsigned &levels, unsigned &shadowIndependent) const {
     levels = 0;
     shadowIndependent = 0;
@@ -1006,15 +1000,11 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     std::vector<Ogre::VertexArrayObject *> shadowVaos;
     if (Ogre::Mesh::msOptimizeForShadowMapping && !data.dynamic)
         shadowVaos = buildShadowVaos(vaoMgr, data, blendW, skinned, accepted);
-    if (shadowVaos.size() == 1) {
-        // THE MIXED LIST (ogre-patch 0088): the shrunk VAO for level 0, and every
-        // coarse level ALIASING its own normal VAO. Correct geometry at every
-        // level — a shadow pass at level k still draws level k's triangles — for
-        // one shadow vertex buffer and one shadow index buffer per mesh instead
-        // of one per level.
-        sub->mVao[Ogre::VpShadow].push_back(shadowVaos.front());
-        for (size_t L = 1; L < sub->mVao[Ogre::VpNormal].size(); ++L)
-            sub->mVao[Ogre::VpShadow].push_back(sub->mVao[Ogre::VpNormal][L]);
+    if (!shadowVaos.empty()) {
+        // THE SHRUNK LIST: one VAO per level, every one in the position-only
+        // layout the caster pipeline is built from (buildShadowVaos' note) —
+        // a shadow pass at level k draws level k's triangles through it.
+        for (Ogre::VertexArrayObject *v : shadowVaos) sub->mVao[Ogre::VpShadow].push_back(v);
     } else {
         // ALL-ALIASED, when there is no optimized form to build at all.
         for (Ogre::VertexArrayObject *v : sub->mVao[Ogre::VpNormal])

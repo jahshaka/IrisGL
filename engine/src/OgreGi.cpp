@@ -11,6 +11,7 @@
 // every one of them is HISTORY, not a second live design. The `gi*` identifiers
 // keep their names by the rename's own mapping rule.
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"       // bindSceneGi's declaration (every PBS-family host calls it)
 #include "SurfaceCache.h"   // SURFACE-CACHE phase 2: giStatus copies the Component's counters
 #include <Vct/OgreVctMaterial.h>
 
@@ -27,11 +28,69 @@
 
 namespace jahshaka { namespace engine { namespace detail {
 
-// HlmsPbs is a process-wide singleton: setVctLighting/setParallaxCorrectedCubemap
-// bind globally. Exactly one scene owns that binding at a time (last enabler
-// wins); teardown only unbinds when the dying scene is the owner, so a takeover
-// never yanks the new owner's binding.
-static OgreScene *sVctBindingOwner = nullptr;
+// ---------------------------------------------------------------------------
+// THE PER-PASS GI BINDING (PHOTON-SCENE-SWITCH-1; the rule and its hook are in
+// EnginePrivate.h, SceneGiBinding). The registry is a handful of entries (one per
+// live scene), read twice per scene pass per PBS-family host: a linear walk.
+// Render thread only, like every other per-SceneManager pass state
+// (FogHlmsListener's maps).
+// ---------------------------------------------------------------------------
+namespace {
+std::vector<std::pair<const Ogre::SceneManager *, const SceneGiBinding *>> sGiBindings;
+}   // namespace
+
+void registerSceneGiBinding(const Ogre::SceneManager *sm, const SceneGiBinding *binding) {
+    for (auto &e : sGiBindings)
+        if (e.first == sm) { e.second = binding; return; }
+    sGiBindings.emplace_back(sm, binding);
+}
+
+void unregisterSceneGiBinding(const Ogre::SceneManager *sm) {
+    for (auto it = sGiBindings.begin(); it != sGiBindings.end(); ++it)
+        if (it->first == sm) { sGiBindings.erase(it); return; }
+}
+
+void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm) {
+    static const SceneGiBinding kNone;
+    const SceneGiBinding *b = &kNone;
+    for (const auto &e : sGiBindings)
+        if (e.first == sm) { b = e.second; break; }
+    // Compared first: a pass of the scene the previous pass drew (every pass of
+    // one view, the shadow node's casters in between) costs three compares.
+    if (host->getVctLighting() != b->vct) host->setVctLighting(b->vct);
+    if (host->getIrradianceField() != b->ifd) host->setIrradianceField(b->ifd);
+    if (host->getParallaxCorrectedCubemap() != b->pcc ||
+        (b->pcc && (host->getPccVctMinDistance() != b->pccMinDist ||
+                    host->getPccVctMaxDistance() != b->pccMaxDist)))
+        host->setParallaxCorrectedCubemap(b->pcc, b->pccMinDist, b->pccMaxDist);
+}
+
+void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
+                  const Ogre::IrradianceField *ifd,
+                  const Ogre::ParallaxCorrectedCubemapBase *pcc) {
+    if (!manager) return;
+    for (int t = Ogre::HLMS_LOW_LEVEL + 1; t < Ogre::HLMS_MAX; ++t) {
+        auto *host = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HlmsTypes(t)));
+        if (!host) continue;
+        if (vct && host->getVctLighting() == vct) host->setVctLighting(nullptr);
+        if (ifd && host->getIrradianceField() == ifd) host->setIrradianceField(nullptr);
+        if (pcc && host->getParallaxCorrectedCubemap() == pcc) host->setParallaxCorrectedCubemap(nullptr);
+    }
+}
+
+void ScenePbs::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
+                               Ogre::ResourceTransitionArray &resourceTransitions,
+                               Ogre::Camera *renderingCamera, const bool bCasterPass) {
+    bindSceneGi(this, renderingCamera ? renderingCamera->getSceneManager() : nullptr);
+    Ogre::HlmsPbs::analyzeBarriers(barrierSolver, resourceTransitions, renderingCamera, bCasterPass);
+}
+
+Ogre::HlmsCache ScenePbs::preparePassHash(const Ogre::CompositorShadowNode *shadowNode,
+                                          bool casterPass, bool dualParaboloid,
+                                          Ogre::SceneManager *sceneManager) {
+    bindSceneGi(this, sceneManager);
+    return Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
+}
 
 // THE DIAGNOSTIC LATCH, READ ONCE (the lead's fix-round item 5). This file asked
 // `getenv("JAHSHAKA_GI_DEBUG")` at sixteen sites, several of them per cascade
@@ -245,10 +304,6 @@ void OgreScene::serviceVoxelReadouts() {
 static bool giDebug() {
     static const bool on = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
     return on;
-}
-
-static Ogre::HlmsPbs *hlmsPbs(Ogre::Root *root) {
-    return static_cast<Ogre::HlmsPbs *>(root->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
 }
 
 /// GiToggle::Auto defers to the quality dial; Off/On pin it either way. Exists
@@ -649,12 +704,8 @@ bool OgreScene::refreshVctFast() {
         voxelWork.close();
         mGiLitVolume = aabb;      // materially the box the grid was placed from
         noteGiAutoVolume(aabb, !giBoundsExplicit());
-        // NOT re-bound to HlmsPbs, deliberately. `rebuildVct` takes the
-        // process-wide binding because a BUILD is a statement about which
-        // scene's GI the shader should sample; a refresh is not. If another
-        // scene took the binding over in the meantime, a background scene
-        // re-solving its own geometry must not snatch it back — and giStatus's
-        // vctBound/pccBound go on reporting the truth either way.
+        // Nothing to re-bind: the arm's objects are the same ones this scene's
+        // passes already bind (SceneGiBinding).
         // The probe CONTENTS are stale (the scene moved), the SHAPES are not.
         // STALE the grid — never dirty it (ENGINE_CACHE_POLICY_SPEC P6). Raising
         // mDirty on every probe here is what made a re-solve capture the WHOLE
@@ -1062,13 +1113,10 @@ GiStatus OgreScene::giStatus() const {
     if (mSurfaceCache) mSurfaceCache->fillStatus(st.cards);
     JAH_TRY {
         if (mPcc) st.probeCount = int(mPcc->getProbes().size());
-        // "Bound" means the process-wide HlmsPbs is sampling THIS scene's arm.
-        // Both halves are checked against our own pointers rather than against
-        // sVctBindingOwner alone: the owner flag says who bound last, these say
-        // what the shader will actually read this frame.
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        st.pccBound = mPcc && pbs->getParallaxCorrectedCubemap() == mPcc;
-        st.vctBound = mVctLighting && pbs->getVctLighting() == mVctLighting;
+        // "Bound" means THIS scene's passes sample the arm (SceneGiBinding): a
+        // finished arm is bound whenever the scene is drawn, whatever else draws.
+        st.pccBound = mPcc && mGiBinding.pcc == mPcc;
+        st.vctBound = mVctLighting && mGiBinding.vct == mVctLighting;
         const auto toV = [](const Ogre::Vector3 &v) { return Vec3(v.x, v.y, v.z); };
         st.boundsMin      = toV(mGiLitVolume.getMinimum());
         st.boundsMax      = toV(mGiLitVolume.getMaximum());
@@ -1126,9 +1174,9 @@ GiStatus OgreScene::giStatus() const {
         // a scene that has no probe grid at all (the shader is rebuilt either
         // way), and the count is the honest answer there too.
         st.probeGateCrossings = mProbeGateCrossings;
-        // DDGI, reported the same way pccBound/vctBound are: against the live
-        // HlmsPbs pointer, not against what was requested or who bound last.
-        st.ifdBound          = mIfd && pbs->getIrradianceField() == mIfd;
+        // DDGI, reported the same way pccBound/vctBound are: what this scene's
+        // passes bind, not what was requested.
+        st.ifdBound          = mIfd && mGiBinding.ifd == mIfd;
         st.ifdProbes         = int(mIfdTotalProbes);
         st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
         if (mIfd) {
@@ -4284,8 +4332,7 @@ bool OgreScene::rebuildVct() {
     }
     if (!itemCount) { teardownVct(); return false; }   // stay armed; next churn re-flags
 
-    hlmsPbs(mRoot)->setVctLighting(mVctLighting);
-    sVctBindingOwner = this;
+    mGiBinding.vct = mVctLighting;   // this scene's passes read it from now on
     // What this arm was built AT (B4): the reuse path re-runs it only while the
     // count still matches, i.e. while nothing it points into can have died.
     mGiBuiltGeneration = mGiDestroyGeneration;
@@ -4320,11 +4367,11 @@ bool OgreScene::rebuildVct() {
             mGiBuildStage = GiBuildStage::ProbeScout;
         } else {
             buildPcc(mGiProbeRegion);
-            // The probe grid now owns the shader's one env-probe slot, so the
-            // IBL cubemap must come OFF every datablock — see the long note at
-            // OgreScene::reflectionTexForDatablocks (OgreSky.cpp). Unconditional:
-            // applyReflectionToAll is a no-op walk when there is no sky
-            // reflection.
+            // The probe grid now owns the shader's one env-probe slot in this
+            // scene's passes, so the IBL cubemap must come OFF every datablock —
+            // see OgreSky.cpp's long note, THE ENV-PROBE SLOT HAS ONE OCCUPANT.
+            // Unconditional: applyReflectionToAll is a no-op walk when there is
+            // no sky reflection.
             applyReflectionToAll();
         }
     }
@@ -4334,7 +4381,7 @@ bool OgreScene::rebuildVct() {
     if (haveBounds) noteGiAutoVolume(aabb, !giBoundsExplicit());
 
     // The DDGI layer, over the volume this build just lit. After the VCT
-    // binding (it takes the same process-wide ownership) and after the PCC
+    // binding (the field joins the same SceneGiBinding) and after the PCC
     // build (the field is diffuse-only; the probes keep the specular they had).
     // A no-op — including a teardown of any previous field — when the toggle is
     // off, which is what makes `rebuildVct` the single place the arm's shape is
@@ -5485,13 +5532,9 @@ static void notePlacementPhases(double msScout, double msPlace, double msDrop,
                                kept, float(msCapture));
 }
 
-// THE PROBE GRID, GONE — unbound if this scene owns the binding, then deleted,
-// with every reading that described it put back to "none".
-//
-// BY POINTER IDENTITY, like teardownVct's unbind: the process-wide HlmsPbs
-// binding may belong to ANOTHER scene, and clearing it from here would blank
-// that scene's reflections for a grid this one never built. (This scene's own
-// pointer is the one being deleted.)
+// THE PROBE GRID, GONE — out of this scene's binding (and off any host the last
+// pass left it on), then deleted, with every reading that described it put back
+// to "none".
 //
 // TWO CALLERS, and the second is why it is a function (fix round item 2): the
 // "every candidate photographed nothing" path, which always had this code, and
@@ -5503,15 +5546,11 @@ static void notePlacementPhases(double msScout, double msPlace, double msDrop,
 // something marked it stale.
 void OgreScene::destroyProbeGrid() {
     if (!mPcc) return;
-    {
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        if (pbs->getParallaxCorrectedCubemap() == mPcc) {
-            pbs->setParallaxCorrectedCubemap(nullptr);
-            // The env slot's occupancy is a PROCESS-WIDE question
-            // (reflectionTexForDatablocks' note): every scene's datablocks may
-            // take their own sky cube back now.
-            if (mEngine) mEngine->reapplyReflectionsAllScenes();
-        }
+    forgetGiArms(mRoot->getHlmsManager(), nullptr, nullptr, mPcc);
+    if (mGiBinding.pcc == mPcc) {
+        mGiBinding.pcc = nullptr;
+        // This scene's datablocks may take their own sky cube back now.
+        noteProbeGridBindingChanged();
     }
     delete mPcc; mPcc = nullptr;
     mProbeSlots.clear();
@@ -5951,15 +5990,15 @@ void OgreScene::buildPccFit() {
             // wherever no probe's box does. What it does NOT close is the
             // avatar preview reading r3 g3 b4 under the any-axis form: that was
             // never the missing sky. Measured on this binary, it is upstream's
-            // one-occupant trap firing in a SECOND scene — the PCC binding is
+            // one-occupant trap firing in a SECOND scene — the PCC binding was
             // PROCESS-WIDE while the sky cube's binding is per scene and per
-            // material, so a preview scene's datablocks keep their manual cube
-            // while the editor scene's grid owns the env slot, and the pixel
-            // shader that generates does not compile (`SampleEnvProbe` against
+            // material, so a preview scene's datablocks kept their manual cube
+            // while the editor scene's grid owned the env slot, and the pixel
+            // shader that generated did not compile (`SampleEnvProbe` against
             // a textureCubeArray; OgreSky.cpp's note lists the three ways).
-            // The character is black because there is no shader, not because
-            // there is no sky. That defect is independent of which form of this
-            // rule ships and is recorded for its own lane.
+            // The character was black because there was no shader, not because
+            // there was no sky. The binding is per scene and per pass since
+            // PHOTON-SCENE-SWITCH-1 (SceneGiBinding), which closes it.
             //
             // The counts, both forms, same binary, with 0048 in: gi.probe_open
             // is IDENTICAL on every case but the 30 m yard (0 vs 3 of 18 at the
@@ -5991,8 +6030,8 @@ void OgreScene::buildPccFit() {
         for (Ogre::CubemapProbe *p : drop) mPcc->destroyProbe(p);
         if (mPcc->getProbes().empty()) {
             // NOTHING TO PHOTOGRAPH. No grid, and the sky cubemap goes back onto
-            // every datablock — `reflectionTexForDatablocks` hands it back the
-            // moment mPcc is null (OgreSky.cpp), and the caller runs
+            // every datablock — `reflectionTexFor` hands it back the moment no
+            // grid is bound (OgreMaterials.cpp), and the caller runs
             // applyReflectionToAll right after this. Cheaper and sharper than a
             // grid of photographs of the sky, which is the owner's rule
             // (2026-09-13 Q3) measured per probe instead of per scene.
@@ -6277,57 +6316,12 @@ void OgreScene::buildPccFinish() {
     // probes that can see it, and the lights are re-injected on the cheap
     // cadence), and the principled per-probe fix is still upstream's to make.
     if (mGi.updateBudget > 0) minDist = std::max(minDist, diag);
-    mPccBindMinDist = minDist;
-    mPccBindMaxDist = minDist * 2.0f;
-    hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
-    // ...and EVERY scene's datablocks must drop their manual cubemap now, not
-    // just this one's: the property that makes texEnvProbeMap a cube array is
-    // set for every pass in the process (reflectionTexForDatablocks' note). A
-    // second scene that kept its sky cube here generated a shader that does not
-    // compile — the avatar preview's black character.
-    if (mEngine) mEngine->reapplyReflectionsAllScenes();
-}
-
-// THE PAGE-RETURN BINDING (ENGINE_CACHE_POLICY_SPEC P10). What a scene coming
-// back on screen needs, and ALL it needs: its arms were built against its own
-// geometry and nothing about a page switch invalidates them — only the
-// process-wide HlmsPbs pointers can have been taken over by another scene's
-// build (the player page's own GI, OgreGi.cpp's "last enabler wins").
-//
-// Each of the three is set to THIS scene's arm, including null for an arm the
-// scene does not have: a scene without probes must not be shaded through the
-// probes of the scene that last built some (the old re-push could not fix that
-// case at all — its teardown only unbinds when it is the owner).
-bool OgreScene::reassertGiBinding() {
-    JAH_TRY {
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        // THE BOUND POINTERS DECIDE, NOT THE OWNER FLAG (code review 2026-09-12):
-        // the flag says who bound last, the pointers say what the shader reads,
-        // and any path that let the two disagree left this scene "owning" a
-        // binding that pointed into another scene's arms — a use-after-free
-        // the moment that scene died. Already ours on all three: a no-op.
-        if (pbs->getVctLighting() == mVctLighting &&
-            pbs->getParallaxCorrectedCubemap() == mPcc &&
-            pbs->getIrradianceField() == mIfd) {
-            sVctBindingOwner = (mVctLighting || mPcc || mIfd) ? this : sVctBindingOwner;
-            return false;
-        }
-        pbs->setVctLighting(mVctLighting);
-        const bool pccBindingMoved = pbs->getParallaxCorrectedCubemap() != mPcc;
-        if (mPcc) pbs->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
-        else      pbs->setParallaxCorrectedCubemap(nullptr);
-        // Process-wide, so every scene re-decides (see rebuildVct's call).
-        if (pccBindingMoved && mEngine) mEngine->reapplyReflectionsAllScenes();
-        pbs->setIrradianceField(mIfd);
-        const bool owns = mVctLighting || mPcc || mIfd;
-        sVctBindingOwner = owns ? this : nullptr;
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                std::string("Jahshaka GI: binding re-asserted (") +
-                (mVctLighting ? "vct " : "") + (mPcc ? "pcc " : "") + (mIfd ? "ifd" : "") +
-                (owns ? ")" : "nothing — unbound)"));
-        return true;
-    } JAH_CATCH(mError, false);
+    mGiBinding.pcc = mPcc;
+    mGiBinding.pccMinDist = minDist;
+    mGiBinding.pccMaxDist = minDist * 2.0f;
+    // ...and THIS scene's datablocks drop their manual cubemap now: its passes
+    // make texEnvProbeMap a cube array from here on (OgreSky.cpp, THE ENV-PROBE SLOT HAS ONE OCCUPANT).
+    noteProbeGridBindingChanged();
 }
 
 // ===========================================================================
@@ -6563,20 +6557,8 @@ void OgreScene::buildIrradianceField() {
         // threshold needs but upstream's own IrradianceField block does not
         // carry, reach the shader through the pass buffer.
         pushIfdState(settings.mNumProbes);
-        // The process-wide binding, under the same discipline as VctLighting's,
-        // and ONLY when the shader is reading THIS scene's voxel lighting: a
-        // rebuild has just bound it (rebuildVct), a re-solve of a background
-        // scene has not (refreshVctFast never snatches the binding). Binding
-        // the field and claiming ownership there anyway left HlmsPbs with the
-        // OTHER scene's VctLighting under an owner flag naming this one — the
-        // other scene's teardown then skipped its unbind (code review
-        // 2026-09-12). The field is kept either way; reassertGiBinding binds it
-        // when this scene takes the screen back.
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        if (pbs->getVctLighting() == mVctLighting) {
-            pbs->setIrradianceField(mIfd);
-            sVctBindingOwner = this;
-        }
+        // WHOLE, so this scene's passes read it from now on (SceneGiBinding).
+        mGiBinding.ifd = mIfd;
 
         if (giDebug())
             Ogre::LogManager::getSingleton().logMessage(
@@ -6616,11 +6598,8 @@ void OgreScene::teardownIrradianceField() {
     mIfdScrolls = mIfdReplacements = 0;
     if (!mIfd) return;
     JAH_TRY {
-        // Pointer identity, not sVctBindingOwner: the owner flag says who bound
-        // last, this says what the shader is about to read. Unbinding someone
-        // else's field would be the takeover bug the VCT half already avoids.
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        if (pbs->getIrradianceField() == mIfd) pbs->setIrradianceField(nullptr);
+        mGiBinding.ifd = nullptr;
+        forgetGiArms(mRoot->getHlmsManager(), nullptr, mIfd, nullptr);
         delete mIfd;
     } JAH_CATCH(mError, );
     mIfd = nullptr;
@@ -6938,29 +6917,12 @@ void OgreScene::teardownVct() {
     mGiChainShapeDirty = false;
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;
-    // Unbind what the shader reads FROM THIS SCENE, by pointer identity (the
-    // same rule teardownIrradianceField uses): the owner flag can disagree with
-    // the pointers, and a pointer left bound past the delete below is a
-    // use-after-free on the next frame. Another scene's binding is untouched.
-    {
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        const bool releasedPcc = mPcc && pbs->getParallaxCorrectedCubemap() == mPcc;
-        if (releasedPcc) pbs->setParallaxCorrectedCubemap(nullptr);
-        if (mVctLighting && pbs->getVctLighting() == mVctLighting) pbs->setVctLighting(nullptr);
-        if (sVctBindingOwner == this) sVctBindingOwner = nullptr;
-        // PROCESS-WIDE: every other scene may take its own sky cube back now
-        // (reflectionTexForDatablocks' note). This runs on an ordinary GI-off
-        // or re-solve as well as on the scene's destruction, and the two need
-        // different timing: on a GI-off the walk happens here and now, because
-        // nothing else will do it and the other scenes' mirrors would stay
-        // unbound (measured: gi.pcc_second_scene's last case went black); on a
-        // DESTROY it must wait until the engine has erased this scene from the
-        // vector the walk iterates, so it is flagged instead.
-        if (releasedPcc) {
-            if (mDestroying) mReleasedPccOnDestroy = true;
-            else if (mEngine) mEngine->reapplyReflectionsAllScenes();
-        }
-    }
+    // THIS SCENE'S PASSES STOP READING ITS ARMS, and any PBS-family host the
+    // last pass left them on lets go before the deletes below.
+    const bool releasedPcc = mPcc && mGiBinding.pcc == mPcc;
+    mGiBinding.vct = nullptr;
+    mGiBinding.pcc = nullptr;
+    forgetGiArms(mRoot->getHlmsManager(), mVctLighting, nullptr, mPcc);
     // Reverse dependency order, all while the SceneManager is still alive:
     // PCC (probe workspaces + cubemap textures) -> VctLighting (reads the
     // voxelizer's textures) -> VctVoxelizer (drops its MeshPtr refs).
@@ -6984,8 +6946,9 @@ void OgreScene::teardownVct() {
     // really starts again.
     if (mGiCamera) { mSceneMgr->destroyCamera(mGiCamera); mGiCamera = nullptr; }
     // ...and back ON now that the slot is free again (the mirror of the call in
-    // rebuildVct). Ordered after `delete mPcc` because the helper reads it.
-    applyReflectionToAll();
+    // rebuildVct) — with the roughness-to-LOD map when a bound grid went.
+    if (releasedPcc) noteProbeGridBindingChanged();
+    else             applyReflectionToAll();
 }
 
 void OgreScene::teardownGi() {

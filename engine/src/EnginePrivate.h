@@ -2704,8 +2704,8 @@ public:
 //   * LightProfiles::build() writes HlmsPbs::setLightProfilesTexture AND
 //     Root::_setLightProfilesInvHeight — there is exactly one of each per
 //     process, so a per-scene registry would have scenes fighting over the
-//     binding (the sVctBindingOwner shape in OgreGi.cpp, which we do not want
-//     to repeat).
+//     binding (the owner shape OgrePlanar.cpp still carries, which we do not
+//     want to repeat).
 //   * HlmsPbs::setAreaLightMasks binds ONE 2D-array pool. Light::setTexture
 //     stores only the pool SLICE index, so a mask that landed in a different
 //     pool renders the WRONG texture with no error at all. One reserved pool,
@@ -2797,6 +2797,57 @@ void retainSharedTexture(Ogre::TextureGpu *tex);
 /// True when this was the LAST reference (the caller destroys the texture).
 bool releaseSharedTexture(Ogre::TextureGpu *tex);
 void resetSharedTextures();
+
+// ---------------------------------------------------------------------------
+// THE SCENE BEING DRAWN IS THE SCENE THE SHADER READS (PHOTON-SCENE-SWITCH-1) —
+// OgreGi.cpp.
+//
+// HlmsPbs holds ONE VctLighting, ONE IrradianceField and ONE parallax-corrected
+// cubemap pointer (+ its two blend distances) for the whole process. Each scene
+// says what ITS passes read in its own `SceneGiBinding`, registered under its
+// SceneManager, and every PBS-family host binds the record of the pass's own
+// SceneManager as the pass begins — `ScenePbs::analyzeBarriers` (the first thing a
+// scene pass asks of an Hlms: CompositorPassScene::execute -> analyzeBarriers, before
+// the barriers that must name the SAME textures the shader will sample) and
+// `preparePassHash` (a pass that skips the barrier walk: the warm-up pass). That is
+// every scene pass of every workspace — a view, an offscreen view, a thumbnail, a
+// material preview, a probe or card capture and Ogre's own internal ones — without
+// a listener to install anywhere. Nothing is restored after a pass: the next pass
+// binds its own. There is no owner: a scene's arms are bound when, and only when,
+// its own passes run.
+struct SceneGiBinding {
+    Ogre::VctLighting                  *vct = nullptr;
+    Ogre::IrradianceField              *ifd = nullptr;
+    Ogre::ParallaxCorrectedCubemapBase *pcc = nullptr;
+    /// The PCC-versus-VCT trust window the grid was bound with (buildPccFinish).
+    float pccMinDist = 1.0f, pccMaxDist = 2.0f;
+};
+/// The record a SceneManager's passes bind; `binding` must outlive the entry
+/// (OgreScene registers its own member at construction, unregisters in destroy()).
+void registerSceneGiBinding(const Ogre::SceneManager *sm, const SceneGiBinding *binding);
+void unregisterSceneGiBinding(const Ogre::SceneManager *sm);
+/// (`bindSceneGi`, the per-pass call every PBS-family host makes, is declared in
+/// HlmsAtom.h beside tellEveryHlms.)
+/// An arm is about to be DELETED: any PBS-family host still holding it (the last
+/// pass of the last frame bound it) lets go now, so no read between frames — a
+/// getter, `resetIblSpecMipmap(0)` walking the bound PCC — meets a freed object.
+void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
+                  const Ogre::IrradianceField *ifd,
+                  const Ogre::ParallaxCorrectedCubemapBase *pcc);
+
+/// THE REGISTERED HLMS_PBS: upstream's HlmsPbs, plus the per-pass binding above.
+/// Our derived Hlms (the Terra pattern) and not a patch: the two overrides are
+/// public virtuals and the three setters public API.
+class ScenePbs final : public Ogre::HlmsPbs {
+public:
+    ScenePbs(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders)
+        : Ogre::HlmsPbs(dataFolder, libraryFolders) {}
+    void analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
+                         Ogre::ResourceTransitionArray &resourceTransitions,
+                         Ogre::Camera *renderingCamera, const bool bCasterPass) override;
+    Ogre::HlmsCache preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
+                                    bool dualParaboloid, Ogre::SceneManager *sceneManager) override;
+};
 
 /// Returns an index buffer that belongs to no VAO to the VaoManager that made it
 /// (MeshRec::clusterStream). At namespace scope, not nested in the record: a
@@ -3040,21 +3091,20 @@ public:
     /// cubemap on every PBR material's datablock. (Body in complete-class context,
     /// so it may call the private impl declared further down.)
     void applyReflectionToAll();
-    /// "Is ANY probe grid bound to HlmsPbs", which is the question the env-probe
-    /// slot's occupancy really turns on — not "does THIS scene have one". See
-    /// the long note above reflectionTexForDatablocks.
-    bool anyProbeGridBound() const;
+    /// "Do THIS scene's passes bind a probe grid" — which is what the env-probe
+    /// slot's occupancy turns on in its passes. See OgreSky.cpp's long note, THE
+    /// ENV-PROBE SLOT HAS ONE OCCUPANT.
+    bool probeGridBound() const { return mGiBinding.pcc != nullptr; }
     /// Re-pushes the mip count of whatever this scene's datablocks hold in the
-    /// env-probe slot. Called ONLY from the probe-transition walk — see the note
-    /// on the definition for why it must not run on every reflection re-apply.
+    /// env-probe slot. Called ONLY on this scene's probe-grid transitions
+    /// (noteProbeGridBindingChanged) — see the note on the definition for why it
+    /// must not run on every reflection re-apply.
     void renotifyReflectionMipmaps();
-    /// Set by destroy() when THIS scene's teardown released the process-wide
-    /// probe binding; read by OgreEngine::destroyScene after the erase, which is
-    /// the only safe place to walk the remaining scenes.
-    bool mReleasedPccOnDestroy = false;
-    /// True for the duration of destroy(): teardownVct is shared between "GI
-    /// off" (walk the other scenes now) and "this scene is going away" (flag it,
-    /// the engine walks after the erase).
+    /// THIS scene's grid was bound or unbound: its datablocks re-decide what the
+    /// env-probe slot holds (a manual cube and the probe array cannot share it),
+    /// and the roughness-to-LOD map follows. Nobody else's passes are affected.
+    void noteProbeGridBindingChanged();
+    /// True for the duration of destroy().
     bool mDestroying = false;
     /// Runs the queued ibl_specular convolution (roughness mip chain) into the
     /// next set's cube, then lands the set if nothing else is owed. Called once
@@ -3237,11 +3287,8 @@ public:
     // VCT voxelizes the scene's PBR items over the GI bounds and cone-traces the
     // result; the hybrid adds a parallax-corrected cubemap probe grid whose
     // reflections blend with VCT's by distance (HlmsPbs PccVctMinDistance).
-    // CAVEAT (GI_SPEC.md): setVctLighting/setParallaxCorrectedCubemap bind to the
-    // process-wide HlmsPbs singleton — VCT GI is effectively editor-scene-only
-    // in v1; the last scene to enable a VCT mode owns the binding, and other
-    // scenes' geometry outside the voxel volume samples nothing (cones exit the
-    // volume and add no light), so previews/thumbnails stay sane in practice.
+    // Every scene's arms are its own: the PBS pass of a scene binds that scene's
+    // VctLighting, field and grid, per pass (SceneGiBinding, above).
     bool setGlobalIllumination(const GiParams &p) override;
     bool setGiTuning(const GiParams &p) override;
     void refreshGlobalIllumination(GiRefreshReason reason) override;
@@ -3371,7 +3418,6 @@ public:
     /// rather than a new public getter: nothing outside the ray tier has any
     /// business with that counter, and it lives in the same TU as the walk.
     friend class RayQueryTier;
-    bool reassertGiBinding() override;
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
     unsigned long long giMaterialSignature() const override;
@@ -4101,9 +4147,6 @@ private:
     };
 
     void applyReflectionToAllImpl();
-    /// The IBL cubemap AS BOUND TO DATABLOCKS — null while automatic PCC owns
-    /// the shader's one env-probe slot (OgreSky.cpp, the long note there).
-    Ogre::TextureGpu *reflectionTexForDatablocks() const;
     /// What ONE material's env-probe slot should hold: its own override cubemap
     /// if it has one, else the scene's global IBL cube, and NULL for both while
     /// automatic PCC is bound (ADDENDUM A-5). The single place that answers it,
@@ -5950,9 +5993,10 @@ private:
     /// rebuilds?", which a total cannot: every other rebuild reason (a mode
     /// change, a destroyed object, a quality dial) is mixed into that one.
     unsigned long long mMobilityRebuilds = 0;
-    /// The PCC/VCT trust window buildPcc bound the grid with, so a binding
-    /// re-assert (P10) re-binds with the same numbers without re-deriving them.
-    float mPccBindMinDist = 0.0f, mPccBindMaxDist = 0.0f;
+    /// WHAT THIS SCENE'S PASSES BIND (SceneGiBinding): registered under mSceneMgr
+    /// at construction; each field is written where the arm is finished and
+    /// cleared where it dies — nowhere else.
+    SceneGiBinding mGiBinding;
     /// The last ambient SH and fog the scene was given, so a host re-push of the
     /// same value (every page return drops the host's own latch) stales nothing.
     float   mLastAmbientSh[27] = {};
@@ -7128,15 +7172,6 @@ public:
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;
-
-    /// THE PROCESS-WIDE PROBE BINDING JUST CHANGED, so every scene has to
-    /// re-decide what its datablocks hold in the env-probe slot (lane
-    /// SKY-FALLBACK-1). HlmsPbs is a singleton and its
-    /// `parallax_correct_cubemaps` property is set for EVERY scene's pass while
-    /// any PCC is bound, so the question "may this material carry a manual
-    /// cubemap" is a process-wide one — see OgreScene::reflectionTexFor. Called
-    /// from the sites that bind or unbind a grid, which live in OgreScene.
-    void reapplyReflectionsAllScenes();
 
     ~OgreEngine() override;
 

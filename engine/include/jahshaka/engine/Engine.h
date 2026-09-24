@@ -362,10 +362,11 @@ public:
     /// AT-A11). `levels` is how many LOD levels the mesh has and
     /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the
     /// corresponding normal one — i.e. how many shrunk position-only VAOs this
-    /// mesh pays for. The shape the engine builds is 1 (level 0 optimized, the
-    /// coarse levels aliased) or 0 (nothing to optimize, everything aliased); it
-    /// was `levels` before ogre-patch 0088 made a MIXED list legal to destroy.
-    /// False for an unknown mesh. Exists because that shape is Ogre-internal, it
+    /// mesh pays for. The shape the engine builds is `levels` (every level shrunk,
+    /// all over ONE vertex buffer) or 0 (nothing to optimize, everything aliased)
+    /// — never a mix: Ogre builds a pass's pipeline from the first VAO's vertex
+    /// layout, so a list mixing layouts draws its other levels as garbage
+    /// (PHOTON-SCENE-SWITCH-1). False for an unknown mesh. Exists because that shape is Ogre-internal, it
     /// is VRAM per mesh forever, and a suite has to be able to see it.
     virtual bool        meshVaoShape(MeshId mesh, unsigned &levels,
                                      unsigned &shadowIndependent) const = 0;
@@ -833,10 +834,10 @@ public:
     /// (placement captures every probe) and the irradiance field — every call,
     /// equal params included: that is the explicit "rebuild now", and suites
     /// use it as such. Hosts therefore push on CHANGE only (SceneMirror
-    /// compares GiParams by value), re-solve through refreshGlobalIllumination,
-    /// and take the process-wide binding back after another scene built GI with
-    /// reassertGiBinding — never by re-pushing. GiMode::Off tears everything
-    /// down. Modes the
+    /// compares GiParams by value) and re-solve through refreshGlobalIllumination.
+    /// A scene's arms are its own: every pass of this scene binds them, every
+    /// pass of another scene binds that scene's (per pass — nothing to take back
+    /// after another scene built GI). GiMode::Off tears everything down. Modes the
     /// backend has not implemented yet degrade to Off (true is still returned so a
     /// document saved with a future mode keeps loading).
     virtual bool        setGlobalIllumination(const GiParams &) = 0;
@@ -1053,23 +1054,6 @@ public:
         hits.clear();
         return false;
     }
-    /// "THIS SCENE IS ON SCREEN AGAIN" — re-points the process-wide HlmsPbs GI
-    /// binding (voxel lighting, reflection-probe grid, irradiance field) at
-    /// this scene's own arms, WITHOUT rebuilding anything
-    /// (ENGINE_CACHE_POLICY_SPEC §2 P10).
-    ///
-    /// The binding is "last scene to build wins" (OgreGi.cpp), so when the
-    /// player page builds its own GI and the editor comes back, the editor's
-    /// scene would render with the player's voxels and probes. The host used to
-    /// answer that by re-pushing setGlobalIllumination, which rebuilds the whole
-    /// arm from scratch — 2-3 s of blocked UI on every page return. This is the
-    /// whole of what a page return needs: the arms this scene already built are
-    /// still valid, only the pointer the shader reads is not.
-    ///
-    /// A scene with no arm of a kind unbinds that kind (another scene's probes
-    /// must not light this one). A no-op, returning false, when this scene
-    /// already owns the binding; true when it re-pointed anything.
-    virtual bool        reassertGiBinding() = 0;
 
     /// "Has any object LEFT the volume that is currently lit?" — 0 when every
     /// GI item is inside it, otherwise a hash of the escapees' quantized world
