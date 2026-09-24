@@ -109,6 +109,30 @@ struct GatherParams {
 constexpr float kPlaneTolerance = 0.01f;
 constexpr float kNormalTolerance = 0.9f;
 
+/// IEEE half to float, for the readback (a test door; subnormals kept).
+float halfToFloat(uint16_t h) {
+    const uint32_t sign = uint32_t(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t mant = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0u) {
+        if (mant == 0u) bits = sign;
+        else {
+            exp = 127u - 15u + 1u;
+            while (!(mant & 0x400u)) { mant <<= 1; --exp; }
+            mant &= 0x3FFu;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 31u) {
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + 127u - 15u) << 23) | (mant << 13);
+    }
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -353,6 +377,12 @@ void ScreenProbeGather::drop(View &v) {
     mHost.gatherRetireBuffer(v.counter, v.counterMemory);
     mHost.gatherRetireBuffer(v.args, v.argsMemory);
     mHost.gatherRetireBuffer(v.readback, v.readbackMemory);
+    mHost.gatherRetireBuffer(v.irrReadback, v.irrReadbackMemory);
+    v.irrReadback = VK_NULL_HANDLE;
+    v.irrReadbackMemory = VK_NULL_HANDLE;
+    v.irrReadbackMapped = nullptr;
+    v.irrHost.clear();
+    v.irrHostFrame = 0u;
     v.records = v.counter = v.args = v.readback = VK_NULL_HANDLE;
     v.recordsMemory = v.counterMemory = v.argsMemory = v.readbackMemory = VK_NULL_HANDLE;
     v.readbackMapped = nullptr;
@@ -394,6 +424,17 @@ void ScreenProbeGather::readPending(View &v) {
             // smaller of the two.
             v.adaptiveAsked = appended;
             v.adaptiveLast = std::min(appended, v.adaptiveCap);
+            // ...AND THE IRRADIANCE READBACK of the same retired frame, decoded
+            // from half floats (a test door; see GatherTuning::readback).
+            if (v.pending[i].irradiance && v.irrReadbackMapped) {
+                const size_t texels = size_t(v.w) * v.h;
+                const uint16_t *src = reinterpret_cast<const uint16_t *>(
+                    static_cast<const char *>(v.irrReadbackMapped) + i * texels * 8u);
+                v.irrHost.resize(texels * 4u);
+                for (size_t k = 0; k < texels * 4u; ++k) v.irrHost[k] = halfToFloat(src[k]);
+                v.irrHostFrame = v.pending[i].gatherFrame;
+                v.pending[i].irradiance = false;
+            }
         }
     }
     if (!mTimestamps || !v.hasQueryBase) {
@@ -544,6 +585,10 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, GatherStatus &
         out.traceMs = v.traceMs;
         out.integrateMs = v.integrateMs;
         out.cpuMs = v.cpuMs;
+        out.irradiance = v.irrHost;
+        out.irradianceW = v.irrHost.empty() ? 0u : v.w;
+        out.irradianceH = v.irrHost.empty() ? 0u : v.h;
+        out.irradianceFrame = v.irrHostFrame;
         return;
     }
 }
@@ -1056,12 +1101,56 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     vkCmdDispatch(cmd, (in.width + 7u) / 8u, (in.height + 7u) / 8u, 1u);
     if (timed)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 5u);
+    // THE IRRADIANCE READBACK (a test door): the integrate's output, still in
+    // the GENERAL layout its storage writes left it in, copied into this frame's
+    // slot of a host ring and decoded once the frame has retired (readPending).
+    bool readbackThisFrame = false;
+    if (in.tuning.readback) {
+        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * 8u;
+        if (!v.irrReadback) {
+            std::string rerr;
+            if (!mHost.gatherMakeBuffer(slotBytes * kFramesInFlight,
+                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, v.irrReadback,
+                                        v.irrReadbackMemory, &v.irrReadbackMapped, rerr))
+                v.irrReadback = VK_NULL_HANDLE;
+        }
+        if (v.irrReadback) {
+            VkMemoryBarrier toCopy{};
+            toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0, nullptr, 0,
+                                 nullptr);
+            VkBufferImageCopy region{};
+            region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = { v.w, v.h, 1u };
+            vkCmdCopyImageToBuffer(
+                cmd, static_cast<Ogre::VulkanTextureGpu *>(v.irradiance)->getFinalTextureName(),
+                VK_IMAGE_LAYOUT_GENERAL, v.irrReadback, 1, &region);
+            // The host reads it after the frame retires; and the copy is ordered
+            // before whatever the layout transition below does to the image (an
+            // execution chain through the compute stage Ogre's barrier starts at).
+            VkMemoryBarrier toHost{};
+            toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &toHost, 0, nullptr, 0, nullptr);
+            readbackThisFrame = true;
+        }
+    }
     {
         // The pending record is written whether or not the device timestamps:
         // it is also what retires this frame's adaptive-count readback.
         View::Pending &pd = v.pending[v.frame % kFramesInFlight];
         pd.frame = mHost.gatherFrameNow();
         pd.live = true;
+        pd.irradiance = readbackThisFrame;
+        pd.gatherFrame = v.frame;
     }
     integrateWork.close();
 

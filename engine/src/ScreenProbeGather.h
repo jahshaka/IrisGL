@@ -31,6 +31,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #ifdef JAH_RAY_QUERY
 #    include <vulkan/vulkan.h>
@@ -223,9 +224,24 @@ private:
         unsigned adaptiveAsked = 0u;     ///< ...before the cap clamped it
         unsigned long long vramBytes = 0ull;
 
+        /// THE IRRADIANCE READBACK (GatherTuning::readback): a host-visible
+        /// ring of kFramesInFlight full-resolution copies, allocated on the first
+        /// frame that asks and freed with the view, and the last retired copy
+        /// decoded to floats for GatherStatus.
+        VkBuffer irrReadback = VK_NULL_HANDLE;
+        VkDeviceMemory irrReadbackMemory = VK_NULL_HANDLE;
+        void *irrReadbackMapped = nullptr;
+        std::vector<float> irrHost;
+        unsigned irrHostFrame = 0u;
+
         unsigned querySlot = 0u, queryBase = 0u;
         bool hasQueryBase = false;
-        struct Pending { uint32_t frame = 0u; bool live = false; };
+        struct Pending {
+            uint32_t frame = 0u;
+            bool live = false;
+            bool irradiance = false;     ///< this slot of the readback ring was written
+            unsigned gatherFrame = 0u;   ///< ...by this gather frame
+        };
         Pending pending[3];
         float placeMs = -1.0f, traceMs = -1.0f, integrateMs = -1.0f, cpuMs = -1.0f;
     };

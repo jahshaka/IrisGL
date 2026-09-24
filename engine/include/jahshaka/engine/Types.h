@@ -3150,6 +3150,15 @@ struct GatherTuning {
     /// reads the sky directly instead of tracing the far copies (the coarse
     /// levels) out to the far plane -- the A/B that prices the far field.
     bool     farQueryOff = false;
+    /// THE IRRADIANCE READBACK (PHOTON-GATHER-1b) -- a TEST AND TOOL door,
+    /// never a frame path: each gathered frame also copies the full-resolution
+    /// `probeIrradiance` target (rgb = E/pi, w = the coverage) into host memory,
+    /// and `GatherStatus::irradiance` carries the last RETIRED frame's copy (a
+    /// few frames late, like the timestamps). It is how a suite reads the
+    /// gather's own answer -- in the shader's units, before any material, light
+    /// or tonemap touches it -- and how determinism is asserted on the estimate
+    /// itself rather than on a picture.
+    bool     readback = false;
 };
 
 /// What the gather did on the last drawn frame of this scene.
@@ -3186,6 +3195,16 @@ struct GatherStatus {
     float traceMs = -1.0f;
     float integrateMs = -1.0f;
     float cpuMs = -1.0f;
+    /// THE READBACK (`GatherTuning::readback`): the last retired frame's
+    /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
+    /// mean radiance over the cosine-weighted hemisphere of the pixel's own
+    /// normal; w = 1 where probes answered, 0 where the fallback owns the
+    /// pixel). Empty without the readback, and until a frame has retired.
+    std::vector<float> irradiance;
+    unsigned irradianceW = 0u, irradianceH = 0u;
+    /// Which gather frame the readback is of (the view's frame counter), so a
+    /// suite can tell a fresh copy from a repeat.
+    unsigned irradianceFrame = 0u;
     /// WHY IT IS NOT RUNNING, when `on` is true and `running` is false and the
     /// reason is the engine's rather than the view's (no ray device, no
     /// pipelines on this driver, no room for the atlas). Empty is "nothing went
