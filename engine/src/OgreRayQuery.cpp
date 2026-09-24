@@ -81,7 +81,17 @@
 // file is its HOST (the device, the retire window, the frame's command buffer,
 // the TLAS) and the one that is friends with the scene it reads.
 #include "ScreenProbeGather.h"
+#include "SkinCache.h"
 #include "SurfaceCache.h"
+
+#include <Animation/OgreSkeletonInstance.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreHlmsManager.h>
+#include <OgreItem.h>
+#include <OgreResourceTransition.h>
+#include <OgreRoot.h>
+#include <OgreSubItem.h>
 
 #include <algorithm>
 #include <chrono>
@@ -105,8 +115,10 @@ inline double msSince(const Clock::time_point &t0) {
 /// Three is Ogre's own dynamic-buffer multiplier, i.e. the depth of the
 /// pipeline this work rides.
 constexpr unsigned kFramesInFlight = 3u;
-/// Two timestamps per pass (BLAS batch, TLAS), per frame slot.
-constexpr unsigned kQueriesPerFrame = 4u;
+/// Two timestamps per pass (BLAS batch, TLAS), per frame slot, then THE SKIN
+/// CACHE's three (PHOTON-SKIN-1): before the skin dispatch, between it and the
+/// skinned structures' builds/refits, and after them.
+constexpr unsigned kQueriesPerFrame = 8u;
 /// HOW MANY SCENES MAY HOLD TIMESTAMP SLOTS AT ONCE. The product case is more
 /// than one drawn scene per frame — the editor plus a material-preview or
 /// thumbnail scene — and each needs its OWN query range, or the second scene of
@@ -363,6 +375,47 @@ private:
         std::vector<uint32_t> geomRowOfSlot;
         unsigned  slot = 0;
 
+        /// THE GPU SKIN CACHE (PHOTON-SKIN-1, SkinCache.h): one entry per RIGGED
+        /// traced item, by NodeId — its posed vertex buffer, its row block in the
+        /// GPU scene, and ITS OWN bottom-level structure (a skinned item's BLAS
+        /// is per ITEM, never shared: two characters on one mesh wear two poses).
+        struct Skin {
+            /// THE CACHE'S IDENTITY is (Item, Mesh, the node's rig generation):
+            /// attachSkinnedMesh re-attaches IN PLACE (detachItem, then createItem),
+            /// so a new Item can land at the old one's address — the pointer alone
+            /// would keep a cache sized and addressed for a mesh that may be gone.
+            Ogre::Item *item = nullptr;
+            const Ogre::Mesh *mesh = nullptr;
+            unsigned long long rigGeneration = 0ull;
+            /// What the cache and its structure were built over, re-checked against
+            /// the live VAO on every pass before anything is skinned or refit.
+            const Ogre::IndexBufferPacked *indices = nullptr;
+            SkinCacheBuffer buf;
+            uint32_t rowBlock = 0xFFFFFFFFu;  ///< the GpuScene row block (a mesh-table entry)
+            uint32_t row = 0xFFFFFFFFu;       ///< its level-0/submesh-0 row: the override
+            unsigned long long poseSerial = 0ull;
+            bool skinned = false;             ///< the job has written it at least once
+            bool seen = false;                ///< in this pass's traced set
+            /// The structure, built once from the cache with ALLOW_UPDATE and
+            /// REFIT in place on every pose change after that. Its own scratch,
+            /// sized for both, so a refit allocates nothing.
+            VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+            RawBuffer storage, scratch;
+            VkDeviceAddress address = 0;
+            bool built = false;
+            unsigned triangles = 0;
+        };
+        std::unordered_map<uint32_t, Skin> skins;
+        /// What the instance writer reads for a rigged slot: the skin BLAS and the
+        /// row, for the entries READY this pass (built and skinned).
+        std::unordered_map<uint32_t, std::pair<VkDeviceAddress, uint32_t>> skinUse;
+        /// The job's two inputs, grown by doubling (Ogre UAV buffers: the job is an
+        /// HlmsComputeJob) and the VaoManager that made them.
+        Ogre::VaoManager *skinVao = nullptr;
+        Ogre::UavBufferPacked *skinJobs = nullptr;
+        Ogre::UavBufferPacked *skinPalette = nullptr;
+        uint32_t skinJobCap = 0, skinPaletteCap = 0;
+
         /// The gate: nothing moved, no item changed and no instance's RAY LEVEL
         /// changed since the last update, so there is nothing to record. The
         /// caster walk's epoch plus the ray rule's refit count.
@@ -385,6 +438,7 @@ private:
         bool     hasQueryBase = false;
         struct PendingTimes {
             unsigned frame = 0; bool blas = false; bool tlas = false; bool live = false;
+            bool skin = false;   ///< queries 4..6: the skin dispatch and the skinned builds
         };
         PendingTimes pending[kFramesInFlight];
 
@@ -407,6 +461,21 @@ private:
     bool runCompaction(SceneAs &sa, VkCommandBuffer cmd);
     bool buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::string &err);
     void readTimestamps(SceneAs &sa);
+    /// THE SKIN CACHE's frame (PHOTON-SKIN-1): reconciles the rigged traced set
+    /// with `sa.skins`, re-skins every item whose POSE moved (one dispatch for all
+    /// of them) and builds or refits their structures — all recorded into `cmd`
+    /// before the gather that references them. Timestamps into `qBase` + 4..6
+    /// when `timed`. Returns false only when the frame must not trace skinned
+    /// items at all (the job is missing); the entries simply stay unready then.
+    bool skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed, unsigned qBase,
+                  std::string &err);
+    /// Frees one entry: its structure retired, its buffer destroyed (Ogre's
+    /// delayed destruction), its row block handed back and the node's override
+    /// cleared. `scene` may be null (the tier's close: the GpuScene dies with it).
+    void dropSkin(OgreScene *scene, SceneAs &sa, uint32_t node, SceneAs::Skin &sk);
+    void dropSkinBuffers(SceneAs &sa);
+    /// The pose serial a cache is keyed on (own + a shared skeleton's master).
+    static unsigned long long skinPoseSerial(const OgreScene *scene, const OgreScene::Node &n);
 
     /// Ogre's frame command buffer, with every encoder closed first: an
     /// acceleration-structure build may not be recorded inside a render pass,
@@ -1374,6 +1443,19 @@ void RayQueryTier::close() {
         dropBuffer(sa.tlasStorage);
         dropBuffer(sa.tlasScratch);
         dropBuffer(sa.instances);
+        // THE SKIN CACHES, destroyed outright (the device is idle): the scene the
+        // map is keyed by may already be gone, so the GpuScene side is not
+        // touched — its tables die with it.
+        for (auto &skv : sa.skins) {
+            SceneAs::Skin &sk = skv.second;
+            if (sk.as) mFn.destroyAccelerationStructure(mVk, sk.as, nullptr);
+            sk.as = VK_NULL_HANDLE;
+            dropBuffer(sk.storage);
+            dropBuffer(sk.scratch);
+            destroySkinCacheBuffer(sa.skinVao, sk.buf);
+        }
+        sa.skins.clear();
+        dropSkinBuffers(sa);
     }
     mScenes.clear();
     for (auto &kv : mReflects) dropReflect(kv.second);
@@ -1513,6 +1595,13 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     retire(sa.tlas, sa.tlasStorage);
     retire(sa.tlasScratch);
     retire(sa.instances);
+    // THE SKIN CACHES (PHOTON-SKIN-1): each hands back its structure, its buffer
+    // and its row block, and clears its node's override — the rows stop naming
+    // a posed copy nobody will update again.
+    for (auto &kv : sa.skins) dropSkin(scene, sa, kv.first, kv.second);
+    sa.skins.clear();
+    sa.skinUse.clear();
+    dropSkinBuffers(sa);
     // The compaction slots this scene still owed a read are never going to be
     // read; hand them back or the ring leaks capacity until compaction stops
     // for EVERY scene (round 3, finding 1: a parked preview did exactly that).
@@ -1541,6 +1630,11 @@ struct InstanceWriter final {
     std::vector<std::pair<const Ogre::Mesh *, float>> *coarseBound = nullptr;
     /// The per-slot geometry row of the near copy (SceneAs::geomRowOfSlot).
     std::vector<uint32_t> *geomRowOfSlot = nullptr;
+    /// THE SKIN CACHE's ready entries by NodeId (SceneAs::skinUse): a rigged
+    /// slot's structure and row. A rigged slot NOT in it is not written at all.
+    const std::unordered_map<uint32_t, std::pair<VkDeviceAddress, uint32_t>> *skinUse = nullptr;
+    /// Rigged slots written this gather (the status's count).
+    unsigned skinned = 0;
     unsigned long long signature = 1469598103934665603ull;   // FNV-1a offset basis
     /// THE SIGNATURE IS ONLY EVER READ TO DECIDE REFIT-vs-REBUILD. A rebuild is
     /// the default (NVIDIA's own guidance for a TLAS, and 0.2-0.35 ms even at
@@ -1563,6 +1657,26 @@ struct InstanceWriter final {
     void hash(unsigned long long v) {
         signature ^= v;
         signature *= 1099511628211ull;
+    }
+
+    /// ONE INSTANCE OVER A STRUCTURE THAT IS NOT THE (MESH, LEVEL) TABLE'S — a
+    /// rigged item's own skinned BLAS (PHOTON-SKIN-1). Its address is known when
+    /// the gather runs (the skin pass creates the structure first), so there is
+    /// nothing to patch.
+    void addDirect(VkDeviceAddress address, bool far, const float *world, unsigned mask,
+                   unsigned customIndex) {
+        const unsigned idx = count++;
+        if (far) ++farCount;
+        if (idx >= capacity) { ++overflow; return; }
+        VkAccelerationStructureInstanceKHR inst{};
+        std::memcpy(&inst.transform.matrix[0][0], world, 12u * sizeof(float));
+        inst.instanceCustomIndex = customIndex & 0xFFFFFFu;
+        inst.mask = mask & 0xFFu;
+        inst.instanceShaderBindingTableRecordOffset = 0;
+        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        inst.accelerationStructureReference = address;
+        if (wantSignature) { hash(0xA24BAED4963EE407ull ^ address); hash(customIndex); hash(mask); }
+        std::memcpy(&dst[idx], &inst, sizeof(inst));
     }
 
     /// ONE-ENTRY MEMO PER COPY KIND (0 near, 1 far). The map lookup below was
@@ -1650,10 +1764,9 @@ struct InstanceWriter final {
 /// exact layout an instance descriptor takes, so this loop is a flags test and a
 /// memcpy per slot and asks Ogre nothing at all.
 ///
-/// WHAT IS IN AND WHAT IS OUT has not moved a bit: `kGpuRayTraced` IS the old
-/// conjunction — carries kVisibleBit or kMovableBit, shown, below the overlay
-/// queues, not skinned (a BLAS reads the mesh's bind pose, so a walking
-/// character would cast a T-pose shadow: audit C-5), not alpha-tested (every
+/// WHAT IS IN AND WHAT IS OUT: `kGpuRayTraced` IS the old conjunction —
+/// carries kVisibleBit or kMovableBit, shown, below the overlay queues, not
+/// alpha-tested (every
 /// BLAS is VK_GEOMETRY_OPAQUE_BIT_KHR and the rays use gl_RayFlagsOpaqueEXT, so
 /// a cut-out leaf would intersect as a solid quad: audit C-16), and it has a
 /// mesh. Editor furniture, the backdrop, the sun disc and distortion objects
@@ -1673,6 +1786,13 @@ struct InstanceWriter final {
 ///     launch that asks for the far field (the gather's second query, past its
 ///     near length) sees it; no near launch can hit a far copy, so no ray is
 ///     answered twice by one object.
+///
+/// A RIGGED ITEM (PHOTON-SKIN-1) is traced through ITS OWN structure, built from
+/// its skin cache (the posed vertices) — the near AND the far copy, since the
+/// cache is one level and a character is small — and its per-slot row is the
+/// cache's. A rigged slot whose cache is not ready this frame is NOT WRITTEN: it
+/// is never traced at the mesh's bind pose (audit C-5's T-pose), which is the
+/// exclusion's whole reason and the only fallback there is.
 ///
 /// `instanceCustomIndex` is the SLOT on BOTH copies — the index of the object's
 /// entry in the table, so a hit shader reads the object's bounds, its previous
@@ -1696,6 +1816,16 @@ static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
         unsigned mask = kRayMaskNear;
         mask |= (flags & detail::kGpuCaster) ? kRayMaskCaster : 0u;
         mask |= (flags & detail::kGpuMover) ? kRayMaskMover : kRayMaskStill;
+        if (flags & detail::kGpuSkinned) {
+            if (!w.skinUse) continue;
+            auto sit = w.skinUse->find(e.ids[0]);
+            if (sit == w.skinUse->end()) continue;
+            w.addDirect(sit->second.first, false, e.world, mask, i);
+            w.addDirect(sit->second.first, true, e.world, kRayMaskFar, i);
+            if (w.geomRowOfSlot) (*w.geomRowOfSlot)[i] = sit->second.second;
+            ++w.skinned;
+            continue;
+        }
         const uint32_t coarsest = coarsestLevelOf(mesh.get());
         const uint32_t nearLevel = std::min(scene->rayLevelOf(i), coarsest);
         w.add(mesh, nearLevel, false, e.world, mask, i);
@@ -2162,6 +2292,460 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
 }
 
 // ---------------------------------------------------------------------------
+// THE GPU SKIN CACHE (PHOTON-SKIN-1, RY-R4; SkinCache.h has the design).
+namespace {
+/// A UAV binding for the skin job (the voxel gather's shape).
+Ogre::DescriptorSetUav::BufferSlot skinSlot(Ogre::UavBufferPacked *buffer,
+                                            Ogre::ResourceAccess::ResourceAccess access) {
+    Ogre::DescriptorSetUav::BufferSlot slot = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+    slot.buffer = buffer;
+    slot.offset = 0;
+    slot.sizeBytes = 0;
+    slot.access = access;
+    return slot;
+}
+constexpr uint32_t kSkinThreadsPerGroup = 64u;   // the job's threads_per_group x
+}  // namespace
+
+/// THE POSE SERIAL a cache is keyed on: the node's own pose pushes AND, for a
+/// shareSkeleton follower (an armour or clothing piece posed by the MASTER's
+/// instance), the master's — the recipe the caster walk uses (OgreGi.cpp,
+/// walkItems). The follower's own poseEpoch never moves when the body's clip
+/// does, so keyed on it alone the piece would be skinned once and frozen.
+unsigned long long RayQueryTier::skinPoseSerial(const OgreScene *scene, const OgreScene::Node &n) {
+    unsigned long long pose = n.poseEpoch;
+    if (n.shareSource) {
+        auto sit = scene->mNodes.find(n.shareSource);
+        if (sit != scene->mNodes.end()) pose = pose * 1000003ull + sit->second.poseEpoch;
+    }
+    return pose;
+}
+
+void RayQueryTier::dropSkin(OgreScene *scene, SceneAs &sa, uint32_t node, SceneAs::Skin &sk) {
+    if (sk.as) retire(sk.as, sk.storage);
+    retire(sk.scratch);
+    sk.address = 0;
+    sk.built = false;
+    destroySkinCacheBuffer(sa.skinVao, sk.buf);
+    if (scene && scene->mGpuScene.live()) {
+        detail::GpuScene &gs = scene->mGpuScene;
+        if (gs.skinRowOf(node) != detail::GpuScene::kNoGeomRow) {
+            gs.setSkinRow(node, detail::GpuScene::kNoGeomRow);
+            // The override goes with the cache: the node's entry is re-composed
+            // (if the node still has an Item) on the next scan.
+            auto nit = scene->mNodes.find(NodeId(node));
+            if (nit != scene->mNodes.end()) scene->markGpuSlotDirty(nit->second);
+        }
+        if (sk.rowBlock != 0xFFFFFFFFu) gs.releaseRowBlock(sk.rowBlock);
+    }
+    sk.rowBlock = sk.row = 0xFFFFFFFFu;
+}
+
+void RayQueryTier::dropSkinBuffers(SceneAs &sa) {
+    if (sa.skinVao) {
+        if (sa.skinJobs) sa.skinVao->destroyUavBuffer(sa.skinJobs);
+        if (sa.skinPalette) sa.skinVao->destroyUavBuffer(sa.skinPalette);
+    }
+    sa.skinJobs = sa.skinPalette = nullptr;
+    sa.skinJobCap = sa.skinPaletteCap = 0;
+}
+
+bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed,
+                            unsigned qBase, std::string &err) {
+    sa.skinUse.clear();
+    sa.st.skinLastItems = 0;
+    sa.st.skinLastVertices = 0;
+    for (auto &kv : sa.skins) kv.second.seen = false;
+    detail::GpuScene &gs = scene->mGpuScene;
+    if (!gs.live()) return true;
+
+    // 1. THE RIGGED TRACED SET, out of the GPU scene's mirror (current: the scan
+    //    ran this frame, just before this tier). The flags word is the one place
+    //    the predicates live; kGpuRayTraced no longer excludes a rigged item.
+    struct Want { uint32_t slot; OgreScene::Node *node; };
+    std::vector<Want> wants;
+    const detail::GpuInstance *mirror = gs.mirrorData();
+    const uint32_t slots = std::min<uint32_t>(gs.slotCount(), uint32_t(scene->mItemNodes.size()));
+    for (uint32_t i = 0; i < slots; ++i) {
+        Ogre::uint32 flags;
+        std::memcpy(&flags, &mirror[i].boundsMax[3], sizeof(flags));
+        if ((flags & (detail::kGpuRayTraced | detail::kGpuSkinned)) !=
+            (detail::kGpuRayTraced | detail::kGpuSkinned))
+            continue;
+        OgreScene::Node *n = scene->mItemNodes[i];
+        if (!n || !n->item || !n->item->getSkeletonInstance()) continue;
+        wants.push_back({ i, n });
+    }
+    if (wants.empty()) return true;
+
+    Ogre::VaoManager *vao = mRs ? mRs->getVaoManager() : nullptr;
+    Ogre::HlmsManager *hm = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getHlmsManager()
+                                                          : nullptr;
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow("Jahshaka/SkinCache") : nullptr;
+    if (!vao || !vao->supportsBufferDeviceAddress()) {
+        sa.st.skinReason = "no buffer device addresses on this device";
+        return true;
+    }
+    if (!job) {
+        sa.st.skinReason = "the Jahshaka/SkinCache job is missing from the staged media";
+        err = sa.st.skinReason;
+        return false;
+    }
+    if (sa.skinVao && sa.skinVao != vao) dropSkinBuffers(sa);
+    sa.skinVao = vao;
+    sa.st.skinReason.clear();
+
+    // 2. RECONCILE: a cache per rigged traced item, created on first sight (or
+    //    when the Item behind the node was rebuilt), marked seen; the ones not
+    //    seen are dropped AFTER the gather (updateScene).
+    struct Dirty { uint32_t node; SceneAs::Skin *sk; OgreScene::Node *n; };
+    std::vector<Dirty> dirty;
+    bool rowsStaged = false;
+    for (const Want &wt : wants) {
+        const uint32_t node = uint32_t(wt.node->selfId);
+        auto it = sa.skins.find(node);
+        // THE IDENTITY, AND THE SOURCE IT WAS BUILT OVER (a mismatch in any of them
+        // drops the cache and makes a new one this pass): a refit over an index
+        // buffer the mesh released, or a job over a source with fewer vertices
+        // than the cache, is a read of freed or foreign memory — an Xid, never a
+        // validation error.
+        const Ogre::VertexArrayObject *liveVao =
+            (wt.node->item->getMesh() && wt.node->item->getMesh()->getNumSubMeshes() &&
+             !wt.node->item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal].empty())
+                ? wt.node->item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal][0]
+                : nullptr;
+        if (it != sa.skins.end() &&
+            (it->second.item != wt.node->item ||
+             it->second.mesh != wt.node->item->getMesh().get() ||
+             it->second.rigGeneration != wt.node->rigGeneration || !liveVao ||
+             liveVao->getIndexBuffer() != it->second.indices ||
+             liveVao->getVertexBuffers().empty() ||
+             uint32_t(liveVao->getVertexBuffers()[0]->getNumElements()) != it->second.buf.vertexCount)) {
+            dropSkin(scene, sa, node, it->second);
+            sa.skins.erase(it);
+            it = sa.skins.end();
+        }
+        if (it == sa.skins.end()) {
+            SceneAs::Skin sk;
+            sk.item = wt.node->item;
+            sk.mesh = wt.node->item->getMesh().get();
+            sk.rigGeneration = wt.node->rigGeneration;
+            sk.indices = liveVao ? liveVao->getIndexBuffer() : nullptr;
+            std::string why;
+            if (!createSkinCacheBuffer(vao, sk.item, sk.buf, why)) {
+                // Not traced — and said so once per item, never at bind pose.
+                sa.st.skinReason = why;
+                continue;
+            }
+            std::vector<std::vector<uint32_t>> rows;
+            sk.rowBlock = gs.acquireRowBlock();
+            if (sk.rowBlock == detail::GpuScene::kNoMesh ||
+                !describeSkinCacheRows(vao, sk.item, sk.buf, rows) || rows.empty() ||
+                rows[0].size() != detail::GpuScene::kGeomRowWords) {
+                sa.st.skinReason = "the skin cache's geometry rows could not be described";
+                if (sk.rowBlock != detail::GpuScene::kNoMesh) gs.releaseRowBlock(sk.rowBlock);
+                destroySkinCacheBuffer(vao, sk.buf);
+                continue;
+            }
+            for (size_t l = 0; l < rows.size() && l < detail::GpuScene::kLevelsPerMesh; ++l)
+                if (rows[l].size() == detail::GpuScene::kGeomRowWords)
+                    gs.stageGeomRow(detail::GpuScene::geomRowIndex(sk.rowBlock, uint32_t(l), 0u),
+                                    rows[l].data());
+            sk.row = detail::GpuScene::geomRowIndex(sk.rowBlock, 0u, 0u);
+            gs.setSkinRow(node, sk.row);
+            scene->markGpuSlotDirty(*wt.node);
+            rowsStaged = true;
+            it = sa.skins.emplace(node, std::move(sk)).first;
+        }
+        SceneAs::Skin &sk = it->second;
+        sk.seen = true;
+        // THE POSE SERIAL: bumped by every pose push (clip time, weights, manual
+        // bones — OgreScene::noteNodePosed). A walk moves the node, not the pose,
+        // and costs nothing here: the cache is in the item's LOCAL space.
+        const unsigned long long serial = skinPoseSerial(scene, *wt.node);
+        if (!sk.skinned || !sk.built || serial != sk.poseSerial) dirty.push_back({ node, &sk, wt.node });
+    }
+    // A row not on the device is a zero address to the job (the ATOM-VOXEL-2 Xid):
+    // the new rows go up NOW, before anything below binds the table.
+    if (rowsStaged) gs.flushGeomRows();
+
+    if (!dirty.empty()) {
+        // 3. THE PALETTE: Ogre's own bone matrices for the renderable — the SAME
+        //    `SkeletonInstance::_getBoneFullTransform` values, in the SAME
+        //    blend-index order, that HlmsPbs::fillBuffersForV2 streams into its
+        //    per-pass buffer for the vertex shader (PREMISE 1's verdict: that
+        //    buffer is a per-PASS ring written only for a DRAWN renderable, at an
+        //    offset only the draw knows — a character off screen, the one a
+        //    mirror or a shadow ray most needs, has no palette in it at all — so
+        //    the values are taken from their source instead of the buffer) —
+        //    taken back into the item's local space by the node's inverse world.
+        std::vector<float> palette;
+        std::vector<SkinJobRecord> jobs;
+        uint32_t maxVerts = 0u;
+        for (Dirty &d : dirty) {
+            Ogre::Item *item = d.sk->item;
+            Ogre::SkeletonInstance *skel = item->getSkeletonInstance();
+            const Ogre::SubItem *sub = item->getNumSubItems() ? item->getSubItem(0) : nullptr;
+            const Ogre::RenderableAnimated::IndexMap *map =
+                sub ? sub->getBlendIndexToBoneIndexMap() : nullptr;
+            Ogre::Node *parent = item->getParentNode();
+            if (!skel || !map || map->empty() || !parent) { d.sk = nullptr; continue; }
+            const Ogre::Matrix4 invWorld = parent->_getFullTransform().inverseAffine();
+            SkinJobRecord r;
+            r.sourceRow = gs.meshIndex(item->getMesh().get()) == detail::GpuScene::kNoMesh
+                              ? detail::GpuScene::kNoGeomRow
+                              : detail::GpuScene::geomRowIndex(gs.meshIndex(item->getMesh().get()), 0u, 0u);
+            if (r.sourceRow == detail::GpuScene::kNoGeomRow) { d.sk = nullptr; continue; }
+            r.vertexCount = d.sk->buf.vertexCount;
+            r.paletteBase = uint32_t(palette.size() / 4u);
+            r.cacheAddressLo = uint32_t(d.sk->buf.address & 0xFFFFFFFFull);
+            r.cacheAddressHi = uint32_t(d.sk->buf.address >> 32u);
+            r.tangentOffset = d.sk->buf.tangentOffset;
+            r.blendOffsets = (d.sk->buf.blendIndexOffset & 0xFFFFu) |
+                             ((d.sk->buf.blendWeightOffset & 0xFFFFu) << 16u);
+            r.boneCount = uint32_t(map->size());
+            for (size_t b = 0; b < map->size(); ++b) {
+                // store4x3, not streamTo4x3: the stream form is a non-temporal
+                // store meant for a mapped GPU buffer; this is a stack copy.
+                alignas(16) float m[12];
+                skel->_getBoneFullTransform((*map)[b]).store4x3(m);
+                const Ogre::Matrix4 world(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8],
+                                          m[9], m[10], m[11], 0.0f, 0.0f, 0.0f, 1.0f);
+                const Ogre::Matrix4 local = invWorld.concatenateAffine(world);
+                for (int row = 0; row < 3; ++row)
+                    for (int col = 0; col < 4; ++col) palette.push_back(float(local[row][col]));
+            }
+            jobs.push_back(r);
+            maxVerts = std::max(maxVerts, r.vertexCount);
+        }
+
+        if (!jobs.empty()) {
+            // 4. THE INPUTS, grown by doubling and uploaded (Ogre's staging copy,
+            //    ordered in the command stream before the dispatch that reads them).
+            const uint32_t paletteRows = uint32_t(palette.size() / 4u);
+            if (paletteRows > sa.skinPaletteCap) {
+                uint32_t cap = std::max(sa.skinPaletteCap, 1024u);
+                while (cap < paletteRows) cap *= 2u;
+                if (sa.skinPalette) vao->destroyUavBuffer(sa.skinPalette);
+                sa.skinPalette = vao->createUavBuffer(cap, 4u * sizeof(float), 0, nullptr, false);
+                sa.skinPaletteCap = cap;
+            }
+            if (uint32_t(jobs.size()) > sa.skinJobCap) {
+                uint32_t cap = std::max(sa.skinJobCap, 8u);
+                while (cap < uint32_t(jobs.size())) cap *= 2u;
+                if (sa.skinJobs) vao->destroyUavBuffer(sa.skinJobs);
+                sa.skinJobs = vao->createUavBuffer(cap, sizeof(SkinJobRecord), 0, nullptr, false);
+                sa.skinJobCap = cap;
+            }
+            sa.skinPalette->upload(palette.data(), 0, paletteRows);
+            sa.skinJobs->upload(jobs.data(), 0, jobs.size());
+
+            // 5. WRITE-AFTER-READ, explicitly: last frame's readers of these very
+            //    caches (the skinned builds, and the ray jobs' hit decode through
+            //    the rows) are in earlier submissions on this queue; the job below
+            //    must not overwrite what they have not read. Ogre's barrier solver
+            //    cannot see a buffer written through a device address (F5's lesson).
+            cmd = frameCmd();
+            if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 4u);
+            VkMemoryBarrier war{};
+            war.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            war.srcAccessMask = 0;
+            war.dstAccessMask = 0;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                     VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &war, 0, nullptr, 0,
+                                 nullptr);
+
+            // 6. THE DISPATCH: x = vertices, y = items. The geometry table is
+            //    re-read immediately before binding (a grow re-creates it — the
+            //    ATOM-VOXEL-2 trap) and every binding is dropped afterwards (the job
+            //    outlives the buffers a later grow destroys).
+            JAH_TRY {
+                job->_setUavBuffer(0u, skinSlot(sa.skinJobs, Ogre::ResourceAccess::Read));
+                job->_setUavBuffer(1u, skinSlot(gs.geomBuffer(), Ogre::ResourceAccess::Read));
+                job->_setUavBuffer(2u, skinSlot(sa.skinPalette, Ogre::ResourceAccess::Read));
+                job->setNumThreadGroups((maxVerts + kSkinThreadsPerGroup - 1u) / kSkinThreadsPerGroup,
+                                        uint32_t(jobs.size()), 1u);
+                Ogre::ResourceTransitionArray &rt =
+                    mRs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+                job->analyzeBarriers(rt);
+                mRs->executeResourceTransition(rt);
+                hc->dispatch(job, nullptr, nullptr);
+                job->clearUavBuffers();
+            }
+            catch (Ogre::Exception &e) {
+                job->clearUavBuffers();
+                err = "skin cache: " + e.getFullDescription();
+                sa.st.skinReason = err;
+                cmd = frameCmd();
+                return false;
+            }
+
+            // 7. PREMISE 2: the job's writes through the cache's device address are
+            //    invisible to Ogre, so the edge to every reader is OURS — the
+            //    skinned structures' builds below (vertex input to an AS build is
+            //    SHADER_READ at the build stage) and the ray jobs' hit decode later
+            //    this frame (compute). No VERTEX_INPUT edge: nothing draws the cache.
+            cmd = frameCmd();
+            VkMemoryBarrier raw{};
+            raw.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            raw.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            raw.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &raw, 0, nullptr, 0, nullptr);
+            if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 5u);
+            ++sa.st.skinDispatches;
+            for (const Dirty &d : dirty) {
+                if (!d.sk) continue;
+                d.sk->skinned = true;
+                d.sk->poseSerial = skinPoseSerial(scene, *d.n);
+                ++sa.st.skinPasses;
+                ++sa.st.skinLastItems;
+                sa.st.skinLastVertices += d.sk->buf.vertexCount;
+            }
+        }
+
+        // 8. THE STRUCTURES: built once (PREFER_FAST_TRACE | ALLOW_UPDATE) and
+        //    REFIT in place on every later pose change — one batch, each with its
+        //    own scratch so no two alias. A refit keeps the address, so the
+        //    instance the gather writes needs nothing else.
+        std::vector<VkAccelerationStructureBuildGeometryInfoKHR> builds;
+        std::vector<VkAccelerationStructureGeometryKHR> geoms;
+        std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+        builds.reserve(dirty.size());
+        geoms.reserve(dirty.size());
+        ranges.reserve(dirty.size());
+        for (const Dirty &d : dirty) {
+            if (!d.sk || !d.sk->skinned) continue;
+            SceneAs::Skin &sk = *d.sk;
+            Ogre::VertexArrayObject *vaoSrc =
+                sk.item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal][0];
+            Ogre::IndexBufferPacked *ib = vaoSrc->getIndexBuffer();
+            Ogre::VulkanBufferInterface *ibi =
+                static_cast<Ogre::VulkanBufferInterface *>(ib->getBufferInterface());
+            const uint32_t tris = uint32_t(vaoSrc->getPrimitiveCount() / 3u);
+            if (!ibi || !tris) continue;
+            VkAccelerationStructureGeometryKHR g{};
+            g.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+            g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+            g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+            g.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+            g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+            g.geometry.triangles.vertexData.deviceAddress = VkDeviceAddress(sk.buf.address);
+            g.geometry.triangles.vertexStride = kSkinCacheStride;
+            g.geometry.triangles.maxVertex = sk.buf.vertexCount - 1u;
+            g.geometry.triangles.indexType = ib->getIndexType() == Ogre::IndexBufferPacked::IT_16BIT
+                                                 ? VK_INDEX_TYPE_UINT16
+                                                 : VK_INDEX_TYPE_UINT32;
+            g.geometry.triangles.indexData.deviceAddress =
+                addressOf(ibi->getVboName()) +
+                VkDeviceSize(ib->_getFinalBufferStart()) * ib->getBytesPerElement() +
+                VkDeviceSize(vaoSrc->getPrimitiveStart()) * ib->getBytesPerElement();
+            VkAccelerationStructureBuildGeometryInfoKHR b{};
+            b.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+            b.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+            b.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                      VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+            b.geometryCount = 1;
+            if (!sk.as) {
+                VkAccelerationStructureBuildSizesInfoKHR sizes{};
+                sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+                b.pGeometries = &g;
+                mFn.getBuildSizes(mVk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &b, &tris, &sizes);
+                const VkDeviceSize align = std::max<VkDeviceSize>(
+                    mAsProps.minAccelerationStructureScratchOffsetAlignment, 1u);
+                if (!makeBuffer(sizes.accelerationStructureSize,
+                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, true,
+                                sk.storage, err) ||
+                    !makeBuffer(std::max(sizes.buildScratchSize, sizes.updateScratchSize) + align,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, true, sk.scratch, err)) {
+                    dropBuffer(sk.storage);
+                    dropBuffer(sk.scratch);
+                    continue;
+                }
+                VkAccelerationStructureCreateInfoKHR ci{};
+                ci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+                ci.buffer = sk.storage.buffer;
+                ci.size = sizes.accelerationStructureSize;
+                ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                if (mFn.createAccelerationStructure(mVk, &ci, nullptr, &sk.as) != VK_SUCCESS) {
+                    sk.as = VK_NULL_HANDLE;
+                    dropBuffer(sk.storage);
+                    dropBuffer(sk.scratch);
+                    err = "rayquery: vkCreateAccelerationStructureKHR (skinned BLAS) failed";
+                    continue;
+                }
+                VkAccelerationStructureDeviceAddressInfoKHR ai{};
+                ai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+                ai.accelerationStructure = sk.as;
+                sk.address = mFn.getAsDeviceAddress(mVk, &ai);
+                sk.built = false;
+            }
+            const VkDeviceSize align = std::max<VkDeviceSize>(
+                mAsProps.minAccelerationStructureScratchOffsetAlignment, 1u);
+            b.mode = sk.built ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                              : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+            b.srcAccelerationStructure = sk.built ? sk.as : VK_NULL_HANDLE;
+            b.dstAccelerationStructure = sk.as;
+            b.scratchData.deviceAddress = (addressOf(sk.scratch.buffer) + align - 1) / align * align;
+            if (sk.built) ++sa.st.skinRefits; else ++sa.st.skinBlasBuilds;
+            sk.built = true;
+            sk.triangles = tris;
+            geoms.push_back(g);
+            VkAccelerationStructureBuildRangeInfoKHR r{};
+            r.primitiveCount = tris;
+            ranges.push_back(r);
+            builds.push_back(b);
+        }
+        if (!builds.empty()) {
+            std::vector<const VkAccelerationStructureBuildRangeInfoKHR *> rangePtrs;
+            for (size_t i = 0; i < builds.size(); ++i) {
+                builds[i].pGeometries = &geoms[i];
+                rangePtrs.push_back(&ranges[i]);
+            }
+            // Last frame's build or refit of the same structure (and the traces
+            // that read it) before this one rewrites it in place.
+            VkMemoryBarrier pre{};
+            pre.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            pre.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                                VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            pre.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                                VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &pre, 0,
+                                 nullptr, 0, nullptr);
+            mFn.cmdBuild(cmd, uint32_t(builds.size()), builds.data(), rangePtrs.data());
+            // BUILD -> the TLAS build that references them (buildTlas' own pre
+            // barrier covers it too; this one is the skinned structures' own).
+            VkMemoryBarrier post{};
+            post.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            post.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+            post.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &post, 0, nullptr, 0, nullptr);
+        }
+        if (timed && sa.st.skinLastItems > 0)
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 6u);
+    }
+
+    // 9. WHAT THE GATHER MAY WRITE: the entries skinned AND built.
+    for (auto &kv : sa.skins) {
+        const SceneAs::Skin &sk = kv.second;
+        if (sk.seen && sk.skinned && sk.built && sk.as && sk.address)
+            sa.skinUse.emplace(kv.first, std::make_pair(sk.address, sk.row));
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 /// Reads back the timestamp pairs a frame old enough to have finished wrote —
 /// with the availability bit, NEVER with a wait.
 void RayQueryTier::readTimestamps(SceneAs &sa) {
@@ -2183,6 +2767,10 @@ void RayQueryTier::readTimestamps(SceneAs &sa) {
         };
         if (p.blas) span(0, 1, sa.st.blasMs);
         if (p.tlas) span(2, 3, sa.st.tlasMs);
+        if (p.skin) {
+            span(4, 5, sa.st.skinMs);
+            span(5, 6, sa.st.skinRefitMs);
+        }
         p.live = false;
     }
 }
@@ -2266,12 +2854,40 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     sa.slot = (sa.slot + 1u) % kFramesInFlight;
     const uint32_t frame = frameNow();
 
+    // THIS FRAME'S TIMESTAMP RANGE, reset once and before anything writes into
+    // it: the skin pass below writes its three before the gather's four.
+    const bool timed = mTimestamps && sa.hasQueryBase;
+    const unsigned ring = frame % kFramesInFlight;
+    const unsigned qBase = sa.queryBase + ring * kQueriesPerFrame;
+    if (timed) vkCmdResetQueryPool(cmd, mTimestamps, qBase, kQueriesPerFrame);
+    SceneAs::PendingTimes &pend = sa.pending[ring];
+    pend = SceneAs::PendingTimes();
+    pend.frame = frame;
+    pend.live = timed;
+
     std::string err;
+    // THE SKIN CACHE FIRST (PHOTON-SKIN-1): the gather writes the rigged items'
+    // structure addresses, so those structures must exist — and be built or
+    // refit over THIS frame's pose — before it runs. The bones are current here:
+    // updateSceneGraph has run (updateAllAnimations) and nothing has rendered.
+    {
+        monitor::CacheScope scope(CacheKind::Gi, WorkReason::Moved, 0, "rq.skin", mRs);
+        const unsigned long long before = sa.st.skinPasses;
+        const Clock::time_point tSkin = Clock::now();
+        if (!skinPass(scene, sa, cmd, timed, qBase, err) && !err.empty())
+            Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
+        if (sa.st.skinPasses != before) sa.st.skinCpuMs = float(msSince(tSkin));
+        pend.skin = sa.st.skinPasses != before;
+        scope.setUnits(unsigned(sa.st.skinPasses - before));
+        if (sa.st.skinPasses == before) scope.cancel();
+    }
+
     for (int attempt = 0; attempt < 2; ++attempt) {
         InstanceWriter w;
         w.blasOf = &sa.blasOf;
         w.coarseBound = &sa.coarseBound;
         w.geomRowOfSlot = &sa.geomRowOfSlot;
+        w.skinUse = &sa.skinUse;
         std::vector<VkDeviceAddress> addresses;
         addresses.reserve(sa.blas.size());
         for (const Blas &bl : sa.blas) addresses.push_back(bl.address);
@@ -2312,15 +2928,6 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             continue;
         }
 
-        const bool timed = mTimestamps && sa.hasQueryBase;
-        const unsigned ring = frame % kFramesInFlight;
-        const unsigned qBase = sa.queryBase + ring * kQueriesPerFrame;
-        if (timed) vkCmdResetQueryPool(cmd, mTimestamps, qBase, kQueriesPerFrame);
-        SceneAs::PendingTimes &pend = sa.pending[ring];
-        pend = SceneAs::PendingTimes();
-        pend.frame = frame;
-        pend.live = timed;
-
         unsigned built = 0;
         if (!w.newBlas.empty()) {
             if (timed)
@@ -2354,6 +2961,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         }
         sa.instanceCount = w.count;
         sa.farInstanceCount = w.farCount;
+        sa.st.skinnedInstances = int(w.skinned);
         sa.farOverlap = w.maxCoarseBound;
         // REBUILD IS THE DEFAULT, refit the optimisation (NVIDIA's own guidance
         // for a TLAS: "consider PREFER_FAST_TRACE and perform only rebuilds").
@@ -2403,6 +3011,15 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     sa.lastEpoch = epoch;
     sa.haveEpoch = true;
     evictStaleBlas(sa);
+    // A RIGGED ITEM THAT LEFT THE TRACED SET gives its cache back HERE, after the
+    // top-level structure this frame built without it — never earlier: the TLAS
+    // a still scene keeps is the one that last referenced it (evictStaleBlas'
+    // rule, and its reason).
+    for (auto it = sa.skins.begin(); it != sa.skins.end();) {
+        if (it->second.seen) { ++it; continue; }
+        dropSkin(scene, sa, it->first, it->second);
+        it = sa.skins.erase(it);
+    }
     sa.st.gatherMs = float(gatherMs);
     // LIVE structures only: an evicted slot keeps its place in the vector (the
     // index is referenced by the table) but holds nothing (F6).
@@ -2424,6 +3041,21 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             ++sa.st.levelBlasCount;
             sa.st.levelBlasBytes += bl.storage.size;
         }
+    }
+    // THE SKINNED STRUCTURES are per ITEM and counted apart as well as in the
+    // totals: their bytes and their caches are what a character costs.
+    sa.st.skinCaches = int(sa.skins.size());
+    sa.st.skinBlasBytes = 0;
+    sa.st.skinCacheBytes = 0;
+    for (const auto &kv : sa.skins) {
+        const SceneAs::Skin &sk = kv.second;
+        if (sk.as) {
+            ++sa.st.blasCount;
+            sa.st.triangles += int(sk.triangles);
+            sa.st.blasBytes += sk.storage.size;
+            sa.st.skinBlasBytes += sk.storage.size;
+        }
+        sa.st.skinCacheBytes += (unsigned long long)sk.buf.vertexCount * kSkinCacheStride;
     }
 }
 

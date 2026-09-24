@@ -32,6 +32,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVoxelReaderParity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreEnvironmentCones.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuScene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/SkinCache.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuVoxelGather.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp

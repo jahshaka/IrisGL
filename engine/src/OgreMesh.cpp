@@ -1,11 +1,14 @@
 // Mesh creation, update and destruction, plus the v2 geometry builder.
 #include "EnginePrivate.h"
+#include "SkinCache.h"
 
 #include <OgreLodStrategy.h>
 #include <OgreLodStrategyManager.h>
 #include <OgreViewport.h>
 #include <OgreLodStrategyPrivate.inl>
+#include <Vct/OgreVctVoxelizer.h>
 
+#include <cstring>
 #include <string>
 #include <algorithm>
 #include <unordered_map>
@@ -1034,6 +1037,136 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     mesh->_setBounds(aabb, false);
     mesh->_setBoundingSphereRadius(aabb.getRadius());
     return mesh;
+}
+
+
+// ---------------------------------------------------------------------------
+// THE GPU SKIN CACHE's BUFFER (PHOTON-SKIN-1; SkinCache.h has the design). It
+// lives here because it is the second half of what `buildMeshV2` made: the same
+// vertex count, the raster's own layout without the blend elements, device-local
+// and addressable — the cache the `Jahshaka/SkinCache` job writes and the ray
+// tier builds the item's bottom-level structure from.
+namespace {
+/// The level-0 VAO of submesh 0 — the one buildMeshV2 builds for a skinned mesh
+/// and the one Ogre's vertex shader skins.
+Ogre::VertexArrayObject *skinSourceVao(const Ogre::Item *item) {
+    if (!item || !item->getMesh() || item->getMesh()->getNumSubMeshes() != 1u) return nullptr;
+    const Ogre::VertexArrayObjectArray &vaos =
+        item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal];
+    return vaos.empty() ? nullptr : vaos[0];
+}
+}  // namespace
+
+bool createSkinCacheBuffer(Ogre::VaoManager *vao, const Ogre::Item *item, SkinCacheBuffer &out,
+                           std::string &err) {
+    out = SkinCacheBuffer();
+    if (!vao || !vao->supportsBufferDeviceAddress()) {
+        err = "skin cache: this device has no buffer device addresses";
+        return false;
+    }
+    Ogre::VertexArrayObject *src = skinSourceVao(item);
+    if (!src || src->getVertexBuffers().size() != 1u || !src->getIndexBuffer()) {
+        err = "skin cache: the item is not one submesh with one vertex buffer";
+        return false;
+    }
+    size_t s = 0, posOffset = 0, biOffset = 0, bwOffset = 0, tanOffset = 0;
+    const Ogre::VertexElement2 *pos = src->findBySemantic(Ogre::VES_POSITION, s, posOffset);
+    const Ogre::VertexElement2 *bi = src->findBySemantic(Ogre::VES_BLEND_INDICES, s, biOffset);
+    const Ogre::VertexElement2 *bw = src->findBySemantic(Ogre::VES_BLEND_WEIGHTS, s, bwOffset);
+    const Ogre::VertexElement2 *tan = src->findBySemantic(Ogre::VES_TANGENT, s, tanOffset);
+    size_t nrmOffset = 0, uvOffset = 0;
+    const Ogre::VertexElement2 *nrm = src->findBySemantic(Ogre::VES_NORMAL, s, nrmOffset);
+    const Ogre::VertexElement2 *uv =
+        src->findBySemantic(Ogre::VES_TEXTURE_COORDINATES, s, uvOffset);
+    if (!pos || pos->mType != Ogre::VET_FLOAT3 || !bi || bi->mType != Ogre::VET_UBYTE4 || !bw ||
+        bw->mType != Ogre::VET_FLOAT4 || (biOffset & 3u) || (bwOffset & 3u) || !nrm ||
+        nrm->mType != Ogre::VET_FLOAT3 || !uv || uv->mType != Ogre::VET_FLOAT2) {
+        err = "skin cache: the source vertex is not buildMeshV2's skinned layout";
+        return false;
+    }
+    Ogre::VertexBufferPacked *srcVb = src->getVertexBuffers()[0];
+    const uint32_t n = uint32_t(srcVb->getNumElements());
+    if (!n) {
+        err = "skin cache: the source has no vertices";
+        return false;
+    }
+    // THE RASTER'S LAYOUT, WITHOUT THE BLEND ELEMENTS: what every unrigged mesh this
+    // engine builds carries, so a reader of the cache's rows reads it exactly as it
+    // reads any other row (and the row's stride is the only thing that differs).
+    Ogre::VertexElement2Vec decl;
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_POSITION));
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_NORMAL));
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_TANGENT));
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT2, Ogre::VES_TEXTURE_COORDINATES));
+    if (Ogre::VaoManager::calculateVertexSize(decl) != kSkinCacheStride) {
+        err = "skin cache: the raster layout is not 48 bytes";
+        return false;
+    }
+    // BT_DEFAULT = device-local, GPU-written, and a CPU_INACCESSIBLE pool: the
+    // pools that carry STORAGE + SHADER_DEVICE_ADDRESS (+ the AS build-input bit
+    // on a ray device). No initial data: the first skin pass writes every vertex
+    // before anything reads it (the ray tier builds nothing from a cache that has
+    // not been skinned).
+    Ogre::VertexBufferPacked *vb =
+        vao->createVertexBuffer(decl, n, Ogre::BT_DEFAULT, nullptr, false);
+    if (!vb) {
+        err = "skin cache: createVertexBuffer failed";
+        return false;
+    }
+    const uint64_t address = vao->getBufferDeviceAddress(vb);
+    if (!address) {
+        vao->destroyVertexBuffer(vb);
+        err = "skin cache: the cache buffer has no device address";
+        return false;
+    }
+    out.vertices = vb;
+    out.vertexCount = n;
+    out.address = address;
+    out.tangentOffset = (tan && tan->mType == Ogre::VET_FLOAT4 && !(tanOffset & 3u))
+                            ? uint32_t(tanOffset)
+                            : 0xFFFFFFFFu;
+    out.blendIndexOffset = uint32_t(biOffset);
+    out.blendWeightOffset = uint32_t(bwOffset);
+    return true;
+}
+
+void destroySkinCacheBuffer(Ogre::VaoManager *vao, SkinCacheBuffer &buf) {
+    if (vao && buf.vertices) vao->destroyVertexBuffer(buf.vertices);
+    buf = SkinCacheBuffer();
+}
+
+bool describeSkinCacheRows(Ogre::VaoManager *vao, const Ogre::Item *item,
+                           const SkinCacheBuffer &buf,
+                           std::vector<std::vector<uint32_t>> &levels) {
+    levels.clear();
+    if (!vao || !item || !buf.vertices || !buf.address) return false;
+    const Ogre::MeshPtr &mesh = item->getMesh();
+    if (!mesh || mesh->getNumSubMeshes() == 0u) return false;
+    const size_t count = mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size();
+    levels.resize(count);
+    bool any = false;
+    static_assert(sizeof(Ogre::VctVoxelizer::GeometryRow) == 48u, "the row is 12 words");
+    for (size_t l = 0; l < count; ++l) {
+        Ogre::VctVoxelizer::GeometryRow row;
+        // THE MESH'S OWN ROW FOR THIS LEVEL (its index address, width and bias —
+        // Ogre's description, never re-derived here), then the vertex half swapped
+        // for the cache's: its address, its stride, and the raster layout's
+        // offsets (position 0, normal 12, uv 40).
+        if (!Ogre::VctVoxelizer::describeGeometryRow(mesh, uint32_t(l), 0u, vao, row)) continue;
+        row.posAddress[0] = uint32_t(buf.address & 0xFFFFFFFFull);
+        row.posAddress[1] = uint32_t(buf.address >> 32u);
+        row.vertexStride = kSkinCacheStride;
+        row.posOffset = 0u;
+        row.normalOffset = 12u;
+        row.uvOffset = 40u;
+        // The FLAGS stay the mesh row's: the index width is the mesh's, and the
+        // normal/uv formats are the same float3/float2 the cache writes
+        // (createSkinCacheBuffer refuses any other source).
+        levels[l].resize(12u);
+        std::memcpy(levels[l].data(), &row, sizeof(row));
+        any = true;
+    }
+    return any;
 }
 
 }}}  // namespace jahshaka::engine::detail
