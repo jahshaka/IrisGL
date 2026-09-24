@@ -4100,7 +4100,13 @@ struct RayQueryStatus {
     /// through its own skinned structure — and out on a frame its skin cache is
     /// not ready, never at its bind pose.
     int  instances = 0;
-    /// THE GPU SKIN CACHE (PHOTON-SKIN-1, RY-R4). `skinnedInstances`: rigged
+    /// THE GPU SKIN CACHE (PHOTON-SKIN-1, RY-R4). WHAT IT DELIVERS: the posed
+    /// SILHOUETTE to every ray (a mirror's hit test, a contact shadow, the hit
+    /// decode's geometric normal) — NOT a shaded character in a reflection: a hit
+    /// is shaded from cards (a rigged mesh has none) or the voxels (they hold the
+    /// rig's BIND pose; the voxel feed reads the mesh's rows, not the override),
+    /// so a traced hit on a posed limb outside the bind pose's voxels is handed
+    /// back to the probe/sky. `skinnedInstances`: rigged
     /// items in the traced set this frame (each over its OWN structure, built
     /// from its posed vertices); `skinCaches`: caches held (one per rigged traced
     /// item, and its row block in the GPU scene); their bytes — the posed vertex

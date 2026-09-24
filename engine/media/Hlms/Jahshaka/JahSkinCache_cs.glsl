@@ -97,8 +97,12 @@ void main()
 	vec3 outTan = vec3( 0.0 );
 	for( uint k = 0u; k < 4u; ++k )
 	{
-		// Clamped into THIS item's palette: a malformed index reads its last bone,
-		// never the next item's rows.
+		// THE SECOND LOCK. The first is at attach: OgreScene::attachSkinnedMesh
+		// refuses a mesh whose largest blend index is past the blend-index map
+		// (OgreSkeleton.cpp), so the raster and this cache never draw two
+		// different wrong pictures. Clamped here anyway into THIS item's palette:
+		// an index that got past it reads the item's last bone, never the next
+		// item's rows.
 		const uint bone = min( ( packedIdx >> ( 8u * k ) ) & 0xFFu, lastBone );
 		const float w = weights[k];
 		const uint base = job.a.z + bone * 3u;

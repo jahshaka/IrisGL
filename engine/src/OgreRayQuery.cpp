@@ -380,7 +380,16 @@ private:
         /// GPU scene, and ITS OWN bottom-level structure (a skinned item's BLAS
         /// is per ITEM, never shared: two characters on one mesh wear two poses).
         struct Skin {
-            Ogre::Item *item = nullptr;       ///< identity: a rebuilt Item is a new cache
+            /// THE CACHE'S IDENTITY is (Item, Mesh, the node's rig generation):
+            /// attachSkinnedMesh re-attaches IN PLACE (detachItem, then createItem),
+            /// so a new Item can land at the old one's address — the pointer alone
+            /// would keep a cache sized and addressed for a mesh that may be gone.
+            Ogre::Item *item = nullptr;
+            const Ogre::Mesh *mesh = nullptr;
+            unsigned long long rigGeneration = 0ull;
+            /// What the cache and its structure were built over, re-checked against
+            /// the live VAO on every pass before anything is skinned or refit.
+            const Ogre::IndexBufferPacked *indices = nullptr;
             SkinCacheBuffer buf;
             uint32_t rowBlock = 0xFFFFFFFFu;  ///< the GpuScene row block (a mesh-table entry)
             uint32_t row = 0xFFFFFFFFu;       ///< its level-0/submesh-0 row: the override
@@ -465,6 +474,8 @@ private:
     /// cleared. `scene` may be null (the tier's close: the GpuScene dies with it).
     void dropSkin(OgreScene *scene, SceneAs &sa, uint32_t node, SceneAs::Skin &sk);
     void dropSkinBuffers(SceneAs &sa);
+    /// The pose serial a cache is keyed on (own + a shared skeleton's master).
+    static unsigned long long skinPoseSerial(const OgreScene *scene, const OgreScene::Node &n);
 
     /// Ogre's frame command buffer, with every encoder closed first: an
     /// acceleration-structure build may not be recorded inside a render pass,
@@ -2296,6 +2307,20 @@ Ogre::DescriptorSetUav::BufferSlot skinSlot(Ogre::UavBufferPacked *buffer,
 constexpr uint32_t kSkinThreadsPerGroup = 64u;   // the job's threads_per_group x
 }  // namespace
 
+/// THE POSE SERIAL a cache is keyed on: the node's own pose pushes AND, for a
+/// shareSkeleton follower (an armour or clothing piece posed by the MASTER's
+/// instance), the master's — the recipe the caster walk uses (OgreGi.cpp,
+/// walkItems). The follower's own poseEpoch never moves when the body's clip
+/// does, so keyed on it alone the piece would be skinned once and frozen.
+unsigned long long RayQueryTier::skinPoseSerial(const OgreScene *scene, const OgreScene::Node &n) {
+    unsigned long long pose = n.poseEpoch;
+    if (n.shareSource) {
+        auto sit = scene->mNodes.find(n.shareSource);
+        if (sit != scene->mNodes.end()) pose = pose * 1000003ull + sit->second.poseEpoch;
+    }
+    return pose;
+}
+
 void RayQueryTier::dropSkin(OgreScene *scene, SceneAs &sa, uint32_t node, SceneAs::Skin &sk) {
     if (sk.as) retire(sk.as, sk.storage);
     retire(sk.scratch);
@@ -2380,7 +2405,23 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
     for (const Want &wt : wants) {
         const uint32_t node = uint32_t(wt.node->selfId);
         auto it = sa.skins.find(node);
-        if (it != sa.skins.end() && it->second.item != wt.node->item) {
+        // THE IDENTITY, AND THE SOURCE IT WAS BUILT OVER (a mismatch in any of them
+        // drops the cache and makes a new one this pass): a refit over an index
+        // buffer the mesh released, or a job over a source with fewer vertices
+        // than the cache, is a read of freed or foreign memory — an Xid, never a
+        // validation error.
+        const Ogre::VertexArrayObject *liveVao =
+            (wt.node->item->getMesh() && wt.node->item->getMesh()->getNumSubMeshes() &&
+             !wt.node->item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal].empty())
+                ? wt.node->item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal][0]
+                : nullptr;
+        if (it != sa.skins.end() &&
+            (it->second.item != wt.node->item ||
+             it->second.mesh != wt.node->item->getMesh().get() ||
+             it->second.rigGeneration != wt.node->rigGeneration || !liveVao ||
+             liveVao->getIndexBuffer() != it->second.indices ||
+             liveVao->getVertexBuffers().empty() ||
+             uint32_t(liveVao->getVertexBuffers()[0]->getNumElements()) != it->second.buf.vertexCount)) {
             dropSkin(scene, sa, node, it->second);
             sa.skins.erase(it);
             it = sa.skins.end();
@@ -2388,6 +2429,9 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
         if (it == sa.skins.end()) {
             SceneAs::Skin sk;
             sk.item = wt.node->item;
+            sk.mesh = wt.node->item->getMesh().get();
+            sk.rigGeneration = wt.node->rigGeneration;
+            sk.indices = liveVao ? liveVao->getIndexBuffer() : nullptr;
             std::string why;
             if (!createSkinCacheBuffer(vao, sk.item, sk.buf, why)) {
                 // Not traced — and said so once per item, never at bind pose.
@@ -2419,7 +2463,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
         // THE POSE SERIAL: bumped by every pose push (clip time, weights, manual
         // bones — OgreScene::noteNodePosed). A walk moves the node, not the pose,
         // and costs nothing here: the cache is in the item's LOCAL space.
-        const unsigned long long serial = wt.node->poseEpoch;
+        const unsigned long long serial = skinPoseSerial(scene, *wt.node);
         if (!sk.skinned || !sk.built || serial != sk.poseSerial) dirty.push_back({ node, &sk, wt.node });
     }
     // A row not on the device is a zero address to the job (the ATOM-VOXEL-2 Xid):
@@ -2558,7 +2602,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             for (const Dirty &d : dirty) {
                 if (!d.sk) continue;
                 d.sk->skinned = true;
-                d.sk->poseSerial = d.n->poseEpoch;
+                d.sk->poseSerial = skinPoseSerial(scene, *d.n);
                 ++sa.st.skinPasses;
                 ++sa.st.skinLastItems;
                 sa.st.skinLastVertices += d.sk->buf.vertexCount;
