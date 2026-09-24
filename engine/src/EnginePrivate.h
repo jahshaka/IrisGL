@@ -2766,7 +2766,12 @@ public:
     const std::string &name() const override;
 
     void setAmbient(const Colour &upper, const Colour &lower) override;
+    /// A HOST'S OWN AMBIENT: it takes the ambient back from the engine (a later
+    /// setEnvironmentLight hands it over again — see mSkyAmbientOwned).
     void setAmbientSh(const float sh[27]) override;
+    /// The one writer behind both: the pass-level SH and every GI consumer,
+    /// staling the probe grid with `why`.
+    void applyAmbientSh(const float sh[27], GiStaleReason why);
     void setEnvironmentLight(const Colour &gain) override;
 
     void setFog(const FogDesc &desc) override;
@@ -2949,8 +2954,14 @@ public:
     void destroyPendingReflection();
     /// No sky, no sky light: every SH this scene holds, the one in force too.
     void forgetSkySh();
-    /// The ambient the pixel reads: the SH in force x mEnvLightGain, or zeros.
-    void applySkyAmbient();
+    /// The ambient the pixel reads: the SH in force x mEnvLightGain, or zeros —
+    /// only while the engine owns the ambient (mSkyAmbientOwned).
+    void applySkyAmbient(GiStaleReason why);
+    /// WHO WRITES THE AMBIENT. setEnvironmentLight hands it to the engine (a
+    /// host modelling a Sky Light: SceneMirror, the previews); setAmbient /
+    /// setAmbientSh take it back (a host lighting its scene with a colour of its
+    /// own, which a sky capture must not overwrite).
+    bool mSkyAmbientOwned = false;
 
     /// THIS SCENE'S SHADOW REQUEST (ShadowDesc). The backend's filter and atlas
     /// are one per PROCESS, so all this does is apply the scene's resolved

@@ -60,7 +60,10 @@ public:
     /// prefiltered environment cube sampled at the same gain. 1.0 is "the
     /// cube's own radiance" and 0.0 is "there is no environment light": zero
     /// ambient, and the sky a BACKDROP — still drawn, reflecting nothing.
-    /// With no sky captured the ambient this forms is 27 zeros.
+    /// With no sky captured the ambient this forms is 27 zeros. WHO WRITES
+    /// THE AMBIENT is the last of the two calls: this one hands it to the
+    /// engine, setAmbient / setAmbientSh take it back for a host that lights
+    /// its scene with a colour of its own (a sky capture then leaves it alone).
     ///
     /// PER CHANNEL (the Sky Light's intensity times its linear tint — the same
     /// gain the ambient SH is multiplied by): THE ONE ENVIRONMENT

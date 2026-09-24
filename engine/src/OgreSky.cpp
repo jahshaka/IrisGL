@@ -729,7 +729,7 @@ void OgreScene::forgetSkySh() {
     mSkyShFresh = false;
     mSkyShInForceValid = false;
     // No sky, no sky light: the ambient it was lighting goes to zero with it.
-    if (wasLighting) applySkyAmbient();
+    if (wasLighting) applySkyAmbient(GiStaleReason::Sky);
 }
 
 // THE SKY'S AMBIENT IS FORMED HERE (PHOTON-SKY-TRANSIENT-1): the SH in force
@@ -737,13 +737,15 @@ void OgreScene::forgetSkySh() {
 // with no sky (no Sky Light = gain 0 = zeros: gi.sky_light). The host pushes the
 // gain only; it used to form this product itself, one sync after the engine had
 // integrated the SH, which put the cube of one sky beside the SH of another on
-// every change frame. Not during teardown (setAmbientSh re-notes the GI arm).
-void OgreScene::applySkyAmbient() {
-    if (mDestroying) return;
+// every change frame. Only while the engine owns the ambient (a host that never
+// pushed a gain, or lit its scene with setAmbient since, keeps its own), and not
+// during teardown (the write re-notes the GI arm).
+void OgreScene::applySkyAmbient(GiStaleReason why) {
+    if (!mSkyAmbientOwned || mDestroying) return;
     const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
     float sh[27];
     for (int i = 0; i < 27; ++i) sh[i] = mSkyShInForceValid ? mSkyShInForce[i] * gain[i % 3] : 0.0f;
-    setAmbientSh(sh);
+    applyAmbientSh(sh, why);
 }
 
 // THE ENVIRONMENT LANDS AS ONE SET (PHOTON-SKY-TRANSIENT-1, measured). A sky
@@ -794,7 +796,7 @@ void OgreScene::landEnvironmentIfComplete() {
         mSkyShFresh = false;
         std::memcpy(mSkyShInForce, mSkySh, sizeof mSkyShInForce);
         mSkyShInForceValid = true;
-        applySkyAmbient();
+        applySkyAmbient(GiStaleReason::Sky);   // the sky's edit, not the light's
     }
 }
 
