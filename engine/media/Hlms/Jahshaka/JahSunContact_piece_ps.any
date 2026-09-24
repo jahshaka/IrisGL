@@ -1,0 +1,51 @@
+// HARD SUN CONTACT SHADOWS — the pixel side (PHOTON P5, RY-R3; lane
+// PHOTON-RAYS-1; SPECS/photon/C4_RAYS_BEYOND_REFLECTIONS_DESIGN.md section 1).
+//
+// CAUTION for editors: the Hlms parser executes an at-directive even inside a
+// comment (DOCS/traps/ENGINE.md). Never write one in this file's comments.
+//
+// WHAT IT DOES. The ray tier traced one hardware ray per pixel (or per 2x2
+// block) from the surface the prepass drew towards the sun, out to the contact
+// range, and wrote jahSunVis: 1 where nothing was in the way, 0 where
+// something was (rq_sun_contact.comp). Here that answer is folded into the
+// FIRST directional light's shadow term — the sun's, the one the shadow map
+// was rendered for — as
+//
+//     fShadow = min( fShadow, jahSunVis )
+//
+// so the map keeps every shadow it has (the ray can only darken) and the ray
+// closes the band of light the map's depth bias leaves at a contact. Beyond
+// the range the ray answers 1 and the map is alone, unchanged.
+//
+// WHY THIS PIECE AND NOT custom_ps_preLights. The material graph defines
+// custom_ps_preLights per datablock, and a second definition of a piece fails
+// the whole shader. The sun's shadow reaches the light loop through ONE piece,
+// DarkenWithShadowFirstLight (Pbs/Any/ShadowMapping_piece_ps.any, inserted as
+// the first caster directional's factor in 800.PixelShader_piece_ps.any's
+// DoDirectionalLights), and that is the piece the cloud layer's ground shadow
+// already redefines (JahFog_piece_vs_piece_ps.any, CLOUDS-2D-1). This library
+// folder's files are parsed in sorted order, so this file comes after the fog
+// file and its redefinition wins; it COMPOSES with the cloud's instead of
+// replacing it — the cloud's factor is the named piece JahCloudSunFactor
+// (empty wherever the cloud layer is not in the pass), so the sun's term is
+// min( map, ray ) times the sheet's transmittance whichever features are on.
+//
+// WHERE IT EXISTS, and each term is a reason:
+//   jah_sun_contact             the pass claimed the texture (the ray tier
+//                               registers it in front of the view's PrePassUse
+//                               pass only — never a capture, a probe or a card
+//                               pass); its VALUE is the texel divisor
+//   hlms_use_prepass            the pass that reads the prepass: fShadow here is
+//                               the prepass' own shadow term, and the ray
+//                               started from the same prepass' depth
+//   hlms_screen_pos_int         iFragCoord is declared
+//   hlms_lights_directional     a directional CASTER exists (the sun that casts
+//   hlms_num_shadow_map_lights  a map); a sun without one keeps no shadow at all
+//   receive_shadows             upstream's own gate on the first light's factor:
+//                               a material that receives no shadow receives no
+//                               contact shadow either
+//   not a caster, not a prepass the two passes that write no colour
+@property( jah_sun_contact && hlms_use_prepass && hlms_screen_pos_int && hlms_lights_directional && hlms_num_shadow_map_lights && receive_shadows && !hlms_shadowcaster && !hlms_prepass )
+	@undefpiece( DarkenWithShadowFirstLight )
+	@piece( DarkenWithShadowFirstLight )* ( min( fShadow, midf_c( OGRE_Load2D( jahSunVis, iFragCoord / @value( jah_sun_contact ), 0 ).x ) ) @insertpiece( JahCloudSunFactor ) )@end
+@end

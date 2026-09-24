@@ -1000,6 +1000,15 @@ public:
     /// a document row and never reaches a panel: a person tunes the TIER.
     virtual void setGatherTuning(const GatherTuning &) {}
 
+    /// HARD SUN CONTACT SHADOWS (Types.h `SunContactDesc`; PHOTON P5 RY-R3).
+    /// The project's row, pushed by the host from the document like the ray
+    /// row: storing it builds nothing; a view whose scene resolves it on gains
+    /// the prepass the rays start from on its next frame. Off by default.
+    virtual void setSunContact(const SunContactDesc &) {}
+    virtual SunContactDesc sunContact() const { return SunContactDesc(); }
+    /// What the job did on the last drawn frame (Types.h `SunContactStatus`).
+    virtual SunContactStatus sunContactStatus() const { return SunContactStatus(); }
+
     /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
     /// readback of one cascade's light volume: its peak, its mean over lit
     /// voxels and how many voxels sit on the storage format's top bin.

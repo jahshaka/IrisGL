@@ -3,12 +3,13 @@
 // against the scene's TLAS, answering the only question this tier exists to
 // answer: what does this ray hit, and how far away is it.
 //
-// It is deliberately GEOMETRY ONLY — no material, no shading, no light. Every
-// later consumer is a different reading of the same answer: R2 reads it as
-// probe visibility (one ray per probe direction), R3 as a sun-contact shadow
-// (one ray towards the sun per pixel), R5 as a reflection's hit point. Radiance
-// AT the hit is a separate question with its own answer (the cascade's lit
-// voxels) and is not this shader's business.
+// It is deliberately GEOMETRY ONLY — no material, no shading, no light. This
+// is the record-driven form (the tool/test trace, OgreScene::traceRays); the
+// frame's consumers each ask the same question in their own job:
+// rq_sun_contact.comp (R3, one ray towards the sun per pixel), the gather's
+// trace and rq_reflect.comp (R5). Radiance AT the hit is a separate question
+// with its own answer (the cascade's lit voxels) and is not this shader's
+// business.
 //
 // NOTE FOR ANY EDIT: this is compiled AT BUILD TIME by glslangValidator at
 // --target-env spirv1.4 (SPV_KHR_ray_query's documented requirement) into a

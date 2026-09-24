@@ -3,11 +3,11 @@
 // WHAT THIS IS. A ray-traceable copy of the scene, kept current every frame:
 // one bottom-level acceleration structure (BLAS) per unique mesh, built from
 // Ogre's OWN vertex and index buffers, and one top-level structure (TLAS) over
-// the instances the scene draws. Nothing consumes it yet — R2 (probe
-// visibility), R3 (hard sun contact shadows) and R5 (ray-traced reflections)
-// are the consumers, and every one of them reads this same structure. What R1
-// ships is the structure, the switch that turns it off, and the proof that a
-// ray hits where the mathematics says it hits.
+// the instances the scene draws. Its consumers — the screen-probe gather, R3
+// (hard sun contact shadows, `recordSunContact`) and R5 (ray-traced
+// reflections) — every one of them reads this same structure. What R1 ships is
+// the structure, the switch that turns it off, and the proof that a ray hits
+// where the mathematics says it hits.
 //
 // WHY IT LOOKS LIKE THIS.
 //
@@ -54,6 +54,8 @@
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
+#include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
+#include <Compositor/OgreCompositorShadowNode.h>
 #include <Vao/OgreVertexArrayObject.h>
 #include <Vao/OgreVertexBufferPacked.h>
 #include <Vao/OgreIndexBufferPacked.h>
@@ -73,6 +75,7 @@
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
 #include "rayquery/rq_card_parity_spv.h"
+#include "rayquery/rq_sun_contact_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
 // jobs, its atlases and its pipelines live in OgreScreenProbeGather.cpp; this
 // file is its HOST (the device, the retire window, the frame's command buffer,
@@ -741,6 +744,83 @@ public:
 private:
     /// Made on the first frame a scene gathers, destroyed by close().
     ScreenProbeGather *mGather = nullptr;
+
+    // ---- HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1, RY-R3) ----------------
+    // One more compute dispatch on the same frame command buffer and the same
+    // hook as the reflection trace and the gather — after the prepass, before
+    // the PrePassUse pass that shades with its answer. One ray per texel from
+    // the prepass' surface towards the sun (rq_sun_contact.comp); the answer is
+    // an Ogre R8 texture the PBS pass reads through the Hlms listener's fourth
+    // extra slot (OgreFog.cpp kExtraPassSlots, JahSunContact_piece_ps.any).
+public:
+    /// Records this frame's contact rays for one view, and registers the
+    /// texture with the listener for exactly the pass it runs in front of.
+    /// Silently does nothing unless the view's scene resolves the row on.
+    void recordSunContact(const ReflectPassListener *key, OgreView *view,
+                          Ogre::CompositorPass *pass);
+    /// Takes the pass-scoped registration away as that pass ends.
+    void releaseSunContactBinding(const ReflectPassListener *key);
+    /// Frees a view's contact state (from ~ReflectPassListener, a workspace
+    /// rebuild, and the row going off).
+    void forgetSunContact(const ReflectPassListener *key);
+    /// The last frame's numbers for a scene (`Scene::sunContactStatus`).
+    void sunContactStatsInto(const OgreScene *scene, SunContactStatus &st) const;
+
+private:
+    struct SunContactView {
+        VkDescriptorSet sets[kReflectRing] = {};
+        RawBuffer       params[kReflectRing];
+        /// The visibility texture the pixel reads (an Ogre texture: it reaches
+        /// the PBS pass through the listener, so it must be one the Hlms can
+        /// bind), at the job's own resolution.
+        Ogre::TextureGpu *vis = nullptr;
+        unsigned w = 0, h = 0, fullW = 0, fullH = 0, divisor = 1;
+        unsigned frame = 0;
+        const Ogre::SceneManager *sceneMgr = nullptr;
+        /// What the last record did, for the status.
+        OgreScene *scene = nullptr;
+        bool      ran = false;
+        unsigned long long rays = 0;
+        float     range = 0.0f;
+        float     toSun[3] = { 0.0f, 0.0f, 0.0f };
+        float     cpuMs = -1.0f;
+        std::string reason;
+        unsigned querySlot = 0;
+        unsigned queryBase = 0;
+        bool     hasQueryBase = false;
+        struct Pending { unsigned frame = 0; bool live = false; };
+        Pending  pending[kFramesInFlight];
+        float    gpuMs = -1.0f;
+    };
+    bool makeSunContactPipeline(std::string &err);
+    void dropSunContact(SunContactView &sv);
+    void readSunContactTimestamps(SunContactView &sv);
+    std::unordered_map<const ReflectPassListener *, SunContactView> mSunContacts;
+    VkDescriptorSetLayout mSunSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mSunPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mSunPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mSunModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mSunPool = VK_NULL_HANDLE;
+    /// Its own point sampler: the reflection's are made with the reflection
+    /// pipeline, which a view with the SSR row off never builds.
+    VkSampler             mSunSampler = VK_NULL_HANDLE;
+    VkQueryPool           mSunTimestamps = VK_NULL_HANDLE;
+    uint32_t              mSunQuerySlots = 0;
+    /// The pipeline (or the R8 storage format) is not available on this device:
+    /// said ONCE, and the shadow map renders alone for the rest of the process.
+    bool                  mSunFailed = false;
+    std::string           mSunFailReason;
+
+    /// ONE IMAGE'S BASIS from a pose and a frustum (rq_reflect.comp's five
+    /// numbers) — the arithmetic recordReflect's eyes are built with, shared so
+    /// the contact rays and the reflection rays cannot drift apart.
+    static EyeBasisF eyeBasis(bool ortho, const Ogre::Vector3 &pos, const Ogre::Quaternion &rot,
+                              float el, float er, float et, float eb);
+    /// THE LETTERBOX (SSR-LETTERBOX-1's ray half): a constrained-aspect camera
+    /// draws the target's INNER rectangle while a compute pass addresses the
+    /// whole target, so the basis is EXPANDED to the target on the CPU.
+    static void expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned fullW,
+                                  unsigned fullH);
 };
 
 // ---------------------------------------------------------------------------
@@ -1298,6 +1378,17 @@ void RayQueryTier::close() {
     mScenes.clear();
     for (auto &kv : mReflects) dropReflect(kv.second);
     mReflects.clear();
+    // THE SUN CONTACT's views (PHOTON-RAYS-1): each takes its registration
+    // away first (the listener holds a raw texture pointer) and retires its
+    // texture into the bin that is emptied below. The sets are DROPPED, not
+    // retired — the pool is destroyed below and frees them (the gather's
+    // close() rule, and its reason).
+    for (auto &kv : mSunContacts) {
+        for (unsigned i = 0; i < kReflectRing; ++i) kv.second.sets[i] = VK_NULL_HANDLE;
+        dropSunContact(kv.second);
+    }
+    mSunContacts.clear();
+    FogHlmsListener::clearSunContact();
     // THE GATHER'S SHADER REGISTRATION DIES WITH THE TEXTURES IT NAMES
     // (GATHER-0's D1, kept): `ScreenProbeGather::close` frees every atlas and
     // takes every registration away, because `FogHlmsListener`'s map is a plain
@@ -1337,6 +1428,17 @@ void RayQueryTier::close() {
         if (r.img.memory) vkFreeMemory(mVk, r.img.memory, nullptr);
     }
     mRetireBin.clear();
+    if (mSunPool) vkDestroyDescriptorPool(mVk, mSunPool, nullptr);
+    if (mSunPipeline) vkDestroyPipeline(mVk, mSunPipeline, nullptr);
+    if (mSunModule) vkDestroyShaderModule(mVk, mSunModule, nullptr);
+    if (mSunPipeLayout) vkDestroyPipelineLayout(mVk, mSunPipeLayout, nullptr);
+    if (mSunSetLayout) vkDestroyDescriptorSetLayout(mVk, mSunSetLayout, nullptr);
+    if (mSunSampler) vkDestroySampler(mVk, mSunSampler, nullptr);
+    if (mSunTimestamps) vkDestroyQueryPool(mVk, mSunTimestamps, nullptr);
+    mSunPool = VK_NULL_HANDLE; mSunPipeline = VK_NULL_HANDLE; mSunModule = VK_NULL_HANDLE;
+    mSunPipeLayout = VK_NULL_HANDLE; mSunSetLayout = VK_NULL_HANDLE;
+    mSunSampler = VK_NULL_HANDLE; mSunTimestamps = VK_NULL_HANDLE;
+    mSunQuerySlots = 0;
     if (mCardParityPool) vkDestroyDescriptorPool(mVk, mCardParityPool, nullptr);
     if (mCardParitySampler) vkDestroySampler(mVk, mCardParitySampler, nullptr);
     mCardParitySampler = VK_NULL_HANDLE;
@@ -3177,6 +3279,36 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
     }
 }
 
+RayQueryTier::EyeBasisF RayQueryTier::eyeBasis(bool ortho, const Ogre::Vector3 &pos,
+                                               const Ogre::Quaternion &rot, float el, float er,
+                                               float et, float eb) {
+    EyeBasisF e;
+    const Ogre::Vector3 f = rot * Ogre::Vector3::NEGATIVE_UNIT_Z;
+    const Ogre::Vector3 r = rot * Ogre::Vector3::UNIT_X;
+    const Ogre::Vector3 u = rot * Ogre::Vector3::UNIT_Y;
+    put3(e.camPos, pos, ortho ? 0.0f : 1.0f);
+    put3(e.rayTL, r * el + u * et + (ortho ? Ogre::Vector3::ZERO : f), 0.0f);
+    put3(e.rayRight, r * (er - el), 0.0f);
+    put3(e.rayDown, u * (eb - et), 0.0f);
+    put3(e.fwd, f, 0.0f);
+    return e;
+}
+
+// A target uv t is the shot's (t - x0) / w, hence rayTL' = rayTL - rayRight x0/w
+// - rayDown y0/h, rayRight' = rayRight / w, rayDown' = rayDown / h. The bars
+// hold cleared depth and every job declines them before any ray.
+void RayQueryTier::expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned fullW,
+                                     unsigned fullH) {
+    if (!cd.letterbox || !fullH) return;
+    float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    chain::letterboxRect(cd.letterboxAspect, float(fullW) / float(fullH), shot);
+    for (int k = 0; k < 3; ++k) {
+        e.rayTL[k] -= e.rayRight[k] * shot[0] / shot[2] + e.rayDown[k] * shot[1] / shot[3];
+        e.rayRight[k] /= shot[2];
+        e.rayDown[k] /= shot[3];
+    }
+}
+
 void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                  Ogre::CompositorPass *pass) {
     if (!isOpen() || mReflectFailed || !view || !pass) return;
@@ -3406,16 +3538,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // frustums, and having two copies of it is how they would drift apart.
     const auto makeEye = [ortho](const Ogre::Vector3 &pos, const Ogre::Quaternion &rot,
                                  float el, float er, float et, float eb) {
-        EyeBasisF e;
-        const Ogre::Vector3 f = rot * Ogre::Vector3::NEGATIVE_UNIT_Z;
-        const Ogre::Vector3 r = rot * Ogre::Vector3::UNIT_X;
-        const Ogre::Vector3 u = rot * Ogre::Vector3::UNIT_Y;
-        put3(e.camPos, pos, ortho ? 0.0f : 1.0f);
-        put3(e.rayTL, r * el + u * et + (ortho ? Ogre::Vector3::ZERO : f), 0.0f);
-        put3(e.rayRight, r * (er - el), 0.0f);
-        put3(e.rayDown, u * (eb - et), 0.0f);
-        put3(e.fwd, f, 0.0f);
-        return e;
+        return eyeBasis(ortho, pos, rot, el, er, et, eb);
     };
     // THE EYES, OR THE ONE CAMERA. A stereo view whose eyes have not been
     // pushed yet declines: tracing the head's frustum across a two-eye target
@@ -3463,18 +3586,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // reprojection's uv spans the same target.
     {
         const ChainDesc cd = view->chainDesc();
-        if (cd.letterbox && fullH) {
-            float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-            chain::letterboxRect(cd.letterboxAspect, float(fullW) / float(fullH), shot);
-            for (int i = 0; i < 2; ++i) {
-                EyeBasisF &e = eyeB[i];
-                for (int k = 0; k < 3; ++k) {
-                    e.rayTL[k] -= e.rayRight[k] * shot[0] / shot[2] + e.rayDown[k] * shot[1] / shot[3];
-                    e.rayRight[k] /= shot[2];
-                    e.rayDown[k] /= shot[3];
-                }
-            }
-        }
+        for (int i = 0; i < 2; ++i) expandEyeToTarget(eyeB[i], cd, fullW, fullH);
     }
     memcpy(pp.camPos, eyeB[0].camPos, sizeof(pp.camPos));
     memcpy(pp.rayTL, eyeB[0].rayTL, sizeof(pp.rayTL));
@@ -4010,6 +4122,538 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
 }
 
 // ---------------------------------------------------------------------------
+// HARD SUN CONTACT SHADOWS — the tier's half (PHOTON-RAYS-1, RY-R3;
+// SPECS/photon/C4_RAYS_BEYOND_REFLECTIONS_DESIGN.md section 1).
+//
+// ONE DISPATCH PER VIEW FRAME in the reflect listener's bracket (the gather's
+// shape): one ray per texel from the prepass' surface towards the sun, tMax the
+// contact range, the caster copies of the near field only, opaque only; the
+// answer an R8 texture the PBS pass folds into the sun's shadow term as
+// min( map, ray ). Deterministic per pixel per frame: no sample sequence, no
+// history, nothing to reproject.
+namespace {
+
+/// The parameter block, std140, mirroring rq_sun_contact.comp's `Params`
+/// member for member (every member a vec4, laid out identically to C).
+struct SunContactParams {
+    float camPos[4] = {};
+    float rayTL[4] = {};
+    float rayRight[4] = {};
+    float rayDown[4] = {};
+    float fwd[4] = {};
+    float projParams[4] = {};
+    float viewAxisX[4] = {};
+    float viewAxisY[4] = {};
+    float viewAxisZ[4] = {};
+    float toSun[4] = {};
+    float resolution[4] = {};
+    float knobs[4] = {};
+};
+constexpr unsigned kSunContactBindings = 5u;
+/// THE BIAS RULE's floor, world units: the lift never falls below a millimetre
+/// however close the camera stands (depth reconstruction's own precision).
+constexpr float kSunContactMinBias = 0.001f;
+
+/// The storage format of the visibility texture. R8 is an EXTENDED storage
+/// format (shaderStorageImageExtendedFormats), not a core-mandatory one — so it
+/// is asked of the device here, once, and a device that cannot store it runs
+/// without the contact term rather than refusing the whole ray tier (the
+/// tier-wide table in rayStorageFormatRefused is for the images every ray job
+/// needs).
+bool sunContactFormatStores(VkPhysicalDevice pd) {
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(pd, VK_FORMAT_R8_UNORM, &props);
+    return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+}
+
+}   // namespace
+
+bool RayQueryTier::makeSunContactPipeline(std::string &err) {
+    if (!mDev || !mDev->mPhysicalDevice || !sunContactFormatStores(mDev->mPhysicalDevice)) {
+        err = "the device cannot store to R8_UNORM (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)";
+        return false;
+    }
+    VkDescriptorSetLayoutBinding b[kSunContactBindings] = {};
+    const VkDescriptorType types[kSunContactBindings] = {
+        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 0 tlas
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 1 params
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 2 gBufNormals
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 3 sceneDepth
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 4 sunVis
+    };
+    for (unsigned i = 0; i < kSunContactBindings; ++i) {
+        b[i].binding = i;
+        b[i].descriptorType = types[i];
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo sli{};
+    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sli.bindingCount = kSunContactBindings;
+    sli.pBindings = b;
+    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mSunSetLayout) != VK_SUCCESS) {
+        err = "vkCreateDescriptorSetLayout failed";
+        return false;
+    }
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mSunSetLayout;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mSunPipeLayout) != VK_SUCCESS) {
+        err = "vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_sunContactSpv);
+    smi.pCode = krq_sunContactSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mSunModule) != VK_SUCCESS) {
+        err = "vkCreateShaderModule failed (the build-time SPIR-V is not loadable)";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mSunModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mSunPipeLayout;
+    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mSunPipeline) != VK_SUCCESS) {
+        err = "vkCreateComputePipelines failed";
+        return false;
+    }
+    // kMaxTimedScenes views' worth of rings — the reflection's ceiling.
+    const unsigned sets = kMaxTimedScenes * kReflectRing;
+    VkDescriptorPoolSize sizes[4] = {};
+    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    sizes[0].descriptorCount = sets;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    sizes[1].descriptorCount = sets;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[2].descriptorCount = sets * 2u;
+    sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    sizes[3].descriptorCount = sets;
+    VkDescriptorPoolCreateInfo dpi{};
+    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = sets;
+    dpi.poolSizeCount = 4;
+    dpi.pPoolSizes = sizes;
+    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mSunPool) != VK_SUCCESS) {
+        err = "vkCreateDescriptorPool failed";
+        return false;
+    }
+    // POINT: the depth and the normal are read at exactly one texel.
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    if (vkCreateSampler(mVk, &si, nullptr, &mSunSampler) != VK_SUCCESS) {
+        err = "vkCreateSampler failed";
+        return false;
+    }
+    if (mTimestampPeriod > 0.0f) {
+        VkQueryPoolCreateInfo qci{};
+        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qci.queryCount = kMaxTimedScenes * kFramesInFlight * 2u;
+        vkCreateQueryPool(mVk, &qci, nullptr, &mSunTimestamps);
+    }
+    return true;
+}
+
+void RayQueryTier::readSunContactTimestamps(SunContactView &sv) {
+    if (!mSunTimestamps || !sv.hasQueryBase) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (unsigned i = 0; i < kFramesInFlight; ++i) {
+        SunContactView::Pending &pd = sv.pending[i];
+        // The reflection's rule, and its reason: `<`, not `<=` (the ring is
+        // kFramesInFlight deep and a slot is reused after that many frames).
+        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
+        uint64_t v[4] = {};
+        const uint32_t base = sv.queryBase + i * 2u;
+        if (vkGetQueryPoolResults(mVk, mSunTimestamps, base, 2, sizeof(v), v, sizeof(uint64_t) * 2u,
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
+                VK_SUCCESS &&
+            v[1] && v[3] && v[2] >= v[0])
+            sv.gpuMs = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
+        pd.live = false;
+    }
+}
+
+void RayQueryTier::dropSunContact(SunContactView &sv) {
+    // THE REGISTRATION FIRST: the listener holds a raw pointer to the texture
+    // that is about to be retired (GATHER-0's D1, the same rule).
+    if (sv.sceneMgr) FogHlmsListener::setSunContact(sv.sceneMgr, nullptr, 1u);
+    for (unsigned i = 0; i < kReflectRing; ++i) {
+        retireSet(sv.sets[i], mSunPool);
+        sv.sets[i] = VK_NULL_HANDLE;
+        retire(sv.params[i]);
+    }
+    retireTexture(sv.vis);
+    if (sv.hasQueryBase) mSunQuerySlots &= ~(uint32_t(1) << sv.querySlot);
+    sv.hasQueryBase = false;
+}
+
+void RayQueryTier::forgetSunContact(const ReflectPassListener *key) {
+    auto it = mSunContacts.find(key);
+    if (it == mSunContacts.end()) return;
+    dropSunContact(it->second);
+    mSunContacts.erase(it);
+}
+
+void RayQueryTier::releaseSunContactBinding(const ReflectPassListener *key) {
+    auto it = mSunContacts.find(key);
+    if (it == mSunContacts.end() || !it->second.sceneMgr) return;
+    FogHlmsListener::setSunContact(it->second.sceneMgr, nullptr, 1u);
+}
+
+void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus &st) const {
+    for (const auto &kv : mSunContacts) {
+        const SunContactView &sv = kv.second;
+        if (sv.scene != scene) continue;
+        if (!sv.ran) {
+            if (st.reason.empty()) st.reason = sv.reason;
+            continue;
+        }
+        st.running = true;
+        st.width = sv.w; st.height = sv.h;
+        st.targetW = sv.fullW; st.targetH = sv.fullH;
+        st.divisor = sv.divisor;
+        st.rays += sv.rays;
+        st.range = sv.range;
+        for (int i = 0; i < 3; ++i) st.toSun[i] = sv.toSun[i];
+        if (sv.gpuMs > st.gpuMs) st.gpuMs = sv.gpuMs;
+        if (sv.cpuMs > st.cpuMs) st.cpuMs = sv.cpuMs;
+        st.reason.clear();
+    }
+    if (!st.running && mSunFailed) st.reason = mSunFailReason;
+}
+
+void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *view,
+                                    Ogre::CompositorPass *pass) {
+    if (!isOpen() || !view || !pass) return;
+    OgreScene *scene = view->ogreScene();
+    Ogre::Camera *cam = view->camera();
+    if (!scene || !cam) return;
+    if (!scene->sunContactWanted()) {
+        // OFF IS FREE AND CLEAN: a view that was casting and stopped gives its
+        // texture back and stops binding it (the gather's rule).
+        forgetSunContact(key);
+        return;
+    }
+    const auto cpuStart = Clock::now();
+    SunContactView &sv = mSunContacts[key];
+    sv.scene = scene;
+    sv.sceneMgr = scene->mSceneMgr;
+    sv.ran = false;
+    sv.rays = 0;
+    /// EVERY EARLY RETURN IS A LEGITIMATE "not this frame": nothing is
+    /// registered, the property is not set, and the pass shades with the shadow
+    /// map alone — the picture without the row. The reason is kept for the
+    /// status, because a row that silently does nothing is the worst outcome.
+    const auto decline = [&sv](const char *why) { sv.reason = why; };
+    readSunContactTimestamps(sv);
+
+    auto sceneIt = mScenes.find(scene);
+    if (sceneIt == mScenes.end()) { decline("the scene has no ray structures yet"); return; }
+    SceneAs &sa = sceneIt->second;
+    if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) {
+        decline("the scene's top-level structure is empty");
+        return;
+    }
+    // NEVER IN VR (the design's VR column): the chain already declines the row
+    // for a stereo view (`ChainDesc::sunContact`); this is the job's own copy of
+    // the rule, so a two-eye target is never traced as one image.
+    if (view->stereo()) { decline("a stereo view (never in VR)"); return; }
+    if (mSunFailed) { decline("the contact pipeline is unavailable on this device"); return; }
+    if (!mSunPipeline) {
+        std::string err;
+        if (!makeSunContactPipeline(err)) {
+            mSunFailed = true;
+            mSunFailReason = "sun contact off: " + err;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: " + mSunFailReason + " (the shadow map renders alone)");
+            decline("the contact pipeline is unavailable on this device");
+            return;
+        }
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: sun contact shadows ON (PHOTON R3) — one ray per texel towards the sun");
+    }
+
+    // ---- THE SUN: the pass' first directional SHADOW CASTER ----------------
+    // The one the pixel's first-light term belongs to: HlmsPbs writes the
+    // directional casters into `light0Buf.lights[]` in the shadow node's order
+    // (OgreHlmsPbs.cpp fillBuffersFor), and the prepass' shadow term — the
+    // fShadow the answer is folded into — is that light's map. A pass with no
+    // shadow node, or a node holding no directional caster, has no sun term to
+    // correct (the piece's hlms_num_shadow_map_lights gate says the same).
+    Ogre::Vector3 toSun = Ogre::Vector3::ZERO;
+    {
+        const Ogre::CompositorShadowNode *sn =
+            static_cast<Ogre::CompositorPassScene *>(pass)->getShadowNode();
+        if (sn) {
+            for (const Ogre::LightClosest &lc : sn->getShadowCastingLights()) {
+                if (lc.light && lc.light->getType() == Ogre::Light::LT_DIRECTIONAL) {
+                    toSun = -lc.light->getDerivedDirection();
+                    break;
+                }
+            }
+        }
+    }
+    if (toSun.squaredLength() < 1e-12f) { decline("no directional shadow caster in the pass"); return; }
+    toSun.normalise();
+
+    // ---- THE CHAIN'S TEXTURES (the gather's two, by the same names) --------
+    Ogre::TextureGpu *normalTex = nullptr, *depthTex = nullptr;
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    if (!node) return;
+    try {
+        normalTex = node->getDefinedTexture(Ogre::IdString("jahGBufNormals"));
+        depthTex = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+    } catch (Ogre::Exception &) { decline("the chain carries no prepass"); return; }
+    if (!normalTex || !depthTex) { decline("the chain carries no prepass"); return; }
+    const unsigned fullW = depthTex->getWidth(), fullH = depthTex->getHeight();
+    if (!fullW || !fullH) return;
+
+    // ---- THE RESOLUTION: the row, or the tier's (half at Low and Medium) ----
+    const SunContactDesc &row = scene->sunContact();
+    unsigned divisor = 1u;
+    switch (row.resolution) {
+    case SunContactResolution::Full: divisor = 1u; break;
+    case SunContactResolution::Half: divisor = 2u; break;
+    case SunContactResolution::Auto:
+    default: divisor = scene->giParams().quality == GiQuality::High ? 1u : 2u; break;
+    }
+    // CEILING, so every pixel's `iFragCoord / divisor` lands inside the texture.
+    const unsigned w = (fullW + divisor - 1u) / divisor, h = (fullH + divisor - 1u) / divisor;
+
+    // ---- THE TEXTURE, resident for good and remade only on a resize --------
+    if (!sv.vis || sv.w != w || sv.h != h) {
+        FogHlmsListener::setSunContact(sv.sceneMgr, nullptr, 1u);
+        retireTexture(sv.vis);
+        // `Uav` and nothing else — the gather's irradiance target's reasoning:
+        // born in GENERAL with the pin's own barrier, SAMPLED because it is a
+        // texture, never Reinterpretable.
+        Ogre::TextureGpuManager *tm = mRs->getTextureGpuManager();
+        static unsigned sSerial = 0u;
+        Ogre::TextureGpu *t = tm->createTexture("JahSunContact/" + std::to_string(++sSerial),
+                                                Ogre::GpuPageOutStrategy::Discard,
+                                                Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+        t->setResolution(w, h, 1u);
+        t->setPixelFormat(Ogre::PFG_R8_UNORM);
+        t->setNumMipmaps(1u);
+        t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+        sv.vis = t;
+        sv.w = w;
+        sv.h = h;
+    }
+    sv.fullW = fullW;
+    sv.fullH = fullH;
+    sv.divisor = divisor;
+
+    if (!sv.hasQueryBase && mSunTimestamps) {
+        for (unsigned s = 0; s < kMaxTimedScenes; ++s) {
+            if (mSunQuerySlots & (uint32_t(1) << s)) continue;
+            mSunQuerySlots |= uint32_t(1) << s;
+            sv.querySlot = s;
+            sv.queryBase = s * kFramesInFlight * 2u;
+            sv.hasQueryBase = true;
+            break;
+        }
+    }
+
+    std::string err;
+    const unsigned ring = sv.frame % kReflectRing;
+    if (!sv.params[ring].buffer &&
+        !makeBuffer(sizeof(SunContactParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
+                    sv.params[ring], err)) {
+        decline("the parameter buffer could not be made");
+        return;
+    }
+    if (!sv.sets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mSunPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mSunSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &sv.sets[ring]) != VK_SUCCESS) {
+            sv.sets[ring] = VK_NULL_HANDLE;
+            decline("no descriptor set");
+            return;
+        }
+    }
+
+    // ---- THE PARAMETERS: the ray tier's eye basis, letterbox folded in -----
+    SunContactParams pp{};
+    const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
+    const Ogre::Quaternion q = cam->getDerivedOrientation();
+    Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
+    cam->getFrustumExtents(fl, fr, ft, fb,
+                           ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
+    EyeBasisF eye = eyeBasis(ortho, cam->getDerivedPosition(), q, float(fl), float(fr),
+                             float(ft), float(fb));
+    expandEyeToTarget(eye, view->chainDesc(), fullW, fullH);
+    memcpy(pp.camPos, eye.camPos, sizeof(pp.camPos));
+    memcpy(pp.rayTL, eye.rayTL, sizeof(pp.rayTL));
+    memcpy(pp.rayRight, eye.rayRight, sizeof(pp.rayRight));
+    memcpy(pp.rayDown, eye.rayDown, sizeof(pp.rayDown));
+    memcpy(pp.fwd, eye.fwd, sizeof(pp.fwd));
+    const Ogre::Vector2 projAB = cam->getProjectionParamsAB();
+    pp.projParams[0] = projAB.x;
+    pp.projParams[1] = projAB.y;
+    pp.projParams[2] = cam->getFarClipDistance();
+    put3(pp.viewAxisX, q * Ogre::Vector3::UNIT_X, 0.0f);
+    put3(pp.viewAxisY, q * Ogre::Vector3::UNIT_Y, 0.0f);
+    put3(pp.viewAxisZ, -(q * Ogre::Vector3::NEGATIVE_UNIT_Z), 0.0f);   // view space looks down -Z
+    const float range = std::min(std::max(row.range, kSunContactMinRange), kSunContactMaxRange);
+    put3(pp.toSun, toSun, range);
+    pp.resolution[0] = float(w);
+    pp.resolution[1] = float(h);
+    pp.resolution[2] = float(fullW);
+    pp.resolution[3] = float(fullH);
+    // THE BIAS RULE's footprint: one of THIS job's texels across the target —
+    // per unit of view distance for a perspective camera (the basis is a ray
+    // whose forward component is 1), in world units for an orthographic one.
+    {
+        const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] +
+                                     eye.rayRight[1] * eye.rayRight[1] +
+                                     eye.rayRight[2] * eye.rayRight[2]);
+        pp.knobs[0] = kRayFootprintTolerance * span * float(divisor) / float(fullW);
+    }
+    pp.knobs[1] = kSunContactMinBias;
+    // THE MASK: the shadow CASTERS' near copies (kRayMaskCaster) — a subset of
+    // the near field, which is the one field a ray this short lives in (A5b §4:
+    // one field per ray; the far copies are the coarse levels past the near
+    // length). An object whose shadows are off must cast no contact shadow
+    // either.
+    pp.knobs[2] = float(kRayMaskCaster);
+    pp.knobs[3] = float(divisor);
+    memcpy(sv.params[ring].mapped, &pp, sizeof(pp));
+    sv.range = range;
+    sv.toSun[0] = toSun.x; sv.toSun[1] = toSun.y; sv.toSun[2] = toSun.z;
+
+    // ---- THE DESCRIPTOR SET, rewritten every frame (uncached, retired views —
+    // the reflection's measured trap about a cached view of a recreated texture)
+    const auto sampledView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot =
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = t;
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+    asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asWrite.accelerationStructureCount = 1;
+    asWrite.pAccelerationStructures = &sa.tlas;
+    VkDescriptorBufferInfo ub{};
+    ub.buffer = sv.params[ring].buffer;
+    ub.range = sizeof(SunContactParams);
+    VkDescriptorImageInfo normals{}, depth{}, store{};
+    normals.sampler = mSunSampler;
+    normals.imageView = sampledView(normalTex);
+    normals.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    depth.sampler = mSunSampler;
+    depth.imageView = sampledView(depthTex);
+    depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = sv.vis;
+        slot.access = Ogre::ResourceAccess::Write;
+        slot.pixelFormat = sv.vis->getPixelFormat();
+        store.imageView = static_cast<Ogre::VulkanTextureGpu *>(sv.vis)->createView(slot, false);
+        retireView(store.imageView);
+        store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (!normals.imageView || !depth.imageView || !store.imageView) {
+        decline("an image view could not be made");
+        return;
+    }
+    VkWriteDescriptorSet wds[kSunContactBindings] = {};
+    for (unsigned i = 0; i < kSunContactBindings; ++i) {
+        wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[i].dstSet = sv.sets[ring];
+        wds[i].dstBinding = i;
+        wds[i].descriptorCount = 1;
+    }
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    wds[0].pNext = &asWrite;
+    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[1].pBufferInfo = &ub;
+    wds[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[2].pImageInfo = &normals;
+    wds[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[3].pImageInfo = &depth;
+    wds[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    wds[4].pImageInfo = &store;
+    vkUpdateDescriptorSets(mVk, kSunContactBindings, wds, 0, nullptr);
+
+    // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER, before the command buffer
+    // is taken (executeResourceTransition closes every encoder and may roll the
+    // queue over — the reflection's recorded reason).
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, sv.vis, Ogre::ResourceLayout::Uav,
+                                 Ogre::ResourceAccess::Write, computeStage);
+        for (Ogre::TextureGpu *t : { normalTex, depthTex })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+
+    // ---- THE DISPATCH -------------------------------------------------------
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) { decline("no command buffer"); return; }
+    {
+        // The frame monitor's row beside the gather's (`sun.contact`): free
+        // while the monitor is off, a GPU-timed row in a capture. `Camera`,
+        // not `None`: a view-dependent answer re-made every frame because the
+        // thing it describes is the picture.
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "sun.contact", mRs);
+        work.setUnits(w * h / 1000u);
+        const bool timed = mSunTimestamps && sv.hasQueryBase;
+        const uint32_t base = sv.queryBase + (sv.frame % kFramesInFlight) * 2u;
+        if (timed) {
+            vkCmdResetQueryPool(cmd, mSunTimestamps, base, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mSunTimestamps, base);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mSunPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mSunPipeLayout, 0, 1,
+                                &sv.sets[ring], 0, nullptr);
+        vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
+        if (timed) {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mSunTimestamps, base + 1u);
+            SunContactView::Pending &pd = sv.pending[sv.frame % kFramesInFlight];
+            pd.frame = frameNow();
+            pd.live = true;
+        }
+    }
+
+    // ...AND NOW THE PIXEL SHADER READS IT: ours to order, since the scene
+    // pass does not know the texture exists (it arrives through the listener).
+    {
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, sv.vis, Ogre::ResourceLayout::Texture,
+                                 Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        mRs->executeResourceTransition(trans);
+    }
+    // THE PROPERTY AND THE TEXTURE TOGETHER, PASS-SCOPED: taken away by
+    // releaseSunContactBinding when this pass ends.
+    FogHlmsListener::setSunContact(sv.sceneMgr, sv.vis, divisor);
+    sv.ran = true;
+    sv.reason.clear();
+    sv.rays = (unsigned long long)w * h;
+    sv.cpuMs = float(msSince(cpuStart));
+    ++sv.frame;
+}
+
+// ---------------------------------------------------------------------------
 /// A DESTRUCTOR MAY NOT THROW — it is implicitly `noexcept`, so an exception
 /// leaving it is `std::terminate`, and this one submits to the GPU (lane VR-3b,
 /// 2026-09-17; the owner's WiVRn smoke died exactly here). The chain was:
@@ -4034,6 +4678,7 @@ ReflectPassListener::~ReflectPassListener() {
         if (rs && !rs->isDeviceLost()) rs->flushCommands();
         mView->mEngine->mRayTier->forgetReflect(this);
         mView->mEngine->mRayTier->forgetGather(this);
+        mView->mEngine->mRayTier->forgetSunContact(this);
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener could not be flushed away cleanly (" +
@@ -4044,12 +4689,14 @@ ReflectPassListener::~ReflectPassListener() {
         // it inherits a stranger's images.
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
     } catch (...) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener's teardown threw a non-Ogre exception",
             Ogre::LML_CRITICAL);
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
     }
 }
 
@@ -4067,6 +4714,10 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     // prepass' depth and normals, and the pixel that reads the gather's answer
     // is shaded by the very pass this listener runs in front of.
     mView->mEngine->mRayTier->recordGather(this, mView, pass);
+    // ...and the SUN CONTACT job (PHOTON-RAYS-1), for the same two reasons: its
+    // rays start from the prepass' surface and its answer is read by the pass
+    // this listener runs in front of.
+    mView->mEngine->mRayTier->recordSunContact(this, mView, pass);
 }
 
 /// GATHER-0 (fix round, D2). The registration made in `passPreExecute` names
@@ -4081,6 +4732,7 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
     if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
     mView->mEngine->mRayTier->releaseGatherBinding(this);
+    mView->mEngine->mRayTier->releaseSunContactBinding(this);
 }
 
 void OgreView::dropReflectState() {
@@ -4093,6 +4745,7 @@ void OgreView::dropReflectState() {
     if (mRoot && mRoot->getRenderSystem()) mRoot->getRenderSystem()->flushCommands();
     mEngine->mRayTier->forgetReflect(mReflectListener.get());
     mEngine->mRayTier->forgetGather(mReflectListener.get());
+    mEngine->mRayTier->forgetSunContact(mReflectListener.get());
 }
 
 void OgreView::syncReflectListener() {
@@ -4106,8 +4759,11 @@ void OgreView::syncReflectListener() {
     // (GATHER-1a): the gather's row is the SCENE's, so a view whose scene turns
     // it on has to gain the prepass it reads its probes' surfaces from. One
     // `chainDesc()` for both comparisons.
+    // ...and `ChainDesc::sunContact` (PHOTON-RAYS-1) the same again: the row
+    // is the scene's and it brings the prepass.
     if (mChainRayReflect != chainDesc().rayReflect ||
-        mChainProbeGather != chainDesc().probeGather)
+        mChainProbeGather != chainDesc().probeGather ||
+        mChainSunContact != chainDesc().sunContact)
         rebuildWorkspaceDef();
     // The same arming rule as the planar and globals listeners, and the same
     // reason it is re-evaluated every frame: the shape above can change, and a
@@ -4136,7 +4792,7 @@ void OgreView::syncReflectListener() {
     // run in front of it.
     const ChainDesc shape = chainDesc();
     const bool wanted = mEnabled && mScene && mCamera && mEngine && mEngine->mRayTier != nullptr &&
-                        (shape.rayReflect || shape.probeGather);
+                        (shape.rayReflect || shape.probeGather || shape.sunContact);
     if (!wanted) {
         if (mReflectListener) {
             removeWorkspaceListener(mReflectListener.get());
@@ -4252,6 +4908,8 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     // return above (the no-rays switch) skips it, which is why
     // `RayQueryTier::close()` clears it too (D1).
     FogHlmsListener::clearProbeGather();
+    // ...and the sun contact's registration, the same backstop (PHOTON-RAYS-1).
+    FogHlmsListener::clearSunContact();
     for (OgreScene *s : drawn) {
         if (!s->rayTracingResolved()) continue;
         mRayTier->updateScene(s);
@@ -4275,6 +4933,30 @@ void OgreScene::gatherStatusInto(GatherStatus &out) const {
     out = GatherStatus();
     out.on = probeGatherWanted();
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->gatherStatsInto(this, out);
+}
+
+/// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the row, held inside its band.
+/// Storing it builds nothing; the view's chain re-checks its shape each frame.
+void OgreScene::setSunContact(const SunContactDesc &d) {
+    SunContactDesc c = d;
+    if (!(c.range >= kSunContactMinRange)) c.range = kSunContactMinRange;   // NaN too
+    if (c.range > kSunContactMaxRange) c.range = kSunContactMaxRange;
+    mSunContact = c;
+}
+
+/// The row resolved against the machine — `probeGatherWanted`'s shape: the
+/// row says what the scene asks for and the machine answers whether it can.
+bool OgreScene::sunContactWanted() const {
+    return mSunContact.enabled && rayTracingResolved();
+}
+
+SunContactStatus OgreScene::sunContactStatus() const {
+    SunContactStatus st;
+    st.on = sunContactWanted();
+    if (st.on && mEngine && mEngine->mRayTier) mEngine->mRayTier->sunContactStatsInto(this, st);
+    if (st.on && !st.running && st.reason.empty())
+        st.reason = "no view of this scene has drawn with the row on yet";
+    return st;
 }
 
 void OgreEngine::shutdownRayQuery() {
@@ -4356,6 +5038,9 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
 void OgreScene::forgetRayQuery() {}
 bool OgreScene::probeGatherWanted() const { return false; }
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
+void OgreScene::setSunContact(const SunContactDesc &d) { mSunContact = d; }
+bool OgreScene::sunContactWanted() const { return false; }
+SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
 bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}
 bool OgreEngine::cardReadParity(Scene *, const std::vector<CardReadQuery> &,

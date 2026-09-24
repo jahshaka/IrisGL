@@ -48,11 +48,14 @@ std::map<const Ogre::SceneManager *, Ogre::TextureGpu *>
                               FogHlmsListener::sProbeGather;                  // render thread only
 std::map<const Ogre::SceneManager *, FogHlmsListener::CloudShadowState>
                               FogHlmsListener::sCloudShadow;                  // render thread only
+std::map<const Ogre::SceneManager *, FogHlmsListener::SunContactBind>
+                              FogHlmsListener::sSunContact;                   // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sCloudSampler = nullptr;       // render thread only
 
 namespace {
 // THE EXTRA PASS TEXTURES, IN THEIR ONE FIXED ORDER (the sky's environment,
-// then the gather's irradiance, then the cloud field — CLOUDS-2D-1). Three
+// then the gather's irradiance, then the cloud field — CLOUDS-2D-1 — then the
+// sun contact visibility — PHOTON-RAYS-1). Three
 // places must agree about it: the count (getNumExtraPassTextures), the
 // registers (propertiesMergedPreGenerationStep) and the bindings
 // (hlmsTypeChanged). They all walk THIS table, so a fourth slot is one row
@@ -66,6 +69,7 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_env",          "jahEnvCube" },
     { "jah_probe_gather", "jahProbeIrradiance" },
     { "jah_cloud_shadow", "jahCloudField" },
+    { "jah_sun_contact",  "jahSunVis" },
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
 /// The slot's property as a hashed IdString, hashed once (these run per
@@ -75,6 +79,7 @@ const Ogre::IdString &extraSlotProperty(size_t i) {
         Ogre::IdString(kExtraPassSlots[0].property),
         Ogre::IdString(kExtraPassSlots[1].property),
         Ogre::IdString(kExtraPassSlots[2].property),
+        Ogre::IdString(kExtraPassSlots[3].property),
     };
     return ids[i];
 }
@@ -211,12 +216,13 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
     if (casterPass || !commandBuffer || !datablock || !datablock->getCreator()) return;
     const PassBinds &pb = sPass[datablock->getCreator()->getType()];
     // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance,
-    // the cloud field. Each pair was set together in preparePassHash with its
-    // property, or not at all.
+    // the cloud field, the sun contact visibility. Each pair was set together
+    // in preparePassHash with its property, or not at all.
     const struct { Ogre::TextureGpu *tex; const Ogre::HlmsSamplerblock *sampler; } bound[] = {
         { pb.skyCube, pb.skySampler },
         { pb.probeGather, pb.probeGatherSampler },
         { pb.cloudField, pb.cloudSampler },
+        { pb.sunVis, pb.sunVisSampler },
     };
     static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
                   "one binding per extra pass slot, in kExtraPassSlots' order");
@@ -250,6 +256,18 @@ void FogHlmsListener::setProbeGather(const Ogre::SceneManager *sm, Ogre::Texture
     sProbeGather[sm] = irradiance;
 }
 void FogHlmsListener::clearProbeGather() { sProbeGather.clear(); }
+
+// PHOTON-RAYS-1 — the sun contact job's registration (see the header).
+void FogHlmsListener::setSunContact(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility,
+                                    unsigned divisor) {
+    if (!sm) return;
+    if (!visibility) { sSunContact.erase(sm); return; }
+    SunContactBind b;
+    b.tex = visibility;
+    b.divisor = divisor ? divisor : 1u;
+    sSunContact[sm] = b;
+}
+void FogHlmsListener::clearSunContact() { sSunContact.clear(); }
 Ogre::TextureGpu *FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
     auto it = sProbeGather.find(sm);
     return it == sProbeGather.end() ? nullptr : it->second;
@@ -362,6 +380,30 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             }
         }
     }
+    // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1) — the gather's three decisions
+    // again, set together or not at all, and PASS-SCOPED the same way (the ray
+    // tier registers the texture in front of the PrePassUse pass and takes it
+    // away when that pass ends), so the capture, probe and card passes of the
+    // same SceneManager never see it. The property's VALUE is the texel
+    // divisor the piece reads the texture at. `sSunContact` is empty in every
+    // scene with the row off: one empty() test per colour pass.
+    pb.sunVis = nullptr;
+    pb.sunVisSampler = nullptr;
+    if (hlms && !casterPass && sceneManager && !sSunContact.empty()) {
+        auto it = sSunContact.find(sceneManager);
+        if (it != sSunContact.end() && it->second.tex) {
+            // The gather's POINT sampler, borrowed (one reference per manager —
+            // the uint16 refcount rule above); the piece reads with a texel
+            // fetch and never filters.
+            const Ogre::HlmsSamplerblock *point = acquireSampler(hlms->getHlmsManager(), false);
+            if (point) {
+                pb.sunVis = it->second.tex;
+                pb.sunVisSampler = point;
+                hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_sun_contact",
+                                   Ogre::int32(it->second.divisor));
+            }
+        }
+    }
     if (casterPass || !shadowNode || !hlms) return;
     // ONLY WHERE AN ASSIGNMENT CHANGED (clean-2 lane, 2026-09-13). A node can
     // only ENTER the broken state when setLightFixedToShadowMap is called on
@@ -456,6 +498,7 @@ void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
     // Every host's pass copy, whole (its textures may name this scene's).
     for (PassBinds &pb : sPass) pb = PassBinds();
     sCloudShadow.erase(sm);
+    sSunContact.erase(sm);
 }
 
 void FogHlmsListener::setCloudShadow(const Ogre::SceneManager *sm, const CloudShadowState &state) {

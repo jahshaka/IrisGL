@@ -1023,6 +1023,14 @@ struct ChainDesc {
     /// does not). Set by the VIEW from the scene's resolved row, exactly as
     /// `rayReflect` is.
     bool  probeGather = false;
+    /// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3), here for the gather's
+    /// reason exactly: the contact job starts each ray from the PREPASS' depth
+    /// and normals and the pixel reads its answer back in the `PrePassUse`
+    /// pass (`iFragCoord`, and the prepass' shadow term the answer is folded
+    /// into). So the prepass runs for `ssr || probeGather || sunContact`.
+    /// Nothing else about the graph moves. Set by the VIEW from the scene's
+    /// resolved row, below the offscreen early-out, never in a stereo view.
+    bool  sunContact = false;
     bool  refractions = false;
     /// THE RADIANCE READBACK (PostFxDesc::hdrReadback, HDR-READBACK-1): the
     /// scene result is kept in a FLOAT target even without `hdr`, and
@@ -2523,6 +2531,17 @@ public:
     static void clearProbeGather();
     static Ogre::TextureGpu *probeGather(const Ogre::SceneManager *sm);
 
+    /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1) — the gather's route, word for
+    /// word: the ray tier registers the visibility texture it has just written
+    /// (`jahSunVis`, R8, 1 = lit) and the texel DIVISOR it was written at (1 =
+    /// one ray per pixel, 2 = one per 2x2 block) immediately before the pass
+    /// that shades with it, and takes it away when that pass ends; this
+    /// listener turns it into the pass property `jah_sun_contact` (its VALUE is
+    /// the divisor), the fourth extra slot and one binding.
+    static void setSunContact(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility,
+                              unsigned divisor);
+    static void clearSunContact();
+
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
     /// because this may be called from any thread and must be a pure function
@@ -2556,11 +2575,17 @@ private:
         const Ogre::HlmsSamplerblock *probeGatherSampler = nullptr;
         Ogre::TextureGpu             *cloudField = nullptr;           // CLOUDS-2D-1
         const Ogre::HlmsSamplerblock *cloudSampler = nullptr;
+        Ogre::TextureGpu             *sunVis = nullptr;               // PHOTON-RAYS-1
+        const Ogre::HlmsSamplerblock *sunVisSampler = nullptr;
     };
     static PassBinds sPass[Ogre::HLMS_MAX];                            // render thread only
     static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
     /// GATHER-0's registration (the pass's copy of it is PassBinds::probeGather).
     static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
+    /// The contact job's registration: the texture and its divisor (the pass's
+    /// copy is PassBinds::sunVis; the divisor becomes the property's value).
+    struct SunContactBind { Ogre::TextureGpu *tex = nullptr; unsigned divisor = 1u; };
+    static std::map<const Ogre::SceneManager *, SunContactBind> sSunContact;  // render thread
     /// The cloud field per SceneManager (CLOUDS-2D-1); the pass's copy of it is
     /// PassBinds::cloudField.
     static std::map<const Ogre::SceneManager *, CloudShadowState> sCloudShadow;  // render thread
@@ -3247,6 +3272,15 @@ public:
     void setGatherTuning(const GatherTuning &t) override { mGatherTuning = t; }
     const GatherTuning &gatherTuning() const { return mGatherTuning; }
     GatherTuning mGatherTuning;
+    /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1). The row is stored here and
+    /// read by the view (the chain's prepass) and the ray tier (the job);
+    /// `sunContactWanted` is the row resolved against the machine, defined in
+    /// OgreRayQuery.cpp beside `probeGatherWanted` for the same reason.
+    void setSunContact(const SunContactDesc &d) override;
+    SunContactDesc sunContact() const override { return mSunContact; }
+    SunContactStatus sunContactStatus() const override;
+    bool sunContactWanted() const;
+    SunContactDesc mSunContact;
     // --- THE GPU SCENE (A3_GPU_SCENE_SLICE_DESIGN.md; GpuScene.h) -----------
     /// Brings the device-side instance and mesh tables up to date for this
     /// frame's movement epoch. Epoch-gated, and the FRAME's pass is the one that
@@ -6437,6 +6471,9 @@ private:
     /// is the scene's, so the shape is re-checked once a frame beside the
     /// reflection's (OgreView::syncReflectListener).
     bool                       mChainProbeGather = false;
+    /// ...and what `ChainDesc::sunContact` was (PHOTON-RAYS-1), for the same
+    /// once-a-frame re-check.
+    bool                       mChainSunContact = false;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.
