@@ -2276,6 +2276,10 @@ struct GiParams {
     /// than metres-per-voxel, which would shrink the lit world as the quality
     /// dial goes down — is at the constant.
     float     testAutoBoundsMax = -1.0f;
+    /// The scene-fitted volume's resolution along its longest side - a test lever over the
+    /// tier's own (`giQualityFacts(...).voxelResolution`), for measuring the resolution as a
+    /// dial against its cost in one process. 0 (the default) is the tier's.
+    unsigned  testVoxelResolution = 0u;
     /// Total light bounces, 1..4 (1 = a single indirect bounce).
     int       numBounces = 1;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
@@ -2612,6 +2616,7 @@ struct GiParams {
     bool operator==(const GiParams &o) const {
         return mode == o.mode && quality == o.quality &&
                numBounces == o.numBounces && testAutoBoundsMax == o.testAutoBoundsMax &&
+               testVoxelResolution == o.testVoxelResolution &&
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
                probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
@@ -4423,6 +4428,35 @@ struct GiVoxelStats {
     /// volumes are byte-identical: it is the instrument of the proof that one
     /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
     std::string lightDigest;
+};
+
+/// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — the test and tool readback of
+/// mip 0 of a cascade's TOTAL light volume and of the voxeliser's ALBEDO volume,
+/// decoded to linear floats, with the lattice they sit on. It is the instrument
+/// of the coverage rule: a voxel's colour integrates to the surface area inside
+/// it, so a wall's column of voxels is summed and composited against the wall
+/// as authored, which no aggregate can do. Blocks exactly like giVoxelStats.
+struct GiVoxelVolume {
+    bool available = false;
+    int  width = 0, height = 0, depth = 0;
+    /// Cascade's voxel origin (the corner of voxel 0,0,0) and cell, world metres.
+    float origin[3] = { 0.f, 0.f, 0.f };
+    float cell[3] = { 0.f, 0.f, 0.f };
+    /// The store's normalisation k (a voxel holds k x the surface's radiance).
+    float multiplier = 0.0f;
+    /// width*height*depth RGBA, x fastest: the TOTAL light (premultiplied by
+    /// the voxel's conservative opacity c, k units), the voxeliser's albedo
+    /// volume (rgb = the surfaces' area-mean albedo, a = c = max of the six
+    /// per-half-axis coverages), the COVERAGE PER HALF-AXIS (rgb = O_x, O_y, O_z of
+    /// the faces looking +a (P) and -a (N): the fraction of the voxel's face along
+    /// that axis they cover - a ray travelling +a sees the N half; a unused) and the
+    /// SURFACE POSITION per half (rgb = O_a x p_a, p_a where along axis a those faces
+    /// lie, in the cascade's normalised [0, 1] box - O-premultiplied, so
+    /// p_a = rgb / O_a; a unused).
+    std::vector<float> light;
+    std::vector<float> albedo;
+    std::vector<float> coverageP, coverageN;
+    std::vector<float> positionP, positionN;
 };
 
 // ---------------------------------------------------------------------------
@@ -7192,7 +7226,7 @@ struct VoxelReaderCone {
     Vec3     dirLS;                  ///< unit direction
     Vec3     biasDirLS;              ///< the hop's bias direction (zero: a point in free space)
     float    tanHalfAngle = 0.577f;  ///< the diffuse cone set's half angle
-    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 4 lod step, 8 gap along the cone, 16 no escape)
+    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 32 one step)
     unsigned cascade = 0u;           ///< which cascade the point reads take
     float    lod = 0.0f;             ///< ...at which mip
 };
@@ -7204,9 +7238,9 @@ struct VoxelReaderCone {
 /// read of it.
 struct VoxelReaderAnswer {
     float march[4] = {};     ///< colour.rgb, alpha
-    float escape[4] = {};    ///< escapeAlpha, travelledC0, lastCascade, travelled
-    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls) where the march's first sample lands
-    float marchRead[4] = {}; ///< the march at zero length: one march step onto that point
+    float escape[4] = {};    ///< alpha (the escape rides it), travelledC0, lastCascade, travelled
+    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls) at the centre of the march's first texel plane
+    float marchRead[4] = {}; ///< the march at zero length: that plane, read whole by the march
 };
 
 /// ONE CONE FOR THE ENVIRONMENT'S CONE-LOOKUP HARNESS (PHOTON-ENV-1;

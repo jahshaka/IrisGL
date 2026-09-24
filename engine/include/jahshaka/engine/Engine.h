@@ -1026,6 +1026,12 @@ public:
     /// the proof that a scrolled field kept the probes that stayed in its window
     /// byte for byte. False without a bound field.
     virtual bool giFieldAtlas(GiFieldAtlas &out) { out = GiFieldAtlas(); return false; }
+    /// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — a TEST AND TOOL readback
+    /// (flushes and BLOCKS on three whole-volume downloads): mip 0 of the total
+    /// light, the albedo and the per-axis coverage volume, decoded (Types.h
+    /// GiVoxelVolume). False
+    /// without a VCT arm or that cascade.
+    virtual bool giVoxelVolume(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
     /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
     /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
     ///

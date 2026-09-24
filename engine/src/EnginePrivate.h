@@ -3321,6 +3321,7 @@ public:
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade) override;
     bool giFieldAtlas(GiFieldAtlas &out) override;
+    bool giVoxelVolume(int cascade, GiVoxelVolume &out) override;
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
