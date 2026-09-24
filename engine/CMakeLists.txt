@@ -151,7 +151,7 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
         VERBATIM)
-    # THE SCREEN-PROBE GATHER'S THREE JOBS (GATHER-1a), same rule plus ONE
+    # THE SCREEN-PROBE GATHER'S FOUR JOBS (GATHER-1a; the filter PHOTON-GATHER-1b), same rule plus ONE
     # addition: `-I src/rayquery/include`, so the hit-radiance functions and the
     # parameter block are SHARED with the reflection trace rather than copied
     # (spec section 10 item 7 — glslang resolves `#include` under
@@ -184,6 +184,16 @@ if(JAH_RAY_QUERY_OK)
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_probeFilterSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_filter.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_filter.comp"
+                ${JAH_RQ_HEADERS}
+        COMMENT "Compiling the screen-probe filter + SH projection at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
                 "-I${JAH_RQ_INCLUDE}"
@@ -200,6 +210,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h")
     set(JAH_RQ_GEN_DIR "${JAH_RQ_GEN_DIR}" PARENT_SCOPE)
 endif()

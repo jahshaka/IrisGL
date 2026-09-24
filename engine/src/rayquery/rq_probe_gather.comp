@@ -1,6 +1,7 @@
 #version 460
-// THE SCREEN-PROBE GATHER, JOB 2 OF 3: THE TRACE
-// (GATHER-1a; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 2 items 2-4).
+// THE SCREEN-PROBE GATHER, JOB 2 OF 4: THE TRACE
+// (GATHER-1a; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 2 items 2-4; the reduce
+// moved to the filter, PHOTON-GATHER-1b).
 //
 // ONE WORKGROUP PER PROBE, one THREAD per ray, one ray per texel of the
 // probe's octahedral map. The workgroup is 8x8, so a probe traces at most 64
@@ -9,29 +10,19 @@
 // THE PHYSICS, and the line that decides the units. A pixel's diffuse GI is
 // E(n) = INTEGRAL L(w) max(0, n.w) dw. HlmsPbs consumes it as `envColourD`,
 // which its BRDF multiplies by kD (= albedo/pi) and by pi
-// (200.BRDFs_piece_ps.any:305) — so `envColourD` is E/pi, the mean radiance
-// over the cosine-weighted hemisphere. This job estimates it as a QUADRATURE
-// over the octahedral map with the EXACT solid angle of each texel
-// (jahOctSolidAngle, whose derivation is at its definition):
+// (200.BRDFs_piece_ps.any:305) — so `envColourD` is E/pi. This job writes the
+// RADIANCE half of that integral and nothing else: each ray's radiance and hit
+// distance, into the probe's 8x8 block of the ATLAS. The next job
+// (rq_probe_filter.comp) filters the map in probe space against its
+// neighbours and projects it onto SH9 with the exact solid angle of each texel
+// (jahOctSolidAngle, whose derivation is at its definition); the integrate
+// evaluates that SH at every pixel's own normal.
 //
-//     E/pi = SUM( L_i * cos_i * dOmega_i ) / SUM( cos_i * dOmega_i )
-//
-// The denominator is pi by construction and is summed rather than assumed for
-// one reason worth the register: with the directions JITTERED inside their
-// texels it is pi plus the estimator's own noise, and dividing by the noise
-// that the numerator carries cancels it — a constant-radiance hemisphere reads
-// exactly that radiance, every frame, instead of wobbling by two per cent. It
-// is a ratio estimator: exact for a uniform environment, O(1/N) biased for a
-// varying one, and far quieter than the raw sum on the axis the analytic gate
-// measures (the MAGNITUDE).
-//
-// WHAT THE ATLAS IS FOR. Every ray also stores its own radiance and its hit
-// DISTANCE into the probe's 8x8 block of the atlas. Nothing reads it at phase
-// 1 — the integrate takes the reduced irradiance out of the probe's record —
-// and it exists because phases 2 and 3 are the filter in probe space, the
-// plane-weighted interpolation and the temporal reprojection, and every one of
-// them reads radiance PER DIRECTION with the distance beside it. Writing it
-// costs one store per ray.
+// THE DIRECTIONS ARE JITTERED inside their texels (stratification: the rays
+// cover the hemisphere once each rather than clustering, and the jitter is
+// what keeps a small bright source from aliasing in and out as the probe
+// moves); the filter assigns each texel's radiance to its texel, whose
+// solid angle it weighs exactly.
 //
 // THE HIT'S RADIANCE, in Lumen's order minus the card (that is phase 5, and it
 // arrives as one more branch here): the cascade VOXEL where the ray hit
@@ -61,10 +52,8 @@
 // 937/938).
 //
 // DETERMINISM (spec section 5). Every stochastic input is an integer hash of
-// (probe cell, ray, frame). The 64 partial sums are reduced by a FIXED-ORDER
-// shared-memory tree — not an atomic, not a subgroup reduction, both of which
-// make the sum's order the scheduler's and a float sum whose order is the
-// scheduler's is not reproducible (patch 0065's lesson in its smallest form).
+// (probe cell, ray, frame); each ray writes its own texel and nothing is summed
+// here (the filter's reduction is a fixed-order shared-memory tree).
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
 
@@ -74,10 +63,10 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 #include "jah_probe_params.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
-layout( std430, set = 0, binding = 2 ) buffer Records { JahProbeRecord r[]; } records;
+layout( std430, set = 0, binding = 2 ) readonly buffer Records { JahProbeRecord r[]; } records;
 /// THE PROBE ATLAS: one 8x8 block per probe, rgb = the radiance arriving along
-/// that texel's direction, a = how far away it came from (-1 = the ray hit
-/// nothing, near or far: the sky).
+/// that texel's ray, re-weighted to the texel's centre (see `reweight`), a = how
+/// far away it came from (-1 = the ray hit nothing, near or far: the sky).
 layout( rgba16f, set = 0, binding = 3 ) uniform image2D probeAtlas;
 layout( set = 0, binding = 4 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 5 ) uniform sampler3D voxelX[kMaxCascades];
@@ -92,9 +81,6 @@ layout( set = 0, binding = 8 ) uniform samplerCube skyCube;
 #define JAH_SKY_ON          ( p.knobs2.z > 0.5 )
 #define JAH_SKY_COLOUR      p.skyColour.xyz
 #include "jah_rq_hit.glsl"
-
-/// The weighted radiance (xyz) and the weight (w), reduced in a fixed order.
-shared vec4 gSum[64];
 
 void main()
 {
@@ -138,7 +124,6 @@ void main()
 	// the unused texels are cleared below by the same store.
 	const ivec2 texel = ivec2( int( lane ) % octRes, int( lane ) / octRes );
 
-	vec4 contribution = vec4( 0.0 );
 	vec4 atlasTexel = vec4( 0.0, 0.0, 0.0, -1.0 );
 
 	if( onSurface && lane < rays )
@@ -160,9 +145,23 @@ void main()
 		const float invR = 1.0 / max( length( octPoint ), 1e-6 );
 		const vec3 dLocal = octPoint * invR;
 		const vec3 dir = normalize( T * dLocal.x + B * dLocal.y + n * dLocal.z );
-		// The cosine IS the local z (the frame is built around the normal), and
-		// the solid angle is the texel's exact one.
-		const float weight = max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) );
+		// THE TEXEL'S QUADRATURE WEIGHT, AT THE RAY AND AT THE CENTRE. The
+		// filter and the SH integrate over texel CENTRES (a texel is one
+		// direction to a neighbour and to the projection), while this ray stands
+		// for a point jittered inside the texel — and with a sharp source that
+		// covers part of a texel, where in the texel the rays hit correlates
+		// with the cosine and the solid angle there: assigning the ray's
+		// radiance to the centre's weight read a rectangular emitter 5-7 % off
+		// at a grazing distance (gi.gather_reference, the lane's A/B). So the
+		// atlas holds the radiance RE-WEIGHTED to the centre:
+		//     L * ( cos dOmega at the ray ) / ( cos dOmega at the centre ),
+		// whose centre quadrature is exactly this ray's jittered one (GATHER-1a's
+		// unbiased estimator), and whose mean over the jitter is the texel's
+		// cosine-weighted radiance per unit of the centre's weight.
+		const vec3 centrePoint = jahOctPoint( ( vec2( t ) + 0.5 ) / float( octRes ) );
+		const float centreCos = centrePoint.z / max( length( centrePoint ), 1e-6 );
+		const float reweight = ( max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) ) ) /
+							   max( centreCos * jahOctSolidAngle( centrePoint, float( octRes ) ), 1e-9 );
 
 		const float bias = p.knobs2.y;
 		const float maxT = p.knobs.y;
@@ -221,8 +220,7 @@ void main()
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );
-		contribution = vec4( radiance * weight, weight );
-		atlasTexel = vec4( radiance, distance );
+		atlasTexel = vec4( min( radiance * reweight, vec3( kMaxRadiance ) ), distance );
 	}
 
 	// The lanes past octRes*octRes have no direction of their own; they clear the
@@ -233,23 +231,4 @@ void main()
 									  : ivec2( int( lane ) % kOctResMax,
 											   int( lane ) / kOctResMax ) ),
 				atlasTexel );
-
-	gSum[lane] = contribution;
-	// The fixed-order tree: lane k adds lane k+s for s = 32, 16, 8, 4, 2, 1.
-	// Six barriers, one deterministic sum.
-	for( uint s = 32u; s > 0u; s >>= 1u )
-	{
-		barrier();
-		if( lane < s )
-			gSum[lane] += gSum[lane + s];
-	}
-	barrier();
-	if( lane == 0u )
-	{
-		vec4 answer = vec4( 0.0 );
-		if( gSum[0].w > 1e-6 )
-			answer = vec4( clamp( gSum[0].xyz / gSum[0].w, vec3( 0.0 ), vec3( kMaxRadiance ) ),
-						   1.0 );
-		records.r[probe].irradiance = answer;
-	}
 }

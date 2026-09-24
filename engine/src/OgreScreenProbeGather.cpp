@@ -1,7 +1,7 @@
 // THE SCREEN-PROBE GATHER — the Component's implementation (GATHER-1a,
 // 2026-09-21; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 9).
 //
-// THREE COMPUTE DISPATCHES on the frame's own command buffer, recorded at the
+// FOUR COMPUTE DISPATCHES on the frame's own command buffer, recorded at the
 // reflection listener's hook — after the SSR prepass (whose depth and normals
 // are the probes' surfaces) and before the opaque pass that shades:
 //
@@ -11,8 +11,14 @@
 //   rq_probe_gather.comp     one WORKGROUP per probe, one ray per thread, one
 //                            ray per octahedral texel; dispatched INDIRECTLY
 //                            because the adaptive probes' count is the GPU's.
-//   rq_probe_integrate.comp  one thread per pixel: the probe its plane agrees
-//                            with, into `jahProbeIrradiance`.
+//   rq_probe_filter.comp     one WORKGROUP per probe, one texel per thread: the
+//                            map filtered against its 3x3 neighbourhood in
+//                            probe space and projected onto SH9 (same indirect
+//                            arguments; PHOTON-GATHER-1b).
+//   rq_probe_integrate.comp  one thread per pixel: the four grid probes and the
+//                            cell's adaptive twin, weighted by the plane test,
+//                            each SH evaluated at the pixel's own normal, into
+//                            `jahProbeIrradiance`.
 //
 // THE BOUNDARY THIS FILE KEEPS. It speaks Vulkan and Ogre and knows nothing
 // about the scene graph: everything it needs about the frame arrives in
@@ -37,6 +43,7 @@
 
 #include "rayquery/rq_probe_place_spv.h"
 #include "rayquery/rq_probe_gather_spv.h"
+#include "rayquery/rq_probe_filter_spv.h"
 #include "rayquery/rq_probe_integrate_spv.h"
 
 #include <algorithm>
@@ -62,15 +69,23 @@ constexpr unsigned kRing = 3u;
 constexpr unsigned kMaxTimedViews = 8u;
 /// Frames of timestamps in flight (Ogre's dynamic-buffer multiplier).
 constexpr unsigned kFramesInFlight = 3u;
-/// Six timestamps a frame: a pair around each of the three jobs.
-constexpr unsigned kQueriesPerFrame = 6u;
+/// Eight timestamps a frame: a pair around each of the four jobs.
+constexpr unsigned kQueriesPerFrame = 8u;
 
 constexpr unsigned kPlaceBindings = 6u;
 constexpr unsigned kTraceBindings = 9u;
+constexpr unsigned kFilterBindings = 4u;
 constexpr unsigned kIntegrateBindings = 5u;
 
-/// One probe's record: three vec4s (see JahProbeRecord in the shaders).
-constexpr unsigned kRecordBytes = 48u;
+/// One probe's record: ten vec4s — position, normal, the irradiance at its own
+/// normal and the SH9 (27 floats in seven vec4s; see JahProbeRecord in the
+/// shaders). PHOTON-GATHER-1b grew it from three vec4s.
+constexpr unsigned kRecordBytes = 160u;
+/// THE WEIGHT FLOOR under which a pixel's plane-weighted probes are not an
+/// answer (w = 0: the fallback owns the pixel). A pixel whose ONLY agreeing probe
+/// is a corner cell's at a sixteenth of the bilinear weight still clears it; one
+/// whose probes all sit off its plane does not.
+constexpr float kWeightFloor = 1e-3f;
 
 /// rq_probe_*.comp's uniform block, MEMBER FOR MEMBER (jah_probe_params.glsl).
 /// std140 over vec4s only, so the C++ layout is the GLSL layout by
@@ -93,6 +108,7 @@ struct GatherParams {
     float viewAxisZ[4] = {};
     float voxelOrigin[kGatherMaxCascades][4] = {};
     float voxelInvSize[kGatherMaxCascades][4] = {};
+    float knobs4[4] = {};
 };
 
 /// THE ADAPTIVE TEST'S TWO TOLERANCES, and why they are constants rather than
@@ -189,6 +205,15 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
                                              kGatherMaxCascades, 1u };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
+    {   // rq_probe_filter.comp
+        const VkDescriptorType t[kFilterBindings] = {
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 records
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 2 the raw atlas
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 3 the filtered atlas
+        };
+        if (!makeLayout(kFilterBindings, t, nullptr, mFilterLayout, "filter")) return false;
+    }
     {   // rq_probe_integrate.comp
         const VkDescriptorType t[kIntegrateBindings] = {
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
@@ -239,23 +264,32 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     if (!makeOne(mTraceLayout, krq_probeGatherSpv, sizeof(krq_probeGatherSpv), mTracePipeLayout,
                  mTraceModule, mTracePipeline, "trace"))
         return false;
+    if (!makeOne(mFilterLayout, krq_probeFilterSpv, sizeof(krq_probeFilterSpv), mFilterPipeLayout,
+                 mFilterModule, mFilterPipeline, "filter"))
+        return false;
     if (!makeOne(mIntegrateLayout, krq_probeIntegrateSpv, sizeof(krq_probeIntegrateSpv),
                  mIntegratePipeLayout, mIntegrateModule, mIntegratePipeline, "integrate"))
         return false;
 
-    const unsigned sets = kMaxTimedViews * kRing * 3u;
+    // PER VIEW AND RING SLOT, four sets: place (1 uniform, 3 storage buffers,
+    // 2 sampled), trace (1 AS, 1 uniform, 1 storage buffer, 1 storage image,
+    // 4 x cascades + 1 sampled), filter (1 uniform, 1 storage buffer, 2 storage
+    // images), integrate (1 uniform, 1 storage buffer, 2 sampled, 1 storage
+    // image).
+    const unsigned groups = kMaxTimedViews * kRing;
+    const unsigned sets = groups * 4u;
     VkDescriptorPoolSize sizes[4] = {};
     sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    sizes[0].descriptorCount = sets;
+    sizes[0].descriptorCount = groups;
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[1].descriptorCount = sets;
+    sizes[1].descriptorCount = groups * 4u;
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[2].descriptorCount = sets * 3u;
+    sizes[2].descriptorCount = groups * 6u;
     sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[3].descriptorCount = sets * 2u;
+    sizes[3].descriptorCount = groups * 4u;
     VkDescriptorPoolSize sampled{};
     sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sampled.descriptorCount = sets * (2u + 4u * kGatherMaxCascades + 1u);
+    sampled.descriptorCount = groups * (2u + 4u * kGatherMaxCascades + 1u + 2u);
     VkDescriptorPoolSize all[5] = { sizes[0], sizes[1], sizes[2], sizes[3], sampled };
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -314,6 +348,9 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, VK_FORMAT_R16G16B16A16_SFLOAT, v.atlas,
                                v.atlasMemory, v.atlasView, err))
         return false;
+    if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, VK_FORMAT_R16G16B16A16_SFLOAT, v.filtered,
+                               v.filteredMemory, v.filteredView, err))
+        return false;
     if (!mHost.gatherMakeBuffer(VkDeviceSize(total) * kRecordBytes,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, v.records,
                                 v.recordsMemory, nullptr, err))
@@ -354,7 +391,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     v.irradiance = t;
 
-    v.vramBytes = (unsigned long long)v.atlasW * v.atlasH * 8ull +
+    v.vramBytes = 2ull * v.atlasW * v.atlasH * 8ull +
                   (unsigned long long)total * kRecordBytes +
                   (unsigned long long)in.width * in.height * 8ull;
     v.targetsReady = true;
@@ -366,8 +403,9 @@ void ScreenProbeGather::drop(View &v) {
     for (unsigned i = 0; i < kRing; ++i) {
         mHost.gatherRetireSet(v.placeSets[i], mPool);
         mHost.gatherRetireSet(v.traceSets[i], mPool);
+        mHost.gatherRetireSet(v.filterSets[i], mPool);
         mHost.gatherRetireSet(v.integrateSets[i], mPool);
-        v.placeSets[i] = v.traceSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
+        v.placeSets[i] = v.traceSets[i] = v.filterSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
         mHost.gatherRetireBuffer(v.params[i], v.paramsMemory[i]);
         v.params[i] = VK_NULL_HANDLE;
         v.paramsMemory[i] = VK_NULL_HANDLE;
@@ -390,6 +428,10 @@ void ScreenProbeGather::drop(View &v) {
     v.atlas = VK_NULL_HANDLE;
     v.atlasMemory = VK_NULL_HANDLE;
     v.atlasView = VK_NULL_HANDLE;
+    mHost.gatherRetireImage(v.filtered, v.filteredMemory, v.filteredView);
+    v.filtered = VK_NULL_HANDLE;
+    v.filteredMemory = VK_NULL_HANDLE;
+    v.filteredView = VK_NULL_HANDLE;
     if (v.irradiance) mHost.gatherRetireTexture(v.irradiance);
     v.irradiance = nullptr;
     if (v.hasQueryBase) mQuerySlots &= ~(uint32_t(1) << v.querySlot);
@@ -405,7 +447,7 @@ void ScreenProbeGather::drop(View &v) {
     v.frame = 0u;
     v.adaptiveLast = 0u;
     v.adaptiveAsked = 0u;
-    v.placeMs = v.traceMs = v.integrateMs = v.cpuMs = -1.0f;
+    v.placeMs = v.traceMs = v.filterMs = v.integrateMs = v.cpuMs = -1.0f;
 }
 
 void ScreenProbeGather::readPending(View &v) {
@@ -462,7 +504,8 @@ void ScreenProbeGather::readPending(View &v) {
             };
             span(0, 1, v.placeMs);
             span(2, 3, v.traceMs);
-            span(4, 5, v.integrateMs);
+            span(4, 5, v.filterMs);
+            span(6, 7, v.integrateMs);
         }
         pd.live = false;
     }
@@ -474,20 +517,24 @@ void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
     // UNDEFINED -> GENERAL and zeroed. A probe block of zero radiance at a
     // distance of zero is what an untraced probe reads as, which is what the
     // integrate hands back to the pixel path.
-    VkImageMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = v.atlas;
-    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.levelCount = 1;
-    b.subresourceRange.layerCount = 1;
-    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    // Both atlases: the raw one and the filtered one.
+    VkImageMemoryBarrier b[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b[i].srcQueueFamilyIndex = b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b[i].image = i == 0 ? v.atlas : v.filtered;
+        b[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b[i].subresourceRange.levelCount = 1;
+        b[i].subresourceRange.layerCount = 1;
+        b[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &b);
+                         0, nullptr, 0, nullptr, 2, b);
     VkClearColorValue zero{};
-    vkCmdClearColorImage(cmd, v.atlas, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &b.subresourceRange);
+    vkCmdClearColorImage(cmd, v.atlas, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &b[0].subresourceRange);
+    vkCmdClearColorImage(cmd, v.filtered, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &b[1].subresourceRange);
     VkMemoryBarrier toCompute{};
     toCompute.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     toCompute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -530,7 +577,7 @@ void ScreenProbeGather::close() {
         // usual.
         View &v = kv.second;
         for (unsigned i = 0; i < kRing; ++i)
-            v.placeSets[i] = v.traceSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
+            v.placeSets[i] = v.traceSets[i] = v.filterSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
         drop(v);
     }
     mViews.clear();
@@ -541,22 +588,26 @@ void ScreenProbeGather::close() {
     if (mPool) vkDestroyDescriptorPool(dev, mPool, nullptr);
     if (mPlacePipeline) vkDestroyPipeline(dev, mPlacePipeline, nullptr);
     if (mTracePipeline) vkDestroyPipeline(dev, mTracePipeline, nullptr);
+    if (mFilterPipeline) vkDestroyPipeline(dev, mFilterPipeline, nullptr);
     if (mIntegratePipeline) vkDestroyPipeline(dev, mIntegratePipeline, nullptr);
     if (mPlaceModule) vkDestroyShaderModule(dev, mPlaceModule, nullptr);
     if (mTraceModule) vkDestroyShaderModule(dev, mTraceModule, nullptr);
+    if (mFilterModule) vkDestroyShaderModule(dev, mFilterModule, nullptr);
     if (mIntegrateModule) vkDestroyShaderModule(dev, mIntegrateModule, nullptr);
     if (mPlacePipeLayout) vkDestroyPipelineLayout(dev, mPlacePipeLayout, nullptr);
     if (mTracePipeLayout) vkDestroyPipelineLayout(dev, mTracePipeLayout, nullptr);
+    if (mFilterPipeLayout) vkDestroyPipelineLayout(dev, mFilterPipeLayout, nullptr);
     if (mIntegratePipeLayout) vkDestroyPipelineLayout(dev, mIntegratePipeLayout, nullptr);
     if (mPlaceLayout) vkDestroyDescriptorSetLayout(dev, mPlaceLayout, nullptr);
     if (mTraceLayout) vkDestroyDescriptorSetLayout(dev, mTraceLayout, nullptr);
+    if (mFilterLayout) vkDestroyDescriptorSetLayout(dev, mFilterLayout, nullptr);
     if (mIntegrateLayout) vkDestroyDescriptorSetLayout(dev, mIntegrateLayout, nullptr);
     if (mTimestamps) vkDestroyQueryPool(dev, mTimestamps, nullptr);
     mPool = VK_NULL_HANDLE;
-    mPlacePipeline = mTracePipeline = mIntegratePipeline = VK_NULL_HANDLE;
-    mPlaceModule = mTraceModule = mIntegrateModule = VK_NULL_HANDLE;
-    mPlacePipeLayout = mTracePipeLayout = mIntegratePipeLayout = VK_NULL_HANDLE;
-    mPlaceLayout = mTraceLayout = mIntegrateLayout = VK_NULL_HANDLE;
+    mPlacePipeline = mTracePipeline = mFilterPipeline = mIntegratePipeline = VK_NULL_HANDLE;
+    mPlaceModule = mTraceModule = mFilterModule = mIntegrateModule = VK_NULL_HANDLE;
+    mPlacePipeLayout = mTracePipeLayout = mFilterPipeLayout = mIntegratePipeLayout = VK_NULL_HANDLE;
+    mPlaceLayout = mTraceLayout = mFilterLayout = mIntegrateLayout = VK_NULL_HANDLE;
     mTimestamps = VK_NULL_HANDLE;
     mQuerySlots = 0u;
 }
@@ -583,6 +634,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, GatherStatus &
         out.atlasBytes = v.vramBytes;
         out.placeMs = v.placeMs;
         out.traceMs = v.traceMs;
+        out.filterMs = v.filterMs;
         out.integrateMs = v.integrateMs;
         out.cpuMs = v.cpuMs;
         out.irradiance = v.irrHost;
@@ -687,6 +739,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         return true;
     };
     if (!allocSet(mPlaceLayout, v.placeSets[ring]) || !allocSet(mTraceLayout, v.traceSets[ring]) ||
+        !allocSet(mFilterLayout, v.filterSets[ring]) ||
         !allocSet(mIntegrateLayout, v.integrateSets[ring]))
         return;
     if (!v.hasQueryBase && mTimestamps) {
@@ -794,6 +847,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         pp.voxelInvSize[c][2] = sz > 0.0f ? 1.0f / sz : 0.0f;
         pp.voxelInvSize[c][3] = have ? in.voxelCell[src] : 1.0f;
     }
+    // PHOTON-GATHER-1b: the SH bands the integrate evaluates (9 unless the
+    // measurement arm asks for 4), the weight floor, the filter on or off.
+    pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
+    pp.knobs4[1] = kWeightFloor;
+    pp.knobs4[2] = in.tuning.filterOff ? 0.0f : 1.0f;
     std::memcpy(v.paramsMapped[ring], &pp, sizeof(pp));
 
     // ---- THE DESCRIPTOR SETS, rewritten every frame ------------------------
@@ -903,6 +961,30 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 
+    {   // the filter set
+        VkDescriptorImageInfo filterRaw{}, filterOut{};
+        filterRaw.imageView = v.atlasView;
+        filterRaw.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        filterOut.imageView = v.filteredView;
+        filterOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet w[kFilterBindings] = {};
+        for (unsigned i = 0; i < kFilterBindings; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = v.filterSets[ring];
+            w[i].dstBinding = i;
+            w[i].descriptorCount = 1;
+        }
+        w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[0].pBufferInfo = &paramsInfo;
+        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[1].pBufferInfo = &recordsInfo;
+        w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[2].pImageInfo = &filterRaw;
+        w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[3].pImageInfo = &filterOut;
+        vkUpdateDescriptorSets(mHost.gatherDevice(), kFilterBindings, w, 0, nullptr);
+    }
+
     VkDescriptorImageInfo irradianceStore{};
     {
         Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
@@ -962,7 +1044,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         rs->executeResourceTransition(trans);
     }
 
-    // ---- THE THREE DISPATCHES ----------------------------------------------
+    // ---- THE FOUR DISPATCHES -----------------------------------------------
     VkCommandBuffer cmd = mHost.gatherFrameCmd();
     if (!cmd) return;
     // THE BLACK STAND-INS THIS FRAME BOUND, out of UNDEFINED. With the SSR row
@@ -1080,7 +1162,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     if (timed)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 3u);
     traceWork.close();
-    {
+    const auto computeToCompute = [&]() {
         VkMemoryBarrier b{};
         b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -1088,19 +1170,37 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0, nullptr, 0,
                              nullptr);
-    }
+    };
+    computeToCompute();
+
+    // THE FILTER IN PROBE SPACE AND THE SH (PHOTON-GATHER-1b): one workgroup
+    // per probe again, from the SAME indirect arguments — every probe the trace
+    // traced is filtered, and none it did not.
+    detail::monitor::CacheScope filterWork(CacheKind::Gi, WorkReason::Camera, 0,
+                                           "gather.filter", rs);
+    filterWork.setUnits(v.uniformProbes + v.adaptiveLast);
+    if (timed)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 4u);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeLayout, 0, 1,
+                            &v.filterSets[ring], 0, nullptr);
+    vkCmdDispatchIndirect(cmd, v.args, 0);
+    if (timed)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 5u);
+    filterWork.close();
+    computeToCompute();
 
     detail::monitor::CacheScope integrateWork(CacheKind::Gi, WorkReason::Camera, 0,
                                               "gather.integrate", rs);
     integrateWork.setUnits(in.width * in.height / 1000u);
     if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 4u);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 6u);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeLayout, 0, 1,
                             &v.integrateSets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (in.width + 7u) / 8u, (in.height + 7u) / 8u, 1u);
     if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 5u);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 7u);
     // THE IRRADIANCE READBACK (a test door): the integrate's output, still in
     // the GENERAL layout its storage writes left it in, copied into this frame's
     // slot of a host ring and decoded once the frame has retired (readPending).

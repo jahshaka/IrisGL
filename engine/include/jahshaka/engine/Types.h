@@ -3159,6 +3159,15 @@ struct GatherTuning {
     /// or tonemap touches it -- and how determinism is asserted on the estimate
     /// itself rather than on a picture.
     bool     readback = false;
+    /// THE SH BANDS THE INTEGRATE EVALUATES (PHOTON-GATHER-1b item 3's
+    /// measurement arm): 9 = the whole record (L0..L2, the shipped value), 4 =
+    /// L0 and L1 only (the stated fallback, whose memory traffic is what the
+    /// SH9 record is priced against). 0 = the shipped value.
+    unsigned shBands = 0u;
+    /// THE FILTER IN PROBE SPACE OFF (PHOTON-GATHER-1b item 2): each probe's SH
+    /// is projected from its own 64 rays alone — the A/B that prices the filter
+    /// and measures what it buys.
+    bool     filterOff = false;
 };
 
 /// What the gather did on the last drawn frame of this scene.
@@ -3195,6 +3204,8 @@ struct GatherStatus {
     float traceMs = -1.0f;
     float integrateMs = -1.0f;
     float cpuMs = -1.0f;
+    /// ...and the FILTER in probe space (PHOTON-GATHER-1b), its own dispatch.
+    float filterMs = -1.0f;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's
     /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
     /// mean radiance over the cosine-weighted hemisphere of the pixel's own
