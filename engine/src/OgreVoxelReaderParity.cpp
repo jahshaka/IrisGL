@@ -194,8 +194,10 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         params.sdf[0] = 7.0f;
         params.sdf[1] = 16.0f;
 
-        // The volumes, per kind then per cascade (the generation job's order).
-        const unsigned kinds = aniso ? 4u : 1u;
+        // The volumes, per kind then per cascade (the generation job's order): the
+        // total, the anisotropic axes, the per-axis coverage (PHOTON-VOXEL-3), the
+        // surface position (PHOTON-VOXEL-4).
+        const unsigned kinds = unsigned(vct->getNumVoxelTextures());
         auto volume = [&](unsigned kind, unsigned c) -> Ogre::TextureGpu * {
             return vct->getLightVoxelTextures(c)[kind];
         };
@@ -242,15 +244,19 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         // ---- THE FRAGMENT HALF --------------------------------------------
         material->load();
         pass = material->getTechnique(0)->getPass(0);
-        for (unsigned short u = 0; u < pass->getNumTextureUnitStates() && u < 16u; ++u) {
-            // Unit = kind * 4 + cascade. Cascades past the chain repeat its last
-            // one and the anisotropic kinds repeat the isotropic volume on a Low
-            // chain: the program never reads them (its count and its anisotropic
-            // switch say so), but a descriptor must not be empty.
+        for (unsigned short u = 0; u < pass->getNumTextureUnitStates() && u < 32u; ++u) {
+            // Unit = kind * 4 + cascade, the kinds FIXED in the program: iso, X, Y,
+            // Z, then the coverage and the position per half-axis (+a, -a). Cascades
+            // past the chain repeat its last one and the anisotropic kinds repeat the
+            // isotropic volume on a Low chain: the program never reads them (its count
+            // and its anisotropic switch say so), but a descriptor must not be empty.
+            // The four split kinds are the list's LAST four entries on either chain.
             const unsigned kind = u / 4u;
             const unsigned c = std::min(unsigned(u % 4u), numCascades - 1u);
             Ogre::TextureUnitState *tus = pass->getTextureUnitState(u);
-            tus->setTexture(volume(kind < kinds ? kind : 0u, c));
+            const unsigned listKind = kind >= 4u ? kinds - 8u + kind
+                                                 : (kind < kinds - 4u ? kind : 0u);
+            tus->setTexture(volume(listKind, c));
             tus->setSamplerblock(*samplerblock);
         }
         Ogre::GpuProgramParametersSharedPtr fp = pass->getFragmentProgramParameters();

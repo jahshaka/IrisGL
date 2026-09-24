@@ -133,9 +133,10 @@ struct GatherInputs {
     Ogre::TextureGpu *sky = nullptr;
     float skyColour[3] = { 0.0f, 0.0f, 0.0f };
 
-    /// The cascade chain's light volumes: [cascade][slot], slot 0 isotropic and
-    /// 1..3 the anisotropic chains.
-    Ogre::TextureGpu *voxel[kGatherMaxCascades][4] = {};
+    /// The cascade chain's light volumes: [cascade][slot], slot 0 isotropic,
+    /// 1..3 the anisotropic chains, 4/5 the coverage per half-axis (+a, -a), 6/7 the
+    /// surface position per half (by name, RQ-COV-SLOT-1 / PHOTON-VOXEL-4).
+    Ogre::TextureGpu *voxel[kGatherMaxCascades][8] = {};
     float voxelOrigin[kGatherMaxCascades][3] = {};
     float voxelSize[kGatherMaxCascades][3] = {};
     float voxelCell[kGatherMaxCascades] = {};

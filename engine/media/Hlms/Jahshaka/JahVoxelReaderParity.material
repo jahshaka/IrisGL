@@ -1,12 +1,13 @@
 // engine.voxel_reader_parity's FRAGMENT half (PHOTON-READER-1): a full-screen
 // quad over a 256 x 1 float target, four texels per cone. The program's source
 // is GENERATED at media staging from the one voxel reader's files
-// (irisgl/engine/CMakeLists.txt); the sixteen volumes and their samplerblock
+// (irisgl/engine/CMakeLists.txt); the thirty-two volumes and their samplerblock
 // are bound from C++ (OgreVoxelReaderParity.cpp), never from this script.
 
 // Upstream's quad vertex shader, declared again with the SAME root layout as the
-// fragment half: a pass's two stages must agree on it, and sixteen textures is
-// past the standard prefab (four) that Ogre/Compositor/Quad_vs carries.
+// fragment half: a pass's two stages must agree on it, and thirty-two textures is
+// past the standard prefab (four) that Ogre/Compositor/Quad_vs carries (thirty-two since
+// PHOTON-VOXEL-4's split coverage and surface position).
 vertex_program Jahshaka/VoxelReaderParity_vs_VK glslvk
 {
 	source Quad_vs.glsl
@@ -92,6 +93,54 @@ material Jahshaka/VoxelReaderParity
 			{
 			}
 			texture_unit t15
+			{
+			}
+			texture_unit t16
+			{
+			}
+			texture_unit t17
+			{
+			}
+			texture_unit t18
+			{
+			}
+			texture_unit t19
+			{
+			}
+			texture_unit t20
+			{
+			}
+			texture_unit t21
+			{
+			}
+			texture_unit t22
+			{
+			}
+			texture_unit t23
+			{
+			}
+			texture_unit t24
+			{
+			}
+			texture_unit t25
+			{
+			}
+			texture_unit t26
+			{
+			}
+			texture_unit t27
+			{
+			}
+			texture_unit t28
+			{
+			}
+			texture_unit t29
+			{
+			}
+			texture_unit t30
+			{
+			}
+			texture_unit t31
 			{
 			}
 		}

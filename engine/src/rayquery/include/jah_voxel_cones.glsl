@@ -121,14 +121,12 @@ vec3 jahConeStart( vec3 posLS, vec3 biasDirLS )
 ///            are read) times the one environment IN THAT CONE'S DIRECTION AT
 ///            THAT CONE'S APERTURE, weighted — radiance, in whatever units the
 ///            caller bound the environment in
-/// `biasDirLS` / `measureDirLS` are the march's hop arguments (the unit normal
-/// in cascade 0's space, and the same as the caller holds it).
-///
 /// THE TWO CONE SETS: six cones (one on the normal weighted 0.25, five at 60
 /// degrees weighted 0.15, tan of the half angle 0.577 = 30 degrees) or four
-/// (at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees, with the march's
-/// fixed mip step). The engine leaves HlmsPbs at four.
-void jahDiffuseCones( vec3 posLS, vec3 biasDirLS, vec3 measureDirLS, mat3 basis,
+/// (at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees). The engine leaves
+/// HlmsPbs at four. The weights carry the cosine; each cone's escape reads its
+/// solid angle uniformly (the environment's cone lookup does the same).
+void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 					  out vec3 light, out vec3 envD )
 {
 #if JAH_CONES_SIX
@@ -150,17 +148,18 @@ void jahDiffuseCones( vec3 posLS, vec3 biasDirLS, vec3 measureDirLS, mat3 basis,
 									  vec3( 0.0, -0.707107, 0.707107 ) );
 	const float coneWeights[4] = float[4]( 0.25, 0.25, 0.25, 0.25 );
 	const float coneAngleTan = 0.98269;
-	const uint coneFlags = JAH_MARCH_LODSTEP;
+	const uint coneFlags = 0u;
 #endif
 	light = vec3( 0.0, 0.0, 0.0 );
 	envD = vec3( 0.0, 0.0, 0.0 );
 	for( int i = 0; i < kCones; ++i )
 	{
 		vec3 d = basis * coneDirs[i];
-		JahConeResult result = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), coneAngleTan, biasDirLS,
-											 measureDirLS, coneFlags );
+		vec4 coneOrigin = origin;
+		coneOrigin.w = jahConeBelow( normalize( d ), basis[2], coneAngleTan );
+		JahConeResult result = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), coneAngleTan, coneOrigin, coneFlags );
 		light += coneWeights[i] * result.colour;
-		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.escapeAlpha / 0.95 ) ) *
+		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.alpha / 0.95 ) ) *
 				jahEnvCone( JAH_CONES_TO_WORLD( d ), coneAngleTan );
 	}
 }

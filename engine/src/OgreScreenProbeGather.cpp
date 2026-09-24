@@ -84,8 +84,9 @@ constexpr unsigned kQueriesPerFrame = 8u;
 constexpr unsigned kPlaceBindings = 6u;
 /// The trace's nine, then GA-1e's six: the card read's four (9-12, the
 /// reflection's jah_rq_card_bindings.glsl at base 9) and the geometric
-/// normal's two (13, 14).
-constexpr unsigned kTraceBindings = 15u;
+/// normal's two (13, 14); then the split voxel store's four arrays by name
+/// (15-18: the coverage and the surface position per half, PHOTON-VOXEL-4).
+constexpr unsigned kTraceBindings = 19u;
 constexpr unsigned kFilterBindings = 3u;
 constexpr unsigned kIntegrateBindings = 10u;
 
@@ -221,7 +222,15 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     const auto makeLayout = [&](unsigned count, const VkDescriptorType *types,
                                 const unsigned *counts, VkDescriptorSetLayout &out,
                                 const char *what) {
-        VkDescriptorSetLayoutBinding b[16] = {};
+        // Sized by the widest set (the trace's) and refused beyond it: a fixed 16 here was
+        // overrun by the trace's nineteen and smashed the stack (PHOTON-VOXEL-4's rebase).
+        constexpr unsigned kMaxBindings = std::max({ kPlaceBindings, kTraceBindings, kFilterBindings,
+                                                     kIntegrateBindings });
+        VkDescriptorSetLayoutBinding b[kMaxBindings] = {};
+        if (count > kMaxBindings) {
+            err = std::string("gather: the ") + what + " set has more bindings than the layout table";
+            return false;
+        }
         for (unsigned i = 0; i < count; ++i) {
             b[i].binding = i;
             b[i].descriptorType = types[i];
@@ -267,10 +276,16 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 12 the card Radiance layer
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 13 the per-slot geometry row
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 14 the GPU scene's geometry rows
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 15 voxelCovP[] (RQ-COV-SLOT-1)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 16 voxelCovN[]
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 17 voxelPosP[] (PHOTON-VOXEL-4)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 voxelPosN[]
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             kGatherMaxCascades, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+                                             kGatherMaxCascades, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
+                                             kGatherMaxCascades, kGatherMaxCascades,
+                                             kGatherMaxCascades, kGatherMaxCascades };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -361,7 +376,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     sizes[3].descriptorCount = groups * 8u;
     VkDescriptorPoolSize sampled{};
     sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sampled.descriptorCount = groups * (2u + 4u * kGatherMaxCascades + 3u + 2u);
+    sampled.descriptorCount = groups * (2u + 8u * kGatherMaxCascades + 3u + 2u);
     VkDescriptorPoolSize all[5] = { sizes[0], sizes[1], sizes[2], sizes[3], sampled };
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1250,8 +1265,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     VkDescriptorImageInfo atlasStore{};
     atlasStore.imageView = v.atlasView;
     atlasStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo volumes[4][kGatherMaxCascades] = {}, sky{};
-    for (int axis = 0; axis < 4; ++axis)
+    VkDescriptorImageInfo volumes[8][kGatherMaxCascades] = {}, sky{};
+    for (int axis = 0; axis < 8; ++axis)
         for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
             const unsigned src =
                 c < in.cascadeCount ? c : (in.cascadeCount ? in.cascadeCount - 1u : 0u);
@@ -1328,6 +1343,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             w[11 + i].pImageInfo = &cardImgs[i];
             w[13 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             w[13 + i].pBufferInfo = &geomBufs[i];
+        }
+        for (unsigned k = 0; k < 4u; ++k) {   // coverage +/-, position +/- (15-18)
+            w[15 + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[15 + k].descriptorCount = kGatherMaxCascades;
+            w[15 + k].pImageInfo = volumes[4 + k];
         }
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
@@ -1414,7 +1434,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < in.cascadeCount; ++c)
-            for (int axis = 0; axis < 4; ++axis)
+            for (int axis = 0; axis < 8; ++axis)
                 if (in.voxel[c][axis])
                     solver.resolveTransition(trans, in.voxel[c][axis],
                                              Ogre::ResourceLayout::Texture,

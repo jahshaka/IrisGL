@@ -1526,12 +1526,13 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
         st.voxels = wt.count;
         st.voxelsAboveOne = wt.aboveOne;
 
-        // THE BYTES of every light volume a reader samples (the total, then the
-        // anisotropic axes), hashed raw — the one-sweep proof's instrument.
+        // THE BYTES of every light volume a reader samples (the total, the
+        // anisotropic axes, the per-axis coverage), hashed raw — the one-sweep
+        // proof's instrument.
         {
             Ogre::uint64 h = 1469598103934665603ull;
             bool all = true;
-            const size_t volumes = lighting->isAnisotropic() ? 4u : 1u;
+            const size_t volumes = lighting->getNumVoxelTextures();
             for (size_t v = 0; v < volumes && all; ++v) {
                 Ogre::TextureGpu *tex = lighting->getLightVoxelTextures()[v];
                 if (!tex || tex->getResidencyStatus() != Ogre::GpuResidency::Resident) {
@@ -1598,6 +1599,102 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
         }
     } JAH_CATCH(mError, st);
     return st;
+}
+
+// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — Engine.h. The same blocking
+// contract as giVoxelStats: flush, then a synchronous download of mip 0.
+bool OgreScene::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
+    out = GiVoxelVolume();
+    JAH_TRY {
+        Ogre::VctLighting *lighting = nullptr;
+        Ogre::VctVoxelizer *voxelizer = nullptr;
+        if (!mVctCascades.empty()) {
+            if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return false;
+            lighting = mVctCascades[size_t(cascadeIdx)].lighting;
+            voxelizer = mVctCascades[size_t(cascadeIdx)].voxelizer;
+        } else if (cascadeIdx == 0) {
+            lighting = mVctLighting;
+            voxelizer = mVctVoxelizer;
+        }
+        if (!lighting || !voxelizer) return false;
+        Ogre::TextureGpu *total = lighting->getLightVoxelTextures()[0];
+        Ogre::TextureGpu *albedo = voxelizer->getAlbedoVox();
+        Ogre::TextureGpu *coverage[2] = { voxelizer->getCoverageVox(0u), voxelizer->getCoverageVox(1u) };
+        Ogre::TextureGpu *position[2] = { voxelizer->getPositionVox(0u), voxelizer->getPositionVox(1u) };
+        if (!total || !albedo || !coverage[0] || !coverage[1] || !position[0] || !position[1] ||
+            total->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            albedo->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            coverage[0]->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            coverage[1]->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            position[0]->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            position[1]->getResidencyStatus() != Ogre::GpuResidency::Resident)
+            return false;
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();
+        Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+        const auto grab = [&](Ogre::TextureGpu *tex, std::vector<float> &dst) -> bool {
+            const Ogre::PixelFormatGpu fmt = tex->getPixelFormat();
+            const bool isHalf = (fmt == Ogre::PFG_RGBA16_FLOAT);
+            const bool isByte = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB || fmt == Ogre::PFG_RGBA8_UNORM);
+            const bool is1010102 = (fmt == Ogre::PFG_R10G10B10A2_UNORM);
+            const bool isUnorm16 = (fmt == Ogre::PFG_RGBA16_UNORM);
+            if (!isHalf && !isByte && !is1010102 && !isUnorm16) return false;
+            const bool srgb = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB);
+            const Ogre::uint32 W = tex->getWidth(), H = tex->getHeight(), D = tex->getDepth();
+            dst.assign(size_t(W) * H * D * 4u, 0.0f);
+            Ogre::AsyncTextureTicket *ticket =
+                tm->createAsyncTextureTicket(W, H, D, Ogre::TextureTypes::Type3D, fmt);
+            bool ok = false;
+            try {
+                ticket->download(tex, 0u, true);
+                const Ogre::TextureBox box = ticket->map(0);
+                for (Ogre::uint32 z = 0; z < D; ++z)
+                    for (Ogre::uint32 y = 0; y < H; ++y) {
+                        const void *row = box.at(0, y, z);
+                        float *o = &dst[((size_t(z) * H + y) * W) * 4u];
+                        for (Ogre::uint32 x = 0; x < W; ++x)
+                            for (int c = 0; c < 4; ++c) {
+                                float v;
+                                if (is1010102) {
+                                    const Ogre::uint32 p =
+                                        reinterpret_cast<const Ogre::uint32 *>(row)[x];
+                                    v = c < 3 ? float((p >> (10 * c)) & 0x3FFu) / 1023.0f
+                                              : float(p >> 30) / 3.0f;
+                                } else if (isUnorm16) {
+                                    v = float(reinterpret_cast<const Ogre::uint16 *>(row)[size_t(x) * 4u + c]) /
+                                        65535.0f;
+                                } else if (isHalf) {
+                                    v = Ogre::Bitwise::halfToFloat(
+                                        reinterpret_cast<const Ogre::uint16 *>(row)[size_t(x) * 4u + c]);
+                                } else {
+                                    v = float(reinterpret_cast<const Ogre::uint8 *>(row)[size_t(x) * 4u + c]) /
+                                        255.0f;
+                                    if (srgb && c < 3)
+                                        v = v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+                                }
+                                o[size_t(x) * 4u + c] = v;
+                            }
+                    }
+                ticket->unmap();
+                ok = true;
+            } catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+              catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+            tm->destroyAsyncTextureTicket(ticket);
+            return ok;
+        };
+        if (!grab(total, out.light) || !grab(albedo, out.albedo) || !grab(coverage[0], out.coverageP) ||
+            !grab(coverage[1], out.coverageN) || !grab(position[0], out.positionP) ||
+            !grab(position[1], out.positionN))
+            return false;
+        out.width = int(total->getWidth());
+        out.height = int(total->getHeight());
+        out.depth = int(total->getDepth());
+        const Ogre::Vector3 o = voxelizer->getVoxelOrigin(), c = voxelizer->getVoxelCellSize();
+        for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
+        out.multiplier = lighting->getCurrentBakingMultiplier();
+        out.available = true;
+        return true;
+    } JAH_CATCH(mError, false);
 }
 
 // THE PROBE FACE PASS'S RENDER-QUEUE CEILING — `rq_last 200` in
@@ -2505,6 +2602,7 @@ bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
 // app's tier descriptions are generated from the same function, so what a tier
 // SAYS and what it DOES cannot drift (render audit A5).
 unsigned OgreScene::giVoxelResolution() const {
+    if (mGi.testVoxelResolution) return mGi.testVoxelResolution;
     return giQualityFacts(mGi.quality).voxelResolution;
 }
 
@@ -4539,8 +4637,39 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
         Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
         mRoot->getRenderSystem(), mRoot->getHlmsManager(),
         true /*correctAreaLightShadows*/, vctMaterialStore());
-    mVctVoxelizer->setResolution(res, res, res);
-    mVctVoxelizer->setRegionToVoxelize(aabb);
+    // A VOXEL CELL IS A CUBE (PHOTON-VOXEL-4): a cone's footprint is isotropic, and one mip
+    // level is one footprint in every direction only on cubic cells. The cell is the box's
+    // longest side over the tier's resolution; each axis takes the next power of two of
+    // cells that covers its side (every level then halves every axis, as a cube's does).
+    // THE BOX IS THE BOUNDS PADDED TO THE POWER-OF-TWO COUNT ON THE FAR SIDE: anchored at
+    // the bounds' MIN corner, each axis grown only toward +a - the bounds' min faces are the
+    // box's, and bounds already on the lattice (every side the longest / 2^k) are the box
+    // exactly (gi.ddgi_edge's). A box grown about its centre moved both faces. The
+    // tier's budget is never exceeded (the longest axis takes exactly `res`). A box 18 x 9 x 18 m at 32: 32 x 16 x
+    // 32 cells of 0.5625 m - it had 32^3 cells of 0.5625 x 0.28 x 0.5625 m, on which the
+    // open floor's wall cone read 0.17-0.23 of its cone-trace reference 0.413 at 32-256
+    // cells, 0.39-0.42 on cubic ones (spikes/photon-voxel-4/lab).
+    Ogre::Aabb region = aabb;
+    Ogre::uint32 dims[3] = { res, res, res };
+    {
+        const Ogre::Vector3 size = aabb.getSize();
+        const Ogre::Real longest = std::max(size.x, std::max(size.y, size.z));
+        if (longest > Ogre::Real(0)) {
+            const Ogre::Real cell = longest / Ogre::Real(res);
+            Ogre::Vector3 half;
+            const Ogre::Vector3 lo = aabb.getMinimum();
+            for (int a = 0; a < 3; ++a) {
+                const Ogre::Real need = size[size_t(a)] / cell - Ogre::Real(1e-3);
+                Ogre::uint32 n = 8u;   // the octant's floor
+                while (n < res && Ogre::Real(n) < need) n <<= 1u;
+                dims[a] = n;
+                half[size_t(a)] = Ogre::Real(0.5) * cell * Ogre::Real(n);
+            }
+            region = Ogre::Aabb(lo + half, half);   // min corner = the bounds' min corner
+        }
+    }
+    mVctVoxelizer->setResolution(dims[0], dims[1], dims[2]);
+    mVctVoxelizer->setRegionToVoxelize(region);
     mVctVoxelizer->dividideOctants(1u, 1u, 1u);
     // THE SINGLE VOLUME IS A CASCADE OF ONE (A5b §2: one path, not two): the same
     // feed, level 0, no size floor.

@@ -63,8 +63,9 @@
 // view angle. One term the pixel has that the card does not, stated: a
 // diffuse fresnel (fresnelD — PbsBrdf::Default carries none; the
 // SeparateDiffuseFresnel BRDFs do, and their card is brighter by 1 - F).
-// And the frame is built on the STORED shading normal where the pixel builds
-// it on the geometric one (they differ under a normal map).
+// And the frame is built on the card's PLANE where the stored normal is the
+// plane's within the format's quantum, on the STORED shading normal elsewhere,
+// where the pixel builds it on the geometric one (they differ under a normal map).
 //
 // No at-sign in any comment of this file (the Hlms parser reads them).
 @insertpiece( SetCrossPlatformSettings )
@@ -91,6 +92,16 @@ vulkan_layout( ogre_t4 ) uniform texture2D cardShadowRough;
 		vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeZ[@value( hlms_num_vct_cascades )];
 		@add( vctTexUnit, hlms_num_vct_cascades )
 	@end
+	// PHOTON-VOXEL-3: the per-axis coverage, the light-volume list's last kind.
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeCovP[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeCovN[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
+	// PHOTON-VOXEL-4: the per-axis surface position, the light-volume list's last kind.
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosP[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosN[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(vctTexUnit) ) uniform textureCube envCube;
 		@add( vctTexUnit, 1 )
@@ -169,6 +180,10 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
 	#define JAH_VOX_COUNT int( gp.counts.x )
 	#define JAH_VOX_SAMPLE_ISO( c, u, l ) textureLod( sampler3D( vctProbes[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_COVP( c, u, l ) textureLod( sampler3D( vctProbeCovP[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_COVN( c, u, l ) textureLod( sampler3D( vctProbeCovN[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_POSP( c, u, l ) textureLod( sampler3D( vctProbePosP[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_POSN( c, u, l ) textureLod( sampler3D( vctProbePosN[c], vSmp ), u, l )
 	@property( vct_anisotropic )
 		#define JAH_VOX_HAS_ANISO 1
 		#define JAH_VOX_ANISO true
@@ -230,7 +245,7 @@ layout( local_size_x = @value( threads_per_group_x ),
 		posLS = jahConeStart( posLS, biasDirLS );
 		vec3 light;
 		vec3 envD;
-		jahDiffuseCones( posLS, biasDirLS, dirLS, jahConeBasisWorld( N ), light, envD );
+		jahDiffuseCones( posLS, jahConeOrigin( posLS, biasDirLS ), jahConeBasisWorld( N ), light, envD );
 		return light * gp.counts.y + envD;
 	}
 @end
@@ -297,6 +312,16 @@ void main()
 		vec3 kD = texelFetch( cardAlbedo, at, 0 ).xyz;
 		vec3 nV = texelFetch( cardNormal, at, 0 ).xyz * 2.0 - 1.0;
 		vec3 N = normalize( r.axisU.xyz * nV.x + r.axisV.xyz * nV.y + r.axisD.xyz * nV.z );
+		// THE CONE FRAME ON THE CARD'S PLANE (PHOTON-VOXEL-4). The card is a planar capture
+		// along axisD, and a texel of a surface IN that plane has the plane's normal exactly;
+		// the stored 8-bit normal cannot hold it (0 decodes to -0.0039: 0.32 degrees off), and
+		// the four-cone set's 45-degree axes put the reader's plane axis on a tie that tilt
+		// breaks - up to 5.7 % of the indirect (gi.cone_integrator_parity). A stored normal
+		// within the format's quantum of the card's axis (1 degree) IS the plane: the frame
+		// takes axisD. Any other texel (a curved or oblique surface the card also holds)
+		// keeps its stored normal.
+		const vec3 jahCardPlaneN = normalize( r.axisD.xyz );
+		const vec3 Ncone = dot( N, jahCardPlaneN ) > 0.99985 ? jahCardPlaneN : N;
 		vec2 sr = texelFetch( cardShadowRough, at, 0 ).xy;
 		// Patch 0043's range: stored = (alpha - 0.001) * 1.001001.
 		float alpha = sr.y / 1.001001 + 0.001;
@@ -351,7 +376,7 @@ void main()
 @property( hlms_num_vct_cascades )
 			// BRDF_EnvMap's envColourD x diffuse x pi x the lobe's albedo, at its
 			// hemispherical mean (the bounce's convention; the header says why).
-			indirect = jahCardEnvColourD( P, N ) * kD * 3.141592654 *
+			indirect = jahCardEnvColourD( P, Ncone ) * kD * 3.141592654 *
 					   jahDiffuseAlbedoHemi( perceptualRoughness );
 @end
 		}
