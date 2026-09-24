@@ -746,13 +746,27 @@ void OgreScene::noteSettleInputs() {
 }
 
 // THE DEBT, raised in one place: a rebuild, an environment change and a tick
-// the one-writer latch refused all owe the same thing — the chain's at-rest
-// answer over its current inputs.
-void OgreScene::oweChainSettle() {
+// the one-writer latch refused all owe the chain's at-rest answer over its
+// current inputs — FROM THE OUTERMOST STALE CASCADE INWARD (PHOTON-GATHER-1b
+// item 6, WRITER-1's audit F5). Each cascade reads only the cascades outside it,
+// so a stale cascade k stales k-1 .. 0 and nothing outside it: a refused at-rest
+// tick (the frame's rebuild injected k over the outer cascades' OLD light before
+// the tick re-injected them) owes k .. 0, and a rebuild of k (its injection read
+// the outer cascades as they stand) owes k-1 .. 0. The whole chain is owed only
+// when the whole chain is stale (a light, the environment). Injecting the outer
+// cascades again would change no byte of them — a cascade-2 rebuild at rest
+// costs 3 injections, not 4 (gi.settle_partial, which also proves the partial
+// settle leaves the whole sweep's bytes).
+void OgreScene::oweChainSettle(size_t top) {
     const size_t n = mVctCascades.size();
     if (n < 2u) return;
+    top = std::min(top, n - 1u);
+    // AN UNFINISHED DEBT MERGES by restarting from the outermost of the two: the
+    // new sweep covers every cascade either debt named, in the tick's order.
+    if (mGiSettleStepsOwed > 0 && mGiSettleCascades == n) top = std::max(top, mGiSettleTop);
     mGiSettleCascades  = n;
-    mGiSettleStepsOwed = kAtRestSweeps * int(n);
+    mGiSettleTop       = top;
+    mGiSettleStepsOwed = kAtRestSweeps * int(top + 1u);
     noteSettleInputs();
 }
 
@@ -766,7 +780,7 @@ void OgreScene::oweChainSettle() {
 // whole `refreshGiLighting(false)`).
 void OgreScene::payChainSettleStep() {
     const size_t n = mVctCascades.size();
-    if (mGiSettleStepsOwed <= 0 || n < 2u || n != mGiSettleCascades) {
+    if (mGiSettleStepsOwed <= 0 || n < 2u || n != mGiSettleCascades || mGiSettleTop >= n) {
         mGiSettleStepsOwed = 0;                 // the chain changed shape under it
         return;
     }
@@ -790,8 +804,10 @@ void OgreScene::payChainSettleStep() {
         // right: nothing finishes while the scene is still changing, and the
         // mirror's own at-rest tick — which fires one frame after the motion
         // ends and clears the debt outright — is what finishes a light gesture.
-        if (mGiSettleSerial != mGiLightWriteSerial) oweChainSettle();
-        const int total = kAtRestSweeps * int(n);
+        if (mGiSettleSerial != mGiLightWriteSerial) oweChainSettle();   // a light: the whole chain
+        // THE SWEEP IS OVER THE STALE CASCADES ONLY: top, top-1, ..., 0.
+        const size_t span = mGiSettleTop + 1u;
+        const int total = kAtRestSweeps * int(span);
         unsigned injections = 0;
         // A cascade with no lighting is skipped exactly as the tick skips it,
         // and without spending the frame: the loop walks on to the next step.
@@ -800,7 +816,7 @@ void OgreScene::payChainSettleStep() {
         // frame, unspent, so the sequence stays the tick's own.
         while (mGiSettleStepsOwed > 0 && injections == 0u) {
             const int step = total - mGiSettleStepsOwed;
-            const size_t i = n - 1u - size_t(step % int(n));
+            const size_t i = mGiSettleTop - size_t(step % int(span));
             if (mVctCascades[i].lighting && injectedThisFrame(i)) break;
             --mGiSettleStepsOwed;
             if (!mVctCascades[i].lighting) continue;
@@ -972,6 +988,9 @@ void OgreScene::runChainTick(bool inMotion) {
         if (mVctCascades.empty()) return;
         mSceneMgr->updateSceneGraph();
         bool refused = false;
+        // The OUTERMOST cascade this tick could not inject: the settle it owes
+        // starts there (oweChainSettle's note).
+        size_t refusedTop = 0;
         {
             // THE LIGHT-ONLY TICK (ENGINE-5 item 2). The cheap path a drag runs
             // every few frames: one injection dispatch per bounce over the
@@ -1014,11 +1033,17 @@ void OgreScene::runChainTick(bool inMotion) {
                 // ...and a cascade the rebuild injected THIS frame is the latch's,
                 // not a refusal: that is the order working.
                 if (injectedThisFrame(i)) {
-                    if (!inMotion) refused = true;   // it read the outer light before this tick
+                    if (!inMotion) {                  // it read the outer light before this tick
+                        refused = true;
+                        refusedTop = std::max(refusedTop, i);
+                    }
                     continue;
                 }
                 if (injectCascade(i)) ++injections;
-                else refused = true;
+                else {
+                    refused = true;
+                    refusedTop = std::max(refusedTop, i);
+                }
             }
             // The skip is per TICK, not for ever: a cascade that was rebuilt
             // before this tick has paid for this tick, and owes the next one
@@ -1034,7 +1059,7 @@ void OgreScene::runChainTick(bool inMotion) {
         // by it (the frame's rebuild injected it first, before this tick's outer
         // cascades), in which case the chain is owed its settle.
         if (!inMotion && mVctCascades.size() > 1u) {
-            if (refused) oweChainSettle();
+            if (refused) oweChainSettle(refusedTop);   // the refused cascade and those inside it
             else         noteChainSettled();
         }
     } JAH_CATCH(mError, );
@@ -5185,6 +5210,10 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // rebuild that threw BEFORE its swap put its placement back and voxelised
     // nothing, so it owes no settle even though the frame was spent on it.
     bool rebuilt = false;
+    // ...and the outermost cascade the rebuild left STALE (oweChainSettle's note):
+    // the one inside a cascade that re-voxelised and injected, or the cascade
+    // itself when its voxels changed and its injection did not happen. -1 = none.
+    long long staleTop = -1;
     for (size_t i = 0; i < mVctCascades.size(); ++i) {
         VctCascade &c = mVctCascades[i];
         if (!c.pending) continue;
@@ -5231,7 +5260,10 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
             // its volume follows (the voxels there are current — only the light
             // injection is missing, which the next rebuild supplies).
             if (i == 0u && placementCommitted) oweCascade0FieldFollow(reason);
-            if (placementCommitted) rebuilt = true;   // those voxels ARE new
+            if (placementCommitted) {
+                rebuilt = true;                        // those voxels ARE new...
+                staleTop = std::max(staleTop, (long long)i);   // ...and their light is not
+            }
             spent = true;                          // the frame paid for it either way
             if (++c.failures >= 2u) c.pending = 0; // ...otherwise `pending` stays set
             continue;
@@ -5251,6 +5283,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         if (i == 0u) oweCascade0FieldFollow(reason);
         spent = true;
         rebuilt = true;
+        staleTop = std::max(staleTop, (long long)i - 1);
     }
     // WHAT THE ARM LIT, KEPT CURRENT (audit B9). `giStatus().boundsMin/Max` is
     // the outermost cascade's box, and that box MOVES — it was written once at
@@ -5287,8 +5320,10 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // million, so the fixed point is not in doubt: the scrolled chain was the
     // wrong one.
     //
-    // THE RULE. A rebuild raises a DEBT of injections — one sweep over every
-    // cascade, outermost first — and the scheduler pays it
+    // THE RULE. A rebuild raises a DEBT of injections — one sweep over the
+    // cascades INSIDE the rebuilt one, outermost first (the rebuilt cascade's
+    // own injection read current outer light; PHOTON-GATHER-1b item 6) — and
+    // the scheduler pays it
     // ONE INJECTION PER FRAME out of the same one-slot budget the rebuilds come
     // from, the rebuild queue keeping priority. It is not a settle "at the
     // stop": there is no camera-still gate at all, deliberately. THE VR CASE IS
@@ -5315,8 +5350,12 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // gi.chain_converge drives it so the suite proves the defect it guards against rather than
     // asserting a number that happens to pass (13.00/255 with it set, 0.00
     // without, measured on that suite's room).
-    if (rebuilt && mVctCascades.size() > 1u)
-        oweChainSettle();            // the lights and environment these steps must all see
+    // FROM THE CASCADE INSIDE THE REBUILT ONE (PHOTON-GATHER-1b item 6): the
+    // rebuild's own injection read the cascades outside it as they stand, so
+    // the cascades inside it are what read a light that has since changed. A
+    // rebuild of cascade 0 therefore owes nothing.
+    if (rebuilt && mVctCascades.size() > 1u && staleTop >= 0)
+        oweChainSettle(size_t(staleTop));
 
     // ---- 2b. THE HOST'S LIGHT TICK, AFTER THE REBUILD (the one writer) ------
     // (PHOTON-WRITER-1; refreshGiLighting says why it is owed rather than run.)

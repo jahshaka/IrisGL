@@ -4751,10 +4751,17 @@ private:
     /// The tick the host asked for this frame under a chain, not yet run.
     enum class GiTickOwed { None = 0, Moving = 1, Rest = 2 };
     GiTickOwed mGiTickOwed = GiTickOwed::None;
-    /// Owe the chain an at-rest settle over its current inputs (a rebuild, an
-    /// environment change, a refused tick): one sweep = n injections, paid
-    /// one per frame by the scheduler, outermost first.
-    void oweChainSettle();
+    /// Owe the chain an at-rest settle over its current inputs, paid one
+    /// injection per frame by the scheduler, outermost first. `top` is the
+    /// OUTERMOST STALE cascade (PHOTON-GATHER-1b item 6): the settle injects
+    /// top, top-1, ..., 0 and leaves the cascades outside it alone — a cascade
+    /// reads only the cascades outside it, so the ones outside a stale one
+    /// were not made stale by it. A light or environment change owes the whole
+    /// chain (the default); a refused at-rest tick owes from the refused
+    /// cascade inward; a rebuild owes from the cascade INSIDE the rebuilt one
+    /// (its own injection read current outer light). An unfinished debt merges
+    /// by restarting from the outermost of the two.
+    void oweChainSettle(size_t top = ~size_t(0));
     /// The field re-integrates once, after the LAST injection of a tick or of a
     /// settle — never per injection.
     void reintegrateFieldAfterInjection();
@@ -4880,12 +4887,15 @@ private:
     /// a walk that returned to its own starting pose).
     ///
     /// THE DEBT IS A COUNT OF INJECTIONS, NOT A FLAG, and it is paid ONE PER
-    /// FRAME out of the scheduler's own one-slot budget: the at-rest tick is one
-    /// sweep over every cascade (n injections, outermost first) and spreading it
-    /// keeps a frame that only owes it because the camera moved at one cheap
-    /// injection. In the tick's own order it leaves the tick's bytes, the
-    /// rebuild queue keeps priority, and a walk that never ends never starves.
+    /// FRAME out of the scheduler's own one-slot budget: a sweep over the STALE
+    /// cascades (mGiSettleTop + 1 injections, outermost first — the whole chain
+    /// only when the whole chain is stale) and spreading it keeps a frame that
+    /// only owes it because the camera moved at one cheap injection. In the
+    /// tick's own order it leaves the tick's bytes, the rebuild queue keeps
+    /// priority, and a walk that never ends never starves.
     int    mGiSettleStepsOwed = 0;
+    /// ...and the outermost cascade that sweep starts at (PHOTON-GATHER-1b).
+    size_t mGiSettleTop = 0;
     /// The cascade count the debt was raised against — a chain that changed
     /// shape under an unfinished settle abandons it rather than injecting a
     /// cascade the sequence no longer describes.
