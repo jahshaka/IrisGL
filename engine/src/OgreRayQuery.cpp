@@ -4652,7 +4652,7 @@ void RayQueryTier::forgetGather(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
-    if (mGather) mGather->statsInto(scene, scene->gatherRestKey(), out);
+    if (mGather) mGather->statsInto(scene, scene->gatherRestKey(), scene->gatherRestartKey(), out);
 }
 
 void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
@@ -4707,6 +4707,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
                    .gather;
     in.tuning = scene->gatherTuning();
     in.restKey = scene->gatherRestKey();
+    in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
@@ -5672,6 +5673,30 @@ unsigned long long OgreScene::gatherRestKey() const {
         fold(cs.captures);
         fold(cs.relights);
         fold(cs.indirectRelights);
+    }
+    return key;
+}
+
+/// THE RESTART KEY (PHOTON-GATHER-1d fix round): the discontinuities the pixel
+/// history cannot follow — the lighting (giLightingSerial: a light or sky write
+/// through refreshGiLighting, an injection landing, a cascade rebuild), a
+/// material write (the surface cache's precise door counts it; the voxels'
+/// re-inject moves the lighting serial) and the cloud layer's GI change. NOT
+/// the transform epoch: a mover's per-frame write is followed per pixel by the
+/// reprojection, and a scene with one would otherwise never settle.
+unsigned long long OgreScene::gatherRestartKey() const {
+    unsigned long long key = 1469598103934665603ull;
+    const auto fold = [&key](unsigned long long v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    fold(giLightingSerial());
+    fold(mCloudGiSerial);
+    if (mSurfaceCache) {
+        CardCacheStatus cs;
+        mSurfaceCache->fillStatus(cs);
+        fold(cs.invalidMaterial);
+        fold(cs.invalidLight);
     }
     return key;
 }

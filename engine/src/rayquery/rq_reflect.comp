@@ -652,7 +652,8 @@ void main()
 							   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
 							   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
 		traced = jahHitRadiance( hitSlot, world + worldN * bias + L * t, hitN, L,
-								 reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha, ok );
+								 reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
+								 true, ok );
 		// A HIT THE CACHE CANNOT SHADE IS NOT A MISS. The ray found geometry;
 		// the voxels simply do not reach it (outside every cascade, or a surface
 		// too thin for the grid). Returning the sky there would draw a hole in

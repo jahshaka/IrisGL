@@ -3359,6 +3359,8 @@ public:
     /// ...and the gather's REST KEY (OgreRayQuery.cpp): that serial, the
     /// geometry's movement epoch and the surface cache's captures and relights.
     unsigned long long gatherRestKey() const;
+    /// The settle's key: the discontinuities only (OgreRayQuery.cpp).
+    unsigned long long gatherRestartKey() const;
     void gatherStatusInto(GatherStatus &out) const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.
@@ -6276,6 +6278,8 @@ public:
     bool hiddenAreaMask() const { return mHiddenAreaMask; }
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
+    void setOffscreenContract(OffscreenContract c) override;
+    OffscreenContract offscreenContract() const override { return mOffscreenContract; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -6642,6 +6646,9 @@ private:
     /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
     /// everywhere but the one suite that has to read what the band does.
     bool                       mLodHysteresisOffscreen = false;
+    /// View::setOffscreenContract; `mSaidNoContract` = the refusal was logged.
+    OffscreenContract          mOffscreenContract = OffscreenContract::Undeclared;
+    mutable bool               mSaidNoContract = false;
     /// An exposure multiplier a host handed over before this view had a chain
     /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
     /// on the chain it builds, once; 0 = nothing owed.

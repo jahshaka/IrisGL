@@ -687,16 +687,17 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = 0.0f;
     // The DDGI block, same four-float alignment rule. Read by
     // media/Hlms/Jahshaka/JahIfd_piece_ps.any, which only exists in the
-    // generated shader while an IrradianceField is bound: x is unused (the
-    // intensity dial it carried is deleted, PHOTON-GATHER-1d), y is the
-    // field's window offset, packed (PHOTON-WRITER-1's scroll: the reader's
-    // modulo), zw are the field's Y and Z probe counts, which upstream's own
-    // IrradianceField block does not carry and the cage clamp needs.
+    // generated shader while an IrradianceField is bound — a float3 (the
+    // intensity dial's float is deleted, PHOTON-GATHER-1d): x is the field's
+    // window offset, packed (PHOTON-WRITER-1's scroll: the reader's modulo), yz
+    // are the field's Y and Z probe counts, which upstream's own
+    // IrradianceField block does not carry and the cage clamp needs. Then the
+    // std140 pad before jahEnv's 16-byte alignment.
     const IfdState ifd = ifdState(sceneManager);
-    *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = ifd.windowOffsetPacked;     // the field's window (PHOTON-WRITER-1)
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
+    *passBufferPtr++ = 0.0f;                       // std140 pad
     // jahEnv (PHOTON-ENV-1): rgb = the environment light's gain per channel on
     // the cube, w = the cube's own mip count. Written unconditionally like every
     // field above — the shader declares it only when it claimed the slot, and a

@@ -8,6 +8,9 @@
 // SURFACE-CACHE phase 2: the cache is a unique_ptr member and the per-frame
 // pass lives here, so this TU needs the Component's complete type.
 #include "SurfaceCache.h"
+#include <OgreHlmsDatablock.h>
+#include <OgreItem.h>
+#include <OgreSubItem.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -1998,12 +2001,24 @@ void OgreScene::updateSurfaceCache() {
     //   * `shown` — a hidden object photographs nothing.
     //   * a baked card list — every skinned mesh, every line mesh and every
     //     model opened without a bake has none, and gets none here.
+    //   * OPAQUE (PHOTON-GATHER-1d fix round) — a card records a surface's
+    //     albedo, normal and depth as the capture's prepass writes them, and a
+    //     blended (Fade/Blend/Glass) sub-item is not a surface the prepass
+    //     holds: the gather's F2 discard keeps it out, and the capture's own
+    //     piece fills the same hook. An item with ANY blended sub-item gets no
+    //     cards; its bounce is the voxels'.
     // The radius itself is the cache's; this walk hands over everything that
     // COULD be resident and lets the Component decide who is.
     view.candidates.reserve(mItemNodes.size());
     for (Node *n : mItemNodes) {
         if (!n || !n->item || !n->node || !n->shown) continue;
         if (!(n->item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        bool blended = false;
+        for (size_t si = 0; si < n->item->getNumSubItems() && !blended; ++si) {
+            const Ogre::HlmsDatablock *db = n->item->getSubItem(si)->getDatablock();
+            blended = db && db->getBlendblock(false)->isAutoTransparent();
+        }
+        if (blended) continue;
         const std::vector<MeshCardDesc> *cards = meshCardsFor(n->item->getMesh().get());
         if (!cards || cards->empty()) continue;
         CardSceneView::Candidate c;

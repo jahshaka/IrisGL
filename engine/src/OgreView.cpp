@@ -146,7 +146,21 @@ ChainDesc OgreView::chainDesc() const {
     // stereo target (the probe grid would have to be split at the eye seam), so
     // without this term a VR eye would pay a second geometry traversal every
     // frame for a prepass nothing then reads.
-    d.probeGather    = mScene && mScene->probeGatherWanted() && !mStereo;
+    // ...AND AN OFFSCREEN VIEW BY ITS DECLARED CONTRACT (the fix round;
+    // View::setOffscreenContract): a still picture gathers and its caller waits
+    // for giAtRest; a live one takes the field's answer; an undeclared one
+    // refuses, once, out loud.
+    const bool wantsGather = mScene && mScene->probeGatherWanted() && !mStereo;
+    bool contractAllows = !isOffscreen() || mOffscreenContract == OffscreenContract::StillPicture;
+    if (wantsGather && isOffscreen() && mOffscreenContract == OffscreenContract::Undeclared &&
+        !mSaidNoContract) {
+        mSaidNoContract = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: offscreen view '" + mName + "' declares no contract "
+            "(View::setOffscreenContract: StillPicture or Live) — it refuses the screen-probe "
+            "gather and takes the field's diffuse");
+    }
+    d.probeGather    = wantsGather && contractAllows;
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -1309,6 +1323,14 @@ void OgreView::setLodHysteresisOffscreen(bool on) {
     mLodHysteresisOffscreen = on;
     // The band is written onto the pass definitions (applyLodHysteresis), so
     // this is graph shape exactly like the two flags above.
+    rebuildWorkspaceDef();
+}
+
+void OgreView::setOffscreenContract(OffscreenContract c) {
+    if (c == mOffscreenContract) return;
+    mOffscreenContract = c;
+    mSaidNoContract = false;
+    // The gather decides the prepass: graph shape, like the flags above.
     rebuildWorkspaceDef();
 }
 

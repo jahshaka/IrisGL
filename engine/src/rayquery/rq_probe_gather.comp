@@ -25,8 +25,9 @@
 // solid angle it weighs exactly.
 //
 // THE HIT'S RADIANCE, in Lumen's order (PHOTON-GATHER-1d, GA-1e): the hit
-// instance's surface CARD where one describes the point and the ray's
-// footprint there is at most k card texels, the cascade VOXEL otherwise, the
+// instance's surface CARD wherever one describes the point (texel-exact and
+// UNGATED: the fix round's decision, the header of jah_rq_hit_radiance.glsl
+// says why), the cascade VOXEL otherwise, the
 // SKY where the ray hit nothing -- `jahHitRadiance` (jah_rq_hit_radiance.glsl),
 // the ONE function the reflection trace's hits read too, handed this ray's own
 // footprint at the hit (t x sqrt(2/rays): one ray stands for one octahedral
@@ -194,7 +195,7 @@ void main()
 		const float reweight = ( max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) ) ) /
 							   max( centreCos * jahOctSolidAngle( centrePoint, float( octRes ) ), 1e-9 );
 
-		const float bias = p.knobs2.y;
+		const float bias = max( p.knobs2.y, 1e-4 * jahViewDistanceOf( posW.xyz ) );
 		const float maxT = p.knobs.y;
 		const float farT = p.knobs3.w;
 		const vec3 origin = posW.xyz + n * bias;
@@ -251,7 +252,7 @@ void main()
 		{
 			distance = tHit;
 			radiance = jahHitRadiance( hitSlot, origin + dir * tHit, hitN, dir,
-									   max( tHit * spread, 1e-4 ), false, ok );
+									   max( tHit * spread, 1e-4 ), false, false, ok );
 			if( !ok )
 				radiance = vec3( 0.0 );   // a hit neither a card nor the cascades shade is BLACK
 		}

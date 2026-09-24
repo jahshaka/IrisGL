@@ -167,6 +167,13 @@ struct GatherInputs {
     /// surface cache captures or relights. With the camera's basis it decides
     /// whether this frame is a REST frame (the rest mean, then the hold).
     unsigned long long restKey = 0ull;
+    /// THE SCENE'S RESTART KEY (OgreScene::gatherRestartKey, PHOTON-GATHER-1d fix
+    /// round): moves only on a DISCONTINUITY the history cannot follow per pixel
+    /// — a light, sky or material write, an injection landing. A continuous
+    /// transform write (an animation, a rider, a mover) is NOT one: reprojection
+    /// follows it. It decides the SETTLED term (GatherStatus::settled), never the
+    /// hold, which keeps `restKey`.
+    unsigned long long restartKey = 0ull;
 
     /// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e) — the
     /// scene's two tables and two atlas layers, bound as the reflection trace
@@ -207,11 +214,12 @@ public:
     /// A view's listener is going away, or its scene has disarmed.
     void forget(const void *key);
     /// The last frame's numbers for a scene.
-    /// `restKey` is the scene's CURRENT rest key: a view whose last frame saw
-    /// another one has not begun the rest its picture owes, so it is not settled
-    /// (a light write between two frames).
+    /// `restKey` / `restartKey` are the scene's CURRENT keys: a view whose last
+    /// frame saw another restart key has not begun the settle its picture owes
+    /// (a light write between two frames), and one that saw another rest key has
+    /// not begun its rest.
     void statsInto(const detail::OgreScene *scene, unsigned long long restKey,
-                   GatherStatus &out) const;
+                   unsigned long long restartKey, GatherStatus &out) const;
     /// Is anything at all held for this key?
     bool holds(const void *key) const { return mViews.count(key) != 0; }
 
@@ -276,6 +284,12 @@ private:
         /// frame saw. Past N (settleFramesOf) the view HOLDS: nothing is dispatched.
         unsigned restFrames = 0u;
         unsigned long long restKey = 0ull;
+        /// THE SETTLE (the fix round's split): frames drawn since the history's
+        /// last RESTART — its birth, a resize, a scene bind, the lever, an
+        /// estimator-changing tuning, or a move of the scene's restart key.
+        /// `settled` is this >= N; the hold above is the stronger rest.
+        unsigned sinceRestart = 0u;
+        unsigned long long restartKey = 0ull;
         /// THE REST MEAN, full resolution (rq_probe_integrate.comp): a true mean
         /// of the rest frames, premultiplied by coverage. One image — at rest a
         /// pixel reads and writes only itself.

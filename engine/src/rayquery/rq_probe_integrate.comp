@@ -266,6 +266,82 @@ void main()
 			}
 		}
 	}
+	// ---- THE SILHOUETTE RULE (GA-EDGE, the fix round) --------------------------
+	// A pixel on a silhouette belongs to the surface it is on, and a thin
+	// surface — a block's top seen almost edge-on, a strip a few pixels tall —
+	// often has no probe in the four cells around it: every plane test fails and
+	// the pixel used to fall to the field's cage, a different estimate (the 1-px
+	// bright lines of the selftest's B1). Two widening steps, each only where the
+	// last found nothing:
+	//   1. a probe ON the pixel's plane in the 5 x 5 cells around it (uniform or
+	//      adaptive), weighted by its plane weight over 1 + its cell distance^2 —
+	//      the nearest same-surface answer;
+	//   2. none on its plane at all: the NEAREST SURFACE — probes within two
+	//      strides' world footprint of the pixel's point, the normal set aside
+	//      and their SH read at the PIXEL's normal (the band-2 SH carries the
+	//      irradiance's variation with the normal; a probe a few centimetres
+	//      round the edge is a far closer estimate than the field's cage).
+	if( wsum < weightFloor )
+	{
+		for( int dy = -2; dy <= 2; ++dy )
+			for( int dx = -2; dx <= 2; ++dx )
+			{
+				const ivec2 c = cell + ivec2( dx, dy );
+				if( any( lessThan( c, ivec2( 0 ) ) ) || any( greaterThanEqual( c, grid ) ) )
+					continue;
+				const uint ui = uint( c.y * grid.x + c.x );
+				const float link = records.r[ui].normalW.w;
+				for( int k = 0; k < 2; ++k )
+				{
+					if( k == 1 && link < 0.5 )
+						break;
+					const uint pi = k == 0 ? ui : uint( link ) - 1u;
+					const vec4 posW = records.r[pi].posW;
+					if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
+						continue;
+					const float w = jahPlaneWeight( posW.xyz, records.r[pi].normalW.xyz, pixelWorld,
+													pixelNormal, pixelDist ) /
+									( 1.0 + float( dx * dx + dy * dy ) );
+					if( w <= 0.0 )
+						continue;
+					sum += shEvalAt( pi, pixelNormal, bands ) * w;
+					wsum += w;
+				}
+			}
+		if( wsum < weightFloor )
+		{
+			const float pixelWorldSize = length( p.rayDown.xyz ) / float( max( full.y, 1 ) ) *
+										 ( p.camPos.w < 0.5 ? 1.0 : pixelDist );
+			const float reach = max( 2.0 * stride * pixelWorldSize, 1e-4 );
+			for( int dy = -2; dy <= 2; ++dy )
+				for( int dx = -2; dx <= 2; ++dx )
+				{
+					const ivec2 c = cell + ivec2( dx, dy );
+					if( any( lessThan( c, ivec2( 0 ) ) ) || any( greaterThanEqual( c, grid ) ) )
+						continue;
+					const uint ui = uint( c.y * grid.x + c.x );
+					const float link = records.r[ui].normalW.w;
+					for( int k = 0; k < 2; ++k )
+					{
+						if( k == 1 && link < 0.5 )
+							break;
+						const uint pi = k == 0 ? ui : uint( link ) - 1u;
+						const vec4 posW = records.r[pi].posW;
+						if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
+							continue;
+						// facing the same side: a probe on a surface's BACK is not near it
+						if( dot( records.r[pi].normalW.xyz, pixelNormal ) < -0.05 )
+							continue;
+						const float d = length( posW.xyz - pixelWorld );
+						const float w = clamp( 1.0 - d / reach, 0.0, 1.0 );
+						if( w <= 0.0 )
+							continue;
+						sum += shEvalAt( pi, pixelNormal, bands ) * w;
+						wsum += w;
+					}
+				}
+		}
+	}
 	vec4 answer = vec4( 0.0 );
 	if( wsum >= weightFloor )
 		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( 1024.0 ) ), 1.0 );

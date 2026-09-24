@@ -3252,6 +3252,9 @@ struct GatherTuning {
 /// PHOTON-GATHER-1c; a full-range step would need 53). `giAtRest` waits for it.
 constexpr float kGatherSettleCodes = 5.0f;
 
+/// An offscreen view's declared contract (View::setOffscreenContract).
+enum class OffscreenContract { Undeclared, StillPicture, Live };
+
 /// What the gather did on the last drawn frame of this scene.
 struct GatherStatus {
     /// The scene's row resolved ON: `GiParams::gather` is On and this machine
@@ -3311,11 +3314,21 @@ struct GatherStatus {
     /// estimate is noisy (a small bright source at a grazing angle) it keeps that
     /// draw's error until something moves. The pixel history is written with the
     /// handed-over value, so a camera that starts moving again continues from the
-    /// rest mean without a pop. `settled` =
-    /// restFrames >= N (true when the history does not run). A YOUNG VIEW (a
-    /// two-frame screenshot) is NOT settled: it shows the raw estimate — up to
-    /// 9/255 of probe noise on a Showroom-shaped room.
+    /// rest mean without a pop. THE REST IS NOT THE SETTLE (the fix round):
+    /// `sinceRestart` = the frames the history has drawn since its last RESTART
+    /// — its birth, a resize, a scene bind, the lever, an estimator-changing
+    /// tuning, or a DISCONTINUITY of the scene (a light, sky or material write,
+    /// an injection landing; OgreScene::gatherRestartKey). A continuous transform
+    /// write (an animation, a socket rider, a mover) is not a restart — the
+    /// reprojection follows it per pixel — and it never lets the scene REST. So
+    /// `settled` = sinceRestart >= N (true when the history does not run): a
+    /// still scene is settled on the frame its rest mean is complete (the two
+    /// counts agree), and a scene with a per-frame writer is settled on the N-th
+    /// frame of its EMA — a picture that is not byte-stable by nature. A YOUNG
+    /// VIEW (a two-frame screenshot) is NOT settled: it shows the raw estimate —
+    /// up to 9/255 of probe noise on a Showroom-shaped room.
     unsigned restFrames = 0u;
+    unsigned sinceRestart = 0u;
     unsigned settleFrames = 0u;
     bool settled = true;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's

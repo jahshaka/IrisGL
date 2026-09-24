@@ -1576,6 +1576,23 @@ public:
     virtual void setLodHysteresisOffscreen(bool) = 0;
     virtual bool lodHysteresisOffscreen() const = 0;
 
+    /// WHAT AN OFFSCREEN VIEW'S PICTURE IS FOR (PHOTON-GATHER-1d fix round) — and
+    /// so whether the screen-probe gather runs in it. At a gather tier the
+    /// gather is the diffuse GI, but it costs a prepass and four compute jobs a
+    /// frame and its first frames are the raw estimate (up to 9/255 of noise),
+    /// so an offscreen view DECLARES one of two contracts, and there is no third:
+    ///   * StillPicture — a screenshot, a thumbnail, a stored preview shot: the
+    ///     gather runs, and the CALLER waits for GiStatus::giAtRest before it
+    ///     reads the pixels (the screenshot verbs' rule, one predicate);
+    ///   * Live — a view drawn every frame for a person (a preview widget, an
+    ///     eye control): the gather is pinned OFF and the view takes the field's
+    ///     (or the cones') answer, the price of a live frame unchanged.
+    /// An offscreen view that declares NEITHER refuses the gather and says so
+    /// once in the log. Ignored on an on-screen view, which always gathers where
+    /// its scene does. Graph shape (the prepass): set it once, at creation.
+    virtual void setOffscreenContract(OffscreenContract) = 0;
+    virtual OffscreenContract offscreenContract() const = 0;
+
     /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
     /// tonemapper's own multiplier (SS1, 2026-09-13) — the number the shader
     /// samples as `fInvLumAvg`, read back off the GPU's 1x1 adaptation history.

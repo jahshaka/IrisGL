@@ -96,7 +96,12 @@
 // holds OPAQUE surfaces only: a blended fragment writes nothing there. The
 // discard is the LAST statement (the helper-lane rule: every load before it runs
 // either way, and none of them reads a device address).
-@property( hlms_prepass && hlms_alphablend && !hlms_shadowcaster )
+// NOT IN A CARD CAPTURE (PHOTON-GATHER-1d fix round): the capture's own piece
+// (JahCardCapture_piece_ps.any) fills the same hook in a prepass, and two
+// definitions of one piece are a compile error, a black frame. Cards hold
+// opaque surfaces only (OgreScene's candidate walk drops a blended item), so
+// the guard is never the one that decides; it keeps the pieces disjoint.
+@property( hlms_prepass && hlms_alphablend && !hlms_shadowcaster && !jah_card_capture )
 @piece( custom_ps_posExecution )
 	discard;
 @end

@@ -526,6 +526,7 @@ void ScreenProbeGather::drop(View &v) {
     v.restMeanMemory = VK_NULL_HANDLE;
     v.restMeanView = VK_NULL_HANDLE;
     v.restFrames = 0u;
+    v.sinceRestart = 0u;
     v.age = 0u;
     mHost.gatherRetireBuffer(v.counter, v.counterMemory);
     mHost.gatherRetireBuffer(v.args, v.argsMemory);
@@ -734,7 +735,7 @@ void ScreenProbeGather::close() {
 }
 
 void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long long restKey,
-                                  GatherStatus &out) const {
+                                  unsigned long long restartKey, GatherStatus &out) const {
     out.error = mLastError;
     // THE VIEWS THAT DREW THE LATEST FRAME of this scene. A scene can hold
     // several (the viewport and a screenshot's shot view, which a screenshot's
@@ -774,11 +775,15 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.irradianceW = v.irrHost.empty() ? 0u : v.w;
     out.irradianceH = v.irrHost.empty() ? 0u : v.h;
     out.irradianceFrame = v.irrHostFrame;
-    // THE SETTLED HISTORY (GatherStatus says what and why): every latest view at
-    // rest for N frames — the rest mean complete and held. A rest key the view
-    // has not drawn yet (a light write between two frames) is no rest at all.
+    // THE SETTLED HISTORY (GatherStatus says what and why): every latest view's
+    // history N frames past its last RESTART. The rest (and its hold) is
+    // reported beside it and is NOT part of the predicate: a scene with a
+    // per-frame writer never rests, and its shot takes the settled EMA picture.
+    // A restart key the view has not drawn yet (a light write between two
+    // frames) is a restart at frame 0.
     out.settled = true;
     out.restFrames = ~0u;
+    out.sinceRestart = ~0u;
     for (const auto &kv : mViews) {
         const View &o = kv.second;
         if (o.scene != scene || !o.targetsReady || o.recordedFrame != v.recordedFrame) continue;
@@ -786,9 +791,12 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
         out.settleFrames = std::max(out.settleFrames, n);
         const unsigned rest = o.restKey == restKey ? o.restFrames : 0u;
         out.restFrames = std::min(out.restFrames, rest);
-        if (o.lastTemporal && rest < n) out.settled = false;
+        const unsigned since = o.restartKey == restartKey ? o.sinceRestart : 0u;
+        out.sinceRestart = std::min(out.sinceRestart, since);
+        if (o.lastTemporal && since < n) out.settled = false;
     }
     if (out.restFrames == ~0u) out.restFrames = 0u;
+    if (out.sinceRestart == ~0u) out.sinceRestart = 0u;
 }
 
 // ---------------------------------------------------------------------------
@@ -962,6 +970,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             std::memcmp(v.prevFwd, in.fwd, sizeof(in.fwd)) == 0;
         const bool still = temporal && !in.tuning.restOff && sameCamera && in.restKey == v.restKey;
         v.restKey = in.restKey;
+        // THE SETTLE: a restart zeroes it (the view's birth or an estimator change
+        // is age 0; the scene's restart key moving is the rest), any other frame
+        // — moving camera, moving geometry, held — counts one.
+        const bool restart = v.age == 0u || in.restartKey != v.restartKey;
+        v.restartKey = in.restartKey;
+        v.sinceRestart = restart ? 0u : std::min(v.sinceRestart + 1u, 1u << 20);
         v.restFrames = still ? std::min(v.restFrames + 1u, 1u << 20) : 0u;
         v.historyFramesLast = historyFramesOf(in.tuning);
         if (still && v.restFrames > settleFramesOf(v.historyFramesLast)) {
@@ -1064,7 +1078,16 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                       : float(v.restFrames ? kRestSequenceBase + v.restFrames : (v.frame & 0xFFFFu));
     pp.knobs[3] = float(in.cascadeCount);
     pp.knobs2[0] = in.anisotropic ? 1.0f : 0.0f;
-    pp.knobs2[1] = in.cascadeCount ? std::max(0.01f, 0.5f * in.voxelCell[0]) : 0.02f;
+    // THE RAY'S START, OFF THE SURFACE BY AN EPSILON — never by half a voxel
+    // (the fix round, gi.gather_cards' near-foot chase): the probe measures the
+    // irradiance AT the surface, and a start lifted 4 cm (0.5 x cascade 0's
+    // cell) measured it 4 cm up — the floor in front of a floating panel read
+    // +7 % at its foot and -11 % at 1.6 m, the sign and size of that lift
+    // exactly (spikes/photon-gather-1d). The floor here, 1 mm, and the shader's
+    // 1e-4 of the view distance (well above a float depth's reconstruction
+    // error) keep a ray off its own triangle; a hit's shading owns its own
+    // footprint.
+    pp.knobs2[1] = 0.001f;
     pp.knobs2[2] = in.sky ? 1.0f : 0.0f;
     pp.knobs2[3] = float(octRes);
     pp.knobs3[0] = float(v.uniformProbes);
