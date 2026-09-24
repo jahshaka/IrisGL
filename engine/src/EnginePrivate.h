@@ -1023,6 +1023,12 @@ struct ChainDesc {
     /// `rayReflect` is.
     bool  probeGather = false;
     bool  refractions = false;
+    /// THE RADIANCE READBACK (PostFxDesc::hdrReadback, HDR-READBACK-1): the
+    /// scene result is kept in a FLOAT target even without `hdr`, and
+    /// ChainHandles::radianceTexture names it. Set before the offscreen
+    /// early-out (it is what the view KEEPS, not a post effect), and graph
+    /// shape: the scene-format textures change.
+    bool  hdrReadback = false;
 
     // ---- The hierarchical depth pyramid (SPECS/NANITE_SPEC.md §4.3) ----
     /// Build a closest-depth mip chain of the scene depth, once per frame, right
@@ -1227,6 +1233,11 @@ struct ChainHandles {
     /// part of ChainDesc::sameShape: changing it must not rebuild a workspace,
     /// so somebody has to rewrite this clear instead — OgreView::applyFixedExposure.
     Ogre::CompositorPassClearDef *fixedExposure = nullptr;
+    /// THE FLOAT SCENE RESULT a radiance readback downloads (HDR-READBACK-1):
+    /// the texture the one composite quad reads — kRt0, or the refraction /
+    /// distortion / AO stage that last rewrote it — named here because which
+    /// one it is depends on the shape. Null unless ChainDesc::hdrReadback.
+    const char *radianceTexture = nullptr;
 };
 
 /// Creates the node definitions and the workspace definition `desc` describes,
@@ -6198,6 +6209,7 @@ public:
     void resize(unsigned w, unsigned h) override;
 
     bool readPixels(Image &out) override;
+    bool readPixelsHdr(ImageF &out) override;
 
     /// Applies whatever resize()/setSampleCount() recorded, at frame time.
     ///

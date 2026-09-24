@@ -509,8 +509,10 @@ bool ChainDesc::anyEffect() const {
     // A stack of looks is an effect on its own: the LDR filters need the post
     // shape (they read a finished image out of a texture), and nothing else in
     // the description has to be on for that to be true.
+    // ...and so is a RADIANCE READBACK (HDR-READBACK-1): the float scene
+    // target it downloads exists only in the chain's shape.
     return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || refractions ||
-           distortion || hzb || !looks.empty();
+           distortion || hzb || !looks.empty() || hdrReadback;
 }
 
 bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
@@ -538,7 +540,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
            a.rayReflect == b.rayReflect && a.probeGather == b.probeGather &&
-           a.refractions == b.refractions &&
+           a.refractions == b.refractions && a.hdrReadback == b.hdrReadback &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
@@ -970,8 +972,18 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // point: light values above 1.0 survive to the tonemapper. Without HDR the
     // chain still needs an offscreen colour target (SSAO/SMAA/SSR/refraction
     // all composite), and it stays RGBA8_UNORM so colours do not move.
+    //
+    // ...UNLESS THE VIEW ASKED TO READ ITS RADIANCE (HDR-READBACK-1). Then every
+    // texture that carries the SCENE RESULT — this one, the refraction clone,
+    // the distortion copy, the AO-applied copy and the SSR colour history that
+    // copies it — is float, so the value the composite reads is the value the
+    // scene wrote, above 1.0 included; the composite quad (Copy without `hdr`,
+    // the tonemap with it) still writes the 8-bit target, and `readPixels`
+    // still reads that. No pass is added: the radiance target IS this chain's
+    // own scene target (ChainHandles::radianceTexture).
+    const bool floatScene = desc.hdr || desc.hdrReadback;
     {
-        auto *td = addTex(n, kRt0, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        auto *td = addTex(n, kRt0, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         td->depthBufferId = 1u;                      // the scene needs depth
         td->preferDepthTexture = desc.ssao || prepass;   // sampled by the AO/SSR/gather passes
         syncRtvDepth(n, kRt0, td);
@@ -1155,7 +1167,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // chain reflects the WORLD, not the last frame's picture of it.
         if (ssrMarch) {
             auto *td = addTex(n, kSsrPrev,
-                              desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+                              floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
         }   // if (ssr)
@@ -1199,7 +1211,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // The cross blur runs at FULL res — it is also the upsample.
         addTex(n, kAoBlurH, Ogre::PFG_R16_FLOAT);
         addTex(n, kAoBlurV, Ogre::PFG_R16_FLOAT);
-        addTex(n, kAoApplied, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        addTex(n, kAoApplied, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
     }
 
     if (desc.distortion) {
@@ -1209,7 +1221,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // The warped copy of the scene. Same format as the scene target, because
         // this happens in LINEAR HDR — before the SSR history copy, before SSAO
         // and long before the tonemap.
-        addTex(n, kDistorted, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        addTex(n, kDistorted, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         // Its own RTV, so the pass can BORROW the scene's depth buffer and test
         // against the opaque geometry without writing to it.
         {
@@ -1282,7 +1294,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // refractives depth-test against the opaque geometry.
         {
             auto *td = addTex(n, kRefractOut,
-                              desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+                              floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         }
         {
             Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kRefractRtv);
@@ -1896,6 +1908,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // this program existed, which is the byte-identical law (§8).
     const bool haveLooks = !desc.looks.empty();
     const char *aaTarget = haveLooks ? kLookA : kTargetChannel;
+
+    // THE RADIANCE READBACK's source: exactly what the composite below reads.
+    if (desc.hdrReadback) handlesOut.radianceTexture = sceneResult;
 
     // Composite into the LDR image SMAA works on, or straight into the window
     // (or, with looks and no SMAA, straight into the looks stage's input).

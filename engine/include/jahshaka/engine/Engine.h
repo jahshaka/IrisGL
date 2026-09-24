@@ -1720,6 +1720,15 @@ public:
     /// returns false for on-screen windows. This is the thumbnail path, and what
     /// makes the engine testable without a window.
     virtual bool readPixels(Image &out) = 0;
+    /// Reads this View's SCENE RADIANCE back in float (HDR-READBACK-1): the
+    /// linear value the scene passes wrote, before the tonemap, the exposure,
+    /// the bloom composite and the 8-bit store — the currency every closed
+    /// form is stated in. Offscreen Views that asked for it only
+    /// (PostFxDesc::hdrReadback); false otherwise, with lastError saying which.
+    /// Reads the frame most recently rendered, exactly like readPixels. A suite
+    /// that measures the DISPLAY (a grade, a dither, a look, a hash) stays on
+    /// readPixels.
+    virtual bool readPixelsHdr(ImageF &out) = 0;
 
     /// Compiles every shader this View's SCENE needs, now, without drawing it
     /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).
