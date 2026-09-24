@@ -4860,7 +4860,7 @@ void OgreEngine::setRayTracing(bool on) {
 // only door on conformant hardware (a measurement switch for
 // gi.rt_reflect_format_refused_lavapipe, not a mode).
 namespace {
-struct RayStorageFormat { VkFormat format; const char *name; };
+struct RayStorageFormat { VkFormat format{}; const char *name{}; };
 constexpr RayStorageFormat kRayStorageFormats[] = {
     { VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT" },   // the reflection mean, the gather atlas
     { VK_FORMAT_R32G32_SFLOAT,       "R32G32_SFLOAT" },         // the reflection's distance pair
