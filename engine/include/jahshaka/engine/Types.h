@@ -2873,7 +2873,14 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[0] = {  5.0f, 64, 0.0f };
         f.cascades[1] = { 20.0f, 64, 0.0f };
         f.cascadeCount = 2;
-        f.voxelResolution = 32u;
+        // THE SCENE-FITTED VOLUME IS 64 TOO (PHOTON-VOXEL-4, the lead's decision): at 32
+        // cells along the longest side a room-sized box has 0.56 m cells, and the field's
+        // wall-foot darkening lands outside its own derived bracket (gi.ddgi_ambient:
+        // 85.0 % against 73.2-83.9); at 64 it lands inside (83.7 % in 76.1-84.0). The
+        // measured cost of the dial, paired in one process (tests/gi/voxel_dial_measure):
+        // the rebuild 0.158 -> 0.220 ms GPU, the store 0.45 -> 3.6 MB, the settle's GI
+        // work 20.9 -> 46.3 ms GPU once, the steady frame +0.005 ms.
+        f.voxelResolution = 64u;
         f.probeFaceSize   = 128u;
         f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
         f.cardResidencyRadius = 15.0f;

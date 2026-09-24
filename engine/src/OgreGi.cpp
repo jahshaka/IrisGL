@@ -4640,9 +4640,12 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     // A VOXEL CELL IS A CUBE (PHOTON-VOXEL-4): a cone's footprint is isotropic, and one mip
     // level is one footprint in every direction only on cubic cells. The cell is the box's
     // longest side over the tier's resolution; each axis takes the next power of two of
-    // cells that covers its side (every level then halves every axis, as a cube's does),
-    // the region growing about its centre to the lattice. The tier's budget is never
-    // exceeded (the longest axis takes exactly `res`). A box 18 x 9 x 18 m at 32: 32 x 16 x
+    // cells that covers its side (every level then halves every axis, as a cube's does).
+    // THE BOX IS THE BOUNDS PADDED TO THE POWER-OF-TWO COUNT ON THE FAR SIDE: anchored at
+    // the bounds' MIN corner, each axis grown only toward +a - the bounds' min faces are the
+    // box's, and bounds already on the lattice (every side the longest / 2^k) are the box
+    // exactly (gi.ddgi_edge's). A box grown about its centre moved both faces. The
+    // tier's budget is never exceeded (the longest axis takes exactly `res`). A box 18 x 9 x 18 m at 32: 32 x 16 x
     // 32 cells of 0.5625 m - it had 32^3 cells of 0.5625 x 0.28 x 0.5625 m, on which the
     // open floor's wall cone read 0.17-0.23 of its cone-trace reference 0.413 at 32-256
     // cells, 0.39-0.42 on cubic ones (spikes/photon-voxel-4/lab).
@@ -4654,6 +4657,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
         if (longest > Ogre::Real(0)) {
             const Ogre::Real cell = longest / Ogre::Real(res);
             Ogre::Vector3 half;
+            const Ogre::Vector3 lo = aabb.getMinimum();
             for (int a = 0; a < 3; ++a) {
                 const Ogre::Real need = size[size_t(a)] / cell - Ogre::Real(1e-3);
                 Ogre::uint32 n = 8u;   // the octant's floor
@@ -4661,7 +4665,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
                 dims[a] = n;
                 half[size_t(a)] = Ogre::Real(0.5) * cell * Ogre::Real(n);
             }
-            region = Ogre::Aabb(aabb.mCenter, half);
+            region = Ogre::Aabb(lo + half, half);   // min corner = the bounds' min corner
         }
     }
     mVctVoxelizer->setResolution(dims[0], dims[1], dims[2]);
