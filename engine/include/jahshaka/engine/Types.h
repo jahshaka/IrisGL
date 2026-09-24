@@ -3168,7 +3168,24 @@ struct GatherTuning {
     /// is projected from its own 64 rays alone — the A/B that prices the filter
     /// and measures what it buys.
     bool     filterOff = false;
+    /// THE PIXEL HISTORY'S MEMORY (PHOTON-GATHER-1c): the frames after which
+    /// its running mean becomes an EMA at 1/historyFrames — a TRUE mean for
+    /// that many frames, then each new frame weighs 1/historyFrames. 0 = the
+    /// shipped 10 (the trade, measured on gi.gather_stable's room: the
+    /// frame-to-frame flicker is ~ the floor x the single-frame innovation —
+    /// 9 codes each frame alone -> 1 code; a lighting step of D codes arrives
+    /// within 1 code after ln(1/D)/ln(1 - 1/historyFrames) frames — 16 for a
+    /// 5-code step). Clamped to 1..63 (the count's six bits).
+    unsigned historyFrames = 0u;
 };
+
+// THE PIXEL HISTORY'S MEASUREMENT LEVER (PHOTON-GATHER-1c item 3) is an
+// ENVIRONMENT variable, not a tuning field: `JAHSHAKA_GATHER_NO_TEMPORAL` set
+// makes every gathering view publish each frame's estimate alone (no history
+// read or written), read at every frame so a suite drives both arms in one
+// process (setenv / unsetenv). It is the frozen-frame rule's pair: a frozen frame
+// index makes consecutive frames the same estimate; this makes each frame's
+// picture that frame's estimate.
 
 /// What the gather did on the last drawn frame of this scene.
 struct GatherStatus {
@@ -3206,6 +3223,12 @@ struct GatherStatus {
     float cpuMs = -1.0f;
     /// ...and the FILTER in probe space (PHOTON-GATHER-1b), its own dispatch.
     float filterMs = -1.0f;
+    /// THE PIXEL HISTORY (PHOTON-GATHER-1c): whether it ran on the last frame
+    /// (false under `JAHSHAKA_GATHER_NO_TEMPORAL`) and the view's age
+    /// (consecutive frames it has been written; 0 on a first frame, a resize, a
+    /// scene bind, a tuning change).
+    bool temporal = false;
+    unsigned historyAge = 0u;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's
     /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
     /// mean radiance over the cosine-weighted hemisphere of the pixel's own

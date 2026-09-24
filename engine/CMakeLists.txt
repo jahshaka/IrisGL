@@ -125,6 +125,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
@@ -162,7 +163,8 @@ if(JAH_RAY_QUERY_OK)
                        "${JAH_RQ_INCLUDE}/jah_voxel_sample.glsl"
                        "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
                        "${JAH_RQ_INCLUDE}/jah_environment.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_probe_params.glsl")
+                       "${JAH_RQ_INCLUDE}/jah_probe_params.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_reproject.glsl")
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x

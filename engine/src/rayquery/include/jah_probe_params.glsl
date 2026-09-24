@@ -73,6 +73,24 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// filter in probe space (0 = the filtered map is the raw one: the A/B that
 	/// prices the filter), w = unused.
 	vec4 knobs4;
+	/// THE PREVIOUS FRAME'S CAMERA (PHOTON-GATHER-1c), in the same five numbers
+	/// as this frame's (camPos .. fwd above) — what the integrate's pixel
+	/// history inverts (jah_reproject.glsl). On a view's first frame the C++
+	/// side writes this frame's own basis here, and nothing reads it
+	/// (knobs5.x = 0).
+	vec4 prevCamPos;
+	vec4 prevRayTL;
+	vec4 prevRayRight;
+	vec4 prevRayDown;
+	vec4 prevFwd;
+	/// THE PIXEL HISTORY (PHOTON-GATHER-1c). x = THE VIEW'S AGE: how many
+	/// consecutive frames this view's history has been written (0 = none yet —
+	/// a first frame, a resize, a scene bind, a tuning change, the history
+	/// switched back on — and then the previous images hold nothing and are
+	/// never read); y = the history's blend FLOOR (the smallest weight a new
+	/// frame takes: 1 / the frames it remembers); z = 1 runs the history (0 =
+	/// `JAHSHAKA_GATHER_NO_TEMPORAL`, the measurement lever); w = unused.
+	vec4 knobs5;
 } p;
 
 /// ONE PROBE'S RECORD — where it sits, what it faces, what it integrated.

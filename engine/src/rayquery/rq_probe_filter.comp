@@ -30,7 +30,7 @@
 //        correlated with the radiance, and it darkened the analytic gate's
 //        emitter by 7-31 % in the lane's A/B. A hit and a miss beside each
 //        other are two surfaces here, never averaged — the noise of a light's
-//        edge is the temporal pass's to remove (phase 3).
+//        edge is the pixel history's to remove (rq_probe_integrate.comp).
 //    The probe's own texel always weighs 1. An ADAPTIVE probe filters against
 //    its CELL's neighbours (its own cell's uniform probe fails its plane by
 //    construction — that is why it was appended). The nine taps are read in
@@ -54,9 +54,11 @@
 //    The 64 partial sums are reduced by a FIXED-ORDER shared-memory tree —
 //    never an atomic or a subgroup op, whose order is the scheduler's.
 //
-// WHAT IT WRITES: the FILTERED ATLAS (rgb = the filtered radiance, a = this
-// probe's own hit distance) — kept beside the raw one for phase 3's temporal
-// pass — and the record's SH and its E/pi at the probe's own normal.
+// WHAT IT WRITES: the record's SH and its E/pi at the probe's own normal. The
+// filtered map lives only in this workgroup's registers — nothing reads it
+// after the projection (the pixel history is in irradiance space, and the
+// importance sampler that would have read last frame's map was measured and
+// refused, PHOTON-GATHER-1c), so it is never stored.
 #extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
@@ -66,7 +68,6 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 layout( std430, set = 0, binding = 1 ) buffer Records { JahProbeRecord r[]; } records;
 layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
-layout( rgba16f, set = 0, binding = 3 ) uniform writeonly image2D filteredAtlas;
 
 
 /// Eight vec4 of partial sums per lane: 27 SH floats (coefficient k, channel c
@@ -150,7 +151,6 @@ void main()
 	barrier();
 
 	vec3 filtered = vec3( 0.0 );
-	float ownDistance = -1.0;
 	vec3 dirW = vec3( 0.0, 0.0, 1.0 );
 	float solidAngle = 0.0;
 	float cosine = 0.0;
@@ -169,7 +169,6 @@ void main()
 		cosine = max( dLocal.z, 0.0 );
 
 		const vec4 own = imageLoad( probeAtlas, block + texel );
-		ownDistance = own.w;
 		vec3 sum = own.xyz;
 		float wsum = 1.0;
 
@@ -214,13 +213,6 @@ void main()
 		}
 		filtered = sum / wsum;
 	}
-
-	// THE FILTERED ATLAS: every texel of the block is written (the padding of a
-	// 6x6 map included), so a reader never finds an older frame's value.
-	imageStore( filteredAtlas,
-				block + ( lane < rays ? texel
-									  : ivec2( int( lane ) % kOctResMax, int( lane ) / kOctResMax ) ),
-				vec4( filtered, ownDistance ) );
 
 	// ---- THE SH PROJECTION, one texel per lane -------------------------------
 	float y[9];

@@ -295,6 +295,10 @@ layout( std430, set = 0, binding = 20 ) readonly buffer JahGeomRows { uvec4 jahG
 #define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
 #include "jah_rq_geom.glsl"
 
+/// WHERE A SURFACE WAS IN THE LAST FRAME'S PICTURE, and the 5 % test — shared
+/// with the gather's histories (PHOTON-GATHER-1c).
+#include "jah_reproject.glsl"
+
 /// Metres along the camera's forward axis, with and without reverse Z — the
 /// same line JahSsrRayMarch_ps.glsl uses, from Camera::getProjectionParamsAB().
 float viewDistance( float rawDepth )
@@ -552,20 +556,15 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 	// that is a fact about the VIEW, so it is read from the view's age and not
 	// inferred from a missing texel.
 	const float viewIsWarm = p.stereo.y >= kWarmupFrames ? 1.0 : 0.0;
-	const vec3 d = world - before.camPos;
-	const float z = dot( d, before.fwd );
-	if( z <= 0.0 )
+	// THE REPROJECTION is shared with the screen-probe gather's histories
+	// (jah_reproject.glsl): one text, so the two cannot disagree about where a
+	// surface was.
+	vec2 uv;
+	float z;
+	if( jahReproject( world, before.camPos, before.perspective, before.rayTL, before.rayRight,
+					  before.rayDown, before.fwd, uv, z ) != 0 )
 	{
-		warmHeld = viewIsWarm;			// behind the camera it was
-		return vec4( 0.0 );
-	}
-	const vec3 plane = before.perspective < 0.5 ? d - before.fwd * z : d / z;
-	const vec3 q = plane - before.rayTL;
-	const vec2 uv = vec2( dot( q, before.rayRight ) / dot( before.rayRight, before.rayRight ),
-						  dot( q, before.rayDown ) / dot( before.rayDown, before.rayDown ) );
-	if( any( lessThan( uv, vec2( 0.0 ) ) ) || any( greaterThanEqual( uv, vec2( 1.0 ) ) ) )
-	{
-		warmHeld = viewIsWarm;			// outside the previous picture it was
+		warmHeld = viewIsWarm;			// behind the camera, or outside the previous picture
 		return vec4( 0.0 );
 	}
 	const ivec2 pc = clamp( ivec2( eyeGlobalUv( uv, eye ) * vec2( traceRes ) ),
@@ -573,10 +572,11 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 	const vec2 wasPair = imageLoad( historyDistPrev, pc ).xy;
 	const float wasDist = wasPair.x;
 	const float dist = z;   // what THIS surface's distance was last frame
-	// 5 % of the distance: far enough not to reject a surface the camera merely
-	// moved along, tight enough that a silhouette's far side is a different
-	// surface. A first frame stores 0 and is rejected here by construction.
-	if( wasDist <= 0.0 || abs( wasDist - dist ) > 0.05 * max( dist, 1.0 ) )
+	// THE 5 % TEST (jah_reproject.glsl): far enough not to reject a surface the
+	// camera merely moved along, tight enough that a silhouette's far side is a
+	// different surface. A first frame stores 0 and is rejected here by
+	// construction.
+	if( !jahSameDistance( wasDist, dist ) )
 	{
 		// THE RADIANCE IS REJECTED; THE CONFIDENCE IS NOT (DRAG-1). A rejection
 		// here means the surface at this pixel is not the one that was here
