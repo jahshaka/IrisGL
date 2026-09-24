@@ -2362,7 +2362,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
     // 1. THE RIGGED TRACED SET, out of the GPU scene's mirror (current: the scan
     //    ran this frame, just before this tier). The flags word is the one place
     //    the predicates live; kGpuRayTraced no longer excludes a rigged item.
-    struct Want { uint32_t slot; OgreScene::Node *node; };
+    struct Want { uint32_t slot = 0; OgreScene::Node *node = nullptr; };
     std::vector<Want> wants;
     const detail::GpuInstance *mirror = gs.mirrorData();
     const uint32_t slots = std::min<uint32_t>(gs.slotCount(), uint32_t(scene->mItemNodes.size()));
@@ -2399,7 +2399,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
     // 2. RECONCILE: a cache per rigged traced item, created on first sight (or
     //    when the Item behind the node was rebuilt), marked seen; the ones not
     //    seen are dropped AFTER the gather (updateScene).
-    struct Dirty { uint32_t node; SceneAs::Skin *sk; OgreScene::Node *n; };
+    struct Dirty { uint32_t node = 0; SceneAs::Skin *sk = nullptr; OgreScene::Node *n = nullptr; };
     std::vector<Dirty> dirty;
     bool rowsStaged = false;
     for (const Want &wt : wants) {
