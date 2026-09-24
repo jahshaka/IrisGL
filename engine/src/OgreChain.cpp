@@ -75,6 +75,7 @@
 // depend on an RQ constant somebody may widen later.
 #include <cmath>
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"   // kHitDecodeRenderQueue (PHOTON-HIT-SHADE-1)
 
 
 #include <Compositor/OgreCompositorWorkspaceDef.h>
@@ -224,6 +225,11 @@ constexpr const char *kSsrPrepassRtv  = "jahSsrPrepassRtv";
 constexpr const char *kSsrRays        = "jahSsrRays";
 constexpr const char *kSsrReflection  = "jahSsrReflection";
 constexpr const char *kSsrPrev        = "jahSsrPrev";
+// THE HIT LIST (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): the names the ray
+// tier reads them by (OgreRayQuery.cpp).
+constexpr const char *kHitIds      = "jahHitIds";
+constexpr const char *kHitDest     = "jahHitDest";
+constexpr const char *kHitRadiance = "jahHitRadiance";
 /// SMAA: LDR edge detection AFTER tonemapping, so it needs its own full-res
 /// target to work on before the result reaches the window. PLAIN UNORM, for
 /// the same measured reason kLookA below is — see the note there and the one
@@ -555,7 +561,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
-           a.rayReflect == b.rayReflect &&
+           a.rayReflect == b.rayReflect && a.hitDecode == b.hitDecode &&
            // THE PREPASS'S SHAPE, not the rows that ask for it (PHOTON-GATHER-1d;
            // RAYS-1's F4): the gather's and the sun contact's rows add NOTHING
            // to the graph but the prepass, so toggling either where the prepass
@@ -803,6 +809,9 @@ void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
         if (!td) continue;
         for (Ogre::CompositorPassDef *p : td->getCompositorPasses()) {
             if (!p || p->getType() != Ogre::PASS_SCENE) continue;
+            // THE HIT DECODE IS NOT A PICTURE OF EITHER EYE: its target is the hit
+            // list, one fragment per record (ChainDesc::hitDecode).
+            if (p->mIdentifier == kHitDecodePassIdentifier) continue;
             auto *sp = static_cast<Ogre::CompositorPassSceneDef *>(p);
             sp->mInstancedStereo = true;
             sp->mCullCameraName  = cull;
@@ -1199,6 +1208,21 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
         }   // if (ssr)
+        // THE HIT LIST (PHOTON-HIT-SHADE-1): two UAVs the ray jobs append to and
+        // the decode's target, W x kHitListHeightFactor H — see ChainDesc::hitDecode.
+        if (desc.hitDecode) {
+            for (const auto &t : { std::make_pair(kHitIds, Ogre::PFG_RGBA32_UINT),
+                                   std::make_pair(kHitDest, Ogre::PFG_R32_UINT) }) {
+                auto *td = addTex(n, t.first, t.second, 0u, 0u, 1.0f, kHitListHeightFactor);
+                // RenderToTexture as well: a node texture carries the compositor's
+                // depth-buffer defaults, which Ogre sets on render targets only
+                // (jahSsrReflection's shape: RTT | Uav).
+                td->textureFlags = Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::Uav;
+            }
+            auto *td = addTex(n, kHitRadiance, Ogre::PFG_RGBA16_FLOAT, 0u, 0u, 1.0f,
+                              kHitListHeightFactor);
+            td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+        }
     }
 
     // THE HZB (NANITE_SPEC §4.3). Declared beside SSAO's depth downscale because
@@ -1495,6 +1519,38 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->addQuadTextureSource(3, kDepth);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         }
+    }
+
+    // ---- THE HIT DECODE (PHOTON-HIT-SHADE-1; ChainDesc::hitDecode) ----------
+    // A ray hit the caches cannot shade is a pixel of a SECOND visibility
+    // buffer: the traces (recorded in this pass' pre-execute, OgreRayQuery.cpp)
+    // append it to the hit list, and this pass draws HlmsAtom's decode over the
+    // list — the render queue that holds nothing but the decode draws, shown for
+    // this pass alone — shading each record with PBS's own lighting pieces. The
+    // write-back into the reflection's mean and the gather's atlas follows in the
+    // opaque pass' pre-execute. The view's shadow node is REUSED (the prepass
+    // updated it): the decode's other shadowed lights read their maps at the
+    // hit, the sun's term is the record's shadow ray. No LOD update: the target
+    // is the list, not a picture (applyLodHysteresis's invariant stays true).
+    if (prepass && desc.hitDecode) {
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kHitRadiance);
+        t->setNumPasses(1);
+        auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
+        p->mShadowNodeRecalculation = Ogre::SHADOW_NODE_REUSE;
+        // w = 0 is "not shaded" to the write-back: every texel a record did not
+        // shade this frame must say so.
+        p->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
+        p->setAllLoadActions(Ogre::LoadAction::Clear);
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        p->mStoreActionDepth = Ogre::StoreAction::DontCare;
+        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        p->mFirstRQ = kHitDecodeRenderQueue;
+        p->mLastRQ = Ogre::uint8(kHitDecodeRenderQueue + 1u);
+        p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
+        p->mUpdateLodLists = false;
+        p->mIdentifier = kHitDecodePassIdentifier;
+        p->mProfilingId = "Jahshaka hit decode";
     }
 
     // The opaque scene pass.

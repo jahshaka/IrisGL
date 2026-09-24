@@ -108,6 +108,14 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// at rest; k >= 1 = the k-th consecutive frame at rest), y = K, the rest
 	/// frames after which the answer IS the rest mean and the host holds.
 	vec4 knobs6;
+	/// THE HIT RECORD (PHOTON-HIT-SHADE-1; the trace's, jah_rq_hit_record.glsl):
+	/// hitList: x = the list's capacity, y = its grid width, z = the GPU scene
+	/// instance entries bound, w = 1 when the list is bound. hitSun: xyz = towards
+	/// the sun, w = 1 when the pass has one. hitSun2: x = the sun ray's TLAS mask,
+	/// y = its minimum lift, z = its length, w = the far copies' lift (farOverlap).
+	vec4 hitList;
+	vec4 hitSun;
+	vec4 hitSun2;
 } p;
 
 /// ONE PROBE'S RECORD — where it sits, what it faces, what it integrated.

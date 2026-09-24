@@ -105,9 +105,9 @@ const float kMaxRadiance = 1024.0;
 /// exists for exactly that width and reading the finest one aliases. `mirror`
 /// takes the containing cascade WHOLE and mip 0 — a crossfade of two texel
 /// sizes is still a blur, and a mirror is the one surface that must not be
-/// blurred. `ok` is false when no bound cascade holds anything there, which the
-/// CALLER decides what to do about (the gather draws it black; a reflection
-/// hands the pixel back).
+/// blurred. `ok` is false when no bound cascade holds anything there: the hit
+/// is then a record for the visibility-buffer decode (jah_rq_hit_record.glsl,
+/// PHOTON-HIT-SHADE-1) in both callers.
 vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out bool ok )
 {
 	ok = false;

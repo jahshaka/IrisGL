@@ -76,11 +76,13 @@ in vec4 gl_FragCoord;
 
 @insertpiece( PccManualProbeDecl )
 
-// The full-screen triangle hands over ONE thing: its draw id, which names the decode
-// twin this draw serves (the bucket test in the prologue).
+// The full-screen triangle hands over its draw id, which names the decode twin this
+// draw serves (the bucket test in the prologue), and in hit mode the hit list's
+// record count this frame (the vertex stage read it to cover only those rows).
 vulkan_layout( location = 0 ) in block
 {
 	flat uint drawId;
+	@property( atom_hit_mode )flat uint hitCount;@end
 } inAtom;
 
 @pset( currSampler, samplerStateStart )

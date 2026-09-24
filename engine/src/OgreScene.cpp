@@ -1502,6 +1502,9 @@ void OgreScene::destroy() {
         // removeRenderQueueListener -> destroy scenes -> delete OverlaySystem
         // -> delete Root (OgreOverlayHud.cpp's header).
         hud::detach(mSceneMgr);
+        // THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): HlmsAtom-owned objects in
+        // this SceneManager's memory, so they die before it does.
+        forgetSceneDecodes(mSceneMgr);
         teardownGi();   // VPL lights die while the SceneManager is still alive
         // The atmosphere destroys its Rectangle2D THROUGH the SceneManager, so it
         // has to go while that is still alive (teardown law: components, then the

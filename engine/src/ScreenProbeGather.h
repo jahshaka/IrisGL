@@ -121,6 +121,27 @@ public:
 /// and the compositor pass. The gather takes what it needs as ARGUMENTS and is
 /// friends with nothing — the debt `SurfaceCardSpike.h` names for a spike, paid
 /// here because this one ships.
+/// THE HIT LIST a ray job appends to (PHOTON-HIT-SHADE-1; the ray tier owns it,
+/// rayquery/include/jah_rq_hit_record.glsl says what a record is): the two
+/// images' storage views, the list's buffer (counters + each record's aux), the GPU scene's instance table (the flags
+/// a hit reads), the list's shape and the sun ray's parameters. `on` false binds
+/// the tier's stand-ins and appends nothing (a hit no cache shades then keeps
+/// the write-back's "unshaded" answer).
+struct HitListBinding {
+    bool on = false;
+    VkImageView ids = VK_NULL_HANDLE, dest = VK_NULL_HANDLE;
+    VkBuffer buf = VK_NULL_HANDLE;
+    VkDeviceSize bufOffset = 0, bufRange = 0;
+    VkBuffer instances = VK_NULL_HANDLE;
+    VkDeviceSize instancesOffset = 0, instancesRange = 0;
+    uint32_t instanceEntries = 0u;
+    uint32_t capacity = 0u, width = 0u;
+    bool sun = false;
+    float toSun[3] = { 0.0f, 1.0f, 0.0f };
+    uint32_t sunMask = 0u;
+    float sunRange = 0.0f, lift = 0.0f, farLift = 0.0f;
+};
+
 struct GatherInputs {
     const detail::OgreScene *scene = nullptr;
     Ogre::SceneManager *sceneMgr = nullptr;
@@ -192,6 +213,9 @@ struct GatherInputs {
     /// card pick faces the reversed ray.
     const std::vector<uint32_t> *geomRowOfSlot = nullptr;
     Ogre::UavBufferPacked *geomRows = nullptr;
+    /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is
+    /// appended for the decode.
+    HitListBinding hit;
 };
 
 /// The Component.
@@ -209,6 +233,16 @@ public:
     /// reflection listener's hook (after the prepass, before the opaque pass
     /// that shades). `key` identifies the view's listener and nothing else.
     void record(const void *key, const GatherInputs &in);
+    /// THE SECOND HALF of a frame (PHOTON-HIT-SHADE-1): `record` places and
+    /// TRACES (in front of the hit decode pass, whose records the traces append
+    /// to); this runs the filter, the SH, the integrate and the pass-scoped
+    /// registration in front of the opaque pass — after the write-back has put
+    /// the decoded radiance into the atlas. A held frame's re-bind happens here
+    /// too. A no-op when `record` did not run for the key this frame.
+    void finish(const void *key);
+    /// The atlas the key's trace wrote THIS frame (the write-back's gather
+    /// destination), or null.
+    VkImageView tracedAtlas(const void *key) const;
     /// The pass this key registered for is over: the Hlms binding is
     /// PASS-scoped and is taken away here (GATHER-0's D2).
     void releaseBinding(const void *key);
@@ -348,6 +382,15 @@ private:
         };
         Pending pending[3];
         float placeMs = -1.0f, traceMs = -1.0f, filterMs = -1.0f, integrateMs = -1.0f, cpuMs = -1.0f;
+        /// THE FRAME BETWEEN ITS TWO HALVES (record -> finish, PHOTON-HIT-SHADE-1):
+        /// what the second half needs of the first.
+        bool finishPending = false;
+        bool finishHold = false;
+        bool finishTraced = false;
+        GatherInputs finishIn;
+        unsigned finishRing = 0u, finishQbase = 0u;
+        bool finishTimed = false, finishTemporal = false;
+        double finishCpuMs = 0.0;
     };
 
     bool makePipelines(std::string &err);

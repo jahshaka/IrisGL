@@ -1,0 +1,102 @@
+#version 460
+// THE HIT WRITE-BACK (PHOTON-HIT-SHADE-1; SPECS/atom/D2_HIT_SHADING_DESIGN.md
+// section 2.3 with the lead's F3).
+//
+// The ray jobs appended every hit the caches could not shade to a compacted list
+// (jah_rq_hit_record.glsl); HlmsAtom's decode in hit mode shaded each record into
+// `jahHitRadiance` (one fragment per record, w = 1 where it shaded); this job
+// scatters that radiance back to where each ray's answer lives, through the SAME
+// arithmetic a card- or voxel-lit hit takes:
+//
+//   * THE REFLECTION: the texel's temporal mean. The trace wrote the texel's
+//     history CARRIED (the previous radiance and count) and this frame's
+//     distances; here it becomes mix( prev, decoded, blend ) at count
+//     min( max( prev.w, the warm-held seed ) + 1, 4096 ) — rq_reflect.comp's own
+//     two lines, with `blend` from the record (negated when the history was
+//     warm-held). The spatial filter runs after this, so it reads the completed
+//     mean.
+//   * THE GATHER: the ray's atlas texel, radiance x the texel re-weight from the
+//     record (rq_probe_gather.comp's `reweight`), its distance kept.
+//
+// A record the decode could not shade (w = 0: a material HlmsAtom serves no twin
+// for, a stale slot) takes the dropped record's answer: the reflection keeps its
+// history and withholds this frame's distance where it had none; the gather's ray
+// stays at zero radiance.
+//
+// ONE THREAD PER RECORD SLOT, records [0, min( count, capacity )). Every record owns
+// its destination texel (a texel traces one ray per frame), so nothing races.
+//
+// COMPILED AT BUILD TIME by glslangValidator at --target-env spirv1.4, like
+// every ray job beside it.
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform Params
+{
+	/// x = the list's capacity, y = its grid width, z = 1 when the reflection's
+	/// history is bound, w = 1 when the gather's atlas is bound.
+	vec4 list;
+} p;
+/// The list's buffer: [0] the records appended, then two words per record from
+/// word 4 (jah_rq_hit_record.glsl) — this job reads the second, the weight.
+layout( std430, set = 0, binding = 1 ) readonly buffer JahHitBuf { uint jahHitBuf[]; };
+layout( set = 0, binding = 2 ) uniform usampler2D jahHitDest;
+layout( set = 0, binding = 3 ) uniform sampler2D jahHitRadiance;
+layout( rgba16f, set = 0, binding = 4 ) uniform image2D historyCur;
+layout( rg32f, set = 0, binding = 5 ) uniform image2D historyDistCur;
+layout( rgba16f, set = 0, binding = 6 ) uniform image2D probeAtlas;
+
+/// rq_reflect.comp's ceiling and warm-up, the same numbers (jah_rq_hit.glsl's
+/// kMaxRadiance; rq_reflect.comp's kWarmupFrames).
+const float kMaxRadiance = 1024.0;
+const float kWarmupFrames = 8.0;
+const uint kDestGather = 0x80000000u;
+
+bool finite3( vec3 v )
+{
+	return all( lessThan( floatBitsToUint( v ) & uvec3( 0x7FFFFFFFu ), uvec3( 0x7F800000u ) ) );
+}
+
+void main()
+{
+	const uint capacity = uint( p.list.x );
+	// THE RECORD INDEX over a 2D grid of groups: a list at 4K holds 4.7 M records,
+	// past the 65,535 groups Vulkan guarantees on one axis.
+	const uint i = ( gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x ) * 64u + gl_LocalInvocationID.x;
+	if( i >= min( jahHitBuf[0], capacity ) )
+		return;
+	const uint w = max( uint( p.list.y ), 1u );
+	const ivec2 at = ivec2( int( i % w ), int( i / w ) );
+	const uint dest = texelFetch( jahHitDest, at, 0 ).x;
+	const float weight = uintBitsToFloat( jahHitBuf[4u + 2u * i + 1u] );
+	const vec4 rad = texelFetch( jahHitRadiance, at, 0 );
+	const bool shaded = rad.w > 0.5 && finite3( rad.xyz );
+	const vec3 radiance = shaded ? clamp( rad.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+	const ivec2 xy = ivec2( int( dest & 0x7FFFu ), int( ( dest >> 15u ) & 0x7FFFu ) );
+	if( ( dest & kDestGather ) != 0u )
+	{
+		if( p.list.w < 0.5 || any( greaterThanEqual( xy, imageSize( probeAtlas ) ) ) )
+			return;
+		const vec4 texel = imageLoad( probeAtlas, xy );
+		imageStore( probeAtlas, xy, vec4( min( radiance * weight, vec3( kMaxRadiance ) ), texel.w ) );
+		return;
+	}
+	// A texel outside the image is never written (no robustness on this device:
+	// an out-of-range store is undefined).
+	if( p.list.z < 0.5 || any( greaterThanEqual( xy, imageSize( historyCur ) ) ) ||
+		any( greaterThanEqual( xy, imageSize( historyDistCur ) ) ) )
+		return;
+	const vec4 prev = imageLoad( historyCur, xy );
+	if( shaded )
+	{
+		const bool warmHeld = weight < 0.0;
+		const float blend = clamp( abs( weight ), 0.0, 1.0 );
+		const float seed = max( prev.w, warmHeld ? kWarmupFrames : 0.0 );
+		const float count = min( seed + 1.0, 4096.0 );
+		imageStore( historyCur, xy, vec4( mix( prev.xyz, radiance, blend ), count ) );
+	}
+	else
+	{
+		const vec4 d = imageLoad( historyDistCur, xy );
+		imageStore( historyDistCur, xy, vec4( prev.w > 0.0 ? d.x : 0.0, d.y, 0.0, 0.0 ) );
+	}
+}

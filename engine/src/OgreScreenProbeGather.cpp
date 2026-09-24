@@ -85,8 +85,9 @@ constexpr unsigned kPlaceBindings = 6u;
 /// The trace's nine, then GA-1e's six: the card read's four (9-12, the
 /// reflection's jah_rq_card_bindings.glsl at base 9) and the geometric
 /// normal's two (13, 14); then the split voxel store's four arrays by name
-/// (15-18: the coverage and the surface position per half, PHOTON-VOXEL-4).
-constexpr unsigned kTraceBindings = 19u;
+/// (15-18: the coverage and the surface position per half, PHOTON-VOXEL-4); then
+/// THE HIT RECORD's four (19-22, PHOTON-HIT-SHADE-1).
+constexpr unsigned kTraceBindings = 23u;
 constexpr unsigned kFilterBindings = 3u;
 constexpr unsigned kIntegrateBindings = 10u;
 
@@ -130,6 +131,11 @@ struct GatherParams {
     float knobs5[4] = {};
     float cards[4] = {};
     float knobs6[4] = {};
+    /// THE HIT RECORD (PHOTON-HIT-SHADE-1; jah_probe_params.glsl's hitList,
+    /// hitSun, hitSun2).
+    float hitList[4] = {};
+    float hitSun[4] = {};
+    float hitSun2[4] = {};
 };
 
 /// THE PIXEL HISTORY'S BLEND FLOOR (PHOTON-GATHER-1c item 1): the smallest
@@ -280,12 +286,19 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 16 voxelCovN[]
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 17 voxelPosP[] (PHOTON-VOXEL-4)
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 voxelPosN[]
+            // THE HIT RECORD (PHOTON-HIT-SHADE-1): the instance table, the list's
+            // two images, its buffer (the counters and each record's aux).
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 19 the GPU scene's instances
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 20 the hit list's records
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 21 ...its destinations
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 22 ...its buffer
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              kGatherMaxCascades, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             kGatherMaxCascades, kGatherMaxCascades };
+                                             kGatherMaxCascades, kGatherMaxCascades,
+                                             1u, 1u, 1u, 1u };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -371,9 +384,9 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     sizes[1].descriptorCount = groups * 4u;
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[2].descriptorCount = groups * 10u;
+    sizes[2].descriptorCount = groups * 12u;   // + the hit record's two (HIT-SHADE-1)
     sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[3].descriptorCount = groups * 8u;
+    sizes[3].descriptorCount = groups * 10u;   // + the hit list's two
     VkDescriptorPoolSize sampled{};
     sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sampled.descriptorCount = groups * (2u + 8u * kGatherMaxCascades + 3u + 2u);
@@ -994,8 +1007,14 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         v.restFrames = still ? std::min(v.restFrames + 1u, 1u << 20) : 0u;
         v.historyFramesLast = historyFramesOf(in.tuning);
         if (still && v.restFrames > settleFramesOf(v.historyFramesLast)) {
-            hold(v, in, temporal);
-            v.cpuMs = float(msSince(cpuStart));
+            // THE RE-BIND IS THE SECOND HALF'S (finish): the registration is
+            // scoped to the opaque pass, and the hit decode pass runs between.
+            v.finishPending = true;
+            v.finishHold = true;
+            v.finishTraced = false;
+            v.finishIn = in;
+            v.finishTemporal = temporal;
+            v.finishCpuMs = msSince(cpuStart);
             return;
         }
     }
@@ -1195,6 +1214,19 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.cards[1] = cardsBound ? float(in.cardRecords) : 0.0f;
     pp.cards[2] = in.cardFootprintTexels;
     pp.cards[3] = float(geomSlots);
+    // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the tier bound, the sun ray.
+    pp.hitList[0] = float(in.hit.capacity);
+    pp.hitList[1] = float(in.hit.width);
+    pp.hitList[2] = float(in.hit.instanceEntries);
+    pp.hitList[3] = in.hit.on ? 1.0f : 0.0f;
+    pp.hitSun[0] = in.hit.toSun[0];
+    pp.hitSun[1] = in.hit.toSun[1];
+    pp.hitSun[2] = in.hit.toSun[2];
+    pp.hitSun[3] = in.hit.sun ? 1.0f : 0.0f;
+    pp.hitSun2[0] = float(in.hit.sunMask);
+    pp.hitSun2[1] = in.hit.lift;
+    pp.hitSun2[2] = in.hit.sunRange;
+    pp.hitSun2[3] = std::max(in.hit.farLift, in.farOverlap);
     std::memcpy(v.paramsMapped[ring], &pp, sizeof(pp));
 
     // ---- THE DESCRIPTOR SETS, rewritten every frame ------------------------
@@ -1349,6 +1381,28 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             w[15 + k].descriptorCount = kGatherMaxCascades;
             w[15 + k].pImageInfo = volumes[4 + k];
         }
+        // THE HIT RECORD (19-22): the tier's list or its stand-ins — every view
+        // real, whatever `on` says (a null view in a set is undefined).
+        VkDescriptorBufferInfo hitBufs[2] = {};
+        hitBufs[0].buffer = in.hit.instances ? in.hit.instances : dummyStorage;
+        hitBufs[0].offset = in.hit.instances ? in.hit.instancesOffset : 0u;
+        hitBufs[0].range = in.hit.instances ? in.hit.instancesRange : VK_WHOLE_SIZE;
+        hitBufs[1].buffer = in.hit.buf ? in.hit.buf : dummyStorage;
+        hitBufs[1].offset = in.hit.buf ? in.hit.bufOffset : 0u;
+        hitBufs[1].range = in.hit.buf ? in.hit.bufRange : VK_WHOLE_SIZE;
+        VkDescriptorImageInfo hitImgs[2] = {};
+        const VkImageView hitViews[2] = { in.hit.ids, in.hit.dest };
+        for (int i = 0; i < 2; ++i) {
+            if (!hitViews[i]) return;
+            hitImgs[i].imageView = hitViews[i];
+            hitImgs[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            w[20 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[20 + i].pImageInfo = &hitImgs[i];
+        }
+        w[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[19].pBufferInfo = &hitBufs[0];
+        w[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[22].pBufferInfo = &hitBufs[1];
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 
@@ -1576,6 +1630,46 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     if (timed)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 3u);
     traceWork.close();
+    // ---- THE FRAME'S FIRST HALF ENDS HERE (PHOTON-HIT-SHADE-1): the trace has
+    // appended the hits no cache can shade to the hit list; the hit decode pass
+    // shades them and the write-back puts their radiance into the atlas before
+    // `finish` filters it.
+    v.finishPending = true;
+    v.finishHold = false;
+    v.finishTraced = true;
+    v.finishIn = in;
+    v.finishRing = ring;
+    v.finishQbase = qbase;
+    v.finishTimed = timed;
+    v.finishTemporal = temporal;
+    v.finishCpuMs = msSince(cpuStart);
+}
+
+VkImageView ScreenProbeGather::tracedAtlas(const void *key) const {
+    auto it = mViews.find(key);
+    if (it == mViews.end() || !it->second.finishPending || !it->second.finishTraced) return VK_NULL_HANDLE;
+    return it->second.atlasView;
+}
+
+void ScreenProbeGather::finish(const void *key) {
+    auto vit = mViews.find(key);
+    if (vit == mViews.end() || !vit->second.finishPending) return;
+    View &v = vit->second;
+    v.finishPending = false;
+    const auto cpuStart = Clock::now();
+    const GatherInputs &in = v.finishIn;
+    const bool temporal = v.finishTemporal;
+    if (v.finishHold) {
+        hold(v, in, temporal);
+        v.cpuMs = float(v.finishCpuMs + msSince(cpuStart));
+        return;
+    }
+    const unsigned ring = v.finishRing;
+    const uint32_t qbase = v.finishQbase;
+    const bool timed = v.finishTimed;
+    Ogre::RenderSystem *rs = mHost.gatherRenderSystem();
+    VkCommandBuffer cmd = mHost.gatherFrameCmd();
+    if (!cmd) return;
     const auto computeToCompute = [&]() {
         VkMemoryBarrier b{};
         b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -1698,7 +1792,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     ++v.age;
     v.recordedFrame = mHost.gatherFrameNow();
     v.lastTemporal = temporal;
-    v.cpuMs = float(msSince(cpuStart));
+    v.cpuMs = float(v.finishCpuMs + msSince(cpuStart));
     ++v.frame;
 }
 

@@ -7,7 +7,9 @@
 // ones it could not — off screen, behind an occluder, past the edge fade, or in
 // the roughness band the march declines. That ordering is Lumen's and it is the
 // right one here for a measurable reason: a ray's hit is shaded from the
-// Photon voxels, whose finest directional mip is HALF the voxel grid, while a
+// surface cache or the Photon voxels (whose finest directional mip is HALF the
+// voxel grid) — or, where neither holds it (a mover, a rigged item, outside
+// every cascade), by the visibility-buffer decode (PHOTON-HIT-SHADE-1) — while a
 // screen hit is a real pixel of this scene. Where the screen has an answer it
 // is the better answer.
 //
@@ -150,6 +152,16 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
 	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
 	vec4 cards;
+	/// ---- THE HIT RECORD (PHOTON-HIT-SHADE-1) ------------------------------
+	/// hitList: x = the list's capacity in records, y = its grid width, z = the
+	/// GPU scene instance entries bound (the flags a hit reads: mover, rigged),
+	/// w = 1 when the list is bound. hitSun: xyz = towards the sun, w = 1 when the
+	/// pass has one. hitSun2: x = the sun ray's TLAS mask (the casters), y = its
+	/// minimum lift off a hit, z = its length, w = the far copies' lift (unused
+	/// here: a reflection traces the near copies only).
+	vec4 hitList;
+	vec4 hitSun;
+	vec4 hitSun2;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -299,6 +311,27 @@ layout( std430, set = 0, binding = 20 ) readonly buffer JahGeomRows { uvec4 jahG
 #define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
 #define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
 #include "jah_rq_geom.glsl"
+
+/// THE HIT RECORD (PHOTON-HIT-SHADE-1): the GPU scene's instance table (binding
+/// 25, the flags a hit reads), the compacted list's two images (26-27) and its
+/// buffer (28: the counters and each record's sun, footprint and weight).
+/// jah_rq_hit_record.glsl says what a record is and which hits write one.
+layout( std430, set = 0, binding = 25 ) readonly buffer JahHitInstances { uvec4 jahHitInstances[]; };
+layout( rgba32ui, set = 0, binding = 26 ) uniform writeonly uimage2D jahHitIds;
+layout( r32ui, set = 0, binding = 27 ) uniform writeonly uimage2D jahHitDest;
+layout( std430, set = 0, binding = 28 ) buffer JahHitBuf { uint jahHitBuf[]; };
+#define JAH_HIT_ON          ( p.hitList.w > 0.5 )
+#define JAH_HIT_CAPACITY    uint( p.hitList.x )
+#define JAH_HIT_LIST_W      max( uint( p.hitList.y ), 1u )
+#define JAH_HIT_INSTANCES   uint( p.hitList.z )
+#define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
+#define JAH_HIT_SUN         p.hitSun
+#define JAH_HIT_SUN_MASK    uint( p.hitSun2.x )
+#define JAH_HIT_SUN_RANGE   p.hitSun2.z
+#define JAH_HIT_LIFT        p.hitSun2.y
+#define JAH_HIT_FAR_LIFT    p.hitSun2.w
+#include "jah_rq_sun_ray.glsl"
+#include "jah_rq_hit_record.glsl"
 
 /// WHERE A SURFACE WAS IN THE LAST FRAME'S PICTURE, and the 5 % test — shared
 /// with the gather's histories (PHOTON-GATHER-1c).
@@ -617,14 +650,10 @@ void main()
 	if( dot( L, worldN ) <= 0.0 )
 		L = reflect( -V, worldN );		// the lobe left the surface: take the mirror
 
-	// THE REPROJECTED HISTORY IS READ BEFORE THE RAY IS TRACED, because a
-	// sample this frame cannot shade must not THROW IT AWAY (third reader,
-	// item 2). A ray that finds geometry the voxels do not reach is a failure
-	// of the CACHE, not evidence about the surface: storing a zero distance
-	// there makes the next frame's reprojection reject, which resets the count
-	// to 1, discards thirty frames of integral, and — through the warm-up —
-	// throttles the ray to an eighth for eight frames afterwards. A glossy lobe
-	// grazing the voxel volume's edge would never converge at all.
+	// THE REPROJECTED HISTORY IS READ BEFORE THE RAY IS TRACED: the temporal
+	// mean below is computed from it whether this frame's radiance comes from
+	// the caches (now) or from the hit decode (rq_hit_composite.comp, after the
+	// decode pass — PHOTON-HIT-SHADE-1).
 	float warmHeld;
 	float wasHitT;
 	const vec4 prev = historyAt( eyeBefore( eye ), eye, world, traceRes, warmHeld, wasHitT );
@@ -641,61 +670,59 @@ void main()
 						   bias, L, maxT );
 	while( rayQueryProceedEXT( rq ) ) {}
 
-	vec3 traced;
+	vec3 traced = vec3( 0.0 );
 	bool ok = false;
 	// How far this frame's ray went: the hit's distance, or — for a ray that
 	// left the scene — a length no hit can have.
 	float hitT = maxT * 2.0;
+	// A HIT THE CACHES CANNOT SHADE IS A PIXEL OF A SECOND VISIBILITY BUFFER
+	// (PHOTON-HIT-SHADE-1). A mover or a rigged item always, and a static hit
+	// neither its card nor a cascade answers: the hit is written to the list and
+	// HlmsAtom's decode shades it — the same lighting text as a screen pixel,
+	// with the sun from a shadow ray — and rq_hit_composite.comp completes the
+	// temporal mean below with that radiance. There is no hand-back to the
+	// probe: a hit is always shaded (a card, a voxel, or the decode).
+	bool record = false;
+	uint recSlot = 0u, recPrim = 0u;
+	vec2 recBary = vec2( 0.0 );
+	vec3 recN = -L;
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
 		gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
 		const float t = rayQueryGetIntersectionTEXT( rq, true );
 		hitT = t;
 		const uint hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+		const uint hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 		vec3 hitN;
 		jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
-							   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
-							   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
-		traced = jahHitRadiance( hitSlot, world + worldN * bias + L * t, hitN, L,
-								 reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
-								 true, ok );
-		// A HIT THE CACHE CANNOT SHADE IS NOT A MISS. The ray found geometry;
-		// the voxels simply do not reach it (outside every cascade, or a surface
-		// too thin for the grid). Returning the sky there would draw a hole in
-		// the middle of an object, which is worse than the probe's photograph —
-		// so the pixel is handed BACK to the probe/sky answer already in the
-		// texture, by writing nothing at all.
-		if( !ok )
-		{
-			// A HIT THE CACHE CANNOT SHADE IS NOT EVIDENCE ABOUT THIS PIXEL.
-			// The history is carried through UNCHANGED — same radiance, same
-			// count, and a live distance so the next frame's reprojection still
-			// finds it. A texel that has never had an answer (prev.w == 0)
-			// writes a zero distance and the filter skips it this frame, which
-			// is the honest "hand it back to the probe".
-			imageStore( historyCur, tc, prev );
-			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
-			return;
-		}
+							   hitPrim, rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
+		const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
+		if( !decodeAlways )
+			traced = jahHitRadiance( hitSlot, world + worldN * bias + L * t, hitN, L,
+									 reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
+									 true, ok );
+		record = decodeAlways || !ok || !finite3( traced );
+		recSlot = hitSlot;
+		recPrim = hitPrim;
+		recBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
+		recN = hitN;
 	}
 	else
 	{
 		traced = skyRadiance( L, lobeAlpha );		// route C: the escape
 		ok = true;
 	}
-	if( !finite3( traced ) )
+	if( !record && !finite3( traced ) )
 	{
-		// A HIT THE CACHE CANNOT SHADE IS NOT EVIDENCE ABOUT THIS PIXEL.
-		// The history is carried through UNCHANGED — same radiance, same
-		// count, and a live distance so the next frame's reprojection still
-		// finds it. A texel that has never had an answer (prev.w == 0)
-		// writes a zero distance and the filter skips it this frame, which
-		// is the honest "hand it back to the probe".
+		// A NON-FINITE ESCAPE IS NOT EVIDENCE ABOUT THIS PIXEL: the history is
+		// carried through unchanged, and a texel that has never had an answer
+		// (prev.w == 0) writes a zero distance so the filter skips it this frame.
 		imageStore( historyCur, tc, prev );
 		imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
 		return;
 	}
-	traced = clamp( traced, vec3( 0.0 ), vec3( kMaxRadiance ) );
+	if( !record )
+		traced = clamp( traced, vec3( 0.0 ), vec3( kMaxRadiance ) );
 
 	// THE TEMPORAL MEAN. 1/n while the mean is young — a true running average,
 	// which is what converges fastest — with a floor so it keeps following a
@@ -772,6 +799,29 @@ void main()
 			blend = max( blend, mix( 1.0, 0.35, wide ) );
 		hitMean = mix( wasHitT, hitT, blend );
 	}
+	const float seed = max( prev.w, warmHeld * kWarmupFrames );
+	const float count = min( seed + 1.0, 4096.0 );
+	if( record )
+	{
+		// THE RECORD: this texel's history is CARRIED (radiance and count as they
+		// were) with this frame's distances, and the write-back (rq_hit_composite)
+		// replaces it with mix( prev, decoded, blend ) at count = min( max( prev.w,
+		// warm-held seed ) + 1, 4096 ) — the same mean as the lines below, the
+		// radiance arriving one pass later. The blend travels negated when the
+		// history is warm-held, which is the seed's only other input.
+		imageStore( historyCur, tc, prev );
+		const vec3 hitPos = world + worldN * bias + L * hitT;
+		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
+		if( jahHitAppend( recSlot, jahHitNearLevel( recSlot ), false, recPrim, recBary, L, sunVis,
+						  reflectFootprint( lobeAlpha, hitT ),
+						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false ) ) )
+			imageStore( historyDistCur, tc, vec4( dist, hitMean, 0.0, 0.0 ) );
+		else
+			// THE LIST WAS FULL (a dropped record, counted): this frame has no
+			// sample for the texel, which keeps what it had.
+			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
+		return;
+	}
 	const vec3 mean = mix( prev.xyz, traced, blend );
 	// THE COUNT, AND THE ONE PLACE IT IS SEEDED (DRAG-1). Ordinarily it is
 	// exactly "how many samples are in this mean", which is what the blend
@@ -790,8 +840,6 @@ void main()
 	// own history is kWarmupFrames old (`historyAt`) — so a freshly created view
 	// (a graded screenshot's, which lives about two frames) still fades in
 	// exactly as before, which is the guarantee the warm-up exists for.
-	const float seed = max( prev.w, warmHeld * kWarmupFrames );
-	const float count = min( seed + 1.0, 4096.0 );
 	imageStore( historyCur, tc, vec4( mean, count ) );
 	imageStore( historyDistCur, tc, vec4( dist, hitMean, 0.0, 0.0 ) );
 

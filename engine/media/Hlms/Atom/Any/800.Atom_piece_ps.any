@@ -13,6 +13,27 @@
 //   LoadMaterial        REPLACED: the material is the id buffer's, not the draw's.
 //   DeclareObjLightMask REPLACED under the fine-light-mask property, same reason.
 //
+// HIT MODE (the pass property atom_hit_mode, PHOTON-HIT-SHADE-1): the SAME text
+// shades a RAY HIT instead of a screen pixel - one fragment per record of the ray
+// jobs' compacted hit list (irisgl/engine/src/rayquery/include/jah_rq_hit_record.glsl).
+// Four branches, and nothing else differs:
+//   the barycentrics are the ray's (from the record), never recomputed from the
+//     fragment through the pass' view-projection;
+//   the texture gradients are the ray's FOOTPRINT at the hit, projected through
+//     the triangle's uv-per-metre, one isotropic LOD - a hit has no screen
+//     neighbours, so every screen derivative is zeroed (the normal-map specular
+//     anti-aliasing of the fork's patch 0022 among them);
+//   the eye vector is the reversed RAY, and the Forward+ cell is the hit's world
+//     position projected through the pass' view-projection (the fork's
+//     fwdCustomFragCoord hook) - a hit outside the frustum has no cell: no
+//     clustered light, decal or cubemap probe reaches it, only the sun, the
+//     field, the voxel cones and the scene's bound reflection;
+//   the SUN'S shadow term is the record's shadow ray, replacing the shadow map
+//     (which covers the camera's frustum only); every other shadowed light keeps
+//     its map, read at the hit's world position.
+// The distance fog is dropped (it is the camera's, and a hit's radiance leaves the
+// hit towards the ray's origin, not the eye).
+//
 // What is NOT here is the point: every lighting piece - Ogre's and the engine's
 // (the voxel cones, the irradiance field, the gather, the environment) - is PBS's,
 // inserted unchanged through upstream's DefaultBodyPS, because every one of them
@@ -27,7 +48,29 @@
 
 	// THE ID IMAGE (R32G32_UINT): x = item slot, bits 0-23, and the level, bits
 	// 24-26; y = the triangle within that level's index range (HlmsAtom.h, AtomId).
+	// In hit mode it is the hit list's RGBA32UI record image (the same two words,
+	// then the barycentrics and the ray's direction), and the list's BUFFER is
+	// bound beside it (two words a record from word 4: the sun's visibility and
+	// the footprint as halves, then the write-back's weight; a buffer because the
+	// pin's table of pass textures has no slot to spare - HlmsAtom.h kHitBufSlot).
 	vulkan_layout( ogre_t@value(atomIdTex) ) uniform utexture2D atomIdTex;
+	@property( atom_hit_mode )
+		ReadOnlyBufferU( @value(atomHitBuf), uint, atomHitBuf );
+		// A HIT HAS NO SCREEN NEIGHBOURS: the fragments of one quad are four
+		// unrelated rays, so every screen derivative of the body is zero - the
+		// footprint in the record is the only width a hit has.
+		#undef OGRE_ddx
+		#undef OGRE_ddy
+		#define OGRE_ddx( val ) ( ( val ) * 0.0 )
+		#define OGRE_ddy( val ) ( ( val ) * 0.0 )
+		float3 atomOctDecode( float2 e )
+		{
+			float3 n = float3( e.x, e.y, 1.0 - abs( e.x ) - abs( e.y ) );
+			if( n.z < 0.0 )
+				n.xy = ( 1.0 - abs( n.yx ) ) * float2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 );
+			return normalize( n );
+		}
+	@end
 
 	// THE GPU SCENE'S TABLES, read-only views of the engine's own buffers
 	// (irisgl/engine/src/GpuScene.h is the contract for every stride below).
@@ -230,13 +273,36 @@
 	float2 atomDdyUV = float2( 0.0, 0.0 );
 	uint atomMaterialSlot = 0u;
 	uint atomLightMask = 0u;
+	@property( atom_hit_mode )
+		// What hit mode hands the body beyond inPs: the sun's visibility (the
+		// directional shadow piece below), the eye vector (the reversed ray, view
+		// space) and the fork's Forward+ cell hook (a pixel of THIS target, and
+		// whether the hit has a cell at all).
+		float atomHitSun = 1.0;
+		midf3 atomHitViewDir = midf3_c( 0.0, 0.0, 1.0 );
+		float2 fwdCustomFragCoord = float2( 0.0, 0.0 );
+		bool fwdCustomHasCell = false;
+	@end
 	{
 		// CLAMPED TO THE IMAGE: robustness is not enabled on this engine's device, so an
 		// out-of-range fetch is undefined, and a draw without a source reads the host's
 		// 1x1 stand-in.
 		ivec2 atomXY = min( ivec2( gl_FragCoord.xy ), textureSize( atomIdTex, 0 ) - ivec2( 1, 1 ) );
-		uint2 atomIds = texelFetch( atomIdTex, atomXY, 0 ).xy;
-		bool atomOk = atomIds.x != 0xFFFFFFFFu;
+		@property( atom_hit_mode )
+			// FRAGMENT i IS RECORD i (row-major over the list's grid); the list holds
+			// hitCount records this frame (the vertex stage covers only their rows).
+			uint4 atomRec = texelFetch( atomIdTex, atomXY, 0 );
+			uint2 atomIds = atomRec.xy;
+			uint atomListIdx = uint( atomXY.y ) * uint( textureSize( atomIdTex, 0 ).x ) + uint( atomXY.x );
+			bool atomOk = atomIds.x != 0xFFFFFFFFu && atomListIdx < inAtom.hitCount;
+			// The record's aux words, CLAMPED into the buffer (a lane past the count
+			// - a helper lane - still loads).
+			uint atomAuxAt = min( 4u + 2u * atomListIdx, max( uint( atomHitBuf.length() ), 2u ) - 2u );
+			float2 atomAux = unpackHalf2x16( atomHitBuf[atomAuxAt] );
+		@else
+			uint2 atomIds = texelFetch( atomIdTex, atomXY, 0 ).xy;
+			bool atomOk = atomIds.x != 0xFFFFFFFFu;
+		@end
 
 		// The tables' lengths (every stand-in holds at least one whole entry of each).
 		uint atomInstCount = uint( atomInstances.length() ) / 10u;
@@ -264,13 +330,33 @@
 		atomOk = atomOk && atomBucket == ( worldMaterialIdx[inAtom.drawId].x & 0x1FFu ) + 1u;
 
 		uint atomMesh = atomInstances[atomI + 6u].w;
+		@property( atom_hit_mode )
+			// THE FAR COPY (bit 27): the mesh's coarsest level, the last one with an
+			// index range - the level the far BLAS was built from.
+			if( ( atomIds.x & 0x08000000u ) != 0u )
+			{
+				uint atomCoarsest = 0u;
+				for( uint atomL = 1u; atomL < 8u; ++atomL )
+				{
+					uint atomLAt = atomMesh * 8u + atomL;
+					if( atomLAt < atomLevelCount && atomLevels[min( atomLAt, max( atomLevelCount, 1u ) - 1u ) * 2u].y > 0u )
+						atomCoarsest = atomL;
+				}
+				atomLevel = atomCoarsest;
+			}
+		@end
 		uint atomLevelAtRaw = atomMesh * 8u + atomLevel;
 		atomOk = atomOk && atomLevelAtRaw < atomLevelCount;
 		uint4 atomLevelRow = atomLevels[min( atomLevelAtRaw, max( atomLevelCount, 1u ) - 1u ) * 2u];
 		// The triangle is compared as a COUNT, never as atomTri * 3: a wrapped product of
 		// a garbage id would pass the test and address past the index buffer.
-		atomOk = atomOk && atomLevelRow.w < atomRowCount && atomTri < atomLevelRow.y / 3u;
-		uint atomRowAt = min( atomLevelRow.w, max( atomRowCount, 1u ) - 1u ) * 3u;
+		// THE SKIN ROW (PHOTON-SKIN-1's row override, GpuInstance::raster z): a rigged
+		// item's geometry is its skin cache's POSED vertices over the mesh's own
+		// index ranges - the rows jah_rq_geom.glsl traces - so a posed character is
+		// shaded on its posed triangles.
+		uint atomRowSrc = atomRaster.z != 0xFFFFFFFFu ? atomRaster.z + atomLevel * 8u : atomLevelRow.w;
+		atomOk = atomOk && atomRowSrc < atomRowCount && atomTri < atomLevelRow.y / 3u;
+		uint atomRowAt = min( atomRowSrc, max( atomRowCount, 1u ) - 1u ) * 3u;
 		uint4 atomAddr = atomGeomRows[atomRowAt];
 		uint4 atomLay0 = atomGeomRows[atomRowAt + 1u];
 		uint4 atomLay1 = atomGeomRows[atomRowAt + 2u];
@@ -322,6 +408,53 @@
 		float3 w0 = mul( float4( p0, 1.0 ), atomWorld );
 		float3 w1 = mul( float4( p1, 1.0 ), atomWorld );
 		float3 w2 = mul( float4( p2, 1.0 ), atomWorld );
+		@property( atom_hit_mode )
+			// THE BARYCENTRICS ARE THE RAY'S (the record), and the hit point is on
+			// the triangle the ray committed to; nothing is recomputed through the
+			// pass' projection. The covering test becomes the record's own: an id
+			// that names a triangle of that level (the range tests above).
+			float2 atomBaryUv = unpackUnorm2x16( atomRec.z );
+			AtomBary b;
+			b.w = float3( 1.0 - atomBaryUv.x - atomBaryUv.y, atomBaryUv.x, atomBaryUv.y );
+			float3 atomHitPos = b.w.x * w0 + b.w.y * w1 + b.w.z * w2;
+			float4 atomHitClip = mul( float4( atomHitPos, 1.0 ), passBuf.viewProj );
+			b.clipW = atomHitClip.w;
+			atomOk = atomOk && all( lessThan( floatBitsToUint( atomHitPos ) & uvec3( 0x7FFFFFFFu ), uvec3( 0x7F800000u ) ) );
+			// THE FORWARD+ CELL (the fork's fwdCustomFragCoord): the hit's own pixel
+			// of this target's grid - the grid is the camera frustum's - and no cell
+			// outside that frustum.
+			fwdCustomHasCell = atomOk && atomHitClip.w > 0.0 &&
+							   all( lessThanEqual( abs( atomHitClip.xy ), float2( atomHitClip.w, atomHitClip.w ) ) );
+			{
+				float2 atomRes = float2( textureSize( atomIdTex, 0 ) );
+				float2 atomNdc = fwdCustomHasCell ? atomHitClip.xy / atomHitClip.w : float2( 0.0, 0.0 );
+				@property( hlms_forwardplus_flipY )
+					fwdCustomFragCoord = float2( ( atomNdc.x * 0.5 + 0.5 ) * atomRes.x, ( 0.5 + atomNdc.y * 0.5 ) * atomRes.y );
+				@else
+					fwdCustomFragCoord = float2( ( atomNdc.x * 0.5 + 0.5 ) * atomRes.x, ( 0.5 - atomNdc.y * 0.5 ) * atomRes.y );
+				@end
+				fwdCustomFragCoord = clamp( fwdCustomFragCoord, float2( 0.0, 0.0 ), atomRes - float2( 0.5, 0.5 ) );
+			}
+			// THE EYE IS THE RAY'S ORIGIN: the reversed ray, in view space.
+			{
+				float3 atomDirW = atomOctDecode( unpackSnorm2x16( atomRec.w ) );
+				float3 atomDirV = mul( float4( atomDirW, 0.0 ), passBuf.view ).xyz;
+				atomHitViewDir = midf3_c( normalize( -atomDirV ) );
+			}
+			atomHitSun = clamp( atomAux.x, 0.0, 1.0 );
+			if( !atomOk )
+			{
+				b.w = float3( 1.0, 0.0, 0.0 );
+				b.clipW = 1.0;
+				w0 = float3( 0.0, 0.0, 0.0 );
+				n0 = float3( 0.0, 0.0, 1.0 );
+				t0 = float4( 1.0, 0.0, 0.0, 1.0 );
+				uvA = float2( 0.0, 0.0 );
+				atomHitViewDir = midf3_c( 0.0, 0.0, 1.0 );
+				fwdCustomHasCell = false;
+				fwdCustomFragCoord = float2( 0.0, 0.0 );
+			}
+		@else
 		float4 c0 = mul( float4( w0, 1.0 ), passBuf.viewProj );
 		float4 c1 = mul( float4( w1, 1.0 ), passBuf.viewProj );
 		float4 c2 = mul( float4( w2, 1.0 ), passBuf.viewProj );
@@ -353,11 +486,33 @@
 			t0 = float4( 1.0, 0.0, 0.0, 1.0 );
 			uvA = float2( 0.0, 0.0 );
 		}
+		@end
 		atomMaterialSlot = atomOk ? ( atomWord & 0xFFFFu ) : 0u;
 		atomLightMask = atomInstances[atomI + 8u].z;
 
 		@property( hlms_uv_count )
 			float2 atomUv0 = b.w.x * uvA + b.w.y * uvB + b.w.z * uvC;
+			@property( atom_hit_mode )
+			if( atomOk )
+			{
+				// THE RAY'S FOOTPRINT AT THE HIT (the record, metres) through the
+				// triangle's uv-per-metre: one isotropic gradient, one LOD.
+				float2 atomE1 = uvB - uvA;
+				float2 atomE2 = uvC - uvA;
+				float atomUvArea = abs( atomE1.x * atomE2.y - atomE1.y * atomE2.x );
+				float atomWArea = length( cross( w1 - w0, w2 - w0 ) );
+				float atomUvPerM = atomWArea > 1e-20 ? sqrt( atomUvArea / atomWArea ) : 0.0;
+				float atomG = max( atomAux.y, 0.0 ) * atomUvPerM;
+				atomDdxUV = float2( atomG, 0.0 );
+				atomDdyUV = float2( 0.0, atomG );
+				if( any( greaterThanEqual( floatBitsToUint( float4( atomDdxUV, atomDdyUV ) ) & uvec4( 0x7FFFFFFFu ),
+										   uvec4( 0x7F800000u ) ) ) )
+				{
+					atomDdxUV = float2( 0.0, 0.0 );
+					atomDdyUV = float2( 0.0, 0.0 );
+				}
+			}
+			@else
 			if( atomOk )
 			{
 				AtomBary bx = atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 1.0, 0.0 ) );
@@ -375,6 +530,7 @@
 					atomDdyUV = float2( 0.0, 0.0 );
 				}
 			}
+			@end
 			inPs.uv0 = atomUv0;
 		@end
 
@@ -450,4 +606,51 @@
 @property( hlms_fine_light_mask || hlms_forwardplus_fine_light_mask )
 	@undefpiece( DeclareObjLightMask )
 	@piece( DeclareObjLightMask )uint objLightMask = atomLightMask;@end
+@end
+
+// HIT MODE'S THREE PIECES (see the header): the eye vector, the sun, and the
+// record's "shaded" mark.
+@property( atom_hit_mode )
+	// THE MARK THE WRITE-BACK READS: w = 1 where a record was shaded, whatever
+	// alpha the material computes (a transparent surface's hit is shaded as its
+	// surface; the day-one front end is opaque). No other library defines this
+	// piece in a hit-mode pass: the fog's is under the fog property (zero here),
+	// the gather's and the card capture's under the prepass.
+	@piece( custom_ps_posExecution )
+		outPs_colour0.w = midf_c( 1.0 );
+	@end
+	// THE EYE VECTOR IS THE REVERSED RAY. Upstream's LightingHeader computes it from
+	// the view-space position (the camera's pinhole); the hook right after it is
+	// the per-datablock custom_ps_preLights, which a decode twin never carries (a
+	// datablock with a custom piece gets no twin, HlmsAtom::decodeTwinFor).
+	@property( needs_view_dir )
+		@piece( custom_ps_preLights )
+			pixelData.viewDir = atomHitViewDir;
+			pixelData.NdotV = saturate( dot( pixelData.normal, pixelData.viewDir ) );
+		@end
+	@end
+	// THE SUN'S SHADOW IS THE RECORD'S SHADOW RAY. Upstream's piece reads the PSSM
+	// splits at the fragment's depth; a hit may lie anywhere, and the maps cover
+	// the camera's frustum. The shadow-map counter advances exactly as upstream's
+	// piece advances it (one per split, or one), so every later shadowed light
+	// still reads its own map.
+	@property( hlms_num_shadow_map_lights )
+	@undefpiece( DoDirectionalShadowMaps )
+	@piece( DoDirectionalShadowMaps )
+	@property( hlms_pssm_splits )
+		midf fShadow = _h( 1.0 );
+		@property( receive_shadows )
+			fShadow = midf_c( atomHitSun );
+			@add( CurrentShadowMap, hlms_pssm_splits )
+		@end
+	@end @property( !hlms_pssm_splits && hlms_num_shadow_map_lights && hlms_lights_directional )
+		@property( receive_shadows )
+			midf fShadow = midf_c( atomHitSun );
+			@add( CurrentShadowMap, 1 )
+		@else
+			midf fShadow = _h( 1.0 );
+		@end
+	@end
+	@end
+	@end
 @end

@@ -28,7 +28,17 @@ vulkan_layout( OGRE_DRAWID ) in uint drawId;
 vulkan_layout( location = 0 ) out block
 {
 	flat uint drawId;
+	@property( atom_hit_mode )flat uint hitCount;@end
 } outAtom;
+
+@property( atom_hit_mode )
+	// HIT MODE (PHOTON-HIT-SHADE-1): the triangle covers only the ROWS of the hit
+	// list that hold this frame's records, so the decode costs what the records
+	// cost and nothing per unused texel. The count is the ray jobs' atomic counter
+	// (word 0, which may pass the capacity: the list's own size caps it).
+	vulkan_layout( ogre_t@value(atomIdTex) ) uniform utexture2D atomIdTex;
+	ReadOnlyBufferU( @value(atomHitBuf), uint, atomHitBuf );
+@end
 
 void main()
 {
@@ -39,4 +49,15 @@ void main()
 	@property( hlms_normal )gl_Position.z += normal.x;@end
 	@property( normal_map && hlms_tangent4 )gl_Position.w = tangent.w;@end
 	outAtom.drawId = drawId;
+	@property( atom_hit_mode )
+		// Framebuffer row 0 is clip y = -1 (a positive-height viewport); the
+		// triangle's corners are y = -1 and y = 3, so scaling their distance from
+		// -1 by rows / height covers exactly the first `rows` rows.
+		ivec2 atomListSize = textureSize( atomIdTex, 0 );
+		uint atomW = uint( max( atomListSize.x, 1 ) ), atomH = uint( max( atomListSize.y, 1 ) );
+		uint atomCount = min( atomHitBuf[0], atomW * atomH );
+		uint atomRows = ( atomCount + atomW - 1u ) / atomW;
+		gl_Position.y = -1.0 + ( gl_Position.y + 1.0 ) * ( float( atomRows ) / float( atomH ) );
+		outAtom.hitCount = atomCount;
+	@end
 }

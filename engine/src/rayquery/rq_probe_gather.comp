@@ -44,19 +44,14 @@
 // that hits near pays one query; only an escaping ray pays the second. The far
 // query is off when the far plane lies inside the near length (p.knobs3.w = 0).
 // WHAT A FAR HIT IS WORTH: the cascades end at the near length, so a far hit is
-// almost always outside every cascade, and its footprint (tens of metres) is far
-// past any card's gate -- it reads BLACK (below). The far query buys OCCLUSION --
-// the sky no longer leaks through distant geometry -- and nothing else; its cost
-// (+17-33 % of the gather in open sky at High/Epic, spikes/atom-farblas-1) is
-// paid for that alone. A far hit asks no card: its triangle is the COARSE
-// level's, which the per-slot geometry rows (the near copy's level) cannot
-// decode.
-// A hit the cascades cannot shade -- near or far -- is BLACK, never sky: the ray
-// found geometry and the cache does not reach it; handing it the sky would
-// light the probe THROUGH the object, which is the leak this whole program
-// exists to remove. Black is an underestimate of a surface's bounce and an
-// exact statement about its occlusion (the lead's decision, ledger sections
-// 937/938).
+// almost always outside every cascade — it is a RECORD for the visibility-
+// buffer decode (PHOTON-HIT-SHADE-1, jah_rq_hit_record.glsl): its triangle is
+// the mesh's COARSEST level (the record's far bit), shaded by HlmsAtom with the
+// scene's own lighting text and written back into this ray's texel by
+// rq_hit_composite.comp. So are a near hit on a MOVER or a RIGGED item (the
+// caches cannot hold them) and a near hit neither its card nor a cascade
+// answers. There is no black and no sky for a hit: the ray found geometry, and
+// the geometry is shaded.
 //
 // DETERMINISM (spec section 5). Every stochastic input is an integer hash of
 // (probe cell, ray, frame); each ray writes its own texel and nothing is summed
@@ -119,6 +114,26 @@ layout( std430, set = 0, binding = 14 ) readonly buffer JahGeomRows { uvec4 jahG
 #include "jah_rq_geom.glsl"
 
 #include "jah_rq_hit_radiance.glsl"
+
+/// THE HIT RECORD (PHOTON-HIT-SHADE-1): the GPU scene's instance table (binding
+/// 19), the compacted list's two images (20-21) and its buffer (22) — the
+/// reflection's 25-28.
+layout( std430, set = 0, binding = 19 ) readonly buffer JahHitInstances { uvec4 jahHitInstances[]; };
+layout( rgba32ui, set = 0, binding = 20 ) uniform writeonly uimage2D jahHitIds;
+layout( r32ui, set = 0, binding = 21 ) uniform writeonly uimage2D jahHitDest;
+layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
+#define JAH_HIT_ON          ( p.hitList.w > 0.5 )
+#define JAH_HIT_CAPACITY    uint( p.hitList.x )
+#define JAH_HIT_LIST_W      max( uint( p.hitList.y ), 1u )
+#define JAH_HIT_INSTANCES   uint( p.hitList.z )
+#define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
+#define JAH_HIT_SUN         p.hitSun
+#define JAH_HIT_SUN_MASK    uint( p.hitSun2.x )
+#define JAH_HIT_SUN_RANGE   p.hitSun2.z
+#define JAH_HIT_LIFT        p.hitSun2.y
+#define JAH_HIT_FAR_LIFT    p.hitSun2.w
+#include "jah_rq_sun_ray.glsl"
+#include "jah_rq_hit_record.glsl"
 
 void main()
 {
@@ -216,10 +231,15 @@ void main()
 		// by) and its triangle's geometric normal (the card pick's facing); a far
 		// hit names neither (the header: its triangle is the coarse level's).
 		uint hitSlot = 0xFFFFFFFFu;
+		uint hitPrim = 0u;
+		vec2 hitBary = vec2( 0.0 );
+		bool far = false;
 		vec3 hitN = -dir;
 		if( hit )
 		{
 			hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+			hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+			hitBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
 			jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
 								   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
 								   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), dir, hitN );
@@ -241,7 +261,11 @@ void main()
 				gl_RayQueryCommittedIntersectionTriangleEXT )
 			{
 				hit = true;
+				far = true;
 				tHit = rayQueryGetIntersectionTEXT( rqFar, true );
+				hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rqFar, true ) );
+				hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
+				hitBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
 			}
 		}
 
@@ -254,13 +278,32 @@ void main()
 		vec3 radiance = vec3( 0.0 );
 		float distance = -1.0;
 		bool ok = false;
+		bool recorded = false;
 		if( hit )
 		{
 			distance = tHit;
-			radiance = jahHitRadiance( hitSlot, origin + dir * tHit, hitN, dir,
-									   max( tHit * spread, 1e-4 ), false, false, ok );
-			if( !ok )
-				radiance = vec3( 0.0 );   // a hit neither a card nor the cascades shade is BLACK
+			// A MOVER, a RIGGED item, or a hit neither its card nor a cascade
+			// answers (a far hit asks the cascades only: its triangle is the
+			// COARSE level's, which no card describes): a record, shaded by the
+			// visibility-buffer decode and written back into this texel by
+			// rq_hit_composite.comp (PHOTON-HIT-SHADE-1). There is no black: a hit
+			// is always shaded (a card, a voxel, or the decode).
+			const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
+			if( !decodeAlways )
+				radiance = jahHitRadiance( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
+										   max( tHit * spread, 1e-4 ), false, false, ok );
+			if( decodeAlways || !ok || !finite3( radiance ) )
+			{
+				const vec3 hitPos = origin + dir * tHit;
+				const float sunVis = jahHitSunVisibility( hitPos, hitN, tHit, far );
+				const ivec2 dest = block + texel;
+				recorded = jahHitAppend( hitSlot, far ? 0u : jahHitNearLevel( hitSlot ), far, hitPrim,
+										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight,
+										 jahHitDestPack( dest, true ) );
+				// THE COMPOSITE writes the radiance; a DROPPED record (the list was
+				// full — counted) leaves this ray's texel at zero radiance.
+				radiance = vec3( 0.0 );
+			}
 		}
 		else
 		{

@@ -26,6 +26,7 @@
 // every ray job beside it (Ogre's own GLSL path never sets a target
 // environment, which SPV_KHR_ray_query requires).
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -68,6 +69,9 @@ layout( set = 0, binding = 1 ) uniform Params
 layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
 layout( set = 0, binding = 3 ) uniform sampler2D sceneDepth;
 layout( r8, set = 0, binding = 4 ) uniform writeonly image2D sunVis;
+
+/// THE SUN RAY is the one text the hit record shares (jah_rq_sun_ray.glsl).
+#include "jah_rq_sun_ray.glsl"
 
 /// Metres along the camera's forward axis — rq_reflect.comp's line, the one
 /// JahSsrRayMarch_ps.glsl uses too.
@@ -145,34 +149,10 @@ void main()
 			// ray's to the map's over the last projParams.w of the range, so
 			// where a long low-sun shadow outruns the range the ray's exact edge
 			// hands over to the map's instead of stopping in a step (the SSR
-			// rim's shape). TWO queries keep the common case cheap: the hard part
-			// of the range asks for ANY hit (terminate on the first), and only a
-			// ray that crossed it clean asks the fade band for its NEAREST hit.
+			// rim's shape) — jah_rq_sun_ray.glsl's two queries.
 			const float range = p.toSun.w;
 			const float hardEnd = range * ( 1.0 - clamp( p.projParams.w, 0.0, 1.0 ) );
-			rayQueryEXT rq;
-			rayQueryInitializeEXT( rq, tlas,
-								   gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
-								   uint( p.knobs.z ), origin, 0.0, L, hardEnd );
-			while( rayQueryProceedEXT( rq ) ) {}
-			if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
-				gl_RayQueryCommittedIntersectionTriangleEXT )
-			{
-				vis = 0.0;
-			}
-			else if( range > hardEnd )
-			{
-				rayQueryEXT rqFade;
-				rayQueryInitializeEXT( rqFade, tlas, gl_RayFlagsOpaqueEXT, uint( p.knobs.z ),
-									   origin, hardEnd, L, range );
-				while( rayQueryProceedEXT( rqFade ) ) {}
-				if( rayQueryGetIntersectionTypeEXT( rqFade, true ) ==
-					gl_RayQueryCommittedIntersectionTriangleEXT )
-				{
-					const float t = rayQueryGetIntersectionTEXT( rqFade, true );
-					vis = clamp( ( t - hardEnd ) / ( range - hardEnd ), 0.0, 1.0 );
-				}
-			}
+			vis = jahSunRay( origin, L, uint( p.knobs.z ), hardEnd, range );
 		}
 	}
 	imageStore( sunVis, tc, vec4( vis ) );

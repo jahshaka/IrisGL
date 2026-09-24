@@ -50,6 +50,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
                  mChainHandles);
     mChainRayReflect = chainDesc().rayReflect;
     mChainPrepass = chainDesc().prepass();
+    mChainHitDecode = chainDesc().hitDecode;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -174,6 +175,8 @@ ChainDesc OgreView::chainDesc() const {
         // to glass everywhere. Scenes without refractive materials never ask for
         // it, so no existing offscreen view changes shape.
         d.refractions = mPostFx.refractions;
+        // THE HIT DECODE (PHOTON-HIT-SHADE-1): the prepass' own rule, below.
+        d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
         return d;
     }
     d.hdr            = mPostFx.hdr;
@@ -277,6 +280,11 @@ ChainDesc OgreView::chainDesc() const {
         d.ssao = false;
         d.ssr  = 0;
     }
+    // THE HIT DECODE (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): wherever the
+    // chain carries the prepass and this scene's rays are live — the ray jobs'
+    // hits that no cache can shade are decoded — and NOT tied to which row
+    // traces, so toggling the gather where the prepass runs is no new graph.
+    d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
     return d;
 }
 
@@ -1350,6 +1358,7 @@ void OgreView::rebuildWorkspaceDef() {
         chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs, mChainHandles);
         mChainRayReflect = chainDesc().rayReflect;
         mChainPrepass = chainDesc().prepass();
+        mChainHitDecode = chainDesc().hitDecode;
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }
