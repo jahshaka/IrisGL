@@ -249,6 +249,56 @@ CloudLayer CloudLayer::fromJson(const QJsonObject &o)
     return clamped(c);
 }
 
+SunContact SunContact::clamped(SunContact c)
+{
+	// A NaN takes the default; the band is the renderer's (scene.h).
+	if (!std::isfinite(c.range)) c.range = SunContact().range;
+	c.range = qBound(kSunContactMinRange, c.range, kSunContactMaxRange);
+	const int r = int(c.resolution);
+	if (r < 0 || r > 2) c.resolution = SunContactResolution::Auto;
+	return c;
+}
+
+const char *SunContact::resolutionName(SunContactResolution r)
+{
+	switch (r) {
+	case SunContactResolution::Full: return "full";
+	case SunContactResolution::Half: return "half";
+	case SunContactResolution::Auto: break;
+	}
+	return "auto";
+}
+
+bool SunContact::resolutionFromName(const QString &name, SunContactResolution &out)
+{
+	const QString n = name.trimmed().toLower();
+	if (n == QLatin1String("auto")) { out = SunContactResolution::Auto; return true; }
+	if (n == QLatin1String("full")) { out = SunContactResolution::Full; return true; }
+	if (n == QLatin1String("half")) { out = SunContactResolution::Half; return true; }
+	return false;
+}
+
+QJsonObject SunContact::toJson() const
+{
+	QJsonObject o;
+	o.insert("enabled", enabled);
+	o.insert("range", double(range));
+	o.insert("resolution", QString::fromLatin1(resolutionName(resolution)));
+	return o;
+}
+
+SunContact SunContact::fromJson(const QJsonObject &o)
+{
+	// AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law).
+	const SunContact d;
+	SunContact c;
+	c.enabled = o.value("enabled").toBool(d.enabled);
+	c.range = float(o.value("range").toDouble(d.range));
+	SunContactResolution r = d.resolution;
+	if (resolutionFromName(o.value("resolution").toString(), r)) c.resolution = r;
+	return clamped(c);
+}
+
 SkyRealistic Scene::clampSkyRealistic(SkyRealistic r)
 {
     // The panel rows' own ranges, in the DOCUMENT: a value a dial cannot

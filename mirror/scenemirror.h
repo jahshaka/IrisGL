@@ -1902,6 +1902,10 @@ private:
     jahshaka::engine::RayTracingMode mLastRayTracing =
         jahshaka::engine::RayTracingMode::Auto;
     bool mRayTracingPushed = false;
+    /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the project's row as last
+    /// pushed, on CHANGE only, the ray row's rule.
+    jahshaka::engine::SunContactDesc mLastSunContact;
+    bool mSunContactPushed = false;
     /// Set by invalidateEnvironment: the next applyEnvironment re-asserts the
     /// process-wide GI binding for this scene instead of re-pushing (P10).
     bool mGiReassertPending = false;

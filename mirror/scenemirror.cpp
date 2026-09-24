@@ -7197,6 +7197,31 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mRayTracingPushed = true;
         }
     }
+    // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the project's row, pushed on
+    // change. Like the ray row it is only half the answer — the renderer ANDs it
+    // with the machine (Scene::sunContactStatus().on) — and it decides nothing
+    // here. The two ranges' bands are one band stated twice (the document does
+    // not include the engine), so they are held equal at compile time.
+    {
+        static_assert(iris::kSunContactMinRange == jahshaka::engine::kSunContactMinRange &&
+                          iris::kSunContactMaxRange == jahshaka::engine::kSunContactMaxRange,
+                      "the document's sun contact range band is the renderer's");
+        using jahshaka::engine::SunContactResolution;
+        jahshaka::engine::SunContactDesc sc;
+        sc.enabled = mSource->sunContact.enabled;
+        sc.range = mSource->sunContact.range;
+        switch (mSource->sunContact.resolution) {
+        case iris::SunContactResolution::Full: sc.resolution = SunContactResolution::Full; break;
+        case iris::SunContactResolution::Half: sc.resolution = SunContactResolution::Half; break;
+        case iris::SunContactResolution::Auto:
+        default: sc.resolution = SunContactResolution::Auto; break;
+        }
+        if (!mSunContactPushed || sc != mLastSunContact) {
+            mTarget->setSunContact(sc);
+            mLastSunContact = sc;
+            mSunContactPushed = true;
+        }
+    }
     // Global Illumination panel. setGlobalIllumination re-traces, so like fog it is
     // pushed on CHANGE only (the per-frame compare is the debounce) — and it also
     // re-traces when the driving light itself moved — Instant
