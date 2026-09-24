@@ -255,10 +255,17 @@ void OgreScene::setEnvironmentLight(const Colour &gain) {
     // Rec.709 luminance; the weights sum to exactly 1.0f in float, so a white
     // gain of 1 is exactly 1.0f and HlmsPbs sets no envmap_scale property.
     const float g = 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
-    if (c.r == mEnvLightGain.r && c.g == mEnvLightGain.g && c.b == mEnvLightGain.b) return;
+    // THE AMBIENT IS SH x THIS GAIN, AND THE ENGINE FORMS IT (PHOTON-SKY-TRANSIENT-1):
+    // a push re-asserts it even when the gain did not move (a host's first push,
+    // a page return), which is what replaces the host's own SH push.
+    if (c.r == mEnvLightGain.r && c.g == mEnvLightGain.g && c.b == mEnvLightGain.b) {
+        applySkyAmbient();
+        return;
+    }
     const bool wasLit = mEnvLightScale > 0.0f;
     mEnvLightGain = c;
     mEnvLightScale = g;
+    applySkyAmbient();
     // Every escape reads the environment at this gain, the bounce injection
     // included: what the voxels hold changes with it.
     noteEnvironmentChanged();

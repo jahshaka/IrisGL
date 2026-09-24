@@ -2929,7 +2929,8 @@ public:
     /// has not landed yet. The host scales them by its Sky Light.
     bool skyAmbientSh(float out[27]) const override;
     /// The LATEST integral (the capture's or the deferred read's). Valid only
-    /// while mSkyShValid; mSkyShFresh = it has not been swapped in yet.
+    /// while mSkyShValid; mSkyShFresh = it has not been swapped in yet (the two
+    /// are set together, and forgetSkySh clears both).
     bool  mSkyShValid = false;
     bool  mSkyShFresh = false;
     float mSkySh[27] = { 0.0f };
@@ -2948,6 +2949,8 @@ public:
     void destroyPendingReflection();
     /// No sky, no sky light: every SH this scene holds, the one in force too.
     void forgetSkySh();
+    /// The ambient the pixel reads: the SH in force x mEnvLightGain, or zeros.
+    void applySkyAmbient();
 
     /// THIS SCENE'S SHADOW REQUEST (ShadowDesc). The backend's filter and atlas
     /// are one per PROCESS, so all this does is apply the scene's resolved

@@ -1688,25 +1688,11 @@ private:
     /// Builds SkyDesc::clouds from the document (applySky, every frame; the
     /// engine drops an unchanged description).
     void applyCloudLayer();
-    // Last ambient pair actually pushed. Ogre picks its ambient shader variant
-    // from these (equal => fixed, different => hemisphere), so pushing an
-    // unchanged value every frame is not free.
-    bool mAmbientPushed = false;
-    /// The environment light's gain per channel, pushed on change beside the
-    /// coefficients (SMOKE-ENGINE-1 item 2; PHOTON-ENV-1). Separate from
-    /// mAmbientPushed because the two move independently: a sky change moves
-    /// the coefficients and not the gain, a Sky Light intensity change moves both.
+    /// The environment light's gain per channel (the Sky Light's intensity x
+    /// linear tint), pushed on change; the engine forms the ambient SH from it
+    /// (PHOTON-SKY-TRANSIENT-1). Dropped by invalidateEnvironment to re-assert.
     jahshaka::engine::Colour mLastEnvGain { 0.0f, 0.0f, 0.0f, 1.0f };
     bool mEnvScalePushed = false;
-    float mLastAmbientSh[27] = { 0.0f };
-    /// THE SKY'S OWN LIGHT (SKY_LIGHT_SPEC.md §2), READ FROM THE ENGINE
-    /// (SKY-GPU): the cosine-convolved integral of the sky the engine just
-    /// drew, in linear light, refreshed from Scene::skyAmbientSh each frame and
-    /// scaled here by the scene's Sky Light. The host has no sky image to
-    /// integrate any more — the analytic sky is a shader and an HDRI's integral
-    /// was the biggest CPU lighting computation left (CPU_GPU_LIGHTING_AUDIT
-    /// F2). No Sky Light => 27 zeros, whatever this holds.
-    float mSkyAmbientSh[27] = { 0.0f };
     // directional, point, spot, area, decal box
     jahshaka::engine::MeshId mWireMeshes[5] = { 0, 0, 0, 0, 0 };
     /// Decal image path + map kind -> pooled atlas slice id. Separate from

@@ -52,24 +52,18 @@ public:
     /// THE ENVIRONMENT'S GAIN AS A SPECULAR LIGHT — the other half of
     /// setAmbientSh, and the half that used to be missing.
     ///
-    /// setAmbientSh carries the environment's DIFFUSE contribution, already
-    /// scaled by whatever light the host decided the environment is: 27 zeros
-    /// mean "no environment light" and a matte surface goes black. Its
-    /// SPECULAR contribution does not travel in those coefficients — it is
-    /// sampled from the prefiltered environment cube — so a host that scaled
-    /// the coefficients and stopped there left a mirror reflecting a sky that
-    /// was lighting nothing (measured: a metal sphere reflected the sky
-    /// byte-identically with every light in the scene hidden, Sky Light
-    /// included).
-    ///
-    /// This is that scale, and the two are meant to be pushed together: the
-    /// gain of the environment light in the same units, so 1.0 is "the cube's
-    /// own radiance" and 0.0 is "there is no environment light", which makes
-    /// the sky a BACKDROP — still drawn, still visible behind the scene,
-    /// reflecting nothing into it.
+    /// THE ENVIRONMENT LIGHT'S GAIN, and with a sky bound THE ENGINE FORMS THE
+    /// AMBIENT FROM IT (PHOTON-SKY-TRANSIENT-1): the scene's SH becomes
+    /// skyAmbientSh x this gain per channel — in the frame the sky's cube lands,
+    /// and again on every push of this call — so a host modelling a Sky Light
+    /// pushes the gain and never the product. Its SPECULAR contribution is the
+    /// prefiltered environment cube sampled at the same gain. 1.0 is "the
+    /// cube's own radiance" and 0.0 is "there is no environment light": zero
+    /// ambient, and the sky a BACKDROP — still drawn, reflecting nothing.
+    /// With no sky captured the ambient this forms is 27 zeros.
     ///
     /// PER CHANNEL (the Sky Light's intensity times its linear tint — the same
-    /// gain the host multiplied the SH coefficients by): THE ONE ENVIRONMENT
+    /// gain the ambient SH is multiplied by): THE ONE ENVIRONMENT
     /// (PHOTON-ENV-1) is one source for every escape — the voxel cones', the
     /// rays' miss, the bounce injection's and the probe-array pass's no-probe
     /// fallback all read the cube times this gain, so a tinted sky lights
@@ -130,11 +124,8 @@ public:
     /// TOGETHER. A sky change keeps the previous set bound until the next
     /// capture, its convolution and its SH have all landed, then swaps the cube
     /// and these coefficients in one step — never a cube nothing has written,
-    /// never a cube of one sky with the SH of another. And when the ambient in
-    /// force is exactly this answer times the gain pushed through
-    /// setEnvironmentLight (what a host modelling a Sky Light pushes), the
-    /// backend applies the new product itself in the landing frame; the host's
-    /// own push of the same numbers is then a no-op. When that lands:
+    /// never a cube of one sky with the SH of another; the scene's ambient is
+    /// set to this answer x the setEnvironmentLight gain in the same step. When that lands:
     ///
     ///   * A LONE sky change lands INSIDE the frame that captured it (the
     ///     capture, the convolution and a synchronous SH read all run before
@@ -150,9 +141,9 @@ public:
     /// run-wide diagnostic latch this engine's measurable rules carry, and the
     /// way the two arms are A/B'd on one binary.
     ///
-    /// UNSCALED: this is the sky's mean incident radiance. A host that models a
-    /// sky LIGHT multiplies by its intensity and tint and pushes the result
-    /// through setAmbientSh — the backend never applies a light of its own.
+    /// UNSCALED: this is the sky's mean incident radiance (the ambient the
+    /// engine applies is this x the setEnvironmentLight gain). Read-only for a
+    /// host: a status readout, never a value to push back.
     virtual bool        skyAmbientSh(float out[27]) const = 0;
     /// The description currently in force (default-constructed = no sky).
     virtual SkyDesc     sky() const = 0;

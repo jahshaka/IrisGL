@@ -435,6 +435,9 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         if (mSceneMgr->getSky())
             mSceneMgr->setSky(false, mSceneMgr->getSkyMethod(), static_cast<Ogre::TextureGpu *>(nullptr));
         if (mSkyOwnedTex) {
+            // A convolution still pending from that texture (a cubemap sky is its
+            // own IBL source) must not read it after it dies — applySkyMode's guard.
+            if (mIblSourceTex == mSkyOwnedTex && !mIblSourceOwned) destroyPendingReflection();
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
             mSkyOwnedTex = nullptr;
         }
@@ -721,9 +724,26 @@ bool OgreScene::skyAmbientSh(float out[27]) const {
 }
 
 void OgreScene::forgetSkySh() {
+    const bool wasLighting = mSkyShInForceValid;
     mSkyShValid = false;
     mSkyShFresh = false;
     mSkyShInForceValid = false;
+    // No sky, no sky light: the ambient it was lighting goes to zero with it.
+    if (wasLighting) applySkyAmbient();
+}
+
+// THE SKY'S AMBIENT IS FORMED HERE (PHOTON-SKY-TRANSIENT-1): the SH in force
+// times the Sky Light gain the host pushed through setEnvironmentLight, or zeros
+// with no sky (no Sky Light = gain 0 = zeros: gi.sky_light). The host pushes the
+// gain only; it used to form this product itself, one sync after the engine had
+// integrated the SH, which put the cube of one sky beside the SH of another on
+// every change frame. Not during teardown (setAmbientSh re-notes the GI arm).
+void OgreScene::applySkyAmbient() {
+    if (mDestroying) return;
+    const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
+    float sh[27];
+    for (int i = 0; i < 27; ++i) sh[i] = mSkyShInForceValid ? mSkyShInForce[i] * gain[i % 3] : 0.0f;
+    setAmbientSh(sh);
 }
 
 // THE ENVIRONMENT LANDS AS ONE SET (PHOTON-SKY-TRANSIENT-1, measured). A sky
@@ -742,16 +762,6 @@ void OgreScene::forgetSkySh() {
 // synchronous), so the change frame already draws the whole new set. A drag's
 // SH read is deferred a frame (integrateSkyShFromCube), and its set lands at the
 // next frame's top when that read does — the previous set drawn meanwhile.
-//
-// THE SH HALF IS THE HOST'S PUSH, APPLIED EARLY. The host derives the pixel's
-// SH as skyAmbientSh x the Sky Light gain it pushed through setEnvironmentLight
-// (SceneMirror), one host sync after the engine publishes it — i.e. after the
-// cube. So when the SH in force IS that product of the set being replaced (the
-// same float arithmetic, bit for bit), the engine applies the next set's product
-// itself; the host's own push of the same numbers next sync is then a no-op
-// (setAmbientSh compares the coefficients). A host that pushes an SH of its own
-// (a preview's studio ambient, a flat setAmbient) fails the comparison and is
-// left alone. A zero gain applies nothing: the SH is zero either way.
 void OgreScene::landEnvironmentIfComplete() {
     if (mSkyCapturePending || mSkyShTicket || mIblPending) return;   // a part is owed
     if (mReflPendingTex) {
@@ -780,21 +790,11 @@ void OgreScene::landEnvironmentIfComplete() {
         pbs->_notifyIblSpecMipmap(next->getNumMipmaps());
         applyReflectionToAll();
     }
-    if (mSkyShFresh && mSkyShValid) {
+    if (mSkyShFresh) {
         mSkyShFresh = false;
-        const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
-        bool hostDerived = mAmbientShKnown && (gain[0] > 0.0f || gain[1] > 0.0f || gain[2] > 0.0f);
-        for (int i = 0; hostDerived && i < 27; ++i) {
-            const float was = mSkyShInForceValid ? mSkyShInForce[i] * gain[i % 3] : 0.0f;
-            if (!(mLastAmbientSh[i] == was)) hostDerived = false;
-        }
         std::memcpy(mSkyShInForce, mSkySh, sizeof mSkyShInForce);
         mSkyShInForceValid = true;
-        if (hostDerived) {
-            float sh[27];
-            for (int i = 0; i < 27; ++i) sh[i] = mSkyShInForce[i] * gain[i % 3];
-            setAmbientSh(sh);
-        }
+        applySkyAmbient();
     }
 }
 
@@ -891,8 +891,8 @@ Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint
 // that means the sky quad has no world AABB yet, culls out, and the capture
 // comes back BLACK (measured: the first colour sky of a run integrated to 0,0,0
 // and every later one was exact). So the capture runs right after
-// updateSceneGraph/applyShadowCacheDirties, still inside the frame; the
-// convolution it queues is picked up by applyPendingIbl at the top of the next.
+// updateSceneGraph/applyShadowCacheDirties, still inside the frame; its
+// convolution runs right behind it, before the frame draws (applyPendingIbl).
 void OgreScene::applyPendingSkyCapture() {
     // THE CLOUD FIELD FIRST (CLOUDS-2D-1): it is a render pass too, and a
     // change that re-bakes it also re-captures — the capture must photograph
@@ -1044,8 +1044,8 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
 // No `flushCommands()` — the frame's own commit submits it, and the pin flushes
 // the copy encoder itself if the cube is destroyed with a download pending
 // (VulkanQueue::notifyTextureDestroyed), which is what makes the capture's
-// ordinary lifetime (freed by applyPendingIbl next frame, or straight away for
-// a cubemap sky) safe to leave exactly as it was.
+// ordinary lifetime (freed by its convolution in the capture's own frame, or
+// straight away for a cubemap sky) safe to leave exactly as it was.
 void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
     destroySkyShTicket();       // never overwrite one: the ticket owns a staging buffer
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
@@ -1122,6 +1122,7 @@ void OgreScene::destroySkyShTicket() {
 // every capture, which is how the two are A/B'd on one binary).
 void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
     mSkyShValid = false;
+    mSkyShFresh = false;
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::AsyncTextureTicket *ticket = nullptr;
     JAH_TRY {
