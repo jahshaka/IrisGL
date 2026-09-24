@@ -1383,7 +1383,10 @@ void SurfaceCache::relightCards() {
         if (mLightJob->getProperty("vct_cone_dirs") != cones)
             mLightJob->setProperty("vct_cone_dirs", cones);
     }
-    const unsigned kinds = aniso ? 4u : 1u;
+    // Every light volume a reader binds per cascade: the total, the anisotropic
+    // axes, the per-axis coverage (PHOTON-VOXEL-3), the surface position
+    // (PHOTON-VOXEL-4) - VctLighting's list.
+    const unsigned kinds = numCascades ? unsigned(vct->getNumVoxelTextures()) : 0u;
     const unsigned vctUnits = numCascades ? kinds * numCascades + (envCube ? 1u : 0u) : 0u;
     // THE CLOUD FIELD, the LAST texture unit (after the chain and the
     // environment), with the field's own wrapped sampler.

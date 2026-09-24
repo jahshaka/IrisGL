@@ -82,11 +82,12 @@ layout( set = 0, binding = 5 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 6 ) uniform sampler3D voxelY[kMaxCascades];
 layout( set = 0, binding = 7 ) uniform sampler3D voxelZ[kMaxCascades];
 layout( set = 0, binding = 8 ) uniform samplerCube skyCube;
-// PHOTON-VOXEL-4 (RQ-COV-SLOT-1): every cascade's per-axis coverage, by name.
-layout( set = 0, binding = 9 ) uniform sampler3D voxelCovP[kMaxCascades];
-layout( set = 0, binding = 10 ) uniform sampler3D voxelCovN[kMaxCascades];
-layout( set = 0, binding = 11 ) uniform sampler3D voxelPosP[kMaxCascades];
-layout( set = 0, binding = 12 ) uniform sampler3D voxelPosN[kMaxCascades];
+// PHOTON-VOXEL-4 (RQ-COV-SLOT-1): every cascade's coverage and surface position per half,
+// by name - after GA-1e's card read (9-12) and geometric normal (13, 14).
+layout( set = 0, binding = 15 ) uniform sampler3D voxelCovP[kMaxCascades];
+layout( set = 0, binding = 16 ) uniform sampler3D voxelCovN[kMaxCascades];
+layout( set = 0, binding = 17 ) uniform sampler3D voxelPosP[kMaxCascades];
+layout( set = 0, binding = 18 ) uniform sampler3D voxelPosN[kMaxCascades];
 
 #define JAH_VOX_COUNT       int( p.knobs.w )
 #define JAH_VOX_ANISO       ( p.knobs2.x > 0.5 )

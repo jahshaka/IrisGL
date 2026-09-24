@@ -2620,8 +2620,10 @@ void OgreScene::bindCloudInjection(Ogre::VctLighting *lighting) {
         const bool on = st.field && wrap && lighting && lighting->getVoxelizer();
         // CHANGE-GUARDED: setNumTexUnits invalidates the PSO hash whatever it is
         // told, and a scene without a layer must leave the job exactly as the
-        // fork's JSON built it (three textures, the property 0).
-        const Ogre::uint8 units = on ? 4u : 3u;
+        // fork's JSON built it (seven textures - albedo, normal, emissive, the
+        // coverage per half-axis (PHOTON-VOXEL-3/-4), the surface position per half -
+        // and the property 0).
+        const Ogre::uint8 units = on ? 8u : 7u;
         if (job->getNumTexUnits() != units) job->setNumTexUnits(units);
         if (job->getProperty("jah_cloud_shadow") != (on ? 1 : 0))
             job->setProperty("jah_cloud_shadow", on ? 1 : 0);
@@ -2629,7 +2631,7 @@ void OgreScene::bindCloudInjection(Ogre::VctLighting *lighting) {
         Ogre::DescriptorSetTexture2::TextureSlot slot(
             Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
         slot.texture = st.field;
-        job->setTexture(3u, slot, wrap);
+        job->setTexture(7u, slot, wrap);   // after the surface position at t5, t6
         Ogre::ShaderParams &params = job->getShaderParams("default");
         const Ogre::Vector3 origin = lighting->getVoxelizer()->getVoxelOrigin();
         if (Ogre::ShaderParams::Param *p = params.findParameter("jahCloudMap"))
