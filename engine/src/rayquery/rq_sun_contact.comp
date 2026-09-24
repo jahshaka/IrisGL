@@ -1,0 +1,179 @@
+#version 460
+// PHOTON R3 — HARD SUN CONTACT SHADOWS (RY-R3; lane PHOTON-RAYS-1;
+// SPECS/photon/C4_RAYS_BEYOND_REFLECTIONS_DESIGN.md section 1).
+//
+// ONE RAY PER PIXEL TOWARDS THE SUN, from the surface the prepass drew, out to
+// the contact range, against the scene's own TLAS — rq_rays.comp's shape (a
+// geometry-only question: is anything in the way?) asked once per texel of a
+// screen instead of once per record. The answer is `jahSunVis`: 1 where the
+// sun reaches the surface, 0 where something stops it. The PBS pass folds it
+// into the first directional light's shadow term as min( map, ray )
+// (media/Hlms/Jahshaka/JahSunContact_piece_ps.any), so the shadow map keeps
+// every shadow it has and the ray closes what its depth bias opens: the band
+// of light a PSSM bias leaves under the edge of anything standing on the
+// ground. Beyond the range the ray answers 1 and the map is alone.
+//
+// DETERMINISTIC PER PIXEL PER FRAME, and that is the whole temporal story: one
+// fixed ray per texel (the texel's own surface point, the one sun direction),
+// no sample sequence, no history — a still camera on a still scene writes the
+// same bytes every frame, and a moving one has nothing to smear.
+//
+// OPAQUE ONLY (audit C-16): alpha-tested casters are not in the TLAS (a cut-out
+// leaf would intersect as a solid quad without an any-hit shader), so their
+// contact is the shadow map's alone; the min() keeps it.
+//
+// COMPILED AT BUILD TIME by glslangValidator at --target-env spirv1.4, like
+// every ray job beside it (Ogre's own GLSL path never sets a target
+// environment, which SPV_KHR_ray_query requires).
+#extension GL_EXT_ray_query : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+
+layout( set = 0, binding = 1 ) uniform Params
+{
+	/// THE CAMERA'S IMAGE, exactly rq_reflect.comp's five numbers: camPos.w =
+	/// 1 perspective / 0 orthographic; worldDir(u,v) = rayTL + rayRight*u +
+	/// rayDown*v over the WHOLE target (a letterbox is already folded in on the
+	/// CPU — the ray tier's rule, OgreRayQuery.cpp `expandEyeToTarget`), scaled
+	/// so its component along `fwd` is 1. Orthographic: an image-plane OFFSET.
+	vec4 camPos;
+	vec4 rayTL;
+	vec4 rayRight;
+	vec4 rayDown;
+	vec4 fwd;
+	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
+	/// z = the far plane, w = THE FADE BAND: the fraction of the range over
+	/// which the answer hands over to the map (kSunContactFadeFraction).
+	vec4 projParams;
+	/// The view space's axes in world space: the G-buffer normal is written in
+	/// the pass camera's view space and this is the rotation back.
+	vec4 viewAxisX;
+	vec4 viewAxisY;
+	vec4 viewAxisZ;
+	/// xyz = the unit direction TOWARDS the sun (the first directional shadow
+	/// caster the pass shades with), w = the contact range in world units.
+	vec4 toSun;
+	/// xy = this job's texel grid, zw = the full target it covers.
+	vec4 resolution;
+	/// THE BIAS RULE (see main): x = the LIFT per unit of view distance
+	/// (perspective) or in world units (orthographic), y = its floor
+	/// in world units, z = the TLAS cull mask, w = the texel DIVISOR (1 = one
+	/// ray per pixel, 2 = one per 2x2 block; the grid is the target's size over
+	/// it, rounded UP, so every pixel's iFragCoord / divisor has a texel).
+	vec4 knobs;
+} p;
+
+layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
+layout( set = 0, binding = 3 ) uniform sampler2D sceneDepth;
+layout( r8, set = 0, binding = 4 ) uniform writeonly image2D sunVis;
+
+/// Metres along the camera's forward axis — rq_reflect.comp's line, the one
+/// JahSsrRayMarch_ps.glsl uses too.
+float viewDistance( float rawDepth )
+{
+	if( p.camPos.w < 0.5 )				// orthographic: depth is linear in distance
+		return abs( ( rawDepth - p.projParams.x ) / p.projParams.y );
+	return p.projParams.y / ( rawDepth - p.projParams.x );
+}
+
+/// The surface this pixel drew, in world space (rq_reflect.comp's worldAt).
+vec3 worldAt( vec2 uv, float dist )
+{
+	const vec3 plane = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
+	if( p.camPos.w < 0.5 )
+		return p.camPos.xyz + plane + p.fwd.xyz * dist;		// an offset, not a ray
+	return p.camPos.xyz + plane * dist;
+}
+
+void main()
+{
+	const ivec2 traceRes = ivec2( p.resolution.xy );
+	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
+	if( any( greaterThanEqual( tc, traceRes ) ) )
+		return;
+
+	// THE PIXEL THIS TEXEL'S RAY STARTS FROM: itself at one ray per pixel, the
+	// top-left pixel of its block at one per 2x2 — a real surface the prepass
+	// drew, never an average of four that may belong to two surfaces.
+	const ivec2 fullRes = ivec2( p.resolution.zw );
+	const int divisor = max( int( p.knobs.w ), 1 );
+	const ivec2 pix = min( tc * divisor, fullRes - 1 );
+	const vec2 uv = ( vec2( pix ) + 0.5 ) / vec2( fullRes );
+
+	// LIT UNLESS PROVEN OTHERWISE: every texel the ray cannot answer for writes
+	// 1, which under min( map, ray ) is exactly the shadow map's picture.
+	float vis = 1.0;
+	const float rawDepth = texelFetch( sceneDepth, pix, 0 ).x;
+	// Cleared depth at EITHER extreme is "nothing was drawn here" (the march's
+	// and the reflection's test).
+	vec3 normalVS = texelFetch( gBufNormals, pix, 0 ).xyz * 2.0 - 1.0;
+	if( rawDepth > 0.0 && rawDepth < 1.0 && dot( normalVS, normalVS ) > 1e-6 )
+	{
+		normalVS = normalize( normalVS );
+		const vec3 worldN = normalize( p.viewAxisX.xyz * normalVS.x +
+									   p.viewAxisY.xyz * normalVS.y +
+									   p.viewAxisZ.xyz * normalVS.z );
+		const vec3 L = p.toSun.xyz;
+		// A surface turned away from the sun is dark by its own cosine; a ray
+		// would only tell it so again (and a grazing one could start inside the
+		// surface it left).
+		if( dot( worldN, L ) > 0.0 )
+		{
+			const float dist = viewDistance( rawDepth );
+			const vec3 world = worldAt( uv, dist );
+			// THE BIAS RULE, for a ray that reads no voxel: the origin is lifted
+			// along the normal by TWO full-resolution pixel footprints at its own
+			// depth (knobs.x, OgreRayQuery.cpp kSunContactLiftFootprints) and
+			// tMin is zero. One footprint is the ray tier's own TOLERANCE
+			// (Types.h kRayFootprintTolerance: the near copy it traces may lie a
+			// footprint off the drawn surface, the level the ray rule chose
+			// being coarser than the drawn one) — a lift of exactly that has no
+			// margin, and a curved caster under a grazing sun starts rays under
+			// its own triangles; the second footprint is the margin (measured
+			// on the sphere lattice of gi.sun_contact). The reflection's rule
+			// (half a voxel cell, tMin = the bias) clears the VOXEL grid's
+			// quantisation, which a geometry-only question never reads, and at
+			// a contact it would miss every occluder closer than the bias. The
+			// lift moves the origin off the receiver, never along the floor, so
+			// the gap beside a caster still closes to the job's own texel.
+			const float footprint = p.camPos.w < 0.5 ? p.knobs.x : p.knobs.x * dist;
+			const float bias = max( footprint, p.knobs.y );
+			const vec3 origin = world + worldN * bias;
+			// THE FADE (the finisher of the range): the answer goes from the
+			// ray's to the map's over the last projParams.w of the range, so
+			// where a long low-sun shadow outruns the range the ray's exact edge
+			// hands over to the map's instead of stopping in a step (the SSR
+			// rim's shape). TWO queries keep the common case cheap: the hard part
+			// of the range asks for ANY hit (terminate on the first), and only a
+			// ray that crossed it clean asks the fade band for its NEAREST hit.
+			const float range = p.toSun.w;
+			const float hardEnd = range * ( 1.0 - clamp( p.projParams.w, 0.0, 1.0 ) );
+			rayQueryEXT rq;
+			rayQueryInitializeEXT( rq, tlas,
+								   gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+								   uint( p.knobs.z ), origin, 0.0, L, hardEnd );
+			while( rayQueryProceedEXT( rq ) ) {}
+			if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
+				gl_RayQueryCommittedIntersectionTriangleEXT )
+			{
+				vis = 0.0;
+			}
+			else if( range > hardEnd )
+			{
+				rayQueryEXT rqFade;
+				rayQueryInitializeEXT( rqFade, tlas, gl_RayFlagsOpaqueEXT, uint( p.knobs.z ),
+									   origin, hardEnd, L, range );
+				while( rayQueryProceedEXT( rqFade ) ) {}
+				if( rayQueryGetIntersectionTypeEXT( rqFade, true ) ==
+					gl_RayQueryCommittedIntersectionTriangleEXT )
+				{
+					const float t = rayQueryGetIntersectionTEXT( rqFade, true );
+					vis = clamp( ( t - hardEnd ) / ( range - hardEnd ), 0.0, 1.0 );
+				}
+			}
+		}
+	}
+	imageStore( sunVis, tc, vec4( vis ) );
+}

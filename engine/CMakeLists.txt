@@ -203,8 +203,19 @@ if(JAH_RAY_QUERY_OK)
                 ${JAH_RQ_HEADERS}
         COMMENT "Compiling the screen-probe integrate at SPIR-V 1.4"
         VERBATIM)
+    # HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1, RY-R3): one ray per pixel towards
+    # the sun from the prepass' surface, geometry only — rq_rays.comp's shape.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_sunContactSpv -o "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
+        COMMENT "Compiling the sun contact shadow job at SPIR-V 1.4"
+        VERBATIM)
     add_custom_target(JahshakaRayQuerySpv
                       DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"

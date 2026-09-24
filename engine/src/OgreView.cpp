@@ -50,6 +50,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
                  mChainHandles);
     mChainRayReflect = chainDesc().rayReflect;
     mChainProbeGather = chainDesc().probeGather;
+    mChainSunContact = chainDesc().sunContact;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -220,6 +221,11 @@ ChainDesc OgreView::chainDesc() const {
     // eye seam — the spec's phase 7), so without this term a VR eye would pay a
     // second geometry traversal every frame for a prepass nothing then reads.
     d.probeGather    = mScene && mScene->probeGatherWanted() && !mStereo;
+    // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the same shape and the same
+    // three terms as the gather's line above — the scene's resolved row, below
+    // the offscreen early-out, and never in a stereo view (the job declines a
+    // two-eye target: never in VR, by the design's own column).
+    d.sunContact     = mScene && mScene->sunContactWanted() && !mStereo;
     d.refractions    = mPostFx.refractions;
     // DISTORTION (POST_LOOKS_SPEC §5.3), below the offscreen early-out with the
     // rest: a distortion object is invisible in the passthrough shape anyway (it
@@ -1322,6 +1328,7 @@ void OgreView::rebuildWorkspaceDef() {
         chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs, mChainHandles);
         mChainRayReflect = chainDesc().rayReflect;
         mChainProbeGather = chainDesc().probeGather;
+        mChainSunContact = chainDesc().sunContact;
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }

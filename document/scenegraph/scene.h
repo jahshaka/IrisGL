@@ -307,6 +307,50 @@ struct CloudLayer
 	static CloudLayer fromJson(const QJsonObject &o);
 };
 
+/// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3; lane PHOTON-RAYS-1) — the
+/// PROJECT's row: one hardware ray per pixel towards the sun from the surface
+/// the camera sees, out to `range`, folded into the sun's shadow term as
+/// min( shadow map, ray ). It closes the band of light a shadow map's depth
+/// bias leaves where an object meets the ground; beyond the range the map
+/// answers alone. It needs ray hardware and the project's ray row (a machine
+/// without either renders the shadow map alone), and it is never drawn in VR.
+///
+/// OFF BY DEFAULT, and a scene at the default writes NO `sunContact` key
+/// (SceneWriter) — so no shipped sample, fixture or selftest pose changes.
+/// The range's band — the renderer's (Types.h kSunContactMinRange/MaxRange),
+/// restated because the document does not include the engine; SceneMirror,
+/// which includes both, asserts the two agree.
+constexpr float kSunContactMinRange = 0.05f;
+constexpr float kSunContactMaxRange = 50.0f;
+enum class SunContactResolution : int
+{
+	Auto = 0,   ///< the tier's: half at the Low and Medium GI quality, full at High
+	Full = 1,   ///< one ray per pixel
+	Half = 2,   ///< one ray per 2x2 block
+};
+struct SunContact
+{
+	bool enabled = false;
+	/// Metres a ray looks for an occluder before the shadow map answers
+	/// alone, held in [kSunContactMinRange, kSunContactMaxRange].
+	float range = 2.0f;
+	SunContactResolution resolution = SunContactResolution::Auto;
+
+	bool operator==(const SunContact &o) const {
+		return enabled == o.enabled && range == o.range && resolution == o.resolution;
+	}
+	bool operator!=(const SunContact &o) const { return !(*this == o); }
+
+	/// The one clamp the verb, the reader and the undo table share.
+	static SunContact clamped(SunContact c);
+	/// The file's form; an ABSENT key takes the constructor's value.
+	QJsonObject toJson() const;
+	static SunContact fromJson(const QJsonObject &o);
+	/// The stable spellings ("auto", "full", "half") — the file, the verb.
+	static const char *resolutionName(SunContactResolution r);
+	static bool resolutionFromName(const QString &name, SunContactResolution &out);
+};
+
 class Scene: public QEnableSharedFromThis<Scene>
 {
     QSharedPointer<Environment> environment;
@@ -373,6 +417,9 @@ public:
     /// THE CLOUD LAYER (CloudLayer above). Serialized as the scene's `clouds`
     /// block — and only when it differs from the default.
     CloudLayer clouds;
+    /// HARD SUN CONTACT SHADOWS (SunContact above). Serialized as the scene's
+    /// `sunContact` block — and only when it differs from the default.
+    SunContact sunContact;
     /// The layer's weather map, RESOLVED from `clouds.weatherMapGuid` by
     /// whoever set the guid (the reader, world.clouds). Runtime only, like
     /// `skyTexture`: the guid is the fact, this is its loaded pixels.

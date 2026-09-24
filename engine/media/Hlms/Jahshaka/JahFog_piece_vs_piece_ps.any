@@ -152,7 +152,7 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_env || jah_probe_gather || jah_cloud_shadow )
+@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact )
 @piece( custom_ps_uniformDeclaration )
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
@@ -177,6 +177,13 @@
 		@property( syntax == glslvk )
 			layout( ogre_s@value(jahCloudField) ) uniform sampler jahCloudSampler;
 		@end
+	@end
+	// THE SUN CONTACT VISIBILITY (PHOTON-RAYS-1): R8, 1 = the sun reaches the
+	// surface this texel's ray started from. Declared wherever the pass claimed
+	// its slot (the view's PrePassUse pass alone); read by
+	// JahSunContact_piece_ps.any with a texel fetch, so no sampler is declared.
+	@property( jah_sun_contact )
+		vulkan_layout( ogre_t@value(jahSunVis) ) uniform texture2D jahSunVis;
 	@end
 @end
 @end
@@ -225,10 +232,11 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	return midf_c( jahCloudTransmittance( jahWp, passBuf.jahCloudMap, passBuf.jahCloudSun ) );
 }
 @end
+@piece( JahCloudSunFactor )* jahCloudSunTransmittance( inPs.pos.xyz )@end
 @property( hlms_lights_directional )
 	@property( receive_shadows && hlms_num_shadow_map_lights )
 		@undefpiece( DarkenWithShadowFirstLight )
-		@piece( DarkenWithShadowFirstLight )* ( fShadow * jahCloudSunTransmittance( inPs.pos.xyz ) )@end
+		@piece( DarkenWithShadowFirstLight )* ( fShadow @insertpiece( JahCloudSunFactor ) )@end
 	@else
 		@piece( DarkenWithShadowFirstLight )* jahCloudSunTransmittance( inPs.pos.xyz )@end
 	@end

@@ -3224,6 +3224,74 @@ struct GatherStatus {
     std::string error;
 };
 
+// ---------------------------------------------------------------------------
+// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3; SPECS/photon/C4_RAYS_BEYOND_
+// REFLECTIONS_DESIGN.md section 1).
+//
+// ONE HARDWARE RAY PER PIXEL towards the sun, from the surface the prepass
+// drew, against the scene's own TLAS, out to a short CONTACT RANGE. The answer
+// (1 = the sun reaches this point, 0 = something is in the way) is folded into
+// the first directional light's shadow term as `min( fShadow, visibility )`:
+// the shadow map keeps every shadow it has, and the ray closes what the map's
+// depth bias opens — the band of light a PSSM bias leaves under the edge of
+// anything standing on the ground. Beyond the range the map answers alone.
+//
+// OFF BY DEFAULT (a project row, `world.sunContact`); never in VR (the stereo
+// chain declines it); never where the scene does not trace (the project's ray
+// row, the machine, --no-ray-query). With it off nothing is allocated, nothing
+// is dispatched, no shader property is set and no pixel moves.
+
+/// THE CONTACT RANGE's default, metres: the distance a ray looks for an
+/// occluder before it leaves the question to the shadow map. The design's
+/// 2 m — a PSSM bias leaks centimetres, so a range of a couple of metres covers
+/// every contact the map gets wrong and costs the traversal nothing it needs.
+constexpr float kSunContactDefaultRange = 2.0f;
+/// ...and the band a row may hold it in (a ray of zero length answers nothing;
+/// a ray of a kilometre is a second shadow map, not a contact term).
+constexpr float kSunContactMinRange = 0.05f;
+constexpr float kSunContactMaxRange = 50.0f;
+
+/// The job's resolution. `Auto` follows the tier: HALF at the Low and Medium GI
+/// quality rows (one ray per 2x2 block), FULL at High (Epic is a High row).
+enum class SunContactResolution { Auto, Full, Half };
+
+/// The project's row (pushed by the host from the document, like the ray row).
+struct SunContactDesc {
+    bool  enabled = false;
+    float range = kSunContactDefaultRange;
+    SunContactResolution resolution = SunContactResolution::Auto;
+    bool operator==(const SunContactDesc &o) const {
+        return enabled == o.enabled && range == o.range && resolution == o.resolution;
+    }
+    bool operator!=(const SunContactDesc &o) const { return !(*this == o); }
+};
+
+/// What the contact job did on the last drawn frame of this scene.
+struct SunContactStatus {
+    /// The row resolved ON: enabled, and this scene traces on this machine.
+    bool on = false;
+    /// ...and a view dispatched it on its last frame (false with `on` true: no
+    /// view of the scene carries the prepass, the view is stereo, or the pass'
+    /// shadow node holds no directional caster — `reason` says which).
+    bool running = false;
+    /// The texture the pixel read, in texels, and the target it covers.
+    unsigned width = 0u, height = 0u, targetW = 0u, targetH = 0u;
+    /// 1 = one ray per pixel, 2 = one per 2x2 block.
+    unsigned divisor = 0u;
+    unsigned long long rays = 0ull;
+    /// The range the rays were cast to, and the world-space direction they were
+    /// cast along (towards the sun: the first directional shadow caster's).
+    float range = 0.0f;
+    float toSun[3] = { 0.0f, 0.0f, 0.0f };
+    /// GPU milliseconds of the dispatch, read back several frames late through
+    /// the tier's timestamps (negative = not measured yet), and the CPU cost of
+    /// recording it.
+    float gpuMs = -1.0f;
+    float cpuMs = -1.0f;
+    /// Why it is not running when `on` is true; empty when nothing declined.
+    std::string reason;
+};
+
 // ---- SURFACE-CACHE phase 2: the capture cache's status and its knobs -------
 //
 // THE STATE THE CACHE PUBLISHES. SURFACE-CACHE-0's `SurfaceCardSpikeDesc` /

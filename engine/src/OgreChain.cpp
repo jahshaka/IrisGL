@@ -511,7 +511,7 @@ bool ChainDesc::anyEffect() const {
     // the description has to be on for that to be true.
     // ...and so is a RADIANCE READBACK (HDR-READBACK-1): the float scene
     // target it downloads exists only in the chain's shape.
-    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || refractions ||
+    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || sunContact || refractions ||
            distortion || hzb || !looks.empty() || hdrReadback;
 }
 
@@ -540,6 +540,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
            a.rayReflect == b.rayReflect && a.probeGather == b.probeGather &&
+           a.sunContact == b.sunContact &&
            a.refractions == b.refractions && a.hdrReadback == b.hdrReadback &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
@@ -978,7 +979,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // gather-only chain composites no reflection at all (the pin sets
     // `hlms_use_ssr` only where the pass carries an ssr texture, and this one
     // hands it none).
-    const bool prepass = ssr || desc.probeGather;
+    // ...and the SUN CONTACT job's (PHOTON-RAYS-1), for the gather's reason: its
+    // rays start from the prepass' depth and normals and its answer is folded
+    // into the prepass' own shadow term in the PrePassUse pass.
+    const bool prepass = ssr || desc.probeGather || desc.sunContact;
 
     // The scene target. RGBA16_FLOAT whenever HDR is on — that is the whole
     // point: light values above 1.0 survive to the tonemapper. Without HDR the
