@@ -98,7 +98,8 @@
 // sphere with SSR switched off showed a clean probe reflection. Both are
 // statements about whether nine neighbouring rays agree — see the block comment
 // above each. The two others live in the march (the arrival angle at the
-// surface a ray hit, and how marginal the thickness test's crossing was), and
+// surface a ray hit — the ray's TRUST — and how marginal the thickness test's
+// crossing was, an ENVELOPE term since SSR-EDGE-1), and
 // the whole point of all four is that where a screen-space trace cannot be
 // trusted the pixel must fall back to the probe or sky the surface already has,
 // which a confidence below 1 does for free through upstream's lerp.
@@ -269,8 +270,9 @@ void main()
 	//    the coherence count's is: a single lucky ray surrounded by misses
 	//    agrees with itself, and that degenerate case is the artefact.
 	//  * THE TRUST TEST IS A RAMP, NOT A STEP, and that is a defect this lane
-	//    shipped in its first round. `taps[i].w` is the product of two SMOOTH
-	//    fields (the arrival angle and the thickness margin); admitting a tap
+	//    shipped in its first round. `taps[i].w` is a SMOOTH field (the arrival
+	//    angle; the thickness margin rode it too until SSR-EDGE-1 moved it into
+	//    the envelope, where it scales instead of being counted); admitting a tap
 	//    at exactly 0.5 draws the ISO-LINE of that field into the picture — the
 	//    coverage jumps by one ninth wherever the field crosses the threshold,
 	//    which on the ssr.engine fixture came out as three horizontal contour
@@ -410,9 +412,10 @@ void main()
 	//
 	// THE RULE, and it is the ONLY rule this shader has below the cutoff: a
 	// VALID hit WINS OUTRIGHT and the probe fills only where there is none. The
-	// confidence decides VALID vs NONE — the arrival angle, the thickness
-	// margin, the sampling verdict and the quorum still reject back-faces,
-	// thin-object leaks, undersampled fans and lone rays — it never SCALES the
+	// confidence decides VALID vs NONE — the arrival angle, the sampling
+	// verdict and the quorum still reject back-faces, undersampled fans and lone
+	// rays (the thickness margin FADES a thin-object leak out through the
+	// envelope since SSR-EDGE-1, where it used to be counted) — it never SCALES the
 	// composite. What remains a fraction is the ENVELOPE (`ray.z`: distance,
 	// screen edge, away-from-the-camera), the roughness ramp and the mask's own
 	// COVERAGE, because none of those is a doubt about the hit: two are where

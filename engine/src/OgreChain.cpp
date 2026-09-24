@@ -2573,6 +2573,7 @@ float fixedExposureScale(float exposureScale, float exposure) {
 }
 
 const char *exposureHistoryTextureName() { return kOldLum; }
+const char *reflectionTextureName() { return kSsrReflection; }
 
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
                 std::vector<std::string> &nodeDefs, PipHandles &handles) {

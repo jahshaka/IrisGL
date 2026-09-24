@@ -1482,6 +1482,9 @@ float fixedExposureScale(float exposureScale, float exposure);
 /// (keep_content, unlike the per-frame `jahLum` it is copied from), which is
 /// what makes View::measuredExposureScale possible at all.
 const char *exposureHistoryTextureName();
+/// The texture HlmsPbs composites as the SSR/ray reflection (jahSsrReflection):
+/// rgb = the reflected radiance, a = the weight the composite lerps by.
+const char *reflectionTextureName();
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -6210,6 +6213,10 @@ public:
 
     bool readPixels(Image &out) override;
     bool readPixelsHdr(ImageF &out) override;
+    bool readReflectionHdr(ImageF &out) override;
+    /// Downloads one of this view's chain textures (a local of its scene node)
+    /// into float: the radiance readback and the reflection readback share it.
+    bool readChainTexture(const char *textureName, ImageF &out, const char *who);
 
     /// Applies whatever resize()/setSampleCount() recorded, at frame time.
     ///

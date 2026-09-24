@@ -47,17 +47,18 @@
 //    xy = the texture-space coordinate the ray hit
 //    z  = the ENVELOPE: how gracefully the technique has to stop here. The
 //         distance fade (1 at the origin falling to 0 at maxDistance), the
-//         SCREEN EDGE ramp and the "this reflection points back at the camera"
-//         ramp, multiplied. All three are smooth functions of screen position
-//         and none of them is a doubt about the hit: they are the places where
-//         a screen-space trace runs out of data and the probe has to take over
+//         SCREEN EDGE ramp, the "this reflection points back at the camera"
+//         ramp, and SSR-EDGE-1's two: the END OF THE RAY'S RANGE (the last
+//         steps before it would leave the screen, pass the eye or run out of
+//         distance) and the THICKNESS MARGIN (how much of the gap between the
+//         ray and the surface the march's own step cannot explain), multiplied.
+//         None of them is a doubt about the hit: they are the places where a
+//         screen-space trace runs out of data and the probe has to take over
 //         without a seam.
 //    w  = the TRUST: 0 for a miss, otherwise the ARRIVAL ANGLE at the surface
 //         the ray hit (a backface or a grazing arrival is a hit the depth
-//         buffer cannot vouch for) times the THICKNESS MARGIN (how much of the
-//         gap between the ray and the surface the march's own step cannot
-//         explain). Both are lane SSR-1's; see the block comment where each is
-//         computed.
+//         buffer cannot vouch for) — lane SSR-1's; see the block comment where
+//         it is computed.
 //
 // THE SPLIT IS LANE SSR-2's AND IT CARRIES A DECISION (the owner's dual image
 // on the Mirror Room's chrome sphere). The four fades used to be one product in
@@ -149,6 +150,32 @@ float jahViewDistance( float d )
 float jahSceneDepthAt( vec2 uv )
 {
 	return texture( vkSampler2D( depthTexture, samplerState ), uv ).x;
+}
+
+// THE RAY'S OWN RANGE (SSR-EDGE-1): how far along `rayDir` the march can follow
+// the ray before it stops being able to — past `maxDistance`, behind the eye,
+// or off the screen — solved EXACTLY on the ray's clip-space line rather than
+// found by stepping. `viewToTextureSpaceMatrix` returns texture space, so a
+// point is on screen while h.x, h.w - h.x, h.y and h.w - h.y are all >= 0 and
+// h.w > 0; each is LINEAR in t along the ray (h = h0 + h1 t), so each leaves
+// its half-space at one t, and the range is the nearest of them.
+float jahRayRange( vec3 origin, vec3 rayDir, float maxDistance )
+{
+	float range = maxDistance;
+	if( rayDir.z < 0.0 )
+		range = min( range, -origin.z / rayDir.z );			// the eye's plane
+	const vec4 h0 = viewToTextureSpaceMatrix * vec4( origin, 1.0 );
+	const vec4 h1 = viewToTextureSpaceMatrix * vec4( rayDir, 0.0 );
+	const vec4 f0 = vec4( h0.x, h0.w - h0.x, h0.y, h0.w - h0.y );
+	const vec4 f1 = vec4( h1.x, h1.w - h1.x, h1.y, h1.w - h1.y );
+	for( int k = 0; k < 4; ++k )
+	{
+		if( f1[k] < 0.0 )
+			range = min( range, -f0[k] / f1[k] );
+	}
+	if( h1.w < 0.0 )
+		range = min( range, -h0.w / h1.w );
+	return max( range, 0.0 );
 }
 
 void main()
@@ -256,6 +283,20 @@ void main()
 		jitter = float( bayer[ ip.y * 4 + ip.x ] ) * ( 1.0 / 16.0 );
 	}
 
+	// THE RAY'S RANGE, found once (SSR-EDGE-1; jahRayRange). The march used to
+	// learn it by stepping past it — a sample off the screen, behind the eye or
+	// beyond maxDistance ended the ray — so whether a crossing just before the
+	// end was FOUND depended on where the sample after it fell: a ray whose
+	// crossing sample landed one step late missed, its neighbour with the other
+	// checkerboard phase hit, and the end of every reflection was a speckled
+	// line of full-weight hits against misses (ssr.edge's spheres: the floor's
+	// reflection on the lower hemisphere, where the rays head toward the camera
+	// and one 0.26 m step crosses much of the screen). The LAST SAMPLE now sits
+	// on the end of the range, just inside it, so a crossing before the end is
+	// found whatever the phase, and hit-or-miss is the geometry's answer.
+	const float range	 = jahRayRange( origin, rayDir, maxDistance );
+	const float rangeEnd = max( range - 1.0e-3 * stepLen, 0.0 );
+
 	float hit		= 0.0;
 	float travelled = maxDistance;
 	vec2  hitUv		= vec2( 0.0 );
@@ -269,7 +310,11 @@ void main()
 		if( i > steps )
 			break;
 
-		const float t = stepLen * ( float( i ) + jitter );
+		const float tStep = stepLen * ( float( i ) + jitter );
+		const bool	last  = tStep >= rangeEnd;
+		const float t	  = last ? rangeEnd : tStep;
+		if( t <= prevT )
+			break;								// the range ended before this step began
 		const vec3	p = origin + rayDir * t;
 		if( p.z <= 0.0 )
 			break;								// the ray went behind the eye
@@ -415,6 +460,8 @@ void main()
 			}
 		}
 		prevT = t;
+		if( last )
+			break;								// the sample on the end of the range was the last
 	}
 
 	if( hit <= 0.0 )
@@ -474,11 +521,42 @@ void main()
 	const float faceFade  = smoothstep( 0.0, 0.2, arrival );
 	const float thickFade = 1.0 - smoothstep( 0.5, 1.0, hitDiff );
 
+	// ...AND THE RIM (SSR-EDGE-1). The resolve lets a TRUSTED hit win outright
+	// (SSR-2's mirror rule), so whatever decides "hit or no hit" draws a
+	// pixel-sharp line into the picture unless the hit's weight has already
+	// faded by the time the decision flips. Two things flip it at a boundary
+	// that is not an object's silhouette, and both were a one-step flip:
+	//
+	//  * THE END OF THE RAY'S RANGE. A ray that is about to leave the screen,
+	//    pass behind the eye or run out of `maxDistance` hits if its crossing
+	//    sample lands before the end and misses if its phase puts that sample
+	//    one step later — the checkerboard jitter makes neighbours disagree, and
+	//    the boundary is a speckled line of full-weight hits against misses
+	//    (measured on ssr.edge's spheres: the floor's reflection on the lower
+	//    hemisphere ended in 592 such pixels; the rays head toward the camera,
+	//    where one 0.26 m step crosses much of the screen, so the screen exit
+	//    and not `maxDistance` is the end almost everywhere). So the weight
+	//    fades over the LAST kEdgeSteps STEPS of the ray's own range
+	//    (jahRayRange: exact, not stepped) — a hit with less than a step of
+	//    range left is the one its neighbour might have missed, and it hands
+	//    over at nearly zero.
+	//  * THE THICKNESS MARGIN. `thickFade` was a TRUST term, and trust is a
+	//    verdict to the resolve (a quorum and a fan count, at 0.5): the margin's
+	//    smooth ramp became a step where it crossed the count's threshold. It is
+	//    an ENVELOPE term now — the same ramp, in the channel the resolve scales
+	//    by instead of counting — so a hit whose crossing only qualifies because
+	//    the thickness guess is generous fades out continuously and is still
+	//    counted as the hit it is (the fan and the quorum judge its AGREEMENT;
+	//    the arrival angle stays the one trust term).
+	const float kEdgeSteps = 2.0;
+	const float rangeLeft  = ( range - travelled ) / stepLen;
+	const float rangeFade  = smoothstep( 0.0, kEdgeSteps, rangeLeft );
+
 	// THE TWO GROUPS GO IN SEPARATE CHANNELS (lane SSR-2 — see OUTPUT at the
-	// top): z carries the three ENVELOPE ramps, w the two TRUST terms. Their
-	// product is unchanged and the resolve still forms it, so no frame that
-	// merely blends moves; the resolve needs them apart to tell "the data runs
-	// out here" from "this hit means nothing", which are the same number today
-	// and opposite decisions on a mirror.
-	fragColour = vec4( hitUv, distFade * edgeFade * camFade, faceFade * thickFade );
+	// top): z carries the ENVELOPE ramps (distance, screen edge, away from the
+	// camera, and SSR-EDGE-1's range end and thickness margin), w the TRUST
+	// (the arrival angle). The resolve forms their product, and needs them apart
+	// to tell "the data runs out here" from "this hit means nothing", which are
+	// opposite decisions on a mirror.
+	fragColour = vec4( hitUv, distFade * edgeFade * camFade * rangeFade * thickFade, faceFade );
 }

@@ -1729,6 +1729,14 @@ public:
     /// that measures the DISPLAY (a grade, a dither, a look, a hash) stays on
     /// readPixels.
     virtual bool readPixelsHdr(ImageF &out) = 0;
+    /// Reads this View's REFLECTION texture back in float — the one HlmsPbs
+    /// composites into the specular environment term (`envColourS = lerp(
+    /// envColourS, rgb, a )`): rgb = the screen-space / ray-traced reflected
+    /// radiance, a = the WEIGHT the composite gives it (0 = the probe/sky
+    /// answers the pixel). A measurement surface for the reflection lanes (the
+    /// SSR rim, the letterbox, the environment match) — offscreen views whose
+    /// chain has the SSR stage only; false otherwise, lastError says which.
+    virtual bool readReflectionHdr(ImageF &out) = 0;
 
     /// Compiles every shader this View's SCENE needs, now, without drawing it
     /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).

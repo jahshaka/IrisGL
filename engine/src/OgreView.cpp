@@ -1471,19 +1471,36 @@ bool OgreView::readPixelsHdr(ImageF &out) {
                  "built the workspace yet)";
         return false;
     }
+    return readChainTexture(mChainHandles.radianceTexture, out, "readPixelsHdr");
+}
+
+bool OgreView::readReflectionHdr(ImageF &out) {
+    if (!mTexture) { mError = "readReflectionHdr: View '" + mName + "' is on-screen"; return false; }
+    if (!mWorkspace) { mError = "readReflectionHdr: View '" + mName + "' has no workspace"; return false; }
+    return readChainTexture(chain::reflectionTextureName(), out, "readReflectionHdr");
+}
+
+bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char *who) {
     JAH_TRY {
-        // The scene result is a LOCAL texture of the chain's scene node: the
-        // node that defines it answers, every other node throws, so ask the one
-        // the view built (the exposure history is found the same way).
+        // A LOCAL texture of the chain's scene node: the node that defines it
+        // answers, every other node throws, so ask the one the view built (the
+        // exposure history is found the same way).
         Ogre::TextureGpu *src = nullptr;
-        const Ogre::IdString name(mChainHandles.radianceTexture);
+        const Ogre::IdString name(textureName);
         const Ogre::IdString sceneNode(chain::sceneNodeDefName(mWorkspaceDef));
         for (Ogre::CompositorNode *n : mWorkspace->getNodeSequence()) {
-            if (n && n->getName() == sceneNode) { src = n->getDefinedTexture(name); break; }
+            if (n && n->getName() == sceneNode) {
+                // getDefinedTexture THROWS on a name the node does not declare
+                // (a chain with no SSR stage has no reflection texture), so ask
+                // the definition's name map first.
+                const auto &names = n->getDefinition()->getNameToChannelMap();
+                if (names.find(name) != names.end()) src = n->getDefinedTexture(name);
+                break;
+            }
         }
         if (!src) {
-            mError = std::string("readPixelsHdr: the chain defines no '") +
-                     mChainHandles.radianceTexture + "'";
+            mError = std::string(who) + ": the chain of View '" + mName + "' defines no '" +
+                     textureName + "'";
             return false;
         }
         const Ogre::PixelFormatGpu fmt = src->getPixelFormat();
@@ -1506,8 +1523,8 @@ bool OgreView::readPixelsHdr(ImageF &out) {
         held.mapped = true;
         out.width = w; out.height = h;
         out.rgba.resize(static_cast<size_t>(w) * h * 4u);
-        // getColourAt decodes whatever the format is (RGBA16F here; an `hdr`
-        // chain's own scene target is the same format) into float, exactly.
+        // getColourAt decodes whatever the format is (RGBA16F for both readers)
+        // into float, exactly.
         for (Ogre::uint32 y = 0; y < h; ++y) {
             for (Ogre::uint32 x = 0; x < w; ++x) {
                 const Ogre::ColourValue c = box.getColourAt(x, y, 0, fmt);
