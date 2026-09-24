@@ -91,6 +91,16 @@ vulkan_layout( ogre_t4 ) uniform texture2D cardShadowRough;
 		vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeZ[@value( hlms_num_vct_cascades )];
 		@add( vctTexUnit, hlms_num_vct_cascades )
 	@end
+	// PHOTON-VOXEL-3: the per-axis coverage, the light-volume list's last kind.
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeCovP[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeCovN[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
+	// PHOTON-VOXEL-4: the per-axis surface position, the light-volume list's last kind.
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosP[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosN[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(vctTexUnit) ) uniform textureCube envCube;
 		@add( vctTexUnit, 1 )
@@ -169,6 +179,10 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
 	#define JAH_VOX_COUNT int( gp.counts.x )
 	#define JAH_VOX_SAMPLE_ISO( c, u, l ) textureLod( sampler3D( vctProbes[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_COVP( c, u, l ) textureLod( sampler3D( vctProbeCovP[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_COVN( c, u, l ) textureLod( sampler3D( vctProbeCovN[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_POSP( c, u, l ) textureLod( sampler3D( vctProbePosP[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_POSN( c, u, l ) textureLod( sampler3D( vctProbePosN[c], vSmp ), u, l )
 	@property( vct_anisotropic )
 		#define JAH_VOX_HAS_ANISO 1
 		#define JAH_VOX_ANISO true
@@ -230,7 +244,7 @@ layout( local_size_x = @value( threads_per_group_x ),
 		posLS = jahConeStart( posLS, biasDirLS );
 		vec3 light;
 		vec3 envD;
-		jahDiffuseCones( posLS, biasDirLS, dirLS, jahConeBasisWorld( N ), light, envD );
+		jahDiffuseCones( posLS, jahConeOrigin( posLS, biasDirLS ), jahConeBasisWorld( N ), light, envD );
 		return light * gp.counts.y + envD;
 	}
 @end

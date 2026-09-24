@@ -5,8 +5,9 @@
 // the pixel stage runs exactly the text the pixel shader's cones, the bounce job
 // and the irradiance field run (irisgl/engine/CMakeLists.txt).
 //
-// The volumes: sixteen units, every cascade's isotropic volume, then every
-// cascade's X, Y, Z (the generation job's order), up to four cascades; one
+// The volumes: twenty-four units, every cascade's isotropic volume, then every
+// cascade's X, Y, Z, then every cascade's per-axis coverage, then every cascade's
+// surface position (the generation job's order), up to four cascades; one
 // sampler, the chain's own trilinear samplerblock. Sixteen textures is past
 // Ogre's standard prefab root layout (four): the program declaration asks for
 // the "max" prefab (JahVoxelReaderParity.material).
@@ -28,6 +29,24 @@ vulkan_layout( ogre_t12 ) uniform texture3D vZ0;
 vulkan_layout( ogre_t13 ) uniform texture3D vZ1;
 vulkan_layout( ogre_t14 ) uniform texture3D vZ2;
 vulkan_layout( ogre_t15 ) uniform texture3D vZ3;
+// PHOTON-VOXEL-3/-4: every cascade's per-half-axis coverage (+a, -a) and surface position
+// (+a, -a), the light-volume list's last kinds.
+vulkan_layout( ogre_t16 ) uniform texture3D vCovP0;
+vulkan_layout( ogre_t17 ) uniform texture3D vCovP1;
+vulkan_layout( ogre_t18 ) uniform texture3D vCovP2;
+vulkan_layout( ogre_t19 ) uniform texture3D vCovP3;
+vulkan_layout( ogre_t20 ) uniform texture3D vCovN0;
+vulkan_layout( ogre_t21 ) uniform texture3D vCovN1;
+vulkan_layout( ogre_t22 ) uniform texture3D vCovN2;
+vulkan_layout( ogre_t23 ) uniform texture3D vCovN3;
+vulkan_layout( ogre_t24 ) uniform texture3D vPosP0;
+vulkan_layout( ogre_t25 ) uniform texture3D vPosP1;
+vulkan_layout( ogre_t26 ) uniform texture3D vPosP2;
+vulkan_layout( ogre_t27 ) uniform texture3D vPosP3;
+vulkan_layout( ogre_t28 ) uniform texture3D vPosN0;
+vulkan_layout( ogre_t29 ) uniform texture3D vPosN1;
+vulkan_layout( ogre_t30 ) uniform texture3D vPosN2;
+vulkan_layout( ogre_t31 ) uniform texture3D vPosN3;
 
 vulkan( layout( ogre_s0 ) uniform sampler vSmp );
 
@@ -57,6 +76,10 @@ out vec4 fragColour;
 #define JAH_VOX_SAMPLE_X( c, u, l ) JAH_PARITY_PICK( vX, c, u, l )
 #define JAH_VOX_SAMPLE_Y( c, u, l ) JAH_PARITY_PICK( vY, c, u, l )
 #define JAH_VOX_SAMPLE_Z( c, u, l ) JAH_PARITY_PICK( vZ, c, u, l )
+#define JAH_VOX_SAMPLE_COVP( c, u, l ) JAH_PARITY_PICK( vCovP, c, u, l )
+#define JAH_VOX_SAMPLE_COVN( c, u, l ) JAH_PARITY_PICK( vCovN, c, u, l )
+#define JAH_VOX_SAMPLE_POSP( c, u, l ) JAH_PARITY_PICK( vPosP, c, u, l )
+#define JAH_VOX_SAMPLE_POSN( c, u, l ) JAH_PARITY_PICK( vPosN, c, u, l )
 #define JAH_VOX_INVRES( c ) chainInvRes[c].xyz
 #define JAH_VOX_MAXLOD( c ) chainInvRes[c].w
 #define JAH_VOX_FROM_PREV_SCALE( c ) chainFromPrev[( (c) - 1 ) * 2]

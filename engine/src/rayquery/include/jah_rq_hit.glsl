@@ -29,7 +29,7 @@
 //                                 flat radiance (the SH's constant band) — the
 //                                 host hands whichever of the two applies
 //
-// ...and the sampler arrays `voxelIso/voxelX/voxelY/voxelZ` and the combined
+// ...and the sampler arrays `voxelIso/voxelX/voxelY/voxelZ/voxelCov` and the combined
 // cube sampler `skyCube`, under those names, with kMaxCascades entries.
 //
 // THE ARITHMETIC IS rq_reflect.comp's, UNCHANGED, and the long rationale for
@@ -63,6 +63,18 @@
 #define JAH_VOX_SAMPLE_X( c, u, l ) textureLod( voxelX[c], u, l )
 #define JAH_VOX_SAMPLE_Y( c, u, l ) textureLod( voxelY[c], u, l )
 #define JAH_VOX_SAMPLE_Z( c, u, l ) textureLod( voxelZ[c], u, l )
+// THE PER-HALF-AXIS COVERAGE (PHOTON-VOXEL-3/-4: the faces looking +a, then -a), bound
+// BY NAME into `voxelCovP` / `voxelCovN` (RQ-COV-SLOT-1: it used to ride `voxelX` by the
+// light-volume list's order), and THE SURFACE POSITION per half (`voxelPosP` / `voxelPosN`):
+// the origin plane's test reads it (the hit's point reads pass no origin plane).
+#define JAH_VOX_SAMPLE_COVP( c, u, l ) textureLod( voxelCovP[c], u, l )
+#define JAH_VOX_SAMPLE_COVN( c, u, l ) textureLod( voxelCovN[c], u, l )
+#define JAH_VOX_SAMPLE_POSP( c, u, l ) textureLod( voxelPosP[c], u, l )
+#define JAH_VOX_SAMPLE_POSN( c, u, l ) textureLod( voxelPosN[c], u, l )
+#endif
+#ifndef JAH_VOX_INVRES
+// 1 / the resolution per axis = the cell over the box's size.
+#define JAH_VOX_INVRES( c ) ( JAH_VOX_INVSIZE( c ).xyz * JAH_VOX_INVSIZE( c ).w )
 #endif
 #include "jah_voxel_sample.glsl"
 
@@ -118,9 +130,9 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		const vec3 ls = ( pos - origin.xyz ) * invSize.xyz;
 		if( any( lessThan( ls, vec3( 0.0 ) ) ) || any( greaterThan( ls, vec3( 1.0 ) ) ) )
 			continue;					// not this cascade's business; try the next one out
-		// The mip for this cascade's own texel size. `invSize.w` is the cell in
-		// world units; a directional texel is two of them.
-		const float texel = 2.0 * max( invSize.w, 1e-6 );
+		// The footprint's lod in this cascade's cells (`invSize.w` is the cell in world
+		// units); the read maps it to its own level (jahVoxelKernelMip).
+		const float texel = max( invSize.w, 1e-6 );
 		float lod = 0.0;
 		if( !mirror )
 			lod = jahVoxelFootprintLod( footprint, texel );
