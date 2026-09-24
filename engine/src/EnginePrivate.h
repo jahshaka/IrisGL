@@ -2791,7 +2791,12 @@ public:
     const std::string &name() const override;
 
     void setAmbient(const Colour &upper, const Colour &lower) override;
+    /// A HOST'S OWN AMBIENT: it takes the ambient back from the engine (a later
+    /// setEnvironmentLight hands it over again — see mSkyAmbientOwned).
     void setAmbientSh(const float sh[27]) override;
+    /// The one writer behind both: the pass-level SH and every GI consumer,
+    /// staling the probe grid with `why`.
+    void applyAmbientSh(const float sh[27], GiStaleReason why);
     void setEnvironmentLight(const Colour &gain) override;
 
     void setFog(const FogDesc &desc) override;
@@ -2887,8 +2892,8 @@ public:
     /// the full image.
     void requestSkyCapture();
     /// Runs the capture (workspace update), reads the 32^2 mip back for the SH,
-    /// and hands the cube to buildReflectionCubemapFrom. Called from
-    /// applyPendingIbl, i.e. inside a frame, where a command buffer exists.
+    /// hands the cube to buildReflectionCubemapFrom and convolves it at once.
+    /// Called inside the frame, after updateSceneGraph and before any draw.
     void applyPendingSkyCapture();
     /// The ambient half of the capture: the cube's 32^2 mip, read back and
     /// integrated into 9 SH bands (the host scales them by its Sky Light).
@@ -2949,11 +2954,39 @@ public:
     /// one after that", not a timer.
     static const unsigned kSkyCaptureDragFrames = 2u;
     bool mSkyCapturePending = false;
-    /// The sky's ambient, 9 SH bands x 3 channels, integrated from the captured
-    /// cube. Valid only while mSkyShValid; the host scales it by its Sky Light.
+    /// The sky's ambient, 9 SH bands x 3 channels: the coefficients of the
+    /// environment IN FORCE (mSkyShInForce), never a newer integral whose cube
+    /// has not landed yet. The host scales them by its Sky Light.
     bool skyAmbientSh(float out[27]) const override;
+    /// The LATEST integral (the capture's or the deferred read's). Valid only
+    /// while mSkyShValid; mSkyShFresh = it has not been swapped in yet (the two
+    /// are set together, and forgetSkySh clears both).
     bool  mSkyShValid = false;
+    bool  mSkyShFresh = false;
     float mSkySh[27] = { 0.0f };
+    /// THE ENVIRONMENT IS ONE SET (PHOTON-SKY-TRANSIENT-1): the reflection cube,
+    /// these coefficients and the Sky Light's gain reach the pixel together. A
+    /// sky change builds the next cube into mReflPendingTex and integrates the
+    /// next SH into mSkySh while the previous set stays bound; when the capture,
+    /// the convolution and the SH have ALL landed, landEnvironmentIfComplete
+    /// swaps the cube and the coefficients in one step. Never a partial set,
+    /// never a cube nothing has written bound to a datablock.
+    bool  mSkyShInForceValid = false;
+    float mSkyShInForce[27] = { 0.0f };
+    Ogre::TextureGpu *mReflPendingTex = nullptr;
+    void landEnvironmentIfComplete();
+    /// Drops the next set's cube (and its owned convolution source) unlanded.
+    void destroyPendingReflection();
+    /// No sky, no sky light: every SH this scene holds, the one in force too.
+    void forgetSkySh();
+    /// The ambient the pixel reads: the SH in force x mEnvLightGain, or zeros —
+    /// only while the engine owns the ambient (mSkyAmbientOwned).
+    void applySkyAmbient(GiStaleReason why);
+    /// WHO WRITES THE AMBIENT. setEnvironmentLight hands it to the engine (a
+    /// host modelling a Sky Light: SceneMirror, the previews); setAmbient /
+    /// setAmbientSh take it back (a host lighting its scene with a colour of its
+    /// own, which a sky capture must not overwrite).
+    bool mSkyAmbientOwned = false;
 
     /// THIS SCENE'S SHADOW REQUEST (ShadowDesc). The backend's filter and atlas
     /// are one per PROCESS, so all this does is apply the scene's resolved
@@ -2966,13 +2999,15 @@ public:
     /// The engine that made this scene — the owner of the global shadow state
     /// above. Never null for a scene created through Engine::createScene().
     OgreEngine *mEngine = nullptr;
-    /// Builds (replacing any previous) the GGX-prefiltered reflection cubemap by
-    /// convolving `srcCube`, and binds it on every PBR datablock. `ownsSource`
+    /// Builds the NEXT GGX-prefiltered reflection cubemap (mReflPendingTex) by
+    /// convolving `srcCube`; the cube in force stays bound until the whole next
+    /// environment set has landed (landEnvironmentIfComplete). `ownsSource`
     /// means the source is ours to destroy once the convolution has run (the
     /// cubemap-sky path passes false: there the source IS the sky texture).
-    /// The prefilter runs on the next renderOneFrame (applyPendingIbl).
+    /// The prefilter runs in applyPendingIbl: inside the capture's own frame for
+    /// a captured sky, at the top of the next frame for a host-pushed cube.
     void buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource);
-    /// Unbinds and destroys the reflection cubemap (no-op when there is none).
+    /// Unbinds and destroys the reflection cubemap and any pending next one.
     void destroyReflection();
     /// Binds (or clears, when mReflectionTex is null) the scene's sky reflection
     /// cubemap on every PBR material's datablock. (Body in complete-class context,
@@ -2994,9 +3029,11 @@ public:
     /// off" (walk the other scenes now) and "this scene is going away" (flag it,
     /// the engine walks after the erase).
     bool mDestroying = false;
-    /// Runs the queued ibl_specular convolution (roughness mip chain) for the
-    /// reflection cubemap. Called once per frame by the engine, like applyPendingGi.
+    /// Runs the queued ibl_specular convolution (roughness mip chain) into the
+    /// next set's cube, then lands the set if nothing else is owed. Called once
+    /// per frame by the engine, like applyPendingGi, and by the capture itself.
     void applyPendingIbl();
+    void convolvePendingIbl();
     Ogre::TextureGpu *mReflectionTex = nullptr;   // prefiltered cube on PBSM_REFLECTION
     /// THE ONE ENVIRONMENT AS THE RAY JOBS BIND IT (PHOTON-ENV-1): the cube (null
     /// while there is none or the Sky Light is out) and ONE colour whose meaning
@@ -5193,7 +5230,7 @@ private:
     /// says whether it is ours to destroy.
     Ogre::TextureGpu *mIblSourceTex = nullptr;
     bool              mIblSourceOwned = false;
-    bool              mIblPending = false;   // convolve on the next frame
+    bool              mIblPending = false;   // convolve into mReflPendingTex
     /// One-shot ibl_specular workspace; kept null between runs.
     Ogre::Camera *mIblCamera = nullptr;
     // VCT arm (null unless a VCT mode is live). Teardown order within the arm:

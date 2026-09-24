@@ -2904,8 +2904,8 @@ bool OgreScene::refreshCascadesFast() {
 // explicitly, which is what a script's `world.refreshGi()` and every suite that
 // asserts on the frame after it do — is answered immediately, as it always was.
 // THE FIRST ARM WAITS FOR ITS SKY (PHOTON-ENV-1 audit F7). Pending = the capture
-// is queued (it runs after updateSceneGraph in THIS frame), its convolution is
-// queued (applyPendingIbl, the top of the next), or its SH read is in flight.
+// is queued (it runs after updateSceneGraph in THIS frame), a host-pushed cube's
+// convolution is queued (applyPendingIbl), or its SH read is in flight.
 // A first build only: a live chain meets a sky change through
 // noteEnvironmentChanged's settle, which is the cheap path for an edit. Bounded
 // like the albedo wait — a scene whose capture never runs (it is never drawn)

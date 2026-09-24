@@ -520,8 +520,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mCloudWeatherPath.clear();
     mSkySource = SkySource();
     mSkyDesc = SkyDesc();
-    for (float &c : mSkyAmbientSh) c = 0.0f;
-    mAmbientPushed = false;
+    mEnvScalePushed = false;
     mSource = scene;
     // ...and the incoming one moves INTO it. This is the whole of the swap from
     // the mirror's side: after it, the engine reads the very nodes the user
@@ -3594,7 +3593,7 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         auto *light = static_cast<iris::LightNode *>(node);
         // A SKY LIGHT IS NOT AN Ogre::Light (SKY_LIGHT_SPEC.md §2). It has no
         // position, no direction, no range and casts nothing: it is the scene's
-        // ambient, pushed once per change through setAmbientSh in
+        // ambient, its gain pushed once per change through setEnvironmentLight in
         // applyEnvironment. Nothing about it belongs in the forward light list,
         // and creating one would cost a light slot per pass for a term the
         // shader already has. The NODE still exists (the icon is pickable and
@@ -6776,7 +6775,7 @@ void SceneMirror::invalidateEnvironment()
     // Only the "already pushed" latches: the LAST-value members stay, so a
     // re-push that lands on the same values is still cheap where the engine
     // setter is idempotent, and correct where it is not.
-    mAmbientPushed = false;
+    mEnvScalePushed = false;
     mFogPushed = false;
     // GI IS NOT RE-PUSHED (ENGINE_CACHE_POLICY_SPEC P10). The GI latch used to
     // be dropped here too, and the re-push that followed is a from-scratch
@@ -7076,68 +7075,35 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // reader and no writer on disk, so it was a measurement knob living in the
     // document. `editor.setLodBias` writes the engine scene directly.)
     // AMBIENT IS THE SKY LIGHT, AND NOTHING ELSE (SKY_LIGHT_SPEC.md §2, owner
-    // decision D14). There is one path and one seam: the sky's own
-    // cosine-convolved integral, scaled by the scene's Sky Light — its
-    // intensity times its tint, decoded sRGB->linear like every other colour a
-    // user picks (§4) — pushed through setAmbientSh.
+    // decision D14): the sky's own cosine-convolved integral scaled by the
+    // scene's Sky Light — its intensity times its tint, decoded sRGB->linear like
+    // every other colour a user picks (§4). THE ENGINE FORMS THAT PRODUCT
+    // (PHOTON-SKY-TRANSIENT-1, Engine.h skyAmbientSh): it integrates the sky it
+    // drew and multiplies by the gain pushed here, in the frame the new sky's
+    // cube lands — a host-side product arrived one sync later and put the cube
+    // of one sky beside the SH of another. The mirror pushes the GAIN only.
     //
-    // NO SKY LIGHT = 27 ZEROS. Not "the old flat colour", not "a small default":
-    // a scene with no Sky Light has no ambient at all, which is the decided
-    // behaviour and the reason the two-light default scene goes black when both
-    // lights are deleted. The flat Engine::setAmbient path is not gone — it is
-    // an ENGINE verb the preview scenes and the engine-side tests still use —
-    // but no document path reaches it any more.
+    // NO SKY LIGHT = GAIN 0 = 27 ZEROS: a scene with no Sky Light has no ambient
+    // at all, which is the decided behaviour and the reason the two-light
+    // default scene goes black when both lights are deleted. The same gain is
+    // the CUBE half of the light (SMOKE-ENGINE-1 item 2; PHOTON-ENV-1): a
+    // mirror's reflection and every escape of the voxel cones, the rays and the
+    // bounce read the sky's cube at it (the engine derives the luminance the
+    // pin's scalar envmapScale needs). skyLight() is the first VISIBLE one, so
+    // hiding it takes the ambient and the reflections with it.
     {
-        float sh[27] = { 0.0f };
-        // THE SKY'S INTEGRAL COMES FROM THE ENGINE (SKY-GPU): it captured the
-        // sky it drew into a cubemap and integrated that. Read every frame —
-        // 27 floats — because the capture lands one frame after the sky change
-        // that asked for it, exactly like the IBL convolution.
-        const bool hasSky = mTarget->skyAmbientSh(mSkyAmbientSh);
         const auto skyLight = mSource->skyLight();
-        // The CUBE half of the same light (SMOKE-ENGINE-1 item 2; PHOTON-ENV-1).
-        // The coefficients below carry the sky's DIFFUSE contribution scaled by
-        // this light; everything that reads the sky's CUBE — a mirror's
-        // reflection, and every escape of the voxel cones, the rays and the
-        // bounce — reads it at the same per-channel gain, pushed beside them
-        // (Engine.h, setEnvironmentLight; the engine derives the luminance the
-        // pin's scalar envmapScale needs).
-        //
-        // NO SKY LIGHT IS 0, on the same predicate the coefficients use
-        // (skyLight() is the first VISIBLE one), so hiding it takes the
-        // reflections with it. `hasSky` is deliberately NOT in this condition:
-        // with no sky there is no cube bound and the gain is moot, and making
-        // it 0 for one frame while the capture lands would flicker every
-        // reflection in the scene on a sky change.
         Colour envGain(0.0f, 0.0f, 0.0f, 1.0f);
         if (skyLight) {
             const iris::LinearColor tint = iris::linearOf(skyLight->color);
-            const float gain[3] = { tint.r * skyLight->intensity,
-                                    tint.g * skyLight->intensity,
-                                    tint.b * skyLight->intensity };
-            envGain = Colour(gain[0], gain[1], gain[2], 1.0f);
-            if (hasSky) {
-                for (int i = 0; i < 9; ++i)
-                    for (int c = 0; c < 3; ++c)
-                        sh[i * 3 + c] = mSkyAmbientSh[i * 3 + c] * gain[c];
-            }
+            envGain = Colour(tint.r * skyLight->intensity, tint.g * skyLight->intensity,
+                             tint.b * skyLight->intensity, 1.0f);
         }
         if (!mEnvScalePushed || envGain.r != mLastEnvGain.r || envGain.g != mLastEnvGain.g ||
             envGain.b != mLastEnvGain.b) {
             mTarget->setEnvironmentLight(envGain);
             mLastEnvGain = envGain;
             mEnvScalePushed = true;
-        }
-        // Push on CHANGE only. The coefficients feed a pass buffer that HlmsPbs
-        // rebuilds per pass anyway, but setSphericalHarmonics also re-decides the
-        // ambient shader variant, so a per-frame push of an unchanged value was
-        // asking a shader/root-layout question every frame for nothing.
-        bool changed = !mAmbientPushed;
-        for (int i = 0; !changed && i < 27; ++i) changed = sh[i] != mLastAmbientSh[i];
-        if (changed) {
-            mTarget->setAmbientSh(sh);
-            std::memcpy(mLastAmbientSh, sh, sizeof(sh));
-            mAmbientPushed = true;
         }
     }
     // THE PER-VIEW HALF, which a second view of this scene gets on its own
@@ -7319,7 +7285,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 // THE SKY LIGHT IS NOT A VOXEL LIGHT (audit A F3). It never
                 // becomes an Ogre::Light at all: its colour and intensity reach
                 // the renderer as the scene's environment (applyEnvironment ->
-                // setAmbientSh + setEnvironmentLight), which the engine hands to
+                // setEnvironmentLight; the engine forms SH x gain), which it hands to
                 // every pass and every cascade's bounce itself — re-settling a
                 // bouncing chain on its own (OgreScene::noteEnvironmentChanged)
                 // — and which stales the probe grid with its own reason. Hashing it here made releasing its intensity slider —

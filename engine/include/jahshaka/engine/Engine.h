@@ -52,24 +52,21 @@ public:
     /// THE ENVIRONMENT'S GAIN AS A SPECULAR LIGHT — the other half of
     /// setAmbientSh, and the half that used to be missing.
     ///
-    /// setAmbientSh carries the environment's DIFFUSE contribution, already
-    /// scaled by whatever light the host decided the environment is: 27 zeros
-    /// mean "no environment light" and a matte surface goes black. Its
-    /// SPECULAR contribution does not travel in those coefficients — it is
-    /// sampled from the prefiltered environment cube — so a host that scaled
-    /// the coefficients and stopped there left a mirror reflecting a sky that
-    /// was lighting nothing (measured: a metal sphere reflected the sky
-    /// byte-identically with every light in the scene hidden, Sky Light
-    /// included).
-    ///
-    /// This is that scale, and the two are meant to be pushed together: the
-    /// gain of the environment light in the same units, so 1.0 is "the cube's
-    /// own radiance" and 0.0 is "there is no environment light", which makes
-    /// the sky a BACKDROP — still drawn, still visible behind the scene,
-    /// reflecting nothing into it.
+    /// THE ENVIRONMENT LIGHT'S GAIN, and with a sky bound THE ENGINE FORMS THE
+    /// AMBIENT FROM IT (PHOTON-SKY-TRANSIENT-1): the scene's SH becomes
+    /// skyAmbientSh x this gain per channel — in the frame the sky's cube lands,
+    /// and again on every push of this call — so a host modelling a Sky Light
+    /// pushes the gain and never the product. Its SPECULAR contribution is the
+    /// prefiltered environment cube sampled at the same gain. 1.0 is "the
+    /// cube's own radiance" and 0.0 is "there is no environment light": zero
+    /// ambient, and the sky a BACKDROP — still drawn, reflecting nothing.
+    /// With no sky captured the ambient this forms is 27 zeros. WHO WRITES
+    /// THE AMBIENT is the last of the two calls: this one hands it to the
+    /// engine, setAmbient / setAmbientSh take it back for a host that lights
+    /// its scene with a colour of its own (a sky capture then leaves it alone).
     ///
     /// PER CHANNEL (the Sky Light's intensity times its linear tint — the same
-    /// gain the host multiplied the SH coefficients by): THE ONE ENVIRONMENT
+    /// gain the ambient SH is multiplied by): THE ONE ENVIRONMENT
     /// (PHOTON-ENV-1) is one source for every escape — the voxel cones', the
     /// rays' miss, the bounce injection's and the probe-array pass's no-probe
     /// fallback all read the cube times this gain, so a tinted sky lights
@@ -125,33 +122,31 @@ public:
     /// all, or the capture has not run: it happens inside the next rendered
     /// frame, like the IBL convolution).
     ///
-    /// WHEN THE ANSWER CHANGES, exactly (lane ENGINE-SMALL-A / audit ON-14,
-    /// 2026-09-18) — because it is one frame for a lone edit and two for a
-    /// gesture, and a host that renders a fixed number of frames and then
-    /// asserts a picture has to know which:
+    /// THE ENVIRONMENT IS ONE SET (PHOTON-SKY-TRANSIENT-1): this answer, the
+    /// reflection cube every datablock samples and the Sky Light gain change
+    /// TOGETHER. A sky change keeps the previous set bound until the next
+    /// capture, its convolution and its SH have all landed, then swaps the cube
+    /// and these coefficients in one step — never a cube nothing has written,
+    /// never a cube of one sky with the SH of another; the scene's ambient is
+    /// set to this answer x the setEnvironmentLight gain in the same step. When that lands:
     ///
-    ///   * A LONE sky change is read SYNCHRONOUSLY, inside the frame that
-    ///     captured it. This call answers with the new sky from the next frame
-    ///     on, and a host pushing the ambient per frame has it in the picture
-    ///     one frame after the capture — the behaviour this contract has always
-    ///     described.
+    ///   * A LONE sky change lands INSIDE the frame that captured it (the
+    ///     capture, the convolution and a synchronous SH read all run before
+    ///     that frame draws): its first frame already shows the whole new set.
     ///   * A GESTURE — a second capture within a couple of drawn frames of the
-    ///     previous one, i.e. a sun being dragged — DEFERS its readback: the
+    ///     previous one, i.e. a sun being dragged — DEFERS its SH readback: the
     ///     download is issued without a flush and read at the top of the NEXT
-    ///     frame, so this call answers with the new sky from that frame on and
-    ///     a host's per-frame push puts it in the picture the frame after, TWO
-    ///     frames behind the capture. In exchange the capture frame does not
-    ///     block on the GPU (measured 0.94 ms of flush and wait per change,
-    ///     i.e. per frame of a drag). Nothing ever flickers: the previous
-    ///     coefficients stay valid until the new ones land.
+    ///     frame, where the set lands; the previous set is drawn meanwhile. In
+    ///     exchange the capture frame does not block on the GPU (measured
+    ///     0.94 ms of flush and wait per change, i.e. per frame of a drag).
     ///
     /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture — the
     /// run-wide diagnostic latch this engine's measurable rules carry, and the
     /// way the two arms are A/B'd on one binary.
     ///
-    /// UNSCALED: this is the sky's mean incident radiance. A host that models a
-    /// sky LIGHT multiplies by its intensity and tint and pushes the result
-    /// through setAmbientSh — the backend never applies a light of its own.
+    /// UNSCALED: this is the sky's mean incident radiance (the ambient the
+    /// engine applies is this x the setEnvironmentLight gain). Read-only for a
+    /// host: a status readout, never a value to push back.
     virtual bool        skyAmbientSh(float out[27]) const = 0;
     /// The description currently in force (default-constructed = no sky).
     virtual SkyDesc     sky() const = 0;

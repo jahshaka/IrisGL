@@ -265,7 +265,7 @@ bool OgreScene::setSky(const SkyDesc &desc) {
                 // No sky, no sky light: the ambient the host derives from this
                 // must go to zero in the same push that removed the sky.
                 mSkyCapturePending = false;
-                mSkyShValid = false;
+                forgetSkySh();
                 destroySkyShTicket();
             }
             // Both of these paths REPLACE the reflection cubemap themselves —
@@ -334,10 +334,7 @@ bool OgreScene::applySkyMode(const SkyDesc &desc) {
         // sky is its own IBL source), it must not run against a destroyed one
         // on the next frame (code review 2026-09-10).
         if (previous && previous != owned) {
-            if (mIblSourceTex == previous && !mIblSourceOwned) {
-                mIblPending = false;
-                mIblSourceTex = nullptr;
-            }
+            if (mIblSourceTex == previous && !mIblSourceOwned) destroyPendingReflection();
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), previous);
         }
         return true;
@@ -438,6 +435,9 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         if (mSceneMgr->getSky())
             mSceneMgr->setSky(false, mSceneMgr->getSkyMethod(), static_cast<Ogre::TextureGpu *>(nullptr));
         if (mSkyOwnedTex) {
+            // A convolution still pending from that texture (a cubemap sky is its
+            // own IBL source) must not read it after it dies — applySkyMode's guard.
+            if (mIblSourceTex == mSkyOwnedTex && !mIblSourceOwned) destroyPendingReflection();
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
             mSkyOwnedTex = nullptr;
         }
@@ -718,9 +718,100 @@ void OgreScene::tuneAtmosphereRenderable() {
 void OgreScene::requestSkyCapture() { mSkyCapturePending = true; }
 
 bool OgreScene::skyAmbientSh(float out[27]) const {
-    if (!mSkyShValid) return false;
-    for (int i = 0; i < 27; ++i) out[i] = mSkySh[i];
+    if (!mSkyShInForceValid) return false;
+    for (int i = 0; i < 27; ++i) out[i] = mSkyShInForce[i];
     return true;
+}
+
+void OgreScene::forgetSkySh() {
+    const bool wasLighting = mSkyShInForceValid;
+    mSkyShValid = false;
+    mSkyShFresh = false;
+    mSkyShInForceValid = false;
+    // No sky, no sky light: the ambient it was lighting goes to zero with it.
+    if (wasLighting) applySkyAmbient(GiStaleReason::Sky);
+}
+
+// THE SKY'S AMBIENT IS FORMED HERE (PHOTON-SKY-TRANSIENT-1): the SH in force
+// times the Sky Light gain the host pushed through setEnvironmentLight, or zeros
+// with no sky (no Sky Light = gain 0 = zeros: gi.sky_light). The host pushes the
+// gain only; it used to form this product itself, one sync after the engine had
+// integrated the SH, which put the cube of one sky beside the SH of another on
+// every change frame. Only while the engine owns the ambient (a host that never
+// pushed a gain, or lit its scene with setAmbient since, keeps its own), and not
+// during teardown (the write re-notes the GI arm).
+void OgreScene::applySkyAmbient(GiStaleReason why) {
+    if (!mSkyAmbientOwned || mDestroying) return;
+    const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
+    float sh[27];
+    for (int i = 0; i < 27; ++i) sh[i] = mSkyShInForceValid ? mSkyShInForce[i] * gain[i % 3] : 0.0f;
+    applyAmbientSh(sh, why);
+}
+
+// THE ENVIRONMENT LANDS AS ONE SET (PHOTON-SKY-TRANSIENT-1, measured). A sky
+// change used to REPLACE the bound reflection cube inside the capture's frame
+// with a newborn one whose convolution was queued for the top of the NEXT frame,
+// so every draw of the change frame sampled a cube nothing had written: recycled
+// VRAM, NaN and 3e4 half-floats in mip 0 (a ground pixel read 111/28/118 or
+// 31/255/32 against 25/29/32 a frame later — the one-frame flash on every sky
+// or sun edit). And the SH reached the pixel one host push later than the cube.
+//
+// THE RULE: the pixel keeps the PREVIOUS environment — cube, SH, gain — until
+// the capture, the convolution and the SH of the next one have all landed, and
+// then the cube and the coefficients swap here, in one step. For a lone change
+// all three land inside the capture's own frame (the capture runs before the
+// draw, the convolution is run right behind it, the first SH read is
+// synchronous), so the change frame already draws the whole new set. A drag's
+// SH read is deferred a frame (integrateSkyShFromCube), and its set lands at the
+// next frame's top when that read does — the previous set drawn meanwhile.
+void OgreScene::landEnvironmentIfComplete() {
+    if (mSkyCapturePending || mSkyShTicket || mIblPending) return;   // a part is owed
+    if (mReflPendingTex) {
+        Ogre::TextureGpu *next = mReflPendingTex;
+        mReflPendingTex = nullptr;
+        // DESTROY THE OLD FIRST, then bind the new — destroyReflection's order
+        // and reason (its Deleted listener is what kills the datablocks' stale
+        // descriptor sets). The new cube is a different, live texture, so the
+        // recycled-address trap cannot alias it.
+        if (Ogre::TextureGpu *old = mReflectionTex) {
+            mReflectionTex = nullptr;
+            try { destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), old); }
+            catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+            catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+        }
+        mReflectionTex = next;
+        // TELL HlmsPbs HOW MANY MIPS THE PROBE HAS. Without this the
+        // roughness->LOD map (envSpecularRoughness,
+        // 800.PixelShader_piece_ps.any:4) multiplies by
+        // passBuf.envMapNumMipmaps, which stays at its 1.0 default for a plain
+        // PBSM_REFLECTION texture — only the PCC classes ever call this — and
+        // every reflection is sampled at mip 0-1 however rough the surface.
+        // The count only ever grows, so it is reset first.
+        Ogre::HlmsPbs *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+        pbs->resetIblSpecMipmap(0u);
+        pbs->_notifyIblSpecMipmap(next->getNumMipmaps());
+        applyReflectionToAll();
+    }
+    if (mSkyShFresh) {
+        mSkyShFresh = false;
+        std::memcpy(mSkyShInForce, mSkySh, sizeof mSkyShInForce);
+        mSkyShInForceValid = true;
+        applySkyAmbient(GiStaleReason::Sky);   // the sky's edit, not the light's
+    }
+}
+
+void OgreScene::destroyPendingReflection() {
+    mIblPending = false;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    if (mIblSourceTex && mIblSourceOwned) {
+        try { destroyRecycled(tm, mIblSourceTex); } catch (...) {}
+    }
+    mIblSourceTex = nullptr;
+    mIblSourceOwned = false;
+    if (mReflPendingTex) {
+        try { destroyRecycled(tm, mReflPendingTex); } catch (...) {}
+        mReflPendingTex = nullptr;
+    }
 }
 
 // ONE CAPTURE RENDER, THREE CALLERS (CLOUDS-2D-1 made it a function): the
@@ -802,8 +893,8 @@ Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint
 // that means the sky quad has no world AABB yet, culls out, and the capture
 // comes back BLACK (measured: the first colour sky of a run integrated to 0,0,0
 // and every later one was exact). So the capture runs right after
-// updateSceneGraph/applyShadowCacheDirties, still inside the frame; the
-// convolution it queues is picked up by applyPendingIbl at the top of the next.
+// updateSceneGraph/applyShadowCacheDirties, still inside the frame; its
+// convolution runs right behind it, before the frame draws (applyPendingIbl).
 void OgreScene::applyPendingSkyCapture() {
     // THE CLOUD FIELD FIRST (CLOUDS-2D-1): it is a render pass too, and a
     // change that re-bakes it also re-captures — the capture must photograph
@@ -814,7 +905,7 @@ void OgreScene::applyPendingSkyCapture() {
     if (mCloudClearPending && mSkyCapturePending && cloudLayerDrawn()) captureCloudClearSky();
     if (!mSkyCapturePending) return;
     mSkyCapturePending = false;
-    if (mSkyDesc.mode == SkyMode::NoSky) { mSkyShValid = false; return; }
+    if (mSkyDesc.mode == SkyMode::NoSky) { forgetSkySh(); return; }
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     if (!cm->hasWorkspaceDefinition(Ogre::IdString(kSkyCaptureWorkspace))) {
         // Media missing (an unstaged tree): no environment rather than a wrong
@@ -822,7 +913,8 @@ void OgreScene::applyPendingSkyCapture() {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: " + std::string(kSkyCaptureWorkspace) +
             " not found — the sky lights nothing and reflects nothing");
-        mSkyShValid = false;
+        forgetSkySh();
+        landEnvironmentIfComplete();   // a host-pushed cube waiting on this SH
         return;
     }
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
@@ -849,13 +941,18 @@ void OgreScene::applyPendingSkyCapture() {
         if (mSkyDesc.mode == SkyMode::Cubemap || mSkyDesc.reflections) {
             destroyRecycled(tm, cube);
         } else {
-            // ...and for every other sky the capture IS the environment. The
-            // convolution it queues runs at the top of the NEXT frame
-            // (applyPendingIbl) and frees the cube afterwards — the same one
-            // frame of latency the IBL has always had, and the reason the
-            // ambient a host reads is the sky of the frame before.
+            // ...and for every other sky the capture IS the environment. It
+            // is convolved HERE, in the capture's own frame and before any draw
+            // (we are inside the frame: a command buffer exists), into the next
+            // set's cube; the convolution frees the capture afterwards. It used
+            // to be queued for the top of the next frame with the newborn cube
+            // already bound — the change frame's flash (landEnvironmentIfComplete).
             buildReflectionCubemapFrom(cube, true);
+            applyPendingIbl();
         }
+        // The whole set lands now when the SH read was synchronous; a deferred
+        // read lands it at the next frame's top (readSkyShTicket).
+        landEnvironmentIfComplete();
         return;
     } catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
@@ -864,7 +961,8 @@ void OgreScene::applyPendingSkyCapture() {
     }
     Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky capture failed: " + mError);
     if (cube) { try { destroyRecycled(tm, cube); } catch (...) {} }
-    mSkyShValid = false;
+    forgetSkySh();
+    landEnvironmentIfComplete();
 }
 
 // The ambient, read off the captured cube's 32^2 mip: 6 x 1024 texels, once per
@@ -948,8 +1046,8 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
 // No `flushCommands()` — the frame's own commit submits it, and the pin flushes
 // the copy encoder itself if the cube is destroyed with a download pending
 // (VulkanQueue::notifyTextureDestroyed), which is what makes the capture's
-// ordinary lifetime (freed by applyPendingIbl next frame, or straight away for
-// a cubemap sky) safe to leave exactly as it was.
+// ordinary lifetime (freed by its convolution in the capture's own frame, or
+// straight away for a cubemap sky) safe to leave exactly as it was.
 void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
     destroySkyShTicket();       // never overwrite one: the ticket owns a staging buffer
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
@@ -1005,8 +1103,11 @@ void OgreScene::readSkyShTicket(bool force) {
         integrateSkyShFromBox(box);
         mSkyShTicket->unmap();
         mSkyShValid = true;
+        mSkyShFresh = true;
     } JAH_CATCH(mError, );
     destroySkyShTicket();
+    // The deferred read was the set's last part: it lands with its cube.
+    landEnvironmentIfComplete();
 }
 
 void OgreScene::destroySkyShTicket() {
@@ -1023,6 +1124,7 @@ void OgreScene::destroySkyShTicket() {
 // every capture, which is how the two are A/B'd on one binary).
 void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
     mSkyShValid = false;
+    mSkyShFresh = false;
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::AsyncTextureTicket *ticket = nullptr;
     JAH_TRY {
@@ -1039,6 +1141,7 @@ void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
         tm->destroyAsyncTextureTicket(ticket);
         ticket = nullptr;
         mSkyShValid = true;
+        mSkyShFresh = true;
         return;
     } catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
@@ -1378,26 +1481,30 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
     return cube;
 }
 
-// EVERY sky change lands here, so this is where the environment cubemap is
-// freed and immediately re-allocated — and the allocator hands the replacement
-// back at the SAME ADDRESS routinely (observed on every re-bake of the Showroom
-// scene: `destroyReflection refl=0x55556cb5e400` then `new cube=0x55556cb5e400`).
-// That matters because Ogre identifies a texture by its TextureGpu POINTER in
-// two caches that outlive it: VulkanTextureGpuManager::mCachedTex (the image
-// views a descriptor set is built from) and DescriptorSetTexture::operator!=
-// (which is how bakeTextures decides a datablock's set is unchanged and can be
-// kept). A recycled address therefore makes an old, dead view look current.
-// destroyReflection() below is what keeps that safe: it lets Ogre's
-// TextureGpuListener::Deleted run so the old descriptor sets die WITH the old
-// texture. Do not "optimise" the order there.
+// EVERY sky change lands here: the NEXT environment cube is allocated beside
+// the one in force, never in its place (PHOTON-SKY-TRANSIENT-1). The cube in
+// force stays bound until landEnvironmentIfComplete swaps the whole set, so no
+// datablock ever samples a cube before the convolution has written it. (This
+// function used to destroy the bound cube and bind the newborn one straight
+// away, with the convolution a frame later: the change frame's flash.)
+//
+// Ogre identifies a texture by its TextureGpu POINTER in two caches that
+// outlive it: VulkanTextureGpuManager::mCachedTex (the image views a
+// descriptor set is built from) and DescriptorSetTexture::operator!= (which is
+// how bakeTextures decides a datablock's set is unchanged and can be kept). A
+// recycled address therefore makes an old, dead view look current — which is
+// why the swap destroys the old cube FIRST (its TextureGpuListener::Deleted
+// kills the stale sets) and only then binds the new one. Do not "optimise" the
+// order in landEnvironmentIfComplete or destroyReflection.
 void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource) {
-    destroyReflection();
+    // An unlanded next set is superseded by this one.
+    destroyPendingReflection();
     mIblSourceTex = srcCube;
     mIblSourceOwned = ownsSource;
     const Ogre::uint32 w = srcCube->getWidth(), h = srcCube->getHeight();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-    // The OUTPUT the PBR datablocks sample: same size, mipped, and a UAV, which
-    // is what the compute integrator writes through.
+    // The OUTPUT the PBR datablocks will sample: same size, mipped, and a UAV,
+    // which is what the compute integrator writes through.
     Ogre::TextureGpu *cube = tm->createTexture(
         recycledName("skyrefl"), Ogre::GpuPageOutStrategy::Discard,
         Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::Uav |
@@ -1411,42 +1518,28 @@ void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsS
     cube->setPixelFormat(srcCube->getPixelFormat());
     cube->setNumMipmaps(Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h));
     cube->scheduleTransitionTo(Ogre::GpuResidency::Resident);
-    // A NEWBORN RENDER TEXTURE IS BORN READY TO RENDER, NOT READY TO SAMPLE
-    // (ENVPROBE-LAYOUT-1's second site, found by sky.env_layout under the
-    // validation layer). `VulkanTextureGpu::createInternalResourcesImpl`
-    // assumes "render textures always start ready to render" and sets
-    // `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL` — and this cube is bound to
-    // every datablock by `applyReflectionToAll` BELOW, while the convolution
-    // that fills it only runs at the top of the NEXT frame (the documented one
-    // frame of IBL latency). Every draw in between samples it, so that frame
-    // reported `VUID-vkCmdDrawIndexed-imageLayout-00344` on `texEnvProbeMap`:
-    // one report per sky change, which is the class lane VR-3b recorded from
-    // its VR fixture (V2F-9) and could not reproduce without a headset.
-    //
-    // The CONTENT of that frame is unchanged — an unwritten cube is what the
-    // in-between frame always sampled; only the layout it is sampled in is
-    // corrected.
-    handOverForSampling(mRoot, cube);
-    mReflectionTex = cube;
-    // TELL HlmsPbs HOW MANY MIPS THE PROBE HAS. Without this the roughness->LOD
-    // map (envSpecularRoughness, 800.PixelShader_piece_ps.any:4) multiplies by
-    // passBuf.envMapNumMipmaps, which stays at its 1.0 default for a plain
-    // PBSM_REFLECTION texture — only the PCC classes ever call this. Every
-    // reflection was therefore sampled at mip 0-1 no matter how rough the
-    // surface: a prefiltered chain nothing reads. (Pre-existing: the box mip
-    // chain this replaces was equally unread.)
-    static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
-        ->_notifyIblSpecMipmap(cube->getNumMipmaps());
-    // The convolution is a compute dispatch: queue it for the next frame, where
-    // a command buffer exists (same contract as applyPendingGi).
+    // (No hand-over for sampling here: nothing samples this cube before the
+    // convolution has written it and handOverForSampling has moved it to the
+    // Texture layout — that is the point of the pending set.)
+    mReflPendingTex = cube;
+    // The convolution is a compute dispatch: it needs a command buffer, so it
+    // runs in applyPendingIbl — straight away when the caller is the capture
+    // (inside the frame), at the top of the next frame for a host-pushed cube.
     mIblPending = true;
-    applyReflectionToAll();
 }
 
 void OgreScene::applyPendingIbl() {
     if (!mIblPending) return;
     mIblPending = false;
-    if (!mIblSourceTex || !mReflectionTex) return;
+    convolvePendingIbl();
+    // The convolution may have been the set's last part (a host-pushed cube, or
+    // a capture whose SH was read synchronously).
+    landEnvironmentIfComplete();
+}
+
+void OgreScene::convolvePendingIbl() {
+    if (!mIblSourceTex || !mReflPendingTex) return;
+    Ogre::TextureGpu *const target = mReflPendingTex;
     // A cube we own is scratch: once the convolution has read it, its (mipped,
     // full-size) VRAM is dead weight until the next sky change.
     struct FreeSource {
@@ -1471,29 +1564,29 @@ void OgreScene::applyPendingIbl() {
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka: " + std::string(kIblWorkspace) +
                 " not found — sky reflections fall back to box mipmaps");
-            mIblSourceTex->copyTo(mReflectionTex, mReflectionTex->getEmptyBox(0), 0,
+            mIblSourceTex->copyTo(target, target->getEmptyBox(0), 0,
                                   mIblSourceTex->getEmptyBox(0), 0);
-            mReflectionTex->_autogenerateMipmaps();
-            handOverForSampling(mRoot, mReflectionTex);
+            target->_autogenerateMipmaps();
+            handOverForSampling(mRoot, target);
             return;
         }
         if (!mIblCamera) mIblCamera = mSceneMgr->createCamera(processUniqueName("iblcam"), false);
         Ogre::CompositorChannelVec externals;
         externals.push_back(mIblSourceTex);
-        externals.push_back(mReflectionTex);
+        externals.push_back(target);
         ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
                               Ogre::IdString(kIblWorkspace), false);
         ws->_beginUpdate(false);
         ws->_update();
         ws->_endUpdate(false);
         cm->removeWorkspace(ws);
-        // THE CONVOLUTION LEFT IT A UAV, AND EVERY DATABLOCK SAMPLES IT
+        // THE CONVOLUTION LEFT IT A UAV, AND EVERY DATABLOCK WILL SAMPLE IT
         // (ENVPROBE-LAYOUT-1): `CompositorPassIblSpecular::analyzeBarriers`
         // resolves the output to `ResourceLayout::Uav` and this workspace has
         // no later pass to move it back, so without this the cube is sampled in
         // `VK_IMAGE_LAYOUT_GENERAL` for the rest of its life. See
         // handOverForSampling.
-        handOverForSampling(mRoot, mReflectionTex);
+        handOverForSampling(mRoot, target);
         return;
     } catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
@@ -1506,19 +1599,16 @@ void OgreScene::applyPendingIbl() {
     Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky IBL specular failed: " + mError);
     if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
     JAH_TRY {
-        mIblSourceTex->copyTo(mReflectionTex, mReflectionTex->getEmptyBox(0), 0,
+        mIblSourceTex->copyTo(target, target->getEmptyBox(0), 0,
                               mIblSourceTex->getEmptyBox(0), 0);
-        mReflectionTex->_autogenerateMipmaps();
-        handOverForSampling(mRoot, mReflectionTex);
+        target->_autogenerateMipmaps();
+        handOverForSampling(mRoot, target);
     } JAH_CATCH(mError, );
 }
 
 void OgreScene::destroyReflection() {
-    mIblPending = false;
+    destroyPendingReflection();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-    if (mIblSourceTex && mIblSourceOwned) destroyRecycled(tm, mIblSourceTex);
-    mIblSourceTex = nullptr;
-    mIblSourceOwned = false;
     if (!mReflectionTex) return;
     Ogre::TextureGpu *tex = mReflectionTex;
     mReflectionTex = nullptr;
@@ -1829,7 +1919,7 @@ void OgreScene::destroySky() {
     // still want it (syncAtmosphere owns that decision).
     if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
     mSkyCapturePending = false;
-    mSkyShValid = false;
+    forgetSkySh();
     destroySkyShTicket();      // it was answering for a sky that is gone
     // Unbind the reflection cubemap from every datablock before it goes away.
     destroyReflection();

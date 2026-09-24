@@ -154,6 +154,11 @@ void OgreScene::noteEnvironmentChanged() {
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {
+    mSkyAmbientOwned = false;   // the host lights this scene itself
+    applyAmbientSh(sh, GiStaleReason::Ambient);
+}
+
+void OgreScene::applyAmbientSh(const float sh[27], GiStaleReason why) {
     // THE PROBE CACHE'S AMBIENT INPUT (ENGINE_CACHE_POLICY_SPEC P7): a probe
     // capture is lit by it. Compared by value, because the host re-pushes the
     // ambient every time a page takes the screen back and that must cost no
@@ -174,7 +179,7 @@ void OgreScene::setAmbientSh(const float sh[27]) {
     if (!mAmbientShKnown || std::memcmp(sh, mLastAmbientSh, sizeof mLastAmbientSh) != 0) {
         std::memcpy(mLastAmbientSh, sh, sizeof mLastAmbientSh);
         mAmbientShKnown = true;
-        staleProbeGrid(GiStaleReason::Ambient);          // a no-op before a grid exists
+        staleProbeGrid(why);                             // a no-op before a grid exists
         // ...and the bounce injection reads the environment (PHOTON-ENV-1).
         noteEnvironmentChanged();
         // (The irradiance field owes nothing here: a VOXEL-fed probe cone-traces
@@ -255,10 +260,19 @@ void OgreScene::setEnvironmentLight(const Colour &gain) {
     // Rec.709 luminance; the weights sum to exactly 1.0f in float, so a white
     // gain of 1 is exactly 1.0f and HlmsPbs sets no envmap_scale property.
     const float g = 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
-    if (c.r == mEnvLightGain.r && c.g == mEnvLightGain.g && c.b == mEnvLightGain.b) return;
+    // THE AMBIENT IS SH x THIS GAIN, AND THE ENGINE FORMS IT (PHOTON-SKY-TRANSIENT-1):
+    // this push hands the ambient to the engine and re-asserts it even when the
+    // gain did not move (a host's first push, a page return) — what replaces the
+    // host's own SH push.
+    mSkyAmbientOwned = true;
+    if (c.r == mEnvLightGain.r && c.g == mEnvLightGain.g && c.b == mEnvLightGain.b) {
+        applySkyAmbient(GiStaleReason::Ambient);
+        return;
+    }
     const bool wasLit = mEnvLightScale > 0.0f;
     mEnvLightGain = c;
     mEnvLightScale = g;
+    applySkyAmbient(GiStaleReason::Ambient);
     // Every escape reads the environment at this gain, the bounce injection
     // included: what the voxels hold changes with it.
     noteEnvironmentChanged();
