@@ -112,6 +112,7 @@ ChainDesc OgreView::chainDesc() const {
     // show the same shot the viewport does, and the flag can only be true when
     // a host deliberately pushed a constrained camera.
     d.letterbox  = mCameraDesc.constrainAspect && mCameraDesc.aspect > 0.0f;
+    d.letterboxAspect = d.letterbox ? mCameraDesc.aspect : 0.0f;
     // THE HZB (NANITE_SPEC §4.3) is set BEFORE the offscreen early-out, with
     // letterbox and for the same kind of reason: it is not a post-process and it
     // changes no pixel of the picture — it is a resource a future screen-space

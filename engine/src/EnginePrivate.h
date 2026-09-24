@@ -1074,6 +1074,12 @@ struct ChainDesc {
     /// derived from the target's own aspect and therefore moves on every
     /// resize — and Ogre re-reads mVpRect from the definition on every execute.
     bool  letterbox = false;
+    /// ...and the CAMERA'S aspect the rectangle is fitted to (a uniform, never
+    /// the shape): the SSR march, its resolve and the reprojection work in the
+    /// SHOT's uv, which is the letterbox rectangle's (SSR-LETTERBOX-1), and
+    /// applyViewGlobals derives the rectangle from this and the view's size
+    /// exactly as OgreView::applyLetterbox does.
+    float letterboxAspect = 0.0f;
 
     // ---- Engine-drawn overlay (STATS_OVERLAY_SPEC.md §6.5) ----
     /// Whether the FINAL overlay pass gets mIncludeOverlays = true. This is a
@@ -1414,7 +1420,11 @@ void initSmaa(Ogre::Root *root, int preset);
 /// is not ours to reinvent. `reprojection` is the view's frame-to-frame state,
 /// declared below beside applyViewGlobals.
 struct SsrReprojection;
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &reprojection);
+/// `shot` is the letterbox's inner rectangle in the target's uv (x, y, w, h) —
+/// (0, 0, 1, 1) without a letterbox — the map between the SHOT's uv, which the
+/// march, the resolve and the reprojection work in, and the textures they read.
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
+               SsrReprojection &reprojection);
 // ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
 //
 // This was ONE function, `applyGlobals`, called once a frame from the primary

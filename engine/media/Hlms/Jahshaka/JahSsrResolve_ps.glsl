@@ -131,6 +131,11 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform mat4 reprojectMatrix;
 	uniform vec4 resolveParams;		// x roughness cutoff, y intensity,
 									// z the cutoff's feather, w unused
+	// THE SHOT'S UV MAP (SSR-LETTERBOX-1; the march's note): the ray buffer
+	// holds hit coordinates in the SHOT's uv, and so does the reprojection;
+	// only a texture read converts. x, y = the letterbox rectangle's corner,
+	// z, w = 1 - its size; zeros = no letterbox.
+	uniform vec4 shotInset;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -161,6 +166,12 @@ const float kSsrMaxRadiance = 1024.0;
 /// neighbourhood instead, because a single sample of a value the buffer could
 /// not represent carries no information about the lobe, and the neighbourhood
 /// does.
+// The shot's uv -> the target's (exact in float without a letterbox).
+vec2 jahShotToTex( vec2 uv )
+{
+	return shotInset.xy + uv * ( vec2( 1.0 ) - shotInset.zw );
+}
+
 vec4 ssrHistoryTap( vec2 uv )
 {
 	const vec3 c = texture( vkSampler2D( prevFrame, linearSampler ), uv ).xyz;
@@ -306,7 +317,9 @@ void main()
 		covHit += tentW * smoothstep( kMirrorTrustLo, kMirrorTrustHi, taps[i].w );
 		if( trusted )
 			++nTrust;
-		const vec2 d = abs( taps[i].xy - refUv ) * rayBufferRes.xy;
+		// In ray-buffer texels: the coordinates are the SHOT's, so the shot's
+		// share of the buffer scales them (x 1 without a letterbox).
+		const vec2 d = abs( taps[i].xy - refUv ) * rayBufferRes.xy * ( vec2( 1.0 ) - shotInset.zw );
 		if( max( d.x, d.y ) > kCoordSpreadTexels )
 			continue;
 		if( trusted )
@@ -538,7 +551,7 @@ void main()
 	// ever lands in it.
 	const float hitDepth =
 		texelFetch( vkSampler2D( depthTexture, pointSampler ),
-					min( ivec2( ray.xy * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) ), 0 ).x;
+					min( ivec2( jahShotToTex( ray.xy ) * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) ), 0 ).x;
 	const vec4	was		 = reprojectMatrix * vec4( ray.xy, hitDepth, 1.0 );
 	if( was.w <= 0.0 )
 	{
@@ -554,7 +567,10 @@ void main()
 		fragColour = vec4( 0.0 );
 		return;
 	}
-	const vec4 centreTap = ssrHistoryTap( prevUv );
+	// The history is a texture of the whole target: read it where the shot's
+	// point lands in it.
+	const vec2 prevTex = jahShotToTex( prevUv );
+	const vec4 centreTap = ssrHistoryTap( prevTex );
 	vec3	   reflected  = centreTap.xyz;
 
 	// THE FIREFLY CLAMP, the second line of defence and the only one that also
@@ -581,10 +597,10 @@ void main()
 		// Each tap goes through ssrHistoryTap on its OWN, not after the
 		// average: one +Inf neighbour must not drag the other three to zero and
 		// collapse the ceiling this pixel is measured against.
-		const vec3	nbr = ( ssrHistoryTap( prevUv + vec2( -t.x, -t.y ) ).xyz +
-							ssrHistoryTap( prevUv + vec2( t.x, -t.y ) ).xyz +
-							ssrHistoryTap( prevUv + vec2( -t.x, t.y ) ).xyz +
-							ssrHistoryTap( prevUv + vec2( t.x, t.y ) ).xyz ) *
+		const vec3	nbr = ( ssrHistoryTap( prevTex + vec2( -t.x, -t.y ) ).xyz +
+							ssrHistoryTap( prevTex + vec2( t.x, -t.y ) ).xyz +
+							ssrHistoryTap( prevTex + vec2( -t.x, t.y ) ).xyz +
+							ssrHistoryTap( prevTex + vec2( t.x, t.y ) ).xyz ) *
 						  0.25;
 		// THE UNREPRESENTABLE SAMPLE TAKES THE NEIGHBOURHOOD, not a clamped
 		// version of itself (see ssrHistoryTap): the lobe stand-in the firefly

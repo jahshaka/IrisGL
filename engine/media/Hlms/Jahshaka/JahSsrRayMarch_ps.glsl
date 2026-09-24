@@ -44,7 +44,8 @@
 //    exactly like ogre-patch 0011 taught the SSAO shader to.
 //
 // OUTPUT (PFG_RGBA16_UNORM, so every channel must be [0,1]):
-//    xy = the texture-space coordinate the ray hit
+//    xy = the coordinate the ray hit, in the SHOT's uv (the target's without a
+//         letterbox; the resolve maps it back — SSR-LETTERBOX-1)
 //    z  = the ENVELOPE: how gracefully the technique has to stop here. The
 //         distance fade (1 at the origin falling to 0 at maxDistance), the
 //         SCREEN EDGE ramp, the "this reflection points back at the camera"
@@ -121,6 +122,18 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// uniform-coherent over the quad, and a permutation would recompile the
 	// marcher every time a project changed the row.
 	uniform vec4 marchParams;
+	// THE SHOT'S UV MAP (SSR-LETTERBOX-1). Under a letterbox the camera's
+	// projection lands in the target's INNER rectangle while this quad covers
+	// the whole target, so the march works in the SHOT's uv ([0,1] over the
+	// rectangle: `viewToTextureSpaceMatrix` is the shot's own map) and converts
+	// to the target's only to read a texture (jahShotToTex). An INSET, so the
+	// constant buffer's zeros are the identity: x, y = the rectangle's corner;
+	// z, w = 1 - its width, height. chain::updateSsr pushes it.
+	uniform vec4 shotInset;
+	// The camera's frustum span per unit of uv (view-space x per u, y per v, at
+	// z = 1): what corrects the quad's interpolated view vector, which is
+	// spread over the whole target, to the shot's uv.
+	uniform vec4 cameraSpan;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -147,9 +160,17 @@ float jahViewDistance( float d )
 	return projectionParams.y / ( d - projectionParams.x );
 }
 
+// The shot's uv -> the target's, where every texture of this pass lives. Exact
+// in float without a letterbox (0 + uv * 1).
+vec2 jahShotToTex( vec2 uv )
+{
+	return shotInset.xy + uv * ( vec2( 1.0 ) - shotInset.zw );
+}
+
+// ...and the depth at a SHOT uv.
 float jahSceneDepthAt( vec2 uv )
 {
-	return texture( vkSampler2D( depthTexture, samplerState ), uv ).x;
+	return texture( vkSampler2D( depthTexture, samplerState ), jahShotToTex( uv ) ).x;
 }
 
 // THE RAY'S OWN RANGE (SSR-EDGE-1): how far along `rayDir` the march can follow
@@ -180,7 +201,20 @@ float jahRayRange( vec3 origin, vec3 rayDir, float maxDistance )
 
 void main()
 {
-	const float rawDepth = jahSceneDepthAt( inPs.uv0 );
+	// THIS PIXEL IN THE SHOT (SSR-LETTERBOX-1): outside the letterbox's
+	// rectangle there is no shot, and nothing to march. Without a letterbox
+	// shotUv IS inPs.uv0, bit for bit ((uv - 0) / 1).
+	const vec2 shotUv = ( inPs.uv0 - shotInset.xy ) / ( vec2( 1.0 ) - shotInset.zw );
+	if( shotUv.x < 0.0 || shotUv.x > 1.0 || shotUv.y < 0.0 || shotUv.y > 1.0 )
+	{
+		fragColour = vec4( 0.0 );
+		return;
+	}
+	// ...and the view vector through it: the quad's corners interpolated at the
+	// target's uv, corrected to the shot's (exactly zero without a letterbox).
+	const vec3 cameraDir = inPs.cameraDir + vec3( ( shotUv - inPs.uv0 ) * cameraSpan.xy, 0.0 );
+
+	const float rawDepth = jahSceneDepthAt( shotUv );
 	// Cleared depth at either extreme = no geometry (the sky quad writes colour,
 	// never depth). Reject both, so this is correct with and without reverse Z.
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
@@ -246,12 +280,12 @@ void main()
 	vec3 toSurface;
 	if( orthoParams.x > 0.5 )
 	{
-		origin	  = vec3( inPs.cameraDir.xy * orthoParams.y, jahViewDistance( rawDepth ) );
+		origin	  = vec3( cameraDir.xy * orthoParams.y, jahViewDistance( rawDepth ) );
 		toSurface = vec3( 0.0, 0.0, 1.0 );
 	}
 	else
 	{
-		origin	  = inPs.cameraDir * jahViewDistance( rawDepth );
+		origin	  = cameraDir * jahViewDistance( rawDepth );
 		toSurface = normalize( origin );
 	}
 	const vec3 rayDir	 = reflect( toSurface, normalVS );
@@ -510,7 +544,7 @@ void main()
 	// Both are ZERO-COST where the trace was already trustworthy — a flat floor
 	// reflecting the room in front of it arrives at its hits face-on and well
 	// inside the tolerance, so both terms are 1 and the frame does not move.
-	vec3 hitNormal = texture( vkSampler2D( gBufNormals, samplerState ), hitUv ).xyz * 2.0 - 1.0;
+	vec3 hitNormal = texture( vkSampler2D( gBufNormals, samplerState ), jahShotToTex( hitUv ) ).xyz * 2.0 - 1.0;
 	float arrival = 0.0;
 	if( dot( hitNormal, hitNormal ) > 1e-6 )
 	{

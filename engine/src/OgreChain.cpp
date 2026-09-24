@@ -3110,10 +3110,40 @@ void initSmaa(Ogre::Root *root, int preset) {
 //      (VIEW_SPACE_CORNERS_NORMALIZED_LH) and therefore the whole march use.
 //   3. left-multiply by the clip→image matrix — the *0.5+0.5 and the y flip, so
 //      the shader divides by w and has a texture coordinate, full stop.
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &reprojection) {
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
+               SsrReprojection &reprojection) {
     if (!camera || desc.ssr <= 0) return;
     Ogre::Pass *march = materialPass("Jahshaka/SsrRayMarch");
     if (!march) return;
+
+    // THE SHOT'S UV MAP (SSR-LETTERBOX-1). Under a constrained-aspect camera the
+    // prepass draws the shot into the letterbox's inner rectangle, while every
+    // quad here covers the whole target: so the march, the resolve and the
+    // reprojection work in the SHOT's uv — where the camera's projection lands,
+    // [0,1] over the rectangle — and convert to the target's uv only to read a
+    // texture. Pushed as an INSET, (x, y, 1 - w, 1 - h), so the constant
+    // buffer's zeros are the identity rectangle: a frame drawn before this runs
+    // is the unletterboxed map, not a division by zero. Without a letterbox the
+    // map is (0, 0, 1, 1) and every conversion is exact in float (x - 0, x / 1,
+    // 0 + x * 1), so an unletterboxed frame is bit-for-bit what it was.
+    const Ogre::Vector4 shotInset(shot[0], shot[1], 1.0f - shot[2], 1.0f - shot[3]);
+    // THE FRUSTUM'S SPAN over the shot, for the march's view vector: the quad
+    // interpolates the camera's far corners (VIEW_SPACE_CORNERS_NORMALIZED_LH)
+    // over the WHOLE target, so under a letterbox the interpolated direction at
+    // a pixel is the one for the wrong uv. It is affine in uv — the corners lie
+    // on the plane z = 1 and view space has no roll — so the march corrects it
+    // by (shotUv - targetUv) times this span: the corners computed exactly as
+    // CompositorPassQuad computes them (OgreCompositorPassQuad.cpp:237-259).
+    Ogre::Vector4 cameraSpan(0.0f, 0.0f, 0.0f, 0.0f);
+    {
+        const Ogre::Matrix4 &viewMat = camera->getViewMatrix(true);
+        const Ogre::Vector3 *corners = camera->getWorldSpaceCorners();
+        const Ogre::Real farPlane = camera->getFarClipDistance();
+        const Ogre::Vector3 upperLeft = (viewMat * corners[5]) / farPlane;
+        const Ogre::Vector3 bottomLeft = (viewMat * corners[6]) / farPlane;
+        const Ogre::Vector3 upperRight = (viewMat * corners[4]) / farPlane;
+        cameraSpan = Ogre::Vector4(upperRight.x - upperLeft.x, bottomLeft.y - upperLeft.y, 0.0f, 0.0f);
+    }
 
     static const Ogre::Matrix4 kClipToImage(0.5,  0.0, 0.0, 0.5,
                                             0.0, -0.5, 0.0, 0.5,
@@ -3127,6 +3157,8 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &rep
     Ogre::GpuProgramParametersSharedPtr ps = march->getFragmentProgramParameters();
     ps->setNamedConstant("projectionParams", camera->getProjectionParamsAB());
     ps->setNamedConstant("viewToTextureSpaceMatrix", m);
+    ps->setNamedConstant("shotInset", shotInset);
+    ps->setNamedConstant("cameraSpan", cameraSpan);
     // THE PROJECTION TYPE, because the march's whole reconstruction depends on
     // it (JahSsrRayMarch_ps.glsl's ORTHOGRAPHIC note). The far plane rides
     // along as the scale that turns the normalized corner back into view-space
@@ -3207,6 +3239,7 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &rep
                              Ogre::Vector4(desc.reflectionRoughnessCutoff, desc.ssrIntensity,
                                            kRayReflectFeather, 0.0f));
         rp->setNamedConstant("reprojectMatrix", reproject);
+        rp->setNamedConstant("shotInset", shotInset);
     }
 }
 
@@ -3294,8 +3327,16 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
                    unsigned(float(viewHeight) * desc.ssaoScale),
                    desc.ssaoRadius, desc.ssaoPower);
     }
-    if (marchesInScreenSpace(desc)) updateSsr(camera, desc, reprojection);
-    else reprojection.have = false;
+    if (marchesInScreenSpace(desc)) {
+        // The letterbox's inner rectangle, derived exactly as
+        // OgreView::applyLetterbox derives the one it writes onto the passes.
+        float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+        if (desc.letterbox && viewHeight)
+            letterboxRect(desc.letterboxAspect, float(viewWidth) / float(viewHeight), shot);
+        updateSsr(camera, desc, shot, reprojection);
+    } else {
+        reprojection.have = false;
+    }
     if (!desc.looks.empty()) updateLooks(desc);
     if (desc.distortion) updateDistortion(desc);
 }
