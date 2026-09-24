@@ -1182,6 +1182,7 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
                 const bool shown = (r.flags & kGpuVisible) != (f & kGpuVisible);
                 if (turned || shown) {
                     CardCasterMove m;
+                    m.node = r.node;
                     m.oldMin = r.min;
                     m.oldMax = r.max;
                     m.newMin = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);

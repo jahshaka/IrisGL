@@ -1646,7 +1646,12 @@ void SurfaceCache::traceMovers() {
             const Footprint n = boxFootprint(sf, m.newMin, m.newMax);
             for (unsigned i = 0; i < mCards.size(); ++i) {
                 CardRec &c = mCards[i];
-                if (c.queued || !c.lastUpdated) continue;
+                // Not yet captured, already queued, captured THIS frame (after the
+                // scene graph: it holds the caster where it is now), or the
+                // caster's own (a moved instance re-allocates its cards, a hidden
+                // one gives them back).
+                if (c.queued || !c.lastUpdated || c.lastUpdated == mFrame) continue;
+                if (mInstances[c.instance].node == m.node) continue;
                 const Footprint &cf = cardFpAt(i);
                 if (!shades(o, cf) && !shades(n, cf)) continue;
                 c.queued = true;

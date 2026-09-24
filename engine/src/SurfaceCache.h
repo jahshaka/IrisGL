@@ -251,6 +251,7 @@ struct CardMoverBox {
     Ogre::Vector3 min, max;      ///< the world AABB
 };
 struct CardCasterMove {
+    NodeId node = 0;
     Ogre::Vector3 oldMin, oldMax;   ///< the world AABB at the previous transform
     Ogre::Vector3 newMin, newMax;
 };
