@@ -46,11 +46,12 @@
 //   SURFACE, and it is what sizes the footprint. They are equal in the first
 //   cascade. At a hop the age is carried into the new cascade's units along
 //   the direction of travel. The specular walk does NOT carry it (it restarts
-//   at every hop, upstream's behaviour): its escape rides the raw directional
-//   alpha, which over-states occlusion at a coarse mip, and the true (wider)
-//   footprint fed to that estimate took the reflected sky from 1.00/0.85/0.85
-//   to 1.00/0.43/0.34 at one/two/four cascades (gi.cascades case 7); the cure
-//   is the specular escape reading the occupancy estimate too — its own lane.
+//   at every hop, upstream's behaviour): its environment share rides the raw
+//   directional COLOUR opacity, which over-states occlusion at a coarse mip, and
+//   the true (wider) footprint fed to it took the reflected sky from
+//   1.00/0.85/0.85 to 1.00/0.43/0.34 at one/two/four cascades (gi.cascades case
+//   7). The specular walk keeps NO escape estimate at all (SPEC-ESCAPE-CRUD:
+//   nobody read it); reading the occupancy estimate there is its own lane.
 //
 //   THE ESCAPE ESTIMATE (0021, 0084). `alpha` is the colour composite's
 //   opacity and decides when the march stops; `escapeAlpha` is the separate
@@ -58,6 +59,8 @@
 //   ambient (the sky) rides. They are the same accumulation wherever the
 //   isotropic volume is read and differ only in the anisotropic stretch, where
 //   the escape reads jahVoxelOccupancy (why: its comment, in the sample file).
+//   Only the DIFFUSE walks keep it; JAH_MARCH_NO_ESCAPE and the specular walk
+//   skip it and return `escapeAlpha` equal to `alpha`.
 //
 //   THE HOP (0070 bias, 0033 assign, 0074 single transmittance). A cone that
 //   leaves a cascade — its footprint has grown to the next cascade's cell, or
@@ -92,6 +95,10 @@ const uint JAH_MARCH_GAP_ALONG_DIR = 8u;	///< the hop's step back is measured al
 /// The caller never reads `escapeAlpha` (the bounce job; the field's probe rays, whose
 /// escape is their own composite): the occupancy estimate's six alpha fetches per
 /// anisotropic step are skipped, and `escapeAlpha` comes back equal to `alpha`.
+/// THE SPECULAR WALK IMPLIES IT (SPEC-ESCAPE-CRUD, PHOTON P3): its one caller, the
+/// pixel's specular cone (Vct_piece_ps.any), weights the environment by the COLOUR
+/// composite's opacity (`specAlpha`) and never read `escapeAlpha` — the six fetches a
+/// step were paid for nothing on every glossy pixel inside a volume.
 const uint JAH_MARCH_NO_ESCAPE = 16u;
 /// Stop after the FIRST sample (the parity harness's "the march at zero length":
 /// what the march reads at a point, against the ray hit's read of it). No consumer
@@ -117,6 +124,8 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 								   float startingEscapeAlpha, float startingTravelled, uint flags )
 {
 	bool specular = ( flags & JAH_MARCH_SPECULAR ) != 0u;
+	// No escape estimate: asked for, or the specular walk (see JAH_MARCH_NO_ESCAPE).
+	bool noEscape = ( flags & ( JAH_MARCH_NO_ESCAPE | JAH_MARCH_SPECULAR ) ) != 0u;
 	vec4 invRes_maxLod = vec4( JAH_VOX_INVRES( c ), JAH_VOX_MAXLOD( c ) );
 	float vctInvResolution = dot( abs( dirLS ), invRes_maxLod.xyz );
 	float resolution = 1.0 / vctInvResolution;
@@ -216,7 +225,7 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 
 			color += sampleColour.xyz * a;
 			alpha += a * sampleColour.w;
-			if( ( flags & JAH_MARCH_NO_ESCAPE ) == 0u )
+			if( !noEscape )
 				escapeAlpha += ( 1.0 - escapeAlpha ) * jahVoxelOccupancy( c, sampleUVW, lodLevel );
 
 			dist += diameter * 0.5;
@@ -236,7 +245,7 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 	JahConeResult result;
 	result.colour = color;
 	result.alpha = alpha;
-	result.escapeAlpha = ( flags & JAH_MARCH_NO_ESCAPE ) != 0u ? alpha : escapeAlpha;
+	result.escapeAlpha = noEscape ? alpha : escapeAlpha;
 	result.lodLevel = lodLevel;
 	result.posLS = nextPosLS;
 	result.travelled = travelled;
