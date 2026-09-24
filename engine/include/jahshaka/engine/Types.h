@@ -3168,6 +3168,15 @@ struct GatherTuning {
     /// is projected from its own 64 rays alone — the A/B that prices the filter
     /// and measures what it buys.
     bool     filterOff = false;
+    /// THE PIXEL HISTORY'S MEMORY (PHOTON-GATHER-1c): the frames after which
+    /// its running mean becomes an EMA at 1/historyFrames — a TRUE mean for
+    /// that many frames, then each new frame weighs 1/historyFrames. 0 = the
+    /// shipped 10 (the trade, measured on gi.gather_stable's room: the
+    /// frame-to-frame flicker is ~ the floor x the single-frame innovation —
+    /// 9 codes each frame alone -> 1 code; a lighting step of D codes arrives
+    /// within 1 code after ln(1/D)/ln(1 - 1/historyFrames) frames — 16 for a
+    /// 5-code step). Clamped to 1..63 (the count's six bits).
+    unsigned historyFrames = 0u;
 };
 
 // THE PIXEL HISTORY'S MEASUREMENT LEVER (PHOTON-GATHER-1c item 3) is an

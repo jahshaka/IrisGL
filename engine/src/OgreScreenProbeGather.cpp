@@ -128,7 +128,7 @@ struct GatherParams {
 /// a new frame's share is 1/n until n reaches it, then 1/kHistoryFrames. It is
 /// the trade between stillness and lag, both measured by gi.gather_stable on the
 /// Showroom-2-shaped room: at 10 (Lumen's own default for its screen-probe
-/// history) a still view steps by at most 1/255 at every sampled pixel after the
+/// history; GatherTuning::historyFrames is the A/B door) a still view steps by at most 1/255 at every sampled pixel after the
 /// warm-up (9/255 with each frame alone), and a lamp switched off is within one
 /// code of its settled picture 16 frames later (0 with each frame alone).
 constexpr float kHistoryFrames = 10.0f;
@@ -141,7 +141,8 @@ bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
     return a.probeStride == b.probeStride && a.octRes == b.octRes && a.rayLength == b.rayLength &&
            a.adaptiveCap == b.adaptiveCap && a.freezeFrameIndex == b.freezeFrameIndex &&
            a.jitterOff == b.jitterOff && a.farQueryOff == b.farQueryOff &&
-           a.shBands == b.shBands && a.filterOff == b.filterOff;
+           a.shBands == b.shBands && a.filterOff == b.filterOff &&
+           a.historyFrames == b.historyFrames;
 }
 
 /// THE ADAPTIVE TEST'S TWO TOLERANCES, and why they are constants rather than
@@ -947,7 +948,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     std::memcpy(pp.prevRayDown, v.prevRayDown, sizeof(pp.prevRayDown));
     std::memcpy(pp.prevFwd, v.prevFwd, sizeof(pp.prevFwd));
     pp.knobs5[0] = float(std::min(v.age, 65535u));
-    pp.knobs5[1] = 1.0f / kHistoryFrames;
+    // The floor: the shipped kHistoryFrames, or the tuning's A/B arm.
+    pp.knobs5[1] = 1.0f / (in.tuning.historyFrames
+                               ? float(std::min(std::max(in.tuning.historyFrames, 1u), 63u))
+                               : kHistoryFrames);
     pp.knobs5[2] = temporal ? 1.0f : 0.0f;
     std::memcpy(v.paramsMapped[ring], &pp, sizeof(pp));
 
