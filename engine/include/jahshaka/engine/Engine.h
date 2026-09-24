@@ -125,25 +125,26 @@ public:
     /// all, or the capture has not run: it happens inside the next rendered
     /// frame, like the IBL convolution).
     ///
-    /// WHEN THE ANSWER CHANGES, exactly (lane ENGINE-SMALL-A / audit ON-14,
-    /// 2026-09-18) — because it is one frame for a lone edit and two for a
-    /// gesture, and a host that renders a fixed number of frames and then
-    /// asserts a picture has to know which:
+    /// THE ENVIRONMENT IS ONE SET (PHOTON-SKY-TRANSIENT-1): this answer, the
+    /// reflection cube every datablock samples and the Sky Light gain change
+    /// TOGETHER. A sky change keeps the previous set bound until the next
+    /// capture, its convolution and its SH have all landed, then swaps the cube
+    /// and these coefficients in one step — never a cube nothing has written,
+    /// never a cube of one sky with the SH of another. And when the ambient in
+    /// force is exactly this answer times the gain pushed through
+    /// setEnvironmentLight (what a host modelling a Sky Light pushes), the
+    /// backend applies the new product itself in the landing frame; the host's
+    /// own push of the same numbers is then a no-op. When that lands:
     ///
-    ///   * A LONE sky change is read SYNCHRONOUSLY, inside the frame that
-    ///     captured it. This call answers with the new sky from the next frame
-    ///     on, and a host pushing the ambient per frame has it in the picture
-    ///     one frame after the capture — the behaviour this contract has always
-    ///     described.
+    ///   * A LONE sky change lands INSIDE the frame that captured it (the
+    ///     capture, the convolution and a synchronous SH read all run before
+    ///     that frame draws): its first frame already shows the whole new set.
     ///   * A GESTURE — a second capture within a couple of drawn frames of the
-    ///     previous one, i.e. a sun being dragged — DEFERS its readback: the
+    ///     previous one, i.e. a sun being dragged — DEFERS its SH readback: the
     ///     download is issued without a flush and read at the top of the NEXT
-    ///     frame, so this call answers with the new sky from that frame on and
-    ///     a host's per-frame push puts it in the picture the frame after, TWO
-    ///     frames behind the capture. In exchange the capture frame does not
-    ///     block on the GPU (measured 0.94 ms of flush and wait per change,
-    ///     i.e. per frame of a drag). Nothing ever flickers: the previous
-    ///     coefficients stay valid until the new ones land.
+    ///     frame, where the set lands; the previous set is drawn meanwhile. In
+    ///     exchange the capture frame does not block on the GPU (measured
+    ///     0.94 ms of flush and wait per change, i.e. per frame of a drag).
     ///
     /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture — the
     /// run-wide diagnostic latch this engine's measurable rules carry, and the
