@@ -623,10 +623,26 @@
 	// the view-space position (the camera's pinhole); the hook right after it is
 	// the per-datablock custom_ps_preLights, which a decode twin never carries (a
 	// datablock with a custom piece gets no twin, HlmsAtom::decodeTwinFor).
+	// EVERYTHING LightingHeader DERIVED FROM THE PINHOLE is re-derived here: NdotV,
+	// the REFLECTION VECTOR (every specular environment read - the probe's
+	// localCorrect, the PCC/VCT blend, the dominant direction, the cubemap, the
+	// VCT specular cone - reads reflDir, which LightingHeader formed from the
+	// camera's eye vector: the camera-to-hit direction mirrored, garbage for a hit
+	// behind the camera) and the hemisphere ambient's specular weight, which
+	// DoAmbientHeader formed from that reflDir. The Fresnel terms read NdotV and
+	// the lights' half vectors read viewDir inside BRDF, after this piece.
 	@property( needs_view_dir )
 		@piece( custom_ps_preLights )
 			pixelData.viewDir = atomHitViewDir;
 			pixelData.NdotV = saturate( dot( pixelData.normal, pixelData.viewDir ) );
+			@property( needs_refl_dir )
+				pixelData.reflDir = _h( 2.0 ) * dot( pixelData.viewDir, pixelData.normal ) * pixelData.normal -
+									pixelData.viewDir;
+				@property( ambient_hemisphere )
+					ambientWS = dot( midf3_c( passBuf.ambientHemisphereDir.xyz ), pixelData.reflDir ) * _h( 0.5 ) +
+								_h( 0.5 );
+				@end
+			@end
 		@end
 	@end
 	// THE SUN'S SHADOW IS THE RECORD'S SHADOW RAY. Upstream's piece reads the PSSM

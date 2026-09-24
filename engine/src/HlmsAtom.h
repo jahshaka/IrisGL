@@ -196,6 +196,14 @@ public:
     /// LoadMaterial indexes. 0xFFFFFFFF for anything that is not a PBS datablock.
     static uint32_t materialWordOf(const Ogre::HlmsDatablock *pbs);
     static constexpr uint32_t kNoMaterialWord = 0xFFFFFFFFu;
+    /// THE TEXTURE SET of a PBS datablock as one key: every slot's texture and
+    /// samplerblock (the public getters; the baked descriptor sets are Ogre's
+    /// protected state). A same-slot texture swap keeps the Hlms hash — the
+    /// property vector does not change — and a decode twin is a CLONE that
+    /// resolved the OLD texture by name, so the twin's staleness witness carries
+    /// this beside the hash (PHOTON-HIT-SHADE-1 audit F6). 0 for anything that
+    /// is not a PBS datablock.
+    static uint64_t textureSetKeyOf(const Ogre::HlmsDatablock *pbs);
 
     Ogre::uint32 fillBuffersForV2(const Ogre::HlmsCache *cache,
                                   const Ogre::QueuedRenderable &queuedRenderable, bool casterPass,

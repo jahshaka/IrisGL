@@ -145,6 +145,26 @@ void HlmsAtom::setDecodeSource(const DecodeSource &src) {
     }
 }
 
+uint64_t HlmsAtom::textureSetKeyOf(const Ogre::HlmsDatablock *db) {
+    if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return 0u;
+    const auto *pbsDb = static_cast<const Ogre::HlmsPbsDatablock *>(db);
+    // FNV-1a over the pointers, slot by slot (a swap between two slots moves it).
+    uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](const void *p) {
+        uint64_t v = uint64_t(reinterpret_cast<uintptr_t>(p));
+        for (int b = 0; b < 8; ++b) {
+            h ^= (v & 0xFFu);
+            h *= 1099511628211ull;
+            v >>= 8u;
+        }
+    };
+    for (Ogre::uint8 t = 0; t < Ogre::NUM_PBSM_TEXTURE_TYPES; ++t) {
+        mix(pbsDb->getTexture(t));
+        mix(pbsDb->getSamplerblock(t));
+    }
+    return h;
+}
+
 uint32_t HlmsAtom::materialWordOf(const Ogre::HlmsDatablock *db) {
     if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS)
         return kNoMaterialWord;

@@ -398,12 +398,14 @@ private:
         std::vector<uint32_t> decodeWords;
         unsigned long long decodeWrites = ~0ull;
         unsigned long long decodeEpoch = ~0ull;
-        /// One item wearing each synced word, and its datablock and Hlms hash when
-        /// last seen (the twin's staleness witness).
+        /// One item wearing each synced word, and its datablock, Hlms hash and
+        /// texture set (HlmsAtom::textureSetKeyOf) when last seen (the twin's
+        /// staleness witness).
         struct DecodeWitness {
             uint32_t slot = 0u;
             const Ogre::HlmsDatablock *db = nullptr;
             Ogre::uint32 hash = 0u;
+            uint64_t texKey = 0u;
         };
         std::vector<DecodeWitness> decodeWitness;
 
@@ -2973,7 +2975,10 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         // datablock changes the permutation of (HlmsDatablock::flushRenderables),
         // so one item wearing each word is the witness: its hash or its datablock
         // moved -> the twin dies (forgetDecodeTwinOf; the epoch moves) and the next
-        // sync re-derives it. One compare per material per frame.
+        // sync re-derives it. A SAME-SLOT TEXTURE SWAP keeps the hash (the property
+        // vector is unchanged) and the twin would keep the old texture in every hit:
+        // the witness carries the datablock's texture set too (audit F6). One hash
+        // compare and one texture-set key per material per frame.
         if (atom && gsc.live()) {
             for (auto &w : sa.decodeWitness) {
                 if (w.slot >= scene->mItemNodes.size()) continue;
@@ -2982,9 +2987,11 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 const Ogre::SubItem *sub = nd->item->getSubItem(0);
                 const Ogre::HlmsDatablock *db = sub->getDatablock();
                 const Ogre::uint32 h = sub->getHlmsHash();
-                if (db == w.db && h != w.hash && db) atom->forgetDecodeTwinOf(db);
+                const uint64_t tk = HlmsAtom::textureSetKeyOf(db);
+                if (db == w.db && (h != w.hash || tk != w.texKey) && db) atom->forgetDecodeTwinOf(db);
                 w.db = db;
                 w.hash = h;
+                w.texKey = tk;
             }
         }
         if (atom && gsc.live() &&
@@ -3015,6 +3022,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                         const Ogre::SubItem *sub = scene->mItemNodes[i]->item->getSubItem(0);
                         dw.db = sub->getDatablock();
                         dw.hash = sub->getHlmsHash();
+                        dw.texKey = HlmsAtom::textureSetKeyOf(dw.db);
                     }
                     witness.push_back(dw);
                 }
@@ -6095,7 +6103,9 @@ bool RayQueryTier::decodeTwinsStale(OgreScene *scene) const {
         const OgreScene::Node *nd = scene->mItemNodes[w.slot];
         if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
         const Ogre::SubItem *sub = nd->item->getSubItem(0);
-        if (sub->getDatablock() != w.db || sub->getHlmsHash() != w.hash) return true;
+        if (sub->getDatablock() != w.db || sub->getHlmsHash() != w.hash ||
+            HlmsAtom::textureSetKeyOf(w.db) != w.texKey)
+            return true;
     }
     return false;
 }
