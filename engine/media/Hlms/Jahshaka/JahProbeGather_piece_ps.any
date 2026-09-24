@@ -18,9 +18,11 @@
 // every other diffuse-GI source adds itself — and it is EMPTY in this engine,
 // because nothing here ever binds an Ogre IrradianceVolume (the piece is
 // defined only under the `irradiance_volumes` property, which is never set).
-// Taking it costs no patch. It is also a SPIKE'S shape and not a shipping one:
-// phase 2 puts the read where the spec says, behind the cage-guard hook of
-// patch 0085, and this piece goes away with the rest of the spike.
+// Taking it costs no patch. The read itself is final since phase 2
+// (PHOTON-GATHER-1b): the integrate writes E/pi at the pixel's normal, and the
+// irradiance field's cage stands down where a probe answered through the fork
+// commit for patch 0086's hook; a blended fragment never reads it (the
+// listener withdraws the property per renderable, GA-GLASS).
 //
 // THE GUARD IS SIX TERMS AND EVERY ONE OF THEM EARNS ITS PLACE, two of them
 // because a missing one does not draw the wrong picture, it LOSES THE FRAME

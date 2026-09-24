@@ -20,17 +20,21 @@
 // passes between them is this file: a small service interface (`Host`) and a
 // per-frame input record the tier fills from the scene it is friends with.
 //
-// WHAT IS DELIBERATELY ABSENT AT PHASE 1: no spatial filter, no temporal
-// accumulation, no SH record, no plane-weighted four-probe interpolation, no
-// importance sampling, no card read at the hit, no stereo. The picture is
-// therefore BLOCKY at the probe stride and NOISY at 64 rays, which is why the
-// row is `GiToggle::Auto` = OFF at every tier until phases 2 and 3 land.
+// WHAT IT DOES SINCE PHASE 2 (PHOTON-GATHER-1b): the trace's map is FILTERED
+// in probe space (the 3x3 neighbourhood, weighted by plane and hit-distance
+// agreement), projected onto SH9 per probe, and every pixel reads its four grid
+// probes and its cell's adaptive twin weighted by the plane test, each
+// evaluated at the pixel's own normal. WHAT IS STILL ABSENT: temporal
+// accumulation and importance sampling (phase 3, PHOTON-GATHER-1c), the card
+// read at the hit, stereo — so the row stays `GiToggle::Auto` = OFF at every
+// tier until PHOTON-GATHER-1d.
 #pragma once
 
 #include "jahshaka/engine/Types.h"
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #ifdef JAH_RAY_QUERY
 #    include <vulkan/vulkan.h>
@@ -186,6 +190,7 @@ private:
     struct View {
         VkDescriptorSet placeSets[3] = {};
         VkDescriptorSet traceSets[3] = {};
+        VkDescriptorSet filterSets[3] = {};
         VkDescriptorSet integrateSets[3] = {};
         VkBuffer params[3] = {};
         VkDeviceMemory paramsMemory[3] = {};
@@ -209,6 +214,11 @@ private:
         VkImage atlas = VK_NULL_HANDLE;
         VkDeviceMemory atlasMemory = VK_NULL_HANDLE;
         VkImageView atlasView = VK_NULL_HANDLE;
+        /// THE FILTERED ATLAS (PHOTON-GATHER-1b): the same layout as the raw
+        /// one, written by the filter; the raw one is kept for phase 3.
+        VkImage filtered = VK_NULL_HANDLE;
+        VkDeviceMemory filteredMemory = VK_NULL_HANDLE;
+        VkImageView filteredView = VK_NULL_HANDLE;
         Ogre::TextureGpu *irradiance = nullptr;
 
         const detail::OgreScene *scene = nullptr;
@@ -223,11 +233,26 @@ private:
         unsigned adaptiveAsked = 0u;     ///< ...before the cap clamped it
         unsigned long long vramBytes = 0ull;
 
+        /// THE IRRADIANCE READBACK (GatherTuning::readback): a host-visible
+        /// ring of kFramesInFlight full-resolution copies, allocated on the first
+        /// frame that asks and freed with the view, and the last retired copy
+        /// decoded to floats for GatherStatus.
+        VkBuffer irrReadback = VK_NULL_HANDLE;
+        VkDeviceMemory irrReadbackMemory = VK_NULL_HANDLE;
+        void *irrReadbackMapped = nullptr;
+        std::vector<float> irrHost;
+        unsigned irrHostFrame = 0u;
+
         unsigned querySlot = 0u, queryBase = 0u;
         bool hasQueryBase = false;
-        struct Pending { uint32_t frame = 0u; bool live = false; };
+        struct Pending {
+            uint32_t frame = 0u;
+            bool live = false;
+            bool irradiance = false;     ///< this slot of the readback ring was written
+            unsigned gatherFrame = 0u;   ///< ...by this gather frame
+        };
         Pending pending[3];
-        float placeMs = -1.0f, traceMs = -1.0f, integrateMs = -1.0f, cpuMs = -1.0f;
+        float placeMs = -1.0f, traceMs = -1.0f, filterMs = -1.0f, integrateMs = -1.0f, cpuMs = -1.0f;
     };
 
     bool makePipelines(std::string &err);
@@ -243,15 +268,19 @@ private:
 
     VkDescriptorSetLayout mPlaceLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout mTraceLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout mFilterLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout mIntegrateLayout = VK_NULL_HANDLE;
     VkPipelineLayout mPlacePipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout mTracePipeLayout = VK_NULL_HANDLE;
+    VkPipelineLayout mFilterPipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout mIntegratePipeLayout = VK_NULL_HANDLE;
     VkPipeline mPlacePipeline = VK_NULL_HANDLE;
     VkPipeline mTracePipeline = VK_NULL_HANDLE;
+    VkPipeline mFilterPipeline = VK_NULL_HANDLE;
     VkPipeline mIntegratePipeline = VK_NULL_HANDLE;
     VkShaderModule mPlaceModule = VK_NULL_HANDLE;
     VkShaderModule mTraceModule = VK_NULL_HANDLE;
+    VkShaderModule mFilterModule = VK_NULL_HANDLE;
     VkShaderModule mIntegrateModule = VK_NULL_HANDLE;
     VkDescriptorPool mPool = VK_NULL_HANDLE;
     VkQueryPool mTimestamps = VK_NULL_HANDLE;

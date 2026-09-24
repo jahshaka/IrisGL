@@ -159,6 +159,25 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
                         hlms->_setTextureReg(tid, Ogre::PixelShader, kExtraPassSlots[i].reg, slot++);
         }
     }
+    {
+        // GA-GLASS (PHOTON-GATHER-1b): A BLENDED FRAGMENT READS NO PROBE. The
+        // gather's texel under a fragment is the OPAQUE surface the prepass drew
+        // there — a glass, fade or additive fragment in front of it would take
+        // that surface's irradiance at full coverage (measured: a Glass slab
+        // moved 1.9/255 and a Blend slab 18.6/255 on the gather's toggle,
+        // gi.gather_glass). So the renderable's copy of the pass property is
+        // withdrawn here, AFTER its texture register was claimed above (the slot
+        // stays bound and numbered — the cloud field's register behind it does
+        // not move — and simply goes undeclared), and every guard that reads it
+        // follows: the piece, the field's cage hook, the declaration, and the
+        // cone-diffuse switch below. The blended fragment keeps the field, the
+        // cones and the environment it had. Cache-safe: derived from two
+        // properties already in the merged set.
+        static const Ogre::IdString kProbeGather("jah_probe_gather");
+        static const Ogre::IdString kAlphaBlend("hlms_alphablend");
+        if (hlms->_getProperty(tid, kProbeGather) && hlms->_getProperty(tid, kAlphaBlend))
+            hlms->_setProperty(tid, kProbeGather, 0);
+    }
     static const Ogre::IdString kIrradianceField("irradiance_field");
     static const Ogre::IdString kVctNumProbes("vct_num_probes");
     static const Ogre::IdString kVctDisableDiffuse("vct_disable_diffuse");

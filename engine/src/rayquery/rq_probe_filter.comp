@@ -1,0 +1,308 @@
+#version 460
+// THE SCREEN-PROBE GATHER, JOB 3 OF 4: THE FILTER IN PROBE SPACE, AND THE SH
+// (PHOTON-GATHER-1b items 2 and 3; SPECS/photon/C2_GATHER_FILTERED_DEFAULT_ON_
+// DESIGN.md sections 1.2 and 1.3).
+//
+// ONE WORKGROUP PER PROBE, one THREAD per texel of its octahedral map — the
+// trace's own shape, dispatched from the same indirect arguments.
+//
+// 1. THE FILTER. Sixty-four rays per probe are a noisy estimate of the
+//    radiance arriving at it; the probes around it traced sixty-four more of
+//    nearly the same function. Each texel of this probe takes the radiance its
+//    3x3 NEIGHBOURHOOD of uniform probes saw IN THE SAME WORLD DIRECTION (the
+//    direction re-expressed in each neighbour's own tangent frame and looked up
+//    in its map — two probes with different normals hold a direction at
+//    different texels), weighted twice:
+//      * by PLANE agreement — the neighbour's position against this probe's
+//        plane and the two normals, the integrate's own test and tolerances
+//        (jahPlaneWeight): a neighbour on another surface saw another
+//        hemisphere and says nothing about this one;
+//      * by HIT-DISTANCE agreement, per texel — a neighbour's ray that hit ten
+//        times nearer (or farther) than this probe's ray in the same direction
+//        found ANOTHER SURFACE (an occluder between the two probes, the edge of
+//        an object), and its radiance is not this direction's. The distance is
+//        the atlas alpha, which is what the trace wrote it for; a miss is at
+//        infinity (two misses agree, a miss never agrees with a hit — and the
+//        ray's length decides nothing). THE TEST IS SYMMETRIC ON PURPOSE, and that is
+//        what keeps the filter unbiased: a weight that depended on which of the
+//        two rays hit (accepting a neighbour's miss beside this probe's hit but
+//        rejecting its nearer hit beside this probe's miss, say) is a weight
+//        correlated with the radiance, and it darkened the analytic gate's
+//        emitter by 7-31 % in the lane's A/B. A hit and a miss beside each
+//        other are two surfaces here, never averaged — the noise of a light's
+//        edge is the temporal pass's to remove (phase 3).
+//    The probe's own texel always weighs 1. An ADAPTIVE probe filters against
+//    its CELL's neighbours (its own cell's uniform probe fails its plane by
+//    construction — that is why it was appended). The nine taps are read in
+//    ONE FIXED ORDER, so the filtered map is a pure function of the atlas:
+//    deterministic by construction.
+//
+// 2. THE SH. The filtered map is projected onto the nine real spherical
+//    harmonics over WORLD axes with each texel's exact solid angle
+//    (jahOctSolidAngle at the texel's centre), convolved with the clamped
+//    cosine and divided by pi, and written into the probe's record — so the
+//    integrate evaluates E/pi at the PIXEL's own normal (a pixel's normal is
+//    not its probe's) with nine multiply-adds per channel. The projection is
+//    normalised per band by the map's own solid-angle sums, and its DC
+//    coefficient is then ANCHORED so the SH at the probe's own normal equals
+//    GATHER-1a's exact ratio estimator there (the anchor's note below: SH9 is
+//    a band-limited kernel, 6-12 % off a rectangular emitter's closed form on
+//    its own). The hemisphere under the probe's plane is ZERO in the projection — nothing traced it — which the SH carries as
+//    an irradiance that falls off with the tilt away from the probe's normal
+//    (exactly (1 + cos t)/2 of a uniform sky), and which the integrate's normal
+//    test keeps small (at most 25 degrees).
+//    The 64 partial sums are reduced by a FIXED-ORDER shared-memory tree —
+//    never an atomic or a subgroup op, whose order is the scheduler's.
+//
+// WHAT IT WRITES: the FILTERED ATLAS (rgb = the filtered radiance, a = this
+// probe's own hit distance) — kept beside the raw one for phase 3's temporal
+// pass — and the record's SH and its E/pi at the probe's own normal.
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+#define JAH_PROBE_PARAMS_BINDING 0
+#include "jah_probe_params.glsl"
+
+layout( std430, set = 0, binding = 1 ) buffer Records { JahProbeRecord r[]; } records;
+layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
+layout( rgba16f, set = 0, binding = 3 ) uniform writeonly image2D filteredAtlas;
+
+
+/// Eight vec4 of partial sums per lane: 27 SH floats (coefficient k, channel c
+/// at 3k + c), the cosine-weighted solid angle in the 28th, and in row 7 the
+/// plain solid angle (x) and the cosine-weighted radiance (yzw) — the exact
+/// quadrature at the probe's own normal that anchors the SH.
+shared vec4 gSum[8][64];
+
+/// THE TAP TABLE (fix round, audit F3): the eight neighbours' per-probe facts —
+/// the tangent frame (T, B, N in xyz), the plane weight against this probe (T.w;
+/// 0 = no tap) and the atlas block (B.w, N.w as floats) — computed ONCE per
+/// workgroup by eight lanes, instead of by all 64 lanes nine times over (every
+/// lane fetched nine records and rebuilt nine frames). Same arithmetic, same
+/// fixed order: the filtered map is bit-identical.
+shared vec4 gTapT[8];
+shared vec4 gTapB[8];
+shared vec4 gTapN[8];
+
+/// A neighbour's ray whose hit distance is this far off this probe's in the
+/// same direction (as the RATIO of the nearer to the farther) is weighed out
+/// entirely; one within this much counts fully. A ratio, so it means the same at
+/// every distance.
+const float kDistanceRatioOut = 0.1;
+const float kDistanceRatioIn = 0.5;
+
+ivec2 blockOf( uint probe )
+{
+	const int atlasCols = max( int( p.knobs3.z ), 1 );
+	return ivec2( int( probe ) % atlasCols, int( probe ) / atlasCols ) * kOctResMax;
+}
+
+void main()
+{
+	const uint probe = gl_WorkGroupID.x;
+	const uint lane = gl_LocalInvocationIndex;
+	const int octRes = int( clamp( p.knobs2.w, 1.0, float( kOctResMax ) ) );
+	const uint rays = uint( octRes * octRes );
+
+	const vec4 posW = records.r[probe].posW;
+	const vec4 normalW = records.r[probe].normalW;
+	const bool onSurface = posW.w > 0.5;
+	const ivec2 block = blockOf( probe );
+	const ivec2 texel = ivec2( int( lane ) % octRes, int( lane ) / octRes );
+
+	// The probe's cell, and the grid it sits in (rq_probe_gather.comp's rule:
+	// an adaptive probe's record names its cell).
+	const ivec2 grid = ivec2( p.resolution.xy );
+	const uint uniformProbes = uint( max( p.knobs3.x, 0.0 ) );
+	const bool adaptive = probe >= uniformProbes;
+	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
+	const ivec2 cell = ivec2( int( cellIndex ) % max( grid.x, 1 ), int( cellIndex ) / max( grid.x, 1 ) );
+
+	// ---- THE TAP TABLE: lane k (0..7) fills neighbour k, row by row with the
+	// centre skipped — the fixed order the taps are summed in.
+	if( lane < 8u )
+	{
+		const int k = int( lane ) < 4 ? int( lane ) : int( lane ) + 1;
+		const ivec2 nc = cell + ivec2( k % 3 - 1, k / 3 - 1 );
+		float wPlane = 0.0;
+		vec3 nT = vec3( 0.0 ), nB = vec3( 0.0 ), nN = vec3( 0.0, 0.0, 1.0 );
+		ivec2 nBlock = ivec2( 0 );
+		if( onSurface && p.knobs4.z > 0.5 && all( greaterThanEqual( nc, ivec2( 0 ) ) ) &&
+			all( lessThan( nc, grid ) ) )
+		{
+			const uint nb = uint( nc.y * grid.x + nc.x );
+			const vec4 nbPos = records.r[nb].posW;
+			if( nbPos.w > 0.5 )
+			{
+				nN = records.r[nb].normalW.xyz;
+				// THE PLANE: the neighbour against THIS probe's plane.
+				wPlane = jahPlaneWeight( posW.xyz, normalW.xyz, nbPos.xyz, nN,
+										 jahViewDistanceOf( posW.xyz ) );
+				jahTangentFrame( nN, nT, nB );
+				nBlock = blockOf( nb );
+			}
+		}
+		gTapT[lane] = vec4( nT, wPlane );
+		gTapB[lane] = vec4( nB, float( nBlock.x ) );
+		gTapN[lane] = vec4( nN, float( nBlock.y ) );
+	}
+	barrier();
+
+	vec3 filtered = vec3( 0.0 );
+	float ownDistance = -1.0;
+	vec3 dirW = vec3( 0.0, 0.0, 1.0 );
+	float solidAngle = 0.0;
+	float cosine = 0.0;
+
+	if( onSurface && lane < rays )
+	{
+		const vec3 n = normalW.xyz;
+		vec3 T, B;
+		jahTangentFrame( n, T, B );
+		// THE TEXEL'S CENTRE DIRECTION and its exact solid angle — the
+		// quadrature the SH projection integrates with.
+		const vec3 octPoint = jahOctPoint( ( vec2( texel ) + 0.5 ) / float( octRes ) );
+		const vec3 dLocal = octPoint / max( length( octPoint ), 1e-6 );
+		dirW = normalize( T * dLocal.x + B * dLocal.y + n * dLocal.z );
+		solidAngle = jahOctSolidAngle( octPoint, float( octRes ) );
+		cosine = max( dLocal.z, 0.0 );
+
+		const vec4 own = imageLoad( probeAtlas, block + texel );
+		ownDistance = own.w;
+		vec3 sum = own.xyz;
+		float wsum = 1.0;
+
+		if( p.knobs4.z > 0.5 )
+		{
+			// THE NINE TAPS, IN ONE FIXED ORDER (row by row); the centre is this
+			// probe itself and is already in the sum. The neighbours' frames and
+			// plane weights come from the workgroup's tap table.
+			for( int k = 0; k < 8; ++k )
+			{
+				const float wPlane = gTapT[k].w;
+				if( wPlane <= 0.0 )
+					continue;
+				const vec3 nT = gTapT[k].xyz, nB = gTapB[k].xyz, nbN = gTapN[k].xyz;
+				// THE SAME WORLD DIRECTION in the neighbour's own frame.
+				const vec3 l = vec3( dot( dirW, nT ), dot( dirW, nB ), dot( dirW, nbN ) );
+				if( l.z <= 0.0 )
+					continue;		// under the neighbour's horizon: it never traced it
+				const ivec2 nt = clamp( ivec2( jahOctUv( l ) * float( octRes ) ), ivec2( 0 ),
+										ivec2( octRes - 1 ) );
+				const vec4 s = imageLoad( probeAtlas,
+										  ivec2( int( gTapB[k].w ), int( gTapN[k].w ) ) + nt );
+				// THE HIT DISTANCE: the same surface, or another one.
+				// A MISS IS AT INFINITY: two misses agree, a miss and a hit never
+				// do (whatever the ray's length happens to be).
+				float wDist = 0.0;
+				if( own.w < 0.0 || s.w < 0.0 )
+					wDist = ( own.w < 0.0 && s.w < 0.0 ) ? 1.0 : 0.0;
+				else
+				{
+					const float ratio = min( own.w, s.w ) / max( max( own.w, s.w ), 1e-6 );
+					wDist = clamp( ( ratio - kDistanceRatioOut ) /
+									   ( kDistanceRatioIn - kDistanceRatioOut ),
+								   0.0, 1.0 );
+				}
+				const float w = wPlane * wDist;
+				if( w <= 0.0 || !finite3( s.xyz ) )
+					continue;
+				sum += s.xyz * w;
+				wsum += w;
+			}
+		}
+		filtered = sum / wsum;
+	}
+
+	// THE FILTERED ATLAS: every texel of the block is written (the padding of a
+	// 6x6 map included), so a reader never finds an older frame's value.
+	imageStore( filteredAtlas,
+				block + ( lane < rays ? texel
+									  : ivec2( int( lane ) % kOctResMax, int( lane ) / kOctResMax ) ),
+				vec4( filtered, ownDistance ) );
+
+	// ---- THE SH PROJECTION, one texel per lane -------------------------------
+	float y[9];
+	jahShBasis9( dirW, y );
+	const float dw = solidAngle;
+	float part[28];
+	for( int k = 0; k < 9; ++k )
+	{
+		const float c = y[k] * dw * jahShCosineOverPi( k );
+		part[3 * k + 0] = filtered.x * c;
+		part[3 * k + 1] = filtered.y * c;
+		part[3 * k + 2] = filtered.z * c;
+	}
+	part[27] = cosine * dw;
+	for( int v = 0; v < 7; ++v )
+		gSum[v][lane] = vec4( part[4 * v], part[4 * v + 1], part[4 * v + 2], part[4 * v + 3] );
+	gSum[7][lane] = vec4( dw, filtered * ( cosine * dw ) );
+	// The fixed-order tree: lane k adds lane k+s for s = 32, 16, 8, 4, 2, 1.
+	for( uint s = 32u; s > 0u; s >>= 1u )
+	{
+		barrier();
+		if( lane < s )
+			for( int v = 0; v < 8; ++v )
+				gSum[v][lane] += gSum[v][lane + s];
+	}
+	barrier();
+	if( lane == 0u )
+	{
+		JahProbeRecord rec = records.r[probe];
+		const float cosSum = gSum[6][0].w;
+		const float omegaSum = gSum[7][0].x;
+		const bool answered = onSurface && cosSum > 1e-6 && omegaSum > 1e-6;
+		// THE RATIO ESTIMATOR'S NORMALISATION, per band: over the hemisphere the
+		// solid angle is 2 pi and the cosine-weighted solid angle pi, exactly; the
+		// quadrature's own sums stand in for them — band 0 by the first, bands 1
+		// and 2 by the second — so a UNIFORM environment reads exactly its
+		// radiance at the probe's normal whatever the quadrature's error (the
+		// uniform hemisphere's band-2 projection is zero).
+		const float norm0 = answered ? 6.28318531 / omegaSum : 0.0;
+		const float norm12 = answered ? 3.14159265 / cosSum : 0.0;
+		for( int v = 0; v < 7; ++v )
+		{
+			vec4 c = gSum[v][0];
+			for( int j = 0; j < 4; ++j )
+			{
+				const int f = 4 * v + j;		// flat float index; coefficient f / 3
+				c[j] *= ( f < 3 ) ? norm0 : norm12;
+			}
+			if( v == 6 )
+				c.w = 0.0;
+			if( !( finite3( c.xyz ) && finite1( c.w ) ) )
+				c = vec4( 0.0 );
+			rec.sh[v] = c;
+		}
+		// THE ANCHOR. A nine-coefficient SH is a band-limited kernel, not the
+		// clamped cosine: evaluated at the probe's own normal it reads a
+		// rectangular emitter's irradiance 6-12 % low near it and 6 % high at a
+		// grazing distance (spikes/photon-gather-1b, the octahedral quadrature
+		// against Lambert's closed form) — where GATHER-1a's quadrature was
+		// exact. So the SH carries the VARIATION with the normal and the exact
+		// quadrature carries the value: the DC coefficient is moved so that the
+		// SH evaluated at the probe's normal IS the ratio estimator's
+		//     E/pi = SUM( L cos dOmega ) / SUM( cos dOmega ),
+		// and a pixel on the probe's own plane reads that exactly while a tilted
+		// one reads it plus the SH's difference (a control variate: the error is
+		// the SH's error in the DIFFERENCE, which vanishes with the tilt).
+		vec3 e = vec3( 0.0 );
+		if( answered )
+		{
+			const vec3 anchor = gSum[7][0].yzw / cosSum;
+			const vec3 band = jahProbeShEval9Raw( rec, normalW.xyz );
+			const vec3 dc = ( anchor - band ) / 0.282095;
+			rec.sh[0].xyz += dc;
+			e = clamp( anchor, vec3( 0.0 ), vec3( 1024.0 ) );
+			if( !( finite3( rec.sh[0].xyz ) && finite3( e ) ) )
+			{
+				for( int v = 0; v < 7; ++v )
+					rec.sh[v] = vec4( 0.0 );
+				e = vec3( 0.0 );
+			}
+		}
+		records.r[probe].sh = rec.sh;
+		records.r[probe].irradiance = vec4( e, answered ? 1.0 : 0.0 );
+	}
+}
