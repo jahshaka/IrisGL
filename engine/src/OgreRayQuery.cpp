@@ -686,6 +686,8 @@ private:
     };
 
     bool makeReflectPipeline(std::string &err);
+    /// The point and linear samplers every job of the tier binds (made once).
+    bool ensureSamplers(std::string &err);
     bool ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, std::string &err);
     /// Records the UNDEFINED -> GENERAL transition and the zero clear for a pair
     /// that was just made. Separate from the creation because the descriptor set
@@ -795,7 +797,7 @@ public:
     void gatherRetireTexture(Ogre::TextureGpu *texture) override { retireTexture(texture); }
     bool gatherDummies(VkImageView &cube, VkImageView &volume, VkImageView &flat, VkBuffer &storage,
                        std::string &err) override {
-        if (!ensureDummyImages(err)) return false;
+        if (!ensureDummyImages(err) || !ensureSamplers(err)) return false;
         cube = mDummyCube.view;
         volume = mDummyVolume.view;
         flat = mDummyFlat.view;
@@ -3651,6 +3653,39 @@ void put3(float *dst, const Ogre::Vector3 &v, float w) {
 
 }   // namespace
 
+// TWO SAMPLERS, AND WHICH IS WHICH MATTERS. The G-buffer and the depth are read
+// at exactly one texel — a linear tap across a depth discontinuity reconstructs a
+// position on neither surface — so they are POINT. The voxel volumes and the sky
+// cube are continuous fields and are LINEAR, with a clamped address mode so a
+// sample at a volume's face does not wrap to the other side of the world.
+// THE TIER'S OWN, made by whichever job needs them first (PHOTON-GATHER-1d): they
+// were made by the reflection's pipeline alone, and the gather borrowed them only
+// because the reflection's record ran first on every PrePassUse pass — a
+// gather-only chain that no longer asks the reflection anything bound a NULL
+// sampler (a driver segfault in vkUpdateDescriptorSets).
+bool RayQueryTier::ensureSamplers(std::string &err) {
+    if (mPointSampler && mLinearSampler) return true;
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    if (!mPointSampler && vkCreateSampler(mVk, &si, nullptr, &mPointSampler) != VK_SUCCESS) {
+        mPointSampler = VK_NULL_HANDLE;
+        err = "rayquery: vkCreateSampler (point) failed";
+        return false;
+    }
+    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    if (!mLinearSampler && vkCreateSampler(mVk, &si, nullptr, &mLinearSampler) != VK_SUCCESS) {
+        mLinearSampler = VK_NULL_HANDLE;
+        err = "rayquery: vkCreateSampler (linear) failed";
+        return false;
+    }
+    return true;
+}
+
 bool RayQueryTier::makeReflectPipeline(std::string &err) {
     VkDescriptorSetLayoutBinding b[kReflectBindings] = {};
     const VkDescriptorType types[kReflectBindings] = {
@@ -3764,28 +3799,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         err = "rayquery/reflect: vkCreateDescriptorPool failed";
         return false;
     }
-    // TWO SAMPLERS, AND WHICH IS WHICH MATTERS. The G-buffer and the depth are
-    // read at exactly one texel — a linear tap across a depth discontinuity
-    // reconstructs a position on neither surface — so they are POINT. The voxel
-    // volumes and the sky cube are continuous fields and are LINEAR, with a
-    // clamped address mode so a sample at a volume's face does not wrap to the
-    // other side of the world.
-    VkSamplerCreateInfo si{};
-    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.maxLod = VK_LOD_CLAMP_NONE;
-    if (vkCreateSampler(mVk, &si, nullptr, &mPointSampler) != VK_SUCCESS) {
-        err = "rayquery/reflect: vkCreateSampler (point) failed";
-        return false;
-    }
-    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    if (vkCreateSampler(mVk, &si, nullptr, &mLinearSampler) != VK_SUCCESS) {
-        err = "rayquery/reflect: vkCreateSampler (linear) failed";
-        return false;
-    }
+    if (!ensureSamplers(err)) return false;
     if (mTimestampPeriod > 0.0f) {
         VkQueryPoolCreateInfo qci{};
         qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
