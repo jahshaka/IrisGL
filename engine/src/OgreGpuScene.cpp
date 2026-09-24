@@ -104,6 +104,7 @@ void GpuScene::destroy() {
     mMeshEntries.clear();
     mFreeMeshSlots.clear();
     mMeshIndex.clear();
+    mSkinRows.clear();
     mMovedLastFrame.clear();
     mCopySet.clear();
     mSlotCapacity = mSlotCount = mMeshCapacity = 0u;
@@ -494,6 +495,49 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
     mLevelDirty = true;
 }
 
+// ---------------------------------------------------------------------------
+// THE ROW OVERRIDE (PHOTON-SKIN-1). A row block is a mesh-table entry that holds
+// rows and nothing else — see GpuScene.h for why it is taken from the same table.
+uint32_t GpuScene::acquireRowBlock() {
+    if (!live()) return kNoMesh;
+    uint32_t index;
+    if (!mFreeMeshSlots.empty()) {
+        index = mFreeMeshSlots.back();
+        mFreeMeshSlots.pop_back();
+    } else {
+        index = uint32_t(mMeshEntries.size());
+        mMeshEntries.push_back(MeshEntry());
+        if (index + 1u > mMeshCapacity) growMeshTable(index + 1u);
+    }
+    mMeshEntries[index] = MeshEntry();
+    mMeshEntries[index].rowBlock = true;
+    // The entry DESCRIBES NOTHING: zero counts, and every level "no geometry", so
+    // a reader that walked the mesh table by index would find an empty mesh.
+    mMeshMirror[index] = GpuMesh();
+    for (uint32_t l = 0; l < kLevelsPerMesh; ++l)
+        mLevelMirror[size_t(index) * kLevelsPerMesh + l] = GpuMeshLevel();
+    mMeshDirty = true;
+    mLevelDirty = true;
+    return index;
+}
+
+void GpuScene::releaseRowBlock(uint32_t entry) {
+    if (entry >= mMeshEntries.size() || !mMeshEntries[entry].rowBlock) return;
+    mMeshEntries[entry] = MeshEntry();
+    const size_t at = size_t(geomRowIndex(entry, 0u, 0u)) * kGeomRowWords;
+    const size_t words = size_t(kGeomRowsPerMesh) * kGeomRowWords;
+    if (at + words <= mGeomMirror.size()) {
+        std::fill(mGeomMirror.begin() + ptrdiff_t(at), mGeomMirror.begin() + ptrdiff_t(at + words), 0u);
+        mGeomDirty = true;
+    }
+    mFreeMeshSlots.push_back(entry);
+}
+
+void GpuScene::setSkinRow(uint32_t node, uint32_t row) {
+    if (row == kNoGeomRow) mSkinRows.erase(node);
+    else mSkinRows[node] = row;
+}
+
 const Ogre::MeshPtr &GpuScene::meshAt(uint32_t index) const {
     static const Ogre::MeshPtr kNone;
     return index < mMeshEntries.size() ? mMeshEntries[index].mesh : kNone;
@@ -513,10 +557,12 @@ static_assert(sizeof(Ogre::Real) == sizeof(float),
 /// The TRACED SET is the conjunction `gatherRayInstances` used to walk for, and
 /// each exclusion is load-bearing for the same reasons it always was: editor
 /// furniture and the backdrop carry their own channel instead of kVisibleBit;
-/// the overlay queues are unlit and depth-test-off; a SKINNED item's buffers
-/// hold the bind pose, so tracing it would reflect a T-pose (audit C-5); an
-/// ALPHA-TESTED datablock has no any-hit shader to cut it out, so a leaf would
-/// intersect as a solid quad (audit C-16).
+/// the overlay queues are unlit and depth-test-off; an ALPHA-TESTED datablock
+/// has no any-hit shader to cut it out, so a leaf would intersect as a solid
+/// quad (audit C-16). A SKINNED item is IN since PHOTON-SKIN-1: the ray tier
+/// traces it through its own structure over its skin cache (its posed
+/// vertices), and leaves it out on a frame the cache is not ready — never at the
+/// mesh's bind pose (audit C-5's T-pose, which is what the exclusion was for).
 Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     Ogre::Item *item = n.item;
     if (!item) return 0u;
@@ -539,7 +585,7 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     if (n.giBoundsExcluded) f |= kGpuGiExcluded;
     // ...and it must be IN the graph: an Item with no parent node draws nothing
     // and has no world transform to trace (the old walk skipped it outright).
-    if ((f & kGpuVisible) && !(f & (kGpuOverlay | kGpuSkinned | kGpuAlphaTested)) &&
+    if ((f & kGpuVisible) && !(f & (kGpuOverlay | kGpuAlphaTested)) &&
         item->getMesh() && item->getParentNode())
         f |= kGpuRayTraced;
     return f;
@@ -619,6 +665,10 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     // every other geometry fact this table carries.
     out.raster[0] = detail::HlmsAtom::kNoMaterialWord;
     out.raster[1] = 0xFFFFFFFFu;
+    // THE SKIN ROW (PHOTON-SKIN-1): the item's own posed geometry, when the ray
+    // tier has made it one (GpuInstance::raster's note). Read from the node's
+    // record in the table, so a slot re-staged for any other reason keeps it.
+    out.raster[2] = mGpuScene.skinRowOf(uint32_t(n.selfId));
     if (item->getNumSubItems()) {
         const Ogre::SubItem *sub = item->getSubItem(0);
         out.raster[0] = detail::HlmsAtom::materialWordOf(sub->getDatablock());
@@ -1014,6 +1064,7 @@ void toPublic(const detail::GpuInstance &in, GpuSceneEntry &out) {
     out.rayLevel = in.ids[3];
     out.pbsMaterialWord = in.raster[0];
     out.tangentOffset = in.raster[1];
+    out.skinRow = in.raster[2];
 }
 }  // namespace
 

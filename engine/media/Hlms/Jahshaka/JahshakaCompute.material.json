@@ -25,6 +25,15 @@
 			"uav_units" : 2
 		},
 
+		"Jahshaka/SkinCache" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahSkinCache_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "JahGeomRows_piece_all.any"],
+			"uav_units" : 3
+		},
+
 		"Jahshaka/CullTest" :
 		{
 			"threads_per_group" : [64, 1, 1],

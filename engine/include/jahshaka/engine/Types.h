@@ -4095,10 +4095,40 @@ struct RayQueryStatus {
     int  blasCount = 0;
     /// The traced set's size: the NEAR copies in the top-level structure. It is
     /// NOT the scene's Item count — editor helpers, backdrops, the sun disc,
-    /// overlay-queue objects, SKINNED Items (they would trace at bind pose
-    /// until R4) and alpha-tested ones (no any-hit without ray-tracing
-    /// pipelines) are all out.
+    /// overlay-queue objects and alpha-tested ones (no any-hit without
+    /// ray-tracing pipelines) are all out. A RIGGED Item is in (PHOTON-SKIN-1)
+    /// through its own skinned structure — and out on a frame its skin cache is
+    /// not ready, never at its bind pose.
     int  instances = 0;
+    /// THE GPU SKIN CACHE (PHOTON-SKIN-1, RY-R4). `skinnedInstances`: rigged
+    /// items in the traced set this frame (each over its OWN structure, built
+    /// from its posed vertices); `skinCaches`: caches held (one per rigged traced
+    /// item, and its row block in the GPU scene); their bytes — the posed vertex
+    /// buffers and the per-item structures (also inside `blasBytes`).
+    int  skinnedInstances = 0;
+    int  skinCaches = 0;
+    unsigned long long skinCacheBytes = 0;
+    unsigned long long skinBlasBytes = 0;
+    /// Cumulative: items re-skinned (one per item per frame its POSE moved —
+    /// a walk without a pose change costs none), skin dispatches (one per frame
+    /// that re-skinned anything), skinned structures built (once per cache) and
+    /// REFIT (once per pose change after that).
+    unsigned long long skinPasses = 0;
+    unsigned long long skinDispatches = 0;
+    unsigned long long skinBlasBuilds = 0;
+    unsigned long long skinRefits = 0;
+    /// The last skin dispatch: items and vertices it wrote, and the GPU
+    /// milliseconds of the dispatch and of the skinned builds/refits after it
+    /// (timestamps read several frames late, never with a wait; -1 until one has
+    /// been measured).
+    int  skinLastItems = 0;
+    unsigned long long skinLastVertices = 0;
+    float skinMs = -1.0f;
+    float skinRefitMs = -1.0f;
+    /// Why rigged items are NOT traced (empty when they are): no device address
+    /// support, the job missing from the media, a source layout the job cannot
+    /// read.
+    std::string skinReason;
     /// The FAR copies (ATOM-FARBLAS-1): the same objects again over their
     /// meshes' coarsest levels, mask `kRayMaskFar`. The top-level structure
     /// holds `instances + farInstances`.
@@ -6978,6 +7008,10 @@ struct GpuSceneEntry {
     /// The byte offset of the item mesh's float4 tangent in its vertex
     /// (`GpuInstance.raster.y`), 0xFFFFFFFF when it has none.
     unsigned tangentOffset = 0xFFFFFFFFu;
+    /// THE ROW OVERRIDE (`GpuInstance.raster.z`, PHOTON-SKIN-1): the geometry row
+    /// of this item's SKIN CACHE — its posed vertices — or 0xFFFFFFFF when its
+    /// mesh's own rows are its geometry (every unrigged item).
+    unsigned skinRow = 0xFFFFFFFFu;
 };
 
 /// WHAT THE TABLES HOLD AND WHAT KEEPING THEM COSTS. Every count is cumulative
