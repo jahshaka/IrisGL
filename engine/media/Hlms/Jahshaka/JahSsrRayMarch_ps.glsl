@@ -199,6 +199,37 @@ float jahRayRange( vec3 origin, vec3 rayDir, float maxDistance )
 	return max( range, 0.0 );
 }
 
+// A NEIGHBOURING PIXEL'S RANGE (SSR-EDGE-1: the fade's width). The same
+// reconstruction main() makes for its own pixel — the depth, the G-buffer
+// normal, the view vector, the reflection — at the SHOT uv `uv` whose view
+// vector is `cameraDir`; negative where that pixel has no surface to reflect.
+float jahPixelRange( vec2 uv, vec3 cameraDir, float maxDistance )
+{
+	if( uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 )
+		return -1.0;
+	const float d = jahSceneDepthAt( uv );
+	if( d <= 0.0 || d >= 1.0 )
+		return -1.0;
+	vec3 n = texture( vkSampler2D( gBufNormals, samplerState ), jahShotToTex( uv ) ).xyz * 2.0 - 1.0;
+	if( dot( n, n ) < 1e-6 )
+		return -1.0;
+	n = normalize( n );
+	n.z = -n.z;
+	vec3 o;
+	vec3 v;
+	if( orthoParams.x > 0.5 )
+	{
+		o = vec3( cameraDir.xy * orthoParams.y, jahViewDistance( d ) );
+		v = vec3( 0.0, 0.0, 1.0 );
+	}
+	else
+	{
+		o = cameraDir * jahViewDistance( d );
+		v = normalize( o );
+	}
+	return jahRayRange( o, reflect( v, n ), maxDistance );
+}
+
 void main()
 {
 	// THIS PIXEL IN THE SHOT (SSR-LETTERBOX-1): outside the letterbox's
@@ -582,7 +613,32 @@ void main()
 	//    the thickness guess is generous fades out continuously and is still
 	//    counted as the hit it is (the fan and the quorum judge its AGREEMENT;
 	//    the arrival angle stays the one trust term).
-	const float kEdgeSteps = 2.0;
+	// THE FADE'S WIDTH IS THE RANGE'S OWN SCREEN-SPACE GRADIENT, in steps,
+	// floored at 2 (the jitter's half step plus the refinement's last step is
+	// the ambiguity a flat neighbourhood has). Where neighbouring pixels' rays
+	// end many steps apart — a curved reflector's limb, where the rays fan — a
+	// two-step fade is narrower than one pixel and the edge stays a rim; the
+	// fade that hands over within a pixel's width is |range(pixel) -
+	// range(neighbour)|. Read on BOTH sides along each axis and the SMALLER
+	// taken, so a neighbour across a silhouette (another surface, whose range
+	// has nothing to do with this one's) cannot widen the fade: a one-sided
+	// jump is an edge of the receiver, a two-sided one is the rays fanning.
+	const vec2 onePixel = ( vec2( 1.0 ) / rayBufferRes.xy ) / ( vec2( 1.0 ) - shotInset.zw );
+	float rangeGrad = 0.0;
+	for( int axis = 0; axis < 2; ++axis )
+	{
+		const vec2 d = axis == 0 ? vec2( onePixel.x, 0.0 ) : vec2( 0.0, onePixel.y );
+		const float ra = jahPixelRange( shotUv + d, cameraDir + vec3( d * cameraSpan.xy, 0.0 ), maxDistance );
+		const float rb = jahPixelRange( shotUv - d, cameraDir - vec3( d * cameraSpan.xy, 0.0 ), maxDistance );
+		float g = 1.0e30;
+		if( ra >= 0.0 )
+			g = min( g, abs( ra - range ) );
+		if( rb >= 0.0 )
+			g = min( g, abs( rb - range ) );
+		if( g < 1.0e30 )
+			rangeGrad = max( rangeGrad, g );
+	}
+	const float kEdgeSteps = max( 2.0, rangeGrad / stepLen );
 	const float rangeLeft  = ( range - travelled ) / stepLen;
 	const float rangeFade  = smoothstep( 0.0, kEdgeSteps, rangeLeft );
 

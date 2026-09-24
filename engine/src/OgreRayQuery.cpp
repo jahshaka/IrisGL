@@ -3451,6 +3451,31 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // same basis for both halves is exactly what the arm reproduces.
         eyeB[1] = eyeB[0];
     }
+    // THE LETTERBOX (SSR-LETTERBOX-1's ray half). Under a constrained-aspect
+    // camera the picture is the target's INNER rectangle (chain::letterboxRect),
+    // while this pass addresses the whole target: so the image basis is
+    // EXPANDED to the target — the same conjugation the march takes in its
+    // pass buffer, here on the CPU so no shader line moves. A target uv t is the
+    // shot's (t - x0) / w, hence rayTL' = rayTL - rayRight x0/w - rayDown y0/h,
+    // rayRight' = rayRight / w, rayDown' = rayDown / h. The bars hold cleared
+    // depth and are declined before any ray; the previous-frame basis is the
+    // expanded one too (rv.prev is written from eyeB below), so the
+    // reprojection's uv spans the same target.
+    {
+        const ChainDesc cd = view->chainDesc();
+        if (cd.letterbox && fullH) {
+            float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+            chain::letterboxRect(cd.letterboxAspect, float(fullW) / float(fullH), shot);
+            for (int i = 0; i < 2; ++i) {
+                EyeBasisF &e = eyeB[i];
+                for (int k = 0; k < 3; ++k) {
+                    e.rayTL[k] -= e.rayRight[k] * shot[0] / shot[2] + e.rayDown[k] * shot[1] / shot[3];
+                    e.rayRight[k] /= shot[2];
+                    e.rayDown[k] /= shot[3];
+                }
+            }
+        }
+    }
     memcpy(pp.camPos, eyeB[0].camPos, sizeof(pp.camPos));
     memcpy(pp.rayTL, eyeB[0].rayTL, sizeof(pp.rayTL));
     memcpy(pp.rayRight, eyeB[0].rayRight, sizeof(pp.rayRight));
@@ -4143,20 +4168,21 @@ void OgreEngine::setRayTracing(bool on) {
 //
 // Every image the tier writes from a compute shader is a STORAGE image: the
 // reflection's temporal pair (the radiance mean, RGBA16F, and the distance pair,
-// RG32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). Vulkan
-// guarantees STORAGE_IMAGE on RGBA16F; on RG32F it does NOT (it rides the
-// shaderStorageImageExtendedFormats feature, and a device may still decline the
-// optimal-tiling bit). The tier used to ASSUME both: `makeStorageImage` would
-// have created an image the device cannot store to, and the first dispatch
-// would have been undefined behaviour rather than a refusal. So the
-// availability gate asks `vkGetPhysicalDeviceFormatProperties` once per device
-// and a device that lacks one is a no-rays device — every consumer (the chain's
-// rayReflect, the cards' Auto, the status) reads that same answer — with ONE
-// log line naming the format.
+// RG32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
+// CORE-MANDATORY STORAGE FORMATS in Vulkan 1.0 (the spec's Required Format
+// Support; shaderStorageImageExtendedFormats covers the R16G16*, R16*, R8*,
+// A2B10G10R10 and B10G11R11 family, not these), so on a conformant driver this
+// check never refuses. It is kept as a DRIVER-DEFECT GUARD — one query per
+// device, one log line — because the alternative on a driver that got the table
+// wrong is `makeStorageImage` creating an image the device cannot store to and
+// the first dispatch being undefined behaviour rather than a refusal. A device
+// that lacks one is a no-rays device, and every consumer (the chain's
+// rayReflect, the cards' Auto, the status) reads that same answer.
 //
 // JAHSHAKA_RAY_DENY_STORAGE_FORMAT names a format (R16G16B16A16_SFLOAT or
-// R32G32_SFLOAT) to treat as unsupported: the refusal path's test door, because
-// no device on this box lacks either (lavapipe included — measured, 2026-09-24).
+// R32G32_SFLOAT) to treat as unsupported: FAULT INJECTION, the refusal path's
+// only door on conformant hardware (a measurement switch for
+// gi.rt_reflect_format_refused_lavapipe, not a mode).
 namespace {
 struct RayStorageFormat { VkFormat format; const char *name; };
 constexpr RayStorageFormat kRayStorageFormats[] = {

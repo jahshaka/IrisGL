@@ -602,7 +602,7 @@ void scissor(ChainHandles &h, Ogre::CompositorPassQuadDef *q, bool clear = true)
 /// After this the scene passes LOAD colour and CLEAR depth, inset to the same
 /// rectangle — so the bars survive and the shot is never stretched into them.
 void addLetterboxPrologue(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
-                          const char *target, ChainHandles &handles) {
+                          const char *target, ChainHandles &handles, bool keepDepth = false) {
     {
         Ogre::CompositorTargetDef *t = n->addTargetPass(kLetterboxFill);
         t->setNumPasses(1);
@@ -621,6 +621,18 @@ void addLetterboxPrologue(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
     q->addQuadTextureSource(0, kLetterboxFill);
     q->setAllClearColours(kLetterboxBars);
     q->setAllLoadActions(Ogre::LoadAction::Clear);     // full-target: THE BARS
+    // ...BUT NEVER THE PREPASS' DEPTH (SSR-LETTERBOX-1, measured). With a
+    // prepass the depth is WRITTEN BEFORE this quad (the SSR/gather prepass
+    // renders into the same kDepth) and the opaque pass depth-tests READ-ONLY
+    // against it; a full-target clear here wiped it, so under a letterbox the
+    // opaque pass lost its early-Z and every consumer that runs between here and
+    // the opaque pass — the ray-traced reflections, the probe gather — found a
+    // cleared depth at every pixel and declined the whole frame (the rays'
+    // whole contribution, ~37 codes on gi.reflect_motion's floor, was missing).
+    if (keepDepth) {
+        q->mLoadActionDepth   = Ogre::LoadAction::Load;
+        q->mLoadActionStencil = Ogre::LoadAction::Load;
+    }
     q->mStoreActionColour[0] = Ogre::StoreAction::Store;
     q->mStoreActionDepth     = Ogre::StoreAction::Store;
     q->mStoreActionStencil   = Ogre::StoreAction::DontCare;
@@ -1480,7 +1492,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // it (ChainHandles::scissorPasses): bloom cannot glow into the bars,
         // no look grades them, and no fill is spent on them. The bars are
         // black by construction at every stage, which is what a letterbox is.
-        if (desc.letterbox) addLetterboxPrologue(n, desc, sceneTarget, handlesOut);
+        if (desc.letterbox) addLetterboxPrologue(n, desc, sceneTarget, handlesOut, prepass);
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
         t->setNumPasses(1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -3185,7 +3197,9 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
     // the frame applied was perceptual 0.581 — deleted, not re-plumbed.
     ps->setNamedConstant("rayParams",
                          Ogre::Vector4(desc.ssrMaxDistance, desc.ssrThickness,
-                                       desc.ssr >= 2 ? 96.0f : 48.0f,
+                                       desc.ssrSteps > 0
+                                           ? float(std::min(std::max(desc.ssrSteps, 8), 128))
+                                           : (desc.ssr >= 2 ? 96.0f : 48.0f),
                                        desc.reflectionRoughnessCutoff));
     // THE MARCH'S PHASE RULE (SSR-RINGS-1), a uniform like the four above: the
     // crossing test and the trust either read the coarse sample (0, the shipped

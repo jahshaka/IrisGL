@@ -5368,6 +5368,11 @@ struct PostFxDesc {
     /// march gives up and the pixel falls back to the probe/sky reflection.
     /// Scene-scale dependent: the default suits a room, not a landscape.
     float ssrMaxDistance = 25.0f;
+    /// THE MARCH'S STEP COUNT, a measurement knob (SSR-EDGE-1): 0 = the quality
+    /// row's (96 at Full-Res Rays, 48 at Half-Res), otherwise 8..128. It exists
+    /// so a suite can change the STEP at a FIXED range — `ssrMaxDistance` alone
+    /// changes both (ssr.rings' fixed-range arm). Nothing in the document writes it.
+    int   ssrSteps = 0;
     /// How thick the depth buffer's surfaces are assumed to be, in world units.
     /// A depth buffer records a surface's FRONT and nothing else, so a crossing
     /// is only accepted when the ray passed within this much of it — too small
@@ -5559,8 +5564,13 @@ struct PostFxDesc {
     /// asks takes the chain's shape (the scene into the float target, the ONE
     /// composite quad into the 8-bit one) and nothing else. No second
     /// composite pass exists: the float target IS the chain's scene target,
-    /// read where the tonemap would read it. A view that does not ask is
-    /// byte-identical to one built before this flag existed.
+    /// read where the tonemap would read it. A view that does not ask builds
+    /// the graph it built before this flag existed. A view that DOES ask is not
+    /// a byte-identical display of the one that does not: with `ssr > 0` its
+    /// SSR colour history is float too, so its reflections carry the UNCLIPPED
+    /// radiance (what an `hdr` chain has always reflected) where an 8-bit chain
+    /// reflects the clipped one — readPixels of the two differ wherever the
+    /// reflected radiance exceeds 1.
     bool  hdrReadback = false;
 
     bool operator==(const PostFxDesc &o) const {
@@ -5576,7 +5586,7 @@ struct PostFxDesc {
                ssaoRadius == o.ssaoRadius && ditherOff == o.ditherOff &&
                smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
-               ssrMaxDistance == o.ssrMaxDistance &&
+               ssrMaxDistance == o.ssrMaxDistance && ssrSteps == o.ssrSteps &&
                ssrMarchPhase == o.ssrMarchPhase &&
                ssrThickness == o.ssrThickness &&
                reflectionRoughnessCutoff == o.reflectionRoughnessCutoff &&

@@ -982,6 +982,7 @@ struct ChainDesc {
     /// built at all, and `jahSsrReflection` is CLEARED instead of resolved into.
     bool  ssrScreenMarch = true;
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
+    int   ssrSteps = 0;             ///< 0 = the row's 48/96 (PostFxDesc::ssrSteps)
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
     float ssrIntensity = 1.0f;
     /// WHICH SAMPLE ANSWERS THE MARCH'S TWO QUESTIONS (PostFxDesc::ssrMarchPhase).
