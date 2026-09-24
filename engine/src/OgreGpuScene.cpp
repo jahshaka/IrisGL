@@ -20,12 +20,14 @@
 #include "EnginePrivate.h"
 #include "GpuScene.h"
 #include "HlmsAtom.h"
+#include "SurfaceCache.h"
 
 #include "Vct/OgreVctMaterial.h"
 #include "Vct/OgreVctVoxelizer.h"
 #include <Vao/OgreTexBufferPacked.h>
 
 #include <OgreLogManager.h>
+#include <OgreRoot.h>
 #include <OgreMesh2.h>
 #include <OgreSubItem.h>
 #include <OgreSubMesh2.h>
@@ -1117,3 +1119,112 @@ bool OgreScene::gpuSceneDeviceEntries(unsigned first, unsigned count,
 }  // namespace detail
 }  // namespace engine
 }  // namespace jahshaka
+
+namespace jahshaka {
+namespace engine {
+namespace detail {
+
+// ---------------------------------------------------------------------------
+// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the scene's in-frame
+// answers, read from the GPU scene's table and its moved set (read-only), after
+// the frame's update (OgreShadow.cpp runs ensureGpuScene for every drawn scene
+// before any render target; the surface cache asks from inside its workspace).
+//
+//   * THE MOVERS: every slot the TLAS writes with kRayMaskMoverCaster (a traced,
+//     shadow-casting mover), with its world AABB — walked only on a frame whose
+//     moved set is not empty or whose slot count changed, and kept otherwise:
+//     a still frame costs a compare.
+//   * THE MOVED: the movers in the frame's moved set (a transform write, a
+//     flags change, a birth — a walk without a pose change counts).
+//   * THE STILL CASTERS THAT MOVED: a moved slot that casts, is not a mover and
+//     whose transform this frame's write changed (world != prevWorld; a birth has
+//     prevWorld = world and is not a move) — its old box is its new box carried
+//     back through prevWorld * world^-1 (conservative under a turn).
+bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
+    out = CardMoverFrame();
+    if (!mGpuScene.live() || !mRoot || !mRoot->getRenderSystem()) return false;
+    const uint32_t frame = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
+    const detail::GpuInstance *mirror = mGpuScene.mirrorData();
+    const uint32_t slots = mGpuScene.slotCount();
+    const bool moved = mGpuScene.movedThisFrame(frame) && !mGpuScene.movedSlots().empty();
+    const auto flagsOf = [](const detail::GpuInstance &e) {
+        Ogre::uint32 f;
+        std::memcpy(&f, &e.boundsMax[3], sizeof(f));
+        return f;
+    };
+    const auto moverCaster = [](Ogre::uint32 f) {
+        return (f & kGpuRayTraced) && (f & kGpuMover) && (f & kGpuCaster);
+    };
+    const auto stillCaster = [](Ogre::uint32 f) {
+        return (f & kGpuVisible) && (f & kGpuCaster) && !(f & kGpuMover);
+    };
+    const auto record = [&](uint32_t i) {
+        const detail::GpuInstance &e = mirror[i];
+        CardCasterRec &r = mCardCasters[i];
+        r.node = NodeId(e.ids[0]);
+        std::memcpy(r.world, e.world, sizeof(r.world));
+        r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
+        r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
+        r.flags = flagsOf(e);
+    };
+    const bool walk = slots != mCardMoverSlots;
+    // THE STILL CASTERS THAT MOVED (before the records are refreshed): a moved
+    // slot whose record names the same node, which casts as a still object now
+    // or did before, and whose transform or visibility changed.
+    if (moved) {
+        for (uint32_t slot : mGpuScene.movedSlots()) {
+            if (slot >= slots || slot >= mCardCasters.size()) continue;
+            const detail::GpuInstance &e = mirror[slot];
+            CardCasterRec &r = mCardCasters[slot];
+            const Ogre::uint32 f = flagsOf(e);
+            if (r.node == NodeId(e.ids[0]) && (stillCaster(f) || stillCaster(r.flags))) {
+                const bool turned = std::memcmp(r.world, e.world, sizeof(r.world)) != 0;
+                const bool shown = (r.flags & kGpuVisible) != (f & kGpuVisible);
+                if (turned || shown) {
+                    CardCasterMove m;
+                    m.oldMin = r.min;
+                    m.oldMax = r.max;
+                    m.newMin = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
+                    m.newMax = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
+                    out.casterMoves.push_back(m);
+                }
+            }
+            if (!walk) record(slot);
+        }
+    }
+    if (moved || walk) {
+        if (walk) {
+            mCardCasters.assign(slots, CardCasterRec());
+            for (uint32_t i = 0; i < slots; ++i) record(i);
+        }
+        mCardMovers.clear();
+        for (uint32_t i = 0; i < slots; ++i) {
+            const detail::GpuInstance &e = mirror[i];
+            if (!moverCaster(flagsOf(e))) continue;
+            CardMoverRec r;
+            r.node = NodeId(e.ids[0]);
+            r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
+            r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
+            mCardMovers.push_back(r);
+        }
+        mCardMoverSlots = slots;
+        out.moversChanged = true;
+    }
+    out.movers.reserve(mCardMovers.size());
+    for (const CardMoverRec &r : mCardMovers) {
+        CardMoverBox b;
+        b.node = r.node;
+        b.min = r.min;
+        b.max = r.max;
+        out.movers.push_back(b);
+    }
+    if (moved)
+        for (uint32_t slot : mGpuScene.movedSlots())
+            if (slot < slots && moverCaster(flagsOf(mirror[slot])))
+                out.moved.push_back(NodeId(mirror[slot].ids[0]));
+    return true;
+}
+
+}   // namespace detail
+}   // namespace engine
+}   // namespace jahshaka

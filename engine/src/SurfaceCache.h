@@ -72,6 +72,7 @@
 #include <OgreVector3.h>
 
 #include <chrono>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -170,6 +171,11 @@ struct CardRec {
     bool surfaceStale = false;
     bool indirectValid = false;
     unsigned long long lastIndirect = 0ull;
+    /// THE MOVERS' TERM (PHOTON-CARDS-4): the card's rect in the mover-visibility
+    /// layer holds a trace the relight must multiply in (`moverTraced`), and the
+    /// card waits for a trace past the frame's budget (`moverPending`).
+    bool moverTraced = false;
+    bool moverPending = false;
 };
 
 /// WHAT THE CACHE IS HANDED EACH FRAME, and the reason it is handed anything at
@@ -232,6 +238,49 @@ struct CardSceneView {
         const std::vector<float> *lodBounds = nullptr;
     };
     std::vector<Candidate> candidates;
+};
+
+/// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — what the scene tells the
+/// cache INSIDE the frame (after the scene graph and the GPU scene's update, so
+/// every box and the moved set are this frame's), and the trace the ray tier
+/// records for it. A card's sun visibility is the CAPTURED term (the still
+/// world's casters: the card shadow node is the probe kind, kVisibleBit alone)
+/// times the MOVERS' term, traced; see OgreSurfaceCache.cpp, "The movers' shadow".
+struct CardMoverBox {
+    NodeId node = 0;
+    Ogre::Vector3 min, max;      ///< the world AABB
+};
+struct CardCasterMove {
+    Ogre::Vector3 oldMin, oldMax;   ///< the world AABB at the previous transform
+    Ogre::Vector3 newMin, newMax;
+};
+struct CardMoverFrame {
+    /// Every traced SHADOW-CASTING mover of the scene (the TLAS's
+    /// kRayMaskMoverCaster set), and whether the list changed this frame (a
+    /// mover moved, arrived, left, or changed its class).
+    std::vector<CardMoverBox> movers;
+    bool moversChanged = false;
+    /// The movers in the frame's moved set (a transform write — a walk without
+    /// a pose change moves the node and counts — a flags change, a birth).
+    std::vector<NodeId> moved;
+    /// The STILL casters whose transform this frame's write moved.
+    std::vector<CardCasterMove> casterMoves;
+};
+struct CardMoverTrace {
+    /// `count` records of 20 floats, the relight's own layout.
+    const float *records = nullptr;
+    unsigned count = 0u;
+    Ogre::TextureGpu *depth = nullptr, *normal = nullptr, *vis = nullptr;
+    Ogre::Vector3 toSun;
+    float range = 0.0f;
+};
+struct CardMoverHooks {
+    std::function<bool(CardMoverFrame &)> frame;
+    std::function<bool(const CardMoverTrace &)> trace;
+    /// A GPU timestamp pair around the relight dispatch (begin = true first).
+    std::function<void(bool)> timeRelight;
+    /// The last GPU milliseconds read back: the trace's and the relight's (-1 unread).
+    std::function<void(float &, float &)> readTimes;
 };
 
 class SurfaceCache final : public Ogre::CompositorWorkspaceListener {
@@ -299,6 +348,10 @@ public:
     /// because "a hover preview costs the object under the mouse" is the whole
     /// point of the model MATERIAL-SWAP-GI-1 built.
     void noteMaterialChanged(MaterialId material);
+    /// The scene's in-frame answers and the ray tier's trace (PHOTON-CARDS-4);
+    /// set once by the scene that owns the cache. Absent (no rays), a card's sun
+    /// term is the captured one alone and a still caster's move still recaptures.
+    void setMoverHooks(const CardMoverHooks &hooks) { mMoverHooks = hooks; }
 
     Ogre::CompositorWorkspace *workspace() const { return mWs; }
     /// THE TWO BUFFERS THE RAY JOB'S CARD READ BINDS (rq_reflect.comp through
@@ -378,6 +431,14 @@ private:
     /// capture's copies, with the frame's lights).
     void planRelights(const CardSceneView &view);
     void relightCards();
+    /// THE MOVERS' SHADOW, in the frame after the capture's copies and before the
+    /// relight: selects the cards the movers' and the moved still casters'
+    /// sun-projected footprints reach, records the trace, and hands the traced
+    /// and the retired cards to the relight.
+    void traceMovers();
+    /// The first visible shadow-casting directional light of `mLights` (the
+    /// capture's PSSM light, the relight's sun), or null.
+    const Ogre::Light *cardSun() const;
     /// Rebuilds the two GPU tables from `mCards` / `mInstances` and uploads
     /// them. Called only when the ALLOCATION changed — never per capture.
     void syncBuffers();
@@ -406,6 +467,21 @@ private:
     /// THE CACHED INDIRECT HALF (a UAV, R11G11B10F like the radiance), the
     /// chain's parameter block, and this frame's chain.
     Ogre::TextureGpu *mIndirect = nullptr;
+    /// THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, written by the
+    /// ray tier's trace (rq_card_movers.comp), read by the relight where the card
+    /// is `moverTraced`. +4 MB at 2048 square.
+    Ogre::TextureGpu *mMoverVis = nullptr;
+    CardMoverHooks mMoverHooks;
+    /// Each mover's footprint box as last traced (its OLD footprint when it
+    /// moves), by node.
+    std::unordered_map<NodeId, std::pair<Ogre::Vector3, Ogre::Vector3>> mMoverLast;
+    std::vector<CardMoverBox> mMovers;
+    Ogre::Vector3 mMoverSun = Ogre::Vector3::ZERO;
+    Ogre::Vector3 mViewerPos = Ogre::Vector3::ZERO;
+    std::vector<float> mMoverCpu;
+    /// This frame's relight additions from the movers (card index, mode).
+    unsigned mMoverTracedLastFrame = 0u, mMoverTexelsLastFrame = 0u, mMoverPending = 0u;
+    unsigned long long mMoverTraces = 0ull, mMoverRetired = 0ull, mCasterRecaptures = 0ull;
     Ogre::UavBufferPacked *mGiBuffer = nullptr;
     std::vector<float> mGiCpu;
     Ogre::VctLighting *mVct = nullptr;

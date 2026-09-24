@@ -241,10 +241,21 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
         COMMENT "Compiling the hit write-back at SPIR-V 1.4"
         VERBATIM)
+    # THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4): sun rays from the texels
+    # of the cards a shadow-casting mover's footprint reaches, against the movers.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_cardMoversSpv -o "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
+        COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
+        VERBATIM)
     add_custom_target(JahshakaRayQuerySpv
                       DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
