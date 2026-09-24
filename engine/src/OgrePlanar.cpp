@@ -67,20 +67,6 @@ namespace {
 
 constexpr const char *kTargetChannel = "JahReflectTarget";
 
-/// The one HlmsPbs binding for the process. HlmsPbs::mPlanarReflections is a
-/// single pointer shared by every scene in the process: the last scene to arm
-/// owns it, and a scene that is not the owner must not clear it on teardown or it
-/// would silently switch reflections off for the scene that is. (The GI arms are
-/// bound per pass since PHOTON-SCENE-SWITCH-1 — SceneGiBinding; this one is not:
-/// HlmsPbs also reads it OUTSIDE a pass, per renderable at hash time
-/// (calculateHashForPreCreate), so a per-pass bind alone cannot scope it.)
-const OgreScene *sBindingOwner = nullptr;
-
-Ogre::HlmsPbs *pbsOf(Ogre::Root *root) {
-    if (!root || !root->getHlmsManager()) return nullptr;
-    return dynamic_cast<Ogre::HlmsPbs *>(root->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-}
-
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -387,11 +373,11 @@ void OgreScene::rebuildPlanar() {
         mPlanarParams.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM_SRGB,
         /*mipmapMethodCompute*/ false);
 
-    // The receiving half is process-wide, like VCT's.
-    if (Ogre::HlmsPbs *pbs = planar::pbsOf(mRoot)) {
-        pbs->setPlanarReflections(mPlanar);
-        planar::sBindingOwner = this;
-    }
+    // THE RECEIVING HALF IS THIS SCENE'S (PHOTON-SCENE-SWITCH-2): HlmsPbs holds
+    // one planar pointer, and it is bound from this record per pass AND per
+    // renderable at hash time (SceneGiBinding::planar; ScenePbs) — a second scene
+    // arming its own mirrors takes nothing from this one.
+    mGiBinding.planar = mPlanar;
 
     // Re-arm every reflector the document already has. A node whose mesh has
     // since stopped being plate-like simply fails to arm; it keeps its flag so
@@ -412,12 +398,10 @@ void OgreScene::teardownPlanar() {
     JAH_TRY {
         disarmAllReflectors();
         // ~PlanarReflections leaves HlmsPbs::mPlanarReflections STALE — it
-        // does not unbind itself. Only the owner clears it (another scene may
-        // have taken the binding since).
-        if (planar::sBindingOwner == this) {
-            if (Ogre::HlmsPbs *pbs = planar::pbsOf(mRoot)) pbs->setPlanarReflections(nullptr);
-            planar::sBindingOwner = nullptr;
-        }
+        // does not unbind itself: out of this scene's record, and off every host
+        // the last pass or hash left it on.
+        mGiBinding.planar = nullptr;
+        forgetGiArms(mRoot->getHlmsManager(), nullptr, nullptr, nullptr, mPlanar);
         delete mPlanar;   // destroys its cameras through mSceneMgr: must precede it
         mPlanar = nullptr;
         planar::destroyWorkspace(mRoot->getCompositorManager2(), mPlanarWorkspaceDef, mPlanarNodeDefs);

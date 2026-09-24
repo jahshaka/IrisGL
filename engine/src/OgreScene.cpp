@@ -1506,7 +1506,7 @@ void OgreScene::destroy() {
         destroyAtmosphere();
         // Before the nodes: PlanarReflections holds raw Renderable pointers, and
         // it destroys its own cameras through the SceneManager. It also has to
-        // unbind itself from the process-wide HlmsPbs, which its destructor
+        // leave this scene's binding and every HlmsPbs host, which its destructor
         // (like VctLighting's) does not do.
         teardownPlanar();
         destroySky();   // also unbinds + destroys the reflection cubemap

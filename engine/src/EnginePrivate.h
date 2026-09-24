@@ -2704,8 +2704,8 @@ public:
 //   * LightProfiles::build() writes HlmsPbs::setLightProfilesTexture AND
 //     Root::_setLightProfilesInvHeight — there is exactly one of each per
 //     process, so a per-scene registry would have scenes fighting over the
-//     binding (the owner shape OgrePlanar.cpp still carries, which we do not
-//     want to repeat).
+//     binding (the owner shape the GI arms and the planar mirrors had before
+//     SceneGiBinding, which we do not want to repeat).
 //   * HlmsPbs::setAreaLightMasks binds ONE 2D-array pool. Light::setTexture
 //     stores only the pool SLICE index, so a mask that landed in a different
 //     pool renders the WRONG texture with no error at all. One reserved pool,
@@ -2821,7 +2821,23 @@ struct SceneGiBinding {
     Ogre::ParallaxCorrectedCubemapBase *pcc = nullptr;
     /// The PCC-versus-VCT trust window the grid was bound with (buildPccFinish).
     float pccMinDist = 1.0f, pccMaxDist = 2.0f;
+    /// THE SCENE'S PLANAR MIRRORS (PHOTON-SCENE-SWITCH-2). Bound per pass like the
+    /// arms above (`cameraMatches` then gates on THIS scene's reflected cameras) AND
+    /// at HASH time per renderable — ScenePbs::calculateHashForPreCreate binds the
+    /// record of the renderable's own SceneManager, so a mirror's hash is decided
+    /// against the PlanarReflections that tracks it, never the last scene to arm.
+    Ogre::PlanarReflections            *planar = nullptr;
+    /// `passBuf.envMapNumMipmaps` for this scene's passes (PHOTON-SCENE-SWITCH-2):
+    /// the mip count of what the env-probe slot holds IN THIS SCENE — the bound
+    /// grid's array, else the largest of the scene's bound reflection cubes (the
+    /// sky's, an authored map's) — never a process-wide maximum. Resolved once per
+    /// frame (OgreScene::resolveIblMipmaps), read per pass.
+    float iblMipmaps = 1.0f;
 };
+/// The record registered for `sm` — null for a SceneManager that registered none.
+/// What giStatus reports as "bound" is read through this, the same lookup the pass
+/// makes (OgreGi.cpp).
+const SceneGiBinding *sceneGiBindingOf(const Ogre::SceneManager *sm);
 /// The record a SceneManager's passes bind; `binding` must outlive the entry
 /// (OgreScene registers its own member at construction, unregisters in destroy()).
 void registerSceneGiBinding(const Ogre::SceneManager *sm, const SceneGiBinding *binding);
@@ -2833,7 +2849,8 @@ void unregisterSceneGiBinding(const Ogre::SceneManager *sm);
 /// getter, `resetIblSpecMipmap(0)` walking the bound PCC — meets a freed object.
 void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
                   const Ogre::IrradianceField *ifd,
-                  const Ogre::ParallaxCorrectedCubemapBase *pcc);
+                  const Ogre::ParallaxCorrectedCubemapBase *pcc,
+                  const Ogre::PlanarReflections *planar = nullptr);
 
 /// THE REGISTERED HLMS_PBS: upstream's HlmsPbs, plus the per-pass binding above.
 /// Our derived Hlms (the Terra pattern) and not a patch: the two overrides are
@@ -2847,6 +2864,12 @@ public:
                          Ogre::Camera *renderingCamera, const bool bCasterPass) override;
     Ogre::HlmsCache preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
                                     bool dualParaboloid, Ogre::SceneManager *sceneManager) override;
+protected:
+    /// HASH TIME (PHOTON-SCENE-SWITCH-2): HlmsPbs reads the planar pointer here
+    /// per renderable, outside any pass (OgreHlmsPbs.cpp:1081-1084) — so the
+    /// renderable's OWN scene's PlanarReflections is bound for the call and the
+    /// pass's pointer put back after it.
+    void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
 };
 
 /// Returns an index buffer that belongs to no VAO to the VaoManager that made it
@@ -3095,15 +3118,14 @@ public:
     /// slot's occupancy turns on in its passes. See OgreSky.cpp's long note, THE
     /// ENV-PROBE SLOT HAS ONE OCCUPANT.
     bool probeGridBound() const { return mGiBinding.pcc != nullptr; }
-    /// Re-pushes the mip count of whatever this scene's datablocks hold in the
-    /// env-probe slot. Called ONLY on this scene's probe-grid transitions
-    /// (noteProbeGridBindingChanged) — see the note on the definition for why it
-    /// must not run on every reflection re-apply.
-    void renotifyReflectionMipmaps();
-    /// THIS scene's grid was bound or unbound: its datablocks re-decide what the
-    /// env-probe slot holds (a manual cube and the probe array cannot share it),
-    /// and the roughness-to-LOD map follows. Nobody else's passes are affected.
-    void noteProbeGridBindingChanged();
+    /// THE ROUGHNESS-TO-LOD MAP'S CHAIN LENGTH FOR THIS SCENE'S PASSES
+    /// (SceneGiBinding::iblMipmaps). Every site that changes what a datablock's
+    /// env-probe slot holds — or whether a grid is bound — marks it; the frame
+    /// head (OgreEngine::renderOneFrame, per drawn scene) resolves it with one
+    /// walk of the materials. Body in OgreSky.cpp.
+    void markIblMipmapsDirty() { mIblMipmapsDirty = true; }
+    void resolveIblMipmaps();
+    bool mIblMipmapsDirty = true;
     /// True for the duration of destroy().
     bool mDestroying = false;
     /// Runs the queued ibl_specular convolution (roughness mip chain) into the

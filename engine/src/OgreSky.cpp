@@ -780,16 +780,10 @@ void OgreScene::landEnvironmentIfComplete() {
             catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
         }
         mReflectionTex = next;
-        // TELL HlmsPbs HOW MANY MIPS THE PROBE HAS. Without this the
-        // roughness->LOD map (envSpecularRoughness,
-        // 800.PixelShader_piece_ps.any:4) multiplies by
-        // passBuf.envMapNumMipmaps, which stays at its 1.0 default for a plain
-        // PBSM_REFLECTION texture — only the PCC classes ever call this — and
-        // every reflection is sampled at mip 0-1 however rough the surface.
-        // The count only ever grows, so it is reset first.
-        Ogre::HlmsPbs *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-        pbs->resetIblSpecMipmap(0u);
-        pbs->_notifyIblSpecMipmap(next->getNumMipmaps());
+        // The roughness->LOD map's chain length follows the new cube
+        // (envSpecularRoughness, 800.PixelShader_piece_ps.any:4, multiplies by
+        // passBuf.envMapNumMipmaps): applyReflectionToAll marks this scene's
+        // count, resolveIblMipmaps sets it (the note there).
         applyReflectionToAll();
     }
     if (mSkyShFresh) {
@@ -1638,11 +1632,7 @@ void OgreScene::destroyReflection() {
     try { destroyRecycled(tm, tex); }
     catch (Ogre::Exception &e)  { mError = e.getFullDescription(); }
     catch (std::exception &e)   { mError = std::string("engine: ") + e.what(); }
-    applyReflectionToAll();
-    // Recompute envMapNumMipmaps from whatever reflection textures remain
-    // (_notifyIblSpecMipmap only ever grows it).
-    static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
-        ->resetIblSpecMipmap(0u);
+    applyReflectionToAll();   // ...which also marks this scene's IBL chain length
 }
 
 void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
@@ -1722,45 +1712,39 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // sky cube reaches its materials through the pass-level slot below (the state is
 // per SceneManager — FogHlmsListener::SkyEnvState).
 //
-// THE ROUGHNESS-TO-LOD MAP AFTER A PROBE TRANSITION (lane SKY-FALLBACK-1,
-// second read). `passBuf.envMapNumMipmaps` is ONE number for the whole pass and
-// `_notifyIblSpecMipmap` only ever GROWS it.
-// `ParallaxCorrectedCubemapAuto::setEnabled` pushes the PROBE ARRAY's count into
-// it (6 while the placement holds the scout's 32 px, 10 at a 512 px tier) and
-// the engine pushed the SKY cube's count only when the cube was BUILT, never
-// again — so once a grid had come and gone, every manual cube in every scene
-// mapped its roughness against a chain it does not have. The scene-wide walk
-// this lane added would spread one scene's transition to all of them.
+// THE ROUGHNESS-TO-LOD MAP IS THE SCENE'S (PHOTON-SCENE-SWITCH-2).
+// `passBuf.envMapNumMipmaps` is ONE number per pass: the envSpecularRoughness
+// map multiplies by it, so it must be the length of the chain the pass's env
+// slot actually holds. HlmsPbs keeps it process-wide and GROW-ONLY
+// (`_notifyIblSpecMipmap`; `resetIblSpecMipmap(0)` re-derives the max over EVERY
+// datablock of every scene), so two scenes with sky cubes of different sizes gave
+// the smaller chain the larger count — a mid-roughness reflection sampled past
+// the end of its chain, over-blurred. (The old transition-only renotify, and the
+// ssr_mirror bar that moved when it ran more often, were symptoms of the same
+// process-wide number.)
 //
-// SO IT RUNS ON THIS SCENE'S TRANSITION AND NOWHERE ELSE
-// (noteProbeGridBindingChanged), which is the whole of the fix and was measured
-// the hard way. Putting it inside applyReflectionToAllImpl —
-// which every sky build, gain edge and material edit funnels through — changes
-// scenes that never had a grid at all: `scripting.e2e.ssr_mirror`'s "SSR is
-// still in this picture" bar fell 11 -> 7 against a bar of 8, reproducibly at
-// -j2 and in BOTH forms (the growth-only notify and the stricter
-// `resetIblSpecMipmap(0)` re-derivation), because a blurrier environment term is
-// a smaller difference between SSR on and off. That is a real picture question
-// about scenes with an authored cube and no probes, it is not this lane's, and
-// it is recorded for the lead rather than absorbed by widening somebody's bar.
-void OgreScene::renotifyReflectionMipmaps() {
+// Now each scene resolves its own: the bound grid's array when its passes bind
+// one, else the largest of its materials' bound reflection cubes (the sky's
+// prefiltered cube, an authored map). Marked dirty wherever a slot's occupant can
+// change, resolved at the frame head, bound per pass with the rest of the record
+// (bindSceneGi -> resetIblSpecMipmap(n), which also takes HlmsPbs out of its
+// automatic mode for good: no Ogre-side notify can move it behind our back).
+void OgreScene::resolveIblMipmaps() {
+    if (!mIblMipmapsDirty) return;
+    mIblMipmapsDirty = false;
+    unsigned mips = 1u;
     JAH_TRY {
-        auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(
-            mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-        if (!hlmsPbs) return;
-        unsigned mips = 0;
-        for (const auto &kv : mMaterials) {
-            if (kv.second.unlit) continue;
-            if (Ogre::TextureGpu *bound = reflectionTexFor(kv.second))
-                mips = std::max(mips, unsigned(bound->getNumMipmaps()));
+        if (mPcc && mGiBinding.pcc == mPcc && mPcc->getBindTexture()) {
+            mips = mPcc->getBindTexture()->getNumMipmaps();
+        } else {
+            for (const auto &kv : mMaterials) {
+                if (kv.second.unlit) continue;
+                if (Ogre::TextureGpu *bound = reflectionTexFor(kv.second))
+                    mips = std::max(mips, unsigned(bound->getNumMipmaps()));
+            }
         }
-        if (mips > 1u) hlmsPbs->_notifyIblSpecMipmap(Ogre::uint8(mips));
     } JAH_CATCH(mError, );
-}
-
-void OgreScene::noteProbeGridBindingChanged() {
-    applyReflectionToAll();
-    renotifyReflectionMipmaps();
+    mGiBinding.iblMipmaps = float(std::max(1u, std::min(255u, mips)));
 }
 
 void OgreScene::applyReflectionToAllImpl() {
@@ -1772,6 +1756,7 @@ void OgreScene::applyReflectionToAllImpl() {
     // re-written here or a scene that acquired its probes after its ambient
     // keeps the sky-cube answer.
     refreshEnvmapScale();
+    markIblMipmapsDirty();
     auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
     for (auto &kv : mMaterials) {
         if (kv.second.unlit) continue;
