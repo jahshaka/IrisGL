@@ -136,7 +136,22 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		float lod = 0.0;
 		if( !mirror )
 			lod = jahVoxelFootprintLod( footprint, texel );
-		const vec4 s = jahVoxelSample( c, ls, dir, lod );
+		// THE HIT READS ITS OWN TEXEL ALONG THE RAY'S AXIS (PHOTON-VOXEL-4): the surface the
+		// ray stopped on lies in the texel holding the point half a cell past the hit; the
+		// texel beyond it on the ray's dominant axis is BEHIND that surface, and a trilinear
+		// read blended it in - through a wall thinner than two cells, the lit far side
+		// (gi.gather's 0.05 m wall: the gather's leak 0.0211 -> 0.0118 against the field's
+		// 0.0084). The lateral axes keep the filter. What remains is A.1: a wall thinner than
+		// a cell holds BOTH faces in one texel with ONE radiance (the injection writes one;
+		// VOXEL-5's second item). The directional level of the facing half was measured and
+		// is worse (0.0827): its two-cell texel holds the far face's light too.
+		vec3 lsHit = ls;
+		{
+			const vec3 ir = JAH_VOX_INVRES( c );
+			const int ax = jahVoxelAxis( dir, ir );
+			lsHit[ax] = ( floor( ls[ax] / ir[ax] ) + 0.5 ) * ir[ax];
+		}
+		const vec4 s = jahVoxelSample( c, lsHit, dir, lod );
 		if( !jahVoxelSampleUsable( s ) )
 			continue;					// this cascade holds nothing here
 		float w = 1.0;
