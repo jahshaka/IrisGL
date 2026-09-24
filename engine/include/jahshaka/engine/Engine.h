@@ -362,10 +362,11 @@ public:
     /// AT-A11). `levels` is how many LOD levels the mesh has and
     /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the
     /// corresponding normal one — i.e. how many shrunk position-only VAOs this
-    /// mesh pays for. The shape the engine builds is 1 (level 0 optimized, the
-    /// coarse levels aliased) or 0 (nothing to optimize, everything aliased); it
-    /// was `levels` before ogre-patch 0088 made a MIXED list legal to destroy.
-    /// False for an unknown mesh. Exists because that shape is Ogre-internal, it
+    /// mesh pays for. The shape the engine builds is `levels` (every level shrunk,
+    /// all over ONE vertex buffer) or 0 (nothing to optimize, everything aliased)
+    /// — never a mix: Ogre builds a pass's pipeline from the first VAO's vertex
+    /// layout, so a list mixing layouts draws its other levels as garbage
+    /// (PHOTON-SCENE-SWITCH-1). False for an unknown mesh. Exists because that shape is Ogre-internal, it
     /// is VRAM per mesh forever, and a suite has to be able to see it.
     virtual bool        meshVaoShape(MeshId mesh, unsigned &levels,
                                      unsigned &shadowIndependent) const = 0;
