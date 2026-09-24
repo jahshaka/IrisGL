@@ -39,7 +39,8 @@ struct SkinJob
 	uvec4 a;	// x source geometry row (the MESH's level 0, submesh 0), y vertex count,
 				// z palette base (in vec4 rows), w cache address low
 	uvec4 b;	// x cache address high, y source tangent byte offset (0xFFFFFFFF none),
-				// z source blend-index byte offset, w source blend-weight byte offset
+				// z source blend-index byte offset (low 16) and blend-weight byte
+				// offset (high 16), w the palette's bone count
 };
 
 layout( std430, ogre_U0 ) readonly restrict buffer jobLayout { SkinJob jobs[]; };
@@ -86,8 +87,9 @@ void main()
 		tan = vec4( srcF.v[lane], srcF.v[lane + 1u], srcF.v[lane + 2u], srcF.v[lane + 3u] );
 	}
 	// VET_UBYTE4 blend indices (one word) and VET_FLOAT4 weights.
-	const uint packedIdx = srcU.v[GEOM_LANE( row, vtx, job.b.z )];
-	const uint wLane = GEOM_LANE( row, vtx, job.b.w );
+	const uint packedIdx = srcU.v[GEOM_LANE( row, vtx, job.b.z & 0xFFFFu )];
+	const uint wLane = GEOM_LANE( row, vtx, job.b.z >> 16u );
+	const uint lastBone = max( job.b.w, 1u ) - 1u;
 	const vec4 weights = vec4( srcF.v[wLane], srcF.v[wLane + 1u], srcF.v[wLane + 2u], srcF.v[wLane + 3u] );
 
 	vec3 outPos = vec3( 0.0 );
@@ -95,7 +97,9 @@ void main()
 	vec3 outTan = vec3( 0.0 );
 	for( uint k = 0u; k < 4u; ++k )
 	{
-		const uint bone = ( packedIdx >> ( 8u * k ) ) & 0xFFu;
+		// Clamped into THIS item's palette: a malformed index reads its last bone,
+		// never the next item's rows.
+		const uint bone = min( ( packedIdx >> ( 8u * k ) ) & 0xFFu, lastBone );
 		const float w = weights[k];
 		const uint base = job.a.z + bone * 3u;
 		const vec4 r0 = palette[base + 0u];

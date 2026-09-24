@@ -2458,8 +2458,9 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             r.cacheAddressLo = uint32_t(d.sk->buf.address & 0xFFFFFFFFull);
             r.cacheAddressHi = uint32_t(d.sk->buf.address >> 32u);
             r.tangentOffset = d.sk->buf.tangentOffset;
-            r.blendIndexOffset = d.sk->buf.blendIndexOffset;
-            r.blendWeightOffset = d.sk->buf.blendWeightOffset;
+            r.blendOffsets = (d.sk->buf.blendIndexOffset & 0xFFFFu) |
+                             ((d.sk->buf.blendWeightOffset & 0xFFFFu) << 16u);
+            r.boneCount = uint32_t(map->size());
             for (size_t b = 0; b < map->size(); ++b) {
                 // store4x3, not streamTo4x3: the stream form is a non-temporal
                 // store meant for a mapped GPU buffer; this is a stack copy.
@@ -2471,13 +2472,6 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
                 for (int row = 0; row < 3; ++row)
                     for (int col = 0; col < 4; ++col) palette.push_back(float(local[row][col]));
             }
-            // A blend index past the map would read another item's rows: the map
-            // is the whole rig under buildMeshV2 (identity), and the job reads
-            // 3 rows per index up to 255 — pad to 256 bones so no index escapes.
-            const size_t bones = map->size();
-            for (size_t b = bones; b < 256u; ++b)
-                for (int row = 0; row < 3; ++row)
-                    for (int col = 0; col < 4; ++col) palette.push_back(row == col ? 1.0f : 0.0f);
             jobs.push_back(r);
             maxVerts = std::max(maxVerts, r.vertexCount);
         }
@@ -2835,8 +2829,10 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     {
         monitor::CacheScope scope(CacheKind::Gi, WorkReason::Moved, 0, "rq.skin", mRs);
         const unsigned long long before = sa.st.skinPasses;
+        const Clock::time_point tSkin = Clock::now();
         if (!skinPass(scene, sa, cmd, timed, qBase, err) && !err.empty())
             Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
+        if (sa.st.skinPasses != before) sa.st.skinCpuMs = float(msSince(tSkin));
         pend.skin = sa.st.skinPasses != before;
         scope.setUnits(unsigned(sa.st.skinPasses - before));
         if (sa.st.skinPasses == before) scope.cancel();

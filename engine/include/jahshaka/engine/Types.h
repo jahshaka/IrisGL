@@ -4125,6 +4125,9 @@ struct RayQueryStatus {
     unsigned long long skinLastVertices = 0;
     float skinMs = -1.0f;
     float skinRefitMs = -1.0f;
+    /// CPU milliseconds the last skin pass cost the frame thread (reconcile, the
+    /// palettes, the uploads, the recording) — -1 until one ran.
+    float skinCpuMs = -1.0f;
     /// Why rigged items are NOT traced (empty when they are): no device address
     /// support, the job missing from the media, a source layout the job cannot
     /// read.

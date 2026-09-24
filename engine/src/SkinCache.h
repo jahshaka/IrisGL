@@ -59,8 +59,13 @@ struct SkinJobRecord {
     uint32_t cacheAddressLo = 0u;
     uint32_t cacheAddressHi = 0u;
     uint32_t tangentOffset = 0xFFFFFFFFu;   ///< source byte offsets beyond what the row says
-    uint32_t blendIndexOffset = 0u;
-    uint32_t blendWeightOffset = 0u;
+    /// The blend-index element's byte offset (low 16 bits) and the blend-weight
+    /// element's (high 16 bits) — a vertex is far shorter than 64 KB.
+    uint32_t blendOffsets = 0u;
+    /// Bones in this item's palette (its blend-index map's length): the job
+    /// clamps a blend index into it, so a malformed index reads this item's last
+    /// bone and never the next item's rows.
+    uint32_t boneCount = 0u;
 };
 static_assert(sizeof(SkinJobRecord) == 32, "the skin job's record is a shader contract");
 
