@@ -86,12 +86,13 @@
 		float4 jahClock;		// x = seconds since the host's clock started; yzw reserved
 	@end
 	@property( irradiance_field )
-		float4 jahIfd;			// JahIfd_piece_ps.any: x = DDGI diffuse intensity,
-								// y = the field's window offset, packed x + 128 y +
-								// 16384 z (PHOTON-WRITER-1's scroll), zw = the field's
-								// Y and Z probe counts (upstream's own block carries
-								// only Nx and Nx*Ny, and the visibility threshold
-								// needs all three axes)
+		float3 jahIfd;			// JahIfd_piece_ps.any: x = the field's window offset,
+								// packed x + 128 y + 16384 z (PHOTON-WRITER-1's
+								// scroll), yz = the field's Y and Z probe counts
+								// (upstream's own block carries only Nx and Nx*Ny,
+								// and the visibility threshold needs all three axes).
+								// THREE floats: std140 aligns the next float4 to 16,
+								// so the host writes one pad float after them
 	@end
 	@property( jah_env )
 		@property( !irradiance_field )

@@ -38,7 +38,9 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// w = how many cascades are bound.
 	vec4 knobs;
 	/// x = 1 when the voxel textures carry the anisotropic slots, y = the
-	/// surface bias in world units, z = 1 when a sky cubemap is bound,
+	/// ray start's floor off the surface in world units (an epsilon; the trace
+	/// takes the larger of it and 1e-4 of the probe's view distance), z = 1
+	/// when a sky cubemap is bound,
 	/// w = the octahedral map's resolution (rays per probe = w*w).
 	vec4 knobs2;
 	/// x = how many UNIFORM probes there are (the grid), y = how many ADAPTIVE
@@ -89,8 +91,23 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// switched back on — and then the previous images hold nothing and are
 	/// never read); y = the history's blend FLOOR (the smallest weight a new
 	/// frame takes: 1 / the frames it remembers); z = 1 runs the history (0 =
-	/// `JAHSHAKA_GATHER_NO_TEMPORAL`, the measurement lever); w = unused.
+	/// `JAHSHAKA_GATHER_NO_TEMPORAL`, the measurement lever); w = 1 accepts every
+	/// reprojected texel (the distance and normal tests off — the test door
+	/// GatherTuning::historyValidationOff; 0 shipped).
 	vec4 knobs5;
+	/// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e — the
+	/// reflection's `p.cards`, word for word): x = the instance-table entries
+	/// bound (0 = the scene holds no cache: every hit reads the voxels), y = the
+	/// card records bound, z = the footprint gate in card texels
+	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
+	/// Read by the trace alone.
+	vec4 cards;
+	/// THE REST MEAN (PHOTON-GATHER-1d, rq_probe_integrate.comp): x = the rest
+	/// frame k (0 = the camera, the lighting or the scene moved this frame — not
+	/// at rest; k >= 1 = the k-th consecutive frame at rest), y = K, the rest
+	/// frames after which the answer IS the rest mean and the host holds.
+	vec4 knobs6;
 } p;
 
 /// ONE PROBE'S RECORD — where it sits, what it faces, what it integrated.

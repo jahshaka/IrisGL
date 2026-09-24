@@ -372,129 +372,31 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 	return normalize( vec3( alpha * Nh.x, alpha * Nh.y, max( 0.0, Nh.z ) ) );
 }
 
-/// THE RADIANCE AT A HIT — THE CARD FIRST, THE VOXELS WHERE NO CARD ANSWERS
-/// (PHOTON-CARDS-2, SC-1d; F1-HITRES).
-///
-/// THE CARD. The surface cache holds, for every carded instance near the
-/// camera, the lit radiance of its surface at the atlas's texel pitch — a
-/// 2 m panel on a 128 page is 1.6 cm a texel, where the finest voxel a mirror
-/// can read is two 7.8 cm cells (15.6 cm) wide. That width was the mirror band's
-/// banding: every hit shaded from a 15.6 cm cell. So a hit asks the card of its
-/// own instance first (`jahCardRadiance`, jah_rq_card.glsl: the instance by the
-/// TLAS's instanceCustomIndex = the item slot, the pick, the through-the-wall
-/// rule, the texel) and takes the card's radiance whole — weight 1, no
-/// crossfade: a card texel is a surface's own answer, not a filtered volume.
-/// The facing direction handed to the pick is the hit triangle's GEOMETRIC
-/// normal (jah_rq_geom.glsl), so a hit near a box's edge reads its own face's
-/// card. The read is texel-exact (the atlas has no mips until SC-2), so it is
-/// taken only while the sample's FOOTPRINT is at most k card texels (Types.h
-/// kCardFootprintTexels, measured): a wider lobe's one sample per frame on one
-/// texel is speckle in a young view where the voxels' read is prefiltered at the
-/// footprint's own mip.
-///
-/// THE VOXELS answer where no card does: an instance with no cards, a point no
-/// card of it describes, a scene without a cache — and a card whose indirect
-/// half has not been marched yet (it would read a black bounce; the header
-/// there says why that happens). Their read, unchanged:
-///
-/// The anisotropic slots and not slot 0, because the spike measured exactly
-/// what slot 0 costs: it is the voxel's radiance averaged over every direction,
-/// so a panel lit on one face reads near-black from the lit side. Slots 1..3
-/// are VctLighting's per-axis chains, each holding the two signs of one axis in
-/// the two halves of its X range, and the read is upstream's own — the cone
-/// tracer's, verbatim: pick the half by the sign of the direction's component,
-/// weight the three axes by that component SQUARED (Vct_piece_ps.any:202-232).
-/// The direction is the RAY's, not the hit surface's normal: the anisotropic
-/// chains are indexed by the direction light is travelling THROUGH the cell,
-/// and the quantity a reflection wants is the radiance leaving the hit towards
-/// the ray's origin, which is the ray's own direction reversed twice — i.e. the
-/// ray's direction. (The hit NORMAL is not available at all without fetching
-/// the hit triangle's vertices, which needs a per-instance geometry table; it
-/// is also not what upstream indexes by.)
-///
-/// THE VOXEL BIAS, stated because a suite asserts against it: a voxel stores
-/// radiance PRE-MULTIPLIED by how much of the cell the surface covers, so a
-/// point sample on a surface reads the surface's radiance times its coverage,
-/// and trilinear filtering at the surface blends in the empty cell next door.
-/// Dividing by the sampled opacity undoes exactly that, which is why the
-/// suite's bar is a fraction of the panel's own lit albedo rather than equality:
-/// a surface thinner than a cell, or at a grazing angle to the grid, keeps a
-/// residual of its neighbours. The sample point is pushed HALF A CELL along the
-/// ray, into the cell the surface occupies rather than onto its face.
-///
-/// THREE THINGS THIS FUNCTION DOES THAT UPSTREAM'S FIRST CUT DID NOT (DRAG-1):
-///
-///  1. THE RADIANCE IS IN THE SCENE'S UNITS, NOT THE BAKE'S. `VctLighting`
-///     normalises everything it injects by the brightest light's radiance over
-///     pi (its `autoMultiplier`), and the PIXEL path multiplies that back out
-///     through `probeParams.multiplier` (Vct_piece_ps.any's `finalMultiplier`).
-///     This function read the voxel raw, so a traced reflection was in
-///     baking-normalised units and came out right ONLY when the brightest light
-///     in the scene happened to have radiance pi — which is exactly a sun at
-///     intensity 1 (powerScale = I*pi), i.e. every fixture the suites use, and
-///     nothing else. A brighter lamp darkened every traced reflection by its
-///     own factor. The engine now exports each cascade's `finalMultiplier` in
-///     `voxelOrigin[c].w` (a slot that held the cascade's largest extent, which
-///     nothing read).
-///
-///  2. THE CASCADE CHOICE IS BLENDED AT THE BOX FACE, not switched. Choosing the
-///     first cascade that CONTAINS the hit steps the texel size 2x at cascade
-///     0's face and 3x at cascade 1's, and a mirror looking across a hall shows
-///     that step as a ring — the boundary of a box, drawn on a reflection. The
-///     contribution now fades out over the last few texels of a cascade and the
-///     next one out takes up the remainder, so the texel size changes over a
-///     band instead of at a surface.
-///
-///  3. THE MIP IS CHOSEN FOR THE LOBE. `textureLod(..., 0.0)` made every ray
-///     read the finest directional mip, so a rough reflection paid for the
-///     anisotropic chain and never read it, and its variance was removed by the
-///     spatial filter instead. The lobe has a width; at distance t it covers a
-///     footprint, and a mip exists for exactly that. What is NOT taken is the
-///     WHOLE lobe footprint: the temporal mean already averages up to N samples
-///     of the lobe (N = 1/knobs2.w, the mean's memory floor), so pre-filtering
-///     the whole lobe on top of that would blur it twice. The honest footprint
-///     for ONE stochastic sample is the spacing BETWEEN the samples the mean
-///     holds, which for N samples spread over the lobe goes as 1/sqrt(N). A
-///     MIRROR takes LOD 0 and no blend widening at all — and LOD 0 is still two
-///     cells, so this does not sharpen a mirror; only hit lighting can.
-///
-/// `lobeAlpha` is the GGX alpha of the surface the ray left and `t` the distance
-/// it travelled.
-vec3 hitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float lobeAlpha, float t,
-				  out bool ok )
+/// THE RADIANCE AT A HIT is `jahHitRadiance` (jah_rq_hit_radiance.glsl): the
+/// CARD first, the VOXELS where no card answers — ONE function, read by this
+/// trace and by the gather's hits (PHOTON-GATHER-1d, GA-1e), whose header says
+/// what each read does. What this trace hands it is its FOOTPRINT, below.
+#include "jah_rq_hit_radiance.glsl"
+
+/// A lobe at or below this GGX alpha is a MIRROR: the card texel-exact, the
+/// containing cascade whole at LOD 0 and no crossfade (a crossfade of two texel
+/// sizes is still a blur, and a mirror is the one surface that must not be
+/// blurred — LOD 0 is still two cells, so only hit lighting sharpens it).
+const float kMirrorAlpha = 0.01;
+
+/// THIS TRACE'S SAMPLE FOOTPRINT at a hit `t` away along a lobe of GGX alpha
+/// `lobeAlpha` — the currency both reads select on. Not the WHOLE lobe: the
+/// temporal mean already averages up to N samples of the lobe (N = 1/knobs2.w,
+/// the mean's memory floor), so pre-filtering the whole lobe on top of that
+/// would blur it twice. The honest footprint for ONE stochastic sample is the
+/// spacing BETWEEN the samples the mean holds, which for N samples spread over
+/// the lobe goes as 1/sqrt(N). (`textureLod(..., 0.0)` once made every ray read
+/// the finest directional mip, so a rough reflection paid for the anisotropic
+/// chain and never read it — DRAG-1.)
+float reflectFootprint( float lobeAlpha, float t )
 {
-	const float meanSamples0 = 1.0 / max( p.knobs2.w, 1e-3 );
-	// THE SAMPLE'S FOOTPRINT AT THE HIT (the spacing between the samples the mean
-	// holds; below): the card is read only while it is at most k card texels
-	// (jahCardRadiance's gate) — a wider lobe reads the prefiltered voxels.
-	{
-		const float cardFootprint = lobeAlpha <= 0.01
-										? 0.0
-										: 2.0 * t * lobeAlpha / sqrt( max( meanSamples0, 1.0 ) );
-		const vec3 card = jahCardRadiance( slot, hitPos, hitNormal, cardFootprint, ok );
-		if( ok )
-			return card;
-	}
-	// THE MIP IS CHOSEN FOR THE LOBE, and this wrapper is where that choice is
-	// made — the shared function takes a FOOTPRINT in world units and knows
-	// nothing about specular lobes. `textureLod(..., 0.0)` made every ray read
-	// the finest directional mip, so a rough reflection paid for the
-	// anisotropic chain and never read it. What is NOT taken is the WHOLE lobe
-	// footprint: the temporal mean already averages up to N samples of the lobe
-	// (N = 1/knobs2.w, the mean's memory floor), so pre-filtering the whole lobe
-	// on top of that would blur it twice. The honest footprint for ONE
-	// stochastic sample is the spacing BETWEEN the samples the mean holds, which
-	// for N samples spread over the lobe goes as 1/sqrt(N).
-	//
-	// A MIRROR takes LOD 0, the containing cascade WHOLE and no crossfade at
-	// all: a crossfade of two texel sizes is still a blur and a mirror is the
-	// one surface that must not be blurred. (LOD 0 is still two cells, so this
-	// does not sharpen a mirror; only hit lighting can.)
-	const float kMirrorAlphaHere = 0.01;
-	const bool mirror = lobeAlpha <= kMirrorAlphaHere;
 	const float meanSamples = 1.0 / max( p.knobs2.w, 1e-3 );
-	const float footprint = 2.0 * t * lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
-	return jahVoxelRadiance( hitPos, dir, footprint, mirror, ok );
+	return 2.0 * t * lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
 }
 
 /// An escaping sample, read at the SAME honest footprint as a hit (GA-SKY): the
@@ -503,10 +405,9 @@ vec3 hitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float lobeAl
 /// reads the environment's finest mip.
 vec3 skyRadiance( vec3 dir, float lobeAlpha )
 {
-	const float kMirrorAlphaHere = 0.01;
 	const float meanSamples = 1.0 / max( p.knobs2.w, 1e-3 );
-	const float tanHalf = lobeAlpha <= kMirrorAlphaHere ? 0.0
-														: lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
+	const float tanHalf = lobeAlpha <= kMirrorAlpha ? 0.0
+													: lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
 	return jahSkyRadiance( dir, tanHalf );
 }
 
@@ -750,7 +651,9 @@ void main()
 		jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
 							   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
 							   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
-		traced = hitRadiance( hitSlot, world + worldN * bias + L * t, hitN, L, lobeAlpha, t, ok );
+		traced = jahHitRadiance( hitSlot, world + worldN * bias + L * t, hitN, L,
+								 reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
+								 true, ok );
 		// A HIT THE CACHE CANNOT SHADE IS NOT A MISS. The ray found geometry;
 		// the voxels simply do not reach it (outside every cascade, or a surface
 		// too thin for the grid). Returning the sky there would draw a hole in
@@ -810,8 +713,8 @@ void main()
 	// the floor over kMirrorAlpha — the alpha at which one sample stops being
 	// the whole integral. 0.01 is perceptual 0.1, the roughness at which the
 	// reflected lobe's half-width (~2*alpha) first exceeds a pixel of a 1080p
-	// frame at a typical field of view.
-	const float kMirrorAlpha = 0.01;
+	// frame at a typical field of view (the file's kMirrorAlpha, the hit read's
+	// mirror cut — one number).
 	// FROM THE PACKING FLOOR, not from zero (third reader, item 3). The
 	// G-buffer cannot hold an alpha below 0.001 — ogre-patch 0043 packs over
 	// [0.001, 1] — so 0.001 IS a mirror, and a ramp starting at 0 gives the

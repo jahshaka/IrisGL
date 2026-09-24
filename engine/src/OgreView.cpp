@@ -49,8 +49,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     chain::build(mRoot->getCompositorManager2(), mWorkspaceDef, chainDesc(), mNodeDefs,
                  mChainHandles);
     mChainRayReflect = chainDesc().rayReflect;
-    mChainProbeGather = chainDesc().probeGather;
-    mChainSunContact = chainDesc().sunContact;
+    mChainPrepass = chainDesc().prepass();
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -132,6 +131,36 @@ ChainDesc OgreView::chainDesc() const {
     // is what the view KEEPS (a float scene target), and the offscreen views
     // are exactly the ones a closed form is measured on.
     d.hdrReadback = mPostFx.hdrReadback;
+    // THE SCREEN-PROBE GATHER, and the reason it is not `&& d.ssr`: the gather
+    // needs the PREPASS, not the reflection row. A project whose gather row is on
+    // gets the prepass in every view that draws its scene, whatever its SSR row
+    // says — which is the whole of `ChainDesc::probeGather`. Like `rayReflect` it
+    // reads the machine through the scene's resolved row and never the document.
+    // ABOVE THE OFFSCREEN EARLY-OUT, like refraction below and for refraction's
+    // reason (PHOTON-GATHER-1d): at a gather tier the gather IS the diffuse GI —
+    // not a post-process but how a surface is lit — so a screenshot, a thumbnail
+    // and a preview show the diffuse the viewport shows (a screenshot is the
+    // editor's own picture), and GiStatus::giAtRest's settled-history term makes
+    // a settled shot wait for its own view's history.
+    // ...AND NOT IN A STEREO VIEW (the lead's read): the Component declines a
+    // stereo target (the probe grid would have to be split at the eye seam), so
+    // without this term a VR eye would pay a second geometry traversal every
+    // frame for a prepass nothing then reads.
+    // ...AND AN OFFSCREEN VIEW BY ITS DECLARED CONTRACT (the fix round;
+    // View::setOffscreenContract): a still picture gathers and its caller waits
+    // for giAtRest; a live one takes the field's answer; an undeclared one
+    // refuses, once, out loud.
+    const bool wantsGather = mScene && mScene->probeGatherWanted() && !mStereo;
+    bool contractAllows = !isOffscreen() || mOffscreenContract == OffscreenContract::StillPicture;
+    if (wantsGather && isOffscreen() && mOffscreenContract == OffscreenContract::Undeclared &&
+        !mSaidNoContract) {
+        mSaidNoContract = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: offscreen view '" + mName + "' declares no contract "
+            "(View::setOffscreenContract: StillPicture or Live) — it refuses the screen-probe "
+            "gather and takes the field's diffuse");
+    }
+    d.probeGather    = wantsGather && contractAllows;
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -206,21 +235,6 @@ ChainDesc OgreView::chainDesc() const {
     // every pixel, `ssr == 1` (High) one in four, exactly as the march does —
     // which is why the row is a scale factor here too and not a second setting.
     d.rayReflect     = d.ssr > 0 && mScene && mScene->rayReflectionsWanted();
-    // THE SCREEN-PROBE GATHER (GATHER-1a), and the reason it is not `&& d.ssr`:
-    // the gather needs the PREPASS, not the reflection row. A project whose
-    // gather row is on gets the prepass in every view that draws its scene,
-    // whatever its SSR row says — which is the whole of `ChainDesc::probeGather`
-    // (the note there). Like `rayReflect` it reads the machine through the
-    // scene's resolved row and never the document directly, and like it this
-    // line is BELOW the offscreen early-out: an offscreen view that did not opt
-    // in (`PostFxDesc::allowOffscreen`) has no prepass and therefore no gather,
-    // so every thumbnail, preview and pixel suite keeps the colours that make
-    // it assertable.
-    // ...AND NOT IN A STEREO VIEW (the lead's read): the Component declines a
-    // stereo target at this phase (the probe grid would have to be split at the
-    // eye seam — the spec's phase 7), so without this term a VR eye would pay a
-    // second geometry traversal every frame for a prepass nothing then reads.
-    d.probeGather    = mScene && mScene->probeGatherWanted() && !mStereo;
     // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the same shape and the same
     // three terms as the gather's line above — the scene's resolved row, below
     // the offscreen early-out, and never in a stereo view (the job declines a
@@ -1312,6 +1326,14 @@ void OgreView::setLodHysteresisOffscreen(bool on) {
     rebuildWorkspaceDef();
 }
 
+void OgreView::setOffscreenContract(OffscreenContract c) {
+    if (c == mOffscreenContract) return;
+    mOffscreenContract = c;
+    mSaidNoContract = false;
+    // The gather decides the prepass: graph shape, like the flags above.
+    rebuildWorkspaceDef();
+}
+
 void OgreView::setBackground(const Colour &c) {
     const bool same = std::abs(c.r - mBackground.r) < 1e-4f && std::abs(c.g - mBackground.g) < 1e-4f &&
                       std::abs(c.b - mBackground.b) < 1e-4f && std::abs(c.a - mBackground.a) < 1e-4f;
@@ -1327,8 +1349,7 @@ void OgreView::rebuildWorkspaceDef() {
         chain::destroy(cm, mWorkspaceDef, mNodeDefs);
         chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs, mChainHandles);
         mChainRayReflect = chainDesc().rayReflect;
-        mChainProbeGather = chainDesc().probeGather;
-        mChainSunContact = chainDesc().sunContact;
+        mChainPrepass = chainDesc().prepass();
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }

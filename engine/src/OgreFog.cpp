@@ -164,38 +164,67 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
                         hlms->_setTextureReg(tid, Ogre::PixelShader, kExtraPassSlots[i].reg, slot++);
         }
     }
-    {
-        // GA-GLASS (PHOTON-GATHER-1b): A BLENDED FRAGMENT READS NO PROBE. The
-        // gather's texel under a fragment is the OPAQUE surface the prepass drew
-        // there — a glass, fade or additive fragment in front of it would take
-        // that surface's irradiance at full coverage (measured: a Glass slab
-        // moved 1.9/255 and a Blend slab 18.6/255 on the gather's toggle,
-        // gi.gather_glass). So the renderable's copy of the pass property is
-        // withdrawn here, AFTER its texture register was claimed above (the slot
-        // stays bound and numbered — the cloud field's register behind it does
-        // not move — and simply goes undeclared), and every guard that reads it
-        // follows: the piece, the field's cage hook, the declaration, and the
-        // cone-diffuse switch below. The blended fragment keeps the field, the
-        // cones and the environment it had. Cache-safe: derived from two
-        // properties already in the merged set.
-        static const Ogre::IdString kProbeGather("jah_probe_gather");
-        static const Ogre::IdString kAlphaBlend("hlms_alphablend");
-        if (hlms->_getProperty(tid, kProbeGather) && hlms->_getProperty(tid, kAlphaBlend))
+    // A BLENDED FRAGMENT IS NOT THE SURFACE THE PREPASS DREW, and three pass
+    // properties describe that surface (PHOTON-GATHER-1b GA-GLASS; 1d F2). All
+    // three are withdrawn per renderable here, AFTER HlmsPbs numbered the texture
+    // registers (notifyPropertiesMergedPreGenerationStep runs before this hook):
+    // the slots stay bound and numbered — nothing behind them moves — and simply
+    // go undeclared, and every guard that reads a property follows it.
+    // Cache-safe: derived from properties already in the merged set.
+    static const Ogre::IdString kProbeGather("jah_probe_gather");
+    static const Ogre::IdString kEnvDiffuseOnly("jah_env_diffuse_only");
+    static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
+    const bool blended = hlms->_getProperty(tid, Ogre::IdString("hlms_alphablend")) != 0 &&
+                         !hlms->_getProperty(tid, kShadowCaster);
+    if (blended) {
+        // F2 — THE PREPASS: `hlms_use_prepass` is a PASS property, and under it
+        // 800.PixelShader takes the fragment's normal, roughness and directional
+        // SHADOW from the G-buffer at iFragCoord — the OPAQUE surface's behind
+        // it (measured: a Fade slab 25/255 dark, shading in its own cast shadow;
+        // spikes/photon-gather-1b/AUDIT.md F2). Withdrawn, the blended fragment
+        // shades from its own interpolants and its own shadow-map lookup, as it
+        // does in a pass with no prepass at all. `hlms_use_ssr` goes with it: the
+        // SSR texel under the fragment is the opaque surface's reflection. THE
+        // OTHER HALF is in the prepass itself: a blended fragment writes nothing
+        // there (JahProbeGather_piece_ps.any's discard), so the G-buffer and the
+        // depth the shading pass tests against are the opaque surfaces' alone —
+        // measured on gi.gather_glass's F2 arm: 31.9/255 dark with neither half,
+        // 7.6 with this one alone, 24.1 with the discard alone, 0.0 with both.
+        static const Ogre::IdString kUsePrePass("hlms_use_prepass");
+        static const Ogre::IdString kUseSsr("hlms_use_ssr");
+        if (hlms->_getProperty(tid, kUsePrePass)) {
+            hlms->_setProperty(tid, kUsePrePass, 0);
+            hlms->_setProperty(tid, kUseSsr, 0);
+        }
+        // GA-GLASS — THE GATHER: the probe texel under a blended fragment is the
+        // opaque surface's irradiance (measured: a Glass slab 1.9/255, a Blend
+        // slab 18.6/255 on the gather's toggle, gi.gather_glass). Withdrawn — and
+        // THE TRANSLUCENT SURFACE'S DIFFUSE GI IS DECIDED (PHOTON-GATHER-1d): the
+        // ENVIRONMENT TERM ONLY — ONE-ENV's irradiance at the fragment's own
+        // normal, `jah_env_diffuse_only` (JahProbeGather_piece_ps.any). A blended
+        // fragment reads no gather (it has no probe of its own: a probe sits on
+        // the surface the prepass drew), no cones (they are compiled out on a
+        // gather tier, below) and no field cage (JahIfd_piece_ps.any declines it
+        // under the same property): what lights a translucent surface from the
+        // scene is its direct light, what it transmits is the refraction's.
+        if (hlms->_getProperty(tid, kProbeGather)) {
             hlms->_setProperty(tid, kProbeGather, 0);
+            hlms->_setProperty(tid, kEnvDiffuseOnly, 1);
+        }
     }
     static const Ogre::IdString kIrradianceField("irradiance_field");
     static const Ogre::IdString kVctNumProbes("vct_num_probes");
     static const Ogre::IdString kVctDisableDiffuse("vct_disable_diffuse");
     {
-        // GATHER-0: WHERE THE GATHER ANSWERS, THE CONES MUST NOT ALSO ANSWER.
-        // The six cone marches per pixel and the probe's 64 rays estimate the
-        // SAME integral; adding them is that integral twice. This is the whole
-        // of spec section 3's first row, in its phase-0 form — and it is the
-        // switch that makes the measured arms comparable at all. Cache-safe:
-        // derived from a pass property already in the merged set.
-        static const Ogre::IdString kProbeGather("jah_probe_gather");
-        static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
-        if (hlms->_getProperty(tid, kProbeGather) && !hlms->_getProperty(tid, kShadowCaster)) {
+        // WHERE THE GATHER ANSWERS, THE CONES DO NOT (GATHER-0; the tier's fact
+        // since PHOTON-GATHER-1d: a pass gathers exactly on a gather tier). The
+        // six cone marches per pixel and the probe's 64 rays estimate the SAME
+        // integral; adding them is that integral twice. So on a gather pass the
+        // cone diffuse is compiled out of every renderable — the gathering ones
+        // and the translucent ones above alike — and the cones' diffuse remains
+        // Low's alone. Cache-safe: derived from the properties just set.
+        if ((hlms->_getProperty(tid, kProbeGather) || hlms->_getProperty(tid, kEnvDiffuseOnly)) &&
+            !hlms->_getProperty(tid, kShadowCaster)) {
             hlms->_setProperty(tid, kVctDisableDiffuse, 1);
             return;
         }
@@ -553,10 +582,7 @@ FogHlmsListener::IfdState FogHlmsListener::ifdState(const Ogre::SceneManager *sm
     // is the single source of that number. The probe counts stay 0, which
     // JahIfd reads as "no counts" and leaves the cage unclamped (upstream's
     // behaviour).
-    IfdState fallback;
-    const GiParams defaults;
-    fallback.intensity = defaults.ddgiIntensity;
-    return fallback;
+    return IfdState();
 }
 
 FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
@@ -661,16 +687,17 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = 0.0f;
     // The DDGI block, same four-float alignment rule. Read by
     // media/Hlms/Jahshaka/JahIfd_piece_ps.any, which only exists in the
-    // generated shader while an IrradianceField is bound: x scales the field's
-    // irradiance (the sky its probes see included, PHOTON-ENV-1), y is the
-    // field's window offset, packed (PHOTON-WRITER-1's scroll: the reader's
-    // modulo), zw are the field's Y and Z probe counts, which upstream's own
-    // IrradianceField block does not carry and the cage clamp needs.
+    // generated shader while an IrradianceField is bound — a float3 (the
+    // intensity dial's float is deleted, PHOTON-GATHER-1d): x is the field's
+    // window offset, packed (PHOTON-WRITER-1's scroll: the reader's modulo), yz
+    // are the field's Y and Z probe counts, which upstream's own
+    // IrradianceField block does not carry and the cage clamp needs. Then the
+    // std140 pad before jahEnv's 16-byte alignment.
     const IfdState ifd = ifdState(sceneManager);
-    *passBufferPtr++ = ifd.intensity;
     *passBufferPtr++ = ifd.windowOffsetPacked;     // the field's window (PHOTON-WRITER-1)
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
+    *passBufferPtr++ = 0.0f;                       // std140 pad
     // jahEnv (PHOTON-ENV-1): rgb = the environment light's gain per channel on
     // the cube, w = the cube's own mip count. Written unconditionally like every
     // field above — the shader declares it only when it claimed the slot, and a

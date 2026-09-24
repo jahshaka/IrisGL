@@ -1196,6 +1196,10 @@ struct ChainDesc {
 
     /// Does this description need anything beyond the passthrough graph?
     bool anyEffect() const;
+    /// Does the chain carry the depth/normal PREPASS (the SSR stage's march or
+    /// rays, the gather, the sun contact)? `build` builds it on this answer and
+    /// `sameShape` compares it in place of the rows that ask for it.
+    bool prepass() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.
     static bool sameShape(const ChainDesc &a, const ChainDesc &b);
@@ -2420,16 +2424,11 @@ public:
     /// shader, once per pass, and all of it must be changeable without a shader
     /// rebuild.
     ///
-    /// It exists because binding an IrradianceField sets `VctDisableDiffuse`:
-    /// DDGI REPLACES voxel-cone diffuse rather than adding to it, and
-    /// upstream's IrradianceFieldSettings has no intensity knob.
-    /// media/Hlms/Jahshaka/JahIfd_piece_ps.any multiplies upstream's
-    /// accumulated irradiance by `intensity` (1.0 = upstream's own brightness).
-    /// Defaults to GiParams' defaults so a scene that never pushes state still
-    /// reads sane values.
+    /// What media/Hlms/Jahshaka/JahIfd_piece_ps.any needs that upstream's own
+    /// render params do not carry: the probe counts and the window. (The
+    /// intensity dial that rode here is DELETED, PHOTON-GATHER-1d: the field is
+    /// applied at its own physical answer; `jahIfd.x` is unused.)
     struct IfdState {
-        /// GiParams::ddgiIntensity, clamped.
-        float intensity = 1.0f;
         /// The field's probe counts on Y and Z. Upstream's own render params
         /// carry only Nx and Nx*Ny (OgreIrradianceField.cpp:812-813) and the
         /// cage clamp needs all three axes, so the two missing
@@ -3374,6 +3373,16 @@ public:
     /// With the row off the tier records no dispatch, the Component allocates
     /// nothing, the Hlms listener sets no property and no pixel moves.
     bool probeGatherWanted() const;
+    /// THE LIGHTING SERIAL the gather's settled history counts from
+    /// (PHOTON-GATHER-1d, OgreGi.cpp): folded from the light-write serial and
+    /// from what moves when an injection LANDS (the chain's settles, the single
+    /// volume's injections, each cascade's rebuilds and lattice cell).
+    unsigned long long giLightingSerial() const;
+    /// ...and the gather's REST KEY (OgreRayQuery.cpp): that serial, the
+    /// geometry's movement epoch and the surface cache's captures and relights.
+    unsigned long long gatherRestKey() const;
+    /// The settle's key: the discontinuities only (OgreRayQuery.cpp).
+    unsigned long long gatherRestartKey() const;
     void gatherStatusInto(GatherStatus &out) const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.
@@ -6291,6 +6300,8 @@ public:
     bool hiddenAreaMask() const { return mHiddenAreaMask; }
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
+    void setOffscreenContract(OffscreenContract c) override;
+    OffscreenContract offscreenContract() const override { return mOffscreenContract; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -6587,13 +6598,11 @@ private:
     /// live view, so the shape is re-checked once a frame in
     /// syncReflectListener rather than only when a host pushes a PostFxDesc.
     bool                       mChainRayReflect = false;
-    /// ...and what `ChainDesc::probeGather` was (GATHER-1a): the gather's row
-    /// is the scene's, so the shape is re-checked once a frame beside the
-    /// reflection's (OgreView::syncReflectListener).
-    bool                       mChainProbeGather = false;
-    /// ...and what `ChainDesc::sunContact` was (PHOTON-RAYS-1), for the same
-    /// once-a-frame re-check.
-    bool                       mChainSunContact = false;
+    /// ...and whether it carried the PREPASS (`ChainDesc::prepass`): the gather's
+    /// and the sun contact's rows are the scene's, so the shape is re-checked once
+    /// a frame beside the reflection's (OgreView::syncReflectListener) — as the
+    /// prepass they ask for, never as the rows themselves (PHOTON-GATHER-1d).
+    bool                       mChainPrepass = false;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.
@@ -6659,6 +6668,9 @@ private:
     /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
     /// everywhere but the one suite that has to read what the band does.
     bool                       mLodHysteresisOffscreen = false;
+    /// View::setOffscreenContract; `mSaidNoContract` = the refusal was logged.
+    OffscreenContract          mOffscreenContract = OffscreenContract::Undeclared;
+    mutable bool               mSaidNoContract = false;
     /// An exposure multiplier a host handed over before this view had a chain
     /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
     /// on the chain it builds, once; 0 = nothing owed.

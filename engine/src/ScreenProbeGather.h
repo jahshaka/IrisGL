@@ -28,9 +28,12 @@
 // full-resolution pixel HISTORY behind the integrate (reprojected through the
 // previous camera, validated on distance and normal, the count-in-history
 // running mean). The trace stays the stratified sampler: reprojected importance
-// sampling was measured and refused (spikes/photon-gather-1c). WHAT IS STILL
-// ABSENT: the card read at the hit, stereo — so the row stays `GiToggle::Auto` =
-// OFF at every tier until PHOTON-GATHER-1d.
+// sampling was measured and refused (spikes/photon-gather-1c). SINCE
+// PHOTON-GATHER-1d: a hit reads its surface CARD first (the reflection's own
+// `jahHitRadiance`, GA-1e), and the row is ON BY TIER — `GiToggle::Auto`
+// resolves through the tier table's gather row (Types.h `GiGatherFacts`: High
+// and Epic on, Medium at 36 rays, Low off). WHAT IS STILL ABSENT: stereo (the
+// VR column keeps the gather off — GA-VR).
 #pragma once
 
 #include "jahshaka/engine/Types.h"
@@ -48,6 +51,7 @@ class CompositorPass;
 class RenderSystem;
 class SceneManager;
 class TextureGpu;
+class UavBufferPacked;
 }   // namespace Ogre
 
 namespace jahshaka {
@@ -101,8 +105,11 @@ public:
     virtual void gatherRetireTexture(Ogre::TextureGpu *texture) = 0;
 
     /// The black stand-ins for the voxel volumes and the sky cube a scene may
-    /// legitimately not have. Recorded (cleared once) by the tier.
-    virtual bool gatherDummies(VkImageView &cube, VkImageView &volume, std::string &err) = 0;
+    /// legitimately not have, the 2D one the card layers take in a scene with no
+    /// surface cache, and the zeroed storage buffer its two tables and the
+    /// geometry rows take there (GA-1e). Recorded (cleared once) by the tier.
+    virtual bool gatherDummies(VkImageView &cube, VkImageView &volume, VkImageView &flat,
+                               VkBuffer &storage, std::string &err) = 0;
     /// ...and the transition that takes them out of UNDEFINED, which only the
     /// FIRST pass to bind them can order (see the tier's note).
     virtual void gatherClearDummies(VkCommandBuffer cmd) = 0;
@@ -149,12 +156,41 @@ struct GatherInputs {
 
     unsigned width = 0u, height = 0u;
 
-    /// What the row and the tier resolved to, and the test door's overrides.
-    GiQuality quality = GiQuality::High;
-    /// The view's SSR row is 2 (Epic), which is how the engine knows a tier the
-    /// three-valued `GiQuality` cannot name — see the note at the probe stride.
-    bool epicRow = false;
+    /// THE TIER TABLE'S GATHER ROW for this scene (Types.h `GiGatherFacts`,
+    /// through `giQualityFacts` — the quality dial and the document's Epic
+    /// tier): the stride, the octahedral resolution and the adaptive cap. Never
+    /// the view's SSR row (GA-TIERROW). ...and the test door's overrides.
+    GiGatherFacts facts;
     GatherTuning tuning;
+    /// THE SCENE'S REST KEY (OgreScene::gatherRestKey): moves on a light write,
+    /// wherever an injection LANDS, when the scene's geometry moves and when the
+    /// surface cache captures or relights. With the camera's basis it decides
+    /// whether this frame is a REST frame (the rest mean, then the hold).
+    unsigned long long restKey = 0ull;
+    /// THE SCENE'S RESTART KEY (OgreScene::gatherRestartKey, PHOTON-GATHER-1d fix
+    /// round): moves only on a DISCONTINUITY the history cannot follow per pixel
+    /// — a light, sky or material write, an injection landing. A continuous
+    /// transform write (an animation, a rider, a mover) is NOT one: reprojection
+    /// follows it. It decides the SETTLED term (GatherStatus::settled), never the
+    /// hold, which keeps `restKey`.
+    unsigned long long restartKey = 0ull;
+
+    /// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e) — the
+    /// scene's two tables and two atlas layers, bound as the reflection trace
+    /// binds them, or all null (the stand-ins are bound and every hit reads the
+    /// voxels). `cardSlots` / `cardRecords` are what the shader may index.
+    Ogre::UavBufferPacked *cardTable = nullptr;
+    Ogre::UavBufferPacked *cardInstances = nullptr;
+    Ogre::TextureGpu *cardDepth = nullptr;
+    Ogre::TextureGpu *cardRadiance = nullptr;
+    unsigned cardSlots = 0u, cardRecords = 0u;
+    float cardFootprintTexels = 0.0f;
+    /// THE HIT'S GEOMETRIC NORMAL: the per-slot geometry-row table the scene's
+    /// TLAS was written with (copied per frame in flight by the gather) and the
+    /// GPU scene's rows, already FLUSHED by the tier this frame. Null = none: the
+    /// card pick faces the reversed ray.
+    const std::vector<uint32_t> *geomRowOfSlot = nullptr;
+    Ogre::UavBufferPacked *geomRows = nullptr;
 };
 
 /// The Component.
@@ -178,7 +214,12 @@ public:
     /// A view's listener is going away, or its scene has disarmed.
     void forget(const void *key);
     /// The last frame's numbers for a scene.
-    void statsInto(const detail::OgreScene *scene, GatherStatus &out) const;
+    /// `restKey` / `restartKey` are the scene's CURRENT keys: a view whose last
+    /// frame saw another restart key has not begun the settle its picture owes
+    /// (a light write between two frames), and one that saw another rest key has
+    /// not begun its rest.
+    void statsInto(const detail::OgreScene *scene, unsigned long long restKey,
+                   unsigned long long restartKey, GatherStatus &out) const;
     /// Is anything at all held for this key?
     bool holds(const void *key) const { return mViews.count(key) != 0; }
 
@@ -198,6 +239,12 @@ private:
         VkBuffer params[3] = {};
         VkDeviceMemory paramsMemory[3] = {};
         void *paramsMapped[3] = {};
+        /// THE PER-SLOT GEOMETRY ROW TABLE, a copy per frame in flight (the
+        /// scene's vector moves under a later frame) — GA-1e's card pick.
+        VkBuffer geomRowOfSlot[3] = {};
+        VkDeviceMemory geomRowOfSlotMemory[3] = {};
+        void *geomRowOfSlotMapped[3] = {};
+        VkDeviceSize geomRowOfSlotBytes[3] = {};
 
         VkBuffer records = VK_NULL_HANDLE;
         VkDeviceMemory recordsMemory = VK_NULL_HANDLE;
@@ -232,6 +279,28 @@ private:
         /// THE VIEW'S AGE: consecutive frames the history has been written
         /// (0 = the previous images hold nothing and are never read).
         unsigned age = 0u;
+        /// THE REST (PHOTON-GATHER-1d): consecutive frames with the camera, the
+        /// scene's rest key and the estimator unchanged, and the key the last
+        /// frame saw. Past N (settleFramesOf) the view HOLDS: nothing is dispatched.
+        unsigned restFrames = 0u;
+        unsigned long long restKey = 0ull;
+        /// THE SETTLE (the fix round's split): frames drawn since the history's
+        /// last RESTART — its birth, a resize, a scene bind, the lever, an
+        /// estimator-changing tuning, or a move of the scene's restart key.
+        /// `settled` is this >= N; the hold above is the stronger rest.
+        unsigned sinceRestart = 0u;
+        unsigned long long restartKey = 0ull;
+        /// THE REST MEAN, full resolution (rq_probe_integrate.comp): a true mean
+        /// of the rest frames, premultiplied by coverage. One image — at rest a
+        /// pixel reads and writes only itself.
+        VkImage restMean = VK_NULL_HANDLE;
+        VkDeviceMemory restMeanMemory = VK_NULL_HANDLE;
+        VkImageView restMeanView = VK_NULL_HANDLE;
+        /// The history's EMA floor in frames, as the last frame ran it.
+        unsigned historyFramesLast = 10u;
+        /// Ogre's frame number of the last frame this view recorded — which of
+        /// a scene's views drew the LATEST frame (statsInto reports those).
+        uint32_t recordedFrame = 0u;
         /// ...and what makes it restart besides new targets: the history
         /// switched back on, or a GatherTuning field that changes the estimator.
         bool temporalLast = false;
@@ -272,6 +341,9 @@ private:
             bool live = false;
             bool irradiance = false;     ///< this slot of the readback ring was written
             unsigned gatherFrame = 0u;   ///< ...by this gather frame
+            /// A HELD frame (the rest, PHOTON-GATHER-1d): only the readback was
+            /// recorded — no counter copy and no timestamps to read back.
+            bool held = false;
         };
         Pending pending[3];
         float placeMs = -1.0f, traceMs = -1.0f, filterMs = -1.0f, integrateMs = -1.0f, cpuMs = -1.0f;
@@ -283,6 +355,10 @@ private:
     void drop(View &v);
     /// The timestamps AND the adaptive count of the frames that have retired.
     void readPending(View &v);
+    /// A HELD frame (PHOTON-GATHER-1d): the view has been at rest for N frames,
+    /// its answer IS the rest mean, and nothing is dispatched — the irradiance
+    /// is re-bound (and copied out when the readback door asks).
+    void hold(View &v, const GatherInputs &in, bool temporal);
     void clearAtlas(View &v, VkCommandBuffer cmd);
 
     GatherHost &mHost;

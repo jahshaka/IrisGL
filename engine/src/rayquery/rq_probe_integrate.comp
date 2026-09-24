@@ -97,6 +97,12 @@ layout( rgba16f, set = 0, binding = 5 ) uniform readonly image2D historyPrev;
 layout( rgba16f, set = 0, binding = 6 ) uniform writeonly image2D historyCur;
 layout( r32ui, set = 0, binding = 7 ) uniform readonly uimage2D historyGeomPrev;
 layout( r32ui, set = 0, binding = 8 ) uniform writeonly uimage2D historyGeomCur;
+/// THE REST MEAN (PHOTON-GATHER-1d): at rest — the camera, the lighting and the
+/// scene held still (p.knobs6.x = the rest frame k >= 1) — a TRUE MEAN of the rest
+/// frames' estimates, restarted at the first rest frame, premultiplied by
+/// coverage like the history. The same pixel reads and writes it (the camera has
+/// not moved, so there is no reprojection and no race): one image, not a pair.
+layout( rgba16f, set = 0, binding = 9 ) uniform image2D restMean;
 
 #include "jah_reproject.glsl"
 
@@ -204,6 +210,8 @@ void main()
 		{
 			imageStore( historyCur, pix, vec4( 0.0 ) );
 			imageStore( historyGeomCur, pix, uvec4( 0u ) );
+			if( p.knobs6.x >= 1.0 )
+				imageStore( restMean, pix, vec4( 0.0 ) );
 		}
 		return;
 	}
@@ -258,6 +266,82 @@ void main()
 			}
 		}
 	}
+	// ---- THE SILHOUETTE RULE (GA-EDGE, the fix round) --------------------------
+	// A pixel on a silhouette belongs to the surface it is on, and a thin
+	// surface — a block's top seen almost edge-on, a strip a few pixels tall —
+	// often has no probe in the four cells around it: every plane test fails and
+	// the pixel used to fall to the field's cage, a different estimate (the 1-px
+	// bright lines of the selftest's B1). Two widening steps, each only where the
+	// last found nothing:
+	//   1. a probe ON the pixel's plane in the 5 x 5 cells around it (uniform or
+	//      adaptive), weighted by its plane weight over 1 + its cell distance^2 —
+	//      the nearest same-surface answer;
+	//   2. none on its plane at all: the NEAREST SURFACE — probes within two
+	//      strides' world footprint of the pixel's point, the normal set aside
+	//      and their SH read at the PIXEL's normal (the band-2 SH carries the
+	//      irradiance's variation with the normal; a probe a few centimetres
+	//      round the edge is a far closer estimate than the field's cage).
+	if( wsum < weightFloor )
+	{
+		for( int dy = -2; dy <= 2; ++dy )
+			for( int dx = -2; dx <= 2; ++dx )
+			{
+				const ivec2 c = cell + ivec2( dx, dy );
+				if( any( lessThan( c, ivec2( 0 ) ) ) || any( greaterThanEqual( c, grid ) ) )
+					continue;
+				const uint ui = uint( c.y * grid.x + c.x );
+				const float link = records.r[ui].normalW.w;
+				for( int k = 0; k < 2; ++k )
+				{
+					if( k == 1 && link < 0.5 )
+						break;
+					const uint pi = k == 0 ? ui : uint( link ) - 1u;
+					const vec4 posW = records.r[pi].posW;
+					if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
+						continue;
+					const float w = jahPlaneWeight( posW.xyz, records.r[pi].normalW.xyz, pixelWorld,
+													pixelNormal, pixelDist ) /
+									( 1.0 + float( dx * dx + dy * dy ) );
+					if( w <= 0.0 )
+						continue;
+					sum += shEvalAt( pi, pixelNormal, bands ) * w;
+					wsum += w;
+				}
+			}
+		if( wsum < weightFloor )
+		{
+			const float pixelWorldSize = length( p.rayDown.xyz ) / float( max( full.y, 1 ) ) *
+										 ( p.camPos.w < 0.5 ? 1.0 : pixelDist );
+			const float reach = max( 2.0 * stride * pixelWorldSize, 1e-4 );
+			for( int dy = -2; dy <= 2; ++dy )
+				for( int dx = -2; dx <= 2; ++dx )
+				{
+					const ivec2 c = cell + ivec2( dx, dy );
+					if( any( lessThan( c, ivec2( 0 ) ) ) || any( greaterThanEqual( c, grid ) ) )
+						continue;
+					const uint ui = uint( c.y * grid.x + c.x );
+					const float link = records.r[ui].normalW.w;
+					for( int k = 0; k < 2; ++k )
+					{
+						if( k == 1 && link < 0.5 )
+							break;
+						const uint pi = k == 0 ? ui : uint( link ) - 1u;
+						const vec4 posW = records.r[pi].posW;
+						if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
+							continue;
+						// facing the same side: a probe on a surface's BACK is not near it
+						if( dot( records.r[pi].normalW.xyz, pixelNormal ) < -0.05 )
+							continue;
+						const float d = length( posW.xyz - pixelWorld );
+						const float w = clamp( 1.0 - d / reach, 0.0, 1.0 );
+						if( w <= 0.0 )
+							continue;
+						sum += shEvalAt( pi, pixelNormal, bands ) * w;
+						wsum += w;
+					}
+				}
+		}
+	}
 	vec4 answer = vec4( 0.0 );
 	if( wsum >= weightFloor )
 		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( 1024.0 ) ), 1.0 );
@@ -288,8 +372,13 @@ void main()
 			// facing (the gather's own same-surface tolerance, the plane test's
 			// normal dot). A corner or a crease reprojects onto a surface at the
 			// same distance facing elsewhere, which the distance alone would pass.
-			if( wasCount > 0u && jahSameDistance( wasDist, z ) &&
-				dot( wasNormal, pixelNormal ) >= p.plane.y )
+			// (knobs5.w = 1 is the test door that turns BOTH tests off —
+			// GatherTuning::historyValidationOff, the arm gi.gather_motion
+			// proves its disocclusion bar against; never shipped.)
+			const bool accept = p.knobs5.w > 0.5 ||
+								( jahSameDistance( wasDist, z ) &&
+								  dot( wasNormal, pixelNormal ) >= p.plane.y );
+			if( wasCount > 0u && accept )
 			{
 				const vec4 h = imageLoad( historyPrev, pc );
 				if( finite3( h.xyz ) && finite1( h.w ) )
@@ -307,7 +396,31 @@ void main()
 	const float floorBlend = clamp( p.knobs5.y, 1.0 / float( kHistoryCountMax ), 1.0 );
 	const float blend = prevCount > 0u ? max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend )
 									   : 1.0;
-	const vec4 mean = mix( prev, vec4( answer.xyz * answer.w, answer.w ), blend );
+	vec4 mean = mix( prev, vec4( answer.xyz * answer.w, answer.w ), blend );
+	// ---- AT REST, THE REST MEAN (PHOTON-GATHER-1d) ------------------------------
+	// The history above is an EMA past its tenth frame, and an EMA never stops:
+	// its state is a function of EVERY frame it has seen, so two pictures of one
+	// still scene — a screenshot after a long settle and one after a short one —
+	// differ, and a still view flickers by the floor's share of each frame's
+	// noise forever. At rest the answer becomes a true mean of the rest frames
+	// alone (restarted at the first, weight 1/k at the k-th: the sample sequence
+	// is the rest frame's own index, so the mean is a function of the scene and
+	// the camera and of nothing that happened before), handed over from the EMA
+	// linearly over N frames (p.knobs6.y, the settle; no pop when a camera
+	// stops), and at k = N the answer IS that mean — after which the host holds
+	// the frame and dispatches nothing (OgreScreenProbeGather.cpp): a still view
+	// costs the gather nothing. THE HISTORY IS WRITTEN WITH THE HANDED-OVER
+	// VALUE, so when the camera moves again the EMA continues from the rest mean
+	// and not from the older EMA state it would otherwise pop back to.
+	const float restK = p.knobs6.x;
+	if( restK >= 1.0 )
+	{
+		const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
+		const vec4 rest = restK < 1.5 ? sample1
+									  : mix( imageLoad( restMean, pix ), sample1, 1.0 / restK );
+		imageStore( restMean, pix, rest );
+		mean = mix( mean, rest, clamp( restK / max( p.knobs6.y, 1.0 ), 0.0, 1.0 ) );
+	}
 	imageStore( historyCur, pix, mean );
 	imageStore( historyGeomCur, pix, uvec4( packGeom( pixelDist, pixelNormal, prevCount + 1u ) ) );
 	// The pixel's answer: the answered frames' mean irradiance at the fraction

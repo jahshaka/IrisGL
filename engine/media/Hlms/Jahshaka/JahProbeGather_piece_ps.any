@@ -49,51 +49,60 @@
 //   !irradiance_volumes   a second definition of one piece is a parse error,
 //                         and this file must not be the one that finds out.
 //
-// THE ACCOUNTING RULE, stated because the spike does not enforce all of it
-// (fix round, H3). A pixel gets exactly ONE diffuse-GI term. The listener
-// compiles the cone diffuse out under this property (`vct_disable_diffuse`),
-// which is the half a host can do from outside; the IRRADIANCE FIELD's own
-// cage still adds its term if a field is bound, so an armed scene with
-// `ddgi` ON would shade TWO of them. Phase 0 avoids it by measuring with the
-// field off (`world.gi({ddgi:"off"})` / `GiToggle::Off`) in every arm; GATHER-1
-// owns the real answer, which is the cage-guard hook of ogre-patch 0085.
+// THE ACCOUNTING RULE (PHOTON-GATHER-1d, where the gather became the diffuse at
+// every ray tier). A pixel gets exactly ONE diffuse-GI term:
+//   * a pixel a probe answered: the gather's, here — the cone diffuse is
+//     compiled out on a gather pass (the listener's `vct_disable_diffuse`), and
+//     the irradiance field's cage declines it (JahIfd_piece_ps.any, the fork's
+//     cage gate, ogre-patch 0086's hook);
+//   * a pixel no probe answered: the FIELD's cage — the field is the fallback
+//     and nothing else at a ray tier — and where the field's own confidence
+//     fades, the field's fallback (the environment, JahIfd's post hook). The
+//     escape-ambient closed form this piece used to add for such a pixel with no
+//     field bound is GONE: a gather tier binds the field (the tier table's
+//     `ddgi` column is on at every tier), so that second copy of the field's
+//     fallback answered only a configuration no tier ships;
+//   * a BLENDED fragment (the listener's `jah_env_diffuse_only`, GA-GLASS + F2):
+//     the ENVIRONMENT term alone — ONE-ENV's irradiance at the fragment's own
+//     normal (`jahEnvIrradiance`). It has no probe of its own (a probe sits on
+//     the surface the prepass drew), and it takes neither the cones nor the
+//     field's cage (declined in JahIfd_piece_ps.any under the same property).
 
 @property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 @piece( applyIrradianceVolumes )
 	float4 jahProbeGathered = OGRE_Load2D( jahProbeIrradiance, iFragCoord, 0 ).xyzw;
 	pixelData.envColourD += midf3_c( jahProbeGathered.xyz ) * midf_c( jahProbeGathered.w );
-	// ...AND THE PIXELS NO PROBE ANSWERED FOR GET THE SKY, which is what they had
-	// before the gather existed and what the spec's accounting promises them
-	// (section 3's last row). Without this line they get NOTHING: turning the
-	// gather on compiles the cone diffuse out of this shader
-	// (`vct_disable_diffuse` from the listener), and every fallback term of this
-	// renderer lives inside the irradiance field's own block -- so with the
-	// FIELD ABSENT a pixel whose probe was rejected by the plane test (a normal
-	// turn, a silhouette, thin geometry, the first frames of a view) rendered
-	// BLACK. Not dim: black, one pixel at a time, in exactly the configuration
-	// every gather suite measures, where a region MEAN hides it (the lead's
-	// read).
-	//
-	// It is the term the FIELD's own fallback applies, spelled the same way and
-	// weighted by the complement of the probe's coverage, so the two regimes
-	// hand over continuously and a pixel still gets exactly ONE diffuse-GI term:
-	// the gather's where a probe covered it, the unoccluded sky ambient where
-	// none did. With a field bound this piece is not the fallback -- the cage
-	// is, through ogre-patch 0086 -- so it is compiled out there.
-	@property( vct_num_probes && !irradiance_field )
-	{
-		const midf jahProbeUncovered = midf_c( 1.0 ) - midf_c( jahProbeGathered.w );
-		if( jahProbeUncovered > midf_c( 0.0 ) )
-		{
-			// The environment's diffuse lookup for this normal (the SH, the
-			// cosine convolution of the sky -- jah_environment.glsl), in radiance.
-			float3 jahProbeAmbient =
-				jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) );
-			pixelData.envColourD.xyz += midf3_c( jahProbeAmbient ) *
-										( midf_c( passBuf.vctProbeParams.blendFade ) *
-										  jahProbeUncovered );
-		}
-	}
-	@end
+@end
+@end
+
+@property( jah_env_diffuse_only && vct_num_probes && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+@piece( applyIrradianceVolumes )
+	// THE TRANSLUCENT SURFACE'S DIFFUSE GI: the environment's diffuse lookup for
+	// this normal (the SH, the cosine convolution of the sky —
+	// jah_environment.glsl), in radiance.
+	pixelData.envColourD.xyz += midf3_c(
+		jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) ) );
+@end
+@end
+
+// F2's SECOND HALF (PHOTON-GATHER-1d): A BLENDED FRAGMENT IS NOT PART OF THE
+// G-BUFFER. The depth/normal prepass draws the same render-queue range as the
+// shading pass (OgreChain.cpp: the shading pass depth-tests read-only against
+// what the prepass wrote), so a Fade/Glass renderable used to write ITS depth,
+// normal and shadow into the prepass — blended over the opaque surface's — and
+// the opaque surface behind it then failed its read-only depth test or read the
+// blend: measured on gi.gather_glass's F2 arm, a Fade slab 7.6/255 dark after the
+// listener's per-renderable withdrawal (31.9 before either half). The prepass
+// holds OPAQUE surfaces only: a blended fragment writes nothing there. The
+// discard is the LAST statement (the helper-lane rule: every load before it runs
+// either way, and none of them reads a device address).
+// NOT IN A CARD CAPTURE (PHOTON-GATHER-1d fix round): the capture's own piece
+// (JahCardCapture_piece_ps.any) fills the same hook in a prepass, and two
+// definitions of one piece are a compile error, a black frame. Cards hold
+// opaque surfaces only (OgreScene's candidate walk drops a blended item), so
+// the guard is never the one that decides; it keeps the pieces disjoint.
+@property( hlms_prepass && hlms_alphablend && !hlms_shadowcaster && !jah_card_capture )
+@piece( custom_ps_posExecution )
+	discard;
 @end
 @end
