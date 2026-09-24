@@ -5368,6 +5368,11 @@ struct PostFxDesc {
     /// march gives up and the pixel falls back to the probe/sky reflection.
     /// Scene-scale dependent: the default suits a room, not a landscape.
     float ssrMaxDistance = 25.0f;
+    /// THE MARCH'S STEP COUNT, a measurement knob (SSR-EDGE-1): 0 = the quality
+    /// row's (96 at Full-Res Rays, 48 at Half-Res), otherwise 8..128. It exists
+    /// so a suite can change the STEP at a FIXED range — `ssrMaxDistance` alone
+    /// changes both (ssr.rings' fixed-range arm). Nothing in the document writes it.
+    int   ssrSteps = 0;
     /// How thick the depth buffer's surfaces are assumed to be, in world units.
     /// A depth buffer records a surface's FRONT and nothing else, so a crossing
     /// is only accepted when the ray passed within this much of it — too small
@@ -5550,6 +5555,24 @@ struct PostFxDesc {
     /// the engine suite, which is the only way to pixel-test the chain at all.
     bool  allowOffscreen = false;
 
+    /// THE RADIANCE READBACK (HDR-READBACK-1). The view keeps its scene result
+    /// in a FLOAT target (RGBA16F) beside the 8-bit one it presents, so
+    /// `View::readPixelsHdr` can return the scene-referred value a closed form
+    /// is stated in. Honoured on EVERY view, offscreen ones included and
+    /// whatever `allowOffscreen` says — like `refractions` it is not a post
+    /// effect but a property of what the view keeps: a passthrough view that
+    /// asks takes the chain's shape (the scene into the float target, the ONE
+    /// composite quad into the 8-bit one) and nothing else. No second
+    /// composite pass exists: the float target IS the chain's scene target,
+    /// read where the tonemap would read it. A view that does not ask builds
+    /// the graph it built before this flag existed. A view that DOES ask is not
+    /// a byte-identical display of the one that does not: with `ssr > 0` its
+    /// SSR colour history is float too, so its reflections carry the UNCLIPPED
+    /// radiance (what an `hdr` chain has always reflected) where an 8-bit chain
+    /// reflects the clipped one — readPixels of the two differ wherever the
+    /// reflected radiance exceeds 1.
+    bool  hdrReadback = false;
+
     bool operator==(const PostFxDesc &o) const {
         return hdr == o.hdr && exposure == o.exposure && exposureMin == o.exposureMin &&
                exposureMax == o.exposureMax &&
@@ -5563,7 +5586,7 @@ struct PostFxDesc {
                ssaoRadius == o.ssaoRadius && ditherOff == o.ditherOff &&
                smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
-               ssrMaxDistance == o.ssrMaxDistance &&
+               ssrMaxDistance == o.ssrMaxDistance && ssrSteps == o.ssrSteps &&
                ssrMarchPhase == o.ssrMarchPhase &&
                ssrThickness == o.ssrThickness &&
                reflectionRoughnessCutoff == o.reflectionRoughnessCutoff &&
@@ -5574,7 +5597,7 @@ struct PostFxDesc {
                tonemapFixed == o.tonemapFixed &&
                exposureScale == o.exposureScale &&
                looks == o.looks && hzb == o.hzb && hzbFarthest == o.hzbFarthest &&
-               allowOffscreen == o.allowOffscreen;
+               allowOffscreen == o.allowOffscreen && hdrReadback == o.hdrReadback;
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
 };
@@ -6302,6 +6325,28 @@ struct Image {
         if (x >= width || y >= height) return Colour(0, 0, 0, 0);
         const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
         return Colour(rgba[i] / 255.0f, rgba[i+1] / 255.0f, rgba[i+2] / 255.0f, rgba[i+3] / 255.0f);
+    }
+};
+
+/// A view's SCENE RADIANCE, read back in float (HDR-READBACK-1, PHOTON P3).
+///
+/// `Image` is the DISPLAY: eight bits a channel, clipped at 1.0, after whatever
+/// grade the view's chain applies. A suite that compares a pixel against a
+/// closed form in physical units (a mirror showing an emitter of radiance 3.0,
+/// a floor lit by a rectangle, a card's texel) cannot use it — every value above
+/// 1.0 reads 1.0, and every value below carries half a code of quantisation
+/// (1.75-2 % at the card bars' magnitudes). This is the same pixels one step
+/// earlier: the linear, scene-referred value the scene passes wrote, BEFORE the
+/// tonemap, the exposure, the bloom composite and the 8-bit store. Filled by
+/// `View::readPixelsHdr` on a view that asked for it (PostFxDesc::hdrReadback).
+struct ImageF {
+    unsigned width = 0, height = 0;
+    std::vector<float> rgba;   // width*height*4, row-major, top-left origin, linear radiance
+    /// Pixel accessor; returns {0,0,0,0} if out of range.
+    Colour at(unsigned x, unsigned y) const {
+        if (x >= width || y >= height) return Colour(0, 0, 0, 0);
+        const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
+        return Colour(rgba[i], rgba[i+1], rgba[i+2], rgba[i+3]);
     }
 };
 

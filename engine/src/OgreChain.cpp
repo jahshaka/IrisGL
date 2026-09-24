@@ -509,8 +509,10 @@ bool ChainDesc::anyEffect() const {
     // A stack of looks is an effect on its own: the LDR filters need the post
     // shape (they read a finished image out of a texture), and nothing else in
     // the description has to be on for that to be true.
+    // ...and so is a RADIANCE READBACK (HDR-READBACK-1): the float scene
+    // target it downloads exists only in the chain's shape.
     return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || refractions ||
-           distortion || hzb || !looks.empty();
+           distortion || hzb || !looks.empty() || hdrReadback;
 }
 
 bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
@@ -538,7 +540,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
            a.rayReflect == b.rayReflect && a.probeGather == b.probeGather &&
-           a.refractions == b.refractions &&
+           a.refractions == b.refractions && a.hdrReadback == b.hdrReadback &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
@@ -600,7 +602,7 @@ void scissor(ChainHandles &h, Ogre::CompositorPassQuadDef *q, bool clear = true)
 /// After this the scene passes LOAD colour and CLEAR depth, inset to the same
 /// rectangle — so the bars survive and the shot is never stretched into them.
 void addLetterboxPrologue(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
-                          const char *target, ChainHandles &handles) {
+                          const char *target, ChainHandles &handles, bool keepDepth = false) {
     {
         Ogre::CompositorTargetDef *t = n->addTargetPass(kLetterboxFill);
         t->setNumPasses(1);
@@ -619,6 +621,18 @@ void addLetterboxPrologue(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
     q->addQuadTextureSource(0, kLetterboxFill);
     q->setAllClearColours(kLetterboxBars);
     q->setAllLoadActions(Ogre::LoadAction::Clear);     // full-target: THE BARS
+    // ...BUT NEVER THE PREPASS' DEPTH (SSR-LETTERBOX-1, measured). With a
+    // prepass the depth is WRITTEN BEFORE this quad (the SSR/gather prepass
+    // renders into the same kDepth) and the opaque pass depth-tests READ-ONLY
+    // against it; a full-target clear here wiped it, so under a letterbox the
+    // opaque pass lost its early-Z and every consumer that runs between here and
+    // the opaque pass — the ray-traced reflections, the probe gather — found a
+    // cleared depth at every pixel and declined the whole frame (the rays'
+    // whole contribution, ~37 codes on gi.reflect_motion's floor, was missing).
+    if (keepDepth) {
+        q->mLoadActionDepth   = Ogre::LoadAction::Load;
+        q->mLoadActionStencil = Ogre::LoadAction::Load;
+    }
     q->mStoreActionColour[0] = Ogre::StoreAction::Store;
     q->mStoreActionDepth     = Ogre::StoreAction::Store;
     q->mStoreActionStencil   = Ogre::StoreAction::DontCare;
@@ -970,8 +984,18 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // point: light values above 1.0 survive to the tonemapper. Without HDR the
     // chain still needs an offscreen colour target (SSAO/SMAA/SSR/refraction
     // all composite), and it stays RGBA8_UNORM so colours do not move.
+    //
+    // ...UNLESS THE VIEW ASKED TO READ ITS RADIANCE (HDR-READBACK-1). Then every
+    // texture that carries the SCENE RESULT — this one, the refraction clone,
+    // the distortion copy, the AO-applied copy and the SSR colour history that
+    // copies it — is float, so the value the composite reads is the value the
+    // scene wrote, above 1.0 included; the composite quad (Copy without `hdr`,
+    // the tonemap with it) still writes the 8-bit target, and `readPixels`
+    // still reads that. No pass is added: the radiance target IS this chain's
+    // own scene target (ChainHandles::radianceTexture).
+    const bool floatScene = desc.hdr || desc.hdrReadback;
     {
-        auto *td = addTex(n, kRt0, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        auto *td = addTex(n, kRt0, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         td->depthBufferId = 1u;                      // the scene needs depth
         td->preferDepthTexture = desc.ssao || prepass;   // sampled by the AO/SSR/gather passes
         syncRtvDepth(n, kRt0, td);
@@ -1155,7 +1179,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // chain reflects the WORLD, not the last frame's picture of it.
         if (ssrMarch) {
             auto *td = addTex(n, kSsrPrev,
-                              desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+                              floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
         }   // if (ssr)
@@ -1199,7 +1223,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // The cross blur runs at FULL res — it is also the upsample.
         addTex(n, kAoBlurH, Ogre::PFG_R16_FLOAT);
         addTex(n, kAoBlurV, Ogre::PFG_R16_FLOAT);
-        addTex(n, kAoApplied, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        addTex(n, kAoApplied, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
     }
 
     if (desc.distortion) {
@@ -1209,7 +1233,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // The warped copy of the scene. Same format as the scene target, because
         // this happens in LINEAR HDR — before the SSR history copy, before SSAO
         // and long before the tonemap.
-        addTex(n, kDistorted, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        addTex(n, kDistorted, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         // Its own RTV, so the pass can BORROW the scene's depth buffer and test
         // against the opaque geometry without writing to it.
         {
@@ -1282,7 +1306,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // refractives depth-test against the opaque geometry.
         {
             auto *td = addTex(n, kRefractOut,
-                              desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+                              floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         }
         {
             Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kRefractRtv);
@@ -1468,7 +1492,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // it (ChainHandles::scissorPasses): bloom cannot glow into the bars,
         // no look grades them, and no fill is spent on them. The bars are
         // black by construction at every stage, which is what a letterbox is.
-        if (desc.letterbox) addLetterboxPrologue(n, desc, sceneTarget, handlesOut);
+        if (desc.letterbox) addLetterboxPrologue(n, desc, sceneTarget, handlesOut, prepass);
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
         t->setNumPasses(1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -1896,6 +1920,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // this program existed, which is the byte-identical law (§8).
     const bool haveLooks = !desc.looks.empty();
     const char *aaTarget = haveLooks ? kLookA : kTargetChannel;
+
+    // THE RADIANCE READBACK's source: exactly what the composite below reads.
+    if (desc.hdrReadback) handlesOut.radianceTexture = sceneResult;
 
     // Composite into the LDR image SMAA works on, or straight into the window
     // (or, with looks and no SMAA, straight into the looks stage's input).
@@ -2558,6 +2585,7 @@ float fixedExposureScale(float exposureScale, float exposure) {
 }
 
 const char *exposureHistoryTextureName() { return kOldLum; }
+const char *reflectionTextureName() { return kSsrReflection; }
 
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
                 std::vector<std::string> &nodeDefs, PipHandles &handles) {
@@ -3094,10 +3122,40 @@ void initSmaa(Ogre::Root *root, int preset) {
 //      (VIEW_SPACE_CORNERS_NORMALIZED_LH) and therefore the whole march use.
 //   3. left-multiply by the clip→image matrix — the *0.5+0.5 and the y flip, so
 //      the shader divides by w and has a texture coordinate, full stop.
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &reprojection) {
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
+               SsrReprojection &reprojection) {
     if (!camera || desc.ssr <= 0) return;
     Ogre::Pass *march = materialPass("Jahshaka/SsrRayMarch");
     if (!march) return;
+
+    // THE SHOT'S UV MAP (SSR-LETTERBOX-1). Under a constrained-aspect camera the
+    // prepass draws the shot into the letterbox's inner rectangle, while every
+    // quad here covers the whole target: so the march, the resolve and the
+    // reprojection work in the SHOT's uv — where the camera's projection lands,
+    // [0,1] over the rectangle — and convert to the target's uv only to read a
+    // texture. Pushed as an INSET, (x, y, 1 - w, 1 - h), so the constant
+    // buffer's zeros are the identity rectangle: a frame drawn before this runs
+    // is the unletterboxed map, not a division by zero. Without a letterbox the
+    // map is (0, 0, 1, 1) and every conversion is exact in float (x - 0, x / 1,
+    // 0 + x * 1), so an unletterboxed frame is bit-for-bit what it was.
+    const Ogre::Vector4 shotInset(shot[0], shot[1], 1.0f - shot[2], 1.0f - shot[3]);
+    // THE FRUSTUM'S SPAN over the shot, for the march's view vector: the quad
+    // interpolates the camera's far corners (VIEW_SPACE_CORNERS_NORMALIZED_LH)
+    // over the WHOLE target, so under a letterbox the interpolated direction at
+    // a pixel is the one for the wrong uv. It is affine in uv — the corners lie
+    // on the plane z = 1 and view space has no roll — so the march corrects it
+    // by (shotUv - targetUv) times this span: the corners computed exactly as
+    // CompositorPassQuad computes them (OgreCompositorPassQuad.cpp:237-259).
+    Ogre::Vector4 cameraSpan(0.0f, 0.0f, 0.0f, 0.0f);
+    {
+        const Ogre::Matrix4 &viewMat = camera->getViewMatrix(true);
+        const Ogre::Vector3 *corners = camera->getWorldSpaceCorners();
+        const Ogre::Real farPlane = camera->getFarClipDistance();
+        const Ogre::Vector3 upperLeft = (viewMat * corners[5]) / farPlane;
+        const Ogre::Vector3 bottomLeft = (viewMat * corners[6]) / farPlane;
+        const Ogre::Vector3 upperRight = (viewMat * corners[4]) / farPlane;
+        cameraSpan = Ogre::Vector4(upperRight.x - upperLeft.x, bottomLeft.y - upperLeft.y, 0.0f, 0.0f);
+    }
 
     static const Ogre::Matrix4 kClipToImage(0.5,  0.0, 0.0, 0.5,
                                             0.0, -0.5, 0.0, 0.5,
@@ -3111,6 +3169,8 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &rep
     Ogre::GpuProgramParametersSharedPtr ps = march->getFragmentProgramParameters();
     ps->setNamedConstant("projectionParams", camera->getProjectionParamsAB());
     ps->setNamedConstant("viewToTextureSpaceMatrix", m);
+    ps->setNamedConstant("shotInset", shotInset);
+    ps->setNamedConstant("cameraSpan", cameraSpan);
     // THE PROJECTION TYPE, because the march's whole reconstruction depends on
     // it (JahSsrRayMarch_ps.glsl's ORTHOGRAPHIC note). The far plane rides
     // along as the scale that turns the normalized corner back into view-space
@@ -3137,7 +3197,9 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &rep
     // the frame applied was perceptual 0.581 — deleted, not re-plumbed.
     ps->setNamedConstant("rayParams",
                          Ogre::Vector4(desc.ssrMaxDistance, desc.ssrThickness,
-                                       desc.ssr >= 2 ? 96.0f : 48.0f,
+                                       desc.ssrSteps > 0
+                                           ? float(std::min(std::max(desc.ssrSteps, 8), 128))
+                                           : (desc.ssr >= 2 ? 96.0f : 48.0f),
                                        desc.reflectionRoughnessCutoff));
     // THE MARCH'S PHASE RULE (SSR-RINGS-1), a uniform like the four above: the
     // crossing test and the trust either read the coarse sample (0, the shipped
@@ -3191,6 +3253,7 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &rep
                              Ogre::Vector4(desc.reflectionRoughnessCutoff, desc.ssrIntensity,
                                            kRayReflectFeather, 0.0f));
         rp->setNamedConstant("reprojectMatrix", reproject);
+        rp->setNamedConstant("shotInset", shotInset);
     }
 }
 
@@ -3278,8 +3341,16 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
                    unsigned(float(viewHeight) * desc.ssaoScale),
                    desc.ssaoRadius, desc.ssaoPower);
     }
-    if (marchesInScreenSpace(desc)) updateSsr(camera, desc, reprojection);
-    else reprojection.have = false;
+    if (marchesInScreenSpace(desc)) {
+        // The letterbox's inner rectangle, derived exactly as
+        // OgreView::applyLetterbox derives the one it writes onto the passes.
+        float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+        if (desc.letterbox && viewHeight)
+            letterboxRect(desc.letterboxAspect, float(viewWidth) / float(viewHeight), shot);
+        updateSsr(camera, desc, shot, reprojection);
+    } else {
+        reprojection.have = false;
+    }
     if (!desc.looks.empty()) updateLooks(desc);
     if (desc.distortion) updateDistortion(desc);
 }

@@ -3451,6 +3451,31 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // same basis for both halves is exactly what the arm reproduces.
         eyeB[1] = eyeB[0];
     }
+    // THE LETTERBOX (SSR-LETTERBOX-1's ray half). Under a constrained-aspect
+    // camera the picture is the target's INNER rectangle (chain::letterboxRect),
+    // while this pass addresses the whole target: so the image basis is
+    // EXPANDED to the target — the same conjugation the march takes in its
+    // pass buffer, here on the CPU so no shader line moves. A target uv t is the
+    // shot's (t - x0) / w, hence rayTL' = rayTL - rayRight x0/w - rayDown y0/h,
+    // rayRight' = rayRight / w, rayDown' = rayDown / h. The bars hold cleared
+    // depth and are declined before any ray; the previous-frame basis is the
+    // expanded one too (rv.prev is written from eyeB below), so the
+    // reprojection's uv spans the same target.
+    {
+        const ChainDesc cd = view->chainDesc();
+        if (cd.letterbox && fullH) {
+            float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+            chain::letterboxRect(cd.letterboxAspect, float(fullW) / float(fullH), shot);
+            for (int i = 0; i < 2; ++i) {
+                EyeBasisF &e = eyeB[i];
+                for (int k = 0; k < 3; ++k) {
+                    e.rayTL[k] -= e.rayRight[k] * shot[0] / shot[2] + e.rayDown[k] * shot[1] / shot[3];
+                    e.rayRight[k] /= shot[2];
+                    e.rayDown[k] /= shot[3];
+                }
+            }
+        }
+    }
     memcpy(pp.camPos, eyeB[0].camPos, sizeof(pp.camPos));
     memcpy(pp.rayTL, eyeB[0].rayTL, sizeof(pp.rayTL));
     memcpy(pp.rayRight, eyeB[0].rayRight, sizeof(pp.rayRight));
@@ -4139,11 +4164,66 @@ void OgreEngine::setRayTracing(bool on) {
         " (the no-rays switch)");
 }
 
+// THE TIER'S STORAGE FORMATS, ASKED OF THE DEVICE (RAY-FMT-CHECK, PHOTON P3).
+//
+// Every image the tier writes from a compute shader is a STORAGE image: the
+// reflection's temporal pair (the radiance mean, RGBA16F, and the distance pair,
+// RG32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
+// CORE-MANDATORY STORAGE FORMATS in Vulkan 1.0 (the spec's Required Format
+// Support; shaderStorageImageExtendedFormats covers the R16G16*, R16*, R8*,
+// A2B10G10R10 and B10G11R11 family, not these), so on a conformant driver this
+// check never refuses. It is kept as a DRIVER-DEFECT GUARD — one query per
+// device, one log line — because the alternative on a driver that got the table
+// wrong is `makeStorageImage` creating an image the device cannot store to and
+// the first dispatch being undefined behaviour rather than a refusal. A device
+// that lacks one is a no-rays device, and every consumer (the chain's
+// rayReflect, the cards' Auto, the status) reads that same answer.
+//
+// JAHSHAKA_RAY_DENY_STORAGE_FORMAT names a format (R16G16B16A16_SFLOAT or
+// R32G32_SFLOAT) to treat as unsupported: FAULT INJECTION, the refusal path's
+// only door on conformant hardware (a measurement switch for
+// gi.rt_reflect_format_refused_lavapipe, not a mode).
+namespace {
+struct RayStorageFormat { VkFormat format; const char *name; };
+constexpr RayStorageFormat kRayStorageFormats[] = {
+    { VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT" },   // the reflection mean, the gather atlas
+    { VK_FORMAT_R32G32_SFLOAT,       "R32G32_SFLOAT" },         // the reflection's distance pair
+};
+
+/// Empty when every format stores; otherwise the first one that does not.
+std::string rayStorageFormatRefused(VkPhysicalDevice pd) {
+    const char *deny = std::getenv("JAHSHAKA_RAY_DENY_STORAGE_FORMAT");
+    for (const RayStorageFormat &f : kRayStorageFormats) {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(pd, f.format, &props);
+        const bool stores = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+        const bool denied = deny && std::strcmp(deny, f.name) == 0;
+        if (!stores || denied) return std::string(f.name) + (denied ? " (denied by JAHSHAKA_RAY_DENY_STORAGE_FORMAT)" : "");
+    }
+    return std::string();
+}
+}   // namespace
+
 bool OgreEngine::rayQueryAvailable() const {
     if (mHeadless || !mRoot) return false;
     Ogre::VulkanRenderSystem *rs = dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem());
     Ogre::VulkanDevice *dev = rs ? rs->getVulkanDevice() : nullptr;
-    return dev && dev->hasRayQuery();
+    if (!dev || !dev->hasRayQuery() || !dev->mPhysicalDevice) return false;
+    // Asked ONCE per physical device: the answer is a property of the device,
+    // and this predicate is read every time a view describes its chain.
+    static VkPhysicalDevice sAsked = VK_NULL_HANDLE;
+    static bool sStores = false;
+    if (sAsked != dev->mPhysicalDevice) {
+        sAsked = dev->mPhysicalDevice;
+        const std::string refused = rayStorageFormatRefused(dev->mPhysicalDevice);
+        sStores = refused.empty();
+        if (!sStores)
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: ray-query tier refused - the device cannot store to " + refused +
+                " (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, optimal tiling), which the tier's "
+                "history images need; this is a no-rays device");
+    }
+    return sStores;
 }
 
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {

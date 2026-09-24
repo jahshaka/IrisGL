@@ -982,6 +982,7 @@ struct ChainDesc {
     /// built at all, and `jahSsrReflection` is CLEARED instead of resolved into.
     bool  ssrScreenMarch = true;
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
+    int   ssrSteps = 0;             ///< 0 = the row's 48/96 (PostFxDesc::ssrSteps)
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
     float ssrIntensity = 1.0f;
     /// WHICH SAMPLE ANSWERS THE MARCH'S TWO QUESTIONS (PostFxDesc::ssrMarchPhase).
@@ -1023,6 +1024,12 @@ struct ChainDesc {
     /// `rayReflect` is.
     bool  probeGather = false;
     bool  refractions = false;
+    /// THE RADIANCE READBACK (PostFxDesc::hdrReadback, HDR-READBACK-1): the
+    /// scene result is kept in a FLOAT target even without `hdr`, and
+    /// ChainHandles::radianceTexture names it. Set before the offscreen
+    /// early-out (it is what the view KEEPS, not a post effect), and graph
+    /// shape: the scene-format textures change.
+    bool  hdrReadback = false;
 
     // ---- The hierarchical depth pyramid (SPECS/NANITE_SPEC.md §4.3) ----
     /// Build a closest-depth mip chain of the scene depth, once per frame, right
@@ -1068,6 +1075,12 @@ struct ChainDesc {
     /// derived from the target's own aspect and therefore moves on every
     /// resize — and Ogre re-reads mVpRect from the definition on every execute.
     bool  letterbox = false;
+    /// ...and the CAMERA'S aspect the rectangle is fitted to (a uniform, never
+    /// the shape): the SSR march, its resolve and the reprojection work in the
+    /// SHOT's uv, which is the letterbox rectangle's (SSR-LETTERBOX-1), and
+    /// applyViewGlobals derives the rectangle from this and the view's size
+    /// exactly as OgreView::applyLetterbox does.
+    float letterboxAspect = 0.0f;
 
     // ---- Engine-drawn overlay (STATS_OVERLAY_SPEC.md §6.5) ----
     /// Whether the FINAL overlay pass gets mIncludeOverlays = true. This is a
@@ -1227,6 +1240,11 @@ struct ChainHandles {
     /// part of ChainDesc::sameShape: changing it must not rebuild a workspace,
     /// so somebody has to rewrite this clear instead — OgreView::applyFixedExposure.
     Ogre::CompositorPassClearDef *fixedExposure = nullptr;
+    /// THE FLOAT SCENE RESULT a radiance readback downloads (HDR-READBACK-1):
+    /// the texture the one composite quad reads — kRt0, or the refraction /
+    /// distortion / AO stage that last rewrote it — named here because which
+    /// one it is depends on the shape. Null unless ChainDesc::hdrReadback.
+    const char *radianceTexture = nullptr;
 };
 
 /// Creates the node definitions and the workspace definition `desc` describes,
@@ -1403,7 +1421,11 @@ void initSmaa(Ogre::Root *root, int preset);
 /// is not ours to reinvent. `reprojection` is the view's frame-to-frame state,
 /// declared below beside applyViewGlobals.
 struct SsrReprojection;
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &reprojection);
+/// `shot` is the letterbox's inner rectangle in the target's uv (x, y, w, h) —
+/// (0, 0, 1, 1) without a letterbox — the map between the SHOT's uv, which the
+/// march, the resolve and the reprojection work in, and the textures they read.
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
+               SsrReprojection &reprojection);
 // ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
 //
 // This was ONE function, `applyGlobals`, called once a frame from the primary
@@ -1471,6 +1493,9 @@ float fixedExposureScale(float exposureScale, float exposure);
 /// (keep_content, unlike the per-frame `jahLum` it is copied from), which is
 /// what makes View::measuredExposureScale possible at all.
 const char *exposureHistoryTextureName();
+/// The texture HlmsPbs composites as the SSR/ray reflection (jahSsrReflection):
+/// rgb = the reflected radiance, a = the weight the composite lerps by.
+const char *reflectionTextureName();
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -6198,6 +6223,11 @@ public:
     void resize(unsigned w, unsigned h) override;
 
     bool readPixels(Image &out) override;
+    bool readPixelsHdr(ImageF &out) override;
+    bool readReflectionHdr(ImageF &out) override;
+    /// Downloads one of this view's chain textures (a local of its scene node)
+    /// into float: the radiance readback and the reflection readback share it.
+    bool readChainTexture(const char *textureName, ImageF &out, const char *who);
 
     /// Applies whatever resize()/setSampleCount() recorded, at frame time.
     ///

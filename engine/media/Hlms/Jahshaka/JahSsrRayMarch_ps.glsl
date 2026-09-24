@@ -44,20 +44,22 @@
 //    exactly like ogre-patch 0011 taught the SSAO shader to.
 //
 // OUTPUT (PFG_RGBA16_UNORM, so every channel must be [0,1]):
-//    xy = the texture-space coordinate the ray hit
+//    xy = the coordinate the ray hit, in the SHOT's uv (the target's without a
+//         letterbox; the resolve maps it back — SSR-LETTERBOX-1)
 //    z  = the ENVELOPE: how gracefully the technique has to stop here. The
 //         distance fade (1 at the origin falling to 0 at maxDistance), the
-//         SCREEN EDGE ramp and the "this reflection points back at the camera"
-//         ramp, multiplied. All three are smooth functions of screen position
-//         and none of them is a doubt about the hit: they are the places where
-//         a screen-space trace runs out of data and the probe has to take over
+//         SCREEN EDGE ramp, the "this reflection points back at the camera"
+//         ramp, and SSR-EDGE-1's two: the END OF THE RAY'S RANGE (the last
+//         steps before it would leave the screen, pass the eye or run out of
+//         distance) and the THICKNESS MARGIN (how much of the gap between the
+//         ray and the surface the march's own step cannot explain), multiplied.
+//         None of them is a doubt about the hit: they are the places where a
+//         screen-space trace runs out of data and the probe has to take over
 //         without a seam.
 //    w  = the TRUST: 0 for a miss, otherwise the ARRIVAL ANGLE at the surface
 //         the ray hit (a backface or a grazing arrival is a hit the depth
-//         buffer cannot vouch for) times the THICKNESS MARGIN (how much of the
-//         gap between the ray and the surface the march's own step cannot
-//         explain). Both are lane SSR-1's; see the block comment where each is
-//         computed.
+//         buffer cannot vouch for) — lane SSR-1's; see the block comment where
+//         it is computed.
 //
 // THE SPLIT IS LANE SSR-2's AND IT CARRIES A DECISION (the owner's dual image
 // on the Mirror Room's chrome sphere). The four fades used to be one product in
@@ -120,6 +122,18 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// uniform-coherent over the quad, and a permutation would recompile the
 	// marcher every time a project changed the row.
 	uniform vec4 marchParams;
+	// THE SHOT'S UV MAP (SSR-LETTERBOX-1). Under a letterbox the camera's
+	// projection lands in the target's INNER rectangle while this quad covers
+	// the whole target, so the march works in the SHOT's uv ([0,1] over the
+	// rectangle: `viewToTextureSpaceMatrix` is the shot's own map) and converts
+	// to the target's only to read a texture (jahShotToTex). An INSET, so the
+	// constant buffer's zeros are the identity: x, y = the rectangle's corner;
+	// z, w = 1 - its width, height. chain::updateSsr pushes it.
+	uniform vec4 shotInset;
+	// The camera's frustum span per unit of uv (view-space x per u, y per v, at
+	// z = 1): what corrects the quad's interpolated view vector, which is
+	// spread over the whole target, to the shot's uv.
+	uniform vec4 cameraSpan;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -146,14 +160,92 @@ float jahViewDistance( float d )
 	return projectionParams.y / ( d - projectionParams.x );
 }
 
+// The shot's uv -> the target's, where every texture of this pass lives. Exact
+// in float without a letterbox (0 + uv * 1).
+vec2 jahShotToTex( vec2 uv )
+{
+	return shotInset.xy + uv * ( vec2( 1.0 ) - shotInset.zw );
+}
+
+// ...and the depth at a SHOT uv.
 float jahSceneDepthAt( vec2 uv )
 {
-	return texture( vkSampler2D( depthTexture, samplerState ), uv ).x;
+	return texture( vkSampler2D( depthTexture, samplerState ), jahShotToTex( uv ) ).x;
+}
+
+// THE RAY'S OWN RANGE (SSR-EDGE-1): how far along `rayDir` the march can follow
+// the ray before it stops being able to — past `maxDistance`, behind the eye,
+// or off the screen — solved EXACTLY on the ray's clip-space line rather than
+// found by stepping. `viewToTextureSpaceMatrix` returns texture space, so a
+// point is on screen while h.x, h.w - h.x, h.y and h.w - h.y are all >= 0 and
+// h.w > 0; each is LINEAR in t along the ray (h = h0 + h1 t), so each leaves
+// its half-space at one t, and the range is the nearest of them.
+float jahRayRange( vec3 origin, vec3 rayDir, float maxDistance )
+{
+	float range = maxDistance;
+	if( rayDir.z < 0.0 )
+		range = min( range, -origin.z / rayDir.z );			// the eye's plane
+	const vec4 h0 = viewToTextureSpaceMatrix * vec4( origin, 1.0 );
+	const vec4 h1 = viewToTextureSpaceMatrix * vec4( rayDir, 0.0 );
+	const vec4 f0 = vec4( h0.x, h0.w - h0.x, h0.y, h0.w - h0.y );
+	const vec4 f1 = vec4( h1.x, h1.w - h1.x, h1.y, h1.w - h1.y );
+	for( int k = 0; k < 4; ++k )
+	{
+		if( f1[k] < 0.0 )
+			range = min( range, -f0[k] / f1[k] );
+	}
+	if( h1.w < 0.0 )
+		range = min( range, -h0.w / h1.w );
+	return max( range, 0.0 );
+}
+
+// A NEIGHBOURING PIXEL'S RANGE (SSR-EDGE-1: the fade's width). The same
+// reconstruction main() makes for its own pixel — the depth, the G-buffer
+// normal, the view vector, the reflection — at the SHOT uv `uv` whose view
+// vector is `cameraDir`; negative where that pixel has no surface to reflect.
+float jahPixelRange( vec2 uv, vec3 cameraDir, float maxDistance )
+{
+	if( uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 )
+		return -1.0;
+	const float d = jahSceneDepthAt( uv );
+	if( d <= 0.0 || d >= 1.0 )
+		return -1.0;
+	vec3 n = texture( vkSampler2D( gBufNormals, samplerState ), jahShotToTex( uv ) ).xyz * 2.0 - 1.0;
+	if( dot( n, n ) < 1e-6 )
+		return -1.0;
+	n = normalize( n );
+	n.z = -n.z;
+	vec3 o;
+	vec3 v;
+	if( orthoParams.x > 0.5 )
+	{
+		o = vec3( cameraDir.xy * orthoParams.y, jahViewDistance( d ) );
+		v = vec3( 0.0, 0.0, 1.0 );
+	}
+	else
+	{
+		o = cameraDir * jahViewDistance( d );
+		v = normalize( o );
+	}
+	return jahRayRange( o, reflect( v, n ), maxDistance );
 }
 
 void main()
 {
-	const float rawDepth = jahSceneDepthAt( inPs.uv0 );
+	// THIS PIXEL IN THE SHOT (SSR-LETTERBOX-1): outside the letterbox's
+	// rectangle there is no shot, and nothing to march. Without a letterbox
+	// shotUv IS inPs.uv0, bit for bit ((uv - 0) / 1).
+	const vec2 shotUv = ( inPs.uv0 - shotInset.xy ) / ( vec2( 1.0 ) - shotInset.zw );
+	if( shotUv.x < 0.0 || shotUv.x > 1.0 || shotUv.y < 0.0 || shotUv.y > 1.0 )
+	{
+		fragColour = vec4( 0.0 );
+		return;
+	}
+	// ...and the view vector through it: the quad's corners interpolated at the
+	// target's uv, corrected to the shot's (exactly zero without a letterbox).
+	const vec3 cameraDir = inPs.cameraDir + vec3( ( shotUv - inPs.uv0 ) * cameraSpan.xy, 0.0 );
+
+	const float rawDepth = jahSceneDepthAt( shotUv );
 	// Cleared depth at either extreme = no geometry (the sky quad writes colour,
 	// never depth). Reject both, so this is correct with and without reverse Z.
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
@@ -219,12 +311,12 @@ void main()
 	vec3 toSurface;
 	if( orthoParams.x > 0.5 )
 	{
-		origin	  = vec3( inPs.cameraDir.xy * orthoParams.y, jahViewDistance( rawDepth ) );
+		origin	  = vec3( cameraDir.xy * orthoParams.y, jahViewDistance( rawDepth ) );
 		toSurface = vec3( 0.0, 0.0, 1.0 );
 	}
 	else
 	{
-		origin	  = inPs.cameraDir * jahViewDistance( rawDepth );
+		origin	  = cameraDir * jahViewDistance( rawDepth );
 		toSurface = normalize( origin );
 	}
 	const vec3 rayDir	 = reflect( toSurface, normalVS );
@@ -256,6 +348,20 @@ void main()
 		jitter = float( bayer[ ip.y * 4 + ip.x ] ) * ( 1.0 / 16.0 );
 	}
 
+	// THE RAY'S RANGE, found once (SSR-EDGE-1; jahRayRange). The march used to
+	// learn it by stepping past it — a sample off the screen, behind the eye or
+	// beyond maxDistance ended the ray — so whether a crossing just before the
+	// end was FOUND depended on where the sample after it fell: a ray whose
+	// crossing sample landed one step late missed, its neighbour with the other
+	// checkerboard phase hit, and the end of every reflection was a speckled
+	// line of full-weight hits against misses (ssr.edge's spheres: the floor's
+	// reflection on the lower hemisphere, where the rays head toward the camera
+	// and one 0.26 m step crosses much of the screen). The LAST SAMPLE now sits
+	// on the end of the range, just inside it, so a crossing before the end is
+	// found whatever the phase, and hit-or-miss is the geometry's answer.
+	const float range	 = jahRayRange( origin, rayDir, maxDistance );
+	const float rangeEnd = max( range - 1.0e-3 * stepLen, 0.0 );
+
 	float hit		= 0.0;
 	float travelled = maxDistance;
 	vec2  hitUv		= vec2( 0.0 );
@@ -269,7 +375,11 @@ void main()
 		if( i > steps )
 			break;
 
-		const float t = stepLen * ( float( i ) + jitter );
+		const float tStep = stepLen * ( float( i ) + jitter );
+		const bool	last  = tStep >= rangeEnd;
+		const float t	  = last ? rangeEnd : tStep;
+		if( t <= prevT )
+			break;								// the range ended before this step began
 		const vec3	p = origin + rayDir * t;
 		if( p.z <= 0.0 )
 			break;								// the ray went behind the eye
@@ -415,6 +525,8 @@ void main()
 			}
 		}
 		prevT = t;
+		if( last )
+			break;								// the sample on the end of the range was the last
 	}
 
 	if( hit <= 0.0 )
@@ -463,7 +575,7 @@ void main()
 	// Both are ZERO-COST where the trace was already trustworthy — a flat floor
 	// reflecting the room in front of it arrives at its hits face-on and well
 	// inside the tolerance, so both terms are 1 and the frame does not move.
-	vec3 hitNormal = texture( vkSampler2D( gBufNormals, samplerState ), hitUv ).xyz * 2.0 - 1.0;
+	vec3 hitNormal = texture( vkSampler2D( gBufNormals, samplerState ), jahShotToTex( hitUv ) ).xyz * 2.0 - 1.0;
 	float arrival = 0.0;
 	if( dot( hitNormal, hitNormal ) > 1e-6 )
 	{
@@ -474,11 +586,67 @@ void main()
 	const float faceFade  = smoothstep( 0.0, 0.2, arrival );
 	const float thickFade = 1.0 - smoothstep( 0.5, 1.0, hitDiff );
 
+	// ...AND THE RIM (SSR-EDGE-1). The resolve lets a TRUSTED hit win outright
+	// (SSR-2's mirror rule), so whatever decides "hit or no hit" draws a
+	// pixel-sharp line into the picture unless the hit's weight has already
+	// faded by the time the decision flips. Two things flip it at a boundary
+	// that is not an object's silhouette, and both were a one-step flip:
+	//
+	//  * THE END OF THE RAY'S RANGE. A ray that is about to leave the screen,
+	//    pass behind the eye or run out of `maxDistance` hits if its crossing
+	//    sample lands before the end and misses if its phase puts that sample
+	//    one step later — the checkerboard jitter makes neighbours disagree, and
+	//    the boundary is a speckled line of full-weight hits against misses
+	//    (measured on ssr.edge's spheres: the floor's reflection on the lower
+	//    hemisphere ended in 592 such pixels; the rays head toward the camera,
+	//    where one 0.26 m step crosses much of the screen, so the screen exit
+	//    and not `maxDistance` is the end almost everywhere). So the weight
+	//    fades over the LAST kEdgeSteps STEPS of the ray's own range
+	//    (jahRayRange: exact, not stepped) — a hit with less than a step of
+	//    range left is the one its neighbour might have missed, and it hands
+	//    over at nearly zero.
+	//  * THE THICKNESS MARGIN. `thickFade` was a TRUST term, and trust is a
+	//    verdict to the resolve (a quorum and a fan count, at 0.5): the margin's
+	//    smooth ramp became a step where it crossed the count's threshold. It is
+	//    an ENVELOPE term now — the same ramp, in the channel the resolve scales
+	//    by instead of counting — so a hit whose crossing only qualifies because
+	//    the thickness guess is generous fades out continuously and is still
+	//    counted as the hit it is (the fan and the quorum judge its AGREEMENT;
+	//    the arrival angle stays the one trust term).
+	// THE FADE'S WIDTH IS THE RANGE'S OWN SCREEN-SPACE GRADIENT, in steps,
+	// floored at 2 (the jitter's half step plus the refinement's last step is
+	// the ambiguity a flat neighbourhood has). Where neighbouring pixels' rays
+	// end many steps apart — a curved reflector's limb, where the rays fan — a
+	// two-step fade is narrower than one pixel and the edge stays a rim; the
+	// fade that hands over within a pixel's width is |range(pixel) -
+	// range(neighbour)|. Read on BOTH sides along each axis and the SMALLER
+	// taken, so a neighbour across a silhouette (another surface, whose range
+	// has nothing to do with this one's) cannot widen the fade: a one-sided
+	// jump is an edge of the receiver, a two-sided one is the rays fanning.
+	const vec2 onePixel = ( vec2( 1.0 ) / rayBufferRes.xy ) / ( vec2( 1.0 ) - shotInset.zw );
+	float rangeGrad = 0.0;
+	for( int axis = 0; axis < 2; ++axis )
+	{
+		const vec2 d = axis == 0 ? vec2( onePixel.x, 0.0 ) : vec2( 0.0, onePixel.y );
+		const float ra = jahPixelRange( shotUv + d, cameraDir + vec3( d * cameraSpan.xy, 0.0 ), maxDistance );
+		const float rb = jahPixelRange( shotUv - d, cameraDir - vec3( d * cameraSpan.xy, 0.0 ), maxDistance );
+		float g = 1.0e30;
+		if( ra >= 0.0 )
+			g = min( g, abs( ra - range ) );
+		if( rb >= 0.0 )
+			g = min( g, abs( rb - range ) );
+		if( g < 1.0e30 )
+			rangeGrad = max( rangeGrad, g );
+	}
+	const float kEdgeSteps = max( 2.0, rangeGrad / stepLen );
+	const float rangeLeft  = ( range - travelled ) / stepLen;
+	const float rangeFade  = smoothstep( 0.0, kEdgeSteps, rangeLeft );
+
 	// THE TWO GROUPS GO IN SEPARATE CHANNELS (lane SSR-2 — see OUTPUT at the
-	// top): z carries the three ENVELOPE ramps, w the two TRUST terms. Their
-	// product is unchanged and the resolve still forms it, so no frame that
-	// merely blends moves; the resolve needs them apart to tell "the data runs
-	// out here" from "this hit means nothing", which are the same number today
-	// and opposite decisions on a mirror.
-	fragColour = vec4( hitUv, distFade * edgeFade * camFade, faceFade * thickFade );
+	// top): z carries the ENVELOPE ramps (distance, screen edge, away from the
+	// camera, and SSR-EDGE-1's range end and thickness margin), w the TRUST
+	// (the arrival angle). The resolve forms their product, and needs them apart
+	// to tell "the data runs out here" from "this hit means nothing", which are
+	// opposite decisions on a mirror.
+	fragColour = vec4( hitUv, distFade * edgeFade * camFade * rangeFade * thickFade, faceFade );
 }

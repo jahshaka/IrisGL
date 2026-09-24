@@ -112,6 +112,7 @@ ChainDesc OgreView::chainDesc() const {
     // show the same shot the viewport does, and the flag can only be true when
     // a host deliberately pushed a constrained camera.
     d.letterbox  = mCameraDesc.constrainAspect && mCameraDesc.aspect > 0.0f;
+    d.letterboxAspect = d.letterbox ? mCameraDesc.aspect : 0.0f;
     // THE HZB (NANITE_SPEC §4.3) is set BEFORE the offscreen early-out, with
     // letterbox and for the same kind of reason: it is not a post-process and it
     // changes no pixel of the picture — it is a resource a future screen-space
@@ -125,6 +126,11 @@ ChainDesc OgreView::chainDesc() const {
     d.hzb        = mPostFx.hzb;
     d.hzbLevels  = d.hzb ? hzbLevelsFor(width(), height()) : 0u;
     d.hzbFarthest = mPostFx.hzbFarthest;
+    // THE RADIANCE READBACK (HDR-READBACK-1), before the early-out for the
+    // reason `hzb` is: it changes no pixel of the picture a view presents — it
+    // is what the view KEEPS (a float scene target), and the offscreen views
+    // are exactly the ones a closed form is measured on.
+    d.hdrReadback = mPostFx.hdrReadback;
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -182,6 +188,7 @@ ChainDesc OgreView::chainDesc() const {
     // an offscreen view. @see PostFxDesc::ssrScreenMarch.
     d.ssrScreenMarch = mPostFx.ssrScreenMarch;
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
+    d.ssrSteps = mPostFx.ssrSteps;
     d.ssrMarchPhase = mPostFx.ssrMarchPhase;
     d.ssrThickness   = mPostFx.ssrThickness;
     d.ssrIntensity   = mPostFx.ssrIntensity;
@@ -1454,6 +1461,79 @@ bool OgreView::readPixels(Image &out) {
             std::memcpy(&out.rgba[static_cast<size_t>(y) * w * 4u], box.at(0, y, 0), w * 4u);
         t->unmap();
         tm->destroyAsyncTextureTicket(t);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+bool OgreView::readPixelsHdr(ImageF &out) {
+    if (!mTexture) { mError = "readPixelsHdr: View '" + mName + "' is on-screen"; return false; }
+    if (!mChainHandles.radianceTexture || !mWorkspace) {
+        mError = "readPixelsHdr: View '" + mName +
+                 "' keeps no float scene result (PostFxDesc::hdrReadback is off, or no frame has "
+                 "built the workspace yet)";
+        return false;
+    }
+    return readChainTexture(mChainHandles.radianceTexture, out, "readPixelsHdr");
+}
+
+bool OgreView::readReflectionHdr(ImageF &out) {
+    if (!mTexture) { mError = "readReflectionHdr: View '" + mName + "' is on-screen"; return false; }
+    if (!mWorkspace) { mError = "readReflectionHdr: View '" + mName + "' has no workspace"; return false; }
+    return readChainTexture(chain::reflectionTextureName(), out, "readReflectionHdr");
+}
+
+bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char *who) {
+    JAH_TRY {
+        // A LOCAL texture of the chain's scene node: the node that defines it
+        // answers, every other node throws, so ask the one the view built (the
+        // exposure history is found the same way).
+        Ogre::TextureGpu *src = nullptr;
+        const Ogre::IdString name(textureName);
+        const Ogre::IdString sceneNode(chain::sceneNodeDefName(mWorkspaceDef));
+        for (Ogre::CompositorNode *n : mWorkspace->getNodeSequence()) {
+            if (n && n->getName() == sceneNode) {
+                // getDefinedTexture THROWS on a name the node does not declare
+                // (a chain with no SSR stage has no reflection texture), so ask
+                // the definition's name map first.
+                const auto &names = n->getDefinition()->getNameToChannelMap();
+                if (names.find(name) != names.end()) src = n->getDefinedTexture(name);
+                break;
+            }
+        }
+        if (!src) {
+            mError = std::string(who) + ": the chain of View '" + mName + "' defines no '" +
+                     textureName + "'";
+            return false;
+        }
+        const Ogre::PixelFormatGpu fmt = src->getPixelFormat();
+        Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+        const Ogre::uint32 w = src->getWidth(), h = src->getHeight();
+        // Owned for the same reason measuredExposureScale's ticket is: download
+        // and map can both throw, and a ticket is not a SharedPtr.
+        struct TicketScope {
+            Ogre::TextureGpuManager *tm = nullptr;
+            Ogre::AsyncTextureTicket *ticket = nullptr;
+            bool mapped = false;
+            ~TicketScope() {
+                if (!ticket) return;
+                if (mapped) ticket->unmap();
+                tm->destroyAsyncTextureTicket(ticket);
+            }
+        } held{ tm, tm->createAsyncTextureTicket(w, h, 1u, Ogre::TextureTypes::Type2D, fmt) };
+        held.ticket->download(src, 0, true);
+        const Ogre::TextureBox box = held.ticket->map(0);
+        held.mapped = true;
+        out.width = w; out.height = h;
+        out.rgba.resize(static_cast<size_t>(w) * h * 4u);
+        // getColourAt decodes whatever the format is (RGBA16F for both readers)
+        // into float, exactly.
+        for (Ogre::uint32 y = 0; y < h; ++y) {
+            for (Ogre::uint32 x = 0; x < w; ++x) {
+                const Ogre::ColourValue c = box.getColourAt(x, y, 0, fmt);
+                float *o = &out.rgba[(static_cast<size_t>(y) * w + x) * 4u];
+                o[0] = c.r; o[1] = c.g; o[2] = c.b; o[3] = c.a;
+            }
+        }
         return true;
     } JAH_CATCH(mError, false);
 }
