@@ -25,7 +25,9 @@
 // datablocks of one bucket into one twin is the S3-DRAW optimisation).
 //
 // WHAT IT IS TOLD. Everything PBS is told, through `tellEveryHlms` (OgreEngine.cpp)
-// — never a setter of its own that could disagree with PBS's.
+// — never a setter of its own that could disagree with PBS's — except the scene's
+// GI arms, which it binds per pass from the pass's own scene (bindSceneGi), exactly
+// as PBS does.
 //
 // NOTHING IN THE PRODUCT DRAWS THROUGH IT YET (S3-DRAW binds it to the id pass);
 // its consumer is `engine.atom_parity`, over a hand-made id buffer.
@@ -61,8 +63,17 @@ namespace detail {
 /// PBS is the source of truth — every engine site tells HlmsPbs — and this copies
 /// what PBS holds onto every other PBS-family host: at registration (`force`) and
 /// once per frame before a host's first read (HlmsAtom's analyzeBarriers /
-/// preparePassHash). Nothing is left unrelayed at this pin.
+/// preparePassHash). Nothing is left unrelayed at this pin but the scene's GI arms,
+/// which are bound per pass (bindSceneGi, below).
 void tellEveryHlms(Ogre::HlmsManager *manager, bool force = false);
+
+/// THE SCENE BEING DRAWN IS THE SCENE THE SHADER READS (PHOTON-SCENE-SWITCH-1;
+/// OgreGi.cpp, SceneGiBinding in EnginePrivate.h): points `host` at the VctLighting,
+/// IrradianceField and PCC (+ its two distances) of the pass's own SceneManager —
+/// null arms for one that registered none. Every PBS-family host calls it at the
+/// head of its analyzeBarriers and preparePassHash, so it is NOT relayed by
+/// tellEveryHlms.
+void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm);
 
 /// The registered HlmsAtom's forgetDecodeTwinOf — a no-op before registration, after
 /// Root, or for a datablock that is not PBS's. The one call every PBS-datablock

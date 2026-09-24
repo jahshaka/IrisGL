@@ -68,10 +68,12 @@ namespace {
 constexpr const char *kTargetChannel = "JahReflectTarget";
 
 /// The one HlmsPbs binding for the process. HlmsPbs::mPlanarReflections is a
-/// single pointer shared by every scene in the process (the sVctBindingOwner
-/// shape in OgreGi.cpp, and the same accepted v1 compromise): the last scene to
-/// arm owns it, and a scene that is not the owner must not clear it on teardown
-/// or it would silently switch reflections off for the scene that is.
+/// single pointer shared by every scene in the process: the last scene to arm
+/// owns it, and a scene that is not the owner must not clear it on teardown or it
+/// would silently switch reflections off for the scene that is. (The GI arms are
+/// bound per pass since PHOTON-SCENE-SWITCH-1 — SceneGiBinding; this one is not:
+/// HlmsPbs also reads it OUTSIDE a pass, per renderable at hash time
+/// (calculateHashForPreCreate), so a per-pass bind alone cannot scope it.)
 const OgreScene *sBindingOwner = nullptr;
 
 Ogre::HlmsPbs *pbsOf(Ogre::Root *root) {

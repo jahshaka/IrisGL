@@ -149,18 +149,16 @@ public:
     /// everything again.
     ///
     /// applyEnvironment debounces ambient / fog / GI against the last value it
-    /// sent, which is right while ONE mirror owns the screen — but some of that
-    /// state is process-wide inside the backend (HlmsPbs' VCT/PCC binding is
-    /// literally "last scene to enable owns it", OgreGi.cpp). The editor and the
+    /// sent, which is right while ONE mirror owns the screen — but some of what
+    /// it pushes resolves against process-wide backend state. The editor and the
     /// player are two mirrors over two engine scenes taking turns on screen: the
     /// one coming back would otherwise decide it had already pushed and leave the
-    /// other's binding in place. Call this whenever a mirror (re)takes the
+    /// other's state in place. Call this whenever a mirror (re)takes the
     /// screen — EngineSceneViewport::begin(), EnginePlayerScene::begin().
     ///
     /// GI is the exception (ENGINE_CACHE_POLICY_SPEC P10): it is NOT re-pushed —
-    /// a GI push is a from-scratch rebuild — the next applyEnvironment calls
-    /// Scene::reassertGiBinding instead, which re-points the binding at this
-    /// scene's still-valid arms and rebuilds nothing.
+    /// a GI push is a from-scratch rebuild, and a scene's arms are bound by its
+    /// own passes whatever else drew (the engine's per-pass SceneGiBinding).
     void invalidateEnvironment();
 
     /// How many times applyEnvironment has pushed a NEW GI configuration
@@ -1892,9 +1890,6 @@ private:
     /// pushed, on CHANGE only, the ray row's rule.
     jahshaka::engine::SunContactDesc mLastSunContact;
     bool mSunContactPushed = false;
-    /// Set by invalidateEnvironment: the next applyEnvironment re-asserts the
-    /// process-wide GI binding for this scene instead of re-pushing (P10).
-    bool mGiReassertPending = false;
     /// The engine's material generation as last adopted (Scene::giMaterialSignature),
     /// and whether the pending settle was armed by lights/geometry — the only
     /// changes the cheap re-inject cadence serves (a material-only edit waits

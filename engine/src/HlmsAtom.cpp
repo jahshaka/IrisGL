@@ -12,6 +12,7 @@
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
 #include <OgreHlmsJson.h>
+#include <OgreCamera.h>
 #include <OgreHlmsManager.h>
 #include <OgreResourceTransition.h>
 #include <OgreHlmsPbsDatablock.h>
@@ -303,9 +304,10 @@ void HlmsAtom::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
     // every scene pass of the frame, and this host draws only through its twins.
     if (mTwins.empty()) return;
     // THE FIRST THING A PASS ASKS OF US READS THE VOXEL AND FIELD TEXTURES — so the
-    // pointers must be PBS's current ones BEFORE, never after: a VctLighting PBS was
-    // told to drop may already be deleted.
+    // relay and THIS PASS'S SCENE'S arms (bindSceneGi) come BEFORE, never after: an
+    // arm from the previous pass's scene is the wrong one, and may be deleted.
     tellEveryHlms(mHlmsManager);
+    bindSceneGi(this, renderingCamera ? renderingCamera->getSceneManager() : nullptr);
     Ogre::HlmsPbs::analyzeBarriers(barrierSolver, resourceTransitions, renderingCamera, bCasterPass);
     if (bCasterPass) return;
     // WHAT THE DECODE READS, declared to Ogre's solver like every other pass input:
@@ -336,6 +338,7 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
     }
     mPassSkipped = false;
     tellEveryHlms(mHlmsManager);
+    bindSceneGi(this, sceneManager);
     uploadBucketTable();
     return Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
 }

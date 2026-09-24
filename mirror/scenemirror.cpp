@@ -6777,15 +6777,11 @@ void SceneMirror::invalidateEnvironment()
     // setter is idempotent, and correct where it is not.
     mEnvScalePushed = false;
     mFogPushed = false;
-    // GI IS NOT RE-PUSHED (ENGINE_CACHE_POLICY_SPEC P10). The GI latch used to
-    // be dropped here too, and the re-push that followed is a from-scratch
-    // rebuild in the engine — voxels, the whole probe grid, the irradiance
-    // field — on every page return: 2.1-2.9 s of blocked UI in the owner's log
-    // after "materials -> editor". What a re-take actually needs is the
-    // process-wide HlmsPbs binding pointed back at THIS scene's arms, which are
-    // still valid; the next applyEnvironment asks the engine for exactly that
-    // (Scene::reassertGiBinding) and nothing more.
-    mGiReassertPending = true;
+    // GI IS NOT RE-PUSHED (ENGINE_CACHE_POLICY_SPEC P10): a GI push is a
+    // from-scratch rebuild in the engine — voxels, the whole probe grid, the
+    // irradiance field — and a re-take needs none of it. The arms this scene
+    // built are its own and every pass of it binds them (the engine's per-pass
+    // SceneGiBinding, PHOTON-SCENE-SWITCH-1), so there is nothing to take back.
 }
 
 // CAMERA_LENS_SPEC §4/§5. Defined beside applyCamera, where the whole model is
@@ -7436,13 +7432,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // field setGlobalIllumination reads is in it, so a new field cannot fall
         // behind the comparison the way a lambda one file away did).
         //
-        // A screen re-take (invalidateEnvironment): point the process-wide GI
-        // binding back at this scene's arms. Before any push below, which — if
-        // the parameters did change meanwhile — rebuilds and binds anyway.
-        if (mGiReassertPending) {
-            mGiReassertPending = false;
-            if (mGiPushed) mTarget->reassertGiBinding();
-        }
         // THE TUNING PUSH FIRST, and it is not an early-out (PHOTON_SPEC §7
         // E2 (8)): the three per-frame floats are OUT of GiParams::operator==,
         // so a slider tick on one of them leaves `gi == mLastGi` and would

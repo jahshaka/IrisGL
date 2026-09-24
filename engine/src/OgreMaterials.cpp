@@ -1932,15 +1932,14 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
 }
 
 // OVERRIDE-ELSE-GLOBAL-ELSE-NULL, all three gated by PCC (ADDENDUM A-5).
-// The successor to reflectionTexForDatablocks() as the ONE place that answers
-// "what cubemap does this material's env-probe slot hold" — every binding site
-// goes through it, so a PCC-binding change cannot leave an override behind.
+// The ONE place that answers "what cubemap does this material's env-probe slot
+// hold" — every binding site goes through it, so a PCC-binding change cannot
+// leave an override behind.
 Ogre::TextureGpu *OgreScene::reflectionTexFor(const MaterialRec &rec) const {
-    // ANY grid anywhere, not this scene's (lane SKY-FALLBACK-1): the slot holds
-    // a cube ARRAY for every scene's pass while a PCC is bound to the HlmsPbs
-    // singleton, and a manual cube then generates a shader that cannot compile.
-    // The long argument is on reflectionTexForDatablocks (OgreSky.cpp).
-    if (anyProbeGridBound()) return nullptr;
+    // THIS scene's grid: the slot holds a cube ARRAY in this scene's passes while
+    // they bind a PCC, and a manual cube then generates a shader that cannot
+    // compile. The long argument is OgreSky.cpp's THE ENV-PROBE SLOT HAS ONE OCCUPANT.
+    if (probeGridBound()) return nullptr;
     const TextureId override_ = rec.boundTextures[size_t(PbrTextureSlot::Reflection)];
     if (override_) {
         auto it = mTextures.find(override_);

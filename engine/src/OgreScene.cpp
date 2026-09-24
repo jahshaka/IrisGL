@@ -13,7 +13,10 @@ namespace jahshaka { namespace engine { namespace detail {
 
 OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
                      std::string &errorSink)
-    : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {}
+    : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
+    // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
+    registerSceneGiBinding(mSceneMgr, &mGiBinding);
+}
 
 OgreScene::~OgreScene() { destroy(); }
 
@@ -381,10 +384,10 @@ bool OgreScene::hasAuthoredReflectionMap() const {
 }
 
 float OgreScene::envmapScaleForPass() const {
-    // Any grid anywhere, for the same reason reflectionTexFor asks that way: the
-    // scale multiplies whatever the env slot holds, and while a PCC is bound to
-    // the singleton that is a probe array in EVERY scene's pass.
-    if (anyProbeGridBound()) return 1.0f;
+    // This scene's grid, for the same reason reflectionTexFor asks that way: the
+    // scale multiplies whatever the env slot holds, and while this scene's
+    // passes bind a PCC that is a probe array.
+    if (probeGridBound()) return 1.0f;
     if (hasAuthoredReflectionMap()) return 1.0f;
     return mEnvLightScale;
 }
@@ -1466,8 +1469,6 @@ NodeId OgreScene::nodeOfLight(const Ogre::Light *light) const {
 
 void OgreScene::destroy() {
     if (!mSceneMgr) return;
-    // teardownVct is shared with "GI off", and the two want different timing for
-    // the process-wide reflection re-bind — see the note there.
     mDestroying = true;
     JAH_TRY {
         // THE SURFACE CACHE BEFORE EVERYTHING, and the order is not tidiness.
@@ -1555,6 +1556,7 @@ void OgreScene::destroy() {
         }
     } JAH_CATCH(mError, );
     FogHlmsListener::unregisterScene(mSceneMgr);
+    unregisterSceneGiBinding(mSceneMgr);
     mSceneMgr = nullptr;
 }
 

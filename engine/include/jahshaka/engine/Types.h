@@ -3481,12 +3481,12 @@ struct GiStatus {
     /// clamped grid product (pccProbesX * pccProbesY * pccProbesZ); 0 in every
     /// other mode, and 0 in the hybrid when the probe arm failed to build.
     int    probeCount = 0;
-    /// Whether THIS scene's probe grid is the one bound to the process-wide
-    /// HlmsPbs — i.e. whether probe reflections are actually being sampled.
-    /// False when the hybrid degraded to plain VCT, and false when another
-    /// scene took the binding over (the sVctBindingOwner rule).
+    /// Whether THIS scene's passes sample its probe grid — i.e. whether probe
+    /// reflections are actually being drawn in it (the binding is per scene and
+    /// per pass: SceneGiBinding). False when the hybrid degraded to plain VCT,
+    /// and while a staged grid is not finished.
     bool   pccBound = false;
-    /// Whether this scene owns the process-wide VCT lighting binding.
+    /// Whether THIS scene's passes sample its VCT lighting.
     bool   vctBound = false;
     /// The RESOLVED lit volume — what the voxelizer was actually given, after
     /// the explicit-bounds check, the per-node exclude flag and the extent
@@ -3637,7 +3637,7 @@ struct GiStatus {
     // VCT volume to feed the field, no IFD media staged, a construction that
     // threw). These four are what the shader is actually doing.
 
-    /// The process-wide HlmsPbs is sampling THIS scene's irradiance field.
+    /// THIS scene's passes sample its irradiance field.
     bool   ifdBound = false;
     /// Probes in the field (the product of the three per-axis counts). 0 when
     /// there is no field.

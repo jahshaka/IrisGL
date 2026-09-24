@@ -475,12 +475,7 @@ void OgreEngine::destroyScene(Scene *scene) {
         // Cheap on a healthy process: a scene destroy is not a hot path.
         advanceResources();
         (*it)->destroy();
-        const bool releasedPcc = (*it)->mReleasedPccOnDestroy;
         mScenes.erase(it);
-        // A scene taking the process-wide probe binding down with it lets every
-        // REMAINING scene bind its own sky cube again (reflectionTexForDatablocks'
-        // note). After the erase: the walk must not see the corpse.
-        if (releasedPcc) reapplyReflectionsAllScenes();
         advanceResources();   // see the note above the first call
         return;
     }
@@ -693,22 +688,6 @@ void OgreEngine::destroyView(View *view) {
         return;
     }
     mLastError = "destroyView: unknown View";
-}
-
-void OgreEngine::reapplyReflectionsAllScenes() {
-    // EVERY scene, including the ones nothing is drawing right now: a preview or
-    // a thumbnail scene that is re-shown later must already hold the right
-    // answer, and the walk is a handful of datablock binds per scene on a
-    // transition that happens when a grid is built or torn down.
-    for (auto &s : mScenes) {
-        if (!s) continue;
-        s->applyReflectionToAll();
-        // ...and the roughness-to-LOD map with it: the grid that just came or
-        // went pushed ITS mip count into the one number the whole pass shares,
-        // and only a transition can leave that number describing a texture
-        // nobody is sampling any more (OgreScene::renotifyReflectionMipmaps).
-        s->renotifyReflectionMipmaps();
-    }
 }
 
 void OgreEngine::scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const {
@@ -2645,8 +2624,11 @@ void OgreEngine::ensureHlms() {
         // be LAST — the fog piece redefines a piece of Hlms/Pbs/Any/Atmosphere,
         // and a redefinition only works after the original has been collected.
         libs.push_back(am.load(mMediaDir + "Hlms/Jahshaka", "FileSystem", true));
+        // ScenePbs: upstream's HlmsPbs plus the per-pass GI binding (every scene
+        // pass binds ITS scene's voxel lighting, field and probe grid —
+        // SceneGiBinding, EnginePrivate.h).
         mRoot->getHlmsManager()->registerHlms(
-            OGRE_NEW Ogre::HlmsPbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
+            OGRE_NEW ScenePbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
     // HLMS ATOM (ATOM-S3-PARITY; SPECS/atom/D1 section 1) — the visibility buffer's
     // material decode, a derived HlmsPbs on the Terra pattern, registered BESIDE
@@ -2850,8 +2832,9 @@ void OgreEngine::ensureHlms() {
 //                         the ambient mode (SH), the non-caster directional budget,
 //                         static-branching lights (and the per-pixel shadow receive
 //                         it forces)
-//   OgreGi.cpp            setVctLighting, setIrradianceField,
-//                         setParallaxCorrectedCubemap (pointer + two distances)
+//   OgreGi.cpp            NOTHING relayed: the VctLighting, the field and the PCC
+//                         are bound per PASS on every host (bindSceneGi,
+//                         SceneGiBinding) — the scene being drawn, not a relay
 //   OgreSky.cpp           _notifyIblSpecMipmap / resetIblSpecMipmap(0)
 //   OgreLights.cpp        setAreaLightForwardSettings, setAreaLightMasks,
 //                         setLightProfilesTexture, loadLtcMatrix
@@ -2901,11 +2884,8 @@ void tellEveryHlms(Ogre::HlmsManager *manager, bool force) {
         if (host->getShadowFilter() != pbs->getShadowFilter())
             host->setShadowSettings(pbs->getShadowFilter());
         if (host->getEsmK() != pbs->getEsmK()) host->setEsmK(pbs->getEsmK());
-        if (host->getVctLighting() != pbs->getVctLighting()) host->setVctLighting(pbs->getVctLighting());
         if (host->getVctFullConeCount() != pbs->getVctFullConeCount())
             host->setVctFullConeCount(pbs->getVctFullConeCount());
-        if (host->getIrradianceField() != pbs->getIrradianceField())
-            host->setIrradianceField(pbs->getIrradianceField());
         if (host->getIrradianceVolume() != pbs->getIrradianceVolume())
             host->setIrradianceVolume(pbs->getIrradianceVolume());
         if (host->getAreaLightMasks() != pbs->getAreaLightMasks())
@@ -2916,13 +2896,8 @@ void tellEveryHlms(Ogre::HlmsManager *manager, bool force) {
         if (host->getPlanarReflections() != pbs->getPlanarReflections())
             host->setPlanarReflections(pbs->getPlanarReflections());
 #endif
-        // THE PCC and its two blend distances, exactly as PBS was given them (fork
-        // getters, ATOM-S3-PARITY).
-        if (host->getParallaxCorrectedCubemap() != pbs->getParallaxCorrectedCubemap() ||
-            host->getPccVctMinDistance() != pbs->getPccVctMinDistance() ||
-            host->getPccVctMaxDistance() != pbs->getPccVctMaxDistance())
-            host->setParallaxCorrectedCubemap(pbs->getParallaxCorrectedCubemap(),
-                                              pbs->getPccVctMinDistance(), pbs->getPccVctMaxDistance());
+        // NOT the VctLighting, the field or the PCC: those are the SCENE's, and
+        // every host binds the pass's own scene's per pass (bindSceneGi).
         // THE LTC MATRIX: loaded once and never unloaded (OgreLights.cpp); the host
         // retrieves the same pooled textures.
         if (pbs->getLtcMatrixTexture() && !host->getLtcMatrixTexture()) host->loadLtcMatrix();
