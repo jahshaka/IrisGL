@@ -4139,11 +4139,65 @@ void OgreEngine::setRayTracing(bool on) {
         " (the no-rays switch)");
 }
 
+// THE TIER'S STORAGE FORMATS, ASKED OF THE DEVICE (RAY-FMT-CHECK, PHOTON P3).
+//
+// Every image the tier writes from a compute shader is a STORAGE image: the
+// reflection's temporal pair (the radiance mean, RGBA16F, and the distance pair,
+// RG32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). Vulkan
+// guarantees STORAGE_IMAGE on RGBA16F; on RG32F it does NOT (it rides the
+// shaderStorageImageExtendedFormats feature, and a device may still decline the
+// optimal-tiling bit). The tier used to ASSUME both: `makeStorageImage` would
+// have created an image the device cannot store to, and the first dispatch
+// would have been undefined behaviour rather than a refusal. So the
+// availability gate asks `vkGetPhysicalDeviceFormatProperties` once per device
+// and a device that lacks one is a no-rays device — every consumer (the chain's
+// rayReflect, the cards' Auto, the status) reads that same answer — with ONE
+// log line naming the format.
+//
+// JAHSHAKA_RAY_DENY_STORAGE_FORMAT names a format (R16G16B16A16_SFLOAT or
+// R32G32_SFLOAT) to treat as unsupported: the refusal path's test door, because
+// no device on this box lacks either (lavapipe included — measured, 2026-09-24).
+namespace {
+struct RayStorageFormat { VkFormat format; const char *name; };
+constexpr RayStorageFormat kRayStorageFormats[] = {
+    { VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT" },   // the reflection mean, the gather atlas
+    { VK_FORMAT_R32G32_SFLOAT,       "R32G32_SFLOAT" },         // the reflection's distance pair
+};
+
+/// Empty when every format stores; otherwise the first one that does not.
+std::string rayStorageFormatRefused(VkPhysicalDevice pd) {
+    const char *deny = std::getenv("JAHSHAKA_RAY_DENY_STORAGE_FORMAT");
+    for (const RayStorageFormat &f : kRayStorageFormats) {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(pd, f.format, &props);
+        const bool stores = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+        const bool denied = deny && std::strcmp(deny, f.name) == 0;
+        if (!stores || denied) return std::string(f.name) + (denied ? " (denied by JAHSHAKA_RAY_DENY_STORAGE_FORMAT)" : "");
+    }
+    return std::string();
+}
+}   // namespace
+
 bool OgreEngine::rayQueryAvailable() const {
     if (mHeadless || !mRoot) return false;
     Ogre::VulkanRenderSystem *rs = dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem());
     Ogre::VulkanDevice *dev = rs ? rs->getVulkanDevice() : nullptr;
-    return dev && dev->hasRayQuery();
+    if (!dev || !dev->hasRayQuery() || !dev->mPhysicalDevice) return false;
+    // Asked ONCE per physical device: the answer is a property of the device,
+    // and this predicate is read every time a view describes its chain.
+    static VkPhysicalDevice sAsked = VK_NULL_HANDLE;
+    static bool sStores = false;
+    if (sAsked != dev->mPhysicalDevice) {
+        sAsked = dev->mPhysicalDevice;
+        const std::string refused = rayStorageFormatRefused(dev->mPhysicalDevice);
+        sStores = refused.empty();
+        if (!sStores)
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: ray-query tier refused - the device cannot store to " + refused +
+                " (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, optimal tiling), which the tier's "
+                "history images need; this is a no-rays device");
+    }
+    return sStores;
 }
 
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
