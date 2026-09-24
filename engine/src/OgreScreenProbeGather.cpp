@@ -222,7 +222,15 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     const auto makeLayout = [&](unsigned count, const VkDescriptorType *types,
                                 const unsigned *counts, VkDescriptorSetLayout &out,
                                 const char *what) {
-        VkDescriptorSetLayoutBinding b[16] = {};
+        // Sized by the widest set (the trace's) and refused beyond it: a fixed 16 here was
+        // overrun by the trace's nineteen and smashed the stack (PHOTON-VOXEL-4's rebase).
+        constexpr unsigned kMaxBindings = std::max({ kPlaceBindings, kTraceBindings, kFilterBindings,
+                                                     kIntegrateBindings });
+        VkDescriptorSetLayoutBinding b[kMaxBindings] = {};
+        if (count > kMaxBindings) {
+            err = std::string("gather: the ") + what + " set has more bindings than the layout table";
+            return false;
+        }
         for (unsigned i = 0; i < count; ++i) {
             b[i].binding = i;
             b[i].descriptorType = types[i];
