@@ -1065,6 +1065,9 @@ void OgreEngine::renderOneFrame() {
                 // and its capture cadence — before the capture below it may ask for.
                 s->tickCloudClock();
                 s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
+                // THIS SCENE'S IBL CHAIN LENGTH (SceneGiBinding::iblMipmaps), after
+                // the pendings that can change what its env slots hold.
+                s->resolveIblMipmaps();
                 // SURFACE-CACHE, after the pendings: the cache reads the
                 // material generation and the light write serial that
                 // applyPendingGi may just have moved, and PLANS this frame's
@@ -2832,13 +2835,12 @@ void OgreEngine::ensureHlms() {
 //                         the ambient mode (SH), the non-caster directional budget,
 //                         static-branching lights (and the per-pixel shadow receive
 //                         it forces)
-//   OgreGi.cpp            NOTHING relayed: the VctLighting, the field and the PCC
-//                         are bound per PASS on every host (bindSceneGi,
-//                         SceneGiBinding) — the scene being drawn, not a relay
-//   OgreSky.cpp           _notifyIblSpecMipmap / resetIblSpecMipmap(0)
+//   OgreGi.cpp,           NOTHING relayed: the VctLighting, the field, the PCC,
+//   OgrePlanar.cpp,       the planar mirrors and the IBL chain length are bound
+//   OgreSky.cpp           per PASS on every host (bindSceneGi, SceneGiBinding) —
+//                         the scene being drawn, not a relay
 //   OgreLights.cpp        setAreaLightForwardSettings, setAreaLightMasks,
 //                         setLightProfilesTexture, loadLtcMatrix
-//   OgrePlanar.cpp        setPlanarReflections
 //   OgreShadow.cpp        setShadowSettings (the PCF kernel)
 //
 // WHY A RELAY AND NOT A ROUTE. Those sites live in files other lanes own, so they
@@ -2892,19 +2894,12 @@ void tellEveryHlms(Ogre::HlmsManager *manager, bool force) {
             host->setAreaLightMasks(pbs->getAreaLightMasks());
         if (host->getLightProfilesTexture() != pbs->getLightProfilesTexture())
             host->setLightProfilesTexture(pbs->getLightProfilesTexture());
-#ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
-        if (host->getPlanarReflections() != pbs->getPlanarReflections())
-            host->setPlanarReflections(pbs->getPlanarReflections());
-#endif
-        // NOT the VctLighting, the field or the PCC: those are the SCENE's, and
-        // every host binds the pass's own scene's per pass (bindSceneGi).
+        // NOT the VctLighting, the field, the PCC, the planar mirrors or the IBL
+        // chain length: those are the SCENE's, and every host binds the pass's
+        // own scene's per pass (bindSceneGi).
         // THE LTC MATRIX: loaded once and never unloaded (OgreLights.cpp); the host
         // retrieves the same pooled textures.
         if (pbs->getLtcMatrixTexture() && !host->getLtcMatrixTexture()) host->loadLtcMatrix();
-        // THE IBL MIP COUNT PBS uploads, READ (PBS stays in its automatic mode; the host
-        // is forced to PBS's value).
-        if (host->getMaxSpecIblMipmap() != pbs->getMaxSpecIblMipmap())
-            host->resetIblSpecMipmap(Ogre::uint8(std::min(255.0f, std::max(1.0f, pbs->getMaxSpecIblMipmap()))));
     }
 }
 

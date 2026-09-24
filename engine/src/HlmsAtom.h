@@ -69,8 +69,9 @@ void tellEveryHlms(Ogre::HlmsManager *manager, bool force = false);
 
 /// THE SCENE BEING DRAWN IS THE SCENE THE SHADER READS (PHOTON-SCENE-SWITCH-1;
 /// OgreGi.cpp, SceneGiBinding in EnginePrivate.h): points `host` at the VctLighting,
-/// IrradianceField and PCC (+ its two distances) of the pass's own SceneManager —
-/// null arms for one that registered none. Every PBS-family host calls it at the
+/// IrradianceField, PCC (+ its two distances), planar mirrors and IBL chain length
+/// of the pass's own SceneManager — null arms (and a 1-level chain) for one that
+/// registered none. Every PBS-family host calls it at the
 /// head of its analyzeBarriers and preparePassHash, so it is NOT relayed by
 /// tellEveryHlms.
 void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm);

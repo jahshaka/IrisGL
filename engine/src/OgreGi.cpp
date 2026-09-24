@@ -50,11 +50,16 @@ void unregisterSceneGiBinding(const Ogre::SceneManager *sm) {
         if (it->first == sm) { sGiBindings.erase(it); return; }
 }
 
+const SceneGiBinding *sceneGiBindingOf(const Ogre::SceneManager *sm) {
+    for (const auto &e : sGiBindings)
+        if (e.first == sm) return e.second;
+    return nullptr;
+}
+
 void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm) {
     static const SceneGiBinding kNone;
-    const SceneGiBinding *b = &kNone;
-    for (const auto &e : sGiBindings)
-        if (e.first == sm) { b = e.second; break; }
+    const SceneGiBinding *b = sceneGiBindingOf(sm);
+    if (!b) b = &kNone;
     // Compared first: a pass of the scene the previous pass drew (every pass of
     // one view, the shadow node's casters in between) costs three compares.
     if (host->getVctLighting() != b->vct) host->setVctLighting(b->vct);
@@ -63,11 +68,19 @@ void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm) {
         (b->pcc && (host->getPccVctMinDistance() != b->pccMinDist ||
                     host->getPccVctMaxDistance() != b->pccMaxDist)))
         host->setParallaxCorrectedCubemap(b->pcc, b->pccMinDist, b->pccMaxDist);
+#ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
+    if (host->getPlanarReflections() != b->planar) host->setPlanarReflections(b->planar);
+#endif
+    // resetIblSpecMipmap(n > 0) also turns HlmsPbs's automatic grow-only mode off:
+    // the count is the scene's, set here and nowhere else.
+    if (host->getMaxSpecIblMipmap() != b->iblMipmaps)
+        host->resetIblSpecMipmap(Ogre::uint8(b->iblMipmaps));
 }
 
 void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
                   const Ogre::IrradianceField *ifd,
-                  const Ogre::ParallaxCorrectedCubemapBase *pcc) {
+                  const Ogre::ParallaxCorrectedCubemapBase *pcc,
+                  const Ogre::PlanarReflections *planar) {
     if (!manager) return;
     for (int t = Ogre::HLMS_LOW_LEVEL + 1; t < Ogre::HLMS_MAX; ++t) {
         auto *host = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HlmsTypes(t)));
@@ -75,6 +88,11 @@ void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
         if (vct && host->getVctLighting() == vct) host->setVctLighting(nullptr);
         if (ifd && host->getIrradianceField() == ifd) host->setIrradianceField(nullptr);
         if (pcc && host->getParallaxCorrectedCubemap() == pcc) host->setParallaxCorrectedCubemap(nullptr);
+#ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
+        if (planar && host->getPlanarReflections() == planar) host->setPlanarReflections(nullptr);
+#else
+        (void)planar;
+#endif
     }
 }
 
@@ -90,6 +108,28 @@ Ogre::HlmsCache ScenePbs::preparePassHash(const Ogre::CompositorShadowNode *shad
                                           Ogre::SceneManager *sceneManager) {
     bindSceneGi(this, sceneManager);
     return Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
+}
+
+void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) {
+#ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
+    // THE RENDERABLE'S OWN SCENE: an Item's SubItem -> its Item -> its
+    // SceneManager -> that scene's record. Anything else (a v1 renderable, an
+    // overlay quad) belongs to no scene's mirrors: no planar pointer at all.
+    const Ogre::SceneManager *sm = nullptr;
+    if (auto *sub = dynamic_cast<const Ogre::SubItem *>(renderable))
+        if (const Ogre::Item *item = sub->getParent()) sm = item->_getManager();
+    const SceneGiBinding *b = sm ? sceneGiBindingOf(sm) : nullptr;
+    Ogre::PlanarReflections *const passPlanar = getPlanarReflections();
+    Ogre::PlanarReflections *const own = b ? b->planar : nullptr;
+    if (own != passPlanar) setPlanarReflections(own);
+    Ogre::HlmsPbs::calculateHashForPreCreate(renderable, inOutPieces);
+    // ...and the pass's pointer back: a hash can be asked for between two
+    // passes, and the next pass of the SAME scene must not re-derive its
+    // barriers from somebody else's mirrors.
+    if (own != passPlanar) setPlanarReflections(passPlanar);
+#else
+    Ogre::HlmsPbs::calculateHashForPreCreate(renderable, inOutPieces);
+#endif
 }
 
 // THE DIAGNOSTIC LATCH, READ ONCE (the lead's fix-round item 5). This file asked
@@ -1115,8 +1155,12 @@ GiStatus OgreScene::giStatus() const {
         if (mPcc) st.probeCount = int(mPcc->getProbes().size());
         // "Bound" means THIS scene's passes sample the arm (SceneGiBinding): a
         // finished arm is bound whenever the scene is drawn, whatever else draws.
-        st.pccBound = mPcc && mGiBinding.pcc == mPcc;
-        st.vctBound = mVctLighting && mGiBinding.vct == mVctLighting;
+        // Read through the REGISTRY — the lookup every pass makes — so "bound"
+        // says what a pass of this scene will actually bind, and a scene whose
+        // record never reached the registry (or was unregistered) reads false.
+        const SceneGiBinding *passBinds = sceneGiBindingOf(mSceneMgr);
+        st.pccBound = mPcc && passBinds && passBinds->pcc == mPcc;
+        st.vctBound = mVctLighting && passBinds && passBinds->vct == mVctLighting;
         const auto toV = [](const Ogre::Vector3 &v) { return Vec3(v.x, v.y, v.z); };
         st.boundsMin      = toV(mGiLitVolume.getMinimum());
         st.boundsMax      = toV(mGiLitVolume.getMaximum());
@@ -1176,7 +1220,7 @@ GiStatus OgreScene::giStatus() const {
         st.probeGateCrossings = mProbeGateCrossings;
         // DDGI, reported the same way pccBound/vctBound are: what this scene's
         // passes bind, not what was requested.
-        st.ifdBound          = mIfd && mGiBinding.ifd == mIfd;
+        st.ifdBound          = mIfd && passBinds && passBinds->ifd == mIfd;
         st.ifdProbes         = int(mIfdTotalProbes);
         st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
         if (mIfd) {
@@ -5550,7 +5594,7 @@ void OgreScene::destroyProbeGrid() {
     if (mGiBinding.pcc == mPcc) {
         mGiBinding.pcc = nullptr;
         // This scene's datablocks may take their own sky cube back now.
-        noteProbeGridBindingChanged();
+        applyReflectionToAll();
     }
     delete mPcc; mPcc = nullptr;
     mProbeSlots.clear();
@@ -6321,7 +6365,7 @@ void OgreScene::buildPccFinish() {
     mGiBinding.pccMaxDist = minDist * 2.0f;
     // ...and THIS scene's datablocks drop their manual cubemap now: its passes
     // make texEnvProbeMap a cube array from here on (OgreSky.cpp, THE ENV-PROBE SLOT HAS ONE OCCUPANT).
-    noteProbeGridBindingChanged();
+    applyReflectionToAll();
 }
 
 // ===========================================================================
@@ -6919,7 +6963,6 @@ void OgreScene::teardownVct() {
     mGiReusedLastRefresh = false;
     // THIS SCENE'S PASSES STOP READING ITS ARMS, and any PBS-family host the
     // last pass left them on lets go before the deletes below.
-    const bool releasedPcc = mPcc && mGiBinding.pcc == mPcc;
     mGiBinding.vct = nullptr;
     mGiBinding.pcc = nullptr;
     forgetGiArms(mRoot->getHlmsManager(), mVctLighting, nullptr, mPcc);
@@ -6946,9 +6989,8 @@ void OgreScene::teardownVct() {
     // really starts again.
     if (mGiCamera) { mSceneMgr->destroyCamera(mGiCamera); mGiCamera = nullptr; }
     // ...and back ON now that the slot is free again (the mirror of the call in
-    // rebuildVct) — with the roughness-to-LOD map when a bound grid went.
-    if (releasedPcc) noteProbeGridBindingChanged();
-    else             applyReflectionToAll();
+    // rebuildVct); the roughness-to-LOD map follows (applyReflectionToAll marks it).
+    applyReflectionToAll();
 }
 
 void OgreScene::teardownGi() {

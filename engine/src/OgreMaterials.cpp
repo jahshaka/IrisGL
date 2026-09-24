@@ -558,6 +558,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
         applyPbr(db, p, mRefractionsActive);
         rec.paramsPushed = true;
         if (Ogre::TextureGpu *rt = reflectionTexFor(rec)) db->setTexture(Ogre::PBSM_REFLECTION, rt);
+        markIblMipmapsDirty();
         mMaterials[++mNextMaterialId] = rec;
         return mNextMaterialId;
     } JAH_CATCH(mError, 0);
@@ -807,6 +808,7 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
             // an unconditional Metallic.
             applyPbr(db, rec.params, mRefractionsActive);
             if (Ogre::TextureGpu *rt = reflectionTexFor(rec)) db->setTexture(Ogre::PBSM_REFLECTION, rt);
+            markIblMipmapsDirty();
         }
         // The maps the host already pushed are the host's state, not the
         // datablock's: re-bind them or a switch would silently strip every
@@ -1004,6 +1006,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
         forgetDecodeTwinOf(dying);    // its decode twin dies first (HlmsAtom.h)
         if (dying) hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
         mMaterials.erase(it);
+        markIblMipmapsDirty();   // its env cube may have been the scene's longest chain
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1904,6 +1907,7 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
                 else if (rec.everBound)
                     db->setTexture(Ogre::PBSM_REFLECTION, nullptr);
                 rec.lastBoundTextures[s] = rec.boundTextures[s];
+                markIblMipmapsDirty();
             }
             continue;
         }
@@ -2028,6 +2032,7 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         if (slot == PbrTextureSlot::Reflection) {
             // The record is already updated above; ask the one function.
             db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(mit->second));
+            markIblMipmapsDirty();
             return true;
         }
         Ogre::TextureGpu *tex = nullptr;
