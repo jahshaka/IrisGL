@@ -4150,6 +4150,15 @@ struct SunContactParams {
     float knobs[4] = {};
 };
 constexpr unsigned kSunContactBindings = 5u;
+/// THE LIFT, in full-resolution pixel footprints: the near copy's tolerance
+/// (kRayFootprintTolerance, one) plus one of margin — see rq_sun_contact.comp.
+constexpr float kSunContactLiftFootprints = 2.0f;
+/// THE FADE BAND: the last 20 % of the range hands the ray's answer over to the
+/// map (the design's 10-20 %; the SSR rim's shape) — rq_sun_contact.comp.
+/// Measured on the side edge of a 5 cm board's shadow at 15 m (gi.sun_contact,
+/// the adjacent 5 cm step across the range's end): 15.1 codes with no fade,
+/// 7.6 at 10 %, 5.4 at 15 %, 3.3-4.7 at 20 % (the map's own edge: 1.1-1.3).
+constexpr float kSunContactFadeFraction = 0.2f;
 /// THE BIAS RULE's floor, world units: the lift never falls below a millimetre
 /// however close the camera stands (depth reconstruction's own precision).
 constexpr float kSunContactMinBias = 0.001f;
@@ -4390,6 +4399,13 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     // fShadow the answer is folded into — is that light's map. A pass with no
     // shadow node, or a node holding no directional caster, has no sun term to
     // correct (the piece's hlms_num_shadow_map_lights gate says the same).
+    //
+    // THE LIST IS CURRENT BECAUSE OF THE PREPASS, not because of this pass (audit
+    // F6): this runs in passPreExecute, BEFORE the PrePassUse pass' own
+    // `shadowNode->_update` (OgreCompositorPassScene.cpp:238 vs :259). It is this
+    // frame's list only because the PrePassCreate pass names the SAME shadow
+    // node (OgreChain.cpp, SHADOW_NODE_FIRST_ONLY) and ran first. A chain whose
+    // prepass stops naming the node would hand this read last frame's casters.
     Ogre::Vector3 toSun = Ogre::Vector3::ZERO;
     {
         const Ogre::CompositorShadowNode *sn =
@@ -4505,6 +4521,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     pp.projParams[0] = projAB.x;
     pp.projParams[1] = projAB.y;
     pp.projParams[2] = cam->getFarClipDistance();
+    pp.projParams[3] = kSunContactFadeFraction;
     put3(pp.viewAxisX, q * Ogre::Vector3::UNIT_X, 0.0f);
     put3(pp.viewAxisY, q * Ogre::Vector3::UNIT_Y, 0.0f);
     put3(pp.viewAxisZ, -(q * Ogre::Vector3::NEGATIVE_UNIT_Z), 0.0f);   // view space looks down -Z
@@ -4514,14 +4531,17 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     pp.resolution[1] = float(h);
     pp.resolution[2] = float(fullW);
     pp.resolution[3] = float(fullH);
-    // THE BIAS RULE's footprint: one of THIS job's texels across the target —
-    // per unit of view distance for a perspective camera (the basis is a ray
-    // whose forward component is 1), in world units for an orthographic one.
+    // THE BIAS RULE's lift: kSunContactLiftFootprints FULL-RESOLUTION pixel
+    // footprints — per unit of view distance for a perspective camera (the
+    // basis is a ray whose forward component is 1), in world units for an
+    // orthographic one. Full resolution whatever the divisor: what the lift
+    // clears is the near copy's own tolerance, which the ray rule states in the
+    // VIEW's pixels (kRayFootprintTolerance), not in this job's texels.
     {
         const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] +
                                      eye.rayRight[1] * eye.rayRight[1] +
                                      eye.rayRight[2] * eye.rayRight[2]);
-        pp.knobs[0] = kRayFootprintTolerance * span * float(divisor) / float(fullW);
+        pp.knobs[0] = kSunContactLiftFootprints * span / float(fullW);
     }
     pp.knobs[1] = kSunContactMinBias;
     // THE MASK: the shadow CASTERS' near copies (kRayMaskCaster) — a subset of

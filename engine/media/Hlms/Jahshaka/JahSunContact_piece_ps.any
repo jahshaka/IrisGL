@@ -45,7 +45,18 @@
 //                               a material that receives no shadow receives no
 //                               contact shadow either
 //   not a caster, not a prepass the two passes that write no colour
-@property( jah_sun_contact && hlms_use_prepass && hlms_screen_pos_int && hlms_lights_directional && hlms_num_shadow_map_lights && receive_shadows && !hlms_shadowcaster && !hlms_prepass )
+//   not alpha-blended           GA-GLASS's rule (GATHER-1b): a Fade or Blend
+//                               renderable in the PrePassUse pass is drawn over
+//                               an OPAQUE surface's prepass texels, and the
+//                               texel under its fragment is that surface's
+//                               answer — a floor's contact shadow would be
+//                               painted on a glass pane. The pane keeps the map's
+//                               term alone. Guarded HERE rather than by
+//                               withdrawing the property in the listener: the
+//                               slot stays claimed and bound (a dead register
+//                               for the pane, as the cloud field's is), and the
+//                               rule sits beside the read it protects.
+@property( jah_sun_contact && hlms_use_prepass && hlms_screen_pos_int && hlms_lights_directional && hlms_num_shadow_map_lights && receive_shadows && !hlms_alphablend && !hlms_shadowcaster && !hlms_prepass )
 	@undefpiece( DarkenWithShadowFirstLight )
 	@piece( DarkenWithShadowFirstLight )* ( min( fShadow, midf_c( OGRE_Load2D( jahSunVis, iFragCoord / @value( jah_sun_contact ), 0 ).x ) ) @insertpiece( JahCloudSunFactor ) )@end
 @end
