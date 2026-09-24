@@ -121,6 +121,16 @@
 	ifdCageEnabled = 1.0 - saturate( OGRE_Load2D( jahProbeIrradiance, iFragCoord, 0 ).w );
 @end
 @end
+// ...AND A BLENDED FRAGMENT ON A GATHER PASS TAKES NO CAGE AT ALL
+// (PHOTON-GATHER-1d, the listener's `jah_env_diffuse_only`): its diffuse GI is the
+// environment term alone, added at the gather's insertion point
+// (JahProbeGather_piece_ps.any) — so the cage is declined outright and, below,
+// the field owes it no fallback either.
+@property( jah_env_diffuse_only )
+@piece( custom_ps_ifdCageGate )
+	ifdCageEnabled = 0.0;
+@end
+@end
 
 @piece( custom_ps_ifdCagePrologue )
 	// THE FOURTH THING THAT IS NOT UPSTREAM'S: THE SURFACE BIAS (ENGINE-6 item
@@ -435,16 +445,18 @@
 	if( ifdCageEnabled == 0.0 )
 		ifdConfidence = 1.0;
 @end
+@property( jah_env_diffuse_only )
+	ifdConfidence = 1.0;
+@end
 
 	// THE SCALE UPSTREAM'S COMPOSITE LINE APPLIES (ogre-patch 0058). Upstream
 	// writes
 	//     pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight );
-	// with the scale at one, and we set it to jahIfd.x -- the DDGI diffuse
-	// intensity the host writes into the pass buffer (JahshakaEngine's
-	// FogHlmsListener; GiParams::ddgiIntensity, 1 = the field's own answer) --
-	// times the confidence and the weight fade above.
-	// At intensity 1 inside the field every factor is exactly 1 and the line is
-	// bit-for-bit what it always was.
+	// with the scale at one, and we set it to the confidence and the weight fade
+	// above -- the field's own answer, with no dial (the intensity trim that rode
+	// jahIfd.x is DELETED, PHOTON-GATHER-1d: a physical answer needs none, and at
+	// a ray tier the field is not the diffuse). Inside the field every factor is
+	// exactly 1 and the line is bit-for-bit upstream's.
 	//
 	// ...TIMES THE VOXEL VOLUME'S OWN DECODE MULTIPLIER (PHOTON-M2, F-C), which
 	// is the unit that was missing from this line.
@@ -472,10 +484,10 @@
 	// bound. Every path today tears the field down before the volume, so the
 	// unguarded read was unreachable; the guard makes it impossible.
 	@property( vct_num_probes )
-	ifdIrradianceScale = float3( passBuf.jahIfd.x * ifdConfidence * ifdWeightFade *
+	ifdIrradianceScale = float3( ifdConfidence * ifdWeightFade *
 								 passBuf.vctProbeParams.multiplier );
 	@else
-	ifdIrradianceScale = float3( passBuf.jahIfd.x * ifdConfidence * ifdWeightFade );
+	ifdIrradianceScale = float3( ifdConfidence * ifdWeightFade );
 	@end
 @end
 

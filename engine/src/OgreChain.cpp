@@ -497,6 +497,15 @@ Ogre::CompositorPassQuadDef *addTonemapQuad(Ogre::CompositorNodeDef *n, const ch
     return q;
 }
 
+/// DOES THIS CHAIN SHAPE CARRY THE SCREEN-SPACE MARCH? One predicate, read by
+/// `build` (which passes and textures exist) and by the per-frame update (whose
+/// material parameters to push) — two answers that must never disagree, and did
+/// not have a shared name until lane REFLECT-VR-1 gave the stereo case one.
+/// @see PostFxDesc::ssrScreenMarch for why a stereo chain never marches.
+bool marchesInScreenSpace(const ChainDesc &d) {
+    return d.ssr > 0 && d.ssrScreenMarch && !d.stereo;
+}
+
 }   // namespace
 
 std::string sceneNodeDefName(const std::string &workspaceDef) {
@@ -513,6 +522,13 @@ bool ChainDesc::anyEffect() const {
     // target it downloads exists only in the chain's shape.
     return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || sunContact || refractions ||
            distortion || hzb || !looks.empty() || hdrReadback;
+}
+
+bool ChainDesc::prepass() const {
+    // The SSR stage runs for the march or for the rays; the TRAVERSAL runs for it,
+    // for the gather and for the sun contact (build's `prepass`, the one text).
+    const bool ssrStage = ssr > 0 && (chain::marchesInScreenSpace(*this) || rayReflect);
+    return ssrStage || probeGather || sunContact;
 }
 
 bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
@@ -539,8 +555,13 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
-           a.rayReflect == b.rayReflect && a.probeGather == b.probeGather &&
-           a.sunContact == b.sunContact &&
+           a.rayReflect == b.rayReflect &&
+           // THE PREPASS'S SHAPE, not the rows that ask for it (PHOTON-GATHER-1d;
+           // RAYS-1's F4): the gather's and the sun contact's rows add NOTHING
+           // to the graph but the prepass, so toggling either where the prepass
+           // already runs (the SSR row, or the other one) is not a new graph —
+           // it used to rebuild the whole workspace, dropping every history.
+           a.prepass() == b.prepass() &&
            a.refractions == b.refractions && a.hdrReadback == b.hdrReadback &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
@@ -773,15 +794,6 @@ void applyLodHysteresis(Ogre::CompositorNodeDef *n, float band) {
     }
 }
 
-/// DOES THIS CHAIN SHAPE CARRY THE SCREEN-SPACE MARCH? One predicate, read by
-/// `build` (which passes and textures exist) and by the per-frame update (whose
-/// material parameters to push) — two answers that must never disagree, and did
-/// not have a shared name until lane REFLECT-VR-1 gave the stereo case one.
-/// @see PostFxDesc::ssrScreenMarch for why a stereo chain never marches.
-bool marchesInScreenSpace(const ChainDesc &d) {
-    return d.ssr > 0 && d.ssrScreenMarch && !d.stereo;
-}
-
 void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
     const Ogre::IdString cull = cullCamera.empty() ? Ogre::IdString()
                                                    : Ogre::IdString(cullCamera);
@@ -982,7 +994,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // ...and the SUN CONTACT job's (PHOTON-RAYS-1), for the gather's reason: its
     // rays start from the prepass' depth and normals and its answer is folded
     // into the prepass' own shadow term in the PrePassUse pass.
-    const bool prepass = ssr || desc.probeGather || desc.sunContact;
+    const bool prepass = desc.prepass();
 
     // The scene target. RGBA16_FLOAT whenever HDR is on — that is the whole
     // point: light values above 1.0 survive to the tonemapper. Without HDR the

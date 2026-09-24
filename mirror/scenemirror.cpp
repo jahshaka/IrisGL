@@ -7260,7 +7260,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // whether or not its SSR row asked for one — `ChainDesc::probeGather`),
         // so it rides the change debounce with the rest of the configuration.
         gi.gather = toggle(mSource->giGather);
-        gi.ddgiIntensity = qBound(0.0f, mSource->giDdgiIntensity, 64.0f);
+        // ...and the ONE fact of the document's tier the quality dial cannot
+        // carry (Epic shares High's quality): the engine's tier table reads it
+        // for the gather's density (Types.h `giQualityFacts`'s `epic` — four
+        // times the probes). The document's tier is `giTier` (PhotonTier's
+        // ordinal: Low 0 .. Epic 3).
+        gi.epicTier = mSource->giTier == 3;
         // EVERY LIGHT IS A VOXEL LIGHT. There is one GI arm now (PHOTON_SPEC
         // E2 (4) deleted Instant Radiosity, which traced from ONE driving light
         // and therefore hashed only that one): the voxel injection reads every
@@ -7448,8 +7453,17 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // would never happen. (Measured the hard way:
             // scripting.e2e.screenshot_grades lost a grade change that arrived
             // in the same frame as a tuning value.)
-            mLastGi.ddgiIntensity     = gi.ddgiIntensity;
             mLastGi.rayMarchStepScale = gi.rayMarchStepScale;
+            // ...AND EVERY OTHER FIELD `giTuningEqual` COMPARES (PHOTON-GATHER-1d):
+            // the gather's row and the tier's Epic fact, the card cache's row,
+            // budget and radius. Left out, one change to any of them kept the
+            // comparison unequal for ever and re-pushed the tuning (the field's
+            // constants included) on EVERY frame after it.
+            mLastGi.gather              = gi.gather;
+            mLastGi.epicTier            = gi.epicTier;
+            mLastGi.cards               = gi.cards;
+            mLastGi.cardBudgetTexels    = gi.cardBudgetTexels;
+            mLastGi.cardResidencyRadius = gi.cardResidencyRadius;
         }
         if (!mGiPushed || gi != mLastGi) {
             mTarget->setGlobalIllumination(gi);

@@ -482,17 +482,13 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
-// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). Constants, no
-// rebuild: `ddgiIntensity` is a shader constant the field's
-// listener reads (pushIfdState), `rayMarchStepScale` is read by the NEXT light
-// injection (giRayMarchStepScale), and none of the three is geometry. So this
-// writes them and, when a field is bound, re-pushes its constants — nothing is
-// torn down, nothing re-voxelises, and no probe is staled (a probe capture does
-// not contain the field's diffuse).
+// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). No rebuild:
+// `rayMarchStepScale` is read by the NEXT light injection (giRayMarchStepScale)
+// and the per-frame rows below by the frame that follows, and none of them is
+// geometry — nothing is torn down, nothing re-voxelises, and no probe is staled.
 bool OgreScene::setGiTuning(const GiParams &p) {
     JAH_TRY {
         const bool marchMoved = p.rayMarchStepScale != mGi.rayMarchStepScale;
-        mGi.ddgiIntensity     = p.ddgiIntensity;
         mGi.rayMarchStepScale = p.rayMarchStepScale;
         // THE CARD CACHE'S TWO PER-FRAME KNOBS. Written and nothing else: the
         // residency pass reads them at the head of the next frame, so a smaller
@@ -513,7 +509,10 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         // Component allocates on the first frame it is on and gives everything
         // back on the first frame it is off. Not one voxel is re-injected.
         mGi.gather               = p.gather;
-        if (mIfd) pushIfdState(mIfdProbeCounts);
+        // ...and the tier's Epic fact (the gather's density — the tier table's
+        // `epic` column): read by the ray tier each frame, re-sizing the
+        // gather's targets and nothing else.
+        mGi.epicTier             = p.epicTier;
         // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
         // moving it changes nothing at all until something else happens to
         // re-inject, and this file's own header calls a silently ignored slider
@@ -1281,8 +1280,43 @@ GiStatus OgreScene::giStatus() const {
         // in OgreRayQuery.cpp, which is where the tier is; `on` false with
         // every other field zero is the shipped state.
         gatherStatusInto(st.gather);
+        // ...AND THE SETTLED HISTORY IS THE PREDICATE'S FOURTH TERM
+        // (PHOTON-GATHER-1d; the 1c audit's M1). Where the gather is the diffuse,
+        // the picture keeps moving after everything above is done: the pixel
+        // history is an EMA, so a young view shows the raw estimate and a
+        // lighting step arrives over N frames. "At rest" therefore also waits
+        // for a history at least N frames old over lighting that has held for N
+        // (GatherStatus::settled, N = settleFrames — 16 for a 5-code step).
+        // Everything that waits on `giAtRest` — editor.screenshot, the selftest's
+        // poses, gi.ddgi — waits for it with no change of its own.
+        if (st.gather.running && !st.gather.settled) st.giAtRest = false;
     } JAH_CATCH(mError, st);
     return st;
+}
+
+// THE LIGHTING SERIAL (PHOTON-GATHER-1d). What the gather's hits read — the
+// voxels' radiance, the environment the misses read, the cards the hits read
+// first — changes at a light write and where an injection LANDS; the settled
+// history counts its frames from the last change. Folded from the same terms as
+// the surface cache's re-injection signature (OgreScene::updateSurfaceCache) plus
+// the write-time light serial: here a write MUST restart the count (the history
+// is about to owe a step), where the card cache must not re-march on one.
+unsigned long long OgreScene::giLightingSerial() const {
+    unsigned long long sig = 1469598103934665603ull;
+    const auto fold = [&sig](unsigned long long v) {
+        sig ^= v;
+        sig *= 1099511628211ull;
+    };
+    fold(mGiLightWriteSerial);
+    fold((unsigned long long)mGiChainSettles);
+    fold(mGiMonoInjections);
+    for (const VctCascade &c : mVctCascades) {
+        fold(c.rebuilds);
+        fold((unsigned long long)c.latticeX);
+        fold((unsigned long long)c.latticeY);
+        fold((unsigned long long)c.latticeZ);
+    }
+    return sig;
 }
 
 // WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — the test-and-tool
@@ -6341,9 +6375,9 @@ void OgreScene::buildPccFinish() {
 // not ADD to the voxel-cone diffuse — it TAKES OVER from it. Measured on the
 // spike's closed room, the pure-indirect term goes from a mean 84/54/56 (VCT,
 // with a blown-out 1.0 in the dark corner where it leaks) to 6.4/3.3/4.0
-// (DDGI, smooth and plausible): the right SHAPE roughly 13x too dim, because
-// upstream never scales it. `GiParams::ddgiIntensity` is our answer, applied in
-// media/Hlms/Jahshaka/JahIfd_piece_ps.any.
+// (DDGI, smooth and plausible): the right SHAPE roughly 13x too dim — a reading
+// the pass-buffer misalignment ogre-patch 0050 fixed; the field is applied at its
+// own answer (media/Hlms/Jahshaka/JahIfd_piece_ps.any), with no dial.
 //
 // WHERE IT LIVES IN THE LIFECYCLE. Inside the VCT arm and strictly within
 // VctLighting's lifetime: the field holds that pointer and binds its voxel
@@ -6566,15 +6600,13 @@ void OgreScene::buildIrradianceField() {
                 std::to_string(settings.mNumProbes[1]) + "x" +
                 std::to_string(settings.mNumProbes[2]) + " (" + std::to_string(total) +
                 " probes) over " + Ogre::StringConverter::toString(origin) + " size " +
-                Ogre::StringConverter::toString(size) + ", intensity " +
-                std::to_string(mGi.ddgiIntensity) + ", re-converge " +
+                Ogre::StringConverter::toString(size) + ", re-converge " +
                 std::to_string(mIfdProbesPerFrame) + " probes/frame");
     } JAH_CATCH(mError, );
 }
 
 void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
     FogHlmsListener::IfdState st;
-    st.intensity  = std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f));
     st.numProbesY = float(numProbes[1]);
     st.numProbesZ = float(numProbes[2]);
     if (mIfd) {

@@ -24,9 +24,13 @@
 // moves); the filter assigns each texel's radiance to its texel, whose
 // solid angle it weighs exactly.
 //
-// THE HIT'S RADIANCE, in Lumen's order minus the card (that is phase 5, and it
-// arrives as one more branch here): the cascade VOXEL where the ray hit
-// something, the SKY where it hit nothing. TWO QUERIES, ONE TLAS (ATOM-FARBLAS-1,
+// THE HIT'S RADIANCE, in Lumen's order (PHOTON-GATHER-1d, GA-1e): the hit
+// instance's surface CARD where one describes the point and the ray's
+// footprint there is at most k card texels, the cascade VOXEL otherwise, the
+// SKY where the ray hit nothing -- `jahHitRadiance` (jah_rq_hit_radiance.glsl),
+// the ONE function the reflection trace's hits read too, handed this ray's own
+// footprint at the hit (t x sqrt(2/rays): one ray stands for one octahedral
+// texel's solid angle). TWO QUERIES, ONE TLAS (ATOM-FARBLAS-1,
 // A5b section 4): the ray first traces the NEAR copies (mask 0x0F) out to its
 // near length -- the lit volume's inscribed radius, OgreScreenProbeGather.cpp's
 // `reach`, inside which every hit is one the cascades can shade -- and a ray that
@@ -38,12 +42,14 @@
 // picture AWAY from the long-ray reference and is gone, PHOTON-GAFAR-1). A ray
 // that hits near pays one query; only an escaping ray pays the second. The far
 // query is off when the far plane lies inside the near length (p.knobs3.w = 0).
-// WHAT A FAR HIT IS WORTH TODAY: the cascades end at the near length, so a far
-// hit is almost always outside every cascade and reads BLACK (below) until the
-// surface cards shade it (CARDS-2). Until then the far query buys OCCLUSION --
+// WHAT A FAR HIT IS WORTH: the cascades end at the near length, so a far hit is
+// almost always outside every cascade, and its footprint (tens of metres) is far
+// past any card's gate -- it reads BLACK (below). The far query buys OCCLUSION --
 // the sky no longer leaks through distant geometry -- and nothing else; its cost
 // (+17-33 % of the gather in open sky at High/Epic, spikes/atom-farblas-1) is
-// paid for that alone.
+// paid for that alone. A far hit asks no card: its triangle is the COARSE
+// level's, which the per-slot geometry rows (the near copy's level) cannot
+// decode.
 // A hit the cascades cannot shade -- near or far -- is BLACK, never sky: the ray
 // found geometry and the cache does not reach it; handing it the sky would
 // light the probe THROUGH the object, which is the leak this whole program
@@ -56,6 +62,8 @@
 // here (the filter's reduction is a fixed-order shared-memory tree).
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -81,6 +89,29 @@ layout( set = 0, binding = 8 ) uniform samplerCube skyCube;
 #define JAH_SKY_ON          ( p.knobs2.z > 0.5 )
 #define JAH_SKY_COLOUR      p.skyColour.xyz
 #include "jah_rq_hit.glsl"
+
+/// THE SURFACE CACHE THE HITS READ FIRST (GA-1e): the card table, the instance
+/// table, the Depth and Radiance layers at bindings 9-12 — bound by the ray tier
+/// exactly as it binds them for the reflection trace (or the stand-ins with zero
+/// slots: every hit then reads the voxels).
+#define JAH_CARD_BINDING_BASE 9
+#include "jah_rq_card_bindings.glsl"
+#define JAH_CARD_SLOTS   uint( p.cards.x )
+#define JAH_CARD_RECORDS uint( p.cards.y )
+#define JAH_CARD_FOOTPRINT_TEXELS p.cards.z
+#include "jah_rq_card.glsl"
+
+/// THE HIT'S GEOMETRIC NORMAL (the card pick's facing): the per-slot row table
+/// the tier writes with the TLAS (binding 13) and the GPU scene's geometry rows
+/// (binding 14, three uvec4 lanes a row) — the reflection's bindings 19/20.
+layout( std430, set = 0, binding = 13 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 14 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+#define JAH_GEOM_SLOTS uint( p.cards.w )
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
+
+#include "jah_rq_hit_radiance.glsl"
 
 void main()
 {
@@ -174,6 +205,18 @@ void main()
 		bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) ==
 				   gl_RayQueryCommittedIntersectionTriangleEXT;
 		float tHit = hit ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;
+		// A NEAR hit names its instance (the item slot the card tables are indexed
+		// by) and its triangle's geometric normal (the card pick's facing); a far
+		// hit names neither (the header: its triangle is the coarse level's).
+		uint hitSlot = 0xFFFFFFFFu;
+		vec3 hitN = -dir;
+		if( hit )
+		{
+			hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+			jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
+								   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
+								   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), dir, hitN );
+		}
 		// THE FAR QUERY, for an escaping ray only: the far copies (kRayMaskFar),
 		// from p.plane.z to the far plane. The same origin and direction; the far
 		// segment starts BEFORE the near one ended by the widest coarse-vs-fine
@@ -207,10 +250,10 @@ void main()
 		if( hit )
 		{
 			distance = tHit;
-			radiance = jahVoxelRadiance( origin + dir * tHit, dir, max( tHit * spread, 1e-4 ),
-										 false, ok );
+			radiance = jahHitRadiance( hitSlot, origin + dir * tHit, hitN, dir,
+									   max( tHit * spread, 1e-4 ), false, ok );
 			if( !ok )
-				radiance = vec3( 0.0 );   // a hit the cascades cannot shade is BLACK
+				radiance = vec3( 0.0 );   // a hit neither a card nor the cascades shade is BLACK
 		}
 		else
 		{

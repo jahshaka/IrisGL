@@ -127,6 +127,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_radiance.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
@@ -184,6 +185,12 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
                 ${JAH_RQ_HEADERS}
+                # ...and the hit read it shares with the reflection (GA-1e).
+                "${JAH_RQ_INCLUDE}/jah_rq_hit_radiance.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_card.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_card_bindings.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_geom.glsl"
+                "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(

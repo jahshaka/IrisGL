@@ -793,11 +793,14 @@ public:
         retireSet(set, pool);
     }
     void gatherRetireTexture(Ogre::TextureGpu *texture) override { retireTexture(texture); }
-    bool gatherDummies(VkImageView &cube, VkImageView &volume, std::string &err) override {
+    bool gatherDummies(VkImageView &cube, VkImageView &volume, VkImageView &flat, VkBuffer &storage,
+                       std::string &err) override {
         if (!ensureDummyImages(err)) return false;
         cube = mDummyCube.view;
         volume = mDummyVolume.view;
-        return cube && volume;
+        flat = mDummyFlat.view;
+        storage = mDummyStorage.buffer;
+        return cube && volume && flat && storage;
     }
     /// ...AND THE STAND-INS MUST BE CLEARED BY WHOEVER BINDS THEM FIRST (the
     /// lead's read). `clearDummyImages` used to have ONE caller — the reflection
@@ -4635,7 +4638,7 @@ void RayQueryTier::forgetGather(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
-    if (mGather) mGather->statsInto(scene, out);
+    if (mGather) mGather->statsInto(scene, scene->giLightingSerial(), out);
 }
 
 void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
@@ -4683,9 +4686,13 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.depth = depthTex;
     in.width = depthTex->getWidth();
     in.height = depthTex->getHeight();
-    in.quality = scene->giParams().quality;
-    in.epicRow = view->postFx().ssr >= 2;
+    // THE TIER TABLE'S GATHER ROW (GA-TIERROW: the table, never the SSR row).
+    // A stereo view has declined above, so the column is the desktop one.
+    in.facts = giQualityFacts(scene->giParams().quality, GiViewProfile::Desktop,
+                              scene->giParams().epicTier)
+                   .gather;
     in.tuning = scene->gatherTuning();
+    in.lightingSerial = scene->giLightingSerial();
     in.farOverlap = sa.farOverlap;
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
@@ -4722,28 +4729,62 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         for (int i = 0; i < 3; ++i) in.skyColour[i] = rayEnv.colour[i];
     }
 
-    // ---- the camera's basis (rq_reflect.comp's reconstruction) -------------
+    // ---- THE SURFACE CACHE THE HITS READ FIRST (GA-1e) ----------------------
+    // The reflection trace's four bindings, taken from the same place by the
+    // same rule (recordReflect): the scene's built cache, or nothing (the
+    // stand-ins are bound and every hit reads the voxels).
+    {
+        const SurfaceCache *cache = scene->mSurfaceCache.get();
+        Ogre::UavBufferPacked *table = cache ? cache->cardBuffer() : nullptr;
+        Ogre::UavBufferPacked *instances = cache ? cache->instanceBuffer() : nullptr;
+        Ogre::TextureGpu *depthLayer = cache ? cache->depthLayer() : nullptr;
+        Ogre::TextureGpu *radianceLayer = cache ? cache->radianceLayer() : nullptr;
+        if (table && instances && depthLayer && radianceLayer && cache->cardRecords() > 0u) {
+            in.cardTable = table;
+            in.cardInstances = instances;
+            in.cardDepth = depthLayer;
+            in.cardRadiance = radianceLayer;
+            in.cardSlots = cache->instanceSlots();
+            in.cardRecords = cache->cardRecords();
+        }
+        in.cardFootprintTexels = cardFootprintTexels();
+    }
+    // ...AND THE HIT'S GEOMETRIC NORMAL: the per-slot row table the TLAS was
+    // written with and the GPU scene's rows, FLUSHED first (a row staged but not
+    // uploaded is a zero address — the trap file's GPU SCENE TABLES rule) and the
+    // table pointer re-read here, never cached across a frame.
+    {
+        detail::GpuScene &gpuScn = scene->gpuScene();
+        if (gpuScn.live()) gpuScn.flushGeomRows();
+        Ogre::UavBufferPacked *rows = gpuScn.live() ? gpuScn.geomBuffer() : nullptr;
+        if (rows && !sa.geomRowOfSlot.empty()) {
+            in.geomRows = rows;
+            in.geomRowOfSlot = &sa.geomRowOfSlot;
+        }
+    }
+
+    // ---- THE CAMERA'S BASIS: the ray tier's one eye basis (eyeBasis), the
+    // LETTERBOX folded in exactly as the reflection and the sun contact fold it
+    // (expandEyeToTarget) — a probe's pixel and the shot's inner rectangle agree.
     const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
-    const Ogre::Vector3 camPos = cam->getDerivedPosition();
     const Ogre::Quaternion q = cam->getDerivedOrientation();
-    const Ogre::Vector3 fwd = q * Ogre::Vector3::NEGATIVE_UNIT_Z;
-    const Ogre::Vector3 right = q * Ogre::Vector3::UNIT_X;
-    const Ogre::Vector3 up = q * Ogre::Vector3::UNIT_Y;
     Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
     cam->getFrustumExtents(fl, fr, ft, fb,
                            ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
+    EyeBasisF eye = eyeBasis(ortho, cam->getDerivedPosition(), q, float(fl), float(fr),
+                             float(ft), float(fb));
+    expandEyeToTarget(eye, view->chainDesc(), in.width, in.height);
+    std::memcpy(in.camPos, eye.camPos, sizeof(in.camPos));
+    std::memcpy(in.rayTL, eye.rayTL, sizeof(in.rayTL));
+    std::memcpy(in.rayRight, eye.rayRight, sizeof(in.rayRight));
+    std::memcpy(in.rayDown, eye.rayDown, sizeof(in.rayDown));
+    std::memcpy(in.fwd, eye.fwd, sizeof(in.fwd));
     const auto put = [](float dst[3], const Ogre::Vector3 &v) {
         dst[0] = float(v.x); dst[1] = float(v.y); dst[2] = float(v.z);
     };
-    in.camPos[0] = float(camPos.x); in.camPos[1] = float(camPos.y);
-    in.camPos[2] = float(camPos.z); in.camPos[3] = ortho ? 0.0f : 1.0f;
-    put(in.rayTL, right * fl + up * ft + (ortho ? Ogre::Vector3::ZERO : fwd));
-    put(in.rayRight, right * (fr - fl));
-    put(in.rayDown, up * (fb - ft));
-    put(in.fwd, fwd);
-    put(in.viewAxisX, right);
-    put(in.viewAxisY, up);
-    put(in.viewAxisZ, -fwd);              // Ogre's view space looks down -Z
+    put(in.viewAxisX, q * Ogre::Vector3::UNIT_X);
+    put(in.viewAxisY, q * Ogre::Vector3::UNIT_Y);
+    put(in.viewAxisZ, -(q * Ogre::Vector3::NEGATIVE_UNIT_Z));   // view space looks down -Z
     const Ogre::Vector2 projAB = cam->getProjectionParamsAB();
     in.projA = float(projAB.x);
     in.projB = float(projAB.y);
@@ -5361,7 +5402,11 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
     if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
-    mView->mEngine->mRayTier->recordReflect(this, mView, pass);
+    // THE TRACE ONLY WHERE THE CHAIN CARRIES ITS TEXTURE (PHOTON-GATHER-1d): a
+    // gather- or contact-only chain declares no `jahSsrReflection`, and asking
+    // for it threw an Ogre exception — logged — on every frame of every such
+    // view (a default-on gather made that every screenshot and thumbnail).
+    if (mView->chainDesc().rayReflect) mView->mEngine->mRayTier->recordReflect(this, mView, pass);
     // GATHER-0 rides the SAME hook, and it has to: the probe's surface is the
     // prepass' depth and normals, and the pixel that reads the gather's answer
     // is shaded by the very pass this listener runs in front of.
@@ -5413,9 +5458,10 @@ void OgreView::syncReflectListener() {
     // `chainDesc()` for both comparisons.
     // ...and `ChainDesc::sunContact` (PHOTON-RAYS-1) the same again: the row
     // is the scene's and it brings the prepass.
-    if (mChainRayReflect != chainDesc().rayReflect ||
-        mChainProbeGather != chainDesc().probeGather ||
-        mChainSunContact != chainDesc().sunContact)
+    // ...AS THE PREPASS THEY ASK FOR (ChainDesc::prepass, PHOTON-GATHER-1d): a
+    // gather or sun-contact toggle where the prepass already runs is not a new
+    // graph and rebuilds nothing.
+    if (mChainRayReflect != chainDesc().rayReflect || mChainPrepass != chainDesc().prepass())
         rebuildWorkspaceDef();
     // The same arming rule as the planar and globals listeners, and the same
     // reason it is re-evaluated every frame: the shape above can change, and a
@@ -5570,13 +5616,25 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
 
 // ---------------------------------------------------------------------------
 /// IS THE SCREEN-PROBE GATHER ON FOR THIS SCENE? The project's row resolved
-/// against the machine, and the same shape `rayReflectionsWanted` has: the row
-/// says what the scene asks for and the machine answers whether it can. `Auto`
-/// is OFF at every tier until the gather's picture is filtered and temporally
-/// accumulated (GiParams::gather's note) — a tier may not select a correct but
-/// noisy estimate.
+/// against the TIER TABLE and the machine (PHOTON-GATHER-1d, the rule T-A), the
+/// same shape `rayReflectionsWanted` has: the row says what the scene asks for,
+/// the table says what `Auto` means at this tier — on at High, Epic and Medium,
+/// off at Low and in the VR column (`giQualityFacts(...).gather.on`) — and only
+/// under a GI mode that is on (there is no diffuse GI to estimate otherwise);
+/// the machine answers whether it can trace at all.
 bool OgreScene::probeGatherWanted() const {
-    if (mGi.gather != GiToggle::On) return false;
+    switch (mGi.gather) {
+    case GiToggle::Off: return false;
+    case GiToggle::On:  break;
+    default:
+        if (mGi.mode == GiMode::Off) return false;
+        if (!giQualityFacts(mGi.quality,
+                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
+                            mGi.epicTier)
+                 .gather.on)
+            return false;
+        break;
+    }
     return rayTracingResolved();
 }
 

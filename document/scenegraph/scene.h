@@ -618,26 +618,17 @@ public:
     /// GI estimated once per 16x16 pixels by 64 hardware rays instead of once
     /// per pixel by six voxel cones: a ray is stopped by a TRIANGLE where a cone
     /// is stopped by a VOXEL, and a rectangular emitter over a plane says which
-    /// is right — the gather reads 1.03 of the closed-form irradiance where the
-    /// cones read 0.75 (gi.gather_reference).
+    /// is right — the gather reads 0.98-1.01 of the closed-form irradiance where
+    /// the cones read 0.65-0.72 (gi.gather_reference).
     ///
-    /// 0 = off, 1 = on, -1 = AUTO, which is OFF at every tier until the phase-1
-    /// estimate is filtered and temporally accumulated (the spec's phases 2 and
-    /// 3): it is correct and NOISY, so a tier may not select it yet. `On` traces
-    /// wherever the machine can and falls back silently where it cannot, exactly
-    /// as the project's ray row does — a machine with no ray query, or a project
-    /// whose ray row is Off, keeps today's picture and this row does nothing.
-    /// Only meaningful in the VCT modes: a gather ray's HIT is lit from the
-    /// voxel cascades.
+    /// 0 = off, 1 = on, -1 = AUTO = THE TIER'S (PHOTON-GATHER-1d): the engine's
+    /// tier table resolves it — on at High, Epic and Medium, off at Low and in a
+    /// headset. It traces wherever the machine can and falls back silently where
+    /// it cannot, exactly as the project's ray row does — a machine with no ray
+    /// query, or a project whose ray row is Off, keeps the no-rays picture and
+    /// this row does nothing. Only meaningful in the VCT modes: a gather ray's
+    /// HIT is lit from the hit surface's card or the voxel cascades.
     int giGather = -1;
-    /// The DDGI diffuse INTENSITY. Ours, not upstream's: binding a field turns
-    /// the voxel-cone diffuse OFF and replaces it with the probes' — which is
-    /// smoother and leak-free — and upstream's IrradianceFieldSettings carries
-    /// no brightness knob at all. 1.0 is the renderer's raw value and the
-    /// calibrated default (measured at 86% of the VCT diffuse it replaces); the
-    /// knob exists because the two terms are different integrals and a scene may
-    /// want to trim one against the other.
-    float giDdgiIntensity = 1.0f;
     /// WHERE THE FIELD'S PROBES GET THEIR LIGHT (GI_UNIFIED_SPEC.md P3 "A2"):
     /// RAYON — the user-facing quality tier for realtime global illumination
     /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.

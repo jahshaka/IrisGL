@@ -288,8 +288,13 @@ void main()
 			// facing (the gather's own same-surface tolerance, the plane test's
 			// normal dot). A corner or a crease reprojects onto a surface at the
 			// same distance facing elsewhere, which the distance alone would pass.
-			if( wasCount > 0u && jahSameDistance( wasDist, z ) &&
-				dot( wasNormal, pixelNormal ) >= p.plane.y )
+			// (knobs5.w = 1 is the test door that turns BOTH tests off —
+			// GatherTuning::historyValidationOff, the arm gi.gather_motion
+			// proves its disocclusion bar against; never shipped.)
+			const bool accept = p.knobs5.w > 0.5 ||
+								( jahSameDistance( wasDist, z ) &&
+								  dot( wasNormal, pixelNormal ) >= p.plane.y );
+			if( wasCount > 0u && accept )
 			{
 				const vec4 h = imageLoad( historyPrev, pc );
 				if( finite3( h.xyz ) && finite1( h.w ) )

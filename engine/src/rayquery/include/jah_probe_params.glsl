@@ -89,8 +89,18 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// switched back on — and then the previous images hold nothing and are
 	/// never read); y = the history's blend FLOOR (the smallest weight a new
 	/// frame takes: 1 / the frames it remembers); z = 1 runs the history (0 =
-	/// `JAHSHAKA_GATHER_NO_TEMPORAL`, the measurement lever); w = unused.
+	/// `JAHSHAKA_GATHER_NO_TEMPORAL`, the measurement lever); w = 1 accepts every
+	/// reprojected texel (the distance and normal tests off — the test door
+	/// GatherTuning::historyValidationOff; 0 shipped).
 	vec4 knobs5;
+	/// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e — the
+	/// reflection's `p.cards`, word for word): x = the instance-table entries
+	/// bound (0 = the scene holds no cache: every hit reads the voxels), y = the
+	/// card records bound, z = the footprint gate in card texels
+	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
+	/// Read by the trace alone.
+	vec4 cards;
 } p;
 
 /// ONE PROBE'S RECORD — where it sits, what it faces, what it integrated.

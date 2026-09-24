@@ -2384,12 +2384,13 @@ struct GiParams {
     ///
     /// THE ONE THING TO KNOW BEFORE TURNING IT ON: binding a field makes
     /// HlmsPbs set `VctDisableDiffuse`, so DDGI REPLACES the voxel-cone diffuse
-    /// rather than adding to it. The replacement is smooth and leak-resistant
-    /// where the cone-traced term blew out corners, and — once the pass-buffer
-    /// alignment defect this lane found is corrected (FogHlmsListener::
-    /// the pass-buffer under-report, fixed by ogre-patch 0050) — it lands within about 15% of the brightness it takes
-    /// over from, which is what makes `ddgiIntensity` a trim rather than a
-    /// correction.
+    /// rather than adding to it: one integral of one radiance field (since
+    /// PHOTON-READER-1 its probe rays march the same cascade chain through the
+    /// same voxel reader as the cones), applied at the field's own answer —
+    /// nothing is calibrated into it and nothing trims it. WHERE THE SCREEN-PROBE
+    /// GATHER RUNS (a ray tier, `gather` above) the field is NOT the diffuse: it
+    /// is the fallback cage for a pixel no probe answered, and the gather is the
+    /// diffuse. At Low it is the diffuse.
     ///
     /// GiToggle::Auto means "let the quality tier decide", and the deciding
     /// happens DOCUMENT-SIDE: the Photon tier (GI_UNIFIED P2) writes a concrete
@@ -2405,20 +2406,6 @@ struct GiParams {
     /// disappears and the sky/flat ambient would be counted twice on top of the
     /// field's own diffuse (P0 spike §5, measured).
     GiToggle  ddgi = GiToggle::Auto;
-    /// The DDGI diffuse INTENSITY — ours, not upstream's (IrradianceFieldSettings
-    /// has no such knob; ours rides the pass buffer into
-    /// media/Hlms/Jahshaka/JahIfd_piece_ps.any, so changing it is a const-buffer
-    /// write and never a shader rebuild).
-    ///
-    /// 1.0 is the field's own answer, untrimmed: since PHOTON-READER-1 the
-    /// field's probe rays march the same cascade chain through the same voxel
-    /// reader as the cone diffuse it replaces (jah_voxel_march.glsl), so the two
-    /// are one integral of one radiance field and differ only in how it is
-    /// integrated (144 rays per probe, blended over the probe cage, against six
-    /// cones per pixel). Nothing is calibrated into it. It stays a dial because a
-    /// scene may want a stylistic trim; clamped to [0, 64], and 0 is a legitimate
-    /// "field bound, contributing nothing" for A/B measurement.
-    float     ddgiIntensity = 1.0f;
 
     // ---- PHOTON: camera-centred voxel cascades (PHOTON_SPEC P0) -------------
 
@@ -2539,12 +2526,16 @@ struct GiParams {
     /// cone is stopped by a VOXEL, which is the whole argument (measured: 18 to
     /// 59 % less light through a thin wall, spikes/gather-0).
     ///
-    /// `Auto` is OFF at every tier until the gather's picture is filtered and
-    /// temporally accumulated (the spec's phases 2 and 3): the phase-1 estimate
-    /// is correct and NOISY, so a tier may not select it yet. `On` turns it on
-    /// wherever the machine traces -- the same rule the reflections take: no
-    /// ray-query device, or a project whose ray row is Off, keeps exactly
-    /// today's picture (the cones and the field) and this row does nothing.
+    /// `Auto` IS THE TIER'S (PHOTON-GATHER-1d, the rule T-A): the tier table's
+    /// gather row (`giQualityFacts(...).gather`) — ON at High, Epic and Medium
+    /// (36 rays), OFF at Low and in the VR column — under a GI mode that is on,
+    /// wherever the machine traces. `On` turns it on wherever the machine traces;
+    /// `Off` keeps the cones and the field. The same machine rule the reflections
+    /// take: no ray-query device, or a project whose ray row is Off, keeps the
+    /// no-rays picture (the field and the cones) and this row does nothing.
+    /// Where the gather runs it IS the diffuse: the cone diffuse is compiled out
+    /// and the irradiance field stays only as the fallback cage for a pixel no
+    /// probe answered.
     ///
     /// It is GRAPH SHAPE as well as a switch: the probes read their surface
     /// from the SSR prepass' depth and normals, so a view whose row is on
@@ -2558,6 +2549,13 @@ struct GiParams {
     /// again to turn a compute dispatch on -- which also made every A/B arm of
     /// every suite compare ACROSS a GI rebuild (the lead's read).
     GiToggle  gather = GiToggle::Auto;
+    /// THE DOCUMENT'S TIER IS EPIC — the one fact of the Studio's tier table the
+    /// three-valued `quality` cannot carry (Epic shares High's rows). The tier
+    /// table reads it for the gather's density alone (`giQualityFacts`'s `epic`:
+    /// four times the probes); PHOTON-TIERS-1 replaces it with a GiQuality. Per
+    /// frame, like `gather` (`giTuningEqual`): it re-sizes the gather's targets
+    /// and rebuilds nothing.
+    bool      epicTier = false;
     // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------
     //
     // WHY THEY LIVE ON GiParams AND NOT ON A STRUCT OF THEIR OWN: the cache is
@@ -2604,7 +2602,7 @@ struct GiParams {
     /// it beside the struct is what makes "add a field" a one-place edit.)
     ///
     /// THE TUNING FLOATS ARE DELIBERATELY ABSENT (PHOTON_SPEC §7 E2 (8),
-    /// audit A F6): `ddgiIntensity` and `rayMarchStepScale` are
+    /// audit A F6): `rayMarchStepScale` and the per-frame rows below are
     /// read per frame, so they take effect through `Scene::setGiTuning` without
     /// a rebuild — and while they were IN this comparison every tick of those
     /// sliders was a from-scratch teardown and re-voxelisation (N of them
@@ -2633,8 +2631,7 @@ struct GiParams {
     }
     /// The values `Scene::setGiTuning` pushes, compared on their own.
     bool giTuningEqual(const GiParams &o) const {
-        return ddgiIntensity == o.ddgiIntensity &&
-               rayMarchStepScale == o.rayMarchStepScale &&
+        return rayMarchStepScale == o.rayMarchStepScale &&
                // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
                // They belong in THIS comparison and not in `operator==` for the
                // same reason the three above do: the residency pass reads them
@@ -2642,7 +2639,7 @@ struct GiParams {
                // with nothing torn down — and a host that only pushed on
                // `operator==` would swallow a radius change entirely, which is
                // the defect this line exists to prevent.
-               gather == o.gather &&
+               gather == o.gather && epicTier == o.epicTier &&
                cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
                cardResidencyRadius == o.cardResidencyRadius;
     }
@@ -2730,6 +2727,37 @@ enum class GiViewProfile {
 /// which is why the gate is set on the picture that showed it.)
 constexpr float kCardFootprintTexels = 4.0f;
 
+/// THE GATHER ROW OF THE TIER TABLE (PHOTON-GATHER-1d, the rule T-A): what the
+/// screen-probe gather is at a tier. One row in the engine's one table; the
+/// Studio's tier column is a projection of it (`world.tierTable()`).
+///
+/// THE RULE: High and Epic ON, Medium ON at 36 rays, Low OFF — the cone
+/// diffuse stays Low's alone. Why the numbers are these (GATHER-0/1a measured,
+/// spikes/gather-1a): PROBE COUNT fills this GPU and rays per probe do not, so
+/// the tiers differ in probe density and map resolution, not in a ray budget —
+/// 16 pixels a probe at Medium and High, 8 at Epic (four times the probes: the
+/// whole block 0.135 ms at High, 0.43 ms at Epic at 1080p); an 8x8 octahedral
+/// map (64 rays) at High and Epic, 6x6 (36) at Medium; the adaptive second
+/// probes capped at a quarter of the grid (Lumen's budget is a fixed
+/// allocation of the same order, and a flat scene spends none of it).
+///
+/// THE VR COLUMN IS OFF (GA-VR): the pixel history is 24 B a pixel — 247 MB and
+/// +0.172 ms at a headset's 10.3 Mpx (PHOTON-GATHER-1c) — and a stereo target
+/// needs its probe grid split at the eye seam; GA-VR shrinks the history first.
+struct GiGatherFacts {
+    /// What `GiParams::gather = GiToggle::Auto` resolves to (under a GI mode
+    /// that is on, on a machine that traces).
+    bool     on = false;
+    /// Pixels per probe on both axes.
+    unsigned stride = 16u;
+    /// The octahedral map's resolution: the probe traces octRes^2 rays, one per
+    /// texel (at most 8 — one ray is one thread of the trace's 8x8 workgroup).
+    unsigned octRes = 8u;
+    /// The adaptive probes a frame may add, as the uniform grid's count divided
+    /// by this (4 = a quarter of the grid).
+    unsigned adaptiveCapDivisor = 4u;
+};
+
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as
     /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
@@ -2814,13 +2842,20 @@ struct GiQualityFacts {
     /// because `GiQuality` is three-valued (it is the RESOLUTION dial; Epic
     /// changes no resolution) and the design gives the two the same tolerance.
     float    pixelTolerance = 1.0f;
+    // ---- THE GATHER ROW (PHOTON-GATHER-1d) -----------------------------------
+    /// The screen-probe gather at this tier (GiGatherFacts says what and why).
+    GiGatherFacts gather;
 };
 
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
 /// with it. `profile` picks the column (see GiViewProfile for the measurement
 /// behind the VR one).
+/// `epic` is the document's EPIC tier (GiParams::epicTier), which the
+/// three-valued `GiQuality` cannot name: Epic shares High's rows except the
+/// gather's density (below) — until PHOTON-TIERS-1 makes Epic a GiQuality.
 inline GiQualityFacts giQualityFacts(GiQuality quality,
-                                     GiViewProfile profile = GiViewProfile::Desktop)
+                                     GiViewProfile profile = GiViewProfile::Desktop,
+                                     bool epic = false)
 {
     GiQualityFacts f;
     switch (quality) {
@@ -2840,6 +2875,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.pixelTolerance = 2.0f;        // the Atom column; see the field
+        f.gather.on = false;            // Low keeps the cone diffuse (T-A)
         break;
     case GiQuality::High:
         f.cascades[0] = {  5.0f, 128, 0.0f };
@@ -2858,6 +2894,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
         f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
+        f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         break;
     default:   // Medium: the same reach as High, at its own resolution
         f.cascades[0] = {  5.0f, 64, 0.0f };
@@ -2872,8 +2909,13 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
+        f.gather = { true, 16u, 6u, 4u };   // 36 rays a probe (T-A)
         break;
     }
+    // ---- THE EPIC TIER'S GATHER: FOUR TIMES THE PROBES -----------------------
+    // Keyed on the TIER, never on the view's SSR row (GA-TIERROW): the SSR row
+    // is the reflections' own and stays what it is.
+    if (epic && f.gather.on) f.gather.stride = 8u;
     // ---- THE VR COLUMN (GiViewProfile, above) ------------------------------
     // ONE transform over the desktop rows, so the two columns cannot drift: the
     // middle cascade goes and the outermost steps twice as far. `stepCells` on
@@ -2910,6 +2952,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // ...and the relight budget with it, on the same floor for the same reason.
         f.cardLightTexels = std::max(f.cardLightTexels / 2u, 16384u);
         f.cardIndirectTexels = std::max(f.cardIndirectTexels / 2u, 16384u);
+        // ...and the GATHER IS OFF in the VR column (GiGatherFacts: GA-VR).
+        f.gather.on = false;
     }
     return f;
 }
@@ -3177,6 +3221,12 @@ struct GatherTuning {
     /// within 1 code after ln(1/D)/ln(1 - 1/historyFrames) frames — 16 for a
     /// 5-code step). Clamped to 1..63 (the count's six bits).
     unsigned historyFrames = 0u;
+    /// THE HISTORY'S VALIDATION OFF (PHOTON-GATHER-1d, the 1c audit's m2) — a
+    /// TEST door, never shipped: every reprojected texel is accepted (the 5 %
+    /// distance test and the normal test both off), which is what a history that
+    /// stopped validating would show. gi.gather_motion drives it to prove its
+    /// disocclusion bar discriminates that defect.
+    bool     historyValidationOff = false;
 };
 
 // THE PIXEL HISTORY'S MEASUREMENT LEVER (PHOTON-GATHER-1c item 3) is an
@@ -3186,6 +3236,13 @@ struct GatherTuning {
 // process (setenv / unsetenv). It is the frozen-frame rule's pair: a frozen frame
 // index makes consecutive frames the same estimate; this makes each frame's
 // picture that frame's estimate.
+
+/// THE STEP THE SETTLED-HISTORY PREDICATE WAITS OUT, in display codes (of 255):
+/// the gather's pixel history is an EMA at 1/historyFrames once it is full, so a
+/// lighting step of D codes decays under one code after ln(1/D)/ln(1 - 1/h)
+/// frames — 16 at D = 5 and h = 10 (the lamp's measured 5.3-code indirect step,
+/// PHOTON-GATHER-1c; a full-range step would need 53). `giAtRest` waits for it.
+constexpr float kGatherSettleCodes = 5.0f;
 
 /// What the gather did on the last drawn frame of this scene.
 struct GatherStatus {
@@ -3229,6 +3286,20 @@ struct GatherStatus {
     /// scene bind, a tuning change).
     bool temporal = false;
     unsigned historyAge = 0u;
+    /// THE SETTLED HISTORY (PHOTON-GATHER-1d; the term `GiStatus::giAtRest`
+    /// carries). `lightingAge` = the gathered frames since the scene's LIGHTING
+    /// last changed — a light write, an injection landing (a chain settle, a
+    /// cascade rebuild or step, the single volume's own) — the moment a history
+    /// starts owing a step; `settleFrames` = N, the frames a step of
+    /// `kGatherSettleCodes` display codes takes to fall under one code through
+    /// the history's EMA, N = ceil( ln(1/D) / ln(1 - 1/historyFrames) ) (16 at the
+    /// shipped 10 frames); `settled` = the history is at least N frames old AND
+    /// the lighting has held for N (true when the history does not run). A
+    /// YOUNG VIEW (a two-frame screenshot) is NOT settled: it shows the raw
+    /// estimate — up to 9/255 of probe noise on a Showroom-shaped room.
+    unsigned lightingAge = 0u;
+    unsigned settleFrames = 0u;
+    bool settled = true;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's
     /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
     /// mean radiance over the cosine-weighted hemisphere of the pixel's own
