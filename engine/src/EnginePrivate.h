@@ -2491,9 +2491,10 @@ public:
     /// same three-hook route the sky's env slot above rides, because there is
     /// no other route into a PBS pass from outside.
     ///
-    /// Registered PER SCENE MANAGER and cleared at the head of every frame
-    /// (OgreEngine::updateRayQuery), so a view that does not gather cannot
-    /// inherit the binding of one that does.
+    /// Registered PER SCENE MANAGER for the length of ONE PASS: the ray tier's
+    /// listener registers it in the PrePassUse pass's passPreExecute and takes
+    /// it away in that pass's passPosExecute (OgreRayQuery.cpp), so no other
+    /// pass — another view's, a mirror's, a probe capture's — ever sees it.
     static void setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance);
     static void clearProbeGather();
     static Ogre::TextureGpu *probeGather(const Ogre::SceneManager *sm);

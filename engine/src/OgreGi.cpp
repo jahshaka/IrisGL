@@ -789,23 +789,9 @@ void OgreScene::payChainSettleStep() {
         monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "vct.light.settle",
                                  mRoot->getRenderSystem());
         mSceneMgr->updateSceneGraph();
-        // A LIGHT THAT MOVED WHILE THE SETTLE WAS RUNNING RESTARTS IT, and this
-        // is not caution: an injection reads the lights' DERIVED poses at the
-        // moment it runs, so a settle whose first steps saw one lamp pose and
-        // its last steps another leaves the chain a MIXTURE of the two and is
-        // not the fixed point of either — and `noteChainSettled` would then
-        // record that mixture as clean and let the next refresh skip the
-        // injection that would have fixed it. Measured:
-        // scripting.e2e.movable_lamp_rest read 3/255, 10/10, the moment the
-        // settle was allowed to absorb a light write (the lamp's push landed
-        // between two steps, the settle finished over it, and the suite's
-        // reference refresh was then skipped as clean).
-        //
-        // A lamp that keeps moving therefore keeps restarting this, which is
-        // right: nothing finishes while the scene is still changing, and the
-        // mirror's own at-rest tick — which fires one frame after the motion
-        // ends and clears the debt outright — is what finishes a light gesture.
-        if (mGiSettleSerial != mGiLightWriteSerial) oweChainSettle();   // a light: the whole chain
+        // (A LIGHT THAT MOVED WHILE THE SETTLE WAS OWED restarted it before this
+        // step was chosen — the scheduler's check, which runs on every payable
+        // frame, idle ones included: see updateCascades.)
         // THE SWEEP IS OVER THE STALE CASCADES ONLY: top, top-1, ..., 0.
         const size_t span = mGiSettleTop + 1u;
         const int total = kAtRestSweeps * int(span);
@@ -5391,6 +5377,29 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         // injections.
         const int n = int(mVctCascades.size());
         if (!pending) {
+            // A LIGHT THAT MOVED WHILE THE SETTLE WAS RUNNING RESTARTS IT, and this
+            // is not caution: an injection reads the lights' DERIVED poses at the
+            // moment it runs, so a settle whose first steps saw one lamp pose and
+            // its last steps another leaves the chain a MIXTURE of the two and is
+            // not the fixed point of either — and `noteChainSettled` would then
+            // record that mixture as clean and let the next refresh skip the
+            // injection that would have fixed it. Measured:
+            // scripting.e2e.movable_lamp_rest read 3/255, 10/10, the moment the
+            // settle was allowed to absorb a light write (the lamp's push landed
+            // between two steps, the settle finished over it, and the suite's
+            // reference refresh was then skipped as clean).
+            //
+            // A lamp that keeps moving therefore keeps restarting this, which is
+            // right: nothing finishes while the scene is still changing, and the
+            // mirror's own at-rest tick — which fires one frame after the motion
+            // ends and clears the debt outright — is what finishes a light gesture.
+            // THE CHECK LIVES HERE, BEFORE THE TIMING GATE (fix round, audit F7):
+            // inside the payer it ran only on the frames a step is paid, so a
+            // partial debt's idle frames missed a light write for up to n - 1
+            // frames, and the restart then zeroed the timing AFTER that frame's
+            // payment — one idle frame more. Restarting before the count makes a
+            // whole-chain restart pay on the very frame it is seen.
+            if (mGiSettleSerial != mGiLightWriteSerial) oweChainSettle();   // a light: the whole chain
             ++mGiSettlePayableFrames;
             if (mGiSettlePayableFrames >= kAtRestSweeps * n - mGiSettleStepsOwed + 1)
                 payChainSettleStep();            // one injection, this frame

@@ -75,6 +75,16 @@ layout( rgba16f, set = 0, binding = 3 ) uniform writeonly image2D filteredAtlas;
 /// quadrature at the probe's own normal that anchors the SH.
 shared vec4 gSum[8][64];
 
+/// THE TAP TABLE (fix round, audit F3): the eight neighbours' per-probe facts —
+/// the tangent frame (T, B, N in xyz), the plane weight against this probe (T.w;
+/// 0 = no tap) and the atlas block (B.w, N.w as floats) — computed ONCE per
+/// workgroup by eight lanes, instead of by all 64 lanes nine times over (every
+/// lane fetched nine records and rebuilt nine frames). Same arithmetic, same
+/// fixed order: the filtered map is bit-identical.
+shared vec4 gTapT[8];
+shared vec4 gTapB[8];
+shared vec4 gTapN[8];
+
 /// A neighbour's ray whose hit distance is this far off this probe's in the
 /// same direction (as the RATIO of the nearer to the farther) is weighed out
 /// entirely; one within this much counts fully. A ratio, so it means the same at
@@ -109,6 +119,36 @@ void main()
 	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
 	const ivec2 cell = ivec2( int( cellIndex ) % max( grid.x, 1 ), int( cellIndex ) / max( grid.x, 1 ) );
 
+	// ---- THE TAP TABLE: lane k (0..7) fills neighbour k, row by row with the
+	// centre skipped — the fixed order the taps are summed in.
+	if( lane < 8u )
+	{
+		const int k = int( lane ) < 4 ? int( lane ) : int( lane ) + 1;
+		const ivec2 nc = cell + ivec2( k % 3 - 1, k / 3 - 1 );
+		float wPlane = 0.0;
+		vec3 nT = vec3( 0.0 ), nB = vec3( 0.0 ), nN = vec3( 0.0, 0.0, 1.0 );
+		ivec2 nBlock = ivec2( 0 );
+		if( onSurface && p.knobs4.z > 0.5 && all( greaterThanEqual( nc, ivec2( 0 ) ) ) &&
+			all( lessThan( nc, grid ) ) )
+		{
+			const uint nb = uint( nc.y * grid.x + nc.x );
+			const vec4 nbPos = records.r[nb].posW;
+			if( nbPos.w > 0.5 )
+			{
+				nN = records.r[nb].normalW.xyz;
+				// THE PLANE: the neighbour against THIS probe's plane.
+				wPlane = jahPlaneWeight( posW.xyz, normalW.xyz, nbPos.xyz, nN,
+										 jahViewDistanceOf( posW.xyz ) );
+				jahTangentFrame( nN, nT, nB );
+				nBlock = blockOf( nb );
+			}
+		}
+		gTapT[lane] = vec4( nT, wPlane );
+		gTapB[lane] = vec4( nB, float( nBlock.x ) );
+		gTapN[lane] = vec4( nN, float( nBlock.y ) );
+	}
+	barrier();
+
 	vec3 filtered = vec3( 0.0 );
 	float ownDistance = -1.0;
 	vec3 dirW = vec3( 0.0, 0.0, 1.0 );
@@ -132,58 +172,44 @@ void main()
 		ownDistance = own.w;
 		vec3 sum = own.xyz;
 		float wsum = 1.0;
-		const float dist = jahViewDistanceOf( posW.xyz );
 
 		if( p.knobs4.z > 0.5 )
 		{
 			// THE NINE TAPS, IN ONE FIXED ORDER (row by row); the centre is this
-			// probe itself and is already in the sum.
-			for( int dy = -1; dy <= 1; ++dy )
+			// probe itself and is already in the sum. The neighbours' frames and
+			// plane weights come from the workgroup's tap table.
+			for( int k = 0; k < 8; ++k )
 			{
-				for( int dx = -1; dx <= 1; ++dx )
+				const float wPlane = gTapT[k].w;
+				if( wPlane <= 0.0 )
+					continue;
+				const vec3 nT = gTapT[k].xyz, nB = gTapB[k].xyz, nbN = gTapN[k].xyz;
+				// THE SAME WORLD DIRECTION in the neighbour's own frame.
+				const vec3 l = vec3( dot( dirW, nT ), dot( dirW, nB ), dot( dirW, nbN ) );
+				if( l.z <= 0.0 )
+					continue;		// under the neighbour's horizon: it never traced it
+				const ivec2 nt = clamp( ivec2( jahOctUv( l ) * float( octRes ) ), ivec2( 0 ),
+										ivec2( octRes - 1 ) );
+				const vec4 s = imageLoad( probeAtlas,
+										  ivec2( int( gTapB[k].w ), int( gTapN[k].w ) ) + nt );
+				// THE HIT DISTANCE: the same surface, or another one.
+				// A MISS IS AT INFINITY: two misses agree, a miss and a hit never
+				// do (whatever the ray's length happens to be).
+				float wDist = 0.0;
+				if( own.w < 0.0 || s.w < 0.0 )
+					wDist = ( own.w < 0.0 && s.w < 0.0 ) ? 1.0 : 0.0;
+				else
 				{
-					if( dx == 0 && dy == 0 )
-						continue;
-					const ivec2 nc = cell + ivec2( dx, dy );
-					if( any( lessThan( nc, ivec2( 0 ) ) ) || any( greaterThanEqual( nc, grid ) ) )
-						continue;
-					const uint nb = uint( nc.y * grid.x + nc.x );
-					const vec4 nbPos = records.r[nb].posW;
-					if( nbPos.w < 0.5 )
-						continue;
-					const vec3 nbN = records.r[nb].normalW.xyz;
-					// THE PLANE: the neighbour against THIS probe's plane.
-					const float wPlane = jahPlaneWeight( posW.xyz, n, nbPos.xyz, nbN, dist );
-					if( wPlane <= 0.0 )
-						continue;
-					// THE SAME WORLD DIRECTION in the neighbour's own frame.
-					vec3 nT, nB;
-					jahTangentFrame( nbN, nT, nB );
-					const vec3 l = vec3( dot( dirW, nT ), dot( dirW, nB ), dot( dirW, nbN ) );
-					if( l.z <= 0.0 )
-						continue;		// under the neighbour's horizon: it never traced it
-					const ivec2 nt = clamp( ivec2( jahOctUv( l ) * float( octRes ) ), ivec2( 0 ),
-											ivec2( octRes - 1 ) );
-					const vec4 s = imageLoad( probeAtlas, blockOf( nb ) + nt );
-					// THE HIT DISTANCE: the same surface, or another one.
-					// A MISS IS AT INFINITY: two misses agree, a miss and a hit never
-					// do (whatever the ray's length happens to be).
-					float wDist = 0.0;
-					if( own.w < 0.0 || s.w < 0.0 )
-						wDist = ( own.w < 0.0 && s.w < 0.0 ) ? 1.0 : 0.0;
-					else
-					{
-						const float ratio = min( own.w, s.w ) / max( max( own.w, s.w ), 1e-6 );
-						wDist = clamp( ( ratio - kDistanceRatioOut ) /
-										   ( kDistanceRatioIn - kDistanceRatioOut ),
-									   0.0, 1.0 );
-					}
-					const float w = wPlane * wDist;
-					if( w <= 0.0 || !finite3( s.xyz ) )
-						continue;
-					sum += s.xyz * w;
-					wsum += w;
+					const float ratio = min( own.w, s.w ) / max( max( own.w, s.w ), 1e-6 );
+					wDist = clamp( ( ratio - kDistanceRatioOut ) /
+									   ( kDistanceRatioIn - kDistanceRatioOut ),
+								   0.0, 1.0 );
 				}
+				const float w = wPlane * wDist;
+				if( w <= 0.0 || !finite3( s.xyz ) )
+					continue;
+				sum += s.xyz * w;
+				wsum += w;
 			}
 		}
 		filtered = sum / wsum;
