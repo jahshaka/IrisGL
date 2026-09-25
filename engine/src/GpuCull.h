@@ -39,8 +39,8 @@ namespace detail {
 struct GpuCullParams {
     float    planes[24] = {};      ///< 6 x (a, b, c, d), inward, normalised
     float    viewProjRow[16] = {}; ///< row-major
-    float    eye[4] = {};
-    float    lod[4] = {};          ///< x tolerance, y proj[1][1], z viewport height, w unused
+    float    eye[4] = {};          ///< xyz the camera, w the LOD switch band (0 = none)
+    float    lod[4] = {};          ///< x tolerance, y proj[1][1], z viewport height, w 1 = orthographic
     uint32_t counts[4] = {};       ///< x instances, y flagsRequired, z flagsForbidden, w mode
     uint32_t hzb[4] = {};          ///< x levels, y width, z height, w reverseZ
 };
@@ -63,6 +63,12 @@ public:
     Ogre::UavBufferPacked *survivors() const { return mSurvivors; }
     Ogre::UavBufferPacked *count() const { return mCount; }
     Ogre::UavBufferPacked *draws() const { return mDraws; }
+    /// THE BAND'S DIRECTION STATE (ogre-patch 0075's `mHysteresisLod`, per list):
+    /// three words a slot — the last level a BANDED request chose, and the node id
+    /// and mesh it was chosen for (a slot renumbered by a removal, or a mesh swap,
+    /// starts with no band). The only buffer that carries state between requests —
+    /// a grow starts it over.
+    Ogre::UavBufferPacked *held() const { return mHeld; }
 
     /// Elements of the count buffer. [0] is the survivor count (a draw's
     /// drawCount); [1..3] are job 3's thread-group counts, which is where
@@ -82,6 +88,7 @@ private:
     Ogre::UavBufferPacked *mSurvivors = nullptr;
     Ogre::UavBufferPacked *mCount = nullptr;
     Ogre::UavBufferPacked *mDraws = nullptr;
+    Ogre::UavBufferPacked *mHeld = nullptr;
     uint32_t mCapacity = 0u;
 };
 

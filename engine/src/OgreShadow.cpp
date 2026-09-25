@@ -1545,6 +1545,10 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                 break;
             }
         }
+        // THE VISIBILITY BUFFER'S FRAME HALF (ATOM S3-DRAW): the screen decode's
+        // draws follow the words the split's items wear, here, outside the
+        // compositor and after the table the split writes into.
+        for (OgreScene *s : drawn) s->updateAtomDraw();
         {
             const auto rqStart = std::chrono::steady_clock::now();
             updateRayQuery(drawn);
@@ -1553,6 +1557,11 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                                          std::chrono::duration<double, std::milli>(
                                              std::chrono::steady_clock::now() - rqStart).count());
         }
+        // ...AND AGAIN AFTER THE RAY TIER, whose own witness may have moved a twin
+        // this frame (its hit sync re-derives only the HIT draws): the screen decode
+        // must hold a draw for every atom word before anything renders. Two compares
+        // when nothing moved.
+        for (OgreScene *s : drawn) s->updateAtomDraw();
     } JAH_CATCH(mLastError, );
 }
 

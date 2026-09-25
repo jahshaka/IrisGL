@@ -928,6 +928,15 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// THE VISIBILITY BUFFER'S SPLIT AND BUCKETS (ATOM S3-DRAW): which items the
+    /// id pass draws, which stay on stock PBS and why, and how many decode draws
+    /// the atom items' materials need (AtomDrawStatus). Computes the bucket keys
+    /// (no shader is compiled); a tool and test read, not a per-frame one.
+    virtual AtomDrawStatus atomDrawStatus() { return AtomDrawStatus(); }
+    /// THE MEASUREMENT DOOR of the visibility buffer (a tool's A/B, never a mode):
+    /// off, every item draws through PBS and every view's chain is rebuilt without
+    /// the id pass. On by default.
+    virtual void setAtomDrawEnabled(bool on) { (void)on; }
     /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
     /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
     /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,

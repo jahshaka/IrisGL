@@ -36,6 +36,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuVoxelGather.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDraw.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomIdPass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomPass.h
@@ -272,8 +274,27 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
         COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
         VERBATIM)
+    # THE VISIBILITY BUFFER'S ID PASS (ATOM S3-DRAW, OgreAtomIdPass.cpp): a
+    # material-less vertex/fragment pair that pulls every vertex through the GPU
+    # scene's geometry rows — jah_geom_rows.glsl, the ONE copy the voxeliser's
+    # piece and the ray jobs read too. SPIR-V 1.0 (buffer references ride
+    # SPV_KHR_physical_storage_buffer; nothing here needs 1.4).
+    foreach(_stage vert frag)
+        add_custom_command(
+            OUTPUT "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h"
+            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S ${_stage} -x
+                    "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                    --vn katomId_${_stage}Spv -o "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+            COMMENT "Compiling the visibility buffer's id pass (${_stage})"
+            VERBATIM)
+    endforeach()
     add_custom_target(JahshakaRayQuerySpv
-                      DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+                      DEPENDS "${JAH_RQ_GEN_DIR}/atom_id_vert_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_id_frag_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
@@ -529,11 +550,17 @@ set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmak
 list(APPEND _hlms_inputs ${JAH_VOXEL_READER_SOURCES} "${JAH_WRAP_HLMS_PIECE}")
 add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${JAHSHAKA_MEDIA_DIR}/Hlms"
+    # THE FORK'S HLMS FOLDERS ARE WIPED FIRST TOO: every one of them is a template or
+    # library path, and a piece file the fork RENAMED (ATOM S3-DRAW: the atmosphere's
+    # vertex pieces became `_piece_vs_piece_ps`) left behind by copy_directory is
+    # parsed beside its replacement — a duplicate piece in every vertex shader.
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Hlms/Common" "${JAHSHAKA_MEDIA_DIR}/Hlms/Pbs"
+            "${JAHSHAKA_MEDIA_DIR}/Hlms/Unlit"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HLMS_SOURCE_DIR}/Common" "${JAHSHAKA_MEDIA_DIR}/Hlms/Common"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs"    "${JAHSHAKA_MEDIA_DIR}/Hlms/Pbs"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HLMS_SOURCE_DIR}/Unlit"  "${JAHSHAKA_MEDIA_DIR}/Hlms/Unlit"
     # Jahshaka's own Hlms pieces (fog colour + height fog, base-map UV tiling) and
-    # the PCC/IBL compositors. WIPED first, unlike the Ogre folders: this one is an
+    # the PCC/IBL compositors. WIPED first, like the Ogre folders: this one is an
     # Hlms LIBRARY path, and a renamed piece file left behind by copy_directory
     # would be parsed alongside its replacement and fail as a duplicate @piece.
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka"

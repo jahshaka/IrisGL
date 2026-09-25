@@ -41,7 +41,7 @@
 			"source" : "JahCullTest_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any"],
 			"textures" : [ {} ],
-			"uav_units" : 6
+			"uav_units" : 7
 		},
 
 		"Jahshaka/CullCompact" :

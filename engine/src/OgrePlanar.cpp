@@ -429,6 +429,7 @@ bool OgreScene::armReflector(NodeId id, Node &n) {
     // build has exactly one submesh, so getSubItem(0) is unambiguous.
     mPlanar->addRenderable(Ogre::PlanarReflections::TrackedRenderable(
         n.item->getSubItem(0), n.item, pl.localNormal, pl.localCentre));
+    markGpuSlotDirty(n);   // its split route moves (atomRouteFor: planar)
     return true;
 }
 
@@ -443,6 +444,7 @@ void OgreScene::disarmReflector(NodeId id, Node &n) {
         if (mPlanar) mPlanar->destroyActor(it->second);
     } JAH_CATCH(mError, );
     mActors.erase(it);
+    if (n.item) markGpuSlotDirty(n);   // its split route moves (atomRouteFor: planar)
 }
 
 void OgreScene::disarmAllReflectors() {

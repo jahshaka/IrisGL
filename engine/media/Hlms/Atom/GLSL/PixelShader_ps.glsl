@@ -83,6 +83,7 @@ vulkan_layout( location = 0 ) in block
 {
 	flat uint drawId;
 	@property( atom_hit_mode )flat uint hitCount;@end
+	@property( !atom_hit_mode )noperspective float2 ndc;@end
 } inAtom;
 
 @pset( currSampler, samplerStateStart )

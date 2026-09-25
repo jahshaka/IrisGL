@@ -169,6 +169,7 @@ enum GpuInstanceFlag : uint32_t {
     kGpuOverlay = 1u << 6,      ///< its render queue is at or above the overlay queues
     kGpuRayTraced = 1u << 7,    ///< the TRACED SET: the conjunction the ray tier used to walk for
     kGpuDragMover = 1u << 8,    ///< MOVER-1: the user has hold of it right now
+    kGpuAtom = 1u << 9,         ///< ATOM S3-DRAW: the id pass draws it, the decode shades it (OgreScene::atomRouteFor)
 };
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the
@@ -370,6 +371,12 @@ public:
     Ogre::UavBufferPacked *instanceBuffer() const { return mInstanceBuffer; }
     Ogre::UavBufferPacked *meshBuffer() const { return mMeshBuffer; }
     Ogre::UavBufferPacked *levelBuffer() const { return mLevelBuffer; }
+    /// The CPU mirror's (mesh entry, level) row — what the device's level table
+    /// holds after the next update.
+    const GpuMeshLevel &levelAt(uint32_t meshIndex, uint32_t level) const {
+        return mLevelMirror[size_t(meshIndex) * kLevelsPerMesh + level];
+    }
+    uint32_t levelMirrorEntries() const { return uint32_t(mLevelMirror.size()); }
     /// THE GEOMETRY ROW TABLE (ATOM P4b): the vertex and index device addresses and
     /// the vertex layout of every (mesh, level, submesh) the scene holds, written
     /// ONCE at attach. The voxeliser binds it for every dispatch
@@ -382,6 +389,11 @@ public:
     /// while it still holds the mesh; a row nobody writes stays zero, and
     /// `GpuMeshLevel::geomRow` is what says whether it means anything.
     void stageGeomRow(uint32_t rowIndex, const void *row48Bytes);
+    /// The CPU mirror's row (kGeomRowWords words), or null past the table.
+    const uint32_t *geomRowAt(uint32_t rowIndex) const {
+        const size_t at = size_t(rowIndex) * kGeomRowWords;
+        return at + kGeomRowWords <= mGeomMirror.size() ? &mGeomMirror[at] : nullptr;
+    }
     /// Points a level entry at its submesh-0 geometry row. Separate from
     /// `acquireMesh` because a row's index depends on the ENTRY's index, which
     /// acquireMesh is the thing that decides.

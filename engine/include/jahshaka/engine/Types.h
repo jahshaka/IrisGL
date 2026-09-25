@@ -4385,7 +4385,7 @@ struct RayQueryStatus {
     /// `hitDropped`: of those, dropped because the list was full (their rays have
     /// no sample that frame — a stat, never a crash), `hitCapacity`: the list's
     /// size (the largest view's), `hitDecodeDraws`: the decode draws the scene
-    /// holds (one per decode twin: S3-DRAW's bucket merge is owed). Read several
+    /// holds (one per decode BUCKET — HlmsAtom::BucketKey, S3-DRAW). Read several
     /// frames late, never with a wait.
     unsigned long long hitRecords = 0;
     unsigned long long hitDropped = 0;
@@ -4411,6 +4411,72 @@ struct RayQueryStatus {
     /// GPU milliseconds of that dispatch, read back from a timestamp pair
     /// several frames later and never with a wait. -1 until measured.
     float reflectMs = -1.0f;
+};
+
+/// THE VISIBILITY BUFFER'S SPLIT AND ITS BUCKETS (ATOM S3-DRAW,
+/// SPECS/atom/D3_S3_DRAW_DESIGN.md §2.2/§2.4) — what the render-queue split
+/// decides for this scene's items and how many decode draws their materials need.
+/// Every count is over the items the scene SHOWS (hidden ones are neither).
+///   atomItems    items the id pass draws and the decode shades: a GPU-scene row,
+///                an opaque PBS material the decode can serve, one submesh.
+///   pbsItems     items that stay on stock HlmsPbs, split by the FIRST reason
+///                that holds, in this order: `notPbs` (an Unlit or other non-PBS
+///                datablock), `customPiece` (a per-datablock custom piece — the
+///                twin cannot carry one), `blended` (a transparent, faded or
+///                refractive material), `twoSided` (a material drawn without back-
+///                face culling: the id pass culls back faces), `pending` (its
+///                textures are still being baked, so its bucket is not known yet:
+///                PBS draws it for those frames), `alphaTested`,
+///                `skinned` (the id pass reads the mesh's bind-pose rows), `noRow`
+///                (no readable level-0 triangle row: a line mesh, no device
+///                addresses, a normal the decode does not read — or more than one
+///                submesh, which no mesh this engine builds has).
+///   stockItems   items in a queue that is not the opaque item queue (gizmos,
+///                wires, the sun disc, distortion): never split, never counted.
+///   materials    distinct PBS materials the atom items wear;
+///   buckets      the decode draws those need (HlmsAtom::BucketKey: one shader
+///                permutation x one texture set x one const-buffer pool);
+///   twins        decode twins HlmsAtom holds (every scene),
+///   decodeDraws  this scene's hit decode draws, and
+///   screenDraws  its screen decode draws.
+struct AtomDrawStatus {
+    bool     live = false;
+    /// The split is live: the GPU scene exists, this device runs the id pass (it
+    /// needs Vulkan buffer device addresses and VK_KHR_draw_indirect_count) and
+    /// the measurement door is open. Off, every item draws through PBS.
+    bool     on = false;
+    unsigned atomItems = 0;
+    unsigned pbsItems = 0;
+    /// Shown, but in no world channel (a backdrop such as the ground's horizon
+    /// quad, or a helper): the id pass draws the world channels only.
+    unsigned notWorld = 0;
+    unsigned notPbs = 0;
+    unsigned customPiece = 0;
+    unsigned blended = 0;
+    unsigned twoSided = 0;
+    /// A planar mirror (Scene::setNodePlanarReflector): PBS binds its reflection per
+    /// renderable, which a decode serving a whole bucket cannot.
+    unsigned planar = 0;
+    unsigned pending = 0;
+    unsigned alphaTested = 0;
+    unsigned skinned = 0;
+    unsigned noRow = 0;
+    unsigned stockItems = 0;
+    unsigned materials = 0;
+    unsigned buckets = 0;
+    unsigned twins = 0;
+    unsigned decodeDraws = 0;
+    /// This scene's SCREEN decode draws (one per bucket of the atom items' words).
+    unsigned screenDraws = 0;
+    /// Views of this scene that draw the atom items through PBS anyway: STEREO
+    /// (VR) chains carry no id pass (it renders one eye).
+    unsigned stereoViews = 0;
+    /// ...and views whose scene pass renders STRAIGHT INTO A WINDOW or a
+    /// multisampled target (the passthrough shape — the Low tier's editor viewport,
+    /// which has no post chain and takes its anti-aliasing from the window's
+    /// samples): the id pass's depth cannot be that pass's depth (Ogre pairs a
+    /// window's colour only with the window's own depth, and one sample with one).
+    unsigned passthroughViews = 0;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
@@ -6537,6 +6603,17 @@ struct GpuCullRequest {
     /// `sampleFootprintPerspective`).
     float projScaleY = 0.0f;
     float viewportHeight = 0.0f;
+    /// AN ORTHOGRAPHIC VIEW: one sample is the same world length at every depth,
+    /// so the level rule takes no distance term (the CPU strategy's ortho case,
+    /// OgreMesh.cpp): the footprint is 2 / (projScaleY * viewportHeight), i.e. the
+    /// ortho window's height over the target's.
+    bool orthographic = false;
+    /// THE VIEW'S LOD SWITCH BAND (ogre-patch 0075's `hysteresis`, the fraction of
+    /// the threshold being crossed): 0 = the exact level. A banded request holds each
+    /// slot's last banded level until the allowed error leaves the band — the id pass
+    /// takes the view's own band (ChainDesc::lodHysteresis), so a watched view does
+    /// not pop at a threshold on the GPU path either.
+    float lodHysteresis = 0.0f;
     /// GpuInstance flag predicates (GpuSceneEntry::flags documents the bits):
     /// every required bit must be set and no forbidden bit may be.
     unsigned flagsRequired = 0u, flagsForbidden = 0u;
@@ -7269,7 +7346,8 @@ struct GpuSceneEntry {
     unsigned meshIndex = 0xFFFFFFFFu;
     /// The predicate bits ONE place computes: 1 visible, 2 caster, 4 mover,
     /// 8 GI-visible, 16 alpha-tested, 32 skinned, 64 overlay, 128 RAY-TRACED
-    /// (the traced set), 256 drag mover, 512 GI-bounds-excluded.
+    /// (the traced set), 256 drag mover, 512 ATOM (the visibility buffer's id pass
+    /// draws it and the decode shades it — AtomDrawStatus).
     unsigned flags = 0u;
     unsigned nodeId = 0u;
     unsigned lightMask = 0u;

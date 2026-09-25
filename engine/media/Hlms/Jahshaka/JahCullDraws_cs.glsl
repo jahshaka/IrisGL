@@ -41,7 +41,7 @@ layout( std430, ogre_U1 ) readonly restrict buffer levelLayout { GpuMeshLevel le
 layout( std430, ogre_U2 ) readonly restrict buffer survLayout { uint survivors[]; };
 layout( std430, ogre_U3 ) readonly restrict buffer lvlLayout { uint outLevel[]; };
 layout( std430, ogre_U4 ) writeonly restrict buffer drawLayout { uint draws[]; };
-layout( std430, ogre_U5 ) readonly restrict buffer cntLayout { uint counter[]; };
+layout( std430, ogre_U5 ) restrict buffer cntLayout { uint counter[]; };
 
 // The instance table is read as raw vec4 LANES here: this job wants one number
 // out of an entry (the mesh index, bit-cast into boundsMin.w = lane 6's w) and
@@ -72,4 +72,7 @@ void main()
 	draws[o + 2u] = row.firstIndex;
 	draws[o + 3u] = 0u;      // vertexOffset — see the header
 	draws[o + 4u] = slot;    // firstInstance: the row of the table this draw is
+	// THE STATS' TRIANGLES (counter[4], zeroed with the request): what the commands
+	// draw, for a consumer that cannot see an indirect draw (the renderer's counters).
+	atomicAdd( counter[4], row.indexCount / 3u );
 }

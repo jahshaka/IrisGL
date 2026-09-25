@@ -246,13 +246,70 @@
 		b.clipW = area * invSum;
 		return b;
 	}
-	float2 atomToPixels( float4 c, float2 res )
+	// A TRIANGLE WITH A VERTEX BEHIND THE EYE (clip w <= 0) - every ground plane
+	// that runs past the camera - has no screen image to snap: the divide by w
+	// above mirrors that vertex, and the weights come out anywhere. For such a
+	// triangle the weights are solved in HOMOGENEOUS space instead (Olano-Greer):
+	// the pixel's clip point is a combination of the three (x, y, w) columns, so
+	// the weights are the adjugate's rows dotted with (ndc.x, ndc.y, 1),
+	// normalised, and the clip w at the pixel is the determinant over their sum.
+	// No divide by a vertex's w, no snap; used only where the snapped form cannot
+	// be (a triangle wholly in front keeps the rasteriser's exact form).
+	AtomBary atomBarycentricHomogeneous( float4 c0, float4 c1, float4 c2, float2 ndc )
+	{
+		float3 v0 = c0.xyw;
+		float3 v1 = c1.xyw;
+		float3 v2 = c2.xyw;
+		float3 q = float3( ndc, 1.0 );
+		float3 u = float3( dot( cross( v1, v2 ), q ), dot( cross( v2, v0 ), q ), dot( cross( v0, v1 ), q ) );
+		float sum = u.x + u.y + u.z;
+		float invSum = 1.0 / ( abs( sum ) > 1e-30 ? sum : 1e-30 );
+		AtomBary b;
+		b.w = u * invSum;
+		b.clipW = dot( v0, cross( v1, v2 ) ) * invSum;
+		return b;
+	}
+	// The NDC of a framebuffer position, atomToPixels' inverse (the pass's y
+	// direction included), inside the pass's viewport (origin, size in pixels).
+	float2 atomPixelToNdc( float2 fb, float2 vpO, float2 vpS )
+	{
+		float2 f = ( fb - vpO ) / vpS;
+		@property( hlms_forwardplus_flipY )
+			return float2( f.x * 2.0 - 1.0, f.y * 2.0 - 1.0 );
+		@else
+			return float2( f.x * 2.0 - 1.0, 1.0 - f.y * 2.0 );
+		@end
+	}
+	// THE FOG COLOUR IS A VERTEX TERM: the vertex shader's DoAtmosphereNprSky writes
+	// it per vertex (the analytic sky's scattering for the direction the vertex is
+	// seen from, or the flat fog colour - JahFog's redefinition), and the rasteriser
+	// interpolates it. The decode evaluates the same piece at the decoded triangle's
+	// three corners and interpolates with the pixel's weights (the fork makes the
+	// atmosphere's vertex pieces reachable from a pixel shader). Hit mode draws no
+	// fog (its pass property is zero).
+	@property( hlms_fog && !atom_hit_mode )
+		@insertpiece( DeclAtmosphereNprSkyFuncs )
+		struct AtomFogVertex
+		{
+			midf3 fog;
+		};
+		midf3 atomFogAt( float3 atomWorldPos )
+		{
+			AtomFogVertex atomFogOut;
+			float4 worldPos = float4( atomWorldPos, 1.0 );
+			#define outVs atomFogOut
+			@insertpiece( DoAtmosphereNprSky )
+			#undef outVs
+			return atomFogOut.fog;
+		}
+	@end
+	float2 atomToPixels( float4 c, float2 vpO, float2 vpS )
 	{
 		float2 ndc = c.xy / c.w;
 		@property( hlms_forwardplus_flipY )
-			float2 fb = float2( ( ndc.x * 0.5 + 0.5 ) * res.x, ( 0.5 + ndc.y * 0.5 ) * res.y );
+			float2 fb = vpO + float2( ( ndc.x * 0.5 + 0.5 ) * vpS.x, ( 0.5 + ndc.y * 0.5 ) * vpS.y );
 		@else
-			float2 fb = float2( ( ndc.x * 0.5 + 0.5 ) * res.x, ( 0.5 - ndc.y * 0.5 ) * res.y );
+			float2 fb = vpO + float2( ( ndc.x * 0.5 + 0.5 ) * vpS.x, ( 0.5 - ndc.y * 0.5 ) * vpS.y );
 		@end
 		return round( fb * 256.0 ) * ( 1.0 / 256.0 );
 	}
@@ -269,6 +326,20 @@
 	// read sits behind the validity flag's BRANCH, the invalid path fills the same
 	// interpolants with harmless values, and the discard comes last.
 	AtomPsIn inPs;
+	@property( !atom_hit_mode )
+		// THE PASS'S VIEWPORT, from the full-screen triangle's own NDC (the id pass drew
+		// into the same rectangle): its size from the NDC's constant step per pixel, its
+		// origin from this pixel. Taken HERE, before any branch - derivatives need the
+		// whole quad. A letterboxed view's inset is exactly this rectangle.
+		float2 atomVpSize = round( abs( float2( 2.0 / max( abs( dFdx( inAtom.ndc.x ) ), 1e-9 ),
+												2.0 / max( abs( dFdy( inAtom.ndc.y ) ), 1e-9 ) ) ) );
+		@property( hlms_forwardplus_flipY )
+			float2 atomVpUnit = float2( inAtom.ndc.x * 0.5 + 0.5, 0.5 + inAtom.ndc.y * 0.5 );
+		@else
+			float2 atomVpUnit = float2( inAtom.ndc.x * 0.5 + 0.5, 0.5 - inAtom.ndc.y * 0.5 );
+		@end
+		float2 atomVpOrigin = round( gl_FragCoord.xy - atomVpUnit * atomVpSize );
+	@end
 	float2 atomDdxUV = float2( 0.0, 0.0 );
 	float2 atomDdyUV = float2( 0.0, 0.0 );
 	uint atomMaterialSlot = 0u;
@@ -322,12 +393,14 @@
 		uint atomWord = atomRaster.x;
 		atomOk = atomOk && atomWord != 0xFFFFFFFFu;
 
-		// THE BUCKET: this draw serves the materials whose table entry is its own twin's
-		// slot plus one; every other pixel belongs to another decode draw.
+		// THE BUCKET: this draw serves the materials whose table entry is its own
+		// bucket's id (the per-draw word's w, HlmsAtom::fillBuffersForV2); every other
+		// pixel belongs to another decode draw. A whole id, never a slot: slots repeat
+		// across the twins' pools.
 		uint atomBucketAt = ( atomWord >> 16u ) * @value(atomSlotsPerPool)u + ( atomWord & 0xFFFFu );
 		atomOk = atomOk && atomBucketAt < atomBucketCount && ( atomWord & 0xFFFFu ) < @value(atomSlotsPerPool)u;
 		uint atomBucket = atomBuckets[min( atomBucketAt, max( atomBucketCount, 1u ) - 1u )];
-		atomOk = atomOk && atomBucket == ( worldMaterialIdx[inAtom.drawId].x & 0x1FFu ) + 1u;
+		atomOk = atomOk && atomBucket != 0u && atomBucket == worldMaterialIdx[inAtom.drawId].w;
 
 		uint atomMesh = atomInstances[atomI + 6u].w;
 		@property( atom_hit_mode )
@@ -459,13 +532,14 @@
 		float4 c1 = mul( float4( w1, 1.0 ), passBuf.viewProj );
 		float4 c2 = mul( float4( w2, 1.0 ), passBuf.viewProj );
 
-		float2 atomRes = float2( textureSize( atomIdTex, 0 ) );
-		float2 s0 = atomToPixels( c0, atomRes );
-		float2 s1 = atomToPixels( c1, atomRes );
-		float2 s2 = atomToPixels( c2, atomRes );
+		float2 s0 = atomToPixels( c0, atomVpOrigin, atomVpSize );
+		float2 s1 = atomToPixels( c1, atomVpOrigin, atomVpSize );
+		float2 s2 = atomToPixels( c2, atomVpOrigin, atomVpSize );
 		float3 atomInvW = float3( 1.0 / c0.w, 1.0 / c1.w, 1.0 / c2.w );
 		float2 atomPix = gl_FragCoord.xy;
-		AtomBary b = atomBarycentric( s0, s1, s2, atomInvW, atomPix );
+		bool atomAllFront = c0.w > 0.0 && c1.w > 0.0 && c2.w > 0.0;
+		AtomBary b = atomAllFront ? atomBarycentric( s0, s1, s2, atomInvW, atomPix )
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix, atomVpOrigin, atomVpSize ) );
 		// AN ID THAT DOES NOT NAME A TRIANGLE COVERING THIS PIXEL IS NEVER SHADED: weights
 		// far outside the triangle or a non-finite clip w (tested on the BITS - a
 		// self-comparison is folded away on this stack) would hand PBS's pieces a position
@@ -515,8 +589,12 @@
 			@else
 			if( atomOk )
 			{
-				AtomBary bx = atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 1.0, 0.0 ) );
-				AtomBary by = atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 0.0, 1.0 ) );
+				AtomBary bx = atomAllFront
+								  ? atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 1.0, 0.0 ) )
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix + float2( 1.0, 0.0 ), atomVpOrigin, atomVpSize ) );
+				AtomBary by = atomAllFront
+								  ? atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 0.0, 1.0 ) )
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix + float2( 0.0, 1.0 ), atomVpOrigin, atomVpSize ) );
 				atomDdxUV = ( bx.w.x * uvA + bx.w.y * uvB + bx.w.z * uvC ) - atomUv0;
 				atomDdyUV = ( by.w.x * uvA + by.w.y * uvB + by.w.z * uvC ) - atomUv0;
 				// A neighbour step that lands on the triangle's plane horizon (a silhouette
@@ -573,6 +651,17 @@
 		@end
 		@property( hlms_pssm_splits )
 			inPs.depth = b.clipW;
+		@end
+		@property( hlms_fog && !atom_hit_mode )
+			// The vertex terms of the distance fog (see atomFogAt): the colour, and
+			// JahFog's height-layer world height (hlms_normal: its interpolant is
+			// declared under the same property).
+			inPs.fog = atomOk ? midf3_c( b.w.x * atomFogAt( w0 ) + b.w.y * atomFogAt( w1 ) +
+										 b.w.z * atomFogAt( w2 ) )
+							  : midf3_c( 0.0, 0.0, 0.0 );
+			@property( hlms_normal || hlms_qtangent )
+				inPs.jahFogWorldY = b.w.x * w0.y + b.w.y * w1.y + b.w.z * w2.y;
+			@end
 		@end
 		@property( !lower_gpu_overhead )
 			inPs.drawId = ushort( inAtom.drawId );

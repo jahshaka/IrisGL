@@ -1004,6 +1004,9 @@ void OgreEngine::renderOneFrame() {
             // rebuilt behind the trace's back, and the camera is recreated on
             // setScene.
             v->syncReflectListener();
+            // ...and the visibility buffer's (ATOM S3-DRAW): ChainDesc::atomDraw
+            // reads the scene's split, which the view learns only once it has one.
+            v->syncAtomDraw();
             // The inset's rectangles are derived from the TARGET's aspect
             // (a normalised rect is not a pixel rect), so a resize that never
             // touched ViewPipDesc still moves the letterbox. Re-derived here,
@@ -2178,6 +2181,8 @@ bool OgreEngine::renderStats(RenderStats &out) const {
                 out.triangles = (unsigned long long)m.mFaceCount;
                 out.vertices  = (unsigned long long)m.mVertexCount;
                 out.instances = (unsigned long long)m.mInstanceCount;
+                // (THE ID PASS'S SHARE is in these: its recorder adds its indirect
+                // draw's counters to the render system's own, OgreAtomIdPass.cpp.)
             }
             // THE PSO DEADLINE'S HONEST HALF (THREADING_ADOPTION_SPEC.md P4(b),
             // decision D-E(1)). Ogre can budget PSO compilation per frame and
@@ -2503,6 +2508,9 @@ OgreEngine::~OgreEngine() {
     // no scene owns them: free them here, while Root (and its texture manager)
     // is still alive.
     lightextras::shutdown();
+    // THE ID PASS'S PIPELINE AND ITS IDENTITY INDEX BUFFER (ATOM S3-DRAW): device
+    // objects, after every view (whose workspaces recorded it) and before Root.
+    try { releaseAtomIdPass(); } catch (...) {}
     // AFTER every scene (each of which removed its own render-queue listener in
     // OgreScene::destroy) and BEFORE Root: ~OverlaySystem deletes the
     // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock
@@ -2637,11 +2645,12 @@ void OgreEngine::ensureHlms() {
     // material decode, a derived HlmsPbs on the Terra pattern, registered BESIDE
     // PBS and in the same breath: window -> registerHlms -> scene manager is the
     // startup-order trap, and this is the registerHlms step. Nothing in the
-    // product draws through it yet (S3-DRAW binds it to the id pass); it is TOLD
-    // everything PBS is told by tellEveryHlms below and once per frame before its
-    // first read. Its pass provider — the engine's ONE CompositorPassProvider,
+    // product's opaque ATOM geometry is drawn by the id pass and shaded by it (the
+    // screen decode, ATOM S3-DRAW), and the ray hits no cache shades are too; it is
+    // TOLD everything PBS is told by tellEveryHlms below and once per frame before
+    // its first read. Its pass provider — the engine's ONE CompositorPassProvider,
     // multiplexed on customId — is installed here too, before any workspace
-    // definition could name a custom pass.
+    // definition could name a custom pass, with the id pass's recorder on it.
     HlmsAtom::getDefaultPaths(mainPath, libPaths);
     {
         Ogre::ArchiveVec libs;
@@ -2650,6 +2659,7 @@ void OgreEngine::ensureHlms() {
             OGRE_NEW HlmsAtom(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
     AtomPassProvider::install(mRoot->getCompositorManager2());
+    registerAtomIdPass();
     // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;
     // Scene::setAmbient converts the flat/hemisphere pair exactly). The mode is a
     // property of the HlmsPbs INSTANCE, not of a scene, so it cannot be chosen

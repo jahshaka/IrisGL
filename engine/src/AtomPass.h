@@ -16,9 +16,15 @@
 //      pipeline bound in the same frame, RTX and lavapipe — engine.atom_negative_control
 //      keeps it that way).
 //
-// THE REGISTRY. A customId is served by a RECORDER registered here; the product
-// registers none yet (S3-DRAW's id pass is the first). Registering is how a test or a
-// later lane gets a custom pass without a second provider.
+// THE REGISTRY. A customId is served by a RECORDER registered here; the product's
+// is the visibility buffer's id pass (`atom_id`, OgreAtomIdPass.cpp). Registering is
+// how a test or a later lane gets a custom pass without a second provider.
+//
+// A PASS WITH A TARGET. When its target pass names a texture or an RTV, the pass
+// owns Ogre's render pass descriptor for it (CompositorPass::initialize), so the
+// attachments get Ogre's own barriers and Ogre's own VkRenderPass: a recorder that
+// draws calls `beginRenderPass()` after whatever compute it records, draws inside
+// the pass Ogre opened, and leaves it open (the next pass closes it).
 #ifndef JAHSHAKA_ENGINE_ATOMPASS_H
 #define JAHSHAKA_ENGINE_ATOMPASS_H
 
@@ -66,8 +72,13 @@ public:
 class AtomPass final : public Ogre::CompositorPass {
 public:
     AtomPass(const AtomPassDef *definition, Ogre::CompositorNode *parentNode,
-             Ogre::SceneManager *sceneManager);
+             Ogre::SceneManager *sceneManager, const Ogre::RenderTargetViewDef *rtvDef);
     void execute(const Ogre::Camera *lodCamera) override;
+    /// The pass's attachments to their render-target layouts (Ogre's solver) and
+    /// Ogre's render pass for them, OPEN (its load actions run now). For a
+    /// recorder that draws; false when the pass has no target.
+    bool beginRenderPass();
+    const Ogre::RenderPassDescriptor *renderPassDesc() const { return mRenderPassDesc; }
 
 private:
     const AtomPassDef *mDef;
