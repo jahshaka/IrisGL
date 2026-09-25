@@ -36,7 +36,7 @@ struct CullParams
 	vec4  planes[6];        // inward-pointing, normalised (a, b, c, d)
 	vec4  viewProjRow[4];   // ROW i in element i
 	vec4  eye;              // xyz the camera position; w unused
-	vec4  lod;              // x tolerance (samples), y proj[1][1], z viewport height, w unused
+	vec4  lod;              // x tolerance (samples), y proj[1][1], z viewport height, w 1 = orthographic
 	uvec4 counts;           // x instanceCount, y flagsRequired, z flagsForbidden, w mode
 	uvec4 hzb;              // x levels (0 = frustum only), y width, z height, w reverseZ
 };
@@ -190,7 +190,9 @@ void main()
 		vec3 lMin = meshes[meshIndex].localBoundsMin.xyz;
 		vec3 lMax = meshes[meshIndex].localBoundsMax.xyz;
 		float worldRadius = 0.5 * length( lMax - lMin ) * scale;
-		float d = max( 0.0, distance( centre, params.eye.xyz ) - worldRadius );
+		// ORTHOGRAPHIC: no distance term (the CPU strategy's ortho case) - one metre
+		// makes the currency's footprint 2 / (proj11 * H), the window over the target.
+		float d = params.lod.w > 0.5 ? 1.0 : max( 0.0, distance( centre, params.eye.xyz ) - worldRadius );
 		float allowed = jahAllowedWorldError(
 			params.lod.x, jahSampleFootprint( d, params.lod.y, params.lod.z ), scale );
 		outLevel[slot] = jahLevelForAllowed( meshIndex, levelCount, allowed );

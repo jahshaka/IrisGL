@@ -146,6 +146,7 @@ void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullReque
     // the same in both (the RS-depth form differs in the z row only), and the
     // height is the pass's target.
     out.projScaleY = float(cam->getProjectionMatrix()[1][1]);
+    out.orthographic = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
     // THE VIEW'S OWN HEIGHT, not the camera's last viewport: an offscreen view's
     // camera reports no viewport outside a pass (measured — `getLastViewport()`
     // is null between frames), and the number the currency wants is the height

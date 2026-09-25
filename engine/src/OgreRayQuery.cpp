@@ -3049,8 +3049,8 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         // array, a shader that cannot compile. Ogre re-hashes every renderable a
         // datablock changes the permutation of (HlmsDatablock::flushRenderables),
         // so one item wearing each word is the witness: its hash or its datablock
-        // moved -> the twin dies (forgetDecodeTwinOf; the epoch moves) and the next
-        // sync re-derives it. A SAME-SLOT TEXTURE SWAP keeps the hash (the property
+        // moved -> the twin dies if its BUCKET moved (forgetDecodeTwinIfMoved; the
+        // epoch moves) and the next sync re-derives it. A SAME-SLOT TEXTURE SWAP keeps the hash (the property
         // vector is unchanged) and the twin would keep the old texture in every hit:
         // the witness carries the datablock's texture set too (audit F6). One hash
         // compare and one texture-set key per material per frame.
@@ -3063,7 +3063,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 const Ogre::HlmsDatablock *db = sub->getDatablock();
                 const Ogre::uint32 h = sub->getHlmsHash();
                 const uint64_t tk = HlmsAtom::textureSetKeyOf(db);
-                if (db == w.db && (h != w.hash || tk != w.texKey) && db) atom->forgetDecodeTwinOf(db);
+                if (db == w.db && (h != w.hash || tk != w.texKey) && db) atom->forgetDecodeTwinIfMoved(db);
                 w.db = db;
                 w.hash = h;
                 w.texKey = tk;

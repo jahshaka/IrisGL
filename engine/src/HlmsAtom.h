@@ -182,6 +182,14 @@ public:
     /// bucket. The twin dies with its LAST member (and the epoch moves). Every
     /// engine site that destroys a PBS datablock calls `forgetDecodeTwinOf` first.
     void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs);
+    /// THE WITNESSES' FORGET (the screen split's and the ray tier's, one frame
+    /// apart in the same frame): a datablock edited in place leaves its twin only
+    /// when its BUCKET moved — its key now differs from the twin's, or it has none
+    /// (pending, refused). A hash that moved inside the same bucket (PBS hashes a
+    /// datablock whose textures just landed) keeps the twin, so the second witness
+    /// to see the edit cannot destroy the draws the first one re-derived. True when
+    /// it forgot.
+    bool forgetDecodeTwinIfMoved(const Ogre::HlmsDatablock *pbs);
     /// Twins = buckets held (every scene), and the PBS datablocks they serve.
     size_t decodeTwinCount() const { return mTwins.size(); }
     size_t decodeMemberCount() const { return mTwinOfPbs.size(); }
@@ -319,6 +327,11 @@ private:
         Ogre::HlmsPbsDatablock *pbs = nullptr;
         Ogre::HlmsPbsDatablock *twin = nullptr;
         BucketKey key;
+        /// THE BUCKET'S ID (never 0, never reused while the process lives): what the
+        /// table holds and what the twin's draws carry in their per-draw word's .w
+        /// (fillBuffersForV2). NOT the twin's slot: slots repeat across the twins'
+        /// const-buffer pools (512 each), and two buckets must never claim a pixel.
+        uint32_t bucketId = 0u;
         std::vector<std::pair<const Ogre::HlmsDatablock *, uint32_t>> members;
     };
     /// Keyed by the TWIN (what a draw carries).
@@ -326,12 +339,13 @@ private:
     std::unordered_map<const Ogre::HlmsDatablock *, Ogre::HlmsPbsDatablock *> mTwinOfPbs;
     std::unordered_map<BucketKey, Ogre::HlmsPbsDatablock *, BucketKeyHash> mTwinOfKey;
     /// THE BUCKET TABLE: for each PBS material word (pool * slotsPerPool + slot),
-    /// 1 + its bucket twin's slot in THIS Hlms's pool, 0 = no bucket. The decode
-    /// discards a pixel whose entry is not its own draw's twin slot + 1.
+    /// the id of its bucket (Twin::bucketId), 0 = no bucket. The decode discards a
+    /// pixel whose entry is not its own draw's bucket id (worldMaterialIdx.w).
     Ogre::ReadOnlyBufferPacked *mBucketBuf = nullptr;
     std::vector<uint32_t> mBucketMirror;
     bool mBucketDirty = true;
     uint32_t mTwinSerial = 0u;
+    uint32_t mBucketSerial = 0u;
     unsigned long long mTwinEpoch = 0ull;
 
     /// The product's decode draws, per SceneManager: the hit decode's

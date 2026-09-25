@@ -147,7 +147,7 @@ void AtomDrawListenerDeleter::operator()(Ogre::CompositorWorkspaceListener *l) c
 void OgreView::syncAtomDraw() {
     const bool atomDraw = chainDesc().atomDraw;
     if (mScene) {
-        const bool on = mScene->atomDrawOn();
+        const bool on = mScene->atomDrawWanted();
         mScene->noteAtomPbsView(this, on && mStereo, on && !mStereo && !atomDraw);
     }
     // THE SHAPE: the scene's split decides it, and a view learns its scene late
@@ -167,9 +167,10 @@ void OgreView::syncAtomDraw() {
     }
 }
 
-bool OgreScene::atomDrawOn() const {
-    return mAtomDrawEnabled && mGpuScene.live() && mRoot &&
-           atomIdPassSupported(mRoot->getRenderSystem());
+bool OgreScene::atomDrawOn() const { return mGpuScene.live() && atomDrawWanted(); }
+
+bool OgreScene::atomDrawWanted() const {
+    return mAtomDrawEnabled && mRoot && atomIdPassSupported(mRoot->getRenderSystem());
 }
 
 void OgreScene::setAtomDrawEnabled(bool on) {
@@ -214,7 +215,9 @@ void OgreScene::updateAtomDraw() {
         const Ogre::uint32 h = sub->getHlmsHash();
         const uint64_t tk = HlmsAtom::textureSetKeyOf(db);
         if (db == w.db && (h != w.hash || tk != w.texKey)) {
-            atom->forgetDecodeTwinOf(db);
+            // Its twin only if its bucket moved; its items ALWAYS re-compose (a
+            // blend or cull edit keeps the key but moves the route).
+            atom->forgetDecodeTwinIfMoved(db);
             for (Node *n : mItemNodes)
                 if (n && n->item && n->item->getNumSubItems() &&
                     n->item->getSubItem(0)->getDatablock() == db)
@@ -309,6 +312,10 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     // The id pass culls back faces (Ogre's default macroblock); a material drawn
     // with any other cull mode stays where its faces are drawn as authored.
     if (db->getMacroblock()->mCullMode != Ogre::CULL_CLOCKWISE) return AtomRoute::TwoSided;
+    // A PLANAR MIRROR: PBS matches the RENDERABLE to its actor at hash time and binds
+    // that actor's reflection per draw (HlmsPbs::calculateHashForPreCreate / fillBuffersFor);
+    // a decode twin serves a bucket, not a renderable, so the mirror stays on PBS.
+    if (mPlanar && mPlanar->hasPlanarReflections(item->getSubItem(0))) return AtomRoute::Planar;
     // ITS TEXTURES STILL BAKING: no bucket yet (HlmsAtom::isBucketPending) — PBS
     // draws it for those frames; updateAtomDraw re-routes it when they land.
     if (HlmsAtom::isBucketPending(db)) {
@@ -358,6 +365,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         case AtomRoute::CustomPiece: ++st.customPiece; break;
         case AtomRoute::Blended: ++st.blended; break;
         case AtomRoute::TwoSided: ++st.twoSided; break;
+        case AtomRoute::Planar: ++st.planar; break;
         case AtomRoute::AlphaTested: ++st.alphaTested; break;
         case AtomRoute::Skinned: ++st.skinned; break;
         case AtomRoute::NoRow: ++st.noRow; break;
@@ -383,7 +391,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     st.screenDraws = atom ? unsigned(atom->screenDecodeCount(mSceneMgr)) : 0u;
     st.on = atomDrawOn();
     st.stereoViews = unsigned(mAtomStereoViews.size());
-    st.msaaViews = unsigned(mAtomMsaaViews.size());
+    st.passthroughViews = unsigned(mAtomPassthroughViews.size());
     return st;
 }
 

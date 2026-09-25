@@ -438,6 +438,7 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
     t.pbs = pbs;
     t.twin = twin;
     t.key = key;
+    t.bucketId = ++mBucketSerial;
     t.members.emplace_back(pbs, word);
     mTwins[twin] = t;
     mTwinOfPbs[pbs] = twin;
@@ -481,6 +482,19 @@ void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
     // before it destroys materials (the grid's arm does), and Ogre asserts on a
     // datablock with linked renderables.
     if (twin && twin->getNameStr()) destroyDatablock(twin->getName());
+}
+
+bool HlmsAtom::forgetDecodeTwinIfMoved(const Ogre::HlmsDatablock *pbs) {
+    auto it = mTwinOfPbs.find(pbs);
+    if (it == mTwinOfPbs.end()) return false;
+    auto tt = mTwins.find(it->second);
+    BucketKey key;
+    std::string err;
+    if (tt != mTwins.end() && pbs->getCreator() && pbs->getCreator()->getType() == Ogre::HLMS_PBS &&
+        bucketKeyOf(static_cast<const Ogre::HlmsPbsDatablock *>(pbs), key, err) && key == tt->second.key)
+        return false;
+    forgetDecodeTwinOf(pbs);
+    return true;
 }
 
 void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
@@ -645,8 +659,8 @@ void HlmsAtom::destroyDecodeTwins() {
     mBucketDirty = true;
 }
 
-/// THE BUCKET TABLE: one uint per PBS (pool, slot) — 1 + the slot of the twin of
-/// that material's bucket in THIS Hlms's pool, 0 where no bucket serves it.
+/// THE BUCKET TABLE: one uint per PBS (pool, slot) — the id of that material's
+/// bucket (Twin::bucketId), 0 where no bucket serves it.
 /// Rewritten only when a bucket gains or loses a member.
 void HlmsAtom::uploadBucketTable() {
     if (!mBucketDirty || !mVaoManager) return;
@@ -657,7 +671,7 @@ void HlmsAtom::uploadBucketTable() {
     std::vector<uint32_t> table(size_t(pools) * perPool, 0u);
     for (const auto &kv : mTwins) {
         // EVERY MEMBER of the bucket names the bucket's one twin.
-        const uint32_t entry = kv.second.twin->getAssignedSlot() + 1u;
+        const uint32_t entry = kv.second.bucketId;
         for (const auto &m : kv.second.members) {
             const uint32_t pool = m.second >> 16u, slot = m.second & 0xFFFFu;
             if (pool < pools && slot < perPool) table[size_t(pool) * perPool + slot] = entry;
@@ -880,6 +894,11 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
     // read. mLastBoundPool is forgotten so the next draw's PBS half rebinds whatever
     // it needs rather than trusting a slot we overwrote.
     const Ogre::HlmsDatablock *db = queuedRenderable.renderable->getDatablock();
+    // THE DRAW'S BUCKET ID, in the .w of the per-draw word PBS just wrote (its four
+    // uints end at mCurrentMappedConstBuffer; .w is the planar-reflection index, which
+    // no twin's permutation reads — a twin serves a bucket, never a planar renderable).
+    if (auto it = mTwins.find(db); it != mTwins.end())
+        *(mCurrentMappedConstBuffer - 1) = it->second.bucketId;
     if (auto it = mTwins.find(db); it != mTwins.end() && it->second.pbs &&
                                    it->second.pbs->getAssignedPool()) {
         const Ogre::ConstBufferPool::BufferPool *pool = it->second.pbs->getAssignedPool();

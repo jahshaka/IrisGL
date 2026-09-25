@@ -40,7 +40,7 @@ struct GpuCullParams {
     float    planes[24] = {};      ///< 6 x (a, b, c, d), inward, normalised
     float    viewProjRow[16] = {}; ///< row-major
     float    eye[4] = {};
-    float    lod[4] = {};          ///< x tolerance, y proj[1][1], z viewport height, w unused
+    float    lod[4] = {};          ///< x tolerance, y proj[1][1], z viewport height, w 1 = orthographic
     uint32_t counts[4] = {};       ///< x instances, y flagsRequired, z flagsForbidden, w mode
     uint32_t hzb[4] = {};          ///< x levels, y width, z height, w reverseZ
 };

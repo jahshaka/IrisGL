@@ -378,12 +378,14 @@
 		uint atomWord = atomRaster.x;
 		atomOk = atomOk && atomWord != 0xFFFFFFFFu;
 
-		// THE BUCKET: this draw serves the materials whose table entry is its own twin's
-		// slot plus one; every other pixel belongs to another decode draw.
+		// THE BUCKET: this draw serves the materials whose table entry is its own
+		// bucket's id (the per-draw word's w, HlmsAtom::fillBuffersForV2); every other
+		// pixel belongs to another decode draw. A whole id, never a slot: slots repeat
+		// across the twins' pools.
 		uint atomBucketAt = ( atomWord >> 16u ) * @value(atomSlotsPerPool)u + ( atomWord & 0xFFFFu );
 		atomOk = atomOk && atomBucketAt < atomBucketCount && ( atomWord & 0xFFFFu ) < @value(atomSlotsPerPool)u;
 		uint atomBucket = atomBuckets[min( atomBucketAt, max( atomBucketCount, 1u ) - 1u )];
-		atomOk = atomOk && atomBucket == ( worldMaterialIdx[inAtom.drawId].x & 0x1FFu ) + 1u;
+		atomOk = atomOk && atomBucket != 0u && atomBucket == worldMaterialIdx[inAtom.drawId].w;
 
 		uint atomMesh = atomInstances[atomI + 6u].w;
 		@property( atom_hit_mode )

@@ -4454,6 +4454,9 @@ struct AtomDrawStatus {
     unsigned customPiece = 0;
     unsigned blended = 0;
     unsigned twoSided = 0;
+    /// A planar mirror (Scene::setNodePlanarReflector): PBS binds its reflection per
+    /// renderable, which a decode serving a whole bucket cannot.
+    unsigned planar = 0;
     unsigned pending = 0;
     unsigned alphaTested = 0;
     unsigned skinned = 0;
@@ -4468,10 +4471,12 @@ struct AtomDrawStatus {
     /// Views of this scene that draw the atom items through PBS anyway: STEREO
     /// (VR) chains carry no id pass (it renders one eye).
     unsigned stereoViews = 0;
-    /// ...and views that render without a post chain straight into a MULTISAMPLED
-    /// target (the passthrough shape at MSAA > 1): the id pass's one-sample depth
-    /// cannot be that pass's depth.
-    unsigned msaaViews = 0;
+    /// ...and views whose scene pass renders STRAIGHT INTO A WINDOW or a
+    /// multisampled target (the passthrough shape — the Low tier's editor viewport,
+    /// which has no post chain and takes its anti-aliasing from the window's
+    /// samples): the id pass's depth cannot be that pass's depth (Ogre pairs a
+    /// window's colour only with the window's own depth, and one sample with one).
+    unsigned passthroughViews = 0;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
@@ -6598,6 +6603,11 @@ struct GpuCullRequest {
     /// `sampleFootprintPerspective`).
     float projScaleY = 0.0f;
     float viewportHeight = 0.0f;
+    /// AN ORTHOGRAPHIC VIEW: one sample is the same world length at every depth,
+    /// so the level rule takes no distance term (the CPU strategy's ortho case,
+    /// OgreMesh.cpp): the footprint is 2 / (projScaleY * viewportHeight), i.e. the
+    /// ortho window's height over the target's.
+    bool orthographic = false;
     /// GpuInstance flag predicates (GpuSceneEntry::flags documents the bits):
     /// every required bit must be set and no forbidden bit may be.
     unsigned flagsRequired = 0u, flagsForbidden = 0u;

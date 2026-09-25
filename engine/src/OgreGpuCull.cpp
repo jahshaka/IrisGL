@@ -221,6 +221,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.lod[0] = req.pixelTolerance;
         p.lod[1] = req.projScaleY;
         p.lod[2] = req.viewportHeight;
+        p.lod[3] = req.orthographic ? 1.0f : 0.0f;
         p.counts[0] = instances;
         p.counts[1] = req.flagsRequired;
         p.counts[2] = req.flagsForbidden;

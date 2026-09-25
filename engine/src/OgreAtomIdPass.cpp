@@ -334,71 +334,79 @@ bool ensureIdentity(Ogre::VaoManager *vao, const GpuScene &gs) {
 }
 
 /// The recorder (AtomPassProvider's `atom_id`).
+///
+/// THE RENDER PASS ALWAYS BEGINS: it is what clears the scene depth every later pass
+/// of the view LOADS (and the id image). Whatever stops the draw — no view in the
+/// registry yet, a GPU scene not live, a pipeline or a cull that did not record —
+/// stops the DRAW only; an early return before the begin would hand the prepass and
+/// the opaque pass last frame's depth.
 void recordIdPass(AtomPassContext &ctx) {
     auto *pass = static_cast<AtomPass *>(ctx.pass);
-    OgreView *view = pass ? atomViewOf(pass->getParentNode()->getWorkspace()) : nullptr;
-    Ogre::VulkanRenderSystem *vkRs = vulkanOf(ctx.renderSystem);
-    OgreScene *scene = view ? view->ogreScene() : nullptr;
-    Ogre::Camera *cam = view ? view->camera() : nullptr;
-    if (!view || !vkRs || !scene || !cam || !pass->renderPassDesc()) return;
-    GpuScene &gs = scene->gpuScene();
-    if (!gs.live()) return;
+    if (!pass || !pass->renderPassDesc()) return;
     const Ogre::RenderPassDescriptor *rpd = pass->renderPassDesc();
     Ogre::TextureGpu *ids = rpd->mColour[0].texture;
     Ogre::TextureGpu *depthTex = rpd->mDepth.texture;
-    if (!ids || !depthTex) return;
-    const VkFormat colourFmt = Ogre::VulkanMappings::get(ids->getPixelFormat());
-    const VkFormat depthFmt = Ogre::VulkanMappings::get(depthTex->getPixelFormat());
-    if (!ensurePipeline(vkRs, colourFmt, depthFmt)) return;
-    Ogre::VaoManager *vao = vkRs->getVaoManager();
-    gs.flushGeomRows();
-    if (!ensureIdentity(vao, gs)) {
-        logOnce("the identity index buffer could not be created");
-        return;
-    }
+    Ogre::VulkanRenderSystem *vkRs = vulkanOf(ctx.renderSystem);
+    if (!ids || !depthTex || !vkRs) return;
+    OgreView *view = atomViewOf(pass->getParentNode()->getWorkspace());
+    OgreScene *scene = view ? view->ogreScene() : nullptr;
+    Ogre::Camera *cam = view ? view->camera() : nullptr;
+    GpuScene *gs = scene ? &scene->gpuScene() : nullptr;
     Ogre::VulkanDevice *device = vkRs->getVulkanDevice();
-
-    // ---- (0) THE LIST'S WRITE-AFTER-READ: the previous frame's draw read it. ----
-    {
-        VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
-                             nullptr, 0, nullptr, 0, nullptr);
-    }
-
-    // ---- (1) THE CULL, into the view's own list ----------------------------------
-    // THE CAMERA'S ASPECT FIRST (CompositorPassScene::execute -> Viewport::
-    // _setupAspectRatio): the scene passes set it when they run, and this pass runs
-    // before all of them — a view sharing its camera with a view of another shape
-    // (an editor shot) would otherwise cull and project with the other one's.
     const Ogre::CompositorPassDef::ViewportRect &vpRect = pass->getDefinition()->mVpRect[0];
-    {
-        const int aw = int(vpRect.mVpWidth * float(ids->getWidth()));
-        const int ah = int(vpRect.mVpHeight * float(ids->getHeight()));
-        const Ogre::Real aspect = Ogre::Real(aw) / Ogre::Real(std::max(1, ah));
-        if (cam->getAutoAspectRatio() && cam->getAspectRatio() != aspect) cam->setAspectRatio(aspect);
+    bool draw = cam && gs && gs->live();
+    if (draw) {
+        const VkFormat colourFmt = Ogre::VulkanMappings::get(ids->getPixelFormat());
+        const VkFormat depthFmt = Ogre::VulkanMappings::get(depthTex->getPixelFormat());
+        draw = ensurePipeline(vkRs, colourFmt, depthFmt);
     }
-    GpuCullRequest req;
-    fillCullFrustum(cam, float(ids->getHeight()), req);
-    req.flagsRequired = kGpuVisible | kGpuAtom;
-    req.flagsForbidden = 0u;
-    req.hzbLevels = 0u;
-    // THE DRAW PATH'S OWN TOLERANCE: one pixel, scaled by the scene's LOD bias
-    // (OgreScene::applyLodValues divides the baked thresholds by it — the same
-    // dial seen from the other side). The LOD seam: Ogre's CPU choice carries
-    // hysteresis (patch 0075) and this one does not, so near a threshold the id
-    // pass may draw a level the shadow casters do not.
-    req.pixelTolerance = 1.0f * scene->lodBias();
-    req.mode = 2u;
-    std::string err;
-    GpuCull &cull = view->atomCull();
-    if (!scene->recordGpuCull(cull, req, nullptr, err)) {
-        logOnce("the cull did not record (" + err + ")");
-        return;
+    if (draw) {
+        gs->flushGeomRows();
+        draw = ensureIdentity(vkRs->getVaoManager(), *gs);
+        if (!draw) logOnce("the identity index buffer could not be created");
     }
+    GpuCull *cullPtr = nullptr;
+    if (draw) {
+        // ---- (0) THE LIST'S WRITE-AFTER-READ: the previous frame's draw read it. ----
+        {
+            VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
+                                 nullptr, 0, nullptr, 0, nullptr);
+        }
 
-    // ---- (2) THE EDGES THE SOLVER CANNOT EXPRESS ---------------------------------
-    {
+        // ---- (1) THE CULL, into the view's own list ------------------------------
+        // THE CAMERA'S ASPECT FIRST (CompositorPassScene::execute -> Viewport::
+        // _setupAspectRatio): the scene passes set it when they run, and this pass
+        // runs before all of them — a view sharing its camera with a view of another
+        // shape (an editor shot) would otherwise cull and project with the other one's.
+        {
+            const int aw = int(vpRect.mVpWidth * float(ids->getWidth()));
+            const int ah = int(vpRect.mVpHeight * float(ids->getHeight()));
+            const Ogre::Real aspect = Ogre::Real(aw) / Ogre::Real(std::max(1, ah));
+            if (cam->getAutoAspectRatio() && cam->getAspectRatio() != aspect) cam->setAspectRatio(aspect);
+        }
+        GpuCullRequest req;
+        fillCullFrustum(cam, float(ids->getHeight()), req);
+        req.flagsRequired = kGpuVisible | kGpuAtom;
+        req.flagsForbidden = 0u;
+        req.hzbLevels = 0u;
+        // THE VIEW STRATEGY'S OWN BUDGET (kLodBudgetPixels), scaled by the scene's LOD bias
+        // (OgreScene::applyLodValues divides the baked thresholds by it — the same
+        // dial seen from the other side). The LOD seam: Ogre's CPU choice carries
+        // hysteresis (patch 0075) and this one does not, so near a threshold the id
+        // pass may draw a level the shadow casters do not.
+        req.pixelTolerance = kLodBudgetPixels * scene->lodBias();
+        req.mode = 2u;
+        std::string err;
+        cullPtr = &view->atomCull();
+        if (!scene->recordGpuCull(*cullPtr, req, nullptr, err)) {
+            logOnce("the cull did not record (" + err + ")");
+            draw = false;
+        }
+    }
+    if (draw) {
+        // ---- (2) THE EDGES THE SOLVER CANNOT EXPRESS -----------------------------
         VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
         VkMemoryBarrier mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -426,6 +434,8 @@ void recordIdPass(AtomPassContext &ctx) {
         cr.layerCount = 1;
         vkCmdClearAttachments(cmd, 1, &ca, 1, &cr);
     }
+    if (!draw) return;   // the depth is cleared (the begin) and the ids are empty
+    GpuCull &cull = *cullPtr;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       gId.pipeline[rpd->requiresTextureFlipping() ? 1 : 0]);
     ctx.boundRawState = true;
@@ -457,9 +467,9 @@ void recordIdPass(AtomPassContext &ctx) {
         IdPushConstants pc{};
         for (int rr = 0; rr < 4; ++rr)
             for (int c = 0; c < 4; ++c) pc.viewProjRow[rr * 4 + c] = float(vpm[rr][c]);
-        addressOf(gs.instanceBuffer(), pc.instances);
-        addressOf(gs.levelBuffer(), pc.levels);
-        addressOf(gs.geomBuffer(), pc.rows);
+        addressOf(gs->instanceBuffer(), pc.instances);
+        addressOf(gs->levelBuffer(), pc.levels);
+        addressOf(gs->geomBuffer(), pc.rows);
         addressOf(cull.levels(), pc.cullLevels);
         vkCmdPushConstants(cmd, gId.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
     }
@@ -473,7 +483,7 @@ void recordIdPass(AtomPassContext &ctx) {
         bufferOf(cull.draws(), drawBuf, drawOff);
         bufferOf(cull.count(), countBuf, countOff);
         gId.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff,
-                                     std::min(cull.capacity(), gs.slotCount()),
+                                     std::min(cull.capacity(), gs->slotCount()),
                                      GpuCull::kDrawWords * sizeof(uint32_t));
     }
 }

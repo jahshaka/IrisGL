@@ -5741,13 +5741,19 @@ private:
     /// first reason (AtomDrawStatus names them in order). `Stock` = an item in a
     /// queue the split never touches.
     enum class AtomRoute : uint8_t {
-        Atom, NotWorld, NotPbs, CustomPiece, Blended, TwoSided, Pending, AlphaTested, Skinned, NoRow, Stock
+        Atom, NotWorld, NotPbs, CustomPiece, Blended, TwoSided, Planar, Pending, AlphaTested, Skinned, NoRow, Stock
     };
     AtomRoute atomRouteFor(const Node &n, Ogre::uint32 flags) const;
 public:
     /// The split is live in this scene: the GPU scene exists, the id pass can run on
     /// this device (OgreAtomIdPass.cpp) and the measurement door is open.
     bool atomDrawOn() const;
+    /// The split is WANTED here: the door is open and this device runs the id pass.
+    /// What a view's chain SHAPE reads — never the GPU scene's liveness, which
+    /// arrives during the first frame and would rebuild every new view's workspace
+    /// one frame in (the id pass of a scene whose table is not live yet clears the
+    /// depth and draws nothing; every item is still on PBS then).
+    bool atomDrawWanted() const;
     /// Once per frame after the GPU scene's update (OgreEngine's frame hook): the
     /// screen decode's draws for the words the atom items wear, and the witness
     /// that re-routes the items of a material whose permutation moved in place.
@@ -5762,14 +5768,14 @@ private:
     /// A route answered Pending (textures still baking) since the last update.
     mutable bool mAtomPendingSeen = false;
     /// The views of this scene whose chains carry no id pass while the split is
-    /// live, by reason (AtomDrawStatus::stereoViews / msaaViews): they draw the
+    /// live, by reason (AtomDrawStatus::stereoViews / passthroughViews): they draw the
     /// Atom queue through PBS.
-    std::unordered_set<const void *> mAtomStereoViews, mAtomMsaaViews;
+    std::unordered_set<const void *> mAtomStereoViews, mAtomPassthroughViews;
 public:
     /// OgreView::syncAtomDraw's report, every frame (both false on detach).
-    void noteAtomPbsView(const void *view, bool stereo, bool msaa) {
+    void noteAtomPbsView(const void *view, bool stereo, bool passthrough) {
         if (stereo) mAtomStereoViews.insert(view); else mAtomStereoViews.erase(view);
-        if (msaa) mAtomMsaaViews.insert(view); else mAtomMsaaViews.erase(view);
+        if (passthrough) mAtomPassthroughViews.insert(view); else mAtomPassthroughViews.erase(view);
     }
 private:
     /// updateAtomDraw's memory: the GPU scene writes it last synced at, and one
@@ -6311,6 +6317,8 @@ public:
     /// The clear colour and the shadow node live in the chain's definitions:
     /// rebuild definitions + workspace, keeping scene, camera and enabled state.
     void rebuildWorkspaceDef();
+    /// ...its body, for a caller that has already detached the workspace.
+    void rebuildDetachedWorkspaceDef();
     static constexpr const char *kShadowNodeName = "JahshakaShadowNode";
     /// The SECOND shadow node, at half the base resolution, used ONLY by the
     /// planar-reflection pass. CompositorShadowNodes are per-workspace and are
