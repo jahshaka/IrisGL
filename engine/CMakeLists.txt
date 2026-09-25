@@ -36,6 +36,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuVoxelGather.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDraw.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomPass.h

@@ -45,6 +45,91 @@ namespace detail {
 
 const char *const HlmsAtom::kTypeName = "Atom";
 
+namespace {
+struct FsVertex {
+    float px = 0, py = 0, pz = 0;              // POSITION: clip-space xy
+    float nx = 0, ny = 0, nz = 0;              // NORMAL
+    float tx = 0, ty = 0, tz = 0, tw = 0;      // TANGENT4
+    float u = 0, v = 0;                        // UV0
+};
+// Clip space, z = 0, w = 1: the decode neither tests nor writes depth (the twin's
+// macroblock says so); the id image alone decides coverage.
+const FsVertex kFullScreenTri[3] = {
+    { -1.0f, -1.0f, 0.0f, 0, 0, 1, 1, 0, 0, 1, 0, 0 },
+    { 3.0f, -1.0f, 0.0f, 0, 0, 1, 1, 0, 0, 1, 0, 0 },
+    { -1.0f, 3.0f, 0.0f, 0, 0, 1, 1, 0, 0, 1, 0, 0 },
+};
+
+/// The full-screen triangle's geometry — ONE layout, shared by every decode draw
+/// and by the bucket key's probe (the key is the permutation over exactly this
+/// layout).
+Ogre::VertexArrayObject *createFullScreenVao(Ogre::VaoManager *vaoManager) {
+    auto *indices = reinterpret_cast<Ogre::uint16 *>(
+        OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * 3u, Ogre::MEMCATEGORY_GEOMETRY));
+    indices[0] = 0;
+    indices[1] = 1;
+    indices[2] = 2;
+    Ogre::IndexBufferPacked *indexBuffer = vaoManager->createIndexBuffer(
+        Ogre::IndexBufferPacked::IT_16BIT, 3u, Ogre::BT_IMMUTABLE, indices, true);
+    Ogre::VertexElement2Vec elements;
+    elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_POSITION));
+    elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_NORMAL));
+    elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_TANGENT));
+    elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT2, Ogre::VES_TEXTURE_COORDINATES));
+    auto *verts = reinterpret_cast<FsVertex *>(
+        OGRE_MALLOC_SIMD(sizeof(kFullScreenTri), Ogre::MEMCATEGORY_GEOMETRY));
+    std::memcpy(verts, kFullScreenTri, sizeof(kFullScreenTri));
+    Ogre::VertexBufferPacked *vertexBuffer =
+        vaoManager->createVertexBuffer(elements, 3u, Ogre::BT_IMMUTABLE, verts, true);
+    Ogre::VertexBufferPackedVec vertexBuffers;
+    vertexBuffers.push_back(vertexBuffer);
+    return vaoManager->createVertexArrayObject(vertexBuffers, indexBuffer, Ogre::OT_TRIANGLE_LIST);
+}
+
+void destroyFullScreenVao(Ogre::VaoManager *vaoManager, Ogre::VertexArrayObject *vao) {
+    if (!vao || !vaoManager) return;
+    Ogre::IndexBufferPacked *ib = vao->getIndexBuffer();
+    const Ogre::VertexBufferPackedVec vbs = vao->getVertexBuffers();
+    vaoManager->destroyVertexArrayObject(vao);
+    if (ib) vaoManager->destroyIndexBuffer(ib);
+    for (Ogre::VertexBufferPacked *vb : vbs) vaoManager->destroyVertexBuffer(vb);
+}
+}  // namespace
+
+/// THE BUCKET KEY'S PROBE: a bare Renderable (no MovableObject, never queued,
+/// never drawn) carrying the full-screen layout. It WEARS a datablock only for
+/// the length of one calculateHashFor and never links to it (a linked renderable
+/// would be flushed and re-hashed by PBS on every edit of that datablock).
+class AtomKeyProbe final : public Ogre::Renderable {
+public:
+    explicit AtomKeyProbe(Ogre::VaoManager *vaoManager) : mVaoManager(vaoManager) {
+        mVao = createFullScreenVao(vaoManager);
+        mVaoPerLod[Ogre::VpNormal].push_back(mVao);
+        mVaoPerLod[Ogre::VpShadow].push_back(mVao);
+    }
+    ~AtomKeyProbe() override {
+        mHlmsDatablock = nullptr;   // never linked (see wear)
+        mVaoPerLod[Ogre::VpNormal].clear();
+        mVaoPerLod[Ogre::VpShadow].clear();
+        destroyFullScreenVao(mVaoManager, mVao);
+    }
+    void wear(Ogre::HlmsDatablock *db) { mHlmsDatablock = db; }
+    void getRenderOperation(Ogre::v1::RenderOperation &, bool) override {
+        OGRE_EXCEPT(Ogre::Exception::ERR_NOT_IMPLEMENTED, "v2 only", "AtomKeyProbe");
+    }
+    void getWorldTransforms(Ogre::Matrix4 *) const override {
+        OGRE_EXCEPT(Ogre::Exception::ERR_NOT_IMPLEMENTED, "v2 only", "AtomKeyProbe");
+    }
+    const Ogre::LightList &getLights() const override { return mNoLights; }
+    bool getCastsShadows() const override { return false; }
+
+private:
+    Ogre::VaoManager *mVaoManager = nullptr;
+    Ogre::VertexArrayObject *mVao = nullptr;
+    Ogre::LightList mNoLights;
+};
+
+
 HlmsAtom::HlmsAtom(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders)
     : Ogre::HlmsPbs(dataFolder, libraryFolders) {
     // Terra's own three lines (OgreHlmsTerra.cpp:87-89).
@@ -64,6 +149,8 @@ HlmsAtom::HlmsAtom(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders)
 
 HlmsAtom::~HlmsAtom() {
     destroyDecodeTwins();
+    delete mKeyProbe;
+    mKeyProbe = nullptr;
     if (mPointSampler && mHlmsManager) mHlmsManager->destroySamplerblock(mPointSampler);
     mPointSampler = nullptr;
     if (mEmptyBuf && mVaoManager) mVaoManager->destroyReadOnlyBuffer(mEmptyBuf);
@@ -180,25 +267,106 @@ uint32_t HlmsAtom::materialWordOf(const Ogre::HlmsDatablock *db) {
 }
 
 // ---------------------------------------------------------------------------
-// THE DECODE TWIN
+// THE DECODE BUCKET (S3-DRAW)
 // ---------------------------------------------------------------------------
-Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std::string &err) {
-    if (!pbs || !pbs->getCreator() || pbs->getCreator()->getType() != Ogre::HLMS_PBS) {
-        err = "decodeTwinFor: not an HlmsPbs datablock";
-        return nullptr;
+namespace {
+/// A property that does not reach the twin: the twin carries its own opaque
+/// blendblock and its own depth-less CULL_NONE macroblock (decodeTwinForBucket), so the
+/// PBS datablock's are not part of the permutation a decode draw compiles.
+bool twinDiscards(const Ogre::IdString &key) {
+    return key == Ogre::HlmsPsoProp::Macroblock || key == Ogre::HlmsPsoProp::Blendblock ||
+           key == Ogre::HlmsBaseProp::AlphaBlend || key == Ogre::HlmsBaseProp::AlphaToCoverage;
+}
+void fnvMix(uint64_t &h, uint64_t v) {
+    for (int b = 0; b < 8; ++b) {
+        h ^= (v & 0xFFu);
+        h *= 1099511628211ull;
+        v >>= 8u;
     }
-    if (auto it = mTwinOfPbs.find(pbs); it != mTwinOfPbs.end()) return it->second;
+}
+}  // namespace
+
+bool HlmsAtom::bucketKeyOf(const Ogre::HlmsPbsDatablock *pbs, BucketKey &out, std::string &err) {
+    if (!pbs || !pbs->getCreator() || pbs->getCreator()->getType() != Ogre::HLMS_PBS) {
+        err = "bucketKeyOf: not an HlmsPbs datablock";
+        return false;
+    }
     for (size_t s = 0; s < Ogre::CustomPieceStage::NumCustomPieceStages; ++s) {
         if (pbs->getCustomPieceFileIdHash(Ogre::CustomPieceStage::CustomPieceStage(s))) {
-            err = "decodeTwinFor: the datablock carries a per-datablock custom piece; it stays "
-                  "on stock HlmsPbs (D1 section 1)";
-            return nullptr;
+            err = "bucketKeyOf: a per-datablock custom piece (the twin cannot carry it)";
+            return false;
         }
     }
     const uint32_t word = materialWordOf(pbs);
     if (word == kNoMaterialWord) {
-        err = "decodeTwinFor: the datablock has no const-buffer slot";
+        err = "bucketKeyOf: the datablock has no const-buffer slot";
+        return false;
+    }
+    if (!mKeyProbe) {
+        if (!mVaoManager) {
+            err = "bucketKeyOf: no VaoManager (the headless boot)";
+            return false;
+        }
+        mKeyProbe = new AtomKeyProbe(mVaoManager);
+    }
+    // OGRE'S OWN DERIVATION: calculateHashFor over the full-screen layout wearing
+    // the PBS datablock — the property set the twin (its JSON clone) generates,
+    // up to the blend/macro state the twin replaces. The entry it leaves in this
+    // Hlms's renderable cache is the one a twin of this bucket would find anyway.
+    mKeyProbe->wear(const_cast<Ogre::HlmsPbsDatablock *>(pbs));
+    Ogre::uint32 hash = 0u, casterHash = 0u;
+    try { calculateHashFor(mKeyProbe, hash, casterHash); }
+    catch (Ogre::Exception &e) {
+        mKeyProbe->wear(nullptr);
+        err = "bucketKeyOf: " + e.getFullDescription();
+        return false;
+    }
+    mKeyProbe->wear(nullptr);
+    const size_t idx = (hash >> Ogre::HlmsBits::RenderableShift) & Ogre::HlmsBits::RenderableMask;
+    if (idx >= mRenderableCache.size()) {
+        err = "bucketKeyOf: the renderable cache has no entry for the hash";
+        return false;
+    }
+    const RenderableCache &rc = mRenderableCache[idx];
+    uint64_t h = 1469598103934665603ull;
+    for (const Ogre::HlmsProperty &p : rc.setProperties) {
+        if (twinDiscards(p.keyName)) continue;
+        fnvMix(h, p.keyName.getU32Value());
+        fnvMix(h, uint64_t(uint32_t(p.value)));
+    }
+    for (size_t st = 0; st < Ogre::NumShaderTypes; ++st) {
+        fnvMix(h, 0xA70Du + st);
+        for (const auto &kv : rc.pieces[st]) {
+            fnvMix(h, kv.first.getU32Value());
+            for (const char c : kv.second) fnvMix(h, uint64_t(uint8_t(c)));
+        }
+    }
+    out.permutation = h;
+    out.textures = textureSetKeyOf(pbs);
+    out.pool = word >> 16u;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE DECODE TWIN
+// ---------------------------------------------------------------------------
+Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pbs, std::string &err) {
+    if (!pbs || !pbs->getCreator() || pbs->getCreator()->getType() != Ogre::HLMS_PBS) {
+        err = "decodeTwinForBucket: not an HlmsPbs datablock";
         return nullptr;
+    }
+    if (auto it = mTwinOfPbs.find(pbs); it != mTwinOfPbs.end()) return it->second;
+    BucketKey key;
+    if (!bucketKeyOf(pbs, key, err)) return nullptr;
+    const uint32_t word = materialWordOf(pbs);
+    // A MEMBER JOINS ITS BUCKET: the twin already exists, and only the bucket
+    // table learns the new word.
+    if (auto kt = mTwinOfKey.find(key); kt != mTwinOfKey.end()) {
+        Twin &t = mTwins[kt->second];
+        t.members.emplace_back(pbs, word);
+        mTwinOfPbs[pbs] = kt->second;
+        mBucketDirty = true;
+        return kt->second;
     }
 
     // OGRE'S OWN SERIALISER IS THE COPY. HlmsJson writes one datablock under its
@@ -206,10 +374,13 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std
     // PBS's JSON half registers (HlmsAtom inherits HlmsPbs::_loadJson), into this
     // Hlms. Every permutation-relevant field travels — the textures (retrieved by
     // name, never reloaded), their samplers and uv sets, workflow, BRDF, transparency,
-    // the maps — without a field list of ours to fall out of date.
+    // the maps — without a field list of ours to fall out of date. The bucket's
+    // FIRST member is cloned; every later member has the same key, i.e. the same
+    // permutation and textures, and differs only in the constants the decode reads
+    // by slot from the pool.
     const Ogre::String *pbsName = pbs->getNameStr();
     if (!pbsName) {
-        err = "decodeTwinFor: the datablock has no name to serialise";
+        err = "decodeTwinForBucket: the datablock has no name to serialise";
         return nullptr;
     }
     const Ogre::String twinName = "jahAtomTwin/" + std::to_string(++mTwinSerial) + "/" + *pbsName;
@@ -222,7 +393,7 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std
     const Ogre::String::size_type nameAt =
         at == Ogre::String::npos ? Ogre::String::npos : json.find(nameKey, at + typeKey.size());
     if (at == Ogre::String::npos || nameAt == Ogre::String::npos) {
-        err = "decodeTwinFor: unexpected JSON shape from HlmsJson::saveMaterial";
+        err = "decodeTwinForBucket: unexpected JSON shape from HlmsJson::saveMaterial";
         return nullptr;
     }
     json.replace(nameAt, nameKey.size(), "\"" + twinName + "\" :");
@@ -231,12 +402,12 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std
         hj.loadMaterials("jahAtomTwin", Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
                          json.c_str(), "");
     } catch (Ogre::Exception &e) {
-        err = "decodeTwinFor: " + e.getFullDescription();
+        err = "decodeTwinForBucket: " + e.getFullDescription();
         return nullptr;
     }
     auto *twin = static_cast<Ogre::HlmsPbsDatablock *>(getDatablock(Ogre::IdString(twinName)));
     if (!twin) {
-        err = "decodeTwinFor: the twin did not load";
+        err = "decodeTwinForBucket: the twin did not load";
         return nullptr;
     }
     // THE DECODE'S MACROBLOCK: a full-screen triangle neither tests nor writes the
@@ -258,9 +429,11 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std
     Twin t;
     t.pbs = pbs;
     t.twin = twin;
-    t.pbsWord = word;
+    t.key = key;
+    t.members.emplace_back(pbs, word);
     mTwins[twin] = t;
     mTwinOfPbs[pbs] = twin;
+    mTwinOfKey[key] = twin;
     mBucketDirty = true;
     return twin;
 }
@@ -269,18 +442,37 @@ void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
     auto it = mTwinOfPbs.find(pbs);
     if (it == mTwinOfPbs.end()) return;
     Ogre::HlmsPbsDatablock *twin = it->second;
-    // THE PRODUCT'S DRAWS OF THE TWIN die first, in every scene (Ogre asserts on a
-    // datablock with linked renderables), and the epoch moves: a scene's synced
-    // word set may now name a datablock that no longer exists.
-    for (auto &kv : mSceneDecodes) destroySceneDraw(kv.first, kv.second, twin);
-    ++mTwinEpoch;
     mTwinOfPbs.erase(it);
-    mTwins.erase(twin);
+    mBucketDirty = true;
+    // The epoch moves on every departure: a scene's synced word set may now name
+    // a datablock that no longer exists, or one that belongs to another bucket.
+    ++mTwinEpoch;
+    auto tt = mTwins.find(twin);
+    if (tt == mTwins.end()) return;
+    Twin &t = tt->second;
+    t.members.erase(std::remove_if(t.members.begin(), t.members.end(),
+                                   [pbs](const std::pair<const Ogre::HlmsDatablock *, uint32_t> &m) {
+                                       return m.first == pbs;
+                                   }),
+                    t.members.end());
+    if (!t.members.empty()) {
+        // THE BUCKET LIVES ON: the twin is a clone of the bucket's state, which
+        // every remaining member shares (the key), and the pool the draw binds is
+        // any member's (the key holds it) — never the departed one's pointer.
+        if (t.pbs == pbs)
+            t.pbs = static_cast<Ogre::HlmsPbsDatablock *>(
+                const_cast<Ogre::HlmsDatablock *>(t.members.front().first));
+        return;
+    }
+    // THE LAST MEMBER LEFT: the product's draws of the twin die first, in every
+    // scene (Ogre asserts on a datablock with linked renderables), then the twin.
+    for (auto &kv : mSceneDecodes) destroySceneDraw(kv.first, kv.second, twin);
+    mTwinOfKey.erase(t.key);
+    mTwins.erase(tt);
     // A decode draw may still carry the twin; the owner detaches its renderables
     // before it destroys materials (the grid's arm does), and Ogre asserts on a
     // datablock with linked renderables.
     if (twin && twin->getNameStr()) destroyDatablock(twin->getName());
-    mBucketDirty = true;
 }
 
 void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
@@ -332,7 +524,7 @@ void HlmsAtom::syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32
         // pass has. A hit on it is not shaded by the decode (stated, not hidden).
         if (it->second->getTransparencyMode() == Ogre::HlmsPbsDatablock::Refractive) continue;
         std::string err;
-        Ogre::HlmsPbsDatablock *twin = decodeTwinFor(it->second, err);
+        Ogre::HlmsPbsDatablock *twin = decodeTwinForBucket(it->second, err);
         if (!twin) {
             // Once per datablock name: a material the decode cannot serve (a
             // per-datablock custom piece) keeps its hits unshaded — stated.
@@ -401,25 +593,30 @@ void HlmsAtom::destroyDecodeTwins() {
     }
     mTwins.clear();
     mTwinOfPbs.clear();
+    mTwinOfKey.clear();
     if (mBucketBuf && mVaoManager) mVaoManager->destroyReadOnlyBuffer(mBucketBuf);
     mBucketBuf = nullptr;
     mBucketMirror.clear();
     mBucketDirty = true;
 }
 
-/// THE BUCKET TABLE: one uint per PBS (pool, slot) — 1 + the twin's slot in THIS
-/// Hlms's pool, 0 where no twin serves that material. Rewritten only when the twin
-/// set changes.
+/// THE BUCKET TABLE: one uint per PBS (pool, slot) — 1 + the slot of the twin of
+/// that material's bucket in THIS Hlms's pool, 0 where no bucket serves it.
+/// Rewritten only when a bucket gains or loses a member.
 void HlmsAtom::uploadBucketTable() {
     if (!mBucketDirty || !mVaoManager) return;
     mBucketDirty = false;
     uint32_t pools = 1u;
-    for (const auto &kv : mTwins) pools = std::max(pools, (kv.second.pbsWord >> 16u) + 1u);
+    for (const auto &kv : mTwins) pools = std::max(pools, kv.second.key.pool + 1u);
     const uint32_t perPool = mSlotsPerPool;
     std::vector<uint32_t> table(size_t(pools) * perPool, 0u);
     for (const auto &kv : mTwins) {
-        const uint32_t pool = kv.second.pbsWord >> 16u, slot = kv.second.pbsWord & 0xFFFFu;
-        if (slot < perPool) table[size_t(pool) * perPool + slot] = kv.second.twin->getAssignedSlot() + 1u;
+        // EVERY MEMBER of the bucket names the bucket's one twin.
+        const uint32_t entry = kv.second.twin->getAssignedSlot() + 1u;
+        for (const auto &m : kv.second.members) {
+            const uint32_t pool = m.second >> 16u, slot = m.second & 0xFFFFu;
+            if (pool < pools && slot < perPool) table[size_t(pool) * perPool + slot] = entry;
+        }
     }
     // A read-only buffer's ELEMENT is one byte (VaoManager::createReadOnlyBuffer
     // hands the Vulkan implementation bytesPerElement = 1), so sizes and upload
@@ -650,22 +847,6 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
 // ---------------------------------------------------------------------------
 // THE FULL-SCREEN TRIANGLE
 // ---------------------------------------------------------------------------
-namespace {
-struct FsVertex {
-    float px = 0, py = 0, pz = 0;              // POSITION: clip-space xy
-    float nx = 0, ny = 0, nz = 0;              // NORMAL
-    float tx = 0, ty = 0, tz = 0, tw = 0;      // TANGENT4
-    float u = 0, v = 0;                        // UV0
-};
-// Clip space, z = 0, w = 1: the decode neither tests nor writes depth (the twin's
-// macroblock says so); the id image alone decides coverage.
-const FsVertex kFullScreenTri[3] = {
-    { -1.0f, -1.0f, 0.0f, 0, 0, 1, 1, 0, 0, 1, 0, 0 },
-    { 3.0f, -1.0f, 0.0f, 0, 0, 1, 1, 0, 0, 1, 0, 0 },
-    { -1.0f, 3.0f, 0.0f, 0, 0, 1, 1, 0, 0, 1, 0, 0 },
-};
-}  // namespace
-
 AtomDecodeRenderable::AtomDecodeRenderable(Ogre::IdType id,
                                            Ogre::ObjectMemoryManager *objectMemoryManager,
                                            Ogre::SceneManager *manager, Ogre::uint8 renderQueueId)
@@ -676,28 +857,7 @@ AtomDecodeRenderable::AtomDecodeRenderable(Ogre::IdType id,
     mObjectData.mWorldAabb->setFromAabb(aabb, mObjectData.mIndex);
     mObjectData.mLocalRadius[mObjectData.mIndex] = std::numeric_limits<Ogre::Real>::max();
     mObjectData.mWorldRadius[mObjectData.mIndex] = std::numeric_limits<Ogre::Real>::max();
-
-    Ogre::VaoManager *vaoManager = manager->getDestinationRenderSystem()->getVaoManager();
-    auto *indices = reinterpret_cast<Ogre::uint16 *>(
-        OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * 3u, Ogre::MEMCATEGORY_GEOMETRY));
-    indices[0] = 0;
-    indices[1] = 1;
-    indices[2] = 2;
-    Ogre::IndexBufferPacked *indexBuffer = vaoManager->createIndexBuffer(
-        Ogre::IndexBufferPacked::IT_16BIT, 3u, Ogre::BT_IMMUTABLE, indices, true);
-    Ogre::VertexElement2Vec elements;
-    elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_POSITION));
-    elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_NORMAL));
-    elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_TANGENT));
-    elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT2, Ogre::VES_TEXTURE_COORDINATES));
-    auto *verts = reinterpret_cast<FsVertex *>(
-        OGRE_MALLOC_SIMD(sizeof(kFullScreenTri), Ogre::MEMCATEGORY_GEOMETRY));
-    std::memcpy(verts, kFullScreenTri, sizeof(kFullScreenTri));
-    Ogre::VertexBufferPacked *vertexBuffer =
-        vaoManager->createVertexBuffer(elements, 3u, Ogre::BT_IMMUTABLE, verts, true);
-    Ogre::VertexBufferPackedVec vertexBuffers;
-    vertexBuffers.push_back(vertexBuffer);
-    mVao = vaoManager->createVertexArrayObject(vertexBuffers, indexBuffer, Ogre::OT_TRIANGLE_LIST);
+    mVao = createFullScreenVao(manager->getDestinationRenderSystem()->getVaoManager());
     mVaoPerLod[Ogre::VpNormal].push_back(mVao);
     mVaoPerLod[Ogre::VpShadow].push_back(mVao);
     mRenderables.push_back(this);
@@ -709,14 +869,8 @@ AtomDecodeRenderable::~AtomDecodeRenderable() {
     // startup/teardown trap: a geometry object outliving Root throws in VaoManager).
     mVaoPerLod[Ogre::VpNormal].clear();
     mVaoPerLod[Ogre::VpShadow].clear();
-    if (mVao && mManager) {
-        Ogre::VaoManager *vaoManager = mManager->getDestinationRenderSystem()->getVaoManager();
-        Ogre::IndexBufferPacked *ib = mVao->getIndexBuffer();
-        const Ogre::VertexBufferPackedVec vbs = mVao->getVertexBuffers();
-        vaoManager->destroyVertexArrayObject(mVao);
-        if (ib) vaoManager->destroyIndexBuffer(ib);
-        for (Ogre::VertexBufferPacked *vb : vbs) vaoManager->destroyVertexBuffer(vb);
-    }
+    if (mVao && mManager)
+        destroyFullScreenVao(mManager->getDestinationRenderSystem()->getVaoManager(), mVao);
     mVao = nullptr;
 }
 

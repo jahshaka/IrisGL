@@ -3351,6 +3351,7 @@ public:
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const override;
+    AtomDrawStatus atomDrawStatus() override;
     GpuSceneStatus gpuSceneStatus() const override;
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
@@ -5684,6 +5685,14 @@ private:
     unsigned long long mRayLevelWalks = 0ull;
     /// THE ONE PLACE the per-item predicates are computed (GpuInstanceFlag).
     Ogre::uint32 gpuFlagsFor(const Node &n) const;
+    /// THE RENDER-QUEUE SPLIT'S ONE DECISION (ATOM S3-DRAW, OgreAtomDraw.cpp):
+    /// does the id pass draw this item and the decode shade it, and if not, the
+    /// first reason (AtomDrawStatus names them in order). `Stock` = an item in a
+    /// queue the split never touches.
+    enum class AtomRoute : uint8_t {
+        Atom, NotPbs, CustomPiece, Blended, AlphaTested, Skinned, MultiSubmesh, NoRow, Stock
+    };
+    AtomRoute atomRouteFor(const Node &n, Ogre::uint32 flags) const;
     /// A seam that changed what a slot's entry SAYS without moving anything —
     /// a visibility, light-mask, cast-shadow, render-queue or material write.
     /// The movement epoch cannot see those (a furniture visibility write is

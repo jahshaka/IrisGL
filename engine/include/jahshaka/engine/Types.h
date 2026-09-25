@@ -4385,7 +4385,7 @@ struct RayQueryStatus {
     /// `hitDropped`: of those, dropped because the list was full (their rays have
     /// no sample that frame — a stat, never a crash), `hitCapacity`: the list's
     /// size (the largest view's), `hitDecodeDraws`: the decode draws the scene
-    /// holds (one per decode twin: S3-DRAW's bucket merge is owed). Read several
+    /// holds (one per decode BUCKET — HlmsAtom::BucketKey, S3-DRAW). Read several
     /// frames late, never with a wait.
     unsigned long long hitRecords = 0;
     unsigned long long hitDropped = 0;
@@ -4411,6 +4411,44 @@ struct RayQueryStatus {
     /// GPU milliseconds of that dispatch, read back from a timestamp pair
     /// several frames later and never with a wait. -1 until measured.
     float reflectMs = -1.0f;
+};
+
+/// THE VISIBILITY BUFFER'S SPLIT AND ITS BUCKETS (ATOM S3-DRAW,
+/// SPECS/atom/D3_S3_DRAW_DESIGN.md §2.2/§2.4) — what the render-queue split
+/// decides for this scene's items and how many decode draws their materials need.
+/// Every count is over the items the scene SHOWS (hidden ones are neither).
+///   atomItems    items the id pass draws and the decode shades: a GPU-scene row,
+///                an opaque PBS material the decode can serve, one submesh.
+///   pbsItems     items that stay on stock HlmsPbs, split by the FIRST reason
+///                that holds, in this order: `notPbs` (an Unlit or other non-PBS
+///                datablock), `customPiece` (a per-datablock custom piece — the
+///                twin cannot carry one), `blended` (a transparent, faded or
+///                refractive material), `alphaTested`, `skinned` (the id pass
+///                reads the mesh's bind-pose rows), `multiSubmesh`, `noRow` (no
+///                readable level-0 geometry row).
+///   stockItems   items in a queue that is not the opaque item queue (gizmos,
+///                wires, the sun disc, distortion): never split, never counted.
+///   materials    distinct PBS materials the atom items wear;
+///   buckets      the decode draws those need (HlmsAtom::BucketKey: one shader
+///                permutation x one texture set x one const-buffer pool);
+///   twins        decode twins HlmsAtom holds (every scene), and
+///   decodeDraws  this scene's decode draws.
+struct AtomDrawStatus {
+    bool     live = false;
+    unsigned atomItems = 0;
+    unsigned pbsItems = 0;
+    unsigned notPbs = 0;
+    unsigned customPiece = 0;
+    unsigned blended = 0;
+    unsigned alphaTested = 0;
+    unsigned skinned = 0;
+    unsigned multiSubmesh = 0;
+    unsigned noRow = 0;
+    unsigned stockItems = 0;
+    unsigned materials = 0;
+    unsigned buckets = 0;
+    unsigned twins = 0;
+    unsigned decodeDraws = 0;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback

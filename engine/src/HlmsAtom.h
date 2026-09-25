@@ -13,16 +13,17 @@
 // unchanged over a LOCAL `inPs` the decode prologue fills.
 //
 // WHAT A DECODE DRAW IS. One full-screen triangle (`AtomDecodeRenderable`) whose
-// datablock is a DECODE TWIN of a PBS datablock (`decodeTwinFor`): the twin carries
-// the PBS datablock's textures and flags, so it generates the same shader
-// permutation and binds the same texture descriptor set, and HlmsAtom binds the PBS
-// datablock's CONST-BUFFER POOL in place of the twin's own — so the id buffer's
-// material word (`GpuInstance::raster[0]`, {pool:16 | slot:16} of the PBS
-// datablock) addresses the PBS material directly. A pixel whose material is not
-// one this twin serves is discarded (the bucket table), so one twin = one decode
-// pass = one BUCKET (FINDINGS Q1: a bucket is one shader permutation x one texture
-// descriptor set; this lane makes one twin per PBS datablock — merging the
-// datablocks of one bucket into one twin is the S3-DRAW optimisation).
+// datablock is the DECODE TWIN of a BUCKET (`decodeTwinForBucket`): every PBS
+// datablock that generates the same shader permutation, binds the same texture
+// set and lives in the same const-buffer pool (`BucketKey`) is served by ONE twin,
+// a clone of the first of them — so a decode costs one draw per bucket, never one
+// per material (S3-DRAW; world.atomStatus reports materials against buckets).
+// The twin carries the bucket's textures
+// and flags, and HlmsAtom binds the bucket's PBS CONST-BUFFER POOL in place of the
+// twin's own — so the id buffer's material word (`GpuInstance::raster[0]`,
+// {pool:16 | slot:16} of the PBS datablock) addresses each member's own constants
+// directly. The bucket table maps EVERY member's word to the twin's slot + 1, and a
+// pixel whose word maps elsewhere is discarded.
 //
 // WHAT IT IS TOLD. Everything PBS is told, through `tellEveryHlms` (OgreEngine.cpp)
 // — never a setter of its own that could disagree with PBS's — except the scene's
@@ -114,6 +115,7 @@ struct AtomId {
 };
 
 class AtomDecodeRenderable;
+class AtomKeyProbe;
 
 class HlmsAtom final : public Ogre::HlmsPbs {
 public:
@@ -153,34 +155,36 @@ public:
     /// previous pass left in those slots. Counted, and logged once with the camera.
     unsigned long long sourcelessDraws() const { return mSourcelessDraws; }
 
-    /// THE DECODE TWIN of a PBS datablock: created on first request (a JSON round
-    /// trip through Ogre's own serialiser, so every permutation-relevant field —
-    /// textures, samplers, workflow, BRDF, maps, uv sets — is Ogre's copy, not a
-    /// list of ours), its macroblock replaced by the decode's (no depth test or
-    /// write, CULL_NONE: a full-screen triangle's winding is not the scene's —
-    /// FINDINGS §2.4 (3)). Returns null when `pbs` is not a PBS datablock or the
-    /// round trip fails (`err` says why). Idempotent. A datablock with a
-    /// per-datablock custom piece is refused: the JSON cannot carry it, and such a
-    /// material stays on stock HlmsPbs (D1 §1's front-end list).
-    Ogre::HlmsPbsDatablock *decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std::string &err);
+    /// THE DECODE TWIN of a PBS datablock's BUCKET (bucketKeyOf): the bucket's one
+    /// twin, created with the bucket's first member (a JSON round trip through Ogre's
+    /// own serialiser, so every permutation-relevant field — textures, samplers,
+    /// workflow, BRDF, maps, uv sets — is Ogre's copy, not a list of ours), its
+    /// macroblock replaced by the decode's (no depth test or write, CULL_NONE: a
+    /// full-screen triangle's winding is not the scene's — FINDINGS §2.4 (3)); a
+    /// later datablock of the same bucket JOINS it (its word enters the bucket
+    /// table). Returns null when `pbs` is not a PBS datablock, carries a
+    /// per-datablock custom piece (the JSON cannot carry it; such a material stays
+    /// on stock HlmsPbs) or the round trip fails (`err` says why). Idempotent.
+    Ogre::HlmsPbsDatablock *decodeTwinForBucket(Ogre::HlmsPbsDatablock *pbs, std::string &err);
     /// Destroys every twin (and the bucket table). Called before the PBS datablocks
     /// they point at can die.
     void destroyDecodeTwins();
-    /// A PBS DATABLOCK IS DYING: its twin (if any) dies with it, BEFORE it — a twin
-    /// keeps the PBS datablock's pointer (fillBuffersForV2 binds its pool) and the
-    /// twin map is keyed by it, so a recycled address would find a stale twin. Every
+    /// A PBS DATABLOCK IS DYING OR CHANGED ITS PERMUTATION: it leaves its bucket
+    /// BEFORE it dies — a twin keeps a member's pointer (fillBuffersForV2 binds its
+    /// pool) and the maps are keyed by it, so a recycled address would find a stale
+    /// bucket. The twin dies with its LAST member (and the epoch moves). Every
     /// engine site that destroys a PBS datablock calls `forgetDecodeTwinOf` first.
     void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs);
+    /// Twins = buckets held (every scene), and the PBS datablocks they serve.
     size_t decodeTwinCount() const { return mTwins.size(); }
+    size_t decodeMemberCount() const { return mTwinOfPbs.size(); }
 
     /// THE PRODUCT'S DECODE DRAWS (PHOTON-HIT-SHADE-1): for a SceneManager whose
-    /// scene runs the ray tier, a twin for every PBS datablock its items wear
-    /// (`materialWords`: GpuInstance::raster x, HlmsAtom::materialWordOf) and ONE
-    /// AtomDecodeRenderable per twin, hidden, at kHitDecodeRenderQueue. Draws of
-    /// twins no longer worn are destroyed. Called outside the compositor (the ray
-    /// tier's per-scene update) whenever the scene's set or twinEpoch() moved.
-    /// S3-DRAW's bucket merge (one draw per permutation x texture set, never per
-    /// material) is still owed.
+    /// scene runs the ray tier, the bucket twin of every PBS datablock its items
+    /// wear (`materialWords`: GpuInstance::raster x, HlmsAtom::materialWordOf) and
+    /// ONE AtomDecodeRenderable per BUCKET, hidden, at kHitDecodeRenderQueue. Draws
+    /// of buckets no longer worn are destroyed. Called outside the compositor (the
+    /// ray tier's per-scene update) whenever the scene's set or twinEpoch() moved.
     void syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32_t> &materialWords);
     /// Shows (for the hit decode pass only) or hides a SceneManager's decode draws.
     void showSceneDecodes(Ogre::SceneManager *sm, bool on);
@@ -204,6 +208,39 @@ public:
     /// this beside the hash (PHOTON-HIT-SHADE-1 audit F6). 0 for anything that
     /// is not a PBS datablock.
     static uint64_t textureSetKeyOf(const Ogre::HlmsDatablock *pbs);
+
+    /// THE DECODE BUCKET (S3-DRAW, SPECS/atom/D3_S3_DRAW_DESIGN.md §2.2): what one
+    /// decode draw can serve. A draw is one twin = one shader permutation, one texture
+    /// descriptor set and one bound const-buffer pool (fillBuffersForV2 binds the
+    /// twin's PBS pool at const slot 1, and the id's material word names a slot IN
+    /// that pool), so two PBS datablocks share a draw exactly when all three agree:
+    ///   permutation  the property set (and pieces) THIS Hlms generates for the
+    ///                datablock over the full-screen triangle's vertex layout —
+    ///                Ogre's own calculateHashFor, read from this Hlms's renderable
+    ///                cache — minus the blend/macro state the twin replaces with its
+    ///                own (a twin is opaque, depth-less and CULL_NONE whatever it
+    ///                clones);
+    ///   textures     textureSetKeyOf: every slot's texture and samplerblock, which
+    ///                is what the baked descriptor sets are made of;
+    ///   pool         the PBS pool index (materialWord >> 16).
+    struct BucketKey {
+        uint64_t permutation = 0u;
+        uint64_t textures = 0u;
+        uint32_t pool = 0u;
+        bool operator==(const BucketKey &o) const {
+            return permutation == o.permutation && textures == o.textures && pool == o.pool;
+        }
+    };
+    struct BucketKeyHash {
+        size_t operator()(const BucketKey &k) const {
+            return size_t(k.permutation ^ (k.textures * 1099511628211ull) ^ (uint64_t(k.pool) << 48u));
+        }
+    };
+    /// The bucket of a PBS datablock; false (with `err`) for anything the decode
+    /// cannot serve — not a PBS datablock, no const-buffer slot, a per-datablock
+    /// custom piece (the JSON twin cannot carry one). Computes a property set (no
+    /// shader is compiled); main thread, outside a pass.
+    bool bucketKeyOf(const Ogre::HlmsPbsDatablock *pbs, BucketKey &out, std::string &err);
 
     Ogre::uint32 fillBuffersForV2(const Ogre::HlmsCache *cache,
                                   const Ogre::QueuedRenderable &queuedRenderable, bool casterPass,
@@ -246,6 +283,9 @@ private:
     void ensureStandIns();
 
     DecodeSource mSource;
+    /// The renderable bucketKeyOf hands to calculateHashFor: the full-screen
+    /// triangle's vertex layout wearing (unlinked) the datablock asked about.
+    AtomKeyProbe *mKeyProbe = nullptr;
     const Ogre::HlmsSamplerblock *mPointSampler = nullptr;
     /// The stand-ins a sourceless draw binds (see sourcelessDraws).
     Ogre::TextureGpu *mEmptyIds = nullptr;
@@ -255,17 +295,21 @@ private:
     /// not this pass's.
     bool mPassSkipped = true;
 
+    /// ONE BUCKET: its twin, the member whose pool the draw binds (any member: the
+    /// key holds the pool), and every member with its material word.
     struct Twin {
         Ogre::HlmsPbsDatablock *pbs = nullptr;
         Ogre::HlmsPbsDatablock *twin = nullptr;
-        uint32_t pbsWord = kNoMaterialWord;
+        BucketKey key;
+        std::vector<std::pair<const Ogre::HlmsDatablock *, uint32_t>> members;
     };
     /// Keyed by the TWIN (what a draw carries).
     std::unordered_map<const Ogre::HlmsDatablock *, Twin> mTwins;
     std::unordered_map<const Ogre::HlmsDatablock *, Ogre::HlmsPbsDatablock *> mTwinOfPbs;
+    std::unordered_map<BucketKey, Ogre::HlmsPbsDatablock *, BucketKeyHash> mTwinOfKey;
     /// THE BUCKET TABLE: for each PBS material word (pool * slotsPerPool + slot),
-    /// 1 + the twin's slot in THIS Hlms's pool, 0 = no twin. The decode discards a
-    /// pixel whose entry is not its own draw's twin slot + 1.
+    /// 1 + its bucket twin's slot in THIS Hlms's pool, 0 = no bucket. The decode
+    /// discards a pixel whose entry is not its own draw's twin slot + 1.
     Ogre::ReadOnlyBufferPacked *mBucketBuf = nullptr;
     std::vector<uint32_t> mBucketMirror;
     bool mBucketDirty = true;

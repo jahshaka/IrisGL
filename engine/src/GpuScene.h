@@ -370,6 +370,12 @@ public:
     Ogre::UavBufferPacked *instanceBuffer() const { return mInstanceBuffer; }
     Ogre::UavBufferPacked *meshBuffer() const { return mMeshBuffer; }
     Ogre::UavBufferPacked *levelBuffer() const { return mLevelBuffer; }
+    /// The CPU mirror's (mesh entry, level) row — what the device's level table
+    /// holds after the next update.
+    const GpuMeshLevel &levelAt(uint32_t meshIndex, uint32_t level) const {
+        return mLevelMirror[size_t(meshIndex) * kLevelsPerMesh + level];
+    }
+    uint32_t levelMirrorEntries() const { return uint32_t(mLevelMirror.size()); }
     /// THE GEOMETRY ROW TABLE (ATOM P4b): the vertex and index device addresses and
     /// the vertex layout of every (mesh, level, submesh) the scene holds, written
     /// ONCE at attach. The voxeliser binds it for every dispatch
