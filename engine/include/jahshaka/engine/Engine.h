@@ -842,9 +842,8 @@ public:
     /// document saved with a future mode keeps loading).
     virtual bool        setGlobalIllumination(const GiParams &) = 0;
     /// THE TUNING PUSH — the GI values that take effect WITHOUT a rebuild
-    /// (PHOTON_SPEC §7 E2 (8), audit A F6). `rayMarchStepScale` is read by the
-    /// next light injection and the gather's and the card cache's rows per
-    /// frame, so moving one is a constant write and not a re-solve — and they are
+    /// (PHOTON_SPEC §7 E2 (8), audit A F6). The gather's and the card cache's rows
+    /// are read per frame, so moving one is a constant write and not a re-solve — and they are
     /// deliberately OUT of `GiParams::operator==` so that a host comparing by
     /// value does not see a slider tick as a configuration change. Before this,
     /// every tick of those three sliders tore the whole arm down and

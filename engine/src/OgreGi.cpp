@@ -575,14 +575,11 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
-// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). No rebuild:
-// `rayMarchStepScale` is read by the NEXT light injection (giRayMarchStepScale)
-// and the per-frame rows below by the frame that follows, and none of them is
-// geometry — nothing is torn down, nothing re-voxelises, and no probe is staled.
+// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). No rebuild: the per-frame
+// rows below are read by the frame that follows, and none of them is geometry —
+// nothing is torn down, nothing re-voxelises, and no probe is staled.
 bool OgreScene::setGiTuning(const GiParams &p) {
     JAH_TRY {
-        const bool marchMoved = p.rayMarchStepScale != mGi.rayMarchStepScale;
-        mGi.rayMarchStepScale = p.rayMarchStepScale;
         // THE CARD CACHE'S TWO PER-FRAME KNOBS. Written and nothing else: the
         // residency pass reads them at the head of the next frame, so a smaller
         // radius gives pages back on that frame and a bigger budget captures
@@ -613,7 +610,6 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         // that are already there: no teardown, no re-voxelisation, 0.1-0.3 ms per
         // cascade (S1 §3). The other two ARE constants and are already live in
         // the line above.
-        if (marchMoved && mVctLighting) refreshGiLighting(false);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1014,8 +1010,10 @@ bool OgreScene::injectCascade(size_t i) {
         return false;
     }
     applyCascadeEnvironment(lighting);
+    // the injection's shadow march is exact (a DDA from each face, PHOTON-VOXEL-5): upstream's
+    // step scale and thin-wall counter have nothing left to scale - their neutral values
     lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                     giRayMarchStepScale());
+                     1.0f /*rayMarchStepScale*/);
     stamp = frame;
     // The single volume's LANDED injections — the surface cache's indirect
     // signature (PHOTON-CARDS-1; a chain folds its cascades' rebuild counts and
@@ -1742,6 +1740,15 @@ bool OgreScene::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
             !grab(coverage[1], out.coverageN) || !grab(position[0], out.positionP) ||
             !grab(position[1], out.positionN))
             return false;
+        // PHOTON-VOXEL-5: level 0's back side and the voxelizer's normal (the anisotropic tiers;
+        // empty on a Low volume, whose one light is both sides).
+        out.lightBack.clear();
+        out.normal.clear();
+        if (lighting->isAnisotropic()) {
+            Ogre::TextureGpu *back = lighting->getLightVoxelTextures()[lighting->backIndex()];
+            Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
+            if (!back || !nrm || !grab(back, out.lightBack) || !grab(nrm, out.normal)) return false;
+        }
         out.width = int(total->getWidth());
         out.height = int(total->getHeight());
         out.depth = int(total->getDepth());
@@ -4433,17 +4440,6 @@ bool OgreScene::giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after) {
     return false;
 }
 
-// VCT light injection ray-marches towards each light to work out what is
-// shadowed, and `rayMarchStepScale` is how coarsely (FIX WAVE B5). Upstream:
-// bigger is faster and starts losing shadows; below 1.0 trips an assert.
-//
-// The document's value, default 1.0, on EVERY injection: the moving tick used
-// to raise it to 2 (and drop its bounces), which handed a volume a different
-// answer from the rebuild beside it — the one writer (PHOTON-WRITER-1) has one.
-float OgreScene::giRayMarchStepScale() const {
-    return std::max(1.0f, mGi.rayMarchStepScale);
-}
-
 
 // TRUE WHEN THE ARM WAS ACTUALLY (RE)BUILT, and that is a contract a caller
 // depends on (the lead's fix-round item 1): `applyPendingGi` clears
@@ -5500,7 +5496,11 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         // worthless work by construction: `pending` is a FLAG ("this cascade is
         // behind"), and a burst of steps while the budget is spent elsewhere
         // collapses into the one rebuild that catches it up.
-        if (moved || jumped) {
+        // `JAHSHAKA_GI_NO_RECENTRE` (PHOTON-VOXEL-5), a MEASUREMENT switch like
+        // JAHSHAKA_GI_FIELD_NO_SCROLL: the chain keeps its placement while the camera
+        // moves (a suite's A/B of what a re-centre's re-voxelisation costs a picture).
+        static const bool noRecentre = std::getenv("JAHSHAKA_GI_NO_RECENTRE") != nullptr;
+        if ((moved || jumped) && !noRecentre) {
             // A SCROLL CLAIMS A PENDING FLAG AN EDIT MAY ALREADY HAVE RAISED —
             // and the work is the same one rebuild either way. The REASON,
             // though, is the edit's: a capture must not read "the camera did

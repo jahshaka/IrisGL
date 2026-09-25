@@ -2374,15 +2374,6 @@ struct GiParams {
     /// and ROUGH surfaces inside the probe region take their environment from the
     /// probes instead of from cone tracing. Mirror-sharp pixels do not move.
     int       updateBudget = 1;
-    /// VCT light-injection ray-march step scale AT REST (FIX WAVE B5). Upstream:
-    /// "bigger values means the shadow raymarching during light injection is
-    /// faster, but may cause glitches if too high (areas that are supposed to be
-    /// shadowed won't be shadowed)"; below 1.0 trips an assert, so 1.0 is the
-    /// floor as well as the default. The engine RAISES it on the cheap in-motion
-    /// re-injection path only (see OgreScene::giRayMarchStepScale) — a re-inject
-    /// that happens every few frames of a drag is allowed to be coarse; the
-    /// re-solve that lands when the drag stops is not.
-    float     rayMarchStepScale = 1.0f;
     /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
     ///
     /// On, and in a VCT mode, the engine builds an `Ogre::IrradianceField` over
@@ -2611,8 +2602,7 @@ struct GiParams {
     /// it beside the struct is what makes "add a field" a one-place edit.)
     ///
     /// THE TUNING FLOATS ARE DELIBERATELY ABSENT (PHOTON_SPEC §7 E2 (8),
-    /// audit A F6): `rayMarchStepScale` and the per-frame rows below are
-    /// read per frame, so they take effect through `Scene::setGiTuning` without
+    /// audit A F6): the per-frame rows below are read per frame, so they take effect through `Scene::setGiTuning` without
     /// a rebuild — and while they were IN this comparison every tick of those
     /// sliders was a from-scratch teardown and re-voxelisation (N of them
     /// under a cascade chain). `giTuningEqual` is their comparison; a host
@@ -2641,8 +2631,7 @@ struct GiParams {
     }
     /// The values `Scene::setGiTuning` pushes, compared on their own.
     bool giTuningEqual(const GiParams &o) const {
-        return rayMarchStepScale == o.rayMarchStepScale &&
-               // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
+        return // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
                // They belong in THIS comparison and not in `operator==` for the
                // same reason the three above do: the residency pass reads them
                // every frame, so moving either takes effect on the next frame
@@ -4553,6 +4542,13 @@ struct GiVoxelVolume {
     std::vector<float> albedo;
     std::vector<float> coverageP, coverageN;
     std::vector<float> positionP, positionN;
+    /// LEVEL 0 PER SIDE (PHOTON-VOXEL-5), the anisotropic tiers (empty on a Low volume): `light`
+    /// holds the MEAN of a voxel's two sides and `lightBack` its BACK (premultiplied the same way;
+    /// the front = 2 light - lightBack), `normal` the voxeliser's (rgb biased 0.5 + 0.5 n, a = 1 for
+    /// a two-sided voxel, whose normal is canonical: the front is the side it points to). The
+    /// faces looking +a take the front where n_a > 0, the back where n_a < 0.
+    std::vector<float> lightBack;
+    std::vector<float> normal;
 };
 
 // ---------------------------------------------------------------------------

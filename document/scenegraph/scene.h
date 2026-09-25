@@ -595,12 +595,6 @@ public:
     float giProbeSnapDeviation = 0.05f;  // shrink-fit snap-back tolerances: the pin's
     float giProbeSnapSidesMin = 0.25f;   // own ctor defaults, made explicit and ours
     float giProbeSnapSidesMax = 0.25f;
-    /// VCT light-injection ray-march step scale AT REST (FIX WAVE B5).
-    /// Integrator knob, verb-only (`world.gi({rayMarchStepScale})`), floor 1.0:
-    /// bigger marches faster and starts losing contact shadows in the bounce,
-    /// and upstream asserts below 1.0. The engine raises it on its own for the
-    /// cheap in-motion re-injection only.
-    float giRayMarchStepScale = 1.0f;
     /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
     /// TRI-STATE, like giProbeHdr/giProbeShadows and for the same reason: -1
     /// auto, 0 off, 1 on. The Photon tier (GI_UNIFIED_SPEC P2) RESOLVES it

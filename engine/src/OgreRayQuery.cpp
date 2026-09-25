@@ -235,7 +235,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 29u;
+constexpr unsigned kReflectBindings = 31u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -253,6 +253,14 @@ constexpr unsigned kReflectSplitKinds = 4u;
 /// (25), the hit list's two images (26-27) and its buffer (28: the counters and
 /// each record's sun, footprint and weight) — jah_rq_hit_record.glsl.
 constexpr unsigned kReflectHitBinding = 25u;
+/// ...and (PHOTON-VOXEL-5) level 0's BACK side (29) and the voxelizer's NORMAL (30): the hit's
+/// level-0 read takes the side of a two-sided voxel its ray meets (the isotropic volume stands
+/// in for both on a Low chain - the back of a one-light store is its light).
+constexpr unsigned kReflectSideBinding = 29u;
+constexpr unsigned kReflectSideKinds = 2u;
+/// The volumes per cascade the ray programs bind: iso, X, Y, Z, coverage +/-, position +/-,
+/// back, normal (PHOTON-VOXEL-5).
+constexpr int kRayVoxelKinds = 10;
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas.
@@ -4013,13 +4021,16 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 26 the hit list's records
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 27 ...its destinations
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 28 ...its buffer (counters + aux)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 29 voxelBack[] (PHOTON-VOXEL-5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 voxelNrm[]
     };
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
         b[i].descriptorType = types[i];
         b[i].descriptorCount =
             ((i >= 10u && i <= 13u) ||
-             (i >= kReflectCovBinding && i < kReflectCovBinding + kReflectSplitKinds))
+             (i >= kReflectCovBinding && i < kReflectCovBinding + kReflectSplitKinds) ||
+             (i >= kReflectSideBinding && i < kReflectSideBinding + kReflectSideKinds))
                 ? kMaxReflectCascades : 1u;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
@@ -4351,7 +4362,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // hit, so the finest one that can answer does. In the single-volume arm
     // there is one. R5 works in both shapes and the cascade flag gates nothing
     // here.
-    Ogre::TextureGpu *vox[kMaxReflectCascades][8] = {};   // iso, X, Y, Z, coverage +/-, position +/-
+    Ogre::TextureGpu *vox[kMaxReflectCascades][kRayVoxelKinds] = {};   // kRayVoxelKinds' order
     Ogre::Vector3 voxOrigin[kMaxReflectCascades], voxSize[kMaxReflectCascades],
                   voxCell[kMaxReflectCascades];
     /// THE CASCADE'S RADIANCE MULTIPLIER (DRAG-1, RENDER_AUDIT PHOTON F2).
@@ -4386,6 +4397,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             vox[voxCount][4 + h] = cov ? cov : tex[0];
             vox[voxCount][6 + h] = pos ? pos : tex[0];
         }
+        vox[voxCount][8] = aniso && tex[lighting->backIndex()] ? tex[lighting->backIndex()] : tex[0];
+        vox[voxCount][9] = aniso && tex[lighting->normalIndex()] ? tex[lighting->normalIndex()] : tex[0];
         voxOrigin[voxCount] = voxelizer->getVoxelOrigin();
         voxSize[voxCount]   = voxelizer->getVoxelSize();
         voxCell[voxCount]   = voxelizer->getVoxelCellSize();
@@ -4751,7 +4764,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     ub.buffer = rv.params[ring].buffer;
     ub.range = sizeof(ReflectParams);
     VkDescriptorImageInfo sampled[3] = {}, storage[5] = {},
-                          volumes[8][kMaxReflectCascades] = {}, sky{};
+                          volumes[kRayVoxelKinds][kMaxReflectCascades] = {}, sky{};
     Ogre::TextureGpu *const sampledSrc[3] = { normalTex, roughTex, depthTex };
     for (int i = 0; i < 3; ++i) {
         sampled[i].sampler = mPointSampler;
@@ -4768,7 +4781,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     storage[3].imageView = rv.dist[prev].view;
     storage[4].imageView = rv.dist[cur].view;
     for (int i = 0; i < 5; ++i) storage[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    for (int axis = 0; axis < 8; ++axis)
+    for (int axis = 0; axis < kRayVoxelKinds; ++axis)
         for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
             const unsigned src = c < voxCount ? c : (voxCount ? voxCount - 1u : 0u);
             Ogre::TextureGpu *t = voxCount ? vox[src][axis] : nullptr;
@@ -4783,7 +4796,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // index is undefined behaviour, not a black sample — which is what the 1x1
     // black stand-ins above are for. A slot still empty here is a failure to
     // make one, and declining the frame is the honest answer.
-    for (int axis = 0; axis < 8; ++axis)
+    for (int axis = 0; axis < kRayVoxelKinds; ++axis)
         for (unsigned c = 0; c < kMaxReflectCascades; ++c)
             if (!volumes[axis][c].imageView) { bail("a voxel view is null"); return; }
     if (!sky.imageView) { bail("the sky view is null"); return; }
@@ -4818,6 +4831,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         w[kReflectCovBinding + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[kReflectCovBinding + k].descriptorCount = kMaxReflectCascades;
         w[kReflectCovBinding + k].pImageInfo = volumes[4 + k];
+    }
+    for (unsigned k = 0; k < kReflectSideKinds; ++k) {   // PHOTON-VOXEL-5: level 0's back, the normal
+        w[kReflectSideBinding + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kReflectSideBinding + k].descriptorCount = kMaxReflectCascades;
+        w[kReflectSideBinding + k].pImageInfo = volumes[8 + k];
     }
     // THE CARD READ'S FOUR (15-18): the cache's own, or the stand-ins.
     VkDescriptorBufferInfo cardBufs[2] = {};
@@ -4924,7 +4942,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < voxCount; ++c)
-            for (int axis = 0; axis < 8; ++axis)
+            for (int axis = 0; axis < kRayVoxelKinds; ++axis)
                 if (vox[c][axis])
                     solver.resolveTransition(trans, vox[c][axis], Ogre::ResourceLayout::Texture,
                                              Ogre::ResourceAccess::Read, computeStage);
@@ -5108,6 +5126,8 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             in.voxel[c][4 + h] = cov ? cov : tex[0];
             in.voxel[c][6 + h] = pos ? pos : tex[0];
         }
+        in.voxel[c][8] = aniso && tex[lighting->backIndex()] ? tex[lighting->backIndex()] : tex[0];
+        in.voxel[c][9] = aniso && tex[lighting->normalIndex()] ? tex[lighting->normalIndex()] : tex[0];
         const Ogre::Vector3 og = voxelizer->getVoxelOrigin();
         const Ogre::Vector3 sz = voxelizer->getVoxelSize();
         const Ogre::Vector3 cl = voxelizer->getVoxelCellSize();
