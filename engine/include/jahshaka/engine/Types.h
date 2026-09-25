@@ -3512,6 +3512,11 @@ struct CardReadPick {
     bool     hit = false;
     float    hitPoint[3] = { 0, 0, 0 };
     float    hitNormal[3] = { 0, 0, 0 };
+    /// ...and the radiance the read sends TOWARDS ITS VIEWER (PHOTON-CARDS-5,
+    /// jah_card_view.glsl: the diffuse lobe's view term restored) — a traced
+    /// question's ray origin, an untraced one's facing direction (head-on).
+    /// `radiance` above is the texel as stored.
+    float    viewed[3] = { 0, 0, 0 };
 };
 
 /// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model

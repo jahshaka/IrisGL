@@ -100,6 +100,8 @@ layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
 /// exactly as it binds them for the reflection trace (or the stand-ins with zero
 /// slots: every hit then reads the voxels).
 #define JAH_CARD_BINDING_BASE 9
+// ...and the view term's five after the job's last binding (PHOTON-CARDS-5).
+#define JAH_CARD_VIEW_BINDING_BASE 25
 #include "jah_rq_card_bindings.glsl"
 #define JAH_CARD_SLOTS   uint( p.cards.x )
 #define JAH_CARD_RECORDS uint( p.cards.y )

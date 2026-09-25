@@ -222,6 +222,12 @@ struct CardSceneView {
     float cloudMap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     float cloudSun[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     unsigned indirectBudgetTexels = 0u;
+    /// THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's own SH, 27 floats in
+    /// world axes (Scene::setAmbientSh's order: the sky's SH x the Sky Light's
+    /// gain, exactly what the engine pushes to HlmsPbs). With no chain the
+    /// relight's environment half is this at the texel's normal; with one, the
+    /// chain hands the same coefficients over and this is not read.
+    const float *ambientSh = nullptr;
 
     /// ONE CANDIDATE — an item inside the radius that may hold cards. The
     /// scene's own predicate decides membership (still-world GI geometry,
@@ -374,6 +380,21 @@ public:
     /// through-the-wall test) and the lit Radiance.
     Ogre::TextureGpu *depthLayer() const { return mAtlas[unsigned(CardLayer::Depth)]; }
     Ogre::TextureGpu *radianceLayer() const { return mRadiance; }
+    /// THE VIEW TERM'S FIVE (PHOTON-CARDS-5, jah_card_view.glsl): what the read
+    /// needs besides the Radiance to restore the diffuse lobe's view term at a
+    /// ray's own direction — the Indirect and Emissive layers (the three stored
+    /// terms apart), the ShadowRough layer (the roughness), and the Albedo and
+    /// Normal layers (the stored normal, and in their alpha the texel's mean
+    /// light direction the relight writes). In the order
+    /// jah_rq_card_bindings.glsl declares them from JAH_CARD_VIEW_BINDING_BASE.
+    static constexpr unsigned kViewLayers = 5u;
+    void viewLayers(Ogre::TextureGpu *out[kViewLayers]) const {
+        out[0] = mIndirect;
+        out[1] = mAtlas[unsigned(CardLayer::Emissive)];
+        out[2] = mAtlas[unsigned(CardLayer::ShadowRough)];
+        out[3] = mAtlas[unsigned(CardLayer::Albedo)];
+        out[4] = mAtlas[unsigned(CardLayer::Normal)];
+    }
     /// The item slot of a node's instance, or -1 when it holds no cards.
     long itemSlotOf(NodeId node) const;
     /// Is a capture executing right now? The Hlms listener's pass property
@@ -495,6 +516,8 @@ private:
     Ogre::TextureGpu *mCloudField = nullptr;
     float mCloudMap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     float mCloudSun[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    /// The scene's SH for the GI-off environment half (CardSceneView::ambientSh).
+    float mAmbientSh[27] = {};
     unsigned long long mIndirectSerial = 0ull;
     bool mIndirectMovingLastFrame = false;
     unsigned mIndirectBudget = 0u;

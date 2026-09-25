@@ -35,10 +35,13 @@ struct Answer
 	vec4 radiance;
 	vec4 hit;
 	vec4 normal;
+	vec4 viewed;	///< the read towards its viewer (PHOTON-CARDS-5); `radiance` is the texel as stored
 };
 layout( std430, set = 0, binding = 1 ) writeonly buffer AnswerBuf { Answer answers[]; };
 
 #define JAH_CARD_BINDING_BASE 2
+// ...and the view term's five after the job's last binding (PHOTON-CARDS-5).
+#define JAH_CARD_VIEW_BINDING_BASE 10
 #include "jah_rq_card_bindings.glsl"
 
 layout( set = 0, binding = 6 ) uniform Counts
@@ -68,6 +71,10 @@ void main()
 	uint slot = floatBitsToUint( q.pos.w );
 	vec3 point = q.pos.xyz;
 	vec3 facing = q.facing.xyz;
+	// THE VIEWER the read restores the lobe's view term for (PHOTON-CARDS-5): a
+	// traced question's ray origin; an untraced one is read head-on (V = its
+	// facing direction).
+	vec3 view = q.facing.xyz;
 	Answer a;
 	a.hit = vec4( 0.0 );
 	a.normal = vec4( 0.0 );
@@ -87,6 +94,7 @@ void main()
 								   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
 								   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), dir, facing );
 			hitFlag = 4u;
+			view = -dir;
 			a.hit = vec4( point, float( slot ) );
 			a.normal = vec4( facing, 0.0 );
 		}
@@ -97,6 +105,7 @@ void main()
 	a.pick = uvec4( ( pick.ok ? 1u : 0u ) | ( pick.lit ? 2u : 0u ) | hitFlag, pick.card,
 					uint( pick.texel.x ), uint( pick.texel.y ) );
 	bool ok;
-	a.radiance = vec4( jahCardRadiance( slot, point, facing, 0.0, ok ), ok ? 1.0 : 0.0 );
+	a.viewed = vec4( jahCardRadiance( slot, point, facing, view, 0.0, ok ), ok ? 1.0 : 0.0 );
+	a.radiance = vec4( ok ? JAH_CARD_RADIANCE( pick.texel ) : vec3( 0.0 ), ok ? 1.0 : 0.0 );
 	answers[i] = a;
 }

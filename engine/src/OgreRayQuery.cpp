@@ -235,7 +235,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 31u;
+constexpr unsigned kReflectBindings = 36u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -261,6 +261,13 @@ constexpr unsigned kReflectSideKinds = 2u;
 /// The volumes per cascade the ray programs bind: iso, X, Y, Z, coverage +/-, position +/-,
 /// back, normal (PHOTON-VOXEL-5).
 constexpr int kRayVoxelKinds = 10;
+/// ...then THE CARD READ'S VIEW TERM (PHOTON-CARDS-5): the surface cache's
+/// Indirect, Emissive, ShadowRough, Albedo and Normal layers (31-35,
+/// jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 31) — the read
+/// restores the diffuse lobe's view term for the ray (jah_card_view.glsl).
+constexpr unsigned kReflectCardViewBinding = 31u;
+static_assert(kReflectBindings == kReflectCardViewBinding + SurfaceCache::kViewLayers,
+              "the card read's view-term layers are the reflection set's last bindings");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas.
@@ -3549,14 +3556,20 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
 
     // ---- the harness pipeline, once ------------------------------------------
     if (!mCardParityPipeline) {
-        const VkDescriptorType types[10] = {
+        // ...and 10-14: the card read's view term (PHOTON-CARDS-5), the five
+        // layers of SurfaceCache::viewLayers.
+        constexpr unsigned kParityBindings = 10u + SurfaceCache::kViewLayers;
+        const VkDescriptorType types[kParityBindings] = {
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER };
-        VkDescriptorSetLayoutBinding b[10] = {};
-        for (unsigned i = 0; i < 10u; ++i) {
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER };
+        VkDescriptorSetLayoutBinding b[kParityBindings] = {};
+        for (unsigned i = 0; i < kParityBindings; ++i) {
             b[i].binding = i;
             b[i].descriptorType = types[i];
             b[i].descriptorCount = 1;
@@ -3564,7 +3577,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         }
         VkDescriptorSetLayoutCreateInfo sli{};
         sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        sli.bindingCount = 10;
+        sli.bindingCount = kParityBindings;
         sli.pBindings = b;
         VkPipelineLayoutCreateInfo pli{};
         pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -3578,7 +3591,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         sizes[0].descriptorCount = 6;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = 2;
+        sizes[1].descriptorCount = 2 + SurfaceCache::kViewLayers;
         sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[2].descriptorCount = 1;
         sizes[3].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
@@ -3629,6 +3642,8 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     Ogre::UavBufferPacked *instances = cache->instanceBuffer();
     Ogre::TextureGpu *depth = cache->depthLayer();
     Ogre::TextureGpu *radiance = cache->radianceLayer();
+    Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
+    cache->viewLayers(cardView);
     // THE TRACED QUESTIONS' INPUTS: the scene's TLAS and the hit-normal tables
     // the reflection binds (the per-slot row copy, the GPU scene's rows).
     auto sceneIt = mScenes.find(scene);
@@ -3650,6 +3665,9 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         for (Ogre::TextureGpu *t : { depth, radiance })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
+        for (Ogre::TextureGpu *t : cardView)
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
         for (Ogre::UavBufferPacked *b : { table, instances })
             solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
         if (geomSlots) solver.resolveTransition(trans, geomRows, Ogre::ResourceAccess::Read, computeStage);
@@ -3661,7 +3679,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     RawBuffer qBuf, aBuf, ubo;
     if (!makeBuffer(n * 8u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, qBuf, err))
         return false;
-    if (!makeBuffer(n * 16u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, aBuf, err)) {
+    if (!makeBuffer(n * 20u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, aBuf, err)) {
         dropBuffer(qBuf);
         return false;
     }
@@ -3710,10 +3728,13 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
                              tables[i]->getBytesPerElement();
         bufs[2 + i].range = tables[i]->getTotalSizeBytes();
     }
-    VkImageView views[2] = {};
-    VkDescriptorImageInfo imgs[2] = {};
-    Ogre::TextureGpu *const layers[2] = { depth, radiance };
-    for (int i = 0; i < 2; ++i) {
+    // 4, 5: the Depth and Radiance layers; 10-14: the view term's five.
+    constexpr unsigned kImgs = 2u + SurfaceCache::kViewLayers;
+    VkImageView views[kImgs] = {};
+    VkDescriptorImageInfo imgs[kImgs] = {};
+    Ogre::TextureGpu *const layers[kImgs] = { depth, radiance, cardView[0], cardView[1],
+                                              cardView[2], cardView[3], cardView[4] };
+    for (unsigned i = 0; i < kImgs; ++i) {
         Ogre::DescriptorSetTexture2::TextureSlot slot =
             Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
         slot.texture = layers[i];
@@ -3748,9 +3769,9 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
     asWrite.accelerationStructureCount = 1;
     asWrite.pAccelerationStructures = &sa->tlas;
-    const unsigned nWrites = 10u;
-    VkWriteDescriptorSet writes[10] = {};
-    for (int i = 0; i < 10; ++i) {
+    const unsigned nWrites = 10u + SurfaceCache::kViewLayers;
+    VkWriteDescriptorSet writes[10u + SurfaceCache::kViewLayers] = {};
+    for (unsigned i = 0; i < nWrites; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = uint32_t(i);
@@ -3771,6 +3792,10 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     for (int i = 0; i < 2; ++i) {
         writes[8 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[8 + i].pBufferInfo = &geomBufs[i];
+    }
+    for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
+        writes[10 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[10 + i].pImageInfo = &imgs[2 + i];
     }
     vkUpdateDescriptorSets(mVk, nWrites, writes, 0, nullptr);
 
@@ -3816,7 +3841,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         const uint32_t *a = static_cast<const uint32_t *>(aBuf.mapped);
         for (size_t i = 0; i < n; ++i) {
             CardReadPick &p = out[i];
-            const uint32_t *r = &a[i * 16u];
+            const uint32_t *r = &a[i * 20u];
             p.ok = (r[0] & 1u) != 0u;
             p.lit = (r[0] & 2u) != 0u;
             p.hit = (r[0] & 4u) != 0u;
@@ -3826,6 +3851,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
             std::memcpy(p.radiance, &r[4], 3u * sizeof(float));
             std::memcpy(p.hitPoint, &r[8], 3u * sizeof(float));
             std::memcpy(p.hitNormal, &r[12], 3u * sizeof(float));
+            std::memcpy(p.viewed, &r[16], 3u * sizeof(float));
         }
     } else {
         err = "cardReadParity: the job did not complete (submit or device-lost wait failed)";
@@ -4023,6 +4049,11 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 28 ...its buffer (counters + aux)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 29 voxelBack[] (PHOTON-VOXEL-5)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 voxelNrm[]
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 31 the card Indirect layer (CARDS-5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 32 ...Emissive
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 33 ...ShadowRough
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 34 ...Albedo
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 ...Normal
     };
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
@@ -4103,7 +4134,10 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     sizes[2].descriptorCount = sets * 7u;   // + the hit list's two (HIT-SHADE-1)
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[3].descriptorCount = sets * (3u + 8u * kMaxReflectCascades + 1u + 2u);
+    // kRayVoxelKinds arrays a cascade (level 0's back side and normal among them,
+    // PHOTON-VOXEL-5), and the card read's view term (PHOTON-CARDS-5).
+    sizes[3].descriptorCount = sets * (3u + unsigned(kRayVoxelKinds) * kMaxReflectCascades + 1u + 2u +
+                                       SurfaceCache::kViewLayers);
     sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     sizes[4].descriptorCount = sets * 6u;   // + the instances and the list's buffer
     VkDescriptorPoolCreateInfo dpi{};
@@ -4432,8 +4466,12 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     Ogre::UavBufferPacked *cardInstances = cardCache ? cardCache->instanceBuffer() : nullptr;
     Ogre::TextureGpu *cardDepth = cardCache ? cardCache->depthLayer() : nullptr;
     Ogre::TextureGpu *cardRadiance = cardCache ? cardCache->radianceLayer() : nullptr;
+    Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
+    if (cardCache) cardCache->viewLayers(cardView);
+    bool cardViewBound = true;
+    for (Ogre::TextureGpu *t : cardView) cardViewBound = cardViewBound && t;
     const bool cardsBound = cardTable && cardInstances && cardDepth && cardRadiance &&
-                            cardCache->cardRecords() > 0u;
+                            cardViewBound && cardCache->cardRecords() > 0u;
 
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
@@ -4870,6 +4908,17 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             return;
         }
     }
+    // THE CARD READ'S VIEW TERM (29-33, PHOTON-CARDS-5): the cache's five, or
+    // the flat stand-in.
+    VkDescriptorImageInfo cardViewImgs[SurfaceCache::kViewLayers] = {};
+    for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
+        cardViewImgs[i].sampler = mPointSampler;
+        cardViewImgs[i].imageView = cardsBound ? sampledView(cardView[i]) : mDummyFlat.view;
+        cardViewImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (!cardViewImgs[i].imageView) { bail("a card view-term binding is null"); return; }
+        w[kReflectCardViewBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kReflectCardViewBinding + i].pImageInfo = &cardViewImgs[i];
+    }
     // THE HIT'S GEOMETRIC NORMAL (19, 20): the tables, or the stand-in with zero
     // slots bound (the shader then faces the reversed ray).
     VkDescriptorBufferInfo geomBufs[2] = {};
@@ -4951,9 +5000,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                      Ogre::ResourceAccess::Read, computeStage);
         // THE CARD READ'S INPUTS: the Radiance layer the CardLight job wrote
         // (a UAV) and the Depth layer the capture copied into, read as
-        // textures; the two tables syncBuffers uploaded, read as buffers.
+        // textures; the two tables syncBuffers uploaded, read as buffers; and
+        // the view term's five (PHOTON-CARDS-5), read as textures.
         if (cardsBound) {
             for (Ogre::TextureGpu *t : { cardDepth, cardRadiance })
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+            for (Ogre::TextureGpu *t : cardView)
                 solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                          Ogre::ResourceAccess::Read, computeStage);
             for (Ogre::UavBufferPacked *b : { cardTable, cardInstances })
@@ -5167,6 +5220,8 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             in.cardInstances = instances;
             in.cardDepth = depthLayer;
             in.cardRadiance = radianceLayer;
+            static_assert(SurfaceCache::kViewLayers == 5u, "the gather binds the view term's five");
+            cache->viewLayers(in.cardView);
             in.cardSlots = cache->instanceSlots();
             in.cardRecords = cache->cardRecords();
         }

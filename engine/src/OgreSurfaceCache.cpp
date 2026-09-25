@@ -256,9 +256,15 @@ bool SurfaceCache::makeAtlas(std::string &err) {
         // defect (flags 0 = load me from a resource group = a worker null
         // dereference). Vulkan gives every texture TRANSFER_SRC|TRANSFER_DST
         // unconditionally, so a manual texture is a valid copy destination.
+        // THE ALBEDO AND NORMAL LAYERS ARE ALSO UAVs (PHOTON-CARDS-5): the
+        // relight writes the texel's mean light direction into their alpha
+        // (JahCardView), which the capture writes as 1 and nothing read.
+        const bool relightWrites = i == unsigned(CardLayer::Albedo) || i == unsigned(CardLayer::Normal);
         Ogre::TextureGpu *t =
             tm->createTexture(processUniqueName(name[i]), Ogre::GpuPageOutStrategy::Discard,
-                              Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2D);
+                              Ogre::TextureFlags::ManualTexture |
+                                  (relightWrites ? Ogre::TextureFlags::Uav : 0u),
+                              Ogre::TextureTypes::Type2D);
         t->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
         t->setPixelFormat(fmt[i]);
         t->setNumMipmaps(1u);
@@ -1125,6 +1131,7 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
     mVct = view.vct;
     mCloudField = view.cloudField;
     for (int k = 0; k < 4; ++k) { mCloudMap[k] = view.cloudMap[k]; mCloudSun[k] = view.cloudSun[k]; }
+    for (int k = 0; k < 27; ++k) mAmbientSh[k] = view.ambientSh ? view.ambientSh[k] : 0.0f;
     // THE RADIANCE SIGNATURE: a light write that changed what a card's
     // DIRECT radiance depends on relights every resident card and recaptures
     // none. A write that also moved a shadow queued the cards for capture
@@ -1360,6 +1367,16 @@ void SurfaceCache::relightCards() {
             g[105u + 4u * k] = sh[3u * k + 1u];
             g[106u + 4u * k] = sh[3u * k + 2u];
         }
+    } else {
+        // GI OFF (PHOTON-CARDS-5): no chain hands the environment over, and the
+        // pixel's ambient is the scene's SH alone — the same coefficients, from
+        // the scene (the job's GI-off branch reads them at the texel's normal).
+        float *g = mGiCpu.data();
+        for (unsigned k = 0; k < 9u; ++k) {
+            g[104u + 4u * k] = mAmbientSh[3u * k];
+            g[105u + 4u * k] = mAmbientSh[3u * k + 1u];
+            g[106u + 4u * k] = mAmbientSh[3u * k + 2u];
+        }
     }
     // THE CLOUD SHADOW (CLOUDS-2D-2): the pixel's own map and throw, the last
     // two vec4s of the block (JahCardLight_cs.glsl's CardGiParams).
@@ -1409,17 +1426,18 @@ void SurfaceCache::relightCards() {
     const bool cloud = mCloudField && cloudWrap;
     if (mLightJob->getProperty("jah_cloud_shadow") != (cloud ? 1 : 0))
         mLightJob->setProperty("jah_cloud_shadow", cloud ? 1 : 0);
-    const unsigned order[kCardLayers] = { unsigned(CardLayer::Albedo), unsigned(CardLayer::Normal),
-                                          unsigned(CardLayer::Depth), unsigned(CardLayer::Emissive),
-                                          unsigned(CardLayer::ShadowRough) };
-    mLightJob->setNumTexUnits(Ogre::uint8(kCardLayers + vctUnits + (cloud ? 1u : 0u)));
+    // The three layers the job SAMPLES (the Albedo and Normal are its UAVs 6, 7).
+    constexpr unsigned kRelightTexLayers = 3u;
+    const unsigned order[kRelightTexLayers] = { unsigned(CardLayer::Depth), unsigned(CardLayer::Emissive),
+                                                unsigned(CardLayer::ShadowRough) };
+    mLightJob->setNumTexUnits(Ogre::uint8(kRelightTexLayers + vctUnits + (cloud ? 1u : 0u)));
     if (cloud) {
         Ogre::DescriptorSetTexture2::TextureSlot slot(
             Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
         slot.texture = mCloudField;
-        mLightJob->setTexture(Ogre::uint8(kCardLayers + vctUnits), slot, cloudWrap);
+        mLightJob->setTexture(Ogre::uint8(kRelightTexLayers + vctUnits), slot, cloudWrap);
     }
-    for (unsigned i = 0; i < kCardLayers; ++i) {
+    for (unsigned i = 0; i < kRelightTexLayers; ++i) {
         Ogre::DescriptorSetTexture2::TextureSlot slot(
             Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
         slot.texture = mAtlas[order[i]];
@@ -1429,13 +1447,13 @@ void SurfaceCache::relightCards() {
         // The chain's volumes, per kind then per cascade (the pixel's and the
         // parity harness's order), the trilinear sampler on the first — the
         // shader's `vSmp` — and the environment cube last.
-        Ogre::uint8 unit = Ogre::uint8(kCardLayers);
+        Ogre::uint8 unit = Ogre::uint8(kRelightTexLayers);
         for (unsigned kind = 0; kind < kinds; ++kind)
             for (unsigned c = 0; c < numCascades; ++c, ++unit) {
                 Ogre::DescriptorSetTexture2::TextureSlot slot(
                     Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
                 slot.texture = vct->getLightVoxelTextures(c)[kind];
-                if (unit == kCardLayers)
+                if (unit == kRelightTexLayers)
                     mLightJob->setTexture(unit, slot, vct->getBindTrilinearSamplerblock());
                 else
                     mLightJob->setTexture(unit, slot, nullptr, false);
@@ -1471,6 +1489,14 @@ void SurfaceCache::relightCards() {
         uav.access = Ogre::ResourceAccess::Read;
         uav.pixelFormat = mMoverVis->getPixelFormat();
         mLightJob->_setUavTexture(5u, uav);
+        // The Albedo and Normal layers: read, and their alpha written (JahCardView).
+        uav.texture = mAtlas[unsigned(CardLayer::Albedo)];
+        uav.access = Ogre::ResourceAccess::ReadWrite;
+        uav.pixelFormat = uav.texture->getPixelFormat();
+        mLightJob->_setUavTexture(6u, uav);
+        uav.texture = mAtlas[unsigned(CardLayer::Normal)];
+        uav.pixelFormat = uav.texture->getPixelFormat();
+        mLightJob->_setUavTexture(7u, uav);
     }
     mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
     mLightJob->setThreadsPerGroup(8u, 8u, 1u);
@@ -1491,6 +1517,8 @@ void SurfaceCache::relightCards() {
         mLightJob->_setUavTexture(3u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->_setUavTexture(4u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->_setUavTexture(5u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->_setUavTexture(6u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->_setUavTexture(7u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->setNumTexUnits(0u);
     }
 

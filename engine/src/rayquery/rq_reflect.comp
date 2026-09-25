@@ -299,6 +299,8 @@ const float kWarmupFrames = 8.0;
 /// THE SURFACE CACHE the hits read FIRST (PHOTON-CARDS-2, SC-1d): the card
 /// table, the instance table, the Depth and Radiance layers, at bindings 15-18.
 #define JAH_CARD_BINDING_BASE 15
+// ...and the view term's five after the job's last binding (PHOTON-CARDS-5).
+#define JAH_CARD_VIEW_BINDING_BASE 31
 #include "jah_rq_card_bindings.glsl"
 #define JAH_CARD_SLOTS   uint( p.cards.x )
 #define JAH_CARD_RECORDS uint( p.cards.y )

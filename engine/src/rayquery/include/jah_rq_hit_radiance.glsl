@@ -8,7 +8,8 @@
 // the card of its own instance first (`jahCardRadiance`, jah_rq_card.glsl: the
 // instance by the TLAS's instanceCustomIndex = the item slot, the pick facing
 // the hit's GEOMETRIC normal, the through-the-wall rule, the texel) and takes the
-// card's radiance whole; the voxels answer where no card does (an instance with
+// card's radiance, its diffuse view term restored for the ray (PHOTON-CARDS-5,
+// jah_card_view.glsl); the voxels answer where no card does (an instance with
 // no cards, a point no card of it describes, a scene without a cache, a card
 // whose indirect half has not been marched yet).
 //
@@ -58,7 +59,9 @@ vec3 jahHitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float foo
 					 bool mirror, bool cardGated, out bool ok )
 {
 	{
-		const vec3 card = jahCardRadiance( slot, hitPos, hitNormal,
+		// The card read restores the diffuse lobe's view term for THIS ray
+		// (PHOTON-CARDS-5): the viewer is where the ray came from.
+		const vec3 card = jahCardRadiance( slot, hitPos, hitNormal, -dir,
 										   ( mirror || !cardGated ) ? 0.0 : footprint, ok );
 		if( ok )
 			return card;
