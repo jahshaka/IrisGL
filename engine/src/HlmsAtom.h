@@ -29,8 +29,12 @@
 // GI arms, which it binds per pass from the pass's own scene (bindSceneGi), exactly
 // as PBS does.
 //
-// NOTHING IN THE PRODUCT DRAWS THROUGH IT YET (S3-DRAW binds it to the id pass);
-// its consumer is `engine.atom_parity`, over a hand-made id buffer.
+// ITS PRODUCT CONSUMER IS THE RAY HITS (PHOTON-HIT-SHADE-1, SPECS/atom/
+// D2_HIT_SHADING_DESIGN.md): in HIT MODE the same decode shades the ray jobs'
+// compacted hit list — one fragment per record — in the chain's "Jahshaka hit
+// decode" pass, over the product's own twins and decode draws (syncSceneDecodes).
+// The screen-mode consumer is still `engine.atom_parity`, over a hand-made id
+// buffer (S3-DRAW binds it to the id pass).
 //
 // Ogre-private: included only by the engine's Ogre TUs and by tests that reach
 // past the public API (tests/atom).
@@ -51,6 +55,7 @@ class HlmsManager;
 class HlmsPbsDatablock;
 class HlmsSamplerblock;
 class ReadOnlyBufferPacked;
+class SceneNode;
 class TextureGpu;
 class UavBufferPacked;
 }  // namespace Ogre
@@ -81,6 +86,15 @@ void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm);
 /// destruction site makes (OgreMaterials.cpp, OgreScene.cpp).
 void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs);
 
+/// The registered HlmsAtom's forgetSceneManager — the scene's decode draws die
+/// before its SceneManager does (OgreScene's and the engine's teardown).
+void forgetSceneDecodes(Ogre::SceneManager *sm);
+
+/// The render queue the product's decode draws live in (the parity suite's too):
+/// every scene pass of the chain covers it, so the draws are shown ONLY for the
+/// hit decode pass (HlmsAtom::showSceneDecodes, from its listener).
+constexpr Ogre::uint8 kHitDecodeRenderQueue = 99u;
+
 /// The id image's two words (R32G32_UINT), the contract between whatever WRITES the
 /// id buffer (the hand-made one of engine.atom_parity today, S3-DRAW's id pass
 /// tomorrow) and the decode:
@@ -98,6 +112,8 @@ struct AtomId {
         return (slot & kSlotMask) | ((level & kLevelMask) << kSlotBits);
     }
 };
+
+class AtomDecodeRenderable;
 
 class HlmsAtom final : public Ogre::HlmsPbs {
 public:
@@ -121,6 +137,13 @@ public:
         Ogre::UavBufferPacked *instances = nullptr;   ///< GpuScene::instanceBuffer()
         Ogre::UavBufferPacked *levels = nullptr;      ///< GpuScene::levelBuffer()
         Ogre::UavBufferPacked *geomRows = nullptr;    ///< GpuScene::geomBuffer()
+        /// HIT MODE (PHOTON-HIT-SHADE-1): `ids` is the hit list's RGBA32UI record
+        /// image and `hitBuf` the ray jobs' buffer (word 0 = records appended; two
+        /// words a record from word 4: the sun's visibility and the footprint as
+        /// halves, the write-back weight — jah_rq_hit_record.glsl). The pass
+        /// property atom_hit_mode selects the decode's hit branches.
+        bool hitMode = false;
+        Ogre::UavBufferPacked *hitBuf = nullptr;
     };
     void setDecodeSource(const DecodeSource &src);
     const DecodeSource &decodeSource() const { return mSource; }
@@ -150,11 +173,37 @@ public:
     void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs);
     size_t decodeTwinCount() const { return mTwins.size(); }
 
+    /// THE PRODUCT'S DECODE DRAWS (PHOTON-HIT-SHADE-1): for a SceneManager whose
+    /// scene runs the ray tier, a twin for every PBS datablock its items wear
+    /// (`materialWords`: GpuInstance::raster x, HlmsAtom::materialWordOf) and ONE
+    /// AtomDecodeRenderable per twin, hidden, at kHitDecodeRenderQueue. Draws of
+    /// twins no longer worn are destroyed. Called outside the compositor (the ray
+    /// tier's per-scene update) whenever the scene's set or twinEpoch() moved.
+    /// S3-DRAW's bucket merge (one draw per permutation x texture set, never per
+    /// material) is still owed.
+    void syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32_t> &materialWords);
+    /// Shows (for the hit decode pass only) or hides a SceneManager's decode draws.
+    void showSceneDecodes(Ogre::SceneManager *sm, bool on);
+    /// Destroys a SceneManager's decode draws (before the manager dies).
+    void forgetSceneManager(Ogre::SceneManager *sm);
+    /// Moves whenever a twin dies — a scene's synced set may then name a word a
+    /// NEW datablock now holds.
+    unsigned long long twinEpoch() const { return mTwinEpoch; }
+    size_t sceneDecodeCount(const Ogre::SceneManager *sm) const;
+
     /// THE MATERIAL WORD of a PBS datablock: {pool index : 16 | slot : 16} in HlmsPbs's
     /// const-buffer pool — what `GpuInstance::raster[0]` carries and what the decode's
     /// LoadMaterial indexes. 0xFFFFFFFF for anything that is not a PBS datablock.
     static uint32_t materialWordOf(const Ogre::HlmsDatablock *pbs);
     static constexpr uint32_t kNoMaterialWord = 0xFFFFFFFFu;
+    /// THE TEXTURE SET of a PBS datablock as one key: every slot's texture and
+    /// samplerblock (the public getters; the baked descriptor sets are Ogre's
+    /// protected state). A same-slot texture swap keeps the Hlms hash — the
+    /// property vector does not change — and a decode twin is a CLONE that
+    /// resolved the OLD texture by name, so the twin's staleness witness carries
+    /// this beside the hash (PHOTON-HIT-SHADE-1 audit F6). 0 for anything that
+    /// is not a PBS datablock.
+    static uint64_t textureSetKeyOf(const Ogre::HlmsDatablock *pbs);
 
     Ogre::uint32 fillBuffersForV2(const Ogre::HlmsCache *cache,
                                   const Ogre::QueuedRenderable &queuedRenderable, bool casterPass,
@@ -177,7 +226,14 @@ public:
     static constexpr Ogre::uint8 kLevelBufSlot = 2u;
     static constexpr Ogre::uint8 kGeomRowBufSlot = 3u;
     static constexpr Ogre::uint8 kBucketBufSlot = 4u;
-    static constexpr Ogre::uint8 kReservedBufSlots = 5u;
+    /// Hit mode's list buffer: the vertex stage covers only the used rows (its
+    /// count), the pixel stage reads each record's sun and footprint. A BUFFER, not
+    /// a second image: the pin's Vulkan table of PASS textures holds 32 slots
+    /// (NUM_BIND_TEXTURES, its bounds assert compiled out), and with a second image
+    /// the hit mode's last pass texture sat at slot 31, its last entry (measured
+    /// from the generated shaders). The read-only buffer table is separate.
+    static constexpr Ogre::uint8 kHitBufSlot = 5u;
+    static constexpr Ogre::uint8 kReservedBufSlots = 6u;
 
 protected:
     Ogre::Hlms::PropertiesMergeStatus notifyPropertiesMergedPreGenerationStep(
@@ -214,6 +270,16 @@ private:
     std::vector<uint32_t> mBucketMirror;
     bool mBucketDirty = true;
     uint32_t mTwinSerial = 0u;
+    unsigned long long mTwinEpoch = 0ull;
+
+    /// The product's decode draws, per SceneManager (syncSceneDecodes).
+    struct SceneDecodes {
+        Ogre::SceneNode *node = nullptr;
+        std::unordered_map<const Ogre::HlmsDatablock *, AtomDecodeRenderable *> draws;
+        bool shown = false;
+    };
+    std::unordered_map<Ogre::SceneManager *, SceneDecodes> mSceneDecodes;
+    void destroySceneDraw(Ogre::SceneManager *sm, SceneDecodes &sd, const Ogre::HlmsDatablock *twin);
 };
 
 /// ONE FULL-SCREEN TRIANGLE drawn through Ogre's own RenderQueue (Ogre's

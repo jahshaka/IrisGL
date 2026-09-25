@@ -892,6 +892,14 @@ struct StereoEyeBasis {
     float tanLeft = 0.0f, tanRight = 0.0f, tanTop = 0.0f, tanBottom = 0.0f;
 };
 
+/// THE HIT DECODE PASS (ChainDesc::hitDecode): its listener records the ray
+/// jobs' TRACES before it (they write the hit list it shades) and arms HlmsAtom's
+/// hit mode for its length; the WRITE-BACK and the filters follow in the opaque
+/// pass' pre-execute. Stamped on exactly that pass.
+constexpr Ogre::uint32 kHitDecodePassIdentifier = 25002u;
+/// The hit list's height as a factor of the target's (ChainDesc::hitDecode).
+constexpr float kHitListHeightFactor = 0.5625f;
+
 struct ChainDesc {
     Colour   background;
     bool     shadows = false;   ///< instantiate the process-wide shadow node
@@ -1032,6 +1040,21 @@ struct ChainDesc {
     /// Nothing else about the graph moves. Set by the VIEW from the scene's
     /// resolved row, below the offscreen early-out, never in a stereo view.
     bool  sunContact = false;
+    /// THE HIT DECODE (PHOTON-HIT-SHADE-1; SPECS/atom/D2_HIT_SHADING_DESIGN.md):
+    /// wherever the chain carries the prepass and the scene's rays are live, the
+    /// graph carries the ray jobs' compacted HIT LIST — `jahHitIds` (RGBA32UI) and
+    /// `jahHitDest` (R32UI), UAVs the traces append to, beside the ray tier's
+    /// buffer (the counters and 8 bytes a record: the sun, footprint, weight) —
+    /// and one PASS_SCENE, "Jahshaka hit decode" (RQ kHitDecodeRenderQueue only,
+    /// into `jahHitRadiance`, RGBA16F), between the SSR resolve and the opaque
+    /// pass: HlmsAtom's decode shading every record. THE LIST'S SIZE is a factor
+    /// of the target (so a resize is not a new graph): W x floor(0.5625 H)
+    /// records = ( W H [the Epic reflection's texels] + 1.25 W H [the Epic
+    /// gather's rays: (W/8)(H/8) probes x 1.25 (the adaptive quarter) x 64] ) / 4
+    /// — a quarter of the worst case; 1,166,400 records at 1920x1080, 36 bytes
+    /// each (28 of record, 8 of radiance) = 42 MB. Not tied to the rows that trace
+    /// (a toggle of the gather where the prepass already runs is not a new graph).
+    bool  hitDecode = false;
     bool  refractions = false;
     /// THE RADIANCE READBACK (PostFxDesc::hdrReadback, HDR-READBACK-1): the
     /// scene result is kept in a FLOAT target even without `hdr`, and
@@ -6604,6 +6627,8 @@ private:
     /// a frame beside the reflection's (OgreView::syncReflectListener) — as the
     /// prepass they ask for, never as the rows themselves (PHOTON-GATHER-1d).
     bool                       mChainPrepass = false;
+    /// ...and ChainDesc::hitDecode (PHOTON-HIT-SHADE-1): the hit list + its pass.
+    bool                       mChainHitDecode = false;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.

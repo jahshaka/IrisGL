@@ -76,10 +76,12 @@
 #include "rayquery/rq_reflect_filter_spv.h"
 #include "rayquery/rq_card_parity_spv.h"
 #include "rayquery/rq_sun_contact_spv.h"
+#include "rayquery/rq_hit_composite_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
 // jobs, its atlases and its pipelines live in OgreScreenProbeGather.cpp; this
 // file is its HOST (the device, the retire window, the frame's command buffer,
 // the TLAS) and the one that is friends with the scene it reads.
+#include "HlmsAtom.h"
 #include "ScreenProbeGather.h"
 #include "SkinCache.h"
 #include "SurfaceCache.h"
@@ -232,7 +234,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 25u;
+constexpr unsigned kReflectBindings = 29u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -246,6 +248,14 @@ constexpr unsigned kReflectGeomBinding = 19u;
 /// wherever it runs.
 constexpr unsigned kReflectCovBinding = 21u;   // then 22, 23, 24: covN, posP, posN
 constexpr unsigned kReflectSplitKinds = 4u;
+/// ...then THE HIT RECORD (PHOTON-HIT-SHADE-1): the GPU scene's instance table
+/// (25), the hit list's two images (26-27) and its buffer (28: the counters and
+/// each record's sun, footprint and weight) — jah_rq_hit_record.glsl.
+constexpr unsigned kReflectHitBinding = 25u;
+/// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
+/// buffer, the destinations, the decoded radiance, the reflection's mean and
+/// distance, the gather's atlas.
+constexpr unsigned kHitCompositeBindings = 7u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -382,6 +392,22 @@ private:
         /// rebuilds a hit's geometric normal from. Written with the instances.
         std::vector<uint32_t> geomRowOfSlot;
         unsigned  slot = 0;
+        /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
+        /// last synced for, the GPU scene's write count and HlmsAtom's twin epoch
+        /// at that sync (updateScene).
+        std::vector<uint32_t> decodeWords;
+        unsigned long long decodeWrites = ~0ull;
+        unsigned long long decodeEpoch = ~0ull;
+        /// One item wearing each synced word, and its datablock, Hlms hash and
+        /// texture set (HlmsAtom::textureSetKeyOf) when last seen (the twin's
+        /// staleness witness).
+        struct DecodeWitness {
+            uint32_t slot = 0u;
+            const Ogre::HlmsDatablock *db = nullptr;
+            Ogre::uint32 hash = 0u;
+            uint64_t texKey = 0u;
+        };
+        std::vector<DecodeWitness> decodeWitness;
 
         /// THE GPU SKIN CACHE (PHOTON-SKIN-1, SkinCache.h): one entry per RIGGED
         /// traced item, by NodeId — its posed vertex buffer, its row block in the
@@ -618,7 +644,11 @@ public:
     /// cases `jahSsrReflection` keeps exactly what the resolve wrote, which is
     /// exactly today's picture.
     void recordReflect(const ReflectPassListener *key, OgreView *view,
-                       Ogre::CompositorPass *pass);
+                       Ogre::CompositorPass *pass, const HitListBinding &hit);
+    /// THE REFLECTION'S SECOND HALF (PHOTON-HIT-SHADE-1): the spatial filter and
+    /// the composite, in front of the opaque pass — after the hit write-back has
+    /// completed the temporal mean of every texel whose ray the decode shaded.
+    void finishReflect(const ReflectPassListener *key);
     /// Frees a view's reflection resources. Called from ~ReflectPassListener.
     void forgetReflect(const ReflectPassListener *key);
     /// How many rays the last recorded trace dispatched, and the GPU
@@ -691,6 +721,10 @@ private:
         struct Pending { unsigned frame = 0; bool live = false; };
         Pending  pending[kFramesInFlight];
         float    gpuMs = -1.0f;
+        /// THE FRAME BETWEEN ITS TWO HALVES (trace -> finishReflect): the ring slot
+        /// the trace bound, its grid, and which of the pair is this frame's mean.
+        bool     finishPending = false;
+        unsigned finishRing = 0, traceW = 0, traceH = 0, curIdx = 0;
     };
 
     bool makeReflectPipeline(std::string &err);
@@ -750,7 +784,7 @@ public:
     /// Silently does nothing unless the view's scene has the row on and this
     /// machine traces.
     void recordGather(const ReflectPassListener *key, OgreView *view,
-                      Ogre::CompositorPass *pass);
+                      Ogre::CompositorPass *pass, const HitListBinding &hit);
     /// Frees a view's gather resources (from ~ReflectPassListener, and when
     /// the row goes off).
     void forgetGather(const ReflectPassListener *key);
@@ -840,6 +874,11 @@ public:
     /// Silently does nothing unless the view's scene resolves the row on.
     void recordSunContact(const ReflectPassListener *key, OgreView *view,
                           Ogre::CompositorPass *pass);
+    /// ...and its second half (PHOTON-HIT-SHADE-1): the texture's transition to
+    /// the pixel stage and the pass-scoped registration, in front of the opaque
+    /// pass that reads it (the rays themselves are traced in front of the hit
+    /// decode pass, with the other ray jobs).
+    void finishSunContact(const ReflectPassListener *key);
     /// Takes the pass-scoped registration away as that pass ends.
     void releaseSunContactBinding(const ReflectPassListener *key);
     /// Frees a view's contact state (from ~ReflectPassListener, a workspace
@@ -873,6 +912,8 @@ private:
         struct Pending { unsigned frame = 0; bool live = false; };
         Pending  pending[kFramesInFlight];
         float    gpuMs = -1.0f;
+        /// The rays were traced this frame; finishSunContact registers them.
+        bool     finishPending = false;
     };
     bool makeSunContactPipeline(std::string &err);
     void dropSunContact(SunContactView &sv);
@@ -892,6 +933,87 @@ private:
     /// said ONCE, and the shadow map renders alone for the rest of the process.
     bool                  mSunFailed = false;
     std::string           mSunFailReason;
+
+public:
+    // ---- THE HIT DECODE (PHOTON-HIT-SHADE-1; SPECS/atom/D2_HIT_SHADING_DESIGN.md)
+    // A ray hit no cache can shade (a mover, a rigged item, a static hit neither
+    // its card nor a cascade answers, the gather's far copies) is appended to the
+    // chain's HIT LIST by the trace; the chain's "Jahshaka hit decode" pass draws
+    // HlmsAtom's decode over the list (one fragment per record); the write-back
+    // (rq_hit_composite.comp) scatters the radiance into the reflection's mean and
+    // the gather's atlas. The ray jobs' recording is split around the decode pass.
+    /// In front of the hit decode pass: the list reset, the TRACES (the sun
+    /// contact, the reflection, the gather) appending to it, HlmsAtom armed.
+    void beginHitDecode(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
+    /// After it: HlmsAtom disarmed, the decode draws hidden, the camera's aspect
+    /// handed back.
+    void endHitDecode(const ReflectPassListener *key);
+    /// In front of the opaque pass: the write-back, then every job's second half
+    /// (the filters, the SH and integrate, the registrations). A chain that ran no
+    /// decode pass this frame traces here first, with no list bound.
+    void finishRayJobs(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
+    void forgetHits(const ReflectPassListener *key);
+    /// The hit list's counters (read back several frames late) for a scene.
+    void hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const;
+
+private:
+    struct HitView {
+        /// The list's buffer: [0] records appended (may pass the capacity), [1]
+        /// records dropped, then two words per record (the sun, the footprint, the
+        /// weight — jah_rq_hit_record.glsl). An Ogre UAV buffer: HlmsAtom reads it
+        /// through a read-only view (a buffer, not an image: the decode's pixel
+        /// shader's pass textures already reach the pin's table's end —
+        /// kHitBufSlot, HlmsAtom.h).
+        Ogre::UavBufferPacked *buf = nullptr;
+        /// This frame's list, the chain's textures (the names OgreChain.cpp gives).
+        Ogre::TextureGpu *ids = nullptr, *dest = nullptr, *radiance = nullptr;
+        uint32_t capacity = 0u, width = 0u;
+        /// The list was bound for THIS frame's traces (a write-back is owed).
+        bool live = false;
+        /// Ogre's frame number of the last decode pass this key ran in front of.
+        uint32_t decodeFrame = 0xFFFFFFFFu;
+        VkDescriptorSet sets[kReflectRing] = {};
+        RawBuffer params[kReflectRing];
+        /// The buffer's two counter words, copied per frame into a host ring and read once
+        /// the frame retired (never a wait).
+        RawBuffer readback;
+        struct Pending { uint32_t frame = 0; bool live = false; };
+        Pending pending[kFramesInFlight];
+        unsigned frame = 0;
+        OgreScene *scene = nullptr;
+        unsigned long long appended = 0ull, dropped = 0ull;
+        /// Armed for the decode pass: the SceneManager whose draws are shown, and
+        /// the camera whose auto aspect is held off for the pass (the decode's
+        /// target is the list, not a picture — F7).
+        Ogre::SceneManager *armedSm = nullptr;
+        Ogre::Camera *pinnedCam = nullptr;
+        bool camAuto = false;
+    };
+    std::unordered_map<const ReflectPassListener *, HitView> mHits;
+    bool prepareHitList(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass,
+                        HitListBinding &out);
+    /// A decode twin of `scene` no longer matches its PBS datablock (a witness's
+    /// Hlms hash or datablock moved since the last sync) — read only.
+    bool decodeTwinsStale(OgreScene *scene) const;
+    /// The binding a trace takes when no list is bound: the stand-ins, `on` false.
+    void hitStandIns(HitListBinding &out);
+    void recordHitComposite(const ReflectPassListener *key);
+    bool makeCompositePipeline(std::string &err);
+    bool ensureHitDummies(std::string &err);
+    void initHitDummies(VkCommandBuffer cmd);
+    void readHitCounters(HitView &hv);
+    VkDescriptorSetLayout mCompSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mCompPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mCompPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mCompModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mCompPool = VK_NULL_HANDLE;
+    bool                  mCompFailed = false;
+    /// 1x1 storage stand-ins in GENERAL (a set's every view must be real): the
+    /// list's two formats, the RGBA16F of the reflection's mean and the gather's
+    /// atlas, and the reflection's distance format.
+    ReflectImage mHitDummyIds, mHitDummyColour, mHitDummyDest, mHitDummyDist;
+    bool mHitDummiesReady = false;
+    bool mHitDummiesNeedInit = false;
 
     /// ONE IMAGE'S BASIS from a pose and a frustum (rq_reflect.comp's five
     /// numbers) — the arithmetic recordReflect's eyes are built with, shared so
@@ -1473,6 +1595,25 @@ void RayQueryTier::close() {
     mScenes.clear();
     for (auto &kv : mReflects) dropReflect(kv.second);
     mReflects.clear();
+    // THE HIT LISTS (PHOTON-HIT-SHADE-1): the counters are Ogre UAV buffers (the
+    // VaoManager is alive: close() runs before Root goes), the sets die with the
+    // pool below, the buffers now (the device is idle).
+    for (auto &kv : mHits) {
+        HitView &hv = kv.second;
+        if (hv.buf && mRs && mRs->getVaoManager()) mRs->getVaoManager()->destroyUavBuffer(hv.buf);
+        hv.buf = nullptr;
+        for (unsigned i = 0; i < kReflectRing; ++i) dropBuffer(hv.params[i]);
+        dropBuffer(hv.readback);
+    }
+    mHits.clear();
+    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist }) {
+        if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
+        if (d->image) vkDestroyImage(mVk, d->image, nullptr);
+        if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
+        *d = ReflectImage();
+    }
+    mHitDummiesReady = false;
+    mHitDummiesNeedInit = false;
     // THE SUN CONTACT's views (PHOTON-RAYS-1): each takes its registration
     // away first (the listener holds a raw texture pointer) and retires its
     // texture into the bin that is emptied below. The sets are DROPPED, not
@@ -1523,6 +1664,14 @@ void RayQueryTier::close() {
         if (r.img.memory) vkFreeMemory(mVk, r.img.memory, nullptr);
     }
     mRetireBin.clear();
+    // THE HIT WRITE-BACK'S POOL, after the bin's sets that name it are freed.
+    if (mCompPool) vkDestroyDescriptorPool(mVk, mCompPool, nullptr);
+    if (mCompPipeline) vkDestroyPipeline(mVk, mCompPipeline, nullptr);
+    if (mCompModule) vkDestroyShaderModule(mVk, mCompModule, nullptr);
+    if (mCompPipeLayout) vkDestroyPipelineLayout(mVk, mCompPipeLayout, nullptr);
+    if (mCompSetLayout) vkDestroyDescriptorSetLayout(mVk, mCompSetLayout, nullptr);
+    mCompPool = VK_NULL_HANDLE; mCompPipeline = VK_NULL_HANDLE; mCompModule = VK_NULL_HANDLE;
+    mCompPipeLayout = VK_NULL_HANDLE; mCompSetLayout = VK_NULL_HANDLE;
     if (mSunPool) vkDestroyDescriptorPool(mVk, mSunPool, nullptr);
     if (mSunPipeline) vkDestroyPipeline(mVk, mSunPipeline, nullptr);
     if (mSunModule) vkDestroyShaderModule(mVk, mSunModule, nullptr);
@@ -2808,6 +2957,79 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // movement — so a still scene whose eye crossed a 2x band must still write
     // its instances once. Both counters only ever grow, so their sum is an
     // epoch too.
+    // THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): a decode twin for every PBS
+    // datablock the scene's items wear, and one decode draw per twin in this
+    // scene — made HERE, outside the compositor, when the set of material words
+    // (GpuInstance::raster x) or HlmsAtom's twin epoch moved. A scan of the GPU
+    // scene's mirror only when its slot writes moved.
+    {
+        const detail::GpuScene &gsc = scene->gpuScene();
+        Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
+        auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+        // A TWIN IS A COPY, AND A COPY DRIFTS: the engine edits a PBS datablock in
+        // place (a texture bound or streamed in, the sky's reflection cube taken
+        // away when a probe grid binds, a flag), and the twin made from it earlier
+        // would shade the old permutation — measured in the app: a twin still
+        // holding the sky cube as its manual reflection under an automatic probe
+        // array, a shader that cannot compile. Ogre re-hashes every renderable a
+        // datablock changes the permutation of (HlmsDatablock::flushRenderables),
+        // so one item wearing each word is the witness: its hash or its datablock
+        // moved -> the twin dies (forgetDecodeTwinOf; the epoch moves) and the next
+        // sync re-derives it. A SAME-SLOT TEXTURE SWAP keeps the hash (the property
+        // vector is unchanged) and the twin would keep the old texture in every hit:
+        // the witness carries the datablock's texture set too (audit F6). One hash
+        // compare and one texture-set key per material per frame.
+        if (atom && gsc.live()) {
+            for (auto &w : sa.decodeWitness) {
+                if (w.slot >= scene->mItemNodes.size()) continue;
+                const OgreScene::Node *nd = scene->mItemNodes[w.slot];
+                if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
+                const Ogre::SubItem *sub = nd->item->getSubItem(0);
+                const Ogre::HlmsDatablock *db = sub->getDatablock();
+                const Ogre::uint32 h = sub->getHlmsHash();
+                const uint64_t tk = HlmsAtom::textureSetKeyOf(db);
+                if (db == w.db && (h != w.hash || tk != w.texKey) && db) atom->forgetDecodeTwinOf(db);
+                w.db = db;
+                w.hash = h;
+                w.texKey = tk;
+            }
+        }
+        if (atom && gsc.live() &&
+            (gsc.writes() != sa.decodeWrites || atom->twinEpoch() != sa.decodeEpoch)) {
+            sa.decodeWrites = gsc.writes();
+            std::vector<uint32_t> words;
+            std::vector<SceneAs::DecodeWitness> witness;
+            const detail::GpuInstance *m = gsc.mirrorData();
+            for (uint32_t i = 0, n = gsc.slotCount(); i < n; ++i)
+                if (m[i].raster[0] != HlmsAtom::kNoMaterialWord) words.push_back(m[i].raster[0]);
+            std::sort(words.begin(), words.end());
+            words.erase(std::unique(words.begin(), words.end()), words.end());
+            if (words != sa.decodeWords || atom->twinEpoch() != sa.decodeEpoch) {
+                sa.decodeWords = words;
+                atom->syncSceneDecodes(scene->mSceneMgr, words);
+                sa.decodeEpoch = atom->twinEpoch();
+                // ...and the witnesses: the first slot wearing each word.
+                std::vector<uint32_t> seen;
+                for (uint32_t i = 0, n = gsc.slotCount(); i < n; ++i) {
+                    const uint32_t w = m[i].raster[0];
+                    if (w == HlmsAtom::kNoMaterialWord) continue;
+                    if (std::find(seen.begin(), seen.end(), w) != seen.end()) continue;
+                    seen.push_back(w);
+                    SceneAs::DecodeWitness dw;
+                    dw.slot = i;
+                    if (i < scene->mItemNodes.size() && scene->mItemNodes[i] && scene->mItemNodes[i]->item &&
+                        scene->mItemNodes[i]->item->getNumSubItems()) {
+                        const Ogre::SubItem *sub = scene->mItemNodes[i]->item->getSubItem(0);
+                        dw.db = sub->getDatablock();
+                        dw.hash = sub->getHlmsHash();
+                        dw.texKey = HlmsAtom::textureSetKeyOf(dw.db);
+                    }
+                    witness.push_back(dw);
+                }
+                sa.decodeWitness.swap(witness);
+            }
+        }
+    }
     const unsigned long long epoch = scene->shadowEpoch() + scene->rayLevelRefits();
     const bool moved = !sa.haveEpoch || epoch != sa.lastEpoch;
     // THIS SCENE'S OWN timestamp range, handed out once. Past the budget a
@@ -3645,6 +3867,11 @@ struct ReflectParams {
     /// z = the footprint gate in card texels (kCardFootprintTexels), w = the
     /// per-slot geometry-row entries bound (0 = the hit's normal is the ray's).
     float cards[4] = {};
+    /// THE HIT RECORD (PHOTON-HIT-SHADE-1; rq_reflect.comp's hitList, hitSun,
+    /// hitSun2).
+    float hitList[4] = {};
+    float hitSun[4] = {};
+    float hitSun2[4] = {};
 };
 
 /// The card read's footprint gate (Types.h kCardFootprintTexels).
@@ -3722,6 +3949,10 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 22 voxelCovN[]
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 23 voxelPosP[]
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 24 voxelPosN[]
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 25 the GPU scene's instances (HIT-SHADE-1)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 26 the hit list's records
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 27 ...its destinations
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 28 ...its buffer (counters + aux)
     };
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
@@ -3799,11 +4030,11 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     sizes[1].descriptorCount = sets;
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[2].descriptorCount = sets * 5u;
+    sizes[2].descriptorCount = sets * 7u;   // + the hit list's two (HIT-SHADE-1)
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sizes[3].descriptorCount = sets * (3u + 8u * kMaxReflectCascades + 1u + 2u);
     sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[4].descriptorCount = sets * 4u;
+    sizes[4].descriptorCount = sets * 6u;   // + the instances and the list's buffer
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -3974,7 +4205,7 @@ void RayQueryTier::expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned
 }
 
 void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
-                                 Ogre::CompositorPass *pass) {
+                                 Ogre::CompositorPass *pass, const HitListBinding &hit) {
     if (!isOpen() || mReflectFailed || !view || !pass) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
@@ -4395,6 +4626,19 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             std::memcpy(rb.mapped, sa.geomRowOfSlot.data(), size_t(want));
     }
     pp.cards[3] = float(geomSlots);
+    // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the decode shades, the sun ray.
+    pp.hitList[0] = float(hit.capacity);
+    pp.hitList[1] = float(hit.width);
+    pp.hitList[2] = float(hit.instanceEntries);
+    pp.hitList[3] = hit.on ? 1.0f : 0.0f;
+    pp.hitSun[0] = hit.toSun[0];
+    pp.hitSun[1] = hit.toSun[1];
+    pp.hitSun[2] = hit.toSun[2];
+    pp.hitSun[3] = hit.sun ? 1.0f : 0.0f;
+    pp.hitSun2[0] = float(hit.sunMask);
+    pp.hitSun2[1] = hit.lift;
+    pp.hitSun2[2] = hit.sunRange;
+    pp.hitSun2[3] = hit.farLift;
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -4565,6 +4809,29 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         w[kReflectGeomBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[kReflectGeomBinding + i].pBufferInfo = &geomBufs[i];
     }
+    // THE HIT RECORD (25-28, PHOTON-HIT-SHADE-1): the list, or the stand-ins.
+    VkDescriptorBufferInfo hitBufs[2] = {};
+    hitBufs[0].buffer = hit.instances ? hit.instances : mDummyStorage.buffer;
+    hitBufs[0].offset = hit.instances ? hit.instancesOffset : 0u;
+    hitBufs[0].range = hit.instances ? hit.instancesRange : VK_WHOLE_SIZE;
+    hitBufs[1].buffer = hit.buf ? hit.buf : mDummyStorage.buffer;
+    hitBufs[1].offset = hit.buf ? hit.bufOffset : 0u;
+    hitBufs[1].range = hit.buf ? hit.bufRange : VK_WHOLE_SIZE;
+    VkDescriptorImageInfo hitImgs[2] = {};
+    {
+        const VkImageView views[2] = { hit.ids, hit.dest };
+        for (int i = 0; i < 2; ++i) {
+            if (!views[i]) { bail("a hit-list view is null"); return; }
+            hitImgs[i].imageView = views[i];
+            hitImgs[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            w[kReflectHitBinding + 1 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[kReflectHitBinding + 1 + i].pImageInfo = &hitImgs[i];
+        }
+    }
+    w[kReflectHitBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[kReflectHitBinding].pBufferInfo = &hitBufs[0];
+    w[kReflectHitBinding + 3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[kReflectHitBinding + 3].pBufferInfo = &hitBufs[1];
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -4633,6 +4900,27 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
+    // ---- THE FIRST HALF ENDS HERE (PHOTON-HIT-SHADE-1): the hits no cache
+    // shades are in the hit list; the decode pass shades them and the write-back
+    // completes their texels' means before finishReflect filters.
+    rv.finishPending = true;
+    rv.finishRing = ring;
+    rv.traceW = traceW;
+    rv.traceH = traceH;
+    rv.curIdx = cur;
+    rv.rays = traceW * traceH;
+    ++rv.frame;
+}
+
+void RayQueryTier::finishReflect(const ReflectPassListener *key) {
+    auto it = mReflects.find(key);
+    if (it == mReflects.end() || !it->second.finishPending) return;
+    ReflectView &rv = it->second;
+    rv.finishPending = false;
+    const unsigned ring = rv.finishRing;
+    const unsigned traceW = rv.traceW, traceH = rv.traceH;
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
     // THE MEAN IS WRITTEN; NOW IT IS READ BY ITS NEIGHBOURS. A plain memory
     // barrier is enough and an image barrier would be wrong: the temporal mean
     // stays in GENERAL for both passes and only the ACCESS has to be ordered.
@@ -4649,18 +4937,22 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // pipeline. Its timestamp is the SAME pair as the trace's, deliberately:
     // what a budget cares about is what the reflection costs, and the split
     // between tracing and filtering is ours, not the frame's.
+    // The set is the trace's (the same layout); a second command-buffer bind,
+    // since a scene pass ran between the two halves.
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
+                            &rv.sets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
     if (mReflectTimestamps && rv.hasQueryBase) {
-        const uint32_t base = rv.queryBase + (rv.frame % kFramesInFlight) * 2u;
+        // rv.frame was advanced by the trace: its pair is the previous slot's.
+        const unsigned tf = rv.frame - 1u;
+        const uint32_t base = rv.queryBase + (tf % kFramesInFlight) * 2u;
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mReflectTimestamps,
                             base + 1u);
-        ReflectView::Pending &pd = rv.pending[rv.frame % kFramesInFlight];
+        ReflectView::Pending &pd = rv.pending[tf % kFramesInFlight];
         pd.frame = frameNow();
         pd.live = true;
     }
-    rv.rays = traceW * traceH;
-    ++rv.frame;
 }
 
 // ---------------------------------------------------------------------------
@@ -4685,7 +4977,7 @@ void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) co
 }
 
 void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
-                                Ogre::CompositorPass *pass) {
+                                Ogre::CompositorPass *pass, const HitListBinding &hit) {
     if (!isOpen() || !view || !pass) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
@@ -4841,6 +5133,9 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.projB = float(projAB.y);
     in.farClip = float(cam->getFarClipDistance());
 
+    // THE HIT LIST (PHOTON-HIT-SHADE-1): a far hit, a mover's, a rigged item's
+    // and a static hit no cache answers are appended for the decode.
+    in.hit = hit;
     if (!mGather) mGather = new ScreenProbeGather(*this);
     mGather->record(key, in);
 }
@@ -5035,6 +5330,26 @@ void RayQueryTier::forgetSunContact(const ReflectPassListener *key) {
     if (it == mSunContacts.end()) return;
     dropSunContact(it->second);
     mSunContacts.erase(it);
+}
+
+void RayQueryTier::finishSunContact(const ReflectPassListener *key) {
+    auto it = mSunContacts.find(key);
+    if (it == mSunContacts.end() || !it->second.finishPending) return;
+    SunContactView &sv = it->second;
+    sv.finishPending = false;
+    if (!sv.vis) return;
+    // ...AND NOW THE PIXEL SHADER READS IT: ours to order, since the scene
+    // pass does not know the texture exists (it arrives through the listener).
+    {
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, sv.vis, Ogre::ResourceLayout::Texture,
+                                 Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        mRs->executeResourceTransition(trans);
+    }
+    // THE PROPERTY AND THE TEXTURE TOGETHER, PASS-SCOPED: taken away by
+    // releaseSunContactBinding when this pass ends.
+    FogHlmsListener::setSunContact(sv.sceneMgr, sv.vis, sv.divisor);
 }
 
 void RayQueryTier::releaseSunContactBinding(const ReflectPassListener *key) {
@@ -5378,18 +5693,10 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
         }
     }
 
-    // ...AND NOW THE PIXEL SHADER READS IT: ours to order, since the scene
-    // pass does not know the texture exists (it arrives through the listener).
-    {
-        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
-        Ogre::ResourceTransitionArray trans;
-        solver.resolveTransition(trans, sv.vis, Ogre::ResourceLayout::Texture,
-                                 Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
-        mRs->executeResourceTransition(trans);
-    }
-    // THE PROPERTY AND THE TEXTURE TOGETHER, PASS-SCOPED: taken away by
-    // releaseSunContactBinding when this pass ends.
-    FogHlmsListener::setSunContact(sv.sceneMgr, sv.vis, divisor);
+    // THE REGISTRATION IS THE SECOND HALF'S (finishSunContact, in front of the
+    // opaque pass that reads it — PHOTON-HIT-SHADE-1 split the ray jobs around
+    // the hit decode pass).
+    sv.finishPending = true;
     sv.ran = true;
     sv.reason.clear();
     sv.rays = (unsigned long long)w * h;
@@ -5423,6 +5730,7 @@ ReflectPassListener::~ReflectPassListener() {
         mView->mEngine->mRayTier->forgetReflect(this);
         mView->mEngine->mRayTier->forgetGather(this);
         mView->mEngine->mRayTier->forgetSunContact(this);
+        mView->mEngine->mRayTier->forgetHits(this);
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener could not be flushed away cleanly (" +
@@ -5434,6 +5742,7 @@ ReflectPassListener::~ReflectPassListener() {
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetHits(this); } catch (...) {}
     } catch (...) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener's teardown threw a non-Ogre exception",
@@ -5441,31 +5750,31 @@ ReflectPassListener::~ReflectPassListener() {
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetHits(this); } catch (...) {}
     }
 }
 
 void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (!pass || !mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
-    // THE PASS, BY WHAT IT DOES AND NOT BY ITS NAME. `PrePassUse` is Ogre's own
-    // word for "this pass shades with a prepass' G-buffers and the ssr texture"
-    // — it is the pass the trace must run before, and the one the compositor
-    // would break if anyone renamed a profiling string.
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
-    if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
-    // THE TRACE ONLY WHERE THE CHAIN CARRIES ITS TEXTURE (PHOTON-GATHER-1d): a
-    // gather- or contact-only chain declares no `jahSsrReflection`, and asking
-    // for it threw an Ogre exception — logged — on every frame of every such
-    // view (a default-on gather made that every screenshot and thumbnail).
-    if (mView->chainDesc().rayReflect) mView->mEngine->mRayTier->recordReflect(this, mView, pass);
-    // GATHER-0 rides the SAME hook, and it has to: the probe's surface is the
-    // prepass' depth and normals, and the pixel that reads the gather's answer
-    // is shaded by the very pass this listener runs in front of.
-    mView->mEngine->mRayTier->recordGather(this, mView, pass);
-    // ...and the SUN CONTACT job (PHOTON-RAYS-1), for the same two reasons: its
-    // rays start from the prepass' surface and its answer is read by the pass
-    // this listener runs in front of.
-    mView->mEngine->mRayTier->recordSunContact(this, mView, pass);
+    if (!def) return;
+    // THE HIT DECODE PASS (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): every ray
+    // job TRACES in front of it — the sun contact, the reflection, the gather —
+    // because a hit no cache can shade is appended to the hit list this pass
+    // shades; HlmsAtom is armed for its length (endHitDecode disarms it).
+    if (def->mIdentifier == kHitDecodePassIdentifier) {
+        mView->mEngine->mRayTier->beginHitDecode(this, mView, pass);
+        return;
+    }
+    // THE PASS, BY WHAT IT DOES AND NOT BY ITS NAME. `PrePassUse` is Ogre's own
+    // word for "this pass shades with a prepass' G-buffers and the ssr texture"
+    // — the pass every ray job's answer is read by. The write-back, the
+    // reflection's filter, the gather's filter/SH/integrate and every job's
+    // pass-scoped registration run in front of it (and, where no decode pass ran
+    // this frame, the traces first).
+    if (def->mPrePassMode != Ogre::PrePassUse) return;
+    mView->mEngine->mRayTier->finishRayJobs(this, mView, pass);
 }
 
 /// GATHER-0 (fix round, D2). The registration made in `passPreExecute` names
@@ -5478,7 +5787,12 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
     if (!pass || !mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
-    if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
+    if (!def) return;
+    if (def->mIdentifier == kHitDecodePassIdentifier) {
+        mView->mEngine->mRayTier->endHitDecode(this);
+        return;
+    }
+    if (def->mPrePassMode != Ogre::PrePassUse) return;
     mView->mEngine->mRayTier->releaseGatherBinding(this);
     mView->mEngine->mRayTier->releaseSunContactBinding(this);
 }
@@ -5494,6 +5808,7 @@ void OgreView::dropReflectState() {
     mEngine->mRayTier->forgetReflect(mReflectListener.get());
     mEngine->mRayTier->forgetGather(mReflectListener.get());
     mEngine->mRayTier->forgetSunContact(mReflectListener.get());
+    mEngine->mRayTier->forgetHits(mReflectListener.get());
 }
 
 void OgreView::syncReflectListener() {
@@ -5512,7 +5827,8 @@ void OgreView::syncReflectListener() {
     // ...AS THE PREPASS THEY ASK FOR (ChainDesc::prepass, PHOTON-GATHER-1d): a
     // gather or sun-contact toggle where the prepass already runs is not a new
     // graph and rebuilds nothing.
-    if (mChainRayReflect != chainDesc().rayReflect || mChainPrepass != chainDesc().prepass())
+    if (mChainRayReflect != chainDesc().rayReflect || mChainPrepass != chainDesc().prepass() ||
+        mChainHitDecode != chainDesc().hitDecode)
         rebuildWorkspaceDef();
     // The same arming rule as the planar and globals listeners, and the same
     // reason it is re-evaluated every frame: the shape above can change, and a
@@ -5555,6 +5871,612 @@ void OgreView::syncReflectListener() {
     }
     mReflectListener->mView = this;
     mReflectListener->mRoot = mRoot;
+}
+
+// ---------------------------------------------------------------------------
+// THE HIT DECODE — the tier's half (PHOTON-HIT-SHADE-1; SPECS/atom/
+// D2_HIT_SHADING_DESIGN.md with the lead's F1-F8). A ray hit no cache can shade
+// is a pixel of a second visibility buffer: the traces append it to the chain's
+// hit list (jah_rq_hit_record.glsl), the chain's "Jahshaka hit decode" pass draws
+// HlmsAtom's decode over the list in HIT MODE, and rq_hit_composite.comp scatters
+// the decoded radiance into the reflection's mean and the gather's atlas — the
+// same arithmetic a card- or voxel-lit hit takes. One copy of the lighting.
+namespace {
+/// The sun of a pass: its shadow node's first directional caster (the light
+/// HlmsPbs's first-light shadow term belongs to — the sun contact's rule).
+bool passSun(Ogre::CompositorPass *pass, Ogre::Vector3 &toSun) {
+    toSun = Ogre::Vector3::ZERO;
+    if (!pass || pass->getType() != Ogre::PASS_SCENE) return false;
+    const Ogre::CompositorShadowNode *sn = static_cast<Ogre::CompositorPassScene *>(pass)->getShadowNode();
+    if (!sn) return false;
+    for (const Ogre::LightClosest &lc : sn->getShadowCastingLights()) {
+        if (lc.light && lc.light->getType() == Ogre::Light::LT_DIRECTIONAL) {
+            toSun = -lc.light->getDerivedDirection();
+            break;
+        }
+    }
+    if (toSun.squaredLength() < 1e-12f) return false;
+    toSun.normalise();
+    return true;
+}
+/// A read-only view of an Ogre UAV buffer as a raw descriptor.
+VkDescriptorBufferInfo rawBufferInfo(Ogre::UavBufferPacked *b) {
+    VkDescriptorBufferInfo info{};
+    auto *bi = static_cast<Ogre::VulkanBufferInterface *>(b->getBufferInterface());
+    info.buffer = bi->getVboName();
+    info.offset = VkDeviceSize(b->_getFinalBufferStart()) * b->getBytesPerElement();
+    info.range = b->getTotalSizeBytes();
+    return info;
+}
+/// The shadow ray's minimum lift off a hit (metres): the hit point is exact on
+/// the traced triangle to float precision, so a millimetre floor (and 1e-4 of the
+/// distance, jah_rq_hit_record.glsl) clears it.
+constexpr float kHitSunLift = 0.001f;
+}   // namespace
+
+bool RayQueryTier::ensureHitDummies(std::string &err) {
+    if (mHitDummiesReady) return true;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32B32A32_UINT, mHitDummyIds, err)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyColour, err)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32_UINT, mHitDummyDest, err)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_SFLOAT, mHitDummyDist, err)) return false;
+    mHitDummiesReady = true;
+    mHitDummiesNeedInit = true;
+    return true;
+}
+
+void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
+    if (!mHitDummiesNeedInit || !cmd) return;
+    mHitDummiesNeedInit = false;
+    VkImageMemoryBarrier b[4] = {};
+    ReflectImage *imgs[4] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist };
+    for (int i = 0; i < 4; ++i) {
+        b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b[i].srcQueueFamilyIndex = b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b[i].image = imgs[i]->image;
+        b[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b[i].subresourceRange.levelCount = 1;
+        b[i].subresourceRange.layerCount = 1;
+        b[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 4, b);
+}
+
+void RayQueryTier::hitStandIns(HitListBinding &out) {
+    out = HitListBinding();
+    std::string err;
+    if (!ensureHitDummies(err) || !ensureDummyImages(err)) return;
+    out.ids = mHitDummyIds.view;
+    out.dest = mHitDummyDest.view;
+}
+
+void RayQueryTier::readHitCounters(HitView &hv) {
+    if (!hv.readback.mapped) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    uint32_t newest = 0u;
+    bool any = false;
+    for (unsigned i = 0; i < kFramesInFlight; ++i) {
+        HitView::Pending &pd = hv.pending[i];
+        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
+        if (!any || int32_t(pd.frame - newest) > 0) {
+            const uint32_t *w = reinterpret_cast<const uint32_t *>(
+                static_cast<const unsigned char *>(hv.readback.mapped) + i * 16u);
+            hv.appended = w[0];
+            hv.dropped = w[1];
+            newest = pd.frame;
+            any = true;
+        }
+        pd.live = false;
+    }
+}
+
+bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view,
+                                  Ogre::CompositorPass *pass, HitListBinding &out) {
+    hitStandIns(out);
+    HitView &hv = mHits[key];
+    hv.live = false;
+    // `JAHSHAKA_HIT_LIST_OFF` — a MEASUREMENT switch, not a mode (read once): the
+    // traces bind no list, so a hit no cache shades has no sample this frame (the
+    // reflection keeps its history; the gather's ray reads zero) — the picture
+    // before PHOTON-HIT-SHADE-1, for attributing a moved hash to the records.
+    static const bool sListOff = std::getenv("JAHSHAKA_HIT_LIST_OFF") != nullptr;
+    if (sListOff) return false;
+    OgreScene *scene = view ? view->ogreScene() : nullptr;
+    Ogre::Camera *cam = view ? view->camera() : nullptr;
+    if (!scene || !cam || !pass || !out.ids) return false;
+    hv.scene = scene;
+    readHitCounters(hv);
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    if (!node) return false;
+    try {
+        hv.ids = node->getDefinedTexture(Ogre::IdString("jahHitIds"));
+        hv.dest = node->getDefinedTexture(Ogre::IdString("jahHitDest"));
+        hv.radiance = node->getDefinedTexture(Ogre::IdString("jahHitRadiance"));
+    } catch (Ogre::Exception &) { return false; }
+    if (!hv.ids || !hv.dest || !hv.radiance || !hv.ids->isUav()) return false;
+    detail::GpuScene &gs = scene->gpuScene();
+    Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
+    if (!instances) return false;
+    Ogre::VaoManager *vao = mRs->getVaoManager();
+    // THE LIST'S BUFFER, sized to the list: the four counter words, then two per
+    // record. Re-made when the list grows (Ogre's destroy is delayed past every
+    // frame in flight; every reader re-reads `hv.buf` before it binds).
+    {
+        const size_t words = 4u + 2u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
+        if (hv.buf && hv.buf->getNumElements() < words) {
+            vao->destroyUavBuffer(hv.buf);
+            hv.buf = nullptr;
+        }
+        if (!hv.buf) hv.buf = vao->createUavBuffer(words, 4u, Ogre::BB_FLAG_READONLY, nullptr, false);
+    }
+    std::string err;
+    if (!hv.readback.buffer &&
+        !makeBuffer(VkDeviceSize(kFramesInFlight) * 16u, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false,
+                    hv.readback, err))
+        return false;
+    hv.capacity = hv.ids->getWidth() * hv.ids->getHeight();
+    hv.width = hv.ids->getWidth();
+
+    // THE LAYOUTS through Ogre's solver, before the command buffer is taken (the
+    // reflection's rule: executeResourceTransition closes every encoder).
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        for (Ogre::TextureGpu *t : { hv.ids, hv.dest })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
+                                     computeStage);
+        solver.resolveTransition(trans, hv.buf, Ogre::ResourceAccess::ReadWrite, computeStage);
+        solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return false;
+    initHitDummies(cmd);
+    // THE COUNTER, ZEROED for this frame: every earlier reader (last frame's
+    // decode, write-back, readback copy) is ordered before the transfer.
+    const VkDescriptorBufferInfo bufInfo = rawBufferInfo(hv.buf);
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                             &b, 0, nullptr, 0, nullptr);
+        vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset, 16u, 0u);
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &b, 0, nullptr, 0, nullptr);
+    }
+    const auto uavView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = t;
+        slot.access = Ogre::ResourceAccess::Write;
+        slot.pixelFormat = t->getPixelFormat();
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    out.on = true;
+    out.ids = uavView(hv.ids);
+    out.dest = uavView(hv.dest);
+    if (!out.ids || !out.dest) { hitStandIns(out); return false; }
+    out.buf = bufInfo.buffer;
+    out.bufOffset = bufInfo.offset;
+    out.bufRange = bufInfo.range;
+    const VkDescriptorBufferInfo instInfo = rawBufferInfo(instances);
+    out.instances = instInfo.buffer;
+    out.instancesOffset = instInfo.offset;
+    out.instancesRange = instInfo.range;
+    out.instanceEntries = gs.slotCount();
+    out.capacity = hv.capacity;
+    out.width = hv.width;
+    Ogre::Vector3 toSun;
+    out.sun = passSun(pass, toSun);
+    out.toSun[0] = toSun.x; out.toSun[1] = toSun.y; out.toSun[2] = toSun.z;
+    out.sunMask = kRayMaskCaster;
+    // THE SUN RAY'S LENGTH: the camera's far plane (the world the frame draws),
+    // floored so an unbounded or tiny far plane still reaches past a room.
+    {
+        const float farClip = float(cam->getFarClipDistance());
+        out.sunRange = farClip > 0.0f ? std::max(farClip, 100.0f) : 10000.0f;
+    }
+    out.lift = kHitSunLift;
+    {
+        auto sit = mScenes.find(scene);
+        out.farLift = sit != mScenes.end() ? std::max(sit->second.farOverlap, kHitSunLift) : kHitSunLift;
+    }
+    hv.live = true;
+    return true;
+}
+
+bool RayQueryTier::decodeTwinsStale(OgreScene *scene) const {
+    if (!scene) return false;
+    auto it = mScenes.find(scene);
+    if (it == mScenes.end()) return false;
+    for (const SceneAs::DecodeWitness &w : it->second.decodeWitness) {
+        if (w.slot >= scene->mItemNodes.size()) continue;
+        const OgreScene::Node *nd = scene->mItemNodes[w.slot];
+        if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
+        const Ogre::SubItem *sub = nd->item->getSubItem(0);
+        if (sub->getDatablock() != w.db || sub->getHlmsHash() != w.hash ||
+            HlmsAtom::textureSetKeyOf(w.db) != w.texKey)
+            return true;
+    }
+    return false;
+}
+
+void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view,
+                                  Ogre::CompositorPass *pass) {
+    if (!view || !pass) return;
+    HitView &hv = mHits[key];
+    // THE CAMERA'S AUTO ASPECT IS HELD OFF FOR THE DECODE PASS, ARMED OR NOT: the
+    // pass renders into the list (W x 0.5625 H) whether or not it decodes, and an
+    // auto-aspect camera is re-aspected by every PASS_SCENE it renders
+    // (OgreCompositorPassScene.cpp) — the projection the pass' shaders read, and
+    // the aspect Ogre's PlanarReflections matches cameras by (measured: a frame
+    // whose decode was skipped re-aspected the camera and the VR eyes' PBS pass
+    // changed permutation, vr.warmup). endHitDecode restores it.
+    if (!hv.pinnedCam) {
+        hv.pinnedCam = view->camera();
+        if (hv.pinnedCam) {
+            hv.camAuto = hv.pinnedCam->getAutoAspectRatio();
+            hv.pinnedCam->setAutoAspectRatio(false);
+        }
+    }
+    if (!isOpen()) return;
+    hv.decodeFrame = frameNow();
+    HitListBinding hit;
+    prepareHitList(key, view, pass, hit);
+    // THE TRACES, in front of the decode (their records are what it shades). The
+    // sun contact rides the same hook: it reads the camera before this pass
+    // re-aspects anything, and its registration waits for the opaque pass.
+    recordSunContact(key, view, pass);
+    if (view->chainDesc().rayReflect) recordReflect(key, view, pass, hit);
+    recordGather(key, view, pass, hit);
+    if (!hv.live) return;
+    const bool reflected = mReflects.count(key) && mReflects[key].finishPending;
+    const bool gathered = mGather && mGather->tracedAtlas(key) != VK_NULL_HANDLE;
+    if (!reflected && !gathered) return;
+    // A STALE TWIN NEVER DRAWS: a PBS datablock that changed its permutation since
+    // updateScene's sync (the engine edits datablocks in place — the sky's manual
+    // cube taken away when a probe grid binds, mid-frame) leaves its twin a copy
+    // of the old state. A twin holding a manual cube under the pass' automatic
+    // probe array cannot compile (OgreSky.cpp's env-probe note), and a shader made
+    // to compile without it would still get the twin's BAKED texture set, one
+    // texture larger than its root layout's range — a descriptor write past the
+    // set (the pin's count assert is compiled out): the Xid 109s this lane's gate
+    // measured. This frame's records go unshaded (the write-back's "unshaded"
+    // answer); the next updateScene re-derives the twin.
+    if (decodeTwinsStale(view->ogreScene())) return;
+    // ARM THE DECODE for this pass alone: the source (the list and the GPU scene's
+    // tables, re-read now — they are re-created when they grow), the scene's
+    // decode draws shown, and the camera's auto aspect held off so the pass'
+    // projection is the view's own (the target is the list, not a picture: F7).
+    Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
+    auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+    OgreScene *scene = view->ogreScene();
+    if (!atom || !scene) return;
+    detail::GpuScene &gs = scene->gpuScene();
+    if (!gs.live()) return;
+    gs.flushGeomRows();
+    HlmsAtom::DecodeSource src;
+    src.ids = hv.ids;
+    src.instances = gs.instanceBuffer();
+    src.levels = gs.levelBuffer();
+    src.geomRows = gs.geomBuffer();
+    src.hitMode = true;
+    src.hitBuf = hv.buf;
+    atom->setDecodeSource(src);
+    atom->showSceneDecodes(scene->mSceneMgr, true);
+    hv.armedSm = scene->mSceneMgr;
+}
+
+void RayQueryTier::endHitDecode(const ReflectPassListener *key) {
+    auto it = mHits.find(key);
+    if (it == mHits.end()) return;
+    HitView &hv = it->second;
+    if (hv.pinnedCam) hv.pinnedCam->setAutoAspectRatio(hv.camAuto);
+    hv.pinnedCam = nullptr;
+    if (!hv.armedSm) return;
+    Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
+    if (auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr) {
+        atom->showSceneDecodes(hv.armedSm, false);
+        atom->setDecodeSource(HlmsAtom::DecodeSource());
+    }
+    hv.armedSm = nullptr;
+}
+
+void RayQueryTier::finishRayJobs(const ReflectPassListener *key, OgreView *view,
+                                 Ogre::CompositorPass *pass) {
+    if (!isOpen() || !view || !pass) return;
+    // DISARMED WHATEVER HAPPENED: a decode pass that threw never reaches its
+    // passPosExecute, and an armed HlmsAtom would decode every later pass of the
+    // frame in hit mode (measured once: the capture passes compiled hit-mode
+    // shaders against prepass state).
+    endHitDecode(key);
+    HitView &hv = mHits[key];
+    if (hv.decodeFrame != frameNow()) {
+        // NO DECODE PASS RAN THIS FRAME (a chain without one): the traces run
+        // here, with no list bound — a hit no cache shades then has no sample
+        // this frame (the write-back's "unshaded" answer).
+        HitListBinding none;
+        hitStandIns(none);
+        hv.live = false;
+        recordSunContact(key, view, pass);
+        if (view->chainDesc().rayReflect) recordReflect(key, view, pass, none);
+        recordGather(key, view, pass, none);
+    }
+    if (hv.live) recordHitComposite(key);
+    hv.live = false;
+    finishReflect(key);
+    if (mGather) mGather->finish(key);
+    finishSunContact(key);
+}
+
+void RayQueryTier::forgetHits(const ReflectPassListener *key) {
+    auto it = mHits.find(key);
+    if (it == mHits.end()) return;
+    endHitDecode(key);
+    HitView &hv = it->second;
+    for (unsigned i = 0; i < kReflectRing; ++i) {
+        retireSet(hv.sets[i], mCompPool);
+        hv.sets[i] = VK_NULL_HANDLE;
+        retire(hv.params[i]);
+    }
+    retire(hv.readback);
+    if (hv.buf && mRs && mRs->getVaoManager()) mRs->getVaoManager()->destroyUavBuffer(hv.buf);
+    hv.buf = nullptr;
+    mHits.erase(it);
+}
+
+void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const {
+    Ogre::HlmsManager *hm = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getHlmsManager() : nullptr;
+    auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+    for (const auto &kv : mHits) {
+        if (kv.second.scene != scene) continue;
+        st.hitRecords += kv.second.appended;
+        st.hitDropped += kv.second.dropped;
+        st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, kv.second.capacity);
+    }
+    if (atom && scene) st.hitDecodeDraws = int(atom->sceneDecodeCount(scene->mSceneMgr));
+}
+
+bool RayQueryTier::makeCompositePipeline(std::string &err) {
+    VkDescriptorSetLayoutBinding b[kHitCompositeBindings] = {};
+    const VkDescriptorType types[kHitCompositeBindings] = {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 the list's buffer (counters + aux)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the destinations
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 the decoded radiance
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the reflection's mean
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 ...its distances
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 the gather's atlas
+    };
+    for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
+        b[i].binding = i;
+        b[i].descriptorType = types[i];
+        b[i].descriptorCount = 1u;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo sli{};
+    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sli.bindingCount = kHitCompositeBindings;
+    sli.pBindings = b;
+    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCompSetLayout) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreateDescriptorSetLayout failed";
+        return false;
+    }
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mCompSetLayout;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mCompPipeLayout) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_hitCompositeSpv);
+    smi.pCode = krq_hitCompositeSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mCompModule) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreateShaderModule failed";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mCompModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mCompPipeLayout;
+    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mCompPipeline) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreateComputePipelines failed";
+        return false;
+    }
+    const unsigned sets = kMaxTimedScenes * kReflectRing;
+    VkDescriptorPoolSize sizes[4] = {};
+    sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    sizes[0].descriptorCount = sets;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sizes[1].descriptorCount = sets;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[2].descriptorCount = sets * 2u;
+    sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    sizes[3].descriptorCount = sets * 3u;
+    VkDescriptorPoolCreateInfo dpi{};
+    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = sets;
+    dpi.poolSizeCount = 4;
+    dpi.pPoolSizes = sizes;
+    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mCompPool) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreateDescriptorPool failed";
+        return false;
+    }
+    return ensureSamplers(err);
+}
+
+void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
+    auto it = mHits.find(key);
+    if (it == mHits.end() || !it->second.live || mCompFailed) return;
+    HitView &hv = it->second;
+    if (!mCompPipeline) {
+        std::string err;
+        if (!makeCompositePipeline(err)) {
+            mCompFailed = true;
+            Ogre::LogManager::getSingleton().logMessage("Jahshaka: the hit write-back is off — " + err);
+            return;
+        }
+    }
+    const unsigned ring = hv.frame % kReflectRing;
+    std::string err;
+    if (!hv.params[ring].buffer &&
+        !makeBuffer(16u, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, hv.params[ring], err))
+        return;
+    if (!hv.sets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mCompPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mCompSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &hv.sets[ring]) != VK_SUCCESS) {
+            hv.sets[ring] = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    // THE DESTINATIONS: the reflection's mean and distance of THIS frame (the
+    // pair the trace wrote), the gather's atlas the trace wrote — or stand-ins
+    // with the consumer's flag down (its records, if any, are skipped).
+    VkImageView histView = mHitDummyColour.view, distView = mHitDummyDist.view, atlasView = mHitDummyColour.view;
+    bool reflectBound = false, gatherBound = false;
+    if (auto rit = mReflects.find(key); rit != mReflects.end() && rit->second.finishPending) {
+        histView = rit->second.hist[rit->second.curIdx].view;
+        distView = rit->second.dist[rit->second.curIdx].view;
+        reflectBound = true;
+    }
+    if (mGather) {
+        if (VkImageView a = mGather->tracedAtlas(key)) { atlasView = a; gatherBound = true; }
+    }
+    const float pp[4] = { float(hv.capacity), float(hv.width), reflectBound ? 1.0f : 0.0f,
+                          gatherBound ? 1.0f : 0.0f };
+    std::memcpy(hv.params[ring].mapped, pp, sizeof(pp));
+
+    const auto sampledView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = t;
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    VkDescriptorBufferInfo ub{};
+    ub.buffer = hv.params[ring].buffer;
+    ub.range = 16u;
+    const VkDescriptorBufferInfo bufInfo = rawBufferInfo(hv.buf);
+    VkDescriptorImageInfo sampled[2] = {}, storage[3] = {};
+    Ogre::TextureGpu *const src[2] = { hv.dest, hv.radiance };
+    for (int i = 0; i < 2; ++i) {
+        sampled[i].sampler = mPointSampler;
+        sampled[i].imageView = sampledView(src[i]);
+        sampled[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (!sampled[i].imageView) return;
+    }
+    const VkImageView dst[3] = { histView, distView, atlasView };
+    for (int i = 0; i < 3; ++i) {
+        storage[i].imageView = dst[i];
+        storage[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        if (!storage[i].imageView) return;
+    }
+    VkWriteDescriptorSet w[kHitCompositeBindings] = {};
+    for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = hv.sets[ring];
+        w[i].dstBinding = i;
+        w[i].descriptorCount = 1;
+    }
+    w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    w[0].pBufferInfo = &ub;
+    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[1].pBufferInfo = &bufInfo;
+    for (int i = 0; i < 2; ++i) {
+        w[2 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[2 + i].pImageInfo = &sampled[i];
+    }
+    for (int i = 0; i < 3; ++i) {
+        w[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[4 + i].pImageInfo = &storage[i];
+    }
+    vkUpdateDescriptorSets(mVk, kHitCompositeBindings, w, 0, nullptr);
+
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        for (Ogre::TextureGpu *t : { hv.dest, hv.radiance })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                     computeStage);
+        solver.resolveTransition(trans, hv.buf, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
+    // The traces' writes to the mean and the atlas (compute, before the decode
+    // pass) are read and rewritten here.
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+    detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "hit.composite", mRs);
+    work.setUnits(unsigned(hv.appended / 1000ull));
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCompPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCompPipeLayout, 0, 1, &hv.sets[ring], 0,
+                            nullptr);
+    // ONE THREAD PER RECORD SLOT; a thread past this frame's count returns at once.
+    {
+        const uint32_t groups = std::max(1u, (hv.capacity + 63u) / 64u);
+        const uint32_t gx = std::min(groups, 65535u);
+        vkCmdDispatch(cmd, gx, (groups + gx - 1u) / gx, 1u);
+    }
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+    // THE COUNTERS, on their way to the host (read several frames late).
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+        VkBufferCopy region{};
+        region.srcOffset = bufInfo.offset;
+        region.dstOffset = VkDeviceSize(hv.frame % kFramesInFlight) * 16u;
+        region.size = 8u;
+        vkCmdCopyBuffer(cmd, bufInfo.buffer, hv.readback.buffer, 1, &region);
+        VkMemoryBarrier h{};
+        h.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        h.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        h.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &h, 0,
+                             nullptr, 0, nullptr);
+        HitView::Pending &pd = hv.pending[hv.frame % kFramesInFlight];
+        pd.frame = frameNow();
+        pd.live = true;
+    }
+    ++hv.frame;
 }
 
 // ---------------------------------------------------------------------------
@@ -5806,6 +6728,7 @@ RayQueryStatus OgreScene::rayQueryStatus() const {
     // trace is a screen-space pass) and this folds the views of THIS scene into
     // the one answer giStatus asks for.
     mEngine->mRayTier->reflectStatsInto(this, st);
+    mEngine->mRayTier->hitStatsInto(this, st);
     return st;
 }
 

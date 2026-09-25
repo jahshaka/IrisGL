@@ -4238,12 +4238,12 @@ struct RayQueryStatus {
     /// not ready, never at its bind pose.
     int  instances = 0;
     /// THE GPU SKIN CACHE (PHOTON-SKIN-1, RY-R4). WHAT IT DELIVERS: the posed
-    /// SILHOUETTE to every ray (a mirror's hit test, a contact shadow, the hit
-    /// decode's geometric normal) — NOT a shaded character in a reflection: a hit
-    /// is shaded from cards (a rigged mesh has none) or the voxels (they hold the
-    /// rig's BIND pose; the voxel feed reads the mesh's rows, not the override),
-    /// so a traced hit on a posed limb outside the bind pose's voxels is handed
-    /// back to the probe/sky. `skinnedInstances`: rigged
+    /// character to every ray — its silhouette (a mirror's hit test, a contact
+    /// shadow) and, since PHOTON-HIT-SHADE-1, its SHADING: a hit on a rigged item
+    /// always goes to the hit decode, which reads the instance's skin row, so a
+    /// reflection shows the POSED triangles lit by the scene's own lighting text
+    /// (the voxels still hold the bind pose — SKIN-2's diffuse feed is owed).
+    /// `skinnedInstances`: rigged
     /// items in the traced set this frame (each over its OWN structure, built
     /// from its posed vertices); `skinCaches`: caches held (one per rigged traced
     /// item, and its row block in the GPU scene); their bytes — the posed vertex
@@ -4308,6 +4308,20 @@ struct RayQueryStatus {
     /// 0.5 ms at 8k instances buys the better tree); the refit is the
     /// optimisation behind the transform-epoch gate.
     bool lastWasRefit = false;
+    /// THE HIT DECODE (PHOTON-HIT-SHADE-1): a ray hit no cache can shade (a
+    /// mover, a rigged item, a static hit neither card nor cascade answers, the
+    /// gather's far copies) is appended to the view's hit list and shaded by
+    /// HlmsAtom's decode. `hitRecords`: records the ray jobs appended in the last
+    /// read-back frame (every view of the scene summed; may pass the capacity),
+    /// `hitDropped`: of those, dropped because the list was full (their rays have
+    /// no sample that frame — a stat, never a crash), `hitCapacity`: the list's
+    /// size (the largest view's), `hitDecodeDraws`: the decode draws the scene
+    /// holds (one per decode twin: S3-DRAW's bucket merge is owed). Read several
+    /// frames late, never with a wait.
+    unsigned long long hitRecords = 0;
+    unsigned long long hitDropped = 0;
+    unsigned long long hitCapacity = 0;
+    int hitDecodeDraws = 0;
     /// Cumulative counters over the scene's life: how many times the top level
     /// was rebuilt, refitted, and how many bottom-level structures were built.
     unsigned long long tlasBuilds = 0;

@@ -57,6 +57,8 @@ HlmsAtom::HlmsAtom(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders)
     // both counters (OgreHlmsPbs.cpp: the registers in notifyPropertiesMergedPre-
     // GenerationStep, the binds in fillBuffersFor), so nothing of PBS's moves onto them.
     mReservedTexBufferSlots = kReservedBufSlots;
+    // The id image (hit mode's record image) — ONE texture: the pass textures
+    // share the pin's 32-slot table (kHitBufSlot, HlmsAtom.h).
     mReservedTexSlots = 1u;
 }
 
@@ -115,6 +117,13 @@ void HlmsAtom::getDefaultPaths(Ogre::String &outDataFolderPath,
     // original was collected); then ours.
     Ogre::String pbsData;
     Ogre::HlmsPbs::getDefaultPaths(pbsData, outLibraryFoldersPaths);
+    // ...AND PBS's DATA FOLDER'S PIECE FILES (Hlms/Pbs/<syntax>/*_piece_*): the
+    // data folder is ours, so a piece PBS keeps beside its templates —
+    // `DeclDecalsSamplers` (Forward3D_piece_ps.glsl), the decal textures'
+    // declarations — would be missing here, and a hit that finds a Forward+ cell
+    // with a decal (PHOTON-HIT-SHADE-1) samples undeclared textures. A library
+    // folder loads piece files only, never the templates beside them.
+    outLibraryFoldersPaths.push_back(pbsData);
     outLibraryFoldersPaths.push_back("Hlms/Jahshaka");
     outLibraryFoldersPaths.push_back("Hlms/Atom/Any");
     // PBS's data folder is Hlms/Pbs/<syntax>; ours is its sibling.
@@ -134,6 +143,26 @@ void HlmsAtom::setDecodeSource(const DecodeSource &src) {
         ref.setAddressingMode(Ogre::TAM_CLAMP);
         mPointSampler = mHlmsManager->getSamplerblock(ref);
     }
+}
+
+uint64_t HlmsAtom::textureSetKeyOf(const Ogre::HlmsDatablock *db) {
+    if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return 0u;
+    const auto *pbsDb = static_cast<const Ogre::HlmsPbsDatablock *>(db);
+    // FNV-1a over the pointers, slot by slot (a swap between two slots moves it).
+    uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](const void *p) {
+        uint64_t v = uint64_t(reinterpret_cast<uintptr_t>(p));
+        for (int b = 0; b < 8; ++b) {
+            h ^= (v & 0xFFu);
+            h *= 1099511628211ull;
+            v >>= 8u;
+        }
+    };
+    for (Ogre::uint8 t = 0; t < Ogre::NUM_PBSM_TEXTURE_TYPES; ++t) {
+        mix(pbsDb->getTexture(t));
+        mix(pbsDb->getSamplerblock(t));
+    }
+    return h;
 }
 
 uint32_t HlmsAtom::materialWordOf(const Ogre::HlmsDatablock *db) {
@@ -219,6 +248,11 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinFor(Ogre::HlmsPbsDatablock *pbs, std
     macro.mDepthWrite = false;
     macro.mCullMode = Ogre::CULL_NONE;
     twin->setMacroblock(macro);
+    // ...and NO BLENDING: a decode draw writes one record's (or one pixel's)
+    // radiance, never a composite over what is under it — a transparent PBS
+    // material's twin shades its surface as the hit decode's write-back expects
+    // (PHOTON-HIT-SHADE-1; the day-one front end is opaque, D1 section 1).
+    twin->setBlendblock(Ogre::HlmsBlendblock());
     // The decode never casts: its shadow-caster permutation is never requested.
 
     Twin t;
@@ -235,6 +269,11 @@ void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
     auto it = mTwinOfPbs.find(pbs);
     if (it == mTwinOfPbs.end()) return;
     Ogre::HlmsPbsDatablock *twin = it->second;
+    // THE PRODUCT'S DRAWS OF THE TWIN die first, in every scene (Ogre asserts on a
+    // datablock with linked renderables), and the epoch moves: a scene's synced
+    // word set may now name a datablock that no longer exists.
+    for (auto &kv : mSceneDecodes) destroySceneDraw(kv.first, kv.second, twin);
+    ++mTwinEpoch;
     mTwinOfPbs.erase(it);
     mTwins.erase(twin);
     // A decode draw may still carry the twin; the owner detaches its renderables
@@ -252,7 +291,110 @@ void forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
         atom->forgetDecodeTwinOf(pbs);
 }
 
+void forgetSceneDecodes(Ogre::SceneManager *sm) {
+    if (!sm) return;
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
+    if (auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr)
+        atom->forgetSceneManager(sm);
+}
+
+void HlmsAtom::destroySceneDraw(Ogre::SceneManager *, SceneDecodes &sd,
+                                const Ogre::HlmsDatablock *twin) {
+    auto it = sd.draws.find(twin);
+    if (it == sd.draws.end()) return;
+    if (sd.node && it->second->getParentSceneNode()) sd.node->detachObject(it->second);
+    delete it->second;
+    sd.draws.erase(it);
+}
+
+void HlmsAtom::syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32_t> &words) {
+    if (!sm || !mHlmsManager) return;
+    SceneDecodes &sd = mSceneDecodes[sm];
+    // WORD -> PBS DATABLOCK, from PBS's own map (a word is {pool | slot}; a dead
+    // datablock's word may be a new datablock's now — twinEpoch says so).
+    std::unordered_map<uint32_t, Ogre::HlmsPbsDatablock *> byWord;
+    {
+        Ogre::Hlms *pbs = mHlmsManager->getHlms(Ogre::HLMS_PBS);
+        if (!pbs) return;
+        for (const auto &kv : pbs->getDatablockMap()) {
+            const uint32_t w = materialWordOf(kv.second.datablock);
+            if (w != kNoMaterialWord)
+                byWord[w] = static_cast<Ogre::HlmsPbsDatablock *>(kv.second.datablock);
+        }
+    }
+    std::unordered_map<const Ogre::HlmsDatablock *, bool> wanted;
+    for (const uint32_t w : words) {
+        auto it = byWord.find(w);
+        if (it == byWord.end()) continue;
+        // A REFRACTIVE material stays on stock HlmsPbs (D1 section 1's front-end
+        // list): its pieces read the refraction pass' screen copy, which no decode
+        // pass has. A hit on it is not shaded by the decode (stated, not hidden).
+        if (it->second->getTransparencyMode() == Ogre::HlmsPbsDatablock::Refractive) continue;
+        std::string err;
+        Ogre::HlmsPbsDatablock *twin = decodeTwinFor(it->second, err);
+        if (!twin) {
+            // Once per datablock name: a material the decode cannot serve (a
+            // per-datablock custom piece) keeps its hits unshaded — stated.
+            static std::unordered_map<std::string, bool> sSaid;
+            const Ogre::String *name = it->second->getNameStr();
+            const std::string key = name ? *name : std::string("?");
+            if (!sSaid[key]) {
+                sSaid[key] = true;
+                Ogre::LogManager::getSingleton().logMessage(
+                    "HlmsAtom: no decode twin for '" + key + "' (" + err +
+                    ") - a ray hit on it is not shaded by the hit decode");
+            }
+            continue;
+        }
+        wanted[twin] = true;
+        if (sd.draws.count(twin)) continue;
+        if (!sd.node) sd.node = sm->getRootSceneNode()->createChildSceneNode(Ogre::SCENE_DYNAMIC);
+        auto *d = new AtomDecodeRenderable(Ogre::Id::generateNewId<Ogre::MovableObject>(),
+                                           &sm->_getEntityMemoryManager(Ogre::SCENE_DYNAMIC), sm,
+                                           kHitDecodeRenderQueue);
+        d->setDatablock(twin);
+        sd.node->attachObject(d);
+        // Hidden AFTER the attach (the parity suite's measured order).
+        d->setVisible(sd.shown);
+        sd.draws[twin] = d;
+    }
+    std::vector<const Ogre::HlmsDatablock *> gone;
+    for (const auto &kv : sd.draws)
+        if (!wanted.count(kv.first)) gone.push_back(kv.first);
+    for (const Ogre::HlmsDatablock *t : gone) destroySceneDraw(sm, sd, t);
+}
+
+void HlmsAtom::showSceneDecodes(Ogre::SceneManager *sm, bool on) {
+    auto it = mSceneDecodes.find(sm);
+    if (it == mSceneDecodes.end()) return;
+    it->second.shown = on;
+    for (auto &kv : it->second.draws) kv.second->setVisible(on);
+}
+
+size_t HlmsAtom::sceneDecodeCount(const Ogre::SceneManager *sm) const {
+    auto it = mSceneDecodes.find(const_cast<Ogre::SceneManager *>(sm));
+    return it == mSceneDecodes.end() ? 0u : it->second.draws.size();
+}
+
+void HlmsAtom::forgetSceneManager(Ogre::SceneManager *sm) {
+    auto it = mSceneDecodes.find(sm);
+    if (it == mSceneDecodes.end()) return;
+    std::vector<const Ogre::HlmsDatablock *> all;
+    for (const auto &kv : it->second.draws) all.push_back(kv.first);
+    for (const Ogre::HlmsDatablock *t : all) destroySceneDraw(sm, it->second, t);
+    if (it->second.node) sm->destroySceneNode(it->second.node);
+    mSceneDecodes.erase(it);
+}
+
 void HlmsAtom::destroyDecodeTwins() {
+    // The product's draws first (they wear the twins), every scene.
+    for (auto &kv : mSceneDecodes) {
+        std::vector<const Ogre::HlmsDatablock *> all;
+        for (const auto &d : kv.second.draws) all.push_back(d.first);
+        for (const Ogre::HlmsDatablock *t : all) destroySceneDraw(kv.first, kv.second, t);
+    }
+    ++mTwinEpoch;
     for (auto &kv : mTwins) {
         if (kv.second.twin && kv.second.twin->getNameStr())
             destroyDatablock(kv.second.twin->getName());
@@ -301,8 +443,12 @@ void HlmsAtom::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
                                Ogre::ResourceTransitionArray &resourceTransitions,
                                Ogre::Camera *renderingCamera, const bool bCasterPass) {
     // NOTHING TO DECODE, NOTHING TO DO: every registered Hlms is asked this for
-    // every scene pass of the frame, and this host draws only through its twins.
-    if (mTwins.empty()) return;
+    // every scene pass of the frame, and this host draws only through its twins,
+    // only in a pass whose recorder has set a decode source (the parity suite's
+    // workspace, the chain's hit decode pass — PHOTON-HIT-SHADE-1's gate: the
+    // product holds twins in every ray-traced scene, and PBS's pass prepare is
+    // the expensive half of a pass).
+    if (mTwins.empty() || !mSource.ids) return;
     // THE FIRST THING A PASS ASKS OF US READS THE VOXEL AND FIELD TEXTURES — so the
     // relay and THIS PASS'S SCENE'S arms (bindSceneGi) come BEFORE, never after: an
     // arm from the previous pass's scene is the wrong one, and may be deleted.
@@ -321,6 +467,10 @@ void HlmsAtom::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
         if (b)
             barrierSolver.resolveTransition(resourceTransitions, b, Ogre::ResourceAccess::Read,
                                             1u << Ogre::PixelShader);
+    // HIT MODE: the list's buffer (the vertex stage's count, the pixel stage's aux).
+    if (mSource.hitMode && mSource.hitBuf)
+        barrierSolver.resolveTransition(resourceTransitions, mSource.hitBuf, Ogre::ResourceAccess::Read,
+                                        (1u << Ogre::VertexShader) | (1u << Ogre::PixelShader));
 }
 
 Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shadowNode,
@@ -332,15 +482,46 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
     // buffer, the lights, the shadow maps), and this host draws only through its
     // decode twins — so while there are none it costs the frame nothing: the cache
     // it returns is never looked up, because no renderable of this type is queued.
-    if (mTwins.empty()) {
+    if (mTwins.empty() || !mSource.ids) {
         mPassSkipped = true;
         return Ogre::HlmsCache();
     }
     mPassSkipped = false;
     tellEveryHlms(mHlmsManager);
     bindSceneGi(this, sceneManager);
+    // Every upload of the pass happens here, before its first draw begins the
+    // render pass: the stand-ins every draw binds, the bucket table.
+    ensureStandIns();
     uploadBucketTable();
-    return Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
+    Ogre::HlmsCache ret =
+        Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
+    if (!mSource.hitMode || casterPass) return ret;
+    // HIT MODE (PHOTON-HIT-SHADE-1): three pass properties on top of PBS's, and
+    // the pass cache re-keyed on them (PBS built it from its own set):
+    //   atom_hit_mode                     the decode's four hit branches;
+    //   hlms_forwardplus_custom_frag_coord the fork's Forward+ cell hook — the
+    //                                     decode hands the hit's own pixel;
+    //   hlms_fog = 0                      the camera's distance fog is not a
+    //                                     hit's (its radiance leaves the hit
+    //                                     towards the ray's origin); the pass
+    //                                     buffer's later members are padded for
+    //                                     it by the fog piece's own layout rule.
+    //
+    // THE BASE IS THE RETURNED SET, never mT[kNoTid] (measured in the app: PBS's
+    // pass prepare leaves 14 of its 69 properties in mT by the time it returns —
+    // a pass cache built from mT lost the lights and the pass buffer).
+    Ogre::HlmsPropertyVec props = ret.setProperties;
+    setProperty(props, Ogre::IdString("atom_hit_mode"), 1);
+    setProperty(props, Ogre::IdString("hlms_forwardplus_custom_frag_coord"), 1);
+    setProperty(props, Ogre::HlmsBaseProp::Fog, 0);
+    PassCache passCache;
+    passCache.passPso = ret.pso.pass;
+    passCache.properties = props;
+    size_t passIdx = 0u;
+    findOrAddPassCache(passCache, true, passIdx);
+    ret.hash = static_cast<Ogre::uint32>(passIdx) << Ogre::HlmsBits::PassShift;
+    ret.setProperties = props;
+    return ret;
 }
 
 void HlmsAtom::postCommandBufferExecution(Ogre::CommandBuffer *commandBuffer) {
@@ -363,6 +544,7 @@ Ogre::Hlms::PropertiesMergeStatus HlmsAtom::notifyPropertiesMergedPreGenerationS
     setProperty(tid, "atomLevelBuf", kLevelBufSlot);
     setProperty(tid, "atomGeomRowBuf", kGeomRowBufSlot);
     setProperty(tid, "atomBucketBuf", kBucketBufSlot);
+    setProperty(tid, "atomHitBuf", kHitBufSlot);
     setProperty(tid, "atomSlotsPerPool", Ogre::int32(mSlotsPerPool));
     Ogre::int32 texSlotsStart = kReservedBufSlots;
     if (getProperty(tid, Ogre::HlmsBaseProp::ForwardPlus))
@@ -435,6 +617,12 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
             Ogre::PixelShader, kGeomRowBufSlot, whole ? roView(mSource.geomRows) : mEmptyBuf, 0, 0);
         *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
             Ogre::PixelShader, kBucketBufSlot, (whole && mBucketBuf) ? mBucketBuf : mEmptyBuf, 0, 0);
+        // HIT MODE's list buffer (both stages read it) — the stand-in otherwise
+        // (made in preparePassHash: an upload here would land INSIDE the pass'
+        // render pass, which the pin cannot resume with a clear).
+        const bool hit = whole && mSource.hitMode && mSource.hitBuf;
+        *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
+            Ogre::PixelShader, kHitBufSlot, hit ? roView(mSource.hitBuf) : mEmptyBuf, 0, 0);
         Ogre::uint16 texSlot = kReservedBufSlots;
         if (mGridBuffer) texSlot = Ogre::uint16(texSlot + 2u);
         *commandBuffer->addCommand<Ogre::CbTexture>() =

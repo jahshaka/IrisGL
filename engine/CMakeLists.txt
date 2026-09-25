@@ -128,6 +128,8 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_radiance.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_record.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_sun_ray.glsl"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
@@ -191,6 +193,9 @@ if(JAH_RAY_QUERY_OK)
                 "${JAH_RQ_INCLUDE}/jah_rq_card_bindings.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_geom.glsl"
                 "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
+                # ...and the hit record + the sun ray (PHOTON-HIT-SHADE-1).
+                "${JAH_RQ_INCLUDE}/jah_rq_hit_record.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
@@ -218,14 +223,28 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
                 --vn krq_sunContactSpv -o "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
+                # the sun ray is one text with the hit record's (PHOTON-HIT-SHADE-1)
+                "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
         COMMENT "Compiling the sun contact shadow job at SPIR-V 1.4"
+        VERBATIM)
+    # THE HIT WRITE-BACK (PHOTON-HIT-SHADE-1): the decoded radiance of every hit
+    # record, scattered back into the reflection's mean and the gather's atlas.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_hitCompositeSpv -o "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
+        COMMENT "Compiling the hit write-back at SPIR-V 1.4"
         VERBATIM)
     add_custom_target(JahshakaRayQuerySpv
                       DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
