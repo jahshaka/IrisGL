@@ -2855,6 +2855,24 @@ struct GiQualityFacts {
     // ---- THE GATHER ROW (PHOTON-GATHER-1d) -----------------------------------
     /// The screen-probe gather at this tier (GiGatherFacts says what and why).
     GiGatherFacts gather;
+    // ---- THE REFLECTION ROW (PHOTON-F12-PCC) ---------------------------------
+    /// THIS TIER'S REFLECTIONS ARE TRACED, so it builds NO reflection-probe
+    /// grid wherever the machine traces (the rule: `OgreScene::probeGridByRays`
+    /// — this row AND `rayTracingResolved()`, the gather's own shape). The three
+    /// sources are the answer there: the screen march, the rays (a hit lit from
+    /// its card, the decode or the voxels) and the anisotropic cone with the sky
+    /// as its escape; a planar mirror stays a planar mirror. True at High (and
+    /// Epic, which reads High's rows); Low and Medium keep the grid wherever a
+    /// technique asks for one. A scene that turns its rays OFF is not a ray tier
+    /// for this rule and keeps its grid.
+    ///
+    /// WHAT IT DELETES, measured on Grand Showroom 2 at Epic (32 probes kept at
+    /// 512 px HDR, app.textureMemory A/B): 838,987,760 bytes of texture — the
+    /// probe array 536,739,840, its capture and IBL cubes 33,550,320, each probe
+    /// workspace's shadow targets 268,435,456 (8 MiB a probe) and the placement's
+    /// 256 px depth buffer 262,144 — and the
+    /// open's placement, 713-799 ms of the UI thread.
+    bool rayReflections = false;
 };
 
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
@@ -2912,6 +2930,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
+        f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         break;
     default:   // Medium: the same reach as High, at its own resolution
         f.cascades[0] = {  5.0f, 64, 0.0f };
@@ -3707,8 +3726,21 @@ struct GiStatus {
     /// `probeCount 0` with this NON-ZERO is the open-scene answer (and the sky
     /// IBL is bound instead); `probeCount 0` with this ZERO while the mode is
     /// the hybrid is the silent-degradation failure gi.pcc_mirror exists to
-    /// catch.
+    /// catch — UNLESS `probeGridByRays` says the tier traces its reflections.
     int    probesDropped = 0;
+    /// THE THIRD ANSWER (PHOTON-F12-PCC): the hybrid at a RAY tier builds no
+    /// grid at all — the tier's facts say its reflections are traced
+    /// (`GiQualityFacts::rayReflections`) and this scene traces on this machine
+    /// (`Scene::rayTracingResolved`). `probeCount` and `probesDropped` are then
+    /// both 0 by design, `pccBound` false, and nothing was placed, photographed
+    /// or captured (`probePlacements`, `probeCapturesTotal`).
+    bool   probeGridByRays = false;
+    /// Probe-grid placements STARTED on this scene over its life (the scout,
+    /// the first of the three stages) and probe captures RENDERED over its life
+    /// (the placement's and the budget's) — cumulative, never reset. A ray tier
+    /// moves neither.
+    unsigned probePlacements = 0;
+    unsigned long long probeCapturesTotal = 0;
     /// How many probes the renderer re-captures per frame — the RESOLVED
     /// `GiParams::updateBudget`, clamped to the probes that actually exist, and
     /// 0 whenever the probe arm did not build (FIX WAVE B1/B2). 0 in every mode

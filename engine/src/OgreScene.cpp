@@ -1810,10 +1810,24 @@ bool OgreScene::rayTracingResolved() const {
 
 void OgreScene::setRayTracing(RayTracingMode mode) {
     const bool wasOn = mRayTracing != RayTracingMode::Off;
+    const bool gridWas = probeGridWanted();
     mRayTracing = mode;
     // OFF is a COST guarantee, not only a picture: the ray structures this
     // scene holds are released now, and updateRayQuery skips it from here.
     if (wasOn && mode == RayTracingMode::Off) forgetRayQuery();
+    // THE ROW MOVES THE PROBE GRID'S RULE (PHOTON-F12-PCC): at a ray tier the
+    // grid is not built, so the row turning the rays on there takes the grid
+    // down and turning them off builds it — the two things a technique change
+    // already does, and nothing else. Down is `dropProbeGridByRays` (the
+    // binding lets go, the datablocks take their sky cube back, the probe
+    // record goes with it); up is the from-scratch `rebuildVct`, owed through the
+    // flush: the cheap paths' belt refuses a hybrid that wants a grid and has
+    // none (refreshCascadesFast / refreshVctFast), so the flush takes the
+    // rebuild, and a rebuild that has to wait (a camera, a texture) stays armed.
+    const bool gridNow = probeGridWanted();
+    if (gridWas == gridNow) return;
+    if (!gridNow) dropProbeGridByRays();
+    else mGiCachesDirty = true;
 }
 
 

@@ -3421,6 +3421,16 @@ public:
     /// With the row off the tier records no dispatch, the Component allocates
     /// nothing, the Hlms listener sets no property and no pixel moves.
     bool probeGatherWanted() const;
+    /// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; OgreGi.cpp).
+    /// `probeGridByRays` is the rule — the tier's facts say its reflections
+    /// are traced (GiQualityFacts::rayReflections) AND this scene traces on
+    /// this machine (rayTracingResolved), the gather's own shape — and
+    /// `probeGridWanted` is the one question every grid path asks: the hybrid,
+    /// and not a ray tier.
+    bool probeGridByRays() const;
+    bool probeGridWanted() const;
+    /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
+    void dropProbeGridByRays();
     /// THE LIGHTING SERIAL the gather's settled history counts from
     /// (PHOTON-GATHER-1d, OgreGi.cpp): folded from the light-write serial and
     /// from what moves when an injection LANDS (the chain's settles, the single
@@ -6065,6 +6075,10 @@ private:
     /// is what lets a suite assert "the drag spent nothing" from outside.
     unsigned long long mProbeCapturesDeferred = 0;
     int                mPlacementCapturesThisFrame = 0;
+    /// Cumulative over the scene's life (GiStatus::probePlacements /
+    /// probeCapturesTotal): scouts started, and probe captures rendered.
+    unsigned           mProbePlacements = 0;
+    unsigned long long mProbeCapturesTotal = 0;
     unsigned long long mGiRebuilds = 0;
     /// How many of those rebuilds a MOBILITY change caused (MobilityStatus::
     /// mobilityRebuilds). Its own counter and not a share of mGiRebuilds

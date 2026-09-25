@@ -493,6 +493,59 @@ static float probeShapeCellRatio(const Ogre::CubemapProbe *p) {
     return worst;
 }
 
+// ---------------------------------------------------------------------------
+// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; C3 design §2.2)
+// ---------------------------------------------------------------------------
+// The tier's facts say its reflections are traced, and this scene traces on this
+// machine: the SAME two terms the screen-probe gather is resolved from
+// (`probeGatherWanted`), so a tier traces its reflections exactly where it
+// traces its diffuse. There the three sources are the answer — the screen march,
+// the rays (a hit lit from its card, the decode or the voxels) and the
+// anisotropic cone with the sky as its escape — and a grid of photographs under
+// them is 839 MB of texture and 713-799 ms of the open (Grand Showroom 2 at
+// Epic, measured — GiQualityFacts::rayReflections has the breakdown). A scene that turns its rays OFF is not a ray tier: it keeps
+// the grid, exactly as Low and Medium do.
+//
+// THE ONE GATE. Every grid path asks `probeGridWanted` and nothing else: the
+// placement (rebuildVct and the staged machine), and the cheap paths' belts
+// that refuse a hybrid with no grid. With no grid everything downstream is
+// already a no-op on `mPcc` — `staleProbeGrid` marks nothing, the budget scans
+// nothing, `ensureCubemapProbeSlots` is never reached (the Forward+ probe slots
+// stay at the scene's default), the binding's `pcc` stays null, so
+// `reflectionTexFor` hands the env slot to the authored map or the sky cube and
+// the IBL mip count follows that cube.
+bool OgreScene::probeGridByRays() const {
+    if (!giQualityFacts(mGi.quality,
+                        mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
+                        mGi.epicTier)
+             .rayReflections)
+        return false;
+    return rayTracingResolved();
+}
+
+bool OgreScene::probeGridWanted() const {
+    return mGi.mode == GiMode::VctPccHybrid && !probeGridByRays();
+}
+
+// THE DOWN HALF, in one place: the grid a ray tier does not build is taken down
+// (the binding lets go, the datablocks take their sky cube back) and the probe
+// record goes with it, so giStatus reads the ray tier and not a drop verdict. A
+// staged build parked on a probe stage walks on to the field. Called by the Ray
+// Tracing row's write (setRayTracing) and by the frame's flush for every other
+// way the rule can turn — the device answering `rayQueryAvailable` only once a
+// view exists, the process latch, the tier's facts.
+void OgreScene::dropProbeGridByRays() {
+    JAH_TRY {
+        destroyProbeGrid();
+        mProbesDropped = 0;
+        mProbeSlots.clear();
+        mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+        if (mGiBuildStage == GiBuildStage::ProbeScout || mGiBuildStage == GiBuildStage::ProbeFit ||
+            mGiBuildStage == GiBuildStage::ProbeFinish)
+            mGiBuildStage = GiBuildStage::Field;
+    } JAH_CATCH(mError, );
+}
+
 bool OgreScene::setGlobalIllumination(const GiParams &p) {
     JAH_TRY {
         switch (p.mode) {
@@ -666,7 +719,7 @@ bool OgreScene::refreshVctFast() {
     // from-scratch rebuild on every refresh because it has none would make the
     // cheapest scene in the editor pay the most. `mProbesDropped` is what
     // separates that from a grid that failed to build at all.
-    if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbesDropped) return false;
+    if (probeGridWanted() && !mPcc && !mProbesDropped) return false;
 
     Ogre::Vector3 mn, mx;
     if (!computeGiBounds(mn, mx)) return false;
@@ -682,7 +735,7 @@ bool OgreScene::refreshVctFast() {
             if (std::fabs(dc[ax]) > tol || std::fabs(dh[ax]) > tol) return false;
         return true;
     };
-    if (mGi.mode == GiMode::VctPccHybrid) {
+    if (probeGridWanted()) {
         // THE PROBE GRID IS A FUNCTION OF THE LIT VOLUME (R5-ROOM): the scout
         // is spread through it, the space it measures is inside it, and the
         // grid is placed in that. So THIS is the box to compare — not the probe
@@ -1182,6 +1235,9 @@ GiStatus OgreScene::giStatus() const {
         // caller can tell "no grid because every candidate probe saw nothing"
         // from "no grid because the mode does not build one".
         st.probesDropped      = mProbesDropped;
+        st.probeGridByRays    = mGi.mode == GiMode::VctPccHybrid && probeGridByRays();
+        st.probePlacements    = mProbePlacements;
+        st.probeCapturesTotal = mProbeCapturesTotal;
         st.probeHdr     = mPcc && mPccHdr;
         st.probeShadows = mPcc && mPccShadowed;
         // RESOLVED, like the two above: the request is clamped to the probes
@@ -1872,6 +1928,7 @@ void OgreScene::latchProbeCaptures(bool drawn) {
             if (p->mDirty && p->mEnabled) ++captures;
     }
     mProbeCapturesLastFrame = captures;
+    if (captures > 0) mProbeCapturesTotal += (unsigned long long)captures;
     // THE MONITOR'S CACHE-WORK RECORD (RENDER_LOOP_MONITOR_SPEC §4.7). One
     // entry per probe that is about to capture, carrying the input change that
     // staled it — or `None`, which is the value that matters: a probe captured
@@ -3028,7 +3085,7 @@ bool OgreScene::refreshCascadesFast() {
     // state the machine is walking through on purpose, and refusing there would
     // rebuild the 57 ms chain on every edit inside the window.
     if (mGiBuildStage == GiBuildStage::Idle) {
-        if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbesDropped) return false;
+        if (probeGridWanted() && !mPcc && !mProbesDropped) return false;
         if (ddgiWanted() && !mIfd) return false;
     }
     JAH_TRY {
@@ -3242,6 +3299,12 @@ bool OgreScene::stepStagedGiBuild() {
         case GiBuildStage::Idle:
             return true;
         case GiBuildStage::ProbeScout: {
+            // A RAY TIER REACHED BETWEEN TWO STAGES PLACES NOTHING (F12-PCC):
+            // the machine walks straight on to the field.
+            if (!probeGridWanted()) {
+                mGiBuildStage = GiBuildStage::Field;
+                return false;
+            }
             // THE BOX IS RE-FITTED HERE, never carried from the cascade stage:
             // an edit between two stages rewinds the machine to THIS one, and
             // the whole point of the rewind is that the grid is placed in the
@@ -3299,6 +3362,10 @@ void OgreScene::applyPendingGi() {
     // NOTHING OF THIS WORLD IS ON SCREEN YET: spend nothing at all
     // (Scene::setLoading). The ordinary flush below is gated on the same thing
     // inside `rebuildVct`; this is the staged machine's half.
+    // A GRID THE RULE NO LONGER WANTS GOES FIRST (PHOTON-F12-PCC) — a ray tier
+    // reached by any route but the row's own write (dropProbeGridByRays).
+    if ((mPcc || mProbesDropped) && !probeGridWanted() && mGi.mode == GiMode::VctPccHybrid)
+        dropProbeGridByRays();
     const bool staged = (mGiBuildStage != GiBuildStage::Idle);
     if (staged && mSceneLoading) return;
     // THE ORDINARY FLUSH RUNS FIRST, AND IT RUNS WHILE A BUILD IS STAGED — the
@@ -4526,7 +4593,8 @@ bool OgreScene::rebuildVct() {
     // renderer already fits to the content. The probes are spread through it and
     // each one then photographs its own surroundings; `buildPcc` keeps the ones
     // that saw something and drops the rest.
-    if (mGi.mode == GiMode::VctPccHybrid && haveBounds) {
+    // ...AND NOT AT A RAY TIER (PHOTON-F12-PCC): `probeGridWanted`.
+    if (probeGridWanted() && haveBounds) {
         // DELIBERATELY the scene's fitted box and not a cascade: where the
         // probes live is a property of the content, not of where the camera
         // stands. The cascade arm changes where the BOUNCE is computed and
@@ -5793,6 +5861,7 @@ double OgreScene::pccPhaseSplit() {
 // false when the grid cannot be built at all — this stage's only refusal.
 void OgreScene::buildPccScout(const Ogre::Aabb &litVolume) {
     mPccStageOk = false;
+    ++mProbePlacements;
     mGiStagedVolume = litVolume;
     for (double &v : mPccPhaseMs) v = 0.0;
     // BY VALUE, and it has to be: the caller passes `mGiProbeRegion` itself and
