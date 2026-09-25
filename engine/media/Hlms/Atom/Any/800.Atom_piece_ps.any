@@ -246,6 +246,62 @@
 		b.clipW = area * invSum;
 		return b;
 	}
+	// A TRIANGLE WITH A VERTEX BEHIND THE EYE (clip w <= 0) - every ground plane
+	// that runs past the camera - has no screen image to snap: the divide by w
+	// above mirrors that vertex, and the weights come out anywhere. For such a
+	// triangle the weights are solved in HOMOGENEOUS space instead (Olano-Greer):
+	// the pixel's clip point is a combination of the three (x, y, w) columns, so
+	// the weights are the adjugate's rows dotted with (ndc.x, ndc.y, 1),
+	// normalised, and the clip w at the pixel is the determinant over their sum.
+	// No divide by a vertex's w, no snap; used only where the snapped form cannot
+	// be (a triangle wholly in front keeps the rasteriser's exact form).
+	AtomBary atomBarycentricHomogeneous( float4 c0, float4 c1, float4 c2, float2 ndc )
+	{
+		float3 v0 = c0.xyw;
+		float3 v1 = c1.xyw;
+		float3 v2 = c2.xyw;
+		float3 q = float3( ndc, 1.0 );
+		float3 u = float3( dot( cross( v1, v2 ), q ), dot( cross( v2, v0 ), q ), dot( cross( v0, v1 ), q ) );
+		float sum = u.x + u.y + u.z;
+		float invSum = 1.0 / ( abs( sum ) > 1e-30 ? sum : 1e-30 );
+		AtomBary b;
+		b.w = u * invSum;
+		b.clipW = dot( v0, cross( v1, v2 ) ) * invSum;
+		return b;
+	}
+	// The NDC of a framebuffer position, atomToPixels' inverse (the pass's y
+	// direction included).
+	float2 atomPixelToNdc( float2 fb, float2 res )
+	{
+		@property( hlms_forwardplus_flipY )
+			return float2( fb.x / res.x * 2.0 - 1.0, fb.y / res.y * 2.0 - 1.0 );
+		@else
+			return float2( fb.x / res.x * 2.0 - 1.0, 1.0 - fb.y / res.y * 2.0 );
+		@end
+	}
+	// THE FOG COLOUR IS A VERTEX TERM: the vertex shader's DoAtmosphereNprSky writes
+	// it per vertex (the analytic sky's scattering for the direction the vertex is
+	// seen from, or the flat fog colour - JahFog's redefinition), and the rasteriser
+	// interpolates it. The decode evaluates the same piece at the decoded triangle's
+	// three corners and interpolates with the pixel's weights (the fork makes the
+	// atmosphere's vertex pieces reachable from a pixel shader). Hit mode draws no
+	// fog (its pass property is zero).
+	@property( hlms_fog && !atom_hit_mode )
+		@insertpiece( DeclAtmosphereNprSkyFuncs )
+		struct AtomFogVertex
+		{
+			midf3 fog;
+		};
+		midf3 atomFogAt( float3 atomWorldPos )
+		{
+			AtomFogVertex atomFogOut;
+			float4 worldPos = float4( atomWorldPos, 1.0 );
+			#define outVs atomFogOut
+			@insertpiece( DoAtmosphereNprSky )
+			#undef outVs
+			return atomFogOut.fog;
+		}
+	@end
 	float2 atomToPixels( float4 c, float2 res )
 	{
 		float2 ndc = c.xy / c.w;
@@ -465,7 +521,9 @@
 		float2 s2 = atomToPixels( c2, atomRes );
 		float3 atomInvW = float3( 1.0 / c0.w, 1.0 / c1.w, 1.0 / c2.w );
 		float2 atomPix = gl_FragCoord.xy;
-		AtomBary b = atomBarycentric( s0, s1, s2, atomInvW, atomPix );
+		bool atomAllFront = c0.w > 0.0 && c1.w > 0.0 && c2.w > 0.0;
+		AtomBary b = atomAllFront ? atomBarycentric( s0, s1, s2, atomInvW, atomPix )
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix, atomRes ) );
 		// AN ID THAT DOES NOT NAME A TRIANGLE COVERING THIS PIXEL IS NEVER SHADED: weights
 		// far outside the triangle or a non-finite clip w (tested on the BITS - a
 		// self-comparison is folded away on this stack) would hand PBS's pieces a position
@@ -515,8 +573,12 @@
 			@else
 			if( atomOk )
 			{
-				AtomBary bx = atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 1.0, 0.0 ) );
-				AtomBary by = atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 0.0, 1.0 ) );
+				AtomBary bx = atomAllFront
+								  ? atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 1.0, 0.0 ) )
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix + float2( 1.0, 0.0 ), atomRes ) );
+				AtomBary by = atomAllFront
+								  ? atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 0.0, 1.0 ) )
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix + float2( 0.0, 1.0 ), atomRes ) );
 				atomDdxUV = ( bx.w.x * uvA + bx.w.y * uvB + bx.w.z * uvC ) - atomUv0;
 				atomDdyUV = ( by.w.x * uvA + by.w.y * uvB + by.w.z * uvC ) - atomUv0;
 				// A neighbour step that lands on the triangle's plane horizon (a silhouette
@@ -573,6 +635,17 @@
 		@end
 		@property( hlms_pssm_splits )
 			inPs.depth = b.clipW;
+		@end
+		@property( hlms_fog && !atom_hit_mode )
+			// The vertex terms of the distance fog (see atomFogAt): the colour, and
+			// JahFog's height-layer world height (hlms_normal: its interpolant is
+			// declared under the same property).
+			inPs.fog = atomOk ? midf3_c( b.w.x * atomFogAt( w0 ) + b.w.y * atomFogAt( w1 ) +
+										 b.w.z * atomFogAt( w2 ) )
+							  : midf3_c( 0.0, 0.0, 0.0 );
+			@property( hlms_normal || hlms_qtangent )
+				inPs.jahFogWorldY = b.w.x * w0.y + b.w.y * w1.y + b.w.z * w2.y;
+			@end
 		@end
 		@property( !lower_gpu_overhead )
 			inPs.drawId = ushort( inAtom.drawId );

@@ -37,6 +37,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDraw.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomIdPass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomPass.h
@@ -273,8 +274,27 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
         COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
         VERBATIM)
+    # THE VISIBILITY BUFFER'S ID PASS (ATOM S3-DRAW, OgreAtomIdPass.cpp): a
+    # material-less vertex/fragment pair that pulls every vertex through the GPU
+    # scene's geometry rows — jah_geom_rows.glsl, the ONE copy the voxeliser's
+    # piece and the ray jobs read too. SPIR-V 1.0 (buffer references ride
+    # SPV_KHR_physical_storage_buffer; nothing here needs 1.4).
+    foreach(_stage vert frag)
+        add_custom_command(
+            OUTPUT "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h"
+            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S ${_stage} -x
+                    "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                    --vn katomId_${_stage}Spv -o "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+            COMMENT "Compiling the visibility buffer's id pass (${_stage})"
+            VERBATIM)
+    endforeach()
     add_custom_target(JahshakaRayQuerySpv
-                      DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+                      DEPENDS "${JAH_RQ_GEN_DIR}/atom_id_vert_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_id_frag_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"

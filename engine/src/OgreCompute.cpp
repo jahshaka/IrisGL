@@ -105,6 +105,20 @@ bool OgreEngine::fillCullView(View *view, GpuCullRequest &out) const {
     if (!v) return false;
     Ogre::Camera *cam = v->camera();
     if (!cam) return false;
+    fillCullFrustum(cam, float(v->height()), out);
+    // THE PYRAMID IS ONLY OFFERED WHEN IT HOLDS SOMETHING. A pyramid that has
+    // been BUILT but never written is an uninitialised allocation, and a cull
+    // against it would reject geometry on the strength of another texture's
+    // leftovers.
+    HzbStatus hst;
+    out.hzbLevels = hzbStatus(view, hst) && hst.built && hst.primed ? hst.levels : 0u;
+    return out.viewportHeight > 0.0f;
+}
+
+/// The frustum, the eye and the level rule's two terms of a cull request, from a
+/// camera and the height of the target its pass renders into (the id pass's own
+/// request, which never offers a pyramid).
+void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullRequest &out) {
 
     const Ogre::Matrix4 vpm = cam->getProjectionMatrixWithRSDepth() * cam->getViewMatrix();
     for (int r = 0; r < 4; ++r)
@@ -137,14 +151,7 @@ bool OgreEngine::fillCullView(View *view, GpuCullRequest &out) const {
     // is null between frames), and the number the currency wants is the height
     // of the target this request's pass renders into, which the View knows for
     // certain.
-    out.viewportHeight = float(v->height());
-    // THE PYRAMID IS ONLY OFFERED WHEN IT HOLDS SOMETHING. A pyramid that has
-    // been BUILT but never written is an uninitialised allocation, and a cull
-    // against it would reject geometry on the strength of another texture's
-    // leftovers.
-    HzbStatus hst;
-    out.hzbLevels = hzbStatus(view, hst) && hst.built && hst.primed ? hst.levels : 0u;
-    return out.viewportHeight > 0.0f;
+    out.viewportHeight = viewportHeight;
 }
 
 

@@ -185,38 +185,34 @@ double measureJob(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc, Ogre::HlmsCompu
 }  // namespace
 
 // ---------------------------------------------------------------------------
-bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
-                           GpuCullResult &out) {
-    out = GpuCullResult();
+// THE RECORDING HALF — the request uploaded and the three jobs dispatched, NOTHING
+// read back: what a frame's own consumer (the visibility buffer's id pass,
+// OgreAtomIdPass.cpp) calls from inside a pass, where a readback would stall the
+// frame. The answer stays in the cull's buffers (count, survivors, levels, draws).
+bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
+                              std::string &err, bool keepBindings) {
     ensureGpuTables();
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
     Ogre::HlmsCompute *hc =
         mRoot && mRoot->getHlmsManager() ? mRoot->getHlmsManager()->getComputeHlms() : nullptr;
-    if (!rs || !hc || !mGpuScene.live()) return false;
-    out.supported = rs->supportsIndirectDispatch();
-    if (!out.supported) return false;
-
+    if (!rs || !hc || !mGpuScene.live() || !rs->supportsIndirectDispatch()) {
+        err = "the GPU cull has no device here (no compute, no GPU scene or no indirect dispatch)";
+        return false;
+    }
     Ogre::HlmsComputeJob *test = hc->findComputeJobNoThrow("Jahshaka/CullTest");
     Ogre::HlmsComputeJob *compact = hc->findComputeJobNoThrow("Jahshaka/CullCompact");
     Ogre::HlmsComputeJob *draws = hc->findComputeJobNoThrow("Jahshaka/CullDraws");
     if (!test || !compact || !draws) {
-        mError = "engine: the cull compute jobs are missing — "
-                     "media/Hlms/Jahshaka/JahshakaCompute.material.json is not staged";
+        err = "engine: the cull compute jobs are missing — "
+              "media/Hlms/Jahshaka/JahshakaCompute.material.json is not staged";
         return false;
     }
-
     const uint32_t instances = mGpuScene.slotCount();
-    out.instances = instances;
-    std::string err;
     // THE TABLE'S CAPACITY, not this request's instance count (see `ensure`).
-    if (!mGpuCull.ensure(rs->getVaoManager(), std::max(mGpuScene.slotCapacity(), 1u), err)) {
-        mError = err;
-        out.supported = false;
+    if (!cull.ensure(rs->getVaoManager(), std::max(mGpuScene.slotCapacity(), 1u), err))
         return false;
-    }
 
     JAH_TRY {
-        const auto tRequest = std::chrono::steady_clock::now();
         // ---- the request, and the counter it has to start from -------------
         GpuCullParams p;
         std::memcpy(p.planes, req.planes, sizeof(p.planes));
@@ -233,9 +229,9 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
         p.hzb[1] = hzb ? uint32_t(hzb->getWidth()) : 0u;
         p.hzb[2] = hzb ? uint32_t(hzb->getHeight()) : 0u;
         p.hzb[3] = rs->isReverseDepth() ? 1u : 0u;
-        mGpuCull.params()->upload(&p, 0, 1u);
+        cull.params()->upload(&p, 0, 1u);
         const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 0u, 0u };
-        mGpuCull.count()->upload(reset, 0, GpuCull::kCountElements);
+        cull.count()->upload(reset, 0, GpuCull::kCountElements);
 
         // ---- job 1: test ---------------------------------------------------
         // THE PYRAMID IS A PERMUTATION (`cull_hzb`), and it has to be: a compute
@@ -253,40 +249,73 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
             ts.texture = hzb;
             test->setTexture(0u, ts);
         }
-        test->_setUavBuffer(0u, cullSlot(mGpuCull.params(), Ogre::ResourceAccess::Read));
+        test->_setUavBuffer(0u, cullSlot(cull.params(), Ogre::ResourceAccess::Read));
         test->_setUavBuffer(1u, cullSlot(mGpuScene.instanceBuffer(), Ogre::ResourceAccess::Read));
         test->_setUavBuffer(2u, cullSlot(mGpuScene.meshBuffer(), Ogre::ResourceAccess::Read));
         test->_setUavBuffer(3u, cullSlot(mGpuScene.levelBuffer(), Ogre::ResourceAccess::Read));
-        test->_setUavBuffer(4u, cullSlot(mGpuCull.visible(), Ogre::ResourceAccess::Write));
-        test->_setUavBuffer(5u, cullSlot(mGpuCull.levels(), Ogre::ResourceAccess::Write));
+        test->_setUavBuffer(4u, cullSlot(cull.visible(), Ogre::ResourceAccess::Write));
+        test->_setUavBuffer(5u, cullSlot(cull.levels(), Ogre::ResourceAccess::Write));
         const uint32_t groups =
             (instances + GpuCull::kThreadsPerGroup - 1u) / GpuCull::kThreadsPerGroup;
         test->setNumThreadGroups(std::max(groups, 1u), 1u, 1u);
 
         // ---- job 2: compact ------------------------------------------------
-        compact->_setUavBuffer(0u, cullSlot(mGpuCull.params(), Ogre::ResourceAccess::Read));
-        compact->_setUavBuffer(1u, cullSlot(mGpuCull.visible(), Ogre::ResourceAccess::Read));
-        compact->_setUavBuffer(2u, cullSlot(mGpuCull.survivors(), Ogre::ResourceAccess::Write));
-        compact->_setUavBuffer(3u, cullSlot(mGpuCull.count(), Ogre::ResourceAccess::ReadWrite));
+        compact->_setUavBuffer(0u, cullSlot(cull.params(), Ogre::ResourceAccess::Read));
+        compact->_setUavBuffer(1u, cullSlot(cull.visible(), Ogre::ResourceAccess::Read));
+        compact->_setUavBuffer(2u, cullSlot(cull.survivors(), Ogre::ResourceAccess::Write));
+        compact->_setUavBuffer(3u, cullSlot(cull.count(), Ogre::ResourceAccess::ReadWrite));
         compact->setNumThreadGroups(std::max(groups, 1u), 1u, 1u);
 
         // ---- job 3: the draw commands, sized by the GPU --------------------
         draws->_setUavBuffer(0u, cullSlot(mGpuScene.instanceBuffer(), Ogre::ResourceAccess::Read));
         draws->_setUavBuffer(1u, cullSlot(mGpuScene.levelBuffer(), Ogre::ResourceAccess::Read));
-        draws->_setUavBuffer(2u, cullSlot(mGpuCull.survivors(), Ogre::ResourceAccess::Read));
-        draws->_setUavBuffer(3u, cullSlot(mGpuCull.levels(), Ogre::ResourceAccess::Read));
-        draws->_setUavBuffer(4u, cullSlot(mGpuCull.draws(), Ogre::ResourceAccess::Write));
-        draws->_setUavBuffer(5u, cullSlot(mGpuCull.count(), Ogre::ResourceAccess::Read));
-        draws->setIndirectDispatchBuffer(mGpuCull.count(), GpuCull::kIndirectOffsetBytes);
-
-        out.requestMs =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tRequest)
-                .count();
+        draws->_setUavBuffer(2u, cullSlot(cull.survivors(), Ogre::ResourceAccess::Read));
+        draws->_setUavBuffer(3u, cullSlot(cull.levels(), Ogre::ResourceAccess::Read));
+        draws->_setUavBuffer(4u, cullSlot(cull.draws(), Ogre::ResourceAccess::Write));
+        draws->_setUavBuffer(5u, cullSlot(cull.count(), Ogre::ResourceAccess::Read));
+        draws->setIndirectDispatchBuffer(cull.count(), GpuCull::kIndirectOffsetBytes);
 
         dispatchWithBarriers(rs, hc, test);
         dispatchWithBarriers(rs, hc, compact);
         if (req.mode >= 2u) dispatchWithBarriers(rs, hc, draws);
+        // The descriptor sets the dispatches bound were built at dispatch time;
+        // the jobs' CPU-side bindings go now (a later grow must not find them),
+        // unless a measurement re-dispatches them as they stand.
+        if (!keepBindings) unbindCullJobs(test, compact, draws);
+        return true;
+    }
+    catch (Ogre::Exception &e) {
+        err = e.getFullDescription();
+        unbindCullJobs(test, compact, draws);
+        return false;
+    }
+}
 
+bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
+                           GpuCullResult &out) {
+    out = GpuCullResult();
+    ensureGpuTables();
+    Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
+    Ogre::HlmsCompute *hc =
+        mRoot && mRoot->getHlmsManager() ? mRoot->getHlmsManager()->getComputeHlms() : nullptr;
+    if (!rs || !hc || !mGpuScene.live()) return false;
+    out.supported = rs->supportsIndirectDispatch();
+    if (!out.supported) return false;
+    const uint32_t instances = mGpuScene.slotCount();
+    out.instances = instances;
+
+    const auto tRequest = std::chrono::steady_clock::now();
+    std::string err;
+    if (!recordGpuCull(mGpuCull, req, hzb, err, req.measureIterations > 0u)) {
+        mError = err;
+        out.supported = false;
+        return false;
+    }
+    out.requestMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tRequest)
+            .count();
+
+    JAH_TRY {
         // ---- what the GPU decided ------------------------------------------
         std::vector<unsigned> counter;
         readUints(mGpuCull.count(), 0u, GpuCull::kCountElements, counter);
@@ -321,17 +350,25 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
         }
 
         if (req.measureIterations) {
+            Ogre::HlmsComputeJob *test = hc->findComputeJobNoThrow("Jahshaka/CullTest");
+            Ogre::HlmsComputeJob *compact = hc->findComputeJobNoThrow("Jahshaka/CullCompact");
+            Ogre::HlmsComputeJob *draws = hc->findComputeJobNoThrow("Jahshaka/CullDraws");
+            // The request kept the bindings for this: each job re-dispatches
+            // over the buffers the request filled.
             out.testMs = measureJob(rs, hc, test, req.measureIterations);
             out.compactMs = measureJob(rs, hc, compact, req.measureIterations);
             if (req.mode >= 2u) out.drawsMs = measureJob(rs, hc, draws, req.measureIterations);
+            unbindCullJobs(test, compact, draws);
         }
-
-        unbindCullJobs(test, compact, draws);
         return true;
     }
     catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
-        unbindCullJobs(test, compact, draws);
+        if (req.measureIterations) {
+            unbindCullJobs(hc->findComputeJobNoThrow("Jahshaka/CullTest"),
+                           hc->findComputeJobNoThrow("Jahshaka/CullCompact"),
+                           hc->findComputeJobNoThrow("Jahshaka/CullDraws"));
+        }
         return false;
     }
 }

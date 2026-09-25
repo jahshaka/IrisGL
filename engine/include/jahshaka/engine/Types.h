@@ -4423,32 +4423,55 @@ struct RayQueryStatus {
 ///                that holds, in this order: `notPbs` (an Unlit or other non-PBS
 ///                datablock), `customPiece` (a per-datablock custom piece — the
 ///                twin cannot carry one), `blended` (a transparent, faded or
-///                refractive material), `alphaTested`, `skinned` (the id pass
-///                reads the mesh's bind-pose rows), `multiSubmesh`, `noRow` (no
-///                readable level-0 geometry row).
+///                refractive material), `twoSided` (a material drawn without back-
+///                face culling: the id pass culls back faces), `pending` (its
+///                textures are still being baked, so its bucket is not known yet:
+///                PBS draws it for those frames), `alphaTested`,
+///                `skinned` (the id pass reads the mesh's bind-pose rows), `noRow`
+///                (no readable level-0 triangle row: a line mesh, no device
+///                addresses, a normal the decode does not read — or more than one
+///                submesh, which no mesh this engine builds has).
 ///   stockItems   items in a queue that is not the opaque item queue (gizmos,
 ///                wires, the sun disc, distortion): never split, never counted.
 ///   materials    distinct PBS materials the atom items wear;
 ///   buckets      the decode draws those need (HlmsAtom::BucketKey: one shader
 ///                permutation x one texture set x one const-buffer pool);
-///   twins        decode twins HlmsAtom holds (every scene), and
-///   decodeDraws  this scene's decode draws.
+///   twins        decode twins HlmsAtom holds (every scene),
+///   decodeDraws  this scene's hit decode draws, and
+///   screenDraws  its screen decode draws.
 struct AtomDrawStatus {
     bool     live = false;
+    /// The split is live: the GPU scene exists, this device runs the id pass (it
+    /// needs Vulkan buffer device addresses and VK_KHR_draw_indirect_count) and
+    /// the measurement door is open. Off, every item draws through PBS.
+    bool     on = false;
     unsigned atomItems = 0;
     unsigned pbsItems = 0;
+    /// Shown, but in no world channel (a backdrop such as the ground's horizon
+    /// quad, or a helper): the id pass draws the world channels only.
+    unsigned notWorld = 0;
     unsigned notPbs = 0;
     unsigned customPiece = 0;
     unsigned blended = 0;
+    unsigned twoSided = 0;
+    unsigned pending = 0;
     unsigned alphaTested = 0;
     unsigned skinned = 0;
-    unsigned multiSubmesh = 0;
     unsigned noRow = 0;
     unsigned stockItems = 0;
     unsigned materials = 0;
     unsigned buckets = 0;
     unsigned twins = 0;
     unsigned decodeDraws = 0;
+    /// This scene's SCREEN decode draws (one per bucket of the atom items' words).
+    unsigned screenDraws = 0;
+    /// Views of this scene that draw the atom items through PBS anyway: STEREO
+    /// (VR) chains carry no id pass (it renders one eye).
+    unsigned stereoViews = 0;
+    /// ...and views that render without a post chain straight into a MULTISAMPLED
+    /// target (the passthrough shape at MSAA > 1): the id pass's one-sample depth
+    /// cannot be that pass's depth.
+    unsigned msaaViews = 0;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
@@ -7295,7 +7318,8 @@ struct GpuSceneEntry {
     unsigned meshIndex = 0xFFFFFFFFu;
     /// The predicate bits ONE place computes: 1 visible, 2 caster, 4 mover,
     /// 8 GI-visible, 16 alpha-tested, 32 skinned, 64 overlay, 128 RAY-TRACED
-    /// (the traced set), 256 drag mover, 512 GI-bounds-excluded.
+    /// (the traced set), 256 drag mover, 512 ATOM (the visibility buffer's id pass
+    /// draws it and the decode shades it — AtomDrawStatus).
     unsigned flags = 0u;
     unsigned nodeId = 0u;
     unsigned lightMask = 0u;

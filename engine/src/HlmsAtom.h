@@ -30,12 +30,12 @@
 // GI arms, which it binds per pass from the pass's own scene (bindSceneGi), exactly
 // as PBS does.
 //
-// ITS PRODUCT CONSUMER IS THE RAY HITS (PHOTON-HIT-SHADE-1, SPECS/atom/
-// D2_HIT_SHADING_DESIGN.md): in HIT MODE the same decode shades the ray jobs'
-// compacted hit list — one fragment per record — in the chain's "Jahshaka hit
-// decode" pass, over the product's own twins and decode draws (syncSceneDecodes).
-// The screen-mode consumer is still `engine.atom_parity`, over a hand-made id
-// buffer (S3-DRAW binds it to the id pass).
+// ITS TWO PRODUCT CONSUMERS. The SCREEN (ATOM S3-DRAW, OgreAtomDraw.cpp): the id
+// pass's image, shaded by one full-screen decode draw per bucket as the first draws
+// of the view's prepass and opaque pass (syncScreenDecodes / showScreenDecodes).
+// The RAY HITS (PHOTON-HIT-SHADE-1, SPECS/atom/D2_HIT_SHADING_DESIGN.md): in HIT
+// MODE the same decode shades the ray jobs' compacted hit list — one fragment per
+// record — in the chain's "Jahshaka hit decode" pass (syncSceneDecodes).
 //
 // Ogre-private: included only by the engine's Ogre TUs and by tests that reach
 // past the public API (tests/atom).
@@ -95,6 +95,13 @@ void forgetSceneDecodes(Ogre::SceneManager *sm);
 /// every scene pass of the chain covers it, so the draws are shown ONLY for the
 /// hit decode pass (HlmsAtom::showSceneDecodes, from its listener).
 constexpr Ogre::uint8 kHitDecodeRenderQueue = 99u;
+/// The queue the SCREEN decode draws live in (ATOM S3-DRAW): the FIRST draws of the
+/// view's prepass and opaque pass. A decode neither tests nor writes depth, so it
+/// must come before the PBS items (10) that may stand in front of an Atom item and
+/// depth-test against the id pass's depth; after the sky (0), which the id depth
+/// already rejects wherever an Atom item stands. Shown only while a pass that skips
+/// the Atom queue runs (the view's listener).
+constexpr Ogre::uint8 kScreenDecodeRenderQueue = 2u;
 
 /// The id image's two words (R32G32_UINT), the contract between whatever WRITES the
 /// id buffer (the hand-made one of engine.atom_parity today, S3-DRAW's id pass
@@ -188,6 +195,14 @@ public:
     void syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32_t> &materialWords);
     /// Shows (for the hit decode pass only) or hides a SceneManager's decode draws.
     void showSceneDecodes(Ogre::SceneManager *sm, bool on);
+    /// THE SCREEN DECODE'S DRAWS (ATOM S3-DRAW): the same buckets for the words the
+    /// scene's ATOM items wear (the render-queue split), one draw per bucket at
+    /// kScreenDecodeRenderQueue, hidden except while a view's pass that skips the
+    /// Atom queue runs (showScreenDecodes, from that view's listener). Called
+    /// outside the compositor (OgreScene::updateAtomDraw).
+    void syncScreenDecodes(Ogre::SceneManager *sm, const std::vector<uint32_t> &materialWords);
+    void showScreenDecodes(Ogre::SceneManager *sm, bool on);
+    size_t screenDecodeCount(const Ogre::SceneManager *sm) const;
     /// Destroys a SceneManager's decode draws (before the manager dies).
     void forgetSceneManager(Ogre::SceneManager *sm);
     /// Moves whenever a twin dies — a scene's synced set may then name a word a
@@ -241,6 +256,9 @@ public:
     /// custom piece (the JSON twin cannot carry one). Computes a property set (no
     /// shader is compiled); main thread, outside a pass.
     bool bucketKeyOf(const Ogre::HlmsPbsDatablock *pbs, BucketKey &out, std::string &err);
+    /// The datablock's textures are still being baked (its descriptor sets are
+    /// dirty): PBS delays its own hash then, so its bucket is not known yet.
+    static bool isBucketPending(const Ogre::HlmsDatablock *pbs);
 
     Ogre::uint32 fillBuffersForV2(const Ogre::HlmsCache *cache,
                                   const Ogre::QueuedRenderable &queuedRenderable, bool casterPass,
@@ -316,14 +334,21 @@ private:
     uint32_t mTwinSerial = 0u;
     unsigned long long mTwinEpoch = 0ull;
 
-    /// The product's decode draws, per SceneManager (syncSceneDecodes).
+    /// The product's decode draws, per SceneManager: the hit decode's
+    /// (syncSceneDecodes, kHitDecodeRenderQueue) and the screen decode's
+    /// (syncScreenDecodes, kScreenDecodeRenderQueue), one draw per bucket each.
     struct SceneDecodes {
         Ogre::SceneNode *node = nullptr;
-        std::unordered_map<const Ogre::HlmsDatablock *, AtomDecodeRenderable *> draws;
-        bool shown = false;
+        struct Set {
+            std::unordered_map<const Ogre::HlmsDatablock *, AtomDecodeRenderable *> draws;
+            bool shown = false;
+        };
+        Set hit, screen;
     };
     std::unordered_map<Ogre::SceneManager *, SceneDecodes> mSceneDecodes;
-    void destroySceneDraw(Ogre::SceneManager *sm, SceneDecodes &sd, const Ogre::HlmsDatablock *twin);
+    void destroySceneDraw(SceneDecodes &sd, const Ogre::HlmsDatablock *twin);
+    void syncDraws(Ogre::SceneManager *sm, SceneDecodes &sd, SceneDecodes::Set &set,
+                   const std::vector<uint32_t> &words, Ogre::uint8 renderQueue);
 };
 
 /// ONE FULL-SCREEN TRIANGLE drawn through Ogre's own RenderQueue (Ogre's

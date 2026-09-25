@@ -1545,6 +1545,10 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                 break;
             }
         }
+        // THE VISIBILITY BUFFER'S FRAME HALF (ATOM S3-DRAW): the screen decode's
+        // draws follow the words the split's items wear, here, outside the
+        // compositor and after the table the split writes into.
+        for (OgreScene *s : drawn) s->updateAtomDraw();
         {
             const auto rqStart = std::chrono::steady_clock::now();
             updateRayQuery(drawn);

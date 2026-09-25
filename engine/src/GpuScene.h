@@ -169,6 +169,7 @@ enum GpuInstanceFlag : uint32_t {
     kGpuOverlay = 1u << 6,      ///< its render queue is at or above the overlay queues
     kGpuRayTraced = 1u << 7,    ///< the TRACED SET: the conjunction the ray tier used to walk for
     kGpuDragMover = 1u << 8,    ///< MOVER-1: the user has hold of it right now
+    kGpuAtom = 1u << 9,         ///< ATOM S3-DRAW: the id pass draws it, the decode shades it (OgreScene::atomRouteFor)
 };
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the
@@ -388,6 +389,11 @@ public:
     /// while it still holds the mesh; a row nobody writes stays zero, and
     /// `GpuMeshLevel::geomRow` is what says whether it means anything.
     void stageGeomRow(uint32_t rowIndex, const void *row48Bytes);
+    /// The CPU mirror's row (kGeomRowWords words), or null past the table.
+    const uint32_t *geomRowAt(uint32_t rowIndex) const {
+        const size_t at = size_t(rowIndex) * kGeomRowWords;
+        return at + kGeomRowWords <= mGeomMirror.size() ? &mGeomMirror[at] : nullptr;
+    }
     /// Points a level entry at its submesh-0 geometry row. Separate from
     /// `acquireMesh` because a row's index depends on the ENTRY's index, which
     /// acquireMesh is the thing that decides.

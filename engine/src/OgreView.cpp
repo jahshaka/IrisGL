@@ -51,6 +51,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     mChainRayReflect = chainDesc().rayReflect;
     mChainPrepass = chainDesc().prepass();
     mChainHitDecode = chainDesc().hitDecode;
+    mChainAtomDraw = chainDesc().atomDraw;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -132,6 +133,14 @@ ChainDesc OgreView::chainDesc() const {
     // is what the view KEEPS (a float scene target), and the offscreen views
     // are exactly the ones a closed form is measured on.
     d.hdrReadback = mPostFx.hdrReadback;
+    // THE VISIBILITY BUFFER (ATOM S3-DRAW): wherever the scene's split is live the
+    // view carries the id pass and its scene passes skip the Atom queue — in EVERY
+    // view, offscreen included, so a screenshot, a thumbnail and a preview shade the
+    // same surfaces the same way the viewport does (a screenshot is the editor's own
+    // picture). NOT in a stereo view: the id pass renders one eye (no per-eye
+    // view-projection or viewport), so a VR chain keeps drawing the Atom queue
+    // through PBS (AtomDrawStatus::stereoViews counts them).
+    d.atomDraw = mScene && mScene->atomDrawOn() && !mStereo;
     // THE SCREEN-PROBE GATHER, and the reason it is not `&& d.ssr`: the gather
     // needs the PREPASS, not the reflection row. A project whose gather row is on
     // gets the prepass in every view that draws its scene, whatever its SSR row
@@ -177,6 +186,7 @@ ChainDesc OgreView::chainDesc() const {
         d.refractions = mPostFx.refractions;
         // THE HIT DECODE (PHOTON-HIT-SHADE-1): the prepass' own rule, below.
         d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
+        d.atomDraw = d.atomDraw && (d.anyEffect() || targetSamples() <= 1u);
         return d;
     }
     d.hdr            = mPostFx.hdr;
@@ -285,6 +295,11 @@ ChainDesc OgreView::chainDesc() const {
     // hits that no cache can shade are decoded — and NOT tied to which row
     // traces, so toggling the gather where the prepass runs is no new graph.
     d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
+    // THE PASSTHROUGH SHAPE ON A MULTISAMPLED TARGET has no id pass: its scene pass
+    // renders straight into the target's samples, and the id pass's depth (one
+    // sample) cannot be that pass's depth. The post shapes render at 1x into their
+    // own targets and always carry it. AtomDrawStatus::msaaViews counts these views.
+    d.atomDraw = d.atomDraw && (d.anyEffect() || targetSamples() <= 1u);
     return d;
 }
 
@@ -908,6 +923,8 @@ bool OgreView::attachWorkspace() {
         mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
             mScene->sceneManager(), t, mCamera, mWorkspaceDef, mEnabled);
         if (!mWorkspace) return false;
+        // The id pass's recorder is handed a pass, and finds its view here.
+        atomRegisterView(mWorkspace, this);
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->addListener(l);
         ++mWorkspaceGeneration;
@@ -988,6 +1005,7 @@ bool OgreView::detachWorkspace() {
         }
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->removeListener(l);
+        atomUnregisterView(mWorkspace);
         mRoot->getCompositorManager2()->removeWorkspace(mWorkspace);
         mWorkspace = nullptr;
         return true;
@@ -1124,6 +1142,7 @@ void OgreView::detachScene(bool takeBlank) {
         mCamera = nullptr;
         // The camera rode a node of the scene that is going away.
         mCameraNode = 0;
+        if (mScene) mScene->noteAtomPbsView(this, false, false);
         mScene  = nullptr;
         mFramesPresented = 0;
         // AND THE CLEAR-ONLY CHAIN TAKES OVER, in the same call (lane
@@ -1359,6 +1378,7 @@ void OgreView::rebuildWorkspaceDef() {
         mChainRayReflect = chainDesc().rayReflect;
         mChainPrepass = chainDesc().prepass();
         mChainHitDecode = chainDesc().hitDecode;
+        mChainAtomDraw = chainDesc().atomDraw;
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }
@@ -1716,6 +1736,12 @@ void OgreView::destroy() {
     // line is work nobody can see. Whatever this view already had comes down.
     detachScene(false);
     destroyBlankChain();
+    // The id pass's list: device buffers, gone before the device (ATOM S3-DRAW).
+    if (mAtomListener) {
+        removeWorkspaceListener(mAtomListener.get());
+        mAtomListener.reset();
+    }
+    mAtomCull.destroy();
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
         // Same reason as the MSAA recreate: destroying a render window destroys
@@ -1748,6 +1774,11 @@ Ogre::TextureGpu *OgreView::createRtt(Ogre::Root *root, const std::string &name,
 }
 
 Ogre::TextureGpu *OgreView::target() const { return mWindow ? mWindow->getTexture() : mTexture; }
+
+unsigned OgreView::targetSamples() const {
+    const Ogre::TextureGpu *t = target();
+    return t ? unsigned(t->getSampleDescription().getColourSamples()) : 1u;
+}
 
 Ogre::TextureGpu *OgreView::targetTexture() const { return target(); }
 

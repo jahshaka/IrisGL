@@ -2,6 +2,8 @@
 // the teardown helpers. Meshes, materials, sky, GI and particles live in their
 // own translation units.
 #include "EnginePrivate.h"
+
+#include <cstdlib>
 #include "HlmsAtom.h"
 
 #include <cmath>
@@ -19,6 +21,10 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     registerSceneGiBinding(mSceneMgr, &mGiBinding);
+    // THE VISIBILITY BUFFER'S MEASUREMENT SWITCH (never a mode): the whole process
+    // draws through PBS — the cost table's reference arm in the app, and the A/B
+    // that attributes a moved picture to the split.
+    if (std::getenv("JAHSHAKA_ATOM_DRAW_OFF")) mAtomDrawEnabled = false;
 }
 
 OgreScene::~OgreScene() { destroy(); }

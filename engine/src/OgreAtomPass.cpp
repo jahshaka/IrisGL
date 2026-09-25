@@ -5,6 +5,7 @@
 #include <Compositor/OgreCompositorNode.h>
 #include <OgreRenderQueue.h>
 #include <OgreRenderSystem.h>
+#include <OgreRenderPassDescriptor.h>
 #include <OgreSceneManager.h>
 
 #include <limits>
@@ -24,8 +25,26 @@ AtomPassProvider &providerObject() {
 }  // namespace
 
 AtomPass::AtomPass(const AtomPassDef *definition, Ogre::CompositorNode *parentNode,
-                   Ogre::SceneManager *sceneManager)
-    : Ogre::CompositorPass(definition, parentNode), mDef(definition), mSceneManager(sceneManager) {}
+                   Ogre::SceneManager *sceneManager, const Ogre::RenderTargetViewDef *rtvDef)
+    : Ogre::CompositorPass(definition, parentNode), mDef(definition), mSceneManager(sceneManager) {
+    // A target pass that names one gives the pass Ogre's render pass descriptor;
+    // a target-less one (the negative control's) keeps none.
+    if (rtvDef) initialize(rtvDef, true);
+}
+
+bool AtomPass::beginRenderPass() {
+    if (!mRenderPassDesc) return false;
+    Ogre::RenderSystem *rs = mParentNode->getRenderSystem();
+    // Ogre's own barrier analysis of the pass's RTV (CompositorPass::
+    // analyzeBarriers: every colour attachment and the depth to their
+    // render-target layouts), executed here — after the recorder's compute,
+    // which resolved its own buffers through the same solver.
+    analyzeBarriers();
+    executeResourceTransitions();
+    setRenderPassDescToCurrent();
+    rs->executeRenderPassDescriptorDelayedActions();
+    return true;
+}
 
 void AtomPass::execute(const Ogre::Camera *lodCamera) {
     // CompositorPass's own bookkeeping for a pass with a pass count.
@@ -33,6 +52,9 @@ void AtomPass::execute(const Ogre::Camera *lodCamera) {
         if (!mNumPassesLeft) return;
         --mNumPassesLeft;
     }
+    // THE PASS IS TIMED like every other (the frame monitor's per-pass GPU ms read
+    // the pass's profiling id).
+    profilingBegin();
     notifyPassEarlyPreExecuteListeners();
     // CompositorPassCompute::execute's discipline: close Ogre's render-pass encoder
     // before recording anything of ours.
@@ -56,6 +78,7 @@ void AtomPass::execute(const Ogre::Camera *lodCamera) {
         }
     }
     notifyPassPosExecuteListeners();
+    profilingEnd();
 }
 
 AtomPassProvider *AtomPassProvider::install(Ogre::CompositorManager2 *cm) {
@@ -96,11 +119,11 @@ Ogre::CompositorPassDef *AtomPassProvider::addPassDef(Ogre::CompositorPassType,
 
 Ogre::CompositorPass *AtomPassProvider::addPass(const Ogre::CompositorPassDef *definition,
                                                 Ogre::Camera *, Ogre::CompositorNode *parentNode,
-                                                const Ogre::RenderTargetViewDef *,
+                                                const Ogre::RenderTargetViewDef *rtvDef,
                                                 Ogre::SceneManager *sceneManager) {
     const auto *def = dynamic_cast<const AtomPassDef *>(definition);
     if (!def) return nullptr;
-    return OGRE_NEW AtomPass(def, parentNode, sceneManager);
+    return OGRE_NEW AtomPass(def, parentNode, sceneManager, rtvDef);
 }
 
 }  // namespace detail

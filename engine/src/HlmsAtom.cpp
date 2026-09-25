@@ -11,6 +11,7 @@
 #include <CommandBuffer/OgreCbShaderBuffer.h>
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
+#include <OgreConstBufferPool.h>
 #include <OgreHlmsJson.h>
 #include <OgreCamera.h>
 #include <OgreHlmsManager.h>
@@ -302,6 +303,13 @@ bool HlmsAtom::bucketKeyOf(const Ogre::HlmsPbsDatablock *pbs, BucketKey &out, st
         err = "bucketKeyOf: the datablock has no const-buffer slot";
         return false;
     }
+    // TEXTURES STILL BAKING: PBS itself delays the hash then (HlmsPbs::
+    // calculateHashFor answers 0 while the descriptor sets are dirty), so there is
+    // no permutation to key on yet — the caller asks again once they are baked.
+    if (isBucketPending(pbs)) {
+        err = "bucketKeyOf: pending (the datablock's textures are still being baked)";
+        return false;
+    }
     if (!mKeyProbe) {
         if (!mVaoManager) {
             err = "bucketKeyOf: no VaoManager (the headless boot)";
@@ -466,7 +474,7 @@ void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
     }
     // THE LAST MEMBER LEFT: the product's draws of the twin die first, in every
     // scene (Ogre asserts on a datablock with linked renderables), then the twin.
-    for (auto &kv : mSceneDecodes) destroySceneDraw(kv.first, kv.second, twin);
+    for (auto &kv : mSceneDecodes) destroySceneDraw(kv.second, twin);
     mTwinOfKey.erase(t.key);
     mTwins.erase(tt);
     // A decode draw may still carry the twin; the owner detaches its renderables
@@ -491,18 +499,18 @@ void forgetSceneDecodes(Ogre::SceneManager *sm) {
         atom->forgetSceneManager(sm);
 }
 
-void HlmsAtom::destroySceneDraw(Ogre::SceneManager *, SceneDecodes &sd,
-                                const Ogre::HlmsDatablock *twin) {
-    auto it = sd.draws.find(twin);
-    if (it == sd.draws.end()) return;
-    if (sd.node && it->second->getParentSceneNode()) sd.node->detachObject(it->second);
-    delete it->second;
-    sd.draws.erase(it);
+void HlmsAtom::destroySceneDraw(SceneDecodes &sd, const Ogre::HlmsDatablock *twin) {
+    for (SceneDecodes::Set *set : { &sd.hit, &sd.screen }) {
+        auto it = set->draws.find(twin);
+        if (it == set->draws.end()) continue;
+        if (sd.node && it->second->getParentSceneNode()) sd.node->detachObject(it->second);
+        delete it->second;
+        set->draws.erase(it);
+    }
 }
 
-void HlmsAtom::syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32_t> &words) {
-    if (!sm || !mHlmsManager) return;
-    SceneDecodes &sd = mSceneDecodes[sm];
+void HlmsAtom::syncDraws(Ogre::SceneManager *sm, SceneDecodes &sd, SceneDecodes::Set &set,
+                         const std::vector<uint32_t> &words, Ogre::uint8 renderQueue) {
     // WORD -> PBS DATABLOCK, from PBS's own map (a word is {pool | slot}; a dead
     // datablock's word may be a new datablock's now — twinEpoch says so).
     std::unordered_map<uint32_t, Ogre::HlmsPbsDatablock *> byWord;
@@ -524,6 +532,7 @@ void HlmsAtom::syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32
         // pass has. A hit on it is not shaded by the decode (stated, not hidden).
         if (it->second->getTransparencyMode() == Ogre::HlmsPbsDatablock::Refractive) continue;
         std::string err;
+        if (isBucketPending(it->second)) continue;   // asked again once its textures are baked
         Ogre::HlmsPbsDatablock *twin = decodeTwinForBucket(it->second, err);
         if (!twin) {
             // Once per datablock name: a material the decode cannot serve (a
@@ -534,47 +543,82 @@ void HlmsAtom::syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32
             if (!sSaid[key]) {
                 sSaid[key] = true;
                 Ogre::LogManager::getSingleton().logMessage(
-                    "HlmsAtom: no decode twin for '" + key + "' (" + err +
-                    ") - a ray hit on it is not shaded by the hit decode");
+                    "HlmsAtom: no decode twin for '" + key + "' (" + err + ")");
             }
             continue;
         }
         wanted[twin] = true;
-        if (sd.draws.count(twin)) continue;
+        if (set.draws.count(twin)) continue;
         if (!sd.node) sd.node = sm->getRootSceneNode()->createChildSceneNode(Ogre::SCENE_DYNAMIC);
         auto *d = new AtomDecodeRenderable(Ogre::Id::generateNewId<Ogre::MovableObject>(),
                                            &sm->_getEntityMemoryManager(Ogre::SCENE_DYNAMIC), sm,
-                                           kHitDecodeRenderQueue);
+                                           renderQueue);
         d->setDatablock(twin);
         sd.node->attachObject(d);
         // Hidden AFTER the attach (the parity suite's measured order).
-        d->setVisible(sd.shown);
-        sd.draws[twin] = d;
+        d->setVisible(set.shown);
+        set.draws[twin] = d;
     }
     std::vector<const Ogre::HlmsDatablock *> gone;
-    for (const auto &kv : sd.draws)
+    for (const auto &kv : set.draws)
         if (!wanted.count(kv.first)) gone.push_back(kv.first);
-    for (const Ogre::HlmsDatablock *t : gone) destroySceneDraw(sm, sd, t);
+    for (const Ogre::HlmsDatablock *t : gone) {
+        auto it = set.draws.find(t);
+        if (sd.node && it->second->getParentSceneNode()) sd.node->detachObject(it->second);
+        delete it->second;
+        set.draws.erase(it);
+    }
+}
+
+bool HlmsAtom::isBucketPending(const Ogre::HlmsDatablock *pbs) {
+    const auto *user = pbs ? dynamic_cast<const Ogre::ConstBufferPoolUser *>(pbs) : nullptr;
+    return user && (user->getDirtyFlags() &
+                    (Ogre::ConstBufferPool::DirtyTextures | Ogre::ConstBufferPool::DirtySamplers));
+}
+
+void HlmsAtom::syncSceneDecodes(Ogre::SceneManager *sm, const std::vector<uint32_t> &words) {
+    if (!sm || !mHlmsManager) return;
+    SceneDecodes &sd = mSceneDecodes[sm];
+    syncDraws(sm, sd, sd.hit, words, kHitDecodeRenderQueue);
+}
+
+void HlmsAtom::syncScreenDecodes(Ogre::SceneManager *sm, const std::vector<uint32_t> &words) {
+    if (!sm || !mHlmsManager) return;
+    SceneDecodes &sd = mSceneDecodes[sm];
+    syncDraws(sm, sd, sd.screen, words, kScreenDecodeRenderQueue);
 }
 
 void HlmsAtom::showSceneDecodes(Ogre::SceneManager *sm, bool on) {
     auto it = mSceneDecodes.find(sm);
     if (it == mSceneDecodes.end()) return;
-    it->second.shown = on;
-    for (auto &kv : it->second.draws) kv.second->setVisible(on);
+    it->second.hit.shown = on;
+    for (auto &kv : it->second.hit.draws) kv.second->setVisible(on);
+}
+
+void HlmsAtom::showScreenDecodes(Ogre::SceneManager *sm, bool on) {
+    auto it = mSceneDecodes.find(sm);
+    if (it == mSceneDecodes.end()) return;
+    it->second.screen.shown = on;
+    for (auto &kv : it->second.screen.draws) kv.second->setVisible(on);
 }
 
 size_t HlmsAtom::sceneDecodeCount(const Ogre::SceneManager *sm) const {
     auto it = mSceneDecodes.find(const_cast<Ogre::SceneManager *>(sm));
-    return it == mSceneDecodes.end() ? 0u : it->second.draws.size();
+    return it == mSceneDecodes.end() ? 0u : it->second.hit.draws.size();
+}
+
+size_t HlmsAtom::screenDecodeCount(const Ogre::SceneManager *sm) const {
+    auto it = mSceneDecodes.find(const_cast<Ogre::SceneManager *>(sm));
+    return it == mSceneDecodes.end() ? 0u : it->second.screen.draws.size();
 }
 
 void HlmsAtom::forgetSceneManager(Ogre::SceneManager *sm) {
     auto it = mSceneDecodes.find(sm);
     if (it == mSceneDecodes.end()) return;
     std::vector<const Ogre::HlmsDatablock *> all;
-    for (const auto &kv : it->second.draws) all.push_back(kv.first);
-    for (const Ogre::HlmsDatablock *t : all) destroySceneDraw(sm, it->second, t);
+    for (const auto &kv : it->second.hit.draws) all.push_back(kv.first);
+    for (const auto &kv : it->second.screen.draws) all.push_back(kv.first);
+    for (const Ogre::HlmsDatablock *t : all) destroySceneDraw(it->second, t);
     if (it->second.node) sm->destroySceneNode(it->second.node);
     mSceneDecodes.erase(it);
 }
@@ -583,8 +627,9 @@ void HlmsAtom::destroyDecodeTwins() {
     // The product's draws first (they wear the twins), every scene.
     for (auto &kv : mSceneDecodes) {
         std::vector<const Ogre::HlmsDatablock *> all;
-        for (const auto &d : kv.second.draws) all.push_back(d.first);
-        for (const Ogre::HlmsDatablock *t : all) destroySceneDraw(kv.first, kv.second, t);
+        for (const auto &d : kv.second.hit.draws) all.push_back(d.first);
+        for (const auto &d : kv.second.screen.draws) all.push_back(d.first);
+        for (const Ogre::HlmsDatablock *t : all) destroySceneDraw(kv.second, t);
     }
     ++mTwinEpoch;
     for (auto &kv : mTwins) {
@@ -645,7 +690,9 @@ void HlmsAtom::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
     // workspace, the chain's hit decode pass — PHOTON-HIT-SHADE-1's gate: the
     // product holds twins in every ray-traced scene, and PBS's pass prepare is
     // the expensive half of a pass).
-    if (mTwins.empty() || !mSource.ids) return;
+    // ...AND NEVER IN A SHADOW PASS: a decode is never a caster, and the shadow
+    // node's passes run INSIDE the armed pass (the prepass that executes the node).
+    if (mTwins.empty() || !mSource.ids || bCasterPass) return;
     // THE FIRST THING A PASS ASKS OF US READS THE VOXEL AND FIELD TEXTURES — so the
     // relay and THIS PASS'S SCENE'S arms (bindSceneGi) come BEFORE, never after: an
     // arm from the previous pass's scene is the wrong one, and may be deleted.
@@ -679,7 +726,7 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
     // buffer, the lights, the shadow maps), and this host draws only through its
     // decode twins — so while there are none it costs the frame nothing: the cache
     // it returns is never looked up, because no renderable of this type is queued.
-    if (mTwins.empty() || !mSource.ids) {
+    if (mTwins.empty() || !mSource.ids || casterPass) {
         mPassSkipped = true;
         return Ogre::HlmsCache();
     }

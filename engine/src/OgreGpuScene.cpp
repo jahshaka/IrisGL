@@ -590,6 +590,10 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     if ((f & kGpuVisible) && !(f & (kGpuOverlay | kGpuAlphaTested)) &&
         item->getMesh() && item->getParentNode())
         f |= kGpuRayTraced;
+    // THE RENDER-QUEUE SPLIT (ATOM S3-DRAW): the id pass draws it, the decode
+    // shades it (atomRouteFor, OgreAtomDraw.cpp). Here, so the backstop compare
+    // below re-composes a slot whose route moved with nothing else.
+    if (atomDrawOn() && atomRouteFor(n, f) == AtomRoute::Atom) f |= kGpuAtom;
     return f;
 }
 
@@ -654,6 +658,10 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     const Ogre::uint32 flags = gpuFlagsFor(n);
     std::memcpy(&out.boundsMin[3], &meshIndex, sizeof(uint32_t));
     std::memcpy(&out.boundsMax[3], &flags, sizeof(uint32_t));
+    // THE SPLIT'S QUEUE follows the route: an Atom item lives in kAtomRenderQueue
+    // (which a view with an id pass skips), everything else where its material
+    // files it (renderQueueFor).
+    placeAtomQueue(n, (flags & kGpuAtom) != 0u);
     out.ids[0] = uint32_t(n.selfId);
     out.ids[1] = gpuMaterialWordFor(n, flags);
     out.ids[2] = uint32_t(n.lightMask);

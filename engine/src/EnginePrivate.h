@@ -63,6 +63,7 @@
 #include <unordered_set>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorWorkspace.h>
+#include <Compositor/OgreCompositorWorkspaceListener.h>
 #include <Compositor/OgreCompositorNodeDef.h>
 #include <Compositor/OgreCompositorShadowNode.h>
 #include <Compositor/OgreCompositorShadowNodeDef.h>
@@ -740,7 +741,9 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // [225,256) are V1_FAST, 15 is PARTICLE_SYSTEM. Our v2 items can therefore only
 // live in 0-99 and 200-224.
 //   0     sky rectangle          (OgreSky)
+//   2     the visibility buffer's screen decode draws (HlmsAtom, kScreenDecodeRenderQueue)
 //   10    normal items           (Ogre's default)
+//   11    the visibility buffer's items (kAtomRenderQueue, ATOM S3-DRAW)
 //   15    PFX2 billboards
 //   200   refractive items       (reserved; phase 7)
 //   210   on-top overlays        (gizmos, wires, selection outlines)
@@ -751,6 +754,48 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // inside the single range the old one-pass workspace drew.)
 constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
 constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
+
+// THE VISIBILITY BUFFER'S QUEUE (ATOM S3-DRAW; SPECS/atom/D3_S3_DRAW_DESIGN.md §2.4).
+// The render-queue split's ONE switch (OgreScene::atomRouteFor, at compose time)
+// files an item the id pass can draw and the decode can shade here; everything else
+// stays at 10. A view whose chain carries the id pass SKIPS this queue in its
+// prepass and opaque pass (the fork's CompositorPassSceneDef::mSkipRQ) — the id pass
+// draws these items and the decode shades them — while every other pass keeps
+// drawing them through PBS exactly as before: the shadow node, the PCC faces and the
+// cards ([0,200)), the planar mirrors ([0,199)), and any view without an id pass
+// (a stereo chain). 11 because it must sit inside all of those ranges, below 200,
+// and in front of the blended queues it would otherwise overwrite in a PBS pass: the
+// grid at 14 and the particles at 15 draw after it, as after the items at 10.
+constexpr Ogre::uint8 kAtomRenderQueue = 11;
+/// The customId of the id pass (AtomPassProvider's registry, OgreAtomIdPass.cpp).
+constexpr const char *kAtomIdPassId = "atom_id";
+/// The chain's id image (R32G32_UINT, AtomId's words): what the id pass writes and
+/// the screen decode reads (OgreChain.cpp defines it; the listener finds it by name).
+constexpr const char *kAtomIdTexture = "jahAtomIds";
+
+/// OgreAtomIdPass.cpp — THE ID PASS's device half. `atomIdPassSupported`: this
+/// device can run it (buffer device addresses, VK_KHR_draw_indirect_count, the
+/// raw-Vulkan TU compiled in; false on macOS and on the NULL render system).
+/// `registerAtomIdPass` puts its recorder on the provider (at Hlms registration);
+/// `releaseAtomIdPass` destroys its pipeline (before Root).
+bool atomIdPassSupported(Ogre::RenderSystem *rs);
+/// OgreCompute.cpp — a cull request's frustum, eye and level-rule terms from a
+/// camera and its pass's target height (OgreEngine::fillCullView's view half).
+void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullRequest &out);
+void registerAtomIdPass();
+void releaseAtomIdPass();
+/// OgreAtomDraw.cpp — which view a workspace with an id pass belongs to (the
+/// recorder is handed a pass, not a view), and the view's listener that arms the
+/// screen decode for the passes that skip the Atom queue.
+void atomRegisterView(const Ogre::CompositorWorkspace *ws, OgreView *view);
+void atomUnregisterView(const Ogre::CompositorWorkspace *ws);
+OgreView *atomViewOf(const Ogre::CompositorWorkspace *ws);
+/// The listener's own deleter: CompositorWorkspaceListener has no virtual destructor.
+struct AtomDrawListenerDeleter {
+    void operator()(Ogre::CompositorWorkspaceListener *l) const;
+};
+using AtomDrawListenerPtr = std::unique_ptr<Ogre::CompositorWorkspaceListener, AtomDrawListenerDeleter>;
+AtomDrawListenerPtr makeAtomDrawListener(OgreView *view);
 
 // THE DISTORTION QUEUE (POST_LOOKS_SPEC.md §5.3).
 //
@@ -1057,6 +1102,11 @@ struct ChainDesc {
     /// each (28 of record, 8 of radiance) = 42 MB. Not tied to the rows that trace
     /// (a toggle of the gather where the prepass already runs is not a new graph).
     bool  hitDecode = false;
+    /// THE VISIBILITY BUFFER (ATOM S3-DRAW, OgreAtomDraw.cpp / OgreAtomIdPass.cpp):
+    /// the id pass in front of every scene pass of the view, which then LOAD its
+    /// depth and SKIP kAtomRenderQueue (the screen decode shades those items as
+    /// the first draw of the prepass and of the opaque pass).
+    bool  atomDraw = false;
     bool  refractions = false;
     /// THE RADIANCE READBACK (PostFxDesc::hdrReadback, HDR-READBACK-1): the
     /// scene result is kept in a FLOAT target even without `hdr`, and
@@ -3352,6 +3402,7 @@ public:
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const override;
     AtomDrawStatus atomDrawStatus() override;
+    void setAtomDrawEnabled(bool on) override;
     GpuSceneStatus gpuSceneStatus() const override;
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
@@ -5690,9 +5741,50 @@ private:
     /// first reason (AtomDrawStatus names them in order). `Stock` = an item in a
     /// queue the split never touches.
     enum class AtomRoute : uint8_t {
-        Atom, NotPbs, CustomPiece, Blended, AlphaTested, Skinned, MultiSubmesh, NoRow, Stock
+        Atom, NotWorld, NotPbs, CustomPiece, Blended, TwoSided, Pending, AlphaTested, Skinned, NoRow, Stock
     };
     AtomRoute atomRouteFor(const Node &n, Ogre::uint32 flags) const;
+public:
+    /// The split is live in this scene: the GPU scene exists, the id pass can run on
+    /// this device (OgreAtomIdPass.cpp) and the measurement door is open.
+    bool atomDrawOn() const;
+    /// Once per frame after the GPU scene's update (OgreEngine's frame hook): the
+    /// screen decode's draws for the words the atom items wear, and the witness
+    /// that re-routes the items of a material whose permutation moved in place.
+    void updateAtomDraw();
+private:
+    /// Files the node's Item in kAtomRenderQueue (atom) or back where its material
+    /// puts it (renderQueueFor). Called by composeGpuInstance.
+    void placeAtomQueue(const Node &n, bool atom) const;
+    /// THE MEASUREMENT DOOR (the cost table's paired arms in one process): false
+    /// routes every item to PBS and every chain builds without the id pass.
+    bool mAtomDrawEnabled = true;
+    /// A route answered Pending (textures still baking) since the last update.
+    mutable bool mAtomPendingSeen = false;
+    /// The views of this scene whose chains carry no id pass while the split is
+    /// live, by reason (AtomDrawStatus::stereoViews / msaaViews): they draw the
+    /// Atom queue through PBS.
+    std::unordered_set<const void *> mAtomStereoViews, mAtomMsaaViews;
+public:
+    /// OgreView::syncAtomDraw's report, every frame (both false on detach).
+    void noteAtomPbsView(const void *view, bool stereo, bool msaa) {
+        if (stereo) mAtomStereoViews.insert(view); else mAtomStereoViews.erase(view);
+        if (msaa) mAtomMsaaViews.insert(view); else mAtomMsaaViews.erase(view);
+    }
+private:
+    /// updateAtomDraw's memory: the GPU scene writes it last synced at, and one
+    /// item per atom word with its datablock, Hlms hash and texture set.
+    unsigned long long mAtomSyncWrites = ~0ull;
+    unsigned long long mAtomSyncEpoch = ~0ull;
+    std::vector<uint32_t> mAtomWords;
+    struct AtomWitness {
+        uint32_t slot = 0u;
+        uint32_t word = 0u;
+        const Ogre::HlmsDatablock *db = nullptr;
+        Ogre::uint32 hash = 0u;
+        uint64_t texKey = 0u;
+    };
+    std::vector<AtomWitness> mAtomWitness;
     /// A seam that changed what a slot's entry SAYS without moving anything —
     /// a visibility, light-mask, cast-shadow, render-queue or material write.
     /// The movement epoch cannot see those (a furniture visibility write is
@@ -5719,6 +5811,14 @@ public:
     }
     /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
     /// null (or a request with hzbLevels 0) is the frustum-only mode.
+    /// The recording half of runGpuCull: the request uploaded and the jobs
+    /// dispatched, nothing read back — for a consumer inside a frame (the id pass).
+    /// `keepBindings` leaves the jobs bound for a measurement's re-dispatches. The
+    /// answer lands in `cull`'s buffers: the scene's own (runGpuCull) or a view's
+    /// (the id pass — one instance per view, so two views of one scene in a frame
+    /// never share the list one of them is drawing from).
+    bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
+                       std::string &err, bool keepBindings = false);
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
@@ -6551,6 +6651,14 @@ public:
     /// above, and for the same reason: every one of those can change between
     /// frames. Defined in OgreRayQuery.cpp (both halves of it).
     void syncReflectListener();
+    /// THE VISIBILITY BUFFER'S VIEW HALF (ATOM S3-DRAW, OgreAtomDraw.cpp), once a
+    /// frame beside syncReflectListener and for its reason: ChainDesc::atomDraw
+    /// reads the SCENE (a view has none when its chain is first built), so the
+    /// shape is re-checked, and the listener that arms the screen decode follows.
+    void syncAtomDraw();
+    /// The view's own GPU cull (the id pass's list): one per view, so two views of
+    /// one scene in a frame never share the list the other is drawing from.
+    detail::GpuCull &atomCull() { return mAtomCull; }
     /// DROPS the reflection trace's per-view Vulkan state, flushing first.
     /// Called from `detachWorkspace` — the one seam every workspace rebuild goes
     /// through — because the trace's descriptor set holds IMAGE VIEWS OF THIS
@@ -6582,6 +6690,8 @@ private:
     /// tail of resize() and setSampleCount().
     void rebuildRtt(unsigned w, unsigned h);
     Ogre::TextureGpu *target() const;
+    /// The target's colour sample count (1 without a target).
+    unsigned targetSamples() const;
 
     // ---- PiP internals (CAMERAS_SPEC §7.7) --------------------------------
     /// Brings the inset's workspace into line with mPip + pipAllowed(): builds
@@ -6661,6 +6771,11 @@ private:
     /// Defined in OgreRayQuery.cpp, which is why it is held through a pointer
     /// the rest of the engine never dereferences.
     std::unique_ptr<ReflectPassListener> mReflectListener;
+    /// ATOM S3-DRAW: the shape the definition was built with, the listener that
+    /// arms the screen decode, and the view's cull buffers.
+    bool mChainAtomDraw = false;
+    AtomDrawListenerPtr mAtomListener;
+    detail::GpuCull mAtomCull;
     unsigned                   mWorkspaceGeneration = 0;
     /// What `ChainDesc::rayReflect` was when the CURRENT workspace definition
     /// was built. The scene arrives AFTER the chain is first built (the
