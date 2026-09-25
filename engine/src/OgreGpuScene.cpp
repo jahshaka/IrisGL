@@ -1141,9 +1141,14 @@ namespace detail {
 //     holds of a still caster — its transform, its visibility, its caster bit,
 //     its CLASS (a still object promoted to the mover channel by a drag or by
 //     setNodeMovable leaves the captured world; a demoted one joins it, with
-//     no transform write at all), its birth and its death. The old box is the
-//     cache's own record of the node (mCardCasters), the new box the table's;
-//     a birth or a death has one box and names it twice.
+//     no transform write at all) and its death. The old box is the cache's own
+//     record of the node (mCardCasters), the new box the table's; a death has
+//     one box and names it twice. AN ARRIVAL IS NOT ONE (yet): the receivers'
+//     cards captured before a still caster arrived lack its shadow until a
+//     light write recaptures them — recapturing them at the arrival compiles a
+//     capture permutation on a frame a VR wearer is shown (vr.warmup, measured
+//     in the PHOTON-CARDS-4 fix round), so the arrival waits for the capture
+//     pass to be warmed.
 bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
     out = CardMoverFrame();
     if (!mGpuScene.live() || !mRoot || !mRoot->getRenderSystem()) return false;
@@ -1188,7 +1193,7 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
         m.newMax = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
         out.casterMoves.push_back(m);
     };
-    const auto boxOnly = [&](const CardCasterRec &r) {
+    const auto death = [&](const CardCasterRec &r) {
         CardCasterMove m;
         m.node = r.node;
         m.oldMin = m.newMin = r.min;
@@ -1218,15 +1223,12 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
         for (uint32_t i = 0; i < slots; ++i) {
             record(i);
             auto it = was.find(mCardCasters[i].node);
-            if (it != was.end()) {
-                casterChange(prior[it->second], mirror[i]);
-                was.erase(it);
-            } else if (stillCaster(mCardCasters[i].flags)) {
-                boxOnly(mCardCasters[i]);    // A BIRTH: its footprint gains its shadow
-            }
+            if (it == was.end()) continue;   // an arrival: see the header
+            casterChange(prior[it->second], mirror[i]);
+            was.erase(it);
         }
         for (const auto &left : was)         // A DEATH: its footprint loses it
-            if (stillCaster(prior[left.second].flags)) boxOnly(prior[left.second]);
+            if (stillCaster(prior[left.second].flags)) death(prior[left.second]);
     } else if (moved) {
         for (uint32_t slot : mGpuScene.movedSlots()) {
             if (slot >= slots) continue;

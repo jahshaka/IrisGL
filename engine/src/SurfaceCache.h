@@ -267,8 +267,8 @@ struct CardMoverFrame {
     /// a pose change moves the node and counts — a flags change, a birth).
     std::vector<NodeId> moved;
     /// The STILL casters whose captured shadow this frame changed: a transform,
-    /// visibility, caster-bit or class change, an arrival or a deletion (an
-    /// arrival or a deletion names its one box as both old and new).
+    /// visibility, caster-bit or class change, or a deletion (which names its
+    /// one box as both old and new).
     std::vector<CardCasterMove> casterMoves;
 };
 struct CardMoverTrace {

@@ -3614,7 +3614,7 @@ struct CardCacheStatus {
     /// still world's, held by the CAPTURED term, so any change to what the
     /// capture holds of it — a transform write, a show/hide, its caster bit, a
     /// change of class (a drag's promotion to the mover channel and its
-    /// demotion at rest; setNodeMovable), its arrival, its deletion — queues
+    /// demotion at rest; setNodeMovable), its deletion — queues
     /// the cards of its old and new sun-projected footprints for a recapture
     /// (the capture's own budget and order). A queued card keeps its traced
     /// movers' term until the capture lands. Cards queued so, for the life of

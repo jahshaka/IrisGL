@@ -1640,7 +1640,7 @@ void SurfaceCache::traceMovers() {
 
     // 1. THE STILL CASTERS THAT MOVED — a transform, a show/hide, the caster
     //    bit, a class change (a drag's promotion and demotion, setNodeMovable),
-    //    an arrival, a deletion: their old and new footprints' cards go back on
+    //    a deletion: their old and new footprints' cards go back on
     //    the capture queue (the captured term is theirs). A queued card that
     //    carries a traced term KEEPS it until the capture lands (step 3 waits
     //    for `landed`): a demoted mover's shadow passes from the trace to the
