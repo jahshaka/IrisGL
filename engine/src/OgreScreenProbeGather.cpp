@@ -86,8 +86,10 @@ constexpr unsigned kPlaceBindings = 6u;
 /// reflection's jah_rq_card_bindings.glsl at base 9) and the geometric
 /// normal's two (13, 14); then the split voxel store's four arrays by name
 /// (15-18: the coverage and the surface position per half, PHOTON-VOXEL-4); then
-/// THE HIT RECORD's four (19-22, PHOTON-HIT-SHADE-1).
-constexpr unsigned kTraceBindings = 23u;
+/// THE HIT RECORD's four (19-22, PHOTON-HIT-SHADE-1); then level 0's back side and
+/// the voxelizer's normal (23, 24: PHOTON-VOXEL-5).
+constexpr unsigned kTraceBindings = 25u;
+constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kFilterBindings = 3u;
 constexpr unsigned kIntegrateBindings = 10u;
 
@@ -292,13 +294,16 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 20 the hit list's records
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 21 ...its destinations
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 22 ...its buffer
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 23 voxelBack[] (PHOTON-VOXEL-5)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 24 voxelNrm[]
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              kGatherMaxCascades, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u };
+                                             1u, 1u, 1u, 1u,
+                                             kGatherMaxCascades, kGatherMaxCascades };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -1297,8 +1302,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     VkDescriptorImageInfo atlasStore{};
     atlasStore.imageView = v.atlasView;
     atlasStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo volumes[8][kGatherMaxCascades] = {}, sky{};
-    for (int axis = 0; axis < 8; ++axis)
+    VkDescriptorImageInfo volumes[10][kGatherMaxCascades] = {}, sky{};
+    for (int axis = 0; axis < 10; ++axis)
         for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
             const unsigned src =
                 c < in.cascadeCount ? c : (in.cascadeCount ? in.cascadeCount - 1u : 0u);
@@ -1380,6 +1385,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             w[15 + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             w[15 + k].descriptorCount = kGatherMaxCascades;
             w[15 + k].pImageInfo = volumes[4 + k];
+        }
+        for (unsigned k = 0; k < 2u; ++k) {   // PHOTON-VOXEL-5: level 0's back, the normal (23, 24)
+            w[kTraceSideBinding + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[kTraceSideBinding + k].descriptorCount = kGatherMaxCascades;
+            w[kTraceSideBinding + k].pImageInfo = volumes[8 + k];
         }
         // THE HIT RECORD (19-22): the tier's list or its stand-ins — every view
         // real, whatever `on` says (a null view in a set is undefined).
@@ -1488,7 +1498,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < in.cascadeCount; ++c)
-            for (int axis = 0; axis < 8; ++axis)
+            for (int axis = 0; axis < 10; ++axis)
                 if (in.voxel[c][axis])
                     solver.resolveTransition(trans, in.voxel[c][axis],
                                              Ogre::ResourceLayout::Texture,

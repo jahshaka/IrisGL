@@ -5177,7 +5177,6 @@ private:
     /// The VCT light-injection ray-march step scale (the document's value, at
     /// least 1). ONE value: the moving tick's coarse march went with the one
     /// writer (a volume's radiance must not depend on which path injected it).
-    float giRayMarchStepScale() const;
     /// THE REUSE ARM (FIX WAVE B4). Re-runs the EXISTING voxelizer and lighting
     /// over the live scene instead of tearing the arm down and building a new
     /// one, and re-dirties the probes without re-running the placement pass.

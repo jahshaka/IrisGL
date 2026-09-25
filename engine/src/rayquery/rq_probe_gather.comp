@@ -83,6 +83,9 @@ layout( set = 0, binding = 15 ) uniform sampler3D voxelCovP[kMaxCascades];
 layout( set = 0, binding = 16 ) uniform sampler3D voxelCovN[kMaxCascades];
 layout( set = 0, binding = 17 ) uniform sampler3D voxelPosP[kMaxCascades];
 layout( set = 0, binding = 18 ) uniform sampler3D voxelPosN[kMaxCascades];
+// PHOTON-VOXEL-5: level 0's back side and the voxeliser's normal (the side a hit meets).
+layout( set = 0, binding = 23 ) uniform sampler3D voxelBack[kMaxCascades];
+layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
 
 #define JAH_VOX_COUNT       int( p.knobs.w )
 #define JAH_VOX_ANISO       ( p.knobs2.x > 0.5 )

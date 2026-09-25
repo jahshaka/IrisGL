@@ -50,26 +50,18 @@
 //   directional COLOUR opacity, which over-states occlusion at a coarse mip, and
 //   the true (wider) footprint fed to it took the reflected sky from
 //   1.00/0.85/0.85 to 1.00/0.43/0.34 at one/two/four cascades (gi.cascades case
-//   7). The specular walk keeps NO escape estimate at all (SPEC-ESCAPE-CRUD:
-//   nobody read it); reading the occupancy estimate there is its own lane.
+//   7).
 //
-//   THE ESCAPE IS THE OPACITY (PHOTON-VOXEL-3; was 0021, 0084). What the ambient
-//   (the sky) rides is the composite's own opacity
-//   along the cone's axis at every mip. The separate occupancy estimate the
-//   anisotropic stretch used to read (the MIN over the three axis volumes) read
-//   0 for any thin sheet on the directional store; it is deleted, with the
-//   escapeAlpha member and the JAH_MARCH_NO_ESCAPE flag that skipped it.
+//   THE ESCAPE IS THE OPACITY (PHOTON-VOXEL-3). What the ambient (the sky) rides
+//   is the composite's own opacity along the cone's axis at every mip.
 //
-//   THE HOP IS CONTIGUOUS (PHOTON-VOXEL-3; 0033 assign, 0074 single
-//   transmittance). A cone that leaves a cascade - its footprint has grown to the
-//   next cascade's cell, or it has left the box - continues in the next one FROM THE
-//   POINT THE PREVIOUS ONE HAD READ UP TO: the next cascade's first plane is the one
-//   holding that point, weighted by its unvisited part, so no stretch of the ray is read
-//   twice or by nobody. (Fork change 0070 - READER-1's record stands as history -
-//   stepped the continuation one cell OF THE NEW CASCADE along the surface normal: up to
-//   1.875 m unread at the outermost cascade. What 0070 approximated with that constant -
-//   keeping a coarse cascade from reading the surface the cone left - is now THE ORIGIN PLANE
-//   below.) The continuation starts its accumulators at the running totals, so what it
+//   THE HOP IS CONTIGUOUS (PHOTON-VOXEL-3). A cone that leaves a cascade - its
+//   footprint has grown to the next cascade's cell, or it has left the box - continues
+//   in the next one FROM THE POINT THE PREVIOUS ONE HAD READ UP TO: the next cascade's
+//   first plane is the one holding that point, weighted by its unvisited part, so no
+//   stretch of the ray is read twice or by nobody; the surface the cone left is kept
+//   out by THE ORIGIN PLANE below. The continuation starts its accumulators at the
+//   running totals, so what it
 //   returns ALREADY carries the transmittance of every cascade before it: the colour is
 //   ADDED once, alpha is ASSIGNED.
 //

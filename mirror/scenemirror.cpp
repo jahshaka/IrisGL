@@ -7246,7 +7246,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
         gi.updateBudget = qMax(0, mSource->giUpdateBudget);        // FIX WAVE B1
-        gi.rayMarchStepScale = qMax(1.0f, mSource->giRayMarchStepScale);   // B5
         // DDGI (GI_UNIFIED_SPEC.md §4 P1): the same tri-state travel as the
         // probe toggles, plus our own intensity scalar. Both ride the CHANGE
         // debounce below like every other GI field — the intensity included,
@@ -7453,8 +7452,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // would never happen. (Measured the hard way:
             // scripting.e2e.screenshot_grades lost a grade change that arrived
             // in the same frame as a tuning value.)
-            mLastGi.rayMarchStepScale = gi.rayMarchStepScale;
-            // ...AND EVERY OTHER FIELD `giTuningEqual` COMPARES (PHOTON-GATHER-1d):
+            // EVERY FIELD `giTuningEqual` COMPARES (PHOTON-GATHER-1d):
             // the gather's row and the tier's Epic fact, the card cache's row,
             // budget and radius. Left out, one change to any of them kept the
             // comparison unequal for ever and re-pushed the tuning (the field's

@@ -31,6 +31,14 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosP[@value(
 @add( vctTexUnit, hlms_num_vct_cascades )
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosN[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
+// PHOTON-VOXEL-5: the anisotropic tiers' level-0 back side and the voxeliser's normal (the
+// list's last two kinds: VctLighting::backIndex / normalIndex).
+@property( vct_anisotropic )
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeBack[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
+	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeNrm[@value( hlms_num_vct_cascades )];
+	@add( vctTexUnit, hlms_num_vct_cascades )
+@end
 
 struct ParityParams
 {
@@ -60,6 +68,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_SAMPLE_X( c, u, l ) textureLod( sampler3D( vctProbeX[c], vSmp ), u, l )
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) textureLod( sampler3D( vctProbeY[c], vSmp ), u, l )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) textureLod( sampler3D( vctProbeZ[c], vSmp ), u, l )
+	#define JAH_VOX_HAS_BACK 1
+	#define JAH_VOX_SAMPLE_BACK( c, u, l ) textureLod( sampler3D( vctProbeBack[c], vSmp ), u, l )
+	#define JAH_VOX_SAMPLE_NRM( c, u, l ) textureLod( sampler3D( vctProbeNrm[c], vSmp ), u, l )
 @else
 	#define JAH_VOX_HAS_ANISO 0
 	#define JAH_VOX_ANISO false
