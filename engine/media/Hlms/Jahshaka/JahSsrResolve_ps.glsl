@@ -98,7 +98,8 @@
 // sphere with SSR switched off showed a clean probe reflection. Both are
 // statements about whether nine neighbouring rays agree — see the block comment
 // above each. The two others live in the march (the arrival angle at the
-// surface a ray hit, and how marginal the thickness test's crossing was), and
+// surface a ray hit — the ray's TRUST — and how marginal the thickness test's
+// crossing was, an ENVELOPE term since SSR-EDGE-1), and
 // the whole point of all four is that where a screen-space trace cannot be
 // trusted the pixel must fall back to the probe or sky the surface already has,
 // which a confidence below 1 does for free through upstream's lerp.
@@ -130,6 +131,11 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform mat4 reprojectMatrix;
 	uniform vec4 resolveParams;		// x roughness cutoff, y intensity,
 									// z the cutoff's feather, w unused
+	// THE SHOT'S UV MAP (SSR-LETTERBOX-1; the march's note): the ray buffer
+	// holds hit coordinates in the SHOT's uv, and so does the reprojection;
+	// only a texture read converts. x, y = the letterbox rectangle's corner,
+	// z, w = 1 - its size; zeros = no letterbox.
+	uniform vec4 shotInset;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -160,6 +166,12 @@ const float kSsrMaxRadiance = 1024.0;
 /// neighbourhood instead, because a single sample of a value the buffer could
 /// not represent carries no information about the lobe, and the neighbourhood
 /// does.
+// The shot's uv -> the target's (exact in float without a letterbox).
+vec2 jahShotToTex( vec2 uv )
+{
+	return shotInset.xy + uv * ( vec2( 1.0 ) - shotInset.zw );
+}
+
 vec4 ssrHistoryTap( vec2 uv )
 {
 	const vec3 c = texture( vkSampler2D( prevFrame, linearSampler ), uv ).xyz;
@@ -269,8 +281,9 @@ void main()
 	//    the coherence count's is: a single lucky ray surrounded by misses
 	//    agrees with itself, and that degenerate case is the artefact.
 	//  * THE TRUST TEST IS A RAMP, NOT A STEP, and that is a defect this lane
-	//    shipped in its first round. `taps[i].w` is the product of two SMOOTH
-	//    fields (the arrival angle and the thickness margin); admitting a tap
+	//    shipped in its first round. `taps[i].w` is a SMOOTH field (the arrival
+	//    angle; the thickness margin rode it too until SSR-EDGE-1 moved it into
+	//    the envelope, where it scales instead of being counted); admitting a tap
 	//    at exactly 0.5 draws the ISO-LINE of that field into the picture — the
 	//    coverage jumps by one ninth wherever the field crosses the threshold,
 	//    which on the ssr.engine fixture came out as three horizontal contour
@@ -304,7 +317,9 @@ void main()
 		covHit += tentW * smoothstep( kMirrorTrustLo, kMirrorTrustHi, taps[i].w );
 		if( trusted )
 			++nTrust;
-		const vec2 d = abs( taps[i].xy - refUv ) * rayBufferRes.xy;
+		// In ray-buffer texels: the coordinates are the SHOT's, so the shot's
+		// share of the buffer scales them (x 1 without a letterbox).
+		const vec2 d = abs( taps[i].xy - refUv ) * rayBufferRes.xy * ( vec2( 1.0 ) - shotInset.zw );
 		if( max( d.x, d.y ) > kCoordSpreadTexels )
 			continue;
 		if( trusted )
@@ -410,9 +425,10 @@ void main()
 	//
 	// THE RULE, and it is the ONLY rule this shader has below the cutoff: a
 	// VALID hit WINS OUTRIGHT and the probe fills only where there is none. The
-	// confidence decides VALID vs NONE — the arrival angle, the thickness
-	// margin, the sampling verdict and the quorum still reject back-faces,
-	// thin-object leaks, undersampled fans and lone rays — it never SCALES the
+	// confidence decides VALID vs NONE — the arrival angle, the sampling
+	// verdict and the quorum still reject back-faces, undersampled fans and lone
+	// rays (the thickness margin FADES a thin-object leak out through the
+	// envelope since SSR-EDGE-1, where it used to be counted) — it never SCALES the
 	// composite. What remains a fraction is the ENVELOPE (`ray.z`: distance,
 	// screen edge, away-from-the-camera), the roughness ramp and the mask's own
 	// COVERAGE, because none of those is a doubt about the hit: two are where
@@ -535,7 +551,7 @@ void main()
 	// ever lands in it.
 	const float hitDepth =
 		texelFetch( vkSampler2D( depthTexture, pointSampler ),
-					min( ivec2( ray.xy * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) ), 0 ).x;
+					min( ivec2( jahShotToTex( ray.xy ) * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) ), 0 ).x;
 	const vec4	was		 = reprojectMatrix * vec4( ray.xy, hitDepth, 1.0 );
 	if( was.w <= 0.0 )
 	{
@@ -551,7 +567,10 @@ void main()
 		fragColour = vec4( 0.0 );
 		return;
 	}
-	const vec4 centreTap = ssrHistoryTap( prevUv );
+	// The history is a texture of the whole target: read it where the shot's
+	// point lands in it.
+	const vec2 prevTex = jahShotToTex( prevUv );
+	const vec4 centreTap = ssrHistoryTap( prevTex );
 	vec3	   reflected  = centreTap.xyz;
 
 	// THE FIREFLY CLAMP, the second line of defence and the only one that also
@@ -578,10 +597,10 @@ void main()
 		// Each tap goes through ssrHistoryTap on its OWN, not after the
 		// average: one +Inf neighbour must not drag the other three to zero and
 		// collapse the ceiling this pixel is measured against.
-		const vec3	nbr = ( ssrHistoryTap( prevUv + vec2( -t.x, -t.y ) ).xyz +
-							ssrHistoryTap( prevUv + vec2( t.x, -t.y ) ).xyz +
-							ssrHistoryTap( prevUv + vec2( -t.x, t.y ) ).xyz +
-							ssrHistoryTap( prevUv + vec2( t.x, t.y ) ).xyz ) *
+		const vec3	nbr = ( ssrHistoryTap( prevTex + vec2( -t.x, -t.y ) ).xyz +
+							ssrHistoryTap( prevTex + vec2( t.x, -t.y ) ).xyz +
+							ssrHistoryTap( prevTex + vec2( -t.x, t.y ) ).xyz +
+							ssrHistoryTap( prevTex + vec2( t.x, t.y ) ).xyz ) *
 						  0.25;
 		// THE UNREPRESENTABLE SAMPLE TAKES THE NEIGHBOURHOOD, not a clamped
 		// version of itself (see ssrHistoryTap): the lobe stand-in the firefly

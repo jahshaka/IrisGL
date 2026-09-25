@@ -40,7 +40,33 @@
 // Every direction handed to this file is in WORLD axes. Ogre samples cubemaps
 // LEFT-HANDED (the sky/IBL adoption's fact): the flip is written once, here.
 
-#ifndef JAH_ENVIRONMENT_GLSL
+// THE GGX LOBE'S DOMINANT DIRECTION (ENV-RAY-MATCH, PHOTON P3) — where a
+// PREFILTERED lookup of the environment should point for a surface of normal
+// `n`, mirror direction `r` and GGX alpha `alpha` (perceptual roughness
+// squared). The split-sum chain is convolved with N = V = R (its own
+// assumption), so reading it along R centres the lobe on the mirror
+// direction; the true lobe — what the ray tier's VNDF samples ARE — leans
+// toward the normal (the off-specular peak) and is clipped by the horizon.
+// This is Frostbite's getSpecularDominantDir ("Moving Frostbite to PBR",
+// Lagarde and de Rousiers 2014, listing 22): A FIT TO THE LOBE'S CENTROID, not
+// the physics — measured on gi.env_ray_match it halves the environment
+// lookup's distance from the rays' answer (the horizon clip and the dropped
+// G2/G1 remain). Space-free: n and r in any one frame. It needs no binding,
+// so it is defined for every includer (HlmsPbs's pixel shader inserts this
+// piece for it with or without the environment's bindings below).
+#ifndef JAH_ENV_DOMINANT_GLSL
+#define JAH_ENV_DOMINANT_GLSL
+vec3 jahEnvDominantDir( vec3 n, vec3 r, float alpha )
+{
+	const float smoothness = clamp( 1.0 - alpha, 0.0, 1.0 );
+	const float f = smoothness * ( sqrt( smoothness ) + alpha );
+	return normalize( mix( n, r, f ) );
+}
+#endif
+
+// THE REST NEEDS THE CALLER'S BINDINGS (the macros above), so an includer that
+// has none — HlmsPbs's pixel shader without VCT — gets the helper only.
+#if !defined( JAH_ENVIRONMENT_GLSL ) && defined( JAH_ENV_GAIN )
 #define JAH_ENVIRONMENT_GLSL
 
 /// The nine-band evaluation in the engine's WORLD basis, with a scale per BAND.
@@ -144,4 +170,4 @@ vec3 jahEnvIrradiance( vec3 nWorld )
 	return max( jahEnvShEval( nWorld, 1.0, 1.0 ), vec3( 0.0 ) );
 }
 
-#endif   // JAH_ENVIRONMENT_GLSL
+#endif   // JAH_ENVIRONMENT_GLSL (and the bindings)

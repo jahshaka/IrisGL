@@ -1,6 +1,7 @@
 // Materials (PBR, unlit, outline), textures and the mesh/material attachment
 // verbs that bind them onto a node.
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"
 #include <cmath>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -557,6 +558,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
         applyPbr(db, p, mRefractionsActive);
         rec.paramsPushed = true;
         if (Ogre::TextureGpu *rt = reflectionTexFor(rec)) db->setTexture(Ogre::PBSM_REFLECTION, rt);
+        markIblMipmapsDirty();
         mMaterials[++mNextMaterialId] = rec;
         return mNextMaterialId;
     } JAH_CATCH(mError, 0);
@@ -764,8 +766,10 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         }
 
         Ogre::Hlms *oldHlms = hlmsFor(rec);
-        if (oldHlms->getDatablock(Ogre::IdString(rec.datablockName)))
+        if (Ogre::HlmsDatablock *old = oldHlms->getDatablock(Ogre::IdString(rec.datablockName))) {
+            forgetDecodeTwinOf(old);   // its decode twin dies first (HlmsAtom.h)
             oldHlms->destroyDatablock(Ogre::IdString(rec.datablockName));
+        }
 
         // A FRESH NAME, not the old one reused. Datablock names are IdStrings
         // in a per-Hlms registry and also key the shader cache's per-datablock
@@ -804,6 +808,7 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
             // an unconditional Metallic.
             applyPbr(db, rec.params, mRefractionsActive);
             if (Ogre::TextureGpu *rt = reflectionTexFor(rec)) db->setTexture(Ogre::PBSM_REFLECTION, rt);
+            markIblMipmapsDirty();
         }
         // The maps the host already pushed are the host's state, not the
         // datablock's: re-bind them or a switch would silently strip every
@@ -998,8 +1003,10 @@ bool OgreScene::destroyMaterial(MaterialId id) {
         Ogre::Hlms *hlms = hlmsFor(it->second);
         Ogre::HlmsDatablock *dying = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
         noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (patch 0081)
+        forgetDecodeTwinOf(dying);    // its decode twin dies first (HlmsAtom.h)
         if (dying) hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
         mMaterials.erase(it);
+        markIblMipmapsDirty();   // its env cube may have been the scene's longest chain
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1292,11 +1299,16 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 // moves to Image2::uploadTo — which copies the very levels
                 // generateMipmaps just produced, bilinear filter and all. This
                 // is a change of transport, not of pixels.
+                //
+                // A ONE-SLICE Type2DArray, not a Type2D: HlmsPbs and HlmsUnlit declare
+                // every material map `texture2DArray`, and a 2D view in that slot is
+                // VUID-vkCmdDrawIndexed-viewType-07752 on every draw (ATOM-S3-PARITY).
+                // The file-loaded path's pool slices already are arrays.
                 Ogre::TextureGpu *tex = tm->createTexture(processUniqueName("gray"),
                                                           Ogre::GpuPageOutStrategy::Discard,
                                                           Ogre::TextureFlags::ManualTexture,
-                                                          Ogre::TextureTypes::Type2D);
-                tex->setResolution(w, h);
+                                                          Ogre::TextureTypes::Type2DArray);
+                tex->setResolution(w, h, 1u);
                 tex->setNumMipmaps(rgba.getNumMipmaps());
                 tex->setPixelFormat(rgba.getPixelFormat());
                 // Immediate residency and NO notifyDataIsReady(): _transitionTo
@@ -1453,9 +1465,14 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         // (pbr_texture_scale_tiles_uvs; file-loaded/batched textures are fine) —
         // fixing it means teaching the cubemap path to copy from pool slices,
         // then batching these like loadTexture does.
+        //
+        // A ONE-SLICE Type2DArray, not a Type2D: HlmsPbs and HlmsUnlit declare every
+        // material map `texture2DArray`, and a 2D view in that slot is
+        // VUID-vkCmdDrawIndexed-viewType-07752 on every draw (ATOM-S3-PARITY). Slice 0
+        // is the image; updateTexture rewrites the same slice.
         Ogre::TextureGpu *tex = tm->createTexture(name, Ogre::GpuPageOutStrategy::Discard,
-                                                  Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2D);
-        tex->setResolution(w, h);
+                                                  Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2DArray);
+        tex->setResolution(w, h, 1u);
         const Ogre::uint8 numMips =
             mipmaps ? Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h) : 1u;
         tex->setNumMipmaps(std::max<Ogre::uint8>(1u, numMips));
@@ -1890,6 +1907,7 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
                 else if (rec.everBound)
                     db->setTexture(Ogre::PBSM_REFLECTION, nullptr);
                 rec.lastBoundTextures[s] = rec.boundTextures[s];
+                markIblMipmapsDirty();
             }
             continue;
         }
@@ -1918,15 +1936,14 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
 }
 
 // OVERRIDE-ELSE-GLOBAL-ELSE-NULL, all three gated by PCC (ADDENDUM A-5).
-// The successor to reflectionTexForDatablocks() as the ONE place that answers
-// "what cubemap does this material's env-probe slot hold" — every binding site
-// goes through it, so a PCC-binding change cannot leave an override behind.
+// The ONE place that answers "what cubemap does this material's env-probe slot
+// hold" — every binding site goes through it, so a PCC-binding change cannot
+// leave an override behind.
 Ogre::TextureGpu *OgreScene::reflectionTexFor(const MaterialRec &rec) const {
-    // ANY grid anywhere, not this scene's (lane SKY-FALLBACK-1): the slot holds
-    // a cube ARRAY for every scene's pass while a PCC is bound to the HlmsPbs
-    // singleton, and a manual cube then generates a shader that cannot compile.
-    // The long argument is on reflectionTexForDatablocks (OgreSky.cpp).
-    if (anyProbeGridBound()) return nullptr;
+    // THIS scene's grid: the slot holds a cube ARRAY in this scene's passes while
+    // they bind a PCC, and a manual cube then generates a shader that cannot
+    // compile. The long argument is OgreSky.cpp's THE ENV-PROBE SLOT HAS ONE OCCUPANT.
+    if (probeGridBound()) return nullptr;
     const TextureId override_ = rec.boundTextures[size_t(PbrTextureSlot::Reflection)];
     if (override_) {
         auto it = mTextures.find(override_);
@@ -2015,6 +2032,7 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         if (slot == PbrTextureSlot::Reflection) {
             // The record is already updated above; ask the one function.
             db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(mit->second));
+            markIblMipmapsDirty();
             return true;
         }
         Ogre::TextureGpu *tex = nullptr;

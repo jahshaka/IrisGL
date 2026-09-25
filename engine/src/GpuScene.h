@@ -102,7 +102,40 @@ struct GpuInstance {
     /// converts it and re-composes the slot. Written by ONE place,
     /// `OgreScene::gpuMaterialWordFor`, `gpuFlagsFor`'s sibling.
     uint32_t ids[4] = {};
-    uint32_t pad[4] = {};
+    /// THE RASTER WORDS (ATOM-S3-PARITY) — what the visibility buffer's decode
+    /// (HlmsAtom, Hlms/Atom) needs of an instance beyond the geometry rows:
+    ///   x = THE PBS MATERIAL WORD, {pool : 16 | slot : 16} of sub-item 0's datablock
+    ///       in HlmsPbs's const-buffer pool (`HlmsAtom::materialWordOf`) — the index
+    ///       the decode's LoadMaterial reads `materialArray` with, exactly as the
+    ///       rasterised draw of the same item would. 0xFFFFFFFF for an item whose
+    ///       datablock is not HlmsPbs's (unlit furniture), which the decode skips.
+    ///   y = the byte offset of the float4 VES_TANGENT in the vertex, 0xFFFFFFFF
+    ///       when the mesh has none. It rides HERE because the geometry row is
+    ///       Ogre's format (VctVoxelizer::GeometryRow) and has no tangent lane at
+    ///       this pin; a fork commit giving the row one moves it there.
+    ///   z = THE SKIN ROW (PHOTON-SKIN-1, RY-R4): the PER-INSTANCE ROW OVERRIDE of a
+    ///       rigged item — the geometry row (level 0, submesh 0) of THIS ITEM's skin
+    ///       cache, the second vertex buffer the `Jahshaka/SkinCache` job writes the
+    ///       posed vertices into (SkinCache.h). A consumer that reads rows asks this
+    ///       lane first: kNoGeomRow means "no override, the mesh's own rows are the
+    ///       geometry" (every unrigged item, and a rigged one whose cache does not
+    ///       exist yet); anything else names a row block of `GpuScene::kGeomRowsPerMesh`
+    ///       rows laid out exactly like a mesh entry's (level l, submesh s at
+    ///       `row + l * kSubmeshesPerMesh + s`), whose vertex address is the cache's
+    ///       and whose index addresses are the mesh's own levels. A field beside the
+    ///       two above, NOT `ids.z` (the light mask) and not the mesh index: the
+    ///       mesh index keeps naming the MESH (its bounds, its levels, its BLAS key),
+    ///       and only the geometry an item presents changes.
+    ///   w = 0.
+    /// Written by ONE place, `OgreScene::composeGpuInstance`, beside the ids — at
+    /// attach and at a material change (both mark the slot), and when the ray tier
+    /// creates or drops a skin cache (`GpuScene::setSkinRow`, which marks it too).
+    ///
+    /// The mirrors of this struct (JahCullTest_cs, JahVoxelGather_cs) name the lane
+    /// `raster` too; neither reads it.
+    /// Defaults to "no material, no tangent, no override": a CLEARED slot
+    /// (onSlotFreed) names no material the decode could shade with.
+    uint32_t raster[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0u };
 };
 static_assert(sizeof(GpuInstance) == 160, "the GPU instance table's stride is a contract");
 
@@ -132,11 +165,11 @@ enum GpuInstanceFlag : uint32_t {
     kGpuMover = 1u << 2,        ///< kMovableBit: the document says it moves
     kGpuGiVisible = 1u << 3,    ///< kGiGeometryBit: it bounces light
     kGpuAlphaTested = 1u << 4,  ///< a sub-item's datablock has an alpha test (no any-hit shader)
-    kGpuSkinned = 1u << 5,      ///< it has a skeleton instance (its buffers hold the bind pose)
+    kGpuSkinned = 1u << 5,      ///< it has a skeleton instance (its MESH's buffers hold the bind pose; its skin cache the pose)
     kGpuOverlay = 1u << 6,      ///< its render queue is at or above the overlay queues
     kGpuRayTraced = 1u << 7,    ///< the TRACED SET: the conjunction the ray tier used to walk for
     kGpuDragMover = 1u << 8,    ///< MOVER-1: the user has hold of it right now
-    kGpuGiExcluded = 1u << 9,   ///< excluded from the GI bounds fit
+    kGpuAtom = 1u << 9,         ///< ATOM S3-DRAW: the id pass draws it, the decode shades it (OgreScene::atomRouteFor)
 };
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the
@@ -258,6 +291,13 @@ public:
     /// next update owes them `prevWorld = world` even if nothing moved in it, so
     /// a still frame after a gesture is not free (and the one after it is).
     bool hasOpenMovers() const { return !mMovedLastFrame.empty(); }
+    /// THE FRAME'S MOVED SET, read-only (PHOTON-CARDS-4: the surface cache's
+    /// mover-shadow trigger): the slots the frame's update staged — a transform
+    /// write, a flags change, a birth — valid only while `movedThisFrame()` says
+    /// the last closing update ran in the VaoManager frame `frame`; any other
+    /// frame moved nothing.
+    const std::vector<uint32_t> &movedSlots() const { return mMovedLastFrame; }
+    bool movedThisFrame(uint32_t frame) const { return mLastCloseFrame == frame; }
 
     const GpuInstance &entry(uint32_t slot) const { return mMirror[slot]; }
     /// The mirror as a raw pointer. The dirty scan reads it once per item, and
@@ -296,6 +336,32 @@ public:
     uint32_t meshIndex(const Ogre::Mesh *mesh) const;
     static constexpr uint32_t kNoMesh = 0xFFFFFFFFu;
 
+    // --- THE ROW OVERRIDE (PHOTON-SKIN-1) -----------------------------------
+    /// A BLOCK OF GEOMETRY ROWS THAT BELONGS TO NO MESH: one mesh-table entry's
+    /// worth (kGeomRowsPerMesh rows, 3 KB) taken out of the same table, so its row
+    /// indices are the same arithmetic (`geomRowIndex(block, level, submesh)`) and
+    /// it grows, flushes and is re-created with the table like every other row.
+    /// The entry itself describes nothing (no mesh, zero counts, no levels, no
+    /// partitions — `ensurePartitions` and `recordBound` skip it as they skip a
+    /// free entry), and no instance names it as its mesh. Returns the ENTRY index
+    /// (kNoMesh when the table is not live); the block's level-0/submesh-0 row is
+    /// `geomRowIndex(entry, 0, 0)`.
+    uint32_t acquireRowBlock();
+    /// Zeroes the block's rows (a recycled block must never read as the dead
+    /// cache's addresses) and hands the entry back.
+    void releaseRowBlock(uint32_t entry);
+    /// THE OVERRIDE ITSELF, by NODE: the skin row `composeGpuInstance` writes into
+    /// `GpuInstance::raster[2]` for this node (kNoGeomRow = none). By node and not
+    /// by slot because a slot is renumbered by every removal (the swap-remove) and
+    /// a node is not; the caller marks the node's slot dirty so the next scan
+    /// re-composes the entry with it.
+    void setSkinRow(uint32_t node, uint32_t row);
+    uint32_t skinRowOf(uint32_t node) const {
+        auto it = mSkinRows.find(node);
+        return it == mSkinRows.end() ? kNoGeomRow : it->second;
+    }
+    size_t skinRowCount() const { return mSkinRows.size(); }
+
     // --- what the readers bind --------------------------------------------
     // The three buffers ARE the facility: `instanceBuffer` is what the test and
     // tool readback downloads and what Atom P3's cull will bind as a UAV, and
@@ -305,6 +371,12 @@ public:
     Ogre::UavBufferPacked *instanceBuffer() const { return mInstanceBuffer; }
     Ogre::UavBufferPacked *meshBuffer() const { return mMeshBuffer; }
     Ogre::UavBufferPacked *levelBuffer() const { return mLevelBuffer; }
+    /// The CPU mirror's (mesh entry, level) row — what the device's level table
+    /// holds after the next update.
+    const GpuMeshLevel &levelAt(uint32_t meshIndex, uint32_t level) const {
+        return mLevelMirror[size_t(meshIndex) * kLevelsPerMesh + level];
+    }
+    uint32_t levelMirrorEntries() const { return uint32_t(mLevelMirror.size()); }
     /// THE GEOMETRY ROW TABLE (ATOM P4b): the vertex and index device addresses and
     /// the vertex layout of every (mesh, level, submesh) the scene holds, written
     /// ONCE at attach. The voxeliser binds it for every dispatch
@@ -317,6 +389,11 @@ public:
     /// while it still holds the mesh; a row nobody writes stays zero, and
     /// `GpuMeshLevel::geomRow` is what says whether it means anything.
     void stageGeomRow(uint32_t rowIndex, const void *row48Bytes);
+    /// The CPU mirror's row (kGeomRowWords words), or null past the table.
+    const uint32_t *geomRowAt(uint32_t rowIndex) const {
+        const size_t at = size_t(rowIndex) * kGeomRowWords;
+        return at + kGeomRowWords <= mGeomMirror.size() ? &mGeomMirror[at] : nullptr;
+    }
     /// Points a level entry at its submesh-0 geometry row. Separate from
     /// `acquireMesh` because a row's index depends on the ENTRY's index, which
     /// acquireMesh is the thing that decides.
@@ -398,7 +475,11 @@ private:
     struct MeshEntry {
         Ogre::MeshPtr mesh;
         uint32_t refs = 0;
+        /// A ROW BLOCK (acquireRowBlock): no mesh, no references, rows only.
+        bool rowBlock = false;
     };
+    /// The row override per NODE (setSkinRow).
+    std::unordered_map<uint32_t, uint32_t> mSkinRows;
     std::vector<MeshEntry> mMeshEntries;
     std::vector<uint32_t> mFreeMeshSlots;
     std::unordered_map<const Ogre::Mesh *, uint32_t> mMeshIndex;

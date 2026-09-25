@@ -19,13 +19,19 @@
 // TLAS build or a compute job recorded last frame keeps reading valid memory.
 #include "EnginePrivate.h"
 #include "GpuScene.h"
+#include "HlmsAtom.h"
+#include "SurfaceCache.h"
 
 #include "Vct/OgreVctMaterial.h"
 #include "Vct/OgreVctVoxelizer.h"
 #include <Vao/OgreTexBufferPacked.h>
 
 #include <OgreLogManager.h>
+#include <OgreRoot.h>
 #include <OgreMesh2.h>
+#include <OgreSubItem.h>
+#include <OgreSubMesh2.h>
+#include <Vao/OgreVertexArrayObject.h>
 #include <Vao/OgreAsyncTicket.h>
 #include <Vao/OgreStagingBuffer.h>
 #include <Vao/OgreUavBufferPacked.h>
@@ -35,6 +41,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <unordered_map>
 
 namespace jahshaka {
 namespace engine {
@@ -100,6 +107,7 @@ void GpuScene::destroy() {
     mMeshEntries.clear();
     mFreeMeshSlots.clear();
     mMeshIndex.clear();
+    mSkinRows.clear();
     mMovedLastFrame.clear();
     mCopySet.clear();
     mSlotCapacity = mSlotCount = mMeshCapacity = 0u;
@@ -490,6 +498,49 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
     mLevelDirty = true;
 }
 
+// ---------------------------------------------------------------------------
+// THE ROW OVERRIDE (PHOTON-SKIN-1). A row block is a mesh-table entry that holds
+// rows and nothing else — see GpuScene.h for why it is taken from the same table.
+uint32_t GpuScene::acquireRowBlock() {
+    if (!live()) return kNoMesh;
+    uint32_t index;
+    if (!mFreeMeshSlots.empty()) {
+        index = mFreeMeshSlots.back();
+        mFreeMeshSlots.pop_back();
+    } else {
+        index = uint32_t(mMeshEntries.size());
+        mMeshEntries.push_back(MeshEntry());
+        if (index + 1u > mMeshCapacity) growMeshTable(index + 1u);
+    }
+    mMeshEntries[index] = MeshEntry();
+    mMeshEntries[index].rowBlock = true;
+    // The entry DESCRIBES NOTHING: zero counts, and every level "no geometry", so
+    // a reader that walked the mesh table by index would find an empty mesh.
+    mMeshMirror[index] = GpuMesh();
+    for (uint32_t l = 0; l < kLevelsPerMesh; ++l)
+        mLevelMirror[size_t(index) * kLevelsPerMesh + l] = GpuMeshLevel();
+    mMeshDirty = true;
+    mLevelDirty = true;
+    return index;
+}
+
+void GpuScene::releaseRowBlock(uint32_t entry) {
+    if (entry >= mMeshEntries.size() || !mMeshEntries[entry].rowBlock) return;
+    mMeshEntries[entry] = MeshEntry();
+    const size_t at = size_t(geomRowIndex(entry, 0u, 0u)) * kGeomRowWords;
+    const size_t words = size_t(kGeomRowsPerMesh) * kGeomRowWords;
+    if (at + words <= mGeomMirror.size()) {
+        std::fill(mGeomMirror.begin() + ptrdiff_t(at), mGeomMirror.begin() + ptrdiff_t(at + words), 0u);
+        mGeomDirty = true;
+    }
+    mFreeMeshSlots.push_back(entry);
+}
+
+void GpuScene::setSkinRow(uint32_t node, uint32_t row) {
+    if (row == kNoGeomRow) mSkinRows.erase(node);
+    else mSkinRows[node] = row;
+}
+
 const Ogre::MeshPtr &GpuScene::meshAt(uint32_t index) const {
     static const Ogre::MeshPtr kNone;
     return index < mMeshEntries.size() ? mMeshEntries[index].mesh : kNone;
@@ -509,10 +560,12 @@ static_assert(sizeof(Ogre::Real) == sizeof(float),
 /// The TRACED SET is the conjunction `gatherRayInstances` used to walk for, and
 /// each exclusion is load-bearing for the same reasons it always was: editor
 /// furniture and the backdrop carry their own channel instead of kVisibleBit;
-/// the overlay queues are unlit and depth-test-off; a SKINNED item's buffers
-/// hold the bind pose, so tracing it would reflect a T-pose (audit C-5); an
-/// ALPHA-TESTED datablock has no any-hit shader to cut it out, so a leaf would
-/// intersect as a solid quad (audit C-16).
+/// the overlay queues are unlit and depth-test-off; an ALPHA-TESTED datablock
+/// has no any-hit shader to cut it out, so a leaf would intersect as a solid
+/// quad (audit C-16). A SKINNED item is IN since PHOTON-SKIN-1: the ray tier
+/// traces it through its own structure over its skin cache (its posed
+/// vertices), and leaves it out on a frame the cache is not ready — never at the
+/// mesh's bind pose (audit C-5's T-pose, which is what the exclusion was for).
 Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     Ogre::Item *item = n.item;
     if (!item) return 0u;
@@ -532,12 +585,15 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
         }
     }
     if (n.dragMover && n.shown) f |= kGpuDragMover;
-    if (n.giBoundsExcluded) f |= kGpuGiExcluded;
     // ...and it must be IN the graph: an Item with no parent node draws nothing
     // and has no world transform to trace (the old walk skipped it outright).
-    if ((f & kGpuVisible) && !(f & (kGpuOverlay | kGpuSkinned | kGpuAlphaTested)) &&
+    if ((f & kGpuVisible) && !(f & (kGpuOverlay | kGpuAlphaTested)) &&
         item->getMesh() && item->getParentNode())
         f |= kGpuRayTraced;
+    // THE RENDER-QUEUE SPLIT (ATOM S3-DRAW): the id pass draws it, the decode
+    // shades it (atomRouteFor, OgreAtomDraw.cpp). Here, so the backstop compare
+    // below re-composes a slot whose route moved with nothing else.
+    if (atomDrawOn() && atomRouteFor(n, f) == AtomRoute::Atom) f |= kGpuAtom;
     return f;
 }
 
@@ -602,6 +658,10 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     const Ogre::uint32 flags = gpuFlagsFor(n);
     std::memcpy(&out.boundsMin[3], &meshIndex, sizeof(uint32_t));
     std::memcpy(&out.boundsMax[3], &flags, sizeof(uint32_t));
+    // THE SPLIT'S QUEUE follows the route: an Atom item lives in kAtomRenderQueue
+    // (which a view with an id pass skips), everything else where its material
+    // files it (renderQueueFor).
+    placeAtomQueue(n, (flags & kGpuAtom) != 0u);
     out.ids[0] = uint32_t(n.selfId);
     out.ids[1] = gpuMaterialWordFor(n, flags);
     out.ids[2] = uint32_t(n.lightMask);
@@ -610,6 +670,30 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     // a slot re-staged for any other reason keeps the level it was given.
     if (n.itemSlot != size_t(-1) && n.itemSlot < mRayLevel.size())
         out.ids[3] = mRayLevel[n.itemSlot];
+    // THE RASTER WORDS (see GpuInstance::raster): sub-item 0's PBS material word, and
+    // the tangent's place in the vertex of the mesh's level-0 VAO — submesh 0, like
+    // every other geometry fact this table carries.
+    out.raster[0] = detail::HlmsAtom::kNoMaterialWord;
+    out.raster[1] = 0xFFFFFFFFu;
+    // THE SKIN ROW (PHOTON-SKIN-1): the item's own posed geometry, when the ray
+    // tier has made it one (GpuInstance::raster's note). Read from the node's
+    // record in the table, so a slot re-staged for any other reason keeps it.
+    out.raster[2] = mGpuScene.skinRowOf(uint32_t(n.selfId));
+    if (item->getNumSubItems()) {
+        const Ogre::SubItem *sub = item->getSubItem(0);
+        out.raster[0] = detail::HlmsAtom::materialWordOf(sub->getDatablock());
+        const Ogre::VertexArrayObjectArray &vaos = sub->getSubMesh()->mVao[Ogre::VpNormal];
+        if (!vaos.empty() && vaos[0]) {
+            size_t posSource = 0u, posOffset = 0u, tanSource = 0u, tanOffset = 0u;
+            const Ogre::VertexElement2 *pos =
+                vaos[0]->findBySemantic(Ogre::VES_POSITION, posSource, posOffset);
+            const Ogre::VertexElement2 *tan =
+                vaos[0]->findBySemantic(Ogre::VES_TANGENT, tanSource, tanOffset);
+            if (pos && tan && tan->mType == Ogre::VET_FLOAT4 && tanSource == posSource &&
+                (tanOffset & 3u) == 0u)
+                out.raster[1] = uint32_t(tanOffset);
+        }
+    }
 }
 
 /// A SEAM THAT CHANGED WHAT THE TABLE SAYS WITHOUT MOVING ANYTHING. The
@@ -988,6 +1072,9 @@ void toPublic(const detail::GpuInstance &in, GpuSceneEntry &out) {
     out.nodeId = in.ids[0];
     out.lightMask = in.ids[2];
     out.rayLevel = in.ids[3];
+    out.pbsMaterialWord = in.raster[0];
+    out.tangentOffset = in.raster[1];
+    out.skinRow = in.raster[2];
 }
 }  // namespace
 
@@ -1040,3 +1127,151 @@ bool OgreScene::gpuSceneDeviceEntries(unsigned first, unsigned count,
 }  // namespace detail
 }  // namespace engine
 }  // namespace jahshaka
+
+namespace jahshaka {
+namespace engine {
+namespace detail {
+
+// ---------------------------------------------------------------------------
+// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the scene's in-frame
+// answers, read from the GPU scene's table and its moved set (read-only), after
+// the frame's update (OgreShadow.cpp runs ensureGpuScene for every drawn scene
+// before any render target; the surface cache asks from inside its workspace).
+//
+//   * THE MOVERS: every slot the TLAS writes with kRayMaskMoverCaster (a traced,
+//     shadow-casting mover), with its world AABB — walked only on a frame whose
+//     moved set is not empty or whose slot count changed (or a moved slot was
+//     renumbered), and kept otherwise: a still frame costs a compare.
+//   * THE MOVED: the movers in the frame's moved set (a transform write, a
+//     flags change, a birth — a walk without a pose change counts).
+//   * THE STILL CASTERS THAT MOVED: every change to what the CAPTURED term
+//     holds of a still caster — its transform, its visibility, its caster bit,
+//     its CLASS (a still object promoted to the mover channel by a drag or by
+//     setNodeMovable leaves the captured world; a demoted one joins it, with
+//     no transform write at all) and its death. The old box is the cache's own
+//     record of the node (mCardCasters), the new box the table's; a death has
+//     one box and names it twice. AN ARRIVAL IS NOT ONE (yet): the receivers'
+//     cards captured before a still caster arrived lack its shadow until a
+//     light write recaptures them — recapturing them at the arrival compiles a
+//     capture permutation on a frame a VR wearer is shown (vr.warmup, measured
+//     in the PHOTON-CARDS-4 fix round), so the arrival waits for the capture
+//     pass to be warmed.
+bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
+    out = CardMoverFrame();
+    if (!mGpuScene.live() || !mRoot || !mRoot->getRenderSystem()) return false;
+    const uint32_t frame = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
+    const detail::GpuInstance *mirror = mGpuScene.mirrorData();
+    const uint32_t slots = mGpuScene.slotCount();
+    const bool moved = mGpuScene.movedThisFrame(frame) && !mGpuScene.movedSlots().empty();
+    const auto flagsOf = [](const detail::GpuInstance &e) {
+        Ogre::uint32 f;
+        std::memcpy(&f, &e.boundsMax[3], sizeof(f));
+        return f;
+    };
+    const auto moverCaster = [](Ogre::uint32 f) {
+        return (f & kGpuRayTraced) && (f & kGpuMover) && (f & kGpuCaster);
+    };
+    const auto stillCaster = [](Ogre::uint32 f) {
+        return (f & kGpuVisible) && (f & kGpuCaster) && !(f & kGpuMover);
+    };
+    const auto record = [&](uint32_t i) {
+        const detail::GpuInstance &e = mirror[i];
+        CardCasterRec &r = mCardCasters[i];
+        r.node = NodeId(e.ids[0]);
+        std::memcpy(r.world, e.world, sizeof(r.world));
+        r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
+        r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
+        r.flags = flagsOf(e);
+    };
+    // WHAT THE CAPTURED TERM LOSES OR GAINS between the record and the table:
+    // a still caster before or after, and its world, visibility, caster bit or
+    // class changed.
+    const auto casterChange = [&](const CardCasterRec &r, const detail::GpuInstance &e) {
+        const Ogre::uint32 f = flagsOf(e);
+        if (!stillCaster(f) && !stillCaster(r.flags)) return;
+        const bool turned = std::memcmp(r.world, e.world, sizeof(r.world)) != 0;
+        const bool flagsMoved = ((r.flags ^ f) & (kGpuVisible | kGpuCaster | kGpuMover)) != 0u;
+        if (!turned && !flagsMoved) return;
+        CardCasterMove m;
+        m.node = r.node;
+        m.oldMin = r.min;
+        m.oldMax = r.max;
+        m.newMin = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
+        m.newMax = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
+        out.casterMoves.push_back(m);
+    };
+    const auto death = [&](const CardCasterRec &r) {
+        CardCasterMove m;
+        m.node = r.node;
+        m.oldMin = m.newMin = r.min;
+        m.oldMax = m.newMax = r.max;
+        out.casterMoves.push_back(m);
+    };
+    // THE WALK: the slot count changed (an item arrived or left), or a moved
+    // slot holds another node than its record (the swap-remove renumbered the
+    // tail into a freed slot while the count stayed — an arrival in the same
+    // frame). Slots are not identities, so the records are compared BY NODE.
+    bool walk = slots != mCardMoverSlots;
+    if (moved && !walk)
+        for (uint32_t slot : mGpuScene.movedSlots())
+            if (slot < slots && (slot >= mCardCasters.size() ||
+                                 mCardCasters[slot].node != NodeId(mirror[slot].ids[0]))) {
+                walk = true;
+                break;
+            }
+    if (walk) {
+        std::unordered_map<NodeId, size_t> was;
+        was.reserve(mCardCasters.size());
+        for (size_t i = 0; i < mCardCasters.size(); ++i)
+            if (mCardCasters[i].node) was[mCardCasters[i].node] = i;
+        std::vector<CardCasterRec> prior;
+        prior.swap(mCardCasters);
+        mCardCasters.assign(slots, CardCasterRec());
+        for (uint32_t i = 0; i < slots; ++i) {
+            record(i);
+            auto it = was.find(mCardCasters[i].node);
+            if (it == was.end()) continue;   // an arrival: see the header
+            casterChange(prior[it->second], mirror[i]);
+            was.erase(it);
+        }
+        for (const auto &left : was)         // A DEATH: its footprint loses it
+            if (stillCaster(prior[left.second].flags)) death(prior[left.second]);
+    } else if (moved) {
+        for (uint32_t slot : mGpuScene.movedSlots()) {
+            if (slot >= slots) continue;
+            casterChange(mCardCasters[slot], mirror[slot]);
+            record(slot);
+        }
+    }
+    if (moved || walk) {
+        mCardMovers.clear();
+        for (uint32_t i = 0; i < slots; ++i) {
+            const detail::GpuInstance &e = mirror[i];
+            if (!moverCaster(flagsOf(e))) continue;
+            CardMoverRec r;
+            r.node = NodeId(e.ids[0]);
+            r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
+            r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
+            mCardMovers.push_back(r);
+        }
+        mCardMoverSlots = slots;
+        out.moversChanged = true;
+    }
+    out.movers.reserve(mCardMovers.size());
+    for (const CardMoverRec &r : mCardMovers) {
+        CardMoverBox b;
+        b.node = r.node;
+        b.min = r.min;
+        b.max = r.max;
+        out.movers.push_back(b);
+    }
+    if (moved)
+        for (uint32_t slot : mGpuScene.movedSlots())
+            if (slot < slots && moverCaster(flagsOf(mirror[slot])))
+                out.moved.push_back(NodeId(mirror[slot].ids[0]));
+    return true;
+}
+
+}   // namespace detail
+}   // namespace engine
+}   // namespace jahshaka

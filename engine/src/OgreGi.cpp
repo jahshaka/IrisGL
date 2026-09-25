@@ -11,6 +11,7 @@
 // every one of them is HISTORY, not a second live design. The `gi*` identifiers
 // keep their names by the rename's own mapping rule.
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"       // bindSceneGi's declaration (every PBS-family host calls it)
 #include "SurfaceCache.h"   // SURFACE-CACHE phase 2: giStatus copies the Component's counters
 #include <Vct/OgreVctMaterial.h>
 
@@ -27,11 +28,109 @@
 
 namespace jahshaka { namespace engine { namespace detail {
 
-// HlmsPbs is a process-wide singleton: setVctLighting/setParallaxCorrectedCubemap
-// bind globally. Exactly one scene owns that binding at a time (last enabler
-// wins); teardown only unbinds when the dying scene is the owner, so a takeover
-// never yanks the new owner's binding.
-static OgreScene *sVctBindingOwner = nullptr;
+// ---------------------------------------------------------------------------
+// THE PER-PASS GI BINDING (PHOTON-SCENE-SWITCH-1; the rule and its hook are in
+// EnginePrivate.h, SceneGiBinding). The registry is a handful of entries (one per
+// live scene), read twice per scene pass per PBS-family host: a linear walk.
+// Render thread only, like every other per-SceneManager pass state
+// (FogHlmsListener's maps).
+// ---------------------------------------------------------------------------
+namespace {
+std::vector<std::pair<const Ogre::SceneManager *, const SceneGiBinding *>> sGiBindings;
+}   // namespace
+
+void registerSceneGiBinding(const Ogre::SceneManager *sm, const SceneGiBinding *binding) {
+    for (auto &e : sGiBindings)
+        if (e.first == sm) { e.second = binding; return; }
+    sGiBindings.emplace_back(sm, binding);
+}
+
+void unregisterSceneGiBinding(const Ogre::SceneManager *sm) {
+    for (auto it = sGiBindings.begin(); it != sGiBindings.end(); ++it)
+        if (it->first == sm) { sGiBindings.erase(it); return; }
+}
+
+const SceneGiBinding *sceneGiBindingOf(const Ogre::SceneManager *sm) {
+    for (const auto &e : sGiBindings)
+        if (e.first == sm) return e.second;
+    return nullptr;
+}
+
+void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm) {
+    static const SceneGiBinding kNone;
+    const SceneGiBinding *b = sceneGiBindingOf(sm);
+    if (!b) b = &kNone;
+    // Compared first: a pass of the scene the previous pass drew (every pass of
+    // one view, the shadow node's casters in between) costs three compares.
+    if (host->getVctLighting() != b->vct) host->setVctLighting(b->vct);
+    if (host->getIrradianceField() != b->ifd) host->setIrradianceField(b->ifd);
+    if (host->getParallaxCorrectedCubemap() != b->pcc ||
+        (b->pcc && (host->getPccVctMinDistance() != b->pccMinDist ||
+                    host->getPccVctMaxDistance() != b->pccMaxDist)))
+        host->setParallaxCorrectedCubemap(b->pcc, b->pccMinDist, b->pccMaxDist);
+#ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
+    if (host->getPlanarReflections() != b->planar) host->setPlanarReflections(b->planar);
+#endif
+    // resetIblSpecMipmap(n > 0) also turns HlmsPbs's automatic grow-only mode off:
+    // the count is the scene's, set here and nowhere else.
+    if (host->getMaxSpecIblMipmap() != b->iblMipmaps)
+        host->resetIblSpecMipmap(Ogre::uint8(b->iblMipmaps));
+}
+
+void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
+                  const Ogre::IrradianceField *ifd,
+                  const Ogre::ParallaxCorrectedCubemapBase *pcc,
+                  const Ogre::PlanarReflections *planar) {
+    if (!manager) return;
+    for (int t = Ogre::HLMS_LOW_LEVEL + 1; t < Ogre::HLMS_MAX; ++t) {
+        auto *host = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HlmsTypes(t)));
+        if (!host) continue;
+        if (vct && host->getVctLighting() == vct) host->setVctLighting(nullptr);
+        if (ifd && host->getIrradianceField() == ifd) host->setIrradianceField(nullptr);
+        if (pcc && host->getParallaxCorrectedCubemap() == pcc) host->setParallaxCorrectedCubemap(nullptr);
+#ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
+        if (planar && host->getPlanarReflections() == planar) host->setPlanarReflections(nullptr);
+#else
+        (void)planar;
+#endif
+    }
+}
+
+void ScenePbs::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
+                               Ogre::ResourceTransitionArray &resourceTransitions,
+                               Ogre::Camera *renderingCamera, const bool bCasterPass) {
+    bindSceneGi(this, renderingCamera ? renderingCamera->getSceneManager() : nullptr);
+    Ogre::HlmsPbs::analyzeBarriers(barrierSolver, resourceTransitions, renderingCamera, bCasterPass);
+}
+
+Ogre::HlmsCache ScenePbs::preparePassHash(const Ogre::CompositorShadowNode *shadowNode,
+                                          bool casterPass, bool dualParaboloid,
+                                          Ogre::SceneManager *sceneManager) {
+    bindSceneGi(this, sceneManager);
+    return Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
+}
+
+void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) {
+#ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
+    // THE RENDERABLE'S OWN SCENE: an Item's SubItem -> its Item -> its
+    // SceneManager -> that scene's record. Anything else (a v1 renderable, an
+    // overlay quad) belongs to no scene's mirrors: no planar pointer at all.
+    const Ogre::SceneManager *sm = nullptr;
+    if (auto *sub = dynamic_cast<const Ogre::SubItem *>(renderable))
+        if (const Ogre::Item *item = sub->getParent()) sm = item->_getManager();
+    const SceneGiBinding *b = sm ? sceneGiBindingOf(sm) : nullptr;
+    Ogre::PlanarReflections *const passPlanar = getPlanarReflections();
+    Ogre::PlanarReflections *const own = b ? b->planar : nullptr;
+    if (own != passPlanar) setPlanarReflections(own);
+    Ogre::HlmsPbs::calculateHashForPreCreate(renderable, inOutPieces);
+    // ...and the pass's pointer back: a hash can be asked for between two
+    // passes, and the next pass of the SAME scene must not re-derive its
+    // barriers from somebody else's mirrors.
+    if (own != passPlanar) setPlanarReflections(passPlanar);
+#else
+    Ogre::HlmsPbs::calculateHashForPreCreate(renderable, inOutPieces);
+#endif
+}
 
 // THE DIAGNOSTIC LATCH, READ ONCE (the lead's fix-round item 5). This file asked
 // `getenv("JAHSHAKA_GI_DEBUG")` at sixteen sites, several of them per cascade
@@ -247,10 +346,6 @@ static bool giDebug() {
     return on;
 }
 
-static Ogre::HlmsPbs *hlmsPbs(Ogre::Root *root) {
-    return static_cast<Ogre::HlmsPbs *>(root->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-}
-
 /// GiToggle::Auto defers to the quality dial; Off/On pin it either way. Exists
 /// so a suite can measure HDR probes and shadowed probes ONE AT A TIME instead
 /// of measuring "GiQuality::High", which changes three things at once.
@@ -332,20 +427,41 @@ static const Ogre::uint32 kIfdTotalProbes = 8192u;
 // measurement attached, not a default to drift.
 static const Ogre::uint8 kIfdDepthRes  = 12u;
 static const Ogre::uint8 kIfdIrradRes  = 6u;
-// TWO RAYS PER DEPTH TEXEL, MEASURED (PHOTON-WRITER-1 fix round, IFD-RAYS). The
-// probe rays cross the voxels at aperture zero (a cone over-occludes grazing
-// directions), and a ray does not prefilter: over the static direction set (the
-// field fills its directions once, never rotated) a small emitter falls between
-// rays or on one, deterministically. Measured on a one-voxel-thick emissive wall
-// 0.8 m square at four probe spacings, three lateral offsets, against its
-// analytic irradiance (spikes/photon-writer-1/ifd-rays-tan0.txt): the probe's
-// reading over analytic spread 1.84-3.55 at 1 ray, 2.65-3.24 at 2, the same at 4,
-// 2.18-2.25 at 16 (a constant factor of the fixture's units; frame to frame the
-// bytes are identical at every count). 2 beats 1 far past the floor and 4 buys
-// nothing over 2; the step frame's follow costs 2.25 ms against 1.19 at 1 ray
-// (gi.field_scroll, one process each, unlocked clocks). The earlier "flat"
-// reading was taken with the cone, which prefilters - not a witness for rays.
-static const Ogre::uint16 kIfdRaysPerPixel = 2u;
+// THE FIELD'S ESTIMATOR (PHOTON-FIELD-ROTATE-1). Ogre's field settings keep ONE ray
+// per depth texel (their default: 144 rays a probe at depthRes 12) in a spherical-
+// Fibonacci set rotated per integration, every texel integrating every ray (DDGI's
+// estimator), and a probe's value is the MEAN of its integrations until it holds
+// kIfdTargetSamples. (Upstream's per-texel rays over-read a one-voxel emissive wall
+// 1.7x even at 256 rays a texel - the octahedral texels are not equal solid angle -
+// and any FIXED set aliases on top: the Fibonacci set unrotated reads the same wall
+// at 1.52x, integration after integration; the old kIfdRaysPerPixel = 2 paid twice
+// the rays for another aliasing. gi.field_thin_wall, gi.field_alias.)
+//
+// THE TARGET, DERIVED FROM THE STORE THE RAYS READ: the estimator need not be more
+// precise than what it integrates. The field's hardest case - a source of about one
+// ray's solid angle, gi.field_thin_wall's one-voxel wall - is uncertain THROUGH THE
+// STORE by the trilinear half-cell at its envelope's edge: e = 1 - ((n-1)/n)^2 =
+// 0.1597 of its irradiance at n = 12 cells (a MODEL of the edge: a symmetric blur of a
+// box keeps its integral; the compositing at the edge is what breaks that). K is the
+// smallest count whose two-sigma error sits inside it, K = ceil((2 sigma / e)^2).
+// THE CONVENTION, stated honestly: sigma is the MEASURED worst of one sample on that
+// fixture - 0.389 on the GPU (gi.field_alias, which re-derives it: 24) - and 25 is
+// that derivation plus one sample of margin. At the simulated 0.40 the same formula
+// gives 26 (25.1 rounded up), so 25 covers sigma <= 0.399. An ordinary lit room's
+// probes read 2 % (median) per sample and are converged long before K; they pay the
+// K passes anyway (a per-probe variance stop is the recorded saving, F7). The cost
+// is time, not frames: K whole-grid passes at the update budget after an event
+// (about 8 K = 200 frames at budget 1), a pass skipping every probe already at K.
+// Every event's own pass - a build's included - is the first sample everywhere
+// (unbiased, every probe valid); a PAUSED field (budget 0) targets one sample.
+static const Ogre::uint32 kIfdTargetSamples = 25u;
+// A LIGHT CHANGE REPLACES (keep 0): the history integrated the OLD light, so the
+// first integration after a change is the probe's value - the latency of the old
+// re-converge (one pass) - and the refinements then average the new light. What the
+// field shows in between is one integration's noise: 2 % median on the leak room
+// (gi.field_alias item 5); keeping k samples would divide that by sqrt(k + 1) at the
+// price of showing the old light at weight k / (k + j) for j more integrations.
+static const Ogre::uint32 kIfdKeepOnChange  = 0u;
 
 // HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
 // 1. The P0 spike's cost table is the argument for converging FAST rather than
@@ -357,6 +473,7 @@ static const Ogre::uint16 kIfdRaysPerPixel = 2u;
 // showing stale bounce for two seconds. Higher budgets scale it linearly, and
 // the batch is rounded UP to a power of two so it always divides the field.
 static const Ogre::uint32 kIfdConvergeFrames = 8u;
+
 
 
 /// How far this probe's fitted SHAPE reaches past its own AREA (its share of
@@ -374,6 +491,59 @@ static float probeShapeCellRatio(const Ogre::CubemapProbe *p) {
         worst = std::max(worst, (smx[ax] - c[ax]) / half);
     }
     return worst;
+}
+
+// ---------------------------------------------------------------------------
+// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; C3 design §2.2)
+// ---------------------------------------------------------------------------
+// The tier's facts say its reflections are traced, and this scene traces on this
+// machine: the SAME two terms the screen-probe gather is resolved from
+// (`probeGatherWanted`), so a tier traces its reflections exactly where it
+// traces its diffuse. There the three sources are the answer — the screen march,
+// the rays (a hit lit from its card, the decode or the voxels) and the
+// anisotropic cone with the sky as its escape — and a grid of photographs under
+// them is 839 MB of texture and 713-799 ms of the open (Grand Showroom 2 at
+// Epic, measured — GiQualityFacts::rayReflections has the breakdown). A scene that turns its rays OFF is not a ray tier: it keeps
+// the grid, exactly as Low and Medium do.
+//
+// THE ONE GATE. Every grid path asks `probeGridWanted` and nothing else: the
+// placement (rebuildVct and the staged machine), and the cheap paths' belts
+// that refuse a hybrid with no grid. With no grid everything downstream is
+// already a no-op on `mPcc` — `staleProbeGrid` marks nothing, the budget scans
+// nothing, `ensureCubemapProbeSlots` is never reached (the Forward+ probe slots
+// stay at the scene's default), the binding's `pcc` stays null, so
+// `reflectionTexFor` hands the env slot to the authored map or the sky cube and
+// the IBL mip count follows that cube.
+bool OgreScene::probeGridByRays() const {
+    if (!giQualityFacts(mGi.quality,
+                        mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
+                        mGi.epicTier)
+             .rayReflections)
+        return false;
+    return rayTracingResolved();
+}
+
+bool OgreScene::probeGridWanted() const {
+    return mGi.mode == GiMode::VctPccHybrid && !probeGridByRays();
+}
+
+// THE DOWN HALF, in one place: the grid a ray tier does not build is taken down
+// (the binding lets go, the datablocks take their sky cube back) and the probe
+// record goes with it, so giStatus reads the ray tier and not a drop verdict. A
+// staged build parked on a probe stage walks on to the field. Called by the Ray
+// Tracing row's write (setRayTracing) and by the frame's flush for every other
+// way the rule can turn — the device answering `rayQueryAvailable` only once a
+// view exists, the process latch, the tier's facts.
+void OgreScene::dropProbeGridByRays() {
+    JAH_TRY {
+        destroyProbeGrid();
+        mProbesDropped = 0;
+        mProbeSlots.clear();
+        mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+        if (mGiBuildStage == GiBuildStage::ProbeScout || mGiBuildStage == GiBuildStage::ProbeFit ||
+            mGiBuildStage == GiBuildStage::ProbeFinish)
+            mGiBuildStage = GiBuildStage::Field;
+    } JAH_CATCH(mError, );
 }
 
 bool OgreScene::setGlobalIllumination(const GiParams &p) {
@@ -405,18 +575,11 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
-// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). Constants, no
-// rebuild: `ddgiIntensity` is a shader constant the field's
-// listener reads (pushIfdState), `rayMarchStepScale` is read by the NEXT light
-// injection (giRayMarchStepScale), and none of the three is geometry. So this
-// writes them and, when a field is bound, re-pushes its constants — nothing is
-// torn down, nothing re-voxelises, and no probe is staled (a probe capture does
-// not contain the field's diffuse).
+// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). No rebuild: the per-frame
+// rows below are read by the frame that follows, and none of them is geometry —
+// nothing is torn down, nothing re-voxelises, and no probe is staled.
 bool OgreScene::setGiTuning(const GiParams &p) {
     JAH_TRY {
-        const bool marchMoved = p.rayMarchStepScale != mGi.rayMarchStepScale;
-        mGi.ddgiIntensity     = p.ddgiIntensity;
-        mGi.rayMarchStepScale = p.rayMarchStepScale;
         // THE CARD CACHE'S TWO PER-FRAME KNOBS. Written and nothing else: the
         // residency pass reads them at the head of the next frame, so a smaller
         // radius gives pages back on that frame and a bigger budget captures
@@ -436,7 +599,10 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         // Component allocates on the first frame it is on and gives everything
         // back on the first frame it is off. Not one voxel is re-injected.
         mGi.gather               = p.gather;
-        if (mIfd) pushIfdState(mIfdProbeCounts);
+        // ...and the tier's Epic fact (the gather's density — the tier table's
+        // `epic` column): read by the ray tier each frame, re-sizing the
+        // gather's targets and nothing else.
+        mGi.epicTier             = p.epicTier;
         // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
         // moving it changes nothing at all until something else happens to
         // re-inject, and this file's own header calls a silently ignored slider
@@ -444,7 +610,6 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         // that are already there: no teardown, no re-voxelisation, 0.1-0.3 ms per
         // cascade (S1 §3). The other two ARE constants and are already live in
         // the line above.
-        if (marchMoved && mVctLighting) refreshGiLighting(false);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -550,7 +715,7 @@ bool OgreScene::refreshVctFast() {
     // from-scratch rebuild on every refresh because it has none would make the
     // cheapest scene in the editor pay the most. `mProbesDropped` is what
     // separates that from a grid that failed to build at all.
-    if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbesDropped) return false;
+    if (probeGridWanted() && !mPcc && !mProbesDropped) return false;
 
     Ogre::Vector3 mn, mx;
     if (!computeGiBounds(mn, mx)) return false;
@@ -566,7 +731,7 @@ bool OgreScene::refreshVctFast() {
             if (std::fabs(dc[ax]) > tol || std::fabs(dh[ax]) > tol) return false;
         return true;
     };
-    if (mGi.mode == GiMode::VctPccHybrid) {
+    if (probeGridWanted()) {
         // THE PROBE GRID IS A FUNCTION OF THE LIT VOLUME (R5-ROOM): the scout
         // is spread through it, the space it measures is inside it, and the
         // grid is placed in that. So THIS is the box to compare — not the probe
@@ -627,12 +792,8 @@ bool OgreScene::refreshVctFast() {
         voxelWork.close();
         mGiLitVolume = aabb;      // materially the box the grid was placed from
         noteGiAutoVolume(aabb, !giBoundsExplicit());
-        // NOT re-bound to HlmsPbs, deliberately. `rebuildVct` takes the
-        // process-wide binding because a BUILD is a statement about which
-        // scene's GI the shader should sample; a refresh is not. If another
-        // scene took the binding over in the meantime, a background scene
-        // re-solving its own geometry must not snatch it back — and giStatus's
-        // vctBound/pccBound go on reporting the truth either way.
+        // Nothing to re-bind: the arm's objects are the same ones this scene's
+        // passes already bind (SceneGiBinding).
         // The probe CONTENTS are stale (the scene moved), the SHAPES are not.
         // STALE the grid — never dirty it (ENGINE_CACHE_POLICY_SPEC P6). Raising
         // mDirty on every probe here is what made a re-solve capture the WHOLE
@@ -724,13 +885,28 @@ void OgreScene::noteSettleInputs() {
 }
 
 // THE DEBT, raised in one place: a rebuild, an environment change and a tick
-// the one-writer latch refused all owe the same thing — the chain's at-rest
-// answer over its current inputs.
-void OgreScene::oweChainSettle() {
+// the one-writer latch refused all owe the chain's at-rest answer over its
+// current inputs — FROM THE OUTERMOST STALE CASCADE INWARD (PHOTON-GATHER-1b
+// item 6, WRITER-1's audit F5). Each cascade reads only the cascades outside it,
+// so a stale cascade k stales k-1 .. 0 and nothing outside it: a refused at-rest
+// tick (the frame's rebuild injected k over the outer cascades' OLD light before
+// the tick re-injected them) owes k .. 0, and a rebuild of k (its injection read
+// the outer cascades as they stand) owes k-1 .. 0. The whole chain is owed only
+// when the whole chain is stale (a light, the environment). Injecting the outer
+// cascades again would change no byte of them — a cascade-2 rebuild at rest
+// costs 3 injections, not 4 (gi.settle_partial, which also proves the partial
+// settle leaves the whole sweep's bytes).
+void OgreScene::oweChainSettle(size_t top) {
     const size_t n = mVctCascades.size();
     if (n < 2u) return;
+    top = std::min(top, n - 1u);
+    // AN UNFINISHED DEBT MERGES by restarting from the outermost of the two: the
+    // new sweep covers every cascade either debt named, in the tick's order.
+    if (mGiSettleStepsOwed > 0 && mGiSettleCascades == n) top = std::max(top, mGiSettleTop);
     mGiSettleCascades  = n;
-    mGiSettleStepsOwed = kAtRestSweeps * int(n);
+    mGiSettleTop       = top;
+    mGiSettleStepsOwed = kAtRestSweeps * int(top + 1u);
+    mGiSettlePayableFrames = 0;          // a restarted debt restarts its timing
     noteSettleInputs();
 }
 
@@ -744,7 +920,7 @@ void OgreScene::oweChainSettle() {
 // whole `refreshGiLighting(false)`).
 void OgreScene::payChainSettleStep() {
     const size_t n = mVctCascades.size();
-    if (mGiSettleStepsOwed <= 0 || n < 2u || n != mGiSettleCascades) {
+    if (mGiSettleStepsOwed <= 0 || n < 2u || n != mGiSettleCascades || mGiSettleTop >= n) {
         mGiSettleStepsOwed = 0;                 // the chain changed shape under it
         return;
     }
@@ -752,24 +928,12 @@ void OgreScene::payChainSettleStep() {
         monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "vct.light.settle",
                                  mRoot->getRenderSystem());
         mSceneMgr->updateSceneGraph();
-        // A LIGHT THAT MOVED WHILE THE SETTLE WAS RUNNING RESTARTS IT, and this
-        // is not caution: an injection reads the lights' DERIVED poses at the
-        // moment it runs, so a settle whose first steps saw one lamp pose and
-        // its last steps another leaves the chain a MIXTURE of the two and is
-        // not the fixed point of either — and `noteChainSettled` would then
-        // record that mixture as clean and let the next refresh skip the
-        // injection that would have fixed it. Measured:
-        // scripting.e2e.movable_lamp_rest read 3/255, 10/10, the moment the
-        // settle was allowed to absorb a light write (the lamp's push landed
-        // between two steps, the settle finished over it, and the suite's
-        // reference refresh was then skipped as clean).
-        //
-        // A lamp that keeps moving therefore keeps restarting this, which is
-        // right: nothing finishes while the scene is still changing, and the
-        // mirror's own at-rest tick — which fires one frame after the motion
-        // ends and clears the debt outright — is what finishes a light gesture.
-        if (mGiSettleSerial != mGiLightWriteSerial) oweChainSettle();
-        const int total = kAtRestSweeps * int(n);
+        // (A LIGHT THAT MOVED WHILE THE SETTLE WAS OWED restarted it before this
+        // step was chosen — the scheduler's check, which runs on every payable
+        // frame, idle ones included: see updateCascades.)
+        // THE SWEEP IS OVER THE STALE CASCADES ONLY: top, top-1, ..., 0.
+        const size_t span = mGiSettleTop + 1u;
+        const int total = kAtRestSweeps * int(span);
         unsigned injections = 0;
         // A cascade with no lighting is skipped exactly as the tick skips it,
         // and without spending the frame: the loop walks on to the next step.
@@ -778,7 +942,7 @@ void OgreScene::payChainSettleStep() {
         // frame, unspent, so the sequence stays the tick's own.
         while (mGiSettleStepsOwed > 0 && injections == 0u) {
             const int step = total - mGiSettleStepsOwed;
-            const size_t i = n - 1u - size_t(step % int(n));
+            const size_t i = mGiSettleTop - size_t(step % int(span));
             if (mVctCascades[i].lighting && injectedThisFrame(i)) break;
             --mGiSettleStepsOwed;
             if (!mVctCascades[i].lighting) continue;
@@ -846,9 +1010,12 @@ bool OgreScene::injectCascade(size_t i) {
         return false;
     }
     applyCascadeEnvironment(lighting);
-    lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                     giRayMarchStepScale());
+    lighting->update(mSceneMgr, cascadeBounces(i), true /*autoMultiplier*/);
     stamp = frame;
+    // The single volume's LANDED injections — the surface cache's indirect
+    // signature (PHOTON-CARDS-1; a chain folds its cascades' rebuild counts and
+    // settles instead). Counted here, inside the one writer, never at a caller.
+    if (!chain) ++mGiMonoInjections;
     if (mGiInjectionCountFrame != frame) {
         mGiInjectionCountFrame = frame;
         mGiInjectionsThisFrame = 0;
@@ -892,11 +1059,13 @@ void OgreScene::reintegrateFieldAfterInjection() {
         mIfdProbesDone = 0u;
         // Paused budget: the field converges inline (5 ms of GPU).
         if (!mIfdProbesPerFrame) {
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.converge.inline",
-                                     mRoot->getRenderSystem());
-            mIfd->update(mIfdTotalProbes);
-            mIfdProbesDone = mIfdTotalProbes;
-            work.setUnits(mIfdTotalProbes);
+            {
+                monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.converge.inline",
+                                         mRoot->getRenderSystem());
+                mIfd->update(mIfdTotalProbes);
+                mIfdProbesDone = mIfdTotalProbes;
+                work.setUnits(mIfdTotalProbes);
+            }
         }
     }}
 
@@ -944,6 +1113,9 @@ void OgreScene::runChainTick(bool inMotion) {
         if (mVctCascades.empty()) return;
         mSceneMgr->updateSceneGraph();
         bool refused = false;
+        // The OUTERMOST cascade this tick could not inject: the settle it owes
+        // starts there (oweChainSettle's note).
+        size_t refusedTop = 0;
         {
             // THE LIGHT-ONLY TICK (ENGINE-5 item 2). The cheap path a drag runs
             // every few frames: one injection dispatch per bounce over the
@@ -986,11 +1158,17 @@ void OgreScene::runChainTick(bool inMotion) {
                 // ...and a cascade the rebuild injected THIS frame is the latch's,
                 // not a refusal: that is the order working.
                 if (injectedThisFrame(i)) {
-                    if (!inMotion) refused = true;   // it read the outer light before this tick
+                    if (!inMotion) {                  // it read the outer light before this tick
+                        refused = true;
+                        refusedTop = std::max(refusedTop, i);
+                    }
                     continue;
                 }
                 if (injectCascade(i)) ++injections;
-                else refused = true;
+                else {
+                    refused = true;
+                    refusedTop = std::max(refusedTop, i);
+                }
             }
             // The skip is per TICK, not for ever: a cascade that was rebuilt
             // before this tick has paid for this tick, and owes the next one
@@ -1006,7 +1184,7 @@ void OgreScene::runChainTick(bool inMotion) {
         // by it (the frame's rebuild injected it first, before this tick's outer
         // cascades), in which case the chain is owed its settle.
         if (!inMotion && mVctCascades.size() > 1u) {
-            if (refused) oweChainSettle();
+            if (refused) oweChainSettle(refusedTop);   // the refused cascade and those inside it
             else         noteChainSettled();
         }
     } JAH_CATCH(mError, );
@@ -1022,13 +1200,14 @@ GiStatus OgreScene::giStatus() const {
     if (mSurfaceCache) mSurfaceCache->fillStatus(st.cards);
     JAH_TRY {
         if (mPcc) st.probeCount = int(mPcc->getProbes().size());
-        // "Bound" means the process-wide HlmsPbs is sampling THIS scene's arm.
-        // Both halves are checked against our own pointers rather than against
-        // sVctBindingOwner alone: the owner flag says who bound last, these say
-        // what the shader will actually read this frame.
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        st.pccBound = mPcc && pbs->getParallaxCorrectedCubemap() == mPcc;
-        st.vctBound = mVctLighting && pbs->getVctLighting() == mVctLighting;
+        // "Bound" means THIS scene's passes sample the arm (SceneGiBinding): a
+        // finished arm is bound whenever the scene is drawn, whatever else draws.
+        // Read through the REGISTRY — the lookup every pass makes — so "bound"
+        // says what a pass of this scene will actually bind, and a scene whose
+        // record never reached the registry (or was unregistered) reads false.
+        const SceneGiBinding *passBinds = sceneGiBindingOf(mSceneMgr);
+        st.pccBound = mPcc && passBinds && passBinds->pcc == mPcc;
+        st.vctBound = mVctLighting && passBinds && passBinds->vct == mVctLighting;
         const auto toV = [](const Ogre::Vector3 &v) { return Vec3(v.x, v.y, v.z); };
         st.boundsMin      = toV(mGiLitVolume.getMinimum());
         st.boundsMax      = toV(mGiLitVolume.getMaximum());
@@ -1051,6 +1230,9 @@ GiStatus OgreScene::giStatus() const {
         // caller can tell "no grid because every candidate probe saw nothing"
         // from "no grid because the mode does not build one".
         st.probesDropped      = mProbesDropped;
+        st.probeGridByRays    = mGi.mode == GiMode::VctPccHybrid && probeGridByRays();
+        st.probePlacements    = mProbePlacements;
+        st.probeCapturesTotal = mProbeCapturesTotal;
         st.probeHdr     = mPcc && mPccHdr;
         st.probeShadows = mPcc && mPccShadowed;
         // RESOLVED, like the two above: the request is clamped to the probes
@@ -1086,11 +1268,10 @@ GiStatus OgreScene::giStatus() const {
         // a scene that has no probe grid at all (the shader is rebuilt either
         // way), and the count is the honest answer there too.
         st.probeGateCrossings = mProbeGateCrossings;
-        // DDGI, reported the same way pccBound/vctBound are: against the live
-        // HlmsPbs pointer, not against what was requested or who bound last.
-        st.ifdBound          = mIfd && pbs->getIrradianceField() == mIfd;
+        // DDGI, reported the same way pccBound/vctBound are: what this scene's
+        // passes bind, not what was requested.
+        st.ifdBound          = mIfd && passBinds && passBinds->ifd == mIfd;
         st.ifdProbes         = int(mIfdTotalProbes);
-        st.ifdConverged      = mIfd && mIfdProbesDone >= mIfdTotalProbes;
         st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
         if (mIfd) {
             st.ifdMin = toV(mIfdVolumeOrigin);
@@ -1100,6 +1281,21 @@ GiStatus OgreScene::giStatus() const {
         st.ifdScrollProbes = mIfdScrolledProbes;
         st.ifdScrolls = mIfdScrolls;
         st.ifdReplacements = mIfdReplacements;
+        st.ifdTargetSamples = mIfd ? unsigned(mIfd->getTargetSamples()) : 0u;
+        st.ifdRefinesOwed   = mIfd ? unsigned(mIfd->getRefinesOwed() +
+                                              (mIfd->isWorkDone() ? 0u : 1u)) : 0u;
+        {
+            // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest).
+            bool cascadePending = mGiCascadeDirtyAll || !mGiCascadeDirtyBoxes.empty();
+            for (const VctCascade &c : mVctCascades) cascadePending = cascadePending || c.pending > 0;
+            const bool rebuildPending = mGiCachesDirty || mGiChainShapeDirty ||
+                                        mGiBuildStage != GiBuildStage::Idle || cascadePending;
+            const bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None;
+            const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
+                                   (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes ||
+                                    (mIfdProbesPerFrame > 0u && st.ifdRefinesOwed > 0u));
+            st.giAtRest = !rebuildPending && !injectionOwed && !fieldBusy;
+        }
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
         st.probeCapturesDeferred  = mProbeCapturesDeferred;
@@ -1179,8 +1375,43 @@ GiStatus OgreScene::giStatus() const {
         // in OgreRayQuery.cpp, which is where the tier is; `on` false with
         // every other field zero is the shipped state.
         gatherStatusInto(st.gather);
+        // ...AND THE SETTLED HISTORY IS THE PREDICATE'S FOURTH TERM
+        // (PHOTON-GATHER-1d; the 1c audit's M1). Where the gather is the diffuse,
+        // the picture keeps moving after everything above is done: the pixel
+        // history is an EMA, so a young view shows the raw estimate and a
+        // lighting step arrives over N frames. "At rest" therefore also waits
+        // for a history at least N frames old over lighting that has held for N
+        // (GatherStatus::settled, N = settleFrames — 16 for a 5-code step).
+        // Everything that waits on `giAtRest` — editor.screenshot, the selftest's
+        // poses, gi.ddgi — waits for it with no change of its own.
+        if (st.gather.running && !st.gather.settled) st.giAtRest = false;
     } JAH_CATCH(mError, st);
     return st;
+}
+
+// THE LIGHTING SERIAL (PHOTON-GATHER-1d). What the gather's hits read — the
+// voxels' radiance, the environment the misses read, the cards the hits read
+// first — changes at a light write and where an injection LANDS; the settled
+// history counts its frames from the last change. Folded from the same terms as
+// the surface cache's re-injection signature (OgreScene::updateSurfaceCache) plus
+// the write-time light serial: here a write MUST restart the count (the history
+// is about to owe a step), where the card cache must not re-march on one.
+unsigned long long OgreScene::giLightingSerial() const {
+    unsigned long long sig = 1469598103934665603ull;
+    const auto fold = [&sig](unsigned long long v) {
+        sig ^= v;
+        sig *= 1099511628211ull;
+    };
+    fold(mGiLightWriteSerial);
+    fold((unsigned long long)mGiChainSettles);
+    fold(mGiMonoInjections);
+    for (const VctCascade &c : mVctCascades) {
+        fold(c.rebuilds);
+        fold((unsigned long long)c.latticeX);
+        fold((unsigned long long)c.latticeY);
+        fold((unsigned long long)c.latticeZ);
+    }
+    return sig;
 }
 
 // WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — the test-and-tool
@@ -1346,12 +1577,13 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
         st.voxels = wt.count;
         st.voxelsAboveOne = wt.aboveOne;
 
-        // THE BYTES of every light volume a reader samples (the total, then the
-        // anisotropic axes), hashed raw — the one-sweep proof's instrument.
+        // THE BYTES of every light volume a reader samples (the total, the
+        // anisotropic axes, the per-axis coverage), hashed raw — the one-sweep
+        // proof's instrument.
         {
             Ogre::uint64 h = 1469598103934665603ull;
             bool all = true;
-            const size_t volumes = lighting->isAnisotropic() ? 4u : 1u;
+            const size_t volumes = lighting->getNumVoxelTextures();
             for (size_t v = 0; v < volumes && all; ++v) {
                 Ogre::TextureGpu *tex = lighting->getLightVoxelTextures()[v];
                 if (!tex || tex->getResidencyStatus() != Ogre::GpuResidency::Resident) {
@@ -1418,6 +1650,111 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
         }
     } JAH_CATCH(mError, st);
     return st;
+}
+
+// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — Engine.h. The same blocking
+// contract as giVoxelStats: flush, then a synchronous download of mip 0.
+bool OgreScene::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
+    out = GiVoxelVolume();
+    JAH_TRY {
+        Ogre::VctLighting *lighting = nullptr;
+        Ogre::VctVoxelizer *voxelizer = nullptr;
+        if (!mVctCascades.empty()) {
+            if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return false;
+            lighting = mVctCascades[size_t(cascadeIdx)].lighting;
+            voxelizer = mVctCascades[size_t(cascadeIdx)].voxelizer;
+        } else if (cascadeIdx == 0) {
+            lighting = mVctLighting;
+            voxelizer = mVctVoxelizer;
+        }
+        if (!lighting || !voxelizer) return false;
+        Ogre::TextureGpu *total = lighting->getLightVoxelTextures()[0];
+        Ogre::TextureGpu *albedo = voxelizer->getAlbedoVox();
+        Ogre::TextureGpu *coverage[2] = { voxelizer->getCoverageVox(0u), voxelizer->getCoverageVox(1u) };
+        Ogre::TextureGpu *position[2] = { voxelizer->getPositionVox(0u), voxelizer->getPositionVox(1u) };
+        if (!total || !albedo || !coverage[0] || !coverage[1] || !position[0] || !position[1] ||
+            total->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            albedo->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            coverage[0]->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            coverage[1]->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            position[0]->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            position[1]->getResidencyStatus() != Ogre::GpuResidency::Resident)
+            return false;
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();
+        Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+        const auto grab = [&](Ogre::TextureGpu *tex, std::vector<float> &dst) -> bool {
+            const Ogre::PixelFormatGpu fmt = tex->getPixelFormat();
+            const bool isHalf = (fmt == Ogre::PFG_RGBA16_FLOAT);
+            const bool isByte = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB || fmt == Ogre::PFG_RGBA8_UNORM);
+            const bool is1010102 = (fmt == Ogre::PFG_R10G10B10A2_UNORM);
+            const bool isUnorm16 = (fmt == Ogre::PFG_RGBA16_UNORM);
+            if (!isHalf && !isByte && !is1010102 && !isUnorm16) return false;
+            const bool srgb = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB);
+            const Ogre::uint32 W = tex->getWidth(), H = tex->getHeight(), D = tex->getDepth();
+            dst.assign(size_t(W) * H * D * 4u, 0.0f);
+            Ogre::AsyncTextureTicket *ticket =
+                tm->createAsyncTextureTicket(W, H, D, Ogre::TextureTypes::Type3D, fmt);
+            bool ok = false;
+            try {
+                ticket->download(tex, 0u, true);
+                const Ogre::TextureBox box = ticket->map(0);
+                for (Ogre::uint32 z = 0; z < D; ++z)
+                    for (Ogre::uint32 y = 0; y < H; ++y) {
+                        const void *row = box.at(0, y, z);
+                        float *o = &dst[((size_t(z) * H + y) * W) * 4u];
+                        for (Ogre::uint32 x = 0; x < W; ++x)
+                            for (int c = 0; c < 4; ++c) {
+                                float v;
+                                if (is1010102) {
+                                    const Ogre::uint32 p =
+                                        reinterpret_cast<const Ogre::uint32 *>(row)[x];
+                                    v = c < 3 ? float((p >> (10 * c)) & 0x3FFu) / 1023.0f
+                                              : float(p >> 30) / 3.0f;
+                                } else if (isUnorm16) {
+                                    v = float(reinterpret_cast<const Ogre::uint16 *>(row)[size_t(x) * 4u + c]) /
+                                        65535.0f;
+                                } else if (isHalf) {
+                                    v = Ogre::Bitwise::halfToFloat(
+                                        reinterpret_cast<const Ogre::uint16 *>(row)[size_t(x) * 4u + c]);
+                                } else {
+                                    v = float(reinterpret_cast<const Ogre::uint8 *>(row)[size_t(x) * 4u + c]) /
+                                        255.0f;
+                                    if (srgb && c < 3)
+                                        v = v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+                                }
+                                o[size_t(x) * 4u + c] = v;
+                            }
+                    }
+                ticket->unmap();
+                ok = true;
+            } catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+              catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+            tm->destroyAsyncTextureTicket(ticket);
+            return ok;
+        };
+        if (!grab(total, out.light) || !grab(albedo, out.albedo) || !grab(coverage[0], out.coverageP) ||
+            !grab(coverage[1], out.coverageN) || !grab(position[0], out.positionP) ||
+            !grab(position[1], out.positionN))
+            return false;
+        // PHOTON-VOXEL-5: level 0's back side and the voxelizer's normal (the anisotropic tiers;
+        // empty on a Low volume, whose one light is both sides).
+        out.lightBack.clear();
+        out.normal.clear();
+        if (lighting->isAnisotropic()) {
+            Ogre::TextureGpu *back = lighting->getLightVoxelTextures()[lighting->backIndex()];
+            Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
+            if (!back || !nrm || !grab(back, out.lightBack) || !grab(nrm, out.normal)) return false;
+        }
+        out.width = int(total->getWidth());
+        out.height = int(total->getHeight());
+        out.depth = int(total->getDepth());
+        const Ogre::Vector3 o = voxelizer->getVoxelOrigin(), c = voxelizer->getVoxelCellSize();
+        for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
+        out.multiplier = lighting->getCurrentBakingMultiplier();
+        out.available = true;
+        return true;
+    } JAH_CATCH(mError, false);
 }
 
 // THE PROBE FACE PASS'S RENDER-QUEUE CEILING — `rq_last 200` in
@@ -1595,6 +1932,7 @@ void OgreScene::latchProbeCaptures(bool drawn) {
             if (p->mDirty && p->mEnabled) ++captures;
     }
     mProbeCapturesLastFrame = captures;
+    if (captures > 0) mProbeCapturesTotal += (unsigned long long)captures;
     // THE MONITOR'S CACHE-WORK RECORD (RENDER_LOOP_MONITOR_SPEC §4.7). One
     // entry per probe that is about to capture, carrying the input change that
     // staled it — or `None`, which is the value that matters: a probe captured
@@ -2325,6 +2663,7 @@ bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
 // app's tier descriptions are generated from the same function, so what a tier
 // SAYS and what it DOES cannot drift (render audit A5).
 unsigned OgreScene::giVoxelResolution() const {
+    if (mGi.testVoxelResolution) return mGi.testVoxelResolution;
     return giQualityFacts(mGi.quality).voxelResolution;
 }
 
@@ -2750,7 +3089,7 @@ bool OgreScene::refreshCascadesFast() {
     // state the machine is walking through on purpose, and refusing there would
     // rebuild the 57 ms chain on every edit inside the window.
     if (mGiBuildStage == GiBuildStage::Idle) {
-        if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbesDropped) return false;
+        if (probeGridWanted() && !mPcc && !mProbesDropped) return false;
         if (ddgiWanted() && !mIfd) return false;
     }
     JAH_TRY {
@@ -2862,8 +3201,8 @@ bool OgreScene::refreshCascadesFast() {
 // explicitly, which is what a script's `world.refreshGi()` and every suite that
 // asserts on the frame after it do — is answered immediately, as it always was.
 // THE FIRST ARM WAITS FOR ITS SKY (PHOTON-ENV-1 audit F7). Pending = the capture
-// is queued (it runs after updateSceneGraph in THIS frame), its convolution is
-// queued (applyPendingIbl, the top of the next), or its SH read is in flight.
+// is queued (it runs after updateSceneGraph in THIS frame), a host-pushed cube's
+// convolution is queued (applyPendingIbl), or its SH read is in flight.
 // A first build only: a live chain meets a sky change through
 // noteEnvironmentChanged's settle, which is the cheap path for an edit. Bounded
 // like the albedo wait — a scene whose capture never runs (it is never drawn)
@@ -2964,6 +3303,12 @@ bool OgreScene::stepStagedGiBuild() {
         case GiBuildStage::Idle:
             return true;
         case GiBuildStage::ProbeScout: {
+            // A RAY TIER REACHED BETWEEN TWO STAGES PLACES NOTHING (F12-PCC):
+            // the machine walks straight on to the field.
+            if (!probeGridWanted()) {
+                mGiBuildStage = GiBuildStage::Field;
+                return false;
+            }
             // THE BOX IS RE-FITTED HERE, never carried from the cascade stage:
             // an edit between two stages rewinds the machine to THIS one, and
             // the whole point of the rewind is that the grid is placed in the
@@ -3021,6 +3366,10 @@ void OgreScene::applyPendingGi() {
     // NOTHING OF THIS WORLD IS ON SCREEN YET: spend nothing at all
     // (Scene::setLoading). The ordinary flush below is gated on the same thing
     // inside `rebuildVct`; this is the staged machine's half.
+    // A GRID THE RULE NO LONGER WANTS GOES FIRST (PHOTON-F12-PCC) — a ray tier
+    // reached by any route but the row's own write (dropProbeGridByRays).
+    if ((mPcc || mProbesDropped) && !probeGridWanted() && mGi.mode == GiMode::VctPccHybrid)
+        dropProbeGridByRays();
     const bool staged = (mGiBuildStage != GiBuildStage::Idle);
     if (staged && mSceneLoading) return;
     // THE ORDINARY FLUSH RUNS FIRST, AND IT RUNS WHILE A BUILD IS STAGED — the
@@ -4088,17 +4437,6 @@ bool OgreScene::giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after) {
     return false;
 }
 
-// VCT light injection ray-marches towards each light to work out what is
-// shadowed, and `rayMarchStepScale` is how coarsely (FIX WAVE B5). Upstream:
-// bigger is faster and starts losing shadows; below 1.0 trips an assert.
-//
-// The document's value, default 1.0, on EVERY injection: the moving tick used
-// to raise it to 2 (and drop its bounces), which handed a volume a different
-// answer from the rebuild beside it — the one writer (PHOTON-WRITER-1) has one.
-float OgreScene::giRayMarchStepScale() const {
-    return std::max(1.0f, mGi.rayMarchStepScale);
-}
-
 
 // TRUE WHEN THE ARM WAS ACTUALLY (RE)BUILT, and that is a contract a caller
 // depends on (the lead's fix-round item 1): `applyPendingGi` clears
@@ -4230,8 +4568,7 @@ bool OgreScene::rebuildVct() {
     }
     if (!itemCount) { teardownVct(); return false; }   // stay armed; next churn re-flags
 
-    hlmsPbs(mRoot)->setVctLighting(mVctLighting);
-    sVctBindingOwner = this;
+    mGiBinding.vct = mVctLighting;   // this scene's passes read it from now on
     // What this arm was built AT (B4): the reuse path re-runs it only while the
     // count still matches, i.e. while nothing it points into can have died.
     mGiBuiltGeneration = mGiDestroyGeneration;
@@ -4249,7 +4586,8 @@ bool OgreScene::rebuildVct() {
     // renderer already fits to the content. The probes are spread through it and
     // each one then photographs its own surroundings; `buildPcc` keeps the ones
     // that saw something and drops the rest.
-    if (mGi.mode == GiMode::VctPccHybrid && haveBounds) {
+    // ...AND NOT AT A RAY TIER (PHOTON-F12-PCC): `probeGridWanted`.
+    if (probeGridWanted() && haveBounds) {
         // DELIBERATELY the scene's fitted box and not a cascade: where the
         // probes live is a property of the content, not of where the camera
         // stands. The cascade arm changes where the BOUNCE is computed and
@@ -4266,11 +4604,11 @@ bool OgreScene::rebuildVct() {
             mGiBuildStage = GiBuildStage::ProbeScout;
         } else {
             buildPcc(mGiProbeRegion);
-            // The probe grid now owns the shader's one env-probe slot, so the
-            // IBL cubemap must come OFF every datablock — see the long note at
-            // OgreScene::reflectionTexForDatablocks (OgreSky.cpp). Unconditional:
-            // applyReflectionToAll is a no-op walk when there is no sky
-            // reflection.
+            // The probe grid now owns the shader's one env-probe slot in this
+            // scene's passes, so the IBL cubemap must come OFF every datablock —
+            // see OgreSky.cpp's long note, THE ENV-PROBE SLOT HAS ONE OCCUPANT.
+            // Unconditional: applyReflectionToAll is a no-op walk when there is
+            // no sky reflection.
             applyReflectionToAll();
         }
     }
@@ -4280,7 +4618,7 @@ bool OgreScene::rebuildVct() {
     if (haveBounds) noteGiAutoVolume(aabb, !giBoundsExplicit());
 
     // The DDGI layer, over the volume this build just lit. After the VCT
-    // binding (it takes the same process-wide ownership) and after the PCC
+    // binding (the field joins the same SceneGiBinding) and after the PCC
     // build (the field is diffuse-only; the probes keep the specular they had).
     // A no-op — including a teardown of any previous field — when the toggle is
     // off, which is what makes `rebuildVct` the single place the arm's shape is
@@ -4360,8 +4698,39 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
         Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
         mRoot->getRenderSystem(), mRoot->getHlmsManager(),
         true /*correctAreaLightShadows*/, vctMaterialStore());
-    mVctVoxelizer->setResolution(res, res, res);
-    mVctVoxelizer->setRegionToVoxelize(aabb);
+    // A VOXEL CELL IS A CUBE (PHOTON-VOXEL-4): a cone's footprint is isotropic, and one mip
+    // level is one footprint in every direction only on cubic cells. The cell is the box's
+    // longest side over the tier's resolution; each axis takes the next power of two of
+    // cells that covers its side (every level then halves every axis, as a cube's does).
+    // THE BOX IS THE BOUNDS PADDED TO THE POWER-OF-TWO COUNT ON THE FAR SIDE: anchored at
+    // the bounds' MIN corner, each axis grown only toward +a - the bounds' min faces are the
+    // box's, and bounds already on the lattice (every side the longest / 2^k) are the box
+    // exactly (gi.ddgi_edge's). A box grown about its centre moved both faces. The
+    // tier's budget is never exceeded (the longest axis takes exactly `res`). A box 18 x 9 x 18 m at 32: 32 x 16 x
+    // 32 cells of 0.5625 m - it had 32^3 cells of 0.5625 x 0.28 x 0.5625 m, on which the
+    // open floor's wall cone read 0.17-0.23 of its cone-trace reference 0.413 at 32-256
+    // cells, 0.39-0.42 on cubic ones (spikes/photon-voxel-4/lab).
+    Ogre::Aabb region = aabb;
+    Ogre::uint32 dims[3] = { res, res, res };
+    {
+        const Ogre::Vector3 size = aabb.getSize();
+        const Ogre::Real longest = std::max(size.x, std::max(size.y, size.z));
+        if (longest > Ogre::Real(0)) {
+            const Ogre::Real cell = longest / Ogre::Real(res);
+            Ogre::Vector3 half;
+            const Ogre::Vector3 lo = aabb.getMinimum();
+            for (int a = 0; a < 3; ++a) {
+                const Ogre::Real need = size[size_t(a)] / cell - Ogre::Real(1e-3);
+                Ogre::uint32 n = 8u;   // the octant's floor
+                while (n < res && Ogre::Real(n) < need) n <<= 1u;
+                dims[a] = n;
+                half[size_t(a)] = Ogre::Real(0.5) * cell * Ogre::Real(n);
+            }
+            region = Ogre::Aabb(lo + half, half);   // min corner = the bounds' min corner
+        }
+    }
+    mVctVoxelizer->setResolution(dims[0], dims[1], dims[2]);
+    mVctVoxelizer->setRegionToVoxelize(region);
     mVctVoxelizer->dividideOctants(1u, 1u, 1u);
     // THE SINGLE VOLUME IS A CASCADE OF ONE (A5b §2: one path, not two): the same
     // feed, level 0, no size floor.
@@ -5124,7 +5493,11 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         // worthless work by construction: `pending` is a FLAG ("this cascade is
         // behind"), and a burst of steps while the budget is spent elsewhere
         // collapses into the one rebuild that catches it up.
-        if (moved || jumped) {
+        // `JAHSHAKA_GI_NO_RECENTRE` (PHOTON-VOXEL-5), a MEASUREMENT switch like
+        // JAHSHAKA_GI_FIELD_NO_SCROLL: the chain keeps its placement while the camera
+        // moves (a suite's A/B of what a re-centre's re-voxelisation costs a picture).
+        static const bool noRecentre = std::getenv("JAHSHAKA_GI_NO_RECENTRE") != nullptr;
+        if ((moved || jumped) && !noRecentre) {
             // A SCROLL CLAIMS A PENDING FLAG AN EDIT MAY ALREADY HAVE RAISED —
             // and the work is the same one rebuild either way. The REASON,
             // though, is the edit's: a capture must not read "the camera did
@@ -5143,6 +5516,10 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // rebuild that threw BEFORE its swap put its placement back and voxelised
     // nothing, so it owes no settle even though the frame was spent on it.
     bool rebuilt = false;
+    // ...and the outermost cascade the rebuild left STALE (oweChainSettle's note):
+    // the one inside a cascade that re-voxelised and injected, or the cascade
+    // itself when its voxels changed and its injection did not happen. -1 = none.
+    long long staleTop = -1;
     for (size_t i = 0; i < mVctCascades.size(); ++i) {
         VctCascade &c = mVctCascades[i];
         if (!c.pending) continue;
@@ -5189,7 +5566,10 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
             // its volume follows (the voxels there are current — only the light
             // injection is missing, which the next rebuild supplies).
             if (i == 0u && placementCommitted) oweCascade0FieldFollow(reason);
-            if (placementCommitted) rebuilt = true;   // those voxels ARE new
+            if (placementCommitted) {
+                rebuilt = true;                        // those voxels ARE new...
+                staleTop = std::max(staleTop, (long long)i);   // ...and their light is not
+            }
             spent = true;                          // the frame paid for it either way
             if (++c.failures >= 2u) c.pending = 0; // ...otherwise `pending` stays set
             continue;
@@ -5209,6 +5589,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         if (i == 0u) oweCascade0FieldFollow(reason);
         spent = true;
         rebuilt = true;
+        staleTop = std::max(staleTop, (long long)i - 1);
     }
     // WHAT THE ARM LIT, KEPT CURRENT (audit B9). `giStatus().boundsMin/Max` is
     // the outermost cascade's box, and that box MOVES — it was written once at
@@ -5245,8 +5626,10 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // million, so the fixed point is not in doubt: the scrolled chain was the
     // wrong one.
     //
-    // THE RULE. A rebuild raises a DEBT of injections — one sweep over every
-    // cascade, outermost first — and the scheduler pays it
+    // THE RULE. A rebuild raises a DEBT of injections — one sweep over the
+    // cascades INSIDE the rebuilt one, outermost first (the rebuilt cascade's
+    // own injection read current outer light; PHOTON-GATHER-1b item 6) — and
+    // the scheduler pays it
     // ONE INJECTION PER FRAME out of the same one-slot budget the rebuilds come
     // from, the rebuild queue keeping priority. It is not a settle "at the
     // stop": there is no camera-still gate at all, deliberately. THE VR CASE IS
@@ -5273,8 +5656,17 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // gi.chain_converge drives it so the suite proves the defect it guards against rather than
     // asserting a number that happens to pass (13.00/255 with it set, 0.00
     // without, measured on that suite's room).
-    if (rebuilt && mVctCascades.size() > 1u)
-        oweChainSettle();            // the lights and environment these steps must all see
+    // FROM THE CASCADE INSIDE THE REBUILT ONE (PHOTON-GATHER-1b item 6): the
+    // rebuild's own injection read the cascades outside it as they stand, so
+    // the cascades inside it are what read a light that has since changed. A
+    // rebuild of cascade 0 therefore owes nothing.
+    // A rebuild that owes nothing new (cascade 0's) still RESTARTS the timing
+    // of a debt already owed, exactly as the whole sweep restarted on every
+    // rebuild (the payment's note below).
+    if (rebuilt && mVctCascades.size() > 1u) {
+        if (staleTop >= 0) oweChainSettle(size_t(staleTop));
+        else               mGiSettlePayableFrames = 0;
+    }
 
     // ---- 2b. THE HOST'S LIGHT TICK, AFTER THE REBUILD (the one writer) ------
     // (PHOTON-WRITER-1; refreshGiLighting says why it is owed rather than run.)
@@ -5290,7 +5682,47 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         bool pending = false;
         for (const VctCascade &c : mVctCascades)
             if (c.pending) { pending = true; break; }
-        if (!pending) payChainSettleStep();      // one injection, this frame
+        // THE SETTLE KEEPS THE WHOLE SWEEP'S TIMING (PHOTON-GATHER-1b item 6).
+        // A debt restarts whenever something owes it again (every rebuild), so
+        // the whole-chain sweep this replaced could only FINISH after the chain's
+        // size in payable frames with no rebuild between — never inside a fast
+        // walk, where a cascade re-voxelises every few frames. A partial debt of
+        // top+1 steps paid on the first payable frames would finish between two
+        // rebuilds instead, and every finished settle re-integrates the
+        // irradiance field (its running mean restarted): measured, 22 field
+        // restarts in gi.field_follows' 200-frame walk against the base's 0.
+        // So the steps are paid on the LAST top+1 of those frames: the settle
+        // finishes exactly when the whole sweep would have — same timing, fewer
+        // injections.
+        const int n = int(mVctCascades.size());
+        if (!pending) {
+            // A LIGHT THAT MOVED WHILE THE SETTLE WAS RUNNING RESTARTS IT, and this
+            // is not caution: an injection reads the lights' DERIVED poses at the
+            // moment it runs, so a settle whose first steps saw one lamp pose and
+            // its last steps another leaves the chain a MIXTURE of the two and is
+            // not the fixed point of either — and `noteChainSettled` would then
+            // record that mixture as clean and let the next refresh skip the
+            // injection that would have fixed it. Measured:
+            // scripting.e2e.movable_lamp_rest read 3/255, 10/10, the moment the
+            // settle was allowed to absorb a light write (the lamp's push landed
+            // between two steps, the settle finished over it, and the suite's
+            // reference refresh was then skipped as clean).
+            //
+            // A lamp that keeps moving therefore keeps restarting this, which is
+            // right: nothing finishes while the scene is still changing, and the
+            // mirror's own at-rest tick — which fires one frame after the motion
+            // ends and clears the debt outright — is what finishes a light gesture.
+            // THE CHECK LIVES HERE, BEFORE THE TIMING GATE (fix round, audit F7):
+            // inside the payer it ran only on the frames a step is paid, so a
+            // partial debt's idle frames missed a light write for up to n - 1
+            // frames, and the restart then zeroed the timing AFTER that frame's
+            // payment — one idle frame more. Restarting before the count makes a
+            // whole-chain restart pay on the very frame it is seen.
+            if (mGiSettleSerial != mGiLightWriteSerial) oweChainSettle();   // a light: the whole chain
+            ++mGiSettlePayableFrames;
+            if (mGiSettlePayableFrames >= kAtRestSweeps * n - mGiSettleStepsOwed + 1)
+                payChainSettleStep();            // one injection, this frame
+        }
     }
     // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once
     // everything else has: every re-voxelisation drained and the incremental
@@ -5372,13 +5804,9 @@ static void notePlacementPhases(double msScout, double msPlace, double msDrop,
                                kept, float(msCapture));
 }
 
-// THE PROBE GRID, GONE — unbound if this scene owns the binding, then deleted,
-// with every reading that described it put back to "none".
-//
-// BY POINTER IDENTITY, like teardownVct's unbind: the process-wide HlmsPbs
-// binding may belong to ANOTHER scene, and clearing it from here would blank
-// that scene's reflections for a grid this one never built. (This scene's own
-// pointer is the one being deleted.)
+// THE PROBE GRID, GONE — out of this scene's binding (and off any host the last
+// pass left it on), then deleted, with every reading that described it put back
+// to "none".
 //
 // TWO CALLERS, and the second is why it is a function (fix round item 2): the
 // "every candidate photographed nothing" path, which always had this code, and
@@ -5390,15 +5818,11 @@ static void notePlacementPhases(double msScout, double msPlace, double msDrop,
 // something marked it stale.
 void OgreScene::destroyProbeGrid() {
     if (!mPcc) return;
-    {
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        if (pbs->getParallaxCorrectedCubemap() == mPcc) {
-            pbs->setParallaxCorrectedCubemap(nullptr);
-            // The env slot's occupancy is a PROCESS-WIDE question
-            // (reflectionTexForDatablocks' note): every scene's datablocks may
-            // take their own sky cube back now.
-            if (mEngine) mEngine->reapplyReflectionsAllScenes();
-        }
+    forgetGiArms(mRoot->getHlmsManager(), nullptr, nullptr, mPcc);
+    if (mGiBinding.pcc == mPcc) {
+        mGiBinding.pcc = nullptr;
+        // This scene's datablocks may take their own sky cube back now.
+        applyReflectionToAll();
     }
     delete mPcc; mPcc = nullptr;
     mProbeSlots.clear();
@@ -5434,6 +5858,7 @@ double OgreScene::pccPhaseSplit() {
 // false when the grid cannot be built at all — this stage's only refusal.
 void OgreScene::buildPccScout(const Ogre::Aabb &litVolume) {
     mPccStageOk = false;
+    ++mProbePlacements;
     mGiStagedVolume = litVolume;
     for (double &v : mPccPhaseMs) v = 0.0;
     // BY VALUE, and it has to be: the caller passes `mGiProbeRegion` itself and
@@ -5838,15 +6263,15 @@ void OgreScene::buildPccFit() {
             // wherever no probe's box does. What it does NOT close is the
             // avatar preview reading r3 g3 b4 under the any-axis form: that was
             // never the missing sky. Measured on this binary, it is upstream's
-            // one-occupant trap firing in a SECOND scene — the PCC binding is
+            // one-occupant trap firing in a SECOND scene — the PCC binding was
             // PROCESS-WIDE while the sky cube's binding is per scene and per
-            // material, so a preview scene's datablocks keep their manual cube
-            // while the editor scene's grid owns the env slot, and the pixel
-            // shader that generates does not compile (`SampleEnvProbe` against
+            // material, so a preview scene's datablocks kept their manual cube
+            // while the editor scene's grid owned the env slot, and the pixel
+            // shader that generated did not compile (`SampleEnvProbe` against
             // a textureCubeArray; OgreSky.cpp's note lists the three ways).
-            // The character is black because there is no shader, not because
-            // there is no sky. That defect is independent of which form of this
-            // rule ships and is recorded for its own lane.
+            // The character was black because there was no shader, not because
+            // there was no sky. The binding is per scene and per pass since
+            // PHOTON-SCENE-SWITCH-1 (SceneGiBinding), which closes it.
             //
             // The counts, both forms, same binary, with 0048 in: gi.probe_open
             // is IDENTICAL on every case but the 30 m yard (0 vs 3 of 18 at the
@@ -5878,8 +6303,8 @@ void OgreScene::buildPccFit() {
         for (Ogre::CubemapProbe *p : drop) mPcc->destroyProbe(p);
         if (mPcc->getProbes().empty()) {
             // NOTHING TO PHOTOGRAPH. No grid, and the sky cubemap goes back onto
-            // every datablock — `reflectionTexForDatablocks` hands it back the
-            // moment mPcc is null (OgreSky.cpp), and the caller runs
+            // every datablock — `reflectionTexFor` hands it back the moment no
+            // grid is bound (OgreMaterials.cpp), and the caller runs
             // applyReflectionToAll right after this. Cheaper and sharper than a
             // grid of photographs of the sky, which is the owner's rule
             // (2026-09-13 Q3) measured per probe instead of per scene.
@@ -6164,57 +6589,12 @@ void OgreScene::buildPccFinish() {
     // probes that can see it, and the lights are re-injected on the cheap
     // cadence), and the principled per-probe fix is still upstream's to make.
     if (mGi.updateBudget > 0) minDist = std::max(minDist, diag);
-    mPccBindMinDist = minDist;
-    mPccBindMaxDist = minDist * 2.0f;
-    hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
-    // ...and EVERY scene's datablocks must drop their manual cubemap now, not
-    // just this one's: the property that makes texEnvProbeMap a cube array is
-    // set for every pass in the process (reflectionTexForDatablocks' note). A
-    // second scene that kept its sky cube here generated a shader that does not
-    // compile — the avatar preview's black character.
-    if (mEngine) mEngine->reapplyReflectionsAllScenes();
-}
-
-// THE PAGE-RETURN BINDING (ENGINE_CACHE_POLICY_SPEC P10). What a scene coming
-// back on screen needs, and ALL it needs: its arms were built against its own
-// geometry and nothing about a page switch invalidates them — only the
-// process-wide HlmsPbs pointers can have been taken over by another scene's
-// build (the player page's own GI, OgreGi.cpp's "last enabler wins").
-//
-// Each of the three is set to THIS scene's arm, including null for an arm the
-// scene does not have: a scene without probes must not be shaded through the
-// probes of the scene that last built some (the old re-push could not fix that
-// case at all — its teardown only unbinds when it is the owner).
-bool OgreScene::reassertGiBinding() {
-    JAH_TRY {
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        // THE BOUND POINTERS DECIDE, NOT THE OWNER FLAG (code review 2026-09-12):
-        // the flag says who bound last, the pointers say what the shader reads,
-        // and any path that let the two disagree left this scene "owning" a
-        // binding that pointed into another scene's arms — a use-after-free
-        // the moment that scene died. Already ours on all three: a no-op.
-        if (pbs->getVctLighting() == mVctLighting &&
-            pbs->getParallaxCorrectedCubemap() == mPcc &&
-            pbs->getIrradianceField() == mIfd) {
-            sVctBindingOwner = (mVctLighting || mPcc || mIfd) ? this : sVctBindingOwner;
-            return false;
-        }
-        pbs->setVctLighting(mVctLighting);
-        const bool pccBindingMoved = pbs->getParallaxCorrectedCubemap() != mPcc;
-        if (mPcc) pbs->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
-        else      pbs->setParallaxCorrectedCubemap(nullptr);
-        // Process-wide, so every scene re-decides (see rebuildVct's call).
-        if (pccBindingMoved && mEngine) mEngine->reapplyReflectionsAllScenes();
-        pbs->setIrradianceField(mIfd);
-        const bool owns = mVctLighting || mPcc || mIfd;
-        sVctBindingOwner = owns ? this : nullptr;
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                std::string("Jahshaka GI: binding re-asserted (") +
-                (mVctLighting ? "vct " : "") + (mPcc ? "pcc " : "") + (mIfd ? "ifd" : "") +
-                (owns ? ")" : "nothing — unbound)"));
-        return true;
-    } JAH_CATCH(mError, false);
+    mGiBinding.pcc = mPcc;
+    mGiBinding.pccMinDist = minDist;
+    mGiBinding.pccMaxDist = minDist * 2.0f;
+    // ...and THIS scene's datablocks drop their manual cubemap now: its passes
+    // make texEnvProbeMap a cube array from here on (OgreSky.cpp, THE ENV-PROBE SLOT HAS ONE OCCUPANT).
+    applyReflectionToAll();
 }
 
 // ===========================================================================
@@ -6234,9 +6614,9 @@ bool OgreScene::reassertGiBinding() {
 // not ADD to the voxel-cone diffuse — it TAKES OVER from it. Measured on the
 // spike's closed room, the pure-indirect term goes from a mean 84/54/56 (VCT,
 // with a blown-out 1.0 in the dark corner where it leaks) to 6.4/3.3/4.0
-// (DDGI, smooth and plausible): the right SHAPE roughly 13x too dim, because
-// upstream never scales it. `GiParams::ddgiIntensity` is our answer, applied in
-// media/Hlms/Jahshaka/JahIfd_piece_ps.any.
+// (DDGI, smooth and plausible): the right SHAPE roughly 13x too dim — a reading
+// the pass-buffer misalignment ogre-patch 0050 fixed; the field is applied at its
+// own answer (media/Hlms/Jahshaka/JahIfd_piece_ps.any), with no dial.
 //
 // WHERE IT LIVES IN THE LIFECYCLE. Inside the VCT arm and strictly within
 // VctLighting's lifetime: the field holds that pointer and binds its voxel
@@ -6321,36 +6701,24 @@ Ogre::uint32 OgreScene::ifdProbesPerFrame(const Ogre::IrradianceFieldSettings &s
     // happen on the paused path.
     if (updateBudget <= 0 || totalProbes == 0u) return 0u;
 
-    // Upstream's dispatch arithmetic, reproduced because the engine must obey
-    // it rather than hope (OgreIrradianceField::update, and spike §4):
-    //     rays        = ppf * depthRes^2 * raysPerPixel
-    //     tpg         = alignToNextMultiple( 128, raysPerIrradiancePixel )
-    //     workGroups  = rays / tpg              <-- INTEGER division
-    // `rays < tpg` therefore dispatches ZERO work groups, which throws inside
-    // HlmsCompute::compileShader and — uncaught, at frame time — terminates the
-    // process. The OGRE_ASSERT_LOW that would have caught it in a debug Ogre is
-    // compiled out of ours. `rays % tpg == 0` is the softer rule (a leftover
-    // silently mis-sizes the dispatch; measured harmless at this pin, obeyed
-    // anyway).
-    const Ogre::uint32 tpg =
-        Ogre::alignToNextMultiple<Ogre::uint32>(128u, settings.getNumRaysPerIrradiancePixel());
-    const Ogre::uint32 raysPerProbe = Ogre::uint32(settings.mDepthProbeResolution) *
-                                      settings.mDepthProbeResolution * settings.mNumRaysPerPixel;
-    if (!raysPerProbe) return 0u;
+    // ONE WORK GROUP PER PROBE (PHOTON-FIELD-ROTATE-1): the generation job's
+    // dispatch is the batch's probe count, so every batch of one or more probes
+    // dispatches (upstream's ray-count arithmetic could dispatch zero groups and
+    // throw at frame time; that floor is gone with it).
+    (void)settings;
 
     // The budget's meaning here: at budget 1 the field re-converges in
     // kIfdConvergeFrames frames, and the cost scales linearly with the dial
     // like every other GI budget. Rounded UP to a power of two so the batch
-    // always divides a power-of-two field exactly — which is what guarantees
-    // the LAST batch is the same size as every other one, and therefore that
-    // the crash floor below holds for every dispatch and not just the first.
+    // always divides a power-of-two field exactly (the last batch is the same
+    // size as every other one). One pass over the field is ONE sample per probe;
+    // the refinements the field owes after it (kIfdTargetSamples) run at the
+    // same rate.
     Ogre::uint64 desired =
         (Ogre::uint64(totalProbes) * Ogre::uint64(updateBudget) + kIfdConvergeFrames - 1u) /
         kIfdConvergeFrames;
     Ogre::uint32 ppf = 1u;
     while (Ogre::uint64(ppf) < desired && ppf < totalProbes) ppf <<= 1u;
-    while (Ogre::uint64(ppf) * raysPerProbe < tpg && ppf < totalProbes) ppf <<= 1u;   // the floor
-    while (ppf < totalProbes && (Ogre::uint64(ppf) * raysPerProbe) % tpg != 0u) ppf <<= 1u;
     if (ppf > totalProbes) ppf = totalProbes;
     return ppf;
 }
@@ -6362,7 +6730,22 @@ void OgreScene::buildIrradianceField() {
 
     JAH_TRY {
         Ogre::IrradianceFieldSettings settings;
-        settings.mNumRaysPerPixel        = kIfdRaysPerPixel;
+        // `JAHSHAKA_GI_FIELD_RAYS` (rays per depth texel), `_SAMPLES` (the target
+        // sample count) and `_STATIC` (no rotation) are MEASUREMENT switches, like
+        // `JAHSHAKA_GI_FIELD_NO_SCROLL`: gi.field_alias drives the arms in one process.
+        if (const char *r = std::getenv("JAHSHAKA_GI_FIELD_RAYS")) {
+            const int n = std::atoi(r);
+            if (n >= 1 && n <= 7) settings.mNumRaysPerPixel = Ogre::uint16(n);   // <= 1024 rays a probe
+        }
+        Ogre::uint32 targetSamples = kIfdTargetSamples;
+        if (const char *k = std::getenv("JAHSHAKA_GI_FIELD_SAMPLES")) {
+            const int n = std::atoi(k);
+            if (n >= 1 && n <= 4096) targetSamples = Ogre::uint32(n);
+        }
+        const bool rotateRays = std::getenv("JAHSHAKA_GI_FIELD_STATIC") == nullptr;
+        // A PAUSED budget integrates nothing progressively, so its target is the one
+        // sample every event's own pass writes inline: it owes nothing after it.
+        if (mGi.updateBudget <= 0) targetSamples = 1u;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
         // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM — whichever arm
@@ -6405,6 +6788,7 @@ void OgreScene::buildIrradianceField() {
         // atlases for the new settings on its own. Upstream's own instruction
         // for "major changes to VctLighting" is exactly this call.
         if (!mIfd) mIfd = new Ogre::IrradianceField(mRoot, mSceneMgr);
+        mIfd->setIntegrationPolicy(targetSamples, kIfdKeepOnChange, rotateRays);
         mIfd->initialize(settings, origin, size, mVctLighting);
         // WHERE THE FIELD IS, recorded as asked for (the field enlarges it by a
         // probe block per side for itself): the scheduler compares against this
@@ -6418,16 +6802,6 @@ void OgreScene::buildIrradianceField() {
         mIfdTotalProbes    = total;
         mIfdProbesDone     = 0u;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
-        mIfdMinProbes      = 0u;
-        {
-            // The smallest batch that still dispatches at least one work group.
-            const Ogre::uint32 tpg = Ogre::alignToNextMultiple<Ogre::uint32>(
-                128u, settings.getNumRaysPerIrradiancePixel());
-            const Ogre::uint32 raysPerProbe = Ogre::uint32(settings.mDepthProbeResolution) *
-                                              settings.mDepthProbeResolution *
-                                              settings.mNumRaysPerPixel;
-            mIfdMinProbes = raysPerProbe ? Ogre::uint32((tpg + raysPerProbe - 1u) / raysPerProbe) : 1u;
-        }
 
         // CONVERGE NOW, in one dispatch, BEFORE binding. Two reasons and both
         // are load-bearing. (1) A freshly created atlas holds whatever the
@@ -6443,25 +6817,21 @@ void OgreScene::buildIrradianceField() {
         // over the PREVIOUS converged atlas and so has nothing ugly to show.
         mIfd->update(mIfdTotalProbes);
         mIfdProbesDone = mIfdTotalProbes;
+        // THE FIRST SAMPLE, NOT THE MEAN (PHOTON-FIELD-ROTATE-1). The field is a mean
+        // over rotated integrations now: this pass is its first sample everywhere -
+        // unbiased, every probe valid, so "bound" is still a whole field - and the
+        // kIfdTargetSamples - 1 refinements it owes run at the update budget
+        // (updateIrradianceField; GiStatus::ifdRefinesOwed reaches 0 when the field
+        // has CONVERGED and stops). Paying them here was measured: 64 passes inline
+        // blocked a new project's thumbnail build for 1.8 s at Epic
+        // (threading.newproject_stall).
 
         // Our two scalars, and the two probe counts the shader's sky-visibility
         // threshold needs but upstream's own IrradianceField block does not
         // carry, reach the shader through the pass buffer.
         pushIfdState(settings.mNumProbes);
-        // The process-wide binding, under the same discipline as VctLighting's,
-        // and ONLY when the shader is reading THIS scene's voxel lighting: a
-        // rebuild has just bound it (rebuildVct), a re-solve of a background
-        // scene has not (refreshVctFast never snatches the binding). Binding
-        // the field and claiming ownership there anyway left HlmsPbs with the
-        // OTHER scene's VctLighting under an owner flag naming this one — the
-        // other scene's teardown then skipped its unbind (code review
-        // 2026-09-12). The field is kept either way; reassertGiBinding binds it
-        // when this scene takes the screen back.
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        if (pbs->getVctLighting() == mVctLighting) {
-            pbs->setIrradianceField(mIfd);
-            sVctBindingOwner = this;
-        }
+        // WHOLE, so this scene's passes read it from now on (SceneGiBinding).
+        mGiBinding.ifd = mIfd;
 
         if (giDebug())
             Ogre::LogManager::getSingleton().logMessage(
@@ -6469,15 +6839,13 @@ void OgreScene::buildIrradianceField() {
                 std::to_string(settings.mNumProbes[1]) + "x" +
                 std::to_string(settings.mNumProbes[2]) + " (" + std::to_string(total) +
                 " probes) over " + Ogre::StringConverter::toString(origin) + " size " +
-                Ogre::StringConverter::toString(size) + ", intensity " +
-                std::to_string(mGi.ddgiIntensity) + ", re-converge " +
+                Ogre::StringConverter::toString(size) + ", re-converge " +
                 std::to_string(mIfdProbesPerFrame) + " probes/frame");
     } JAH_CATCH(mError, );
 }
 
 void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
     FogHlmsListener::IfdState st;
-    st.intensity  = std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f));
     st.numProbesY = float(numProbes[1]);
     st.numProbesZ = float(numProbes[2]);
     if (mIfd) {
@@ -6493,7 +6861,7 @@ void OgreScene::teardownIrradianceField() {
     // a field, so a debt outliving its field could only be paid into the next
     // one — which converges WHOLE at its build and owes nothing.
     mIfdFollowOwed = 0;
-    mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = mIfdMinProbes = 0u;
+    mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = 0u;
     mIfdVolumeOrigin = mIfdVolumeSize = Ogre::Vector3::ZERO;
     mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
     mIfdFollows = 0;
@@ -6501,11 +6869,8 @@ void OgreScene::teardownIrradianceField() {
     mIfdScrolls = mIfdReplacements = 0;
     if (!mIfd) return;
     JAH_TRY {
-        // Pointer identity, not sVctBindingOwner: the owner flag says who bound
-        // last, this says what the shader is about to read. Unbinding someone
-        // else's field would be the takeover bug the VCT half already avoids.
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        if (pbs->getIrradianceField() == mIfd) pbs->setIrradianceField(nullptr);
+        mGiBinding.ifd = nullptr;
+        forgetGiArms(mRoot->getHlmsManager(), nullptr, mIfd, nullptr);
         delete mIfd;
     } JAH_CATCH(mError, );
     mIfd = nullptr;
@@ -6524,32 +6889,34 @@ void OgreScene::updateIrradianceField() {
     // all — which is also what keeps the zero-work-group abort unreachable on
     // this path.
     if (!mIfdProbesPerFrame) return;
-    if (mIfdProbesDone >= mIfdTotalProbes) return;              // converged
+    if (mIfdProbesDone >= mIfdTotalProbes) {
+        // THE FIRST SAMPLE IS EVERYWHERE; THE FIELD REFINES (PHOTON-FIELD-ROTATE-1).
+        // Each whole-grid refinement gives every probe below the target one more
+        // sample under a new ray rotation, at the budget's rate; the field stops
+        // (and costs nothing) once none is owed.
+        JAH_TRY {
+            if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) return;   // converged
+            const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, mIfd->getWorkRemaining());
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "ifd.refine",
+                                     mRoot->getRenderSystem());
+            mIfd->update(batch);
+            work.setUnits(batch);
+        } JAH_CATCH(mError, );
+        return;
+    }
     JAH_TRY {
         const Ogre::uint32 remaining = mIfdTotalProbes - mIfdProbesDone;
         const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, remaining);
-        // THE CRASH FLOOR, checked at the dispatch rather than trusted from the
-        // arithmetic that chose the batch. It cannot fire as things stand — the
-        // batch and the field are both powers of two, so the batch divides the
-        // field and every dispatch is a full batch — and it is here because the
-        // failure it guards is not a glitch but an uncaught throw at frame time
-        // that takes the process with it (spike §4; the guarding assert is
-        // compiled out of our Ogre). Declaring the field converged leaves a few
-        // probes on their previous data, which is wrong pixels; dispatching
-        // would be no pixels at all.
-        if (batch < mIfdMinProbes) {
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: DDGI re-converge stopped " + std::to_string(remaining) +
-                " probes short — a batch of " + std::to_string(batch) +
-                " is below the dispatch floor of " + std::to_string(mIfdMinProbes));
-            mIfdProbesDone = mIfdTotalProbes;
-            return;
-        }
         {
             // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
             // budget's turn, one batch of probes a frame, so `Sweep` is its
-            // reason: nothing changed, this is the cache catching up.
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "ifd.converge",
+            // reason: nothing changed, this is the cache catching up. A
+            // RE-PLACEMENT's slabs (PHOTON-FIELD-ROTATE-1 part 3: the work has no
+            // history) are filed as "ifd.replace", a change's as "ifd.converge".
+            const bool replacing =
+                mIfd->getWorkMode() == Ogre::IrradianceField::IntegrateFresh;
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0,
+                                     replacing ? "ifd.replace" : "ifd.converge",
                                      mRoot->getRenderSystem());
             mIfd->update(batch);
             work.setUnits(batch);
@@ -6590,7 +6957,7 @@ void OgreScene::updateIrradianceField() {
 // budget's frames (1,024 a frame at budget 1). What it buys is that the frame
 // which moved the field is already showing the right answer; measured with the
 // progressive policy forced, the field is never converged at all while the
-// camera keeps walking (`ifdConverged` false for the whole 100 m), so every
+// camera keeps walking (the field never converged for the whole 100 m), so every
 // frame of a walk would carry a mixture of two placements. In a uniform scene
 // that mixture is invisible (the lane measured 0.0 % difference on the suite's
 // ground band, both policies); the size of the error is exactly how much the
@@ -6649,21 +7016,37 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
         // THE SCROLL REFUSED (a resize, or a jump of the whole grid or more on
         // an axis - a teleport, a headset re-centred far away): nothing of the
         // window is kept, so the field is RE-PLACED onto cascade 0's box from
-        // scratch - offset 0, every probe integrated in this frame - exactly
-        // once; the window's origin is then cascade 0's own, and the next step
-        // scrolls from there.
+        // scratch - offset 0 - exactly once; the window's origin is then cascade
+        // 0's own, and the next step scrolls from there.
+        //
+        // A JUMP WITHOUT A HITCH (PHOTON-FIELD-ROTATE-1 part 3). The whole grid used
+        // to be integrated in this frame (8,192 probes: 10.7 ms of GPU at two rays,
+        // 96 % of a VR frame). setFieldVolume makes the work the whole grid with NO
+        // history and INVALIDATES every probe (its count cleared to 0), so the
+        // re-placement is integrated like any other pass: in SLABS of the budget's
+        // probes a frame (ifdProbesPerFrame; the work list's slowest axis, z, so a
+        // slab is whole z-planes), by updateIrradianceField, from the next frame on.
+        // Until a probe's first integration the pixel's reader gives it no weight,
+        // and a cage with no valid probe hands its pixel to the cone term (the
+        // reader's fallback, JahIfd_piece_ps.any) - never the old placement's
+        // values, which describe another place. A PAUSED budget integrates the whole
+        // placement inline (one sample a probe; a paused field refines nothing).
         mIfd->setFieldVolume(origin, size);
-        mIfd->reset();
         mIfdVolumeOrigin = origin;
         mIfdVolumeSize   = size;
         ++mIfdFollows;
         ++mIfdReplacements;
         pushIfdState(mIfdProbeCounts);                  // the window's offset is 0 again
-        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                 mRoot->getRenderSystem());
-        mIfd->update(mIfdTotalProbes);
-        mIfdProbesDone = mIfdTotalProbes;
-        work.setUnits(mIfdTotalProbes);
+        mIfdProbesDone = 0u;
+        if (!mIfdProbesPerFrame) {
+            {
+                monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                         mRoot->getRenderSystem());
+                mIfd->update(mIfdTotalProbes);
+                mIfdProbesDone = mIfdTotalProbes;
+                work.setUnits(mIfdTotalProbes);
+            }
+        }
     } JAH_CATCH(mError, );
 }
 
@@ -6693,11 +7076,13 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
         mIfd->reset();
         mIfdProbesDone = 0u;
         if (!mIfdProbesPerFrame) {
-            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                     mRoot->getRenderSystem());
-            mIfd->update(mIfdTotalProbes);
-            mIfdProbesDone = mIfdTotalProbes;
-            work.setUnits(mIfdTotalProbes);
+            {
+                monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                         mRoot->getRenderSystem());
+                mIfd->update(mIfdTotalProbes);
+                mIfdProbesDone = mIfdTotalProbes;
+                work.setUnits(mIfdTotalProbes);
+            }
         }
         return true;
     }
@@ -6709,15 +7094,17 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
         Ogre::Vector3 target = mIfdVolumeOrigin;
         for (int a = 0; a < 3; ++a) target[a] += float(d[a]) * spacing[a];
         mIfd->setFieldVolume(target, size);
-        mIfd->reset();
         mIfdVolumeOrigin = target;
         ++mIfdFollows;
+        ++mIfdReplacements;     // ifdFollows = ifdScrolls + ifdReplacements, this arm included
         pushIfdState(mIfdProbeCounts);
-        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                 mRoot->getRenderSystem());
-        mIfd->update(mIfdTotalProbes);
-        mIfdProbesDone = mIfdTotalProbes;
-        work.setUnits(mIfdTotalProbes);
+        {
+            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
+                                     mRoot->getRenderSystem());
+            mIfd->update(mIfdTotalProbes);
+            mIfdProbesDone = mIfdTotalProbes;
+            work.setUnits(mIfdTotalProbes);
+        }
         return true;
     }
     // A whole re-integration still running (a settle's, a light's) is restarted
@@ -6726,6 +7113,7 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
     mIfd->scrollWindow(d);
     for (int a = 0; a < 3; ++a) mIfdVolumeOrigin[a] += float(d[a]) * spacing[a];
     ++mIfdFollows;
+    ++mIfdScrolls;              // (never counted before PHOTON-FIELD-ROTATE-1: the status read 0)
     pushIfdState(mIfdProbeCounts);                      // the reader's modulo offset
     {
         // THE STEP FRAME'S WHOLE COST: the entered planes, inline, before any
@@ -6742,6 +7130,8 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
         mIfdProbesDone = 0u;
     } else {
         mIfdProbesDone = mIfdTotalProbes;
+        // The entered planes' refinements run at the budget (the kept probes that
+        // hold the target are skipped); a paused field refines nothing.
     }
     return true;
 }
@@ -6798,29 +7188,11 @@ void OgreScene::teardownVct() {
     mGiChainShapeDirty = false;
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;
-    // Unbind what the shader reads FROM THIS SCENE, by pointer identity (the
-    // same rule teardownIrradianceField uses): the owner flag can disagree with
-    // the pointers, and a pointer left bound past the delete below is a
-    // use-after-free on the next frame. Another scene's binding is untouched.
-    {
-        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        const bool releasedPcc = mPcc && pbs->getParallaxCorrectedCubemap() == mPcc;
-        if (releasedPcc) pbs->setParallaxCorrectedCubemap(nullptr);
-        if (mVctLighting && pbs->getVctLighting() == mVctLighting) pbs->setVctLighting(nullptr);
-        if (sVctBindingOwner == this) sVctBindingOwner = nullptr;
-        // PROCESS-WIDE: every other scene may take its own sky cube back now
-        // (reflectionTexForDatablocks' note). This runs on an ordinary GI-off
-        // or re-solve as well as on the scene's destruction, and the two need
-        // different timing: on a GI-off the walk happens here and now, because
-        // nothing else will do it and the other scenes' mirrors would stay
-        // unbound (measured: gi.pcc_second_scene's last case went black); on a
-        // DESTROY it must wait until the engine has erased this scene from the
-        // vector the walk iterates, so it is flagged instead.
-        if (releasedPcc) {
-            if (mDestroying) mReleasedPccOnDestroy = true;
-            else if (mEngine) mEngine->reapplyReflectionsAllScenes();
-        }
-    }
+    // THIS SCENE'S PASSES STOP READING ITS ARMS, and any PBS-family host the
+    // last pass left them on lets go before the deletes below.
+    mGiBinding.vct = nullptr;
+    mGiBinding.pcc = nullptr;
+    forgetGiArms(mRoot->getHlmsManager(), mVctLighting, nullptr, mPcc);
     // Reverse dependency order, all while the SceneManager is still alive:
     // PCC (probe workspaces + cubemap textures) -> VctLighting (reads the
     // voxelizer's textures) -> VctVoxelizer (drops its MeshPtr refs).
@@ -6844,7 +7216,7 @@ void OgreScene::teardownVct() {
     // really starts again.
     if (mGiCamera) { mSceneMgr->destroyCamera(mGiCamera); mGiCamera = nullptr; }
     // ...and back ON now that the slot is free again (the mirror of the call in
-    // rebuildVct). Ordered after `delete mPcc` because the helper reads it.
+    // rebuildVct); the roughness-to-LOD map follows (applyReflectionToAll marks it).
     applyReflectionToAll();
 }
 

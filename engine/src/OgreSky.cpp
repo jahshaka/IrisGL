@@ -19,6 +19,13 @@
 #include <OgrePass.h>
 #include <OgreTextureUnitState.h>
 #include <OgreMaterialManager.h>
+#include <OgreControllerManager.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreShaderParams.h>
+#include <OgreStagingTexture.h>
+#include <OgreAsyncTextureTicket.h>
+#include <cstring>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -206,6 +213,25 @@ bool OgreScene::setSky(const SkyDesc &desc) {
         mAtmoSunHaze = std::max(1.0f, desc.atmosphere.sunHaze);
         ++mAtmoPresetGeneration;   // the tint's memo is keyed on this
     }
+    // THE CLOUD LAYER (CLOUDS-2D-1) is the fourth independent half. Three kinds
+    // of change, three costs: the FIELD (coverage, density, the weather map)
+    // re-bakes the optical-depth field; the LOOK (the field, the altitude, the
+    // sun that lights it) re-captures the environment, immediately, and stales
+    // the probe grid, which photographs the sky; the WIND and the shadow
+    // strength move no sky pixel at a given time and cost a uniform write. The
+    // scroll's own re-captures are the cadence's (tickCloudClock), not this.
+    if (!(mSkyDesc.clouds == desc.clouds)) {
+        const bool fieldChanged = !mSkyDesc.clouds.sameField(desc.clouds);
+        const bool lookChanged = !mSkyDesc.clouds.sameLook(desc.clouds);
+        mSkyDesc.clouds = desc.clouds;
+        applyCloudLayer(fieldChanged);
+        if (lookChanged && mSkyDesc.mode != SkyMode::NoSky && !skyChanged) {
+            staleProbeGrid(GiStaleReason::Sky);
+            requestSkyCapture();
+            ++mCloudStatus.changeCaptures;
+            mCloudFramesSinceCapture = 0u;
+        }
+    }
     if (!skyChanged && !reflChanged) return true;   // idempotent: nothing else to do
     // THE PROBE CACHE'S SKY INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
     // faces capture the sky (RQ 0 is inside their range) and the reflection
@@ -226,13 +252,20 @@ bool OgreScene::setSky(const SkyDesc &desc) {
             // convolution's input; a cubemap sky keeps feeding the convolution
             // its own full-resolution faces, because re-rendering those into a
             // 128^2 capture would throw reflection detail away for nothing.
+            // The layer is drawn over any sky there is (the HOST keeps it off
+            // image skies, which carry their own clouds) — a mode change can
+            // turn it on or off.
+            // A new sky is also a new light on the sheet: its clear-sky term is
+            // re-taken before the capture that photographs it.
+            mCloudClearPending = true;
+            applyCloudLayer(false);
             if (desc.mode != SkyMode::NoSky)
                 requestSkyCapture();
             else {
                 // No sky, no sky light: the ambient the host derives from this
                 // must go to zero in the same push that removed the sky.
                 mSkyCapturePending = false;
-                mSkyShValid = false;
+                forgetSkySh();
                 destroySkyShTicket();
             }
             // Both of these paths REPLACE the reflection cubemap themselves —
@@ -301,10 +334,7 @@ bool OgreScene::applySkyMode(const SkyDesc &desc) {
         // sky is its own IBL source), it must not run against a destroyed one
         // on the next frame (code review 2026-09-10).
         if (previous && previous != owned) {
-            if (mIblSourceTex == previous && !mIblSourceOwned) {
-                mIblPending = false;
-                mIblSourceTex = nullptr;
-            }
+            if (mIblSourceTex == previous && !mIblSourceOwned) destroyPendingReflection();
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), previous);
         }
         return true;
@@ -405,6 +435,9 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         if (mSceneMgr->getSky())
             mSceneMgr->setSky(false, mSceneMgr->getSkyMethod(), static_cast<Ogre::TextureGpu *>(nullptr));
         if (mSkyOwnedTex) {
+            // A convolution still pending from that texture (a cubemap sky is its
+            // own IBL source) must not read it after it dies — applySkyMode's guard.
+            if (mIblSourceTex == mSkyOwnedTex && !mIblSourceOwned) destroyPendingReflection();
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
             mSkyOwnedTex = nullptr;
         }
@@ -685,9 +718,152 @@ void OgreScene::tuneAtmosphereRenderable() {
 void OgreScene::requestSkyCapture() { mSkyCapturePending = true; }
 
 bool OgreScene::skyAmbientSh(float out[27]) const {
-    if (!mSkyShValid) return false;
-    for (int i = 0; i < 27; ++i) out[i] = mSkySh[i];
+    if (!mSkyShInForceValid) return false;
+    for (int i = 0; i < 27; ++i) out[i] = mSkyShInForce[i];
     return true;
+}
+
+void OgreScene::forgetSkySh() {
+    const bool wasLighting = mSkyShInForceValid;
+    mSkyShValid = false;
+    mSkyShFresh = false;
+    mSkyShInForceValid = false;
+    // No sky, no sky light: the ambient it was lighting goes to zero with it.
+    if (wasLighting) applySkyAmbient(GiStaleReason::Sky);
+}
+
+// THE SKY'S AMBIENT IS FORMED HERE (PHOTON-SKY-TRANSIENT-1): the SH in force
+// times the Sky Light gain the host pushed through setEnvironmentLight, or zeros
+// with no sky (no Sky Light = gain 0 = zeros: gi.sky_light). The host pushes the
+// gain only; it used to form this product itself, one sync after the engine had
+// integrated the SH, which put the cube of one sky beside the SH of another on
+// every change frame. Only while the engine owns the ambient (a host that never
+// pushed a gain, or lit its scene with setAmbient since, keeps its own), and not
+// during teardown (the write re-notes the GI arm).
+void OgreScene::applySkyAmbient(GiStaleReason why) {
+    if (!mSkyAmbientOwned || mDestroying) return;
+    const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
+    float sh[27];
+    for (int i = 0; i < 27; ++i) sh[i] = mSkyShInForceValid ? mSkyShInForce[i] * gain[i % 3] : 0.0f;
+    applyAmbientSh(sh, why);
+}
+
+// THE ENVIRONMENT LANDS AS ONE SET (PHOTON-SKY-TRANSIENT-1, measured). A sky
+// change used to REPLACE the bound reflection cube inside the capture's frame
+// with a newborn one whose convolution was queued for the top of the NEXT frame,
+// so every draw of the change frame sampled a cube nothing had written: recycled
+// VRAM, NaN and 3e4 half-floats in mip 0 (a ground pixel read 111/28/118 or
+// 31/255/32 against 25/29/32 a frame later — the one-frame flash on every sky
+// or sun edit). And the SH reached the pixel one host push later than the cube.
+//
+// THE RULE: the pixel keeps the PREVIOUS environment — cube, SH, gain — until
+// the capture, the convolution and the SH of the next one have all landed, and
+// then the cube and the coefficients swap here, in one step. For a lone change
+// all three land inside the capture's own frame (the capture runs before the
+// draw, the convolution is run right behind it, the first SH read is
+// synchronous), so the change frame already draws the whole new set. A drag's
+// SH read is deferred a frame (integrateSkyShFromCube), and its set lands at the
+// next frame's top when that read does — the previous set drawn meanwhile.
+void OgreScene::landEnvironmentIfComplete() {
+    if (mSkyCapturePending || mSkyShTicket || mIblPending) return;   // a part is owed
+    if (mReflPendingTex) {
+        Ogre::TextureGpu *next = mReflPendingTex;
+        mReflPendingTex = nullptr;
+        // DESTROY THE OLD FIRST, then bind the new — destroyReflection's order
+        // and reason (its Deleted listener is what kills the datablocks' stale
+        // descriptor sets). The new cube is a different, live texture, so the
+        // recycled-address trap cannot alias it.
+        if (Ogre::TextureGpu *old = mReflectionTex) {
+            mReflectionTex = nullptr;
+            try { destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), old); }
+            catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+            catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+        }
+        mReflectionTex = next;
+        // The roughness->LOD map's chain length follows the new cube
+        // (envSpecularRoughness, 800.PixelShader_piece_ps.any:4, multiplies by
+        // passBuf.envMapNumMipmaps): applyReflectionToAll marks this scene's
+        // count, resolveIblMipmaps sets it (the note there).
+        applyReflectionToAll();
+    }
+    if (mSkyShFresh) {
+        mSkyShFresh = false;
+        std::memcpy(mSkyShInForce, mSkySh, sizeof mSkyShInForce);
+        mSkyShInForceValid = true;
+        applySkyAmbient(GiStaleReason::Sky);   // the sky's edit, not the light's
+    }
+}
+
+void OgreScene::destroyPendingReflection() {
+    mIblPending = false;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    if (mIblSourceTex && mIblSourceOwned) {
+        try { destroyRecycled(tm, mIblSourceTex); } catch (...) {}
+    }
+    mIblSourceTex = nullptr;
+    mIblSourceOwned = false;
+    if (mReflPendingTex) {
+        try { destroyRecycled(tm, mReflPendingTex); } catch (...) {}
+        mReflPendingTex = nullptr;
+    }
+}
+
+// ONE CAPTURE RENDER, THREE CALLERS (CLOUDS-2D-1 made it a function): the
+// environment capture below, the clear-sky capture the cloud layer is lit by,
+// and the export's equirect bake. It renders the capture workspace — render
+// queue 0 at visibility 0x1, i.e. the sky and whatever the scene draws over it
+// at that queue — from a camera at the origin into a new `size`^2 RGBA16F cube
+// named from the recycled pool, and returns it (the caller frees it with
+// destroyRecycled). Throws through Ogre's exceptions; the callers catch.
+Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips) {
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    Ogre::TextureGpu *cube = tm->createTexture(
+        recycledName(prefix), Ogre::GpuPageOutStrategy::Discard,
+        // RenderToTexture because the compositor draws into it;
+        // AllowAutomipmaps because BOTH readers of the environment capture want
+        // a chain — the SH from the 32^2 level, the ibl_specular pass from all
+        // of them (it refuses an input that cannot generate one).
+        mips ? (Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::AllowAutomipmaps)
+             : Ogre::TextureFlags::RenderToTexture,
+        Ogre::TextureTypes::TypeCube);
+    Ogre::CompositorWorkspace *ws = nullptr;
+    try {
+        cube->setResolution(size, size, 6u);
+        // FLOAT16, NOT sRGB8, and it is the ambient integral that decides it:
+        // one 8-bit sRGB step at mid-grey is ~5e-3 of linear radiance, and the
+        // rounding a GPU does on that encode is vendor-dependent — so a
+        // band-0 assertion against `linearOf(the picked colour)` could only be
+        // held to 4e-3, three times looser than the CPU path it replaced. In
+        // half-float the capture stores what the shader computed, and the
+        // tolerance goes back to 1e-3. It also stops the environment clipping
+        // at 1.0, which an HDR sky (a sunset, a bright HDRI) very much does.
+        cube->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
+        if (mips) cube->setNumMipmaps(Ogre::PixelFormatGpuUtils::getMaxMipmapCount(size, size));
+        cube->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+
+        if (!mIblCamera) mIblCamera = mSceneMgr->createCamera(processUniqueName("iblcam"), false);
+        // The capture camera IS the cube's centre: at the origin, unrotated
+        // (camera_cubemap_reorient multiplies the six face rotations onto
+        // whatever orientation it finds), square, 90 degrees.
+        mIblCamera->setPosition(Ogre::Vector3::ZERO);
+        mIblCamera->setOrientation(Ogre::Quaternion::IDENTITY);
+        mIblCamera->setAspectRatio(1.0f);
+        mIblCamera->setFOVy(Ogre::Degree(90.0f));
+        Ogre::CompositorChannelVec externals;
+        externals.push_back(cube);
+        ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
+                              Ogre::IdString(kSkyCaptureWorkspace), false);
+        ws->_beginUpdate(false);
+        ws->_update();
+        ws->_endUpdate(false);
+        cm->removeWorkspace(ws);
+        return cube;
+    } catch (...) {
+        if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
+        try { destroyRecycled(tm, cube); } catch (...) {}
+        throw;
+    }
 }
 
 // Six render_scene passes over render queue 0 into the six faces of a small
@@ -711,12 +887,19 @@ bool OgreScene::skyAmbientSh(float out[27]) const {
 // that means the sky quad has no world AABB yet, culls out, and the capture
 // comes back BLACK (measured: the first colour sky of a run integrated to 0,0,0
 // and every later one was exact). So the capture runs right after
-// updateSceneGraph/applyShadowCacheDirties, still inside the frame; the
-// convolution it queues is picked up by applyPendingIbl at the top of the next.
+// updateSceneGraph/applyShadowCacheDirties, still inside the frame; its
+// convolution runs right behind it, before the frame draws (applyPendingIbl).
 void OgreScene::applyPendingSkyCapture() {
+    // THE CLOUD FIELD FIRST (CLOUDS-2D-1): it is a render pass too, and a
+    // change that re-bakes it also re-captures — the capture must photograph
+    // the new field, not the old one.
+    if (mCloudFieldPending) bakeCloudField();
+    // ...and the clear sky the sheet is lit by, before the capture that
+    // photographs the lit sheet.
+    if (mCloudClearPending && mSkyCapturePending && cloudLayerDrawn()) captureCloudClearSky();
     if (!mSkyCapturePending) return;
     mSkyCapturePending = false;
-    if (mSkyDesc.mode == SkyMode::NoSky) { mSkyShValid = false; return; }
+    if (mSkyDesc.mode == SkyMode::NoSky) { forgetSkySh(); return; }
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     if (!cm->hasWorkspaceDefinition(Ogre::IdString(kSkyCaptureWorkspace))) {
         // Media missing (an unstaged tree): no environment rather than a wrong
@@ -724,51 +907,14 @@ void OgreScene::applyPendingSkyCapture() {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: " + std::string(kSkyCaptureWorkspace) +
             " not found — the sky lights nothing and reflects nothing");
-        mSkyShValid = false;
+        forgetSkySh();
+        landEnvironmentIfComplete();   // a host-pushed cube waiting on this SH
         return;
     }
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::TextureGpu *cube = nullptr;
-    Ogre::CompositorWorkspace *ws = nullptr;
     JAH_TRY {
-        cube = tm->createTexture(
-            recycledName("skycapture"), Ogre::GpuPageOutStrategy::Discard,
-            // RenderToTexture because the compositor draws into it;
-            // AllowAutomipmaps because BOTH readers want a chain — the SH from
-            // the 32^2 level, the ibl_specular pass from all of them (it
-            // refuses an input that cannot generate one).
-            Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::AllowAutomipmaps,
-            Ogre::TextureTypes::TypeCube);
-        cube->setResolution(kSkyCaptureSize, kSkyCaptureSize, 6u);
-        // FLOAT16, NOT sRGB8, and it is the ambient integral that decides it:
-        // one 8-bit sRGB step at mid-grey is ~5e-3 of linear radiance, and the
-        // rounding a GPU does on that encode is vendor-dependent — so a
-        // band-0 assertion against `linearOf(the picked colour)` could only be
-        // held to 4e-3, three times looser than the CPU path it replaced. In
-        // half-float the capture stores what the shader computed, and the
-        // tolerance goes back to 1e-3. It also stops the environment clipping
-        // at 1.0, which an HDR sky (a sunset, a bright HDRI) very much does.
-        cube->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
-        cube->setNumMipmaps(Ogre::PixelFormatGpuUtils::getMaxMipmapCount(kSkyCaptureSize, kSkyCaptureSize));
-        cube->scheduleTransitionTo(Ogre::GpuResidency::Resident);
-
-        if (!mIblCamera) mIblCamera = mSceneMgr->createCamera(processUniqueName("iblcam"), false);
-        // The capture camera IS the cube's centre: at the origin, unrotated
-        // (camera_cubemap_reorient multiplies the six face rotations onto
-        // whatever orientation it finds), square, 90 degrees.
-        mIblCamera->setPosition(Ogre::Vector3::ZERO);
-        mIblCamera->setOrientation(Ogre::Quaternion::IDENTITY);
-        mIblCamera->setAspectRatio(1.0f);
-        mIblCamera->setFOVy(Ogre::Degree(90.0f));
-        Ogre::CompositorChannelVec externals;
-        externals.push_back(cube);
-        ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
-                              Ogre::IdString(kSkyCaptureWorkspace), false);
-        ws->_beginUpdate(false);
-        ws->_update();
-        ws->_endUpdate(false);
-        cm->removeWorkspace(ws);
-        ws = nullptr;
+        cube = renderSkyCaptureCube("skycapture", kSkyCaptureSize, true);
 
         // THE AMBIENT, off the sky the capture just took. The SUN DISC is
         // deliberately NOT in it (the compositor's queue range), and not in the
@@ -789,13 +935,18 @@ void OgreScene::applyPendingSkyCapture() {
         if (mSkyDesc.mode == SkyMode::Cubemap || mSkyDesc.reflections) {
             destroyRecycled(tm, cube);
         } else {
-            // ...and for every other sky the capture IS the environment. The
-            // convolution it queues runs at the top of the NEXT frame
-            // (applyPendingIbl) and frees the cube afterwards — the same one
-            // frame of latency the IBL has always had, and the reason the
-            // ambient a host reads is the sky of the frame before.
+            // ...and for every other sky the capture IS the environment. It
+            // is convolved HERE, in the capture's own frame and before any draw
+            // (we are inside the frame: a command buffer exists), into the next
+            // set's cube; the convolution frees the capture afterwards. It used
+            // to be queued for the top of the next frame with the newborn cube
+            // already bound — the change frame's flash (landEnvironmentIfComplete).
             buildReflectionCubemapFrom(cube, true);
+            applyPendingIbl();
         }
+        // The whole set lands now when the SH read was synchronous; a deferred
+        // read lands it at the next frame's top (readSkyShTicket).
+        landEnvironmentIfComplete();
         return;
     } catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
@@ -803,9 +954,9 @@ void OgreScene::applyPendingSkyCapture() {
         mError = std::string("engine: ") + e.what();
     }
     Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky capture failed: " + mError);
-    if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
     if (cube) { try { destroyRecycled(tm, cube); } catch (...) {} }
-    mSkyShValid = false;
+    forgetSkySh();
+    landEnvironmentIfComplete();
 }
 
 // The ambient, read off the captured cube's 32^2 mip: 6 x 1024 texels, once per
@@ -875,7 +1026,13 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
     // every capture takes the synchronous path, so the A/B is a run of the
     // shipped binary and not a build.
     static const bool forceSync = std::getenv("JAHSHAKA_SKY_SH_SYNC") != nullptr;
-    if (mSkyShValid && consecutive && !forceSync) { issueSkyShRead(cube); return; }
+    // A capture the cloud layer's SCROLL asked for (tickCloudClock) is not a
+    // gesture but it is PERIODIC, and its ambient trailing by one more frame
+    // is invisible, so it takes the no-wait read too: the cadence costs the
+    // capture's GPU work and never a GPU->CPU stall on the UI thread.
+    const bool asyncOnce = mSkyCaptureAsyncOnce;
+    mSkyCaptureAsyncOnce = false;
+    if (mSkyShValid && (consecutive || asyncOnce) && !forceSync) { issueSkyShRead(cube); return; }
     integrateSkyShNow(cube);
 }
 
@@ -883,8 +1040,8 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
 // No `flushCommands()` — the frame's own commit submits it, and the pin flushes
 // the copy encoder itself if the cube is destroyed with a download pending
 // (VulkanQueue::notifyTextureDestroyed), which is what makes the capture's
-// ordinary lifetime (freed by applyPendingIbl next frame, or straight away for
-// a cubemap sky) safe to leave exactly as it was.
+// ordinary lifetime (freed by its convolution in the capture's own frame, or
+// straight away for a cubemap sky) safe to leave exactly as it was.
 void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
     destroySkyShTicket();       // never overwrite one: the ticket owns a staging buffer
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
@@ -911,6 +1068,7 @@ void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
 void OgreScene::pollSkyShRead() {
     if (mSkyCaptureIdleFrames < 1000u) ++mSkyCaptureIdleFrames;   // the gesture's clock
     readSkyShTicket(false);
+    readCloudClearTicket(false);
 }
 
 // READ THE DEFERRED DOWNLOAD, or leave it for the next frame.
@@ -939,8 +1097,11 @@ void OgreScene::readSkyShTicket(bool force) {
         integrateSkyShFromBox(box);
         mSkyShTicket->unmap();
         mSkyShValid = true;
+        mSkyShFresh = true;
     } JAH_CATCH(mError, );
     destroySkyShTicket();
+    // The deferred read was the set's last part: it lands with its cube.
+    landEnvironmentIfComplete();
 }
 
 void OgreScene::destroySkyShTicket() {
@@ -957,6 +1118,7 @@ void OgreScene::destroySkyShTicket() {
 // every capture, which is how the two are A/B'd on one binary).
 void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
     mSkyShValid = false;
+    mSkyShFresh = false;
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::AsyncTextureTicket *ticket = nullptr;
     JAH_TRY {
@@ -973,6 +1135,7 @@ void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
         tm->destroyAsyncTextureTicket(ticket);
         ticket = nullptr;
         mSkyShValid = true;
+        mSkyShFresh = true;
         return;
     } catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
@@ -986,7 +1149,7 @@ void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
 // ONE INTEGRAL, TWO CALLERS: the cube face's texels -> the nine coefficients.
 // Neither path may have its own copy of this — the synchronous form is the
 // oracle for the asynchronous one, and two implementations could not be.
-void OgreScene::integrateSkyShFromBox(const Ogre::TextureBox &box) {
+void OgreScene::integrateSkyShFromBox(const Ogre::TextureBox &box, float *out) {
     const Ogre::uint32 n = box.width;
     {
         ShAccum acc;
@@ -1017,7 +1180,7 @@ void OgreScene::integrateSkyShFromBox(const Ogre::TextureBox &box) {
                 }
             }
         }
-        acc.finish(mSkySh);
+        acc.finish(out ? out : mSkySh);
     }
 }
 
@@ -1312,26 +1475,30 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
     return cube;
 }
 
-// EVERY sky change lands here, so this is where the environment cubemap is
-// freed and immediately re-allocated — and the allocator hands the replacement
-// back at the SAME ADDRESS routinely (observed on every re-bake of the Showroom
-// scene: `destroyReflection refl=0x55556cb5e400` then `new cube=0x55556cb5e400`).
-// That matters because Ogre identifies a texture by its TextureGpu POINTER in
-// two caches that outlive it: VulkanTextureGpuManager::mCachedTex (the image
-// views a descriptor set is built from) and DescriptorSetTexture::operator!=
-// (which is how bakeTextures decides a datablock's set is unchanged and can be
-// kept). A recycled address therefore makes an old, dead view look current.
-// destroyReflection() below is what keeps that safe: it lets Ogre's
-// TextureGpuListener::Deleted run so the old descriptor sets die WITH the old
-// texture. Do not "optimise" the order there.
+// EVERY sky change lands here: the NEXT environment cube is allocated beside
+// the one in force, never in its place (PHOTON-SKY-TRANSIENT-1). The cube in
+// force stays bound until landEnvironmentIfComplete swaps the whole set, so no
+// datablock ever samples a cube before the convolution has written it. (This
+// function used to destroy the bound cube and bind the newborn one straight
+// away, with the convolution a frame later: the change frame's flash.)
+//
+// Ogre identifies a texture by its TextureGpu POINTER in two caches that
+// outlive it: VulkanTextureGpuManager::mCachedTex (the image views a
+// descriptor set is built from) and DescriptorSetTexture::operator!= (which is
+// how bakeTextures decides a datablock's set is unchanged and can be kept). A
+// recycled address therefore makes an old, dead view look current — which is
+// why the swap destroys the old cube FIRST (its TextureGpuListener::Deleted
+// kills the stale sets) and only then binds the new one. Do not "optimise" the
+// order in landEnvironmentIfComplete or destroyReflection.
 void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource) {
-    destroyReflection();
+    // An unlanded next set is superseded by this one.
+    destroyPendingReflection();
     mIblSourceTex = srcCube;
     mIblSourceOwned = ownsSource;
     const Ogre::uint32 w = srcCube->getWidth(), h = srcCube->getHeight();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-    // The OUTPUT the PBR datablocks sample: same size, mipped, and a UAV, which
-    // is what the compute integrator writes through.
+    // The OUTPUT the PBR datablocks will sample: same size, mipped, and a UAV,
+    // which is what the compute integrator writes through.
     Ogre::TextureGpu *cube = tm->createTexture(
         recycledName("skyrefl"), Ogre::GpuPageOutStrategy::Discard,
         Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::Uav |
@@ -1345,42 +1512,28 @@ void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsS
     cube->setPixelFormat(srcCube->getPixelFormat());
     cube->setNumMipmaps(Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h));
     cube->scheduleTransitionTo(Ogre::GpuResidency::Resident);
-    // A NEWBORN RENDER TEXTURE IS BORN READY TO RENDER, NOT READY TO SAMPLE
-    // (ENVPROBE-LAYOUT-1's second site, found by sky.env_layout under the
-    // validation layer). `VulkanTextureGpu::createInternalResourcesImpl`
-    // assumes "render textures always start ready to render" and sets
-    // `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL` — and this cube is bound to
-    // every datablock by `applyReflectionToAll` BELOW, while the convolution
-    // that fills it only runs at the top of the NEXT frame (the documented one
-    // frame of IBL latency). Every draw in between samples it, so that frame
-    // reported `VUID-vkCmdDrawIndexed-imageLayout-00344` on `texEnvProbeMap`:
-    // one report per sky change, which is the class lane VR-3b recorded from
-    // its VR fixture (V2F-9) and could not reproduce without a headset.
-    //
-    // The CONTENT of that frame is unchanged — an unwritten cube is what the
-    // in-between frame always sampled; only the layout it is sampled in is
-    // corrected.
-    handOverForSampling(mRoot, cube);
-    mReflectionTex = cube;
-    // TELL HlmsPbs HOW MANY MIPS THE PROBE HAS. Without this the roughness->LOD
-    // map (envSpecularRoughness, 800.PixelShader_piece_ps.any:4) multiplies by
-    // passBuf.envMapNumMipmaps, which stays at its 1.0 default for a plain
-    // PBSM_REFLECTION texture — only the PCC classes ever call this. Every
-    // reflection was therefore sampled at mip 0-1 no matter how rough the
-    // surface: a prefiltered chain nothing reads. (Pre-existing: the box mip
-    // chain this replaces was equally unread.)
-    static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
-        ->_notifyIblSpecMipmap(cube->getNumMipmaps());
-    // The convolution is a compute dispatch: queue it for the next frame, where
-    // a command buffer exists (same contract as applyPendingGi).
+    // (No hand-over for sampling here: nothing samples this cube before the
+    // convolution has written it and handOverForSampling has moved it to the
+    // Texture layout — that is the point of the pending set.)
+    mReflPendingTex = cube;
+    // The convolution is a compute dispatch: it needs a command buffer, so it
+    // runs in applyPendingIbl — straight away when the caller is the capture
+    // (inside the frame), at the top of the next frame for a host-pushed cube.
     mIblPending = true;
-    applyReflectionToAll();
 }
 
 void OgreScene::applyPendingIbl() {
     if (!mIblPending) return;
     mIblPending = false;
-    if (!mIblSourceTex || !mReflectionTex) return;
+    convolvePendingIbl();
+    // The convolution may have been the set's last part (a host-pushed cube, or
+    // a capture whose SH was read synchronously).
+    landEnvironmentIfComplete();
+}
+
+void OgreScene::convolvePendingIbl() {
+    if (!mIblSourceTex || !mReflPendingTex) return;
+    Ogre::TextureGpu *const target = mReflPendingTex;
     // A cube we own is scratch: once the convolution has read it, its (mipped,
     // full-size) VRAM is dead weight until the next sky change.
     struct FreeSource {
@@ -1405,29 +1558,29 @@ void OgreScene::applyPendingIbl() {
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka: " + std::string(kIblWorkspace) +
                 " not found — sky reflections fall back to box mipmaps");
-            mIblSourceTex->copyTo(mReflectionTex, mReflectionTex->getEmptyBox(0), 0,
+            mIblSourceTex->copyTo(target, target->getEmptyBox(0), 0,
                                   mIblSourceTex->getEmptyBox(0), 0);
-            mReflectionTex->_autogenerateMipmaps();
-            handOverForSampling(mRoot, mReflectionTex);
+            target->_autogenerateMipmaps();
+            handOverForSampling(mRoot, target);
             return;
         }
         if (!mIblCamera) mIblCamera = mSceneMgr->createCamera(processUniqueName("iblcam"), false);
         Ogre::CompositorChannelVec externals;
         externals.push_back(mIblSourceTex);
-        externals.push_back(mReflectionTex);
+        externals.push_back(target);
         ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
                               Ogre::IdString(kIblWorkspace), false);
         ws->_beginUpdate(false);
         ws->_update();
         ws->_endUpdate(false);
         cm->removeWorkspace(ws);
-        // THE CONVOLUTION LEFT IT A UAV, AND EVERY DATABLOCK SAMPLES IT
+        // THE CONVOLUTION LEFT IT A UAV, AND EVERY DATABLOCK WILL SAMPLE IT
         // (ENVPROBE-LAYOUT-1): `CompositorPassIblSpecular::analyzeBarriers`
         // resolves the output to `ResourceLayout::Uav` and this workspace has
         // no later pass to move it back, so without this the cube is sampled in
         // `VK_IMAGE_LAYOUT_GENERAL` for the rest of its life. See
         // handOverForSampling.
-        handOverForSampling(mRoot, mReflectionTex);
+        handOverForSampling(mRoot, target);
         return;
     } catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
@@ -1440,19 +1593,16 @@ void OgreScene::applyPendingIbl() {
     Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky IBL specular failed: " + mError);
     if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
     JAH_TRY {
-        mIblSourceTex->copyTo(mReflectionTex, mReflectionTex->getEmptyBox(0), 0,
+        mIblSourceTex->copyTo(target, target->getEmptyBox(0), 0,
                               mIblSourceTex->getEmptyBox(0), 0);
-        mReflectionTex->_autogenerateMipmaps();
-        handOverForSampling(mRoot, mReflectionTex);
+        target->_autogenerateMipmaps();
+        handOverForSampling(mRoot, target);
     } JAH_CATCH(mError, );
 }
 
 void OgreScene::destroyReflection() {
-    mIblPending = false;
+    destroyPendingReflection();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-    if (mIblSourceTex && mIblSourceOwned) destroyRecycled(tm, mIblSourceTex);
-    mIblSourceTex = nullptr;
-    mIblSourceOwned = false;
     if (!mReflectionTex) return;
     Ogre::TextureGpu *tex = mReflectionTex;
     mReflectionTex = nullptr;
@@ -1482,17 +1632,13 @@ void OgreScene::destroyReflection() {
     try { destroyRecycled(tm, tex); }
     catch (Ogre::Exception &e)  { mError = e.getFullDescription(); }
     catch (std::exception &e)   { mError = std::string("engine: ") + e.what(); }
-    applyReflectionToAll();
-    // Recompute envMapNumMipmaps from whatever reflection textures remain
-    // (_notifyIblSpecMipmap only ever grows it).
-    static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
-        ->resetIblSpecMipmap(0u);
+    applyReflectionToAll();   // ...which also marks this scene's IBL chain length
 }
 
 void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 
 // THE ENV-PROBE SLOT HAS ONE OCCUPANT (found the hard way, 2026-09-07, the
-// reflections P3/P6 lane; it is why `reflectionTexForDatablocks()` exists at all
+// reflections P3/P6 lane; it is why `probeGridBound()` gates `reflectionTexFor`
 // rather than every site just reading mReflectionTex).
 //
 // The PBS pixel shader has exactly ONE env-probe texture, `texEnvProbeMap`. An
@@ -1552,65 +1698,53 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // while a grid exists, exactly as before. Closing that needs a per-datablock
 // environment texture, which this pin does not have.
 //
-// AND THE QUESTION IS PROCESS-WIDE, NOT PER SCENE (lane SKY-FALLBACK-1, second
-// read; this was a live defect on main). `HlmsPbs` is a singleton and it sets
-// `parallax_correct_cubemaps` — and therefore makes `texEnvProbeMap` a cube
-// ARRAY — for EVERY scene's pass while ANY grid is bound (OgreHlmsPbs.cpp:1820-
-// 1828). Testing this scene's own `mPcc` therefore answered the wrong question:
-// a SECOND scene (a preview, a thumbnail, the avatar module) whose materials
-// kept their manual sky cube generated `SampleEnvProbe` against a cube array,
-// which does not compile, and its objects did not draw at all. That is the
-// avatar preview's black character — measured, r3 g3 b4 with two shader-compile
-// exceptions in the log, and previously misread as the missing sky.
+// THE QUESTION IS THIS SCENE'S (PHOTON-SCENE-SWITCH-1). `HlmsPbs` sets
+// `parallax_correct_cubemaps` — and therefore makes `texEnvProbeMap` a cube ARRAY
+// — for every pass that runs with a PCC bound (OgreHlmsPbs.cpp:1820-1828), and
+// since the binding became per pass (SceneGiBinding) only THIS scene's passes run
+// with this scene's grid. So the answer is "does this scene's binding hold a
+// grid": its datablocks drop their manual cube when it does, and no other
+// scene's are touched. (While the binding was process-wide the question was too,
+// and every grid transition walked every scene — a preview whose materials kept
+// their sky cube generated `SampleEnvProbe` against a cube array and drew
+// nothing: the avatar preview's black character, r3 g3 b4. gi.pcc_second_scene
+// guards both halves.) The scene keeps its sky either way: under a grid its own
+// sky cube reaches its materials through the pass-level slot below (the state is
+// per SceneManager — FogHlmsListener::SkyEnvState).
 //
-// So it asks HlmsPbs. The scene keeps its sky either way: with a grid bound
-// anywhere, the pass property fires in THAT scene's passes too, so its own sky
-// cube reaches its materials through the pass-level slot below (the state is
-// per SceneManager — FogHlmsListener::SkyEnvState). Every site that binds or
-// unbinds a grid calls OgreEngine::reapplyReflectionsAllScenes so the binding
-// follows the singleton for every scene, not just the one that changed.
-// THE ROUGHNESS-TO-LOD MAP AFTER A PROBE TRANSITION (lane SKY-FALLBACK-1,
-// second read). `passBuf.envMapNumMipmaps` is ONE number for the whole pass and
-// `_notifyIblSpecMipmap` only ever GROWS it.
-// `ParallaxCorrectedCubemapAuto::setEnabled` pushes the PROBE ARRAY's count into
-// it (6 while the placement holds the scout's 32 px, 10 at a 512 px tier) and
-// the engine pushed the SKY cube's count only when the cube was BUILT, never
-// again — so once a grid had come and gone, every manual cube in every scene
-// mapped its roughness against a chain it does not have. The scene-wide walk
-// this lane added would spread one scene's transition to all of them.
+// THE ROUGHNESS-TO-LOD MAP IS THE SCENE'S (PHOTON-SCENE-SWITCH-2).
+// `passBuf.envMapNumMipmaps` is ONE number per pass: the envSpecularRoughness
+// map multiplies by it, so it must be the length of the chain the pass's env
+// slot actually holds. HlmsPbs keeps it process-wide and GROW-ONLY
+// (`_notifyIblSpecMipmap`; `resetIblSpecMipmap(0)` re-derives the max over EVERY
+// datablock of every scene), so two scenes with sky cubes of different sizes gave
+// the smaller chain the larger count — a mid-roughness reflection sampled past
+// the end of its chain, over-blurred. (The old transition-only renotify, and the
+// ssr_mirror bar that moved when it ran more often, were symptoms of the same
+// process-wide number.)
 //
-// SO IT RUNS ON THE TRANSITION AND NOWHERE ELSE, which is the whole of the fix
-// and was measured the hard way. Putting it inside applyReflectionToAllImpl —
-// which every sky build, gain edge and material edit funnels through — changes
-// scenes that never had a grid at all: `scripting.e2e.ssr_mirror`'s "SSR is
-// still in this picture" bar fell 11 -> 7 against a bar of 8, reproducibly at
-// -j2 and in BOTH forms (the growth-only notify and the stricter
-// `resetIblSpecMipmap(0)` re-derivation), because a blurrier environment term is
-// a smaller difference between SSR on and off. That is a real picture question
-// about scenes with an authored cube and no probes, it is not this lane's, and
-// it is recorded for the lead rather than absorbed by widening somebody's bar.
-void OgreScene::renotifyReflectionMipmaps() {
+// Now each scene resolves its own: the bound grid's array when its passes bind
+// one, else the largest of its materials' bound reflection cubes (the sky's
+// prefiltered cube, an authored map). Marked dirty wherever a slot's occupant can
+// change, resolved at the frame head, bound per pass with the rest of the record
+// (bindSceneGi -> resetIblSpecMipmap(n), which also takes HlmsPbs out of its
+// automatic mode for good: no Ogre-side notify can move it behind our back).
+void OgreScene::resolveIblMipmaps() {
+    if (!mIblMipmapsDirty) return;
+    mIblMipmapsDirty = false;
+    unsigned mips = 1u;
     JAH_TRY {
-        auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(
-            mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-        if (!hlmsPbs) return;
-        unsigned mips = 0;
-        for (const auto &kv : mMaterials) {
-            if (kv.second.unlit) continue;
-            if (Ogre::TextureGpu *bound = reflectionTexFor(kv.second))
-                mips = std::max(mips, unsigned(bound->getNumMipmaps()));
+        if (mPcc && mGiBinding.pcc == mPcc && mPcc->getBindTexture()) {
+            mips = mPcc->getBindTexture()->getNumMipmaps();
+        } else {
+            for (const auto &kv : mMaterials) {
+                if (kv.second.unlit) continue;
+                if (Ogre::TextureGpu *bound = reflectionTexFor(kv.second))
+                    mips = std::max(mips, unsigned(bound->getNumMipmaps()));
+            }
         }
-        if (mips > 1u) hlmsPbs->_notifyIblSpecMipmap(Ogre::uint8(mips));
     } JAH_CATCH(mError, );
-}
-
-bool OgreScene::anyProbeGridBound() const {
-    auto *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-    return pbs && pbs->getParallaxCorrectedCubemap() != nullptr;
-}
-
-Ogre::TextureGpu *OgreScene::reflectionTexForDatablocks() const {
-    return anyProbeGridBound() ? nullptr : mReflectionTex;
+    mGiBinding.iblMipmaps = float(std::max(1u, std::min(255u, mips)));
 }
 
 void OgreScene::applyReflectionToAllImpl() {
@@ -1622,6 +1756,7 @@ void OgreScene::applyReflectionToAllImpl() {
     // re-written here or a scene that acquired its probes after its ambient
     // keeps the sky-cube answer.
     refreshEnvmapScale();
+    markIblMipmapsDirty();
     auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
     for (auto &kv : mMaterials) {
         if (kv.second.unlit) continue;
@@ -1741,6 +1876,9 @@ void OgreScene::applySunDisc(const SunDisc &sun) {
         ps->setNamedConstant("sunColour",
                              Ogre::Vector4(sun.colour.r, sun.colour.g, sun.colour.b, 1.0f));
     } JAH_CATCH(mError, );
+    // ...and, while a cloud layer is drawn, the disc seen THROUGH it wears the
+    // clouded variant of this material with the same two numbers.
+    syncSunDiscClouds();
 }
 
 void OgreScene::destroySunDisc() {
@@ -1755,11 +1893,12 @@ void OgreScene::destroySunDisc() {
 
 void OgreScene::destroySky() {
     destroySunDisc();
+    destroyCloudLayer();
     // The analytic sky goes with it — but the COMPONENT does not: the fog may
     // still want it (syncAtmosphere owns that decision).
     if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
     mSkyCapturePending = false;
-    mSkyShValid = false;
+    forgetSkySh();
     destroySkyShTicket();      // it was answering for a sky that is gone
     // Unbind the reflection cubemap from every datablock before it goes away.
     destroyReflection();
@@ -1770,6 +1909,739 @@ void OgreScene::destroySky() {
         mSkyOwnedTex = nullptr;
     }
     if (mIblCamera) { mSceneMgr->destroyCamera(mIblCamera); mIblCamera = nullptr; }
+}
+
+
+// ---------------------------------------------------------------------------
+// THE CLOUD LAYER (CLOUDS-2D-1; SPECS/CLOUDS_ASSESSMENT.md option C0)
+// ---------------------------------------------------------------------------
+// HDRP's Cloud Layer, in this engine's terms: ONE sheet of cloud at an altitude
+// over a curved earth, drawn by a THIRD screen quad beside the sky's and the sun
+// disc's (the disc's shape: our own low-level material, the camera ray derived
+// from the inverse view-projection). Four pieces, each where it belongs:
+//
+//   * THE FIELD — the sheet's vertical optical depth over one 16 km tile, baked
+//     into a 1024^2 R16F target from a fixed-seed Perlin-Worley noise (generated
+//     once per process on the CPU, uploaded as a ManualTexture) times the
+//     optional weather map. Re-baked on a change of coverage, density or map,
+//     never per frame; the wind SCROLLS it (a uniform), it does not re-bake it.
+//   * THE LAYER — render queue 0, subgroup 2: after the sky (subgroup 1), inside
+//     the environment capture's range (queue 0, visibility 0x1), so the ambient
+//     SH, the reflection cube and every Photon estimator that reads the one
+//     environment see the sheet with no further work (PHOTON B3). Premultiplied
+//     over the sky; lit by the sun (two-stream transmission plus a two-lobe
+//     single scatter, self-shadowed through the field towards the sun) and by
+//     the sky's own mean radiance (JahCloudLayer_ps.glsl says why each).
+//   * THE DISC — the sun disc is drawn at queue 5, after the layer (it must stay
+//     out of the capture), so while a layer exists it wears a clouded variant
+//     of its material: the same disc times the sheet's transmittance along the
+//     same ray (JahCloudLayer.glsl is the one copy of that geometry).
+//   * THE GROUND SHADOW — the same field handed to HlmsPbs as a third extra
+//     pass texture (FogHlmsListener, `jah_cloud_shadow`), multiplying the first
+//     directional light's shadow factor by exp(-tau / mu_s) where the sun ray
+//     from the pixel crosses the sheet.
+//
+// A DISABLED LAYER CREATES NOTHING: no quad, no texture, no pass property. A
+// scene that never enables one generates every shader and draws every pixel
+// exactly as it did before this lane (the 0048 pattern), which is what keeps
+// the selftest hashes and every fixture where they are.
+//
+// THE CAPTURE CADENCE. A parameter change re-captures at once (setSky). While
+// the sheet SCROLLS the environment it is captured into goes stale slowly — a
+// cloud moves a few metres a frame against a 16 km tile — so the scroll
+// re-captures every kCloudCaptureFrames drawn frames, with the asynchronous SH
+// read (no GPU wait). A capture is not free downstream: a new SH re-captures the
+// probes that read it, re-integrates the irradiance field and relights the
+// surface cache's indirect half (the environment is in its signature). The
+// period below is set from that measured cost.
+namespace {
+constexpr float    kCloudTileMetres   = 16000.0f;   // one tile of the field, in world metres
+constexpr Ogre::uint32 kCloudFieldSize = 1024u;     // ~16 m a texel: shadows soft, cells resolved
+constexpr Ogre::uint32 kCloudNoiseSize = 256u;
+constexpr float    kCloudTauFull      = 32.0f;      // a full column's optical depth at density 1 (a thick stratocumulus deck; its base transmits ~22 % diffusely)
+constexpr float    kCloudSlabMetres   = 1000.0f;    // the sheet's thickness the self-shadow crosses
+constexpr float    kCloudFadeMetres   = 60000.0f;   // the distance the far sheet fades over
+// THE SCROLL'S RE-CAPTURE PERIOD, SET FROM ITS MEASURED DOWNSTREAM COST
+// (spikes/clouds-2d-1/cadence/, 2026-09-23: Debug, Xvfb, one process, three
+// interleaved still/scroll pairs of 240 frames at a forced period of 10, the
+// default tier — probe grid + irradiance field, cards off at every shipped
+// tier). ONE scroll capture costs 26.4 ms of GPU and 45.7 ms of UI-thread CPU
+// in total — 28.8 and 16.7 still frames — almost none of it the capture: a new
+// SH stales the probe grid ("ambient", its whole grid re-captured at the
+// budget's one probe a frame) and re-sweeps the irradiance field. At 90 frames
+// that is +32 % GPU / +18 % CPU amortised; at 600 it is +4.8 % / +2.8 %. A
+// sheet at 10 m/s moves 100 m in those 10 s against a field of kilometre
+// cells, so the ambient it photographs has not moved; a parameter change
+// still re-captures at once.
+constexpr unsigned kCloudCaptureFrames = 600u;
+/// The period in force: kCloudCaptureFrames, unless the run-wide measurement
+/// latch JAHSHAKA_CLOUD_CAPTURE_FRAMES names another (read once — the A/B of
+/// the cadence is a run of the shipped binary, like JAHSHAKA_SKY_SH_SYNC).
+unsigned cloudCapturePeriod() {
+    static const unsigned period = [] {
+        const char *v = std::getenv("JAHSHAKA_CLOUD_CAPTURE_FRAMES");
+        const long n = v ? std::strtol(v, nullptr, 10) : 0;
+        return n > 0 ? unsigned(n) : kCloudCaptureFrames;
+    }();
+    return period;
+}
+const char *kCloudBakeWorkspace = "JahshakaCloudBakeWorkspace";
+
+// ---- the noise: a fixed seed, integer hashing, every channel tiling --------
+inline Ogre::uint32 cloudHash(Ogre::uint32 x, Ogre::uint32 y, Ogre::uint32 seed) {
+    Ogre::uint32 h = x * 0x8da6b343u ^ y * 0xd8163841u ^ seed * 0xcb1ab31fu;
+    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+    return h;
+}
+inline float cloudRand01(Ogre::uint32 h) { return float(h & 0xFFFFFFu) / float(0x1000000u); }
+inline Ogre::uint32 wrapCell(int i, int period) { return Ogre::uint32(((i % period) + period) % period); }
+
+/// Gradient noise tiling at `period` lattice cells over [0,1).
+float cloudPerlin(float u, float v, int period, Ogre::uint32 seed) {
+    const float x = u * float(period), y = v * float(period);
+    const int ix = int(std::floor(x)), iy = int(std::floor(y));
+    const float fx = x - float(ix), fy = y - float(iy);
+    auto grad = [&](int cx, int cy, float dx, float dy) {
+        const Ogre::uint32 h = cloudHash(wrapCell(cx, period), wrapCell(cy, period), seed);
+        const float a = cloudRand01(h) * 6.28318531f;
+        return std::cos(a) * dx + std::sin(a) * dy;
+    };
+    const float n00 = grad(ix, iy, fx, fy), n10 = grad(ix + 1, iy, fx - 1.0f, fy);
+    const float n01 = grad(ix, iy + 1, fx, fy - 1.0f), n11 = grad(ix + 1, iy + 1, fx - 1.0f, fy - 1.0f);
+    const float sx = fx * fx * fx * (fx * (fx * 6.0f - 15.0f) + 10.0f);
+    const float sy = fy * fy * fy * (fy * (fy * 6.0f - 15.0f) + 10.0f);
+    const float a = n00 + (n10 - n00) * sx, b = n01 + (n11 - n01) * sx;
+    return a + (b - a) * sy;   // about [-0.7, 0.7]
+}
+float cloudPerlinFbm(float u, float v, int period, int octaves, Ogre::uint32 seed) {
+    float sum = 0.0f, amp = 0.5f;
+    for (int o = 0; o < octaves; ++o, period *= 2, amp *= 0.5f)
+        sum += amp * cloudPerlin(u, v, period, seed + Ogre::uint32(o) * 101u);
+    return sum;
+}
+/// 1 - the distance to the nearest feature point (Worley F1), tiling.
+float cloudWorley(float u, float v, int period, Ogre::uint32 seed) {
+    const float x = u * float(period), y = v * float(period);
+    const int ix = int(std::floor(x)), iy = int(std::floor(y));
+    float best = 4.0f;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int cx = ix + dx, cy = iy + dy;
+            const Ogre::uint32 h = cloudHash(wrapCell(cx, period), wrapCell(cy, period), seed);
+            const float px = float(cx) + cloudRand01(h);
+            const float py = float(cy) + cloudRand01(cloudHash(h, 0x9e3779b9u, seed));
+            const float d2 = (px - x) * (px - x) + (py - y) * (py - y);
+            best = std::min(best, d2);
+        }
+    return 1.0f - std::min(1.0f, std::sqrt(best));
+}
+float cloudWorleyFbm(float u, float v, int period, Ogre::uint32 seed) {
+    return 0.625f * cloudWorley(u, v, period, seed) +
+           0.25f  * cloudWorley(u, v, period * 2, seed + 7u) +
+           0.125f * cloudWorley(u, v, period * 4, seed + 13u);
+}
+
+/// THE NOISE, ONCE PER PROCESS: 256^2 RGBA8 plus its box-filtered mip chain
+/// (the bake samples it minified). R = Perlin-Worley cumulus, G = a finer
+/// Worley (the edge erosion), B = low-frequency Perlin (large-scale
+/// patchiness), A = high-frequency Perlin (reserved for wisps). Each channel is
+/// stretched to its own measured [min, max] — deterministic, because the data
+/// is. The seed is a constant: every run, every machine, the same sky.
+const std::vector<std::vector<Ogre::uint8>> &cloudNoiseMips() {
+    static const std::vector<std::vector<Ogre::uint8>> mips = [] {
+        const Ogre::uint32 n = kCloudNoiseSize;
+        const Ogre::uint32 kSeed = 0x6a09e667u;
+        std::vector<float> ch[4];
+        for (auto &c : ch) c.resize(size_t(n) * n);
+        for (Ogre::uint32 y = 0; y < n; ++y)
+            for (Ogre::uint32 x = 0; x < n; ++x) {
+                const float u = (float(x) + 0.5f) / float(n), v = (float(y) + 0.5f) / float(n);
+                const size_t i = size_t(y) * n + x;
+                // Schneider's Perlin-Worley: the Perlin fbm remapped from the
+                // inverted Worley fbm's floor — billowy cells with soft tops.
+                const float perlin = 0.5f + cloudPerlinFbm(u, v, 4, 4, kSeed);
+                const float worley = cloudWorleyFbm(u, v, 4, kSeed + 1u);
+                const float lo = worley - 1.0f;
+                ch[0][i] = (perlin - lo) / std::max(1.0f - lo, 1e-4f);
+                ch[1][i] = cloudWorleyFbm(u, v, 8, kSeed + 2u);
+                ch[2][i] = cloudPerlinFbm(u, v, 2, 3, kSeed + 3u);
+                ch[3][i] = cloudPerlinFbm(u, v, 16, 3, kSeed + 4u);
+            }
+        std::vector<Ogre::uint8> base(size_t(n) * n * 4u);
+        for (int c = 0; c < 4; ++c) {
+            float lo = ch[c][0], hi = ch[c][0];
+            for (float f : ch[c]) { lo = std::min(lo, f); hi = std::max(hi, f); }
+            const float k = hi > lo ? 1.0f / (hi - lo) : 0.0f;
+            for (size_t i = 0; i < ch[c].size(); ++i)
+                base[i * 4u + size_t(c)] =
+                    Ogre::uint8(std::lround(std::min(1.0f, std::max(0.0f, (ch[c][i] - lo) * k)) * 255.0f));
+        }
+        std::vector<std::vector<Ogre::uint8>> out;
+        out.push_back(std::move(base));
+        for (Ogre::uint32 m = n; m > 1u; m >>= 1) {
+            const std::vector<Ogre::uint8> &src = out.back();
+            const Ogre::uint32 h = m >> 1;
+            std::vector<Ogre::uint8> dst(size_t(h) * h * 4u);
+            for (Ogre::uint32 y = 0; y < h; ++y)
+                for (Ogre::uint32 x = 0; x < h; ++x)
+                    for (int c = 0; c < 4; ++c) {
+                        const auto at = [&](Ogre::uint32 sx, Ogre::uint32 sy) {
+                            return unsigned(src[(size_t(sy) * m + sx) * 4u + size_t(c)]);
+                        };
+                        dst[(size_t(y) * h + x) * 4u + size_t(c)] = Ogre::uint8(
+                            (at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) +
+                             at(2 * x + 1, 2 * y + 1) + 2u) / 4u);
+                    }
+            out.push_back(std::move(dst));
+        }
+        return out;
+    }();
+    return mips;
+}
+
+/// A per-scene clone of one of our materials (the sun disc's reason: its
+/// parameters are this scene's). Null when the media is not staged.
+Ogre::MaterialPtr cloneForScene(const char *base, Ogre::SceneManager *sm) {
+    Ogre::MaterialManager &mm = Ogre::MaterialManager::getSingleton();
+    const Ogre::String name = Ogre::String(base) + Ogre::StringConverter::toString(sm->getId());
+    Ogre::MaterialPtr m = mm.getByName(name);
+    if (m) return m;
+    Ogre::MaterialPtr src = std::static_pointer_cast<Ogre::Material>(
+        mm.load(base, Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME));
+    if (!src) return Ogre::MaterialPtr();
+    m = src->clone(name);
+    m->load();
+    // A material whose program failed to compile has no supported technique,
+    // and drawing it takes the frame down in the pipeline build — refuse it
+    // here, where the failure is one line in the log instead.
+    if (m->getNumSupportedTechniques() == 0) return Ogre::MaterialPtr();
+    return m;
+}
+}   // namespace
+
+bool OgreScene::cloudLayerDrawn() const {
+    return mSkyDesc.clouds.enabled && mSkyDesc.mode != SkyMode::NoSky && mCloudQuad &&
+           mCloudMaterial && mCloudField;
+}
+
+void OgreScene::applyCloudLayer(bool fieldChanged) {
+    const CloudLayerDesc &c = mSkyDesc.clouds;
+    const unsigned period =
+        (c.enabled && (c.wind[0] != 0.0f || c.wind[1] != 0.0f)) ? cloudCapturePeriod() : 0u;
+    // A wind that STARTS starts its period: the first scroll capture is one
+    // period after the sheet began to move, never whatever an earlier wind left.
+    if (period && !mCloudStatus.capturePeriodFrames) mCloudFramesSinceCapture = 0u;
+    mCloudStatus.capturePeriodFrames = period;
+    if (!c.enabled || mSkyDesc.mode == SkyMode::NoSky) {
+        // HIDDEN, NOT DESTROYED (the disc's rule): the layer is switched on and
+        // off from a World row, and its field is 2 MB that a switch back on
+        // would otherwise re-bake. The ground shadow goes with it at once.
+        if (mCloudQuad) mCloudQuad->setVisibilityFlags(0u);
+        FogHlmsListener::setCloudShadow(mSceneMgr, FogHlmsListener::CloudShadowState());
+        mCloudStatus.drawn = false;
+        mCloudStatus.reason = !c.enabled ? "off" : "noSky";
+        syncSunDiscClouds();
+        snapshotCloudGi();
+        return;
+    }
+    JAH_TRY {
+        Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+        if (!mCloudMaterial) mCloudMaterial = cloneForScene("Jahshaka/CloudLayer", mSceneMgr);
+        // The bake's material is the BASE one, not a clone: a render_quad pass
+        // names its material in the compositor script, and the bake binds its
+        // inputs immediately before the one render that reads them.
+        if (!mCloudBakeMaterial)
+            mCloudBakeMaterial = std::static_pointer_cast<Ogre::Material>(
+                Ogre::MaterialManager::getSingleton().load(
+                    "Jahshaka/CloudBake", Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME));
+        if (mCloudBakeMaterial && mCloudBakeMaterial->getNumSupportedTechniques() == 0)
+            mCloudBakeMaterial.reset();
+        if (!mCloudMaterial || !mCloudBakeMaterial) {
+            mCloudStatus.drawn = false;
+            mCloudStatus.reason = "media";
+            mError = "clouds: Jahshaka/CloudLayer or Jahshaka/CloudBake is not staged";
+            return;
+        }
+        // THE NOISE, uploaded once per scene from the process-wide copy.
+        if (!mCloudNoise) {
+            const auto &mips = cloudNoiseMips();
+            mCloudNoise = tm->createTexture(recycledName("cloudnoise"),
+                                            Ogre::GpuPageOutStrategy::SaveToSystemRam,
+                                            Ogre::TextureFlags::ManualTexture,
+                                            Ogre::TextureTypes::Type2D);
+            mCloudNoise->setResolution(kCloudNoiseSize, kCloudNoiseSize);
+            mCloudNoise->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+            mCloudNoise->setNumMipmaps(Ogre::uint8(mips.size()));
+            // Immediate, and NO notifyDataIsReady (DOCS/traps/ENGINE.md: a
+            // ManualTexture's _transitionTo calls it itself).
+            mCloudNoise->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
+            mCloudNoise->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
+            for (size_t m = 0; m < mips.size(); ++m) {
+                const Ogre::uint32 n = std::max(1u, kCloudNoiseSize >> m);
+                Ogre::StagingTexture *staging =
+                    tm->getStagingTexture(n, n, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+                staging->startMapRegion();
+                Ogre::TextureBox box = staging->mapRegion(n, n, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+                for (Ogre::uint32 y = 0; y < n; ++y)
+                    std::memcpy(box.at(0, y, 0), &mips[m][size_t(y) * n * 4u], size_t(n) * 4u);
+                staging->stopMapRegion();
+                staging->upload(box, mCloudNoise, Ogre::uint8(m), 0, 0);
+                tm->removeStagingTexture(staging);
+            }
+        }
+        // THE FIELD, a render target of our own with its mip chain.
+        if (!mCloudField) {
+            mCloudField = tm->createTexture(
+                recycledName("cloudfield"), Ogre::GpuPageOutStrategy::Discard,
+                Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::AllowAutomipmaps,
+                Ogre::TextureTypes::Type2D);
+            mCloudField->setResolution(kCloudFieldSize, kCloudFieldSize);
+            mCloudField->setPixelFormat(Ogre::PFG_R16_FLOAT);
+            mCloudField->setNumMipmaps(
+                Ogre::PixelFormatGpuUtils::getMaxMipmapCount(kCloudFieldSize, kCloudFieldSize));
+            mCloudField->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+            fieldChanged = true;
+        }
+        if (fieldChanged) mCloudFieldPending = true;
+        // THE QUAD, created once (applySunDisc's recipe and its three traps:
+        // update() after setGeometry, the identity flags OFF, the static AABB).
+        if (!mCloudQuad) {
+            mCloudQuad = mSceneMgr->createRectangle2D(Ogre::SCENE_STATIC);
+            mCloudQuad->initialize(Ogre::BT_DEFAULT, Ogre::Rectangle2D::GeometryFlagQuad);
+            mCloudQuad->setGeometry(-Ogre::Vector2::UNIT_SCALE, Ogre::Vector2(2.0f));
+            mCloudQuad->update();
+            mCloudQuad->setUseIdentityView(false);
+            mCloudQuad->setUseIdentityProjection(false);
+            // QUEUE 0, SUBGROUP 2: after the sky quad (subgroup 1, which is
+            // after a VR eye's hidden-area mesh at 0 — tuneSkyRenderable) and
+            // inside the capture's range. The subgroup is the render queue's
+            // top sort key, so the order is a guarantee and not a hash.
+            mCloudQuad->setRenderQueueGroup(0u);
+            mCloudQuad->setRenderQueueSubGroup(2u);
+            mCloudQuad->setCastShadows(false);
+            mSceneMgr->getRootSceneNode(Ogre::SCENE_STATIC)->attachObject(mCloudQuad);
+            mSceneMgr->notifyStaticAabbDirty(mCloudQuad);
+            mCloudQuad->setMaterial(mCloudMaterial);
+        }
+        // kVisibleBit ONLY: in every view and in the environment capture
+        // (visibility 0x1), never GI geometry, never a shadow caster.
+        mCloudQuad->setVisibilityFlags(kVisibleBit);
+        Ogre::Pass *pass = mCloudMaterial->getTechnique(0)->getPass(0);
+        if (Ogre::TextureUnitState *tu = pass->getTextureUnitState("cloudField"))
+            tu->setTexture(mCloudField);
+        Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+        const Ogre::Vector3 toSun =
+            Ogre::Vector3(c.sunDir[0], c.sunDir[1], c.sunDir[2]).normalisedCopy();
+        ps->setNamedConstant("cloudSun", Ogre::Vector4(toSun.x, toSun.y, toSun.z, c.hasSun ? 1.0f : 0.0f));
+        ps->setNamedConstant("cloudSunE", Ogre::Vector4(c.sunIrradiance.r, c.sunIrradiance.g,
+                                                        c.sunIrradiance.b, kCloudSlabMetres));
+        mCloudStatus.drawn = true;
+        mCloudStatus.reason.clear();
+        if (!mCloudClearValid) mCloudClearPending = true;
+    } JAH_CATCH(mError, );
+    updateCloudLayer();   // the scroll, the SH term and the ground shadow, now
+    syncSunDiscClouds();
+    snapshotCloudGi();    // the voxels' and the cards' copy (CLOUDS-2D-2)
+}
+
+void OgreScene::bakeCloudField() {
+    mCloudFieldPending = false;
+    if (!mCloudField || !mCloudBakeMaterial) return;
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    if (!cm->hasWorkspaceDefinition(Ogre::IdString(kCloudBakeWorkspace))) {
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: " + std::string(kCloudBakeWorkspace) +
+            " not found — the cloud layer has no field");
+        return;
+    }
+    Ogre::CompositorWorkspace *ws = nullptr;
+    JAH_TRY {
+        if (!mCloudBakeCamera) mCloudBakeCamera = mSceneMgr->createCamera(processUniqueName("cloudcam"), false);
+        // THE BAKE'S INPUTS, bound into the base material immediately before
+        // the one render that reads them (every scene's bake does the same, so
+        // the shared material never carries another scene's state into it).
+        const CloudLayerDesc &c = mSkyDesc.clouds;
+        Ogre::Pass *bake = mCloudBakeMaterial->getTechnique(0)->getPass(0);
+        Ogre::TextureGpu *weather = nullptr;
+        if (c.weatherMap) {
+            auto it = mTextures.find(c.weatherMap);
+            if (it != mTextures.end()) weather = it->second.texture;
+        }
+        if (weather) waitForTextureResident(weather);
+        if (Ogre::TextureUnitState *tu = bake->getTextureUnitState("cloudNoise")) tu->setTexture(mCloudNoise);
+        // No map: the noise stands in for the unit (never read — bakeParams.z
+        // is 0), because an unbound unit is not a thing a pass may have.
+        if (Ogre::TextureUnitState *tu = bake->getTextureUnitState("cloudWeather"))
+            tu->setTexture(weather ? weather : mCloudNoise);
+        bake->getFragmentProgramParameters()->setNamedConstant(
+            "bakeParams", Ogre::Vector4(std::max(0.0f, std::min(1.0f, c.coverage)),
+                                        std::max(0.0f, c.density) * kCloudTauFull,
+                                        weather ? 1.0f : 0.0f, 0.0f));
+        Ogre::CompositorChannelVec externals;
+        externals.push_back(mCloudField);
+        ws = cm->addWorkspace(mSceneMgr, externals, mCloudBakeCamera,
+                              Ogre::IdString(kCloudBakeWorkspace), false);
+        ws->_beginUpdate(false);
+        ws->_update();
+        ws->_endUpdate(false);
+        cm->removeWorkspace(ws);
+        ws = nullptr;
+        mCloudField->_autogenerateMipmaps();
+        // Sampled by HlmsPbs through the listener's pass slot: it has to be in
+        // the layout a sampler expects (handOverForSampling's header).
+        handOverForSampling(mRoot, mCloudField);
+        ++mCloudStatus.fieldBakes;
+        // THE FIELD'S PIXELS CHANGED: the voxels and the cards read them.
+        snapshotCloudGi(true);
+        return;
+    } JAH_CATCH(mError, );
+    if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
+    Ogre::LogManager::getSingleton().logMessage("Jahshaka: cloud field bake failed: " + mError);
+}
+
+// THE LAYER'S CLOCK, ONCE PER DRAWN FRAME AND FROM NOWHERE ELSE (OgreEngine's
+// renderOneFrame; the fix round's F1: this used to live inside the constant
+// push, which setSky also runs on every look change — a dragged sun over the
+// realistic sky ticked it three times a frame). The frame delta the host
+// pushed for this frame (the document's SimulationClock through
+// Engine::setFixedFrameDelta — zero on a paused scene, a fixed 1/60 grid under
+// a script). Then the constants for the frame.
+void OgreScene::tickCloudClock() {
+    if (!cloudLayerDrawn()) return;
+    const CloudLayerDesc &c = mSkyDesc.clouds;
+    const double dt = double(Ogre::ControllerManager::getSingleton().getFrameDelay());
+    const bool scrolling = (c.wind[0] != 0.0f || c.wind[1] != 0.0f);
+    if (scrolling && dt > 0.0) {
+        ++mCloudStatus.clockTicks;
+        mCloudClock += dt;
+        // The capture cadence, in drawn frames that actually moved the sheet.
+        if (++mCloudFramesSinceCapture >= cloudCapturePeriod()) {
+            mCloudFramesSinceCapture = 0u;
+            mSkyCaptureAsyncOnce = true;
+            requestSkyCapture();
+            ++mCloudStatus.scrollCaptures;
+            updateCloudLayer();
+            snapshotCloudGi();   // the GI inputs follow the scroll at the capture's cadence
+            return;
+        }
+    }
+    updateCloudLayer();
+}
+
+// THE LAYER'S CONSTANTS for the current clock: pushes only, advances nothing —
+// safe to run on any edit.
+void OgreScene::updateCloudLayer() {
+    if (!cloudLayerDrawn()) return;
+    const CloudLayerDesc &c = mSkyDesc.clouds;
+    // The scroll, wrapped to the tile in DOUBLE so a long session keeps its
+    // float precision (the field tiles; only the offset within a tile matters).
+    for (int i = 0; i < 2; ++i) {
+        const double off = -double(c.wind[i]) * mCloudClock;
+        mCloudScroll[i] = float(off - std::floor(off / kCloudTileMetres) * kCloudTileMetres);
+        mCloudStatus.scroll[i] = mCloudScroll[i];
+    }
+    JAH_TRY {
+        const Ogre::Vector4 layer(c.altitude, 1.0f / kCloudTileMetres, mCloudScroll[0], mCloudScroll[1]);
+        Ogre::Pass *pass = mCloudMaterial->getTechnique(0)->getPass(0);
+        Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+        ps->setNamedConstant("cloudLayer", layer);
+        pushCloudAmbient();
+        if (mSunDiscCloudMaterial) {
+            Ogre::GpuProgramParametersSharedPtr dp =
+                mSunDiscCloudMaterial->getTechnique(0)->getPass(0)->getFragmentProgramParameters();
+            dp->setNamedConstant("cloudLayer", layer);
+        }
+        // THE GROUND SHADOW's per-frame state (read by the listener per pass).
+        FogHlmsListener::CloudShadowState st;
+        const Ogre::Vector3 toSun =
+            Ogre::Vector3(c.sunDir[0], c.sunDir[1], c.sunDir[2]).normalisedCopy();
+        if (c.hasSun && toSun.y > 0.0f && c.shadow > 0.0f) {
+            const float muS = std::max(toSun.y, 0.02f);
+            st.field = mCloudField;
+            st.invTile = 1.0f / kCloudTileMetres;
+            st.strength = std::min(1.0f, c.shadow);
+            st.scroll[0] = mCloudScroll[0];
+            st.scroll[1] = mCloudScroll[1];
+            st.altitude = c.altitude;
+            st.sunThrow[0] = toSun.x / muS;
+            st.sunThrow[1] = toSun.z / muS;
+            st.invMuSun = 1.0f / muS;
+        }
+        FogHlmsListener::setCloudShadow(mSceneMgr, st);
+    } JAH_CATCH(mError, );
+}
+
+// THE SKY LIGHT ON THE SHEET: the CLEAR sky's mean radiance (SH band 0 in this
+// basis IS the mean over the sphere — ShAccum's k0), from a capture with the
+// sheet hidden (captureCloudClearSky's header says why never the environment
+// capture the sheet is itself in).
+void OgreScene::pushCloudAmbient() {
+    if (!mCloudMaterial) return;
+    JAH_TRY {
+        const Ogre::Vector4 amb = mCloudClearValid
+            ? Ogre::Vector4(std::max(0.0f, mCloudClearMean[0]), std::max(0.0f, mCloudClearMean[1]),
+                            std::max(0.0f, mCloudClearMean[2]), kCloudFadeMetres)
+            : Ogre::Vector4(0.0f, 0.0f, 0.0f, kCloudFadeMetres);
+        mCloudMaterial->getTechnique(0)->getPass(0)->getFragmentProgramParameters()
+            ->setNamedConstant("cloudAmbient", amb);
+    } JAH_CATCH(mError, );
+}
+
+void OgreScene::captureCloudClearSky() {
+    mCloudClearPending = false;
+    if (!mCloudQuad) return;
+    // A GESTURE (a sun being dragged over an analytic sky re-captures every
+    // frame) takes the ticket; a lone change reads synchronously, so the
+    // capture right after this one in the same frame photographs a sheet lit
+    // by the sky it is under. The same rule, and the same measurement, as the
+    // environment's own SH (integrateSkyShFromCube's header).
+    const bool consecutive = mSkyCaptureIdleFrames <= kSkyCaptureDragFrames;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    Ogre::TextureGpu *cube = nullptr;
+    Ogre::AsyncTextureTicket *ticket = nullptr;
+    JAH_TRY {
+        mCloudQuad->setVisibilityFlags(0u);
+        try {
+            cube = renderSkyCaptureCube("skyclear", kSkyCaptureSize, true);
+        } catch (...) {
+            mCloudQuad->setVisibilityFlags(kVisibleBit);
+            throw;
+        }
+        mCloudQuad->setVisibilityFlags(kVisibleBit);
+        cube->_autogenerateMipmaps();
+        const Ogre::uint8 mip = std::min<Ogre::uint8>(kSkyShMip, Ogre::uint8(cube->getNumMipmaps() - 1u));
+        const Ogre::uint32 n = std::max(1u, kSkyCaptureSize >> mip);
+        readCloudClearTicket(true);   // never overwrite one: it owns a staging buffer
+        ticket = tm->createAsyncTextureTicket(n, n, 6u, Ogre::TextureTypes::TypeCube,
+                                              cube->getPixelFormat());
+        if (mCloudClearValid && consecutive) {
+            ticket->download(cube, mip, false);   // read at the next frame's top
+            mCloudClearTicket = ticket;
+            ticket = nullptr;
+        } else {
+            mRoot->getRenderSystem()->flushCommands();
+            ticket->download(cube, mip, true);
+            mCloudClearTicket = ticket;
+            ticket = nullptr;
+            readCloudClearTicket(true);
+        }
+        destroyRecycled(tm, cube);
+        cube = nullptr;
+    } JAH_CATCH(mError, );
+    if (ticket) { try { tm->destroyAsyncTextureTicket(ticket); } catch (...) {} }
+    if (cube) { try { destroyRecycled(tm, cube); } catch (...) {} }
+}
+
+void OgreScene::readCloudClearTicket(bool force) {
+    if (!mCloudClearTicket) return;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    JAH_TRY {
+        if (!force && !mCloudClearTicket->queryIsTransferDone()) return;   // next frame
+        const Ogre::TextureBox box = mCloudClearTicket->map(0);
+        float sh[27];
+        integrateSkyShFromBox(box, sh);
+        mCloudClearTicket->unmap();
+        for (int c = 0; c < 3; ++c) mCloudClearMean[c] = sh[c];
+        mCloudClearValid = true;
+        pushCloudAmbient();
+    } JAH_CATCH(mError, );
+    JAH_TRY { tm->destroyAsyncTextureTicket(mCloudClearTicket); } JAH_CATCH(mError, );
+    mCloudClearTicket = nullptr;
+}
+
+void OgreScene::syncSunDiscClouds() {
+    if (!mSunDisc || !mSunDiscMaterial) return;
+    JAH_TRY {
+        if (!cloudLayerDrawn()) {
+            // THE DISC'S OWN MATERIAL, and exactly it: a scene with no layer
+            // draws the disc it drew before the layer existed.
+            if (mSunDisc->getMaterial() != mSunDiscMaterial) mSunDisc->setMaterial(mSunDiscMaterial);
+            return;
+        }
+        if (!mSunDiscCloudMaterial) mSunDiscCloudMaterial = cloneForScene("Jahshaka/SunDiscClouded", mSceneMgr);
+        if (!mSunDiscCloudMaterial) return;
+        Ogre::Pass *dst = mSunDiscCloudMaterial->getTechnique(0)->getPass(0);
+        Ogre::Pass *src = mSunDiscMaterial->getTechnique(0)->getPass(0);
+        // The disc's two numbers, as applySunDisc wrote them.
+        dst->getFragmentProgramParameters()->copyMatchingNamedConstantsFrom(
+            *src->getFragmentProgramParameters());
+        if (Ogre::TextureUnitState *tu = dst->getTextureUnitState("cloudField"))
+            tu->setTexture(mCloudField);
+        dst->getFragmentProgramParameters()->setNamedConstant(
+            "cloudLayer", Ogre::Vector4(mSkyDesc.clouds.altitude, 1.0f / kCloudTileMetres,
+                                        mCloudScroll[0], mCloudScroll[1]));
+        if (mSunDisc->getMaterial() != mSunDiscCloudMaterial) mSunDisc->setMaterial(mSunDiscCloudMaterial);
+    } JAH_CATCH(mError, );
+}
+
+void OgreScene::destroyCloudLayer() {
+    FogHlmsListener::setCloudShadow(mSceneMgr, FogHlmsListener::CloudShadowState());
+    // The GI copy goes with it (no re-injection here: the scene is being torn
+    // down or its sky replaced, and both re-inject on their own).
+    mCloudGiState = FogHlmsListener::CloudShadowState();
+    ++mCloudGiSerial;
+    if (mCloudQuad) { mSceneMgr->destroyRectangle2D(mCloudQuad); mCloudQuad = nullptr; }
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    // The clones keep their units: a destroyed texture nulls itself out of every
+    // unit that holds it (TextureUnitState listens), and every clone is re-bound
+    // before it draws again (applyCloudLayer, syncSunDiscClouds, bakeCloudField).
+    if (mCloudField) { destroyRecycled(tm, mCloudField); mCloudField = nullptr; }
+    if (mCloudNoise) { destroyRecycled(tm, mCloudNoise); mCloudNoise = nullptr; }
+    if (mCloudBakeCamera) { mSceneMgr->destroyCamera(mCloudBakeCamera); mCloudBakeCamera = nullptr; }
+    mCloudMaterial.reset();
+    mCloudBakeMaterial.reset();
+    mSunDiscCloudMaterial.reset();
+    mCloudFieldPending = false;
+    if (mCloudClearTicket) {
+        JAH_TRY { tm->destroyAsyncTextureTicket(mCloudClearTicket); } JAH_CATCH(mError, );
+        mCloudClearTicket = nullptr;
+    }
+    mCloudClearValid = false;
+    mCloudClearPending = false;
+    mCloudStatus.drawn = false;
+    mCloudStatus.reason = "off";
+    // ...AND FORGET WHAT WAS PUSHED (destroySunDisc's reason).
+    mSkyDesc.clouds = CloudLayerDesc();
+}
+
+CloudStatus OgreScene::cloudStatus() const {
+    CloudStatus st = mCloudStatus;
+    st.drawn = cloudLayerDrawn();
+    if (st.drawn) st.reason.clear();
+    else if (!mSkyDesc.clouds.enabled) st.reason = "off";
+    else if (mSkyDesc.mode == SkyMode::NoSky) st.reason = "noSky";
+    else if (st.reason.empty()) st.reason = "media";
+    return st;
+}
+
+// THE SKY AS A PICTURE (CLOUDS-2D-1's export bake; Engine.h has the contract).
+// The capture workspace renders EXACTLY the environment's picture — the bound
+// sky and, over it, the cloud layer — into a cube of the asked size; the cube
+// is read back synchronously (an export is not a frame) and resampled into the
+// viewer's lat-long convention on the CPU.
+bool OgreScene::renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize,
+                                  float exposure, std::vector<unsigned char> &rgba) {
+    if (mSkyDesc.mode == SkyMode::NoSky || width == 0 || height == 0 || faceSize == 0) return false;
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    if (!cm->hasWorkspaceDefinition(Ogre::IdString(kSkyCaptureWorkspace))) return false;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    Ogre::TextureGpu *cube = nullptr;
+    Ogre::AsyncTextureTicket *ticket = nullptr;
+    bool ok = false;
+    JAH_TRY {
+        if (mCloudFieldPending) bakeCloudField();
+        // A hand-driven workspace outside renderOneFrame updates its own graph
+        // (DOCS/traps/ENGINE.md: otherwise the quads cull out at the origin).
+        mSceneMgr->updateSceneGraph();
+        cube = renderSkyCaptureCube("skyexport", faceSize, false);
+        mRoot->getRenderSystem()->flushCommands();
+        ticket = tm->createAsyncTextureTicket(faceSize, faceSize, 6u, Ogre::TextureTypes::TypeCube,
+                                              cube->getPixelFormat());
+        ticket->download(cube, 0, true);
+        const Ogre::TextureBox box = ticket->map(0);
+        rgba.assign(size_t(width) * height * 4u, 0u);
+        const auto encode = [exposure](float v) {
+            v = std::max(0.0f, v * exposure);
+            const float srgb = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+            return (unsigned char)std::lround(std::min(1.0f, std::max(0.0f, srgb)) * 255.0f);
+        };
+        for (unsigned y = 0; y < height; ++y) {
+            // gltfexporter's stitchCubemapToEquirect convention, exactly.
+            const float phi = (float(y) + 0.5f) / float(height) * float(M_PI);
+            const float dy = std::cos(phi), sp = std::sin(phi);
+            for (unsigned x = 0; x < width; ++x) {
+                const float theta = (1.0f - (float(x) + 0.5f) / float(width)) * 2.0f * float(M_PI);
+                const float d[3] = { sp * std::cos(theta), dy, sp * std::sin(theta) };
+                int face = 0;
+                float best = -2.0f;
+                for (int f = 0; f < 6; ++f) {
+                    const float k = d[0] * kFaceFwd[f][0] + d[1] * kFaceFwd[f][1] + d[2] * kFaceFwd[f][2];
+                    if (k > best) { best = k; face = f; }
+                }
+                const float *rt = kFaceRight[face], *up = kFaceUp[face];
+                const float nx = (d[0] * rt[0] + d[1] * rt[1] + d[2] * rt[2]) / best;
+                const float ny = (d[0] * up[0] + d[1] * up[1] + d[2] * up[2]) / best;
+                const unsigned px = std::min(faceSize - 1u, unsigned(std::max(0.0f, (nx + 1.0f) * 0.5f * float(faceSize))));
+                const unsigned py = std::min(faceSize - 1u, unsigned(std::max(0.0f, (1.0f - ny) * 0.5f * float(faceSize))));
+                const Ogre::uint16 *t = reinterpret_cast<const Ogre::uint16 *>(box.at(px, py, size_t(face)));
+                unsigned char *o = &rgba[(size_t(y) * width + x) * 4u];
+                o[0] = encode(Ogre::Bitwise::halfToFloat(t[0]));
+                o[1] = encode(Ogre::Bitwise::halfToFloat(t[1]));
+                o[2] = encode(Ogre::Bitwise::halfToFloat(t[2]));
+                o[3] = 255u;
+            }
+        }
+        ticket->unmap();
+        ok = true;
+    } JAH_CATCH(mError, false);
+    if (ticket) { try { tm->destroyAsyncTextureTicket(ticket); } catch (...) {} }
+    if (cube) { try { destroyRecycled(tm, cube); } catch (...) {} }
+    return ok;
+}
+
+
+// ---------------------------------------------------------------------------
+// THE CLOUD SHADOW ON THE VOXELS AND THE CARDS (CLOUDS-2D-2)
+// ---------------------------------------------------------------------------
+// The pixel's direct sun is darkened by the sheet (JahFog); so must every other
+// estimate of the SAME direct term be, or the bounce under an overcast is lit
+// by a clear sun: the voxel light injection (fork media, LightInjection) and
+// the surface cache's card relight (JahCardLight) read the same field through
+// the same function (the piece JahCloudShadow), at their own world points.
+void OgreScene::snapshotCloudGi(bool fieldRebaked) {
+    FogHlmsListener::CloudShadowState st;
+    // NOT BEFORE THE FIELD HOLDS ITS PIXELS: an injection runs at the writer
+    // point, which can come before this frame's bake — a voxel read through an
+    // unbaked field reads whatever the allocation held. The bake re-snapshots.
+    if (cloudLayerDrawn() && !mCloudFieldPending) st = FogHlmsListener::cloudShadow(mSceneMgr);
+    const FogHlmsListener::CloudShadowState &o = mCloudGiState;
+    const bool same = st.field == o.field && st.invTile == o.invTile &&
+                      st.strength == o.strength && st.scroll[0] == o.scroll[0] &&
+                      st.scroll[1] == o.scroll[1] && st.altitude == o.altitude &&
+                      st.sunThrow[0] == o.sunThrow[0] && st.sunThrow[1] == o.sunThrow[1] &&
+                      st.invMuSun == o.invMuSun;
+    if (same && !(fieldRebaked && st.field)) return;
+    mCloudGiState = st;
+    ++mCloudGiSerial;
+    // The voxels hold the direct term, so a change re-injects them (the light
+    // tick's path: one injection over the voxels already there, or an owed tick
+    // under a chain); the field re-integrates from them.
+    if (mVctLighting) refreshGiLighting(false);
+}
+
+void OgreScene::bindCloudInjection(Ogre::VctLighting *lighting) {
+    Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow("VCT/LightInjection") : nullptr;
+    if (!job) return;
+    JAH_TRY {
+        const FogHlmsListener::CloudShadowState &st = mCloudGiState;
+        const Ogre::HlmsSamplerblock *wrap =
+            st.field ? FogHlmsListener::acquireWrapSampler(mRoot->getHlmsManager()) : nullptr;
+        const bool on = st.field && wrap && lighting && lighting->getVoxelizer();
+        // CHANGE-GUARDED: setNumTexUnits invalidates the PSO hash whatever it is
+        // told, and a scene without a layer must leave the job exactly as the
+        // fork's JSON built it (seven textures - albedo, normal, emissive, the
+        // coverage per half-axis (PHOTON-VOXEL-3/-4), the surface position per half -
+        // and the property 0).
+        const Ogre::uint8 units = on ? 8u : 7u;
+        if (job->getNumTexUnits() != units) job->setNumTexUnits(units);
+        if (job->getProperty("jah_cloud_shadow") != (on ? 1 : 0))
+            job->setProperty("jah_cloud_shadow", on ? 1 : 0);
+        if (!on) return;
+        Ogre::DescriptorSetTexture2::TextureSlot slot(
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+        slot.texture = st.field;
+        job->setTexture(7u, slot, wrap);   // after the surface position at t5, t6
+        Ogre::ShaderParams &params = job->getShaderParams("default");
+        const Ogre::Vector3 origin = lighting->getVoxelizer()->getVoxelOrigin();
+        if (Ogre::ShaderParams::Param *p = params.findParameter("jahCloudMap"))
+            p->setManualValue(Ogre::Vector4(st.invTile, st.strength, st.scroll[0], st.scroll[1]));
+        if (Ogre::ShaderParams::Param *p = params.findParameter("jahCloudSun"))
+            p->setManualValue(Ogre::Vector4(st.sunThrow[0], st.sunThrow[1], st.altitude, st.invMuSun));
+        if (Ogre::ShaderParams::Param *p = params.findParameter("jahCloudOrigin"))
+            p->setManualValue(Ogre::Vector4(origin.x, origin.y, origin.z, 0.0f));
+        params.setDirty();
+    } JAH_CATCH(mError, );
 }
 
 }}}  // namespace jahshaka::engine::detail

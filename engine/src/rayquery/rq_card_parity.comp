@@ -1,0 +1,111 @@
+#version 460
+// gi.card_read_parity's GPU half (PHOTON-CARDS-2): the ray job's card read —
+// jah_rq_card.glsl, the SAME include rq_reflect.comp reads — asked at a list of
+// world points, its pick written out for the suite to hold against the CPU's
+// SurfaceCache::readAt. A test-only job: nothing in a frame dispatches it
+// (RayQueryTier::cardPickBlocking records it on its own command buffer and
+// stalls on the answer). The bindings are the card read's four, named exactly
+// as rq_reflect.comp names them.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+
+/// One question: xyz = the world point, w = the item slot (as a float's bits);
+/// facing.xyz = the direction the read treats as "facing". facing.w = 1 is a
+/// TRACED question instead: pos.xyz is a ray's origin and facing.xyz its
+/// direction; the job traces it through the scene's TLAS (near copies, as the
+/// reflection does), takes the slot from the hit, rebuilds the hit's geometric
+/// normal (jah_rq_geom.glsl) and asks the pick with it — the reflection's whole
+/// hit path but the lighting.
+struct Query
+{
+	vec4 pos;
+	vec4 facing;
+};
+layout( std430, set = 0, binding = 0 ) readonly buffer QueryBuf { Query queries[]; };
+/// One answer: x = ok | lit << 1 | hit << 2, y = the card, zw = the atlas
+/// texel; then the radiance the read returns; then (traced) the hit point and
+/// the geometric normal's bits in w... (hitN.xyz in `normal`).
+struct Answer
+{
+	uvec4 pick;
+	vec4 radiance;
+	vec4 hit;
+	vec4 normal;
+	vec4 viewed;	///< the read towards its viewer (PHOTON-CARDS-5); `radiance` is the texel as stored
+};
+layout( std430, set = 0, binding = 1 ) writeonly buffer AnswerBuf { Answer answers[]; };
+
+#define JAH_CARD_BINDING_BASE 2
+// ...and the view term's five after the job's last binding (PHOTON-CARDS-5).
+#define JAH_CARD_VIEW_BINDING_BASE 10
+#include "jah_rq_card_bindings.glsl"
+
+layout( set = 0, binding = 6 ) uniform Counts
+{
+	uvec4 counts;	///< x = queries, y = instance slots bound, z = card records bound
+} cnt;
+
+#define JAH_CARD_SLOTS cnt.counts.y
+#define JAH_CARD_RECORDS cnt.counts.z
+#define JAH_CARD_FOOTPRINT_TEXELS 1.0
+#include "jah_rq_card.glsl"
+
+layout( set = 0, binding = 7 ) uniform accelerationStructureEXT tlas;
+layout( std430, set = 0, binding = 8 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 9 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+#define JAH_GEOM_SLOTS cnt.counts.w
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
+
+void main()
+{
+	const uint i = gl_GlobalInvocationID.x;
+	if( i >= cnt.counts.x )
+		return;
+	const Query q = queries[i];
+	uint slot = floatBitsToUint( q.pos.w );
+	vec3 point = q.pos.xyz;
+	vec3 facing = q.facing.xyz;
+	// THE VIEWER the read restores the lobe's view term for (PHOTON-CARDS-5): a
+	// traced question's ray origin; an untraced one is read head-on (V = its
+	// facing direction).
+	vec3 view = q.facing.xyz;
+	Answer a;
+	a.hit = vec4( 0.0 );
+	a.normal = vec4( 0.0 );
+	uint hitFlag = 0u;
+	if( q.facing.w > 0.5 )
+	{
+		rayQueryEXT rq;
+		rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, q.pos.xyz, 0.0,
+							   normalize( q.facing.xyz ), 1000.0 );
+		while( rayQueryProceedEXT( rq ) ) {}
+		if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+		{
+			const vec3 dir = normalize( q.facing.xyz );
+			slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+			point = q.pos.xyz + dir * rayQueryGetIntersectionTEXT( rq, true );
+			jahHitGeometricNormal( slot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
+								   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
+								   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), dir, facing );
+			hitFlag = 4u;
+			view = -dir;
+			a.hit = vec4( point, float( slot ) );
+			a.normal = vec4( facing, 0.0 );
+		}
+		else
+			slot = 0xFFFFFFFFu;
+	}
+	const JahCardPick pick = jahCardPick( slot, point, facing );
+	a.pick = uvec4( ( pick.ok ? 1u : 0u ) | ( pick.lit ? 2u : 0u ) | hitFlag, pick.card,
+					uint( pick.texel.x ), uint( pick.texel.y ) );
+	bool ok;
+	a.viewed = vec4( jahCardRadiance( slot, point, facing, view, 0.0, ok ), ok ? 1.0 : 0.0 );
+	a.radiance = vec4( ok ? JAH_CARD_RADIANCE( pick.texel ) : vec3( 0.0 ), ok ? 1.0 : 0.0 );
+	answers[i] = a;
+}

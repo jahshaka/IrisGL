@@ -515,10 +515,12 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mDecalTextures.clear();
     mTarget->setSky(SkyDesc());   // no sky — which also clears the reflection cubemap
     for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
+    if (mCloudWeatherTexture) mTarget->destroyTexture(mCloudWeatherTexture);
+    mCloudWeatherTexture = 0;
+    mCloudWeatherPath.clear();
     mSkySource = SkySource();
     mSkyDesc = SkyDesc();
-    for (float &c : mSkyAmbientSh) c = 0.0f;
-    mAmbientPushed = false;
+    mEnvScalePushed = false;
     mSource = scene;
     // ...and the incoming one moves INTO it. This is the whole of the swap from
     // the mirror's side: after it, the engine reads the very nodes the user
@@ -3591,7 +3593,7 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         auto *light = static_cast<iris::LightNode *>(node);
         // A SKY LIGHT IS NOT AN Ogre::Light (SKY_LIGHT_SPEC.md §2). It has no
         // position, no direction, no range and casts nothing: it is the scene's
-        // ambient, pushed once per change through setAmbientSh in
+        // ambient, its gain pushed once per change through setEnvironmentLight in
         // applyEnvironment. Nothing about it belongs in the forward light list,
         // and creating one would cost a light slot per pass for a term the
         // shader already has. The NODE still exists (the icon is pickable and
@@ -6773,17 +6775,13 @@ void SceneMirror::invalidateEnvironment()
     // Only the "already pushed" latches: the LAST-value members stay, so a
     // re-push that lands on the same values is still cheap where the engine
     // setter is idempotent, and correct where it is not.
-    mAmbientPushed = false;
+    mEnvScalePushed = false;
     mFogPushed = false;
-    // GI IS NOT RE-PUSHED (ENGINE_CACHE_POLICY_SPEC P10). The GI latch used to
-    // be dropped here too, and the re-push that followed is a from-scratch
-    // rebuild in the engine — voxels, the whole probe grid, the irradiance
-    // field — on every page return: 2.1-2.9 s of blocked UI in the owner's log
-    // after "materials -> editor". What a re-take actually needs is the
-    // process-wide HlmsPbs binding pointed back at THIS scene's arms, which are
-    // still valid; the next applyEnvironment asks the engine for exactly that
-    // (Scene::reassertGiBinding) and nothing more.
-    mGiReassertPending = true;
+    // GI IS NOT RE-PUSHED (ENGINE_CACHE_POLICY_SPEC P10): a GI push is a
+    // from-scratch rebuild in the engine — voxels, the whole probe grid, the
+    // irradiance field — and a re-take needs none of it. The arms this scene
+    // built are its own and every pass of it binds them (the engine's per-pass
+    // SceneGiBinding, PHOTON-SCENE-SWITCH-1), so there is nothing to take back.
 }
 
 // CAMERA_LENS_SPEC §4/§5. Defined beside applyCamera, where the whole model is
@@ -7073,68 +7071,35 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // reader and no writer on disk, so it was a measurement knob living in the
     // document. `editor.setLodBias` writes the engine scene directly.)
     // AMBIENT IS THE SKY LIGHT, AND NOTHING ELSE (SKY_LIGHT_SPEC.md §2, owner
-    // decision D14). There is one path and one seam: the sky's own
-    // cosine-convolved integral, scaled by the scene's Sky Light — its
-    // intensity times its tint, decoded sRGB->linear like every other colour a
-    // user picks (§4) — pushed through setAmbientSh.
+    // decision D14): the sky's own cosine-convolved integral scaled by the
+    // scene's Sky Light — its intensity times its tint, decoded sRGB->linear like
+    // every other colour a user picks (§4). THE ENGINE FORMS THAT PRODUCT
+    // (PHOTON-SKY-TRANSIENT-1, Engine.h skyAmbientSh): it integrates the sky it
+    // drew and multiplies by the gain pushed here, in the frame the new sky's
+    // cube lands — a host-side product arrived one sync later and put the cube
+    // of one sky beside the SH of another. The mirror pushes the GAIN only.
     //
-    // NO SKY LIGHT = 27 ZEROS. Not "the old flat colour", not "a small default":
-    // a scene with no Sky Light has no ambient at all, which is the decided
-    // behaviour and the reason the two-light default scene goes black when both
-    // lights are deleted. The flat Engine::setAmbient path is not gone — it is
-    // an ENGINE verb the preview scenes and the engine-side tests still use —
-    // but no document path reaches it any more.
+    // NO SKY LIGHT = GAIN 0 = 27 ZEROS: a scene with no Sky Light has no ambient
+    // at all, which is the decided behaviour and the reason the two-light
+    // default scene goes black when both lights are deleted. The same gain is
+    // the CUBE half of the light (SMOKE-ENGINE-1 item 2; PHOTON-ENV-1): a
+    // mirror's reflection and every escape of the voxel cones, the rays and the
+    // bounce read the sky's cube at it (the engine derives the luminance the
+    // pin's scalar envmapScale needs). skyLight() is the first VISIBLE one, so
+    // hiding it takes the ambient and the reflections with it.
     {
-        float sh[27] = { 0.0f };
-        // THE SKY'S INTEGRAL COMES FROM THE ENGINE (SKY-GPU): it captured the
-        // sky it drew into a cubemap and integrated that. Read every frame —
-        // 27 floats — because the capture lands one frame after the sky change
-        // that asked for it, exactly like the IBL convolution.
-        const bool hasSky = mTarget->skyAmbientSh(mSkyAmbientSh);
         const auto skyLight = mSource->skyLight();
-        // The CUBE half of the same light (SMOKE-ENGINE-1 item 2; PHOTON-ENV-1).
-        // The coefficients below carry the sky's DIFFUSE contribution scaled by
-        // this light; everything that reads the sky's CUBE — a mirror's
-        // reflection, and every escape of the voxel cones, the rays and the
-        // bounce — reads it at the same per-channel gain, pushed beside them
-        // (Engine.h, setEnvironmentLight; the engine derives the luminance the
-        // pin's scalar envmapScale needs).
-        //
-        // NO SKY LIGHT IS 0, on the same predicate the coefficients use
-        // (skyLight() is the first VISIBLE one), so hiding it takes the
-        // reflections with it. `hasSky` is deliberately NOT in this condition:
-        // with no sky there is no cube bound and the gain is moot, and making
-        // it 0 for one frame while the capture lands would flicker every
-        // reflection in the scene on a sky change.
         Colour envGain(0.0f, 0.0f, 0.0f, 1.0f);
         if (skyLight) {
             const iris::LinearColor tint = iris::linearOf(skyLight->color);
-            const float gain[3] = { tint.r * skyLight->intensity,
-                                    tint.g * skyLight->intensity,
-                                    tint.b * skyLight->intensity };
-            envGain = Colour(gain[0], gain[1], gain[2], 1.0f);
-            if (hasSky) {
-                for (int i = 0; i < 9; ++i)
-                    for (int c = 0; c < 3; ++c)
-                        sh[i * 3 + c] = mSkyAmbientSh[i * 3 + c] * gain[c];
-            }
+            envGain = Colour(tint.r * skyLight->intensity, tint.g * skyLight->intensity,
+                             tint.b * skyLight->intensity, 1.0f);
         }
         if (!mEnvScalePushed || envGain.r != mLastEnvGain.r || envGain.g != mLastEnvGain.g ||
             envGain.b != mLastEnvGain.b) {
             mTarget->setEnvironmentLight(envGain);
             mLastEnvGain = envGain;
             mEnvScalePushed = true;
-        }
-        // Push on CHANGE only. The coefficients feed a pass buffer that HlmsPbs
-        // rebuilds per pass anyway, but setSphericalHarmonics also re-decides the
-        // ambient shader variant, so a per-frame push of an unchanged value was
-        // asking a shader/root-layout question every frame for nothing.
-        bool changed = !mAmbientPushed;
-        for (int i = 0; !changed && i < 27; ++i) changed = sh[i] != mLastAmbientSh[i];
-        if (changed) {
-            mTarget->setAmbientSh(sh);
-            std::memcpy(mLastAmbientSh, sh, sizeof(sh));
-            mAmbientPushed = true;
         }
     }
     // THE PER-VIEW HALF, which a second view of this scene gets on its own
@@ -7194,6 +7159,31 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mRayTracingPushed = true;
         }
     }
+    // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the project's row, pushed on
+    // change. Like the ray row it is only half the answer — the renderer ANDs it
+    // with the machine (Scene::sunContactStatus().on) — and it decides nothing
+    // here. The two ranges' bands are one band stated twice (the document does
+    // not include the engine), so they are held equal at compile time.
+    {
+        static_assert(iris::kSunContactMinRange == jahshaka::engine::kSunContactMinRange &&
+                          iris::kSunContactMaxRange == jahshaka::engine::kSunContactMaxRange,
+                      "the document's sun contact range band is the renderer's");
+        using jahshaka::engine::SunContactResolution;
+        jahshaka::engine::SunContactDesc sc;
+        sc.enabled = mSource->sunContact.enabled;
+        sc.range = mSource->sunContact.range;
+        switch (mSource->sunContact.resolution) {
+        case iris::SunContactResolution::Full: sc.resolution = SunContactResolution::Full; break;
+        case iris::SunContactResolution::Half: sc.resolution = SunContactResolution::Half; break;
+        case iris::SunContactResolution::Auto:
+        default: sc.resolution = SunContactResolution::Auto; break;
+        }
+        if (!mSunContactPushed || sc != mLastSunContact) {
+            mTarget->setSunContact(sc);
+            mLastSunContact = sc;
+            mSunContactPushed = true;
+        }
+    }
     // Global Illumination panel. setGlobalIllumination re-traces, so like fog it is
     // pushed on CHANGE only (the per-frame compare is the debounce) — and it also
     // re-traces when the driving light itself moved — Instant
@@ -7237,9 +7227,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
         gi.dragMoverChannel   = mSource->giDragMoverChannel > 0;
         // THE SURFACE CACHE's three rows, pushed as they are authored. `cards`
-        // is a GiToggle and AUTO resolves to OFF in the engine at this phase
-        // (nothing reads a card until the ray hit does), so the document row
-        // and the engine's answer agree without the mirror deciding anything.
+        // is a GiToggle and the ENGINE resolves Auto (on exactly where the
+        // reflection trace runs — a ray's hit reads the card first), so the
+        // mirror decides nothing.
         gi.cards = toggle(mSource->giCards);
         gi.cardBudgetTexels = qMax(0, mSource->giCardBudgetTexels);
         gi.cardResidencyRadius = qMax(0.0f, mSource->giCardRadius);
@@ -7256,7 +7246,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
         gi.updateBudget = qMax(0, mSource->giUpdateBudget);        // FIX WAVE B1
-        gi.rayMarchStepScale = qMax(1.0f, mSource->giRayMarchStepScale);   // B5
         // DDGI (GI_UNIFIED_SPEC.md §4 P1): the same tri-state travel as the
         // probe toggles, plus our own intensity scalar. Both ride the CHANGE
         // debounce below like every other GI field — the intensity included,
@@ -7270,7 +7259,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // whether or not its SSR row asked for one — `ChainDesc::probeGather`),
         // so it rides the change debounce with the rest of the configuration.
         gi.gather = toggle(mSource->giGather);
-        gi.ddgiIntensity = qBound(0.0f, mSource->giDdgiIntensity, 64.0f);
+        // ...and the ONE fact of the document's tier the quality dial cannot
+        // carry (Epic shares High's quality): the engine's tier table reads it
+        // for the gather's density (Types.h `giQualityFacts`'s `epic` — four
+        // times the probes). The document's tier is `giTier` (PhotonTier's
+        // ordinal: Low 0 .. Epic 3).
+        gi.epicTier = mSource->giTier == 3;
         // EVERY LIGHT IS A VOXEL LIGHT. There is one GI arm now (PHOTON_SPEC
         // E2 (4) deleted Instant Radiosity, which traced from ONE driving light
         // and therefore hashed only that one): the voxel injection reads every
@@ -7316,7 +7310,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 // THE SKY LIGHT IS NOT A VOXEL LIGHT (audit A F3). It never
                 // becomes an Ogre::Light at all: its colour and intensity reach
                 // the renderer as the scene's environment (applyEnvironment ->
-                // setAmbientSh + setEnvironmentLight), which the engine hands to
+                // setEnvironmentLight; the engine forms SH x gain), which it hands to
                 // every pass and every cascade's bounce itself — re-settling a
                 // bouncing chain on its own (OgreScene::noteEnvironmentChanged)
                 // — and which stales the probe grid with its own reason. Hashing it here made releasing its intensity slider —
@@ -7442,13 +7436,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // field setGlobalIllumination reads is in it, so a new field cannot fall
         // behind the comparison the way a lambda one file away did).
         //
-        // A screen re-take (invalidateEnvironment): point the process-wide GI
-        // binding back at this scene's arms. Before any push below, which — if
-        // the parameters did change meanwhile — rebuilds and binds anyway.
-        if (mGiReassertPending) {
-            mGiReassertPending = false;
-            if (mGiPushed) mTarget->reassertGiBinding();
-        }
         // THE TUNING PUSH FIRST, and it is not an early-out (PHOTON_SPEC §7
         // E2 (8)): the three per-frame floats are OUT of GiParams::operator==,
         // so a slider tick on one of them leaves `gi == mLastGi` and would
@@ -7465,8 +7452,16 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // would never happen. (Measured the hard way:
             // scripting.e2e.screenshot_grades lost a grade change that arrived
             // in the same frame as a tuning value.)
-            mLastGi.ddgiIntensity     = gi.ddgiIntensity;
-            mLastGi.rayMarchStepScale = gi.rayMarchStepScale;
+            // EVERY FIELD `giTuningEqual` COMPARES (PHOTON-GATHER-1d):
+            // the gather's row and the tier's Epic fact, the card cache's row,
+            // budget and radius. Left out, one change to any of them kept the
+            // comparison unequal for ever and re-pushed the tuning (the field's
+            // constants included) on EVERY frame after it.
+            mLastGi.gather              = gi.gather;
+            mLastGi.epicTier            = gi.epicTier;
+            mLastGi.cards               = gi.cards;
+            mLastGi.cardBudgetTexels    = gi.cardBudgetTexels;
+            mLastGi.cardResidencyRadius = gi.cardResidencyRadius;
         }
         if (!mGiPushed || gi != mLastGi) {
             mTarget->setGlobalIllumination(gi);
@@ -8013,6 +8008,7 @@ void SceneMirror::applySky(View *view)
             }
         }
     }
+    applyCloudLayer();
     // IDEMPOTENT (the assertion mirror.document_to_engine's sky-idempotency case
     // makes): an unchanged description costs one comparison inside the engine —
     // no upload, no cube rebuild, no IBL reconvolution, no workspace churn.
@@ -8028,6 +8024,79 @@ void SceneMirror::applySky(View *view)
         // for instead of being 2.3x brighter than it.
         const iris::LinearColor c = iris::linearOf(mSource->skyColor);
         view->setBackground(Colour(c.r, c.g, c.b, 1.0f));
+    }
+}
+
+// THE CLOUD LAYER (CLOUDS-2D-1), rebuilt from the document every frame like the
+// sun disc and dropped by the engine's own comparison. It rides the sky
+// description because the engine draws it as part of the sky and captures it
+// with it; it is NOT part of the SkySource signature — a cloud edit must never
+// rebuild the sky.
+//
+// DRAWN OVER THE COLOUR, GRADIENT AND REALISTIC SKIES ONLY. A photograph —
+// equirect or cubemap — has its own clouds painted in, and a sheet over it
+// would be a second weather; the World panel says so and disables the rows.
+//
+// THE SUN THAT LIGHTS THE SHEET is the scene's sun light, in the renderer's own
+// units: the light reaches a surface as colour x intensity x pi (HlmsPbs'
+// power scale — OgreScene::setLight) and a white card facing it reflects that
+// much radiance, so its IRRADIANCE is pi times that again. Times the same
+// atmosphere tint the light itself gets, so a low sun lights the sheet the
+// colour it lights the ground. Above the sheet the beam has crossed less air
+// than on the ground; the difference is not modelled (one sun, one colour).
+void SceneMirror::applyCloudLayer()
+{
+    CloudLayerDesc &cl = mSkyDesc.clouds;
+    cl = CloudLayerDesc();
+    const iris::CloudLayer &doc = mSource->clouds;
+    const bool imageSky = mSource->skyType == iris::SkyType::EQUIRECTANGULAR ||
+                          mSource->skyType == iris::SkyType::CUBEMAP;
+    // The weather map's pixels follow its FILE, uploaded once per change.
+    const QString weatherPath = (doc.enabled && !imageSky && !doc.weatherMapGuid.isEmpty() &&
+                                 mSource->cloudWeatherMap)
+                                    ? mSource->cloudWeatherMap->source : QString();
+    if (weatherPath != mCloudWeatherPath) {
+        if (mCloudWeatherTexture) mTarget->destroyTexture(mCloudWeatherTexture);
+        mCloudWeatherTexture = 0;
+        mCloudWeatherPath = weatherPath;
+        if (!weatherPath.isEmpty()) {
+            // DATA, not a colour: uploaded linear (srgb false), and held at a
+            // size that covers one 16 km tile with no waste (a larger map adds
+            // nothing the 1024^2 field could keep).
+            QImage img(weatherPath);
+            if (!img.isNull()) {
+                if (img.width() > 1024 || img.height() > 1024)
+                    img = img.scaled(1024, 1024, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                img = img.convertToFormat(QImage::Format_RGBA8888);
+                mCloudWeatherTexture = mTarget->createTexture(unsigned(img.width()),
+                                                              unsigned(img.height()),
+                                                              img.constBits(), false);
+            }
+        }
+    }
+    if (!doc.enabled || imageSky) return;
+    cl.enabled = true;
+    cl.coverage = doc.coverage;
+    cl.density = doc.density;
+    cl.altitude = doc.altitude;
+    cl.shadow = doc.shadow;
+    // The heading the wind blows TOWARDS, from +X turning towards -Z.
+    const float heading = doc.direction * float(M_PI) / 180.0f;
+    cl.wind[0] = doc.speed * std::cos(heading);
+    cl.wind[1] = -doc.speed * std::sin(heading);
+    cl.weatherMap = mCloudWeatherTexture;
+    const auto sunLight = mSource->sunLight();
+    if (sunLight && sunLight->isVisibleInScene()) {
+        const iris::Vec3 travel = sunLight->getLightDir();
+        if (travel.lengthSquared() > 1e-12f) {
+            const iris::Vec3 toSun = -travel.normalized();
+            cl.hasSun = true;
+            cl.sunDir[0] = toSun.x(); cl.sunDir[1] = toSun.y(); cl.sunDir[2] = toSun.z();
+            const iris::LinearColor c = iris::linearOf(sunLight->color);
+            const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
+            const float k = std::max(0.0f, sunLight->intensity) * float(M_PI * M_PI);
+            cl.sunIrradiance = Colour(c.r * k * tint.r, c.g * k * tint.g, c.b * k * tint.b, 1.0f);
+        }
     }
 }
 

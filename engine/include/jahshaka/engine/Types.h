@@ -578,6 +578,11 @@ constexpr unsigned kRayMaskMover = 0x02u;    ///< the document says it moves
 constexpr unsigned kRayMaskStill = 0x04u;    ///< still world (not a mover)
 constexpr unsigned kRayMaskNear = 0x08u;     ///< every near copy
 constexpr unsigned kRayMaskFar = 0x10u;      ///< every far copy, and nothing else
+/// A SHADOW-CASTING MOVER'S NEAR COPY, and nothing else (PHOTON-CARDS-4): the
+/// surface cache's mover-shadow launch traces this bit alone. A launch's mask
+/// matches an instance on ANY common bit, so "a mover AND a caster" cannot be
+/// asked with bits 0 and 1 — it is its own bit. No other launch names it.
+constexpr unsigned kRayMaskMoverCaster = 0x20u;
 constexpr unsigned kRayMaskNearField = kRayMaskCaster | kRayMaskMover | kRayMaskStill | kRayMaskNear;
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
@@ -891,6 +896,114 @@ struct SunDisc {
     bool operator!=(const SunDisc &o) const { return !(*this == o); }
 };
 
+/// THE 2D CLOUD LAYER (CLOUDS-2D-1; SPECS/CLOUDS_ASSESSMENT.md option C0 —
+/// HDRP's Cloud Layer as the model). One sheet of cloud at `altitude` metres,
+/// drawn as a screen quad at render queue 0 OVER the bound sky (the sun disc's
+/// shape) and therefore inside the sky capture's range: the ambient SH, the
+/// reflection cube and every Photon estimator that reads the one environment
+/// see it with no further work. A top-down TRANSMITTANCE map of the same field
+/// shades the first directional light's term in HlmsPbs (the listener's extra
+/// pass texture — Terra's shadow pattern).
+///
+/// A DISABLED LAYER IS NO LAYER: nothing is created, no pass property is set,
+/// no Hlms shader changes — every picture of a scene without one is the picture
+/// it was before the layer existed (the 0048 pattern).
+///
+/// WHAT IT COSTS, MEASURED (spikes/clouds-2d-1/, 2026-09-23, Debug, Xvfb, one
+/// process, paired arms, a six-primitive scene whose still frame is ~0.6 ms GPU —
+/// so carry the ABSOLUTE numbers, not a percentage of that frame):
+///   * the layer's own draw (the quad, the clouded disc, the ground-shadow
+///     lookup), coverage 0.5 against the layer off, clocks locked 2100-2550 MHz:
+///     +0.06 / +0.15 / +0.07 ms GPU per frame over three pairs (median frames);
+///     the UI-thread CPU difference was inside its noise (±0.4 ms);
+///   * ONE environment re-capture, downstream included: 26.4 ms GPU and 45.7 ms
+///     UI-thread CPU in total — the capture is small; the new SH re-stales the
+///     whole probe grid (re-captured at the budget's one probe per frame) and
+///     re-sweeps the irradiance field. On a scene with more probes it is more.
+///     The scroll therefore re-captures every 600 drawn frames (OgreSky.cpp).
+///
+/// A HAZARD, BY DESIGN: the sheet is SUN-LIT, so the sun is in its look — with a
+/// layer on, a COLOUR or GRADIENT sky (which never depended on the sun) re-captures
+/// the environment and re-stales the probe grid on every frame the sun moves (a
+/// drag, a keyframed sun), a cost class those skies never paid; the realistic sky
+/// always did. The probe budget caps the probe half at one probe per frame.
+struct CloudLayerDesc {
+    bool      enabled = false;
+    /// 0 (clear) .. 1 (overcast): the fraction of the field that is cloud.
+    float     coverage = 0.5f;
+    /// Optical thickness multiplier, 0 .. 4.
+    float     density = 1.0f;
+    /// The layer's altitude in metres (the curved-earth projection and the
+    /// sideways throw of the ground shadow under a low sun).
+    float     altitude = 2000.0f;
+    /// 0 .. 1: how much of the layer's transmittance reaches the sun's light
+    /// on the ground (1 = all of it).
+    float     shadow = 1.0f;
+    /// Wind, world metres per second of SCENE time along x and z. The scroll is
+    /// the engine's own fixed clock (the frame deltas the host pushes), so a
+    /// paused scene holds still and a scripted frame is reproducible.
+    float     wind[2] = { 0.0f, 0.0f };
+    /// An optional weather map (its red channel scales the coverage over one
+    /// tile of the layer); 0 = none. Sampled as data, never sRGB-decoded.
+    TextureId weatherMap = 0;
+    /// THE SUN THAT LIGHTS THE LAYER: the direction TOWARDS it and its
+    /// irradiance in the renderer's units (the first directional light's
+    /// colour x tint x intensity x pi x pi — what a white Lambert plate facing
+    /// it reflects is that over pi). No sun = lit by the sky alone.
+    bool      hasSun = false;
+    float     sunDir[3] = { 0.0f, 1.0f, 0.0f };
+    Colour    sunIrradiance { 0.0f, 0.0f, 0.0f, 1.0f };
+
+    /// The inputs of the baked density / transmittance field. A change here
+    /// re-bakes it; anything else is a uniform write.
+    bool sameField(const CloudLayerDesc &o) const {
+        if (enabled != o.enabled) return false;
+        if (!enabled) return true;
+        return coverage == o.coverage && density == o.density && weatherMap == o.weatherMap;
+    }
+    /// Everything the CAPTURED sky depends on (the field, the look and the
+    /// light) — a change re-captures the environment. The wind and the shadow
+    /// strength are not in it: neither moves a sky pixel at a given time.
+    bool sameLook(const CloudLayerDesc &o) const {
+        if (!sameField(o)) return false;
+        if (!enabled) return true;
+        return altitude == o.altitude && hasSun == o.hasSun &&
+               sunDir[0] == o.sunDir[0] && sunDir[1] == o.sunDir[1] && sunDir[2] == o.sunDir[2] &&
+               sunIrradiance.r == o.sunIrradiance.r && sunIrradiance.g == o.sunIrradiance.g &&
+               sunIrradiance.b == o.sunIrradiance.b;
+    }
+    bool operator==(const CloudLayerDesc &o) const {
+        if (!sameLook(o)) return false;
+        if (!enabled) return true;
+        return shadow == o.shadow && wind[0] == o.wind[0] && wind[1] == o.wind[1];
+    }
+    bool operator!=(const CloudLayerDesc &o) const { return !(*this == o); }
+};
+
+/// What the cloud layer is DOING in a scene (world.clouds().live).
+struct CloudStatus {
+    /// The layer quad exists and is visible (enabled, over a sky it may draw on).
+    bool     drawn = false;
+    /// Why not, when not: "off", "noSky", "media". (The engine never hears of a
+    /// layer the mirror keeps off an image sky; world.clouds composes "imageSky"
+    /// from the document for that case.)
+    std::string reason;
+    /// Captures of the sky environment the layer has asked for: on a change
+    /// (`changeCaptures`) and while it scrolls (`scrollCaptures`), over the
+    /// scene's life.
+    unsigned changeCaptures = 0;
+    unsigned scrollCaptures = 0;
+    /// Frames the layer's clock advanced (one per drawn frame with wind and a
+    /// non-zero frame delta, never more).
+    unsigned clockTicks = 0;
+    /// Frames between two scroll captures (0 = no scroll captures: still wind).
+    unsigned capturePeriodFrames = 0;
+    /// How many times the density / transmittance field has been baked.
+    unsigned fieldBakes = 0;
+    /// The layer's scroll offset in metres (x, z) at the last frame drawn.
+    float    scroll[2] = { 0.0f, 0.0f };
+};
+
 /// THE EDITOR'S GRID, DRAWN BY A SHADER (GRID-2, owner review R5: "the grid is a
 /// LINE mesh — MSAA/SMAA treat 1 px lines poorly and Vulkan line width is fixed
 /// at 1; the correct fix is a shader-drawn grid on the ground plane").
@@ -983,9 +1096,13 @@ struct SkyDesc {
     /// half: it changes every time the sun light is rotated, and re-uploading
     /// the sky or rebuilding the IBL cubemap for that would be absurd.
     SunDisc   sun;
+    /// THE CLOUD LAYER (CloudLayerDesc above), a FOURTH independent half: drawn
+    /// as part of the sky and captured with it, but a cloud edit must not tear
+    /// the sky down, and a wind change must not even re-capture it.
+    CloudLayerDesc clouds;
 
     bool operator==(const SkyDesc &o) const {
-        return sameSky(o) && sameReflections(o) && sun == o.sun;
+        return sameSky(o) && sameReflections(o) && sun == o.sun && clouds == o.clouds;
     }
     bool operator!=(const SkyDesc &o) const { return !(*this == o); }
 
@@ -2164,6 +2281,10 @@ struct GiParams {
     /// than metres-per-voxel, which would shrink the lit world as the quality
     /// dial goes down — is at the constant.
     float     testAutoBoundsMax = -1.0f;
+    /// The scene-fitted volume's resolution along its longest side - a test lever over the
+    /// tier's own (`giQualityFacts(...).voxelResolution`), for measuring the resolution as a
+    /// dial against its cost in one process. 0 (the default) is the tier's.
+    unsigned  testVoxelResolution = 0u;
     /// Total light bounces, 1..4 (1 = a single indirect bounce).
     int       numBounces = 1;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
@@ -2253,15 +2374,6 @@ struct GiParams {
     /// and ROUGH surfaces inside the probe region take their environment from the
     /// probes instead of from cone tracing. Mirror-sharp pixels do not move.
     int       updateBudget = 1;
-    /// VCT light-injection ray-march step scale AT REST (FIX WAVE B5). Upstream:
-    /// "bigger values means the shadow raymarching during light injection is
-    /// faster, but may cause glitches if too high (areas that are supposed to be
-    /// shadowed won't be shadowed)"; below 1.0 trips an assert, so 1.0 is the
-    /// floor as well as the default. The engine RAISES it on the cheap in-motion
-    /// re-injection path only (see OgreScene::giRayMarchStepScale) — a re-inject
-    /// that happens every few frames of a drag is allowed to be coarse; the
-    /// re-solve that lands when the drag stops is not.
-    float     rayMarchStepScale = 1.0f;
     /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
     ///
     /// On, and in a VCT mode, the engine builds an `Ogre::IrradianceField` over
@@ -2272,12 +2384,13 @@ struct GiParams {
     ///
     /// THE ONE THING TO KNOW BEFORE TURNING IT ON: binding a field makes
     /// HlmsPbs set `VctDisableDiffuse`, so DDGI REPLACES the voxel-cone diffuse
-    /// rather than adding to it. The replacement is smooth and leak-resistant
-    /// where the cone-traced term blew out corners, and — once the pass-buffer
-    /// alignment defect this lane found is corrected (FogHlmsListener::
-    /// the pass-buffer under-report, fixed by ogre-patch 0050) — it lands within about 15% of the brightness it takes
-    /// over from, which is what makes `ddgiIntensity` a trim rather than a
-    /// correction.
+    /// rather than adding to it: one integral of one radiance field (since
+    /// PHOTON-READER-1 its probe rays march the same cascade chain through the
+    /// same voxel reader as the cones), applied at the field's own answer —
+    /// nothing is calibrated into it and nothing trims it. WHERE THE SCREEN-PROBE
+    /// GATHER RUNS (a ray tier, `gather` above) the field is NOT the diffuse: it
+    /// is the fallback cage for a pixel no probe answered, and the gather is the
+    /// diffuse. At Low it is the diffuse.
     ///
     /// GiToggle::Auto means "let the quality tier decide", and the deciding
     /// happens DOCUMENT-SIDE: the Photon tier (GI_UNIFIED P2) writes a concrete
@@ -2293,20 +2406,6 @@ struct GiParams {
     /// disappears and the sky/flat ambient would be counted twice on top of the
     /// field's own diffuse (P0 spike §5, measured).
     GiToggle  ddgi = GiToggle::Auto;
-    /// The DDGI diffuse INTENSITY — ours, not upstream's (IrradianceFieldSettings
-    /// has no such knob; ours rides the pass buffer into
-    /// media/Hlms/Jahshaka/JahIfd_piece_ps.any, so changing it is a const-buffer
-    /// write and never a shader rebuild).
-    ///
-    /// 1.0 is the field's own answer, untrimmed: since PHOTON-READER-1 the
-    /// field's probe rays march the same cascade chain through the same voxel
-    /// reader as the cone diffuse it replaces (jah_voxel_march.glsl), so the two
-    /// are one integral of one radiance field and differ only in how it is
-    /// integrated (144 rays per probe, blended over the probe cage, against six
-    /// cones per pixel). Nothing is calibrated into it. It stays a dial because a
-    /// scene may want a stylistic trim; clamped to [0, 64], and 0 is a legitimate
-    /// "field bound, contributing nothing" for A/B measurement.
-    float     ddgiIntensity = 1.0f;
 
     // ---- PHOTON: camera-centred voxel cascades (PHOTON_SPEC P0) -------------
 
@@ -2427,12 +2526,16 @@ struct GiParams {
     /// cone is stopped by a VOXEL, which is the whole argument (measured: 18 to
     /// 59 % less light through a thin wall, spikes/gather-0).
     ///
-    /// `Auto` is OFF at every tier until the gather's picture is filtered and
-    /// temporally accumulated (the spec's phases 2 and 3): the phase-1 estimate
-    /// is correct and NOISY, so a tier may not select it yet. `On` turns it on
-    /// wherever the machine traces -- the same rule the reflections take: no
-    /// ray-query device, or a project whose ray row is Off, keeps exactly
-    /// today's picture (the cones and the field) and this row does nothing.
+    /// `Auto` IS THE TIER'S (PHOTON-GATHER-1d, the rule T-A): the tier table's
+    /// gather row (`giQualityFacts(...).gather`) — ON at High, Epic and Medium
+    /// (36 rays), OFF at Low and in the VR column — under a GI mode that is on,
+    /// wherever the machine traces. `On` turns it on wherever the machine traces;
+    /// `Off` keeps the cones and the field. The same machine rule the reflections
+    /// take: no ray-query device, or a project whose ray row is Off, keeps the
+    /// no-rays picture (the field and the cones) and this row does nothing.
+    /// Where the gather runs it IS the diffuse: the cone diffuse is compiled out
+    /// and the irradiance field stays only as the fallback cage for a pixel no
+    /// probe answered.
     ///
     /// It is GRAPH SHAPE as well as a switch: the probes read their surface
     /// from the SSR prepass' depth and normals, so a view whose row is on
@@ -2446,6 +2549,13 @@ struct GiParams {
     /// again to turn a compute dispatch on -- which also made every A/B arm of
     /// every suite compare ACROSS a GI rebuild (the lead's read).
     GiToggle  gather = GiToggle::Auto;
+    /// THE DOCUMENT'S TIER IS EPIC — the one fact of the Studio's tier table the
+    /// three-valued `quality` cannot carry (Epic shares High's rows). The tier
+    /// table reads it for the gather's density alone (`giQualityFacts`'s `epic`:
+    /// four times the probes); PHOTON-TIERS-1 replaces it with a GiQuality. Per
+    /// frame, like `gather` (`giTuningEqual`): it re-sizes the gather's targets
+    /// and rebuilds nothing.
+    bool      epicTier = false;
     // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------
     //
     // WHY THEY LIVE ON GiParams AND NOT ON A STRUCT OF THEIR OWN: the cache is
@@ -2456,9 +2566,10 @@ struct GiParams {
     // or freed by it); the BUDGET and the RADIUS are deliberately NOT — they
     // are read per frame by the residency pass, exactly like the three tuning
     // floats above, so dragging either of them re-captures nothing.
-    /// Off / Auto / On. AUTO is OFF at this phase and says so: nothing reads a
-    /// card until phase 4 (the ray hit), so capturing on a user's machine would
-    /// be pure cost. A suite and the monitor turn it On.
+    /// Off / Auto / On. AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): a card's reader
+    /// is the reflection trace's hit, so the cache runs exactly where that
+    /// trace does (the scene's ray row resolved against the machine) and costs
+    /// nothing elsewhere. A suite and the monitor force it On.
     GiToggle  cards = GiToggle::Auto;
     /// THE PER-FRAME TEXEL BUDGET — Lumen's shape (its capture budget is 512 x
     /// 512 texels a frame) and the number the whole capture cadence is sized
@@ -2491,8 +2602,7 @@ struct GiParams {
     /// it beside the struct is what makes "add a field" a one-place edit.)
     ///
     /// THE TUNING FLOATS ARE DELIBERATELY ABSENT (PHOTON_SPEC §7 E2 (8),
-    /// audit A F6): `ddgiIntensity` and `rayMarchStepScale` are
-    /// read per frame, so they take effect through `Scene::setGiTuning` without
+    /// audit A F6): the per-frame rows below are read per frame, so they take effect through `Scene::setGiTuning` without
     /// a rebuild — and while they were IN this comparison every tick of those
     /// sliders was a from-scratch teardown and re-voxelisation (N of them
     /// under a cascade chain). `giTuningEqual` is their comparison; a host
@@ -2501,6 +2611,7 @@ struct GiParams {
     bool operator==(const GiParams &o) const {
         return mode == o.mode && quality == o.quality &&
                numBounces == o.numBounces && testAutoBoundsMax == o.testAutoBoundsMax &&
+               testVoxelResolution == o.testVoxelResolution &&
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
                probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
@@ -2520,16 +2631,14 @@ struct GiParams {
     }
     /// The values `Scene::setGiTuning` pushes, compared on their own.
     bool giTuningEqual(const GiParams &o) const {
-        return ddgiIntensity == o.ddgiIntensity &&
-               rayMarchStepScale == o.rayMarchStepScale &&
-               // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
+        return // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
                // They belong in THIS comparison and not in `operator==` for the
                // same reason the three above do: the residency pass reads them
                // every frame, so moving either takes effect on the next frame
                // with nothing torn down — and a host that only pushed on
                // `operator==` would swallow a radius change entirely, which is
                // the defect this line exists to prevent.
-               gather == o.gather &&
+               gather == o.gather && epicTier == o.epicTier &&
                cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
                cardResidencyRadius == o.cardResidencyRadius;
     }
@@ -2594,6 +2703,60 @@ enum class GiViewProfile {
 
 /// It is a pure function of the quality dial and the view profile: no scene, no
 /// device, no Ogre.
+/// THE CARD READ'S FOOTPRINT GATE (PHOTON-CARDS-2 fix round, audit F2 — the
+/// lead's decision; the currency SC-2's page mips will select a level on). A
+/// reflection ray's hit reads the surface-cache card only while the sample's
+/// footprint at the hit (2 t alpha / sqrt(N), the spacing between the samples
+/// the temporal mean holds) is at most this many of the card's texels; a wider
+/// footprint reads the voxels, prefiltered at its own mip.
+///
+/// MEASURED (2026-09-23, spikes/photon-cards-2/sweepB): the selftest's fixture B
+/// (the glossy 0.2 floor reflecting the pillars — where the ungated card read
+/// showed its speckle) shot at the Viewport grade with the gate at k = 0 (the
+/// voxel read everywhere) .. infinity; the floor's speckle as the mean
+/// |pixel - its 3x3 median|: 0.532 codes at k = 0, 0.531 / 0.530 / 0.538 at
+/// k = 1 / 2 / 4 (x1.01 — the card read's sharpness in 2,862 / 5,747 / 13,102
+/// pixels, no new speckle), 0.675 at k = 8 (x1.27) and 0.703 ungated (x1.32).
+/// So k = 4, the widest footprint inside the lead's x1.2 bar. (gi.rt_reflect's
+/// 0.3-rough arm, the audit's first recipe, `test_rt_reflect --footprint-sweep`,
+/// never crosses: in a WARM view the temporal mean hides the card's noise
+/// above ~7 texels and the voxel's bias is the larger error there; below 4
+/// texels both follow the near-mirror per-frame sampling. The speckle is a
+/// young-view, SPATIAL property — two consecutive screenshots are identical —
+/// which is why the gate is set on the picture that showed it.)
+constexpr float kCardFootprintTexels = 4.0f;
+
+/// THE GATHER ROW OF THE TIER TABLE (PHOTON-GATHER-1d, the rule T-A): what the
+/// screen-probe gather is at a tier. One row in the engine's one table; the
+/// Studio's tier column is a projection of it (`world.tierTable()`).
+///
+/// THE RULE: High and Epic ON, Medium ON at 36 rays, Low OFF — the cone
+/// diffuse stays Low's alone. Why the numbers are these (GATHER-0/1a measured,
+/// spikes/gather-1a): PROBE COUNT fills this GPU and rays per probe do not, so
+/// the tiers differ in probe density and map resolution, not in a ray budget —
+/// 16 pixels a probe at Medium and High, 8 at Epic (four times the probes: the
+/// whole block 0.135 ms at High, 0.43 ms at Epic at 1080p); an 8x8 octahedral
+/// map (64 rays) at High and Epic, 6x6 (36) at Medium; the adaptive second
+/// probes capped at a quarter of the grid (Lumen's budget is a fixed
+/// allocation of the same order, and a flat scene spends none of it).
+///
+/// THE VR COLUMN IS OFF (GA-VR): the pixel history is 24 B a pixel — 247 MB and
+/// +0.172 ms at a headset's 10.3 Mpx (PHOTON-GATHER-1c) — and a stereo target
+/// needs its probe grid split at the eye seam; GA-VR shrinks the history first.
+struct GiGatherFacts {
+    /// What `GiParams::gather = GiToggle::Auto` resolves to (under a GI mode
+    /// that is on, on a machine that traces).
+    bool     on = false;
+    /// Pixels per probe on both axes.
+    unsigned stride = 16u;
+    /// The octahedral map's resolution: the probe traces octRes^2 rays, one per
+    /// texel (at most 8 — one ray is one thread of the trace's 8x8 workgroup).
+    unsigned octRes = 8u;
+    /// The adaptive probes a frame may add, as the uniform grid's count divided
+    /// by this (4 = a quarter of the grid).
+    unsigned adaptiveCapDivisor = 4u;
+};
+
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as
     /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
@@ -2616,27 +2779,23 @@ struct GiQualityFacts {
     /// what was MEASURED on this pin, and the measurement is not the one phase
     /// 0 took.
     ///
-    /// SURFACE-CACHE-0 read 0.042-0.057 ms per card and sized this at twenty
-    /// cards to the millisecond. SURFACE-CACHE-1b re-measured it in the REAL
-    /// scene manager and read **0.33-0.37 ms per card** — and the difference is
-    /// not the real scene and not the shadow node (both were measured out: the
-    /// figure is flat from 16 items to 64, and recalculating the shadow node
-    /// once per card set instead of once per card moved it by nothing). It is
-    /// that phase 0 drove SIX cards through ONE `CompositorWorkspace::_update`
-    /// and this Component drives ONE, because six cards need six camera poses
-    /// and one update carries one. 0.32 ms of the 0.33 is that update's own
-    /// fixed cost; the five `vkCmdCopyImage` into the atlas are 0.013.
+    /// THE NUMBER IT STANDS ON (PHOTON-CARDS-1, SC-1b-ITEM8): **0.18-0.20 ms a
+    /// card**, CPU, with the shadow fit FIRING — `sc1b_measure showroom`, a
+    /// Showroom-2-shaped scene (45 carded instances, a sun, three shadowed point
+    /// lamps), all arms in one process: 0.218 ms a card at one card per
+    /// workspace update, 0.200 at three, 0.184 at a full batch of eight. About
+    /// 0.13 of it is the card's own PSSM fit (three caster passes over the
+    /// still world; 0.053-0.076 with nothing casting), because the capture now
+    /// runs inside Ogre's frame with the frame's light list and a camera per
+    /// pass — the 0.33 ms this row was first sized on was a hand-driven
+    /// workspace update per card whose fit never fired (its light list was
+    /// empty). The capture's shadow node is PSSM-only (kCardShadowNodeName):
+    /// with the probe node's point-lamp cubes it was ~1.0 ms a card.
     ///
-    /// So the budget is three cards to the millisecond, not twenty, and the
-    /// shipped default says so rather than promising a cadence the engine does
-    /// not have. THE HEADROOM IS NAMED AND MEASURED: 0.32 / 6 = 0.053 is
-    /// exactly phase 0's figure, so a capture node with N target passes under
-    /// per-pass execution masks — N cards of ONE instance per update, which
-    /// needs only the one subject bit — would buy back most of the difference
-    /// (~0.09 ms a card at N = 8). That is a lane of its own (the scratch has to
-    /// become a strip and a sub-page card needs an off-centre ortho window), and
-    /// it is a cost lane, not a correctness one.
-    unsigned cardBudgetTexels = 32768u;   // 2 cards a frame ~ 0.7 ms
+    /// So the rows keep the milliseconds they were given — ~0.4 / ~0.6 /
+    /// ~1.0 ms a frame — and buy two, three and five cards with them. One
+    /// workspace update carries at most eight (`kCaptureBatch`).
+    unsigned cardBudgetTexels = 49152u;   // 3 cards a frame ~ 0.6 ms
     /// THE RESIDENCY RADIUS, metres. Beyond it an instance holds no pages. It
     /// is a tier row because the atlas is a fixed 2k at this phase: 256 pages
     /// of 128 texels is about forty six-card sets at full size, so the radius
@@ -2644,6 +2803,22 @@ struct GiQualityFacts {
     /// 4k atlas with a page table and streaming; ours has neither yet, and
     /// pretending otherwise would just overflow the atlas silently.)
     float    cardResidencyRadius = 30.0f;
+    /// THE LIT CARD'S PER-FRAME BUDGET (PHOTON-CARDS-1, SC-1c), in atlas TEXELS
+    /// relit a frame by the `Jahshaka/CardLight` job — a second budget beside the
+    /// capture's, because a light's colour or intensity changes every card's
+    /// radiance and no card's picture. Lumen's own direct-lighting budget, 1024
+    /// square, is the ceiling; the rows are a quarter, an eighth and a sixteenth
+    /// of it, NOT YET MEASURED in GPU milliseconds (that needs the clocks locked
+    /// — the lead's measurement): a capture's cards are relit the frame they
+    /// land, inside this budget, and a light write relights the resident set
+    /// over as many frames as it takes.
+    unsigned cardLightTexels = 131072u;
+    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (six cones
+    /// over the chain) per texel, spent when a card is captured and when the
+    /// chain re-injects. Lumen's own indirect budget, 512 square, is the
+    /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
+    /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
+    unsigned cardIndirectTexels = 32768u;
     // ---- THE ATOM COLUMN (ATOM P3's SUB-ERROR) -----------------------------
     /// THE TIER'S GEOMETRIC TOLERANCE, in SAMPLES of whatever is sampling —
     /// pixels for a view, cells for a cascade. It is the `tolerance` argument of
@@ -2666,13 +2841,38 @@ struct GiQualityFacts {
     /// because `GiQuality` is three-valued (it is the RESOLUTION dial; Epic
     /// changes no resolution) and the design gives the two the same tolerance.
     float    pixelTolerance = 1.0f;
+    // ---- THE GATHER ROW (PHOTON-GATHER-1d) -----------------------------------
+    /// The screen-probe gather at this tier (GiGatherFacts says what and why).
+    GiGatherFacts gather;
+    // ---- THE REFLECTION ROW (PHOTON-F12-PCC) ---------------------------------
+    /// THIS TIER'S REFLECTIONS ARE TRACED, so it builds NO reflection-probe
+    /// grid wherever the machine traces (the rule: `OgreScene::probeGridByRays`
+    /// — this row AND `rayTracingResolved()`, the gather's own shape). The three
+    /// sources are the answer there: the screen march, the rays (a hit lit from
+    /// its card, the decode or the voxels) and the anisotropic cone with the sky
+    /// as its escape; a planar mirror stays a planar mirror. True at High (and
+    /// Epic, which reads High's rows); Low and Medium keep the grid wherever a
+    /// technique asks for one. A scene that turns its rays OFF is not a ray tier
+    /// for this rule and keeps its grid.
+    ///
+    /// WHAT IT DELETES, measured on Grand Showroom 2 at Epic (32 probes kept at
+    /// 512 px HDR, app.textureMemory A/B): 838,987,760 bytes of texture — the
+    /// probe array 536,739,840, its capture and IBL cubes 33,550,320, each probe
+    /// workspace's shadow targets 268,435,456 (8 MiB a probe) and the placement's
+    /// 256 px depth buffer 262,144 — and the
+    /// open's placement, 713-799 ms of the UI thread.
+    bool rayReflections = false;
 };
 
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
 /// with it. `profile` picks the column (see GiViewProfile for the measurement
 /// behind the VR one).
+/// `epic` is the document's EPIC tier (GiParams::epicTier), which the
+/// three-valued `GiQuality` cannot name: Epic shares High's rows except the
+/// gather's density (below) — until PHOTON-TIERS-1 makes Epic a GiQuality.
 inline GiQualityFacts giQualityFacts(GiQuality quality,
-                                     GiViewProfile profile = GiViewProfile::Desktop)
+                                     GiViewProfile profile = GiViewProfile::Desktop,
+                                     bool epic = false)
 {
     GiQualityFacts f;
     switch (quality) {
@@ -2685,11 +2885,21 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[0] = {  5.0f, 64, 0.0f };
         f.cascades[1] = { 20.0f, 64, 0.0f };
         f.cascadeCount = 2;
-        f.voxelResolution = 32u;
+        // THE SCENE-FITTED VOLUME IS 64 TOO (PHOTON-VOXEL-4, the lead's decision): at 32
+        // cells along the longest side a room-sized box has 0.56 m cells, and the field's
+        // wall-foot darkening lands outside its own derived bracket (gi.ddgi_ambient:
+        // 85.0 % against 73.2-83.9); at 64 it lands inside (83.7 % in 76.1-84.0). The
+        // measured cost of the dial, paired in one process (tests/gi/voxel_dial_measure):
+        // the rebuild 0.158 -> 0.220 ms GPU, the store 0.45 -> 3.6 MB, the settle's GI
+        // work 20.9 -> 46.3 ms GPU once, the steady frame +0.005 ms.
+        f.voxelResolution = 64u;
         f.probeFaceSize   = 128u;
-        f.cardBudgetTexels = 16384u;    // 1 card a frame ~ 0.35 ms
+        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
         f.cardResidencyRadius = 15.0f;
+        f.cardLightTexels = 65536u;     // 4 pages a frame
+        f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.pixelTolerance = 2.0f;        // the Atom column; see the field
+        f.gather.on = false;            // Low keeps the cone diffuse (T-A)
         break;
     case GiQuality::High:
         f.cascades[0] = {  5.0f, 128, 0.0f };
@@ -2703,9 +2913,13 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
         f.probeHdrDefault     = true;
         f.probeShadowsDefault = true;
-        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 1.0 ms on the measured cost
+        f.cardBudgetTexels = 81920u;    // 5 cards a frame ~ 1.0 ms on the measured cost
         f.cardResidencyRadius = 60.0f;
+        f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
+        f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
+        f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
+        f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         break;
     default:   // Medium: the same reach as High, at its own resolution
         f.cascades[0] = {  5.0f, 64, 0.0f };
@@ -2715,11 +2929,18 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 4;
         f.voxelResolution = 64u;
         f.probeFaceSize   = 256u;
-        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.7 ms
+        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.6 ms
         f.cardResidencyRadius = 30.0f;
+        f.cardLightTexels = 131072u;    // 8 pages a frame
+        f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
+        f.gather = { true, 16u, 6u, 4u };   // 36 rays a probe (T-A)
         break;
     }
+    // ---- THE EPIC TIER'S GATHER: FOUR TIMES THE PROBES -----------------------
+    // Keyed on the TIER, never on the view's SSR row (GA-TIERROW): the SSR row
+    // is the reflections' own and stays what it is.
+    if (epic && f.gather.on) f.gather.stride = 8u;
     // ---- THE VR COLUMN (GiViewProfile, above) ------------------------------
     // ONE transform over the desktop rows, so the two columns cannot drift: the
     // middle cascade goes and the outermost steps twice as far. `stepCells` on
@@ -2753,6 +2974,11 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // would not be a smaller budget, it would be a budget the code has to
         // ignore. Low's VR row is the one that reaches it.
         f.cardBudgetTexels = std::max(f.cardBudgetTexels, 16384u);
+        // ...and the relight budget with it, on the same floor for the same reason.
+        f.cardLightTexels = std::max(f.cardLightTexels / 2u, 16384u);
+        f.cardIndirectTexels = std::max(f.cardIndirectTexels / 2u, 16384u);
+        // ...and the GATHER IS OFF in the VR column (GiGatherFacts: GA-VR).
+        f.gather.on = false;
     }
     return f;
 }
@@ -2993,7 +3219,66 @@ struct GatherTuning {
     /// reads the sky directly instead of tracing the far copies (the coarse
     /// levels) out to the far plane -- the A/B that prices the far field.
     bool     farQueryOff = false;
+    /// THE IRRADIANCE READBACK (PHOTON-GATHER-1b) -- a TEST AND TOOL door,
+    /// never a frame path: each gathered frame also copies the full-resolution
+    /// `probeIrradiance` target (rgb = E/pi, w = the coverage) into host memory,
+    /// and `GatherStatus::irradiance` carries the last RETIRED frame's copy (a
+    /// few frames late, like the timestamps). It is how a suite reads the
+    /// gather's own answer -- in the shader's units, before any material, light
+    /// or tonemap touches it -- and how determinism is asserted on the estimate
+    /// itself rather than on a picture.
+    bool     readback = false;
+    /// THE SH BANDS THE INTEGRATE EVALUATES (PHOTON-GATHER-1b item 3's
+    /// measurement arm): 9 = the whole record (L0..L2, the shipped value), 4 =
+    /// L0 and L1 only (the stated fallback, whose memory traffic is what the
+    /// SH9 record is priced against). 0 = the shipped value.
+    unsigned shBands = 0u;
+    /// THE FILTER IN PROBE SPACE OFF (PHOTON-GATHER-1b item 2): each probe's SH
+    /// is projected from its own 64 rays alone — the A/B that prices the filter
+    /// and measures what it buys.
+    bool     filterOff = false;
+    /// THE PIXEL HISTORY'S MEMORY (PHOTON-GATHER-1c): the frames after which
+    /// its running mean becomes an EMA at 1/historyFrames — a TRUE mean for
+    /// that many frames, then each new frame weighs 1/historyFrames. 0 = the
+    /// shipped 10 (the trade, measured on gi.gather_stable's room: the
+    /// frame-to-frame flicker is ~ the floor x the single-frame innovation —
+    /// 9 codes each frame alone -> 1 code; a lighting step of D codes arrives
+    /// within 1 code after ln(1/D)/ln(1 - 1/historyFrames) frames — 16 for a
+    /// 5-code step). Clamped to 1..63 (the count's six bits).
+    unsigned historyFrames = 0u;
+    /// THE HISTORY'S VALIDATION OFF (PHOTON-GATHER-1d, the 1c audit's m2) — a
+    /// TEST door, never shipped: every reprojected texel is accepted (the 5 %
+    /// distance test and the normal test both off), which is what a history that
+    /// stopped validating would show. gi.gather_motion drives it to prove its
+    /// disocclusion bar discriminates that defect.
+    bool     historyValidationOff = false;
+    /// THE REST OFF (PHOTON-GATHER-1d) — a MEASUREMENT door, never shipped: the
+    /// view never counts a rest frame, so there is no rest mean and no hold and
+    /// every frame is the pixel history's. A still view HOLDS one N-sample mean
+    /// (GatherStatus::settled), so averaging its frames reads that one draw; a
+    /// suite that averages a still view's frames to read the ESTIMATOR's mean
+    /// (gi.gather_reference, gi.gather_plane) or that measures the history's own
+    /// floor at rest (gi.gather_stable's trade) sets it.
+    bool     restOff = false;
 };
+
+// THE PIXEL HISTORY'S MEASUREMENT LEVER (PHOTON-GATHER-1c item 3) is an
+// ENVIRONMENT variable, not a tuning field: `JAHSHAKA_GATHER_NO_TEMPORAL` set
+// makes every gathering view publish each frame's estimate alone (no history
+// read or written), read at every frame so a suite drives both arms in one
+// process (setenv / unsetenv). It is the frozen-frame rule's pair: a frozen frame
+// index makes consecutive frames the same estimate; this makes each frame's
+// picture that frame's estimate.
+
+/// THE STEP THE SETTLED-HISTORY PREDICATE WAITS OUT, in display codes (of 255):
+/// the gather's pixel history is an EMA at 1/historyFrames once it is full, so a
+/// lighting step of D codes decays under one code after ln(1/D)/ln(1 - 1/h)
+/// frames — 16 at D = 5 and h = 10 (the lamp's measured 5.3-code indirect step,
+/// PHOTON-GATHER-1c; a full-range step would need 53). `giAtRest` waits for it.
+constexpr float kGatherSettleCodes = 5.0f;
+
+/// An offscreen view's declared contract (View::setOffscreenContract).
+enum class OffscreenContract { Undeclared, StillPicture, Live };
 
 /// What the gather did on the last drawn frame of this scene.
 struct GatherStatus {
@@ -3029,12 +3314,132 @@ struct GatherStatus {
     float traceMs = -1.0f;
     float integrateMs = -1.0f;
     float cpuMs = -1.0f;
+    /// ...and the FILTER in probe space (PHOTON-GATHER-1b), its own dispatch.
+    float filterMs = -1.0f;
+    /// THE PIXEL HISTORY (PHOTON-GATHER-1c): whether it ran on the last frame
+    /// (false under `JAHSHAKA_GATHER_NO_TEMPORAL`) and the view's age
+    /// (consecutive frames it has been written; 0 on a first frame, a resize, a
+    /// scene bind, a tuning change).
+    bool temporal = false;
+    unsigned historyAge = 0u;
+    /// THE SETTLED HISTORY (PHOTON-GATHER-1d; the term `GiStatus::giAtRest`
+    /// carries). `restFrames` = the consecutive gathered frames at REST: the
+    /// camera unmoved, the scene's lighting unchanged (a light write, an
+    /// injection landing — a chain settle, a cascade rebuild or step, the single
+    /// volume's own), the scene's geometry unmoved and the surface cache idle,
+    /// the estimator unchanged; `settleFrames` = N, the frames a step of
+    /// `kGatherSettleCodes` display codes takes to fall under one code through the
+    /// history's EMA, N = ceil( ln(1/D) / ln(1 - 1/historyFrames) ) (16 at the
+    /// shipped 10 frames), and the length of the REST MEAN: at rest the answer is
+    /// handed over from the EMA to a true mean of the rest frames alone over N
+    /// frames, IS that mean at the N-th and is then HELD (nothing is dispatched)
+    /// — so a still picture is a function of the scene and the camera and not of
+    /// its history or of how long it was waited for, and two screenshots of it
+    /// agree byte for byte. The held picture is ONE N-sample mean: where a probe's
+    /// estimate is noisy (a small bright source at a grazing angle) it keeps that
+    /// draw's error until something moves. The pixel history is written with the
+    /// handed-over value, so a camera that starts moving again continues from the
+    /// rest mean without a pop. THE REST IS NOT THE SETTLE (the fix round):
+    /// `sinceRestart` = the frames the history has drawn since its last RESTART
+    /// — its birth, a resize, a scene bind, the lever, an estimator-changing
+    /// tuning, or a DISCONTINUITY of the scene (a light, sky or material write,
+    /// an injection landing; OgreScene::gatherRestartKey). A continuous transform
+    /// write (an animation, a socket rider, a mover) is not a restart — the
+    /// reprojection follows it per pixel — and it never lets the scene REST. So
+    /// `settled` = sinceRestart >= N (true when the history does not run): a
+    /// still scene is settled on the frame its rest mean is complete (the two
+    /// counts agree), and a scene with a per-frame writer is settled on the N-th
+    /// frame of its EMA — a picture that is not byte-stable by nature. A YOUNG
+    /// VIEW (a two-frame screenshot) is NOT settled: it shows the raw estimate —
+    /// up to 9/255 of probe noise on a Showroom-shaped room.
+    unsigned restFrames = 0u;
+    unsigned sinceRestart = 0u;
+    unsigned settleFrames = 0u;
+    bool settled = true;
+    /// THE READBACK (`GatherTuning::readback`): the last retired frame's
+    /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
+    /// mean radiance over the cosine-weighted hemisphere of the pixel's own
+    /// normal; w = 1 where probes answered, 0 where the fallback owns the
+    /// pixel). Empty without the readback, and until a frame has retired.
+    std::vector<float> irradiance;
+    unsigned irradianceW = 0u, irradianceH = 0u;
+    /// Which gather frame the readback is of (the view's frame counter), so a
+    /// suite can tell a fresh copy from a repeat.
+    unsigned irradianceFrame = 0u;
     /// WHY IT IS NOT RUNNING, when `on` is true and `running` is false and the
     /// reason is the engine's rather than the view's (no ray device, no
     /// pipelines on this driver, no room for the atlas). Empty is "nothing went
     /// wrong" — a row that silently does nothing is the worst of the three
     /// outcomes.
     std::string error;
+};
+
+// ---------------------------------------------------------------------------
+// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3; SPECS/photon/C4_RAYS_BEYOND_
+// REFLECTIONS_DESIGN.md section 1).
+//
+// ONE HARDWARE RAY PER PIXEL towards the sun, from the surface the prepass
+// drew, against the scene's own TLAS, out to a short CONTACT RANGE. The answer
+// (1 = the sun reaches this point, 0 = something is in the way) is folded into
+// the first directional light's shadow term as `min( fShadow, visibility )`:
+// the shadow map keeps every shadow it has, and the ray closes what the map's
+// depth bias opens — the band of light a PSSM bias leaves under the edge of
+// anything standing on the ground. Beyond the range the map answers alone.
+//
+// OFF BY DEFAULT (a project row, `world.sunContact`); never in VR (the stereo
+// chain declines it); never where the scene does not trace (the project's ray
+// row, the machine, --no-ray-query). With it off nothing is allocated, nothing
+// is dispatched, no shader property is set and no pixel moves.
+
+/// THE CONTACT RANGE's default, metres: the distance a ray looks for an
+/// occluder before it leaves the question to the shadow map. The design's
+/// 2 m — a PSSM bias leaks centimetres, so a range of a couple of metres covers
+/// every contact the map gets wrong and costs the traversal nothing it needs.
+constexpr float kSunContactDefaultRange = 2.0f;
+/// ...and the band a row may hold it in (a ray of zero length answers nothing;
+/// a ray of a kilometre is a second shadow map, not a contact term).
+constexpr float kSunContactMinRange = 0.05f;
+constexpr float kSunContactMaxRange = 50.0f;
+
+/// The job's resolution. `Auto` follows the tier: HALF at the Low and Medium GI
+/// quality rows (one ray per 2x2 block), FULL at High (Epic is a High row).
+enum class SunContactResolution { Auto, Full, Half };
+
+/// The project's row (pushed by the host from the document, like the ray row).
+struct SunContactDesc {
+    bool  enabled = false;
+    float range = kSunContactDefaultRange;
+    SunContactResolution resolution = SunContactResolution::Auto;
+    bool operator==(const SunContactDesc &o) const {
+        return enabled == o.enabled && range == o.range && resolution == o.resolution;
+    }
+    bool operator!=(const SunContactDesc &o) const { return !(*this == o); }
+};
+
+/// What the contact job did on the last drawn frame of this scene.
+struct SunContactStatus {
+    /// The row resolved ON: enabled, and this scene traces on this machine.
+    bool on = false;
+    /// ...and a view dispatched it on its last frame (false with `on` true: no
+    /// view of the scene carries the prepass, the view is stereo, or the pass'
+    /// shadow node holds no directional caster — `reason` says which).
+    bool running = false;
+    /// The texture the pixel read, in texels, and the target it covers.
+    unsigned width = 0u, height = 0u, targetW = 0u, targetH = 0u;
+    /// 1 = one ray per pixel, 2 = one per 2x2 block.
+    unsigned divisor = 0u;
+    unsigned long long rays = 0ull;
+    /// The range the rays were cast to, and the world-space direction they were
+    /// cast along (towards the sun: the first directional shadow caster's).
+    float range = 0.0f;
+    float toSun[3] = { 0.0f, 0.0f, 0.0f };
+    /// GPU milliseconds of the dispatch, read back several frames late through
+    /// the tier's timestamps (negative = not measured yet), and the CPU cost of
+    /// recording it.
+    float gpuMs = -1.0f;
+    float cpuMs = -1.0f;
+    /// Why it is not running when `on` is true; empty when nothing declined.
+    std::string reason;
 };
 
 // ---- SURFACE-CACHE phase 2: the capture cache's status and its knobs -------
@@ -3063,6 +3468,55 @@ struct CardSample {
     float depth = 0.0f;                 ///< world units from the card's near plane; 0 = nothing captured there
     float shadow = 0.0f;                ///< 1 = fully lit by the shadowed lights, 0 = fully occluded
     float roughness = 0.0f;             ///< the GGX ALPHA (perceptual squared), through patch 0043's range
+    /// THE LIT CARD (the sixth layer, `Jahshaka/CardLight`): the texel's
+    /// outgoing diffuse radiance — direct from the scene's lights (the sun
+    /// through `shadow`) plus the indirect below plus the emissive. 0 until
+    /// the card has been relit.
+    float radiance[3] = { 0, 0, 0 };
+    /// ...and its cached INDIRECT half alone (the voxel march from the texel x
+    /// kD x pi x the lobe's albedo jahDiffuseAlbedo at V = N — BRDF_EnvMap's
+    /// arithmetic); 0 until the card's indirect has been marched.
+    float indirect[3] = { 0, 0, 0 };
+    /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from
+    /// readCardTexel), and whether its radiance carries a marched indirect
+    /// half — what gi.card_read_parity holds the ray job's own pick to.
+    int      card = -1;
+    unsigned texelX = 0u, texelY = 0u;
+    bool     lit = false;
+};
+
+/// ONE QUESTION FOR THE RAY JOB'S CARD READ (Engine::cardReadParity): a world
+/// point on `node`'s surface and the direction the read treats as "facing"
+/// (the ray job passes the reversed ray direction — jah_rq_card.glsl says why).
+struct CardReadQuery {
+    Vec3   position;
+    Vec3   facing;
+    NodeId node = 0;
+    /// A TRACED question: `position` is a ray's origin and `facing` its
+    /// direction; the job traces the scene's TLAS (near copies, as the
+    /// reflection does), takes the instance from the hit and the facing from
+    /// the hit triangle's geometric normal — the reflection's hit path whole
+    /// but the lighting. `node` is ignored.
+    bool   trace = false;
+};
+/// ...and the ray job's answer: the card and texel its GLSL picked, whether the
+/// card was lit, and the radiance it would return (0 when not `ok`).
+struct CardReadPick {
+    bool     ok = false;
+    bool     lit = false;
+    int      card = -1;
+    unsigned texelX = 0u, texelY = 0u;
+    float    radiance[3] = { 0, 0, 0 };
+    /// A traced question's hit: whether the ray hit, where, and the geometric
+    /// normal the job rebuilt there (the facing it asked the pick with).
+    bool     hit = false;
+    float    hitPoint[3] = { 0, 0, 0 };
+    float    hitNormal[3] = { 0, 0, 0 };
+    /// ...and the radiance the read sends TOWARDS ITS VIEWER (PHOTON-CARDS-5,
+    /// jah_card_view.glsl: the diffuse lobe's view term restored) — a traced
+    /// question's ray origin, an untraced one's facing direction (head-on).
+    /// `radiance` above is the texel as stored.
+    float    viewed[3] = { 0, 0, 0 };
 };
 
 /// THE SURFACE CACHE'S OWN STATUS (GiStatus::cards). Every counter is the model
@@ -3109,13 +3563,76 @@ struct CardCacheStatus {
     /// page into the atlas.
     float captureWorkspaceMs = 0.0f;
     float captureCopyMs = 0.0f;
-    /// PHASE 4's TABLES, as they stand: how many card records the GPU buffer
-    /// describes, and how many item slots the instance buffer is indexed over.
-    /// Nothing binds them yet (the reader is the ray hit at phase 4); they are
-    /// here so a suite can see that the layout the shader will read is being
-    /// maintained and not merely declared.
+    /// THE RAY READ'S TABLES, as they stand: how many card records the GPU
+    /// buffer describes, and how many item slots the instance buffer is indexed
+    /// over — what the reflection trace's card read (jah_rq_card.glsl) binds.
     unsigned cardRecords = 0u;
     unsigned instanceSlots = 0u;
+    /// THE LIT CARD (PHOTON-CARDS-1): the Radiance layer's format name (chosen
+    /// from what the device can store to from a compute job — R11G11B10F, else
+    /// RGBA16F), the relight budget in texels a frame, what the last frame
+    /// relit (cards, texels), the relights for the life of the cache, the light
+    /// writes that changed only a card's RADIANCE (a colour, an intensity — no
+    /// recapture), and the CPU milliseconds the last frame's relight dispatch
+    /// cost to record.
+    std::string radianceFormat;
+    unsigned lightBudgetTexels = 0u;
+    unsigned relitLastFrame = 0u;
+    unsigned relitTexelsLastFrame = 0u;
+    unsigned long long relights = 0ull;
+    unsigned long long invalidRadiance = 0ull;
+    float lightMs = 0.0f;
+    /// THE INDIRECT HALF's own budget and counters: cards and texels whose
+    /// voxel march ran last frame, marches for the life of the cache, the
+    /// re-injections that staled the resident set's indirect (one per burst),
+    /// and whether the last relight had a chain to march at all.
+    unsigned indirectBudgetTexels = 0u;
+    unsigned indirectLastFrame = 0u;
+    unsigned indirectTexelsLastFrame = 0u;
+    unsigned long long indirectRelights = 0ull;
+    unsigned long long invalidIndirect = 0ull;
+    bool indirectOn = false;
+    /// Lights the relight job could not hold (past its 64) at the last relight;
+    /// the engine log says so once per cache.
+    unsigned lightsDropped = 0u;
+    /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4). A card's sun visibility
+    /// is the captured term (the still world's casters) TIMES a traced term for
+    /// the movers: a transform write of a shadow-casting mover traces sun rays
+    /// against the movers alone (`kRayMaskMoverCaster`) from every texel of the
+    /// cards inside its sun-projected footprint, old and new, and relights them
+    /// in the same frame. `moverCasters` = the traced shadow-casting movers the
+    /// last evaluation saw; the last frame's traced cards and texels and the
+    /// lifetime count; `moverRetired` = cards whose mover term was dropped because
+    /// no footprint reaches them any more (relit, not traced); `moverPending` =
+    /// cards past the frame's budget, carried to the next frame (oldest pending
+    /// first, nearest among equals — every pending card is traced within
+    /// ceil(pending / the cards the budget holds) frames while movers keep moving).
+    /// The budget is the relight's own number (`lightBudgetTexels`), spent a
+    /// second time on the mover term. `moverGpuMs` / `relightGpuMs` = the trace
+    /// job's and the relight job's GPU milliseconds on the last frame that ran
+    /// them (timestamps; -1 until read).
+    unsigned moverCasters = 0u;
+    unsigned moverTracedLastFrame = 0u;
+    unsigned moverTexelsLastFrame = 0u;
+    unsigned long long moverTraces = 0ull;
+    unsigned long long moverRetired = 0ull;
+    unsigned moverPending = 0u;
+    /// ...and how many frames the OLDEST of them has waited since it went
+    /// pending (0 when none waits) — the starvation reading: under the oldest-
+    /// first order it stays below ceil(pending / the cards the budget holds).
+    unsigned moverPendingAge = 0u;
+    float moverGpuMs = -1.0f;
+    float relightGpuMs = -1.0f;
+    /// A STILL CASTER THAT MOVES (PHOTON-CARDS-4 finding 3): its shadow is the
+    /// still world's, held by the CAPTURED term, so any change to what the
+    /// capture holds of it — a transform write, a show/hide, its caster bit, a
+    /// change of class (a drag's promotion to the mover channel and its
+    /// demotion at rest; setNodeMovable), its deletion — queues
+    /// the cards of its old and new sun-projected footprints for a recapture
+    /// (the capture's own budget and order). A queued card keeps its traced
+    /// movers' term until the capture lands. Cards queued so, for the life of
+    /// the cache.
+    unsigned long long casterRecaptures = 0ull;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
@@ -3134,12 +3651,12 @@ struct GiStatus {
     /// clamped grid product (pccProbesX * pccProbesY * pccProbesZ); 0 in every
     /// other mode, and 0 in the hybrid when the probe arm failed to build.
     int    probeCount = 0;
-    /// Whether THIS scene's probe grid is the one bound to the process-wide
-    /// HlmsPbs — i.e. whether probe reflections are actually being sampled.
-    /// False when the hybrid degraded to plain VCT, and false when another
-    /// scene took the binding over (the sVctBindingOwner rule).
+    /// Whether THIS scene's passes sample its probe grid — i.e. whether probe
+    /// reflections are actually being drawn in it (the binding is per scene and
+    /// per pass: SceneGiBinding). False when the hybrid degraded to plain VCT,
+    /// and while a staged grid is not finished.
     bool   pccBound = false;
-    /// Whether this scene owns the process-wide VCT lighting binding.
+    /// Whether THIS scene's passes sample its VCT lighting.
     bool   vctBound = false;
     /// The RESOLVED lit volume — what the voxelizer was actually given, after
     /// the explicit-bounds check, the per-node exclude flag and the extent
@@ -3203,8 +3720,21 @@ struct GiStatus {
     /// `probeCount 0` with this NON-ZERO is the open-scene answer (and the sky
     /// IBL is bound instead); `probeCount 0` with this ZERO while the mode is
     /// the hybrid is the silent-degradation failure gi.pcc_mirror exists to
-    /// catch.
+    /// catch — UNLESS `probeGridByRays` says the tier traces its reflections.
     int    probesDropped = 0;
+    /// THE THIRD ANSWER (PHOTON-F12-PCC): the hybrid at a RAY tier builds no
+    /// grid at all — the tier's facts say its reflections are traced
+    /// (`GiQualityFacts::rayReflections`) and this scene traces on this machine
+    /// (`Scene::rayTracingResolved`). `probeCount` and `probesDropped` are then
+    /// both 0 by design, `pccBound` false, and nothing was placed, photographed
+    /// or captured (`probePlacements`, `probeCapturesTotal`).
+    bool   probeGridByRays = false;
+    /// Probe-grid placements STARTED on this scene over its life (the scout,
+    /// the first of the three stages) and probe captures RENDERED over its life
+    /// (the placement's and the budget's) — cumulative, never reset. A ray tier
+    /// moves neither.
+    unsigned probePlacements = 0;
+    unsigned long long probeCapturesTotal = 0;
     /// How many probes the renderer re-captures per frame — the RESOLVED
     /// `GiParams::updateBudget`, clamped to the probes that actually exist, and
     /// 0 whenever the probe arm did not build (FIX WAVE B1/B2). 0 in every mode
@@ -3290,25 +3820,16 @@ struct GiStatus {
     // VCT volume to feed the field, no IFD media staged, a construction that
     // threw). These four are what the shader is actually doing.
 
-    /// The process-wide HlmsPbs is sampling THIS scene's irradiance field.
+    /// THIS scene's passes sample its irradiance field.
     bool   ifdBound = false;
     /// Probes in the field (the product of the three per-axis counts). 0 when
     /// there is no field.
     int    ifdProbes = 0;
-    /// Every probe in the field has been integrated at least once since the
-    /// last build or reset. A bound field is ALWAYS converged on the frame it
-    /// binds (the build converges it in one dispatch) and on the frame it is
-    /// re-placed under a cascade chain (a follow converges it whole); it reads
-    /// false while a progressive re-converge is in flight — after
-    /// `refreshGiLighting`, or after cascade 0 re-voxelised at the same place.
-    bool   ifdConverged = false;
-    /// Probes the field is re-integrating per frame while a re-converge is in
-    /// flight — the resolved figure, derived from `GiParams::updateBudget` and
-    /// then clamped to the engine's dispatch rule (see OgreGi.cpp
-    /// ifdProbesPerFrame: a dispatch of fewer rays than one thread group is an
-    /// UNCAUGHT THROW in a release-built engine, so the clamp is mandatory).
-    /// 0 when the budget is 0 (paused: nothing re-converges) or when there is
-    /// no field.
+    /// Probes the field integrates per frame while a pass is in flight - the
+    /// resolved figure, `GiParams::updateBudget` x the field / 8 frames, rounded
+    /// up to a power of two (OgreGi.cpp ifdProbesPerFrame). 0 when the budget is 0
+    /// (paused: nothing progresses; every event's own pass runs inline) or when
+    /// there is no field.
     int    ifdProbesPerFrame = 0;
     /// WHERE THE FIELD IS: the corners of the volume its probe grid spans, as
     /// the engine placed it (the field enlarges that volume by one probe block
@@ -3334,9 +3855,31 @@ struct GiStatus {
     /// How the follows split (PHOTON-WRITER-1): `ifdScrolls` moved the window and
     /// kept every probe that stayed in it; `ifdReplacements` re-placed the whole
     /// field (a resize, or a jump of the whole grid or more - nothing to keep).
-    /// ifdFollows = ifdScrolls + ifdReplacements. Reset by a build.
+    /// ifdFollows = ifdScrolls + ifdReplacements. A re-placement counts ONCE,
+    /// however many frames its slabs take (PHOTON-FIELD-ROTATE-1: they are the
+    /// "ifd.replace" monitor rows). Reset by a build.
     unsigned long long ifdScrolls = 0;
     unsigned long long ifdReplacements = 0;
+    /// THE FIELD'S ESTIMATOR (PHOTON-FIELD-ROTATE-1): a probe's value is the mean of
+    /// its integrations, each under a fresh random rotation of its ray set, until it
+    /// holds `ifdTargetSamples`; every event (a build, a follow, a light change) owes
+    /// the field `ifdTargetSamples - 1` whole-grid refinements after its own pass, run
+    /// at the update budget, and `ifdRefinesOwed` counts the passes not yet
+    /// finished, the running one included (so `ifdRefinesOwed < ifdTargetSamples`
+    /// = every probe holds a sample). 0 = converged: the field costs nothing until
+    /// the next event. A PAUSED field (budget 0) has a target of 1: every event's
+    /// own pass runs inline and nothing is owed after it.
+    unsigned ifdTargetSamples = 0;
+    unsigned ifdRefinesOwed = 0;
+    /// GI IS AT REST (PHOTON-FIELD-ROTATE-1): nothing this scene's GI owes will
+    /// change the picture - no rebuild or re-voxelisation pending (the flush, a
+    /// staged build, a cascade step, a chain-shape change, a dirty box), no light
+    /// tick or settle injection owed, no field follow owed, and the irradiance
+    /// field's passes all done (refinements included, unless the budget is paused).
+    /// THE one settle predicate: a screenshot, the selftest's poses and every
+    /// "the picture has stopped moving" check wait on it, in frames. True with
+    /// GI off. (Reflection-probe captures are `staleProbes`, separately.)
+    bool giAtRest = true;
 
     // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
     // Reflection probes are re-captured only while STALE. These say what the
@@ -3758,10 +4301,49 @@ struct RayQueryStatus {
     int  blasCount = 0;
     /// The traced set's size: the NEAR copies in the top-level structure. It is
     /// NOT the scene's Item count — editor helpers, backdrops, the sun disc,
-    /// overlay-queue objects, SKINNED Items (they would trace at bind pose
-    /// until R4) and alpha-tested ones (no any-hit without ray-tracing
-    /// pipelines) are all out.
+    /// overlay-queue objects and alpha-tested ones (no any-hit without
+    /// ray-tracing pipelines) are all out. A RIGGED Item is in (PHOTON-SKIN-1)
+    /// through its own skinned structure — and out on a frame its skin cache is
+    /// not ready, never at its bind pose.
     int  instances = 0;
+    /// THE GPU SKIN CACHE (PHOTON-SKIN-1, RY-R4). WHAT IT DELIVERS: the posed
+    /// character to every ray — its silhouette (a mirror's hit test, a contact
+    /// shadow) and, since PHOTON-HIT-SHADE-1, its SHADING: a hit on a rigged item
+    /// always goes to the hit decode, which reads the instance's skin row, so a
+    /// reflection shows the POSED triangles lit by the scene's own lighting text
+    /// (the voxels still hold the bind pose — SKIN-2's diffuse feed is owed).
+    /// `skinnedInstances`: rigged
+    /// items in the traced set this frame (each over its OWN structure, built
+    /// from its posed vertices); `skinCaches`: caches held (one per rigged traced
+    /// item, and its row block in the GPU scene); their bytes — the posed vertex
+    /// buffers and the per-item structures (also inside `blasBytes`).
+    int  skinnedInstances = 0;
+    int  skinCaches = 0;
+    unsigned long long skinCacheBytes = 0;
+    unsigned long long skinBlasBytes = 0;
+    /// Cumulative: items re-skinned (one per item per frame its POSE moved —
+    /// a walk without a pose change costs none), skin dispatches (one per frame
+    /// that re-skinned anything), skinned structures built (once per cache) and
+    /// REFIT (once per pose change after that).
+    unsigned long long skinPasses = 0;
+    unsigned long long skinDispatches = 0;
+    unsigned long long skinBlasBuilds = 0;
+    unsigned long long skinRefits = 0;
+    /// The last skin dispatch: items and vertices it wrote, and the GPU
+    /// milliseconds of the dispatch and of the skinned builds/refits after it
+    /// (timestamps read several frames late, never with a wait; -1 until one has
+    /// been measured).
+    int  skinLastItems = 0;
+    unsigned long long skinLastVertices = 0;
+    float skinMs = -1.0f;
+    float skinRefitMs = -1.0f;
+    /// CPU milliseconds the last skin pass cost the frame thread (reconcile, the
+    /// palettes, the uploads, the recording) — -1 until one ran.
+    float skinCpuMs = -1.0f;
+    /// Why rigged items are NOT traced (empty when they are): no device address
+    /// support, the job missing from the media, a source layout the job cannot
+    /// read.
+    std::string skinReason;
     /// The FAR copies (ATOM-FARBLAS-1): the same objects again over their
     /// meshes' coarsest levels, mask `kRayMaskFar`. The top-level structure
     /// holds `instances + farInstances`.
@@ -3795,6 +4377,20 @@ struct RayQueryStatus {
     /// 0.5 ms at 8k instances buys the better tree); the refit is the
     /// optimisation behind the transform-epoch gate.
     bool lastWasRefit = false;
+    /// THE HIT DECODE (PHOTON-HIT-SHADE-1): a ray hit no cache can shade (a
+    /// mover, a rigged item, a static hit neither card nor cascade answers, the
+    /// gather's far copies) is appended to the view's hit list and shaded by
+    /// HlmsAtom's decode. `hitRecords`: records the ray jobs appended in the last
+    /// read-back frame (every view of the scene summed; may pass the capacity),
+    /// `hitDropped`: of those, dropped because the list was full (their rays have
+    /// no sample that frame — a stat, never a crash), `hitCapacity`: the list's
+    /// size (the largest view's), `hitDecodeDraws`: the decode draws the scene
+    /// holds (one per decode BUCKET — HlmsAtom::BucketKey, S3-DRAW). Read several
+    /// frames late, never with a wait.
+    unsigned long long hitRecords = 0;
+    unsigned long long hitDropped = 0;
+    unsigned long long hitCapacity = 0;
+    int hitDecodeDraws = 0;
     /// Cumulative counters over the scene's life: how many times the top level
     /// was rebuilt, refitted, and how many bottom-level structures were built.
     unsigned long long tlasBuilds = 0;
@@ -3815,6 +4411,72 @@ struct RayQueryStatus {
     /// GPU milliseconds of that dispatch, read back from a timestamp pair
     /// several frames later and never with a wait. -1 until measured.
     float reflectMs = -1.0f;
+};
+
+/// THE VISIBILITY BUFFER'S SPLIT AND ITS BUCKETS (ATOM S3-DRAW,
+/// SPECS/atom/D3_S3_DRAW_DESIGN.md §2.2/§2.4) — what the render-queue split
+/// decides for this scene's items and how many decode draws their materials need.
+/// Every count is over the items the scene SHOWS (hidden ones are neither).
+///   atomItems    items the id pass draws and the decode shades: a GPU-scene row,
+///                an opaque PBS material the decode can serve, one submesh.
+///   pbsItems     items that stay on stock HlmsPbs, split by the FIRST reason
+///                that holds, in this order: `notPbs` (an Unlit or other non-PBS
+///                datablock), `customPiece` (a per-datablock custom piece — the
+///                twin cannot carry one), `blended` (a transparent, faded or
+///                refractive material), `twoSided` (a material drawn without back-
+///                face culling: the id pass culls back faces), `pending` (its
+///                textures are still being baked, so its bucket is not known yet:
+///                PBS draws it for those frames), `alphaTested`,
+///                `skinned` (the id pass reads the mesh's bind-pose rows), `noRow`
+///                (no readable level-0 triangle row: a line mesh, no device
+///                addresses, a normal the decode does not read — or more than one
+///                submesh, which no mesh this engine builds has).
+///   stockItems   items in a queue that is not the opaque item queue (gizmos,
+///                wires, the sun disc, distortion): never split, never counted.
+///   materials    distinct PBS materials the atom items wear;
+///   buckets      the decode draws those need (HlmsAtom::BucketKey: one shader
+///                permutation x one texture set x one const-buffer pool);
+///   twins        decode twins HlmsAtom holds (every scene),
+///   decodeDraws  this scene's hit decode draws, and
+///   screenDraws  its screen decode draws.
+struct AtomDrawStatus {
+    bool     live = false;
+    /// The split is live: the GPU scene exists, this device runs the id pass (it
+    /// needs Vulkan buffer device addresses and VK_KHR_draw_indirect_count) and
+    /// the measurement door is open. Off, every item draws through PBS.
+    bool     on = false;
+    unsigned atomItems = 0;
+    unsigned pbsItems = 0;
+    /// Shown, but in no world channel (a backdrop such as the ground's horizon
+    /// quad, or a helper): the id pass draws the world channels only.
+    unsigned notWorld = 0;
+    unsigned notPbs = 0;
+    unsigned customPiece = 0;
+    unsigned blended = 0;
+    unsigned twoSided = 0;
+    /// A planar mirror (Scene::setNodePlanarReflector): PBS binds its reflection per
+    /// renderable, which a decode serving a whole bucket cannot.
+    unsigned planar = 0;
+    unsigned pending = 0;
+    unsigned alphaTested = 0;
+    unsigned skinned = 0;
+    unsigned noRow = 0;
+    unsigned stockItems = 0;
+    unsigned materials = 0;
+    unsigned buckets = 0;
+    unsigned twins = 0;
+    unsigned decodeDraws = 0;
+    /// This scene's SCREEN decode draws (one per bucket of the atom items' words).
+    unsigned screenDraws = 0;
+    /// Views of this scene that draw the atom items through PBS anyway: STEREO
+    /// (VR) chains carry no id pass (it renders one eye).
+    unsigned stereoViews = 0;
+    /// ...and views whose scene pass renders STRAIGHT INTO A WINDOW or a
+    /// multisampled target (the passthrough shape — the Low tier's editor viewport,
+    /// which has no post chain and takes its anti-aliasing from the window's
+    /// samples): the id pass's depth cannot be that pass's depth (Ogre pairs a
+    /// window's colour only with the window's own depth, and one sample with one).
+    unsigned passthroughViews = 0;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
@@ -3922,6 +4584,42 @@ struct GiVoxelStats {
     /// volumes are byte-identical: it is the instrument of the proof that one
     /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
     std::string lightDigest;
+};
+
+/// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — the test and tool readback of
+/// mip 0 of a cascade's TOTAL light volume and of the voxeliser's ALBEDO volume,
+/// decoded to linear floats, with the lattice they sit on. It is the instrument
+/// of the coverage rule: a voxel's colour integrates to the surface area inside
+/// it, so a wall's column of voxels is summed and composited against the wall
+/// as authored, which no aggregate can do. Blocks exactly like giVoxelStats.
+struct GiVoxelVolume {
+    bool available = false;
+    int  width = 0, height = 0, depth = 0;
+    /// Cascade's voxel origin (the corner of voxel 0,0,0) and cell, world metres.
+    float origin[3] = { 0.f, 0.f, 0.f };
+    float cell[3] = { 0.f, 0.f, 0.f };
+    /// The store's normalisation k (a voxel holds k x the surface's radiance).
+    float multiplier = 0.0f;
+    /// width*height*depth RGBA, x fastest: the TOTAL light (premultiplied by
+    /// the voxel's conservative opacity c, k units), the voxeliser's albedo
+    /// volume (rgb = the surfaces' area-mean albedo, a = c = max of the six
+    /// per-half-axis coverages), the COVERAGE PER HALF-AXIS (rgb = O_x, O_y, O_z of
+    /// the faces looking +a (P) and -a (N): the fraction of the voxel's face along
+    /// that axis they cover - a ray travelling +a sees the N half; a unused) and the
+    /// SURFACE POSITION per half (rgb = O_a x p_a, p_a where along axis a those faces
+    /// lie, in the cascade's normalised [0, 1] box - O-premultiplied, so
+    /// p_a = rgb / O_a; a unused).
+    std::vector<float> light;
+    std::vector<float> albedo;
+    std::vector<float> coverageP, coverageN;
+    std::vector<float> positionP, positionN;
+    /// LEVEL 0 PER SIDE (PHOTON-VOXEL-5), the anisotropic tiers (empty on a Low volume): `light`
+    /// holds the MEAN of a voxel's two sides and `lightBack` its BACK (premultiplied the same way;
+    /// the front = 2 light - lightBack), `normal` the voxeliser's (rgb biased 0.5 + 0.5 n, a = 1 for
+    /// a two-sided voxel, whose normal is canonical: the front is the side it points to). The
+    /// faces looking +a take the front where n_a > 0, the back where n_a < 0.
+    std::vector<float> lightBack;
+    std::vector<float> normal;
 };
 
 // ---------------------------------------------------------------------------
@@ -5129,6 +5827,11 @@ struct PostFxDesc {
     /// march gives up and the pixel falls back to the probe/sky reflection.
     /// Scene-scale dependent: the default suits a room, not a landscape.
     float ssrMaxDistance = 25.0f;
+    /// THE MARCH'S STEP COUNT, a measurement knob (SSR-EDGE-1): 0 = the quality
+    /// row's (96 at Full-Res Rays, 48 at Half-Res), otherwise 8..128. It exists
+    /// so a suite can change the STEP at a FIXED range — `ssrMaxDistance` alone
+    /// changes both (ssr.rings' fixed-range arm). Nothing in the document writes it.
+    int   ssrSteps = 0;
     /// How thick the depth buffer's surfaces are assumed to be, in world units.
     /// A depth buffer records a surface's FRONT and nothing else, so a crossing
     /// is only accepted when the ray passed within this much of it — too small
@@ -5311,6 +6014,24 @@ struct PostFxDesc {
     /// the engine suite, which is the only way to pixel-test the chain at all.
     bool  allowOffscreen = false;
 
+    /// THE RADIANCE READBACK (HDR-READBACK-1). The view keeps its scene result
+    /// in a FLOAT target (RGBA16F) beside the 8-bit one it presents, so
+    /// `View::readPixelsHdr` can return the scene-referred value a closed form
+    /// is stated in. Honoured on EVERY view, offscreen ones included and
+    /// whatever `allowOffscreen` says — like `refractions` it is not a post
+    /// effect but a property of what the view keeps: a passthrough view that
+    /// asks takes the chain's shape (the scene into the float target, the ONE
+    /// composite quad into the 8-bit one) and nothing else. No second
+    /// composite pass exists: the float target IS the chain's scene target,
+    /// read where the tonemap would read it. A view that does not ask builds
+    /// the graph it built before this flag existed. A view that DOES ask is not
+    /// a byte-identical display of the one that does not: with `ssr > 0` its
+    /// SSR colour history is float too, so its reflections carry the UNCLIPPED
+    /// radiance (what an `hdr` chain has always reflected) where an 8-bit chain
+    /// reflects the clipped one — readPixels of the two differ wherever the
+    /// reflected radiance exceeds 1.
+    bool  hdrReadback = false;
+
     bool operator==(const PostFxDesc &o) const {
         return hdr == o.hdr && exposure == o.exposure && exposureMin == o.exposureMin &&
                exposureMax == o.exposureMax &&
@@ -5324,7 +6045,7 @@ struct PostFxDesc {
                ssaoRadius == o.ssaoRadius && ditherOff == o.ditherOff &&
                smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
-               ssrMaxDistance == o.ssrMaxDistance &&
+               ssrMaxDistance == o.ssrMaxDistance && ssrSteps == o.ssrSteps &&
                ssrMarchPhase == o.ssrMarchPhase &&
                ssrThickness == o.ssrThickness &&
                reflectionRoughnessCutoff == o.reflectionRoughnessCutoff &&
@@ -5335,7 +6056,7 @@ struct PostFxDesc {
                tonemapFixed == o.tonemapFixed &&
                exposureScale == o.exposureScale &&
                looks == o.looks && hzb == o.hzb && hzbFarthest == o.hzbFarthest &&
-               allowOffscreen == o.allowOffscreen;
+               allowOffscreen == o.allowOffscreen && hdrReadback == o.hdrReadback;
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
 };
@@ -5531,6 +6252,14 @@ struct RenderStats {
     unsigned long long triangles = 0;
     unsigned long long vertices = 0;
     unsigned long long instances = 0;
+    /// HOW MANY FRAMES THE GEOMETRY COUNTS TRAIL THE PICTURE (ATOM S3-DRAW). 0 while
+    /// every draw is decided on the CPU: Ogre counts what it submits. Where a view's
+    /// visibility buffer draws, its objects and their levels are chosen ON THE GPU by
+    /// the cull, and their share of the counts is read back from the cull's own
+    /// counters once the frame that drew them has retired — never by stalling the
+    /// frame for it — so after a change (a pose, the LOD dial) the counts settle this
+    /// many frames later. A reader that compares counts across a change waits this.
+    unsigned gpuCountLagFrames = 0;
 
     /// PSOs the LAST frame gave up on because it ran out of its compile budget
     /// (SPECS/THREADING_ADOPTION_SPEC.md P4(b), decision D-E(1)). Objects using
@@ -5882,6 +6611,17 @@ struct GpuCullRequest {
     /// `sampleFootprintPerspective`).
     float projScaleY = 0.0f;
     float viewportHeight = 0.0f;
+    /// AN ORTHOGRAPHIC VIEW: one sample is the same world length at every depth,
+    /// so the level rule takes no distance term (the CPU strategy's ortho case,
+    /// OgreMesh.cpp): the footprint is 2 / (projScaleY * viewportHeight), i.e. the
+    /// ortho window's height over the target's.
+    bool orthographic = false;
+    /// THE VIEW'S LOD SWITCH BAND (ogre-patch 0075's `hysteresis`, the fraction of
+    /// the threshold being crossed): 0 = the exact level. A banded request holds each
+    /// slot's last banded level until the allowed error leaves the band — the id pass
+    /// takes the view's own band (ChainDesc::lodHysteresis), so a watched view does
+    /// not pop at a threshold on the GPU path either.
+    float lodHysteresis = 0.0f;
     /// GpuInstance flag predicates (GpuSceneEntry::flags documents the bits):
     /// every required bit must be set and no forbidden bit may be.
     unsigned flagsRequired = 0u, flagsForbidden = 0u;
@@ -6063,6 +6803,28 @@ struct Image {
         if (x >= width || y >= height) return Colour(0, 0, 0, 0);
         const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
         return Colour(rgba[i] / 255.0f, rgba[i+1] / 255.0f, rgba[i+2] / 255.0f, rgba[i+3] / 255.0f);
+    }
+};
+
+/// A view's SCENE RADIANCE, read back in float (HDR-READBACK-1, PHOTON P3).
+///
+/// `Image` is the DISPLAY: eight bits a channel, clipped at 1.0, after whatever
+/// grade the view's chain applies. A suite that compares a pixel against a
+/// closed form in physical units (a mirror showing an emitter of radiance 3.0,
+/// a floor lit by a rectangle, a card's texel) cannot use it — every value above
+/// 1.0 reads 1.0, and every value below carries half a code of quantisation
+/// (1.75-2 % at the card bars' magnitudes). This is the same pixels one step
+/// earlier: the linear, scene-referred value the scene passes wrote, BEFORE the
+/// tonemap, the exposure, the bloom composite and the 8-bit store. Filled by
+/// `View::readPixelsHdr` on a view that asked for it (PostFxDesc::hdrReadback).
+struct ImageF {
+    unsigned width = 0, height = 0;
+    std::vector<float> rgba;   // width*height*4, row-major, top-left origin, linear radiance
+    /// Pixel accessor; returns {0,0,0,0} if out of range.
+    Colour at(unsigned x, unsigned y) const {
+        if (x >= width || y >= height) return Colour(0, 0, 0, 0);
+        const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
+        return Colour(rgba[i], rgba[i+1], rgba[i+2], rgba[i+3]);
     }
 };
 
@@ -6397,6 +7159,12 @@ struct FrameRecord {
     float       textureWaitMs = 0.0f;   ///< the frame-head streaming drain
     /// Σ of the passes' GPU milliseconds, or NEGATIVE when unmeasured.
     float       gpuMs = -1.0f;
+    /// GPU timing MARKS this frame issued that the render system's query pool
+    /// had no room for (a pass or a dispatch with no GPU time because of it,
+    /// never because it cost nothing). Non-zero means THIS frame's GPU numbers
+    /// are incomplete. Per frame, so a capture that drains every 250 ms still
+    /// sees every frame that dropped one (POST-C-FIXES-1).
+    unsigned    gpuMarksDropped = 0;
     /// What the monitor itself cost this frame, so analysis can subtract it.
     float       overheadMs = 0.0f;
 };
@@ -6454,11 +7222,17 @@ struct MonitorStatus {
     bool     gpuSupported = false;   ///< ...and the device/backend can do timestamps
     bool     gpuActive    = false;   ///< ...and a capture has a query pool open NOW
     unsigned gpuQueryPools = 0;      ///< MUST be 0 outside a capture
-    /// GPU samples the LAST frame could not record because the query pool ran
-    /// out of room. Non-zero means this capture's GPU numbers are INCOMPLETE —
-    /// said out loud rather than left for analysis to notice that some passes
-    /// have no time. (A probe capture alone is 6 faces x ~22 passes.)
-    unsigned gpuSamplesTruncated = 0;
+    /// GPU timing MARKS the query pool could not hold, CUMULATIVE since this
+    /// capture turned the monitor on (the per-frame count rides each
+    /// FrameRecord::gpuMarksDropped). Non-zero means the capture's GPU numbers
+    /// are INCOMPLETE — said out loud rather than left for analysis to notice
+    /// that some passes have no time. Cumulative because the host reads this
+    /// on its drain timer, and a LAST-FRAME reading (what this field used to
+    /// be) missed every dropping frame between two drains. Measured on Grand
+    /// Showroom 2 at Epic (POST-C-FIXES-1): the worst frame issued 1,214 marks
+    /// (2,428 of the pool's 4,096 queries — 96 probe faces at updateBudget 64,
+    /// rays off); 0 dropped in every arm.
+    unsigned long long gpuMarksDropped = 0;
     std::string gpuReason;           ///< why GPU timing is unavailable, when it is
     float    overheadMs = 0.0f;      ///< the monitor's own cost, last frame
 };
@@ -6580,7 +7354,8 @@ struct GpuSceneEntry {
     unsigned meshIndex = 0xFFFFFFFFu;
     /// The predicate bits ONE place computes: 1 visible, 2 caster, 4 mover,
     /// 8 GI-visible, 16 alpha-tested, 32 skinned, 64 overlay, 128 RAY-TRACED
-    /// (the traced set), 256 drag mover, 512 GI-bounds-excluded.
+    /// (the traced set), 256 drag mover, 512 ATOM (the visibility buffer's id pass
+    /// draws it and the decode shades it — AtomDrawStatus).
     unsigned flags = 0u;
     unsigned nodeId = 0u;
     unsigned lightMask = 0u;
@@ -6588,6 +7363,18 @@ struct GpuSceneEntry {
     /// this instance's NEAR bottom-level structure is built from at its
     /// current distance. 0 until a camera has been seen.
     unsigned rayLevel = 0u;
+    /// THE PBS MATERIAL WORD (`GpuInstance.raster.x`, ATOM-S3-PARITY): {pool : 16 |
+    /// slot : 16} of the item's material in the PBS const-buffer pool — what the
+    /// visibility-buffer decode indexes materials with. 0xFFFFFFFF when the item's
+    /// material is not a PBS one.
+    unsigned pbsMaterialWord = 0xFFFFFFFFu;
+    /// The byte offset of the item mesh's float4 tangent in its vertex
+    /// (`GpuInstance.raster.y`), 0xFFFFFFFF when it has none.
+    unsigned tangentOffset = 0xFFFFFFFFu;
+    /// THE ROW OVERRIDE (`GpuInstance.raster.z`, PHOTON-SKIN-1): the geometry row
+    /// of this item's SKIN CACHE — its posed vertices — or 0xFFFFFFFF when its
+    /// mesh's own rows are its geometry (every unrigged item).
+    unsigned skinRow = 0xFFFFFFFFu;
 };
 
 /// WHAT THE TABLES HOLD AND WHAT KEEPING THEM COSTS. Every count is cumulative
@@ -6634,7 +7421,7 @@ struct VoxelReaderCone {
     Vec3     dirLS;                  ///< unit direction
     Vec3     biasDirLS;              ///< the hop's bias direction (zero: a point in free space)
     float    tanHalfAngle = 0.577f;  ///< the diffuse cone set's half angle
-    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 4 lod step, 8 gap along the cone, 16 no escape)
+    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 32 one step)
     unsigned cascade = 0u;           ///< which cascade the point reads take
     float    lod = 0.0f;             ///< ...at which mip
 };
@@ -6646,9 +7433,9 @@ struct VoxelReaderCone {
 /// read of it.
 struct VoxelReaderAnswer {
     float march[4] = {};     ///< colour.rgb, alpha
-    float escape[4] = {};    ///< escapeAlpha, travelledC0, lastCascade, travelled
-    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls) where the march's first sample lands
-    float marchRead[4] = {}; ///< the march at zero length: one march step onto that point
+    float escape[4] = {};    ///< alpha (the escape rides it), travelledC0, lastCascade, travelled
+    float hitRead[4] = {};   ///< jahVoxelSample (what jah_rq_hit.glsl calls) at the centre of the march's first texel plane
+    float marchRead[4] = {}; ///< the march at zero length: that plane, read whole by the march
 };
 
 /// ONE CONE FOR THE ENVIRONMENT'S CONE-LOOKUP HARNESS (PHOTON-ENV-1;

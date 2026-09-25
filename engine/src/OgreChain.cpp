@@ -75,6 +75,7 @@
 // depend on an RQ constant somebody may widen later.
 #include <cmath>
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"   // kHitDecodeRenderQueue (PHOTON-HIT-SHADE-1)
 
 
 #include <Compositor/OgreCompositorWorkspaceDef.h>
@@ -214,6 +215,14 @@ constexpr const char *kDepth    = "jahDepth";
 /// carries `mipmapLevel` on both its texture and its UAV sources.
 constexpr const char *kHzb      = "jahHzb";
 constexpr const char *kSceneRtv = "jahSceneRtv";
+/// THE VISIBILITY BUFFER (ATOM S3-DRAW, ChainDesc::atomDraw): the id image the id
+/// pass writes (R32G32_UINT, AtomId's two words), the RTV it renders through (the
+/// id image + the scene's named depth, which the prepass and the opaque pass then
+/// LOAD), and — in the passthrough shape — the RTV that puts the same depth under
+/// the view's own target.
+constexpr const char *kAtomIds          = kAtomIdTexture;
+constexpr const char *kAtomIdRtv        = "jahAtomIdRtv";
+constexpr const char *kPassthroughRtv   = "jahPassthroughRtv";
 /// SSR. The prepass' second G-buffer (HlmsPbs writes shadow term in x and
 /// packed roughness in y), the RTV the prepass renders through, the ray march's
 /// output (hit coordinates, at half or full resolution), the full-resolution
@@ -224,6 +233,11 @@ constexpr const char *kSsrPrepassRtv  = "jahSsrPrepassRtv";
 constexpr const char *kSsrRays        = "jahSsrRays";
 constexpr const char *kSsrReflection  = "jahSsrReflection";
 constexpr const char *kSsrPrev        = "jahSsrPrev";
+// THE HIT LIST (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): the names the ray
+// tier reads them by (OgreRayQuery.cpp).
+constexpr const char *kHitIds      = "jahHitIds";
+constexpr const char *kHitDest     = "jahHitDest";
+constexpr const char *kHitRadiance = "jahHitRadiance";
 /// SMAA: LDR edge detection AFTER tonemapping, so it needs its own full-res
 /// target to work on before the result reaches the window. PLAIN UNORM, for
 /// the same measured reason kLookA below is — see the note there and the one
@@ -497,6 +511,15 @@ Ogre::CompositorPassQuadDef *addTonemapQuad(Ogre::CompositorNodeDef *n, const ch
     return q;
 }
 
+/// DOES THIS CHAIN SHAPE CARRY THE SCREEN-SPACE MARCH? One predicate, read by
+/// `build` (which passes and textures exist) and by the per-frame update (whose
+/// material parameters to push) — two answers that must never disagree, and did
+/// not have a shared name until lane REFLECT-VR-1 gave the stereo case one.
+/// @see PostFxDesc::ssrScreenMarch for why a stereo chain never marches.
+bool marchesInScreenSpace(const ChainDesc &d) {
+    return d.ssr > 0 && d.ssrScreenMarch && !d.stereo;
+}
+
 }   // namespace
 
 std::string sceneNodeDefName(const std::string &workspaceDef) {
@@ -509,8 +532,17 @@ bool ChainDesc::anyEffect() const {
     // A stack of looks is an effect on its own: the LDR filters need the post
     // shape (they read a finished image out of a texture), and nothing else in
     // the description has to be on for that to be true.
-    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || refractions ||
-           distortion || hzb || !looks.empty();
+    // ...and so is a RADIANCE READBACK (HDR-READBACK-1): the float scene
+    // target it downloads exists only in the chain's shape.
+    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || sunContact || refractions ||
+           distortion || hzb || !looks.empty() || hdrReadback;
+}
+
+bool ChainDesc::prepass() const {
+    // The SSR stage runs for the march or for the rays; the TRAVERSAL runs for it,
+    // for the gather and for the sun contact (build's `prepass`, the one text).
+    const bool ssrStage = ssr > 0 && (chain::marchesInScreenSpace(*this) || rayReflect);
+    return ssrStage || probeGather || sunContact;
 }
 
 bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
@@ -537,8 +569,15 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
-           a.rayReflect == b.rayReflect && a.probeGather == b.probeGather &&
-           a.refractions == b.refractions &&
+           a.rayReflect == b.rayReflect && a.hitDecode == b.hitDecode &&
+           a.atomDraw == b.atomDraw &&
+           // THE PREPASS'S SHAPE, not the rows that ask for it (PHOTON-GATHER-1d;
+           // RAYS-1's F4): the gather's and the sun contact's rows add NOTHING
+           // to the graph but the prepass, so toggling either where the prepass
+           // already runs (the SSR row, or the other one) is not a new graph —
+           // it used to rebuild the whole workspace, dropping every history.
+           a.prepass() == b.prepass() &&
+           a.refractions == b.refractions && a.hdrReadback == b.hdrReadback &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
@@ -600,7 +639,7 @@ void scissor(ChainHandles &h, Ogre::CompositorPassQuadDef *q, bool clear = true)
 /// After this the scene passes LOAD colour and CLEAR depth, inset to the same
 /// rectangle — so the bars survive and the shot is never stretched into them.
 void addLetterboxPrologue(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
-                          const char *target, ChainHandles &handles) {
+                          const char *target, ChainHandles &handles, bool keepDepth = false) {
     {
         Ogre::CompositorTargetDef *t = n->addTargetPass(kLetterboxFill);
         t->setNumPasses(1);
@@ -619,12 +658,65 @@ void addLetterboxPrologue(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
     q->addQuadTextureSource(0, kLetterboxFill);
     q->setAllClearColours(kLetterboxBars);
     q->setAllLoadActions(Ogre::LoadAction::Clear);     // full-target: THE BARS
+    // ...BUT NEVER THE PREPASS' DEPTH (SSR-LETTERBOX-1, measured). With a
+    // prepass the depth is WRITTEN BEFORE this quad (the SSR/gather prepass
+    // renders into the same kDepth) and the opaque pass depth-tests READ-ONLY
+    // against it; a full-target clear here wiped it, so under a letterbox the
+    // opaque pass lost its early-Z and every consumer that runs between here and
+    // the opaque pass — the ray-traced reflections, the probe gather — found a
+    // cleared depth at every pixel and declined the whole frame (the rays'
+    // whole contribution, ~37 codes on gi.reflect_motion's floor, was missing).
+    if (keepDepth) {
+        q->mLoadActionDepth   = Ogre::LoadAction::Load;
+        q->mLoadActionStencil = Ogre::LoadAction::Load;
+    }
     q->mStoreActionColour[0] = Ogre::StoreAction::Store;
     q->mStoreActionDepth     = Ogre::StoreAction::Store;
     q->mStoreActionStencil   = Ogre::StoreAction::DontCare;
     q->mProfilingId = "Jahshaka letterbox";
     inset(handles, q);                                 // ...and the background inside
 }
+
+/// THE ID PASS'S TARGET (ChainDesc::atomDraw): the id image and the RTV that pairs
+/// it with the scene's named depth. The caller has already defined kDepth.
+void addAtomIdTargets(Ogre::CompositorNodeDef *n) {
+    auto *td = addTex(n, kAtomIds, Ogre::PFG_RG32_UINT);
+    td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+    Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kAtomIdRtv);
+    Ogre::RenderTargetViewEntry ids;
+    ids.textureName = kAtomIds;
+    rtv->colourAttachments.push_back(ids);
+    rtv->depthAttachment.textureName = kDepth;
+    rtv->stencilAttachment.textureName = kDepth;
+    rtv->preferDepthTexture = true;
+}
+
+/// THE ID PASS (ATOM S3-DRAW; OgreAtomIdPass.cpp records it): a PASS_CUSTOM through
+/// the engine's provider, the cull chain's indirect draws with a material-less
+/// vertex/fragment pair, writing the id image and the SCENE DEPTH — which the
+/// prepass and the opaque pass then load, and the PBS remainder depth-tests
+/// against. The depth is CLEARED here (Ogre's load action, reverse-Z's far); the id
+/// image is cleared to AtomId::kEmpty by the recorder (a float clear colour cannot
+/// say 0xFFFFFFFF).
+void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandles &handles) {
+    Ogre::CompositorTargetDef *t = n->addTargetPass(kAtomIdRtv);
+    t->setNumPasses(1);
+    Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomIdPassId));
+    p->mLoadActionColour[0] = Ogre::LoadAction::DontCare;
+    p->mLoadActionDepth = Ogre::LoadAction::Clear;
+    p->mLoadActionStencil = Ogre::LoadAction::Clear;
+    p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+    p->mStoreActionDepth = Ogre::StoreAction::Store;
+    p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+    p->mProfilingId = "Jahshaka atom id";
+    // A letterboxed view's ids line up with its image.
+    if (desc.letterbox) inset(handles, p);
+}
+
+/// The view's passes that the id pass stands in for SKIP the Atom queue (the fork's
+/// CompositorPassSceneDef::mSkipRQ): its items are drawn by the id pass and shaded by
+/// the screen decode (which is what arms the decode — OgreAtomDraw.cpp's listener).
+void skipAtomQueue(Ogre::CompositorPassSceneDef *p) { p->setSkipRenderQueue(kAtomRenderQueue, true); }
 
 }   // namespace
 
@@ -758,15 +850,6 @@ void applyLodHysteresis(Ogre::CompositorNodeDef *n, float band) {
     }
 }
 
-/// DOES THIS CHAIN SHAPE CARRY THE SCREEN-SPACE MARCH? One predicate, read by
-/// `build` (which passes and textures exist) and by the per-frame update (whose
-/// material parameters to push) — two answers that must never disagree, and did
-/// not have a shared name until lane REFLECT-VR-1 gave the stereo case one.
-/// @see PostFxDesc::ssrScreenMarch for why a stereo chain never marches.
-bool marchesInScreenSpace(const ChainDesc &d) {
-    return d.ssr > 0 && d.ssrScreenMarch && !d.stereo;
-}
-
 void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
     const Ogre::IdString cull = cullCamera.empty() ? Ogre::IdString()
                                                    : Ogre::IdString(cullCamera);
@@ -776,6 +859,9 @@ void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
         if (!td) continue;
         for (Ogre::CompositorPassDef *p : td->getCompositorPasses()) {
             if (!p || p->getType() != Ogre::PASS_SCENE) continue;
+            // THE HIT DECODE IS NOT A PICTURE OF EITHER EYE: its target is the hit
+            // list, one fragment per record (ChainDesc::hitDecode).
+            if (p->mIdentifier == kHitDecodePassIdentifier) continue;
             auto *sp = static_cast<Ogre::CompositorPassSceneDef *>(p);
             sp->mInstancedStereo = true;
             sp->mCullCameraName  = cull;
@@ -811,15 +897,32 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // PASSTHROUGH — the shape every view had before this file, and the shape
     // every offscreen view still has. Bit-identical to createBasicWorkspaceDef.
     if (!desc.anyEffect()) {
+        n->setNumLocalTextureDefinitions((desc.letterbox ? 1u : 0u) + (desc.atomDraw ? 2u : 0u));
         if (desc.letterbox) {
             // Bars first, background inside them; the scene passes below then
             // LOAD colour instead of clearing it (a clear is full-target and
             // would wipe the bars) and confine themselves to the inner rect.
-            n->setNumLocalTextureDefinitions(1);
             addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
             addLetterboxPrologue(n, desc, kTargetChannel, handlesOut);
         }
-        Ogre::CompositorTargetDef *t = n->addTargetPass(kTargetChannel);
+        // THE VISIBILITY BUFFER IN THE PASSTHROUGH SHAPE: the id pass needs a depth
+        // it can hand the scene pass, so the target gets a NAMED depth through an
+        // RTV of its own (the view's colour + kDepth) instead of the pool's.
+        if (desc.atomDraw) {
+            auto *dt = addTex(n, kDepth, Ogre::PFG_D32_FLOAT);
+            dt->preferDepthTexture = true;
+            addAtomIdTargets(n);
+            Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kPassthroughRtv);
+            Ogre::RenderTargetViewEntry colour0;
+            colour0.textureName = kTargetChannel;
+            rtv->colourAttachments.push_back(colour0);
+            rtv->depthAttachment.textureName = kDepth;
+            rtv->stencilAttachment.textureName = kDepth;
+            rtv->preferDepthTexture = true;
+            addAtomIdPass(n, desc, handlesOut);
+        }
+        Ogre::CompositorTargetDef *t =
+            n->addTargetPass(desc.atomDraw ? kPassthroughRtv : kTargetChannel);
         t->setNumPasses(2);
         {
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -829,6 +932,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             if (desc.letterbox) {
                 p->mLoadActionColour[0] = Ogre::LoadAction::Load;   // keep the bars
                 inset(handlesOut, p);
+            }
+            // THE ID PASS'S DEPTH IS THIS PASS'S DEPTH (ChainDesc::atomDraw).
+            if (desc.atomDraw) {
+                p->mLoadActionDepth = Ogre::LoadAction::Load;
+                p->mLoadActionStencil = Ogre::LoadAction::Load;
+                skipAtomQueue(p);
             }
             // NOT the compositor default (StoreOrResolve): on an MSAA target
             // that resolves and DISCARDS the multisample contents, and the
@@ -927,7 +1036,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
-    n->setNumLocalTextureDefinitions(27);   // 25 + the letterbox swatch + the HZB
+    n->setNumLocalTextureDefinitions(28);   // 25 + the letterbox swatch + the HZB + the ids
     if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
@@ -964,14 +1073,27 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // gather-only chain composites no reflection at all (the pin sets
     // `hlms_use_ssr` only where the pass carries an ssr texture, and this one
     // hands it none).
-    const bool prepass = ssr || desc.probeGather;
+    // ...and the SUN CONTACT job's (PHOTON-RAYS-1), for the gather's reason: its
+    // rays start from the prepass' depth and normals and its answer is folded
+    // into the prepass' own shadow term in the PrePassUse pass.
+    const bool prepass = desc.prepass();
 
     // The scene target. RGBA16_FLOAT whenever HDR is on — that is the whole
     // point: light values above 1.0 survive to the tonemapper. Without HDR the
     // chain still needs an offscreen colour target (SSAO/SMAA/SSR/refraction
     // all composite), and it stays RGBA8_UNORM so colours do not move.
+    //
+    // ...UNLESS THE VIEW ASKED TO READ ITS RADIANCE (HDR-READBACK-1). Then every
+    // texture that carries the SCENE RESULT — this one, the refraction clone,
+    // the distortion copy, the AO-applied copy and the SSR colour history that
+    // copies it — is float, so the value the composite reads is the value the
+    // scene wrote, above 1.0 included; the composite quad (Copy without `hdr`,
+    // the tonemap with it) still writes the 8-bit target, and `readPixels`
+    // still reads that. No pass is added: the radiance target IS this chain's
+    // own scene target (ChainHandles::radianceTexture).
+    const bool floatScene = desc.hdr || desc.hdrReadback;
     {
-        auto *td = addTex(n, kRt0, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        auto *td = addTex(n, kRt0, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         td->depthBufferId = 1u;                      // the scene needs depth
         td->preferDepthTexture = desc.ssao || prepass;   // sampled by the AO/SSR/gather passes
         syncRtvDepth(n, kRt0, td);
@@ -1067,12 +1189,15 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // a named attachment it can borrow, and the opaque pass has to STORE it.
     // ...and the HZB, which is nothing BUT a consumer of the scene depth: it
     // cannot read a depth buffer the compositor picked out of a pool.
+    // ...and THE ID PASS (ChainDesc::atomDraw), which writes the depth every scene
+    // pass after it loads.
     const bool namedDepth = desc.ssao || prepass || desc.refractions || desc.distortion ||
-                            desc.hzb;
+                            desc.hzb || desc.atomDraw;
     if (namedDepth) {
         auto *td = addTex(n, kDepth, Ogre::PFG_D32_FLOAT);
         td->preferDepthTexture = true;
     }
+    if (desc.atomDraw) addAtomIdTargets(n);
 
     // THE NORMALS G-BUFFER, and it is ONE texture for two effects. SSAO gets it
     // from the main pass as a second colour attachment (mGenNormalsGBuf); SSR
@@ -1155,10 +1280,25 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // chain reflects the WORLD, not the last frame's picture of it.
         if (ssrMarch) {
             auto *td = addTex(n, kSsrPrev,
-                              desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+                              floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
         }   // if (ssr)
+        // THE HIT LIST (PHOTON-HIT-SHADE-1): two UAVs the ray jobs append to and
+        // the decode's target, W x kHitListHeightFactor H — see ChainDesc::hitDecode.
+        if (desc.hitDecode) {
+            for (const auto &t : { std::make_pair(kHitIds, Ogre::PFG_RGBA32_UINT),
+                                   std::make_pair(kHitDest, Ogre::PFG_R32_UINT) }) {
+                auto *td = addTex(n, t.first, t.second, 0u, 0u, 1.0f, kHitListHeightFactor);
+                // RenderToTexture as well: a node texture carries the compositor's
+                // depth-buffer defaults, which Ogre sets on render targets only
+                // (jahSsrReflection's shape: RTT | Uav).
+                td->textureFlags = Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::Uav;
+            }
+            auto *td = addTex(n, kHitRadiance, Ogre::PFG_RGBA16_FLOAT, 0u, 0u, 1.0f,
+                              kHitListHeightFactor);
+            td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+        }
     }
 
     // THE HZB (NANITE_SPEC §4.3). Declared beside SSAO's depth downscale because
@@ -1199,7 +1339,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // The cross blur runs at FULL res — it is also the upsample.
         addTex(n, kAoBlurH, Ogre::PFG_R16_FLOAT);
         addTex(n, kAoBlurV, Ogre::PFG_R16_FLOAT);
-        addTex(n, kAoApplied, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        addTex(n, kAoApplied, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
     }
 
     if (desc.distortion) {
@@ -1209,7 +1349,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // The warped copy of the scene. Same format as the scene target, because
         // this happens in LINEAR HDR — before the SSR history copy, before SSAO
         // and long before the tonemap.
-        addTex(n, kDistorted, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        addTex(n, kDistorted, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         // Its own RTV, so the pass can BORROW the scene's depth buffer and test
         // against the opaque geometry without writing to it.
         {
@@ -1282,7 +1422,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // refractives depth-test against the opaque geometry.
         {
             auto *td = addTex(n, kRefractOut,
-                              desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+                              floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         }
         {
             Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kRefractRtv);
@@ -1364,6 +1504,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // deletes the entire `use_prepass_msaa` half of upstream's recipe: no
     // explicit-resolve G-buffers, no depth resolve, no per-subsample coverage
     // test in the Pbs shader.
+    // THE ID PASS (ATOM S3-DRAW) — before every scene pass of the view: they load
+    // its depth.
+    if (desc.atomDraw) addAtomIdPass(n, desc, handlesOut);
+
     if (prepass) {
         // The colour history, seeded ONCE. Without this the first frame's
         // resolve samples an Undefined texture; with it, the first frame simply
@@ -1421,6 +1565,14 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // clear value — the test that ogre-patch 0011 taught SSAO).
             p->setAllClearColours(Ogre::ColourValue::White);
             p->setAllLoadActions(Ogre::LoadAction::Clear);
+            // THE ID PASS WROTE THE DEPTH (ChainDesc::atomDraw): loaded, and the
+            // Atom queue skipped — the screen decode, the first draw of this pass,
+            // writes the Atom items' normals and shadow/roughness.
+            if (desc.atomDraw) {
+                p->mLoadActionDepth = Ogre::LoadAction::Load;
+                p->mLoadActionStencil = Ogre::LoadAction::Load;
+                skipAtomQueue(p);
+            }
             p->mStoreActionColour[0] = Ogre::StoreAction::Store;
             p->mStoreActionColour[1] = Ogre::StoreAction::Store;
             p->mStoreActionDepth     = Ogre::StoreAction::Store;
@@ -1457,6 +1609,38 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
     }
 
+    // ---- THE HIT DECODE (PHOTON-HIT-SHADE-1; ChainDesc::hitDecode) ----------
+    // A ray hit the caches cannot shade is a pixel of a SECOND visibility
+    // buffer: the traces (recorded in this pass' pre-execute, OgreRayQuery.cpp)
+    // append it to the hit list, and this pass draws HlmsAtom's decode over the
+    // list — the render queue that holds nothing but the decode draws, shown for
+    // this pass alone — shading each record with PBS's own lighting pieces. The
+    // write-back into the reflection's mean and the gather's atlas follows in the
+    // opaque pass' pre-execute. The view's shadow node is REUSED (the prepass
+    // updated it): the decode's other shadowed lights read their maps at the
+    // hit, the sun's term is the record's shadow ray. No LOD update: the target
+    // is the list, not a picture (applyLodHysteresis's invariant stays true).
+    if (prepass && desc.hitDecode) {
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kHitRadiance);
+        t->setNumPasses(1);
+        auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
+        p->mShadowNodeRecalculation = Ogre::SHADOW_NODE_REUSE;
+        // w = 0 is "not shaded" to the write-back: every texel a record did not
+        // shade this frame must say so.
+        p->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
+        p->setAllLoadActions(Ogre::LoadAction::Clear);
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        p->mStoreActionDepth = Ogre::StoreAction::DontCare;
+        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        p->mFirstRQ = kHitDecodeRenderQueue;
+        p->mLastRQ = Ogre::uint8(kHitDecodeRenderQueue + 1u);
+        p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
+        p->mUpdateLodLists = false;
+        p->mIdentifier = kHitDecodePassIdentifier;
+        p->mProfilingId = "Jahshaka hit decode";
+    }
+
     // The opaque scene pass.
     {
         const char *sceneTarget = namedDepth ? kSceneRtv : kRt0;
@@ -1468,7 +1652,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // it (ChainHandles::scissorPasses): bloom cannot glow into the bars,
         // no look grades them, and no fill is spent on them. The bars are
         // black by construction at every stage, which is what a letterbox is.
-        if (desc.letterbox) addLetterboxPrologue(n, desc, sceneTarget, handlesOut);
+        if (desc.letterbox)
+            addLetterboxPrologue(n, desc, sceneTarget, handlesOut, prepass || desc.atomDraw);
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
         t->setNumPasses(1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -1486,6 +1671,13 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // away and the frame would come out empty. Loading it also buys exact
         // early-Z for free, which is most of what pays for the extra traversal.
         if (prepass) p->mLoadActionDepth = Ogre::LoadAction::Load;
+        // ...AND THE ID PASS'S (ChainDesc::atomDraw), with or without a prepass; the
+        // Atom queue is the id pass's and the screen decode's.
+        if (desc.atomDraw) {
+            p->mLoadActionDepth = Ogre::LoadAction::Load;
+            p->mLoadActionStencil = Ogre::LoadAction::Load;
+            skipAtomQueue(p);
+        }
         // Plain Store, at every effect combination: upstream's recipe needs
         // "store_and_resolve" here because its refractive pass renders into a
         // MULTISAMPLE clone while sampling the resolved original, and at 1x
@@ -1896,6 +2088,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // this program existed, which is the byte-identical law (§8).
     const bool haveLooks = !desc.looks.empty();
     const char *aaTarget = haveLooks ? kLookA : kTargetChannel;
+
+    // THE RADIANCE READBACK's source: exactly what the composite below reads.
+    if (desc.hdrReadback) handlesOut.radianceTexture = sceneResult;
 
     // Composite into the LDR image SMAA works on, or straight into the window
     // (or, with looks and no SMAA, straight into the looks stage's input).
@@ -2558,6 +2753,7 @@ float fixedExposureScale(float exposureScale, float exposure) {
 }
 
 const char *exposureHistoryTextureName() { return kOldLum; }
+const char *reflectionTextureName() { return kSsrReflection; }
 
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
                 std::vector<std::string> &nodeDefs, PipHandles &handles) {
@@ -3094,10 +3290,40 @@ void initSmaa(Ogre::Root *root, int preset) {
 //      (VIEW_SPACE_CORNERS_NORMALIZED_LH) and therefore the whole march use.
 //   3. left-multiply by the clip→image matrix — the *0.5+0.5 and the y flip, so
 //      the shader divides by w and has a texture coordinate, full stop.
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &reprojection) {
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
+               SsrReprojection &reprojection) {
     if (!camera || desc.ssr <= 0) return;
     Ogre::Pass *march = materialPass("Jahshaka/SsrRayMarch");
     if (!march) return;
+
+    // THE SHOT'S UV MAP (SSR-LETTERBOX-1). Under a constrained-aspect camera the
+    // prepass draws the shot into the letterbox's inner rectangle, while every
+    // quad here covers the whole target: so the march, the resolve and the
+    // reprojection work in the SHOT's uv — where the camera's projection lands,
+    // [0,1] over the rectangle — and convert to the target's uv only to read a
+    // texture. Pushed as an INSET, (x, y, 1 - w, 1 - h), so the constant
+    // buffer's zeros are the identity rectangle: a frame drawn before this runs
+    // is the unletterboxed map, not a division by zero. Without a letterbox the
+    // map is (0, 0, 1, 1) and every conversion is exact in float (x - 0, x / 1,
+    // 0 + x * 1), so an unletterboxed frame is bit-for-bit what it was.
+    const Ogre::Vector4 shotInset(shot[0], shot[1], 1.0f - shot[2], 1.0f - shot[3]);
+    // THE FRUSTUM'S SPAN over the shot, for the march's view vector: the quad
+    // interpolates the camera's far corners (VIEW_SPACE_CORNERS_NORMALIZED_LH)
+    // over the WHOLE target, so under a letterbox the interpolated direction at
+    // a pixel is the one for the wrong uv. It is affine in uv — the corners lie
+    // on the plane z = 1 and view space has no roll — so the march corrects it
+    // by (shotUv - targetUv) times this span: the corners computed exactly as
+    // CompositorPassQuad computes them (OgreCompositorPassQuad.cpp:237-259).
+    Ogre::Vector4 cameraSpan(0.0f, 0.0f, 0.0f, 0.0f);
+    {
+        const Ogre::Matrix4 &viewMat = camera->getViewMatrix(true);
+        const Ogre::Vector3 *corners = camera->getWorldSpaceCorners();
+        const Ogre::Real farPlane = camera->getFarClipDistance();
+        const Ogre::Vector3 upperLeft = (viewMat * corners[5]) / farPlane;
+        const Ogre::Vector3 bottomLeft = (viewMat * corners[6]) / farPlane;
+        const Ogre::Vector3 upperRight = (viewMat * corners[4]) / farPlane;
+        cameraSpan = Ogre::Vector4(upperRight.x - upperLeft.x, bottomLeft.y - upperLeft.y, 0.0f, 0.0f);
+    }
 
     static const Ogre::Matrix4 kClipToImage(0.5,  0.0, 0.0, 0.5,
                                             0.0, -0.5, 0.0, 0.5,
@@ -3111,6 +3337,8 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &rep
     Ogre::GpuProgramParametersSharedPtr ps = march->getFragmentProgramParameters();
     ps->setNamedConstant("projectionParams", camera->getProjectionParamsAB());
     ps->setNamedConstant("viewToTextureSpaceMatrix", m);
+    ps->setNamedConstant("shotInset", shotInset);
+    ps->setNamedConstant("cameraSpan", cameraSpan);
     // THE PROJECTION TYPE, because the march's whole reconstruction depends on
     // it (JahSsrRayMarch_ps.glsl's ORTHOGRAPHIC note). The far plane rides
     // along as the scale that turns the normalized corner back into view-space
@@ -3137,7 +3365,9 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &rep
     // the frame applied was perceptual 0.581 — deleted, not re-plumbed.
     ps->setNamedConstant("rayParams",
                          Ogre::Vector4(desc.ssrMaxDistance, desc.ssrThickness,
-                                       desc.ssr >= 2 ? 96.0f : 48.0f,
+                                       desc.ssrSteps > 0
+                                           ? float(std::min(std::max(desc.ssrSteps, 8), 128))
+                                           : (desc.ssr >= 2 ? 96.0f : 48.0f),
                                        desc.reflectionRoughnessCutoff));
     // THE MARCH'S PHASE RULE (SSR-RINGS-1), a uniform like the four above: the
     // crossing test and the trust either read the coarse sample (0, the shipped
@@ -3191,6 +3421,7 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &rep
                              Ogre::Vector4(desc.reflectionRoughnessCutoff, desc.ssrIntensity,
                                            kRayReflectFeather, 0.0f));
         rp->setNamedConstant("reprojectMatrix", reproject);
+        rp->setNamedConstant("shotInset", shotInset);
     }
 }
 
@@ -3278,8 +3509,16 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
                    unsigned(float(viewHeight) * desc.ssaoScale),
                    desc.ssaoRadius, desc.ssaoPower);
     }
-    if (marchesInScreenSpace(desc)) updateSsr(camera, desc, reprojection);
-    else reprojection.have = false;
+    if (marchesInScreenSpace(desc)) {
+        // The letterbox's inner rectangle, derived exactly as
+        // OgreView::applyLetterbox derives the one it writes onto the passes.
+        float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+        if (desc.letterbox && viewHeight)
+            letterboxRect(desc.letterboxAspect, float(viewWidth) / float(viewHeight), shot);
+        updateSsr(camera, desc, shot, reprojection);
+    } else {
+        reprojection.have = false;
+    }
     if (!desc.looks.empty()) updateLooks(desc);
     if (desc.distortion) updateDistortion(desc);
 }

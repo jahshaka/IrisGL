@@ -1,7 +1,7 @@
 // THE SCREEN-PROBE GATHER — the Component's implementation (GATHER-1a,
 // 2026-09-21; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 9).
 //
-// THREE COMPUTE DISPATCHES on the frame's own command buffer, recorded at the
+// FOUR COMPUTE DISPATCHES on the frame's own command buffer, recorded at the
 // reflection listener's hook — after the SSR prepass (whose depth and normals
 // are the probes' surfaces) and before the opaque pass that shades:
 //
@@ -11,8 +11,19 @@
 //   rq_probe_gather.comp     one WORKGROUP per probe, one ray per thread, one
 //                            ray per octahedral texel; dispatched INDIRECTLY
 //                            because the adaptive probes' count is the GPU's.
-//   rq_probe_integrate.comp  one thread per pixel: the probe its plane agrees
-//                            with, into `jahProbeIrradiance`.
+//   rq_probe_filter.comp     one WORKGROUP per probe, one texel per thread: the
+//                            map filtered against its 3x3 neighbourhood in
+//                            probe space and projected onto SH9 (same indirect
+//                            arguments; PHOTON-GATHER-1b).
+//   rq_probe_integrate.comp  one thread per pixel: the four grid probes and the
+//                            cell's adaptive twin, weighted by the plane test,
+//                            each SH evaluated at the pixel's own normal, then
+//                            the pixel HISTORY (PHOTON-GATHER-1c: reprojected,
+//                            validated, the count-in-history mean), into
+//                            `jahProbeIrradiance`.
+//
+// WHAT IS PING-PONGED (PHOTON-GATHER-1c): the pixel history's two pairs —
+// `View::flip` names this frame's half of each.
 //
 // THE BOUNDARY THIS FILE KEEPS. It speaks Vulkan and Ogre and knows nothing
 // about the scene graph: everything it needs about the frame arrives in
@@ -30,17 +41,22 @@
 #include <OgreTextureGpuManager.h>
 #include <OgreLogManager.h>
 #include <OgreResourceTransition.h>
+#include <Vao/OgreUavBufferPacked.h>
 
 #include "OgreVulkanRenderSystem.h"
 #include "OgreVulkanTextureGpu.h"
 #include "OgreVulkanDevice.h"
+#include "Vao/OgreVulkanBufferInterface.h"
 
 #include "rayquery/rq_probe_place_spv.h"
 #include "rayquery/rq_probe_gather_spv.h"
+#include "rayquery/rq_probe_filter_spv.h"
 #include "rayquery/rq_probe_integrate_spv.h"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -62,15 +78,35 @@ constexpr unsigned kRing = 3u;
 constexpr unsigned kMaxTimedViews = 8u;
 /// Frames of timestamps in flight (Ogre's dynamic-buffer multiplier).
 constexpr unsigned kFramesInFlight = 3u;
-/// Six timestamps a frame: a pair around each of the three jobs.
-constexpr unsigned kQueriesPerFrame = 6u;
+/// Eight timestamps a frame: a pair around each of the four jobs.
+constexpr unsigned kQueriesPerFrame = 8u;
 
 constexpr unsigned kPlaceBindings = 6u;
-constexpr unsigned kTraceBindings = 9u;
-constexpr unsigned kIntegrateBindings = 5u;
+/// The trace's nine, then GA-1e's six: the card read's four (9-12, the
+/// reflection's jah_rq_card_bindings.glsl at base 9) and the geometric
+/// normal's two (13, 14); then the split voxel store's four arrays by name
+/// (15-18: the coverage and the surface position per half, PHOTON-VOXEL-4); then
+/// THE HIT RECORD's four (19-22, PHOTON-HIT-SHADE-1); then level 0's back side and
+/// the voxelizer's normal (23, 24: PHOTON-VOXEL-5); then the card read's VIEW
+/// TERM's five (25-29, PHOTON-CARDS-5: jah_rq_card_bindings.glsl at
+/// JAH_CARD_VIEW_BINDING_BASE 25).
+constexpr unsigned kTraceBindings = 30u;
+constexpr unsigned kTraceSideBinding = 23u;
+constexpr unsigned kTraceCardViewBinding = 25u;
+static_assert(kTraceBindings == kTraceCardViewBinding + SurfaceCache::kViewLayers,
+              "the card read's view-term layers are the trace set's last bindings");
+constexpr unsigned kFilterBindings = 3u;
+constexpr unsigned kIntegrateBindings = 10u;
 
-/// One probe's record: three vec4s (see JahProbeRecord in the shaders).
-constexpr unsigned kRecordBytes = 48u;
+/// One probe's record: ten vec4s — position, normal, the irradiance at its own
+/// normal and the SH9 (27 floats in seven vec4s; see JahProbeRecord in the
+/// shaders). PHOTON-GATHER-1b grew it from three vec4s.
+constexpr unsigned kRecordBytes = 160u;
+/// THE WEIGHT FLOOR under which a pixel's plane-weighted probes are not an
+/// answer (w = 0: the fallback owns the pixel). A pixel whose ONLY agreeing probe
+/// is a corner cell's at a sixteenth of the bilinear weight still clears it; one
+/// whose probes all sit off its plane does not.
+constexpr float kWeightFloor = 1e-3f;
 
 /// rq_probe_*.comp's uniform block, MEMBER FOR MEMBER (jah_probe_params.glsl).
 /// std140 over vec4s only, so the C++ layout is the GLSL layout by
@@ -93,7 +129,63 @@ struct GatherParams {
     float viewAxisZ[4] = {};
     float voxelOrigin[kGatherMaxCascades][4] = {};
     float voxelInvSize[kGatherMaxCascades][4] = {};
+    float knobs4[4] = {};
+    float prevCamPos[4] = {};
+    float prevRayTL[4] = {};
+    float prevRayRight[4] = {};
+    float prevRayDown[4] = {};
+    float prevFwd[4] = {};
+    float knobs5[4] = {};
+    float cards[4] = {};
+    float knobs6[4] = {};
+    /// THE HIT RECORD (PHOTON-HIT-SHADE-1; jah_probe_params.glsl's hitList,
+    /// hitSun, hitSun2).
+    float hitList[4] = {};
+    float hitSun[4] = {};
+    float hitSun2[4] = {};
 };
+
+/// THE PIXEL HISTORY'S BLEND FLOOR (PHOTON-GATHER-1c item 1): the smallest
+/// weight a new frame takes once the running mean has that many frames in it —
+/// a new frame's share is 1/n until n reaches it, then 1/kHistoryFrames. It is
+/// the trade between stillness and lag, both measured by gi.gather_stable on the
+/// Showroom-2-shaped room: at 10 (Lumen's own default for its screen-probe
+/// history; GatherTuning::historyFrames is the A/B door) a still view steps by at most 1/255 at every sampled pixel after the
+/// warm-up (9/255 with each frame alone), and a lamp switched off is within one
+/// code of its settled picture 16 frames later (0 with each frame alone).
+constexpr float kHistoryFrames = 10.0f;
+
+/// The history's floor in frames as a tuning runs it (the shipped kHistoryFrames,
+/// or GatherTuning::historyFrames, 1..63).
+unsigned historyFramesOf(const GatherTuning &t) {
+    return t.historyFrames ? std::min(std::max(t.historyFrames, 1u), 63u) : unsigned(kHistoryFrames);
+}
+/// N — the frames a step of kGatherSettleCodes codes takes to fall under one code
+/// through the history's EMA, ceil( ln(1/D) / ln(1 - 1/h) ) (16 at h = 10), and
+/// the length of the REST MEAN (rq_probe_integrate.comp): at rest the answer IS
+/// the mean of N rest frames at the N-th, and the view then holds — whatever
+/// else delays the scene's rest, the held picture is the same N samples.
+unsigned settleFramesOf(unsigned historyFrames) {
+    const double h = double(std::max(historyFrames, 2u));
+    return unsigned(std::ceil(std::log(1.0 / double(kGatherSettleCodes)) / std::log(1.0 - 1.0 / h)));
+}
+/// THE REST FRAMES' SAMPLE SEQUENCE: frame index kRestSequenceBase + k at the
+/// k-th rest frame, so the rest mean is the same set of samples whoever asks and
+/// whatever came before — a function of the scene and the camera alone.
+constexpr unsigned kRestSequenceBase = 0x10000u;
+
+/// Does a tuning change CHANGE THE ESTIMATOR? Every field but the readback (a
+/// test door that only copies the answer out). A changed estimator is a new
+/// history: its first frame takes its own estimate whole, so an A/B across a
+/// tuning push is never an average of its two arms.
+bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
+    return a.probeStride == b.probeStride && a.octRes == b.octRes && a.rayLength == b.rayLength &&
+           a.adaptiveCap == b.adaptiveCap && a.freezeFrameIndex == b.freezeFrameIndex &&
+           a.jitterOff == b.jitterOff && a.farQueryOff == b.farQueryOff &&
+           a.shBands == b.shBands && a.filterOff == b.filterOff &&
+           a.historyFrames == b.historyFrames &&
+           a.historyValidationOff == b.historyValidationOff && a.restOff == b.restOff;
+}
 
 /// THE ADAPTIVE TEST'S TWO TOLERANCES, and why they are constants rather than
 /// rows. `kPlaneTolerance` is how far a cell's pixel may lie off its probe's
@@ -109,6 +201,30 @@ struct GatherParams {
 constexpr float kPlaneTolerance = 0.01f;
 constexpr float kNormalTolerance = 0.9f;
 
+/// IEEE half to float, for the readback (a test door; subnormals kept).
+float halfToFloat(uint16_t h) {
+    const uint32_t sign = uint32_t(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t mant = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0u) {
+        if (mant == 0u) bits = sign;
+        else {
+            exp = 127u - 15u + 1u;
+            while (!(mant & 0x400u)) { mant <<= 1; --exp; }
+            mant &= 0x3FFu;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 31u) {
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + 127u - 15u) << 23) | (mant << 13);
+    }
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -119,7 +235,15 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     const auto makeLayout = [&](unsigned count, const VkDescriptorType *types,
                                 const unsigned *counts, VkDescriptorSetLayout &out,
                                 const char *what) {
-        VkDescriptorSetLayoutBinding b[16] = {};
+        // Sized by the widest set (the trace's) and refused beyond it: a fixed 16 here was
+        // overrun by the trace's nineteen and smashed the stack (PHOTON-VOXEL-4's rebase).
+        constexpr unsigned kMaxBindings = std::max({ kPlaceBindings, kTraceBindings, kFilterBindings,
+                                                     kIntegrateBindings });
+        VkDescriptorSetLayoutBinding b[kMaxBindings] = {};
+        if (count > kMaxBindings) {
+            err = std::string("gather: the ") + what + " set has more bindings than the layout table";
+            return false;
+        }
         for (unsigned i = 0; i < count; ++i) {
             b[i].binding = i;
             b[i].descriptorType = types[i];
@@ -159,11 +283,48 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 6 voxelY[]
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 7 voxelZ[]
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 8 sky cube
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 9 the card table
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 10 the card instance table
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 11 the card Depth layer
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 12 the card Radiance layer
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 13 the per-slot geometry row
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 14 the GPU scene's geometry rows
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 15 voxelCovP[] (RQ-COV-SLOT-1)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 16 voxelCovN[]
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 17 voxelPosP[] (PHOTON-VOXEL-4)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 voxelPosN[]
+            // THE HIT RECORD (PHOTON-HIT-SHADE-1): the instance table, the list's
+            // two images, its buffer (the counters and each record's aux).
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 19 the GPU scene's instances
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 20 the hit list's records
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 21 ...its destinations
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 22 ...its buffer
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 23 voxelBack[] (PHOTON-VOXEL-5)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 24 voxelNrm[]
+            // THE CARD READ'S VIEW TERM (PHOTON-CARDS-5).
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 25 the card Indirect layer
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 26 ...Emissive
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 27 ...ShadowRough
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 28 ...Albedo
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 29 ...Normal
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             kGatherMaxCascades, 1u };
+                                             kGatherMaxCascades, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
+                                             kGatherMaxCascades, kGatherMaxCascades,
+                                             kGatherMaxCascades, kGatherMaxCascades,
+                                             1u, 1u, 1u, 1u,
+                                             kGatherMaxCascades, kGatherMaxCascades,
+                                             1u, 1u, 1u, 1u, 1u };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
+    }
+    {   // rq_probe_filter.comp
+        const VkDescriptorType t[kFilterBindings] = {
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 records
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 2 the raw atlas
+        };
+        if (!makeLayout(kFilterBindings, t, nullptr, mFilterLayout, "filter")) return false;
     }
     {   // rq_probe_integrate.comp
         const VkDescriptorType t[kIntegrateBindings] = {
@@ -172,6 +333,11 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 normals
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 depth
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 irradiance
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 last frame's history
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 this frame's history
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 last frame's history geometry
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 8 this frame's history geometry
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 9 the rest mean (PHOTON-GATHER-1d)
         };
         if (!makeLayout(kIntegrateBindings, t, nullptr, mIntegrateLayout, "integrate")) return false;
     }
@@ -215,23 +381,34 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     if (!makeOne(mTraceLayout, krq_probeGatherSpv, sizeof(krq_probeGatherSpv), mTracePipeLayout,
                  mTraceModule, mTracePipeline, "trace"))
         return false;
+    if (!makeOne(mFilterLayout, krq_probeFilterSpv, sizeof(krq_probeFilterSpv), mFilterPipeLayout,
+                 mFilterModule, mFilterPipeline, "filter"))
+        return false;
     if (!makeOne(mIntegrateLayout, krq_probeIntegrateSpv, sizeof(krq_probeIntegrateSpv),
                  mIntegratePipeLayout, mIntegrateModule, mIntegratePipeline, "integrate"))
         return false;
 
-    const unsigned sets = kMaxTimedViews * kRing * 3u;
+    // PER VIEW AND RING SLOT, four sets: place (1 uniform, 3 storage buffers,
+    // 2 sampled), trace (1 AS, 1 uniform, 5 storage buffers, 1 storage image,
+    // 4 x cascades + 3 sampled), filter (1 uniform, 1 storage buffer, 1 storage
+    // image), integrate (1 uniform, 1 storage buffer, 2 sampled, 6 storage
+    // images).
+    const unsigned groups = kMaxTimedViews * kRing;
+    const unsigned sets = groups * 4u;
     VkDescriptorPoolSize sizes[4] = {};
     sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    sizes[0].descriptorCount = sets;
+    sizes[0].descriptorCount = groups;
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[1].descriptorCount = sets;
+    sizes[1].descriptorCount = groups * 4u;
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[2].descriptorCount = sets * 3u;
+    sizes[2].descriptorCount = groups * 12u;   // + the hit record's two (HIT-SHADE-1)
     sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[3].descriptorCount = sets * 2u;
+    sizes[3].descriptorCount = groups * 10u;   // + the hit list's two
     VkDescriptorPoolSize sampled{};
     sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sampled.descriptorCount = sets * (2u + 4u * kGatherMaxCascades + 1u);
+    // The voxel arrays: iso, X, Y, Z, coverage +/-, position +/- (8) and level 0's
+    // back side and normal (2, PHOTON-VOXEL-5) — ten a cascade; the card read's view term (5).
+    sampled.descriptorCount = groups * (2u + 10u * kGatherMaxCascades + 3u + 2u + SurfaceCache::kViewLayers);
     VkDescriptorPoolSize all[5] = { sizes[0], sizes[1], sizes[2], sizes[3], sampled };
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -266,6 +443,13 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     if (v.targetsReady && v.w == in.width && v.h == in.height && v.stride == stride &&
         v.octRes == octRes && v.adaptiveCap == adaptiveCap)
         return true;
+    // OUTSIDE ANY ENCODER FIRST (PHOTON-GATHER-1d, found by the validation
+    // selftest once the gather ran by default): this runs in the scene pass's
+    // pre-execute hook, and creating the full-resolution irradiance texture below
+    // (TextureGpu::_transitionTo) records a layout barrier — inside the pass's open
+    // render pass, VUID-vkCmdPipelineBarrier-None-07889. The host's frame command
+    // buffer is taken with every encoder ended.
+    if (!mHost.gatherFrameCmd()) { err = "gather: no frame command buffer"; return false; }
     drop(v);
     v.w = in.width;
     v.h = in.height;
@@ -293,6 +477,19 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     if (!mHost.gatherMakeBuffer(VkDeviceSize(total) * kRecordBytes,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, v.records,
                                 v.recordsMemory, nullptr, err))
+        return false;
+    for (unsigned k = 0; k < 2u; ++k) {
+        // THE PIXEL HISTORY PAIR at the target's resolution (rq_probe_integrate.comp).
+        if (!mHost.gatherMakeImage(in.width, in.height, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                   v.history[k], v.historyMemory[k], v.historyView[k], err))
+            return false;
+        if (!mHost.gatherMakeImage(in.width, in.height, VK_FORMAT_R32_UINT, v.historyGeom[k],
+                                   v.historyGeomMemory[k], v.historyGeomView[k], err))
+            return false;
+    }
+    // THE REST MEAN (PHOTON-GATHER-1d), one image at the target's resolution.
+    if (!mHost.gatherMakeImage(in.width, in.height, VK_FORMAT_R16G16B16A16_SFLOAT, v.restMean,
+                               v.restMeanMemory, v.restMeanView, err))
         return false;
     if (!mHost.gatherMakeBuffer(64u,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -330,11 +527,16 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     v.irradiance = t;
 
-    v.vramBytes = (unsigned long long)v.atlasW * v.atlasH * 8ull +
+    // The atlas, the records, the irradiance target (8 bytes a pixel), the
+    // pixel history's two pairs (8 + 4 bytes a pixel each) and the rest mean
+    // (8 bytes a pixel).
+    v.vramBytes = 1ull * v.atlasW * v.atlasH * 8ull +
                   (unsigned long long)total * kRecordBytes +
-                  (unsigned long long)in.width * in.height * 8ull;
+                  (unsigned long long)in.width * in.height * (8ull + 2ull * 12ull + 8ull);
     v.targetsReady = true;
     v.atlasNeedsClear = true;
+    v.age = 0u;
+    v.flip = 0u;
     return true;
 }
 
@@ -342,17 +544,46 @@ void ScreenProbeGather::drop(View &v) {
     for (unsigned i = 0; i < kRing; ++i) {
         mHost.gatherRetireSet(v.placeSets[i], mPool);
         mHost.gatherRetireSet(v.traceSets[i], mPool);
+        mHost.gatherRetireSet(v.filterSets[i], mPool);
         mHost.gatherRetireSet(v.integrateSets[i], mPool);
-        v.placeSets[i] = v.traceSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
+        v.placeSets[i] = v.traceSets[i] = v.filterSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
         mHost.gatherRetireBuffer(v.params[i], v.paramsMemory[i]);
         v.params[i] = VK_NULL_HANDLE;
         v.paramsMemory[i] = VK_NULL_HANDLE;
         v.paramsMapped[i] = nullptr;
+        mHost.gatherRetireBuffer(v.geomRowOfSlot[i], v.geomRowOfSlotMemory[i]);
+        v.geomRowOfSlot[i] = VK_NULL_HANDLE;
+        v.geomRowOfSlotMemory[i] = VK_NULL_HANDLE;
+        v.geomRowOfSlotMapped[i] = nullptr;
+        v.geomRowOfSlotBytes[i] = 0u;
     }
     mHost.gatherRetireBuffer(v.records, v.recordsMemory);
+    for (unsigned k = 0; k < 2u; ++k) {
+        mHost.gatherRetireImage(v.history[k], v.historyMemory[k], v.historyView[k]);
+        v.history[k] = VK_NULL_HANDLE;
+        v.historyMemory[k] = VK_NULL_HANDLE;
+        v.historyView[k] = VK_NULL_HANDLE;
+        mHost.gatherRetireImage(v.historyGeom[k], v.historyGeomMemory[k], v.historyGeomView[k]);
+        v.historyGeom[k] = VK_NULL_HANDLE;
+        v.historyGeomMemory[k] = VK_NULL_HANDLE;
+        v.historyGeomView[k] = VK_NULL_HANDLE;
+    }
+    mHost.gatherRetireImage(v.restMean, v.restMeanMemory, v.restMeanView);
+    v.restMean = VK_NULL_HANDLE;
+    v.restMeanMemory = VK_NULL_HANDLE;
+    v.restMeanView = VK_NULL_HANDLE;
+    v.restFrames = 0u;
+    v.sinceRestart = 0u;
+    v.age = 0u;
     mHost.gatherRetireBuffer(v.counter, v.counterMemory);
     mHost.gatherRetireBuffer(v.args, v.argsMemory);
     mHost.gatherRetireBuffer(v.readback, v.readbackMemory);
+    mHost.gatherRetireBuffer(v.irrReadback, v.irrReadbackMemory);
+    v.irrReadback = VK_NULL_HANDLE;
+    v.irrReadbackMemory = VK_NULL_HANDLE;
+    v.irrReadbackMapped = nullptr;
+    v.irrHost.clear();
+    v.irrHostFrame = 0u;
     v.records = v.counter = v.args = v.readback = VK_NULL_HANDLE;
     v.recordsMemory = v.counterMemory = v.argsMemory = v.readbackMemory = VK_NULL_HANDLE;
     v.readbackMapped = nullptr;
@@ -375,7 +606,7 @@ void ScreenProbeGather::drop(View &v) {
     v.frame = 0u;
     v.adaptiveLast = 0u;
     v.adaptiveAsked = 0u;
-    v.placeMs = v.traceMs = v.integrateMs = v.cpuMs = -1.0f;
+    v.placeMs = v.traceMs = v.filterMs = v.integrateMs = v.cpuMs = -1.0f;
 }
 
 void ScreenProbeGather::readPending(View &v) {
@@ -386,6 +617,7 @@ void ScreenProbeGather::readPending(View &v) {
     if (v.readbackMapped) {
         for (unsigned i = 0; i < kFramesInFlight; ++i) {
             if (!v.pending[i].live || uint32_t(nowAll - v.pending[i].frame) < inFlightAll) continue;
+            if (!v.pending[i].held) {
             uint32_t appended = 0u;
             std::memcpy(&appended, static_cast<const char *>(v.readbackMapped) + i * 16u,
                         sizeof(appended));
@@ -394,6 +626,18 @@ void ScreenProbeGather::readPending(View &v) {
             // smaller of the two.
             v.adaptiveAsked = appended;
             v.adaptiveLast = std::min(appended, v.adaptiveCap);
+            }
+            // ...AND THE IRRADIANCE READBACK of the same retired frame, decoded
+            // from half floats (a test door; see GatherTuning::readback).
+            if (v.pending[i].irradiance && v.irrReadbackMapped) {
+                const size_t texels = size_t(v.w) * v.h;
+                const uint16_t *src = reinterpret_cast<const uint16_t *>(
+                    static_cast<const char *>(v.irrReadbackMapped) + i * texels * 8u);
+                v.irrHost.resize(texels * 4u);
+                for (size_t k = 0; k < texels * 4u; ++k) v.irrHost[k] = halfToFloat(src[k]);
+                v.irrHostFrame = v.pending[i].gatherFrame;
+                v.pending[i].irradiance = false;
+            }
         }
     }
     if (!mTimestamps || !v.hasQueryBase) {
@@ -409,6 +653,7 @@ void ScreenProbeGather::readPending(View &v) {
         // `< inFlight`, not `<=`: the ring is kFramesInFlight deep and a slot is
         // REUSED after that many frames (the reflect path's lesson).
         if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
+        if (pd.held) { pd.live = false; continue; }   // a held frame wrote no timestamps
         uint64_t q[kQueriesPerFrame * 2] = {};
         const uint32_t base = v.queryBase + i * kQueriesPerFrame;
         if (vkGetQueryPoolResults(mHost.gatherDevice(), mTimestamps, base, kQueriesPerFrame,
@@ -421,7 +666,8 @@ void ScreenProbeGather::readPending(View &v) {
             };
             span(0, 1, v.placeMs);
             span(2, 3, v.traceMs);
-            span(4, 5, v.integrateMs);
+            span(4, 5, v.filterMs);
+            span(6, 7, v.integrateMs);
         }
         pd.live = false;
     }
@@ -433,20 +679,31 @@ void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
     // UNDEFINED -> GENERAL and zeroed. A probe block of zero radiance at a
     // distance of zero is what an untraced probe reads as, which is what the
     // integrate hands back to the pixel path.
-    VkImageMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = v.atlas;
-    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.levelCount = 1;
-    b.subresourceRange.layerCount = 1;
-    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    // Every image: the atlas and both history pairs (a zero history word is "no
+    // surface", which every distance test rejects — though nothing reads them
+    // before the view's age says so).
+    // ...and the rest mean (PHOTON-GATHER-1d), which the integrate binds on every
+    // frame and writes only at rest.
+    const VkImage images[6] = { v.atlas, v.history[0], v.history[1], v.historyGeom[0],
+                                v.historyGeom[1], v.restMean };
+    VkImageMemoryBarrier b[6] = {};
+    for (int i = 0; i < 6; ++i) {
+        b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b[i].srcQueueFamilyIndex = b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b[i].image = images[i];
+        b[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b[i].subresourceRange.levelCount = 1;
+        b[i].subresourceRange.layerCount = 1;
+        b[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &b);
+                         0, nullptr, 0, nullptr, 6, b);
     VkClearColorValue zero{};
-    vkCmdClearColorImage(cmd, v.atlas, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &b.subresourceRange);
+    for (int i = 0; i < 6; ++i)
+        vkCmdClearColorImage(cmd, images[i], VK_IMAGE_LAYOUT_GENERAL, &zero, 1,
+                             &b[i].subresourceRange);
     VkMemoryBarrier toCompute{};
     toCompute.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     toCompute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -489,7 +746,7 @@ void ScreenProbeGather::close() {
         // usual.
         View &v = kv.second;
         for (unsigned i = 0; i < kRing; ++i)
-            v.placeSets[i] = v.traceSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
+            v.placeSets[i] = v.traceSets[i] = v.filterSets[i] = v.integrateSets[i] = VK_NULL_HANDLE;
         drop(v);
     }
     mViews.clear();
@@ -500,55 +757,158 @@ void ScreenProbeGather::close() {
     if (mPool) vkDestroyDescriptorPool(dev, mPool, nullptr);
     if (mPlacePipeline) vkDestroyPipeline(dev, mPlacePipeline, nullptr);
     if (mTracePipeline) vkDestroyPipeline(dev, mTracePipeline, nullptr);
+    if (mFilterPipeline) vkDestroyPipeline(dev, mFilterPipeline, nullptr);
     if (mIntegratePipeline) vkDestroyPipeline(dev, mIntegratePipeline, nullptr);
     if (mPlaceModule) vkDestroyShaderModule(dev, mPlaceModule, nullptr);
     if (mTraceModule) vkDestroyShaderModule(dev, mTraceModule, nullptr);
+    if (mFilterModule) vkDestroyShaderModule(dev, mFilterModule, nullptr);
     if (mIntegrateModule) vkDestroyShaderModule(dev, mIntegrateModule, nullptr);
     if (mPlacePipeLayout) vkDestroyPipelineLayout(dev, mPlacePipeLayout, nullptr);
     if (mTracePipeLayout) vkDestroyPipelineLayout(dev, mTracePipeLayout, nullptr);
+    if (mFilterPipeLayout) vkDestroyPipelineLayout(dev, mFilterPipeLayout, nullptr);
     if (mIntegratePipeLayout) vkDestroyPipelineLayout(dev, mIntegratePipeLayout, nullptr);
     if (mPlaceLayout) vkDestroyDescriptorSetLayout(dev, mPlaceLayout, nullptr);
     if (mTraceLayout) vkDestroyDescriptorSetLayout(dev, mTraceLayout, nullptr);
+    if (mFilterLayout) vkDestroyDescriptorSetLayout(dev, mFilterLayout, nullptr);
     if (mIntegrateLayout) vkDestroyDescriptorSetLayout(dev, mIntegrateLayout, nullptr);
     if (mTimestamps) vkDestroyQueryPool(dev, mTimestamps, nullptr);
     mPool = VK_NULL_HANDLE;
-    mPlacePipeline = mTracePipeline = mIntegratePipeline = VK_NULL_HANDLE;
-    mPlaceModule = mTraceModule = mIntegrateModule = VK_NULL_HANDLE;
-    mPlacePipeLayout = mTracePipeLayout = mIntegratePipeLayout = VK_NULL_HANDLE;
-    mPlaceLayout = mTraceLayout = mIntegrateLayout = VK_NULL_HANDLE;
+    mPlacePipeline = mTracePipeline = mFilterPipeline = mIntegratePipeline = VK_NULL_HANDLE;
+    mPlaceModule = mTraceModule = mFilterModule = mIntegrateModule = VK_NULL_HANDLE;
+    mPlacePipeLayout = mTracePipeLayout = mFilterPipeLayout = mIntegratePipeLayout = VK_NULL_HANDLE;
+    mPlaceLayout = mTraceLayout = mFilterLayout = mIntegrateLayout = VK_NULL_HANDLE;
     mTimestamps = VK_NULL_HANDLE;
     mQuerySlots = 0u;
 }
 
-void ScreenProbeGather::statsInto(const detail::OgreScene *scene, GatherStatus &out) const {
+void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long long restKey,
+                                  unsigned long long restartKey, GatherStatus &out) const {
     out.error = mLastError;
+    // THE VIEWS THAT DREW THE LATEST FRAME of this scene. A scene can hold
+    // several (the viewport and a screenshot's shot view, which a screenshot's
+    // settle loop draws ALONE while the viewport is quiet): the numbers are the
+    // latest view's, and the settled history is every latest view's — a young
+    // shot view is not settled because the quiet viewport was.
+    const View *latest = nullptr;
     for (const auto &kv : mViews) {
         const View &v = kv.second;
         if (v.scene != scene || !v.targetsReady) continue;
-        out.running = true;
-        out.stride = v.stride;
-        out.octRes = v.octRes;
-        out.raysPerProbe = v.octRes * v.octRes;
-        out.probesX = v.gridW;
-        out.probesY = v.gridH;
-        out.probes = v.uniformProbes;
-        out.adaptive = v.adaptiveLast;
-        out.adaptiveRequested = v.adaptiveAsked;
-        out.adaptiveCap = v.adaptiveCap;
-        out.raysPerFrame =
-            (unsigned long long)(v.uniformProbes + v.adaptiveLast) * out.raysPerProbe;
-        out.targetW = v.w;
-        out.targetH = v.h;
-        out.atlasBytes = v.vramBytes;
-        out.placeMs = v.placeMs;
-        out.traceMs = v.traceMs;
-        out.integrateMs = v.integrateMs;
-        out.cpuMs = v.cpuMs;
-        return;
+        if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) latest = &v;
     }
+    if (!latest) return;
+    const View &v = *latest;
+    out.running = true;
+    out.stride = v.stride;
+    out.octRes = v.octRes;
+    out.raysPerProbe = v.octRes * v.octRes;
+    out.probesX = v.gridW;
+    out.probesY = v.gridH;
+    out.probes = v.uniformProbes;
+    out.adaptive = v.adaptiveLast;
+    out.adaptiveRequested = v.adaptiveAsked;
+    out.adaptiveCap = v.adaptiveCap;
+    out.raysPerFrame = (unsigned long long)(v.uniformProbes + v.adaptiveLast) * out.raysPerProbe;
+    out.targetW = v.w;
+    out.targetH = v.h;
+    out.atlasBytes = v.vramBytes;
+    out.placeMs = v.placeMs;
+    out.traceMs = v.traceMs;
+    out.filterMs = v.filterMs;
+    out.integrateMs = v.integrateMs;
+    out.cpuMs = v.cpuMs;
+    out.temporal = v.lastTemporal;
+    out.historyAge = v.age;
+    out.irradiance = v.irrHost;
+    out.irradianceW = v.irrHost.empty() ? 0u : v.w;
+    out.irradianceH = v.irrHost.empty() ? 0u : v.h;
+    out.irradianceFrame = v.irrHostFrame;
+    // THE SETTLED HISTORY (GatherStatus says what and why): every latest view's
+    // history N frames past its last RESTART. The rest (and its hold) is
+    // reported beside it and is NOT part of the predicate: a scene with a
+    // per-frame writer never rests, and its shot takes the settled EMA picture.
+    // A restart key the view has not drawn yet (a light write between two
+    // frames) is a restart at frame 0.
+    out.settled = true;
+    out.restFrames = ~0u;
+    out.sinceRestart = ~0u;
+    for (const auto &kv : mViews) {
+        const View &o = kv.second;
+        if (o.scene != scene || !o.targetsReady || o.recordedFrame != v.recordedFrame) continue;
+        const unsigned n = settleFramesOf(o.historyFramesLast);
+        out.settleFrames = std::max(out.settleFrames, n);
+        const unsigned rest = o.restKey == restKey ? o.restFrames : 0u;
+        out.restFrames = std::min(out.restFrames, rest);
+        const unsigned since = o.restartKey == restartKey ? o.sinceRestart : 0u;
+        out.sinceRestart = std::min(out.sinceRestart, since);
+        if (o.lastTemporal && since < n) out.settled = false;
+    }
+    if (out.restFrames == ~0u) out.restFrames = 0u;
+    if (out.sinceRestart == ~0u) out.sinceRestart = 0u;
 }
 
 // ---------------------------------------------------------------------------
+// A HELD FRAME (PHOTON-GATHER-1d). The view has been at rest for N frames: its
+// irradiance texture holds the rest mean (rq_probe_integrate.comp) and stays
+// exactly that until something moves. Nothing is dispatched; the texture is bound
+// to the pass again, and the readback door still copies it out (a suite averaging
+// a still scene's frames reads the held answer, not a stall).
+void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
+    Ogre::RenderSystem *rs = mHost.gatherRenderSystem();
+    if (in.tuning.readback && v.irrReadback) {
+        {
+            Ogre::BarrierSolver &solver = rs->getBarrierSolver();
+            Ogre::ResourceTransitionArray trans;
+            solver.resolveTransition(trans, v.irradiance, Ogre::ResourceLayout::Uav,
+                                     Ogre::ResourceAccess::Read, 1u << Ogre::GPT_COMPUTE_PROGRAM);
+            rs->executeResourceTransition(trans);
+        }
+        VkCommandBuffer cmd = mHost.gatherFrameCmd();
+        if (cmd) {
+            VkMemoryBarrier toCopy{};
+            toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+            toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0, nullptr, 0, nullptr);
+            const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * 8u;
+            VkBufferImageCopy region{};
+            region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = { v.w, v.h, 1u };
+            vkCmdCopyImageToBuffer(
+                cmd, static_cast<Ogre::VulkanTextureGpu *>(v.irradiance)->getFinalTextureName(),
+                VK_IMAGE_LAYOUT_GENERAL, v.irrReadback, 1, &region);
+            VkMemoryBarrier toHost{};
+            toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &toHost, 0, nullptr, 0, nullptr);
+            View::Pending &pd = v.pending[v.frame % kFramesInFlight];
+            pd.frame = mHost.gatherFrameNow();
+            pd.live = true;
+            pd.irradiance = true;
+            pd.held = true;
+            pd.gatherFrame = v.frame;
+            ++v.frame;
+        }
+    }
+    {
+        Ogre::BarrierSolver &solver = rs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, v.irradiance, Ogre::ResourceLayout::Texture,
+                                 Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        rs->executeResourceTransition(trans);
+    }
+    detail::FogHlmsListener::setProbeGather(in.sceneMgr, v.irradiance);
+    ++v.age;
+    v.lastTemporal = temporal;
+    v.recordedFrame = mHost.gatherFrameNow();
+}
+
 void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     if (mFailed || !in.scene || !in.sceneMgr || !in.tlas || !in.normals || !in.depth) return;
     if (!in.width || !in.height) return;
@@ -568,41 +928,36 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             "is estimated from probe rays (SPECS/SCREEN_PROBE_GATHER_SPEC.md)");
     }
 
-    // ---- WHAT THE TIER ASKS FOR, and what the quality row derives ----------
-    // 16 pixels per probe at Medium and High, 8 at Epic (four times the
-    // probes); 64 rays each, 36 at Medium. The ray budget is NOT what decides
-    // these numbers — GATHER-0 measured the trace at 0.21 ns a ray and found
-    // the 8,160-probe arm FASTER than a 2,040-probe one at the same ray count
-    // (probe count is what fills this GPU) — the picture and the VRAM are.
-    //
-    // WHERE "EPIC" COMES FROM, since the engine's `GiQuality` has three values
-    // and Epic is not one of them (the tier table maps Epic onto High plus a
-    // bigger cascade set): the VIEW's SSR row, exactly as the reflection trace
-    // reads it for its own resolution — 2 at Epic, 1 at High, 0 below. One row,
-    // two consumers, no second setting, and the same sentence R5's note makes.
-    // The Studio tier table gains a column of its own at phase 4, where the
-    // gather is turned on by tier at all.
-    unsigned stride = in.epicRow ? 8u : 16u;
-    unsigned octRes = in.quality == GiQuality::Medium ? 6u : 8u;
+    // ---- WHAT THE TIER ASKS FOR: the tier table's gather row ----------------
+    // (Types.h `GiGatherFacts`, handed over in `in.facts`): 16 pixels a probe at
+    // Medium and High, 8 at Epic; 64 rays each, 36 at Medium. The ray budget is
+    // NOT what decides these numbers — GATHER-0 measured the trace at 0.21 ns a
+    // ray and found the 8,160-probe arm FASTER than a 2,040-probe one at the same
+    // ray count (probe count is what fills this GPU) — the picture and the VRAM
+    // are. Epic is the TABLE's row, never the view's SSR row (GA-TIERROW).
+    unsigned stride = in.facts.stride;
+    unsigned octRes = in.facts.octRes;
     if (in.tuning.probeStride) stride = in.tuning.probeStride;
     if (in.tuning.octRes) octRes = in.tuning.octRes;
     stride = std::min(std::max(stride, 2u), 64u);
     octRes = std::min(std::max(octRes, 1u), kGatherOctResMax);
 
     View &v = mViews[key];
+    // A SCENE BIND IS A NEW VIEW for the histories: nothing in them is this
+    // scene's.
+    if (v.scene != in.scene) v.age = 0u;
     v.scene = in.scene;
     v.sceneMgr = in.sceneMgr;
     readPending(v);
 
     const unsigned gridW = (in.width + stride - 1u) / stride;
     const unsigned gridH = (in.height + stride - 1u) / stride;
-    // HOW MANY ADAPTIVE PROBES A FRAME MAY ADD. A quarter of the grid: Lumen's
-    // own budget is a fixed allocation of the same order, and the number is a
-    // CAP rather than a target — a flat scene spends none of it. The cap is
-    // part of the allocation (the atlas and the record buffer are sized for the
-    // worst case, resident, never per frame — the 0071 lesson), so it cannot be
-    // a per-frame decision.
-    unsigned adaptiveCap = gridW * gridH / 4u;
+    // HOW MANY ADAPTIVE PROBES A FRAME MAY ADD: the table's share of the grid (a
+    // quarter). A CAP rather than a target — a flat scene spends none of it. The
+    // cap is part of the allocation (the atlas and the record buffer are sized
+    // for the worst case, resident, never per frame — the 0071 lesson), so it
+    // cannot be a per-frame decision.
+    unsigned adaptiveCap = gridW * gridH / std::max(in.facts.adaptiveCapDivisor, 1u);
     if (in.tuning.adaptiveCap >= 0) adaptiveCap = unsigned(in.tuning.adaptiveCap);
 
     std::string err;
@@ -623,6 +978,67 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
     mLastError.clear();
 
+    // ---- THE PIXEL HISTORY'S INPUTS (PHOTON-GATHER-1c) -----------------------
+    // THE MEASUREMENT LEVER, read at every frame so a suite drives both arms in
+    // one process: each frame's estimate alone, no history read or written.
+    const bool temporal = std::getenv("JAHSHAKA_GATHER_NO_TEMPORAL") == nullptr;
+    // The history restarts when it would otherwise average two estimators: the
+    // history switched back on (its images were not written meanwhile), or a
+    // tuning field that changes the estimator (an A/B arm).
+    if (temporal && !v.temporalLast) v.age = 0u;
+    if (!sameEstimator(in.tuning, v.tuningLast)) v.age = 0u;
+    v.temporalLast = temporal;
+    v.tuningLast = in.tuning;
+    if (v.age == 0u) {
+        // Nothing reads it at age 0; this frame's basis keeps the block finite.
+        const auto put3w = [](float dst[4], const float src[3], float w) {
+            dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = w;
+        };
+        std::memcpy(v.prevCamPos, in.camPos, sizeof(v.prevCamPos));
+        put3w(v.prevRayTL, in.rayTL, 0.0f);
+        put3w(v.prevRayRight, in.rayRight, 0.0f);
+        put3w(v.prevRayDown, in.rayDown, 0.0f);
+        put3w(v.prevFwd, in.fwd, 0.0f);
+    }
+    // ---- THE REST (PHOTON-GATHER-1d) --------------------------------------------
+    // A frame is a REST frame when nothing the answer depends on moved since the
+    // last one: the camera's basis (bit for bit — a tracked VR head is never at
+    // rest, and a still editor camera always is), the scene's rest key (the
+    // lighting, the geometry, the surface cache: OgreScene::gatherRestKey) and the
+    // estimator (an age of 0 is a restart). At rest the integrate hands the answer
+    // over to a true mean of the rest frames (rq_probe_integrate.comp); after N of
+    // them the answer IS that mean and the view HOLDS: nothing is dispatched.
+    {
+        const bool sameCamera =
+            v.age > 0u && std::memcmp(v.prevCamPos, in.camPos, sizeof(v.prevCamPos)) == 0 &&
+            std::memcmp(v.prevRayTL, in.rayTL, sizeof(in.rayTL)) == 0 &&
+            std::memcmp(v.prevRayRight, in.rayRight, sizeof(in.rayRight)) == 0 &&
+            std::memcmp(v.prevRayDown, in.rayDown, sizeof(in.rayDown)) == 0 &&
+            std::memcmp(v.prevFwd, in.fwd, sizeof(in.fwd)) == 0;
+        const bool still = temporal && !in.tuning.restOff && sameCamera && in.restKey == v.restKey;
+        v.restKey = in.restKey;
+        // THE SETTLE: a restart zeroes it (the view's birth or an estimator change
+        // is age 0; the scene's restart key moving is the rest), any other frame
+        // — moving camera, moving geometry, held — counts one.
+        const bool restart = v.age == 0u || in.restartKey != v.restartKey;
+        v.restartKey = in.restartKey;
+        v.sinceRestart = restart ? 0u : std::min(v.sinceRestart + 1u, 1u << 20);
+        v.restFrames = still ? std::min(v.restFrames + 1u, 1u << 20) : 0u;
+        v.historyFramesLast = historyFramesOf(in.tuning);
+        if (still && v.restFrames > settleFramesOf(v.historyFramesLast)) {
+            // THE RE-BIND IS THE SECOND HALF'S (finish): the registration is
+            // scoped to the opaque pass, and the hit decode pass runs between.
+            v.finishPending = true;
+            v.finishHold = true;
+            v.finishTraced = false;
+            v.finishIn = in;
+            v.finishTemporal = temporal;
+            v.finishCpuMs = msSince(cpuStart);
+            return;
+        }
+    }
+    const unsigned cur = v.flip & 1u, prev = cur ^ 1u;   // the history pair's halves
+
     const unsigned ring = v.frame % kRing;
     if (!v.params[ring] &&
         !mHost.gatherMakeBuffer(sizeof(GatherParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true,
@@ -642,6 +1058,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         return true;
     };
     if (!allocSet(mPlaceLayout, v.placeSets[ring]) || !allocSet(mTraceLayout, v.traceSets[ring]) ||
+        !allocSet(mFilterLayout, v.filterSets[ring]) ||
         !allocSet(mIntegrateLayout, v.integrateSets[ring]))
         return;
     if (!v.hasQueryBase && mTimestamps) {
@@ -707,10 +1124,23 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         pp.knobs[1] = in.tuning.rayLength > 0.0f ? in.tuning.rayLength : derived;
     }
     // THE SAMPLE SEQUENCE'S ONLY INPUT, and the determinism arm that holds it.
-    pp.knobs[2] = in.tuning.freezeFrameIndex ? 0.0f : float(v.frame & 0xFFFFu);
+    // ...and AT REST the rest frame's own index (kRestSequenceBase + k), so the
+    // rest mean is the same samples whatever came before it (PHOTON-GATHER-1d).
+    pp.knobs[2] = in.tuning.freezeFrameIndex
+                      ? 0.0f
+                      : float(v.restFrames ? kRestSequenceBase + v.restFrames : (v.frame & 0xFFFFu));
     pp.knobs[3] = float(in.cascadeCount);
     pp.knobs2[0] = in.anisotropic ? 1.0f : 0.0f;
-    pp.knobs2[1] = in.cascadeCount ? std::max(0.01f, 0.5f * in.voxelCell[0]) : 0.02f;
+    // THE RAY'S START, OFF THE SURFACE BY AN EPSILON — never by half a voxel
+    // (the fix round, gi.gather_cards' near-foot chase): the probe measures the
+    // irradiance AT the surface, and a start lifted 4 cm (0.5 x cascade 0's
+    // cell) measured it 4 cm up — the floor in front of a floating panel read
+    // +7 % at its foot and -11 % at 1.6 m, the sign and size of that lift
+    // exactly (spikes/photon-gather-1d). The floor here, 1 mm, and the shader's
+    // 1e-4 of the view distance (well above a float depth's reconstruction
+    // error) keep a ray off its own triangle; a hit's shading owns its own
+    // footprint.
+    pp.knobs2[1] = 0.001f;
     pp.knobs2[2] = in.sky ? 1.0f : 0.0f;
     pp.knobs2[3] = float(octRes);
     pp.knobs3[0] = float(v.uniformProbes);
@@ -749,6 +1179,75 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         pp.voxelInvSize[c][2] = sz > 0.0f ? 1.0f / sz : 0.0f;
         pp.voxelInvSize[c][3] = have ? in.voxelCell[src] : 1.0f;
     }
+    // PHOTON-GATHER-1b: the SH bands the integrate evaluates (9 unless the
+    // measurement arm asks for 4), the weight floor, the filter on or off.
+    pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
+    pp.knobs4[1] = kWeightFloor;
+    pp.knobs4[2] = in.tuning.filterOff ? 0.0f : 1.0f;
+    // PHOTON-GATHER-1c: the previous camera, the view's age, the history's floor,
+    // the lever.
+    std::memcpy(pp.prevCamPos, v.prevCamPos, sizeof(pp.prevCamPos));
+    std::memcpy(pp.prevRayTL, v.prevRayTL, sizeof(pp.prevRayTL));
+    std::memcpy(pp.prevRayRight, v.prevRayRight, sizeof(pp.prevRayRight));
+    std::memcpy(pp.prevRayDown, v.prevRayDown, sizeof(pp.prevRayDown));
+    std::memcpy(pp.prevFwd, v.prevFwd, sizeof(pp.prevFwd));
+    pp.knobs5[0] = float(std::min(v.age, 65535u));
+    // The floor: the shipped kHistoryFrames, or the tuning's A/B arm.
+    pp.knobs5[1] = 1.0f / float(v.historyFramesLast);
+    // THE REST MEAN (PHOTON-GATHER-1d): the rest frame k and N.
+    pp.knobs6[0] = temporal ? float(v.restFrames) : 0.0f;
+    pp.knobs6[1] = float(settleFramesOf(v.historyFramesLast));
+    pp.knobs5[2] = temporal ? 1.0f : 0.0f;
+    pp.knobs5[3] = in.tuning.historyValidationOff ? 1.0f : 0.0f;
+    // PHOTON-GATHER-1d (GA-1e): the surface cache the hits read first, and the
+    // per-slot geometry rows the card pick faces by — the per-slot table copied
+    // into this ring slot's buffer (the scene's vector moves under a later
+    // frame). No cache or no rows: zero slots, and the shader never indexes the
+    // stand-ins bound in their place.
+    uint32_t geomSlots = 0u;
+    if (in.geomRows && in.geomRowOfSlot && !in.geomRowOfSlot->empty()) {
+        const VkDeviceSize want = VkDeviceSize(in.geomRowOfSlot->size()) * sizeof(uint32_t);
+        if (v.geomRowOfSlot[ring] && v.geomRowOfSlotBytes[ring] < want) {
+            mHost.gatherRetireBuffer(v.geomRowOfSlot[ring], v.geomRowOfSlotMemory[ring]);
+            v.geomRowOfSlot[ring] = VK_NULL_HANDLE;
+            v.geomRowOfSlotMemory[ring] = VK_NULL_HANDLE;
+            v.geomRowOfSlotMapped[ring] = nullptr;
+            v.geomRowOfSlotBytes[ring] = 0u;
+        }
+        if (!v.geomRowOfSlot[ring]) {
+            const VkDeviceSize bytes = std::max<VkDeviceSize>(want, 1024u);
+            std::string gerr;
+            if (mHost.gatherMakeBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                                       v.geomRowOfSlot[ring], v.geomRowOfSlotMemory[ring],
+                                       &v.geomRowOfSlotMapped[ring], gerr))
+                v.geomRowOfSlotBytes[ring] = bytes;
+        }
+        if (v.geomRowOfSlot[ring] && v.geomRowOfSlotMapped[ring]) {
+            std::memcpy(v.geomRowOfSlotMapped[ring], in.geomRowOfSlot->data(), size_t(want));
+            geomSlots = uint32_t(in.geomRowOfSlot->size());
+        }
+    }
+    bool cardViewBound = true;
+    for (Ogre::TextureGpu *t : in.cardView) cardViewBound = cardViewBound && t;
+    const bool cardsBound = in.cardTable && in.cardInstances && in.cardDepth && in.cardRadiance &&
+                            cardViewBound && in.cardRecords > 0u;
+    pp.cards[0] = cardsBound ? float(in.cardSlots) : 0.0f;
+    pp.cards[1] = cardsBound ? float(in.cardRecords) : 0.0f;
+    pp.cards[2] = in.cardFootprintTexels;
+    pp.cards[3] = float(geomSlots);
+    // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the tier bound, the sun ray.
+    pp.hitList[0] = float(in.hit.capacity);
+    pp.hitList[1] = float(in.hit.width);
+    pp.hitList[2] = float(in.hit.instanceEntries);
+    pp.hitList[3] = in.hit.on ? 1.0f : 0.0f;
+    pp.hitSun[0] = in.hit.toSun[0];
+    pp.hitSun[1] = in.hit.toSun[1];
+    pp.hitSun[2] = in.hit.toSun[2];
+    pp.hitSun[3] = in.hit.sun ? 1.0f : 0.0f;
+    pp.hitSun2[0] = float(in.hit.sunMask);
+    pp.hitSun2[1] = in.hit.lift;
+    pp.hitSun2[2] = in.hit.sunRange;
+    pp.hitSun2[3] = std::max(in.hit.farLift, in.farOverlap);
     std::memcpy(v.paramsMapped[ring], &pp, sizeof(pp));
 
     // ---- THE DESCRIPTOR SETS, rewritten every frame ------------------------
@@ -763,8 +1262,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         mHost.gatherRetireView(view);
         return view;
     };
-    VkImageView dummyCube = VK_NULL_HANDLE, dummyVolume = VK_NULL_HANDLE;
-    if (!mHost.gatherDummies(dummyCube, dummyVolume, err)) return;
+    VkImageView dummyCube = VK_NULL_HANDLE, dummyVolume = VK_NULL_HANDLE,
+                dummyFlat = VK_NULL_HANDLE;
+    VkBuffer dummyStorage = VK_NULL_HANDLE;
+    if (!mHost.gatherDummies(dummyCube, dummyVolume, dummyFlat, dummyStorage, err)) return;
 
     VkDescriptorBufferInfo paramsInfo{};
     paramsInfo.buffer = v.params[ring];
@@ -817,8 +1318,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     VkDescriptorImageInfo atlasStore{};
     atlasStore.imageView = v.atlasView;
     atlasStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo volumes[4][kGatherMaxCascades] = {}, sky{};
-    for (int axis = 0; axis < 4; ++axis)
+    VkDescriptorImageInfo volumes[10][kGatherMaxCascades] = {}, sky{};
+    for (int axis = 0; axis < 10; ++axis)
         for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
             const unsigned src =
                 c < in.cascadeCount ? c : (in.cascadeCount ? in.cascadeCount - 1u : 0u);
@@ -855,7 +1356,111 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         }
         w[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[8].pImageInfo = &sky;
+        // THE CARD READ'S FOUR (9-12) — the cache's own or the stand-ins, the
+        // reflection trace's rule — and THE GEOMETRIC NORMAL'S TWO (13, 14).
+        const auto bufferInfo = [](Ogre::UavBufferPacked *b) {
+            VkDescriptorBufferInfo info{};
+            auto *bi = static_cast<Ogre::VulkanBufferInterface *>(b->getBufferInterface());
+            info.buffer = bi->getVboName();
+            info.offset = VkDeviceSize(b->_getFinalBufferStart()) * b->getBytesPerElement();
+            info.range = b->getTotalSizeBytes();
+            return info;
+        };
+        VkDescriptorBufferInfo stand{};
+        stand.buffer = dummyStorage;
+        stand.range = VK_WHOLE_SIZE;
+        VkDescriptorBufferInfo cardBufs[2] = { stand, stand };
+        VkDescriptorImageInfo cardImgs[2] = {};
+        if (cardsBound) {
+            cardBufs[0] = bufferInfo(in.cardTable);
+            cardBufs[1] = bufferInfo(in.cardInstances);
+        }
+        Ogre::TextureGpu *const layers[2] = { in.cardDepth, in.cardRadiance };
+        for (int i = 0; i < 2; ++i) {
+            cardImgs[i].sampler = mHost.gatherPointSampler();
+            cardImgs[i].imageView = cardsBound ? sampledView(layers[i]) : dummyFlat;
+            cardImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (!cardImgs[i].imageView || !cardBufs[i].buffer) return;
+        }
+        VkDescriptorBufferInfo geomBufs[2] = { stand, stand };
+        if (geomSlots) {
+            geomBufs[0].buffer = v.geomRowOfSlot[ring];
+            geomBufs[0].offset = 0;
+            geomBufs[0].range = VK_WHOLE_SIZE;
+            geomBufs[1] = bufferInfo(in.geomRows);
+        }
+        for (int i = 0; i < 2; ++i) {
+            w[9 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w[9 + i].pBufferInfo = &cardBufs[i];
+            w[11 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[11 + i].pImageInfo = &cardImgs[i];
+            w[13 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w[13 + i].pBufferInfo = &geomBufs[i];
+        }
+        for (unsigned k = 0; k < 4u; ++k) {   // coverage +/-, position +/- (15-18)
+            w[15 + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[15 + k].descriptorCount = kGatherMaxCascades;
+            w[15 + k].pImageInfo = volumes[4 + k];
+        }
+        for (unsigned k = 0; k < 2u; ++k) {   // PHOTON-VOXEL-5: level 0's back, the normal (23, 24)
+            w[kTraceSideBinding + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[kTraceSideBinding + k].descriptorCount = kGatherMaxCascades;
+            w[kTraceSideBinding + k].pImageInfo = volumes[8 + k];
+        }
+        // THE HIT RECORD (19-22): the tier's list or its stand-ins — every view
+        // real, whatever `on` says (a null view in a set is undefined).
+        VkDescriptorBufferInfo hitBufs[2] = {};
+        hitBufs[0].buffer = in.hit.instances ? in.hit.instances : dummyStorage;
+        hitBufs[0].offset = in.hit.instances ? in.hit.instancesOffset : 0u;
+        hitBufs[0].range = in.hit.instances ? in.hit.instancesRange : VK_WHOLE_SIZE;
+        hitBufs[1].buffer = in.hit.buf ? in.hit.buf : dummyStorage;
+        hitBufs[1].offset = in.hit.buf ? in.hit.bufOffset : 0u;
+        hitBufs[1].range = in.hit.buf ? in.hit.bufRange : VK_WHOLE_SIZE;
+        VkDescriptorImageInfo hitImgs[2] = {};
+        const VkImageView hitViews[2] = { in.hit.ids, in.hit.dest };
+        for (int i = 0; i < 2; ++i) {
+            if (!hitViews[i]) return;
+            hitImgs[i].imageView = hitViews[i];
+            hitImgs[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            w[20 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[20 + i].pImageInfo = &hitImgs[i];
+        }
+        w[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[19].pBufferInfo = &hitBufs[0];
+        w[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[22].pBufferInfo = &hitBufs[1];
+        // THE CARD READ'S VIEW TERM (25-29, PHOTON-CARDS-5): the cache's five
+        // or the flat stand-in, the card read's rule.
+        VkDescriptorImageInfo cardViewImgs[SurfaceCache::kViewLayers] = {};
+        for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
+            cardViewImgs[i].sampler = mHost.gatherPointSampler();
+            cardViewImgs[i].imageView = cardsBound ? sampledView(in.cardView[i]) : dummyFlat;
+            cardViewImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (!cardViewImgs[i].imageView) return;
+            w[kTraceCardViewBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[kTraceCardViewBinding + i].pImageInfo = &cardViewImgs[i];
+        }
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
+    }
+
+    {   // the filter set
+        VkDescriptorImageInfo filterRaw{};
+        filterRaw.imageView = v.atlasView;
+        filterRaw.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet w[kFilterBindings] = {};
+        for (unsigned i = 0; i < kFilterBindings; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = v.filterSets[ring];
+            w[i].dstBinding = i;
+            w[i].descriptorCount = 1;
+        }
+        w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[0].pBufferInfo = &paramsInfo;
+        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[1].pBufferInfo = &recordsInfo;
+        w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[2].pImageInfo = &filterRaw;
+        vkUpdateDescriptorSets(mHost.gatherDevice(), kFilterBindings, w, 0, nullptr);
     }
 
     VkDescriptorImageInfo irradianceStore{};
@@ -888,6 +1493,20 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[3].pImageInfo = &depth;
         w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[4].pImageInfo = &irradianceStore;
+        VkDescriptorImageInfo hist[4] = {};
+        const VkImageView histViews[4] = { v.historyView[prev], v.historyView[cur],
+                                           v.historyGeomView[prev], v.historyGeomView[cur] };
+        for (unsigned k = 0; k < 4u; ++k) {
+            hist[k].imageView = histViews[k];
+            hist[k].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            w[5 + k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[5 + k].pImageInfo = &hist[k];
+        }
+        VkDescriptorImageInfo rest{};
+        rest.imageView = v.restMeanView;
+        rest.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[9].pImageInfo = &rest;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 
@@ -906,7 +1525,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < in.cascadeCount; ++c)
-            for (int axis = 0; axis < 4; ++axis)
+            for (int axis = 0; axis < 10; ++axis)
                 if (in.voxel[c][axis])
                     solver.resolveTransition(trans, in.voxel[c][axis],
                                              Ogre::ResourceLayout::Texture,
@@ -914,10 +1533,26 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         if (in.sky)
             solver.resolveTransition(trans, in.sky, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
+        // THE CARD READ'S INPUTS (GA-1e), the reflection's transitions: the
+        // Radiance layer the CardLight job wrote and the Depth layer the capture
+        // copied into, read as textures; the two tables and the geometry rows,
+        // read as buffers.
+        if (cardsBound) {
+            for (Ogre::TextureGpu *t : { in.cardDepth, in.cardRadiance })
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+            for (Ogre::TextureGpu *t : in.cardView)
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+            for (Ogre::UavBufferPacked *b : { in.cardTable, in.cardInstances })
+                solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
+        }
+        if (geomSlots)
+            solver.resolveTransition(trans, in.geomRows, Ogre::ResourceAccess::Read, computeStage);
         rs->executeResourceTransition(trans);
     }
 
-    // ---- THE THREE DISPATCHES ----------------------------------------------
+    // ---- THE FOUR DISPATCHES -----------------------------------------------
     VkCommandBuffer cmd = mHost.gatherFrameCmd();
     if (!cmd) return;
     // THE BLACK STAND-INS THIS FRAME BOUND, out of UNDEFINED. With the SSR row
@@ -1035,7 +1670,47 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     if (timed)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 3u);
     traceWork.close();
-    {
+    // ---- THE FRAME'S FIRST HALF ENDS HERE (PHOTON-HIT-SHADE-1): the trace has
+    // appended the hits no cache can shade to the hit list; the hit decode pass
+    // shades them and the write-back puts their radiance into the atlas before
+    // `finish` filters it.
+    v.finishPending = true;
+    v.finishHold = false;
+    v.finishTraced = true;
+    v.finishIn = in;
+    v.finishRing = ring;
+    v.finishQbase = qbase;
+    v.finishTimed = timed;
+    v.finishTemporal = temporal;
+    v.finishCpuMs = msSince(cpuStart);
+}
+
+VkImageView ScreenProbeGather::tracedAtlas(const void *key) const {
+    auto it = mViews.find(key);
+    if (it == mViews.end() || !it->second.finishPending || !it->second.finishTraced) return VK_NULL_HANDLE;
+    return it->second.atlasView;
+}
+
+void ScreenProbeGather::finish(const void *key) {
+    auto vit = mViews.find(key);
+    if (vit == mViews.end() || !vit->second.finishPending) return;
+    View &v = vit->second;
+    v.finishPending = false;
+    const auto cpuStart = Clock::now();
+    const GatherInputs &in = v.finishIn;
+    const bool temporal = v.finishTemporal;
+    if (v.finishHold) {
+        hold(v, in, temporal);
+        v.cpuMs = float(v.finishCpuMs + msSince(cpuStart));
+        return;
+    }
+    const unsigned ring = v.finishRing;
+    const uint32_t qbase = v.finishQbase;
+    const bool timed = v.finishTimed;
+    Ogre::RenderSystem *rs = mHost.gatherRenderSystem();
+    VkCommandBuffer cmd = mHost.gatherFrameCmd();
+    if (!cmd) return;
+    const auto computeToCompute = [&]() {
         VkMemoryBarrier b{};
         b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -1043,25 +1718,88 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0, nullptr, 0,
                              nullptr);
-    }
+    };
+    computeToCompute();
+
+    // THE FILTER IN PROBE SPACE AND THE SH (PHOTON-GATHER-1b): one workgroup
+    // per probe again, from the SAME indirect arguments — every probe the trace
+    // traced is filtered, and none it did not.
+    detail::monitor::CacheScope filterWork(CacheKind::Gi, WorkReason::Camera, 0,
+                                           "gather.filter", rs);
+    filterWork.setUnits(v.uniformProbes + v.adaptiveLast);
+    if (timed)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 4u);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeLayout, 0, 1,
+                            &v.filterSets[ring], 0, nullptr);
+    vkCmdDispatchIndirect(cmd, v.args, 0);
+    if (timed)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 5u);
+    filterWork.close();
+    computeToCompute();
 
     detail::monitor::CacheScope integrateWork(CacheKind::Gi, WorkReason::Camera, 0,
                                               "gather.integrate", rs);
     integrateWork.setUnits(in.width * in.height / 1000u);
     if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 4u);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 6u);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeLayout, 0, 1,
                             &v.integrateSets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (in.width + 7u) / 8u, (in.height + 7u) / 8u, 1u);
     if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 5u);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 7u);
+    // THE IRRADIANCE READBACK (a test door): the integrate's output, still in
+    // the GENERAL layout its storage writes left it in, copied into this frame's
+    // slot of a host ring and decoded once the frame has retired (readPending).
+    bool readbackThisFrame = false;
+    if (in.tuning.readback) {
+        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * 8u;
+        if (!v.irrReadback) {
+            std::string rerr;
+            if (!mHost.gatherMakeBuffer(slotBytes * kFramesInFlight,
+                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, v.irrReadback,
+                                        v.irrReadbackMemory, &v.irrReadbackMapped, rerr))
+                v.irrReadback = VK_NULL_HANDLE;
+        }
+        if (v.irrReadback) {
+            VkMemoryBarrier toCopy{};
+            toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0, nullptr, 0,
+                                 nullptr);
+            VkBufferImageCopy region{};
+            region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = { v.w, v.h, 1u };
+            vkCmdCopyImageToBuffer(
+                cmd, static_cast<Ogre::VulkanTextureGpu *>(v.irradiance)->getFinalTextureName(),
+                VK_IMAGE_LAYOUT_GENERAL, v.irrReadback, 1, &region);
+            // The host reads it after the frame retires; and the copy is ordered
+            // before whatever the layout transition below does to the image (an
+            // execution chain through the compute stage Ogre's barrier starts at).
+            VkMemoryBarrier toHost{};
+            toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &toHost, 0, nullptr, 0, nullptr);
+            readbackThisFrame = true;
+        }
+    }
     {
         // The pending record is written whether or not the device timestamps:
         // it is also what retires this frame's adaptive-count readback.
         View::Pending &pd = v.pending[v.frame % kFramesInFlight];
         pd.frame = mHost.gatherFrameNow();
         pd.live = true;
+        pd.irradiance = readbackThisFrame;
+        pd.held = false;
+        pd.gatherFrame = v.frame;
     }
     integrateWork.close();
 
@@ -1081,7 +1819,20 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // and left unbound is an undefined descriptor. The registration is
     // PASS-SCOPED and `releaseBinding` takes it away when the pass ends.
     detail::FogHlmsListener::setProbeGather(in.sceneMgr, v.irradiance);
-    v.cpuMs = float(msSince(cpuStart));
+    // ...AND THIS FRAME BECOMES THE PREVIOUS ONE: its camera, its half of each
+    // pair, one more frame of age.
+    std::memcpy(v.prevCamPos, in.camPos, sizeof(v.prevCamPos));
+    for (int i = 0; i < 3; ++i) {
+        v.prevRayTL[i] = in.rayTL[i];
+        v.prevRayRight[i] = in.rayRight[i];
+        v.prevRayDown[i] = in.rayDown[i];
+        v.prevFwd[i] = in.fwd[i];
+    }
+    v.flip ^= 1u;
+    ++v.age;
+    v.recordedFrame = mHost.gatherFrameNow();
+    v.lastTemporal = temporal;
+    v.cpuMs = float(v.finishCpuMs + msSince(cpuStart));
     ++v.frame;
 }
 

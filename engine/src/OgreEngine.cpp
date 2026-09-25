@@ -4,6 +4,8 @@
 // engine/src/ is the only directory that includes Ogre; the shared declarations
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
+#include "AtomPass.h"
+#include "HlmsAtom.h"
 
 #include <set>
 #include <unistd.h>
@@ -473,12 +475,7 @@ void OgreEngine::destroyScene(Scene *scene) {
         // Cheap on a healthy process: a scene destroy is not a hot path.
         advanceResources();
         (*it)->destroy();
-        const bool releasedPcc = (*it)->mReleasedPccOnDestroy;
         mScenes.erase(it);
-        // A scene taking the process-wide probe binding down with it lets every
-        // REMAINING scene bind its own sky cube again (reflectionTexForDatablocks'
-        // note). After the erase: the walk must not see the corpse.
-        if (releasedPcc) reapplyReflectionsAllScenes();
         advanceResources();   // see the note above the first call
         return;
     }
@@ -691,22 +688,6 @@ void OgreEngine::destroyView(View *view) {
         return;
     }
     mLastError = "destroyView: unknown View";
-}
-
-void OgreEngine::reapplyReflectionsAllScenes() {
-    // EVERY scene, including the ones nothing is drawing right now: a preview or
-    // a thumbnail scene that is re-shown later must already hold the right
-    // answer, and the walk is a handful of datablock binds per scene on a
-    // transition that happens when a grid is built or torn down.
-    for (auto &s : mScenes) {
-        if (!s) continue;
-        s->applyReflectionToAll();
-        // ...and the roughness-to-LOD map with it: the grid that just came or
-        // went pushed ITS mip count into the one number the whole pass shares,
-        // and only a transition can leave that number describing a texture
-        // nobody is sampling any more (OgreScene::renotifyReflectionMipmaps).
-        s->renotifyReflectionMipmaps();
-    }
 }
 
 void OgreEngine::scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const {
@@ -1023,6 +1004,9 @@ void OgreEngine::renderOneFrame() {
             // rebuilt behind the trace's back, and the camera is recreated on
             // setScene.
             v->syncReflectListener();
+            // ...and the visibility buffer's (ATOM S3-DRAW): ChainDesc::atomDraw
+            // reads the scene's split, which the view learns only once it has one.
+            v->syncAtomDraw();
             // The inset's rectangles are derived from the TARGET's aspect
             // (a normalised rect is not a pixel rect), so a resize that never
             // touched ViewPipDesc still moves the letterbox. Re-derived here,
@@ -1080,13 +1064,20 @@ void OgreEngine::renderOneFrame() {
                 // capture because a read issued inside a frame must not be
                 // polled in that same frame.
                 s->pollSkyShRead();
+                // THE CLOUD LAYER'S FRAME (CLOUDS-2D-1): its clock, its scroll
+                // and its capture cadence — before the capture below it may ask for.
+                s->tickCloudClock();
                 s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
-                // SURFACE-CACHE phase 2, after the pendings and before any
-                // workspace runs: the cache reads the material generation and
-                // the light write serial that applyPendingGi may just have
-                // moved, and it drives its own capture workspace by hand, which
-                // has to happen while the frame's command buffer is open and
-                // the monitor's listeners are attached.
+                // THIS SCENE'S IBL CHAIN LENGTH (SceneGiBinding::iblMipmaps), after
+                // the pendings that can change what its env slots hold.
+                s->resolveIblMipmaps();
+                // SURFACE-CACHE, after the pendings: the cache reads the
+                // material generation and the light write serial that
+                // applyPendingGi may just have moved, and PLANS this frame's
+                // capture batch. The capture itself runs inside Root's frame
+                // (its workspace is enabled and first in the manager's list),
+                // after the frame's scene-graph update and light list — the
+                // light list a capture planned here used to run without.
                 s->updateSurfaceCache();
             }
         // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
@@ -2190,6 +2181,18 @@ bool OgreEngine::renderStats(RenderStats &out) const {
                 out.triangles = (unsigned long long)m.mFaceCount;
                 out.vertices  = (unsigned long long)m.mVertexCount;
                 out.instances = (unsigned long long)m.mInstanceCount;
+                // (THE ID PASS'S SHARE is in these: its recorder adds its indirect
+                // draw's counters to the render system's own, OgreAtomIdPass.cpp — as
+                // its stats ring reads them: the counters of the cull recorded one
+                // frame before the slot's copy, read `multiplier + 1` frames after it.)
+                for (const auto &v : mViews) {
+                    unsigned long long tris = 0ull;
+                    unsigned surv = 0u;
+                    if (v && v->isEnabled() && v->atomStats(tris, surv)) {
+                        out.gpuCountLagFrames = unsigned(rs->getVaoManager()->getDynamicBufferMultiplier()) + 2u;
+                        break;
+                    }
+                }
             }
             // THE PSO DEADLINE'S HONEST HALF (THREADING_ADOPTION_SPEC.md P4(b),
             // decision D-E(1)). Ogre can budget PSO compilation per frame and
@@ -2515,6 +2518,9 @@ OgreEngine::~OgreEngine() {
     // no scene owns them: free them here, while Root (and its texture manager)
     // is still alive.
     lightextras::shutdown();
+    // THE ID PASS'S PIPELINE AND ITS IDENTITY INDEX BUFFER (ATOM S3-DRAW): device
+    // objects, after every view (whose workspaces recorded it) and before Root.
+    try { releaseAtomIdPass(); } catch (...) {}
     // AFTER every scene (each of which removed its own render-queue listener in
     // OgreScene::destroy) and BEFORE Root: ~OverlaySystem deletes the
     // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock
@@ -2639,16 +2645,31 @@ void OgreEngine::ensureHlms() {
         // be LAST — the fog piece redefines a piece of Hlms/Pbs/Any/Atmosphere,
         // and a redefinition only works after the original has been collected.
         libs.push_back(am.load(mMediaDir + "Hlms/Jahshaka", "FileSystem", true));
+        // ScenePbs: upstream's HlmsPbs plus the per-pass GI binding (every scene
+        // pass binds ITS scene's voxel lighting, field and probe grid —
+        // SceneGiBinding, EnginePrivate.h).
         mRoot->getHlmsManager()->registerHlms(
-            OGRE_NEW Ogre::HlmsPbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
+            OGRE_NEW ScenePbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
-    // The pass-buffer listener asks HlmsPbs, on the render thread, for the state
-    // of the pass it is building: which PCC owns the env-probe slot (the sky
-    // cube's register, SKY-FALLBACK-1). Asking the Hlms itself rather than
-    // mirroring the state in a flag of ours is what makes the two impossible to
-    // disagree.
-    FogHlmsListener::setPbs(
-        static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)));
+    // HLMS ATOM (ATOM-S3-PARITY; SPECS/atom/D1 section 1) — the visibility buffer's
+    // material decode, a derived HlmsPbs on the Terra pattern, registered BESIDE
+    // PBS and in the same breath: window -> registerHlms -> scene manager is the
+    // startup-order trap, and this is the registerHlms step. Nothing in the
+    // product's opaque ATOM geometry is drawn by the id pass and shaded by it (the
+    // screen decode, ATOM S3-DRAW), and the ray hits no cache shades are too; it is
+    // TOLD everything PBS is told by tellEveryHlms below and once per frame before
+    // its first read. Its pass provider — the engine's ONE CompositorPassProvider,
+    // multiplexed on customId — is installed here too, before any workspace
+    // definition could name a custom pass, with the id pass's recorder on it.
+    HlmsAtom::getDefaultPaths(mainPath, libPaths);
+    {
+        Ogre::ArchiveVec libs;
+        for (const auto &p : libPaths) libs.push_back(am.load(mMediaDir + p, "FileSystem", true));
+        mRoot->getHlmsManager()->registerHlms(
+            OGRE_NEW HlmsAtom(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
+    }
+    AtomPassProvider::install(mRoot->getCompositorManager2());
+    registerAtomIdPass();
     // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;
     // Scene::setAmbient converts the flat/hemisphere pair exactly). The mode is a
     // property of the HlmsPbs INSTANCE, not of a scene, so it cannot be chosen
@@ -2711,9 +2732,14 @@ void OgreEngine::ensureHlms() {
     // billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
-    // generated shader (and its properties) there. Diagnostic only.
-    if (const char *dbg = std::getenv("JAHSHAKA_HLMS_DEBUG_DIR"))
+    // generated shader (and its properties) there, for EVERY PBS-family host (a
+    // debug output path is not relayed by tellEveryHlms). Diagnostic only.
+    if (const char *dbg = std::getenv("JAHSHAKA_HLMS_DEBUG_DIR")) {
         mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setDebugOutputPath(true, true, dbg);
+        mRoot->getHlmsManager()->getHlms(HlmsAtom::kType)->setDebugOutputPath(true, true, dbg);
+    }
+    // ...and every other PBS-family host now knows what PBS was just told.
+    tellEveryHlms(mRoot->getHlmsManager(), true);
     // THE CACHE LOAD GOES HERE and nowhere else (SHADER_CACHE_SPEC §4.3 rule 5):
     // after BOTH registerHlms calls — HlmsDiskCache::applyTo needs the Hlms
     // instances to exist — and before registerCommonMaterials(), which parses
@@ -2817,6 +2843,84 @@ void OgreEngine::ensureHlms() {
     // here, rather than on the first frame of a world open.
     hud::build(mRoot);
     createShadowNode();
+}
+
+// ---------------------------------------------------------------------------
+// tellEveryHlms — THE ONE FUNCTION every PBS-family host is told through
+// (ATOM-S3-PARITY; SPECS/atom/D1 section 1; HlmsAtom.h).
+//
+// WHAT PBS IS TOLD TODAY, by every site that asks the HlmsManager for HLMS_PBS
+// (grepped at the lane's base; the list is the relay below, one row per setter):
+//   registerHlms (here)   the listener (fog, the environment's slot, the gather),
+//                         the ambient mode (SH), the non-caster directional budget,
+//                         static-branching lights (and the per-pixel shadow receive
+//                         it forces)
+//   OgreGi.cpp,           NOTHING relayed: the VctLighting, the field, the PCC,
+//   OgrePlanar.cpp,       the planar mirrors and the IBL chain length are bound
+//   OgreSky.cpp           per PASS on every host (bindSceneGi, SceneGiBinding) —
+//                         the scene being drawn, not a relay
+//   OgreLights.cpp        setAreaLightForwardSettings, setAreaLightMasks,
+//                         setLightProfilesTexture, loadLtcMatrix
+//   OgreShadow.cpp        setShadowSettings (the PCF kernel)
+//
+// WHY A RELAY AND NOT A ROUTE. Those sites live in files other lanes own, so they
+// keep telling PBS, and PBS is the source of truth: this copies what PBS HOLDS onto
+// every other host. A NEW engine site that tells PBS reaches every host for free; a
+// new HlmsPbs SETTER without a getter is the one thing it cannot see (the fork adds
+// the getter with the setter — ATOM-S3-PARITY added the four that were missing).
+//
+// WHEN: at registration (forced), and ONCE PER FRAME (keyed on Root's frame number)
+// the first time a host reads it — HlmsAtom's analyzeBarriers/preparePassHash, which
+// run before any of its draws. Every engine setter runs on the update thread before
+// or after renderOneFrame, never between two passes of one frame, so a pointer PBS
+// was told to DROP (a VctLighting about to be deleted) is off every host before the
+// next frame's first read. Unchanged state costs one compare per field.
+namespace {
+unsigned long sRelayFrame = ~0ul;
+}  // namespace
+
+void tellEveryHlms(Ogre::HlmsManager *manager, bool force) {
+    if (!manager) return;
+    const unsigned long frame = Ogre::Root::getSingleton().getNextFrameNumber();
+    if (!force && frame == sRelayFrame) return;
+    sRelayFrame = frame;
+    auto *pbs = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HLMS_PBS));
+    if (!pbs) return;
+    for (int t = Ogre::HLMS_LOW_LEVEL + 1; t < Ogre::HLMS_MAX; ++t) {
+        if (t == Ogre::HLMS_PBS) continue;
+        auto *host = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HlmsTypes(t)));
+        if (!host) continue;   // Unlit and anything else that is not PBS-family
+        if (host->getListener() != pbs->getListener()) host->setListener(pbs->getListener());
+        if (host->getAmbientLightMode() != pbs->getAmbientLightMode())
+            host->setAmbientLightMode(pbs->getAmbientLightMode());
+        if (host->getMaxNonCasterDirectionalLights() != pbs->getMaxNonCasterDirectionalLights())
+            host->setMaxNonCasterDirectionalLights(pbs->getMaxNonCasterDirectionalLights());
+        if (host->getStaticBranchingLights() != pbs->getStaticBranchingLights())
+            host->setStaticBranchingLights(pbs->getStaticBranchingLights());
+        if (host->getShadowReceiversInPixelShader() != pbs->getShadowReceiversInPixelShader())
+            host->setShadowReceiversInPixelShader(pbs->getShadowReceiversInPixelShader());
+        if (host->getAreaLightsApproxLimit() != pbs->getAreaLightsApproxLimit() ||
+            host->getAreaLightsLtcLimit() != pbs->getAreaLightsLtcLimit())
+            host->setAreaLightForwardSettings(pbs->getAreaLightsApproxLimit(),
+                                              pbs->getAreaLightsLtcLimit());
+        if (host->getShadowFilter() != pbs->getShadowFilter())
+            host->setShadowSettings(pbs->getShadowFilter());
+        if (host->getEsmK() != pbs->getEsmK()) host->setEsmK(pbs->getEsmK());
+        if (host->getVctFullConeCount() != pbs->getVctFullConeCount())
+            host->setVctFullConeCount(pbs->getVctFullConeCount());
+        if (host->getIrradianceVolume() != pbs->getIrradianceVolume())
+            host->setIrradianceVolume(pbs->getIrradianceVolume());
+        if (host->getAreaLightMasks() != pbs->getAreaLightMasks())
+            host->setAreaLightMasks(pbs->getAreaLightMasks());
+        if (host->getLightProfilesTexture() != pbs->getLightProfilesTexture())
+            host->setLightProfilesTexture(pbs->getLightProfilesTexture());
+        // NOT the VctLighting, the field, the PCC, the planar mirrors or the IBL
+        // chain length: those are the SCENE's, and every host binds the pass's
+        // own scene's per pass (bindSceneGi).
+        // THE LTC MATRIX: loaded once and never unloaded (OgreLights.cpp); the host
+        // retrieves the same pooled textures.
+        if (pbs->getLtcMatrixTexture() && !host->getLtcMatrixTexture()) host->loadLtcMatrix();
+    }
 }
 
 void OgreEngine::registerCommonMaterials() {
@@ -2926,6 +3030,12 @@ void OgreEngine::createShadowNode() {
                         std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps),
                         mShadowPerMapClears, probeRes / 2u);
     }
+    // The CARD-CAPTURE node (OgreView::kCardShadowNodeName has the numbers):
+    // the sun's PSSM at the probe resolution, no focused maps, one whole-atlas
+    // clear — instantiated once per scene whose surface cache is on.
+    if (!cm->hasShadowNodeDefinition(OgreView::kCardShadowNodeName))
+        buildShadowNode(OgreView::kCardShadowNodeName, probeShadowResolution(mShadowResolution), 0u,
+                        false, 0u);
 }
 
 }  // namespace detail

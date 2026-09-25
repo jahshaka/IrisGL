@@ -3,11 +3,11 @@
 // WHAT THIS IS. A ray-traceable copy of the scene, kept current every frame:
 // one bottom-level acceleration structure (BLAS) per unique mesh, built from
 // Ogre's OWN vertex and index buffers, and one top-level structure (TLAS) over
-// the instances the scene draws. Nothing consumes it yet — R2 (probe
-// visibility), R3 (hard sun contact shadows) and R5 (ray-traced reflections)
-// are the consumers, and every one of them reads this same structure. What R1
-// ships is the structure, the switch that turns it off, and the proof that a
-// ray hits where the mathematics says it hits.
+// the instances the scene draws. Its consumers — the screen-probe gather, R3
+// (hard sun contact shadows, `recordSunContact`) and R5 (ray-traced
+// reflections) — every one of them reads this same structure. What R1 ships is
+// the structure, the switch that turns it off, and the proof that a ray hits
+// where the mathematics says it hits.
 //
 // WHY IT LOOKS LIKE THIS.
 //
@@ -54,10 +54,13 @@
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
+#include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
+#include <Compositor/OgreCompositorShadowNode.h>
 #include <Vao/OgreVertexArrayObject.h>
 #include <Vao/OgreVertexBufferPacked.h>
 #include <Vao/OgreIndexBufferPacked.h>
 #include <Vao/OgreVaoManager.h>
+#include <Vao/OgreUavBufferPacked.h>
 
 #if JAH_RAY_QUERY
 
@@ -71,11 +74,27 @@
 #include "rayquery/rq_rays_spv.h"
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
+#include "rayquery/rq_card_parity_spv.h"
+#include "rayquery/rq_sun_contact_spv.h"
+#include "rayquery/rq_hit_composite_spv.h"
+#include "rayquery/rq_card_movers_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
 // jobs, its atlases and its pipelines live in OgreScreenProbeGather.cpp; this
 // file is its HOST (the device, the retire window, the frame's command buffer,
 // the TLAS) and the one that is friends with the scene it reads.
+#include "HlmsAtom.h"
 #include "ScreenProbeGather.h"
+#include "SkinCache.h"
+#include "SurfaceCache.h"
+
+#include <Animation/OgreSkeletonInstance.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreHlmsManager.h>
+#include <OgreItem.h>
+#include <OgreResourceTransition.h>
+#include <OgreRoot.h>
+#include <OgreSubItem.h>
 
 #include <algorithm>
 #include <chrono>
@@ -99,8 +118,10 @@ inline double msSince(const Clock::time_point &t0) {
 /// Three is Ogre's own dynamic-buffer multiplier, i.e. the depth of the
 /// pipeline this work rides.
 constexpr unsigned kFramesInFlight = 3u;
-/// Two timestamps per pass (BLAS batch, TLAS), per frame slot.
-constexpr unsigned kQueriesPerFrame = 4u;
+/// Two timestamps per pass (BLAS batch, TLAS), per frame slot, then THE SKIN
+/// CACHE's three (PHOTON-SKIN-1): before the skin dispatch, between it and the
+/// skinned structures' builds/refits, and after them.
+constexpr unsigned kQueriesPerFrame = 8u;
 /// HOW MANY SCENES MAY HOLD TIMESTAMP SLOTS AT ONCE. The product case is more
 /// than one drawn scene per frame — the editor plus a material-preview or
 /// thumbnail scene — and each needs its OWN query range, or the second scene of
@@ -211,8 +232,46 @@ constexpr unsigned kMaxReflectCascades = 4u;
 /// command buffer that has not retired may not be rewritten, and this set is
 /// rewritten every frame (every input can be recreated behind our back).
 constexpr unsigned kReflectRing = 3u;
-/// Bindings in rq_reflect.comp's set 0.
-constexpr unsigned kReflectBindings = 15u;
+/// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
+/// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
+/// card table, the instance table, the Depth and Radiance layers).
+constexpr unsigned kReflectBindings = 36u;
+constexpr unsigned kReflectCardBinding = 15u;
+/// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
+/// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
+/// rows (20) — rq_reflect.comp through jah_rq_geom.glsl.
+constexpr unsigned kReflectGeomBinding = 19u;
+/// ...then (PHOTON-VOXEL-4, RQ-COV-SLOT-1) every cascade's PER-HALF-AXIS COVERAGE (21 the
+/// faces looking +a, 22 looking -a) and SURFACE POSITION (23, 24), by name: the hit's read
+/// takes the opacity along its ray from the coverage. It used to ride the `voxelX` array by
+/// the light-volume list's ORDER - right only while the list kept that order. The position
+/// is the origin plane's, which the hit's point reads never take; the reader binds it
+/// wherever it runs.
+constexpr unsigned kReflectCovBinding = 21u;   // then 22, 23, 24: covN, posP, posN
+constexpr unsigned kReflectSplitKinds = 4u;
+/// ...then THE HIT RECORD (PHOTON-HIT-SHADE-1): the GPU scene's instance table
+/// (25), the hit list's two images (26-27) and its buffer (28: the counters and
+/// each record's sun, footprint and weight) — jah_rq_hit_record.glsl.
+constexpr unsigned kReflectHitBinding = 25u;
+/// ...and (PHOTON-VOXEL-5) level 0's BACK side (29) and the voxelizer's NORMAL (30): the hit's
+/// level-0 read takes the side of a two-sided voxel its ray meets (the isotropic volume stands
+/// in for both on a Low chain - the back of a one-light store is its light).
+constexpr unsigned kReflectSideBinding = 29u;
+constexpr unsigned kReflectSideKinds = 2u;
+/// The volumes per cascade the ray programs bind: iso, X, Y, Z, coverage +/-, position +/-,
+/// back, normal (PHOTON-VOXEL-5).
+constexpr int kRayVoxelKinds = 10;
+/// ...then THE CARD READ'S VIEW TERM (PHOTON-CARDS-5): the surface cache's
+/// Indirect, Emissive, ShadowRough, Albedo and Normal layers (31-35,
+/// jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 31) — the read
+/// restores the diffuse lobe's view term for the ray (jah_card_view.glsl).
+constexpr unsigned kReflectCardViewBinding = 31u;
+static_assert(kReflectBindings == kReflectCardViewBinding + SurfaceCache::kViewLayers,
+              "the card read's view-term layers are the reflection set's last bindings");
+/// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
+/// buffer, the destinations, the decoded radiance, the reflection's mean and
+/// distance, the gather's atlas.
+constexpr unsigned kHitCompositeBindings = 7u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -291,6 +350,12 @@ public:
     /// comes back as {t (<0 = miss), customIndex, primitiveIndex, hit?1:0}.
     bool traceBlocking(OgreScene *scene, const std::vector<float> &rays,
                        std::vector<float> &hits, std::string &err);
+    /// gi.card_read_parity's GPU half (PHOTON-CARDS-2): the reflection's card
+    /// read (jah_rq_card.glsl) asked at `queries` through a test-only job
+    /// (rq_card_parity.comp) over the scene's own surface cache. Flushes
+    /// Ogre's commands, submits, stalls — a suite, never a frame.
+    bool cardPickBlocking(OgreScene *scene, const std::vector<CardReadQuery> &queries,
+                          std::vector<CardReadPick> &out, std::string &err);
 
     RayQueryStatus status(const OgreScene *scene) const;
 
@@ -337,7 +402,69 @@ private:
         /// The coarsest level's bound per GpuScene mesh index (with the mesh it
         /// was read for), so the writer asks the mesh records once per mesh.
         std::vector<std::pair<const Ogre::Mesh *, float>> coarseBound;
+        /// THE GEOMETRY ROW OF EACH SLOT'S NEAR COPY (PHOTON-CARDS-2 fix round):
+        /// GpuScene::geomRowIndex(mesh, the level its near BLAS was built from,
+        /// submesh 0), 0xFFFFFFFF for a slot not traced — what the reflection
+        /// rebuilds a hit's geometric normal from. Written with the instances.
+        std::vector<uint32_t> geomRowOfSlot;
         unsigned  slot = 0;
+        /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
+        /// last synced for, the GPU scene's write count and HlmsAtom's twin epoch
+        /// at that sync (updateScene).
+        std::vector<uint32_t> decodeWords;
+        unsigned long long decodeWrites = ~0ull;
+        unsigned long long decodeEpoch = ~0ull;
+        /// One item wearing each synced word, and its datablock, Hlms hash and
+        /// texture set (HlmsAtom::textureSetKeyOf) when last seen (the twin's
+        /// staleness witness).
+        struct DecodeWitness {
+            uint32_t slot = 0u;
+            const Ogre::HlmsDatablock *db = nullptr;
+            Ogre::uint32 hash = 0u;
+            uint64_t texKey = 0u;
+        };
+        std::vector<DecodeWitness> decodeWitness;
+
+        /// THE GPU SKIN CACHE (PHOTON-SKIN-1, SkinCache.h): one entry per RIGGED
+        /// traced item, by NodeId — its posed vertex buffer, its row block in the
+        /// GPU scene, and ITS OWN bottom-level structure (a skinned item's BLAS
+        /// is per ITEM, never shared: two characters on one mesh wear two poses).
+        struct Skin {
+            /// THE CACHE'S IDENTITY is (Item, Mesh, the node's rig generation):
+            /// attachSkinnedMesh re-attaches IN PLACE (detachItem, then createItem),
+            /// so a new Item can land at the old one's address — the pointer alone
+            /// would keep a cache sized and addressed for a mesh that may be gone.
+            Ogre::Item *item = nullptr;
+            const Ogre::Mesh *mesh = nullptr;
+            unsigned long long rigGeneration = 0ull;
+            /// What the cache and its structure were built over, re-checked against
+            /// the live VAO on every pass before anything is skinned or refit.
+            const Ogre::IndexBufferPacked *indices = nullptr;
+            SkinCacheBuffer buf;
+            uint32_t rowBlock = 0xFFFFFFFFu;  ///< the GpuScene row block (a mesh-table entry)
+            uint32_t row = 0xFFFFFFFFu;       ///< its level-0/submesh-0 row: the override
+            unsigned long long poseSerial = 0ull;
+            bool skinned = false;             ///< the job has written it at least once
+            bool seen = false;                ///< in this pass's traced set
+            /// The structure, built once from the cache with ALLOW_UPDATE and
+            /// REFIT in place on every pose change after that. Its own scratch,
+            /// sized for both, so a refit allocates nothing.
+            VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+            RawBuffer storage, scratch;
+            VkDeviceAddress address = 0;
+            bool built = false;
+            unsigned triangles = 0;
+        };
+        std::unordered_map<uint32_t, Skin> skins;
+        /// What the instance writer reads for a rigged slot: the skin BLAS and the
+        /// row, for the entries READY this pass (built and skinned).
+        std::unordered_map<uint32_t, std::pair<VkDeviceAddress, uint32_t>> skinUse;
+        /// The job's two inputs, grown by doubling (Ogre UAV buffers: the job is an
+        /// HlmsComputeJob) and the VaoManager that made them.
+        Ogre::VaoManager *skinVao = nullptr;
+        Ogre::UavBufferPacked *skinJobs = nullptr;
+        Ogre::UavBufferPacked *skinPalette = nullptr;
+        uint32_t skinJobCap = 0, skinPaletteCap = 0;
 
         /// The gate: nothing moved, no item changed and no instance's RAY LEVEL
         /// changed since the last update, so there is nothing to record. The
@@ -361,6 +488,7 @@ private:
         bool     hasQueryBase = false;
         struct PendingTimes {
             unsigned frame = 0; bool blas = false; bool tlas = false; bool live = false;
+            bool skin = false;   ///< queries 4..6: the skin dispatch and the skinned builds
         };
         PendingTimes pending[kFramesInFlight];
 
@@ -383,6 +511,21 @@ private:
     bool runCompaction(SceneAs &sa, VkCommandBuffer cmd);
     bool buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::string &err);
     void readTimestamps(SceneAs &sa);
+    /// THE SKIN CACHE's frame (PHOTON-SKIN-1): reconciles the rigged traced set
+    /// with `sa.skins`, re-skins every item whose POSE moved (one dispatch for all
+    /// of them) and builds or refits their structures — all recorded into `cmd`
+    /// before the gather that references them. Timestamps into `qBase` + 4..6
+    /// when `timed`. Returns false only when the frame must not trace skinned
+    /// items at all (the job is missing); the entries simply stay unready then.
+    bool skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed, unsigned qBase,
+                  std::string &err);
+    /// Frees one entry: its structure retired, its buffer destroyed (Ogre's
+    /// delayed destruction), its row block handed back and the node's override
+    /// cleared. `scene` may be null (the tier's close: the GpuScene dies with it).
+    void dropSkin(OgreScene *scene, SceneAs &sa, uint32_t node, SceneAs::Skin &sk);
+    void dropSkinBuffers(SceneAs &sa);
+    /// The pose serial a cache is keyed on (own + a shared skeleton's master).
+    static unsigned long long skinPoseSerial(const OgreScene *scene, const OgreScene::Node &n);
 
     /// Ogre's frame command buffer, with every encoder closed first: an
     /// acceleration-structure build may not be recorded inside a render pass,
@@ -489,7 +632,12 @@ private:
     /// cleared once, and left in SHADER_READ_ONLY_OPTIMAL for the process' life.
     bool ensureDummyImages(std::string &err);
     void clearDummyImages(VkCommandBuffer cmd);
-    ReflectImage mDummyCube, mDummyVolume;
+    /// ...and the card read's (PHOTON-CARDS-2): a scene without a surface cache
+    /// binds a 1x1 black 2D image for the two atlas layers and a 256-byte
+    /// storage buffer for the two tables, with ZERO instance slots in the
+    /// parameters, so the read declines every hit without touching them.
+    ReflectImage mDummyCube, mDummyVolume, mDummyFlat;
+    RawBuffer mDummyStorage;
     bool mDummiesReady = false;
     bool mDummiesNeedClear = false;
     bool makeStorageImage(unsigned w, unsigned h, VkFormat fmt, ReflectImage &out,
@@ -512,7 +660,11 @@ public:
     /// cases `jahSsrReflection` keeps exactly what the resolve wrote, which is
     /// exactly today's picture.
     void recordReflect(const ReflectPassListener *key, OgreView *view,
-                       Ogre::CompositorPass *pass);
+                       Ogre::CompositorPass *pass, const HitListBinding &hit);
+    /// THE REFLECTION'S SECOND HALF (PHOTON-HIT-SHADE-1): the spatial filter and
+    /// the composite, in front of the opaque pass — after the hit write-back has
+    /// completed the temporal mean of every texel whose ray the decode shaded.
+    void finishReflect(const ReflectPassListener *key);
     /// Frees a view's reflection resources. Called from ~ReflectPassListener.
     void forgetReflect(const ReflectPassListener *key);
     /// How many rays the last recorded trace dispatched, and the GPU
@@ -541,6 +693,9 @@ private:
         /// is rewritten EVERY frame and there is one per frame in flight.
         VkDescriptorSet sets[kReflectRing] = {};
         RawBuffer       params[kReflectRing];
+        /// THE PER-SLOT GEOMETRY ROW the scene's TLAS was written with, copied
+        /// per frame in flight (the scene's vector moves under a later frame).
+        RawBuffer       geomRowOfSlot[kReflectRing];
         /// The temporal mean and the distance beside it, ping-ponged: read from
         /// [frame & 1], written to [~frame & 1]. See rq_reflect.comp's note on
         /// why one buffer is a race.
@@ -582,9 +737,15 @@ private:
         struct Pending { unsigned frame = 0; bool live = false; };
         Pending  pending[kFramesInFlight];
         float    gpuMs = -1.0f;
+        /// THE FRAME BETWEEN ITS TWO HALVES (trace -> finishReflect): the ring slot
+        /// the trace bound, its grid, and which of the pair is this frame's mean.
+        bool     finishPending = false;
+        unsigned finishRing = 0, traceW = 0, traceH = 0, curIdx = 0;
     };
 
     bool makeReflectPipeline(std::string &err);
+    /// The point and linear samplers every job of the tier binds (made once).
+    bool ensureSamplers(std::string &err);
     bool ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, std::string &err);
     /// Records the UNDEFINED -> GENERAL transition and the zero clear for a pair
     /// that was just made. Separate from the creation because the descriptor set
@@ -608,6 +769,15 @@ private:
     VkPipeline            mFilterPipeline = VK_NULL_HANDLE;
     VkShaderModule        mFilterModule = VK_NULL_HANDLE;
     VkDescriptorPool      mReflectPool = VK_NULL_HANDLE;
+    /// gi.card_read_parity's harness (cardPickBlocking), made on first use.
+    VkDescriptorSetLayout mCardParitySetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mCardParityPipeLayout = VK_NULL_HANDLE;
+    VkShaderModule        mCardParityModule = VK_NULL_HANDLE;
+    VkPipeline            mCardParityPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool      mCardParityPool = VK_NULL_HANDLE;
+    /// Its own point sampler: the reflection's are made with the reflection
+    /// pipeline, which a scene without an SSR chain never builds.
+    VkSampler             mCardParitySampler = VK_NULL_HANDLE;
     VkSampler             mPointSampler = VK_NULL_HANDLE;
     VkSampler             mLinearSampler = VK_NULL_HANDLE;
     /// The pipeline could not be made on this device; say so ONCE and take the
@@ -630,7 +800,7 @@ public:
     /// Silently does nothing unless the view's scene has the row on and this
     /// machine traces.
     void recordGather(const ReflectPassListener *key, OgreView *view,
-                      Ogre::CompositorPass *pass);
+                      Ogre::CompositorPass *pass, const HitListBinding &hit);
     /// Frees a view's gather resources (from ~ReflectPassListener, and when
     /// the row goes off).
     void forgetGather(const ReflectPassListener *key);
@@ -683,11 +853,14 @@ public:
         retireSet(set, pool);
     }
     void gatherRetireTexture(Ogre::TextureGpu *texture) override { retireTexture(texture); }
-    bool gatherDummies(VkImageView &cube, VkImageView &volume, std::string &err) override {
-        if (!ensureDummyImages(err)) return false;
+    bool gatherDummies(VkImageView &cube, VkImageView &volume, VkImageView &flat, VkBuffer &storage,
+                       std::string &err) override {
+        if (!ensureDummyImages(err) || !ensureSamplers(err)) return false;
         cube = mDummyCube.view;
         volume = mDummyVolume.view;
-        return cube && volume;
+        flat = mDummyFlat.view;
+        storage = mDummyStorage.buffer;
+        return cube && volume && flat && storage;
     }
     /// ...AND THE STAND-INS MUST BE CLEARED BY WHOEVER BINDS THEM FIRST (the
     /// lead's read). `clearDummyImages` used to have ONE caller — the reflection
@@ -703,6 +876,208 @@ public:
 private:
     /// Made on the first frame a scene gathers, destroyed by close().
     ScreenProbeGather *mGather = nullptr;
+
+    // ---- HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1, RY-R3) ----------------
+    // One more compute dispatch on the same frame command buffer and the same
+    // hook as the reflection trace and the gather — after the prepass, before
+    // the PrePassUse pass that shades with its answer. One ray per texel from
+    // the prepass' surface towards the sun (rq_sun_contact.comp); the answer is
+    // an Ogre R8 texture the PBS pass reads through the Hlms listener's fourth
+    // extra slot (OgreFog.cpp kExtraPassSlots, JahSunContact_piece_ps.any).
+public:
+    /// Records this frame's contact rays for one view, and registers the
+    /// texture with the listener for exactly the pass it runs in front of.
+    /// Silently does nothing unless the view's scene resolves the row on.
+    void recordSunContact(const ReflectPassListener *key, OgreView *view,
+                          Ogre::CompositorPass *pass);
+    /// ...and its second half (PHOTON-HIT-SHADE-1): the texture's transition to
+    /// the pixel stage and the pass-scoped registration, in front of the opaque
+    /// pass that reads it (the rays themselves are traced in front of the hit
+    /// decode pass, with the other ray jobs).
+    void finishSunContact(const ReflectPassListener *key);
+    /// Takes the pass-scoped registration away as that pass ends.
+    void releaseSunContactBinding(const ReflectPassListener *key);
+    /// Frees a view's contact state (from ~ReflectPassListener, a workspace
+    /// rebuild, and the row going off).
+    void forgetSunContact(const ReflectPassListener *key);
+    /// The last frame's numbers for a scene (`Scene::sunContactStatus`).
+    void sunContactStatsInto(const OgreScene *scene, SunContactStatus &st) const;
+
+private:
+    struct SunContactView {
+        VkDescriptorSet sets[kReflectRing] = {};
+        RawBuffer       params[kReflectRing];
+        /// The visibility texture the pixel reads (an Ogre texture: it reaches
+        /// the PBS pass through the listener, so it must be one the Hlms can
+        /// bind), at the job's own resolution.
+        Ogre::TextureGpu *vis = nullptr;
+        unsigned w = 0, h = 0, fullW = 0, fullH = 0, divisor = 1;
+        unsigned frame = 0;
+        const Ogre::SceneManager *sceneMgr = nullptr;
+        /// What the last record did, for the status.
+        OgreScene *scene = nullptr;
+        bool      ran = false;
+        unsigned long long rays = 0;
+        float     range = 0.0f;
+        float     toSun[3] = { 0.0f, 0.0f, 0.0f };
+        float     cpuMs = -1.0f;
+        std::string reason;
+        unsigned querySlot = 0;
+        unsigned queryBase = 0;
+        bool     hasQueryBase = false;
+        struct Pending { unsigned frame = 0; bool live = false; };
+        Pending  pending[kFramesInFlight];
+        float    gpuMs = -1.0f;
+        /// The rays were traced this frame; finishSunContact registers them.
+        bool     finishPending = false;
+    };
+    bool makeSunContactPipeline(std::string &err);
+    void dropSunContact(SunContactView &sv);
+    void readSunContactTimestamps(SunContactView &sv);
+    std::unordered_map<const ReflectPassListener *, SunContactView> mSunContacts;
+    VkDescriptorSetLayout mSunSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mSunPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mSunPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mSunModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mSunPool = VK_NULL_HANDLE;
+    /// Its own point sampler: the reflection's are made with the reflection
+    /// pipeline, which a view with the SSR row off never builds.
+    VkSampler             mSunSampler = VK_NULL_HANDLE;
+    VkQueryPool           mSunTimestamps = VK_NULL_HANDLE;
+    uint32_t              mSunQuerySlots = 0;
+    /// The pipeline (or the R8 storage format) is not available on this device:
+    /// said ONCE, and the shadow map renders alone for the rest of the process.
+    bool                  mSunFailed = false;
+    std::string           mSunFailReason;
+
+public:
+    // ---- THE HIT DECODE (PHOTON-HIT-SHADE-1; SPECS/atom/D2_HIT_SHADING_DESIGN.md)
+    // A ray hit no cache can shade (a mover, a rigged item, a static hit neither
+    // its card nor a cascade answers, the gather's far copies) is appended to the
+    // chain's HIT LIST by the trace; the chain's "Jahshaka hit decode" pass draws
+    // HlmsAtom's decode over the list (one fragment per record); the write-back
+    // (rq_hit_composite.comp) scatters the radiance into the reflection's mean and
+    // the gather's atlas. The ray jobs' recording is split around the decode pass.
+    /// In front of the hit decode pass: the list reset, the TRACES (the sun
+    /// contact, the reflection, the gather) appending to it, HlmsAtom armed.
+    void beginHitDecode(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
+    /// After it: HlmsAtom disarmed, the decode draws hidden, the camera's aspect
+    /// handed back.
+    void endHitDecode(const ReflectPassListener *key);
+    /// In front of the opaque pass: the write-back, then every job's second half
+    /// (the filters, the SH and integrate, the registrations). A chain that ran no
+    /// decode pass this frame traces here first, with no list bound.
+    void finishRayJobs(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
+    void forgetHits(const ReflectPassListener *key);
+    /// The hit list's counters (read back several frames late) for a scene.
+    void hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const;
+
+private:
+    struct HitView {
+        /// The list's buffer: [0] records appended (may pass the capacity), [1]
+        /// records dropped, then two words per record (the sun, the footprint, the
+        /// weight — jah_rq_hit_record.glsl). An Ogre UAV buffer: HlmsAtom reads it
+        /// through a read-only view (a buffer, not an image: the decode's pixel
+        /// shader's pass textures already reach the pin's table's end —
+        /// kHitBufSlot, HlmsAtom.h).
+        Ogre::UavBufferPacked *buf = nullptr;
+        /// This frame's list, the chain's textures (the names OgreChain.cpp gives).
+        Ogre::TextureGpu *ids = nullptr, *dest = nullptr, *radiance = nullptr;
+        uint32_t capacity = 0u, width = 0u;
+        /// The list was bound for THIS frame's traces (a write-back is owed).
+        bool live = false;
+        /// Ogre's frame number of the last decode pass this key ran in front of.
+        uint32_t decodeFrame = 0xFFFFFFFFu;
+        VkDescriptorSet sets[kReflectRing] = {};
+        RawBuffer params[kReflectRing];
+        /// The buffer's two counter words, copied per frame into a host ring and read once
+        /// the frame retired (never a wait).
+        RawBuffer readback;
+        struct Pending { uint32_t frame = 0; bool live = false; };
+        Pending pending[kFramesInFlight];
+        unsigned frame = 0;
+        OgreScene *scene = nullptr;
+        unsigned long long appended = 0ull, dropped = 0ull;
+        /// Armed for the decode pass: the SceneManager whose draws are shown, and
+        /// the camera whose auto aspect is held off for the pass (the decode's
+        /// target is the list, not a picture — F7).
+        Ogre::SceneManager *armedSm = nullptr;
+        Ogre::Camera *pinnedCam = nullptr;
+        bool camAuto = false;
+    };
+    std::unordered_map<const ReflectPassListener *, HitView> mHits;
+    bool prepareHitList(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass,
+                        HitListBinding &out);
+    /// A decode twin of `scene` no longer matches its PBS datablock (a witness's
+    /// Hlms hash or datablock moved since the last sync) — read only.
+    bool decodeTwinsStale(OgreScene *scene) const;
+    /// The binding a trace takes when no list is bound: the stand-ins, `on` false.
+    void hitStandIns(HitListBinding &out);
+    void recordHitComposite(const ReflectPassListener *key);
+    bool makeCompositePipeline(std::string &err);
+    bool ensureHitDummies(std::string &err);
+    void initHitDummies(VkCommandBuffer cmd);
+    void readHitCounters(HitView &hv);
+    VkDescriptorSetLayout mCompSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mCompPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mCompPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mCompModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mCompPool = VK_NULL_HANDLE;
+    bool                  mCompFailed = false;
+    /// 1x1 storage stand-ins in GENERAL (a set's every view must be real): the
+    /// list's two formats, the RGBA16F of the reflection's mean and the gather's
+    /// atlas, and the reflection's distance format.
+    ReflectImage mHitDummyIds, mHitDummyColour, mHitDummyDest, mHitDummyDist;
+    bool mHitDummiesReady = false;
+    bool mHitDummiesNeedInit = false;
+    // ---- THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) ----------------
+    // One dispatch per scene per frame a mover moved, recorded from the
+    // surface cache's workspacePosUpdate — after the capture's copies (it reads
+    // the new Depth and Normal) and before the relight that multiplies its
+    // answer in (rq_card_movers.comp). The TLAS it traces was built this frame
+    // (updateScene, before any render target).
+public:
+    bool traceCardMovers(OgreScene *scene, const CardMoverTrace &job);
+    /// A timestamp pair around the scene's relight dispatch, and the read-back.
+    void timeCardRelight(OgreScene *scene, bool begin);
+    void cardMoverTimes(OgreScene *scene, float &traceMs, float &relightMs);
+    void forgetCardMovers(OgreScene *scene);
+
+private:
+    struct CardMoverView {
+        VkDescriptorSet sets[kReflectRing] = {};
+        RawBuffer       params[kReflectRing];
+        RawBuffer       records[kReflectRing];
+        unsigned frame = 0;
+        unsigned querySlot = 0, queryBase = 0;
+        bool     hasQueryBase = false;
+        struct Pending { uint32_t frame = 0; bool trace = false; bool relight = false; };
+        Pending  pending[kFramesInFlight];
+        float    traceMs = -1.0f, relightMs = -1.0f;
+    };
+    bool makeCardMoverPipeline(std::string &err);
+    bool cardMoverQueries(CardMoverView &cv);
+    void readCardMoverTimestamps(CardMoverView &cv);
+    std::unordered_map<const OgreScene *, CardMoverView> mCardMovers;
+    VkDescriptorSetLayout mCmSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mCmPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mCmPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mCmModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mCmPool = VK_NULL_HANDLE;
+    VkQueryPool           mCmTimestamps = VK_NULL_HANDLE;
+    uint32_t              mCmQuerySlots = 0;
+    bool                  mCmFailed = false;
+
+    /// ONE IMAGE'S BASIS from a pose and a frustum (rq_reflect.comp's five
+    /// numbers) — the arithmetic recordReflect's eyes are built with, shared so
+    /// the contact rays and the reflection rays cannot drift apart.
+    static EyeBasisF eyeBasis(bool ortho, const Ogre::Vector3 &pos, const Ogre::Quaternion &rot,
+                              float el, float er, float et, float eb);
+    /// THE LETTERBOX (SSR-LETTERBOX-1's ray half): a constrained-aspect camera
+    /// draws the target's INNER rectangle while a compute pass addresses the
+    /// whole target, so the basis is EXPANDED to the target on the CPU.
+    static void expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned fullW,
+                                  unsigned fullH);
 };
 
 // ---------------------------------------------------------------------------
@@ -901,10 +1276,11 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
     struct Spec { ReflectImage *img = nullptr; VkImageType type = VK_IMAGE_TYPE_2D;
                   VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D; uint32_t layers = 0;
                   VkImageCreateFlags flags = 0; };
-    const Spec specs[2] = {
+    const Spec specs[3] = {
         { &mDummyCube, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_CUBE, 6u,
           VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT },
         { &mDummyVolume, VK_IMAGE_TYPE_3D, VK_IMAGE_VIEW_TYPE_3D, 1u, 0u },
+        { &mDummyFlat, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, 1u, 0u },
     };
     for (const Spec &sp : specs) {
         VkImageCreateInfo ici{};
@@ -949,6 +1325,10 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
             return false;
         }
     }
+    if (!mDummyStorage.buffer &&
+        !makeBuffer(256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, mDummyStorage, err))
+        return false;
+    std::memset(mDummyStorage.mapped, 0, 256u);
     mDummiesReady = true;
     mDummiesNeedClear = true;
     return true;
@@ -957,9 +1337,9 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
 void RayQueryTier::clearDummyImages(VkCommandBuffer cmd) {
     if (!mDummiesNeedClear) return;
     mDummiesNeedClear = false;
-    ReflectImage *imgs[2] = { &mDummyCube, &mDummyVolume };
-    const uint32_t layers[2] = { 6u, 1u };
-    for (int i = 0; i < 2; ++i) {
+    ReflectImage *imgs[3] = { &mDummyCube, &mDummyVolume, &mDummyFlat };
+    const uint32_t layers[3] = { 6u, 1u, 1u };
+    for (int i = 0; i < 3; ++i) {
         VkImageSubresourceRange range{};
         range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         range.levelCount = 1;
@@ -1251,10 +1631,53 @@ void RayQueryTier::close() {
         dropBuffer(sa.tlasStorage);
         dropBuffer(sa.tlasScratch);
         dropBuffer(sa.instances);
+        // THE SKIN CACHES, destroyed outright (the device is idle): the scene the
+        // map is keyed by may already be gone, so the GpuScene side is not
+        // touched — its tables die with it.
+        for (auto &skv : sa.skins) {
+            SceneAs::Skin &sk = skv.second;
+            if (sk.as) mFn.destroyAccelerationStructure(mVk, sk.as, nullptr);
+            sk.as = VK_NULL_HANDLE;
+            dropBuffer(sk.storage);
+            dropBuffer(sk.scratch);
+            destroySkinCacheBuffer(sa.skinVao, sk.buf);
+        }
+        sa.skins.clear();
+        dropSkinBuffers(sa);
     }
     mScenes.clear();
     for (auto &kv : mReflects) dropReflect(kv.second);
     mReflects.clear();
+    // THE HIT LISTS (PHOTON-HIT-SHADE-1): the counters are Ogre UAV buffers (the
+    // VaoManager is alive: close() runs before Root goes), the sets die with the
+    // pool below, the buffers now (the device is idle).
+    for (auto &kv : mHits) {
+        HitView &hv = kv.second;
+        if (hv.buf && mRs && mRs->getVaoManager()) mRs->getVaoManager()->destroyUavBuffer(hv.buf);
+        hv.buf = nullptr;
+        for (unsigned i = 0; i < kReflectRing; ++i) dropBuffer(hv.params[i]);
+        dropBuffer(hv.readback);
+    }
+    mHits.clear();
+    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist }) {
+        if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
+        if (d->image) vkDestroyImage(mVk, d->image, nullptr);
+        if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
+        *d = ReflectImage();
+    }
+    mHitDummiesReady = false;
+    mHitDummiesNeedInit = false;
+    // THE SUN CONTACT's views (PHOTON-RAYS-1): each takes its registration
+    // away first (the listener holds a raw texture pointer) and retires its
+    // texture into the bin that is emptied below. The sets are DROPPED, not
+    // retired — the pool is destroyed below and frees them (the gather's
+    // close() rule, and its reason).
+    for (auto &kv : mSunContacts) {
+        for (unsigned i = 0; i < kReflectRing; ++i) kv.second.sets[i] = VK_NULL_HANDLE;
+        dropSunContact(kv.second);
+    }
+    mSunContacts.clear();
+    FogHlmsListener::clearSunContact();
     // THE GATHER'S SHADER REGISTRATION DIES WITH THE TEXTURES IT NAMES
     // (GATHER-0's D1, kept): `ScreenProbeGather::close` frees every atlas and
     // takes every registration away, because `FogHlmsListener`'s map is a plain
@@ -1273,12 +1696,13 @@ void RayQueryTier::close() {
     // (`mDummyArray` — SURFACE-CACHE-0's 1x1x6 stand-in for the card spike's
     // five bindings — went with the spike at SURFACE-CACHE-1b; nothing in the
     // gather or the reflect job binds a 2D ARRAY.)
-    for (ReflectImage *d : { &mDummyCube, &mDummyVolume }) {
+    for (ReflectImage *d : { &mDummyCube, &mDummyVolume, &mDummyFlat }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
         if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
         *d = ReflectImage();
     }
+    dropBuffer(mDummyStorage);
     mDummiesReady = false;
     mDummiesNeedClear = false;
     for (Retired &r : mRetireBin) {
@@ -1293,6 +1717,51 @@ void RayQueryTier::close() {
         if (r.img.memory) vkFreeMemory(mVk, r.img.memory, nullptr);
     }
     mRetireBin.clear();
+    // THE HIT WRITE-BACK'S POOL, after the bin's sets that name it are freed.
+    if (mCompPool) vkDestroyDescriptorPool(mVk, mCompPool, nullptr);
+    if (mCompPipeline) vkDestroyPipeline(mVk, mCompPipeline, nullptr);
+    if (mCompModule) vkDestroyShaderModule(mVk, mCompModule, nullptr);
+    if (mCompPipeLayout) vkDestroyPipelineLayout(mVk, mCompPipeLayout, nullptr);
+    if (mCompSetLayout) vkDestroyDescriptorSetLayout(mVk, mCompSetLayout, nullptr);
+    mCompPool = VK_NULL_HANDLE; mCompPipeline = VK_NULL_HANDLE; mCompModule = VK_NULL_HANDLE;
+    mCompPipeLayout = VK_NULL_HANDLE; mCompSetLayout = VK_NULL_HANDLE;
+    if (mSunPool) vkDestroyDescriptorPool(mVk, mSunPool, nullptr);
+    if (mSunPipeline) vkDestroyPipeline(mVk, mSunPipeline, nullptr);
+    if (mSunModule) vkDestroyShaderModule(mVk, mSunModule, nullptr);
+    if (mSunPipeLayout) vkDestroyPipelineLayout(mVk, mSunPipeLayout, nullptr);
+    if (mSunSetLayout) vkDestroyDescriptorSetLayout(mVk, mSunSetLayout, nullptr);
+    if (mSunSampler) vkDestroySampler(mVk, mSunSampler, nullptr);
+    if (mSunTimestamps) vkDestroyQueryPool(mVk, mSunTimestamps, nullptr);
+    mSunPool = VK_NULL_HANDLE; mSunPipeline = VK_NULL_HANDLE; mSunModule = VK_NULL_HANDLE;
+    mSunPipeLayout = VK_NULL_HANDLE; mSunSetLayout = VK_NULL_HANDLE;
+    mSunSampler = VK_NULL_HANDLE; mSunTimestamps = VK_NULL_HANDLE;
+    mSunQuerySlots = 0;
+    // THE CARD MOVERS' state: sets dropped with the pool (the sun contact's rule).
+    for (auto &kv : mCardMovers)
+        for (unsigned i = 0; i < kReflectRing; ++i) {
+            dropBuffer(kv.second.params[i]);
+            dropBuffer(kv.second.records[i]);
+        }
+    mCardMovers.clear();
+    if (mCmPool) vkDestroyDescriptorPool(mVk, mCmPool, nullptr);
+    if (mCmPipeline) vkDestroyPipeline(mVk, mCmPipeline, nullptr);
+    if (mCmModule) vkDestroyShaderModule(mVk, mCmModule, nullptr);
+    if (mCmPipeLayout) vkDestroyPipelineLayout(mVk, mCmPipeLayout, nullptr);
+    if (mCmSetLayout) vkDestroyDescriptorSetLayout(mVk, mCmSetLayout, nullptr);
+    if (mCmTimestamps) vkDestroyQueryPool(mVk, mCmTimestamps, nullptr);
+    mCmPool = VK_NULL_HANDLE; mCmPipeline = VK_NULL_HANDLE; mCmModule = VK_NULL_HANDLE;
+    mCmPipeLayout = VK_NULL_HANDLE; mCmSetLayout = VK_NULL_HANDLE; mCmTimestamps = VK_NULL_HANDLE;
+    mCmQuerySlots = 0;
+    if (mCardParityPool) vkDestroyDescriptorPool(mVk, mCardParityPool, nullptr);
+    if (mCardParitySampler) vkDestroySampler(mVk, mCardParitySampler, nullptr);
+    mCardParitySampler = VK_NULL_HANDLE;
+    if (mCardParityPipeline) vkDestroyPipeline(mVk, mCardParityPipeline, nullptr);
+    if (mCardParityModule) vkDestroyShaderModule(mVk, mCardParityModule, nullptr);
+    if (mCardParityPipeLayout) vkDestroyPipelineLayout(mVk, mCardParityPipeLayout, nullptr);
+    if (mCardParitySetLayout) vkDestroyDescriptorSetLayout(mVk, mCardParitySetLayout, nullptr);
+    mCardParityPool = VK_NULL_HANDLE; mCardParityPipeline = VK_NULL_HANDLE;
+    mCardParityModule = VK_NULL_HANDLE; mCardParityPipeLayout = VK_NULL_HANDLE;
+    mCardParitySetLayout = VK_NULL_HANDLE;
     if (mReflectPool) vkDestroyDescriptorPool(mVk, mReflectPool, nullptr);
     if (mReflectPipeline) vkDestroyPipeline(mVk, mReflectPipeline, nullptr);
     if (mFilterPipeline) vkDestroyPipeline(mVk, mFilterPipeline, nullptr);
@@ -1357,6 +1826,13 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     retire(sa.tlas, sa.tlasStorage);
     retire(sa.tlasScratch);
     retire(sa.instances);
+    // THE SKIN CACHES (PHOTON-SKIN-1): each hands back its structure, its buffer
+    // and its row block, and clears its node's override — the rows stop naming
+    // a posed copy nobody will update again.
+    for (auto &kv : sa.skins) dropSkin(scene, sa, kv.first, kv.second);
+    sa.skins.clear();
+    sa.skinUse.clear();
+    dropSkinBuffers(sa);
     // The compaction slots this scene still owed a read are never going to be
     // read; hand them back or the ring leaks capacity until compaction stops
     // for EVERY scene (round 3, finding 1: a parked preview did exactly that).
@@ -1364,6 +1840,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
         if (bl.compactState == 1u) mCompactBusy &= ~(uint64_t(1) << bl.compactSlot);
     if (sa.hasQueryBase) mTimedSceneSlots &= ~(uint32_t(1) << sa.querySlot);
     mScenes.erase(it);
+    forgetCardMovers(scene);
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,6 +1860,13 @@ struct InstanceWriter final {
     /// and the per-mesh-index cache of the coarsest bound it is built from.
     float maxCoarseBound = 0.0f;
     std::vector<std::pair<const Ogre::Mesh *, float>> *coarseBound = nullptr;
+    /// The per-slot geometry row of the near copy (SceneAs::geomRowOfSlot).
+    std::vector<uint32_t> *geomRowOfSlot = nullptr;
+    /// THE SKIN CACHE's ready entries by NodeId (SceneAs::skinUse): a rigged
+    /// slot's structure and row. A rigged slot NOT in it is not written at all.
+    const std::unordered_map<uint32_t, std::pair<VkDeviceAddress, uint32_t>> *skinUse = nullptr;
+    /// Rigged slots written this gather (the status's count).
+    unsigned skinned = 0;
     unsigned long long signature = 1469598103934665603ull;   // FNV-1a offset basis
     /// THE SIGNATURE IS ONLY EVER READ TO DECIDE REFIT-vs-REBUILD. A rebuild is
     /// the default (NVIDIA's own guidance for a TLAS, and 0.2-0.35 ms even at
@@ -1405,6 +1889,26 @@ struct InstanceWriter final {
     void hash(unsigned long long v) {
         signature ^= v;
         signature *= 1099511628211ull;
+    }
+
+    /// ONE INSTANCE OVER A STRUCTURE THAT IS NOT THE (MESH, LEVEL) TABLE'S — a
+    /// rigged item's own skinned BLAS (PHOTON-SKIN-1). Its address is known when
+    /// the gather runs (the skin pass creates the structure first), so there is
+    /// nothing to patch.
+    void addDirect(VkDeviceAddress address, bool far, const float *world, unsigned mask,
+                   unsigned customIndex) {
+        const unsigned idx = count++;
+        if (far) ++farCount;
+        if (idx >= capacity) { ++overflow; return; }
+        VkAccelerationStructureInstanceKHR inst{};
+        std::memcpy(&inst.transform.matrix[0][0], world, 12u * sizeof(float));
+        inst.instanceCustomIndex = customIndex & 0xFFFFFFu;
+        inst.mask = mask & 0xFFu;
+        inst.instanceShaderBindingTableRecordOffset = 0;
+        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        inst.accelerationStructureReference = address;
+        if (wantSignature) { hash(0xA24BAED4963EE407ull ^ address); hash(customIndex); hash(mask); }
+        std::memcpy(&dst[idx], &inst, sizeof(inst));
     }
 
     /// ONE-ENTRY MEMO PER COPY KIND (0 near, 1 far). The map lookup below was
@@ -1492,10 +1996,9 @@ struct InstanceWriter final {
 /// exact layout an instance descriptor takes, so this loop is a flags test and a
 /// memcpy per slot and asks Ogre nothing at all.
 ///
-/// WHAT IS IN AND WHAT IS OUT has not moved a bit: `kGpuRayTraced` IS the old
-/// conjunction — carries kVisibleBit or kMovableBit, shown, below the overlay
-/// queues, not skinned (a BLAS reads the mesh's bind pose, so a walking
-/// character would cast a T-pose shadow: audit C-5), not alpha-tested (every
+/// WHAT IS IN AND WHAT IS OUT: `kGpuRayTraced` IS the old conjunction —
+/// carries kVisibleBit or kMovableBit, shown, below the overlay queues, not
+/// alpha-tested (every
 /// BLAS is VK_GEOMETRY_OPAQUE_BIT_KHR and the rays use gl_RayFlagsOpaqueEXT, so
 /// a cut-out leaf would intersect as a solid quad: audit C-16), and it has a
 /// mesh. Editor furniture, the backdrop, the sun disc and distortion objects
@@ -1510,11 +2013,20 @@ struct InstanceWriter final {
 ///   * THE NEAR COPY over the level the RAY RULE chose (`GpuInstance::ids[3]`,
 ///     AT-A8r, `OgreScene::updateRayLevels`; clamped to the chain), carrying the
 ///     per-consumer bits of audit C-15 — bit 0 a shadow caster, bit 1 a mover,
-///     bit 2 still world — AND bit 3, "near". A near launch traces 0x0F.
+///     bit 2 still world — AND bit 3, "near". A near launch traces 0x0F. A
+///     shadow-casting mover's near copy carries bit 5 too (kRayMaskMoverCaster,
+///     the surface cache's mover-shadow launch, PHOTON-CARDS-4).
 ///   * THE FAR COPY over the mesh's COARSEST level, carrying bit 4 ALONE. Only a
 ///     launch that asks for the far field (the gather's second query, past its
 ///     near length) sees it; no near launch can hit a far copy, so no ray is
 ///     answered twice by one object.
+///
+/// A RIGGED ITEM (PHOTON-SKIN-1) is traced through ITS OWN structure, built from
+/// its skin cache (the posed vertices) — the near AND the far copy, since the
+/// cache is one level and a character is small — and its per-slot row is the
+/// cache's. A rigged slot whose cache is not ready this frame is NOT WRITTEN: it
+/// is never traced at the mesh's bind pose (audit C-5's T-pose), which is the
+/// exclusion's whole reason and the only fallback there is.
 ///
 /// `instanceCustomIndex` is the SLOT on BOTH copies — the index of the object's
 /// entry in the table, so a hit shader reads the object's bounds, its previous
@@ -1525,6 +2037,7 @@ static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
     if (!gs.live()) return;
     const detail::GpuInstance *mirror = gs.mirrorData();
     const uint32_t slots = gs.slotCount();
+    if (w.geomRowOfSlot) w.geomRowOfSlot->assign(slots, detail::GpuScene::kNoGeomRow);
     for (uint32_t i = 0; i < slots; ++i) {
         const detail::GpuInstance &e = mirror[i];
         Ogre::uint32 flags;
@@ -1537,10 +2050,27 @@ static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
         unsigned mask = kRayMaskNear;
         mask |= (flags & detail::kGpuCaster) ? kRayMaskCaster : 0u;
         mask |= (flags & detail::kGpuMover) ? kRayMaskMover : kRayMaskStill;
+        // ...and the surface cache's mover-shadow bit (PHOTON-CARDS-4): a mover
+        // that casts, on its near copy only.
+        if ((flags & detail::kGpuMover) && (flags & detail::kGpuCaster)) mask |= kRayMaskMoverCaster;
+        if (flags & detail::kGpuSkinned) {
+            if (!w.skinUse) continue;
+            auto sit = w.skinUse->find(e.ids[0]);
+            if (sit == w.skinUse->end()) continue;
+            w.addDirect(sit->second.first, false, e.world, mask, i);
+            w.addDirect(sit->second.first, true, e.world, kRayMaskFar, i);
+            if (w.geomRowOfSlot) (*w.geomRowOfSlot)[i] = sit->second.second;
+            ++w.skinned;
+            continue;
+        }
         const uint32_t coarsest = coarsestLevelOf(mesh.get());
         const uint32_t nearLevel = std::min(scene->rayLevelOf(i), coarsest);
         w.add(mesh, nearLevel, false, e.world, mask, i);
         w.add(mesh, coarsest, true, e.world, kRayMaskFar, i);
+        // The near copy's geometry, as the GPU scene's rows name it (a level the
+        // mesh has no row for reads zero addresses there, which the shader tests).
+        if (w.geomRowOfSlot && nearLevel < detail::GpuScene::kLevelsPerMesh)
+            (*w.geomRowOfSlot)[i] = detail::GpuScene::geomRowIndex(meshIndex, nearLevel, 0u);
         // THE HAND-OVER'S WIDTH (audit F2): how far, in world units, a far copy's
         // surface may lie from its fine one — the coarsest level's measured bound
         // grown by the instance's largest axis scale. The gather starts its far
@@ -1999,6 +2529,460 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
 }
 
 // ---------------------------------------------------------------------------
+// THE GPU SKIN CACHE (PHOTON-SKIN-1, RY-R4; SkinCache.h has the design).
+namespace {
+/// A UAV binding for the skin job (the voxel gather's shape).
+Ogre::DescriptorSetUav::BufferSlot skinSlot(Ogre::UavBufferPacked *buffer,
+                                            Ogre::ResourceAccess::ResourceAccess access) {
+    Ogre::DescriptorSetUav::BufferSlot slot = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+    slot.buffer = buffer;
+    slot.offset = 0;
+    slot.sizeBytes = 0;
+    slot.access = access;
+    return slot;
+}
+constexpr uint32_t kSkinThreadsPerGroup = 64u;   // the job's threads_per_group x
+}  // namespace
+
+/// THE POSE SERIAL a cache is keyed on: the node's own pose pushes AND, for a
+/// shareSkeleton follower (an armour or clothing piece posed by the MASTER's
+/// instance), the master's — the recipe the caster walk uses (OgreGi.cpp,
+/// walkItems). The follower's own poseEpoch never moves when the body's clip
+/// does, so keyed on it alone the piece would be skinned once and frozen.
+unsigned long long RayQueryTier::skinPoseSerial(const OgreScene *scene, const OgreScene::Node &n) {
+    unsigned long long pose = n.poseEpoch;
+    if (n.shareSource) {
+        auto sit = scene->mNodes.find(n.shareSource);
+        if (sit != scene->mNodes.end()) pose = pose * 1000003ull + sit->second.poseEpoch;
+    }
+    return pose;
+}
+
+void RayQueryTier::dropSkin(OgreScene *scene, SceneAs &sa, uint32_t node, SceneAs::Skin &sk) {
+    if (sk.as) retire(sk.as, sk.storage);
+    retire(sk.scratch);
+    sk.address = 0;
+    sk.built = false;
+    destroySkinCacheBuffer(sa.skinVao, sk.buf);
+    if (scene && scene->mGpuScene.live()) {
+        detail::GpuScene &gs = scene->mGpuScene;
+        if (gs.skinRowOf(node) != detail::GpuScene::kNoGeomRow) {
+            gs.setSkinRow(node, detail::GpuScene::kNoGeomRow);
+            // The override goes with the cache: the node's entry is re-composed
+            // (if the node still has an Item) on the next scan.
+            auto nit = scene->mNodes.find(NodeId(node));
+            if (nit != scene->mNodes.end()) scene->markGpuSlotDirty(nit->second);
+        }
+        if (sk.rowBlock != 0xFFFFFFFFu) gs.releaseRowBlock(sk.rowBlock);
+    }
+    sk.rowBlock = sk.row = 0xFFFFFFFFu;
+}
+
+void RayQueryTier::dropSkinBuffers(SceneAs &sa) {
+    if (sa.skinVao) {
+        if (sa.skinJobs) sa.skinVao->destroyUavBuffer(sa.skinJobs);
+        if (sa.skinPalette) sa.skinVao->destroyUavBuffer(sa.skinPalette);
+    }
+    sa.skinJobs = sa.skinPalette = nullptr;
+    sa.skinJobCap = sa.skinPaletteCap = 0;
+}
+
+bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed,
+                            unsigned qBase, std::string &err) {
+    sa.skinUse.clear();
+    sa.st.skinLastItems = 0;
+    sa.st.skinLastVertices = 0;
+    for (auto &kv : sa.skins) kv.second.seen = false;
+    detail::GpuScene &gs = scene->mGpuScene;
+    if (!gs.live()) return true;
+
+    // 1. THE RIGGED TRACED SET, out of the GPU scene's mirror (current: the scan
+    //    ran this frame, just before this tier). The flags word is the one place
+    //    the predicates live; kGpuRayTraced no longer excludes a rigged item.
+    struct Want { uint32_t slot = 0; OgreScene::Node *node = nullptr; };
+    std::vector<Want> wants;
+    const detail::GpuInstance *mirror = gs.mirrorData();
+    const uint32_t slots = std::min<uint32_t>(gs.slotCount(), uint32_t(scene->mItemNodes.size()));
+    for (uint32_t i = 0; i < slots; ++i) {
+        Ogre::uint32 flags;
+        std::memcpy(&flags, &mirror[i].boundsMax[3], sizeof(flags));
+        if ((flags & (detail::kGpuRayTraced | detail::kGpuSkinned)) !=
+            (detail::kGpuRayTraced | detail::kGpuSkinned))
+            continue;
+        OgreScene::Node *n = scene->mItemNodes[i];
+        if (!n || !n->item || !n->item->getSkeletonInstance()) continue;
+        wants.push_back({ i, n });
+    }
+    if (wants.empty()) return true;
+
+    Ogre::VaoManager *vao = mRs ? mRs->getVaoManager() : nullptr;
+    Ogre::HlmsManager *hm = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getHlmsManager()
+                                                          : nullptr;
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow("Jahshaka/SkinCache") : nullptr;
+    if (!vao || !vao->supportsBufferDeviceAddress()) {
+        sa.st.skinReason = "no buffer device addresses on this device";
+        return true;
+    }
+    if (!job) {
+        sa.st.skinReason = "the Jahshaka/SkinCache job is missing from the staged media";
+        err = sa.st.skinReason;
+        return false;
+    }
+    if (sa.skinVao && sa.skinVao != vao) dropSkinBuffers(sa);
+    sa.skinVao = vao;
+    sa.st.skinReason.clear();
+
+    // 2. RECONCILE: a cache per rigged traced item, created on first sight (or
+    //    when the Item behind the node was rebuilt), marked seen; the ones not
+    //    seen are dropped AFTER the gather (updateScene).
+    struct Dirty { uint32_t node = 0; SceneAs::Skin *sk = nullptr; OgreScene::Node *n = nullptr; };
+    std::vector<Dirty> dirty;
+    bool rowsStaged = false;
+    for (const Want &wt : wants) {
+        const uint32_t node = uint32_t(wt.node->selfId);
+        auto it = sa.skins.find(node);
+        // THE IDENTITY, AND THE SOURCE IT WAS BUILT OVER (a mismatch in any of them
+        // drops the cache and makes a new one this pass): a refit over an index
+        // buffer the mesh released, or a job over a source with fewer vertices
+        // than the cache, is a read of freed or foreign memory — an Xid, never a
+        // validation error.
+        const Ogre::VertexArrayObject *liveVao =
+            (wt.node->item->getMesh() && wt.node->item->getMesh()->getNumSubMeshes() &&
+             !wt.node->item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal].empty())
+                ? wt.node->item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal][0]
+                : nullptr;
+        if (it != sa.skins.end() &&
+            (it->second.item != wt.node->item ||
+             it->second.mesh != wt.node->item->getMesh().get() ||
+             it->second.rigGeneration != wt.node->rigGeneration || !liveVao ||
+             liveVao->getIndexBuffer() != it->second.indices ||
+             liveVao->getVertexBuffers().empty() ||
+             uint32_t(liveVao->getVertexBuffers()[0]->getNumElements()) != it->second.buf.vertexCount)) {
+            dropSkin(scene, sa, node, it->second);
+            sa.skins.erase(it);
+            it = sa.skins.end();
+        }
+        if (it == sa.skins.end()) {
+            SceneAs::Skin sk;
+            sk.item = wt.node->item;
+            sk.mesh = wt.node->item->getMesh().get();
+            sk.rigGeneration = wt.node->rigGeneration;
+            sk.indices = liveVao ? liveVao->getIndexBuffer() : nullptr;
+            std::string why;
+            if (!createSkinCacheBuffer(vao, sk.item, sk.buf, why)) {
+                // Not traced — and said so once per item, never at bind pose.
+                sa.st.skinReason = why;
+                continue;
+            }
+            std::vector<std::vector<uint32_t>> rows;
+            sk.rowBlock = gs.acquireRowBlock();
+            if (sk.rowBlock == detail::GpuScene::kNoMesh ||
+                !describeSkinCacheRows(vao, sk.item, sk.buf, rows) || rows.empty() ||
+                rows[0].size() != detail::GpuScene::kGeomRowWords) {
+                sa.st.skinReason = "the skin cache's geometry rows could not be described";
+                if (sk.rowBlock != detail::GpuScene::kNoMesh) gs.releaseRowBlock(sk.rowBlock);
+                destroySkinCacheBuffer(vao, sk.buf);
+                continue;
+            }
+            for (size_t l = 0; l < rows.size() && l < detail::GpuScene::kLevelsPerMesh; ++l)
+                if (rows[l].size() == detail::GpuScene::kGeomRowWords)
+                    gs.stageGeomRow(detail::GpuScene::geomRowIndex(sk.rowBlock, uint32_t(l), 0u),
+                                    rows[l].data());
+            sk.row = detail::GpuScene::geomRowIndex(sk.rowBlock, 0u, 0u);
+            gs.setSkinRow(node, sk.row);
+            scene->markGpuSlotDirty(*wt.node);
+            rowsStaged = true;
+            it = sa.skins.emplace(node, std::move(sk)).first;
+        }
+        SceneAs::Skin &sk = it->second;
+        sk.seen = true;
+        // THE POSE SERIAL: bumped by every pose push (clip time, weights, manual
+        // bones — OgreScene::noteNodePosed). A walk moves the node, not the pose,
+        // and costs nothing here: the cache is in the item's LOCAL space.
+        const unsigned long long serial = skinPoseSerial(scene, *wt.node);
+        if (!sk.skinned || !sk.built || serial != sk.poseSerial) dirty.push_back({ node, &sk, wt.node });
+    }
+    // A row not on the device is a zero address to the job (the ATOM-VOXEL-2 Xid):
+    // the new rows go up NOW, before anything below binds the table.
+    if (rowsStaged) gs.flushGeomRows();
+
+    if (!dirty.empty()) {
+        // 3. THE PALETTE: Ogre's own bone matrices for the renderable — the SAME
+        //    `SkeletonInstance::_getBoneFullTransform` values, in the SAME
+        //    blend-index order, that HlmsPbs::fillBuffersForV2 streams into its
+        //    per-pass buffer for the vertex shader (PREMISE 1's verdict: that
+        //    buffer is a per-PASS ring written only for a DRAWN renderable, at an
+        //    offset only the draw knows — a character off screen, the one a
+        //    mirror or a shadow ray most needs, has no palette in it at all — so
+        //    the values are taken from their source instead of the buffer) —
+        //    taken back into the item's local space by the node's inverse world.
+        std::vector<float> palette;
+        std::vector<SkinJobRecord> jobs;
+        uint32_t maxVerts = 0u;
+        for (Dirty &d : dirty) {
+            Ogre::Item *item = d.sk->item;
+            Ogre::SkeletonInstance *skel = item->getSkeletonInstance();
+            const Ogre::SubItem *sub = item->getNumSubItems() ? item->getSubItem(0) : nullptr;
+            const Ogre::RenderableAnimated::IndexMap *map =
+                sub ? sub->getBlendIndexToBoneIndexMap() : nullptr;
+            Ogre::Node *parent = item->getParentNode();
+            if (!skel || !map || map->empty() || !parent) { d.sk = nullptr; continue; }
+            const Ogre::Matrix4 invWorld = parent->_getFullTransform().inverseAffine();
+            SkinJobRecord r;
+            r.sourceRow = gs.meshIndex(item->getMesh().get()) == detail::GpuScene::kNoMesh
+                              ? detail::GpuScene::kNoGeomRow
+                              : detail::GpuScene::geomRowIndex(gs.meshIndex(item->getMesh().get()), 0u, 0u);
+            if (r.sourceRow == detail::GpuScene::kNoGeomRow) { d.sk = nullptr; continue; }
+            r.vertexCount = d.sk->buf.vertexCount;
+            r.paletteBase = uint32_t(palette.size() / 4u);
+            r.cacheAddressLo = uint32_t(d.sk->buf.address & 0xFFFFFFFFull);
+            r.cacheAddressHi = uint32_t(d.sk->buf.address >> 32u);
+            r.tangentOffset = d.sk->buf.tangentOffset;
+            r.blendOffsets = (d.sk->buf.blendIndexOffset & 0xFFFFu) |
+                             ((d.sk->buf.blendWeightOffset & 0xFFFFu) << 16u);
+            r.boneCount = uint32_t(map->size());
+            for (size_t b = 0; b < map->size(); ++b) {
+                // store4x3, not streamTo4x3: the stream form is a non-temporal
+                // store meant for a mapped GPU buffer; this is a stack copy.
+                alignas(16) float m[12];
+                skel->_getBoneFullTransform((*map)[b]).store4x3(m);
+                const Ogre::Matrix4 world(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8],
+                                          m[9], m[10], m[11], 0.0f, 0.0f, 0.0f, 1.0f);
+                const Ogre::Matrix4 local = invWorld.concatenateAffine(world);
+                for (int row = 0; row < 3; ++row)
+                    for (int col = 0; col < 4; ++col) palette.push_back(float(local[row][col]));
+            }
+            jobs.push_back(r);
+            maxVerts = std::max(maxVerts, r.vertexCount);
+        }
+
+        if (!jobs.empty()) {
+            // 4. THE INPUTS, grown by doubling and uploaded (Ogre's staging copy,
+            //    ordered in the command stream before the dispatch that reads them).
+            const uint32_t paletteRows = uint32_t(palette.size() / 4u);
+            if (paletteRows > sa.skinPaletteCap) {
+                uint32_t cap = std::max(sa.skinPaletteCap, 1024u);
+                while (cap < paletteRows) cap *= 2u;
+                if (sa.skinPalette) vao->destroyUavBuffer(sa.skinPalette);
+                sa.skinPalette = vao->createUavBuffer(cap, 4u * sizeof(float), 0, nullptr, false);
+                sa.skinPaletteCap = cap;
+            }
+            if (uint32_t(jobs.size()) > sa.skinJobCap) {
+                uint32_t cap = std::max(sa.skinJobCap, 8u);
+                while (cap < uint32_t(jobs.size())) cap *= 2u;
+                if (sa.skinJobs) vao->destroyUavBuffer(sa.skinJobs);
+                sa.skinJobs = vao->createUavBuffer(cap, sizeof(SkinJobRecord), 0, nullptr, false);
+                sa.skinJobCap = cap;
+            }
+            sa.skinPalette->upload(palette.data(), 0, paletteRows);
+            sa.skinJobs->upload(jobs.data(), 0, jobs.size());
+
+            // 5. WRITE-AFTER-READ, explicitly: last frame's readers of these very
+            //    caches (the skinned builds, and the ray jobs' hit decode through
+            //    the rows) are in earlier submissions on this queue; the job below
+            //    must not overwrite what they have not read. Ogre's barrier solver
+            //    cannot see a buffer written through a device address (F5's lesson).
+            cmd = frameCmd();
+            if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 4u);
+            VkMemoryBarrier war{};
+            war.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            war.srcAccessMask = 0;
+            war.dstAccessMask = 0;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                     VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &war, 0, nullptr, 0,
+                                 nullptr);
+
+            // 6. THE DISPATCH: x = vertices, y = items. The geometry table is
+            //    re-read immediately before binding (a grow re-creates it — the
+            //    ATOM-VOXEL-2 trap) and every binding is dropped afterwards (the job
+            //    outlives the buffers a later grow destroys).
+            JAH_TRY {
+                job->_setUavBuffer(0u, skinSlot(sa.skinJobs, Ogre::ResourceAccess::Read));
+                job->_setUavBuffer(1u, skinSlot(gs.geomBuffer(), Ogre::ResourceAccess::Read));
+                job->_setUavBuffer(2u, skinSlot(sa.skinPalette, Ogre::ResourceAccess::Read));
+                job->setNumThreadGroups((maxVerts + kSkinThreadsPerGroup - 1u) / kSkinThreadsPerGroup,
+                                        uint32_t(jobs.size()), 1u);
+                Ogre::ResourceTransitionArray &rt =
+                    mRs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+                job->analyzeBarriers(rt);
+                mRs->executeResourceTransition(rt);
+                hc->dispatch(job, nullptr, nullptr);
+                job->clearUavBuffers();
+            }
+            catch (Ogre::Exception &e) {
+                job->clearUavBuffers();
+                err = "skin cache: " + e.getFullDescription();
+                sa.st.skinReason = err;
+                cmd = frameCmd();
+                return false;
+            }
+
+            // 7. PREMISE 2: the job's writes through the cache's device address are
+            //    invisible to Ogre, so the edge to every reader is OURS — the
+            //    skinned structures' builds below (vertex input to an AS build is
+            //    SHADER_READ at the build stage) and the ray jobs' hit decode later
+            //    this frame (compute). No VERTEX_INPUT edge: nothing draws the cache.
+            cmd = frameCmd();
+            VkMemoryBarrier raw{};
+            raw.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            raw.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            raw.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &raw, 0, nullptr, 0, nullptr);
+            if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 5u);
+            ++sa.st.skinDispatches;
+            for (const Dirty &d : dirty) {
+                if (!d.sk) continue;
+                d.sk->skinned = true;
+                d.sk->poseSerial = skinPoseSerial(scene, *d.n);
+                ++sa.st.skinPasses;
+                ++sa.st.skinLastItems;
+                sa.st.skinLastVertices += d.sk->buf.vertexCount;
+            }
+        }
+
+        // 8. THE STRUCTURES: built once (PREFER_FAST_TRACE | ALLOW_UPDATE) and
+        //    REFIT in place on every later pose change — one batch, each with its
+        //    own scratch so no two alias. A refit keeps the address, so the
+        //    instance the gather writes needs nothing else.
+        std::vector<VkAccelerationStructureBuildGeometryInfoKHR> builds;
+        std::vector<VkAccelerationStructureGeometryKHR> geoms;
+        std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+        builds.reserve(dirty.size());
+        geoms.reserve(dirty.size());
+        ranges.reserve(dirty.size());
+        for (const Dirty &d : dirty) {
+            if (!d.sk || !d.sk->skinned) continue;
+            SceneAs::Skin &sk = *d.sk;
+            Ogre::VertexArrayObject *vaoSrc =
+                sk.item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal][0];
+            Ogre::IndexBufferPacked *ib = vaoSrc->getIndexBuffer();
+            Ogre::VulkanBufferInterface *ibi =
+                static_cast<Ogre::VulkanBufferInterface *>(ib->getBufferInterface());
+            const uint32_t tris = uint32_t(vaoSrc->getPrimitiveCount() / 3u);
+            if (!ibi || !tris) continue;
+            VkAccelerationStructureGeometryKHR g{};
+            g.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+            g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+            g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+            g.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+            g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+            g.geometry.triangles.vertexData.deviceAddress = VkDeviceAddress(sk.buf.address);
+            g.geometry.triangles.vertexStride = kSkinCacheStride;
+            g.geometry.triangles.maxVertex = sk.buf.vertexCount - 1u;
+            g.geometry.triangles.indexType = ib->getIndexType() == Ogre::IndexBufferPacked::IT_16BIT
+                                                 ? VK_INDEX_TYPE_UINT16
+                                                 : VK_INDEX_TYPE_UINT32;
+            g.geometry.triangles.indexData.deviceAddress =
+                addressOf(ibi->getVboName()) +
+                VkDeviceSize(ib->_getFinalBufferStart()) * ib->getBytesPerElement() +
+                VkDeviceSize(vaoSrc->getPrimitiveStart()) * ib->getBytesPerElement();
+            VkAccelerationStructureBuildGeometryInfoKHR b{};
+            b.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+            b.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+            b.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                      VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+            b.geometryCount = 1;
+            if (!sk.as) {
+                VkAccelerationStructureBuildSizesInfoKHR sizes{};
+                sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+                b.pGeometries = &g;
+                mFn.getBuildSizes(mVk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &b, &tris, &sizes);
+                const VkDeviceSize align = std::max<VkDeviceSize>(
+                    mAsProps.minAccelerationStructureScratchOffsetAlignment, 1u);
+                if (!makeBuffer(sizes.accelerationStructureSize,
+                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, true,
+                                sk.storage, err) ||
+                    !makeBuffer(std::max(sizes.buildScratchSize, sizes.updateScratchSize) + align,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, true, sk.scratch, err)) {
+                    dropBuffer(sk.storage);
+                    dropBuffer(sk.scratch);
+                    continue;
+                }
+                VkAccelerationStructureCreateInfoKHR ci{};
+                ci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+                ci.buffer = sk.storage.buffer;
+                ci.size = sizes.accelerationStructureSize;
+                ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                if (mFn.createAccelerationStructure(mVk, &ci, nullptr, &sk.as) != VK_SUCCESS) {
+                    sk.as = VK_NULL_HANDLE;
+                    dropBuffer(sk.storage);
+                    dropBuffer(sk.scratch);
+                    err = "rayquery: vkCreateAccelerationStructureKHR (skinned BLAS) failed";
+                    continue;
+                }
+                VkAccelerationStructureDeviceAddressInfoKHR ai{};
+                ai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+                ai.accelerationStructure = sk.as;
+                sk.address = mFn.getAsDeviceAddress(mVk, &ai);
+                sk.built = false;
+            }
+            const VkDeviceSize align = std::max<VkDeviceSize>(
+                mAsProps.minAccelerationStructureScratchOffsetAlignment, 1u);
+            b.mode = sk.built ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                              : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+            b.srcAccelerationStructure = sk.built ? sk.as : VK_NULL_HANDLE;
+            b.dstAccelerationStructure = sk.as;
+            b.scratchData.deviceAddress = (addressOf(sk.scratch.buffer) + align - 1) / align * align;
+            if (sk.built) ++sa.st.skinRefits; else ++sa.st.skinBlasBuilds;
+            sk.built = true;
+            sk.triangles = tris;
+            geoms.push_back(g);
+            VkAccelerationStructureBuildRangeInfoKHR r{};
+            r.primitiveCount = tris;
+            ranges.push_back(r);
+            builds.push_back(b);
+        }
+        if (!builds.empty()) {
+            std::vector<const VkAccelerationStructureBuildRangeInfoKHR *> rangePtrs;
+            for (size_t i = 0; i < builds.size(); ++i) {
+                builds[i].pGeometries = &geoms[i];
+                rangePtrs.push_back(&ranges[i]);
+            }
+            // Last frame's build or refit of the same structure (and the traces
+            // that read it) before this one rewrites it in place.
+            VkMemoryBarrier pre{};
+            pre.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            pre.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                                VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            pre.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                                VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &pre, 0,
+                                 nullptr, 0, nullptr);
+            mFn.cmdBuild(cmd, uint32_t(builds.size()), builds.data(), rangePtrs.data());
+            // BUILD -> the TLAS build that references them (buildTlas' own pre
+            // barrier covers it too; this one is the skinned structures' own).
+            VkMemoryBarrier post{};
+            post.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            post.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+            post.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &post, 0, nullptr, 0, nullptr);
+        }
+        if (timed && sa.st.skinLastItems > 0)
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 6u);
+    }
+
+    // 9. WHAT THE GATHER MAY WRITE: the entries skinned AND built.
+    for (auto &kv : sa.skins) {
+        const SceneAs::Skin &sk = kv.second;
+        if (sk.seen && sk.skinned && sk.built && sk.as && sk.address)
+            sa.skinUse.emplace(kv.first, std::make_pair(sk.address, sk.row));
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 /// Reads back the timestamp pairs a frame old enough to have finished wrote —
 /// with the availability bit, NEVER with a wait.
 void RayQueryTier::readTimestamps(SceneAs &sa) {
@@ -2020,6 +3004,10 @@ void RayQueryTier::readTimestamps(SceneAs &sa) {
         };
         if (p.blas) span(0, 1, sa.st.blasMs);
         if (p.tlas) span(2, 3, sa.st.tlasMs);
+        if (p.skin) {
+            span(4, 5, sa.st.skinMs);
+            span(5, 6, sa.st.skinRefitMs);
+        }
         p.live = false;
     }
 }
@@ -2044,6 +3032,79 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // movement — so a still scene whose eye crossed a 2x band must still write
     // its instances once. Both counters only ever grow, so their sum is an
     // epoch too.
+    // THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): a decode twin for every PBS
+    // datablock the scene's items wear, and one decode draw per twin in this
+    // scene — made HERE, outside the compositor, when the set of material words
+    // (GpuInstance::raster x) or HlmsAtom's twin epoch moved. A scan of the GPU
+    // scene's mirror only when its slot writes moved.
+    {
+        const detail::GpuScene &gsc = scene->gpuScene();
+        Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
+        auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+        // A TWIN IS A COPY, AND A COPY DRIFTS: the engine edits a PBS datablock in
+        // place (a texture bound or streamed in, the sky's reflection cube taken
+        // away when a probe grid binds, a flag), and the twin made from it earlier
+        // would shade the old permutation — measured in the app: a twin still
+        // holding the sky cube as its manual reflection under an automatic probe
+        // array, a shader that cannot compile. Ogre re-hashes every renderable a
+        // datablock changes the permutation of (HlmsDatablock::flushRenderables),
+        // so one item wearing each word is the witness: its hash or its datablock
+        // moved -> the twin dies if its BUCKET moved (forgetDecodeTwinIfMoved; the
+        // epoch moves) and the next sync re-derives it. A SAME-SLOT TEXTURE SWAP keeps the hash (the property
+        // vector is unchanged) and the twin would keep the old texture in every hit:
+        // the witness carries the datablock's texture set too (audit F6). One hash
+        // compare and one texture-set key per material per frame.
+        if (atom && gsc.live()) {
+            for (auto &w : sa.decodeWitness) {
+                if (w.slot >= scene->mItemNodes.size()) continue;
+                const OgreScene::Node *nd = scene->mItemNodes[w.slot];
+                if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
+                const Ogre::SubItem *sub = nd->item->getSubItem(0);
+                const Ogre::HlmsDatablock *db = sub->getDatablock();
+                const Ogre::uint32 h = sub->getHlmsHash();
+                const uint64_t tk = HlmsAtom::textureSetKeyOf(db);
+                if (db == w.db && (h != w.hash || tk != w.texKey) && db) atom->forgetDecodeTwinIfMoved(db);
+                w.db = db;
+                w.hash = h;
+                w.texKey = tk;
+            }
+        }
+        if (atom && gsc.live() &&
+            (gsc.writes() != sa.decodeWrites || atom->twinEpoch() != sa.decodeEpoch)) {
+            sa.decodeWrites = gsc.writes();
+            std::vector<uint32_t> words;
+            std::vector<SceneAs::DecodeWitness> witness;
+            const detail::GpuInstance *m = gsc.mirrorData();
+            for (uint32_t i = 0, n = gsc.slotCount(); i < n; ++i)
+                if (m[i].raster[0] != HlmsAtom::kNoMaterialWord) words.push_back(m[i].raster[0]);
+            std::sort(words.begin(), words.end());
+            words.erase(std::unique(words.begin(), words.end()), words.end());
+            if (words != sa.decodeWords || atom->twinEpoch() != sa.decodeEpoch) {
+                sa.decodeWords = words;
+                atom->syncSceneDecodes(scene->mSceneMgr, words);
+                sa.decodeEpoch = atom->twinEpoch();
+                // ...and the witnesses: the first slot wearing each word.
+                std::vector<uint32_t> seen;
+                for (uint32_t i = 0, n = gsc.slotCount(); i < n; ++i) {
+                    const uint32_t w = m[i].raster[0];
+                    if (w == HlmsAtom::kNoMaterialWord) continue;
+                    if (std::find(seen.begin(), seen.end(), w) != seen.end()) continue;
+                    seen.push_back(w);
+                    SceneAs::DecodeWitness dw;
+                    dw.slot = i;
+                    if (i < scene->mItemNodes.size() && scene->mItemNodes[i] && scene->mItemNodes[i]->item &&
+                        scene->mItemNodes[i]->item->getNumSubItems()) {
+                        const Ogre::SubItem *sub = scene->mItemNodes[i]->item->getSubItem(0);
+                        dw.db = sub->getDatablock();
+                        dw.hash = sub->getHlmsHash();
+                        dw.texKey = HlmsAtom::textureSetKeyOf(dw.db);
+                    }
+                    witness.push_back(dw);
+                }
+                sa.decodeWitness.swap(witness);
+            }
+        }
+    }
     const unsigned long long epoch = scene->shadowEpoch() + scene->rayLevelRefits();
     const bool moved = !sa.haveEpoch || epoch != sa.lastEpoch;
     // THIS SCENE'S OWN timestamp range, handed out once. Past the budget a
@@ -2103,11 +3164,40 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     sa.slot = (sa.slot + 1u) % kFramesInFlight;
     const uint32_t frame = frameNow();
 
+    // THIS FRAME'S TIMESTAMP RANGE, reset once and before anything writes into
+    // it: the skin pass below writes its three before the gather's four.
+    const bool timed = mTimestamps && sa.hasQueryBase;
+    const unsigned ring = frame % kFramesInFlight;
+    const unsigned qBase = sa.queryBase + ring * kQueriesPerFrame;
+    if (timed) vkCmdResetQueryPool(cmd, mTimestamps, qBase, kQueriesPerFrame);
+    SceneAs::PendingTimes &pend = sa.pending[ring];
+    pend = SceneAs::PendingTimes();
+    pend.frame = frame;
+    pend.live = timed;
+
     std::string err;
+    // THE SKIN CACHE FIRST (PHOTON-SKIN-1): the gather writes the rigged items'
+    // structure addresses, so those structures must exist — and be built or
+    // refit over THIS frame's pose — before it runs. The bones are current here:
+    // updateSceneGraph has run (updateAllAnimations) and nothing has rendered.
+    {
+        monitor::CacheScope scope(CacheKind::Gi, WorkReason::Moved, 0, "rq.skin", mRs);
+        const unsigned long long before = sa.st.skinPasses;
+        const Clock::time_point tSkin = Clock::now();
+        if (!skinPass(scene, sa, cmd, timed, qBase, err) && !err.empty())
+            Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
+        if (sa.st.skinPasses != before) sa.st.skinCpuMs = float(msSince(tSkin));
+        pend.skin = sa.st.skinPasses != before;
+        scope.setUnits(unsigned(sa.st.skinPasses - before));
+        if (sa.st.skinPasses == before) scope.cancel();
+    }
+
     for (int attempt = 0; attempt < 2; ++attempt) {
         InstanceWriter w;
         w.blasOf = &sa.blasOf;
         w.coarseBound = &sa.coarseBound;
+        w.geomRowOfSlot = &sa.geomRowOfSlot;
+        w.skinUse = &sa.skinUse;
         std::vector<VkDeviceAddress> addresses;
         addresses.reserve(sa.blas.size());
         for (const Blas &bl : sa.blas) addresses.push_back(bl.address);
@@ -2148,15 +3238,6 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             continue;
         }
 
-        const bool timed = mTimestamps && sa.hasQueryBase;
-        const unsigned ring = frame % kFramesInFlight;
-        const unsigned qBase = sa.queryBase + ring * kQueriesPerFrame;
-        if (timed) vkCmdResetQueryPool(cmd, mTimestamps, qBase, kQueriesPerFrame);
-        SceneAs::PendingTimes &pend = sa.pending[ring];
-        pend = SceneAs::PendingTimes();
-        pend.frame = frame;
-        pend.live = timed;
-
         unsigned built = 0;
         if (!w.newBlas.empty()) {
             if (timed)
@@ -2190,6 +3271,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         }
         sa.instanceCount = w.count;
         sa.farInstanceCount = w.farCount;
+        sa.st.skinnedInstances = int(w.skinned);
         sa.farOverlap = w.maxCoarseBound;
         // REBUILD IS THE DEFAULT, refit the optimisation (NVIDIA's own guidance
         // for a TLAS: "consider PREFER_FAST_TRACE and perform only rebuilds").
@@ -2239,6 +3321,15 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     sa.lastEpoch = epoch;
     sa.haveEpoch = true;
     evictStaleBlas(sa);
+    // A RIGGED ITEM THAT LEFT THE TRACED SET gives its cache back HERE, after the
+    // top-level structure this frame built without it — never earlier: the TLAS
+    // a still scene keeps is the one that last referenced it (evictStaleBlas'
+    // rule, and its reason).
+    for (auto it = sa.skins.begin(); it != sa.skins.end();) {
+        if (it->second.seen) { ++it; continue; }
+        dropSkin(scene, sa, it->first, it->second);
+        it = sa.skins.erase(it);
+    }
     sa.st.gatherMs = float(gatherMs);
     // LIVE structures only: an evicted slot keeps its place in the vector (the
     // index is referenced by the table) but holds nothing (F6).
@@ -2260,6 +3351,21 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             ++sa.st.levelBlasCount;
             sa.st.levelBlasBytes += bl.storage.size;
         }
+    }
+    // THE SKINNED STRUCTURES are per ITEM and counted apart as well as in the
+    // totals: their bytes and their caches are what a character costs.
+    sa.st.skinCaches = int(sa.skins.size());
+    sa.st.skinBlasBytes = 0;
+    sa.st.skinCacheBytes = 0;
+    for (const auto &kv : sa.skins) {
+        const SceneAs::Skin &sk = kv.second;
+        if (sk.as) {
+            ++sa.st.blasCount;
+            sa.st.triangles += int(sk.triangles);
+            sa.st.blasBytes += sk.storage.size;
+            sa.st.skinBlasBytes += sk.storage.size;
+        }
+        sa.st.skinCacheBytes += (unsigned long long)sk.buf.vertexCount * kSkinCacheStride;
     }
 }
 
@@ -2430,6 +3536,354 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
     return ok;
 }
 
+// gi.card_read_parity — the reflection's card read, asked directly
+// ---------------------------------------------------------------------------
+// The same include the trace reads (jah_rq_card.glsl) behind the same four
+// bindings (jah_rq_card_bindings.glsl, here at base 2), dispatched once over a
+// list of points on its own command buffer, the picks read back. The suite
+// holds them against SurfaceCache::readAt, the CPU reference.
+bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardReadQuery> &queries,
+                                    std::vector<CardReadPick> &out, std::string &err) {
+    out.clear();
+    if (!isOpen()) { err = "cardReadParity: the ray tier is not open"; return false; }
+    const SurfaceCache *cache = scene ? scene->mSurfaceCache.get() : nullptr;
+    if (!cache || !cache->cardBuffer() || !cache->instanceBuffer() || !cache->depthLayer() ||
+        !cache->radianceLayer() || !cache->cardRecords()) {
+        err = "cardReadParity: the scene holds no built surface cache";
+        return false;
+    }
+    if (queries.empty()) { err = "cardReadParity: no queries"; return false; }
+
+    // ---- the harness pipeline, once ------------------------------------------
+    if (!mCardParityPipeline) {
+        // ...and 10-14: the card read's view term (PHOTON-CARDS-5), the five
+        // layers of SurfaceCache::viewLayers.
+        constexpr unsigned kParityBindings = 10u + SurfaceCache::kViewLayers;
+        const VkDescriptorType types[kParityBindings] = {
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER };
+        VkDescriptorSetLayoutBinding b[kParityBindings] = {};
+        for (unsigned i = 0; i < kParityBindings; ++i) {
+            b[i].binding = i;
+            b[i].descriptorType = types[i];
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo sli{};
+        sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        sli.bindingCount = kParityBindings;
+        sli.pBindings = b;
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &mCardParitySetLayout;
+        VkShaderModuleCreateInfo smi{};
+        smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smi.codeSize = sizeof(krq_cardParitySpv);
+        smi.pCode = krq_cardParitySpv;
+        VkDescriptorPoolSize sizes[4] = {};
+        sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sizes[0].descriptorCount = 6;
+        sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sizes[1].descriptorCount = 2 + SurfaceCache::kViewLayers;
+        sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        sizes[2].descriptorCount = 1;
+        sizes[3].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        sizes[3].descriptorCount = 1;
+        VkDescriptorPoolCreateInfo dpi{};
+        dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        dpi.maxSets = 1;
+        dpi.poolSizeCount = 4;
+        dpi.pPoolSizes = sizes;
+        if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCardParitySetLayout) != VK_SUCCESS ||
+            vkCreatePipelineLayout(mVk, &pli, nullptr, &mCardParityPipeLayout) != VK_SUCCESS ||
+            vkCreateShaderModule(mVk, &smi, nullptr, &mCardParityModule) != VK_SUCCESS ||
+            vkCreateDescriptorPool(mVk, &dpi, nullptr, &mCardParityPool) != VK_SUCCESS) {
+            err = "cardReadParity: the harness pipeline could not be made";
+            return false;
+        }
+        VkComputePipelineCreateInfo cpi{};
+        cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = mCardParityModule;
+        cpi.stage.pName = "main";
+        cpi.layout = mCardParityPipeLayout;
+        if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mCardParityPipeline) !=
+            VK_SUCCESS) {
+            err = "cardReadParity: vkCreateComputePipelines failed";
+            return false;
+        }
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = VK_LOD_CLAMP_NONE;
+        if (vkCreateSampler(mVk, &si, nullptr, &mCardParitySampler) != VK_SUCCESS) {
+            err = "cardReadParity: vkCreateSampler failed";
+            return false;
+        }
+    }
+
+    // ---- THE INPUTS IN THEIR READ LAYOUTS, AND EVERYTHING OGRE RECORDED FIRST.
+    // The atlas's Depth layer and the Radiance UAV as textures, the two tables
+    // as buffers — through Ogre's own solver (its bookkeeping stays true: the
+    // harness changes no layout) — then the flush that submits the captures,
+    // the relight and the table uploads ahead of this job.
+    Ogre::UavBufferPacked *table = cache->cardBuffer();
+    Ogre::UavBufferPacked *instances = cache->instanceBuffer();
+    Ogre::TextureGpu *depth = cache->depthLayer();
+    Ogre::TextureGpu *radiance = cache->radianceLayer();
+    Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
+    cache->viewLayers(cardView);
+    // THE TRACED QUESTIONS' INPUTS: the scene's TLAS and the hit-normal tables
+    // the reflection binds (the per-slot row copy, the GPU scene's rows).
+    auto sceneIt = mScenes.find(scene);
+    SceneAs *sa = sceneIt != mScenes.end() && sceneIt->second.tlas ? &sceneIt->second : nullptr;
+    detail::GpuScene &gpuScn = scene->gpuScene();
+    if (gpuScn.live()) gpuScn.flushGeomRows();
+    Ogre::UavBufferPacked *geomRows = gpuScn.live() ? gpuScn.geomBuffer() : nullptr;
+    const uint32_t geomSlots = (sa && geomRows) ? uint32_t(sa->geomRowOfSlot.size()) : 0u;
+    // The job's layout names the TLAS, so every dispatch binds one (a descriptor
+    // a shader uses statically must be valid even when no question traces).
+    if (!sa) {
+        err = "cardReadParity: the scene has no acceleration structure yet (render a frame with rays on)";
+        return false;
+    }
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        for (Ogre::TextureGpu *t : { depth, radiance })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        for (Ogre::TextureGpu *t : cardView)
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        for (Ogre::UavBufferPacked *b : { table, instances })
+            solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
+        if (geomSlots) solver.resolveTransition(trans, geomRows, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    mRs->flushCommands();
+
+    const size_t n = queries.size();
+    RawBuffer qBuf, aBuf, ubo;
+    if (!makeBuffer(n * 8u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, qBuf, err))
+        return false;
+    if (!makeBuffer(n * 20u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, aBuf, err)) {
+        dropBuffer(qBuf);
+        return false;
+    }
+    if (!makeBuffer(4u * sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
+        dropBuffer(qBuf);
+        dropBuffer(aBuf);
+        return false;
+    }
+    {
+        float *q = static_cast<float *>(qBuf.mapped);
+        for (size_t i = 0; i < n; ++i) {
+            const long slot = cache->itemSlotOf(queries[i].node);
+            const uint32_t slotBits = slot < 0 ? 0xFFFFFFFFu : uint32_t(slot);
+            q[i * 8u + 0] = queries[i].position.x;
+            q[i * 8u + 1] = queries[i].position.y;
+            q[i * 8u + 2] = queries[i].position.z;
+            std::memcpy(&q[i * 8u + 3], &slotBits, sizeof(slotBits));
+            q[i * 8u + 4] = queries[i].facing.x;
+            q[i * 8u + 5] = queries[i].facing.y;
+            q[i * 8u + 6] = queries[i].facing.z;
+            q[i * 8u + 7] = queries[i].trace ? 1.0f : 0.0f;
+        }
+        const uint32_t counts[4] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), geomSlots };
+        std::memcpy(ubo.mapped, counts, sizeof(counts));
+    }
+
+    VkDescriptorSetAllocateInfo dai{};
+    dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dai.descriptorPool = mCardParityPool;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &mCardParitySetLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(mVk, &dai, &set) != VK_SUCCESS) {
+        err = "cardReadParity: vkAllocateDescriptorSets failed";
+        dropBuffer(qBuf); dropBuffer(aBuf); dropBuffer(ubo);
+        return false;
+    }
+    VkDescriptorBufferInfo bufs[4] = {};
+    bufs[0].buffer = qBuf.buffer; bufs[0].range = VK_WHOLE_SIZE;
+    bufs[1].buffer = aBuf.buffer; bufs[1].range = VK_WHOLE_SIZE;
+    Ogre::UavBufferPacked *const tables[2] = { table, instances };
+    for (int i = 0; i < 2; ++i) {
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(tables[i]->getBufferInterface());
+        bufs[2 + i].buffer = bi->getVboName();
+        bufs[2 + i].offset = VkDeviceSize(tables[i]->_getFinalBufferStart()) *
+                             tables[i]->getBytesPerElement();
+        bufs[2 + i].range = tables[i]->getTotalSizeBytes();
+    }
+    // 4, 5: the Depth and Radiance layers; 10-14: the view term's five.
+    constexpr unsigned kImgs = 2u + SurfaceCache::kViewLayers;
+    VkImageView views[kImgs] = {};
+    VkDescriptorImageInfo imgs[kImgs] = {};
+    Ogre::TextureGpu *const layers[kImgs] = { depth, radiance, cardView[0], cardView[1],
+                                              cardView[2], cardView[3], cardView[4] };
+    for (unsigned i = 0; i < kImgs; ++i) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot =
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = layers[i];
+        views[i] = static_cast<Ogre::VulkanTextureGpu *>(layers[i])->createView(slot, false);
+        imgs[i].sampler = mCardParitySampler;
+        imgs[i].imageView = views[i];
+        imgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    VkDescriptorBufferInfo ub{};
+    ub.buffer = ubo.buffer;
+    ub.range = 4u * sizeof(uint32_t);
+    // 7-9: the TLAS (the scene's, or none when no question traces — a
+    // descriptor must still be valid, so the stand-in is only for 8/9), the
+    // per-slot rows (copied now), the GPU scene's rows.
+    RawBuffer rowBuf;
+    VkDescriptorBufferInfo geomBufs[2] = {};
+    if (geomSlots &&
+        makeBuffer(VkDeviceSize(geomSlots) * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                   false, rowBuf, err)) {
+        std::memcpy(rowBuf.mapped, sa->geomRowOfSlot.data(), size_t(geomSlots) * sizeof(uint32_t));
+        geomBufs[0].buffer = rowBuf.buffer;
+        geomBufs[0].range = VK_WHOLE_SIZE;
+        auto *gbi = static_cast<Ogre::VulkanBufferInterface *>(geomRows->getBufferInterface());
+        geomBufs[1].buffer = gbi->getVboName();
+        geomBufs[1].offset = VkDeviceSize(geomRows->_getFinalBufferStart()) * geomRows->getBytesPerElement();
+        geomBufs[1].range = geomRows->getTotalSizeBytes();
+    } else {
+        if (!ensureDummyImages(err)) { dropBuffer(qBuf); dropBuffer(aBuf); dropBuffer(ubo); return false; }
+        for (VkDescriptorBufferInfo &g : geomBufs) { g.buffer = mDummyStorage.buffer; g.range = VK_WHOLE_SIZE; }
+    }
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+    asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asWrite.accelerationStructureCount = 1;
+    asWrite.pAccelerationStructures = &sa->tlas;
+    const unsigned nWrites = 10u + SurfaceCache::kViewLayers;
+    VkWriteDescriptorSet writes[10u + SurfaceCache::kViewLayers] = {};
+    for (unsigned i = 0; i < nWrites; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = uint32_t(i);
+        writes[i].descriptorCount = 1;
+    }
+    for (int i = 0; i < 4; ++i) {
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &bufs[i];
+    }
+    for (int i = 0; i < 2; ++i) {
+        writes[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[4 + i].pImageInfo = &imgs[i];
+    }
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[6].pBufferInfo = &ub;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    writes[7].pNext = &asWrite;
+    for (int i = 0; i < 2; ++i) {
+        writes[8 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[8 + i].pBufferInfo = &geomBufs[i];
+    }
+    for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
+        writes[10 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[10 + i].pImageInfo = &imgs[2 + i];
+    }
+    vkUpdateDescriptorSets(mVk, nWrites, writes, 0, nullptr);
+
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.queueFamilyIndex = mDev->mGraphicsQueue.getFamilyIdx();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    vkCreateCommandPool(mVk, &pci, nullptr, &pool);
+    VkCommandBufferAllocateInfo cai{};
+    cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cai.commandPool = pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(mVk, &cai, &cmd);
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCardParityPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCardParityPipeLayout, 0, 1, &set,
+                            0, nullptr);
+    vkCmdDispatch(cmd, uint32_t((n + 63u) / 64u), 1, 1);
+    VkMemoryBarrier toHost{};
+    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toHost.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                         1, &toHost, 0, nullptr, 0, nullptr);
+    vkEndCommandBuffer(cmd);
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    vkCreateFence(mVk, &fci, nullptr, &fence);
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    bool ok = vkQueueSubmit(mDev->mGraphicsQueue.mQueue, 1, &si, fence) == VK_SUCCESS;
+    if (ok) ok = vkWaitForFences(mVk, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    if (ok) {
+        out.resize(n);
+        const uint32_t *a = static_cast<const uint32_t *>(aBuf.mapped);
+        for (size_t i = 0; i < n; ++i) {
+            CardReadPick &p = out[i];
+            const uint32_t *r = &a[i * 20u];
+            p.ok = (r[0] & 1u) != 0u;
+            p.lit = (r[0] & 2u) != 0u;
+            p.hit = (r[0] & 4u) != 0u;
+            p.card = p.ok ? int(r[1]) : -1;
+            p.texelX = r[2];
+            p.texelY = r[3];
+            std::memcpy(p.radiance, &r[4], 3u * sizeof(float));
+            std::memcpy(p.hitPoint, &r[8], 3u * sizeof(float));
+            std::memcpy(p.hitNormal, &r[12], 3u * sizeof(float));
+            std::memcpy(p.viewed, &r[16], 3u * sizeof(float));
+        }
+    } else {
+        err = "cardReadParity: the job did not complete (submit or device-lost wait failed)";
+    }
+    vkDestroyFence(mVk, fence, nullptr);
+    vkFreeCommandBuffers(mVk, pool, 1, &cmd);
+    vkDestroyCommandPool(mVk, pool, nullptr);
+    vkFreeDescriptorSets(mVk, mCardParityPool, 1, &set);
+    for (VkImageView v : views)
+        if (v) vkDestroyImageView(mVk, v, nullptr);
+    dropBuffer(rowBuf);
+    dropBuffer(qBuf);
+    dropBuffer(aBuf);
+    dropBuffer(ubo);
+    return ok;
+}
+
+bool OgreEngine::cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
+                                std::vector<CardReadPick> &out) {
+    out.clear();
+    if (!mRayTier || !mRayTier->isOpen()) {
+        mLastError = "cardReadParity: the ray tier is not open (no ray-query device, or rays off)";
+        return false;
+    }
+    std::string err;
+    if (!mRayTier->cardPickBlocking(static_cast<OgreScene *>(scene), queries, out, err)) {
+        mLastError = err;
+        return false;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // R5 — RAY-TRACED REFLECTIONS. The consumer, in the same TU as the structures.
 //
@@ -2502,13 +3956,64 @@ struct ReflectParams {
     float prevRayRight2[4] = {};
     float prevRayDown2[4] = {};
     float prevFwd2[4] = {};
+    /// THE SURFACE CACHE (PHOTON-CARDS-2): x = the instance-table entries bound
+    /// (0 = no cache — the card read declines every hit), y = the card records,
+    /// z = the footprint gate in card texels (kCardFootprintTexels), w = the
+    /// per-slot geometry-row entries bound (0 = the hit's normal is the ray's).
+    float cards[4] = {};
+    /// THE HIT RECORD (PHOTON-HIT-SHADE-1; rq_reflect.comp's hitList, hitSun,
+    /// hitSun2).
+    float hitList[4] = {};
+    float hitSun[4] = {};
+    float hitSun2[4] = {};
 };
+
+/// The card read's footprint gate (Types.h kCardFootprintTexels).
+/// `JAHSHAKA_CARD_FOOTPRINT_K` is a MEASUREMENT switch, not a mode: the sweep
+/// that chose the constant (test_rt_reflect --footprint-sweep) sets it per arm.
+float cardFootprintTexels() {
+    if (const char *e = std::getenv("JAHSHAKA_CARD_FOOTPRINT_K")) return float(std::atof(e));
+    return kCardFootprintTexels;
+}
 
 void put3(float *dst, const Ogre::Vector3 &v, float w) {
     dst[0] = v.x; dst[1] = v.y; dst[2] = v.z; dst[3] = w;
 }
 
 }   // namespace
+
+// TWO SAMPLERS, AND WHICH IS WHICH MATTERS. The G-buffer and the depth are read
+// at exactly one texel — a linear tap across a depth discontinuity reconstructs a
+// position on neither surface — so they are POINT. The voxel volumes and the sky
+// cube are continuous fields and are LINEAR, with a clamped address mode so a
+// sample at a volume's face does not wrap to the other side of the world.
+// THE TIER'S OWN, made by whichever job needs them first (PHOTON-GATHER-1d): they
+// were made by the reflection's pipeline alone, and the gather borrowed them only
+// because the reflection's record ran first on every PrePassUse pass — a
+// gather-only chain that no longer asks the reflection anything bound a NULL
+// sampler (a driver segfault in vkUpdateDescriptorSets).
+bool RayQueryTier::ensureSamplers(std::string &err) {
+    if (mPointSampler && mLinearSampler) return true;
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    if (!mPointSampler && vkCreateSampler(mVk, &si, nullptr, &mPointSampler) != VK_SUCCESS) {
+        mPointSampler = VK_NULL_HANDLE;
+        err = "rayquery: vkCreateSampler (point) failed";
+        return false;
+    }
+    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    if (!mLinearSampler && vkCreateSampler(mVk, &si, nullptr, &mLinearSampler) != VK_SUCCESS) {
+        mLinearSampler = VK_NULL_HANDLE;
+        err = "rayquery: vkCreateSampler (linear) failed";
+        return false;
+    }
+    return true;
+}
 
 bool RayQueryTier::makeReflectPipeline(std::string &err) {
     VkDescriptorSetLayoutBinding b[kReflectBindings] = {};
@@ -2528,11 +4033,36 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 12 voxelY[]
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 13 voxelZ[]
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 14 sky cube
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 15 the card table
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 16 the card instance table
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 17 the card Depth layer
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 the card Radiance layer
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 19 the per-slot geometry row
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 20 the geometry rows
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 21 voxelCovP[] (PHOTON-VOXEL-4)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 22 voxelCovN[]
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 23 voxelPosP[]
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 24 voxelPosN[]
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 25 the GPU scene's instances (HIT-SHADE-1)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 26 the hit list's records
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 27 ...its destinations
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 28 ...its buffer (counters + aux)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 29 voxelBack[] (PHOTON-VOXEL-5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 voxelNrm[]
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 31 the card Indirect layer (CARDS-5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 32 ...Emissive
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 33 ...ShadowRough
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 34 ...Albedo
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 ...Normal
     };
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
         b[i].descriptorType = types[i];
-        b[i].descriptorCount = (i >= 10u && i <= 13u) ? kMaxReflectCascades : 1u;
+        b[i].descriptorCount =
+            ((i >= 10u && i <= 13u) ||
+             (i >= kReflectCovBinding && i < kReflectCovBinding + kReflectSplitKinds) ||
+             (i >= kReflectSideBinding && i < kReflectSideBinding + kReflectSideKinds))
+                ? kMaxReflectCascades : 1u;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo sli{};
@@ -2596,47 +4126,31 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     // Sized for kMaxTimedScenes views' worth of rings, which is the same ceiling
     // the timestamp pool uses and far more views than a product frame draws.
     const unsigned sets = kMaxTimedScenes * kReflectRing;
-    VkDescriptorPoolSize sizes[4] = {};
+    VkDescriptorPoolSize sizes[5] = {};
     sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     sizes[0].descriptorCount = sets;
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     sizes[1].descriptorCount = sets;
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[2].descriptorCount = sets * 5u;
+    sizes[2].descriptorCount = sets * 7u;   // + the hit list's two (HIT-SHADE-1)
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[3].descriptorCount = sets * (3u + 4u * kMaxReflectCascades + 1u);
+    // kRayVoxelKinds arrays a cascade (level 0's back side and normal among them,
+    // PHOTON-VOXEL-5), and the card read's view term (PHOTON-CARDS-5).
+    sizes[3].descriptorCount = sets * (3u + unsigned(kRayVoxelKinds) * kMaxReflectCascades + 1u + 2u +
+                                       SurfaceCache::kViewLayers);
+    sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sizes[4].descriptorCount = sets * 6u;   // + the instances and the list's buffer
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     dpi.maxSets = sets;
-    dpi.poolSizeCount = 4;
+    dpi.poolSizeCount = 5;
     dpi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mReflectPool) != VK_SUCCESS) {
         err = "rayquery/reflect: vkCreateDescriptorPool failed";
         return false;
     }
-    // TWO SAMPLERS, AND WHICH IS WHICH MATTERS. The G-buffer and the depth are
-    // read at exactly one texel — a linear tap across a depth discontinuity
-    // reconstructs a position on neither surface — so they are POINT. The voxel
-    // volumes and the sky cube are continuous fields and are LINEAR, with a
-    // clamped address mode so a sample at a volume's face does not wrap to the
-    // other side of the world.
-    VkSamplerCreateInfo si{};
-    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.maxLod = VK_LOD_CLAMP_NONE;
-    if (vkCreateSampler(mVk, &si, nullptr, &mPointSampler) != VK_SUCCESS) {
-        err = "rayquery/reflect: vkCreateSampler (point) failed";
-        return false;
-    }
-    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    if (vkCreateSampler(mVk, &si, nullptr, &mLinearSampler) != VK_SUCCESS) {
-        err = "rayquery/reflect: vkCreateSampler (linear) failed";
-        return false;
-    }
+    if (!ensureSamplers(err)) return false;
     if (mTimestampPeriod > 0.0f) {
         VkQueryPoolCreateInfo qci{};
         qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
@@ -2740,6 +4254,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
         retireSet(rv.sets[i]);
         rv.sets[i] = VK_NULL_HANDLE;
         retire(rv.params[i]);
+        retire(rv.geomRowOfSlot[i]);
     }
     for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.dist[i]); }
     if (rv.hasQueryBase) mReflectQuerySlots &= ~(uint32_t(1) << rv.querySlot);
@@ -2764,8 +4279,38 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
     }
 }
 
+RayQueryTier::EyeBasisF RayQueryTier::eyeBasis(bool ortho, const Ogre::Vector3 &pos,
+                                               const Ogre::Quaternion &rot, float el, float er,
+                                               float et, float eb) {
+    EyeBasisF e;
+    const Ogre::Vector3 f = rot * Ogre::Vector3::NEGATIVE_UNIT_Z;
+    const Ogre::Vector3 r = rot * Ogre::Vector3::UNIT_X;
+    const Ogre::Vector3 u = rot * Ogre::Vector3::UNIT_Y;
+    put3(e.camPos, pos, ortho ? 0.0f : 1.0f);
+    put3(e.rayTL, r * el + u * et + (ortho ? Ogre::Vector3::ZERO : f), 0.0f);
+    put3(e.rayRight, r * (er - el), 0.0f);
+    put3(e.rayDown, u * (eb - et), 0.0f);
+    put3(e.fwd, f, 0.0f);
+    return e;
+}
+
+// A target uv t is the shot's (t - x0) / w, hence rayTL' = rayTL - rayRight x0/w
+// - rayDown y0/h, rayRight' = rayRight / w, rayDown' = rayDown / h. The bars
+// hold cleared depth and every job declines them before any ray.
+void RayQueryTier::expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned fullW,
+                                     unsigned fullH) {
+    if (!cd.letterbox || !fullH) return;
+    float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    chain::letterboxRect(cd.letterboxAspect, float(fullW) / float(fullH), shot);
+    for (int k = 0; k < 3; ++k) {
+        e.rayTL[k] -= e.rayRight[k] * shot[0] / shot[2] + e.rayDown[k] * shot[1] / shot[3];
+        e.rayRight[k] /= shot[2];
+        e.rayDown[k] /= shot[3];
+    }
+}
+
 void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
-                                 Ogre::CompositorPass *pass) {
+                                 Ogre::CompositorPass *pass, const HitListBinding &hit) {
     if (!isOpen() || mReflectFailed || !view || !pass) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
@@ -2851,7 +4396,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // hit, so the finest one that can answer does. In the single-volume arm
     // there is one. R5 works in both shapes and the cascade flag gates nothing
     // here.
-    Ogre::TextureGpu *vox[kMaxReflectCascades][4] = {};
+    Ogre::TextureGpu *vox[kMaxReflectCascades][kRayVoxelKinds] = {};   // kRayVoxelKinds' order
     Ogre::Vector3 voxOrigin[kMaxReflectCascades], voxSize[kMaxReflectCascades],
                   voxCell[kMaxReflectCascades];
     /// THE CASCADE'S RADIANCE MULTIPLIER (DRAG-1, RENDER_AUDIT PHOTON F2).
@@ -2876,7 +4421,18 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const bool aniso = lighting->isAnisotropic() && tex[1] && tex[2] && tex[3];
         if (voxCount == 0) anisotropic = aniso;
         else if (anisotropic != aniso) return;   // one shader path per dispatch
-        for (int i = 0; i < 4; ++i) vox[voxCount][i] = tex[i] ? tex[i] : tex[0];
+        // BY NAME (RQ-COV-SLOT-1): the isotropic volume, the three directional ones (the
+        // isotropic volume stands in on a Low chain, whose shader never reads them) and
+        // the coverage from VctLighting's own index.
+        vox[voxCount][0] = tex[0];
+        for (int i = 1; i < 4; ++i) vox[voxCount][i] = (aniso && tex[i]) ? tex[i] : tex[0];
+        for (unsigned h = 0; h < 2u; ++h) {
+            Ogre::TextureGpu *cov = tex[lighting->coverageIndex(h)], *pos = tex[lighting->positionIndex(h)];
+            vox[voxCount][4 + h] = cov ? cov : tex[0];
+            vox[voxCount][6 + h] = pos ? pos : tex[0];
+        }
+        vox[voxCount][8] = aniso && tex[lighting->backIndex()] ? tex[lighting->backIndex()] : tex[0];
+        vox[voxCount][9] = aniso && tex[lighting->normalIndex()] ? tex[lighting->normalIndex()] : tex[0];
         voxOrigin[voxCount] = voxelizer->getVoxelOrigin();
         voxSize[voxCount]   = voxelizer->getVoxelSize();
         voxCell[voxCount]   = voxelizer->getVoxelCellSize();
@@ -2901,6 +4457,21 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // flat environment when there is no cube (OgreScene::rayEnvironment).
     const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();
     Ogre::TextureGpu *skyTex = rayEnv.cube;
+    // ---- THE SURFACE CACHE THE HITS READ FIRST (PHOTON-CARDS-2, SC-1d) -------
+    // Its two tables and two atlas layers, when the scene holds a built cache
+    // (OgreScene::updateSurfaceCache — the `cards` row); without one the read
+    // is bound to the stand-ins with zero slots and every hit reads the voxels.
+    const SurfaceCache *cardCache = scene->mSurfaceCache.get();
+    Ogre::UavBufferPacked *cardTable = cardCache ? cardCache->cardBuffer() : nullptr;
+    Ogre::UavBufferPacked *cardInstances = cardCache ? cardCache->instanceBuffer() : nullptr;
+    Ogre::TextureGpu *cardDepth = cardCache ? cardCache->depthLayer() : nullptr;
+    Ogre::TextureGpu *cardRadiance = cardCache ? cardCache->radianceLayer() : nullptr;
+    Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
+    if (cardCache) cardCache->viewLayers(cardView);
+    bool cardViewBound = true;
+    for (Ogre::TextureGpu *t : cardView) cardViewBound = cardViewBound && t;
+    const bool cardsBound = cardTable && cardInstances && cardDepth && cardRadiance &&
+                            cardViewBound && cardCache->cardRecords() > 0u;
 
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
@@ -2982,16 +4553,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // frustums, and having two copies of it is how they would drift apart.
     const auto makeEye = [ortho](const Ogre::Vector3 &pos, const Ogre::Quaternion &rot,
                                  float el, float er, float et, float eb) {
-        EyeBasisF e;
-        const Ogre::Vector3 f = rot * Ogre::Vector3::NEGATIVE_UNIT_Z;
-        const Ogre::Vector3 r = rot * Ogre::Vector3::UNIT_X;
-        const Ogre::Vector3 u = rot * Ogre::Vector3::UNIT_Y;
-        put3(e.camPos, pos, ortho ? 0.0f : 1.0f);
-        put3(e.rayTL, r * el + u * et + (ortho ? Ogre::Vector3::ZERO : f), 0.0f);
-        put3(e.rayRight, r * (er - el), 0.0f);
-        put3(e.rayDown, u * (eb - et), 0.0f);
-        put3(e.fwd, f, 0.0f);
-        return e;
+        return eyeBasis(ortho, pos, rot, el, er, et, eb);
     };
     // THE EYES, OR THE ONE CAMERA. A stereo view whose eyes have not been
     // pushed yet declines: tracing the head's frustum across a two-eye target
@@ -3026,6 +4588,20 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // one day. Under the measurement arm above it IS read, and reading the
         // same basis for both halves is exactly what the arm reproduces.
         eyeB[1] = eyeB[0];
+    }
+    // THE LETTERBOX (SSR-LETTERBOX-1's ray half). Under a constrained-aspect
+    // camera the picture is the target's INNER rectangle (chain::letterboxRect),
+    // while this pass addresses the whole target: so the image basis is
+    // EXPANDED to the target — the same conjugation the march takes in its
+    // pass buffer, here on the CPU so no shader line moves. A target uv t is the
+    // shot's (t - x0) / w, hence rayTL' = rayTL - rayRight x0/w - rayDown y0/h,
+    // rayRight' = rayRight / w, rayDown' = rayDown / h. The bars hold cleared
+    // depth and are declined before any ray; the previous-frame basis is the
+    // expanded one too (rv.prev is written from eyeB below), so the
+    // reprojection's uv spans the same target.
+    {
+        const ChainDesc cd = view->chainDesc();
+        for (int i = 0; i < 2; ++i) expandEyeToTarget(eyeB[i], cd, fullW, fullH);
     }
     memcpy(pp.camPos, eyeB[0].camPos, sizeof(pp.camPos));
     memcpy(pp.rayTL, eyeB[0].rayTL, sizeof(pp.rayTL));
@@ -3138,6 +4714,42 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
     // stereo shape, exactly where the previous basis is withheld above).
     pp.stereo[1] = float(rv.historyFrames);
+    pp.cards[0] = cardsBound ? float(cardCache->instanceSlots()) : 0.0f;
+    pp.cards[1] = cardsBound ? float(cardCache->cardRecords()) : 0.0f;
+    pp.cards[2] = cardFootprintTexels();
+    // ---- THE HIT'S GEOMETRIC NORMAL: the per-slot row table (a copy per frame in
+    // flight) and the GPU scene's geometry rows, flushed first (a row staged but
+    // not uploaded is a zero address - the trap file's GPU SCENE TABLES rule) and
+    // the table pointer re-read here, never cached across a frame.
+    detail::GpuScene &gpuScn = scene->gpuScene();
+    if (gpuScn.live()) gpuScn.flushGeomRows();
+    Ogre::UavBufferPacked *geomRows = gpuScn.live() ? gpuScn.geomBuffer() : nullptr;
+    uint32_t geomSlots = geomRows ? uint32_t(sa.geomRowOfSlot.size()) : 0u;
+    if (geomSlots) {
+        RawBuffer &rb = rv.geomRowOfSlot[ring];
+        const VkDeviceSize want = VkDeviceSize(geomSlots) * sizeof(uint32_t);
+        if (rb.buffer && rb.size < want) retire(rb);
+        if (!rb.buffer &&
+            !makeBuffer(std::max<VkDeviceSize>(want, 1024u), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                        false, rb, err))
+            geomSlots = 0u;
+        else
+            std::memcpy(rb.mapped, sa.geomRowOfSlot.data(), size_t(want));
+    }
+    pp.cards[3] = float(geomSlots);
+    // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the decode shades, the sun ray.
+    pp.hitList[0] = float(hit.capacity);
+    pp.hitList[1] = float(hit.width);
+    pp.hitList[2] = float(hit.instanceEntries);
+    pp.hitList[3] = hit.on ? 1.0f : 0.0f;
+    pp.hitSun[0] = hit.toSun[0];
+    pp.hitSun[1] = hit.toSun[1];
+    pp.hitSun[2] = hit.toSun[2];
+    pp.hitSun[3] = hit.sun ? 1.0f : 0.0f;
+    pp.hitSun2[0] = float(hit.sunMask);
+    pp.hitSun2[1] = hit.lift;
+    pp.hitSun2[2] = hit.sunRange;
+    pp.hitSun2[3] = hit.farLift;
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -3190,7 +4802,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     ub.buffer = rv.params[ring].buffer;
     ub.range = sizeof(ReflectParams);
     VkDescriptorImageInfo sampled[3] = {}, storage[5] = {},
-                          volumes[4][kMaxReflectCascades] = {}, sky{};
+                          volumes[kRayVoxelKinds][kMaxReflectCascades] = {}, sky{};
     Ogre::TextureGpu *const sampledSrc[3] = { normalTex, roughTex, depthTex };
     for (int i = 0; i < 3; ++i) {
         sampled[i].sampler = mPointSampler;
@@ -3207,7 +4819,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     storage[3].imageView = rv.dist[prev].view;
     storage[4].imageView = rv.dist[cur].view;
     for (int i = 0; i < 5; ++i) storage[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    for (int axis = 0; axis < 4; ++axis)
+    for (int axis = 0; axis < kRayVoxelKinds; ++axis)
         for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
             const unsigned src = c < voxCount ? c : (voxCount ? voxCount - 1u : 0u);
             Ogre::TextureGpu *t = voxCount ? vox[src][axis] : nullptr;
@@ -3222,7 +4834,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // index is undefined behaviour, not a black sample — which is what the 1x1
     // black stand-ins above are for. A slot still empty here is a failure to
     // make one, and declining the frame is the honest answer.
-    for (int axis = 0; axis < 4; ++axis)
+    for (int axis = 0; axis < kRayVoxelKinds; ++axis)
         for (unsigned c = 0; c < kMaxReflectCascades; ++c)
             if (!volumes[axis][c].imageView) { bail("a voxel view is null"); return; }
     if (!sky.imageView) { bail("the sky view is null"); return; }
@@ -3253,6 +4865,100 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     w[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[14].pImageInfo = &sky;
+    for (unsigned k = 0; k < kReflectSplitKinds; ++k) {
+        w[kReflectCovBinding + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kReflectCovBinding + k].descriptorCount = kMaxReflectCascades;
+        w[kReflectCovBinding + k].pImageInfo = volumes[4 + k];
+    }
+    for (unsigned k = 0; k < kReflectSideKinds; ++k) {   // PHOTON-VOXEL-5: level 0's back, the normal
+        w[kReflectSideBinding + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kReflectSideBinding + k].descriptorCount = kMaxReflectCascades;
+        w[kReflectSideBinding + k].pImageInfo = volumes[8 + k];
+    }
+    // THE CARD READ'S FOUR (15-18): the cache's own, or the stand-ins.
+    VkDescriptorBufferInfo cardBufs[2] = {};
+    VkDescriptorImageInfo cardImgs[2] = {};
+    {
+        Ogre::UavBufferPacked *const bufs[2] = { cardTable, cardInstances };
+        for (int i = 0; i < 2; ++i) {
+            if (cardsBound) {
+                auto *bi = static_cast<Ogre::VulkanBufferInterface *>(bufs[i]->getBufferInterface());
+                cardBufs[i].buffer = bi->getVboName();
+                cardBufs[i].offset = VkDeviceSize(bufs[i]->_getFinalBufferStart()) *
+                                     bufs[i]->getBytesPerElement();
+                cardBufs[i].range = bufs[i]->getTotalSizeBytes();
+            } else {
+                cardBufs[i].buffer = mDummyStorage.buffer;
+                cardBufs[i].range = VK_WHOLE_SIZE;
+            }
+            w[kReflectCardBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w[kReflectCardBinding + i].pBufferInfo = &cardBufs[i];
+        }
+        Ogre::TextureGpu *const layers[2] = { cardDepth, cardRadiance };
+        for (int i = 0; i < 2; ++i) {
+            cardImgs[i].sampler = mPointSampler;
+            cardImgs[i].imageView = cardsBound ? sampledView(layers[i]) : mDummyFlat.view;
+            cardImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            w[kReflectCardBinding + 2 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[kReflectCardBinding + 2 + i].pImageInfo = &cardImgs[i];
+        }
+        if (!cardImgs[0].imageView || !cardImgs[1].imageView || !cardBufs[0].buffer ||
+            !cardBufs[1].buffer) {
+            bail("a card-read binding is null");
+            return;
+        }
+    }
+    // THE CARD READ'S VIEW TERM (31-35, PHOTON-CARDS-5): the cache's five, or
+    // the flat stand-in.
+    VkDescriptorImageInfo cardViewImgs[SurfaceCache::kViewLayers] = {};
+    for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
+        cardViewImgs[i].sampler = mPointSampler;
+        cardViewImgs[i].imageView = cardsBound ? sampledView(cardView[i]) : mDummyFlat.view;
+        cardViewImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (!cardViewImgs[i].imageView) { bail("a card view-term binding is null"); return; }
+        w[kReflectCardViewBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kReflectCardViewBinding + i].pImageInfo = &cardViewImgs[i];
+    }
+    // THE HIT'S GEOMETRIC NORMAL (19, 20): the tables, or the stand-in with zero
+    // slots bound (the shader then faces the reversed ray).
+    VkDescriptorBufferInfo geomBufs[2] = {};
+    if (geomSlots) {
+        geomBufs[0].buffer = rv.geomRowOfSlot[ring].buffer;
+        geomBufs[0].range = VK_WHOLE_SIZE;
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(geomRows->getBufferInterface());
+        geomBufs[1].buffer = bi->getVboName();
+        geomBufs[1].offset = VkDeviceSize(geomRows->_getFinalBufferStart()) * geomRows->getBytesPerElement();
+        geomBufs[1].range = geomRows->getTotalSizeBytes();
+    } else {
+        for (VkDescriptorBufferInfo &g : geomBufs) { g.buffer = mDummyStorage.buffer; g.range = VK_WHOLE_SIZE; }
+    }
+    for (int i = 0; i < 2; ++i) {
+        w[kReflectGeomBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[kReflectGeomBinding + i].pBufferInfo = &geomBufs[i];
+    }
+    // THE HIT RECORD (25-28, PHOTON-HIT-SHADE-1): the list, or the stand-ins.
+    VkDescriptorBufferInfo hitBufs[2] = {};
+    hitBufs[0].buffer = hit.instances ? hit.instances : mDummyStorage.buffer;
+    hitBufs[0].offset = hit.instances ? hit.instancesOffset : 0u;
+    hitBufs[0].range = hit.instances ? hit.instancesRange : VK_WHOLE_SIZE;
+    hitBufs[1].buffer = hit.buf ? hit.buf : mDummyStorage.buffer;
+    hitBufs[1].offset = hit.buf ? hit.bufOffset : 0u;
+    hitBufs[1].range = hit.buf ? hit.bufRange : VK_WHOLE_SIZE;
+    VkDescriptorImageInfo hitImgs[2] = {};
+    {
+        const VkImageView views[2] = { hit.ids, hit.dest };
+        for (int i = 0; i < 2; ++i) {
+            if (!views[i]) { bail("a hit-list view is null"); return; }
+            hitImgs[i].imageView = views[i];
+            hitImgs[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            w[kReflectHitBinding + 1 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[kReflectHitBinding + 1 + i].pImageInfo = &hitImgs[i];
+        }
+    }
+    w[kReflectHitBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[kReflectHitBinding].pBufferInfo = &hitBufs[0];
+    w[kReflectHitBinding + 3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[kReflectHitBinding + 3].pBufferInfo = &hitBufs[1];
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -3285,13 +4991,29 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < voxCount; ++c)
-            for (int axis = 0; axis < 4; ++axis)
+            for (int axis = 0; axis < kRayVoxelKinds; ++axis)
                 if (vox[c][axis])
                     solver.resolveTransition(trans, vox[c][axis], Ogre::ResourceLayout::Texture,
                                              Ogre::ResourceAccess::Read, computeStage);
         if (skyTex)
             solver.resolveTransition(trans, skyTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
+        // THE CARD READ'S INPUTS: the Radiance layer the CardLight job wrote
+        // (a UAV) and the Depth layer the capture copied into, read as
+        // textures; the two tables syncBuffers uploaded, read as buffers; and
+        // the view term's five (PHOTON-CARDS-5), read as textures.
+        if (cardsBound) {
+            for (Ogre::TextureGpu *t : { cardDepth, cardRadiance })
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+            for (Ogre::TextureGpu *t : cardView)
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+            for (Ogre::UavBufferPacked *b : { cardTable, cardInstances })
+                solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
+        }
+        if (geomSlots)
+            solver.resolveTransition(trans, geomRows, Ogre::ResourceAccess::Read, computeStage);
         mRs->executeResourceTransition(trans);
     }
 
@@ -3309,6 +5031,27 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
+    // ---- THE FIRST HALF ENDS HERE (PHOTON-HIT-SHADE-1): the hits no cache
+    // shades are in the hit list; the decode pass shades them and the write-back
+    // completes their texels' means before finishReflect filters.
+    rv.finishPending = true;
+    rv.finishRing = ring;
+    rv.traceW = traceW;
+    rv.traceH = traceH;
+    rv.curIdx = cur;
+    rv.rays = traceW * traceH;
+    ++rv.frame;
+}
+
+void RayQueryTier::finishReflect(const ReflectPassListener *key) {
+    auto it = mReflects.find(key);
+    if (it == mReflects.end() || !it->second.finishPending) return;
+    ReflectView &rv = it->second;
+    rv.finishPending = false;
+    const unsigned ring = rv.finishRing;
+    const unsigned traceW = rv.traceW, traceH = rv.traceH;
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
     // THE MEAN IS WRITTEN; NOW IT IS READ BY ITS NEIGHBOURS. A plain memory
     // barrier is enough and an image barrier would be wrong: the temporal mean
     // stays in GENERAL for both passes and only the ACCESS has to be ordered.
@@ -3325,18 +5068,22 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // pipeline. Its timestamp is the SAME pair as the trace's, deliberately:
     // what a budget cares about is what the reflection costs, and the split
     // between tracing and filtering is ours, not the frame's.
+    // The set is the trace's (the same layout); a second command-buffer bind,
+    // since a scene pass ran between the two halves.
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
+                            &rv.sets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
     if (mReflectTimestamps && rv.hasQueryBase) {
-        const uint32_t base = rv.queryBase + (rv.frame % kFramesInFlight) * 2u;
+        // rv.frame was advanced by the trace: its pair is the previous slot's.
+        const unsigned tf = rv.frame - 1u;
+        const uint32_t base = rv.queryBase + (tf % kFramesInFlight) * 2u;
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mReflectTimestamps,
                             base + 1u);
-        ReflectView::Pending &pd = rv.pending[rv.frame % kFramesInFlight];
+        ReflectView::Pending &pd = rv.pending[tf % kFramesInFlight];
         pd.frame = frameNow();
         pd.live = true;
     }
-    rv.rays = traceW * traceH;
-    ++rv.frame;
 }
 
 // ---------------------------------------------------------------------------
@@ -3357,11 +5104,11 @@ void RayQueryTier::forgetGather(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
-    if (mGather) mGather->statsInto(scene, out);
+    if (mGather) mGather->statsInto(scene, scene->gatherRestKey(), scene->gatherRestartKey(), out);
 }
 
 void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
-                                Ogre::CompositorPass *pass) {
+                                Ogre::CompositorPass *pass, const HitListBinding &hit) {
     if (!isOpen() || !view || !pass) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
@@ -3405,9 +5152,14 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.depth = depthTex;
     in.width = depthTex->getWidth();
     in.height = depthTex->getHeight();
-    in.quality = scene->giParams().quality;
-    in.epicRow = view->postFx().ssr >= 2;
+    // THE TIER TABLE'S GATHER ROW (GA-TIERROW: the table, never the SSR row).
+    // A stereo view has declined above, so the column is the desktop one.
+    in.facts = giQualityFacts(scene->giParams().quality, GiViewProfile::Desktop,
+                              scene->giParams().epicTier)
+                   .gather;
     in.tuning = scene->gatherTuning();
+    in.restKey = scene->gatherRestKey();
+    in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
@@ -3419,7 +5171,16 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (in.cascadeCount == 0) in.anisotropic = aniso;
         else if (in.anisotropic != aniso) return;
         const unsigned c = in.cascadeCount;
-        for (int i = 0; i < 4; ++i) in.voxel[c][i] = tex[i] ? tex[i] : tex[0];
+        // BY NAME (RQ-COV-SLOT-1): as the reflection binds them.
+        in.voxel[c][0] = tex[0];
+        for (int i = 1; i < 4; ++i) in.voxel[c][i] = (aniso && tex[i]) ? tex[i] : tex[0];
+        for (unsigned h = 0; h < 2u; ++h) {
+            Ogre::TextureGpu *cov = tex[lighting->coverageIndex(h)], *pos = tex[lighting->positionIndex(h)];
+            in.voxel[c][4 + h] = cov ? cov : tex[0];
+            in.voxel[c][6 + h] = pos ? pos : tex[0];
+        }
+        in.voxel[c][8] = aniso && tex[lighting->backIndex()] ? tex[lighting->backIndex()] : tex[0];
+        in.voxel[c][9] = aniso && tex[lighting->normalIndex()] ? tex[lighting->normalIndex()] : tex[0];
         const Ogre::Vector3 og = voxelizer->getVoxelOrigin();
         const Ogre::Vector3 sz = voxelizer->getVoxelSize();
         const Ogre::Vector3 cl = voxelizer->getVoxelCellSize();
@@ -3444,35 +5205,978 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         for (int i = 0; i < 3; ++i) in.skyColour[i] = rayEnv.colour[i];
     }
 
-    // ---- the camera's basis (rq_reflect.comp's reconstruction) -------------
+    // ---- THE SURFACE CACHE THE HITS READ FIRST (GA-1e) ----------------------
+    // The reflection trace's four bindings, taken from the same place by the
+    // same rule (recordReflect): the scene's built cache, or nothing (the
+    // stand-ins are bound and every hit reads the voxels).
+    {
+        const SurfaceCache *cache = scene->mSurfaceCache.get();
+        Ogre::UavBufferPacked *table = cache ? cache->cardBuffer() : nullptr;
+        Ogre::UavBufferPacked *instances = cache ? cache->instanceBuffer() : nullptr;
+        Ogre::TextureGpu *depthLayer = cache ? cache->depthLayer() : nullptr;
+        Ogre::TextureGpu *radianceLayer = cache ? cache->radianceLayer() : nullptr;
+        if (table && instances && depthLayer && radianceLayer && cache->cardRecords() > 0u) {
+            in.cardTable = table;
+            in.cardInstances = instances;
+            in.cardDepth = depthLayer;
+            in.cardRadiance = radianceLayer;
+            cache->viewLayers(in.cardView);
+            in.cardSlots = cache->instanceSlots();
+            in.cardRecords = cache->cardRecords();
+        }
+        in.cardFootprintTexels = cardFootprintTexels();
+    }
+    // ...AND THE HIT'S GEOMETRIC NORMAL: the per-slot row table the TLAS was
+    // written with and the GPU scene's rows, FLUSHED first (a row staged but not
+    // uploaded is a zero address — the trap file's GPU SCENE TABLES rule) and the
+    // table pointer re-read here, never cached across a frame.
+    {
+        detail::GpuScene &gpuScn = scene->gpuScene();
+        if (gpuScn.live()) gpuScn.flushGeomRows();
+        Ogre::UavBufferPacked *rows = gpuScn.live() ? gpuScn.geomBuffer() : nullptr;
+        if (rows && !sa.geomRowOfSlot.empty()) {
+            in.geomRows = rows;
+            in.geomRowOfSlot = &sa.geomRowOfSlot;
+        }
+    }
+
+    // ---- THE CAMERA'S BASIS: the ray tier's one eye basis (eyeBasis), the
+    // LETTERBOX folded in exactly as the reflection and the sun contact fold it
+    // (expandEyeToTarget) — a probe's pixel and the shot's inner rectangle agree.
     const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
-    const Ogre::Vector3 camPos = cam->getDerivedPosition();
     const Ogre::Quaternion q = cam->getDerivedOrientation();
-    const Ogre::Vector3 fwd = q * Ogre::Vector3::NEGATIVE_UNIT_Z;
-    const Ogre::Vector3 right = q * Ogre::Vector3::UNIT_X;
-    const Ogre::Vector3 up = q * Ogre::Vector3::UNIT_Y;
     Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
     cam->getFrustumExtents(fl, fr, ft, fb,
                            ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
+    EyeBasisF eye = eyeBasis(ortho, cam->getDerivedPosition(), q, float(fl), float(fr),
+                             float(ft), float(fb));
+    expandEyeToTarget(eye, view->chainDesc(), in.width, in.height);
+    std::memcpy(in.camPos, eye.camPos, sizeof(in.camPos));
+    std::memcpy(in.rayTL, eye.rayTL, sizeof(in.rayTL));
+    std::memcpy(in.rayRight, eye.rayRight, sizeof(in.rayRight));
+    std::memcpy(in.rayDown, eye.rayDown, sizeof(in.rayDown));
+    std::memcpy(in.fwd, eye.fwd, sizeof(in.fwd));
     const auto put = [](float dst[3], const Ogre::Vector3 &v) {
         dst[0] = float(v.x); dst[1] = float(v.y); dst[2] = float(v.z);
     };
-    in.camPos[0] = float(camPos.x); in.camPos[1] = float(camPos.y);
-    in.camPos[2] = float(camPos.z); in.camPos[3] = ortho ? 0.0f : 1.0f;
-    put(in.rayTL, right * fl + up * ft + (ortho ? Ogre::Vector3::ZERO : fwd));
-    put(in.rayRight, right * (fr - fl));
-    put(in.rayDown, up * (fb - ft));
-    put(in.fwd, fwd);
-    put(in.viewAxisX, right);
-    put(in.viewAxisY, up);
-    put(in.viewAxisZ, -fwd);              // Ogre's view space looks down -Z
+    put(in.viewAxisX, q * Ogre::Vector3::UNIT_X);
+    put(in.viewAxisY, q * Ogre::Vector3::UNIT_Y);
+    put(in.viewAxisZ, -(q * Ogre::Vector3::NEGATIVE_UNIT_Z));   // view space looks down -Z
     const Ogre::Vector2 projAB = cam->getProjectionParamsAB();
     in.projA = float(projAB.x);
     in.projB = float(projAB.y);
     in.farClip = float(cam->getFarClipDistance());
 
+    // THE HIT LIST (PHOTON-HIT-SHADE-1): a far hit, a mover's, a rigged item's
+    // and a static hit no cache answers are appended for the decode.
+    in.hit = hit;
     if (!mGather) mGather = new ScreenProbeGather(*this);
     mGather->record(key, in);
+}
+
+// ---------------------------------------------------------------------------
+// HARD SUN CONTACT SHADOWS — the tier's half (PHOTON-RAYS-1, RY-R3;
+// SPECS/photon/C4_RAYS_BEYOND_REFLECTIONS_DESIGN.md section 1).
+//
+// ONE DISPATCH PER VIEW FRAME in the reflect listener's bracket (the gather's
+// shape): one ray per texel from the prepass' surface towards the sun, tMax the
+// contact range, the caster copies of the near field only, opaque only; the
+// answer an R8 texture the PBS pass folds into the sun's shadow term as
+// min( map, ray ). Deterministic per pixel per frame: no sample sequence, no
+// history, nothing to reproject.
+namespace {
+
+/// The parameter block, std140, mirroring rq_sun_contact.comp's `Params`
+/// member for member (every member a vec4, laid out identically to C).
+struct SunContactParams {
+    float camPos[4] = {};
+    float rayTL[4] = {};
+    float rayRight[4] = {};
+    float rayDown[4] = {};
+    float fwd[4] = {};
+    float projParams[4] = {};
+    float viewAxisX[4] = {};
+    float viewAxisY[4] = {};
+    float viewAxisZ[4] = {};
+    float toSun[4] = {};
+    float resolution[4] = {};
+    float knobs[4] = {};
+};
+constexpr unsigned kSunContactBindings = 5u;
+/// THE LIFT, in full-resolution pixel footprints: the near copy's tolerance
+/// (kRayFootprintTolerance, one) plus one of margin — see rq_sun_contact.comp.
+constexpr float kSunContactLiftFootprints = 2.0f;
+/// THE FADE BAND: the last 20 % of the range hands the ray's answer over to the
+/// map (the design's 10-20 %; the SSR rim's shape) — rq_sun_contact.comp.
+/// Measured on the side edge of a 5 cm board's shadow at 15 m (gi.sun_contact,
+/// the adjacent 5 cm step across the range's end): 15.1 codes with no fade,
+/// 7.6 at 10 %, 5.4 at 15 %, 3.3-4.7 at 20 % (the map's own edge: 1.1-1.3).
+constexpr float kSunContactFadeFraction = 0.2f;
+/// THE BIAS RULE's floor, world units: the lift never falls below a millimetre
+/// however close the camera stands (depth reconstruction's own precision).
+constexpr float kSunContactMinBias = 0.001f;
+
+/// The storage format of the visibility texture. R8 is an EXTENDED storage
+/// format (shaderStorageImageExtendedFormats), not a core-mandatory one — so it
+/// is asked of the device here, once, and a device that cannot store it runs
+/// without the contact term rather than refusing the whole ray tier (the
+/// tier-wide table in rayStorageFormatRefused is for the images every ray job
+/// needs).
+bool sunContactFormatStores(VkPhysicalDevice pd) {
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(pd, VK_FORMAT_R8_UNORM, &props);
+    return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+}
+
+}   // namespace
+
+bool RayQueryTier::makeSunContactPipeline(std::string &err) {
+    if (!mDev || !mDev->mPhysicalDevice || !sunContactFormatStores(mDev->mPhysicalDevice)) {
+        err = "the device cannot store to R8_UNORM (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)";
+        return false;
+    }
+    VkDescriptorSetLayoutBinding b[kSunContactBindings] = {};
+    const VkDescriptorType types[kSunContactBindings] = {
+        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 0 tlas
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 1 params
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 2 gBufNormals
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 3 sceneDepth
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 4 sunVis
+    };
+    for (unsigned i = 0; i < kSunContactBindings; ++i) {
+        b[i].binding = i;
+        b[i].descriptorType = types[i];
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo sli{};
+    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sli.bindingCount = kSunContactBindings;
+    sli.pBindings = b;
+    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mSunSetLayout) != VK_SUCCESS) {
+        err = "vkCreateDescriptorSetLayout failed";
+        return false;
+    }
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mSunSetLayout;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mSunPipeLayout) != VK_SUCCESS) {
+        err = "vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_sunContactSpv);
+    smi.pCode = krq_sunContactSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mSunModule) != VK_SUCCESS) {
+        err = "vkCreateShaderModule failed (the build-time SPIR-V is not loadable)";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mSunModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mSunPipeLayout;
+    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mSunPipeline) != VK_SUCCESS) {
+        err = "vkCreateComputePipelines failed";
+        return false;
+    }
+    // kMaxTimedScenes views' worth of rings — the reflection's ceiling.
+    const unsigned sets = kMaxTimedScenes * kReflectRing;
+    VkDescriptorPoolSize sizes[4] = {};
+    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    sizes[0].descriptorCount = sets;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    sizes[1].descriptorCount = sets;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[2].descriptorCount = sets * 2u;
+    sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    sizes[3].descriptorCount = sets;
+    VkDescriptorPoolCreateInfo dpi{};
+    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = sets;
+    dpi.poolSizeCount = 4;
+    dpi.pPoolSizes = sizes;
+    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mSunPool) != VK_SUCCESS) {
+        err = "vkCreateDescriptorPool failed";
+        return false;
+    }
+    // POINT: the depth and the normal are read at exactly one texel.
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    if (vkCreateSampler(mVk, &si, nullptr, &mSunSampler) != VK_SUCCESS) {
+        err = "vkCreateSampler failed";
+        return false;
+    }
+    if (mTimestampPeriod > 0.0f) {
+        VkQueryPoolCreateInfo qci{};
+        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qci.queryCount = kMaxTimedScenes * kFramesInFlight * 2u;
+        vkCreateQueryPool(mVk, &qci, nullptr, &mSunTimestamps);
+    }
+    return true;
+}
+
+void RayQueryTier::readSunContactTimestamps(SunContactView &sv) {
+    if (!mSunTimestamps || !sv.hasQueryBase) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (unsigned i = 0; i < kFramesInFlight; ++i) {
+        SunContactView::Pending &pd = sv.pending[i];
+        // The reflection's rule, and its reason: `<`, not `<=` (the ring is
+        // kFramesInFlight deep and a slot is reused after that many frames).
+        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
+        uint64_t v[4] = {};
+        const uint32_t base = sv.queryBase + i * 2u;
+        if (vkGetQueryPoolResults(mVk, mSunTimestamps, base, 2, sizeof(v), v, sizeof(uint64_t) * 2u,
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
+                VK_SUCCESS &&
+            v[1] && v[3] && v[2] >= v[0])
+            sv.gpuMs = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
+        pd.live = false;
+    }
+}
+
+void RayQueryTier::dropSunContact(SunContactView &sv) {
+    // THE REGISTRATION FIRST: the listener holds a raw pointer to the texture
+    // that is about to be retired (GATHER-0's D1, the same rule).
+    if (sv.sceneMgr) FogHlmsListener::setSunContact(sv.sceneMgr, nullptr, 1u);
+    for (unsigned i = 0; i < kReflectRing; ++i) {
+        retireSet(sv.sets[i], mSunPool);
+        sv.sets[i] = VK_NULL_HANDLE;
+        retire(sv.params[i]);
+    }
+    retireTexture(sv.vis);
+    if (sv.hasQueryBase) mSunQuerySlots &= ~(uint32_t(1) << sv.querySlot);
+    sv.hasQueryBase = false;
+}
+
+void RayQueryTier::forgetSunContact(const ReflectPassListener *key) {
+    auto it = mSunContacts.find(key);
+    if (it == mSunContacts.end()) return;
+    dropSunContact(it->second);
+    mSunContacts.erase(it);
+}
+
+void RayQueryTier::finishSunContact(const ReflectPassListener *key) {
+    auto it = mSunContacts.find(key);
+    if (it == mSunContacts.end() || !it->second.finishPending) return;
+    SunContactView &sv = it->second;
+    sv.finishPending = false;
+    if (!sv.vis) return;
+    // ...AND NOW THE PIXEL SHADER READS IT: ours to order, since the scene
+    // pass does not know the texture exists (it arrives through the listener).
+    {
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, sv.vis, Ogre::ResourceLayout::Texture,
+                                 Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        mRs->executeResourceTransition(trans);
+    }
+    // THE PROPERTY AND THE TEXTURE TOGETHER, PASS-SCOPED: taken away by
+    // releaseSunContactBinding when this pass ends.
+    FogHlmsListener::setSunContact(sv.sceneMgr, sv.vis, sv.divisor);
+}
+
+void RayQueryTier::releaseSunContactBinding(const ReflectPassListener *key) {
+    auto it = mSunContacts.find(key);
+    if (it == mSunContacts.end() || !it->second.sceneMgr) return;
+    FogHlmsListener::setSunContact(it->second.sceneMgr, nullptr, 1u);
+}
+
+void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus &st) const {
+    for (const auto &kv : mSunContacts) {
+        const SunContactView &sv = kv.second;
+        if (sv.scene != scene) continue;
+        if (!sv.ran) {
+            if (st.reason.empty()) st.reason = sv.reason;
+            continue;
+        }
+        st.running = true;
+        st.width = sv.w; st.height = sv.h;
+        st.targetW = sv.fullW; st.targetH = sv.fullH;
+        st.divisor = sv.divisor;
+        st.rays += sv.rays;
+        st.range = sv.range;
+        for (int i = 0; i < 3; ++i) st.toSun[i] = sv.toSun[i];
+        if (sv.gpuMs > st.gpuMs) st.gpuMs = sv.gpuMs;
+        if (sv.cpuMs > st.cpuMs) st.cpuMs = sv.cpuMs;
+        st.reason.clear();
+    }
+    if (!st.running && mSunFailed) st.reason = mSunFailReason;
+}
+
+void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *view,
+                                    Ogre::CompositorPass *pass) {
+    if (!isOpen() || !view || !pass) return;
+    OgreScene *scene = view->ogreScene();
+    Ogre::Camera *cam = view->camera();
+    if (!scene || !cam) return;
+    if (!scene->sunContactWanted()) {
+        // OFF IS FREE AND CLEAN: a view that was casting and stopped gives its
+        // texture back and stops binding it (the gather's rule).
+        forgetSunContact(key);
+        return;
+    }
+    const auto cpuStart = Clock::now();
+    SunContactView &sv = mSunContacts[key];
+    sv.scene = scene;
+    sv.sceneMgr = scene->mSceneMgr;
+    sv.ran = false;
+    sv.rays = 0;
+    /// EVERY EARLY RETURN IS A LEGITIMATE "not this frame": nothing is
+    /// registered, the property is not set, and the pass shades with the shadow
+    /// map alone — the picture without the row. The reason is kept for the
+    /// status, because a row that silently does nothing is the worst outcome.
+    const auto decline = [&sv](const char *why) { sv.reason = why; };
+    readSunContactTimestamps(sv);
+
+    auto sceneIt = mScenes.find(scene);
+    if (sceneIt == mScenes.end()) { decline("the scene has no ray structures yet"); return; }
+    SceneAs &sa = sceneIt->second;
+    if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) {
+        decline("the scene's top-level structure is empty");
+        return;
+    }
+    // NEVER IN VR (the design's VR column): the chain already declines the row
+    // for a stereo view (`ChainDesc::sunContact`); this is the job's own copy of
+    // the rule, so a two-eye target is never traced as one image.
+    if (view->stereo()) { decline("a stereo view (never in VR)"); return; }
+    if (mSunFailed) { decline("the contact pipeline is unavailable on this device"); return; }
+    if (!mSunPipeline) {
+        std::string err;
+        if (!makeSunContactPipeline(err)) {
+            mSunFailed = true;
+            mSunFailReason = "sun contact off: " + err;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: " + mSunFailReason + " (the shadow map renders alone)");
+            decline("the contact pipeline is unavailable on this device");
+            return;
+        }
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: sun contact shadows ON (PHOTON R3) — one ray per texel towards the sun");
+    }
+
+    // ---- THE SUN: the pass' first directional SHADOW CASTER ----------------
+    // The one the pixel's first-light term belongs to: HlmsPbs writes the
+    // directional casters into `light0Buf.lights[]` in the shadow node's order
+    // (OgreHlmsPbs.cpp fillBuffersFor), and the prepass' shadow term — the
+    // fShadow the answer is folded into — is that light's map. A pass with no
+    // shadow node, or a node holding no directional caster, has no sun term to
+    // correct (the piece's hlms_num_shadow_map_lights gate says the same).
+    //
+    // THE LIST IS CURRENT BECAUSE OF THE PREPASS, not because of this pass (audit
+    // F6): this runs in passPreExecute, BEFORE the PrePassUse pass' own
+    // `shadowNode->_update` (OgreCompositorPassScene.cpp:238 vs :259). It is this
+    // frame's list only because the PrePassCreate pass names the SAME shadow
+    // node (OgreChain.cpp, SHADOW_NODE_FIRST_ONLY) and ran first. A chain whose
+    // prepass stops naming the node would hand this read last frame's casters.
+    Ogre::Vector3 toSun = Ogre::Vector3::ZERO;
+    {
+        const Ogre::CompositorShadowNode *sn =
+            static_cast<Ogre::CompositorPassScene *>(pass)->getShadowNode();
+        if (sn) {
+            for (const Ogre::LightClosest &lc : sn->getShadowCastingLights()) {
+                if (lc.light && lc.light->getType() == Ogre::Light::LT_DIRECTIONAL) {
+                    toSun = -lc.light->getDerivedDirection();
+                    break;
+                }
+            }
+        }
+    }
+    if (toSun.squaredLength() < 1e-12f) { decline("no directional shadow caster in the pass"); return; }
+    toSun.normalise();
+
+    // ---- THE CHAIN'S TEXTURES (the gather's two, by the same names) --------
+    Ogre::TextureGpu *normalTex = nullptr, *depthTex = nullptr;
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    if (!node) return;
+    try {
+        normalTex = node->getDefinedTexture(Ogre::IdString("jahGBufNormals"));
+        depthTex = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+    } catch (Ogre::Exception &) { decline("the chain carries no prepass"); return; }
+    if (!normalTex || !depthTex) { decline("the chain carries no prepass"); return; }
+    const unsigned fullW = depthTex->getWidth(), fullH = depthTex->getHeight();
+    if (!fullW || !fullH) return;
+
+    // ---- THE RESOLUTION: the row, or the tier's (half at Low and Medium) ----
+    const SunContactDesc &row = scene->sunContact();
+    unsigned divisor = 1u;
+    switch (row.resolution) {
+    case SunContactResolution::Full: divisor = 1u; break;
+    case SunContactResolution::Half: divisor = 2u; break;
+    case SunContactResolution::Auto:
+    default: divisor = scene->giParams().quality == GiQuality::High ? 1u : 2u; break;
+    }
+    // CEILING, so every pixel's `iFragCoord / divisor` lands inside the texture.
+    const unsigned w = (fullW + divisor - 1u) / divisor, h = (fullH + divisor - 1u) / divisor;
+
+    // ---- THE TEXTURE, resident for good and remade only on a resize --------
+    if (!sv.vis || sv.w != w || sv.h != h) {
+        FogHlmsListener::setSunContact(sv.sceneMgr, nullptr, 1u);
+        retireTexture(sv.vis);
+        // `Uav` and nothing else — the gather's irradiance target's reasoning:
+        // born in GENERAL with the pin's own barrier, SAMPLED because it is a
+        // texture, never Reinterpretable.
+        Ogre::TextureGpuManager *tm = mRs->getTextureGpuManager();
+        static unsigned sSerial = 0u;
+        Ogre::TextureGpu *t = tm->createTexture("JahSunContact/" + std::to_string(++sSerial),
+                                                Ogre::GpuPageOutStrategy::Discard,
+                                                Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+        t->setResolution(w, h, 1u);
+        t->setPixelFormat(Ogre::PFG_R8_UNORM);
+        t->setNumMipmaps(1u);
+        t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+        sv.vis = t;
+        sv.w = w;
+        sv.h = h;
+    }
+    sv.fullW = fullW;
+    sv.fullH = fullH;
+    sv.divisor = divisor;
+
+    if (!sv.hasQueryBase && mSunTimestamps) {
+        for (unsigned s = 0; s < kMaxTimedScenes; ++s) {
+            if (mSunQuerySlots & (uint32_t(1) << s)) continue;
+            mSunQuerySlots |= uint32_t(1) << s;
+            sv.querySlot = s;
+            sv.queryBase = s * kFramesInFlight * 2u;
+            sv.hasQueryBase = true;
+            break;
+        }
+    }
+
+    std::string err;
+    const unsigned ring = sv.frame % kReflectRing;
+    if (!sv.params[ring].buffer &&
+        !makeBuffer(sizeof(SunContactParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
+                    sv.params[ring], err)) {
+        decline("the parameter buffer could not be made");
+        return;
+    }
+    if (!sv.sets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mSunPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mSunSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &sv.sets[ring]) != VK_SUCCESS) {
+            sv.sets[ring] = VK_NULL_HANDLE;
+            decline("no descriptor set");
+            return;
+        }
+    }
+
+    // ---- THE PARAMETERS: the ray tier's eye basis, letterbox folded in -----
+    SunContactParams pp{};
+    const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
+    const Ogre::Quaternion q = cam->getDerivedOrientation();
+    Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
+    cam->getFrustumExtents(fl, fr, ft, fb,
+                           ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
+    EyeBasisF eye = eyeBasis(ortho, cam->getDerivedPosition(), q, float(fl), float(fr),
+                             float(ft), float(fb));
+    expandEyeToTarget(eye, view->chainDesc(), fullW, fullH);
+    memcpy(pp.camPos, eye.camPos, sizeof(pp.camPos));
+    memcpy(pp.rayTL, eye.rayTL, sizeof(pp.rayTL));
+    memcpy(pp.rayRight, eye.rayRight, sizeof(pp.rayRight));
+    memcpy(pp.rayDown, eye.rayDown, sizeof(pp.rayDown));
+    memcpy(pp.fwd, eye.fwd, sizeof(pp.fwd));
+    const Ogre::Vector2 projAB = cam->getProjectionParamsAB();
+    pp.projParams[0] = projAB.x;
+    pp.projParams[1] = projAB.y;
+    pp.projParams[2] = cam->getFarClipDistance();
+    pp.projParams[3] = kSunContactFadeFraction;
+    put3(pp.viewAxisX, q * Ogre::Vector3::UNIT_X, 0.0f);
+    put3(pp.viewAxisY, q * Ogre::Vector3::UNIT_Y, 0.0f);
+    put3(pp.viewAxisZ, -(q * Ogre::Vector3::NEGATIVE_UNIT_Z), 0.0f);   // view space looks down -Z
+    const float range = std::min(std::max(row.range, kSunContactMinRange), kSunContactMaxRange);
+    put3(pp.toSun, toSun, range);
+    pp.resolution[0] = float(w);
+    pp.resolution[1] = float(h);
+    pp.resolution[2] = float(fullW);
+    pp.resolution[3] = float(fullH);
+    // THE BIAS RULE's lift: kSunContactLiftFootprints FULL-RESOLUTION pixel
+    // footprints — per unit of view distance for a perspective camera (the
+    // basis is a ray whose forward component is 1), in world units for an
+    // orthographic one. Full resolution whatever the divisor: what the lift
+    // clears is the near copy's own tolerance, which the ray rule states in the
+    // VIEW's pixels (kRayFootprintTolerance), not in this job's texels.
+    {
+        const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] +
+                                     eye.rayRight[1] * eye.rayRight[1] +
+                                     eye.rayRight[2] * eye.rayRight[2]);
+        pp.knobs[0] = kSunContactLiftFootprints * span / float(fullW);
+    }
+    pp.knobs[1] = kSunContactMinBias;
+    // THE MASK: the shadow CASTERS' near copies (kRayMaskCaster) — a subset of
+    // the near field, which is the one field a ray this short lives in (A5b §4:
+    // one field per ray; the far copies are the coarse levels past the near
+    // length). An object whose shadows are off must cast no contact shadow
+    // either.
+    pp.knobs[2] = float(kRayMaskCaster);
+    pp.knobs[3] = float(divisor);
+    memcpy(sv.params[ring].mapped, &pp, sizeof(pp));
+    sv.range = range;
+    sv.toSun[0] = toSun.x; sv.toSun[1] = toSun.y; sv.toSun[2] = toSun.z;
+
+    // ---- THE DESCRIPTOR SET, rewritten every frame (uncached, retired views —
+    // the reflection's measured trap about a cached view of a recreated texture)
+    const auto sampledView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot =
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = t;
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+    asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asWrite.accelerationStructureCount = 1;
+    asWrite.pAccelerationStructures = &sa.tlas;
+    VkDescriptorBufferInfo ub{};
+    ub.buffer = sv.params[ring].buffer;
+    ub.range = sizeof(SunContactParams);
+    VkDescriptorImageInfo normals{}, depth{}, store{};
+    normals.sampler = mSunSampler;
+    normals.imageView = sampledView(normalTex);
+    normals.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    depth.sampler = mSunSampler;
+    depth.imageView = sampledView(depthTex);
+    depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = sv.vis;
+        slot.access = Ogre::ResourceAccess::Write;
+        slot.pixelFormat = sv.vis->getPixelFormat();
+        store.imageView = static_cast<Ogre::VulkanTextureGpu *>(sv.vis)->createView(slot, false);
+        retireView(store.imageView);
+        store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (!normals.imageView || !depth.imageView || !store.imageView) {
+        decline("an image view could not be made");
+        return;
+    }
+    VkWriteDescriptorSet wds[kSunContactBindings] = {};
+    for (unsigned i = 0; i < kSunContactBindings; ++i) {
+        wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[i].dstSet = sv.sets[ring];
+        wds[i].dstBinding = i;
+        wds[i].descriptorCount = 1;
+    }
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    wds[0].pNext = &asWrite;
+    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[1].pBufferInfo = &ub;
+    wds[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[2].pImageInfo = &normals;
+    wds[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[3].pImageInfo = &depth;
+    wds[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    wds[4].pImageInfo = &store;
+    vkUpdateDescriptorSets(mVk, kSunContactBindings, wds, 0, nullptr);
+
+    // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER, before the command buffer
+    // is taken (executeResourceTransition closes every encoder and may roll the
+    // queue over — the reflection's recorded reason).
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, sv.vis, Ogre::ResourceLayout::Uav,
+                                 Ogre::ResourceAccess::Write, computeStage);
+        for (Ogre::TextureGpu *t : { normalTex, depthTex })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+
+    // ---- THE DISPATCH -------------------------------------------------------
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) { decline("no command buffer"); return; }
+    {
+        // The frame monitor's row beside the gather's (`sun.contact`): free
+        // while the monitor is off, a GPU-timed row in a capture. `Camera`,
+        // not `None`: a view-dependent answer re-made every frame because the
+        // thing it describes is the picture.
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "sun.contact", mRs);
+        work.setUnits(w * h / 1000u);
+        const bool timed = mSunTimestamps && sv.hasQueryBase;
+        const uint32_t base = sv.queryBase + (sv.frame % kFramesInFlight) * 2u;
+        if (timed) {
+            vkCmdResetQueryPool(cmd, mSunTimestamps, base, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mSunTimestamps, base);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mSunPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mSunPipeLayout, 0, 1,
+                                &sv.sets[ring], 0, nullptr);
+        vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
+        if (timed) {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mSunTimestamps, base + 1u);
+            SunContactView::Pending &pd = sv.pending[sv.frame % kFramesInFlight];
+            pd.frame = frameNow();
+            pd.live = true;
+        }
+    }
+
+    // THE REGISTRATION IS THE SECOND HALF'S (finishSunContact, in front of the
+    // opaque pass that reads it — PHOTON-HIT-SHADE-1 split the ray jobs around
+    // the hit decode pass).
+    sv.finishPending = true;
+    sv.ran = true;
+    sv.reason.clear();
+    sv.rays = (unsigned long long)w * h;
+    sv.cpuMs = float(msSince(cpuStart));
+    ++sv.frame;
+}
+
+// ---------------------------------------------------------------------------
+// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the ray tier's half. The
+// surface cache selects the cards (OgreSurfaceCache.cpp, "The movers' shadow")
+// and hands over their records in the relight's layout; this records one ray
+// per texel towards the sun against the shadow-casting movers' near copies
+// (kRayMaskMoverCaster) into the cache's R8 mover-visibility layer.
+namespace {
+struct CardMoverParams {
+    float toSun[4] = {};
+    float knobs[4] = {};
+};
+constexpr unsigned kCardMoverBindings = 6u;
+/// Four timestamps a frame: the trace's pair and the relight's pair.
+constexpr unsigned kCardMoverQueries = 4u;
+/// The records ring's capacity: the relight list's (kMaxRelights, 80 B a card).
+constexpr unsigned kCardMoverMaxRecords = 1024u;
+constexpr unsigned kCardMoverRecordFloats = 20u;
+}   // namespace
+
+bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
+    if (!mDev || !mDev->mPhysicalDevice || !sunContactFormatStores(mDev->mPhysicalDevice)) {
+        err = "the device cannot store to R8_UNORM (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)";
+        return false;
+    }
+    if (!ensureSamplers(err)) return false;
+    VkDescriptorSetLayoutBinding b[kCardMoverBindings] = {};
+    const VkDescriptorType types[kCardMoverBindings] = {
+        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 0 tlas
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 1 params
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 2 the card records
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 3 cardDepth
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 4 cardNormal
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 5 moverVis
+    };
+    for (unsigned i = 0; i < kCardMoverBindings; ++i) {
+        b[i].binding = i;
+        b[i].descriptorType = types[i];
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo sli{};
+    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sli.bindingCount = kCardMoverBindings;
+    sli.pBindings = b;
+    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCmSetLayout) != VK_SUCCESS) {
+        err = "vkCreateDescriptorSetLayout failed";
+        return false;
+    }
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mCmSetLayout;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mCmPipeLayout) != VK_SUCCESS) {
+        err = "vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_cardMoversSpv);
+    smi.pCode = krq_cardMoversSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mCmModule) != VK_SUCCESS) {
+        err = "vkCreateShaderModule failed (the build-time SPIR-V is not loadable)";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mCmModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mCmPipeLayout;
+    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mCmPipeline) != VK_SUCCESS) {
+        err = "vkCreateComputePipelines failed";
+        return false;
+    }
+    const unsigned sets = kMaxTimedScenes * kReflectRing;
+    VkDescriptorPoolSize sizes[5] = {};
+    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    sizes[0].descriptorCount = sets;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    sizes[1].descriptorCount = sets;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sizes[2].descriptorCount = sets;
+    sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[3].descriptorCount = sets * 2u;
+    sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    sizes[4].descriptorCount = sets;
+    VkDescriptorPoolCreateInfo dpi{};
+    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = sets;
+    dpi.poolSizeCount = 5;
+    dpi.pPoolSizes = sizes;
+    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mCmPool) != VK_SUCCESS) {
+        err = "vkCreateDescriptorPool failed";
+        return false;
+    }
+    if (mTimestampPeriod > 0.0f) {
+        VkQueryPoolCreateInfo qci{};
+        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qci.queryCount = kMaxTimedScenes * kFramesInFlight * kCardMoverQueries;
+        vkCreateQueryPool(mVk, &qci, nullptr, &mCmTimestamps);
+    }
+    return true;
+}
+
+bool RayQueryTier::cardMoverQueries(CardMoverView &cv) {
+    if (!mCmTimestamps) return false;
+    if (cv.hasQueryBase) return true;
+    for (unsigned s = 0; s < kMaxTimedScenes; ++s) {
+        if (mCmQuerySlots & (uint32_t(1) << s)) continue;
+        mCmQuerySlots |= uint32_t(1) << s;
+        cv.querySlot = s;
+        cv.queryBase = s * kFramesInFlight * kCardMoverQueries;
+        cv.hasQueryBase = true;
+        return true;
+    }
+    return false;
+}
+
+void RayQueryTier::readCardMoverTimestamps(CardMoverView &cv) {
+    if (!mCmTimestamps || !cv.hasQueryBase) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (unsigned i = 0; i < kFramesInFlight; ++i) {
+        CardMoverView::Pending &pd = cv.pending[i];
+        if ((!pd.trace && !pd.relight) || uint32_t(now - pd.frame) < inFlight) continue;
+        const uint32_t base = cv.queryBase + i * kCardMoverQueries;
+        for (unsigned pair = 0; pair < 2u; ++pair) {
+            bool &live = pair ? pd.relight : pd.trace;
+            if (!live) continue;
+            uint64_t v[4] = {};
+            if (vkGetQueryPoolResults(mVk, mCmTimestamps, base + pair * 2u, 2, sizeof(v), v,
+                                      sizeof(uint64_t) * 2u,
+                                      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
+                    VK_SUCCESS &&
+                v[1] && v[3] && v[2] >= v[0]) {
+                const float ms = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
+                (pair ? cv.relightMs : cv.traceMs) = ms;
+            }
+            live = false;
+        }
+    }
+}
+
+bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) {
+    if (!isOpen() || !scene || !job.count || !job.records || !job.depth || !job.normal || !job.vis)
+        return false;
+    auto sceneIt = mScenes.find(scene);
+    if (sceneIt == mScenes.end()) return false;
+    SceneAs &sa = sceneIt->second;
+    if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) return false;
+    if (mCmFailed) return false;
+    if (!mCmPipeline) {
+        std::string err;
+        if (!makeCardMoverPipeline(err)) {
+            mCmFailed = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: card mover shadows off: " + err + " (the cards hold the still world's sun term alone)");
+            return false;
+        }
+    }
+    CardMoverView &cv = mCardMovers[scene];
+    readCardMoverTimestamps(cv);
+    const unsigned count = std::min(job.count, kCardMoverMaxRecords);
+    std::string err;
+    const unsigned ring = cv.frame % kReflectRing;
+    if (!cv.params[ring].buffer &&
+        !makeBuffer(sizeof(CardMoverParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
+                    cv.params[ring], err))
+        return false;
+    const VkDeviceSize recBytes = VkDeviceSize(kCardMoverMaxRecords) * kCardMoverRecordFloats * sizeof(float);
+    if (!cv.records[ring].buffer &&
+        !makeBuffer(recBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, cv.records[ring], err))
+        return false;
+    if (!cv.sets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mCmPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mCmSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &cv.sets[ring]) != VK_SUCCESS) {
+            cv.sets[ring] = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+    CardMoverParams pp{};
+    pp.toSun[0] = job.toSun.x; pp.toSun[1] = job.toSun.y; pp.toSun[2] = job.toSun.z;
+    pp.toSun[3] = job.range;
+    pp.knobs[0] = float(kRayMaskMoverCaster);
+    memcpy(cv.params[ring].mapped, &pp, sizeof(pp));
+    memcpy(cv.records[ring].mapped, job.records, size_t(count) * kCardMoverRecordFloats * sizeof(float));
+
+    const auto sampledView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot =
+            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = t;
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+    asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asWrite.accelerationStructureCount = 1;
+    asWrite.pAccelerationStructures = &sa.tlas;
+    VkDescriptorBufferInfo ub{}, rb{};
+    ub.buffer = cv.params[ring].buffer;
+    ub.range = sizeof(CardMoverParams);
+    rb.buffer = cv.records[ring].buffer;
+    rb.range = recBytes;
+    VkDescriptorImageInfo depth{}, normal{}, store{};
+    depth.sampler = mPointSampler;
+    depth.imageView = sampledView(job.depth);
+    depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    normal.sampler = mPointSampler;
+    normal.imageView = sampledView(job.normal);
+    normal.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = job.vis;
+        slot.access = Ogre::ResourceAccess::Write;
+        slot.pixelFormat = job.vis->getPixelFormat();
+        store.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.vis)->createView(slot, false);
+        retireView(store.imageView);
+        store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (!depth.imageView || !normal.imageView || !store.imageView) return false;
+    VkWriteDescriptorSet wds[kCardMoverBindings] = {};
+    for (unsigned i = 0; i < kCardMoverBindings; ++i) {
+        wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[i].dstSet = cv.sets[ring];
+        wds[i].dstBinding = i;
+        wds[i].descriptorCount = 1;
+    }
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    wds[0].pNext = &asWrite;
+    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[1].pBufferInfo = &ub;
+    wds[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wds[2].pBufferInfo = &rb;
+    wds[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[3].pImageInfo = &depth;
+    wds[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[4].pImageInfo = &normal;
+    wds[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    wds[5].pImageInfo = &store;
+    vkUpdateDescriptorSets(mVk, kCardMoverBindings, wds, 0, nullptr);
+
+    // THE LAYOUTS through Ogre's own solver, before the command buffer is taken:
+    // the capture's copies wrote Depth and Normal this frame; the relight that
+    // follows reads the layer as a UAV and its analyzeBarriers orders it after
+    // this write (the solver now knows the layer was written in compute).
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, job.vis, Ogre::ResourceLayout::Uav,
+                                 Ogre::ResourceAccess::Write, computeStage);
+        for (Ogre::TextureGpu *t : { job.depth, job.normal })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return false;
+    {
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Caster, 0, "cards.movers", mRs);
+        work.setUnits(count);
+        const bool timed = cardMoverQueries(cv);
+        const unsigned slot = frameNow() % kFramesInFlight;
+        const uint32_t base = cv.queryBase + slot * kCardMoverQueries;
+        if (timed) {
+            vkCmdResetQueryPool(cmd, mCmTimestamps, base, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mCmTimestamps, base);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCmPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCmPipeLayout, 0, 1,
+                                &cv.sets[ring], 0, nullptr);
+        vkCmdDispatch(cmd, kCardPageSize / 8u, kCardPageSize / 8u, count);
+        if (timed) {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mCmTimestamps, base + 1u);
+            CardMoverView::Pending &pd = cv.pending[slot];
+            if (pd.frame != frameNow()) { pd.frame = frameNow(); pd.relight = false; }
+            pd.trace = true;
+        }
+    }
+    ++cv.frame;
+    return true;
+}
+
+void RayQueryTier::timeCardRelight(OgreScene *scene, bool begin) {
+    if (!isOpen() || !mCmTimestamps || !scene) return;
+    auto it = mCardMovers.find(scene);
+    if (it == mCardMovers.end()) return;   // timed only once the scene has traced
+    CardMoverView &cv = it->second;
+    if (!cardMoverQueries(cv)) return;
+    const unsigned slot = frameNow() % kFramesInFlight;
+    const uint32_t base = cv.queryBase + slot * kCardMoverQueries + 2u;
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
+    if (begin) {
+        vkCmdResetQueryPool(cmd, mCmTimestamps, base, 2);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mCmTimestamps, base);
+    } else {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mCmTimestamps, base + 1u);
+        CardMoverView::Pending &pd = cv.pending[slot];
+        if (pd.frame != frameNow()) { pd.frame = frameNow(); pd.trace = false; }
+        pd.relight = true;
+    }
+}
+
+void RayQueryTier::cardMoverTimes(OgreScene *scene, float &traceMs, float &relightMs) {
+    auto it = mCardMovers.find(scene);
+    if (it == mCardMovers.end()) return;
+    readCardMoverTimestamps(it->second);
+    traceMs = it->second.traceMs;
+    relightMs = it->second.relightMs;
+}
+
+void RayQueryTier::forgetCardMovers(OgreScene *scene) {
+    auto it = mCardMovers.find(scene);
+    if (it == mCardMovers.end()) return;
+    for (unsigned i = 0; i < kReflectRing; ++i) {
+        retireSet(it->second.sets[i], mCmPool);
+        retire(it->second.params[i]);
+        retire(it->second.records[i]);
+    }
+    if (it->second.hasQueryBase) mCmQuerySlots &= ~(uint32_t(1) << it->second.querySlot);
+    mCardMovers.erase(it);
+}
+
+bool OgreScene::traceCardMovers(const CardMoverTrace &job) {
+    return mEngine && mEngine->mRayTier && mEngine->mRayTier->traceCardMovers(this, job);
+}
+void OgreScene::timeCardRelight(bool begin) {
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->timeCardRelight(this, begin);
+}
+void OgreScene::cardMoverTimes(float &traceMs, float &relightMs) {
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardMoverTimes(this, traceMs, relightMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -3500,6 +6204,8 @@ ReflectPassListener::~ReflectPassListener() {
         if (rs && !rs->isDeviceLost()) rs->flushCommands();
         mView->mEngine->mRayTier->forgetReflect(this);
         mView->mEngine->mRayTier->forgetGather(this);
+        mView->mEngine->mRayTier->forgetSunContact(this);
+        mView->mEngine->mRayTier->forgetHits(this);
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener could not be flushed away cleanly (" +
@@ -3510,29 +6216,40 @@ ReflectPassListener::~ReflectPassListener() {
         // it inherits a stranger's images.
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetHits(this); } catch (...) {}
     } catch (...) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener's teardown threw a non-Ogre exception",
             Ogre::LML_CRITICAL);
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetHits(this); } catch (...) {}
     }
 }
 
 void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (!pass || !mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
-    // THE PASS, BY WHAT IT DOES AND NOT BY ITS NAME. `PrePassUse` is Ogre's own
-    // word for "this pass shades with a prepass' G-buffers and the ssr texture"
-    // — it is the pass the trace must run before, and the one the compositor
-    // would break if anyone renamed a profiling string.
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
-    if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
-    mView->mEngine->mRayTier->recordReflect(this, mView, pass);
-    // GATHER-0 rides the SAME hook, and it has to: the probe's surface is the
-    // prepass' depth and normals, and the pixel that reads the gather's answer
-    // is shaded by the very pass this listener runs in front of.
-    mView->mEngine->mRayTier->recordGather(this, mView, pass);
+    if (!def) return;
+    // THE HIT DECODE PASS (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): every ray
+    // job TRACES in front of it — the sun contact, the reflection, the gather —
+    // because a hit no cache can shade is appended to the hit list this pass
+    // shades; HlmsAtom is armed for its length (endHitDecode disarms it).
+    if (def->mIdentifier == kHitDecodePassIdentifier) {
+        mView->mEngine->mRayTier->beginHitDecode(this, mView, pass);
+        return;
+    }
+    // THE PASS, BY WHAT IT DOES AND NOT BY ITS NAME. `PrePassUse` is Ogre's own
+    // word for "this pass shades with a prepass' G-buffers and the ssr texture"
+    // — the pass every ray job's answer is read by. The write-back, the
+    // reflection's filter, the gather's filter/SH/integrate and every job's
+    // pass-scoped registration run in front of it (and, where no decode pass ran
+    // this frame, the traces first).
+    if (def->mPrePassMode != Ogre::PrePassUse) return;
+    mView->mEngine->mRayTier->finishRayJobs(this, mView, pass);
 }
 
 /// GATHER-0 (fix round, D2). The registration made in `passPreExecute` names
@@ -3545,8 +6262,14 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
     if (!pass || !mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
-    if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
+    if (!def) return;
+    if (def->mIdentifier == kHitDecodePassIdentifier) {
+        mView->mEngine->mRayTier->endHitDecode(this);
+        return;
+    }
+    if (def->mPrePassMode != Ogre::PrePassUse) return;
     mView->mEngine->mRayTier->releaseGatherBinding(this);
+    mView->mEngine->mRayTier->releaseSunContactBinding(this);
 }
 
 void OgreView::dropReflectState() {
@@ -3559,6 +6282,8 @@ void OgreView::dropReflectState() {
     if (mRoot && mRoot->getRenderSystem()) mRoot->getRenderSystem()->flushCommands();
     mEngine->mRayTier->forgetReflect(mReflectListener.get());
     mEngine->mRayTier->forgetGather(mReflectListener.get());
+    mEngine->mRayTier->forgetSunContact(mReflectListener.get());
+    mEngine->mRayTier->forgetHits(mReflectListener.get());
 }
 
 void OgreView::syncReflectListener() {
@@ -3572,8 +6297,13 @@ void OgreView::syncReflectListener() {
     // (GATHER-1a): the gather's row is the SCENE's, so a view whose scene turns
     // it on has to gain the prepass it reads its probes' surfaces from. One
     // `chainDesc()` for both comparisons.
-    if (mChainRayReflect != chainDesc().rayReflect ||
-        mChainProbeGather != chainDesc().probeGather)
+    // ...and `ChainDesc::sunContact` (PHOTON-RAYS-1) the same again: the row
+    // is the scene's and it brings the prepass.
+    // ...AS THE PREPASS THEY ASK FOR (ChainDesc::prepass, PHOTON-GATHER-1d): a
+    // gather or sun-contact toggle where the prepass already runs is not a new
+    // graph and rebuilds nothing.
+    if (mChainRayReflect != chainDesc().rayReflect || mChainPrepass != chainDesc().prepass() ||
+        mChainHitDecode != chainDesc().hitDecode)
         rebuildWorkspaceDef();
     // The same arming rule as the planar and globals listeners, and the same
     // reason it is re-evaluated every frame: the shape above can change, and a
@@ -3602,7 +6332,7 @@ void OgreView::syncReflectListener() {
     // run in front of it.
     const ChainDesc shape = chainDesc();
     const bool wanted = mEnabled && mScene && mCamera && mEngine && mEngine->mRayTier != nullptr &&
-                        (shape.rayReflect || shape.probeGather);
+                        (shape.rayReflect || shape.probeGather || shape.sunContact);
     if (!wanted) {
         if (mReflectListener) {
             removeWorkspaceListener(mReflectListener.get());
@@ -3619,6 +6349,612 @@ void OgreView::syncReflectListener() {
 }
 
 // ---------------------------------------------------------------------------
+// THE HIT DECODE — the tier's half (PHOTON-HIT-SHADE-1; SPECS/atom/
+// D2_HIT_SHADING_DESIGN.md with the lead's F1-F8). A ray hit no cache can shade
+// is a pixel of a second visibility buffer: the traces append it to the chain's
+// hit list (jah_rq_hit_record.glsl), the chain's "Jahshaka hit decode" pass draws
+// HlmsAtom's decode over the list in HIT MODE, and rq_hit_composite.comp scatters
+// the decoded radiance into the reflection's mean and the gather's atlas — the
+// same arithmetic a card- or voxel-lit hit takes. One copy of the lighting.
+namespace {
+/// The sun of a pass: its shadow node's first directional caster (the light
+/// HlmsPbs's first-light shadow term belongs to — the sun contact's rule).
+bool passSun(Ogre::CompositorPass *pass, Ogre::Vector3 &toSun) {
+    toSun = Ogre::Vector3::ZERO;
+    if (!pass || pass->getType() != Ogre::PASS_SCENE) return false;
+    const Ogre::CompositorShadowNode *sn = static_cast<Ogre::CompositorPassScene *>(pass)->getShadowNode();
+    if (!sn) return false;
+    for (const Ogre::LightClosest &lc : sn->getShadowCastingLights()) {
+        if (lc.light && lc.light->getType() == Ogre::Light::LT_DIRECTIONAL) {
+            toSun = -lc.light->getDerivedDirection();
+            break;
+        }
+    }
+    if (toSun.squaredLength() < 1e-12f) return false;
+    toSun.normalise();
+    return true;
+}
+/// A read-only view of an Ogre UAV buffer as a raw descriptor.
+VkDescriptorBufferInfo rawBufferInfo(Ogre::UavBufferPacked *b) {
+    VkDescriptorBufferInfo info{};
+    auto *bi = static_cast<Ogre::VulkanBufferInterface *>(b->getBufferInterface());
+    info.buffer = bi->getVboName();
+    info.offset = VkDeviceSize(b->_getFinalBufferStart()) * b->getBytesPerElement();
+    info.range = b->getTotalSizeBytes();
+    return info;
+}
+/// The shadow ray's minimum lift off a hit (metres): the hit point is exact on
+/// the traced triangle to float precision, so a millimetre floor (and 1e-4 of the
+/// distance, jah_rq_hit_record.glsl) clears it.
+constexpr float kHitSunLift = 0.001f;
+}   // namespace
+
+bool RayQueryTier::ensureHitDummies(std::string &err) {
+    if (mHitDummiesReady) return true;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32B32A32_UINT, mHitDummyIds, err)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyColour, err)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32_UINT, mHitDummyDest, err)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_SFLOAT, mHitDummyDist, err)) return false;
+    mHitDummiesReady = true;
+    mHitDummiesNeedInit = true;
+    return true;
+}
+
+void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
+    if (!mHitDummiesNeedInit || !cmd) return;
+    mHitDummiesNeedInit = false;
+    VkImageMemoryBarrier b[4] = {};
+    ReflectImage *imgs[4] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist };
+    for (int i = 0; i < 4; ++i) {
+        b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b[i].srcQueueFamilyIndex = b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b[i].image = imgs[i]->image;
+        b[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b[i].subresourceRange.levelCount = 1;
+        b[i].subresourceRange.layerCount = 1;
+        b[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 4, b);
+}
+
+void RayQueryTier::hitStandIns(HitListBinding &out) {
+    out = HitListBinding();
+    std::string err;
+    if (!ensureHitDummies(err) || !ensureDummyImages(err)) return;
+    out.ids = mHitDummyIds.view;
+    out.dest = mHitDummyDest.view;
+}
+
+void RayQueryTier::readHitCounters(HitView &hv) {
+    if (!hv.readback.mapped) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    uint32_t newest = 0u;
+    bool any = false;
+    for (unsigned i = 0; i < kFramesInFlight; ++i) {
+        HitView::Pending &pd = hv.pending[i];
+        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
+        if (!any || int32_t(pd.frame - newest) > 0) {
+            const uint32_t *w = reinterpret_cast<const uint32_t *>(
+                static_cast<const unsigned char *>(hv.readback.mapped) + i * 16u);
+            hv.appended = w[0];
+            hv.dropped = w[1];
+            newest = pd.frame;
+            any = true;
+        }
+        pd.live = false;
+    }
+}
+
+bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view,
+                                  Ogre::CompositorPass *pass, HitListBinding &out) {
+    hitStandIns(out);
+    HitView &hv = mHits[key];
+    hv.live = false;
+    // `JAHSHAKA_HIT_LIST_OFF` — a MEASUREMENT switch, not a mode (read once): the
+    // traces bind no list, so a hit no cache shades has no sample this frame (the
+    // reflection keeps its history; the gather's ray reads zero) — the picture
+    // before PHOTON-HIT-SHADE-1, for attributing a moved hash to the records.
+    static const bool sListOff = std::getenv("JAHSHAKA_HIT_LIST_OFF") != nullptr;
+    if (sListOff) return false;
+    OgreScene *scene = view ? view->ogreScene() : nullptr;
+    Ogre::Camera *cam = view ? view->camera() : nullptr;
+    if (!scene || !cam || !pass || !out.ids) return false;
+    hv.scene = scene;
+    readHitCounters(hv);
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    if (!node) return false;
+    try {
+        hv.ids = node->getDefinedTexture(Ogre::IdString("jahHitIds"));
+        hv.dest = node->getDefinedTexture(Ogre::IdString("jahHitDest"));
+        hv.radiance = node->getDefinedTexture(Ogre::IdString("jahHitRadiance"));
+    } catch (Ogre::Exception &) { return false; }
+    if (!hv.ids || !hv.dest || !hv.radiance || !hv.ids->isUav()) return false;
+    detail::GpuScene &gs = scene->gpuScene();
+    Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
+    if (!instances) return false;
+    Ogre::VaoManager *vao = mRs->getVaoManager();
+    // THE LIST'S BUFFER, sized to the list: the four counter words, then two per
+    // record. Re-made when the list grows (Ogre's destroy is delayed past every
+    // frame in flight; every reader re-reads `hv.buf` before it binds).
+    {
+        const size_t words = 4u + 2u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
+        if (hv.buf && hv.buf->getNumElements() < words) {
+            vao->destroyUavBuffer(hv.buf);
+            hv.buf = nullptr;
+        }
+        if (!hv.buf) hv.buf = vao->createUavBuffer(words, 4u, Ogre::BB_FLAG_READONLY, nullptr, false);
+    }
+    std::string err;
+    if (!hv.readback.buffer &&
+        !makeBuffer(VkDeviceSize(kFramesInFlight) * 16u, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false,
+                    hv.readback, err))
+        return false;
+    hv.capacity = hv.ids->getWidth() * hv.ids->getHeight();
+    hv.width = hv.ids->getWidth();
+
+    // THE LAYOUTS through Ogre's solver, before the command buffer is taken (the
+    // reflection's rule: executeResourceTransition closes every encoder).
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        for (Ogre::TextureGpu *t : { hv.ids, hv.dest })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
+                                     computeStage);
+        solver.resolveTransition(trans, hv.buf, Ogre::ResourceAccess::ReadWrite, computeStage);
+        solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return false;
+    initHitDummies(cmd);
+    // THE COUNTER, ZEROED for this frame: every earlier reader (last frame's
+    // decode, write-back, readback copy) is ordered before the transfer.
+    const VkDescriptorBufferInfo bufInfo = rawBufferInfo(hv.buf);
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                             &b, 0, nullptr, 0, nullptr);
+        vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset, 16u, 0u);
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &b, 0, nullptr, 0, nullptr);
+    }
+    const auto uavView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = t;
+        slot.access = Ogre::ResourceAccess::Write;
+        slot.pixelFormat = t->getPixelFormat();
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    out.on = true;
+    out.ids = uavView(hv.ids);
+    out.dest = uavView(hv.dest);
+    if (!out.ids || !out.dest) { hitStandIns(out); return false; }
+    out.buf = bufInfo.buffer;
+    out.bufOffset = bufInfo.offset;
+    out.bufRange = bufInfo.range;
+    const VkDescriptorBufferInfo instInfo = rawBufferInfo(instances);
+    out.instances = instInfo.buffer;
+    out.instancesOffset = instInfo.offset;
+    out.instancesRange = instInfo.range;
+    out.instanceEntries = gs.slotCount();
+    out.capacity = hv.capacity;
+    out.width = hv.width;
+    Ogre::Vector3 toSun;
+    out.sun = passSun(pass, toSun);
+    out.toSun[0] = toSun.x; out.toSun[1] = toSun.y; out.toSun[2] = toSun.z;
+    out.sunMask = kRayMaskCaster;
+    // THE SUN RAY'S LENGTH: the camera's far plane (the world the frame draws),
+    // floored so an unbounded or tiny far plane still reaches past a room.
+    {
+        const float farClip = float(cam->getFarClipDistance());
+        out.sunRange = farClip > 0.0f ? std::max(farClip, 100.0f) : 10000.0f;
+    }
+    out.lift = kHitSunLift;
+    {
+        auto sit = mScenes.find(scene);
+        out.farLift = sit != mScenes.end() ? std::max(sit->second.farOverlap, kHitSunLift) : kHitSunLift;
+    }
+    hv.live = true;
+    return true;
+}
+
+bool RayQueryTier::decodeTwinsStale(OgreScene *scene) const {
+    if (!scene) return false;
+    auto it = mScenes.find(scene);
+    if (it == mScenes.end()) return false;
+    for (const SceneAs::DecodeWitness &w : it->second.decodeWitness) {
+        if (w.slot >= scene->mItemNodes.size()) continue;
+        const OgreScene::Node *nd = scene->mItemNodes[w.slot];
+        if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
+        const Ogre::SubItem *sub = nd->item->getSubItem(0);
+        if (sub->getDatablock() != w.db || sub->getHlmsHash() != w.hash ||
+            HlmsAtom::textureSetKeyOf(w.db) != w.texKey)
+            return true;
+    }
+    return false;
+}
+
+void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view,
+                                  Ogre::CompositorPass *pass) {
+    if (!view || !pass) return;
+    HitView &hv = mHits[key];
+    // THE CAMERA'S AUTO ASPECT IS HELD OFF FOR THE DECODE PASS, ARMED OR NOT: the
+    // pass renders into the list (W x 0.5625 H) whether or not it decodes, and an
+    // auto-aspect camera is re-aspected by every PASS_SCENE it renders
+    // (OgreCompositorPassScene.cpp) — the projection the pass' shaders read, and
+    // the aspect Ogre's PlanarReflections matches cameras by (measured: a frame
+    // whose decode was skipped re-aspected the camera and the VR eyes' PBS pass
+    // changed permutation, vr.warmup). endHitDecode restores it.
+    if (!hv.pinnedCam) {
+        hv.pinnedCam = view->camera();
+        if (hv.pinnedCam) {
+            hv.camAuto = hv.pinnedCam->getAutoAspectRatio();
+            hv.pinnedCam->setAutoAspectRatio(false);
+        }
+    }
+    if (!isOpen()) return;
+    hv.decodeFrame = frameNow();
+    HitListBinding hit;
+    prepareHitList(key, view, pass, hit);
+    // THE TRACES, in front of the decode (their records are what it shades). The
+    // sun contact rides the same hook: it reads the camera before this pass
+    // re-aspects anything, and its registration waits for the opaque pass.
+    recordSunContact(key, view, pass);
+    if (view->chainDesc().rayReflect) recordReflect(key, view, pass, hit);
+    recordGather(key, view, pass, hit);
+    if (!hv.live) return;
+    const bool reflected = mReflects.count(key) && mReflects[key].finishPending;
+    const bool gathered = mGather && mGather->tracedAtlas(key) != VK_NULL_HANDLE;
+    if (!reflected && !gathered) return;
+    // A STALE TWIN NEVER DRAWS: a PBS datablock that changed its permutation since
+    // updateScene's sync (the engine edits datablocks in place — the sky's manual
+    // cube taken away when a probe grid binds, mid-frame) leaves its twin a copy
+    // of the old state. A twin holding a manual cube under the pass' automatic
+    // probe array cannot compile (OgreSky.cpp's env-probe note), and a shader made
+    // to compile without it would still get the twin's BAKED texture set, one
+    // texture larger than its root layout's range — a descriptor write past the
+    // set (the pin's count assert is compiled out): the Xid 109s this lane's gate
+    // measured. This frame's records go unshaded (the write-back's "unshaded"
+    // answer); the next updateScene re-derives the twin.
+    if (decodeTwinsStale(view->ogreScene())) return;
+    // ARM THE DECODE for this pass alone: the source (the list and the GPU scene's
+    // tables, re-read now — they are re-created when they grow), the scene's
+    // decode draws shown, and the camera's auto aspect held off so the pass'
+    // projection is the view's own (the target is the list, not a picture: F7).
+    Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
+    auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+    OgreScene *scene = view->ogreScene();
+    if (!atom || !scene) return;
+    detail::GpuScene &gs = scene->gpuScene();
+    if (!gs.live()) return;
+    gs.flushGeomRows();
+    HlmsAtom::DecodeSource src;
+    src.ids = hv.ids;
+    src.instances = gs.instanceBuffer();
+    src.levels = gs.levelBuffer();
+    src.geomRows = gs.geomBuffer();
+    src.hitMode = true;
+    src.hitBuf = hv.buf;
+    atom->setDecodeSource(src);
+    atom->showSceneDecodes(scene->mSceneMgr, true);
+    hv.armedSm = scene->mSceneMgr;
+}
+
+void RayQueryTier::endHitDecode(const ReflectPassListener *key) {
+    auto it = mHits.find(key);
+    if (it == mHits.end()) return;
+    HitView &hv = it->second;
+    if (hv.pinnedCam) hv.pinnedCam->setAutoAspectRatio(hv.camAuto);
+    hv.pinnedCam = nullptr;
+    if (!hv.armedSm) return;
+    Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
+    if (auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr) {
+        atom->showSceneDecodes(hv.armedSm, false);
+        atom->setDecodeSource(HlmsAtom::DecodeSource());
+    }
+    hv.armedSm = nullptr;
+}
+
+void RayQueryTier::finishRayJobs(const ReflectPassListener *key, OgreView *view,
+                                 Ogre::CompositorPass *pass) {
+    if (!isOpen() || !view || !pass) return;
+    // DISARMED WHATEVER HAPPENED: a decode pass that threw never reaches its
+    // passPosExecute, and an armed HlmsAtom would decode every later pass of the
+    // frame in hit mode (measured once: the capture passes compiled hit-mode
+    // shaders against prepass state).
+    endHitDecode(key);
+    HitView &hv = mHits[key];
+    if (hv.decodeFrame != frameNow()) {
+        // NO DECODE PASS RAN THIS FRAME (a chain without one): the traces run
+        // here, with no list bound — a hit no cache shades then has no sample
+        // this frame (the write-back's "unshaded" answer).
+        HitListBinding none;
+        hitStandIns(none);
+        hv.live = false;
+        recordSunContact(key, view, pass);
+        if (view->chainDesc().rayReflect) recordReflect(key, view, pass, none);
+        recordGather(key, view, pass, none);
+    }
+    if (hv.live) recordHitComposite(key);
+    hv.live = false;
+    finishReflect(key);
+    if (mGather) mGather->finish(key);
+    finishSunContact(key);
+}
+
+void RayQueryTier::forgetHits(const ReflectPassListener *key) {
+    auto it = mHits.find(key);
+    if (it == mHits.end()) return;
+    endHitDecode(key);
+    HitView &hv = it->second;
+    for (unsigned i = 0; i < kReflectRing; ++i) {
+        retireSet(hv.sets[i], mCompPool);
+        hv.sets[i] = VK_NULL_HANDLE;
+        retire(hv.params[i]);
+    }
+    retire(hv.readback);
+    if (hv.buf && mRs && mRs->getVaoManager()) mRs->getVaoManager()->destroyUavBuffer(hv.buf);
+    hv.buf = nullptr;
+    mHits.erase(it);
+}
+
+void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const {
+    Ogre::HlmsManager *hm = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getHlmsManager() : nullptr;
+    auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+    for (const auto &kv : mHits) {
+        if (kv.second.scene != scene) continue;
+        st.hitRecords += kv.second.appended;
+        st.hitDropped += kv.second.dropped;
+        st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, kv.second.capacity);
+    }
+    if (atom && scene) st.hitDecodeDraws = int(atom->sceneDecodeCount(scene->mSceneMgr));
+}
+
+bool RayQueryTier::makeCompositePipeline(std::string &err) {
+    VkDescriptorSetLayoutBinding b[kHitCompositeBindings] = {};
+    const VkDescriptorType types[kHitCompositeBindings] = {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 the list's buffer (counters + aux)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the destinations
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 the decoded radiance
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the reflection's mean
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 ...its distances
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 the gather's atlas
+    };
+    for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
+        b[i].binding = i;
+        b[i].descriptorType = types[i];
+        b[i].descriptorCount = 1u;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo sli{};
+    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sli.bindingCount = kHitCompositeBindings;
+    sli.pBindings = b;
+    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCompSetLayout) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreateDescriptorSetLayout failed";
+        return false;
+    }
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mCompSetLayout;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mCompPipeLayout) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_hitCompositeSpv);
+    smi.pCode = krq_hitCompositeSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mCompModule) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreateShaderModule failed";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mCompModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mCompPipeLayout;
+    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mCompPipeline) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreateComputePipelines failed";
+        return false;
+    }
+    const unsigned sets = kMaxTimedScenes * kReflectRing;
+    VkDescriptorPoolSize sizes[4] = {};
+    sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    sizes[0].descriptorCount = sets;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sizes[1].descriptorCount = sets;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[2].descriptorCount = sets * 2u;
+    sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    sizes[3].descriptorCount = sets * 3u;
+    VkDescriptorPoolCreateInfo dpi{};
+    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = sets;
+    dpi.poolSizeCount = 4;
+    dpi.pPoolSizes = sizes;
+    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mCompPool) != VK_SUCCESS) {
+        err = "rayquery/hit: vkCreateDescriptorPool failed";
+        return false;
+    }
+    return ensureSamplers(err);
+}
+
+void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
+    auto it = mHits.find(key);
+    if (it == mHits.end() || !it->second.live || mCompFailed) return;
+    HitView &hv = it->second;
+    if (!mCompPipeline) {
+        std::string err;
+        if (!makeCompositePipeline(err)) {
+            mCompFailed = true;
+            Ogre::LogManager::getSingleton().logMessage("Jahshaka: the hit write-back is off — " + err);
+            return;
+        }
+    }
+    const unsigned ring = hv.frame % kReflectRing;
+    std::string err;
+    if (!hv.params[ring].buffer &&
+        !makeBuffer(16u, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, hv.params[ring], err))
+        return;
+    if (!hv.sets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mCompPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mCompSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &hv.sets[ring]) != VK_SUCCESS) {
+            hv.sets[ring] = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    // THE DESTINATIONS: the reflection's mean and distance of THIS frame (the
+    // pair the trace wrote), the gather's atlas the trace wrote — or stand-ins
+    // with the consumer's flag down (its records, if any, are skipped).
+    VkImageView histView = mHitDummyColour.view, distView = mHitDummyDist.view, atlasView = mHitDummyColour.view;
+    bool reflectBound = false, gatherBound = false;
+    if (auto rit = mReflects.find(key); rit != mReflects.end() && rit->second.finishPending) {
+        histView = rit->second.hist[rit->second.curIdx].view;
+        distView = rit->second.dist[rit->second.curIdx].view;
+        reflectBound = true;
+    }
+    if (mGather) {
+        if (VkImageView a = mGather->tracedAtlas(key)) { atlasView = a; gatherBound = true; }
+    }
+    const float pp[4] = { float(hv.capacity), float(hv.width), reflectBound ? 1.0f : 0.0f,
+                          gatherBound ? 1.0f : 0.0f };
+    std::memcpy(hv.params[ring].mapped, pp, sizeof(pp));
+
+    const auto sampledView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = t;
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    VkDescriptorBufferInfo ub{};
+    ub.buffer = hv.params[ring].buffer;
+    ub.range = 16u;
+    const VkDescriptorBufferInfo bufInfo = rawBufferInfo(hv.buf);
+    VkDescriptorImageInfo sampled[2] = {}, storage[3] = {};
+    Ogre::TextureGpu *const src[2] = { hv.dest, hv.radiance };
+    for (int i = 0; i < 2; ++i) {
+        sampled[i].sampler = mPointSampler;
+        sampled[i].imageView = sampledView(src[i]);
+        sampled[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (!sampled[i].imageView) return;
+    }
+    const VkImageView dst[3] = { histView, distView, atlasView };
+    for (int i = 0; i < 3; ++i) {
+        storage[i].imageView = dst[i];
+        storage[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        if (!storage[i].imageView) return;
+    }
+    VkWriteDescriptorSet w[kHitCompositeBindings] = {};
+    for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = hv.sets[ring];
+        w[i].dstBinding = i;
+        w[i].descriptorCount = 1;
+    }
+    w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    w[0].pBufferInfo = &ub;
+    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[1].pBufferInfo = &bufInfo;
+    for (int i = 0; i < 2; ++i) {
+        w[2 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[2 + i].pImageInfo = &sampled[i];
+    }
+    for (int i = 0; i < 3; ++i) {
+        w[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[4 + i].pImageInfo = &storage[i];
+    }
+    vkUpdateDescriptorSets(mVk, kHitCompositeBindings, w, 0, nullptr);
+
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        for (Ogre::TextureGpu *t : { hv.dest, hv.radiance })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                     computeStage);
+        solver.resolveTransition(trans, hv.buf, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
+    // The traces' writes to the mean and the atlas (compute, before the decode
+    // pass) are read and rewritten here.
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+    detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "hit.composite", mRs);
+    work.setUnits(unsigned(hv.appended / 1000ull));
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCompPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCompPipeLayout, 0, 1, &hv.sets[ring], 0,
+                            nullptr);
+    // ONE THREAD PER RECORD SLOT; a thread past this frame's count returns at once.
+    {
+        const uint32_t groups = std::max(1u, (hv.capacity + 63u) / 64u);
+        const uint32_t gx = std::min(groups, 65535u);
+        vkCmdDispatch(cmd, gx, (groups + gx - 1u) / gx, 1u);
+    }
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+    // THE COUNTERS, on their way to the host (read several frames late).
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+        VkBufferCopy region{};
+        region.srcOffset = bufInfo.offset;
+        region.dstOffset = VkDeviceSize(hv.frame % kFramesInFlight) * 16u;
+        region.size = 8u;
+        vkCmdCopyBuffer(cmd, bufInfo.buffer, hv.readback.buffer, 1, &region);
+        VkMemoryBarrier h{};
+        h.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        h.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        h.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &h, 0,
+                             nullptr, 0, nullptr);
+        HitView::Pending &pd = hv.pending[hv.frame % kFramesInFlight];
+        pd.frame = frameNow();
+        pd.live = true;
+    }
+    ++hv.frame;
+}
+
+// ---------------------------------------------------------------------------
 // THE ENGINE SIDE. Three methods and one frame hook; everything above is
 // private to this TU.
 void OgreEngine::setRayTracing(bool on) {
@@ -3630,11 +6966,66 @@ void OgreEngine::setRayTracing(bool on) {
         " (the no-rays switch)");
 }
 
+// THE TIER'S STORAGE FORMATS, ASKED OF THE DEVICE (RAY-FMT-CHECK, PHOTON P3).
+//
+// Every image the tier writes from a compute shader is a STORAGE image: the
+// reflection's temporal pair (the radiance mean, RGBA16F, and the distance pair,
+// RG32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
+// CORE-MANDATORY STORAGE FORMATS in Vulkan 1.0 (the spec's Required Format
+// Support; shaderStorageImageExtendedFormats covers the R16G16*, R16*, R8*,
+// A2B10G10R10 and B10G11R11 family, not these), so on a conformant driver this
+// check never refuses. It is kept as a DRIVER-DEFECT GUARD — one query per
+// device, one log line — because the alternative on a driver that got the table
+// wrong is `makeStorageImage` creating an image the device cannot store to and
+// the first dispatch being undefined behaviour rather than a refusal. A device
+// that lacks one is a no-rays device, and every consumer (the chain's
+// rayReflect, the cards' Auto, the status) reads that same answer.
+//
+// JAHSHAKA_RAY_DENY_STORAGE_FORMAT names a format (R16G16B16A16_SFLOAT or
+// R32G32_SFLOAT) to treat as unsupported: FAULT INJECTION, the refusal path's
+// only door on conformant hardware (a measurement switch for
+// gi.rt_reflect_format_refused_lavapipe, not a mode).
+namespace {
+struct RayStorageFormat { VkFormat format{}; const char *name{}; };
+constexpr RayStorageFormat kRayStorageFormats[] = {
+    { VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT" },   // the reflection mean, the gather atlas
+    { VK_FORMAT_R32G32_SFLOAT,       "R32G32_SFLOAT" },         // the reflection's distance pair
+};
+
+/// Empty when every format stores; otherwise the first one that does not.
+std::string rayStorageFormatRefused(VkPhysicalDevice pd) {
+    const char *deny = std::getenv("JAHSHAKA_RAY_DENY_STORAGE_FORMAT");
+    for (const RayStorageFormat &f : kRayStorageFormats) {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(pd, f.format, &props);
+        const bool stores = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+        const bool denied = deny && std::strcmp(deny, f.name) == 0;
+        if (!stores || denied) return std::string(f.name) + (denied ? " (denied by JAHSHAKA_RAY_DENY_STORAGE_FORMAT)" : "");
+    }
+    return std::string();
+}
+}   // namespace
+
 bool OgreEngine::rayQueryAvailable() const {
     if (mHeadless || !mRoot) return false;
     Ogre::VulkanRenderSystem *rs = dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem());
     Ogre::VulkanDevice *dev = rs ? rs->getVulkanDevice() : nullptr;
-    return dev && dev->hasRayQuery();
+    if (!dev || !dev->hasRayQuery() || !dev->mPhysicalDevice) return false;
+    // Asked ONCE per physical device: the answer is a property of the device,
+    // and this predicate is read every time a view describes its chain.
+    static VkPhysicalDevice sAsked = VK_NULL_HANDLE;
+    static bool sStores = false;
+    if (sAsked != dev->mPhysicalDevice) {
+        sAsked = dev->mPhysicalDevice;
+        const std::string refused = rayStorageFormatRefused(dev->mPhysicalDevice);
+        sStores = refused.empty();
+        if (!sStores)
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: ray-query tier refused - the device cannot store to " + refused +
+                " (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, optimal tiling), which the tier's "
+                "history images need; this is a no-rays device");
+    }
+    return sStores;
 }
 
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
@@ -3663,6 +7054,8 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     // return above (the no-rays switch) skips it, which is why
     // `RayQueryTier::close()` clears it too (D1).
     FogHlmsListener::clearProbeGather();
+    // ...and the sun contact's registration, the same backstop (PHOTON-RAYS-1).
+    FogHlmsListener::clearSunContact();
     for (OgreScene *s : drawn) {
         if (!s->rayTracingResolved()) continue;
         mRayTier->updateScene(s);
@@ -3671,14 +7064,74 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
 
 // ---------------------------------------------------------------------------
 /// IS THE SCREEN-PROBE GATHER ON FOR THIS SCENE? The project's row resolved
-/// against the machine, and the same shape `rayReflectionsWanted` has: the row
-/// says what the scene asks for and the machine answers whether it can. `Auto`
-/// is OFF at every tier until the gather's picture is filtered and temporally
-/// accumulated (GiParams::gather's note) — a tier may not select a correct but
-/// noisy estimate.
+/// against the TIER TABLE and the machine (PHOTON-GATHER-1d, the rule T-A), the
+/// same shape `rayReflectionsWanted` has: the row says what the scene asks for,
+/// the table says what `Auto` means at this tier — on at High, Epic and Medium,
+/// off at Low and in the VR column (`giQualityFacts(...).gather.on`) — and only
+/// under a GI mode that is on (there is no diffuse GI to estimate otherwise);
+/// the machine answers whether it can trace at all.
 bool OgreScene::probeGatherWanted() const {
-    if (mGi.gather != GiToggle::On) return false;
+    switch (mGi.gather) {
+    case GiToggle::Off: return false;
+    case GiToggle::On:  break;
+    default:
+        if (mGi.mode == GiMode::Off) return false;
+        if (!giQualityFacts(mGi.quality,
+                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
+                            mGi.epicTier)
+                 .gather.on)
+            return false;
+        break;
+    }
     return rayTracingResolved();
+}
+
+/// THE GATHER'S REST KEY (PHOTON-GATHER-1d): everything the gather's answer
+/// depends on besides the camera — the lighting (giLightingSerial: a light
+/// write, an injection landing), the geometry (the ray tier's own gate: the
+/// movement epoch and the ray rule's refits) and the surface cache the hits read
+/// first (its captures and relights). A frame whose key and camera equal the
+/// last frame's is a REST frame (ScreenProbeGather: the rest mean, the hold).
+unsigned long long OgreScene::gatherRestKey() const {
+    unsigned long long key = 1469598103934665603ull;
+    const auto fold = [&key](unsigned long long v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    fold(giLightingSerial());
+    fold(shadowEpoch() + rayLevelRefits());
+    if (mSurfaceCache) {
+        CardCacheStatus cs;
+        mSurfaceCache->fillStatus(cs);
+        fold(cs.captures);
+        fold(cs.relights);
+        fold(cs.indirectRelights);
+    }
+    return key;
+}
+
+/// THE RESTART KEY (PHOTON-GATHER-1d fix round): the discontinuities the pixel
+/// history cannot follow — the lighting (giLightingSerial: a light or sky write
+/// through refreshGiLighting, an injection landing, a cascade rebuild), a
+/// material write (the surface cache's precise door counts it; the voxels'
+/// re-inject moves the lighting serial) and the cloud layer's GI change. NOT
+/// the transform epoch: a mover's per-frame write is followed per pixel by the
+/// reprojection, and a scene with one would otherwise never settle.
+unsigned long long OgreScene::gatherRestartKey() const {
+    unsigned long long key = 1469598103934665603ull;
+    const auto fold = [&key](unsigned long long v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    fold(giLightingSerial());
+    fold(mCloudGiSerial);
+    if (mSurfaceCache) {
+        CardCacheStatus cs;
+        mSurfaceCache->fillStatus(cs);
+        fold(cs.invalidMaterial);
+        fold(cs.invalidLight);
+    }
+    return key;
 }
 
 /// The gather's numbers for `GiStatus`.
@@ -3686,6 +7139,30 @@ void OgreScene::gatherStatusInto(GatherStatus &out) const {
     out = GatherStatus();
     out.on = probeGatherWanted();
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->gatherStatsInto(this, out);
+}
+
+/// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the row, held inside its band.
+/// Storing it builds nothing; the view's chain re-checks its shape each frame.
+void OgreScene::setSunContact(const SunContactDesc &d) {
+    SunContactDesc c = d;
+    if (!(c.range >= kSunContactMinRange)) c.range = kSunContactMinRange;   // NaN too
+    if (c.range > kSunContactMaxRange) c.range = kSunContactMaxRange;
+    mSunContact = c;
+}
+
+/// The row resolved against the machine — `probeGatherWanted`'s shape: the
+/// row says what the scene asks for and the machine answers whether it can.
+bool OgreScene::sunContactWanted() const {
+    return mSunContact.enabled && rayTracingResolved();
+}
+
+SunContactStatus OgreScene::sunContactStatus() const {
+    SunContactStatus st;
+    st.on = sunContactWanted();
+    if (st.on && mEngine && mEngine->mRayTier) mEngine->mRayTier->sunContactStatsInto(this, st);
+    if (st.on && !st.running && st.reason.empty())
+        st.reason = "no view of this scene has drawn with the row on yet";
+    return st;
 }
 
 void OgreEngine::shutdownRayQuery() {
@@ -3726,6 +7203,7 @@ RayQueryStatus OgreScene::rayQueryStatus() const {
     // trace is a screen-space pass) and this folds the views of THIS scene into
     // the one answer giStatus asks for.
     mEngine->mRayTier->reflectStatsInto(this, st);
+    mEngine->mRayTier->hitStatsInto(this, st);
     return st;
 }
 
@@ -3766,9 +7244,21 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
 }
 void OgreScene::forgetRayQuery() {}
 bool OgreScene::probeGatherWanted() const { return false; }
+bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
+void OgreScene::timeCardRelight(bool) {}
+void OgreScene::cardMoverTimes(float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
+void OgreScene::setSunContact(const SunContactDesc &d) { mSunContact = d; }
+bool OgreScene::sunContactWanted() const { return false; }
+SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
 bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}
+bool OgreEngine::cardReadParity(Scene *, const std::vector<CardReadQuery> &,
+                                std::vector<CardReadPick> &out) {
+    out.clear();
+    mLastError = "cardReadParity: no ray-query tier on this platform";
+    return false;
+}
 
 // R5 takes the same road: with no tier there is nothing to hook, so the
 // listener is never created and `jahSsrReflection` holds what the screen-space

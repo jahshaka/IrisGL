@@ -32,9 +32,16 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVoxelReaderParity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreEnvironmentCones.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuScene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/SkinCache.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuVoxelGather.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDraw.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomIdPass.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomPass.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomPass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuVoxelGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
@@ -94,6 +101,21 @@ endif()
 if(JAH_RAY_QUERY_OK)
     set(JAH_RQ_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/rayquery")
     file(MAKE_DIRECTORY "${JAH_RQ_GEN_DIR}")
+    # THE FORK'S DIFFUSE LOBE FOR GLSLANG (PHOTON-CARDS-5): the card read restores
+    # the lobe's view term with JahBrdf's and JahDiffuseAlbedo's own functions,
+    # unwrapped from the fork's Pbs media at build time (never a copy).
+    set(JAH_RQ_FORK_BRDF "${JAH_RQ_GEN_DIR}/jah_fork_brdf.glsl")
+    add_custom_command(
+        OUTPUT "${JAH_RQ_FORK_BRDF}"
+        COMMAND ${CMAKE_COMMAND} -DUNWRAP=1 -DOUT=${JAH_RQ_FORK_BRDF}
+                -DIN0=${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahBrdf_piece_all.any
+                -DIN1=${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahDiffuseAlbedo_piece_all.any
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
+        DEPENDS "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahBrdf_piece_all.any"
+                "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahDiffuseAlbedo_piece_all.any"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
+        COMMENT "Unwrapping the fork's diffuse lobe for the ray jobs' card read"
+        VERBATIM)
     # BUILD-TIME SPIR-V, at spirv1.4 — never committed bytes (the spike
     # committed SPIR-V 1.5 headers, which are legal only on a device at
     # apiVersion >= 1.2 and which no reviewer can read: audit C-7/C-10).
@@ -109,7 +131,7 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
-                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_reflectSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
@@ -117,7 +139,34 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_voxel_sample.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_environment.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_radiance.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_record.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_sun_ray.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
+                "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
+        VERBATIM)
+    # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
+    # asked at a list of points - a test-only job, same rule.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
+                --vn krq_cardParitySpv -o "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
+                "${JAH_RQ_FORK_BRDF}"
+        COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
     add_custom_command(
@@ -128,7 +177,7 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
         VERBATIM)
-    # THE SCREEN-PROBE GATHER'S THREE JOBS (GATHER-1a), same rule plus ONE
+    # THE SCREEN-PROBE GATHER'S FOUR JOBS (GATHER-1a; the filter PHOTON-GATHER-1b), same rule plus ONE
     # addition: `-I src/rayquery/include`, so the hit-radiance functions and the
     # parameter block are SHARED with the reflection trace rather than copied
     # (spec section 10 item 7 — glslang resolves `#include` under
@@ -139,7 +188,8 @@ if(JAH_RAY_QUERY_OK)
                        "${JAH_RQ_INCLUDE}/jah_voxel_sample.glsl"
                        "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
                        "${JAH_RQ_INCLUDE}/jah_environment.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_probe_params.glsl")
+                       "${JAH_RQ_INCLUDE}/jah_probe_params.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_reproject.glsl")
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
@@ -153,12 +203,33 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
-                "-I${JAH_RQ_INCLUDE}"
+                "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_probeGatherSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
                 ${JAH_RQ_HEADERS}
+                # ...and the hit read it shares with the reflection (GA-1e).
+                "${JAH_RQ_INCLUDE}/jah_rq_hit_radiance.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_card.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_card_bindings.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_geom.glsl"
+                "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
+                # ...and the hit record + the sun ray (PHOTON-HIT-SHADE-1).
+                "${JAH_RQ_INCLUDE}/jah_rq_hit_record.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
+                "${JAH_RQ_INCLUDE}/jah_card_view.glsl"
+                "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_probeFilterSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_filter.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_filter.comp"
+                ${JAH_RQ_HEADERS}
+        COMMENT "Compiling the screen-probe filter + SH projection at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
@@ -170,12 +241,69 @@ if(JAH_RAY_QUERY_OK)
                 ${JAH_RQ_HEADERS}
         COMMENT "Compiling the screen-probe integrate at SPIR-V 1.4"
         VERBATIM)
+    # HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1, RY-R3): one ray per pixel towards
+    # the sun from the prepass' surface, geometry only — rq_rays.comp's shape.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_sunContactSpv -o "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
+                # the sun ray is one text with the hit record's (PHOTON-HIT-SHADE-1)
+                "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
+        COMMENT "Compiling the sun contact shadow job at SPIR-V 1.4"
+        VERBATIM)
+    # THE HIT WRITE-BACK (PHOTON-HIT-SHADE-1): the decoded radiance of every hit
+    # record, scattered back into the reflection's mean and the gather's atlas.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_hitCompositeSpv -o "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
+        COMMENT "Compiling the hit write-back at SPIR-V 1.4"
+        VERBATIM)
+    # THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4): sun rays from the texels
+    # of the cards a shadow-casting mover's footprint reaches, against the movers.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_cardMoversSpv -o "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
+        COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
+        VERBATIM)
+    # THE VISIBILITY BUFFER'S ID PASS (ATOM S3-DRAW, OgreAtomIdPass.cpp): a
+    # material-less vertex/fragment pair that pulls every vertex through the GPU
+    # scene's geometry rows — jah_geom_rows.glsl, the ONE copy the voxeliser's
+    # piece and the ray jobs read too. SPIR-V 1.0 (buffer references ride
+    # SPV_KHR_physical_storage_buffer; nothing here needs 1.4).
+    foreach(_stage vert frag)
+        add_custom_command(
+            OUTPUT "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h"
+            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S ${_stage} -x
+                    "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                    --vn katomId_${_stage}Spv -o "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+            COMMENT "Compiling the visibility buffer's id pass (${_stage})"
+            VERBATIM)
+    endforeach()
     add_custom_target(JahshakaRayQuerySpv
-                      DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+                      DEPENDS "${JAH_RQ_GEN_DIR}/atom_id_vert_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_id_frag_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h")
     set(JAH_RQ_GEN_DIR "${JAH_RQ_GEN_DIR}" PARENT_SCOPE)
 endif()
@@ -394,7 +522,8 @@ file(GLOB_RECURSE _hlms_inputs CONFIGURE_DEPENDS
      "${OGRE_NEXT_SMAA_MATERIALS_DIR}/*"
      "${OGRE_NEXT_VCT_MEDIA_DIR}/*" "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}/*"
      "${OGRE_NEXT_IBL_MEDIA_DIR}/*" "${OGRE_NEXT_IFD_MEDIA_DIR}/*"
-     "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*")
+     "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*"
+     "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Atom/*")
 list(APPEND _hlms_inputs "${OGRE_NEXT_DEBUGPACK_ZIP}")
 # THE ONE VOXEL RADIANCE READER (PHOTON-READER-1). Two plain-GLSL files are the
 # only source of the cone march and the voxel read: the ray jobs include them
@@ -408,24 +537,38 @@ set(JAH_VOXEL_READER_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
 set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
 set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
 list(APPEND _hlms_inputs ${JAH_VOXEL_READER_SOURCES} "${JAH_WRAP_HLMS_PIECE}")
 add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${JAHSHAKA_MEDIA_DIR}/Hlms"
+    # THE FORK'S HLMS FOLDERS ARE WIPED FIRST TOO: every one of them is a template or
+    # library path, and a piece file the fork RENAMED (ATOM S3-DRAW: the atmosphere's
+    # vertex pieces became `_piece_vs_piece_ps`) left behind by copy_directory is
+    # parsed beside its replacement — a duplicate piece in every vertex shader.
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Hlms/Common" "${JAHSHAKA_MEDIA_DIR}/Hlms/Pbs"
+            "${JAHSHAKA_MEDIA_DIR}/Hlms/Unlit"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HLMS_SOURCE_DIR}/Common" "${JAHSHAKA_MEDIA_DIR}/Hlms/Common"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs"    "${JAHSHAKA_MEDIA_DIR}/Hlms/Pbs"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HLMS_SOURCE_DIR}/Unlit"  "${JAHSHAKA_MEDIA_DIR}/Hlms/Unlit"
     # Jahshaka's own Hlms pieces (fog colour + height fog, base-map UV tiling) and
-    # the PCC/IBL compositors. WIPED first, unlike the Ogre folders: this one is an
+    # the PCC/IBL compositors. WIPED first, like the Ogre folders: this one is an
     # Hlms LIBRARY path, and a renamed piece file left behind by copy_directory
     # would be parsed alongside its replacement and fail as a duplicate @piece.
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka" "${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka"
+    # HLMS ATOM's data folder and its one library (ATOM-S3-PARITY), wiped first for
+    # the same reason: Hlms/Atom/Any is a library path.
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Hlms/Atom"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Atom" "${JAHSHAKA_MEDIA_DIR}/Hlms/Atom"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelSample
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelSample_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
@@ -434,6 +577,20 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelMarch
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelMarch_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE ONE DIFFUSE CONE INTEGRATOR (PHOTON-CARDS-2): the cone frame, the cone
+    # sets, the start bias and the escape weight - read by the pixel shader's
+    # cones, the bounce-injection job and the surface cache's card job.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelCones
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelCones_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE GEOMETRY ROW DECODE (PHOTON-CARDS-2): the vertex/index reads through a
+    # geometry row's device addresses - the voxeliser's two jobs insert it, the
+    # ray jobs' hit normal (jah_rq_geom.glsl) includes it.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahGeomRows
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahGeomRows_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE ONE ENVIRONMENT (PHOTON-ENV-1): what every escape sees — the cone
     # lookup on the prefiltered sky chain and the SH irradiance, one file, read
@@ -448,6 +605,18 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahFieldWindow
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahFieldWindow_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE CLOUD LAYER'S SHADOW (CLOUDS-2D-1/-2D-2): one transmittance, read by the
+    # pixel (JahFog), the voxel light injection and the card relight.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahCloudShadow
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCloudShadow_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # A CARD READ FROM A DIRECTION (PHOTON-CARDS-5): the relight writes the mean
+    # light direction the ray jobs' card read restores the lobe's view term with.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahCardView
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCardView_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # engine.voxel_reader_parity (tests/compute): the harness body as a piece
     # for its compute half, and its fragment half as a plain GLSL program built

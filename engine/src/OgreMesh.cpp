@@ -1,11 +1,14 @@
 // Mesh creation, update and destruction, plus the v2 geometry builder.
 #include "EnginePrivate.h"
+#include "SkinCache.h"
 
 #include <OgreLodStrategy.h>
 #include <OgreLodStrategyManager.h>
 #include <OgreViewport.h>
 #include <OgreLodStrategyPrivate.inl>
+#include <Vct/OgreVctVoxelizer.h>
 
+#include <cstring>
 #include <string>
 #include <algorithm>
 #include <unordered_map>
@@ -498,32 +501,27 @@ namespace {
 ///
 /// Returns null when there is nothing to gain (the caller then aliases the main
 /// VAO, which is Ogre's "useSameVaos" fallback).
-/// The optimized shadow VAO: a position-only (plus blend indices/weights) vertex
-/// buffer with duplicate vertices merged, and ONE VAO over it — LEVEL 0's. An
-/// EMPTY return means "no optimized form", and the caller aliases the normal VAOs
-/// for every level instead.
+/// The optimized shadow VAOs: ONE position-only (plus blend indices/weights)
+/// vertex buffer with duplicate vertices merged, and one VAO PER LOD LEVEL over it
+/// (each with its own remapped index buffer). An EMPTY return means "no optimized
+/// form", and the caller aliases the normal VAOs for every level instead.
 ///
-/// ONE, NOT ONE PER LEVEL, SINCE ogre-patch 0088 (ATOM inventory row AT-A11).
-/// `SubMesh::destroyShadowMappingVaos` used to decide ALIAS-versus-INDEPENDENT
-/// for the whole shadow list from one test on entry 0, so a MIXED list — an
-/// independent VAO at 0 and aliases above it — read as independent: it destroyed
-/// the aliased entries and `~SubMesh` destroyed the same VAOs and their shared
-/// vertex buffer a second time ("Vertex Buffer has already been destroyed or
-/// doesn't belong to this VaoManager", measured 2026-09-15 by the suite that came
-/// with this feature). Only the two pure shapes were legal, so this built one
-/// independent VAO per level to stay inside one of them. Patch 0088 makes the
-/// alias test per entry, and the mixed list — which is the shape a LOD chain
-/// wants — is legal.
-///
-/// WHY THE MIXED LIST IS THE RIGHT SHAPE, and not merely the newly-allowed one:
-/// the optimized form exists so a shadow pass streams 12 bytes per vertex instead
-/// of 48, and its value is proportional to the vertex fetch the pass actually
-/// does. Each level halves its triangles, so the coarse levels of every mesh in a
-/// scene together account for a vanishing share of that fetch — while an
-/// independent index buffer and VertexArrayObject per level per mesh is VRAM for
-/// the life of the mesh. So level 0 gets the shrunk buffer and the coarse levels
-/// alias their own normal VAOs (the CALLER does the aliasing — this function
-/// returns the one VAO it built).
+/// EVERY LEVEL, NEVER A MIXED LIST (PHOTON-SCENE-SWITCH-1, measured). Ogre builds
+/// ONE pipeline per renderable per pass and takes its vertex layout from the FIRST
+/// VAO of the pass's list (`Hlms::createShaderCacheEntry`, OgreHlms.cpp:2939-2942 —
+/// upstream's own TODO: "Should we allow Vaos with different vertex formats on
+/// LODs?"). A list holding the shrunk VAO at level 0 and the NORMAL VAOs above it
+/// (the ATOM AT-A11 shape) therefore drew every coarse level into the shadow map
+/// through a 12-byte position-only layout over a 48-byte vertex buffer: garbage
+/// caster geometry whose shape depended on where the buffer landed in the pool.
+/// `gi.sun_contact_both` measured it — the sphere lattice's map cast 37,777
+/// darkened px in its own process, 9 px after another scene had drawn, and 22,090
+/// (the true shadow, every level's own triangles) with the shadow optimisation
+/// off. All levels shrunk is also upstream's shape
+/// (`VertexShadowMapHelper::optimizeForShadowMapping`: one independent VAO per
+/// level), and `SubMesh::destroyVaos` destroys a vertex buffer shared by several
+/// VAOs once. The price is one index buffer per coarse level, each a fraction of
+/// level 0's.
 std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
     Ogre::VaoManager *vaoMgr, const MeshData &data, const std::vector<float> &blendW,
     bool skinned, const std::vector<const std::vector<unsigned> *> &levels) {
@@ -587,7 +585,6 @@ std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
     std::memcpy(vertexData, unique.data(), stride * uniqueCount);
 
     Ogre::VertexBufferPacked *vbuf = nullptr;
-    Ogre::IndexBufferPacked *ibuf = nullptr;
     try {
         vbuf = vaoMgr->createVertexBuffer(decl, Ogre::uint32(uniqueCount), Ogre::BT_IMMUTABLE,
                                           vertexData, true);
@@ -599,11 +596,11 @@ std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
     }
 
     // The index type follows the SHADOW vertex count, which can only shrink.
+    // One VAO per level, every one over the same shrunk vertex buffer.
     std::vector<Ogre::VertexArrayObject *> out;
     Ogre::VertexBufferPackedVec shadowVbufs;
     shadowVbufs.push_back(vbuf);
-    {
-        const std::vector<unsigned> *level = levels.front();   // LEVEL 0, and only it
+    for (const std::vector<unsigned> *level : levels) {
         const size_t count = level->size();
         Ogre::IndexBufferPacked *ibuf = nullptr;
         if (uniqueCount <= 65535u) {
@@ -691,10 +688,10 @@ void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
     }
 }
 
-// The VAO-list SHAPE, for the suite that has to see what ogre-patch 0088 bought
-// (AT-A11). Counting the shadow entries that are NOT in the normal list is the same
-// test the patched `destroyShadowMappingVaos` makes, which is the point: the number
-// this reports is the number of VAOs and index buffers the mesh really owns.
+// The VAO-list SHAPE (AT-A11; PHOTON-SCENE-SWITCH-1). Counting the shadow entries
+// that are NOT in the normal list is the same test the patched
+// `destroyShadowMappingVaos` makes (ogre-patch 0088), which is the point: the number
+// this reports is the number of shadow VAOs and index buffers the mesh really owns.
 bool OgreScene::meshVaoShape(MeshId mesh, unsigned &levels, unsigned &shadowIndependent) const {
     levels = 0;
     shadowIndependent = 0;
@@ -1003,15 +1000,11 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     std::vector<Ogre::VertexArrayObject *> shadowVaos;
     if (Ogre::Mesh::msOptimizeForShadowMapping && !data.dynamic)
         shadowVaos = buildShadowVaos(vaoMgr, data, blendW, skinned, accepted);
-    if (shadowVaos.size() == 1) {
-        // THE MIXED LIST (ogre-patch 0088): the shrunk VAO for level 0, and every
-        // coarse level ALIASING its own normal VAO. Correct geometry at every
-        // level — a shadow pass at level k still draws level k's triangles — for
-        // one shadow vertex buffer and one shadow index buffer per mesh instead
-        // of one per level.
-        sub->mVao[Ogre::VpShadow].push_back(shadowVaos.front());
-        for (size_t L = 1; L < sub->mVao[Ogre::VpNormal].size(); ++L)
-            sub->mVao[Ogre::VpShadow].push_back(sub->mVao[Ogre::VpNormal][L]);
+    if (!shadowVaos.empty()) {
+        // THE SHRUNK LIST: one VAO per level, every one in the position-only
+        // layout the caster pipeline is built from (buildShadowVaos' note) —
+        // a shadow pass at level k draws level k's triangles through it.
+        for (Ogre::VertexArrayObject *v : shadowVaos) sub->mVao[Ogre::VpShadow].push_back(v);
     } else {
         // ALL-ALIASED, when there is no optimized form to build at all.
         for (Ogre::VertexArrayObject *v : sub->mVao[Ogre::VpNormal])
@@ -1034,6 +1027,136 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     mesh->_setBounds(aabb, false);
     mesh->_setBoundingSphereRadius(aabb.getRadius());
     return mesh;
+}
+
+
+// ---------------------------------------------------------------------------
+// THE GPU SKIN CACHE's BUFFER (PHOTON-SKIN-1; SkinCache.h has the design). It
+// lives here because it is the second half of what `buildMeshV2` made: the same
+// vertex count, the raster's own layout without the blend elements, device-local
+// and addressable — the cache the `Jahshaka/SkinCache` job writes and the ray
+// tier builds the item's bottom-level structure from.
+namespace {
+/// The level-0 VAO of submesh 0 — the one buildMeshV2 builds for a skinned mesh
+/// and the one Ogre's vertex shader skins.
+Ogre::VertexArrayObject *skinSourceVao(const Ogre::Item *item) {
+    if (!item || !item->getMesh() || item->getMesh()->getNumSubMeshes() != 1u) return nullptr;
+    const Ogre::VertexArrayObjectArray &vaos =
+        item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal];
+    return vaos.empty() ? nullptr : vaos[0];
+}
+}  // namespace
+
+bool createSkinCacheBuffer(Ogre::VaoManager *vao, const Ogre::Item *item, SkinCacheBuffer &out,
+                           std::string &err) {
+    out = SkinCacheBuffer();
+    if (!vao || !vao->supportsBufferDeviceAddress()) {
+        err = "skin cache: this device has no buffer device addresses";
+        return false;
+    }
+    Ogre::VertexArrayObject *src = skinSourceVao(item);
+    if (!src || src->getVertexBuffers().size() != 1u || !src->getIndexBuffer()) {
+        err = "skin cache: the item is not one submesh with one vertex buffer";
+        return false;
+    }
+    size_t s = 0, posOffset = 0, biOffset = 0, bwOffset = 0, tanOffset = 0;
+    const Ogre::VertexElement2 *pos = src->findBySemantic(Ogre::VES_POSITION, s, posOffset);
+    const Ogre::VertexElement2 *bi = src->findBySemantic(Ogre::VES_BLEND_INDICES, s, biOffset);
+    const Ogre::VertexElement2 *bw = src->findBySemantic(Ogre::VES_BLEND_WEIGHTS, s, bwOffset);
+    const Ogre::VertexElement2 *tan = src->findBySemantic(Ogre::VES_TANGENT, s, tanOffset);
+    size_t nrmOffset = 0, uvOffset = 0;
+    const Ogre::VertexElement2 *nrm = src->findBySemantic(Ogre::VES_NORMAL, s, nrmOffset);
+    const Ogre::VertexElement2 *uv =
+        src->findBySemantic(Ogre::VES_TEXTURE_COORDINATES, s, uvOffset);
+    if (!pos || pos->mType != Ogre::VET_FLOAT3 || !bi || bi->mType != Ogre::VET_UBYTE4 || !bw ||
+        bw->mType != Ogre::VET_FLOAT4 || (biOffset & 3u) || (bwOffset & 3u) || !nrm ||
+        nrm->mType != Ogre::VET_FLOAT3 || !uv || uv->mType != Ogre::VET_FLOAT2) {
+        err = "skin cache: the source vertex is not buildMeshV2's skinned layout";
+        return false;
+    }
+    Ogre::VertexBufferPacked *srcVb = src->getVertexBuffers()[0];
+    const uint32_t n = uint32_t(srcVb->getNumElements());
+    if (!n) {
+        err = "skin cache: the source has no vertices";
+        return false;
+    }
+    // THE RASTER'S LAYOUT, WITHOUT THE BLEND ELEMENTS: what every unrigged mesh this
+    // engine builds carries, so a reader of the cache's rows reads it exactly as it
+    // reads any other row (and the row's stride is the only thing that differs).
+    Ogre::VertexElement2Vec decl;
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_POSITION));
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_NORMAL));
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_TANGENT));
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT2, Ogre::VES_TEXTURE_COORDINATES));
+    if (Ogre::VaoManager::calculateVertexSize(decl) != kSkinCacheStride) {
+        err = "skin cache: the raster layout is not 48 bytes";
+        return false;
+    }
+    // BT_DEFAULT = device-local, GPU-written, and a CPU_INACCESSIBLE pool: the
+    // pools that carry STORAGE + SHADER_DEVICE_ADDRESS (+ the AS build-input bit
+    // on a ray device). No initial data: the first skin pass writes every vertex
+    // before anything reads it (the ray tier builds nothing from a cache that has
+    // not been skinned).
+    Ogre::VertexBufferPacked *vb =
+        vao->createVertexBuffer(decl, n, Ogre::BT_DEFAULT, nullptr, false);
+    if (!vb) {
+        err = "skin cache: createVertexBuffer failed";
+        return false;
+    }
+    const uint64_t address = vao->getBufferDeviceAddress(vb);
+    if (!address) {
+        vao->destroyVertexBuffer(vb);
+        err = "skin cache: the cache buffer has no device address";
+        return false;
+    }
+    out.vertices = vb;
+    out.vertexCount = n;
+    out.address = address;
+    out.tangentOffset = (tan && tan->mType == Ogre::VET_FLOAT4 && !(tanOffset & 3u))
+                            ? uint32_t(tanOffset)
+                            : 0xFFFFFFFFu;
+    out.blendIndexOffset = uint32_t(biOffset);
+    out.blendWeightOffset = uint32_t(bwOffset);
+    return true;
+}
+
+void destroySkinCacheBuffer(Ogre::VaoManager *vao, SkinCacheBuffer &buf) {
+    if (vao && buf.vertices) vao->destroyVertexBuffer(buf.vertices);
+    buf = SkinCacheBuffer();
+}
+
+bool describeSkinCacheRows(Ogre::VaoManager *vao, const Ogre::Item *item,
+                           const SkinCacheBuffer &buf,
+                           std::vector<std::vector<uint32_t>> &levels) {
+    levels.clear();
+    if (!vao || !item || !buf.vertices || !buf.address) return false;
+    const Ogre::MeshPtr &mesh = item->getMesh();
+    if (!mesh || mesh->getNumSubMeshes() == 0u) return false;
+    const size_t count = mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size();
+    levels.resize(count);
+    bool any = false;
+    static_assert(sizeof(Ogre::VctVoxelizer::GeometryRow) == 48u, "the row is 12 words");
+    for (size_t l = 0; l < count; ++l) {
+        Ogre::VctVoxelizer::GeometryRow row;
+        // THE MESH'S OWN ROW FOR THIS LEVEL (its index address, width and bias —
+        // Ogre's description, never re-derived here), then the vertex half swapped
+        // for the cache's: its address, its stride, and the raster layout's
+        // offsets (position 0, normal 12, uv 40).
+        if (!Ogre::VctVoxelizer::describeGeometryRow(mesh, uint32_t(l), 0u, vao, row)) continue;
+        row.posAddress[0] = uint32_t(buf.address & 0xFFFFFFFFull);
+        row.posAddress[1] = uint32_t(buf.address >> 32u);
+        row.vertexStride = kSkinCacheStride;
+        row.posOffset = 0u;
+        row.normalOffset = 12u;
+        row.uvOffset = 40u;
+        // The FLAGS stay the mesh row's: the index width is the mesh's, and the
+        // normal/uv formats are the same float3/float2 the cache writes
+        // (createSkinCacheBuffer refuses any other source).
+        levels[l].resize(12u);
+        std::memcpy(levels[l].data(), &row, sizeof(row));
+        any = true;
+    }
+    return any;
 }
 
 }}}  // namespace jahshaka::engine::detail

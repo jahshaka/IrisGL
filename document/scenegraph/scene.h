@@ -250,6 +250,107 @@ struct SkyRealistic
 	static SkyRealistic defaults();
 };
 
+/// THE 2D CLOUD LAYER (CLOUDS-2D-1; SPECS/CLOUDS_ASSESSMENT.md option C0,
+/// HDRP's Cloud Layer as the model). ONE sheet of cloud at a fixed altitude,
+/// drawn by the renderer OVER the colour, gradient and realistic skies and
+/// captured with them into the scene's environment (the Sky Light's ambient
+/// and every reflection), with a top-down transmittance map that shades the
+/// sun's light on the ground. It is not a volume: there is no parallax inside
+/// it and the camera never enters it (the volumetric program is parked,
+/// SPECS/VOLUMETRIC_CLOUDS_SPEC.md). An equirectangular or cubemap sky carries
+/// its own painted clouds and the layer is not drawn over it.
+///
+/// OFF BY DEFAULT, and a scene whose layer is at the default writes NO
+/// `clouds` key at all (SceneWriter) — so no shipped sample, fixture or
+/// selftest pose changes by one byte until an author turns it on.
+struct CloudLayer
+{
+	/// The layer is drawn, captured and casts its shadow only while this is on.
+	bool enabled = false;
+	/// How much of the sky the cloud field covers, 0 (clear) .. 1 (overcast).
+	float coverage = 0.5f;
+	/// Optical thickness multiplier, 0 .. 4: how opaque a covered patch is,
+	/// and therefore how dark its underside and its shadow are.
+	float density = 1.0f;
+	/// Wind speed in metres per SECOND OF SCENE TIME (the renderer's fixed
+	/// clock — a paused scene holds its clouds still), 0 .. 100.
+	float speed = 10.0f;
+	/// The heading the wind blows TOWARDS, degrees about +Y from +X towards
+	/// -Z (a compass that turns the way the editor's yaw does), 0 .. 360.
+	float direction = 0.0f;
+	/// The layer's altitude in metres, 500 .. 8000 — THE ALTITUDE LOOK: how
+	/// the sheet converges to the horizon over a curved earth (a low layer
+	/// fills the sky, a high one stays overhead), and how far the ground
+	/// shadow is thrown sideways by a low sun.
+	float altitude = 2000.0f;
+	/// How strongly the layer shades the sun's light on the ground, 0 .. 1
+	/// (1 = the transmittance the layer actually has).
+	float shadow = 1.0f;
+	/// An optional WEATHER MAP — an image asset guid whose red channel scales
+	/// the coverage over one tile of the layer (white = clouds allowed,
+	/// black = clear). Empty = none.
+	QString weatherMapGuid;
+
+	bool operator==(const CloudLayer &o) const {
+		return enabled == o.enabled && coverage == o.coverage && density == o.density &&
+		       speed == o.speed && direction == o.direction && altitude == o.altitude &&
+		       shadow == o.shadow && weatherMapGuid == o.weatherMapGuid;
+	}
+	bool operator!=(const CloudLayer &o) const { return !(*this == o); }
+
+	/// Every dial held inside its band (the verb, the reader and the panel
+	/// share this one clamp).
+	static CloudLayer clamped(CloudLayer c);
+	/// The file's form. `fromJson` gives an ABSENT key the constructor's value
+	/// (the reader-defaults law).
+	QJsonObject toJson() const;
+	static CloudLayer fromJson(const QJsonObject &o);
+};
+
+/// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3; lane PHOTON-RAYS-1) — the
+/// PROJECT's row: one hardware ray per pixel towards the sun from the surface
+/// the camera sees, out to `range`, folded into the sun's shadow term as
+/// min( shadow map, ray ). It closes the band of light a shadow map's depth
+/// bias leaves where an object meets the ground; beyond the range the map
+/// answers alone. It needs ray hardware and the project's ray row (a machine
+/// without either renders the shadow map alone), and it is never drawn in VR.
+///
+/// OFF BY DEFAULT, and a scene at the default writes NO `sunContact` key
+/// (SceneWriter) — so no shipped sample, fixture or selftest pose changes.
+/// The range's band — the renderer's (Types.h kSunContactMinRange/MaxRange),
+/// restated because the document does not include the engine; SceneMirror,
+/// which includes both, asserts the two agree.
+constexpr float kSunContactMinRange = 0.05f;
+constexpr float kSunContactMaxRange = 50.0f;
+enum class SunContactResolution : int
+{
+	Auto = 0,   ///< the tier's: half at the Low and Medium GI quality, full at High
+	Full = 1,   ///< one ray per pixel
+	Half = 2,   ///< one ray per 2x2 block
+};
+struct SunContact
+{
+	bool enabled = false;
+	/// Metres a ray looks for an occluder before the shadow map answers
+	/// alone, held in [kSunContactMinRange, kSunContactMaxRange].
+	float range = 2.0f;
+	SunContactResolution resolution = SunContactResolution::Auto;
+
+	bool operator==(const SunContact &o) const {
+		return enabled == o.enabled && range == o.range && resolution == o.resolution;
+	}
+	bool operator!=(const SunContact &o) const { return !(*this == o); }
+
+	/// The one clamp the verb, the reader and the undo table share.
+	static SunContact clamped(SunContact c);
+	/// The file's form; an ABSENT key takes the constructor's value.
+	QJsonObject toJson() const;
+	static SunContact fromJson(const QJsonObject &o);
+	/// The stable spellings ("auto", "full", "half") — the file, the verb.
+	static const char *resolutionName(SunContactResolution r);
+	static bool resolutionFromName(const QString &name, SunContactResolution &out);
+};
+
 class Scene: public QEnableSharedFromThis<Scene>
 {
     QSharedPointer<Environment> environment;
@@ -313,6 +414,16 @@ public:
     // Two fields the renderer never read: the engine clears to the SKY, and
     // whether there is a sky is `skyType`. Neither was ever serialized.)
     Texture2DPtr skyTexture;
+    /// THE CLOUD LAYER (CloudLayer above). Serialized as the scene's `clouds`
+    /// block — and only when it differs from the default.
+    CloudLayer clouds;
+    /// HARD SUN CONTACT SHADOWS (SunContact above). Serialized as the scene's
+    /// `sunContact` block — and only when it differs from the default.
+    SunContact sunContact;
+    /// The layer's weather map, RESOLVED from `clouds.weatherMapGuid` by
+    /// whoever set the guid (the reader, world.clouds). Runtime only, like
+    /// `skyTexture`: the guid is the fact, this is its loaded pixels.
+    Texture2DPtr cloudWeatherMap;
     QColor skyColor;
 	QColor gradientTop;
 	QColor gradientMid;
@@ -412,12 +523,12 @@ public:
     /// THE SURFACE CACHE (SURFACE-CACHE phase 2) — three per-project rows.
     ///
     /// `giCards` takes the same three-state spelling every other GI toggle in
-    /// this struct takes — 0 OFF, 1 ON, anything else (-1) AUTO — and AUTO IS
-    /// OFF at this phase
-    /// and says so: nothing READS a card until phase 4 (the ray hit), so a
-    /// machine that captured them would be paying for pictures nobody looks at.
-    /// The row exists now because the cache is built now and a suite, a
-    /// measurement and the render monitor all need to turn it on.
+    /// this struct takes — 0 OFF, 1 ON, anything else (-1) AUTO — and the
+    /// DEFAULT IS AUTO (PHOTON-CARDS-2): the engine resolves Auto to "on exactly
+    /// where the reflection trace runs" (a ray's hit reads the card first), so a
+    /// machine without rays pays nothing. The World Mode table's `giCards` row
+    /// writes Off at Low and Medium (no ray tier there) and Auto at High and Epic.
+    /// SceneReader's absent-key default is this constructor's (the trap).
     ///
     /// `giCardBudgetTexels` is the per-frame CAPTURE budget in TEXELS —
     /// Lumen's own shape (its capture budget is 512 x 512 a frame) — and 0 is
@@ -429,7 +540,7 @@ public:
     /// than this from the camera holds no atlas pages at all. 0 is the tier's.
     /// The engine's own documentation for all three is GiParams::cards /
     /// cardBudgetTexels / cardResidencyRadius.
-    int giCards = 0;
+    int giCards = -1;
     int giCardBudgetTexels = 0;
     float giCardRadius = 0.0f;
     /// A DRAGGED STILL RIDES THE MOVER CHANNEL FOR THE LENGTH OF THE GESTURE
@@ -484,12 +595,6 @@ public:
     float giProbeSnapDeviation = 0.05f;  // shrink-fit snap-back tolerances: the pin's
     float giProbeSnapSidesMin = 0.25f;   // own ctor defaults, made explicit and ours
     float giProbeSnapSidesMax = 0.25f;
-    /// VCT light-injection ray-march step scale AT REST (FIX WAVE B5).
-    /// Integrator knob, verb-only (`world.gi({rayMarchStepScale})`), floor 1.0:
-    /// bigger marches faster and starts losing contact shadows in the bounce,
-    /// and upstream asserts below 1.0. The engine raises it on its own for the
-    /// cheap in-motion re-injection only.
-    float giRayMarchStepScale = 1.0f;
     /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
     /// TRI-STATE, like giProbeHdr/giProbeShadows and for the same reason: -1
     /// auto, 0 off, 1 on. The Photon tier (GI_UNIFIED_SPEC P2) RESOLVES it
@@ -507,26 +612,17 @@ public:
     /// GI estimated once per 16x16 pixels by 64 hardware rays instead of once
     /// per pixel by six voxel cones: a ray is stopped by a TRIANGLE where a cone
     /// is stopped by a VOXEL, and a rectangular emitter over a plane says which
-    /// is right — the gather reads 1.03 of the closed-form irradiance where the
-    /// cones read 0.75 (gi.gather_reference).
+    /// is right — the gather reads 0.98-1.01 of the closed-form irradiance where
+    /// the cones read 0.65-0.72 (gi.gather_reference).
     ///
-    /// 0 = off, 1 = on, -1 = AUTO, which is OFF at every tier until the phase-1
-    /// estimate is filtered and temporally accumulated (the spec's phases 2 and
-    /// 3): it is correct and NOISY, so a tier may not select it yet. `On` traces
-    /// wherever the machine can and falls back silently where it cannot, exactly
-    /// as the project's ray row does — a machine with no ray query, or a project
-    /// whose ray row is Off, keeps today's picture and this row does nothing.
-    /// Only meaningful in the VCT modes: a gather ray's HIT is lit from the
-    /// voxel cascades.
+    /// 0 = off, 1 = on, -1 = AUTO = THE TIER'S (PHOTON-GATHER-1d): the engine's
+    /// tier table resolves it — on at High, Epic and Medium, off at Low and in a
+    /// headset. It traces wherever the machine can and falls back silently where
+    /// it cannot, exactly as the project's ray row does — a machine with no ray
+    /// query, or a project whose ray row is Off, keeps the no-rays picture and
+    /// this row does nothing. Only meaningful in the VCT modes: a gather ray's
+    /// HIT is lit from the hit surface's card or the voxel cascades.
     int giGather = -1;
-    /// The DDGI diffuse INTENSITY. Ours, not upstream's: binding a field turns
-    /// the voxel-cone diffuse OFF and replaces it with the probes' — which is
-    /// smoother and leak-free — and upstream's IrradianceFieldSettings carries
-    /// no brightness knob at all. 1.0 is the renderer's raw value and the
-    /// calibrated default (measured at 86% of the VCT diffuse it replaces); the
-    /// knob exists because the two terms are different integrals and a scene may
-    /// want to trim one against the other.
-    float giDdgiIntensity = 1.0f;
     /// WHERE THE FIELD'S PROBES GET THEIR LIGHT (GI_UNIFIED_SPEC.md P3 "A2"):
     /// RAYON — the user-facing quality tier for realtime global illumination
     /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.

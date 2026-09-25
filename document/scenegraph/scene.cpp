@@ -206,6 +206,99 @@ QColor skyColourFromJson(const QJsonObject &o, const QColor &fallback)
 }
 }   // namespace
 
+CloudLayer CloudLayer::clamped(CloudLayer c)
+{
+    c.coverage  = qBound(0.0f,   c.coverage,  1.0f);
+    c.density   = qBound(0.0f,   c.density,   4.0f);
+    c.speed     = qBound(0.0f,   c.speed,     100.0f);
+    c.direction = std::fmod(std::fmod(c.direction, 360.0f) + 360.0f, 360.0f);
+    c.altitude  = qBound(500.0f, c.altitude,  8000.0f);
+    c.shadow    = qBound(0.0f,   c.shadow,    1.0f);
+    return c;
+}
+
+QJsonObject CloudLayer::toJson() const
+{
+    QJsonObject o;
+    o.insert("enabled",   enabled);
+    o.insert("coverage",  double(coverage));
+    o.insert("density",   double(density));
+    o.insert("speed",     double(speed));
+    o.insert("direction", double(direction));
+    o.insert("altitude",  double(altitude));
+    o.insert("shadow",    double(shadow));
+    if (!weatherMapGuid.isEmpty()) o.insert("weatherMap", weatherMapGuid);
+    return o;
+}
+
+CloudLayer CloudLayer::fromJson(const QJsonObject &o)
+{
+    // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law):
+    // every default below is the constructor's own value, read off a default
+    // instance rather than spelled a second time.
+    const CloudLayer d;
+    CloudLayer c;
+    c.enabled   = o.value("enabled").toBool(d.enabled);
+    c.coverage  = float(o.value("coverage").toDouble(d.coverage));
+    c.density   = float(o.value("density").toDouble(d.density));
+    c.speed     = float(o.value("speed").toDouble(d.speed));
+    c.direction = float(o.value("direction").toDouble(d.direction));
+    c.altitude  = float(o.value("altitude").toDouble(d.altitude));
+    c.shadow    = float(o.value("shadow").toDouble(d.shadow));
+    c.weatherMapGuid = o.value("weatherMap").toString(d.weatherMapGuid);
+    return clamped(c);
+}
+
+SunContact SunContact::clamped(SunContact c)
+{
+	// A NaN takes the default; the band is the renderer's (scene.h).
+	if (!std::isfinite(c.range)) c.range = SunContact().range;
+	c.range = qBound(kSunContactMinRange, c.range, kSunContactMaxRange);
+	const int r = int(c.resolution);
+	if (r < 0 || r > 2) c.resolution = SunContactResolution::Auto;
+	return c;
+}
+
+const char *SunContact::resolutionName(SunContactResolution r)
+{
+	switch (r) {
+	case SunContactResolution::Full: return "full";
+	case SunContactResolution::Half: return "half";
+	case SunContactResolution::Auto: break;
+	}
+	return "auto";
+}
+
+bool SunContact::resolutionFromName(const QString &name, SunContactResolution &out)
+{
+	const QString n = name.trimmed().toLower();
+	if (n == QLatin1String("auto")) { out = SunContactResolution::Auto; return true; }
+	if (n == QLatin1String("full")) { out = SunContactResolution::Full; return true; }
+	if (n == QLatin1String("half")) { out = SunContactResolution::Half; return true; }
+	return false;
+}
+
+QJsonObject SunContact::toJson() const
+{
+	QJsonObject o;
+	o.insert("enabled", enabled);
+	o.insert("range", double(range));
+	o.insert("resolution", QString::fromLatin1(resolutionName(resolution)));
+	return o;
+}
+
+SunContact SunContact::fromJson(const QJsonObject &o)
+{
+	// AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law).
+	const SunContact d;
+	SunContact c;
+	c.enabled = o.value("enabled").toBool(d.enabled);
+	c.range = float(o.value("range").toDouble(d.range));
+	SunContactResolution r = d.resolution;
+	if (resolutionFromName(o.value("resolution").toString(), r)) c.resolution = r;
+	return clamped(c);
+}
+
 SkyRealistic Scene::clampSkyRealistic(SkyRealistic r)
 {
     // The panel rows' own ranges, in the DOCUMENT: a value a dial cannot
@@ -308,9 +401,8 @@ Scene::Scene()
     giUpdateBudget = 1;         // one probe re-capture per frame (FIX WAVE B1)
     giPccGrid = iris::Vec3(3, 2, 3);
     giDdgi = -1;                // auto: no tier has been applied to this scene yet
-    giGather = -1;              // auto = OFF until the gather is filtered (scene.h)
+    giGather = -1;              // auto = the tier decides (scene.h)
     giDragMoverChannel = 1;     // MOVER-1: ON by default (owner §844; see scene.h)
-    giDdgiIntensity = 1.0f;     // the calibrated default; see scene.h
     // The Photon quality tier this scene comes back at when GI is switched on
     // (GI_UNIFIED_SPEC P2, owner decision D2 — new scenes are Epic). GI itself
     // stays OFF here: a bare document renders nothing until a tier is applied,

@@ -1,6 +1,7 @@
 // OgreView: a render target (window or RTT) plus the compositor workspace and
 // camera that draw a scene into it.
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"
 
 // The inset's letterbox rectangle is written straight onto its scene pass'
 // DEFINITION (chain::PipHandles::scenePass) between frames — Ogre re-reads it
@@ -14,6 +15,7 @@
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <OgreRenderPassDescriptor.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <string>
@@ -49,7 +51,9 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     chain::build(mRoot->getCompositorManager2(), mWorkspaceDef, chainDesc(), mNodeDefs,
                  mChainHandles);
     mChainRayReflect = chainDesc().rayReflect;
-    mChainProbeGather = chainDesc().probeGather;
+    mChainPrepass = chainDesc().prepass();
+    mChainHitDecode = chainDesc().hitDecode;
+    mChainAtomDraw = chainDesc().atomDraw;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -112,6 +116,7 @@ ChainDesc OgreView::chainDesc() const {
     // show the same shot the viewport does, and the flag can only be true when
     // a host deliberately pushed a constrained camera.
     d.letterbox  = mCameraDesc.constrainAspect && mCameraDesc.aspect > 0.0f;
+    d.letterboxAspect = d.letterbox ? mCameraDesc.aspect : 0.0f;
     // THE HZB (NANITE_SPEC §4.3) is set BEFORE the offscreen early-out, with
     // letterbox and for the same kind of reason: it is not a post-process and it
     // changes no pixel of the picture — it is a resource a future screen-space
@@ -125,6 +130,49 @@ ChainDesc OgreView::chainDesc() const {
     d.hzb        = mPostFx.hzb;
     d.hzbLevels  = d.hzb ? hzbLevelsFor(width(), height()) : 0u;
     d.hzbFarthest = mPostFx.hzbFarthest;
+    // THE RADIANCE READBACK (HDR-READBACK-1), before the early-out for the
+    // reason `hzb` is: it changes no pixel of the picture a view presents — it
+    // is what the view KEEPS (a float scene target), and the offscreen views
+    // are exactly the ones a closed form is measured on.
+    d.hdrReadback = mPostFx.hdrReadback;
+    // THE VISIBILITY BUFFER (ATOM S3-DRAW): wherever the scene's split is live the
+    // view carries the id pass and its scene passes skip the Atom queue — in EVERY
+    // view, offscreen included, so a screenshot, a thumbnail and a preview shade the
+    // same surfaces the same way the viewport does (a screenshot is the editor's own
+    // picture). NOT in a stereo view: the id pass renders one eye (no per-eye
+    // view-projection or viewport), so a VR chain keeps drawing the Atom queue
+    // through PBS (AtomDrawStatus::stereoViews counts them).
+    d.atomDraw = mScene && mScene->atomDrawWanted() && !mStereo;
+    // THE SCREEN-PROBE GATHER, and the reason it is not `&& d.ssr`: the gather
+    // needs the PREPASS, not the reflection row. A project whose gather row is on
+    // gets the prepass in every view that draws its scene, whatever its SSR row
+    // says — which is the whole of `ChainDesc::probeGather`. Like `rayReflect` it
+    // reads the machine through the scene's resolved row and never the document.
+    // ABOVE THE OFFSCREEN EARLY-OUT, like refraction below and for refraction's
+    // reason (PHOTON-GATHER-1d): at a gather tier the gather IS the diffuse GI —
+    // not a post-process but how a surface is lit — so a screenshot, a thumbnail
+    // and a preview show the diffuse the viewport shows (a screenshot is the
+    // editor's own picture), and GiStatus::giAtRest's settled-history term makes
+    // a settled shot wait for its own view's history.
+    // ...AND NOT IN A STEREO VIEW (the lead's read): the Component declines a
+    // stereo target (the probe grid would have to be split at the eye seam), so
+    // without this term a VR eye would pay a second geometry traversal every
+    // frame for a prepass nothing then reads.
+    // ...AND AN OFFSCREEN VIEW BY ITS DECLARED CONTRACT (the fix round;
+    // View::setOffscreenContract): a still picture gathers and its caller waits
+    // for giAtRest; a live one takes the field's answer; an undeclared one
+    // refuses, once, out loud.
+    const bool wantsGather = mScene && mScene->probeGatherWanted() && !mStereo;
+    bool contractAllows = !isOffscreen() || mOffscreenContract == OffscreenContract::StillPicture;
+    if (wantsGather && isOffscreen() && mOffscreenContract == OffscreenContract::Undeclared &&
+        !mSaidNoContract) {
+        mSaidNoContract = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: offscreen view '" + mName + "' declares no contract "
+            "(View::setOffscreenContract: StillPicture or Live) — it refuses the screen-probe "
+            "gather and takes the field's diffuse");
+    }
+    d.probeGather    = wantsGather && contractAllows;
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -138,6 +186,9 @@ ChainDesc OgreView::chainDesc() const {
         // to glass everywhere. Scenes without refractive materials never ask for
         // it, so no existing offscreen view changes shape.
         d.refractions = mPostFx.refractions;
+        // THE HIT DECODE (PHOTON-HIT-SHADE-1): the prepass' own rule, below.
+        d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
+        d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
         return d;
     }
     d.hdr            = mPostFx.hdr;
@@ -182,6 +233,7 @@ ChainDesc OgreView::chainDesc() const {
     // an offscreen view. @see PostFxDesc::ssrScreenMarch.
     d.ssrScreenMarch = mPostFx.ssrScreenMarch;
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
+    d.ssrSteps = mPostFx.ssrSteps;
     d.ssrMarchPhase = mPostFx.ssrMarchPhase;
     d.ssrThickness   = mPostFx.ssrThickness;
     d.ssrIntensity   = mPostFx.ssrIntensity;
@@ -198,21 +250,11 @@ ChainDesc OgreView::chainDesc() const {
     // every pixel, `ssr == 1` (High) one in four, exactly as the march does —
     // which is why the row is a scale factor here too and not a second setting.
     d.rayReflect     = d.ssr > 0 && mScene && mScene->rayReflectionsWanted();
-    // THE SCREEN-PROBE GATHER (GATHER-1a), and the reason it is not `&& d.ssr`:
-    // the gather needs the PREPASS, not the reflection row. A project whose
-    // gather row is on gets the prepass in every view that draws its scene,
-    // whatever its SSR row says — which is the whole of `ChainDesc::probeGather`
-    // (the note there). Like `rayReflect` it reads the machine through the
-    // scene's resolved row and never the document directly, and like it this
-    // line is BELOW the offscreen early-out: an offscreen view that did not opt
-    // in (`PostFxDesc::allowOffscreen`) has no prepass and therefore no gather,
-    // so every thumbnail, preview and pixel suite keeps the colours that make
-    // it assertable.
-    // ...AND NOT IN A STEREO VIEW (the lead's read): the Component declines a
-    // stereo target at this phase (the probe grid would have to be split at the
-    // eye seam — the spec's phase 7), so without this term a VR eye would pay a
-    // second geometry traversal every frame for a prepass nothing then reads.
-    d.probeGather    = mScene && mScene->probeGatherWanted() && !mStereo;
+    // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the same shape and the same
+    // three terms as the gather's line above — the scene's resolved row, below
+    // the offscreen early-out, and never in a stereo view (the job declines a
+    // two-eye target: never in VR, by the design's own column).
+    d.sunContact     = mScene && mScene->sunContactWanted() && !mStereo;
     d.refractions    = mPostFx.refractions;
     // DISTORTION (POST_LOOKS_SPEC §5.3), below the offscreen early-out with the
     // rest: a distortion object is invisible in the passthrough shape anyway (it
@@ -250,6 +292,19 @@ ChainDesc OgreView::chainDesc() const {
         d.ssao = false;
         d.ssr  = 0;
     }
+    // THE HIT DECODE (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): wherever the
+    // chain carries the prepass and this scene's rays are live — the ray jobs'
+    // hits that no cache can shade are decoded — and NOT tied to which row
+    // traces, so toggling the gather where the prepass runs is no new graph.
+    d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
+    // THE PASSTHROUGH SHAPE ON A WINDOW OR A MULTISAMPLED TARGET has no id pass: its
+    // scene pass renders straight into that target, and the id pass's depth cannot be
+    // that pass's depth — Ogre pairs a window's colour with the window's own depth
+    // only (TextureGpu::supportsAsDepthBufferFor: isRenderWindowSpecific), and one
+    // sample with one. That is the Low tier's editor viewport: no post chain, its
+    // anti-aliasing the window's samples. The post shapes render at 1x into their own
+    // targets and always carry it. AtomDrawStatus::passthroughViews counts these.
+    d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
     return d;
 }
 
@@ -849,6 +904,10 @@ bool OgreView::setScene(Scene *scene) {
         // pixels before this view existed). Hosts gate their loading cover on
         // this being 0.
         mFramesPresented = 0;
+        // THE SCENE DECIDES THE ID PASS (ChainDesc::atomDraw): a view built before it
+        // had a scene carries none, and the graph is re-derived HERE, before its first
+        // attach, never one frame later.
+        if (mChainAtomDraw != chainDesc().atomDraw) rebuildDetachedWorkspaceDef();
         return attachWorkspace();
     } JAH_CATCH(mError, false);
 }
@@ -873,6 +932,8 @@ bool OgreView::attachWorkspace() {
         mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
             mScene->sceneManager(), t, mCamera, mWorkspaceDef, mEnabled);
         if (!mWorkspace) return false;
+        // The id pass's recorder is handed a pass, and finds its view here.
+        atomRegisterView(mWorkspace, this);
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->addListener(l);
         ++mWorkspaceGeneration;
@@ -953,6 +1014,7 @@ bool OgreView::detachWorkspace() {
         }
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->removeListener(l);
+        atomUnregisterView(mWorkspace);
         mRoot->getCompositorManager2()->removeWorkspace(mWorkspace);
         mWorkspace = nullptr;
         return true;
@@ -1089,6 +1151,7 @@ void OgreView::detachScene(bool takeBlank) {
         mCamera = nullptr;
         // The camera rode a node of the scene that is going away.
         mCameraNode = 0;
+        if (mScene) mScene->noteAtomPbsView(this, false, false);
         mScene  = nullptr;
         mFramesPresented = 0;
         // AND THE CLEAR-ONLY CHAIN TAKES OVER, in the same call (lane
@@ -1299,6 +1362,14 @@ void OgreView::setLodHysteresisOffscreen(bool on) {
     rebuildWorkspaceDef();
 }
 
+void OgreView::setOffscreenContract(OffscreenContract c) {
+    if (c == mOffscreenContract) return;
+    mOffscreenContract = c;
+    mSaidNoContract = false;
+    // The gather decides the prepass: graph shape, like the flags above.
+    rebuildWorkspaceDef();
+}
+
 void OgreView::setBackground(const Colour &c) {
     const bool same = std::abs(c.r - mBackground.r) < 1e-4f && std::abs(c.g - mBackground.g) < 1e-4f &&
                       std::abs(c.b - mBackground.b) < 1e-4f && std::abs(c.a - mBackground.a) < 1e-4f;
@@ -1309,14 +1380,20 @@ void OgreView::setBackground(const Colour &c) {
 
 void OgreView::rebuildWorkspaceDef() {
     JAH_TRY {
-        Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
         const bool hadWorkspace = detachWorkspace();
-        chain::destroy(cm, mWorkspaceDef, mNodeDefs);
-        chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs, mChainHandles);
-        mChainRayReflect = chainDesc().rayReflect;
-        mChainProbeGather = chainDesc().probeGather;
+        rebuildDetachedWorkspaceDef();
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
+}
+
+void OgreView::rebuildDetachedWorkspaceDef() {
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    chain::destroy(cm, mWorkspaceDef, mNodeDefs);
+    chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs, mChainHandles);
+    mChainRayReflect = chainDesc().rayReflect;
+    mChainPrepass = chainDesc().prepass();
+    mChainHitDecode = chainDesc().hitDecode;
+    mChainAtomDraw = chainDesc().atomDraw;
 }
 
 bool OgreView::dropWorkspaceForShadowRebuild() {
@@ -1402,6 +1479,11 @@ void OgreView::rebuildRtt(unsigned w, unsigned h) {
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     tm->destroyTexture(mTexture);
     mTexture = createRtt(mRoot, processUniqueName("rtt"), w, h, mRequestedSamples);
+    // A NEW SAMPLE COUNT CAN MOVE THE SHAPE (ChainDesc::atomDraw: the passthrough
+    // shape carries the id pass at 1x only), and the old definition's passes would
+    // throw building their render pass against the new target — re-derived before
+    // the attach, never a frame later.
+    if (hadWorkspace && mChainAtomDraw != chainDesc().atomDraw) rebuildDetachedWorkspaceDef();
     if (hadWorkspace) attachWorkspace();
 }
 
@@ -1454,6 +1536,79 @@ bool OgreView::readPixels(Image &out) {
             std::memcpy(&out.rgba[static_cast<size_t>(y) * w * 4u], box.at(0, y, 0), w * 4u);
         t->unmap();
         tm->destroyAsyncTextureTicket(t);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+bool OgreView::readPixelsHdr(ImageF &out) {
+    if (!mTexture) { mError = "readPixelsHdr: View '" + mName + "' is on-screen"; return false; }
+    if (!mChainHandles.radianceTexture || !mWorkspace) {
+        mError = "readPixelsHdr: View '" + mName +
+                 "' keeps no float scene result (PostFxDesc::hdrReadback is off, or no frame has "
+                 "built the workspace yet)";
+        return false;
+    }
+    return readChainTexture(mChainHandles.radianceTexture, out, "readPixelsHdr");
+}
+
+bool OgreView::readReflectionHdr(ImageF &out) {
+    if (!mTexture) { mError = "readReflectionHdr: View '" + mName + "' is on-screen"; return false; }
+    if (!mWorkspace) { mError = "readReflectionHdr: View '" + mName + "' has no workspace"; return false; }
+    return readChainTexture(chain::reflectionTextureName(), out, "readReflectionHdr");
+}
+
+bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char *who) {
+    JAH_TRY {
+        // A LOCAL texture of the chain's scene node: the node that defines it
+        // answers, every other node throws, so ask the one the view built (the
+        // exposure history is found the same way).
+        Ogre::TextureGpu *src = nullptr;
+        const Ogre::IdString name(textureName);
+        const Ogre::IdString sceneNode(chain::sceneNodeDefName(mWorkspaceDef));
+        for (Ogre::CompositorNode *n : mWorkspace->getNodeSequence()) {
+            if (n && n->getName() == sceneNode) {
+                // getDefinedTexture THROWS on a name the node does not declare
+                // (a chain with no SSR stage has no reflection texture), so ask
+                // the definition's name map first.
+                const auto &names = n->getDefinition()->getNameToChannelMap();
+                if (names.find(name) != names.end()) src = n->getDefinedTexture(name);
+                break;
+            }
+        }
+        if (!src) {
+            mError = std::string(who) + ": the chain of View '" + mName + "' defines no '" +
+                     textureName + "'";
+            return false;
+        }
+        const Ogre::PixelFormatGpu fmt = src->getPixelFormat();
+        Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+        const Ogre::uint32 w = src->getWidth(), h = src->getHeight();
+        // Owned for the same reason measuredExposureScale's ticket is: download
+        // and map can both throw, and a ticket is not a SharedPtr.
+        struct TicketScope {
+            Ogre::TextureGpuManager *tm = nullptr;
+            Ogre::AsyncTextureTicket *ticket = nullptr;
+            bool mapped = false;
+            ~TicketScope() {
+                if (!ticket) return;
+                if (mapped) ticket->unmap();
+                tm->destroyAsyncTextureTicket(ticket);
+            }
+        } held{ tm, tm->createAsyncTextureTicket(w, h, 1u, Ogre::TextureTypes::Type2D, fmt) };
+        held.ticket->download(src, 0, true);
+        const Ogre::TextureBox box = held.ticket->map(0);
+        held.mapped = true;
+        out.width = w; out.height = h;
+        out.rgba.resize(static_cast<size_t>(w) * h * 4u);
+        // getColourAt decodes whatever the format is (RGBA16F for both readers)
+        // into float, exactly.
+        for (Ogre::uint32 y = 0; y < h; ++y) {
+            for (Ogre::uint32 x = 0; x < w; ++x) {
+                const Ogre::ColourValue c = box.getColourAt(x, y, 0, fmt);
+                float *o = &out.rgba[(static_cast<size_t>(y) * w + x) * 4u];
+                o[0] = c.r; o[1] = c.g; o[2] = c.b; o[3] = c.a;
+            }
+        }
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1586,7 +1741,38 @@ bool OgreView::warmUpShaders() {
         const bool wasEnabled = mEnabled;
         const bool wantEnabled = !usesPass;
         if (wasEnabled != wantEnabled) setEnabled(wantEnabled);
-        const bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName);
+        // THE SCREEN DECODE IS WARMED WITH THE REST (ATOM S3-DRAW): its twins' draws
+        // are hidden outside the passes the id pass stands in for, so for this one
+        // frame they are shown against the stand-in source.
+        HlmsAtom *atom = mChainAtomDraw ? dynamic_cast<HlmsAtom *>(
+                                              mRoot->getHlmsManager()->getHlms(HlmsAtom::kType))
+                                        : nullptr;
+        // TWICE where the split is live. The warm-up frame is Ogre's own (no engine
+        // frame hook: the GPU scene is not composed and no item is routed), and a
+        // datablock is PENDING until a frame uploads it (HlmsAtom::isBucketPending) —
+        // so the first frame draws everything through PBS (compiling what the shadow
+        // casters, the captures and the stay-on-PBS items need) and uploads the
+        // datablocks; then the table is composed and the items routed here, and the
+        // second frame compiles the decode twins they now wear, and nothing else.
+        bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName);
+        if (atom) {
+            mScene->ensureGpuScene(/*graphIsCurrent=*/false);
+            mScene->updateAtomDraw();
+            // ...and the id pass's three cull jobs, which a warm-up PASS never runs
+            // (it clones the scene passes only): one recorded cull into this view's
+            // own list builds them — the id pass overwrites it on its first frame.
+            {
+                GpuCullRequest req;
+                fillCullFrustum(mCamera, float(height()), req);
+                req.flagsRequired = kGpuVisible | kGpuAtom;
+                req.mode = 2u;
+                std::string err;
+                mScene->recordGpuCull(mAtomCull, req, nullptr, err);
+            }
+            atom->armForWarmUp(mScene->sceneManager(), true);
+            ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName) && ok;
+            atom->armForWarmUp(mScene->sceneManager(), false);
+        }
         if (wasEnabled != wantEnabled) setEnabled(wasEnabled);
         return ok;
     } JAH_CATCH(mError, false);
@@ -1599,6 +1785,13 @@ void OgreView::destroy() {
     // line is work nobody can see. Whatever this view already had comes down.
     detachScene(false);
     destroyBlankChain();
+    // The id pass's list: device buffers, gone before the device (ATOM S3-DRAW).
+    if (mAtomListener) {
+        removeWorkspaceListener(mAtomListener.get());
+        mAtomListener.reset();
+    }
+    mAtomCull.destroy();
+    atomIdPassForgetView(this);
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
         // Same reason as the MSAA recreate: destroying a render window destroys
@@ -1631,6 +1824,17 @@ Ogre::TextureGpu *OgreView::createRtt(Ogre::Root *root, const std::string &name,
 }
 
 Ogre::TextureGpu *OgreView::target() const { return mWindow ? mWindow->getTexture() : mTexture; }
+
+unsigned OgreView::targetSamples() const {
+    // The REQUESTED count as well as the achieved one: a target built this frame
+    // reports its achieved samples only once it is resident, and the chain is
+    // described before that (a 1x answer there built an id pass for a 4x target).
+    const Ogre::TextureGpu *t = target();
+    unsigned n = std::max(mRequestedSamples, 1u);
+    if (t) n = std::max({ n, unsigned(t->getSampleDescription().getColourSamples()),
+                          unsigned(t->getRequestedSampleDescription().getColourSamples()) });
+    return n;
+}
 
 Ogre::TextureGpu *OgreView::targetTexture() const { return target(); }
 

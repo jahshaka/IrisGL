@@ -1,6 +1,7 @@
 #version 460
-// THE SCREEN-PROBE GATHER, JOB 2 OF 3: THE TRACE
-// (GATHER-1a; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 2 items 2-4).
+// THE SCREEN-PROBE GATHER, JOB 2 OF 4: THE TRACE
+// (GATHER-1a; SPECS/SCREEN_PROBE_GATHER_SPEC.md section 2 items 2-4; the reduce
+// moved to the filter, PHOTON-GATHER-1b).
 //
 // ONE WORKGROUP PER PROBE, one THREAD per ray, one ray per texel of the
 // probe's octahedral map. The workgroup is 8x8, so a probe traces at most 64
@@ -9,33 +10,28 @@
 // THE PHYSICS, and the line that decides the units. A pixel's diffuse GI is
 // E(n) = INTEGRAL L(w) max(0, n.w) dw. HlmsPbs consumes it as `envColourD`,
 // which its BRDF multiplies by kD (= albedo/pi) and by pi
-// (200.BRDFs_piece_ps.any:305) — so `envColourD` is E/pi, the mean radiance
-// over the cosine-weighted hemisphere. This job estimates it as a QUADRATURE
-// over the octahedral map with the EXACT solid angle of each texel
-// (jahOctSolidAngle, whose derivation is at its definition):
+// (200.BRDFs_piece_ps.any:305) — so `envColourD` is E/pi. This job writes the
+// RADIANCE half of that integral and nothing else: each ray's radiance and hit
+// distance, into the probe's 8x8 block of the ATLAS. The next job
+// (rq_probe_filter.comp) filters the map in probe space against its
+// neighbours and projects it onto SH9 with the exact solid angle of each texel
+// (jahOctSolidAngle, whose derivation is at its definition); the integrate
+// evaluates that SH at every pixel's own normal.
 //
-//     E/pi = SUM( L_i * cos_i * dOmega_i ) / SUM( cos_i * dOmega_i )
+// THE DIRECTIONS ARE JITTERED inside their texels (stratification: the rays
+// cover the hemisphere once each rather than clustering, and the jitter is
+// what keeps a small bright source from aliasing in and out as the probe
+// moves); the filter assigns each texel's radiance to its texel, whose
+// solid angle it weighs exactly.
 //
-// The denominator is pi by construction and is summed rather than assumed for
-// one reason worth the register: with the directions JITTERED inside their
-// texels it is pi plus the estimator's own noise, and dividing by the noise
-// that the numerator carries cancels it — a constant-radiance hemisphere reads
-// exactly that radiance, every frame, instead of wobbling by two per cent. It
-// is a ratio estimator: exact for a uniform environment, O(1/N) biased for a
-// varying one, and far quieter than the raw sum on the axis the analytic gate
-// measures (the MAGNITUDE).
-//
-// WHAT THE ATLAS IS FOR. Every ray also stores its own radiance and its hit
-// DISTANCE into the probe's 8x8 block of the atlas. Nothing reads it at phase
-// 1 — the integrate takes the reduced irradiance out of the probe's record —
-// and it exists because phases 2 and 3 are the filter in probe space, the
-// plane-weighted interpolation and the temporal reprojection, and every one of
-// them reads radiance PER DIRECTION with the distance beside it. Writing it
-// costs one store per ray.
-//
-// THE HIT'S RADIANCE, in Lumen's order minus the card (that is phase 5, and it
-// arrives as one more branch here): the cascade VOXEL where the ray hit
-// something, the SKY where it hit nothing. TWO QUERIES, ONE TLAS (ATOM-FARBLAS-1,
+// THE HIT'S RADIANCE, in Lumen's order (PHOTON-GATHER-1d, GA-1e): the hit
+// instance's surface CARD wherever one describes the point (texel-exact and
+// UNGATED: the fix round's decision, the header of jah_rq_hit_radiance.glsl
+// says why), the cascade VOXEL otherwise, the
+// SKY where the ray hit nothing -- `jahHitRadiance` (jah_rq_hit_radiance.glsl),
+// the ONE function the reflection trace's hits read too, handed this ray's own
+// footprint at the hit (t x sqrt(2/rays): one ray stands for one octahedral
+// texel's solid angle). TWO QUERIES, ONE TLAS (ATOM-FARBLAS-1,
 // A5b section 4): the ray first traces the NEAR copies (mask 0x0F) out to its
 // near length -- the lit volume's inscribed radius, OgreScreenProbeGather.cpp's
 // `reach`, inside which every hit is one the cascades can shade -- and a ray that
@@ -47,26 +43,23 @@
 // picture AWAY from the long-ray reference and is gone, PHOTON-GAFAR-1). A ray
 // that hits near pays one query; only an escaping ray pays the second. The far
 // query is off when the far plane lies inside the near length (p.knobs3.w = 0).
-// WHAT A FAR HIT IS WORTH TODAY: the cascades end at the near length, so a far
-// hit is almost always outside every cascade and reads BLACK (below) until the
-// surface cards shade it (CARDS-2). Until then the far query buys OCCLUSION --
-// the sky no longer leaks through distant geometry -- and nothing else; its cost
-// (+17-33 % of the gather in open sky at High/Epic, spikes/atom-farblas-1) is
-// paid for that alone.
-// A hit the cascades cannot shade -- near or far -- is BLACK, never sky: the ray
-// found geometry and the cache does not reach it; handing it the sky would
-// light the probe THROUGH the object, which is the leak this whole program
-// exists to remove. Black is an underestimate of a surface's bounce and an
-// exact statement about its occlusion (the lead's decision, ledger sections
-// 937/938).
+// WHAT A FAR HIT IS WORTH: the cascades end at the near length, so a far hit is
+// almost always outside every cascade — it is a RECORD for the visibility-
+// buffer decode (PHOTON-HIT-SHADE-1, jah_rq_hit_record.glsl): its triangle is
+// the mesh's COARSEST level (the record's far bit), shaded by HlmsAtom with the
+// scene's own lighting text and written back into this ray's texel by
+// rq_hit_composite.comp. So are a near hit on a MOVER or a RIGGED item (the
+// caches cannot hold them) and a near hit neither its card nor a cascade
+// answers. There is no black and no sky for a hit: the ray found geometry, and
+// the geometry is shaded.
 //
 // DETERMINISM (spec section 5). Every stochastic input is an integer hash of
-// (probe cell, ray, frame). The 64 partial sums are reduced by a FIXED-ORDER
-// shared-memory tree — not an atomic, not a subgroup reduction, both of which
-// make the sum's order the scheduler's and a float sum whose order is the
-// scheduler's is not reproducible (patch 0065's lesson in its smallest form).
+// (probe cell, ray, frame); each ray writes its own texel and nothing is summed
+// here (the filter's reduction is a fixed-order shared-memory tree).
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -74,16 +67,25 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 #include "jah_probe_params.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
-layout( std430, set = 0, binding = 2 ) buffer Records { JahProbeRecord r[]; } records;
+layout( std430, set = 0, binding = 2 ) readonly buffer Records { JahProbeRecord r[]; } records;
 /// THE PROBE ATLAS: one 8x8 block per probe, rgb = the radiance arriving along
-/// that texel's direction, a = how far away it came from (-1 = the ray hit
-/// nothing, near or far: the sky).
+/// that texel's ray, re-weighted to the texel's centre (see `reweight`), a = how
+/// far away it came from (-1 = the ray hit nothing, near or far: the sky).
 layout( rgba16f, set = 0, binding = 3 ) uniform image2D probeAtlas;
 layout( set = 0, binding = 4 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 5 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 6 ) uniform sampler3D voxelY[kMaxCascades];
 layout( set = 0, binding = 7 ) uniform sampler3D voxelZ[kMaxCascades];
 layout( set = 0, binding = 8 ) uniform samplerCube skyCube;
+// PHOTON-VOXEL-4 (RQ-COV-SLOT-1): every cascade's coverage and surface position per half,
+// by name - after GA-1e's card read (9-12) and geometric normal (13, 14).
+layout( set = 0, binding = 15 ) uniform sampler3D voxelCovP[kMaxCascades];
+layout( set = 0, binding = 16 ) uniform sampler3D voxelCovN[kMaxCascades];
+layout( set = 0, binding = 17 ) uniform sampler3D voxelPosP[kMaxCascades];
+layout( set = 0, binding = 18 ) uniform sampler3D voxelPosN[kMaxCascades];
+// PHOTON-VOXEL-5: level 0's back side and the voxeliser's normal (the side a hit meets).
+layout( set = 0, binding = 23 ) uniform sampler3D voxelBack[kMaxCascades];
+layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
 
 #define JAH_VOX_COUNT       int( p.knobs.w )
 #define JAH_VOX_ANISO       ( p.knobs2.x > 0.5 )
@@ -93,8 +95,50 @@ layout( set = 0, binding = 8 ) uniform samplerCube skyCube;
 #define JAH_SKY_COLOUR      p.skyColour.xyz
 #include "jah_rq_hit.glsl"
 
-/// The weighted radiance (xyz) and the weight (w), reduced in a fixed order.
-shared vec4 gSum[64];
+/// THE SURFACE CACHE THE HITS READ FIRST (GA-1e): the card table, the instance
+/// table, the Depth and Radiance layers at bindings 9-12 — bound by the ray tier
+/// exactly as it binds them for the reflection trace (or the stand-ins with zero
+/// slots: every hit then reads the voxels).
+#define JAH_CARD_BINDING_BASE 9
+// ...and the view term's five after the job's last binding (PHOTON-CARDS-5).
+#define JAH_CARD_VIEW_BINDING_BASE 25
+#include "jah_rq_card_bindings.glsl"
+#define JAH_CARD_SLOTS   uint( p.cards.x )
+#define JAH_CARD_RECORDS uint( p.cards.y )
+#define JAH_CARD_FOOTPRINT_TEXELS p.cards.z
+#include "jah_rq_card.glsl"
+
+/// THE HIT'S GEOMETRIC NORMAL (the card pick's facing): the per-slot row table
+/// the tier writes with the TLAS (binding 13) and the GPU scene's geometry rows
+/// (binding 14, three uvec4 lanes a row) — the reflection's bindings 19/20.
+layout( std430, set = 0, binding = 13 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 14 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+#define JAH_GEOM_SLOTS uint( p.cards.w )
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
+
+#include "jah_rq_hit_radiance.glsl"
+
+/// THE HIT RECORD (PHOTON-HIT-SHADE-1): the GPU scene's instance table (binding
+/// 19), the compacted list's two images (20-21) and its buffer (22) — the
+/// reflection's 25-28.
+layout( std430, set = 0, binding = 19 ) readonly buffer JahHitInstances { uvec4 jahHitInstances[]; };
+layout( rgba32ui, set = 0, binding = 20 ) uniform writeonly uimage2D jahHitIds;
+layout( r32ui, set = 0, binding = 21 ) uniform writeonly uimage2D jahHitDest;
+layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
+#define JAH_HIT_ON          ( p.hitList.w > 0.5 )
+#define JAH_HIT_CAPACITY    uint( p.hitList.x )
+#define JAH_HIT_LIST_W      max( uint( p.hitList.y ), 1u )
+#define JAH_HIT_INSTANCES   uint( p.hitList.z )
+#define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
+#define JAH_HIT_SUN         p.hitSun
+#define JAH_HIT_SUN_MASK    uint( p.hitSun2.x )
+#define JAH_HIT_SUN_RANGE   p.hitSun2.z
+#define JAH_HIT_LIFT        p.hitSun2.y
+#define JAH_HIT_FAR_LIFT    p.hitSun2.w
+#include "jah_rq_sun_ray.glsl"
+#include "jah_rq_hit_record.glsl"
 
 void main()
 {
@@ -138,7 +182,6 @@ void main()
 	// the unused texels are cleared below by the same store.
 	const ivec2 texel = ivec2( int( lane ) % octRes, int( lane ) / octRes );
 
-	vec4 contribution = vec4( 0.0 );
 	vec4 atlasTexel = vec4( 0.0, 0.0, 0.0, -1.0 );
 
 	if( onSurface && lane < rays )
@@ -160,11 +203,25 @@ void main()
 		const float invR = 1.0 / max( length( octPoint ), 1e-6 );
 		const vec3 dLocal = octPoint * invR;
 		const vec3 dir = normalize( T * dLocal.x + B * dLocal.y + n * dLocal.z );
-		// The cosine IS the local z (the frame is built around the normal), and
-		// the solid angle is the texel's exact one.
-		const float weight = max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) );
+		// THE TEXEL'S QUADRATURE WEIGHT, AT THE RAY AND AT THE CENTRE. The
+		// filter and the SH integrate over texel CENTRES (a texel is one
+		// direction to a neighbour and to the projection), while this ray stands
+		// for a point jittered inside the texel — and with a sharp source that
+		// covers part of a texel, where in the texel the rays hit correlates
+		// with the cosine and the solid angle there: assigning the ray's
+		// radiance to the centre's weight read a rectangular emitter 5-7 % off
+		// at a grazing distance (gi.gather_reference, the lane's A/B). So the
+		// atlas holds the radiance RE-WEIGHTED to the centre:
+		//     L * ( cos dOmega at the ray ) / ( cos dOmega at the centre ),
+		// whose centre quadrature is exactly this ray's jittered one (GATHER-1a's
+		// unbiased estimator), and whose mean over the jitter is the texel's
+		// cosine-weighted radiance per unit of the centre's weight.
+		const vec3 centrePoint = jahOctPoint( ( vec2( t ) + 0.5 ) / float( octRes ) );
+		const float centreCos = centrePoint.z / max( length( centrePoint ), 1e-6 );
+		const float reweight = ( max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) ) ) /
+							   max( centreCos * jahOctSolidAngle( centrePoint, float( octRes ) ), 1e-9 );
 
-		const float bias = p.knobs2.y;
+		const float bias = max( p.knobs2.y, 1e-4 * jahViewDistanceOf( posW.xyz ) );
 		const float maxT = p.knobs.y;
 		const float farT = p.knobs3.w;
 		const vec3 origin = posW.xyz + n * bias;
@@ -175,6 +232,23 @@ void main()
 		bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) ==
 				   gl_RayQueryCommittedIntersectionTriangleEXT;
 		float tHit = hit ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;
+		// A NEAR hit names its instance (the item slot the card tables are indexed
+		// by) and its triangle's geometric normal (the card pick's facing); a far
+		// hit names neither (the header: its triangle is the coarse level's).
+		uint hitSlot = 0xFFFFFFFFu;
+		uint hitPrim = 0u;
+		vec2 hitBary = vec2( 0.0 );
+		bool far = false;
+		vec3 hitN = -dir;
+		if( hit )
+		{
+			hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+			hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+			hitBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
+			jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
+								   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
+								   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), dir, hitN );
+		}
 		// THE FAR QUERY, for an escaping ray only: the far copies (kRayMaskFar),
 		// from p.plane.z to the far plane. The same origin and direction; the far
 		// segment starts BEFORE the near one ended by the widest coarse-vs-fine
@@ -192,7 +266,11 @@ void main()
 				gl_RayQueryCommittedIntersectionTriangleEXT )
 			{
 				hit = true;
+				far = true;
 				tHit = rayQueryGetIntersectionTEXT( rqFar, true );
+				hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rqFar, true ) );
+				hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
+				hitBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
 			}
 		}
 
@@ -205,13 +283,32 @@ void main()
 		vec3 radiance = vec3( 0.0 );
 		float distance = -1.0;
 		bool ok = false;
+		bool recorded = false;
 		if( hit )
 		{
 			distance = tHit;
-			radiance = jahVoxelRadiance( origin + dir * tHit, dir, max( tHit * spread, 1e-4 ),
-										 false, ok );
-			if( !ok )
-				radiance = vec3( 0.0 );   // a hit the cascades cannot shade is BLACK
+			// A MOVER, a RIGGED item, or a hit neither its card nor a cascade
+			// answers (a far hit asks the cascades only: its triangle is the
+			// COARSE level's, which no card describes): a record, shaded by the
+			// visibility-buffer decode and written back into this texel by
+			// rq_hit_composite.comp (PHOTON-HIT-SHADE-1). There is no black: a hit
+			// is always shaded (a card, a voxel, or the decode).
+			const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
+			if( !decodeAlways )
+				radiance = jahHitRadiance( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
+										   max( tHit * spread, 1e-4 ), false, false, ok );
+			if( decodeAlways || !ok || !finite3( radiance ) )
+			{
+				const vec3 hitPos = origin + dir * tHit;
+				const float sunVis = jahHitSunVisibility( hitPos, hitN, tHit, far );
+				const ivec2 dest = block + texel;
+				recorded = jahHitAppend( hitSlot, far ? 0u : jahHitNearLevel( hitSlot ), far, hitPrim,
+										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight,
+										 jahHitDestPack( dest, true ) );
+				// THE COMPOSITE writes the radiance; a DROPPED record (the list was
+				// full — counted) leaves this ray's texel at zero radiance.
+				radiance = vec3( 0.0 );
+			}
 		}
 		else
 		{
@@ -221,35 +318,23 @@ void main()
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );
-		contribution = vec4( radiance * weight, weight );
-		atlasTexel = vec4( radiance, distance );
+		atlasTexel = vec4( min( radiance * reweight, vec3( kMaxRadiance ) ), distance );
 	}
 
-	// The lanes past octRes*octRes have no direction of their own; they clear the
-	// 8x8 block's padding so a reader never finds an older frame's radiance in
-	// it. (At octRes 8 there are none.)
-	imageStore( probeAtlas,
-				block + ( lane < rays ? texel
-									  : ivec2( int( lane ) % kOctResMax,
-											   int( lane ) / kOctResMax ) ),
-				atlasTexel );
-
-	gSum[lane] = contribution;
-	// The fixed-order tree: lane k adds lane k+s for s = 32, 16, 8, 4, 2, 1.
-	// Six barriers, one deterministic sum.
-	for( uint s = 32u; s > 0u; s >>= 1u )
-	{
-		barrier();
-		if( lane < s )
-			gSum[lane] += gSum[lane + s];
-	}
-	barrier();
-	if( lane == 0u )
-	{
-		vec4 answer = vec4( 0.0 );
-		if( gSum[0].w > 1e-6 )
-			answer = vec4( clamp( gSum[0].xyz / gSum[0].w, vec3( 0.0 ), vec3( kMaxRadiance ) ),
-						   1.0 );
-		records.r[probe].irradiance = answer;
-	}
+	// THE RAY'S TEXEL, from the lanes that own a direction.
+	if( lane < rays )
+		imageStore( probeAtlas, block + texel, atlasTexel );
+	// ...AND THE 8x8 BLOCK'S PADDING, cleared so a reader never finds an older
+	// frame's radiance in it: each lane clears the block texel at its OWN 8x8
+	// position when that texel lies outside the octRes x octRes map. The padding
+	// is never addressed by lane - rays (PHOTON-GATHER-1d): at Medium (octRes 6)
+	// lanes 36..63 at (lane % 8, lane / 8) land on (4,4), (5,4), (0,5)...(5,5) —
+	// texels of the map itself — and a padding clear raced the ray store in the
+	// same texel, so a probe's irradiance was the scheduler's choice (two
+	// editor.screenshot shots of one still scene differed on ~5 % of pixels).
+	// Here every block texel has exactly one writer. (At octRes 8 there is no
+	// padding.)
+	const ivec2 own = ivec2( int( lane ) % kOctResMax, int( lane ) / kOctResMax );
+	if( own.x >= octRes || own.y >= octRes )
+		imageStore( probeAtlas, block + own, vec4( 0.0, 0.0, 0.0, -1.0 ) );
 }

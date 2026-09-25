@@ -2,15 +2,30 @@
 // the teardown helpers. Meshes, materials, sky, GI and particles live in their
 // own translation units.
 #include "EnginePrivate.h"
+
+#include <cstdlib>
+#include "HlmsAtom.h"
+
+#include <cmath>
 // SURFACE-CACHE phase 2: the cache is a unique_ptr member and the per-frame
 // pass lives here, so this TU needs the Component's complete type.
 #include "SurfaceCache.h"
+#include <OgreHlmsDatablock.h>
+#include <OgreItem.h>
+#include <OgreSubItem.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
 OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
                      std::string &errorSink)
-    : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {}
+    : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
+    // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
+    registerSceneGiBinding(mSceneMgr, &mGiBinding);
+    // THE VISIBILITY BUFFER'S MEASUREMENT SWITCH (never a mode): the whole process
+    // draws through PBS — the cost table's reference arm in the app, and the A/B
+    // that attributes a moved picture to the split.
+    if (std::getenv("JAHSHAKA_ATOM_DRAW_OFF")) mAtomDrawEnabled = false;
+}
 
 OgreScene::~OgreScene() { destroy(); }
 
@@ -104,6 +119,9 @@ void OgreScene::applyVctEnvironment() {
 
 void OgreScene::applyCascadeEnvironment(Ogre::VctLighting *lighting) {
     if (!lighting) return;
+    // THE CLOUD LAYER'S SHADOW ON THE INJECTION (CLOUDS-2D-2), bound or cleared
+    // on the shared job for THIS volume, beside its environment.
+    bindCloudInjection(lighting);
     JAH_TRY {
         Ogre::TextureGpu *cube = (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
         lighting->setEnvironment(cube,
@@ -148,14 +166,32 @@ void OgreScene::noteEnvironmentChanged() {
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {
+    mSkyAmbientOwned = false;   // the host lights this scene itself
+    applyAmbientSh(sh, GiStaleReason::Ambient);
+}
+
+void OgreScene::applyAmbientSh(const float sh[27], GiStaleReason why) {
     // THE PROBE CACHE'S AMBIENT INPUT (ENGINE_CACHE_POLICY_SPEC P7): a probe
     // capture is lit by it. Compared by value, because the host re-pushes the
     // ambient every time a page takes the screen back and that must cost no
     // re-capture. (setAmbient funnels through here, so both are covered.)
+    // GUARDED AT THE SOURCE (PHOTON-FIELD-ROTATE-1, F5): a non-finite coefficient,
+    // or a negative constant band (the mean radiance - the higher bands are signed
+    // by nature), is refused with one log line and the previous SH kept: every probe
+    // ray's escape reads these, and the field's mean would carry a bad value.
+    for (int i = 0; i < 27; ++i) {
+        if (!std::isfinite(sh[i]) || (i < 3 && sh[i] < 0.0f)) {
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: an ambient SH with a non-finite or negative-mean coefficient (" +
+                std::to_string(i) + " = " + std::to_string(sh[i]) +
+                ") was refused; the previous SH stands");
+            return;
+        }
+    }
     if (!mAmbientShKnown || std::memcmp(sh, mLastAmbientSh, sizeof mLastAmbientSh) != 0) {
         std::memcpy(mLastAmbientSh, sh, sizeof mLastAmbientSh);
         mAmbientShKnown = true;
-        staleProbeGrid(GiStaleReason::Ambient);          // a no-op before a grid exists
+        staleProbeGrid(why);                             // a no-op before a grid exists
         // ...and the bounce injection reads the environment (PHOTON-ENV-1).
         noteEnvironmentChanged();
         // (The irradiance field owes nothing here: a VOXEL-fed probe cone-traces
@@ -223,14 +259,32 @@ void OgreScene::setAmbientSh(const float sh[27]) {
 // (Sky Light intensity 1, white) generates the identical shader it always did
 // and renders the identical pixels.
 void OgreScene::setEnvironmentLight(const Colour &gain) {
+    // THE FIELD'S PER-CHANNEL INPUTS ARE GUARDED AT THE SOURCE (PHOTON-FIELD-ROTATE-1,
+    // F5): a non-finite gain would reach every probe ray's escape and the field's
+    // running mean would carry it until the next change. Refused, the previous gain
+    // kept, one log line. (A negative channel is clamped to 0 below, as before.)
+    if (!std::isfinite(gain.r) || !std::isfinite(gain.g) || !std::isfinite(gain.b)) {
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: a non-finite environment-light gain was refused; the previous gain stands");
+        return;
+    }
     const Colour c(std::max(gain.r, 0.0f), std::max(gain.g, 0.0f), std::max(gain.b, 0.0f), 1.0f);
     // Rec.709 luminance; the weights sum to exactly 1.0f in float, so a white
     // gain of 1 is exactly 1.0f and HlmsPbs sets no envmap_scale property.
     const float g = 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
-    if (c.r == mEnvLightGain.r && c.g == mEnvLightGain.g && c.b == mEnvLightGain.b) return;
+    // THE AMBIENT IS SH x THIS GAIN, AND THE ENGINE FORMS IT (PHOTON-SKY-TRANSIENT-1):
+    // this push hands the ambient to the engine and re-asserts it even when the
+    // gain did not move (a host's first push, a page return) — what replaces the
+    // host's own SH push.
+    mSkyAmbientOwned = true;
+    if (c.r == mEnvLightGain.r && c.g == mEnvLightGain.g && c.b == mEnvLightGain.b) {
+        applySkyAmbient(GiStaleReason::Ambient);
+        return;
+    }
     const bool wasLit = mEnvLightScale > 0.0f;
     mEnvLightGain = c;
     mEnvLightScale = g;
+    applySkyAmbient(GiStaleReason::Ambient);
     // Every escape reads the environment at this gain, the bounce injection
     // included: what the voxels hold changes with it.
     noteEnvironmentChanged();
@@ -339,10 +393,10 @@ bool OgreScene::hasAuthoredReflectionMap() const {
 }
 
 float OgreScene::envmapScaleForPass() const {
-    // Any grid anywhere, for the same reason reflectionTexFor asks that way: the
-    // scale multiplies whatever the env slot holds, and while a PCC is bound to
-    // the singleton that is a probe array in EVERY scene's pass.
-    if (anyProbeGridBound()) return 1.0f;
+    // This scene's grid, for the same reason reflectionTexFor asks that way: the
+    // scale multiplies whatever the env slot holds, and while this scene's
+    // passes bind a PCC that is a probe array.
+    if (probeGridBound()) return 1.0f;
     if (hasAuthoredReflectionMap()) return 1.0f;
     return mEnvLightScale;
 }
@@ -1424,8 +1478,6 @@ NodeId OgreScene::nodeOfLight(const Ogre::Light *light) const {
 
 void OgreScene::destroy() {
     if (!mSceneMgr) return;
-    // teardownVct is shared with "GI off", and the two want different timing for
-    // the process-wide reflection re-bind — see the note there.
     mDestroying = true;
     JAH_TRY {
         // THE SURFACE CACHE BEFORE EVERYTHING, and the order is not tidiness.
@@ -1456,6 +1508,9 @@ void OgreScene::destroy() {
         // removeRenderQueueListener -> destroy scenes -> delete OverlaySystem
         // -> delete Root (OgreOverlayHud.cpp's header).
         hud::detach(mSceneMgr);
+        // THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): HlmsAtom-owned objects in
+        // this SceneManager's memory, so they die before it does.
+        forgetSceneDecodes(mSceneMgr);
         teardownGi();   // VPL lights die while the SceneManager is still alive
         // The atmosphere destroys its Rectangle2D THROUGH the SceneManager, so it
         // has to go while that is still alive (teardown law: components, then the
@@ -1463,7 +1518,7 @@ void OgreScene::destroy() {
         destroyAtmosphere();
         // Before the nodes: PlanarReflections holds raw Renderable pointers, and
         // it destroys its own cameras through the SceneManager. It also has to
-        // unbind itself from the process-wide HlmsPbs, which its destructor
+        // leave this scene's binding and every HlmsPbs host, which its destructor
         // (like VctLighting's) does not do.
         teardownPlanar();
         destroySky();   // also unbinds + destroys the reflection cubemap
@@ -1476,8 +1531,10 @@ void OgreScene::destroy() {
         releaseQueueDepthAnchor();
         for (auto &kv : mMaterials) {
             Ogre::Hlms *hlms = hlmsFor(kv.second);
-            if (hlms->getDatablock(Ogre::IdString(kv.second.datablockName)))
+            if (Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(kv.second.datablockName))) {
+                forgetDecodeTwinOf(db);   // its decode twin dies first (HlmsAtom.h)
                 hlms->destroyDatablock(Ogre::IdString(kv.second.datablockName));
+            }
         }
         mMaterials.clear();
         for (auto &kv : mTextures) releaseTextureRec(kv.second);
@@ -1511,6 +1568,7 @@ void OgreScene::destroy() {
         }
     } JAH_CATCH(mError, );
     FogHlmsListener::unregisterScene(mSceneMgr);
+    unregisterSceneGiBinding(mSceneMgr);
     mSceneMgr = nullptr;
 }
 
@@ -1689,8 +1747,10 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     }
     if (!n.datablockName.empty()) {
         auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
-        if (hlmsPbs->getDatablock(Ogre::IdString(n.datablockName)))
+        if (Ogre::HlmsDatablock *db = hlmsPbs->getDatablock(Ogre::IdString(n.datablockName))) {
+            forgetDecodeTwinOf(db);   // its decode twin dies first (HlmsAtom.h)
             hlmsPbs->destroyDatablock(Ogre::IdString(n.datablockName));
+        }
         n.datablockName.clear();
     }
     if (n.node) { mSceneMgr->destroySceneNode(n.node); n.node = nullptr; }
@@ -1756,10 +1816,24 @@ bool OgreScene::rayTracingResolved() const {
 
 void OgreScene::setRayTracing(RayTracingMode mode) {
     const bool wasOn = mRayTracing != RayTracingMode::Off;
+    const bool gridWas = probeGridWanted();
     mRayTracing = mode;
     // OFF is a COST guarantee, not only a picture: the ray structures this
     // scene holds are released now, and updateRayQuery skips it from here.
     if (wasOn && mode == RayTracingMode::Off) forgetRayQuery();
+    // THE ROW MOVES THE PROBE GRID'S RULE (PHOTON-F12-PCC): at a ray tier the
+    // grid is not built, so the row turning the rays on there takes the grid
+    // down and turning them off builds it — the two things a technique change
+    // already does, and nothing else. Down is `dropProbeGridByRays` (the
+    // binding lets go, the datablocks take their sky cube back, the probe
+    // record goes with it); up is the from-scratch `rebuildVct`, owed through the
+    // flush: the cheap paths' belt refuses a hybrid that wants a grid and has
+    // none (refreshCascadesFast / refreshVctFast), so the flush takes the
+    // rebuild, and a rebuild that has to wait (a camera, a texture) stays armed.
+    const bool gridNow = probeGridWanted();
+    if (gridWas == gridNow) return;
+    if (!gridNow) dropProbeGridByRays();
+    else mGiCachesDirty = true;
 }
 
 
@@ -1769,17 +1843,18 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 //
 // WHERE THIS RUNS AND WHY. Once per DRAWN scene from `renderOneFrame`, right
 // after `applyPendingGi` — so a material edit or a light write has already
-// bumped the signatures the cache compares — and before Ogre's own workspaces.
-// That is "in the frame" in the sense that matters: the monitor's per-pass
-// listeners are attached at the frame's head, the GPU work goes into this
-// frame's command buffer, and the capture's cost is visible where every other
-// engine cache's cost is.
+// bumped the signatures the cache compares — and before Root's frame. It
+// PLANS (residency, invalidation, this frame's batch); the capture executes
+// inside Root's frame, after `updateSceneGraph`, as the first workspace in the
+// manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
 void OgreScene::updateSurfaceCache() {
-    // AUTO IS OFF AT THIS PHASE, and it says so rather than quietly capturing:
-    // nothing reads a card until phase 4 (the ray hit), so a user's machine
-    // would be paying for pictures nobody looks at. A suite and the monitor
-    // turn the row On.
-    const bool want = mGi.cards == GiToggle::On;
+    // AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): the reader of a card is the
+    // reflection trace's hit (rq_reflect.comp, jah_rq_card.glsl), so the cache
+    // is on exactly where that trace runs — the World row resolved against the
+    // machine (`rayReflectionsWanted`) — and costs nothing where it cannot be
+    // read. On forces it (a suite, the monitor); Off refuses it.
+    const bool want = mGi.cards == GiToggle::On ||
+                      (mGi.cards == GiToggle::Auto && rayReflectionsWanted());
     if (!want) {
         if (mSurfaceCache) mSurfaceCache.reset();
         return;
@@ -1796,6 +1871,15 @@ void OgreScene::updateSurfaceCache() {
             mSurfaceCache.reset();
             return;
         }
+        // THE MOVERS' SHADOW (PHOTON-CARDS-4): the scene's in-frame answers and
+        // the ray tier's trace; a scene without rays answers "no trace" and the
+        // cards keep the still world's sun term alone.
+        CardMoverHooks hooks;
+        hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
+        hooks.trace = [this](const CardMoverTrace &t) { return traceCardMovers(t); };
+        hooks.timeRelight = [this](bool begin) { timeCardRelight(begin); };
+        hooks.readTimes = [this](float &a, float &b) { cardMoverTimes(a, b); };
+        mSurfaceCache->setMoverHooks(hooks);
     }
     // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
     // does, and waits for one the same way: `mGiCamPos` is the authoritative
@@ -1852,6 +1936,94 @@ void OgreScene::updateSurfaceCache() {
         }
     }
     view.lightSerial = lightSig;
+    // THE RADIANCE SIGNATURE: the shadow signature above plus everything a
+    // card's LIT radiance depends on and its capture does not — the colour,
+    // the power, the reach and the cone. A colour slider costs the cache a
+    // relight of the resident set (the `Jahshaka/CardLight` job, under its own
+    // budget) and not one capture. The lights themselves are handed over for
+    // the job's light list (below).
+    unsigned long long radianceSig = lightSig;
+    for (NodeId lid : mLightNodes) {
+        auto lit = mNodes.find(lid);
+        if (lit == mNodes.end() || !lit->second.light) continue;
+        const Ogre::Light *l = lit->second.light;
+        const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
+        const auto foldR = [&radianceSig](float f) {
+            radianceSig ^= (unsigned long long)(long long)std::lround(double(f) * 1000.0);
+            radianceSig *= 1099511628211ull;
+        };
+        foldR(c.r); foldR(c.g); foldR(c.b);
+        foldR(l->getAttenuationRange()); foldR(l->getAttenuationLinear());
+        foldR(l->getAttenuationQuadric());
+        foldR(l->getSpotlightInnerAngle().valueRadians());
+        foldR(l->getSpotlightOuterAngle().valueRadians());
+        foldR(l->getSpotlightFalloff());
+        // ...and the light itself, for the relight job: EVERY light node,
+        // world space, unculled — the frame's global list is culled against
+        // the frame's cameras, and a card lights surfaces off screen.
+        view.lights.push_back(lit->second.light);
+    }
+    // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected
+    // with, and its serial in the radiance signature — a layer change or a
+    // scroll capture relights the resident cards (and recaptures none).
+    radianceSig ^= mCloudGiSerial;
+    radianceSig *= 1099511628211ull;
+    if (mCloudGiState.field) {
+        const FogHlmsListener::CloudShadowState &cs = mCloudGiState;
+        view.cloudField = cs.field;
+        view.cloudMap[0] = cs.invTile;  view.cloudMap[1] = cs.strength;
+        view.cloudMap[2] = cs.scroll[0]; view.cloudMap[3] = cs.scroll[1];
+        view.cloudSun[0] = cs.sunThrow[0]; view.cloudSun[1] = cs.sunThrow[1];
+        view.cloudSun[2] = cs.altitude;    view.cloudSun[3] = cs.invMuSun;
+    }
+    view.radianceSerial = radianceSig;
+    view.lightBudgetTexels = facts.cardLightTexels;
+    // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0
+    // VctLighting the pass buffer is filled from), and THE RE-INJECTION
+    // SIGNATURE — folded ONLY from what moves when an injection LANDS, never
+    // from the write-time serials (a light write or a material generation
+    // bumps at the WRITE, and a dragged light re-marched the whole resident set
+    // against voxels that had not moved, every frame): the chain's settles, each
+    // cascade's rebuilds and lattice cell, the VctLighting objects themselves,
+    // the single volume's own landed-injection count (OgreGi.cpp), and the
+    // environment the escapes read (below).
+    view.vct = mVctLighting;
+    view.indirectBudgetTexels = facts.cardIndirectTexels;
+    // ...and THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's SH, the engine's
+    // own SH x gain (applySkyAmbient), in the indirect signature below.
+    view.ambientSh = mLastAmbientSh;
+    {
+        unsigned long long sig = 1469598103934665603ull;
+        const auto foldI = [&sig](unsigned long long v) {
+            sig ^= v;
+            sig *= 1099511628211ull;
+        };
+        foldI((unsigned long long)mGiChainSettles);
+        foldI(mGiMonoInjections);
+        // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
+        // injection at all: noteEnvironmentChanged hands the new sky to every
+        // VctLighting at once (applyVctEnvironment) and the pixel reads it the
+        // same frame, so the card's escape must too. The values
+        // applyCascadeEnvironment hands over, quantised.
+        {
+            const Ogre::TextureGpu *cube =
+                (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
+            foldI((unsigned long long)(uintptr_t)cube);
+            const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
+            for (float g : gain) foldI((unsigned long long)(long long)std::lround(double(g) * 1e4));
+            for (int k = 0; k < 27; ++k)
+                foldI((unsigned long long)(long long)std::lround(double(mLastAmbientSh[k]) * 1e4));
+        }
+        foldI((unsigned long long)(uintptr_t)mVctLighting);
+        for (const VctCascade &c : mVctCascades) {
+            foldI((unsigned long long)(uintptr_t)c.lighting);
+            foldI(c.rebuilds);
+            foldI((unsigned long long)c.latticeX);
+            foldI((unsigned long long)c.latticeY);
+            foldI((unsigned long long)c.latticeZ);
+        }
+        view.indirectSerial = sig;
+    }
 
     // THE CANDIDATE LIST — THE SCENE'S OWN WALK, handed over rather than
     // reached for. The predicate is the same one the voxel side uses, and each
@@ -1864,12 +2036,24 @@ void OgreScene::updateSurfaceCache() {
     //   * `shown` — a hidden object photographs nothing.
     //   * a baked card list — every skinned mesh, every line mesh and every
     //     model opened without a bake has none, and gets none here.
+    //   * OPAQUE (PHOTON-GATHER-1d fix round) — a card records a surface's
+    //     albedo, normal and depth as the capture's prepass writes them, and a
+    //     blended (Fade/Blend/Glass) sub-item is not a surface the prepass
+    //     holds: the gather's F2 discard keeps it out, and the capture's own
+    //     piece fills the same hook. An item with ANY blended sub-item gets no
+    //     cards; its bounce is the voxels'.
     // The radius itself is the cache's; this walk hands over everything that
     // COULD be resident and lets the Component decide who is.
     view.candidates.reserve(mItemNodes.size());
     for (Node *n : mItemNodes) {
         if (!n || !n->item || !n->node || !n->shown) continue;
         if (!(n->item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        bool blended = false;
+        for (size_t si = 0; si < n->item->getNumSubItems() && !blended; ++si) {
+            const Ogre::HlmsDatablock *db = n->item->getSubItem(si)->getDatablock();
+            blended = db && db->getBlendblock(false)->isAutoTransparent();
+        }
+        if (blended) continue;
         const std::vector<MeshCardDesc> *cards = meshCardsFor(n->item->getMesh().get());
         if (!cards || cards->empty()) continue;
         CardSceneView::Candidate c;
@@ -1891,10 +2075,11 @@ bool OgreScene::readCardTexel(NodeId node, unsigned card, float u, float v, Card
     return mSurfaceCache->readTexel(node, card, u, v, out);
 }
 
-bool OgreScene::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out) {
+bool OgreScene::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
+                           NodeId onlyNode) {
     out = CardSample();
     if (!mSurfaceCache) return false;
-    return mSurfaceCache->readAt(toOgre(world), toOgre(normal), out);
+    return mSurfaceCache->readAt(toOgre(world), toOgre(normal), out, onlyNode);
 }
 
 bool OgreScene::dumpCardAtlas(const std::string &prefix, std::string &err) {

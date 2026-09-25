@@ -200,6 +200,14 @@ void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
     mGpuSampleIndex.erase(it);
 }
 
+void FrameMonitor::noteGpuMarksDropped(unsigned n) {
+    if (!n) return;
+    mGpuMarksDropped += n;
+    // The frame that issued them is the newest one waiting for its samples; a
+    // frame already published (no GPU sampling, or aged out) keeps the total only.
+    if (!mPending.empty()) mPending.back().rec.gpuMarksDropped += n;
+}
+
 void FrameMonitor::retirePending(bool all) {
     const size_t keep = (all || !mGpu) ? 0u : size_t(kGpuLatencyFrames);
     while (mPending.size() > keep) {
@@ -425,11 +433,14 @@ void PassListener::passPreExecute(Ogre::CompositorPass *pass) {
     // three shadow nodes are named constants, so "this is a probe's shadow map
     // pass" is a fact and not a guess.
     f.rec.bucket = PassBucket::Other;
+    static const Ogre::IdString cardShadowNodeId(OgreView::kCardShadowNodeName);
     if (node) {
         const Ogre::IdString id = node->getName();
         if (id == shadowNodeId(ShadowNodeKind::View))         f.rec.bucket = PassBucket::ShadowView;
         else if (id == shadowNodeId(ShadowNodeKind::Reflect)) f.rec.bucket = PassBucket::ShadowReflect;
         else if (id == shadowNodeId(ShadowNodeKind::Probe))   f.rec.bucket = PassBucket::ShadowProbe;
+        // The card capture's node draws the probe kind's casters (EnginePrivate.h).
+        else if (id == cardShadowNodeId)                      f.rec.bucket = PassBucket::ShadowProbe;
         else f.rec.bucket = sceneKind ? PassBucket::Main : PassBucket::Post;
     }
     if (sceneKind) f.rec.shadowMs = 0.0f;   // a scene pass answers the split; see below
@@ -1040,11 +1051,7 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
     st.gpuSupported = true;
     st.gpuActive = available;
     st.gpuQueryPools = available ? 2u : 0u;
-    if (available) {
-        Ogre::uint32 truncated = 0u;
-        try { rs->getCustomAttribute("JahGpuSamplesTruncated", &truncated); } catch (...) {}
-        st.gpuSamplesTruncated = unsigned(truncated);
-    }
+    if (available && mMonitor) st.gpuMarksDropped = mMonitor->gpuMarksDropped();
     if (!available)
         st.gpuReason = mMonitor ? "the device or queue has no usable timestamps"
                                 : "no capture is running (no query pool exists)";
@@ -1062,6 +1069,12 @@ void OgreEngine::gpuFrameBegin() {
     if (!rs) return;
     try {
         rs->getCustomAttribute("JahGpuFrameBegin", nullptr);
+        // THE MARKS THE POOL COULD NOT HOLD in the frame that just ended — the
+        // fork's count for the pool it has just recycled, read EVERY frame so no
+        // dropping frame goes unrecorded between two host drains.
+        Ogre::uint32 dropped = 0u;
+        rs->getCustomAttribute("JahGpuSamplesTruncated", &dropped);
+        mMonitor->noteGpuMarksDropped(unsigned(dropped));
         std::vector<std::pair<Ogre::uint32, float>> results;
         rs->getCustomAttribute("JahGpuSampleResults", &results);
         for (const auto &r : results) mMonitor->noteGpuSample(unsigned(r.first), r.second);

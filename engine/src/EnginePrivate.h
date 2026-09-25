@@ -63,6 +63,7 @@
 #include <unordered_set>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorWorkspace.h>
+#include <Compositor/OgreCompositorWorkspaceListener.h>
 #include <Compositor/OgreCompositorNodeDef.h>
 #include <Compositor/OgreCompositorShadowNode.h>
 #include <Compositor/OgreCompositorShadowNodeDef.h>
@@ -139,6 +140,8 @@ namespace jahshaka { namespace engine {
 /// may hold. Only OgreSurfaceCache.cpp and the scene's own TU need its
 /// definition.
 class SurfaceCache;
+struct CardMoverTrace;
+struct CardMoverFrame;
 // The backend's own namespace: these types and helpers are shared between the
 // TUs under engine/src and by nothing else (they used to live in one anonymous
 // namespace, when the backend was a single translation unit).
@@ -546,6 +549,7 @@ constexpr float        kPssmSplitPadding  = 1.0f;
 constexpr float        kPssmSplitBlend    = 0.125f;
 constexpr float        kPssmSplitFade     = 0.313f;
 constexpr Ogre::uint32 kPssmStableSplits  = 2u;
+constexpr float        kPssmConstantBiasScale = 0.3f;   ///< the sun's constant bias x 0.3 (OgreShadow.cpp's table)
 /// The engine's hard ceiling on focused (point/spot) shadow maps, whatever a
 /// host asks for (SHADOW_TOOLING_SPEC D1). The bound is VRAM and shadow passes,
 /// not the pass buffer — a mapped caster costs ~112 B there.
@@ -737,7 +741,9 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // [225,256) are V1_FAST, 15 is PARTICLE_SYSTEM. Our v2 items can therefore only
 // live in 0-99 and 200-224.
 //   0     sky rectangle          (OgreSky)
+//   2     the visibility buffer's screen decode draws (HlmsAtom, kScreenDecodeRenderQueue)
 //   10    normal items           (Ogre's default)
+//   11    the visibility buffer's items (kAtomRenderQueue, ATOM S3-DRAW)
 //   15    PFX2 billboards
 //   200   refractive items       (reserved; phase 7)
 //   210   on-top overlays        (gizmos, wires, selection outlines)
@@ -748,6 +754,50 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // inside the single range the old one-pass workspace drew.)
 constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
 constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
+
+// THE VISIBILITY BUFFER'S QUEUE (ATOM S3-DRAW; SPECS/atom/D3_S3_DRAW_DESIGN.md §2.4).
+// The render-queue split's ONE switch (OgreScene::atomRouteFor, at compose time)
+// files an item the id pass can draw and the decode can shade here; everything else
+// stays at 10. A view whose chain carries the id pass SKIPS this queue in its
+// prepass and opaque pass (the fork's CompositorPassSceneDef::mSkipRQ) — the id pass
+// draws these items and the decode shades them — while every other pass keeps
+// drawing them through PBS exactly as before: the shadow node, the PCC faces and the
+// cards ([0,200)), the planar mirrors ([0,199)), and any view without an id pass
+// (a stereo chain). 11 because it must sit inside all of those ranges, below 200,
+// and in front of the blended queues it would otherwise overwrite in a PBS pass: the
+// grid at 14 and the particles at 15 draw after it, as after the items at 10.
+constexpr Ogre::uint8 kAtomRenderQueue = 11;
+/// The customId of the id pass (AtomPassProvider's registry, OgreAtomIdPass.cpp).
+constexpr const char *kAtomIdPassId = "atom_id";
+/// The chain's id image (R32G32_UINT, AtomId's words): what the id pass writes and
+/// the screen decode reads (OgreChain.cpp defines it; the listener finds it by name).
+constexpr const char *kAtomIdTexture = "jahAtomIds";
+
+/// OgreAtomIdPass.cpp — THE ID PASS's device half. `atomIdPassSupported`: this
+/// device can run it (buffer device addresses, VK_KHR_draw_indirect_count, the
+/// raw-Vulkan TU compiled in; false on macOS and on the NULL render system).
+/// `registerAtomIdPass` puts its recorder on the provider (at Hlms registration);
+/// `releaseAtomIdPass` destroys its pipeline (before Root).
+bool atomIdPassSupported(Ogre::RenderSystem *rs);
+/// OgreCompute.cpp — a cull request's frustum, eye and level-rule terms from a
+/// camera and its pass's target height (OgreEngine::fillCullView's view half).
+void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullRequest &out);
+void registerAtomIdPass();
+void releaseAtomIdPass();
+/// A view going away: its stats ring (OgreAtomIdPass.cpp) goes with it.
+void atomIdPassForgetView(const OgreView *view);
+/// OgreAtomDraw.cpp — which view a workspace with an id pass belongs to (the
+/// recorder is handed a pass, not a view), and the view's listener that arms the
+/// screen decode for the passes that skip the Atom queue.
+void atomRegisterView(const Ogre::CompositorWorkspace *ws, OgreView *view);
+void atomUnregisterView(const Ogre::CompositorWorkspace *ws);
+OgreView *atomViewOf(const Ogre::CompositorWorkspace *ws);
+/// The listener's own deleter: CompositorWorkspaceListener has no virtual destructor.
+struct AtomDrawListenerDeleter {
+    void operator()(Ogre::CompositorWorkspaceListener *l) const;
+};
+using AtomDrawListenerPtr = std::unique_ptr<Ogre::CompositorWorkspaceListener, AtomDrawListenerDeleter>;
+AtomDrawListenerPtr makeAtomDrawListener(OgreView *view);
 
 // THE DISTORTION QUEUE (POST_LOOKS_SPEC.md §5.3).
 //
@@ -891,6 +941,14 @@ struct StereoEyeBasis {
     float tanLeft = 0.0f, tanRight = 0.0f, tanTop = 0.0f, tanBottom = 0.0f;
 };
 
+/// THE HIT DECODE PASS (ChainDesc::hitDecode): its listener records the ray
+/// jobs' TRACES before it (they write the hit list it shades) and arms HlmsAtom's
+/// hit mode for its length; the WRITE-BACK and the filters follow in the opaque
+/// pass' pre-execute. Stamped on exactly that pass.
+constexpr Ogre::uint32 kHitDecodePassIdentifier = 25002u;
+/// The hit list's height as a factor of the target's (ChainDesc::hitDecode).
+constexpr float kHitListHeightFactor = 0.5625f;
+
 struct ChainDesc {
     Colour   background;
     bool     shadows = false;   ///< instantiate the process-wide shadow node
@@ -982,6 +1040,7 @@ struct ChainDesc {
     /// built at all, and `jahSsrReflection` is CLEARED instead of resolved into.
     bool  ssrScreenMarch = true;
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
+    int   ssrSteps = 0;             ///< 0 = the row's 48/96 (PostFxDesc::ssrSteps)
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
     float ssrIntensity = 1.0f;
     /// WHICH SAMPLE ANSWERS THE MARCH'S TWO QUESTIONS (PostFxDesc::ssrMarchPhase).
@@ -1022,7 +1081,41 @@ struct ChainDesc {
     /// does not). Set by the VIEW from the scene's resolved row, exactly as
     /// `rayReflect` is.
     bool  probeGather = false;
+    /// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3), here for the gather's
+    /// reason exactly: the contact job starts each ray from the PREPASS' depth
+    /// and normals and the pixel reads its answer back in the `PrePassUse`
+    /// pass (`iFragCoord`, and the prepass' shadow term the answer is folded
+    /// into). So the prepass runs for `ssr || probeGather || sunContact`.
+    /// Nothing else about the graph moves. Set by the VIEW from the scene's
+    /// resolved row, below the offscreen early-out, never in a stereo view.
+    bool  sunContact = false;
+    /// THE HIT DECODE (PHOTON-HIT-SHADE-1; SPECS/atom/D2_HIT_SHADING_DESIGN.md):
+    /// wherever the chain carries the prepass and the scene's rays are live, the
+    /// graph carries the ray jobs' compacted HIT LIST — `jahHitIds` (RGBA32UI) and
+    /// `jahHitDest` (R32UI), UAVs the traces append to, beside the ray tier's
+    /// buffer (the counters and 8 bytes a record: the sun, footprint, weight) —
+    /// and one PASS_SCENE, "Jahshaka hit decode" (RQ kHitDecodeRenderQueue only,
+    /// into `jahHitRadiance`, RGBA16F), between the SSR resolve and the opaque
+    /// pass: HlmsAtom's decode shading every record. THE LIST'S SIZE is a factor
+    /// of the target (so a resize is not a new graph): W x floor(0.5625 H)
+    /// records = ( W H [the Epic reflection's texels] + 1.25 W H [the Epic
+    /// gather's rays: (W/8)(H/8) probes x 1.25 (the adaptive quarter) x 64] ) / 4
+    /// — a quarter of the worst case; 1,166,400 records at 1920x1080, 36 bytes
+    /// each (28 of record, 8 of radiance) = 42 MB. Not tied to the rows that trace
+    /// (a toggle of the gather where the prepass already runs is not a new graph).
+    bool  hitDecode = false;
+    /// THE VISIBILITY BUFFER (ATOM S3-DRAW, OgreAtomDraw.cpp / OgreAtomIdPass.cpp):
+    /// the id pass in front of every scene pass of the view, which then LOAD its
+    /// depth and SKIP kAtomRenderQueue (the screen decode shades those items as
+    /// the first draw of the prepass and of the opaque pass).
+    bool  atomDraw = false;
     bool  refractions = false;
+    /// THE RADIANCE READBACK (PostFxDesc::hdrReadback, HDR-READBACK-1): the
+    /// scene result is kept in a FLOAT target even without `hdr`, and
+    /// ChainHandles::radianceTexture names it. Set before the offscreen
+    /// early-out (it is what the view KEEPS, not a post effect), and graph
+    /// shape: the scene-format textures change.
+    bool  hdrReadback = false;
 
     // ---- The hierarchical depth pyramid (SPECS/NANITE_SPEC.md §4.3) ----
     /// Build a closest-depth mip chain of the scene depth, once per frame, right
@@ -1068,6 +1161,12 @@ struct ChainDesc {
     /// derived from the target's own aspect and therefore moves on every
     /// resize — and Ogre re-reads mVpRect from the definition on every execute.
     bool  letterbox = false;
+    /// ...and the CAMERA'S aspect the rectangle is fitted to (a uniform, never
+    /// the shape): the SSR march, its resolve and the reprojection work in the
+    /// SHOT's uv, which is the letterbox rectangle's (SSR-LETTERBOX-1), and
+    /// applyViewGlobals derives the rectangle from this and the view's size
+    /// exactly as OgreView::applyLetterbox does.
+    float letterboxAspect = 0.0f;
 
     // ---- Engine-drawn overlay (STATS_OVERLAY_SPEC.md §6.5) ----
     /// Whether the FINAL overlay pass gets mIncludeOverlays = true. This is a
@@ -1174,6 +1273,10 @@ struct ChainDesc {
 
     /// Does this description need anything beyond the passthrough graph?
     bool anyEffect() const;
+    /// Does the chain carry the depth/normal PREPASS (the SSR stage's march or
+    /// rays, the gather, the sun contact)? `build` builds it on this answer and
+    /// `sameShape` compares it in place of the rows that ask for it.
+    bool prepass() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.
     static bool sameShape(const ChainDesc &a, const ChainDesc &b);
@@ -1227,6 +1330,11 @@ struct ChainHandles {
     /// part of ChainDesc::sameShape: changing it must not rebuild a workspace,
     /// so somebody has to rewrite this clear instead — OgreView::applyFixedExposure.
     Ogre::CompositorPassClearDef *fixedExposure = nullptr;
+    /// THE FLOAT SCENE RESULT a radiance readback downloads (HDR-READBACK-1):
+    /// the texture the one composite quad reads — kRt0, or the refraction /
+    /// distortion / AO stage that last rewrote it — named here because which
+    /// one it is depends on the shape. Null unless ChainDesc::hdrReadback.
+    const char *radianceTexture = nullptr;
 };
 
 /// Creates the node definitions and the workspace definition `desc` describes,
@@ -1403,7 +1511,11 @@ void initSmaa(Ogre::Root *root, int preset);
 /// is not ours to reinvent. `reprojection` is the view's frame-to-frame state,
 /// declared below beside applyViewGlobals.
 struct SsrReprojection;
-void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, SsrReprojection &reprojection);
+/// `shot` is the letterbox's inner rectangle in the target's uv (x, y, w, h) —
+/// (0, 0, 1, 1) without a letterbox — the map between the SHOT's uv, which the
+/// march, the resolve and the reprojection work in, and the textures they read.
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
+               SsrReprojection &reprojection);
 // ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
 //
 // This was ONE function, `applyGlobals`, called once a frame from the primary
@@ -1471,6 +1583,9 @@ float fixedExposureScale(float exposureScale, float exposure);
 /// (keep_content, unlike the per-frame `jahLum` it is copied from), which is
 /// what makes View::measuredExposureScale possible at all.
 const char *exposureHistoryTextureName();
+/// The texture HlmsPbs composites as the SSR/ray reflection (jahSsrReflection):
+/// rgb = the reflected radiance, a = the weight the composite lerps by.
+const char *reflectionTextureName();
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -1680,6 +1795,13 @@ public:
     unsigned pendingEvents() const { return unsigned(mEvents.size()); }
     unsigned long long framesRecorded() const { return mFramesRecorded; }
     unsigned long long framesDropped() const { return mFramesDropped; }
+    /// GPU timing marks the query pool could not hold, since the monitor went
+    /// on (MonitorStatus::gpuMarksDropped).
+    unsigned long long gpuMarksDropped() const { return mGpuMarksDropped; }
+    /// Files `n` marks the render system dropped in the frame that JUST ENDED —
+    /// the newest record in the holding queue (the call is made at the head of
+    /// the next frame, after its beginFrame) — and adds them to the total.
+    void noteGpuMarksDropped(unsigned n);
     unsigned long long eventsDropped() const { return mEventsDropped; }
     float lastOverheadMs() const { return mLastOverheadMs; }
     void addOverhead(double ms) { mOverheadMs += ms; }
@@ -1722,6 +1844,7 @@ private:
     float    mLastOverheadMs = 0.0f;
     bool     mInFrame = false;
     unsigned long long mFramesRecorded = 0, mFramesDropped = 0, mEventsDropped = 0;
+    unsigned long long mGpuMarksDropped = 0;
 };
 
 /// The live monitor, or null. EVERY instrumentation site starts with this: one
@@ -2386,16 +2509,11 @@ public:
     /// shader, once per pass, and all of it must be changeable without a shader
     /// rebuild.
     ///
-    /// It exists because binding an IrradianceField sets `VctDisableDiffuse`:
-    /// DDGI REPLACES voxel-cone diffuse rather than adding to it, and
-    /// upstream's IrradianceFieldSettings has no intensity knob.
-    /// media/Hlms/Jahshaka/JahIfd_piece_ps.any multiplies upstream's
-    /// accumulated irradiance by `intensity` (1.0 = upstream's own brightness).
-    /// Defaults to GiParams' defaults so a scene that never pushes state still
-    /// reads sane values.
+    /// What media/Hlms/Jahshaka/JahIfd_piece_ps.any needs that upstream's own
+    /// render params do not carry: the probe counts and the window. (The
+    /// intensity dial that rode here is DELETED, PHOTON-GATHER-1d: the field is
+    /// applied at its own physical answer; `jahIfd.x` is unused.)
     struct IfdState {
-        /// GiParams::ddgiIntensity, clamped.
-        float intensity = 1.0f;
         /// The field's probe counts on Y and Z. Upstream's own render params
         /// carry only Nx and Nx*Ny (OgreIrradianceField.cpp:812-813) and the
         /// cage clamp needs all three axes, so the two missing
@@ -2412,12 +2530,6 @@ public:
     static void     setIfdState(const Ogre::SceneManager *sm, const IfdState &state);
     static IfdState ifdState(const Ogre::SceneManager *sm);
 
-    /// Hands the listener the HlmsPbs singleton it queries on the render thread
-    /// for the state of the pass being built (which PCC owns the env-probe
-    /// slot). Global, not per scene, because the binding is. Asking HlmsPbs
-    /// itself rather than keeping a mirror is what makes the two impossible to
-    /// disagree.
-    static void setPbs(Ogre::HlmsPbs *pbs);
     /// THE LISTENER'S OWN SAMPLERBLOCKS DIE WITH THE ENGINE (PHOTON-ENV-1 audit
     /// F10). The environment slot's trilinear block and the gather's point
     /// block are each acquired ONCE per HlmsManager (a uint16 reference count
@@ -2427,6 +2539,29 @@ public:
     /// which a pointer compared against a dead one would never notice.
     static void releaseSamplers();
     static const Ogre::HlmsSamplerblock *acquireSampler(Ogre::HlmsManager *mgr, bool trilinear);
+    /// The cloud field's block: trilinear and WRAPPED (the field tiles), taken
+    /// once per manager like the two above and released with them.
+    static const Ogre::HlmsSamplerblock *acquireWrapSampler(Ogre::HlmsManager *mgr);
+
+    /// THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1): the third extra pass
+    /// texture on the same three-hook route as the sky's environment and the
+    /// gather (`jah_cloud_shadow`, register `jahCloudField`), plus the members
+    /// JahFog_piece_vs_piece_ps.any appends LAST to the pass-buffer extension.
+    /// Registered per scene by OgreScene::applyCloudLayer; a scene with no layer
+    /// (or a shadow strength of 0) registers nothing, sets no property and
+    /// generates exactly the shaders it generated before the layer existed.
+    struct CloudShadowState {
+        /// The baked optical-depth field (R16F, one tile), or null = no shadow.
+        Ogre::TextureGpu *field = nullptr;
+        float invTile = 0.0f;        // 1 / the tile's size in metres
+        float strength = 0.0f;       // 0..1
+        float scroll[2] = { 0.0f, 0.0f };   // metres, this frame
+        float altitude = 0.0f;       // metres
+        float sunThrow[2] = { 0.0f, 0.0f }; // toSun.xz / toSun.y
+        float invMuSun = 1.0f;       // 1 / toSun.y (clamped)
+    };
+    static void             setCloudShadow(const Ogre::SceneManager *sm, const CloudShadowState &state);
+    static CloudShadowState cloudShadow(const Ogre::SceneManager *sm);
 
     /// THE SKY'S OWN ENVIRONMENT SLOT (lane SKY-FALLBACK-1, PHOTON_SPEC §7).
     ///
@@ -2474,12 +2609,24 @@ public:
     /// same three-hook route the sky's env slot above rides, because there is
     /// no other route into a PBS pass from outside.
     ///
-    /// Registered PER SCENE MANAGER and cleared at the head of every frame
-    /// (OgreEngine::updateRayQuery), so a view that does not gather cannot
-    /// inherit the binding of one that does.
+    /// Registered PER SCENE MANAGER for the length of ONE PASS: the ray tier's
+    /// listener registers it in the PrePassUse pass's passPreExecute and takes
+    /// it away in that pass's passPosExecute (OgreRayQuery.cpp), so no other
+    /// pass — another view's, a mirror's, a probe capture's — ever sees it.
     static void setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance);
     static void clearProbeGather();
     static Ogre::TextureGpu *probeGather(const Ogre::SceneManager *sm);
+
+    /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1) — the gather's route, word for
+    /// word: the ray tier registers the visibility texture it has just written
+    /// (`jahSunVis`, R8, 1 = lit) and the texel DIVISOR it was written at (1 =
+    /// one ray per pixel, 2 = one per 2x2 block) immediately before the pass
+    /// that shades with it, and takes it away when that pass ends; this
+    /// listener turns it into the pass property `jah_sun_contact` (its VALUE is
+    /// the divisor), the fourth extra slot and one binding.
+    static void setSunContact(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility,
+                              unsigned divisor);
+    static void clearSunContact();
 
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
@@ -2495,23 +2642,43 @@ public:
                          const Ogre::HlmsDatablock *datablock, size_t texUnit) override;
 
 private:
-    /// The sky cube of the pass BEING BUILT, and the samplerblock to bind it
-    /// with — both decided in preparePassHash and read in hlmsTypeChanged, on
-    /// the render thread, within one pass. Set together or not at all: a slot
-    /// claimed by getNumExtraPassTextures and left unbound is an undefined
-    /// descriptor.
-    static Ogre::TextureGpu             *sPassSkyCube;                 // render thread only
-    static const Ogre::HlmsSamplerblock *sPassSkySampler;              // render thread only
+    /// What the pass BEING BUILT binds in the listener's extra slots — the sky
+    /// cube and the gather's irradiance, each with its samplerblock — decided in
+    /// preparePassHash and read in hlmsTypeChanged, on the render thread, within
+    /// one pass. Set together or not at all: a slot claimed by
+    /// getNumExtraPassTextures and left unbound is an undefined descriptor.
+    ///
+    /// ONE PER Hlms HOST, indexed by the Hlms type (ATOM-S3-PARITY): the listener
+    /// is set on every PBS-family host (tellEveryHlms), `RenderQueue::
+    /// renderPassPrepare` runs preparePassHash on EVERY registered Hlms of a pass
+    /// in turn, and a single shared copy was overwritten by whichever host ran
+    /// last — a host whose pass properties differed would have left another's
+    /// claimed slot unbound.
+    struct PassBinds {
+        Ogre::TextureGpu             *skyCube = nullptr;
+        const Ogre::HlmsSamplerblock *skySampler = nullptr;
+        Ogre::TextureGpu             *probeGather = nullptr;
+        const Ogre::HlmsSamplerblock *probeGatherSampler = nullptr;
+        Ogre::TextureGpu             *cloudField = nullptr;           // CLOUDS-2D-1
+        const Ogre::HlmsSamplerblock *cloudSampler = nullptr;
+        Ogre::TextureGpu             *sunVis = nullptr;               // PHOTON-RAYS-1
+        const Ogre::HlmsSamplerblock *sunVisSampler = nullptr;
+    };
+    static PassBinds sPass[Ogre::HLMS_MAX];                            // render thread only
     static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
-    /// GATHER-0's registration and the pass's copy of it — the same
-    /// set-together-or-not-at-all rule as the sky's pair above.
+    /// GATHER-0's registration (the pass's copy of it is PassBinds::probeGather).
     static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
-    static Ogre::TextureGpu             *sPassProbeGather;             // render thread only
-    static const Ogre::HlmsSamplerblock *sPassProbeGatherSampler;      // render thread only
+    /// The contact job's registration: the texture and its divisor (the pass's
+    /// copy is PassBinds::sunVis; the divisor becomes the property's value).
+    struct SunContactBind { Ogre::TextureGpu *tex = nullptr; unsigned divisor = 1u; };
+    static std::map<const Ogre::SceneManager *, SunContactBind> sSunContact;  // render thread
+    /// The cloud field per SceneManager (CLOUDS-2D-1); the pass's copy of it is
+    /// PassBinds::cloudField.
+    static std::map<const Ogre::SceneManager *, CloudShadowState> sCloudShadow;  // render thread
+    static const Ogre::HlmsSamplerblock *sCloudSampler;                // render thread only
     static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only
     static const Ogre::HlmsSamplerblock *sEnvSampler;                  // render thread only
     static const Ogre::HlmsSamplerblock *sGatherSampler;               // render thread only
-    static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static unsigned       sLightCountMismatches;                       // render thread only
     static unsigned       sMismatchLogged;                             // render thread only
     /// Shadow nodes whose slot assignment changed this frame — see
@@ -2621,8 +2788,8 @@ public:
 //   * LightProfiles::build() writes HlmsPbs::setLightProfilesTexture AND
 //     Root::_setLightProfilesInvHeight — there is exactly one of each per
 //     process, so a per-scene registry would have scenes fighting over the
-//     binding (the sVctBindingOwner shape in OgreGi.cpp, which we do not want
-//     to repeat).
+//     binding (the owner shape the GI arms and the planar mirrors had before
+//     SceneGiBinding, which we do not want to repeat).
 //   * HlmsPbs::setAreaLightMasks binds ONE 2D-array pool. Light::setTexture
 //     stores only the pool SLICE index, so a mask that landed in a different
 //     pool renders the WRONG texture with no error at all. One reserved pool,
@@ -2715,6 +2882,80 @@ void retainSharedTexture(Ogre::TextureGpu *tex);
 bool releaseSharedTexture(Ogre::TextureGpu *tex);
 void resetSharedTextures();
 
+// ---------------------------------------------------------------------------
+// THE SCENE BEING DRAWN IS THE SCENE THE SHADER READS (PHOTON-SCENE-SWITCH-1) —
+// OgreGi.cpp.
+//
+// HlmsPbs holds ONE VctLighting, ONE IrradianceField and ONE parallax-corrected
+// cubemap pointer (+ its two blend distances) for the whole process. Each scene
+// says what ITS passes read in its own `SceneGiBinding`, registered under its
+// SceneManager, and every PBS-family host binds the record of the pass's own
+// SceneManager as the pass begins — `ScenePbs::analyzeBarriers` (the first thing a
+// scene pass asks of an Hlms: CompositorPassScene::execute -> analyzeBarriers, before
+// the barriers that must name the SAME textures the shader will sample) and
+// `preparePassHash` (a pass that skips the barrier walk: the warm-up pass). That is
+// every scene pass of every workspace — a view, an offscreen view, a thumbnail, a
+// material preview, a probe or card capture and Ogre's own internal ones — without
+// a listener to install anywhere. Nothing is restored after a pass: the next pass
+// binds its own. There is no owner: a scene's arms are bound when, and only when,
+// its own passes run.
+struct SceneGiBinding {
+    Ogre::VctLighting                  *vct = nullptr;
+    Ogre::IrradianceField              *ifd = nullptr;
+    Ogre::ParallaxCorrectedCubemapBase *pcc = nullptr;
+    /// The PCC-versus-VCT trust window the grid was bound with (buildPccFinish).
+    float pccMinDist = 1.0f, pccMaxDist = 2.0f;
+    /// THE SCENE'S PLANAR MIRRORS (PHOTON-SCENE-SWITCH-2). Bound per pass like the
+    /// arms above (`cameraMatches` then gates on THIS scene's reflected cameras) AND
+    /// at HASH time per renderable — ScenePbs::calculateHashForPreCreate binds the
+    /// record of the renderable's own SceneManager, so a mirror's hash is decided
+    /// against the PlanarReflections that tracks it, never the last scene to arm.
+    Ogre::PlanarReflections            *planar = nullptr;
+    /// `passBuf.envMapNumMipmaps` for this scene's passes (PHOTON-SCENE-SWITCH-2):
+    /// the mip count of what the env-probe slot holds IN THIS SCENE — the bound
+    /// grid's array, else the largest of the scene's bound reflection cubes (the
+    /// sky's, an authored map's) — never a process-wide maximum. Resolved once per
+    /// frame (OgreScene::resolveIblMipmaps), read per pass.
+    float iblMipmaps = 1.0f;
+};
+/// The record registered for `sm` — null for a SceneManager that registered none.
+/// What giStatus reports as "bound" is read through this, the same lookup the pass
+/// makes (OgreGi.cpp).
+const SceneGiBinding *sceneGiBindingOf(const Ogre::SceneManager *sm);
+/// The record a SceneManager's passes bind; `binding` must outlive the entry
+/// (OgreScene registers its own member at construction, unregisters in destroy()).
+void registerSceneGiBinding(const Ogre::SceneManager *sm, const SceneGiBinding *binding);
+void unregisterSceneGiBinding(const Ogre::SceneManager *sm);
+/// (`bindSceneGi`, the per-pass call every PBS-family host makes, is declared in
+/// HlmsAtom.h beside tellEveryHlms.)
+/// An arm is about to be DELETED: any PBS-family host still holding it (the last
+/// pass of the last frame bound it) lets go now, so no read between frames — a
+/// getter, `resetIblSpecMipmap(0)` walking the bound PCC — meets a freed object.
+void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
+                  const Ogre::IrradianceField *ifd,
+                  const Ogre::ParallaxCorrectedCubemapBase *pcc,
+                  const Ogre::PlanarReflections *planar = nullptr);
+
+/// THE REGISTERED HLMS_PBS: upstream's HlmsPbs, plus the per-pass binding above.
+/// Our derived Hlms (the Terra pattern) and not a patch: the two overrides are
+/// public virtuals and the three setters public API.
+class ScenePbs final : public Ogre::HlmsPbs {
+public:
+    ScenePbs(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders)
+        : Ogre::HlmsPbs(dataFolder, libraryFolders) {}
+    void analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
+                         Ogre::ResourceTransitionArray &resourceTransitions,
+                         Ogre::Camera *renderingCamera, const bool bCasterPass) override;
+    Ogre::HlmsCache preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
+                                    bool dualParaboloid, Ogre::SceneManager *sceneManager) override;
+protected:
+    /// HASH TIME (PHOTON-SCENE-SWITCH-2): HlmsPbs reads the planar pointer here
+    /// per renderable, outside any pass (OgreHlmsPbs.cpp:1081-1084) — so the
+    /// renderable's OWN scene's PlanarReflections is bound for the call and the
+    /// pass's pointer put back after it.
+    void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
+};
+
 /// Returns an index buffer that belongs to no VAO to the VaoManager that made it
 /// (MeshRec::clusterStream). At namespace scope, not nested in the record: a
 /// nested deleter is not yet default-constructible where the record's own
@@ -2735,7 +2976,12 @@ public:
     const std::string &name() const override;
 
     void setAmbient(const Colour &upper, const Colour &lower) override;
+    /// A HOST'S OWN AMBIENT: it takes the ambient back from the engine (a later
+    /// setEnvironmentLight hands it over again — see mSkyAmbientOwned).
     void setAmbientSh(const float sh[27]) override;
+    /// The one writer behind both: the pass-level SH and every GI consumer,
+    /// staling the probe grid with `why`.
+    void applyAmbientSh(const float sh[27], GiStaleReason why);
     void setEnvironmentLight(const Colour &gain) override;
 
     void setFog(const FogDesc &desc) override;
@@ -2831,8 +3077,8 @@ public:
     /// the full image.
     void requestSkyCapture();
     /// Runs the capture (workspace update), reads the 32^2 mip back for the SH,
-    /// and hands the cube to buildReflectionCubemapFrom. Called from
-    /// applyPendingIbl, i.e. inside a frame, where a command buffer exists.
+    /// hands the cube to buildReflectionCubemapFrom and convolves it at once.
+    /// Called inside the frame, after updateSceneGraph and before any draw.
     void applyPendingSkyCapture();
     /// The ambient half of the capture: the cube's 32^2 mip, read back and
     /// integrated into 9 SH bands (the host scales them by its Sky Light).
@@ -2853,11 +3099,22 @@ public:
     void integrateSkyShFromCube(Ogre::TextureGpu *cube);
     void integrateSkyShNow(Ogre::TextureGpu *cube);
     void issueSkyShRead(Ogre::TextureGpu *cube);
-    void integrateSkyShFromBox(const Ogre::TextureBox &box);
+    /// `out` = the 27 coefficients (the scene's mSkySh unless told otherwise).
+    void integrateSkyShFromBox(const Ogre::TextureBox &box, float *out = nullptr);
+    /// Renders the capture workspace into a new cube (OgreSky.cpp says who).
+    Ogre::TextureGpu *renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips);
     /// Called at the top of every frame this scene is drawn in: counts the
     /// gesture's clock and, if the pending read has landed, integrates it.
     /// Never blocks.
     void pollSkyShRead();
+    /// Once per drawn frame (OgreEngine, beside pollSkyShRead): advances the
+    /// layer's own clock by the frame delta the host pushed, writes the scroll
+    /// into the layer, the disc and the ground shadow, and runs the capture
+    /// cadence while the layer scrolls.
+    void updateCloudLayer();
+    /// ...and the one per-frame advance of the layer's clock and capture
+    /// cadence (renderOneFrame only), which then pushes the constants.
+    void tickCloudClock();
     /// The read itself. `force` maps unconditionally — a capture about to
     /// replace the ticket takes its answer first, and by then the copy is a
     /// frame old and free (see the note in OgreSky.cpp).
@@ -2882,11 +3139,39 @@ public:
     /// one after that", not a timer.
     static const unsigned kSkyCaptureDragFrames = 2u;
     bool mSkyCapturePending = false;
-    /// The sky's ambient, 9 SH bands x 3 channels, integrated from the captured
-    /// cube. Valid only while mSkyShValid; the host scales it by its Sky Light.
+    /// The sky's ambient, 9 SH bands x 3 channels: the coefficients of the
+    /// environment IN FORCE (mSkyShInForce), never a newer integral whose cube
+    /// has not landed yet. The host scales them by its Sky Light.
     bool skyAmbientSh(float out[27]) const override;
+    /// The LATEST integral (the capture's or the deferred read's). Valid only
+    /// while mSkyShValid; mSkyShFresh = it has not been swapped in yet (the two
+    /// are set together, and forgetSkySh clears both).
     bool  mSkyShValid = false;
+    bool  mSkyShFresh = false;
     float mSkySh[27] = { 0.0f };
+    /// THE ENVIRONMENT IS ONE SET (PHOTON-SKY-TRANSIENT-1): the reflection cube,
+    /// these coefficients and the Sky Light's gain reach the pixel together. A
+    /// sky change builds the next cube into mReflPendingTex and integrates the
+    /// next SH into mSkySh while the previous set stays bound; when the capture,
+    /// the convolution and the SH have ALL landed, landEnvironmentIfComplete
+    /// swaps the cube and the coefficients in one step. Never a partial set,
+    /// never a cube nothing has written bound to a datablock.
+    bool  mSkyShInForceValid = false;
+    float mSkyShInForce[27] = { 0.0f };
+    Ogre::TextureGpu *mReflPendingTex = nullptr;
+    void landEnvironmentIfComplete();
+    /// Drops the next set's cube (and its owned convolution source) unlanded.
+    void destroyPendingReflection();
+    /// No sky, no sky light: every SH this scene holds, the one in force too.
+    void forgetSkySh();
+    /// The ambient the pixel reads: the SH in force x mEnvLightGain, or zeros —
+    /// only while the engine owns the ambient (mSkyAmbientOwned).
+    void applySkyAmbient(GiStaleReason why);
+    /// WHO WRITES THE AMBIENT. setEnvironmentLight hands it to the engine (a
+    /// host modelling a Sky Light: SceneMirror, the previews); setAmbient /
+    /// setAmbientSh take it back (a host lighting its scene with a colour of its
+    /// own, which a sky capture must not overwrite).
+    bool mSkyAmbientOwned = false;
 
     /// THIS SCENE'S SHADOW REQUEST (ShadowDesc). The backend's filter and atlas
     /// are one per PROCESS, so all this does is apply the scene's resolved
@@ -2899,37 +3184,39 @@ public:
     /// The engine that made this scene — the owner of the global shadow state
     /// above. Never null for a scene created through Engine::createScene().
     OgreEngine *mEngine = nullptr;
-    /// Builds (replacing any previous) the GGX-prefiltered reflection cubemap by
-    /// convolving `srcCube`, and binds it on every PBR datablock. `ownsSource`
+    /// Builds the NEXT GGX-prefiltered reflection cubemap (mReflPendingTex) by
+    /// convolving `srcCube`; the cube in force stays bound until the whole next
+    /// environment set has landed (landEnvironmentIfComplete). `ownsSource`
     /// means the source is ours to destroy once the convolution has run (the
     /// cubemap-sky path passes false: there the source IS the sky texture).
-    /// The prefilter runs on the next renderOneFrame (applyPendingIbl).
+    /// The prefilter runs in applyPendingIbl: inside the capture's own frame for
+    /// a captured sky, at the top of the next frame for a host-pushed cube.
     void buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource);
-    /// Unbinds and destroys the reflection cubemap (no-op when there is none).
+    /// Unbinds and destroys the reflection cubemap and any pending next one.
     void destroyReflection();
     /// Binds (or clears, when mReflectionTex is null) the scene's sky reflection
     /// cubemap on every PBR material's datablock. (Body in complete-class context,
     /// so it may call the private impl declared further down.)
     void applyReflectionToAll();
-    /// "Is ANY probe grid bound to HlmsPbs", which is the question the env-probe
-    /// slot's occupancy really turns on — not "does THIS scene have one". See
-    /// the long note above reflectionTexForDatablocks.
-    bool anyProbeGridBound() const;
-    /// Re-pushes the mip count of whatever this scene's datablocks hold in the
-    /// env-probe slot. Called ONLY from the probe-transition walk — see the note
-    /// on the definition for why it must not run on every reflection re-apply.
-    void renotifyReflectionMipmaps();
-    /// Set by destroy() when THIS scene's teardown released the process-wide
-    /// probe binding; read by OgreEngine::destroyScene after the erase, which is
-    /// the only safe place to walk the remaining scenes.
-    bool mReleasedPccOnDestroy = false;
-    /// True for the duration of destroy(): teardownVct is shared between "GI
-    /// off" (walk the other scenes now) and "this scene is going away" (flag it,
-    /// the engine walks after the erase).
+    /// "Do THIS scene's passes bind a probe grid" — which is what the env-probe
+    /// slot's occupancy turns on in its passes. See OgreSky.cpp's long note, THE
+    /// ENV-PROBE SLOT HAS ONE OCCUPANT.
+    bool probeGridBound() const { return mGiBinding.pcc != nullptr; }
+    /// THE ROUGHNESS-TO-LOD MAP'S CHAIN LENGTH FOR THIS SCENE'S PASSES
+    /// (SceneGiBinding::iblMipmaps). Every site that changes what a datablock's
+    /// env-probe slot holds — or whether a grid is bound — marks it; the frame
+    /// head (OgreEngine::renderOneFrame, per drawn scene) resolves it with one
+    /// walk of the materials. Body in OgreSky.cpp.
+    void markIblMipmapsDirty() { mIblMipmapsDirty = true; }
+    void resolveIblMipmaps();
+    bool mIblMipmapsDirty = true;
+    /// True for the duration of destroy().
     bool mDestroying = false;
-    /// Runs the queued ibl_specular convolution (roughness mip chain) for the
-    /// reflection cubemap. Called once per frame by the engine, like applyPendingGi.
+    /// Runs the queued ibl_specular convolution (roughness mip chain) into the
+    /// next set's cube, then lands the set if nothing else is owed. Called once
+    /// per frame by the engine, like applyPendingGi, and by the capture itself.
     void applyPendingIbl();
+    void convolvePendingIbl();
     Ogre::TextureGpu *mReflectionTex = nullptr;   // prefiltered cube on PBSM_REFLECTION
     /// THE ONE ENVIRONMENT AS THE RAY JOBS BIND IT (PHOTON-ENV-1): the cube (null
     /// while there is none or the Sky Light is out) and ONE colour whose meaning
@@ -3106,11 +3393,8 @@ public:
     // VCT voxelizes the scene's PBR items over the GI bounds and cone-traces the
     // result; the hybrid adds a parallax-corrected cubemap probe grid whose
     // reflections blend with VCT's by distance (HlmsPbs PccVctMinDistance).
-    // CAVEAT (GI_SPEC.md): setVctLighting/setParallaxCorrectedCubemap bind to the
-    // process-wide HlmsPbs singleton — VCT GI is effectively editor-scene-only
-    // in v1; the last scene to enable a VCT mode owns the binding, and other
-    // scenes' geometry outside the voxel volume samples nothing (cones exit the
-    // volume and add no light), so previews/thumbnails stay sane in practice.
+    // Every scene's arms are its own: the PBS pass of a scene binds that scene's
+    // VctLighting, field and grid, per pass (SceneGiBinding, above).
     bool setGlobalIllumination(const GiParams &p) override;
     bool setGiTuning(const GiParams &p) override;
     void refreshGlobalIllumination(GiRefreshReason reason) override;
@@ -3122,10 +3406,13 @@ public:
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade) override;
     bool giFieldAtlas(GiFieldAtlas &out) override;
+    bool giVoxelVolume(int cascade, GiVoxelVolume &out) override;
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const override;
+    AtomDrawStatus atomDrawStatus() override;
+    void setAtomDrawEnabled(bool on) override;
     GpuSceneStatus gpuSceneStatus() const override;
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
@@ -3142,9 +3429,32 @@ public:
     void updateSurfaceCache();
     bool readCardTexel(NodeId node, unsigned card, float u, float v,
                        CardSample &out) override;
-    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out) override;
+    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
+                    NodeId onlyNode = 0) override;
     bool dumpCardAtlas(const std::string &prefix, std::string &err) override;
     const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
+    /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the scene's in-frame
+    /// answers to the cache (OgreGpuScene.cpp: the traced shadow-casting movers,
+    /// the frame's moved set, the still casters a transform write moved) and the
+    /// ray tier's trace and timestamps (OgreRayQuery.cpp).
+    bool cardMoverFrame(CardMoverFrame &out);
+    bool traceCardMovers(const CardMoverTrace &job);
+    void timeCardRelight(bool begin);
+    void cardMoverTimes(float &traceMs, float &relightMs);
+    /// The mover list as last walked, and the slot count it was walked at: the
+    /// walk runs only on a frame whose moved set is not empty or whose slot
+    /// count changed (or a moved slot now holds another node).
+    struct CardMoverRec { NodeId node = 0; Ogre::Vector3 min, max; };
+    std::vector<CardMoverRec> mCardMovers;
+    uint32_t mCardMoverSlots = 0xFFFFFFFFu;
+    /// Every slot's caster state as the cache last saw it (the node, its world
+    /// transform, its box, its flags) — a still caster's OLD box when it moves,
+    /// changes class or dies. Slots are renumbered by the swap-remove, so a walk
+    /// compares these to the table BY NODE. Not the GPU scene's prevWorld: two
+    /// updates in one frame (a reader before the frame, the frame's own) can
+    /// re-stage a slot and erase it.
+    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; };
+    std::vector<CardCasterRec> mCardCasters;
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
     /// has none (every skinned mesh, every line mesh, every model opened
     /// without a bake). Indexed by `Ogre::Mesh *` because all a cache holds is
@@ -3173,12 +3483,41 @@ public:
     /// With the row off the tier records no dispatch, the Component allocates
     /// nothing, the Hlms listener sets no property and no pixel moves.
     bool probeGatherWanted() const;
+    /// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; OgreGi.cpp).
+    /// `probeGridByRays` is the rule — the tier's facts say its reflections
+    /// are traced (GiQualityFacts::rayReflections) AND this scene traces on
+    /// this machine (rayTracingResolved), the gather's own shape — and
+    /// `probeGridWanted` is the one question every grid path asks: the hybrid,
+    /// and not a ray tier.
+    bool probeGridByRays() const;
+    bool probeGridWanted() const;
+    /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
+    void dropProbeGridByRays();
+    /// THE LIGHTING SERIAL the gather's settled history counts from
+    /// (PHOTON-GATHER-1d, OgreGi.cpp): folded from the light-write serial and
+    /// from what moves when an injection LANDS (the chain's settles, the single
+    /// volume's injections, each cascade's rebuilds and lattice cell).
+    unsigned long long giLightingSerial() const;
+    /// ...and the gather's REST KEY (OgreRayQuery.cpp): that serial, the
+    /// geometry's movement epoch and the surface cache's captures and relights.
+    unsigned long long gatherRestKey() const;
+    /// The settle's key: the discontinuities only (OgreRayQuery.cpp).
+    unsigned long long gatherRestartKey() const;
     void gatherStatusInto(GatherStatus &out) const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.
     void setGatherTuning(const GatherTuning &t) override { mGatherTuning = t; }
     const GatherTuning &gatherTuning() const { return mGatherTuning; }
     GatherTuning mGatherTuning;
+    /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1). The row is stored here and
+    /// read by the view (the chain's prepass) and the ray tier (the job);
+    /// `sunContactWanted` is the row resolved against the machine, defined in
+    /// OgreRayQuery.cpp beside `probeGatherWanted` for the same reason.
+    void setSunContact(const SunContactDesc &d) override;
+    SunContactDesc sunContact() const override { return mSunContact; }
+    SunContactStatus sunContactStatus() const override;
+    bool sunContactWanted() const;
+    SunContactDesc mSunContact;
     // --- THE GPU SCENE (A3_GPU_SCENE_SLICE_DESIGN.md; GpuScene.h) -----------
     /// Brings the device-side instance and mesh tables up to date for this
     /// frame's movement epoch. Epoch-gated, and the FRAME's pass is the one that
@@ -3230,7 +3569,6 @@ public:
     /// rather than a new public getter: nothing outside the ray tier has any
     /// business with that counter, and it lives in the same TU as the walk.
     friend class RayQueryTier;
-    bool reassertGiBinding() override;
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
     unsigned long long giMaterialSignature() const override;
@@ -3960,9 +4298,6 @@ private:
     };
 
     void applyReflectionToAllImpl();
-    /// The IBL cubemap AS BOUND TO DATABLOCKS — null while automatic PCC owns
-    /// the shader's one env-probe slot (OgreSky.cpp, the long note there).
-    Ogre::TextureGpu *reflectionTexForDatablocks() const;
     /// What ONE material's env-probe slot should hold: its own override cubemap
     /// if it has one, else the scene's global IBL cube, and NULL for both while
     /// automatic PCC is bound (ADDENDUM A-5). The single place that answers it,
@@ -4143,6 +4478,73 @@ private:
     /// switched on and off, not created and destroyed).
     void applySunDisc(const SunDisc &sun);
     void destroySunDisc();
+    // ---- THE CLOUD LAYER (CLOUDS-2D-1; OgreSky.cpp, "THE CLOUD LAYER") -----
+    /// Creates (once), shows, hides and parameterises the layer from
+    /// mSkyDesc.clouds; `fieldChanged` queues a re-bake of the field.
+    void applyCloudLayer(bool fieldChanged);
+    void destroyCloudLayer();
+    /// The sun disc's material follows the layer: the clouded variant while a
+    /// layer is drawn (the disc is dimmed by the sheet in front of it), its own
+    /// otherwise — so a scene without a layer draws exactly the disc it drew.
+    void syncSunDiscClouds();
+    /// Renders the pending field bake, INSIDE a frame (it is a render pass):
+    /// called at the head of applyPendingSkyCapture, so a capture queued by
+    /// the same change photographs the new field.
+    void bakeCloudField();
+    CloudStatus cloudStatus() const override;
+    bool renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize, float exposure,
+                           std::vector<unsigned char> &rgba) override;
+    /// Is the layer on screen: enabled, and a sky to draw over.
+    bool cloudLayerDrawn() const;
+    Ogre::Rectangle2D *mCloudQuad = nullptr;
+    Ogre::MaterialPtr  mCloudMaterial;          // per-scene clone of Jahshaka/CloudLayer
+    Ogre::MaterialPtr  mCloudBakeMaterial;      // Jahshaka/CloudBake itself (the bake binds per render)
+    Ogre::MaterialPtr  mSunDiscCloudMaterial;   // ...of Jahshaka/SunDiscClouded
+    Ogre::TextureGpu  *mCloudNoise = nullptr;   // 256^2 RGBA8, fixed seed, ManualTexture
+    Ogre::TextureGpu  *mCloudField = nullptr;   // 1024^2 R16F optical depth, one tile
+    Ogre::Camera      *mCloudBakeCamera = nullptr;
+    bool     mCloudFieldPending = false;
+    /// The layer's own clock: the sum of the frame deltas of the frames this
+    /// scene was drawn in (the engine has no wall clock).
+    double   mCloudClock = 0.0;
+    float    mCloudScroll[2] = { 0.0f, 0.0f };
+    /// Drawn frames since the last capture the layer's scroll asked for.
+    unsigned mCloudFramesSinceCapture = 0u;
+    /// A capture requested by the SCROLL takes the asynchronous SH read even
+    /// when it is not part of a gesture (integrateSkyShFromCube).
+    bool     mSkyCaptureAsyncOnce = false;
+    /// THE CLEAR SKY THE SHEET IS LIT BY. The sheet's sky-light term must not
+    /// read the environment capture it is itself IN (a feedback whose answer
+    /// depends on the edit history, and which ran an overcast deck to a
+    /// saturated copy of its own colour at a low sun): it reads a capture of
+    /// the same sky with the sheet hidden — taken only when the SKY changes
+    /// (never on the sheet's own edits or scroll), synchronously for a lone
+    /// change and through a ticket read at the next frame's top during a
+    /// gesture, exactly like the environment's own SH.
+    void captureCloudClearSky();
+    void readCloudClearTicket(bool force);
+    void pushCloudAmbient();
+    // ---- CLOUDS-2D-2: the sheet's shadow on the voxels and the cards ----------
+    /// The cloud shadow the GI inputs read — the pixel's state, SNAPSHOT on a
+    /// change of the layer and at each scroll capture (the environment's own
+    /// cadence), never per frame: a voxel re-injection and a card relight are
+    /// the downstream cost the cadence was measured for. A change re-injects
+    /// the lighting (refreshGiLighting) and moves mCloudGiSerial, which the
+    /// cards' radiance signature folds.
+    FogHlmsListener::CloudShadowState mCloudGiState;
+    unsigned long long mCloudGiSerial = 0ull;
+    /// `fieldRebaked`: the field's pixels changed under the same pointer.
+    void snapshotCloudGi(bool fieldRebaked = false);
+    /// Binds (or clears) the cloud field and its parameters on the shared
+    /// "VCT/LightInjection" job for THIS volume — called before every
+    /// VctLighting::update (applyCascadeEnvironment), because the job is shared
+    /// by name process-wide and the state in force is whoever set it last.
+    void bindCloudInjection(Ogre::VctLighting *lighting);
+    bool     mCloudClearPending = false;
+    bool     mCloudClearValid = false;
+    float    mCloudClearMean[3] = { 0.0f, 0.0f, 0.0f };
+    Ogre::AsyncTextureTicket *mCloudClearTicket = nullptr;
+    CloudStatus mCloudStatus;
     /// THE SHADER GRID (GRID-2, OgreGrid.cpp): the sun disc's mechanism — a
     /// Rectangle2D whose fragment program intersects the camera ray with the
     /// grid plane and writes that point's depth. A disabled grid hides the
@@ -4641,10 +5043,17 @@ private:
     /// The tick the host asked for this frame under a chain, not yet run.
     enum class GiTickOwed { None = 0, Moving = 1, Rest = 2 };
     GiTickOwed mGiTickOwed = GiTickOwed::None;
-    /// Owe the chain an at-rest settle over its current inputs (a rebuild, an
-    /// environment change, a refused tick): one sweep = n injections, paid
-    /// one per frame by the scheduler, outermost first.
-    void oweChainSettle();
+    /// Owe the chain an at-rest settle over its current inputs, paid one
+    /// injection per frame by the scheduler, outermost first. `top` is the
+    /// OUTERMOST STALE cascade (PHOTON-GATHER-1b item 6): the settle injects
+    /// top, top-1, ..., 0 and leaves the cascades outside it alone — a cascade
+    /// reads only the cascades outside it, so the ones outside a stale one
+    /// were not made stale by it. A light or environment change owes the whole
+    /// chain (the default); a refused at-rest tick owes from the refused
+    /// cascade inward; a rebuild owes from the cascade INSIDE the rebuilt one
+    /// (its own injection read current outer light). An unfinished debt merges
+    /// by restarting from the outermost of the two.
+    void oweChainSettle(size_t top = ~size_t(0));
     /// The field re-integrates once, after the LAST injection of a tick or of a
     /// settle — never per injection.
     void reintegrateFieldAfterInjection();
@@ -4770,12 +5179,20 @@ private:
     /// a walk that returned to its own starting pose).
     ///
     /// THE DEBT IS A COUNT OF INJECTIONS, NOT A FLAG, and it is paid ONE PER
-    /// FRAME out of the scheduler's own one-slot budget: the at-rest tick is one
-    /// sweep over every cascade (n injections, outermost first) and spreading it
-    /// keeps a frame that only owes it because the camera moved at one cheap
-    /// injection. In the tick's own order it leaves the tick's bytes, the
-    /// rebuild queue keeps priority, and a walk that never ends never starves.
+    /// FRAME out of the scheduler's own one-slot budget: a sweep over the STALE
+    /// cascades (mGiSettleTop + 1 injections, outermost first — the whole chain
+    /// only when the whole chain is stale) and spreading it keeps a frame that
+    /// only owes it because the camera moved at one cheap injection. In the
+    /// tick's own order it leaves the tick's bytes, the rebuild queue keeps
+    /// priority, and a walk that never ends never starves.
     int    mGiSettleStepsOwed = 0;
+    /// ...and the outermost cascade that sweep starts at (PHOTON-GATHER-1b).
+    size_t mGiSettleTop = 0;
+    /// ...and how many frames that could pay a step have passed since the debt
+    /// was last (re)started: the steps are paid on the last top+1 of the
+    /// chain's size in such frames, so a partial settle finishes exactly when a
+    /// whole sweep would have (the scheduler's note says why).
+    int    mGiSettlePayableFrames = 0;
     /// The cascade count the debt was raised against — a chain that changed
     /// shape under an unfinished settle abandons it rather than injecting a
     /// cascade the sequence no longer describes.
@@ -4822,7 +5239,6 @@ private:
     /// The VCT light-injection ray-march step scale (the document's value, at
     /// least 1). ONE value: the moving tick's coarse march went with the one
     /// writer (a volume's radiance must not depend on which path injected it).
-    float giRayMarchStepScale() const;
     /// THE REUSE ARM (FIX WAVE B4). Re-runs the EXISTING voxelizer and lighting
     /// over the live scene instead of tearing the arm down and building a new
     /// one, and re-dirties the probes without re-running the placement pass.
@@ -5058,7 +5474,7 @@ private:
     /// says whether it is ours to destroy.
     Ogre::TextureGpu *mIblSourceTex = nullptr;
     bool              mIblSourceOwned = false;
-    bool              mIblPending = false;   // convolve on the next frame
+    bool              mIblPending = false;   // convolve into mReflPendingTex
     /// One-shot ibl_specular workspace; kept null between runs.
     Ogre::Camera *mIblCamera = nullptr;
     // VCT arm (null unless a VCT mode is live). Teardown order within the arm:
@@ -5143,11 +5559,6 @@ private:
     Ogre::uint32                      mIfdTotalProbes     = 0;
     Ogre::uint32                      mIfdProbesDone      = 0;
     Ogre::uint32                      mIfdProbesPerFrame  = 0;
-    /// The smallest batch that still dispatches at least one compute work
-    /// group. Below it, `HlmsCompute::compileShader` throws at frame time and
-    /// nothing catches it (spike §4) — so it is a floor the engine enforces,
-    /// not a number it reports.
-    Ogre::uint32                      mIfdMinProbes       = 0;
     /// THE VOLUME THE FIELD IS PLACED OVER, as asked for (the field enlarges it
     /// by one probe block per side for itself). Recorded so the scheduler can
     /// tell a cascade-0 re-placement from a plain re-voxelisation at the same
@@ -5335,6 +5746,61 @@ private:
     unsigned long long mRayLevelWalks = 0ull;
     /// THE ONE PLACE the per-item predicates are computed (GpuInstanceFlag).
     Ogre::uint32 gpuFlagsFor(const Node &n) const;
+    /// THE RENDER-QUEUE SPLIT'S ONE DECISION (ATOM S3-DRAW, OgreAtomDraw.cpp):
+    /// does the id pass draw this item and the decode shade it, and if not, the
+    /// first reason (AtomDrawStatus names them in order). `Stock` = an item in a
+    /// queue the split never touches.
+    enum class AtomRoute : uint8_t {
+        Atom, NotWorld, NotPbs, CustomPiece, Blended, TwoSided, Planar, Pending, AlphaTested, Skinned, NoRow, Stock
+    };
+    AtomRoute atomRouteFor(const Node &n, Ogre::uint32 flags) const;
+public:
+    /// The split is live in this scene: the GPU scene exists, the id pass can run on
+    /// this device (OgreAtomIdPass.cpp) and the measurement door is open.
+    bool atomDrawOn() const;
+    /// The split is WANTED here: the door is open and this device runs the id pass.
+    /// What a view's chain SHAPE reads — never the GPU scene's liveness, which
+    /// arrives during the first frame and would rebuild every new view's workspace
+    /// one frame in (the id pass of a scene whose table is not live yet clears the
+    /// depth and draws nothing; every item is still on PBS then).
+    bool atomDrawWanted() const;
+    /// Once per frame after the GPU scene's update (OgreEngine's frame hook): the
+    /// screen decode's draws for the words the atom items wear, and the witness
+    /// that re-routes the items of a material whose permutation moved in place.
+    void updateAtomDraw();
+private:
+    /// Files the node's Item in kAtomRenderQueue (atom) or back where its material
+    /// puts it (renderQueueFor). Called by composeGpuInstance.
+    void placeAtomQueue(const Node &n, bool atom) const;
+    /// THE MEASUREMENT DOOR (the cost table's paired arms in one process): false
+    /// routes every item to PBS and every chain builds without the id pass.
+    bool mAtomDrawEnabled = true;
+    /// A route answered Pending (textures still baking) since the last update.
+    mutable bool mAtomPendingSeen = false;
+    /// The views of this scene whose chains carry no id pass while the split is
+    /// live, by reason (AtomDrawStatus::stereoViews / passthroughViews): they draw the
+    /// Atom queue through PBS.
+    std::unordered_set<const void *> mAtomStereoViews, mAtomPassthroughViews;
+public:
+    /// OgreView::syncAtomDraw's report, every frame (both false on detach).
+    void noteAtomPbsView(const void *view, bool stereo, bool passthrough) {
+        if (stereo) mAtomStereoViews.insert(view); else mAtomStereoViews.erase(view);
+        if (passthrough) mAtomPassthroughViews.insert(view); else mAtomPassthroughViews.erase(view);
+    }
+private:
+    /// updateAtomDraw's memory: the GPU scene writes it last synced at, and one
+    /// item per atom word with its datablock, Hlms hash and texture set.
+    unsigned long long mAtomSyncWrites = ~0ull;
+    unsigned long long mAtomSyncEpoch = ~0ull;
+    std::vector<uint32_t> mAtomWords;
+    struct AtomWitness {
+        uint32_t slot = 0u;
+        uint32_t word = 0u;
+        const Ogre::HlmsDatablock *db = nullptr;
+        Ogre::uint32 hash = 0u;
+        uint64_t texKey = 0u;
+    };
+    std::vector<AtomWitness> mAtomWitness;
     /// A seam that changed what a slot's entry SAYS without moving anything —
     /// a visibility, light-mask, cast-shadow, render-queue or material write.
     /// The movement epoch cannot see those (a furniture visibility write is
@@ -5361,6 +5827,16 @@ public:
     }
     /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
     /// null (or a request with hzbLevels 0) is the frustum-only mode.
+    /// The recording half of runGpuCull: the request uploaded and the jobs
+    /// dispatched, nothing read back — for a consumer inside a frame (the id pass).
+    /// `keepBindings` leaves the jobs bound for a measurement's re-dispatches. The
+    /// answer lands in `cull`'s buffers: the scene's own (runGpuCull) or a view's
+    /// (the id pass — one instance per view, so two views of one scene in a frame
+    /// never share the list one of them is drawing from).
+    /// `requestMs` (optional): the host's share — the request's write and the jobs'
+    /// bindings, after the buffers exist (GpuCullResult::requestMs).
+    bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
+                       std::string &err, bool keepBindings = false, double *requestMs = nullptr);
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
@@ -5557,6 +6033,7 @@ private:
     unsigned long long mGiInjectionCountFrame = ~0ull;
     unsigned           mGiInjectionsThisFrame = 0;
     unsigned           mGiInjectionsPeak      = 0;
+    unsigned long long mGiMonoInjections      = 0;   ///< the single volume's landed injections (the surface cache's indirect signature; counted in injectCascade)
     /// EVERY WRITE A LIGHT INJECTION WOULD READ (DRAG-1 round 2, F5): a light's
     /// parameters (setLight), its POSE (setNodeTransform on a node that owns
     /// one — a movable lamp never stales the probe grid, so nothing else sees
@@ -5724,6 +6201,10 @@ private:
     /// is what lets a suite assert "the drag spent nothing" from outside.
     unsigned long long mProbeCapturesDeferred = 0;
     int                mPlacementCapturesThisFrame = 0;
+    /// Cumulative over the scene's life (GiStatus::probePlacements /
+    /// probeCapturesTotal): scouts started, and probe captures rendered.
+    unsigned           mProbePlacements = 0;
+    unsigned long long mProbeCapturesTotal = 0;
     unsigned long long mGiRebuilds = 0;
     /// How many of those rebuilds a MOBILITY change caused (MobilityStatus::
     /// mobilityRebuilds). Its own counter and not a share of mGiRebuilds
@@ -5731,9 +6212,10 @@ private:
     /// rebuilds?", which a total cannot: every other rebuild reason (a mode
     /// change, a destroyed object, a quality dial) is mixed into that one.
     unsigned long long mMobilityRebuilds = 0;
-    /// The PCC/VCT trust window buildPcc bound the grid with, so a binding
-    /// re-assert (P10) re-binds with the same numbers without re-deriving them.
-    float mPccBindMinDist = 0.0f, mPccBindMaxDist = 0.0f;
+    /// WHAT THIS SCENE'S PASSES BIND (SceneGiBinding): registered under mSceneMgr
+    /// at construction; each field is written where the arm is finished and
+    /// cleared where it dies — nowhere else.
+    SceneGiBinding mGiBinding;
     /// The last ambient SH and fog the scene was given, so a host re-push of the
     /// same value (every page return drops the host's own latch) stales nothing.
     float   mLastAmbientSh[27] = {};
@@ -5847,6 +6329,8 @@ public:
     /// The clear colour and the shadow node live in the chain's definitions:
     /// rebuild definitions + workspace, keeping scene, camera and enabled state.
     void rebuildWorkspaceDef();
+    /// ...its body, for a caller that has already detached the workspace.
+    void rebuildDetachedWorkspaceDef();
     static constexpr const char *kShadowNodeName = "JahshakaShadowNode";
     /// The SECOND shadow node, at half the base resolution, used ONLY by the
     /// planar-reflection pass. CompositorShadowNodes are per-workspace and are
@@ -5890,6 +6374,9 @@ public:
     /// PBS variants (numShadowMapLights differs from the main view's), compiled
     /// once and disk-cached, exactly like the reflect node's.
     static constexpr const char *kProbeShadowNodeName = "JahshakaProbeShadowNode";
+    /// The FOURTH shadow node: the surface cache's card capture only — the sun's
+    /// PSSM at the probe resolution, nothing else (why: DOCS/traps/ENGINE.md, "CARD SHADOW NODE").
+    static constexpr const char *kCardShadowNodeName = "JahshakaCardShadowNode";
 
     // ---- The workspace seam (POST_CHAIN_SPEC.md; the planar-reflection lane
     //      depends on it) ---------------------------------------------------
@@ -6003,6 +6490,8 @@ public:
     bool hiddenAreaMask() const { return mHiddenAreaMask; }
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
+    void setOffscreenContract(OffscreenContract c) override;
+    OffscreenContract offscreenContract() const override { return mOffscreenContract; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -6089,6 +6578,11 @@ public:
     void resize(unsigned w, unsigned h) override;
 
     bool readPixels(Image &out) override;
+    bool readPixelsHdr(ImageF &out) override;
+    bool readReflectionHdr(ImageF &out) override;
+    /// Downloads one of this view's chain textures (a local of its scene node)
+    /// into float: the radiance readback and the reflection readback share it.
+    bool readChainTexture(const char *textureName, ImageF &out, const char *who);
 
     /// Applies whatever resize()/setSampleCount() recorded, at frame time.
     ///
@@ -6177,6 +6671,29 @@ public:
     /// above, and for the same reason: every one of those can change between
     /// frames. Defined in OgreRayQuery.cpp (both halves of it).
     void syncReflectListener();
+    /// THE VISIBILITY BUFFER'S VIEW HALF (ATOM S3-DRAW, OgreAtomDraw.cpp), once a
+    /// frame beside syncReflectListener and for its reason: ChainDesc::atomDraw
+    /// reads the SCENE (a view has none when its chain is first built), so the
+    /// shape is re-checked, and the listener that arms the screen decode follows.
+    void syncAtomDraw();
+    /// The view's own GPU cull (the id pass's list): one per view, so two views of
+    /// one scene in a frame never share the list the other is drawing from.
+    detail::GpuCull &atomCull() { return mAtomCull; }
+    /// THE ID PASS'S SHARE OF THE FRAME'S STATS (renderStats): its indirect draws never
+    /// reach Ogre's RenderingMetrics, so the cull's own counters (survivors, and the
+    /// triangles the draws job adds up) are copied into a mapped ring and read back
+    /// once the frame that wrote them has retired (OgreAtomIdPass.cpp) — a few frames
+    /// late, never waited on, and never a mid-frame submit.
+    void setAtomStats(unsigned long long triangles, unsigned survivors) {
+        mAtomTriangles = triangles;
+        mAtomSurvivors = survivors;
+        mAtomStatsValid = true;
+    }
+    bool atomStats(unsigned long long &triangles, unsigned &survivors) const {
+        triangles = mAtomTriangles;
+        survivors = mAtomSurvivors;
+        return mChainAtomDraw && mAtomStatsValid;
+    }
     /// DROPS the reflection trace's per-view Vulkan state, flushing first.
     /// Called from `detachWorkspace` — the one seam every workspace rebuild goes
     /// through — because the trace's descriptor set holds IMAGE VIEWS OF THIS
@@ -6208,6 +6725,8 @@ private:
     /// tail of resize() and setSampleCount().
     void rebuildRtt(unsigned w, unsigned h);
     Ogre::TextureGpu *target() const;
+    /// The target's colour sample count (1 without a target).
+    unsigned targetSamples() const;
 
     // ---- PiP internals (CAMERAS_SPEC §7.7) --------------------------------
     /// Brings the inset's workspace into line with mPip + pipAllowed(): builds
@@ -6287,6 +6806,14 @@ private:
     /// Defined in OgreRayQuery.cpp, which is why it is held through a pointer
     /// the rest of the engine never dereferences.
     std::unique_ptr<ReflectPassListener> mReflectListener;
+    /// ATOM S3-DRAW: the shape the definition was built with, the listener that
+    /// arms the screen decode, and the view's cull buffers.
+    bool mChainAtomDraw = false;
+    AtomDrawListenerPtr mAtomListener;
+    detail::GpuCull mAtomCull;
+    unsigned long long mAtomTriangles = 0ull;
+    unsigned mAtomSurvivors = 0u;
+    bool mAtomStatsValid = false;
     unsigned                   mWorkspaceGeneration = 0;
     /// What `ChainDesc::rayReflect` was when the CURRENT workspace definition
     /// was built. The scene arrives AFTER the chain is first built (the
@@ -6294,10 +6821,13 @@ private:
     /// live view, so the shape is re-checked once a frame in
     /// syncReflectListener rather than only when a host pushes a PostFxDesc.
     bool                       mChainRayReflect = false;
-    /// ...and what `ChainDesc::probeGather` was (GATHER-1a): the gather's row
-    /// is the scene's, so the shape is re-checked once a frame beside the
-    /// reflection's (OgreView::syncReflectListener).
-    bool                       mChainProbeGather = false;
+    /// ...and whether it carried the PREPASS (`ChainDesc::prepass`): the gather's
+    /// and the sun contact's rows are the scene's, so the shape is re-checked once
+    /// a frame beside the reflection's (OgreView::syncReflectListener) — as the
+    /// prepass they ask for, never as the rows themselves (PHOTON-GATHER-1d).
+    bool                       mChainPrepass = false;
+    /// ...and ChainDesc::hitDecode (PHOTON-HIT-SHADE-1): the hit list + its pass.
+    bool                       mChainHitDecode = false;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.
@@ -6363,6 +6893,9 @@ private:
     /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
     /// everywhere but the one suite that has to read what the band does.
     bool                       mLodHysteresisOffscreen = false;
+    /// View::setOffscreenContract; `mSaidNoContract` = the refusal was logged.
+    OffscreenContract          mOffscreenContract = OffscreenContract::Undeclared;
+    mutable bool               mSaidNoContract = false;
     /// An exposure multiplier a host handed over before this view had a chain
     /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
     /// on the chain it builds, once; 0 = nothing owed.
@@ -6848,6 +7381,9 @@ public:
     bool hzbStatus(View *view, HzbStatus &out) const override;
     bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                       unsigned &width, unsigned &height) override;
+    // ---- The ray job's card read, asked directly (OgreRayQuery.cpp) ----
+    bool cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
+                        std::vector<CardReadPick> &out) override;
     // ---- The one voxel reader's parity harness (OgreVoxelReaderParity.cpp) ----
     bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
                            std::vector<VoxelReaderAnswer> &fragment,
@@ -6895,15 +7431,6 @@ public:
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;
-
-    /// THE PROCESS-WIDE PROBE BINDING JUST CHANGED, so every scene has to
-    /// re-decide what its datablocks hold in the env-probe slot (lane
-    /// SKY-FALLBACK-1). HlmsPbs is a singleton and its
-    /// `parallax_correct_cubemaps` property is set for EVERY scene's pass while
-    /// any PCC is bound, so the question "may this material carry a manual
-    /// cubemap" is a process-wide one — see OgreScene::reflectionTexFor. Called
-    /// from the sites that bind or unbind a grid, which live in OgreScene.
-    void reapplyReflectionsAllScenes();
 
     ~OgreEngine() override;
 

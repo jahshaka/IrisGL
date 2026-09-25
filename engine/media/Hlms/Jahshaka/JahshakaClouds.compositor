@@ -1,0 +1,29 @@
+// THE CLOUD FIELD BAKE (CLOUDS-2D-1): one quad into the field texture, run by
+// hand on a change of the layer's coverage, density or weather map
+// (OgreScene::bakeCloudField) -- never per frame. The mip chain is generated
+// by the host right after (the layer reads the field towards the horizon).
+//
+// external 0 = the field (R16F, RenderToTexture + AllowAutomipmaps)
+
+compositor_node JahshakaCloudBakeNode
+{
+	in 0 cloudField
+
+	target cloudField
+	{
+		pass render_quad
+		{
+			load
+			{
+				all	dont_care
+			}
+			material Jahshaka/CloudBake
+			profiling_id "Jahshaka cloud field bake"
+		}
+	}
+}
+
+workspace JahshakaCloudBakeWorkspace
+{
+	connect_external 0 JahshakaCloudBakeNode 0
+}

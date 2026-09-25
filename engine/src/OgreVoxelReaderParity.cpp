@@ -194,8 +194,10 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         params.sdf[0] = 7.0f;
         params.sdf[1] = 16.0f;
 
-        // The volumes, per kind then per cascade (the generation job's order).
-        const unsigned kinds = aniso ? 4u : 1u;
+        // The volumes, per kind then per cascade (the generation job's order): the
+        // total, the anisotropic axes, the per-axis coverage (PHOTON-VOXEL-3), the
+        // surface position (PHOTON-VOXEL-4).
+        const unsigned kinds = unsigned(vct->getNumVoxelTextures());
         auto volume = [&](unsigned kind, unsigned c) -> Ogre::TextureGpu * {
             return vct->getLightVoxelTextures(c)[kind];
         };
@@ -242,15 +244,26 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         // ---- THE FRAGMENT HALF --------------------------------------------
         material->load();
         pass = material->getTechnique(0)->getPass(0);
-        for (unsigned short u = 0; u < pass->getNumTextureUnitStates() && u < 16u; ++u) {
-            // Unit = kind * 4 + cascade. Cascades past the chain repeat its last
-            // one and the anisotropic kinds repeat the isotropic volume on a Low
-            // chain: the program never reads them (its count and its anisotropic
-            // switch say so), but a descriptor must not be empty.
+        for (unsigned short u = 0; u < pass->getNumTextureUnitStates() && u < 40u; ++u) {
+            // Unit = kind * 4 + cascade, the kinds FIXED in the program: iso, X, Y,
+            // Z, then the coverage and the position per half-axis (+a, -a), then
+            // (PHOTON-VOXEL-5) level 0's back side and the normal. Cascades past the
+            // chain repeat its last one and the anisotropic kinds repeat the isotropic
+            // volume on a Low chain: the program never reads X/Y/Z there (its count and
+            // its anisotropic switch say so), and the isotropic volume standing in for
+            // the back reads the one light either side; a descriptor must not be empty.
+            // By NAME, VctLighting's indices.
             const unsigned kind = u / 4u;
             const unsigned c = std::min(unsigned(u % 4u), numCascades - 1u);
             Ogre::TextureUnitState *tus = pass->getTextureUnitState(u);
-            tus->setTexture(volume(kind < kinds ? kind : 0u, c));
+            const bool aniso = vct->isAnisotropic();
+            unsigned listKind = 0u;
+            if (kind >= 1u && kind <= 3u) listKind = aniso ? kind : 0u;
+            else if (kind == 4u || kind == 5u) listKind = vct->coverageIndex(kind - 4u);
+            else if (kind == 6u || kind == 7u) listKind = vct->positionIndex(kind - 6u);
+            else if (kind == 8u) listKind = aniso ? vct->backIndex() : 0u;
+            else if (kind == 9u) listKind = aniso ? vct->normalIndex() : 0u;
+            tus->setTexture(volume(listKind, c));
             tus->setSamplerblock(*samplerblock);
         }
         Ogre::GpuProgramParametersSharedPtr fp = pass->getFragmentProgramParameters();

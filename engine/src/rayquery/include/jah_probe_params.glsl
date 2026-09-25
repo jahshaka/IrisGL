@@ -1,7 +1,7 @@
-// THE SCREEN-PROBE GATHER'S PARAMETERS — one uniform block, three jobs
-// (GATHER-1a, 2026-09-21).
+// THE SCREEN-PROBE GATHER'S PARAMETERS — one uniform block, four jobs
+// (GATHER-1a, 2026-09-21; the filter PHOTON-GATHER-1b).
 //
-// The placement job, the trace and the integrate all read the SAME buffer, so
+// The placement job, the trace, the filter and the integrate all read the SAME buffer, so
 // the block lives in one file and the C++ mirror (`GatherParams` in
 // OgreScreenProbeGather.cpp) is written against one declaration. std140 over
 // vec4s only, so the C++ layout is the GLSL layout by construction.
@@ -38,7 +38,9 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// w = how many cascades are bound.
 	vec4 knobs;
 	/// x = 1 when the voxel textures carry the anisotropic slots, y = the
-	/// surface bias in world units, z = 1 when a sky cubemap is bound,
+	/// ray start's floor off the surface in world units (an epsilon; the trace
+	/// takes the larger of it and 1e-4 of the probe's view distance), z = 1
+	/// when a sky cubemap is bound,
 	/// w = the octahedral map's resolution (rays per probe = w*w).
 	vec4 knobs2;
 	/// x = how many UNIFORM probes there are (the grid), y = how many ADAPTIVE
@@ -67,23 +69,160 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 voxelOrigin[kMaxCascades];
 	/// Per cascade: xyz = 1 / the box's world size, w = one cell in world units.
 	vec4 voxelInvSize[kMaxCascades];
+	/// PHOTON-GATHER-1b. x = the SH bands the integrate evaluates (9 = L0..L2,
+	/// 4 = L0..L1: the measurement arm, GatherTuning::shBands), y = the weight
+	/// floor under which a pixel is left to the fallback (w = 0), z = 1 runs the
+	/// filter in probe space (0 = the filtered map is the raw one: the A/B that
+	/// prices the filter), w = unused.
+	vec4 knobs4;
+	/// THE PREVIOUS FRAME'S CAMERA (PHOTON-GATHER-1c), in the same five numbers
+	/// as this frame's (camPos .. fwd above) — what the integrate's pixel
+	/// history inverts (jah_reproject.glsl). On a view's first frame the C++
+	/// side writes this frame's own basis here, and nothing reads it
+	/// (knobs5.x = 0).
+	vec4 prevCamPos;
+	vec4 prevRayTL;
+	vec4 prevRayRight;
+	vec4 prevRayDown;
+	vec4 prevFwd;
+	/// THE PIXEL HISTORY (PHOTON-GATHER-1c). x = THE VIEW'S AGE: how many
+	/// consecutive frames this view's history has been written (0 = none yet —
+	/// a first frame, a resize, a scene bind, a tuning change, the history
+	/// switched back on — and then the previous images hold nothing and are
+	/// never read); y = the history's blend FLOOR (the smallest weight a new
+	/// frame takes: 1 / the frames it remembers); z = 1 runs the history (0 =
+	/// `JAHSHAKA_GATHER_NO_TEMPORAL`, the measurement lever); w = 1 accepts every
+	/// reprojected texel (the distance and normal tests off — the test door
+	/// GatherTuning::historyValidationOff; 0 shipped).
+	vec4 knobs5;
+	/// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e — the
+	/// reflection's `p.cards`, word for word): x = the instance-table entries
+	/// bound (0 = the scene holds no cache: every hit reads the voxels), y = the
+	/// card records bound, z = the footprint gate in card texels
+	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
+	/// Read by the trace alone.
+	vec4 cards;
+	/// THE REST MEAN (PHOTON-GATHER-1d, rq_probe_integrate.comp): x = the rest
+	/// frame k (0 = the camera, the lighting or the scene moved this frame — not
+	/// at rest; k >= 1 = the k-th consecutive frame at rest), y = K, the rest
+	/// frames after which the answer IS the rest mean and the host holds.
+	vec4 knobs6;
+	/// THE HIT RECORD (PHOTON-HIT-SHADE-1; the trace's, jah_rq_hit_record.glsl):
+	/// hitList: x = the list's capacity, y = its grid width, z = the GPU scene
+	/// instance entries bound, w = 1 when the list is bound. hitSun: xyz = towards
+	/// the sun, w = 1 when the pass has one. hitSun2: x = the sun ray's TLAS mask,
+	/// y = its minimum lift, z = its length, w = the far copies' lift (farOverlap).
+	vec4 hitList;
+	vec4 hitSun;
+	vec4 hitSun2;
 } p;
 
 /// ONE PROBE'S RECORD — where it sits, what it faces, what it integrated.
-/// std430: three vec4s, 48 bytes, and the C++ mirror is `ProbeRecord`.
+/// std430: ten vec4s, 160 bytes, and the C++ mirror is `kRecordBytes`
+/// (OgreScreenProbeGather.cpp).
 struct JahProbeRecord
 {
 	/// xyz = the probe's world position (already lifted off the surface by
 	/// nothing — the bias is applied per ray), w = 1 when it sits on a surface.
 	vec4 posW;
 	/// xyz = its world normal, w = the index of this cell's ADAPTIVE probe plus
-	/// one (0 = the cell has none).
+	/// one (0 = the cell has none); on an ADAPTIVE probe, its own cell's index
+	/// plus one.
 	vec4 normalW;
-	/// rgb = the mean radiance over the cosine-weighted hemisphere, i.e. E/pi,
-	/// which is exactly what HlmsPbs's `envColourD` is; w = 1 when the probe
+	/// rgb = the irradiance at the probe's OWN normal as E/pi (the SH below,
+	/// evaluated there — a reading for status and suites), w = 1 when the probe
 	/// answered at all.
 	vec4 irradiance;
+	/// THE SH9 RECORD (PHOTON-GATHER-1b item 3): the filtered radiance map
+	/// projected onto the nine real spherical harmonics L0..L2 over WORLD axes,
+	/// already CONVOLVED with the clamped cosine and divided by pi, its DC
+	/// coefficient ANCHORED so that the SH at the probe's own normal is the exact
+	/// quadrature there (rq_probe_filter.comp says why) — so
+	/// jahProbeShEval( record, n ) IS E(n)/pi, the unit `envColourD` takes, at
+	/// the normal n. Coefficient k, channel c lives at flat float 3k + c of the
+	/// seven vec4s (27 floats; the 28th is unused).
+	vec4 sh[7];
 };
+
+/// THE NINE REAL SPHERICAL HARMONICS L0..L2 at a unit direction, in the
+/// standard order (Y00; Y1-1, Y10, Y11; Y2-2, Y2-1, Y20, Y21, Y22).
+void jahShBasis9( vec3 d, out float y[9] )
+{
+	y[0] = 0.282095;
+	y[1] = 0.488603 * d.y;
+	y[2] = 0.488603 * d.z;
+	y[3] = 0.488603 * d.x;
+	y[4] = 1.092548 * d.x * d.y;
+	y[5] = 1.092548 * d.y * d.z;
+	y[6] = 0.315392 * ( 3.0 * d.z * d.z - 1.0 );
+	y[7] = 1.092548 * d.x * d.z;
+	y[8] = 0.546274 * ( d.x * d.x - d.y * d.y );
+}
+
+/// The clamped-cosine convolution per band, divided by pi (Ramamoorthi and
+/// Hanrahan's A_l / pi: 1, 2/3, 1/4). A coefficient multiplied by this turns a
+/// RADIANCE projection into an E/pi one.
+float jahShCosineOverPi( int k )
+{
+	return k == 0 ? 1.0 : ( k < 4 ? 2.0 / 3.0 : 0.25 );
+}
+
+/// Coefficient k of a record's SH (rgb).
+vec3 jahProbeShCoeff( JahProbeRecord r, int k )
+{
+	const int f = 3 * k;
+	return vec3( r.sh[( f ) >> 2][( f ) & 3], r.sh[( f + 1 ) >> 2][( f + 1 ) & 3],
+				 r.sh[( f + 2 ) >> 2][( f + 2 ) & 3] );
+}
+
+/// E(n)/pi from a record's SH at the unit normal n, over the first `bands`
+/// coefficients (9 = L0..L2; 4 = L0..L1). Clamped at zero: a band-limited
+/// reconstruction rings below zero where the radiance has a hard edge, and a
+/// negative irradiance is not light.
+vec3 jahProbeShEval( JahProbeRecord r, vec3 n, int bands )
+{
+	float y[9];
+	jahShBasis9( n, y );
+	vec3 e = vec3( 0.0 );
+	for( int k = 0; k < 9; ++k )
+	{
+		if( k >= bands )
+			break;
+		e += jahProbeShCoeff( r, k ) * y[k];
+	}
+	return max( e, vec3( 0.0 ) );
+}
+
+/// ...the same sum WITHOUT the clamp — the anchor needs the raw value the DC
+/// coefficient corrects.
+vec3 jahProbeShEval9Raw( JahProbeRecord r, vec3 n )
+{
+	float y[9];
+	jahShBasis9( n, y );
+	vec3 e = vec3( 0.0 );
+	for( int k = 0; k < 9; ++k )
+		e += jahProbeShCoeff( r, k ) * y[k];
+	return e;
+}
+
+/// THE PLANE TEST, as a WEIGHT (PHOTON-GATHER-1b): how well a surface at
+/// `x` with normal `nx`, at view distance `dist`, belongs to the plane of a
+/// probe at `probePos` with normal `probeN`. The same two tolerances the
+/// placement job's adaptive test uses — the distance off the plane as a
+/// fraction of the view distance (an angular tolerance), and the normals' dot —
+/// each turned from a cut into a linear ramp, so a pixel on the probe's own
+/// plane weighs 1 and one at either tolerance weighs 0.
+float jahPlaneWeight( vec3 probePos, vec3 probeN, vec3 x, vec3 nx, float dist )
+{
+	const float planeTol = max( p.plane.x, 1e-4 ) * max( dist, 1e-3 );
+	const float normalTol = p.plane.y;
+	const float offPlane = abs( dot( probeN, x - probePos ) );
+	const float wp = clamp( 1.0 - offPlane / planeTol, 0.0, 1.0 );
+	const float wn = clamp( ( dot( probeN, nx ) - normalTol ) / max( 1.0 - normalTol, 1e-3 ), 0.0,
+							1.0 );
+	return wp * wn;
+}
 
 /// THE OCTAHEDRAL MAP, hemisphere form: the unit square onto the upper half of
 /// the sphere in the probe's tangent frame. Returns the UNNORMALISED
@@ -97,6 +236,17 @@ vec3 jahOctPoint( vec2 uv )
 	const vec2 f = uv * 2.0 - 1.0;
 	const vec2 d = vec2( ( f.x + f.y ) * 0.5, ( f.x - f.y ) * 0.5 );
 	return vec3( d.x, d.y, 1.0 - abs( d.x ) - abs( d.y ) );
+}
+
+/// ...and its INVERSE: the unit square coordinate of a direction in the
+/// probe's tangent frame (z >= 0 — the caller rejects the lower hemisphere).
+/// The octahedron point is the direction divided by its L1 norm; the 45-degree
+/// rotation is its own inverse up to the factor the forward map halved.
+vec2 jahOctUv( vec3 dLocal )
+{
+	const vec3 o = dLocal / max( abs( dLocal.x ) + abs( dLocal.y ) + dLocal.z, 1e-6 );
+	const vec2 f = vec2( o.x + o.y, o.x - o.y );
+	return clamp( f * 0.5 + 0.5, vec2( 0.0 ), vec2( 1.0 ) );
 }
 
 /// THE SOLID ANGLE one texel of that map subtends, EXACTLY, and the whole
@@ -147,6 +297,13 @@ float jahViewDistance( float rawDepth )
 	if( p.camPos.w < 0.5 )
 		return abs( ( rawDepth - p.projParams.x ) / p.projParams.y );
 	return p.projParams.y / ( rawDepth - p.projParams.x );
+}
+
+/// The view distance of a WORLD point (the same linear depth jahViewDistance
+/// decodes), for a probe whose record carries only its position.
+float jahViewDistanceOf( vec3 world )
+{
+	return max( dot( world - p.camPos.xyz, p.fwd.xyz ), 1e-3 );
 }
 
 vec3 jahWorldAt( vec2 uv, float dist )

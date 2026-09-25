@@ -52,24 +52,21 @@ public:
     /// THE ENVIRONMENT'S GAIN AS A SPECULAR LIGHT — the other half of
     /// setAmbientSh, and the half that used to be missing.
     ///
-    /// setAmbientSh carries the environment's DIFFUSE contribution, already
-    /// scaled by whatever light the host decided the environment is: 27 zeros
-    /// mean "no environment light" and a matte surface goes black. Its
-    /// SPECULAR contribution does not travel in those coefficients — it is
-    /// sampled from the prefiltered environment cube — so a host that scaled
-    /// the coefficients and stopped there left a mirror reflecting a sky that
-    /// was lighting nothing (measured: a metal sphere reflected the sky
-    /// byte-identically with every light in the scene hidden, Sky Light
-    /// included).
-    ///
-    /// This is that scale, and the two are meant to be pushed together: the
-    /// gain of the environment light in the same units, so 1.0 is "the cube's
-    /// own radiance" and 0.0 is "there is no environment light", which makes
-    /// the sky a BACKDROP — still drawn, still visible behind the scene,
-    /// reflecting nothing into it.
+    /// THE ENVIRONMENT LIGHT'S GAIN, and with a sky bound THE ENGINE FORMS THE
+    /// AMBIENT FROM IT (PHOTON-SKY-TRANSIENT-1): the scene's SH becomes
+    /// skyAmbientSh x this gain per channel — in the frame the sky's cube lands,
+    /// and again on every push of this call — so a host modelling a Sky Light
+    /// pushes the gain and never the product. Its SPECULAR contribution is the
+    /// prefiltered environment cube sampled at the same gain. 1.0 is "the
+    /// cube's own radiance" and 0.0 is "there is no environment light": zero
+    /// ambient, and the sky a BACKDROP — still drawn, reflecting nothing.
+    /// With no sky captured the ambient this forms is 27 zeros. WHO WRITES
+    /// THE AMBIENT is the last of the two calls: this one hands it to the
+    /// engine, setAmbient / setAmbientSh take it back for a host that lights
+    /// its scene with a colour of its own (a sky capture then leaves it alone).
     ///
     /// PER CHANNEL (the Sky Light's intensity times its linear tint — the same
-    /// gain the host multiplied the SH coefficients by): THE ONE ENVIRONMENT
+    /// gain the ambient SH is multiplied by): THE ONE ENVIRONMENT
     /// (PHOTON-ENV-1) is one source for every escape — the voxel cones', the
     /// rays' miss, the bounce injection's and the probe-array pass's no-probe
     /// fallback all read the cube times this gain, so a tinted sky lights
@@ -125,36 +122,48 @@ public:
     /// all, or the capture has not run: it happens inside the next rendered
     /// frame, like the IBL convolution).
     ///
-    /// WHEN THE ANSWER CHANGES, exactly (lane ENGINE-SMALL-A / audit ON-14,
-    /// 2026-09-18) — because it is one frame for a lone edit and two for a
-    /// gesture, and a host that renders a fixed number of frames and then
-    /// asserts a picture has to know which:
+    /// THE ENVIRONMENT IS ONE SET (PHOTON-SKY-TRANSIENT-1): this answer, the
+    /// reflection cube every datablock samples and the Sky Light gain change
+    /// TOGETHER. A sky change keeps the previous set bound until the next
+    /// capture, its convolution and its SH have all landed, then swaps the cube
+    /// and these coefficients in one step — never a cube nothing has written,
+    /// never a cube of one sky with the SH of another; the scene's ambient is
+    /// set to this answer x the setEnvironmentLight gain in the same step. When that lands:
     ///
-    ///   * A LONE sky change is read SYNCHRONOUSLY, inside the frame that
-    ///     captured it. This call answers with the new sky from the next frame
-    ///     on, and a host pushing the ambient per frame has it in the picture
-    ///     one frame after the capture — the behaviour this contract has always
-    ///     described.
+    ///   * A LONE sky change lands INSIDE the frame that captured it (the
+    ///     capture, the convolution and a synchronous SH read all run before
+    ///     that frame draws): its first frame already shows the whole new set.
     ///   * A GESTURE — a second capture within a couple of drawn frames of the
-    ///     previous one, i.e. a sun being dragged — DEFERS its readback: the
+    ///     previous one, i.e. a sun being dragged — DEFERS its SH readback: the
     ///     download is issued without a flush and read at the top of the NEXT
-    ///     frame, so this call answers with the new sky from that frame on and
-    ///     a host's per-frame push puts it in the picture the frame after, TWO
-    ///     frames behind the capture. In exchange the capture frame does not
-    ///     block on the GPU (measured 0.94 ms of flush and wait per change,
-    ///     i.e. per frame of a drag). Nothing ever flickers: the previous
-    ///     coefficients stay valid until the new ones land.
+    ///     frame, where the set lands; the previous set is drawn meanwhile. In
+    ///     exchange the capture frame does not block on the GPU (measured
+    ///     0.94 ms of flush and wait per change, i.e. per frame of a drag).
     ///
     /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture — the
     /// run-wide diagnostic latch this engine's measurable rules carry, and the
     /// way the two arms are A/B'd on one binary.
     ///
-    /// UNSCALED: this is the sky's mean incident radiance. A host that models a
-    /// sky LIGHT multiplies by its intensity and tint and pushes the result
-    /// through setAmbientSh — the backend never applies a light of its own.
+    /// UNSCALED: this is the sky's mean incident radiance (the ambient the
+    /// engine applies is this x the setEnvironmentLight gain). Read-only for a
+    /// host: a status readout, never a value to push back.
     virtual bool        skyAmbientSh(float out[27]) const = 0;
     /// The description currently in force (default-constructed = no sky).
     virtual SkyDesc     sky() const = 0;
+    /// THE CLOUD LAYER'S LIVE STATE (SkyDesc::clouds; CloudStatus says what each
+    /// field means). A scene that never enabled the layer answers "off".
+    virtual CloudStatus cloudStatus() const { return CloudStatus(); }
+    /// THE SKY AS A PICTURE (CLOUDS-2D-1's export bake): renders the bound sky
+    /// AND its cloud layer — exactly what the environment capture renders — into
+    /// a `faceSize`^2 cube and resamples it into a `width` x `height` lat-long
+    /// image, row 0 at the zenith, u = 0 at -X going through -Z (the viewer's
+    /// equirect convention, gltfexporter's stitchCubemapToEquirect), as
+    /// sRGB-encoded RGBA8 of the linear radiance times `exposure`, clamped.
+    /// Synchronous — a GPU wait; an export-time call, never a frame-time one.
+    /// False with no sky bound (or headless).
+    virtual bool        renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize,
+                                          float exposure, std::vector<unsigned char> &rgba)
+    { (void)width; (void)height; (void)faceSize; (void)exposure; (void)rgba; return false; }
     /// THE ATMOSPHERE'S TINT ON A LIGHT COMING FROM `toSun` (SUN_FOLLOWS_
     /// ATMOSPHERE, lane ENGINE-7 item 6). White (1,1,1) unless the scene's sky
     /// IS the analytic atmosphere — every other sky is a picture, and a picture
@@ -353,10 +362,11 @@ public:
     /// AT-A11). `levels` is how many LOD levels the mesh has and
     /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the
     /// corresponding normal one — i.e. how many shrunk position-only VAOs this
-    /// mesh pays for. The shape the engine builds is 1 (level 0 optimized, the
-    /// coarse levels aliased) or 0 (nothing to optimize, everything aliased); it
-    /// was `levels` before ogre-patch 0088 made a MIXED list legal to destroy.
-    /// False for an unknown mesh. Exists because that shape is Ogre-internal, it
+    /// mesh pays for. The shape the engine builds is `levels` (every level shrunk,
+    /// all over ONE vertex buffer) or 0 (nothing to optimize, everything aliased)
+    /// — never a mix: Ogre builds a pass's pipeline from the first VAO's vertex
+    /// layout, so a list mixing layouts draws its other levels as garbage
+    /// (PHOTON-SCENE-SWITCH-1). False for an unknown mesh. Exists because that shape is Ogre-internal, it
     /// is VRAM per mesh forever, and a suite has to be able to see it.
     virtual bool        meshVaoShape(MeshId mesh, unsigned &levels,
                                      unsigned &shadowIndependent) const = 0;
@@ -824,18 +834,16 @@ public:
     /// (placement captures every probe) and the irradiance field — every call,
     /// equal params included: that is the explicit "rebuild now", and suites
     /// use it as such. Hosts therefore push on CHANGE only (SceneMirror
-    /// compares GiParams by value), re-solve through refreshGlobalIllumination,
-    /// and take the process-wide binding back after another scene built GI with
-    /// reassertGiBinding — never by re-pushing. GiMode::Off tears everything
-    /// down. Modes the
+    /// compares GiParams by value) and re-solve through refreshGlobalIllumination.
+    /// A scene's arms are its own: every pass of this scene binds them, every
+    /// pass of another scene binds that scene's (per pass — nothing to take back
+    /// after another scene built GI). GiMode::Off tears everything down. Modes the
     /// backend has not implemented yet degrade to Off (true is still returned so a
     /// document saved with a future mode keeps loading).
     virtual bool        setGlobalIllumination(const GiParams &) = 0;
     /// THE TUNING PUSH — the GI values that take effect WITHOUT a rebuild
-    /// (PHOTON_SPEC §7 E2 (8), audit A F6). `ddgiIntensity` and
-    /// `rayMarchStepScale` are read per frame (the first by the irradiance
-    /// field's shader constants, the second by the next light injection), so
-    /// moving one is a constant write and not a re-solve — and they are
+    /// (PHOTON_SPEC §7 E2 (8), audit A F6). The gather's and the card cache's rows
+    /// are read per frame, so moving one is a constant write and not a re-solve — and they are
     /// deliberately OUT of `GiParams::operator==` so that a host comparing by
     /// value does not see a slider tick as a configuration change. Before this,
     /// every tick of those three sliders tore the whole arm down and
@@ -920,6 +928,15 @@ public:
     /// illumination — it is a geometry service GI happens to be the first
     /// consumer of.
     virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// THE VISIBILITY BUFFER'S SPLIT AND BUCKETS (ATOM S3-DRAW): which items the
+    /// id pass draws, which stay on stock PBS and why, and how many decode draws
+    /// the atom items' materials need (AtomDrawStatus). Computes the bucket keys
+    /// (no shader is compiled); a tool and test read, not a per-frame one.
+    virtual AtomDrawStatus atomDrawStatus() { return AtomDrawStatus(); }
+    /// THE MEASUREMENT DOOR of the visibility buffer (a tool's A/B, never a mode):
+    /// off, every item draws through PBS and every view's chain is rebuilt without
+    /// the id pass. On by default.
+    virtual void setAtomDrawEnabled(bool on) { (void)on; }
     /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
     /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
     /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
@@ -956,13 +973,16 @@ public:
         out = CardSample();
         return false;
     }
-    /// ...and the question PHASE 4 asks at a ray's hit, answered on the CPU:
-    /// what does the cache hold at this WORLD POINT, on a surface facing this
-    /// way? Lumen's own order — the cards facing the normal, projected with
-    /// three dot products, depth-tested against their own stored depth, the
-    /// squarest one wins. False when no card covers the point, which is the
-    /// answer that hands a hit back to the voxels.
-    virtual bool readCardAt(const Vec3 & /*world*/, const Vec3 & /*normal*/, CardSample &out) {
+    /// ...and the question a ray's hit asks, answered on the CPU: what does
+    /// the cache hold at this WORLD POINT, on a surface facing this way?
+    /// Lumen's own order — the cards facing the normal, projected with three
+    /// dot products, depth-tested against their own stored depth, the squarest
+    /// one wins. False when no card covers the point, which is the answer that
+    /// hands a hit back to the voxels. `onlyNode` (0 = every card) restricts
+    /// the pick to one instance's cards, the ray job's own scope. The ray job's
+    /// GPU port of this read is held to it by gi.card_read_parity.
+    virtual bool readCardAt(const Vec3 & /*world*/, const Vec3 & /*normal*/, CardSample &out,
+                            NodeId /*onlyNode*/ = 0) {
         out = CardSample();
         return false;
     }
@@ -982,6 +1002,15 @@ public:
     /// determinism arm that holds the frame index, the ray length. It is not
     /// a document row and never reaches a panel: a person tunes the TIER.
     virtual void setGatherTuning(const GatherTuning &) {}
+
+    /// HARD SUN CONTACT SHADOWS (Types.h `SunContactDesc`; PHOTON P5 RY-R3).
+    /// The project's row, pushed by the host from the document like the ray
+    /// row: storing it builds nothing; a view whose scene resolves it on gains
+    /// the prepass the rays start from on its next frame. Off by default.
+    virtual void setSunContact(const SunContactDesc &) {}
+    virtual SunContactDesc sunContact() const { return SunContactDesc(); }
+    /// What the job did on the last drawn frame (Types.h `SunContactStatus`).
+    virtual SunContactStatus sunContactStatus() const { return SunContactStatus(); }
 
     /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
     /// readback of one cascade's light volume: its peak, its mean over lit
@@ -1005,6 +1034,12 @@ public:
     /// the proof that a scrolled field kept the probes that stayed in its window
     /// byte for byte. False without a bound field.
     virtual bool giFieldAtlas(GiFieldAtlas &out) { out = GiFieldAtlas(); return false; }
+    /// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — a TEST AND TOOL readback
+    /// (flushes and BLOCKS on three whole-volume downloads): mip 0 of the total
+    /// light, the albedo and the per-axis coverage volume, decoded (Types.h
+    /// GiVoxelVolume). False
+    /// without a VCT arm or that cascade.
+    virtual bool giVoxelVolume(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
     /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
     /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
     ///
@@ -1032,23 +1067,6 @@ public:
         hits.clear();
         return false;
     }
-    /// "THIS SCENE IS ON SCREEN AGAIN" — re-points the process-wide HlmsPbs GI
-    /// binding (voxel lighting, reflection-probe grid, irradiance field) at
-    /// this scene's own arms, WITHOUT rebuilding anything
-    /// (ENGINE_CACHE_POLICY_SPEC §2 P10).
-    ///
-    /// The binding is "last scene to build wins" (OgreGi.cpp), so when the
-    /// player page builds its own GI and the editor comes back, the editor's
-    /// scene would render with the player's voxels and probes. The host used to
-    /// answer that by re-pushing setGlobalIllumination, which rebuilds the whole
-    /// arm from scratch — 2-3 s of blocked UI on every page return. This is the
-    /// whole of what a page return needs: the arms this scene already built are
-    /// still valid, only the pointer the shader reads is not.
-    ///
-    /// A scene with no arm of a kind unbinds that kind (another scene's probes
-    /// must not light this one). A no-op, returning false, when this scene
-    /// already owns the binding; true when it re-pointed anything.
-    virtual bool        reassertGiBinding() = 0;
 
     /// "Has any object LEFT the volume that is currently lit?" — 0 when every
     /// GI item is inside it, otherwise a hash of the escapees' quantized world
@@ -1572,6 +1590,23 @@ public:
     virtual void setLodHysteresisOffscreen(bool) = 0;
     virtual bool lodHysteresisOffscreen() const = 0;
 
+    /// WHAT AN OFFSCREEN VIEW'S PICTURE IS FOR (PHOTON-GATHER-1d fix round) — and
+    /// so whether the screen-probe gather runs in it. At a gather tier the
+    /// gather is the diffuse GI, but it costs a prepass and four compute jobs a
+    /// frame and its first frames are the raw estimate (up to 9/255 of noise),
+    /// so an offscreen view DECLARES one of two contracts, and there is no third:
+    ///   * StillPicture — a screenshot, a thumbnail, a stored preview shot: the
+    ///     gather runs, and the CALLER waits for GiStatus::giAtRest before it
+    ///     reads the pixels (the screenshot verbs' rule, one predicate);
+    ///   * Live — a view drawn every frame for a person (a preview widget, an
+    ///     eye control): the gather is pinned OFF and the view takes the field's
+    ///     (or the cones') answer, the price of a live frame unchanged.
+    /// An offscreen view that declares NEITHER refuses the gather and says so
+    /// once in the log. Ignored on an on-screen view, which always gathers where
+    /// its scene does. Graph shape (the prepass): set it once, at creation.
+    virtual void setOffscreenContract(OffscreenContract) = 0;
+    virtual OffscreenContract offscreenContract() const = 0;
+
     /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
     /// tonemapper's own multiplier (SS1, 2026-09-13) — the number the shader
     /// samples as `fInvLumAvg`, read back off the GPU's 1x1 adaptation history.
@@ -1703,6 +1738,23 @@ public:
     /// returns false for on-screen windows. This is the thumbnail path, and what
     /// makes the engine testable without a window.
     virtual bool readPixels(Image &out) = 0;
+    /// Reads this View's SCENE RADIANCE back in float (HDR-READBACK-1): the
+    /// linear value the scene passes wrote, before the tonemap, the exposure,
+    /// the bloom composite and the 8-bit store — the currency every closed
+    /// form is stated in. Offscreen Views that asked for it only
+    /// (PostFxDesc::hdrReadback); false otherwise, with lastError saying which.
+    /// Reads the frame most recently rendered, exactly like readPixels. A suite
+    /// that measures the DISPLAY (a grade, a dither, a look, a hash) stays on
+    /// readPixels.
+    virtual bool readPixelsHdr(ImageF &out) = 0;
+    /// Reads this View's REFLECTION texture back in float — the one HlmsPbs
+    /// composites into the specular environment term (`envColourS = lerp(
+    /// envColourS, rgb, a )`): rgb = the screen-space / ray-traced reflected
+    /// radiance, a = the WEIGHT the composite gives it (0 = the probe/sky
+    /// answers the pixel). A measurement surface for the reflection lanes (the
+    /// SSR rim, the letterbox, the environment match) — offscreen views whose
+    /// chain has the SSR stage only; false otherwise, lastError says which.
+    virtual bool readReflectionHdr(ImageF &out) = 0;
 
     /// Compiles every shader this View's SCENE needs, now, without drawing it
     /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).
@@ -2762,6 +2814,18 @@ public:
     virtual bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
                                    std::vector<VoxelReaderAnswer> &fragment,
                                    std::vector<VoxelReaderAnswer> &compute) = 0;
+
+    /// THE RAY JOB'S CARD READ, ASKED DIRECTLY (PHOTON-CARDS-2,
+    /// gi.card_read_parity). The reflection trace reads a hit's radiance from
+    /// the surface cache first (rayquery/include/jah_rq_card.glsl); this runs
+    /// that same read, through the same bindings, in a test-only compute job at
+    /// each query's point, facing and instance, and returns the card and atlas
+    /// texel it picked — which a suite holds against `Scene::readCardAt`, the
+    /// CPU reference. A MEASUREMENT (flush, dispatch, stall) — a suite, never a
+    /// frame. False without a ray-query device or a built surface cache (the
+    /// reason in takeLastError()).
+    virtual bool cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
+                                std::vector<CardReadPick> &out) = 0;
 
     /// THE ENVIRONMENT'S CONE LOOKUP, MEASURED (PHOTON-ENV-1). Evaluates the one
     /// environment's cone lookup (jah_environment.glsl's jahEnvCone) for every

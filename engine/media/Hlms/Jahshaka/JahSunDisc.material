@@ -14,31 +14,11 @@
 //
 // GLSL + Vulkan only, like every other material we own in this folder.
 
-vertex_program Jahshaka/SunDisc_vs_GLSL glsl
-{
-	source JahSunDisc_vs.glsl
-}
-vertex_program Jahshaka/SunDisc_vs_VK glslvk
-{
-	source JahSunDisc_vs.glsl
-}
-vertex_program Jahshaka/SunDisc_vs unified
-{
-	delegate Jahshaka/SunDisc_vs_GLSL
-	delegate Jahshaka/SunDisc_vs_VK
-
-	// The three auto-params Ogre fills per CAMERA. `param_named_auto` in a
-	// program's default_params is the form that works under Vulkan (a plain
-	// `param_named` in a program_ref is applied before the constant table
-	// exists and fails with "setting of constant failed", which leaves the
-	// whole pass broken and the quad silently undrawn).
-	default_params
-	{
-		param_named_auto	rsDepthRange	rs_depth_range
-		param_named_auto	invViewProj		inverse_viewproj_matrix
-		param_named_auto	cameraPos		camera_position
-	}
-}
+// THE VERTEX PROGRAM LIVES IN JahSunDisc.program (CLOUDS-2D-1): the cloud
+// layer's quad and the clouded disc draw the same camera ray, and a program
+// one material file defines is not reliably defined when ANOTHER material file
+// is parsed (script files of one pattern are read in the archive's order).
+// Every *.program file is read before any *.material file.
 
 fragment_program Jahshaka/SunDisc_ps_GLSL glsl
 {
