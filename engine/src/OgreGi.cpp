@@ -1010,7 +1010,10 @@ bool OgreScene::injectCascade(size_t i) {
         return false;
     }
     applyCascadeEnvironment(lighting);
-    lighting->update(mSceneMgr, cascadeBounces(i), true /*autoMultiplier*/);
+    // the injection's shadow march is exact (a DDA from each face, PHOTON-VOXEL-5): upstream's
+    // step scale and thin-wall counter have nothing left to scale - their neutral values
+    lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
+                     1.0f /*rayMarchStepScale*/);
     stamp = frame;
     // The single volume's LANDED injections — the surface cache's indirect
     // signature (PHOTON-CARDS-1; a chain folds its cascades' rebuild counts and
