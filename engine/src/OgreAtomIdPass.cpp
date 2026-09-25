@@ -76,11 +76,11 @@ namespace {
 /// The push constants, as atom_id.vert declares them (std430 push-constant block:
 /// four vec4 then four uvec2 — 96 bytes, inside the 128 every device offers).
 struct IdPushConstants {
-    float    viewProjRow[16];
-    uint32_t instances[2];
-    uint32_t levels[2];
-    uint32_t rows[2];
-    uint32_t cullLevels[2];
+    float    viewProjRow[16] = {};
+    uint32_t instances[2] = {};
+    uint32_t levels[2] = {};
+    uint32_t rows[2] = {};
+    uint32_t cullLevels[2] = {};
 };
 static_assert(sizeof(IdPushConstants) == 96, "atom_id.vert's push-constant block");
 
