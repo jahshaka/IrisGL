@@ -25,24 +25,22 @@
 // with the light terms of 800.PixelShader_piece_ps.any's DoPointLights /
 // DoSpotLights (the attenuation 1 / (0.5 + (linear + quadratic d) d), the
 // range fade of fork change 0018, the spot cone) as JahBrdf's
-// jahLightAttenuation / jahSpotAttenuation. (800.PixelShader still spells
-// those two terms out inline at each of its light loops: the pixel side of
-// that pair is not converged yet.) `pbsDirect()` in test_gi_field_energy.cpp
+// jahLightAttenuation / jahSpotAttenuation — the functions 800.PixelShader's
+// own light loops call (PHOTON-CARDS-5 measured a lamp at three distances: the
+// card 0.987-0.993 of the head-on pixel). `pbsDirect()` in test_gi_field_energy.cpp
 // writes the same arithmetic out in C++, so a test holds this to that closed
 // form.
 //
 // A TEXEL IS READ FROM EVERY DIRECTION (a reflection ray's hit, a gather's),
-// so it stores a view-INDEPENDENT diffuse. The INDIRECT half takes the lobe's
-// HEMISPHERICAL mean albedo, jahDiffuseAlbedoHemi(r) — the bounce job's
-// convention for the same "read from everywhere" situation (the voxel re-emits
-// the same mean), so a card and a voxel hold one quantity (PHOTON-CARDS-2 audit
-// F4, the lead's decision). THE DIRECT half keeps V = N (viewScatter = 1):
-// fd90 there depends on the half vector of each outgoing direction, so its
-// hemispherical mean has no closed form this file can write in one line; its
-// mean over outgoing directions is 1 + (fd90 - 1) / 21 of V = N's, at most 7 %
-// off at r = 1 and exact at r = 0 — stated, the one convention still split.
-// The specular lobe is not cached (Lumen's rule: the surface cache is a
-// diffuse store).
+// so it stores the HEAD-ON diffuse and the READ restores the view term
+// (JahCardView, jah_card_view.glsl — PHOTON-CARDS-5): THE DIRECT half at V = N
+// (viewScatter = 1, fd90 on H = normalize( L + N )), with the texel's mean
+// light direction written beside it (the Albedo and Normal layers' alpha) so
+// the read takes the lobe at the ray's own V; THE ENVIRONMENT half at the
+// lobe's HEMISPHERICAL mean albedo, jahDiffuseAlbedoHemi(r) — the bounce job's
+// convention (a voxel re-emits the same mean; PHOTON-CARDS-2 audit F4), which
+// the read turns into the directional albedo at its own N.V. The specular lobe
+// is not cached (Lumen's rule: the surface cache is a diffuse store).
 //
 // VISIBILITY. The SUN's is the stored shadow term (the capture's PSSM term of
 // the first shadow-casting directional light — the prepass writes that one
@@ -52,7 +50,9 @@
 // visibility is the traced residue's, where rays exist (PHOTON P5). Area
 // lights are not summed (their LTC path is not transcribed). Stated, all three.
 //
-// INDIRECT = THE PIXEL'S OWN DIFFUSE GI, from the texel: the ONE diffuse
+// INDIRECT = THE PIXEL'S OWN DIFFUSE ENVIRONMENT TERM, from the texel. With GI
+// OFF it is the SH ambient at the texel's normal (the engine's SH x gain, the
+// pixel's envColourD); with the chain it is the pixel's diffuse GI: the ONE diffuse
 // cone integrator (JahVoxelCones, jah_voxel_cones.glsl — the frame, the cone
 // set, the weights, the start bias, the escape weight; the same TEXT the
 // pixel's computeVctProbe and the bounce job run) over the ONE voxel reader
@@ -62,7 +62,7 @@
 // outgoing radiance as BRDF_EnvMap does, envColourD x diffuse x pi x the lobe's
 // albedo, with the albedo taken as its HEMISPHERICAL mean jahDiffuseAlbedoHemi
 // (the fork's JahDiffuseAlbedo piece; above) where the pixel takes it at its own
-// view angle. One term the pixel has that the card does not, stated: a
+// view angle (the read restores that). One term the pixel has that the card does not, stated: a
 // diffuse fresnel (fresnelD — PbsBrdf::Default carries none; the
 // SeparateDiffuseFresnel BRDFs do, and their card is brighter by 1 - F).
 // And the frame is built on the card's PLANE where the stored normal is the
@@ -73,17 +73,17 @@
 @insertpiece( SetCrossPlatformSettings )
 @insertpiece( DeclUavCrossPlatform )
 
-vulkan_layout( ogre_t0 ) uniform texture2D cardAlbedo;
-vulkan_layout( ogre_t1 ) uniform texture2D cardNormal;
-vulkan_layout( ogre_t2 ) uniform texture2D cardDepth;
-vulkan_layout( ogre_t3 ) uniform texture2D cardEmissive;
-vulkan_layout( ogre_t4 ) uniform texture2D cardShadowRough;
+// (The Albedo and Normal layers are UAVs, u6 and u7 below: the job writes the
+// mean light direction into their alpha — JahCardView.)
+vulkan_layout( ogre_t0 ) uniform texture2D cardDepth;
+vulkan_layout( ogre_t1 ) uniform texture2D cardEmissive;
+vulkan_layout( ogre_t2 ) uniform texture2D cardShadowRough;
 
-@set( jahCloudUnit, 5 )
+@set( jahCloudUnit, 3 )
 @property( hlms_num_vct_cascades )
-	@pset( vctTexUnit, 5 )
+	@pset( vctTexUnit, 3 )
 	@psub( uses_array_bindings, hlms_num_vct_cascades, 1 )
-	vulkan( layout( ogre_s5 ) uniform sampler vSmp );
+	vulkan( layout( ogre_s3 ) uniform sampler vSmp );
 	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbes[@value( hlms_num_vct_cascades )];
 	@add( vctTexUnit, hlms_num_vct_cascades )
 	@property( vct_anisotropic )
@@ -169,6 +169,14 @@ uniform restrict image2D cardIndirect;
 // carries one (camPos.w = 1). The captured term holds the still world only.
 layout( vulkan( ogre_u5 ) vk_comma @insertpiece( uav5_pf_type ) )
 uniform restrict readonly image2D cardMoverVis;
+// THE ALBEDO AND NORMAL LAYERS (PHOTON-CARDS-5): read here as the capture copied
+// them, and their ALPHA (which no reader used: the capture writes 1) rewritten
+// with the texels' mean light direction, octahedral (JahCardView) — the card
+// read restores the diffuse lobe's view term from it.
+layout( vulkan( ogre_u6 ) vk_comma @insertpiece( uav6_pf_type ) )
+uniform restrict image2D cardAlbedo;
+layout( vulkan( ogre_u7 ) vk_comma @insertpiece( uav7_pf_type ) )
+uniform restrict image2D cardNormal;
 
 // THE CHAIN AND THE ENVIRONMENT, as VctLighting hands them to every reader
 // (getCascadeChainParams, the cascade-0 volume's box, getFinalMultiplier,
@@ -190,6 +198,30 @@ layout( std430, ogre_U2 ) readonly restrict buffer giLayout { CardGiParams gp; }
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
 		local_size_z = @value( threads_per_group_z ) ) in;
+
+// THE ONE ENVIRONMENT (JahEnvironment), bound with or without the chain: with
+// GI OFF its SH is the pixel's whole ambient (PHOTON-CARDS-5), and the host
+// fills envSh from the scene's own coefficients (the sky's SH x the Sky Light's
+// gain, what the engine pushes to HlmsPbs) when no chain hands them over.
+@property( hlms_num_vct_cascades && jah_env )
+	#define JAH_ENV_CUBE_ON true
+	#define JAH_ENV_SAMPLE( d, l ) textureLod( samplerCube( envCube, vSmp ), d, l ).xyz
+@else
+	#define JAH_ENV_CUBE_ON false
+	#define JAH_ENV_SAMPLE( d, l ) vec3( 0.0, 0.0, 0.0 )
+@end
+#define JAH_ENV_MIPS gp.envGainMips.w
+#define JAH_ENV_GAIN gp.envGainMips.xyz
+#define JAH_ENV_SH_C0 gp.envSh[0].xyz
+#define JAH_ENV_SH_C1 gp.envSh[1].xyz
+#define JAH_ENV_SH_C2 gp.envSh[2].xyz
+#define JAH_ENV_SH_C3 gp.envSh[3].xyz
+#define JAH_ENV_SH_C4 gp.envSh[4].xyz
+#define JAH_ENV_SH_C5 gp.envSh[5].xyz
+#define JAH_ENV_SH_C6 gp.envSh[6].xyz
+#define JAH_ENV_SH_C7 gp.envSh[7].xyz
+#define JAH_ENV_SH_C8 gp.envSh[8].xyz
+@insertpiece( JahEnvironment )
 
 @property( hlms_num_vct_cascades )
 	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
@@ -218,26 +250,6 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_FROM_PREV_OFFSET( c ) gp.chainFromPrev[( (c) - 1 ) * 2 + 1]
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
-
-	@property( jah_env )
-		#define JAH_ENV_CUBE_ON true
-		#define JAH_ENV_SAMPLE( d, l ) textureLod( samplerCube( envCube, vSmp ), d, l ).xyz
-	@else
-		#define JAH_ENV_CUBE_ON false
-		#define JAH_ENV_SAMPLE( d, l ) vec3( 0.0, 0.0, 0.0 )
-	@end
-	#define JAH_ENV_MIPS gp.envGainMips.w
-	#define JAH_ENV_GAIN gp.envGainMips.xyz
-	#define JAH_ENV_SH_C0 gp.envSh[0].xyz
-	#define JAH_ENV_SH_C1 gp.envSh[1].xyz
-	#define JAH_ENV_SH_C2 gp.envSh[2].xyz
-	#define JAH_ENV_SH_C3 gp.envSh[3].xyz
-	#define JAH_ENV_SH_C4 gp.envSh[4].xyz
-	#define JAH_ENV_SH_C5 gp.envSh[5].xyz
-	#define JAH_ENV_SH_C6 gp.envSh[6].xyz
-	#define JAH_ENV_SH_C7 gp.envSh[7].xyz
-	#define JAH_ENV_SH_C8 gp.envSh[8].xyz
-	@insertpiece( JahEnvironment )
 
 	// THE ONE DIFFUSE CONE INTEGRATOR (JahVoxelCones): the frame is built from
 	// the texel's WORLD normal (jahConeBasisWorld: the pixel's cubemap-frame
@@ -298,6 +310,7 @@ vec3 jahCardRound( vec3 v )
 
 @insertpiece( JahBrdf )
 @insertpiece( JahDiffuseAlbedo )
+@insertpiece( JahCardView )
 @property( jah_cloud_shadow )
 	#define JAH_CLOUD_TAU( uv ) textureLod( sampler2D( cloudField, cloudSmp ), uv, 0.0 ).x
 	@insertpiece( JahCloudShadow )
@@ -327,8 +340,11 @@ void main()
 	float depth = texelFetch( cardDepth, at, 0 ).x;
 	if( depth > 0.0 )
 	{
-		vec3 kD = texelFetch( cardAlbedo, at, 0 ).xyz;
-		vec3 nV = texelFetch( cardNormal, at, 0 ).xyz * 2.0 - 1.0;
+		// Read raw and written back raw, the alpha replaced (no re-quantisation).
+		const vec4 albedoRaw = imageLoad( cardAlbedo, at );
+		const vec4 normalRaw = imageLoad( cardNormal, at );
+		vec3 kD = albedoRaw.xyz;
+		vec3 nV = normalRaw.xyz * 2.0 - 1.0;
 		vec3 N = normalize( r.axisU.xyz * nV.x + r.axisV.xyz * nV.y + r.axisD.xyz * nV.z );
 		// THE CONE FRAME ON THE CARD'S PLANE (PHOTON-VOXEL-4). The card is a planar capture
 		// along axisD, and a texel of a surface IN that plane has the plane's normal exactly;
@@ -353,6 +369,9 @@ void main()
 		// traced one (the movers), where the host traced this card.
 		float moverVis = r.camPos.w > 0.5 ? imageLoad( cardMoverVis, at ).x : 1.0;
 		vec3 direct = vec3( 0.0, 0.0, 0.0 );
+		// THE MEAN LIGHT DIRECTION (JahCardView): each light's direction weighted
+		// by its share of the direct half's luminance.
+		vec3 lightMean = vec3( 0.0, 0.0, 0.0 );
 		uint n = lightCount.x;
 		for( uint i = 0u; i < n; ++i )
 		{
@@ -387,8 +406,18 @@ void main()
 			if( type < 0.5 )
 				visibility *= jahCloudTransmittance( P, gp.cloudMap, gp.cloudSun );
 @end
-			direct += l.diffuse.xyz * ( jahCardDiffuse( N, L, perceptualRoughness ) * atten * visibility );
+			// The PLANE-SNAPPED normal (Ncone), the one the read's view-term ratio
+			// divides by (jah_rq_card.glsl): the ratio is then exact by text.
+			const vec3 share = l.diffuse.xyz * ( jahCardDiffuse( Ncone, L, perceptualRoughness ) * atten * visibility );
+			direct += share;
+			lightMean += L * dot( share, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
+		// No light reaches the texel: its direct half is zero and the direction is
+		// never used; the normal stands in.
+		const vec3 lightDir = dot( lightMean, lightMean ) > 1e-20 ? normalize( lightMean ) : Ncone;
+		const vec2 lightOct = jahCardOctEncode( lightDir );
+		imageStore( cardAlbedo, at, vec4( albedoRaw.xyz, lightOct.x ) );
+		imageStore( cardNormal, at, vec4( normalRaw.xyz, lightOct.y ) );
 
 		// THE INDIRECT HALF (mode bit 1 marches, bit 2 says "none yet", else the
 		// cached layer).
@@ -398,6 +427,15 @@ void main()
 			// BRDF_EnvMap's envColourD x diffuse x pi x the lobe's albedo, at its
 			// hemispherical mean (the bounce's convention; the header says why).
 			indirect = jahCardEnvColourD( P, Ncone ) * kD * 3.141592654 *
+					   jahDiffuseAlbedoHemi( perceptualRoughness );
+@else
+			// GI OFF (PHOTON-CARDS-5): the pixel's envColourD is the SH irradiance
+			// at its normal — the sky's SH x the Sky Light's gain, the engine's own
+			// coefficients — so the card's environment half is that, through the
+			// same BRDF_EnvMap arithmetic. Cached like the march: the SH is in the
+			// indirect signature (OgreScene::updateSurfaceCache), so a change
+			// re-runs this branch.
+			indirect = jahEnvIrradiance( Ncone ) * kD * 3.141592654 *
 					   jahDiffuseAlbedoHemi( perceptualRoughness );
 @end
 		}

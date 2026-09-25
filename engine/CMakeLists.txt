@@ -99,6 +99,21 @@ endif()
 if(JAH_RAY_QUERY_OK)
     set(JAH_RQ_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/rayquery")
     file(MAKE_DIRECTORY "${JAH_RQ_GEN_DIR}")
+    # THE FORK'S DIFFUSE LOBE FOR GLSLANG (PHOTON-CARDS-5): the card read restores
+    # the lobe's view term with JahBrdf's and JahDiffuseAlbedo's own functions,
+    # unwrapped from the fork's Pbs media at build time (never a copy).
+    set(JAH_RQ_FORK_BRDF "${JAH_RQ_GEN_DIR}/jah_fork_brdf.glsl")
+    add_custom_command(
+        OUTPUT "${JAH_RQ_FORK_BRDF}"
+        COMMAND ${CMAKE_COMMAND} -DUNWRAP=1 -DOUT=${JAH_RQ_FORK_BRDF}
+                -DIN0=${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahBrdf_piece_all.any
+                -DIN1=${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahDiffuseAlbedo_piece_all.any
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
+        DEPENDS "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahBrdf_piece_all.any"
+                "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahDiffuseAlbedo_piece_all.any"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
+        COMMENT "Unwrapping the fork's diffuse lobe for the ray jobs' card read"
+        VERBATIM)
     # BUILD-TIME SPIR-V, at spirv1.4 — never committed bytes (the spike
     # committed SPIR-V 1.5 headers, which are legal only on a device at
     # apiVersion >= 1.2 and which no reviewer can read: audit C-7/C-10).
@@ -114,7 +129,7 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
-                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_reflectSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
@@ -130,6 +145,8 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_radiance.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_record.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_sun_ray.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
+                "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
@@ -137,7 +154,7 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
-                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_cardParitySpv -o "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
@@ -145,6 +162,8 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
+                "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
@@ -182,7 +201,7 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
-                "-I${JAH_RQ_INCLUDE}"
+                "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_probeGatherSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
@@ -196,6 +215,8 @@ if(JAH_RAY_QUERY_OK)
                 # ...and the hit record + the sun ray (PHOTON-HIT-SHADE-1).
                 "${JAH_RQ_INCLUDE}/jah_rq_hit_record.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
+                "${JAH_RQ_INCLUDE}/jah_card_view.glsl"
+                "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
@@ -501,6 +522,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
 set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
@@ -562,6 +584,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahCloudShadow
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCloudShadow_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # A CARD READ FROM A DIRECTION (PHOTON-CARDS-5): the relight writes the mean
+    # light direction the ray jobs' card read restores the lobe's view term with.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahCardView
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCardView_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # engine.voxel_reader_parity (tests/compute): the harness body as a piece
     # for its compute half, and its fragment half as a plain GLSL program built

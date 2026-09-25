@@ -1983,6 +1983,9 @@ void OgreScene::updateSurfaceCache() {
     // environment the escapes read (below).
     view.vct = mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
+    // ...and THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's SH, the engine's
+    // own SH x gain (applySkyAmbient), in the indirect signature below.
+    view.ambientSh = mLastAmbientSh;
     {
         unsigned long long sig = 1469598103934665603ull;
         const auto foldI = [&sig](unsigned long long v) {
