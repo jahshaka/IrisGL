@@ -1429,7 +1429,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[19].pBufferInfo = &hitBufs[0];
         w[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[22].pBufferInfo = &hitBufs[1];
-        // THE CARD READ'S VIEW TERM (23-27, PHOTON-CARDS-5): the cache's five
+        // THE CARD READ'S VIEW TERM (25-29, PHOTON-CARDS-5): the cache's five
         // or the flat stand-in, the card read's rule.
         VkDescriptorImageInfo cardViewImgs[SurfaceCache::kViewLayers] = {};
         for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {

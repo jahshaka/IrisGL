@@ -4908,7 +4908,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             return;
         }
     }
-    // THE CARD READ'S VIEW TERM (29-33, PHOTON-CARDS-5): the cache's five, or
+    // THE CARD READ'S VIEW TERM (31-35, PHOTON-CARDS-5): the cache's five, or
     // the flat stand-in.
     VkDescriptorImageInfo cardViewImgs[SurfaceCache::kViewLayers] = {};
     for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {

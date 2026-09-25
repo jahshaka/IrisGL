@@ -208,7 +208,7 @@ struct GatherInputs {
     Ogre::TextureGpu *cardDepth = nullptr;
     Ogre::TextureGpu *cardRadiance = nullptr;
     /// ...and the card read's VIEW TERM (PHOTON-CARDS-5): SurfaceCache::viewLayers'
-    /// five (Indirect, Emissive, ShadowRough, Albedo, Normal), bound at 23-27.
+    /// five (Indirect, Emissive, ShadowRough, Albedo, Normal), bound at 25-29.
     Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
     unsigned cardSlots = 0u, cardRecords = 0u;
     float cardFootprintTexels = 0.0f;
