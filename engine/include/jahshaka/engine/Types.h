@@ -7074,6 +7074,12 @@ struct FrameRecord {
     float       textureWaitMs = 0.0f;   ///< the frame-head streaming drain
     /// Σ of the passes' GPU milliseconds, or NEGATIVE when unmeasured.
     float       gpuMs = -1.0f;
+    /// GPU timing MARKS this frame issued that the render system's query pool
+    /// had no room for (a pass or a dispatch with no GPU time because of it,
+    /// never because it cost nothing). Non-zero means THIS frame's GPU numbers
+    /// are incomplete. Per frame, so a capture that drains every 250 ms still
+    /// sees every frame that dropped one (POST-C-FIXES-1).
+    unsigned    gpuMarksDropped = 0;
     /// What the monitor itself cost this frame, so analysis can subtract it.
     float       overheadMs = 0.0f;
 };
@@ -7131,11 +7137,17 @@ struct MonitorStatus {
     bool     gpuSupported = false;   ///< ...and the device/backend can do timestamps
     bool     gpuActive    = false;   ///< ...and a capture has a query pool open NOW
     unsigned gpuQueryPools = 0;      ///< MUST be 0 outside a capture
-    /// GPU samples the LAST frame could not record because the query pool ran
-    /// out of room. Non-zero means this capture's GPU numbers are INCOMPLETE —
-    /// said out loud rather than left for analysis to notice that some passes
-    /// have no time. (A probe capture alone is 6 faces x ~22 passes.)
-    unsigned gpuSamplesTruncated = 0;
+    /// GPU timing MARKS the query pool could not hold, CUMULATIVE since this
+    /// capture turned the monitor on (the per-frame count rides each
+    /// FrameRecord::gpuMarksDropped). Non-zero means the capture's GPU numbers
+    /// are INCOMPLETE — said out loud rather than left for analysis to notice
+    /// that some passes have no time. Cumulative because the host reads this
+    /// on its drain timer, and a LAST-FRAME reading (what this field used to
+    /// be) missed every dropping frame between two drains. Measured on Grand
+    /// Showroom 2 at Epic (POST-C-FIXES-1): the worst frame issued 1,214 marks
+    /// (2,428 of the pool's 4,096 queries — 96 probe faces at updateBudget 64,
+    /// rays off); 0 dropped in every arm.
+    unsigned long long gpuMarksDropped = 0;
     std::string gpuReason;           ///< why GPU timing is unavailable, when it is
     float    overheadMs = 0.0f;      ///< the monitor's own cost, last frame
 };

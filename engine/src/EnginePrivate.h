@@ -1743,6 +1743,13 @@ public:
     unsigned pendingEvents() const { return unsigned(mEvents.size()); }
     unsigned long long framesRecorded() const { return mFramesRecorded; }
     unsigned long long framesDropped() const { return mFramesDropped; }
+    /// GPU timing marks the query pool could not hold, since the monitor went
+    /// on (MonitorStatus::gpuMarksDropped).
+    unsigned long long gpuMarksDropped() const { return mGpuMarksDropped; }
+    /// Files `n` marks the render system dropped in the frame that JUST ENDED —
+    /// the newest record in the holding queue (the call is made at the head of
+    /// the next frame, after its beginFrame) — and adds them to the total.
+    void noteGpuMarksDropped(unsigned n);
     unsigned long long eventsDropped() const { return mEventsDropped; }
     float lastOverheadMs() const { return mLastOverheadMs; }
     void addOverhead(double ms) { mOverheadMs += ms; }
@@ -1785,6 +1792,7 @@ private:
     float    mLastOverheadMs = 0.0f;
     bool     mInFrame = false;
     unsigned long long mFramesRecorded = 0, mFramesDropped = 0, mEventsDropped = 0;
+    unsigned long long mGpuMarksDropped = 0;
 };
 
 /// The live monitor, or null. EVERY instrumentation site starts with this: one
