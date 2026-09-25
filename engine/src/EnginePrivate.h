@@ -87,7 +87,6 @@
 // breakthrough and leave its sky and its sun/ambient coupling alone (OgreFog.cpp).
 #include <Atmosphere/OgreAtmosphereNpr.h>
 #include <OgrePlanarReflections.h>
-#include <Vao/OgreAsyncTicket.h>
 #include <Compositor/OgreCompositorWorkspaceListener.h>
 
 // NO <X11/Xlib.h> HERE, deliberately. The only X11 thing this header ever
@@ -785,6 +784,8 @@ bool atomIdPassSupported(Ogre::RenderSystem *rs);
 void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullRequest &out);
 void registerAtomIdPass();
 void releaseAtomIdPass();
+/// A view going away: its stats ring (OgreAtomIdPass.cpp) goes with it.
+void atomIdPassForgetView(const OgreView *view);
 /// OgreAtomDraw.cpp — which view a workspace with an id pass belongs to (the
 /// recorder is handed a pass, not a view), and the view's listener that arms the
 /// screen decode for the passes that skip the Atom queue.
@@ -6672,10 +6673,14 @@ public:
     detail::GpuCull &atomCull() { return mAtomCull; }
     /// THE ID PASS'S SHARE OF THE FRAME'S STATS (renderStats): its indirect draws never
     /// reach Ogre's RenderingMetrics, so the cull's own counters (survivors, and the
-    /// triangles the draws job adds up) are read back — a frame or two late, never
-    /// waited on. `harvestAtomStats` collects a finished readback and asks for the
-    /// last frame's counters (the id pass calls it before its cull resets them).
-    void harvestAtomStats();
+    /// triangles the draws job adds up) are copied into a mapped ring and read back
+    /// once the frame that wrote them has retired (OgreAtomIdPass.cpp) — a few frames
+    /// late, never waited on, and never a mid-frame submit.
+    void setAtomStats(unsigned long long triangles, unsigned survivors) {
+        mAtomTriangles = triangles;
+        mAtomSurvivors = survivors;
+        mAtomStatsValid = true;
+    }
     bool atomStats(unsigned long long &triangles, unsigned &survivors) const {
         triangles = mAtomTriangles;
         survivors = mAtomSurvivors;
@@ -6798,7 +6803,6 @@ private:
     bool mChainAtomDraw = false;
     AtomDrawListenerPtr mAtomListener;
     detail::GpuCull mAtomCull;
-    Ogre::AsyncTicketPtr mAtomStatsTicket;
     unsigned long long mAtomTriangles = 0ull;
     unsigned mAtomSurvivors = 0u;
     bool mAtomStatsValid = false;

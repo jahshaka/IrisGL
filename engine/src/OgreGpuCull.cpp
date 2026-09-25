@@ -104,8 +104,10 @@ bool GpuCull::ensure(Ogre::VaoManager *vao, uint32_t slotCapacity, std::string &
     mDraws = vao->createUavBuffer(size_t(want) * kDrawWords, sizeof(uint32_t), 0, zeros.data(),
                                   false);
     {
-        const std::vector<uint32_t> none(want, 0xFFFFFFFFu);
-        mHeld = vao->createUavBuffer(want, sizeof(uint32_t), 0, const_cast<uint32_t *>(none.data()), false);
+        // Three words a slot: the held level, and the node id and mesh it was held for.
+        const std::vector<uint32_t> none(size_t(want) * 3u, 0xFFFFFFFFu);
+        mHeld = vao->createUavBuffer(want * 3u, sizeof(uint32_t), 0, const_cast<uint32_t *>(none.data()),
+                                     false);
     }
     mCapacity = want;
     return mParams != nullptr;
@@ -284,7 +286,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         draws->_setUavBuffer(3u, cullSlot(cull.levels(), Ogre::ResourceAccess::Read));
         draws->_setUavBuffer(4u, cullSlot(cull.draws(), Ogre::ResourceAccess::Write));
         // ReadWrite: the job adds up the triangles its commands draw (count[4], the
-        // id pass's share of the frame's stats — OgreView::harvestAtomStats).
+        // id pass's share of the frame's stats — OgreAtomIdPass.cpp's stats ring).
         draws->_setUavBuffer(5u, cullSlot(cull.count(), Ogre::ResourceAccess::ReadWrite));
         draws->setIndirectDispatchBuffer(cull.count(), GpuCull::kIndirectOffsetBytes);
         if (requestMs)

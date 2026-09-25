@@ -49,6 +49,9 @@
 #include <Vao/OgreVaoManager.h>
 
 #include <algorithm>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 #include <cstring>
 #include <vector>
 
@@ -131,6 +134,130 @@ void addressOf(Ogre::UavBufferPacked *buf, uint32_t out[2]) {
     const VkDeviceAddress a = gId.bufferDeviceAddress(gId.dev, &info) + off;
     out[0] = uint32_t(a & 0xFFFFFFFFull);
     out[1] = uint32_t(a >> 32u);
+}
+
+/// THE ID PASS'S STATS RING, per view: the cull's count words copied into host-visible
+/// memory every frame and read back once the frame that wrote them has retired. An
+/// AsyncTicket would submit the command buffer mid-frame (VulkanAsyncTicket's ctor
+/// commits it) — measured: +1.0 ms GPU and +0.45 ms CPU on the default scene.
+struct StatsRing {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    const uint32_t *mapped = nullptr;
+    uint32_t slots = 0u;
+    uint32_t writtenAt[8] = {};
+    bool written[8] = {};
+};
+std::unordered_map<const OgreView *, StatsRing> gRings;
+/// Rings of views that went away, with the frame they left at: destroyed once that
+/// frame has retired (a copy into them may still be in flight) — never a device wait.
+std::vector<std::pair<StatsRing, uint32_t>> gGrave;
+
+uint32_t currentFrame() {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
+    return rs && rs->getVaoManager() ? rs->getVaoManager()->getFrameCount() : 0u;
+}
+
+constexpr VkDeviceSize kStatsSlotBytes = GpuCull::kCountElements * sizeof(uint32_t);
+
+void destroyRing(StatsRing &r) {
+    if (!gId.dev) return;
+    if (r.memory) {
+        vkUnmapMemory(gId.dev, r.memory);
+        vkFreeMemory(gId.dev, r.memory, nullptr);
+    }
+    if (r.buffer) vkDestroyBuffer(gId.dev, r.buffer, nullptr);
+    r = StatsRing();
+}
+
+bool ensureRing(Ogre::VulkanDevice *device, StatsRing &r, uint32_t slots) {
+    if (r.buffer) return true;
+    slots = std::min(std::max(slots, 2u), 8u);
+    VkBufferCreateInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = kStatsSlotBytes * slots;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(gId.dev, &bi, nullptr, &r.buffer) != VK_SUCCESS) return false;
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(gId.dev, r.buffer, &req);
+    VkPhysicalDeviceMemoryProperties props;
+    vkGetPhysicalDeviceMemoryProperties(device->mPhysicalDevice, &props);
+    const VkMemoryPropertyFlags want =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    uint32_t type = UINT32_MAX;
+    for (uint32_t i = 0; i < props.memoryTypeCount && type == UINT32_MAX; ++i)
+        if ((req.memoryTypeBits & (1u << i)) && (props.memoryTypes[i].propertyFlags & want) == want) type = i;
+    VkMemoryAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = type;
+    void *p = nullptr;
+    if (type == UINT32_MAX || vkAllocateMemory(gId.dev, &ai, nullptr, &r.memory) != VK_SUCCESS ||
+        vkBindBufferMemory(gId.dev, r.buffer, r.memory, 0) != VK_SUCCESS ||
+        vkMapMemory(gId.dev, r.memory, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
+        destroyRing(r);
+        return false;
+    }
+    r.mapped = static_cast<const uint32_t *>(p);
+    r.slots = slots;
+    return true;
+}
+
+/// Reads the slot this frame reuses (written `slots` frames ago: retired, since Ogre
+/// keeps at most its dynamic-buffer multiplier of frames in flight) into the view,
+/// then records this frame's copy of the LAST cull's counters into it — before this
+/// frame's request zeroes them.
+void reapGrave(uint32_t frame) {
+    for (size_t i = 0; i < gGrave.size();) {
+        if (frame - gGrave[i].second > 8u) {
+            destroyRing(gGrave[i].first);
+            gGrave[i] = gGrave.back();
+            gGrave.pop_back();
+        } else {
+            ++i;
+        }
+    }
+}
+
+void cycleStats(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreView *view, GpuCull &cull) {
+    reapGrave(vao->getFrameCount());
+    if (!cull.count()) return;
+    StatsRing &r = gRings[view];
+    if (!ensureRing(device, r, uint32_t(vao->getDynamicBufferMultiplier()) + 1u)) return;
+    const uint32_t frame = vao->getFrameCount();
+    const uint32_t s = frame % r.slots;
+    if (r.written[s] && frame - r.writtenAt[s] >= r.slots) {
+        const uint32_t *w = r.mapped + size_t(s) * GpuCull::kCountElements;
+        view->setAtomStats(w[4], w[0]);
+    }
+    VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    VkBuffer src = VK_NULL_HANDLE;
+    VkDeviceSize srcOff = 0;
+    bufferOf(cull.count(), src, srcOff);
+    VkBufferCopy c{};
+    c.srcOffset = srcOff;
+    c.dstOffset = VkDeviceSize(s) * kStatsSlotBytes;
+    c.size = kStatsSlotBytes;
+    vkCmdCopyBuffer(cmd, src, r.buffer, 1, &c);
+    // ...and the request's reset (a transfer write) waits for this read; the host
+    // reads the slot only after the frame's fence, which makes the write visible.
+    VkMemoryBarrier hb{};
+    hb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0,
+                         nullptr);
+    r.written[s] = true;
+    r.writtenAt[s] = frame;
 }
 
 VkShaderModule makeModule(VkDevice dev, const uint32_t *code, size_t bytes) {
@@ -387,7 +514,10 @@ void recordIdPass(AtomPassContext &ctx) {
             if (cam->getAutoAspectRatio() && cam->getAspectRatio() != aspect) cam->setAspectRatio(aspect);
         }
         GpuCullRequest req;
-        fillCullFrustum(cam, float(ids->getHeight()), req);
+        // THE PASS'S OWN HEIGHT — the viewport's actual rows, the letterbox inset included
+        // (Viewport::getActualHeight, what the CPU strategy reads for the casters and the
+        // remainder: OgreMesh.cpp's worldPerPixel) — never the whole target's.
+        fillCullFrustum(cam, float(std::max(1, int(vpRect.mVpHeight * float(ids->getHeight())))), req);
         req.flagsRequired = kGpuVisible | kGpuAtom;
         req.flagsForbidden = 0u;
         req.hzbLevels = 0u;
@@ -401,8 +531,8 @@ void recordIdPass(AtomPassContext &ctx) {
         req.lodHysteresis = view->chainDesc().lodHysteresis;
         req.mode = 2u;
         std::string err;
-        view->harvestAtomStats();   // the last frame's counters, before this request zeroes them
         cullPtr = &view->atomCull();
+        cycleStats(device, vkRs->getVaoManager(), view, *cullPtr);   // before this request zeroes them
         if (!scene->recordGpuCull(*cullPtr, req, nullptr, err)) {
             logOnce("the cull did not record (" + err + ")");
             draw = false;
@@ -493,7 +623,7 @@ void recordIdPass(AtomPassContext &ctx) {
     // through Ogre's render queue, so its share is added here, in the pass — the
     // frame's totals and the monitor's per-pass rows (a delta around the pass) both
     // include it. The GPU's own counters, read back a frame or two late
-    // (OgreView::harvestAtomStats): exact for a still scene, one frame behind a moving one.
+    // (the stats ring, cycleStats): exact for a still scene, a few frames behind a moving one.
     {
         unsigned long long tris = 0ull;
         unsigned surv = 0u;
@@ -535,14 +665,28 @@ void releaseAtomIdPass() {
     gId.identityCount = 0u;
     if (gId.dev) {
         vkDeviceWaitIdle(gId.dev);
+        for (auto &kv : gRings) destroyRing(kv.second);
+        gRings.clear();
+        for (auto &g : gGrave) destroyRing(g.first);
+        gGrave.clear();
         destroyPipelineObjects();
         if (gId.layout) vkDestroyPipelineLayout(gId.dev, gId.layout, nullptr);
     }
     gId = IdPipeline();
 }
 
+void atomIdPassForgetView(const OgreView *view) {
+    auto it = gRings.find(view);
+    if (it == gRings.end()) return;
+    // The ring may be the target of a copy still in flight: to the grave, reaped once
+    // its last frame has retired.
+    gGrave.emplace_back(it->second, currentFrame());
+    gRings.erase(it);
+}
+
 #else   // !JAH_RAY_QUERY — no raw Vulkan here (macOS): every view keeps the Atom queue on PBS.
 
+void atomIdPassForgetView(const OgreView *) {}
 bool atomIdPassSupported(Ogre::RenderSystem *) { return false; }
 void registerAtomIdPass() {}
 void releaseAtomIdPass() {}

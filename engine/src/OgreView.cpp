@@ -1791,6 +1791,7 @@ void OgreView::destroy() {
         mAtomListener.reset();
     }
     mAtomCull.destroy();
+    atomIdPassForgetView(this);
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
         // Same reason as the MSAA recreate: destroying a render window destroys

@@ -202,9 +202,16 @@ void main()
 		// band on the first sight). The band is measured on the threshold being
 		// crossed - the next level's bound going coarser, the held level's own going
 		// finer - and a value past it moves, however many levels at once.
+		// THE STATE BELONGS TO THE OBJECT, NOT THE SLOT: the table is swap-on-remove,
+		// so a slot's held level is kept with the node id and mesh it was chosen for,
+		// and another object renumbered into the slot (or a mesh swapped under it)
+		// starts with no band - Ogre's mHysteresisLod = 0xFF on a new object.
 		if( params.eye.w > 0.0 )
 		{
-			uint held = heldLevel[slot];
+			uint heldAt = slot * 3u;
+			uint held = heldLevel[heldAt];
+			if( heldLevel[heldAt + 1u] != instances[slot].ids.x || heldLevel[heldAt + 2u] != meshIndex )
+				held = 0xFFFFFFFFu;
 			if( level != held && held < levelCount )
 			{
 				uint base = meshIndex * JAH_LEVELS_PER_MESH;
@@ -213,7 +220,9 @@ void main()
 				if( level > held ? ( allowed < threshold + band ) : ( allowed > threshold - band ) )
 					level = held;
 			}
-			heldLevel[slot] = level;
+			heldLevel[heldAt] = level;
+			heldLevel[heldAt + 1u] = instances[slot].ids.x;
+			heldLevel[heldAt + 2u] = meshIndex;
 		}
 		outLevel[slot] = level;
 	}

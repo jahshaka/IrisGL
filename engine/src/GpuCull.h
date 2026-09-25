@@ -64,8 +64,10 @@ public:
     Ogre::UavBufferPacked *count() const { return mCount; }
     Ogre::UavBufferPacked *draws() const { return mDraws; }
     /// THE BAND'S DIRECTION STATE (ogre-patch 0075's `mHysteresisLod`, per list):
-    /// the last level a BANDED request chose per slot, 0xFFFFFFFF = none yet. The
-    /// only buffer that carries state between requests — a grow starts it over.
+    /// three words a slot — the last level a BANDED request chose, and the node id
+    /// and mesh it was chosen for (a slot renumbered by a removal, or a mesh swap,
+    /// starts with no band). The only buffer that carries state between requests —
+    /// a grow starts it over.
     Ogre::UavBufferPacked *held() const { return mHeld; }
 
     /// Elements of the count buffer. [0] is the survivor count (a draw's
