@@ -1557,7 +1557,7 @@ struct SunFrame {
     Ogre::Vector3 L, e1, e2;
 };
 struct Footprint {
-    float a0, a1, b0, b1, top;   ///< the projected rect, and the top along the sun
+    float a0 = 0.0f, a1 = 0.0f, b0 = 0.0f, b1 = 0.0f, top = 0.0f;   ///< the projected rect, and the top along the sun
 };
 SunFrame sunFrame(const Ogre::Vector3 &toSun) {
     SunFrame f;
