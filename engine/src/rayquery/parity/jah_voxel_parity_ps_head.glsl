@@ -5,12 +5,13 @@
 // the pixel stage runs exactly the text the pixel shader's cones, the bounce job
 // and the irradiance field run (irisgl/engine/CMakeLists.txt).
 //
-// The volumes: twenty-four units, every cascade's isotropic volume, then every
+// The volumes: forty units, every cascade's isotropic volume, then every
 // cascade's X, Y, Z, then every cascade's per-axis coverage, then every cascade's
-// surface position (the generation job's order), up to four cascades; one
-// sampler, the chain's own trilinear samplerblock. Sixteen textures is past
-// Ogre's standard prefab root layout (four): the program declaration asks for
-// the "max" prefab (JahVoxelReaderParity.material).
+// surface position, then (PHOTON-VOXEL-5) every cascade's level-0 back side and
+// normal (the generation job's order), up to four cascades; one sampler, the
+// chain's own trilinear samplerblock. That is past Ogre's standard prefab root
+// layout (four): the program declaration asks for the "max" prefab
+// (JahVoxelReaderParity.material; sixty-four textures since PHOTON-VOXEL-5).
 
 
 vulkan_layout( ogre_t0 ) uniform texture3D vIso0;
@@ -47,6 +48,14 @@ vulkan_layout( ogre_t28 ) uniform texture3D vPosN0;
 vulkan_layout( ogre_t29 ) uniform texture3D vPosN1;
 vulkan_layout( ogre_t30 ) uniform texture3D vPosN2;
 vulkan_layout( ogre_t31 ) uniform texture3D vPosN3;
+vulkan_layout( ogre_t32 ) uniform texture3D vBack0;
+vulkan_layout( ogre_t33 ) uniform texture3D vBack1;
+vulkan_layout( ogre_t34 ) uniform texture3D vBack2;
+vulkan_layout( ogre_t35 ) uniform texture3D vBack3;
+vulkan_layout( ogre_t36 ) uniform texture3D vNrm0;
+vulkan_layout( ogre_t37 ) uniform texture3D vNrm1;
+vulkan_layout( ogre_t38 ) uniform texture3D vNrm2;
+vulkan_layout( ogre_t39 ) uniform texture3D vNrm3;
 
 vulkan( layout( ogre_s0 ) uniform sampler vSmp );
 
@@ -80,6 +89,9 @@ out vec4 fragColour;
 #define JAH_VOX_SAMPLE_COVN( c, u, l ) JAH_PARITY_PICK( vCovN, c, u, l )
 #define JAH_VOX_SAMPLE_POSP( c, u, l ) JAH_PARITY_PICK( vPosP, c, u, l )
 #define JAH_VOX_SAMPLE_POSN( c, u, l ) JAH_PARITY_PICK( vPosN, c, u, l )
+#define JAH_VOX_HAS_BACK 1
+#define JAH_VOX_SAMPLE_BACK( c, u, l ) JAH_PARITY_PICK( vBack, c, u, l )
+#define JAH_VOX_SAMPLE_NRM( c, u, l ) JAH_PARITY_PICK( vNrm, c, u, l )
 #define JAH_VOX_INVRES( c ) chainInvRes[c].xyz
 #define JAH_VOX_MAXLOD( c ) chainInvRes[c].w
 #define JAH_VOX_FROM_PREV_SCALE( c ) chainFromPrev[( (c) - 1 ) * 2]

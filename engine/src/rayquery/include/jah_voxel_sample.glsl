@@ -35,6 +35,13 @@
 //     JAH_VOX_SAMPLE_POSN(c,u,l)   p absolute in the cascade's normalised space; positionIndex(0 / 1))
 //                                - the origin plane's test
 //     JAH_VOX_INVRES(c)          vec3: 1 / cascade c's resolution, per axis
+//     JAH_VOX_HAS_BACK           0 or 1, a PREPROCESSOR constant (PHOTON-VOXEL-5): the anisotropic
+//                                tiers' level-0 BACK side and the voxeliser's normal are bound:
+//     JAH_VOX_SAMPLE_BACK(c,u,l) vec4: level 0's back side (premultiplied like the isotropic
+//                                volume, which holds the two sides' MEAN - the front is twice
+//                                the mean minus the back); VctLighting::backIndex()
+//     JAH_VOX_SAMPLE_NRM(c,u,l)  vec4: the voxeliser's normal (xyz biased, the canonical normal of a
+//                                two-sided voxel: the front is the side it points to); normalIndex()
 //
 // THE VOLUME'S DIRECTIONAL READ IS THE ONLY RULE HERE — ONE RULE AT EVERY MIP
 // (PHOTON-VOXEL-3, jahVoxelReadIso's comment): a step takes the opacity of what it
@@ -44,6 +51,10 @@
 
 #ifndef JAH_VOXEL_SAMPLE_GLSL
 #define JAH_VOXEL_SAMPLE_GLSL
+
+#ifndef JAH_VOX_HAS_BACK
+#define JAH_VOX_HAS_BACK 0
+#endif
 
 /// THE LEVEL A READ TAKES FOR A FOOTPRINT 2^lod CELLS WIDE: the level whose TRILINEAR
 /// KERNEL is the footprint. A trilinear fetch weighs the texels within one texel of the
@@ -249,7 +260,24 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 	else
 #endif
 	{
-		const vec4 s = JAH_VOX_SAMPLE_ISO( c, posLS, mip );
+		vec4 s = JAH_VOX_SAMPLE_ISO( c, posLS, mip );
+#if JAH_VOX_HAS_BACK
+		// LEVEL 0 PER SIDE (PHOTON-VOXEL-5): a voxel holding both faces of a slab thinner than the
+		// cell keeps two lights - the isotropic volume their mean, the back beside it - and the
+		// faces looking back at the travel (half ha) are the side the normal's component along the
+		// axis says: along it the front (twice the mean minus the back), against it the back. A
+		// one-sided voxel's back IS its light, so either answer is its light. The normal is read
+		// filtered like the light (the canonical normal of a two-sided voxel agrees between
+		// neighbours: VoxelMerge_piece_cs.any).
+		{
+			const vec4 bk = JAH_VOX_SAMPLE_BACK( c, posLS, mip );
+			const float along = ( ha == 0 ? 1.0 : -1.0 ) * ( JAH_VOX_SAMPLE_NRM( c, posLS, mip )[axis] * 2.0 - 1.0 );
+			if( along < 0.0 )
+				s.xyz = bk.xyz;
+			else if( along > 0.0 )
+				s.xyz = max( 2.0 * s.xyz - bk.xyz, vec3( 0.0 ) );
+		}
+#endif
 		// a ray takes both halves (any face it crosses stops it), a cone the one looking back
 		const float oBack = jahVoxelCov( c, ha, posLS, mip )[axis];
 		const float o = ray ? min( 1.0, oBack + jahVoxelCov( c, 1 - ha, posLS, mip )[axis] ) : oBack;

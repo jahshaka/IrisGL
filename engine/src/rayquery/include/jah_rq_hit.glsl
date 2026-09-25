@@ -29,7 +29,8 @@
 //                                 flat radiance (the SH's constant band) — the
 //                                 host hands whichever of the two applies
 //
-// ...and the sampler arrays `voxelIso/voxelX/voxelY/voxelZ/voxelCov` and the combined
+// ...and the sampler arrays `voxelIso/voxelX/voxelY/voxelZ/voxelCovP/N/voxelPosP/N/voxelBack/
+// voxelNrm` and the combined
 // cube sampler `skyCube`, under those names, with kMaxCascades entries.
 //
 // THE ARITHMETIC IS rq_reflect.comp's, UNCHANGED, and the long rationale for
@@ -71,6 +72,11 @@
 #define JAH_VOX_SAMPLE_COVN( c, u, l ) textureLod( voxelCovN[c], u, l )
 #define JAH_VOX_SAMPLE_POSP( c, u, l ) textureLod( voxelPosP[c], u, l )
 #define JAH_VOX_SAMPLE_POSN( c, u, l ) textureLod( voxelPosN[c], u, l )
+// LEVEL 0 PER SIDE (PHOTON-VOXEL-5): the back side and the voxeliser's normal, `voxelBack` /
+// `voxelNrm` (on a Low chain the isotropic volume stands in for both: one light, either side).
+#define JAH_VOX_HAS_BACK 1
+#define JAH_VOX_SAMPLE_BACK( c, u, l ) textureLod( voxelBack[c], u, l )
+#define JAH_VOX_SAMPLE_NRM( c, u, l ) textureLod( voxelNrm[c], u, l )
 #endif
 #ifndef JAH_VOX_INVRES
 // 1 / the resolution per axis = the cell over the box's size.
@@ -136,7 +142,29 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		float lod = 0.0;
 		if( !mirror )
 			lod = jahVoxelFootprintLod( footprint, texel );
-		const vec4 s = jahVoxelSample( c, ls, dir, lod );
+		// THE HIT READS THE TEXEL ITS SURFACE WAS VOXELISED INTO (PHOTON-VOXEL-5 item (iv)).
+		// Along the ray's dominant axis the surface lies in one of the two texels either side
+		// of the hit - the voxels are half-open, so a face ON a texel plane belongs to the
+		// texel above it whichever way the ray travels. The read half a cell past the hit
+		// (trilinear) took the texel BEHIND a face that sits in the lower half of its own:
+		// a static crate's face on a texel plane read the empty interior and the hit was
+		// handed back (gi.hit_voxel; HIT-SHADE-1's F-A: 0.045 against the raster's 0.366).
+		// Both texels are read whole (their centres along the axis, the lateral position
+		// kept) and the one holding the surface - the larger opacity along the ray - answers.
+		vec4 s;
+		{
+			const vec3 ir = JAH_VOX_INVRES( c );
+			const int ax = jahVoxelAxis( dir, ir );
+			const float at = ( hitPos[ax] - origin[ax] ) * invSize[ax];
+			const float k = floor( at / ir[ax] );
+			vec3 lsA = ls, lsB = ls;
+			lsA[ax] = ( k + 0.5 ) * ir[ax];
+			const float kOther = ( at / ir[ax] - k ) < 0.5 ? k - 1.0 : k + 1.0;
+			lsB[ax] = ( kOther + 0.5 ) * ir[ax];
+			const vec4 sA = jahVoxelSample( c, lsA, dir, lod );
+			const vec4 sB = jahVoxelSample( c, lsB, dir, lod );
+			s = sB.w > sA.w ? sB : sA;
+		}
 		if( !jahVoxelSampleUsable( s ) )
 			continue;					// this cascade holds nothing here
 		float w = 1.0;
