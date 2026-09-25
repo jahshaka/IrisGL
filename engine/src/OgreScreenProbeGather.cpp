@@ -86,8 +86,11 @@ constexpr unsigned kPlaceBindings = 6u;
 /// reflection's jah_rq_card_bindings.glsl at base 9) and the geometric
 /// normal's two (13, 14); then the split voxel store's four arrays by name
 /// (15-18: the coverage and the surface position per half, PHOTON-VOXEL-4); then
-/// THE HIT RECORD's four (19-22, PHOTON-HIT-SHADE-1).
-constexpr unsigned kTraceBindings = 23u;
+/// THE HIT RECORD's four (19-22, PHOTON-HIT-SHADE-1); then the card read's
+/// VIEW TERM's five (23-27, PHOTON-CARDS-5: jah_rq_card_bindings.glsl at
+/// JAH_CARD_VIEW_BINDING_BASE 23).
+constexpr unsigned kTraceBindings = 28u;
+constexpr unsigned kTraceCardViewBinding = 23u;
 constexpr unsigned kFilterBindings = 3u;
 constexpr unsigned kIntegrateBindings = 10u;
 
@@ -292,13 +295,19 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 20 the hit list's records
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 21 ...its destinations
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 22 ...its buffer
+            // THE CARD READ'S VIEW TERM (PHOTON-CARDS-5).
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 23 the card Indirect layer
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 24 ...Emissive
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 25 ...ShadowRough
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 26 ...Albedo
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 27 ...Normal
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              kGatherMaxCascades, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u };
+                                             1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -389,7 +398,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     sizes[3].descriptorCount = groups * 10u;   // + the hit list's two
     VkDescriptorPoolSize sampled{};
     sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sampled.descriptorCount = groups * (2u + 8u * kGatherMaxCascades + 3u + 2u);
+    sampled.descriptorCount = groups * (2u + 8u * kGatherMaxCascades + 3u + 2u + 5u);
     VkDescriptorPoolSize all[5] = { sizes[0], sizes[1], sizes[2], sizes[3], sampled };
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1208,8 +1217,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             geomSlots = uint32_t(in.geomRowOfSlot->size());
         }
     }
+    bool cardViewBound = true;
+    for (Ogre::TextureGpu *t : in.cardView) cardViewBound = cardViewBound && t;
     const bool cardsBound = in.cardTable && in.cardInstances && in.cardDepth && in.cardRadiance &&
-                            in.cardRecords > 0u;
+                            cardViewBound && in.cardRecords > 0u;
     pp.cards[0] = cardsBound ? float(in.cardSlots) : 0.0f;
     pp.cards[1] = cardsBound ? float(in.cardRecords) : 0.0f;
     pp.cards[2] = in.cardFootprintTexels;
@@ -1403,6 +1414,17 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[19].pBufferInfo = &hitBufs[0];
         w[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[22].pBufferInfo = &hitBufs[1];
+        // THE CARD READ'S VIEW TERM (23-27, PHOTON-CARDS-5): the cache's five
+        // or the flat stand-in, the card read's rule.
+        VkDescriptorImageInfo cardViewImgs[5] = {};
+        for (unsigned i = 0; i < 5u; ++i) {
+            cardViewImgs[i].sampler = mHost.gatherPointSampler();
+            cardViewImgs[i].imageView = cardsBound ? sampledView(in.cardView[i]) : dummyFlat;
+            cardViewImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (!cardViewImgs[i].imageView) return;
+            w[kTraceCardViewBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[kTraceCardViewBinding + i].pImageInfo = &cardViewImgs[i];
+        }
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 
@@ -1502,6 +1524,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // read as buffers.
         if (cardsBound) {
             for (Ogre::TextureGpu *t : { in.cardDepth, in.cardRadiance })
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+            for (Ogre::TextureGpu *t : in.cardView)
                 solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                          Ogre::ResourceAccess::Read, computeStage);
             for (Ogre::UavBufferPacked *b : { in.cardTable, in.cardInstances })

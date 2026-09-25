@@ -6,7 +6,10 @@
 // WHAT A CARD IS (SurfaceCache.h, CardRec): an axis-aligned rectangle in WORLD
 // space around one instance, captured orthographically along its outward axis
 // into the atlas — depth from the card's near plane, and (the CardLight job)
-// the lit RADIANCE: direct + the voxel march's indirect + emissive, at V = N.
+// the lit RADIANCE: direct + the environment half + emissive, stored HEAD-ON
+// (V = N) — and the read restores the diffuse lobe's VIEW term for the ray
+// that reads it (jah_card_view.glsl, PHOTON-CARDS-5: at a grazing eye the pixel
+// is up to 1.6-1.8x its head-on value, and so is the card read now).
 // Reading one at a world point is three dot products and a texel fetch; no
 // per-instance matrix exists anywhere in the read.
 //
@@ -63,13 +66,20 @@
 //     JAH_CARD_INSTANCE(slot)     uvec4  (firstCard, cardCount, 0, 0)
 //     JAH_CARD_DEPTH(texel)       float  the Depth layer at an atlas texel
 //     JAH_CARD_RADIANCE(texel)    vec3   the Radiance layer at an atlas texel
+//     JAH_CARD_INDIRECT / _EMISSIVE / _SHADOW_ROUGH / _ALBEDO / _NORMAL (texel)
+//                                        the view term's five layers
 // and the card table as `jahCards[]` — jah_rq_card_bindings.glsl declares all
-// of it at the caller's JAH_CARD_BINDING_BASE.
+// of it at the caller's JAH_CARD_BINDING_BASE and JAH_CARD_VIEW_BINDING_BASE.
 //
 // No Hlms directive mark anywhere in this file (it may be wrapped into a piece).
 
 #ifndef JAH_RQ_CARD_GLSL
 #define JAH_RQ_CARD_GLSL
+
+// The fork's diffuse lobe (JahBrdf, JahDiffuseAlbedo — unwrapped from its Pbs
+// media by the build) and the view term built on it.
+#include "jah_fork_brdf.glsl"
+#include "jah_card_view.glsl"
 
 // ONE CARD, as SurfaceCache::syncBuffers writes it (std430, 80 bytes;
 // JahCardRecordGpu in the bindings file):
@@ -135,19 +145,40 @@ JahCardPick jahCardPick( uint slot, vec3 hitPos, vec3 facingDir )
 	return best;
 }
 
-/// THE RADIANCE LEAVING A HIT, FROM ITS CARD. `ok` is false when no card of
+/// THE RADIANCE LEAVING A HIT TOWARDS `viewDir` (unit, from the hit to the
+/// viewer: the reversed ray), FROM ITS CARD. `ok` is false when no card of
 /// the instance describes the point, when the one that does has not had its
 /// indirect half marched yet, or when `footprint` (world metres) is wider than
 /// JAH_CARD_FOOTPRINT_TEXELS of that card's texels — the caller then reads the
 /// voxels. The atlas is read texel-exact (no mips until SC-2).
-vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, float footprint, out bool ok )
+vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, float footprint,
+					  out bool ok )
 {
 	const JahCardPick pick = jahCardPick( slot, hitPos, facingDir );
 	ok = pick.ok && pick.lit &&
 		 footprint <= float( JAH_CARD_FOOTPRINT_TEXELS ) * jahCards[pick.card].axis.w;
 	if( !ok )
 		return vec3( 0.0 );
-	return JAH_CARD_RADIANCE( pick.texel );
+	// THE VIEW TERM (jah_card_view.glsl): the stored normal in the card's own
+	// frame (u, v, the outward axis — the relight's decode), the roughness
+	// through patch 0043's range (the relight's), the mean light direction from
+	// the two alphas.
+	const JahCardRecordGpu c = jahCards[pick.card];
+	const vec4 albedo = JAH_CARD_ALBEDO( pick.texel );
+	const vec4 normal = JAH_CARD_NORMAL( pick.texel );
+	const vec3 nV = normal.xyz * 2.0 - 1.0;
+	const vec3 Nstored = normalize( normalize( c.rowU.xyz ) * nV.x + normalize( c.rowV.xyz ) * nV.y +
+									c.axis.xyz * nV.z );
+	// THE CARD'S PLANE, as the relight takes it (JahCardLight_cs.glsl): a stored
+	// normal within the 8-bit format's quantum of the card's axis (0 decodes to
+	// -0.0039, 0.32 degrees off) IS the plane — at a grazing N.V that tilt alone
+	// moved the view term 0.9 % (measured, PHOTON-CARDS-5).
+	const vec3 N = dot( Nstored, c.axis.xyz ) > 0.99985 ? c.axis.xyz : Nstored;
+	const float alpha = JAH_CARD_SHADOW_ROUGH( pick.texel ).y / 1.001001 + 0.001;
+	const float r = sqrt( max( alpha, 0.0 ) );
+	const vec3 L = jahCardOctDecode( vec2( albedo.w, normal.w ) );
+	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ), JAH_CARD_INDIRECT( pick.texel ),
+								JAH_CARD_EMISSIVE( pick.texel ), N, L, r, normalize( viewDir ) );
 }
 
 #endif   // JAH_RQ_CARD_GLSL
