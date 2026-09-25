@@ -818,6 +818,18 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         if (it == mByNode.end()) continue;
         InstanceRec &inst = mInstances[it->second];
         if (inst.item != cand.item) continue;   // a rebuilt Item is a new instance
+        // THE SLOT IS THE SCENE'S, NOT THIS RECORD'S (V2 audit C-1, 2026-09-25):
+        // a swap-on-remove renumbers the tail item into the freed slot
+        // (OgreGi.cpp's removeItemSlot), and the ray hits address the instance
+        // table by THAT slot (the TLAS custom index). The copy taken when the
+        // record was made went stale, so a renumbered carded item's hits read
+        // no cards and a newcomer on its old slot read another object's. The
+        // candidate carries the node's current slot every frame: follow it,
+        // and re-sync the table when it moved.
+        if (inst.itemSlot != cand.itemSlot) {
+            inst.itemSlot = cand.itemSlot;
+            mTableDirty = true;
+        }
         const Ogre::Aabb box = cand.item->getWorldAabbUpdated();
         inst.distance = (box.mCenter - view.viewerPos).length();
         // RESIDENCY IS RE-DECIDED EVERY FRAME, in both directions. An instance
