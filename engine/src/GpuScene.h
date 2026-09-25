@@ -169,7 +169,6 @@ enum GpuInstanceFlag : uint32_t {
     kGpuOverlay = 1u << 6,      ///< its render queue is at or above the overlay queues
     kGpuRayTraced = 1u << 7,    ///< the TRACED SET: the conjunction the ray tier used to walk for
     kGpuDragMover = 1u << 8,    ///< MOVER-1: the user has hold of it right now
-    kGpuGiExcluded = 1u << 9,   ///< excluded from the GI bounds fit
 };
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the

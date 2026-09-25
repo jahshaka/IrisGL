@@ -582,7 +582,6 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
         }
     }
     if (n.dragMover && n.shown) f |= kGpuDragMover;
-    if (n.giBoundsExcluded) f |= kGpuGiExcluded;
     // ...and it must be IN the graph: an Item with no parent node draws nothing
     // and has no world transform to trace (the old walk skipped it outright).
     if ((f & kGpuVisible) && !(f & (kGpuOverlay | kGpuAlphaTested)) &&
