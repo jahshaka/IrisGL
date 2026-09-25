@@ -93,6 +93,8 @@ constexpr unsigned kPlaceBindings = 6u;
 constexpr unsigned kTraceBindings = 30u;
 constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kTraceCardViewBinding = 25u;
+static_assert(kTraceBindings == kTraceCardViewBinding + SurfaceCache::kViewLayers,
+              "the card read's view-term layers are the trace set's last bindings");
 constexpr unsigned kFilterBindings = 3u;
 constexpr unsigned kIntegrateBindings = 10u;
 
@@ -406,7 +408,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     // The voxel arrays: iso, X, Y, Z, coverage +/-, position +/- (8) and level 0's
     // back side and normal (2, PHOTON-VOXEL-5) — ten a cascade; the card read's view term (5).
-    sampled.descriptorCount = groups * (2u + 10u * kGatherMaxCascades + 3u + 2u + 5u);
+    sampled.descriptorCount = groups * (2u + 10u * kGatherMaxCascades + 3u + 2u + SurfaceCache::kViewLayers);
     VkDescriptorPoolSize all[5] = { sizes[0], sizes[1], sizes[2], sizes[3], sampled };
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1429,8 +1431,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[22].pBufferInfo = &hitBufs[1];
         // THE CARD READ'S VIEW TERM (23-27, PHOTON-CARDS-5): the cache's five
         // or the flat stand-in, the card read's rule.
-        VkDescriptorImageInfo cardViewImgs[5] = {};
-        for (unsigned i = 0; i < 5u; ++i) {
+        VkDescriptorImageInfo cardViewImgs[SurfaceCache::kViewLayers] = {};
+        for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
             cardViewImgs[i].sampler = mHost.gatherPointSampler();
             cardViewImgs[i].imageView = cardsBound ? sampledView(in.cardView[i]) : dummyFlat;
             cardViewImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

@@ -22,7 +22,9 @@
 // LIGHT DIRECTION — the light-weighted mean of the lights' directions, the
 // weight each light's share of the direct half's luminance. The relight writes
 // it octahedrally into the two alpha channels no reader used (the Albedo and
-// Normal layers' alpha, both RGBA8, 8 bits a component: about 0.5 degree): NO
+// Normal layers' alpha, both RGBA8, 8 bits a component: 65,536 cells over the
+// sphere, a cell 0.79 degree, half a cell 0.4 degree — fd90 = 1.5 r + r L.V moves
+// by at most 0.007 r, 0.5 % of the direct half at a mirror's N.V = 0.08): NO
 // NEW LAYER, NO VRAM. (V.H)^2 = ( 1 + L.V ) / 2 is LINEAR in L, so the mean of
 // fd90 over the lights is fd90 of the MEAN direction exactly — and the view
 // scatter, linear in fd90, with it. What is stored is that mean NORMALISED (two
@@ -30,7 +32,12 @@
 // one light and, for several, off by the spread of their directions: the
 // error is r x ( 1 - N.V )^5 x ( L_mean - normalize( L_mean ) ).V of the direct
 // half at most, plus the light scatter's cross term (1 - N.L)^5, which the one
-// direction also stands in for.
+// direction also stands in for. THE NAMED RESIDUAL (the lead's decision): a
+// grazing mirror of a floor under differently coloured lights is off per channel
+// by up to ~10 % (the weight is the luminance, not the channel's share); head-on
+// and moderate angles within 3 %; per-channel directions would need a new layer.
+// THE NORMAL both halves take is the plane-snapped one (the relight's direct
+// half and the read's ratio alike), so the ratio is exact by text.
 //
 // No Hlms directive mark anywhere in this file (it is wrapped into a piece).
 // Needs jahDisneyDiffuse (JahBrdf) and jahDiffuseAlbedo / jahDiffuseAlbedoHemi

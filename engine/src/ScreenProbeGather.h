@@ -37,6 +37,7 @@
 #pragma once
 
 #include "jahshaka/engine/Types.h"
+#include "SurfaceCache.h"   // kViewLayers: the card read's view-term layers (PHOTON-CARDS-5)
 
 #include <string>
 #include <unordered_map>
@@ -208,7 +209,7 @@ struct GatherInputs {
     Ogre::TextureGpu *cardRadiance = nullptr;
     /// ...and the card read's VIEW TERM (PHOTON-CARDS-5): SurfaceCache::viewLayers'
     /// five (Indirect, Emissive, ShadowRough, Albedo, Normal), bound at 23-27.
-    Ogre::TextureGpu *cardView[5] = {};
+    Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
     unsigned cardSlots = 0u, cardRecords = 0u;
     float cardFootprintTexels = 0.0f;
     /// THE HIT'S GEOMETRIC NORMAL: the per-slot geometry-row table the scene's

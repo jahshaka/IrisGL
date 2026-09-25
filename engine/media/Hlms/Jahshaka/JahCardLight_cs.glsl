@@ -406,13 +406,15 @@ void main()
 			if( type < 0.5 )
 				visibility *= jahCloudTransmittance( P, gp.cloudMap, gp.cloudSun );
 @end
-			const vec3 share = l.diffuse.xyz * ( jahCardDiffuse( N, L, perceptualRoughness ) * atten * visibility );
+			// The PLANE-SNAPPED normal (Ncone), the one the read's view-term ratio
+			// divides by (jah_rq_card.glsl): the ratio is then exact by text.
+			const vec3 share = l.diffuse.xyz * ( jahCardDiffuse( Ncone, L, perceptualRoughness ) * atten * visibility );
 			direct += share;
 			lightMean += L * dot( share, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
 		// No light reaches the texel: its direct half is zero and the direction is
 		// never used; the normal stands in.
-		const vec3 lightDir = dot( lightMean, lightMean ) > 1e-20 ? normalize( lightMean ) : N;
+		const vec3 lightDir = dot( lightMean, lightMean ) > 1e-20 ? normalize( lightMean ) : Ncone;
 		const vec2 lightOct = jahCardOctEncode( lightDir );
 		imageStore( cardAlbedo, at, vec4( albedoRaw.xyz, lightOct.x ) );
 		imageStore( cardNormal, at, vec4( normalRaw.xyz, lightOct.y ) );

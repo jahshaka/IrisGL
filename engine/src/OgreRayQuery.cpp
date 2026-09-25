@@ -5220,7 +5220,6 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             in.cardInstances = instances;
             in.cardDepth = depthLayer;
             in.cardRadiance = radianceLayer;
-            static_assert(SurfaceCache::kViewLayers == 5u, "the gather binds the view term's five");
             cache->viewLayers(in.cardView);
             in.cardSlots = cache->instanceSlots();
             in.cardRecords = cache->cardRecords();

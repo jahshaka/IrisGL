@@ -1225,11 +1225,24 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
                 std::find(mBatch.begin(), mBatch.end(), i) == mBatch.end())
                 rest.push_back(i);
         oldestFirst(rest, false);
+        const size_t batchCount = want.size();
         want.insert(want.end(), rest.begin(), rest.end());
         unsigned spent = 0u;
-        for (unsigned idx : want) {
+        for (size_t w = 0; w < want.size(); ++w) {
+            const unsigned idx = want[w];
             const unsigned cost = mCards[idx].size * mCards[idx].size;
-            if (spent && spent + cost > mLightBudget) break;
+            // THIS FRAME'S CAPTURES ARE NEVER CUT BY THE BUDGET (PHOTON-CARDS-5 audit
+            // F3): the capture's copy rewrote the texels whole — the Albedo and
+            // Normal alphas included, which hold the mean light direction the ray
+            // read restores the view term with (JahCardView) — while the card's
+            // `indirectValid` (the read's lit flag) stands. A captured card that
+            // waited for a later frame's budget would be read with the capture's
+            // alpha (1, 1), the world -Z direction, and its stale radiance: the
+            // physics is that a capture and its relight are ONE update of the
+            // card, so the relight rides the capture's frame (its cost was
+            // budgeted with the capture: at most kCaptureBatch cards).
+            const bool captured = w < batchCount;
+            if (!captured && spent && spent + cost > mLightBudget) break;
             if (mRelight.size() >= kMaxRelights) break;
             mRelight.push_back(idx);
             mRelightMode.push_back(mCards[idx].indirectValid ? 0u : 2u);
