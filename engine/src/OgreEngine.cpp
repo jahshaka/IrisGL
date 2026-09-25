@@ -2182,7 +2182,17 @@ bool OgreEngine::renderStats(RenderStats &out) const {
                 out.vertices  = (unsigned long long)m.mVertexCount;
                 out.instances = (unsigned long long)m.mInstanceCount;
                 // (THE ID PASS'S SHARE is in these: its recorder adds its indirect
-                // draw's counters to the render system's own, OgreAtomIdPass.cpp.)
+                // draw's counters to the render system's own, OgreAtomIdPass.cpp — as
+                // its stats ring reads them: the counters of the cull recorded one
+                // frame before the slot's copy, read `multiplier + 1` frames after it.)
+                for (const auto &v : mViews) {
+                    unsigned long long tris = 0ull;
+                    unsigned surv = 0u;
+                    if (v && v->isEnabled() && v->atomStats(tris, surv)) {
+                        out.gpuCountLagFrames = unsigned(rs->getVaoManager()->getDynamicBufferMultiplier()) + 2u;
+                        break;
+                    }
+                }
             }
             // THE PSO DEADLINE'S HONEST HALF (THREADING_ADOPTION_SPEC.md P4(b),
             // decision D-E(1)). Ogre can budget PSO compilation per frame and

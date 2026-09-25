@@ -6252,6 +6252,14 @@ struct RenderStats {
     unsigned long long triangles = 0;
     unsigned long long vertices = 0;
     unsigned long long instances = 0;
+    /// HOW MANY FRAMES THE GEOMETRY COUNTS TRAIL THE PICTURE (ATOM S3-DRAW). 0 while
+    /// every draw is decided on the CPU: Ogre counts what it submits. Where a view's
+    /// visibility buffer draws, its objects and their levels are chosen ON THE GPU by
+    /// the cull, and their share of the counts is read back from the cull's own
+    /// counters once the frame that drew them has retired — never by stalling the
+    /// frame for it — so after a change (a pose, the LOD dial) the counts settle this
+    /// many frames later. A reader that compares counts across a change waits this.
+    unsigned gpuCountLagFrames = 0;
 
     /// PSOs the LAST frame gave up on because it ran out of its compile budget
     /// (SPECS/THREADING_ADOPTION_SPEC.md P4(b), decision D-E(1)). Objects using
