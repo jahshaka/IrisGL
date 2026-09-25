@@ -64,13 +64,14 @@ GpuCull::~GpuCull() { destroy(); }
 void GpuCull::destroy() {
     if (mVao) {
         if (mDraws) mVao->destroyUavBuffer(mDraws);
+        if (mHeld) mVao->destroyUavBuffer(mHeld);
         if (mCount) mVao->destroyUavBuffer(mCount);
         if (mSurvivors) mVao->destroyUavBuffer(mSurvivors);
         if (mLevels) mVao->destroyUavBuffer(mLevels);
         if (mVisible) mVao->destroyUavBuffer(mVisible);
         if (mParams) mVao->destroyUavBuffer(mParams);
     }
-    mDraws = mCount = mSurvivors = mLevels = mVisible = mParams = nullptr;
+    mDraws = mCount = mSurvivors = mLevels = mVisible = mParams = mHeld = nullptr;
     mVao = nullptr;
     mCapacity = 0u;
 }
@@ -102,6 +103,10 @@ bool GpuCull::ensure(Ogre::VaoManager *vao, uint32_t slotCapacity, std::string &
     mCount = vao->createUavBuffer(kCountElements, sizeof(uint32_t), 0, zeros.data(), false);
     mDraws = vao->createUavBuffer(size_t(want) * kDrawWords, sizeof(uint32_t), 0, zeros.data(),
                                   false);
+    {
+        const std::vector<uint32_t> none(want, 0xFFFFFFFFu);
+        mHeld = vao->createUavBuffer(want, sizeof(uint32_t), 0, const_cast<uint32_t *>(none.data()), false);
+    }
     mCapacity = want;
     return mParams != nullptr;
 }
@@ -141,7 +146,7 @@ void unbindCullJobs(Ogre::HlmsComputeJob *test, Ogre::HlmsComputeJob *compact,
     const Ogre::DescriptorSetUav::BufferSlot empty =
         Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
     if (test)
-        for (uint8_t i = 0; i < 6u; ++i) test->_setUavBuffer(i, empty);
+        for (uint8_t i = 0; i < 7u; ++i) test->_setUavBuffer(i, empty);
     if (compact)
         for (uint8_t i = 0; i < 4u; ++i) compact->_setUavBuffer(i, empty);
     if (draws) {
@@ -190,7 +195,7 @@ double measureJob(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc, Ogre::HlmsCompu
 // OgreAtomIdPass.cpp) calls from inside a pass, where a readback would stall the
 // frame. The answer stays in the cull's buffers (count, survivors, levels, draws).
 bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
-                              std::string &err, bool keepBindings) {
+                              std::string &err, bool keepBindings, double *requestMs) {
     ensureGpuTables();
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
     Ogre::HlmsCompute *hc =
@@ -212,12 +217,16 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
     if (!cull.ensure(rs->getVaoManager(), std::max(mGpuScene.slotCapacity(), 1u), err))
         return false;
 
+    // THE HOST'S SHARE (GpuCullResult::requestMs): the request's write and the three
+    // dispatches' recording — never the tables' or the list's (re)allocation above.
+    const auto tRequest = std::chrono::steady_clock::now();
     JAH_TRY {
         // ---- the request, and the counter it has to start from -------------
         GpuCullParams p;
         std::memcpy(p.planes, req.planes, sizeof(p.planes));
         std::memcpy(p.viewProjRow, req.viewProj, sizeof(p.viewProjRow));
         for (int i = 0; i < 3; ++i) p.eye[i] = req.eye[i];
+        p.eye[3] = req.lodHysteresis;
         p.lod[0] = req.pixelTolerance;
         p.lod[1] = req.projScaleY;
         p.lod[2] = req.viewportHeight;
@@ -256,6 +265,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         test->_setUavBuffer(3u, cullSlot(mGpuScene.levelBuffer(), Ogre::ResourceAccess::Read));
         test->_setUavBuffer(4u, cullSlot(cull.visible(), Ogre::ResourceAccess::Write));
         test->_setUavBuffer(5u, cullSlot(cull.levels(), Ogre::ResourceAccess::Write));
+        test->_setUavBuffer(6u, cullSlot(cull.held(), Ogre::ResourceAccess::ReadWrite));
         const uint32_t groups =
             (instances + GpuCull::kThreadsPerGroup - 1u) / GpuCull::kThreadsPerGroup;
         test->setNumThreadGroups(std::max(groups, 1u), 1u, 1u);
@@ -273,8 +283,13 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         draws->_setUavBuffer(2u, cullSlot(cull.survivors(), Ogre::ResourceAccess::Read));
         draws->_setUavBuffer(3u, cullSlot(cull.levels(), Ogre::ResourceAccess::Read));
         draws->_setUavBuffer(4u, cullSlot(cull.draws(), Ogre::ResourceAccess::Write));
-        draws->_setUavBuffer(5u, cullSlot(cull.count(), Ogre::ResourceAccess::Read));
+        // ReadWrite: the job adds up the triangles its commands draw (count[4], the
+        // id pass's share of the frame's stats — OgreView::harvestAtomStats).
+        draws->_setUavBuffer(5u, cullSlot(cull.count(), Ogre::ResourceAccess::ReadWrite));
         draws->setIndirectDispatchBuffer(cull.count(), GpuCull::kIndirectOffsetBytes);
+        if (requestMs)
+            *requestMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tRequest)
+                             .count();
 
         dispatchWithBarriers(rs, hc, test);
         dispatchWithBarriers(rs, hc, compact);
@@ -305,16 +320,12 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
     const uint32_t instances = mGpuScene.slotCount();
     out.instances = instances;
 
-    const auto tRequest = std::chrono::steady_clock::now();
     std::string err;
-    if (!recordGpuCull(mGpuCull, req, hzb, err, req.measureIterations > 0u)) {
+    if (!recordGpuCull(mGpuCull, req, hzb, err, req.measureIterations > 0u, &out.requestMs)) {
         mError = err;
         out.supported = false;
         return false;
     }
-    out.requestMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tRequest)
-            .count();
 
     JAH_TRY {
         // ---- what the GPU decided ------------------------------------------

@@ -1,6 +1,7 @@
 // OgreView: a render target (window or RTT) plus the compositor workspace and
 // camera that draw a scene into it.
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"
 
 // The inset's letterbox rectangle is written straight onto its scene pass'
 // DEFINITION (chain::PipHandles::scenePass) between frames — Ogre re-reads it
@@ -1740,7 +1741,38 @@ bool OgreView::warmUpShaders() {
         const bool wasEnabled = mEnabled;
         const bool wantEnabled = !usesPass;
         if (wasEnabled != wantEnabled) setEnabled(wantEnabled);
-        const bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName);
+        // THE SCREEN DECODE IS WARMED WITH THE REST (ATOM S3-DRAW): its twins' draws
+        // are hidden outside the passes the id pass stands in for, so for this one
+        // frame they are shown against the stand-in source.
+        HlmsAtom *atom = mChainAtomDraw ? dynamic_cast<HlmsAtom *>(
+                                              mRoot->getHlmsManager()->getHlms(HlmsAtom::kType))
+                                        : nullptr;
+        // TWICE where the split is live. The warm-up frame is Ogre's own (no engine
+        // frame hook: the GPU scene is not composed and no item is routed), and a
+        // datablock is PENDING until a frame uploads it (HlmsAtom::isBucketPending) —
+        // so the first frame draws everything through PBS (compiling what the shadow
+        // casters, the captures and the stay-on-PBS items need) and uploads the
+        // datablocks; then the table is composed and the items routed here, and the
+        // second frame compiles the decode twins they now wear, and nothing else.
+        bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName);
+        if (atom) {
+            mScene->ensureGpuScene(/*graphIsCurrent=*/false);
+            mScene->updateAtomDraw();
+            // ...and the id pass's three cull jobs, which a warm-up PASS never runs
+            // (it clones the scene passes only): one recorded cull into this view's
+            // own list builds them — the id pass overwrites it on its first frame.
+            {
+                GpuCullRequest req;
+                fillCullFrustum(mCamera, float(height()), req);
+                req.flagsRequired = kGpuVisible | kGpuAtom;
+                req.mode = 2u;
+                std::string err;
+                mScene->recordGpuCull(mAtomCull, req, nullptr, err);
+            }
+            atom->armForWarmUp(mScene->sceneManager(), true);
+            ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName) && ok;
+            atom->armForWarmUp(mScene->sceneManager(), false);
+        }
         if (wasEnabled != wantEnabled) setEnabled(wasEnabled);
         return ok;
     } JAH_CATCH(mError, false);

@@ -155,6 +155,11 @@ public:
         Ogre::UavBufferPacked *hitBuf = nullptr;
     };
     void setDecodeSource(const DecodeSource &src);
+    /// THE SHADER WARM-UP'S ARMING (OgreView::warmUpShaders): the empty stand-ins as
+    /// the source (a warm-up pass compiles, it never draws) and the scene's screen
+    /// decodes shown - including the ones the warm-up frame itself creates - so the
+    /// warm-up compiles the decode twins' permutations for every scene pass it clones.
+    void armForWarmUp(Ogre::SceneManager *sm, bool on);
     const DecodeSource &decodeSource() const { return mSource; }
     /// Decode draws recorded with NO source set (every member null or some) — each
     /// such draw binds the host's own EMPTY stand-ins (an id image that names nothing,
@@ -265,7 +270,9 @@ public:
     /// shader is compiled); main thread, outside a pass.
     bool bucketKeyOf(const Ogre::HlmsPbsDatablock *pbs, BucketKey &out, std::string &err);
     /// The datablock's textures are still being baked (its descriptor sets are
-    /// dirty): PBS delays its own hash then, so its bucket is not known yet.
+    /// dirty): PBS delays its own hash then, so its real bucket is not known yet —
+    /// bucketKeyOf gives it a bucket of its own, and the screen split routes it to
+    /// PBS (atomRouteFor: pending).
     static bool isBucketPending(const Ogre::HlmsDatablock *pbs);
 
     Ogre::uint32 fillBuffersForV2(const Ogre::HlmsCache *cache,

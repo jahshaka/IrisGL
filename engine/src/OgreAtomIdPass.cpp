@@ -393,12 +393,15 @@ void recordIdPass(AtomPassContext &ctx) {
         req.hzbLevels = 0u;
         // THE VIEW STRATEGY'S OWN BUDGET (kLodBudgetPixels), scaled by the scene's LOD bias
         // (OgreScene::applyLodValues divides the baked thresholds by it — the same
-        // dial seen from the other side). The LOD seam: Ogre's CPU choice carries
-        // hysteresis (patch 0075) and this one does not, so near a threshold the id
-        // pass may draw a level the shadow casters do not.
+        // dial seen from the other side).
         req.pixelTolerance = kLodBudgetPixels * scene->lodBias();
+        // ...and THE VIEW'S SWITCH BAND, the one its scene passes carry (ogre-patch
+        // 0075; ChainDesc::lodHysteresis): a watched view holds a level across a
+        // threshold on this path exactly as it does on Ogre's.
+        req.lodHysteresis = view->chainDesc().lodHysteresis;
         req.mode = 2u;
         std::string err;
+        view->harvestAtomStats();   // the last frame's counters, before this request zeroes them
         cullPtr = &view->atomCull();
         if (!scene->recordGpuCull(*cullPtr, req, nullptr, err)) {
             logOnce("the cull did not record (" + err + ")");
@@ -485,6 +488,25 @@ void recordIdPass(AtomPassContext &ctx) {
         gId.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff,
                                      std::min(cull.capacity(), gs->slotCount()),
                                      GpuCull::kDrawWords * sizeof(uint32_t));
+    }
+    // THE RENDERER'S COUNTERS SEE THIS DRAW TOO: an indirect draw never passes
+    // through Ogre's render queue, so its share is added here, in the pass — the
+    // frame's totals and the monitor's per-pass rows (a delta around the pass) both
+    // include it. The GPU's own counters, read back a frame or two late
+    // (OgreView::harvestAtomStats): exact for a still scene, one frame behind a moving one.
+    {
+        unsigned long long tris = 0ull;
+        unsigned surv = 0u;
+        if (view->atomStats(tris, surv)) {
+            Ogre::RenderingMetrics m;
+            m.mIsRecordingMetrics = true;
+            m.mBatchCount = 1u;
+            m.mDrawCount = 1u;
+            m.mFaceCount = size_t(tris);
+            m.mVertexCount = size_t(tris) * 3u;
+            m.mInstanceCount = surv;
+            ctx.renderSystem->_addMetrics(m);
+        }
     }
 }
 

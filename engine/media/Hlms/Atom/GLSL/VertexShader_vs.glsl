@@ -29,6 +29,7 @@ vulkan_layout( location = 0 ) out block
 {
 	flat uint drawId;
 	@property( atom_hit_mode )flat uint hitCount;@end
+	@property( !atom_hit_mode )noperspective float2 ndc;@end
 } outAtom;
 
 @property( atom_hit_mode )
@@ -49,6 +50,9 @@ void main()
 	@property( hlms_normal )gl_Position.z += normal.x;@end
 	@property( normal_map && hlms_tangent4 )gl_Position.w = tangent.w;@end
 	outAtom.drawId = drawId;
+	// THE PIXEL'S NDC INSIDE THE PASS'S VIEWPORT (screen mode): the pixel stage takes
+	// the viewport's rectangle from it (a letterboxed view's inset included).
+	@property( !atom_hit_mode )outAtom.ndc = gl_Position.xy;@end
 	@property( atom_hit_mode )
 		// Framebuffer row 0 is clip y = -1 (a positive-height viewport); the
 		// triangle's corners are y = -1 and y = 3, so scaling their distance from

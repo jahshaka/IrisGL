@@ -20,6 +20,7 @@
 #include <OgreMesh2.h>
 #include <OgreRoot.h>
 #include <OgreSubItem.h>
+#include <Vao/OgreUavBufferPacked.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -165,6 +166,21 @@ void OgreView::syncAtomDraw() {
         mAtomListener = makeAtomDrawListener(this);
         addWorkspaceListener(mAtomListener.get());
     }
+}
+
+void OgreView::harvestAtomStats() {
+    if (mAtomStatsTicket && mAtomStatsTicket->queryIsTransferDone()) {
+        const auto *w = static_cast<const uint32_t *>(mAtomStatsTicket->map());
+        mAtomSurvivors = w[0];
+        mAtomTriangles = w[4];
+        mAtomStatsTicket->unmap();
+        mAtomStatsTicket.reset();
+        mAtomStatsValid = true;
+    }
+    // The LAST frame's counters, before this frame's request zeroes them (the copy is
+    // recorded first; the command stream keeps the order).
+    if (!mAtomStatsTicket && mAtomCull.count())
+        mAtomStatsTicket = mAtomCull.count()->readRequest(0, GpuCull::kCountElements);
 }
 
 bool OgreScene::atomDrawOn() const { return mGpuScene.live() && atomDrawWanted(); }

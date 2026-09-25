@@ -6608,6 +6608,12 @@ struct GpuCullRequest {
     /// OgreMesh.cpp): the footprint is 2 / (projScaleY * viewportHeight), i.e. the
     /// ortho window's height over the target's.
     bool orthographic = false;
+    /// THE VIEW'S LOD SWITCH BAND (ogre-patch 0075's `hysteresis`, the fraction of
+    /// the threshold being crossed): 0 = the exact level. A banded request holds each
+    /// slot's last banded level until the allowed error leaves the band — the id pass
+    /// takes the view's own band (ChainDesc::lodHysteresis), so a watched view does
+    /// not pop at a threshold on the GPU path either.
+    float lodHysteresis = 0.0f;
     /// GpuInstance flag predicates (GpuSceneEntry::flags documents the bits):
     /// every required bit must be set and no forbidden bit may be.
     unsigned flagsRequired = 0u, flagsForbidden = 0u;

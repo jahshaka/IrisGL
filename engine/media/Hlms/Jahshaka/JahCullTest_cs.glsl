@@ -35,7 +35,7 @@ struct CullParams
 {
 	vec4  planes[6];        // inward-pointing, normalised (a, b, c, d)
 	vec4  viewProjRow[4];   // ROW i in element i
-	vec4  eye;              // xyz the camera position; w unused
+	vec4  eye;              // xyz the camera position; w the LOD switch band (0 = none)
 	vec4  lod;              // x tolerance (samples), y proj[1][1], z viewport height, w 1 = orthographic
 	uvec4 counts;           // x instanceCount, y flagsRequired, z flagsForbidden, w mode
 	uvec4 hzb;              // x levels (0 = frustum only), y width, z height, w reverseZ
@@ -81,6 +81,7 @@ layout( std430, ogre_U2 ) readonly restrict buffer meshLayout { GpuMesh meshes[]
 layout( std430, ogre_U3 ) readonly restrict buffer levelLayout { GpuMeshLevel levels[]; };
 layout( std430, ogre_U4 ) writeonly restrict buffer visLayout { uint visible[]; };
 layout( std430, ogre_U5 ) writeonly restrict buffer lvlLayout { uint outLevel[]; };
+layout( std430, ogre_U6 ) restrict buffer heldLayout { uint heldLevel[]; };
 
 // THE PYRAMID THIS READS IS A FARTHEST-DEPTH CHAIN, not a closest-depth one, and
 // the difference is the whole correctness of the test (ATOM-SUBSTRATE-1 fix
@@ -195,7 +196,26 @@ void main()
 		float d = params.lod.w > 0.5 ? 1.0 : max( 0.0, distance( centre, params.eye.xyz ) - worldRadius );
 		float allowed = jahAllowedWorldError(
 			params.lod.x, jahSampleFootprint( d, params.lod.y, params.lod.z ), scale );
-		outLevel[slot] = jahLevelForAllowed( meshIndex, levelCount, allowed );
+		uint level = jahLevelForAllowed( meshIndex, levelCount, allowed );
+		// THE SWITCH BAND (ogre-patch 0075's LodStrategy::lodSet, on the GPU): held is
+		// this list's last BANDED level for the slot (0xFFFFFFFF = none, and so no
+		// band on the first sight). The band is measured on the threshold being
+		// crossed - the next level's bound going coarser, the held level's own going
+		// finer - and a value past it moves, however many levels at once.
+		if( params.eye.w > 0.0 )
+		{
+			uint held = heldLevel[slot];
+			if( level != held && held < levelCount )
+			{
+				uint base = meshIndex * JAH_LEVELS_PER_MESH;
+				float threshold = level > held ? levels[base + held + 1u].bound : levels[base + held].bound;
+				float band = abs( threshold ) * params.eye.w;
+				if( level > held ? ( allowed < threshold + band ) : ( allowed > threshold - band ) )
+					level = held;
+			}
+			heldLevel[slot] = level;
+		}
+		outLevel[slot] = level;
 	}
 
 	// ---- the hierarchical depth test --------------------------------------

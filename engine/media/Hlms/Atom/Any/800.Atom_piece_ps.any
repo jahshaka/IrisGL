@@ -270,13 +270,14 @@
 		return b;
 	}
 	// The NDC of a framebuffer position, atomToPixels' inverse (the pass's y
-	// direction included).
-	float2 atomPixelToNdc( float2 fb, float2 res )
+	// direction included), inside the pass's viewport (origin, size in pixels).
+	float2 atomPixelToNdc( float2 fb, float2 vpO, float2 vpS )
 	{
+		float2 f = ( fb - vpO ) / vpS;
 		@property( hlms_forwardplus_flipY )
-			return float2( fb.x / res.x * 2.0 - 1.0, fb.y / res.y * 2.0 - 1.0 );
+			return float2( f.x * 2.0 - 1.0, f.y * 2.0 - 1.0 );
 		@else
-			return float2( fb.x / res.x * 2.0 - 1.0, 1.0 - fb.y / res.y * 2.0 );
+			return float2( f.x * 2.0 - 1.0, 1.0 - f.y * 2.0 );
 		@end
 	}
 	// THE FOG COLOUR IS A VERTEX TERM: the vertex shader's DoAtmosphereNprSky writes
@@ -302,13 +303,13 @@
 			return atomFogOut.fog;
 		}
 	@end
-	float2 atomToPixels( float4 c, float2 res )
+	float2 atomToPixels( float4 c, float2 vpO, float2 vpS )
 	{
 		float2 ndc = c.xy / c.w;
 		@property( hlms_forwardplus_flipY )
-			float2 fb = float2( ( ndc.x * 0.5 + 0.5 ) * res.x, ( 0.5 + ndc.y * 0.5 ) * res.y );
+			float2 fb = vpO + float2( ( ndc.x * 0.5 + 0.5 ) * vpS.x, ( 0.5 + ndc.y * 0.5 ) * vpS.y );
 		@else
-			float2 fb = float2( ( ndc.x * 0.5 + 0.5 ) * res.x, ( 0.5 - ndc.y * 0.5 ) * res.y );
+			float2 fb = vpO + float2( ( ndc.x * 0.5 + 0.5 ) * vpS.x, ( 0.5 - ndc.y * 0.5 ) * vpS.y );
 		@end
 		return round( fb * 256.0 ) * ( 1.0 / 256.0 );
 	}
@@ -325,6 +326,20 @@
 	// read sits behind the validity flag's BRANCH, the invalid path fills the same
 	// interpolants with harmless values, and the discard comes last.
 	AtomPsIn inPs;
+	@property( !atom_hit_mode )
+		// THE PASS'S VIEWPORT, from the full-screen triangle's own NDC (the id pass drew
+		// into the same rectangle): its size from the NDC's constant step per pixel, its
+		// origin from this pixel. Taken HERE, before any branch - derivatives need the
+		// whole quad. A letterboxed view's inset is exactly this rectangle.
+		float2 atomVpSize = round( abs( float2( 2.0 / max( abs( dFdx( inAtom.ndc.x ) ), 1e-9 ),
+												2.0 / max( abs( dFdy( inAtom.ndc.y ) ), 1e-9 ) ) ) );
+		@property( hlms_forwardplus_flipY )
+			float2 atomVpUnit = float2( inAtom.ndc.x * 0.5 + 0.5, 0.5 + inAtom.ndc.y * 0.5 );
+		@else
+			float2 atomVpUnit = float2( inAtom.ndc.x * 0.5 + 0.5, 0.5 - inAtom.ndc.y * 0.5 );
+		@end
+		float2 atomVpOrigin = round( gl_FragCoord.xy - atomVpUnit * atomVpSize );
+	@end
 	float2 atomDdxUV = float2( 0.0, 0.0 );
 	float2 atomDdyUV = float2( 0.0, 0.0 );
 	uint atomMaterialSlot = 0u;
@@ -517,15 +532,14 @@
 		float4 c1 = mul( float4( w1, 1.0 ), passBuf.viewProj );
 		float4 c2 = mul( float4( w2, 1.0 ), passBuf.viewProj );
 
-		float2 atomRes = float2( textureSize( atomIdTex, 0 ) );
-		float2 s0 = atomToPixels( c0, atomRes );
-		float2 s1 = atomToPixels( c1, atomRes );
-		float2 s2 = atomToPixels( c2, atomRes );
+		float2 s0 = atomToPixels( c0, atomVpOrigin, atomVpSize );
+		float2 s1 = atomToPixels( c1, atomVpOrigin, atomVpSize );
+		float2 s2 = atomToPixels( c2, atomVpOrigin, atomVpSize );
 		float3 atomInvW = float3( 1.0 / c0.w, 1.0 / c1.w, 1.0 / c2.w );
 		float2 atomPix = gl_FragCoord.xy;
 		bool atomAllFront = c0.w > 0.0 && c1.w > 0.0 && c2.w > 0.0;
 		AtomBary b = atomAllFront ? atomBarycentric( s0, s1, s2, atomInvW, atomPix )
-								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix, atomRes ) );
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix, atomVpOrigin, atomVpSize ) );
 		// AN ID THAT DOES NOT NAME A TRIANGLE COVERING THIS PIXEL IS NEVER SHADED: weights
 		// far outside the triangle or a non-finite clip w (tested on the BITS - a
 		// self-comparison is folded away on this stack) would hand PBS's pieces a position
@@ -577,10 +591,10 @@
 			{
 				AtomBary bx = atomAllFront
 								  ? atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 1.0, 0.0 ) )
-								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix + float2( 1.0, 0.0 ), atomRes ) );
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix + float2( 1.0, 0.0 ), atomVpOrigin, atomVpSize ) );
 				AtomBary by = atomAllFront
 								  ? atomBarycentric( s0, s1, s2, atomInvW, atomPix + float2( 0.0, 1.0 ) )
-								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix + float2( 0.0, 1.0 ), atomRes ) );
+								  : atomBarycentricHomogeneous( c0, c1, c2, atomPixelToNdc( atomPix + float2( 0.0, 1.0 ), atomVpOrigin, atomVpSize ) );
 				atomDdxUV = ( bx.w.x * uvA + bx.w.y * uvB + bx.w.z * uvC ) - atomUv0;
 				atomDdyUV = ( by.w.x * uvA + by.w.y * uvB + by.w.z * uvC ) - atomUv0;
 				// A neighbour step that lands on the triangle's plane horizon (a silhouette

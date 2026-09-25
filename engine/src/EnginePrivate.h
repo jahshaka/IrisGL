@@ -87,6 +87,7 @@
 // breakthrough and leave its sky and its sun/ambient coupling alone (OgreFog.cpp).
 #include <Atmosphere/OgreAtmosphereNpr.h>
 #include <OgrePlanarReflections.h>
+#include <Vao/OgreAsyncTicket.h>
 #include <Compositor/OgreCompositorWorkspaceListener.h>
 
 // NO <X11/Xlib.h> HERE, deliberately. The only X11 thing this header ever
@@ -5823,8 +5824,10 @@ public:
     /// answer lands in `cull`'s buffers: the scene's own (runGpuCull) or a view's
     /// (the id pass — one instance per view, so two views of one scene in a frame
     /// never share the list one of them is drawing from).
+    /// `requestMs` (optional): the host's share — the request's write and the jobs'
+    /// bindings, after the buffers exist (GpuCullResult::requestMs).
     bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
-                       std::string &err, bool keepBindings = false);
+                       std::string &err, bool keepBindings = false, double *requestMs = nullptr);
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
@@ -6667,6 +6670,17 @@ public:
     /// The view's own GPU cull (the id pass's list): one per view, so two views of
     /// one scene in a frame never share the list the other is drawing from.
     detail::GpuCull &atomCull() { return mAtomCull; }
+    /// THE ID PASS'S SHARE OF THE FRAME'S STATS (renderStats): its indirect draws never
+    /// reach Ogre's RenderingMetrics, so the cull's own counters (survivors, and the
+    /// triangles the draws job adds up) are read back — a frame or two late, never
+    /// waited on. `harvestAtomStats` collects a finished readback and asks for the
+    /// last frame's counters (the id pass calls it before its cull resets them).
+    void harvestAtomStats();
+    bool atomStats(unsigned long long &triangles, unsigned &survivors) const {
+        triangles = mAtomTriangles;
+        survivors = mAtomSurvivors;
+        return mChainAtomDraw && mAtomStatsValid;
+    }
     /// DROPS the reflection trace's per-view Vulkan state, flushing first.
     /// Called from `detachWorkspace` — the one seam every workspace rebuild goes
     /// through — because the trace's descriptor set holds IMAGE VIEWS OF THIS
@@ -6784,6 +6798,10 @@ private:
     bool mChainAtomDraw = false;
     AtomDrawListenerPtr mAtomListener;
     detail::GpuCull mAtomCull;
+    Ogre::AsyncTicketPtr mAtomStatsTicket;
+    unsigned long long mAtomTriangles = 0ull;
+    unsigned mAtomSurvivors = 0u;
+    bool mAtomStatsValid = false;
     unsigned                   mWorkspaceGeneration = 0;
     /// What `ChainDesc::rayReflect` was when the CURRENT workspace definition
     /// was built. The scene arrives AFTER the chain is first built (the

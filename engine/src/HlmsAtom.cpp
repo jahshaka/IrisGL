@@ -305,10 +305,17 @@ bool HlmsAtom::bucketKeyOf(const Ogre::HlmsPbsDatablock *pbs, BucketKey &out, st
     }
     // TEXTURES STILL BAKING: PBS itself delays the hash then (HlmsPbs::
     // calculateHashFor answers 0 while the descriptor sets are dirty), so there is
-    // no permutation to key on yet — the caller asks again once they are baked.
+    // no permutation to key on yet — the datablock is a bucket OF ITS OWN until they
+    // are baked (its twin, a clone, carries its textures exactly), and the witnesses
+    // move it to its real bucket the frame its hash lands (forgetDecodeTwinIfMoved:
+    // the key moved). The screen split routes a pending item to PBS meanwhile
+    // (atomRouteFor); a RAY HIT on it is shaded through this singleton twin — a swap
+    // of a live material's texture reaches its hits on the first frame.
     if (isBucketPending(pbs)) {
-        err = "bucketKeyOf: pending (the datablock's textures are still being baked)";
-        return false;
+        out.permutation = 0x8000000000000000ull | uint64_t(reinterpret_cast<uintptr_t>(pbs));
+        out.textures = textureSetKeyOf(pbs);
+        out.pool = word >> 16u;
+        return true;
     }
     if (!mKeyProbe) {
         if (!mVaoManager) {
@@ -546,7 +553,6 @@ void HlmsAtom::syncDraws(Ogre::SceneManager *sm, SceneDecodes &sd, SceneDecodes:
         // pass has. A hit on it is not shaded by the decode (stated, not hidden).
         if (it->second->getTransparencyMode() == Ogre::HlmsPbsDatablock::Refractive) continue;
         std::string err;
-        if (isBucketPending(it->second)) continue;   // asked again once its textures are baked
         Ogre::HlmsPbsDatablock *twin = decodeTwinForBucket(it->second, err);
         if (!twin) {
             // Once per datablock name: a material the decode cannot serve (a
@@ -607,6 +613,21 @@ void HlmsAtom::showSceneDecodes(Ogre::SceneManager *sm, bool on) {
     if (it == mSceneDecodes.end()) return;
     it->second.hit.shown = on;
     for (auto &kv : it->second.hit.draws) kv.second->setVisible(on);
+}
+
+void HlmsAtom::armForWarmUp(Ogre::SceneManager *sm, bool on) {
+    if (!sm) return;
+    if (on) {
+        ensureStandIns();
+        DecodeSource src;
+        src.ids = mEmptyIds;
+        setDecodeSource(src);
+    } else {
+        setDecodeSource(DecodeSource());
+    }
+    SceneDecodes &sd = mSceneDecodes[sm];
+    sd.screen.shown = on;
+    for (auto &kv : sd.screen.draws) kv.second->setVisible(on);
 }
 
 void HlmsAtom::showScreenDecodes(Ogre::SceneManager *sm, bool on) {

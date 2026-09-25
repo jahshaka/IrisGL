@@ -2181,6 +2181,8 @@ bool OgreEngine::renderStats(RenderStats &out) const {
                 out.triangles = (unsigned long long)m.mFaceCount;
                 out.vertices  = (unsigned long long)m.mVertexCount;
                 out.instances = (unsigned long long)m.mInstanceCount;
+                // (THE ID PASS'S SHARE is in these: its recorder adds its indirect
+                // draw's counters to the render system's own, OgreAtomIdPass.cpp.)
             }
             // THE PSO DEADLINE'S HONEST HALF (THREADING_ADOPTION_SPEC.md P4(b),
             // decision D-E(1)). Ogre can budget PSO compilation per frame and
