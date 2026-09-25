@@ -1851,6 +1851,15 @@ void OgreScene::updateSurfaceCache() {
             mSurfaceCache.reset();
             return;
         }
+        // THE MOVERS' SHADOW (PHOTON-CARDS-4): the scene's in-frame answers and
+        // the ray tier's trace; a scene without rays answers "no trace" and the
+        // cards keep the still world's sun term alone.
+        CardMoverHooks hooks;
+        hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
+        hooks.trace = [this](const CardMoverTrace &t) { return traceCardMovers(t); };
+        hooks.timeRelight = [this](bool begin) { timeCardRelight(begin); };
+        hooks.readTimes = [this](float &a, float &b) { cardMoverTimes(a, b); };
+        mSurfaceCache->setMoverHooks(hooks);
     }
     // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
     // does, and waits for one the same way: `mGiCamPos` is the authoritative

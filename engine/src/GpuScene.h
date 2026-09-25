@@ -291,6 +291,13 @@ public:
     /// next update owes them `prevWorld = world` even if nothing moved in it, so
     /// a still frame after a gesture is not free (and the one after it is).
     bool hasOpenMovers() const { return !mMovedLastFrame.empty(); }
+    /// THE FRAME'S MOVED SET, read-only (PHOTON-CARDS-4: the surface cache's
+    /// mover-shadow trigger): the slots the frame's update staged — a transform
+    /// write, a flags change, a birth — valid only while `movedThisFrame()` says
+    /// the last closing update ran in the VaoManager frame `frame`; any other
+    /// frame moved nothing.
+    const std::vector<uint32_t> &movedSlots() const { return mMovedLastFrame; }
+    bool movedThisFrame(uint32_t frame) const { return mLastCloseFrame == frame; }
 
     const GpuInstance &entry(uint32_t slot) const { return mMirror[slot]; }
     /// The mirror as a raw pointer. The dirty scan reads it once per item, and

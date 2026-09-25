@@ -139,6 +139,8 @@ namespace jahshaka { namespace engine {
 /// may hold. Only OgreSurfaceCache.cpp and the scene's own TU need its
 /// definition.
 class SurfaceCache;
+struct CardMoverTrace;
+struct CardMoverFrame;
 // The backend's own namespace: these types and helpers are shared between the
 // TUs under engine/src and by nothing else (they used to live in one anonymous
 // namespace, when the backend was a single translation unit).
@@ -3369,6 +3371,28 @@ public:
                     NodeId onlyNode = 0) override;
     bool dumpCardAtlas(const std::string &prefix, std::string &err) override;
     const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
+    /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the scene's in-frame
+    /// answers to the cache (OgreGpuScene.cpp: the traced shadow-casting movers,
+    /// the frame's moved set, the still casters a transform write moved) and the
+    /// ray tier's trace and timestamps (OgreRayQuery.cpp).
+    bool cardMoverFrame(CardMoverFrame &out);
+    bool traceCardMovers(const CardMoverTrace &job);
+    void timeCardRelight(bool begin);
+    void cardMoverTimes(float &traceMs, float &relightMs);
+    /// The mover list as last walked, and the slot count it was walked at: the
+    /// walk runs only on a frame whose moved set is not empty or whose slot
+    /// count changed (or a moved slot now holds another node).
+    struct CardMoverRec { NodeId node = 0; Ogre::Vector3 min, max; };
+    std::vector<CardMoverRec> mCardMovers;
+    uint32_t mCardMoverSlots = 0xFFFFFFFFu;
+    /// Every slot's caster state as the cache last saw it (the node, its world
+    /// transform, its box, its flags) — a still caster's OLD box when it moves,
+    /// changes class or dies. Slots are renumbered by the swap-remove, so a walk
+    /// compares these to the table BY NODE. Not the GPU scene's prevWorld: two
+    /// updates in one frame (a reader before the frame, the frame's own) can
+    /// re-stage a slot and erase it.
+    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; };
+    std::vector<CardCasterRec> mCardCasters;
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
     /// has none (every skinned mesh, every line mesh, every model opened
     /// without a bake). Indexed by `Ogre::Mesh *` because all a cache holds is

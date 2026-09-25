@@ -46,7 +46,9 @@
 //
 // VISIBILITY. The SUN's is the stored shadow term (the capture's PSSM term of
 // the first shadow-casting directional light — the prepass writes that one
-// term and nothing else). A point or spot light is UNSHADOWED here: its
+// term and nothing else; its casters are the still world) times the MOVERS'
+// term, traced by the ray tier into cardMoverVis for the cards a mover's
+// footprint reaches (PHOTON-CARDS-4). A point or spot light is UNSHADOWED here: its
 // visibility is the traced residue's, where rays exist (PHOTON P5). Area
 // lights are not summed (their LTC path is not transcribed). Stated, all three.
 //
@@ -116,7 +118,7 @@ vulkan_layout( ogre_t4 ) uniform texture2D cardShadowRough;
 @end
 
 // ONE CARD TO RELIGHT. rect = (atlasX, atlasY, size, mode); camPos = the
-// capture camera's position; axisU.xyz / axisV.xyz = the card's u and v with
+// capture camera's position, .w = 1 when the card carries a movers' trace; axisU.xyz / axisV.xyz = the card's u and v with
 // the ortho window's width / height in .w; axisD.xyz = the card's outward axis.
 struct CardRelight
 {
@@ -154,6 +156,11 @@ layout( vulkan( ogre_u3 ) vk_comma @insertpiece( uav3_pf_type ) )
 uniform restrict writeonly image2D cardRadiance;
 layout( vulkan( ogre_u4 ) vk_comma @insertpiece( uav4_pf_type ) )
 uniform restrict image2D cardIndirect;
+// THE MOVERS' VISIBILITY (PHOTON-CARDS-4): the ray tier's trace of the sun
+// against the shadow-casting movers (rq_card_movers.comp), read where the card
+// carries one (camPos.w = 1). The captured term holds the still world only.
+layout( vulkan( ogre_u5 ) vk_comma @insertpiece( uav5_pf_type ) )
+uniform restrict readonly image2D cardMoverVis;
 
 // THE CHAIN AND THE ENVIRONMENT, as VctLighting hands them to every reader
 // (getCascadeChainParams, the cascade-0 volume's box, getFinalMultiplier,
@@ -331,6 +338,9 @@ void main()
 		vec3 P = r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) +
 				 r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) - r.axisD.xyz * depth;
 
+		// THE SUN'S TWO TERMS: the captured one (the still world) times the
+		// traced one (the movers), where the host traced this card.
+		float moverVis = r.camPos.w > 0.5 ? imageLoad( cardMoverVis, at ).x : 1.0;
 		vec3 direct = vec3( 0.0, 0.0, 0.0 );
 		uint n = lightCount.x;
 		for( uint i = 0u; i < n; ++i )
@@ -359,7 +369,7 @@ void main()
 					atten *= jahSpotAttenuation( spotCosAngle, l.spotParams.xyz );
 				}
 			}
-			float visibility = l.diffuse.w > 0.5 ? sr.x : 1.0;
+			float visibility = l.diffuse.w > 0.5 ? sr.x * moverVis : 1.0;
 @property( jah_cloud_shadow )
 			// A DIRECTIONAL LIGHT CROSSES THE CLOUD SHEET (CLOUDS-2D-2): the
 			// pixel's own factor, at this texel's world point.

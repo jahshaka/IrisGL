@@ -578,6 +578,11 @@ constexpr unsigned kRayMaskMover = 0x02u;    ///< the document says it moves
 constexpr unsigned kRayMaskStill = 0x04u;    ///< still world (not a mover)
 constexpr unsigned kRayMaskNear = 0x08u;     ///< every near copy
 constexpr unsigned kRayMaskFar = 0x10u;      ///< every far copy, and nothing else
+/// A SHADOW-CASTING MOVER'S NEAR COPY, and nothing else (PHOTON-CARDS-4): the
+/// surface cache's mover-shadow launch traces this bit alone. A launch's mask
+/// matches an instance on ANY common bit, so "a mover AND a caster" cannot be
+/// asked with bits 0 and 1 — it is its own bit. No other launch names it.
+constexpr unsigned kRayMaskMoverCaster = 0x20u;
 constexpr unsigned kRayMaskNearField = kRayMaskCaster | kRayMaskMover | kRayMaskStill | kRayMaskNear;
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
@@ -3577,6 +3582,44 @@ struct CardCacheStatus {
     /// Lights the relight job could not hold (past its 64) at the last relight;
     /// the engine log says so once per cache.
     unsigned lightsDropped = 0u;
+    /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4). A card's sun visibility
+    /// is the captured term (the still world's casters) TIMES a traced term for
+    /// the movers: a transform write of a shadow-casting mover traces sun rays
+    /// against the movers alone (`kRayMaskMoverCaster`) from every texel of the
+    /// cards inside its sun-projected footprint, old and new, and relights them
+    /// in the same frame. `moverCasters` = the traced shadow-casting movers the
+    /// last evaluation saw; the last frame's traced cards and texels and the
+    /// lifetime count; `moverRetired` = cards whose mover term was dropped because
+    /// no footprint reaches them any more (relit, not traced); `moverPending` =
+    /// cards past the frame's budget, carried to the next frame (oldest pending
+    /// first, nearest among equals — every pending card is traced within
+    /// ceil(pending / the cards the budget holds) frames while movers keep moving).
+    /// The budget is the relight's own number (`lightBudgetTexels`), spent a
+    /// second time on the mover term. `moverGpuMs` / `relightGpuMs` = the trace
+    /// job's and the relight job's GPU milliseconds on the last frame that ran
+    /// them (timestamps; -1 until read).
+    unsigned moverCasters = 0u;
+    unsigned moverTracedLastFrame = 0u;
+    unsigned moverTexelsLastFrame = 0u;
+    unsigned long long moverTraces = 0ull;
+    unsigned long long moverRetired = 0ull;
+    unsigned moverPending = 0u;
+    /// ...and how many frames the OLDEST of them has waited since it went
+    /// pending (0 when none waits) — the starvation reading: under the oldest-
+    /// first order it stays below ceil(pending / the cards the budget holds).
+    unsigned moverPendingAge = 0u;
+    float moverGpuMs = -1.0f;
+    float relightGpuMs = -1.0f;
+    /// A STILL CASTER THAT MOVES (PHOTON-CARDS-4 finding 3): its shadow is the
+    /// still world's, held by the CAPTURED term, so any change to what the
+    /// capture holds of it — a transform write, a show/hide, its caster bit, a
+    /// change of class (a drag's promotion to the mover channel and its
+    /// demotion at rest; setNodeMovable), its deletion — queues
+    /// the cards of its old and new sun-projected footprints for a recapture
+    /// (the capture's own budget and order). A queued card keeps its traced
+    /// movers' term until the capture lands. Cards queued so, for the life of
+    /// the cache.
+    unsigned long long casterRecaptures = 0ull;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same

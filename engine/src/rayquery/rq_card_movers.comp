@@ -1,0 +1,85 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4).
+//
+// A card's sun visibility has two halves. The STILL WORLD's is the term its
+// capture stored (ShadowRough.x: the card shadow node draws the probe kind's
+// casters, which a mover never is). The MOVERS' is this job's: one ray per
+// texel of every card a shadow-casting mover's sun-projected footprint reaches,
+// from the texel's world point towards the sun, against the movers alone
+// (kRayMaskMoverCaster, their near copies). The answer (1 lit, 0 occluded) goes
+// into the cache's R8 mover-visibility layer at the texel's atlas address, and
+// the relight job (JahCardLight_cs.glsl) multiplies it into the sun's term for
+// the cards the host flags as carrying one.
+//
+// The texel's world point and normal are the relight's own reconstruction
+// (JahCardLight_cs.glsl main: the capture camera's position, the ortho window
+// on axisU/axisV, the depth back along axisD; the normal decoded from the card's
+// view space) — the two jobs must agree texel for texel.
+//
+// A HARD term: one ray, no filter. The captured term is the capture's PSSM
+// filter; a mover's edge is one texel wide here.
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+
+layout( set = 0, binding = 1 ) uniform Params
+{
+	vec4 toSun;		// xyz = the unit direction TOWARDS the sun, w = the ray's length
+	vec4 knobs;		// x = the mask, yzw = unused
+} p;
+
+// ONE CARD, the relight's record layout (CardRelight): rect = (atlasX, atlasY,
+// size, unused); camPos; axisU.xyz/axisV.xyz with the ortho window's width /
+// height in .w; axisD.
+struct CardRec
+{
+	vec4 rect;
+	vec4 camPos;
+	vec4 axisU;
+	vec4 axisV;
+	vec4 axisD;
+};
+layout( std430, set = 0, binding = 2 ) readonly buffer Cards { CardRec cards[]; };
+
+layout( set = 0, binding = 3 ) uniform sampler2D cardDepth;
+layout( set = 0, binding = 4 ) uniform sampler2D cardNormal;
+layout( r8, set = 0, binding = 5 ) uniform writeonly image2D moverVis;
+
+void main()
+{
+	const CardRec r = cards[gl_WorkGroupID.z];
+	const uint size = uint( r.rect.z );
+	const uvec2 t = gl_GlobalInvocationID.xy;
+	if( t.x >= size || t.y >= size )
+		return;
+	const ivec2 at = ivec2( uint( r.rect.x ) + t.x, uint( r.rect.y ) + t.y );
+
+	float vis = 1.0;
+	const float depth = texelFetch( cardDepth, at, 0 ).x;
+	if( depth > 0.0 )
+	{
+		const vec3 nV = texelFetch( cardNormal, at, 0 ).xyz * 2.0 - 1.0;
+		const vec3 N = normalize( r.axisU.xyz * nV.x + r.axisV.xyz * nV.y + r.axisD.xyz * nV.z );
+		const vec3 L = p.toSun.xyz;
+		if( dot( N, L ) > 0.0 )
+		{
+			// Image row 0 is the card's +v side (the capture camera's +Y).
+			const vec2 f = ( vec2( t ) + 0.5 ) / float( size );
+			const vec3 P = r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) +
+						   r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) - r.axisD.xyz * depth;
+			// NO LIFT: a receiver is never a mover (movers carry no cards), so the
+			// ray cannot find the surface it starts on.
+			rayQueryEXT rq;
+			rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+								   uint( p.knobs.x ), P, 0.0, L, p.toSun.w );
+			while( rayQueryProceedEXT( rq ) ) {}
+			if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
+				gl_RayQueryCommittedIntersectionTriangleEXT )
+				vis = 0.0;
+		}
+	}
+	imageStore( moverVis, at, vec4( vis ) );
+}

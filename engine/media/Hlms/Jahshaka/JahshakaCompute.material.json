@@ -151,7 +151,7 @@
 			"source" : "JahCardLight_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahBrdf_piece_all.any", "JahDiffuseAlbedo_piece_all.any", "JahCloudShadow_piece_all.any"],
 			"inform_shader_of_texture_data_change" : true,
-			"uav_units" : 5,
+			"uav_units" : 6,
 			"properties" :
 			{
 				"vct_anisotropic" : 0,
