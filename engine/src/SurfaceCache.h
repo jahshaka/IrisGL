@@ -173,9 +173,11 @@ struct CardRec {
     unsigned long long lastIndirect = 0ull;
     /// THE MOVERS' TERM (PHOTON-CARDS-4): the card's rect in the mover-visibility
     /// layer holds a trace the relight must multiply in (`moverTraced`), and the
-    /// card waits for a trace past the frame's budget (`moverPending`).
+    /// card waits for a trace past the frame's budget (`moverPending`, since the
+    /// frame `moverPendingSince` — the age the trace order serves oldest first).
     bool moverTraced = false;
     bool moverPending = false;
+    unsigned long long moverPendingSince = 0ull;
 };
 
 /// WHAT THE CACHE IS HANDED EACH FRAME, and the reason it is handed anything at
@@ -264,7 +266,9 @@ struct CardMoverFrame {
     /// The movers in the frame's moved set (a transform write — a walk without
     /// a pose change moves the node and counts — a flags change, a birth).
     std::vector<NodeId> moved;
-    /// The STILL casters whose transform this frame's write moved.
+    /// The STILL casters whose captured shadow this frame changed: a transform,
+    /// visibility, caster-bit or class change, an arrival or a deletion (an
+    /// arrival or a deletion names its one box as both old and new).
     std::vector<CardCasterMove> casterMoves;
 };
 struct CardMoverTrace {
@@ -481,7 +485,8 @@ private:
     Ogre::Vector3 mViewerPos = Ogre::Vector3::ZERO;
     std::vector<float> mMoverCpu;
     /// This frame's relight additions from the movers (card index, mode).
-    unsigned mMoverTracedLastFrame = 0u, mMoverTexelsLastFrame = 0u, mMoverPending = 0u;
+    unsigned mMoverTracedLastFrame = 0u, mMoverTexelsLastFrame = 0u, mMoverPending = 0u,
+             mMoverPendingAge = 0u;
     unsigned long long mMoverTraces = 0ull, mMoverRetired = 0ull, mCasterRecaptures = 0ull;
     Ogre::UavBufferPacked *mGiBuffer = nullptr;
     std::vector<float> mGiCpu;

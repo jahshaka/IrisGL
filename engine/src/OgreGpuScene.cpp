@@ -41,6 +41,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <unordered_map>
 
 namespace jahshaka {
 namespace engine {
@@ -1132,14 +1133,17 @@ namespace detail {
 //
 //   * THE MOVERS: every slot the TLAS writes with kRayMaskMoverCaster (a traced,
 //     shadow-casting mover), with its world AABB — walked only on a frame whose
-//     moved set is not empty or whose slot count changed, and kept otherwise:
-//     a still frame costs a compare.
+//     moved set is not empty or whose slot count changed (or a moved slot was
+//     renumbered), and kept otherwise: a still frame costs a compare.
 //   * THE MOVED: the movers in the frame's moved set (a transform write, a
 //     flags change, a birth — a walk without a pose change counts).
-//   * THE STILL CASTERS THAT MOVED: a moved slot that casts, is not a mover and
-//     whose transform this frame's write changed (world != prevWorld; a birth has
-//     prevWorld = world and is not a move) — its old box is its new box carried
-//     back through prevWorld * world^-1 (conservative under a turn).
+//   * THE STILL CASTERS THAT MOVED: every change to what the CAPTURED term
+//     holds of a still caster — its transform, its visibility, its caster bit,
+//     its CLASS (a still object promoted to the mover channel by a drag or by
+//     setNodeMovable leaves the captured world; a demoted one joins it, with
+//     no transform write at all), its birth and its death. The old box is the
+//     cache's own record of the node (mCardCasters), the new box the table's;
+//     a birth or a death has one box and names it twice.
 bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
     out = CardMoverFrame();
     if (!mGpuScene.live() || !mRoot || !mRoot->getRenderSystem()) return false;
@@ -1167,37 +1171,70 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
         r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
         r.flags = flagsOf(e);
     };
-    const bool walk = slots != mCardMoverSlots;
-    // THE STILL CASTERS THAT MOVED (before the records are refreshed): a moved
-    // slot whose record names the same node, which casts as a still object now
-    // or did before, and whose transform or visibility changed.
-    if (moved) {
-        for (uint32_t slot : mGpuScene.movedSlots()) {
-            if (slot >= slots || slot >= mCardCasters.size()) continue;
-            const detail::GpuInstance &e = mirror[slot];
-            CardCasterRec &r = mCardCasters[slot];
-            const Ogre::uint32 f = flagsOf(e);
-            if (r.node == NodeId(e.ids[0]) && (stillCaster(f) || stillCaster(r.flags))) {
-                const bool turned = std::memcmp(r.world, e.world, sizeof(r.world)) != 0;
-                const bool shown = (r.flags & kGpuVisible) != (f & kGpuVisible);
-                if (turned || shown) {
-                    CardCasterMove m;
-                    m.node = r.node;
-                    m.oldMin = r.min;
-                    m.oldMax = r.max;
-                    m.newMin = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
-                    m.newMax = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
-                    out.casterMoves.push_back(m);
-                }
+    // WHAT THE CAPTURED TERM LOSES OR GAINS between the record and the table:
+    // a still caster before or after, and its world, visibility, caster bit or
+    // class changed.
+    const auto casterChange = [&](const CardCasterRec &r, const detail::GpuInstance &e) {
+        const Ogre::uint32 f = flagsOf(e);
+        if (!stillCaster(f) && !stillCaster(r.flags)) return;
+        const bool turned = std::memcmp(r.world, e.world, sizeof(r.world)) != 0;
+        const bool flagsMoved = ((r.flags ^ f) & (kGpuVisible | kGpuCaster | kGpuMover)) != 0u;
+        if (!turned && !flagsMoved) return;
+        CardCasterMove m;
+        m.node = r.node;
+        m.oldMin = r.min;
+        m.oldMax = r.max;
+        m.newMin = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
+        m.newMax = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
+        out.casterMoves.push_back(m);
+    };
+    const auto boxOnly = [&](const CardCasterRec &r) {
+        CardCasterMove m;
+        m.node = r.node;
+        m.oldMin = m.newMin = r.min;
+        m.oldMax = m.newMax = r.max;
+        out.casterMoves.push_back(m);
+    };
+    // THE WALK: the slot count changed (an item arrived or left), or a moved
+    // slot holds another node than its record (the swap-remove renumbered the
+    // tail into a freed slot while the count stayed — an arrival in the same
+    // frame). Slots are not identities, so the records are compared BY NODE.
+    bool walk = slots != mCardMoverSlots;
+    if (moved && !walk)
+        for (uint32_t slot : mGpuScene.movedSlots())
+            if (slot < slots && (slot >= mCardCasters.size() ||
+                                 mCardCasters[slot].node != NodeId(mirror[slot].ids[0]))) {
+                walk = true;
+                break;
             }
-            if (!walk) record(slot);
+    if (walk) {
+        std::unordered_map<NodeId, size_t> was;
+        was.reserve(mCardCasters.size());
+        for (size_t i = 0; i < mCardCasters.size(); ++i)
+            if (mCardCasters[i].node) was[mCardCasters[i].node] = i;
+        std::vector<CardCasterRec> prior;
+        prior.swap(mCardCasters);
+        mCardCasters.assign(slots, CardCasterRec());
+        for (uint32_t i = 0; i < slots; ++i) {
+            record(i);
+            auto it = was.find(mCardCasters[i].node);
+            if (it != was.end()) {
+                casterChange(prior[it->second], mirror[i]);
+                was.erase(it);
+            } else if (stillCaster(mCardCasters[i].flags)) {
+                boxOnly(mCardCasters[i]);    // A BIRTH: its footprint gains its shadow
+            }
+        }
+        for (const auto &left : was)         // A DEATH: its footprint loses it
+            if (stillCaster(prior[left.second].flags)) boxOnly(prior[left.second]);
+    } else if (moved) {
+        for (uint32_t slot : mGpuScene.movedSlots()) {
+            if (slot >= slots) continue;
+            casterChange(mCardCasters[slot], mirror[slot]);
+            record(slot);
         }
     }
     if (moved || walk) {
-        if (walk) {
-            mCardCasters.assign(slots, CardCasterRec());
-            for (uint32_t i = 0; i < slots; ++i) record(i);
-        }
         mCardMovers.clear();
         for (uint32_t i = 0; i < slots; ++i) {
             const detail::GpuInstance &e = mirror[i];

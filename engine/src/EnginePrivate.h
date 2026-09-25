@@ -3381,14 +3381,16 @@ public:
     void cardMoverTimes(float &traceMs, float &relightMs);
     /// The mover list as last walked, and the slot count it was walked at: the
     /// walk runs only on a frame whose moved set is not empty or whose slot
-    /// count changed.
+    /// count changed (or a moved slot now holds another node).
     struct CardMoverRec { NodeId node = 0; Ogre::Vector3 min, max; };
     std::vector<CardMoverRec> mCardMovers;
     uint32_t mCardMoverSlots = 0xFFFFFFFFu;
     /// Every slot's caster state as the cache last saw it (the node, its world
-    /// transform, its box, its flags) — a still caster's OLD box when it moves.
-    /// Not the GPU scene's prevWorld: two updates in one frame (a reader before
-    /// the frame, the frame's own) can re-stage a slot and erase it.
+    /// transform, its box, its flags) — a still caster's OLD box when it moves,
+    /// changes class or dies. Slots are renumbered by the swap-remove, so a walk
+    /// compares these to the table BY NODE. Not the GPU scene's prevWorld: two
+    /// updates in one frame (a reader before the frame, the frame's own) can
+    /// re-stage a slot and erase it.
     struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; };
     std::vector<CardCasterRec> mCardCasters;
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that

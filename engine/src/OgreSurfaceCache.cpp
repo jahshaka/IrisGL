@@ -1638,8 +1638,13 @@ void SurfaceCache::traceMovers() {
     // Captured (its Depth and Normal landed): this frame's batch has, by now.
     const auto landed = [this](const CardRec &c) { return c.lastUpdated != 0ull && !c.queued; };
 
-    // 1. THE STILL CASTERS THAT MOVED: their old and new footprints' cards go
-    //    back on the capture queue (the captured term is theirs).
+    // 1. THE STILL CASTERS THAT MOVED — a transform, a show/hide, the caster
+    //    bit, a class change (a drag's promotion and demotion, setNodeMovable),
+    //    an arrival, a deletion: their old and new footprints' cards go back on
+    //    the capture queue (the captured term is theirs). A queued card that
+    //    carries a traced term KEEPS it until the capture lands (step 3 waits
+    //    for `landed`): a demoted mover's shadow passes from the trace to the
+    //    capture without a frame of neither.
     if (haveSun) {
         for (const CardCasterMove &m : mf.casterMoves) {
             const Footprint o = boxFootprint(sf, m.oldMin, m.oldMax);
@@ -1663,6 +1668,12 @@ void SurfaceCache::traceMovers() {
     // 2. THE MOVERS' BOXES THAT CHANGED: a moved mover's old and new box, a
     //    mover this cache has not traced yet, one that left (its old box), and
     //    every box when the sun turned (every trace is stale).
+    // A card goes pending ONCE: a card still waiting keeps its age.
+    const auto pend = [this](CardRec &c) {
+        if (c.moverPending) return;
+        c.moverPending = true;
+        c.moverPendingSince = mFrame;
+    };
     std::vector<Footprint> changed;
     std::vector<Footprint> current;
     current.reserve(mMovers.size());
@@ -1708,11 +1719,11 @@ void SurfaceCache::traceMovers() {
             if (!landed(mCards[i])) continue;
             const Footprint &cf = cardFpAt(i);
             for (const Footprint &f : changed)
-                if (shades(f, cf)) { mCards[i].moverPending = true; break; }
+                if (shades(f, cf)) { pend(mCards[i]); break; }
         }
     }
     for (unsigned idx : mBatch)
-        if (!mMovers.empty() || mCards[idx].moverTraced) mCards[idx].moverPending = true;
+        if (!mMovers.empty() || mCards[idx].moverTraced) pend(mCards[idx]);
 
     std::vector<unsigned> trace;
     const auto relightDirect = [this](unsigned i) {
@@ -1724,6 +1735,7 @@ void SurfaceCache::traceMovers() {
     };
     const bool canTrace = haveSun && bool(mMoverHooks.trace);
     mMoverPending = 0u;
+    mMoverPendingAge = 0u;
     for (unsigned i = 0; i < mCards.size(); ++i) {
         CardRec &c = mCards[i];
         if (!c.moverPending) continue;
@@ -1747,10 +1759,19 @@ void SurfaceCache::traceMovers() {
     }
     if (trace.empty()) return;
 
-    // 4. NEAREST FIRST under the budget — the relight's own number, spent a
-    //    second time on the movers' term; the rest waits a frame (a stat).
+    // 4. OLDEST FIRST, NEAREST AMONG EQUALS, under the budget — the relight's
+    //    own number, spent a second time on the movers' term; the rest waits (a
+    //    stat). THE AGE IS WHAT BOUNDS THE WAIT: nearest-first alone served the
+    //    same nearest cards every frame while movers kept moving (they go
+    //    pending again each frame) and a far card's term froze for the whole
+    //    motion. With the age, a card pending since frame F is traced before
+    //    any card that went pending after F — so every pending card is traced
+    //    within ceil(pending cards / cards the budget holds) frames (planRelights'
+    //    `oldestFirst`, the same rule for the same reason).
     const Ogre::Vector3 eye = mViewerPos;
     std::sort(trace.begin(), trace.end(), [this, &eye](unsigned a, unsigned b) {
+        if (mCards[a].moverPendingSince != mCards[b].moverPendingSince)
+            return mCards[a].moverPendingSince < mCards[b].moverPendingSince;
         const float da = (mCards[a].centre - eye).squaredLength();
         const float db = (mCards[b].centre - eye).squaredLength();
         if (da != db) return da < db;
@@ -1767,6 +1788,11 @@ void SurfaceCache::traceMovers() {
         spent += cost;
     }
     mMoverPending = unsigned(trace.size() - now.size());
+    // The oldest card left waiting (the list is oldest first): its age in frames.
+    const auto ageOf = [this](unsigned idx) {
+        return unsigned(std::min<unsigned long long>(mFrame - mCards[idx].moverPendingSince, 0xFFFFFFFFull));
+    };
+    if (now.size() < trace.size()) mMoverPendingAge = ageOf(trace[now.size()]);
     if (now.empty()) return;
 
     mMoverCpu.assign(now.size() * kRelightFloats, 0.0f);
@@ -1790,6 +1816,7 @@ void SurfaceCache::traceMovers() {
     job.range = kMoverRayRange;
     if (!mMoverHooks.trace(job)) {
         mMoverPending = unsigned(trace.size());   // no structure this frame: next frame
+        mMoverPendingAge = ageOf(trace.front());
         return;
     }
     for (unsigned idx : now) {
@@ -2064,6 +2091,7 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.moverTraces = mMoverTraces;
     out.moverRetired = mMoverRetired;
     out.moverPending = mMoverPending;
+    out.moverPendingAge = mMoverPendingAge;
     out.casterRecaptures = mCasterRecaptures;
     if (mMoverHooks.readTimes) mMoverHooks.readTimes(out.moverGpuMs, out.relightGpuMs);
 }

@@ -3591,7 +3591,9 @@ struct CardCacheStatus {
     /// last evaluation saw; the last frame's traced cards and texels and the
     /// lifetime count; `moverRetired` = cards whose mover term was dropped because
     /// no footprint reaches them any more (relit, not traced); `moverPending` =
-    /// cards past the frame's budget, carried to the next frame (nearest first).
+    /// cards past the frame's budget, carried to the next frame (oldest pending
+    /// first, nearest among equals — every pending card is traced within
+    /// ceil(pending / the cards the budget holds) frames while movers keep moving).
     /// The budget is the relight's own number (`lightBudgetTexels`), spent a
     /// second time on the mover term. `moverGpuMs` / `relightGpuMs` = the trace
     /// job's and the relight job's GPU milliseconds on the last frame that ran
@@ -3602,12 +3604,20 @@ struct CardCacheStatus {
     unsigned long long moverTraces = 0ull;
     unsigned long long moverRetired = 0ull;
     unsigned moverPending = 0u;
+    /// ...and how many frames the OLDEST of them has waited since it went
+    /// pending (0 when none waits) — the starvation reading: under the oldest-
+    /// first order it stays below ceil(pending / the cards the budget holds).
+    unsigned moverPendingAge = 0u;
     float moverGpuMs = -1.0f;
     float relightGpuMs = -1.0f;
     /// A STILL CASTER THAT MOVES (PHOTON-CARDS-4 finding 3): its shadow is the
-    /// still world's, held by the CAPTURED term, so its transform write queues
+    /// still world's, held by the CAPTURED term, so any change to what the
+    /// capture holds of it — a transform write, a show/hide, its caster bit, a
+    /// change of class (a drag's promotion to the mover channel and its
+    /// demotion at rest; setNodeMovable), its arrival, its deletion — queues
     /// the cards of its old and new sun-projected footprints for a recapture
-    /// (the capture's own budget and order). Cards queued so, for the life of
+    /// (the capture's own budget and order). A queued card keeps its traced
+    /// movers' term until the capture lands. Cards queued so, for the life of
     /// the cache.
     unsigned long long casterRecaptures = 0ull;
 };
