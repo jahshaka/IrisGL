@@ -106,7 +106,9 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// THE REST MEAN (PHOTON-GATHER-1d, rq_probe_integrate.comp): x = the rest
 	/// frame k (0 = the camera, the lighting or the scene moved this frame — not
 	/// at rest; k >= 1 = the k-th consecutive frame at rest), y = K, the rest
-	/// frames after which the answer IS the rest mean and the host holds.
+	/// frames after which the answer IS the rest mean and the host holds;
+	/// z = the view's ADVANCING frame counter (PHOTON-GA-VR: the packed history's
+	/// rounding, which a frozen sample index must not freeze), w = unused.
 	vec4 knobs6;
 	/// THE HIT RECORD (PHOTON-HIT-SHADE-1; the trace's, jah_rq_hit_record.glsl):
 	/// hitList: x = the list's capacity, y = its grid width, z = the GPU scene

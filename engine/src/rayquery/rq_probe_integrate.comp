@@ -62,12 +62,15 @@
 //       bits: 0.4 % against the 5 % test), its normal (octahedral, 5 + 5 bits —
 //       the test is at 25 degrees), the count (4 bits: the blend reads it only
 //       up to the floor, 1/10 shipped) and the mean COVERAGE (6 bits).
-// THE TWO ACCUMULATED QUANTITIES CANNOT STALL (`stepQuantum`): rounded to
-// nearest, and where that would keep last frame's stored value while this
-// frame's sample sits in another quantum, moved one quantum toward it — an EMA
-// at a 1/10 blend stored round-to-nearest would stall up to five quanta from
-// its mean (a coverage of 0.9 in 6 bits would never climb back to 1). No dither:
-// a frozen frame converges every arm to the sample's own quantum, byte for byte.
+// THE ROUNDING OF THE TWO ACCUMULATED QUANTITIES IS STOCHASTIC (`roundingDither`,
+// keyed on the view's ADVANCING frame counter): an EMA at a 1/10 blend stored
+// round-to-nearest cannot move while a tenth of its innovation is under half a
+// quantum, so it would stall up to five quanta from the mean it estimates (a
+// coverage of 0.9 in 6 bits would never climb back to 1 once every frame
+// answers); rounded up with probability equal to the fraction it is UNBIASED,
+// and exact values (a coverage of 0 or 1, a zero) round to themselves. Measured
+// against a deterministic "step one quantum toward the sample" rule, it adds
+// less noise (gi.gather_motion's still control 0.215 against 0.232 codes).
 // THE BUILDER'S NOTES (C2 design, section 2): the history is in IRRADIANCE
 // space at the pixel — the atlas' re-weighting (note a) is inside the unbiased
 // quadrature the SH was projected with, the atlas' hit distances (note b) never
@@ -135,32 +138,27 @@ vec3 octDecode( vec2 o )
 	return normalize( n );
 }
 
-/// ONE QUANTISED STEP OF A RUNNING MEAN, in quanta: `m` the new (unrounded)
-/// mean, `prev` last frame's stored value, `target` what the mean moves toward
-/// (this frame's sample, or the rest mean at rest). Round to nearest — and
-/// where that would leave the stored value where it was while the target sits
-/// in another quantum, step ONE quantum toward the target. An EMA at a 1/10
-/// blend stored round-to-nearest cannot move while a tenth of its innovation is
-/// under half a quantum, so it would stall up to five quanta from its mean (a
-/// 6-bit coverage of 0.9 would never climb back to 1 once every frame answers
-/// again); this cannot stall, is deterministic (no dither: a frozen frame's
-/// A/B converges both arms to the SAME stored value, the target's own quantum),
-/// and with a noisy target steps up and down with the noise's sign — unbiased.
-float stepQuantum( float m, float prev, float target )
+/// THE ROUNDING'S NUMBER on [0,1): a pure function of (the pixel IN ITS EYE'S
+/// OWN IMAGE, the view's ADVANCING frame counter p.knobs6.z, which quantity) —
+/// the gather's own PCG. The counter is the view's, never the sample sequence's
+/// frame (p.knobs.z): a FROZEN frame index (every gather A/B's rule) would fix
+/// the number per pixel and turn the rounding into a biased one, which stalls a
+/// long history a few quanta from a constant estimate (gi.far_blas' frozen A/B
+/// caught exactly that, 5,360 px). Deterministic run to run; two eyes at one
+/// pose round alike.
+float roundingDither( ivec2 localPix, uint salt )
 {
-	float q = floor( m + 0.5 );
-	const float pq = floor( prev + 0.5 ), tq = floor( target + 0.5 );
-	if( q == pq && tq != pq )
-		q = pq + sign( tq - pq );
-	return q;
+	const uint h = jahPcg( uint( localPix.x ) * 1973u + uint( localPix.y ) * 9277u +
+						   uint( p.knobs6.z ) * 26699u + salt * 104729u );
+	return float( h & 0xFFFFFFu ) / 16777216.0;
 }
 
 /// A NON-NEGATIVE rgb AS ONE SHARED-EXPONENT WORD (the E5B9G9R9 layout: red in
 /// bits 0-8, green 9-17, blue 18-26, the exponent biased by 15 in 27-31), each
-/// mantissa one `stepQuantum` from last frame's stored value. The exponent is
-/// the brightest channel's (frexp, exact), bumped once where that channel's
-/// mantissa could round to 512.
-uint packRgbShared( vec3 c, vec3 prev, vec3 target )
+/// mantissa rounded up with probability equal to its fraction (`u`). The
+/// exponent is the brightest channel's (frexp, exact), bumped once where that
+/// channel's mantissa could round to 512.
+uint packRgbShared( vec3 c, float u )
 {
 	c = clamp( c, vec3( 0.0 ), vec3( 1024.0 ) );
 	const float maxc = max( c.r, max( c.g, c.b ) );
@@ -175,10 +173,7 @@ uint packRgbShared( vec3 c, vec3 prev, vec3 target )
 		sharedExp += 1;
 		scale *= 0.5;
 	}
-	uvec3 m;
-	for( int k = 0; k < 3; ++k )
-		m[k] = uint( clamp( stepQuantum( c[k] * scale, prev[k] * scale, target[k] * scale ), 0.0,
-							511.0 ) );
+	const uvec3 m = uvec3( min( floor( c * scale + u ), vec3( 511.0 ) ) );
 	return m.r | ( m.g << 9u ) | ( m.b << 18u ) | ( uint( sharedExp ) << 27u );
 }
 vec3 unpackRgbShared( uint w )
@@ -190,17 +185,14 @@ vec3 unpackRgbShared( uint w )
 /// THE GEOMETRY WORD: the distance (a half without its sign, its mantissa
 /// rounded to 7 bits: 0.4 % against the 5 % test) in bits 0-11, the normal's
 /// octahedral pair in 12-21, the count in 22-25 and the mean coverage (6 bits,
-/// one `stepQuantum` from last frame's) in 26-31.
-uint packGeom( float dist, vec3 n, uint count, float coverage, float prevCoverage,
-			   float targetCoverage )
+/// rounded like the mean, with `u`) in 26-31.
+uint packGeom( float dist, vec3 n, uint count, float coverage, float u )
 {
 	const uint h = packHalf2x16( vec2( dist, 0.0 ) ) & 0x7FFFu;
 	const uint d = min( ( h + 4u ) >> 3u, 0xFFFu );
 	const uvec2 q = uvec2( clamp( round( ( octEncode( n ) * 0.5 + 0.5 ) * 31.0 ), vec2( 0.0 ),
 								  vec2( 31.0 ) ) );
-	const uint cov = uint( clamp( stepQuantum( clamp( coverage, 0.0, 1.0 ) * 63.0, prevCoverage * 63.0,
-											   targetCoverage * 63.0 ),
-								  0.0, 63.0 ) );
+	const uint cov = uint( min( floor( clamp( coverage, 0.0, 1.0 ) * 63.0 + u ), 63.0 ) );
 	return d | ( q.x << 12u ) | ( q.y << 17u ) | ( min( count, kHistoryCountMax ) << 22u ) | ( cov << 26u );
 }
 void unpackGeom( uint g, out float dist, out vec3 n, out uint count, out float coverage )
@@ -503,22 +495,18 @@ void main()
 	// VALUE, so when the camera moves again the EMA continues from the rest mean
 	// and not from the older EMA state it would otherwise pop back to.
 	const float restK = p.knobs6.x;
-	vec4 restTarget = vec4( 0.0 );
 	if( restK >= 1.0 )
 	{
 		const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
 		const vec4 rest = restK < 1.5 ? sample1
 									  : mix( imageLoad( restMean, pix ), sample1, 1.0 / restK );
 		imageStore( restMean, pix, rest );
-		restTarget = rest;
 		mean = mix( mean, rest, clamp( restK / max( p.knobs6.y, 1.0 ), 0.0, 1.0 ) );
 	}
-	// THE TARGET the stored mean steps toward: this frame's sample, or at rest the
-	// rest mean it is being handed over to.
-	const vec4 target = restK >= 1.0 ? restTarget : vec4( answer.xyz * answer.w, answer.w );
 	imageStore( historyCur, pix,
-				uvec4( packRgbShared( mean.xyz, prev.xyz, target.xyz ),
-					   packGeom( pixelDist, pixelNormal, prevCount + 1u, mean.w, prev.w, target.w ),
+				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
+					   packGeom( pixelDist, pixelNormal, prevCount + 1u, mean.w,
+								 roundingDither( ivec2( lx, pix.y ), 2u ) ),
 					   0u, 0u ) );
 	// The pixel's answer: the answered frames' mean irradiance at the fraction
 	// of frames that answered (the piece and the field's cage are both linear in

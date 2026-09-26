@@ -1261,6 +1261,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // THE REST MEAN (PHOTON-GATHER-1d): the rest frame k and N.
     pp.knobs6[0] = temporal ? float(v.restFrames) : 0.0f;
     pp.knobs6[1] = float(settleFramesOf(v.historyFramesLast));
+    // ...and the view's ADVANCING frame counter (PHOTON-GA-VR): the packed
+    // history's stochastic rounding is keyed on it, never on the sample
+    // sequence's frame above, which a frozen A/B holds still.
+    pp.knobs6[2] = float(v.frame & 0xFFFFu);
     pp.knobs5[2] = temporal ? 1.0f : 0.0f;
     pp.knobs5[3] = in.tuning.historyValidationOff ? 1.0f : 0.0f;
     // PHOTON-GATHER-1d (GA-1e): the surface cache the hits read first, and the
