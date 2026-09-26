@@ -1765,14 +1765,15 @@ bool OgreView::warmUpShaders() {
         if (atom) {
             mScene->ensureGpuScene(/*graphIsCurrent=*/false);
             mScene->updateAtomDraw();
-            // ...and the id pass's three cull jobs, which a warm-up PASS never runs
-            // (it clones the scene passes only): one recorded cull into this view's
-            // own list builds them — the id pass overwrites it on its first frame.
+            // ...and the id pass's cull jobs — the frustum test, the compaction and THE
+            // CUT's two (ATOM-CLUSTER-CUT) — which a warm-up PASS never runs (it clones
+            // the scene passes only): one recorded cut into this view's own list builds
+            // them; the id pass overwrites it on its first frame.
             {
                 GpuCullRequest req;
                 fillCullFrustum(mCamera, float(height()), req);
                 req.flagsRequired = kGpuVisible | kGpuAtom;
-                req.mode = 2u;
+                req.mode = 3u;
                 std::string err;
                 mScene->recordGpuCull(mAtomCull, req, nullptr, err);
             }

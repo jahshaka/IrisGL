@@ -43,8 +43,12 @@ struct GpuCullParams {
     float    lod[4] = {};          ///< x tolerance, y proj[1][1], z viewport height, w 1 = orthographic
     uint32_t counts[4] = {};       ///< x instances, y flagsRequired, z flagsForbidden, w mode
     uint32_t hzb[4] = {};          ///< x levels, y width, z height, w reverseZ
+    /// THE CUT'S BUDGET (mode 3, ATOM-CLUSTER-CUT): x = the compacted index stream's
+    /// capacity in indices, y = the drawn-cluster record capacity, z = where the stream's
+    /// COARSE RESERVE begins (the main region is [0, z)), w = 0.
+    uint32_t cut[4] = {};
 };
-static_assert(sizeof(GpuCullParams) == 224, "the cull request's layout is a shader contract");
+static_assert(sizeof(GpuCullParams) == 240, "the cull request's layout is a shader contract");
 
 class GpuCull {
 public:
@@ -70,11 +74,68 @@ public:
     /// a grow starts it over.
     Ogre::UavBufferPacked *held() const { return mHeld; }
 
+    // ---- THE CUT (mode 3, ATOM-CLUSTER-CUT; SPECS/v2/CLUSTER_CUT_DESIGN.md D1/D2) --
+    /// Makes the cut's per-frame buffers exist at the current budget: the larger of
+    /// this list's own (grown when a cut it recorded reported an overflow —
+    /// `noteCutOverflow`) and `sceneNeed`, the SCENE's high-water mark of the indices a
+    /// cut asked for (OgreScene::cutIndexNeed) — so a view born into a heavy scene (a
+    /// screenshot, a thumbnail: two frames of life) starts at the size the scene needs.
+    bool ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneNeed = 0u);
+    /// THE COMPACTED INDEX STREAM: the drawn clusters' corners, mesh-local vertex
+    /// indices (32-bit), each surviving instance's run contiguous; the id pass binds
+    /// it as its index buffer (the identity buffer it replaced is deleted).
+    Ogre::UavBufferPacked *cutStream() const { return mCutStream; }
+    /// Per stream TRIANGLE, the id image's y word (`cluster << 8 | local triangle`)
+    /// and the cluster's DAG depth (the x word's top byte): two words a triangle.
+    Ogre::UavBufferPacked *cutTriWords() const { return mCutTriWords; }
+    /// One uvec4 per DRAWN CLUSTER: (slot, the cluster's global index, its first
+    /// index in the stream, its depth) — the emit job's work list.
+    Ogre::UavBufferPacked *cutRecords() const { return mCutRecords; }
+    /// Per SLOT: the instance's first TRIANGLE in the stream (the id pass's fragment
+    /// adds gl_PrimitiveID to it).
+    Ogre::UavBufferPacked *cutSlotBase() const { return mCutSlotBase; }
+    uint32_t cutIndexBudget() const { return mCutIndexBudget; }
+    uint32_t cutRecordBudget() const { return mCutRecordBudget; }
+    /// Where the coarse reserve begins: the main region is the first 7/8 of the stream.
+    uint32_t cutMainBudget() const { return mCutIndexBudget - mCutIndexBudget / 8u; }
+    /// A TEST DOOR (the overflow's proof): the next budget is `indices`, the scene's
+    /// high-water mark is ignored by this list, and overflows still double it.
+    void setCutBudgetForTest(uint32_t indices) {
+        mCutWantBudget = indices;
+        mCutIgnoreScene = true;
+        mCutForceCreate = true;
+    }
+    /// THE OVERFLOW, as the stats ring read it back: the budget doubles (to the
+    /// ceiling) before the next cut. The frames in flight lose no object — an instance
+    /// that does not fit draws its ROOT CUT from the coarse reserve (JahCullCut_cs) —
+    /// unless even the reserve is full, which is counted apart.
+    void noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked, uint32_t recordsAsked);
+    /// The first budget and the ceiling (indices): 2 M (700 k triangles; 8 MB of stream
+    /// + 5.3 MB of triangle words + 1.3 MB of records = ~15 MB a view) growing from what
+    /// was asked to 32 M; a view of a scene that has needed more starts at the scene's
+    /// high-water mark. NOT 8 M (the fix round's ask): with 8 M a view the selftest's
+    /// fixture B flipped two pixels at the gizmo's Z handle in 5 of 7 runs (0 of 12 at
+    /// 2 M, same code) — a layout-sensitive read somewhere, owner not found; reported.
+    static constexpr uint32_t kCutIndexBudgetFirst = 2u * 1024u * 1024u;
+    static constexpr uint32_t kCutIndexBudgetCeiling = 32u * 1024u * 1024u;
+    /// Records per index of budget: one record per 24 indices (8 triangles).
+    static constexpr uint32_t kCutIndicesPerRecord = 24u;
+
     /// Elements of the count buffer. [0] is the survivor count (a draw's
     /// drawCount); [1..3] are job 3's thread-group counts, which is where
-    /// patch 0032's indirect dispatch reads them from — hence the offset below.
-    static constexpr uint32_t kCountElements = 8u;
+    /// patch 0032's indirect dispatch reads them from — hence the offset below;
+    /// [4] the triangles the commands draw (the stats). THE CUT'S (mode 3):
+    /// [5..7] the cut job's groups (one per survivor), [8..10] the emit job's
+    /// groups (one per drawn-cluster record, [8] = records written), [11] the
+    /// stream's cursor (indices reserved), [12] instances that did not fit the
+    /// budget (drawn nothing this frame), [13] the indices they asked for, [14] the
+    /// (instance, cluster) pairs the rule evaluated, [15] the coarse reserve's cursor.
+    /// (Since the fix round: [12] = instances drawn COARSE — their root cut, from the
+    /// reserve — and [13] = instances drawn NOTHING, neither fitting.)
+    static constexpr uint32_t kCountElements = 16u;
     static constexpr uint32_t kIndirectOffsetBytes = 4u;
+    static constexpr uint32_t kCutIndirectOffsetBytes = 5u * 4u;
+    static constexpr uint32_t kEmitIndirectOffsetBytes = 8u * 4u;
     /// Threads per group of all three jobs (JahshakaCompute.material.json) and
     /// the width of the compaction's shared-memory scan.
     static constexpr uint32_t kThreadsPerGroup = 64u;
@@ -90,6 +151,14 @@ private:
     Ogre::UavBufferPacked *mDraws = nullptr;
     Ogre::UavBufferPacked *mHeld = nullptr;
     uint32_t mCapacity = 0u;
+    Ogre::UavBufferPacked *mCutStream = nullptr;
+    Ogre::UavBufferPacked *mCutTriWords = nullptr;
+    Ogre::UavBufferPacked *mCutRecords = nullptr;
+    Ogre::UavBufferPacked *mCutSlotBase = nullptr;
+    uint32_t mCutIndexBudget = 0u, mCutRecordBudget = 0u, mCutSlotCapacity = 0u;
+    uint32_t mCutWantBudget = kCutIndexBudgetFirst;
+    bool mCutIgnoreScene = false;
+    bool mCutForceCreate = false;   ///< the test door's budget may be SMALLER than the current one
 };
 
 }  // namespace detail

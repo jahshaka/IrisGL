@@ -189,7 +189,15 @@ namespace
 // the levels are the same index lists with bounds up to 1/1.25 smaller; on a scan
 // both the levels and the bounds change (the owner's temple: level-1 bound 2.48 m
 // -> 0.047 m). The bake's OUTPUT changed, so the version is bumped (BAKEKEY-1).
-constexpr int kFormatVersion = 14;
+// v15 (2026-09-26, ATOM-CLUSTER-CUT): THE CLUSTER DAG'S GROUP ERRORS FOLLOW THE
+// BOUND'S RULE. Every group's level-0 side is capped at its island's extent (a
+// dropped debris island costs its size, never its distance to unrelated surface —
+// the owner's temple's groups read 8-60x their simplifier error at the median, up
+// to 520x), the sampling margin multiplies the sampled terms only, and an exact
+// per-facet walk (seven points a facet) joins the removed-vertex walk; the groups
+// sample 8 points per simplified triangle and 4 per lost facet. Every stored group
+// error can move, so the version is bumped (BAKEKEY-1).
+constexpr int kFormatVersion = 15;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -3650,6 +3658,13 @@ constexpr int kMinTrianglesForDag = 2 * kMaxTriangles;
 /// samples over 68,220 triangles), and the exact term, the removed vertices, is
 /// walked in full either way.
 constexpr int kGroupSamplesMin = 512;
+/// ...at EIGHT per simplified triangle and FOUR per lost facet (ATOM-CLUSTER-CUT;
+/// were two and one): the margin covers the sampling gap only where the samples are
+/// dense enough for it to be a gap. At two per triangle the dragon's depth-0 group
+/// read 0.0089 where eight times the samples found 0.0097 (the DAG half of
+/// atom.lod_bound_bar); the chain samples a level at 4096+ over its whole surface.
+constexpr int kGroupSamplesPerTriangle = 8;
+constexpr int kGroupSamplesPerLostFacet = 4;
 
 using Variant = MeshBake::ClusterDagVariant;
 
@@ -3773,15 +3788,97 @@ int soupGridRes(const float *positions, int posComps, const std::vector<unsigned
     return std::clamp(int(std::ceil(double(longest) / cell)), 1, 4096);
 }
 
+/// THE DENSE REFERENCE of one group (ClusterDagStats::denseReference — the DAG's
+/// half of atom.lod_bound_bar's (a)): the same represented-surface rule as the bake,
+/// measured INDEPENDENTLY of its sampler and without its early-outs — 8x the area
+/// samples both ways, every removed vertex, and every lost level-0 facet and every
+/// added facet of S at the REFERENCE pattern (corners, edge midpoints, centroid and
+/// the centroids of the 1-to-4 split), island-capped on the level-0 side, NO margin.
+/// Level 0 is asked through the group's local soup where it answers within `reach`
+/// (exact there) and the whole grid past it. `removed[i]` says regionV[i] is not on S.
+float denseGroupReference(surface::TriangleGrid::Query &q, const float *positions, int posComps,
+                          const surface::TriangleGrid &baseGrid, const surface::TriangleGrid *gridL, float reach,
+                          const std::vector<std::array<unsigned, 3>> &baseFacets,
+                          const std::vector<unsigned> &simplifiedIdx, const surface::TriangleGrid &gridS,
+                          const std::vector<unsigned> &regionV, const std::vector<unsigned char> &removed,
+                          const std::vector<unsigned> &lostIdx, const lodchain::Islands &islands,
+                          size_t samplesCap, size_t sTris)
+{
+    float worst = 0.0f;
+    std::vector<surface::Sample> pts;
+    const size_t dense = 8u;
+    const auto toLevel0 = [&](const Vec3 &p) {
+        float d = gridL ? gridL->closest(q, p) : baseGrid.closest(q, p);
+        if (gridL && !(d <= reach)) d = baseGrid.closest(q, p);
+        return d;
+    };
+    if (surface::sample(positions, posComps, simplifiedIdx,
+                        dense * std::clamp(sTris * size_t(kGroupSamplesPerTriangle), size_t(kGroupSamplesMin),
+                                           samplesCap), &pts) > 0.0f)
+        for (const surface::Sample &sp : pts) {
+            const float d = toLevel0(sp.pos);
+            if (std::isfinite(d)) worst = std::max(worst, d);
+        }
+    for (size_t i = 0; i < regionV.size(); ++i) {
+        if (!removed[i]) continue;
+        const unsigned v = regionV[i];
+        const float d = std::min(gridS.closest(q, vertexOf(positions, posComps, v)), islands.capOf[v]);
+        if (std::isfinite(d)) worst = std::max(worst, d);
+    }
+    if (!lostIdx.empty() &&
+        surface::sample(positions, posComps, lostIdx,
+                        dense * std::clamp(lostIdx.size() / 3 * size_t(kGroupSamplesPerLostFacet),
+                                           size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f)
+        for (const surface::Sample &sp : pts) {
+            const float d = std::min(gridS.closest(q, sp.pos), islands.capOf[lostIdx[size_t(sp.tri) * 3]]);
+            if (std::isfinite(d)) worst = std::max(worst, d);
+        }
+    const auto refPts = [&](const std::vector<unsigned> &idx, size_t t, Vec3 *out) {
+        const Vec3 a = vertexOf(positions, posComps, idx[t * 3]), b = vertexOf(positions, posComps, idx[t * 3 + 1]),
+                   c = vertexOf(positions, posComps, idx[t * 3 + 2]);
+        out[0] = (a + b + c) * (1.0f / 3.0f);
+        out[1] = (a + b) * 0.5f;
+        out[2] = (b + c) * 0.5f;
+        out[3] = (c + a) * 0.5f;
+        out[4] = a; out[5] = b; out[6] = c;
+        out[7] = (a * 4.0f + b + c) * (1.0f / 6.0f);
+        out[8] = (b * 4.0f + c + a) * (1.0f / 6.0f);
+        out[9] = (c * 4.0f + a + b) * (1.0f / 6.0f);
+    };
+    Vec3 pp[10];
+    for (size_t t = 0; t < lostIdx.size() / 3; ++t) {
+        refPts(lostIdx, t, pp);
+        const float cap = islands.capOf[lostIdx[t * 3]];
+        for (const Vec3 &p : pp) {
+            const float d = std::min(gridS.closest(q, p), cap);
+            if (std::isfinite(d)) worst = std::max(worst, d);
+        }
+    }
+    for (size_t t = 0; t < sTris; ++t) {
+        std::array<unsigned, 3> f = { simplifiedIdx[t * 3], simplifiedIdx[t * 3 + 1], simplifiedIdx[t * 3 + 2] };
+        std::sort(f.begin(), f.end());
+        if (std::binary_search(baseFacets.begin(), baseFacets.end(), f)) continue;
+        refPts(simplifiedIdx, t, pp);
+        for (const Vec3 &p : pp) {
+            const float d = toLevel0(p);
+            if (std::isfinite(d)) worst = std::max(worst, d);
+        }
+    }
+    return worst;
+}
+
 void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant)
 {
     if (mesh.isNull()) return;
     mesh->clusterDag = MeshClusterDag();
     if (stats) {
-        const bool want = stats->wantRegions, reference = stats->referenceMeasure;
+        const bool want = stats->wantRegions, reference = stats->referenceMeasure,
+                   dense = stats->denseReference, wantTerms = stats->wantTerms;
         *stats = MeshBake::ClusterDagStats();
         stats->wantRegions = want;
         stats->referenceMeasure = reference;
+        stats->denseReference = dense;
+        stats->wantTerms = wantTerms || dense;
     }
     if (!mesh->getSkeleton().isNull()) return;     // static meshes only, as the chain
     if (mesh->primitiveMode != PrimitiveMode::Triangles) return;
@@ -3980,6 +4077,23 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     std::vector<std::vector<size_t>> byWave(static_cast<size_t>(waves));
     for (size_t g = 0; g < groups.size(); ++g) byWave[size_t(wave[g])].push_back(g);
 
+    // THE ISLANDS (the chain's represented-surface rule, `lodchain::Islands`): once,
+    // over level 0, before the waves, and READ-ONLY inside them — every group's
+    // level-0 side is capped at its island's extent.
+    const lodchain::Islands islands = lodchain::findIslands(positions, posComps, nv, base);
+    QVector<MeshBake::ClusterDagStats::GroupTerms> *terms =
+        stats && stats->wantTerms ? &stats->groupTerms : nullptr;
+    if (terms) terms->resize(int(groups.size()));
+    std::vector<std::array<unsigned, 3>> baseFacets;   // the dense reference's "is it level 0's"
+    if (stats && stats->denseReference) {
+        baseFacets.resize(baseTris);
+        for (size_t t = 0; t < baseTris; ++t) {
+            baseFacets[t] = { base[t * 3], base[t * 3 + 1], base[t * 3 + 2] };
+            std::sort(baseFacets[t].begin(), baseFacets[t].end());
+        }
+        std::sort(baseFacets.begin(), baseFacets.end());
+    }
+
     std::vector<float> measured(groups.size(), FLT_MAX);
     std::vector<unsigned char> below(groups.size(), 0);
     std::vector<size_t> groupFallbacks(groups.size(), 0);
@@ -4112,13 +4226,31 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             for (float v : chunkMax) m = std::max(m, v);
             return m;
         };
-        float worst = 0.0f;
+        // THE MEASUREMENT FOLLOWS THE CHAIN'S RULE (ATOM-LOD-BOUND-1, applied to the
+        // groups by ATOM-CLUSTER-CUT): the SAMPLED terms (1 and 3) carry the 1.25
+        // sampling margin and the EXACT ones (2 and the per-facet walk below) do not,
+        // and every LEVEL-0 point is capped at its own island's extent (`islands`,
+        // read-only here) — a debris island the group dropped costs its size, never
+        // its distance to unrelated surface (the scan's 100x). Each class keeps its
+        // own running maximum, which is what the max-only queries stop at; a cap can
+        // only LOWER a distance, so a query stopped at or below the running maximum
+        // stays at or below it capped, and the chunked folds are the serial walk's.
+        float sampled = 0.0f, exact = 0.0f;
+        std::atomic<bool> capBound { false };   // a diagnostic of the terms table only
+        const auto capped = [&](float d, unsigned v) {
+            const float cap = islands.capOf[v];
+            if (d > cap) { capBound.store(true, std::memory_order_relaxed); return cap; }
+            return d;
+        };
         const size_t sTris = simplifiedIdx.size() / 3;
+        const bool whole = stats && stats->referenceMeasure;
+        float reach = 0.0f;
+        bool haveSoup = false;
         if (surface::sample(positions, posComps, simplifiedIdx,
-                            std::clamp(sTris * 2u, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f) {
-            const float reach = (ghi - glo).length() * 0.1f + floorLen;
+                            std::clamp(sTris * size_t(kGroupSamplesPerTriangle), size_t(kGroupSamplesMin), samplesCap),
+                            &pts) > 0.0f) {
+            reach = (ghi - glo).length() * 0.1f + floorLen;
             const Vec3 grow(reach, reach, reach);
-            const bool whole = stats && stats->referenceMeasure;
             if (!whole) {
                 baseGrid.collect(glo - grow, ghi + grow, sc.soupTris);
                 sc.soupIdx.clear();
@@ -4126,12 +4258,13 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                     sc.soupIdx.insert(sc.soupIdx.end(), { base[t * 3], base[t * 3 + 1], base[t * 3 + 2] });
                 gridL.build(positions, posComps, sc.soupIdx, glo - grow, ghi + grow,
                                soupGridRes(positions, posComps, sc.soupIdx, glo - grow, ghi + grow));
+                haveSoup = true;
             }
             // (The fallback count is a diagnostic of how often the local soup was
             // asked past its reach; with a chunk's running maximum as the stop it is
             // a function of the chunking — of the input, not of the thread count.)
             std::atomic<size_t> fellBack { 0 };
-            worst = runningMax(pts.size(), worst, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
+            sampled = runningMax(pts.size(), sampled, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
                 // Only the MAXIMUM is wanted, so a sample that has anything within
                 // the running maximum stops looking (`stopAtOrBelow`).
                 const Vec3 &p = pts[i].pos;
@@ -4145,10 +4278,10 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             });
             groupFallbacks[g] = fellBack.load();
         }
-        const float termS = worst;
-        // Every removed vertex, exactly (it also names the output it stands under:
-        // each writes its own `removedOwner` entry).
-        worst = runningMax(regionV.size(), worst, [&](size_t i, surface::TriangleGrid::Query &q, float) {
+        const float termS = sampled;
+        // Every removed vertex, exactly and island-capped (it also names the output it
+        // stands under: each writes its own `removedOwner` entry).
+        exact = runningMax(regionV.size(), exact, [&](size_t i, surface::TriangleGrid::Query &q, float) {
             const unsigned v = regionV[i];
             const size_t l = regionL[i];
             removedOwner[l] = -1;
@@ -4156,9 +4289,9 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             unsigned tri = 0u;
             const float d = gridS.closest(q, vertexOf(positions, posComps, v), nullptr, nullptr, &tri);
             removedOwner[l] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);
-            return d;
+            return capped(d, v);
         });
-        const float termV = worst;
+        const float termV = exact;
         std::vector<unsigned> lostIdx;
         for (size_t i = 0; i < regionV.size(); ++i) {
             const unsigned v = regionV[i];
@@ -4173,20 +4306,126 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         }
         if (!lostIdx.empty() &&
             surface::sample(positions, posComps, lostIdx,
-                            std::clamp(lostIdx.size() / 3, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f)
-            worst = runningMax(pts.size(), worst, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
-                return (stats && stats->referenceMeasure)
-                           ? gridS.closest(q, pts[i].pos)
-                           : gridS.closest(q, pts[i].pos, nullptr, nullptr, nullptr, stop);
+                            std::clamp(lostIdx.size() / 3 * size_t(kGroupSamplesPerLostFacet), size_t(kGroupSamplesMin),
+                                       samplesCap), &pts) > 0.0f)
+            sampled = runningMax(pts.size(), sampled, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
+                const unsigned v0 = lostIdx[size_t(pts[i].tri) * 3];
+                if (!(islands.capOf[v0] > stop)) return 0.0f;     // this island cannot raise it
+                const float d = whole ? gridS.closest(q, pts[i].pos)
+                                      : gridS.closest(q, pts[i].pos, nullptr, nullptr, nullptr, stop);
+                return capped(d, v0);
             });
-        measured[g] = std::max(worst * lodchain::kBoundMargin, floorLen);
+        // THE PER-FACET WALK (the chain's F1, exact per point, no margin): the
+        // distance from a union of triangles peaks inside a facet, where neither the
+        // removed vertices nor the samples need look. Every LOST level-0 facet (term
+        // 3's set: a facet with a kept corner can sit half under a neighbour's
+        // surface — the staircase term 3 already refuses) against S, island-capped;
+        // and every facet of S that is not a level-0 facet against level 0 (surface
+        // the group ADDED; the local soup answers within `reach`, the whole grid past
+        // it — the term-1 rule). SEVEN POINTS a facet — the centroid, the three edge
+        // midpoints and the centroids of the 1-to-4 split (the corners are the vertex
+        // term's) — not the chain's four: a group is a patch whose facets can be long
+        // slivers against a rim, and the four-point walk read 0.042 where the dense
+        // reference found 0.139 inside one such facet (the endless plane's depth-4
+        // group, measured by atom.lod_bound_bar's DAG half).
+        const auto facetPts = [&](unsigned ia, unsigned ib, unsigned ic, Vec3 *out) {
+            const Vec3 a = vertexOf(positions, posComps, ia), b = vertexOf(positions, posComps, ib),
+                       c = vertexOf(positions, posComps, ic);
+            out[0] = (a + b + c) * (1.0f / 3.0f);
+            out[1] = (a + b) * 0.5f;
+            out[2] = (b + c) * 0.5f;
+            out[3] = (c + a) * 0.5f;
+            out[4] = (a * 4.0f + b + c) * (1.0f / 6.0f);
+            out[5] = (b * 4.0f + c + a) * (1.0f / 6.0f);
+            out[6] = (c * 4.0f + a + b) * (1.0f / 6.0f);
+        };
+        exact = runningMax(lostIdx.size() / 3, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop) {
+            const unsigned v0 = lostIdx[t * 3];
+            if (!(islands.capOf[v0] > stop)) return 0.0f;
+            Vec3 fp[7];
+            facetPts(lostIdx[t * 3], lostIdx[t * 3 + 1], lostIdx[t * 3 + 2], fp);
+            float m = 0.0f;
+            for (const Vec3 &pt : fp) {
+                const float d = whole ? gridS.closest(q, pt)
+                                      : gridS.closest(q, pt, nullptr, nullptr, nullptr, std::max(stop, m));
+                if (std::isfinite(d)) m = std::max(m, capped(d, v0));
+            }
+            return m;
+        });
+        {
+            const bool useSoup = !whole && haveSoup;
+            std::vector<std::array<unsigned, 3>> present;
+            const std::vector<unsigned> &near = useSoup ? sc.soupIdx : base;
+            present.reserve(near.size() / 3);
+            for (size_t t = 0; t < near.size() / 3; ++t) {
+                std::array<unsigned, 3> f = { near[t * 3], near[t * 3 + 1], near[t * 3 + 2] };
+                std::sort(f.begin(), f.end());
+                present.push_back(f);
+            }
+            std::sort(present.begin(), present.end());
+            exact = runningMax(sTris, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop) {
+                std::array<unsigned, 3> f = { simplifiedIdx[t * 3], simplifiedIdx[t * 3 + 1],
+                                              simplifiedIdx[t * 3 + 2] };
+                std::sort(f.begin(), f.end());
+                if (std::binary_search(present.begin(), present.end(), f)) return 0.0f;
+                Vec3 fp[7];
+                facetPts(simplifiedIdx[t * 3], simplifiedIdx[t * 3 + 1], simplifiedIdx[t * 3 + 2], fp);
+                float m = 0.0f;
+                for (const Vec3 &pt : fp) {
+                    const float st = std::max(stop, m);
+                    float d = useSoup ? gridL.closest(q, pt, nullptr, nullptr, nullptr, st) : baseGrid.closest(q, pt);
+                    if (useSoup && !(d <= reach)) d = baseGrid.closest(q, pt, nullptr, nullptr, nullptr, st);
+                    if (std::isfinite(d)) m = std::max(m, d);
+                }
+                return m;
+            });
+        }
+        measured[g] = std::max(std::max(sampled * lodchain::kBoundMargin, exact), floorLen);
         if (measured[g] < groups[g].simplified.error) below[g] = 1;
         if (termsLog)
             termLines[g] = (QStringLiteral("dag terms: group %1 depth %2  R %3 verts  S %4 tris  S->L0 %5  "
-                                   "removed verts %6  lost facets %7  estimate %8")
+                                   "removed verts %6  exact %7  sampled %8  estimate %9")
                         .arg(g).arg(groups[g].depth).arg(regionV.size()).arg(sTris)
                         .arg(double(termS), 0, 'g', 4).arg(double(termV), 0, 'g', 4)
-                        .arg(double(worst), 0, 'g', 4).arg(double(groups[g].simplified.error), 0, 'g', 4));
+                        .arg(double(exact), 0, 'g', 4).arg(double(sampled), 0, 'g', 4)
+                        .arg(double(groups[g].simplified.error), 0, 'g', 4));
+        if (terms) {
+            // Each group writes its OWN row (the wave's groups never share one).
+            MeshBake::ClusterDagStats::GroupTerms &row = (*terms)[int(g)];
+            row.regionVertices = int(regionV.size());
+            row.simplifiedTriangles = int(sTris);
+            row.sampled = sampled * lodchain::kBoundMargin;
+            row.vertex = termV;
+            row.facet = exact;
+            row.bound = measured[g];
+            row.capBound = capBound.load();
+            // THE ISLANDS THIS GROUP DROPPED: a level-0 component wholly inside the
+            // region with no vertex on S (the chain's "a level has none of it").
+            std::vector<unsigned> comps;
+            for (unsigned v : regionV)
+                if (islands.compOf[v] < islands.count()) comps.push_back(islands.compOf[v]);
+            std::sort(comps.begin(), comps.end());
+            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
+            for (unsigned comp : comps) {
+                bool dropped = true;
+                for (unsigned i = islands.vertStart[comp]; i < islands.vertStart[comp + 1] && dropped; ++i) {
+                    const size_t lw = local(islands.verts[i]);
+                    if (lw == kAbsent || !inRegion[lw] || kept[lw]) dropped = false;
+                }
+                if (dropped) {
+                    ++row.islandsDropped;
+                    row.droppedMaxExtent = std::max(row.droppedMaxExtent, islands.extent[comp]);
+                }
+            }
+            if (stats->denseReference) {
+                std::vector<unsigned char> removed(regionV.size());
+                for (size_t i = 0; i < regionV.size(); ++i) removed[i] = kept[regionL[i]] ? 0u : 1u;
+                row.reference = denseGroupReference(sc.single[0], positions, posComps, baseGrid,
+                                                    (!whole && haveSoup) ? &gridL : nullptr, reach,
+                                                    baseFacets, simplifiedIdx, gridS, regionV, removed, lostIdx,
+                                                    islands, samplesCap, sTris);
+            }
+        }
 
         // HAND ON: every output carries its own vertices plus the removed ones
         // nearest it; the partition gives each kept vertex to its first user.
@@ -4253,6 +4492,15 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             }
         }
     }
+
+    if (terms)
+        for (size_t g = 0; g < groups.size(); ++g) {
+            MeshBake::ClusterDagStats::GroupTerms &row = (*terms)[int(g)];
+            row.depth = dag.groups[int(g)].depth;
+            row.estimate = dag.groups[int(g)].estimate;
+            row.stored = dag.groups[int(g)].error;
+            if (row.bound == 0.0f) row.bound = measured[g];   // terminal: FLT_MAX
+        }
 
     // ---- meshlet-local storage -------------------------------------------
     dag.clusters.resize(int(raw.size()));

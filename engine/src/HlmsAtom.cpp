@@ -138,8 +138,9 @@ HlmsAtom::HlmsAtom(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders)
     mTypeName = kTypeName;
     mTypeNameStr = kTypeName;
     // PBS reserves ONE tex-buffer slot, the vertex shader's worldMatBuf. The decode
-    // needs four more (the instance table, the level table, the geometry rows, the
-    // bucket table) and one texture (the id image). PBS's own slot accounting honours
+    // needs seven more (the instance table, the level table, the geometry rows, the
+    // bucket table, the hit list, the mesh table and the cluster table) and one
+    // texture (the id image). PBS's own slot accounting honours
     // both counters (OgreHlmsPbs.cpp: the registers in notifyPropertiesMergedPre-
     // GenerationStep, the binds in fillBuffersFor), so nothing of PBS's moves onto them.
     mReservedTexBufferSlots = kReservedBufSlots;
@@ -835,6 +836,8 @@ Ogre::Hlms::PropertiesMergeStatus HlmsAtom::notifyPropertiesMergedPreGenerationS
     setProperty(tid, "atomGeomRowBuf", kGeomRowBufSlot);
     setProperty(tid, "atomBucketBuf", kBucketBufSlot);
     setProperty(tid, "atomHitBuf", kHitBufSlot);
+    setProperty(tid, "atomMeshBuf", kMeshBufSlot);
+    setProperty(tid, "atomClusterBuf", kClusterBufSlot);
     setProperty(tid, "atomSlotsPerPool", Ogre::int32(mSlotsPerPool));
     Ogre::int32 texSlotsStart = kReservedBufSlots;
     if (getProperty(tid, Ogre::HlmsBaseProp::ForwardPlus))
@@ -913,6 +916,12 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
         const bool hit = whole && mSource.hitMode && mSource.hitBuf;
         *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
             Ogre::PixelShader, kHitBufSlot, hit ? roView(mSource.hitBuf) : mEmptyBuf, 0, 0);
+        // THE CUT'S TABLES (the screen decode's cluster resolve).
+        *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
+            Ogre::PixelShader, kMeshBufSlot, (whole && mSource.meshes) ? roView(mSource.meshes) : mEmptyBuf, 0, 0);
+        *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
+            Ogre::PixelShader, kClusterBufSlot,
+            (whole && mSource.clusters) ? roView(mSource.clusters) : mEmptyBuf, 0, 0);
         Ogre::uint16 texSlot = kReservedBufSlots;
         if (mGridBuffer) texSlot = Ogre::uint16(texSlot + 2u);
         *commandBuffer->addCommand<Ogre::CbTexture>() =

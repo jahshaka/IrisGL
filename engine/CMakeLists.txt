@@ -288,6 +288,7 @@ if(JAH_RAY_QUERY_OK)
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
             COMMENT "Compiling the visibility buffer's id pass (${_stage})"
             VERBATIM)
     endforeach()
@@ -539,6 +540,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_atom_id.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
@@ -591,6 +593,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahGeomRows
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahGeomRows_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE ID IMAGE'S ONE DECODE (ATOM-CLUSTER-CUT): the two words' packing — the id
+    # pass includes it, the screen decode inserts it.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahAtomId
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahAtomId_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_atom_id.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE ONE ENVIRONMENT (PHOTON-ENV-1): what every escape sees — the cone
     # lookup on the prefiltered sky chain and the SH irradiance, one file, read

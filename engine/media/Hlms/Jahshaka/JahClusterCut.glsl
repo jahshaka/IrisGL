@@ -13,8 +13,9 @@
 // affordable when its measured error is STRICTLY below what the consumer affords
 // at the group's own distance, which is the chain's level walk's comparison.
 //
-// NOTHING IN THE PRODUCT INCLUDES THIS PIECE YET. Stage 3's GPU cut will, from
-// the cull. It spends the ONE currency — jahSampleFootprint / jahAllowedWorldError
+// THE PRODUCT'S CUT INCLUDES IT (ATOM-CLUSTER-CUT): the cull's cut job
+// (JahCullCut_cs.glsl) evaluates every (surviving instance, cluster) through it. It
+// spends the ONE currency — jahSampleFootprint / jahAllowedWorldError
 // in JahLevelRule_piece_cs.any (piece JahLevelRuleCurrency) — so an includer
 // inserts that piece first, and the instance's scale is the caller's
 // jahWorldMaxAxisScale (the longest COLUMN, the same piece's JahLevelRuleScale).
@@ -44,17 +45,23 @@ struct JahCluster
 
 // What the consumer can afford AT ONE GROUP: the distance from the eye to the
 // group's sphere, transformed by the instance, spelled operation for operation as
-// clusterGroupAllowed spells it.
+// clusterGroupAllowed spells it. ORTHOGRAPHIC: no distance term (the level walk's
+// own ortho case, JahCullTest_cs.glsl) - one metre makes the footprint the window
+// over the target.
 float jahClusterGroupAllowed( vec4 sphere, vec4 row0, vec4 row1, vec4 row2, float scale,
-							  vec3 eye, float tolerance, float projScaleY, float viewportHeight )
+							  vec3 eye, float tolerance, float projScaleY, float viewportHeight,
+							  bool orthographic )
 {
-	float cx = row0.x * sphere.x + row0.y * sphere.y + row0.z * sphere.z + row0.w;
-	float cy = row1.x * sphere.x + row1.y * sphere.y + row1.z * sphere.z + row1.w;
-	float cz = row2.x * sphere.x + row2.y * sphere.y + row2.z * sphere.z + row2.w;
-	float dx = cx - eye.x;
-	float dy = cy - eye.y;
-	float dz = cz - eye.z;
-	float d = max( 0.0, sqrt( dx * dx + dy * dy + dz * dz ) - sphere.w * scale );
+	// PRECISE: no fused multiply-add the compiler chooses per call site — one group
+	// judged at two places must give one answer (the cut job judges each group once
+	// anyway; this keeps the inline fallback and the parity job to the same rule).
+	precise float cx = row0.x * sphere.x + row0.y * sphere.y + row0.z * sphere.z + row0.w;
+	precise float cy = row1.x * sphere.x + row1.y * sphere.y + row1.z * sphere.z + row1.w;
+	precise float cz = row2.x * sphere.x + row2.y * sphere.y + row2.z * sphere.z + row2.w;
+	precise float dx = cx - eye.x;
+	precise float dy = cy - eye.y;
+	precise float dz = cz - eye.z;
+	precise float d = orthographic ? 1.0 : max( 0.0, sqrt( dx * dx + dy * dy + dz * dz ) - sphere.w * scale );
 	return jahAllowedWorldError( tolerance, jahSampleFootprint( d, projScaleY, viewportHeight ), scale );
 }
 

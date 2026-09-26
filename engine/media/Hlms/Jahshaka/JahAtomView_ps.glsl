@@ -65,8 +65,11 @@ void main()
 	float finalDepth = texelFetch( sceneDepth, sxy, 0 ).x;
 
 	uint mode = uint( atomViewParams.x + 0.5 );
+	// THE ID'S WORDS (src/rayquery/include/jah_atom_id.glsl, the one decode, spelled
+	// here because a low-level material cannot insert an Hlms piece): x = the slot
+	// in bits 0-23 and the drawn cluster's DAG DEPTH in bits 24-31.
 	uint slot = id.x & 0x00FFFFFFu;
-	uint level = ( id.x >> 24u ) & 0x7u;
+	uint depth = id.x >> 24u;
 
 	vec3 colour = vec3( 0.0 );
 	if( mode == 1u )
@@ -75,12 +78,18 @@ void main()
 	}
 	else if( mode == 2u )
 	{
-		// Level 0 warm, the coarsest cold (the verb's legend).
-		const vec3 ramp[8] = vec3[8]( vec3( 1.0, 0.15, 0.1 ), vec3( 1.0, 0.55, 0.0 ),
-									  vec3( 1.0, 0.95, 0.1 ), vec3( 0.6, 1.0, 0.1 ),
-									  vec3( 0.1, 0.85, 0.2 ), vec3( 0.1, 0.9, 0.95 ),
-									  vec3( 0.15, 0.35, 1.0 ), vec3( 0.6, 0.2, 1.0 ) );
-		colour = ramp[level];
+		// THE CUT'S DEPTH (ATOM-CLUSTER-CUT): a leaf (the authored surface) warm, the
+		// deeper the DAG the colder, then eight more for the deepest DAGs (a 10 M
+		// asset's reaches 12-13); anything deeper paints the last (the verb's legend).
+		const vec3 ramp[16] = vec3[16]( vec3( 1.0, 0.15, 0.1 ), vec3( 1.0, 0.55, 0.0 ),
+										vec3( 1.0, 0.95, 0.1 ), vec3( 0.6, 1.0, 0.1 ),
+										vec3( 0.1, 0.85, 0.2 ), vec3( 0.1, 0.9, 0.95 ),
+										vec3( 0.15, 0.35, 1.0 ), vec3( 0.6, 0.2, 1.0 ),
+										vec3( 1.0, 0.4, 0.8 ), vec3( 0.85, 0.85, 0.85 ),
+										vec3( 0.55, 0.35, 0.2 ), vec3( 0.3, 0.6, 0.5 ),
+										vec3( 0.9, 0.7, 0.5 ), vec3( 0.4, 0.4, 0.7 ),
+										vec3( 0.7, 0.1, 0.4 ), vec3( 0.2, 0.2, 0.2 ) );
+		colour = ramp[min( depth, 15u )];
 	}
 	else if( mode == 3u )
 	{

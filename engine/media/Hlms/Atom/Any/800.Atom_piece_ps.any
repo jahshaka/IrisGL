@@ -46,10 +46,13 @@
 	@insertpiece( Common_Matrix_DeclLoadOgreFloat4x3 )
 	@insertpiece( Common_Matrix_DeclUnpackMatrix4x4 )
 
-	// THE ID IMAGE (R32G32_UINT): x = item slot, bits 0-23, and the level, bits
-	// 24-26; y = the triangle within that level's index range (HlmsAtom.h, AtomId).
-	// In hit mode it is the hit list's RGBA32UI record image (the same two words,
-	// then the barycentrics and the ray's direction), and the list's BUFFER is
+	// THE ID IMAGE (R32G32_UINT), the cut's encoding (ATOM-CLUSTER-CUT; the piece
+	// JahAtomId is the one decode): x = item slot, bits 0-23, and the drawn
+	// cluster's DAG depth, bits 24-31; y = the cluster (its index in its mesh's
+	// DAG) above 8 bits and the triangle inside it in the low 8 (HlmsAtom.h, AtomId).
+	// In hit mode it is the hit list's RGBA32UI record image (slot and LEVEL, the
+	// triangle of the level, then the barycentrics and the ray's direction - a ray
+	// hits a structure built from a level), and the list's BUFFER is
 	// bound beside it (two words a record from word 4: the sun's visibility and
 	// the footprint as halves, then the write-back's weight; a buffer because the
 	// pin's table of pass textures has no slot to spare - HlmsAtom.h kHitBufSlot).
@@ -80,10 +83,17 @@
 	//   levels:    2 uint4 per GpuMeshLevel (firstIndex, indexCount, bound, geomRow)
 	//   geomRows:  3 uint4 per geometry row (Ogre's VctVoxelizer GeometryRow)
 	//   buckets:   1 uint per PBS (pool, slot) - 1 + the twin slot that serves it
+	@insertpiece( JahAtomId )
 	ReadOnlyBufferU( @value(atomInstanceBuf), uint4, atomInstances );
 	ReadOnlyBufferU( @value(atomLevelBuf), uint4, atomLevels );
 	ReadOnlyBufferU( @value(atomGeomRowBuf), uint4, atomGeomRows );
 	ReadOnlyBufferU( @value(atomBucketBuf), uint, atomBuckets );
+	// THE CUT'S TABLES (ATOM-CLUSTER-CUT): meshes, 4 uint4 per GpuMesh (dag = lane 3:
+	// first cluster, count, first group, the CLUSTER ROW); clusters, 2 uint4 per
+	// GpuCluster (range = first index in the mesh's cluster stream, index count,
+	// group, refined). The screen decode's only route to a triangle.
+	ReadOnlyBufferU( @value(atomMeshBuf), uint4, atomMeshes );
+	ReadOnlyBufferU( @value(atomClusterBuf), uint4, atomClusters );
 
 	// THE GEOMETRY, READ WHERE THE RASTER KEEPS IT: the vertex and index buffers the
 	// engine draws, through the device addresses of the GPU scene's geometry rows
@@ -386,8 +396,6 @@
 		uint atomSlotRaw = atomIds.x & 0x00FFFFFFu;
 		atomOk = atomOk && atomSlotRaw < atomInstCount;
 		uint atomI = min( atomSlotRaw, max( atomInstCount, 1u ) - 1u ) * 10u;
-		uint atomLevel = ( atomIds.x >> 24u ) & 0x7u;
-		uint atomTri = atomIds.y;
 
 		uint4 atomRaster = atomInstances[atomI + 9u];
 		uint atomWord = atomRaster.x;
@@ -403,7 +411,13 @@
 		atomOk = atomOk && atomBucket != 0u && atomBucket == worldMaterialIdx[inAtom.drawId].w;
 
 		uint atomMesh = atomInstances[atomI + 6u].w;
+		// Where the triangle's corners are: a geometry row and the first index.
+		uint atomRowSrc = 0u;
+		uint atomFirstIdx = 0u;
 		@property( atom_hit_mode )
+			// A HIT NAMES A LEVEL (the structure the ray hit was built from).
+			uint atomLevel = ( atomIds.x >> 24u ) & 0x7u;
+			uint atomTri = atomIds.y;
 			// THE FAR COPY (bit 27): the mesh's coarsest level, the last one with an
 			// index range - the level the far BLAS was built from.
 			if( ( atomIds.x & 0x08000000u ) != 0u )
@@ -417,18 +431,37 @@
 				}
 				atomLevel = atomCoarsest;
 			}
+			uint atomLevelAtRaw = atomMesh * 8u + atomLevel;
+			atomOk = atomOk && atomLevelAtRaw < atomLevelCount;
+			uint4 atomLevelRow = atomLevels[min( atomLevelAtRaw, max( atomLevelCount, 1u ) - 1u ) * 2u];
+			// The triangle is compared as a COUNT, never as atomTri * 3: a wrapped product
+			// of a garbage id would pass the test and address past the index buffer.
+			// THE SKIN ROW (PHOTON-SKIN-1's row override, GpuInstance::raster z): a rigged
+			// item's geometry is its skin cache's POSED vertices over the mesh's own
+			// index ranges - the rows jah_rq_geom.glsl traces - so a posed character is
+			// shaded on its posed triangles.
+			atomRowSrc = atomRaster.z != 0xFFFFFFFFu ? atomRaster.z + atomLevel * 8u : atomLevelRow.w;
+			atomOk = atomOk && atomTri < atomLevelRow.y / 3u;
+			atomFirstIdx = atomLevelRow.x + min( atomTri, atomLevelRow.y / 3u ) * 3u;
+		@else
+			// THE SCREEN'S ID NAMES A CLUSTER (ATOM-CLUSTER-CUT): the mesh's dag, the
+			// cluster's range in the mesh's cluster stream, read through the CLUSTER
+			// ROW. An Atom item is never rigged (the split keeps skins on PBS), so no
+			// row override applies. Every index is clamped into its table and compared
+			// as a COUNT (the helper-lane rule).
+			uint4 atomDec = jahAtomIdDecode( atomIds );
+			uint atomMeshCount = uint( atomMeshes.length() ) / 4u;
+			uint atomClusterCount = uint( atomClusters.length() ) / 2u;
+			atomOk = atomOk && atomMesh < atomMeshCount && atomClusterCount > 0u;
+			uint4 atomDag = atomMeshes[min( atomMesh, max( atomMeshCount, 1u ) - 1u ) * 4u + 3u];
+			atomOk = atomOk && atomDec.z < atomDag.y;
+			uint atomClusterAt = min( atomDag.x + atomDec.z, max( atomClusterCount, 1u ) - 1u );
+			uint4 atomRange = atomClusters[atomClusterAt * 2u];
+			atomOk = atomOk && atomDec.w < atomRange.y / 3u;
+			atomRowSrc = atomDag.w;
+			atomFirstIdx = atomRange.x + min( atomDec.w, 255u ) * 3u;
 		@end
-		uint atomLevelAtRaw = atomMesh * 8u + atomLevel;
-		atomOk = atomOk && atomLevelAtRaw < atomLevelCount;
-		uint4 atomLevelRow = atomLevels[min( atomLevelAtRaw, max( atomLevelCount, 1u ) - 1u ) * 2u];
-		// The triangle is compared as a COUNT, never as atomTri * 3: a wrapped product of
-		// a garbage id would pass the test and address past the index buffer.
-		// THE SKIN ROW (PHOTON-SKIN-1's row override, GpuInstance::raster z): a rigged
-		// item's geometry is its skin cache's POSED vertices over the mesh's own
-		// index ranges - the rows jah_rq_geom.glsl traces - so a posed character is
-		// shaded on its posed triangles.
-		uint atomRowSrc = atomRaster.z != 0xFFFFFFFFu ? atomRaster.z + atomLevel * 8u : atomLevelRow.w;
-		atomOk = atomOk && atomRowSrc < atomRowCount && atomTri < atomLevelRow.y / 3u;
+		atomOk = atomOk && atomRowSrc < atomRowCount;
 		uint atomRowAt = min( atomRowSrc, max( atomRowCount, 1u ) - 1u ) * 3u;
 		uint4 atomAddr = atomGeomRows[atomRowAt];
 		uint4 atomLay0 = atomGeomRows[atomRowAt + 1u];
@@ -455,7 +488,7 @@
 		float2 uvA = float2( 0.0, 0.0 ), uvB = uvA, uvC = uvA;
 		if( atomOk )
 		{
-			uint atomFirst = atomLevelRow.x + atomTri * 3u;
+			uint atomFirst = atomFirstIdx;
 			uint vi0 = atomIndex( atomAddr, atomLay1, atomFirst );
 			uint vi1 = atomIndex( atomAddr, atomLay1, atomFirst + 1u );
 			uint vi2 = atomIndex( atomAddr, atomLay1, atomFirst + 2u );
