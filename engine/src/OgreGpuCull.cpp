@@ -287,7 +287,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         mGpuScene.flushGeomRows();
         if (!cull.ensureCut(rs->getVaoManager(), err)) return false;
         if (!mGpuScene.clusterBuffer() || !mGpuScene.groupBuffer()) {
-            err = "the cut has no cluster tables (no mesh with geometry rows is attached)";
+            err = "the cut's cluster tables could not be created";
             return false;
         }
     }

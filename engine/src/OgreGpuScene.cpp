@@ -247,7 +247,10 @@ void GpuScene::setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
 }
 
 void GpuScene::flushClusterTables() {
-    if (!mClusterDirty || !mVao) return;
+    // THE TABLES EXIST FROM THE FIRST FLUSH, EMPTY OR NOT: a scene with no mesh yet
+    // (a new project before its first attach) still records the cut, which binds them
+    // and draws nothing.
+    if (!mVao || (!mClusterDirty && mClusterBuffer && mGroupBuffer)) return;
     mClusterDirty = false;
     mClusterMirror.clear();
     mGroupMirror.clear();
