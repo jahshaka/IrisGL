@@ -4021,9 +4021,10 @@ bool RayQueryTier::ensureSamplers(std::string &err) {
     return true;
 }
 
-bool RayQueryTier::makeReflectPipeline(std::string &err) {
-    VkDescriptorSetLayoutBinding b[kReflectBindings] = {};
-    const VkDescriptorType types[kReflectBindings] = {
+/// THE REFLECTION SET'S LAYOUT, one type a binding (rq_reflect.comp's set 0) — a
+/// table and not a local of makeReflectPipeline so the pool's arithmetic COUNTS it
+/// (kReflectStorageImages) rather than restating it as a literal.
+constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 0  tlas
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 1  params
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 2  normals
@@ -4062,6 +4063,24 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 ...Normal
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 36 the photon view's overlay (PHOTON-VIEW-1)
     };
+constexpr unsigned countReflect(VkDescriptorType type) {
+    unsigned n = 0u;
+    for (unsigned i = 0; i < kReflectBindings; ++i) n += kReflectTypes[i] == type ? 1u : 0u;
+    return n;
+}
+/// The set's STORAGE IMAGES (the pool's arithmetic below counts them): jahSsrReflection,
+/// the two history pairs, the hit list's two (HIT-SHADE-1) and the photon view's overlay
+/// (PHOTON-VIEW-1) — every one a single descriptor (no storage image is an arrayed
+/// binding: the cascade arrays are all sampled).
+constexpr unsigned kReflectStorageImages = countReflect(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+static_assert(kReflectTypes[kReflectPhotonBinding] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
+                  kReflectTypes[kReflectHitBinding + 1u] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
+                  kReflectTypes[kReflectHitBinding + 2u] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+              "the writer's storage-image bindings are the layout's (the pool counts the layout)");
+
+bool RayQueryTier::makeReflectPipeline(std::string &err) {
+    VkDescriptorSetLayoutBinding b[kReflectBindings] = {};
+    const VkDescriptorType *types = kReflectTypes;
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
         b[i].descriptorType = types[i];
@@ -4139,9 +4158,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     sizes[1].descriptorCount = sets;
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    // jahSsrReflection, the two history pairs, the hit list's two (HIT-SHADE-1) and
-    // the photon view's overlay (PHOTON-VIEW-1).
-    sizes[2].descriptorCount = sets * 8u;
+    sizes[2].descriptorCount = sets * kReflectStorageImages;   // counted from the layout
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     // kRayVoxelKinds arrays a cascade (level 0's back side and normal among them,
     // PHOTON-VOXEL-5), and the card read's view term (PHOTON-CARDS-5).
