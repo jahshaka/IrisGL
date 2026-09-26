@@ -5926,9 +5926,12 @@ private:
     Ogre::IrradianceField *mPhotonIfd = nullptr;
     Ogre::MovableObject *mPhotonIfdVis = nullptr;
     unsigned long long mPhotonIfdFollows = ~0ull;
-    /// Cards: the quads, and how many cards they were built for.
+    /// Cards: the quads, how many vertices they hold, and the cache's table
+    /// generation and frame they were built at (re-uploaded only when the table
+    /// moves or the age ramp's clock ticks — kPhotonCardAgeFrames).
     Ogre::ManualObject *mPhotonCards = nullptr;
-    size_t mPhotonCardQuads = 0u, mPhotonCardVerts = 0u;
+    size_t mPhotonCardVerts = 0u;
+    unsigned long long mPhotonCardGeneration = ~0ull, mPhotonCardFrame = 0ull;
     /// The lighting showing the Voxels picture is still one of the chain's and
     /// still shows it (checked by pointer before any dereference).
     bool photonVoxelLive() const;

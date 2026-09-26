@@ -364,7 +364,8 @@ void OgreScene::photonCardsOff() {
         mSceneMgr->destroyManualObject(mPhotonCards);
     }
     mPhotonCards = nullptr;
-    mPhotonCardQuads = mPhotonCardVerts = 0u;
+    mPhotonCardVerts = 0u;
+    mPhotonCardGeneration = ~0ull;
 }
 
 void OgreScene::photonRefreshBounds() {
@@ -406,6 +407,11 @@ const char *photonCardsDatablock(Ogre::Root *root) {
     }
     return kPhotonCardsMaterial;
 }
+
+/// THE AGE RAMP'S CLOCK: a table that has not moved still AGES (every card's colour
+/// walks towards red), so its quads are re-coloured once a second of cache frames —
+/// a debug picture's resolution, not a per-frame upload.
+constexpr unsigned long long kPhotonCardAgeFrames = 60ull;
 
 /// Capture age -> colour, on a LOG scale of cache frames: green when fresh,
 /// yellow at about thirty seconds (1,900 frames), red at ten minutes (36,000) and
@@ -532,71 +538,76 @@ void OgreScene::syncPhotonView() {
         }
     }
 
-    // ---- CARDS: the cache's table as quads, rebuilt every frame the view is on.
+    // ---- CARDS: the cache's table as quads, re-uploaded only when the table moves
+    // (SurfaceCache::photonGeneration) or the age ramp's clock ticks.
     if (view != PhotonView::Cards || !mSurfaceCache || !mSurfaceCache->built()) {
         if (mPhotonCards) photonCardsOff();
+        return;
+    }
+    const unsigned long long gen = mSurfaceCache->photonGeneration(), frame = mSurfaceCache->frame();
+    if (mPhotonCards && gen == mPhotonCardGeneration && frame - mPhotonCardFrame < kPhotonCardAgeFrames)
+        return;
+    std::vector<PhotonCardQuad> quads;
+    mSurfaceCache->photonQuads(quads);
+    size_t held = 0u;
+    for (const PhotonCardQuad &q : quads) held += q.held ? 1u : 0u;
+    const size_t outlined = quads.size() - held;
+    // A held card is one quad (4 vertices); a waiting one an outline of four
+    // thin quads (16).
+    const size_t verts = held * 4u + outlined * 16u;
+    const char *db = photonCardsDatablock(mRoot);
+    if (!verts || !db) {
+        if (mPhotonCards) photonCardsOff();
+        return;
+    }
+    const bool rebuild = !mPhotonCards || verts != mPhotonCardVerts;
+    if (!mPhotonCards) {
+        mPhotonCards = mSceneMgr->createManualObject(Ogre::SCENE_DYNAMIC);
+        mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)->attachObject(mPhotonCards);
+        mPhotonCards->setVisibilityFlags(kPhotonViewBit);
+        mPhotonCards->setCastShadows(false);
+    }
+    if (rebuild) {
+        mPhotonCards->clear();
+        mPhotonCards->begin(db, Ogre::OT_TRIANGLE_LIST);
     } else {
-        static std::vector<PhotonCardQuad> quads;
-        mSurfaceCache->photonQuads(quads);
-        size_t held = 0u;
-        for (const PhotonCardQuad &q : quads) held += q.held ? 1u : 0u;
-        const size_t outlined = quads.size() - held;
-        // A held card is one quad (4 vertices); a waiting one an outline of four
-        // thin quads (16).
-        const size_t verts = held * 4u + outlined * 16u;
-        const char *db = photonCardsDatablock(mRoot);
-        if (!verts || !db) {
-            if (mPhotonCards) photonCardsOff();
+        mPhotonCards->beginUpdate(0);
+    }
+    Ogre::uint32 base = 0u;
+    const auto quad = [&](const Ogre::Vector3 &a, const Ogre::Vector3 &b, const Ogre::Vector3 &c,
+                          const Ogre::Vector3 &d, const Ogre::ColourValue &col) {
+        for (const Ogre::Vector3 *p : { &a, &b, &c, &d }) {
+            mPhotonCards->position(*p);
+            mPhotonCards->colour(col);
+        }
+        mPhotonCards->quad(base, base + 1u, base + 2u, base + 3u);
+        base += 4u;
+    };
+    const Ogre::ColourValue waiting(1.0f, 0.9f, 0.1f, 1.0f);
+    for (const PhotonCardQuad &q : quads) {
+        // Lifted off its plane by a millimetre and a thousandth of its size:
+        // the depth bias does the rest.
+        const float lift = 0.001f + 0.001f * std::max(q.halfU.length(), q.halfV.length());
+        const Ogre::Vector3 c = q.centre + q.normal * lift;
+        const Ogre::Vector3 p00 = c - q.halfU - q.halfV, p10 = c + q.halfU - q.halfV,
+                            p11 = c + q.halfU + q.halfV, p01 = c - q.halfU + q.halfV;
+        if (q.held) {
+            quad(p00, p10, p11, p01, ageColour(q.age));
         } else {
-            const bool rebuild = !mPhotonCards || verts != mPhotonCardVerts;
-            if (!mPhotonCards) {
-                mPhotonCards = mSceneMgr->createManualObject(Ogre::SCENE_DYNAMIC);
-                mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)->attachObject(mPhotonCards);
-                mPhotonCards->setVisibilityFlags(kPhotonViewBit);
-                mPhotonCards->setCastShadows(false);
-            }
-            if (rebuild) {
-                mPhotonCards->clear();
-                mPhotonCards->begin(db, Ogre::OT_TRIANGLE_LIST);
-            } else {
-                mPhotonCards->beginUpdate(0);
-            }
-            Ogre::uint32 base = 0u;
-            const auto quad = [&](const Ogre::Vector3 &a, const Ogre::Vector3 &b, const Ogre::Vector3 &c,
-                                  const Ogre::Vector3 &d, const Ogre::ColourValue &col) {
-                for (const Ogre::Vector3 *p : { &a, &b, &c, &d }) {
-                    mPhotonCards->position(*p);
-                    mPhotonCards->colour(col);
-                }
-                mPhotonCards->quad(base, base + 1u, base + 2u, base + 3u);
-                base += 4u;
-            };
-            const Ogre::ColourValue waiting(1.0f, 0.9f, 0.1f, 1.0f);
-            for (const PhotonCardQuad &q : quads) {
-                // Lifted off its plane by a millimetre and a thousandth of its size:
-                // the depth bias does the rest.
-                const float lift = 0.001f + 0.001f * std::max(q.halfU.length(), q.halfV.length());
-                const Ogre::Vector3 c = q.centre + q.normal * lift;
-                const Ogre::Vector3 p00 = c - q.halfU - q.halfV, p10 = c + q.halfU - q.halfV,
-                                    p11 = c + q.halfU + q.halfV, p01 = c - q.halfU + q.halfV;
-                if (q.held) {
-                    quad(p00, p10, p11, p01, ageColour(q.age));
-                } else {
-                    // The outline's width: a twentieth of the card's shorter side, at
-                    // most 4 cm (a ground card is tens of metres wide).
-                    const float w = std::min(0.04f, 0.1f * std::min(q.halfU.length(), q.halfV.length()));
-                    const Ogre::Vector3 du = q.halfU.normalisedCopy() * w, dv = q.halfV.normalisedCopy() * w;
-                    quad(p00, p10, p10 + dv, p00 + dv, waiting);
-                    quad(p01 - dv, p11 - dv, p11, p01, waiting);
-                    quad(p00, p00 + du, p01 + du, p01, waiting);
-                    quad(p10 - du, p10, p11, p11 - du, waiting);
-                }
-            }
-            mPhotonCards->end();
-            mPhotonCardVerts = verts;
-            mPhotonCardQuads = quads.size();
+            // The outline's width: a twentieth of the card's shorter side, at
+            // most 4 cm (a ground card is tens of metres wide).
+            const float w = std::min(0.04f, 0.1f * std::min(q.halfU.length(), q.halfV.length()));
+            const Ogre::Vector3 du = q.halfU.normalisedCopy() * w, dv = q.halfV.normalisedCopy() * w;
+            quad(p00, p10, p10 + dv, p00 + dv, waiting);
+            quad(p01 - dv, p11 - dv, p11, p01, waiting);
+            quad(p00, p00 + du, p01 + du, p01, waiting);
+            quad(p10 - du, p10, p11, p11 - du, waiting);
         }
     }
+    mPhotonCards->end();
+    mPhotonCardVerts = verts;
+    mPhotonCardGeneration = gen;
+    mPhotonCardFrame = frame;
 }
 
 }   // namespace detail

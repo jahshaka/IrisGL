@@ -526,6 +526,7 @@ bool SurfaceCache::build(Ogre::SceneManager *sceneMgr, std::string &err) {
 
 void SurfaceCache::destroyAll() {
     mBuilt = false;
+    ++mPhotonGeneration;
     mInstances.clear();
     mCards.clear();
     mByNode.clear();
@@ -785,6 +786,7 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
                     mByNode[cand.node] = mInstances.size();
                     mInstances.push_back(inst);
                     mTableDirty = true;
+                    ++mPhotonGeneration;
                     return true;
                 }
                 r.queued = true;
@@ -801,6 +803,7 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
     mByNode[cand.node] = mInstances.size();
     mInstances.push_back(inst);
     mTableDirty = true;
+    ++mPhotonGeneration;
     return true;
 }
 
@@ -914,6 +917,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         mInstances.swap(keptInst);
         mCards.swap(keptCards);
         mTableDirty = true;
+        ++mPhotonGeneration;
     }
 
     // 3. WHAT ARRIVES — the nearest candidates first, so a full atlas holds the
@@ -1084,6 +1088,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         card.queued = false;
         if (!card.lastUpdated) mTableDirty = true;   // its first capture: readable now
         card.lastUpdated = mFrame;
+        ++mPhotonGeneration;
         ++mCaptures;
         ++mCapturesLastFrame;
         mTexelsLastFrame += card.size * card.size;

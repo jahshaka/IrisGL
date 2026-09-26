@@ -334,6 +334,13 @@ public:
     /// THE PHOTON VIEW'S TABLE (PHOTON-VIEW-1): every allocated card of every
     /// resident instance, held (a capture landed) or waiting for its first.
     void photonQuads(std::vector<PhotonCardQuad> &out) const;
+    /// ...and ITS GENERATION: moves whenever what photonQuads answers can change —
+    /// a card allocated or released (an arrival, a departure, a moved instance's
+    /// re-cut, a rebuild) or a capture landing (its age restarts). The view
+    /// re-uploads its quads on a move (and on the age ramp's own clock, frame()).
+    unsigned long long photonGeneration() const { return mPhotonGeneration; }
+    /// The cache's frame counter (a card's age is counted in it).
+    unsigned long long frame() const { return mFrame; }
     /// TEST AND TOOL: one card texel, all five layers, through an
     /// AsyncTextureTicket (flushCommands first).
     bool readTexel(NodeId node, unsigned card, float u, float v, CardSample &out) const;
@@ -599,6 +606,7 @@ private:
     bool mAtlasFull = false;
 
     unsigned long long mFrame = 0ull;
+    unsigned long long mPhotonGeneration = 0ull;   ///< photonGeneration()
     unsigned long long mCaptures = 0ull;
     unsigned mCapturesLastFrame = 0u;
     unsigned mTexelsLastFrame = 0u;
