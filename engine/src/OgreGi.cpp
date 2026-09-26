@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 #include <OgreHlmsManager.h>
 #include <OgreAsyncTextureTicket.h>
@@ -38,6 +39,20 @@ namespace jahshaka { namespace engine { namespace detail {
 namespace {
 std::vector<std::pair<const Ogre::SceneManager *, const SceneGiBinding *>> sGiBindings;
 }   // namespace
+
+// THE GI SIDE'S OWN SCENE-GRAPH UPDATES, COUNTED (lane D1-SCALE-FIXTURES, the owed
+// "extra updateSceneGraph calls per frame during a drag" row): the light re-inject
+// (refreshVctFast, refreshGiLighting, runChainTick), the chain's settle step and the
+// arm / cascade builds each update the graph themselves, on top of the frame's own
+// update. Each call files a `gi.sceneGraph` monitor stage — one record
+// per call, so a frame's count and cost are readable — but only INSIDE a frame: a
+// call between frames would be banked into the next frame's stages and make them
+// sum past its wall time. The call itself is unchanged.
+static void giUpdateSceneGraph(Ogre::SceneManager *sm) {
+    std::unique_ptr<monitor::Stage> st;
+    if (monitor::live() && monitor::gMonitor->inFrame()) st.reset(new monitor::Stage("gi.sceneGraph"));
+    sm->updateSceneGraph();
+}
 
 void registerSceneGiBinding(const Ogre::SceneManager *sm, const SceneGiBinding *binding) {
     for (auto &e : sGiBindings)
@@ -772,7 +787,7 @@ bool OgreScene::refreshVctFast() {
             // build itself and there is no set to compare.
             // World transforms first: the table reads them, and the whole reason
             // this call exists is that something moved.
-            mSceneMgr->updateSceneGraph();
+            giUpdateSceneGraph(mSceneMgr);
             if (!sameBox(aabb, mGiLitVolume)) {
                 mVctVoxelizer->setRegionToVoxelize(aabb);
                 mVctVoxelizer->dividideOctants(1u, 1u, 1u);
@@ -927,7 +942,7 @@ void OgreScene::payChainSettleStep() {
     JAH_TRY {
         monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "vct.light.settle",
                                  mRoot->getRenderSystem());
-        mSceneMgr->updateSceneGraph();
+        giUpdateSceneGraph(mSceneMgr);
         // (A LIGHT THAT MOVED WHILE THE SETTLE WAS OWED restarted it before this
         // step was chosen — the scheduler's check, which runs on every payable
         // frame, idle ones included: see updateCascades.)
@@ -1091,7 +1106,7 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             if (int(ask) > int(mGiTickOwed)) mGiTickOwed = ask;
             return true;
         }
-        mSceneMgr->updateSceneGraph();
+        giUpdateSceneGraph(mSceneMgr);
         {
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0,
                                      inMotion ? "vct.light.moving" : "vct.light",
@@ -1111,7 +1126,7 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
 void OgreScene::runChainTick(bool inMotion) {
     JAH_TRY {
         if (mVctCascades.empty()) return;
-        mSceneMgr->updateSceneGraph();
+        giUpdateSceneGraph(mSceneMgr);
         bool refused = false;
         // The OUTERMOST cascade this tick could not inject: the settle it owes
         // starts there (oweChainSettle's note).
@@ -4692,7 +4707,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
 
     // World transforms must be current before voxelization: the GPU scene's table
     // is brought current from them.
-    mSceneMgr->updateSceneGraph();
+    giUpdateSceneGraph(mSceneMgr);
 
     mVctVoxelizer = new Ogre::VctVoxelizer(
         Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
@@ -4953,7 +4968,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
 
     // World transforms must be current before voxelisation (the same rule
     // buildVoxelArm keeps).
-    mSceneMgr->updateSceneGraph();
+    giUpdateSceneGraph(mSceneMgr);
 
     mVctCascades.clear();
     mVctCascades.resize(table.size());
@@ -5293,7 +5308,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     bool built = false;               // the volumes on the GPU describe the NEW placement
     const auto attempt = [&]() -> bool {
         JAH_TRY {
-            mSceneMgr->updateSceneGraph();
+            giUpdateSceneGraph(mSceneMgr);
             // FAULT INJECTION, for the suite that proves the revert path (F2).
             // The same shape as JAH_TEXTURE_WAIT_FAULT (OgreEngine.cpp): read
             // per rebuild rather than cached, because the test arms it between

@@ -1078,6 +1078,10 @@ void OgreEngine::renderOneFrame() {
                 // (its workspace is enabled and first in the manager's list),
                 // after the frame's scene-graph update and light list — the
                 // light list a capture planned here used to run without.
+                // ITS OWN MONITOR STAGE (lane D1-SCALE-FIXTURES, W13): the
+                // candidate walk over every item runs here every frame, and
+                // scale.cpu_walks reads it as a number rather than an A/B.
+                monitor::Stage cardStage("engine.cards");
                 s->updateSurfaceCache();
             }
         // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
