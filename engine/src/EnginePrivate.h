@@ -772,6 +772,16 @@ constexpr const char *kAtomIdPassId = "atom_id";
 /// The chain's id image (R32G32_UINT, AtomId's words): what the id pass writes and
 /// the screen decode reads (OgreChain.cpp defines it; the listener finds it by name).
 constexpr const char *kAtomIdTexture = "jahAtomIds";
+/// THE ATOM VIEW (D0-ATOM-VIEW, Types.h AtomView). Its two passes — the copy of
+/// the id pass's depth and the false-colour quad after the post chain — carry THIS
+/// execution-mask bit and nothing else, and the view's atom listener clears it from
+/// the workspace's mask every frame the scene's view is Off: switching the view
+/// never rebuilds the workspace, and Off executes neither pass. Every other pass of
+/// every chain keeps Ogre's default masks (0xFF, a clear pass 0x01), which the
+/// workspace's remaining bits still intersect.
+constexpr Ogre::uint8 kAtomViewExecutionBit = 0x80u;
+/// The quad's material (engine media, Hlms/Jahshaka/JahAtomView.material).
+constexpr const char *kAtomViewMaterial = "Jahshaka/AtomView";
 
 /// OgreAtomIdPass.cpp — THE ID PASS's device half. `atomIdPassSupported`: this
 /// device can run it (buffer device addresses, VK_KHR_draw_indirect_count, the
@@ -3413,6 +3423,13 @@ public:
     RayQueryStatus rayQueryStatus() const override;
     AtomDrawStatus atomDrawStatus() override;
     void setAtomDrawEnabled(bool on) override;
+    void setAtomView(AtomView view) override { mAtomView = view; }
+    AtomView atomView() const override { return mAtomView; }
+    /// THE BUCKETS VIEW'S TABLE (OgreAtomDraw.cpp): one R32_UINT texel per GPU
+    /// scene slot holding the decode bucket that shades it (0 = none), 1024 slots a
+    /// row. Written by updateAtomDraw ONLY while the view is Buckets (a CPU walk of
+    /// the slots and an upload when a value moved); null until then.
+    Ogre::TextureGpu *atomViewTable() const { return mAtomViewTable; }
     GpuSceneStatus gpuSceneStatus() const override;
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
@@ -5775,6 +5792,15 @@ private:
     /// THE MEASUREMENT DOOR (the cost table's paired arms in one process): false
     /// routes every item to PBS and every chain builds without the id pass.
     bool mAtomDrawEnabled = true;
+    /// THE ATOM VIEW (not saved; a new scene starts Off).
+    AtomView mAtomView = AtomView::Off;
+    Ogre::TextureGpu *mAtomViewTable = nullptr;
+    std::vector<uint32_t> mAtomViewRows;   ///< what the table holds (its CPU copy)
+    void syncAtomViewTable();
+public:
+    /// Destroys the Buckets table (the scene's teardown, before its SceneManager).
+    void releaseAtomViewTable();
+private:
     /// A route answered Pending (textures still baking) since the last update.
     mutable bool mAtomPendingSeen = false;
     /// The views of this scene whose chains carry no id pass while the split is

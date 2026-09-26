@@ -1511,6 +1511,8 @@ void OgreScene::destroy() {
         // THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): HlmsAtom-owned objects in
         // this SceneManager's memory, so they die before it does.
         forgetSceneDecodes(mSceneMgr);
+        // THE ATOM VIEW'S BUCKET TABLE: a texture of this tree's manager.
+        releaseAtomViewTable();
         teardownGi();   // VPL lights die while the SceneManager is still alive
         // The atmosphere destroys its Rectangle2D THROUGH the SceneManager, so it
         // has to go while that is still alive (teardown law: components, then the

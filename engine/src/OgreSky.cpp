@@ -473,15 +473,15 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         // day, which the model uses for the sun's height terms; sin(elevation)
         // of our own unit vector is that number, and asin/PI puts it in the
         // [0;1] the component wants. With no sun light in the scene the sky is
-        // evaluated at the model's lowest sun: its night, the same answer the
-        // CPU bake gave for a sunless scene.
+        // evaluated at the ZENITH sun (SKY-SUN-1): the same formula at toSun =
+        // +Y gives 0.5, a plain noon sky. timeOfDay 0 is the model's HORIZON — a
+        // sunset — which painted every sunless realistic-sky scene pink.
         const Ogre::Vector3 toSun = sky.hasSun
             ? Ogre::Vector3(sky.sunDir[0], sky.sunDir[1], sky.sunDir[2]).normalisedCopy()
             : Ogre::Vector3::UNIT_Y;
         const float elevation = std::max(-1.0f, std::min(1.0f, float(toSun.y)));
-        const float timeOfDay = sky.hasSun
-            ? std::max(0.0f, std::min(1.0f - 1e-6f, std::asin(elevation) / float(M_PI)))
-            : 0.0f;
+        const float timeOfDay =
+            std::max(0.0f, std::min(1.0f - 1e-6f, std::asin(elevation) / float(M_PI)));
         mAtmosphere->setSunDir(-toSun, timeOfDay);
         mAtmoSunDir = -toSun;          // what the component is holding, for the tint query
         mAtmoTimeOfDay = timeOfDay;

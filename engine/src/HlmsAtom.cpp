@@ -454,6 +454,13 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
     return twin;
 }
 
+uint32_t HlmsAtom::bucketIdOf(const Ogre::HlmsDatablock *pbs) const {
+    auto it = mTwinOfPbs.find(pbs);
+    if (it == mTwinOfPbs.end()) return 0u;
+    auto t = mTwins.find(static_cast<const Ogre::HlmsDatablock *>(it->second));
+    return t == mTwins.end() ? 0u : t->second.bucketId;
+}
+
 void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
     auto it = mTwinOfPbs.find(pbs);
     if (it == mTwinOfPbs.end()) return;

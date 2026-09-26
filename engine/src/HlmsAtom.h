@@ -198,6 +198,10 @@ public:
     /// Twins = buckets held (every scene), and the PBS datablocks they serve.
     size_t decodeTwinCount() const { return mTwins.size(); }
     size_t decodeMemberCount() const { return mTwinOfPbs.size(); }
+    /// THE BUCKET a PBS datablock is shaded by (Twin::bucketId: never 0, never
+    /// reused), 0 when no twin serves it. The Atom view's Buckets table (OgreScene::
+    /// syncAtomViewTable) colours by this.
+    uint32_t bucketIdOf(const Ogre::HlmsDatablock *pbs) const;
 
     /// THE PRODUCT'S DECODE DRAWS (PHOTON-HIT-SHADE-1): for a SceneManager whose
     /// scene runs the ray tier, the bucket twin of every PBS datablock its items
