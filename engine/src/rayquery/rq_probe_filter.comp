@@ -129,8 +129,10 @@ void main()
 		float wPlane = 0.0;
 		vec3 nT = vec3( 0.0 ), nB = vec3( 0.0 ), nN = vec3( 0.0, 0.0, 1.0 );
 		ivec2 nBlock = ivec2( 0 );
+		// A NEIGHBOUR IN THE SAME EYE ONLY (PHOTON-GA-VR): across the seam the
+		// next column is the OTHER eye's picture of another part of the scene.
 		if( onSurface && p.knobs4.z > 0.5 && all( greaterThanEqual( nc, ivec2( 0 ) ) ) &&
-			all( lessThan( nc, grid ) ) )
+			all( lessThan( nc, grid ) ) && jahEyeOfCell( nc.x ) == jahEyeOfCell( cell.x ) )
 		{
 			const uint nb = uint( nc.y * grid.x + nc.x );
 			const vec4 nbPos = records.r[nb].posW;
@@ -139,7 +141,8 @@ void main()
 				nN = records.r[nb].normalW.xyz;
 				// THE PLANE: the neighbour against THIS probe's plane.
 				wPlane = jahPlaneWeight( posW.xyz, normalW.xyz, nbPos.xyz, nN,
-										 jahViewDistanceOf( posW.xyz ) );
+										 jahViewDistanceOf( jahEyeNow( jahEyeOfCell( cell.x ) ),
+															posW.xyz ) );
 				jahTangentFrame( nN, nT, nB );
 				nBlock = blockOf( nb );
 			}

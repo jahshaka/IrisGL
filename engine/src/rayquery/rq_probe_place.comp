@@ -60,17 +60,24 @@ layout( std430, set = 0, binding = 5 ) buffer Args { uint x; uint y; uint z; } a
 /// pixel the prepass never touched).
 struct Surface { vec3 world; vec3 normal; float dist; bool valid; };
 
-Surface surfaceAt( vec2 pix )
+Surface surfaceAt( vec2 pix, int eye )
 {
 	Surface s;
 	s.world = vec3( 0.0 );
 	s.normal = vec3( 0.0 );
 	s.dist = 0.0;
 	s.valid = false;
-	// CLAMPED TO THE IMAGE: the grid is a ceiling division, so the last cell of
-	// a row can reach past the target's edge, and a sampler's clamp would read
-	// the edge texel while the reconstruction claimed the outside position.
-	const vec2 uv = clamp( pix / vec2( p.resolution.zw ), vec2( 0.0 ), vec2( 0.999999 ) );
+	// CLAMPED TO THE EYE'S OWN IMAGE: the grid is a ceiling division, so the
+	// last cell of a row can reach past the eye's edge — past the target's, or
+	// under stereo across the SEAM into the other eye — and a sampler's clamp
+	// would read the edge texel while the reconstruction claimed the outside
+	// position. `local` is the eye's 0..1 coordinate (the ray basis's), `uv` the
+	// target's (the textures'); with one eye they are the same number.
+	const float eyeW = float( jahEyeWidth() );
+	const float x0 = float( eye ) * eyeW;
+	const vec2 local = clamp( vec2( ( pix.x - x0 ) / eyeW, pix.y / p.resolution.w ), vec2( 0.0 ),
+							  vec2( 0.999999 ) );
+	const vec2 uv = jahStereo() ? vec2( ( local.x * eyeW + x0 ) / p.resolution.z, local.y ) : local;
 	const float rawDepth = texture( sceneDepth, uv ).x;
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
 		return s;
@@ -81,7 +88,7 @@ Surface surfaceAt( vec2 pix )
 	s.normal = normalize( p.viewAxisX.xyz * normalVS.x + p.viewAxisY.xyz * normalVS.y +
 						  p.viewAxisZ.xyz * normalVS.z );
 	s.dist = jahViewDistance( rawDepth );
-	s.world = jahWorldAt( uv, s.dist );
+	s.world = jahWorldAt( jahEyeNow( eye ), local, s.dist );
 	s.valid = finite3( s.world ) && finite3( s.normal ) && finite1( s.dist );
 	return s;
 }
@@ -105,6 +112,13 @@ void main()
 	const uint index = uint( cell.y * grid.x + cell.x );
 	const float stride = max( p.knobs.x, 1.0 );
 	const uint frame = uint( p.knobs.z );
+	// THE CELL'S EYE AND ITS ORIGIN IN THE TARGET (PHOTON-GA-VR): under stereo
+	// the right eye's cells follow the left eye's and start at the seam, so a
+	// cell's pixels are one eye's pixels; with one eye the origin is cell x
+	// stride, exactly as before.
+	const int eye = jahEyeOfCell( cell.x );
+	const vec2 cellOrigin = vec2( float( cell.x - eye * jahEyeGridW() ), float( cell.y ) ) * stride +
+							vec2( float( eye * jahEyeWidth() ), 0.0 );
 
 	// ---- 1. THE PROBE'S PIXEL, jittered inside its own cell ---------------
 	vec2 offset = vec2( 0.5, 0.5 );
@@ -113,15 +127,15 @@ void main()
 		// The pixel CENTRE of a jittered texel, not a continuous position: the
 		// depth and normals are point-sampled, so a sub-pixel position would
 		// read one texel and claim another's place.
-		const vec2 j = jahSample2( cell, 0u, frame );
+		const vec2 j = jahSample2( jahLocalCell( cell ), 0u, frame );
 		offset = floor( j * stride ) + 0.5;
 	}
 	else
 	{
 		offset = vec2( floor( stride * 0.5 ) + 0.5 );
 	}
-	const vec2 probePix = vec2( cell ) * stride + offset;
-	const Surface probe = surfaceAt( probePix );
+	const vec2 probePix = cellOrigin + offset;
+	const Surface probe = surfaceAt( probePix, eye );
 	if( !probe.valid )
 	{
 		// No surface under this probe: the record says so and the integrate
@@ -144,8 +158,8 @@ void main()
 	for( int i = 0; i < 4; ++i )
 	{
 		const vec2 q = vec2( float( i & 1 ), float( ( i >> 1 ) & 1 ) );
-		const vec2 pix = ( vec2( cell ) + ( q + 0.25 ) * 0.5 ) * stride + vec2( 0.5 );
-		const Surface s = surfaceAt( pix );
+		const vec2 pix = cellOrigin + ( q + 0.25 ) * 0.5 * stride + vec2( 0.5 );
+		const Surface s = surfaceAt( pix, eye );
 		if( !s.valid )
 			continue;
 		// How far off the probe's plane this pixel lies, as a fraction of its

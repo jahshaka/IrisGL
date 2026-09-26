@@ -2528,7 +2528,7 @@ struct GiParams {
     ///
     /// `Auto` IS THE TIER'S (PHOTON-GATHER-1d, the rule T-A): the tier table's
     /// gather row (`giQualityFacts(...).gather`) — ON at High, Epic and Medium
-    /// (36 rays), OFF at Low and in the VR column — under a GI mode that is on,
+    /// (36 rays), OFF at Low, the VR column the same (PHOTON-GA-VR) — under a GI mode that is on,
     /// wherever the machine traces. `On` turns it on wherever the machine traces;
     /// `Off` keeps the cones and the field. The same machine rule the reflections
     /// take: no ray-query device, or a project whose ray row is Off, keeps the
@@ -2740,9 +2740,20 @@ constexpr float kCardFootprintTexels = 4.0f;
 /// probes capped at a quarter of the grid (Lumen's budget is a fixed
 /// allocation of the same order, and a flat scene spends none of it).
 ///
-/// THE VR COLUMN IS OFF (GA-VR): the pixel history is 24 B a pixel — 247 MB and
-/// +0.172 ms at a headset's 10.3 Mpx (PHOTON-GATHER-1c) — and a stereo target
-/// needs its probe grid split at the eye seam; GA-VR shrinks the history first.
+/// THE VR COLUMN IS THE DESKTOP'S ROW (PHOTON-GA-VR, decided by arithmetic): a
+/// stereo target gathers per EYE (the grid split at the seam, each eye through
+/// its own basis) with the packed 16 B-a-pixel history, and in a headset the
+/// gather is CHEAPER than the diffuse it removes — the cone diffuse is compiled
+/// out and the field's cage stands down where a probe answered. Measured at the
+/// Quest Pro's 2160x2376 per eye on Monado's simulated HMD, clocks locked
+/// 2100-2550 MHz, gather-on and gather-off windows alternated every 24 frames in
+/// one process (spikes/photon-ga-vr/EVIDENCE.md): the instanced opaque pass
+/// sheds 2.4-2.5 ms an eye on the default scene and 4.7-5.1 on Showroom 2, the
+/// gather's four jobs cost 0.5-1.5 ms an eye (3.0 at Epic on Showroom 2, the
+/// 4x probes' trace), a net 0.6 / 3.8-4.1 ms an eye BACK at Medium and High and
+/// 2.1 at Epic. The field alone (the ddgi door) is 0.27 / 0.50 ms an eye of it.
+/// VRAM: 280 MB a headset view at 16 px a probe (the history 164 MB), 381 MB at
+/// Epic's 8 — a stereo view holds no rest mean (it never rests).
 struct GiGatherFacts {
     /// What `GiParams::gather = GiToggle::Auto` resolves to (under a GI mode
     /// that is on, on a machine that traces).
@@ -2977,8 +2988,9 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // ...and the relight budget with it, on the same floor for the same reason.
         f.cardLightTexels = std::max(f.cardLightTexels / 2u, 16384u);
         f.cardIndirectTexels = std::max(f.cardIndirectTexels / 2u, 16384u);
-        // ...and the GATHER IS OFF in the VR column (GiGatherFacts: GA-VR).
-        f.gather.on = false;
+        // ...and the GATHER IS THE DESKTOP'S ROW (GiGatherFacts: PHOTON-GA-VR's
+        // arithmetic — cheaper per eye than the cone and field diffuse it removes
+        // at every tier that has it, Epic's four times the probes included).
     }
     return f;
 }
@@ -3209,8 +3221,13 @@ struct GatherTuning {
     /// else, which is the A/B that prices the adaptive pass.
     int      adaptiveCap = -1;
     /// THE DETERMINISM ARM. The sample sequence's only input is an integer hash
-    /// of (probe cell, ray, frame index); holding the frame term makes
-    /// consecutive frames of a still scene byte-identical.
+    /// of (probe cell, ray, frame index); holding the frame term makes the
+    /// RAW estimate of consecutive frames of a still scene byte-identical. The
+    /// packed history's rounding dither (GA-VR) is keyed on the view's ADVANCING
+    /// frame counter and ignores this freeze, so a pixel A/B is byte-exact only
+    /// where the rest mean holds (a still view past its rest frames) or under
+    /// JAHSHAKA_GATHER_NO_TEMPORAL; a moving arm or a stereo view (which never
+    /// rests) compares within the rounding's amplitude, not exactly.
     bool     freezeFrameIndex = false;
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
@@ -3244,7 +3261,8 @@ struct GatherTuning {
     /// frame-to-frame flicker is ~ the floor x the single-frame innovation —
     /// 9 codes each frame alone -> 1 code; a lighting step of D codes arrives
     /// within 1 code after ln(1/D)/ln(1 - 1/historyFrames) frames — 16 for a
-    /// 5-code step). Clamped to 1..63 (the count's six bits).
+    /// 5-code step). Clamped to 1..15 (the packed history's four count bits,
+    /// PHOTON-GA-VR).
     unsigned historyFrames = 0u;
     /// THE HISTORY'S VALIDATION OFF (PHOTON-GATHER-1d, the 1c audit's m2) — a
     /// TEST door, never shipped: every reprojected texel is accepted (the 5 %
@@ -3303,10 +3321,19 @@ struct GatherStatus {
     unsigned long long raysPerFrame = 0ull;
     /// The view the numbers below were measured on.
     unsigned targetW = 0u, targetH = 0u;
-    /// Bytes of texture the gather holds resident: the octahedral radiance +
-    /// hit-distance atlas, the probe records and the full-resolution
-    /// irradiance target.
-    unsigned long long atlasBytes = 0ull;
+    /// A TWO-EYE TARGET (PHOTON-GA-VR): the grid is two grids side by side,
+    /// `eyeProbesX` columns over each eye (probesX = 2 x eyeProbesX), split at
+    /// the seam; with one eye `eyeProbesX` = probesX.
+    bool stereo = false;
+    unsigned eyeProbesX = 0u;
+    /// THE VIEW'S RESIDENT VRAM, in bytes (PHOTON-GA-VR): the octahedral
+    /// radiance + hit-distance atlas, the probe records, the full-resolution
+    /// irradiance target (8 B a pixel), the pixel history and the rest mean
+    /// (8 B a pixel; none for a stereo view, which never rests) — and of it,
+    /// `historyBytes`: the history's two packed halves, 16 B a pixel (8 B a
+    /// texel each; the rgba16f + r32ui pairs before it were 24).
+    unsigned long long vramBytes = 0ull;
+    unsigned long long historyBytes = 0ull;
     /// GPU milliseconds per stage, read back several frames late through the
     /// tier's own timestamp pool (negative = not measured yet), and the CPU
     /// cost of RECORDING them on the thread that draws.

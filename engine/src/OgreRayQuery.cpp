@@ -5124,12 +5124,18 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     if (sceneIt == mScenes.end()) return;
     SceneAs &sa = sceneIt->second;
     if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) return;
-    // ONE EYE ONLY AT PHASE 1. A stereo target is two images in one texture and
-    // the probe grid would have to be split at the seam exactly as the
-    // reflection's is; that is the spec's phase 7, and gathering a stereo
-    // target as if it were one image would measure a wrong picture rather than
-    // decline to measure one (the VR column keeps the irradiance field, V-A).
-    if (view->stereo()) return;
+    // TWO EYES, ONE GATHER (PHOTON-GA-VR — the reflection trace's REFLECT-VR-1
+    // rule, below where the basis is built): a stereo target is gathered per eye
+    // in the same dispatches, each eye through its own located basis, the probe
+    // grid split at the seam (ScreenProbeGather). A stereo view whose eyes have
+    // not been pushed yet DECLINES — gathering the head's frustum across a
+    // two-eye target would place every probe at a wrong world point.
+    const bool stereo = view->stereo();
+    const StereoEyeBasis *eyes = view->stereoEyes();
+    if (stereo && !eyes) {
+        if (mGather && mGather->holds(key)) mGather->forget(key);
+        return;
+    }
 
     // THE CHAIN'S TEXTURES, by the names OgreChain.cpp declares them under —
     // the same two the reflection trace reads, and for the same reason: a
@@ -5152,9 +5158,15 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.depth = depthTex;
     in.width = depthTex->getWidth();
     in.height = depthTex->getHeight();
-    // THE TIER TABLE'S GATHER ROW (GA-TIERROW: the table, never the SSR row).
-    // A stereo view has declined above, so the column is the desktop one.
-    in.facts = giQualityFacts(scene->giParams().quality, GiViewProfile::Desktop,
+    // A two-eye target must split into two whole eyes (the reflection's guard).
+    if (stereo && (in.width < 2u || (in.width & 1u))) return;
+    in.stereo = stereo;
+    // THE TIER TABLE'S GATHER ROW (GA-TIERROW: the table, never the SSR row), in
+    // the column `probeGatherWanted` reads: the VR column while a headset drives
+    // the scene's GI (every view of it then — the eyes, and the mono control an
+    // eye screenshot compares with them — gathers at the headset's density).
+    in.facts = giQualityFacts(scene->giParams().quality,
+                              scene->mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
                               scene->giParams().epicTier)
                    .gather;
     in.tuning = scene->gatherTuning();
@@ -5243,19 +5255,38 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     // ---- THE CAMERA'S BASIS: the ray tier's one eye basis (eyeBasis), the
     // LETTERBOX folded in exactly as the reflection and the sun contact fold it
     // (expandEyeToTarget) — a probe's pixel and the shot's inner rectangle agree.
+    // UNDER STEREO, THE TWO LOCATED EYES (PHOTON-GA-VR): each eye's pose and
+    // asymmetric frustum, mapped over its own half — recordReflect's arithmetic
+    // through the same two functions. The VIEW AXES stay the rendering camera's
+    // for both eyes, and that is exact (recordReflect's note: HlmsPbs uploads one
+    // view matrix per pass, so both halves' G-buffer normals are in the HEAD's
+    // view space).
     const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
     const Ogre::Quaternion q = cam->getDerivedOrientation();
-    Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
-    cam->getFrustumExtents(fl, fr, ft, fb,
-                           ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
-    EyeBasisF eye = eyeBasis(ortho, cam->getDerivedPosition(), q, float(fl), float(fr),
-                             float(ft), float(fb));
-    expandEyeToTarget(eye, view->chainDesc(), in.width, in.height);
-    std::memcpy(in.camPos, eye.camPos, sizeof(in.camPos));
-    std::memcpy(in.rayTL, eye.rayTL, sizeof(in.rayTL));
-    std::memcpy(in.rayRight, eye.rayRight, sizeof(in.rayRight));
-    std::memcpy(in.rayDown, eye.rayDown, sizeof(in.rayDown));
-    std::memcpy(in.fwd, eye.fwd, sizeof(in.fwd));
+    EyeBasisF eyeB[2];
+    if (stereo) {
+        for (int i = 0; i < 2; ++i)
+            eyeB[i] = eyeBasis(ortho, eyes[i].position, eyes[i].orientation, eyes[i].tanLeft,
+                               eyes[i].tanRight, eyes[i].tanTop, eyes[i].tanBottom);
+    } else {
+        Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
+        cam->getFrustumExtents(fl, fr, ft, fb,
+                               ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
+        eyeB[0] = eyeBasis(ortho, cam->getDerivedPosition(), q, float(fl), float(fr), float(ft),
+                           float(fb));
+        eyeB[1] = eyeB[0];
+    }
+    for (int i = 0; i < 2; ++i) expandEyeToTarget(eyeB[i], view->chainDesc(), in.width, in.height);
+    std::memcpy(in.camPos, eyeB[0].camPos, sizeof(in.camPos));
+    std::memcpy(in.rayTL, eyeB[0].rayTL, sizeof(in.rayTL));
+    std::memcpy(in.rayRight, eyeB[0].rayRight, sizeof(in.rayRight));
+    std::memcpy(in.rayDown, eyeB[0].rayDown, sizeof(in.rayDown));
+    std::memcpy(in.fwd, eyeB[0].fwd, sizeof(in.fwd));
+    std::memcpy(in.camPos2, eyeB[1].camPos, sizeof(in.camPos2));
+    std::memcpy(in.rayTL2, eyeB[1].rayTL, sizeof(in.rayTL2));
+    std::memcpy(in.rayRight2, eyeB[1].rayRight, sizeof(in.rayRight2));
+    std::memcpy(in.rayDown2, eyeB[1].rayDown, sizeof(in.rayDown2));
+    std::memcpy(in.fwd2, eyeB[1].fwd, sizeof(in.fwd2));
     const auto put = [](float dst[3], const Ogre::Vector3 &v) {
         dst[0] = float(v.x); dst[1] = float(v.y); dst[2] = float(v.z);
     };
@@ -7067,7 +7098,7 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
 /// against the TIER TABLE and the machine (PHOTON-GATHER-1d, the rule T-A), the
 /// same shape `rayReflectionsWanted` has: the row says what the scene asks for,
 /// the table says what `Auto` means at this tier — on at High, Epic and Medium,
-/// off at Low and in the VR column (`giQualityFacts(...).gather.on`) — and only
+/// off at Low, the VR column the same (`giQualityFacts(...).gather.on`) — and only
 /// under a GI mode that is on (there is no diffuse GI to estimate otherwise);
 /// the machine answers whether it can trace at all.
 bool OgreScene::probeGatherWanted() const {

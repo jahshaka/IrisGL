@@ -154,17 +154,21 @@ ChainDesc OgreView::chainDesc() const {
     // and a preview show the diffuse the viewport shows (a screenshot is the
     // editor's own picture), and GiStatus::giAtRest's settled-history term makes
     // a settled shot wait for its own view's history.
-    // ...AND NOT IN A STEREO VIEW (the lead's read): the Component declines a
-    // stereo target (the probe grid would have to be split at the eye seam), so
-    // without this term a VR eye would pay a second geometry traversal every
-    // frame for a prepass nothing then reads.
+    // ...AND IN A STEREO VIEW TOO (PHOTON-GA-VR): the Component gathers a two-eye
+    // target per eye, its grid split at the seam; the row itself (the tier
+    // table's VR column) decides whether a headset runs it.
     // ...AND AN OFFSCREEN VIEW BY ITS DECLARED CONTRACT (the fix round;
     // View::setOffscreenContract): a still picture gathers and its caller waits
     // for giAtRest; a live one takes the field's answer; an undeclared one
-    // refuses, once, out loud.
-    const bool wantsGather = mScene && mScene->probeGatherWanted() && !mStereo;
-    bool contractAllows = !isOffscreen() || mOffscreenContract == OffscreenContract::StillPicture;
-    if (wantsGather && isOffscreen() && mOffscreenContract == OffscreenContract::Undeclared &&
+    // refuses, once, out loud. A VIEW THAT PRESENTS TO A PERSON — a window, or
+    // the headset's eye pair (a stereo view: an offscreen target only because
+    // the runtime's swapchains take a copy of it) — declares nothing and
+    // gathers by its row: the contract is a property of the pictures an editor
+    // makes offscreen, and the wearer's picture is not one of them.
+    const bool wantsGather = mScene && mScene->probeGatherWanted();
+    const bool presents = !isOffscreen() || mStereo;
+    bool contractAllows = presents || mOffscreenContract == OffscreenContract::StillPicture;
+    if (wantsGather && !presents && mOffscreenContract == OffscreenContract::Undeclared &&
         !mSaidNoContract) {
         mSaidNoContract = true;
         Ogre::LogManager::getSingleton().logMessage(
