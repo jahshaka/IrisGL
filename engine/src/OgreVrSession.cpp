@@ -1392,9 +1392,9 @@ bool VrSession::create(std::string &reason) {
     View *v = mEngine->createOffscreenView("jahshaka-vr", mEyeWidth * 2u, mEyeHeight,
                                            Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
     if (!v) { reason = "createOffscreenView failed: " + mEngine->lastError(); return false; }
-    // LIVE: the eye pair is drawn every frame for the wearer, and the VR
-    // column is gather-off (stereo declines it besides).
-    v->setOffscreenContract(OffscreenContract::Live);
+    // NO OFFSCREEN CONTRACT: the eye pair PRESENTS to the wearer, so it gathers
+    // by the scene's row — the VR column of the tier table — like a window
+    // (OgreView's chain rule for a stereo view, PHOTON-GA-VR).
     mView = static_cast<OgreView *>(v);
     // ORDER, AND IT IS WORTH A LINE (the Fable read's F8): the override and the
     // base description are set BEFORE `setStereo`, because every one of these
@@ -4568,9 +4568,12 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
     View *v = mEngine->createOffscreenView("jahshaka-vr-eye", mEyeWidth, mEyeHeight,
                                            Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
     if (!v) { error = "vrEyeScreenshot: " + mEngine->lastError(); return false; }
-    // LIVE: the control is compared with the eyes, and the VR column is
-    // gather-off (GiQualityFacts) — the control takes the eyes' answer.
-    v->setOffscreenContract(OffscreenContract::Live);
+    // A STILL PICTURE: the control is compared with the eyes, and the eyes gather
+    // wherever the scene's row resolves on (the tier table's VR column,
+    // PHOTON-GA-VR) — so the control gathers by the same row and at the same
+    // density (the ray tier reads the VR column while the headset drives GI),
+    // and is read once it stops moving.
+    v->setOffscreenContract(OffscreenContract::StillPicture);
     OgreView *control = static_cast<OgreView *>(v);
     bool ok = false;
     JAH_TRY {

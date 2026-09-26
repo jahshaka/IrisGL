@@ -32,8 +32,11 @@
 // PHOTON-GATHER-1d: a hit reads its surface CARD first (the reflection's own
 // `jahHitRadiance`, GA-1e), and the row is ON BY TIER — `GiToggle::Auto`
 // resolves through the tier table's gather row (Types.h `GiGatherFacts`: High
-// and Epic on, Medium at 36 rays, Low off). WHAT IS STILL ABSENT: stereo (the
-// VR column keeps the gather off — GA-VR).
+// and Epic on, Medium at 36 rays, Low off). SINCE PHOTON-GA-VR: STEREO — a
+// two-eye target gathers per EYE in the same four dispatches (the grid is two
+// grids side by side, split at the seam; each eye reconstructs and reprojects
+// through its own basis — the reflection's REFLECT-VR-1 rule), and the pixel
+// history is ONE PACKED 8-byte texel (16 B a pixel for the pair, every view).
 #pragma once
 
 #include "jahshaka/engine/Types.h"
@@ -168,8 +171,16 @@ struct GatherInputs {
     bool anisotropic = false;
 
     /// The camera's basis, in the five vectors the shaders reconstruct with.
+    /// Under STEREO these are the LEFT eye's, over its own half as a 0..1 image.
     float camPos[4] = { 0, 0, 0, 1 };
     float rayTL[3] = {}, rayRight[3] = {}, rayDown[3] = {}, fwd[3] = {};
+    /// A TWO-EYE TARGET (PHOTON-GA-VR): the left eye in the left half of every
+    /// texture, the right in the right half (`width` is both eyes', even), and
+    /// the RIGHT eye's basis in the same five vectors. The ray tier fills it
+    /// from the session's located eyes exactly as the reflection trace does.
+    bool stereo = false;
+    float camPos2[4] = { 0, 0, 0, 1 };
+    float rayTL2[3] = {}, rayRight2[3] = {}, rayDown2[3] = {}, fwd2[3] = {};
     float viewAxisX[3] = {}, viewAxisY[3] = {}, viewAxisZ[3] = {};
     float projA = 0.0f, projB = 0.0f, farClip = 0.0f;
     /// THE FAR QUERY'S HAND-OVER WIDTH (world units, ATOM-FARBLAS-1 audit F2):
@@ -305,15 +316,12 @@ private:
         VkDeviceMemory atlasMemory = VK_NULL_HANDLE;
         VkImageView atlasView = VK_NULL_HANDLE;
         /// THE PIXEL HISTORY (PHOTON-GATHER-1c), full resolution, ping-ponged:
-        /// `history` rgba16f (premultiplied mean E/pi, mean coverage) and
-        /// `historyGeom` r32ui (distance, normal, count) — rq_probe_integrate.comp
-        /// says what each bit is.
+        /// ONE rg32ui texel a pixel (PHOTON-GA-VR — the premultiplied mean E/pi
+        /// as a shared-exponent word; the distance, normal, count and mean
+        /// coverage as the other) — rq_probe_integrate.comp says what each bit is.
         VkImage history[2] = {};
         VkDeviceMemory historyMemory[2] = {};
         VkImageView historyView[2] = {};
-        VkImage historyGeom[2] = {};
-        VkDeviceMemory historyGeomMemory[2] = {};
-        VkImageView historyGeomView[2] = {};
         /// Which of the pair is THIS frame's.
         unsigned flip = 0u;
         /// THE VIEW'S AGE: consecutive frames the history has been written
@@ -347,15 +355,23 @@ private:
         GatherTuning tuningLast;
         /// What the last recorded frame ran with (GatherStatus).
         bool lastTemporal = false;
-        /// THE PREVIOUS FRAME'S CAMERA, in the five vectors the shaders invert.
+        /// THE PREVIOUS FRAME'S CAMERA, in the five vectors the shaders invert
+        /// (the left eye's under stereo), and the right eye's beside it.
         float prevCamPos[4] = {}, prevRayTL[4] = {}, prevRayRight[4] = {}, prevRayDown[4] = {},
               prevFwd[4] = {};
+        float prevCamPos2[4] = {}, prevRayTL2[4] = {}, prevRayRight2[4] = {},
+              prevRayDown2[4] = {}, prevFwd2[4] = {};
         Ogre::TextureGpu *irradiance = nullptr;
 
         const detail::OgreScene *scene = nullptr;
         Ogre::SceneManager *sceneMgr = nullptr;
         unsigned w = 0u, h = 0u, stride = 0u, octRes = 0u;
         unsigned gridW = 0u, gridH = 0u, uniformProbes = 0u, adaptiveCap = 0u, atlasCols = 0u;
+        /// THE TARGET'S SHAPE (PHOTON-GA-VR): two eyes side by side, each `eyeW`
+        /// pixels and `eyeGridW` probe columns wide (gridW = 2 x eyeGridW); one
+        /// eye = the whole target and the whole grid.
+        bool stereo = false;
+        unsigned eyeW = 0u, eyeGridW = 0u;
         unsigned atlasW = 0u, atlasH = 0u;
         bool targetsReady = false;
         bool atlasNeedsClear = false;
@@ -363,6 +379,8 @@ private:
         unsigned adaptiveLast = 0u;      ///< read back from the counter, a frame late
         unsigned adaptiveAsked = 0u;     ///< ...before the cap clamped it
         unsigned long long vramBytes = 0ull;
+        /// ...of which the pixel history's pair (GatherStatus::historyBytes).
+        unsigned long long historyBytes = 0ull;
 
         /// THE IRRADIANCE READBACK (GatherTuning::readback): a host-visible
         /// ring of kFramesInFlight full-resolution copies, allocated on the first
@@ -443,6 +461,11 @@ private:
     /// This device's guaranteed work-group ceiling on X (0 until the pipelines
     /// are made), and whether the clamp has been said once.
     uint32_t mMaxWorkGroupX = 0u;
+    /// ...and its largest 2D image side (the atlas' height grows with the
+    /// adaptive cap; an image past it is not an allocation failure, it is a lost
+    /// device — found by vr.gather_stereo's first draft, whose uncapped tuning
+    /// asked for a 131,072-texel-tall atlas: Xid 69).
+    uint32_t mMaxImageDim = 0u;
     bool mSaidWorkGroupClamp = false;
 };
 

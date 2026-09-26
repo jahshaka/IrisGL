@@ -197,7 +197,7 @@ void main()
 		// than a fixed quadrature that would alias a small bright source in
 		// and out as the probe moves.
 		const ivec2 t = ivec2( int( lane ) % octRes, int( lane ) / octRes );
-		const vec2 j = jahSample2( cell, sequence + lane + 1u, frame );
+		const vec2 j = jahSample2( jahLocalCell( cell ), sequence + lane + 1u, frame );
 		const vec2 uv = ( vec2( t ) + j ) / float( octRes );
 		const vec3 octPoint = jahOctPoint( uv );
 		const float invR = 1.0 / max( length( octPoint ), 1e-6 );
@@ -221,7 +221,9 @@ void main()
 		const float reweight = ( max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) ) ) /
 							   max( centreCos * jahOctSolidAngle( centrePoint, float( octRes ) ), 1e-9 );
 
-		const float bias = max( p.knobs2.y, 1e-4 * jahViewDistanceOf( posW.xyz ) );
+		// ...from the EYE that placed the probe (its cell names it, PHOTON-GA-VR).
+		const float bias =
+			max( p.knobs2.y, 1e-4 * jahViewDistanceOf( jahEyeNow( jahEyeOfCell( cell.x ) ), posW.xyz ) );
 		const float maxT = p.knobs.y;
 		const float farT = p.knobs3.w;
 		const vec3 origin = posW.xyz + n * bias;

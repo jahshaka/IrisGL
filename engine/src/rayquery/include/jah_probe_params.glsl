@@ -116,7 +116,94 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 hitList;
 	vec4 hitSun;
 	vec4 hitSun2;
+	/// THE SECOND EYE (PHOTON-GA-VR; rq_reflect.comp's REFLECT-VR-1 layout, word
+	/// for word). x = 1 when the target carries TWO EYES SIDE BY SIDE — the left
+	/// eye in the left half of every full-resolution image here, the right in the
+	/// right half; then the camera's five vectors above are the LEFT eye's, each
+	/// mapped over its OWN half as a 0..1 image, and the ten below are the right
+	/// eye's (now and the previous frame's). y = ONE EYE'S WIDTH in pixels (half
+	/// the target), z = THE PROBE COLUMNS PER EYE: the grid is two grids side by
+	/// side, the right eye's cells numbered after the left eye's, so a probe's
+	/// cell names its eye and no cell's pixels straddle the seam. With x = 0 the
+	/// block is unread, y and z are the whole target's width and grid, and every
+	/// helper below reduces to the one-camera arithmetic exactly.
+	vec4 stereo;
+	vec4 camPos2;
+	vec4 rayTL2;
+	vec4 rayRight2;
+	vec4 rayDown2;
+	vec4 fwd2;
+	vec4 prevCamPos2;
+	vec4 prevRayTL2;
+	vec4 prevRayRight2;
+	vec4 prevRayDown2;
+	vec4 prevFwd2;
 } p;
+
+/// ONE EYE'S IMAGE — rq_reflect.comp's `EyeImage`: where the eye is and the
+/// world-space ray (or image-plane offset) of its own 0..1 image.
+struct JahEye
+{
+	vec3  camPos;
+	float perspective;		// 1 = a ray per pixel, 0 = an offset (orthographic)
+	vec3  rayTL;
+	vec3  rayRight;
+	vec3  rayDown;
+	vec3  fwd;
+};
+
+JahEye jahEyeNow( int eye )
+{
+	JahEye e;
+	if( eye == 1 )
+	{
+		e.camPos = p.camPos2.xyz; e.perspective = p.camPos2.w;
+		e.rayTL = p.rayTL2.xyz; e.rayRight = p.rayRight2.xyz;
+		e.rayDown = p.rayDown2.xyz; e.fwd = p.fwd2.xyz;
+	}
+	else
+	{
+		e.camPos = p.camPos.xyz; e.perspective = p.camPos.w;
+		e.rayTL = p.rayTL.xyz; e.rayRight = p.rayRight.xyz;
+		e.rayDown = p.rayDown.xyz; e.fwd = p.fwd.xyz;
+	}
+	return e;
+}
+
+/// ...and the same eye in the PREVIOUS frame (the pixel history's reprojection).
+JahEye jahEyeBefore( int eye )
+{
+	JahEye e;
+	if( eye == 1 )
+	{
+		e.camPos = p.prevCamPos2.xyz; e.perspective = p.prevCamPos2.w;
+		e.rayTL = p.prevRayTL2.xyz; e.rayRight = p.prevRayRight2.xyz;
+		e.rayDown = p.prevRayDown2.xyz; e.fwd = p.prevFwd2.xyz;
+	}
+	else
+	{
+		e.camPos = p.prevCamPos.xyz; e.perspective = p.prevCamPos.w;
+		e.rayTL = p.prevRayTL.xyz; e.rayRight = p.prevRayRight.xyz;
+		e.rayDown = p.prevRayDown.xyz; e.fwd = p.prevFwd.xyz;
+	}
+	return e;
+}
+
+bool jahStereo() { return p.stereo.x > 0.5; }
+/// One eye's width in pixels (the whole target's with one eye).
+int jahEyeWidth() { return jahStereo() ? int( p.stereo.y ) : int( p.resolution.z ); }
+/// One eye's probe columns (the whole grid's with one eye).
+int jahEyeGridW() { return jahStereo() ? int( p.stereo.z ) : int( p.resolution.x ); }
+/// WHICH EYE OWNS A PIXEL COLUMN, and which owns a probe CELL column — the whole
+/// of the stereo layout in two lines.
+int jahEyeOfPixel( int x ) { return ( jahStereo() && x >= jahEyeWidth() ) ? 1 : 0; }
+int jahEyeOfCell( int cx ) { return ( jahStereo() && cx >= jahEyeGridW() ) ? 1 : 0; }
+/// A cell's coordinate in ITS EYE'S OWN grid — what every stochastic input is
+/// keyed on, so the two eyes draw the same sample pattern cell for cell (the
+/// eyes agree where they see the same thing — no binocular shimmer from
+/// uncorrelated noise — and two eyes at one pose give byte-identical halves,
+/// vr.gather_stereo's exact control). With one eye it is the cell.
+ivec2 jahLocalCell( ivec2 cell ) { return cell - ivec2( jahEyeOfCell( cell.x ) * jahEyeGridW(), 0 ); }
 
 /// ONE PROBE'S RECORD — where it sits, what it faces, what it integrated.
 /// std430: ten vec4s, 160 bytes, and the C++ mirror is `kRecordBytes`
@@ -300,18 +387,22 @@ float jahViewDistance( float rawDepth )
 }
 
 /// The view distance of a WORLD point (the same linear depth jahViewDistance
-/// decodes), for a probe whose record carries only its position.
-float jahViewDistanceOf( vec3 world )
+/// decodes) from the eye that sees it, for a probe whose record carries only its
+/// position.
+float jahViewDistanceOf( JahEye e, vec3 world )
 {
-	return max( dot( world - p.camPos.xyz, p.fwd.xyz ), 1e-3 );
+	return max( dot( world - e.camPos, e.fwd ), 1e-3 );
 }
 
-vec3 jahWorldAt( vec2 uv, float dist )
+/// The world point at view distance `dist` on the EYE'S OWN 0..1 image
+/// coordinate `uv` (under stereo each half reconstructs through the eye that
+/// rendered it — rq_reflect.comp's worldAt).
+vec3 jahWorldAt( JahEye e, vec2 uv, float dist )
 {
-	const vec3 plane = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
-	if( p.camPos.w < 0.5 )
-		return p.camPos.xyz + plane + p.fwd.xyz * dist;
-	return p.camPos.xyz + plane * dist;
+	const vec3 plane = e.rayTL + e.rayRight * uv.x + e.rayDown * uv.y;
+	if( e.perspective < 0.5 )
+		return e.camPos + plane + e.fwd * dist;
+	return e.camPos + plane * dist;
 }
 
 /// THE PROBE'S TANGENT FRAME around its normal (Duff et al., branchless) — the
