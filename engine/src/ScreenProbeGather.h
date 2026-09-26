@@ -370,6 +370,13 @@ private:
         /// after a resize — breaks the REST (never the history) so the integrate
         /// runs and the overlay is written; a held view dispatches nothing.
         unsigned photonLast = 0u;
+        /// ...and THE OVERLAY'S STORAGE VIEW, made once per overlay texture (keyed by
+        /// the texture AND its generation: a re-created overlay may reuse the address)
+        /// and retired when the overlay changes or the view goes — not a view created
+        /// and retired every frame the discs are on.
+        const Ogre::TextureGpu *photonViewOf = nullptr;
+        unsigned photonViewGeneration = 0u;
+        VkImageView photonView = VK_NULL_HANDLE;
         GatherTuning tuningLast;
         /// What the last recorded frame ran with (GatherStatus).
         bool lastTemporal = false;

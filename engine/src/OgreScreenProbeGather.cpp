@@ -624,6 +624,9 @@ void ScreenProbeGather::drop(View &v) {
     v.restMean = VK_NULL_HANDLE;
     v.restMeanMemory = VK_NULL_HANDLE;
     v.restMeanView = VK_NULL_HANDLE;
+    if (v.photonView) mHost.gatherRetireView(v.photonView);
+    v.photonView = VK_NULL_HANDLE;
+    v.photonViewOf = nullptr;
     v.restFrames = 0u;
     v.sinceRestart = 0u;
     v.age = 0u;
@@ -1607,14 +1610,28 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         photon.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         photon.imageView = irradianceStore.imageView;
         if (in.photonOverlay) {
-            Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-            slot.texture = in.photonOverlay;
-            slot.access = Ogre::ResourceAccess::Write;
-            slot.pixelFormat = in.photonOverlay->getPixelFormat();
-            photon.imageView =
-                static_cast<Ogre::VulkanTextureGpu *>(in.photonOverlay)->createView(slot, false);
-            mHost.gatherRetireView(photon.imageView);
+            if (v.photonView && (v.photonViewOf != in.photonOverlay ||
+                                 v.photonViewGeneration != in.photonOverlayGeneration)) {
+                mHost.gatherRetireView(v.photonView);
+                v.photonView = VK_NULL_HANDLE;
+            }
+            if (!v.photonView) {
+                Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+                slot.texture = in.photonOverlay;
+                slot.access = Ogre::ResourceAccess::Write;
+                slot.pixelFormat = in.photonOverlay->getPixelFormat();
+                v.photonView =
+                    static_cast<Ogre::VulkanTextureGpu *>(in.photonOverlay)->createView(slot, false);
+                v.photonViewOf = in.photonOverlay;
+                v.photonViewGeneration = in.photonOverlayGeneration;
+            }
+            photon.imageView = v.photonView;
             if (!photon.imageView) return;
+        } else if (v.photonView) {
+            // The discs went off: the view goes with them (the overlay may be retired next).
+            mHost.gatherRetireView(v.photonView);
+            v.photonView = VK_NULL_HANDLE;
+            v.photonViewOf = nullptr;
         }
         w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[8].pImageInfo = &photon;
