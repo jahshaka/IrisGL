@@ -5881,8 +5881,17 @@ public:
         bool passes = false;        ///< its chain carries the photon passes (the post-chain shape)
         bool rayReflect = false;    ///< ...and traces reflections (Hits)
         bool probeGather = false;   ///< ...and gathers screen probes (ScreenProbes)
+        /// ...and draws both eyes (a headset's view, ChainDesc::stereo): its photon
+        /// pass is instanced-stereo, and Ogre's voxel and probe visualizers are
+        /// low-level materials the pin's stereo scheme does not serve (no per-eye
+        /// matrix in their vertex programs) — Voxels and Probes refuse while one
+        /// is live (photonViewRefusal) and its listener never draws them.
+        bool stereo = false;
     };
-    void notePhotonView(const void *view, bool onScreen, const PhotonViewShape &shape);
+    /// `presents`: a view a person watches — a window, or a headset's eye pair (an
+    /// offscreen target only because the runtime copies it); an editor's shot is
+    /// neither and is forgotten here.
+    void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
     /// THE VISUALIZERS' WORLD BOXES, re-derived in front of the photon pass (its
     /// listener): VctLighting::update re-tracks Ogre's voxel visualizer on every
     /// light tick, and VoxelVisualizer::setTrackingVoxel writes the object's WORLD
@@ -5901,7 +5910,7 @@ private:
     /// THE PHOTON VIEW (not saved; a new scene starts Off) and what is up for it.
     PhotonView mPhotonView = PhotonView::Off;
     int mPhotonVoxelCascade = -1;
-    std::unordered_map<const void *, PhotonViewShape> mPhotonViews;   ///< on-screen views only
+    std::unordered_map<const void *, PhotonViewShape> mPhotonViews;   ///< the presenting views only
     /// Voxels: the cascade whose lighting shows its visualizer, the visualizer
     /// (found as Ogre attached it) and what it was built from — a change of any
     /// of them (a rebuild that swapped the voxeliser, re-created the textures or

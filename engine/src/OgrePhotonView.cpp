@@ -134,7 +134,10 @@ public:
         if (!ws) return;
         OgreScene *scene = mView ? mView->ogreScene() : nullptr;
         const PhotonView view = scene ? scene->photonView() : PhotonView::Off;
-        bool sceneBit = drawsGeometry(view);
+        // A STEREO VIEW never draws Ogre's visualizers (PhotonViewShape::stereo): a
+        // mode set before the headset came up keeps painting the desktop's view only.
+        bool sceneBit = drawsGeometry(view) &&
+                        !(mView->stereo() && (view == PhotonView::Voxels || view == PhotonView::Probes));
         // THE OVERLAY'S COMPOSITE RUNS WHEREVER THE VIEW HOLDS AN OVERLAY: whether the
         // ray tier writes it THIS frame is only known inside the frame, after this
         // mask is read, so the quad itself is told (passEarlyPreExecute) and draws
@@ -237,7 +240,8 @@ void OgreView::syncPhotonView() {
     shape.passes = cd.anyEffect();
     shape.rayReflect = cd.rayReflect;
     shape.probeGather = cd.probeGather;
-    mScene->notePhotonView(this, !isOffscreen(), shape);
+    shape.stereo = cd.stereo;
+    mScene->notePhotonView(this, !isOffscreen() || stereo(), shape);
 
     // THE OVERLAY follows the scene's view and the target's size. Created here,
     // between frames; the tier writes it inside the frame and says so.
@@ -272,31 +276,38 @@ void OgreView::syncPhotonView() {
 // ---------------------------------------------------------------------------
 // THE SCENE HALF
 // ---------------------------------------------------------------------------
-void OgreScene::notePhotonView(const void *view, bool onScreen, const PhotonViewShape &shape) {
-    if (onScreen) mPhotonViews[view] = shape;
+void OgreScene::notePhotonView(const void *view, bool presents, const PhotonViewShape &shape) {
+    if (presents) mPhotonViews[view] = shape;
     else mPhotonViews.erase(view);
 }
 
 std::string OgreScene::photonViewRefusal(PhotonView view) const {
     if (view == PhotonView::Off) return std::string();
-    bool passes = false, reflect = false, gather = false;
+    bool passes = false, reflect = false, gather = false, stereo = false;
     for (const auto &kv : mPhotonViews) {
         if (!kv.second.passes) continue;
         passes = true;
         reflect = reflect || kv.second.rayReflect;
         gather = gather || kv.second.probeGather;
+        stereo = stereo || kv.second.stereo;
     }
     if (!passes)
         return "no viewport of this scene draws the post chain (the Low tier's viewport draws straight "
                "into its window), so the photon view has nowhere to paint";
+    const auto stereoRefusal = [](const char *what) {
+        return std::string("a stereo (headset) view draws this scene, and Ogre's ") + what +
+               " visualizer is a low-level material the engine's instanced stereo does not serve";
+    };
     switch (view) {
     case PhotonView::Voxels:
         if (!mVctLighting)
             return "this scene holds no voxel lighting (GI off, or a mode that builds no voxels)";
+        if (stereo) return stereoRefusal("voxel");
         break;
     case PhotonView::Probes:
         if (!mIfd)
             return "this scene holds no irradiance field (world.gi({ddgi}) is off, or the tier builds none)";
+        if (stereo) return stereoRefusal("probe");
         break;
     case PhotonView::Cards:
         if (!mSurfaceCache || !mSurfaceCache->built())
