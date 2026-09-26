@@ -937,6 +937,16 @@ public:
     /// off, every item draws through PBS and every view's chain is rebuilt without
     /// the id pass. On by default.
     virtual void setAtomDrawEnabled(bool on) { (void)on; }
+    /// THE ATOM VIEW (AtomView, Types.h): the false-colour picture of the
+    /// visibility buffer over every view of this scene that carries the id pass.
+    /// Switching it rebuilds nothing (the chain's pass is gated by the workspace's
+    /// execution mask); Off is byte-identical to a scene that never had it.
+    virtual void setAtomView(AtomView view) { (void)view; }
+    virtual AtomView atomView() const { return AtomView::Off; }
+    /// Whether the view can paint anything here: the split is live AND every view
+    /// of the scene that draws into a window carries the id pass (the Low tier's
+    /// passthrough viewport does not). Hosts refuse a mode other than Off when false.
+    virtual bool atomViewPaintable() const { return false; }
     /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
     /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
     /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,

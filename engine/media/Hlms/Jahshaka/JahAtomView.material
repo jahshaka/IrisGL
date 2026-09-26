@@ -1,0 +1,69 @@
+// THE ATOM VIEW (D0-ATOM-VIEW; jahshaka::engine::AtomView in Types.h).
+//
+// One full-screen quad, after the post chain and before the overlays
+// (OgreChain.cpp, addAtomViewPass), that paints the false colour of whatever the
+// visibility buffer holds wherever an ATOM item is the visible surface:
+//
+//   unit 0  the id image (R32G32_UINT: slot | level, triangle - HlmsAtom.h AtomId)
+//   unit 1  the id pass's depth, copied right after the id pass
+//   unit 2  the scene's final depth
+//   unit 3  the Buckets table (OgreScene::atomViewTable, bound from C++ per view)
+//
+// A pixel whose id is empty, or whose final depth is not the id pass's depth (a
+// stock-PBR object stands in front of the atom item the id image still names),
+// is DISCARDED: it keeps the lit picture.
+//
+// `atomViewParams.x` is the mode (1 triangles, 2 levels, 3 buckets, 4 objects),
+// pushed per view by the view's atom listener; the default 0 draws nothing.
+// GLSL + Vulkan only.
+fragment_program Jahshaka/AtomView_ps_VK glslvk
+{
+	source JahAtomView_ps.glsl
+}
+fragment_program Jahshaka/AtomView_ps unified
+{
+	delegate Jahshaka/AtomView_ps_VK
+}
+
+material Jahshaka/AtomView
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/AtomView_ps
+			{
+				param_named atomViewParams float4 0 0 0 0
+			}
+
+			texture_unit atomIds
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+			texture_unit atomIdDepth
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+			texture_unit sceneDepth
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+			texture_unit bucketTable
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+		}
+	}
+}

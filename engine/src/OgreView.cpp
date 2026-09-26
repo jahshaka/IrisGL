@@ -932,6 +932,9 @@ bool OgreView::attachWorkspace() {
         mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
             mScene->sceneManager(), t, mCamera, mWorkspaceDef, mEnabled);
         if (!mWorkspace) return false;
+        // THE ATOM VIEW'S PASSES START OFF (kAtomViewExecutionBit): the view's atom
+        // listener sets the bit, per frame, only while the scene's view is on.
+        mWorkspace->setExecutionMask(Ogre::uint8(0xFFu & ~kAtomViewExecutionBit));
         // The id pass's recorder is handed a pass, and finds its view here.
         atomRegisterView(mWorkspace, this);
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)

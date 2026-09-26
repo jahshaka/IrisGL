@@ -198,6 +198,11 @@ public:
     /// Twins = buckets held (every scene), and the PBS datablocks they serve.
     size_t decodeTwinCount() const { return mTwins.size(); }
     size_t decodeMemberCount() const { return mTwinOfPbs.size(); }
+    /// THE BUCKET a PBS datablock is shaded by (Twin::bucketId: never 0, never
+    /// reused), 0 when no twin serves it. The Atom view's Buckets table (OgreScene::
+    /// syncAtomViewTable) colours by this.
+    uint32_t bucketIdOf(const Ogre::HlmsDatablock *pbs) const;
+    unsigned long long bucketGeneration() const { return mBucketGeneration; }
 
     /// THE PRODUCT'S DECODE DRAWS (PHOTON-HIT-SHADE-1): for a SceneManager whose
     /// scene runs the ray tier, the bucket twin of every PBS datablock its items
@@ -351,6 +356,9 @@ private:
     Ogre::ReadOnlyBufferPacked *mBucketBuf = nullptr;
     std::vector<uint32_t> mBucketMirror;
     bool mBucketDirty = true;
+    /// Moves with every bucket-table change (a bucket gained or lost a member):
+    /// the Atom view's Buckets table re-walks only when it moved.
+    unsigned long long mBucketGeneration = 0ull;
     uint32_t mTwinSerial = 0u;
     uint32_t mBucketSerial = 0u;
     unsigned long long mTwinEpoch = 0ull;

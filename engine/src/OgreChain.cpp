@@ -223,6 +223,14 @@ constexpr const char *kSceneRtv = "jahSceneRtv";
 constexpr const char *kAtomIds          = kAtomIdTexture;
 constexpr const char *kAtomIdRtv        = "jahAtomIdRtv";
 constexpr const char *kPassthroughRtv   = "jahPassthroughRtv";
+/// THE ATOM VIEW (D0-ATOM-VIEW): the id pass's depth, copied right after it (its
+/// PASS_DEPTHCOPY carries kAtomViewExecutionBit — it runs only while the view is
+/// on). The view's quad paints only where the scene's FINAL depth still equals this
+/// one, so a stock-PBR object standing in front of an atom item keeps its picture.
+/// THE PRICE OF "NO REBUILD ON SWITCH": the texture is part of the graph, so EVERY
+/// view that carries the id pass holds one, view Off or not — a full-target D32,
+/// 8.3 MB at 1920x1080 and 33 MB at 3840x2160.
+constexpr const char *kAtomViewDepth    = "jahAtomViewDepth";
 /// SSR. The prepass' second G-buffer (HlmsPbs writes shadow term in x and
 /// packed roughness in y), the RTV the prepass renders through, the ray march's
 /// output (hit coordinates, at half or full resolution), the full-resolution
@@ -424,7 +432,7 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// copies still point at — a read-after-destroy the moment the next pass is added.
 /// So it is called EXACTLY ONCE, with a capacity no chain can exceed, before
 /// the first addTargetPass. Nothing below may call it again.
-constexpr size_t kMaxTargetPasses = 64;   // 48 + up to 14 HZB mip passes
+constexpr size_t kMaxTargetPasses = 72;   // 50 + up to 14 HZB mip passes, and headroom
 
 /// THE STORE ACTION OF THE LAST PASS ANY WORKSPACE OF OURS PUTS ON A TARGET.
 ///
@@ -689,6 +697,9 @@ void addAtomIdTargets(Ogre::CompositorNodeDef *n) {
     rtv->depthAttachment.textureName = kDepth;
     rtv->stencilAttachment.textureName = kDepth;
     rtv->preferDepthTexture = true;
+    // ...and THE ATOM VIEW's copy of the id pass's depth (kAtomViewDepth).
+    auto *vd = addTex(n, kAtomViewDepth, Ogre::PFG_D32_FLOAT);
+    vd->preferDepthTexture = true;
 }
 
 /// THE ID PASS (ATOM S3-DRAW; OgreAtomIdPass.cpp records it): a PASS_CUSTOM through
@@ -711,6 +722,45 @@ void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandl
     p->mProfilingId = "Jahshaka atom id";
     // A letterboxed view's ids line up with its image.
     if (desc.letterbox) inset(handles, p);
+    // THE ATOM VIEW'S DEPTH, copied before any scene pass adds a stock-PBR surface
+    // to it (the prepass and the opaque pass LOAD this depth and draw into it).
+    // Executed only while the view is on (kAtomViewExecutionBit).
+    {
+        Ogre::CompositorTargetDef *ct = n->addTargetPass(kAtomViewDepth);
+        ct->setNumPasses(1);
+        auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(ct->addPass(Ogre::PASS_DEPTHCOPY));
+        c->setDepthTextureCopy(kDepth, kAtomViewDepth);
+        c->mExecutionMask = kAtomViewExecutionBit;
+        c->mProfilingId = "Jahshaka atom view depth";
+    }
+}
+
+/// THE ATOM VIEW'S QUAD (D0-ATOM-VIEW; JahAtomView.material): on the view's own
+/// target, AFTER every post pass and BEFORE the overlays, so its colours are the
+/// palette's (no exposure, tonemap, bloom or history ever sees them — the view Off
+/// is byte-identical) and the gizmos still draw on top. It samples the id image, the
+/// id pass's depth copy and the scene's final depth; the Buckets table is bound on
+/// its fourth unit from C++ (the view's atom listener). Executed only while the
+/// scene's view is on (kAtomViewExecutionBit). A letterbox confines it by scissor
+/// alone: the quad's uv must span the whole target for the id image to line up.
+void addAtomViewPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandles &handles) {
+    Ogre::CompositorTargetDef *t = n->addTargetPass(kTargetChannel);
+    t->setNumPasses(1);
+    auto *q = static_cast<Ogre::CompositorPassQuadDef *>(t->addPass(Ogre::PASS_QUAD));
+    q->mMaterialName = kAtomViewMaterial;
+    q->addQuadTextureSource(0, kAtomIds);
+    q->addQuadTextureSource(1, kAtomViewDepth);
+    q->addQuadTextureSource(2, kDepth);
+    q->setAllLoadActions(Ogre::LoadAction::Load);
+    q->mLoadActionDepth = Ogre::LoadAction::DontCare;
+    q->mLoadActionStencil = Ogre::LoadAction::DontCare;
+    // Store, never resolve: the overlay pass still renders into these samples.
+    q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+    q->mStoreActionDepth = Ogre::StoreAction::DontCare;
+    q->mStoreActionStencil = Ogre::StoreAction::DontCare;
+    q->mExecutionMask = kAtomViewExecutionBit;
+    q->mProfilingId = "Jahshaka atom view";
+    if (desc.letterbox) scissor(handles, q, /*clear=*/false);
 }
 
 /// The view's passes that the id pass stands in for SKIP the Atom queue (the fork's
@@ -897,7 +947,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // PASSTHROUGH — the shape every view had before this file, and the shape
     // every offscreen view still has. Bit-identical to createBasicWorkspaceDef.
     if (!desc.anyEffect()) {
-        n->setNumLocalTextureDefinitions((desc.letterbox ? 1u : 0u) + (desc.atomDraw ? 2u : 0u));
+        n->setNumLocalTextureDefinitions((desc.letterbox ? 1u : 0u) + (desc.atomDraw ? 3u : 0u));
         if (desc.letterbox) {
             // Bars first, background inside them; the scene passes below then
             // LOAD colour instead of clearing it (a clear is full-target and
@@ -923,7 +973,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         Ogre::CompositorTargetDef *t =
             n->addTargetPass(desc.atomDraw ? kPassthroughRtv : kTargetChannel);
-        t->setNumPasses(2);
+        // With the id pass the opaque pass and the overlay pass are two TARGET
+        // passes on the same RTV, the Atom view's quad between them on the colour
+        // alone (it samples this depth, which it therefore cannot have attached).
+        t->setNumPasses(desc.atomDraw ? 1 : 2);
         {
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
             p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
@@ -960,6 +1013,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // THE PASS THAT UPDATES THE MIRRORS (planar::kPlanarUpdatePassIdentifier):
             // the one that samples a planar reflection, so the one that renders it.
             p->mIdentifier = planar::kPlanarUpdatePassIdentifier;
+        }
+        if (desc.atomDraw) {
+            addAtomViewPass(n, desc, handlesOut);
+            t = n->addTargetPass(kPassthroughRtv);
+            t->setNumPasses(1);
         }
         {
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -1036,7 +1094,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
-    n->setNumLocalTextureDefinitions(28);   // 25 + the letterbox swatch + the HZB + the ids
+    n->setNumLocalTextureDefinitions(29);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth
     if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
@@ -1689,8 +1747,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // pass, which is the whole reason haze can hide behind a wall. The VUID
         // lesson below applies verbatim: DontCare makes the contents UNDEFINED,
         // not "kept but unpromised".
+        // ...and the Atom view's quad, which compares the FINAL depth with the id
+        // pass's: a depth that must survive to the end of the frame.
         p->mStoreActionDepth   = (desc.ssao || prepass || desc.refractions || desc.distortion ||
-                                  desc.hzb)
+                                  desc.hzb || desc.atomDraw)
                                      ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
         p->mStoreActionStencil = Ogre::StoreAction::DontCare;
         // Ignored in a prepass mode (the flag's own documentation says so), and
@@ -1817,7 +1877,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // is a knife edge — i.e. the SKY, which came out as blocks of
             // recycled-VRAM noise under the Epic chain (2026-09-03 defect lane;
             // sky_stays_smooth_under_the_post_chain is the pixel gate).
-            p->mStoreActionDepth = (desc.ssao || prepass || desc.distortion)
+            // (+ the Atom view's quad, which reads the final depth after the post chain.)
+            p->mStoreActionDepth = (desc.ssao || prepass || desc.distortion || desc.atomDraw)
                                        ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             // The shadow node was already computed for this camera by the opaque
@@ -2204,6 +2265,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             if (desc.letterbox) scissor(handlesOut, q);
         }
     }
+
+    // THE ATOM VIEW (D0-ATOM-VIEW), after every effect and before the overlays.
+    if (desc.atomDraw) addAtomViewPass(n, desc, handlesOut);
 
     // Overlays, straight onto the window, after every effect: gizmos, wires and
     // always-on-top helpers must not be tonemapped, blurred or edge-detected.

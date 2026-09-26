@@ -4477,6 +4477,10 @@ struct AtomDrawStatus {
     /// samples): the id pass's depth cannot be that pass's depth (Ogre pairs a
     /// window's colour only with the window's own depth, and one sample with one).
     unsigned passthroughViews = 0;
+    /// THE ATOM VIEW CAN PAINT (Scene::atomViewPaintable): `on` and no passthrough
+    /// view — at the Low tier the viewport carries no id pass and the view paints
+    /// nothing, so Scene::setAtomView's callers refuse there.
+    bool     viewPaintable = false;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
@@ -6793,6 +6797,20 @@ struct ViewOverlayDesc {
     }
     bool operator!=(const ViewOverlayDesc &o) const { return !(*this == o); }
 };
+
+/// THE ATOM VIEW (D0-ATOM-VIEW): a false-colour picture of what the visibility
+/// buffer holds, painted over the finished frame (after the post chain, before the
+/// overlays) wherever an ATOM item is the visible surface. Objects the split keeps
+/// on the stock PBR shader (AtomDrawStatus: blended, two-sided, skinned, ...) keep
+/// their lit picture. A property of the renderer's SCENE, never saved: every view of
+/// the scene that carries the id pass shows it (a VR eye pair carries none).
+///   Triangles  a hash of (object, level, triangle) -> a bright random colour
+///   Levels     the LOD level the cull chose, a fixed ramp from level 0 (red) through
+///              orange, yellow, lime, green, cyan, blue to level 7 (violet)
+///   Buckets    a hash of the decode bucket (one colour per decode draw)
+///   Objects    a hash of the GPU scene slot (one colour per object)
+enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects };
+
 
 /// A CPU-side RGBA8 image, used to read back an offscreen View.
 struct Image {

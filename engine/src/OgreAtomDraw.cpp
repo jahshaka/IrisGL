@@ -17,6 +17,16 @@
 #include <OgreHlmsManager.h>
 #include <OgreHlmsPbsDatablock.h>
 #include <OgreItem.h>
+#include <OgreMaterial.h>
+#include <OgreMaterialManager.h>
+#include <OgrePass.h>
+#include <OgreRenderSystem.h>
+#include <OgreStagingTexture.h>
+#include <OgreTechnique.h>
+#include <OgreTextureBox.h>
+#include <OgreTextureGpuManager.h>
+#include <OgreTextureUnitState.h>
+#include <OgreGpuProgramParams.h>
 #include <OgreMesh2.h>
 #include <OgreRoot.h>
 #include <OgreSubItem.h>
@@ -69,9 +79,42 @@ OgreView *atomViewOf(const Ogre::CompositorWorkspace *ws) {
 // GPU scene's tables, and the scene's screen decode draws are shown.
 // ---------------------------------------------------------------------------
 namespace {
+/// THE ATOM VIEW'S QUAD MATERIAL PASS (JahAtomView.material), or null before the
+/// media is parsed.
+Ogre::Pass *atomViewMaterialPass() {
+    Ogre::MaterialPtr m = Ogre::MaterialManager::getSingleton().getByName(
+        kAtomViewMaterial, Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME);
+    if (!m) return nullptr;
+    m->load();
+    Ogre::Technique *t = m->getBestTechnique();
+    return t && t->getNumPasses() ? t->getPass(0) : nullptr;
+}
+
 class AtomDrawListener final : public Ogre::CompositorWorkspaceListener {
 public:
     explicit AtomDrawListener(OgreView *view) : mView(view) {}
+    /// THE ATOM VIEW'S SWITCH (D0-ATOM-VIEW), immediately before THIS workspace's
+    /// passes execute: its two passes (the depth copy, the quad) carry
+    /// kAtomViewExecutionBit and nothing else, so the bit in the workspace's mask IS
+    /// the view — no rebuild, and Off runs neither. The quad's material is a process
+    /// singleton, so its mode and its Buckets table are pushed here, per view, the
+    /// way the looks push theirs (the values are read at pass execute time).
+    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override {
+        if (!ws) return;
+        OgreScene *scene = mView ? mView->ogreScene() : nullptr;
+        const AtomView view = scene ? scene->atomView() : AtomView::Off;
+        Ogre::TextureGpu *table = scene ? scene->atomViewTable() : nullptr;
+        Ogre::Pass *pass = (view != AtomView::Off && table) ? atomViewMaterialPass() : nullptr;
+        const bool on = pass && pass->hasFragmentProgram() && pass->getNumTextureUnitStates() >= 4u;
+        const Ogre::uint8 mask = ws->getExecutionMask();
+        ws->setExecutionMask(on ? Ogre::uint8(mask | kAtomViewExecutionBit)
+                                : Ogre::uint8(mask & ~kAtomViewExecutionBit));
+        if (!on) return;
+        Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+        ps->setIgnoreMissingParams(true);
+        ps->setNamedConstant("atomViewParams", Ogre::Vector4(Ogre::Real(int(view)), 0, 0, 0));
+        pass->getTextureUnitState(3)->setTexture(table);
+    }
     void passPreExecute(Ogre::CompositorPass *pass) override {
         if (!pass || pass->getType() != Ogre::PASS_SCENE || !mView) return;
         const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
@@ -199,6 +242,12 @@ void OgreScene::placeAtomQueue(const Node &n, bool atom) const {
 }
 
 void OgreScene::updateAtomDraw() {
+    updateAtomSplit();
+    // THE ATOM VIEW'S TABLE follows whatever the split just decided.
+    syncAtomViewTable();
+}
+
+void OgreScene::updateAtomSplit() {
     HlmsAtom *atom = registeredAtom();
     if (!atom || !mGpuScene.live()) return;
     // THE WITNESS: a material edited IN PLACE (a blend, an alpha test, a texture)
@@ -346,6 +395,94 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     return AtomRoute::Atom;
 }
 
+// ---------------------------------------------------------------------------
+// THE ATOM VIEW'S BUCKETS TABLE (D0-ATOM-VIEW). The bucket is not in the id image
+// (a draw of the decode knows its own, a pixel does not), and a compositor quad
+// binds textures, not the GPU scene's buffers — so the view reads one R32_UINT
+// texel per GPU scene slot: the bucket (HlmsAtom::bucketIdOf) of the datablock the
+// slot's atom item wears, 0 for anything else. The texture exists while the view
+// is on (the quad binds it in every mode) and is freed when it goes Off; its
+// CONTENTS are walked only while the view is Buckets and only when the slot set or
+// a bucket's membership moved, and uploaded only when a value did.
+// ---------------------------------------------------------------------------
+namespace {
+constexpr uint32_t kAtomViewTableWidth = 1024u;
+}
+
+void OgreScene::releaseAtomViewTable() {
+    if (mAtomViewTable && mRoot && mRoot->getRenderSystem())
+        mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mAtomViewTable);
+    mAtomViewTable = nullptr;
+    mAtomViewRows.clear();
+}
+
+void OgreScene::syncAtomViewTable() {
+    // OFF FREES IT (the next view that is not Off creates it again).
+    if (mAtomView == AtomView::Off) {
+        if (mAtomViewTable) releaseAtomViewTable();
+        mAtomViewWrites = mAtomViewBucketGen = ~0ull;
+        return;
+    }
+    Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
+    if (!rs) return;
+    const uint32_t slots = mGpuScene.live() ? uint32_t(mGpuScene.slotCount()) : 0u;
+    const uint32_t rows = std::max(1u, (slots + kAtomViewTableWidth - 1u) / kAtomViewTableWidth);
+    HlmsAtom *atom = registeredAtom();
+    const unsigned long long bucketGen = atom ? atom->bucketGeneration() : 0ull;
+    const bool buckets = mAtomView == AtomView::Buckets;
+    // CHANGE-DRIVEN: the walk runs only in Buckets mode and only when the slot set
+    // (the GPU scene's writes) or a bucket's membership (HlmsAtom's generation)
+    // moved since the last one; any other mode reads no contents at all.
+    if (mAtomViewTable && mAtomViewTable->getHeight() == rows &&
+        (!buckets || (mAtomViewWrites == mGpuScene.writes() && mAtomViewBucketGen == bucketGen)))
+        return;
+    std::vector<uint32_t> table(size_t(rows) * kAtomViewTableWidth, 0u);
+    if (buckets && atom) {
+        const GpuInstance *m = mGpuScene.mirrorData();
+        for (uint32_t i = 0; i < slots && i < mItemNodes.size(); ++i) {
+            uint32_t flags = 0u;
+            std::memcpy(&flags, &m[i].boundsMax[3], sizeof(flags));
+            const Node *nd = mItemNodes[i];
+            if (!(flags & kGpuAtom) || !nd || !nd->item || !nd->item->getNumSubItems()) continue;
+            table[i] = atom->bucketIdOf(nd->item->getSubItem(0)->getDatablock());
+        }
+    }
+    if (buckets) {
+        mAtomViewWrites = mGpuScene.writes();
+        mAtomViewBucketGen = bucketGen;
+    } else {
+        mAtomViewWrites = mAtomViewBucketGen = ~0ull;   // entering Buckets walks
+    }
+    if (mAtomViewTable && mAtomViewTable->getHeight() == rows && table == mAtomViewRows) return;
+    Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+    if (mAtomViewTable && mAtomViewTable->getHeight() != rows) {
+        tm->destroyTexture(mAtomViewTable);
+        mAtomViewTable = nullptr;
+    }
+    if (!mAtomViewTable) {
+        // A ManualTexture goes Resident by an immediate transition and is never
+        // notifyDataIsReady'd (DOCS/traps/ENGINE.md).
+        mAtomViewTable = tm->createTexture(
+            "jahAtomViewTable/" + std::to_string(reinterpret_cast<uintptr_t>(this)),
+            Ogre::GpuPageOutStrategy::Discard, Ogre::TextureFlags::ManualTexture,
+            Ogre::TextureTypes::Type2D);
+        mAtomViewTable->setResolution(kAtomViewTableWidth, rows);
+        mAtomViewTable->setPixelFormat(Ogre::PFG_R32_UINT);
+        mAtomViewTable->setNumMipmaps(1u);
+        mAtomViewTable->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    }
+    Ogre::StagingTexture *st = tm->getStagingTexture(kAtomViewTableWidth, rows, 1u, 1u, Ogre::PFG_R32_UINT);
+    st->startMapRegion();
+    Ogre::TextureBox box = st->mapRegion(kAtomViewTableWidth, rows, 1u, 1u, Ogre::PFG_R32_UINT);
+    for (uint32_t y = 0; y < rows; ++y)
+        std::memcpy(box.at(0, y, 0), &table[size_t(y) * kAtomViewTableWidth],
+                    kAtomViewTableWidth * sizeof(uint32_t));
+    st->stopMapRegion();
+    st->upload(box, mAtomViewTable, 0, nullptr, nullptr, true);
+    tm->removeStagingTexture(st);
+    mAtomViewRows.swap(table);
+}
+
 AtomDrawStatus OgreScene::atomDrawStatus() {
     AtomDrawStatus st;
     st.live = mGpuScene.live();
@@ -392,6 +529,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     st.on = atomDrawOn();
     st.stereoViews = unsigned(mAtomStereoViews.size());
     st.passthroughViews = unsigned(mAtomPassthroughViews.size());
+    st.viewPaintable = atomViewPaintable();
     return st;
 }
 
