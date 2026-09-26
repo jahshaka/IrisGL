@@ -172,7 +172,17 @@ set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # x86-64 baseline code has no FMA to contract into and GCC does not reassociate
 # float reductions without -ffast-math, so -O2 computes what -O0 computes —
 # which bake.determinism and the scan's blob hash A/B prove (the spike).
-target_compile_options(meshoptimizer PRIVATE $<$<CONFIG:Debug>:-O2>)
+#
+# AND -ffp-contract=off IN EVERY CONFIGURATION (F3), so that equality holds by
+# construction rather than by x86-64's luck: on a target WITH fused multiply-add
+# (arm64 — the Mac — or an x86 build with -march=native) the compiler may fuse
+# a*b+c into one rounding at -O2 and not at -O0 (clang contracts within an
+# expression by default), and a bake's bytes would then depend on the build type
+# and the machine. With contraction off every a*b+c rounds twice everywhere, so
+# Debug = Release on every platform by construction. (Across platforms the libm
+# calls the bake makes — acos, pow — are the platform's; that is not this rule.)
+set(_jah_bake_fp $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-ffp-contract=off>)
+target_compile_options(meshoptimizer PRIVATE $<$<CONFIG:Debug>:-O2> ${_jah_bake_fp})   # all C++ sources
 set(BUILD_SHARED_LIBS "${_jah_outer_shared_libs}")
 set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
@@ -467,9 +477,10 @@ string(SHA256 _mesh_bake_producer_id "${_mesh_bake_blob}")
 # list separator and would become three defines.
 string(REPLACE ";" "|" _mesh_bake_hashed_list "${_mesh_bake_hashed_sources}")
 
-# The bake's own TUs at -O2 in Debug (see the meshoptimizer block above for why).
+# The bake's own TUs at -O2 in Debug, and never contracting (see the meshoptimizer
+# block above for both).
 set_source_files_properties(import/meshbake.cpp import/clusterlod.cpp
-    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
