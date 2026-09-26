@@ -157,6 +157,7 @@ public:
         struct StageMs { double lodChain = 0.0, cards = 0.0, sdf = 0.0, dag = 0.0; };
         QVector<StageMs> stageMs;   ///< aiScene mesh order, as `meshes`
         double meshesMs = 0.0;      ///< the wall time of all meshes' stages together
+        int bakeThreads = 0;        ///< the width this bake ran at (MeshBake::bakeThreads when it started)
         /// "m0 99875t lod 1234 cards 12 sdf 34 dag 567 | m1 ..." — the per-stage ms.
         QString stageSummary() const;
     };

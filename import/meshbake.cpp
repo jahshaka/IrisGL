@@ -4572,6 +4572,7 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards)
     };
     const size_t meshes = size_t(model.meshes.size());
     model.stageMs = QVector<MeshBake::Model::StageMs>(int(meshes));
+    model.bakeThreads = bakepool::width();
     std::vector<MeshBake::ClusterDagStats> dagStats(meshes);
     const Clock::time_point start = Clock::now();
     // Tasks [0, meshes) are the chains (the longest work, handed out first), then
@@ -4641,7 +4642,7 @@ QString MeshBake::Model::stageSummary() const
                      .arg(ms.sdf, 0, 'f', 0).arg(ms.dag, 0, 'f', 0);
     }
     return QStringLiteral("meshes %1 ms on %2 threads [%3]")
-        .arg(meshesMs, 0, 'f', 0).arg(bakepool::width()).arg(parts.join(QStringLiteral(" | ")));
+        .arg(meshesMs, 0, 'f', 0).arg(bakeThreads).arg(parts.join(QStringLiteral(" | ")));
 }
 
 MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &filePath,
