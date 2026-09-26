@@ -21,6 +21,7 @@ For more information see the LICENSE file
 #include <cfloat>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -1382,9 +1383,14 @@ public:
             cellOf(tlo, c0);
             cellOf(thi, c1);
         };
+        // A triangle filed in ONE cell is met at most once by any walk (a walk visits
+        // each cell once), so only the ones filed in several need the query's
+        // visited set: `mShared` marks them, and the set stays small and cold.
+        mShared.assign(mTriCount, 0u);
         for (size_t t = 0; t < mTriCount; ++t) {
             int c0[3], c1[3];
             cellRange(t, c0, c1);
+            mShared[t] = (c0[0] != c1[0] || c0[1] != c1[1] || c0[2] != c1[2]) ? 1u : 0u;
             for (int z = c0[2]; z <= c1[2]; ++z)
                 for (int y = c0[1]; y <= c1[1]; ++y)
                     for (int x = c0[0]; x <= c1[0]; ++x)
@@ -1411,15 +1417,25 @@ public:
 
     /// A QUERY'S SCRATCH, owned by the thread asking — never by the grid, which is
     /// READ-ONLY once built, so any number of threads query one grid at once
-    /// (IMPORT-SPEED-1; `bakepool`). The stamps dedupe a triangle filed in several
-    /// cells within ONE query (a fresh generation per query), and the tie set is the
-    /// pseudonormal's; neither carries anything from one query to the next, so an
-    /// answer never depends on which queries the same scratch served before it.
-    /// Sized on first use against a grid; one scratch may serve several grids.
+    /// (IMPORT-SPEED-1; `bakepool`). The visited set dedupes a triangle filed in
+    /// several cells within ONE query (a fresh generation per query), and the tie
+    /// set is the pseudonormal's; neither carries anything from one query to the
+    /// next, so an answer never depends on which queries the same scratch served
+    /// before it.
+    ///
+    /// THE VISITED SET IS ONE BIT PER TRIANGLE (IMPORT-SPEED-1 F2), cleared after
+    /// each query through the list of words it touched. A per-triangle 32-bit stamp
+    /// was 4 bytes x the grid's triangles in EVERY thread's scratch — 800 MB at 10 M
+    /// triangles on 20 threads for the stamps alone; the bits are 1/32 of that
+    /// (25 MB), and keep the dense array's cache behaviour (neighbouring triangles
+    /// have neighbouring indices). A hash set sized by the query was measured and
+    /// refused: a bake walks ~1e9 shared triangles and the probes cost the scan
+    /// 20 %. Only triangles filed in more than one cell are ever marked (`mShared`).
+    /// Same answer: "skip a triangle already tested in this query", exactly.
     struct Query
     {
-        std::vector<unsigned> stamp;
-        unsigned generation = 0;
+        std::vector<std::uint64_t> bits;
+        std::vector<unsigned> touched;   ///< words of `bits` this query set
         std::vector<Tie> ties;
     };
 
@@ -1450,8 +1466,7 @@ public:
         if (mTriCount == 0) return std::numeric_limits<float>::infinity();
         int base[3];
         cellOf(p, base);
-        const unsigned generation = nextGeneration(query);
-        std::vector<unsigned> &stamp = query.stamp;
+        beginQuery(query);
         std::vector<Tie> &ties = query.ties;
         ties.clear();
         float best = std::numeric_limits<float>::infinity();
@@ -1478,8 +1493,7 @@ public:
                         const size_t cell = index(x, y, z);
                         for (unsigned i = mStart[cell]; i < mStart[cell + 1]; ++i) {
                             const unsigned t = mTris[i];
-                            if (stamp[t] == generation) continue;   // filed in several cells
-                            stamp[t] = generation;
+                            if (mShared[t] && !firstVisit(query, t)) continue;   // filed in several cells
                             const Vec3 a = vertexAt((*mIndices)[size_t(t) * 3]);
                             const Vec3 b = vertexAt((*mIndices)[size_t(t) * 3 + 1]);
                             const Vec3 c = vertexAt((*mIndices)[size_t(t) * 3 + 2]);
@@ -1538,21 +1552,24 @@ public:
     /// a triangle is filed in every cell its own AABB touches and both boxes clamp
     /// to the grid the same way — which is what makes a local soup built from it
     /// exact for any query whose nearest surface lies inside the box.
-    void collect(Query &query, const Vec3 &lo, const Vec3 &hi, std::vector<unsigned> &out) const
+    ///
+    /// Its visited set is its OWN (one bit per triangle, freed on return), so no
+    /// caller's query scratch has to be passed in or sized for this grid.
+    void collect(const Vec3 &lo, const Vec3 &hi, std::vector<unsigned> &out) const
     {
         out.clear();
         if (mTriCount == 0) return;
         int c0[3], c1[3];
         cellOf(lo, c0);
         cellOf(hi, c1);
-        const unsigned generation = nextGeneration(query);
+        Query visited;
+        beginQuery(visited);   // its own (see above), sized to this grid
         for (int z = c0[2]; z <= c1[2]; ++z)
             for (int y = c0[1]; y <= c1[1]; ++y)
                 for (int x = c0[0]; x <= c1[0]; ++x)
                     for (unsigned i = mStart[index(x, y, z)]; i < mStart[index(x, y, z) + 1]; ++i) {
                         const unsigned t = mTris[i];
-                        if (query.stamp[t] == generation) continue;
-                        query.stamp[t] = generation;
+                        if (mShared[t] && !firstVisit(visited, t)) continue;
                         out.push_back(t);
                     }
     }
@@ -1566,17 +1583,24 @@ public:
     float tieEps(float d) const { return std::max(mCell * 1e-4f, std::fabs(d) * 1e-4f); }
 
 private:
-    /// A generation no stamp of this scratch holds yet: stamps only ever hold
-    /// generations already handed out, so any fresh one is "not visited" for every
-    /// triangle. A scratch too short for this grid (first use, or a bigger grid)
-    /// is re-zeroed, which restarts the count; so does the wrap.
-    unsigned nextGeneration(Query &query) const
+    /// Empties the visited set (the words the last query touched) and sizes it for
+    /// this grid; one scratch may serve grids of any size.
+    void beginQuery(Query &query) const
     {
-        if (query.stamp.size() < mTriCount || query.generation == std::numeric_limits<unsigned>::max()) {
-            query.stamp.assign(std::max(query.stamp.size(), mTriCount), 0u);
-            query.generation = 0u;
-        }
-        return ++query.generation;
+        for (unsigned w : query.touched) query.bits[w] = 0u;
+        query.touched.clear();
+        const size_t words = (mTriCount + 63) / 64;
+        if (query.bits.size() < words) query.bits.resize(words, 0u);
+    }
+    /// True the first time `t` is seen in the current query (and records it).
+    static bool firstVisit(Query &query, unsigned t)
+    {
+        std::uint64_t &word = query.bits[t >> 6];
+        const std::uint64_t bit = std::uint64_t(1) << (t & 63u);
+        if (word & bit) return false;
+        if (!word) query.touched.push_back(t >> 6);
+        word |= bit;
+        return true;
     }
     Vec3 vertexAt(unsigned i) const
     {
@@ -1603,6 +1627,7 @@ private:
     int mDim[3] = { 1, 1, 1 };
     std::vector<unsigned> mStart;   ///< per cell, into mTris (cells + 1 entries)
     std::vector<unsigned> mTris;    ///< every cell's triangles, cell after cell
+    std::vector<unsigned char> mShared;   ///< per triangle: filed in more than one cell
     /// The faces meeting at one vertex, with room to spare. A nearest FEATURE is a
     /// face (1), an edge (2) or a vertex (its incident faces); anything beyond this
     /// is a near-equidistant crowd that contributes nothing to a pseudonormal.
@@ -3887,39 +3912,30 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     // depth, reported to the suites (a level-0 triangle belongs where its first
     // corner does) so "exactly one cut covers every triangle" can be counted.
     std::vector<std::vector<unsigned>> regionAll(raw.size()), regionOwn(raw.size());
-    // THE PER-THREAD SCRATCH of the measurement (IMPORT-SPEED-1): every stamp array
-    // and owner map the walk below writes is PER GROUP in meaning (a fresh stamp
-    // opens each use), so each thread of the pool carries its own and no group can
-    // see another's marks.
+    // THE PER-THREAD SCRATCH of the measurement (IMPORT-SPEED-1): sample and soup
+    // buffers and one query scratch, none of them mesh-sized. Every per-VERTEX mark
+    // the walk needs (kept, in the region, who owns it) is the GROUP'S, indexed in
+    // the group's own vertex set (`measureGroup`): F2 — five mesh-sized arrays per
+    // thread were 2 GB at 5 M vertices on 20 threads, before any group was big.
     struct Scratch
     {
-        std::vector<unsigned> vertexStamp, inRegion, keptStamp;
-        std::vector<int> keptOwner, removedOwner;
-        unsigned stamp = 0;
         std::vector<surface::Sample> pts;
         std::vector<unsigned> soupTris, soupIdx;
         surface::Queries single = surface::Queries(1);   ///< a small group's queries: this thread's own
-        void ensure(size_t nv)
-        {
-            if (vertexStamp.size() == nv) return;
-            vertexStamp.assign(nv, 0u); inRegion.assign(nv, 0u); keptStamp.assign(nv, 0u);
-            keptOwner.assign(nv, -1); removedOwner.assign(nv, -1);
-        }
     };
     const int width = bakepool::width();
     std::vector<Scratch> scratch(static_cast<size_t>(width));
-    const auto ownVertices = [&](Scratch &sc, size_t c, std::vector<unsigned> &out) {
-        const unsigned stamp = ++sc.stamp;
-        for (unsigned v : raw[c].indices)
-            if (sc.vertexStamp[v] != stamp) { sc.vertexStamp[v] = stamp; out.push_back(v); }
-    };
     {
-        Scratch &sc = scratch[0];
-        sc.ensure(nv);
+        // The leaves, once and on this thread: each keeps its own vertices (first
+        // occurrence order), and the partition gives each vertex to its first leaf.
+        std::vector<unsigned> vertexStamp(nv, 0u);
         std::vector<unsigned char> ownStamp(nv, 0u);
+        unsigned stamp = 0;
         for (size_t c = 0; c < raw.size(); ++c) {
             if (raw[c].refined != -1) continue;
-            ownVertices(sc, c, regionAll[c]);
+            ++stamp;
+            for (unsigned v : raw[c].indices)
+                if (vertexStamp[v] != stamp) { vertexStamp[v] = stamp; regionAll[c].push_back(v); }
             for (unsigned v : raw[c].indices)
                 if (!ownStamp[v]) { ownStamp[v] = 1; regionOwn[c].push_back(v); }
         }
@@ -3971,24 +3987,58 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     std::vector<QString> termLines(termsLog ? groups.size() : 0);
     const auto measureGroup = [&](size_t g, Scratch &sc) {
         if (groups[g].simplified.error == FLT_MAX || outputs[g].empty()) return;   // terminal
-        sc.ensure(nv);
-        std::vector<int> &keptOwner = sc.keptOwner, &removedOwner = sc.removedOwner;
-        std::vector<unsigned> &inRegion = sc.inRegion, &keptStamp = sc.keptStamp;
         std::vector<surface::Sample> &pts = sc.pts;
-        const unsigned here = ++sc.stamp;
-        // S: the group's simplified output, and who keeps which vertex.
+        // S: the group's simplified output.
         std::vector<unsigned> simplifiedIdx, ownerOfTri;
         for (int o : outputs[g]) {
             const std::vector<unsigned> &idx = raw[size_t(o)].indices;
             simplifiedIdx.insert(simplifiedIdx.end(), idx.begin(), idx.end());
             ownerOfTri.insert(ownerOfTri.end(), idx.size() / 3, unsigned(o));
-            for (unsigned v : idx) if (keptStamp[v] != here) { keptStamp[v] = here; keptOwner[v] = o; }
         }
-        // R: the level-0 vertices the members stand for.
-        std::vector<unsigned> regionV;
+        // THE GROUP'S OWN VERTEX SET (F2): every vertex this group reads or marks is
+        // one of S's or one its members stand for, so the marks live in arrays over
+        // that set, reached through a hash from vertex to its local index
+        // (`local(v)`) — memory that scales with the group, not the mesh. Every walk
+        // below keeps its order, so the answers are the mesh-sized arrays' exactly.
+        std::vector<unsigned> candidates;   // the members' regions, in order, with repeats
         for (int m : members[g])
-            for (unsigned v : regionAll[size_t(m)])
-                if (inRegion[v] != here) { inRegion[v] = here; regionV.push_back(v); }
+            candidates.insert(candidates.end(), regionAll[size_t(m)].begin(), regionAll[size_t(m)].end());
+        constexpr size_t kAbsent = std::numeric_limits<size_t>::max();
+        constexpr unsigned kEmpty = std::numeric_limits<unsigned>::max();
+        size_t tableSize = 64;
+        while (tableSize < 2 * (candidates.size() + simplifiedIdx.size())) tableSize *= 2;
+        std::vector<std::pair<unsigned, unsigned>> table(tableSize, { kEmpty, 0u });
+        size_t universe = 0;
+        const size_t mask = tableSize - 1;
+        const auto slotOf = [&](unsigned v) {
+            size_t h = (size_t(v) * 0x9E3779B1u) & mask;
+            while (table[h].first != kEmpty && table[h].first != v) h = (h + 1) & mask;
+            return h;
+        };
+        for (const std::vector<unsigned> *list : { &candidates, &simplifiedIdx })
+            for (unsigned v : *list) {
+                const size_t h = slotOf(v);
+                if (table[h].first == kEmpty) table[h] = { v, unsigned(universe++) };
+            }
+        const auto local = [&](unsigned v) {
+            const size_t h = slotOf(v);
+            return table[h].first == v ? size_t(table[h].second) : kAbsent;
+        };
+        std::vector<unsigned char> kept(universe, 0u), inRegion(universe, 0u);
+        std::vector<int> keptOwner(universe, -1), removedOwner(universe, -1);
+        // Who keeps which vertex: its first output, in output order.
+        for (int o : outputs[g])
+            for (unsigned v : raw[size_t(o)].indices) {
+                const size_t l = local(v);
+                if (!kept[l]) { kept[l] = 1; keptOwner[l] = o; }
+            }
+        // R: the level-0 vertices the members stand for, first occurrence first.
+        std::vector<unsigned> regionV;
+        std::vector<size_t> regionL;   // their local indices
+        for (unsigned v : candidates) {
+            const size_t l = local(v);
+            if (!inRegion[l]) { inRegion[l] = 1; regionV.push_back(v); regionL.push_back(l); }
+        }
         if (regionV.empty() || simplifiedIdx.empty()) return;
 
         // The grid over S spans the group, not the mesh (a group is a small patch
@@ -4045,7 +4095,6 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         surface::Queries wide(big ? size_t(width) : 0u);
         surface::Queries &queries = big ? wide : sc.single;
         surface::TriangleGrid gridL;
-        surface::TriangleGrid::Query &own = sc.single[0];
         // One running-maximum loop: each chunk folds `distanceOf(i, query, stop)`
         // from `start` with its own maximum as the stop; the chunks fold in order.
         const auto runningMax = [&](size_t n, float start, auto &&distanceOf) {
@@ -4071,7 +4120,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             const Vec3 grow(reach, reach, reach);
             const bool whole = stats && stats->referenceMeasure;
             if (!whole) {
-                baseGrid.collect(own, glo - grow, ghi + grow, sc.soupTris);
+                baseGrid.collect(glo - grow, ghi + grow, sc.soupTris);
                 sc.soupIdx.clear();
                 for (unsigned t : sc.soupTris)
                     sc.soupIdx.insert(sc.soupIdx.end(), { base[t * 3], base[t * 3 + 1], base[t * 3 + 2] });
@@ -4101,22 +4150,27 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         // each writes its own `removedOwner` entry).
         worst = runningMax(regionV.size(), worst, [&](size_t i, surface::TriangleGrid::Query &q, float) {
             const unsigned v = regionV[i];
-            removedOwner[v] = -1;
-            if (keptStamp[v] == here) return 0.0f;                 // KEPT: on S, distance 0
+            const size_t l = regionL[i];
+            removedOwner[l] = -1;
+            if (kept[l]) return 0.0f;                              // KEPT: on S, distance 0
             unsigned tri = 0u;
             const float d = gridS.closest(q, vertexOf(positions, posComps, v), nullptr, nullptr, &tri);
-            removedOwner[v] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);
+            removedOwner[l] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);
             return d;
         });
         const float termV = worst;
         std::vector<unsigned> lostIdx;
-        for (unsigned v : regionV)
+        for (size_t i = 0; i < regionV.size(); ++i) {
+            const unsigned v = regionV[i];
+            if (kept[regionL[i]]) continue;
             for (unsigned t : trisByAnchor[v]) {
                 const unsigned b = base[t * 3 + 1], c = base[t * 3 + 2];
-                if (inRegion[b] != here || inRegion[c] != here) continue;
-                if (keptStamp[v] == here || keptStamp[b] == here || keptStamp[c] == here) continue;
+                const size_t lb = local(b), lc = local(c);
+                if (lb == kAbsent || lc == kAbsent || !inRegion[lb] || !inRegion[lc]) continue;
+                if (kept[lb] || kept[lc]) continue;
                 lostIdx.insert(lostIdx.end(), { v, b, c });
             }
+        }
         if (!lostIdx.empty() &&
             surface::sample(positions, posComps, lostIdx,
                             std::clamp(lostIdx.size() / 3, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f)
@@ -4136,12 +4190,23 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
 
         // HAND ON: every output carries its own vertices plus the removed ones
         // nearest it; the partition gives each kept vertex to its first user.
-        for (int o : outputs[g]) ownVertices(sc, size_t(o), regionAll[size_t(o)]);
-        for (unsigned v : regionV)
-            if (removedOwner[v] >= 0) regionAll[size_t(removedOwner[v])].push_back(v);
+        {
+            std::vector<unsigned> seen(universe, 0u);
+            unsigned stamp = 0;
+            for (int o : outputs[g]) {
+                ++stamp;
+                for (unsigned v : raw[size_t(o)].indices) {
+                    const size_t l = local(v);
+                    if (seen[l] != stamp) { seen[l] = stamp; regionAll[size_t(o)].push_back(v); }
+                }
+            }
+        }
+        for (size_t i = 0; i < regionV.size(); ++i)
+            if (removedOwner[regionL[i]] >= 0) regionAll[size_t(removedOwner[regionL[i]])].push_back(regionV[i]);
         for (int m : members[g])
             for (unsigned v : regionOwn[size_t(m)]) {
-                const int o = keptStamp[v] == here ? keptOwner[v] : removedOwner[v];
+                const size_t l = local(v);
+                const int o = l == kAbsent ? -1 : (kept[l] ? keptOwner[l] : removedOwner[l]);
                 if (o >= 0) regionOwn[size_t(o)].push_back(v);
             }
     };
