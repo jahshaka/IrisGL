@@ -139,7 +139,7 @@ struct GpuInstance {
 };
 static_assert(sizeof(GpuInstance) == 160, "the GPU instance table's stride is a contract");
 
-/// ONE MESH, std430, 48 bytes, indexed by the mesh table index.
+/// ONE MESH, std430, 64 bytes, indexed by the mesh table index.
 ///
 /// `positionAddress` and `indexAddress` USED TO BE HERE AND ARE DELETED (ATOM
 /// P4b). Nothing ever wrote them, and ATOM-VOXEL-1 found out why they could not
@@ -149,12 +149,46 @@ static_assert(sizeof(GpuInstance) == 160, "the GPU instance table's stride is a 
 /// beside the address anyway. Both now live in the GEOMETRY ROW table below, one
 /// row per (mesh, level, submesh). A3 §1.1's "GpuMesh carries the pool's device
 /// addresses" is amended by A5b §1.
+///
+/// `dag` (ATOM-CLUSTER-CUT) names the mesh's CLUSTER DAG in the two cluster tables
+/// below: x = its first cluster in `GpuScene::clusterBuffer`, y = its cluster count,
+/// z = its first group in `GpuScene::groupBuffer`, w = THE CLUSTER ROW — the geometry
+/// row whose index address is the mesh's cluster stream (GpuScene::kClusterRow), so a
+/// cluster's triangle t reads its corners at `firstIndex + 3t` through the same row
+/// decode every other reader uses. A mesh the bake gave no DAG (a small one, a
+/// runtime primitive) gets a FLAT one: level 0 cut into runs of kFlatClusterTriangles,
+/// all leaves of one terminal group, over level 0's own index buffer.
 struct GpuMesh {
     uint32_t counts[4] = {};  ///< x vertices, y level-0 indices, z level count, w submesh count
     float    localBoundsMin[4] = {};
     float    localBoundsMax[4] = {};  ///< [3] = the level-0 LOD bound (ATOM-BAKE-1's honest error)
+    uint32_t dag[4] = { 0u, 0u, 0u, 0xFFFFFFFFu };   ///< cluster base, count, group base, cluster row
 };
-static_assert(sizeof(GpuMesh) == 48, "the GPU mesh table's stride is a contract");
+static_assert(sizeof(GpuMesh) == 64, "the GPU mesh table's stride is a contract");
+
+/// ONE CLUSTER of a mesh's DAG, std430, 32 bytes — the layout JahClusterCut.glsl's
+/// `JahCluster` declares: `firstIndex`/`indexCount` its range of the mesh's cluster
+/// stream (the cluster row's index buffer), `group` the group it is a MEMBER of and
+/// `refined` the group that PRODUCED it (kNoGroup = level 0), both GLOBAL indices of
+/// `GpuScene::groupBuffer`; the sphere is the header's culling bound (mesh space).
+struct GpuCluster {
+    uint32_t firstIndex = 0;
+    uint32_t indexCount = 0;
+    uint32_t group = 0;
+    uint32_t refined = 0xFFFFFFFFu;
+    float    sphere[4] = {};
+};
+static_assert(sizeof(GpuCluster) == 32, "the GPU cluster table's stride is a contract");
+
+/// ONE GROUP of a mesh's DAG, std430, 32 bytes — JahClusterCut.glsl's
+/// `JahClusterGroup`: the sphere the bake grew to contain every child group's, and
+/// x = the MEASURED error (mesh units; FLT_MAX = terminal), y = clusterlod's estimate,
+/// z = the DAG depth, w = 0.
+struct GpuClusterGroup {
+    float sphere[4] = {};
+    float error[4] = {};
+};
+static_assert(sizeof(GpuClusterGroup) == 32, "the GPU group table's stride is a contract");
 
 /// THE FLAGS WORD — the predicates every consumer used to recompute for itself.
 /// ONE place writes them (`OgreScene::gpuFlagsFor`); nobody else asks the
@@ -227,7 +261,14 @@ public:
     /// this header does not name the type and no consumer of GpuScene.h drags in
     /// HlmsPbs; the writer (`OgreScene::acquireGpuMesh`) hands over 48 bytes.
     static constexpr uint32_t kGeomRowWords = 12u;
-    static constexpr uint32_t kGeomRowsPerMesh = kLevelsPerMesh * kSubmeshesPerMesh;
+    /// Rows per mesh entry: one per (level, submesh), then THE CLUSTER ROW
+    /// (ATOM-CLUSTER-CUT) — the level-0 row with the cluster stream as its index
+    /// buffer (GpuMesh::dag.w names it; `clusterRowIndex`).
+    static constexpr uint32_t kClusterRow = kLevelsPerMesh * kSubmeshesPerMesh;
+    static constexpr uint32_t kGeomRowsPerMesh = kClusterRow + 1u;
+    /// A flat DAG's leaf (a mesh with no baked DAG): the bake's own leaf size.
+    static constexpr uint32_t kFlatClusterTriangles = 128u;
+    static constexpr uint32_t kNoGroup = 0xFFFFFFFFu;
     static constexpr uint32_t kNoGeomRow = 0xFFFFFFFFu;
     /// No material word yet (see GpuInstance::ids).
     static constexpr uint32_t kNoMaterialWord = 0xFFFFFFFFu;
@@ -238,6 +279,7 @@ public:
     static uint32_t geomRowIndex(uint32_t meshIndex, uint32_t level, uint32_t submesh) {
         return meshIndex * kGeomRowsPerMesh + level * kSubmeshesPerMesh + submesh;
     }
+    static uint32_t clusterRowIndex(uint32_t meshIndex) { return meshIndex * kGeomRowsPerMesh + kClusterRow; }
 
     ~GpuScene();
 
@@ -326,6 +368,25 @@ public:
     /// (a MeshPtr outliving Root throws in VaoManager).
     uint32_t acquireMesh(const Ogre::MeshPtr &mesh, const GpuMesh &desc,
                          const GpuMeshLevel *levels, uint32_t levelCount);
+    /// THE MESH'S CLUSTER DAG (ATOM-CLUSTER-CUT), given once at its first acquire:
+    /// its clusters with LOCAL group indices (rebased onto the global group table
+    /// here) and its groups. The two tables are rebuilt WHOLE when the mesh set
+    /// changes — like the partitions, a DAG cannot change while its mesh lives — and
+    /// `dag` x/y/z of the entry are written then (w, the cluster row, by the caller).
+    void setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
+                    std::vector<GpuClusterGroup> groups, uint32_t clusterRow);
+    /// Uploads the cluster tables if the mesh set moved (update() calls it; a
+    /// consumer binding the tables outside the frame's scan calls it first).
+    void flushClusterTables();
+    Ogre::UavBufferPacked *clusterBuffer() const { return mClusterBuffer; }
+    Ogre::UavBufferPacked *groupBuffer() const { return mGroupBuffer; }
+    uint32_t clusterCount() const { return mClusterCount; }
+    /// The most clusters one live mesh carries (the cut's per-instance loop bound).
+    uint32_t maxClustersPerMesh() const { return mMaxClustersPerMesh; }
+    const GpuMesh &meshEntry(uint32_t index) const { return mMeshMirror[index]; }
+    /// The CPU mirror of the global tables (valid after flushClusterTables).
+    const std::vector<GpuCluster> &clusterMirror() const { return mClusterMirror; }
+    const std::vector<GpuClusterGroup> &groupMirror() const { return mGroupMirror; }
     /// The mesh an entry names, or a null pointer.
     const Ogre::MeshPtr &meshAt(uint32_t index) const;
     uint32_t meshEntryCount() const { return uint32_t(mMeshEntries.size()); }
@@ -477,7 +538,17 @@ private:
         uint32_t refs = 0;
         /// A ROW BLOCK (acquireRowBlock): no mesh, no references, rows only.
         bool rowBlock = false;
+        /// The mesh's DAG (setMeshDag), local group indices; the global tables are
+        /// rebuilt from these.
+        std::vector<GpuCluster> clusters;
+        std::vector<GpuClusterGroup> groups;
     };
+    Ogre::UavBufferPacked *mClusterBuffer = nullptr;
+    Ogre::UavBufferPacked *mGroupBuffer = nullptr;
+    std::vector<GpuCluster> mClusterMirror;
+    std::vector<GpuClusterGroup> mGroupMirror;
+    uint32_t mClusterCapacity = 0, mGroupCapacity = 0, mClusterCount = 0, mMaxClustersPerMesh = 0;
+    bool mClusterDirty = false;
     /// The row override per NODE (setSkinRow).
     std::unordered_map<uint32_t, uint32_t> mSkinRows;
     std::vector<MeshEntry> mMeshEntries;

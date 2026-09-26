@@ -2,11 +2,13 @@
 //
 // No vertex attributes: every vertex is PULLED through the GPU scene's tables, the
 // same rows the decode and the voxeliser read (jah_geom_rows.glsl, the ONE copy of
-// the geometry-row decode). The draw is one VkDrawIndexedIndirectCommand of the
-// GPU cull's list (JahCullDraws_cs.glsl): firstInstance is the INSTANCE SLOT, and
-// firstIndex/indexCount are the chosen level's range, drawn over an IDENTITY index
-// buffer so gl_VertexIndex is the index ELEMENT in the level's own index buffer
-// (the meshes live in different index buffers; one indirect draw binds one).
+// the geometry-row decode). The draw is one VkDrawIndexedIndirectCommand per
+// surviving instance, written by the cull's CUT (ATOM-CLUSTER-CUT, JahCullCut_cs.glsl):
+// firstInstance is the INSTANCE SLOT and [firstIndex, +indexCount) the instance's
+// run of the view's COMPACTED STREAM (JahCullEmit_cs.glsl), which holds REAL,
+// mesh-local vertex indices — so gl_VertexIndex IS the vertex, the post-transform
+// cache sees the reuse, and the position is read through the mesh's CLUSTER ROW
+// (GpuMesh::dag.w: level 0's vertices; every cluster of every depth indexes them).
 //
 // The transform is the decode's own order — world rows, then the view-projection
 // rows — so the triangle the decode rebuilds from the id lands where this one did.
@@ -30,13 +32,15 @@ layout( push_constant ) uniform AtomIdPc
 {
 	vec4  viewProjRow[4];   // row i of proj * view, the pass's own (texture flip included)
 	uvec2 instances;        // GpuScene::instanceBuffer: 10 uvec4 per GpuInstance
-	uvec2 levels;           // GpuScene::levelBuffer: 2 uvec4 per GpuMeshLevel
+	uvec2 meshes;           // GpuScene::meshBuffer: 4 uvec4 per GpuMesh (dag = lane 3)
 	uvec2 rows;             // GpuScene::geomBuffer: 3 uvec4 per geometry row
-	uvec2 cullLevels;       // GpuCull::levels: one uint per slot, the level the cull chose
+	uvec2 triWords;         // GpuCull::cutTriWords: two words per stream triangle (the fragment's)
+	uvec2 slotBase;         // GpuCull::cutSlotBase: the slot's first stream triangle
+	uvec2 pad;
 } pc;
 
-layout( location = 0 ) flat out uint outSlotLevel;
-layout( location = 1 ) flat out uint outTriangle;
+layout( location = 0 ) flat out uint outSlot;
+layout( location = 1 ) flat out uint outTriBase;
 
 out gl_PerVertex
 {
@@ -48,17 +52,15 @@ void main()
 	uint slot = uint( gl_InstanceIndex );
 	AtomVec4Ref inst = AtomVec4Ref( pc.instances );
 	uint mesh = inst.v[slot * 10u + 6u].w;
-	uint level = AtomWordRef( pc.cullLevels ).v[slot] & 0x7u;
-	uvec4 lev = AtomVec4Ref( pc.levels ).v[( mesh * 8u + level ) * 2u];
+	uint rowIndex = AtomVec4Ref( pc.meshes ).v[mesh * 4u + 3u].w;
 
 	AtomVec4Ref rows = AtomVec4Ref( pc.rows );
 	GeometryRow row;
-	row.addresses = rows.v[lev.w * 3u];
-	row.layout0 = rows.v[lev.w * 3u + 1u];
-	row.layout1 = rows.v[lev.w * 3u + 2u];
+	row.addresses = rows.v[rowIndex * 3u];
+	row.layout0 = rows.v[rowIndex * 3u + 1u];
+	row.layout1 = rows.v[rowIndex * 3u + 2u];
 
-	uint element = uint( gl_VertexIndex );
-	vec4 p = vec4( geomPosition( row, geomIndex( row, element ) ), 1.0 );
+	vec4 p = vec4( geomPosition( row, uint( gl_VertexIndex ) ), 1.0 );
 	vec3 w = vec3( dot( uintBitsToFloat( inst.v[slot * 10u + 0u] ), p ),
 				   dot( uintBitsToFloat( inst.v[slot * 10u + 1u] ), p ),
 				   dot( uintBitsToFloat( inst.v[slot * 10u + 2u] ), p ) );
@@ -66,9 +68,6 @@ void main()
 	gl_Position = vec4( dot( pc.viewProjRow[0], w4 ), dot( pc.viewProjRow[1], w4 ),
 						dot( pc.viewProjRow[2], w4 ), dot( pc.viewProjRow[3], w4 ) );
 
-	// AtomId: x = slot (24 bits) | level (3 bits); y = the triangle counted from the
-	// level's first index. Flat, so the PROVOKING vertex (the triangle's first)
-	// decides: its element is firstIndex + 3t.
-	outSlotLevel = ( slot & 0x00FFFFFFu ) | ( level << 24u );
-	outTriangle = ( element - lev.x ) / 3u;
+	outSlot = slot;
+	outTriBase = AtomWordRef( pc.slotBase ).v[slot];
 }

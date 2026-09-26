@@ -39,6 +39,7 @@ struct CullParams
 	vec4  lod;              // x tolerance (samples), y proj[1][1], z viewport height, w 1 = orthographic
 	uvec4 counts;           // x instanceCount, y flagsRequired, z flagsForbidden, w mode
 	uvec4 hzb;              // x levels (0 = frustum only), y width, z height, w reverseZ
+	uvec4 cut;              // mode 3's budget: x stream indices, y drawn-cluster records
 };
 
 struct GpuInstance
@@ -60,6 +61,7 @@ struct GpuMesh
 	uvec4 counts;           // x vertices, y level-0 indices, z LEVEL COUNT, w submeshes
 	vec4  localBoundsMin;
 	vec4  localBoundsMax;   // w = the level-0 bound, which is 0 by definition
+	uvec4 dag;              // the cluster DAG: base, count, group base, cluster row (GpuScene.h)
 };
 
 // 32 bytes since ATOM P4b: the partition range beside the index range.
@@ -185,8 +187,10 @@ void main()
 	float scale = jahWorldMaxAxisScale( instances[slot].world[0], instances[slot].world[1],
 										instances[slot].world[2] );
 
+	// MODE 3 (THE CLUSTER CUT) PICKS NO LEVEL: the cut job decides per cluster, and
+	// neither the walk nor its band runs (the level stays 0 in `outLevel`).
 	uint levelCount = meshes[meshIndex].counts.z;
-	if( params.lod.x > 0.0 && scale > 0.0 && levelCount > 1u )
+	if( params.counts.w < 3u && params.lod.x > 0.0 && scale > 0.0 && levelCount > 1u )
 	{
 		vec3 lMin = meshes[meshIndex].localBoundsMin.xyz;
 		vec3 lMax = meshes[meshIndex].localBoundsMax.xyz;

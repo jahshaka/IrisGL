@@ -63,6 +63,10 @@ GpuCull::~GpuCull() { destroy(); }
 
 void GpuCull::destroy() {
     if (mVao) {
+        if (mCutStream) mVao->destroyUavBuffer(mCutStream);
+        if (mCutTriWords) mVao->destroyUavBuffer(mCutTriWords);
+        if (mCutRecords) mVao->destroyUavBuffer(mCutRecords);
+        if (mCutSlotBase) mVao->destroyUavBuffer(mCutSlotBase);
         if (mDraws) mVao->destroyUavBuffer(mDraws);
         if (mHeld) mVao->destroyUavBuffer(mHeld);
         if (mCount) mVao->destroyUavBuffer(mCount);
@@ -72,8 +76,44 @@ void GpuCull::destroy() {
         if (mParams) mVao->destroyUavBuffer(mParams);
     }
     mDraws = mCount = mSurvivors = mLevels = mVisible = mParams = mHeld = nullptr;
+    mCutStream = mCutTriWords = mCutRecords = mCutSlotBase = nullptr;
+    mCutIndexBudget = mCutRecordBudget = mCutSlotCapacity = 0u;
     mVao = nullptr;
     mCapacity = 0u;
+}
+
+/// THE CUT'S BUFFERS. The stream, its triangle words and the records are sized by
+/// the BUDGET (never per frame: re-created only when an overflow raised it), the
+/// per-slot base by the list's slot capacity. Nothing in them is state between
+/// requests — every word a reader reads is written by the request it reads.
+bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err) {
+    if (!mParams || vao != mVao) {
+        err = "gpucull: the cut's buffers need the list's (ensure first)";
+        return false;
+    }
+    if (!mCutSlotBase || mCutSlotCapacity < mCapacity) {
+        if (mCutSlotBase) vao->destroyUavBuffer(mCutSlotBase);
+        mCutSlotBase = vao->createUavBuffer(mCapacity, sizeof(uint32_t), 0, nullptr, false);
+        mCutSlotCapacity = mCapacity;
+    }
+    if (mCutStream && mCutIndexBudget >= mCutWantBudget) return true;
+    if (mCutStream) vao->destroyUavBuffer(mCutStream);
+    if (mCutTriWords) vao->destroyUavBuffer(mCutTriWords);
+    if (mCutRecords) vao->destroyUavBuffer(mCutRecords);
+    mCutIndexBudget = mCutWantBudget;
+    mCutRecordBudget = mCutIndexBudget / kCutIndicesPerRecord;
+    mCutStream = vao->createUavBuffer(mCutIndexBudget, sizeof(uint32_t), 0, nullptr, false);
+    mCutTriWords = vao->createUavBuffer(size_t(mCutIndexBudget / 3u) * 2u, sizeof(uint32_t), 0, nullptr, false);
+    mCutRecords = vao->createUavBuffer(mCutRecordBudget, 4u * sizeof(uint32_t), 0, nullptr, false);
+    return mCutStream && mCutTriWords && mCutRecords;
+}
+
+void GpuCull::noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked) {
+    if (!overflowedInstances) return;
+    uint32_t want = std::max(mCutWantBudget, kCutIndexBudgetFirst);
+    while (want < kCutIndexBudgetCeiling && want < indicesAsked) want *= 2u;
+    if (want == mCutWantBudget && want < kCutIndexBudgetCeiling) want *= 2u;
+    mCutWantBudget = std::min(want, kCutIndexBudgetCeiling);
 }
 
 /// `slotCapacity` IS THE TABLE'S CAPACITY AND NOT ITS COUNT, and the difference
@@ -157,6 +197,20 @@ void unbindCullJobs(Ogre::HlmsComputeJob *test, Ogre::HlmsComputeJob *compact,
     }
 }
 
+/// The cut's two jobs, cleared the same way.
+void unbindCutJobs(Ogre::HlmsComputeJob *cut, Ogre::HlmsComputeJob *emit) {
+    const Ogre::DescriptorSetUav::BufferSlot empty =
+        Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+    if (cut) {
+        for (uint8_t i = 0; i < 10u; ++i) cut->_setUavBuffer(i, empty);
+        cut->setIndirectDispatchBuffer(0);
+    }
+    if (emit) {
+        for (uint8_t i = 0; i < 9u; ++i) emit->_setUavBuffer(i, empty);
+        emit->setIndirectDispatchBuffer(0);
+    }
+}
+
 /// One dispatch with the barriers its bindings imply.
 void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
                           Ogre::HlmsComputeJob *job) {
@@ -218,6 +272,25 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
     // THE TABLE'S CAPACITY, not this request's instance count (see `ensure`).
     if (!cull.ensure(rs->getVaoManager(), std::max(mGpuScene.slotCapacity(), 1u), err))
         return false;
+    // THE CUT (mode 3): its two jobs and its per-frame buffers at the current budget,
+    // and the DAG tables on the device before anything binds them.
+    const bool cutMode = req.mode >= 3u;
+    Ogre::HlmsComputeJob *cutJob = cutMode ? hc->findComputeJobNoThrow("Jahshaka/CullCut") : nullptr;
+    Ogre::HlmsComputeJob *emitJob = cutMode ? hc->findComputeJobNoThrow("Jahshaka/CullEmit") : nullptr;
+    if (cutMode) {
+        if (!cutJob || !emitJob) {
+            err = "engine: the cut's compute jobs are missing — "
+                  "media/Hlms/Jahshaka/JahshakaCompute.material.json is not staged";
+            return false;
+        }
+        mGpuScene.flushClusterTables();
+        mGpuScene.flushGeomRows();
+        if (!cull.ensureCut(rs->getVaoManager(), err)) return false;
+        if (!mGpuScene.clusterBuffer() || !mGpuScene.groupBuffer()) {
+            err = "the cut has no cluster tables (no mesh with geometry rows is attached)";
+            return false;
+        }
+    }
 
     // THE HOST'S SHARE (GpuCullResult::requestMs): the request's write and the three
     // dispatches' recording — never the tables' or the list's (re)allocation above.
@@ -241,8 +314,11 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.hzb[1] = hzb ? uint32_t(hzb->getWidth()) : 0u;
         p.hzb[2] = hzb ? uint32_t(hzb->getHeight()) : 0u;
         p.hzb[3] = rs->isReverseDepth() ? 1u : 0u;
+        p.cut[0] = cutMode ? cull.cutIndexBudget() : 0u;
+        p.cut[1] = cutMode ? cull.cutRecordBudget() : 0u;
         cull.params()->upload(&p, 0, 1u);
-        const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 0u, 0u };
+        const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u,
+                                                          0u, 1u, 1u, 0u, 0u, 0u, 0u, 0u };
         cull.count()->upload(reset, 0, GpuCull::kCountElements);
 
         // ---- job 1: test ---------------------------------------------------
@@ -289,22 +365,55 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         // id pass's share of the frame's stats — OgreAtomIdPass.cpp's stats ring).
         draws->_setUavBuffer(5u, cullSlot(cull.count(), Ogre::ResourceAccess::ReadWrite));
         draws->setIndirectDispatchBuffer(cull.count(), GpuCull::kIndirectOffsetBytes);
+
+        // ---- the cut (mode 3): job 3' per survivor, job 4' per drawn cluster ----
+        if (cutMode) {
+            cutJob->_setUavBuffer(0u, cullSlot(cull.params(), Ogre::ResourceAccess::Read));
+            cutJob->_setUavBuffer(1u, cullSlot(mGpuScene.instanceBuffer(), Ogre::ResourceAccess::Read));
+            cutJob->_setUavBuffer(2u, cullSlot(mGpuScene.meshBuffer(), Ogre::ResourceAccess::Read));
+            cutJob->_setUavBuffer(3u, cullSlot(mGpuScene.clusterBuffer(), Ogre::ResourceAccess::Read));
+            cutJob->_setUavBuffer(4u, cullSlot(mGpuScene.groupBuffer(), Ogre::ResourceAccess::Read));
+            cutJob->_setUavBuffer(5u, cullSlot(cull.survivors(), Ogre::ResourceAccess::Read));
+            cutJob->_setUavBuffer(6u, cullSlot(cull.count(), Ogre::ResourceAccess::ReadWrite));
+            cutJob->_setUavBuffer(7u, cullSlot(cull.draws(), Ogre::ResourceAccess::Write));
+            cutJob->_setUavBuffer(8u, cullSlot(cull.cutRecords(), Ogre::ResourceAccess::Write));
+            cutJob->_setUavBuffer(9u, cullSlot(cull.cutSlotBase(), Ogre::ResourceAccess::Write));
+            cutJob->setIndirectDispatchBuffer(cull.count(), GpuCull::kCutIndirectOffsetBytes);
+            emitJob->_setUavBuffer(0u, cullSlot(cull.params(), Ogre::ResourceAccess::Read));
+            emitJob->_setUavBuffer(1u, cullSlot(cull.cutRecords(), Ogre::ResourceAccess::Read));
+            emitJob->_setUavBuffer(2u, cullSlot(mGpuScene.instanceBuffer(), Ogre::ResourceAccess::Read));
+            emitJob->_setUavBuffer(3u, cullSlot(mGpuScene.meshBuffer(), Ogre::ResourceAccess::Read));
+            emitJob->_setUavBuffer(4u, cullSlot(mGpuScene.clusterBuffer(), Ogre::ResourceAccess::Read));
+            emitJob->_setUavBuffer(5u, cullSlot(mGpuScene.geomBuffer(), Ogre::ResourceAccess::Read));
+            emitJob->_setUavBuffer(6u, cullSlot(cull.cutStream(), Ogre::ResourceAccess::Write));
+            emitJob->_setUavBuffer(7u, cullSlot(cull.cutTriWords(), Ogre::ResourceAccess::Write));
+            emitJob->_setUavBuffer(8u, cullSlot(cull.count(), Ogre::ResourceAccess::Read));
+            emitJob->setIndirectDispatchBuffer(cull.count(), GpuCull::kEmitIndirectOffsetBytes);
+        }
         if (requestMs)
             *requestMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tRequest)
                              .count();
 
         dispatchWithBarriers(rs, hc, test);
         dispatchWithBarriers(rs, hc, compact);
-        if (req.mode >= 2u) dispatchWithBarriers(rs, hc, draws);
+        if (req.mode == 2u) dispatchWithBarriers(rs, hc, draws);
+        if (cutMode) {
+            dispatchWithBarriers(rs, hc, cutJob);
+            dispatchWithBarriers(rs, hc, emitJob);
+        }
         // The descriptor sets the dispatches bound were built at dispatch time;
         // the jobs' CPU-side bindings go now (a later grow must not find them),
         // unless a measurement re-dispatches them as they stand.
-        if (!keepBindings) unbindCullJobs(test, compact, draws);
+        if (!keepBindings) {
+            unbindCullJobs(test, compact, draws);
+            unbindCutJobs(cutJob, emitJob);
+        }
         return true;
     }
     catch (Ogre::Exception &e) {
         err = e.getFullDescription();
         unbindCullJobs(test, compact, draws);
+        unbindCutJobs(cutJob, emitJob);
         return false;
     }
 }
@@ -341,7 +450,64 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
             readUints(mGpuCull.levels(), 0u, instances, out.levels);
         if (readBack && out.survivors)
             readUints(mGpuCull.survivors(), 0u, out.survivors, out.survivorSlots);
-        if (req.mode >= 2u) {
+        if (req.mode >= 3u) {
+            out.draws = out.survivors;
+            out.cutClusters = std::min(counter[8], mGpuCull.cutRecordBudget());
+            out.cutIndices = counter[11];
+            out.cutTriangles = counter[4];
+            out.cutOverflow = counter[12];
+            out.cutOverflowIndices = counter[13];
+            out.cutEvaluated = counter[14];
+            out.cutIndexBudget = mGpuCull.cutIndexBudget();
+            if (readBack && out.survivors)
+                readUints(mGpuCull.draws(), 0u, out.survivors * GpuCull::kDrawWords, out.drawCommands);
+            if (readBack && out.cutClusters) {
+                std::vector<unsigned> rec;
+                readUints(mGpuCull.cutRecords(), 0u, out.cutClusters * 4u, rec);
+                out.cutDrawn.reserve(size_t(out.cutClusters) * 3u);
+                for (unsigned r = 0; r < out.cutClusters; ++r) {
+                    const unsigned slot = rec[r * 4u], global = rec[r * 4u + 1u];
+                    if (slot >= mGpuScene.slotCapacity()) continue;   // a skipped (overflow) record
+                    uint32_t meshIndex = 0u;
+                    std::memcpy(&meshIndex, &mGpuScene.entry(slot).boundsMin[3], sizeof(uint32_t));
+                    const unsigned base = meshIndex < mGpuScene.meshEntryCount()
+                                              ? mGpuScene.meshEntry(meshIndex).dag[0] : 0u;
+                    out.cutDrawn.push_back(slot);
+                    out.cutDrawn.push_back(global - base);
+                    out.cutDrawn.push_back(rec[r * 4u + 3u]);
+                }
+            }
+            if (req.measureIterations) {
+                Ogre::HlmsComputeJob *cutJob = hc->findComputeJobNoThrow("Jahshaka/CullCut");
+                Ogre::HlmsComputeJob *emitJob = hc->findComputeJobNoThrow("Jahshaka/CullEmit");
+                // THE CUT JOB ACCUMULATES (its cursors), so each measured dispatch starts
+                // from the counters the compaction left: survivors and the dispatch
+                // arguments kept, the cut's own words zeroed. The emit job only reads.
+                std::vector<uint32_t> again(counter.begin(), counter.end());
+                again[4] = again[8] = again[11] = again[12] = again[13] = again[14] = 0u;
+                const auto t0 = std::chrono::steady_clock::now();
+                rs->flushCommands();
+                const auto t1 = std::chrono::steady_clock::now();
+                for (unsigned i = 0; i < req.measureIterations; ++i) {
+                    mGpuCull.count()->upload(again.data(), 0, GpuCull::kCountElements);
+                    dispatchWithBarriers(rs, hc, cutJob);
+                }
+                rs->flushCommands();
+                const auto t2 = std::chrono::steady_clock::now();
+                // ...minus the counter uploads alone.
+                for (unsigned i = 0; i < req.measureIterations; ++i)
+                    mGpuCull.count()->upload(again.data(), 0, GpuCull::kCountElements);
+                rs->flushCommands();
+                const auto t3 = std::chrono::steady_clock::now();
+                const double empty = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                const double full = std::chrono::duration<double, std::milli>(t2 - t1).count();
+                const double uploads = std::chrono::duration<double, std::milli>(t3 - t2).count();
+                out.cutMs = std::max(0.0, full - std::max(empty, uploads)) / double(req.measureIterations);
+                out.emitMs = measureJob(rs, hc, emitJob, req.measureIterations);
+                unbindCutJobs(cutJob, emitJob);
+            }
+        }
+        if (req.mode == 2u) {
             out.draws = out.survivors;
             if (readBack && out.survivors)
                 readUints(mGpuCull.draws(), 0u, out.survivors * GpuCull::kDrawWords,
@@ -371,7 +537,7 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
             // over the buffers the request filled.
             out.testMs = measureJob(rs, hc, test, req.measureIterations);
             out.compactMs = measureJob(rs, hc, compact, req.measureIterations);
-            if (req.mode >= 2u) out.drawsMs = measureJob(rs, hc, draws, req.measureIterations);
+            if (req.mode == 2u) out.drawsMs = measureJob(rs, hc, draws, req.measureIterations);
             unbindCullJobs(test, compact, draws);
         }
         return true;
@@ -382,6 +548,8 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
             unbindCullJobs(hc->findComputeJobNoThrow("Jahshaka/CullTest"),
                            hc->findComputeJobNoThrow("Jahshaka/CullCompact"),
                            hc->findComputeJobNoThrow("Jahshaka/CullDraws"));
+            unbindCutJobs(hc->findComputeJobNoThrow("Jahshaka/CullCut"),
+                          hc->findComputeJobNoThrow("Jahshaka/CullEmit"));
         }
         return false;
     }

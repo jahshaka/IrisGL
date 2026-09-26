@@ -24,6 +24,7 @@
 
 #include "Vct/OgreVctMaterial.h"
 #include "Vct/OgreVctVoxelizer.h"
+#include <Vao/OgreIndexBufferPacked.h>
 #include <Vao/OgreTexBufferPacked.h>
 
 #include <OgreLogManager.h>
@@ -88,7 +89,14 @@ void GpuScene::destroy() {
         if (mGeomBuffer) mVao->destroyUavBuffer(mGeomBuffer);
         if (mPartBuffer) mVao->destroyTexBuffer(mPartBuffer);
         if (mPartAabbBuffer) mVao->destroyUavBuffer(mPartAabbBuffer);
+        if (mClusterBuffer) mVao->destroyUavBuffer(mClusterBuffer);
+        if (mGroupBuffer) mVao->destroyUavBuffer(mGroupBuffer);
     }
+    mClusterBuffer = mGroupBuffer = nullptr;
+    mClusterMirror.clear();
+    mGroupMirror.clear();
+    mClusterCapacity = mGroupCapacity = mClusterCount = mMaxClustersPerMesh = 0u;
+    mClusterDirty = false;
     mInstanceBuffer = mMeshBuffer = mLevelBuffer = mGeomBuffer = nullptr;
     mPartBuffer = nullptr;
     mPartAabbBuffer = nullptr;
@@ -224,6 +232,68 @@ bool GpuScene::ensurePartitions(Ogre::HlmsManager *hlmsManager, Ogre::RenderSyst
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// THE CLUSTER TABLES (ATOM-CLUSTER-CUT): every live mesh's DAG, concatenated. Rebuilt
+// WHOLE when the mesh set changes, exactly like the partitions above — a DAG cannot
+// change while its mesh lives, and the rebuild is O(clusters) once per attach batch.
+void GpuScene::setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
+                          std::vector<GpuClusterGroup> groups, uint32_t clusterRow) {
+    if (meshIndex >= mMeshEntries.size()) return;
+    mMeshEntries[meshIndex].clusters = std::move(clusters);
+    mMeshEntries[meshIndex].groups = std::move(groups);
+    mMeshMirror[meshIndex].dag[3] = clusterRow;
+    mMeshDirty = true;
+    mClusterDirty = true;
+}
+
+void GpuScene::flushClusterTables() {
+    if (!mClusterDirty || !mVao) return;
+    mClusterDirty = false;
+    mClusterMirror.clear();
+    mGroupMirror.clear();
+    mMaxClustersPerMesh = 0u;
+    for (uint32_t e = 0; e < uint32_t(mMeshEntries.size()); ++e) {
+        MeshEntry &me = mMeshEntries[e];
+        GpuMesh &gm = mMeshMirror[e];
+        if (me.refs == 0u || me.rowBlock || me.clusters.empty() || me.groups.empty()) {
+            gm.dag[0] = gm.dag[1] = gm.dag[2] = 0u;
+            continue;
+        }
+        const uint32_t cBase = uint32_t(mClusterMirror.size()), gBase = uint32_t(mGroupMirror.size());
+        for (GpuCluster c : me.clusters) {
+            c.group += gBase;
+            if (c.refined != kNoGroup) c.refined += gBase;
+            mClusterMirror.push_back(c);
+        }
+        mGroupMirror.insert(mGroupMirror.end(), me.groups.begin(), me.groups.end());
+        gm.dag[0] = cBase;
+        gm.dag[1] = uint32_t(me.clusters.size());
+        gm.dag[2] = gBase;
+        mMaxClustersPerMesh = std::max(mMaxClustersPerMesh, gm.dag[1]);
+    }
+    mClusterCount = uint32_t(mClusterMirror.size());
+    mMeshDirty = true;
+    // GROWN BY DOUBLING, never shrunk; a re-create hands the old buffer to Ogre's
+    // delayed destruction (a consumer re-reads the pointer before every dispatch).
+    const auto grow = [&](Ogre::UavBufferPacked *&buf, uint32_t &cap, size_t count, size_t stride,
+                          const void *data) {
+        if (!buf || count > cap) {
+            if (buf) mVao->destroyUavBuffer(buf);
+            uint32_t want = std::max(cap, 1024u);
+            while (want < count) want *= 2u;
+            std::vector<unsigned char> init(size_t(want) * stride, 0u);
+            if (count) std::memcpy(init.data(), data, count * stride);
+            buf = mVao->createUavBuffer(want, uint32_t(stride), 0, init.data(), false);
+            cap = want;
+        } else if (count) {
+            buf->upload(data, 0, count);
+        }
+        ++mCopies;
+    };
+    grow(mClusterBuffer, mClusterCapacity, mClusterMirror.size(), sizeof(GpuCluster), mClusterMirror.data());
+    grow(mGroupBuffer, mGroupCapacity, mGroupMirror.size(), sizeof(GpuClusterGroup), mGroupMirror.data());
+}
+
 uint64_t GpuScene::recordBound() const {
     uint64_t bound = 0;
     for (uint32_t e = 0; e < uint32_t(mMeshEntries.size()); ++e) {
@@ -315,6 +385,9 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long lon
     mLastDirtyCount = unsigned(dirtySlots.size());
     if (!live()) return;
 
+    // THE CLUSTER TABLES before the mesh table: their rebuild writes the entries'
+    // `dag` bases.
+    flushClusterTables();
     // THE MESH TABLE FIRST: an instance's mesh index must mean something on the
     // device before the instance referencing it arrives.
     if (mMeshDirty && !mMeshMirror.empty()) {
@@ -484,10 +557,12 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
         --mMeshEntries[index].refs;
         return;
     }
+    const bool hadDag = !mMeshEntries[index].clusters.empty();
     mMeshEntries[index] = MeshEntry();
     mMeshIndex.erase(it);
     mFreeMeshSlots.push_back(index);
     mPartitionsDirty = true;      // the last reference: its partitions go with it
+    if (hadDag) mClusterDirty = true;   // ...and its clusters
     // THE ENTRY IS ZEROED, not left behind: a slot recycled to a different mesh
     // must never be readable as the dead one's geometry (the VctMaterial
     // by-pointer aliasing lesson, DOCS/traps/ENGINE.md).
@@ -814,6 +889,81 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
     for (uint32_t l = 0; l < levelCount && l < detail::GpuScene::kLevelsPerMesh; ++l) {
         if (levelHasBase[l])
             mGpuScene.setLevelGeomRow(index, l, detail::GpuScene::geomRowIndex(index, l, 0u));
+    }
+
+    // THE CLUSTER DAG AND ITS ROW (ATOM-CLUSTER-CUT). The row is level 0's with the
+    // CLUSTER STREAM as its index buffer (the same vertices, ATOM rule 1); a mesh the
+    // bake gave no DAG gets a FLAT one over level 0's own indices (runs of
+    // kFlatClusterTriangles, every one a leaf of one terminal group), so every Atom
+    // item is drawn by the one cut and nothing reads a level on the id pass.
+    const StagedRow *base0 = nullptr;
+    for (const StagedRow &sr : rows)
+        if (sr.level == 0u && sr.submesh == 0u) base0 = &sr;
+    Ogre::VaoManager *vaoMgr = mRoot ? mRoot->getRenderSystem()->getVaoManager() : nullptr;
+    if (base0 && vaoMgr) {
+        std::vector<detail::GpuCluster> clusters;
+        std::vector<detail::GpuClusterGroup> groups;
+        Ogre::VctVoxelizer::GeometryRow crow = base0->row;
+        const Ogre::IndexBufferPacked *stream = rec.clusterStream.get();
+        const uint64_t rawIdx = stream ? vaoMgr->getBufferDeviceAddress(stream) : 0u;
+        if (stream && rawIdx && !rec.clusters.empty() && !rec.clusterGroups.empty()) {
+            const uint32_t idxBytes = uint32_t(stream->getBytesPerElement());
+            const uint64_t floored = rawIdx & ~uint64_t(3u);
+            crow.idxBias = uint32_t((rawIdx - floored) / idxBytes);
+            crow.idxAddress[0] = uint32_t(floored & 0xFFFFFFFFu);
+            crow.idxAddress[1] = uint32_t(floored >> 32u);
+            // Bit 0 of the row's flags is "32-bit indices" (the row format's own bit,
+            // VoxelizerGeomFlag::Index32bit in OgreVctVoxelizer.cpp; the decode's
+            // ATOM_GEOM_INDEX32): the stream's width, which is level 0's.
+            constexpr uint32_t kRowIndex32 = 1u;
+            crow.flags = (crow.flags & ~kRowIndex32) |
+                         (stream->getIndexType() == Ogre::IndexBufferPacked::IT_32BIT ? kRowIndex32 : 0u);
+            clusters.reserve(rec.clusters.size());
+            for (const MeshCluster &c : rec.clusters) {
+                detail::GpuCluster g;
+                g.firstIndex = c.firstIndex;
+                g.indexCount = c.indexCount;
+                g.group = uint32_t(c.group);
+                g.refined = c.refined < 0 ? detail::GpuScene::kNoGroup : uint32_t(c.refined);
+                for (int k = 0; k < 3; ++k) g.sphere[k] = c.centre[k];
+                g.sphere[3] = c.radius;
+                clusters.push_back(g);
+            }
+            groups.reserve(rec.clusterGroups.size());
+            for (const MeshClusterGroup &gr : rec.clusterGroups) {
+                detail::GpuClusterGroup g;
+                for (int k = 0; k < 3; ++k) g.sphere[k] = gr.centre[k];
+                g.sphere[3] = gr.radius;
+                g.error[0] = gr.error;
+                g.error[1] = gr.estimate;
+                g.error[2] = float(gr.depth);
+                groups.push_back(g);
+            }
+        } else if (levels[0].indexCount >= 3u) {
+            // THE FLAT DAG: the row IS level 0's; the clusters are its index range.
+            const Ogre::Vector3 c = local.mCenter;
+            const float r = float(local.mHalfSize.length());
+            detail::GpuClusterGroup g;
+            g.sphere[0] = c.x; g.sphere[1] = c.y; g.sphere[2] = c.z; g.sphere[3] = r;
+            g.error[0] = std::numeric_limits<float>::max();
+            g.error[1] = std::numeric_limits<float>::max();
+            groups.push_back(g);
+            const uint32_t run = detail::GpuScene::kFlatClusterTriangles * 3u;
+            for (uint32_t first = 0; first + 3u <= levels[0].indexCount; first += run) {
+                detail::GpuCluster k;
+                k.firstIndex = levels[0].firstIndex + first;
+                k.indexCount = std::min(run, (levels[0].indexCount - first) / 3u * 3u);
+                k.group = 0u;
+                k.refined = detail::GpuScene::kNoGroup;
+                std::memcpy(k.sphere, g.sphere, sizeof(k.sphere));
+                clusters.push_back(k);
+            }
+        }
+        if (!clusters.empty()) {
+            const uint32_t crowIndex = detail::GpuScene::clusterRowIndex(index);
+            mGpuScene.stageGeomRow(crowIndex, &crow);
+            mGpuScene.setMeshDag(index, std::move(clusters), std::move(groups), crowIndex);
+        }
     }
     return index;
 }

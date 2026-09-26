@@ -3,11 +3,14 @@
 //
 // WHAT IT RECORDS, inside the chain's `atom_id` PASS_CUSTOM (OgreChain.cpp) and
 // after the provider closed Ogre's render pass (AtomPass.h):
-//   1. THE CULL — the GPU cull's three jobs over the scene's table, into the VIEW's
-//      own list (OgreView::atomCull): frustum, the level rule (one pixel x the
-//      scene's LOD bias, the draw path's own tolerance) and one
-//      VkDrawIndexedIndirectCommand per survivor, the predicate "visible and routed
-//      to Atom" (kGpuVisible | kGpuAtom). Nothing is read back.
+//   1. THE CULL — the GPU cull's CUT MODE over the scene's table, into the VIEW's
+//      own list (OgreView::atomCull): frustum, then THE CLUSTER CUT per (survivor,
+//      cluster) at the view's tolerance (one pixel x the scene's LOD bias; no switch
+//      band — a frontier change under a pixel is invisible by construction), the
+//      drawn clusters' indices compacted into the list's stream and one
+//      VkDrawIndexedIndirectCommand per survivor over its run of it
+//      (ATOM-CLUSTER-CUT, SPECS/v2/CLUSTER_CUT_DESIGN.md), the predicate "visible
+//      and routed to Atom" (kGpuVisible | kGpuAtom). Nothing is read back.
 //   2. THE EDGES the barrier solver cannot express — compute write -> indirect read
 //      (patch 0032's own reason) and the GPU scene's tables, read by the vertex
 //      stage through device addresses the solver never sees — as one raw memory
@@ -23,8 +26,9 @@
 // (boundRawState); the render pass stays open for the next pass to close.
 //
 // THE PIPELINE is ours: no vertex attributes (atom_id.vert pulls every vertex
-// through the geometry rows over an IDENTITY index buffer), push constants only
-// (the pass's view-projection rows and four device addresses — no descriptor set
+// through the mesh's cluster row; the cut's compacted stream is the index buffer, so
+// gl_VertexIndex is a real vertex), push constants only (the pass's view-projection
+// rows and five device addresses — no descriptor set
 // to keep per frame in flight), created against a render pass COMPATIBLE with
 // Ogre's (the same two formats, one sample) and rebuilt only when a format does.
 // Front face CLOCKWISE and back faces culled, exactly Ogre's Vulkan convention for
@@ -73,16 +77,20 @@ namespace detail {
 #if JAH_RAY_QUERY
 namespace {
 
-/// The push constants, as atom_id.vert declares them (std430 push-constant block:
-/// four vec4 then four uvec2 — 96 bytes, inside the 128 every device offers).
+/// The push constants, as atom_id.vert and atom_id.frag declare them (std430
+/// push-constant block: four vec4 then six uvec2 — 112 bytes, inside the 128 every
+/// device offers). Both stages read the block (the fragment its triangle words).
 struct IdPushConstants {
     float    viewProjRow[16] = {};
     uint32_t instances[2] = {};
-    uint32_t levels[2] = {};
+    uint32_t meshes[2] = {};
     uint32_t rows[2] = {};
-    uint32_t cullLevels[2] = {};
+    uint32_t triWords[2] = {};
+    uint32_t slotBase[2] = {};
+    uint32_t pad[2] = {};
 };
-static_assert(sizeof(IdPushConstants) == 96, "atom_id.vert's push-constant block");
+static_assert(sizeof(IdPushConstants) == 112, "atom_id.vert/.frag's push-constant block");
+constexpr VkShaderStageFlags kIdPushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 struct IdPipeline {
     VkDevice dev = VK_NULL_HANDLE;
@@ -96,10 +104,6 @@ struct IdPipeline {
     VkPipeline pipeline[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkFormat colour = VK_FORMAT_UNDEFINED;
     VkFormat depth = VK_FORMAT_UNDEFINED;
-    /// THE IDENTITY INDEX BUFFER: element i holds i, so a command's firstIndex and
-    /// indexCount address the level's own index range through gl_VertexIndex.
-    Ogre::IndexBufferPacked *identity = nullptr;
-    uint32_t identityCount = 0u;
     bool refused = false;   ///< a creation failed; said once, the pass records nothing
 };
 IdPipeline gId;
@@ -231,6 +235,18 @@ void cycleStats(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreView *vie
     if (r.written[s] && frame - r.writtenAt[s] >= r.slots) {
         const uint32_t *w = r.mapped + size_t(s) * GpuCull::kCountElements;
         view->setAtomStats(w[4], w[0]);
+        // THE CUT'S WORDS (GpuCull.h's count layout): drawn clusters, indices
+        // reserved, instances that did not fit, the pairs evaluated — and the
+        // budget grows before the next request when something did not fit.
+        AtomCutStats cs;
+        cs.clusters = std::min(w[8], cull.cutRecordBudget());
+        cs.indices = w[11];
+        cs.overflow = w[12];
+        cs.overflowIndices = w[13];
+        cs.evaluated = w[14];
+        cs.indexBudget = cull.cutIndexBudget();
+        view->setAtomCutStats(cs);
+        cull.noteCutOverflow(w[12], w[11]);
     }
     VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
     VkMemoryBarrier mb{};
@@ -298,7 +314,7 @@ bool ensurePipeline(Ogre::VulkanRenderSystem *vkRs, VkFormat colour, VkFormat de
             return false;
         }
         VkPushConstantRange pc{};
-        pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        pc.stageFlags = kIdPushStages;
         pc.offset = 0;
         pc.size = sizeof(IdPushConstants);
         VkPipelineLayoutCreateInfo pl{};
@@ -435,31 +451,6 @@ bool ensurePipeline(Ogre::VulkanRenderSystem *vkRs, VkFormat colour, VkFormat de
     return true;
 }
 
-/// The identity index buffer, grown (by doubling) to cover every level range the
-/// scene's table holds.
-bool ensureIdentity(Ogre::VaoManager *vao, const GpuScene &gs) {
-    uint32_t need = 0u;
-    for (uint32_t m = 0, e = gs.levelMirrorEntries() / GpuScene::kLevelsPerMesh; m < e; ++m)
-        for (uint32_t l = 0; l < GpuScene::kLevelsPerMesh; ++l) {
-            const GpuMeshLevel &lv = gs.levelAt(m, l);
-            need = std::max(need, lv.firstIndex + lv.indexCount);
-        }
-    if (gId.identity && need <= gId.identityCount) return true;
-    uint32_t count = std::max(gId.identityCount, 65536u);
-    while (count < need) count *= 2u;
-    if (gId.identity) {
-        vao->destroyIndexBuffer(gId.identity);
-        gId.identity = nullptr;
-        gId.identityCount = 0u;
-    }
-    std::vector<uint32_t> data(count);
-    for (uint32_t i = 0; i < count; ++i) data[i] = i;
-    gId.identity = vao->createIndexBuffer(Ogre::IndexBufferPacked::IT_32BIT, count, Ogre::BT_IMMUTABLE,
-                                          data.data(), false);
-    gId.identityCount = gId.identity ? count : 0u;
-    return gId.identity != nullptr;
-}
-
 /// The recorder (AtomPassProvider's `atom_id`).
 ///
 /// THE RENDER PASS ALWAYS BEGINS: it is what clears the scene depth every later pass
@@ -487,17 +478,17 @@ void recordIdPass(AtomPassContext &ctx) {
         const VkFormat depthFmt = Ogre::VulkanMappings::get(depthTex->getPixelFormat());
         draw = ensurePipeline(vkRs, colourFmt, depthFmt);
     }
-    if (draw) {
-        gs->flushGeomRows();
-        draw = ensureIdentity(vkRs->getVaoManager(), *gs);
-        if (!draw) logOnce("the identity index buffer could not be created");
-    }
+    if (draw) gs->flushGeomRows();
     GpuCull *cullPtr = nullptr;
     if (draw) {
-        // ---- (0) THE LIST'S WRITE-AFTER-READ: the previous frame's draw read it. ----
+        // ---- (0) THE LIST'S WRITE-AFTER-READ: the previous frame's draw read it (the
+        // commands, the compacted stream as its index buffer, the slot bases in the
+        // vertex stage and the triangle words in the fragment stage). ----
         {
             VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                  VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
                                  nullptr, 0, nullptr, 0, nullptr);
         }
@@ -525,11 +516,11 @@ void recordIdPass(AtomPassContext &ctx) {
         // (OgreScene::applyLodValues divides the baked thresholds by it — the same
         // dial seen from the other side).
         req.pixelTolerance = kLodBudgetPixels * scene->lodBias();
-        // ...and THE VIEW'S SWITCH BAND, the one its scene passes carry (ogre-patch
-        // 0075; ChainDesc::lodHysteresis): a watched view holds a level across a
-        // threshold on this path exactly as it does on Ogre's.
-        req.lodHysteresis = view->chainDesc().lodHysteresis;
-        req.mode = 2u;
+        // NO SWITCH BAND (D4): the band exists because a WHOLE OBJECT switching pops;
+        // a cut whose every group is judged under one sample of error changes its
+        // frontier invisibly by construction (Nanite has none). THE CUT (mode 3).
+        req.lodHysteresis = 0.0f;
+        req.mode = 3u;
         std::string err;
         cullPtr = &view->atomCull();
         cycleStats(device, vkRs->getVaoManager(), view, *cullPtr);   // before this request zeroes them
@@ -548,7 +539,7 @@ void recordIdPass(AtomPassContext &ctx) {
                            VK_ACCESS_INDEX_READ_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 1, &mb, 0, nullptr, 0, nullptr);
     }
 
@@ -601,15 +592,18 @@ void recordIdPass(AtomPassContext &ctx) {
         for (int rr = 0; rr < 4; ++rr)
             for (int c = 0; c < 4; ++c) pc.viewProjRow[rr * 4 + c] = float(vpm[rr][c]);
         addressOf(gs->instanceBuffer(), pc.instances);
-        addressOf(gs->levelBuffer(), pc.levels);
+        addressOf(gs->meshBuffer(), pc.meshes);
         addressOf(gs->geomBuffer(), pc.rows);
-        addressOf(cull.levels(), pc.cullLevels);
-        vkCmdPushConstants(cmd, gId.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+        addressOf(cull.cutTriWords(), pc.triWords);
+        addressOf(cull.cutSlotBase(), pc.slotBase);
+        vkCmdPushConstants(cmd, gId.layout, kIdPushStages, 0, sizeof(pc), &pc);
     }
     {
+        // THE CUT'S COMPACTED STREAM IS THE INDEX BUFFER (the identity buffer it
+        // replaced is deleted): each command's run holds real vertex indices.
         VkBuffer ib = VK_NULL_HANDLE;
         VkDeviceSize ibOff = 0;
-        bufferOf(gId.identity, ib, ibOff);
+        bufferOf(cull.cutStream(), ib, ibOff);
         vkCmdBindIndexBuffer(cmd, ib, ibOff, VK_INDEX_TYPE_UINT32);
         VkBuffer drawBuf = VK_NULL_HANDLE, countBuf = VK_NULL_HANDLE;
         VkDeviceSize drawOff = 0, countOff = 0;
@@ -658,11 +652,6 @@ void registerAtomIdPass() {
 
 void releaseAtomIdPass() {
     if (AtomPassProvider *p = AtomPassProvider::instance()) p->setRecorder(kAtomIdPassId, AtomPassRecorder());
-    Ogre::Root *root = Ogre::Root::getSingletonPtr();
-    Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
-    if (gId.identity && rs && rs->getVaoManager()) rs->getVaoManager()->destroyIndexBuffer(gId.identity);
-    gId.identity = nullptr;
-    gId.identityCount = 0u;
     if (gId.dev) {
         vkDeviceWaitIdle(gId.dev);
         for (auto &kv : gRings) destroyRing(kv.second);

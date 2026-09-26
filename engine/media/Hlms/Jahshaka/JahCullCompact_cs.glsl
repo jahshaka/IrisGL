@@ -43,6 +43,7 @@ struct CullParams
 	vec4  lod;
 	uvec4 counts;           // x instanceCount, y flagsRequired, z flagsForbidden, w mode
 	uvec4 hzb;
+	uvec4 cut;
 };
 
 layout( std430, ogre_U0 ) readonly restrict buffer paramsLayout { CullParams params; };
@@ -84,7 +85,11 @@ void main()
 	{
 		gBase = total != 0u ? atomicAdd( counter[0], total ) : 0u;
 		if( total != 0u )
+		{
 			atomicMax( counter[1], ( gBase + total + JAH_SCAN_WIDTH - 1u ) / JAH_SCAN_WIDTH );
+			// THE CUT'S DISPATCH (mode 3): one workgroup per survivor.
+			atomicMax( counter[5], gBase + total );
+		}
 	}
 	barrier();
 
