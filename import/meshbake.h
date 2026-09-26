@@ -218,6 +218,7 @@ public:
         float quadric = 0.0f;        ///< the simplifier's own error (lodErrors)
         float areaTerm = 0.0f;       ///< sampled two-sided distance, margin applied
         float vertexTerm = 0.0f;     ///< exact removed-vertex distance (island-capped)
+        float facetTerm = 0.0f;      ///< exact per-facet distance: dropped/added facets' centroid + edge midpoints (at least vertexTerm)
         float bound = 0.0f;          ///< what lodBounds stores
         int   islandsDropped = 0;    ///< components level 0 has and this level has none of
         float droppedMaxExtent = 0.0f;  ///< the largest of those (its bbox diagonal)
@@ -323,12 +324,13 @@ public:
     /// VERIFICATION, and it exists for the same reason `producerHashOf` does: the
     /// claim has to be TESTABLE without re-running the thing that made it.
     ///
-    /// `checkLodBounds` re-measures every level of `mesh` against level 0 with
-    /// `densityMultiple` times as many area samples as the bake used, at strata the
-    /// bake never used, plus the exact removed-vertex walk, under the same
-    /// represented-surface rule (island caps) and WITHOUT the sampling margin — a
-    /// dense reference of the two-sided distance — and answers whether every
-    /// stored `lodBounds[k]` is at least that. On a mesh with no islands (one
+    /// `checkLodBounds` re-measures every level of `mesh` against level 0 — PER
+    /// FACET (every dropped level-0 facet and every level facet at its corners,
+    /// edge midpoints, centroid and the centroids of its 1-to-4 split: strictly
+    /// denser than the bake's centroid + midpoints), plus `densityMultiple` times
+    /// the bake's area samples and the exact removed-vertex walk, under the same
+    /// represented-surface rule (island caps) and WITHOUT the sampling margin —
+    /// and answers whether every stored `lodBounds[k]` is at least that. On a mesh with no islands (one
     /// component: every shipped primitive, the dragon) the reference IS the
     /// sampled two-sided Hausdorff distance.
     ///

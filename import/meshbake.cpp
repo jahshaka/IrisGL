@@ -16,6 +16,7 @@ For more information see the LICENSE file
 #include "import/parsecensus.h"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -1578,7 +1579,9 @@ constexpr float kMaxRelBound   = 0.25f;
 /// error from the level's surface; one further out is locked (with its fan) and
 /// the level is re-simplified, at most `kLockPasses` simplifications per level.
 /// Past the pass budget the level keeps what it has and the bound charges it
-/// honestly — the lock shapes the level, it never shapes the measurement.
+/// honestly — the lock shapes the level, it never shapes the measurement. A
+/// displaced point is a removed vertex OR a point of a dropped facet (F1: a sliver
+/// peaks mid-facet); the owner's scan converges in 2-3 passes, one level in 4.
 ///
 /// WHY 2, MEASURED (ATOM-LOD-BOUND-1, spikes/atom-lod-bound-1/): it is the
 /// largest factor the shipped smooth content already honours with no lock at all
@@ -1797,6 +1800,71 @@ float removedVertexDistance(const float *positions, int posComps,
     return worst;
 }
 
+/// THE PER-FACET TERM (ATOM-LOD-BOUND-1 F1): the distance from a union of
+/// triangles is not convex, so a level-0 facet the level no longer has can peak
+/// in its INTERIOR (a sliver between a removed tip near a wall and its kept ring)
+/// where neither the removed-vertex walk nor a few thousand area samples look.
+/// So every facet of `from` that is NOT a facet of `against` (a facet the level
+/// kept is at distance zero everywhere) is queried at fixed points against
+/// `againstGrid`: `Bake` = its centroid and three edge midpoints; `Reference` =
+/// also its three corners and the centroids of its three corner sub-triangles
+/// (the 1-to-4 split) — strictly denser, the verification's pattern. Level-0
+/// points are island-capped (`islands`, null for the level's own facets). Only
+/// the MAXIMUM is wanted, so each query stops at the running maximum
+/// (`TriangleGrid::closest`'s `stopAtOrBelow`), which is what keeps it in the
+/// vertex walk's cost class.
+enum class FacetPattern { Bake, Reference };
+float facetDistance(const float *positions, int posComps, const std::vector<unsigned> &from,
+                    const std::vector<unsigned> &against, const surface::TriangleGrid &againstGrid,
+                    const Islands *islands, FacetPattern pattern, float worst = 0.0f,
+                    std::vector<unsigned> *overOut = nullptr)
+{
+    // `overOut` (the displacement lock's form): collect every facet of `from`
+    // with a point further than `worst` instead of raising the maximum.
+    const float threshold = worst;
+    if (overOut) overOut->clear();
+    std::vector<std::array<unsigned, 3>> present(against.size() / 3);
+    for (size_t t = 0; t < present.size(); ++t) {
+        std::array<unsigned, 3> f = { against[t * 3], against[t * 3 + 1], against[t * 3 + 2] };
+        std::sort(f.begin(), f.end());
+        present[t] = f;
+    }
+    std::sort(present.begin(), present.end());
+    const auto at = [&](unsigned v) {
+        const float *p = positions + size_t(v) * size_t(posComps);
+        return Vec3(p[0], p[1], p[2]);
+    };
+    for (size_t t = 0; t < from.size() / 3; ++t) {
+        std::array<unsigned, 3> f = { from[t * 3], from[t * 3 + 1], from[t * 3 + 2] };
+        std::sort(f.begin(), f.end());
+        if (std::binary_search(present.begin(), present.end(), f)) continue;
+        const float cap = islands ? islands->capOf[from[t * 3]]
+                                  : std::numeric_limits<float>::infinity();
+        if (!(cap > (overOut ? threshold : worst))) continue;   // this island cannot exceed it
+        const Vec3 a = at(from[t * 3]), b = at(from[t * 3 + 1]), c = at(from[t * 3 + 2]);
+        Vec3 pts[10];
+        int n = 0;
+        pts[n++] = (a + b + c) * (1.0f / 3.0f);
+        pts[n++] = (a + b) * 0.5f;
+        pts[n++] = (b + c) * 0.5f;
+        pts[n++] = (c + a) * 0.5f;
+        if (pattern == FacetPattern::Reference) {
+            pts[n++] = a; pts[n++] = b; pts[n++] = c;
+            pts[n++] = (a * 4.0f + b + c) * (1.0f / 6.0f);
+            pts[n++] = (b * 4.0f + c + a) * (1.0f / 6.0f);
+            pts[n++] = (c * 4.0f + a + b) * (1.0f / 6.0f);
+        }
+        for (int i = 0; i < n; ++i) {
+            const float stop = overOut ? threshold : worst;
+            const float d = std::min(againstGrid.closest(pts[i], nullptr, nullptr, nullptr, stop), cap);
+            if (!std::isfinite(d) || d <= stop) continue;
+            if (overOut) { overOut->push_back(unsigned(t)); break; }
+            worst = d;
+        }
+    }
+    return worst;
+}
+
 /// Both terms at once (the verification's form): returns the exact term and
 /// writes the sampled one, before any margin, to `areaOut`.
 float twoSidedDistance(const float *positions, int posComps,
@@ -1956,6 +2024,7 @@ void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
         bool locking = false;
         std::vector<size_t> anchors;             // per component: its largest triangle in prev
         std::vector<unsigned> fanStart, fanTris; // CSR: each vertex's triangles in prev
+        std::vector<unsigned> overFacets;        // level-0 facets past the budget (F1)
         std::vector<unsigned> candidate;
         surface::TriangleGrid levelGrid;
         float vertexTerm = 0.0f;
@@ -1988,13 +2057,22 @@ void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
                 ++locked;
                 return true;
             };
-            for (const auto &vd : displaced) {
-                if (vd.second <= budget) continue;
-                if (lockVertex(vd.first)) more = true;
-                for (unsigned f = fanStart[vd.first]; f < fanStart[size_t(vd.first) + 1]; ++f)
+            const auto lockWithFan = [&](unsigned v) {
+                if (fanStart[v] == fanStart[size_t(v) + 1]) return;   // not in prev: not this level's to keep
+                if (lockVertex(v)) more = true;
+                for (unsigned f = fanStart[v]; f < fanStart[size_t(v) + 1]; ++f)
                     for (int k = 0; k < 3; ++k)
                         if (lockVertex(prev[size_t(fanTris[f]) * 3 + size_t(k)])) more = true;
-            }
+            };
+            for (const auto &vd : displaced)
+                if (vd.second > budget) lockWithFan(vd.first);
+            // ...AND EVERY DROPPED LEVEL-0 FACET WITH AN INTERIOR POINT PAST THE
+            // BUDGET (F1: the distance peaks mid-facet on slivers the vertex walk
+            // cannot see) keeps its corners, with their fans.
+            facetDistance(positions, posComps, base, candidate, levelGrid, &islands,
+                          FacetPattern::Bake, budget, &overFacets);
+            for (unsigned t : overFacets)
+                for (int k = 0; k < 3; ++k) lockWithFan(base[size_t(t) * 3 + size_t(k)]);
             if (!more) break;
             // AND EVERY COMPONENT WHOSE ERASURE WOULD COST MORE THAN THE BUDGET
             // KEEPS ONE TRIANGLE — its largest in `prev`, all three vertices
@@ -2043,7 +2121,16 @@ void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
         // rule); the sampling-gap margin on the sampled term only.
         const float areaTerm = areaDistance(positions, posComps, out, levelGrid, base, baseGrid,
                                             boundSamples, &islands);
-        const float measured = std::max(areaTerm * kBoundMargin, vertexTerm);
+        // THE EXACT TERM IS VERTICES AND FACETS (F1): the removed-vertex walk
+        // above, then every level-0 facet the level dropped (centroid + edge
+        // midpoints, island-capped) against the level, and every facet the level
+        // made against level 0 (surface it ADDED). Exact per point, no margin.
+        float facetTerm = facetDistance(positions, posComps, base, out, levelGrid, &islands,
+                                        FacetPattern::Bake, vertexTerm);
+        facetTerm = facetDistance(positions, posComps, out, base, baseGrid, nullptr,
+                                  FacetPattern::Bake, facetTerm);
+        const float exactTerm = std::max(vertexTerm, facetTerm);
+        const float measured = std::max(areaTerm * kBoundMargin, exactTerm);
         // MONOTONE NON-DECREASING BY CONSTRUCTION, and that is a requirement and
         // not a tidy-up: `lodLevelForWorldError` walks the array and stops at the
         // FIRST level it cannot afford, which is only the right answer for a
@@ -2069,6 +2156,7 @@ void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
             row.quadric = error;
             row.areaTerm = areaTerm * kBoundMargin;
             row.vertexTerm = vertexTerm;
+            row.facetTerm = facetTerm;
             row.bound = bound;
             row.verticesLocked = locked;
             row.passes = passes;
@@ -3780,10 +3868,18 @@ bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *
                         lodchain::boundGridRes(level.size() / 3));
         // The same represented-surface rule the bake applies (island caps), at
         // `densityMultiple` times the samples and NO margin: the reference.
+        // (F1) and the PER-FACET reference: every level-0 facet at its corners,
+        // edge midpoints, centroid and the centroids of its 1-to-4 split (a facet
+        // the level kept contributes zero), and every level facet likewise against
+        // level 0 — strictly denser than the bake's facet points.
         float area = 0.0f;
         const float exact = lodchain::twoSidedDistance(positions, posComps, level, levelGrid,
                                                        base, baseGrid, dense, &area, &islands);
-        const float measured = std::max(area, exact);
+        float facets = lodchain::facetDistance(positions, posComps, base, level, levelGrid,
+                                               &islands, lodchain::FacetPattern::Reference);
+        facets = lodchain::facetDistance(positions, posComps, level, base, baseGrid, nullptr,
+                                         lodchain::FacetPattern::Reference, facets);
+        const float measured = std::max(std::max(area, exact), facets);
         if (referenceOut) referenceOut->append(measured);
         // A float comparison of two lengths measured the same way: one part in a
         // million of the stored value is the round-off, not a tolerance on the
