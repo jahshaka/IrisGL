@@ -231,6 +231,11 @@ constexpr const char *kPassthroughRtv   = "jahPassthroughRtv";
 /// view that carries the id pass holds one, view Off or not — a full-target D32,
 /// 8.3 MB at 1920x1080 and 33 MB at 3840x2160.
 constexpr const char *kAtomViewDepth    = "jahAtomViewDepth";
+/// THE PHOTON VIEW's own depth (a copy of the scene's) and the view through which
+/// its scene pass draws onto the target (addPhotonViewPasses).
+constexpr const char *kPhotonColour     = "jahPhotonColour";
+constexpr const char *kPhotonDepth      = "jahPhotonDepth";
+constexpr const char *kPhotonRtv        = "jahPhotonRtv";
 /// SSR. The prepass' second G-buffer (HlmsPbs writes shadow term in x and
 /// packed roughness in y), the RTV the prepass renders through, the ray march's
 /// output (hit coordinates, at half or full resolution), the full-resolution
@@ -432,7 +437,7 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// copies still point at — a read-after-destroy the moment the next pass is added.
 /// So it is called EXACTLY ONCE, with a capacity no chain can exceed, before
 /// the first addTargetPass. Nothing below may call it again.
-constexpr size_t kMaxTargetPasses = 72;   // 50 + up to 14 HZB mip passes, and headroom
+constexpr size_t kMaxTargetPasses = 76;   // 50 + up to 14 HZB mip passes, the photon view's 4, and headroom
 
 /// THE STORE ACTION OF THE LAST PASS ANY WORKSPACE OF OURS PUTS ON A TARGET.
 ///
@@ -763,6 +768,110 @@ void addAtomViewPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHan
     if (desc.letterbox) scissor(handles, q, /*clear=*/false);
 }
 
+/// THE PHOTON VIEW (PHOTON-VIEW-1; Types.h PhotonView), after every post pass and
+/// the Atom view's quad, before the overlays — on the finished picture, so no
+/// history, exposure meter, bloom or G-buffer ever sees a debug drawable and the
+/// view Off is byte-identical. Gated stages:
+///   * the view's photon depth prepared: the scene depth COPIED (kPhotonDepthCopyBit,
+///     Cards — occluded by the scene while the scene depth later frames' HZB and
+///     effects read is never written; a chain with no NAMED scene depth clears
+///     instead) or CLEARED (kPhotonDepthClearBit, Voxels and Probes);
+///   * ONE PASS_SCENE drawing the kPhotonViewBit channel alone — Ogre's
+///     VoxelVisualizer and IfdProbeVisualizer, the cards' quads — into the photon
+///     LAYER (a transparent RGBA8 texture at the target's size) through that depth
+///     (kPhotonSceneExecutionBit). Its mask is written by the caller AFTER the
+///     helper sweep (which drops the channel from every other scene pass), which is
+///     why the definition is handed back. A layer and not the target itself: a
+///     render WINDOW takes no manually specified depth attachment;
+///   * the layer's composite over the picture (kPhotonSceneExecutionBit), and the
+///     ray tier's per-view overlay's (the gather's probe discs, the reflection's hit
+///     classes; kPhotonOverlayExecutionBit), whose texture the view's photon
+///     listener binds from C++ like the Atom view's table.
+/// The price, on or off: the layer and its depth, 8 bytes a pixel of the target
+/// (16.6 MB at 1920x1080).
+Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
+                                                  ChainHandles &handles, bool namedDepth) {
+    {
+        // The layer and its depth: local textures at the target's size, so the two
+        // attach together (a render WINDOW takes no manually specified depth).
+        addTex(n, kPhotonColour, Ogre::PFG_RGBA8_UNORM);
+        auto *td = addTex(n, kPhotonDepth, Ogre::PFG_D32_FLOAT);
+        td->preferDepthTexture = true;
+        Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kPhotonRtv);
+        Ogre::RenderTargetViewEntry colour0;
+        colour0.textureName = kPhotonColour;
+        rtv->colourAttachments.push_back(colour0);
+        rtv->depthAttachment.textureName = kPhotonDepth;
+        rtv->stencilAttachment.textureName = kPhotonDepth;
+        rtv->preferDepthTexture = true;
+    }
+    // THE LAYER'S DEPTH, two ways, one bit each (the listener picks by mode): the
+    // SCENE's depth copied (kPhotonDepthCopyBit — the cards sit on the picture's
+    // surfaces and hide behind its walls; a chain with no named scene depth clears
+    // instead), or a CLEARED depth (kPhotonDepthClearBit — the voxels and the probes
+    // are a world of their own: a floor voxel's top face IS the floor's depth, so
+    // the scene's depth would hide every voxel of every surface).
+    {
+        Ogre::CompositorTargetDef *ct = n->addTargetPass(kPhotonDepth);
+        ct->setNumPasses(namedDepth ? 2 : 1);
+        if (namedDepth) {
+            auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(ct->addPass(Ogre::PASS_DEPTHCOPY));
+            c->setDepthTextureCopy(kDepth, kPhotonDepth);
+            c->mExecutionMask = kPhotonDepthCopyBit;
+            c->mProfilingId = "Jahshaka photon view depth";
+        }
+        auto *c = static_cast<Ogre::CompositorPassClearDef *>(ct->addPass(Ogre::PASS_CLEAR));
+        c->mExecutionMask = namedDepth ? kPhotonDepthClearBit
+                                       : Ogre::uint8(kPhotonDepthClearBit | kPhotonDepthCopyBit);
+        c->mProfilingId = "Jahshaka photon view depth clear";
+    }
+    Ogre::CompositorPassSceneDef *scene = nullptr;
+    {
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kPhotonRtv);
+        t->setNumPasses(1);
+        auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        // A TRANSPARENT LAYER over the depth prepared above.
+        p->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
+        p->setAllLoadActions(Ogre::LoadAction::Clear);
+        p->mLoadActionDepth = Ogre::LoadAction::Load;
+        p->mLoadActionStencil = Ogre::LoadAction::Load;
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        p->mStoreActionDepth = Ogre::StoreAction::DontCare;
+        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        p->mFirstRQ = 0u;
+        p->mLastRQ = kOverlayRenderQueue;
+        p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
+        p->mUpdateLodLists = false;
+        p->mExecutionMask = kPhotonSceneExecutionBit;
+        p->mProfilingId = "Jahshaka photon view";
+        if (desc.letterbox) inset(handles, p);
+        scene = p;
+    }
+    // THE TWO COMPOSITES onto the target: the layer (the scene pass' own bit), then
+    // the tier's overlay (its bit; the texture is bound from C++).
+    const auto composite = [&](const char *material, Ogre::uint8 bit, const char *profilingId) {
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kTargetChannel);
+        t->setNumPasses(1);
+        auto *q = static_cast<Ogre::CompositorPassQuadDef *>(t->addPass(Ogre::PASS_QUAD));
+        q->mMaterialName = material;
+        q->setAllLoadActions(Ogre::LoadAction::Load);
+        q->mLoadActionDepth = Ogre::LoadAction::DontCare;
+        q->mLoadActionStencil = Ogre::LoadAction::DontCare;
+        // Store, never resolve: the overlay pass still renders into these samples.
+        q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        q->mStoreActionDepth = Ogre::StoreAction::DontCare;
+        q->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        q->mExecutionMask = bit;
+        q->mProfilingId = profilingId;
+        if (desc.letterbox) scissor(handles, q, /*clear=*/false);
+        return q;
+    };
+    composite(kPhotonLayerMaterial, kPhotonSceneExecutionBit, "Jahshaka photon layer")
+        ->addQuadTextureSource(0, kPhotonColour);
+    composite(kPhotonOverlayMaterial, kPhotonOverlayExecutionBit, "Jahshaka photon overlay");
+    return scene;
+}
+
 /// The view's passes that the id pass stands in for SKIP the Atom queue (the fork's
 /// CompositorPassSceneDef::mSkipRQ): its items are drawn by the id pass and shaded by
 /// the screen decode (which is what arms the decode — OgreAtomDraw.cpp's listener).
@@ -812,6 +921,9 @@ Ogre::uint32 helperBitsToDrop(const ChainDesc &desc) {
     // come out with two empty corners; see kVrMaskBit for why no capture path
     // needs a rule of its own.
     if (!desc.hiddenAreaMask) drop |= kVrMaskBit;
+    // THE PHOTON VIEW'S CHANNEL (kPhotonViewBit): out of EVERY scene pass of every
+    // view; the chain's own photon pass asks for it alone (addPhotonViewPasses).
+    drop |= kPhotonViewBit;
     return drop;
 }
 
@@ -1094,7 +1206,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
-    n->setNumLocalTextureDefinitions(29);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth
+    n->setNumLocalTextureDefinitions(31);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the photon view's two
     if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
@@ -1878,8 +1990,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // recycled-VRAM noise under the Epic chain (2026-09-03 defect lane;
             // sky_stays_smooth_under_the_post_chain is the pixel gate).
             // (+ the Atom view's quad, which reads the final depth after the post chain.)
-            p->mStoreActionDepth = (desc.ssao || prepass || desc.distortion || desc.atomDraw)
-                                       ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
+            // (+ THE PHOTON VIEW's depth copy after the post chain, which every
+            // post-chain shape carries: the depth must survive this pass always.)
+            p->mStoreActionDepth = Ogre::StoreAction::Store;
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             // The shadow node was already computed for this camera by the opaque
             // pass; recomputing it would render every shadow map a second time.
@@ -2268,6 +2381,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     // THE ATOM VIEW (D0-ATOM-VIEW), after every effect and before the overlays.
     if (desc.atomDraw) addAtomViewPass(n, desc, handlesOut);
+    // THE PHOTON VIEW (PHOTON-VIEW-1), after it and before the overlays.
+    Ogre::CompositorPassSceneDef *photonPass = addPhotonViewPasses(n, desc, handlesOut, namedDepth);
 
     // Overlays, straight onto the window, after every effect: gizmos, wires and
     // always-on-top helpers must not be tonemapped, blurred or edge-detected.
@@ -2298,6 +2413,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     }
 
     if (const Ogre::uint32 drop = helperBitsToDrop(desc)) maskOutHelpers(n, drop);
+    // ...and the photon pass asks for ITS channel alone, which the sweep just took
+    // out of every scene pass of this node (kPhotonViewBit; the AND with RESERVED
+    // is the overlayVisibilityMask law).
+    if (photonPass)
+        photonPass->mVisibilityMask = kPhotonViewBit & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
     if (desc.stereo) applyStereo(n, desc.cullCameraName);
     if (desc.lodHysteresis > 0.0f) applyLodHysteresis(n, desc.lodHysteresis);
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
@@ -2766,6 +2886,9 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
         p->mLastRQ  = kOverlayRenderQueue;    // no gizmos, wires, grid or camera bodies
         p->mIncludeOverlays = false;          // see kIncludeOverlaysNote
         p->mShadowNode = Ogre::IdString();    // §7.2: the inset ships shadows OFF
+        // Never the photon view's drawables (kPhotonViewBit): the inset is a
+        // second camera's picture, not the debug view's.
+        p->mVisibilityMask = Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS & ~kPhotonViewBit;
         p->mProfilingId = "Jahshaka PiP scene";
         handlesOut.scenePass = p;
     }

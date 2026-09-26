@@ -6883,6 +6883,13 @@ void OgreScene::teardownIrradianceField() {
     mIfdScrolledProbes = 0;
     mIfdScrolls = mIfdReplacements = 0;
     if (!mIfd) return;
+    // THE PHOTON VIEW's probe picture dies with the field (~IrradianceField takes
+    // Ogre's visualizer down); the view puts it up again on the next field.
+    if (mPhotonIfd == mIfd) {
+        mPhotonIfd = nullptr;
+        mPhotonIfdVis = nullptr;
+        mPhotonIfdFollows = ~0ull;
+    }
     JAH_TRY {
         mGiBinding.ifd = nullptr;
         forgetGiArms(mRoot->getHlmsManager(), nullptr, mIfd, nullptr);

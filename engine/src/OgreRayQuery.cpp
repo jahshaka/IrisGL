@@ -325,6 +325,9 @@ inline uint32_t coarsestLevelOf(const Ogre::Mesh *mesh) {
 class RayQueryTier final : public GatherHost {
 public:
     ~RayQueryTier() { close(); }
+    /// A texture a VIEW owns and this tier's sets may still name (the photon
+    /// view's overlay, PHOTON-VIEW-1): destroyed through the retire window.
+    void retireViewTexture(Ogre::TextureGpu *&t) { retireTexture(t); }
 
     /// Resolves the device, the entry points and the pipeline. False (with a
     /// reason in `err`) when this device has no ray query — which is not an
@@ -6303,6 +6306,24 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
     mView->mEngine->mRayTier->releaseSunContactBinding(this);
 }
 
+/// THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1) goes through the tier's retire
+/// window: this frame's reflection and gather sets may still name it.
+void OgreView::retirePhotonOverlay() {
+    if (!mPhotonOverlay) return;
+    if (mEngine && mEngine->mRayTier) {
+        mEngine->mRayTier->retireViewTexture(mPhotonOverlay);
+    } else {
+        JAH_TRY {
+            if (mRoot && mRoot->getRenderSystem()) {
+                mRoot->getRenderSystem()->flushCommands();
+                mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mPhotonOverlay);
+            }
+        } JAH_CATCH(mError, );
+    }
+    mPhotonOverlay = nullptr;
+    mPhotonOverlayWritten = false;
+}
+
 void OgreView::dropReflectState() {
     if (!mReflectListener || !mEngine || !mEngine->mRayTier) return;
     // SUBMIT AND WAIT FIRST. A descriptor set may not be freed while a command
@@ -7284,6 +7305,13 @@ bool OgreScene::sunContactWanted() const { return false; }
 SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
 bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}
+void OgreView::retirePhotonOverlay() {
+    // No tier, nothing ever wrote it (the verb refuses ScreenProbes and Hits).
+    if (mPhotonOverlay && mRoot && mRoot->getRenderSystem())
+        mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mPhotonOverlay);
+    mPhotonOverlay = nullptr;
+    mPhotonOverlayWritten = false;
+}
 bool OgreEngine::cardReadParity(Scene *, const std::vector<CardReadQuery> &,
                                 std::vector<CardReadPick> &out) {
     out.clear();

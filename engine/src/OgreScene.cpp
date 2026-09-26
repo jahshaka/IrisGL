@@ -1513,6 +1513,10 @@ void OgreScene::destroy() {
         forgetSceneDecodes(mSceneMgr);
         // THE ATOM VIEW'S BUCKET TABLE: a texture of this tree's manager.
         releaseAtomViewTable();
+        // THE PHOTON VIEW'S DRAWABLES: Ogre's visualizers switched off on their
+        // (still live) GI arms and the cards' quads destroyed, all through this
+        // manager — before teardownGi deletes the arms.
+        releasePhotonView();
         teardownGi();   // VPL lights die while the SceneManager is still alive
         // The atmosphere destroys its Rectangle2D THROUGH the SceneManager, so it
         // has to go while that is still alive (teardown law: components, then the

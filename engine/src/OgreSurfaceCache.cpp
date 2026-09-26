@@ -2078,6 +2078,27 @@ void SurfaceCache::noteMaterialChanged(MaterialId material) {
 // ---------------------------------------------------------------------------
 // What it publishes
 // ---------------------------------------------------------------------------
+void SurfaceCache::photonQuads(std::vector<PhotonCardQuad> &out) const {
+    out.clear();
+    if (!mBuilt) return;
+    for (const InstanceRec &inst : mInstances) {
+        if (!inst.node || !inst.cardCount) continue;
+        for (unsigned c = 0; c < inst.cardCount; ++c) {
+            const CardRec &card = mCards[inst.firstCard + c];
+            PhotonCardQuad q;
+            // THE CARD'S PLANE: the face of its box the capture looks through
+            // (aimCamera's near side) — for a flat surface, the surface itself.
+            q.centre = card.centre + card.d * card.halfDepth;
+            q.halfU = card.u * card.halfU;
+            q.halfV = card.v * card.halfV;
+            q.normal = card.d;
+            q.held = card.lastUpdated > 0ull;
+            q.age = q.held && mFrame > card.lastUpdated ? mFrame - card.lastUpdated : 0ull;
+            out.push_back(q);
+        }
+    }
+}
+
 void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out = CardCacheStatus();
     out.built = mBuilt;

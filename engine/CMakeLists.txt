@@ -37,6 +37,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuScene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDraw.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgrePhotonView.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomIdPass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp
@@ -496,8 +497,9 @@ set(OGRE_NEXT_IBL_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IBL")
 # The DDGI (IrradianceField) compute jobs — GI_UNIFIED_SPEC.md §4 P1. Five jobs
 # (GenFromVct, depth + colour integration, two border mirrors) plus their .any
 # pieces and the generation compositor, ~120K. `Visualizer/` travels with the
-# folder (copy_directory) but is deliberately NOT registered as a resource
-# location: it is upstream's debug probe-sphere material, which we do not draw.
+# folder (copy_directory) and is registered as a resource location: it is
+# upstream's debug probe-sphere material, the photon view's Probes picture
+# (PHOTON-VIEW-1) — like VCT/Visualizer, its Voxels picture.
 #
 # ORDINARY MEDIA STAGING, and the distinction matters (P0 spike finding 1,
 # correcting the spec's own bullet): this is NOT the patch-0009/0017 class. The

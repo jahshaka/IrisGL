@@ -294,6 +294,17 @@ struct CardMoverHooks {
     std::function<void(float &, float &)> readTimes;
 };
 
+/// ONE CARD AS THE PHOTON VIEW DRAWS IT (PHOTON-VIEW-1, PhotonView::Cards): the
+/// card's world rectangle as it was cut (the centre of the box face the capture
+/// looks through, the two HALF-extent vectors along its u and v, the outward
+/// normal), whether it HOLDS a capture, and how
+/// many cache frames ago that capture landed.
+struct PhotonCardQuad {
+    Ogre::Vector3 centre, halfU, halfV, normal;
+    bool held = false;
+    unsigned long long age = 0ull;
+};
+
 class SurfaceCache final : public Ogre::CompositorWorkspaceListener {
 public:
     SurfaceCache();
@@ -320,6 +331,9 @@ public:
 
     /// Everything a host, a monitor or a suite can see.
     void fillStatus(CardCacheStatus &out) const;
+    /// THE PHOTON VIEW'S TABLE (PHOTON-VIEW-1): every allocated card of every
+    /// resident instance, held (a capture landed) or waiting for its first.
+    void photonQuads(std::vector<PhotonCardQuad> &out) const;
     /// TEST AND TOOL: one card texel, all five layers, through an
     /// AsyncTextureTicket (flushCommands first).
     bool readTexel(NodeId node, unsigned card, float u, float v, CardSample &out) const;
