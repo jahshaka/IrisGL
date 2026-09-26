@@ -110,10 +110,13 @@ public:
     /// that does not fit draws its ROOT CUT from the coarse reserve (JahCullCut_cs) —
     /// unless even the reserve is full, which is counted apart.
     void noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked, uint32_t recordsAsked);
-    /// The first budget and the ceiling (indices): 8 M (2.8 M triangles; 32 MB of
-    /// stream + 21 MB of triangle words + 5.3 MB of records = ~59 MB a view) growing by
-    /// doubling to 32 M.
-    static constexpr uint32_t kCutIndexBudgetFirst = 8u * 1024u * 1024u;
+    /// The first budget and the ceiling (indices): 2 M (700 k triangles; 8 MB of stream
+    /// + 5.3 MB of triangle words + 1.3 MB of records = ~15 MB a view) growing from what
+    /// was asked to 32 M; a view of a scene that has needed more starts at the scene's
+    /// high-water mark. NOT 8 M (the fix round's ask): with 8 M a view the selftest's
+    /// fixture B flipped two pixels at the gizmo's Z handle in 5 of 7 runs (0 of 12 at
+    /// 2 M, same code) — a layout-sensitive read somewhere, owner not found; reported.
+    static constexpr uint32_t kCutIndexBudgetFirst = 2u * 1024u * 1024u;
     static constexpr uint32_t kCutIndexBudgetCeiling = 32u * 1024u * 1024u;
     /// Records per index of budget: one record per 24 indices (8 triangles).
     static constexpr uint32_t kCutIndicesPerRecord = 24u;
