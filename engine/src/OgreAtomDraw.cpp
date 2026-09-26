@@ -244,9 +244,9 @@ void OgreScene::placeAtomQueue(const Node &n, bool atom) const {
 void OgreScene::updateAtomDraw() {
     // THE ATOM VIEW'S TABLE follows whatever this call decides (every return below).
     struct ViewTableAtExit {
-        OgreScene *s;
+        OgreScene *s = nullptr;
         ~ViewTableAtExit() {
-            try { s->syncAtomViewTable(); } catch (Ogre::Exception &) {}
+            if (s) try { s->syncAtomViewTable(); } catch (Ogre::Exception &) {}
         }
     } viewTableAtExit{ this };
     HlmsAtom *atom = registeredAtom();
