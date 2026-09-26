@@ -310,6 +310,32 @@ public:
         /// shipped path (a local soup + max-only queries) is exact against;
         /// atom.cluster_cut asserts the two agree.
         bool   referenceMeasure = false;
+        /// IN: THE DENSE REFERENCE per group (atom.lod_bound_bar's (a) for the DAG,
+        /// ATOM-CLUSTER-CUT): 8x the area samples against the WHOLE level-0 grid, the
+        /// per-facet walk at the reference pattern (corners, midpoints, centroid and
+        /// the 1-to-4 split's centroids), the same island caps, NO margin — written
+        /// to `GroupTerms::reference`. Implies `wantTerms`.
+        bool   denseReference = false;
+        /// IN: one `GroupTerms` row per group into `groupTerms` (the bar's and the
+        /// report's table; `test_mesh_bake --dag-terms <file>` prints it).
+        bool   wantTerms = false;
+        struct GroupTerms
+        {
+            int   depth = 0;
+            int   regionVertices = 0;   ///< level-0 vertices the group stands for
+            int   simplifiedTriangles = 0;
+            float estimate = 0.0f;      ///< clusterlod's own error (FLT_MAX = terminal)
+            float sampled = 0.0f;       ///< the two area terms' maximum, margin APPLIED
+            float vertex = 0.0f;        ///< exact removed-vertex distance (island-capped)
+            float facet = 0.0f;         ///< exact per-facet distance (lost facets capped; S's facets against level 0)
+            float bound = 0.0f;         ///< the group's own measured error (before the monotone fix)
+            float stored = 0.0f;        ///< what the DAG stores (after the monotone fix)
+            float reference = -1.0f;    ///< the dense reference (denseReference), else -1
+            int   islandsDropped = 0;   ///< level-0 components wholly inside the region with no vertex kept
+            float droppedMaxExtent = 0.0f;
+            bool  capBound = false;     ///< an island cap lowered some point's distance
+        };
+        QVector<GroupTerms> groupTerms;
         double buildMs = 0.0;          ///< clodBuild alone
         double measureMs = 0.0;        ///< the per-group measurement + provenance
         bool   wantRegions = false;

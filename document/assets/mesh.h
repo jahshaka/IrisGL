@@ -305,10 +305,12 @@ struct MeshSdf
 ///
 /// THE ERROR THE RULE READS IS MEASURED, not the simplifier's estimate — exactly
 /// ATOM P1's AT-A5 finding for the chain's levels, applied per group: `error` is
-/// the sampled two-sided distance x1.25 between the group's simplified geometry
-/// and the LEVEL-0 surface it stands for, in mesh units (the same currency as
-/// `Mesh::lodBounds`), forced MONOTONE at bake (a group's error is never below
-/// any child group's). `estimate` is clusterlod.h's own number, kept as the
+/// the two-sided distance between the group's simplified geometry and the LEVEL-0
+/// surface it stands for, under the chain's rule (ATOM-LOD-BOUND-1, applied to the
+/// groups by ATOM-CLUSTER-CUT): the sampled terms x1.25, the removed-vertex and
+/// per-facet terms exact, every level-0 point capped at its island's extent — in
+/// mesh units (the same currency as `Mesh::lodBounds`), forced MONOTONE at bake (a
+/// group's error is never below any child group's). `estimate` is clusterlod.h's own number, kept as the
 /// diagnostic `lodErrors` is. A TERMINAL group (the root, or a group the
 /// simplifier could not reduce) carries FLT_MAX in both — it is never affordable.
 ///
