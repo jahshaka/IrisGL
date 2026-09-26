@@ -247,10 +247,12 @@ void GpuScene::setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
 }
 
 void GpuScene::flushClusterTables() {
-    // THE TABLES EXIST FROM THE FIRST FLUSH, EMPTY OR NOT: a scene with no mesh yet
-    // (a new project before its first attach) still records the cut, which binds them
-    // and draws nothing.
-    if (!mVao || (!mClusterDirty && mClusterBuffer && mGroupBuffer)) return;
+    // Only when the mesh set moved: a scene with no DAG-bearing mesh yet has no tables,
+    // and the id pass records no cut for it (OgreAtomIdPass.cpp). Creating empty tables
+    // at the first flush instead moved the device's allocation order and turned
+    // atom.cluster_crack's harness picture (a BT_DEFAULT index buffer rewritten per cut)
+    // non-deterministic — measured, root cause in the harness not found; reported.
+    if (!mClusterDirty || !mVao) return;
     mClusterDirty = false;
     mClusterMirror.clear();
     mGroupMirror.clear();

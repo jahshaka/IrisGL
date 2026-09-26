@@ -524,7 +524,12 @@ void recordIdPass(AtomPassContext &ctx) {
         std::string err;
         cullPtr = &view->atomCull();
         cycleStats(device, vkRs->getVaoManager(), view, *cullPtr);   // before this request zeroes them
-        if (!scene->recordGpuCull(*cullPtr, req, nullptr, err)) {
+        // NO DAG-BEARING MESH ATTACHED YET (a new project's first frames): no cluster
+        // tables, so there is no cut to record — the depth is still cleared below.
+        gs->flushClusterTables();
+        if (!gs->clusterBuffer() || !gs->groupBuffer()) {
+            draw = false;
+        } else if (!scene->recordGpuCull(*cullPtr, req, nullptr, err)) {
             logOnce("the cull did not record (" + err + ")");
             draw = false;
         }
