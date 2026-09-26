@@ -13,7 +13,9 @@
 //                           size, OgreView::photonOverlay, bound from C++ per view
 //                           by the view's photon listener): the screen-probe
 //                           gather's discs and the reflection trace's hit classes,
-//                           written straight-alpha by the tier's own jobs.
+//                           written straight-alpha by the tier's own jobs;
+//                           `photonParams.x` (pushed per view in front of the
+//                           pass) is 1 once the tier has written it, 0 draws nothing.
 //
 // GLSL + Vulkan only; one shader text, the coverage rule a preprocessor define.
 fragment_program Jahshaka/PhotonOverlay_ps_VK glslvk

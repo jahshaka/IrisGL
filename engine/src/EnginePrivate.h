@@ -6843,6 +6843,9 @@ public:
     /// The tier wrote the overlay (its contents are defined from then on).
     void notePhotonOverlayWritten() { mPhotonOverlayWritten = true; }
     bool photonOverlayWritten() const { return mPhotonOverlayWritten; }
+    /// Which overlay (1, 2, ... — one per creation; 0 = none): a re-created
+    /// overlay may recycle the pointer.
+    unsigned photonOverlayGeneration() const { return mPhotonOverlayGeneration; }
     /// The view's own GPU cull (the id pass's list): one per view, so two views of
     /// one scene in a frame never share the list the other is drawing from.
     detail::GpuCull &atomCull() { return mAtomCull; }
@@ -6981,6 +6984,7 @@ private:
     PhotonListenerPtr mPhotonListener;
     Ogre::TextureGpu *mPhotonOverlay = nullptr;
     bool mPhotonOverlayWritten = false;
+    unsigned mPhotonOverlayGeneration = 0u;
     /// The overlay's destroy, through the ray tier's retire window when there is
     /// one (OgreRayQuery.cpp — its descriptor sets may still be in flight).
     void retirePhotonOverlay();

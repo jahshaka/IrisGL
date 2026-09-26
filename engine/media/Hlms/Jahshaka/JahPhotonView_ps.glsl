@@ -15,6 +15,15 @@ in block
 	vec2 uv0;
 } inPs;
 
+#ifndef PHOTON_COVERAGE
+// x = 1 once the ray tier has written the overlay (OgreView::photonOverlayWritten),
+// pushed per view by the photon listener in front of this pass; 0 draws nothing
+// (a view whose tier has not traced yet — the overlay's contents are undefined).
+vulkan( layout( ogre_P0 ) uniform Params { )
+	uniform vec4 photonParams;
+vulkan( }; )
+#endif
+
 vulkan_layout( location = 0 )
 out vec4 fragColour;
 
@@ -28,6 +37,7 @@ void main()
 	const bool covered = any( greaterThan( o, vec4( 0.0 ) ) );
 	fragColour = vec4( clamp( o.rgb, vec3( 0.0 ), vec3( 1.0 ) ), covered ? 1.0 : 0.0 );
 #else
-	fragColour = vec4( clamp( o.rgb, vec3( 0.0 ), vec3( 1.0 ) ), clamp( o.a, 0.0, 1.0 ) );
+	const float valid = photonParams.x > 0.5 ? 1.0 : 0.0;
+	fragColour = vec4( clamp( o.rgb, vec3( 0.0 ), vec3( 1.0 ) ), clamp( o.a, 0.0, 1.0 ) * valid );
 #endif
 }

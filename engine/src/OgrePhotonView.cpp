@@ -38,6 +38,7 @@
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <IrradianceField/OgreIfdProbeVisualizer.h>
 #include <IrradianceField/OgreIrradianceField.h>
+#include <OgreGpuProgramParams.h>
 #include <OgreHlmsManager.h>
 #include <OgreHlmsUnlit.h>
 #include <OgreHlmsUnlitDatablock.h>
@@ -134,14 +135,11 @@ public:
         OgreScene *scene = mView ? mView->ogreScene() : nullptr;
         const PhotonView view = scene ? scene->photonView() : PhotonView::Off;
         bool sceneBit = drawsGeometry(view);
-        bool overlayBit = false;
-        if (usesOverlay(view) && mView->photonOverlay() && mView->photonOverlayWritten()) {
-            Ogre::Pass *pass = overlayMaterialPass();
-            if (pass && pass->hasFragmentProgram() && pass->getNumTextureUnitStates() >= 1u) {
-                pass->getTextureUnitState(0)->setTexture(mView->photonOverlay());
-                overlayBit = true;
-            }
-        }
+        // THE OVERLAY'S COMPOSITE RUNS WHEREVER THE VIEW HOLDS AN OVERLAY: whether the
+        // ray tier writes it THIS frame is only known inside the frame, after this
+        // mask is read, so the quad itself is told (passEarlyPreExecute) and draws
+        // nothing until the first write — no frame of latency, no undefined texel.
+        const bool overlayBit = usesOverlay(view) && mView->photonOverlay();
         Ogre::uint8 mask = Ogre::uint8(ws->getExecutionMask() & ~kPhotonExecutionBits);
         if (sceneBit)
             mask = Ogre::uint8(mask | kPhotonSceneExecutionBit |
@@ -150,9 +148,11 @@ public:
         ws->setExecutionMask(mask);
         mIsolation = isolationOf(view);
     }
-    /// THE OVERLAY'S LAYOUT: the ray tier wrote it as a UAV this frame; in front of
-    /// its composite (before the quad's render pass opens) it becomes a texture —
-    /// through Ogre's own barrier solver, which also keeps the layout bookkeeping.
+    /// THE OVERLAY'S COMPOSITE, in front of its quad (before the render pass opens):
+    /// the view's overlay bound on the (process-wide) material with its validity
+    /// (the tier has written it — this frame's write, recorded earlier in the
+    /// frame, counts), and the texture taken from the UAV layout the tier left it
+    /// in to a texture, through Ogre's own barrier solver.
     void passEarlyPreExecute(Ogre::CompositorPass *pass) override {
         if (!pass) return;
         // THE PHOTON SCENE PASS: its drawables' world boxes are made current before
@@ -167,6 +167,13 @@ public:
         Ogre::TextureGpu *overlay = mView ? mView->photonOverlay() : nullptr;
         Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
         if (!overlay || !rs) return;
+        Ogre::Pass *mat = overlayMaterialPass();
+        if (!mat || !mat->hasFragmentProgram() || mat->getNumTextureUnitStates() < 1u) return;
+        mat->getTextureUnitState(0)->setTexture(overlay);
+        Ogre::GpuProgramParametersSharedPtr ps = mat->getFragmentProgramParameters();
+        ps->setIgnoreMissingParams(true);
+        ps->setNamedConstant("photonParams",
+                             Ogre::Vector4(mView->photonOverlayWritten() ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f));
         Ogre::BarrierSolver &solver = rs->getBarrierSolver();
         Ogre::ResourceTransitionArray trans;
         solver.resolveTransition(trans, overlay, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
@@ -236,7 +243,10 @@ void OgreView::syncPhotonView() {
     // between frames; the tier writes it inside the frame and says so.
     const PhotonView view = mScene->photonView();
     Ogre::TextureGpu *t = target();
-    const bool want = usesOverlay(view) && shape.passes && t && (cd.rayReflect || cd.probeGather);
+    // Not on the chain's ray rows: a new view (a screenshot's) learns its scene and
+    // rebuilds its chain with the ray jobs a frame or two later, and a shot of a few
+    // frames must not wait a frame more for the overlay the tier then writes.
+    const bool want = usesOverlay(view) && shape.passes && t;
     if (mPhotonOverlay && (!want || mPhotonOverlay->getWidth() != t->getWidth() ||
                            mPhotonOverlay->getHeight() != t->getHeight()))
         retirePhotonOverlay();
@@ -254,6 +264,7 @@ void OgreView::syncPhotonView() {
             o->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
             mPhotonOverlay = o;
             mPhotonOverlayWritten = false;
+            ++mPhotonOverlayGeneration;
         } JAH_CATCH(mError, );
     }
 }

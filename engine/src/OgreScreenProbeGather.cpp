@@ -1087,7 +1087,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // a HELD view dispatches no integrate, and the overlay is the integrate's.
         // The rest restarts; the history is untouched (the rest mean is a function
         // of the rest frames' own sequence, so it settles back to the same answer).
-        const bool photon = in.photonOverlay != nullptr;
+        const unsigned photon = in.photonOverlay ? in.photonOverlayGeneration : 0u;
         const bool still = temporal && !in.tuning.restOff && !in.stereo && sameCamera &&
                            in.restKey == v.restKey && photon == v.photonLast;
         v.photonLast = photon;

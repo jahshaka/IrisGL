@@ -5193,7 +5193,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         Ogre::TextureGpu *o = view->photonOverlay();
         if (o && o->getWidth() == in.width && o->getHeight() == in.height) {
             in.photonOverlay = o;
-            view->notePhotonOverlayWritten();
+            in.photonOverlayGeneration = view->photonOverlayGeneration();
         }
     }
     // A two-eye target must split into two whole eyes (the reflection's guard).
@@ -5341,6 +5341,9 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.hit = hit;
     if (!mGather) mGather = new ScreenProbeGather(*this);
     mGather->record(key, in);
+    // The overlay holds the discs once an integrate has written it (a held frame
+    // keeps the last one).
+    if (in.photonOverlay && mGather->integrates(key)) view->notePhotonOverlayWritten();
 }
 
 // ---------------------------------------------------------------------------
