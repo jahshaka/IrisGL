@@ -168,7 +168,15 @@ namespace
 // config is refused). A new trailing block on every mesh: every .jmb written
 // before today is rejected by this line, on purpose, and every library re-bakes
 // once (the BAKEKEY-1 rule — the output changed, so the version is bumped).
-constexpr int kFormatVersion = 13;
+// v14 (2026-09-26, ATOM-LOD-BOUND-1): THE BOUND MEASURES REPRESENTED SURFACE, and
+// the chain honours it. A dropped island costs its own extent (never its distance
+// to unrelated surface), the sampling margin multiplies the sampled term only, and
+// a level is re-simplified with every vertex it would displace past twice its own
+// error locked (lodchain::build). On smooth content (the primitives, the dragon)
+// the levels are the same index lists with bounds up to 1/1.25 smaller; on a scan
+// both the levels and the bounds change (the owner's temple: level-1 bound 2.48 m
+// -> 0.047 m). The bake's OUTPUT changed, so the version is bumped (BAKEKEY-1).
+constexpr int kFormatVersion = 14;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -946,6 +954,7 @@ struct Sample
 {
     Vec3 pos;
     Vec3 nrm;
+    unsigned tri = 0;   ///< the triangle (in the sampled soup's own order) it lies on
 };
 
 /// The van der Corput radical inverse — the low-discrepancy sequence that
@@ -1011,6 +1020,7 @@ float sample(const float *positions, int posComps, const std::vector<unsigned> &
         Sample s;
         s.pos = a * (1.0f - su) + b * (su * (1.0f - r2)) + c * (su * r2);
         s.nrm = n;
+        s.tri = unsigned(t);
         out->push_back(s);
     }
     return totalArea;
@@ -1499,7 +1509,12 @@ constexpr float kUvWeight      = 0.5f;   ///< the same relative priority, times 
 // sample spacing, so the measured maximum under-states the true one; 1.25 is the
 // factor applied for it. It is NOT a safety pad for the method — the method is
 // exact per sample (surface::TriangleGrid's query is the brute-force answer) —
-// it pays for the sample count alone, which is why it travels with N.
+// it pays for the sample count alone, which is why it travels with N — and why
+// it multiplies the AREA term only (ATOM-LOD-BOUND-1). The removed-vertex term
+// is not sampled: every removed vertex is queried exactly, so there is no gap to
+// pay for, and multiplying it too made an exact number 25 % worse than itself —
+// on the Stanford dragon that alone put level 1's bound at 2.11x the simplifier's
+// error (0.0171 against 0.0081) where the measured displacement is 1.69x.
 constexpr int   kBoundSamples      = 4096;   ///< samples per level PER DIRECTION.
 constexpr int   kBoundBigTriangles = 100000; ///< above this a mesh has more surface than 4096 samples resolve...
 constexpr int   kBoundSamplesBig   = 8192;   ///< ...so it gets twice as many.
@@ -1558,78 +1573,240 @@ constexpr float kBoundFloorRel     = 1e-5f;
 /// meshes; if it ever fires it is the interesting thing in the bake log.
 constexpr float kMaxRelBound   = 0.25f;
 
-/// THE MEASURED TWO-SIDED DISTANCE between two index lists over ONE vertex
-/// buffer (every level of a chain shares the vertices, ATOM rule 1), before the
-/// margin. `gridA` must be the grid of `a`, `gridB` of `b`.
+/// kDisplacementBudget / kLockPasses — THE DISPLACEMENT LOCK (`lodchain::build`).
+/// A removed vertex may sit at most this many times the level's own simplifier
+/// error from the level's surface; one further out is locked (with its fan) and
+/// the level is re-simplified, at most `kLockPasses` simplifications per level.
+/// Past the pass budget the level keeps what it has and the bound charges it
+/// honestly — the lock shapes the level, it never shapes the measurement.
+///
+/// WHY 2, MEASURED (ATOM-LOD-BOUND-1, spikes/atom-lod-bound-1/): it is the
+/// largest factor the shipped smooth content already honours with no lock at all
+/// — the Stanford dragon's worst level is 1.69x, the endless plane's 1.54x, so at
+/// 2 their chains are byte-for-byte the plain simplifier's — and on the owner's
+/// scan it converges in two to three passes with every level at 1.84-1.98x (at
+/// 1.5 the dragon takes locks and the scan's third mesh does not converge in the
+/// pass budget). The quadric is an area-weighted MEAN of plane distances and is
+/// blind to what a scan is made of: planes extend forever, so the tip of a spike
+/// collapses onto its own base "on the plane", and a 1-triangle island collapses
+/// to nothing at almost no cost. Two is the tolerance on that estimate.
+constexpr float kDisplacementBudget = 2.0f;
+constexpr int   kLockPasses    = 4;
+
+/// THE ISLANDS OF A MESH, and why the bound needs them (ATOM-LOD-BOUND-1).
+///
+/// WHAT WAS WRONG. A scan is one big surface plus hundreds of DEBRIS ISLANDS —
+/// disconnected components of one to a few dozen triangles floating around it
+/// (the owner's greek_temple_scan.glb: 46 / 733 / 1238 components in its three
+/// meshes, 42 / 712 / 1199 of them under 100 triangles). `meshopt_simplify`
+/// collapses a small island to nothing as readily as any other edge, and the
+/// removed-vertex walk then measured each deleted island's vertices against the
+/// NEAREST SURVIVING SURFACE — metres away, some unrelated wall. Measured at the
+/// scan's level 1: every one of the three meshes' worst removed vertices sat on
+/// an island of 1-6 triangles with an extent of 0.05-0.36 m, 1.9-4.0 m from any
+/// surface the level kept, so the stored bound was 2.48 / 2.63 / 5.05 m against
+/// a simplifier error of 0.024 / 0.030 / 0.044 — 100-115x — and no view distance
+/// under 1 km ever afforded level 1.
+///
+/// THE RULE: THE BOUND MEASURES REPRESENTED SURFACE. A point of level 0 whose
+/// component survives in the level is displaced by its distance to the level's
+/// surface — the Hausdorff term, unchanged. A point whose component the level
+/// DROPPED is content the level no longer shows, and the most a viewer can miss
+/// by its absence is the island itself: its distance is capped at its component's
+/// extent (the diagonal of its box — no point of it is further than that from any
+/// other point of it). The cap is `min(d, extent)` on every level-0 point, which
+/// is inert on anything big (the temple's main body is 43 m across; no removed
+/// vertex of it sits 43 m from the level) and on every single-component mesh (all
+/// the shipped primitives), and exactly the island's size on a deleted island.
+///
+/// AND THE SIMPLIFIER IS NOT ALLOWED TO MAKE THAT ERROR IN THE FIRST PLACE. A
+/// capped bound is honest but still prices the whole chain by its debris: a 0.36 m
+/// island dropped at a level whose surface moved 0.024 m makes the level cost
+/// 0.36 m. With the cap alone the scan's level-1 bounds were 0.17 / 0.63 / 0.69 m
+/// (7-21x the simplifier's error): half of it islands, half slivers and spikes
+/// of the big surfaces the quadric under-prices. So the level is re-simplified
+/// under THE DISPLACEMENT LOCK (`kDisplacementBudget`, in `build`): every removed
+/// vertex displaced past twice the level's own error is locked with its fan, and
+/// every component whose erasure would cost more than that keeps its largest
+/// triangle. After it the scan's level-1 bounds are 0.047 / 0.059 / 0.088 m — at
+/// most 2x the simplifier's error, at the same triangle counts. Whatever the pass
+/// budget leaves is charged by the cap, honestly.
+///
+/// `meshopt_SimplifyPrune` IS NOT THE TOOL, read and rejected: it REMOVES whole
+/// components whose bounding radius is under the simplifier's current error (the
+/// same "an island costs its size" rule as the cap here — simplifier.cpp's
+/// measureComponents), but it does not stop the ordinary edge collapses from
+/// erasing a larger island, which is what happens on the scan.
+///
+/// COMPONENTS ARE WELDED BY POSITION (`meshopt_generatePositionRemap`): a scan's
+/// UV seams split vertices everywhere, and a component by index would be cut
+/// along every seam into pieces that are not islands at all — the same welding
+/// the simplifier itself does when it decides what is a border.
+struct Islands
+{
+    std::vector<unsigned> compOf;      ///< per vertex; UINT_MAX when level 0 does not use it
+    std::vector<float>    extent;      ///< per component: its box diagonal
+    std::vector<float>    capOf;       ///< per vertex: extent[compOf[v]] (infinity when unused)
+    std::vector<size_t>   triangles;   ///< per component: its level-0 triangle count
+    std::vector<unsigned> vertStart;   ///< CSR: component c's vertices are
+    std::vector<unsigned> verts;       ///<   verts[vertStart[c] .. vertStart[c + 1])
+    size_t count() const { return extent.size(); }
+};
+
+Islands findIslands(const float *positions, int posComps, size_t nv,
+                    const std::vector<unsigned> &base)
+{
+    Islands is;
+    std::vector<unsigned> remap(nv);
+    meshopt_generatePositionRemap(remap.data(), positions, nv, sizeof(float) * size_t(posComps));
+    std::vector<unsigned> parent(nv);
+    for (size_t v = 0; v < nv; ++v) parent[v] = unsigned(v);
+    const auto root = [&](unsigned x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    for (size_t t = 0; t < base.size() / 3; ++t) {
+        const unsigned a = root(remap[base[t * 3]]);
+        for (int k = 1; k < 3; ++k) {
+            const unsigned b = root(remap[base[t * 3 + size_t(k)]]);
+            if (a != b) parent[b] = a;
+        }
+    }
+    // Numbered in first-use order of the index list: deterministic.
+    constexpr unsigned kNone = std::numeric_limits<unsigned>::max();
+    std::vector<unsigned> idOfRoot(nv, kNone);
+    std::vector<Vec3> lo, hi;
+    is.compOf.assign(nv, kNone);
+    for (unsigned v : base) {
+        const unsigned r = root(remap[v]);
+        if (idOfRoot[r] == kNone) {
+            idOfRoot[r] = unsigned(lo.size());
+            lo.emplace_back(FLT_MAX, FLT_MAX, FLT_MAX);
+            hi.emplace_back(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+        }
+        const unsigned c = idOfRoot[r];
+        is.compOf[v] = c;
+        const float *p = positions + size_t(v) * size_t(posComps);
+        lo[c] = Vec3(std::min(lo[c].x(), p[0]), std::min(lo[c].y(), p[1]), std::min(lo[c].z(), p[2]));
+        hi[c] = Vec3(std::max(hi[c].x(), p[0]), std::max(hi[c].y(), p[1]), std::max(hi[c].z(), p[2]));
+    }
+    const size_t n = lo.size();
+    is.extent.resize(n);
+    for (size_t c = 0; c < n; ++c) is.extent[c] = (hi[c] - lo[c]).length();
+    is.triangles.assign(n, 0);
+    for (size_t t = 0; t < base.size() / 3; ++t) ++is.triangles[is.compOf[base[t * 3]]];
+    is.capOf.assign(nv, std::numeric_limits<float>::infinity());
+    is.vertStart.assign(n + 1, 0);
+    for (size_t v = 0; v < nv; ++v)
+        if (is.compOf[v] != kNone) { is.capOf[v] = is.extent[is.compOf[v]]; ++is.vertStart[is.compOf[v] + 1]; }
+    for (size_t c = 0; c < n; ++c) is.vertStart[c + 1] += is.vertStart[c];
+    is.verts.resize(is.vertStart[n]);
+    std::vector<unsigned> fill(is.vertStart.begin(), is.vertStart.end() - 1);
+    for (size_t v = 0; v < nv; ++v)
+        if (is.compOf[v] != kNone) is.verts[fill[is.compOf[v]]++] = unsigned(v);
+    return is;
+}
+
+/// THE MEASURED TWO-SIDED DISTANCE between a level `a` and level 0 `b` over ONE
+/// vertex buffer (every level of a chain shares the vertices, ATOM rule 1), as its
+/// two terms: `areaOut` the sampled one (before the margin) and the return value
+/// the exact one over the removed vertices. `gridA` must be the grid of `a`,
+/// `gridB` of `b`. `islands` caps every level-0 point at its component's extent
+/// (the represented-surface rule above); `worstVertexOut` names the vertex the
+/// exact term came from.
 ///
 /// TWO SAMPLE SETS, AND THE SECOND ONE IS THE MAXIMUM — it was added after the
 /// acceptance suite caught its absence and then CORRECTED after the lane's audit
 /// read what it was actually measuring.
 ///
-///   * AREA SAMPLES, both ways, cover the surfaces evenly and are what an average
-///     deviation needs.
-///   * AND THE BASE VERTICES THE LEVEL NO LONGER HAS. A Hausdorff distance between
-///     two piecewise-linear surfaces is attained at a vertex or on an edge, never
-///     in the middle of a facet, and `meshopt_simplify` REMOVES vertices without
-///     ever moving one (its output is an index list over the ORIGINAL vertex
-///     buffer — ATOM rule 1, one vertex buffer and N index buffers). So the whole
-///     of the worst case sits on the vertices level 0 has and level k does not,
-///     and those are the only points this walk needs: a vertex level k still USES
-///     is a vertex of one of its own triangles, whose distance to level k is
-///     exactly zero.
-///
-///     THE FIRST CUT WALKED BOTH DIRECTIONS AND CAPPED THE WALK, and both were
-///     wrong. Level k's own vertices against level 0 measured 0 every single time
-///     (they are level-0 vertices, on level-0 triangles); and the walk that DID
-///     matter — level 0's vertices against level k — was strided past a 200 000
-///     probe cap, so a million-vertex mesh probed one vertex in five and the
-///     margin cannot cover a SKIPPED vertex, only an unsampled facet. The set
-///     difference is the fix in both directions at once: no dead loop, no stride,
-///     and it is SMALLER than either walk was (a halving step removes about half
-///     the vertices, and only those are queried).
-///
-/// `includeRemovedVertices` exists for the acceptance suite, which measures
-/// AREA-ONLY on purpose so that it exercises the sampling-gap margin instead of
-/// reproducing the exact term the bake already took a maximum over
-/// (`MeshBake::checkLodBounds`).
+///   * AREA SAMPLES, both ways, cover the surfaces evenly: the distance to a
+///     union of triangles can peak inside a facet, and only samples see that.
+///   * AND THE BASE VERTICES THE LEVEL NO LONGER HAS. `meshopt_simplify` REMOVES
+///     vertices without ever moving one (its output is an index list over the
+///     ORIGINAL vertex buffer — ATOM rule 1), so the worst displacement of the
+///     authored surface sits, almost always, on the vertices level 0 has and level
+///     k does not; a vertex level k still USES is a vertex of one of its own
+///     triangles, whose distance to level k is exactly zero. This term is EXACT —
+///     every removed vertex is queried, no stride — which is why the sampling-gap
+///     margin applies to the area term alone (`lodchain::build`).
+/// THE SAMPLED TERM: area samples both ways, the level-0 side capped by island.
+float areaDistance(const float *positions, int posComps,
+                   const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
+                   const std::vector<unsigned> &b, const surface::TriangleGrid &gridB,
+                   size_t samples, const Islands *islands)
+{
+    float area = 0.0f;
+    std::vector<surface::Sample> pts;
+    // The level's own surface against level 0: surface the level ADDED. Never
+    // capped — a level has no island level 0 lacks.
+    if (surface::sample(positions, posComps, a, samples, &pts) > 0.0f)
+        for (const surface::Sample &s : pts) {
+            const float d = gridB.closest(s.pos);
+            if (std::isfinite(d)) area = std::max(area, d);
+        }
+    // Level 0 against the level: surface the level MOVED or DROPPED, capped by
+    // the island the sample lies on.
+    if (surface::sample(positions, posComps, b, samples, &pts) > 0.0f)
+        for (const surface::Sample &s : pts) {
+            float d = gridA.closest(s.pos);
+            if (islands) d = std::min(d, islands->capOf[b[size_t(s.tri) * 3]]);
+            if (std::isfinite(d)) area = std::max(area, d);
+        }
+    return area;
+}
+
+/// The sorted, unique vertex set of an index list.
+std::vector<unsigned> vertexSet(const unsigned *indices, size_t count)
+{
+    std::vector<unsigned> v(indices, indices + count);
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    return v;
+}
+
+/// THE EXACT TERM: every vertex `baseSet` (level 0's, sorted unique) has and the
+/// level `a` does not, against the level's own surface, island-capped. Returns
+/// the maximum; `each` (optional) receives every removed vertex with its distance
+/// — the displacement lock's input — and `worstVertexOut` the arg-max.
+float removedVertexDistance(const float *positions, int posComps,
+                            const std::vector<unsigned> &baseSet,
+                            const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
+                            const Islands *islands,
+                            std::vector<std::pair<unsigned, float>> *each = nullptr,
+                            unsigned *worstVertexOut = nullptr)
+{
+    const std::vector<unsigned> kept = vertexSet(a.data(), a.size());
+    std::vector<unsigned> removed;
+    removed.reserve(baseSet.size());
+    std::set_difference(baseSet.begin(), baseSet.end(), kept.begin(), kept.end(),
+                        std::back_inserter(removed));
+    if (each) { each->clear(); each->reserve(removed.size()); }
+    if (worstVertexOut) *worstVertexOut = std::numeric_limits<unsigned>::max();
+    float worst = 0.0f;
+    for (unsigned v : removed) {
+        const float *p = positions + size_t(v) * size_t(posComps);
+        float d = gridA.closest(Vec3(p[0], p[1], p[2]));
+        if (islands) d = std::min(d, islands->capOf[v]);
+        if (!std::isfinite(d)) continue;
+        if (each) each->emplace_back(v, d);
+        if (d > worst) {
+            worst = d;
+            if (worstVertexOut) *worstVertexOut = v;
+        }
+    }
+    return worst;
+}
+
+/// Both terms at once (the verification's form): returns the exact term and
+/// writes the sampled one, before any margin, to `areaOut`.
 float twoSidedDistance(const float *positions, int posComps,
                        const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
                        const std::vector<unsigned> &b, const surface::TriangleGrid &gridB,
-                       size_t samples, bool includeRemovedVertices = true)
+                       size_t samples, float *areaOut, const Islands *islands = nullptr)
 {
-    float worst = 0.0f;
-    std::vector<surface::Sample> pts;
-    const auto areaOneWay = [&](const std::vector<unsigned> &from,
-                                const surface::TriangleGrid &against) {
-        if (surface::sample(positions, posComps, from, samples, &pts) > 0.0f)
-            for (const surface::Sample &s : pts) {
-                const float d = against.closest(s.pos);
-                if (std::isfinite(d)) worst = std::max(worst, d);
-            }
-    };
-    areaOneWay(a, gridB);
-    areaOneWay(b, gridA);
-    if (!includeRemovedVertices) return worst;
-
-    // THE VERTICES `b` (level 0) HAS AND `a` (the level) DOES NOT, against the
-    // level's own surface. Sorted-unique both sides, then one set_difference —
-    // deterministic, allocation-bounded by the vertex count, no stride.
-    std::vector<unsigned> base(b.begin(), b.end());
-    std::sort(base.begin(), base.end());
-    base.erase(std::unique(base.begin(), base.end()), base.end());
-    std::vector<unsigned> kept(a.begin(), a.end());
-    std::sort(kept.begin(), kept.end());
-    kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
-    std::vector<unsigned> removed;
-    removed.reserve(base.size());
-    std::set_difference(base.begin(), base.end(), kept.begin(), kept.end(),
-                        std::back_inserter(removed));
-    for (unsigned v : removed) {
-        const float *p = positions + size_t(v) * size_t(posComps);
-        const float d = gridA.closest(Vec3(p[0], p[1], p[2]));
-        if (std::isfinite(d)) worst = std::max(worst, d);
-    }
-    return worst;
+    if (areaOut) *areaOut = areaDistance(positions, posComps, a, gridA, b, gridB, samples, islands);
+    return removedVertexDistance(positions, posComps, vertexSet(b.data(), b.size()), a, gridA,
+                                 islands);
 }
 
 /// The first vertex buffer carrying `usage`, as floats: pointer, component
@@ -1651,8 +1828,9 @@ const float *attribData(const MeshPtr &mesh, VertexAttribUsage usage,
     return nullptr;
 }
 
-void build(const MeshPtr &mesh)
+void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
 {
+    if (terms) terms->clear();
     if (mesh.isNull()) return;
     mesh->lodIndices.clear();
     mesh->lodErrors.clear();
@@ -1731,6 +1909,15 @@ void build(const MeshPtr &mesh)
     const size_t boundSamples = base.size() / 3 > size_t(kBoundBigTriangles)
                                     ? size_t(kBoundSamplesBig) : size_t(kBoundSamples);
 
+    // THE ISLANDS (the represented-surface rule, `Islands` above): once, over
+    // level 0 — every level is measured against level 0 and every lock names a
+    // level-0 component.
+    const Islands islands = findIslands(positions, posComps, nv, base);
+    const std::vector<unsigned> baseSet = vertexSet(base.data(), base.size());
+    std::vector<unsigned char> lock;            // per vertex; allocated on first need
+    std::vector<std::pair<unsigned, float>> displaced;
+    std::vector<size_t> survivors(islands.count());
+
     std::vector<unsigned> prev = base;
     float accumulated = 0.0f;
     float boundSoFar = 0.0f;
@@ -1742,15 +1929,105 @@ void build(const MeshPtr &mesh)
         std::vector<unsigned> out(prev.size());
         float stepError = 0.0f;
         const unsigned options = meshopt_SimplifyErrorAbsolute | meshopt_SimplifyPermissive;
-        const size_t n = attrCount
-            ? meshopt_simplifyWithAttributes(out.data(), prev.data(), prev.size(),
-                                             positions, nv, posStride,
-                                             attribs.data(), sizeof(float) * attrCount,
-                                             weights.data(), attrCount,
-                                             nullptr, target, FLT_MAX, options, &stepError)
-            : meshopt_simplify(out.data(), prev.data(), prev.size(),
-                               positions, nv, posStride,
-                               target, FLT_MAX, options, &stepError);
+        const auto simplify = [&](const unsigned char *vertexLock) {
+            return attrCount
+                ? meshopt_simplifyWithAttributes(out.data(), prev.data(), prev.size(),
+                                                 positions, nv, posStride,
+                                                 attribs.data(), sizeof(float) * attrCount,
+                                                 weights.data(), attrCount,
+                                                 vertexLock, target, FLT_MAX, options, &stepError)
+                : meshopt_simplifyWithAttributes(out.data(), prev.data(), prev.size(),
+                                                 positions, nv, posStride,
+                                                 nullptr, 0, nullptr, 0,
+                                                 vertexLock, target, FLT_MAX, options, &stepError);
+        };
+        size_t n = simplify(nullptr);
+        // THE DISPLACEMENT LOCK (the represented-surface rule's other half): after a
+        // simplification every removed level-0 vertex is measured against the
+        // level's surface (island-capped); one displaced by more than
+        // `kDisplacementBudget` times the level's own error is LOCKED and the level
+        // simplified again. A deleted island bigger than the budget is thereby
+        // kept (all its vertices are displaced by its extent), and a spike or a
+        // sliver the quadric under-priced survives to a coarser level. The first
+        // pass is the plain one, so a mesh whose simplification already honours
+        // the budget (every shipped primitive, the dragon) takes exactly the path
+        // it always took. The last pass's measurement IS the level's vertex term.
+        int passes = 1, locked = 0;
+        bool locking = false;
+        std::vector<size_t> anchors;             // per component: its largest triangle in prev
+        std::vector<unsigned> fanStart, fanTris; // CSR: each vertex's triangles in prev
+        std::vector<unsigned> candidate;
+        surface::TriangleGrid levelGrid;
+        float vertexTerm = 0.0f;
+        unsigned worstVertex = std::numeric_limits<unsigned>::max();
+        while (n >= 3 && n % 3 == 0) {
+            candidate.assign(out.begin(), out.begin() + std::ptrdiff_t(n));
+            levelGrid.build(positions, posComps, candidate, lo, hi, boundGridRes(candidate.size() / 3));
+            vertexTerm = removedVertexDistance(positions, posComps, baseSet, candidate, levelGrid,
+                                               &islands, &displaced, &worstVertex);
+            if (passes >= kLockPasses) break;
+            const float budget = kDisplacementBudget * std::max(accumulated, stepError);
+            bool more = false;
+            // A displaced vertex is kept WITH ITS FAN: the vertex and every vertex of
+            // its triangles in `prev`. Locking the vertex alone is not enough — a
+            // locked vertex still leaves the index list when the collapses of its
+            // NEIGHBOURS degenerate every triangle it is in, and a fully locked
+            // triangle cannot degenerate.
+            if (fanStart.empty()) {
+                fanStart.assign(nv + 1, 0);
+                for (unsigned v : prev) ++fanStart[size_t(v) + 1];
+                for (size_t v = 0; v < nv; ++v) fanStart[v + 1] += fanStart[v];
+                fanTris.resize(prev.size());
+                std::vector<unsigned> fill(fanStart.begin(), fanStart.end() - 1);
+                for (size_t i = 0; i < prev.size(); ++i) fanTris[fill[prev[i]]++] = unsigned(i / 3);
+            }
+            const auto lockVertex = [&](unsigned v) {
+                if (!locking) { lock.assign(nv, 0); locking = true; }
+                if (lock[v]) return false;
+                lock[v] = meshopt_SimplifyVertex_Lock;
+                ++locked;
+                return true;
+            };
+            for (const auto &vd : displaced) {
+                if (vd.second <= budget) continue;
+                if (lockVertex(vd.first)) more = true;
+                for (unsigned f = fanStart[vd.first]; f < fanStart[size_t(vd.first) + 1]; ++f)
+                    for (int k = 0; k < 3; ++k)
+                        if (lockVertex(prev[size_t(fanTris[f]) * 3 + size_t(k)])) more = true;
+            }
+            if (!more) break;
+            // AND EVERY COMPONENT WHOSE ERASURE WOULD COST MORE THAN THE BUDGET
+            // KEEPS ONE TRIANGLE — its largest in `prev`, all three vertices
+            // locked (a triangle whose vertices cannot move cannot degenerate).
+            // Without it the re-simplification pays for the vertices just locked
+            // by erasing OTHER islands the first pass happened to leave, and the
+            // loop chases them pass after pass (measured on the scan: 700-2700
+            // locks and the pass budget exhausted on two of three meshes).
+            if (anchors.empty()) {
+                anchors.assign(islands.count(), std::numeric_limits<size_t>::max());
+                std::vector<float> best(islands.count(), -1.0f);
+                for (size_t t = 0; t < prev.size() / 3; ++t) {
+                    const float *a = positions + size_t(prev[t * 3]) * size_t(posComps);
+                    const float *b = positions + size_t(prev[t * 3 + 1]) * size_t(posComps);
+                    const float *c = positions + size_t(prev[t * 3 + 2]) * size_t(posComps);
+                    const float area = Vec3::crossProduct(Vec3(b[0] - a[0], b[1] - a[1], b[2] - a[2]),
+                                                          Vec3(c[0] - a[0], c[1] - a[1], c[2] - a[2]))
+                                           .lengthSquared();
+                    const unsigned comp = islands.compOf[prev[t * 3]];
+                    if (area > best[comp]) { best[comp] = area; anchors[comp] = t; }
+                }
+            }
+            for (size_t comp = 0; comp < islands.count(); ++comp) {
+                if (anchors[comp] == std::numeric_limits<size_t>::max() ||
+                    islands.extent[comp] <= budget) continue;
+                for (int k = 0; k < 3; ++k) {
+                    const unsigned v = prev[anchors[comp] * 3 + size_t(k)];
+                    lockVertex(v);
+                }
+            }
+            n = simplify(lock.data());
+            ++passes;
+        }
         if (n < 3 || n % 3 != 0) break;
         // Topology can stop the simplifier short. A level that did not shed at
         // least 15% costs a buffer and a switch for nothing.
@@ -1759,14 +2036,14 @@ void build(const MeshPtr &mesh)
         const float error = std::max(accumulated, stepError);
         if (extent > 0.0f && error > extent * kMaxRelError) break;
 
-        out.resize(n);
+        out.swap(candidate);
 
-        // THE MEASUREMENT (AT-A5). Level `out` against level 0, both ways.
-        surface::TriangleGrid levelGrid;
-        levelGrid.build(positions, posComps, out, lo, hi, boundGridRes(out.size() / 3));
-        const float measured =
-            twoSidedDistance(positions, posComps, out, levelGrid, base, baseGrid, boundSamples) *
-            kBoundMargin;
+        // THE MEASUREMENT (AT-A5). Level `out` against level 0, both ways, every
+        // level-0 point capped at its island's extent (the represented-surface
+        // rule); the sampling-gap margin on the sampled term only.
+        const float areaTerm = areaDistance(positions, posComps, out, levelGrid, base, baseGrid,
+                                            boundSamples, &islands);
+        const float measured = std::max(areaTerm * kBoundMargin, vertexTerm);
         // MONOTONE NON-DECREASING BY CONSTRUCTION, and that is a requirement and
         // not a tidy-up: `lodLevelForWorldError` walks the array and stops at the
         // FIRST level it cannot afford, which is only the right answer for a
@@ -1774,25 +2051,6 @@ void build(const MeshPtr &mesh)
         // level (a coarser level can happen to land closer at the points these
         // samples fall on), so the running max is taken — which over-states, i.e.
         // errs towards a FINER level than needed, which is the safe direction.
-        // THE TWO TERMS, SEPARATELY, behind a run-wide latch (the idiom every
-        // measurable rule in this tree carries). It is how the margin and the vertex
-        // walk are re-checked without a build, and what it measured is why the
-        // vertex walk exists: on `endlessplane.obj` the removed vertices raise the
-        // level-2 bound from 4.589 to 60.033 — THIRTEEN TIMES — because a flat mesh
-        // deviates only where its RIM was cut, which no area sampler will land on.
-        // On smooth meshes they add 1.008x to 1.046x, i.e. almost nothing, which is
-        // the other half of the honest statement.
-        if (std::getenv("JAH_BAKE_BOUND_TERMS")) {
-            surface::TriangleGrid g2;
-            g2.build(positions, posComps, out, lo, hi, boundGridRes(out.size() / 3));
-            const float areaOnly = twoSidedDistance(positions, posComps, out, g2, base, baseGrid,
-                                                    boundSamples, false) * kBoundMargin;
-            irisLog(QStringLiteral("bound terms: level %1  area-only %2  with-removed-verts %3  "
-                                   "verts add %4x")
-                        .arg(mesh->lodIndices.size() + 1)
-                        .arg(double(areaOnly), 0, 'f', 6).arg(double(measured), 0, 'f', 6)
-                        .arg(areaOnly > 0.0f ? double(measured) / double(areaOnly) : 0.0, 0, 'f', 3));
-        }
         const float bound = std::max(std::max(boundSoFar, measured),
                                      extent > 0.0f ? extent * kBoundFloorRel : 0.0f);
         // The safety net (`kMaxRelBound`): this level's surface may sit further
@@ -1805,6 +2063,28 @@ void build(const MeshPtr &mesh)
         mesh->lodIndices.append(levelIndices);
         mesh->lodErrors.append(error);
         mesh->lodBounds.append(bound);
+        if (terms) {
+            MeshBake::LodLevelTerms row;
+            row.triangles = int(n / 3);
+            row.quadric = error;
+            row.areaTerm = areaTerm * kBoundMargin;
+            row.vertexTerm = vertexTerm;
+            row.bound = bound;
+            row.verticesLocked = locked;
+            row.passes = passes;
+            std::fill(survivors.begin(), survivors.end(), size_t(0));
+            for (size_t t = 0; t < out.size() / 3; ++t) ++survivors[islands.compOf[out[t * 3]]];
+            for (size_t c = 0; c < islands.count(); ++c)
+                if (!survivors[c]) {
+                    ++row.islandsDropped;
+                    row.droppedMaxExtent = std::max(row.droppedMaxExtent, islands.extent[c]);
+                }
+            if (worstVertex < nv && islands.compOf[worstVertex] < islands.count()) {
+                row.worstComponentTriangles = int(islands.triangles[islands.compOf[worstVertex]]);
+                row.worstComponentExtent = islands.extent[islands.compOf[worstVertex]];
+            }
+            terms->append(row);
+        }
 
         accumulated = error;
         boundSoFar = bound;
@@ -3432,7 +3712,10 @@ QVector<float> shippedConfigRecord() { return configRecord(kShipped); }
 
 }   // namespace
 
-void MeshBake::buildLodChain(const MeshPtr &mesh) { lodchain::build(mesh); }
+void MeshBake::buildLodChain(const MeshPtr &mesh, QVector<LodLevelTerms> *terms)
+{
+    lodchain::build(mesh, terms);
+}
 
 void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, ClusterDagVariant variant)
 {
@@ -3457,9 +3740,11 @@ void MeshBake::buildCards(const MeshPtr &mesh, int maxCards) { cards::build(mesh
 
 void MeshBake::buildSdf(const MeshPtr &mesh) { sdf::build(mesh); }
 
-bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *worstRatioOut)
+bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *worstRatioOut,
+                              QVector<float> *referenceOut)
 {
     if (worstRatioOut) *worstRatioOut = 0.0;
+    if (referenceOut) referenceOut->clear();
     if (mesh.isNull() || mesh->lodIndices.isEmpty()) return true;
     if (mesh->lodBounds.size() != mesh->lodIndices.size()) return false;
     int posComps = 3; size_t nv = 0;
@@ -3481,6 +3766,7 @@ bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *
     }
     surface::TriangleGrid baseGrid;
     baseGrid.build(positions, posComps, base, lo, hi, lodchain::boundGridRes(base.size() / 3));
+    const lodchain::Islands islands = lodchain::findIslands(positions, posComps, nv, base);
     const size_t dense =
         size_t(std::max(1, densityMultiple)) *
         size_t(base.size() / 3 > size_t(lodchain::kBoundBigTriangles)
@@ -3492,8 +3778,13 @@ bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *
         surface::TriangleGrid levelGrid;
         levelGrid.build(positions, posComps, level, lo, hi,
                         lodchain::boundGridRes(level.size() / 3));
-        const float measured = lodchain::twoSidedDistance(positions, posComps, level, levelGrid,
-                                                          base, baseGrid, dense);
+        // The same represented-surface rule the bake applies (island caps), at
+        // `densityMultiple` times the samples and NO margin: the reference.
+        float area = 0.0f;
+        const float exact = lodchain::twoSidedDistance(positions, posComps, level, levelGrid,
+                                                       base, baseGrid, dense, &area, &islands);
+        const float measured = std::max(area, exact);
+        if (referenceOut) referenceOut->append(measured);
         // A float comparison of two lengths measured the same way: one part in a
         // million of the stored value is the round-off, not a tolerance on the
         // claim.

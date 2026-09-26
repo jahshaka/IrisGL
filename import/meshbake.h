@@ -208,7 +208,25 @@ public:
     /// fixture, a re-bake path) must be able to ask for the same levels the
     /// importer would have produced rather than a second implementation of them.
     /// Pure CPU, no assimp, no engine; safe from any thread.
-    static void buildLodChain(const MeshPtr &mesh);
+    ///
+    /// `terms`, when given, receives ONE ROW PER STORED LEVEL: how its bound was
+    /// made (the bound's two measured terms and the island rule's work). It is the
+    /// test-time window on the rule — the suites print it; the bake passes null.
+    struct LodLevelTerms
+    {
+        int   triangles = 0;
+        float quadric = 0.0f;        ///< the simplifier's own error (lodErrors)
+        float areaTerm = 0.0f;       ///< sampled two-sided distance, margin applied
+        float vertexTerm = 0.0f;     ///< exact removed-vertex distance (island-capped)
+        float bound = 0.0f;          ///< what lodBounds stores
+        int   islandsDropped = 0;    ///< components level 0 has and this level has none of
+        float droppedMaxExtent = 0.0f;  ///< the largest of those (its bbox diagonal)
+        int   verticesLocked = 0;    ///< removed vertices the displacement lock kept (displaced past the budget)
+        int   passes = 0;            ///< simplifier runs this level took (1 = no island had to be kept)
+        int   worstComponentTriangles = 0;   ///< level-0 triangles of the component the vertex term came from
+        float worstComponentExtent = 0.0f;   ///< ...and its extent
+    };
+    static void buildLodChain(const MeshPtr &mesh, QVector<LodLevelTerms> *terms = nullptr);
 
     /// SURFACE-CACHE phase 1 (SPECS/SURFACE_CACHE_ASSESSMENT.md §7): build
     /// `mesh`'s SURFACE CARD LIST, in place — `cards` + `cardCoverage`, or both
@@ -305,22 +323,25 @@ public:
     /// VERIFICATION, and it exists for the same reason `producerHashOf` does: the
     /// claim has to be TESTABLE without re-running the thing that made it.
     ///
-    /// `checkLodBounds` re-measures every level of `mesh` against level 0 by AREA
-    /// SAMPLING ALONE, with `densityMultiple` times as many samples as the bake
-    /// used, and answers whether every measured distance is inside the stored
-    /// `lodBounds[k]`.
+    /// `checkLodBounds` re-measures every level of `mesh` against level 0 with
+    /// `densityMultiple` times as many area samples as the bake used, at strata the
+    /// bake never used, plus the exact removed-vertex walk, under the same
+    /// represented-surface rule (island caps) and WITHOUT the sampling margin — a
+    /// dense reference of the two-sided distance — and answers whether every
+    /// stored `lodBounds[k]` is at least that. On a mesh with no islands (one
+    /// component: every shipped primitive, the dragon) the reference IS the
+    /// sampled two-sided Hausdorff distance.
     ///
-    /// WHAT IT IS AND IS NOT. It is not an independent derivation of the bound: the
-    /// bake's maximum comes from the REMOVED BASE VERTICES, computed exactly, and
-    /// any check that walked them too would reproduce that term bit for bit and
-    /// pass by construction. Dropping them is what leaves the sampling-gap margin
-    /// exposed — so this is a REGRESSION CHECK on the margin and on the whole
-    /// pipeline (sampler, grid, floor, monotonicity), at a sample count and a set
-    /// of strata the bake never used. A mesh with no chain trivially passes.
-    /// `worstRatioOut` receives the largest (dense measurement / stored bound) seen,
-    /// so a failure reports a number instead of a boolean.
+    /// WHAT IT IS AND IS NOT. The exact vertex term is the same computation the
+    /// bake made, so where it carries the maximum the check reproduces the stored
+    /// number and passes at ratio 1.0000; what it genuinely tests is that the area
+    /// margin covers what 8x the samples find inside facets, and the whole
+    /// pipeline (sampler, grid, floor, monotonicity). A mesh with no chain
+    /// trivially passes. `worstRatioOut` receives the largest (reference / stored)
+    /// seen, and `referenceOut` one reference per level.
     static bool checkLodBounds(const MeshPtr &mesh, int densityMultiple = 8,
-                               double *worstRatioOut = nullptr);
+                               double *worstRatioOut = nullptr,
+                               QVector<float> *referenceOut = nullptr);
 
     /// ...and whether `mesh`'s SDF agrees with LEVEL 0's surface. Walks the cells
     /// inside the field's exact band, compares each stored distance with the exact

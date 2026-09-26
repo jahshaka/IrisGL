@@ -398,13 +398,16 @@ public:
     /// a mesh inside ONE draw call downstream (finding B).
     ///
     /// `lodBounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0 —
-    /// a sampled Hausdorff estimate with the sampling-gap margin applied — as a
-    /// LENGTH in mesh units, monotonically non-decreasing. THIS is the currency
+    /// the displacement of REPRESENTED surface: an exact walk of the removed
+    /// vertices plus area samples (the sampling-gap margin on the samples only),
+    /// every level-0 point capped at its own island's extent, so a debris island
+    /// the level dropped costs its size and not its distance to unrelated surface
+    /// (ATOM-LOD-BOUND-1) — as a LENGTH in mesh units, monotonically non-decreasing. THIS is the currency
     /// the whole program is judged in and the only one any consumer reads:
     /// divided by the view distance it is a screen-space error, and compared
     /// against a world-space cell size it answers "is this level fine enough for
     /// a voxel of that size". The measurement is `meshbake.cpp`'s
-    /// `lodchain::twoSidedDistance`; the one selection rule over it is
+    /// `lodchain::build` (areaDistance + removedVertexDistance); the one selection rule over it is
     /// `lodLevelForWorldError` (jahshaka/engine/Types.h).
     ///
     /// `lodErrors[i]` is what the SIMPLIFIER said about that level — its
