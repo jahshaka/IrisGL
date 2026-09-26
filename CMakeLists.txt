@@ -161,6 +161,18 @@ option(MESHOPT_BUILD_GLTFPACK "" OFF)
 option(MESHOPT_BUILD_SHARED_LIBS "" OFF)
 add_subdirectory_with_folder("Dependencies/MeshOptimizer" thirdparty/meshoptimizer)
 set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# THE BAKE IS OPTIMISED IN DEBUG TOO (IMPORT-SPEED-1). Debug is the daily driver,
+# and at -O0 the bake's inner loops (the nearest-surface query, the simplifier)
+# call Vec3::operator-, length() and hypot() as real functions: measured on the
+# owner's 233k-triangle scan, the same bake on the same 20 threads is several
+# times faster at -O2 (spikes/import-speed-1/). So the three bake TUs —
+# meshoptimizer (the target below), import/meshbake.cpp and import/clusterlod.cpp
+# (set on their sources after the SRCS list) — take -O2 in Debug; -g stays, and
+# every other configuration keeps its own level. The OUTPUT is the same bytes:
+# x86-64 baseline code has no FMA to contract into and GCC does not reassociate
+# float reductions without -ffast-math, so -O2 computes what -O0 computes —
+# which bake.determinism and the scan's blob hash A/B prove (the spike).
+target_compile_options(meshoptimizer PRIVATE $<$<CONFIG:Debug>:-O2>)
 set(BUILD_SHARED_LIBS "${_jah_outer_shared_libs}")
 set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
@@ -455,6 +467,9 @@ string(SHA256 _mesh_bake_producer_id "${_mesh_bake_blob}")
 # list separator and would become three defines.
 string(REPLACE ";" "|" _mesh_bake_hashed_list "${_mesh_bake_hashed_sources}")
 
+# The bake's own TUs at -O2 in Debug (see the meshoptimizer block above for why).
+set_source_files_properties(import/meshbake.cpp import/clusterlod.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
