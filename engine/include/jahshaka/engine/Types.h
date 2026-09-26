@@ -199,9 +199,10 @@ inline size_t lodLevelForWorldError(const std::vector<float> &bounds, float allo
 // SPECS/atom/B2_CLUSTER_DAG_DESIGN.md §2. The mesh's CLUSTER DAG is a bake
 // product (irisgl/import/meshbake.cpp `clusterdag`, document/assets/mesh.h
 // `iris::MeshClusterDag`) handed across as the two tables below plus one global
-// index stream (`MeshData::clusterIndices`). Nothing in the product draws it yet:
-// stage 3's GPU cut is the consumer, and the proof that the rule below selects
-// ONE crack-free cut lives in the test harness (tests/atom/cluster_draw.*).
+// index stream (`MeshData::clusterIndices`). THE PRODUCT DRAWS IT (ATOM-CLUSTER-CUT,
+// SPECS/v2/CLUSTER_CUT_DESIGN.md): the GPU cull evaluates this rule per (instance,
+// cluster) and the id pass draws the cut; the test harness (tests/atom/cluster_draw.*)
+// is the rule's CPU-side proof.
 //
 // THE RULE IS clusterlod.h's RENDER TEST (its lines 129-133), with the MEASURED
 // group error in the quality currency's units:
@@ -264,6 +265,7 @@ struct ClusterCutView {
     float tolerance = 0.0f;       ///< samples (the view's pixel budget)
     float projScaleY = 0.0f;      ///< proj[1][1]
     float viewportHeight = 0.0f;  ///< the pass's target height
+    bool  orthographic = false;   ///< no distance term: one metre (the level walk's ortho case)
 };
 
 /// What the consumer can afford AT ONE GROUP, in mesh units. The arithmetic is
@@ -276,7 +278,8 @@ inline float clusterGroupAllowed(const MeshClusterGroup &g, const ClusterCutView
     const float cz = v.worldRow[2][0] * g.centre[0] + v.worldRow[2][1] * g.centre[1] +
                      v.worldRow[2][2] * g.centre[2] + v.worldRow[2][3];
     const float dx = cx - v.eye[0], dy = cy - v.eye[1], dz = cz - v.eye[2];
-    const float d = std::max(0.0f, std::sqrt(dx * dx + dy * dy + dz * dz) - g.radius * v.scale);
+    const float d = v.orthographic ? 1.0f
+                                   : std::max(0.0f, std::sqrt(dx * dx + dy * dy + dz * dz) - g.radius * v.scale);
     return allowedWorldError(v.tolerance,
                              sampleFootprintPerspective(d, v.projScaleY, v.viewportHeight), v.scale);
 }
@@ -4508,6 +4511,23 @@ struct AtomDrawStatus {
     /// view — at the Low tier the viewport carries no id pass and the view paints
     /// nothing, so Scene::setAtomView's callers refuse there.
     bool     viewPaintable = false;
+    /// THE CUT (ATOM-CLUSTER-CUT), as the first enabled view of this scene last read
+    /// its id pass's counters back (a few frames late, never waited on): drawn
+    /// clusters, indices in the compacted stream, the triangles drawn, the
+    /// (instance, cluster) pairs the rule evaluated, the instances that did not fit
+    /// the stream's main region (drawn COARSE that frame: their root cut, from the
+    /// reserve), the instances that fit nothing (drawn NOTHING — 0 is the invariant),
+    /// and the budget itself. `cutValid` false before a view has read any.
+    bool     cutValid = false;
+    unsigned cutClusters = 0, cutIndices = 0, cutEvaluated = 0;
+    unsigned cutOverflow = 0, cutMissing = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
+    unsigned long long cutTriangles = 0ull;
+};
+
+/// The id pass's cut counters, one view's (AtomDrawStatus carries them).
+struct AtomCutStats {
+    unsigned clusters = 0, indices = 0, evaluated = 0, overflow = 0, missing = 0, overflowIndices = 0,
+             indexBudget = 0;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
@@ -6649,9 +6669,9 @@ struct GpuCullRequest {
     bool orthographic = false;
     /// THE VIEW'S LOD SWITCH BAND (ogre-patch 0075's `hysteresis`, the fraction of
     /// the threshold being crossed): 0 = the exact level. A banded request holds each
-    /// slot's last banded level until the allowed error leaves the band — the id pass
-    /// takes the view's own band (ChainDesc::lodHysteresis), so a watched view does
-    /// not pop at a threshold on the GPU path either.
+    /// slot's last banded level until the allowed error leaves the band. Levels only
+    /// (modes 1-2): the CUT (mode 3, the id pass's) takes no band — its frontier
+    /// changes under one sample of error, invisibly by construction (CLUSTER_CUT D4).
     float lodHysteresis = 0.0f;
     /// GpuInstance flag predicates (GpuSceneEntry::flags documents the bits):
     /// every required bit must be set and no forbidden bit may be.
@@ -6664,7 +6684,10 @@ struct GpuCullRequest {
     /// every survivor on level 0.
     float pixelTolerance = 0.0f;
     /// 0 = survivors only; 1 = + the per-instance level; 2 = + one
-    /// VkDrawIndexedIndirectCommand per survivor.
+    /// VkDrawIndexedIndirectCommand per survivor (the level's range); 3 = THE CLUSTER
+    /// CUT (ATOM-CLUSTER-CUT): no level — the cluster rule per (survivor, cluster),
+    /// the drawn clusters' indices compacted into the list's stream and one command
+    /// per survivor over its run of it (the id pass's request).
     unsigned mode = 0u;
     /// MEASUREMENT ONLY, and 0 in every real request: after the functional run,
     /// each job is dispatched this many more times over the buffers it already
@@ -6717,6 +6740,20 @@ struct GpuCullResult {
     /// Five uints per draw: indexCount, instanceCount, firstIndex,
     /// vertexOffset, firstInstance.
     std::vector<unsigned> drawCommands;
+    /// THE CUT (mode 3), from the count buffer: drawn clusters (records written),
+    /// indices asked of the stream's main region, the triangles the commands draw, the
+    /// (instance, cluster) pairs the rule evaluated, the instances whose cut did not fit
+    /// and drew their ROOT CUT from the coarse reserve (`cutOverflow`), the instances
+    /// that fit neither and drew NOTHING (`cutMissing`), the indices asked
+    /// (`cutOverflowIndices`, the main cursor), and the budget the request ran under.
+    unsigned cutClusters = 0, cutIndices = 0, cutTriangles = 0, cutEvaluated = 0;
+    unsigned cutOverflow = 0, cutMissing = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
+    /// With `readBack`: THE DRAWN SET, three uints per drawn cluster — the item slot,
+    /// the cluster's index in ITS MESH's DAG (`MeshData::clusters`) and its depth —
+    /// in the records' (arrival) order, which is not stable between runs.
+    std::vector<unsigned> cutDrawn;
+    /// The two cut jobs' cost, measured as the three above are (a slope).
+    double cutMs = -1.0, emitMs = -1.0;
 };
 
 /// THE HIERARCHICAL DEPTH PYRAMID, as built (PostFxDesc::hzb; NANITE_SPEC

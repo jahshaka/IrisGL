@@ -61,6 +61,22 @@
 			"uav_units" : 6
 		},
 
+		"Jahshaka/CullCut" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"source" : "JahCullCut_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahClusterCut.glsl"],
+			"uav_units" : 10
+		},
+
+		"Jahshaka/CullEmit" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"source" : "JahCullEmit_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "JahGeomRows_piece_all.any"],
+			"uav_units" : 9
+		},
+
 		"Jahshaka/VoxelGatherCount" :
 		{
 			"threads_per_group" : [64, 1, 1],

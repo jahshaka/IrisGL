@@ -104,21 +104,26 @@ constexpr Ogre::uint8 kHitDecodeRenderQueue = 99u;
 constexpr Ogre::uint8 kScreenDecodeRenderQueue = 2u;
 
 /// The id image's two words (R32G32_UINT), the contract between whatever WRITES the
-/// id buffer (the hand-made one of engine.atom_parity today, S3-DRAW's id pass
-/// tomorrow) and the decode:
-///   x = the GPU scene's ITEM SLOT (bits 0-23) | the mesh LEVEL (bits 24-26);
-///       0xFFFFFFFF = nothing covers this pixel
-///   y = the TRIANGLE, counted from the first index of (that level, submesh 0)'s
-///       range (`GpuMeshLevel::firstIndex`)
-/// Submesh 0 only, like the voxel gather: every mesh the engine bakes has one.
+/// id buffer (the id pass, and the hand-made images of engine.atom_parity) and the
+/// screen decode — ATOM-CLUSTER-CUT's encoding (SPECS/v2/CLUSTER_CUT_DESIGN.md D3;
+/// the GLSL statement is src/rayquery/include/jah_atom_id.glsl):
+///   x = the GPU scene's ITEM SLOT (bits 0-23) | the drawn cluster's DAG DEPTH
+///       (bits 24-31, 0 = a leaf); 0xFFFFFFFF = nothing covers this pixel
+///   y = the CLUSTER, its index in its mesh's DAG (bits 8-31) | the TRIANGLE
+///       inside the cluster (bits 0-7)
+/// The hit list's records keep (slot | LEVEL, triangle of the level): a ray hits a
+/// structure built from a level (jah_rq_hit_record.glsl).
 struct AtomId {
     static constexpr uint32_t kEmpty = 0xFFFFFFFFu;
     static constexpr uint32_t kSlotBits = 24u;
     static constexpr uint32_t kSlotMask = (1u << kSlotBits) - 1u;
-    static constexpr uint32_t kLevelMask = 0x7u;
-    static uint32_t pack(uint32_t slot, uint32_t level) {
-        return (slot & kSlotMask) | ((level & kLevelMask) << kSlotBits);
+    static uint32_t packX(uint32_t slot, uint32_t depth) {
+        return (slot & kSlotMask) | ((depth < 254u ? depth : 254u) << kSlotBits);
     }
+    static uint32_t packY(uint32_t cluster, uint32_t localTriangle) {
+        return (cluster << 8u) | (localTriangle & 0xFFu);
+    }
+    static uint32_t depthOf(uint32_t x) { return x >> kSlotBits; }
 };
 
 class AtomDecodeRenderable;
@@ -146,6 +151,11 @@ public:
         Ogre::UavBufferPacked *instances = nullptr;   ///< GpuScene::instanceBuffer()
         Ogre::UavBufferPacked *levels = nullptr;      ///< GpuScene::levelBuffer()
         Ogre::UavBufferPacked *geomRows = nullptr;    ///< GpuScene::geomBuffer()
+        /// THE CUT'S TABLES (ATOM-CLUSTER-CUT): the screen decode resolves an id's
+        /// (cluster, triangle) through the mesh's `dag` and the cluster table. Null
+        /// binds the empty stand-in (hit mode reads levels, never these).
+        Ogre::UavBufferPacked *meshes = nullptr;      ///< GpuScene::meshBuffer()
+        Ogre::UavBufferPacked *clusters = nullptr;    ///< GpuScene::clusterBuffer()
         /// HIT MODE (PHOTON-HIT-SHADE-1): `ids` is the hit list's RGBA32UI record
         /// image and `hitBuf` the ray jobs' buffer (word 0 = records appended; two
         /// words a record from word 4: the sun's visibility and the footprint as
@@ -308,7 +318,11 @@ public:
     /// the hit mode's last pass texture sat at slot 31, its last entry (measured
     /// from the generated shaders). The read-only buffer table is separate.
     static constexpr Ogre::uint8 kHitBufSlot = 5u;
-    static constexpr Ogre::uint8 kReservedBufSlots = 6u;
+    /// THE CUT'S TABLES (ATOM-CLUSTER-CUT): the mesh table (its `dag`) and the
+    /// cluster table, read by the screen decode.
+    static constexpr Ogre::uint8 kMeshBufSlot = 6u;
+    static constexpr Ogre::uint8 kClusterBufSlot = 7u;
+    static constexpr Ogre::uint8 kReservedBufSlots = 8u;
 
 protected:
     Ogre::Hlms::PropertiesMergeStatus notifyPropertiesMergedPreGenerationStep(

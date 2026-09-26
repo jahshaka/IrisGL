@@ -149,6 +149,9 @@ public:
         src.instances = gs.instanceBuffer();
         src.levels = gs.levelBuffer();
         src.geomRows = gs.geomBuffer();
+        gs.flushClusterTables();
+        src.meshes = gs.meshBuffer();
+        src.clusters = gs.clusterBuffer();
         atom->setDecodeSource(src);
         atom->showScreenDecodes(scene->sceneManager(), true);
         mArmed = scene->sceneManager();
@@ -530,6 +533,23 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     st.stereoViews = unsigned(mAtomStereoViews.size());
     st.passthroughViews = unsigned(mAtomPassthroughViews.size());
     st.viewPaintable = atomViewPaintable();
+    // THE CUT'S COUNTERS, the first enabled view of this scene that has read any.
+    for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
+        AtomCutStats cs;
+        unsigned long long tris = 0ull;
+        unsigned surv = 0u;
+        if (!v || !v->atomStats(tris, surv) || !v->atomCutStats(cs)) continue;
+        st.cutValid = true;
+        st.cutClusters = cs.clusters;
+        st.cutIndices = cs.indices;
+        st.cutEvaluated = cs.evaluated;
+        st.cutOverflow = cs.overflow;
+        st.cutMissing = cs.missing;
+        st.cutOverflowIndices = cs.overflowIndices;
+        st.cutIndexBudget = cs.indexBudget;
+        st.cutTriangles = tris;
+        break;
+    }
     return st;
 }
 

@@ -46,6 +46,7 @@ struct GpuMesh
 	uvec4 counts;       // x vertices, y level-0 indices, z LEVEL COUNT, w submeshes
 	vec4  localBoundsMin;
 	vec4  localBoundsMax;
+	uvec4 dag;              // the cluster DAG: base, count, group base, cluster row (GpuScene.h)
 };
 
 struct GpuMeshLevel

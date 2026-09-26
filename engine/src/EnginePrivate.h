@@ -3490,6 +3490,13 @@ public:
     /// the slots and an upload when a value moved); null until then.
     Ogre::TextureGpu *atomViewTable() const { return mAtomViewTable; }
     GpuSceneStatus gpuSceneStatus() const override;
+    /// THE CUT'S INDEX NEED, the scene's high-water mark (ATOM-CLUSTER-CUT F1): the most
+    /// indices any view's cut of this scene asked of its stream (the stats ring's
+    /// cursor). Every GpuCull sizes its stream from at least this, so a view born into
+    /// a heavy scene — a screenshot, a thumbnail — does not start small and overflow.
+    void noteCutIndexNeed(uint32_t indices) { mCutIndexNeed = std::max(mCutIndexNeed, indices); }
+    uint32_t cutIndexNeed() const { return mCutIndexNeed; }
+    uint32_t mCutIndexNeed = 0u;
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
                                std::vector<GpuSceneEntry> &out) override;
@@ -4218,15 +4225,17 @@ private:
         /// triangles concatenated in cluster order (`MeshData::clusterIndices`),
         /// one IMMUTABLE index buffer over the SAME vertex buffer as the levels,
         /// in the SAME index type as level 0, so a cluster is the contiguous
-        /// range [firstIndex, firstIndex + indexCount) of it. Bound to no VAO and
-        /// drawn by nothing in the product yet: it is stage 3's input (its GPU
-        /// cut issues one indexed draw per cluster range), uploaded now so the
-        /// cut has a stream to name. Null for a mesh with no DAG. Owned here:
+        /// range [firstIndex, firstIndex + indexCount) of it. Bound to no VAO: it
+        /// is THE CUT's source (ATOM-CLUSTER-CUT) — the GPU scene's cluster row
+        /// names its device address, the cull's emit job copies the drawn clusters'
+        /// corners out of it into the view's compacted stream, and the screen decode
+        /// reads a pixel's triangle from it. Null for a mesh with no DAG (the GPU
+        /// scene then cuts level 0's own indices, a FLAT DAG). Owned here:
         /// the deleter returns it to the VaoManager when the record dies (every
         /// record dies with its scene, before Root).
         std::unique_ptr<Ogre::IndexBufferPacked, IndexBufferRelease> clusterStream;
-        /// The DAG's tables, kept beside the stream they index (stage 3 uploads
-        /// them to the GPU; a suite reads them to check the stream).
+        /// The DAG's tables, kept beside the stream they index (the GPU scene uploads
+        /// them at the mesh's first attach; a suite reads them to check the stream).
         std::vector<MeshCluster>      clusters;
         std::vector<MeshClusterGroup> clusterGroups;
     };
@@ -6864,6 +6873,12 @@ public:
         survivors = mAtomSurvivors;
         return mChainAtomDraw && mAtomStatsValid;
     }
+    /// ...and THE CUT'S counters from the same ring (ATOM-CLUSTER-CUT).
+    void setAtomCutStats(const AtomCutStats &s) { mAtomCutStats = s; }
+    bool atomCutStats(AtomCutStats &out) const {
+        out = mAtomCutStats;
+        return mChainAtomDraw && mAtomStatsValid;
+    }
     /// DROPS the reflection trace's per-view Vulkan state, flushing first.
     /// Called from `detachWorkspace` — the one seam every workspace rebuild goes
     /// through — because the trace's descriptor set holds IMAGE VIEWS OF THIS
@@ -6991,6 +7006,7 @@ private:
     detail::GpuCull mAtomCull;
     unsigned long long mAtomTriangles = 0ull;
     unsigned mAtomSurvivors = 0u;
+    AtomCutStats mAtomCutStats;
     bool mAtomStatsValid = false;
     unsigned                   mWorkspaceGeneration = 0;
     /// What `ChainDesc::rayReflect` was when the CURRENT workspace definition
@@ -7222,6 +7238,14 @@ public:
     /// the path that asks: a View exists by then.
     Ogre::SceneManager *blankSceneManager();
     bool  isHeadless() const override { return mHeadless; }
+    /// The views currently bound to `scene` (ATOM-CLUSTER-CUT: the cut's counters
+    /// are a view's, and AtomDrawStatus is a scene's).
+    std::vector<OgreView *> viewsOf(const OgreScene *scene) const {
+        std::vector<OgreView *> out;
+        for (const auto &v : mViews)
+            if (v && v->ogreScene() == scene && v->isEnabled()) out.push_back(v.get());
+        return out;
+    }
 
     void destroyScene(Scene *scene) override;
     /// Destroys whatever a frame asked for while it was running
