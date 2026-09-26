@@ -1023,9 +1023,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // dropped, and the next frame that asks for a different size may try
         // again. Only the PIPELINES (below) latch, because a device that cannot
         // compile them this minute cannot compile them next minute either.
+        if (mLastError != err)   // once per reason, not once per frame while it persists
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: the screen-probe gather could not allocate its targets — " + err);
         mLastError = err;
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: the screen-probe gather could not allocate its targets — " + err);
         drop(v);
         return;
     }

@@ -3221,8 +3221,13 @@ struct GatherTuning {
     /// else, which is the A/B that prices the adaptive pass.
     int      adaptiveCap = -1;
     /// THE DETERMINISM ARM. The sample sequence's only input is an integer hash
-    /// of (probe cell, ray, frame index); holding the frame term makes
-    /// consecutive frames of a still scene byte-identical.
+    /// of (probe cell, ray, frame index); holding the frame term makes the
+    /// RAW estimate of consecutive frames of a still scene byte-identical. The
+    /// packed history's rounding dither (GA-VR) is keyed on the view's ADVANCING
+    /// frame counter and ignores this freeze, so a pixel A/B is byte-exact only
+    /// where the rest mean holds (a still view past its rest frames) or under
+    /// JAHSHAKA_GATHER_NO_TEMPORAL; a moving arm or a stereo view (which never
+    /// rests) compares within the rounding's amplitude, not exactly.
     bool     freezeFrameIndex = false;
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
