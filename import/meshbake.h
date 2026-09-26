@@ -151,7 +151,26 @@ public:
         /// single-mesh shortcut (one MeshNode, no children).
         BakedNode root;
         bool singleMesh = false;
+        /// WHAT THE BAKE COST, per mesh and per stage (IMPORT-SPEED-1): the import's
+        /// log line carries it, so the next slow file is diagnosed from the log
+        /// alone. Never serialized — it describes the run, not the product.
+        struct StageMs { double lodChain = 0.0, cards = 0.0, sdf = 0.0, dag = 0.0; };
+        QVector<StageMs> stageMs;   ///< aiScene mesh order, as `meshes`
+        double meshesMs = 0.0;      ///< the wall time of all meshes' stages together
+        /// "m0 99875t lod 1234 cards 12 sdf 34 dag 567 | m1 ..." — the per-stage ms.
+        QString stageSummary() const;
     };
+
+    /// THE BAKE'S WIDTH (IMPORT-SPEED-1): how many threads one bake may use — the
+    /// meshes of a model concurrently, and inside each mesh the bound's queries,
+    /// the cluster DAG's group measurement and the SDF's exact band. 0 (the
+    /// default) = the hardware's thread count; the pool behind it is ONE process-
+    /// wide set of hardware-size workers, however many bakes run. The OUTPUT does
+    /// not depend on it — every reduction is ordered (meshbake.cpp, `bakepool`) —
+    /// which is what `bake.determinism` proves byte for byte (1 thread against the
+    /// hardware's).
+    static void setBakeThreads(int threads);
+    static int bakeThreads();   ///< the width a bake started now would use
 
     /// The format this build writes and reads.
     static int formatVersion();

@@ -17,11 +17,20 @@ For more information see the LICENSE file
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <vector>
+#if defined(__GLIBC__)
+#include <malloc.h>   // malloc_trim — bakeStages hands the pool threads' freed arenas back
+#endif
 
 #include <QCryptographicHash>
 #include <QDataStream>
@@ -876,6 +885,166 @@ QString MeshBake::casRole() { return QStringLiteral("bake"); }
 namespace
 {
 
+// ---- THE BAKE'S THREADS (IMPORT-SPEED-1) ----------------------------------
+//
+// The bake is ~all nearest-surface queries (the LOD bound's samples, removed
+// vertices and facets; the cluster DAG's per-group measurement; the SDF's exact
+// band), and every query is independent of every other: it READS a grid and
+// writes one number. So the bake runs them on every hardware thread — and its
+// OUTPUT stays a function of the model alone, byte for byte, for three reasons
+// that each hold by construction:
+//
+//   1. THE PARTITION IS THE INPUT'S, NEVER THE WIDTH'S. `Range` cuts [0, n) into
+//      chunks whose size depends on n (and a grain) only; one thread or twenty
+//      walk the same chunks, in whatever order the pool hands them out.
+//   2. EVERY REDUCTION IS ORDERED. A chunk writes its result into ITS OWN slot of
+//      a per-chunk array; the caller folds the array in chunk order after the
+//      pool returns — a maximum (order-free on floats anyway, and taken with the
+//      serial loop's strict `>` so the first arg-max wins), a list (concatenated
+//      in chunk order = the serial loop's order), a count (a sum of integers).
+//   3. THE GRID IS READ-ONLY. A query's scratch (the triangle stamps, the tie set)
+//      is a `TriangleGrid::Query` owned by the calling thread's SLOT, never by the
+//      grid; the answer of one query does not depend on which queries ran before
+//      it on the same scratch.
+//
+// THE POOL IS ONE, PROCESS-WIDE, HARDWARE-SIZE (the memory law: no unbounded
+// fan-out). Its workers start on first use and live for the process. The CALLER
+// ALWAYS WORKS ITS OWN JOB, so a job started from inside another job's chunk
+// (the meshes of a model run concurrently, and each mesh's stages call the pool
+// again) finishes even if every worker is busy: nesting cannot deadlock and never
+// adds a thread.
+namespace bakepool {
+
+std::atomic<int> gWidth { 0 };   ///< MeshBake::setBakeThreads; 0 = the hardware's
+
+int hardware()
+{
+    const unsigned n = std::thread::hardware_concurrency();
+    return n > 0 ? int(n) : 1;
+}
+
+/// The width a bake started now uses: the configured count, capped at the hardware.
+int width()
+{
+    const int w = gWidth.load(std::memory_order_relaxed);
+    return w > 0 ? std::min(w, hardware()) : hardware();
+}
+
+/// [0, n) in chunks of a size that depends on `n` and `grain` alone (rule 1): at
+/// most ~256 chunks, none smaller than `grain` items.
+struct Range
+{
+    size_t n = 0, size = 1, count = 0;
+    Range(size_t items, size_t grain)
+        : n(items), size(std::max<size_t>(std::max<size_t>(grain, 1), (items + 255) / 256)),
+          count((items + size - 1) / size) {}
+    size_t begin(size_t c) const { return c * size; }
+    size_t end(size_t c) const { return std::min(n, (c + 1) * size); }
+};
+
+class Pool
+{
+public:
+    static Pool &instance()
+    {
+        // Leaked on purpose: detached workers may still be parked on the condition
+        // variable when static destructors run, and a pool that outlives them is
+        // the only order that is always safe.
+        static Pool *pool = new Pool;
+        return *pool;
+    }
+
+    /// Runs body(chunk, slot) for every chunk in [0, chunks), on at most `width`
+    /// threads (the caller is one of them), and returns when all are done. `slot`
+    /// is in [0, width) and unique among the threads working THIS job at once —
+    /// the index of the caller's per-thread scratch.
+    void run(size_t chunks, int width, const std::function<void(size_t, int)> &body)
+    {
+        if (chunks == 0) return;
+        if (width <= 1 || chunks == 1) {
+            for (size_t c = 0; c < chunks; ++c) body(c, 0);
+            return;
+        }
+        Job job;
+        job.body = &body;
+        job.chunks = chunks;
+        job.maxSlots = width;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            while (int(mThreads) < hardware() - 1) {
+                std::thread([this] { worker(); }).detach();
+                ++mThreads;
+            }
+            mJobs.push_back(&job);
+        }
+        mWake.notify_all();
+        work(job, 0);
+        std::unique_lock<std::mutex> lock(mMutex);
+        mJobs.erase(std::find(mJobs.begin(), mJobs.end(), &job));
+        mIdle.wait(lock, [&] { return job.active == 0; });
+    }
+
+private:
+    struct Job
+    {
+        const std::function<void(size_t, int)> *body = nullptr;
+        size_t chunks = 0;
+        int maxSlots = 1;
+        std::atomic<size_t> next { 0 };
+        int joined = 1;   ///< under mMutex; the caller holds slot 0
+        int active = 0;   ///< under mMutex; workers inside work()
+    };
+
+    static void work(Job &job, int slot)
+    {
+        for (;;) {
+            const size_t c = job.next.fetch_add(1);
+            if (c >= job.chunks) return;
+            (*job.body)(c, slot);
+        }
+    }
+
+    Job *joinable() const
+    {
+        for (Job *job : mJobs)
+            if (job->joined < job->maxSlots && job->next.load() < job->chunks) return job;
+        return nullptr;
+    }
+
+    void worker()
+    {
+        std::unique_lock<std::mutex> lock(mMutex);
+        for (;;) {
+            Job *job = nullptr;
+            mWake.wait(lock, [&] { return (job = joinable()) != nullptr; });
+            const int slot = job->joined++;
+            ++job->active;
+            lock.unlock();
+            work(*job, slot);
+            lock.lock();
+            if (--job->active == 0) mIdle.notify_all();
+        }
+    }
+
+    std::mutex mMutex;
+    std::condition_variable mWake, mIdle;
+    std::deque<Job *> mJobs;
+    size_t mThreads = 0;
+};
+
+/// The one parallel loop of the bake: body(chunk, begin, end, slot) over `range`,
+/// on `width` threads. Callers size their per-slot scratch by the SAME `width`.
+template <class Body>
+void forRange(const Range &range, int width, Body &&body)
+{
+    const std::function<void(size_t, int)> f = [&](size_t c, int slot) {
+        body(c, range.begin(c), range.end(c), slot);
+    };
+    Pool::instance().run(range.count, width, f);
+}
+
+}   // namespace bakepool
+
 /// The bake's node walk — the exact rules `_buildScene` applies, recorded as
 /// data instead of as SceneNodes. Kept beside loadAsSceneFragment in review
 /// terms: any change to one is a change to both, and the round-trip suite
@@ -1145,28 +1314,67 @@ public:
             const float s = a == 0 ? size.x() : (a == 1 ? size.y() : size.z());
             mDim[a] = std::clamp(int(std::floor(s / mCell)) + 1, 1, std::max(res, 1));
         }
-        mCells.assign(size_t(mDim[0]) * size_t(mDim[1]) * size_t(mDim[2]), {});
-        mStamp.assign(mTriCount, 0u);
-        mGeneration = 0u;
-
-        for (size_t t = 0; t < mTriCount; ++t) {
+        // THE CELLS ARE ONE FLAT LIST (CSR: `mStart` per cell into `mTris`), filed by
+        // a counting pass and a fill pass over the triangles in index order — so each
+        // cell lists its triangles in ascending order, exactly as appending to a
+        // vector per cell did, and every query walks the same candidates in the same
+        // order. What it saves is the vector per cell: 24 bytes for every EMPTY cell
+        // and an allocation for every occupied one, on a grid rebuilt per level and
+        // per lock pass, and one per cluster-DAG group on every pool thread at once
+        // (IMPORT-SPEED-1: the per-cell vectors were most of the parallel bake's
+        // peak memory).
+        const size_t cells = size_t(mDim[0]) * size_t(mDim[1]) * size_t(mDim[2]);
+        mStart.assign(cells + 1, 0u);
+        const auto cellRange = [&](size_t t, int c0[3], int c1[3]) {
             Vec3 tlo = vertexAt((*mIndices)[t * 3]), thi = tlo;
             for (int k = 1; k < 3; ++k) {
                 const Vec3 v = vertexAt((*mIndices)[t * 3 + size_t(k)]);
                 tlo = Vec3(std::min(tlo.x(), v.x()), std::min(tlo.y(), v.y()), std::min(tlo.z(), v.z()));
                 thi = Vec3(std::max(thi.x(), v.x()), std::max(thi.y(), v.y()), std::max(thi.z(), v.z()));
             }
-            int c0[3], c1[3];
             cellOf(tlo, c0);
             cellOf(thi, c1);
+        };
+        for (size_t t = 0; t < mTriCount; ++t) {
+            int c0[3], c1[3];
+            cellRange(t, c0, c1);
             for (int z = c0[2]; z <= c1[2]; ++z)
                 for (int y = c0[1]; y <= c1[1]; ++y)
                     for (int x = c0[0]; x <= c1[0]; ++x)
-                        mCells[index(x, y, z)].push_back(unsigned(t));
+                        ++mStart[index(x, y, z) + 1];
+        }
+        for (size_t c = 0; c < cells; ++c) mStart[c + 1] += mStart[c];
+        mTris.resize(mStart[cells]);
+        std::vector<unsigned> fill(mStart.begin(), mStart.end() - 1);
+        for (size_t t = 0; t < mTriCount; ++t) {
+            int c0[3], c1[3];
+            cellRange(t, c0, c1);
+            for (int z = c0[2]; z <= c1[2]; ++z)
+                for (int y = c0[1]; y <= c1[1]; ++y)
+                    for (int x = c0[0]; x <= c1[0]; ++x)
+                        mTris[fill[index(x, y, z)]++] = unsigned(t);
         }
     }
 
     bool empty() const { return mTriCount == 0; }
+
+    /// One candidate nearest feature: where on the triangle, the triangle, and how
+    /// far. Kept only while a caller asks for a normal.
+    struct Tie { Vec3 q, a, b, c; float d = 0.0f; };
+
+    /// A QUERY'S SCRATCH, owned by the thread asking — never by the grid, which is
+    /// READ-ONLY once built, so any number of threads query one grid at once
+    /// (IMPORT-SPEED-1; `bakepool`). The stamps dedupe a triangle filed in several
+    /// cells within ONE query (a fresh generation per query), and the tie set is the
+    /// pseudonormal's; neither carries anything from one query to the next, so an
+    /// answer never depends on which queries the same scratch served before it.
+    /// Sized on first use against a grid; one scratch may serve several grids.
+    struct Query
+    {
+        std::vector<unsigned> stamp;
+        unsigned generation = 0;
+        std::vector<Tie> ties;
+    };
 
     /// The nearest point of the soup to `p`, and — when `normalOut` is asked for —
     /// the ANGLE-WEIGHTED PSEUDONORMAL there (see `angleWeightAt`: a face normal is
@@ -1177,8 +1385,8 @@ public:
     /// The tie set is collected as the walk goes and resolved at the end, because
     /// `best` only stops shrinking when the walk stops: a candidate is kept when it
     /// is within `eps` of the best SO FAR, and the final pass drops whatever the
-    /// eventual best left behind. The scratch vector is a member so the hundreds of
-    /// thousands of queries a bake makes allocate once.
+    /// eventual best left behind. The scratch lives in the caller's `Query` (one per
+    /// thread), so the hundreds of thousands of queries a bake makes allocate once.
     ///
     /// `triangleOut` receives the index (in the soup's own order) of the triangle
     /// the nearest point lies on — the cluster DAG's region assignment asks which
@@ -1189,14 +1397,16 @@ public:
     /// — only for a caller taking a MAXIMUM of distances whose running value is
     /// that threshold, where no such answer can move the maximum (the cluster
     /// DAG's area terms). Never with a point, a normal or a triangle asked for.
-    float closest(const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr,
+    float closest(Query &query, const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr,
                   unsigned *triangleOut = nullptr, float stopAtOrBelow = -1.0f) const
     {
         if (mTriCount == 0) return std::numeric_limits<float>::infinity();
         int base[3];
         cellOf(p, base);
-        ++mGeneration;
-        mTies.clear();
+        const unsigned generation = nextGeneration(query);
+        std::vector<unsigned> &stamp = query.stamp;
+        std::vector<Tie> &ties = query.ties;
+        ties.clear();
         float best = std::numeric_limits<float>::infinity();
         unsigned bestTri = 0u;
         Vec3 bestPoint, bestNormal(0, 1, 0);
@@ -1218,9 +1428,11 @@ public:
                             std::abs(y - base[1]) != ring && std::abs(z - base[2]) != ring)
                             continue;
                         any = true;
-                        for (unsigned t : mCells[index(x, y, z)]) {
-                            if (mStamp[t] == mGeneration) continue;   // filed in several cells
-                            mStamp[t] = mGeneration;
+                        const size_t cell = index(x, y, z);
+                        for (unsigned i = mStart[cell]; i < mStart[cell + 1]; ++i) {
+                            const unsigned t = mTris[i];
+                            if (stamp[t] == generation) continue;   // filed in several cells
+                            stamp[t] = generation;
                             const Vec3 a = vertexAt((*mIndices)[size_t(t) * 3]);
                             const Vec3 b = vertexAt((*mIndices)[size_t(t) * 3 + 1]);
                             const Vec3 c = vertexAt((*mIndices)[size_t(t) * 3 + 2]);
@@ -1240,9 +1452,9 @@ public:
                                 // A strictly nearer hit RESTARTS the set, since the
                                 // feature has changed; `kMaxTies` is generous for
                                 // the real cases — the faces around one vertex.
-                                if (d < best - eps) mTies.clear();
-                                if (d <= best + eps && mTies.size() < kMaxTies)
-                                    mTies.push_back({ q, a, b, c, d });
+                                if (d < best - eps) ties.clear();
+                                if (d <= best + eps && ties.size() < kMaxTies)
+                                    ties.push_back({ q, a, b, c, d });
                             }
                             if (d < best) { best = d; bestPoint = q; bestTri = t; }
                             if (d <= stopAtOrBelow) return d;
@@ -1256,7 +1468,7 @@ public:
             // The angle-weighted sum over every triangle that really is nearest.
             const float eps = tieEps(best);
             Vec3 sum(0, 0, 0);
-            for (const Tie &tie : mTies) {
+            for (const Tie &tie : ties) {
                 if (tie.d > best + eps) continue;
                 const Vec3 n = Vec3::crossProduct(tie.b - tie.a, tie.c - tie.a).normalized();
                 if (n.lengthSquared() < 0.5f) continue;
@@ -1279,20 +1491,21 @@ public:
     /// a triangle is filed in every cell its own AABB touches and both boxes clamp
     /// to the grid the same way — which is what makes a local soup built from it
     /// exact for any query whose nearest surface lies inside the box.
-    void collect(const Vec3 &lo, const Vec3 &hi, std::vector<unsigned> &out) const
+    void collect(Query &query, const Vec3 &lo, const Vec3 &hi, std::vector<unsigned> &out) const
     {
         out.clear();
         if (mTriCount == 0) return;
         int c0[3], c1[3];
         cellOf(lo, c0);
         cellOf(hi, c1);
-        ++mGeneration;
+        const unsigned generation = nextGeneration(query);
         for (int z = c0[2]; z <= c1[2]; ++z)
             for (int y = c0[1]; y <= c1[1]; ++y)
                 for (int x = c0[0]; x <= c1[0]; ++x)
-                    for (unsigned t : mCells[index(x, y, z)]) {
-                        if (mStamp[t] == mGeneration) continue;
-                        mStamp[t] = mGeneration;
+                    for (unsigned i = mStart[index(x, y, z)]; i < mStart[index(x, y, z) + 1]; ++i) {
+                        const unsigned t = mTris[i];
+                        if (query.stamp[t] == generation) continue;
+                        query.stamp[t] = generation;
                         out.push_back(t);
                     }
     }
@@ -1306,6 +1519,18 @@ public:
     float tieEps(float d) const { return std::max(mCell * 1e-4f, std::fabs(d) * 1e-4f); }
 
 private:
+    /// A generation no stamp of this scratch holds yet: stamps only ever hold
+    /// generations already handed out, so any fresh one is "not visited" for every
+    /// triangle. A scratch too short for this grid (first use, or a bigger grid)
+    /// is re-zeroed, which restarts the count; so does the wrap.
+    unsigned nextGeneration(Query &query) const
+    {
+        if (query.stamp.size() < mTriCount || query.generation == std::numeric_limits<unsigned>::max()) {
+            query.stamp.assign(std::max(query.stamp.size(), mTriCount), 0u);
+            query.generation = 0u;
+        }
+        return ++query.generation;
+    }
     Vec3 vertexAt(unsigned i) const
     {
         const float *v = mPositions + size_t(i) * size_t(mPosComps);
@@ -1329,18 +1554,16 @@ private:
     Vec3 mLo;
     float mCell = 1.0f;
     int mDim[3] = { 1, 1, 1 };
-    std::vector<std::vector<unsigned>> mCells;
-    mutable std::vector<unsigned> mStamp;
-    mutable unsigned mGeneration = 0;
-    /// One candidate nearest feature: where on the triangle, the triangle, and how
-    /// far. Kept only while a caller asks for a normal.
-    struct Tie { Vec3 q, a, b, c; float d = 0.0f; };
+    std::vector<unsigned> mStart;   ///< per cell, into mTris (cells + 1 entries)
+    std::vector<unsigned> mTris;    ///< every cell's triangles, cell after cell
     /// The faces meeting at one vertex, with room to spare. A nearest FEATURE is a
     /// face (1), an edge (2) or a vertex (its incident faces); anything beyond this
     /// is a near-equidistant crowd that contributes nothing to a pseudonormal.
     static constexpr size_t kMaxTies = 32;
-    mutable std::vector<Tie> mTies;
 };
+
+/// One query scratch per pool slot (`bakepool::forRange`'s `slot`).
+using Queries = std::vector<TriangleGrid::Query>;
 
 }   // namespace surface
 
@@ -1710,6 +1933,34 @@ Islands findIslands(const float *positions, int posComps, size_t nv,
     return is;
 }
 
+/// QUERIES PER CHUNK, at least: one nearest-surface query costs microseconds, a
+/// chunk hand-out about one, so a chunk of 64 keeps the pool's overhead in the
+/// noise without starving 20 threads on a few thousand samples.
+constexpr size_t kQueryGrain = 64;
+
+/// THE MAXIMUM OF A DISTANCE OVER [0, n), on the bake's threads — the serial
+/// loop `m = max(m, d)` over finite d, starting at 0, and bit-identical to it:
+/// each chunk folds its own items in order into its own slot, and the chunks are
+/// folded in order after (`bakepool`, rule 2). `distanceOf(i, query)` is one
+/// item's distance with the calling thread's query scratch.
+template <class F>
+float parallelMax(size_t n, surface::Queries &queries, F &&distanceOf)
+{
+    const bakepool::Range range(n, kQueryGrain);
+    std::vector<float> chunkMax(range.count, 0.0f);
+    bakepool::forRange(range, int(queries.size()), [&](size_t c, size_t begin, size_t end, int slot) {
+        float m = 0.0f;
+        for (size_t i = begin; i < end; ++i) {
+            const float d = distanceOf(i, queries[size_t(slot)]);
+            if (std::isfinite(d)) m = std::max(m, d);
+        }
+        chunkMax[c] = m;
+    });
+    float m = 0.0f;
+    for (float v : chunkMax) m = std::max(m, v);
+    return m;
+}
+
 /// THE MEASURED TWO-SIDED DISTANCE between a level `a` and level 0 `b` over ONE
 /// vertex buffer (every level of a chain shares the vertices, ATOM rule 1), as its
 /// two terms: `areaOut` the sampled one (before the margin) and the return value
@@ -1736,25 +1987,24 @@ Islands findIslands(const float *positions, int posComps, size_t nv,
 float areaDistance(const float *positions, int posComps,
                    const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
                    const std::vector<unsigned> &b, const surface::TriangleGrid &gridB,
-                   size_t samples, const Islands *islands)
+                   size_t samples, const Islands *islands, surface::Queries &queries)
 {
     float area = 0.0f;
     std::vector<surface::Sample> pts;
     // The level's own surface against level 0: surface the level ADDED. Never
     // capped — a level has no island level 0 lacks.
     if (surface::sample(positions, posComps, a, samples, &pts) > 0.0f)
-        for (const surface::Sample &s : pts) {
-            const float d = gridB.closest(s.pos);
-            if (std::isfinite(d)) area = std::max(area, d);
-        }
+        area = std::max(area, parallelMax(pts.size(), queries, [&](size_t i, surface::TriangleGrid::Query &q) {
+            return gridB.closest(q, pts[i].pos);
+        }));
     // Level 0 against the level: surface the level MOVED or DROPPED, capped by
     // the island the sample lies on.
     if (surface::sample(positions, posComps, b, samples, &pts) > 0.0f)
-        for (const surface::Sample &s : pts) {
-            float d = gridA.closest(s.pos);
-            if (islands) d = std::min(d, islands->capOf[b[size_t(s.tri) * 3]]);
-            if (std::isfinite(d)) area = std::max(area, d);
-        }
+        area = std::max(area, parallelMax(pts.size(), queries, [&](size_t i, surface::TriangleGrid::Query &q) {
+            float d = gridA.closest(q, pts[i].pos);
+            if (islands) d = std::min(d, islands->capOf[b[size_t(pts[i].tri) * 3]]);
+            return d;
+        }));
     return area;
 }
 
@@ -1774,7 +2024,7 @@ std::vector<unsigned> vertexSet(const unsigned *indices, size_t count)
 float removedVertexDistance(const float *positions, int posComps,
                             const std::vector<unsigned> &baseSet,
                             const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
-                            const Islands *islands,
+                            const Islands *islands, surface::Queries &queries,
                             std::vector<std::pair<unsigned, float>> *each = nullptr,
                             unsigned *worstVertexOut = nullptr)
 {
@@ -1783,18 +2033,33 @@ float removedVertexDistance(const float *positions, int posComps,
     removed.reserve(baseSet.size());
     std::set_difference(baseSet.begin(), baseSet.end(), kept.begin(), kept.end(),
                         std::back_inserter(removed));
+    // Per chunk: its maximum, its FIRST arg-max (strict `>`, as the serial walk),
+    // and its list; folded in chunk order — the serial walk's answer exactly.
+    struct Chunk { float worst = 0.0f; unsigned vertex = std::numeric_limits<unsigned>::max();
+                   std::vector<std::pair<unsigned, float>> each; };
+    const bakepool::Range range(removed.size(), kQueryGrain);
+    std::vector<Chunk> chunks(range.count);
+    bakepool::forRange(range, int(queries.size()), [&](size_t c, size_t begin, size_t end, int slot) {
+        Chunk &out = chunks[c];
+        if (each) out.each.reserve(end - begin);
+        for (size_t i = begin; i < end; ++i) {
+            const unsigned v = removed[i];
+            const float *p = positions + size_t(v) * size_t(posComps);
+            float d = gridA.closest(queries[size_t(slot)], Vec3(p[0], p[1], p[2]));
+            if (islands) d = std::min(d, islands->capOf[v]);
+            if (!std::isfinite(d)) continue;
+            if (each) out.each.emplace_back(v, d);
+            if (d > out.worst) { out.worst = d; out.vertex = v; }
+        }
+    });
     if (each) { each->clear(); each->reserve(removed.size()); }
     if (worstVertexOut) *worstVertexOut = std::numeric_limits<unsigned>::max();
     float worst = 0.0f;
-    for (unsigned v : removed) {
-        const float *p = positions + size_t(v) * size_t(posComps);
-        float d = gridA.closest(Vec3(p[0], p[1], p[2]));
-        if (islands) d = std::min(d, islands->capOf[v]);
-        if (!std::isfinite(d)) continue;
-        if (each) each->emplace_back(v, d);
-        if (d > worst) {
-            worst = d;
-            if (worstVertexOut) *worstVertexOut = v;
+    for (const Chunk &chunk : chunks) {
+        if (each) each->insert(each->end(), chunk.each.begin(), chunk.each.end());
+        if (chunk.worst > worst) {
+            worst = chunk.worst;
+            if (worstVertexOut) *worstVertexOut = chunk.vertex;
         }
     }
     return worst;
@@ -1816,8 +2081,8 @@ float removedVertexDistance(const float *positions, int posComps,
 enum class FacetPattern { Bake, Reference };
 float facetDistance(const float *positions, int posComps, const std::vector<unsigned> &from,
                     const std::vector<unsigned> &against, const surface::TriangleGrid &againstGrid,
-                    const Islands *islands, FacetPattern pattern, float worst = 0.0f,
-                    std::vector<unsigned> *overOut = nullptr)
+                    const Islands *islands, FacetPattern pattern, surface::Queries &queries,
+                    float worst = 0.0f, std::vector<unsigned> *overOut = nullptr)
 {
     // `overOut` (the displacement lock's form): collect every facet of `from`
     // with a point further than `worst` instead of raising the maximum.
@@ -1834,33 +2099,54 @@ float facetDistance(const float *positions, int posComps, const std::vector<unsi
         const float *p = positions + size_t(v) * size_t(posComps);
         return Vec3(p[0], p[1], p[2]);
     };
-    for (size_t t = 0; t < from.size() / 3; ++t) {
-        std::array<unsigned, 3> f = { from[t * 3], from[t * 3 + 1], from[t * 3 + 2] };
-        std::sort(f.begin(), f.end());
-        if (std::binary_search(present.begin(), present.end(), f)) continue;
-        const float cap = islands ? islands->capOf[from[t * 3]]
-                                  : std::numeric_limits<float>::infinity();
-        if (!(cap > (overOut ? threshold : worst))) continue;   // this island cannot exceed it
-        const Vec3 a = at(from[t * 3]), b = at(from[t * 3 + 1]), c = at(from[t * 3 + 2]);
-        Vec3 pts[10];
-        int n = 0;
-        pts[n++] = (a + b + c) * (1.0f / 3.0f);
-        pts[n++] = (a + b) * 0.5f;
-        pts[n++] = (b + c) * 0.5f;
-        pts[n++] = (c + a) * 0.5f;
-        if (pattern == FacetPattern::Reference) {
-            pts[n++] = a; pts[n++] = b; pts[n++] = c;
-            pts[n++] = (a * 4.0f + b + c) * (1.0f / 6.0f);
-            pts[n++] = (b * 4.0f + c + a) * (1.0f / 6.0f);
-            pts[n++] = (c * 4.0f + a + b) * (1.0f / 6.0f);
+    // THE FACETS ON THE BAKE'S THREADS. Each chunk keeps its OWN running maximum,
+    // starting at the caller's `worst`, as the stop of its queries. That changes
+    // how much each query walks, never the answer: a query stopped at the running
+    // maximum returns a distance at or below it only when the true one is too (and
+    // then it cannot raise the maximum), and otherwise walks to the exact nearest —
+    // so every chunk ends at max(worst, the exact maximum of its points), and the
+    // fold over chunks is the serial loop's number. The `overOut` list is per chunk
+    // against the fixed `threshold`, concatenated in chunk (= facet) order.
+    struct Chunk { float worst = 0.0f; std::vector<unsigned> over; };
+    const bakepool::Range range(from.size() / 3, kQueryGrain);
+    std::vector<Chunk> chunks(range.count);
+    bakepool::forRange(range, int(queries.size()), [&](size_t chunk, size_t begin, size_t end, int slot) {
+        surface::TriangleGrid::Query &query = queries[size_t(slot)];
+        float local = worst;
+        std::vector<unsigned> &over = chunks[chunk].over;
+        for (size_t t = begin; t < end; ++t) {
+            std::array<unsigned, 3> f = { from[t * 3], from[t * 3 + 1], from[t * 3 + 2] };
+            std::sort(f.begin(), f.end());
+            if (std::binary_search(present.begin(), present.end(), f)) continue;
+            const float cap = islands ? islands->capOf[from[t * 3]]
+                                      : std::numeric_limits<float>::infinity();
+            if (!(cap > (overOut ? threshold : local))) continue;   // this island cannot exceed it
+            const Vec3 a = at(from[t * 3]), b = at(from[t * 3 + 1]), c = at(from[t * 3 + 2]);
+            Vec3 pts[10];
+            int n = 0;
+            pts[n++] = (a + b + c) * (1.0f / 3.0f);
+            pts[n++] = (a + b) * 0.5f;
+            pts[n++] = (b + c) * 0.5f;
+            pts[n++] = (c + a) * 0.5f;
+            if (pattern == FacetPattern::Reference) {
+                pts[n++] = a; pts[n++] = b; pts[n++] = c;
+                pts[n++] = (a * 4.0f + b + c) * (1.0f / 6.0f);
+                pts[n++] = (b * 4.0f + c + a) * (1.0f / 6.0f);
+                pts[n++] = (c * 4.0f + a + b) * (1.0f / 6.0f);
+            }
+            for (int i = 0; i < n; ++i) {
+                const float stop = overOut ? threshold : local;
+                const float d = std::min(againstGrid.closest(query, pts[i], nullptr, nullptr, nullptr, stop), cap);
+                if (!std::isfinite(d) || d <= stop) continue;
+                if (overOut) { over.push_back(unsigned(t)); break; }
+                local = d;
+            }
         }
-        for (int i = 0; i < n; ++i) {
-            const float stop = overOut ? threshold : worst;
-            const float d = std::min(againstGrid.closest(pts[i], nullptr, nullptr, nullptr, stop), cap);
-            if (!std::isfinite(d) || d <= stop) continue;
-            if (overOut) { overOut->push_back(unsigned(t)); break; }
-            worst = d;
-        }
+        chunks[chunk].worst = local;
+    });
+    for (const Chunk &chunk : chunks) {
+        worst = std::max(worst, chunk.worst);
+        if (overOut) overOut->insert(overOut->end(), chunk.over.begin(), chunk.over.end());
     }
     return worst;
 }
@@ -1870,11 +2156,13 @@ float facetDistance(const float *positions, int posComps, const std::vector<unsi
 float twoSidedDistance(const float *positions, int posComps,
                        const std::vector<unsigned> &a, const surface::TriangleGrid &gridA,
                        const std::vector<unsigned> &b, const surface::TriangleGrid &gridB,
-                       size_t samples, float *areaOut, const Islands *islands = nullptr)
+                       size_t samples, float *areaOut, const Islands *islands,
+                       surface::Queries &queries)
 {
-    if (areaOut) *areaOut = areaDistance(positions, posComps, a, gridA, b, gridB, samples, islands);
+    if (areaOut)
+        *areaOut = areaDistance(positions, posComps, a, gridA, b, gridB, samples, islands, queries);
     return removedVertexDistance(positions, posComps, vertexSet(b.data(), b.size()), a, gridA,
-                                 islands);
+                                 islands, queries);
 }
 
 /// The first vertex buffer carrying `usage`, as floats: pointer, component
@@ -1982,6 +2270,7 @@ void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
     // level-0 component.
     const Islands islands = findIslands(positions, posComps, nv, base);
     const std::vector<unsigned> baseSet = vertexSet(base.data(), base.size());
+    surface::Queries queries(static_cast<size_t>(bakepool::width()));   // one query scratch per thread
     std::vector<unsigned char> lock;            // per vertex; allocated on first need
     std::vector<std::pair<unsigned, float>> displaced;
     std::vector<size_t> survivors(islands.count());
@@ -2033,7 +2322,7 @@ void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
             candidate.assign(out.begin(), out.begin() + std::ptrdiff_t(n));
             levelGrid.build(positions, posComps, candidate, lo, hi, boundGridRes(candidate.size() / 3));
             vertexTerm = removedVertexDistance(positions, posComps, baseSet, candidate, levelGrid,
-                                               &islands, &displaced, &worstVertex);
+                                               &islands, queries, &displaced, &worstVertex);
             if (passes >= kLockPasses) break;
             const float budget = kDisplacementBudget * std::max(accumulated, stepError);
             bool more = false;
@@ -2070,7 +2359,7 @@ void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
             // BUDGET (F1: the distance peaks mid-facet on slivers the vertex walk
             // cannot see) keeps its corners, with their fans.
             facetDistance(positions, posComps, base, candidate, levelGrid, &islands,
-                          FacetPattern::Bake, budget, &overFacets);
+                          FacetPattern::Bake, queries, budget, &overFacets);
             for (unsigned t : overFacets)
                 for (int k = 0; k < 3; ++k) lockWithFan(base[size_t(t) * 3 + size_t(k)]);
             if (!more) break;
@@ -2120,15 +2409,15 @@ void build(const MeshPtr &mesh, QVector<MeshBake::LodLevelTerms> *terms)
         // level-0 point capped at its island's extent (the represented-surface
         // rule); the sampling-gap margin on the sampled term only.
         const float areaTerm = areaDistance(positions, posComps, out, levelGrid, base, baseGrid,
-                                            boundSamples, &islands);
+                                            boundSamples, &islands, queries);
         // THE EXACT TERM IS VERTICES AND FACETS (F1): the removed-vertex walk
         // above, then every level-0 facet the level dropped (centroid + edge
         // midpoints, island-capped) against the level, and every facet the level
         // made against level 0 (surface it ADDED). Exact per point, no margin.
         float facetTerm = facetDistance(positions, posComps, base, out, levelGrid, &islands,
-                                        FacetPattern::Bake, vertexTerm);
+                                        FacetPattern::Bake, queries, vertexTerm);
         facetTerm = facetDistance(positions, posComps, out, base, baseGrid, nullptr,
-                                  FacetPattern::Bake, facetTerm);
+                                  FacetPattern::Bake, queries, facetTerm);
         const float exactTerm = std::max(vertexTerm, facetTerm);
         const float measured = std::max(areaTerm * kBoundMargin, exactTerm);
         // MONOTONE NON-DECREASING BY CONSTRUCTION, and that is a requirement and
@@ -3089,31 +3378,37 @@ void build(const MeshPtr &mesh)
                     }
         }
     }
+    // Each pass reads the previous pass's arrays and writes only its own cell of
+    // the next, so its z slices run on the bake's threads with no order at all.
+    const int width = bakepool::width();
     const int maxDim = std::max(std::max(int(dim[0]), int(dim[1])), int(dim[2]));
     for (int step = maxDim / 2; step >= 1; step /= 2) {
         std::vector<Vec3> nextSeed = seed;
         std::vector<float> nextDist = dist;
         std::vector<char> nextHas = has;
-        for (int z = 0; z < int(dim[2]); ++z)
-            for (int y = 0; y < int(dim[1]); ++y)
-                for (int x = 0; x < int(dim[0]); ++x) {
-                    const size_t self = at(size_t(x), size_t(y), size_t(z));
-                    const Vec3 p = centreOf(size_t(x), size_t(y), size_t(z));
-                    for (int dz = -1; dz <= 1; ++dz)
-                        for (int dy = -1; dy <= 1; ++dy)
-                            for (int dx = -1; dx <= 1; ++dx) {
-                                if (!dx && !dy && !dz) continue;
-                                const int nx = x + dx * step, ny = y + dy * step, nz = z + dz * step;
-                                if (nx < 0 || ny < 0 || nz < 0 || nx >= int(dim[0]) ||
-                                    ny >= int(dim[1]) || nz >= int(dim[2])) continue;
-                                const size_t other = at(size_t(nx), size_t(ny), size_t(nz));
-                                if (!has[other]) continue;
-                                const float d = (seed[other] - p).length();
-                                if (d < nextDist[self]) {
-                                    nextDist[self] = d; nextSeed[self] = seed[other]; nextHas[self] = 1;
+        bakepool::forRange(bakepool::Range(size_t(dim[2]), 1), width,
+                           [&](size_t, size_t zBegin, size_t zEnd, int) {
+            for (int z = int(zBegin); z < int(zEnd); ++z)
+                for (int y = 0; y < int(dim[1]); ++y)
+                    for (int x = 0; x < int(dim[0]); ++x) {
+                        const size_t self = at(size_t(x), size_t(y), size_t(z));
+                        const Vec3 p = centreOf(size_t(x), size_t(y), size_t(z));
+                        for (int dz = -1; dz <= 1; ++dz)
+                            for (int dy = -1; dy <= 1; ++dy)
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    if (!dx && !dy && !dz) continue;
+                                    const int nx = x + dx * step, ny = y + dy * step, nz = z + dz * step;
+                                    if (nx < 0 || ny < 0 || nz < 0 || nx >= int(dim[0]) ||
+                                        ny >= int(dim[1]) || nz >= int(dim[2])) continue;
+                                    const size_t other = at(size_t(nx), size_t(ny), size_t(nz));
+                                    if (!has[other]) continue;
+                                    const float d = (seed[other] - p).length();
+                                    if (d < nextDist[self]) {
+                                        nextDist[self] = d; nextSeed[self] = seed[other]; nextHas[self] = 1;
+                                    }
                                 }
-                            }
-                }
+                    }
+        });
         seed.swap(nextSeed); dist.swap(nextDist); has.swap(nextHas);
     }
 
@@ -3124,21 +3419,25 @@ void build(const MeshPtr &mesh)
     // and how it flips the sign at a cone tip or a wedge spine).
     const float scale = cell * kRangeCells;
     const float band = cell * kExactBand;
+    // Each cell's query writes that cell alone: on the bake's threads, no order.
     std::vector<float> signedValue(count, 0.0f);
     std::vector<char> known(count, 0);
-    for (size_t i = 0; i < count; ++i) {
-        if (!has[i] || dist[i] > band) continue;
-        const size_t x = i % size_t(dim[0]);
-        const size_t y = (i / size_t(dim[0])) % size_t(dim[1]);
-        const size_t z = i / (size_t(dim[0]) * size_t(dim[1]));
-        const Vec3 p = centreOf(x, y, z);
-        Vec3 nearest, normal(0, 1, 0);
-        const float d = grid.closest(p, &nearest, &normal);
-        if (!std::isfinite(d)) continue;
-        const float side = Vec3::dotProduct(p - nearest, normal);
-        signedValue[i] = side < 0.0f ? -d : d;
-        known[i] = 1;
-    }
+    surface::Queries queries(static_cast<size_t>(width));
+    bakepool::forRange(bakepool::Range(count, 1024), width, [&](size_t, size_t begin, size_t end, int slot) {
+        for (size_t i = begin; i < end; ++i) {
+            if (!has[i] || dist[i] > band) continue;
+            const size_t x = i % size_t(dim[0]);
+            const size_t y = (i / size_t(dim[0])) % size_t(dim[1]);
+            const size_t z = i / (size_t(dim[0]) * size_t(dim[1]));
+            const Vec3 p = centreOf(x, y, z);
+            Vec3 nearest, normal(0, 1, 0);
+            const float d = grid.closest(queries[size_t(slot)], p, &nearest, &normal);
+            if (!std::isfinite(d)) continue;
+            const float side = Vec3::dotProduct(p - nearest, normal);
+            signedValue[i] = side < 0.0f ? -d : d;
+            known[i] = 1;
+        }
+    });
 
     // (4) AND THE SIGN IS FLOODED OUTWARDS, WHICH IS SOUND AND A NORMAL IS NOT.
     //
@@ -3541,18 +3840,42 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     // depth, reported to the suites (a level-0 triangle belongs where its first
     // corner does) so "exactly one cut covers every triangle" can be counted.
     std::vector<std::vector<unsigned>> regionAll(raw.size()), regionOwn(raw.size());
-    std::vector<unsigned> vertexStamp(nv, 0u), ownStamp(nv, 0u);
-    unsigned stamp = 1;
-    const auto ownVertices = [&](size_t c, std::vector<unsigned> &out) {
-        ++stamp;
-        for (unsigned v : raw[c].indices)
-            if (vertexStamp[v] != stamp) { vertexStamp[v] = stamp; out.push_back(v); }
+    // THE PER-THREAD SCRATCH of the measurement (IMPORT-SPEED-1): every stamp array
+    // and owner map the walk below writes is PER GROUP in meaning (a fresh stamp
+    // opens each use), so each thread of the pool carries its own and no group can
+    // see another's marks.
+    struct Scratch
+    {
+        std::vector<unsigned> vertexStamp, inRegion, keptStamp;
+        std::vector<int> keptOwner, removedOwner;
+        unsigned stamp = 0;
+        std::vector<surface::Sample> pts;
+        std::vector<unsigned> soupTris, soupIdx;
+        surface::Queries single = surface::Queries(1);   ///< a small group's queries: this thread's own
+        void ensure(size_t nv)
+        {
+            if (vertexStamp.size() == nv) return;
+            vertexStamp.assign(nv, 0u); inRegion.assign(nv, 0u); keptStamp.assign(nv, 0u);
+            keptOwner.assign(nv, -1); removedOwner.assign(nv, -1);
+        }
     };
-    for (size_t c = 0; c < raw.size(); ++c) {
-        if (raw[c].refined != -1) continue;
-        ownVertices(c, regionAll[c]);
+    const int width = bakepool::width();
+    std::vector<Scratch> scratch(static_cast<size_t>(width));
+    const auto ownVertices = [&](Scratch &sc, size_t c, std::vector<unsigned> &out) {
+        const unsigned stamp = ++sc.stamp;
         for (unsigned v : raw[c].indices)
-            if (!ownStamp[v]) { ownStamp[v] = 1; regionOwn[c].push_back(v); }
+            if (sc.vertexStamp[v] != stamp) { sc.vertexStamp[v] = stamp; out.push_back(v); }
+    };
+    {
+        Scratch &sc = scratch[0];
+        sc.ensure(nv);
+        std::vector<unsigned char> ownStamp(nv, 0u);
+        for (size_t c = 0; c < raw.size(); ++c) {
+            if (raw[c].refined != -1) continue;
+            ownVertices(sc, c, regionAll[c]);
+            for (unsigned v : raw[c].indices)
+                if (!ownStamp[v]) { ownStamp[v] = 1; regionOwn[c].push_back(v); }
+        }
     }
     // Level-0 triangles by their first corner, for the area term and the stats.
     std::vector<std::vector<unsigned>> trisByAnchor(nv);
@@ -3572,18 +3895,40 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     const size_t samplesCap = baseTris > size_t(lodchain::kBoundBigTriangles)
                                   ? size_t(lodchain::kBoundSamplesBig) : size_t(lodchain::kBoundSamples);
     const float floorLen = extent > 0.0f ? extent * lodchain::kBoundFloorRel : 0.0f;
+    // A group whose region holds this many level-0 vertices runs its own query
+    // loops on the pool (the roots of a big mesh; see `measureGroup`).
+    constexpr size_t kBigGroupVertices = 4096;
+
+    // THE WAVES. A group reads the regions its MEMBERS were handed by the groups
+    // that made them (`refined`, always a lower id) and hands regions on to its
+    // own outputs, which no other group writes. So a group depends on exactly the
+    // groups that refined its members, and every group whose producers are all
+    // done can be measured at once: wave(g) = 1 + the latest wave among them. The
+    // groups of one wave run on the bake's threads; each writes its own `measured`
+    // slot, its own counts and its own outputs' regions — the serial id-order walk's
+    // answer, because nothing a group reads is written inside its own wave.
+    std::vector<int> wave(groups.size(), 0);
+    int waves = 0;
+    for (size_t g = 0; g < groups.size(); ++g) {
+        for (int m : members[g])
+            if (raw[size_t(m)].refined >= 0) wave[g] = std::max(wave[g], wave[size_t(raw[size_t(m)].refined)] + 1);
+        waves = std::max(waves, wave[g] + 1);
+    }
+    std::vector<std::vector<size_t>> byWave(static_cast<size_t>(waves));
+    for (size_t g = 0; g < groups.size(); ++g) byWave[size_t(wave[g])].push_back(g);
 
     std::vector<float> measured(groups.size(), FLT_MAX);
-    int belowEstimate = 0;
-    std::vector<int> keptOwner(nv, -1), removedOwner(nv, -1);
-    std::vector<unsigned> inRegion(nv, 0u), keptStamp(nv, 0u);
-    std::vector<surface::Sample> pts;
-    std::vector<unsigned> soupTris, soupIdx;
-    surface::TriangleGrid gridL;
-    size_t fallbacks = 0;
-    for (size_t g = 0; g < groups.size(); ++g) {
-        if (groups[g].simplified.error == FLT_MAX || outputs[g].empty()) continue;   // terminal
-        const unsigned here = ++stamp;
+    std::vector<unsigned char> below(groups.size(), 0);
+    std::vector<size_t> groupFallbacks(groups.size(), 0);
+    const bool termsLog = std::getenv("JAH_BAKE_DAG_TERMS") != nullptr;
+    std::vector<QString> termLines(termsLog ? groups.size() : 0);
+    const auto measureGroup = [&](size_t g, Scratch &sc) {
+        if (groups[g].simplified.error == FLT_MAX || outputs[g].empty()) return;   // terminal
+        sc.ensure(nv);
+        std::vector<int> &keptOwner = sc.keptOwner, &removedOwner = sc.removedOwner;
+        std::vector<unsigned> &inRegion = sc.inRegion, &keptStamp = sc.keptStamp;
+        std::vector<surface::Sample> &pts = sc.pts;
+        const unsigned here = ++sc.stamp;
         // S: the group's simplified output, and who keeps which vertex.
         std::vector<unsigned> simplifiedIdx, ownerOfTri;
         for (int o : outputs[g]) {
@@ -3597,7 +3942,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         for (int m : members[g])
             for (unsigned v : regionAll[size_t(m)])
                 if (inRegion[v] != here) { inRegion[v] = here; regionV.push_back(v); }
-        if (regionV.empty() || simplifiedIdx.empty()) continue;
+        if (regionV.empty() || simplifiedIdx.empty()) return;
 
         // The grid over S spans the group, not the mesh (a group is a small patch
         // of a large mesh, and a grid over the mesh's box would file the patch
@@ -3641,6 +3986,36 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         // `reach` asks the whole-mesh grid instead. `reach` is a tenth of the
         // group's box diagonal plus the arithmetic floor: far above any group's
         // error on every shipped mesh, so the fallback is the rare case.
+        // A BIG GROUP'S QUERIES RUN ON THE POOL TOO. The last waves hold one or two
+        // groups whose region is most of the mesh (the roots), so wave-parallelism
+        // alone leaves them on one thread; their three query loops are chunked like
+        // the chain's, each chunk with its own running maximum as its stop — which
+        // moves how far a query walks, never the maximum (lodchain::facetDistance
+        // states the argument). Small groups keep one thread's scratch.
+        // (The local grid and a big group's scratch are the GROUP'S, freed with it:
+        // kept per thread they held the largest group's cells for the whole bake.)
+        const bool big = regionV.size() >= kBigGroupVertices;
+        surface::Queries wide(big ? size_t(width) : 0u);
+        surface::Queries &queries = big ? wide : sc.single;
+        surface::TriangleGrid gridL;
+        surface::TriangleGrid::Query &own = sc.single[0];
+        // One running-maximum loop: each chunk folds `distanceOf(i, query, stop)`
+        // from `start` with its own maximum as the stop; the chunks fold in order.
+        const auto runningMax = [&](size_t n, float start, auto &&distanceOf) {
+            const bakepool::Range range(n, lodchain::kQueryGrain);
+            std::vector<float> chunkMax(range.count, start);
+            bakepool::forRange(range, int(queries.size()), [&](size_t c, size_t begin, size_t end, int slot) {
+                float local = start;
+                for (size_t i = begin; i < end; ++i) {
+                    const float d = distanceOf(i, queries[size_t(slot)], local);
+                    if (std::isfinite(d)) local = std::max(local, d);
+                }
+                chunkMax[c] = local;
+            });
+            float m = start;
+            for (float v : chunkMax) m = std::max(m, v);
+            return m;
+        };
         float worst = 0.0f;
         const size_t sTris = simplifiedIdx.size() / 3;
         if (surface::sample(positions, posComps, simplifiedIdx,
@@ -3649,34 +4024,43 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             const Vec3 grow(reach, reach, reach);
             const bool whole = stats && stats->referenceMeasure;
             if (!whole) {
-                baseGrid.collect(glo - grow, ghi + grow, soupTris);
-                soupIdx.clear();
-                for (unsigned t : soupTris)
-                    soupIdx.insert(soupIdx.end(), { base[t * 3], base[t * 3 + 1], base[t * 3 + 2] });
-                gridL.build(positions, posComps, soupIdx, glo - grow, ghi + grow,
-                            soupGridRes(positions, posComps, soupIdx, glo - grow, ghi + grow));
+                baseGrid.collect(own, glo - grow, ghi + grow, sc.soupTris);
+                sc.soupIdx.clear();
+                for (unsigned t : sc.soupTris)
+                    sc.soupIdx.insert(sc.soupIdx.end(), { base[t * 3], base[t * 3 + 1], base[t * 3 + 2] });
+                gridL.build(positions, posComps, sc.soupIdx, glo - grow, ghi + grow,
+                               soupGridRes(positions, posComps, sc.soupIdx, glo - grow, ghi + grow));
             }
-            for (const surface::Sample &sp : pts) {
+            // (The fallback count is a diagnostic of how often the local soup was
+            // asked past its reach; with a chunk's running maximum as the stop it is
+            // a function of the chunking — of the input, not of the thread count.)
+            std::atomic<size_t> fellBack { 0 };
+            worst = runningMax(pts.size(), worst, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
                 // Only the MAXIMUM is wanted, so a sample that has anything within
                 // the running maximum stops looking (`stopAtOrBelow`).
-                float d = whole ? baseGrid.closest(sp.pos)       // the reference: plain nearest
-                                : gridL.closest(sp.pos, nullptr, nullptr, nullptr, worst);
+                const Vec3 &p = pts[i].pos;
+                float d = whole ? baseGrid.closest(q, p)       // the reference: plain nearest
+                                : gridL.closest(q, p, nullptr, nullptr, nullptr, stop);
                 if (!whole && !(d <= reach)) {
-                    d = baseGrid.closest(sp.pos, nullptr, nullptr, nullptr, worst);
-                    ++fallbacks;
+                    d = baseGrid.closest(q, p, nullptr, nullptr, nullptr, stop);
+                    fellBack.fetch_add(1, std::memory_order_relaxed);
                 }
-                if (std::isfinite(d)) worst = std::max(worst, d);
-            }
+                return d;
+            });
+            groupFallbacks[g] = fellBack.load();
         }
         const float termS = worst;
-        for (unsigned v : regionV) {
+        // Every removed vertex, exactly (it also names the output it stands under:
+        // each writes its own `removedOwner` entry).
+        worst = runningMax(regionV.size(), worst, [&](size_t i, surface::TriangleGrid::Query &q, float) {
+            const unsigned v = regionV[i];
             removedOwner[v] = -1;
-            if (keptStamp[v] == here) continue;                 // KEPT: on S, distance 0
+            if (keptStamp[v] == here) return 0.0f;                 // KEPT: on S, distance 0
             unsigned tri = 0u;
-            const float d = gridS.closest(vertexOf(positions, posComps, v), nullptr, nullptr, &tri);
-            if (std::isfinite(d)) worst = std::max(worst, d);
+            const float d = gridS.closest(q, vertexOf(positions, posComps, v), nullptr, nullptr, &tri);
             removedOwner[v] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);
-        }
+            return d;
+        });
         const float termV = worst;
         std::vector<unsigned> lostIdx;
         for (unsigned v : regionV)
@@ -3689,16 +4073,15 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         if (!lostIdx.empty() &&
             surface::sample(positions, posComps, lostIdx,
                             std::clamp(lostIdx.size() / 3, size_t(kGroupSamplesMin), samplesCap), &pts) > 0.0f)
-            for (const surface::Sample &sp : pts) {
-                const float d = (stats && stats->referenceMeasure)
-                                    ? gridS.closest(sp.pos)
-                                    : gridS.closest(sp.pos, nullptr, nullptr, nullptr, worst);
-                if (std::isfinite(d)) worst = std::max(worst, d);
-            }
+            worst = runningMax(pts.size(), worst, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
+                return (stats && stats->referenceMeasure)
+                           ? gridS.closest(q, pts[i].pos)
+                           : gridS.closest(q, pts[i].pos, nullptr, nullptr, nullptr, stop);
+            });
         measured[g] = std::max(worst * lodchain::kBoundMargin, floorLen);
-        if (measured[g] < groups[g].simplified.error) ++belowEstimate;
-        if (std::getenv("JAH_BAKE_DAG_TERMS"))
-            irisLog(QStringLiteral("dag terms: group %1 depth %2  R %3 verts  S %4 tris  S->L0 %5  "
+        if (measured[g] < groups[g].simplified.error) below[g] = 1;
+        if (termsLog)
+            termLines[g] = (QStringLiteral("dag terms: group %1 depth %2  R %3 verts  S %4 tris  S->L0 %5  "
                                    "removed verts %6  lost facets %7  estimate %8")
                         .arg(g).arg(groups[g].depth).arg(regionV.size()).arg(sTris)
                         .arg(double(termS), 0, 'g', 4).arg(double(termV), 0, 'g', 4)
@@ -3706,7 +4089,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
 
         // HAND ON: every output carries its own vertices plus the removed ones
         // nearest it; the partition gives each kept vertex to its first user.
-        for (int o : outputs[g]) ownVertices(size_t(o), regionAll[size_t(o)]);
+        for (int o : outputs[g]) ownVertices(sc, size_t(o), regionAll[size_t(o)]);
         for (unsigned v : regionV)
             if (removedOwner[v] >= 0) regionAll[size_t(removedOwner[v])].push_back(v);
         for (int m : members[g])
@@ -3714,6 +4097,18 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                 const int o = keptStamp[v] == here ? keptOwner[v] : removedOwner[v];
                 if (o >= 0) regionOwn[size_t(o)].push_back(v);
             }
+    };
+    for (const std::vector<size_t> &list : byWave)
+        bakepool::forRange(bakepool::Range(list.size(), 1), width,
+                           [&](size_t, size_t begin, size_t end, int slot) {
+                               for (size_t i = begin; i < end; ++i) measureGroup(list[i], scratch[size_t(slot)]);
+                           });
+    int belowEstimate = 0;
+    size_t fallbacks = 0;
+    for (size_t g = 0; g < groups.size(); ++g) {
+        belowEstimate += below[g];
+        fallbacks += groupFallbacks[g];
+        if (termsLog && !termLines[g].isEmpty()) irisLog(termLines[g]);
     }
 
     // ---- the two monotonicities (children always have LOWER ids) ---------
@@ -3855,6 +4250,7 @@ bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *
     surface::TriangleGrid baseGrid;
     baseGrid.build(positions, posComps, base, lo, hi, lodchain::boundGridRes(base.size() / 3));
     const lodchain::Islands islands = lodchain::findIslands(positions, posComps, nv, base);
+    surface::Queries queries(static_cast<size_t>(bakepool::width()));
     const size_t dense =
         size_t(std::max(1, densityMultiple)) *
         size_t(base.size() / 3 > size_t(lodchain::kBoundBigTriangles)
@@ -3874,11 +4270,11 @@ bool MeshBake::checkLodBounds(const MeshPtr &mesh, int densityMultiple, double *
         // level 0 — strictly denser than the bake's facet points.
         float area = 0.0f;
         const float exact = lodchain::twoSidedDistance(positions, posComps, level, levelGrid,
-                                                       base, baseGrid, dense, &area, &islands);
+                                                       base, baseGrid, dense, &area, &islands, queries);
         float facets = lodchain::facetDistance(positions, posComps, base, level, levelGrid,
-                                               &islands, lodchain::FacetPattern::Reference);
+                                               &islands, lodchain::FacetPattern::Reference, queries);
         facets = lodchain::facetDistance(positions, posComps, level, base, baseGrid, nullptr,
-                                         lodchain::FacetPattern::Reference, facets);
+                                         lodchain::FacetPattern::Reference, queries, facets);
         const float measured = std::max(std::max(area, exact), facets);
         if (referenceOut) referenceOut->append(measured);
         // A float comparison of two lengths measured the same way: one part in a
@@ -3922,6 +4318,7 @@ bool MeshBake::checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut
     double worst = 0.0;
     int probed = 0;
     const float band = f.cell * sdf::kExactBand;
+    surface::TriangleGrid::Query query;
     for (int z = 0; z < int(f.dim[2]); ++z)
         for (int y = 0; y < int(f.dim[1]); ++y)
             for (int x = 0; x < int(f.dim[0]); ++x) {
@@ -3929,7 +4326,7 @@ bool MeshBake::checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut
                 if (std::fabs(stored) > band) continue;      // outside the exact band
                 const Vec3 p = f.origin + Vec3(float(x) * f.cell, float(y) * f.cell,
                                                float(z) * f.cell);
-                const float exact = grid.closest(p);
+                const float exact = grid.closest(query, p);
                 if (!std::isfinite(exact)) continue;
                 ++probed;
                 worst = std::max(worst, double(std::fabs(std::fabs(stored) - exact)) /
@@ -4031,6 +4428,110 @@ MeshBake::Model MeshBake::buildFromScene(const SceneSource &source, const QStrin
     return buildFromScene(source.scene(), filePath, fingerprint, extractDir, xf);
 }
 
+namespace
+{
+
+/// EVERY MESH'S PRODUCTS, CONCURRENTLY (IMPORT-SPEED-1). Per mesh, two chains of
+/// work that share nothing but the mesh's read-only level 0:
+///
+///   * ATOM stage 1: the LOD chain, then SURFACE-CACHE phase 1's card list (a card
+///     names the level its texel picks), then ATOM P2's signed distance field (its
+///     cell may not be finer than level 1's measured bound) — that order is
+///     load-bearing, so the three run one after another in one task;
+///   * ATOM stage 2: the cluster DAG, which simplifies level 0 itself and reads
+///     nothing the other three write, in its own task.
+///
+/// Every task writes only its own mesh's own fields, and each stage's output is a
+/// function of its inputs alone (`bakepool`), so the blob does not depend on which
+/// task ran first or on how many threads ran them. The fallback parse path (a
+/// library with no bake yet) gets none of these — the same "no LOD" behaviour the
+/// tree has always had, and one more reason a bake is worth having.
+///
+/// ONE LOG LINE per mesh that gets a DAG, in mesh order after all tasks, with the
+/// bake's two FIX COUNTS: a group error raised to a child's, or a sphere grown to
+/// contain a child's, is the bake correcting its own measurement, and a count that
+/// is suddenly large is the thing to see (shipped content: 0-3 per mesh, 17 spheres
+/// on the dragon).
+void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards)
+{
+    using Clock = std::chrono::steady_clock;
+    const auto msSince = [](Clock::time_point t0) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    };
+    const size_t meshes = size_t(model.meshes.size());
+    model.stageMs = QVector<MeshBake::Model::StageMs>(int(meshes));
+    std::vector<MeshBake::ClusterDagStats> dagStats(meshes);
+    const Clock::time_point start = Clock::now();
+    // Tasks [0, meshes) are the chains (the longest work, handed out first), then
+    // [meshes, 2 * meshes) the DAGs.
+    bakepool::forRange(bakepool::Range(meshes * 2, 1), bakepool::width(),
+                       [&](size_t, size_t begin, size_t end, int) {
+        for (size_t task = begin; task < end; ++task) {
+            const size_t i = task % meshes;
+            const MeshPtr &mesh = model.meshes.at(int(i));
+            MeshBake::Model::StageMs &ms = model.stageMs[int(i)];
+            if (task < meshes) {
+                Clock::time_point t = Clock::now();
+                MeshBake::buildLodChain(mesh);
+                ms.lodChain = msSince(t);
+                t = Clock::now();
+                MeshBake::buildCards(mesh, maxCards);
+                ms.cards = msSince(t);
+                t = Clock::now();
+                MeshBake::buildSdf(mesh);
+                ms.sdf = msSince(t);
+            } else {
+                const Clock::time_point t = Clock::now();
+                MeshBake::buildClusterDag(mesh, &dagStats[i]);
+                ms.dag = msSince(t);
+            }
+        }
+    });
+    model.meshesMs = msSince(start);
+#if defined(__GLIBC__)
+    // THE POOL'S FREED MEMORY GOES BACK. glibc gives every thread its own malloc
+    // arena and keeps what a thread freed for that thread's next allocation, so
+    // after a bake the pool's twenty arenas would sit on their share of the
+    // working set (measured on the owner's scan: the bake's transient peak is
+    // ~400 MB above the serial bake's, most of it scratch that is already freed
+    // here). One trim returns the free pages of every arena to the system.
+    malloc_trim(0);
+#endif
+    for (size_t i = 0; i < meshes; ++i) {
+        const MeshBake::ClusterDagStats &st = dagStats[i];
+        if (st.clusters > 0)
+            irisLog(QStringLiteral("mesh bake: cluster DAG %1 (mesh %2): %3 clusters, %4 groups, depth %5; "
+                                   "fixes: %6 monotone, %7 sphere; %8 ms (clodBuild %9, measure %10)")
+                        .arg(QFileInfo(filePath).fileName()).arg(i).arg(st.clusters)
+                        .arg(st.groups).arg(st.depth).arg(st.monotoneFixes)
+                        .arg(st.sphereFixes)
+                        .arg(st.buildMs + st.measureMs, 0, 'f', 1)
+                        .arg(st.buildMs, 0, 'f', 1).arg(st.measureMs, 0, 'f', 1));
+    }
+}
+
+}   // namespace
+
+void MeshBake::setBakeThreads(int threads) { bakepool::gWidth.store(std::max(threads, 0)); }
+
+int MeshBake::bakeThreads() { return bakepool::width(); }
+
+QString MeshBake::Model::stageSummary() const
+{
+    QStringList parts;
+    for (int i = 0; i < meshes.size() && i < stageMs.size(); ++i) {
+        const MeshPtr &mesh = meshes.at(i);
+        const IndexBufferPtr ib = mesh ? mesh->getIndexBuffer() : IndexBufferPtr();
+        const qint64 tris = ib && ib->data ? qint64(ib->dataSize) / qint64(sizeof(unsigned) * 3) : 0;
+        const StageMs &ms = stageMs.at(i);
+        parts << QStringLiteral("m%1 %2t lod %3 cards %4 sdf %5 dag %6")
+                     .arg(i).arg(tris).arg(ms.lodChain, 0, 'f', 0).arg(ms.cards, 0, 'f', 0)
+                     .arg(ms.sdf, 0, 'f', 0).arg(ms.dag, 0, 'f', 0);
+    }
+    return QStringLiteral("meshes %1 ms on %2 threads [%3]")
+        .arg(meshesMs, 0, 'f', 0).arg(bakepool::width()).arg(parts.join(QStringLiteral(" | ")));
+}
+
 MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &filePath,
                                          const QString &fingerprint, const QString &extractDir,
                                          const ImportTransform &xf)
@@ -4045,6 +4546,9 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
     QVector<int> materialFor(int(scene->mNumMeshes), -1);
     QHash<unsigned, int> materialIndexMap;
     const QString dir = QFileInfo(filePath).absoluteDir().absolutePath();
+    // The meshes are built from the scene one after another (the Mesh
+    // constructor reads assimp's scene); their STAGES then run concurrently
+    // (`bakeStages`).
     for (unsigned i = 0; i < scene->mNumMeshes; ++i) {
         const aiMesh *m = scene->mMeshes[i];
         // THE TUNING SWITCHES (import/importsettings.h §4.3). They act on what
@@ -4055,37 +4559,11 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
         // node (tests/meshbake compares the two trees).
         auto mesh = MeshPtr(new Mesh(const_cast<aiMesh *>(m), xf.skeleton));
         if (m->HasBones() && xf.skeleton) mesh->setSkeleton(Mesh::extractSkeleton(m, scene));
-        // ATOM stage 1: the LOD chain is a product of the bake, built here and
-        // nowhere else. The fallback parse path (a library with no bake yet)
-        // gets no chain — which is the same "no LOD" behaviour the tree has
-        // today, and one more reason a bake is worth having.
-        MeshBake::buildLodChain(mesh);
-        // SURFACE-CACHE phase 1: the card list, built from the chain (a card
-        // names the level its texel picks), so the order of these two lines is
-        // load-bearing.
-        MeshBake::buildCards(mesh, xf.maxCards);
-        // ATOM P2 / SUB-S5-SDF: the signed distance field, also built from the
-        // chain (its cell may not be finer than level 1's measured bound), so it
-        // comes third and the order of all three lines is load-bearing.
-        MeshBake::buildSdf(mesh);
-        // ATOM stage 2: the cluster DAG. Independent of the three above (it
-        // simplifies level 0 itself), so its place in the order is free.
-        // ONE LOG LINE per mesh that gets a DAG, with the bake's two FIX COUNTS:
-        // a group error raised to a child's, or a sphere grown to contain a
-        // child's, is the bake correcting its own measurement, and a count that is
-        // suddenly large is the thing to see (shipped content: 0-3 per mesh, 17
-        // spheres on the dragon).
-        MeshBake::ClusterDagStats dagStats;
-        MeshBake::buildClusterDag(mesh, &dagStats);
-        if (dagStats.clusters > 0)
-            irisLog(QStringLiteral("mesh bake: cluster DAG %1 (mesh %2): %3 clusters, %4 groups, depth %5; "
-                                   "fixes: %6 monotone, %7 sphere; %8 ms")
-                        .arg(QFileInfo(filePath).fileName()).arg(i).arg(dagStats.clusters)
-                        .arg(dagStats.groups).arg(dagStats.depth).arg(dagStats.monotoneFixes)
-                        .arg(dagStats.sphereFixes)
-                        .arg(dagStats.buildMs + dagStats.measureMs, 0, 'f', 1));
         model.meshes.append(mesh);
-
+    }
+    bakeStages(model, filePath, xf.maxCards);
+    for (unsigned i = 0; i < scene->mNumMeshes; ++i) {
+        const aiMesh *m = scene->mMeshes[i];
         const unsigned aiMatIndex = m->mMaterialIndex;
         auto known = materialIndexMap.constFind(aiMatIndex);
         if (known != materialIndexMap.constEnd()) {
