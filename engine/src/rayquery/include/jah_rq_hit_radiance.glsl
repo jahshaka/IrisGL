@@ -55,8 +55,11 @@
 /// THE HIT LIST (jah_rq_hit_record.glsl, PHOTON-HIT-SHADE-1), where HlmsAtom's
 /// decode shades it with the scene's own lighting text. A hit on a MOVER or a
 /// RIGGED item never asks this function at all: the caches cannot hold it.
-vec3 jahHitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint,
-					 bool mirror, bool cardGated, out bool ok )
+/// ...and WHICH of the two answered (`source`: 1 the card, 2 the cascades, 0
+/// neither) — the photon view's Hits picture (PHOTON-VIEW-1) reads it; the answer
+/// itself is the same arithmetic as jahHitRadiance's, which is this function.
+vec3 jahHitRadianceSourced( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint,
+							bool mirror, bool cardGated, out bool ok, out uint source )
 {
 	{
 		// The card read restores the diffuse lobe's view term for THIS ray
@@ -64,9 +67,21 @@ vec3 jahHitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float foo
 		const vec3 card = jahCardRadiance( slot, hitPos, hitNormal, -dir,
 										   ( mirror || !cardGated ) ? 0.0 : footprint, ok );
 		if( ok )
+		{
+			source = 1u;
 			return card;
+		}
 	}
-	return jahVoxelRadiance( hitPos, dir, footprint, mirror, ok );
+	const vec3 voxel = jahVoxelRadiance( hitPos, dir, footprint, mirror, ok );
+	source = ok ? 2u : 0u;
+	return voxel;
+}
+
+vec3 jahHitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint,
+					 bool mirror, bool cardGated, out bool ok )
+{
+	uint source;
+	return jahHitRadianceSourced( slot, hitPos, hitNormal, dir, footprint, mirror, cardGated, ok, source );
 }
 
 #endif   // JAH_RQ_HIT_RADIANCE_GLSL

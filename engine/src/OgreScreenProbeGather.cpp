@@ -103,15 +103,17 @@ constexpr unsigned kTraceCardViewBinding = 25u;
 static_assert(kTraceBindings == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the card read's view-term layers are the trace set's last bindings");
 constexpr unsigned kFilterBindings = 3u;
-/// The integrate's eight: params, records, normals, depth, the irradiance, the
-/// history's two halves (one packed texel each, PHOTON-GA-VR) and the rest mean.
-constexpr unsigned kIntegrateBindings = 8u;
+/// The integrate's nine: params, records, normals, depth, the irradiance, the
+/// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean and
+/// the photon view's overlay (PHOTON-VIEW-1).
+constexpr unsigned kIntegrateBindings = 9u;
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
 /// of the ping-pong — the shared-exponent mean and the geometry word.
 constexpr unsigned kHistoryTexelBytes = 8u;
 /// The integrate set's STORAGE IMAGES (the pool's arithmetic below counts them):
-/// the irradiance, the history's two halves and the rest mean — bindings 4..7.
-constexpr unsigned kIntegrateStorageImages = 4u;
+/// the irradiance, the history's two halves, the rest mean and the photon overlay
+/// — bindings 4..8.
+constexpr unsigned kIntegrateStorageImages = 5u;
 static_assert(kIntegrateBindings == 4u + kIntegrateStorageImages,
               "the integrate set's storage images are its last bindings (the pool counts them)");
 
@@ -367,6 +369,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 last frame's history (packed)
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 this frame's history (packed)
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 the rest mean (PHOTON-GATHER-1d)
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 8 the photon overlay (PHOTON-VIEW-1)
         };
         if (!makeLayout(kIntegrateBindings, t, nullptr, mIntegrateLayout, "integrate")) return false;
     }
@@ -420,8 +423,9 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     // PER VIEW AND RING SLOT, four sets: place (1 uniform, 3 storage buffers,
     // 2 sampled), trace (1 AS, 1 uniform, 5 storage buffers, 1 storage image,
     // 4 x cascades + 3 sampled), filter (1 uniform, 1 storage buffer, 1 storage
-    // image), integrate (1 uniform, 1 storage buffer, 2 sampled, 4 storage
-    // images: the irradiance, the history's two halves, the rest mean).
+    // image), integrate (1 uniform, 1 storage buffer, 2 sampled, 5 storage
+    // images: the irradiance, the history's two halves, the rest mean, the photon
+    // overlay).
     const unsigned groups = kMaxTimedViews * kRing;
     const unsigned sets = groups * 4u;
     VkDescriptorPoolSize sizes[4] = {};
@@ -1079,8 +1083,14 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             std::memcmp(v.prevFwd, in.fwd, sizeof(in.fwd)) == 0;
         // NEVER UNDER STEREO: a tracked head is never at rest (see ensureTargets'
         // rest-mean note) and a stereo view holds no rest mean to rest into.
+        // ...and not on the frame the photon view's discs come or go (PHOTON-VIEW-1):
+        // a HELD view dispatches no integrate, and the overlay is the integrate's.
+        // The rest restarts; the history is untouched (the rest mean is a function
+        // of the rest frames' own sequence, so it settles back to the same answer).
+        const bool photon = in.photonOverlay != nullptr;
         const bool still = temporal && !in.tuning.restOff && !in.stereo && sameCamera &&
-                           in.restKey == v.restKey;
+                           in.restKey == v.restKey && photon == v.photonLast;
+        v.photonLast = photon;
         v.restKey = in.restKey;
         // THE SETTLE: a restart zeroes it (the view's birth or an estimator change
         // is age 0; the scene's restart key moving is the rest), any other frame
@@ -1249,6 +1259,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
     pp.knobs4[1] = kWeightFloor;
     pp.knobs4[2] = in.tuning.filterOff ? 0.0f : 1.0f;
+    pp.knobs4[3] = in.photonOverlay ? 1.0f : 0.0f;   // THE PHOTON VIEW's discs (PHOTON-VIEW-1)
     // PHOTON-GATHER-1c: the previous camera, the view's age, the history's floor,
     // the lever.
     std::memcpy(pp.prevCamPos, v.prevCamPos, sizeof(pp.prevCamPos));
@@ -1590,6 +1601,23 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         rest.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         w[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[7].pImageInfo = &rest;
+        // THE PHOTON OVERLAY (8): the view's, or — the knob off — the irradiance
+        // target's own storage view as a stand-in of the same format, never written.
+        VkDescriptorImageInfo photon{};
+        photon.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        photon.imageView = irradianceStore.imageView;
+        if (in.photonOverlay) {
+            Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+            slot.texture = in.photonOverlay;
+            slot.access = Ogre::ResourceAccess::Write;
+            slot.pixelFormat = in.photonOverlay->getPixelFormat();
+            photon.imageView =
+                static_cast<Ogre::VulkanTextureGpu *>(in.photonOverlay)->createView(slot, false);
+            mHost.gatherRetireView(photon.imageView);
+            if (!photon.imageView) return;
+        }
+        w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[8].pImageInfo = &photon;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 
@@ -1604,6 +1632,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         Ogre::ResourceTransitionArray trans;
         solver.resolveTransition(trans, v.irradiance, Ogre::ResourceLayout::Uav,
                                  Ogre::ResourceAccess::ReadWrite, computeStage);
+        if (in.photonOverlay)
+            solver.resolveTransition(trans, in.photonOverlay, Ogre::ResourceLayout::Uav,
+                                     Ogre::ResourceAccess::Write, computeStage);
         for (Ogre::TextureGpu *t : { in.normals, in.depth })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);

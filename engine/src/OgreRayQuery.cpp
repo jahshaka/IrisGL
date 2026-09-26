@@ -235,7 +235,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 36u;
+constexpr unsigned kReflectBindings = 37u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -266,8 +266,11 @@ constexpr int kRayVoxelKinds = 10;
 /// jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 31) — the read
 /// restores the diffuse lobe's view term for the ray (jah_card_view.glsl).
 constexpr unsigned kReflectCardViewBinding = 31u;
-static_assert(kReflectBindings == kReflectCardViewBinding + SurfaceCache::kViewLayers,
-              "the card read's view-term layers are the reflection set's last bindings");
+/// ...and THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1): one storage image the trace
+/// writes the Hits picture into (36, rq_reflect.comp) — the set's last binding.
+constexpr unsigned kReflectPhotonBinding = kReflectCardViewBinding + SurfaceCache::kViewLayers;
+static_assert(kReflectBindings == kReflectPhotonBinding + 1u,
+              "the photon overlay is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas.
@@ -4057,6 +4060,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 33 ...ShadowRough
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 34 ...Albedo
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 ...Normal
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 36 the photon view's overlay (PHOTON-VIEW-1)
     };
     for (unsigned i = 0; i < kReflectBindings; ++i) {
         b[i].binding = i;
@@ -4135,7 +4139,9 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     sizes[1].descriptorCount = sets;
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[2].descriptorCount = sets * 7u;   // + the hit list's two (HIT-SHADE-1)
+    // jahSsrReflection, the two history pairs, the hit list's two (HIT-SHADE-1) and
+    // the photon view's overlay (PHOTON-VIEW-1).
+    sizes[2].descriptorCount = sets * 8u;
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     // kRayVoxelKinds arrays a cascade (level 0's back side and normal among them,
     // PHOTON-VOXEL-5), and the card read's view term (PHOTON-CARDS-5).
@@ -4717,6 +4723,12 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
     // stereo shape, exactly where the previous basis is withheld above).
     pp.stereo[1] = float(rv.historyFrames);
+    // THE PHOTON VIEW'S Hits (PHOTON-VIEW-1): the view's overlay, written by this
+    // trace when the scene's view asks and the view holds one at the full size.
+    Ogre::TextureGpu *photon =
+        scene->photonView() == PhotonView::Hits ? view->photonOverlay() : nullptr;
+    if (photon && (photon->getWidth() != fullW || photon->getHeight() != fullH)) photon = nullptr;
+    pp.stereo[2] = photon ? 1.0f : 0.0f;
     pp.cards[0] = cardsBound ? float(cardCache->instanceSlots()) : 0.0f;
     pp.cards[1] = cardsBound ? float(cardCache->cardRecords()) : 0.0f;
     pp.cards[2] = cardFootprintTexels();
@@ -4962,6 +4974,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     w[kReflectHitBinding].pBufferInfo = &hitBufs[0];
     w[kReflectHitBinding + 3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[kReflectHitBinding + 3].pBufferInfo = &hitBufs[1];
+    // THE PHOTON VIEW'S OVERLAY (36): the view's, or — the knob off — the reflection
+    // target's own storage view as a stand-in of the same format, never written.
+    VkDescriptorImageInfo photonImg{};
+    photonImg.imageView = photon ? uavView(photon) : storage[0].imageView;
+    photonImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!photonImg.imageView) { bail("the photon overlay view is null"); return; }
+    w[kReflectPhotonBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[kReflectPhotonBinding].pImageInfo = &photonImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -4990,6 +5010,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         Ogre::ResourceTransitionArray trans;
         solver.resolveTransition(trans, ssrTex, Ogre::ResourceLayout::Uav,
                                  Ogre::ResourceAccess::ReadWrite, computeStage);
+        if (photon)
+            solver.resolveTransition(trans, photon, Ogre::ResourceLayout::Uav,
+                                     Ogre::ResourceAccess::Write, computeStage);
         for (Ogre::TextureGpu *t : { normalTex, roughTex, depthTex })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
@@ -5034,6 +5057,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
+    // The overlay holds this frame's picture from here; the photon listener takes it
+    // to the texture layout in front of its composite.
+    if (photon) view->notePhotonOverlayWritten();
     // ---- THE FIRST HALF ENDS HERE (PHOTON-HIT-SHADE-1): the hits no cache
     // shades are in the hit list; the decode pass shades them and the write-back
     // completes their texels' means before finishReflect filters.
@@ -5161,6 +5187,15 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.depth = depthTex;
     in.width = depthTex->getWidth();
     in.height = depthTex->getHeight();
+    // THE PHOTON VIEW'S ScreenProbes (PHOTON-VIEW-1): the view's overlay, written
+    // by the integrate when the scene's view asks and it is the gather's size.
+    if (scene->photonView() == PhotonView::ScreenProbes) {
+        Ogre::TextureGpu *o = view->photonOverlay();
+        if (o && o->getWidth() == in.width && o->getHeight() == in.height) {
+            in.photonOverlay = o;
+            view->notePhotonOverlayWritten();
+        }
+    }
     // A two-eye target must split into two whole eyes (the reflection's guard).
     if (stereo && (in.width < 2u || (in.width & 1u))) return;
     in.stereo = stereo;

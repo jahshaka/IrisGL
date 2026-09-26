@@ -232,6 +232,10 @@ struct GatherInputs {
     /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is
     /// appended for the decode.
     HitListBinding hit;
+    /// THE PHOTON VIEW'S ScreenProbes OVERLAY (PHOTON-VIEW-1): the view's overlay
+    /// texture (RGBA16F, the target's size) the integrate writes its probe discs
+    /// into, or null (the view is not ScreenProbes: nothing is written).
+    Ogre::TextureGpu *photonOverlay = nullptr;
 };
 
 /// The Component.
@@ -352,6 +356,10 @@ private:
         /// ...and what makes it restart besides new targets: the history
         /// switched back on, or a GatherTuning field that changes the estimator.
         bool temporalLast = false;
+        /// THE PHOTON VIEW's discs were asked for last frame (PHOTON-VIEW-1): a
+        /// change breaks the REST (never the history) so the integrate runs and the
+        /// overlay is written — a held view dispatches nothing.
+        bool photonLast = false;
         GatherTuning tuningLast;
         /// What the last recorded frame ran with (GatherStatus).
         bool lastTemporal = false;
