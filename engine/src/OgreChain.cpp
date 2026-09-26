@@ -787,22 +787,30 @@ void addAtomViewPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHan
 ///     ray tier's per-view overlay's (the gather's probe discs, the reflection's hit
 ///     classes; kPhotonOverlayExecutionBit), whose texture the view's photon
 ///     listener binds from C++ like the Atom view's table.
-/// The price, on or off: the layer and its depth, 8 bytes a pixel of the target
-/// (16.6 MB at 1920x1080).
+/// THE LAYER'S DEPTH IS THE ATOM VIEW'S WHERE THE CHAIN HOLDS ONE (desc.atomDraw):
+/// kAtomViewDepth is a full-target D32 of the graph that only the Atom view's quad
+/// reads, and that quad has run (above) before the photon passes prepare their depth,
+/// so the photon view borrows it rather than holding a second one.
+/// The price, on or off: the RGBA8 layer, 4 bytes a pixel of the target (8.3 MB at
+/// 1920x1080), and — on a chain without the id pass — its own D32 beside it (8 bytes
+/// a pixel, 16.6 MB).
 Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
                                                   ChainHandles &handles, bool namedDepth) {
+    const char *depth = desc.atomDraw ? kAtomViewDepth : kPhotonDepth;
     {
         // The layer and its depth: local textures at the target's size, so the two
         // attach together (a render WINDOW takes no manually specified depth).
         addTex(n, kPhotonColour, Ogre::PFG_RGBA8_UNORM);
-        auto *td = addTex(n, kPhotonDepth, Ogre::PFG_D32_FLOAT);
-        td->preferDepthTexture = true;
+        if (!desc.atomDraw) {
+            auto *td = addTex(n, kPhotonDepth, Ogre::PFG_D32_FLOAT);
+            td->preferDepthTexture = true;
+        }
         Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kPhotonRtv);
         Ogre::RenderTargetViewEntry colour0;
         colour0.textureName = kPhotonColour;
         rtv->colourAttachments.push_back(colour0);
-        rtv->depthAttachment.textureName = kPhotonDepth;
-        rtv->stencilAttachment.textureName = kPhotonDepth;
+        rtv->depthAttachment.textureName = depth;
+        rtv->stencilAttachment.textureName = depth;
         rtv->preferDepthTexture = true;
     }
     // THE LAYER'S DEPTH, two ways, one bit each (the listener picks by mode): the
@@ -812,11 +820,11 @@ Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, co
     // are a world of their own: a floor voxel's top face IS the floor's depth, so
     // the scene's depth would hide every voxel of every surface).
     {
-        Ogre::CompositorTargetDef *ct = n->addTargetPass(kPhotonDepth);
+        Ogre::CompositorTargetDef *ct = n->addTargetPass(depth);
         ct->setNumPasses(namedDepth ? 2 : 1);
         if (namedDepth) {
             auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(ct->addPass(Ogre::PASS_DEPTHCOPY));
-            c->setDepthTextureCopy(kDepth, kPhotonDepth);
+            c->setDepthTextureCopy(kDepth, depth);
             c->mExecutionMask = kPhotonDepthCopyBit;
             c->mProfilingId = "Jahshaka photon view depth";
         }
