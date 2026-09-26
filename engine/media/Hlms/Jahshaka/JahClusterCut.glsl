@@ -52,13 +52,16 @@ float jahClusterGroupAllowed( vec4 sphere, vec4 row0, vec4 row1, vec4 row2, floa
 							  vec3 eye, float tolerance, float projScaleY, float viewportHeight,
 							  bool orthographic )
 {
-	float cx = row0.x * sphere.x + row0.y * sphere.y + row0.z * sphere.z + row0.w;
-	float cy = row1.x * sphere.x + row1.y * sphere.y + row1.z * sphere.z + row1.w;
-	float cz = row2.x * sphere.x + row2.y * sphere.y + row2.z * sphere.z + row2.w;
-	float dx = cx - eye.x;
-	float dy = cy - eye.y;
-	float dz = cz - eye.z;
-	float d = orthographic ? 1.0 : max( 0.0, sqrt( dx * dx + dy * dy + dz * dz ) - sphere.w * scale );
+	// PRECISE: no fused multiply-add the compiler chooses per call site — one group
+	// judged at two places must give one answer (the cut job judges each group once
+	// anyway; this keeps the inline fallback and the parity job to the same rule).
+	precise float cx = row0.x * sphere.x + row0.y * sphere.y + row0.z * sphere.z + row0.w;
+	precise float cy = row1.x * sphere.x + row1.y * sphere.y + row1.z * sphere.z + row1.w;
+	precise float cz = row2.x * sphere.x + row2.y * sphere.y + row2.z * sphere.z + row2.w;
+	precise float dx = cx - eye.x;
+	precise float dy = cy - eye.y;
+	precise float dz = cz - eye.z;
+	precise float d = orthographic ? 1.0 : max( 0.0, sqrt( dx * dx + dy * dy + dz * dz ) - sphere.w * scale );
 	return jahAllowedWorldError( tolerance, jahSampleFootprint( d, projScaleY, viewportHeight ), scale );
 }
 

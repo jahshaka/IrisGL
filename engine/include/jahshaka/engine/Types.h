@@ -4515,17 +4515,19 @@ struct AtomDrawStatus {
     /// its id pass's counters back (a few frames late, never waited on): drawn
     /// clusters, indices in the compacted stream, the triangles drawn, the
     /// (instance, cluster) pairs the rule evaluated, the instances that did not fit
-    /// the stream's budget (drawn nothing that frame) with the indices they asked
-    /// for, and the budget itself. `cutValid` false before a view has read any.
+    /// the stream's main region (drawn COARSE that frame: their root cut, from the
+    /// reserve), the instances that fit nothing (drawn NOTHING — 0 is the invariant),
+    /// and the budget itself. `cutValid` false before a view has read any.
     bool     cutValid = false;
     unsigned cutClusters = 0, cutIndices = 0, cutEvaluated = 0;
-    unsigned cutOverflow = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
+    unsigned cutOverflow = 0, cutMissing = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
     unsigned long long cutTriangles = 0ull;
 };
 
 /// The id pass's cut counters, one view's (AtomDrawStatus carries them).
 struct AtomCutStats {
-    unsigned clusters = 0, indices = 0, evaluated = 0, overflow = 0, overflowIndices = 0, indexBudget = 0;
+    unsigned clusters = 0, indices = 0, evaluated = 0, overflow = 0, missing = 0, overflowIndices = 0,
+             indexBudget = 0;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
@@ -6739,12 +6741,13 @@ struct GpuCullResult {
     /// vertexOffset, firstInstance.
     std::vector<unsigned> drawCommands;
     /// THE CUT (mode 3), from the count buffer: drawn clusters (records written),
-    /// indices reserved in the stream, the triangles the commands draw, the
-    /// (instance, cluster) pairs the rule evaluated, and the instances that did not
-    /// fit the budget (they draw nothing this frame; the budget grows) with the
-    /// indices they asked for. The budget the request ran under beside them.
+    /// indices asked of the stream's main region, the triangles the commands draw, the
+    /// (instance, cluster) pairs the rule evaluated, the instances whose cut did not fit
+    /// and drew their ROOT CUT from the coarse reserve (`cutOverflow`), the instances
+    /// that fit neither and drew NOTHING (`cutMissing`), the indices asked
+    /// (`cutOverflowIndices`, the main cursor), and the budget the request ran under.
     unsigned cutClusters = 0, cutIndices = 0, cutTriangles = 0, cutEvaluated = 0;
-    unsigned cutOverflow = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
+    unsigned cutOverflow = 0, cutMissing = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
     /// With `readBack`: THE DRAWN SET, three uints per drawn cluster — the item slot,
     /// the cluster's index in ITS MESH's DAG (`MeshData::clusters`) and its depth —
     /// in the records' (arrival) order, which is not stable between runs.

@@ -44,7 +44,8 @@ struct GpuCullParams {
     uint32_t counts[4] = {};       ///< x instances, y flagsRequired, z flagsForbidden, w mode
     uint32_t hzb[4] = {};          ///< x levels, y width, z height, w reverseZ
     /// THE CUT'S BUDGET (mode 3, ATOM-CLUSTER-CUT): x = the compacted index stream's
-    /// capacity in indices, y = the drawn-cluster record capacity, z/w = 0.
+    /// capacity in indices, y = the drawn-cluster record capacity, z = where the stream's
+    /// COARSE RESERVE begins (the main region is [0, z)), w = 0.
     uint32_t cut[4] = {};
 };
 static_assert(sizeof(GpuCullParams) == 240, "the cull request's layout is a shader contract");
@@ -74,9 +75,12 @@ public:
     Ogre::UavBufferPacked *held() const { return mHeld; }
 
     // ---- THE CUT (mode 3, ATOM-CLUSTER-CUT; SPECS/v2/CLUSTER_CUT_DESIGN.md D1/D2) --
-    /// Makes the cut's per-frame buffers exist at the current budget (grown when the
-    /// last cut this list recorded reported an overflow — `noteCutOverflow`).
-    bool ensureCut(Ogre::VaoManager *vao, std::string &err);
+    /// Makes the cut's per-frame buffers exist at the current budget: the larger of
+    /// this list's own (grown when a cut it recorded reported an overflow —
+    /// `noteCutOverflow`) and `sceneNeed`, the SCENE's high-water mark of the indices a
+    /// cut asked for (OgreScene::cutIndexNeed) — so a view born into a heavy scene (a
+    /// screenshot, a thumbnail: two frames of life) starts at the size the scene needs.
+    bool ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneNeed = 0u);
     /// THE COMPACTED INDEX STREAM: the drawn clusters' corners, mesh-local vertex
     /// indices (32-bit), each surviving instance's run contiguous; the id pass binds
     /// it as its index buffer (the identity buffer it replaced is deleted).
@@ -92,13 +96,24 @@ public:
     Ogre::UavBufferPacked *cutSlotBase() const { return mCutSlotBase; }
     uint32_t cutIndexBudget() const { return mCutIndexBudget; }
     uint32_t cutRecordBudget() const { return mCutRecordBudget; }
+    /// Where the coarse reserve begins: the main region is the first 7/8 of the stream.
+    uint32_t cutMainBudget() const { return mCutIndexBudget - mCutIndexBudget / 8u; }
+    /// A TEST DOOR (the overflow's proof): the next budget is `indices`, the scene's
+    /// high-water mark is ignored by this list, and overflows still double it.
+    void setCutBudgetForTest(uint32_t indices) {
+        mCutWantBudget = indices;
+        mCutIgnoreScene = true;
+        mCutForceCreate = true;
+    }
     /// THE OVERFLOW, as the stats ring read it back: the budget doubles (to the
-    /// ceiling) before the next cut, so a scene that outgrew it loses instances for
-    /// the frames in flight and never silently for ever.
-    void noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked);
-    /// The first budget and the ceiling (indices): 2 M (667 k triangles, 8 MB of
-    /// stream + 5.3 MB of triangle words a view) growing by doubling to 32 M.
-    static constexpr uint32_t kCutIndexBudgetFirst = 2u * 1024u * 1024u;
+    /// ceiling) before the next cut. The frames in flight lose no object — an instance
+    /// that does not fit draws its ROOT CUT from the coarse reserve (JahCullCut_cs) —
+    /// unless even the reserve is full, which is counted apart.
+    void noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked, uint32_t recordsAsked);
+    /// The first budget and the ceiling (indices): 8 M (2.8 M triangles; 32 MB of
+    /// stream + 21 MB of triangle words + 5.3 MB of records = ~59 MB a view) growing by
+    /// doubling to 32 M.
+    static constexpr uint32_t kCutIndexBudgetFirst = 8u * 1024u * 1024u;
     static constexpr uint32_t kCutIndexBudgetCeiling = 32u * 1024u * 1024u;
     /// Records per index of budget: one record per 24 indices (8 triangles).
     static constexpr uint32_t kCutIndicesPerRecord = 24u;
@@ -111,7 +126,9 @@ public:
     /// groups (one per drawn-cluster record, [8] = records written), [11] the
     /// stream's cursor (indices reserved), [12] instances that did not fit the
     /// budget (drawn nothing this frame), [13] the indices they asked for, [14] the
-    /// (instance, cluster) pairs the rule evaluated, [15] = 0.
+    /// (instance, cluster) pairs the rule evaluated, [15] the coarse reserve's cursor.
+    /// (Since the fix round: [12] = instances drawn COARSE — their root cut, from the
+    /// reserve — and [13] = instances drawn NOTHING, neither fitting.)
     static constexpr uint32_t kCountElements = 16u;
     static constexpr uint32_t kIndirectOffsetBytes = 4u;
     static constexpr uint32_t kCutIndirectOffsetBytes = 5u * 4u;
@@ -137,6 +154,8 @@ private:
     Ogre::UavBufferPacked *mCutSlotBase = nullptr;
     uint32_t mCutIndexBudget = 0u, mCutRecordBudget = 0u, mCutSlotCapacity = 0u;
     uint32_t mCutWantBudget = kCutIndexBudgetFirst;
+    bool mCutIgnoreScene = false;
+    bool mCutForceCreate = false;   ///< the test door's budget may be SMALLER than the current one
 };
 
 }  // namespace detail

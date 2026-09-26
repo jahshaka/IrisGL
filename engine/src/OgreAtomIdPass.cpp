@@ -242,11 +242,14 @@ void cycleStats(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreView *vie
         cs.clusters = std::min(w[8], cull.cutRecordBudget());
         cs.indices = w[11];
         cs.overflow = w[12];
-        cs.overflowIndices = w[13];
+        cs.missing = w[13];
+        cs.overflowIndices = w[11];
         cs.evaluated = w[14];
         cs.indexBudget = cull.cutIndexBudget();
         view->setAtomCutStats(cs);
-        cull.noteCutOverflow(w[12], w[11]);
+        cull.noteCutOverflow(w[12] + w[13], w[11], w[8]);
+        // THE SCENE'S HIGH-WATER MARK: every later view of this scene is born at it.
+        if (OgreScene *sc = view->ogreScene()) sc->noteCutIndexNeed(w[11]);
     }
     VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
     VkMemoryBarrier mb{};

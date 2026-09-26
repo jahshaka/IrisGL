@@ -163,6 +163,8 @@ struct GpuMesh {
     float    localBoundsMin[4] = {};
     float    localBoundsMax[4] = {};  ///< [3] = the level-0 LOD bound (ATOM-BAKE-1's honest error)
     uint32_t dag[4] = { 0u, 0u, 0u, 0xFFFFFFFFu };   ///< cluster base, count, group base, cluster row
+    // localBoundsMin[3] carries the DAG's GROUP COUNT, bit-cast (the cut job's per-group
+    // mask needs it; written by flushClusterTables, 0 for a mesh with no DAG).
 };
 static_assert(sizeof(GpuMesh) == 64, "the GPU mesh table's stride is a contract");
 

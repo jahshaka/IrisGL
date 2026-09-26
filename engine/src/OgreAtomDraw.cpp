@@ -544,6 +544,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         st.cutIndices = cs.indices;
         st.cutEvaluated = cs.evaluated;
         st.cutOverflow = cs.overflow;
+        st.cutMissing = cs.missing;
         st.cutOverflowIndices = cs.overflowIndices;
         st.cutIndexBudget = cs.indexBudget;
         st.cutTriangles = tris;

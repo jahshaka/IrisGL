@@ -262,6 +262,7 @@ void GpuScene::flushClusterTables() {
         GpuMesh &gm = mMeshMirror[e];
         if (me.refs == 0u || me.rowBlock || me.clusters.empty() || me.groups.empty()) {
             gm.dag[0] = gm.dag[1] = gm.dag[2] = 0u;
+            gm.localBoundsMin[3] = 0.0f;
             continue;
         }
         const uint32_t cBase = uint32_t(mClusterMirror.size()), gBase = uint32_t(mGroupMirror.size());
@@ -274,6 +275,8 @@ void GpuScene::flushClusterTables() {
         gm.dag[0] = cBase;
         gm.dag[1] = uint32_t(me.clusters.size());
         gm.dag[2] = gBase;
+        const uint32_t groupCount = uint32_t(me.groups.size());
+        std::memcpy(&gm.localBoundsMin[3], &groupCount, sizeof(groupCount));
         mMaxClustersPerMesh = std::max(mMaxClustersPerMesh, gm.dag[1]);
     }
     mClusterCount = uint32_t(mClusterMirror.size());
@@ -297,6 +300,14 @@ void GpuScene::flushClusterTables() {
     };
     grow(mClusterBuffer, mClusterCapacity, mClusterMirror.size(), sizeof(GpuCluster), mClusterMirror.data());
     grow(mGroupBuffer, mGroupCapacity, mGroupMirror.size(), sizeof(GpuClusterGroup), mGroupMirror.data());
+    // THE MESH TABLE WITH THEM (the fix round's F4): the rebuild rebased every entry's
+    // `dag`, and a caller outside update() (the id pass, the screen decode's arming)
+    // must never pair the new cluster table with the old bases for a frame.
+    if (mMeshBuffer && !mMeshMirror.empty()) {
+        mMeshBuffer->upload(mMeshMirror.data(), 0, mMeshMirror.size());
+        mMeshDirty = false;
+        ++mCopies;
+    }
 }
 
 uint64_t GpuScene::recordBound() const {

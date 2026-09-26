@@ -3430,6 +3430,13 @@ public:
     /// the slots and an upload when a value moved); null until then.
     Ogre::TextureGpu *atomViewTable() const { return mAtomViewTable; }
     GpuSceneStatus gpuSceneStatus() const override;
+    /// THE CUT'S INDEX NEED, the scene's high-water mark (ATOM-CLUSTER-CUT F1): the most
+    /// indices any view's cut of this scene asked of its stream (the stats ring's
+    /// cursor). Every GpuCull sizes its stream from at least this, so a view born into
+    /// a heavy scene — a screenshot, a thumbnail — does not start small and overflow.
+    void noteCutIndexNeed(uint32_t indices) { mCutIndexNeed = std::max(mCutIndexNeed, indices); }
+    uint32_t cutIndexNeed() const { return mCutIndexNeed; }
+    uint32_t mCutIndexNeed = 0u;
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
                                std::vector<GpuSceneEntry> &out) override;

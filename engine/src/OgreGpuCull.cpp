@@ -86,7 +86,7 @@ void GpuCull::destroy() {
 /// the BUDGET (never per frame: re-created only when an overflow raised it), the
 /// per-slot base by the list's slot capacity. Nothing in them is state between
 /// requests — every word a reader reads is written by the request it reads.
-bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err) {
+bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneNeed) {
     if (!mParams || vao != mVao) {
         err = "gpucull: the cut's buffers need the list's (ensure first)";
         return false;
@@ -96,7 +96,14 @@ bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err) {
         mCutSlotBase = vao->createUavBuffer(mCapacity, sizeof(uint32_t), 0, nullptr, false);
         mCutSlotCapacity = mCapacity;
     }
-    if (mCutStream && mCutIndexBudget >= mCutWantBudget) return true;
+    if (!mCutIgnoreScene && sceneNeed) {
+        // The main region must hold the scene's need: budget x 7/8 >= need.
+        uint32_t want = mCutWantBudget;
+        while (want < kCutIndexBudgetCeiling && want - want / 8u < sceneNeed) want *= 2u;
+        mCutWantBudget = std::min(want, kCutIndexBudgetCeiling);
+    }
+    if (mCutStream && mCutIndexBudget >= mCutWantBudget && !mCutForceCreate) return true;
+    mCutForceCreate = false;
     if (mCutStream) vao->destroyUavBuffer(mCutStream);
     if (mCutTriWords) vao->destroyUavBuffer(mCutTriWords);
     if (mCutRecords) vao->destroyUavBuffer(mCutRecords);
@@ -108,11 +115,15 @@ bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err) {
     return mCutStream && mCutTriWords && mCutRecords;
 }
 
-void GpuCull::noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked) {
+void GpuCull::noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked, uint32_t recordsAsked) {
     if (!overflowedInstances) return;
-    uint32_t want = std::max(mCutWantBudget, kCutIndexBudgetFirst);
-    while (want < kCutIndexBudgetCeiling && want < indicesAsked) want *= 2u;
-    if (want == mCutWantBudget && want < kCutIndexBudgetCeiling) want *= 2u;
+    // SIZED FROM WHAT WAS ASKED, never a blind doubling: the ring reports the same
+    // overflow for every frame in flight (4-5 of them), and a doubling per report
+    // overshot a 209 k need to 4.4 M (measured, atom.cluster_crack E).
+    uint32_t want = mCutWantBudget;
+    while (want < kCutIndexBudgetCeiling &&
+           (want - want / 8u < indicesAsked || want / kCutIndicesPerRecord < recordsAsked))
+        want *= 2u;
     mCutWantBudget = std::min(want, kCutIndexBudgetCeiling);
 }
 
@@ -285,7 +296,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         }
         mGpuScene.flushClusterTables();
         mGpuScene.flushGeomRows();
-        if (!cull.ensureCut(rs->getVaoManager(), err)) return false;
+        if (!cull.ensureCut(rs->getVaoManager(), err, mCutIndexNeed)) return false;
         if (!mGpuScene.clusterBuffer() || !mGpuScene.groupBuffer()) {
             err = "the cut's cluster tables could not be created";
             return false;
@@ -316,6 +327,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.hzb[3] = rs->isReverseDepth() ? 1u : 0u;
         p.cut[0] = cutMode ? cull.cutIndexBudget() : 0u;
         p.cut[1] = cutMode ? cull.cutRecordBudget() : 0u;
+        p.cut[2] = cutMode ? cull.cutMainBudget() : 0u;
         cull.params()->upload(&p, 0, 1u);
         const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u,
                                                           0u, 1u, 1u, 0u, 0u, 0u, 0u, 0u };
@@ -456,7 +468,8 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
             out.cutIndices = counter[11];
             out.cutTriangles = counter[4];
             out.cutOverflow = counter[12];
-            out.cutOverflowIndices = counter[13];
+            out.cutMissing = counter[13];
+            out.cutOverflowIndices = counter[11];
             out.cutEvaluated = counter[14];
             out.cutIndexBudget = mGpuCull.cutIndexBudget();
             if (readBack && out.survivors)
@@ -484,7 +497,7 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
                 // from the counters the compaction left: survivors and the dispatch
                 // arguments kept, the cut's own words zeroed. The emit job only reads.
                 std::vector<uint32_t> again(counter.begin(), counter.end());
-                again[4] = again[8] = again[11] = again[12] = again[13] = again[14] = 0u;
+                again[4] = again[8] = again[11] = again[12] = again[13] = again[14] = again[15] = 0u;
                 const auto t0 = std::chrono::steady_clock::now();
                 rs->flushCommands();
                 const auto t1 = std::chrono::steady_clock::now();
