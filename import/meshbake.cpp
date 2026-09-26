@@ -23,6 +23,8 @@ For more information see the LICENSE file
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <exception>
+#include <stdexcept>
 #include <functional>
 #include <limits>
 #include <mutex>
@@ -958,11 +960,20 @@ public:
     /// threads (the caller is one of them), and returns when all are done. `slot`
     /// is in [0, width) and unique among the threads working THIS job at once —
     /// the index of the caller's per-thread scratch.
+    ///
+    /// AN EXCEPTION IN ANY CHUNK (a bad_alloc on a huge asset, anything a stage
+    /// throws) behaves as it does in a serial loop: the job stops handing out
+    /// chunks, the chunks already running finish, and the FIRST exception is
+    /// rethrown here, on the caller — never on a pool thread (where it would
+    /// std::terminate the app), and never with this job still listed (the Job
+    /// lives on this frame: a listed dangling Job is what a worker would read
+    /// next). MeshBake::buildFromScene turns it into "no bake" and the pool
+    /// serves the next bake as if nothing happened.
     void run(size_t chunks, int width, const std::function<void(size_t, int)> &body)
     {
         if (chunks == 0) return;
         if (width <= 1 || chunks == 1) {
-            for (size_t c = 0; c < chunks; ++c) body(c, 0);
+            for (size_t c = 0; c < chunks; ++c) runChunk(body, c, 0);
             return;
         }
         Job job;
@@ -977,12 +988,29 @@ public:
             }
             mJobs.push_back(&job);
         }
-        mWake.notify_all();
-        work(job, 0);
-        std::unique_lock<std::mutex> lock(mMutex);
-        mJobs.erase(std::find(mJobs.begin(), mJobs.end(), &job));
-        mIdle.wait(lock, [&] { return job.active == 0; });
+        {
+            // Unlisted and quiescent before this frame can end, however it ends.
+            struct Leave
+            {
+                Pool &pool;
+                Job &job;
+                ~Leave()
+                {
+                    std::unique_lock<std::mutex> lock(pool.mMutex);
+                    pool.mJobs.erase(std::find(pool.mJobs.begin(), pool.mJobs.end(), &job));
+                    pool.mIdle.wait(lock, [&] { return job.active == 0; });
+                }
+            } leave { *this, job };
+            mWake.notify_all();
+            work(job, 0);
+        }
+        if (job.error) std::rethrow_exception(job.error);
     }
+
+    /// TEST HOOK (bake.determinism's failure half): the n-th chunk run from now
+    /// on, on whatever thread, throws std::runtime_error; 0 disarms it. Counts
+    /// the serial path too, so a width-1 bake fails the same way.
+    static void failAfterChunks(int n) { sFailCountdown.store(n); }
 
 private:
     struct Job
@@ -993,16 +1021,35 @@ private:
         std::atomic<size_t> next { 0 };
         int joined = 1;   ///< under mMutex; the caller holds slot 0
         int active = 0;   ///< under mMutex; workers inside work()
+        std::exception_ptr error;   ///< under mMutex; the first chunk's that threw
     };
 
-    static void work(Job &job, int slot)
+    static void runChunk(const std::function<void(size_t, int)> &body, size_t c, int slot)
+    {
+        if (sFailCountdown.load(std::memory_order_relaxed) > 0 && sFailCountdown.fetch_sub(1) == 1)
+            throw std::runtime_error("mesh bake: injected failure (MeshBake::failBakeAfterChunksForTest)");
+        body(c, slot);
+    }
+
+    void work(Job &job, int slot)
     {
         for (;;) {
             const size_t c = job.next.fetch_add(1);
             if (c >= job.chunks) return;
-            (*job.body)(c, slot);
+            try {
+                runChunk(*job.body, c, slot);
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(mMutex);
+                    if (!job.error) job.error = std::current_exception();
+                }
+                job.next.store(job.chunks);   // drain: no thread claims another chunk
+                return;
+            }
         }
     }
+
+    static inline std::atomic<int> sFailCountdown { 0 };
 
     Job *joinable() const
     {
@@ -4535,6 +4582,29 @@ QString MeshBake::Model::stageSummary() const
 MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &filePath,
                                          const QString &fingerprint, const QString &extractDir,
                                          const ImportTransform &xf)
+{
+    // A BAKE THAT THROWS IS NO BAKE (IMPORT-SPEED-1 F1): an out-of-memory on a huge
+    // asset, or anything a stage throws on a pool thread (rethrown here by
+    // `bakepool::Pool::run`), is logged and answered with an invalid model — the
+    // import keeps its source and the open path parses instead, as for any bake
+    // that could not be written. Never an exception out of the import's worker.
+    try {
+        return buildFromSceneUnguarded(scene, filePath, fingerprint, extractDir, xf);
+    } catch (const std::exception &e) {
+        irisLog(QStringLiteral("mesh bake: %1 could not be baked (%2); the open path will parse it instead")
+                    .arg(QFileInfo(filePath).fileName(), QString::fromLocal8Bit(e.what())));
+    } catch (...) {
+        irisLog(QStringLiteral("mesh bake: %1 could not be baked (unknown exception); the open path will "
+                               "parse it instead").arg(QFileInfo(filePath).fileName()));
+    }
+    return Model();
+}
+
+void MeshBake::failBakeAfterChunksForTest(int chunks) { bakepool::Pool::failAfterChunks(chunks); }
+
+MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QString &filePath,
+                                                  const QString &fingerprint, const QString &extractDir,
+                                                  const ImportTransform &xf)
 {
     Model model;
     if (!scene || scene->mNumMeshes == 0) return model;

@@ -170,6 +170,10 @@ public:
     /// which is what `bake.determinism` proves byte for byte (1 thread against the
     /// hardware's).
     static void setBakeThreads(int threads);
+    /// TEST ONLY (bake.determinism): the `chunks`-th unit of bake work from now on
+    /// throws; buildFromScene must answer an invalid model and the next bake must
+    /// be whole. 0 disarms.
+    static void failBakeAfterChunksForTest(int chunks);
     static int bakeThreads();   ///< the width a bake started now would use
 
     /// The format this build writes and reads.
@@ -446,6 +450,13 @@ public:
     static SceneNodePtr buildFragment(
         const Model &model, const QString &filePath,
         const std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData &data)> &createMaterialFunc);
+
+private:
+    /// buildFromScene's body; buildFromScene turns any exception out of it into
+    /// an invalid model (a bake that throws is no bake).
+    static Model buildFromSceneUnguarded(const aiScene *scene, const QString &filePath,
+                                         const QString &fingerprint, const QString &extractDir,
+                                         const ImportTransform &xf);
 };
 
 }   // namespace iris
