@@ -1547,8 +1547,12 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         }
         // THE VISIBILITY BUFFER'S FRAME HALF (ATOM S3-DRAW): the screen decode's
         // draws follow the words the split's items wear, here, outside the
-        // compositor and after the table the split writes into.
-        for (OgreScene *s : drawn) s->updateAtomDraw();
+        // compositor and after the table the split writes into. ITS OWN MONITOR
+        // STAGE (lane D1-SCALE-FIXTURES, W13: the words walk + sort on a mover).
+        {
+            monitor::Stage wordsStage("engine.atomwords");
+            for (OgreScene *s : drawn) s->updateAtomDraw();
+        }
         {
             const auto rqStart = std::chrono::steady_clock::now();
             updateRayQuery(drawn);
@@ -1561,7 +1565,10 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // this frame (its hit sync re-derives only the HIT draws): the screen decode
         // must hold a draw for every atom word before anything renders. Two compares
         // when nothing moved.
-        for (OgreScene *s : drawn) s->updateAtomDraw();
+        {
+            monitor::Stage wordsStage("engine.atomwords");
+            for (OgreScene *s : drawn) s->updateAtomDraw();
+        }
     } JAH_CATCH(mLastError, );
 }
 
