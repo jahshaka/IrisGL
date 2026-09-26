@@ -3054,10 +3054,9 @@ public:
     Ogre::Rectangle2D *mAtmoQuad = nullptr;
     void tuneAtmosphereRenderable();
     /// WHAT applySkyAtmosphere PUSHED INTO THE COMPONENT, kept because the
-    /// component offers no getter for either and atmosphereSunTint has to put
-    /// them back after asking it a question about a different sun.
+    /// component offers no getter and atmosphereSunTint has to put it back after
+    /// asking it a question about a different sun.
     Ogre::Vector3 mAtmoSunDir = Ogre::Vector3::UNIT_Y;   // the direction the light TRAVELS
-    float         mAtmoTimeOfDay = 0.0f;
     /// THE SUN RAY'S AIR (lane SKY-DENSITY-1) — the atmosphere's turbidity, the
     /// one input to atmosphereSunTint. Deliberately NOT a field of the
     /// component's preset: the sky pass never reads it, and the sky's own
@@ -5785,7 +5784,14 @@ public:
     /// screen decode's draws for the words the atom items wear, and the witness
     /// that re-routes the items of a material whose permutation moved in place.
     void updateAtomDraw();
+    /// THE ATOM VIEW CAN PAINT in this scene's viewport: the split is live and no
+    /// view of the scene draws straight into a window without the id pass (the Low
+    /// tier's passthrough viewport — AtomDrawStatus::passthroughViews). A VR eye
+    /// pair carries no id pass either, but the desktop view beside it does.
+    bool atomViewPaintable() const override { return atomDrawOn() && mAtomPassthroughViews.empty(); }
 private:
+    /// updateAtomDraw's first half: the split's witness and the screen decode's draws.
+    void updateAtomSplit();
     /// Files the node's Item in kAtomRenderQueue (atom) or back where its material
     /// puts it (renderQueueFor). Called by composeGpuInstance.
     void placeAtomQueue(const Node &n, bool atom) const;
@@ -5796,6 +5802,9 @@ private:
     AtomView mAtomView = AtomView::Off;
     Ogre::TextureGpu *mAtomViewTable = nullptr;
     std::vector<uint32_t> mAtomViewRows;   ///< what the table holds (its CPU copy)
+    /// The Buckets walk's witness: the GPU scene's slot writes and HlmsAtom's bucket
+    /// generation it last walked at (~0 = walk on the next sync).
+    unsigned long long mAtomViewWrites = ~0ull, mAtomViewBucketGen = ~0ull;
     void syncAtomViewTable();
 public:
     /// Destroys the Buckets table (the scene's teardown, before its SceneManager).

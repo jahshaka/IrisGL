@@ -484,7 +484,6 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
             std::max(0.0f, std::min(1.0f - 1e-6f, std::asin(elevation) / float(M_PI)));
         mAtmosphere->setSunDir(-toSun, timeOfDay);
         mAtmoSunDir = -toSun;          // what the component is holding, for the tint query
-        mAtmoTimeOfDay = timeOfDay;
 
         mAtmoSkyOn = true;
         syncAtmosphere();

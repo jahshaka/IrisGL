@@ -227,6 +227,9 @@ constexpr const char *kPassthroughRtv   = "jahPassthroughRtv";
 /// PASS_DEPTHCOPY carries kAtomViewExecutionBit — it runs only while the view is
 /// on). The view's quad paints only where the scene's FINAL depth still equals this
 /// one, so a stock-PBR object standing in front of an atom item keeps its picture.
+/// THE PRICE OF "NO REBUILD ON SWITCH": the texture is part of the graph, so EVERY
+/// view that carries the id pass holds one, view Off or not — a full-target D32,
+/// 8.3 MB at 1920x1080 and 33 MB at 3840x2160.
 constexpr const char *kAtomViewDepth    = "jahAtomViewDepth";
 /// SSR. The prepass' second G-buffer (HlmsPbs writes shadow term in x and
 /// packed roughness in y), the RTV the prepass renders through, the ray march's

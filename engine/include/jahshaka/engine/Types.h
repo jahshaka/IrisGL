@@ -4477,6 +4477,10 @@ struct AtomDrawStatus {
     /// samples): the id pass's depth cannot be that pass's depth (Ogre pairs a
     /// window's colour only with the window's own depth, and one sample with one).
     unsigned passthroughViews = 0;
+    /// THE ATOM VIEW CAN PAINT (Scene::atomViewPaintable): `on` and no passthrough
+    /// view — at the Low tier the viewport carries no id pass and the view paints
+    /// nothing, so Scene::setAtomView's callers refuse there.
+    bool     viewPaintable = false;
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback

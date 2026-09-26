@@ -242,13 +242,12 @@ void OgreScene::placeAtomQueue(const Node &n, bool atom) const {
 }
 
 void OgreScene::updateAtomDraw() {
-    // THE ATOM VIEW'S TABLE follows whatever this call decides (every return below).
-    struct ViewTableAtExit {
-        OgreScene *s = nullptr;
-        ~ViewTableAtExit() {
-            if (s) try { s->syncAtomViewTable(); } catch (Ogre::Exception &) {}
-        }
-    } viewTableAtExit{ this };
+    updateAtomSplit();
+    // THE ATOM VIEW'S TABLE follows whatever the split just decided.
+    syncAtomViewTable();
+}
+
+void OgreScene::updateAtomSplit() {
     HlmsAtom *atom = registeredAtom();
     if (!atom || !mGpuScene.live()) return;
     // THE WITNESS: a material edited IN PLACE (a blend, an alpha test, a texture)
@@ -402,8 +401,9 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
 // binds textures, not the GPU scene's buffers — so the view reads one R32_UINT
 // texel per GPU scene slot: the bucket (HlmsAtom::bucketIdOf) of the datablock the
 // slot's atom item wears, 0 for anything else. The texture exists while the view
-// is on (the quad binds it in every mode); its CONTENTS are walked and uploaded
-// only while the view is Buckets, and only when a value moved.
+// is on (the quad binds it in every mode) and is freed when it goes Off; its
+// CONTENTS are walked only while the view is Buckets and only when the slot set or
+// a bucket's membership moved, and uploaded only when a value did.
 // ---------------------------------------------------------------------------
 namespace {
 constexpr uint32_t kAtomViewTableWidth = 1024u;
@@ -417,29 +417,48 @@ void OgreScene::releaseAtomViewTable() {
 }
 
 void OgreScene::syncAtomViewTable() {
-    if (mAtomView == AtomView::Off) return;
+    // OFF FREES IT (the next view that is not Off creates it again).
+    if (mAtomView == AtomView::Off) {
+        if (mAtomViewTable) releaseAtomViewTable();
+        mAtomViewWrites = mAtomViewBucketGen = ~0ull;
+        return;
+    }
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
     if (!rs) return;
     const uint32_t slots = mGpuScene.live() ? uint32_t(mGpuScene.slotCount()) : 0u;
     const uint32_t rows = std::max(1u, (slots + kAtomViewTableWidth - 1u) / kAtomViewTableWidth);
+    HlmsAtom *atom = registeredAtom();
+    const unsigned long long bucketGen = atom ? atom->bucketGeneration() : 0ull;
+    const bool buckets = mAtomView == AtomView::Buckets;
+    // CHANGE-DRIVEN: the walk runs only in Buckets mode and only when the slot set
+    // (the GPU scene's writes) or a bucket's membership (HlmsAtom's generation)
+    // moved since the last one; any other mode reads no contents at all.
+    if (mAtomViewTable && mAtomViewTable->getHeight() == rows &&
+        (!buckets || (mAtomViewWrites == mGpuScene.writes() && mAtomViewBucketGen == bucketGen)))
+        return;
     std::vector<uint32_t> table(size_t(rows) * kAtomViewTableWidth, 0u);
-    if (mAtomView == AtomView::Buckets) {
-        if (HlmsAtom *atom = registeredAtom()) {
-            const GpuInstance *m = mGpuScene.mirrorData();
-            for (uint32_t i = 0; i < slots && i < mItemNodes.size(); ++i) {
-                uint32_t flags = 0u;
-                std::memcpy(&flags, &m[i].boundsMax[3], sizeof(flags));
-                const Node *nd = mItemNodes[i];
-                if (!(flags & kGpuAtom) || !nd || !nd->item || !nd->item->getNumSubItems()) continue;
-                table[i] = atom->bucketIdOf(nd->item->getSubItem(0)->getDatablock());
-            }
+    if (buckets && atom) {
+        const GpuInstance *m = mGpuScene.mirrorData();
+        for (uint32_t i = 0; i < slots && i < mItemNodes.size(); ++i) {
+            uint32_t flags = 0u;
+            std::memcpy(&flags, &m[i].boundsMax[3], sizeof(flags));
+            const Node *nd = mItemNodes[i];
+            if (!(flags & kGpuAtom) || !nd || !nd->item || !nd->item->getNumSubItems()) continue;
+            table[i] = atom->bucketIdOf(nd->item->getSubItem(0)->getDatablock());
         }
-    } else if (mAtomViewTable && mAtomViewTable->getHeight() == rows) {
-        return;   // another mode never reads the contents
+    }
+    if (buckets) {
+        mAtomViewWrites = mGpuScene.writes();
+        mAtomViewBucketGen = bucketGen;
+    } else {
+        mAtomViewWrites = mAtomViewBucketGen = ~0ull;   // entering Buckets walks
     }
     if (mAtomViewTable && mAtomViewTable->getHeight() == rows && table == mAtomViewRows) return;
     Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
-    if (mAtomViewTable && mAtomViewTable->getHeight() != rows) releaseAtomViewTable();
+    if (mAtomViewTable && mAtomViewTable->getHeight() != rows) {
+        tm->destroyTexture(mAtomViewTable);
+        mAtomViewTable = nullptr;
+    }
     if (!mAtomViewTable) {
         // A ManualTexture goes Resident by an immediate transition and is never
         // notifyDataIsReady'd (DOCS/traps/ENGINE.md).
@@ -510,6 +529,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     st.on = atomDrawOn();
     st.stereoViews = unsigned(mAtomStereoViews.size());
     st.passthroughViews = unsigned(mAtomPassthroughViews.size());
+    st.viewPaintable = atomViewPaintable();
     return st;
 }
 

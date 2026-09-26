@@ -381,6 +381,7 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
         t.members.emplace_back(pbs, word);
         mTwinOfPbs[pbs] = kt->second;
         mBucketDirty = true;
+        ++mBucketGeneration;
         return kt->second;
     }
 
@@ -451,6 +452,7 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
     mTwinOfPbs[pbs] = twin;
     mTwinOfKey[key] = twin;
     mBucketDirty = true;
+    ++mBucketGeneration;
     return twin;
 }
 
@@ -467,6 +469,7 @@ void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
     Ogre::HlmsPbsDatablock *twin = it->second;
     mTwinOfPbs.erase(it);
     mBucketDirty = true;
+    ++mBucketGeneration;
     // The epoch moves on every departure: a scene's synced word set may now name
     // a datablock that no longer exists, or one that belongs to another bucket.
     ++mTwinEpoch;
@@ -685,6 +688,7 @@ void HlmsAtom::destroyDecodeTwins() {
     mBucketBuf = nullptr;
     mBucketMirror.clear();
     mBucketDirty = true;
+    ++mBucketGeneration;
 }
 
 /// THE BUCKET TABLE: one uint per PBS (pool, slot) — the id of that material's
