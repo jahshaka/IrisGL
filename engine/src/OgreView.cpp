@@ -1170,6 +1170,15 @@ void OgreView::detachScene(bool takeBlank) {
         // The inset's camera belongs to the scene that is going away, and its
         // definitions name this view — both die here, workspace before camera.
         destroyPip();
+        // ...AND THE REQUEST DIES WITH IT (VIEWS-XID-1). The desc names a camera
+        // pose, a rect and a grade chosen for the scene that is going away; a
+        // PiP is never rebuilt on a scene it was not asked for. Kept, the next
+        // setScene's attachWorkspace -> syncPip rebuilt the inset on the NEW
+        // scene before the host had pushed anything, the synchronous cover
+        // frames drew it, and the device was lost (Xid 13 "3D WIDTH ZT", Xid 31
+        // — 14/14 runs; 0/31 with this line, spikes/views-xid-1/). A host that
+        // wants an inset on the new scene asks for it again with setPip.
+        mPip = ViewPipDesc{};
         if (mCamera && mScene && mScene->sceneManager()) mScene->sceneManager()->destroyCamera(mCamera);
         mCamera = nullptr;
         // The camera rode a node of the scene that is going away.
