@@ -286,9 +286,7 @@ set (HEADERS
     document/animation/animation.h
     import/materialhelper.h
     core/irisutils.h
-    core/ziphelper.h
     document/scenegraph/particlesystemnode.h
-    document/scenegraph/iviewsource.h
     document/materials/pbrmaterial.h
     document/animation/propertyanim.h
     document/animation/animableproperty.h
@@ -311,9 +309,7 @@ set (HEADERS
     core/geometry/plane.h
     core/geometry/frustum.h
     core/geometry/aabb.h
-    core/math/transform.h
     core/logger.h
-    core/performancetimer.h
     document/materials/renderstates.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h
