@@ -585,6 +585,8 @@ public:
     unsigned long long grows() const { return mGrows; }
     double lastCopyMs() const { return mLastCopyMs; }
     unsigned lastDirtyCount() const { return mLastDirtyCount; }
+    /// Slot changes the change feed has told its consumers, ever (priming excluded).
+    unsigned long long notifies() const { return mNotifies; }
     unsigned long long epoch() const { return mEpoch; }
 
 private:
@@ -656,8 +658,10 @@ private:
     /// THE CHANGE FEED's consumers, and the one place they are told.
     std::vector<GpuSceneObserver *> mObservers;
     void notify(uint32_t slot, const GpuInstance *now) {
+        ++mNotifies;
         for (GpuSceneObserver *o : mObservers) o->gpuSlotChanged(slot, now);
     }
+    unsigned long long mNotifies = 0ull;
     /// Slots whose ray level was patched since their last copy (patchRayLevel).
     std::vector<uint32_t> mPatched;
     /// Copies `mCopySet` (sorted, unique, in range) to the device: one staging map,

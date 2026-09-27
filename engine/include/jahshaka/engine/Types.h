@@ -7544,6 +7544,11 @@ struct GpuSceneStatus {
     /// Walks of the ray-level pass (one per frame in which the camera or the
     /// scene moved; a still frame runs none).
     unsigned long long rayLevelWalks = 0;
+    /// THE CHANGE FEED's notifications, ever (ATOM-CPU-WALKS-1): slot changes told to
+    /// the consumers that derive from the table (the split's words, the ray tier's
+    /// traced set, the card candidates) — each one is that many visits for each. A
+    /// still frame adds none; a mover frame adds one per moved slot.
+    unsigned long long feedNotifies = 0;
 };
 
 /// ONE CONE FOR THE ONE VOXEL READER'S PARITY HARNESS (PHOTON-READER-1;

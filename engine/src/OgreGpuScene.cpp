@@ -1310,6 +1310,7 @@ GpuSceneStatus OgreScene::gpuSceneStatus() const {
     st.rayLevelEvals = mRayLevelEvals;
     st.rayLevelRefits = mRayLevelRefits;
     st.rayLevelWalks = mRayLevelWalks;
+    st.feedNotifies = mGpuScene.notifies();
     return st;
 }
 
