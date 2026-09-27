@@ -136,6 +136,10 @@ void ScenePbs::calculateHashFor(Ogre::Renderable *renderable, Ogre::uint32 &outH
     // then caster hash) adds nothing.
     if (!mHashNotes.empty() && mHashNotes.back().owner == note.owner && mHashNotes.back().db == note.db)
         return;
+    if (mHashNotes.size() >= kMaxHashNotes) {
+        mHashNotesOverflow = true;
+        return;
+    }
     mHashNotes.push_back(note);
 }
 

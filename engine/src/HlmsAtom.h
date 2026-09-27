@@ -211,6 +211,9 @@ public:
     /// `pbs` is a KEY first — dereferenced only when a twin is registered for it,
     /// and every site that destroys a PBS datablock forgets its twin first.
     bool decodeTwinMoved(const Ogre::HlmsDatablock *pbs, uint32_t &word);
+    /// forgetDecodeTwinIfMoved for EVERY datablock a twin serves (the PBS change
+    /// log's overflow answer, OgreEngine::drainPbsChanges).
+    void forgetMovedDecodeTwins();
     /// Twins = buckets held (every scene), and the PBS datablocks they serve.
     size_t decodeTwinCount() const { return mTwins.size(); }
     size_t decodeMemberCount() const { return mTwinOfPbs.size(); }

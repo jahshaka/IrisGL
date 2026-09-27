@@ -277,6 +277,16 @@ void OgreEngine::drainPbsChanges() {
     auto *pbs = hm ? dynamic_cast<ScenePbs *>(hm->getHlms(Ogre::HLMS_PBS)) : nullptr;
     if (!pbs) return;
     const std::vector<ScenePbs::HashNote> &notes = pbs->hashNotes();
+    if (pbs->hashNotesOverflowed()) {
+        // THE LOG OVERFLOWED (kMaxHashNotes): every twin whose bucket moved leaves,
+        // and every item of every scene is re-composed — once.
+        if (HlmsAtom *atom = registeredAtom()) atom->forgetMovedDecodeTwins();
+        for (auto &s : mScenes)
+            if (s) s->markAllItemsRehashed();
+        ++mPbsDrainOverflows;
+        pbs->clearHashNotes();
+        return;
+    }
     std::vector<const Ogre::HlmsDatablock *> &dbs = mPbsDrainScratch;
     dbs.clear();
     for (const ScenePbs::HashNote &n : notes)

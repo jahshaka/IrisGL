@@ -3054,7 +3054,16 @@ public:
     void calculateHashFor(Ogre::Renderable *renderable, Ogre::uint32 &outHash,
                           Ogre::uint32 &outCasterHash) override;
     const std::vector<HashNote> &hashNotes() const { return mHashNotes; }
-    void clearHashNotes() { mHashNotes.clear(); }
+    /// THE LOG IS BOUNDED: a process that re-hashes more than this between two
+    /// drains (a headless boot never draws, so it never drains; a load of a hundred
+    /// thousand items in one frame) stops noting and says so — the drain then treats
+    /// EVERY datablock and every item as re-hashed, once, which is correct and O(N).
+    static constexpr size_t kMaxHashNotes = 65536u;
+    bool hashNotesOverflowed() const { return mHashNotesOverflow; }
+    void clearHashNotes() {
+        mHashNotes.clear();
+        mHashNotesOverflow = false;
+    }
     /// ...AND THE EDITS NOT HASHED YET: a texture or sampler swap moves the
     /// datablock's pointers at once and its hash only at the next pass' upload
     /// (ConstBufferPool::uploadDirtyDatablocks -> updateDescriptorSets ->
@@ -3072,6 +3081,7 @@ protected:
     void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
 private:
     std::vector<HashNote> mHashNotes;
+    bool mHashNotesOverflow = false;
 };
 
 /// Returns an index buffer that belongs to no VAO to the VaoManager that made it
@@ -6040,6 +6050,13 @@ private:
         std::vector<unsigned char> filed;
         std::vector<uint64_t> columnOf;
         std::vector<uint32_t> at;         ///< per slot, its index in its column
+        /// Per slot, what the filing measured — the box centre the query's distance
+        /// test reads, and the mesh's card list and LOD bounds (a mesh's own facts:
+        /// they cannot change while the item wears the mesh) — so a frame's list
+        /// asks no map per candidate.
+        std::vector<Ogre::Vector3> centreOf;
+        std::vector<const std::vector<MeshCardDesc> *> cardsOf;
+        std::vector<const std::vector<float> *> boundsOf;
         /// Per slot, the list serial (`serial` below) of its last change: a slot
         /// the table re-wrote since the last list is measured with the RECOMPUTING
         /// read — its cached world box may predate the frame that moved or made it
@@ -6055,10 +6072,18 @@ private:
             columnOf.clear();
             at.clear();
             changedAt.clear();
+            centreOf.clear();
+            cardsOf.clear();
+            boundsOf.clear();
         }
-        /// The candidate slots of every column the sphere (grown by one column)
-        /// reaches, in no particular order.
+        /// The candidate slots whose FILED centre lies within the sphere grown by
+        /// kSlack, from the columns it reaches, in no particular order.
         void query(const Ogre::Vector3 &centre, float radius, std::vector<uint32_t> &out) const;
+        /// Metres past the radius a filed centre may lie and still be offered: the
+        /// table's box is last frame's for an item the document moved before this
+        /// frame, and one that crossed more than this in one frame arrives a frame
+        /// late (a newborn always does: it is filed by the frame that stages it).
+        static constexpr float kSlack = 4.0f;
     };
     CardFeed mCardFeed;
     std::vector<uint32_t> mCardQuery;
@@ -6081,6 +6106,11 @@ public:
     void markItemRehashed(const Ogre::MovableObject *owner) {
         auto it = mNodeOfItem.find(owner);
         if (it != mNodeOfItem.end() && it->second) markGpuSlotDirty(*it->second);
+    }
+    /// ...and the log's overflow answer: every item.
+    void markAllItemsRehashed() {
+        for (Node *n : mItemNodes)
+            if (n) markGpuSlotDirty(*n);
     }
     /// THE RAY LEVEL'S PASS (ATOM P3's AT-A8r). Called once per frame per drawn
     /// scene with the eye and the projection of the view that draws it; runs
@@ -7612,7 +7642,7 @@ public:
     void drainPbsChanges();
     std::vector<const Ogre::HlmsDatablock *> mPbsDrainScratch;
     /// What the drain has handled, ever (notes, distinct datablocks) — AtomDrawStatus.
-    unsigned long long mPbsDrainNotes = 0ull, mPbsDrainDatablocks = 0ull;
+    unsigned long long mPbsDrainNotes = 0ull, mPbsDrainDatablocks = 0ull, mPbsDrainOverflows = 0ull;
     /// Frame half three: after the frame rendered — the counters' readings.
     void latchShadowCounters();
     /// Called by OgreScene BEFORE it destroys an Ogre::Light: unties it from

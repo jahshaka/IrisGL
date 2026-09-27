@@ -524,6 +524,13 @@ bool HlmsAtom::decodeTwinMoved(const Ogre::HlmsDatablock *pbs, uint32_t &word) {
              key.pool == tt->second.key.pool);
 }
 
+void HlmsAtom::forgetMovedDecodeTwins() {
+    std::vector<const Ogre::HlmsDatablock *> served;
+    served.reserve(mTwinOfPbs.size());
+    for (const auto &kv : mTwinOfPbs) served.push_back(kv.first);
+    for (const Ogre::HlmsDatablock *db : served) forgetDecodeTwinIfMoved(db);
+}
+
 bool HlmsAtom::forgetDecodeTwinIfMoved(const Ogre::HlmsDatablock *pbs) {
     auto it = mTwinOfPbs.find(pbs);
     if (it == mTwinOfPbs.end()) return false;

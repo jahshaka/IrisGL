@@ -1,30 +1,35 @@
-// Jahshaka - THE TOP-LEVEL INSTANCES, WRITTEN ON THE DEVICE (ATOM-CPU-WALKS-1;
-// OgreRayQuery.cpp, "the instances by compute").
+#version 460
+
+// THE TOP-LEVEL INSTANCES, WRITTEN ON THE DEVICE (ATOM-CPU-WALKS-1; OgreRayQuery.cpp,
+// "THE INSTANCES BY COMPUTE").
 //
 // ONE THREAD PER GPU SCENE SLOT. The ray tier's top-level structure holds TWO
-// instances per slot at fixed places - the NEAR copy at 2 x slot and the FAR copy
-// at 2 x slot + 1 (A5b section 4: one TLAS, masks tell the copies apart) - and a
-// slot that is not traced writes both as INACTIVE (all zero: reference 0 and mask 0,
-// which the Vulkan spec makes an inactive instance). The array's length is
-// therefore twice the slot count and known on the host without a readback: the
-// driver on this box offers no indirect build (accelerationStructureIndirectBuild
-// is false on the RTX 4080 SUPER / 595.84), and a compacted count would reach the
-// host a frame late.
+// instances per slot at fixed places — the NEAR copy at 2 x slot and the FAR copy at
+// 2 x slot + 1 (A5b section 4: one TLAS, masks tell the copies apart) — and a slot
+// that is not traced writes both INACTIVE (all zero: reference 0 and mask 0). The
+// array's length is twice the slot count, known on the host with no readback: this
+// driver offers no indirect build (accelerationStructureIndirectBuild is false on
+// the RTX 4080 SUPER / 595.84), and a compacted count would reach the host frames
+// late.
+//
+// A RAW PIPELINE FROM BUILD-TIME SPIR-V, like every other job of the ray tier: it is
+// dispatched on the first frame a scene traces, and an Hlms compute job compiled
+// then would be a shader compile inside that frame (shadercache.warmup's contract:
+// the first real frame after a warm-up compiles nothing).
 //
 // EVERY INPUT IS ALREADY ON THE DEVICE except what is per MESH: the instance table
 // (world rows, the flags word, the mesh index, the ray level in ids.w) is the GPU
-// scene's own; the host uploads, only when they change, the bottom-level address
-// of every (mesh, level) and every mesh's coarsest level, and the ready skinned
-// structures by slot. The host keeps no per-instance loop at all.
+// scene's own; the host writes, per frame it traces, the bottom-level address of
+// every (mesh, level) and every mesh's coarsest level, and the ready rigged slots.
 //
 // THE ARITHMETIC IS THE OLD CPU WRITER'S, field for field (engine.tlas_compute
-// holds the two byte-equal): the transform is the table's world rows (row-major
-// 3x4 is exactly VkTransformMatrixKHR), the custom index the slot, the near mask
-// near | caster | mover-or-still | mover-caster, the far mask far alone, the
-// flags TRIANGLE_FACING_CULL_DISABLE, the near level min(ray level, coarsest).
-//
-// No Hlms directive mark appears in any comment of this file.
-@insertpiece( SetCrossPlatformSettings )
+// holds the array byte-equal to a reference writer): the transform is the table's
+// world rows (row-major 3x4 is exactly VkTransformMatrixKHR), the custom index the
+// slot, the near mask near | caster | mover-or-still | mover-caster, the far mask
+// far alone, the flags TRIANGLE_FACING_CULL_DISABLE, the near level
+// min(ray level, coarsest).
+
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
 
 // Mirrors detail::GpuInstance (GpuScene.h), 160 bytes, rows as vec4s.
 struct GpuInstance
@@ -45,17 +50,13 @@ struct AsInstance
 	uvec4 tail;
 };
 
-layout( std430, ogre_U0 ) readonly restrict buffer instanceLayout { GpuInstance instances[]; };
+layout( std430, set = 0, binding = 0 ) readonly buffer InstanceTable { GpuInstance instances[]; };
 // THE INPUTS (RayQueryTier::writeTlasInputs): a 16-word header, then a 36-word
 // record per mesh-table entry (sixteen uvec2 level addresses, the coarsest level),
-// then a 4-word record per ready skinned slot (slot, address lo, address hi, 0),
+// then a 4-word record per ready rigged slot (slot, address lo, address hi, 0),
 // ascending by slot.
-layout( std430, ogre_U1 ) readonly restrict buffer inputLayout { uint words[]; };
-layout( std430, ogre_U2 ) writeonly restrict buffer outLayout { AsInstance outInstances[]; };
-
-layout( local_size_x = @value( threads_per_group_x ),
-		local_size_y = @value( threads_per_group_y ),
-		local_size_z = @value( threads_per_group_z ) ) in;
+layout( std430, set = 0, binding = 1 ) readonly buffer Inputs { uint words[]; };
+layout( std430, set = 0, binding = 2 ) writeonly buffer Out { AsInstance outInstances[]; };
 
 #define HDR_SLOTS			0u
 #define HDR_MESHES			1u
@@ -71,8 +72,8 @@ layout( local_size_x = @value( threads_per_group_x ),
 #define HDR_FLAG_MOVER		12u
 #define HDR_FLAG_SKINNED	13u
 #define HDR_WORDS			16u
-#define MESH_WORDS			36u
 #define LEVEL_SLOTS			16u
+#define MESH_WORDS			36u
 // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
 #define INSTANCE_FLAGS		1u
 
@@ -82,8 +83,8 @@ void writeInstance( uint at, uint slot, uint mask, uvec2 address )
 	o.transform[0] = instances[slot].world[0];
 	o.transform[1] = instances[slot].world[1];
 	o.transform[2] = instances[slot].world[2];
-	o.tail = uvec4( ( slot & 0xFFFFFFu ) | ( ( mask & 0xFFu ) << 24u ),
-					INSTANCE_FLAGS << 24u, address.x, address.y );
+	o.tail = uvec4( ( slot & 0xFFFFFFu ) | ( ( mask & 0xFFu ) << 24u ), INSTANCE_FLAGS << 24u, address.x,
+					address.y );
 	outInstances[at] = o;
 }
 
@@ -128,8 +129,7 @@ void main()
 			while( lo < hi )
 			{
 				const uint mid = ( lo + hi ) >> 1u;
-				const uint at = skinBase + mid * 4u;
-				if( words[at] < slot )
+				if( words[skinBase + mid * 4u] < slot )
 					lo = mid + 1u;
 				else
 					hi = mid;

@@ -2067,7 +2067,7 @@ void OgreScene::updateSurfaceCache() {
         Node *n = mItemNodes[slot];
         if (!n || !n->item || !n->node || !n->shown) continue;
         if (!(n->item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        const std::vector<MeshCardDesc> *cards = meshCardsFor(n->item->getMesh().get());
+        const std::vector<MeshCardDesc> *cards = mCardFeed.cardsOf[slot];
         if (!cards || cards->empty()) continue;
         CardSceneView::Candidate c;
         c.node = n->selfId;
@@ -2076,7 +2076,7 @@ void OgreScene::updateSurfaceCache() {
         c.sceneNode = n->node;
         c.material = n->materialRef;
         c.cards = cards;
-        c.lodBounds = lodBoundsFor(n->item->getMesh().get());
+        c.lodBounds = mCardFeed.boundsOf[slot];
         const bool fresh = slot < mCardFeed.changedAt.size() && mCardFeed.changedAt[slot] + 1u >= mCardFeed.serial;
         c.box = fresh ? n->item->getWorldAabbUpdated() : n->item->getWorldAabb();
         view.candidates.push_back(c);
@@ -2136,8 +2136,20 @@ void OgreScene::CardFeed::gpuSlotChanged(uint32_t slot, const GpuInstance *now) 
         columnOf.resize(size_t(slot) + 1u, 0ull);
         at.resize(size_t(slot) + 1u, 0u);
         changedAt.resize(size_t(slot) + 1u, 0ull);
+        centreOf.resize(size_t(slot) + 1u, Ogre::Vector3::ZERO);
+        cardsOf.resize(size_t(slot) + 1u, nullptr);
+        boundsOf.resize(size_t(slot) + 1u, nullptr);
     }
     changedAt[slot] = serial;
+    if (want) {
+        const Node &n = *scene->mItemNodes[slot];
+        const Ogre::Mesh *mesh = n.item->getMesh().get();
+        centreOf[slot] = Ogre::Vector3(0.5f * (now->boundsMin[0] + now->boundsMax[0]),
+                                       0.5f * (now->boundsMin[1] + now->boundsMax[1]),
+                                       0.5f * (now->boundsMin[2] + now->boundsMax[2]));
+        cardsOf[slot] = scene->meshCardsFor(mesh);
+        boundsOf[slot] = scene->lodBoundsFor(mesh);
+    }
     if (filed[slot] && want && columnOf[slot] == key) return;
     if (filed[slot]) {
         // SWAP-REMOVE inside the column; the slot that moved into the hole is told.
@@ -2165,9 +2177,11 @@ void OgreScene::CardFeed::gpuSlotChanged(uint32_t slot, const GpuInstance *now) 
 
 void OgreScene::CardFeed::query(const Ogre::Vector3 &centre, float radius, std::vector<uint32_t> &out) const {
     if (columns.empty() || !(radius >= 0.0f)) return;
-    // THE SPHERE GROWN BY ONE COLUMN: a box the table filed a frame ago (a still
-    // item the document moved before this frame) is still found.
-    const float reach = radius + kColumn;
+    // THE SPHERE GROWN BY kSlack: a box the table filed a frame ago (a still item
+    // the document moved before this frame) is still found; the columns are only the
+    // index, the filed centre is the test.
+    const float reach = radius + kSlack;
+    const float reach2 = reach * reach;
     const int x0 = int(std::floor((centre.x - reach) / kColumn)), x1 = int(std::floor((centre.x + reach) / kColumn));
     const int z0 = int(std::floor((centre.z - reach) / kColumn)), z1 = int(std::floor((centre.z + reach) / kColumn));
     const auto take = [&](uint64_t key, const std::vector<uint32_t> &col) {
@@ -2176,8 +2190,9 @@ void OgreScene::CardFeed::query(const Ogre::Vector3 &centre, float radius, std::
         const float nx = std::max(float(ix) * kColumn, std::min(centre.x, float(ix + 1) * kColumn));
         const float nz = std::max(float(iz) * kColumn, std::min(centre.z, float(iz + 1) * kColumn));
         const float dx = nx - centre.x, dz = nz - centre.z;
-        if (dx * dx + dz * dz > reach * reach) return;
-        out.insert(out.end(), col.begin(), col.end());
+        if (dx * dx + dz * dz > reach2) return;
+        for (const uint32_t slot : col)
+            if ((centreOf[slot] - centre).squaredLength() <= reach2) out.push_back(slot);
     };
     // Whichever is fewer: the columns the square spans, or the columns that hold
     // anything (a huge radius must not cost a lookup per empty column).
