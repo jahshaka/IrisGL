@@ -134,6 +134,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	///
 	/// y = THE VIEW'S AGE: how many consecutive frames this history has been
 	/// written (0 on a first frame, a resize, a scene bind). See `historyAt`.
+	/// z = 1 writes THE PHOTON VIEW'S Hits overlay (binding 36, PHOTON-VIEW-1).
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;
@@ -325,6 +326,35 @@ layout( std430, set = 0, binding = 25 ) readonly buffer JahHitInstances { uvec4 
 layout( rgba32ui, set = 0, binding = 26 ) uniform writeonly uimage2D jahHitIds;
 layout( r32ui, set = 0, binding = 27 ) uniform writeonly uimage2D jahHitDest;
 layout( std430, set = 0, binding = 28 ) buffer JahHitBuf { uint jahHitBuf[]; };
+/// THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1, binding 36): with p.stereo.z = 1 (the
+/// scene's view is Hits) every traced texel writes, over its block of the full-
+/// resolution overlay, the colour of what shaded its ray — or a dim veil where no
+/// ray was traced. Written ONLY under the knob, and nothing else here reads it:
+/// the reflection's own images and arithmetic are untouched by the view. With the
+/// knob off the binding holds a stand-in (the reflection target's own view) that
+/// is never written.
+layout( rgba16f, set = 0, binding = 36 ) uniform writeonly image2D photonOverlay;
+const vec4 kPhotonNoRay   = vec4( 0.0, 0.0, 0.0, 0.6 );
+const vec4 kPhotonCard    = vec4( 0.1, 0.9, 0.2, 1.0 );
+const vec4 kPhotonVoxel   = vec4( 0.15, 0.35, 1.0, 1.0 );
+const vec4 kPhotonSky     = vec4( 0.2, 0.95, 1.0, 1.0 );
+const vec4 kPhotonList    = vec4( 1.0, 0.2, 1.0, 1.0 );
+const vec4 kPhotonDropped = vec4( 1.0, 0.1, 0.05, 1.0 );
+void photonHit( ivec2 tc, vec4 c )
+{
+	if( p.stereo.z < 0.5 )
+		return;
+	const ivec2 full = ivec2( p.resolution.zw );
+	const ivec2 traceRes = max( ivec2( p.resolution.xy ), ivec2( 1 ) );
+	const ivec2 scale = max( full / traceRes, ivec2( 1 ) );
+	// The LAST texel of a row or column covers the remainder too (a target that is
+	// not a whole number of blocks): every pixel of the overlay is written.
+	const ivec2 lo = tc * scale;
+	const ivec2 hi = min( mix( lo + scale, full, greaterThanEqual( tc, traceRes - 1 ) ), full );
+	for( int y = lo.y; y < hi.y; ++y )
+		for( int x = lo.x; x < hi.x; ++x )
+			imageStore( photonOverlay, ivec2( x, y ), c );
+}
 #define JAH_HIT_ON          ( p.hitList.w > 0.5 )
 #define JAH_HIT_CAPACITY    uint( p.hitList.x )
 #define JAH_HIT_LIST_W      max( uint( p.hitList.y ), 1u )
@@ -586,6 +616,7 @@ void main()
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
 	{
 		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		photonHit( tc, kPhotonNoRay );
 		return;
 	}
 	const float roughGate = p.knobs.x;
@@ -610,12 +641,14 @@ void main()
 	if( roughness > roughGate + feather )
 	{
 		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		photonHit( tc, kPhotonNoRay );
 		return;
 	}
 	vec3 normalVS = texture( gBufNormals, uv ).xyz * 2.0 - 1.0;
 	if( dot( normalVS, normalVS ) < 1e-6 )
 	{
 		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		photonHit( tc, kPhotonNoRay );
 		return;
 	}
 	normalVS = normalize( normalVS );
@@ -636,6 +669,7 @@ void main()
 	if( dot( worldN, V ) <= 0.0 )
 	{
 		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		photonHit( tc, kPhotonNoRay );
 		return;
 	}
 
@@ -691,6 +725,7 @@ void main()
 	uint recSlot = 0u, recPrim = 0u;
 	vec2 recBary = vec2( 0.0 );
 	vec3 recN = -L;
+	uint photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceSourced); 3 the sky
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
 		gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
@@ -703,9 +738,9 @@ void main()
 							   hitPrim, rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
 		const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
 		if( !decodeAlways )
-			traced = jahHitRadiance( hitSlot, world + worldN * bias + L * t, hitN, L,
-									 reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
-									 true, ok );
+			traced = jahHitRadianceSourced( hitSlot, world + worldN * bias + L * t, hitN, L,
+											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
+											true, ok, photonSource );
 		record = decodeAlways || !ok || !finite3( traced );
 		recSlot = hitSlot;
 		recPrim = hitPrim;
@@ -716,6 +751,7 @@ void main()
 	{
 		traced = skyRadiance( L, lobeAlpha );		// route C: the escape
 		ok = true;
+		photonSource = 3u;
 	}
 	if( !record && !finite3( traced ) )
 	{
@@ -724,6 +760,7 @@ void main()
 		// (prev.w == 0) writes a zero distance so the filter skips it this frame.
 		imageStore( historyCur, tc, prev );
 		imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
+		photonHit( tc, kPhotonDropped );
 		return;
 	}
 	if( !record )
@@ -820,11 +857,17 @@ void main()
 		if( jahHitAppend( recSlot, jahHitNearLevel( recSlot ), false, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),
 						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false ) ) )
+		{
 			imageStore( historyDistCur, tc, vec4( dist, hitMean, 0.0, 0.0 ) );
+			photonHit( tc, kPhotonList );
+		}
 		else
+		{
 			// THE LIST WAS FULL (a dropped record, counted): this frame has no
 			// sample for the texel, which keeps what it had.
 			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
+			photonHit( tc, kPhotonDropped );
+		}
 		return;
 	}
 	const vec3 mean = mix( prev.xyz, traced, blend );
@@ -847,6 +890,7 @@ void main()
 	// exactly as before, which is the guarantee the warm-up exists for.
 	imageStore( historyCur, tc, vec4( mean, count ) );
 	imageStore( historyDistCur, tc, vec4( dist, hitMean, 0.0, 0.0 ) );
+	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );
 
 	// THE COMPOSITE IS THE FILTER PASS' (round C). This shader now ends at the
 	// temporal mean: `rq_reflect_filter.comp` reads it back through a

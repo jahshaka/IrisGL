@@ -6875,6 +6875,31 @@ struct ViewOverlayDesc {
 ///   Objects    a hash of the GPU scene slot (one colour per object)
 enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects };
 
+/// THE PHOTON VIEW (PHOTON-VIEW-1): the lighting's own debug pictures, one at a
+/// time, over every view of the renderer's SCENE that draws the post chain. A
+/// property of the scene, never saved; switching it rebuilds no workspace (its
+/// passes are gated by the workspace's execution mask) and Off is byte-identical.
+///   Voxels        the lit voxels of ONE cascade as cubes (Ogre's VctLighting debug
+///                 visualizer): the finest that holds the scene's lit content, or
+///                 the one Scene::setPhotonVoxelCascade names
+///   Probes        the irradiance field's probes as spheres coloured by their
+///                 irradiance (Ogre's IrradianceField debug visualizer)
+///   Cards         every surface-cache card as a quad on the plane it is captured
+///                 through: filled and coloured by capture age (a log ramp, green
+///                 fresh -> red at ten minutes) where it holds a capture, outlined
+///                 yellow where it waits for its first
+///   ScreenProbes  the screen-probe gather's probes as discs at their positions,
+///                 coloured by the irradiance each probe traced
+///   Diffuse       the indirect diffuse term alone (direct light, emission and
+///                 reflections off) — a pass property on the one lighting text
+///   Reflections   the specular environment term alone (probes, voxels, SSR and
+///                 the ray-traced reflection) — the same mechanism
+///   Hits          every traced reflection pixel coloured by what shaded its ray:
+///                 green = a card, blue = the voxels, cyan = the sky, magenta = the
+///                 hit list (the decode), red = a dropped record; no ray = dimmed
+enum class PhotonView { Off = 0, Voxels, Probes, Cards, ScreenProbes, Diffuse, Reflections, Hits };
+constexpr int kPhotonViewCount = 8;
+
 
 /// A CPU-side RGBA8 image, used to read back an offscreen View.
 struct Image {

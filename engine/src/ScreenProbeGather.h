@@ -232,6 +232,13 @@ struct GatherInputs {
     /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is
     /// appended for the decode.
     HitListBinding hit;
+    /// THE PHOTON VIEW'S ScreenProbes OVERLAY (PHOTON-VIEW-1): the view's overlay
+    /// texture (RGBA16F, the target's size) the integrate writes its probe discs
+    /// into, or null (the view is not ScreenProbes: nothing is written).
+    Ogre::TextureGpu *photonOverlay = nullptr;
+    /// ...and which one (OgreView::photonOverlayGeneration: a re-created overlay
+    /// may recycle the pointer).
+    unsigned photonOverlayGeneration = 0u;
 };
 
 /// The Component.
@@ -273,6 +280,12 @@ public:
                    unsigned long long restartKey, GatherStatus &out) const;
     /// Is anything at all held for this key?
     bool holds(const void *key) const { return mViews.count(key) != 0; }
+    /// Will this frame's second half run the integrate for `key` (a frame recorded
+    /// and not held)? The photon view's overlay is written exactly then.
+    bool integrates(const void *key) const {
+        auto it = mViews.find(key);
+        return it != mViews.end() && it->second.finishPending && !it->second.finishHold;
+    }
 
 private:
     /// One view's resident state. The atlas and the records are RAW Vulkan
@@ -352,6 +365,18 @@ private:
         /// ...and what makes it restart besides new targets: the history
         /// switched back on, or a GatherTuning field that changes the estimator.
         bool temporalLast = false;
+        /// THE PHOTON VIEW's overlay generation the discs were written into last
+        /// frame (0: none asked, PHOTON-VIEW-1): a change — on, off, or a new texture
+        /// after a resize — breaks the REST (never the history) so the integrate
+        /// runs and the overlay is written; a held view dispatches nothing.
+        unsigned photonLast = 0u;
+        /// ...and THE OVERLAY'S STORAGE VIEW, made once per overlay texture (keyed by
+        /// the texture AND its generation: a re-created overlay may reuse the address)
+        /// and retired when the overlay changes or the view goes — not a view created
+        /// and retired every frame the discs are on.
+        const Ogre::TextureGpu *photonViewOf = nullptr;
+        unsigned photonViewGeneration = 0u;
+        VkImageView photonView = VK_NULL_HANDLE;
         GatherTuning tuningLast;
         /// What the last recorded frame ran with (GatherStatus).
         bool lastTemporal = false;
