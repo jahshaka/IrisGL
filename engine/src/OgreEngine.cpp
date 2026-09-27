@@ -7,6 +7,14 @@
 #include "AtomPass.h"
 #include "HlmsAtom.h"
 
+#if JAH_RAY_QUERY
+// For the injected Vulkan frame faults only (raiseFrameFault): the render
+// system's own failure function and its device. Linked whenever the ray tier
+// is, which is every Linux build.
+#include "OgreVulkanDevice.h"
+#include "OgreVulkanRenderSystem.h"
+#endif
+
 #include <set>
 #include <unistd.h>
 
@@ -737,7 +745,7 @@ void frameCloseStep(std::string &sink, Step &&step) {
         } catch (...) {}
     };
     try { step(); }
-    catch (Ogre::Exception &e) { try { note(e.getFullDescription()); } catch (...) {} }
+    catch (Ogre::Exception &e) { try { note(::jahshaka::engine::detail::describeOgreFailure(e)); } catch (...) {} }
     catch (std::exception &e)  { try { note(std::string("engine: ") + e.what()); } catch (...) {} }
     catch (...)                { note("engine: an unknown exception closing the frame"); }
 }
@@ -1480,6 +1488,25 @@ void OgreEngine::raiseFrameFault() {
     const FrameFault fault = mFrameFault;
     if (--mFrameFaultLeft == 0u) mFrameFault = FrameFault::None;
     if (fault == FrameFault::ThrowDeviceLost) mFrameFaultDeviceLost = true;
+#if JAH_RAY_QUERY
+    // THE RENDER SYSTEM'S OWN FAILURE PATH (lane FORK-OOM-1): the function every
+    // `checkVkResult` calls, with the live device, so the fork's latch decision
+    // is the thing under test. It always throws.
+    if (fault == FrameFault::VulkanOutOfDeviceMemory || fault == FrameFault::VulkanDeviceLost) {
+        auto *vkRs = mRoot ? dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem())
+                           : nullptr;
+        if (vkRs) {
+            const bool oom = fault == FrameFault::VulkanOutOfDeviceMemory;
+            Ogre::onVulkanFailure(vkRs->getVulkanDevice(),
+                                  oom ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_DEVICE_LOST,
+                                  oom ? "Jahshaka: an injected frame fault (Engine::setFrameFault) - "
+                                        "TEST ONLY: vkAllocateMemory failed for a 67108864-byte pool"
+                                      : "Jahshaka: an injected frame fault (Engine::setFrameFault) - "
+                                        "TEST ONLY: a Vulkan call returned VK_ERROR_DEVICE_LOST",
+                                  "OgreEngine::renderOneFrame", __FILE__, __LINE__);
+        }
+    }
+#endif
     OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
                 "Jahshaka: an injected frame fault (Engine::setFrameFault) - TEST ONLY",
                 "OgreEngine::renderOneFrame");

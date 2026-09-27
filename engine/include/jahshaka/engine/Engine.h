@@ -1979,7 +1979,8 @@ public:
     /// fired rather than passing vacuously.
     ///
     /// `FrameFault::None` (or `frames` 0) disarms. Nothing in Studio calls
-    /// this — it exists for `engine.frame_catch` and `vr.session`.
+    /// this — it exists for `engine.frame_catch`, `engine.oom_is_not_loss` and
+    /// `vr.session`.
     virtual void setFrameFault(FrameFault fault, unsigned frames) = 0;
 
     /// THE GPU IS GONE AND THIS PROCESS CANNOT COME BACK FROM IT (lane XID-2,

@@ -229,11 +229,36 @@ inline void releaseRecycledName(const std::string &name) {
     if (slot < it->second.size()) it->second[slot] = false;
 }
 
+/// WHAT A HOST READS WHEN OGRE THREW (lane FORK-OOM-1, 2026-09-27). Ogre's own
+/// full description, with ONE case said first in plain words: a Vulkan
+/// out-of-memory. The Vulkan render system throws every failed call as
+/// ERR_RENDERINGAPI_ERROR with the VkResult as the exception's number
+/// (`onVulkanFailure`), and since the fork's "OOM is not a device loss" commit
+/// an OOM no longer latches the device: the engine carries on, and the error a
+/// suite or a user reads must say what happened — the GPU refused an
+/// allocation (the pool's size is in Ogre's text) — not leave them to find
+/// "VK_ERROR_OUT_OF_DEVICE_MEMORY" at the end of a paragraph. The two numbers
+/// are Vulkan's own (VkResult, core since 1.0); this header does not include
+/// Vulkan.
+inline std::string describeOgreFailure(const Ogre::Exception &e) {
+    constexpr int kVkErrorOutOfHostMemory = -1;     // VK_ERROR_OUT_OF_HOST_MEMORY
+    constexpr int kVkErrorOutOfDeviceMemory = -2;   // VK_ERROR_OUT_OF_DEVICE_MEMORY
+    if (dynamic_cast<const Ogre::RenderingAPIException *>(&e)) {
+        if (e.getNumber() == kVkErrorOutOfDeviceMemory)
+            return "GPU out of memory (VK_ERROR_OUT_OF_DEVICE_MEMORY; the device is NOT lost): " +
+                   e.getFullDescription();
+        if (e.getNumber() == kVkErrorOutOfHostMemory)
+            return "host out of memory in the GPU driver (VK_ERROR_OUT_OF_HOST_MEMORY; the device "
+                   "is NOT lost): " + e.getFullDescription();
+    }
+    return e.getFullDescription();
+}
+
 // Every backend virtual is wrapped: `JAH_TRY { ... } JAH_CATCH(errSink, failValue)`.
 // Ogre throws Ogre::Exception; its own allocations may throw std::bad_alloc.
 #define JAH_TRY try
 #define JAH_CATCH(sink, ret)                                                          \
-    catch (Ogre::Exception &e) { (sink) = e.getFullDescription(); return ret; }       \
+    catch (Ogre::Exception &e) { (sink) = ::jahshaka::engine::detail::describeOgreFailure(e); return ret; } \
     catch (std::exception &e)  { (sink) = std::string("engine: ") + e.what(); return ret; }
 
 class OgreEngine;
