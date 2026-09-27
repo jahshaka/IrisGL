@@ -7125,7 +7125,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         fog.heightLevel = mSource->fogHeightLevel;
         fog.breakMinBrightness = mSource->fogBreakMinBrightness;
         fog.breakFalloff = mSource->fogBreakFalloff;
-        fog.atmosphereColour = mSource->fogAtmosphere;
         const bool changed =
             !mFogPushed || mLastFog.enabled != fog.enabled ||
             mLastFog.colour.r != fog.colour.r || mLastFog.colour.g != fog.colour.g ||
@@ -7133,7 +7132,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mLastFog.heightDensity != fog.heightDensity ||
             mLastFog.heightFalloff != fog.heightFalloff ||
             mLastFog.heightLevel != fog.heightLevel ||
-            mLastFog.atmosphereColour != fog.atmosphereColour ||
             mLastFog.breakMinBrightness != fog.breakMinBrightness ||
             mLastFog.breakFalloff != fog.breakFalloff;
         if (changed) { mTarget->setFog(fog); mLastFog = fog; mFogPushed = true; }

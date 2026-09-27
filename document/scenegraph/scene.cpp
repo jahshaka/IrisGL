@@ -381,7 +381,6 @@ Scene::Scene()
     // scene has always come up with).
     fogDensity = fogDensityFromLinear(100.0f, 180.0f);
     fogHeightDensity = 0.0f;      // height layer off until asked for
-    fogAtmosphere = false;        // the authored colour, until a scene asks for the sky's
     fogHeightFalloff = 0.1f;
     fogHeightLevel = 0.0f;
     fogBreakMinBrightness = 0.25f;

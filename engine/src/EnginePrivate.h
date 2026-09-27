@@ -2424,10 +2424,16 @@ struct FogState {
     float heightDensity = 0.0f;     ///< 0 = no height layer (shader skips the branch)
     float heightFalloff = 0.1f;
     float heightLevel   = 0.0f;
-    /// FogDesc::atmosphereColour — read in preparePassHash, where it becomes the
-    /// `jah_fog_atmo` shader property that decides whether our media file
-    /// replaces upstream's per-vertex sky colour with the authored one.
+    /// The ANALYTIC sky is the scene's sky — read in preparePassHash, where it
+    /// becomes the `jah_fog_atmo` shader property: our media file then does the
+    /// WHOLE fog per pixel in the sky's own colour for the pixel's view ray
+    /// (upstream's block is left an identity, the component's density 0), and
+    /// with it false the authored colour (r, g, b above) feeds upstream's block.
     bool  atmosphere    = false;
+    /// The distance medium's density under the analytic sky (exp2 per world
+    /// unit): the air's aerial perspective plus the World fog's. 0 otherwise —
+    /// upstream's block carries the World fog then. Pass-buffer float 7.
+    float distanceDensity = 0.0f;
 };
 
 class FogHlmsListener final : public Ogre::HlmsListener {
@@ -3003,10 +3009,17 @@ public:
     /// destroys its Rectangle2D through it).
     void ensureAtmosphere();
     void destroyAtmosphere();
-    /// Re-derives the per-scene FogState the shader reads from the last pushed
-    /// FogDesc. Called by setFog AND by syncAtmosphere, because the aerial
-    /// colour mode depends on whether the analytic sky is bound.
+    /// Re-derives BOTH halves of the fog from the last pushed FogDesc and the
+    /// sky: the per-scene FogState the shader reads (colour mode, height layer)
+    /// and the component preset's fog block (the air's density plus the
+    /// authored one, the breakthrough pair). Called by setFog, by syncAtmosphere
+    /// and by a turbidity change, because under the analytic sky the air is a
+    /// medium whether or not the World fog is on (FOG-ATMO-1).
     void pushFogState();
+    /// THE AIR'S AERIAL-PERSPECTIVE DENSITY, exp2 per metre, at the turbidity
+    /// the analytic sky holds (mAtmoSunHaze) — OgreSky.cpp derives it from the
+    /// same optical depths the sun's tint uses. 0 without the analytic sky.
+    float airFogDensity() const;
     Ogre::AtmosphereNpr *mAtmosphere = nullptr;
 
     /// Ogre's OWN sky (SceneManager::setSky): a full-screen Rectangle2D at the far

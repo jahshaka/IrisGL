@@ -212,6 +212,14 @@ bool OgreScene::setSky(const SkyDesc &desc) {
         mSkyDesc.atmosphere.sunHaze = desc.atmosphere.sunHaze;
         mAtmoSunHaze = std::max(1.0f, desc.atmosphere.sunHaze);
         ++mAtmoPresetGeneration;   // the tint's memo is keyed on this
+        // ...AND THE AIR'S AERIAL PERSPECTIVE (FOG-ATMO-1): the same turbidity is
+        // the air's extinction along every view ray, so a far surface's haze
+        // moves with it. No sky pixel does — but the probe faces are fogged PBS
+        // renders, so they are stale exactly as a World fog edit makes them.
+        if (mAtmoSkyOn) {
+            pushFogState();
+            staleProbeGrid(GiStaleReason::Fog);
+        }
     }
     // THE CLOUD LAYER (CLOUDS-2D-1) is the fourth independent half. Three kinds
     // of change, three costs: the FIELD (coverage, density, the weather map)
@@ -416,16 +424,22 @@ bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
 //      every sky type, at the sun light's angular size, with its own visibility
 //      channel so probe captures can exclude it. Two discs would be two suns.
 //
-//   3. ITS FOG, IN EVERY PBS SHADER. preparePassHash sets HlmsBaseProp::Fog for
-//      any scene the component is registered on, and registration is not
-//      optional: _update() — which writes the quad's per-camera corner rays —
-//      only runs for the SceneManager's registered atmosphere. So a scene with
-//      the analytic sky compiles the fog block whether or not the World fog is
-//      on. `fogDensity = 0` makes that block an exact identity (fogWeight =
-//      exp2(0) = 1, and lerp(a, b, 1) is b), which is what setFog leaves behind
-//      when the fog is off. A scene with no analytic sky and no fog registers
-//      no atmosphere at all and its shaders are untouched — that is what keeps
-//      every other scene's pixels, and the selftest, where they were.
+//   3. ITS FOG, IN EVERY PBS SHADER — which is NOT refused any more (lane
+//      FOG-ATMO-1; it was zeroed until then). preparePassHash sets
+//      HlmsBaseProp::Fog for any scene the component is registered on, and
+//      registration is not optional: _update() — which writes the quad's
+//      per-camera corner rays — only runs for the SceneManager's registered
+//      atmosphere. So a scene with the analytic sky compiles the fog block
+//      whether or not the World fog is on — and under this sky that block is
+//      left an exact identity (density 0) while OUR piece does the fog per
+//      pixel: the AIR's aerial perspective at the atmosphere's own extinction
+//      (airFogDensity, below — the same turbidity the sun's tint reads, one
+//      atmosphere, one density) plus the World fog's when it is on, towards
+//      the sky quad's own radiance for the pixel's view ray. A far surface
+//      therefore fades into exactly the sky behind it, and the 2 km horizon
+//      plane with it (JahFog_piece_vs_piece_ps.any says why upstream's
+//      per-vertex colour could not do that). A scene with no analytic sky and
+//      no fog registers no atmosphere at all and its shaders are untouched.
 bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
     ensureAtmosphere();
     if (!mAtmosphere) return false;   // media missing: mError says so
@@ -449,16 +463,10 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         preset.skyColour        = Ogre::Vector3(sky.skyColour.r, sky.skyColour.g, sky.skyColour.b);
         preset.skyPower         = std::max(0.0f, sky.skyPower);
         preset.sunPower         = 0.0f;    // (2) above: the disc is SunDisc's
-        // THE FOG HALF belongs to setFog — but only when the fog is ON. When
-        // this path is what CREATED the component (a scene that picks the
-        // analytic sky and has never touched the fog), the preset it copies is
-        // UPSTREAM's constructor default, and that is `fogDensity( 0.0001f )`
-        // (OgreAtmosphereNpr.h): 0.7 % of a surface's colour lost at 100 m and
-        // 13 % at the 2 km horizon plane, for a fog nobody asked for and no
-        // panel row admits to. setFog's off-branch zeroes it, but only for a
-        // scene that had the fog on first. Zero it here, from the flag that
-        // says whether the fog has a customer at all.
-        if (!mAtmoFogOn) preset.fogDensity = 0.0f;
+        // THE FOG HALF (fogDensity and the breakthrough pair) is pushFogState's,
+        // reached through syncAtmosphere below once mAtmoSunHaze and
+        // mAtmoSkyOn hold this sky — never upstream's constructor default
+        // (`fogDensity( 0.0001f )`, a number with no physical source).
         mAtmosphere->setPreset(preset);
         // THE SUN'S OWN AIR IS NOT A PRESET FIELD (lane SKY-DENSITY-1): the
         // component draws the sky, the transmittance below the atmosphere is
@@ -661,6 +669,48 @@ Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
     return tint;
 }
 
+// THE AIR'S AERIAL PERSPECTIVE (lane FOG-ATMO-1) — THE SAME ATMOSPHERE AS THE
+// SUN'S TINT ABOVE, ALONG A HORIZONTAL RAY INSTEAD OF A SLANT ONE.
+//
+// The tint integrates the optical depths over the whole COLUMN (tau, per
+// channel, the Preetham A.2 terms above). A view ray across the ground stays
+// inside the lowest few hundred metres, where the extinction COEFFICIENT is the
+// sea-level one, and for an exponentially stratified species that is the
+// column depth divided by its scale height:
+//
+//     sigma = tau_rayleigh(550) / H_R  +  beta(T) * lambda^-1.3 (550) / H_A
+//
+//     H_R = 8.0 km   the molecular scale height
+//     H_A = 1.2 km   the aerosol (Mie) scale height
+//                    (both as in Bruneton & Neyret 2008, the standard pair)
+//
+// Ozone is left out: it lives in the stratosphere, and a ground-level ray
+// crosses none of it. At the shipped turbidity 2.5 (beta = 0.06934):
+//
+//     sigma = 0.10013/8000 + 0.06934 * 2.17535/1200 = 1.252e-5 + 1.257e-4
+//           = 1.382e-4 per metre                (meteorological visibility
+//             3.912/sigma = 28 km — a clear day, which is what T 2.5 is)
+//
+// so a surface keeps exp(-sigma d): 98.6 % at 100 m, 87.1 % at 1 km (the
+// editor camera's far plane), 75.8 % at the 2 km horizon plane. At T 1 (pure
+// air) it is 1.26e-5 — 300 km visibility; at T 6, 4.3e-4 — 9 km.
+//
+// The component's fog is exp2(-d * fogDensity), so the number handed over is
+// sigma / ln 2. And it is ONE channel, 550 nm (the photopic peak, which is what
+// a visibility is defined at): upstream's fog weight is a scalar, so the air's
+// blue-over-red extinction is not carried — the colour it fogs TOWARDS is the
+// sky's own scattering, which is where the blue of distance comes from.
+float OgreScene::airFogDensity() const {
+    if (!mAtmoSkyOn) return 0.0f;
+    constexpr float kRayleighScaleHeightM = 8000.0f;
+    constexpr float kAerosolScaleHeightM  = 1200.0f;
+    constexpr float kLn2 = 0.69314718f;
+    const float beta = std::max(0.0f, 0.04608f * mAtmoSunHaze - 0.04586f);
+    const float sigma = kTauRayleigh[1] / kRayleighScaleHeightM +
+                        beta * kTauAerosolPerBeta[1] / kAerosolScaleHeightM;
+    return sigma / kLn2;
+}
+
 // ONE COMPONENT, TWO CUSTOMERS (the analytic sky and the fog). Registration on
 // the SceneManager is what makes the quad update and what sets hlms_fog, so it
 // is decided HERE from both flags rather than by whichever of setSky/setFog ran
@@ -671,8 +721,10 @@ void OgreScene::syncAtmosphere() {
     JAH_TRY {
         if (!mAtmoSkyOn && !mAtmoFogOn) {
             // Neither: hide the quad AND unregister, which is what makes "no
-            // fog" bit-exact (no hlms_fog, no fog code in any shader).
+            // fog" bit-exact (no hlms_fog, no fog code in any shader) — and the
+            // fog state the shader would read goes with it.
             mAtmosphere->setSky(mSceneMgr, false);
+            FogHlmsListener::unregisterFog(mSceneMgr);
             return;
         }
         // setSky(true) shows the quad and registers; setSky(false) hides and
@@ -681,8 +733,8 @@ void OgreScene::syncAtmosphere() {
         mAtmosphere->setSky(mSceneMgr, mAtmoSkyOn);
         if (!mAtmoSkyOn) mSceneMgr->_setAtmosphere(mAtmosphere);
         tuneAtmosphereRenderable();
-        // ...and the FOG's colour mode with it: the aerial mode is only
-        // meaningful while the analytic sky is the sky, so it is re-derived
+        // ...and the FOG with it — its colour mode and the air's density both
+        // follow whether the analytic sky is the sky, so they are re-derived
         // here rather than pinned at the moment setFog happened to run
         // (pushFogState's header has the defect that made this a function).
         pushFogState();
