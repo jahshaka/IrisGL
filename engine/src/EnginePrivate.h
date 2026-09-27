@@ -769,6 +769,9 @@ constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
 constexpr Ogre::uint8 kAtomRenderQueue = 11;
 /// The customId of the id pass (AtomPassProvider's registry, OgreAtomIdPass.cpp).
 constexpr const char *kAtomIdPassId = "atom_id";
+/// ...and of the LATE id pass, the disocclusion half of the two-pass occlusion
+/// (ChainDesc::atomOcclusion): the same recorder with the rejected set.
+constexpr const char *kAtomIdLatePassId = "atom_id_late";
 /// The chain's id image (R32G32_UINT, AtomId's words): what the id pass writes and
 /// the screen decode reads (OgreChain.cpp defines it; the listener finds it by name).
 constexpr const char *kAtomIdTexture = "jahAtomIds";
@@ -1119,6 +1122,16 @@ struct ChainDesc {
     /// depth and SKIP kAtomRenderQueue (the screen decode shades those items as
     /// the first draw of the prepass and of the opaque pass).
     bool  atomDraw = false;
+    /// THE ID PASS'S OCCLUSION (ATOM-OCCLUSION-1; Scene::setAtomOcclusionEnabled, the
+    /// measuring door): the two-pass form. The id pass culls against the PREVIOUS
+    /// frame's pyramid (`jahHzb`, still holding it: nothing has rebuilt it yet this
+    /// frame) and draws the survivors; the pyramid is rebuilt from that depth (a seed +
+    /// a reduce per level, FARTHEST, `hzbLevels` of them); the LATE id pass
+    /// (kAtomIdLatePassId) tests the rejected set again against it and draws the
+    /// disoccluded ones into the same id image and depth. Only with `atomDraw`, and not
+    /// where the view asked for a CLOSEST pyramid of its own (the reduce direction is
+    /// one job property).
+    bool  atomOcclusion = false;
     bool  refractions = false;
     /// THE RADIANCE READBACK (PostFxDesc::hdrReadback, HDR-READBACK-1): the
     /// scene result is kept in a FLOAT target even without `hdr`, and
@@ -3422,6 +3435,8 @@ public:
     RayQueryStatus rayQueryStatus() const override;
     AtomDrawStatus atomDrawStatus() override;
     void setAtomDrawEnabled(bool on) override;
+    void setAtomOcclusionEnabled(bool on) override;
+    bool atomOcclusionEnabled() const override { return mAtomOcclusionEnabled; }
     void setAtomView(AtomView view) override { mAtomView = view; }
     AtomView atomView() const override { return mAtomView; }
     /// THE BUCKETS VIEW'S TABLE (OgreAtomDraw.cpp): one R32_UINT texel per GPU
@@ -5789,6 +5804,9 @@ public:
     /// one frame in (the id pass of a scene whose table is not live yet clears the
     /// depth and draws nothing; every item is still on PBS then).
     bool atomDrawWanted() const;
+    /// THE ID PASS'S OCCLUSION IS WANTED here (ChainDesc::atomOcclusion): the split is,
+    /// and the occlusion's measuring door is open.
+    bool atomOcclusionWanted() const { return atomDrawWanted() && mAtomOcclusionEnabled; }
     /// Once per frame after the GPU scene's update (OgreEngine's frame hook): the
     /// screen decode's draws for the words the atom items wear, and the witness
     /// that re-routes the items of a material whose permutation moved in place.
@@ -5807,6 +5825,9 @@ private:
     /// THE MEASUREMENT DOOR (the cost table's paired arms in one process): false
     /// routes every item to PBS and every chain builds without the id pass.
     bool mAtomDrawEnabled = true;
+    /// ...and THE OCCLUSION'S (ATOM-OCCLUSION-1): false builds every chain with the id
+    /// pass frustum-only (no pyramid, no late pass). Not saved; a new scene starts on.
+    bool mAtomOcclusionEnabled = true;
     /// THE ATOM VIEW (not saved; a new scene starts Off).
     AtomView mAtomView = AtomView::Off;
     Ogre::TextureGpu *mAtomViewTable = nullptr;
@@ -5879,8 +5900,12 @@ public:
     /// never share the list one of them is drawing from).
     /// `requestMs` (optional): the host's share — the request's write and the jobs'
     /// bindings, after the buffers exist (GpuCullResult::requestMs).
+    /// `prior` (ATOM-OCCLUSION-1's DISOCCLUSION PASS): another list's cull of this frame —
+    /// only the instances ITS depth test rejected are tested (the `cull_retest`
+    /// permutation), against `hzb`; null is an ordinary request.
     bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
-                       std::string &err, bool keepBindings = false, double *requestMs = nullptr);
+                       std::string &err, bool keepBindings = false, double *requestMs = nullptr,
+                       const GpuCull *prior = nullptr);
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
@@ -6337,6 +6362,24 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+/// THE FIRST CULL'S HISTORY (ATOM-OCCLUSION-1, OgreView::atomOcclusionHistory): what the
+/// pyramid in a view's `jahHzb` was built from. The late pass writes it once the
+/// pyramid of its frame is built; the next frame's first cull tests against that
+/// pyramid only while everything here still names the same pyramid.
+struct AtomOcclusionHistory {
+    bool valid = false;
+    /// The row-major view-projection the pyramid's depth was DRAWN with, in the cull's
+    /// row convention (OgreAtomIdPass.cpp's cullMatrixOf).
+    float viewProj[16] = {};
+    /// The viewport rectangle in mip 0, and the pyramid's size and levels.
+    unsigned rect[4] = { 0u, 0u, 0u, 0u };
+    unsigned width = 0u, height = 0u, levels = 0u;
+    /// The workspace generation (a rebuilt graph's pyramid is a new texture) and the
+    /// scene the depth was of (a switch of world is a cut).
+    unsigned generation = 0u;
+    const void *scene = nullptr;
+};
+
 class OgreView final : public View {
 public:
     /// On-screen: `window` is set. Offscreen: `texture` is set. Never both.
@@ -6433,6 +6476,8 @@ public:
     bool attachWorkspace();
     /// This view's current chain shape — what the builder is asked for.
     ChainDesc chainDesc() const;
+    /// chainDesc's last word: ChainDesc::atomOcclusion and the pyramid it needs.
+    void finishAtomOcclusion(ChainDesc &d) const;
 
     // ---- VR (SPECS/VR_SPEC.md §4.3) ---------------------------------------
     /// Makes this view's chain a STEREO one: every scene pass renders both eyes
@@ -6723,6 +6768,40 @@ public:
     /// The view's own GPU cull (the id pass's list): one per view, so two views of
     /// one scene in a frame never share the list the other is drawing from.
     detail::GpuCull &atomCull() { return mAtomCull; }
+    /// THE LATE LIST (ATOM-OCCLUSION-1): the disocclusion pass's cull, its own buffers.
+    detail::GpuCull &atomCullLate() { return mAtomCullLate; }
+    /// Whether this view's chain carries the two-pass occlusion (ChainDesc::atomOcclusion).
+    bool chainAtomOcclusion() const { return mChainAtomOcclusion; }
+    /// WHAT THE FIRST CULL TESTS AGAINST (OgreAtomIdPass.cpp): the matrix the pyramid
+    /// in `jahHzb` was BUILT with (the late pass's draw of the previous frame), the
+    /// viewport rectangle it covered, the pyramid's size, the workspace generation and
+    /// the scene — a pyramid of another graph, size or world is not tested against.
+    AtomOcclusionHistory &atomOcclusionHistory() { return mAtomOcclHistory; }
+    /// Whether THIS frame's first cull tested against a pyramid (set by the first pass,
+    /// read by the late one: nothing was rejected otherwise).
+    void setAtomFirstTested(bool tested) { mAtomFirstTested = tested; }
+    bool atomFirstTested() const { return mAtomFirstTested; }
+    /// The late pass's share (the stats ring's second half): its triangles and
+    /// survivors, the instances the frame's depth test REJECTED (not drawn: occluded)
+    /// and the late pass's survivors (DISOCCLUDED — drawn only because the second test
+    /// found them visible).
+    void setAtomLateStats(unsigned long long triangles, unsigned survivors, unsigned occluded,
+                          unsigned disoccluded) {
+        mAtomLateTriangles = triangles;
+        mAtomLateSurvivors = survivors;
+        mAtomOccluded = occluded;
+        mAtomDisoccluded = disoccluded;
+    }
+    bool atomLateStats(unsigned long long &triangles, unsigned &survivors) const {
+        triangles = mAtomLateTriangles;
+        survivors = mAtomLateSurvivors;
+        return mChainAtomDraw && mAtomStatsValid;
+    }
+    bool atomOcclusionStats(unsigned &occluded, unsigned &disoccluded) const {
+        occluded = mAtomOccluded;
+        disoccluded = mAtomDisoccluded;
+        return mChainAtomOcclusion && mAtomStatsValid;
+    }
     /// THE ID PASS'S SHARE OF THE FRAME'S STATS (renderStats): its indirect draws never
     /// reach Ogre's RenderingMetrics, so the cull's own counters (survivors, and the
     /// triangles the draws job adds up) are copied into a mapped ring and read back
@@ -6734,6 +6813,12 @@ public:
         mAtomStatsValid = true;
     }
     bool atomStats(unsigned long long &triangles, unsigned &survivors) const {
+        triangles = mAtomTriangles + mAtomLateTriangles;
+        survivors = mAtomSurvivors + mAtomLateSurvivors;
+        return mChainAtomDraw && mAtomStatsValid;
+    }
+    /// ...the FIRST pass's share alone (its pass's metrics row).
+    bool atomFirstStats(unsigned long long &triangles, unsigned &survivors) const {
         triangles = mAtomTriangles;
         survivors = mAtomSurvivors;
         return mChainAtomDraw && mAtomStatsValid;
@@ -6859,6 +6944,16 @@ private:
     /// ATOM S3-DRAW: the shape the definition was built with, the listener that
     /// arms the screen decode, and the view's cull buffers.
     bool mChainAtomDraw = false;
+    /// ATOM-OCCLUSION-1: the shape's occlusion (ChainDesc::atomOcclusion), the LATE
+    /// list (the disocclusion pass's own cull: one list per pass, so the late draw
+    /// never reads the buffers the first one is still drawing from) and the history
+    /// the first cull tests against.
+    bool mChainAtomOcclusion = false;
+    detail::GpuCull mAtomCullLate;
+    AtomOcclusionHistory mAtomOcclHistory;
+    bool mAtomFirstTested = false;
+    unsigned long long mAtomLateTriangles = 0ull;
+    unsigned mAtomLateSurvivors = 0u, mAtomOccluded = 0u, mAtomDisoccluded = 0u;
     AtomDrawListenerPtr mAtomListener;
     detail::GpuCull mAtomCull;
     unsigned long long mAtomTriangles = 0ull;
@@ -7440,6 +7535,7 @@ public:
     bool hzbStatus(View *view, HzbStatus &out) const override;
     bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                       unsigned &width, unsigned &height) override;
+    bool readAtomIds(View *view, std::vector<uint32_t> &words, unsigned &width, unsigned &height) override;
     // ---- The ray job's card read, asked directly (OgreRayQuery.cpp) ----
     bool cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
                         std::vector<CardReadPick> &out) override;

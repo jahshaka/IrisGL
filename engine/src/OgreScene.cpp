@@ -25,6 +25,9 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     // draws through PBS — the cost table's reference arm in the app, and the A/B
     // that attributes a moved picture to the split.
     if (std::getenv("JAHSHAKA_ATOM_DRAW_OFF")) mAtomDrawEnabled = false;
+    // ...and the occlusion's (ATOM-OCCLUSION-1): the frustum-only id pass, the A/B that
+    // proves a picture (the selftest's four hashes) does not move with the depth test.
+    if (std::getenv("JAHSHAKA_ATOM_OCCLUSION_OFF")) mAtomOcclusionEnabled = false;
 }
 
 OgreScene::~OgreScene() { destroy(); }

@@ -199,7 +199,7 @@ void unbindCullJobs(Ogre::HlmsComputeJob *test, Ogre::HlmsComputeJob *compact,
     const Ogre::DescriptorSetUav::BufferSlot empty =
         Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
     if (test)
-        for (uint8_t i = 0; i < 7u; ++i) test->_setUavBuffer(i, empty);
+        for (uint8_t i = 0; i < test->getNumUavUnits(); ++i) test->_setUavBuffer(i, empty);
     if (compact)
         for (uint8_t i = 0; i < 4u; ++i) compact->_setUavBuffer(i, empty);
     if (draws) {
@@ -262,7 +262,8 @@ double measureJob(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc, Ogre::HlmsCompu
 // OgreAtomIdPass.cpp) calls from inside a pass, where a readback would stall the
 // frame. The answer stays in the cull's buffers (count, survivors, levels, draws).
 bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
-                              std::string &err, bool keepBindings, double *requestMs) {
+                              std::string &err, bool keepBindings, double *requestMs,
+                              const GpuCull *prior) {
     ensureGpuTables();
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
     Ogre::HlmsCompute *hc =
@@ -283,6 +284,12 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
     // THE TABLE'S CAPACITY, not this request's instance count (see `ensure`).
     if (!cull.ensure(rs->getVaoManager(), std::max(mGpuScene.slotCapacity(), 1u), err))
         return false;
+    // THE DISOCCLUSION PASS reads the first pass's visibility words by slot: its list
+    // must cover the table this request tests.
+    if (prior && (!prior->visible() || prior->capacity() < instances)) {
+        err = "the disocclusion pass's first list does not cover the table";
+        return false;
+    }
     // THE CUT (mode 3): its two jobs and its per-frame buffers at the current budget,
     // and the DAG tables on the device before anything binds them.
     const bool cutMode = req.mode >= 3u;
@@ -328,9 +335,10 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.cut[0] = cutMode ? cull.cutIndexBudget() : 0u;
         p.cut[1] = cutMode ? cull.cutRecordBudget() : 0u;
         p.cut[2] = cutMode ? cull.cutMainBudget() : 0u;
+        for (int i = 0; i < 4; ++i) p.hzbRect[i] = hzb ? req.hzbRect[i] : 0u;
         cull.params()->upload(&p, 0, 1u);
-        const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u,
-                                                          0u, 1u, 1u, 0u, 0u, 0u, 0u, 0u };
+        const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u, 0u, 1u,
+                                                          1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
         cull.count()->upload(reset, 0, GpuCull::kCountElements);
 
         // ---- job 1: test ---------------------------------------------------
@@ -343,6 +351,9 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         // cache needs (patch 0063 skips a shader that reflects array bindings).
         test->setProperty("cull_hzb", hzb ? 1 : 0);
         test->setNumTexUnits(hzb ? 1u : 0u);
+        // THE DISOCCLUSION PASS's permutation: one more buffer, the first list's words.
+        test->setProperty("cull_retest", prior ? 1 : 0);
+        test->setNumUavUnits(prior ? 8u : 7u);
         if (hzb) {
             Ogre::DescriptorSetTexture2::TextureSlot ts =
                 Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
@@ -356,6 +367,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         test->_setUavBuffer(4u, cullSlot(cull.visible(), Ogre::ResourceAccess::Write));
         test->_setUavBuffer(5u, cullSlot(cull.levels(), Ogre::ResourceAccess::Write));
         test->_setUavBuffer(6u, cullSlot(cull.held(), Ogre::ResourceAccess::ReadWrite));
+        if (prior) test->_setUavBuffer(7u, cullSlot(prior->visible(), Ogre::ResourceAccess::Read));
         const uint32_t groups =
             (instances + GpuCull::kThreadsPerGroup - 1u) / GpuCull::kThreadsPerGroup;
         test->setNumThreadGroups(std::max(groups, 1u), 1u, 1u);
@@ -456,6 +468,7 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
         readUints(mGpuCull.count(), 0u, GpuCull::kCountElements, counter);
         out.survivors = counter.size() > 0 ? counter[0] : 0u;
         out.indirectGroups = counter.size() > 1 ? counter[1] : 0u;
+        out.occluded = counter.size() > 16 ? counter[16] : 0u;
         if (out.survivors > instances) out.survivors = instances;
 
         if (req.mode >= 1u || readBack)

@@ -191,14 +191,15 @@ void AtomDrawListenerDeleter::operator()(Ogre::CompositorWorkspaceListener *l) c
 }
 
 void OgreView::syncAtomDraw() {
-    const bool atomDraw = chainDesc().atomDraw;
+    const ChainDesc cd = chainDesc();
+    const bool atomDraw = cd.atomDraw;
     if (mScene) {
         const bool on = mScene->atomDrawWanted();
         mScene->noteAtomPbsView(this, on && mStereo, on && !mStereo && !atomDraw);
     }
     // THE SHAPE: the scene's split decides it, and a view learns its scene late
     // (and its target's sample count can change under it).
-    if (mChainAtomDraw != atomDraw) rebuildWorkspaceDef();
+    if (mChainAtomDraw != atomDraw || mChainAtomOcclusion != cd.atomOcclusion) rebuildWorkspaceDef();
     const bool wanted = mChainAtomDraw && mScene && mCamera;
     if (!wanted) {
         if (mAtomListener) {
@@ -227,6 +228,12 @@ void OgreScene::setAtomDrawEnabled(bool on) {
     // description push — the engine's per-frame view sync compares shapes.
     for (Node *n : mItemNodes)
         if (n) markGpuSlotDirty(*n);
+}
+
+void OgreScene::setAtomOcclusionEnabled(bool on) {
+    // A SHAPE CHANGE and nothing else: every view of this scene re-derives its chain
+    // (the pyramid and the late pass come or go) on its next sync, as for the split.
+    mAtomOcclusionEnabled = on;
 }
 
 void OgreScene::placeAtomQueue(const Node &n, bool atom) const {
@@ -548,6 +555,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         st.cutOverflowIndices = cs.overflowIndices;
         st.cutIndexBudget = cs.indexBudget;
         st.cutTriangles = tris;
+        st.occlusion = v->atomOcclusionStats(st.occluded, st.disoccluded);
         break;
     }
     return st;

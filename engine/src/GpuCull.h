@@ -47,8 +47,13 @@ struct GpuCullParams {
     /// capacity in indices, y = the drawn-cluster record capacity, z = where the stream's
     /// COARSE RESERVE begins (the main region is [0, z)), w = 0.
     uint32_t cut[4] = {};
+    /// THE VIEWPORT'S RECTANGLE IN THE PYRAMID'S MIP 0 (ATOM-OCCLUSION-1): x0, y0, width,
+    /// height in texels — NDC spans the pass's viewport, which is a letterboxed view's
+    /// inset and not its whole target. Width 0 = the whole pyramid. Read by the depth
+    /// test alone; the jobs that declare a shorter struct read its prefix.
+    uint32_t hzbRect[4] = {};
 };
-static_assert(sizeof(GpuCullParams) == 240, "the cull request's layout is a shader contract");
+static_assert(sizeof(GpuCullParams) == 256, "the cull request's layout is a shader contract");
 
 class GpuCull {
 public:
@@ -132,7 +137,10 @@ public:
     /// (instance, cluster) pairs the rule evaluated, [15] the coarse reserve's cursor.
     /// (Since the fix round: [12] = instances drawn COARSE — their root cut, from the
     /// reserve — and [13] = instances drawn NOTHING, neither fitting.)
-    static constexpr uint32_t kCountElements = 16u;
+    /// THE DEPTH TEST'S (ATOM-OCCLUSION-1): [16] the instances the pyramid REJECTED
+    /// (the test's visibility word 2 — the set the disocclusion pass tests again);
+    /// [17..19] zero.
+    static constexpr uint32_t kCountElements = 20u;
     static constexpr uint32_t kIndirectOffsetBytes = 4u;
     static constexpr uint32_t kCutIndirectOffsetBytes = 5u * 4u;
     static constexpr uint32_t kEmitIndirectOffsetBytes = 8u * 4u;

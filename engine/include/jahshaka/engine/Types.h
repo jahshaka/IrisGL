@@ -4522,6 +4522,13 @@ struct AtomDrawStatus {
     unsigned cutClusters = 0, cutIndices = 0, cutEvaluated = 0;
     unsigned cutOverflow = 0, cutMissing = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
     unsigned long long cutTriangles = 0ull;
+    /// THE OCCLUSION (ATOM-OCCLUSION-1), from the same view and the same read: whether
+    /// its chain culls against the depth pyramid (the door open and the id pass live),
+    /// the instances the frame's depth test REJECTED — in the frustum, not drawn — and
+    /// the instances the late pass DISOCCLUDED (rejected against the previous frame's
+    /// pyramid, found visible against this frame's, drawn by the late pass).
+    bool     occlusion = false;
+    unsigned occluded = 0, disoccluded = 0;
 };
 
 /// The id pass's cut counters, one view's (AtomDrawStatus carries them).
@@ -6679,6 +6686,10 @@ struct GpuCullRequest {
     /// 0 = frustum only. Otherwise the number of mip levels in the pyramid to
     /// test against, which the engine takes from the view's own HzbStatus.
     unsigned hzbLevels = 0u;
+    /// THE VIEWPORT'S RECTANGLE IN THE PYRAMID'S MIP 0 (x0, y0, width, height in
+    /// texels): NDC spans the pass's viewport — a letterboxed view's inset, not its
+    /// whole target. Width 0 (the default) = the whole pyramid.
+    unsigned hzbRect[4] = { 0u, 0u, 0u, 0u };
     /// The level rule's input, in SAMPLES (the tier's Atom column,
     /// `GiQualityFacts::pixelTolerance`, times the session's lodBias). 0 keeps
     /// every survivor on level 0.
@@ -6713,6 +6724,9 @@ struct GpuCullResult {
     unsigned instances = 0;
     /// THE COUNT THE GPU WROTE, read back from the count buffer.
     unsigned survivors = 0;
+    /// Instances the DEPTH TEST rejected (in the frustum, behind the pyramid; count[16]):
+    /// 0 with no pyramid (ATOM-OCCLUSION-1).
+    unsigned occluded = 0;
     /// The thread-group count job 2 left for job 3, i.e. what the indirect
     /// dispatch ran: ceil(survivors / 64). 0 when the mode did not reach job 3.
     unsigned indirectGroups = 0;

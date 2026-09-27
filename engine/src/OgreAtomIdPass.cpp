@@ -144,13 +144,15 @@ void addressOf(Ogre::UavBufferPacked *buf, uint32_t out[2]) {
 /// memory every frame and read back once the frame that wrote them has retired. An
 /// AsyncTicket would submit the command buffer mid-frame (VulkanAsyncTicket's ctor
 /// commits it) — measured: +1.0 ms GPU and +0.45 ms CPU on the default scene.
+/// TWO HALVES A SLOT (ATOM-OCCLUSION-1): the first list's counters and the LATE list's
+/// (the disocclusion pass's), each written by its own pass and read on its own.
 struct StatsRing {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     const uint32_t *mapped = nullptr;
     uint32_t slots = 0u;
-    uint32_t writtenAt[8] = {};
-    bool written[8] = {};
+    uint32_t writtenAt[2][8] = {};
+    bool written[2][8] = {};
 };
 std::unordered_map<const OgreView *, StatsRing> gRings;
 /// Rings of views that went away, with the frame they left at: destroyed once that
@@ -163,7 +165,8 @@ uint32_t currentFrame() {
     return rs && rs->getVaoManager() ? rs->getVaoManager()->getFrameCount() : 0u;
 }
 
-constexpr VkDeviceSize kStatsSlotBytes = GpuCull::kCountElements * sizeof(uint32_t);
+constexpr VkDeviceSize kStatsHalfBytes = GpuCull::kCountElements * sizeof(uint32_t);
+constexpr VkDeviceSize kStatsSlotBytes = 2u * kStatsHalfBytes;
 
 void destroyRing(StatsRing &r) {
     if (!gId.dev) return;
@@ -225,47 +228,73 @@ void reapGrave(uint32_t frame) {
     }
 }
 
-void cycleStats(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreView *view, GpuCull &cull) {
-    reapGrave(vao->getFrameCount());
-    if (!cull.count()) return;
+/// `late` names the half: false the first list (the id pass), true the late list (the
+/// disocclusion pass, whose read also completes the first's: the cut's counters of the
+/// frame are the two lists' sums). `cull` null = this frame's late pass recorded no cull
+/// (the first one tested nothing): its half is ZEROED for the frame, so the counters it
+/// reads back later describe that frame and not an older one.
+void cycleStats(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreView *view, GpuCull *cull,
+                bool late) {
+    if (!late) reapGrave(vao->getFrameCount());
+    if (cull && !cull->count()) return;
     StatsRing &r = gRings[view];
     if (!ensureRing(device, r, uint32_t(vao->getDynamicBufferMultiplier()) + 1u)) return;
     const uint32_t frame = vao->getFrameCount();
     const uint32_t s = frame % r.slots;
-    if (r.written[s] && frame - r.writtenAt[s] >= r.slots) {
-        const uint32_t *w = r.mapped + size_t(s) * GpuCull::kCountElements;
-        view->setAtomStats(w[4], w[0]);
+    const uint32_t h = late ? 1u : 0u;
+    if (r.written[h][s] && frame - r.writtenAt[h][s] >= r.slots) {
+        const uint32_t *w = r.mapped + size_t(s) * 2u * GpuCull::kCountElements + h * GpuCull::kCountElements;
+        GpuCull &list = late ? view->atomCullLate() : view->atomCull();
         // THE CUT'S WORDS (GpuCull.h's count layout): drawn clusters, indices
         // reserved, instances that did not fit, the pairs evaluated — and the
         // budget grows before the next request when something did not fit.
+        // The late half ADDS to the first's (read earlier in this same frame, from the
+        // same frame's slot): the cut's counters are the frame's, both lists summed.
         AtomCutStats cs;
-        cs.clusters = std::min(w[8], cull.cutRecordBudget());
-        cs.indices = w[11];
-        cs.overflow = w[12];
-        cs.missing = w[13];
-        cs.overflowIndices = w[11];
-        cs.evaluated = w[14];
-        cs.indexBudget = cull.cutIndexBudget();
+        if (late) view->atomCutStats(cs);
+        cs.clusters += std::min(w[8], list.cutRecordBudget());
+        cs.indices += w[11];
+        cs.overflow += w[12];
+        cs.missing += w[13];
+        cs.overflowIndices += w[11];
+        cs.evaluated += w[14];
+        if (!late) {
+            cs.indexBudget = list.cutIndexBudget();
+            view->setAtomStats(w[4], w[0]);
+            // No late read follows on a frame-only chain: the late share is nothing.
+            if (!view->chainAtomOcclusion()) view->setAtomLateStats(0ull, 0u, 0u, 0u);
+        } else {
+            // THE OCCLUSION'S WORDS: the late test's rejects are what the frame's depth
+            // test kept out (occluded), its survivors what it disoccluded.
+            view->setAtomLateStats(w[4], w[0], w[16], w[0]);
+        }
         view->setAtomCutStats(cs);
-        cull.noteCutOverflow(w[12] + w[13], w[11], w[8]);
-        // THE SCENE'S HIGH-WATER MARK: every later view of this scene is born at it.
+        list.noteCutOverflow(w[12] + w[13], w[11], w[8]);
+        // THE SCENE'S HIGH-WATER MARK: every later view of this scene is born at it,
+        // and both lists of a view are sized by it (the late list can hold the whole
+        // frame the frame after a cut: an overflow would draw coarse, never exact).
         if (OgreScene *sc = view->ogreScene()) sc->noteCutIndexNeed(w[11]);
     }
     VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
-    VkMemoryBarrier mb{};
-    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
-    VkBuffer src = VK_NULL_HANDLE;
-    VkDeviceSize srcOff = 0;
-    bufferOf(cull.count(), src, srcOff);
-    VkBufferCopy c{};
-    c.srcOffset = srcOff;
-    c.dstOffset = VkDeviceSize(s) * kStatsSlotBytes;
-    c.size = kStatsSlotBytes;
-    vkCmdCopyBuffer(cmd, src, r.buffer, 1, &c);
+    const VkDeviceSize dst = VkDeviceSize(s) * kStatsSlotBytes + VkDeviceSize(h) * kStatsHalfBytes;
+    if (cull) {
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        VkBuffer src = VK_NULL_HANDLE;
+        VkDeviceSize srcOff = 0;
+        bufferOf(cull->count(), src, srcOff);
+        VkBufferCopy c{};
+        c.srcOffset = srcOff;
+        c.dstOffset = dst;
+        c.size = kStatsHalfBytes;
+        vkCmdCopyBuffer(cmd, src, r.buffer, 1, &c);
+    } else {
+        vkCmdFillBuffer(cmd, r.buffer, dst, kStatsHalfBytes, 0u);
+    }
     // ...and the request's reset (a transfer write) waits for this read; the host
     // reads the slot only after the frame's fence, which makes the write visible.
     VkMemoryBarrier hb{};
@@ -275,8 +304,8 @@ void cycleStats(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreView *vie
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0,
                          nullptr);
-    r.written[s] = true;
-    r.writtenAt[s] = frame;
+    r.written[h][s] = true;
+    r.writtenAt[h][s] = frame;
 }
 
 VkShaderModule makeModule(VkDevice dev, const uint32_t *code, size_t bytes) {
@@ -454,14 +483,61 @@ bool ensurePipeline(Ogre::VulkanRenderSystem *vkRs, VkFormat colour, VkFormat de
     return true;
 }
 
-/// The recorder (AtomPassProvider's `atom_id`).
+/// THE PASS'S DRAW MATRIX (HlmsPbs::preparePassHash's): the RS-depth projection, its y
+/// row negated where the pass requires texture flipping, times the camera's view —
+/// what the vertex stage draws with, and therefore what the depth the pyramid is
+/// built from was drawn with.
+Ogre::Matrix4 drawMatrixOf(Ogre::Camera *cam, const Ogre::RenderPassDescriptor *rpd) {
+    Ogre::Matrix4 proj = cam->getProjectionMatrixWithRSDepth();
+    if (rpd->requiresTextureFlipping())
+        for (int c = 0; c < 4; ++c) proj[1][c] = -proj[1][c];
+    return proj * cam->getVrViewMatrix(0);
+}
+
+/// THE MATRIX A CULL TESTS A PYRAMID WITH, from the pass's draw matrix: the cull turns NDC
+/// into rows as `0.5 - y / 2` (JahCullTest_cs — the convention of a pyramid of depth Ogre
+/// drew into a flipping target through the camera's own matrix), while this pass draws
+/// through a POSITIVE-height viewport, where a row is `0.5 + y / 2` of its draw matrix:
+/// the draw matrix with its y row negated makes the one the cull reads rows of correctly,
+/// flipping target or not.
+Ogre::Matrix4 cullMatrixOf(const Ogre::Matrix4 &draw) {
+    Ogre::Matrix4 m = draw;
+    for (int c = 0; c < 4; ++c) m[1][c] = -m[1][c];
+    return m;
+}
+
+/// The pass's viewport rectangle in texels of its target (Ogre's Viewport derives its
+/// actual rectangle from the definition's relative one the same way).
+void viewportRectOf(const Ogre::CompositorPassDef::ViewportRect &r, uint32_t tw, uint32_t th, unsigned out[4]) {
+    out[0] = unsigned(int(r.mVpLeft * float(tw)));
+    out[1] = unsigned(int(r.mVpTop * float(th)));
+    out[2] = unsigned(int(r.mVpWidth * float(tw)));
+    out[3] = unsigned(int(r.mVpHeight * float(th)));
+}
+
+/// The recorder (AtomPassProvider's `atom_id`, and `atom_id_late` with `late`).
 ///
-/// THE RENDER PASS ALWAYS BEGINS: it is what clears the scene depth every later pass
-/// of the view LOADS (and the id image). Whatever stops the draw — no view in the
-/// registry yet, a GPU scene not live, a pipeline or a cull that did not record —
+/// THE FIRST PASS'S RENDER PASS ALWAYS BEGINS: it is what clears the scene depth every
+/// later pass of the view LOADS (and the id image). Whatever stops the draw — no view in
+/// the registry yet, a GPU scene not live, a pipeline or a cull that did not record —
 /// stops the DRAW only; an early return before the begin would hand the prepass and
 /// the opaque pass last frame's depth.
-void recordIdPass(AtomPassContext &ctx) {
+///
+/// THE TWO-PASS OCCLUSION (ATOM-OCCLUSION-1, ChainDesc::atomOcclusion). The FIRST pass
+/// culls against the PREVIOUS frame's pyramid — still in `jahHzb`, since nothing has
+/// rebuilt it yet this frame — projected with the matrix THAT pyramid's depth was drawn
+/// with (the history), so the pyramid is never misread whatever the camera did since:
+/// a cut only makes its prediction poor, never the answer wrong. The chain then builds
+/// the pyramid from the first pass's depth; the LATE pass tests the set the first cull
+/// rejected against it with THIS frame's matrix and draws the survivors into the same
+/// id image and depth. An instance the late test also rejects lies behind depth that
+/// is in the final picture (the first pass's surfaces are a subset of it), so no pixel
+/// it could have won is lost: the id image equals the frustum-only one (the conservative
+/// test: the farthest depth over every texel of the box's rectangle, the box's nearest
+/// point, a relative margin). With NO usable history — a view's first frame, a rebuilt
+/// graph, a resized pyramid, another world — the first cull tests nothing and the late
+/// pass records nothing: the frame is the frustum-only frame.
+void recordIdPass(AtomPassContext &ctx, bool late) {
     auto *pass = static_cast<AtomPass *>(ctx.pass);
     if (!pass || !pass->renderPassDesc()) return;
     const Ogre::RenderPassDescriptor *rpd = pass->renderPassDesc();
@@ -475,6 +551,10 @@ void recordIdPass(AtomPassContext &ctx) {
     GpuScene *gs = scene ? &scene->gpuScene() : nullptr;
     Ogre::VulkanDevice *device = vkRs->getVulkanDevice();
     const Ogre::CompositorPassDef::ViewportRect &vpRect = pass->getDefinition()->mVpRect[0];
+    const uint32_t tw = uint32_t(ids->getWidth()), th = uint32_t(ids->getHeight());
+    // THE LATE PASS draws only on a chain that carries it, after a first pass that
+    // tested (and so may have rejected something).
+    if (late && (!view || !view->chainAtomOcclusion())) return;
     bool draw = cam && gs && gs->live();
     if (draw) {
         const VkFormat colourFmt = Ogre::VulkanMappings::get(ids->getPixelFormat());
@@ -482,39 +562,60 @@ void recordIdPass(AtomPassContext &ctx) {
         draw = ensurePipeline(vkRs, colourFmt, depthFmt);
     }
     if (draw) gs->flushGeomRows();
+    // THE PYRAMID (ChainDesc::atomOcclusion): the chain's `jahHzb`, the texture both
+    // passes' tests bind.
+    Ogre::TextureGpu *hzb = nullptr;
+    if (view && view->chainAtomOcclusion()) {
+        JAH_TRY { hzb = pass->getParentNode()->getDefinedTexture(Ogre::IdString("jahHzb")); }
+        catch (const Ogre::Exception &) { hzb = nullptr; }
+    }
+    unsigned rect[4] = { 0u, 0u, 0u, 0u };
+    viewportRectOf(vpRect, tw, th, rect);
+    Ogre::Matrix4 vpm = Ogre::Matrix4::IDENTITY;
     GpuCull *cullPtr = nullptr;
     if (draw) {
-        // ---- (0) THE LIST'S WRITE-AFTER-READ: the previous frame's draw read it (the
-        // commands, the compacted stream as its index buffer, the slot bases in the
-        // vertex stage and the triangle words in the fragment stage). ----
-        {
-            VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
-            vkCmdPipelineBarrier(cmd,
-                                 VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
-                                 nullptr, 0, nullptr, 0, nullptr);
-        }
-
-        // ---- (1) THE CULL, into the view's own list ------------------------------
         // THE CAMERA'S ASPECT FIRST (CompositorPassScene::execute -> Viewport::
         // _setupAspectRatio): the scene passes set it when they run, and this pass
         // runs before all of them — a view sharing its camera with a view of another
         // shape (an editor shot) would otherwise cull and project with the other one's.
         {
-            const int aw = int(vpRect.mVpWidth * float(ids->getWidth()));
-            const int ah = int(vpRect.mVpHeight * float(ids->getHeight()));
+            const int aw = int(vpRect.mVpWidth * float(tw));
+            const int ah = int(vpRect.mVpHeight * float(th));
             const Ogre::Real aspect = Ogre::Real(aw) / Ogre::Real(std::max(1, ah));
             if (cam->getAutoAspectRatio() && cam->getAspectRatio() != aspect) cam->setAspectRatio(aspect);
         }
+        vpm = drawMatrixOf(cam, rpd);
+        AtomOcclusionHistory &hist = view->atomOcclusionHistory();
+        // WHICH PYRAMID THIS PASS TESTS AGAINST, and with which matrix.
+        Ogre::TextureGpu *testAgainst = nullptr;
         GpuCullRequest req;
         // THE PASS'S OWN HEIGHT — the viewport's actual rows, the letterbox inset included
         // (Viewport::getActualHeight, what the CPU strategy reads for the casters and the
         // remainder: OgreMesh.cpp's worldPerPixel) — never the whole target's.
-        fillCullFrustum(cam, float(std::max(1, int(vpRect.mVpHeight * float(ids->getHeight())))), req);
+        fillCullFrustum(cam, float(std::max(1, int(vpRect.mVpHeight * float(th)))), req);
+        if (!late) {
+            // THE PREVIOUS FRAME'S PYRAMID, while the history still names it.
+            const bool usable = hzb && hist.valid && hist.generation == view->workspaceGeneration() &&
+                                hist.scene == scene && hist.width == hzb->getWidth() &&
+                                hist.height == hzb->getHeight() && hist.levels == hzb->getNumMipmaps() &&
+                                std::equal(rect, rect + 4, hist.rect);
+            view->setAtomFirstTested(usable);
+            if (usable) {
+                testAgainst = hzb;
+                std::memcpy(req.viewProj, hist.viewProj, sizeof(req.viewProj));
+                std::copy(hist.rect, hist.rect + 4, req.hzbRect);
+            }
+        } else if (hzb && view->atomFirstTested()) {
+            // THIS FRAME'S, just built from the first pass's depth.
+            testAgainst = hzb;
+            const Ogre::Matrix4 cm = cullMatrixOf(vpm);
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) req.viewProj[r * 4 + c] = float(cm[r][c]);
+            std::copy(rect, rect + 4, req.hzbRect);
+        }
         req.flagsRequired = kGpuVisible | kGpuAtom;
         req.flagsForbidden = 0u;
-        req.hzbLevels = 0u;
+        req.hzbLevels = testAgainst ? testAgainst->getNumMipmaps() : 0u;
         // THE VIEW STRATEGY'S OWN BUDGET (kLodBudgetPixels), scaled by the scene's LOD bias
         // (OgreScene::applyLodValues divides the baked thresholds by it — the same
         // dial seen from the other side).
@@ -524,18 +625,54 @@ void recordIdPass(AtomPassContext &ctx) {
         // frontier invisibly by construction (Nanite has none). THE CUT (mode 3).
         req.lodHysteresis = 0.0f;
         req.mode = 3u;
-        std::string err;
-        cullPtr = &view->atomCull();
-        cycleStats(device, vkRs->getVaoManager(), view, *cullPtr);   // before this request zeroes them
-        // NO DAG-BEARING MESH ATTACHED YET (a new project's first frames): no cluster
-        // tables, so there is no cut to record — the depth is still cleared below.
-        gs->flushClusterTables();
-        if (!gs->clusterBuffer() || !gs->groupBuffer()) {
+        cullPtr = late ? &view->atomCullLate() : &view->atomCull();
+        if (late && !testAgainst) {
+            // THE FIRST PASS TESTED NOTHING: nothing was rejected, there is nothing to
+            // draw — the frame is the frustum-only frame. Its half of the ring says so.
+            cycleStats(device, vkRs->getVaoManager(), view, nullptr, true);
             draw = false;
-        } else if (!scene->recordGpuCull(*cullPtr, req, nullptr, err)) {
-            logOnce("the cull did not record (" + err + ")");
-            draw = false;
+        } else {
+            // ---- (0) THE LIST'S WRITE-AFTER-READ: the previous frame's draw read it
+            // (the commands, the compacted stream as its index buffer, the slot bases in
+            // the vertex stage and the triangle words in the fragment stage). ----
+            {
+                VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+                vkCmdPipelineBarrier(cmd,
+                                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
+                                     nullptr, 0, nullptr, 0, nullptr);
+            }
+            // ---- (1) THE CULL, into the pass's own list ---------------------------
+            std::string err;
+            cycleStats(device, vkRs->getVaoManager(), view, cullPtr, late);   // before this request zeroes them
+            // NO DAG-BEARING MESH ATTACHED YET (a new project's first frames): no cluster
+            // tables, so there is no cut to record — the depth is still cleared below.
+            gs->flushClusterTables();
+            if (!gs->clusterBuffer() || !gs->groupBuffer()) {
+                draw = false;
+            } else if (!scene->recordGpuCull(*cullPtr, req, testAgainst, err, false, nullptr,
+                                             late ? &view->atomCull() : nullptr)) {
+                logOnce("the cull did not record (" + err + ")");
+                draw = false;
+            }
         }
+        if (late) {
+            // THE HISTORY THE NEXT FRAME'S FIRST CULL TESTS AGAINST: the pyramid of this
+            // frame (built from the first pass's depth, drawn with this matrix).
+            hist.valid = hzb != nullptr;
+            const Ogre::Matrix4 cm = cullMatrixOf(vpm);
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) hist.viewProj[r * 4 + c] = float(cm[r][c]);
+            std::copy(rect, rect + 4, hist.rect);
+            hist.width = hzb ? hzb->getWidth() : 0u;
+            hist.height = hzb ? hzb->getHeight() : 0u;
+            hist.levels = hzb ? hzb->getNumMipmaps() : 0u;
+            hist.generation = view->workspaceGeneration();
+            hist.scene = scene;
+        }
+    } else if (late && view) {
+        view->atomOcclusionHistory().valid = false;
     }
     if (draw) {
         // ---- (2) THE EDGES THE SOLVER CANNOT EXPRESS -----------------------------
@@ -550,12 +687,14 @@ void recordIdPass(AtomPassContext &ctx) {
                                  VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 1, &mb, 0, nullptr, 0, nullptr);
     }
+    // THE LATE PASS WITH NOTHING TO DRAW records nothing at all: the first pass's id
+    // image and depth stand, and the next scene pass's own barriers take the depth.
+    if (late && !draw) return;
 
     // ---- (3) OGRE'S RENDER PASS, OUR PIPELINE ------------------------------------
     if (!pass->beginRenderPass()) return;
     VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
-    const uint32_t tw = uint32_t(ids->getWidth()), th = uint32_t(ids->getHeight());
-    {
+    if (!late) {
         VkClearAttachment ca{};
         ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         ca.colorAttachment = 0;
@@ -576,26 +715,19 @@ void recordIdPass(AtomPassContext &ctx) {
     {
         const Ogre::CompositorPassDef::ViewportRect &r = vpRect;
         VkViewport v{};
-        v.x = float(int(r.mVpLeft * float(tw)));
-        v.y = float(int(r.mVpTop * float(th)));
-        v.width = float(int(r.mVpWidth * float(tw)));
-        v.height = float(int(r.mVpHeight * float(th)));
+        v.x = float(rect[0]);
+        v.y = float(rect[1]);
+        v.width = float(rect[2]);
+        v.height = float(rect[3]);
         v.minDepth = 0.0f;
         v.maxDepth = 1.0f;
         vkCmdSetViewport(cmd, 0, 1, &v);
-        VkRect2D s{};
-        s.offset = { int32_t(r.mVpScissorLeft * float(tw)), int32_t(r.mVpScissorTop * float(th)) };
-        s.extent = { uint32_t(r.mVpScissorWidth * float(tw)), uint32_t(r.mVpScissorHeight * float(th)) };
-        vkCmdSetScissor(cmd, 0, 1, &s);
+        VkRect2D sc{};
+        sc.offset = { int32_t(r.mVpScissorLeft * float(tw)), int32_t(r.mVpScissorTop * float(th)) };
+        sc.extent = { uint32_t(r.mVpScissorWidth * float(tw)), uint32_t(r.mVpScissorHeight * float(th)) };
+        vkCmdSetScissor(cmd, 0, 1, &sc);
     }
     {
-        // THE PASS BUFFER'S OWN PROJECTION (HlmsPbs::preparePassHash): the RS-depth
-        // projection, its y row negated where the pass requires texture flipping,
-        // times the camera's view.
-        Ogre::Matrix4 proj = cam->getProjectionMatrixWithRSDepth();
-        if (rpd->requiresTextureFlipping())
-            for (int c = 0; c < 4; ++c) proj[1][c] = -proj[1][c];
-        const Ogre::Matrix4 vpm = proj * cam->getVrViewMatrix(0);
         IdPushConstants pc{};
         for (int rr = 0; rr < 4; ++rr)
             for (int c = 0; c < 4; ++c) pc.viewProjRow[rr * 4 + c] = float(vpm[rr][c]);
@@ -624,12 +756,13 @@ void recordIdPass(AtomPassContext &ctx) {
     // THE RENDERER'S COUNTERS SEE THIS DRAW TOO: an indirect draw never passes
     // through Ogre's render queue, so its share is added here, in the pass — the
     // frame's totals and the monitor's per-pass rows (a delta around the pass) both
-    // include it. The GPU's own counters, read back a frame or two late
-    // (the stats ring, cycleStats): exact for a still scene, a few frames behind a moving one.
+    // include it: each pass its own list's. The GPU's own counters, read back a frame
+    // or two late (the stats ring, cycleStats): exact for a still scene, a few frames
+    // behind a moving one.
     {
         unsigned long long tris = 0ull;
         unsigned surv = 0u;
-        if (view->atomStats(tris, surv)) {
+        if (late ? view->atomLateStats(tris, surv) : view->atomFirstStats(tris, surv)) {
             Ogre::RenderingMetrics m;
             m.mIsRecordingMetrics = true;
             m.mBatchCount = 1u;
@@ -654,12 +787,17 @@ bool atomIdPassSupported(Ogre::RenderSystem *rs) {
 }
 
 void registerAtomIdPass() {
-    if (AtomPassProvider *p = AtomPassProvider::instance())
-        p->setRecorder(kAtomIdPassId, [](AtomPassContext &ctx) { recordIdPass(ctx); });
+    if (AtomPassProvider *p = AtomPassProvider::instance()) {
+        p->setRecorder(kAtomIdPassId, [](AtomPassContext &ctx) { recordIdPass(ctx, false); });
+        p->setRecorder(kAtomIdLatePassId, [](AtomPassContext &ctx) { recordIdPass(ctx, true); });
+    }
 }
 
 void releaseAtomIdPass() {
-    if (AtomPassProvider *p = AtomPassProvider::instance()) p->setRecorder(kAtomIdPassId, AtomPassRecorder());
+    if (AtomPassProvider *p = AtomPassProvider::instance()) {
+        p->setRecorder(kAtomIdPassId, AtomPassRecorder());
+        p->setRecorder(kAtomIdLatePassId, AtomPassRecorder());
+    }
     if (gId.dev) {
         vkDeviceWaitIdle(gId.dev);
         for (auto &kv : gRings) destroyRing(kv.second);
