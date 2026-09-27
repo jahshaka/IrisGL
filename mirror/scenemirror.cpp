@@ -32,7 +32,6 @@
 #include "irisgl/document/assets/vertexbuffer.h"     // VertexBuffer / IndexBuffer (CPU copies)
 #include "irisgl/document/materials/material.h"
 #include "irisgl/document/materials/pbrmaterial.h"
-#include "irisgl/document/materials/defaultmaterial.h"
 #include "irisgl/core/properties/property.h"
 #include "irisgl/core/math/trs.h"
 #include "irisgl/document/assets/livetextures.h"
@@ -4215,9 +4214,8 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
     PbrParams p;
     if (!material || !toPbrParams(material, p)) {
         // A material class the mirror cannot translate gets one shared neutral
-        // material. Since HLMS_ADOPTION P4b the document holds PbrMaterials and
-        // the legacy DefaultMaterial only, so this is a guard rather than a
-        // path anything shipped takes.
+        // material. The document holds PbrMaterials only, so this is a guard
+        // (and the no-material node's surface) rather than a translation.
         if (!mDefaultMaterial) {
             // THE SAME SURFACE THE DOCUMENT INVENTS (DRAG-1, RENDER_AUDIT I-1),
             // from the one definition in pbrmaterial.h. It used to be its own
@@ -4554,11 +4552,6 @@ quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMate
         }
         return h.h;
     }
-    if (auto *def = dynamic_cast<iris::DefaultMaterial *>(material)) {
-        h << quint32(2) << def->getDiffuseColor()
-          << def->getShininess() << def->getTextureScale();
-        return h.h;
-    }
     h << quint32(0);
     return h.h;
 }
@@ -4620,7 +4613,7 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     ++mMaterialBuilds;
     ms.hasPbr = toPbrParams(material, ms.pbr);
 
-    // Document slot name -> engine slot. PbrMaterial and DefaultMaterial naming.
+    // Document slot name -> engine slot.
     // There is no occlusion entry because there is no occlusion ROW any more
     // (HLMS_ADOPTION P2): the engine has no ambient-occlusion slot, so the
     // document stopped pretending to have one. An old file's "u_occlusionMap"
@@ -4634,9 +4627,7 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
                   bool srgb = false; };
     static const Slot kSlots[] = {
         { QLatin1StringView("u_baseColorMap"),  PbrTextureSlot::Albedo,    true  },
-        { QLatin1StringView("u_diffuseTexture"), PbrTextureSlot::Albedo,   true  },
         { QLatin1StringView("u_normalMap"),     PbrTextureSlot::Normal,    false },
-        { QLatin1StringView("u_normalTexture"), PbrTextureSlot::Normal,    false },
         { QLatin1StringView("u_metallicMap"),   PbrTextureSlot::Metalness, false },
         { QLatin1StringView("u_roughnessMap"),  PbrTextureSlot::Roughness, false },
         { QLatin1StringView("u_emissiveMap"),   PbrTextureSlot::Emissive,  true  },
@@ -4858,18 +4849,6 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
     // src/io/builtinmaterials.cpp, where it runs once and produces a real
     // PbrMaterial instead of running per material per frame and producing an
     // approximation the panel could not show.)
-    if (auto *def = dynamic_cast<iris::DefaultMaterial *>(material)) {
-        // Legacy Blinn-Phong material: diffuse -> albedo, shininess -> roughness.
-        const iris::LinearColor c = iris::linearOf(def->getDiffuseColor());
-        out.albedo    = Colour(c.r, c.g, c.b, 1.0f);
-        out.metalness = 0.0f;
-        const float shin = std::max(0.0f, std::min(def->getShininess(), 128.0f));
-        out.roughness = 1.0f - std::sqrt(shin / 128.0f) * 0.9f;
-        out.emissive  = Colour(0, 0, 0);
-        // The legacy material has one uniform scale and no offset/rotation.
-        out.uvScale[0] = out.uvScale[1] = def->getTextureScale();
-        return true;
-    }
     return false;
 }
 

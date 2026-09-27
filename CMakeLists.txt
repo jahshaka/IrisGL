@@ -188,7 +188,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
 set(SRCS
     document/assets/mesh.cpp
-    document/materials/defaultmaterial.cpp
     document/scenegraph/meshnode.cpp
     import/graphicshelper.cpp
     import/meshprewarm.cpp
@@ -262,7 +261,6 @@ set (HEADERS
     document/scenegraph/cameranode.h
     document/scenegraph/cameralens.h
     document/scenegraph/meshnode.h
-    document/materials/defaultmaterial.h
     document/assets/vertexlayout.h
     document/assets/vertexbuffer.h
     core/viewport.h
