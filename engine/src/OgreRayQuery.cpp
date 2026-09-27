@@ -6280,7 +6280,12 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     // pass-scoped registration run in front of it (and, where no decode pass ran
     // this frame, the traces first).
     if (def->mPrePassMode != Ogre::PrePassUse) return;
+    // THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) is the first such pass of
+    // the frame and the opaque pass the last: the jobs finish once, in front of the
+    // first, and the registrations stand until the last is over.
+    if (def->mIdentifier != kScreenDecodePassIdentifier && mRayJobsFinished) return;
     mView->mEngine->mRayTier->finishRayJobs(this, mView, pass);
+    mRayJobsFinished = def->mIdentifier == kScreenDecodePassIdentifier;
 }
 
 /// GATHER-0 (fix round, D2). The registration made in `passPreExecute` names
@@ -6299,6 +6304,8 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
         return;
     }
     if (def->mPrePassMode != Ogre::PrePassUse) return;
+    if (def->mIdentifier == kScreenDecodePassIdentifier) return;   // the opaque pass follows
+    mRayJobsFinished = false;
     mView->mEngine->mRayTier->releaseGatherBinding(this);
     mView->mEngine->mRayTier->releaseSunContactBinding(this);
 }

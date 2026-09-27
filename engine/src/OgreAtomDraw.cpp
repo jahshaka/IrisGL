@@ -71,12 +71,16 @@ OgreView *atomViewOf(const Ogre::CompositorWorkspace *ws) {
     return it == atomViews().end() ? nullptr : it->second;
 }
 
+bool atomDecodeClassified() { return std::getenv("JAHSHAKA_ATOM_CLASSIFY_OFF") == nullptr; }
+
 // ---------------------------------------------------------------------------
-// THE SCREEN DECODE'S ARMING (ATOM S3-DRAW). A view's pass that SKIPS the Atom
-// queue is a pass the id pass stands in for — the prepass and the opaque pass of
-// a chain with ChainDesc::atomDraw — so it is the pass whose first draws are the
-// screen decode: for its length HlmsAtom is handed the view's id image and the
-// GPU scene's tables, and the scene's screen decode draws are shown.
+// THE SCREEN DECODE'S ARMING (ATOM S3-DRAW; ATOM-DECODE-CLASS-1). The view's SCREEN
+// DECODE PASSES (kScreenDecodePassIdentifier: one in front of the prepass, one in
+// front of the opaque pass) are the passes whose draws are the screen decode: for
+// the length of each HlmsAtom is handed the view's id image and the GPU scene's
+// tables, the scene's screen decode draws and its classifier are shown, and the
+// pass is CLASSIFIED (the material depth). The prepass and the opaque pass SKIP the
+// Atom queue (its items are the id pass's) and draw no decode.
 // ---------------------------------------------------------------------------
 namespace {
 /// THE ATOM VIEW'S QUAD MATERIAL PASS (JahAtomView.material), or null before the
@@ -118,7 +122,7 @@ public:
     void passPreExecute(Ogre::CompositorPass *pass) override {
         if (!pass || pass->getType() != Ogre::PASS_SCENE || !mView) return;
         const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
-        if (!def || !def->skipsRenderQueue(kAtomRenderQueue)) return;
+        if (!def || def->mIdentifier != kScreenDecodePassIdentifier) return;
         // A MEASUREMENT SWITCH, never a mode (JAHSHAKA_HIT_LIST_OFF's kind): the
         // decode left unarmed, so the Atom items are drawn by NOTHING in this pass —
         // engine.atom_draw's proof that the view's passes really skip their queue.
@@ -152,6 +156,7 @@ public:
         gs.flushClusterTables();
         src.meshes = gs.meshBuffer();
         src.clusters = gs.clusterBuffer();
+        src.classified = atomDecodeClassified();
         atom->setDecodeSource(src);
         atom->showScreenDecodes(scene->sceneManager(), true);
         mArmed = scene->sceneManager();

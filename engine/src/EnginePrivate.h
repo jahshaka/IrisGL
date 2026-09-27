@@ -295,6 +295,11 @@ public:
     /// piece (a pass with no `hlms_screen_pos_int` has no `iFragCoord`, one
     /// with no `needs_env_brdf` has no `envColourD`), which loses the frame.
     void passPosExecute(Ogre::CompositorPass *pass) override;
+    /// THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) shades with the prepass
+    /// too, in front of the opaque pass: the ray jobs finish in front of IT, and its
+    /// pass-scoped registrations stand until the opaque pass is over — one window
+    /// for the two passes that read them.
+    bool        mRayJobsFinished = false;
     /// The view whose chain this listener rides. Never null while registered.
     OgreView   *mView = nullptr;
     /// ...and its Root, so the destructor can flush without reaching into the
@@ -741,6 +746,7 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // [225,256) are V1_FAST, 15 is PARTICLE_SYSTEM. Our v2 items can therefore only
 // live in 0-99 and 200-224.
 //   0     sky rectangle          (OgreSky)
+//   1     the screen decode's classifier (HlmsAtom, kScreenClassifyRenderQueue)
 //   2     the visibility buffer's screen decode draws (HlmsAtom, kScreenDecodeRenderQueue)
 //   10    normal items           (Ogre's default)
 //   11    the visibility buffer's items (kAtomRenderQueue, ATOM S3-DRAW)
@@ -956,6 +962,19 @@ struct StereoEyeBasis {
 /// hit mode for its length; the WRITE-BACK and the filters follow in the opaque
 /// pass' pre-execute. Stamped on exactly that pass.
 constexpr Ogre::uint32 kHitDecodePassIdentifier = 25002u;
+/// THE SCREEN DECODE PASSES (ATOM-DECODE-CLASS-1, OgreChain.cpp addAtomDecodePass):
+/// the classifier and the bucket draws over the material depth, one in front of the
+/// prepass and one in front of the opaque pass. The atom listener arms HlmsAtom for
+/// them; the ray tier's finishes its jobs in front of the first one that shades with
+/// the prepass. Stamped on exactly those passes.
+constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
+/// THE CLASSIFICATION'S MEASUREMENT SWITCH (ATOM-DECODE-CLASS-1, deleted with the
+/// late-discard loop): JAHSHAKA_ATOM_CLASSIFY_OFF set = the screen decode passes run
+/// UNCLASSIFIED — no classifier, no depth test, every bucket's draw at every pixel,
+/// each discarding every pixel of another bucket after the prologue. Read per pass
+/// by the atom listener: no graph change, so a process flips it between frames
+/// without a rebuild (every history carries on).
+bool atomDecodeClassified();
 /// The hit list's height as a factor of the target's (ChainDesc::hitDecode).
 constexpr float kHitListHeightFactor = 0.5625f;
 
