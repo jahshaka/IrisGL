@@ -397,7 +397,6 @@ SceneMirror::SceneMirror(Scene *target) : mTarget(target)
     // the whole walk EVERY sync — ruinous for frame time and exact by
     // construction, which is what the differential suite runs under. A number
     // sets the amortised verifier's per-sync budget (0 turns it off).
-    mTrace = std::getenv("JAH_MIRROR_TRACE") != nullptr;
     if (const char *v = std::getenv("JAH_MIRROR_VERIFY")) {
         const QByteArray mode(v);
         if (mode == "full") mVerifyEverything = true;
@@ -1159,14 +1158,7 @@ void SceneMirror::consumeDirty()
         if (!n) continue;               // tombstoned: the node left the document
         // CLEARED BEFORE THE VISIT, so a write the visit itself makes (the
         // mirror's own soft-mobility promotion) is not lost.
-        const quint16 mask = n->_takeDirtyMask();
-        // JAH_MIRROR_TRACE=1 names what the document reported, per sync. The
-        // one question this design makes hard to answer by reading code — "why
-        // is anything on the list at all on a still frame?" — and the answer
-        // found the first defect it looked for (the viewport re-asserts the
-        // selection every frame, which was marking a node per frame forever).
-        if (mTrace)
-            qWarning("mirror.dirty: '%s' mask=0x%04x", qUtf8Printable(n->name), unsigned(mask));
+        (void)n->_takeDirtyMask();
         visitDirty(n);
     }
     mConsumingDirty = false;

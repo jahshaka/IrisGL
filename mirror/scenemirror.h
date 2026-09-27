@@ -1977,8 +1977,6 @@ private:
     /// query flags of every node sharing the material on the same frame).
     bool mConsumingDirty = false;
     bool mVerifyEverything = false;
-    /// JAH_MIRROR_TRACE=1: name every node the document reported, per sync.
-    bool mTrace = false;
     /// MEASURED (8,404-node lattice, Debug + ASan, 2026-09-13): the verifier is
     /// the DOMINANT term in a still frame's mirror once the walk is gone —
     /// host.mirror 0.558 ms median, of which mirror.verify is 0.462. Most of
