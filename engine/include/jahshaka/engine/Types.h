@@ -4441,6 +4441,10 @@ struct RayQueryStatus {
     /// GPU milliseconds of that dispatch, read back from a timestamp pair
     /// several frames later and never with a wait. -1 until measured.
     float reflectMs = -1.0f;
+    /// GPU milliseconds of the screen march's OBJECT-MOTION job (REFLECT-MOVERS-1,
+    /// rq_motion.comp, in front of the SSR resolve), read back the same way. -1
+    /// until measured, and on a chain that carries no march or no id pass.
+    float reflectMotionMs = -1.0f;
 };
 
 /// THE VISIBILITY BUFFER'S SPLIT AND ITS BUCKETS (ATOM S3-DRAW,

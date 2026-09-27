@@ -109,12 +109,28 @@ fragment_program Jahshaka/SsrResolve_ps_GLSL glsl
 		param_named gBufShadowRoughness		int 1
 		param_named prevFrame				int 2
 		param_named depthTexture			int 3
+		param_named velocityTexture			int 4
+	}
+}
+
+// Upstream's quad vertex shader again, with the resolve's root layout: a pass's two
+// stages must agree on it (the voxel reader parity's rule, JahVoxelReaderParity.material).
+vertex_program Jahshaka/SsrResolveQuad_vs_VK glslvk
+{
+	source Quad_vs.glsl
+	root_layout high
+	default_params
+	{
+		param_named_auto worldViewProj worldviewproj_matrix
 	}
 }
 
 fragment_program Jahshaka/SsrResolve_ps_VK glslvk
 {
 	source JahSsrResolve_ps.glsl
+	// FIVE textures since REFLECT-MOVERS-1 (the object motion is the fifth): the
+	// standard prefab layout holds four.
+	root_layout high
 }
 
 fragment_program Jahshaka/SsrResolve_ps unified
@@ -133,7 +149,7 @@ material Jahshaka/SsrResolve
 			depth_write off
 			cull_hardware none
 
-			vertex_program_ref Ogre/Compositor/Quad_vs
+			vertex_program_ref Jahshaka/SsrResolveQuad_vs_VK
 			{
 			}
 
@@ -172,6 +188,14 @@ material Jahshaka/SsrResolve
 			}
 
 			texture_unit depthTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+
+			// THE OBJECT MOTION (REFLECT-MOVERS-1, jahSsrVelocity): read at the
+			// hit's own texel, point-sampled — a delta, never an average of two.
+			texture_unit velocityTexture
 			{
 				tex_address_mode	clamp
 				filtering			none

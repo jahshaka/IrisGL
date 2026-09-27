@@ -170,6 +170,18 @@ if(JAH_RAY_QUERY_OK)
                 "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
+    # REFLECT-MOVERS-1's object motion for the screen march's resolve, same rule.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                --vn krq_motionSpv -o "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
+        COMMENT "Compiling the screen march's object-motion compute shader at SPIR-V 1.4"
+        VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
@@ -303,6 +315,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"

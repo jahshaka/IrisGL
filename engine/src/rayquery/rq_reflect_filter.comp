@@ -133,6 +133,14 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 prevRayRight2;
 	vec4 prevRayDown2;
 	vec4 prevFwd2;
+	/// ...the trace's surface-cache and hit-record blocks (unread here), then
+	/// REFLECT-MOVERS-1's `motion`: w = 1 with the lane's rules on — the restart
+	/// band below reads it.
+	vec4 cards;
+	vec4 hitList;
+	vec4 hitSun;
+	vec4 hitSun2;
+	vec4 motion;
 } p;
 
 /// THE PER-EYE BASIS IS THE TRACE'S, NOT THIS PASS'. `rq_reflect.comp` shares
@@ -220,7 +228,7 @@ const float kDepthSigma = 3.0;
 /// have). A MIRROR is still never filtered: its one sample is exact. A YOUNG
 /// view is left alone (its pixels count up from one — the screenshot's fade).
 const float kFreshFrames = 8.0;
-const int   kFreshRadius = 2;
+const int   kFreshRadius = 3;
 const float kDepthFloorRel = 0.002;
 const float kNormalPower = 32.0;
 
@@ -304,10 +312,12 @@ void main()
 	const float texelsPerPixel = max( float( scale.x ), 1.0 );
 	int radius = int( min( float( kMaxRadius ),
 						   floor( kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) / texelsPerPixel ) ) );
+	bool fresh = false;
 	{
 		const float sinceRestart = count - ( kWarmupFrames + 1.0 );
-		if( p.stereo.y >= kWarmupFrames + kFreshFrames + 1.0 && sinceRestart >= 0.0 &&
-			sinceRestart < kFreshFrames )
+		fresh = p.motion.w > 0.5 && p.stereo.y >= kWarmupFrames + kFreshFrames + 1.0 && sinceRestart >= 0.0 &&
+				sinceRestart < kFreshFrames;
+		if( fresh )
 			radius = max( radius, int( ceil( float( kFreshRadius ) *
 											 ( 1.0 - sinceRestart / kFreshFrames ) ) ) );
 	}
@@ -386,6 +396,7 @@ void main()
 				// à-trous step of 1 is at this radius.
 				const float sw = max( 0.0, 1.0 - length( vec2( dx, dy ) ) / float( radius + 1 ) );
 				const float w = sw * pow( ndot, kNormalPower ) * ( 1.0 - dz / tol );
+
 				if( w <= 0.0 )
 					continue;
 				sum += h.xyz * w;

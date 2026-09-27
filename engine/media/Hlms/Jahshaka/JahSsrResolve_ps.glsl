@@ -110,6 +110,10 @@ vulkan_layout( ogre_t0 ) uniform texture2D rayTexture;
 vulkan_layout( ogre_t1 ) uniform texture2D gBufShadowRoughness;
 vulkan_layout( ogre_t2 ) uniform texture2D prevFrame;
 vulkan_layout( ogre_t3 ) uniform texture2D depthTexture;
+// THE OBJECT MOTION (REFLECT-MOVERS-1; rq_motion.comp): at a pixel of a MOVING slot,
+// xy = where its surface point would sit in this image at its previous pose, as a
+// delta in the target's uv, z = the depth value's delta, w = 1; w = 0 elsewhere.
+vulkan_layout( ogre_t4 ) uniform texture2D velocityTexture;
 
 vulkan( layout( ogre_s0 ) uniform sampler pointSampler );
 vulkan( layout( ogre_s2 ) uniform sampler linearSampler );
@@ -549,10 +553,24 @@ void main()
 	// ramp over kHistoryEdgeFade of the picture, not a line; it is narrower than
 	// the march's own screen-edge fade because only a frame's worth of motion
 	// ever lands in it.
-	const float hitDepth =
-		texelFetch( vkSampler2D( depthTexture, pointSampler ),
-					min( ivec2( jahShotToTex( ray.xy ) * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) ), 0 ).x;
-	const vec4	was		 = reprojectMatrix * vec4( ray.xy, hitDepth, 1.0 );
+	const ivec2 hitTexel =
+		min( ivec2( jahShotToTex( ray.xy ) * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) );
+	const float hitDepth = texelFetch( vkSampler2D( depthTexture, pointSampler ), hitTexel, 0 ).x;
+	// A HIT ON A MOVING OBJECT (REFLECT-MOVERS-1): the point was elsewhere in the
+	// previous picture by the object's own motion as well as the camera's. The
+	// velocity carries it back to its previous pose in THIS image, and the camera
+	// reprojection below then takes that to the previous picture — previous world
+	// position through the previous camera, exactly. The delta is in the target's
+	// uv; the hit is in the shot's (a letterbox's inner rectangle), hence the
+	// shot's size. A hit on anything that did not move reads w = 0 and takes the
+	// camera path unchanged.
+	vec3 hitAt = vec3( ray.xy, hitDepth );
+	{
+		const vec4 vel = texelFetch( vkSampler2D( velocityTexture, pointSampler ), hitTexel, 0 );
+		if( vel.w > 0.5 )
+			hitAt += vec3( vel.xy / max( vec2( 1.0 ) - shotInset.zw, vec2( 1e-6 ) ), vel.z );
+	}
+	const vec4	was		 = reprojectMatrix * vec4( hitAt, 1.0 );
 	if( was.w <= 0.0 )
 	{
 		fragColour = vec4( 0.0 );

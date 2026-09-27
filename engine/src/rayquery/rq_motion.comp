@@ -1,0 +1,96 @@
+#version 460
+// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1, fix round F1).
+//
+// The march's resolve (JahSsrResolve_ps.glsl) fetches the reflected colour from
+// the PREVIOUS frame's picture — there is no other picture yet when HlmsPbs needs
+// the reflection — and it finds where the hit's world point WAS through the
+// camera only. A hit on a MOVING object was somewhere else in that picture, so a
+// floor's reflection of a moving sphere trailed it by one frame of the sphere's
+// motion: the owner's desktop case (4.4 codes against 0.1 on the rig).
+//
+// This job writes, for every pixel the id pass drew for a slot that MOVED this
+// frame, where that pixel's surface point would be in THIS frame's image had it
+// stayed at its previous pose: a delta in the target's 0..1 coordinate and in the
+// depth buffer's own value. The resolve adds it to the hit before its camera
+// reprojection (previous-world-to-image x inverse(this image)), which composes to
+// exactly "the previous world position through the previous camera". Every other
+// pixel is left as the chain's clear wrote it (w = 0), and the resolve reads that
+// as "the camera path", so no still pixel moves.
+//
+// The previous pose is the GPU scene's `prevWorld` (GpuScene.h), the same rows
+// and the same test (jah_reproject.glsl) the reflection trace uses — one source
+// for "did this surface move and from where".
+//
+// COMPILED AT BUILD TIME at SPIR-V 1.4, like every ray job beside it.
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform Params
+{
+	/// The image basis of this frame's camera, EXPANDED TO THE TARGET
+	/// (rq_reflect.comp's EyeImage and its letterbox note): xyz, w = 1 perspective.
+	vec4 camPos;
+	vec4 rayTL;
+	vec4 rayRight;
+	vec4 rayDown;
+	vec4 fwd;
+	/// x = A, y = B of Camera::getProjectionParamsAB().
+	vec4 projParams;
+	/// xy = the target size in pixels, z = the GPU scene's live slots.
+	vec4 resolution;
+} p;
+layout( set = 0, binding = 1 ) uniform sampler2D sceneDepth;
+layout( set = 0, binding = 2 ) uniform usampler2D atomIds;
+layout( std430, set = 0, binding = 3 ) readonly buffer Instances { uvec4 inst[]; };
+layout( rgba16f, set = 0, binding = 4 ) uniform writeonly image2D velocity;
+
+#include "jah_atom_id.glsl"
+#include "jah_reproject.glsl"
+
+float viewDistance( float rawDepth )
+{
+	if( p.camPos.w < 0.5 )
+		return abs( ( rawDepth - p.projParams.x ) / p.projParams.y );
+	return p.projParams.y / ( rawDepth - p.projParams.x );
+}
+
+void main()
+{
+	const ivec2 px = ivec2( gl_GlobalInvocationID.xy );
+	const ivec2 res = ivec2( p.resolution.xy );
+	if( any( greaterThanEqual( px, res ) ) )
+		return;
+	const uint idX = texelFetch( atomIds, px, 0 ).x;
+	if( idX == JAH_ATOM_ID_EMPTY )
+		return;
+	const uint slot = idX & JAH_ATOM_ID_SLOT_MASK;
+	if( slot >= uint( p.resolution.z ) )
+		return;
+	const uint flags = inst[slot * 10u + 7u].w;   // boundsMax.w: the flags word
+	if( ( flags & kJahReprojectMoverFlags ) == 0u )
+		return;
+	const uvec4 w0 = inst[slot * 10u + 0u], w1 = inst[slot * 10u + 1u], w2 = inst[slot * 10u + 2u];
+	const uvec4 q0 = inst[slot * 10u + 3u], q1 = inst[slot * 10u + 4u], q2 = inst[slot * 10u + 5u];
+	if( !jahInstanceMoved( flags, w0, w1, w2, q0, q1, q2 ) )
+		return;
+	const float raw = texelFetch( sceneDepth, px, 0 ).x;
+	if( raw <= 0.0 || raw >= 1.0 )
+		return;
+	const vec2 uv = ( vec2( px ) + 0.5 ) / vec2( res );
+	const float dist = viewDistance( raw );
+	const vec3 plane = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
+	const vec3 world = p.camPos.w < 0.5 ? p.camPos.xyz + plane + p.fwd.xyz * dist
+										: p.camPos.xyz + plane * dist;
+	const vec3 was = jahInstancePrevPosition( w0, w1, w2, q0, q1, q2, world );
+	vec2 uvWas;
+	float zWas;
+	// Behind the camera: no image position — leave the camera path (w = 0).
+	if( jahReproject( was, p.camPos.xyz, p.camPos.w, p.rayTL.xyz, p.rayRight.xyz, p.rayDown.xyz,
+					  p.fwd.xyz, uvWas, zWas ) == 1 )
+		return;
+	// The depth buffer's value at that distance: the inverse of viewDistance.
+	const float rawWas = p.camPos.w < 0.5 ? p.projParams.x + ( raw - p.projParams.x ) * ( zWas / max( dist, 1e-6 ) )
+										  : p.projParams.x + p.projParams.y / max( zWas, 1e-6 );
+	imageStore( velocity, px, vec4( uvWas - uv, rawWas - raw, 1.0 ) );
+}
