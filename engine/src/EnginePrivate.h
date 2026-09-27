@@ -3585,6 +3585,7 @@ public:
     AtomDrawStatus atomDrawStatus() override;
     void setAtomDrawEnabled(bool on) override;
     void setAtomOcclusionEnabled(bool on) override;
+    void setAtomCutBudgetForTest(unsigned indices) override;
     bool atomOcclusionEnabled() const override { return mAtomOcclusionEnabled; }
     void setAtomView(AtomView view) override { mAtomView = view; }
     AtomView atomView() const override { return mAtomView; }

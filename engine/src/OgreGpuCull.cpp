@@ -104,6 +104,9 @@ bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneN
     }
     if (mCutStream && mCutIndexBudget >= mCutWantBudget && !mCutForceCreate) return true;
     mCutForceCreate = false;
+    if (atomTraceOn())
+        atomTrace("cut buffers re-created: budget " + std::to_string(mCutIndexBudget) + " -> " +
+                  std::to_string(mCutWantBudget) + " indices (scene need " + std::to_string(sceneNeed) + ")");
     if (mCutStream) vao->destroyUavBuffer(mCutStream);
     if (mCutTriWords) vao->destroyUavBuffer(mCutTriWords);
     if (mCutRecords) vao->destroyUavBuffer(mCutRecords);
@@ -124,6 +127,10 @@ void GpuCull::noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAske
     while (want < kCutIndexBudgetCeiling &&
            (want - want / 8u < indicesAsked || want / kCutIndicesPerRecord < recordsAsked))
         want *= 2u;
+    if (atomTraceOn())
+        atomTrace("cut overflow read back: " + std::to_string(overflowedInstances) + " instances, " +
+                  std::to_string(indicesAsked) + " indices asked, the next budget " + std::to_string(mCutWantBudget) +
+                  " -> " + std::to_string(std::min(want, kCutIndexBudgetCeiling)));
     mCutWantBudget = std::min(want, kCutIndexBudgetCeiling);
 }
 

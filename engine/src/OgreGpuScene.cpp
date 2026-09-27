@@ -28,6 +28,7 @@
 #include <Vao/OgreTexBufferPacked.h>
 
 #include <OgreLogManager.h>
+#include <OgreRenderSystem.h>
 #include <OgreRoot.h>
 #include <OgreMesh2.h>
 #include <OgreSubItem.h>
@@ -40,6 +41,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -47,6 +49,20 @@
 namespace jahshaka {
 namespace engine {
 namespace detail {
+
+bool atomTraceOn() {
+    static const bool on = std::getenv("JAHSHAKA_ATOM_TRACE") != nullptr;
+    return on;
+}
+
+void atomTrace(const std::string &what) {
+    if (!atomTraceOn()) return;
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
+    const unsigned frame = rs && rs->getVaoManager() ? unsigned(rs->getVaoManager()->getFrameCount()) : 0u;
+    if (Ogre::LogManager *lm = Ogre::LogManager::getSingletonPtr())
+        lm->logMessage("Jahshaka atom trace: frame " + std::to_string(frame) + " " + what);
+}
 
 namespace {
 /// The first capacity. Small enough that a thumbnail scene of three nodes does
@@ -137,6 +153,7 @@ void GpuScene::growTo(uint32_t capacity) {
         ++mGrows;
     }
     mInstanceBuffer = mVao->createUavBuffer(want, sizeof(GpuInstance), 0, mMirror.data(), false);
+    if (atomTraceOn()) atomTrace("instance table grown " + std::to_string(mSlotCapacity) + " -> " + std::to_string(want));
     mSlotCapacity = want;
 }
 
@@ -170,6 +187,7 @@ void GpuScene::growMeshTable(uint32_t capacity) {
                                         kGeomRowWords * sizeof(uint32_t), 0, mGeomMirror.data(),
                                         false);
     mGeomDirty = false;   // the create above uploaded the mirror
+    if (atomTraceOn()) atomTrace("mesh table grown " + std::to_string(mMeshCapacity) + " -> " + std::to_string(want));
     mMeshCapacity = want;
 }
 
@@ -246,6 +264,7 @@ void GpuScene::setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
     mMeshEntries[meshIndex].clusters = std::move(clusters);
     mMeshEntries[meshIndex].groups = std::move(groups);
     mMeshMirror[meshIndex].dag[3] = clusterRow;
+    if (atomTraceOn()) atomTrace("mesh DAG set: entry " + std::to_string(meshIndex));
     mMeshDirty = true;
     mClusterDirty = true;
 }
@@ -302,8 +321,13 @@ void GpuScene::flushClusterTables() {
         }
         ++mCopies;
     };
+    const uint32_t clusterCapWas = mClusterCapacity, groupCapWas = mGroupCapacity;
     grow(mClusterBuffer, mClusterCapacity, mClusterMirror.size(), sizeof(GpuCluster), mClusterMirror.data());
     grow(mGroupBuffer, mGroupCapacity, mGroupMirror.size(), sizeof(GpuClusterGroup), mGroupMirror.data());
+    if (atomTraceOn())
+        atomTrace("cluster tables rebuilt: " + std::to_string(mClusterMirror.size()) + " clusters, " +
+                  std::to_string(mGroupMirror.size()) + " groups" +
+                  (mClusterCapacity != clusterCapWas || mGroupCapacity != groupCapWas ? " (re-created)" : ""));
     // THE MESH TABLE WITH THEM (the fix round's F4): the rebuild rebased every entry's
     // `dag`, and a caller outside update() (the id pass, the screen decode's arming)
     // must never pair the new cluster table with the old bases for a frame.
@@ -624,6 +648,7 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
     mFreeMeshSlots.push_back(index);
     mPartitionsDirty = true;      // the last reference: its partitions go with it
     if (hadDag) mClusterDirty = true;   // ...and its clusters
+    if (atomTraceOn()) atomTrace("mesh released: entry " + std::to_string(index) + (hadDag ? " (with a DAG)" : ""));
     // THE ENTRY IS ZEROED, not left behind: a slot recycled to a different mesh
     // must never be readable as the dead one's geometry (the VctMaterial
     // by-pointer aliasing lesson, DOCS/traps/ENGINE.md).

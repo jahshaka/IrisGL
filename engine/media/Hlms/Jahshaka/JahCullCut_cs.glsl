@@ -92,7 +92,13 @@ shared uint gRecBase;
 shared uint gMode;   // 0 nothing, 1 the cut, 2 the root cut
 // Record slots a reservation took and could not use (its range ran past the record
 // capacity): written as SKIPS, because the emit job's dispatch is the record cursor
-// and would otherwise read a stale record of an earlier frame.
+// and would otherwise read a stale record of an earlier frame. BOTH words are written
+// by lane 0 for every workgroup (ATOM-BLACK-FRAMES-1): shared memory starts with
+// whatever the SM's previous workgroup left there, and a base left unwritten beside a
+// zero count once wrapped the skip loop's unsigned bound - the loop then stamped skips
+// over the whole record buffer up to the budget, the emit skipped nearly every cluster,
+// and the id pass drew this frame's commands over the previous frame's stream: whole
+// frames of garbage ids that the decode refused (black), at random, 1 to 3 per 100.
 shared uint gSkipBase[2];
 shared uint gSkipCount[2];
 
@@ -222,6 +228,8 @@ void main()
 	if( lane == 0u )
 	{
 		atomicAdd( counter[14], dag.y );
+		gSkipBase[0] = 0u;
+		gSkipBase[1] = 0u;
 		gSkipCount[0] = 0u;
 		gSkipCount[1] = 0u;
 		uint mode = 0u;
@@ -286,11 +294,19 @@ void main()
 
 	// ---- pass 2: the records, at this lane's offsets inside the run ----------------
 	// Reserved-but-unusable record slots become skips (inside the capacity only: the
-	// emit job never reads past it).
+	// emit job never reads past it). The loop counts OFFSETS from the base: at most
+	// gSkipCount[k] records, the base written by lane 0 for every workgroup.
 	for( uint k = 0u; k < 2u; ++k )
-		for( uint r = gSkipBase[k] + lane; r < gSkipBase[k] + gSkipCount[k] && r < params.cut.y;
-			 r += JAH_CUT_WIDTH )
-			records[r] = uvec4( 0xFFFFFFFFu, 0u, 0u, 0u );
+	{
+		uint skipBase = gSkipBase[k];
+		uint skipCount = gSkipCount[k];
+		for( uint j = lane; j < skipCount; j += JAH_CUT_WIDTH )
+		{
+			uint r = skipBase + j;
+			if( r < params.cut.y )
+				records[r] = uvec4( 0xFFFFFFFFu, 0u, 0u, 0u );
+		}
+	}
 	uint mode = gMode;
 	if( mode == 0u )
 		return;

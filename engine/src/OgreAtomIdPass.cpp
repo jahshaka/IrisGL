@@ -330,6 +330,11 @@ void cycleStats(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreView *vie
             view->setAtomLateStats(w[4], w[0], w[16], w[0]);
         }
         view->setAtomCutStats(cs);
+        if (atomTraceOn() && (w[12] || w[13]))
+            atomTrace(std::string(late ? "late" : "first") + " list's counters of frame " +
+                      std::to_string(r.writtenAt[h][s]) + ": coarse " + std::to_string(w[12]) + ", missing " +
+                      std::to_string(w[13]) + ", indices " + std::to_string(w[11]) + ", records " +
+                      std::to_string(w[8]) + ", budget " + std::to_string(list.cutIndexBudget()));
         list.noteCutOverflow(w[12] + w[13], w[11], w[8]);
         // THE SCENE'S HIGH-WATER MARK: every later view of this scene is born at it,
         // and both lists of a view are sized by it (the late list can hold the whole
