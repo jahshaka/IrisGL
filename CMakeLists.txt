@@ -217,7 +217,6 @@ set(SRCS
     document/scenegraph/particlesystemnode.cpp
     core/math/mathhelper.cpp
     document/materials/pbrmaterial.cpp
-    document/materials/postprocessmanager.cpp
     document/animation/propertyanim.cpp
     document/scenegraph/lightnode.cpp
     document/scenegraph/decalnode.cpp
@@ -239,7 +238,6 @@ set(SRCS
     core/logger.cpp
     document/assets/linemeshbuilder.cpp
     document/assets/shapehelper.cpp
-    document/materials/postfx/fxaapostprocess.cpp
 	document/materials/renderstates.cpp
     document/materials/rasterizerstate.cpp
     document/physics/avatarmovement.cpp
@@ -292,8 +290,6 @@ set (HEADERS
     document/scenegraph/particlesystemnode.h
     document/scenegraph/iviewsource.h
     document/materials/pbrmaterial.h
-    document/materials/postprocess.h
-    document/materials/postprocessmanager.h
     document/animation/propertyanim.h
     document/animation/animableproperty.h
     document/assets/skeleton.h
@@ -321,7 +317,6 @@ set (HEADERS
     document/materials/renderstates.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h
-    document/materials/postfx/fxaapostprocess.h
     document/materials/rasterizerstate.h
     document/physics/avatarmovement.h
     document/physics/environment.h
