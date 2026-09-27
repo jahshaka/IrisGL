@@ -1,0 +1,162 @@
+// Jahshaka - THE TOP-LEVEL INSTANCES, WRITTEN ON THE DEVICE (ATOM-CPU-WALKS-1;
+// OgreRayQuery.cpp, "the instances by compute").
+//
+// ONE THREAD PER GPU SCENE SLOT. The ray tier's top-level structure holds TWO
+// instances per slot at fixed places - the NEAR copy at 2 x slot and the FAR copy
+// at 2 x slot + 1 (A5b section 4: one TLAS, masks tell the copies apart) - and a
+// slot that is not traced writes both as INACTIVE (all zero: reference 0 and mask 0,
+// which the Vulkan spec makes an inactive instance). The array's length is
+// therefore twice the slot count and known on the host without a readback: the
+// driver on this box offers no indirect build (accelerationStructureIndirectBuild
+// is false on the RTX 4080 SUPER / 595.84), and a compacted count would reach the
+// host a frame late.
+//
+// EVERY INPUT IS ALREADY ON THE DEVICE except what is per MESH: the instance table
+// (world rows, the flags word, the mesh index, the ray level in ids.w) is the GPU
+// scene's own; the host uploads, only when they change, the bottom-level address
+// of every (mesh, level) and every mesh's coarsest level, and the ready skinned
+// structures by slot. The host keeps no per-instance loop at all.
+//
+// THE ARITHMETIC IS THE OLD CPU WRITER'S, field for field (engine.tlas_compute
+// holds the two byte-equal): the transform is the table's world rows (row-major
+// 3x4 is exactly VkTransformMatrixKHR), the custom index the slot, the near mask
+// near | caster | mover-or-still | mover-caster, the far mask far alone, the
+// flags TRIANGLE_FACING_CULL_DISABLE, the near level min(ray level, coarsest).
+//
+// No Hlms directive mark appears in any comment of this file.
+@insertpiece( SetCrossPlatformSettings )
+
+// Mirrors detail::GpuInstance (GpuScene.h), 160 bytes, rows as vec4s.
+struct GpuInstance
+{
+	vec4 world[3];
+	vec4 prevWorld[3];
+	vec4 boundsMin;		// w = the mesh table index (bit-cast)
+	vec4 boundsMax;		// w = the flags word (bit-cast)
+	uvec4 ids;			// w = the ray level
+	uvec4 raster;
+};
+
+// VkAccelerationStructureInstanceKHR, 64 bytes: the 3x4 transform, then
+// (customIndex : 24 | mask : 8), (sbt offset : 24 | flags : 8), the reference.
+struct AsInstance
+{
+	vec4 transform[3];
+	uvec4 tail;
+};
+
+layout( std430, ogre_U0 ) readonly restrict buffer instanceLayout { GpuInstance instances[]; };
+// THE INPUTS (RayQueryTier::writeTlasInputs): a 16-word header, then a 36-word
+// record per mesh-table entry (sixteen uvec2 level addresses, the coarsest level),
+// then a 4-word record per ready skinned slot (slot, address lo, address hi, 0),
+// ascending by slot.
+layout( std430, ogre_U1 ) readonly restrict buffer inputLayout { uint words[]; };
+layout( std430, ogre_U2 ) writeonly restrict buffer outLayout { AsInstance outInstances[]; };
+
+layout( local_size_x = @value( threads_per_group_x ),
+		local_size_y = @value( threads_per_group_y ),
+		local_size_z = @value( threads_per_group_z ) ) in;
+
+#define HDR_SLOTS			0u
+#define HDR_MESHES			1u
+#define HDR_SKINS			2u
+#define HDR_MASK_NEAR		4u
+#define HDR_MASK_CASTER		5u
+#define HDR_MASK_MOVER		6u
+#define HDR_MASK_STILL		7u
+#define HDR_MASK_MOVERCAST	8u
+#define HDR_MASK_FAR		9u
+#define HDR_FLAG_TRACED		10u
+#define HDR_FLAG_CASTER		11u
+#define HDR_FLAG_MOVER		12u
+#define HDR_FLAG_SKINNED	13u
+#define HDR_WORDS			16u
+#define MESH_WORDS			36u
+#define LEVEL_SLOTS			16u
+// VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
+#define INSTANCE_FLAGS		1u
+
+void writeInstance( uint at, uint slot, uint mask, uvec2 address )
+{
+	AsInstance o;
+	o.transform[0] = instances[slot].world[0];
+	o.transform[1] = instances[slot].world[1];
+	o.transform[2] = instances[slot].world[2];
+	o.tail = uvec4( ( slot & 0xFFFFFFu ) | ( ( mask & 0xFFu ) << 24u ),
+					INSTANCE_FLAGS << 24u, address.x, address.y );
+	outInstances[at] = o;
+}
+
+void writeInactive( uint at )
+{
+	AsInstance o;
+	o.transform[0] = vec4( 0.0 );
+	o.transform[1] = vec4( 0.0 );
+	o.transform[2] = vec4( 0.0 );
+	o.tail = uvec4( 0u );
+	outInstances[at] = o;
+}
+
+void main()
+{
+	const uint slot = gl_GlobalInvocationID.x;
+	if( slot >= words[HDR_SLOTS] )
+		return;
+
+	const uint flags = floatBitsToUint( instances[slot].boundsMax.w );
+	const uint meshIndex = floatBitsToUint( instances[slot].boundsMin.w );
+	uvec2 nearAddress = uvec2( 0u );
+	uvec2 farAddress = uvec2( 0u );
+	uint mask = 0u;
+	if( ( flags & words[HDR_FLAG_TRACED] ) != 0u )
+	{
+		mask = words[HDR_MASK_NEAR];
+		if( ( flags & words[HDR_FLAG_CASTER] ) != 0u )
+			mask |= words[HDR_MASK_CASTER];
+		const bool mover = ( flags & words[HDR_FLAG_MOVER] ) != 0u;
+		mask |= mover ? words[HDR_MASK_MOVER] : words[HDR_MASK_STILL];
+		if( mover && ( flags & words[HDR_FLAG_CASTER] ) != 0u )
+			mask |= words[HDR_MASK_MOVERCAST];
+
+		if( ( flags & words[HDR_FLAG_SKINNED] ) != 0u )
+		{
+			// A RIGGED SLOT is traced through its own structure, near and far, and
+			// only when its cache is ready this frame (never at the bind pose).
+			const uint skinBase = HDR_WORDS + words[HDR_MESHES] * MESH_WORDS;
+			uint lo = 0u;
+			uint hi = words[HDR_SKINS];
+			while( lo < hi )
+			{
+				const uint mid = ( lo + hi ) >> 1u;
+				const uint at = skinBase + mid * 4u;
+				if( words[at] < slot )
+					lo = mid + 1u;
+				else
+					hi = mid;
+			}
+			const uint at = skinBase + lo * 4u;
+			if( lo < words[HDR_SKINS] && words[at] == slot )
+			{
+				nearAddress = uvec2( words[at + 1u], words[at + 2u] );
+				farAddress = nearAddress;
+			}
+		}
+		else if( meshIndex < words[HDR_MESHES] )
+		{
+			const uint rec = HDR_WORDS + meshIndex * MESH_WORDS;
+			const uint coarsest = min( words[rec + LEVEL_SLOTS * 2u], LEVEL_SLOTS - 1u );
+			const uint nearLevel = min( instances[slot].ids.w, coarsest );
+			nearAddress = uvec2( words[rec + nearLevel * 2u], words[rec + nearLevel * 2u + 1u] );
+			farAddress = uvec2( words[rec + coarsest * 2u], words[rec + coarsest * 2u + 1u] );
+		}
+	}
+
+	if( ( nearAddress.x | nearAddress.y ) != 0u )
+		writeInstance( slot * 2u, slot, mask, nearAddress );
+	else
+		writeInactive( slot * 2u );
+	if( ( farAddress.x | farAddress.y ) != 0u )
+		writeInstance( slot * 2u + 1u, slot, words[HDR_MASK_FAR], farAddress );
+	else
+		writeInactive( slot * 2u + 1u );
+}

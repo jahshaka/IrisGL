@@ -100,6 +100,8 @@
 #include <chrono>
 #include <cstring>
 #include <cstdio>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -345,6 +347,16 @@ public:
     void updateScene(OgreScene *scene);
     /// Frees everything held for a scene that is going away.
     void forgetScene(OgreScene *scene);
+    /// THE TIER IS CLOSING WHILE `scene` LIVES (the no-rays switch): its GPU scene
+    /// stops telling this tier's feed anything. close() cannot do it — the scenes it
+    /// is keyed by may already be gone — so the engine, which knows which live,
+    /// calls this first.
+    void detachFeed(OgreScene *scene) {
+        auto it = mScenes.find(scene);
+        if (it == mScenes.end() || !it->second.feedOn) return;
+        scene->mGpuScene.removeObserver(&it->second.feed);
+        it->second.feedOn = false;
+    }
 
     /// THE TOOL/TEST TRACE — the only place in this file that submits its own
     /// command buffer and waits on a fence, and it must never be called from a
@@ -394,42 +406,97 @@ private:
 
         VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
         RawBuffer tlasStorage, tlasScratch;
-        /// Persistently mapped, kFramesInFlight slots: the gather writes
-        /// straight into the slot this frame will build from, so a transform
-        /// never passes through an intermediate vector.
-        RawBuffer instances;
-        unsigned  instanceCapacity = 0;
-        unsigned  instanceCount = 0;      ///< near + far copies: what the TLAS holds
+        /// THE INSTANCE ARRAY, WRITTEN ON THE DEVICE (ATOM-CPU-WALKS-1): the
+        /// `Jahshaka/TlasWrite` job's output, TWO instances per GPU scene slot at
+        /// fixed places (near at 2 x slot, far at 2 x slot + 1; an untraced slot's
+        /// pair INACTIVE), so the build's primitive count is `2 x slotCount` and
+        /// known on the host. An Ogre UAV buffer: the device-local pools carry the
+        /// acceleration-structure build-input usage and a device address (fork
+        /// patch 0039), so the build reads it in place. Grown by doubling; Ogre's
+        /// delayed destruction holds a replaced one past the frames in flight.
+        Ogre::UavBufferPacked *tlasOut = nullptr;
+        uint32_t tlasOutCap = 0;
+        /// ...and the job's per-MESH inputs (writeTlasInputs): the header, every
+        /// mesh-table entry's level addresses and coarsest level, the ready rigged
+        /// slots. Uploaded only when it changed (its CPU copy is `tlasInWords`).
+        Ogre::UavBufferPacked *tlasIn = nullptr;
+        uint32_t tlasInCap = 0;
+        std::vector<uint32_t> tlasInWords, tlasInScratch;
+        /// What the mesh records were written for: the BLAS set's version (every
+        /// address a build, a compaction or an eviction moved) and the GPU scene's
+        /// mesh-set serial.
+        unsigned long long blasVersion = 1ull, inputsBlasVersion = 0ull, inputsMeshSerial = ~0ull;
+        Ogre::VaoManager *tlasVao = nullptr;
+        /// The build's primitive count (2 x the slot count it was written for).
+        unsigned  tlasPrimitives = 0;
+        unsigned  instanceCount = 0;      ///< ACTIVE near + far copies: what the TLAS traces
         unsigned  farInstanceCount = 0;   ///< ...of which the far copies
         /// The widest coarse-vs-fine gap of the set this TLAS was written from
         /// (world units): the gather's far query starts this far BEFORE its near
         /// length (audit F2). Held with the TLAS, so a still frame keeps it.
         float     farOverlap = 0.0f;
-        /// The coarsest level's bound per GpuScene mesh index (with the mesh it
-        /// was read for), so the writer asks the mesh records once per mesh.
-        std::vector<std::pair<const Ogre::Mesh *, float>> coarseBound;
         /// THE GEOMETRY ROW OF EACH SLOT'S NEAR COPY (PHOTON-CARDS-2 fix round):
         /// GpuScene::geomRowIndex(mesh, the level its near BLAS was built from,
         /// submesh 0), 0xFFFFFFFF for a slot not traced — what the reflection
-        /// rebuilds a hit's geometric normal from. Written with the instances.
+        /// rebuilds a hit's geometric normal from. Kept by the change feed (a
+        /// rigged slot's row by the gather, from its ready skin cache).
         std::vector<uint32_t> geomRowOfSlot;
-        unsigned  slot = 0;
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
-        /// last synced for, the GPU scene's write count and HlmsAtom's twin epoch
-        /// at that sync (updateScene).
+        /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
         std::vector<uint32_t> decodeWords;
-        unsigned long long decodeWrites = ~0ull;
         unsigned long long decodeEpoch = ~0ull;
-        /// One item wearing each synced word, and its datablock, Hlms hash and
-        /// texture set (HlmsAtom::textureSetKeyOf) when last seen (the twin's
-        /// staleness witness).
-        struct DecodeWitness {
-            uint32_t slot = 0u;
-            const Ogre::HlmsDatablock *db = nullptr;
-            Ogre::uint32 hash = 0u;
-            uint64_t texKey = 0u;
+        /// THE GPU SCENE'S CHANGE FEED (ATOM-CPU-WALKS-1), this tier's side: what it
+        /// derives from the table, kept at the table's writes instead of re-derived
+        /// by a walk over every slot. The words: every slot's PBS material word (a
+        /// hit on any PBS item is shaded by the decode). Registered on the scene's
+        /// first update, removed by forgetScene / detachFeed.
+        struct Feed final : detail::GpuSceneObserver {
+            detail::WordCounts words;
+            /// THE TRACED SET, per slot: what the slot contributes to the
+            /// top-level structure — its kind (0 not traced, 1 traced through the
+            /// mesh's structures, 2 rigged: through its own skin structure), the
+            /// (mesh, level) keys of its near and far copies, and the far copy's
+            /// hand-over width. Kept so the slot's OLD contribution can be taken
+            /// back exactly (the entry's old mesh index may be another mesh's now).
+            struct Rec {
+                const Ogre::Mesh *mesh = nullptr;
+                uint32_t meshIndex = detail::GpuScene::kNoMesh;
+                uint32_t nearLevel = 0u, farLevel = 0u;
+                uint32_t kind = 0u;
+                bool rigged = false;   ///< traced + skinned, mesh or not (the skin pass' want)
+                float coarse = 0.0f;
+                bool sameKeys(const Rec &o) const {
+                    return kind == o.kind && mesh == o.mesh && meshIndex == o.meshIndex &&
+                           nearLevel == o.nearLevel && farLevel == o.farLevel && rigged == o.rigged;
+                }
+            };
+            std::vector<Rec> recs;
+            /// Every (mesh, level) a traced slot references, with the count and a
+            /// mesh-table index to reach the MeshPtr: the bottom-level structures
+            /// this scene needs, without a walk (ensureBlas's wants, eviction's
+            /// "still referenced").
+            struct KeyRef { uint32_t count = 0u; uint32_t meshIndex = 0u; };
+            std::unordered_map<BlasKey, KeyRef, BlasKeyHash> keys;
+            /// Kind-2 slots (rigged, traced, with a mesh) and the skin pass' wants
+            /// (rigged + traced), ascending — the order the old walks visited them.
+            std::set<uint32_t> skinned, rigged;
+            /// The far copies' hand-over widths (a multiset; its largest is farOverlap).
+            std::map<float, uint32_t> coarse;
+            uint32_t traced = 0u;          ///< kind-1 slots
+            /// A key, a kind or a slot count moved since the last build: the set
+            /// changed (the next TLAS is a rebuild, and a still epoch still builds).
+            bool structDirty = true;
+            /// The per-slot rows (SceneAs::geomRowOfSlot).
+            std::vector<uint32_t> *rows = nullptr;
+            OgreScene *scene = nullptr;
+            unsigned long long visits = 0ull;
+
+            void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override;
+            void gpuSceneReset() override;
+            void take(uint32_t slot, const Rec &r, int sign);
         };
-        std::vector<DecodeWitness> decodeWitness;
+        Feed feed;
+        bool feedOn = false;
 
         /// THE GPU SKIN CACHE (PHOTON-SKIN-1, SkinCache.h): one entry per RIGGED
         /// traced item, by NodeId — its posed vertex buffer, its row block in the
@@ -477,9 +544,10 @@ private:
         /// caster walk's epoch plus the ray rule's refit count.
         unsigned long long lastEpoch = 0;
         bool haveEpoch = false;
-        /// The traced set's shape (count + BLAS identities), so a changed set
-        /// forces a rebuild rather than a refit.
-        unsigned long long setSignature = 0;
+        /// What the last top-level build was made from — the slot count and the
+        /// job's inputs (every BLAS address, the ready rigged slots): a refit is
+        /// legal only when neither moved and the feed saw no change of the set.
+        uint32_t builtSlots = 0u;
 
         /// THIS SCENE'S OWN timestamp range in the shared pool, and its own
         /// in-flight record. Both are per SCENE, not per frame: two scenes
@@ -513,6 +581,20 @@ private:
 
     bool ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants, VkCommandBuffer cmd,
                     unsigned &built, std::string &err);
+    /// THE INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1): the job's inputs, re-written
+    /// only when they changed (`changed`), and the rigged slots' rows; then the
+    /// `Jahshaka/TlasWrite` dispatch into `sa.tlasOut`, with the edges to the
+    /// build that reads it. `skinReady` = rigged slots traced this frame.
+    bool writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skinReady, bool &changed,
+                         std::string &err);
+    bool dispatchTlasWrite(OgreScene *scene, SceneAs &sa, std::string &err);
+public:
+    /// engine.tlas_compute's door (a TOOL path: it submits and waits): the
+    /// device-written instance array read back, its ACTIVE entries in order, held
+    /// byte for byte against the CPU writer run over the same mirror and the same
+    /// structures — plus the far overlap, the counts and the per-slot rows.
+    bool verifyTlasBlocking(OgreScene *scene, TlasVerifyReport &out, std::string &err);
+private:
     /// True when it actually recorded a compaction copy this frame.
     bool runCompaction(SceneAs &sa, VkCommandBuffer cmd);
     bool buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::string &err);
@@ -1216,7 +1298,7 @@ void RayQueryTier::evictStaleBlas(SceneAs &sa) {
         bl.address = 0;
         bl.compactState = 0;
         bl.lastSeen = 0;
-        sa.setSignature = 0;      // the set changed: the next TLAS is a rebuild
+        ++sa.blasVersion;         // the set changed: the next TLAS is a rebuild
     }
 }
 
@@ -1636,7 +1718,12 @@ void RayQueryTier::close() {
         if (sa.tlas) mFn.destroyAccelerationStructure(mVk, sa.tlas, nullptr);
         dropBuffer(sa.tlasStorage);
         dropBuffer(sa.tlasScratch);
-        dropBuffer(sa.instances);
+        // The job's two buffers are Ogre's (the VaoManager outlives this call).
+        if (sa.tlasVao) {
+            if (sa.tlasOut) sa.tlasVao->destroyUavBuffer(sa.tlasOut);
+            if (sa.tlasIn) sa.tlasVao->destroyUavBuffer(sa.tlasIn);
+        }
+        sa.tlasOut = sa.tlasIn = nullptr;
         // THE SKIN CACHES, destroyed outright (the device is idle): the scene the
         // map is keyed by may already be gone, so the GpuScene side is not
         // touched — its tables die with it.
@@ -1829,9 +1916,17 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
         // destruction for its own dynamic-buffer multiplier of frames.
         bl.mesh.reset();
     }
+    if (sa.feedOn) scene->mGpuScene.removeObserver(&sa.feed);
+    sa.feedOn = false;
     retire(sa.tlas, sa.tlasStorage);
     retire(sa.tlasScratch);
-    retire(sa.instances);
+    // The job's buffers through Ogre's delayed destruction (a build recorded in a
+    // frame still in flight reads the instances).
+    if (sa.tlasVao) {
+        if (sa.tlasOut) sa.tlasVao->destroyUavBuffer(sa.tlasOut);
+        if (sa.tlasIn) sa.tlasVao->destroyUavBuffer(sa.tlasIn);
+    }
+    sa.tlasOut = sa.tlasIn = nullptr;
     // THE SKIN CACHES (PHOTON-SKIN-1): each hands back its structure, its buffer
     // and its row block, and clears its node's override — the rows stop naming
     // a posed copy nobody will update again.
@@ -2099,6 +2194,313 @@ static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// THE INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1) — the change feed's side, the job's
+// inputs and the dispatch. The job (Hlms/Jahshaka/JahTlasWrite_cs.glsl) writes two
+// instances per slot at fixed places; everything here is per CHANGED SLOT (the
+// feed), per MESH (the inputs) or per rigged item — no loop over the instances.
+namespace {
+/// Level slots per mesh record in the job's inputs (JahTlasWrite_cs.glsl's
+/// LEVEL_SLOTS). The bake tops out at six levels (GpuScene::kLevelsPerMesh holds
+/// eight); a chain deeper than this is traced at this depth at most.
+constexpr uint32_t kTlasLevels = 16u;
+/// The inputs' layout (the shader's HDR_* / MESH_WORDS).
+constexpr uint32_t kTlasHeaderWords = 16u;
+constexpr uint32_t kTlasMeshWords = kTlasLevels * 2u + 4u;
+constexpr uint32_t kTlasSkinWords = 4u;
+constexpr uint32_t kTlasThreadsPerGroup = 64u;   // the job's threads_per_group
+}   // namespace
+
+void RayQueryTier::SceneAs::Feed::take(uint32_t slot, const Rec &r, int sign) {
+    if (r.rigged) {
+        if (sign > 0) rigged.insert(slot); else rigged.erase(slot);
+    }
+    if (r.kind == 2u) {
+        if (sign > 0) skinned.insert(slot); else skinned.erase(slot);
+    }
+    if (r.kind == 1u) {
+        traced = sign > 0 ? traced + 1u : (traced ? traced - 1u : 0u);
+        for (const uint32_t level : { r.nearLevel, r.farLevel }) {
+            const BlasKey key{ r.mesh, level };
+            if (sign > 0) {
+                KeyRef &k = keys[key];
+                ++k.count;
+                k.meshIndex = r.meshIndex;
+            } else {
+                auto it = keys.find(key);
+                if (it != keys.end() && (it->second.count <= 1u)) keys.erase(it);
+                else if (it != keys.end()) --it->second.count;
+            }
+        }
+        if (r.coarse > 0.0f) {
+            if (sign > 0) {
+                ++coarse[r.coarse];
+            } else {
+                auto it = coarse.find(r.coarse);
+                if (it != coarse.end() && --it->second == 0u) coarse.erase(it);
+            }
+        }
+    }
+}
+
+/// ONE SLOT'S CONTRIBUTION, from the entry as it is now. The predicates are the
+/// old writer's, read from the same words: `kGpuRayTraced` (the conjunction every
+/// consumer used to recompute), a mesh the table names, `kGpuSkinned` for a rigged
+/// item (its own structure), the near level the RAY RULE's (ids.w, AT-A8r) clamped
+/// to the chain, the far copy the coarsest, and the far copy's hand-over width
+/// (audit F2): the coarsest level's measured bound grown by the largest axis scale.
+void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) {
+    ++visits;
+    words.set(slot, now ? now->raster[0] : detail::WordCounts::kNone);
+    Rec next;
+    if (now && scene) {
+        uint32_t flags = 0u, meshIndex = 0u;
+        std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
+        std::memcpy(&meshIndex, &now->boundsMin[3], sizeof(meshIndex));
+        if (flags & detail::kGpuRayTraced) {
+            next.rigged = (flags & detail::kGpuSkinned) != 0u;
+            const Ogre::MeshPtr &mp = scene->mGpuScene.meshAt(meshIndex);
+            if (mp && next.rigged) {
+                next.kind = 2u;
+            } else if (mp) {
+                next.kind = 1u;
+                next.mesh = mp.get();
+                next.meshIndex = meshIndex;
+                const uint32_t coarsest = std::min(coarsestLevelOf(mp.get()), kTlasLevels - 1u);
+                next.farLevel = coarsest;
+                next.nearLevel = std::min(now->ids[3], coarsest);
+                if (coarsest > 0u) {
+                    const std::vector<float> *b = scene->lodBoundsFor(mp.get());
+                    const float bound = (b && !b->empty()) ? b->back() : 0.0f;
+                    if (bound > 0.0f) {
+                        const float grown = bound * worldMaxAxisScale(now->world);
+                        if (std::isfinite(grown) && grown > 0.0f) next.coarse = grown;
+                    }
+                }
+            }
+        }
+    }
+    if (slot >= recs.size()) recs.resize(size_t(slot) + 1u);
+    Rec &was = recs[slot];
+    if (!was.sameKeys(next)) structDirty = true;
+    take(slot, was, -1);
+    take(slot, next, +1);
+    // THE NEAR COPY'S ROW. A rigged slot's row is its skin cache's, written by the
+    // gather from the ready caches (writeTlasInputs); it keeps the one it has here.
+    if (rows) {
+        if (slot >= rows->size()) rows->resize(size_t(slot) + 1u, detail::GpuScene::kNoGeomRow);
+        if (next.kind == 1u)
+            (*rows)[slot] = next.nearLevel < detail::GpuScene::kLevelsPerMesh
+                                ? detail::GpuScene::geomRowIndex(next.meshIndex, next.nearLevel, 0u)
+                                : detail::GpuScene::kNoGeomRow;
+        else if (next.kind != 2u || was.kind != 2u)
+            (*rows)[slot] = detail::GpuScene::kNoGeomRow;
+    }
+    was = next;
+}
+
+void RayQueryTier::SceneAs::Feed::gpuSceneReset() {
+    words.reset();
+    recs.clear();
+    keys.clear();
+    skinned.clear();
+    rigged.clear();
+    coarse.clear();
+    traced = 0u;
+    structDirty = true;
+    if (rows) rows->clear();
+}
+
+/// THE JOB'S INPUTS: a header (counts, the mask and flag bits — the C++ constants
+/// are the one source), one record per mesh-table entry (every level's structure
+/// address, the coarsest level) re-written only when the BLAS set or the mesh set
+/// moved, and the READY rigged slots (their skin structures, ascending by slot) —
+/// the old writer's "a rigged slot whose cache is not ready is NOT WRITTEN".
+bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skinReady, bool &changed,
+                                   std::string &err) {
+    detail::GpuScene &gs = scene->mGpuScene;
+    SceneAs::Feed &fd = sa.feed;
+    const uint32_t meshes = gs.meshEntryCount();
+    std::vector<uint32_t> &w = sa.tlasInScratch;
+    const bool meshesCurrent = sa.inputsBlasVersion == sa.blasVersion &&
+                               sa.inputsMeshSerial == gs.meshSetSerial() &&
+                               sa.tlasInWords.size() >= size_t(kTlasHeaderWords) + size_t(meshes) * kTlasMeshWords &&
+                               sa.tlasInWords.size() > 1u && sa.tlasInWords[1] == meshes;
+    w.assign(size_t(kTlasHeaderWords) + size_t(meshes) * kTlasMeshWords, 0u);
+    w[0] = gs.slotCount();
+    w[1] = meshes;
+    w[4] = kRayMaskNear;
+    w[5] = kRayMaskCaster;
+    w[6] = kRayMaskMover;
+    w[7] = kRayMaskStill;
+    w[8] = kRayMaskMoverCaster;
+    w[9] = kRayMaskFar;
+    w[10] = detail::kGpuRayTraced;
+    w[11] = detail::kGpuCaster;
+    w[12] = detail::kGpuMover;
+    w[13] = detail::kGpuSkinned;
+    if (meshesCurrent) {
+        std::copy(sa.tlasInWords.begin() + kTlasHeaderWords,
+                  sa.tlasInWords.begin() + kTlasHeaderWords + ptrdiff_t(meshes) * kTlasMeshWords,
+                  w.begin() + kTlasHeaderWords);
+    } else {
+        for (uint32_t m = 0; m < meshes; ++m) {
+            const Ogre::MeshPtr &mp = gs.meshAt(m);
+            if (!mp) continue;
+            uint32_t *rec = w.data() + kTlasHeaderWords + size_t(m) * kTlasMeshWords;
+            for (uint32_t l = 0; l < kTlasLevels; ++l) {
+                auto it = sa.blasOf.find(BlasKey{ mp.get(), l });
+                const VkDeviceAddress a =
+                    (it != sa.blasOf.end() && it->second < sa.blas.size()) ? sa.blas[it->second].address : 0u;
+                rec[2u * l] = uint32_t(a & 0xFFFFFFFFu);
+                rec[2u * l + 1u] = uint32_t(a >> 32u);
+            }
+            rec[2u * kTlasLevels] = std::min(coarsestLevelOf(mp.get()), kTlasLevels - 1u);
+        }
+        sa.inputsBlasVersion = sa.blasVersion;
+        sa.inputsMeshSerial = gs.meshSetSerial();
+    }
+    // THE READY RIGGED SLOTS (the skin pass just ran: sa.skinUse is this frame's),
+    // and their rows — O(rigged items).
+    skinReady = 0u;
+    if (sa.geomRowOfSlot.size() < gs.slotCount())
+        sa.geomRowOfSlot.resize(gs.slotCount(), detail::GpuScene::kNoGeomRow);
+    for (const uint32_t slot : fd.skinned) {
+        if (slot >= gs.slotCount()) continue;
+        auto it = sa.skinUse.find(gs.entry(slot).ids[0]);
+        if (it == sa.skinUse.end()) {
+            sa.geomRowOfSlot[slot] = detail::GpuScene::kNoGeomRow;
+            continue;
+        }
+        w.push_back(slot);
+        w.push_back(uint32_t(it->second.first & 0xFFFFFFFFu));
+        w.push_back(uint32_t(it->second.first >> 32u));
+        w.push_back(0u);
+        sa.geomRowOfSlot[slot] = it->second.second;
+        ++skinReady;
+    }
+    w[2] = skinReady;
+    // The rows past the slot count describe nothing (a freed tail).
+    if (sa.geomRowOfSlot.size() > gs.slotCount()) sa.geomRowOfSlot.resize(gs.slotCount());
+
+    changed = w != sa.tlasInWords;
+    if (!changed && sa.tlasIn) return true;
+    Ogre::VaoManager *vao = mRs ? mRs->getVaoManager() : nullptr;
+    if (!vao || !vao->supportsBufferDeviceAddress()) {
+        err = "the instance job needs buffer device addresses";
+        return false;
+    }
+    if (sa.tlasVao && sa.tlasVao != vao) {
+        if (sa.tlasOut) sa.tlasVao->destroyUavBuffer(sa.tlasOut);
+        if (sa.tlasIn) sa.tlasVao->destroyUavBuffer(sa.tlasIn);
+        sa.tlasOut = sa.tlasIn = nullptr;
+        sa.tlasOutCap = sa.tlasInCap = 0u;
+    }
+    sa.tlasVao = vao;
+    if (!sa.tlasIn || sa.tlasInCap < w.size()) {
+        uint32_t cap = std::max<uint32_t>(sa.tlasInCap, 1024u);
+        while (cap < w.size()) cap *= 2u;
+        if (sa.tlasIn) vao->destroyUavBuffer(sa.tlasIn);
+        sa.tlasIn = vao->createUavBuffer(cap, sizeof(uint32_t), 0, nullptr, false);
+        sa.tlasInCap = cap;
+    }
+    // WRITE-AFTER-READ: last frame's dispatch read these words (an earlier
+    // submission on this queue); the upload's copy must not overtake it.
+    {
+        VkCommandBuffer cmd = frameCmd();
+        VkMemoryBarrier war{};
+        war.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                             &war, 0, nullptr, 0, nullptr);
+    }
+    sa.tlasIn->upload(w.data(), 0, w.size());
+    sa.tlasInWords.swap(w);
+    changed = true;
+    return true;
+}
+
+bool RayQueryTier::dispatchTlasWrite(OgreScene *scene, SceneAs &sa, std::string &err) {
+    detail::GpuScene &gs = scene->mGpuScene;
+    const uint32_t slots = gs.slotCount();
+    Ogre::VaoManager *vao = sa.tlasVao;
+    Ogre::HlmsManager *hm = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getHlmsManager() : nullptr;
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow("Jahshaka/TlasWrite") : nullptr;
+    if (!job) {
+        err = "the Jahshaka/TlasWrite job is missing from the staged media";
+        return false;
+    }
+    if (!vao || !sa.tlasIn) {
+        err = "the instance job has no inputs";
+        return false;
+    }
+    // THE OUTPUT: two instances a slot, grown by doubling (never per frame).
+    const uint32_t want = std::max(64u, 2u * slots);
+    if (!sa.tlasOut || sa.tlasOutCap < want) {
+        uint32_t cap = std::max(sa.tlasOutCap, 64u);
+        while (cap < want) cap *= 2u;
+        if (sa.tlasOut) vao->destroyUavBuffer(sa.tlasOut);
+        sa.tlasOut = vao->createUavBuffer(cap, sizeof(VkAccelerationStructureInstanceKHR), 0, nullptr, false);
+        sa.tlasOutCap = cap;
+        sa.feed.structDirty = true;   // a new array: the build is full
+    }
+    if (!slots) return true;           // nothing to write; the build takes 0 primitives
+    Ogre::UavBufferPacked *table = gs.instanceBuffer();   // re-read: a grow re-creates it
+    if (!table) {
+        err = "the GPU scene has no instance table";
+        return false;
+    }
+    // THE EDGES Ogre's solver cannot see: last frame's BUILD read the output (an
+    // acceleration-structure input, not a UAV the solver tracks), and this frame's
+    // staging copies (the GPU scene's slots, the ray-level patches, the inputs)
+    // wrote what the job reads.
+    {
+        VkCommandBuffer cmd = frameCmd();
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+    const auto slotOf = [](Ogre::UavBufferPacked *buf, Ogre::ResourceAccess::ResourceAccess access) {
+        Ogre::DescriptorSetUav::BufferSlot slot(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        slot.buffer = buf;
+        slot.offset = 0;
+        slot.sizeBytes = 0;
+        slot.access = access;
+        return slot;
+    };
+    try {
+        job->_setUavBuffer(0u, slotOf(table, Ogre::ResourceAccess::Read));
+        job->_setUavBuffer(1u, slotOf(sa.tlasIn, Ogre::ResourceAccess::Read));
+        job->_setUavBuffer(2u, slotOf(sa.tlasOut, Ogre::ResourceAccess::Write));
+        job->setNumThreadGroups((slots + kTlasThreadsPerGroup - 1u) / kTlasThreadsPerGroup, 1u, 1u);
+        Ogre::ResourceTransitionArray &rt = mRs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+        job->analyzeBarriers(rt);
+        mRs->executeResourceTransition(rt);
+        hc->dispatch(job, nullptr, nullptr);
+        job->clearUavBuffers();
+    } catch (Ogre::Exception &e) {
+        job->clearUavBuffers();
+        err = "the instance job: " + e.getFullDescription();
+        return false;
+    }
+    // THE JOB -> THE BUILD: the instances are an acceleration-structure input
+    // read through a device address, which the solver has no word for.
+    VkCommandBuffer cmd = frameCmd();
+    VkMemoryBarrier raw{};
+    raw.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    raw.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    raw.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &raw, 0, nullptr, 0,
+                         nullptr);
+    ++sa.st.tlasJobDispatches;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2408,8 +2810,9 @@ bool RayQueryTier::runCompaction(SceneAs &sa, VkCommandBuffer cmd) {
         ai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
         ai.accelerationStructure = dst;
         bl.address = mFn.getAsDeviceAddress(mVk, &ai);
-        // The TLAS references the OLD address until it is rebuilt: force one.
-        sa.setSignature = 0;
+        // The TLAS references the OLD address until it is rebuilt: the inputs'
+        // version moves, so the job re-writes the instances and the build is full.
+        ++sa.blasVersion;
         compacted_any = true;
     }
     return compacted_any;
@@ -2423,9 +2826,10 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     geom.geometry.instances.sType =
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     geom.geometry.instances.arrayOfPointers = VK_FALSE;
+    // THE JOB'S OUTPUT, read in place (a device-local Ogre UAV buffer: patch 0039
+    // gives those pools the build-input usage and an address).
     geom.geometry.instances.data.deviceAddress =
-        addressOf(sa.instances.buffer) +
-        VkDeviceSize(sa.slot) * sa.instanceCapacity * sizeof(VkAccelerationStructureInstanceKHR);
+        (sa.tlasVao && sa.tlasOut) ? VkDeviceAddress(sa.tlasVao->getBufferDeviceAddress(sa.tlasOut)) : 0u;
 
     VkAccelerationStructureBuildGeometryInfoKHR build{};
     build.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
@@ -2448,7 +2852,7 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     // — on every single add. The storage only grows when the capacity does.
     VkAccelerationStructureBuildSizesInfoKHR sizes{};
     sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-    const uint32_t sizeFor = std::max(sa.instanceCapacity, sa.instanceCount);
+    const uint32_t sizeFor = std::max(sa.tlasOutCap, sa.tlasPrimitives);
     mFn.getBuildSizes(mVk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build, &sizeFor,
                       &sizes);
 
@@ -2489,7 +2893,7 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     build.scratchData.deviceAddress = scratchAddr;
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
-    range.primitiveCount = sa.instanceCount;
+    range.primitiveCount = sa.tlasPrimitives;
     const VkAccelerationStructureBuildRangeInfoKHR *rangePtr = &range;
 
     // WHAT THIS BUILD MUST WAIT FOR — all of it (finding 1). The old barrier
@@ -2602,19 +3006,14 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
     detail::GpuScene &gs = scene->mGpuScene;
     if (!gs.live()) return true;
 
-    // 1. THE RIGGED TRACED SET, out of the GPU scene's mirror (current: the scan
-    //    ran this frame, just before this tier). The flags word is the one place
-    //    the predicates live; kGpuRayTraced no longer excludes a rigged item.
+    // 1. THE RIGGED TRACED SET, kept by the change feed (ATOM-CPU-WALKS-1; it used
+    //    to be a walk of the GPU scene's mirror every moving frame), ascending by
+    //    slot as that walk visited it. The flags word is the one place the
+    //    predicates live; kGpuRayTraced no longer excludes a rigged item.
     struct Want { uint32_t slot = 0; OgreScene::Node *node = nullptr; };
     std::vector<Want> wants;
-    const detail::GpuInstance *mirror = gs.mirrorData();
-    const uint32_t slots = std::min<uint32_t>(gs.slotCount(), uint32_t(scene->mItemNodes.size()));
-    for (uint32_t i = 0; i < slots; ++i) {
-        Ogre::uint32 flags;
-        std::memcpy(&flags, &mirror[i].boundsMax[3], sizeof(flags));
-        if ((flags & (detail::kGpuRayTraced | detail::kGpuSkinned)) !=
-            (detail::kGpuRayTraced | detail::kGpuSkinned))
-            continue;
+    for (const uint32_t i : sa.feed.rigged) {
+        if (i >= gs.slotCount() || i >= scene->mItemNodes.size()) continue;
         OgreScene::Node *n = scene->mItemNodes[i];
         if (!n || !n->item || !n->item->getSkeletonInstance()) continue;
         wants.push_back({ i, n });
@@ -3041,78 +3440,38 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): a decode twin for every PBS
     // datablock the scene's items wear, and one decode draw per twin in this
     // scene — made HERE, outside the compositor, when the set of material words
-    // (GpuInstance::raster x) or HlmsAtom's twin epoch moved. A scan of the GPU
-    // scene's mirror only when its slot writes moved.
+    // (GpuInstance::raster x, kept by the change feed) or HlmsAtom's twin epoch
+    // moved. A TWIN IS A COPY, AND A COPY DRIFTS: the engine edits a PBS datablock
+    // in place (a texture bound or streamed in, the sky's reflection cube taken
+    // away when a probe grid binds, a flag); Ogre re-hashes every renderable such
+    // an edit reaches, the PBS change log notes it, and the frame's drain
+    // (OgreEngine::drainPbsChanges) forgets the twin whose bucket moved — the epoch
+    // this compares. Nothing here walks the slots or polls a material.
     {
-        const detail::GpuScene &gsc = scene->gpuScene();
+        detail::GpuScene &gsc = scene->mGpuScene;
         Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
         auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
-        // A TWIN IS A COPY, AND A COPY DRIFTS: the engine edits a PBS datablock in
-        // place (a texture bound or streamed in, the sky's reflection cube taken
-        // away when a probe grid binds, a flag), and the twin made from it earlier
-        // would shade the old permutation — measured in the app: a twin still
-        // holding the sky cube as its manual reflection under an automatic probe
-        // array, a shader that cannot compile. Ogre re-hashes every renderable a
-        // datablock changes the permutation of (HlmsDatablock::flushRenderables),
-        // so one item wearing each word is the witness: its hash or its datablock
-        // moved -> the twin dies if its BUCKET moved (forgetDecodeTwinIfMoved; the
-        // epoch moves) and the next sync re-derives it. A SAME-SLOT TEXTURE SWAP keeps the hash (the property
-        // vector is unchanged) and the twin would keep the old texture in every hit:
-        // the witness carries the datablock's texture set too (audit F6). One hash
-        // compare and one texture-set key per material per frame.
-        if (atom && gsc.live()) {
-            for (auto &w : sa.decodeWitness) {
-                if (w.slot >= scene->mItemNodes.size()) continue;
-                const OgreScene::Node *nd = scene->mItemNodes[w.slot];
-                if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
-                const Ogre::SubItem *sub = nd->item->getSubItem(0);
-                const Ogre::HlmsDatablock *db = sub->getDatablock();
-                const Ogre::uint32 h = sub->getHlmsHash();
-                const uint64_t tk = HlmsAtom::textureSetKeyOf(db);
-                if (db == w.db && (h != w.hash || tk != w.texKey) && db) atom->forgetDecodeTwinIfMoved(db);
-                w.db = db;
-                w.hash = h;
-                w.texKey = tk;
-            }
+        if (gsc.live() && !sa.feedOn) {
+            sa.feed.scene = scene;
+            sa.feed.rows = &sa.geomRowOfSlot;
+            gsc.addObserver(&sa.feed);   // primes it: one walk, once per scene
+            sa.feedOn = true;
         }
-        if (atom && gsc.live() &&
-            (gsc.writes() != sa.decodeWrites || atom->twinEpoch() != sa.decodeEpoch)) {
-            sa.decodeWrites = gsc.writes();
-            std::vector<uint32_t> words;
-            std::vector<SceneAs::DecodeWitness> witness;
-            const detail::GpuInstance *m = gsc.mirrorData();
-            for (uint32_t i = 0, n = gsc.slotCount(); i < n; ++i)
-                if (m[i].raster[0] != HlmsAtom::kNoMaterialWord) words.push_back(m[i].raster[0]);
-            std::sort(words.begin(), words.end());
-            words.erase(std::unique(words.begin(), words.end()), words.end());
+        if (atom && gsc.live() && (sa.feed.words.changed() || atom->twinEpoch() != sa.decodeEpoch)) {
+            std::vector<uint32_t> words = sa.feed.words.take();
             if (words != sa.decodeWords || atom->twinEpoch() != sa.decodeEpoch) {
-                sa.decodeWords = words;
-                atom->syncSceneDecodes(scene->mSceneMgr, words);
+                sa.decodeWords.swap(words);
+                atom->syncSceneDecodes(scene->mSceneMgr, sa.decodeWords);
                 sa.decodeEpoch = atom->twinEpoch();
-                // ...and the witnesses: the first slot wearing each word.
-                std::vector<uint32_t> seen;
-                for (uint32_t i = 0, n = gsc.slotCount(); i < n; ++i) {
-                    const uint32_t w = m[i].raster[0];
-                    if (w == HlmsAtom::kNoMaterialWord) continue;
-                    if (std::find(seen.begin(), seen.end(), w) != seen.end()) continue;
-                    seen.push_back(w);
-                    SceneAs::DecodeWitness dw;
-                    dw.slot = i;
-                    if (i < scene->mItemNodes.size() && scene->mItemNodes[i] && scene->mItemNodes[i]->item &&
-                        scene->mItemNodes[i]->item->getNumSubItems()) {
-                        const Ogre::SubItem *sub = scene->mItemNodes[i]->item->getSubItem(0);
-                        dw.db = sub->getDatablock();
-                        dw.hash = sub->getHlmsHash();
-                        dw.texKey = HlmsAtom::textureSetKeyOf(dw.db);
-                    }
-                    witness.push_back(dw);
-                }
-                sa.decodeWitness.swap(witness);
             }
         }
     }
     const unsigned long long epoch = scene->shadowEpoch() + scene->rayLevelRefits();
-    const bool moved = !sa.haveEpoch || epoch != sa.lastEpoch;
+    // ...AND THE SET ITSELF (ATOM-CPU-WALKS-1): a slot that entered or left the
+    // traced set, or changed its structures, without anything moving (an alpha
+    // test or a route edited in place, a skinned item's rig) is a new set — the
+    // feed says so; the old writer re-read the set only when the epoch moved.
+    const bool moved = !sa.haveEpoch || epoch != sa.lastEpoch || sa.feed.structDirty;
     // THIS SCENE'S OWN timestamp range, handed out once. Past the budget a
     // scene simply reports no GPU milliseconds — a thumbnail scene's timings
     // are worth nothing and a missing number is better than a wrong one.
@@ -3146,8 +3505,8 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // reproducible (round 2, cases 7/8).
     //
     // Run here, the addresses are already the new ones when the gather reads
-    // them, and compaction's own `setSignature = 0` forces the full rebuild
-    // that publishes them.
+    // them, and compaction's own blasVersion bump forces the full rebuild that
+    // publishes them.
     VkCommandBuffer cmd = frameCmd();
     if (!cmd) return;
     const bool didCompact = runCompaction(sa, cmd);
@@ -3167,7 +3526,6 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // instance walk", which it was not. Only the walk is timed now; the rest is
     // GPU-side work whose cost the timestamps report.
     double gatherMs = 0.0;
-    sa.slot = (sa.slot + 1u) % kFramesInFlight;
     const uint32_t frame = frameNow();
 
     // THIS FRAME'S TIMESTAMP RANGE, reset once and before anything writes into
@@ -3198,95 +3556,87 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         if (sa.st.skinPasses == before) scope.cancel();
     }
 
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        InstanceWriter w;
-        w.blasOf = &sa.blasOf;
-        w.coarseBound = &sa.coarseBound;
-        w.geomRowOfSlot = &sa.geomRowOfSlot;
-        w.skinUse = &sa.skinUse;
-        std::vector<VkDeviceAddress> addresses;
-        addresses.reserve(sa.blas.size());
-        for (const Blas &bl : sa.blas) addresses.push_back(bl.address);
-        w.blasAddress = &addresses;
-        w.capacity = sa.instanceCapacity;
-        w.wantSignature = preferRefit();
-        std::vector<unsigned char> seen(sa.blas.size(), 0u);
-        w.seen = &seen;
-        w.dst = sa.instances.mapped
-                    ? static_cast<VkAccelerationStructureInstanceKHR *>(sa.instances.mapped) +
-                          size_t(sa.slot) * sa.instanceCapacity
-                    : nullptr;
-        const Clock::time_point tGather = Clock::now();
-        writeRayInstances(scene, w);
-        gatherMs += msSince(tGather);
-
-        if (w.count > sa.instanceCapacity || !sa.instances.mapped) {
-            if (attempt == 1) { sa.st.enabled = false; return; }
-            // GROW. One buffer, kFramesInFlight slots: the gather writes into
-            // the slot this frame builds from, so a transform never passes
-            // through an intermediate vector and the GPU is never reading the
-            // slot being written.
-            const unsigned want = std::max<unsigned>(64u, w.count + w.count / 2u + 16u);
-            // RETIRED, not waited on (finding 6): a TLAS build queued last
-            // frame still reads the old array. This runs on every scene's FIRST
-            // frame, so a device wait here was a stall every scene paid.
-            retire(sa.instances);
-            if (!makeBuffer(VkDeviceSize(want) * kFramesInFlight *
-                                sizeof(VkAccelerationStructureInstanceKHR),
-                            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                            true, true, sa.instances, err)) {
-                Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
-                sa.st.enabled = false;
-                return;
-            }
-            sa.instanceCapacity = want;
-            sa.setSignature = 0;
-            continue;
+    // --- THE INSTANCES, ON THE DEVICE (ATOM-CPU-WALKS-1) ---------------------
+    // What the host still does here is per MESH or per rigged item, never per
+    // instance: the bottom-level structures the change feed says are referenced
+    // and do not exist yet (built first — the job reads their addresses), the
+    // job's inputs when they changed, the dispatch, the build. `gatherMs` is that
+    // CPU; it used to be the instance walk (3-13 ms at 10k, W8 / W13).
+    const Clock::time_point tGather = Clock::now();
+    SceneAs::Feed &fd = sa.feed;
+    detail::GpuScene &gs = scene->mGpuScene;
+    const uint32_t slots = gs.slotCount();
+    {
+        // 1. THE STRUCTURES THE SET REFERENCES and nobody built yet, ascending by
+        //    (mesh entry, level) so the order is the same every run.
+        std::vector<std::pair<std::pair<uint32_t, uint32_t>, BlasWant>> missing;
+        for (const auto &kv : fd.keys) {
+            if (!kv.second.count || sa.blasOf.count(kv.first)) continue;
+            const Ogre::MeshPtr &mp = gs.meshAt(kv.second.meshIndex);
+            if (!mp || mp.get() != kv.first.mesh) continue;
+            missing.push_back({ { kv.second.meshIndex, kv.first.level }, BlasWant{ mp, kv.first.level } });
         }
-
-        unsigned built = 0;
-        if (!w.newBlas.empty()) {
+        std::sort(missing.begin(), missing.end(),
+                  [](const auto &x, const auto &y) { return x.first < y.first; });
+        if (!missing.empty()) {
+            std::vector<BlasWant> wants;
+            wants.reserve(missing.size());
+            for (auto &m : missing) wants.push_back(m.second);
+            unsigned built = 0;
             if (timed)
                 vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 0);
             monitor::CacheScope scope(CacheKind::Gi, WorkReason::Added, 0, "rq.blas", mRs);
-            if (!ensureBlas(sa, w.newBlas, cmd, built, err)) {
+            if (!ensureBlas(sa, wants, cmd, built, err)) {
                 Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
                 scope.cancel();
                 // The TLAS goes with the failure: compaction may already have
                 // retired structures it references, and a scene that stops
                 // moving would keep that half-built tree for ever (finding 6).
                 retire(sa.tlas, sa.tlasStorage);
-                sa.setSignature = 0;
+                ++sa.blasVersion;
                 sa.st.enabled = false;
                 return;
             }
             scope.setUnits(built);
             if (timed)
-                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps,
-                                    qBase + 1);
+                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 1);
             pend.blas = built != 0u;
             sa.st.blasBuilds += built;
-            // Patch the instances that referenced a structure that did not
-            // exist when they were written.
-            for (const InstanceWriter::Patch &p : w.patches) {
-                const BlasWant &want = w.newBlas[p.newBlas];
-                auto it = sa.blasOf.find(BlasKey{ want.mesh.get(), want.level });
-                if (it == sa.blasOf.end()) continue;
-                w.dst[p.instance].accelerationStructureReference = sa.blas[it->second].address;
-            }
+            if (built) ++sa.blasVersion;
         }
-        sa.instanceCount = w.count;
-        sa.farInstanceCount = w.farCount;
-        sa.st.skinnedInstances = int(w.skinned);
-        sa.farOverlap = w.maxCoarseBound;
+        // Every structure the set still references was SEEN this frame
+        // (evictStaleBlas' clock) — O(keys), never O(instances).
+        for (const auto &kv : fd.keys) {
+            if (!kv.second.count) continue;
+            auto it = sa.blasOf.find(kv.first);
+            if (it != sa.blasOf.end() && it->second < sa.blas.size()) sa.blas[it->second].lastSeen = frame;
+        }
+    }
+    // 2. THE JOB'S INPUTS (and the rigged slots' rows), then 3. THE DISPATCH.
+    unsigned skinReady = 0;
+    bool inputsChanged = false;
+    if (!writeTlasInputs(scene, sa, skinReady, inputsChanged, err) || !dispatchTlasWrite(scene, sa, err)) {
+        Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
+        retire(sa.tlas, sa.tlasStorage);
+        ++sa.blasVersion;
+        sa.st.enabled = false;
+        return;
+    }
+    cmd = frameCmd();
+    sa.tlasPrimitives = 2u * slots;
+    sa.farInstanceCount = fd.traced + skinReady;
+    sa.instanceCount = 2u * sa.farInstanceCount;
+    sa.st.skinnedInstances = int(skinReady);
+    sa.farOverlap = fd.coarse.empty() ? 0.0f : fd.coarse.rbegin()->first;
+    gatherMs = msSince(tGather);
+    {
         // REBUILD IS THE DEFAULT, refit the optimisation (NVIDIA's own guidance
         // for a TLAS: "consider PREFER_FAST_TRACE and perform only rebuilds").
-        // A refit is only ever taken when the SET is identical — same
-        // instances, same structures, only transforms moved — which is exactly
-        // what the signature says, and only when the tuning asks for it.
-        const bool sameSet = (sa.setSignature == w.signature) && sa.tlas;
+        // A refit is only ever taken when the SET is identical — no key, kind or
+        // slot count moved (the feed), and no address and no ready rigged slot
+        // (the inputs) — and only when the tuning asks for it.
+        const bool sameSet = sa.tlas && !fd.structDirty && !inputsChanged && sa.builtSlots == slots;
         const bool refit = preferRefit() && sameSet;
-        sa.setSignature = w.signature;
         if (timed)
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 2);
         {
@@ -3299,7 +3649,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 // retired structures it references, and a scene that stops
                 // moving would keep that half-built tree for ever (finding 6).
                 retire(sa.tlas, sa.tlasStorage);
-                sa.setSignature = 0;
+                ++sa.blasVersion;
                 sa.st.enabled = false;
                 return;
             }
@@ -3319,9 +3669,8 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         if (timed)
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 3);
         pend.tlas = true;
-        for (size_t i = 0; i < seen.size() && i < sa.blas.size(); ++i)
-            if (seen[i]) sa.blas[i].lastSeen = frame;
-        break;
+        fd.structDirty = false;
+        sa.builtSlots = slots;
     }
 
     sa.lastEpoch = epoch;
@@ -3388,7 +3737,125 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
         st.enabled = isOpen();
         return st;
     }
-    return it->second.st;
+    RayQueryStatus st = it->second.st;
+    st.feedSlotVisits = it->second.feed.visits;
+    return st;
+}
+
+namespace {
+VkDescriptorBufferInfo rawBufferInfo(Ogre::UavBufferPacked *b);
+}   // namespace
+
+// ---------------------------------------------------------------------------
+// engine.tlas_compute's door (ATOM-CPU-WALKS-1): the job's output against the CPU
+// writer, byte for byte. A TOOL path — its own command buffer, a fence wait.
+bool RayQueryTier::verifyTlasBlocking(OgreScene *scene, TlasVerifyReport &out, std::string &err) {
+    out = TlasVerifyReport();
+    if (!isOpen()) { err = "rayquery: the tier is not open"; return false; }
+    auto it = mScenes.find(scene);
+    if (it == mScenes.end() || !it->second.tlasOut || !it->second.tlasVao) {
+        err = "rayquery: this scene has no instance array yet (render a frame first)";
+        return false;
+    }
+    SceneAs &sa = it->second;
+    const uint32_t slots = sa.builtSlots;
+    out.slots = slots;
+    // 1. THE DEVICE'S ARRAY, copied out.
+    std::vector<VkAccelerationStructureInstanceKHR> dev(size_t(slots) * 2u);
+    if (slots) {
+        RawBuffer host;
+        const VkDeviceSize bytes = VkDeviceSize(dev.size()) * sizeof(VkAccelerationStructureInstanceKHR);
+        if (!makeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, host, err)) return false;
+        const VkDescriptorBufferInfo src = rawBufferInfo(sa.tlasOut);
+        VkCommandPoolCreateInfo pci{};
+        pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pci.queueFamilyIndex = mDev->mGraphicsQueue.getFamilyIdx();
+        VkCommandPool pool = VK_NULL_HANDLE;
+        vkCreateCommandPool(mVk, &pci, nullptr, &pool);
+        VkCommandBufferAllocateInfo cai{};
+        cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cai.commandPool = pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(mVk, &cai, &cmd);
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &bi);
+        VkMemoryBarrier pre{};
+        pre.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        pre.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        pre.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &pre,
+                             0, nullptr, 0, nullptr);
+        VkBufferCopy region{};
+        region.srcOffset = src.offset;
+        region.size = bytes;
+        vkCmdCopyBuffer(cmd, src.buffer, host.buffer, 1, &region);
+        VkMemoryBarrier toHost{};
+        toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0,
+                             nullptr, 0, nullptr);
+        vkEndCommandBuffer(cmd);
+        VkFenceCreateInfo fci{};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        vkCreateFence(mVk, &fci, nullptr, &fence);
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        bool ok = vkQueueSubmit(mDev->mGraphicsQueue.mQueue, 1, &si, fence) == VK_SUCCESS;
+        if (ok) ok = vkWaitForFences(mVk, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+        if (ok) std::memcpy(dev.data(), host.mapped, size_t(bytes));
+        vkDestroyFence(mVk, fence, nullptr);
+        vkFreeCommandBuffers(mVk, pool, 1, &cmd);
+        vkDestroyCommandPool(mVk, pool, nullptr);
+        dropBuffer(host);
+        if (!ok) { err = "rayquery: the instance readback did not complete"; return false; }
+    }
+    std::vector<VkAccelerationStructureInstanceKHR> active;
+    for (const VkAccelerationStructureInstanceKHR &e : dev)
+        if (e.accelerationStructureReference) active.push_back(e);
+    out.deviceActive = unsigned(active.size());
+
+    // 2. THE CPU WRITER over the same mirror and the same structures.
+    std::vector<VkAccelerationStructureInstanceKHR> cpu(size_t(slots) * 2u + 16u);
+    InstanceWriter w;
+    w.blasOf = &sa.blasOf;
+    std::vector<std::pair<const Ogre::Mesh *, float>> coarse;
+    w.coarseBound = &coarse;
+    std::vector<uint32_t> rows;
+    w.geomRowOfSlot = &rows;
+    w.skinUse = &sa.skinUse;
+    std::vector<VkDeviceAddress> addresses;
+    for (const Blas &bl : sa.blas) addresses.push_back(bl.address);
+    w.blasAddress = &addresses;
+    w.capacity = unsigned(cpu.size());
+    w.dst = cpu.data();
+    writeRayInstances(scene, w);
+    out.cpuCount = w.count;
+    out.cpuMissingBlas = unsigned(w.newBlas.size());
+    const size_t n = std::min<size_t>(active.size(), w.count);
+    for (size_t i = 0; i < n; ++i) {
+        ++out.compared;
+        if (std::memcmp(&active[i], &cpu[i], sizeof(VkAccelerationStructureInstanceKHR)) != 0) {
+            if (!out.mismatched) out.firstMismatch = unsigned(i);
+            ++out.mismatched;
+        }
+    }
+    out.deviceOverlap = sa.farOverlap;
+    out.cpuOverlap = w.maxCoarseBound;
+    out.countsEqual = active.size() == w.count && sa.instanceCount == w.count &&
+                      sa.farInstanceCount == w.farCount;
+    rows.resize(slots, detail::GpuScene::kNoGeomRow);
+    std::vector<uint32_t> tierRows = sa.geomRowOfSlot;
+    tierRows.resize(slots, detail::GpuScene::kNoGeomRow);
+    out.rowsEqual = rows == tierRows;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -6680,16 +7147,28 @@ bool RayQueryTier::decodeTwinsStale(OgreScene *scene) const {
     if (!scene) return false;
     auto it = mScenes.find(scene);
     if (it == mScenes.end()) return false;
-    for (const SceneAs::DecodeWitness &w : it->second.decodeWitness) {
-        if (w.slot >= scene->mItemNodes.size()) continue;
-        const OgreScene::Node *nd = scene->mItemNodes[w.slot];
-        if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
-        const Ogre::SubItem *sub = nd->item->getSubItem(0);
-        if (sub->getDatablock() != w.db || sub->getHlmsHash() != w.hash ||
-            HlmsAtom::textureSetKeyOf(w.db) != w.texKey)
-            return true;
-    }
-    return false;
+    // THE EDITS SINCE THE FRAME'S DRAIN (ATOM-CPU-WALKS-1): a datablock re-hashed
+    // since then (the PBS change log) or holding an edit not hashed yet (the pool's
+    // dirty list) whose twin's BUCKET moved, and that this scene's draws serve. The
+    // log and the dirty list are empty on a frame nobody edited a material, so this
+    // costs nothing then — it used to re-read every witness item per pass.
+    Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
+    auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+    auto *pbs = hm ? dynamic_cast<ScenePbs *>(hm->getHlms(Ogre::HLMS_PBS)) : nullptr;
+    if (!atom || !pbs) return false;
+    const std::vector<uint32_t> &words = it->second.decodeWords;
+    const auto servedAndMoved = [&](const Ogre::HlmsDatablock *db) {
+        uint32_t word = HlmsAtom::kNoMaterialWord;
+        if (!atom->decodeTwinMoved(db, word)) return false;
+        return std::binary_search(words.begin(), words.end(), word);
+    };
+    for (const ScenePbs::HashNote &n : pbs->hashNotes())
+        if (n.db && servedAndMoved(n.db)) return true;
+    bool stale = false;
+    pbs->forEachDirtyDatablock([&](const Ogre::HlmsDatablock *db) {
+        if (!stale && servedAndMoved(db)) stale = true;
+    });
+    return stale;
 }
 
 void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view,
@@ -7274,6 +7753,8 @@ SunContactStatus OgreScene::sunContactStatus() const {
 
 void OgreEngine::shutdownRayQuery() {
     if (!mRayTier) return;
+    for (auto &sc : mScenes)
+        if (sc) mRayTier->detachFeed(sc.get());
     mRayTier->close();
     delete mRayTier;
     mRayTier = nullptr;
@@ -7281,6 +7762,11 @@ void OgreEngine::shutdownRayQuery() {
 
 void OgreScene::forgetRayQuery() {
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->forgetScene(this);
+}
+
+bool OgreScene::verifyTlasCompute(TlasVerifyReport &out, std::string &err) {
+    if (!mEngine || !mEngine->mRayTier) { err = "rayquery: no ray tier"; return false; }
+    return mEngine->mRayTier->verifyTlasBlocking(this, out, err);
 }
 
 bool OgreScene::rayReflectionsWanted() const {
@@ -7350,6 +7836,10 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
     return false;
 }
 void OgreScene::forgetRayQuery() {}
+bool OgreScene::verifyTlasCompute(TlasVerifyReport &, std::string &err) {
+    err = "rayquery: not built";
+    return false;
+}
 bool OgreScene::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
 void OgreScene::timeCardRelight(bool) {}

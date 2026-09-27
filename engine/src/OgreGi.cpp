@@ -125,6 +125,20 @@ Ogre::HlmsCache ScenePbs::preparePassHash(const Ogre::CompositorShadowNode *shad
     return Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
 }
 
+void ScenePbs::calculateHashFor(Ogre::Renderable *renderable, Ogre::uint32 &outHash,
+                                Ogre::uint32 &outCasterHash) {
+    Ogre::HlmsPbs::calculateHashFor(renderable, outHash, outCasterHash);
+    HashNote note;
+    note.db = renderable ? renderable->getDatablock() : nullptr;
+    if (auto *sub = dynamic_cast<const Ogre::SubItem *>(renderable)) note.owner = sub->getParent();
+    // One note per (owner, datablock) run: a flush re-hashes an Item's sub-items
+    // back to back, and a caller that re-hashes the same renderable twice (hash,
+    // then caster hash) adds nothing.
+    if (!mHashNotes.empty() && mHashNotes.back().owner == note.owner && mHashNotes.back().db == note.db)
+        return;
+    mHashNotes.push_back(note);
+}
+
 void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) {
 #ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
     // THE RENDERABLE'S OWN SCENE: an Item's SubItem -> its Item -> its
@@ -3837,6 +3851,7 @@ void OgreScene::indexItemNode(Node &n) {
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
+    if (n.item) mNodeOfItem[n.item] = &n;
     markGpuSlotDirty(n);            // a newborn slot has no entry in the table yet
 }
 
@@ -3866,6 +3881,10 @@ void OgreScene::unindexItemNode(Node &n) {
     n.scan.shadowPresent = false;
     n.scan.shadowItem = nullptr;
     if (n.itemSlot == size_t(-1)) return;
+    if (n.item) {
+        auto owned = mNodeOfItem.find(n.item);
+        if (owned != mNodeOfItem.end() && owned->second == &n) mNodeOfItem.erase(owned);
+    }
     const size_t i = n.itemSlot;
     Node *last = mItemNodes.back();
     mItemNodes[i] = last;

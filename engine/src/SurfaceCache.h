@@ -68,6 +68,7 @@
 #include "jahshaka/engine/Types.h"
 
 #include <Compositor/OgreCompositorWorkspaceListener.h>
+#include <Math/Simple/OgreAabb.h>
 #include <OgreQuaternion.h>
 #include <OgreVector3.h>
 
@@ -244,7 +245,15 @@ struct CardSceneView {
         /// and for a future consumer; the CARD'S LEVEL is not derived from it —
         /// the bake owns that number (AT-CARDLOD, see OgreSurfaceCache.cpp).
         const std::vector<float> *lodBounds = nullptr;
+        /// ITS WORLD BOX, measured by the scene this frame (the recomputing read:
+        /// the cache plans before the frame's scene-graph update). The radius
+        /// test, the transform signature and the arrivals' sort read it here — it
+        /// used to be measured again for each of them.
+        Ogre::Aabb box;
     };
+    /// Every item that CAN hold cards in the columns the residency sphere reaches
+    /// (OgreScene::CardFeed) — a superset of the ones inside the radius, and never
+    /// the whole scene (ATOM-CPU-WALKS-1).
     std::vector<Candidate> candidates;
 };
 

@@ -205,6 +205,12 @@ public:
     /// to see the edit cannot destroy the draws the first one re-derived. True when
     /// it forgot.
     bool forgetDecodeTwinIfMoved(const Ogre::HlmsDatablock *pbs);
+    /// ...the same question WITHOUT forgetting (the hit decode's staleness test,
+    /// RayQueryTier::decodeTwinsStale): true when `pbs` serves a twin whose bucket
+    /// its current state no longer matches, with the datablock's material word.
+    /// `pbs` is a KEY first — dereferenced only when a twin is registered for it,
+    /// and every site that destroys a PBS datablock forgets its twin first.
+    bool decodeTwinMoved(const Ogre::HlmsDatablock *pbs, uint32_t &word);
     /// Twins = buckets held (every scene), and the PBS datablocks they serve.
     size_t decodeTwinCount() const { return mTwins.size(); }
     size_t decodeMemberCount() const { return mTwinOfPbs.size(); }
