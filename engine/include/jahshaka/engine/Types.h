@@ -7021,9 +7021,29 @@ struct ImageF {
 ///     REALLY latches the render system (no GPU is touched, but from here on
 ///     it vetoes every frame, exactly as after a real loss): the process
 ///     cannot render again and the host must end it. A suite arms it LAST.
-/// The two Vulkan kinds need the Vulkan render system linked into the engine
+///   * `VulkanOutOfDeviceMemoryInRecord` — the same OOM call, raised INSIDE the
+///     frame's recording (from an Ogre frame listener's `frameRenderingQueued`,
+///     inside `Root::_updateAllRenderTargets`, before the swap). Ogre's frame
+///     state is not whole after that, so it is TERMINAL (`GpuFault`): the
+///     engine renders nothing more and the host must end the process.
+/// The Vulkan kinds need the Vulkan render system linked into the engine
 /// (`JAH_RAY_QUERY`); without it they raise the plain `Throw`.
-enum class FrameFault { None, Throw, ThrowDeviceLost, VulkanOutOfDeviceMemory, VulkanDeviceLost };
+enum class FrameFault { None, Throw, ThrowDeviceLost, VulkanOutOfDeviceMemory, VulkanDeviceLost,
+                        VulkanOutOfDeviceMemoryInRecord };
+
+/// A GPU FAULT THE SESSION CANNOT CONTINUE FROM (`Engine::gpuFault`, lane
+/// FORK-OOM-1). Two facts, kept apart so a log and a test rig never class one
+/// as the other:
+///   * `DeviceLost` — the render system reported VK_ERROR_DEVICE_LOST
+///     (`Engine::deviceLost`). The device is gone.
+///   * `OutOfMemoryInFrame` — a Vulkan out-of-memory happened INSIDE a frame's
+///     work (its pending rebuilds, its scene update or its recording), whoever
+///     caught it. The device is NOT lost, but Ogre's frame state is not whole
+///     after a failure half-way through recording (measured: the next frame
+///     dereferenced null in the render-pass setup), so the engine stops
+///     rendering. An OOM OUTSIDE a frame (a resource created between frames)
+///     is an ordinary error the caller sees, and the engine continues.
+enum class GpuFault { None, DeviceLost, OutOfMemoryInFrame };
 
 /// What the monitor is doing. `Review` is the one recording level — the spec's
 /// old Recorder/Compact/Full ladder collapsed to it when the HUD was cut.

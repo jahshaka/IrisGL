@@ -240,6 +240,11 @@ inline void releaseRecycledName(const std::string &name) {
 /// "VK_ERROR_OUT_OF_DEVICE_MEMORY" at the end of a paragraph. The two numbers
 /// are Vulkan's own (VkResult, core since 1.0); this header does not include
 /// Vulkan.
+inline bool isVulkanOutOfMemory(const Ogre::Exception &e) {
+    return dynamic_cast<const Ogre::RenderingAPIException *>(&e) &&
+           (e.getNumber() == -1 || e.getNumber() == -2);   // VK_ERROR_OUT_OF_{HOST,DEVICE}_MEMORY
+}
+
 inline std::string describeOgreFailure(const Ogre::Exception &e) {
     constexpr int kVkErrorOutOfHostMemory = -1;     // VK_ERROR_OUT_OF_HOST_MEMORY
     constexpr int kVkErrorOutOfDeviceMemory = -2;   // VK_ERROR_OUT_OF_DEVICE_MEMORY
@@ -7574,6 +7579,13 @@ public:
     /// Called from ONE site inside renderOneFrame; always throws.
     void raiseFrameFault();
     bool deviceLost() const override;
+    GpuFault gpuFault() const override;
+    /// The render system's out-of-memory count (VulkanDevice::getOutOfMemoryFailures,
+    /// the fork) and the last one's text; 0 / "" without the Vulkan render system.
+    unsigned vulkanOomCount() const;
+    std::string vulkanLastOom() const;
+    /// FORK-OOM-1: a Vulkan OOM inside this frame's work is terminal (GpuFault).
+    void latchOutOfMemoryInFrame();
     void advanceResources() override;
 
     // ---- VR (SPECS/VR_SPEC.md §4) -----------------------------------------
@@ -8275,6 +8287,20 @@ private:
     FrameFault mFrameFault = FrameFault::None;
     unsigned   mFrameFaultLeft = 0u;
     bool       mFrameFaultDeviceLost = false;
+    /// The in-record door (FrameFault::VulkanOutOfDeviceMemoryInRecord): an Ogre
+    /// frame listener, attached only while that kind is armed.
+    std::unique_ptr<Ogre::FrameListener> mInRecordFault;
+    bool mInRecordFaultAttached = false;
+    /// FORK-OOM-1 — THE FRAME'S WORK WINDOW. The render system's OOM count at the
+    /// top of the frame and at the end of its work (the after-record point where the
+    /// injected frame fault fires); an OOM between the two, caught by whoever, is
+    /// terminal. `mFrameThrewOom`: the frame's own catch saw one (the fallback
+    /// without the render system's count).
+    GpuFault mGpuFault = GpuFault::None;
+    unsigned mOomAtFrameStart = 0u;
+    unsigned mOomAtFrameWorkEnd = 0u;
+    bool     mFrameWorkEnded = false;
+    bool     mFrameThrewOom = false;
     /// WHAT STOPPING A CAPTURE LEAVES BEHIND. Switching the monitor off flushes
     /// the frames still waiting for their GPU samples (which arrive two frames
     /// late) into here, so the host's usual "stop, then drain" order does not
