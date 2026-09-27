@@ -1,0 +1,93 @@
+// THE PHOTON VIEW'S TWO COMPOSITES (PHOTON-VIEW-1; jahshaka::engine::PhotonView in
+// Types.h). Full-screen quads after the post chain and the Atom view, before the
+// overlays (OgreChain.cpp, addPhotonViewPasses), each a plain alpha blend over the
+// finished picture of one texture on unit 0:
+//
+//   Jahshaka/PhotonLayer    the photon scene pass' own colour target (the chain's
+//                           jahPhotonColour, a quad texture source): Ogre's voxel
+//                           and probe visualizers and the cards' quads, drawn
+//                           against a copy of the scene depth onto a transparent
+//                           clear. COVERAGE is "anything was written" — a
+//                           visualizer's alpha is its texel's, not a coverage.
+//   Jahshaka/PhotonOverlay  the ray tier's per-view overlay (RGBA16F at the target's
+//                           size, OgreView::photonOverlay, bound from C++ per view
+//                           by the view's photon listener): the screen-probe
+//                           gather's discs and the reflection trace's hit classes,
+//                           written straight-alpha by the tier's own jobs;
+//                           `photonParams.x` (pushed per view in front of the
+//                           pass) is 1 once the tier has written it, 0 draws nothing.
+//
+// GLSL + Vulkan only; one shader text, the coverage rule a preprocessor define.
+fragment_program Jahshaka/PhotonOverlay_ps_VK glslvk
+{
+	source JahPhotonView_ps.glsl
+}
+fragment_program Jahshaka/PhotonOverlay_ps unified
+{
+	delegate Jahshaka/PhotonOverlay_ps_VK
+}
+fragment_program Jahshaka/PhotonLayer_ps_VK glslvk
+{
+	source JahPhotonView_ps.glsl
+	preprocessor_defines PHOTON_COVERAGE=1
+}
+fragment_program Jahshaka/PhotonLayer_ps unified
+{
+	delegate Jahshaka/PhotonLayer_ps_VK
+}
+
+material Jahshaka/PhotonOverlay
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+			scene_blend alpha_blend
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/PhotonOverlay_ps
+			{
+			}
+
+			texture_unit photonOverlay
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+		}
+	}
+}
+
+material Jahshaka/PhotonLayer
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+			scene_blend alpha_blend
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/PhotonLayer_ps
+			{
+			}
+
+			texture_unit photonLayer
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+		}
+	}
+}
