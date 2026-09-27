@@ -646,9 +646,8 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 	if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
 		return vec4( 0.0 );
 	// HOW FAR AWAY the thing in this mean was (the second channel): what main()
-	// compares this frame's ray against when the camera has moved. ITS SIGN is
-	// the mover flag (REFLECT-MOVERS-1): negative when that frame's ray hit a
-	// slot that was moving — the distance itself is never negative.
+	// compares this frame's ray against when the camera has moved — with the
+	// texel's MOVER AGE in its six low mantissa bits (jahPackMeanLength).
 	wasHitT = finite1( wasPair.y ) && wasPair.y > 0.0 ? jahMeanLength( wasPair.y ) : 0.0;
 	wasMoverAge = wasHitT > 0.0 ? jahMeanMoverAge( wasPair.y ) : 63.0;
 	return vec4( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), h.w );
@@ -938,8 +937,9 @@ void main()
 			float vHitT;
 			const vec4 vPrev = historyAtImage( before, eye, onSurf, traceRes, vHitT );
 			const float nearer = max( min( imageT, vHitT ), 1e-3 );
-			// THE SAME THING, MOVING: the rays in that mean hit a moving slot too
-			// (its mover flag) and went as far as this texel's mean did, to within
+			// THE SAME THING, MOVING: every tap of that mean hit a moving slot within
+			// kMoverMeanFrames (historyAtImage's age test), and the mean went as far
+			// as this texel's mean did, to within
 			// the lobe's own spread (the tolerance the restart below uses). The
 			// distance is the MEAN's, never one sample's: a glossy lobe's samples
 			// land at many lengths on one object.
@@ -966,9 +966,11 @@ void main()
 	// in at 1/n — never a memory drop that keeps the count, which would freeze
 	// this one noisy sample into the mean for thirty frames.
 	// THE MISSING SIDE WAITS FOR EVIDENCE: a ray that missed restarts a mean of the
-	// moving thing only on the THIRD consecutive miss (the age) — a trail drains in
-	// three frames; the lobe's tail inside the reflection, and the half-and-half
-	// edge, rarely miss three times running.
+	// moving thing only on the SECOND consecutive miss (the stored age is 1 or more:
+	// the previous frame's ray missed too) — a trail drains in two frames; the
+	// lobe's tail inside the reflection, and the half-and-half edge, rarely miss
+	// twice running (gi.reflect_mover: the rays glossy floor's grain 2.18x -> 1.28x
+	// the still case's, one frame of trailing-edge trail more).
 	const bool arrived = hitMoving;
 	const bool departed = p.motion.w > 0.5 && !hitMoving && wasMoverAge < kMoverMeanFrames &&
 						  wasMoverAge >= 1.0;
@@ -1096,7 +1098,8 @@ void main()
 			blend = max( blend, drop );
 		hitMean = mix( wasHitT, hitT, blend );
 	}
-	// THE MOVER FLAG rides the ray length's sign (historyAt).
+	// THE MOVER AGE rides the mean length's low bits: 0 when this ray hit a moving
+	// slot, one frame older otherwise (jahPackMeanLength saturates at 63).
 	const float hitMeanStored = jahPackMeanLength( hitMean, hitMoving ? 0.0 : wasMoverAge + 1.0 );
 	const float seed = max( prev.w, warmHeld * kWarmupFrames );
 	const float count = min( seed + 1.0, 4096.0 );

@@ -222,7 +222,9 @@ const float kDepthSigma = 3.0;
 /// kWarmupFrames and counted from there (rq_reflect.comp's DRAG-1 seed), so a
 /// count within kFreshFrames of kWarmupFrames + 1 is a mean of that many real
 /// samples and no more: one noisy ray standing in for an integral. Such a texel
-/// widens its kernel to kFreshRadius trace texels — the same depth and normal
+/// widens its kernel to ceil( kFreshRadius x (1 - k / kFreshFrames) ) trace texels
+/// k frames after the restart — 3 for the first three frames, 2 for the next
+/// three, 1 for the last two — the same depth and normal
 /// weights, so never across a silhouette — shrinking back to the lobe's own as
 /// its samples arrive (the SVGF step that stands in for a history it does not
 /// have). A MIRROR is still never filtered: its one sample is exact. A YOUNG
