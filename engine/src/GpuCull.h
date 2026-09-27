@@ -19,6 +19,7 @@
 #ifndef JAHSHAKA_ENGINE_GPUCULL_H
 #define JAHSHAKA_ENGINE_GPUCULL_H
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -115,6 +116,17 @@ public:
     /// that does not fit draws its ROOT CUT from the coarse reserve (JahCullCut_cs) —
     /// unless even the reserve is full, which is counted apart.
     void noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked, uint32_t recordsAsked);
+    /// THE LATE LIST FOLLOWS THE FIRST (ATOM-OCCLUSION-1, the Fable read's F1): the
+    /// disocclusion pass can hold the whole frame the frame after a cut, so its next budget
+    /// is at least the first list's — one seed for both lists, whatever either one learnt
+    /// (the scene's high-water mark, an overflow, a test door) — before it records.
+    void followCutBudget(const GpuCull &first) {
+        const uint32_t want = std::max(first.mCutWantBudget, first.mCutIndexBudget);
+        if (want > mCutWantBudget) {
+            mCutWantBudget = want;
+            if (mCutIndexBudget < want) mCutForceCreate = true;
+        }
+    }
     /// The first budget and the ceiling (indices): 2 M (700 k triangles; 8 MB of stream
     /// + 5.3 MB of triangle words + 1.3 MB of records = ~15 MB a view) growing from what
     /// was asked to 32 M; a view of a scene that has needed more starts at the scene's

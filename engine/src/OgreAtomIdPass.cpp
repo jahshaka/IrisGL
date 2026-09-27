@@ -716,6 +716,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
             // NO DAG-BEARING MESH ATTACHED YET (a new project's first frames): no cluster
             // tables, so there is no cut to record — the depth is still cleared below.
             gs->flushClusterTables();
+            if (late) cullPtr->followCutBudget(view->atomCull());
             if (!gs->clusterBuffer() || !gs->groupBuffer()) {
                 draw = false;
             } else if (!scene->recordGpuCull(*cullPtr, req, testAgainst, err, false, nullptr,
