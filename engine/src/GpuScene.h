@@ -91,7 +91,7 @@ struct GpuInstance {
     /// re-evaluated only when the instance's distance from the camera changes by
     /// 2x (the hysteresis is what keeps a BLAS refit rare — `OgreScene::
     /// updateRayLevels`, PATCHED in place: patchRayLevel). ITS CONSUMER IS THE RAY
-    /// TIER'S NEAR COPY (ATOM-FARBLAS-1; the Jahshaka/TlasWrite job reads it here):
+    /// TIER'S NEAR COPY (ATOM-FARBLAS-1; the instance job rq_tlas_write.comp reads it here):
     /// the instance's near BLAS is built from this level, its far copy from the
     /// mesh's coarsest.
     ///

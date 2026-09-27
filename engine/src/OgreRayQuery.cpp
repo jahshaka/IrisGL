@@ -30,7 +30,7 @@
 //    scene's own item slot — never from `SceneManager::getMovableObjectIterator`
 //    (audit C-4: the spike traced the editor's gizmo arrows and light icons).
 //    The instances are written ON THE DEVICE from that table (the
-//    Jahshaka/TlasWrite job, "THE INSTANCES BY COMPUTE" below; GpuScene.h).
+//    rq_tlas_write.comp job, "THE INSTANCES BY COMPUTE" below; GpuScene.h).
 //
 // WHAT IT NEEDS FROM THE PIN (patches-only law):
 //   * 0038 — the instance at Vulkan 1.2 when the loader allows, the seven
@@ -588,7 +588,7 @@ private:
                     unsigned &built, std::string &err);
     /// THE INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1): the job's inputs, re-written
     /// only when they changed (`changed`), and the rigged slots' rows; then the
-    /// `Jahshaka/TlasWrite` dispatch into `sa.tlasOut`, with the edges to the
+    /// rq_tlas_write.comp dispatch into `sa.tlasOut`, with the edges to the
     /// build that reads it. `skinReady` = rigged slots traced this frame.
     bool writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skinReady, bool &changed,
                          std::string &err);
@@ -1982,7 +1982,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 
 // ---------------------------------------------------------------------------
 // THE INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1) — the change feed's side, the job's
-// inputs and the dispatch. The job (Hlms/Jahshaka/JahTlasWrite_cs.glsl) writes two
+// inputs and the dispatch. The job (rayquery/rq_tlas_write.comp, build-time SPIR-V) writes two
 // instances per slot at fixed places; everything here is per CHANGED SLOT (the
 // feed), per MESH (the inputs) or per rigged item — no loop over the instances.
 // (It replaced the CPU instance writer — a walk of every slot into the mapped
@@ -2013,7 +2013,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 // `instanceCustomIndex` is the SLOT on both copies: a hit reads the object's entry
 // with one fetch whichever copy it hit; the copy is told apart by the launch's MASK.
 namespace {
-/// Level slots per mesh record in the job's inputs (JahTlasWrite_cs.glsl's
+/// Level slots per mesh record in the job's inputs (rq_tlas_write.comp's
 /// LEVEL_SLOTS). The bake tops out at six levels (GpuScene::kLevelsPerMesh holds
 /// eight); a chain deeper than this is traced at this depth at most.
 constexpr uint32_t kTlasLevels = 16u;

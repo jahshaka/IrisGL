@@ -4401,7 +4401,7 @@ struct RayQueryStatus {
     /// -1 until one has been measured; a still scene never rebuilds one.
     float blasMs = -1.0f;
     /// CPU milliseconds of THE INSTANCE UPDATE's host side — since ATOM-CPU-WALKS-1
-    /// the instances are written ON THE DEVICE (the Jahshaka/TlasWrite job, one
+    /// the instances are written ON THE DEVICE (the instance job rq_tlas_write.comp, one
     /// thread per slot, from the GPU scene's table), so this is the per-MESH work
     /// (missing structures' wants, the job's inputs when they changed) and the
     /// dispatch: it no longer scales with the instance count.
