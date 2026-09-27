@@ -930,11 +930,19 @@ private:
         float    gpuMs = -1.0f;
         /// The rays were traced this frame; finishSunContact registers them.
         bool     finishPending = false;
+        /// finishSunContact registered them and the pass has not ended yet.
+        bool     bound = false;
     };
     bool makeSunContactPipeline(std::string &err);
     void dropSunContact(SunContactView &sv);
     void readSunContactTimestamps(SunContactView &sv);
     std::unordered_map<const ReflectPassListener *, SunContactView> mSunContacts;
+    struct SuspendedBindings {
+        const Ogre::SceneManager *gatherSm = nullptr;
+        Ogre::TextureGpu *gather = nullptr;
+        bool sun = false;
+    };
+    std::unordered_map<const ReflectPassListener *, SuspendedBindings> mSuspended;
     VkDescriptorSetLayout mSunSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mSunPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mSunPipeline = VK_NULL_HANDLE;
@@ -968,6 +976,15 @@ public:
     /// (the filters, the SH and integrate, the registrations). A chain that ran no
     /// decode pass this frame traces here first, with no list bound.
     void finishRayJobs(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
+    /// THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) shades with the same
+    /// registrations as the opaque pass, which is the pass after it — but between the
+    /// two, in the opaque pass's early pre-execute, the planar mirrors render their
+    /// reflection workspaces on the same SceneManager, and a pass-scoped registration
+    /// must never reach them (gi.gather_nest's GA-NEST). So the registrations are
+    /// taken away after the decode pass and put back, exactly as they were, in front
+    /// of the opaque pass: no job re-runs.
+    void suspendPassBindings(const ReflectPassListener *key, const Ogre::SceneManager *sm);
+    void resumePassBindings(const ReflectPassListener *key);
     void forgetHits(const ReflectPassListener *key);
     /// The hit list's counters (read back several frames late) for a scene.
     void hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const;
@@ -5515,12 +5532,40 @@ void RayQueryTier::finishSunContact(const ReflectPassListener *key) {
     // THE PROPERTY AND THE TEXTURE TOGETHER, PASS-SCOPED: taken away by
     // releaseSunContactBinding when this pass ends.
     FogHlmsListener::setSunContact(sv.sceneMgr, sv.vis, sv.divisor);
+    sv.bound = true;
 }
 
 void RayQueryTier::releaseSunContactBinding(const ReflectPassListener *key) {
     auto it = mSunContacts.find(key);
     if (it == mSunContacts.end() || !it->second.sceneMgr) return;
     FogHlmsListener::setSunContact(it->second.sceneMgr, nullptr, 1u);
+    it->second.bound = false;
+}
+
+void RayQueryTier::suspendPassBindings(const ReflectPassListener *key, const Ogre::SceneManager *sm) {
+    SuspendedBindings &s = mSuspended[key];
+    s = SuspendedBindings();
+    if (sm) {
+        s.gatherSm = sm;
+        s.gather = FogHlmsListener::probeGather(sm);
+        if (s.gather) FogHlmsListener::setProbeGather(sm, nullptr);
+    }
+    auto it = mSunContacts.find(key);
+    if (it != mSunContacts.end() && it->second.bound && it->second.sceneMgr) {
+        s.sun = true;
+        FogHlmsListener::setSunContact(it->second.sceneMgr, nullptr, 1u);
+    }
+}
+
+void RayQueryTier::resumePassBindings(const ReflectPassListener *key) {
+    auto st = mSuspended.find(key);
+    if (st == mSuspended.end()) return;
+    const SuspendedBindings s = st->second;
+    mSuspended.erase(st);
+    if (s.gather && s.gatherSm) FogHlmsListener::setProbeGather(s.gatherSm, s.gather);
+    auto it = mSunContacts.find(key);
+    if (s.sun && it != mSunContacts.end() && it->second.bound && it->second.sceneMgr && it->second.vis)
+        FogHlmsListener::setSunContact(it->second.sceneMgr, it->second.vis, it->second.divisor);
 }
 
 void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus &st) const {
@@ -6282,8 +6327,12 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (def->mPrePassMode != Ogre::PrePassUse) return;
     // THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) is the first such pass of
     // the frame and the opaque pass the last: the jobs finish once, in front of the
-    // first, and the registrations stand until the last is over.
-    if (def->mIdentifier != kScreenDecodePassIdentifier && mRayJobsFinished) return;
+    // first; the registrations are held back between the two (suspendPassBindings:
+    // the planar mirrors render there) and put back in front of the second.
+    if (def->mIdentifier != kScreenDecodePassIdentifier && mRayJobsFinished) {
+        mView->mEngine->mRayTier->resumePassBindings(this);
+        return;
+    }
     mView->mEngine->mRayTier->finishRayJobs(this, mView, pass);
     mRayJobsFinished = def->mIdentifier == kScreenDecodePassIdentifier;
 }
@@ -6304,7 +6353,11 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
         return;
     }
     if (def->mPrePassMode != Ogre::PrePassUse) return;
-    if (def->mIdentifier == kScreenDecodePassIdentifier) return;   // the opaque pass follows
+    if (def->mIdentifier == kScreenDecodePassIdentifier) {   // the opaque pass follows
+        mView->mEngine->mRayTier->suspendPassBindings(
+            this, mView->ogreScene() ? mView->ogreScene()->sceneManager() : nullptr);
+        return;
+    }
     mRayJobsFinished = false;
     mView->mEngine->mRayTier->releaseGatherBinding(this);
     mView->mEngine->mRayTier->releaseSunContactBinding(this);

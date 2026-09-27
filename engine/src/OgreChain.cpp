@@ -789,7 +789,7 @@ void skipAtomQueue(Ogre::CompositorPassSceneDef *p) { p->setSkipRenderQueue(kAto
 /// for the opaque one (OgreRayQuery.cpp: the ray jobs finish in front of the FIRST
 /// pass that shades with the prepass).
 Ogre::CompositorPassSceneDef *addAtomDecodePass(Ogre::CompositorNodeDef *n, const char *mainRtv,
-                                                bool classify, const char *profilingId) {
+                                                bool classify, bool keepDepth, const char *profilingId) {
     const std::string rtvName = std::string(mainRtv) + "/atomDecode";
     Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(Ogre::IdString(rtvName));
     const Ogre::RenderTargetViewDef *main = n->getRenderTargetViewDef(Ogre::IdString(mainRtv));
@@ -803,10 +803,10 @@ Ogre::CompositorPassSceneDef *addAtomDecodePass(Ogre::CompositorNodeDef *n, cons
     p->mLastRQ = Ogre::uint8(kScreenDecodeRenderQueue + 1u);
     // The classifier writes every pixel of the viewport: the depth's old contents
     // are never read. A later decode pass of the frame (the opaque one after the
-    // prepass) LOADS it, read-only.
+    // prepass) LOADS it, read-only — the only reason to store it (`keepDepth`).
     p->mLoadActionDepth = classify ? Ogre::LoadAction::Clear : Ogre::LoadAction::Load;
     p->mLoadActionStencil = Ogre::LoadAction::DontCare;
-    p->mStoreActionDepth = Ogre::StoreAction::Store;
+    p->mStoreActionDepth = keepDepth ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
     p->mStoreActionStencil = Ogre::StoreAction::DontCare;
     p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
     // The LODs are the id pass's; these draws are full-screen triangles.
@@ -1065,7 +1065,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1): the classifier and the bucket
         // draws, over the material depth, in front of the opaque pass.
         Ogre::CompositorPassSceneDef *decode =
-            desc.atomDraw ? addAtomDecodePass(n, kPassthroughRtv, true, "Jahshaka atom decode") : nullptr;
+            desc.atomDraw ? addAtomDecodePass(n, kPassthroughRtv, true, false, "Jahshaka atom decode") : nullptr;
         Ogre::CompositorTargetDef *t =
             n->addTargetPass(desc.atomDraw ? kPassthroughRtv : kTargetChannel);
         // With the id pass the opaque pass and the overlay pass are two TARGET
@@ -1710,7 +1710,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // ...ITS SCREEN DECODE PASS in front (ATOM-DECODE-CLASS-1): the frame's
             // first, so it classifies.
             Ogre::CompositorPassSceneDef *decode =
-                desc.atomDraw ? addAtomDecodePass(n, kSsrPrepassRtv, true, "Jahshaka atom decode prepass")
+                desc.atomDraw ? addAtomDecodePass(n, kSsrPrepassRtv, true, true, "Jahshaka atom decode prepass")
                               : nullptr;
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrepassRtv);
             t->setNumPasses(1);
@@ -1817,7 +1817,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) in front: it classifies unless
         // the prepass's decode pass already did this frame.
         Ogre::CompositorPassSceneDef *decode =
-            desc.atomDraw ? addAtomDecodePass(n, sceneTarget, !prepass, "Jahshaka atom decode") : nullptr;
+            desc.atomDraw ? addAtomDecodePass(n, sceneTarget, !prepass, false, "Jahshaka atom decode") : nullptr;
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
         t->setNumPasses(1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
