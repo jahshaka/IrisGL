@@ -799,6 +799,10 @@ void registerAtomIdPass();
 void releaseAtomIdPass();
 /// A view going away: its stats ring (OgreAtomIdPass.cpp) goes with it.
 void atomIdPassForgetView(const OgreView *view);
+/// THE OCCLUSION'S PYRAMID (ATOM-OCCLUSION-1, OgreAtomIdPass.cpp): `hzb`'s every level
+/// rebuilt from `depth` — the seed and a reduce per level (farthest), dispatched through
+/// HlmsCompute with Ogre's barrier solver. False when the jobs are not staged.
+bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb);
 /// OgreAtomDraw.cpp — which view a workspace with an id pass belongs to (the
 /// recorder is handed a pass, not a view), and the view's listener that arms the
 /// screen decode for the passes that skip the Atom queue.

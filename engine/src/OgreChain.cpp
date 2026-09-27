@@ -432,7 +432,7 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// copies still point at — a read-after-destroy the moment the next pass is added.
 /// So it is called EXACTLY ONCE, with a capacity no chain can exceed, before
 /// the first addTargetPass. Nothing below may call it again.
-constexpr size_t kMaxTargetPasses = 88;   // 50 + up to 14 HZB mip passes twice (the id pass's + a view's own) + the late id pass, and headroom
+constexpr size_t kMaxTargetPasses = 72;   // 50 + up to 14 HZB mip passes, and headroom
 
 /// THE STORE ACTION OF THE LAST PASS ANY WORKSPACE OF OURS PUTS ON A TARGET.
 ///
@@ -703,7 +703,11 @@ void addAtomIdTargets(Ogre::CompositorNodeDef *n) {
 }
 
 /// THE PYRAMID'S TEXTURE (NANITE_SPEC §4.3): one R32_FLOAT at the view's resolution
-/// with `desc.hzbLevels` mips. No RenderTargetView — nothing ever renders INTO it;
+/// with `desc.hzbLevels` mips for a view's own pyramid (PostFxDesc::hzb: its compute
+/// passes address each level, so the count is graph shape) — and EVERY level the size
+/// allows (0: Ogre's own maximum, re-derived when the target resizes) where only the
+/// id pass's occlusion builds it (its recorder walks the texture's levels as they are,
+/// so a resize is no new graph). No RenderTargetView — nothing ever renders INTO it;
 /// every level is written by a compute pass through a UAV, which is the only way to
 /// address a mip level at all (addTargetPass has no mip parameter).
 void addHzbTexture(Ogre::CompositorNodeDef *n, const ChainDesc &desc) {
@@ -711,7 +715,7 @@ void addHzbTexture(Ogre::CompositorNodeDef *n, const ChainDesc &desc) {
     td->width = 0u; td->height = 0u;
     td->widthFactor = 1.0f; td->heightFactor = 1.0f;
     td->format = Ogre::PFG_R32_FLOAT;
-    td->numMipmaps = Ogre::uint8(desc.hzbLevels);
+    td->numMipmaps = desc.hzb ? Ogre::uint8(desc.hzbLevels) : Ogre::uint8(0u);
     td->depthBufferId = 0;
     td->fsaa = "1";
     // Uav AND RenderToTexture, even though nothing ever renders into it:
@@ -733,8 +737,8 @@ void addHzbTexture(Ogre::CompositorNodeDef *n, const ChainDesc &desc) {
 /// source as a UAV rather than as a texture is deliberate: an Ogre resource layout
 /// is per-TEXTURE, not per-mip, so binding one texture as Texture and Uav in the
 /// same pass would ask the barrier solver for two layouts at once. Both slots being
-/// Uav asks for one. The jobs are SHARED by every level (and by both builds of a
-/// chain that has two): CompositorPassCompute::execute calls setResourcesToJob()
+/// Uav asks for one. The jobs are SHARED by every level (and with the id pass's
+/// occlusion, whose recorder dispatches them itself): CompositorPassCompute::execute calls setResourcesToJob()
 /// every frame, so each pass re-binds its own mips before dispatching, and
 /// HlmsComputeJob::_calculateNumThreadGroupsBasedOnSetting reads the bound UAV's MIP
 /// dimensions — so the group counts follow the level with no arithmetic of ours.
@@ -752,7 +756,7 @@ void addHzbBuild(Ogre::CompositorNodeDef *n, const ChainDesc &desc, const std::s
     reduce->setProperty("hzb_reverse_z", (rs && rs->isReverseDepth()) ? 1 : 0);
     // WHICH DEPTH A LEVEL KEEPS — the request's, not a constant. The farthest chain
     // is the only one an occlusion cull can be conservative against
-    // (PostFxDesc::hzbFarthest carries why; ChainDesc::atomOcclusion forces it).
+    // (PostFxDesc::hzbFarthest carries why).
     reduce->setProperty("hzb_farthest", desc.hzbFarthest ? 1 : 0);
     {
         Ogre::CompositorTargetDef *t = n->addTargetPass("");
@@ -775,13 +779,14 @@ void addHzbBuild(Ogre::CompositorNodeDef *n, const ChainDesc &desc, const std::s
 }
 
 /// THE TWO-PASS OCCLUSION'S SECOND HALF (ATOM-OCCLUSION-1, ChainDesc::atomOcclusion),
-/// after the id pass: the pyramid rebuilt from the depth the id pass just wrote (the
-/// survivors of the PREVIOUS frame's pyramid), then THE LATE ID PASS on the same RTV,
-/// LOADING the id image and the depth, which tests the set the first cull rejected
-/// against the new pyramid and draws what is disoccluded (OgreAtomIdPass.cpp). The
-/// pyramid it leaves is the one the NEXT frame's first cull reads.
+/// after the id pass: THE LATE ID PASS on the same RTV, LOADING the id image and the
+/// depth. Its recorder (OgreAtomIdPass.cpp) builds the pyramid from the depth the id
+/// pass just wrote — the seed and a reduce per level the texture has, dispatched by the
+/// recorder rather than as compute passes, so the level count is not graph shape and a
+/// resize rebuilds nothing — then tests the set the first cull rejected against it and
+/// draws what is disoccluded. The pyramid it leaves is the one the NEXT frame's first
+/// cull reads.
 void addAtomOcclusionPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandles &handles) {
-    addHzbBuild(n, desc, "Jahshaka atom HZB ");
     Ogre::CompositorTargetDef *t = n->addTargetPass(kAtomIdRtv);
     t->setNumPasses(1);
     Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomIdLatePassId));
@@ -1064,7 +1069,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             rtv->depthAttachment.textureName = kDepth;
             rtv->stencilAttachment.textureName = kDepth;
             rtv->preferDepthTexture = true;
-            if (desc.atomOcclusion && desc.hzbLevels > 0u) addHzbTexture(n, desc);
+            if (desc.atomOcclusion) addHzbTexture(n, desc);
             addAtomIdPass(n, desc, handlesOut);
         }
         Ogre::CompositorTargetDef *t =
@@ -1461,7 +1466,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // view that asked for a pyramid of its own gets it rebuilt after the opaque pass
     // too (the complete depth, the one a screen trace and the next frame's first cull
     // want).
-    if ((desc.hzb || desc.atomOcclusion) && desc.hzbLevels > 0u) addHzbTexture(n, desc);
+    if ((desc.hzb && desc.hzbLevels > 0u) || desc.atomOcclusion) addHzbTexture(n, desc);
 
     if (desc.ssao) {
         // Half-res depth, exactly the sample's layout: the AO march is the

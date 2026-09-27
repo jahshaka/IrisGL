@@ -14,6 +14,8 @@
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <OgreRenderPassDescriptor.h>
+#include <OgreResourceTransition.h>
+#include <OgreRenderSystem.h>
 
 #include <algorithm>
 #include <cmath>
@@ -317,16 +319,11 @@ ChainDesc OgreView::chainDesc() const {
 }
 
 /// THE ID PASS'S OCCLUSION (ChainDesc::atomOcclusion), decided LAST — after every rule
-/// that can take the id pass away. It needs the pyramid: its level count is the
-/// view's (a resize that moves it is a new graph, as for PostFxDesc::hzb), and it is
-/// FARTHEST, so a view that asked for a CLOSEST pyramid of its own keeps the id pass
-/// frustum-only (the reduce direction is one property of one job).
+/// that can take the id pass away. Its pyramid is FARTHEST, so a view that asked for a
+/// CLOSEST pyramid of its own keeps the id pass frustum-only (the reduce direction is
+/// one property of one job, and the two share the texture).
 void OgreView::finishAtomOcclusion(ChainDesc &d) const {
     d.atomOcclusion = d.atomDraw && mScene && mScene->atomOcclusionWanted() && (!d.hzb || d.hzbFarthest);
-    if (d.atomOcclusion) {
-        d.hzbLevels = hzbLevelsFor(width(), height());
-        d.hzbFarthest = true;
-    }
 }
 
 bool OgreView::overlaysAllowed() const {
@@ -1473,15 +1470,14 @@ void OgreView::resize(unsigned w, unsigned h) {
             // the "viewport stops presenting after a dock-open resize" defect).
             mPendingW = w; mPendingH = h;
         } else {
-            const bool pyramid = mPostFx.hzb || mChainAtomOcclusion;
-            const unsigned hzbBefore = pyramid ? hzbLevelsFor(width(), height()) : 0u;
+            const unsigned hzbBefore = mPostFx.hzb ? hzbLevelsFor(width(), height()) : 0u;
             rebuildRtt(w, h);   // an RTT cannot be resized in place
             mWidth = w; mHeight = h;
             // THE HZB'S LEVEL COUNT IS GRAPH SHAPE (ChainDesc::hzbLevels): the
             // compositor resizes a factor-sized texture without rebuilding the
             // node, so a size change that changes the mip count would leave
             // compute passes addressing levels that no longer exist.
-            if (pyramid && hzbLevelsFor(width(), height()) != hzbBefore)
+            if (mPostFx.hzb && hzbLevelsFor(width(), height()) != hzbBefore)
                 rebuildWorkspaceDef();
         }
     } JAH_CATCH(mError, );
@@ -1645,11 +1641,11 @@ bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char
 void OgreView::applyPendingResize() {
     // See the offscreen branch of resize(): the pyramid's level count is part of
     // the graph, so a size change that moves it rebuilds the chain — the view's own
-    // (PostFxDesc::hzb) and the id pass's (ChainDesc::atomOcclusion) alike.
-    const bool pyramid = mPostFx.hzb || mChainAtomOcclusion;
-    const unsigned hzbBefore = pyramid ? hzbLevelsFor(width(), height()) : 0u;
+    // (PostFxDesc::hzb); the id pass's occlusion builds whatever levels the texture has
+    // and is no graph change.
+    const unsigned hzbBefore = mPostFx.hzb ? hzbLevelsFor(width(), height()) : 0u;
     applyPendingResizeImpl();
-    if (pyramid && hzbLevelsFor(width(), height()) != hzbBefore)
+    if (mPostFx.hzb && hzbLevelsFor(width(), height()) != hzbBefore)
         rebuildWorkspaceDef();
 }
 
@@ -1803,11 +1799,27 @@ bool OgreView::warmUpShaders() {
                 // set — against this chain's pyramid (whatever it holds: nothing reads the
                 // answer, the id pass overwrites both lists on its first frame).
                 if (mChainAtomOcclusion) {
-                    Ogre::TextureGpu *hzb = nullptr;
+                    Ogre::TextureGpu *hzb = nullptr, *depth = nullptr;
                     if (mWorkspace)
-                        for (Ogre::CompositorNode *node : mWorkspace->getNodeSequence())
-                            if ((hzb = node->getDefinedTexture(Ogre::IdString("jahHzb"))) != nullptr) break;
-                    if (hzb) {
+                        for (Ogre::CompositorNode *node : mWorkspace->getNodeSequence()) {
+                            if (!hzb) hzb = node->getDefinedTexture(Ogre::IdString("jahHzb"));
+                            if (!depth) depth = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+                        }
+                    if (hzb && depth) {
+                        // ...and the pyramid's own two jobs, dispatched by the late pass —
+                        // FIRST, which is what gives the pyramid a layout the culls may read.
+                        // The depth is DISCARDABLE and this is its first touch since the
+                        // solver's frame began: the solver refuses that to a read (in a
+                        // frame the id pass's render pass writes it first). So it is
+                        // declared written here (its content is garbage; nothing reads it).
+                        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+                        {
+                            Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+                            rs->getBarrierSolver().resolveTransition(rt, depth, Ogre::ResourceLayout::RenderTarget,
+                                                                     Ogre::ResourceAccess::Write, 0u);
+                            rs->executeResourceTransition(rt);
+                        }
+                        recordOcclusionPyramid(rs, depth, hzb);
                         req.hzbLevels = hzb->getNumMipmaps();
                         mScene->recordGpuCull(mAtomCull, req, hzb, err);
                         mScene->recordGpuCull(mAtomCullLate, req, hzb, err, false, nullptr, &mAtomCull);

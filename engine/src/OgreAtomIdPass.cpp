@@ -46,8 +46,12 @@
 
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreHlmsManager.h>
 #include <OgreRenderPassDescriptor.h>
 #include <OgreRenderSystem.h>
+#include <OgreResourceTransition.h>
 #include <OgreRoot.h>
 #include <Vao/OgreIndexBufferPacked.h>
 #include <Vao/OgreUavBufferPacked.h>
@@ -74,6 +78,55 @@
 namespace jahshaka {
 namespace engine {
 namespace detail {
+
+/// THE OCCLUSION'S PYRAMID (EnginePrivate.h): the compositor's own compute-pass discipline
+/// (CompositorPassCompute::execute — bind, the job's barriers through Ogre's solver,
+/// dispatch) once per level, the level count read off the texture as it is.
+bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb) {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *seed = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbSeed") : nullptr;
+    Ogre::HlmsComputeJob *reduce = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbReduce") : nullptr;
+    if (!rs || !depth || !hzb || !seed || !reduce) return false;
+    // FARTHEST, in the render system's depth direction (JahHzbReduce_cs; the job's
+    // properties, shared with a view's own pyramid — which is farthest wherever this
+    // one is built, ChainDesc::atomOcclusion).
+    const Ogre::int32 reverse = rs->isReverseDepth() ? 1 : 0;
+    if (reduce->getProperty("hzb_reverse_z") != reverse) reduce->setProperty("hzb_reverse_z", reverse);
+    if (reduce->getProperty("hzb_farthest") != 1) reduce->setProperty("hzb_farthest", 1);
+    auto run = [&](Ogre::HlmsComputeJob *job) {
+        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+        job->analyzeBarriers(rt);
+        rs->executeResourceTransition(rt);
+        hc->dispatch(job, nullptr, nullptr);
+    };
+    auto uav = [&](Ogre::uint8 mip, Ogre::ResourceAccess::ResourceAccess access) {
+        Ogre::DescriptorSetUav::TextureSlot t = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        t.texture = hzb;
+        t.access = access;
+        t.mipmapLevel = mip;
+        return t;
+    };
+    rs->endRenderPassDescriptor();
+    {
+        Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        ts.texture = depth;
+        seed->setTexture(0u, ts);
+        seed->_setUavTexture(0u, uav(0u, Ogre::ResourceAccess::Write));
+        run(seed);
+        seed->setTexture(0u, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+        seed->_setUavTexture(0u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+    }
+    for (Ogre::uint8 m = 1u; m < hzb->getNumMipmaps(); ++m) {
+        reduce->_setUavTexture(0u, uav(m, Ogre::ResourceAccess::Write));
+        reduce->_setUavTexture(1u, uav(Ogre::uint8(m - 1u), Ogre::ResourceAccess::Read));
+        run(reduce);
+    }
+    // The jobs' descriptor sets hold raw pointers: no binding outlives this build.
+    reduce->_setUavTexture(0u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+    reduce->_setUavTexture(1u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+    return true;
+}
 
 #if JAH_RAY_QUERY
 namespace {
@@ -570,6 +623,12 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         JAH_TRY { hzb = pass->getParentNode()->getDefinedTexture(Ogre::IdString("jahHzb")); }
         catch (const Ogre::Exception &) { hzb = nullptr; }
     }
+    // THE LATE PASS BUILDS THE PYRAMID FIRST, from the depth the first pass just wrote
+    // (every level the texture has: a resize is no new graph). Built every frame the
+    // chain carries the occlusion, drawn or not — it is the next frame's history.
+    bool pyramidBuilt = false;
+    if (late && hzb) pyramidBuilt = recordOcclusionPyramid(ctx.renderSystem, depthTex, hzb);
+    if (late && !pyramidBuilt) hzb = nullptr;
     unsigned rect[4] = { 0u, 0u, 0u, 0u };
     viewportRectOf(vpRect, tw, th, rect);
     Ogre::Matrix4 vpm = Ogre::Matrix4::IDENTITY;
