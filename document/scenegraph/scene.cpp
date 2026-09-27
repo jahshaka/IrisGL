@@ -374,7 +374,16 @@ Scene::Scene()
     skyColor = QColor(96, 96, 96);
 
     fogColor = QColor(250, 250, 250);
-    fogEnabled = true;
+    // THE WORLD FOG IS OFF BY DEFAULT (FOG-ATMO-1 fix round). Under the
+    // realistic sky — the new scene's — the AIR already hazes the distance on
+    // its own, at the atmosphere's density (OgreSky.cpp airFogDensity): a
+    // default fog of half-gone-at-140 m on top of it, fading to the sky's own
+    // radiance, turned the ground yellow at a low sun. The fog is an authored
+    // medium (mist, smoke, a valley's haze), asked for, not a default. The
+    // reader's absent-key default is this value (SceneReader reads
+    // `fogEnabled` with scene->fogEnabled as its fallback); every shipped
+    // sample carries its own fogEnabled/fogDensity and is untouched.
+    fogEnabled = false;
     // 2/(100+180) = 0.0071: the exponential density that keeps the retired
     // 100..180 LINEAR fog looking like itself (see fogDensityFromLinear — the
     // two distances are gone from the document, but this is the density a
