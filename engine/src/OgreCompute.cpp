@@ -117,7 +117,7 @@ bool OgreEngine::fillCullView(View *view, GpuCullRequest &out) const {
 
 /// The frustum, the eye and the level rule's two terms of a cull request, from a
 /// camera and the height of the target its pass renders into (the id pass's own
-/// request, which never offers a pyramid).
+/// request, whose pyramid and matrix it chooses itself: OgreAtomIdPass.cpp).
 void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullRequest &out) {
 
     const Ogre::Matrix4 vpm = cam->getProjectionMatrixWithRSDepth() * cam->getViewMatrix();
@@ -247,6 +247,38 @@ bool OgreEngine::readHzbLevel(View *view, unsigned level, std::vector<float> &ou
         ticket->unmap();
         tm->destroyAsyncTextureTicket(ticket);
         width = w; height = h;
+        return true;
+    }
+    catch (Ogre::Exception &e) { mLastError = e.getFullDescription(); return false; }
+}
+
+/// THE ID IMAGE, read back (ATOM-OCCLUSION-1's proofs): the chain's `jahAtomIds` (two
+/// uint words a pixel), after the same load-bearing flush.
+bool OgreEngine::readAtomIds(View *view, std::vector<uint32_t> &words, unsigned &width, unsigned &height) {
+    words.clear();
+    width = height = 0u;
+    OgreView *v = static_cast<OgreView *>(view);
+    if (!mRoot || !v || !v->workspace()) return false;
+    JAH_TRY {
+        Ogre::TextureGpu *tex = nullptr;
+        for (Ogre::CompositorNode *node : v->workspace()->getNodeSequence())
+            if ((tex = node->getDefinedTexture(Ogre::IdString(kAtomIdTexture))) != nullptr) break;
+        if (!tex) { mLastError = "readAtomIds: this view's chain carries no id pass"; return false; }
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();
+        const Ogre::uint32 w = tex->getWidth(), h = tex->getHeight();
+        Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+        Ogre::AsyncTextureTicket *ticket =
+            tm->createAsyncTextureTicket(w, h, 1u, Ogre::TextureTypes::Type2D, tex->getPixelFormat());
+        ticket->download(tex, 0u, true);
+        const Ogre::TextureBox box = ticket->map(0);
+        words.resize(size_t(w) * size_t(h) * 2u);
+        for (Ogre::uint32 y = 0; y < h; ++y)
+            std::memcpy(&words[size_t(y) * w * 2u], box.at(0, y, 0), size_t(w) * 2u * sizeof(uint32_t));
+        ticket->unmap();
+        tm->destroyAsyncTextureTicket(ticket);
+        width = w;
+        height = h;
         return true;
     }
     catch (Ogre::Exception &e) { mLastError = e.getFullDescription(); return false; }

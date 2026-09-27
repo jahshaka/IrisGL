@@ -4525,6 +4525,13 @@ struct AtomDrawStatus {
     unsigned cutClusters = 0, cutIndices = 0, cutEvaluated = 0;
     unsigned cutOverflow = 0, cutMissing = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
     unsigned long long cutTriangles = 0ull;
+    /// THE OCCLUSION (ATOM-OCCLUSION-1), from the same view and the same read: whether
+    /// its chain culls against the depth pyramid (the door open and the id pass live),
+    /// the instances the frame's depth test REJECTED — in the frustum, not drawn — and
+    /// the instances the late pass DISOCCLUDED (rejected against the previous frame's
+    /// pyramid, found visible against this frame's, drawn by the late pass).
+    bool     occlusion = false;
+    unsigned occluded = 0, disoccluded = 0;
 };
 
 /// The id pass's cut counters, one view's (AtomDrawStatus carries them).
@@ -6682,6 +6689,10 @@ struct GpuCullRequest {
     /// 0 = frustum only. Otherwise the number of mip levels in the pyramid to
     /// test against, which the engine takes from the view's own HzbStatus.
     unsigned hzbLevels = 0u;
+    /// THE VIEWPORT'S RECTANGLE IN THE PYRAMID'S MIP 0 (x0, y0, width, height in
+    /// texels): NDC spans the pass's viewport — a letterboxed view's inset, not its
+    /// whole target. Width 0 (the default) = the whole pyramid.
+    unsigned hzbRect[4] = { 0u, 0u, 0u, 0u };
     /// The level rule's input, in SAMPLES (the tier's Atom column,
     /// `GiQualityFacts::pixelTolerance`, times the session's lodBias). 0 keeps
     /// every survivor on level 0.
@@ -6716,6 +6727,9 @@ struct GpuCullResult {
     unsigned instances = 0;
     /// THE COUNT THE GPU WROTE, read back from the count buffer.
     unsigned survivors = 0;
+    /// Instances the DEPTH TEST rejected (in the frustum, behind the pyramid; count[16]):
+    /// 0 with no pyramid (ATOM-OCCLUSION-1).
+    unsigned occluded = 0;
     /// The thread-group count job 2 left for job 3, i.e. what the indirect
     /// dispatch ran: ceil(survivors / 64). 0 when the mode did not reach job 3.
     unsigned indirectGroups = 0;
@@ -6877,6 +6891,31 @@ struct ViewOverlayDesc {
 ///   Buckets    a hash of the decode bucket (one colour per decode draw)
 ///   Objects    a hash of the GPU scene slot (one colour per object)
 enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects };
+
+/// THE PHOTON VIEW (PHOTON-VIEW-1): the lighting's own debug pictures, one at a
+/// time, over every view of the renderer's SCENE that draws the post chain. A
+/// property of the scene, never saved; switching it rebuilds no workspace (its
+/// passes are gated by the workspace's execution mask) and Off is byte-identical.
+///   Voxels        the lit voxels of ONE cascade as cubes (Ogre's VctLighting debug
+///                 visualizer): the finest that holds the scene's lit content, or
+///                 the one Scene::setPhotonVoxelCascade names
+///   Probes        the irradiance field's probes as spheres coloured by their
+///                 irradiance (Ogre's IrradianceField debug visualizer)
+///   Cards         every surface-cache card as a quad on the plane it is captured
+///                 through: filled and coloured by capture age (a log ramp, green
+///                 fresh -> red at ten minutes) where it holds a capture, outlined
+///                 yellow where it waits for its first
+///   ScreenProbes  the screen-probe gather's probes as discs at their positions,
+///                 coloured by the irradiance each probe traced
+///   Diffuse       the indirect diffuse term alone (direct light, emission and
+///                 reflections off) — a pass property on the one lighting text
+///   Reflections   the specular environment term alone (probes, voxels, SSR and
+///                 the ray-traced reflection) — the same mechanism
+///   Hits          every traced reflection pixel coloured by what shaded its ray:
+///                 green = a card, blue = the voxels, cyan = the sky, magenta = the
+///                 hit list (the decode), red = a dropped record; no ray = dimmed
+enum class PhotonView { Off = 0, Voxels, Probes, Cards, ScreenProbes, Diffuse, Reflections, Hits };
+constexpr int kPhotonViewCount = 8;
 
 
 /// A CPU-side RGBA8 image, used to read back an offscreen View.

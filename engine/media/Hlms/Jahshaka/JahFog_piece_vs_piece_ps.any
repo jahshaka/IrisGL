@@ -317,7 +317,9 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	// lands. (The built-in fog block upstream is guarded the same way.) Both
 	// branches run after upstream's block, on the colour about to be written;
 	// the second is the height layer exactly as it was before FOG-ATMO-1.
-	@property( !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only )
+	// ...AND NOT UNDER THE PHOTON VIEW'S ISOLATION (jah_photon_view, JahPhotonView_piece_ps.any),
+	// which owns this hook for its pass and draws one lighting term with no fog at all.
+	@property( !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 	@piece( custom_ps_posExecution )
 	@property( jah_fog_atmo )
 	{

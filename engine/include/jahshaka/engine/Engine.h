@@ -937,6 +937,15 @@ public:
     /// off, every item draws through PBS and every view's chain is rebuilt without
     /// the id pass. On by default.
     virtual void setAtomDrawEnabled(bool on) { (void)on; }
+    /// THE MEASURING DOOR OF THE ID PASS'S OCCLUSION (ATOM-OCCLUSION-1; a tool's A/B,
+    /// never a mode, not saved): on (the default) every view that carries the id pass
+    /// culls the Atom queue against the depth pyramid in the two-pass form — the
+    /// previous frame's pyramid first, then the rejected set again against this
+    /// frame's — and draws exactly the same picture; off, every chain is rebuilt
+    /// frustum-only (no pyramid, no late pass). AtomDrawStatus::occluded and
+    /// ::disoccluded count what it does.
+    virtual void setAtomOcclusionEnabled(bool on) { (void)on; }
+    virtual bool atomOcclusionEnabled() const { return false; }
     /// THE ATOM VIEW (AtomView, Types.h): the false-colour picture of the
     /// visibility buffer over every view of this scene that carries the id pass.
     /// Switching it rebuilds nothing (the chain's pass is gated by the workspace's
@@ -947,6 +956,22 @@ public:
     /// of the scene that draws into a window carries the id pass (the Low tier's
     /// passthrough viewport does not). Hosts refuse a mode other than Off when false.
     virtual bool atomViewPaintable() const { return false; }
+    /// THE PHOTON VIEW (PhotonView, Types.h): the lighting's debug pictures over
+    /// every view of this scene that draws the post chain. Switching it rebuilds
+    /// nothing; Off is byte-identical to a scene that never had it.
+    virtual void setPhotonView(PhotonView view) { (void)view; }
+    virtual PhotonView photonView() const { return PhotonView::Off; }
+    /// Empty when `view` can paint in this scene right now, otherwise WHY it
+    /// cannot (the tier has no field, the rays are off, ...). Off always can.
+    /// Hosts refuse a mode with a reason.
+    virtual std::string photonViewRefusal(PhotonView view) const {
+        return view == PhotonView::Off ? std::string() : std::string("the renderer has no photon view");
+    }
+    /// WHICH CASCADE the Voxels picture shows: -1 (the default) the finest that
+    /// holds the scene's whole lit content (the outermost when none does), n the
+    /// chain's cascade n (clamped to the chain). Not saved.
+    virtual void setPhotonVoxelCascade(int cascade) { (void)cascade; }
+    virtual int photonVoxelCascade() const { return -1; }
     /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
     /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
     /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
@@ -2738,6 +2763,13 @@ public:
     /// in a frame. False when there is no pyramid or no such level.
     virtual bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                               unsigned &width, unsigned &height) = 0;
+
+    /// Reads `view`'s VISIBILITY-BUFFER ID IMAGE back (ATOM-OCCLUSION-1): two words a
+    /// pixel, row-major — the id pass's x (slot | the cluster's depth << 24) and y
+    /// (cluster << 8 | triangle), 0xFFFFFFFF where it drew nothing. A MEASUREMENT (a
+    /// flush and a stall, like readHzbLevel): the occlusion's pixel-exact proofs compare
+    /// it with the door open and shut. False when the view's chain carries no id pass.
+    virtual bool readAtomIds(View *view, std::vector<uint32_t> &words, unsigned &width, unsigned &height) = 0;
 
     /// Serializes the cache now and writes it OFF THE CALLING THREAD. Called on
     /// clean shutdown and once a compile burst has settled; safe (and a no-op)

@@ -21,10 +21,14 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     registerSceneGiBinding(mSceneMgr, &mGiBinding);
-    // THE VISIBILITY BUFFER'S MEASUREMENT SWITCH (never a mode): the whole process
-    // draws through PBS — the cost table's reference arm in the app, and the A/B
-    // that attributes a moved picture to the split.
+    // THE SELFTEST'S DOORS, a pair: JAHSHAKA_ATOM_DRAW_OFF shuts the split (every item
+    // through PBS) and JAHSHAKA_ATOM_OCCLUSION_OFF the id pass's occlusion (frustum-only,
+    // ATOM-OCCLUSION-1) — the scriptless --engine-selftest has no other way to take its
+    // four hashes' A/B (a whole process one way). Measuring switches, never modes: every
+    // other A/B goes through the verbs (world.setAtomDraw, world.setAtomOcclusion),
+    // paired in one process.
     if (std::getenv("JAHSHAKA_ATOM_DRAW_OFF")) mAtomDrawEnabled = false;
+    if (std::getenv("JAHSHAKA_ATOM_OCCLUSION_OFF")) mAtomOcclusionEnabled = false;
 }
 
 OgreScene::~OgreScene() { destroy(); }
@@ -1513,6 +1517,10 @@ void OgreScene::destroy() {
         forgetSceneDecodes(mSceneMgr);
         // THE ATOM VIEW'S BUCKET TABLE: a texture of this tree's manager.
         releaseAtomViewTable();
+        // THE PHOTON VIEW'S DRAWABLES: Ogre's visualizers switched off on their
+        // (still live) GI arms and the cards' quads destroyed, all through this
+        // manager — before teardownGi deletes the arms.
+        releasePhotonView();
         teardownGi();   // VPL lights die while the SceneManager is still alive
         // The atmosphere destroys its Rectangle2D THROUGH the SceneManager, so it
         // has to go while that is still alive (teardown law: components, then the

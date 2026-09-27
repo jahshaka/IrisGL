@@ -19,6 +19,7 @@
 #ifndef JAHSHAKA_ENGINE_GPUCULL_H
 #define JAHSHAKA_ENGINE_GPUCULL_H
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -47,8 +48,13 @@ struct GpuCullParams {
     /// capacity in indices, y = the drawn-cluster record capacity, z = where the stream's
     /// COARSE RESERVE begins (the main region is [0, z)), w = 0.
     uint32_t cut[4] = {};
+    /// THE VIEWPORT'S RECTANGLE IN THE PYRAMID'S MIP 0 (ATOM-OCCLUSION-1): x0, y0, width,
+    /// height in texels — NDC spans the pass's viewport, which is a letterboxed view's
+    /// inset and not its whole target. Width 0 = the whole pyramid. Read by the depth
+    /// test alone; the jobs that declare a shorter struct read its prefix.
+    uint32_t hzbRect[4] = {};
 };
-static_assert(sizeof(GpuCullParams) == 240, "the cull request's layout is a shader contract");
+static_assert(sizeof(GpuCullParams) == 256, "the cull request's layout is a shader contract");
 
 class GpuCull {
 public:
@@ -110,6 +116,17 @@ public:
     /// that does not fit draws its ROOT CUT from the coarse reserve (JahCullCut_cs) —
     /// unless even the reserve is full, which is counted apart.
     void noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked, uint32_t recordsAsked);
+    /// THE LATE LIST FOLLOWS THE FIRST (ATOM-OCCLUSION-1, the Fable read's F1): the
+    /// disocclusion pass can hold the whole frame the frame after a cut, so its next budget
+    /// is at least the first list's — one seed for both lists, whatever either one learnt
+    /// (the scene's high-water mark, an overflow, a test door) — before it records.
+    void followCutBudget(const GpuCull &first) {
+        const uint32_t want = std::max(first.mCutWantBudget, first.mCutIndexBudget);
+        if (want > mCutWantBudget) {
+            mCutWantBudget = want;
+            if (mCutIndexBudget < want) mCutForceCreate = true;
+        }
+    }
     /// The first budget and the ceiling (indices): 2 M (700 k triangles; 8 MB of stream
     /// + 5.3 MB of triangle words + 1.3 MB of records = ~15 MB a view) growing from what
     /// was asked to 32 M; a view of a scene that has needed more starts at the scene's
@@ -132,7 +149,10 @@ public:
     /// (instance, cluster) pairs the rule evaluated, [15] the coarse reserve's cursor.
     /// (Since the fix round: [12] = instances drawn COARSE — their root cut, from the
     /// reserve — and [13] = instances drawn NOTHING, neither fitting.)
-    static constexpr uint32_t kCountElements = 16u;
+    /// THE DEPTH TEST'S (ATOM-OCCLUSION-1): [16] the instances the pyramid REJECTED
+    /// (the test's visibility word 2 — the set the disocclusion pass tests again);
+    /// [17..19] zero.
+    static constexpr uint32_t kCountElements = 20u;
     static constexpr uint32_t kIndirectOffsetBytes = 4u;
     static constexpr uint32_t kCutIndirectOffsetBytes = 5u * 4u;
     static constexpr uint32_t kEmitIndirectOffsetBytes = 8u * 4u;

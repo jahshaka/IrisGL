@@ -59,6 +59,8 @@ std::map<const Ogre::SceneManager *, FogHlmsListener::CloudShadowState>
                               FogHlmsListener::sCloudShadow;                  // render thread only
 std::map<const Ogre::SceneManager *, FogHlmsListener::SunContactBind>
                               FogHlmsListener::sSunContact;                   // render thread only
+std::map<const Ogre::SceneManager *, int>
+                              FogHlmsListener::sPhotonIsolation;              // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sCloudSampler = nullptr;       // render thread only
 
 namespace {
@@ -325,6 +327,12 @@ void FogHlmsListener::setSunContact(const Ogre::SceneManager *sm, Ogre::TextureG
     sSunContact[sm] = b;
 }
 void FogHlmsListener::clearSunContact() { sSunContact.clear(); }
+// PHOTON-VIEW-1 — the view's isolation, pass-scoped like the gather's registration.
+void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode) {
+    if (!sm) return;
+    if (mode <= 0) { sPhotonIsolation.erase(sm); return; }
+    sPhotonIsolation[sm] = mode;
+}
 Ogre::TextureGpu *FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
     auto it = sProbeGather.find(sm);
     return it == sProbeGather.end() ? nullptr : it->second;
@@ -461,6 +469,17 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             }
         }
     }
+    // THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): a pass property whose VALUE is
+    // the mode (1 the indirect diffuse alone, 2 the specular environment alone),
+    // read by JahPhotonView_piece_ps.any. Empty in every scene whose view is not
+    // Diffuse or Reflections, and set only for the length of the one pass that
+    // shades the picture: one empty() test per colour pass otherwise, and every
+    // generated shader is the one it was.
+    if (hlms && !casterPass && sceneManager && !sPhotonIsolation.empty()) {
+        auto it = sPhotonIsolation.find(sceneManager);
+        if (it != sPhotonIsolation.end() && it->second > 0)
+            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_photon_view", Ogre::int32(it->second));
+    }
     if (casterPass || !shadowNode || !hlms) return;
     // ONLY WHERE AN ASSIGNMENT CHANGED (clean-2 lane, 2026-09-13). A node can
     // only ENTER the broken state when setLightFixedToShadowMap is called on
@@ -556,6 +575,7 @@ void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
     for (PassBinds &pb : sPass) pb = PassBinds();
     sCloudShadow.erase(sm);
     sSunContact.erase(sm);
+    sPhotonIsolation.erase(sm);
 }
 
 void FogHlmsListener::setCloudShadow(const Ogre::SceneManager *sm, const CloudShadowState &state) {
