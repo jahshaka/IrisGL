@@ -968,13 +968,6 @@ constexpr Ogre::uint32 kHitDecodePassIdentifier = 25002u;
 /// them; the ray tier's finishes its jobs in front of the first one that shades with
 /// the prepass. Stamped on exactly those passes.
 constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
-/// THE CLASSIFICATION'S MEASUREMENT SWITCH (ATOM-DECODE-CLASS-1, deleted with the
-/// late-discard loop): JAHSHAKA_ATOM_CLASSIFY_OFF set = the screen decode passes run
-/// UNCLASSIFIED — no classifier, no depth test, every bucket's draw at every pixel,
-/// each discarding every pixel of another bucket after the prologue. Read per pass
-/// by the atom listener: no graph change, so a process flips it between frames
-/// without a rebuild (every history carries on).
-bool atomDecodeClassified();
 /// The hit list's height as a factor of the target's (ChainDesc::hitDecode).
 constexpr float kHitListHeightFactor = 0.5625f;
 

@@ -71,8 +71,6 @@ OgreView *atomViewOf(const Ogre::CompositorWorkspace *ws) {
     return it == atomViews().end() ? nullptr : it->second;
 }
 
-bool atomDecodeClassified() { return std::getenv("JAHSHAKA_ATOM_CLASSIFY_OFF") == nullptr; }
-
 // ---------------------------------------------------------------------------
 // THE SCREEN DECODE'S ARMING (ATOM S3-DRAW; ATOM-DECODE-CLASS-1). The view's SCREEN
 // DECODE PASSES (kScreenDecodePassIdentifier: one in front of the prepass, one in
@@ -156,7 +154,7 @@ public:
         gs.flushClusterTables();
         src.meshes = gs.meshBuffer();
         src.clusters = gs.clusterBuffer();
-        src.classified = atomDecodeClassified();
+        src.classified = true;
         atom->setDecodeSource(src);
         atom->showScreenDecodes(scene->sceneManager(), true);
         mArmed = scene->sceneManager();

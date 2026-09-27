@@ -182,10 +182,12 @@ public:
         /// property atom_hit_mode selects the decode's hit branches.
         bool hitMode = false;
         Ogre::UavBufferPacked *hitBuf = nullptr;
-        /// A SCREEN DECODE PASS (ATOM-DECODE-CLASS-1): the pass's depth is the
-        /// material depth, and the pass property atom_classified makes every bucket
-        /// draw a triangle at its class's depth tested EQUAL (applyStrongMacroblock-
-        /// Rules), and the classifier write that depth.
+        /// A SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) — set by whoever records one
+        /// (the view's listener; the parity harness): the pass's depth is the
+        /// material depth, the pass property atom_classified makes every bucket draw
+        /// a triangle at its class's depth tested EQUAL (applyStrongMacroblockRules),
+        /// and the classifier is shown and writes that depth. There is no other screen
+        /// decode: the bucket loop that discarded every other bucket's pixel is gone.
         bool classified = false;
     };
     void setDecodeSource(const DecodeSource &src);

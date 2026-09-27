@@ -728,8 +728,9 @@
 		// AN ID THAT NAMES NOTHING THIS DRAW CAN SHADE IS NEVER SHADED: a record the
 		// hit list cannot name keeps the clear's w = 0 (the write-back's "not
 		// shaded"); a screen pixel whose id fails a check above keeps what the pass
-		// cleared. In a CLASSIFIED pass this is no longer the bucket loop - the early
-		// depth test already ran only this bucket's pixels here - but the guard for a
+		// cleared. On the screen this is no longer the bucket loop (a screen decode
+		// pass is always classified: the early depth test runs only this bucket's
+		// pixels here, ATOM-DECODE-CLASS-1) but the guard for a
 		// pixel whose id is not a covering triangle of its own bucket
 		// (ATOM-DECODE-CLASS-1 measured frames of the 10k world that the base renders
 		// black and that, without this guard, the classified decode rendered as
