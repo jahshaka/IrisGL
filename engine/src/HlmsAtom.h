@@ -22,8 +22,10 @@
 // and flags, and HlmsAtom binds the bucket's PBS CONST-BUFFER POOL in place of the
 // twin's own — so the id buffer's material word (`GpuInstance::raster[0]`,
 // {pool:16 | slot:16} of the PBS datablock) addresses each member's own constants
-// directly. The bucket table maps EVERY member's word to the twin's slot + 1, and a
-// pixel whose word maps elsewhere is discarded.
+// directly. The bucket table maps EVERY member's word to the bucket's CLASS, and the
+// screen decode is CLASSIFIED (ATOM-DECODE-CLASS-1): one full-screen draw writes each
+// pixel's class as the material depth, and each bucket's draw tests its own class
+// EQUAL, so the early depth test hands a pixel to its own bucket alone.
 //
 // WHAT IT IS TOLD. Everything PBS is told, through `tellEveryHlms` (OgreEngine.cpp)
 // — never a setter of its own that could disagree with PBS's — except the scene's
@@ -31,8 +33,9 @@
 // as PBS does.
 //
 // ITS TWO PRODUCT CONSUMERS. The SCREEN (ATOM S3-DRAW, OgreAtomDraw.cpp): the id
-// pass's image, shaded by one full-screen decode draw per bucket as the first draws
-// of the view's prepass and opaque pass (syncScreenDecodes / showScreenDecodes).
+// pass's image, shaded by one full-screen decode draw per bucket in the view's
+// screen decode passes — one in front of the prepass, one in front of the opaque
+// pass, over the material depth (syncScreenDecodes / showScreenDecodes).
 // The RAY HITS (PHOTON-HIT-SHADE-1, SPECS/atom/D2_HIT_SHADING_DESIGN.md): in HIT
 // MODE the same decode shades the ray jobs' compacted hit list — one fragment per
 // record — in the chain's "Jahshaka hit decode" pass (syncSceneDecodes).
@@ -95,13 +98,29 @@ void forgetSceneDecodes(Ogre::SceneManager *sm);
 /// every scene pass of the chain covers it, so the draws are shown ONLY for the
 /// hit decode pass (HlmsAtom::showSceneDecodes, from its listener).
 constexpr Ogre::uint8 kHitDecodeRenderQueue = 99u;
-/// The queue the SCREEN decode draws live in (ATOM S3-DRAW): the FIRST draws of the
-/// view's prepass and opaque pass. A decode neither tests nor writes depth, so it
-/// must come before the PBS items (10) that may stand in front of an Atom item and
-/// depth-test against the id pass's depth; after the sky (0), which the id depth
-/// already rejects wherever an Atom item stands. Shown only while a pass that skips
-/// the Atom queue runs (the view's listener).
+/// The queue the SCREEN decode draws live in (ATOM S3-DRAW): the draws of the
+/// view's SCREEN DECODE PASSES (ATOM-DECODE-CLASS-1, OgreChain.cpp
+/// addAtomDecodePass), one in front of the prepass and one in front of the opaque
+/// pass, whose depth attachment is the MATERIAL DEPTH. Shown only while such a pass
+/// runs (the view's listener).
 constexpr Ogre::uint8 kScreenDecodeRenderQueue = 2u;
+/// THE CLASSIFIER's queue (ATOM-DECODE-CLASS-1): the one full-screen draw that turns
+/// the id image into the material depth, in front of the bucket draws of the first
+/// screen decode pass of a frame.
+constexpr Ogre::uint8 kScreenClassifyRenderQueue = 1u;
+
+/// THE DECODE BY CLASSIFICATION (ATOM-DECODE-CLASS-1; Nanite's material depth). A
+/// bucket's CLASS is a small integer (1-based, reused after its bucket dies, never
+/// shared by two live buckets); the classifier writes, per pixel, the class of the
+/// bucket its id names as a DEPTH, `class x kClassDepthStep`, into the chain's
+/// `jahAtomMaterialDepth` (0 where nothing covers the pixel), and each bucket's
+/// decode draw is a full-screen triangle at ITS class's depth, tested EQUAL — the
+/// hardware's early depth test rejects every other bucket's pixel before the pixel
+/// shader runs, so a pixel is decoded once, by its own bucket. The step is a power
+/// of two and a class below 2^24 an exact float, so the value the classifier writes
+/// and the value the triangle rasterises are the same bits.
+constexpr uint32_t kMaxBuckets = (1u << 24u) - 1u;
+constexpr float kClassDepthStep = 1.0f / 16777216.0f;   // 2^-24 = 1 / (kMaxBuckets + 1)
 
 /// The id image's two words (R32G32_UINT), the contract between whatever WRITES the
 /// id buffer (the id pass, and the hand-made images of engine.atom_parity) and the
@@ -163,6 +182,13 @@ public:
         /// property atom_hit_mode selects the decode's hit branches.
         bool hitMode = false;
         Ogre::UavBufferPacked *hitBuf = nullptr;
+        /// A SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) — set by whoever records one
+        /// (the view's listener; the parity harness): the pass's depth is the
+        /// material depth, the pass property atom_classified makes every bucket draw
+        /// a triangle at its class's depth tested EQUAL (applyStrongMacroblockRules),
+        /// and the classifier is shown and writes that depth. There is no other screen
+        /// decode: the bucket loop that discarded every other bucket's pixel is gone.
+        bool classified = false;
     };
     void setDecodeSource(const DecodeSource &src);
     /// THE SHADER WARM-UP'S ARMING (OgreView::warmUpShaders): the empty stand-ins as
@@ -214,6 +240,14 @@ public:
     /// forgetDecodeTwinIfMoved for EVERY datablock a twin serves (the PBS change
     /// log's overflow answer, OgreEngine::drainPbsChanges).
     void forgetMovedDecodeTwins();
+    /// THE CLASSIFIER'S DATABLOCK (ATOM-DECODE-CLASS-1): an HlmsAtom datablock of
+    /// its own, which the shader generator recognises (the renderable property
+    /// atom_classify: a pixel shader that writes the pixel's class as its depth and
+    /// nothing else). Its macroblock always passes and writes depth; its blendblock
+    /// writes no colour. Created on first use, destroyed with the twins.
+    Ogre::HlmsPbsDatablock *classifyDatablock();
+    /// A bucket's CLASS (kMaxBuckets above), 0 when no twin serves the datablock.
+    uint32_t classOf(const Ogre::HlmsDatablock *pbs) const;
     /// Twins = buckets held (every scene), and the PBS datablocks they serve.
     size_t decodeTwinCount() const { return mTwins.size(); }
     size_t decodeMemberCount() const { return mTwinOfPbs.size(); }
@@ -337,6 +371,14 @@ protected:
     Ogre::Hlms::PropertiesMergeStatus notifyPropertiesMergedPreGenerationStep(
         size_t tid, Ogre::PiecesMap *inOutPieces) override;
     void setupRootLayout(Ogre::RootLayout &rootLayout, size_t tid) override;
+    /// The classifier's renderable property (atom_classify), beside PBS's own.
+    void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
+    /// THE CLASSIFIED PASS'S DEPTH RULE (ATOM-DECODE-CLASS-1) — Ogre's own per-pass
+    /// macroblock door (Hlms::applyStrongMacroblockRules, OgreHlms.cpp): under the pass
+    /// property atom_classified a bucket draw tests its class's depth EQUAL and
+    /// writes none; the twin's own macroblock (no depth, CULL_NONE) is what every
+    /// other pass — the hit decode, a harness — draws with.
+    void applyStrongMacroblockRules(Ogre::HlmsMacroblock &macroblock, const size_t tid) const override;
 
 private:
     void uploadBucketTable();
@@ -367,6 +409,11 @@ private:
         /// (fillBuffersForV2). NOT the twin's slot: slots repeat across the twins'
         /// const-buffer pools (512 each), and two buckets must never claim a pixel.
         uint32_t bucketId = 0u;
+        /// THE BUCKET'S CLASS (ATOM-DECODE-CLASS-1): what the bucket table holds,
+        /// what the draw carries in its per-draw word's .w, and what the classifier
+        /// writes as depth. The lowest free class when the bucket is born; freed
+        /// with it.
+        uint32_t classIdx = 0u;
         std::vector<std::pair<const Ogre::HlmsDatablock *, uint32_t>> members;
     };
     /// Keyed by the TWIN (what a draw carries).
@@ -374,8 +421,10 @@ private:
     std::unordered_map<const Ogre::HlmsDatablock *, Ogre::HlmsPbsDatablock *> mTwinOfPbs;
     std::unordered_map<BucketKey, Ogre::HlmsPbsDatablock *, BucketKeyHash> mTwinOfKey;
     /// THE BUCKET TABLE: for each PBS material word (pool * slotsPerPool + slot),
-    /// the id of its bucket (Twin::bucketId), 0 = no bucket. The decode discards a
-    /// pixel whose entry is not its own draw's bucket id (worldMaterialIdx.w).
+    /// the CLASS of its bucket (Twin::classIdx), 0 = no bucket. The classifier
+    /// writes it as the pixel's material depth; a bucket draw's pixel whose entry is
+    /// not its own class (worldMaterialIdx.w) carries the harmless interpolants — it
+    /// can only be a HELPER lane there, the early depth test rejected it.
     Ogre::ReadOnlyBufferPacked *mBucketBuf = nullptr;
     std::vector<uint32_t> mBucketMirror;
     bool mBucketDirty = true;
@@ -384,6 +433,11 @@ private:
     unsigned long long mBucketGeneration = 0ull;
     uint32_t mTwinSerial = 0u;
     uint32_t mBucketSerial = 0u;
+    /// The classes in use (index = class; [0] is never used).
+    std::vector<bool> mClassUsed;
+    uint32_t takeClass();
+    void releaseClass(uint32_t c);
+    Ogre::HlmsPbsDatablock *mClassifyDb = nullptr;
     unsigned long long mTwinEpoch = 0ull;
 
     /// The product's decode draws, per SceneManager: the hit decode's
@@ -396,9 +450,13 @@ private:
             bool shown = false;
         };
         Set hit, screen;
+        /// The screen decode's classifier (kScreenClassifyRenderQueue), alive while
+        /// the screen set holds a draw; shown with it.
+        AtomDecodeRenderable *classify = nullptr;
     };
     std::unordered_map<Ogre::SceneManager *, SceneDecodes> mSceneDecodes;
     void destroySceneDraw(SceneDecodes &sd, const Ogre::HlmsDatablock *twin);
+    void destroyClassifier(SceneDecodes &sd);
     void syncDraws(Ogre::SceneManager *sm, SceneDecodes &sd, SceneDecodes::Set &set,
                    const std::vector<uint32_t> &words, Ogre::uint8 renderQueue);
 };

@@ -73,6 +73,7 @@
 // readbacks. The planar-reflection pass (OgrePlanar.cpp) sets it false too,
 // even though its RQ range already excludes 254 — the guarantee must not
 // depend on an RQ constant somebody may widen later.
+#include <algorithm>
 #include <cmath>
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"   // kHitDecodeRenderQueue (PHOTON-HIT-SHADE-1)
@@ -231,6 +232,13 @@ constexpr const char *kPassthroughRtv   = "jahPassthroughRtv";
 /// view that carries the id pass holds one, view Off or not — a full-target D32,
 /// 8.3 MB at 1920x1080 and 33 MB at 3840x2160.
 constexpr const char *kAtomViewDepth    = "jahAtomViewDepth";
+/// THE MATERIAL DEPTH (ATOM-DECODE-CLASS-1; Nanite's form): each pixel's bucket CLASS
+/// as a depth (HlmsAtom.h kClassDepthStep), written by the classifier as the first
+/// draw of the frame's first screen decode pass and tested EQUAL by every bucket
+/// draw — the depth attachment of the screen decode passes, and of nothing else.
+/// The same lifetime as the Atom view's depth: a full-target D32 in every view that
+/// carries the id pass, 8.3 MB at 1920x1080.
+constexpr const char *kAtomMaterialDepth = "jahAtomMaterialDepth";
 /// THE PHOTON VIEW's own depth (a copy of the scene's) and the view through which
 /// its scene pass draws onto the target (addPhotonViewPasses).
 constexpr const char *kPhotonColour     = "jahPhotonColour";
@@ -437,7 +445,7 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// copies still point at — a read-after-destroy the moment the next pass is added.
 /// So it is called EXACTLY ONCE, with a capacity no chain can exceed, before
 /// the first addTargetPass. Nothing below may call it again.
-constexpr size_t kMaxTargetPasses = 76;   // 50 + up to 14 HZB mip passes, the photon view's 4, and headroom
+constexpr size_t kMaxTargetPasses = 78;   // 50 + up to 14 HZB mip passes, the photon view's 4, the decode passes' 2, and headroom
 
 /// THE STORE ACTION OF THE LAST PASS ANY WORKSPACE OF OURS PUTS ON A TARGET.
 ///
@@ -583,7 +591,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
            a.rayReflect == b.rayReflect && a.hitDecode == b.hitDecode &&
-           a.atomDraw == b.atomDraw &&
+           a.atomDraw == b.atomDraw && a.atomOcclusion == b.atomOcclusion &&
            // THE PREPASS'S SHAPE, not the rows that ask for it (PHOTON-GATHER-1d;
            // RAYS-1's F4): the gather's and the sun contact's rows add NOTHING
            // to the graph but the prepass, so toggling either where the prepass
@@ -705,6 +713,105 @@ void addAtomIdTargets(Ogre::CompositorNodeDef *n) {
     // ...and THE ATOM VIEW's copy of the id pass's depth (kAtomViewDepth).
     auto *vd = addTex(n, kAtomViewDepth, Ogre::PFG_D32_FLOAT);
     vd->preferDepthTexture = true;
+    // ...and THE MATERIAL DEPTH the screen decode passes test against.
+    auto *md = addTex(n, kAtomMaterialDepth, Ogre::PFG_D32_FLOAT);
+    md->preferDepthTexture = true;
+}
+
+/// THE PYRAMID'S TEXTURE (NANITE_SPEC §4.3): one R32_FLOAT at the view's resolution
+/// with `desc.hzbLevels` mips for a view's own pyramid (PostFxDesc::hzb: its compute
+/// passes address each level, so the count is graph shape) — and EVERY level the size
+/// allows (0: Ogre's own maximum, re-derived when the target resizes) where only the
+/// id pass's occlusion builds it (its recorder walks the texture's levels as they are,
+/// so a resize is no new graph). No RenderTargetView — nothing ever renders INTO it;
+/// every level is written by a compute pass through a UAV, which is the only way to
+/// address a mip level at all (addTargetPass has no mip parameter).
+void addHzbTexture(Ogre::CompositorNodeDef *n, const ChainDesc &desc) {
+    auto *td = n->addTextureDefinition(kHzb);
+    td->width = 0u; td->height = 0u;
+    td->widthFactor = 1.0f; td->heightFactor = 1.0f;
+    td->format = Ogre::PFG_R32_FLOAT;
+    td->numMipmaps = desc.hzb ? Ogre::uint8(desc.hzbLevels) : Ogre::uint8(0u);
+    td->depthBufferId = 0;
+    td->fsaa = "1";
+    // Uav AND RenderToTexture, even though nothing ever renders into it:
+    // TextureDefinitionBase::createTextures calls _setDepthBufferDefaults
+    // unconditionally, and that throws "Texture must've been created with
+    // TextureFlags::RenderToTexture" on anything else (OgreTextureGpu.cpp:676).
+    // DiscardableContent is deliberately NOT claimed — the seed rewrites
+    // every texel of mip 0 each frame and each reduce rewrites its own
+    // level, so no level is ever read before this frame wrote it... EXCEPT by the id
+    // pass's first cull (ChainDesc::atomOcclusion), which reads LAST frame's levels
+    // before this frame's seed: the content must survive the frame boundary.
+    td->textureFlags = Ogre::TextureFlags::Uav | Ogre::TextureFlags::RenderToTexture;
+}
+
+/// THE PYRAMID'S BUILD from the scene's named depth as it stands at this point of
+/// the graph: one compute pass per mip — the SEED copies the depth into mip 0 (a
+/// separate job because its source is a depth attachment), then one REDUCE per
+/// level, each reading the level above as a UAV and writing its own. Reading the
+/// source as a UAV rather than as a texture is deliberate: an Ogre resource layout
+/// is per-TEXTURE, not per-mip, so binding one texture as Texture and Uav in the
+/// same pass would ask the barrier solver for two layouts at once. Both slots being
+/// Uav asks for one. The jobs are SHARED by every level (and with the id pass's
+/// occlusion, whose recorder dispatches them itself): CompositorPassCompute::execute calls setResourcesToJob()
+/// every frame, so each pass re-binds its own mips before dispatching, and
+/// HlmsComputeJob::_calculateNumThreadGroupsBasedOnSetting reads the bound UAV's MIP
+/// dimensions — so the group counts follow the level with no arithmetic of ours.
+void addHzbBuild(Ogre::CompositorNodeDef *n, const ChainDesc &desc, const std::string &profilingPrefix) {
+    Ogre::Root &root = Ogre::Root::getSingleton();
+    Ogre::HlmsCompute *hc = root.getHlmsManager() ? root.getHlmsManager()->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *seed = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbSeed") : nullptr;
+    Ogre::HlmsComputeJob *reduce = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbReduce") : nullptr;
+    if (!seed || !reduce) return;
+    // WHICH WAY IS CLOSE. Ogre's Vulkan render system defaults to REVERSE-Z (near =
+    // 1, far = 0), so the closest depth of a footprint is its MAXIMUM — but the
+    // shader is told rather than assuming it, so a build that turns reverse depth
+    // off still produces a conservative pyramid instead of an inverted one.
+    Ogre::RenderSystem *rs = root.getRenderSystem();
+    reduce->setProperty("hzb_reverse_z", (rs && rs->isReverseDepth()) ? 1 : 0);
+    // WHICH DEPTH A LEVEL KEEPS — the request's, not a constant. The farthest chain
+    // is the only one an occlusion cull can be conservative against
+    // (PostFxDesc::hzbFarthest carries why).
+    reduce->setProperty("hzb_farthest", desc.hzbFarthest ? 1 : 0);
+    {
+        Ogre::CompositorTargetDef *t = n->addTargetPass("");
+        t->setNumPasses(1);
+        auto *c = static_cast<Ogre::CompositorPassComputeDef *>(t->addPass(Ogre::PASS_COMPUTE));
+        c->mJobName = "Jahshaka/HzbSeed";
+        c->mProfilingId = profilingPrefix + "0";
+        c->addTextureSource(0, kDepth);
+        c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
+    }
+    for (unsigned m = 1u; m < desc.hzbLevels; ++m) {
+        Ogre::CompositorTargetDef *t = n->addTargetPass("");
+        t->setNumPasses(1);
+        auto *c = static_cast<Ogre::CompositorPassComputeDef *>(t->addPass(Ogre::PASS_COMPUTE));
+        c->mJobName = "Jahshaka/HzbReduce";
+        c->mProfilingId = profilingPrefix + std::to_string(m);
+        c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, Ogre::uint8(m), Ogre::PFG_UNKNOWN, false);
+        c->addUavSource(1, kHzb, Ogre::ResourceAccess::Read, 0, Ogre::uint8(m - 1u), Ogre::PFG_UNKNOWN, false);
+    }
+}
+
+/// THE TWO-PASS OCCLUSION'S SECOND HALF (ATOM-OCCLUSION-1, ChainDesc::atomOcclusion),
+/// after the id pass: THE LATE ID PASS on the same RTV, LOADING the id image and the
+/// depth. Its recorder (OgreAtomIdPass.cpp) builds the pyramid from the depth the id
+/// pass just wrote — the seed and a reduce per level the texture has, dispatched by the
+/// recorder rather than as compute passes, so the level count is not graph shape and a
+/// resize rebuilds nothing — then tests the set the first cull rejected against it and
+/// draws what is disoccluded. The pyramid it leaves is the one the NEXT frame's first
+/// cull reads.
+void addAtomOcclusionPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandles &handles) {
+    Ogre::CompositorTargetDef *t = n->addTargetPass(kAtomIdRtv);
+    t->setNumPasses(1);
+    Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomIdLatePassId));
+    p->setAllLoadActions(Ogre::LoadAction::Load);
+    p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+    p->mStoreActionDepth = Ogre::StoreAction::Store;
+    p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+    p->mProfilingId = "Jahshaka atom id late";
+    if (desc.letterbox) inset(handles, p);
 }
 
 /// THE ID PASS (ATOM S3-DRAW; OgreAtomIdPass.cpp records it): a PASS_CUSTOM through
@@ -727,6 +834,9 @@ void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandl
     p->mProfilingId = "Jahshaka atom id";
     // A letterboxed view's ids line up with its image.
     if (desc.letterbox) inset(handles, p);
+    // THE TWO-PASS OCCLUSION (ChainDesc::atomOcclusion): the pyramid from this depth,
+    // then the late id pass over the rejected set.
+    if (desc.atomOcclusion) addAtomOcclusionPasses(n, desc, handles);
     // THE ATOM VIEW'S DEPTH, copied before any scene pass adds a stock-PBR surface
     // to it (the prepass and the opaque pass LOAD this depth and draw into it).
     // Executed only while the view is on (kAtomViewExecutionBit).
@@ -884,6 +994,86 @@ Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, co
 /// CompositorPassSceneDef::mSkipRQ): its items are drawn by the id pass and shaded by
 /// the screen decode (which is what arms the decode — OgreAtomDraw.cpp's listener).
 void skipAtomQueue(Ogre::CompositorPassSceneDef *p) { p->setSkipRenderQueue(kAtomRenderQueue, true); }
+
+/// THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1), in front of the scene pass `mainRtv`
+/// serves (the prepass or the opaque pass): the SAME colour attachments over the
+/// MATERIAL DEPTH instead of the scene's, and the render queues of the classifier
+/// (when `classify`: the first decode pass of the frame writes the material depth)
+/// and the bucket draws only. Its scene settings are the main pass's, copied by
+/// finishAtomDecodePass once that pass is built. Its listener arms HlmsAtom
+/// (OgreAtomDraw.cpp, by kScreenDecodePassIdentifier) and so does the ray tier's
+/// for the opaque one (OgreRayQuery.cpp: the ray jobs finish in front of the FIRST
+/// pass that shades with the prepass).
+Ogre::CompositorPassSceneDef *addAtomDecodePass(Ogre::CompositorNodeDef *n, const char *mainRtv,
+                                                bool classify, bool keepDepth, const char *profilingId) {
+    const std::string rtvName = std::string(mainRtv) + "/atomDecode";
+    Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(Ogre::IdString(rtvName));
+    const Ogre::RenderTargetViewDef *main = n->getRenderTargetViewDef(Ogre::IdString(mainRtv));
+    rtv->colourAttachments = main->colourAttachments;
+    rtv->depthAttachment.textureName = kAtomMaterialDepth;
+    rtv->preferDepthTexture = true;
+    Ogre::CompositorTargetDef *t = n->addTargetPass(rtvName);
+    t->setNumPasses(1);
+    auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+    p->mFirstRQ = classify ? kScreenClassifyRenderQueue : kScreenDecodeRenderQueue;
+    p->mLastRQ = Ogre::uint8(kScreenDecodeRenderQueue + 1u);
+    // The classifier writes every pixel of the viewport: the depth's old contents
+    // are never read. A later decode pass of the frame (the opaque one after the
+    // prepass) LOADS it, read-only — the only reason to store it (`keepDepth`).
+    p->mLoadActionDepth = classify ? Ogre::LoadAction::Clear : Ogre::LoadAction::Load;
+    p->mLoadActionStencil = Ogre::LoadAction::DontCare;
+    p->mStoreActionDepth = keepDepth ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
+    p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+    p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
+    // The LODs are the id pass's; these draws are full-screen triangles.
+    p->mUpdateLodLists = false;
+    p->mIdentifier = kScreenDecodePassIdentifier;
+    p->mProfilingId = profilingId;
+    return p;
+}
+
+/// ...and its SCENE SETTINGS, the main pass's — the pass is the main pass's own first
+/// draws moved in front of it, so the decode's shaders are compiled for exactly the
+/// pass state they were compiled for inside it (the shadow node — the decode pass is
+/// its first user and so the one that updates it; the prepass mode and its textures;
+/// the normals G-buffer; the mask; the viewport). The main pass then LOADS the colour
+/// the decode pass cleared (or loaded) and wrote.
+void finishAtomDecodePass(ChainHandles &handles, Ogre::CompositorPassSceneDef *d,
+                          Ogre::CompositorPassSceneDef *m) {
+    d->mShadowNode = m->mShadowNode;
+    d->mShadowNodeRecalculation = m->mShadowNodeRecalculation;
+    d->mVisibilityMask = m->mVisibilityMask;
+    d->mLightVisibilityMask = m->mLightVisibilityMask;
+    d->mCameraName = m->mCameraName;
+    d->mLodCameraName = m->mLodCameraName;
+    d->mCullCameraName = m->mCullCameraName;
+    d->mPrePassMode = m->mPrePassMode;
+    d->mPrePassTexture = m->mPrePassTexture;
+    d->mPrePassDepthTexture = m->mPrePassDepthTexture;
+    d->mPrePassSsrTexture = m->mPrePassSsrTexture;
+    d->mDepthTextureNoMsaa = m->mDepthTextureNoMsaa;
+    d->mRefractionsTexture = m->mRefractionsTexture;
+    d->mGenNormalsGBuf = m->mGenNormalsGBuf;
+    d->mEnableForwardPlus = m->mEnableForwardPlus;
+    d->mCameraCubemapReorient = m->mCameraCubemapReorient;
+    d->mLodBias = m->mLodBias;
+    d->mMaterialScheme = m->mMaterialScheme;
+    d->mExecutionMask = m->mExecutionMask;
+    d->mViewportModifierMask = m->mViewportModifierMask;
+    // A prepass-use pass tests its depth read-only; so does the decode pass that
+    // follows the classifying one (setUseDepthPrePass set both on the main pass).
+    d->mReadOnlyDepth = m->mReadOnlyDepth;
+    d->mReadOnlyStencil = m->mReadOnlyStencil;
+    for (size_t i = 0; i < OGRE_MAX_MULTIPLE_RENDER_TARGETS; ++i) {
+        d->mClearColour[i] = m->mClearColour[i];
+        d->mLoadActionColour[i] = m->mLoadActionColour[i];
+        d->mStoreActionColour[i] = Ogre::StoreAction::Store;
+        m->mLoadActionColour[i] = Ogre::LoadAction::Load;
+    }
+    // A letterboxed view's decode lines up with its image.
+    if (std::find(handles.insetPasses.begin(), handles.insetPasses.end(), m) != handles.insetPasses.end())
+        inset(handles, d);
+}
 
 }   // namespace
 
@@ -1067,7 +1257,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // PASSTHROUGH — the shape every view had before this file, and the shape
     // every offscreen view still has. Bit-identical to createBasicWorkspaceDef.
     if (!desc.anyEffect()) {
-        n->setNumLocalTextureDefinitions((desc.letterbox ? 1u : 0u) + (desc.atomDraw ? 3u : 0u));
+        n->setNumLocalTextureDefinitions((desc.letterbox ? 1u : 0u) + (desc.atomDraw ? 4u : 0u) +
+                                         (desc.atomOcclusion ? 1u : 0u));
         if (desc.letterbox) {
             // Bars first, background inside them; the scene passes below then
             // LOAD colour instead of clearing it (a clear is full-target and
@@ -1089,8 +1280,13 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             rtv->depthAttachment.textureName = kDepth;
             rtv->stencilAttachment.textureName = kDepth;
             rtv->preferDepthTexture = true;
+            if (desc.atomOcclusion) addHzbTexture(n, desc);
             addAtomIdPass(n, desc, handlesOut);
         }
+        // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1): the classifier and the bucket
+        // draws, over the material depth, in front of the opaque pass.
+        Ogre::CompositorPassSceneDef *decode =
+            desc.atomDraw ? addAtomDecodePass(n, kPassthroughRtv, true, false, "Jahshaka atom decode") : nullptr;
         Ogre::CompositorTargetDef *t =
             n->addTargetPass(desc.atomDraw ? kPassthroughRtv : kTargetChannel);
         // With the id pass the opaque pass and the overlay pass are two TARGET
@@ -1133,6 +1329,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // THE PASS THAT UPDATES THE MIRRORS (planar::kPlanarUpdatePassIdentifier):
             // the one that samples a planar reflection, so the one that renders it.
             p->mIdentifier = planar::kPlanarUpdatePassIdentifier;
+            if (decode) finishAtomDecodePass(handlesOut, decode, p);
         }
         if (desc.atomDraw) {
             addAtomViewPass(n, desc, handlesOut);
@@ -1214,7 +1411,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
-    n->setNumLocalTextureDefinitions(31);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the photon view's two
+    n->setNumLocalTextureDefinitions(32);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two
     if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
@@ -1479,29 +1676,13 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
     }
 
-    // THE HZB (NANITE_SPEC §4.3). Declared beside SSAO's depth downscale because
-    // it is the general form of it: one R32_FLOAT texture at the view's
-    // resolution carrying a full closest-depth mip chain. No RenderTargetView —
-    // nothing ever renders INTO it; every level is written by a compute pass
-    // through a UAV, which is the only way to address a mip level at all
-    // (addTargetPass has no mip parameter).
-    if (desc.hzb && desc.hzbLevels > 0u) {
-        auto *td = n->addTextureDefinition(kHzb);
-        td->width = 0u; td->height = 0u;
-        td->widthFactor = 1.0f; td->heightFactor = 1.0f;
-        td->format = Ogre::PFG_R32_FLOAT;
-        td->numMipmaps = Ogre::uint8(desc.hzbLevels);
-        td->depthBufferId = 0;
-        td->fsaa = "1";
-        // Uav AND RenderToTexture, even though nothing ever renders into it:
-        // TextureDefinitionBase::createTextures calls _setDepthBufferDefaults
-        // unconditionally, and that throws "Texture must've been created with
-        // TextureFlags::RenderToTexture" on anything else (OgreTextureGpu.cpp:676).
-        // DiscardableContent is deliberately NOT claimed — the seed rewrites
-        // every texel of mip 0 each frame and each reduce rewrites its own
-        // level, so no level is ever read before this frame wrote it.
-        td->textureFlags = Ogre::TextureFlags::Uav | Ogre::TextureFlags::RenderToTexture;
-    }
+    // THE HZB (NANITE_SPEC §4.3; addHzbTexture). Declared beside SSAO's depth
+    // downscale because it is the general form of it.
+    // ...and THE ID PASS'S OWN (ChainDesc::atomOcclusion) — ONE texture either way: a
+    // view that asked for a pyramid of its own gets it rebuilt after the opaque pass
+    // too (the complete depth, the one a screen trace and the next frame's first cull
+    // want).
+    if ((desc.hzb && desc.hzbLevels > 0u) || desc.atomOcclusion) addHzbTexture(n, desc);
 
     if (desc.ssao) {
         // Half-res depth, exactly the sample's layout: the AO march is the
@@ -1731,6 +1912,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // depth-tests read-only against what this one wrote: a fragment the
         // prepass never drew has no depth to be equal to.
         {
+            // ...ITS SCREEN DECODE PASS in front (ATOM-DECODE-CLASS-1): the frame's
+            // first, so it classifies.
+            Ogre::CompositorPassSceneDef *decode =
+                desc.atomDraw ? addAtomDecodePass(n, kSsrPrepassRtv, true, true, "Jahshaka atom decode prepass")
+                              : nullptr;
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrepassRtv);
             t->setNumPasses(1);
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -1761,6 +1947,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mProfilingId = "Jahshaka SSR prepass";
             // A letterboxed view's G-buffer has to line up with its image.
             if (desc.letterbox) inset(handlesOut, p);
+            if (decode) finishAtomDecodePass(handlesOut, decode, p);
         }
         // THE MARCH. Half or full resolution per the quality row; the frustum
         // corners are what let the shader rebuild a view-space position from
@@ -1832,6 +2019,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // black by construction at every stage, which is what a letterbox is.
         if (desc.letterbox)
             addLetterboxPrologue(n, desc, sceneTarget, handlesOut, prepass || desc.atomDraw);
+        // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) in front: it classifies unless
+        // the prepass's decode pass already did this frame.
+        Ogre::CompositorPassSceneDef *decode =
+            desc.atomDraw ? addAtomDecodePass(n, sceneTarget, !prepass, false, "Jahshaka atom decode") : nullptr;
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
         t->setNumPasses(1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -1900,68 +2091,14 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mProfilingId = "Jahshaka opaque";
         // THE PASS THAT UPDATES THE MIRRORS — see the other chain shape above.
         p->mIdentifier = planar::kPlanarUpdatePassIdentifier;
+        if (decode) finishAtomDecodePass(handlesOut, decode, p);
     }
 
     // ---- THE HZB, right after the opaque pass (NANITE_SPEC §4.3) ------------
-    //
-    // One compute pass per mip: the SEED copies the scene depth into mip 0 (a
-    // separate job because its source is a depth attachment, and a multisample
-    // one when the view is MSAA), then one REDUCE per level, each reading the
-    // level above as a UAV and writing its own. Reading the source as a UAV
-    // rather than as a texture is deliberate: an Ogre resource layout is
-    // per-TEXTURE, not per-mip, so binding one texture as Texture and Uav in the
-    // same pass would ask the barrier solver for two layouts at once. Both slots
-    // being Uav asks for one.
-    //
-    // The jobs are SHARED by every level: CompositorPassCompute::execute calls
-    // setResourcesToJob() every frame, so each pass re-binds its own mips before
-    // dispatching, and HlmsComputeJob::_calculateNumThreadGroupsBasedOnSetting
-    // reads the bound UAV's MIP dimensions — so the group counts follow the
-    // level with no arithmetic of ours.
-    if (desc.hzb && desc.hzbLevels > 0u) {
-        Ogre::Root &root = Ogre::Root::getSingleton();
-        Ogre::HlmsCompute *hc = root.getHlmsManager() ? root.getHlmsManager()->getComputeHlms()
-                                                      : nullptr;
-        Ogre::HlmsComputeJob *seed = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbSeed") : nullptr;
-        Ogre::HlmsComputeJob *reduce = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbReduce") : nullptr;
-        if (seed && reduce) {
-            // WHICH WAY IS CLOSE. Ogre's Vulkan render system defaults to
-            // REVERSE-Z (near = 1, far = 0), so the closest depth of a footprint
-            // is its MAXIMUM — but the shader is told rather than assuming it, so
-            // a build that turns reverse depth off still produces a conservative
-            // pyramid instead of an inverted one.
-            Ogre::RenderSystem *rs = root.getRenderSystem();
-            reduce->setProperty("hzb_reverse_z", (rs && rs->isReverseDepth()) ? 1 : 0);
-            // WHICH DEPTH A LEVEL KEEPS — the request's, not a constant. The
-            // farthest chain is the only one an occlusion cull can be
-            // conservative against (PostFxDesc::hzbFarthest carries why).
-            reduce->setProperty("hzb_farthest", desc.hzbFarthest ? 1 : 0);
-
-            {
-                Ogre::CompositorTargetDef *t = n->addTargetPass("");
-                t->setNumPasses(1);
-                auto *c = static_cast<Ogre::CompositorPassComputeDef *>(
-                    t->addPass(Ogre::PASS_COMPUTE));
-                c->mJobName = "Jahshaka/HzbSeed";
-                c->mProfilingId = "Jahshaka HZB 0";
-                c->addTextureSource(0, kDepth);
-                c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, 0,
-                                Ogre::PFG_UNKNOWN, false);
-            }
-            for (unsigned m = 1u; m < desc.hzbLevels; ++m) {
-                Ogre::CompositorTargetDef *t = n->addTargetPass("");
-                t->setNumPasses(1);
-                auto *c = static_cast<Ogre::CompositorPassComputeDef *>(
-                    t->addPass(Ogre::PASS_COMPUTE));
-                c->mJobName = "Jahshaka/HzbReduce";
-                c->mProfilingId = std::string("Jahshaka HZB ") + std::to_string(m);
-                c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, Ogre::uint8(m),
-                                Ogre::PFG_UNKNOWN, false);
-                c->addUavSource(1, kHzb, Ogre::ResourceAccess::Read, 0, Ogre::uint8(m - 1u),
-                                Ogre::PFG_UNKNOWN, false);
-            }
-        }
-    }
+    // The view's own pyramid (PostFxDesc::hzb) of the COMPLETE depth; addHzbBuild
+    // carries the build's shape. With the id pass's occlusion on too, this is the
+    // pyramid the next frame's first cull reads.
+    if (desc.hzb && desc.hzbLevels > 0u) addHzbBuild(n, desc, "Jahshaka HZB ");
 
     // The scene result the post passes read. (No MSAA resolve stands here any
     // more: the chain renders at 1x by construction — see ChainDesc — and the

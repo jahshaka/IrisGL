@@ -82,7 +82,8 @@
 	//              raster 9 = the PBS material word, the tangent byte offset)
 	//   levels:    2 uint4 per GpuMeshLevel (firstIndex, indexCount, bound, geomRow)
 	//   geomRows:  3 uint4 per geometry row (Ogre's VctVoxelizer GeometryRow)
-	//   buckets:   1 uint per PBS (pool, slot) - 1 + the twin slot that serves it
+	//   buckets:   1 uint per PBS (pool, slot) - the CLASS of the bucket that serves
+	//              it, 0 = none (HlmsAtom::Twin::classIdx)
 	@insertpiece( JahAtomId )
 	ReadOnlyBufferU( @value(atomInstanceBuf), uint4, atomInstances );
 	ReadOnlyBufferU( @value(atomLevelBuf), uint4, atomLevels );
@@ -94,6 +95,38 @@
 	// group, refined). The screen decode's only route to a triangle.
 	ReadOnlyBufferU( @value(atomMeshBuf), uint4, atomMeshes );
 	ReadOnlyBufferU( @value(atomClusterBuf), uint4, atomClusters );
+
+	// THE PIXEL'S BUCKET CLASS (ATOM-DECODE-CLASS-1) - the ONE walk the classifier
+	// and the decode share, so the material depth and the decode's own bucket test
+	// cannot disagree: the id's item slot, its instance's material word, the bucket
+	// table's entry for the word. Every read is clamped into its table (the
+	// helper-lane rule below); ok says every step was in range and a bucket serves
+	// the word.
+	struct AtomClass
+	{
+		uint instAt;
+		uint4 raster;
+		uint word;
+		uint cls;
+		bool ok;
+	};
+	AtomClass atomClassOf( uint2 ids )
+	{
+		AtomClass c;
+		uint instCount = uint( atomInstances.length() ) / 10u;
+		uint bucketCount = uint( atomBuckets.length() );
+		uint slotRaw = ids.x & 0x00FFFFFFu;
+		c.ok = ids.x != 0xFFFFFFFFu && instCount > 0u && bucketCount > 0u && slotRaw < instCount;
+		c.instAt = min( slotRaw, max( instCount, 1u ) - 1u ) * 10u;
+		c.raster = atomInstances[c.instAt + 9u];
+		c.word = c.raster.x;
+		c.ok = c.ok && c.word != 0xFFFFFFFFu;
+		uint bucketAt = ( c.word >> 16u ) * @value(atomSlotsPerPool)u + ( c.word & 0xFFFFu );
+		c.ok = c.ok && bucketAt < bucketCount && ( c.word & 0xFFFFu ) < @value(atomSlotsPerPool)u;
+		c.cls = atomBuckets[min( bucketAt, max( bucketCount, 1u ) - 1u )];
+		c.ok = c.ok && c.cls != 0u;
+		return c;
+	}
 
 	// THE GEOMETRY, READ WHERE THE RASTER KEEPS IT: the vertex and index buffers the
 	// engine draws, through the device addresses of the GPU scene's geometry rows
@@ -386,29 +419,22 @@
 		@end
 
 		// The tables' lengths (every stand-in holds at least one whole entry of each).
-		uint atomInstCount = uint( atomInstances.length() ) / 10u;
 		uint atomLevelCount = uint( atomLevels.length() ) / 2u;
 		uint atomRowCount = uint( atomGeomRows.length() ) / 3u;
-		uint atomBucketCount = uint( atomBuckets.length() );
-		atomOk = atomOk && atomInstCount > 0u && atomLevelCount > 0u && atomRowCount > 0u &&
-				 atomBucketCount > 0u;
-
-		uint atomSlotRaw = atomIds.x & 0x00FFFFFFu;
-		atomOk = atomOk && atomSlotRaw < atomInstCount;
-		uint atomI = min( atomSlotRaw, max( atomInstCount, 1u ) - 1u ) * 10u;
-
-		uint4 atomRaster = atomInstances[atomI + 9u];
-		uint atomWord = atomRaster.x;
-		atomOk = atomOk && atomWord != 0xFFFFFFFFu;
+		atomOk = atomOk && atomLevelCount > 0u && atomRowCount > 0u;
 
 		// THE BUCKET: this draw serves the materials whose table entry is its own
-		// bucket's id (the per-draw word's w, HlmsAtom::fillBuffersForV2); every other
-		// pixel belongs to another decode draw. A whole id, never a slot: slots repeat
-		// across the twins' pools.
-		uint atomBucketAt = ( atomWord >> 16u ) * @value(atomSlotsPerPool)u + ( atomWord & 0xFFFFu );
-		atomOk = atomOk && atomBucketAt < atomBucketCount && ( atomWord & 0xFFFFu ) < @value(atomSlotsPerPool)u;
-		uint atomBucket = atomBuckets[min( atomBucketAt, max( atomBucketCount, 1u ) - 1u )];
-		atomOk = atomOk && atomBucket != 0u && atomBucket == worldMaterialIdx[inAtom.drawId].w;
+		// bucket's CLASS (the per-draw word's w, HlmsAtom::fillBuffersForV2). A whole
+		// class, never a slot: slots repeat across the twins' pools. In a classified
+		// pass the early depth test already gave this pixel to its own bucket's draw
+		// alone, so a lane of another class is a HELPER lane of a straddling quad -
+		// and it must carry exactly the harmless interpolants below, never its own
+		// pixel's decode, or its neighbours' derivatives would change.
+		AtomClass atomClass = atomClassOf( atomIds );
+		uint atomI = atomClass.instAt;
+		uint4 atomRaster = atomClass.raster;
+		uint atomWord = atomClass.word;
+		atomOk = atomOk && atomClass.ok && atomClass.cls == worldMaterialIdx[inAtom.drawId].w;
 
 		uint atomMesh = atomInstances[atomI + 6u].w;
 		// Where the triangle's corners are: a geometry row and the first index.
@@ -699,6 +725,16 @@
 		@property( !lower_gpu_overhead )
 			inPs.drawId = ushort( inAtom.drawId );
 		@end
+		// AN ID THAT NAMES NOTHING THIS DRAW CAN SHADE IS NEVER SHADED: a record the
+		// hit list cannot name keeps the clear's w = 0 (the write-back's "not
+		// shaded"); a screen pixel whose id fails a check above keeps what the pass
+		// cleared. On the screen this is no longer the bucket loop (a screen decode
+		// pass is always classified: the early depth test runs only this bucket's
+		// pixels here, ATOM-DECODE-CLASS-1) but the guard for a
+		// pixel whose id is not a covering triangle of its own bucket
+		// (ATOM-DECODE-CLASS-1 measured frames of the 10k world that the base renders
+		// black and that, without this guard, the classified decode rendered as
+		// whole-screen bands of the harmless triangle).
 		if( !atomOk )
 			discard;
 	}

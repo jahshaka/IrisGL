@@ -40,6 +40,7 @@ struct CullParams
 	uvec4 counts;           // x instanceCount, y flagsRequired, z flagsForbidden, w mode
 	uvec4 hzb;              // x levels (0 = frustum only), y width, z height, w reverseZ
 	uvec4 cut;              // mode 3's budget: x stream indices, y drawn-cluster records
+	uvec4 hzbRect;          // the viewport's rectangle in the pyramid's mip 0: x0, y0, w, h (w 0 = all of it)
 };
 
 struct GpuInstance
@@ -84,6 +85,12 @@ layout( std430, ogre_U3 ) readonly restrict buffer levelLayout { GpuMeshLevel le
 layout( std430, ogre_U4 ) writeonly restrict buffer visLayout { uint visible[]; };
 layout( std430, ogre_U5 ) writeonly restrict buffer lvlLayout { uint outLevel[]; };
 layout( std430, ogre_U6 ) restrict buffer heldLayout { uint heldLevel[]; };
+// THE DISOCCLUSION PASS (ATOM-OCCLUSION-1, the two-pass form): the first pass's own
+// visibility words, read to find the set it REJECTED by depth (the word 2) — only those
+// are tested again, against the pyramid built from the first pass's depth.
+@property( cull_retest )
+layout( std430, ogre_U7 ) readonly restrict buffer priorLayout { uint prior[]; };
+@end
 
 // THE PYRAMID THIS READS IS A FARTHEST-DEPTH CHAIN, not a closest-depth one, and
 // the difference is the whole correctness of the test (ATOM-SUBSTRATE-1 fix
@@ -166,6 +173,10 @@ void main()
 		return;
 	if( meshIndex == 0xFFFFFFFFu )
 		return;
+@property( cull_retest )
+	if( prior[slot] != 2u )
+		return;
+@end
 
 	// ---- the frustum, against the world AABB ------------------------------
 	// The POSITIVE VERTEX only: the corner furthest along the plane's normal.
@@ -263,19 +274,32 @@ void main()
 		if( testable )
 		{
 			vec2 size = vec2( float( params.hzb.y ), float( params.hzb.z ) );
-			// NDC to TEXELS. Ogre's Vulkan viewport has a NEGATIVE height, so
-			// clip-space y is UP and the flip lives in the viewport transform;
-			// the pyramid's mip 0 is a copy of the depth ATTACHMENT, whose row
-			// 0 is the top. So y inverts here and x does not.
-			vec2 t0 = vec2( ( lo.x * 0.5 + 0.5 ) * size.x, ( 0.5 - hi.y * 0.5 ) * size.y );
-			vec2 t1 = vec2( ( hi.x * 0.5 + 0.5 ) * size.x, ( 0.5 - lo.y * 0.5 ) * size.y );
+			// THE VIEWPORT'S RECTANGLE IN MIP 0: NDC spans the pass's viewport, which
+			// is the whole target except in a letterboxed view (its inset).
+			vec2 org = vec2( 0.0 );
+			vec2 ext = size;
+			if( params.hzbRect.z != 0u )
+			{
+				org = vec2( params.hzbRect.xy );
+				ext = vec2( params.hzbRect.zw );
+			}
+			// NDC to TEXELS. The pyramid's mip 0 is a copy of the depth
+			// ATTACHMENT, whose row 0 is the top, and a depth Ogre drew into a
+			// flipping target through the camera's own matrix has clip-space y
+			// UP: so y inverts here and x does not. A caller whose depth was
+			// drawn another way hands the matrix that makes this true (the id
+			// pass: its draw matrix with the y row negated, cullMatrixOf).
+			vec2 t0 = org + vec2( ( lo.x * 0.5 + 0.5 ) * ext.x, ( 0.5 - hi.y * 0.5 ) * ext.y );
+			vec2 t1 = org + vec2( ( hi.x * 0.5 + 0.5 ) * ext.x, ( 0.5 - lo.y * 0.5 ) * ext.y );
+			t0 = max( t0, org );
+			t1 = min( t1, org + ext );
 			vec2 rect = max( t1 - t0, vec2( 0.0 ) );
-			// THE MIP WHERE THE RECTANGLE SPANS AT MOST 2 TEXELS PER AXIS, so
-			// the four CORNER fetches below cover every texel it touches.
-			// (`/4.0` here would pick a level where the rectangle is 4 texels
-			// wide and the four corners leave up to 12 of its 16 texels
-			// unsampled — a hierarchical test that reads only the corners of
-			// its own footprint can reject something visible in the middle.)
+			// THE MIP WHERE THE RECTANGLE IS AT MOST 2 TEXELS WIDE PER AXIS — which a
+			// misaligned rectangle can still spread over THREE texel indices (0.9 to
+			// 2.9 touches texels 0, 1 and 2). ATOM-OCCLUSION-1: the four CORNER
+			// fetches this used to take skipped the middle row and column, and the
+			// test could reject something visible there; every texel from a to b is
+			// fetched now (at most 3 x 3).
 			float widest = max( rect.x, rect.y );
 			int mip = int( ceil( log2( max( widest, 1.0 ) / 2.0 ) ) );
 			mip = clamp( mip, 0, int( params.hzb.x ) - 1 );
@@ -285,17 +309,16 @@ void main()
 
 			// THE FARTHEST DEPTH ANYWHERE UNDER THE RECTANGLE is the one to
 			// beat. Each texel already holds the farthest of ITS footprint, so
-			// over the four it is the farthest of those — the smallest value
+			// over the texels it is the farthest of those — the smallest value
 			// under reverse-Z. Anything nearer than that, anywhere under the
 			// rectangle, would be a surface this object could still be seen
 			// past, which is why the extreme and not an average is right.
 			float farthestUnder = params.hzb.w != 0u ? 1.0e30 : -1.0e30;
-			for( int yy = 0; yy < 2; ++yy )
+			for( int yy = a.y; yy <= b.y; ++yy )
 			{
-				for( int xx = 0; xx < 2; ++xx )
+				for( int xx = a.x; xx <= b.x; ++xx )
 				{
-					ivec2 uv = ivec2( xx == 0 ? a.x : b.x, yy == 0 ? a.y : b.y );
-					float d = texelFetch( hzbTexture, uv, mip ).x;
+					float d = texelFetch( hzbTexture, ivec2( xx, yy ), mip ).x;
 					farthestUnder = params.hzb.w != 0u ? min( farthestUnder, d )
 													  : max( farthestUnder, d );
 				}
@@ -303,11 +326,21 @@ void main()
 			// OCCLUDED when even the box's NEAREST point is farther than the
 			// FARTHEST thing drawn under it: every pixel of the rectangle then
 			// already holds something in front of this object. In reverse-Z
-			// farther is smaller.
-			bool occluded = params.hzb.w != 0u ? ( nearest < farthestUnder )
-											   : ( nearest > farthestUnder );
+			// farther is smaller. THE MARGIN (a relative 2 to the minus 16 of the
+			// depth) keeps a surface lying ON the occluder's depth, within the
+			// rounding of the box against the rasterised vertices, drawn: the
+			// test may keep what is hidden, never drop what is seen.
+			float margin = abs( nearest ) * 1.52587890625e-5;
+			bool occluded = params.hzb.w != 0u ? ( nearest + margin < farthestUnder )
+											   : ( nearest - margin > farthestUnder );
 			if( occluded )
+			{
+				// REJECTED BY DEPTH, and SAID SO (the word 2, never a survivor): the
+				// disocclusion pass tests exactly this set again, and the compaction
+				// counts it (count[16]).
+				visible[slot] = 2u;
 				return;
+			}
 		}
 	}
 @end

@@ -53,8 +53,9 @@ struct FsVertex {
     float tx = 0, ty = 0, tz = 0, tw = 0;      // TANGENT4
     float u = 0, v = 0;                        // UV0
 };
-// Clip space, z = 0, w = 1: the decode neither tests nor writes depth (the twin's
-// macroblock says so); the id image alone decides coverage.
+// Clip space, z = 0, w = 1. In a CLASSIFIED pass the vertex stage replaces z with the
+// draw's class depth (the per-draw word's .w; ATOM-DECODE-CLASS-1); anywhere else the
+// twin's macroblock tests no depth and the id image alone decides coverage.
 const FsVertex kFullScreenTri[3] = {
     { -1.0f, -1.0f, 0.0f, 0, 0, 1, 1, 0, 0, 1, 0, 0 },
     { 3.0f, -1.0f, 0.0f, 0, 0, 1, 1, 0, 0, 1, 0, 0 },
@@ -400,6 +401,13 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
         err = "decodeTwinForBucket: the datablock has no name to serialise";
         return nullptr;
     }
+    // A BUCKET NEEDS A CLASS (the material depth's value); kMaxBuckets live buckets
+    // at most — refused, never shared.
+    const uint32_t classIdx = takeClass();
+    if (!classIdx) {
+        err = "decodeTwinForBucket: every class is in use (kMaxBuckets live buckets)";
+        return nullptr;
+    }
     const Ogre::String twinName = "jahAtomTwin/" + std::to_string(++mTwinSerial) + "/" + *pbsName;
     Ogre::String json;
     Ogre::HlmsJson hj(mHlmsManager, nullptr);
@@ -419,18 +427,23 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
         hj.loadMaterials("jahAtomTwin", Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
                          json.c_str(), "");
     } catch (Ogre::Exception &e) {
+        releaseClass(classIdx);
         err = "decodeTwinForBucket: " + e.getFullDescription();
         return nullptr;
     }
     auto *twin = static_cast<Ogre::HlmsPbsDatablock *>(getDatablock(Ogre::IdString(twinName)));
     if (!twin) {
+        releaseClass(classIdx);
         err = "decodeTwinForBucket: the twin did not load";
         return nullptr;
     }
     // THE DECODE'S MACROBLOCK: a full-screen triangle neither tests nor writes the
     // depth the id pass owns, and its winding is not the scene's (CULL_NONE — with
     // Ogre's default the decode draws NOTHING and a mean test reads it as "most
-    // pixels differ", FINDINGS §2.4 (3)).
+    // pixels differ", FINDINGS §2.4 (3)). A CLASSIFIED pass turns the test on,
+    // EQUAL against the material depth, through the pass's strong-macroblock rule
+    // (applyStrongMacroblockRules) — the twin itself stays depth-less for the hit
+    // decode, whose pass has no material depth.
     Ogre::HlmsMacroblock macro;
     macro.mDepthCheck = false;
     macro.mDepthWrite = false;
@@ -448,6 +461,7 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
     t.twin = twin;
     t.key = key;
     t.bucketId = ++mBucketSerial;
+    t.classIdx = classIdx;
     t.members.emplace_back(pbs, word);
     mTwins[twin] = t;
     mTwinOfPbs[pbs] = twin;
@@ -462,6 +476,47 @@ uint32_t HlmsAtom::bucketIdOf(const Ogre::HlmsDatablock *pbs) const {
     if (it == mTwinOfPbs.end()) return 0u;
     auto t = mTwins.find(static_cast<const Ogre::HlmsDatablock *>(it->second));
     return t == mTwins.end() ? 0u : t->second.bucketId;
+}
+
+uint32_t HlmsAtom::classOf(const Ogre::HlmsDatablock *pbs) const {
+    auto it = mTwinOfPbs.find(pbs);
+    if (it == mTwinOfPbs.end()) return 0u;
+    auto t = mTwins.find(static_cast<const Ogre::HlmsDatablock *>(it->second));
+    return t == mTwins.end() ? 0u : t->second.classIdx;
+}
+
+uint32_t HlmsAtom::takeClass() {
+    // THE LOWEST FREE CLASS: the material depth's values stay small and dense.
+    if (mClassUsed.empty()) mClassUsed.push_back(true);   // class 0 = "no bucket"
+    for (uint32_t c = 1u; c < uint32_t(mClassUsed.size()); ++c)
+        if (!mClassUsed[c]) {
+            mClassUsed[c] = true;
+            return c;
+        }
+    if (mClassUsed.size() > size_t(kMaxBuckets)) return 0u;
+    mClassUsed.push_back(true);
+    return uint32_t(mClassUsed.size() - 1u);
+}
+
+void HlmsAtom::releaseClass(uint32_t c) {
+    if (c && c < mClassUsed.size()) mClassUsed[c] = false;
+}
+
+Ogre::HlmsPbsDatablock *HlmsAtom::classifyDatablock() {
+    if (mClassifyDb) return mClassifyDb;
+    // Every pixel of the pass's viewport is written (a pixel no id covers gets 0,
+    // which no class equals), whatever the attachment held; no colour is.
+    Ogre::HlmsMacroblock macro;
+    macro.mDepthCheck = true;
+    macro.mDepthWrite = true;
+    macro.mDepthFunc = Ogre::CMPF_ALWAYS_PASS;
+    macro.mCullMode = Ogre::CULL_NONE;
+    Ogre::HlmsBlendblock blend;
+    blend.mBlendChannelMask = 0u;
+    mClassifyDb = static_cast<Ogre::HlmsPbsDatablock *>(
+        createDatablock(Ogre::IdString("jahAtomClassify"), "jahAtomClassify", macro, blend,
+                        Ogre::HlmsParamVec(), false));
+    return mClassifyDb;
 }
 
 void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
@@ -495,6 +550,7 @@ void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
     // scene (Ogre asserts on a datablock with linked renderables), then the twin.
     for (auto &kv : mSceneDecodes) destroySceneDraw(kv.second, twin);
     mTwinOfKey.erase(t.key);
+    releaseClass(t.classIdx);
     mTwins.erase(tt);
     // A decode draw may still carry the twin; the owner detaches its renderables
     // before it destroys materials (the grid's arm does), and Ogre asserts on a
@@ -646,6 +702,25 @@ void HlmsAtom::syncScreenDecodes(Ogre::SceneManager *sm, const std::vector<uint3
     if (!sm || !mHlmsManager) return;
     SceneDecodes &sd = mSceneDecodes[sm];
     syncDraws(sm, sd, sd.screen, words, kScreenDecodeRenderQueue);
+    // THE CLASSIFIER lives while a bucket draw does (ATOM-DECODE-CLASS-1).
+    if (!sd.screen.draws.empty() && !sd.classify) {
+        if (!sd.node) sd.node = sm->getRootSceneNode()->createChildSceneNode(Ogre::SCENE_DYNAMIC);
+        sd.classify = new AtomDecodeRenderable(Ogre::Id::generateNewId<Ogre::MovableObject>(),
+                                               &sm->_getEntityMemoryManager(Ogre::SCENE_DYNAMIC), sm,
+                                               kScreenClassifyRenderQueue);
+        sd.classify->setDatablock(classifyDatablock());
+        sd.node->attachObject(sd.classify);
+        sd.classify->setVisible(sd.screen.shown && mSource.classified);
+    } else if (sd.screen.draws.empty() && sd.classify) {
+        destroyClassifier(sd);
+    }
+}
+
+void HlmsAtom::destroyClassifier(SceneDecodes &sd) {
+    if (!sd.classify) return;
+    if (sd.node && sd.classify->getParentSceneNode()) sd.node->detachObject(sd.classify);
+    delete sd.classify;
+    sd.classify = nullptr;
 }
 
 void HlmsAtom::showSceneDecodes(Ogre::SceneManager *sm, bool on) {
@@ -661,6 +736,9 @@ void HlmsAtom::armForWarmUp(Ogre::SceneManager *sm, bool on) {
         ensureStandIns();
         DecodeSource src;
         src.ids = mEmptyIds;
+        // The product's screen decode is always classified: the permutations the
+        // warm-up compiles are the classified ones.
+        src.classified = true;
         setDecodeSource(src);
     } else {
         setDecodeSource(DecodeSource());
@@ -668,6 +746,7 @@ void HlmsAtom::armForWarmUp(Ogre::SceneManager *sm, bool on) {
     SceneDecodes &sd = mSceneDecodes[sm];
     sd.screen.shown = on;
     for (auto &kv : sd.screen.draws) kv.second->setVisible(on);
+    if (sd.classify) sd.classify->setVisible(on);
 }
 
 void HlmsAtom::showScreenDecodes(Ogre::SceneManager *sm, bool on) {
@@ -675,6 +754,8 @@ void HlmsAtom::showScreenDecodes(Ogre::SceneManager *sm, bool on) {
     if (it == mSceneDecodes.end()) return;
     it->second.screen.shown = on;
     for (auto &kv : it->second.screen.draws) kv.second->setVisible(on);
+    // The classifier draws only in a CLASSIFIED pass (the source set just before).
+    if (it->second.classify) it->second.classify->setVisible(on && mSource.classified);
 }
 
 size_t HlmsAtom::sceneDecodeCount(const Ogre::SceneManager *sm) const {
@@ -694,6 +775,7 @@ void HlmsAtom::forgetSceneManager(Ogre::SceneManager *sm) {
     for (const auto &kv : it->second.hit.draws) all.push_back(kv.first);
     for (const auto &kv : it->second.screen.draws) all.push_back(kv.first);
     for (const Ogre::HlmsDatablock *t : all) destroySceneDraw(it->second, t);
+    destroyClassifier(it->second);
     if (it->second.node) sm->destroySceneNode(it->second.node);
     mSceneDecodes.erase(it);
 }
@@ -705,6 +787,7 @@ void HlmsAtom::destroyDecodeTwins() {
         for (const auto &d : kv.second.hit.draws) all.push_back(d.first);
         for (const auto &d : kv.second.screen.draws) all.push_back(d.first);
         for (const Ogre::HlmsDatablock *t : all) destroySceneDraw(kv.second, t);
+        destroyClassifier(kv.second);
     }
     ++mTwinEpoch;
     for (auto &kv : mTwins) {
@@ -714,6 +797,10 @@ void HlmsAtom::destroyDecodeTwins() {
     mTwins.clear();
     mTwinOfPbs.clear();
     mTwinOfKey.clear();
+    mClassUsed.clear();
+    // The classifier's datablock (its draws died above, in every scene).
+    if (mClassifyDb) destroyDatablock(Ogre::IdString("jahAtomClassify"));
+    mClassifyDb = nullptr;
     if (mBucketBuf && mVaoManager) mVaoManager->destroyReadOnlyBuffer(mBucketBuf);
     mBucketBuf = nullptr;
     mBucketMirror.clear();
@@ -721,8 +808,8 @@ void HlmsAtom::destroyDecodeTwins() {
     ++mBucketGeneration;
 }
 
-/// THE BUCKET TABLE: one uint per PBS (pool, slot) — the id of that material's
-/// bucket (Twin::bucketId), 0 where no bucket serves it.
+/// THE BUCKET TABLE: one uint per PBS (pool, slot) — the CLASS of that material's
+/// bucket (Twin::classIdx), 0 where no bucket serves it.
 /// Rewritten only when a bucket gains or loses a member.
 void HlmsAtom::uploadBucketTable() {
     if (!mBucketDirty || !mVaoManager) return;
@@ -732,8 +819,8 @@ void HlmsAtom::uploadBucketTable() {
     const uint32_t perPool = mSlotsPerPool;
     std::vector<uint32_t> table(size_t(pools) * perPool, 0u);
     for (const auto &kv : mTwins) {
-        // EVERY MEMBER of the bucket names the bucket's one twin.
-        const uint32_t entry = kv.second.bucketId;
+        // EVERY MEMBER of the bucket names the bucket's one class.
+        const uint32_t entry = kv.second.classIdx;
         for (const auto &m : kv.second.members) {
             const uint32_t pool = m.second >> 16u, slot = m.second & 0xFFFFu;
             if (pool < pools && slot < perPool) table[size_t(pool) * perPool + slot] = entry;
@@ -815,7 +902,26 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
     uploadBucketTable();
     Ogre::HlmsCache ret =
         Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
-    if (!mSource.hitMode || casterPass) return ret;
+    if (casterPass) return ret;
+    if (!mSource.hitMode) {
+        if (!mSource.classified) return ret;
+        // A SCREEN DECODE PASS (ATOM-DECODE-CLASS-1): one pass property on top of
+        // PBS's, the pass cache re-keyed on it exactly as hit mode's below —
+        //   atom_classified   the bucket draws' vertex stage puts the triangle at
+        //                     the draw's class depth, their pixel stage declares
+        //                     early fragment tests, and their PSO tests that depth
+        //                     EQUAL without writing it (applyStrongMacroblockRules).
+        Ogre::HlmsPropertyVec props = ret.setProperties;
+        setProperty(props, Ogre::IdString("atom_classified"), 1);
+        PassCache passCache;
+        passCache.passPso = ret.pso.pass;
+        passCache.properties = props;
+        size_t passIdx = 0u;
+        findOrAddPassCache(passCache, true, passIdx);
+        ret.hash = static_cast<Ogre::uint32>(passIdx) << Ogre::HlmsBits::PassShift;
+        ret.setProperties = props;
+        return ret;
+    }
     // HIT MODE (PHOTON-HIT-SHADE-1): three pass properties on top of PBS's, and
     // the pass cache re-keyed on them (PBS built it from its own set):
     //   atom_hit_mode                     the decode's four hit branches;
@@ -874,6 +980,24 @@ Ogre::Hlms::PropertiesMergeStatus HlmsAtom::notifyPropertiesMergedPreGenerationS
     if (!getProperty(tid, Ogre::HlmsBaseProp::ShadowCaster))
         setTextureReg(tid, Ogre::PixelShader, "atomIdTex", texSlotsStart);
     return status;
+}
+
+void HlmsAtom::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) {
+    Ogre::HlmsPbs::calculateHashForPreCreate(renderable, inOutPieces);
+    if (mClassifyDb && renderable && renderable->getDatablock() == mClassifyDb)
+        setProperty(kNoTid, Ogre::IdString("atom_classify"), 1);
+}
+
+void HlmsAtom::applyStrongMacroblockRules(Ogre::HlmsMacroblock &macroblock, const size_t tid) const {
+    Ogre::HlmsPbs::applyStrongMacroblockRules(macroblock, tid);
+    // A BUCKET DRAW OF A CLASSIFIED PASS: its class's depth, EQUAL, never written —
+    // the classifier keeps its own macroblock (always, written).
+    if (getProperty(tid, Ogre::IdString("atom_classified")) &&
+        !getProperty(tid, Ogre::IdString("atom_classify"))) {
+        macroblock.mDepthCheck = true;
+        macroblock.mDepthWrite = false;
+        macroblock.mDepthFunc = Ogre::CMPF_EQUAL;
+    }
 }
 
 void HlmsAtom::setupRootLayout(Ogre::RootLayout &rootLayout, size_t tid) {
@@ -964,11 +1088,12 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
     // read. mLastBoundPool is forgotten so the next draw's PBS half rebinds whatever
     // it needs rather than trusting a slot we overwrote.
     const Ogre::HlmsDatablock *db = queuedRenderable.renderable->getDatablock();
-    // THE DRAW'S BUCKET ID, in the .w of the per-draw word PBS just wrote (its four
+    // THE DRAW'S CLASS, in the .w of the per-draw word PBS just wrote (its four
     // uints end at mCurrentMappedConstBuffer; .w is the planar-reflection index, which
-    // no twin's permutation reads — a twin serves a bucket, never a planar renderable).
+    // no twin's permutation reads — a twin serves a bucket, never a planar renderable):
+    // the vertex stage's depth in a classified pass, the pixel stage's bucket test.
     if (auto it = mTwins.find(db); it != mTwins.end())
-        *(mCurrentMappedConstBuffer - 1) = it->second.bucketId;
+        *(mCurrentMappedConstBuffer - 1) = it->second.classIdx;
     if (auto it = mTwins.find(db); it != mTwins.end() && it->second.pbs &&
                                    it->second.pbs->getAssignedPool()) {
         const Ogre::ConstBufferPool::BufferPool *pool = it->second.pbs->getAssignedPool();

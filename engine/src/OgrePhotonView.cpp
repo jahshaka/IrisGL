@@ -156,7 +156,13 @@ public:
     }
     void passPreExecute(Ogre::CompositorPass *pass) override {
         if (!mIsolation || !pass || pass->getType() != Ogre::PASS_SCENE) return;
-        if (pass->getDefinition()->mIdentifier != planar::kPlanarUpdatePassIdentifier) return;
+        // THE PASSES THAT SHADE THE PICTURE: the opaque pass, and the opaque screen
+        // decode pass in front of it (ATOM-DECODE-CLASS-1: the Atom items are shaded
+        // there) — never the prepass's decode pass, which writes the G-buffer.
+        const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
+        const bool opaqueDecode = def->mIdentifier == kScreenDecodePassIdentifier &&
+                                  def->mPrePassMode != Ogre::PrePassCreate;
+        if (def->mIdentifier != planar::kPlanarUpdatePassIdentifier && !opaqueDecode) return;
         OgreScene *scene = mView ? mView->ogreScene() : nullptr;
         if (!scene || !scene->sceneManager()) return;
         mArmed = scene->sceneManager();

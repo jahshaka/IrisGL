@@ -143,6 +143,25 @@ vulkan_layout( location = 0 ) in block
 
 @insertpiece( custom_ps_functions )
 
+@property( atom_classify )
+// THE CLASSIFIER (ATOM-DECODE-CLASS-1): the pixel's bucket CLASS as its depth - the
+// material depth every bucket draw of the pass then tests EQUAL. 0 where no bucket
+// serves the pixel (nothing covers it, or its id fails the walk): no class equals it.
+// The class is an integer below 2 to the 24th and the step a power of two, so this
+// value and the one a bucket draw's triangle rasterises are the same bits
+// (HlmsAtom.h, kClassDepthStep). No colour is written (the blendblock's mask).
+void main()
+{
+	ivec2 atomXY = min( ivec2( gl_FragCoord.xy ), textureSize( atomIdTex, 0 ) - ivec2( 1, 1 ) );
+	AtomClass atomClass = atomClassOf( texelFetch( atomIdTex, atomXY, 0 ).xy );
+	gl_FragDepth = atomClass.ok ? float( atomClass.cls ) * ( 1.0 / 16777216.0 ) : 0.0;
+}
+@else
+@property( atom_classified )
+// A BUCKET DRAW OF A CLASSIFIED PASS: the depth test runs BEFORE this shader, so a
+// pixel of another bucket never starts it (the whole point of the classification).
+layout( early_fragment_tests ) in;
+@end
 void main()
 {
 	@insertpiece( AtomDecodePrologue )
@@ -150,6 +169,7 @@ void main()
 	@insertpiece( DefaultBodyPS )
 	@insertpiece( custom_ps_posExecution )
 }
+@end ///atom_classify
 @else ///!hlms_shadowcaster
 void main()
 {

@@ -22,10 +22,19 @@
 // to the ambient.
 //
 // What the component gives the shader: hlms_fog + a const buffer with fogDensity
-// and the two breakthrough terms, consumed by the stock HlmsPbs pixel shader.
-// What it CANNOT give: an authored fog colour (it computes a procedural sky
-// colour per vertex) and height fog. Those two ride the pass-buffer extension
-// below and media/Hlms/Jahshaka/JahFog_piece_vs_piece_ps.any.
+// and the two breakthrough terms, consumed by the stock HlmsPbs pixel shader,
+// and its procedural sky colour per vertex. What it CANNOT give: an authored
+// fog colour (for the skies that are not it) and height fog. Those two ride the
+// pass-buffer extension below and media/Hlms/Jahshaka/JahFog_piece_vs_piece_ps.any.
+//
+// UNDER THE ANALYTIC SKY THE AIR IS A MEDIUM (lane FOG-ATMO-1). The component
+// stays registered with the sky; the medium's density — the air's own
+// (OgreScene::airFogDensity) whether or not the World fog is on, plus the World
+// fog's — rides OUR pass buffer, and our piece fogs every layer per pixel
+// towards the sky quad's own radiance for the pixel's ray, leaving upstream's
+// block an identity (density 0; its per-vertex colour is a different function
+// from the sky's and was evaluated at the corners of 4 km triangles — the media
+// file has the measurements). The authored colour is only for the other skies.
 #include "EnginePrivate.h"
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
@@ -697,7 +706,7 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = p.heightFalloff;
     *passBufferPtr++ = p.heightLevel;
     *passBufferPtr++ = cameraY;
-    *passBufferPtr++ = 0.0f;
+    *passBufferPtr++ = p.distanceDensity;   // jahFogHeight.w (FOG-ATMO-1)
     // The clock. Four floats so the struct stays 16-byte aligned like every
     // other member of a std140 buffer; x is seconds, yzw are reserved for the
     // things a generated piece will want next (frame index, delta, a seed).
@@ -826,64 +835,78 @@ void OgreScene::setFog(const FogDesc &desc) {
         //
         // UNLESS THE ANALYTIC SKY IS BOUND (SKY-GPU): the same component draws
         // it, and its registration is what makes the quad update at all, so the
-        // fog cannot take it down. The fog block then stays in the shader with
-        // fogDensity 0 — an exact identity, see applySkyAtmosphere (3).
+        // fog cannot take it down — and under that sky the AIR is still a medium
+        // (FOG-ATMO-1): syncAtmosphere -> pushFogState leaves the air's own
+        // aerial perspective in the fog block, without the World fog's density,
+        // height layer or breakthrough.
         mAtmoFogOn = false;
         if (mAtmoSkyOn) {
             syncAtmosphere();
-            if (mAtmosphere) JAH_TRY {
-                Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
-                preset.fogDensity = 0.0f;
-                mAtmosphere->setPreset(preset);
-                ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
-            } JAH_CATCH(mError, );
         } else {
             destroyAtmosphere();
+            FogHlmsListener::unregisterFog(mSceneMgr);
         }
-        FogHlmsListener::unregisterFog(mSceneMgr);
         return;
     }
     mAtmoFogOn = true;
     ensureAtmosphere();
     if (!mAtmosphere) return;   // media missing: the scene renders unfogged, mError says why
-    syncAtmosphere();
+    syncAtmosphere();           // ...which ends in pushFogState: the preset's fog block and the FogState
+}
+
+// THE FOG THE SHADER READS, derived from the LAST description the host pushed
+// AND the sky — re-derived whenever either changes, which is the point of it
+// being a function (the colour mode used to be decided once, at setFog time,
+// and outlived the sky it was made of).
+//
+// FOG-ATMO-1: under the ANALYTIC sky the colour is that sky's own scattering
+// for every layer — there is no switch, the sky decides — and the air is a
+// medium whether or not the World fog is on: the preset's fog density is the
+// air's (airFogDensity, OgreSky.cpp) plus the World fog's. Under any other sky
+// the World fog is the only medium and it takes the authored colour.
+void OgreScene::pushFogState() {
+    const bool fogOn = mAtmoFogOn && mFogDescKnown;
+    if (!mAtmosphere || (!fogOn && !mAtmoSkyOn)) {
+        FogHlmsListener::unregisterFog(mSceneMgr);
+        return;
+    }
+    const FogDesc &desc = mLastFogDesc;
+    FogState s;
+    if (fogOn) {
+        s.r = desc.colour.r; s.g = desc.colour.g; s.b = desc.colour.b;
+        s.heightDensity = std::max(desc.heightDensity, 0.0f);
+        s.heightFalloff = desc.heightFalloff;
+        s.heightLevel   = desc.heightLevel;
+    }
+    s.atmosphere = mAtmoSkyOn;
+    // ONE MEDIUM PER RAY: two absorbing media along the same ray compose by
+    // adding their densities (the transmittances multiply), so the air and the
+    // World fog share one exponential exactly. Under the analytic sky it is OUR
+    // piece's (per pixel, in the sky's colour — the media file says why
+    // upstream's per-vertex colour could not be used); under any other sky the
+    // World fog alone is upstream's.
+    // THE AIR IS PURE EXTINCTION AND ONLY THE WORLD FOG BENDS (the fix
+    // round's F4): the piece takes exp2(-L*air) * lerp(1, exp2(-L*world),
+    // breakthrough), so the air's density rides the authored colour's slot
+    // (unread under the analytic sky) and the World fog's its own.
+    const float worldDensity = fogOn ? std::max(desc.density, 0.0f) : 0.0f;
+    s.distanceDensity = mAtmoSkyOn ? worldDensity : 0.0f;
+    if (mAtmoSkyOn) { s.r = airFogDensity(); s.g = 0.0f; s.b = 0.0f; }
+    FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassHash / preparePassBuffer
 
     JAH_TRY {
         Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
-        preset.fogDensity            = std::max(desc.density, 0.0f);
-        preset.fogBreakMinBrightness = std::max(desc.breakMinBrightness, 0.0f);
-        preset.fogBreakFalloff       = std::max(desc.breakFalloff, 0.0f);
-        // Everything else in the preset drives the sky and the (unlinked) sun; the
-        // hidden quad and the absent light make those values unobservable.
+        // Under the analytic sky upstream's block is an exact identity
+        // (exp2(0) = 1); the breakthrough pair below is still the component's,
+        // because our piece reads it from the same constant buffer.
+        preset.fogDensity = mAtmoSkyOn ? 0.0f : worldDensity;
+        // The breakthrough is the World fog's authored bend of the curve; the
+        // air alone is pure extinction (falloff 0 makes lumFogWeight exactly 1).
+        preset.fogBreakMinBrightness = fogOn ? std::max(desc.breakMinBrightness, 0.0f) : 0.0f;
+        preset.fogBreakFalloff       = fogOn ? std::max(desc.breakFalloff, 0.0f) : 0.0f;
         mAtmosphere->setPreset(preset);
         ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
-
-        pushFogState();
     } JAH_CATCH(mError, );
-}
-
-// THE FOG STATE THE SHADER READS, derived from the LAST description the host
-// pushed — and re-derived whenever the SKY changes, which is the point of it
-// being a function.
-//
-// `atmosphere` (the aerial-perspective mode) is only meaningful while an
-// ANALYTIC sky is drawn: the colour it asks for is that sky's own scattering,
-// and with any other sky bound the component's model would be evaluated for a
-// sky nobody can see. It used to be decided once, at setFog time, and then
-// OUTLIVED the sky — pick Realistic, turn Aerial on, switch to a photograph,
-// and the fog went on being coloured by an atmosphere that was no longer
-// drawn. Now syncAtmosphere calls this on every sky change, so the mode is a
-// function of the state rather than of the order the host pushed things in.
-void OgreScene::pushFogState() {
-    if (!mAtmoFogOn || !mFogDescKnown) return;
-    const FogDesc &desc = mLastFogDesc;
-    FogState s;
-    s.r = desc.colour.r; s.g = desc.colour.g; s.b = desc.colour.b;
-    s.heightDensity = std::max(desc.heightDensity, 0.0f);
-    s.heightFalloff = desc.heightFalloff;
-    s.heightLevel   = desc.heightLevel;
-    s.atmosphere    = desc.atmosphereColour && mAtmoSkyOn;
-    FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassBuffer
 }
 
 }}}  // namespace jahshaka::engine::detail

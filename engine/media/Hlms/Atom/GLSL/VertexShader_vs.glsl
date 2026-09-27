@@ -32,6 +32,12 @@ vulkan_layout( location = 0 ) out block
 	@property( !atom_hit_mode )noperspective float2 ndc;@end
 } outAtom;
 
+@property( atom_classified && !atom_classify )
+	// A BUCKET DRAW OF A CLASSIFIED PASS (ATOM-DECODE-CLASS-1) reads its CLASS from
+	// the per-draw word's w (HlmsAtom::fillBuffersForV2).
+	@insertpiece( InstanceStructDecl )
+@end
+
 @property( atom_hit_mode )
 	// HIT MODE (PHOTON-HIT-SHADE-1): the triangle covers only the ROWS of the hit
 	// list that hold this frame's records, so the decode costs what the records
@@ -49,6 +55,13 @@ void main()
 	@property( hlms_uv_count )gl_Position.xy += uv0.xy;@end
 	@property( hlms_normal )gl_Position.z += normal.x;@end
 	@property( normal_map && hlms_tangent4 )gl_Position.w = tangent.w;@end
+	@property( atom_classified && !atom_classify )
+		// ...AT ITS CLASS'S DEPTH: the plane is constant, so every covered pixel
+		// rasterises exactly the value the classifier wrote where this bucket's
+		// pixels are, and the EQUAL test passes there and nowhere else. Added: the
+		// normal stream's zero stays consumed, and zero plus the value is the value.
+		gl_Position.z += float( worldMaterialIdx[drawId].w ) * ( 1.0 / 16777216.0 );
+	@end
 	outAtom.drawId = drawId;
 	// THE PIXEL'S NDC INSIDE THE PASS'S VIEWPORT (screen mode): the pixel stage takes
 	// the viewport's rectangle from it (a letterboxed view's inset included).
