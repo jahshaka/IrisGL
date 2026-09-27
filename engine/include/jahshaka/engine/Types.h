@@ -826,10 +826,11 @@ struct AtmosphereSky {
     /// rays come from that registration), and registering it puts `hlms_fog`
     /// into every PBS pass hash for as long as the sky is bound — a second
     /// permutation set for the scene's materials and, on a cold shader cache,
-    /// a compile hitch the first time the sky is switched on. The fog block
-    /// is not an identity under this sky: it carries the air's own aerial
+    /// a compile hitch the first time the sky is switched on. Under this sky
+    /// the fog is not an identity: every lit pixel pays the air's own aerial
     /// perspective (FogDesc, FOG-ATMO-1) whether or not the World fog is on,
-    /// and the per-vertex scattering colour it fogs towards. MEASURED on a
+    /// fogging per pixel towards the sky's own radiance for the pixel's view
+    /// ray (upstream's block is left an identity). MEASURED on a
     /// floor + a metal sphere with the fog OFF: 100 shader compiles with a
     /// colour sky, 104 after switching to the analytic one — four permutations
     /// and one hitch, once, warm-cached afterwards. With the fog ON (which is

@@ -865,8 +865,13 @@ void OgreScene::pushFogState() {
     // piece's (per pixel, in the sky's colour — the media file says why
     // upstream's per-vertex colour could not be used); under any other sky the
     // World fog alone is upstream's.
+    // THE AIR IS PURE EXTINCTION AND ONLY THE WORLD FOG BENDS (the fix
+    // round's F4): the piece takes exp2(-L*air) * lerp(1, exp2(-L*world),
+    // breakthrough), so the air's density rides the authored colour's slot
+    // (unread under the analytic sky) and the World fog's its own.
     const float worldDensity = fogOn ? std::max(desc.density, 0.0f) : 0.0f;
-    s.distanceDensity = mAtmoSkyOn ? airFogDensity() + worldDensity : 0.0f;
+    s.distanceDensity = mAtmoSkyOn ? worldDensity : 0.0f;
+    if (mAtmoSkyOn) { s.r = airFogDensity(); s.g = 0.0f; s.b = 0.0f; }
     FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassHash / preparePassBuffer
 
     JAH_TRY {

@@ -2430,9 +2430,11 @@ struct FogState {
     /// (upstream's block is left an identity, the component's density 0), and
     /// with it false the authored colour (r, g, b above) feeds upstream's block.
     bool  atmosphere    = false;
-    /// The distance medium's density under the analytic sky (exp2 per world
-    /// unit): the air's aerial perspective plus the World fog's. 0 otherwise —
-    /// upstream's block carries the World fog then. Pass-buffer float 7.
+    /// The World fog's distance density under the analytic sky (exp2 per world
+    /// unit), pass-buffer float 7; 0 otherwise — upstream's block carries the
+    /// World fog then. The AIR's density rides float 0 (`r`, the authored
+    /// colour's red, which the piece does not read under that sky): the two
+    /// media are separate because only the World fog carries the breakthrough.
     float distanceDensity = 0.0f;
 };
 

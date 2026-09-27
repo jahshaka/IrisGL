@@ -75,8 +75,8 @@
 // source BYTE-IDENTICAL to a build where none of this existed.
 @piece( custom_passBuffer )
 	@property( hlms_fog )
-		float4 jahFogColour;	// rgb = fog colour (linear), w = height-layer density (0 = off)
-		float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w = the distance density under the analytic sky
+		float4 jahFogColour;	// rgb = fog colour (linear; under the analytic sky x = the air's density instead), w = height-layer density (0 = off)
+		float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w = the World fog's distance density under the analytic sky
 	@end
 	@property( jah_shader_clock || irradiance_field || jah_env )
 		@property( !hlms_fog )
@@ -338,9 +338,18 @@ midf jahCloudSunTransmittance( float3 viewPos )
 		const float jahDiff = atmoSettings.packedParams3.w;
 		jahDir.y += jahDiff * 0.075 * ( 1.0 - jahDir.y ) * ( 1.0 - jahDir.y );
 		jahDir = normalize( jahDir + jahDisp );
+		// THE SCATTERING ANGLE IS THE RAY'S OWN (the fix round's F5): the
+		// phase term reads the direction BEFORE the horizon clamp. The sky
+		// quad takes it after the clamp, which is the same thing for every
+		// ray the sky itself draws above its border; for a ray into the
+		// ground the clamp lifts it to the horizon, and a phase read there
+		// made the whole ground glow like the sunset horizon at any downward
+		// angle. The clamped direction is kept for the horizon radiance
+		// lookup (the density and the gradient) below, which is what makes a
+		// fully fogged ground meet the sky without a line.
+		const float jahLdotV360 = dot( jahDir, jahSunDir ) * 0.5 + 0.5;
 		jahDir.y = max( jahDir.y, atmoSettings.packedParams2.w );
 		jahDir = normalize( jahDir + jahDisp );
-		const float jahLdotV360 = dot( jahDir, jahSunDir ) * 0.5 + 0.5;
 		const float jahPtDensity =
 			atmoSettings.densityCoeff /
 			pow( max( jahDir.y / ( 1.0 - atmoSettings.sunHeight ), 0.0035 ),
@@ -356,14 +365,19 @@ midf jahCloudSunTransmittance( float3 viewPos )
 		jahFogLin += jahLdotV360 * atmoSettings.packedParams1.xyz;
 		jahFogLin *= atmoSettings.lightDensity * atmoSettings.packedParams1.w;
 
-		// THE DISTANCE MEDIUM: exp2( -L * density ), the air plus the World fog,
-		// with upstream's own breakthrough on the unfogged colour's luminance
-		// (the component packs the pair as min * falloff and -falloff; falloff
-		// 0 — the air alone — is pure extinction).
+		// THE DISTANCE MEDIUM, TWO MEDIA ON ONE RAY (the fix round's F4): the
+		// AIR is pure extinction, exp2( -L * air ) with the air's density in
+		// jahFogColour.x (the authored colour is not read under this sky), and
+		// the World fog alone carries upstream's breakthrough on the unfogged
+		// colour's luminance, exp2( -L * world ) in jahFogHeight.w. The
+		// breakthrough weight is clamped to [0; 1]: upstream's max( exp2, 0 )
+		// is 1.017 at luminance 0 with the shipped pair (the component packs it
+		// as min * falloff and -falloff), which lerped PAST the fog colour.
 		const float jahLum = dot( jahSurf, float3( 0.212655, 0.715158, 0.072187 ) );
-		const float jahBreak = max( exp2( atmoSettings.fogBreakFalloff * jahLum +
-										  atmoSettings.fogBreakMinBrightness ), 0.0 );
-		const float jahTd = lerp( 1.0, exp2( -jahL * passBuf.jahFogHeight.w ), jahBreak );
+		const float jahBreak = clamp( exp2( atmoSettings.fogBreakFalloff * jahLum +
+											atmoSettings.fogBreakMinBrightness ), 0.0, 1.0 );
+		const float jahTd = exp2( -jahL * passBuf.jahFogColour.x ) *
+							lerp( 1.0, exp2( -jahL * passBuf.jahFogHeight.w ), jahBreak );
 		float3 jahOut = lerp( jahFogLin, jahSurf, jahTd );
 		if( passBuf.jahFogColour.w > 0.0 )
 		{
