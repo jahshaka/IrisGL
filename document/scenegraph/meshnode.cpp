@@ -33,8 +33,8 @@ For more information see the LICENSE file
 #include "assimp/vector3.h"
 #include "assimp/quaternion.h"
 
+#include "document/materials/material.h"
 #include "document/assets/vertexlayout.h"
-#include "document/materials/defaultmaterial.h"
 #include "import/materialhelper.h"
 #include "document/animation/animableproperty.h"
 #include "document/animation/animation.h"

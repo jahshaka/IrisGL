@@ -891,7 +891,6 @@ void Scene::rayCast(const iris::Vec3& segStart,
         PickingResult pick;
         pick.hitNode = p.node;
         pick.hitPoint = p.hitPoint;
-        pick.distanceFromStartSqrd = p.distanceSqrd;
         pick.triangleIndex = p.triangleIndex;
         hitList.append(pick);
     }
