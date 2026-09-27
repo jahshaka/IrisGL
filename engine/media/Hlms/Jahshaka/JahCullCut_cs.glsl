@@ -294,8 +294,8 @@ void main()
 
 	// ---- pass 2: the records, at this lane's offsets inside the run ----------------
 	// Reserved-but-unusable record slots become skips (inside the capacity only: the
-	// emit job never reads past it). The loop counts OFFSETS from the base, so no sum
-	// can wrap: at most gSkipCount[k] records, each inside [base, capacity).
+	// emit job never reads past it). The loop counts OFFSETS from the base: at most
+	// gSkipCount[k] records, the base written by lane 0 for every workgroup.
 	for( uint k = 0u; k < 2u; ++k )
 	{
 		uint skipBase = gSkipBase[k];
@@ -303,7 +303,7 @@ void main()
 		for( uint j = lane; j < skipCount; j += JAH_CUT_WIDTH )
 		{
 			uint r = skipBase + j;
-			if( r >= skipBase && r < params.cut.y )
+			if( r < params.cut.y )
 				records[r] = uvec4( 0xFFFFFFFFu, 0u, 0u, 0u );
 		}
 	}
