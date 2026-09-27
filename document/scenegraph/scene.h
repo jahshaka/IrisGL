@@ -156,8 +156,6 @@ struct PickingResult
 {
     iris::SceneNodePtr hitNode;
     iris::Vec3 hitPoint;
-
-    float distanceFromStartSqrd = 0.0f;
     /// The TriMesh triangle that was hit. Reported since both ray walks became
     /// one implementation (audit F13): this half of the pair used to drop it
     /// while the other half depended on it.
