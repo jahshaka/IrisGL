@@ -956,6 +956,22 @@ public:
     /// of the scene that draws into a window carries the id pass (the Low tier's
     /// passthrough viewport does not). Hosts refuse a mode other than Off when false.
     virtual bool atomViewPaintable() const { return false; }
+    /// THE PHOTON VIEW (PhotonView, Types.h): the lighting's debug pictures over
+    /// every view of this scene that draws the post chain. Switching it rebuilds
+    /// nothing; Off is byte-identical to a scene that never had it.
+    virtual void setPhotonView(PhotonView view) { (void)view; }
+    virtual PhotonView photonView() const { return PhotonView::Off; }
+    /// Empty when `view` can paint in this scene right now, otherwise WHY it
+    /// cannot (the tier has no field, the rays are off, ...). Off always can.
+    /// Hosts refuse a mode with a reason.
+    virtual std::string photonViewRefusal(PhotonView view) const {
+        return view == PhotonView::Off ? std::string() : std::string("the renderer has no photon view");
+    }
+    /// WHICH CASCADE the Voxels picture shows: -1 (the default) the finest that
+    /// holds the scene's whole lit content (the outermost when none does), n the
+    /// chain's cascade n (clamped to the chain). Not saved.
+    virtual void setPhotonVoxelCascade(int cascade) { (void)cascade; }
+    virtual int photonVoxelCascade() const { return -1; }
     /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
     /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
     /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,

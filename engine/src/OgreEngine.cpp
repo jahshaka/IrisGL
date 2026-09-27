@@ -1007,6 +1007,9 @@ void OgreEngine::renderOneFrame() {
             // ...and the visibility buffer's (ATOM S3-DRAW): ChainDesc::atomDraw
             // reads the scene's split, which the view learns only once it has one.
             v->syncAtomDraw();
+            // ...and THE PHOTON VIEW's (PHOTON-VIEW-1): the listener that gates its
+            // passes, the ray tier's overlay while the scene's view needs one.
+            v->syncPhotonView();
             // The inset's rectangles are derived from the TARGET's aspect
             // (a normalised rect is not a pixel rect), so a resize that never
             // touched ViewPipDesc still moves the letterbox. Re-derived here,
@@ -1083,6 +1086,11 @@ void OgreEngine::renderOneFrame() {
                 // scale.cpu_walks reads it as a number rather than an A/B.
                 monitor::Stage cardStage("engine.cards");
                 s->updateSurfaceCache();
+                // THE PHOTON VIEW's scene half (PHOTON-VIEW-1), after the cache
+                // planned its frame (the Cards picture reads its table) and the
+                // pendings rebuilt what they rebuild (the Voxels and Probes pictures
+                // follow the arms). Free when the view is Off and nothing is up.
+                s->syncPhotonView();
             }
         // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
         // applyGlobals in two). The MSAA resolve weights and the SMAA preset
@@ -2950,11 +2958,15 @@ void OgreEngine::registerCommonMaterials() {
                                // DDGI's five compute jobs (GI_UNIFIED_SPEC §4
                                // P1). ONE location, flat folder — the .any
                                // pieces sit beside the per-syntax shaders, like
-                               // IBL's. `IrradianceFields/Visualizer` is staged
-                               // beside it but deliberately NOT registered: it
-                               // is upstream's debug probe-sphere material and
-                               // we never draw it.
+                               // IBL's.
                                "Compute/Algorithms/IrradianceFields",
+                               // THE PHOTON VIEW's two Ogre pictures (PHOTON-VIEW-1):
+                               // upstream's own debug materials for the lit voxels
+                               // (VctLighting::setDebugVisualization) and the field's
+                               // probe spheres (IrradianceField::setDebugVisualization),
+                               // parsed here and compiled only when a view first asks.
+                               "VCT/Visualizer",
+                               "Compute/Algorithms/IrradianceFields/Visualizer",
                                // Post chain (POST_CHAIN_SPEC.md §4.1). The Vulkan
                                // (glslvk) programs source the SAME .glsl files as
                                // the GL ones, so GLSL is the folder that matters;

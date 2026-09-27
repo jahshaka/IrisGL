@@ -1,0 +1,58 @@
+// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1; Types.h PhotonView Diffuse and
+// Reflections) — the lighting text's own terms, one at a time, from the SAME
+// shader text that lights every pixel: never a second shader.
+//
+// THE HOOK is custom_ps_posExecution, which upstream's template inserts inside
+// main() after DefaultBodyPS (and HlmsAtom's decode template after the same
+// body): the body is a PIECE, so pixelData — with envColourD and envColourS
+// holding every environment source's final answer (the voxel cones, the
+// irradiance field, the screen-probe gather, the SH ambient, the probes, the
+// planar mirror, SSR and the ray-traced reflection, all composited into them by
+// the lines above BRDF_EnvMap) — is still in scope. The picture's output is
+// replaced by upstream's own BRDF_EnvMap evaluated again from a zero colour with
+// the OTHER term zeroed:
+//   value 1  Diffuse      envColourS zeroed: the indirect diffuse alone
+//                          (envColourD x albedo x the diffuse lobe's albedo)
+//   value 2  Reflections  envColourD zeroed: the specular environment alone
+//                          (envColourS x the split-sum specular)
+// Direct light, emission, refraction and fog are not in either picture.
+//
+// THE PROPERTY is jah_photon_view (its value is the mode), a PASS property set by
+// FogHlmsListener::preparePassHash only while the view's photon listener has
+// registered it — for the length of the one pass that shades the picture (the
+// opaque pass) — so every other pass, and every scene whose view is not one of
+// these two, generates the shader it generated before this file existed.
+//
+// THE HOOK IS SHARED: the fog's height layer defines it under hlms_fog and steps
+// aside under this property (JahFog_piece_vs_piece_ps.any); the gather's and the
+// card capture's definitions are prepass-only; HlmsAtom's is the hit decode's,
+// whose pass never carries this property (atom_hit_mode is in the guard anyway).
+//
+// SPELLED OUT, NO DIRECTIVE MARK IN ANY COMMENT: the Hlms parser reads them there.
+@property( jah_photon_view && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !atom_hit_mode )
+@piece( custom_ps_posExecution )
+	{
+		// A SCOPE OF ITS OWN: BRDF_EnvMap declares its locals, and the body above
+		// already declared them once in main's scope.
+		midf3 finalColour = midf3_c( 0, 0, 0 );
+		@property( needs_env_brdf )
+			@property( jah_photon_view == 1 )
+				pixelData.envColourS = midf3_c( 0, 0, 0 );
+				@property( clear_coat )
+					pixelData.clearCoatEnvColourS = midf3_c( 0, 0, 0 );
+				@end
+			@end
+			@property( jah_photon_view == 2 )
+				pixelData.envColourD = midf3_c( 0, 0, 0 );
+			@end
+			@insertpiece( BRDF_EnvMap )
+		@end
+		// The template's own output rule (Ogre-Next 4.0 always writes linear).
+		@property( !hw_gamma_write )
+			outPs_colour0.xyz = sqrt( finalColour );
+		@else
+			outPs_colour0.xyz = finalColour;
+		@end
+	}
+@end
+@end

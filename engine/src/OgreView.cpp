@@ -953,7 +953,8 @@ bool OgreView::attachWorkspace() {
         if (!mWorkspace) return false;
         // THE ATOM VIEW'S PASSES START OFF (kAtomViewExecutionBit): the view's atom
         // listener sets the bit, per frame, only while the scene's view is on.
-        mWorkspace->setExecutionMask(Ogre::uint8(0xFFu & ~kAtomViewExecutionBit));
+        // ...AND THE PHOTON VIEW'S (kPhotonExecutionBits), by its listener likewise.
+        mWorkspace->setExecutionMask(Ogre::uint8(0xFFu & ~kAtomViewExecutionBit & ~kPhotonExecutionBits));
         // The id pass's recorder is handed a pass, and finds its view here.
         atomRegisterView(mWorkspace, this);
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
@@ -1174,6 +1175,14 @@ void OgreView::detachScene(bool takeBlank) {
         // The camera rode a node of the scene that is going away.
         mCameraNode = 0;
         if (mScene) mScene->noteAtomPbsView(this, false, false);
+        // THE PHOTON VIEW's view half goes with the scene: its listener, the
+        // tier's overlay, and this view from the scene's shapes.
+        if (mScene) mScene->notePhotonView(this, false, OgreScene::PhotonViewShape());
+        if (mPhotonListener) {
+            removeWorkspaceListener(mPhotonListener.get());
+            mPhotonListener.reset();
+        }
+        if (mPhotonOverlay) retirePhotonOverlay();
         mScene  = nullptr;
         mFramesPresented = 0;
         // AND THE CLEAR-ONLY CHAIN TAKES OVER, in the same call (lane

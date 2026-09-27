@@ -113,6 +113,13 @@ layout( rg32ui, set = 0, binding = 6 ) uniform writeonly uimage2D historyCur;
 /// coverage like the history. The same pixel reads and writes it (the camera has
 /// not moved, so there is no reprojection and no race): one image, not a pair.
 layout( rgba16f, set = 0, binding = 7 ) uniform image2D restMean;
+/// THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1, binding 8): with p.knobs4.w = 1 (the
+/// scene's view is ScreenProbes) every pixel writes whether it lies on one of the
+/// probes around it — a disc at the probe's own position, coloured by the
+/// irradiance its rays traced — or a dim veil. Written ONLY under the knob and read
+/// by nothing here: the integrate's answer and its histories are the view's none
+/// of its business. With the knob off the binding holds a stand-in, never written.
+layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2D photonOverlay;
 
 #include "jah_reproject.glsl"
 
@@ -229,6 +236,49 @@ vec3 shEvalAt( uint i, vec3 n, int bands )
 	return max( e, vec3( 0.0 ) );
 }
 
+/// THE DISCS (PHOTON-VIEW-1): the probes of the 3 x 3 cells around the pixel's
+/// own (uniform and adaptive), each projected through the pixel's eye; the nearest
+/// whose disc holds the pixel colours it — E/pi tonemapped (x / (1 + x)), the
+/// radiance a white surface there would show — with a one-pixel dark rim.
+vec4 photonDisc( ivec2 pix, int lx, ivec2 cell, ivec2 cellOff, ivec2 gridEye, ivec2 grid,
+				 JahEye e, int eyeW, ivec2 full, float stride )
+{
+	const float radius = max( 0.3 * stride, 1.5 );
+	const vec2 here = vec2( float( lx ), float( pix.y ) ) + 0.5;
+	float best = radius;
+	vec4 outC = vec4( 0.0, 0.0, 0.0, 0.6 );
+	for( int dy = -1; dy <= 1; ++dy )
+		for( int dx = -1; dx <= 1; ++dx )
+		{
+			const ivec2 c = cell + ivec2( dx, dy );
+			if( any( lessThan( c, cellOff ) ) || any( greaterThanEqual( c, cellOff + gridEye ) ) )
+				continue;
+			const uint ui = uint( c.y * grid.x + c.x );
+			const float link = records.r[ui].normalW.w;
+			for( int k = 0; k < 2; ++k )
+			{
+				if( k == 1 && link < 0.5 )
+					break;
+				const uint pi = k == 0 ? ui : uint( link ) - 1u;
+				const vec4 posW = records.r[pi].posW;
+				if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
+					continue;
+				vec2 uv;
+				float z;
+				if( jahReproject( posW.xyz, e.camPos, e.perspective, e.rayTL, e.rayRight, e.rayDown,
+								  e.fwd, uv, z ) != 0 )
+					continue;
+				const float d = length( uv * vec2( float( eyeW ), float( full.y ) ) - here );
+				if( d >= best )
+					continue;
+				best = d;
+				const vec3 irr = max( records.r[pi].irradiance.xyz, vec3( 0.0 ) );
+				outC = d > radius - 1.0 ? vec4( 0.0, 0.0, 0.0, 1.0 ) : vec4( irr / ( vec3( 1.0 ) + irr ), 1.0 );
+			}
+		}
+	return outC;
+}
+
 void main()
 {
 	const ivec2 full = ivec2( p.resolution.zw );
@@ -251,6 +301,9 @@ void main()
 	const ivec2 cell = clamp( ivec2( vec2( lx, pix.y ) / stride ), ivec2( 0 ), gridEye - 1 ) + cellOff;
 	const uint index = uint( cell.y * grid.x + cell.x );
 	const JahEye thisEye = jahEyeNow( eye );
+	if( p.knobs4.w > 0.5 )
+		imageStore( photonOverlay, pix,
+					photonDisc( pix, lx, cell, cellOff, gridEye, grid, thisEye, eyeW, full, stride ) );
 
 	// The pixel's own surface, from the same prepass the probes were placed on:
 	// `uv` over the target (the textures), `local` over the eye's own image (the

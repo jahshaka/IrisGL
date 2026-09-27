@@ -295,6 +295,11 @@ public:
     /// piece (a pass with no `hlms_screen_pos_int` has no `iFragCoord`, one
     /// with no `needs_env_brdf` has no `envColourD`), which loses the frame.
     void passPosExecute(Ogre::CompositorPass *pass) override;
+    /// THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) shades with the prepass
+    /// too, in front of the opaque pass: the ray jobs finish in front of IT, and its
+    /// pass-scoped registrations stand until the opaque pass is over — one window
+    /// for the two passes that read them.
+    bool        mRayJobsFinished = false;
     /// The view whose chain this listener rides. Never null while registered.
     OgreView   *mView = nullptr;
     /// ...and its Root, so the destructor can flush without reaching into the
@@ -531,6 +536,26 @@ constexpr Ogre::uint32 kVrMaskBit      = 1u << 9;
 // for a moment is drawn by them exactly as it was.
 constexpr Ogre::uint32 kCardSubjectBit = 1u << 10;
 
+// THE PHOTON VIEW'S CHANNEL (PHOTON-VIEW-1). The NINTH bit, and like
+// kCardSubjectBit not an inversion: the only objects that ever carry it are the
+// photon view's debug drawables (Ogre's VoxelVisualizer and IfdProbeVisualizer,
+// the cards' quads), and they carry it ALONE.
+//
+// WHAT IT BUYS: those objects live in the scene's own SceneManager (Ogre's
+// debug visualizers attach themselves there), so without a channel of their own
+// every pass of every workspace of that manager would draw them — the prepass
+// (the G-buffers every ray job reads), the opaque pass (the HDR target every
+// history and the exposure meter read) and the thumbnails. With it:
+//   * OUT of every capture with no rule: the probe faces and the sky capture
+//     (`visibility_mask 0x1`), the shadow nodes (shadowCasterChannels, and the
+//     drawables cast nothing), the planar allowlist, the card capture (the
+//     subject bit) — none of them asks for this bit.
+//   * OUT of every view chain's scene passes, which are born holding every
+//     RESERVED bit: chain::helperBitsToDrop drops it from every view, always.
+//   * IN exactly one pass: the chain's photon pass (after the post chain,
+//     execution-gated by kPhotonSceneExecutionBit), whose mask is this bit alone.
+constexpr Ogre::uint32 kPhotonViewBit  = 1u << 11;
+
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
 // ---------------------------------------------------------------------------
@@ -741,6 +766,7 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // [225,256) are V1_FAST, 15 is PARTICLE_SYSTEM. Our v2 items can therefore only
 // live in 0-99 and 200-224.
 //   0     sky rectangle          (OgreSky)
+//   1     the screen decode's classifier (HlmsAtom, kScreenClassifyRenderQueue)
 //   2     the visibility buffer's screen decode draws (HlmsAtom, kScreenDecodeRenderQueue)
 //   10    normal items           (Ogre's default)
 //   11    the visibility buffer's items (kAtomRenderQueue, ATOM S3-DRAW)
@@ -785,6 +811,28 @@ constexpr const char *kAtomIdTexture = "jahAtomIds";
 constexpr Ogre::uint8 kAtomViewExecutionBit = 0x80u;
 /// The quad's material (engine media, Hlms/Jahshaka/JahAtomView.material).
 constexpr const char *kAtomViewMaterial = "Jahshaka/AtomView";
+/// THE PHOTON VIEW (PHOTON-VIEW-1, Types.h PhotonView): two gated stages after the
+/// post chain, before the overlays — a depth copy, a PASS_SCENE drawing the
+/// kPhotonViewBit drawables (Voxels, Probes, Cards) into the view's photon layer and
+/// the layer's composite, on kPhotonSceneExecutionBit; and a PASS_QUAD compositing
+/// the ray tier's overlay (ScreenProbes, Hits) on kPhotonOverlayExecutionBit. The view's photon listener sets exactly the bits the
+/// scene's view needs, every frame; Off executes none of them.
+constexpr Ogre::uint8 kPhotonSceneExecutionBit   = 0x40u;
+constexpr Ogre::uint8 kPhotonOverlayExecutionBit = 0x20u;
+/// ...and how the layer's depth is prepared: the scene's copied (Cards) or cleared
+/// (Voxels, Probes — a world of their own).
+constexpr Ogre::uint8 kPhotonDepthCopyBit  = 0x10u;
+constexpr Ogre::uint8 kPhotonDepthClearBit = 0x08u;
+/// Every photon bit, for the workspace's initial mask. (A PASS_CLEAR's default
+/// mask is 0x01 and every other pass's 0xFF, so the low bits stay everyone's.)
+constexpr Ogre::uint8 kPhotonExecutionBits = kPhotonSceneExecutionBit | kPhotonOverlayExecutionBit |
+                                             kPhotonDepthCopyBit | kPhotonDepthClearBit;
+/// The two composites' materials (engine media, Hlms/Jahshaka/JahPhotonView.material):
+/// the scene pass' layer, and the tier's overlay.
+constexpr const char *kPhotonLayerMaterial   = "Jahshaka/PhotonLayer";
+constexpr const char *kPhotonOverlayMaterial = "Jahshaka/PhotonOverlay";
+/// The cards' quads' material (the same file).
+constexpr const char *kPhotonCardsMaterial = "Jahshaka/PhotonCards";
 
 /// OgreAtomIdPass.cpp — THE ID PASS's device half. `atomIdPassSupported`: this
 /// device can run it (buffer device addresses, VK_KHR_draw_indirect_count, the
@@ -815,6 +863,12 @@ struct AtomDrawListenerDeleter {
 };
 using AtomDrawListenerPtr = std::unique_ptr<Ogre::CompositorWorkspaceListener, AtomDrawListenerDeleter>;
 AtomDrawListenerPtr makeAtomDrawListener(OgreView *view);
+/// OgrePhotonView.cpp — THE PHOTON VIEW's per-view listener (PHOTON-VIEW-1).
+struct PhotonListenerDeleter {
+    void operator()(Ogre::CompositorWorkspaceListener *l) const;
+};
+using PhotonListenerPtr = std::unique_ptr<Ogre::CompositorWorkspaceListener, PhotonListenerDeleter>;
+PhotonListenerPtr makePhotonListener(OgreView *view);
 
 // THE DISTORTION QUEUE (POST_LOOKS_SPEC.md §5.3).
 //
@@ -963,6 +1017,12 @@ struct StereoEyeBasis {
 /// hit mode for its length; the WRITE-BACK and the filters follow in the opaque
 /// pass' pre-execute. Stamped on exactly that pass.
 constexpr Ogre::uint32 kHitDecodePassIdentifier = 25002u;
+/// THE SCREEN DECODE PASSES (ATOM-DECODE-CLASS-1, OgreChain.cpp addAtomDecodePass):
+/// the classifier and the bucket draws over the material depth, one in front of the
+/// prepass and one in front of the opaque pass. The atom listener arms HlmsAtom for
+/// them; the ray tier's finishes its jobs in front of the first one that shades with
+/// the prepass. Stamped on exactly those passes.
+constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
 /// The hit list's height as a factor of the target's (ChainDesc::hitDecode).
 constexpr float kHitListHeightFactor = 0.5625f;
 
@@ -2655,6 +2715,17 @@ public:
                               unsigned divisor);
     static void clearSunContact();
 
+    /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
+    /// for the pass being executed, registered by the view's photon listener in
+    /// front of the pass that shades the scene (the opaque pass,
+    /// planar::kPlanarUpdatePassIdentifier) and taken away when it ends — the
+    /// gather's pass-scoped route, so no capture, probe, card, mirror or decode
+    /// pass of the same SceneManager ever sees it. The pass property
+    /// `jah_photon_view` (its VALUE is the mode) selects the lighting text's own
+    /// isolation (JahPhotonView_piece_ps.any): one lighting text, never a second
+    /// shader. 0 takes it away.
+    static void setPhotonIsolation(const Ogre::SceneManager *sm, int mode);
+
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
     /// because this may be called from any thread and must be a pure function
@@ -2699,6 +2770,7 @@ private:
     /// copy is PassBinds::sunVis; the divisor becomes the property's value).
     struct SunContactBind { Ogre::TextureGpu *tex = nullptr; unsigned divisor = 1u; };
     static std::map<const Ogre::SceneManager *, SunContactBind> sSunContact;  // render thread
+    static std::map<const Ogre::SceneManager *, int> sPhotonIsolation;  // render thread
     /// The cloud field per SceneManager (CLOUDS-2D-1); the pass's copy of it is
     /// PassBinds::cloudField.
     static std::map<const Ogre::SceneManager *, CloudShadowState> sCloudShadow;  // render thread
@@ -5820,6 +5892,40 @@ public:
     /// tier's passthrough viewport — AtomDrawStatus::passthroughViews). A VR eye
     /// pair carries no id pass either, but the desktop view beside it does.
     bool atomViewPaintable() const override { return atomDrawOn() && mAtomPassthroughViews.empty(); }
+
+    // ---- THE PHOTON VIEW (PHOTON-VIEW-1, OgrePhotonView.cpp) ----------------
+    void setPhotonView(PhotonView view) override { mPhotonView = view; }
+    PhotonView photonView() const override { return mPhotonView; }
+    std::string photonViewRefusal(PhotonView view) const override;
+    void setPhotonVoxelCascade(int cascade) override { mPhotonVoxelCascade = cascade < 0 ? -1 : cascade; }
+    int photonVoxelCascade() const override { return mPhotonVoxelCascade; }
+    /// ONCE A FRAME PER DRAWN SCENE (renderOneFrame, after updateSurfaceCache):
+    /// the scene half of the view — Ogre's voxel visualizer on the finest cascade
+    /// that holds the camera (Voxels), Ogre's probe visualizer on the field
+    /// (Probes), the cards' quads from the cache's table (Cards) — each put up,
+    /// followed and taken down as the view and the GI arms move. Free when Off
+    /// and nothing is up.
+    void syncPhotonView();
+    /// Every drawable down (the scene's teardown, before the GI arms and the
+    /// SceneManager; idempotent).
+    void releasePhotonView();
+    /// What one view of this scene can show (OgreView::syncPhotonView's report,
+    /// every frame; a detach forgets the view).
+    struct PhotonViewShape {
+        bool passes = false;        ///< its chain carries the photon passes (the post-chain shape)
+        bool rayReflect = false;    ///< ...and traces reflections (Hits)
+        bool probeGather = false;   ///< ...and gathers screen probes (ScreenProbes)
+        /// ...and draws both eyes (a headset's view, ChainDesc::stereo): its photon
+        /// pass is instanced-stereo, and Ogre's voxel and probe visualizers are
+        /// low-level materials the pin's stereo scheme does not serve (no per-eye
+        /// matrix in their vertex programs) — Voxels and Probes refuse while one
+        /// is live (photonViewRefusal) and its listener never draws them.
+        bool stereo = false;
+    };
+    /// `presents`: a view a person watches — a window, or a headset's eye pair (an
+    /// offscreen target only because the runtime copies it); an editor's shot is
+    /// neither and is forgotten here.
+    void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
 private:
     /// updateAtomDraw's first half: the split's witness and the screen decode's draws.
     void updateAtomSplit();
@@ -5832,6 +5938,33 @@ private:
     /// ...and THE OCCLUSION'S (ATOM-OCCLUSION-1): false builds every chain with the id
     /// pass frustum-only (no pyramid, no late pass). Not saved; a new scene starts on.
     bool mAtomOcclusionEnabled = true;
+    /// THE PHOTON VIEW (not saved; a new scene starts Off) and what is up for it.
+    PhotonView mPhotonView = PhotonView::Off;
+    int mPhotonVoxelCascade = -1;
+    std::unordered_map<const void *, PhotonViewShape> mPhotonViews;   ///< the presenting views only
+    /// Voxels: the cascade whose lighting shows its visualizer
+    /// (VctLighting::getDebugVisualizer) and what it was built from — a change of
+    /// any of them (a rebuild that swapped the voxeliser, re-created the textures
+    /// or moved the volume) rebuilds the picture.
+    Ogre::VctLighting *mPhotonVoxelLighting = nullptr;
+    const void *mPhotonVoxelSource = nullptr;
+    Ogre::TextureGpu *mPhotonVoxelTex = nullptr;
+    Ogre::Vector3 mPhotonVoxelOrigin = Ogre::Vector3::ZERO;
+    /// Probes: the field showing its visualizer (IrradianceField::getDebugVisualizer;
+    /// the fork keeps it placed through every follow).
+    Ogre::IrradianceField *mPhotonIfd = nullptr;
+    /// Cards: the quads, how many vertices they hold, and the cache's table
+    /// generation and frame they were built at (re-uploaded only when the table
+    /// moves or the age ramp's clock ticks — kPhotonCardAgeFrames).
+    Ogre::ManualObject *mPhotonCards = nullptr;
+    size_t mPhotonCardVerts = 0u;
+    unsigned long long mPhotonCardGeneration = ~0ull, mPhotonCardFrame = 0ull;
+    /// The lighting showing the Voxels picture is still one of the chain's and
+    /// still shows it (checked by pointer before any dereference).
+    bool photonVoxelLive() const;
+    void photonVoxelsOff();
+    void photonProbesOff();
+    void photonCardsOff();
     /// THE ATOM VIEW (not saved; a new scene starts Off).
     AtomView mAtomView = AtomView::Off;
     Ogre::TextureGpu *mAtomViewTable = nullptr;
@@ -6769,6 +6902,22 @@ public:
     /// reads the SCENE (a view has none when its chain is first built), so the
     /// shape is re-checked, and the listener that arms the screen decode follows.
     void syncAtomDraw();
+    /// THE PHOTON VIEW'S VIEW HALF (PHOTON-VIEW-1, OgrePhotonView.cpp), once a
+    /// frame beside syncAtomDraw: the listener that sets the photon passes'
+    /// execution bits and scopes the isolation property to the opaque pass, the
+    /// ray tier's overlay texture while the scene's view needs one, and this
+    /// view's shape reported to the scene (what the verb may refuse on).
+    void syncPhotonView();
+    /// THE RAY TIER'S PER-VIEW OVERLAY (ScreenProbes, Hits): RGBA16F at the
+    /// target's size, a UAV the tier writes and the photon quad samples. Null
+    /// unless the scene's view is one of the two.
+    Ogre::TextureGpu *photonOverlay() const { return mPhotonOverlay; }
+    /// The tier wrote the overlay (its contents are defined from then on).
+    void notePhotonOverlayWritten() { mPhotonOverlayWritten = true; }
+    bool photonOverlayWritten() const { return mPhotonOverlayWritten; }
+    /// Which overlay (1, 2, ... — one per creation; 0 = none): a re-created
+    /// overlay may recycle the pointer.
+    unsigned photonOverlayGeneration() const { return mPhotonOverlayGeneration; }
     /// The view's own GPU cull (the id pass's list): one per view, so two views of
     /// one scene in a frame never share the list the other is drawing from.
     detail::GpuCull &atomCull() { return mAtomCull; }
@@ -6959,6 +7108,14 @@ private:
     unsigned long long mAtomLateTriangles = 0ull;
     unsigned mAtomLateSurvivors = 0u, mAtomOccluded = 0u, mAtomDisoccluded = 0u;
     AtomDrawListenerPtr mAtomListener;
+    /// PHOTON-VIEW-1: the view's photon listener and the tier's overlay.
+    PhotonListenerPtr mPhotonListener;
+    Ogre::TextureGpu *mPhotonOverlay = nullptr;
+    bool mPhotonOverlayWritten = false;
+    unsigned mPhotonOverlayGeneration = 0u;
+    /// The overlay's destroy, through the ray tier's retire window when there is
+    /// one (OgreRayQuery.cpp — its descriptor sets may still be in flight).
+    void retirePhotonOverlay();
     detail::GpuCull mAtomCull;
     unsigned long long mAtomTriangles = 0ull;
     unsigned mAtomSurvivors = 0u;

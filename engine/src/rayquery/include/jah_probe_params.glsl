@@ -73,7 +73,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// 4 = L0..L1: the measurement arm, GatherTuning::shBands), y = the weight
 	/// floor under which a pixel is left to the fallback (w = 0), z = 1 runs the
 	/// filter in probe space (0 = the filtered map is the raw one: the A/B that
-	/// prices the filter), w = unused.
+	/// prices the filter), w = 1 writes THE PHOTON VIEW's ScreenProbes overlay
+	/// (the integrate's binding 8, PHOTON-VIEW-1).
 	vec4 knobs4;
 	/// THE PREVIOUS FRAME'S CAMERA (PHOTON-GATHER-1c), in the same five numbers
 	/// as this frame's (camPos .. fwd above) — what the integrate's pixel
