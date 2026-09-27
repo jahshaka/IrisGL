@@ -212,9 +212,6 @@ public:
     /// the walk reached every node every frame; since the dirty set it is the
     /// only honest spelling of "is this node still mirrored?".
     quint64 mirroredNodeCount() const { return quint64(mEntries.size()); }
-    /// Every document node this mirror holds an entry for, by name. Diagnostic
-    /// (the mirror suites print it when a count assertion fails).
-    QStringList mirroredNodeNames() const;
     /// The EFFECTIVE VISIBILITY this mirror last pushed for `node` (1 shown,
     /// 0 hidden, -1 never pushed / not mirrored). The engine has no read-back
     /// for it, and it is the contract the F6 case asserts: since ENGINE-3 the
@@ -454,8 +451,6 @@ public:
     quint64 clipStatePushes() const { return mClipStatePushes; }
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
     static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const iris::Mat4 &world);
-    /// The engine mesh already created for a document mesh, or 0.
-    jahshaka::engine::MeshId engineMesh(iris::Mesh *mesh) const;
 
     /// The whole selected SET (EDITOR_MULTISELECT_SPEC §2.3). The shell walk
     /// was always N-mesh — one shell per mesh under the highlighted node — so

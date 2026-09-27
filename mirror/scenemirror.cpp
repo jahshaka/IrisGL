@@ -1325,31 +1325,11 @@ void SceneMirror::syncSunAtmosphere()
     }
 }
 
-QStringList SceneMirror::mirroredNodeNames() const
-{
-    QStringList out;
-    for (auto it = mEntries.constBegin(); it != mEntries.constEnd(); ++it)
-        out << (it->docNode ? it->docNode->name : QStringLiteral("<released>"));
-    out.sort();
-    return out;
-}
-
 int SceneMirror::pushedVisibility(const iris::SceneNode *node) const
 {
     if (!node) return -1;
     auto it = mEntries.constFind(node);
     return it == mEntries.constEnd() ? -1 : it->visiblePushed;
-}
-
-MeshId SceneMirror::engineMesh(iris::Mesh *mesh) const
-{
-    // The cache is keyed by (mesh, rig id) — one document mesh can back two
-    // engine meshes when two characters resolve it to different rigs. This
-    // DIAGNOSTIC answer is the first match; callers that need the mesh a
-    // particular NODE is drawing read that node's entry instead.
-    for (auto it = mMeshes.constBegin(); it != mMeshes.constEnd(); ++it)
-        if (it.key().first == mesh) return it.value();
-    return 0;
 }
 
 void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
