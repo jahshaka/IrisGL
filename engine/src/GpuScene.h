@@ -248,6 +248,13 @@ struct GpuMeshLevel {
 };
 static_assert(sizeof(GpuMeshLevel) == 32, "the GPU level table's stride is a contract");
 
+/// ATOM-BLACK-FRAMES-1's EVENT TRACE (a measurement door, JAHSHAKA_ATOM_TRACE): one log
+/// line per event of the tables and the cut's buffers, stamped with the render system's
+/// frame counter (AtomDrawStatus::frame) — what the discriminator's frames are correlated
+/// against. Nothing is logged with the door shut.
+bool atomTraceOn();
+void atomTrace(const std::string &what);
+
 class GpuScene {
 public:
     /// Levels per mesh entry in the range table. The bake tops out well below
@@ -380,6 +387,8 @@ public:
     /// Uploads the cluster tables if the mesh set moved (update() calls it; a
     /// consumer binding the tables outside the frame's scan calls it first).
     void flushClusterTables();
+    /// The cluster tables wait for a rebuild (the next flush rebases every `dag`).
+    bool clusterDirty() const { return mClusterDirty; }
     Ogre::UavBufferPacked *clusterBuffer() const { return mClusterBuffer; }
     Ogre::UavBufferPacked *groupBuffer() const { return mGroupBuffer; }
     uint32_t clusterCount() const { return mClusterCount; }

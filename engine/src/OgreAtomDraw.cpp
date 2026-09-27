@@ -30,6 +30,7 @@
 #include <OgreMesh2.h>
 #include <OgreRoot.h>
 #include <OgreSubItem.h>
+#include <Vao/OgreVaoManager.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -151,6 +152,8 @@ public:
         src.instances = gs.instanceBuffer();
         src.levels = gs.levelBuffer();
         src.geomRows = gs.geomBuffer();
+        if (atomTraceOn() && gs.clusterDirty())
+            atomTrace("the cluster tables were dirtied between the id pass and the decode");
         gs.flushClusterTables();
         src.meshes = gs.meshBuffer();
         src.clusters = gs.clusterBuffer();
@@ -237,6 +240,14 @@ void OgreScene::setAtomOcclusionEnabled(bool on) {
     // A SHAPE CHANGE and nothing else: every view of this scene re-derives its chain
     // (the pyramid and the late pass come or go) on its next sync, as for the split.
     mAtomOcclusionEnabled = on;
+}
+
+void OgreScene::setAtomCutBudgetForTest(unsigned indices) {
+    for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
+        if (!v) continue;
+        v->atomCull().setCutBudgetForTest(indices);
+        v->atomCullLate().setCutBudgetForTest(indices);
+    }
 }
 
 void OgreScene::placeAtomQueue(const Node &n, bool atom) const {
@@ -543,6 +554,8 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     st.stereoViews = unsigned(mAtomStereoViews.size());
     st.passthroughViews = unsigned(mAtomPassthroughViews.size());
     st.viewPaintable = atomViewPaintable();
+    if (mRoot && mRoot->getRenderSystem() && mRoot->getRenderSystem()->getVaoManager())
+        st.frame = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
     // THE CUT'S COUNTERS, the first enabled view of this scene that has read any.
     for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
         AtomCutStats cs;

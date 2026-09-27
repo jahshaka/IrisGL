@@ -4529,6 +4529,9 @@ struct AtomDrawStatus {
     /// pyramid, found visible against this frame's, drawn by the late pass).
     bool     occlusion = false;
     unsigned occluded = 0, disoccluded = 0;
+    /// The render system's frame counter at this read — the stamp the engine's
+    /// JAHSHAKA_ATOM_TRACE log lines carry (ATOM-BLACK-FRAMES-1's coverage trace).
+    unsigned long long frame = 0ull;
 };
 
 /// The id pass's cut counters, one view's (AtomDrawStatus carries them).

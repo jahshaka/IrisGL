@@ -37,6 +37,7 @@
 #include <Vao/OgreVertexArrayObject.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -884,6 +885,14 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
         //                     EQUAL without writing it (applyStrongMacroblockRules).
         Ogre::HlmsPropertyVec props = ret.setProperties;
         setProperty(props, Ogre::IdString("atom_classified"), 1);
+        // THE DISCRIMINATOR (a TEST DOOR, ATOM-BLACK-FRAMES-1): a colour code per failed
+        // validity term instead of the discard (800.Atom_piece_ps.any's AtomDeclDecode);
+        // 2 paints the code chart. Read per pass: a test flips it between frames.
+        if (const char *d = std::getenv("JAHSHAKA_ATOM_DISCRIMINATE")) {
+            const int v = std::atoi(d);
+            if (v >= 1) setProperty(props, Ogre::IdString("atom_discriminate"), 1);
+            if (v >= 2) setProperty(props, Ogre::IdString("atom_discriminate_chart"), 1);
+        }
         PassCache passCache;
         passCache.passPso = ret.pso.pass;
         passCache.properties = props;
