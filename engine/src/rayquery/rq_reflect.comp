@@ -169,8 +169,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// moving slot reprojects through that slot's two poses (jah_reproject.glsl).
 	/// 0 = no id pass on this chain (a stereo chain, the split off): every
 	/// surface takes the camera path. yz = the id image's size in pixels.
-	/// w = 1 with the lane's hit-motion rules on (0 = JAH_R5_NO_MOTION, the
-	/// measuring door: the camera-only history of before).
+	/// w = 1 with the lane's hit-motion rules on, 2 when a mover also moved in the
+	/// last two frames (the departure rule's gate); 0 = JAH_R5_NO_MOTION, the
+	/// measuring door: the camera-only history of before.
 	vec4 motion;
 } p;
 
@@ -900,10 +901,12 @@ void main()
 	// A virtual texel that fails keeps the surface's history, which the restart
 	// below then judges.
 	bool hitMoving = false;
+	bool hitMover = false;   // a mover-flagged slot, moving or parked (the age's input)
 	bool virtualHeld = false;   // the history was found through the reflected image
 	vec3 prevHit = world + worldN * bias + L * hitT;   // an escape: a point beyond every hit
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
+		hitMover = p.motion.w > 0.5 && ( jahHitFlags( recSlot ) & kJahReprojectMoverFlags ) != 0u;
 		const MovedSlot hs = movedSlot( recSlot );
 		if( hs.moved && p.motion.w > 0.5 )
 		{
@@ -971,8 +974,15 @@ void main()
 	// lobe's tail inside the reflection, and the half-and-half edge, rarely miss
 	// twice running (gi.reflect_mover: the rays glossy floor's grain 2.18x -> 1.28x
 	// the still case's, one frame of trailing-edge trail more).
+	//
+	// THE AGE COUNTS HITS ON A MOVER, MOVING OR PARKED (hitMover): the mean of a
+	// parked mover's reflection must still know what it holds, or the moment the
+	// mover leaves its rays miss a mean that reads "no mover" and drain at the
+	// floor's 1/32 — the sphere's parked pose ghosted on the floor for sixty frames
+	// and more. And the departure rule runs only while movers are moving
+	// (motion.w = 2): at rest a lobe's tail that misses twice is noise.
 	const bool arrived = hitMoving;
-	const bool departed = p.motion.w > 0.5 && !hitMoving && wasMoverAge < kMoverMeanFrames &&
+	const bool departed = p.motion.w > 1.5 && !hitMover && wasMoverAge < kMoverMeanFrames &&
 						  wasMoverAge >= 1.0;
 	if( ( arrived || departed ) && !virtualHeld && prev.w > 0.0 && wasHitT > 0.0 )
 	{
@@ -1098,9 +1108,9 @@ void main()
 			blend = max( blend, drop );
 		hitMean = mix( wasHitT, hitT, blend );
 	}
-	// THE MOVER AGE rides the mean length's low bits: 0 when this ray hit a moving
-	// slot, one frame older otherwise (jahPackMeanLength saturates at 63).
-	const float hitMeanStored = jahPackMeanLength( hitMean, hitMoving ? 0.0 : wasMoverAge + 1.0 );
+	// THE MOVER AGE rides the mean length's low bits: 0 when this ray hit a mover
+	// (moving or parked), one frame older otherwise (saturating at 63).
+	const float hitMeanStored = jahPackMeanLength( hitMean, hitMover ? 0.0 : wasMoverAge + 1.0 );
 	const float seed = max( prev.w, warmHeld * kWarmupFrames );
 	const float count = min( seed + 1.0, 4096.0 );
 	if( record )

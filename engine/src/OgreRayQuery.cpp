@@ -717,6 +717,9 @@ private:
         struct MotionPending { unsigned frame = 0; bool live = false; };
         MotionPending   motionPending[3];
         float           motionGpuMs = -1.0f;
+        /// Frames since a MOVER slot (kGpuMover | kGpuDragMover) last moved in this
+        /// view's scene — the trace's departure rule is live only just after one did.
+        unsigned        framesSinceMoverMoved = 1000u;
         /// The descriptor ring. A set that is bound by a command buffer still in
         /// flight may not be rewritten, and every input of this pass can be
         /// recreated behind our back (a workspace rebuild replaces every texture
@@ -4928,7 +4931,25 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.motion[0] = idTex ? 1.0f : 0.0f;
     pp.motion[1] = idTex ? float(idTex->getWidth()) : 1.0f;
     pp.motion[2] = idTex ? float(idTex->getHeight()) : 1.0f;
-    pp.motion[3] = motionOn ? 1.0f : 0.0f;
+    // ...AND WHETHER A MOVER MOVED IN THE LAST TWO FRAMES (motion.w = 2): the trace
+    // restarts a mean of a mover's reflection whose rays stopped finding it only
+    // then — at rest (every mover parked) a glossy lobe's tail that misses twice is
+    // noise, not a departure, and no still pixel may move.
+    {
+        bool moverMoved = false;
+        const uint32_t vaoFrame = mRs->getVaoManager()->getFrameCount();
+        if (gpuScn.live() && gpuScn.movedThisFrame(vaoFrame)) {
+            const detail::GpuInstance *mirror = gpuScn.mirrorData();
+            for (uint32_t slot : gpuScn.movedSlots()) {
+                if (slot >= gpuScn.slotCount()) continue;
+                uint32_t f;
+                std::memcpy(&f, &mirror[slot].boundsMax[3], sizeof(f));
+                if (f & (detail::kGpuMover | detail::kGpuDragMover)) { moverMoved = true; break; }
+            }
+        }
+        rv.framesSinceMoverMoved = moverMoved ? 0u : std::min(rv.framesSinceMoverMoved + 1u, 1000u);
+    }
+    pp.motion[3] = !motionOn ? 0.0f : (rv.framesSinceMoverMoved <= 2u ? 2.0f : 1.0f);
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
