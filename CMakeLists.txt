@@ -188,7 +188,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
 set(SRCS
     document/assets/mesh.cpp
-    document/materials/defaultmaterial.cpp
     document/scenegraph/meshnode.cpp
     import/graphicshelper.cpp
     import/meshprewarm.cpp
@@ -217,7 +216,6 @@ set(SRCS
     document/scenegraph/particlesystemnode.cpp
     core/math/mathhelper.cpp
     document/materials/pbrmaterial.cpp
-    document/materials/postprocessmanager.cpp
     document/animation/propertyanim.cpp
     document/scenegraph/lightnode.cpp
     document/scenegraph/decalnode.cpp
@@ -239,7 +237,6 @@ set(SRCS
     core/logger.cpp
     document/assets/linemeshbuilder.cpp
     document/assets/shapehelper.cpp
-    document/materials/postfx/fxaapostprocess.cpp
 	document/materials/renderstates.cpp
     document/materials/rasterizerstate.cpp
     document/physics/avatarmovement.cpp
@@ -264,7 +261,6 @@ set (HEADERS
     document/scenegraph/cameranode.h
     document/scenegraph/cameralens.h
     document/scenegraph/meshnode.h
-    document/materials/defaultmaterial.h
     document/assets/vertexlayout.h
     document/assets/vertexbuffer.h
     core/viewport.h
@@ -288,12 +284,8 @@ set (HEADERS
     document/animation/animation.h
     import/materialhelper.h
     core/irisutils.h
-    core/ziphelper.h
     document/scenegraph/particlesystemnode.h
-    document/scenegraph/iviewsource.h
     document/materials/pbrmaterial.h
-    document/materials/postprocess.h
-    document/materials/postprocessmanager.h
     document/animation/propertyanim.h
     document/animation/animableproperty.h
     document/assets/skeleton.h
@@ -315,13 +307,10 @@ set (HEADERS
     core/geometry/plane.h
     core/geometry/frustum.h
     core/geometry/aabb.h
-    core/math/transform.h
     core/logger.h
-    core/performancetimer.h
     document/materials/renderstates.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h
-    document/materials/postfx/fxaapostprocess.h
     document/materials/rasterizerstate.h
     document/physics/avatarmovement.h
     document/physics/environment.h

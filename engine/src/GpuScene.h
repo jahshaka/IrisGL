@@ -44,6 +44,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -89,9 +90,10 @@ struct GpuInstance {
     /// instance's bottom-level acceleration structure should be built from,
     /// re-evaluated only when the instance's distance from the camera changes by
     /// 2x (the hysteresis is what keeps a BLAS refit rare — `OgreScene::
-    /// updateRayLevels`). ITS CONSUMER IS THE RAY TIER'S NEAR COPY (ATOM-FARBLAS-1,
-    /// `writeRayInstances`): the instance's near BLAS is built from this level,
-    /// its far copy from the mesh's coarsest.
+    /// updateRayLevels`, PATCHED in place: patchRayLevel). ITS CONSUMER IS THE RAY
+    /// TIER'S NEAR COPY (ATOM-FARBLAS-1; the instance job rq_tlas_write.comp reads it here):
+    /// the instance's near BLAS is built from this level, its far copy from the
+    /// mesh's coarsest.
     ///
     /// y = THE MATERIAL WORD (ATOM P4b): {pool : 16 | slot : 16} in the chain's ONE
     /// shared `VctMaterial` store — the bucket whose const buffer holds this item's
@@ -255,6 +257,77 @@ static_assert(sizeof(GpuMeshLevel) == 32, "the GPU level table's stride is a con
 bool atomTraceOn();
 void atomTrace(const std::string &what);
 
+/// THE CHANGE FEED (ATOM-CPU-WALKS-1). A consumer that keeps a fact DERIVED from
+/// the table — the ray tier's traced set and its BLAS references, the material
+/// words a scene's decode draws follow, the card candidates — registers here and is
+/// told about every slot whose entry changed, AT the write: a stage, a swap-remove's
+/// renumbering, a free, a ray-level patch. That is what lets each of them keep its
+/// fact current in O(changes) instead of re-deriving it with a walk over every slot
+/// every frame (W13: four such walks cost 30-45 ms a frame at 10k instances).
+///
+/// THE CONTRACT: `gpuSlotChanged(slot, now)` is called with the mirror's entry as it
+/// is NOW (null = the slot is cleared: freed, or the tail a swap-remove emptied);
+/// the consumer replaces whatever it derived from that slot. It is never told what
+/// the entry USED to say — a consumer that needs the old contribution keeps its own
+/// per-slot record (the entry's old mesh may already be another mesh's index). A
+/// consumer registered late is PRIMED with every live slot (`addObserver`), once.
+/// `gpuSceneReset` means the table was destroyed: every slot reads as cleared.
+class GpuSceneObserver {
+public:
+    virtual ~GpuSceneObserver() = default;
+    virtual void gpuSlotChanged(uint32_t slot, const GpuInstance *now) = 0;
+    virtual void gpuSceneReset() = 0;
+};
+
+/// THE MATERIAL WORDS A SCENE'S ITEMS WEAR, kept by the change feed (ATOM-CPU-WALKS-1):
+/// a count per word, and the word each slot contributed. The decode draws — the
+/// split's screen draws and the ray tier's hit draws — follow the SET of words, which
+/// used to be re-derived by a walk + sort over every slot whenever any slot was
+/// written (every mover frame). `set` is O(log W) and marks the set changed only when
+/// a word appears or disappears; `take` hands the sorted set over and clears the mark.
+/// `visits` counts the slots it was told about — the suite's "a still frame visits
+/// nothing" (atom.words_still).
+class WordCounts {
+public:
+    static constexpr uint32_t kNone = 0xFFFFFFFFu;
+    void set(uint32_t slot, uint32_t word) {
+        ++mVisits;
+        if (slot >= mOfSlot.size()) mOfSlot.resize(size_t(slot) + 1u, kNone);
+        uint32_t &was = mOfSlot[slot];
+        if (was == word) return;
+        if (was != kNone) {
+            auto it = mCount.find(was);
+            if (it != mCount.end() && --it->second == 0u) {
+                mCount.erase(it);
+                mChanged = true;
+            }
+        }
+        if (word != kNone && mCount[word]++ == 0u) mChanged = true;
+        was = word;
+    }
+    void reset() {
+        mOfSlot.clear();
+        if (!mCount.empty()) mChanged = true;
+        mCount.clear();
+    }
+    bool changed() const { return mChanged; }
+    /// The set, ascending (what `syncScreenDecodes` / `syncSceneDecodes` take).
+    std::vector<uint32_t> take() {
+        mChanged = false;
+        std::vector<uint32_t> out;
+        out.reserve(mCount.size());
+        for (const auto &kv : mCount) out.push_back(kv.first);
+        return out;
+    }
+    unsigned long long visits() const { return mVisits; }
+
+private:
+    std::vector<uint32_t> mOfSlot;
+    std::map<uint32_t, uint32_t> mCount;
+    bool mChanged = true;
+    unsigned long long mVisits = 0ull;
+};
+
 class GpuScene {
 public:
     /// Levels per mesh entry in the range table. The bake tops out well below
@@ -351,6 +424,21 @@ public:
     bool movedThisFrame(uint32_t frame) const { return mLastCloseFrame == frame; }
 
     const GpuInstance &entry(uint32_t slot) const { return mMirror[slot]; }
+
+    /// THE CHANGE FEED (GpuSceneObserver): registers and PRIMES `o` with every
+    /// live slot (one walk, at registration only); `removeObserver` before `o` dies.
+    void addObserver(GpuSceneObserver *o);
+    void removeObserver(GpuSceneObserver *o);
+
+    /// THE RAY LEVEL, PATCHED IN PLACE (ATOM-CPU-WALKS-1). `OgreScene::
+    /// updateRayLevels` runs AFTER the frame's scan, so a re-stage would reach the
+    /// device a frame late — and a second stage in the same frame would take this
+    /// frame's pose as the previous one. A patch writes `ids[3]` alone into the
+    /// mirror (prevWorld untouched), tells the observers, and queues the slot;
+    /// `flushPatched` copies the queued entries NOW (the ray tier reads the table
+    /// right after), and `update` takes any still queued.
+    void patchRayLevel(uint32_t slot, uint32_t level);
+    void flushPatched();
     /// The mirror as a raw pointer. The dirty scan reads it once per item, and
     /// in a Debug build (which is the daily driver) an accessor call per item is
     /// a measurable part of the walk.
@@ -401,6 +489,10 @@ public:
     /// The mesh an entry names, or a null pointer.
     const Ogre::MeshPtr &meshAt(uint32_t index) const;
     uint32_t meshEntryCount() const { return uint32_t(mMeshEntries.size()); }
+    /// Moves whenever an entry starts or stops naming a mesh (a new mesh acquired,
+    /// the last reference to one released): what a consumer that caches per-mesh
+    /// facts by entry index compares (the ray tier's TLAS job inputs).
+    unsigned long long meshSetSerial() const { return mMeshSetSerial; }
     /// Drops one reference; the entry is FREED (and the index recycled) with the
     /// last one.
     void releaseMesh(const Ogre::Mesh *mesh);
@@ -502,6 +594,8 @@ public:
     unsigned long long grows() const { return mGrows; }
     double lastCopyMs() const { return mLastCopyMs; }
     unsigned lastDirtyCount() const { return mLastDirtyCount; }
+    /// Slot changes the change feed has told its consumers, ever (priming excluded).
+    unsigned long long notifies() const { return mNotifies; }
     unsigned long long epoch() const { return mEpoch; }
 
 private:
@@ -566,9 +660,22 @@ private:
     std::vector<uint32_t> mFreeMeshSlots;
     std::unordered_map<const Ogre::Mesh *, uint32_t> mMeshIndex;
     uint32_t mMeshCapacity = 0;
+    unsigned long long mMeshSetSerial = 0ull;
     bool mMeshDirty = false;
     bool mLevelDirty = false;
 
+    /// THE CHANGE FEED's consumers, and the one place they are told.
+    std::vector<GpuSceneObserver *> mObservers;
+    void notify(uint32_t slot, const GpuInstance *now) {
+        ++mNotifies;
+        for (GpuSceneObserver *o : mObservers) o->gpuSlotChanged(slot, now);
+    }
+    unsigned long long mNotifies = 0ull;
+    /// Slots whose ray level was patched since their last copy (patchRayLevel).
+    std::vector<uint32_t> mPatched;
+    /// Copies `mCopySet` (sorted, unique, in range) to the device: one staging map,
+    /// one Destination per contiguous run.
+    void copySet();
     /// The slots this frame's copy must also close (prevWorld = world).
     std::vector<uint32_t> mMovedLastFrame;
     /// Slots freed since the last update: cleared in the mirror and owed a copy,

@@ -13,8 +13,6 @@
 #include <QtConcurrent>
 #include <algorithm>
 #include <cmath>
-#include "document/materials/defaultmaterial.h"
-#include "document/assets/texture2d.h"
 
 namespace iris {
 
@@ -256,26 +254,6 @@ QImage MaterialHelper::convertAiTextureToImage(const aiTexture *at)
     const aiTexel* texelData = reinterpret_cast<const aiTexel*>(at->pcData);
     QImage image(reinterpret_cast<const uchar*>(texelData), width, height, QImage::Format_RGBA8888);
     return image.copy();
-}
-
-DefaultMaterialPtr MaterialHelper::createMaterial(aiMaterial* aiMat, QString assetPath)
-{
-    auto mat = DefaultMaterial::create();
-    mat->setDiffuseColor(getAiMaterialColor(aiMat, AI_MATKEY_COLOR_DIFFUSE));
-    mat->setSpecularColor(getAiMaterialColor(aiMat, AI_MATKEY_COLOR_SPECULAR));
-    mat->setAmbientColor(getAiMaterialColor(aiMat, AI_MATKEY_COLOR_AMBIENT));
-    mat->setShininess(getAiMaterialFloat(aiMat, AI_MATKEY_SHININESS));
-
-    if (!assetPath.isEmpty()) {
-        QString diffuseTex = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE);
-        if (!diffuseTex.isEmpty()) {
-            // Contained: the model does not get to name a file outside its own
-            // folder (see containedTexturePath).
-            const QString path = containedTexturePath(diffuseTex, assetPath);
-            if (!path.isEmpty()) mat->setDiffuseTexture(Texture2D::load(path));
-        }
-    }
-    return mat;
 }
 
 void MaterialHelper::saveTextureAsync(const QImage &image, const QString &path)

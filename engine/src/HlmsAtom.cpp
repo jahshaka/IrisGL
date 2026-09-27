@@ -559,6 +559,35 @@ void HlmsAtom::forgetDecodeTwinOf(const Ogre::HlmsDatablock *pbs) {
     if (twin && twin->getNameStr()) destroyDatablock(twin->getName());
 }
 
+bool HlmsAtom::decodeTwinMoved(const Ogre::HlmsDatablock *pbs, uint32_t &word) {
+    auto it = mTwinOfPbs.find(pbs);
+    if (it == mTwinOfPbs.end()) return false;
+    word = materialWordOf(pbs);
+    auto tt = mTwins.find(it->second);
+    BucketKey key;
+    std::string err;
+    if (tt == mTwins.end() || !pbs->getCreator() || pbs->getCreator()->getType() != Ogre::HLMS_PBS ||
+        !bucketKeyOf(static_cast<const Ogre::HlmsPbsDatablock *>(pbs), key, err))
+        return true;
+    if (key == tt->second.key) return false;
+    // A SINGLETON TWIN MADE WHILE THE DATABLOCK'S TEXTURES BAKED (bucketKeyOf's
+    // pending key, which names this datablock) is a clone of it as it now is: the
+    // bake that followed re-hashed the datablock and gave it its real bucket, but the
+    // same textures and pool are the same draw. It moves to that bucket at the next
+    // drain (forgetDecodeTwinIfMoved); it is not STALE for this frame's decode — a
+    // same-slot texture swap reaches its hits on the first frame (gi.hit_shade (g)).
+    const uint64_t pendingKey = 0x8000000000000000ull | uint64_t(reinterpret_cast<uintptr_t>(pbs));
+    return !(tt->second.key.permutation == pendingKey && key.textures == tt->second.key.textures &&
+             key.pool == tt->second.key.pool);
+}
+
+void HlmsAtom::forgetMovedDecodeTwins() {
+    std::vector<const Ogre::HlmsDatablock *> served;
+    served.reserve(mTwinOfPbs.size());
+    for (const auto &kv : mTwinOfPbs) served.push_back(kv.first);
+    for (const Ogre::HlmsDatablock *db : served) forgetDecodeTwinIfMoved(db);
+}
+
 bool HlmsAtom::forgetDecodeTwinIfMoved(const Ogre::HlmsDatablock *pbs) {
     auto it = mTwinOfPbs.find(pbs);
     if (it == mTwinOfPbs.end()) return false;
