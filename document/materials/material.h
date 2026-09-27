@@ -111,12 +111,7 @@ public:
 
     Material() {
         acceptsLighting = true;
-        // Was left uninitialised. RenderList copies this straight onto the render
-        // item (renderlist.cpp:39), so a material that never called
-        // setRenderLayer() carried a garbage layer into the render list.
-        // The retired CustomMaterial masked it by always setting one;
-        // DefaultMaterial and any new subclass did not. Default to the layer it
-        // used for "opaque", so an unconfigured material sorts with ordinary
+        // A material that never calls setRenderLayer() sorts with ordinary
         // geometry.
         renderLayer = RenderLayer::Background;
     }

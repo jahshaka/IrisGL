@@ -168,6 +168,14 @@ void main()
 	@insertpiece( custom_ps_preExecution )
 	@insertpiece( DefaultBodyPS )
 	@insertpiece( custom_ps_posExecution )
+	@property( atom_discriminate && !hlms_prepass )
+		// THE DISCRIMINATOR'S PICTURE (800.Atom_piece_ps.any, AtomDeclDecode): the code
+		// (the chart's column band at value 2), and code 0 where the decode is valid.
+		@property( atom_discriminate_chart )
+			atomCode = min( uint( gl_FragCoord.x * 17.0 / float( textureSize( atomIdTex, 0 ).x ) ), 16u );
+		@end
+		outPs_colour0 = midf4_c( float4( atomCodeColour( atomCode ), 1.0 ) );
+	@end
 }
 @end ///atom_classify
 @else ///!hlms_shadowcaster

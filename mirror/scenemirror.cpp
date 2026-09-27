@@ -16,6 +16,7 @@
 #include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/scene.h"
 #include "irisgl/document/scenegraph/skybake.h"
+#include "irisgl/document/scenegraph/simulationclock.h"
 #include "irisgl/document/scenegraph/scenenode.h"
 #include "irisgl/document/scenegraph/meshnode.h"
 #include "irisgl/document/scenegraph/lightnode.h"
@@ -32,7 +33,6 @@
 #include "irisgl/document/assets/vertexbuffer.h"     // VertexBuffer / IndexBuffer (CPU copies)
 #include "irisgl/document/materials/material.h"
 #include "irisgl/document/materials/pbrmaterial.h"
-#include "irisgl/document/materials/defaultmaterial.h"
 #include "irisgl/core/properties/property.h"
 #include "irisgl/core/math/trs.h"
 #include "irisgl/document/assets/livetextures.h"
@@ -397,7 +397,6 @@ SceneMirror::SceneMirror(Scene *target) : mTarget(target)
     // the whole walk EVERY sync — ruinous for frame time and exact by
     // construction, which is what the differential suite runs under. A number
     // sets the amortised verifier's per-sync budget (0 turns it off).
-    mTrace = std::getenv("JAH_MIRROR_TRACE") != nullptr;
     if (const char *v = std::getenv("JAH_MIRROR_VERIFY")) {
         const QByteArray mode(v);
         if (mode == "full") mVerifyEverything = true;
@@ -775,11 +774,11 @@ int SceneMirror::sync()
             mLastStaticDemotions = iris::graph::staticDemotions();
         }
     }
-    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2). Zero on
-    // the first sync, and capped at a tenth of a second: a stall must not let a
-    // tracking camera jump its whole remaining focus travel in one frame.
-    if (!mFocusClock.isValid()) { mFocusClock.start(); mFocusDt = 0.0f; }
-    else mFocusDt = std::min(0.1f, float(mFocusClock.restart()) * 0.001f);
+    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2): the
+    // simulated seconds the host's frame bought on the document's
+    // SimulationClock (advanced before the sync) — whole 1/60 s steps, capped
+    // by the clock's catch-up bound, so a stall cannot jump the focus.
+    mFocusDt = mSource ? float(mSource->simulationClock().frameSeconds()) : 0.0f;
     // (The per-walk `mMaterialSync.clear()` that stood here is GONE — the memo
     // crosses frames now, validated by a fingerprint; see MaterialSync in the
     // header. It is PRUNED at the end of the walk instead, so it never holds a
@@ -926,13 +925,14 @@ int SceneMirror::sync()
     }
     // THE SHADER CLOCK (HLMS_ADOPTION P5), and only when something reads it.
     // The host owns the number: mShaderTimeOverride is what a deterministic
-    // test or a scrubbed timeline sets; otherwise it is wall-clock seconds
-    // since the first frame that needed one.
+    // test or a scrubbed timeline sets; otherwise it ACCUMULATES the document
+    // SimulationClock's frameSeconds() — the grid steps each host frame bought
+    // (no wall clock, trap 7; not time(), which resets at play edges).
     if (mAnyCustomPiece) {
         if (mShaderTimeOverride >= 0.0f) mTarget->setShaderTime(mShaderTimeOverride);
         else {
-            if (!mShaderClock.isValid()) mShaderClock.start();
-            mTarget->setShaderTime(float(mShaderClock.nsecsElapsed()) * 1e-9f);
+            if (mSource) mShaderSeconds += mSource->simulationClock().frameSeconds();
+            mTarget->setShaderTime(float(mShaderSeconds));
         }
     }
     // SHARING BEFORE CLIPS (AVATAR_RIG_PERF_SPEC §3.4): a follower carries no
@@ -1159,14 +1159,7 @@ void SceneMirror::consumeDirty()
         if (!n) continue;               // tombstoned: the node left the document
         // CLEARED BEFORE THE VISIT, so a write the visit itself makes (the
         // mirror's own soft-mobility promotion) is not lost.
-        const quint16 mask = n->_takeDirtyMask();
-        // JAH_MIRROR_TRACE=1 names what the document reported, per sync. The
-        // one question this design makes hard to answer by reading code — "why
-        // is anything on the list at all on a still frame?" — and the answer
-        // found the first defect it looked for (the viewport re-asserts the
-        // selection every frame, which was marking a node per frame forever).
-        if (mTrace)
-            qWarning("mirror.dirty: '%s' mask=0x%04x", qUtf8Printable(n->name), unsigned(mask));
+        (void)n->_takeDirtyMask();
         visitDirty(n);
     }
     mConsumingDirty = false;
@@ -1325,31 +1318,11 @@ void SceneMirror::syncSunAtmosphere()
     }
 }
 
-QStringList SceneMirror::mirroredNodeNames() const
-{
-    QStringList out;
-    for (auto it = mEntries.constBegin(); it != mEntries.constEnd(); ++it)
-        out << (it->docNode ? it->docNode->name : QStringLiteral("<released>"));
-    out.sort();
-    return out;
-}
-
 int SceneMirror::pushedVisibility(const iris::SceneNode *node) const
 {
     if (!node) return -1;
     auto it = mEntries.constFind(node);
     return it == mEntries.constEnd() ? -1 : it->visiblePushed;
-}
-
-MeshId SceneMirror::engineMesh(iris::Mesh *mesh) const
-{
-    // The cache is keyed by (mesh, rig id) — one document mesh can back two
-    // engine meshes when two characters resolve it to different rigs. This
-    // DIAGNOSTIC answer is the first match; callers that need the mesh a
-    // particular NODE is drawing read that node's entry instead.
-    for (auto it = mMeshes.constBegin(); it != mMeshes.constEnd(); ++it)
-        if (it.key().first == mesh) return it.value();
-    return 0;
 }
 
 void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
@@ -4243,9 +4216,8 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
     PbrParams p;
     if (!material || !toPbrParams(material, p)) {
         // A material class the mirror cannot translate gets one shared neutral
-        // material. Since HLMS_ADOPTION P4b the document holds PbrMaterials and
-        // the legacy DefaultMaterial only, so this is a guard rather than a
-        // path anything shipped takes.
+        // material. The document holds PbrMaterials only, so this is a guard
+        // (and the no-material node's surface) rather than a translation.
         if (!mDefaultMaterial) {
             // THE SAME SURFACE THE DOCUMENT INVENTS (DRAG-1, RENDER_AUDIT I-1),
             // from the one definition in pbrmaterial.h. It used to be its own
@@ -4582,11 +4554,6 @@ quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMate
         }
         return h.h;
     }
-    if (auto *def = dynamic_cast<iris::DefaultMaterial *>(material)) {
-        h << quint32(2) << def->getDiffuseColor()
-          << def->getShininess() << def->getTextureScale();
-        return h.h;
-    }
     h << quint32(0);
     return h.h;
 }
@@ -4648,7 +4615,7 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     ++mMaterialBuilds;
     ms.hasPbr = toPbrParams(material, ms.pbr);
 
-    // Document slot name -> engine slot. PbrMaterial and DefaultMaterial naming.
+    // Document slot name -> engine slot.
     // There is no occlusion entry because there is no occlusion ROW any more
     // (HLMS_ADOPTION P2): the engine has no ambient-occlusion slot, so the
     // document stopped pretending to have one. An old file's "u_occlusionMap"
@@ -4662,9 +4629,7 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
                   bool srgb = false; };
     static const Slot kSlots[] = {
         { QLatin1StringView("u_baseColorMap"),  PbrTextureSlot::Albedo,    true  },
-        { QLatin1StringView("u_diffuseTexture"), PbrTextureSlot::Albedo,   true  },
         { QLatin1StringView("u_normalMap"),     PbrTextureSlot::Normal,    false },
-        { QLatin1StringView("u_normalTexture"), PbrTextureSlot::Normal,    false },
         { QLatin1StringView("u_metallicMap"),   PbrTextureSlot::Metalness, false },
         { QLatin1StringView("u_roughnessMap"),  PbrTextureSlot::Roughness, false },
         { QLatin1StringView("u_emissiveMap"),   PbrTextureSlot::Emissive,  true  },
@@ -4886,18 +4851,6 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
     // src/io/builtinmaterials.cpp, where it runs once and produces a real
     // PbrMaterial instead of running per material per frame and producing an
     // approximation the panel could not show.)
-    if (auto *def = dynamic_cast<iris::DefaultMaterial *>(material)) {
-        // Legacy Blinn-Phong material: diffuse -> albedo, shininess -> roughness.
-        const iris::LinearColor c = iris::linearOf(def->getDiffuseColor());
-        out.albedo    = Colour(c.r, c.g, c.b, 1.0f);
-        out.metalness = 0.0f;
-        const float shin = std::max(0.0f, std::min(def->getShininess(), 128.0f));
-        out.roughness = 1.0f - std::sqrt(shin / 128.0f) * 0.9f;
-        out.emissive  = Colour(0, 0, 0);
-        // The legacy material has one uniform scale and no offset/rotation.
-        out.uvScale[0] = out.uvScale[1] = def->getTextureScale();
-        return true;
-    }
     return false;
 }
 
@@ -7125,7 +7078,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         fog.heightLevel = mSource->fogHeightLevel;
         fog.breakMinBrightness = mSource->fogBreakMinBrightness;
         fog.breakFalloff = mSource->fogBreakFalloff;
-        fog.atmosphereColour = mSource->fogAtmosphere;
         const bool changed =
             !mFogPushed || mLastFog.enabled != fog.enabled ||
             mLastFog.colour.r != fog.colour.r || mLastFog.colour.g != fog.colour.g ||
@@ -7133,7 +7085,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mLastFog.heightDensity != fog.heightDensity ||
             mLastFog.heightFalloff != fog.heightFalloff ||
             mLastFog.heightLevel != fog.heightLevel ||
-            mLastFog.atmosphereColour != fog.atmosphereColour ||
             mLastFog.breakMinBrightness != fog.breakMinBrightness ||
             mLastFog.breakFalloff != fog.breakFalloff;
         if (changed) { mTarget->setFog(fog); mLastFog = fog; mFogPushed = true; }

@@ -32,9 +32,6 @@ namespace iris
 class MaterialHelper
 {
 public:
-    static DefaultMaterialPtr createMaterial(aiMaterial* aiMat, QString assetPath);
-
-
     /// `assetPath` resolves the file's RELATIVE texture references (the
     /// source's directory). `writeDir` is where extraction OUTPUT lands —
     /// embedded texture files and the split metallic/roughness maps; empty

@@ -20,7 +20,6 @@
 // in one commit. Includes iris (Qt) and jahshaka/engine. Never Ogre.
 #include "core/math/mat4.h"
 #include <QColor>
-#include <QElapsedTimer>
 #include <QHash>
 #include <QList>
 #include <QImage>
@@ -212,9 +211,6 @@ public:
     /// the walk reached every node every frame; since the dirty set it is the
     /// only honest spelling of "is this node still mirrored?".
     quint64 mirroredNodeCount() const { return quint64(mEntries.size()); }
-    /// Every document node this mirror holds an entry for, by name. Diagnostic
-    /// (the mirror suites print it when a count assertion fails).
-    QStringList mirroredNodeNames() const;
     /// The EFFECTIVE VISIBILITY this mirror last pushed for `node` (1 shown,
     /// 0 hidden, -1 never pushed / not mirrored). The engine has no read-back
     /// for it, and it is the contract the F6 case asserts: since ENGINE-3 the
@@ -454,8 +450,6 @@ public:
     quint64 clipStatePushes() const { return mClipStatePushes; }
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
     static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const iris::Mat4 &world);
-    /// The engine mesh already created for a document mesh, or 0.
-    jahshaka::engine::MeshId engineMesh(iris::Mesh *mesh) const;
 
     /// The whole selected SET (EDITOR_MULTISELECT_SPEC §2.3). The shell walk
     /// was always N-mesh — one shell per mesh under the highlighted node — so
@@ -1394,20 +1388,21 @@ private:
     /// True once any mirrored material has carried a generated piece: the gate
     /// on pushing the shader clock at all, so a scene without one is untouched.
     bool mAnyCustomPiece = false;
-    /// The host's clock for generated pieces. Negative = use the wall clock
-    /// below; a test or a timeline sets an exact value through
+    /// The host's clock for generated pieces. Negative = the FRAME-COUNTED
+    /// clock below; a test or a timeline sets an exact value through
     /// setShaderTimeOverride so a frame is reproducible.
     float mShaderTimeOverride = -1.0f;
-    QElapsedTimer mShaderClock;
-    /// FOCUS SMOOTHING's clock and the seconds it produced for THIS sync
-    /// (CAMERA_LENS_SPEC §3 P2). One clock for the whole walk, not one per
-    /// camera, so every tracking camera eases by the same dt in a frame. Zero
-    /// on the first sync (nothing to ease from) and clamped, so a stalled
-    /// editor does not teleport focus on the frame it wakes up. The smoothing
-    /// arithmetic itself is a pure function of this dt
-    /// (iris::lens::smoothTowards) precisely so it can be tested without one.
-    QElapsedTimer mFocusClock;
-    float         mFocusDt = 0.0f;
+    /// The shader clock: the document's SimulationClock::frameSeconds()
+    /// ACCUMULATED since the first sync that needed it — whole 1/60 s steps,
+    /// as many as the host's frame bought, and never reset by a play edge
+    /// (SimulationClock::time() is). No wall clock (trap 7).
+    double mShaderSeconds = 0.0;
+    /// FOCUS SMOOTHING's dt for THIS sync (CAMERA_LENS_SPEC §3 P2): the
+    /// document's SimulationClock::frameSeconds() — the steps the host's frame
+    /// bought, 0 on a frame that bought none. One value for the whole walk, so
+    /// every tracking camera eases by the same dt. The smoothing arithmetic is
+    /// a pure function of it (iris::lens::smoothTowards).
+    float mFocusDt = 0.0f;
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.
     /// One character's union rig, derived and cached (AVATAR_RIG_PERF_SPEC
@@ -1982,8 +1977,6 @@ private:
     /// query flags of every node sharing the material on the same frame).
     bool mConsumingDirty = false;
     bool mVerifyEverything = false;
-    /// JAH_MIRROR_TRACE=1: name every node the document reported, per sync.
-    bool mTrace = false;
     /// MEASURED (8,404-node lattice, Debug + ASan, 2026-09-13): the verifier is
     /// the DOMINANT term in a still frame's mirror once the walk is gone —
     /// host.mirror 0.558 ms median, of which mirror.verify is 0.462. Most of

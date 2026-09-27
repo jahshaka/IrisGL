@@ -30,6 +30,7 @@
 #include <OgreMesh2.h>
 #include <OgreRoot.h>
 #include <OgreSubItem.h>
+#include <Vao/OgreVaoManager.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -151,6 +152,8 @@ public:
         src.instances = gs.instanceBuffer();
         src.levels = gs.levelBuffer();
         src.geomRows = gs.geomBuffer();
+        if (atomTraceOn() && gs.clusterDirty())
+            atomTrace("the cluster tables were dirtied between the id pass and the decode");
         gs.flushClusterTables();
         src.meshes = gs.meshBuffer();
         src.clusters = gs.clusterBuffer();
@@ -239,6 +242,14 @@ void OgreScene::setAtomOcclusionEnabled(bool on) {
     mAtomOcclusionEnabled = on;
 }
 
+void OgreScene::setAtomCutBudgetForTest(unsigned indices) {
+    for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
+        if (!v) continue;
+        v->atomCull().setCutBudgetForTest(indices);
+        v->atomCullLate().setCutBudgetForTest(indices);
+    }
+}
+
 void OgreScene::placeAtomQueue(const Node &n, bool atom) const {
     Ogre::Item *item = n.item;
     if (!item) return;
@@ -263,92 +274,61 @@ void OgreScene::updateAtomDraw() {
 void OgreScene::updateAtomSplit() {
     HlmsAtom *atom = registeredAtom();
     if (!atom || !mGpuScene.live()) return;
-    // THE WITNESS: a material edited IN PLACE (a blend, an alpha test, a texture)
-    // may leave or change its bucket without any seam marking a slot: one item per
-    // atom word says so, and every item wearing the word re-composes (its route and
-    // its queue follow) — the ray tier's own rule for its twins.
-    bool moved = false;
-    for (AtomWitness &w : mAtomWitness) {
-        if (w.slot >= mItemNodes.size()) continue;
-        const Node *nd = mItemNodes[w.slot];
-        if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
-        const Ogre::SubItem *sub = nd->item->getSubItem(0);
-        const Ogre::HlmsDatablock *db = sub->getDatablock();
-        const Ogre::uint32 h = sub->getHlmsHash();
-        const uint64_t tk = HlmsAtom::textureSetKeyOf(db);
-        if (db == w.db && (h != w.hash || tk != w.texKey)) {
-            // Its twin only if its bucket moved; its items ALWAYS re-compose (a
-            // blend or cull edit keeps the key but moves the route).
-            atom->forgetDecodeTwinIfMoved(db);
-            for (Node *n : mItemNodes)
-                if (n && n->item && n->item->getNumSubItems() &&
-                    n->item->getSubItem(0)->getDatablock() == db)
-                    markGpuSlotDirty(*n);
-            moved = true;
-        }
-        w.db = db;
-        w.hash = h;
-        w.texKey = tk;
-    }
-    // THE ITEMS WAITING ON THEIR TEXTURES: re-composed (and so re-routed) once
-    // their datablock's descriptor sets are baked. A walk only while something waits.
-    if (mAtomPendingSeen) {
-        mAtomPendingSeen = false;
-        for (Node *n : mItemNodes) {
-            if (!n || !n->item || !n->item->getNumSubItems()) continue;
-            const Ogre::HlmsDatablock *db = n->item->getSubItem(0)->getDatablock();
-            if (HlmsAtom::isBucketPending(db)) {
-                mAtomPendingSeen = true;
-                continue;
-            }
-            uint32_t flags = 0u;
-            if (n->itemSlot < mGpuScene.slotCount())
-                std::memcpy(&flags, &mGpuScene.entry(uint32_t(n->itemSlot)).boundsMax[3], sizeof(flags));
-            if (!(flags & kGpuAtom) && n->item->getRenderQueueGroup() == kOpaqueItemQueue) {
-                markGpuSlotDirty(*n);
-                moved = true;
-            }
-        }
-    }
-    if (moved) ensureGpuScene(/*graphIsCurrent=*/true);
     // THE SCREEN DECODE'S DRAWS: one per bucket of the words the atom items wear,
-    // re-derived when the table's writes or the twins moved.
-    if (mGpuScene.writes() == mAtomSyncWrites && atom->twinEpoch() == mAtomSyncEpoch) return;
-    mAtomSyncWrites = mGpuScene.writes();
-    std::vector<uint32_t> words;
-    std::vector<AtomWitness> witness;
-    const GpuInstance *m = mGpuScene.mirrorData();
-    for (uint32_t i = 0, e = mGpuScene.slotCount(); i < e; ++i) {
-        uint32_t flags = 0u;
-        std::memcpy(&flags, &m[i].boundsMax[3], sizeof(flags));
-        if (!(flags & kGpuAtom) || m[i].raster[0] == HlmsAtom::kNoMaterialWord) continue;
-        words.push_back(m[i].raster[0]);
-    }
-    std::sort(words.begin(), words.end());
-    words.erase(std::unique(words.begin(), words.end()), words.end());
+    // re-derived when that SET moved (the change feed, AtomWordFeed) or a twin died.
+    // An in-place material edit is not polled for here any more: the PBS change log
+    // (ScenePbs::HashNote) hears it at Ogre's own re-hash, and the frame's drain
+    // (OgreEngine::drainPbsChanges) forgets the twin whose bucket moved and
+    // re-composes the Items it re-hashed — before this scene's scan, so the route,
+    // the queue and the word follow in the same frame. A still frame does nothing.
+    if (!mAtomFeed.words.changed() && atom->twinEpoch() == mAtomSyncEpoch) return;
+    std::vector<uint32_t> words = mAtomFeed.words.take();
     if (words == mAtomWords && atom->twinEpoch() == mAtomSyncEpoch) return;
-    mAtomWords = words;
-    atom->syncScreenDecodes(mSceneMgr, words);
+    mAtomWords.swap(words);
+    atom->syncScreenDecodes(mSceneMgr, mAtomWords);
     mAtomSyncEpoch = atom->twinEpoch();
-    for (uint32_t i = 0, e = mGpuScene.slotCount(); i < e && i < mItemNodes.size(); ++i) {
-        uint32_t flags = 0u;
-        std::memcpy(&flags, &m[i].boundsMax[3], sizeof(flags));
-        if (!(flags & kGpuAtom)) continue;
-        const uint32_t word = m[i].raster[0];
-        if (std::find_if(witness.begin(), witness.end(),
-                         [word](const AtomWitness &w) { return w.word == word; }) != witness.end())
-            continue;
-        const Node *nd = mItemNodes[i];
-        if (!nd || !nd->item || !nd->item->getNumSubItems()) continue;
-        AtomWitness w;
-        w.slot = i;
-        w.word = word;
-        w.db = nd->item->getSubItem(0)->getDatablock();
-        w.hash = nd->item->getSubItem(0)->getHlmsHash();
-        w.texKey = HlmsAtom::textureSetKeyOf(w.db);
-        witness.push_back(w);
+}
+
+/// THE PBS CHANGE LOG'S DRAIN (EnginePrivate.h's declaration says what and why).
+/// Distinct datablocks first (a flush notes every renderable of one datablock), then
+/// the Items, each told to the scene that indexes it.
+void OgreEngine::drainPbsChanges() {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
+    auto *pbs = hm ? dynamic_cast<ScenePbs *>(hm->getHlms(Ogre::HLMS_PBS)) : nullptr;
+    if (!pbs) return;
+    const std::vector<ScenePbs::HashNote> &notes = pbs->hashNotes();
+    if (pbs->hashNotesOverflowed()) {
+        // THE LOG OVERFLOWED (kMaxHashNotes): every twin whose bucket moved leaves,
+        // and every item of every scene is re-composed — once.
+        if (HlmsAtom *atom = registeredAtom()) atom->forgetMovedDecodeTwins();
+        for (auto &s : mScenes)
+            if (s) s->markAllItemsRehashed();
+        ++mPbsDrainOverflows;
+        pbs->clearHashNotes();
+        return;
     }
-    mAtomWitness.swap(witness);
+    std::vector<const Ogre::HlmsDatablock *> &dbs = mPbsDrainScratch;
+    dbs.clear();
+    for (const ScenePbs::HashNote &n : notes)
+        if (n.db) dbs.push_back(n.db);
+    pbs->forEachDirtyDatablock([&dbs](const Ogre::HlmsDatablock *db) { dbs.push_back(db); });
+    mPbsDrainNotes += notes.size();
+    if (dbs.empty() && notes.empty()) return;
+    std::sort(dbs.begin(), dbs.end());
+    dbs.erase(std::unique(dbs.begin(), dbs.end()), dbs.end());
+    // A TWIN LEAVES ONLY WHEN ITS BUCKET MOVED (forgetDecodeTwinIfMoved; a lookup
+    // and nothing else for a datablock that serves no twin). The epoch it moves is
+    // what makes every scene's decode draws re-sync.
+    if (HlmsAtom *atom = registeredAtom())
+        for (const Ogre::HlmsDatablock *db : dbs) atom->forgetDecodeTwinIfMoved(db);
+    mPbsDrainDatablocks += dbs.size();
+    for (const ScenePbs::HashNote &n : notes) {
+        if (!n.owner) continue;
+        for (auto &s : mScenes)
+            if (s) s->markItemRehashed(n.owner);
+    }
+    pbs->clearHashNotes();
 }
 
 OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) const {
@@ -379,11 +359,10 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     // a decode twin serves a bucket, not a renderable, so the mirror stays on PBS.
     if (mPlanar && mPlanar->hasPlanarReflections(item->getSubItem(0))) return AtomRoute::Planar;
     // ITS TEXTURES STILL BAKING: no bucket yet (HlmsAtom::isBucketPending) — PBS
-    // draws it for those frames; updateAtomDraw re-routes it when they land.
-    if (HlmsAtom::isBucketPending(db)) {
-        mAtomPendingSeen = true;
-        return AtomRoute::Pending;
-    }
+    // draws it for those frames. The bake re-hashes every renderable wearing the
+    // datablock (updateDescriptorSets -> flushRenderables), which the PBS change log
+    // notes: the next drain re-composes the item and re-routes it.
+    if (HlmsAtom::isBucketPending(db)) return AtomRoute::Pending;
     if (flags & kGpuAlphaTested) return AtomRoute::AlphaTested;
     if (flags & kGpuSkinned) return AtomRoute::Skinned;
     // THE ROW IS SUBMESH 0's OF A TRIANGLE LIST: every mesh this engine builds has
@@ -499,6 +478,11 @@ void OgreScene::syncAtomViewTable() {
 AtomDrawStatus OgreScene::atomDrawStatus() {
     AtomDrawStatus st;
     st.live = mGpuScene.live();
+    st.wordSlotVisits = mAtomFeed.words.visits();
+    if (mEngine) {
+        st.pbsNotes = mEngine->mPbsDrainNotes;
+        st.pbsDatablocks = mEngine->mPbsDrainDatablocks;
+    }
     Ogre::HlmsManager *hm = mRoot ? mRoot->getHlmsManager() : nullptr;
     auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
     std::unordered_set<uint32_t> words;
@@ -543,6 +527,8 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     st.stereoViews = unsigned(mAtomStereoViews.size());
     st.passthroughViews = unsigned(mAtomPassthroughViews.size());
     st.viewPaintable = atomViewPaintable();
+    if (mRoot && mRoot->getRenderSystem() && mRoot->getRenderSystem()->getVaoManager())
+        st.frame = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
     // THE CUT'S COUNTERS, the first enabled view of this scene that has read any.
     for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
         AtomCutStats cs;

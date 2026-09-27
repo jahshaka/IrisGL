@@ -156,8 +156,6 @@ struct PickingResult
 {
     iris::SceneNodePtr hitNode;
     iris::Vec3 hitPoint;
-
-    float distanceFromStartSqrd = 0.0f;
     /// The TriMesh triangle that was hit. Reported since both ray walks became
     /// one implementation (audit F13): this half of the pair used to drop it
     /// while the other half depended on it.
@@ -179,8 +177,7 @@ enum class SkyType : int
 /// INSTANT RADIOSITY IS GONE (PHOTON_SPEC §7 E2 (4), 2026-09-15) and the
 /// ordinals moved with it. Safe by construction: `scenewriter.cpp` writes this
 /// as a stable STRING and says at the table that "the enum ints must stay free
-/// to be reordered"; a document that still says `instant_radiosity` reads back
-/// as VCT, which is what its tier resolves to now.
+/// to be reordered"; an unknown spelling reads as OFF.
 enum class GiMode : int
 {
 	OFF = 0,
@@ -234,6 +231,12 @@ struct SkyRealistic
 	/// the SKY's own defaults were fitted to (SKY-TUNE-1), so the two describe
 	/// the same air. Below 1 the aerosol term would amplify rather than absorb;
 	/// it is held there. OgreSky.cpp::atmosphereSunTint carries the model.
+	///
+	/// ONE AIR, TWO EFFECTS (FOG-ATMO-1): the same turbidity is the AERIAL
+	/// PERSPECTIVE every lit surface gets under this sky — the air's sea-level
+	/// extinction along the view ray (OgreSky.cpp::airFogDensity; 1.38e-4 per
+	/// metre at 2.5, 76 % of a surface left at 2 km), always on, fogging
+	/// towards the sky's own colour. No sky pixel reads it.
 	float sunHaze = 2.5f;
 
 	// THE SKY HAS NO SUN OF ITS OWN (SKY_LIGHT_SPEC.md §3, owner decision D15).
@@ -432,15 +435,15 @@ public:
 
     // Fog properties. The model is EXPONENTIAL (jahshaka::engine::FogDesc):
     // transmittance = 2^(-distance * fogDensity), times a second, height-varying
-    // layer of the same colour.
+    // layer of the same colour. Under the REALISTIC sky that colour is the sky's
+    // own scattering and the air's aerial perspective is always on beneath the
+    // authored density (FOG-ATMO-1); fogColor is the other skies' fog colour.
     //
     // THE LINEAR PAIR IS GONE (`fogStart`/`fogEnd` — render audit I-6, CRUD
     // law): exponential fog begins at the camera and never stops, so a start
-    // and an end distance described nothing the renderer could draw. Their last
-    // job — deriving a density for a scene written before `fogDensity` existed
-    // — belongs to the reader, which now reads those two keys into locals,
-    // calls fogDensityFromLinear and forgets them. Nothing writes them again.
-    QColor fogColor;
+    // and an end distance described nothing the renderer could draw. Nothing
+    // reads or writes them (forward-building).
+    QColor fogColor;       // the fog colour under the non-realistic skies
     bool fogEnabled;
     float fogDensity;          // per world unit, exp2
     float fogHeightDensity;    // 0 = no height layer
@@ -448,13 +451,10 @@ public:
     float fogHeightLevel;      // world Y at which fogHeightDensity applies
     float fogBreakMinBrightness;   // luminance where bright pixels start resisting the fog
     float fogBreakFalloff;         // how fast they do; 0 = pure exponential fog
-    /// AERIAL PERSPECTIVE (SKY-GPU): the distance fog takes its colour from the
-    /// ANALYTIC sky's own scattering for the direction each surface is seen
-    /// from, instead of fogColor — so a far hill fades into the sky behind it
-    /// and follows the sun. Needs the realistic sky (it IS that sky's model);
-    /// with any other sky bound the engine keeps the authored colour. Off by
-    /// default: fogColor is a colour a person picked.
-    bool fogAtmosphere;
+    // (THE `fogAtmosphere` SWITCH IS GONE — FOG-ATMO-1. Under the realistic
+    // sky both fog layers ALWAYS take the sky's own scattering colour and the
+    // air's aerial perspective is always on; fogColor is used only under the
+    // other skies. There was nothing left to choose.)
 
     /// The exponential density an old LINEAR start/end pair maps to: the two
     /// curves are matched where the eye reads fog, at the HALF-fogged distance.
@@ -572,9 +572,7 @@ public:
     ///       go first.
     ///   N = spend more per frame for less latency; the cost is linear.
     ///
-    /// Documents written before the fix wave carry `giAutoRefresh` instead and
-    /// map onto it (false -> 0, true -> 1); readers that still speak the old
-    /// spelling (world.settings' `autoRefresh`) report `budget > 0`.
+    /// world.settings' `autoRefresh` reports `budget > 0`.
     int giUpdateBudget = 1;
     iris::Vec3 giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
     // Hybrid probe-capture knobs (REFLECTIONS_ADOPTION_SPEC.md P3). Integrator
@@ -848,14 +846,8 @@ public:
     /// number for them. The march used to carry a second cutoff of its own that
     /// no document could write.
     ///
-    /// THE NAME SAYS BOTH HALVES (lane SMALL-ITEMS D, ledger §453 finding 4).
-    /// It was `rayReflectRoughness` while a ray was the only thing it gated;
-    /// once the march took the same dial that name described half of what the
-    /// field does, and the World row had been spelled `reflectionRoughnessCutoff`
-    /// all along. There is ONE name now, the row's, everywhere — document, desc,
-    /// mirror, file key and verb. A document written before the rename carries
-    /// the old key and still opens: the reader accepts both spellings and writes
-    /// the new one (src/io/sceneformat.h, readReflectionRoughnessCutoff).
+    /// ONE NAME, the World row's, everywhere — document, desc, mirror, file key
+    /// and verb (src/io/sceneformat.h, readReflectionRoughnessCutoff).
     ///
     /// PERCENT AND NOT A FLOAT, deliberately: every World row in this document
     /// is an int (worldmodes::Row), the tier table's columns are ints, and a

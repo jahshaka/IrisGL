@@ -41,6 +41,26 @@
 // ordinary local variable.
 
 @piece( AtomDeclDecode )
+	// THE DISCRIMINATOR (ATOM-BLACK-FRAMES-1, a TEST DOOR: the pass property
+	// atom_discriminate, JAHSHAKA_ATOM_DISCRIMINATE in HlmsAtom::preparePassHash): the
+	// FIRST validity term a screen pixel failed, 0 = none, painted as a colour code in
+	// place of the discard. atom_discriminate_chart (the variable's value 2) paints the
+	// code chart (the code of the pixel's column band) over every decoded pixel, which
+	// is how a reader learns what each code looks like after the post chain.
+	@property( atom_discriminate )
+		#define ATOM_NOTE( k ) if( atomCode == 0u && !atomOk ) atomCode = k;
+		float3 atomCodeColour( uint code )
+		{
+			// base 3 of code + 1, one digit a channel: never black (the clear).
+			uint v = code + 1u;
+			float3 lv = float3( float( v % 3u ), float( ( v / 3u ) % 3u ), float( ( v / 9u ) % 3u ) );
+			return float3( lv.x == 0.0 ? 0.0 : ( lv.x == 1.0 ? 0.3 : 16.0 ),
+						   lv.y == 0.0 ? 0.0 : ( lv.y == 1.0 ? 0.3 : 16.0 ),
+						   lv.z == 0.0 ? 0.0 : ( lv.z == 1.0 ? 0.3 : 16.0 ) );
+		}
+	@else
+		#define ATOM_NOTE( k )
+	@end
 	// Upstream's matrix unpackers are inserted by the vertex header only. They are
 	// plain macros; inserting the same two pieces here keeps the unpacking upstream's.
 	@insertpiece( Common_Matrix_DeclLoadOgreFloat4x3 )
@@ -387,6 +407,9 @@
 	float2 atomDdyUV = float2( 0.0, 0.0 );
 	uint atomMaterialSlot = 0u;
 	uint atomLightMask = 0u;
+	@property( atom_discriminate )
+		uint atomCode = 0u;
+	@end
 	@property( atom_hit_mode )
 		// What hit mode hands the body beyond inPs: the sun's visibility (the
 		// directional shadow piece below), the eye vector (the reversed ray, view
@@ -416,12 +439,14 @@
 		@else
 			uint2 atomIds = texelFetch( atomIdTex, atomXY, 0 ).xy;
 			bool atomOk = atomIds.x != 0xFFFFFFFFu;
+			ATOM_NOTE( 1u )
 		@end
 
 		// The tables' lengths (every stand-in holds at least one whole entry of each).
 		uint atomLevelCount = uint( atomLevels.length() ) / 2u;
 		uint atomRowCount = uint( atomGeomRows.length() ) / 3u;
 		atomOk = atomOk && atomLevelCount > 0u && atomRowCount > 0u;
+		ATOM_NOTE( 2u )
 
 		// THE BUCKET: this draw serves the materials whose table entry is its own
 		// bucket's CLASS (the per-draw word's w, HlmsAtom::fillBuffersForV2). A whole
@@ -434,7 +459,20 @@
 		uint atomI = atomClass.instAt;
 		uint4 atomRaster = atomClass.raster;
 		uint atomWord = atomClass.word;
-		atomOk = atomOk && atomClass.ok && atomClass.cls == worldMaterialIdx[inAtom.drawId].w;
+		@property( atom_discriminate )
+		{
+			// The class walk's own terms, one code each (atomClassOf's order).
+			uint dInst = uint( atomInstances.length() ) / 10u;
+			uint dSlot = atomIds.x & 0x00FFFFFFu;
+			uint dBuckets = uint( atomBuckets.length() );
+			uint dAt = ( atomClass.word >> 16u ) * @value(atomSlotsPerPool)u + ( atomClass.word & 0xFFFFu );
+			if( atomCode == 0u && atomOk && !atomClass.ok )
+				atomCode = dSlot >= dInst ? 3u : ( atomClass.word == 0xFFFFFFFFu ? 4u : ( dAt >= dBuckets ? 5u : 6u ) );
+		}
+		@end
+		atomOk = atomOk && atomClass.ok;
+		atomOk = atomOk && atomClass.cls == worldMaterialIdx[inAtom.drawId].w;
+		ATOM_NOTE( 7u )
 
 		uint atomMesh = atomInstances[atomI + 6u].w;
 		// Where the triangle's corners are: a geometry row and the first index.
@@ -478,22 +516,30 @@
 			uint4 atomDec = jahAtomIdDecode( atomIds );
 			uint atomMeshCount = uint( atomMeshes.length() ) / 4u;
 			uint atomClusterCount = uint( atomClusters.length() ) / 2u;
-			atomOk = atomOk && atomMesh < atomMeshCount && atomClusterCount > 0u;
+			atomOk = atomOk && atomMesh < atomMeshCount;
+			ATOM_NOTE( 8u )
+			atomOk = atomOk && atomClusterCount > 0u;
+			ATOM_NOTE( 9u )
 			uint4 atomDag = atomMeshes[min( atomMesh, max( atomMeshCount, 1u ) - 1u ) * 4u + 3u];
 			atomOk = atomOk && atomDec.z < atomDag.y;
+			ATOM_NOTE( 10u )
 			uint atomClusterAt = min( atomDag.x + atomDec.z, max( atomClusterCount, 1u ) - 1u );
 			uint4 atomRange = atomClusters[atomClusterAt * 2u];
 			atomOk = atomOk && atomDec.w < atomRange.y / 3u;
+			ATOM_NOTE( 11u )
 			atomRowSrc = atomDag.w;
 			atomFirstIdx = atomRange.x + min( atomDec.w, 255u ) * 3u;
 		@end
 		atomOk = atomOk && atomRowSrc < atomRowCount;
+		ATOM_NOTE( 12u )
 		uint atomRowAt = min( atomRowSrc, max( atomRowCount, 1u ) - 1u ) * 3u;
 		uint4 atomAddr = atomGeomRows[atomRowAt];
 		uint4 atomLay0 = atomGeomRows[atomRowAt + 1u];
 		uint4 atomLay1 = atomGeomRows[atomRowAt + 2u];
-		atomOk = atomOk && ( atomAddr.x | atomAddr.y ) != 0u && ( atomAddr.z | atomAddr.w ) != 0u &&
-				 ( atomLay1.x & ATOM_GEOM_NORMAL_MASK ) == ATOM_GEOM_NORMAL_FLOAT3;
+		atomOk = atomOk && ( atomAddr.x | atomAddr.y ) != 0u && ( atomAddr.z | atomAddr.w ) != 0u;
+		ATOM_NOTE( 13u )
+		atomOk = atomOk && ( atomLay1.x & ATOM_GEOM_NORMAL_MASK ) == ATOM_GEOM_NORMAL_FLOAT3;
+		ATOM_NOTE( 14u )
 
 		ogre_float4x3 atomWorld = makeOgreFloat4x3( uintBitsToFloat( atomInstances[atomI + 0u] ),
 													uintBitsToFloat( atomInstances[atomI + 1u] ),
@@ -604,10 +650,12 @@
 		// self-comparison is folded away on this stack) would hand PBS's pieces a position
 		// anywhere, and the clustered light loop indexes its grid with it. A covering id's
 		// weights sit in [0, 1] up to the rasteriser's own tie-breaking.
-		atomOk = atomOk && ( floatBitsToUint( b.clipW ) & 0x7FFFFFFFu ) < 0x7F800000u && b.clipW > 0.0 &&
-				 all( lessThan( floatBitsToUint( b.w ) & uvec3( 0x7FFFFFFFu ), uvec3( 0x7F800000u ) ) ) &&
+		atomOk = atomOk && ( floatBitsToUint( b.clipW ) & 0x7FFFFFFFu ) < 0x7F800000u && b.clipW > 0.0;
+		ATOM_NOTE( 15u )
+		atomOk = atomOk && all( lessThan( floatBitsToUint( b.w ) & uvec3( 0x7FFFFFFFu ), uvec3( 0x7F800000u ) ) ) &&
 				 all( greaterThanEqual( b.w, float3( -0.25, -0.25, -0.25 ) ) ) &&
 				 all( lessThanEqual( b.w, float3( 1.25, 1.25, 1.25 ) ) );
+		ATOM_NOTE( 16u )
 		if( !atomOk )
 		{
 			// The harmless interpolants a helper lane carries into the body: the first
@@ -735,8 +783,12 @@
 		// (ATOM-DECODE-CLASS-1 measured frames of the 10k world that the base renders
 		// black and that, without this guard, the classified decode rendered as
 		// whole-screen bands of the harmless triangle).
+		@property( atom_discriminate && !hlms_prepass )
+			// The door paints instead: the body runs on the harmless interpolants.
+		@else
 		if( !atomOk )
 			discard;
+		@end
 	}
 
 	// EVERY MATERIAL FETCH OF EVERY UPSTREAM PIECE, redirected to the gradient form:

@@ -946,6 +946,12 @@ public:
     /// ::disoccluded count what it does.
     virtual void setAtomOcclusionEnabled(bool on) { (void)on; }
     virtual bool atomOcclusionEnabled() const { return false; }
+    /// A TEST DOOR (ATOM-BLACK-FRAMES-1's coverage trace; never a mode, not saved): every
+    /// view of this scene re-creates its id pass's cut buffers at `indices` of stream on
+    /// its next frame — smaller than the need, the overflow path runs (the root cut from
+    /// the reserve, the stats ring's report, the budget's growth), exactly as
+    /// GpuCull::setCutBudgetForTest does for an engine suite.
+    virtual void setAtomCutBudgetForTest(unsigned indices) { (void)indices; }
     /// THE ATOM VIEW (AtomView, Types.h): the false-colour picture of the
     /// visibility buffer over every view of this scene that carries the id pass.
     /// Switching it rebuilds nothing (the chain's pass is gated by the workspace's

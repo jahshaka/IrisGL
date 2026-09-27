@@ -295,11 +295,6 @@ public:
         socketName = socket;
     }
 
-	// Bullet interpolates the transform of physics bodies
-	// to give them a smooth movement. This bool disables that
-	// and uses the actual transform of the body.
-	bool useInterpolatedPhysicsTransform = true;
-
     // ---- COLLISION CONTENT (AVATAR_LOCOMOTION_SPEC §6.3, option C) --------
     //
     // "This mesh is something a character can walk into." Only `isPhysicsBody`

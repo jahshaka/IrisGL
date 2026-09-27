@@ -13,8 +13,8 @@
 // mesh, level and submesh, the device addresses of the vertex and index
 // buffers THE RASTER DRAWS FROM plus the vertex layout: Ogre's
 // VctVoxelizer::GeometryRow, 48 bytes, three uvec4 lanes) and a per-slot table
-// the ray tier writes as it writes the TLAS (the row of the level the slot's
-// NEAR copy was built from, OgreRayQuery.cpp's writeRayInstances). The hit's
+// the ray tier keeps with the TLAS (the row of the level the slot's
+// NEAR copy was built from, the instance job rq_tlas_write.comp). The hit's
 // geometry index is the submesh (rows of one level are contiguous), its
 // primitive index the triangle; three indices, three positions, the object-to-
 // world transform the ray query hands back, one cross product. A row the scene
