@@ -90,9 +90,10 @@ struct GpuInstance {
     /// instance's bottom-level acceleration structure should be built from,
     /// re-evaluated only when the instance's distance from the camera changes by
     /// 2x (the hysteresis is what keeps a BLAS refit rare — `OgreScene::
-    /// updateRayLevels`). ITS CONSUMER IS THE RAY TIER'S NEAR COPY (ATOM-FARBLAS-1,
-    /// `writeRayInstances`): the instance's near BLAS is built from this level,
-    /// its far copy from the mesh's coarsest.
+    /// updateRayLevels`, PATCHED in place: patchRayLevel). ITS CONSUMER IS THE RAY
+    /// TIER'S NEAR COPY (ATOM-FARBLAS-1; the Jahshaka/TlasWrite job reads it here):
+    /// the instance's near BLAS is built from this level, its far copy from the
+    /// mesh's coarsest.
     ///
     /// y = THE MATERIAL WORD (ATOM P4b): {pool : 16 | slot : 16} in the chain's ONE
     /// shared `VctMaterial` store — the bucket whose const buffer holds this item's

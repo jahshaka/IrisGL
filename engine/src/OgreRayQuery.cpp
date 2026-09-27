@@ -29,7 +29,8 @@
 //  * THE TRACED SET COMES FROM THE GPU SCENE'S TABLE, which is indexed by the
 //    scene's own item slot — never from `SceneManager::getMovableObjectIterator`
 //    (audit C-4: the spike traced the editor's gizmo arrows and light icons).
-//    See `writeRayInstances` below and GpuScene.h.
+//    The instances are written ON THE DEVICE from that table (the
+//    Jahshaka/TlasWrite job, "THE INSTANCES BY COMPUTE" below; GpuScene.h).
 //
 // WHAT IT NEEDS FROM THE PIN (patches-only law):
 //   * 0038 — the instance at Vulkan 1.2 when the loader allows, the seven
@@ -590,10 +591,10 @@ private:
     bool dispatchTlasWrite(OgreScene *scene, SceneAs &sa, std::string &err);
 public:
     /// engine.tlas_compute's door (a TOOL path: it submits and waits): the
-    /// device-written instance array read back, its ACTIVE entries in order, held
-    /// byte for byte against the CPU writer run over the same mirror and the same
-    /// structures — plus the far overlap, the counts and the per-slot rows.
-    bool verifyTlasBlocking(OgreScene *scene, TlasVerifyReport &out, std::string &err);
+    /// device-written instance array read back, and what a reference needs beside
+    /// it — the structures' addresses, the ready rigged slots, the overlap, the
+    /// counts, the rows (TlasReadback).
+    bool readTlasBlocking(OgreScene *scene, TlasReadback &out, std::string &err);
 private:
     /// True when it actually recorded a compaction copy this frame.
     bool runCompaction(SceneAs &sa, VkCommandBuffer cmd);
@@ -1945,262 +1946,37 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 }
 
 // ---------------------------------------------------------------------------
-// THE INSTANCE SINK. The gather writes each instance descriptor straight into
-// the mapped slot this frame will build from — no intermediate vector, which is
-// the cost audit C's P3 item names (4-6 ms of CPU for 8,026 instances in the
-// spike's naive form).
-namespace {
-struct InstanceWriter final {
-    VkAccelerationStructureInstanceKHR *dst = nullptr;
-    unsigned capacity = 0;
-    unsigned count = 0;
-    unsigned overflow = 0;
-    /// How many of `count` are FAR copies (mask kRayMaskFar).
-    unsigned farCount = 0;
-    /// The widest coarse-vs-fine gap over the traced set, world units (F2),
-    /// and the per-mesh-index cache of the coarsest bound it is built from.
-    float maxCoarseBound = 0.0f;
-    std::vector<std::pair<const Ogre::Mesh *, float>> *coarseBound = nullptr;
-    /// The per-slot geometry row of the near copy (SceneAs::geomRowOfSlot).
-    std::vector<uint32_t> *geomRowOfSlot = nullptr;
-    /// THE SKIN CACHE's ready entries by NodeId (SceneAs::skinUse): a rigged
-    /// slot's structure and row. A rigged slot NOT in it is not written at all.
-    const std::unordered_map<uint32_t, std::pair<VkDeviceAddress, uint32_t>> *skinUse = nullptr;
-    /// Rigged slots written this gather (the status's count).
-    unsigned skinned = 0;
-    unsigned long long signature = 1469598103934665603ull;   // FNV-1a offset basis
-    /// THE SIGNATURE IS ONLY EVER READ TO DECIDE REFIT-vs-REBUILD. A rebuild is
-    /// the default (NVIDIA's own guidance for a TLAS, and 0.2-0.35 ms even at
-    /// 8,000 instances), so with the refit off there is nothing to compare and
-    /// three FNV rounds per instance are pure cost.
-    bool wantSignature = false;
-    std::unordered_map<BlasKey, size_t, BlasKeyHash> *blasOf = nullptr;
-    const std::vector<VkDeviceAddress> *blasAddress = nullptr;
-    /// Slots referenced by this gather, so a BLAS nothing points at any more can
-    /// be evicted (finding 5).
-    std::vector<unsigned char> *seen = nullptr;
-    /// (mesh, level)s seen this gather that have no BLAS yet, in first-seen
-    /// order, and the instances that must have their reference patched once they
-    /// do.
-    std::vector<BlasWant> newBlas;
-    std::unordered_map<BlasKey, unsigned, BlasKeyHash> newIndexOf;
-    struct Patch { unsigned instance = 0; unsigned newBlas = 0; };
-    std::vector<Patch> patches;
-
-    void hash(unsigned long long v) {
-        signature ^= v;
-        signature *= 1099511628211ull;
-    }
-
-    /// ONE INSTANCE OVER A STRUCTURE THAT IS NOT THE (MESH, LEVEL) TABLE'S — a
-    /// rigged item's own skinned BLAS (PHOTON-SKIN-1). Its address is known when
-    /// the gather runs (the skin pass creates the structure first), so there is
-    /// nothing to patch.
-    void addDirect(VkDeviceAddress address, bool far, const float *world, unsigned mask,
-                   unsigned customIndex) {
-        const unsigned idx = count++;
-        if (far) ++farCount;
-        if (idx >= capacity) { ++overflow; return; }
-        VkAccelerationStructureInstanceKHR inst{};
-        std::memcpy(&inst.transform.matrix[0][0], world, 12u * sizeof(float));
-        inst.instanceCustomIndex = customIndex & 0xFFFFFFu;
-        inst.mask = mask & 0xFFu;
-        inst.instanceShaderBindingTableRecordOffset = 0;
-        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        inst.accelerationStructureReference = address;
-        if (wantSignature) { hash(0xA24BAED4963EE407ull ^ address); hash(customIndex); hash(mask); }
-        std::memcpy(&dst[idx], &inst, sizeof(inst));
-    }
-
-    /// ONE-ENTRY MEMO PER COPY KIND (0 near, 1 far). The map lookup below was
-    /// 8,001 hash lookups per gather on the lattice; consecutive instances
-    /// almost always share a mesh (that scene is 8,001 instances of 22 meshes),
-    /// so remembering the last key answers nearly all of them with a compare.
-    /// ONE memo per kind because the writer alternates near and far for every
-    /// slot — a single memo would miss on every call. A pure cache: a miss
-    /// falls through to the map and gives the same answer.
-    struct Memo { BlasKey key; size_t slot = 0; bool found = false; };
-    Memo memo[2];
-
-    /// One instance descriptor. `world` is the GPU scene's own twelve floats — a
-    /// ROW-MAJOR 3x4, which is exactly `VkTransformMatrixKHR`'s layout, so the
-    /// transform is ONE memcpy and no longer twelve loads out of an Ogre
-    /// Matrix4 (the table already did that conversion once, for everybody).
-    void add(const Ogre::MeshPtr &meshPtr, uint32_t level, bool far, const float *world,
-             unsigned mask, unsigned customIndex) {
-        const BlasKey key{ meshPtr.get(), level };
-        const unsigned idx = count++;
-        if (far) ++farCount;
-        if (idx >= capacity) { ++overflow; return; }
-        // BUILD IT ON THE STACK, STORE IT ONCE. `dst` points into HOST-VISIBLE
-        // device memory, which on this driver is WRITE-COMBINED: it streams
-        // writes beautifully and reads back at a crawl. Four of this struct's
-        // fields are BITFIELDS (instanceCustomIndex 24, mask 8,
-        // instanceShaderBindingTableRecordOffset 24, flags 8), and assigning a
-        // bitfield is a read-modify-write — so writing them in place READ the
-        // uncached mapping four times per instance. That, not the map lookup,
-        // was the bulk of the 3.5 ms this function cost at 8,001 instances.
-        // Assembled here and copied as one 64-byte store, the mapping is only
-        // ever written, linearly.
-        VkAccelerationStructureInstanceKHR inst{};
-        std::memcpy(&inst.transform.matrix[0][0], world, 12u * sizeof(float));
-        inst.instanceCustomIndex = customIndex & 0xFFFFFFu;
-        inst.mask = mask & 0xFFu;
-        inst.instanceShaderBindingTableRecordOffset = 0;
-        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        inst.accelerationStructureReference = 0;
-
-        Memo &m = memo[far ? 1 : 0];
-        if (m.found && m.key == key) {
-            inst.accelerationStructureReference = (*blasAddress)[m.slot];
-            if (seen && m.slot < seen->size()) (*seen)[m.slot] = 1u;
-            if (wantSignature) { hash(1ull + m.slot); hash(customIndex); hash(mask); }
-            std::memcpy(&dst[idx], &inst, sizeof(inst));
-            return;
-        }
-        auto it = blasOf->find(key);
-        if (it != blasOf->end()) {
-            m.key = key; m.slot = it->second; m.found = true;
-            if (seen && it->second < seen->size()) (*seen)[it->second] = 1u;
-            inst.accelerationStructureReference = (*blasAddress)[it->second];
-            if (wantSignature) hash(1ull + it->second);
-        } else {
-            m.found = false;
-            auto nit = newIndexOf.find(key);
-            unsigned ni;
-            if (nit == newIndexOf.end()) {
-                ni = unsigned(newBlas.size());
-                newBlas.push_back({ meshPtr, level });
-                newIndexOf.emplace(key, ni);
-            } else {
-                ni = nit->second;
-            }
-            patches.push_back({ idx, ni });
-            if (wantSignature) hash(0x9E3779B97F4A7C15ull + ni);
-        }
-        if (wantSignature) { hash(customIndex); hash(mask); }
-        std::memcpy(&dst[idx], &inst, sizeof(inst));
-    }
-};
-}   // namespace
-
-/// THE TRACED SET, READ OUT OF THE GPU SCENE'S TABLE (A3 slice §1.3).
-///
-/// WHAT CHANGED AND WHY. This used to be `OgreScene::gatherRayInstances`: a walk
-/// of the scene's item index that re-asked Ogre, per item, every question the
-/// table now answers — the visibility flags, the render queue, the skeleton, the
-/// mesh, and a loop over every sub-item's datablock for an alpha test — and then
-/// read the node's full world transform. Measured at 3.4-4.0 ms for 8,001
-/// instances in a Debug build (inventory LAT-L8 / F11-WALKS). Every one of those
-/// predicates is now precomputed into the flags word by the ONE place that
-/// computes them (`OgreScene::gpuFlagsFor`), and the transform is already in the
-/// exact layout an instance descriptor takes, so this loop is a flags test and a
-/// memcpy per slot and asks Ogre nothing at all.
-///
-/// WHAT IS IN AND WHAT IS OUT: `kGpuRayTraced` IS the old conjunction —
-/// carries kVisibleBit or kMovableBit, shown, below the overlay queues, not
-/// alpha-tested (every
-/// BLAS is VK_GEOMETRY_OPAQUE_BIT_KHR and the rays use gl_RayFlagsOpaqueEXT, so
-/// a cut-out leaf would intersect as a solid quad: audit C-16), and it has a
-/// mesh. Editor furniture, the backdrop, the sun disc and distortion objects
-/// carry their own channel INSTEAD of kVisibleBit precisely so captures can
-/// exclude them, and they fail the first test.
-///
-/// EVERY TRACED OBJECT IS WRITTEN TWICE (ATOM-FARBLAS-1, A5b §4 — ONE TLAS with
-/// explicit masks; the two-TLAS alternative was rejected on cost: it doubles the
-/// build and refit every frame and puts the near/far split in a binding instead
-/// of a bit). The masks (Types.h, `kRayMask*`):
-///
-///   * THE NEAR COPY over the level the RAY RULE chose (`GpuInstance::ids[3]`,
-///     AT-A8r, `OgreScene::updateRayLevels`; clamped to the chain), carrying the
-///     per-consumer bits of audit C-15 — bit 0 a shadow caster, bit 1 a mover,
-///     bit 2 still world — AND bit 3, "near". A near launch traces 0x0F. A
-///     shadow-casting mover's near copy carries bit 5 too (kRayMaskMoverCaster,
-///     the surface cache's mover-shadow launch, PHOTON-CARDS-4).
-///   * THE FAR COPY over the mesh's COARSEST level, carrying bit 4 ALONE. Only a
-///     launch that asks for the far field (the gather's second query, past its
-///     near length) sees it; no near launch can hit a far copy, so no ray is
-///     answered twice by one object.
-///
-/// A RIGGED ITEM (PHOTON-SKIN-1) is traced through ITS OWN structure, built from
-/// its skin cache (the posed vertices) — the near AND the far copy, since the
-/// cache is one level and a character is small — and its per-slot row is the
-/// cache's. A rigged slot whose cache is not ready this frame is NOT WRITTEN: it
-/// is never traced at the mesh's bind pose (audit C-5's T-pose), which is the
-/// exclusion's whole reason and the only fallback there is.
-///
-/// `instanceCustomIndex` is the SLOT on BOTH copies — the index of the object's
-/// entry in the table, so a hit shader reads the object's bounds, its previous
-/// transform and its mesh with one fetch whichever copy it hit; the copy is told
-/// apart by the MASK the launch asked with, never by the index.
-static void writeRayInstances(const OgreScene *scene, InstanceWriter &w) {
-    const detail::GpuScene &gs = scene->gpuScene();
-    if (!gs.live()) return;
-    const detail::GpuInstance *mirror = gs.mirrorData();
-    const uint32_t slots = gs.slotCount();
-    if (w.geomRowOfSlot) w.geomRowOfSlot->assign(slots, detail::GpuScene::kNoGeomRow);
-    for (uint32_t i = 0; i < slots; ++i) {
-        const detail::GpuInstance &e = mirror[i];
-        Ogre::uint32 flags;
-        std::memcpy(&flags, &e.boundsMax[3], sizeof(flags));
-        if (!(flags & detail::kGpuRayTraced)) continue;
-        Ogre::uint32 meshIndex;
-        std::memcpy(&meshIndex, &e.boundsMin[3], sizeof(meshIndex));
-        const Ogre::MeshPtr &mesh = gs.meshAt(meshIndex);
-        if (!mesh) continue;
-        unsigned mask = kRayMaskNear;
-        mask |= (flags & detail::kGpuCaster) ? kRayMaskCaster : 0u;
-        mask |= (flags & detail::kGpuMover) ? kRayMaskMover : kRayMaskStill;
-        // ...and the surface cache's mover-shadow bit (PHOTON-CARDS-4): a mover
-        // that casts, on its near copy only.
-        if ((flags & detail::kGpuMover) && (flags & detail::kGpuCaster)) mask |= kRayMaskMoverCaster;
-        if (flags & detail::kGpuSkinned) {
-            if (!w.skinUse) continue;
-            auto sit = w.skinUse->find(e.ids[0]);
-            if (sit == w.skinUse->end()) continue;
-            w.addDirect(sit->second.first, false, e.world, mask, i);
-            w.addDirect(sit->second.first, true, e.world, kRayMaskFar, i);
-            if (w.geomRowOfSlot) (*w.geomRowOfSlot)[i] = sit->second.second;
-            ++w.skinned;
-            continue;
-        }
-        const uint32_t coarsest = coarsestLevelOf(mesh.get());
-        const uint32_t nearLevel = std::min(scene->rayLevelOf(i), coarsest);
-        w.add(mesh, nearLevel, false, e.world, mask, i);
-        w.add(mesh, coarsest, true, e.world, kRayMaskFar, i);
-        // The near copy's geometry, as the GPU scene's rows name it (a level the
-        // mesh has no row for reads zero addresses there, which the shader tests).
-        if (w.geomRowOfSlot && nearLevel < detail::GpuScene::kLevelsPerMesh)
-            (*w.geomRowOfSlot)[i] = detail::GpuScene::geomRowIndex(meshIndex, nearLevel, 0u);
-        // THE HAND-OVER'S WIDTH (audit F2): how far, in world units, a far copy's
-        // surface may lie from its fine one — the coarsest level's measured bound
-        // grown by the instance's largest axis scale. The gather starts its far
-        // query that much BEFORE the near length, so a coarse surface inside it
-        // whose fine surface lies just outside cannot be passed by both queries.
-        // The bound is cached per MESH TABLE INDEX (checked against the mesh
-        // pointer, so a recycled index re-reads): a lookup through the scene's
-        // mesh records per instance doubled this loop on the lattice, whose
-        // consecutive instances cycle through eleven meshes.
-        if (coarsest > 0u) {
-            if (meshIndex >= w.coarseBound->size()) w.coarseBound->resize(meshIndex + 1u);
-            auto &cached = (*w.coarseBound)[meshIndex];
-            if (cached.first != mesh.get()) {
-                const std::vector<float> *b = scene->lodBoundsFor(mesh.get());
-                cached = { mesh.get(), (b && !b->empty()) ? b->back() : 0.0f };
-            }
-            if (cached.second > 0.0f) {
-                const float grown = cached.second * worldMaxAxisScale(e.world);
-                if (std::isfinite(grown) && grown > w.maxCoarseBound) w.maxCoarseBound = grown;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // THE INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1) — the change feed's side, the job's
 // inputs and the dispatch. The job (Hlms/Jahshaka/JahTlasWrite_cs.glsl) writes two
 // instances per slot at fixed places; everything here is per CHANGED SLOT (the
 // feed), per MESH (the inputs) or per rigged item — no loop over the instances.
+// (It replaced the CPU instance writer — a walk of every slot into the mapped
+// instance ring, 3-13 ms at 10k — which engine.tlas_compute held byte-equal to
+// this path before it was deleted; the suite keeps the reference itself.)
+//
+// THE TRACED SET IS THE TABLE'S `kGpuRayTraced` — carries kVisibleBit or
+// kMovableBit, shown, below the overlay queues, not alpha-tested (every BLAS is
+// VK_GEOMETRY_OPAQUE_BIT_KHR and the rays use gl_RayFlagsOpaqueEXT, so a cut-out
+// leaf would intersect as a solid quad: audit C-16) — with a mesh. Editor
+// furniture, the backdrop, the sun disc and distortion objects carry their own
+// channel INSTEAD of kVisibleBit precisely so captures can exclude them.
+//
+// EVERY TRACED OBJECT IS WRITTEN TWICE (ATOM-FARBLAS-1, A5b §4 — ONE TLAS with
+// explicit masks; two TLASes would double the build every frame). The masks
+// (Types.h, `kRayMask*`):
+//   * THE NEAR COPY over the level the RAY RULE chose (`GpuInstance::ids[3]`,
+//     AT-A8r, `OgreScene::updateRayLevels`; clamped to the chain), carrying the
+//     per-consumer bits of audit C-15 — a shadow caster, a mover or still world —
+//     and "near"; a shadow-casting mover's also kRayMaskMoverCaster (the surface
+//     cache's mover-shadow launch, PHOTON-CARDS-4).
+//   * THE FAR COPY over the mesh's COARSEST level, carrying kRayMaskFar ALONE: only
+//     a launch that asks for the far field sees it, so no ray is answered twice by
+//     one object.
+// A RIGGED ITEM (PHOTON-SKIN-1) is traced through ITS OWN structure, built from its
+// skin cache — near and far — and its row is the cache's; one whose cache is not
+// ready this frame is not written at all (never traced at the bind pose, audit C-5).
+// `instanceCustomIndex` is the SLOT on both copies: a hit reads the object's entry
+// with one fetch whichever copy it hit; the copy is told apart by the launch's MASK.
 namespace {
 /// Level slots per mesh record in the job's inputs (JahTlasWrite_cs.glsl's
 /// LEVEL_SLOTS). The bake tops out at six levels (GpuScene::kLevelsPerMesh holds
@@ -3747,10 +3523,12 @@ VkDescriptorBufferInfo rawBufferInfo(Ogre::UavBufferPacked *b);
 }   // namespace
 
 // ---------------------------------------------------------------------------
-// engine.tlas_compute's door (ATOM-CPU-WALKS-1): the job's output against the CPU
-// writer, byte for byte. A TOOL path — its own command buffer, a fence wait.
-bool RayQueryTier::verifyTlasBlocking(OgreScene *scene, TlasVerifyReport &out, std::string &err) {
-    out = TlasVerifyReport();
+// engine.tlas_compute's door (ATOM-CPU-WALKS-1): the job's output read back, with
+// what the suite needs to build its own reference — every bottom-level structure's
+// address by (mesh, level), the ready rigged slots, the far overlap, the counts and
+// the rows. A TOOL path — its own command buffer, a fence wait.
+bool RayQueryTier::readTlasBlocking(OgreScene *scene, TlasReadback &out, std::string &err) {
+    out = TlasReadback();
     if (!isOpen()) { err = "rayquery: the tier is not open"; return false; }
     auto it = mScenes.find(scene);
     if (it == mScenes.end() || !it->second.tlasOut || !it->second.tlasVao) {
@@ -3760,11 +3538,10 @@ bool RayQueryTier::verifyTlasBlocking(OgreScene *scene, TlasVerifyReport &out, s
     SceneAs &sa = it->second;
     const uint32_t slots = sa.builtSlots;
     out.slots = slots;
-    // 1. THE DEVICE'S ARRAY, copied out.
-    std::vector<VkAccelerationStructureInstanceKHR> dev(size_t(slots) * 2u);
+    out.instances.assign(size_t(slots) * 2u * sizeof(VkAccelerationStructureInstanceKHR), 0u);
     if (slots) {
         RawBuffer host;
-        const VkDeviceSize bytes = VkDeviceSize(dev.size()) * sizeof(VkAccelerationStructureInstanceKHR);
+        const VkDeviceSize bytes = VkDeviceSize(out.instances.size());
         if (!makeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, host, err)) return false;
         const VkDescriptorBufferInfo src = rawBufferInfo(sa.tlasOut);
         VkCommandPoolCreateInfo pci{};
@@ -3810,51 +3587,23 @@ bool RayQueryTier::verifyTlasBlocking(OgreScene *scene, TlasVerifyReport &out, s
         si.pCommandBuffers = &cmd;
         bool ok = vkQueueSubmit(mDev->mGraphicsQueue.mQueue, 1, &si, fence) == VK_SUCCESS;
         if (ok) ok = vkWaitForFences(mVk, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
-        if (ok) std::memcpy(dev.data(), host.mapped, size_t(bytes));
+        if (ok) std::memcpy(out.instances.data(), host.mapped, size_t(bytes));
         vkDestroyFence(mVk, fence, nullptr);
         vkFreeCommandBuffers(mVk, pool, 1, &cmd);
         vkDestroyCommandPool(mVk, pool, nullptr);
         dropBuffer(host);
         if (!ok) { err = "rayquery: the instance readback did not complete"; return false; }
     }
-    std::vector<VkAccelerationStructureInstanceKHR> active;
-    for (const VkAccelerationStructureInstanceKHR &e : dev)
-        if (e.accelerationStructureReference) active.push_back(e);
-    out.deviceActive = unsigned(active.size());
-
-    // 2. THE CPU WRITER over the same mirror and the same structures.
-    std::vector<VkAccelerationStructureInstanceKHR> cpu(size_t(slots) * 2u + 16u);
-    InstanceWriter w;
-    w.blasOf = &sa.blasOf;
-    std::vector<std::pair<const Ogre::Mesh *, float>> coarse;
-    w.coarseBound = &coarse;
-    std::vector<uint32_t> rows;
-    w.geomRowOfSlot = &rows;
-    w.skinUse = &sa.skinUse;
-    std::vector<VkDeviceAddress> addresses;
-    for (const Blas &bl : sa.blas) addresses.push_back(bl.address);
-    w.blasAddress = &addresses;
-    w.capacity = unsigned(cpu.size());
-    w.dst = cpu.data();
-    writeRayInstances(scene, w);
-    out.cpuCount = w.count;
-    out.cpuMissingBlas = unsigned(w.newBlas.size());
-    const size_t n = std::min<size_t>(active.size(), w.count);
-    for (size_t i = 0; i < n; ++i) {
-        ++out.compared;
-        if (std::memcmp(&active[i], &cpu[i], sizeof(VkAccelerationStructureInstanceKHR)) != 0) {
-            if (!out.mismatched) out.firstMismatch = unsigned(i);
-            ++out.mismatched;
-        }
-    }
-    out.deviceOverlap = sa.farOverlap;
-    out.cpuOverlap = w.maxCoarseBound;
-    out.countsEqual = active.size() == w.count && sa.instanceCount == w.count &&
-                      sa.farInstanceCount == w.farCount;
-    rows.resize(slots, detail::GpuScene::kNoGeomRow);
-    std::vector<uint32_t> tierRows = sa.geomRowOfSlot;
-    tierRows.resize(slots, detail::GpuScene::kNoGeomRow);
-    out.rowsEqual = rows == tierRows;
+    for (const auto &kv : sa.blasOf)
+        if (kv.second < sa.blas.size() && sa.blas[kv.second].address)
+            out.structures.push_back({ kv.first.mesh, kv.first.level, uint64_t(sa.blas[kv.second].address) });
+    for (const auto &kv : sa.skinUse)
+        out.skins.push_back({ kv.first, uint64_t(kv.second.first), kv.second.second });
+    out.farOverlap = sa.farOverlap;
+    out.instanceCount = sa.instanceCount;
+    out.farInstanceCount = sa.farInstanceCount;
+    out.rows = sa.geomRowOfSlot;
+    out.rows.resize(slots, detail::GpuScene::kNoGeomRow);
     return true;
 }
 
@@ -7764,9 +7513,9 @@ void OgreScene::forgetRayQuery() {
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->forgetScene(this);
 }
 
-bool OgreScene::verifyTlasCompute(TlasVerifyReport &out, std::string &err) {
+bool OgreScene::readTlasInstances(TlasReadback &out, std::string &err) {
     if (!mEngine || !mEngine->mRayTier) { err = "rayquery: no ray tier"; return false; }
-    return mEngine->mRayTier->verifyTlasBlocking(this, out, err);
+    return mEngine->mRayTier->readTlasBlocking(this, out, err);
 }
 
 bool OgreScene::rayReflectionsWanted() const {
@@ -7836,7 +7585,7 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
     return false;
 }
 void OgreScene::forgetRayQuery() {}
-bool OgreScene::verifyTlasCompute(TlasVerifyReport &, std::string &err) {
+bool OgreScene::readTlasInstances(TlasReadback &, std::string &err) {
     err = "rayquery: not built";
     return false;
 }

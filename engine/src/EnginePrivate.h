@@ -3009,14 +3009,22 @@ void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
 /// THE REGISTERED HLMS_PBS: upstream's HlmsPbs, plus the per-pass binding above.
 /// Our derived Hlms (the Terra pattern) and not a patch: the two overrides are
 /// public virtuals and the three setters public API.
-/// engine.tlas_compute's reading (ATOM-CPU-WALKS-1, OgreScene::verifyTlasCompute):
-/// the device-written instance array's ACTIVE entries, in order, against the CPU
-/// writer run over the same mirror and structures.
-struct TlasVerifyReport {
-    unsigned slots = 0, deviceActive = 0, cpuCount = 0, cpuMissingBlas = 0;
-    unsigned compared = 0, mismatched = 0, firstMismatch = ~0u;
-    float deviceOverlap = 0.0f, cpuOverlap = 0.0f;
-    bool countsEqual = false, rowsEqual = false;
+/// engine.tlas_compute's reading (ATOM-CPU-WALKS-1, OgreScene::readTlasInstances):
+/// the device-written instance array (VkAccelerationStructureInstanceKHR, 64 bytes
+/// each, TWO per slot: near at 2 x slot, far at 2 x slot + 1, an untraced slot's
+/// pair zero) and what a reference needs to rebuild it — the address of every
+/// bottom-level structure by (mesh, level), the ready rigged slots by NodeId, the
+/// far overlap, the active counts and the per-slot rows.
+struct TlasReadback {
+    unsigned slots = 0;
+    std::vector<unsigned char> instances;
+    struct Structure { const void *mesh = nullptr; uint32_t level = 0; uint64_t address = 0; };
+    std::vector<Structure> structures;
+    struct Skin { uint32_t node = 0; uint64_t address = 0; uint32_t row = 0; };
+    std::vector<Skin> skins;
+    float farOverlap = 0.0f;
+    unsigned instanceCount = 0, farInstanceCount = 0;
+    std::vector<uint32_t> rows;
 };
 
 class ScenePbs final : public Ogre::HlmsPbs {
@@ -3672,8 +3680,8 @@ public:
     /// DROP THIS SCENE'S acceleration structures (OgreScene::destroy calls it).
     /// A no-op when the tier never held any. Defined in OgreRayQuery.cpp.
     void forgetRayQuery();
-    /// engine.tlas_compute (a TOOL path: submits and waits) — TlasVerifyReport.
-    bool verifyTlasCompute(TlasVerifyReport &out, std::string &err);
+    /// engine.tlas_compute (a TOOL path: submits and waits) — TlasReadback.
+    bool readTlasInstances(TlasReadback &out, std::string &err);
     /// THE ONE PREDICATE that decides whether this scene's reflections are
     /// traced (PHOTON_SPEC §7 R5 item 5). It answers the DOCUMENT's half —
     /// "does this project want rays" — resolved against the MACHINE's
