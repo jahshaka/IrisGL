@@ -7,15 +7,16 @@
 //       Voxels  VctLighting::setDebugVisualization — a VoxelVisualizer (a
 //               MovableObject + Renderable of the Hlms/Pbs component, drawn with
 //               upstream's VCT/VoxelVisualizer material) over the lit voxels of
-//               ONE cascade: the finest that holds the camera;
+//               ONE cascade: the finest that holds the scene's lit content;
 //       Probes  IrradianceField::setDebugVisualization — an IfdProbeVisualizer
 //               (the same shape) drawing every probe as a sphere shaded by the
 //               field's irradiance atlas.
 //     Both attach themselves to the scene's SceneManager on a SCENE_STATIC node
 //     of their own and are destroyed by their owner (VctLighting's and
 //     IrradianceField's destructors switch the picture off first), so their
-//     lifetime is the GI arm's: the scene only puts the picture up, re-puts it
-//     when the arm rebuilt under it, and takes it down.
+//     lifetime is the GI arm's: the scene only puts the picture up (its owner's
+//     getDebugVisualizer hands it out for the photon channel), re-puts it when the
+//     arm rebuilt under it, and takes it down. The fork keeps both placed.
 //   * OURS:
 //       Cards         the surface cache's table as quads (an Ogre ManualObject
 //                     with an HlmsUnlit vertex-colour datablock);
@@ -42,7 +43,6 @@
 #include <OgreHlmsManager.h>
 #include <OgreHlmsUnlit.h>
 #include <OgreHlmsUnlitDatablock.h>
-#include <OgreLogManager.h>
 #include <OgreManualObject2.h>
 #include <OgreMaterial.h>
 #include <OgreMaterialManager.h>
@@ -89,32 +89,11 @@ Ogre::Pass *overlayMaterialPass() {
     return t && t->getNumPasses() ? t->getPass(0) : nullptr;
 }
 
-/// THE VISUALIZER OGRE JUST ATTACHED. `VctLighting::setDebugVisualization` and
-/// `IrradianceField::setDebugVisualization` create their visualizer on a NEW child
-/// of the manager's static root and keep the pointer to themselves (no getter at
-/// the pin), and the photon view must put it on its own channel — so it is taken
-/// from where Ogre put it: the root's last child, its one attached object, checked
-/// by type. A pin that moves the node answers null here and the view says so in
-/// the log rather than drawing the visualizer into every pass. (The clean fix is a
-/// getter on both classes — reported upstream of this lane.)
-template <class T>
-T *attachedVisualizer(Ogre::SceneManager *sm) {
-    if (!sm) return nullptr;
-    Ogre::SceneNode *root = sm->getRootSceneNode(Ogre::SCENE_STATIC);
-    const size_t n = root ? root->numChildren() : 0u;
-    if (!n) return nullptr;
-    auto *node = static_cast<Ogre::SceneNode *>(root->getChild(n - 1u));
-    if (!node || node->numAttachedObjects() != 1u) return nullptr;
-    return dynamic_cast<T *>(node->getAttachedObject(0));
-}
-
-/// Puts a debug drawable on the photon channel alone, cast-less, and makes its
-/// static world box current (a SCENE_STATIC object's box is otherwise the one it
-/// was born with — DOCS/traps/ENGINE.md).
-void toPhotonChannel(Ogre::SceneManager *sm, Ogre::MovableObject *mo) {
+/// Puts one of Ogre's debug visualizers (taken from its owner's getter) on the photon
+/// channel alone, cast-less.
+void toPhotonChannel(Ogre::MovableObject *mo) {
     mo->setVisibilityFlags(kPhotonViewBit);
     mo->setCastShadows(false);
-    if (mo->getParentNode()) sm->notifyStaticDirty(mo->getParentNode());
 }
 
 // ---------------------------------------------------------------------------
@@ -157,15 +136,7 @@ public:
     /// frame, counts), and the texture taken from the UAV layout the tier left it
     /// in to a texture, through Ogre's own barrier solver.
     void passEarlyPreExecute(Ogre::CompositorPass *pass) override {
-        if (!pass) return;
-        // THE PHOTON SCENE PASS: its drawables' world boxes are made current before
-        // it culls (OgreScene::photonRefreshBounds says why).
-        if (pass->getType() == Ogre::PASS_SCENE &&
-            pass->getDefinition()->mExecutionMask == kPhotonSceneExecutionBit) {
-            if (OgreScene *scene = mView ? mView->ogreScene() : nullptr) scene->photonRefreshBounds();
-            return;
-        }
-        if (pass->getType() != Ogre::PASS_QUAD) return;
+        if (!pass || pass->getType() != Ogre::PASS_QUAD) return;
         if (pass->getDefinition()->mExecutionMask != kPhotonOverlayExecutionBit) return;
         Ogre::TextureGpu *overlay = mView ? mView->photonOverlay() : nullptr;
         Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
@@ -340,7 +311,6 @@ void OgreScene::photonVoxelsOff() {
     // picture off); only a LIVE one is asked to.
     if (photonVoxelLive()) mPhotonVoxelLighting->setDebugVisualization(false, mSceneMgr);
     mPhotonVoxelLighting = nullptr;
-    mPhotonVoxelVis = nullptr;
     mPhotonVoxelSource = nullptr;
     mPhotonVoxelTex = nullptr;
 }
@@ -348,14 +318,11 @@ void OgreScene::photonVoxelsOff() {
 void OgreScene::photonProbesOff() {
     // mPhotonIfd is always the LIVE field or null: teardownIrradianceField
     // forgets it before the field (and Ogre's visualizer with it) is deleted.
-    // (IrradianceField::getDebugVisualizationMode returns the mode as a BOOL at
-    // the pin — Colour reads false — so the scene's own record is the witness.)
-    if (mPhotonIfd && mPhotonIfd == mIfd)
+    if (mPhotonIfd && mPhotonIfd == mIfd &&
+        mPhotonIfd->getDebugVisualizationMode() != Ogre::IrradianceField::DebugVisualizationNone)
         mPhotonIfd->setDebugVisualization(Ogre::IrradianceField::DebugVisualizationNone, mSceneMgr,
                                           mPhotonIfd->getDebugTessellation());
     mPhotonIfd = nullptr;
-    mPhotonIfdVis = nullptr;
-    mPhotonIfdFollows = ~0ull;
 }
 
 void OgreScene::photonCardsOff() {
@@ -366,16 +333,6 @@ void OgreScene::photonCardsOff() {
     mPhotonCards = nullptr;
     mPhotonCardVerts = 0u;
     mPhotonCardGeneration = ~0ull;
-}
-
-void OgreScene::photonRefreshBounds() {
-    // ONLY A LIVE ONE: a cascade rebuilt since syncPhotonView (inside this frame)
-    // deleted its lighting and Ogre's visualizer with it — the pointer is then
-    // matched against the live chain before anything is dereferenced (and a new
-    // lighting recycled at the same address holds no visualizer of ours).
-    if (mPhotonVoxelVis && photonVoxelLive() && mPhotonVoxelVis->getParentNode())
-        mPhotonVoxelVis->getWorldAabbUpdated();
-    if (mPhotonIfdVis && mPhotonIfdVis->getParentNode()) mPhotonIfdVis->getWorldAabbUpdated();
 }
 
 void OgreScene::releasePhotonView() {
@@ -472,39 +429,21 @@ void OgreScene::syncPhotonView() {
         if (!same) {
             photonVoxelsOff();
             if (want && source && tex) {
+                // The fork places the static visualizer and keeps its world box
+                // current (VctLighting::setDebugVisualization / update).
                 want->setDebugVisualization(true, mSceneMgr);
-                auto *vis = attachedVisualizer<Ogre::VoxelVisualizer>(mSceneMgr);
-                if (!vis) {
-                    // Never leave Ogre's visualizer on the default channels, where
-                    // every pass would draw it.
-                    want->setDebugVisualization(false, mSceneMgr);
-                    static bool said = false;
-                    if (!said) {
-                        said = true;
-                        Ogre::LogManager::getSingleton().logMessage(
-                            "Jahshaka photon view: the voxel visualizer was not where Ogre attaches it — "
-                            "the Voxels view draws nothing",
-                            Ogre::LML_CRITICAL);
-                    }
-                } else {
-                    toPhotonChannel(mSceneMgr, vis);
-                    // The visualizer is STATIC: its transform and box are forced
-                    // current here, as upstream's own resetTexturesFromBuildRelative does.
-                    vis->getParentNode()->_getFullTransformUpdated();
-                    vis->getWorldAabbUpdated();
-                    mPhotonVoxelLighting = want;
-                    mPhotonVoxelVis = vis;
-                    mPhotonVoxelSource = source;
-                    mPhotonVoxelTex = tex;
-                    mPhotonVoxelOrigin = origin;
-                }
+                toPhotonChannel(want->getDebugVisualizer());
+                mPhotonVoxelLighting = want;
+                mPhotonVoxelSource = source;
+                mPhotonVoxelTex = tex;
+                mPhotonVoxelOrigin = origin;
             }
         }
     }
 
-    // ---- PROBES: Ogre's IfdProbeVisualizer on the field. A re-initialize keeps it
-    // (IrradianceField::initialize re-points it), a follow moves its STATIC node
-    // (the fork's setFieldVolume / scrollWindow), whose box is then re-derived.
+    // ---- PROBES: Ogre's IfdProbeVisualizer on the field. The fork keeps it placed:
+    // a re-initialize re-points it, a follow (setFieldVolume / scrollWindow) moves its
+    // static node and its window offset (IrradianceField::placeDebugVisualizer).
     {
         Ogre::IrradianceField *want = view == PhotonView::Probes ? mIfd : nullptr;
         if (want != mPhotonIfd) {
@@ -513,28 +452,9 @@ void OgreScene::syncPhotonView() {
                 // Tessellation 4: a 7 x 16 band sphere, ~110 triangles a probe (8
                 // would be 32,000 — 266 M triangles for a 8,192-probe field).
                 want->setDebugVisualization(Ogre::IrradianceField::DebugVisualizationColour, mSceneMgr, 4u);
-                auto *vis = attachedVisualizer<Ogre::IfdProbeVisualizer>(mSceneMgr);
-                if (!vis) {
-                    want->setDebugVisualization(Ogre::IrradianceField::DebugVisualizationNone, mSceneMgr, 4u);
-                    static bool said = false;
-                    if (!said) {
-                        said = true;
-                        Ogre::LogManager::getSingleton().logMessage(
-                            "Jahshaka photon view: the probe visualizer was not where Ogre attaches it — "
-                            "the Probes view draws nothing",
-                            Ogre::LML_CRITICAL);
-                    }
-                } else {
-                    toPhotonChannel(mSceneMgr, vis);
-                    mPhotonIfd = want;
-                    mPhotonIfdVis = vis;
-                    mPhotonIfdFollows = mIfdFollows;
-                }
+                toPhotonChannel(want->getDebugVisualizer());
+                mPhotonIfd = want;
             }
-        } else if (mPhotonIfd && mIfdFollows != mPhotonIfdFollows) {
-            mPhotonIfdFollows = mIfdFollows;
-            if (mPhotonIfdVis && mPhotonIfdVis->getParentNode())
-                mSceneMgr->notifyStaticDirty(mPhotonIfdVis->getParentNode());
         }
     }
 

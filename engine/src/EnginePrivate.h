@@ -5892,12 +5892,6 @@ public:
     /// offscreen target only because the runtime copies it); an editor's shot is
     /// neither and is forgotten here.
     void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
-    /// THE VISUALIZERS' WORLD BOXES, re-derived in front of the photon pass (its
-    /// listener): VctLighting::update re-tracks Ogre's voxel visualizer on every
-    /// light tick, and VoxelVisualizer::setTrackingVoxel writes the object's WORLD
-    /// box as its LOCAL one — for a SCENE_STATIC object nothing re-derives it, so
-    /// the picture was culled wherever the volume is not at the world origin.
-    void photonRefreshBounds();
 private:
     /// updateAtomDraw's first half: the split's witness and the screen decode's draws.
     void updateAtomSplit();
@@ -5911,21 +5905,17 @@ private:
     PhotonView mPhotonView = PhotonView::Off;
     int mPhotonVoxelCascade = -1;
     std::unordered_map<const void *, PhotonViewShape> mPhotonViews;   ///< the presenting views only
-    /// Voxels: the cascade whose lighting shows its visualizer, the visualizer
-    /// (found as Ogre attached it) and what it was built from — a change of any
-    /// of them (a rebuild that swapped the voxeliser, re-created the textures or
-    /// moved the volume) rebuilds the picture.
+    /// Voxels: the cascade whose lighting shows its visualizer
+    /// (VctLighting::getDebugVisualizer) and what it was built from — a change of
+    /// any of them (a rebuild that swapped the voxeliser, re-created the textures
+    /// or moved the volume) rebuilds the picture.
     Ogre::VctLighting *mPhotonVoxelLighting = nullptr;
-    Ogre::MovableObject *mPhotonVoxelVis = nullptr;
     const void *mPhotonVoxelSource = nullptr;
     Ogre::TextureGpu *mPhotonVoxelTex = nullptr;
     Ogre::Vector3 mPhotonVoxelOrigin = Ogre::Vector3::ZERO;
-    /// Probes: the field showing its visualizer, and the placement count it was
-    /// put up at (mIfdFollows — a follow re-places the field, and Ogre's
-    /// visualizer is placed once).
+    /// Probes: the field showing its visualizer (IrradianceField::getDebugVisualizer;
+    /// the fork keeps it placed through every follow).
     Ogre::IrradianceField *mPhotonIfd = nullptr;
-    Ogre::MovableObject *mPhotonIfdVis = nullptr;
-    unsigned long long mPhotonIfdFollows = ~0ull;
     /// Cards: the quads, how many vertices they hold, and the cache's table
     /// generation and frame they were built at (re-uploaded only when the table
     /// moves or the age ramp's clock ticks — kPhotonCardAgeFrames).
