@@ -566,7 +566,10 @@ void main()
 	// camera path unchanged.
 	vec3 hitAt = vec3( ray.xy, hitDepth );
 	{
-		const vec4 vel = texelFetch( vkSampler2D( velocityTexture, pointSampler ), hitTexel, 0 );
+		// clamped INTO the texture: a chain whose job cannot run declares it 1x1
+		const ivec2 velSize = textureSize( vkSampler2D( velocityTexture, pointSampler ), 0 );
+		const vec4 vel = texelFetch( vkSampler2D( velocityTexture, pointSampler ),
+									 min( hitTexel, velSize - ivec2( 1 ) ), 0 );
 		if( vel.w > 0.5 )
 			hitAt += vec3( vel.xy / max( vec2( 1.0 ) - shotInset.zw, vec2( 1e-6 ) ), vel.z );
 	}

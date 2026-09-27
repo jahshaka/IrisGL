@@ -1660,10 +1660,17 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // tier (rq_motion.comp) from the id image and the GPU scene's prevWorld;
         // cleared to w = 0 ("the camera path") every frame in front of it, so a
         // chain whose job does not run reads exactly the resolve it always did.
+        //
+        // FULL SIZE ONLY WHERE THE JOB RUNS (the ray tier and the id pass): 8 bytes a
+        // pixel — 16.6 MB at 1920x1080 — per march chain. Every other march chain
+        // (no rays, the split off) declares it 1x1: the resolve binds a texture it
+        // reads as "the camera path" everywhere, clamping its fetch into the texture.
         if (ssrMarch) {
-            auto *td = addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT);
+            const bool velocityJob = desc.rayReflect && desc.atomDraw;
+            auto *td = velocityJob ? addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT)
+                                   : addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT, 1u, 1u);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
-            if (desc.rayReflect && desc.atomDraw) td->textureFlags |= Ogre::TextureFlags::Uav;
+            if (velocityJob) td->textureFlags |= Ogre::TextureFlags::Uav;
         }
         if (ssrMarch) {
             auto *td = addTex(n, kSsrPrev,
