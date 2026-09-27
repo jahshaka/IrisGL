@@ -229,11 +229,41 @@ inline void releaseRecycledName(const std::string &name) {
     if (slot < it->second.size()) it->second[slot] = false;
 }
 
+/// WHAT A HOST READS WHEN OGRE THREW (lane FORK-OOM-1, 2026-09-27). Ogre's own
+/// full description, with ONE case said first in plain words: a Vulkan
+/// out-of-memory. The Vulkan render system throws every failed call as
+/// ERR_RENDERINGAPI_ERROR with the VkResult as the exception's number
+/// (`onVulkanFailure`), and since the fork's "OOM is not a device loss" commit
+/// an OOM no longer latches the device: the engine carries on, and the error a
+/// suite or a user reads must say what happened — the GPU refused an
+/// allocation (the pool's size is in Ogre's text) — not leave them to find
+/// "VK_ERROR_OUT_OF_DEVICE_MEMORY" at the end of a paragraph. The two numbers
+/// are Vulkan's own (VkResult, core since 1.0); this header does not include
+/// Vulkan.
+inline bool isVulkanOutOfMemory(const Ogre::Exception &e) {
+    return dynamic_cast<const Ogre::RenderingAPIException *>(&e) &&
+           (e.getNumber() == -1 || e.getNumber() == -2);   // VK_ERROR_OUT_OF_{HOST,DEVICE}_MEMORY
+}
+
+inline std::string describeOgreFailure(const Ogre::Exception &e) {
+    constexpr int kVkErrorOutOfHostMemory = -1;     // VK_ERROR_OUT_OF_HOST_MEMORY
+    constexpr int kVkErrorOutOfDeviceMemory = -2;   // VK_ERROR_OUT_OF_DEVICE_MEMORY
+    if (dynamic_cast<const Ogre::RenderingAPIException *>(&e)) {
+        if (e.getNumber() == kVkErrorOutOfDeviceMemory)
+            return "GPU out of memory (VK_ERROR_OUT_OF_DEVICE_MEMORY; the device is NOT lost): " +
+                   e.getFullDescription();
+        if (e.getNumber() == kVkErrorOutOfHostMemory)
+            return "host out of memory in the GPU driver (VK_ERROR_OUT_OF_HOST_MEMORY; the device "
+                   "is NOT lost): " + e.getFullDescription();
+    }
+    return e.getFullDescription();
+}
+
 // Every backend virtual is wrapped: `JAH_TRY { ... } JAH_CATCH(errSink, failValue)`.
 // Ogre throws Ogre::Exception; its own allocations may throw std::bad_alloc.
 #define JAH_TRY try
 #define JAH_CATCH(sink, ret)                                                          \
-    catch (Ogre::Exception &e) { (sink) = e.getFullDescription(); return ret; }       \
+    catch (Ogre::Exception &e) { (sink) = ::jahshaka::engine::detail::describeOgreFailure(e); return ret; } \
     catch (std::exception &e)  { (sink) = std::string("engine: ") + e.what(); return ret; }
 
 class OgreEngine;
@@ -7549,6 +7579,13 @@ public:
     /// Called from ONE site inside renderOneFrame; always throws.
     void raiseFrameFault();
     bool deviceLost() const override;
+    GpuFault gpuFault() const override;
+    /// The render system's out-of-memory count (VulkanDevice::getOutOfMemoryFailures,
+    /// the fork) and the last one's text; 0 / "" without the Vulkan render system.
+    unsigned vulkanOomCount() const;
+    std::string vulkanLastOom() const;
+    /// FORK-OOM-1: a Vulkan OOM inside this frame's work is terminal (GpuFault).
+    void latchOutOfMemoryInFrame();
     void advanceResources() override;
 
     // ---- VR (SPECS/VR_SPEC.md §4) -----------------------------------------
@@ -8250,6 +8287,20 @@ private:
     FrameFault mFrameFault = FrameFault::None;
     unsigned   mFrameFaultLeft = 0u;
     bool       mFrameFaultDeviceLost = false;
+    /// The in-record door (FrameFault::VulkanOutOfDeviceMemoryInRecord): an Ogre
+    /// frame listener, attached only while that kind is armed.
+    std::unique_ptr<Ogre::FrameListener> mInRecordFault;
+    bool mInRecordFaultAttached = false;
+    /// FORK-OOM-1 — THE FRAME'S WORK WINDOW. The render system's OOM count at the
+    /// top of the frame and at the end of its work (the after-record point where the
+    /// injected frame fault fires); an OOM between the two, caught by whoever, is
+    /// terminal. `mFrameThrewOom`: the frame's own catch saw one (the fallback
+    /// without the render system's count).
+    GpuFault mGpuFault = GpuFault::None;
+    unsigned mOomAtFrameStart = 0u;
+    unsigned mOomAtFrameWorkEnd = 0u;
+    bool     mFrameWorkEnded = false;
+    bool     mFrameThrewOom = false;
     /// WHAT STOPPING A CAPTURE LEAVES BEHIND. Switching the monitor off flushes
     /// the frames still waiting for their GPU samples (which arrive two frames
     /// late) into here, so the host's usual "stop, then drain" order does not

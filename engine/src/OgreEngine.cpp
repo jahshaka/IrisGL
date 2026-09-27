@@ -7,6 +7,14 @@
 #include "AtomPass.h"
 #include "HlmsAtom.h"
 
+#if JAH_RAY_QUERY
+// For the injected Vulkan frame faults only (raiseFrameFault): the render
+// system's own failure function and its device. Linked whenever the ray tier
+// is, which is every Linux build.
+#include "OgreVulkanDevice.h"
+#include "OgreVulkanRenderSystem.h"
+#endif
+
 #include <set>
 #include <unistd.h>
 
@@ -737,7 +745,7 @@ void frameCloseStep(std::string &sink, Step &&step) {
         } catch (...) {}
     };
     try { step(); }
-    catch (Ogre::Exception &e) { try { note(e.getFullDescription()); } catch (...) {} }
+    catch (Ogre::Exception &e) { try { note(::jahshaka::engine::detail::describeOgreFailure(e)); } catch (...) {} }
     catch (std::exception &e)  { try { note(std::string("engine: ") + e.what()); } catch (...) {} }
     catch (...)                { note("engine: an unknown exception closing the frame"); }
 }
@@ -772,11 +780,22 @@ void OgreEngine::renderOneFrame() {
     // the lost/stopped session's end and the device-lost latch. `closeRenderFrame`
     // holds all of it and the destructor is what runs it, so it runs on every
     // exit — the normal one, the VR pump's early return, and a throw.
+    // A FATAL OOM ENDED THE FRAMES (FORK-OOM-1, GpuFault::OutOfMemoryInFrame):
+    // Ogre's frame state is not whole after an OOM half-way through a frame, and
+    // the next frame into it crashes (measured: a null deref in the render-pass
+    // setup). Nothing is touched from here on; the host ends the process. This is
+    // TERMINAL until the evict/retry lane (after D) makes a mid-frame OOM
+    // recoverable.
+    if (mGpuFault == GpuFault::OutOfMemoryInFrame) return;
     struct FrameScope {
         OgreEngine *self;
         explicit FrameScope(OgreEngine *s) : self(s) { self->mInRenderFrame = true; }
         ~FrameScope() { self->closeRenderFrame(); }
     } frameScope(this);
+    // THE FRAME'S WORK WINDOW OPENS (FORK-OOM-1): the render system's OOM count now.
+    mOomAtFrameStart = vulkanOomCount();
+    mFrameWorkEnded = false;
+    mFrameThrewOom = false;
     JAH_TRY {
         // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
         // While a session runs this call IS the frame's clock: it polls the
@@ -1306,7 +1325,13 @@ void OgreEngine::renderOneFrame() {
             // exactly the position a `VK_ERROR_DEVICE_LOST` from the frame's
             // commit occupies, and a fault raised any earlier would prove
             // nothing about the acquires the close has to release.
-            if (mFrameFaultLeft) raiseFrameFault();
+            // THE FRAME'S WORK WINDOW CLOSES HERE (FORK-OOM-1): everything above
+            // is the frame's work; an OOM after this point (the fault below) is
+            // an ordinary error, the frame's state being complete.
+            mOomAtFrameWorkEnd = vulkanOomCount();
+            mFrameWorkEnded = true;
+            if (mFrameFaultLeft && mFrameFault != FrameFault::VulkanOutOfDeviceMemoryInRecord)
+                raiseFrameFault();
         }
         // POSE FOLLOWERS (Scene::followSkeleton — the selection silhouette over
         // an animating character). AFTER the frame, deliberately: the source's
@@ -1335,7 +1360,15 @@ void OgreEngine::renderOneFrame() {
                     rs->getMetrics().mIsRecordingMetrics;
             monitor::gMonitor->endFrame(mUpdatedScenes);
         }
-    } JAH_CATCH(mLastError, );
+    }
+    // JAH_CATCH spelled out: the frame also records whether what it caught was a
+    // Vulkan OOM (latchOutOfMemoryInFrame's fallback without the render system's count).
+    catch (Ogre::Exception &e) {
+        mLastError = detail::describeOgreFailure(e);
+        mFrameThrewOom = detail::isVulkanOutOfMemory(e);
+        return;
+    }
+    catch (std::exception &e) { mLastError = std::string("engine: ") + e.what(); return; }
     // NOTHING BELONGS HERE. Every line that used to follow the catch ran on the
     // normal path only (JAH_CATCH returns); the frame's close is
     // `closeRenderFrame`, called by the scope guard above.
@@ -1394,7 +1427,10 @@ void OgreEngine::closeRenderFrame() noexcept {
     });
     // ---- 3. a lost or stopped session ------------------------------------
     frameCloseStep(mLastError, [this] { endLostOrStoppedVrSession(); });
-    // ---- 4. the device-lost latch ----------------------------------------
+    // ---- 4. the fatal-OOM latch, then the device-lost latch ---------------
+    // (A loss found in the same frame overwrites the OOM's message: it is the
+    // stronger fact.)
+    frameCloseStep(mLastError, [this] { latchOutOfMemoryInFrame(); });
     frameCloseStep(mLastError, [this] { latchDeviceLost(); });
     // ---- 5. the deferred teardowns ---------------------------------------
     mInRenderFrame = false;
@@ -1457,6 +1493,71 @@ void OgreEngine::latchDeviceLost() {
         Ogre::LML_CRITICAL);
 }
 
+// A VULKAN OOM INSIDE A FRAME'S WORK IS TERMINAL (lane FORK-OOM-1, 2026-09-27).
+//
+// The fork no longer latches an OOM as a device loss (the device is fine, and an
+// OOM outside a frame is an ordinary error the caller sees). But an OOM half-way
+// through a frame leaves Ogre's frame state broken whoever caught it — measured
+// in the MERGE tier on a full card: 12 app runs logged the OOM, carried on, and
+// crashed in the NEXT frame (VulkanRenderPassDescriptor::performLoadActions, null).
+// So an OOM between the window's open (the top of renderOneFrame) and its close
+// (the end of the frame's work) ends the engine's frames — the same clean end as
+// a loss, with the honest reason. TERMINAL ONLY UNTIL THE EVICT/RETRY LANE (after
+// D) MAKES A MID-FRAME OOM RECOVERABLE.
+void OgreEngine::latchOutOfMemoryInFrame() {
+    if (mGpuFault != GpuFault::None || mDeviceLost) return;
+    const unsigned end = mFrameWorkEnded ? mOomAtFrameWorkEnd : vulkanOomCount();
+    const bool counted = end != mOomAtFrameStart;
+    // Without the render system's count: the frame's own catch, if it threw
+    // before its work was done.
+    const bool thrown = mFrameThrewOom && !mFrameWorkEnded;
+    if (!counted && !thrown) return;
+    mGpuFault = GpuFault::OutOfMemoryInFrame;
+    std::string what = vulkanLastOom();
+    if (what.empty()) what = mLastError;
+    for (char &c : what) if (c == '\n') c = ' ';
+    const bool host = what.find("VK_ERROR_OUT_OF_HOST_MEMORY") != std::string::npos;
+    mLastError = std::string("GPU out of memory (") +
+                 (host ? "VK_ERROR_OUT_OF_HOST_MEMORY" : "VK_ERROR_OUT_OF_DEVICE_MEMORY") +
+                 "; the device is NOT lost - " + what +
+                 ") inside a frame: the session cannot continue (a mid-frame out-of-memory "
+                 "is not recoverable yet)";
+    Ogre::LogManager::getSingleton().logMessage("Jahshaka: " + mLastError, Ogre::LML_CRITICAL);
+}
+
+GpuFault OgreEngine::gpuFault() const {
+    return mDeviceLost ? GpuFault::DeviceLost : mGpuFault;
+}
+
+unsigned OgreEngine::vulkanOomCount() const {
+#if JAH_RAY_QUERY
+    auto *vkRs = mRoot ? dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem()) : nullptr;
+    if (vkRs && vkRs->getVulkanDevice()) return vkRs->getVulkanDevice()->getOutOfMemoryFailures();
+#endif
+    return 0u;
+}
+
+std::string OgreEngine::vulkanLastOom() const {
+#if JAH_RAY_QUERY
+    auto *vkRs = mRoot ? dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem()) : nullptr;
+    if (vkRs && vkRs->getVulkanDevice()) return vkRs->getVulkanDevice()->getLastOutOfMemory();
+#endif
+    return std::string();
+}
+
+namespace {
+/// THE IN-RECORD DOOR (FrameFault::VulkanOutOfDeviceMemoryInRecord): Ogre fires
+/// `frameRenderingQueued` from inside `Root::_updateAllRenderTargets`, after the
+/// workspaces were recorded and before the swap — inside the frame's recording.
+class InRecordFaultListener final : public Ogre::FrameListener {
+public:
+    explicit InRecordFaultListener(std::function<void()> raise) : mRaise(std::move(raise)) {}
+    bool frameRenderingQueued(const Ogre::FrameEvent &) override { mRaise(); return true; }
+private:
+    std::function<void()> mRaise;
+};
+}   // namespace
+
 // ---------------------------------------------------------------------------
 // THE INJECTED FRAME FAULT (Engine::setFrameFault; FrameFault's note in
 // Types.h). Test-facing: the engine's frame close cannot be asserted without a
@@ -1470,6 +1571,20 @@ void OgreEngine::setFrameFault(FrameFault fault, unsigned frames) {
     // process. (The latch itself is one-way, by design: a lost device never
     // comes back.)
     if (mFrameFault != FrameFault::ThrowDeviceLost) mFrameFaultDeviceLost = false;
+    // The in-record door is a frame listener, attached only while it is armed.
+    const bool wantListener = mFrameFault == FrameFault::VulkanOutOfDeviceMemoryInRecord;
+    if (mRoot && wantListener && !mInRecordFaultAttached) {
+        if (!mInRecordFault)
+            mInRecordFault.reset(new InRecordFaultListener([this] {
+                if (mFrameFaultLeft && mFrameFault == FrameFault::VulkanOutOfDeviceMemoryInRecord)
+                    raiseFrameFault();
+            }));
+        mRoot->addFrameListener(mInRecordFault.get());
+        mInRecordFaultAttached = true;
+    } else if (mRoot && !wantListener && mInRecordFaultAttached) {
+        mRoot->removeFrameListener(mInRecordFault.get());
+        mInRecordFaultAttached = false;
+    }
 }
 
 void OgreEngine::raiseFrameFault() {
@@ -1480,6 +1595,26 @@ void OgreEngine::raiseFrameFault() {
     const FrameFault fault = mFrameFault;
     if (--mFrameFaultLeft == 0u) mFrameFault = FrameFault::None;
     if (fault == FrameFault::ThrowDeviceLost) mFrameFaultDeviceLost = true;
+#if JAH_RAY_QUERY
+    // THE RENDER SYSTEM'S OWN FAILURE PATH (lane FORK-OOM-1): the function every
+    // `checkVkResult` calls, with the live device, so the fork's latch decision
+    // is the thing under test. It always throws.
+    if (fault == FrameFault::VulkanOutOfDeviceMemory || fault == FrameFault::VulkanDeviceLost ||
+        fault == FrameFault::VulkanOutOfDeviceMemoryInRecord) {
+        auto *vkRs = mRoot ? dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem())
+                           : nullptr;
+        if (vkRs) {
+            const bool oom = fault != FrameFault::VulkanDeviceLost;
+            Ogre::onVulkanFailure(vkRs->getVulkanDevice(),
+                                  oom ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_DEVICE_LOST,
+                                  oom ? "Jahshaka: an injected frame fault (Engine::setFrameFault) - "
+                                        "TEST ONLY: vkAllocateMemory failed for a 67108864-byte pool"
+                                      : "Jahshaka: an injected frame fault (Engine::setFrameFault) - "
+                                        "TEST ONLY: a Vulkan call returned VK_ERROR_DEVICE_LOST",
+                                  "OgreEngine::renderOneFrame", __FILE__, __LINE__);
+        }
+    }
+#endif
     OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
                 "Jahshaka: an injected frame fault (Engine::setFrameFault) - TEST ONLY",
                 "OgreEngine::renderOneFrame");
@@ -2577,6 +2712,8 @@ OgreEngine::~OgreEngine() {
     // The pass listener's samplerblock references go back to the manager that
     // gave them (PHOTON-ENV-1 audit F10) — it dies with Root.
     try { FogHlmsListener::releaseSamplers(); } catch (...) {}
+    if (mRoot && mInRecordFaultAttached) mRoot->removeFrameListener(mInRecordFault.get());
+    mInRecordFaultAttached = false;
     delete mRoot;
     mRoot = nullptr;
     // ...and now, with Root gone, the instance and device the OpenXR runtime

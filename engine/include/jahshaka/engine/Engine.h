@@ -1979,7 +1979,8 @@ public:
     /// fired rather than passing vacuously.
     ///
     /// `FrameFault::None` (or `frames` 0) disarms. Nothing in Studio calls
-    /// this — it exists for `engine.frame_catch` and `vr.session`.
+    /// this — it exists for `engine.frame_catch`, `engine.oom_is_not_loss` and
+    /// `vr.session`.
     virtual void setFrameFault(FrameFault fault, unsigned frames) = 0;
 
     /// THE GPU IS GONE AND THIS PROCESS CANNOT COME BACK FROM IT (lane XID-2,
@@ -1994,6 +1995,14 @@ public:
     /// ever), so running destructors is how an application FREEZES instead of
     /// ending — which is what the owner saw. Log, tell the user, `_exit`.
     virtual bool deviceLost() const = 0;
+
+    /// THE FATAL GPU FAULT, IF ANY (`GpuFault`, lane FORK-OOM-1). `DeviceLost`
+    /// exactly when `deviceLost()`; `OutOfMemoryInFrame` once a Vulkan OOM hit
+    /// a frame's work — from then on `renderOneFrame` does nothing and
+    /// `lastError()` reads "GPU out of memory (VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    /// the device is NOT lost — <the pool>) ...". Either way the host ends the
+    /// process as it does for a loss (no orderly teardown), saying which.
+    virtual GpuFault gpuFault() const = 0;
 
     /// ADVANCES THE RENDERER'S RESOURCE BOOKKEEPING WITHOUT DRAWING ANYTHING
     /// (lane OPEN-FRAMES-1, 2026-09-15).
