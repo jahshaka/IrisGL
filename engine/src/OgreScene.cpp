@@ -21,10 +21,14 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     registerSceneGiBinding(mSceneMgr, &mGiBinding);
-    // THE VISIBILITY BUFFER'S MEASUREMENT SWITCH (never a mode): the whole process
-    // draws through PBS — the cost table's reference arm in the app, and the A/B
-    // that attributes a moved picture to the split.
+    // THE SELFTEST'S DOORS, a pair: JAHSHAKA_ATOM_DRAW_OFF shuts the split (every item
+    // through PBS) and JAHSHAKA_ATOM_OCCLUSION_OFF the id pass's occlusion (frustum-only,
+    // ATOM-OCCLUSION-1) — the scriptless --engine-selftest has no other way to take its
+    // four hashes' A/B (a whole process one way). Measuring switches, never modes: every
+    // other A/B goes through the verbs (world.setAtomDraw, world.setAtomOcclusion),
+    // paired in one process.
     if (std::getenv("JAHSHAKA_ATOM_DRAW_OFF")) mAtomDrawEnabled = false;
+    if (std::getenv("JAHSHAKA_ATOM_OCCLUSION_OFF")) mAtomOcclusionEnabled = false;
 }
 
 OgreScene::~OgreScene() { destroy(); }

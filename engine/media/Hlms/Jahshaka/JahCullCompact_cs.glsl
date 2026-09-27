@@ -55,6 +55,7 @@ layout( std430, ogre_U3 ) restrict buffer cntLayout { uint counter[]; };
 
 shared uint gScan[JAH_SCAN_WIDTH];
 shared uint gBase;
+shared uint gRejected;
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
@@ -64,9 +65,16 @@ void main()
 {
 	uint lane = gl_LocalInvocationID.x;
 	uint slot = gl_GlobalInvocationID.x;
-	uint mine = ( slot < params.counts.x && visible[slot] != 0u ) ? 1u : 0u;
+	// A SURVIVOR IS THE WORD 1 (JahCullTest_cs): the word 2 is an instance the depth
+	// test rejected — not drawn, and counted in count[16] (ATOM-OCCLUSION-1).
+	uint word = slot < params.counts.x ? visible[slot] : 0u;
+	uint mine = word == 1u ? 1u : 0u;
+	if( lane == 0u )
+		gRejected = 0u;
 	gScan[lane] = mine;
 	barrier();
+	if( word == 2u )
+		atomicAdd( gRejected, 1u );
 
 	// HILLIS-STEELE, inclusive, in place. Every step reads a value written by
 	// the step before it, so both barriers are load-bearing: the read of
@@ -83,6 +91,8 @@ void main()
 	uint total = gScan[JAH_SCAN_WIDTH - 1u];
 	if( lane == 0u )
 	{
+		if( gRejected != 0u )
+			atomicAdd( counter[16], gRejected );
 		gBase = total != 0u ? atomicAdd( counter[0], total ) : 0u;
 		if( total != 0u )
 		{

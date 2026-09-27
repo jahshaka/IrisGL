@@ -14,6 +14,8 @@
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <OgreRenderPassDescriptor.h>
+#include <OgreResourceTransition.h>
+#include <OgreRenderSystem.h>
 
 #include <algorithm>
 #include <cmath>
@@ -54,6 +56,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     mChainPrepass = chainDesc().prepass();
     mChainHitDecode = chainDesc().hitDecode;
     mChainAtomDraw = chainDesc().atomDraw;
+    mChainAtomOcclusion = chainDesc().atomOcclusion;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -121,8 +124,9 @@ ChainDesc OgreView::chainDesc() const {
     // letterbox and for the same kind of reason: it is not a post-process and it
     // changes no pixel of the picture — it is a resource a future screen-space
     // trace reads, and an offscreen capture is exactly where such a trace gets
-    // measured. It can only be true when a host deliberately asked for it, and
-    // nothing in this engine asks yet.
+    // measured. It is true only where a host deliberately asked for it — the id
+    // pass's own pyramid (ChainDesc::atomOcclusion, finishAtomOcclusion) is another
+    // flag, placed after the id pass, and needs none of this.
     //
     // The LEVEL COUNT is part of the graph (see ChainDesc::hzbLevels), derived
     // here from the view's achieved size — which is why it is read through
@@ -193,6 +197,7 @@ ChainDesc OgreView::chainDesc() const {
         // THE HIT DECODE (PHOTON-HIT-SHADE-1): the prepass' own rule, below.
         d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
         d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
+        finishAtomOcclusion(d);
         return d;
     }
     d.hdr            = mPostFx.hdr;
@@ -309,7 +314,16 @@ ChainDesc OgreView::chainDesc() const {
     // anti-aliasing the window's samples. The post shapes render at 1x into their own
     // targets and always carry it. AtomDrawStatus::passthroughViews counts these.
     d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
+    finishAtomOcclusion(d);
     return d;
+}
+
+/// THE ID PASS'S OCCLUSION (ChainDesc::atomOcclusion), decided LAST — after every rule
+/// that can take the id pass away. Its pyramid is FARTHEST, so a view that asked for a
+/// CLOSEST pyramid of its own keeps the id pass frustum-only (the reduce direction is
+/// one property of one job, and the two share the texture).
+void OgreView::finishAtomOcclusion(ChainDesc &d) const {
+    d.atomOcclusion = d.atomDraw && mScene && mScene->atomOcclusionWanted() && (!d.hzb || d.hzbFarthest);
 }
 
 bool OgreView::overlaysAllowed() const {
@@ -911,7 +925,8 @@ bool OgreView::setScene(Scene *scene) {
         // THE SCENE DECIDES THE ID PASS (ChainDesc::atomDraw): a view built before it
         // had a scene carries none, and the graph is re-derived HERE, before its first
         // attach, never one frame later.
-        if (mChainAtomDraw != chainDesc().atomDraw) rebuildDetachedWorkspaceDef();
+        if (mChainAtomDraw != chainDesc().atomDraw || mChainAtomOcclusion != chainDesc().atomOcclusion)
+            rebuildDetachedWorkspaceDef();
         return attachWorkspace();
     } JAH_CATCH(mError, false);
 }
@@ -1410,6 +1425,7 @@ void OgreView::rebuildDetachedWorkspaceDef() {
     mChainPrepass = chainDesc().prepass();
     mChainHitDecode = chainDesc().hitDecode;
     mChainAtomDraw = chainDesc().atomDraw;
+    mChainAtomOcclusion = chainDesc().atomOcclusion;
 }
 
 bool OgreView::dropWorkspaceForShadowRebuild() {
@@ -1499,7 +1515,9 @@ void OgreView::rebuildRtt(unsigned w, unsigned h) {
     // shape carries the id pass at 1x only), and the old definition's passes would
     // throw building their render pass against the new target — re-derived before
     // the attach, never a frame later.
-    if (hadWorkspace && mChainAtomDraw != chainDesc().atomDraw) rebuildDetachedWorkspaceDef();
+    if (hadWorkspace && (mChainAtomDraw != chainDesc().atomDraw ||
+                         mChainAtomOcclusion != chainDesc().atomOcclusion))
+        rebuildDetachedWorkspaceDef();
     if (hadWorkspace) attachWorkspace();
 }
 
@@ -1631,9 +1649,9 @@ bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char
 
 void OgreView::applyPendingResize() {
     // See the offscreen branch of resize(): the pyramid's level count is part of
-    // the graph, so a size change that moves it rebuilds the chain. Free (one
-    // integer compare) for every view that has no pyramid, which is all of them
-    // until a Photon spike turns one on.
+    // the graph, so a size change that moves it rebuilds the chain — the view's own
+    // (PostFxDesc::hzb); the id pass's occlusion builds whatever levels the texture has
+    // and is no graph change.
     const unsigned hzbBefore = mPostFx.hzb ? hzbLevelsFor(width(), height()) : 0u;
     applyPendingResizeImpl();
     if (mPostFx.hzb && hzbLevelsFor(width(), height()) != hzbBefore)
@@ -1785,6 +1803,37 @@ bool OgreView::warmUpShaders() {
                 req.mode = 3u;
                 std::string err;
                 mScene->recordGpuCull(mAtomCull, req, nullptr, err);
+                // ...AND THE OCCLUSION'S PERMUTATIONS (ATOM-OCCLUSION-1): the test against
+                // the pyramid, and the late pass's retest of the first list's rejected
+                // set — against this chain's pyramid (whatever it holds: nothing reads the
+                // answer, the id pass overwrites both lists on its first frame).
+                if (mChainAtomOcclusion) {
+                    Ogre::TextureGpu *hzb = nullptr, *depth = nullptr;
+                    if (mWorkspace)
+                        for (Ogre::CompositorNode *node : mWorkspace->getNodeSequence()) {
+                            if (!hzb) hzb = node->getDefinedTexture(Ogre::IdString("jahHzb"));
+                            if (!depth) depth = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+                        }
+                    if (hzb && depth) {
+                        // ...and the pyramid's own two jobs, dispatched by the late pass —
+                        // FIRST, which is what gives the pyramid a layout the culls may read.
+                        // The depth is DISCARDABLE and this is its first touch since the
+                        // solver's frame began: the solver refuses that to a read (in a
+                        // frame the id pass's render pass writes it first). So it is
+                        // declared written here (its content is garbage; nothing reads it).
+                        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+                        {
+                            Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+                            rs->getBarrierSolver().resolveTransition(rt, depth, Ogre::ResourceLayout::RenderTarget,
+                                                                     Ogre::ResourceAccess::Write, 0u);
+                            rs->executeResourceTransition(rt);
+                        }
+                        recordOcclusionPyramid(rs, depth, hzb);
+                        req.hzbLevels = hzb->getNumMipmaps();
+                        mScene->recordGpuCull(mAtomCull, req, hzb, err);
+                        mScene->recordGpuCull(mAtomCullLate, req, hzb, err, false, nullptr, &mAtomCull);
+                    }
+                }
             }
             atom->armForWarmUp(mScene->sceneManager(), true);
             ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName) && ok;
@@ -1808,6 +1857,7 @@ void OgreView::destroy() {
         mAtomListener.reset();
     }
     mAtomCull.destroy();
+    mAtomCullLate.destroy();
     atomIdPassForgetView(this);
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
