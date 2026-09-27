@@ -848,7 +848,7 @@ bool OgreScene::casterProbeForTest(CasterProbe &out) {
     out.drawn.reserve(records);
     for (uint32_t r = 0; r < records; ++r) {
         const uint32_t *rec = p.mapped + GpuCull::kCountElements + size_t(r) * 4u;
-        OgreScene::CasterProbe::Drawn d;
+        OgreScene::CasterProbe::Drawn d{};
         d.slot = rec[0];
         d.depth = rec[3];
         // THE MESH-LOCAL CLUSTER: the record names the global one (the mesh's base + c).

@@ -3650,7 +3650,7 @@ public:
         unsigned rect[4] = { 0, 0, 0, 0 };   ///< the map's rectangle in its target, texels
         unsigned survivors = 0, overflow = 0, missing = 0;
         unsigned long long triangles = 0ull;
-        struct Drawn { unsigned slot, cluster, depth; };   ///< cluster = MESH-LOCAL index
+        struct Drawn { unsigned slot = 0, cluster = 0, depth = 0; };   ///< cluster = MESH-LOCAL index
         std::vector<Drawn> drawn;
     };
     void armCasterProbeForTest(unsigned map, unsigned face);

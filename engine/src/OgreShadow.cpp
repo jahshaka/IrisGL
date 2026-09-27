@@ -46,6 +46,7 @@
 // against createShadowNodeWithSettings stays readable. It is a copy we own: an
 // upstream change to the helper does not reach it.
 #include "EnginePrivate.h"
+#include "AtomPass.h"
 
 #include <Compositor/Pass/PassClear/OgreCompositorPassClearDef.h>
 #include <Compositor/Pass/PassQuad/OgreCompositorPassQuadDef.h>
@@ -878,6 +879,12 @@ public:
     void passPreExecute(Ogre::CompositorPass *pass) override {
         const Ogre::CompositorNode *node = pass->getParentNode();
         if (!node || node->getName() != mNode) return;
+        // THE CASTER CUT'S PASS (ATOM-SHADOWS-1) is the second half of the scene pass it
+        // follows -- the same map's one render -- so it is not a pass of its own here.
+        if (pass->getType() == Ogre::PASS_CUSTOM) {
+            const auto *ad = dynamic_cast<const AtomPassDef *>(pass->getDefinition());
+            if (ad && ad->mCustomId == Ogre::IdString(kAtomCasterPassId)) return;
+        }
         ++mTotal;
         const Ogre::uint32 idx = pass->getDefinition()->mShadowMapIdx;
         if (idx < kMaxTrackedMaps) ++mPerMap[idx];
