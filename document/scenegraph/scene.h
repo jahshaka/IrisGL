@@ -177,8 +177,7 @@ enum class SkyType : int
 /// INSTANT RADIOSITY IS GONE (PHOTON_SPEC §7 E2 (4), 2026-09-15) and the
 /// ordinals moved with it. Safe by construction: `scenewriter.cpp` writes this
 /// as a stable STRING and says at the table that "the enum ints must stay free
-/// to be reordered"; a document that still says `instant_radiosity` reads back
-/// as VCT, which is what its tier resolves to now.
+/// to be reordered"; an unknown spelling reads as OFF.
 enum class GiMode : int
 {
 	OFF = 0,
@@ -573,9 +572,7 @@ public:
     ///       go first.
     ///   N = spend more per frame for less latency; the cost is linear.
     ///
-    /// Documents written before the fix wave carry `giAutoRefresh` instead and
-    /// map onto it (false -> 0, true -> 1); readers that still speak the old
-    /// spelling (world.settings' `autoRefresh`) report `budget > 0`.
+    /// world.settings' `autoRefresh` reports `budget > 0`.
     int giUpdateBudget = 1;
     iris::Vec3 giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
     // Hybrid probe-capture knobs (REFLECTIONS_ADOPTION_SPEC.md P3). Integrator
@@ -849,14 +846,8 @@ public:
     /// number for them. The march used to carry a second cutoff of its own that
     /// no document could write.
     ///
-    /// THE NAME SAYS BOTH HALVES (lane SMALL-ITEMS D, ledger §453 finding 4).
-    /// It was `rayReflectRoughness` while a ray was the only thing it gated;
-    /// once the march took the same dial that name described half of what the
-    /// field does, and the World row had been spelled `reflectionRoughnessCutoff`
-    /// all along. There is ONE name now, the row's, everywhere — document, desc,
-    /// mirror, file key and verb. A document written before the rename carries
-    /// the old key and still opens: the reader accepts both spellings and writes
-    /// the new one (src/io/sceneformat.h, readReflectionRoughnessCutoff).
+    /// ONE NAME, the World row's, everywhere — document, desc, mirror, file key
+    /// and verb (src/io/sceneformat.h, readReflectionRoughnessCutoff).
     ///
     /// PERCENT AND NOT A FLOAT, deliberately: every World row in this document
     /// is an int (worldmodes::Row), the tier table's columns are ints, and a
