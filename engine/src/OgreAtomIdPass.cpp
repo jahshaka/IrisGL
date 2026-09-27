@@ -91,9 +91,14 @@ bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogr
     // FARTHEST, in the render system's depth direction (JahHzbReduce_cs; the job's
     // properties, shared with a view's own pyramid — which is farthest wherever this
     // one is built, ChainDesc::atomOcclusion).
+    // THE PROPERTIES ARE PUT BACK after the build: a view's own pyramid's compute passes
+    // (PostFxDesc::hzb) set them once, at their chain's build, on this same job — a
+    // CLOSEST one elsewhere would otherwise be built farthest (chain.hzb caught it).
     const Ogre::int32 reverse = rs->isReverseDepth() ? 1 : 0;
-    if (reduce->getProperty("hzb_reverse_z") != reverse) reduce->setProperty("hzb_reverse_z", reverse);
-    if (reduce->getProperty("hzb_farthest") != 1) reduce->setProperty("hzb_farthest", 1);
+    const Ogre::int32 wasReverse = reduce->getProperty("hzb_reverse_z");
+    const Ogre::int32 wasFarthest = reduce->getProperty("hzb_farthest");
+    if (wasReverse != reverse) reduce->setProperty("hzb_reverse_z", reverse);
+    if (wasFarthest != 1) reduce->setProperty("hzb_farthest", 1);
     auto run = [&](Ogre::HlmsComputeJob *job) {
         Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
         job->analyzeBarriers(rt);
@@ -125,6 +130,8 @@ bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogr
     // The jobs' descriptor sets hold raw pointers: no binding outlives this build.
     reduce->_setUavTexture(0u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
     reduce->_setUavTexture(1u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+    if (wasReverse != reverse) reduce->setProperty("hzb_reverse_z", wasReverse);
+    if (wasFarthest != 1) reduce->setProperty("hzb_farthest", wasFarthest);
     return true;
 }
 
