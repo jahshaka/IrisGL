@@ -39,6 +39,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDraw.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgrePhotonView.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomIdPass.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomCasterPass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomPass.h
@@ -303,9 +304,31 @@ if(JAH_RAY_QUERY_OK)
             COMMENT "Compiling the visibility buffer's id pass (${_stage})"
             VERBATIM)
     endforeach()
+    # THE CASTER CUT (ATOM-SHADOWS-1, OgreAtomCasterPass.cpp): the same vertex pull, the
+    # stock caster's bias; a fragment stage for a point light's cube face only.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S vert -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                --vn katomCaster_vertSpv -o "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster.vert"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster.vert"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+        COMMENT "Compiling the caster cut (vert)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S frag -x
+                --vn katomCasterPoint_fragSpv -o "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster_point.frag"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster_point.frag"
+        COMMENT "Compiling the caster cut (point frag)"
+        VERBATIM)
     add_custom_target(JahshakaRayQuerySpv
                       DEPENDS "${JAH_RQ_GEN_DIR}/atom_id_vert_spv.h"
                               "${JAH_RQ_GEN_DIR}/atom_id_frag_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"

@@ -4543,6 +4543,18 @@ struct AtomDrawStatus {
     /// pyramid, found visible against this frame's, drawn by the late pass).
     bool     occlusion = false;
     unsigned occluded = 0, disoccluded = 0;
+    /// THE CASTER CUT (ATOM-SHADOWS-1): the shadow maps' Atom casters, each map drawn from
+    /// its light view's own cluster cut (the rule at the map's texel), as the scene last
+    /// read its caster counters back (a few frames late, never waited on) — of the last
+    /// frame that rendered any map: the caster draws recorded (one per map or cube face
+    /// re-rendered), the triangles and clusters they drew and the instances that survived
+    /// their frusta (summed over the maps), the instances drawn COARSE and drawn NOTHING
+    /// (summed; 0 is the invariant for the second), and the caster stream's budget in
+    /// indices (one stream, reused map after map). `casterValid` false before any read.
+    bool     casterValid = false;
+    unsigned casterMaps = 0, casterClusters = 0, casterInstances = 0;
+    unsigned casterOverflow = 0, casterMissing = 0, casterIndexBudget = 0;
+    unsigned long long casterTriangles = 0ull;
     /// The render system's frame counter at this read — the stamp the engine's
     /// JAHSHAKA_ATOM_TRACE log lines carry (ATOM-BLACK-FRAMES-1's coverage trace).
     unsigned long long frame = 0ull;

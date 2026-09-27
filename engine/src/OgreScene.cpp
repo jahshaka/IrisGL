@@ -23,6 +23,9 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     registerSceneGiBinding(mSceneMgr, &mGiBinding);
+    // WHICH SCENE A SHADOW NODE'S CASTER PASS DRAWS (ATOM-SHADOWS-1): the recorder is
+    // handed the pass's scene manager.
+    atomRegisterScene(mSceneMgr, this);
     // THE SELFTEST'S DOORS, a pair: JAHSHAKA_ATOM_DRAW_OFF shuts the split (every item
     // through PBS) and JAHSHAKA_ATOM_OCCLUSION_OFF the id pass's occlusion (frustum-only,
     // ATOM-OCCLUSION-1) — the scriptless --engine-selftest has no other way to take its
@@ -1517,6 +1520,9 @@ void OgreScene::destroy() {
         // this tree's VaoManager is alive, and the mesh table HOLDS MeshPtrs —
         // and a MeshPtr outliving Root throws in VaoManager (trap 1).
         mGpuScene.destroy();
+        // THE CASTER CUT'S LIST and its stats ring, with the tables it reads.
+        mCasterCull.destroy();
+        atomCasterPassForgetScene(this);
         // FIRST, before anything else in this scene goes: the overlay system's
         // render-queue listener is registered on THIS SceneManager, and the
         // teardown order the component needs is
@@ -1590,6 +1596,7 @@ void OgreScene::destroy() {
     } JAH_CATCH(mError, );
     FogHlmsListener::unregisterScene(mSceneMgr);
     unregisterSceneGiBinding(mSceneMgr);
+    atomUnregisterScene(mSceneMgr);
     mSceneMgr = nullptr;
 }
 

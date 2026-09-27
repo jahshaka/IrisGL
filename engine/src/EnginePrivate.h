@@ -798,6 +798,10 @@ constexpr const char *kAtomIdPassId = "atom_id";
 /// ...and of the LATE id pass, the disocclusion half of the two-pass occlusion
 /// (ChainDesc::atomOcclusion): the same recorder with the rejected set.
 constexpr const char *kAtomIdLatePassId = "atom_id_late";
+/// ...and of THE CASTER CUT (ATOM-SHADOWS-1, OgreAtomCasterPass.cpp): the PASS_CUSTOM that
+/// follows every caster scene pass of a shadow node on a device that runs the id pass
+/// (OgreShadow.cpp) and draws the map's Atom casters from the light's own cluster cut.
+constexpr const char *kAtomCasterPassId = "atom_caster";
 /// The chain's id image (R32G32_UINT, AtomId's words): what the id pass writes and
 /// the screen decode reads (OgreChain.cpp defines it; the listener finds it by name).
 constexpr const char *kAtomIdTexture = "jahAtomIds";
@@ -847,6 +851,19 @@ void registerAtomIdPass();
 void releaseAtomIdPass();
 /// A view going away: its stats ring (OgreAtomIdPass.cpp) goes with it.
 void atomIdPassForgetView(const OgreView *view);
+/// OgreAtomCasterPass.cpp — THE CASTER CUT's device half (ATOM-SHADOWS-1): its recorder
+/// on the provider (beside the id pass's), its pipelines destroyed before Root, and a
+/// scene going away takes its stats ring with it.
+class OgreScene;
+void registerAtomCasterPass();
+void releaseAtomCasterPass();
+void atomCasterPassForgetScene(const OgreScene *scene);
+/// Which scene a scene manager renders (the caster recorder is handed a pass and its
+/// scene manager: a shadow node runs in views, probes and cards alike, and only a
+/// view's workspace is in atomViewOf's registry). OgreScene registers itself.
+void atomRegisterScene(const Ogre::SceneManager *sm, OgreScene *scene);
+void atomUnregisterScene(const Ogre::SceneManager *sm);
+OgreScene *atomSceneOf(const Ogre::SceneManager *sm);
 /// THE OCCLUSION'S PYRAMID (ATOM-OCCLUSION-1, OgreAtomIdPass.cpp): `hzb`'s every level
 /// rebuilt from `depth` — the seed and a reduce per level (farthest), dispatched through
 /// HlmsCompute with Ogre's barrier solver. False when the jobs are not staged.
@@ -3600,6 +3617,44 @@ public:
     /// cursor). Every GpuCull sizes its stream from at least this, so a view born into
     /// a heavy scene — a screenshot, a thumbnail — does not start small and overflow.
     void noteCutIndexNeed(uint32_t indices) { mCutIndexNeed = std::max(mCutIndexNeed, indices); }
+    /// THE CASTER CUT'S LIST (ATOM-SHADOWS-1, OgreAtomCasterPass.cpp): ONE per scene,
+    /// reused map after map inside a frame — the recorder serialises the uses (the
+    /// previous draw's reads before the next cull's writes, the id pass's own edge), so a
+    /// scene pays one stream however many maps its views, mirrors and probes render.
+    /// Seeded from the scene's high-water mark like a view's list, grown by its own
+    /// overflows; it never raises the mark (a map's cut is not a view's).
+    detail::GpuCull &casterCull() { return mCasterCull; }
+    /// What the caster recorder read back (AtomDrawStatus's caster fields).
+    struct CasterStats {
+        bool valid = false;
+        unsigned maps = 0, clusters = 0, instances = 0, overflow = 0, missing = 0, indexBudget = 0;
+        unsigned long long triangles = 0ull;
+    };
+    void setCasterStats(const CasterStats &s) { mCasterStats = s; }
+    /// True while this scene files any item in the Atom queue (the split's word set is
+    /// not empty): the caster pass's gate.
+    bool hasAtomItems() const { return !mAtomWords.empty(); }
+    /// THE CASTER CUT'S TEST DOOR (shadow.atom_cut; never a mode): arm it for ONE map of
+    /// the VIEW kind's shadow node (`map` = the shadow map index, `face` = the cube face of
+    /// a point map, 0 otherwise); the next frame that renders that map copies its cut —
+    /// the request the recorder built and every drawn cluster — and the read below returns
+    /// it once that frame has retired (false before). A read re-arms nothing.
+    struct CasterProbe {
+        unsigned map = 0, face = 0;
+        bool orthographic = false;
+        float eye[3] = { 0, 0, 0 };
+        float projScaleY = 0, viewportHeight = 0, tolerance = 0;
+        float biasScale = 0;              ///< the shadow camera's constant-bias scale
+        float depthNear = 0, depthFar = 0;   ///< the map's depth range (the caster's depthRange)
+        float viewProj[16] = {};          ///< rows, the cut's (the camera's RS-depth VP)
+        unsigned rect[4] = { 0, 0, 0, 0 };   ///< the map's rectangle in its target, texels
+        unsigned survivors = 0, overflow = 0, missing = 0;
+        unsigned long long triangles = 0ull;
+        struct Drawn { unsigned slot, cluster, depth; };   ///< cluster = MESH-LOCAL index
+        std::vector<Drawn> drawn;
+    };
+    void armCasterProbeForTest(unsigned map, unsigned face);
+    bool casterProbeForTest(CasterProbe &out);
     uint32_t cutIndexNeed() const { return mCutIndexNeed; }
     uint32_t mCutIndexNeed = 0u;
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
@@ -5913,6 +5968,8 @@ private:
     /// tables it reads are owned by; a consumer that wants two culls of one
     /// scene in a frame is stage 3's problem and gets a second instance.
     detail::GpuCull mGpuCull;
+    detail::GpuCull mCasterCull;   ///< casterCull(): the shadow maps' caster cut (ATOM-SHADOWS-1)
+    CasterStats mCasterStats;
     mutable bool mGpuSceneRefused = false;   ///< create() said no (headless); do not retry
     mutable std::vector<uint32_t> mGpuDirty;    ///< this update's slots (kept, not reallocated)
     mutable std::vector<uint32_t> mGpuForced;   ///< explicit marks since the last update

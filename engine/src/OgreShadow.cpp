@@ -301,6 +301,26 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     //   focused: one scene pass (spot) + 6 cube faces + 1 copy     (N * 8)
     def->setNumTargetPass((perMapClears ? numMaps : 1u) + 3u + N * 8u);
 
+    // THE ATOM CASTERS (ATOM-SHADOWS-1; OgreAtomCasterPass.cpp): where this device
+    // runs the visibility buffer, every caster scene pass SKIPS the Atom queue and is
+    // followed, on the same target and map, by the caster cut's PASS_CUSTOM — the
+    // light's own cluster cut, one indirect command per instance, depth only. A
+    // device without the id pass (the Mac, the NULL render system) never files an
+    // item there and keeps upstream's pass list exactly.
+    const bool atomCasters = atomIdPassSupported(rs);
+    const auto addAtomCaster = [&](Ogre::CompositorTargetDef *target, Ogre::CompositorPassSceneDef *scene) {
+        if (!atomCasters) return;
+        scene->setSkipRenderQueue(kAtomRenderQueue, true);
+        Ogre::CompositorPassDef *p = target->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomCasterPassId));
+        p->setAllLoadActions(Ogre::LoadAction::Load);
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        p->mStoreActionDepth = Ogre::StoreAction::Store;
+        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        p->mShadowMapIdx = scene->mShadowMapIdx;
+        p->mIncludeOverlays = false;
+        p->mProfilingId = "Jahshaka atom caster";
+    };
+
     // What this node's maps draw: ONE definition shared with the lamp-map
     // cache's caster scan (shadowCasterChannels — R1/R2 widen it per kind).
     const ShadowNodeKind kind =
@@ -363,7 +383,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     for (unsigned j = 0u; j < 3u; ++j) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setShadowMapSupportedLightTypes(directionalMask);
-        target->setNumPasses(1u);
+        target->setNumPasses(atomCasters ? 2u : 1u);
         Ogre::CompositorPassSceneDef *scene =
             static_cast<Ogre::CompositorPassSceneDef *>(target->addPass(Ogre::PASS_SCENE));
         scene->mShadowMapIdx = j;
@@ -371,6 +391,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         scene->mLastRQ = 255u;
         scene->mIncludeOverlays = false;
         scene->mVisibilityMask = casterMask;
+        addAtomCaster(target, scene);
     }
 
     // (c) The focused maps: a spot pass, then the point-light cubemap + copy.
@@ -380,7 +401,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     for (unsigned i = 0u; i < N; ++i) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setShadowMapSupportedLightTypes(spotMask);
-        target->setNumPasses(1u);
+        target->setNumPasses(atomCasters ? 2u : 1u);
         Ogre::CompositorPassSceneDef *scene =
             static_cast<Ogre::CompositorPassSceneDef *>(target->addPass(Ogre::PASS_SCENE));
         scene->mShadowMapIdx = 3u + i;
@@ -388,12 +409,13 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         scene->mLastRQ = 255u;
         scene->mIncludeOverlays = false;
         scene->mVisibilityMask = casterMask;
+        addAtomCaster(target, scene);
     }
     for (unsigned i = 0u; i < N; ++i) {
         for (Ogre::uint32 face = 0u; face < 6u; ++face) {
             Ogre::CompositorTargetDef *target = def->addTargetPass(cubeName, face);
             target->setShadowMapSupportedLightTypes(pointMask);
-            target->setNumPasses(1u);
+            target->setNumPasses(atomCasters ? 2u : 1u);
             Ogre::CompositorPassSceneDef *scene =
                 static_cast<Ogre::CompositorPassSceneDef *>(target->addPass(Ogre::PASS_SCENE));
             scene->setAllLoadActions(Ogre::LoadAction::Clear);
@@ -405,6 +427,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
             scene->mLastRQ = 255u;
             scene->mIncludeOverlays = false;
             scene->mVisibilityMask = casterMask;
+            addAtomCaster(target, scene);
         }
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setShadowMapSupportedLightTypes(pointMask);

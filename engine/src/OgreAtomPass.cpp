@@ -56,9 +56,25 @@ void AtomPass::execute(const Ogre::Camera *lodCamera) {
     // the pass's profiling id).
     profilingBegin();
     notifyPassEarlyPreExecuteListeners();
+    Ogre::RenderSystem *rs = mParentNode->getRenderSystem();
+    // THE GATE (AtomPassGate): nothing to record — the pass is nothing, and whatever
+    // render pass Ogre has open stays open.
+    if (const AtomPassGate *gate = gProvider ? gProvider->gate(mDef->mCustomId) : nullptr) {
+        AtomPassContext probe;
+        probe.customId = mDef->mCustomId;
+        probe.pass = this;
+        probe.renderSystem = rs;
+        probe.sceneManager = mSceneManager;
+        probe.lodCamera = lodCamera;
+        if (*gate && !(*gate)(probe)) {
+            notifyPassPreExecuteListeners();
+            notifyPassPosExecuteListeners();
+            profilingEnd();
+            return;
+        }
+    }
     // CompositorPassCompute::execute's discipline: close Ogre's render-pass encoder
     // before recording anything of ours.
-    Ogre::RenderSystem *rs = mParentNode->getRenderSystem();
     rs->endRenderPassDescriptor();
     notifyPassPreExecuteListeners();
 
@@ -93,7 +109,10 @@ AtomPassProvider *AtomPassProvider::instance() { return gProvider; }
 void AtomPassProvider::uninstall(Ogre::CompositorManager2 *cm) {
     if (cm && gProvider && cm->getCompositorPassProvider() == gProvider)
         cm->setCompositorPassProvider(nullptr);
-    if (gProvider) gProvider->mRecorders.clear();
+    if (gProvider) {
+        gProvider->mRecorders.clear();
+        gProvider->mGates.clear();
+    }
     gProvider = nullptr;
 }
 
@@ -106,6 +125,17 @@ void AtomPassProvider::setRecorder(const std::string &customId, AtomPassRecorder
 const AtomPassRecorder *AtomPassProvider::recorder(Ogre::IdString customId) const {
     auto it = mRecorders.find(customId);
     return it == mRecorders.end() ? nullptr : &it->second;
+}
+
+void AtomPassProvider::setGate(const std::string &customId, AtomPassGate gate) {
+    const Ogre::IdString id(customId);
+    if (gate) mGates[id] = std::move(gate);
+    else mGates.erase(id);
+}
+
+const AtomPassGate *AtomPassProvider::gate(Ogre::IdString customId) const {
+    auto it = mGates.find(customId);
+    return it == mGates.end() ? nullptr : &it->second;
 }
 
 Ogre::CompositorPassDef *AtomPassProvider::addPassDef(Ogre::CompositorPassType,
