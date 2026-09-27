@@ -231,6 +231,15 @@ public:
     /// to see the edit cannot destroy the draws the first one re-derived. True when
     /// it forgot.
     bool forgetDecodeTwinIfMoved(const Ogre::HlmsDatablock *pbs);
+    /// ...the same question WITHOUT forgetting (the hit decode's staleness test,
+    /// RayQueryTier::decodeTwinsStale): true when `pbs` serves a twin whose bucket
+    /// its current state no longer matches, with the datablock's material word.
+    /// `pbs` is a KEY first — dereferenced only when a twin is registered for it,
+    /// and every site that destroys a PBS datablock forgets its twin first.
+    bool decodeTwinMoved(const Ogre::HlmsDatablock *pbs, uint32_t &word);
+    /// forgetDecodeTwinIfMoved for EVERY datablock a twin serves (the PBS change
+    /// log's overflow answer, OgreEngine::drainPbsChanges).
+    void forgetMovedDecodeTwins();
     /// THE CLASSIFIER'S DATABLOCK (ATOM-DECODE-CLASS-1): an HlmsAtom datablock of
     /// its own, which the shader generator recognises (the renderable property
     /// atom_classify: a pixel shader that writes the pixel's class as its depth and

@@ -700,7 +700,7 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
     inst.material = cand.material;
     inst.seen = true;
     inst.firstCard = unsigned(mCards.size());
-    const Ogre::Aabb box = cand.item->getWorldAabbUpdated();
+    const Ogre::Aabb &box = cand.box;   // measured by the scene this frame
     inst.centre = box.mCenter;
     inst.halfSize = box.mHalfSize;
     inst.rotation = rot;
@@ -833,7 +833,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             inst.itemSlot = cand.itemSlot;
             mTableDirty = true;
         }
-        const Ogre::Aabb box = cand.item->getWorldAabbUpdated();
+        const Ogre::Aabb &box = cand.box;
         inst.distance = (box.mCenter - view.viewerPos).length();
         // RESIDENCY IS RE-DECIDED EVERY FRAME, in both directions. An instance
         // the camera has walked away from gives its pages back on the frame it
@@ -943,16 +943,15 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     for (const CardSceneView::Candidate &cand : view.candidates) {
         if (!cand.item || !cand.cards || cand.cards->empty()) continue;
         if (mByNode.find(cand.node) != mByNode.end()) continue;
-        const Ogre::Aabb box = cand.item->getWorldAabbUpdated();
-        if ((box.mCenter - view.viewerPos).squaredLength() > r2) continue;
+        if ((cand.box.mCenter - view.viewerPos).squaredLength() > r2) continue;
         arriving.push_back(&cand);
     }
     if (arriving.empty()) return;
     const Ogre::Vector3 eye = view.viewerPos;
     std::sort(arriving.begin(), arriving.end(),
               [eye](const CardSceneView::Candidate *a, const CardSceneView::Candidate *b) {
-                  const float da = (a->item->getWorldAabb().mCenter - eye).squaredLength();
-                  const float db = (b->item->getWorldAabb().mCenter - eye).squaredLength();
+                  const float da = (a->box.mCenter - eye).squaredLength();
+                  const float db = (b->box.mCenter - eye).squaredLength();
                   if (da != db) return da < db;
                   return a->node < b->node;
               });

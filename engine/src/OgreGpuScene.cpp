@@ -82,6 +82,10 @@ bool GpuScene::create(Ogre::VaoManager *vao, std::string &err) {
 }
 
 void GpuScene::destroy() {
+    // THE FEED'S CONSUMERS HEAR IT FIRST: every slot they derived from is gone.
+    // They stay registered — a re-created table starts empty and they follow it.
+    for (GpuSceneObserver *o : mObservers) o->gpuSceneReset();
+    mPatched.clear();
     if (mVao) {
         if (mInstanceBuffer) mVao->destroyUavBuffer(mInstanceBuffer);
         if (mMeshBuffer) mVao->destroyUavBuffer(mMeshBuffer);
@@ -374,6 +378,37 @@ void GpuScene::stage(uint32_t slot, const GpuInstance &in) {
     std::memcpy(dst.prevWorld, prev, sizeof(prev));
     mBorn[slot] = 1u;
     ++mWrites;
+    notify(slot, &dst);
+}
+
+void GpuScene::addObserver(GpuSceneObserver *o) {
+    if (!o || std::find(mObservers.begin(), mObservers.end(), o) != mObservers.end()) return;
+    mObservers.push_back(o);
+    // THE PRIMING WALK — the only walk the feed ever makes, once per consumer.
+    for (uint32_t i = 0; i < mSlotCount && i < mSlotCapacity; ++i)
+        if (mBorn[i]) o->gpuSlotChanged(i, &mMirror[i]);
+}
+
+void GpuScene::removeObserver(GpuSceneObserver *o) {
+    mObservers.erase(std::remove(mObservers.begin(), mObservers.end(), o), mObservers.end());
+}
+
+void GpuScene::patchRayLevel(uint32_t slot, uint32_t level) {
+    if (slot >= mSlotCapacity || !mBorn[slot] || mMirror[slot].ids[3] == level) return;
+    mMirror[slot].ids[3] = level;
+    mPatched.push_back(slot);
+    ++mWrites;
+    notify(slot, &mMirror[slot]);
+}
+
+void GpuScene::flushPatched() {
+    if (mPatched.empty() || !live()) return;
+    mCopySet.assign(mPatched.begin(), mPatched.end());
+    mPatched.clear();
+    std::sort(mCopySet.begin(), mCopySet.end());
+    mCopySet.erase(std::unique(mCopySet.begin(), mCopySet.end()), mCopySet.end());
+    while (!mCopySet.empty() && mCopySet.back() >= mSlotCapacity) mCopySet.pop_back();
+    copySet();
 }
 
 void GpuScene::onSlotFreed(uint32_t slot) {
@@ -382,6 +417,7 @@ void GpuScene::onSlotFreed(uint32_t slot) {
     mBorn[slot] = 0u;
     mStagedAt[slot] = 0u;
     mFreedSlots.push_back(slot);
+    notify(slot, nullptr);
 }
 
 void GpuScene::onSlotMoved(uint32_t from, uint32_t to) {
@@ -393,6 +429,7 @@ void GpuScene::onSlotMoved(uint32_t from, uint32_t to) {
     std::memcpy(&mMirror[to], &mMirror[from], sizeof(GpuInstance));
     mBorn[to] = mBorn[from];
     mStagedAt[to] = 0u;      // it must be re-staged/copied this update
+    notify(to, mBorn[to] ? &mMirror[to] : nullptr);
     onSlotFreed(from);       // ...and the tail it came from is cleared and copied
 }
 
@@ -430,6 +467,9 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long lon
     for (uint32_t slot : mFreedSlots)
         if (slot < mSlotCapacity && !stagedThisUpdate(slot)) mCopySet.push_back(slot);
     mFreedSlots.clear();
+    // RAY-LEVEL PATCHES nobody flushed yet (patchRayLevel) ride along too.
+    mCopySet.insert(mCopySet.end(), mPatched.begin(), mPatched.end());
+    mPatched.clear();
 
     // LAST FRAME'S MOVERS THAT DID NOT MOVE AGAIN. Their previous pose is now
     // their current one; without this a mover that stops carries a stale
@@ -479,12 +519,15 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long lon
 
     if (mCopySet.empty()) return;   // A STILL FRAME COPIES NOTHING AT ALL.
 
-    const auto t0 = std::chrono::steady_clock::now();
     std::sort(mCopySet.begin(), mCopySet.end());
     mCopySet.erase(std::unique(mCopySet.begin(), mCopySet.end()), mCopySet.end());
     while (!mCopySet.empty() && mCopySet.back() >= mSlotCapacity) mCopySet.pop_back();
-    if (mCopySet.empty()) return;
+    copySet();
+}
 
+void GpuScene::copySet() {
+    if (mCopySet.empty()) return;
+    const auto t0 = std::chrono::steady_clock::now();
     // THE RUN COALESCER. Sorted slots collapse into contiguous runs, and a run
     // is one copy — a scene whose whole item list moved is ONE copy, a scene
     // with one mover is one copy of 160 bytes.
@@ -545,6 +588,7 @@ uint32_t GpuScene::acquireMesh(const Ogre::MeshPtr &meshPtr, const GpuMesh &desc
     }
     mMeshEntries[index].mesh = meshPtr;
     mMeshEntries[index].refs = 1u;
+    ++mMeshSetSerial;
     mPartitionsDirty = true;      // a NEW mesh: its levels have no partitions yet
     mMeshIndex[mesh] = index;
     mMeshMirror[index] = desc;
@@ -576,6 +620,7 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
     const bool hadDag = !mMeshEntries[index].clusters.empty();
     mMeshEntries[index] = MeshEntry();
     mMeshIndex.erase(it);
+    ++mMeshSetSerial;
     mFreeMeshSlots.push_back(index);
     mPartitionsDirty = true;      // the last reference: its partitions go with it
     if (hadDag) mClusterDirty = true;   // ...and its clusters
@@ -1215,12 +1260,15 @@ void OgreScene::updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, floa
         if (want == mRayLevel[i]) continue;
         ++mRayLevelRefits;
         mRayLevel[i] = want;
-        // THE TABLE IS WRITTEN THROUGH THE MIRROR'S OWN PATH: the slot is
-        // re-staged from its node (so `prevWorld` keeps the one rule it has)
-        // and the dirty list carries it to the device with the frame's other
-        // writes. A direct poke into the mirror would not be copied at all.
-        if (i < mItemNodes.size() && mItemNodes[i]) markGpuSlotDirty(*mItemNodes[i]);
+        // THE TABLE IS PATCHED IN PLACE (ATOM-CPU-WALKS-1): ids[3] alone, prevWorld
+        // untouched, the feed told, the entry queued. This pass runs AFTER the
+        // frame's scan, so a re-stage (what this used to do) reached the device a
+        // frame late — the ray tier, which now writes its instances on the device
+        // from this table, would have built from the previous level.
+        mGpuScene.patchRayLevel(i, want);
     }
+    // ...and on the device before the ray tier reads it, this frame.
+    mGpuScene.flushPatched();
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,6 +1310,7 @@ GpuSceneStatus OgreScene::gpuSceneStatus() const {
     st.rayLevelEvals = mRayLevelEvals;
     st.rayLevelRefits = mRayLevelRefits;
     st.rayLevelWalks = mRayLevelWalks;
+    st.feedNotifies = mGpuScene.notifies();
     return st;
 }
 

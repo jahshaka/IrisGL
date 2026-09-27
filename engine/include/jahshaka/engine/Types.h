@@ -4400,11 +4400,17 @@ struct RayQueryStatus {
     /// GPU milliseconds of the last batch of bottom-level builds, same reading.
     /// -1 until one has been measured; a still scene never rebuilds one.
     float blasMs = -1.0f;
-    /// CPU milliseconds THE INSTANCE WALK cost — only the walk that writes the
-    /// transforms into the mapped buffer, not the command recording around it.
-    /// This is the number that scales with instance count and the one a budget
-    /// is kept on.
+    /// CPU milliseconds of THE INSTANCE UPDATE's host side — since ATOM-CPU-WALKS-1
+    /// the instances are written ON THE DEVICE (the instance job rq_tlas_write.comp, one
+    /// thread per slot, from the GPU scene's table), so this is the per-MESH work
+    /// (missing structures' wants, the job's inputs when they changed) and the
+    /// dispatch: it no longer scales with the instance count.
     float gatherMs = -1.0f;
+    /// The instance job's dispatches, ever, and the slots the change feed has told
+    /// this tier about (the traced set, its structures and words kept per change —
+    /// a still frame adds none).
+    unsigned long long tlasJobDispatches = 0ull;
+    unsigned long long feedSlotVisits = 0ull;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
     /// 0.5 ms at 8k instances buys the better tree); the refit is the
@@ -4521,6 +4527,11 @@ struct AtomDrawStatus {
     /// the stream's main region (drawn COARSE that frame: their root cut, from the
     /// reserve), the instances that fit nothing (drawn NOTHING — 0 is the invariant),
     /// and the budget itself. `cutValid` false before a view has read any.
+    /// THE CHANGE-DRIVEN WORDS (ATOM-CPU-WALKS-1), cumulative: the slots the GPU
+    /// scene's change feed told the split's word set about (a still frame adds none —
+    /// atom.words_still), and the PBS change log's drain, process-wide: the notes and
+    /// the distinct datablocks it handled.
+    unsigned long long wordSlotVisits = 0ull, pbsNotes = 0ull, pbsDatablocks = 0ull;
     bool     cutValid = false;
     unsigned cutClusters = 0, cutIndices = 0, cutEvaluated = 0;
     unsigned cutOverflow = 0, cutMissing = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
@@ -7533,6 +7544,11 @@ struct GpuSceneStatus {
     /// Walks of the ray-level pass (one per frame in which the camera or the
     /// scene moved; a still frame runs none).
     unsigned long long rayLevelWalks = 0;
+    /// THE CHANGE FEED's notifications, ever (ATOM-CPU-WALKS-1): slot changes told to
+    /// the consumers that derive from the table (the split's words, the ray tier's
+    /// traced set, the card candidates) — each one is that many visits for each. A
+    /// still frame adds none; a mover frame adds one per moved slot.
+    unsigned long long feedNotifies = 0;
 };
 
 /// ONE CONE FOR THE ONE VOXEL READER'S PARITY HARNESS (PHOTON-READER-1;

@@ -3,6 +3,8 @@
 // own translation units.
 #include "EnginePrivate.h"
 
+#include <optional>
+
 #include <cstdlib>
 #include "HlmsAtom.h"
 
@@ -28,10 +30,19 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     // other A/B goes through the verbs (world.setAtomDraw, world.setAtomOcclusion),
     // paired in one process.
     if (std::getenv("JAHSHAKA_ATOM_DRAW_OFF")) mAtomDrawEnabled = false;
+    // THE ATOM ITEMS' WORDS follow the table from its first write (ATOM-CPU-WALKS-1).
+    mGpuScene.addObserver(&mAtomFeed);
+    mCardFeed.scene = this;
+    mGpuScene.addObserver(&mCardFeed);
     if (std::getenv("JAHSHAKA_ATOM_OCCLUSION_OFF")) mAtomOcclusionEnabled = false;
 }
 
-OgreScene::~OgreScene() { destroy(); }
+OgreScene::~OgreScene() {
+    destroy();
+    // Before the members die: the table's destructor tells its observers.
+    mGpuScene.removeObserver(&mAtomFeed);
+    mGpuScene.removeObserver(&mCardFeed);
+}
 
 const std::string &OgreScene::name() const { return mName; }
 
@@ -1922,6 +1933,13 @@ void OgreScene::updateSurfaceCache() {
     // Over `mLightNodes`, which is the engine's own light index (a hint that is
     // a superset), so this is a handful of quantised folds and not a walk of
     // the node map.
+    // THE LIGHT WALK IS ITS OWN MONITOR STAGE (ATOM-CPU-WALKS-1): O(lights) every
+    // frame, not the candidate walk — 0.55 ms of engine.cards at the world's 500
+    // lamps once the candidates stopped being a walk. It stays a walk: the fold reads
+    // each lamp's DERIVED pose, and not every writer of a lamp's node says so (the
+    // transform epoch counts the document's and Scene::setNodeTransform's writes).
+    std::optional<monitor::Stage> lightStage;
+    lightStage.emplace("engine.cards.lights");
     unsigned long long lightSig = 1469598103934665603ull;
     const auto fold = [&lightSig](unsigned long long v) {
         lightSig ^= v;
@@ -1973,6 +1991,7 @@ void OgreScene::updateSurfaceCache() {
         // the frame's cameras, and a card lights surfaces off screen.
         view.lights.push_back(lit->second.light);
     }
+    lightStage.reset();
     // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected
     // with, and its serial in the radiance signature — a layer change or a
     // scroll capture relights the resident cards (and recaptures none).
@@ -2035,36 +2054,24 @@ void OgreScene::updateSurfaceCache() {
         view.indirectSerial = sig;
     }
 
-    // THE CANDIDATE LIST — THE SCENE'S OWN WALK, handed over rather than
-    // reached for. The predicate is the same one the voxel side uses, and each
-    // clause is the same statement it makes there:
-    //   * `kGiGeometryBit` — a surface that BOUNCES light. It excludes the sky,
-    //     unlit overlays, line meshes, billboards, helpers and backdrops for
-    //     free, and it excludes a MOVER, which is the point: a card set is
-    //     stored lighting, and a mover is the engine's word for "not part of
-    //     the room's stored lighting".
-    //   * `shown` — a hidden object photographs nothing.
-    //   * a baked card list — every skinned mesh, every line mesh and every
-    //     model opened without a bake has none, and gets none here.
-    //   * OPAQUE (PHOTON-GATHER-1d fix round) — a card records a surface's
-    //     albedo, normal and depth as the capture's prepass writes them, and a
-    //     blended (Fade/Blend/Glass) sub-item is not a surface the prepass
-    //     holds: the gather's F2 discard keeps it out, and the capture's own
-    //     piece fills the same hook. An item with ANY blended sub-item gets no
-    //     cards; its bounce is the voxels'.
-    // The radius itself is the cache's; this walk hands over everything that
-    // COULD be resident and lets the Component decide who is.
-    view.candidates.reserve(mItemNodes.size());
-    for (Node *n : mItemNodes) {
+    // THE CANDIDATE LIST — handed over rather than reached for, and since
+    // ATOM-CPU-WALKS-1 NOT A WALK: the change feed files every item that can hold
+    // cards (cardEligible, below) by where the table says it is, and the frame
+    // takes the columns the residency sphere reaches. Each offered item's box is
+    // measured NOW (pre-frame, the recomputing read) — the cache's own radius test
+    // and its sort read it from the candidate instead of measuring it again. The
+    // cheap half of the predicate (shown, the GI channel) is re-read here so a hide
+    // this frame is exact; the rest (blend, the card list) changes only through a
+    // re-staged slot (a material edit reaches it through the PBS change log).
+    mCardQuery.clear();
+    mCardFeed.query(mGiCamPos, view.radius, mCardQuery);
+    view.candidates.reserve(mCardQuery.size());
+    for (const uint32_t slot : mCardQuery) {
+        if (slot >= mItemNodes.size()) continue;
+        Node *n = mItemNodes[slot];
         if (!n || !n->item || !n->node || !n->shown) continue;
         if (!(n->item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        bool blended = false;
-        for (size_t si = 0; si < n->item->getNumSubItems() && !blended; ++si) {
-            const Ogre::HlmsDatablock *db = n->item->getSubItem(si)->getDatablock();
-            blended = db && db->getBlendblock(false)->isAutoTransparent();
-        }
-        if (blended) continue;
-        const std::vector<MeshCardDesc> *cards = meshCardsFor(n->item->getMesh().get());
+        const std::vector<MeshCardDesc> *cards = mCardFeed.cardsOf[slot];
         if (!cards || cards->empty()) continue;
         CardSceneView::Candidate c;
         c.node = n->selfId;
@@ -2073,10 +2080,136 @@ void OgreScene::updateSurfaceCache() {
         c.sceneNode = n->node;
         c.material = n->materialRef;
         c.cards = cards;
-        c.lodBounds = lodBoundsFor(n->item->getMesh().get());
+        c.lodBounds = mCardFeed.boundsOf[slot];
+        const bool fresh = slot < mCardFeed.changedAt.size() && mCardFeed.changedAt[slot] + 1u >= mCardFeed.serial;
+        c.box = fresh ? n->item->getWorldAabbUpdated() : n->item->getWorldAabb();
         view.candidates.push_back(c);
     }
+    ++mCardFeed.serial;
     mSurfaceCache->update(view);
+}
+
+/// THE CANDIDATE PREDICATE, and each clause is the statement the voxel side makes:
+///   * `kGiGeometryBit` — a surface that BOUNCES light. It excludes the sky,
+///     unlit overlays, line meshes, billboards, helpers and backdrops for free,
+///     and it excludes a MOVER, which is the point: a card set is stored
+///     lighting, and a mover is the engine's word for "not part of the room's
+///     stored lighting".
+///   * `shown` — a hidden object photographs nothing.
+///   * a baked card list — every skinned mesh, every line mesh and every model
+///     opened without a bake has none, and gets none here.
+///   * OPAQUE (PHOTON-GATHER-1d fix round) — a card records a surface's albedo,
+///     normal and depth as the capture's prepass writes them, and a blended
+///     (Fade/Blend/Glass) sub-item is not a surface the prepass holds: the
+///     gather's F2 discard keeps it out, and the capture's own piece fills the
+///     same hook. An item with ANY blended sub-item gets no cards; its bounce is
+///     the voxels'.
+/// The radius itself is the cache's; this decides who COULD be resident.
+bool OgreScene::cardEligible(const Node &n) const {
+    if (!n.item || !n.node || !n.shown) return false;
+    if (!(n.item->getVisibilityFlags() & kGiGeometryBit)) return false;
+    for (size_t si = 0; si < n.item->getNumSubItems(); ++si) {
+        const Ogre::HlmsDatablock *db = n.item->getSubItem(si)->getDatablock();
+        if (db && db->getBlendblock(false)->isAutoTransparent()) return false;
+    }
+    const std::vector<MeshCardDesc> *cards = meshCardsFor(n.item->getMesh().get());
+    return cards && !cards->empty();
+}
+
+namespace {
+uint64_t cardColumnKey(int ix, int iz) {
+    return (uint64_t(uint32_t(ix)) << 32u) | uint64_t(uint32_t(iz));
+}
+}  // namespace
+
+void OgreScene::CardFeed::gpuSlotChanged(uint32_t slot, const GpuInstance *now) {
+    ++visits;
+    bool want = false;
+    uint64_t key = 0ull;
+    if (now && scene && slot < scene->mItemNodes.size() && scene->mItemNodes[slot] &&
+        scene->cardEligible(*scene->mItemNodes[slot])) {
+        const float cx = 0.5f * (now->boundsMin[0] + now->boundsMax[0]);
+        const float cz = 0.5f * (now->boundsMin[2] + now->boundsMax[2]);
+        if (std::isfinite(cx) && std::isfinite(cz)) {
+            want = true;
+            key = cardColumnKey(int(std::floor(cx / kColumn)), int(std::floor(cz / kColumn)));
+        }
+    }
+    if (slot >= filed.size()) {
+        filed.resize(size_t(slot) + 1u, 0u);
+        columnOf.resize(size_t(slot) + 1u, 0ull);
+        at.resize(size_t(slot) + 1u, 0u);
+        changedAt.resize(size_t(slot) + 1u, 0ull);
+        centreOf.resize(size_t(slot) + 1u, Ogre::Vector3::ZERO);
+        cardsOf.resize(size_t(slot) + 1u, nullptr);
+        boundsOf.resize(size_t(slot) + 1u, nullptr);
+    }
+    changedAt[slot] = serial;
+    if (want) {
+        const Node &n = *scene->mItemNodes[slot];
+        const Ogre::Mesh *mesh = n.item->getMesh().get();
+        centreOf[slot] = Ogre::Vector3(0.5f * (now->boundsMin[0] + now->boundsMax[0]),
+                                       0.5f * (now->boundsMin[1] + now->boundsMax[1]),
+                                       0.5f * (now->boundsMin[2] + now->boundsMax[2]));
+        cardsOf[slot] = scene->meshCardsFor(mesh);
+        boundsOf[slot] = scene->lodBoundsFor(mesh);
+    }
+    if (filed[slot] && want && columnOf[slot] == key) return;
+    if (filed[slot]) {
+        // SWAP-REMOVE inside the column; the slot that moved into the hole is told.
+        auto it = columns.find(columnOf[slot]);
+        if (it != columns.end()) {
+            std::vector<uint32_t> &col = it->second;
+            const uint32_t i = at[slot];
+            if (i < col.size() && col[i] == slot) {
+                col[i] = col.back();
+                at[col[i]] = i;
+                col.pop_back();
+            }
+            if (col.empty()) columns.erase(it);
+        }
+        filed[slot] = 0u;
+    }
+    if (want) {
+        std::vector<uint32_t> &col = columns[key];
+        at[slot] = uint32_t(col.size());
+        col.push_back(slot);
+        columnOf[slot] = key;
+        filed[slot] = 1u;
+    }
+}
+
+void OgreScene::CardFeed::query(const Ogre::Vector3 &centre, float radius, std::vector<uint32_t> &out) const {
+    if (columns.empty() || !(radius >= 0.0f)) return;
+    // THE SPHERE GROWN BY kSlack: a box the table filed a frame ago (a still item
+    // the document moved before this frame) is still found; the columns are only the
+    // index, the filed centre is the test.
+    const float reach = radius + kSlack;
+    const float reach2 = reach * reach;
+    const int x0 = int(std::floor((centre.x - reach) / kColumn)), x1 = int(std::floor((centre.x + reach) / kColumn));
+    const int z0 = int(std::floor((centre.z - reach) / kColumn)), z1 = int(std::floor((centre.z + reach) / kColumn));
+    const auto take = [&](uint64_t key, const std::vector<uint32_t> &col) {
+        const int ix = int(uint32_t(key >> 32u)), iz = int(uint32_t(key & 0xFFFFFFFFu));
+        // The column's nearest point to the centre, in the plane.
+        const float nx = std::max(float(ix) * kColumn, std::min(centre.x, float(ix + 1) * kColumn));
+        const float nz = std::max(float(iz) * kColumn, std::min(centre.z, float(iz + 1) * kColumn));
+        const float dx = nx - centre.x, dz = nz - centre.z;
+        if (dx * dx + dz * dz > reach2) return;
+        for (const uint32_t slot : col)
+            if ((centreOf[slot] - centre).squaredLength() <= reach2) out.push_back(slot);
+    };
+    // Whichever is fewer: the columns the square spans, or the columns that hold
+    // anything (a huge radius must not cost a lookup per empty column).
+    const double spanned = (double(x1) - double(x0) + 1.0) * (double(z1) - double(z0) + 1.0);
+    if (spanned <= double(columns.size())) {
+        for (int ix = x0; ix <= x1; ++ix)
+            for (int iz = z0; iz <= z1; ++iz) {
+                auto it = columns.find(cardColumnKey(ix, iz));
+                if (it != columns.end()) take(it->first, it->second);
+            }
+    } else {
+        for (const auto &kv : columns) take(kv.first, kv.second);
+    }
 }
 
 bool OgreScene::readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) {

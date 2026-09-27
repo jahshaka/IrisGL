@@ -275,6 +275,16 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
         COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
         VERBATIM)
+    # THE TOP-LEVEL INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1): one thread per GPU scene
+    # slot writes its near and far instance from the table.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_tlasWriteSpv -o "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_tlas_write.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_tlas_write.comp"
+        COMMENT "Compiling the top-level instance job at SPIR-V 1.4"
+        VERBATIM)
     # THE VISIBILITY BUFFER'S ID PASS (ATOM S3-DRAW, OgreAtomIdPass.cpp): a
     # material-less vertex/fragment pair that pulls every vertex through the GPU
     # scene's geometry rows — jah_geom_rows.glsl, the ONE copy the voxeliser's
@@ -300,6 +310,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"

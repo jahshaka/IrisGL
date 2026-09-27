@@ -3046,6 +3046,24 @@ void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
 /// THE REGISTERED HLMS_PBS: upstream's HlmsPbs, plus the per-pass binding above.
 /// Our derived Hlms (the Terra pattern) and not a patch: the two overrides are
 /// public virtuals and the three setters public API.
+/// engine.tlas_compute's reading (ATOM-CPU-WALKS-1, OgreScene::readTlasInstances):
+/// the device-written instance array (VkAccelerationStructureInstanceKHR, 64 bytes
+/// each, TWO per slot: near at 2 x slot, far at 2 x slot + 1, an untraced slot's
+/// pair zero) and what a reference needs to rebuild it — the address of every
+/// bottom-level structure by (mesh, level), the ready rigged slots by NodeId, the
+/// far overlap, the active counts and the per-slot rows.
+struct TlasReadback {
+    unsigned slots = 0;
+    std::vector<unsigned char> instances;
+    struct Structure { const void *mesh = nullptr; uint32_t level = 0; uint64_t address = 0; };
+    std::vector<Structure> structures;
+    struct Skin { uint32_t node = 0; uint64_t address = 0; uint32_t row = 0; };
+    std::vector<Skin> skins;
+    float farOverlap = 0.0f;
+    unsigned instanceCount = 0, farInstanceCount = 0;
+    std::vector<uint32_t> rows;
+};
+
 class ScenePbs final : public Ogre::HlmsPbs {
 public:
     ScenePbs(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders)
@@ -3055,12 +3073,52 @@ public:
                          Ogre::Camera *renderingCamera, const bool bCasterPass) override;
     Ogre::HlmsCache preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
                                     bool dualParaboloid, Ogre::SceneManager *sceneManager) override;
+
+    /// THE PBS CHANGE LOG (ATOM-CPU-WALKS-1). Every edit that can move what an item
+    /// wearing a PBS datablock IS to the engine — its permutation, its blend or cull
+    /// state, its alpha test, its baked texture set — reaches Ogre's renderables
+    /// through ONE door: `HlmsDatablock::flushRenderables` (or a renderable's own
+    /// `setDatablock`) re-hashes them with `calculateHashFor`, a public virtual. So
+    /// this is where the engine hears about an in-place edit, instead of polling one
+    /// witness item per material every frame (W13: 18 ms still at 10k materials).
+    /// A note is the renderable's owner (an Item; null for anything else) and its
+    /// datablock, kept until the frame's drain (OgreEngine::drainPbsChanges). Both
+    /// pointers are KEYS: neither is dereferenced after the call that noted it.
+    struct HashNote {
+        const Ogre::MovableObject *owner = nullptr;
+        const Ogre::HlmsDatablock *db = nullptr;
+    };
+    void calculateHashFor(Ogre::Renderable *renderable, Ogre::uint32 &outHash,
+                          Ogre::uint32 &outCasterHash) override;
+    const std::vector<HashNote> &hashNotes() const { return mHashNotes; }
+    /// THE LOG IS BOUNDED: a process that re-hashes more than this between two
+    /// drains (a headless boot never draws, so it never drains; a load of a hundred
+    /// thousand items in one frame) stops noting and says so — the drain then treats
+    /// EVERY datablock and every item as re-hashed, once, which is correct and O(N).
+    static constexpr size_t kMaxHashNotes = 65536u;
+    bool hashNotesOverflowed() const { return mHashNotesOverflow; }
+    void clearHashNotes() {
+        mHashNotes.clear();
+        mHashNotesOverflow = false;
+    }
+    /// ...AND THE EDITS NOT HASHED YET: a texture or sampler swap moves the
+    /// datablock's pointers at once and its hash only at the next pass' upload
+    /// (ConstBufferPool::uploadDirtyDatablocks -> updateDescriptorSets ->
+    /// flushRenderables). The pool's dirty list is PROTECTED state of our own base
+    /// class — read here, never written. Every entry is one of this Hlms' datablocks.
+    template <class F> void forEachDirtyDatablock(F &&f) const {
+        for (Ogre::ConstBufferPoolUser *u : mDirtyUsers)
+            f(static_cast<const Ogre::HlmsPbsDatablock *>(u));
+    }
 protected:
     /// HASH TIME (PHOTON-SCENE-SWITCH-2): HlmsPbs reads the planar pointer here
     /// per renderable, outside any pass (OgreHlmsPbs.cpp:1081-1084) — so the
     /// renderable's OWN scene's PlanarReflections is bound for the call and the
     /// pass's pointer put back after it.
     void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
+private:
+    std::vector<HashNote> mHashNotes;
+    bool mHashNotesOverflow = false;
 };
 
 /// Returns an index buffer that belongs to no VAO to the VaoManager that made it
@@ -3678,6 +3736,8 @@ public:
     /// DROP THIS SCENE'S acceleration structures (OgreScene::destroy calls it).
     /// A no-op when the tier never held any. Defined in OgreRayQuery.cpp.
     void forgetRayQuery();
+    /// engine.tlas_compute (a TOOL path: submits and waits) — TlasReadback.
+    bool readTlasInstances(TlasReadback &out, std::string &err);
     /// THE ONE PREDICATE that decides whether this scene's reflections are
     /// traced (PHOTON_SPEC §7 R5 item 5). It answers the DOCUMENT's half —
     /// "does this project want rays" — resolved against the MACHINE's
@@ -5992,8 +6052,6 @@ public:
     /// Destroys the Buckets table (the scene's teardown, before its SceneManager).
     void releaseAtomViewTable();
 private:
-    /// A route answered Pending (textures still baking) since the last update.
-    mutable bool mAtomPendingSeen = false;
     /// The views of this scene whose chains carry no id pass while the split is
     /// live, by reason (AtomDrawStatus::stereoViews / passthroughViews): they draw the
     /// Atom queue through PBS.
@@ -6005,25 +6063,107 @@ public:
         if (passthrough) mAtomPassthroughViews.insert(view); else mAtomPassthroughViews.erase(view);
     }
 private:
-    /// updateAtomDraw's memory: the GPU scene writes it last synced at, and one
-    /// item per atom word with its datablock, Hlms hash and texture set.
-    unsigned long long mAtomSyncWrites = ~0ull;
+    /// updateAtomDraw's memory: HlmsAtom's twin epoch and the words at the last sync.
     unsigned long long mAtomSyncEpoch = ~0ull;
     std::vector<uint32_t> mAtomWords;
-    struct AtomWitness {
-        uint32_t slot = 0u;
-        uint32_t word = 0u;
-        const Ogre::HlmsDatablock *db = nullptr;
-        Ogre::uint32 hash = 0u;
-        uint64_t texKey = 0u;
+    /// THE ATOM ITEMS' WORDS, kept by the GPU scene's change feed (ATOM-CPU-WALKS-1):
+    /// a slot's word is its PBS material word when the table routes it Atom
+    /// (kGpuAtom), none otherwise. What the screen decode's draws follow — the walk
+    /// + sort over every slot this replaces ran on every mover frame, and the
+    /// per-material witness walk beside it on EVERY frame (W13: 18-19 ms at 10k).
+    /// An in-place material edit reaches the table through the PBS change log's
+    /// drain (drainPbsChanges), which re-composes the Items it re-hashed.
+    struct AtomWordFeed final : detail::GpuSceneObserver {
+        detail::WordCounts words;
+        void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override {
+            uint32_t flags = 0u;
+            if (now) std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
+            words.set(slot, (now && (flags & detail::kGpuAtom)) ? now->raster[0] : detail::WordCounts::kNone);
+        }
+        void gpuSceneReset() override { words.reset(); }
     };
-    std::vector<AtomWitness> mAtomWitness;
+    AtomWordFeed mAtomFeed;
+    /// THE CARD CANDIDATES, kept by the change feed (ATOM-CPU-WALKS-1). The surface
+    /// cache used to be handed EVERY item every frame (a walk of every sub-item's
+    /// blend state and the mesh's card list, then a world box recomputed up every
+    /// parent chain, W13: 6.8 ms at 10k); now the items that CAN hold cards — the
+    /// candidate predicate (cardEligible: shown, GI geometry, opaque, a baked card
+    /// list) evaluated when a slot's entry changes — sit in a grid of vertical
+    /// columns by the entry's world-box centre, and a frame asks only the columns
+    /// the residency sphere reaches (query: one column of margin for a box the table
+    /// has not caught up with yet). The per-frame test itself is unchanged and
+    /// exact — the cache still measures each offered item's current box.
+    struct CardFeed final : detail::GpuSceneObserver {
+        static constexpr float kColumn = 16.0f;   ///< metres; a column's side
+        OgreScene *scene = nullptr;
+        std::unordered_map<uint64_t, std::vector<uint32_t>> columns;
+        /// Per slot: filed or not, and where (every 64-bit key names a column, so
+        /// "not a candidate" is its own flag, never a key value).
+        std::vector<unsigned char> filed;
+        std::vector<uint64_t> columnOf;
+        std::vector<uint32_t> at;         ///< per slot, its index in its column
+        /// Per slot, what the filing measured — the box centre the query's distance
+        /// test reads, and the mesh's card list and LOD bounds (a mesh's own facts:
+        /// they cannot change while the item wears the mesh) — so a frame's list
+        /// asks no map per candidate.
+        std::vector<Ogre::Vector3> centreOf;
+        std::vector<const std::vector<MeshCardDesc> *> cardsOf;
+        std::vector<const std::vector<float> *> boundsOf;
+        /// Per slot, the list serial (`serial` below) of its last change: a slot
+        /// the table re-wrote since the last list is measured with the RECOMPUTING
+        /// read — its cached world box may predate the frame that moved or made it
+        /// — and every other one with the cached box, which for an item nothing
+        /// moved is the same bits (measured: 0 of 250,000 differ once settled).
+        std::vector<unsigned long long> changedAt;
+        unsigned long long serial = 1ull;
+        unsigned long long visits = 0ull;
+        void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override;
+        void gpuSceneReset() override {
+            columns.clear();
+            filed.clear();
+            columnOf.clear();
+            at.clear();
+            changedAt.clear();
+            centreOf.clear();
+            cardsOf.clear();
+            boundsOf.clear();
+        }
+        /// The candidate slots whose FILED centre lies within the sphere grown by
+        /// kSlack, from the columns it reaches, in no particular order.
+        void query(const Ogre::Vector3 &centre, float radius, std::vector<uint32_t> &out) const;
+        /// Metres past the radius a filed centre may lie and still be offered: the
+        /// table's box is last frame's for an item the document moved before this
+        /// frame, and one that crossed more than this in one frame arrives a frame
+        /// late (a newborn always does: it is filed by the frame that stages it).
+        static constexpr float kSlack = 4.0f;
+    };
+    CardFeed mCardFeed;
+    std::vector<uint32_t> mCardQuery;
+    /// The candidate predicate, one place (the feed files by it, the frame re-reads
+    /// its cheap half).
+    bool cardEligible(const Node &n) const;
     /// A seam that changed what a slot's entry SAYS without moving anything —
     /// a visibility, light-mask, cast-shadow, render-queue or material write.
     /// The movement epoch cannot see those (a furniture visibility write is
     /// deliberately not scene movement, VR-SCAN-1), so they say so by name.
     void markGpuSlotDirty(const Node &n);
+    /// THE ITEM'S NODE (ATOM-CPU-WALKS-1): every indexed Item and the node that holds
+    /// it, maintained where the item index is (indexItemNode / unindexItemNode) — the
+    /// PBS change log names Items, and this is how a note becomes a slot.
+    std::unordered_map<const Ogre::MovableObject *, Node *> mNodeOfItem;
 public:
+    /// A PBS change-log note for one of this scene's Items (drainPbsChanges): its slot
+    /// is re-composed by the next scan. Unknown owners (another scene's, a dead one's)
+    /// are ignored — the pointer is only a key.
+    void markItemRehashed(const Ogre::MovableObject *owner) {
+        auto it = mNodeOfItem.find(owner);
+        if (it != mNodeOfItem.end() && it->second) markGpuSlotDirty(*it->second);
+    }
+    /// ...and the log's overflow answer: every item.
+    void markAllItemsRehashed() {
+        for (Node *n : mItemNodes)
+            if (n) markGpuSlotDirty(*n);
+    }
     /// THE RAY LEVEL'S PASS (ATOM P3's AT-A8r). Called once per frame per drawn
     /// scene with the eye and the projection of the view that draws it; runs
     /// nothing when neither the camera nor the table moved.
@@ -7620,6 +7760,15 @@ public:
     /// lamps fit its maps (the v1 over-budget rule); otherwise it stays on
     /// Ogre's closest-first dynamic sort and shadowStatus says so.
     void applyShadowCacheDirties(const std::vector<OgreScene *> &drawn);
+    /// THE PBS CHANGE LOG'S DRAIN (ATOM-CPU-WALKS-1, ScenePbs::HashNote), once a frame
+    /// before the scenes' scans: a datablock that was re-hashed (or holds an edit not
+    /// hashed yet) loses its decode twin if its BUCKET moved, and every Item it was
+    /// re-hashed for is re-composed in its scene's table. What the per-frame witness
+    /// walks (the split's and the ray tier's) used to find by polling every material.
+    void drainPbsChanges();
+    std::vector<const Ogre::HlmsDatablock *> mPbsDrainScratch;
+    /// What the drain has handled, ever (notes, distinct datablocks) — AtomDrawStatus.
+    unsigned long long mPbsDrainNotes = 0ull, mPbsDrainDatablocks = 0ull, mPbsDrainOverflows = 0ull;
     /// Frame half three: after the frame rendered — the counters' readings.
     void latchShadowCounters();
     /// Called by OgreScene BEFORE it destroys an Ogre::Light: unties it from
