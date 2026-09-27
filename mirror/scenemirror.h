@@ -20,7 +20,6 @@
 // in one commit. Includes iris (Qt) and jahshaka/engine. Never Ogre.
 #include "core/math/mat4.h"
 #include <QColor>
-#include <QElapsedTimer>
 #include <QHash>
 #include <QList>
 #include <QImage>
@@ -1389,20 +1388,21 @@ private:
     /// True once any mirrored material has carried a generated piece: the gate
     /// on pushing the shader clock at all, so a scene without one is untouched.
     bool mAnyCustomPiece = false;
-    /// The host's clock for generated pieces. Negative = use the wall clock
-    /// below; a test or a timeline sets an exact value through
+    /// The host's clock for generated pieces. Negative = the FRAME-COUNTED
+    /// clock below; a test or a timeline sets an exact value through
     /// setShaderTimeOverride so a frame is reproducible.
     float mShaderTimeOverride = -1.0f;
-    QElapsedTimer mShaderClock;
-    /// FOCUS SMOOTHING's clock and the seconds it produced for THIS sync
-    /// (CAMERA_LENS_SPEC §3 P2). One clock for the whole walk, not one per
-    /// camera, so every tracking camera eases by the same dt in a frame. Zero
-    /// on the first sync (nothing to ease from) and clamped, so a stalled
-    /// editor does not teleport focus on the frame it wakes up. The smoothing
-    /// arithmetic itself is a pure function of this dt
-    /// (iris::lens::smoothTowards) precisely so it can be tested without one.
-    QElapsedTimer mFocusClock;
-    float         mFocusDt = 0.0f;
+    /// Syncs since the first one that needed the shader clock. The clock is
+    /// `mShaderFrames * SimulationClock::kStepSeconds` — the engine has no wall
+    /// clock (it advances by a fixed 1/60 s per frame), so neither does this.
+    quint64 mShaderFrames = 0;
+    /// FOCUS SMOOTHING's dt for THIS sync (CAMERA_LENS_SPEC §3 P2): one grid
+    /// step (SimulationClock::kStepSeconds) per sync, zero on the first one
+    /// (nothing to ease from). One value for the whole walk, so every tracking
+    /// camera eases by the same dt in a frame. The smoothing arithmetic is a
+    /// pure function of it (iris::lens::smoothTowards).
+    bool  mFocusStarted = false;
+    float mFocusDt = 0.0f;
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.
     /// One character's union rig, derived and cached (AVATAR_RIG_PERF_SPEC

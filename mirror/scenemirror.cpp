@@ -16,6 +16,7 @@
 #include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/scene.h"
 #include "irisgl/document/scenegraph/skybake.h"
+#include "irisgl/document/scenegraph/simulationclock.h"
 #include "irisgl/document/scenegraph/scenenode.h"
 #include "irisgl/document/scenegraph/meshnode.h"
 #include "irisgl/document/scenegraph/lightnode.h"
@@ -773,11 +774,11 @@ int SceneMirror::sync()
             mLastStaticDemotions = iris::graph::staticDemotions();
         }
     }
-    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2). Zero on
-    // the first sync, and capped at a tenth of a second: a stall must not let a
-    // tracking camera jump its whole remaining focus travel in one frame.
-    if (!mFocusClock.isValid()) { mFocusClock.start(); mFocusDt = 0.0f; }
-    else mFocusDt = std::min(0.1f, float(mFocusClock.restart()) * 0.001f);
+    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2): one grid
+    // step per sync, zero on the first — frame-counted like every other clock
+    // the engine sees (it has no wall clock; a stall cannot jump the focus).
+    mFocusDt = mFocusStarted ? float(iris::SimulationClock::kStepSeconds) : 0.0f;
+    mFocusStarted = true;
     // (The per-walk `mMaterialSync.clear()` that stood here is GONE — the memo
     // crosses frames now, validated by a fingerprint; see MaterialSync in the
     // header. It is PRUNED at the end of the walk instead, so it never holds a
@@ -924,14 +925,14 @@ int SceneMirror::sync()
     }
     // THE SHADER CLOCK (HLMS_ADOPTION P5), and only when something reads it.
     // The host owns the number: mShaderTimeOverride is what a deterministic
-    // test or a scrubbed timeline sets; otherwise it is wall-clock seconds
-    // since the first frame that needed one.
+    // test or a scrubbed timeline sets; otherwise it is FRAME-COUNTED — one
+    // grid step per sync since the first frame that needed one (the engine
+    // has no wall clock, trap 7).
     if (mAnyCustomPiece) {
         if (mShaderTimeOverride >= 0.0f) mTarget->setShaderTime(mShaderTimeOverride);
-        else {
-            if (!mShaderClock.isValid()) mShaderClock.start();
-            mTarget->setShaderTime(float(mShaderClock.nsecsElapsed()) * 1e-9f);
-        }
+        else
+            mTarget->setShaderTime(float(double(mShaderFrames++) *
+                                         iris::SimulationClock::kStepSeconds));
     }
     // SHARING BEFORE CLIPS (AVATAR_RIG_PERF_SPEC §3.4): a follower carries no
     // clips at all, so which pieces are followers has to be settled before the
