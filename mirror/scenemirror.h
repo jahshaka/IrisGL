@@ -1392,16 +1392,16 @@ private:
     /// clock below; a test or a timeline sets an exact value through
     /// setShaderTimeOverride so a frame is reproducible.
     float mShaderTimeOverride = -1.0f;
-    /// Syncs since the first one that needed the shader clock. The clock is
-    /// `mShaderFrames * SimulationClock::kStepSeconds` — the engine has no wall
-    /// clock (it advances by a fixed 1/60 s per frame), so neither does this.
-    quint64 mShaderFrames = 0;
-    /// FOCUS SMOOTHING's dt for THIS sync (CAMERA_LENS_SPEC §3 P2): one grid
-    /// step (SimulationClock::kStepSeconds) per sync, zero on the first one
-    /// (nothing to ease from). One value for the whole walk, so every tracking
-    /// camera eases by the same dt in a frame. The smoothing arithmetic is a
-    /// pure function of it (iris::lens::smoothTowards).
-    bool  mFocusStarted = false;
+    /// The shader clock: the document's SimulationClock::frameSeconds()
+    /// ACCUMULATED since the first sync that needed it — whole 1/60 s steps,
+    /// as many as the host's frame bought, and never reset by a play edge
+    /// (SimulationClock::time() is). No wall clock (trap 7).
+    double mShaderSeconds = 0.0;
+    /// FOCUS SMOOTHING's dt for THIS sync (CAMERA_LENS_SPEC §3 P2): the
+    /// document's SimulationClock::frameSeconds() — the steps the host's frame
+    /// bought, 0 on a frame that bought none. One value for the whole walk, so
+    /// every tracking camera eases by the same dt. The smoothing arithmetic is
+    /// a pure function of it (iris::lens::smoothTowards).
     float mFocusDt = 0.0f;
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.

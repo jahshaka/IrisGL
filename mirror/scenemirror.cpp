@@ -774,11 +774,11 @@ int SceneMirror::sync()
             mLastStaticDemotions = iris::graph::staticDemotions();
         }
     }
-    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2): one grid
-    // step per sync, zero on the first — frame-counted like every other clock
-    // the engine sees (it has no wall clock; a stall cannot jump the focus).
-    mFocusDt = mFocusStarted ? float(iris::SimulationClock::kStepSeconds) : 0.0f;
-    mFocusStarted = true;
+    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2): the
+    // simulated seconds the host's frame bought on the document's
+    // SimulationClock (advanced before the sync) — whole 1/60 s steps, capped
+    // by the clock's catch-up bound, so a stall cannot jump the focus.
+    mFocusDt = mSource ? float(mSource->simulationClock().frameSeconds()) : 0.0f;
     // (The per-walk `mMaterialSync.clear()` that stood here is GONE — the memo
     // crosses frames now, validated by a fingerprint; see MaterialSync in the
     // header. It is PRUNED at the end of the walk instead, so it never holds a
@@ -925,14 +925,15 @@ int SceneMirror::sync()
     }
     // THE SHADER CLOCK (HLMS_ADOPTION P5), and only when something reads it.
     // The host owns the number: mShaderTimeOverride is what a deterministic
-    // test or a scrubbed timeline sets; otherwise it is FRAME-COUNTED — one
-    // grid step per sync since the first frame that needed one (the engine
-    // has no wall clock, trap 7).
+    // test or a scrubbed timeline sets; otherwise it ACCUMULATES the document
+    // SimulationClock's frameSeconds() — the grid steps each host frame bought
+    // (no wall clock, trap 7; not time(), which resets at play edges).
     if (mAnyCustomPiece) {
         if (mShaderTimeOverride >= 0.0f) mTarget->setShaderTime(mShaderTimeOverride);
-        else
-            mTarget->setShaderTime(float(double(mShaderFrames++) *
-                                         iris::SimulationClock::kStepSeconds));
+        else {
+            if (mSource) mShaderSeconds += mSource->simulationClock().frameSeconds();
+            mTarget->setShaderTime(float(mShaderSeconds));
+        }
     }
     // SHARING BEFORE CLIPS (AVATAR_RIG_PERF_SPEC §3.4): a follower carries no
     // clips at all, so which pieces are followers has to be settled before the
