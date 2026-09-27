@@ -1141,11 +1141,11 @@ struct ChainDesc {
     bool  hdrReadback = false;
 
     // ---- The hierarchical depth pyramid (SPECS/NANITE_SPEC.md §4.3) ----
-    /// Build a closest-depth mip chain of the scene depth, once per frame, right
-    /// after the opaque pass. PHOTON SHARED INFRASTRUCTURE and nothing else
-    /// today: no pass of this engine reads it yet, so it is OFF everywhere and
-    /// costs nothing until a spike asks for it (a stackless screen-space trace
-    /// is the first intended consumer). A GRAPH change — one texture and one
+    /// THE VIEW'S OWN pyramid of the COMPLETE scene depth (PostFxDesc::hzb), built
+    /// once per frame right after the opaque pass, for a reader that asks for it
+    /// (a screen-space trace, the cull suites' replays). The id pass's occlusion
+    /// builds its pyramid into the same texture after the id pass (atomOcclusion,
+    /// below) whether or not this is set. A GRAPH change — one texture and one
     /// compute pass per mip level.
     bool  hzb = false;
     /// How many mip levels the pyramid has, i.e. how many compute passes the

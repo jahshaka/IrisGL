@@ -117,7 +117,7 @@ bool OgreEngine::fillCullView(View *view, GpuCullRequest &out) const {
 
 /// The frustum, the eye and the level rule's two terms of a cull request, from a
 /// camera and the height of the target its pass renders into (the id pass's own
-/// request, which never offers a pyramid).
+/// request, whose pyramid and matrix it chooses itself: OgreAtomIdPass.cpp).
 void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullRequest &out) {
 
     const Ogre::Matrix4 vpm = cam->getProjectionMatrixWithRSDepth() * cam->getViewMatrix();

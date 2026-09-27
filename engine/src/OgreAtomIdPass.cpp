@@ -4,7 +4,8 @@
 // WHAT IT RECORDS, inside the chain's `atom_id` PASS_CUSTOM (OgreChain.cpp) and
 // after the provider closed Ogre's render pass (AtomPass.h):
 //   1. THE CULL — the GPU cull's CUT MODE over the scene's table, into the VIEW's
-//      own list (OgreView::atomCull): frustum, then THE CLUSTER CUT per (survivor,
+//      own list (OgreView::atomCull): frustum, the DEPTH PYRAMID (the two-pass
+//      occlusion, recordIdPass's note — ATOM-OCCLUSION-1), then THE CLUSTER CUT per (survivor,
 //      cluster) at the view's tolerance (one pixel x the scene's LOD bias; no switch
 //      band — a frontier change under a pixel is invisible by construction), the
 //      drawn clusters' indices compacted into the list's stream and one

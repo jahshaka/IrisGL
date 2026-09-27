@@ -122,8 +122,9 @@ ChainDesc OgreView::chainDesc() const {
     // letterbox and for the same kind of reason: it is not a post-process and it
     // changes no pixel of the picture — it is a resource a future screen-space
     // trace reads, and an offscreen capture is exactly where such a trace gets
-    // measured. It can only be true when a host deliberately asked for it, and
-    // nothing in this engine asks yet.
+    // measured. It is true only where a host deliberately asked for it — the id
+    // pass's own pyramid (ChainDesc::atomOcclusion, finishAtomOcclusion) is another
+    // flag, placed after the id pass, and needs none of this.
     //
     // The LEVEL COUNT is part of the graph (see ChainDesc::hzbLevels), derived
     // here from the view's achieved size — which is why it is read through
@@ -1643,9 +1644,8 @@ bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char
 
 void OgreView::applyPendingResize() {
     // See the offscreen branch of resize(): the pyramid's level count is part of
-    // the graph, so a size change that moves it rebuilds the chain. Free (one
-    // integer compare) for every view that has no pyramid, which is all of them
-    // until a Photon spike turns one on.
+    // the graph, so a size change that moves it rebuilds the chain — the view's own
+    // (PostFxDesc::hzb) and the id pass's (ChainDesc::atomOcclusion) alike.
     const bool pyramid = mPostFx.hzb || mChainAtomOcclusion;
     const unsigned hzbBefore = pyramid ? hzbLevelsFor(width(), height()) : 0u;
     applyPendingResizeImpl();
