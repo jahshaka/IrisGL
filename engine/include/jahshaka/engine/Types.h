@@ -796,20 +796,23 @@ struct AtmosphereSky {
     /// the level the tree is tuned around after the density fit dropped it to
     /// 0.66 (the model's radiance is proportional to densityCoeff).
     float skyPower  = 1.5f;
-    /// THE AIR ON THE WAY TO THE SUN — the atmosphere's turbidity, and the only
-    /// input to `Scene::atmosphereSunTint` (lane SKY-DENSITY-1). It is NOT a
-    /// sky-look dial and it reaches AtmosphereNpr's preset nowhere: the sky's
-    /// radiance is the NPR model's business (`density` above), the direct
-    /// beam's extinction is Beer-Lambert physics, and one number could not
-    /// serve both without each edit moving the other. 1 = a purely molecular
-    /// atmosphere, 2.5 = the clear day the sky's own defaults were fitted to,
-    /// 4-6 = hazy; held at or above 1 (below it the aerosol term amplifies).
+    /// THE AIR — the atmosphere's turbidity (lane SKY-DENSITY-1), and the ONE
+    /// density of this atmosphere. It decides two things, both Beer-Lambert
+    /// physics of the same air: the colour the SUNLIGHT arrives in
+    /// (`Scene::atmosphereSunTint`, the extinction along the ray to the sun)
+    /// and, since FOG-ATMO-1, the AERIAL PERSPECTIVE — the air's extinction
+    /// along every view ray, always on under this sky (OgreSky.cpp states the
+    /// sea-level coefficient it derives). It is NOT a sky-look dial and it
+    /// reaches the sky dome nowhere: the sky's radiance is the NPR model's
+    /// business (`density` above). 1 = a purely molecular atmosphere, 2.5 = the
+    /// clear day the sky's own defaults were fitted to, 4-6 = hazy; held at or
+    /// above 1 (below it the aerosol term amplifies).
     ///
     /// It is deliberately ABSENT from the comparison below, which asks "is this
-    /// the same SKY?" and decides whether the backend tears the sky down,
-    /// re-captures the environment and stales the probe grid. This dial changes
-    /// no sky pixel and no reflection — only the colour of the direct sunlight
-    /// — so it is applied on its own, like the sun disc (Scene::setSky).
+    /// the same SKY?" and decides whether the backend tears the sky down and
+    /// re-captures the environment. This dial changes no sky pixel, so it is
+    /// applied on its own, like the sun disc (Scene::setSky) — which stales the
+    /// probe grid for the fog it changes on surfaces, and nothing else.
     float sunHaze   = 2.5f;
     /// Unit vector FROM the scene TOWARDS the sun, in world space — the scene's
     /// sun light's direction, reversed, pushed by the host. With `hasSun` false
@@ -823,9 +826,11 @@ struct AtmosphereSky {
     /// rays come from that registration), and registering it puts `hlms_fog`
     /// into every PBS pass hash for as long as the sky is bound — a second
     /// permutation set for the scene's materials and, on a cold shader cache,
-    /// a compile hitch the first time the sky is switched on. The fog block
-    /// itself is an exact identity while the World fog is off (density 0), so
-    /// it costs shader COMPILES and a few ALU, never a pixel. MEASURED on a
+    /// a compile hitch the first time the sky is switched on. Under this sky
+    /// the fog is not an identity: every lit pixel pays the air's own aerial
+    /// perspective (FogDesc, FOG-ATMO-1) whether or not the World fog is on,
+    /// fogging per pixel towards the sky's own radiance for the pixel's view
+    /// ray (upstream's block is left an identity). MEASURED on a
     /// floor + a metal sphere with the fog OFF: 100 shader compiles with a
     /// colour sky, 104 after switching to the analytic one — four permutations
     /// and one hitch, once, warm-cached afterwards. With the fog ON (which is
@@ -4148,23 +4153,34 @@ struct GiStatus {
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------
-/// EXPONENTIAL distance fog, plus an optional height-varying layer of the same
-/// colour. Both layers absorb, so their transmittances multiply:
+/// EXPONENTIAL distance fog, plus an optional height-varying layer. Both layers
+/// absorb, so their transmittances multiply:
 ///
 ///     transmittance = 2^( -distance * density ) * 2^( -heightOpticalDepth )
-///     pixel         = lerp( colour, surface, transmittance )
+///     pixel         = lerp( fogColour, surface, transmittance )
 ///
 /// `density` is therefore "how much is lost per world unit" in exp2 units: a
 /// surface 1/density units away keeps half its own colour, and 4.32/density is
 /// where only 5% of it survives. (The document maps the legacy linear start/end
 /// pair onto it by matching the half-fogged distance — iris::Scene.)
 ///
+/// THE COLOUR DEPENDS ON THE SKY, NOT ON A SWITCH (lane FOG-ATMO-1). Under the
+/// ANALYTIC sky (SkyMode::Atmosphere) the air itself is a medium: the backend
+/// keeps the atmosphere's own AERIAL PERSPECTIVE on whether or not this fog is
+/// enabled — the air's extinction, derived from the same turbidity that tints
+/// the sun (AtmosphereSky::sunHaze; OgreSky.cpp states the model and the
+/// number) — and `density` / the height layer ADD haze on top of it. Every
+/// layer then fogs towards the sky's own scattering colour for the direction
+/// each surface is seen from, so a far surface fades into the sky behind it
+/// and follows the sun. `colour` is used only under the other skies (a colour,
+/// a gradient, an image), which have no atmosphere to ask.
+///
 /// Only lit (PBR) surfaces are fogged; unlit overlays (gizmos, wires,
-/// billboards) and the sky never are, exactly as before.
+/// billboards) and the sky never are.
 struct FogDesc {
     bool   enabled = false;
-    Colour colour;                ///< linear fog colour
-    float  density = 0.024f;      ///< homogeneous density per world unit (exp2)
+    Colour colour;                ///< linear fog colour — the non-analytic skies only
+    float  density = 0.024f;      ///< homogeneous density per world unit (exp2), on top of the air
 
     /// Height layer: a second exponential medium whose density falls off with
     /// world Y — density(y) = heightDensity * 2^( -(y - heightLevel) * heightFalloff )
@@ -4177,24 +4193,11 @@ struct FogDesc {
     /// Brightness breakthrough: bright pixels (a sun disc, an emissive sign)
     /// resist the fog instead of dissolving into it. `breakMinBrightness` is the
     /// luminance where breaking through starts, `breakFalloff` how fast it takes
-    /// hold. breakFalloff = 0 turns it off, leaving pure exponential fog.
+    /// hold. breakFalloff = 0 turns it off, leaving pure exponential fog. It
+    /// applies to the distance fog while this fog is enabled; the air alone
+    /// (fog disabled under the analytic sky) is pure extinction.
     float  breakMinBrightness = 0.25f;
     float  breakFalloff       = 0.1f;
-
-    /// AERIAL PERSPECTIVE: take the fog's COLOUR from the analytic sky instead
-    /// of `colour` (SKY-GPU). The engine's atmosphere component computes a
-    /// per-vertex scattering colour for the direction each surface is seen
-    /// from, so a distant hill fades into the sky it stands against rather than
-    /// into one authored grey — and it changes with the sun, for free, because
-    /// it is the same model the sky is drawn with.
-    ///
-    /// OFF BY DEFAULT, and off is what every scene authored before this had:
-    /// `colour` is a value a person picked, and no scene's look changes unasked.
-    /// The height layer is unaffected either way (it is ours, and it uses
-    /// `colour`); with the atmospheric colour on, the two layers are
-    /// deliberately different colours — the distance haze is the sky's, the
-    /// ground layer is the author's.
-    bool   atmosphereColour = false;
 };
 
 // ---- Planar reflections (scene-level, PLANAR_REFLECTIONS_SPEC.md) ----
