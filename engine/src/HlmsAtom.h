@@ -84,6 +84,9 @@ void tellEveryHlms(Ogre::HlmsManager *manager, bool force = false);
 /// head of its analyzeBarriers and preparePassHash, so it is NOT relayed by
 /// tellEveryHlms.
 void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm);
+/// THE SCENE'S LIGHT DIRT (SceneGiBinding::lightWriteSerial / lightsRemoved, D3-HIT-
+/// SHADE-2) — false for a SceneManager that registered no record.
+bool sceneLightDirt(const Ogre::SceneManager *sm, unsigned long long &serial, unsigned long long &removed);
 
 /// The registered HlmsAtom's forgetDecodeTwinOf — a no-op before registration, after
 /// Root, or for a datablock that is not PBS's. The one call every PBS-datablock
@@ -447,6 +450,19 @@ private:
     /// The world light list (uploadWorldLights) and the bytes it last uploaded.
     Ogre::ReadOnlyBufferPacked *mWorldLightBuf = nullptr;
     std::vector<float> mWorldLightMirror;
+    /// Per SceneManager: the list as last BUILT and the dirt it was built at (the
+    /// scene's light serial and removal count, the shadow node's casting set, the
+    /// cap). A pass whose dirt matches reuses it — no walk, no sort.
+    struct WorldLights {
+        unsigned long long serial = ~0ull, removed = ~0ull;
+        std::vector<const Ogre::Light *> casting;
+        Ogre::uint32 cap = 0u;
+        unsigned count = 0u;
+        std::vector<float> data;
+    };
+    std::unordered_map<const Ogre::SceneManager *, WorldLights> mWorldLightScenes;
+    /// Builds (rebuilds) the list of one scene into `out` (uploadWorldLights' walk).
+    void buildWorldLights(Ogre::SceneManager *sm, WorldLights &out);
     unsigned mWorldLightCount = 0u;
     unsigned mWorldLightCap = 0u;
     bool mBucketDirty = true;

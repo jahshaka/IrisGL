@@ -775,6 +775,7 @@ size_t HlmsAtom::screenDecodeCount(const Ogre::SceneManager *sm) const {
 }
 
 void HlmsAtom::forgetSceneManager(Ogre::SceneManager *sm) {
+    mWorldLightScenes.erase(sm);
     auto it = mSceneDecodes.find(sm);
     if (it == mSceneDecodes.end()) return;
     std::vector<const Ogre::HlmsDatablock *> all;
@@ -866,12 +867,9 @@ void HlmsAtom::uploadBucketTable() {
 /// test (the visibility layer and the scene's light mask). Area lights and
 /// directional ones are the pass buffer's (directional always; area lights as
 /// the camera culled them — stated). Uploaded only when the bytes change.
-void HlmsAtom::uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorShadowNode *shadowNode) {
-    if (!mVaoManager || !sm) return;
-    std::vector<const Ogre::Light *> casting;
-    if (shadowNode)
-        for (const Ogre::LightClosest &lc : shadowNode->getShadowCastingLights())
-            if (lc.light) casting.push_back(lc.light);
+void HlmsAtom::buildWorldLights(Ogre::SceneManager *sm, WorldLights &out) {
+    const std::vector<const Ogre::Light *> &casting = out.casting;
+    const Ogre::uint32 cap = out.cap;
     struct Entry {
         const Ogre::Light *light = nullptr;
         float power = 0.0f;
@@ -895,11 +893,9 @@ void HlmsAtom::uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorS
         if (a.power != b.power) return a.power > b.power;
         return a.light->getId() < b.light->getId();
     });
-    // THE PER-HIT CAP: Forward+'s lights per cell (the engine's setForwardClustered).
-    Ogre::uint32 cap = 96u;
-    if (auto *fc = dynamic_cast<Ogre::ForwardClustered *>(sm->getForwardPlus())) cap = fc->getLightsPerCell();
     const float invHeightProfiles = Ogre::Root::getSingleton().getLightProfilesInvHeight();
-    std::vector<float> data;
+    std::vector<float> &data = out.data;
+    data.clear();
     data.reserve(4u + lights.size() * 24u);
     const Ogre::uint32 count = Ogre::uint32(lights.size());
     auto bits = [](Ogre::uint32 u) { float f; std::memcpy(&f, &u, sizeof f); return f; };
@@ -926,8 +922,35 @@ void HlmsAtom::uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorS
         data.insert(data.end(), { 1.0f / (std::cos(inner * 0.5f) - std::cos(outer * 0.5f)), std::cos(outer * 0.5f),
                                   float(l->getSpotlightFalloff()), 0.0f });
     }
+    out.count = count;
+}
+
+void HlmsAtom::uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorShadowNode *shadowNode) {
+    if (!mVaoManager || !sm) return;
+    std::vector<const Ogre::Light *> casting;
+    if (shadowNode)
+        for (const Ogre::LightClosest &lc : shadowNode->getShadowCastingLights())
+            if (lc.light) casting.push_back(lc.light);
+    Ogre::uint32 cap = 96u;
+    if (auto *fc = dynamic_cast<Ogre::ForwardClustered *>(sm->getForwardPlus())) cap = fc->getLightsPerCell();
+    // THE DIRT (the brief's design: rebuilt when a light changes). A scene with no
+    // binding record (none registered) is rebuilt every pass.
+    unsigned long long serial = 0ull, removed = 0ull;
+    const bool dirtKnown = sceneLightDirt(sm, serial, removed);
+    WorldLights &wl = mWorldLightScenes[sm];
+    const bool rebuild = !dirtKnown || wl.serial != serial || wl.removed != removed ||
+                         wl.casting != casting || wl.cap != cap;
+    if (rebuild) {
+        wl.casting.swap(casting);
+        wl.cap = cap;
+        buildWorldLights(sm, wl);
+        wl.serial = dirtKnown ? serial : ~0ull;
+        wl.removed = dirtKnown ? removed : ~0ull;
+    }
+    const std::vector<float> &data = wl.data;
+    const unsigned count = wl.count;
     mWorldLightCount = count;
-    mWorldLightCap = cap;
+    mWorldLightCap = wl.cap;
     if (mWorldLightBuf && data.size() == mWorldLightMirror.size() &&
         std::memcmp(data.data(), mWorldLightMirror.data(), data.size() * sizeof(float)) == 0)
         return;
@@ -944,7 +967,7 @@ void HlmsAtom::uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorS
                                                            nullptr, false);
     }
     mWorldLightBuf->upload(data.data(), 0u, bytes);
-    mWorldLightMirror.swap(data);
+    mWorldLightMirror = data;
 }
 
 // ---------------------------------------------------------------------------

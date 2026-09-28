@@ -22,6 +22,8 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
                      std::string &errorSink)
     : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
+    mGiBinding.lightWriteSerial = &mGiLightWriteSerial;
+    mGiBinding.lightsRemoved = &mLightsRemoved;
     registerSceneGiBinding(mSceneMgr, &mGiBinding);
     // WHICH SCENE A SHADOW NODE'S CASTER PASS DRAWS (ATOM-SHADOWS-1): the recorder is
     // handed the pass's scene manager.
@@ -1456,6 +1458,7 @@ bool OgreScene::removeLight(NodeId id) {
         it->second.light = nullptr;
         mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id),
                           mLightNodes.end());
+        ++mLightsRemoved;
         // A recreated light starts with no profile and no mask: forget what the
         // dead one carried, or the next setLight would skip re-assigning it.
         it->second.lightProfilePath.clear();
@@ -1770,6 +1773,7 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
         if (mEngine) mEngine->releaseShadowLamp(this, n.light);   // see removeLight
         n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr;
         mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id), mLightNodes.end());
+        ++mLightsRemoved;
     }
     if (n.lightNode) { mSceneMgr->destroySceneNode(n.lightNode); n.lightNode = nullptr; }
     // Same for the decal's internal child. Note releaseDecal only tears the

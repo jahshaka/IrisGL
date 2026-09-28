@@ -3102,6 +3102,13 @@ struct SceneGiBinding {
     /// sky's, an authored map's) — never a process-wide maximum. Resolved once per
     /// frame (OgreScene::resolveIblMipmaps), read per pass.
     float iblMipmaps = 1.0f;
+    /// THE SCENE'S LIGHT DIRT (D3-HIT-SHADE-2): the hit decode's world light list
+    /// (HlmsAtom::uploadWorldLights) is rebuilt only when one of these moved —
+    /// the light write serial (every setLight push, a light node's pose or
+    /// visibility write, the mirror's noteLightsMoved, the environment) and the
+    /// count of lights destroyed. Point at the owning OgreScene's counters.
+    const unsigned long long *lightWriteSerial = nullptr;
+    const unsigned long long *lightsRemoved = nullptr;
 };
 /// The record registered for `sm` — null for a SceneManager that registered none.
 /// What giStatus reports as "bound" is read through this, the same lookup the pass
@@ -6481,6 +6488,9 @@ private:
     /// one — a movable lamp never stales the probe grid, so nothing else sees
     /// it), and a light leaving the scene. Monotonic; only ever compared.
     unsigned long long mGiLightWriteSerial = 0;
+    /// Lights destroyed (removeLight, removeNode) — the world light list's dirt
+    /// beside mGiLightWriteSerial (SceneGiBinding::lightsRemoved).
+    unsigned long long mLightsRemoved = 0;
     /// The chain's at-rest light ticks that landed an injection (runChainTick) —
     /// folded into the surface cache's indirect signature.
     unsigned long long mGiRestTicks = 0;

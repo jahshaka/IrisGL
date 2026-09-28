@@ -71,6 +71,14 @@ const SceneGiBinding *sceneGiBindingOf(const Ogre::SceneManager *sm) {
     return nullptr;
 }
 
+bool sceneLightDirt(const Ogre::SceneManager *sm, unsigned long long &serial, unsigned long long &removed) {
+    const SceneGiBinding *b = sceneGiBindingOf(sm);
+    if (!b || !b->lightWriteSerial || !b->lightsRemoved) return false;
+    serial = *b->lightWriteSerial;
+    removed = *b->lightsRemoved;
+    return true;
+}
+
 void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm) {
     static const SceneGiBinding kNone;
     const SceneGiBinding *b = sceneGiBindingOf(sm);

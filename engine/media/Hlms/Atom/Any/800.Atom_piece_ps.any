@@ -870,8 +870,11 @@
 	@end
 	// THE WORLD'S LIGHTS AT A HIT WITH NO CELL (D3-HIT-SHADE-2). Inside the camera's
 	// frustum the hit's Forward+ cell holds exactly the lights whose range reaches
-	// that cell - the screen's answer, the hit keeps it (and the cell's decals and
-	// cubemap probes with it). Outside the frustum there is no cell, and the
+	// that cell - the screen's answer, the hit keeps it: the cell is a SPATIAL
+	// index, and this list is not - a hit here walks EVERY world light (the cap
+	// counts only the lights that shade), so its cost grows with the scene's lamp
+	// count; that scan, and the cell's decals and cubemap probes, are why the
+	// in-frustum hits keep the cell (a world-space light grid is its own lane). Outside the frustum there is no cell, and the
 	// clustered list itself holds only the lights that touch the frustum; the
 	// physics is the same everywhere (a lamp lights every point inside its range),
 	// so such a hit loops the WORLD list (HlmsAtom::uploadWorldLights): every point
