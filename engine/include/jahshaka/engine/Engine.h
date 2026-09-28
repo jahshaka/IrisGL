@@ -1709,6 +1709,11 @@ public:
     /// pipGeneration moves). Three things are structural, and only three:
     /// turning the inset on or off, flipping `tonemap`, and RESIZING the rect
     /// (Route C's local texture is sized from it — see ViewPipDesc).
+    ///
+    /// THE REQUEST BELONGS TO THE SCENE IT WAS MADE ON: detaching the scene
+    /// (setScene(nullptr)) resets it to a default ViewPipDesc (enabled = false),
+    /// so binding the next scene never rebuilds an inset nobody asked for on
+    /// it (VIEWS-XID-1). A host that wants one there calls setPip again.
     virtual void setPip(const ViewPipDesc &) = 0;
     virtual const ViewPipDesc &pip() const = 0;
     /// How many times the INSET's own workspace has been created — the
