@@ -60,9 +60,14 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     // `EngineConfig::rayTracing` is the HOST's answer — Studio fills it from the
     // application preference (Preferences > Rendering) ANDed with
     // --no-ray-query. The environment variable is kept as the override a suite
-    // can set when it cannot reach the config (it is also what ogre-patch 0038
-    // reads at vkCreateDevice, so the two must agree).
+    // can set when it cannot reach the config.
     mRayTracingWanted = cfg.rayTracing && getenv("JAHSHAKA_NO_RAY_QUERY") == nullptr;
+    // ...and OFF REACHES THE DEVICE: the fork's VulkanDevice asks for the ray
+    // extensions and feature bits only while this static says so, so a no-rays
+    // process runs on exactly the device a machine without the hardware gets.
+    // Before the render system loads (and before the OpenXR route builds its
+    // device request, which reads the same static).
+    Ogre::VulkanDevice::msRayQueryAllowed = mRayTracingWanted;
     // Process-wide static, read by Mesh::prepareForShadowMapping at mesh-build
     // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it
     // is a plain static, not engine state.
@@ -121,9 +126,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // and queries all behave (verified end to end by the Studio suite
         // tests/engine/test_engine_headless.cpp — the lane's first assertion —
         // and by spikes/scenegraph-null-rs for the graph half).
-        const char *plugin = cfg.headless      ? "RenderSystem_NULL"
-                             : (cfg.backend == Backend::Vulkan) ? "RenderSystem_Vulkan"
-                                                                : "RenderSystem_GL3Plus";
+        const char *plugin = cfg.headless ? "RenderSystem_NULL" : "RenderSystem_Vulkan";
         // ---- OPENXR, STEP 1 (SPECS/VR_SPEC.md §4.1) -----------------------
         // BEFORE loadPlugin, because the Vulkan render system reads
         // `external_instance` in its CONSTRUCTOR, which is what loadPlugin
@@ -144,11 +147,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
                              ? "VR was not requested for this process (start it with --vr)"
                          : cfg.headless
                              ? "this engine is headless (the NULL render system renders nothing)"
-                         : cfg.backend != Backend::Vulkan
-                             ? "VR needs the Vulkan backend"
                              : "";
-        if (cfg.vr == VrMode::IfAvailable && !cfg.headless &&
-            cfg.backend == Backend::Vulkan) {
+        if (cfg.vr == VrMode::IfAvailable && !cfg.headless) {
             std::string why;
             mVrBoot = vr::bootBegin(mVrInfo, why);
             if (!mVrBoot) {

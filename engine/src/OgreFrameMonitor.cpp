@@ -1040,7 +1040,7 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
         st.gpuCompiled = true;
     } catch (...) {
         st.gpuReason = "this Ogre build has no GPU timestamp support "
-                       "(ogre-patch 0027 / JAH_GPU_TIMESTAMPS is off — a production build)";
+                       "(JAH_GPU_TIMESTAMPS is off — a production build)";
         return;
     }
     // LOCK 2, THE RUNTIME. `available` is true only while a query pool exists,

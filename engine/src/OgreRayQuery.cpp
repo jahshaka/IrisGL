@@ -32,7 +32,7 @@
 //    The instances are written ON THE DEVICE from that table (the
 //    rq_tlas_write.comp job, "THE INSTANCES BY COMPUTE" below; GpuScene.h).
 //
-// WHAT IT NEEDS FROM THE PIN (patches-only law):
+// WHAT IT NEEDS FROM THE FORK (jahshaka/ogre-next):
 //   * 0038 — the instance at Vulkan 1.2 when the loader allows, the seven
 //     extension names, and exactly three feature bits (masked, because upstream
 //     queries and enables through ONE pNext chain). Without it vkCreateDevice
@@ -4863,11 +4863,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     rv.rays = 0;
     /// EVERY EARLY RETURN BELOW IS A LEGITIMATE "not this frame" and leaves
     /// `jahSsrReflection` holding exactly what the resolve wrote — today's
-    /// picture. `JAH_R5_WHY=1` names which one, because a silent decline is
-    /// indistinguishable from a trace that draws nothing.
+    /// picture. The log names which one, ONCE per reason per process: a silent
+    /// decline is indistinguishable from a trace that draws nothing, and one that
+    /// persists must not flood the log (it replaced the JAH_R5_WHY switch).
     const auto bail = [](const char *reason) {
-        if (getenv("JAH_R5_WHY"))
-            Ogre::LogManager::getSingleton().logMessage(std::string("R5 declined: ") + reason);
+        static std::vector<const char *> said;   // the render thread's, like this pass
+        if (std::find(said.begin(), said.end(), reason) != said.end()) return;
+        said.push_back(reason);
+        Ogre::LogManager::getSingleton().logMessage(std::string("R5 declined: ") + reason);
     };
     readReflectTimestamps(rv);
     if (!rv.hasQueryBase && mReflectTimestamps) {
@@ -4942,8 +4945,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // axis lands in the wrong eye or in neither — the owner's "no reflections
     // in the headset", measured).
     EyeBasisF eyeB[2];
-    // THE ARM THAT RE-MEASURES THE CLAIM (the shape of JAH_RQ_NO_MULT beside
-    // it): `JAH_R5_MONO_EYES=1` traces a stereo target through the RENDERING
+    // THE ARM THAT RE-MEASURES THE CLAIM: `JAH_R5_MONO_EYES=1` traces a stereo target through the RENDERING
     // camera for both halves — the behaviour before lane REFLECT-VR-1 — so the
     // cost of getting this wrong can be measured rather than argued. On the
     // `vr.session` mirror fixture it moves an eye from a mean of 0.34/255
@@ -5048,17 +5050,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // ...AND THE RADIANCE MULTIPLIER in `.w` (DRAG-1). The slot held this
         // cascade's largest extent, which no shader ever read; see voxMultiplier.
         pp.voxelOrigin[c][3] = voxCount ? voxMultiplier[src] : 1.0f;
-        // THE ARMS THAT RE-MEASURE THE CLAIM (DRAG-1), the same shape as
-        // JAHSHAKA_GI_SWEEPS: `JAH_RQ_NO_MULT` restores the un-multiplied
-        // reading this replaced, and `JAH_RQ_SHOW_MULT` prints the factor. On
-        // tests/rtreflect's fixture (brightest light radiance 2.0, so the
-        // factor is 2/pi = 0.6366) the mirror's red excess reads 0.0737 without
-        // it and 0.0434 with it: the ray used to show that fixture 57 % too
-        // bright, which is what a voxel read in baking units means.
-        if (std::getenv("JAH_RQ_NO_MULT")) pp.voxelOrigin[c][3] = 1.0f;
-        if (std::getenv("JAH_RQ_SHOW_MULT") && c == 0)
-            std::fprintf(stderr, "JAH_RQ multiplier c0 = %.6f (cascades %u)\n",
-                         double(pp.voxelOrigin[c][3]), voxCount);
+        // MEASURED (DRAG-1) on tests/rtreflect's fixture (brightest light
+        // radiance 2.0, so the factor is 2/pi = 0.6366): the mirror's red excess
+        // read 0.0737 without it and 0.0434 with it — the ray used to show that
+        // fixture 57 % too bright, which is what a voxel read in baking units means.
         pp.voxelInvSize[c][0] = sz.x > 0.0f ? 1.0f / sz.x : 0.0f;
         pp.voxelInvSize[c][1] = sz.y > 0.0f ? 1.0f / sz.y : 0.0f;
         pp.voxelInvSize[c][2] = sz.z > 0.0f ? 1.0f / sz.z : 0.0f;

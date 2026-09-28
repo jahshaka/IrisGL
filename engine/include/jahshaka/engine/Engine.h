@@ -140,10 +140,6 @@ public:
     ///     exchange the capture frame does not block on the GPU (measured
     ///     0.94 ms of flush and wait per change, i.e. per frame of a drag).
     ///
-    /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture — the
-    /// run-wide diagnostic latch this engine's measurable rules carry, and the
-    /// way the two arms are A/B'd on one binary.
-    ///
     /// UNSCALED: this is the sky's mean incident radiance (the ambient the
     /// engine applies is this x the setEnvironmentLight gain). Read-only for a
     /// host: a status readout, never a value to push back.

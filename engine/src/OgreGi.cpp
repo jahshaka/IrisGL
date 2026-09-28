@@ -585,7 +585,7 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
         case GiMode::Off:
             teardownGi();
             mGi = p;
-            mCascadeVoxelLod = p.cascadeVoxelLod && mCascadeLodAllowed;
+            mCascadeVoxelLod = p.cascadeVoxelLod;
             // Switching GI off is the user's own "start over": the hysteresis
             // floor forgets what used to be lit, so switching back on fits the
             // scene as it is now rather than as it was.
@@ -601,7 +601,7 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
             // by giStatus — never read per item, and deliberately NOT written
             // back into `mGi`, which must keep comparing equal to what the
             // document pushes or every push under the latch would rebuild.
-            mCascadeVoxelLod = p.cascadeVoxelLod && mCascadeLodAllowed;
+            mCascadeVoxelLod = p.cascadeVoxelLod;
             rebuildVct();
             return true;
         }
@@ -3969,14 +3969,7 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
         mProbeMotionRun = 1;
         mProbeMotionQuietFrames = 0;
     }
-    // THE DIAGNOSTIC THE MEASUREMENT DRIVES: this deferral is a claim about cost and about
-    // the picture at the drag's end, and both claims have to be checkable from
-    // outside against the behaviour it replaced, in ONE binary at one pose.
-    // Read per frame rather than cached because a test arms it between frames,
-    // and a getenv against a path that may issue a 512-square six-face capture
-    // is not a cost anyone can measure.
-    const bool deferMotion = std::getenv("JAHSHAKA_PROBE_NO_MOTION_DEFER") == nullptr;
-    bool deferring = deferMotion && mProbeDragActive && !mProbeStaleBeyondMotion;
+    bool deferring = mProbeDragActive && !mProbeStaleBeyondMotion;
     if (deferring) {
         // ...WITH A CEILING (DRAG-1 round 2, F4). A drag ends and a keyframed
         // object in play does not: without this, a motion that never stops is

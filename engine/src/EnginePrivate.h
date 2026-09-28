@@ -3334,8 +3334,6 @@ public:
     /// colours), and every later one issues the download with INACCURATE
     /// tracking and maps it on a later frame — `pollSkyShRead` at the frame's
     /// top — with the previous coefficients staying valid meanwhile.
-    /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture,
-    /// which is how the two are A/B'd on one binary.
     void integrateSkyShFromCube(Ogre::TextureGpu *cube);
     void integrateSkyShNow(Ogre::TextureGpu *cube);
     void issueSkyShRead(Ogre::TextureGpu *cube);
@@ -5672,11 +5670,6 @@ private:
     /// `GiStatus::cascadeVoxelLod`. Kept apart from `mGi` on purpose — `mGi`
     /// must keep comparing equal to what the document pushes.
     bool mCascadeVoxelLod = true;
-    /// The latch itself, the shape `JAHSHAKA_NO_RAY_QUERY` uses
-    /// (OgreEngine.cpp:55): a measurement needs to move ONE term with one
-    /// binary and one scene, and a run-wide switch is how it does that. Read
-    /// ONCE, at construction, and never again.
-    const bool mCascadeLodAllowed = std::getenv("JAHSHAKA_NO_CASCADE_LOD") == nullptr;
     /// ATOM stage 1: the scene-wide LOD dial. 1 = the reference budget of one
     /// pixel of geometric error; 0 pins every object at level 0.
     float mLodBias = 1.0f;

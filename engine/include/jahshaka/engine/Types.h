@@ -4124,10 +4124,9 @@ struct GiStatus {
     /// (cascadesAwaitingCamera).
     std::vector<CascadeStatus> cascades;
     /// THE FAR-FIELD PROXY, AS APPLIED: whether the cascades are voxelising the
-    /// baked LOD levels (`GiParams::cascadeVoxelLod` met with the engine's
-    /// run-wide `JAHSHAKA_NO_CASCADE_LOD` diagnostic latch). It is here so the
-    /// arm a measurement is on has a NAME — a switch nothing can report is a
-    /// switch nobody can trust. True is the default and the shipped arm.
+    /// baked LOD levels (`GiParams::cascadeVoxelLod`). It is here so the arm a
+    /// measurement is on has a NAME — a switch nothing can report is a switch
+    /// nobody can trust. True is the default and the shipped arm.
     bool cascadeVoxelLod = true;
     /// The chain is WANTED but has not been built, because no view has tracked a
     /// camera yet — a camera-centred arm is built around the camera and there is
@@ -4322,8 +4321,6 @@ struct PlanarReflectionParams {
     /// geometry and no sky). Normally the view's background.
     Colour   background = Colour(0.0f, 0.0f, 0.0f, 1.0f);
 };
-
-enum class Backend { Vulkan, OpenGL };
 
 /// `Engine::createScene(name, kSceneMainThreadOnly)` — "this scene gets NO
 /// worker threads" (SPECS/THREADING_ADOPTION_SPEC.md P5).
@@ -5503,8 +5500,9 @@ struct VrStatus {
 /// runtime (next to the executable, an env override, or a compile-time default).
 /// Nothing in the engine is baked to a build-machine path.
 struct EngineConfig {
-    Backend     backend = Backend::Vulkan;
-    /// HEADLESS: boot the backend's NULL render system instead of `backend`
+    // The renderer is Vulkan, always (the Backend enum and its unreachable OpenGL
+    // value are gone with the GL3Plus build, D6-FORK-TOOLING).
+    /// HEADLESS: boot the NULL render system instead of Vulkan
     /// (SPECS/SCENEGRAPH_SPEC.md §3b, v2). Everything that is not pixels works
     /// exactly as it does on a real device — scenes, the document scene graph,
     /// nodes, meshes, materials, queries, transforms — and NOTHING renders:

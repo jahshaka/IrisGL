@@ -256,15 +256,10 @@ private:
 // — see the patch header.
 static const float kLodHysteresis = 0.10f;
 
-// What a WATCHED view's scene passes get, read once (the run-wide diagnostic
-// latch every measurable engine rule in this tree carries — JAHSHAKA_NO_RAY_QUERY,
-// JAHSHAKA_NO_CASCADE_LOD — so the band's A/B is a run of the shipped binary and
-// not a build). Zero everywhere else, by construction.
+// What a WATCHED view's scene passes get. Zero everywhere else, by construction.
 float jahLodHysteresis()
 {
-    static const float band =
-        std::getenv("JAHSHAKA_NO_LOD_HYSTERESIS") == nullptr ? kLodHysteresis : 0.0f;
-    return band;
+    return kLodHysteresis;
 }
 
 // (THE SUITE'S WAY IN IS NO LONGER HERE — LOD-LATCH-1, 2026-09-18. A band is
