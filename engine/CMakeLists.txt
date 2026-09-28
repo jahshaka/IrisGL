@@ -124,9 +124,13 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_raysSpv -o "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_rays.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_rays.comp"
+                # the cut-out candidate test (REFLECT-MOVERS-2)
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
         COMMENT "Compiling the ray-query compute shader at SPIR-V 1.4"
         VERBATIM)
     # R5's reflection trace, same rule (PHOTON_SPEC §7 R5).
@@ -151,6 +155,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_sun_ray.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
                 "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
@@ -232,6 +237,7 @@ if(JAH_RAY_QUERY_OK)
                 # ...and the hit record + the sun ray (PHOTON-HIT-SHADE-1).
                 "${JAH_RQ_INCLUDE}/jah_rq_hit_record.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
                 "${JAH_RQ_INCLUDE}/jah_card_view.glsl"
                 "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
@@ -267,6 +273,8 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
                 # the sun ray is one text with the hit record's (PHOTON-HIT-SHADE-1)
                 "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
+                "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
         COMMENT "Compiling the sun contact shadow job at SPIR-V 1.4"
         VERBATIM)
     # THE HIT WRITE-BACK (PHOTON-HIT-SHADE-1): the decoded radiance of every hit
@@ -284,10 +292,23 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
                 --vn krq_cardMoversSpv -o "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
+                "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
+                "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
         COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
+        VERBATIM)
+    # A CUT-OUT'S MASK FOR THE RAYS (REFLECT-MOVERS-2): a material's albedo alpha
+    # through its alpha test, one bit a texel (jah_rq_alpha.glsl reads it).
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_alpha_mask_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_alphaMaskSpv -o "${JAH_RQ_GEN_DIR}/rq_alpha_mask_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_alpha_mask.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_alpha_mask.comp"
+        COMMENT "Compiling the cut-out mask job at SPIR-V 1.4"
         VERBATIM)
     # THE TOP-LEVEL INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1): one thread per GPU scene
     # slot writes its near and far instance from the table.
@@ -346,6 +367,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_alpha_mask_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"

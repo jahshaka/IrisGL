@@ -1,0 +1,71 @@
+#version 460
+// A CUT-OUT'S MASK FOR THE RAYS (REFLECT-MOVERS-2; jah_rq_alpha.glsl reads it).
+//
+// One thread per 32 texels: the material's albedo texture at one level (the
+// first no larger than kMaxAlphaMask on a side, RayQueryTier), its ALPHA put
+// through the datablock's own alpha test, one bit a texel, row-major, into a
+// buffer reached by its device address. The test is the raster's, word for word
+// (Hlms/Pbs 800.PixelShader_piece_ps: `if( threshold CMP alpha ) discard;` with
+// CMP the datablock's compare function, HlmsDatablock::getCmpString): a texel is
+// SOLID when the raster would keep it.
+//
+// The texture is bound through a 2D-ARRAY view of its one layer (a pooled
+// texture's slice, or a plain 2D image's only layer — both legal), so one
+// pipeline serves both.
+//
+// COMPILED AT BUILD TIME at SPIR-V 1.4, like every ray job beside it.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform sampler2DArray src;
+
+layout( push_constant ) uniform Push
+{
+	uvec4 a;	// x = width, y = height (the level's), z = the level, w = Ogre::CompareFunction
+	uvec4 b;	// xy = the mask's device address, z = the threshold's float bits, w = words
+} pc;
+
+layout( buffer_reference, std430, buffer_reference_align = 4 ) writeonly buffer MaskOut
+{
+	uint bits[];
+};
+
+/// Ogre::CompareFunction: 2 LESS, 3 LESS_EQUAL, 4 EQUAL, 5 NOT_EQUAL,
+/// 6 GREATER_EQUAL, 7 GREATER. The raster DISCARDS when `threshold CMP alpha`.
+bool kept( float alpha, float threshold, uint cmp )
+{
+	bool discard_;
+	switch( cmp )
+	{
+	case 2u: discard_ = threshold < alpha; break;
+	case 3u: discard_ = threshold <= alpha; break;
+	case 4u: discard_ = threshold == alpha; break;
+	case 5u: discard_ = threshold != alpha; break;
+	case 6u: discard_ = threshold >= alpha; break;
+	case 7u: discard_ = threshold > alpha; break;
+	default: discard_ = false; break;
+	}
+	return !discard_;
+}
+
+void main()
+{
+	const uint word = gl_GlobalInvocationID.x;
+	if( word >= pc.b.w )
+		return;
+	const uint w = max( pc.a.x, 1u ), h = max( pc.a.y, 1u );
+	const float threshold = uintBitsToFloat( pc.b.z );
+	uint bits = 0u;
+	for( uint k = 0u; k < 32u; ++k )
+	{
+		const uint i = word * 32u + k;
+		if( i >= w * h )
+			break;
+		const float alpha = texelFetch( src, ivec3( int( i % w ), int( i / w ), 0 ), int( pc.a.z ) ).a;
+		if( kept( alpha, threshold, pc.a.w ) )
+			bits |= 1u << k;
+	}
+	MaskOut( pc.b.xy ).bits[word] = bits;
+}

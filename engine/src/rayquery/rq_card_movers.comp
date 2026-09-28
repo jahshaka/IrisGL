@@ -1,5 +1,8 @@
 #version 460
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 
 // THE SUN'S VISIBILITY ON THE CARDS: one ray per card texel towards the sun, in
 // two modes of one job (knobs.y).
@@ -40,8 +43,12 @@ layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 layout( set = 0, binding = 1 ) uniform Params
 {
 	vec4 toSun;		// xyz = the unit direction TOWARDS the sun, w = the ray's length
-	vec4 knobs;		// x = the mask, y = the mode (0 movers, 1 still), zw = unused
+	vec4 knobs;		// x = the mask, y = the mode (0 movers, 1 still), zw = the alpha table's address (float bits)
 } p;
+
+/// A CUT-OUT CASTS ITS HOLES ON A CARD TOO (REFLECT-MOVERS-2, jah_rq_alpha.glsl).
+#define JAH_ALPHA_TABLE floatBitsToUint( p.knobs.zw )
+#include "jah_rq_alpha.glsl"
 
 // ONE CARD, the relight's record layout (CardRelight): rect = (atlasX, atlasY,
 // size, the still mode's lift in metres); camPos; axisU.xyz/axisV.xyz with the ortho window's width /
@@ -86,9 +93,9 @@ void main()
 			// THE LIFT (the head of this file): the still mode's, from the record.
 			const vec3 origin = p.knobs.y > 0.5 ? P + N * r.rect.w : P;
 			rayQueryEXT rq;
-			rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+			rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
 								   uint( p.knobs.x ), origin, 0.0, L, p.toSun.w );
-			while( rayQueryProceedEXT( rq ) ) {}
+			JAH_RQ_PROCEED( rq )
 			if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
 				gl_RayQueryCommittedIntersectionTriangleEXT )
 				vis = 0.0;

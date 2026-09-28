@@ -2,8 +2,9 @@
 // factored out of rq_sun_contact.comp).
 //
 // Is the sun visible from `origin`? One inline query towards it against the
-// scene's TLAS, geometry only, OPAQUE only (alpha-tested casters are not in the
-// structure, audit C-16). Two queries keep the common case cheap: the hard part
+// scene's TLAS, geometry only — an alpha-tested caster's candidates tested
+// against its mask (jah_rq_alpha.glsl, REFLECT-MOVERS-2), so a fence's shadow
+// has its holes. Two queries keep the common case cheap: the hard part
 // of the range asks for ANY hit (terminate on the first) and answers 0 on one;
 // only a ray that crossed it clean asks the fade band [hardEnd, range] for its
 // NEAREST hit, whose distance hands the answer over linearly from 0 at hardEnd to
@@ -19,27 +20,30 @@
 //     for the sun at that hit (a hit may lie anywhere, on screen or not, and the
 //     map covers the camera's frustum only).
 //
-// The caller enables GL_EXT_ray_query and declares `tlas`.
+// The caller enables GL_EXT_ray_query, GL_EXT_buffer_reference and
+// GL_EXT_buffer_reference_uvec2, declares `tlas` and defines JAH_ALPHA_TABLE.
 // No Hlms directive mark anywhere in this file.
 
 #ifndef JAH_RQ_SUN_RAY_GLSL
 #define JAH_RQ_SUN_RAY_GLSL
 
+#include "jah_rq_alpha.glsl"
+
 float jahSunRay( vec3 origin, vec3 toSun, uint mask, float hardEnd, float range )
 {
 	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+	rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
 						   mask, origin, 0.0, toSun, hardEnd );
-	while( rayQueryProceedEXT( rq ) ) {}
+	JAH_RQ_PROCEED( rq )
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 		return 0.0;
 	float vis = 1.0;
 	if( range > hardEnd )
 	{
 		rayQueryEXT rqFade;
-		rayQueryInitializeEXT( rqFade, tlas, gl_RayFlagsOpaqueEXT, mask, origin, hardEnd, toSun,
-							   range );
-		while( rayQueryProceedEXT( rqFade ) ) {}
+		rayQueryInitializeEXT( rqFade, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), mask, origin, hardEnd,
+							   toSun, range );
+		JAH_RQ_PROCEED( rqFade )
 		if( rayQueryGetIntersectionTypeEXT( rqFade, true ) ==
 			gl_RayQueryCommittedIntersectionTriangleEXT )
 		{

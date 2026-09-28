@@ -173,6 +173,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// last two frames (the departure rule's gate); 0 = JAH_R5_NO_MOTION, the
 	/// measuring door: the camera-only history of before.
 	vec4 motion;
+	/// THE ALPHA TABLE (REFLECT-MOVERS-2, jah_rq_alpha.glsl): xy = its device
+	/// address, float bits (0 = none: the rays stay opaque).
+	vec4 alpha;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -375,6 +378,7 @@ void photonHit( ivec2 tc, vec4 c )
 #define JAH_HIT_SUN_RANGE   p.hitSun2.z
 #define JAH_HIT_LIFT        p.hitSun2.y
 #define JAH_HIT_FAR_LIFT    p.hitSun2.w
+#define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
 #include "jah_rq_hit_record.glsl"
 
@@ -892,9 +896,9 @@ void main()
 	rayQueryEXT rq;
 	// NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): a reflection traces the
 	// level the ray rule chose, never the far field's coarse copies (A5b §4).
-	rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, world + worldN * bias,
+	rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, world + worldN * bias,
 						   bias, L, maxT );
-	while( rayQueryProceedEXT( rq ) ) {}
+	JAH_RQ_PROCEED( rq )
 
 	vec3 traced = vec3( 0.0 );
 	bool ok = false;
