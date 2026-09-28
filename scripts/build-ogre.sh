@@ -266,7 +266,7 @@ if command -v ccache >/dev/null 2>&1 && [ "${JAH_NO_CCACHE:-0}" != "1" ]; then
     CCACHE_FLAGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
 fi
 
-# GPU TIMESTAMPS (was ogre-patch 0027, now the fork's M03 commit) — DEV BUILDS
+# GPU TIMESTAMPS (was fork 1a81f866a+1bccc3f93 (was 0027), now the fork's M03 commit) — DEV BUILDS
 # ONLY, the first of the two
 # off-switches the owner asked for (RENDER_LOOP_MONITOR_SPEC D3, 2026-09-12).
 # Without it the Vulkan render system's initGPUProfiling /

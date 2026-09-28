@@ -79,7 +79,7 @@ ChainDesc OgreView::chainDesc() const {
     // through PostFxDesc::allowOffscreen like every other deliberate case.
     d.stereo         = mStereo;
     d.cullCameraName = mStereo ? mCullCameraName : std::string();
-    // THE LOD SWITCH BAND (ogre-patch 0075, ChainDesc::lodHysteresis), and the
+    // THE LOD SWITCH BAND (fork 5230c9390+8282f6d70 (was 0075), ChainDesc::lodHysteresis), and the
     // whole rule in one line: a band belongs to a picture somebody WATCHES OVER
     // TIME and is exactly wrong for a CAPTURE. So it is on for an on-screen view
     // — the editor viewport, the Player's window — and for the VR session's
@@ -281,7 +281,7 @@ ChainDesc OgreView::chainDesc() const {
     // contact shadowing SLID while panning — the owner report.
     //
     // Both shaders now BRANCH on the projection instead (JahSsrRayMarch_ps.glsl
-    // and ogre-patch 0019 for SSAO), so the effects are correct under an
+    // and fork 3f1ad1110 (was 0019) for SSAO), so the effects are correct under an
     // orthographic camera and stay on. THIS IS THE FALLBACK: one environment
     // variable puts the plain gate back, for a driver on which the branch ever
     // misbehaves. It is deliberately not a document row — the ortho branch is
@@ -1696,7 +1696,7 @@ void OgreView::applyPendingResizeImpl() {
     // xcb_get_geometry for the REAL current size of the host's window,
     // mDevice->stallIgnoringDeviceLost(), destroySwapchain (which transitions
     // colour AND depth to OnStorage — the stale-depth-buffer fault the recreate
-    // existed to avoid), setFinalResolution, createSwapchain. ogre-patch 0008
+    // existed to avoid), setFinalResolution, createSwapchain. fork 1a64cd1d8 (was 0008)
     // then makes the new swapchain honour the surface's currentExtent, so the
     // extent lands right even if the geometry moved again in between.
     //
@@ -1762,7 +1762,7 @@ bool OgreView::warmUpShaders() {
         const std::string refNode = chain::sceneNodeDefName(mWorkspaceDef);
         // THE TWO ROUTES WANT OPPOSITE THINGS FROM THIS VIEW.
         //
-        // CompositorPassWarmUp (the route ogre-patch 0016 unblocked) runs in its
+        // CompositorPassWarmUp (the route fork 8282f6d70 (was 0016) unblocked) runs in its
         // OWN 4x4 workspace and this view's must stay DISABLED, or the frame
         // that drives it also renders the real thing at full resolution — the
         // ~250 ms this whole route exists to remove. If the view is somehow

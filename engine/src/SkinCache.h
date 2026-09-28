@@ -82,7 +82,7 @@ struct SkinCacheBuffer {
 
 /// Creates `item`'s cache: a device-local vertex buffer of the level-0 vertex
 /// count in the raster's layout, with a device address (the pools carry the
-/// STORAGE and SHADER_DEVICE_ADDRESS bits — fork a480b5e2f / patch 0039) and the
+/// STORAGE and SHADER_DEVICE_ADDRESS bits — fork a480b5e2f / fork b028638c1 (was 0039)) and the
 /// acceleration-structure build-input bit where the device has rays. Refuses (with
 /// `err`) an item whose level-0 source is not what the job reads: one submesh, one
 /// vertex buffer holding a float3 position, a float4-able blend-weight element and

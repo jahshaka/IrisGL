@@ -161,7 +161,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, floa
 		return vec3( 0.0 );
 	// THE VIEW TERM (jah_card_view.glsl): the stored normal in the card's own
 	// frame (u, v, the outward axis — the relight's decode), the roughness
-	// through patch 0043's range (the relight's), the mean light direction from
+	// through fork 16d8e29d4 (was 0043)'s range (the relight's), the mean light direction from
 	// the two alphas.
 	const JahCardRecordGpu c = jahCards[pick.card];
 	const vec4 albedo = JAH_CARD_ALBEDO( pick.texel );

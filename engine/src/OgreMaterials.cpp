@@ -1002,7 +1002,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
         (void)anyWorn;   // worn by nothing: nothing in the volume changed
         Ogre::Hlms *hlms = hlmsFor(it->second);
         Ogre::HlmsDatablock *dying = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
-        noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (patch 0081)
+        noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081))
         forgetDecodeTwinOf(dying);    // its decode twin dies first (HlmsAtom.h)
         if (dying) hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
         mMaterials.erase(it);

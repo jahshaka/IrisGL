@@ -580,7 +580,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
     // STEREO is graph shape twice over: it writes four fields onto every scene
     // pass definition, and a flip must therefore rebuild (VR_SPEC §4.3).
     if (a.stereo != b.stereo || a.cullCameraName != b.cullCameraName) return false;
-    // ...and so is the LOD BAND, for the same reason (ogre-patch 0075): it is
+    // ...and so is the LOD BAND, for the same reason (fork 5230c9390+8282f6d70 (was 0075)): it is
     // written onto the pass definitions.
     if (a.lodHysteresis != b.lodHysteresis) return false;
     return a.distortion == b.distortion && a.hzb == b.hzb && a.hzbLevels == b.hzbLevels &&
@@ -1179,7 +1179,7 @@ void maskOutHelpers(Ogre::CompositorNodeDef *n, Ogre::uint32 drop) {
 /// miss and an arbitration call. The screen quads are made stereo by swapping
 /// their MATERIAL instead (OgreVrSession.cpp, syncStereoQuads).
 /// THE LOD SWITCH BAND, ON EVERY SCENE PASS THIS NODE CARRIES
-/// (ChainDesc::lodHysteresis, ogre-patch 0075).
+/// (ChainDesc::lodHysteresis, fork 5230c9390+8282f6d70 (was 0075)).
 ///
 /// The same sweep as maskOutHelpers and applyStereo, and ALL OF THEM OR NONE
 /// for a sharper reason than either: every scene pass in this node renders with
@@ -1945,7 +1945,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // Clear to white, the sample's value: an unwritten normals texel
             // decodes to (1,1,1) rather than (-1,-1,-1), and the march rejects
             // it by DEPTH anyway (nothing was drawn, so the depth is still the
-            // clear value — the test that ogre-patch 0011 taught SSAO).
+            // clear value — the test that fork 3f1ad1110 (was 0011) taught SSAO).
             p->setAllClearColours(Ogre::ColourValue::White);
             p->setAllLoadActions(Ogre::LoadAction::Clear);
             // THE ID PASS WROTE THE DEPTH (ChainDesc::atomDraw): loaded, and the
@@ -2722,7 +2722,7 @@ void setVrMirrorUv(float scaleX, float scaleY, float offsetX, float offsetY) {
 //   "You must call ForwardPlusBase::collectLights first!" assert is compiled
 //   out and the null deref is the whole story (OgreForwardPlusBase.cpp:527-538).
 //
-// The fix is upstream and is three lines: **ogre-patch 0016** adds the missing
+// The fix is upstream and is three lines: **fork 8282f6d70 (was 0016)** adds the missing
 // collectLights to _warmUpShadersCollect, mirroring _cullPhase01 exactly. With
 // it the insert and the lookup happen inside the SAME call, off the SAME
 // camera and the SAME viewport, so every term of the key — including the
@@ -2741,7 +2741,7 @@ void setVrMirrorUv(float scaleX, float scaleY, float offsetX, float offsetY) {
 //
 // AND IT IS OFF BY DEFAULT ANYWAY. The audit's standing caveat — "no upstream
 // sample exercises WarmUpHelper, it is lightly-trodden code" — was right twice
-// over. Patch 0016 removes the FIRST crash; there is a SECOND one downstream of
+// over. fork 8282f6d70 (was 0016) removes the FIRST crash; there is a SECOND one downstream of
 // it that this lane could not fix without a second patch, and it is a
 // read-after-destroy, which is not something to default anybody into:
 //
@@ -3262,7 +3262,7 @@ void setBloomThreshold(float minThreshold, float fullColourThreshold) {
 // ---- THE DITHER (lane DITHER-1) -------------------------------------------
 //
 // The tonemap quad is the ONE place in this engine where a floating-point
-// picture becomes 8-bit display codes, and patch 0079 makes it dither that
+// picture becomes 8-bit display codes, and fork feab041c6 (was 0079) makes it dither that
 // write (the amplitude, the determinism and the domain are documented once, in
 // irisgl/engine/media/Hlms/Jahshaka/JahDither.glsl). All that is left here is
 // the DIAGNOSTIC OFF SWITCH: the single-process A/B the guard suite and the
@@ -3330,7 +3330,7 @@ void forgetTonemapParams() {
     gBloomAmountPushed = -1.0f;
 }
 
-/// HOW MUCH BLOOM REACHES THE PICTURE (lane BLOOM-AMOUNT-1, ogre-patch 0082).
+/// HOW MUCH BLOOM REACHES THE PICTURE (lane BLOOM-AMOUNT-1, fork feab041c6 (was 0082)).
 ///
 /// The composite is `picture += bloom * amount` and this pushes the amount. It
 /// is ONE multiply in the tonemap quad, not a change anywhere in the ladder,
@@ -3346,7 +3346,7 @@ void forgetTonemapParams() {
 void setBloomAmount(float amount) {
     resolveTonemapParams();
     if (!gTonemapHasBloomAmount) {
-        // Staged media that predates patch 0082: the amount is simply not
+        // Staged media that predates fork feab041c6 (was 0082): the amount is simply not
         // there, the picture is the amount-1 one, and that is a correct
         // picture. Said once, like the dither's own note, and by the same
         // resolve-once flag so it cannot repeat per frame.
@@ -3356,7 +3356,7 @@ void setBloomAmount(float amount) {
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka: the staged HDR media has no jahBloomAmountMinusOne - the Bloom "
                 "Amount dial does nothing (every scene renders at 1x). Re-run "
-                "irisgl/scripts/build-ogre.sh; patch 0082 is missing from this tree.");
+                "irisgl/scripts/build-ogre.sh; fork feab041c6 (was 0082) is missing from this tree.");
         }
         return;
     }
@@ -3375,12 +3375,12 @@ void setDither(bool off) {
         static bool said = false;
         if (!gTonemapHasDither && !said) {
             said = true;
-            // Staged media that predates patch 0079. Say so ONCE — the picture
+            // Staged media that predates fork feab041c6 (was 0079). Say so ONCE — the picture
             // is the old banded one, which is a defect, not a crash.
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka: the staged HDR media has no jahDitherOff - the graded "
                 "picture is NOT dithered (8-bit contour banding). Re-run "
-                "irisgl/scripts/build-ogre.sh; patch 0079 is missing from this tree.");
+                "irisgl/scripts/build-ogre.sh; fork feab041c6 (was 0079) is missing from this tree.");
         }
     }
     if (!gTonemapHasDither) return;
@@ -3539,7 +3539,7 @@ void updateSsao(Ogre::Camera *camera, unsigned aoWidth, unsigned aoHeight,
     Ogre::Pass *pass = materialPass("SSAO/HS");
     if (!pass) return;
     // THE DEPTH PAIR, and it is NOT the same arithmetic for the two projections
-    // (ogre-patch 0019's note; SSAO_HS_ps.glsl reads it through jahOrthoParams).
+    // (fork 3f1ad1110 (was 0019)'s note; SSAO_HS_ps.glsl reads it through jahOrthoParams).
     //
     // PERSPECTIVE: `B / (d - A)` is metres, and B is DIVIDED by the far plane
     // so what the shader gets is a [0,1] fraction of it — which is what makes
@@ -3834,7 +3834,7 @@ void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                       unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection) {
     if (desc.hdr) {
-        // The tonemap quad's 8-bit write is dithered (patch 0079); this pushes
+        // The tonemap quad's 8-bit write is dithered (fork feab041c6 (was 0079)); this pushes
         // only the diagnostic off switch, and the shader's default is
         // "dithered".
         setDither(desc.ditherOff);

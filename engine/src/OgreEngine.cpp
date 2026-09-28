@@ -132,7 +132,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // `external_instance` in its CONSTRUCTOR, which is what loadPlugin
         // runs. On the vulkan_enable2 route the RUNTIME creates the VkInstance
         // (from our own VkInstanceCreateInfo) and later the VkDevice (from the
-        // VkDeviceCreateInfo ogre-patch 0068 exports), and Ogre runs on both.
+        // VkDeviceCreateInfo fork d014b064f+1bccc3f93 (was 0068) exports), and Ogre runs on both.
         //
         // NOTHING HERE IS FATAL. No loader, no manifest, no runtime, no headset
         // on the cable: the reason is logged and recorded in vrInfo(), the
@@ -200,7 +200,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // is the host's real one whenever the host can wait that long.
         mNullWindow = mRoot->initialise(cfg.headless, "jahshaka-headless");
         // ---- OPENXR, STEP 2 -----------------------------------------------
-        // AFTER initialise and BEFORE any window: ogre-patch 0068's exporter
+        // AFTER initialise and BEFORE any window: fork d014b064f+1bccc3f93 (was 0068)'s exporter
         // reads the instance-extension list the render system's constructor
         // filled, so a request built earlier silently loses the feature chain
         // (phase 1a's §8.5 — the one correction the spike made to the spec's
@@ -531,7 +531,7 @@ View *OgreEngine::createView(const std::string &name,
         Ogre::NameValuePairList params;
 #ifdef __APPLE__
         // macOS: the handle is the host's NSView (Types.h). Ogre's Metal window
-        // (ogre-patches 0007) hosts its OWN CAMetalLayer-backed child view inside
+        // (fork 1a81f866a+d014b064f+1bccc3f93 (was 0007)) hosts its OWN CAMetalLayer-backed child view inside
         // it and builds the VkSurfaceKHR from that layer through
         // VK_EXT_metal_surface — the host's own layer is never replaced, because
         // toolkits that manage their layer (Qt's QNSView) refuse the replacement.
@@ -838,7 +838,7 @@ void OgreEngine::renderOneFrame() {
         if (monitor::live()) {
             monPre.reset(new monitor::Stage("engine.pre"));
             // BEFORE anything renders and outside every encoder — the only
-            // place a Vulkan query pool may be reset (ogre-patch 0027).
+            // place a Vulkan query pool may be reset (fork 1a81f866a+1bccc3f93 (was 0027)).
             gpuFrameBegin();
         }
         // THE ONE TEXTURE WAIT (THREADING_ADOPTION_SPEC.md P2 item 3, decision
@@ -1470,7 +1470,7 @@ void OgreEngine::endLostOrStoppedVrSession() {
 
 // THE GPU IS GONE (lane XID-2, 2026-09-17). Said ONCE, loudly, the moment
 // the render system reports it: from here on the render system vetoes every
-// frame (ogre-patch 0072 -- it no longer tries to recreate the device, which
+// frame (fork d014b064f+1bccc3f93 (was 0072) -- it no longer tries to recreate the device, which
 // on this driver hangs inside vkDestroyDevice for ever), so a host that does
 // not ask would see a silent, frozen picture and nothing in the log.
 //

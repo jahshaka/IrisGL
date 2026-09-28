@@ -568,7 +568,7 @@ CacheScope::CacheScope(CacheKind cache, WorkReason reason, unsigned long long id
     mArmed = true;
     mDetail = detail;
     mStart = std::chrono::steady_clock::now();
-    // THE GPU PAIR (ogre-patch 0027). This is the ONLY way a compute dispatch
+    // THE GPU PAIR (fork 1a81f866a+1bccc3f93 (was 0027)). This is the ONLY way a compute dispatch
     // can report GPU time: every other sample in the monitor rides a compositor
     // pass callback, and a GI voxelisation, a light injection or an irradiance
     // field's integration is not a pass. Work between frames samples too — the
@@ -1059,7 +1059,7 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
 // The frame's GPU bookkeeping: rotate the query pools, read back what the frame
 // two frames ago measured, and reset the pool about to be written. ONE call,
 // at the top of the frame and outside every encoder — which is the only place
-// vkCmdResetQueryPool is legal (see ogre-patch 0027).
+// vkCmdResetQueryPool is legal (see fork 1a81f866a+1bccc3f93 (was 0027)).
 void OgreEngine::gpuFrameBegin() {
     if (!mMonitor || !mMonitor->mGpu) return;
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;

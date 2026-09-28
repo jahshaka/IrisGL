@@ -1,6 +1,6 @@
 // Jahshaka — ATOM-CLUSTER-CUT: THE EMIT, the cull's last mode-3 job (SPECS/v2/
 // CLUSTER_CUT_DESIGN.md D2 and D3). ONE WORKGROUP PER DRAWN CLUSTER (the cut job's
-// records; count[8] is the dispatch, ogre-patch 0032), its 64 threads copying the
+// records; count[8] is the dispatch, fork 1bccc3f93+a98e2b0af (was 0032)), its 64 threads copying the
 // cluster's corners from the mesh's CLUSTER STREAM into the view's compacted stream
 // at the record's offset, and writing each triangle's two id words.
 //

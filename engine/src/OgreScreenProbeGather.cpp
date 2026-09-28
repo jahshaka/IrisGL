@@ -1726,7 +1726,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTracePipeLayout, 0, 1,
                             &v.traceSets[ring], 0, nullptr);
     // ONE WORKGROUP PER PROBE — the trace's 64 threads ARE its 64 rays — and
-    // the COUNT is the GPU's own (patch 0032's shape: a count nobody on the CPU
+    // the COUNT is the GPU's own (fork 1bccc3f93+a98e2b0af (was 0032)'s shape: a count nobody on the CPU
     // can know without a round trip).
     vkCmdDispatchIndirect(cmd, v.args, 0);
     if (timed)

@@ -14,7 +14,7 @@
 //                             LIST and the count is written by the GPU.
 //   3. Jahshaka/CullDraws   — one VkDrawIndexedIndirectCommand per survivor,
 //                             DISPATCHED INDIRECTLY off job 2's count
-//                             (ogre-patch 0032). After job 1 is dispatched no
+//                             (fork 1bccc3f93+a98e2b0af (was 0032)). After job 1 is dispatched no
 //                             host learns how much work there is.
 //
 // THE HOST'S WHOLE SHARE is the request: 224 bytes and a zeroed 32-byte counter,
@@ -30,7 +30,7 @@
 // THE BARRIERS. Every hand-off between the jobs goes through Ogre's
 // BarrierSolver (`analyzeBarriers` + `executeResourceTransition`), which is
 // exactly right for compute-write -> compute-read. The ONE edge it cannot
-// express is compute-write -> indirect-read, and patch 0032 issues that by hand
+// express is compute-write -> indirect-read, and fork 1bccc3f93+a98e2b0af (was 0032) issues that by hand
 // inside `_dispatchIndirect`; the stage-0 spike measured the same edge with
 // synchronization validation clean on both devices (FINDINGS 7.2), and
 // NANITE_SPEC's N-3 stays closed.
@@ -239,7 +239,7 @@ void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
 }
 
 /// THE COST OF ONE JOB, as the queue sees it. There are no per-dispatch GPU
-/// timestamps available outside a compositor pass at this pin (patch 0027's
+/// timestamps available outside a compositor pass at this pin (fork 1a81f866a+1bccc3f93 (was 0027)'s
 /// samples are keyed to passes and come back two frames late), so the number is
 /// a SLOPE and says so: the job is dispatched `iterations` more times over the
 /// buffers it has already filled, the command buffer is flushed, and the wall
@@ -355,7 +355,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         // (measured 2026-09-22), and binding a dummy to satisfy the check would
         // put a texture in the root layout that the shader never reads. Both
         // permutations keep FIXED-SIZE bindings, which is what the microcode
-        // cache needs (patch 0063 skips a shader that reflects array bindings).
+        // cache needs (fork 5bfe24cd9 (was 0063) skips a shader that reflects array bindings).
         test->setProperty("cull_hzb", hzb ? 1 : 0);
         test->setNumTexUnits(hzb ? 1u : 0u);
         // THE DISOCCLUSION PASS's permutation: one more buffer, the first list's words.

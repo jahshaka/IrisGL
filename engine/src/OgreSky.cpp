@@ -1714,7 +1714,7 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // is the fence; it goes black without this.
 //
 // WHAT CHANGED IS WHERE THE SKY WENT INSTEAD (lane SKY-FALLBACK-1,
-// ogre-patch 0048). The old note said "nothing is lost visually: the probe
+// fork 4d5fbef16+8f09c0cd4 (was 0048)). The old note said "nothing is lost visually: the probe
 // captures include the sky, so the probes ARE the environment". That was true
 // while a probe grid was an all-or-nothing scene-wide decision — a grid meant a
 // room, and in a room the probes are the environment. It stopped being true the
@@ -1727,7 +1727,7 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // So the sky has its OWN slot now, at the pass level, through the extra
 // pass texture HlmsPbs offers its Hlms listener
 // (FogHlmsListener::SkyEnvState / getNumExtraPassTextures / hlmsTypeChanged,
-// OgreFog.cpp; the composite is ogre-patch 0048, inside upstream's per-pixel
+// OgreFog.cpp; the composite is fork 4d5fbef16+8f09c0cd4 (was 0048), inside upstream's per-pixel
 // probe loop). It is bound for every colour pass of a scene whose grid has
 // taken the env slot, and the probe loop hands it every pixel no probe's box
 // contains. This function therefore still returns null under a PCC — the slot

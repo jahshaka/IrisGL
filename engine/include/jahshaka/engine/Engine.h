@@ -1578,7 +1578,7 @@ public:
     virtual void setVrHelpersVisible(bool) = 0;
     virtual bool vrHelpersVisible() const = 0;
 
-    /// DOES THIS OFFSCREEN VIEW GET THE LOD SWITCH BAND? (ogre-patch 0075,
+    /// DOES THIS OFFSCREEN VIEW GET THE LOD SWITCH BAND? (fork 5230c9390+8282f6d70 (was 0075),
     /// ATOM-3; lane ENGINE-SMALL-A's LOD-LATCH-1, 2026-09-18.)
     ///
     /// The band (`ChainDesc::lodHysteresis`) holds an object's LOD level across

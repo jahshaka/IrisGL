@@ -1653,7 +1653,7 @@ VkCommandBuffer RayQueryTier::frameCmd() {
     // barriers below meaningless.
     mDev->mGraphicsQueue.endAllEncoders();
     // The pin's own public accessor — usable from outside the plugin since
-    // ogre-patch 0040 exported Ogre::onVulkanFailure, which its device-lost
+    // fork 1a81f866a (was 0040) exported Ogre::onVulkanFailure, which its device-lost
     // branch calls and which the Vulkan render system did not export (so this
     // line compiled and failed to LINK).
     //
@@ -1689,7 +1689,7 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
         }
     }
     if (!mDev || !mDev->hasRayQuery()) {
-        err = "rayquery: the device has no VK_KHR_ray_query (ogre-patch 0038 missing, or the "
+        err = "rayquery: the device has no VK_KHR_ray_query (fork d014b064f (was 0038) missing, or the "
               "driver does not advertise it)";
         return false;
     }
@@ -4287,7 +4287,7 @@ bool OgreEngine::cardReadParity(Scene *scene, const std::vector<CardReadQuery> &
 // NO OGRE PATCH. Everything it needs is public: `getDefinedTexture` for the
 // chain's textures, `createView` for the image views, `getBarrierSolver` /
 // `executeResourceTransition` for the layouts, and `getCurrentCmdBuffer` for
-// the recording (which patch 0040 already made linkable). The one change to the
+// the recording (which fork 1a81f866a (was 0040) already made linkable). The one change to the
 // engine's own chain is the Uav flag on `jahSsrReflection`, which is ours.
 
 namespace {
@@ -4998,7 +4998,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // ...and the flag the shader splits on. Under the measurement arm it is 0
     // on a stereo target, which is precisely the pre-lane shape: ONE image, the
     // rendering camera's, stretched across two eyes' worth of pixels. (What the
-    // arm cannot reproduce is that before ogre-patch 0078 that camera's
+    // arm cannot reproduce is that before fork 6130df9d1 (was 0078) that camera's
     // extents were INDETERMINATE as well, because it carries a custom
     // projection matrix — so the shipped defect was the sum of the two.)
     pp.stereo[0] = (stereo && !monoEyes) ? 1.0f : 0.0f;
@@ -6943,7 +6943,7 @@ void OgreScene::cardMoverTimes(float &traceMs, float &relightMs, float &stillMs)
 ///       -> VulkanQueue::commitAndNextCommandBuffer -> vkQueueSubmit
 ///       -> VK_ERROR_DEVICE_LOST -> checkVkResult THROWS -> SIGABRT
 ///
-/// ogre-patch 0069 made the same statement about the pin's own staging buffer;
+/// fork b028638c1 (was 0069) made the same statement about the pin's own staging buffer;
 /// this is OUR destructor and it is ours to make safe. Two rules, in order:
 /// a lost device is not flushed at all (a submit on it can only fail, and the
 /// engine's own frame tail already reports the loss), and anything that still

@@ -39,7 +39,7 @@ namespace jahshaka { namespace engine { namespace detail {
 // `LodStrategy::lodSet` is public and is the ONE function MovableObject grants
 // friendship to, and `LodStrategyManager::addStrategy` takes ownership exactly
 // as it does for upstream's four. The only pin change this lane makes is
-// ogre-patch 0075, which adds the hysteresis band `lodSet` has no way to
+// fork 5230c9390+8282f6d70 (was 0075), which adds the hysteresis band `lodSet` has no way to
 // express (the switch is a step in both directions otherwise).
 //
 // AT 1080 LINES AND 45 DEGREES THIS IS ARITHMETICALLY THE OLD RULE: the stage-1
@@ -133,7 +133,7 @@ public:
             Ogre::ArrayReal v = objData.mWorldAabb->mCenter.distance(cameraPos) - (*worldRadius);
             v = Ogre::Mathlib::Max(v, zero) * scale * meshUnitsPerWorldUnit(*localRadius, *worldRadius);
             CastArrayToReal(lodValues, v);
-            // The band is THIS PASS'S (ogre-patch 0075): the value is the same
+            // The band is THIS PASS'S (fork 5230c9390+8282f6d70 (was 0075)): the value is the same
             // arithmetic for every pass, the band is not.
             lodSet(objData, lodValues, hysteresis);
             objData.advanceLodPack();
@@ -234,7 +234,7 @@ private:
 
 }   // namespace
 
-// THE SWITCH HYSTERESIS (ATOM-3 A7, ogre-patch 0075), as a fraction of the
+// THE SWITCH HYSTERESIS (ATOM-3 A7, fork 5230c9390+8282f6d70 (was 0075)), as a fraction of the
 // threshold being crossed. Upstream's `lodSet` flips at the exact threshold in
 // both directions, so an object parked on one changes level every frame the
 // camera dithers — 71 pops in 600 frames on a camera oscillating by 2 % of the
@@ -244,7 +244,7 @@ private:
 // is bounded by construction: a value genuinely past the band switches on the
 // frame it gets there.
 //
-// IT IS A PER-PASS NUMBER (ATOM-3-FIX; patch 0075 amended): it reaches
+// IT IS A PER-PASS NUMBER (ATOM-3-FIX; fork 5230c9390+8282f6d70 (was 0075) amended): it reaches
 // `lodSet` from the PASS DEFINITION that asked for the LOD update, so the
 // watched view carries it and a planar reflector's mirrored camera, a PiP
 // inset, a probe cube face and a thumbnail do not (they take the exact level
@@ -632,7 +632,7 @@ void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<floa
     // say that in an ascending array is a threshold nothing can reach.
     //
     // Ascending with the strategy's base value first — what LodStrategy::lodSet
-    // binary-searches. Patch 0059 is what makes this expressible at all:
+    // binary-searches. fork 5230c9390 (was 0059) is what makes this expressible at all:
     // Mesh::mLodValues is protected and _setLodInfo's body is commented out
     // upstream.
     Ogre::Mesh::LodValueArray values;
@@ -687,9 +687,10 @@ void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
 }
 
 // The VAO-list SHAPE (AT-A11; PHOTON-SCENE-SWITCH-1). Counting the shadow entries
-// that are NOT in the normal list is the same test the patched
-// `destroyShadowMappingVaos` makes (ogre-patch 0088), which is the point: the number
-// this reports is the number of shadow VAOs and index buffers the mesh really owns.
+// that are NOT in the normal list gives the number of shadow VAOs and index buffers
+// the mesh really owns — the ones Ogre's SubMesh::destroyShadowMappingVaos destroys
+// (upstream's per-list alias test: the host builds only the two pure shapes, all
+// aliased or all independent, D6-FORK-TOOLING deleted the per-entry variant).
 bool OgreScene::meshVaoShape(MeshId mesh, unsigned &levels, unsigned &shadowIndependent) const {
     levels = 0;
     shadowIndependent = 0;
