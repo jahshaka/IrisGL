@@ -58,7 +58,8 @@
 //     sheet never shows more sky light than the clear sky did.
 //   * DISTANCE: a sheet 100 km away is seen through that much air. The sky
 //     model draws no aerial perspective for us to composite into, so the far
-//     sheet fades into the sky itself with distance (a stated proxy).
+//     sheet fades into the sky itself with distance (a stated proxy), and is
+//     read through a coarser mip the more grazing the view (below).
 //
 // THE SUN'S IRRADIANCE arrives in the renderer's own units -- what a white
 // Lambert card facing the sun would reflect times pi -- so the sheet and a
@@ -93,7 +94,13 @@ in block
 vulkan_layout( location = 0 )
 out vec4 fragColour;
 
-#define JAH_CLOUD_TAU( uv ) texture( vkSampler2D( cloudField, cloudSampler ), uv ).x
+// THE FAR EDGE, SOFTENED BY THE VIEW'S GRAZING ANGLE (CLOUDS-2D-3): towards the
+// horizon a pixel covers kilometres of sheet and the slant multiplies every
+// depth by 1 / mu, so the field is read through a coarser mip the more grazing
+// the ray -- half a mip per halving of mu -- and a far cloud's edge is its
+// footprint's average, not a texel's step magnified into a wall.
+float jahCloudBias = 0.0;
+#define JAH_CLOUD_TAU( uv ) texture( vkSampler2D( cloudField, cloudSampler ), uv, jahCloudBias ).x
 #include "JahCloudLayer.glsl"
 
 float jahHenyeyGreenstein( float cosTheta, float g )
@@ -115,6 +122,7 @@ void main()
 		fragColour = vec4( 0.0, 0.0, 0.0, 0.0 );
 		return;
 	}
+	jahCloudBias = 0.5 * log2( 1.0 / max( hit.mu, 0.05 ) );
 	const float tau = JAH_CLOUD_TAU( hit.uv );
 	const float tView = jahCloudViewTransmittance( tau, hit );
 	const float opacity = 1.0 - tView;

@@ -60,18 +60,80 @@ fragment_program Jahshaka/SunDiscClouded_ps unified
 	}
 }
 
+// THE FIELD BAKE'S FOUR PASSES (CLOUDS-2D-3; JahshakaClouds.compositor):
+// the footprint, the blur along x and along y, the field.
+fragment_program Jahshaka/CloudShape_ps_GLSL glsl
+{
+	source JahCloudShape_ps.glsl
+	// JahCloudNoise.glsl, the one copy of the field's lattices.
+	enable_include_header true
+	default_params
+	{
+		param_named cloudWeather int 0
+	}
+}
+fragment_program Jahshaka/CloudShape_ps_VK glslvk
+{
+	source JahCloudShape_ps.glsl
+	enable_include_header true
+}
+fragment_program Jahshaka/CloudShape_ps unified
+{
+	delegate Jahshaka/CloudShape_ps_GLSL
+	delegate Jahshaka/CloudShape_ps_VK
+}
+
+fragment_program Jahshaka/CloudBlurH_ps_GLSL glsl
+{
+	source JahCloudBlur_ps.glsl
+	default_params
+	{
+		param_named cloudIn int 0
+	}
+}
+fragment_program Jahshaka/CloudBlurH_ps_VK glslvk
+{
+	source JahCloudBlur_ps.glsl
+}
+fragment_program Jahshaka/CloudBlurH_ps unified
+{
+	delegate Jahshaka/CloudBlurH_ps_GLSL
+	delegate Jahshaka/CloudBlurH_ps_VK
+}
+
+fragment_program Jahshaka/CloudBlurV_ps_GLSL glsl
+{
+	source JahCloudBlur_ps.glsl
+	preprocessor_defines JAH_BLUR_V=1
+	default_params
+	{
+		param_named cloudIn int 0
+	}
+}
+fragment_program Jahshaka/CloudBlurV_ps_VK glslvk
+{
+	source JahCloudBlur_ps.glsl
+	preprocessor_defines JAH_BLUR_V=1
+}
+fragment_program Jahshaka/CloudBlurV_ps unified
+{
+	delegate Jahshaka/CloudBlurV_ps_GLSL
+	delegate Jahshaka/CloudBlurV_ps_VK
+}
+
 fragment_program Jahshaka/CloudBake_ps_GLSL glsl
 {
 	source JahCloudBake_ps.glsl
+	enable_include_header true
 	default_params
 	{
-		param_named cloudNoise int 0
-		param_named cloudWeather int 1
+		param_named cloudBlurred int 0
 	}
 }
 fragment_program Jahshaka/CloudBake_ps_VK glslvk
 {
 	source JahCloudBake_ps.glsl
+	enable_include_header true
 }
 fragment_program Jahshaka/CloudBake_ps unified
 {

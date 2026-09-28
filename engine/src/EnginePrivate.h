@@ -4808,8 +4808,8 @@ private:
     Ogre::MaterialPtr  mCloudMaterial;          // per-scene clone of Jahshaka/CloudLayer
     Ogre::MaterialPtr  mCloudBakeMaterial;      // Jahshaka/CloudBake itself (the bake binds per render)
     Ogre::MaterialPtr  mSunDiscCloudMaterial;   // ...of Jahshaka/SunDiscClouded
-    Ogre::TextureGpu  *mCloudNoise = nullptr;   // 256^2 RGBA8, fixed seed, ManualTexture
-    Ogre::TextureGpu  *mCloudField = nullptr;   // 1024^2 R16F optical depth, one tile
+    Ogre::TextureGpu  *mCloudWeatherNone = nullptr;   // 1x1 white, ManualTexture: the bake's no-map unit
+    Ogre::TextureGpu  *mCloudField = nullptr;   // 2048^2 R16F optical depth, one 64 km tile
     Ogre::Camera      *mCloudBakeCamera = nullptr;
     bool     mCloudFieldPending = false;
     /// The layer's own clock: the sum of the frame deltas of the frames this

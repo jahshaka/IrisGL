@@ -8016,12 +8016,13 @@ void SceneMirror::applyCloudLayer()
         mCloudWeatherPath = weatherPath;
         if (!weatherPath.isEmpty()) {
             // DATA, not a colour: uploaded linear (srgb false), and held at a
-            // size that covers one 16 km tile with no waste (a larger map adds
-            // nothing the 1024^2 field could keep).
+            // size that covers one 64 km tile with no waste (the bake reads it
+            // on its 512^2 footprint grid, CLOUDS-2D-3 — a larger map adds
+            // nothing the bake could keep).
             QImage img(weatherPath);
             if (!img.isNull()) {
-                if (img.width() > 1024 || img.height() > 1024)
-                    img = img.scaled(1024, 1024, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                if (img.width() > 512 || img.height() > 512)
+                    img = img.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 img = img.convertToFormat(QImage::Format_RGBA8888);
                 mCloudWeatherTexture = mTarget->createTexture(unsigned(img.width()),
                                                               unsigned(img.height()),
