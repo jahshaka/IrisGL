@@ -1453,8 +1453,8 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
             }
         }
 
-        // The DIRECT volume exists only on a cascade that bounces (ogre-patch
-        // 0076's D term). Its peak is the normalisation's own self-check.
+        // The DIRECT volume exists only on a cascade that bounces (fork ae2ed529f+155a56bf8
+        // (was 0076)'s D term). Its peak is the normalisation's own self-check.
         if (Ogre::TextureGpu *direct = lighting->getLightDirectTexture()) {
             Walk wd;
             if (walk(direct, wd)) {
@@ -1463,8 +1463,8 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
             }
         }
 
-        // AND THE SOURCE THE INJECTION SEEDS FROM (VOXEL-CLIP-1, ogre-patch
-        // 0087): the voxeliser's EMISSIVE volume, in scene radiance. The lit
+        // AND THE SOURCE THE INJECTION SEEDS FROM (VOXEL-CLIP-1, fork ad452604a+155a56bf8
+        // (was 0087)): the voxeliser's EMISSIVE volume, in scene radiance. The lit
         // volumes above are the injection's OUTPUT, and an emitter clipped on
         // its way in is indistinguishable there from a dimmer emitter — the
         // same argument that put the volumes in this readback in the first

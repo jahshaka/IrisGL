@@ -6024,7 +6024,7 @@ struct PostFxDesc {
     ///
     /// THERE USED TO BE A SECOND ONE. `ssrRoughnessCutoff` (0.35) gated the
     /// march, nothing in the document ever wrote it, and it was compared
-    /// against a G-buffer channel the march decoded with the pre-ogre-patch-0043
+    /// against a G-buffer channel the march decoded with the pre-fork 16d8e29d4 (was 0043)
     /// range and never square-rooted — so the band the frame applied was
     /// perceptual 0.581, not 0.35 and not anything a user could read. It is
     /// deleted; the march reads this field (OgreChain::updateSsr).

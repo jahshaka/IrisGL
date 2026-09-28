@@ -3160,8 +3160,8 @@ void VrSession::applyEyeViews() {
 // covers both is one that renders THIS session's chain, in stereo, at THIS
 // session's eye size — which is what this is.
 //
-// WHY NOT Ogre's own CompositorPassWarmUp (chain::warmUp, the route ogre-patch
-// 0016 unblocked). Two reasons, and the second is the deciding one:
+// WHY NOT Ogre's own CompositorPassWarmUp (chain::warmUp, the route fork 8282f6d70
+// (was 0016) unblocked). Two reasons, and the second is the deciding one:
 //   1. `Hlms::preparePassHash`, `HlmsPbs::preparePassHash` and
 //      `HlmsUnlit::preparePassHash` all read the instanced-stereo flag through
 //      `pass->getType() == PASS_SCENE` and a downcast to

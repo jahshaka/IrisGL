@@ -678,8 +678,8 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // mip count, declared only by a pass that claimed the environment's slot.
     //
     // Nothing here compensates for the irradiance field's block any more: its
-    // own getConstBufferSize() under-reported by one float4 until ogre-patch
-    // 0050, and this listener used to reserve four extra floats on a
+    // own getConstBufferSize() under-reported by one float4 until fork ae2ed529f+822d538f5
+    // (was 0050), and this listener used to reserve four extra floats on a
     // field-bound non-caster pass and then deliberately SKIP them, so that the
     // field's 24-float write and HlmsPbs's 20-float pointer advance could not
     // collide with our first float4. That correction depended on HlmsPbs

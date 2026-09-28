@@ -2592,8 +2592,8 @@ public:
                                    bool, Ogre::SceneManager *) const override;
     float *preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
                              Ogre::SceneManager *sceneManager, float *passBufferPtr) override;
-    /// THE LAMP-MAP CACHE'S SELF-CHECK (ENGINE_CACHE_POLICY_SPEC E2, ogre-patch
-    /// 0025). Hlms declares `hlms_num_shadow_map_lights` from the shadow node's
+    /// THE LAMP-MAP CACHE'S SELF-CHECK (ENGINE_CACHE_POLICY_SPEC E2, fork 6130df9d1
+    /// (was 0025)). Hlms declares `hlms_num_shadow_map_lights` from the shadow node's
     /// ACTIVE COUNT but indexes shadow maps from the node's SLOT ARRAY; a lamp
     /// fixed into a slot after the node last built its light list makes the two
     /// disagree and generates a pixel shader that references a shadow map it

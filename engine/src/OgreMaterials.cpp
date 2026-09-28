@@ -651,8 +651,8 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             return true;   // an unlit material is never refractive
         }
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
-        // THE REFLECTION-PROBE GATE'S ONE EXPENSIVE EDIT, COUNTED (ogre-patch
-        // 0028, round-3 item 9). The gate is a SHADER property, so the three
+        // THE REFLECTION-PROBE GATE'S ONE EXPENSIVE EDIT, COUNTED (fork 36162ff37+16d8e29d4
+        // (was 0028), round-3 item 9). The gate is a SHADER property, so the three
         // setters that can cross it flush every renderable wearing this
         // datablock when — and only when — the answer CHANGES. That makes an
         // ordinary parameter push free and a crossing push expensive, and the

@@ -572,13 +572,13 @@ set(OGRE_NEXT_IBL_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IBL")
 # (PHOTON-VIEW-1) — like VCT/Visualizer, its Voxels picture.
 #
 # ORDINARY MEDIA STAGING, and the distinction matters (P0 spike finding 1,
-# correcting the spec's own bullet): this is NOT the patch-0009/0017 class. The
+# correcting the spec's own bullet): this is NOT the fork c290052de+4d5fbef16 (was 0009/0017) class. The
 # files are upstream's, unpatched, copied from OGRE_NEXT_SOURCE by the normal
 # build step — a `cmake --build` picks them up and no tree has to re-run
 # build-ogre.sh. A tree that has not rebuilt simply has no IFD media, and DDGI
 # then fails LOUD (the compute jobs are missing) instead of rendering wrong.
 set(OGRE_NEXT_IFD_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IrradianceFields")
-# The overlay font (STATS_OVERLAY_SPEC §9.3 — patch-0009 class: staged from the
+# The overlay font (STATS_OVERLAY_SPEC §9.3 — fork c290052de (was 0009) class: staged from the
 # SOURCE tree, so EVERY tree and every worktree re-stages, and a tree that has
 # not rebuilt has no font and therefore no stats readout and no loading cover).
 #

@@ -1455,8 +1455,8 @@ bool OgreView::isEnabled() const { return mEnabled; }
 // The ACHIEVED size, exactly like sampleCount() reports the achieved sample
 // count: what the render target really is, not what the host asked for. For an
 // on-screen view those differ constantly — the swapchain follows the native
-// window (and on X11 the surface's currentExtent wins outright, ogre-patch
-// 0008), a request made this frame is applied at the next applyPendingResize,
+// window (and on X11 the surface's currentExtent wins outright, fork 1a64cd1d8
+// (was 0008)), a request made this frame is applied at the next applyPendingResize,
 // and a window manager may never grant the size at all. Reporting the request
 // made the selftest's resize assertion tautological (deep audit area 7 F3):
 // it compared the values we had just pushed with themselves.
@@ -1714,8 +1714,8 @@ void OgreView::applyPendingResizeImpl() {
         return;
     }
     // ---- MSAA CHANGE: the one case that still recreates the window. ---------
-    // Vulkan/XCB has no setFsaa (only the Metal window implements it, patch
-    // 0007), so the sample count can only change by building a new window with
+    // Vulkan/XCB has no setFsaa (only the Metal window implements it, fork 1a81f866a+d014b064f+1bccc3f93
+    // (was 0007)), so the sample count can only change by building a new window with
     // a different FSAA misc param on the same native handle.
     //
     // STALL FIRST. destroyRenderWindow tears down the swapchain and calls
