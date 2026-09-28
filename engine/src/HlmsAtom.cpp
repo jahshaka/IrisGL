@@ -18,6 +18,9 @@
 #include <OgreResourceTransition.h>
 #include <OgreHlmsPbsDatablock.h>
 #include <OgreLogManager.h>
+#include <OgreLight.h>
+#include <OgreForwardClustered.h>
+#include <Compositor/OgreCompositorShadowNode.h>
 #include <OgreRenderQueue.h>
 #include <OgreRenderSystem.h>
 #include <OgreResourceGroupManager.h>
@@ -159,6 +162,8 @@ HlmsAtom::~HlmsAtom() {
     mPointSampler = nullptr;
     if (mEmptyBuf && mVaoManager) mVaoManager->destroyReadOnlyBuffer(mEmptyBuf);
     mEmptyBuf = nullptr;
+    if (mWorldLightBuf && mVaoManager) mVaoManager->destroyReadOnlyBuffer(mWorldLightBuf);
+    mWorldLightBuf = nullptr;
     if (mEmptyIds && mRenderSystem && mRenderSystem->getTextureGpuManager())
         mRenderSystem->getTextureGpuManager()->destroyTexture(mEmptyIds);
     mEmptyIds = nullptr;
@@ -842,6 +847,106 @@ void HlmsAtom::uploadBucketTable() {
     mBucketMirror.swap(table);
 }
 
+/// THE WORLD LIGHT LIST (D3-HIT-SHADE-2). A ray hit outside the camera's frustum
+/// has no Forward+ cell (the fork's fwdCustomFragCoord hook), and Ogre's clustered
+/// list holds only the lights whose range touches that frustum
+/// (ForwardClustered::collectLights culls against the camera; even the scene's
+/// "global" list is culled against every camera, SceneManager::buildLightList). The
+/// physics does not care where the camera is: a lamp lights every point inside its
+/// range. So the hit decode carries its own list: EVERY point and spot light of the
+/// scene the pass buffer does not already hold — the shadow node's casting lights
+/// ride the pass buffer, exactly the set ForwardClustered excludes — in WORLD space
+/// (the shader moves it through the pass's view), Forward+'s six float4 a light
+/// (fillGlobalLightListBuffer's layout: position + type, diffuse + the light mask's
+/// bits, specular, attenuation, spot direction + profile, spot parameters) behind one
+/// header float4 (the count, the per-hit cap). ORDERED BY CONTRIBUTION — the peak
+/// channel of the light's power, brightest first, the id as the tie — and the hit
+/// shades at most Forward+'s lights-per-cell of the ones whose range contains it:
+/// the bound the forward list keeps on screen. A light is visible by Ogre's own
+/// test (the visibility layer and the scene's light mask). Area lights and
+/// directional ones are the pass buffer's (directional always; area lights as
+/// the camera culled them — stated). Uploaded only when the bytes change.
+void HlmsAtom::uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorShadowNode *shadowNode) {
+    if (!mVaoManager || !sm) return;
+    std::vector<const Ogre::Light *> casting;
+    if (shadowNode)
+        for (const Ogre::LightClosest &lc : shadowNode->getShadowCastingLights())
+            if (lc.light) casting.push_back(lc.light);
+    struct Entry {
+        const Ogre::Light *light;
+        float power;
+    };
+    std::vector<Entry> lights;
+    const Ogre::uint32 mask = sm->getLightMask();
+    Ogre::SceneManager::MovableObjectIterator it = sm->getMovableObjectIterator(Ogre::LightFactory::FACTORY_TYPE_NAME);
+    while (it.hasMoreElements()) {
+        const Ogre::Light *l = static_cast<const Ogre::Light *>(it.getNext());
+        if (l->getType() != Ogre::Light::LT_POINT && l->getType() != Ogre::Light::LT_SPOTLIGHT) continue;
+        if (!l->isAttached() || !l->getVisible() || !(l->getVisibilityFlags() & mask)) continue;
+        if (std::find(casting.begin(), casting.end(), l) != casting.end()) continue;
+        const Ogre::ColourValue d = l->getDiffuseColour() * l->getPowerScale();
+        const Ogre::ColourValue sp = l->getSpecularColour() * l->getPowerScale();
+        const float power = std::max(std::max(d.r, d.g), d.b);
+        if (!(power > 0.0f) && !(std::max(std::max(sp.r, sp.g), sp.b) > 0.0f)) continue;
+        if (!(l->getAttenuationRange() > 0.0f)) continue;
+        lights.push_back({ l, power });
+    }
+    std::sort(lights.begin(), lights.end(), [](const Entry &a, const Entry &b) {
+        if (a.power != b.power) return a.power > b.power;
+        return a.light->getId() < b.light->getId();
+    });
+    // THE PER-HIT CAP: Forward+'s lights per cell (the engine's setForwardClustered).
+    Ogre::uint32 cap = 96u;
+    if (auto *fc = dynamic_cast<Ogre::ForwardClustered *>(sm->getForwardPlus())) cap = fc->getLightsPerCell();
+    const float invHeightProfiles = Ogre::Root::getSingleton().getLightProfilesInvHeight();
+    std::vector<float> data;
+    data.reserve(4u + lights.size() * 24u);
+    const Ogre::uint32 count = Ogre::uint32(lights.size());
+    auto bits = [](Ogre::uint32 u) { float f; std::memcpy(&f, &u, sizeof f); return f; };
+    data.push_back(bits(count));
+    data.push_back(bits(cap));
+    data.push_back(0.0f);
+    data.push_back(0.0f);
+    for (const Entry &e : lights) {
+        const Ogre::Light *l = e.light;
+        const Ogre::Vector3 p = l->getParentNode()->_getDerivedPosition();
+        data.insert(data.end(), { float(p.x), float(p.y), float(p.z), float(l->getType()) });
+        const Ogre::ColourValue d = l->getDiffuseColour() * l->getPowerScale();
+        data.insert(data.end(), { d.r, d.g, d.b, bits(l->getLightMask()) });
+        const Ogre::ColourValue sp = l->getSpecularColour() * l->getPowerScale();
+        data.insert(data.end(), { sp.r, sp.g, sp.b, 0.0f });
+        const float range = float(l->getAttenuationRange());
+        data.insert(data.end(), { range, float(l->getAttenuationLinear()), float(l->getAttenuationQuadric()),
+                                  1.0f / range });
+        const Ogre::Vector3 dir = l->getDerivedDirection();
+        data.insert(data.end(), { float(dir.x), float(dir.y), float(dir.z),
+                                  (float(l->getLightProfileIdx()) + 0.5f) * invHeightProfiles });
+        const float inner = float(l->getSpotlightInnerAngle().valueRadians());
+        const float outer = float(l->getSpotlightOuterAngle().valueRadians());
+        data.insert(data.end(), { 1.0f / (std::cos(inner * 0.5f) - std::cos(outer * 0.5f)), std::cos(outer * 0.5f),
+                                  float(l->getSpotlightFalloff()), 0.0f });
+    }
+    mWorldLightCount = count;
+    mWorldLightCap = cap;
+    if (mWorldLightBuf && data.size() == mWorldLightMirror.size() &&
+        std::memcmp(data.data(), mWorldLightMirror.data(), data.size() * sizeof(float)) == 0)
+        return;
+    // A read-only buffer's element is one byte (see uploadBucketTable).
+    const size_t bytes = data.size() * sizeof(float);
+    if (mWorldLightBuf && mWorldLightBuf->getNumElements() < bytes) {
+        mVaoManager->destroyReadOnlyBuffer(mWorldLightBuf);
+        mWorldLightBuf = nullptr;
+    }
+    if (!mWorldLightBuf) {
+        // Room for 32 lights before the first regrowth.
+        const size_t room = std::max(bytes, (4u + 32u * 24u) * sizeof(float));
+        mWorldLightBuf = mVaoManager->createReadOnlyBuffer(Ogre::PFG_RGBA32_FLOAT, room, Ogre::BT_DEFAULT,
+                                                           nullptr, false);
+    }
+    mWorldLightBuf->upload(data.data(), 0u, bytes);
+    mWorldLightMirror.swap(data);
+}
+
 // ---------------------------------------------------------------------------
 // THE PASS: the first read of a frame asks PBS what it holds (tellEveryHlms, once per frame).
 // ---------------------------------------------------------------------------
@@ -901,6 +1006,7 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
     // render pass: the stand-ins every draw binds, the bucket table.
     ensureStandIns();
     uploadBucketTable();
+    if (mSource.hitMode && !casterPass) uploadWorldLights(sceneManager, shadowNode);
     Ogre::HlmsCache ret =
         Ogre::HlmsPbs::preparePassHash(shadowNode, casterPass, dualParaboloid, sceneManager);
     if (casterPass) return ret;
@@ -949,6 +1055,21 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
     setProperty(props, Ogre::IdString("atom_hit_mode"), 1);
     setProperty(props, Ogre::IdString("hlms_forwardplus_custom_frag_coord"), 1);
     setProperty(props, Ogre::HlmsBaseProp::Fog, 0);
+    // MEASUREMENT DOORS (D3-HIT-SHADE-2's paired arms; read per pass, so one process
+    // flips them between frames — never a product setting):
+    //   JAHSHAKA_HIT_WORLD_LIGHTS=off   the world light list is not read (the
+    //                                   picture before this lane: a hit with no
+    //                                   cell gets no point or spot light);
+    //   JAHSHAKA_HIT_WORLD_LIGHTS=all   EVERY hit takes the world list and no
+    //                                   Forward+ cell (the "one list" arm);
+    //   JAHSHAKA_HIT_VCT_SPECULAR=0     the VCT specular cone compiled out of the
+    //                                   hit decode (vct_disable_specular).
+    if (const char *w = std::getenv("JAHSHAKA_HIT_WORLD_LIGHTS")) {
+        if (std::strcmp(w, "off") == 0) setProperty(props, Ogre::IdString("atom_hit_world_off"), 1);
+        else if (std::strcmp(w, "all") == 0) setProperty(props, Ogre::IdString("atom_hit_world_all"), 1);
+    }
+    if (const char *v = std::getenv("JAHSHAKA_HIT_VCT_SPECULAR"); v && std::strcmp(v, "0") == 0)
+        setProperty(props, Ogre::IdString("vct_disable_specular"), 1);
     PassCache passCache;
     passCache.passPso = ret.pso.pass;
     passCache.properties = props;
@@ -982,6 +1103,7 @@ Ogre::Hlms::PropertiesMergeStatus HlmsAtom::notifyPropertiesMergedPreGenerationS
     setProperty(tid, "atomHitBuf", kHitBufSlot);
     setProperty(tid, "atomMeshBuf", kMeshBufSlot);
     setProperty(tid, "atomClusterBuf", kClusterBufSlot);
+    setProperty(tid, "atomWorldLightBuf", kWorldLightBufSlot);
     setProperty(tid, "atomSlotsPerPool", Ogre::int32(mSlotsPerPool));
     Ogre::int32 texSlotsStart = kReservedBufSlots;
     if (getProperty(tid, Ogre::HlmsBaseProp::ForwardPlus))
@@ -1084,6 +1206,10 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
         *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
             Ogre::PixelShader, kClusterBufSlot,
             (whole && mSource.clusters) ? roView(mSource.clusters) : mEmptyBuf, 0, 0);
+        // HIT MODE's world light list (uploadWorldLights) — the stand-in otherwise
+        // (its first word, the count, is 0).
+        *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
+            Ogre::PixelShader, kWorldLightBufSlot, (hit && mWorldLightBuf) ? mWorldLightBuf : mEmptyBuf, 0, 0);
         Ogre::uint16 texSlot = kReservedBufSlots;
         if (mGridBuffer) texSlot = Ogre::uint16(texSlot + 2u);
         *commandBuffer->addCommand<Ogre::CbTexture>() =
