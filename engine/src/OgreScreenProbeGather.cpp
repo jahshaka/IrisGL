@@ -59,6 +59,9 @@
 #include "rayquery/rq_probe_gather_spv.h"
 #include "rayquery/rq_probe_filter_spv.h"
 #include "rayquery/rq_probe_integrate_spv.h"
+#include "VkDescriptorPools.h"
+
+#include <OgreBitwise.h>
 
 #include <algorithm>
 #include <cmath>
@@ -234,30 +237,6 @@ bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
 constexpr float kPlaneTolerance = 0.01f;
 constexpr float kNormalTolerance = 0.9f;
 
-/// IEEE half to float, for the readback (a test door; subnormals kept).
-float halfToFloat(uint16_t h) {
-    const uint32_t sign = uint32_t(h & 0x8000u) << 16;
-    uint32_t exp = (h >> 10) & 0x1Fu;
-    uint32_t mant = h & 0x3FFu;
-    uint32_t bits;
-    if (exp == 0u) {
-        if (mant == 0u) bits = sign;
-        else {
-            exp = 127u - 15u + 1u;
-            while (!(mant & 0x400u)) { mant <<= 1; --exp; }
-            mant &= 0x3FFu;
-            bits = sign | (exp << 23) | (mant << 13);
-        }
-    } else if (exp == 31u) {
-        bits = sign | 0x7F800000u | (mant << 13);
-    } else {
-        bits = sign | ((exp + 127u - 15u) << 23) | (mant << 13);
-    }
-    float f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
-}
-
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -265,6 +244,10 @@ ScreenProbeGather::~ScreenProbeGather() { close(); }
 
 bool ScreenProbeGather::makePipelines(std::string &err) {
     VkDevice dev = mHost.gatherDevice();
+    // PER VIEW AND RING SLOT, four sets (place, trace, filter, integrate): the pool is
+    // planned from the four layouts as each is made (VkDescriptorPools.h).
+    const unsigned groups = kMaxTimedViews * kRing;
+    detail::DescriptorPoolPlan plan;
     const auto makeLayout = [&](unsigned count, const VkDescriptorType *types,
                                 const unsigned *counts, VkDescriptorSetLayout &out,
                                 const char *what) {
@@ -283,15 +266,9 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             b[i].descriptorCount = counts ? counts[i] : 1u;
             b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
-        VkDescriptorSetLayoutCreateInfo sli{};
-        sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        sli.bindingCount = count;
-        sli.pBindings = b;
-        if (vkCreateDescriptorSetLayout(dev, &sli, nullptr, &out) != VK_SUCCESS) {
-            err = std::string("gather: vkCreateDescriptorSetLayout (") + what + ") failed";
-            return false;
-        }
-        return true;
+        // The layout and its pool line in one call (VkDescriptorPools.h).
+        return plan.makeLayout(dev, b, count, groups, out, err,
+                               (std::string("gather/") + what).c_str());
     };
 
     {   // rq_probe_place.comp
@@ -420,40 +397,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
                  mIntegratePipeLayout, mIntegrateModule, mIntegratePipeline, "integrate"))
         return false;
 
-    // PER VIEW AND RING SLOT, four sets: place (1 uniform, 3 storage buffers,
-    // 2 sampled), trace (1 AS, 1 uniform, 5 storage buffers, 1 storage image,
-    // 4 x cascades + 3 sampled), filter (1 uniform, 1 storage buffer, 1 storage
-    // image), integrate (1 uniform, 1 storage buffer, 2 sampled, 5 storage
-    // images: the irradiance, the history's two halves, the rest mean, the photon
-    // overlay).
-    const unsigned groups = kMaxTimedViews * kRing;
-    const unsigned sets = groups * 4u;
-    VkDescriptorPoolSize sizes[4] = {};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    sizes[0].descriptorCount = groups;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[1].descriptorCount = groups * 4u;
-    sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[2].descriptorCount = groups * 12u;   // + the hit record's two (HIT-SHADE-1)
-    sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    // The trace's atlas + the hit list's two, the filter's atlas, the integrate's.
-    sizes[3].descriptorCount = groups * (3u + 1u + kIntegrateStorageImages);
-    VkDescriptorPoolSize sampled{};
-    sampled.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    // The voxel arrays: iso, X, Y, Z, coverage +/-, position +/- (8) and level 0's
-    // back side and normal (2, PHOTON-VOXEL-5) — ten a cascade; the card read's view term (5).
-    sampled.descriptorCount = groups * (2u + 10u * kGatherMaxCascades + 3u + 2u + SurfaceCache::kViewLayers);
-    VkDescriptorPoolSize all[5] = { sizes[0], sizes[1], sizes[2], sizes[3], sampled };
-    VkDescriptorPoolCreateInfo dpi{};
-    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpi.maxSets = sets;
-    dpi.poolSizeCount = 5;
-    dpi.pPoolSizes = all;
-    if (vkCreateDescriptorPool(dev, &dpi, nullptr, &mPool) != VK_SUCCESS) {
-        err = "gather: vkCreateDescriptorPool failed";
+    if (!plan.create(dev, "gather", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mPool, err))
         return false;
-    }
 
     auto *rs = static_cast<Ogre::VulkanRenderSystem *>(mHost.gatherRenderSystem());
     if (rs && rs->getVulkanDevice()) {
@@ -689,7 +634,7 @@ void ScreenProbeGather::readPending(View &v) {
                 const uint16_t *src = reinterpret_cast<const uint16_t *>(
                     static_cast<const char *>(v.irrReadbackMapped) + i * texels * 8u);
                 v.irrHost.resize(texels * 4u);
-                for (size_t k = 0; k < texels * 4u; ++k) v.irrHost[k] = halfToFloat(src[k]);
+                for (size_t k = 0; k < texels * 4u; ++k) v.irrHost[k] = Ogre::Bitwise::halfToFloat(src[k]);
                 v.irrHostFrame = v.pending[i].gatherFrame;
                 v.pending[i].irradiance = false;
             }
@@ -1781,7 +1726,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTracePipeLayout, 0, 1,
                             &v.traceSets[ring], 0, nullptr);
     // ONE WORKGROUP PER PROBE — the trace's 64 threads ARE its 64 rays — and
-    // the COUNT is the GPU's own (patch 0032's shape: a count nobody on the CPU
+    // the COUNT is the GPU's own (fork 1bccc3f93+a98e2b0af (was 0032)'s shape: a count nobody on the CPU
     // can know without a round trip).
     vkCmdDispatchIndirect(cmd, v.args, 0);
     if (timed)

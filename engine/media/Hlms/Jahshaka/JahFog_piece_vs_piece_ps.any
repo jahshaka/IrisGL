@@ -130,7 +130,7 @@
 	@end
 @end
 
-// THE ENVIRONMENT CUBE (PHOTON-ENV-1; first claimed by ogre-patch 0048, lane
+// THE ENVIRONMENT CUBE (PHOTON-ENV-1; first claimed by fork 4d5fbef16+8f09c0cd4 (was 0048), lane
 // SKY-FALLBACK-1, for the probe-array pass alone). Every escape in the pixel
 // shader reads it now -- the voxel cones' (jah_environment.glsl through
 // Vct_piece_ps.any) and the probe-array pass's no-probe fallback.

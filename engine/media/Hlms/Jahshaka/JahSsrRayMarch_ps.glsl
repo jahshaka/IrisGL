@@ -41,7 +41,7 @@
 //    RenderSystem::isReverseDepth() (OgreFrustum.cpp:108) — Vulkan's default
 //    here is reverse, far == 0. `B / (d - A)` is metres either way, and the
 //    "nothing was rendered here" test therefore has to reject BOTH extremes,
-//    exactly like ogre-patch 0011 taught the SSAO shader to.
+//    exactly like fork 3f1ad1110 (was 0011) taught the SSAO shader to.
 //
 // OUTPUT (PFG_RGBA16_UNORM, so every channel must be [0,1]):
 //    xy = the coordinate the ray hit, in the SHOT's uv (the target's without a
@@ -259,7 +259,7 @@ void main()
 	// readers', ledger 432/440). It is the GGX ALPHA and not a perceptual
 	// roughness: HlmsPbs runs with `mPerceptualRoughness` true, so the
 	// `pixelData.roughness` the prepass packs into this channel is the perceptual
-	// value SQUARED, and ogre-patch 0043 packs it over [0.001, 1] — the shader's
+	// value SQUARED, and fork 16d8e29d4 (was 0043) packs it over [0.001, 1] — the shader's
 	// own alpha floor — not over upstream's old [0.02, 1].
 	//
 	// This line used the PRE-0043 range and then compared the result to the
@@ -267,7 +267,7 @@ void main()
 	// was `0.980981 * alpha + 0.019019 > 0.35`, i.e. alpha 0.3374, i.e.
 	// PERCEPTUAL 0.581 — a number nobody chose and nobody could read anywhere.
 	//
-	// So: undo the range patch 0043 wrote, then take the square root, because the
+	// So: undo the range fork 16d8e29d4 (was 0043) wrote, then take the square root, because the
 	// cutoff is stated in PERCEPTUAL roughness. That is the number the material
 	// panel shows, the number the World row's "Roughness Cutoff" is in, and the
 	// number the ray-traced half of the same reflection gates on

@@ -12,7 +12,7 @@
 // NO VULKAN HERE EITHER (the same rule the GPU scene keeps): the results are
 // Ogre `UavBufferPacked`s, which an `HlmsComputeJob` binds as SSBOs and Vulkan
 // creates with INDIRECT_BUFFER_BIT already set — so the same buffer is legal as
-// `vkCmdDispatchIndirect`'s argument (patch 0032's path, used here) and as a
+// `vkCmdDispatchIndirect`'s argument (fork 1bccc3f93+a98e2b0af (was 0032)'s path, used here) and as a
 // `vkCmdDrawIndexedIndirect` source for stage 3's own pass, with no patch and no
 // `IndirectBufferPacked` (which Vulkan emulates in system memory at this pin and
 // which therefore has no VkBuffer at all — the stage-0 spike's finding 7.2).
@@ -73,7 +73,7 @@ public:
     Ogre::UavBufferPacked *survivors() const { return mSurvivors; }
     Ogre::UavBufferPacked *count() const { return mCount; }
     Ogre::UavBufferPacked *draws() const { return mDraws; }
-    /// THE BAND'S DIRECTION STATE (ogre-patch 0075's `mHysteresisLod`, per list):
+    /// THE BAND'S DIRECTION STATE (fork 5230c9390+8282f6d70 (was 0075)'s `mHysteresisLod`, per list):
     /// three words a slot — the last level a BANDED request chose, and the node id
     /// and mesh it was chosen for (a slot renumbered by a removal, or a mesh swap,
     /// starts with no band). The only buffer that carries state between requests —
@@ -140,7 +140,7 @@ public:
 
     /// Elements of the count buffer. [0] is the survivor count (a draw's
     /// drawCount); [1..3] are job 3's thread-group counts, which is where
-    /// patch 0032's indirect dispatch reads them from — hence the offset below;
+    /// fork 1bccc3f93+a98e2b0af (was 0032)'s indirect dispatch reads them from — hence the offset below;
     /// [4] the triangles the commands draw (the stats). THE CUT'S (mode 3):
     /// [5..7] the cut job's groups (one per survivor), [8..10] the emit job's
     /// groups (one per drawn-cluster record, [8] = records written), [11] the

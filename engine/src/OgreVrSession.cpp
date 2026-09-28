@@ -315,7 +315,7 @@ unsigned vrTestBlinkFrames() {
 //
 // THE ORDER IS THE PRODUCT (phase 1a §8.5, the one correction the spike made to
 // VR_SPEC §4.1): `loadPlugin` must come BEFORE buildDeviceCreationRequest,
-// because ogre-patch 0068's exporter tests
+// because fork d014b064f+1bccc3f93 (was 0068)'s exporter tests
 // `VulkanInstance::hasExtension(VK_KHR_get_physical_device_properties2)` against
 // the static list the RENDER SYSTEM'S CONSTRUCTOR fills. Build the request
 // first and the feature chain is silently skipped — i.e. Ogre would compile
@@ -558,7 +558,7 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
         reason = "xrGetVulkanGraphicsRequirements2KHR failed";
         return false;
     }
-    // Ogre asks for a 1.2 instance when the loader allows it (ogre-patch 0038's
+    // Ogre asks for a 1.2 instance when the loader allows it (fork d014b064f (was 0038)'s
     // ray query needs 1.2), so 1.2 must fall inside the runtime's window. Monado
     // answers 1.0 .. 1023.1023.1023 and WiVRn the same; a runtime that capped
     // below 1.2 would be a real refusal and is reported as one.
@@ -630,7 +630,7 @@ bool VrBoot::device(Ogre::Root *root, VrInfo &info, std::string &reason) {
     vkGetPhysicalDeviceProperties(mPhysicalDevice, &pdp);
     vrLog("the runtime picked '%s'", pdp.deviceName);
 
-    // THE DEVICE OGRE WOULD HAVE BUILT (ogre-patch 0068 hunk 2): the exact
+    // THE DEVICE OGRE WOULD HAVE BUILT (fork d014b064f+1bccc3f93 (was 0068) hunk 2): the exact
     // extension list and the exact VkPhysicalDeviceFeatures2 chain
     // `VulkanDevice::createDevice` would have passed, so the device the runtime
     // creates is the device Ogre believes it has. Without it Ogre reads the
@@ -692,7 +692,7 @@ bool VrBoot::device(Ogre::Root *root, VrInfo &info, std::string &reason) {
     mExternalDevice.device = mDevice;
     mExternalDevice.graphicsQueue = mQueue;
     mExternalDevice.presentQueue = mQueue;
-    mExternalDevice.creationRequest = &mRequest;   // ogre-patch 0068: the ENABLED set
+    mExternalDevice.creationRequest = &mRequest;   // fork d014b064f+1bccc3f93 (was 0068): the ENABLED set
     for (const char *e : mRequest.extensions) {
         VkExtensionProperties p{};
         std::strncpy(p.extensionName, e, VK_MAX_EXTENSION_NAME_SIZE - 1);
@@ -2955,7 +2955,7 @@ void VrSession::applyEyeViews() {
         // distance in the ROOM, so at world scale s the eyes are s times
         // further apart in the world.
         eyeToHead[eye].setTrans(eyeToHead[eye].getTrans() * mConfig.worldScale);
-        // THE INVARIANT ogre-patch 0078 DEPENDS ON, stated where it is
+        // THE INVARIANT fork 6130df9d1 (was 0078) DEPENDS ON, stated where it is
         // established rather than where it is consumed: the matrix below is
         // built from THIS camera's own near and far, and `getFrustumExtents(
         // FET_TAN_HALF_ANGLES)` divides the extents it unprojects from the
@@ -3160,8 +3160,8 @@ void VrSession::applyEyeViews() {
 // covers both is one that renders THIS session's chain, in stereo, at THIS
 // session's eye size — which is what this is.
 //
-// WHY NOT Ogre's own CompositorPassWarmUp (chain::warmUp, the route ogre-patch
-// 0016 unblocked). Two reasons, and the second is the deciding one:
+// WHY NOT Ogre's own CompositorPassWarmUp (chain::warmUp, the route fork 8282f6d70
+// (was 0016) unblocked). Two reasons, and the second is the deciding one:
 //   1. `Hlms::preparePassHash`, `HlmsPbs::preparePassHash` and
 //      `HlmsUnlit::preparePassHash` all read the instanced-stereo flag through
 //      `pass->getType() == PASS_SCENE` and a downcast to
@@ -3399,7 +3399,7 @@ void VrSession::copyEyes() {
     vkRs->executeResourceTransition(trans);
     dev->mGraphicsQueue.endAllEncoders();
     // getCurrentCmdBuffer never returns null: on a lost device its own
-    // checkVkResult throws (the accessor ogre-patch 0040 made linkable).
+    // checkVkResult throws (the accessor fork 1a81f866a (was 0040) made linkable).
     VkCommandBuffer cmd = dev->mGraphicsQueue.getCurrentCmdBuffer();
     const VkImage src = static_cast<Ogre::VulkanTextureGpu *>(rtt)->getFinalTextureName();
 

@@ -452,7 +452,7 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
         p->mIncludeOverlays = false;
         // THE LOD LISTS ARE NOT RE-DERIVED BY THIS PASS. The level a card is
         // captured at is the card's OWN (`MeshCardDesc::lodLevel`), written
-        // straight onto the Item through patch 0085's setter in passPreExecute —
+        // straight onto the Item through fork 5230c9390 (was 0085)'s setter in passPreExecute —
         // a pass that recomputed LOD from this ortho camera would undo it.
         p->mUpdateLodLists = false;
         p->mProfilingId = "Jahshaka card capture";
@@ -1017,7 +1017,7 @@ void SurfaceCache::passPreExecute(Ogre::CompositorPass *pass) {
     mSubjectFlags = inst.item->getVisibilityFlags();
     mSubjectLod = inst.item->getCurrentMeshLod();
     inst.item->setVisibilityFlags(mSubjectFlags | detail::kCardSubjectBit);
-    // THE CARD'S OWN LOD (patch 0085): the level is a capture DECISION (the
+    // THE CARD'S OWN LOD (fork 5230c9390 (was 0085)): the level is a capture DECISION (the
     // bake's, spent at the card's texel), and upstream keeps the member
     // protected with only a "reset to 0" door.
     inst.item->_setCurrentMeshLod(card.lodLevel);
@@ -1306,7 +1306,7 @@ void SurfaceCache::relightCards() {
         o[4] = c.r; o[5] = c.g; o[6] = c.b; o[7] = (l == sun) ? 1.0f : 0.0f;
         const float range = l->getAttenuationRange();
         o[8] = range; o[9] = l->getAttenuationLinear(); o[10] = l->getAttenuationQuadric();
-        o[11] = range > 0.0f ? 1.0f / range : 0.0f;   // patch 0018's fade, as light0Buf writes it
+        o[11] = range > 0.0f ? 1.0f / range : 0.0f;   // fork 36162ff37+16d8e29d4 (was 0018)'s fade, as light0Buf writes it
         const Ogre::Vector3 sd = l->getDerivedDirection();
         o[12] = sd.x; o[13] = sd.y; o[14] = sd.z; o[15] = 0.0f;
         const float inner = l->getSpotlightInnerAngle().valueRadians();

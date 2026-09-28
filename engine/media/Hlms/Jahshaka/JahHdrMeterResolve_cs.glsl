@@ -27,7 +27,7 @@
 // is still reported to ~1e-4 nats, where bin centres alone would have been out
 // by up to +/-0.117 stops - about 5/255 in a mid tone, which is visible.
 //
-// AN UNMEASURABLE FRAME HOLDS THE GRADE, which is patch 0042's rule and the
+// AN UNMEASURABLE FRAME HOLDS THE GRADE, which is fork feab041c6 (was 0042)'s rule and the
 // only answer that cannot invent a grade change: a missing measurement carries
 // no information about the scene. With a histogram "unmeasurable" no longer
 // means "one bad sample" - unusable samples were never binned - it means the

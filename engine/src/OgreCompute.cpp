@@ -1,6 +1,6 @@
 // ATOM P3 / PHOTON SHARED INFRASTRUCTURE — the compute substrate's VIEW half
 // (SPECS/atom/A4_SUBSTRATE_CULL_DESIGN.md sections 1-2; NANITE_SPEC section 4.2-4.3;
-//  ogre-patch 0032 and 0027).
+//  fork 1bccc3f93+a98e2b0af+1a81f866a (was 0032 and 0027)).
 //
 // TWO THINGS LIVE HERE and they share one reason: both need a VIEW.
 //
@@ -12,7 +12,7 @@
 //
 // WHAT WAS HERE AND IS GONE (ATOM-SUBSTRATE-1, 2026-09-22): `indirectDispatchProbe`
 // and its three compute jobs `Jahshaka/IndirectCount`, `IndirectWork` and
-// `IndirectWorkCpu`. They were the PROOF of patch 0032 while it had no consumer;
+// `IndirectWorkCpu`. They were the PROOF of fork 1bccc3f93+a98e2b0af (was 0032) while it had no consumer;
 // it has one now, and the cull's job 3 makes the same claim on the same device
 // with real work behind it: the survivor count is written by a compute shader
 // and the next dispatch is sized from it. `engine.gpu_cull` asserts the

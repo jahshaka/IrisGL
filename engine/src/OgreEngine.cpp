@@ -60,9 +60,14 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     // `EngineConfig::rayTracing` is the HOST's answer — Studio fills it from the
     // application preference (Preferences > Rendering) ANDed with
     // --no-ray-query. The environment variable is kept as the override a suite
-    // can set when it cannot reach the config (it is also what ogre-patch 0038
-    // reads at vkCreateDevice, so the two must agree).
+    // can set when it cannot reach the config.
     mRayTracingWanted = cfg.rayTracing && getenv("JAHSHAKA_NO_RAY_QUERY") == nullptr;
+    // ...and OFF REACHES THE DEVICE: the fork's VulkanDevice asks for the ray
+    // extensions and feature bits only while this static says so, so a no-rays
+    // process runs on exactly the device a machine without the hardware gets.
+    // Before the render system loads (and before the OpenXR route builds its
+    // device request, which reads the same static).
+    Ogre::VulkanDevice::msRayQueryAllowed = mRayTracingWanted;
     // Process-wide static, read by Mesh::prepareForShadowMapping at mesh-build
     // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it
     // is a plain static, not engine state.
@@ -121,15 +126,13 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // and queries all behave (verified end to end by the Studio suite
         // tests/engine/test_engine_headless.cpp — the lane's first assertion —
         // and by spikes/scenegraph-null-rs for the graph half).
-        const char *plugin = cfg.headless      ? "RenderSystem_NULL"
-                             : (cfg.backend == Backend::Vulkan) ? "RenderSystem_Vulkan"
-                                                                : "RenderSystem_GL3Plus";
+        const char *plugin = cfg.headless ? "RenderSystem_NULL" : "RenderSystem_Vulkan";
         // ---- OPENXR, STEP 1 (SPECS/VR_SPEC.md §4.1) -----------------------
         // BEFORE loadPlugin, because the Vulkan render system reads
         // `external_instance` in its CONSTRUCTOR, which is what loadPlugin
         // runs. On the vulkan_enable2 route the RUNTIME creates the VkInstance
         // (from our own VkInstanceCreateInfo) and later the VkDevice (from the
-        // VkDeviceCreateInfo ogre-patch 0068 exports), and Ogre runs on both.
+        // VkDeviceCreateInfo fork d014b064f+1bccc3f93 (was 0068) exports), and Ogre runs on both.
         //
         // NOTHING HERE IS FATAL. No loader, no manifest, no runtime, no headset
         // on the cable: the reason is logged and recorded in vrInfo(), the
@@ -144,11 +147,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
                              ? "VR was not requested for this process (start it with --vr)"
                          : cfg.headless
                              ? "this engine is headless (the NULL render system renders nothing)"
-                         : cfg.backend != Backend::Vulkan
-                             ? "VR needs the Vulkan backend"
                              : "";
-        if (cfg.vr == VrMode::IfAvailable && !cfg.headless &&
-            cfg.backend == Backend::Vulkan) {
+        if (cfg.vr == VrMode::IfAvailable && !cfg.headless) {
             std::string why;
             mVrBoot = vr::bootBegin(mVrInfo, why);
             if (!mVrBoot) {
@@ -200,7 +200,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // is the host's real one whenever the host can wait that long.
         mNullWindow = mRoot->initialise(cfg.headless, "jahshaka-headless");
         // ---- OPENXR, STEP 2 -----------------------------------------------
-        // AFTER initialise and BEFORE any window: ogre-patch 0068's exporter
+        // AFTER initialise and BEFORE any window: fork d014b064f+1bccc3f93 (was 0068)'s exporter
         // reads the instance-extension list the render system's constructor
         // filled, so a request built earlier silently loses the feature chain
         // (phase 1a's §8.5 — the one correction the spike made to the spec's
@@ -531,7 +531,7 @@ View *OgreEngine::createView(const std::string &name,
         Ogre::NameValuePairList params;
 #ifdef __APPLE__
         // macOS: the handle is the host's NSView (Types.h). Ogre's Metal window
-        // (ogre-patches 0007) hosts its OWN CAMetalLayer-backed child view inside
+        // (fork 1a81f866a+d014b064f+1bccc3f93 (was 0007)) hosts its OWN CAMetalLayer-backed child view inside
         // it and builds the VkSurfaceKHR from that layer through
         // VK_EXT_metal_surface — the host's own layer is never replaced, because
         // toolkits that manage their layer (Qt's QNSView) refuse the replacement.
@@ -838,7 +838,7 @@ void OgreEngine::renderOneFrame() {
         if (monitor::live()) {
             monPre.reset(new monitor::Stage("engine.pre"));
             // BEFORE anything renders and outside every encoder — the only
-            // place a Vulkan query pool may be reset (ogre-patch 0027).
+            // place a Vulkan query pool may be reset (fork 1a81f866a+1bccc3f93 (was 0027)).
             gpuFrameBegin();
         }
         // THE ONE TEXTURE WAIT (THREADING_ADOPTION_SPEC.md P2 item 3, decision
@@ -1470,7 +1470,7 @@ void OgreEngine::endLostOrStoppedVrSession() {
 
 // THE GPU IS GONE (lane XID-2, 2026-09-17). Said ONCE, loudly, the moment
 // the render system reports it: from here on the render system vetoes every
-// frame (ogre-patch 0072 -- it no longer tries to recreate the device, which
+// frame (fork d014b064f+1bccc3f93 (was 0072) -- it no longer tries to recreate the device, which
 // on this driver hangs inside vkDestroyDevice for ever), so a host that does
 // not ask would see a silent, frozen picture and nothing in the log.
 //
@@ -1656,10 +1656,10 @@ bool OgreEngine::deviceLost() const { return mDeviceLost; }
 // an install that has to stay responsive).
 //
 // CALLING IT OUTSIDE A FRAME IS THE PIN'S TOLERATED SHAPE (its issue #433),
-// not its documented practice — the two upstream offline capture paths one
-// might cite (OgreParallaxCorrectedCubemapAuto.cpp:385-388,
-// OgreIrradianceFieldRaster.cpp:284-288) complete the bracket with
-// `_endFrameOnce()` every time. AND IT COMMITS ONLY EVERY SECOND CALL:
+// not its documented practice — upstream's offline capture path one might
+// cite (OgreParallaxCorrectedCubemapAuto.cpp:385-388; the raster irradiance
+// field's renderProbes did the same until the fork deleted it) completes the
+// bracket with `_endFrameOnce()` every time. AND IT COMMITS ONLY EVERY SECOND CALL:
 // `VulkanVaoManager::_update` (OgreVulkanVaoManager.cpp:2041-2070) issues the
 // `commitAndNextCommandBuffer( NewFrameIdx )` only when the previous _update was
 // not followed by a commit, so one bare call after a normal frame ARMS and the
@@ -2678,6 +2678,11 @@ OgreEngine::~OgreEngine() {
     // objects, after every view (whose workspaces recorded it) and before Root.
     try { releaseAtomIdPass(); } catch (...) {}
     try { releaseAtomCasterPass(); } catch (...) {}
+    // ...and THE PASS PROVIDER comes off the compositor manager (V2-E E9), after every
+    // workspace that could instantiate its passes died with the views above. The
+    // provider is a process static: left installed, it stayed armed across Root's
+    // teardown, holding the closures the two releases just emptied.
+    if (mRoot) { try { AtomPassProvider::uninstall(mRoot->getCompositorManager2()); } catch (...) {} }
     // AFTER every scene (each of which removed its own render-queue listener in
     // OgreScene::destroy) and BEFORE Root: ~OverlaySystem deletes the
     // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock

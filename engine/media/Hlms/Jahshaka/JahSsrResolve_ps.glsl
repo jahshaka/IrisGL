@@ -5,7 +5,7 @@
 // shader then does the composite for us —
 //     envColourS = lerp( envColourS, ssrReflection.rgb, ssrReflection.w )
 // (Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any, `hlms_use_ssr`, with
-// ogre-patch 0036 making that lerp the only spelling) — so w is literally "how
+// fork 16d8e29d4 (was 0036) making that lerp the only spelling) — so w is literally "how
 // much of the probe/sky answer does the screen replace", and a zero here is
 // EXACTLY today's picture. That is what makes the roughness cutoff and the edge
 // fades safe: every one of them just hands the pixel back to the IBL cube.
@@ -368,7 +368,7 @@ void main()
 	// vanishing as a hard boundary across a floor whose roughness varies.
 	//
 	// THE DECODE IS THE MARCH'S (lane SSR-3, and the same defect was here): the
-	// channel is the GGX ALPHA packed by ogre-patch 0043 over [0.001, 1], so the
+	// channel is the GGX ALPHA packed by fork 16d8e29d4 (was 0043) over [0.001, 1], so the
 	// perceptual roughness the cutoff is stated in is its square root. Read with
 	// the pre-0043 range and no square root, this ramp ran over perceptual
 	// 0.399 -> 0.581 for a cutoff of 0.35.
@@ -398,7 +398,7 @@ void main()
 	const float cutoff	  = resolveParams.x;
 	const float feather	  = resolveParams.z;
 	// The ramp starts where CONTENT starts: the G-buffer cannot hold an alpha
-	// below 0.001 (patch 0043's floor), i.e. a perceptual roughness below
+	// below 0.001 (fork 16d8e29d4 (was 0043)'s floor), i.e. a perceptual roughness below
 	// 0.0316, so a ramp whose lower edge sat at 0 gave a perfect mirror only
 	// part of its screen reflection at a low cutoff (31 % at the row's 5 %).
 	// Clamped at the floor, a mirror is always at full strength and the ramp
@@ -549,7 +549,7 @@ void main()
 	// at all. The clamped fetch used to return the border texel's — somebody
 	// else's colour, stretched — and the honest answer is the one every other
 	// declined pixel gets: weight zero, which hands the pixel to the probe, the
-	// sky or the ray (patch 0036's composite). The fade to that edge is a
+	// sky or the ray (fork 16d8e29d4 (was 0036)'s composite). The fade to that edge is a
 	// ramp over kHistoryEdgeFade of the picture, not a line; it is narrower than
 	// the march's own screen-edge fade because only a frame's worth of motion
 	// ever lands in it.

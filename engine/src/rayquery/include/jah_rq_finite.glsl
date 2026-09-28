@@ -1,7 +1,7 @@
 // IS THIS A NUMBER? — the one copy (GATHER-1a).
 //
 // `x == x` IS NOT A NaN TEST IN THIS TREE (CLAUDE.md, lane HDR-1, measured on
-// NVIDIA 595.84): the compiler folds a self-equality to true, so patch 0034's
+// NVIDIA 595.84): the compiler folds a self-equality to true, so fork feab041c6 (was 0034)'s
 // guard never fired and its "fix" worked by accident. The BITS are the test —
 // an exponent of all ones is Inf or NaN, whatever the sign.
 //

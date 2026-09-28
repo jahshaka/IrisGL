@@ -14,12 +14,12 @@
 // is the better answer.
 //
 // WHERE THE ANSWER GOES. Straight into `jahSsrReflection`, the RGBA16F texture
-// HlmsPbs samples as `ssrTexture` and composites with ogre-patch 0036's single
+// HlmsPbs samples as `ssrTexture` and composites with fork 16d8e29d4 (was 0036)'s single
 // lerp:
 //     envColourS = lerp( envColourS, ssrReflection.rgb, ssrReflection.w )
 // so `w` is literally "how much of the probe/sky answer does the trace
 // replace". NEVER an add: the same lobe twice, through a history loop, is what
-// patch 0036 exists to stop (PHOTON_SPEC §11 rule 3). Where this shader writes
+// fork 16d8e29d4 (was 0036) exists to stop (PHOTON_SPEC §11 rule 3). Where this shader writes
 // nothing, the texture still holds exactly what JahSsrResolve wrote, which is
 // exactly today's picture.
 //
@@ -734,7 +734,7 @@ void main()
 	// ten in the lobe (second reader, C1). It is the GGX ALPHA — HlmsPbs runs
 	// with `mPerceptualRoughness` true, so `pixelData.roughness` in the piece
 	// that writes this channel is the perceptual value SQUARED (CLAUDE.md) —
-	// packed by ogre-patch 0043 over [0.001, 1] and NOT over upstream's old
+	// packed by fork 16d8e29d4 (was 0043) over [0.001, 1] and NOT over upstream's old
 	// [0.02, 1]. Decoding it with the old range and then squaring it again ran
 	// the lobe at perceptual to the FOURTH power: a surface authored at 0.3 was
 	// traced as though it were 0.095, about ten times too sharp.
@@ -1035,7 +1035,7 @@ void main()
 	// frame at a typical field of view (the file's kMirrorAlpha, the hit read's
 	// mirror cut — one number).
 	// FROM THE PACKING FLOOR, not from zero (third reader, item 3). The
-	// G-buffer cannot hold an alpha below 0.001 — ogre-patch 0043 packs over
+	// G-buffer cannot hold an alpha below 0.001 — fork 16d8e29d4 (was 0043) packs over
 	// [0.001, 1] — so 0.001 IS a mirror, and a ramp starting at 0 gives the
 	// sharpest surface this renderer can express a blend of 0.972 rather than
 	// 1: a mirror in a two-frame view would show 2.8 % probe, and a

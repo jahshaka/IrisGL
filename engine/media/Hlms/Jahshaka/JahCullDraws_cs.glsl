@@ -1,7 +1,7 @@
 // Jahshaka — ATOM P3's CULL, job 3 of 3: DRAW COMMANDS (design section 1.2).
 // ONE THREAD PER SURVIVOR, and the dispatch itself is sized by the GPU: job 2
 // wrote this job's thread-group count into the same buffer that carries the
-// survivor count, and ogre-patch 0032's `_dispatchIndirect` reads it. From job
+// survivor count, and fork 1bccc3f93+a98e2b0af (was 0032)'s `_dispatchIndirect` reads it. From job
 // 1's dispatch onwards no host ever learns how much work there is.
 //
 // WHAT IT WRITES is exactly a VkDrawIndexedIndirectCommand, five uints:

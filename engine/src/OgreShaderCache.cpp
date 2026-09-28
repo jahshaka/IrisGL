@@ -818,7 +818,7 @@ bool ShaderCache::save(Ogre::Root *root) {
     // which does not exclude timers — true, but irrelevant HERE: nothing in
     // this function's body pumps an event loop, so the window a nested pump
     // would need is a window save() never opens. The crash was Ogre indexing
-    // its own vectors with unvalidated indices and ogre-patch 0035 is the guard
+    // its own vectors with unvalidated indices and fork d6348decd (was 0035) is the guard
     // for it. This bool is hygiene, kept on its own merits.
     if (mSaving) { logLine("save already in progress — skipped the re-entrant call"); return false; }
     struct Reentry {
@@ -1098,7 +1098,7 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     // shader lookup as [type:3][renderable:16][pass:13] and grows both caches
     // for the life of the process with no eviction anywhere; the pass side ran
     // out of its EIGHT bits on 2026-09-14 and corrupted the renderable index,
-    // which is the crash ogre-patch 0046 rebalanced the fields for. The worst
+    // which is the crash fork d6348decd (was 0046) rebalanced the fields for. The worst
     // Hlms is reported because one exhausted cache is the fault whichever Hlms
     // owns it, and the capacities travel with the counts so a reading is
     // self-describing ("115 of 8192") on any future split.

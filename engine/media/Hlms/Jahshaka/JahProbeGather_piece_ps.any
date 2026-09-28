@@ -21,7 +21,7 @@
 // Taking it costs no patch. The read itself is final since phase 2
 // (PHOTON-GATHER-1b): the integrate writes E/pi at the pixel's normal, and the
 // irradiance field's cage stands down where a probe answered through the fork
-// commit for patch 0086's hook; a blended fragment never reads it (the
+// commit for fork b6c409c1f (was 0086)'s hook; a blended fragment never reads it (the
 // listener withdraws the property per renderable, GA-GLASS).
 //
 // THE GUARD IS SIX TERMS AND EVERY ONE OF THEM EARNS ITS PLACE, two of them
@@ -54,7 +54,7 @@
 //   * a pixel a probe answered: the gather's, here — the cone diffuse is
 //     compiled out on a gather pass (the listener's `vct_disable_diffuse`), and
 //     the irradiance field's cage declines it (JahIfd_piece_ps.any, the fork's
-//     cage gate, ogre-patch 0086's hook);
+//     cage gate, fork b6c409c1f (was 0086)'s hook);
 //   * a pixel no probe answered: the FIELD's cage — the field is the fallback
 //     and nothing else at a ray tier — and where the field's own confidence
 //     fades, the field's fallback (the environment, JahIfd's post hook). The
