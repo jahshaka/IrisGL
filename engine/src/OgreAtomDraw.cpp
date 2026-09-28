@@ -577,6 +577,8 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     st.casterMissing = mCasterStats.missing;
     st.casterIndexBudget = mCasterStats.indexBudget;
     st.casterTriangles = mCasterStats.triangles;
+    st.casterMapsPeak = mCasterStats.peakMaps;
+    st.casterUnrecorded = mCasterStats.unrecorded;
     return st;
 }
 

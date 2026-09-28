@@ -4077,8 +4077,8 @@ struct GiStatus {
         int   attached = 0;
         /// CPU milliseconds of that same rebuild (the submission cost on the
         /// frame's own thread). The GPU half is NOT here and cannot be: a
-        /// timestamp pair is read back two frames later, so it is reported
-        /// where a two-frame-late number belongs — the monitor's `vct.cascadeN`
+        /// timestamp pair is read back once the GPU has finished the frame, so
+        /// it is reported where a late number belongs — the monitor's `vct.cascadeN`
         /// cacheWork rows (fork 1a81f866a+1bccc3f93 (was 0027)).
         float lastCpuMs = -1.0f;
         /// WHICH MESH LOD LEVELS THE ATTACH SET TOOK (ATOM stage 1's hand-off,
@@ -4604,6 +4604,12 @@ struct AtomDrawStatus {
     unsigned casterMaps = 0, casterClusters = 0, casterInstances = 0;
     unsigned casterOverflow = 0, casterMissing = 0, casterIndexBudget = 0;
     unsigned long long casterTriangles = 0ull;
+    /// THE MOST MAPS ONE FRAME RECORDED since the scene's first caster cut, and the
+    /// maps a frame rendered but could NOT record (CASTER-USES-1): the stats ring
+    /// grows mid-frame (doubling, up to 4,096 maps a frame), so the second is 0
+    /// unless one frame renders more than that — or a growth failed.
+    unsigned casterMapsPeak = 0;
+    unsigned long long casterUnrecorded = 0ull;
     /// The render system's frame counter at this read — the stamp the engine's
     /// JAHSHAKA_ATOM_TRACE log lines carry (ATOM-BLACK-FRAMES-1's coverage trace).
     unsigned long long frame = 0ull;
@@ -6792,7 +6798,7 @@ struct GpuCullRequest {
     /// filled and the wall clock of a flush of them, minus an empty flush's own
     /// cost, is divided by the count. There are no per-dispatch GPU timestamps
     /// outside a compositor pass at this pin (fork 1a81f866a+1bccc3f93 (was 0027)'s samples are keyed to
-    /// passes and arrive two frames late), so the three `*Ms` fields are that
+    /// passes and arrive once the GPU has finished the frame), so the three `*Ms` fields are that
     /// SLOPE: an upper bound that includes the per-dispatch driver cost, which
     /// is the number to compare a CPU cull against anyway.
     unsigned measureIterations = 0u;
@@ -7475,6 +7481,12 @@ struct MonitorStatus {
     /// (2,428 of the pool's 4,096 queries — 96 probe faces at updateBudget 64,
     /// rays off); 0 dropped in every arm.
     unsigned long long gpuMarksDropped = 0;
+    /// FRAMES PUBLISHED BEFORE EVERY GPU SAMPLE ANSWERED, cumulative since the
+    /// capture started. A record waits until the GPU has finished its frame
+    /// (MONITOR-RETIRE-1); one held past 16 newer frames (a lost device took
+    /// the query pools) is published with its passes unsampled and counted
+    /// here. 0 on a healthy capture, however heavy the frames.
+    unsigned long long gpuFramesAgedOut = 0;
     std::string gpuReason;           ///< why GPU timing is unavailable, when it is
     float    overheadMs = 0.0f;      ///< the monitor's own cost, last frame
 };

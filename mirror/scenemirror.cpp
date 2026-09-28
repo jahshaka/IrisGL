@@ -3312,7 +3312,15 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // ONE memo probe for the whole branch — materialFor reads the same
             // entry, and the reference stays valid because nothing between here
             // and syncTextures inserts another material.
-            const MaterialSync &attachMs = materialSyncFor(material);
+            // A MESH NODE WITH NO MATERIAL (a script, an API caller, a
+            // partially-built synthetic node — the editor always gives one)
+            // wears the DEFAULT surface: materialFor(null) returns the shared
+            // default material, and its sync is the default parameters with no
+            // texture — never a fingerprint of a material that does not exist
+            // (materialSyncFor's slot loop reads material->textures; NULL-
+            // MATERIAL-SYNC-1). The default IS the physics of an unassigned
+            // surface, not a fallback picture.
+            const MaterialSync &attachMs = material ? materialSyncFor(material) : defaultMaterialSync();
             MaterialId mat = materialFor(material);
             bool attached = false;
             e.gpuSkinned = false;
@@ -4218,21 +4226,7 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
         // A material class the mirror cannot translate gets one shared neutral
         // material. The document holds PbrMaterials only, so this is a guard
         // (and the no-material node's surface) rather than a translation.
-        if (!mDefaultMaterial) {
-            // THE SAME SURFACE THE DOCUMENT INVENTS (DRAG-1, RENDER_AUDIT I-1),
-            // from the one definition in pbrmaterial.h. It used to be its own
-            // set of numbers (albedo 0.8, roughness 0.6), so a mesh node with
-            // no material rendered as a surface the properties panel could not
-            // show and a user could not edit — and at a roughness neither the
-            // panel nor this file agreed on.
-            PbrParams d;
-            d.albedo    = Colour(iris::defaultmaterial::kBaseColorLinear,
-                                 iris::defaultmaterial::kBaseColorLinear,
-                                 iris::defaultmaterial::kBaseColorLinear);
-            d.metalness = iris::defaultmaterial::kMetalness;
-            d.roughness = iris::defaultmaterial::kRoughness;
-            mDefaultMaterial = mTarget->createPbrMaterial(d);
-        }
+        if (!mDefaultMaterial) mDefaultMaterial = mTarget->createPbrMaterial(defaultMaterialSync().pbr);
         return mDefaultMaterial;
     }
     auto it = mMaterials.constFind(material);
@@ -4556,6 +4550,25 @@ quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMate
     }
     h << quint32(0);
     return h.h;
+}
+
+/// THE DEFAULT SURFACE's sync: the parameters of a mesh node with no material,
+/// no texture bound. THE SAME SURFACE THE DOCUMENT INVENTS (DRAG-1,
+/// RENDER_AUDIT I-1), from the one definition in pbrmaterial.h — the panel shows
+/// it, a user can edit it, and the mirror's default material is built from it.
+const SceneMirror::MaterialSync &SceneMirror::defaultMaterialSync()
+{
+    static const MaterialSync kDefault = [] {
+        MaterialSync d;
+        d.hasPbr = true;
+        d.pbr.albedo    = Colour(iris::defaultmaterial::kBaseColorLinear,
+                                 iris::defaultmaterial::kBaseColorLinear,
+                                 iris::defaultmaterial::kBaseColorLinear);
+        d.pbr.metalness = iris::defaultmaterial::kMetalness;
+        d.pbr.roughness = iris::defaultmaterial::kRoughness;
+        return d;
+    }();
+    return kDefault;
 }
 
 const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *material)

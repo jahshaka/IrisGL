@@ -2661,8 +2661,9 @@ public:
     ///
     /// TWO THINGS TO KNOW, both consequences of GPU timing:
     ///  * A frame is not published the instant it ends. GPU samples come back
-    ///    two frames late, so a record waits a few frames for them; drain in a
-    ///    loop, never "render one frame, expect one record".
+    ///    when the GPU has finished the frame (at most Ogre's frames in flight
+    ///    + 1 later), so a record waits for them; drain in a loop, never
+    ///    "render one frame, expect one record".
     ///  * STOPPING the monitor flushes everything still waiting, and the NEXT
     ///    call to this returns it even though the monitor is off. That makes
     ///    the natural host order — stop the capture, then drain — lossless. The

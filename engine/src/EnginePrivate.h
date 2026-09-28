@@ -1839,20 +1839,29 @@ public:
 
     // ---- GPU timestamps (P1c, fork 1a81f866a+1bccc3f93 (was 0027)) -----------------------------
     //
-    // A GPU sample comes back TWO FRAMES LATE (the query pool for frame N is
-    // read just before it is recycled at the start of frame N+2, behind the
-    // availability bit, so nothing ever stalls the CPU on the GPU). A frame
-    // record therefore cannot be published the moment it ends: it waits in a
-    // short holding queue until its samples arrive or it ages out, and only
-    // then enters the ring the host drains.
-    static constexpr unsigned kGpuLatencyFrames = 3u;
+    // A GPU sample comes back WHEN THE GPU HAS FINISHED ITS FRAME (the fork
+    // polls each written query pool non-blocking at the top of every frame and
+    // reports a pool only once every sample in it is back — MONITOR-RETIRE-1).
+    // A frame record therefore cannot be published the moment it ends: it
+    // waits in a holding queue until EVERY sample it asked for has answered
+    // (a time, or a negative "will never have one"), and only then enters the
+    // ring the host drains. The old rule — publish after a fixed three frames —
+    // retired a heavy frame before its GPU had finished it: on 7.1 M id-pass
+    // triangles 1-4 of ~570 records carried an id-pass time.
+    // kMaxHeldFrames bounds the queue: a frame whose samples never return (a
+    // lost device took the pools) is published unsampled after that many
+    // newer frames, and counted (`gpuFramesAgedOut`).
+    static constexpr unsigned kMaxHeldFrames = 16u;
     /// A frame waiting for its GPU samples, with the sample id of each pass
     /// and of each timed cache row.
     struct PendingFrame {
         FrameRecord           rec;
         std::vector<unsigned> passSampleIds;    ///< parallel to rec.passes
         std::vector<unsigned> cacheSampleIds;   ///< parallel to rec.cacheWork
+        unsigned              outstanding = 0u; ///< sample ids not yet answered
     };
+    /// Frames published before every sample answered (kMaxHeldFrames).
+    unsigned long long mGpuFramesAgedOut = 0ull;
     /// The level this capture was started at (`Review` today). Held so the
     /// switch is level-sensitive rather than merely on/off.
     MonitorLevel mLevel = MonitorLevel::Review;
@@ -2037,7 +2046,7 @@ void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
 /// can report GPU time at all: the monitor's other samples ride the compositor
 /// pass callbacks, and a compute job the engine dispatches itself is not a
 /// compositor pass. The pair is written into the same command buffer as the
-/// dispatch and read back two frames later, exactly like a pass's.
+/// dispatch and read back once the GPU has finished it, exactly like a pass's.
 ///
 /// A SCOPE MUST NOT STRADDLE A FRAME BOUNDARY. The render system's sample
 /// stack is cleared when the host opens a frame (fork 1a81f866a+1bccc3f93 (was 0027)'s
@@ -3671,6 +3680,8 @@ public:
         bool valid = false;
         unsigned maps = 0, clusters = 0, instances = 0, overflow = 0, missing = 0, indexBudget = 0;
         unsigned long long triangles = 0ull;
+        unsigned peakMaps = 0;              ///< the most maps one frame recorded (cumulative)
+        unsigned long long unrecorded = 0;  ///< maps rendered but not recorded (cumulative)
     };
     void setCasterStats(const CasterStats &s) { mCasterStats = s; }
     /// True while this scene files any item in the Atom queue (the split's word set is

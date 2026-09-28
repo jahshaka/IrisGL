@@ -164,9 +164,10 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     mCurrent.overheadMs = float(mOverheadMs);
     mLastOverheadMs = float(mOverheadMs);
     mOverheadMs = 0.0;
-    // THE HOLDING QUEUE (P1c). A GPU sample comes back two frames late, so the
-    // record waits here until its samples arrive or it ages out; without GPU
-    // sampling the queue is one deep and the record is published immediately.
+    // THE HOLDING QUEUE (P1c). A GPU sample comes back when the GPU has
+    // finished the frame, so the record waits here until every sample it asked
+    // for has answered (MONITOR-RETIRE-1); without GPU sampling the queue is
+    // one deep and the record is published immediately.
     PendingFrame pf;
     pf.rec = std::move(mCurrent);
     pf.passSampleIds.swap(mPassSampleIds);
@@ -174,9 +175,15 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     if (mGpu) {
         const unsigned slot = unsigned(mPending.size());
         for (unsigned i = 0; i < pf.passSampleIds.size(); ++i)
-            if (pf.passSampleIds[i]) mGpuSampleIndex[pf.passSampleIds[i]] = { slot, i, false };
+            if (pf.passSampleIds[i]) {
+                mGpuSampleIndex[pf.passSampleIds[i]] = { slot, i, false };
+                ++pf.outstanding;
+            }
         for (unsigned i = 0; i < pf.cacheSampleIds.size(); ++i)
-            if (pf.cacheSampleIds[i]) mGpuSampleIndex[pf.cacheSampleIds[i]] = { slot, i, true };
+            if (pf.cacheSampleIds[i]) {
+                mGpuSampleIndex[pf.cacheSampleIds[i]] = { slot, i, true };
+                ++pf.outstanding;
+            }
     }
     mPending.push_back(std::move(pf));
     retirePending(false);
@@ -190,8 +197,14 @@ void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
     if (it == mGpuSampleIndex.end()) return;     // its frame already aged out
     const GpuSampleSlot where = it->second;
     if (where.frame < mPending.size()) {
-        FrameRecord &rec = mPending[where.frame].rec;
-        if (where.cache) {
+        PendingFrame &pf = mPending[where.frame];
+        if (pf.outstanding) --pf.outstanding;
+        FrameRecord &rec = pf.rec;
+        // A NEGATIVE time is the fork's "this sample will never have one" (no
+        // query room, a wrapped counter, a lost pool): it answers the sample
+        // and leaves the row unmeasured.
+        if (ms < 0.0f) {
+        } else if (where.cache) {
             if (where.row < rec.cacheWork.size()) rec.cacheWork[where.row].gpuMs = ms;
         } else if (where.row < rec.passes.size()) {
             rec.passes[where.row].gpuMs = ms;
@@ -209,8 +222,15 @@ void FrameMonitor::noteGpuMarksDropped(unsigned n) {
 }
 
 void FrameMonitor::retirePending(bool all) {
-    const size_t keep = (all || !mGpu) ? 0u : size_t(kGpuLatencyFrames);
-    while (mPending.size() > keep) {
+    // IN ORDER: the oldest frame leaves first, once every sample it asked for
+    // has answered — the GPU finishes frames in submission order, so a newer
+    // frame never waits long behind an older one. A frame held past
+    // kMaxHeldFrames is published unsampled and counted.
+    while (!mPending.empty()) {
+        const bool answered = mPending.front().outstanding == 0u;
+        const bool aged = mPending.size() > size_t(kMaxHeldFrames);
+        if (!(all || !mGpu || answered || aged)) break;
+        if (!answered && !all && mGpu) ++mGpuFramesAgedOut;
         PendingFrame pf = std::move(mPending.front());
         mPending.pop_front();
         // The frame's GPU total, from whatever came back. NEGATIVE stays
@@ -1047,7 +1067,13 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
     // and a pool exists only inside a capture.
     st.gpuSupported = true;
     st.gpuActive = available;
-    st.gpuQueryPools = available ? 2u : 0u;
+    st.gpuQueryPools = 0u;
+    if (available) {
+        Ogre::uint32 pools = 0u;
+        try { rs->getCustomAttribute("JahGpuQueryPools", &pools); } catch (...) {}
+        st.gpuQueryPools = unsigned(pools);
+    }
+    if (available && mMonitor) st.gpuFramesAgedOut = mMonitor->mGpuFramesAgedOut;
     if (available && mMonitor) st.gpuMarksDropped = mMonitor->gpuMarksDropped();
     if (!available)
         st.gpuReason = mMonitor ? "the device or queue has no usable timestamps"
@@ -1056,8 +1082,9 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
         st.gpuReason.clear();
 }
 
-// The frame's GPU bookkeeping: rotate the query pools, read back what the frame
-// two frames ago measured, and reset the pool about to be written. ONE call,
+// The frame's GPU bookkeeping: collect every query pool whose results are back
+// (the render system answers each sample once — a time, or negative for "never"),
+// and reset a free pool for this frame. ONE call,
 // at the top of the frame and outside every encoder — which is the only place
 // vkCmdResetQueryPool is legal (see fork 1a81f866a+1bccc3f93 (was 0027)).
 void OgreEngine::gpuFrameBegin() {
