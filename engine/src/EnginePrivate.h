@@ -6641,6 +6641,7 @@ private:
     /// Cumulative over the scene's life (GiStatus::probePlacements /
     /// probeCapturesTotal): scouts started, and probe captures rendered.
     unsigned           mProbePlacements = 0;
+    unsigned           mProbeReplacements = 0;   // GiStatus::probeReplacements
     unsigned long long mProbeCapturesTotal = 0;
     unsigned long long mGiRebuilds = 0;
     /// How many of those rebuilds a MOBILITY change caused (MobilityStatus::

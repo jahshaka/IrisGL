@@ -3843,6 +3843,11 @@ struct GiStatus {
     /// (the placement's and the budget's) — cumulative, never reset. A ray tier
     /// moves neither.
     unsigned probePlacements = 0;
+    /// ...of which RE-PLACEMENTS (REGION-REBUILD-1): a refresh whose content moved
+    /// the grid's region past its tolerance re-places the grid ALONE — the chain
+    /// keeps its cascades and re-voxelises only the edit's own box — and counts
+    /// here as well as in `probePlacements`. Cumulative, never reset.
+    unsigned probeReplacements = 0;
     unsigned long long probeCapturesTotal = 0;
     /// How many probes the renderer re-captures per frame — the RESOLVED
     /// `GiParams::updateBudget`, clamped to the probes that actually exist, and
