@@ -4102,8 +4102,9 @@ struct GiStatus {
         /// count), so a non-zero here is a defect, and it is logged critically.
         long long voxelOverflow = 0;
     };
-    /// The live cascade chain, innermost first. Empty unless
-    /// GiParams::cascades built one.
+    /// The live cascade chain, innermost first — the voxels of every Vct and
+    /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera
+    /// (cascadesAwaitingCamera).
     std::vector<CascadeStatus> cascades;
     /// THE FAR-FIELD PROXY, AS APPLIED: whether the cascades are voxelising the
     /// baked LOD levels (`GiParams::cascadeVoxelLod` met with the engine's

@@ -1849,7 +1849,7 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
     // binding lets go, the datablocks take their sky cube back, the probe
     // record goes with it); up is the from-scratch `rebuildVct`, owed through the
     // flush: the cheap paths' belt refuses a hybrid that wants a grid and has
-    // none (refreshCascadesFast / refreshVctFast), so the flush takes the
+    // none (refreshCascadesFast), so the flush takes the
     // rebuild, and a rebuild that has to wait (a camera, a texture) stays armed.
     const bool gridNow = probeGridWanted();
     if (gridWas == gridNow) return;
