@@ -4576,6 +4576,12 @@ struct AtomDrawStatus {
     unsigned casterMaps = 0, casterClusters = 0, casterInstances = 0;
     unsigned casterOverflow = 0, casterMissing = 0, casterIndexBudget = 0;
     unsigned long long casterTriangles = 0ull;
+    /// THE MOST MAPS ONE FRAME RECORDED since the scene's first caster cut, and the
+    /// maps a frame rendered but could NOT record (CASTER-USES-1): the stats ring
+    /// grows mid-frame (doubling, up to 4,096 maps a frame), so the second is 0
+    /// unless one frame renders more than that — or a growth failed.
+    unsigned casterMapsPeak = 0;
+    unsigned long long casterUnrecorded = 0ull;
     /// The render system's frame counter at this read — the stamp the engine's
     /// JAHSHAKA_ATOM_TRACE log lines carry (ATOM-BLACK-FRAMES-1's coverage trace).
     unsigned long long frame = 0ull;

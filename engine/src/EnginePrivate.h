@@ -3676,6 +3676,8 @@ public:
         bool valid = false;
         unsigned maps = 0, clusters = 0, instances = 0, overflow = 0, missing = 0, indexBudget = 0;
         unsigned long long triangles = 0ull;
+        unsigned peakMaps = 0;              ///< the most maps one frame recorded (cumulative)
+        unsigned long long unrecorded = 0;  ///< maps rendered but not recorded (cumulative)
     };
     void setCasterStats(const CasterStats &s) { mCasterStats = s; }
     /// True while this scene files any item in the Atom queue (the split's word set is

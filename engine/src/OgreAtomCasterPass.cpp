@@ -311,10 +311,20 @@ VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &
 // ---- THE STATS RING, per scene -------------------------------------------------
 // The caster list's count words copied into host-visible memory after every use and
 // read once the frame that wrote them has retired (the id pass's ring, OgreAtomIdPass.cpp,
-// with a column per use: one list serves up to kMaxUses maps a frame).
-constexpr uint32_t kMaxUses = 64u;
+// with a column per use: one list serves `columns` maps a frame).
+//
+// THE WIDTH FOLLOWS THE FRAME (CASTER-USES-1). It was a fixed 64 columns, and a first
+// frame renders every map at once — a 59-map view node, a mirror's node and the probes'
+// — so the overflow went unrecorded until a later frame. The ring starts at kFirstUses
+// and DOUBLES the moment a frame asks for one more column than it has, copying the
+// columns this frame already wrote (the other slots belong to frames still in flight,
+// which wrote the old buffer: their stats are skipped once, never mis-read). kMaxUses is
+// the named bound — a frame past it records no more and says how many it did not
+// (`casterUnrecorded`).
+constexpr uint32_t kFirstUses = 64u;
+constexpr uint32_t kMaxUses = 4096u;
+constexpr uint32_t kNoUse = 0xFFFFFFFFu;
 constexpr VkDeviceSize kUseBytes = GpuCull::kCountElements * sizeof(uint32_t);
-constexpr VkDeviceSize kSlotBytes = kUseBytes * kMaxUses;
 
 struct CasterRing {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -326,6 +336,9 @@ struct CasterRing {
     bool written[8] = {};
     uint32_t frame = ~0u;         ///< the frame the uses below count
     uint32_t usesThisFrame = 0u;
+    uint32_t columns = 0u;        ///< uses one slot holds (the ring's width)
+    unsigned peakUses = 0u;       ///< the most uses one retired frame recorded
+    unsigned long long unrecorded = 0ull;   ///< uses past kMaxUses (or a failed growth)
     /// The triangles each use of the last frame READ drew (the metrics a use adds).
     std::vector<unsigned long long> lastTriangles;
 };
@@ -342,13 +355,14 @@ void destroyRing(CasterRing &r) {
     r = CasterRing();
 }
 
-bool ensureRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t slots) {
+bool ensureRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t slots, uint32_t columns = kFirstUses) {
     if (r.buffer) return true;
     slots = std::min(std::max(slots, 2u), 8u);
     VkBufferCreateInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bi.size = kSlotBytes * slots;
-    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.size = kUseBytes * columns * slots;
+    // TRANSFER_SRC: a growth copies this frame's columns out of it.
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (vkCreateBuffer(gC.dev, &bi, nullptr, &r.buffer) != VK_SUCCESS) return false;
     VkMemoryRequirements req;
@@ -372,6 +386,7 @@ bool ensureRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t slots) {
     }
     r.mapped = static_cast<const uint32_t *>(p);
     r.slots = slots;
+    r.columns = columns;
     return true;
 }
 
@@ -480,14 +495,58 @@ void reapGrave(uint32_t frame) {
     }
 }
 
+/// THE RING DOUBLES, mid-frame (CASTER-USES-1): a bigger ring is made, the columns this
+/// frame already wrote are copied into it (in the command buffer, after their own
+/// copies), and the old one goes to the grave. The slots of the frames still in flight
+/// wrote the OLD buffer, so their stats are skipped once rather than read from the new.
+bool growRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t frame) {
+    if (r.columns >= kMaxUses) return false;
+    CasterRing bigger;
+    if (!ensureRing(device, bigger, r.slots, std::min(r.columns * 2u, kMaxUses))) return false;
+    const uint32_t s = frame % r.slots;
+    VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+    if (r.uses[s]) {
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0,
+                             nullptr, 0, nullptr);
+        VkBufferCopy c{};
+        c.srcOffset = VkDeviceSize(s) * r.columns * kUseBytes;
+        c.dstOffset = VkDeviceSize(s) * bigger.columns * kUseBytes;
+        c.size = VkDeviceSize(r.uses[s]) * kUseBytes;
+        vkCmdCopyBuffer(cmd, r.buffer, bigger.buffer, 1, &c);
+        VkMemoryBarrier hb{};
+        hb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0,
+                             nullptr);
+    }
+    bigger.frame = r.frame;
+    bigger.usesThisFrame = r.usesThisFrame;
+    bigger.uses[s] = r.uses[s];
+    bigger.written[s] = r.written[s];
+    bigger.writtenAt[s] = r.writtenAt[s];
+    bigger.lastTriangles = r.lastTriangles;
+    bigger.peakUses = r.peakUses;
+    bigger.unrecorded = r.unrecorded;
+    gGrave.emplace_back(r, frame);
+    r = bigger;
+    return true;
+}
+
 /// THE FIRST USE OF A FRAME reads the slot this frame reuses (written `slots` frames
 /// ago: retired) — every use of that frame, summed into the scene's caster stats, and
 /// each use's words told to the list (an overflow grows its budget before this frame's
-/// first cut). Returns the use's column for this frame, or kMaxUses when the ring is
-/// full or missing (the use then records no copy).
+/// first cut). Returns the use's column for this frame (growing the ring when the frame
+/// needs one more), or kNoUse when it cannot (past kMaxUses, or no ring: the use then
+/// records no copy and is counted).
 uint32_t beginUse(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreScene *scene, CasterRing &r) {
     const uint32_t frame = vao->getFrameCount();
-    if (!ensureRing(device, r, uint32_t(vao->getDynamicBufferMultiplier()) + 1u)) return kMaxUses;
+    if (!ensureRing(device, r, uint32_t(vao->getDynamicBufferMultiplier()) + 1u)) return kNoUse;
     const uint32_t s = frame % r.slots;
     if (r.frame != frame) {
         reapGrave(frame);
@@ -500,8 +559,11 @@ uint32_t beginUse(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreScene *
             cs.maps = r.uses[s];
             cs.indexBudget = list.cutIndexBudget();
             r.lastTriangles.assign(r.uses[s], 0ull);
+            r.peakUses = std::max(r.peakUses, unsigned(r.uses[s]));
+            cs.peakMaps = r.peakUses;
+            cs.unrecorded = r.unrecorded;
             for (uint32_t u = 0; u < r.uses[s]; ++u) {
-                const uint32_t *w = r.mapped + (size_t(s) * kMaxUses + u) * GpuCull::kCountElements;
+                const uint32_t *w = r.mapped + (size_t(s) * r.columns + u) * GpuCull::kCountElements;
                 // THE CUT'S WORDS (GpuCull.h's count layout): [0] survivors, [4] triangles,
                 // [8] drawn-cluster records, [11] indices reserved, [12] coarse, [13] nothing.
                 cs.instances += w[0];
@@ -517,13 +579,17 @@ uint32_t beginUse(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreScene *
         }
         r.uses[s] = 0u;
     }
-    return r.usesThisFrame < kMaxUses ? r.usesThisFrame++ : kMaxUses;
+    if (r.usesThisFrame >= r.columns && !growRing(device, r, frame)) {
+        ++r.unrecorded;
+        return kNoUse;
+    }
+    return r.usesThisFrame++;
 }
 
 /// After the use's cut: its counters into the ring's column (the next cut's reset is a
 /// transfer write that waits for this read).
 void endUse(Ogre::VulkanDevice *device, CasterRing &r, GpuCull &cull, uint32_t frame, uint32_t use) {
-    if (use >= kMaxUses || !r.buffer || !cull.count()) return;
+    if (use == kNoUse || use >= r.columns || !r.buffer || !cull.count()) return;
     const uint32_t s = frame % r.slots;
     VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
     VkMemoryBarrier mb{};
@@ -537,7 +603,7 @@ void endUse(Ogre::VulkanDevice *device, CasterRing &r, GpuCull &cull, uint32_t f
     atomBufferOf(cull.count(), src, srcOff);
     VkBufferCopy c{};
     c.srcOffset = srcOff;
-    c.dstOffset = (VkDeviceSize(s) * kMaxUses + use) * kUseBytes;
+    c.dstOffset = (VkDeviceSize(s) * r.columns + use) * kUseBytes;
     c.size = kUseBytes;
     vkCmdCopyBuffer(cmd, src, r.buffer, 1, &c);
     VkMemoryBarrier hb{};
