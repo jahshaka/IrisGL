@@ -45,8 +45,9 @@
 //     path never sets a target environment, so it would emit SPIR-V 1.0, and
 //     the spike's "commit the bytes" shortcut is gone with it.
 //
-// THE BOUNDARY. This is the only TU in the engine that includes Vulkan. The
-// public headers stay Vulkan-free (RayQueryStatus is plain data), and on a
+// THE BOUNDARY. One of the engine's six Vulkan TUs (with OgreScreenProbeGather.cpp,
+// OgreVrSession.cpp, OgreEngine.cpp and the Atom id/caster passes; the raw pools
+// share VkDescriptorPools.h). The public headers stay Vulkan-free (RayQueryStatus is plain data), and on a
 // platform without the Vulkan render system the whole file compiles to nothing
 // (JAH_RAY_QUERY, set by CMake — macOS takes that path, because MoltenVK
 // exposes neither extension: SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
@@ -89,6 +90,7 @@
 #include "ScreenProbeGather.h"
 #include "SkinCache.h"
 #include "SurfaceCache.h"
+#include "VkDescriptorPools.h"
 
 #include <Animation/OgreSkeletonInstance.h>
 #include <OgreHlmsCompute.h>
@@ -1763,14 +1765,9 @@ bool RayQueryTier::makePipeline(std::string &err) {
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorSetLayoutCreateInfo sli{};
-    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sli.bindingCount = 4;
-    sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mSetLayout) != VK_SUCCESS) {
-        err = "rayquery: vkCreateDescriptorSetLayout failed";
-        return false;
-    }
+    // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h).
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, 4u, 8u, mSetLayout, err, "rayquery/trace")) return false;
     VkPipelineLayoutCreateInfo pli{};
     pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pli.setLayoutCount = 1;
@@ -1798,23 +1795,9 @@ bool RayQueryTier::makePipeline(std::string &err) {
         err = "rayquery: vkCreateComputePipelines failed";
         return false;
     }
-    VkDescriptorPoolSize sizes[3] = {};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    sizes[0].descriptorCount = 8;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[1].descriptorCount = 16;
-    sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[2].descriptorCount = 8;
-    VkDescriptorPoolCreateInfo dpi{};
-    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpi.maxSets = 8;
-    dpi.poolSizeCount = 3;
-    dpi.pPoolSizes = sizes;
-    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mDescPool) != VK_SUCCESS) {
-        err = "rayquery: vkCreateDescriptorPool failed";
+    // THE POOL FROM THE LAYOUT (VkDescriptorPools.h): eight trace sets live at once.
+    if (!plan.create(mVk, "rayquery/trace", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mDescPool, err))
         return false;
-    }
     return true;
 }
 
@@ -2321,14 +2304,9 @@ bool RayQueryTier::makeTlasWritePipeline(std::string &err) {
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorSetLayoutCreateInfo sli{};
-    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sli.bindingCount = kTlasWriteBindings;
-    sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mTwSetLayout) != VK_SUCCESS) {
-        err = "vkCreateDescriptorSetLayout failed (the instance job)";
-        return false;
-    }
+    // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h).
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, kTlasWriteBindings, kTlasWriteSets, mTwSetLayout, err, "rayquery/tlas-write")) return false;
     VkPipelineLayoutCreateInfo pli{};
     pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pli.setLayoutCount = 1;
@@ -2356,21 +2334,9 @@ bool RayQueryTier::makeTlasWritePipeline(std::string &err) {
         err = "vkCreateComputePipelines failed (the instance job)";
         return false;
     }
-    // THE POOL FROM THE LAYOUT'S OWN CONSTANTS (the descriptor-overrun trap): every
-    // set is kTlasWriteBindings storage buffers.
-    VkDescriptorPoolSize size{};
-    size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    size.descriptorCount = kTlasWriteSets * kTlasWriteBindings;
-    VkDescriptorPoolCreateInfo dpi{};
-    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpi.maxSets = kTlasWriteSets;
-    dpi.poolSizeCount = 1;
-    dpi.pPoolSizes = &size;
-    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mTwPool) != VK_SUCCESS) {
-        err = "vkCreateDescriptorPool failed (the instance job)";
+    // THE POOL FROM THE LAYOUT (VkDescriptorPools.h).
+    if (!plan.create(mVk, "rayquery/tlas-write", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mTwPool, err))
         return false;
-    }
     return true;
 }
 
@@ -4001,10 +3967,10 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
             b[i].descriptorCount = 1;
             b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
-        VkDescriptorSetLayoutCreateInfo sli{};
-        sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        sli.bindingCount = kParityBindings;
-        sli.pBindings = b;
+        // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h): the harness's one set.
+        DescriptorPoolPlan plan;
+        if (!plan.makeLayout(mVk, b, kParityBindings, 1u, mCardParitySetLayout, err, "rayquery/card-parity"))
+            return false;
         VkPipelineLayoutCreateInfo pli{};
         pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pli.setLayoutCount = 1;
@@ -4013,28 +3979,14 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         smi.codeSize = sizeof(krq_cardParitySpv);
         smi.pCode = krq_cardParitySpv;
-        VkDescriptorPoolSize sizes[4] = {};
-        sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        sizes[0].descriptorCount = 6;
-        sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = 2 + SurfaceCache::kViewLayers;
-        sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        sizes[2].descriptorCount = 1;
-        sizes[3].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        sizes[3].descriptorCount = 1;
-        VkDescriptorPoolCreateInfo dpi{};
-        dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        dpi.maxSets = 1;
-        dpi.poolSizeCount = 4;
-        dpi.pPoolSizes = sizes;
-        if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCardParitySetLayout) != VK_SUCCESS ||
-            vkCreatePipelineLayout(mVk, &pli, nullptr, &mCardParityPipeLayout) != VK_SUCCESS ||
-            vkCreateShaderModule(mVk, &smi, nullptr, &mCardParityModule) != VK_SUCCESS ||
-            vkCreateDescriptorPool(mVk, &dpi, nullptr, &mCardParityPool) != VK_SUCCESS) {
+        if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mCardParityPipeLayout) != VK_SUCCESS ||
+            vkCreateShaderModule(mVk, &smi, nullptr, &mCardParityModule) != VK_SUCCESS) {
             err = "cardReadParity: the harness pipeline could not be made";
             return false;
         }
+        if (!plan.create(mVk, "rayquery/card-parity", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+                         mCardParityPool, err))
+            return false;
         VkComputePipelineCreateInfo cpi{};
         cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
         cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -4444,9 +4396,8 @@ bool RayQueryTier::ensureSamplers(std::string &err) {
     return true;
 }
 
-/// THE REFLECTION SET'S LAYOUT, one type a binding (rq_reflect.comp's set 0) — a
-/// table and not a local of makeReflectPipeline so the pool's arithmetic COUNTS it
-/// (kReflectStorageImages) rather than restating it as a literal.
+/// THE REFLECTION SET'S LAYOUT, one type a binding (rq_reflect.comp's set 0); its
+/// pool is planned from the bindings made from it (VkDescriptorPools.h).
 constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 0  tlas
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 1  params
@@ -4487,27 +4438,12 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 36 the photon view's overlay (PHOTON-VIEW-1)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 37 the view's id image (REFLECT-MOVERS-1)
     };
-constexpr unsigned countReflect(VkDescriptorType type) {
-    unsigned n = 0u;
-    for (unsigned i = 0; i < kReflectBindings; ++i) n += kReflectTypes[i] == type ? 1u : 0u;
-    return n;
-}
-/// The set's STORAGE IMAGES (the pool's arithmetic below counts them): jahSsrReflection,
-/// the two history pairs, the hit list's two (HIT-SHADE-1) and the photon view's overlay
-/// (PHOTON-VIEW-1) — every one a single descriptor (no storage image is an arrayed
-/// binding: the cascade arrays are all sampled).
-constexpr unsigned kReflectStorageImages = countReflect(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-              "the id image is sampled (the pool counts the layout's samplers)");
-/// The set's SAMPLED descriptors, counted from the layout: every single binding plus
-/// the cascade arrays' extra kMaxReflectCascades - 1 each.
-constexpr unsigned kReflectSampled =
-    countReflect(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) +
-    (4u + kReflectSplitKinds + kReflectSideKinds) * (kMaxReflectCascades - 1u);
+              "the id image is sampled (the writer binds it as a sampler)");
 static_assert(kReflectTypes[kReflectPhotonBinding] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
                   kReflectTypes[kReflectHitBinding + 1u] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
                   kReflectTypes[kReflectHitBinding + 2u] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-              "the writer's storage-image bindings are the layout's (the pool counts the layout)");
+              "the writer's storage-image bindings are the layout's");
 
 bool RayQueryTier::makeReflectPipeline(std::string &err) {
     VkDescriptorSetLayoutBinding b[kReflectBindings] = {};
@@ -4522,14 +4458,9 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
                 ? kMaxReflectCascades : 1u;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorSetLayoutCreateInfo sli{};
-    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sli.bindingCount = kReflectBindings;
-    sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mReflectSetLayout) != VK_SUCCESS) {
-        err = "rayquery/reflect: vkCreateDescriptorSetLayout failed";
-        return false;
-    }
+    // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h).
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, kReflectBindings, 2u * kMaxTimedScenes * kReflectRing, mReflectSetLayout, err, "rayquery/reflect")) return false;
     VkPipelineLayoutCreateInfo pli{};
     pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pli.setLayoutCount = 1;
@@ -4580,37 +4511,11 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
             return false;
         }
     }
-    // Sized for kMaxTimedScenes views' worth of rings, which is the same ceiling
-    // the timestamp pool uses and far more views than a product frame draws.
-    // Two modes a scene (the movers' view and the still view), a ring each.
-    const unsigned sets = 2u * kMaxTimedScenes * kReflectRing;
-    VkDescriptorPoolSize sizes[5] = {};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    sizes[0].descriptorCount = sets;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[1].descriptorCount = sets;
-    sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[2].descriptorCount = sets * kReflectStorageImages;   // counted from the layout
-    sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    // kRayVoxelKinds arrays a cascade (level 0's back side and normal among them,
-    // PHOTON-VOXEL-5), the card read's view term (PHOTON-CARDS-5) and the id image
-    // (REFLECT-MOVERS-1) — counted from the layout, never restated.
-    static_assert(kReflectSampled == 3u + unsigned(kRayVoxelKinds) * kMaxReflectCascades + 1u + 2u +
-                                         SurfaceCache::kViewLayers + 1u,
-                  "the reflection set's samplers: G-buffers, voxels, sky, cards, view term, ids");
-    sizes[3].descriptorCount = sets * kReflectSampled;
-    sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[4].descriptorCount = sets * 6u;   // + the instances and the list's buffer
-    VkDescriptorPoolCreateInfo dpi{};
-    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpi.maxSets = sets;
-    dpi.poolSizeCount = 5;
-    dpi.pPoolSizes = sizes;
-    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mReflectPool) != VK_SUCCESS) {
-        err = "rayquery/reflect: vkCreateDescriptorPool failed";
+    // The pool its layout planned: kMaxTimedScenes views' worth of rings (the
+    // timestamp pool's ceiling, far more views than a product frame draws), two
+    // modes a scene (the movers' view and the still view), a ring each.
+    if (!plan.create(mVk, "rayquery/reflect", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mReflectPool, err))
         return false;
-    }
     if (!ensureSamplers(err)) return false;
     if (mTimestampPeriod > 0.0f) {
         VkQueryPoolCreateInfo qci{};
@@ -5611,14 +5516,9 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorSetLayoutCreateInfo sli{};
-    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sli.bindingCount = kMotionBindings;
-    sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mMotionSetLayout) != VK_SUCCESS) {
-        err = "rayquery/motion: vkCreateDescriptorSetLayout failed";
-        return false;
-    }
+    // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h).
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, kMotionBindings, kMaxTimedScenes * kMotionRing, mMotionSetLayout, err, "rayquery/motion")) return false;
     VkPipelineLayoutCreateInfo pli{};
     pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pli.setLayoutCount = 1;
@@ -5646,23 +5546,9 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
         err = "rayquery/motion: vkCreateComputePipelines failed";
         return false;
     }
-    // The pool's arithmetic from the layout's table (the descriptor-overrun rule).
-    const unsigned sets = kMaxTimedScenes * kMotionRing;
-    VkDescriptorPoolSize sizes[kMotionBindings] = {};
-    for (unsigned i = 0; i < kMotionBindings; ++i) {
-        sizes[i].type = kMotionTypes[i];
-        sizes[i].descriptorCount = sets;
-    }
-    VkDescriptorPoolCreateInfo dpi{};
-    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpi.maxSets = sets;
-    dpi.poolSizeCount = kMotionBindings;
-    dpi.pPoolSizes = sizes;
-    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mMotionPool) != VK_SUCCESS) {
-        err = "rayquery/motion: vkCreateDescriptorPool failed";
+    // The pool its layout planned (VkDescriptorPools.h): a ring a view.
+    if (!plan.create(mVk, "rayquery/motion", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mMotionPool, err))
         return false;
-    }
     if (mTimestampPeriod > 0.0f) {
         VkQueryPoolCreateInfo qci{};
         qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
@@ -6194,14 +6080,9 @@ bool RayQueryTier::makeSunContactPipeline(std::string &err) {
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorSetLayoutCreateInfo sli{};
-    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sli.bindingCount = kSunContactBindings;
-    sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mSunSetLayout) != VK_SUCCESS) {
-        err = "vkCreateDescriptorSetLayout failed";
-        return false;
-    }
+    // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h).
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, kSunContactBindings, kMaxTimedScenes * kReflectRing, mSunSetLayout, err, "rayquery/sun-contact")) return false;
     VkPipelineLayoutCreateInfo pli{};
     pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pli.setLayoutCount = 1;
@@ -6229,27 +6110,9 @@ bool RayQueryTier::makeSunContactPipeline(std::string &err) {
         err = "vkCreateComputePipelines failed";
         return false;
     }
-    // kMaxTimedScenes views' worth of rings — the reflection's ceiling.
-    const unsigned sets = kMaxTimedScenes * kReflectRing;
-    VkDescriptorPoolSize sizes[4] = {};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    sizes[0].descriptorCount = sets;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[1].descriptorCount = sets;
-    sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[2].descriptorCount = sets * 2u;
-    sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[3].descriptorCount = sets;
-    VkDescriptorPoolCreateInfo dpi{};
-    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpi.maxSets = sets;
-    dpi.poolSizeCount = 4;
-    dpi.pPoolSizes = sizes;
-    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mSunPool) != VK_SUCCESS) {
-        err = "vkCreateDescriptorPool failed";
+    // The pool its layout planned: kMaxTimedScenes views' worth of rings, the reflection's ceiling.
+    if (!plan.create(mVk, "rayquery/sun-contact", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mSunPool, err))
         return false;
-    }
     // POINT: the depth and the normal are read at exactly one texel.
     VkSamplerCreateInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -6762,14 +6625,9 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorSetLayoutCreateInfo sli{};
-    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sli.bindingCount = kCardMoverBindings;
-    sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCmSetLayout) != VK_SUCCESS) {
-        err = "vkCreateDescriptorSetLayout failed";
-        return false;
-    }
+    // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h).
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, kCardMoverBindings, kMaxTimedScenes * kReflectRing, mCmSetLayout, err, "rayquery/card-movers")) return false;
     VkPipelineLayoutCreateInfo pli{};
     pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pli.setLayoutCount = 1;
@@ -6797,28 +6655,9 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
         err = "vkCreateComputePipelines failed";
         return false;
     }
-    const unsigned sets = kMaxTimedScenes * kReflectRing;
-    VkDescriptorPoolSize sizes[5] = {};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    sizes[0].descriptorCount = sets;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[1].descriptorCount = sets;
-    sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[2].descriptorCount = sets;
-    sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[3].descriptorCount = sets * 2u;
-    sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[4].descriptorCount = sets * 2u;
-    VkDescriptorPoolCreateInfo dpi{};
-    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpi.maxSets = sets;
-    dpi.poolSizeCount = 5;
-    dpi.pPoolSizes = sizes;
-    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mCmPool) != VK_SUCCESS) {
-        err = "vkCreateDescriptorPool failed";
+    // The pool its layout planned (VkDescriptorPools.h).
+    if (!plan.create(mVk, "rayquery/card-movers", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mCmPool, err))
         return false;
-    }
     if (mTimestampPeriod > 0.0f) {
         VkQueryPoolCreateInfo qci{};
         qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
@@ -7711,14 +7550,9 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
         b[i].descriptorCount = 1u;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorSetLayoutCreateInfo sli{};
-    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    sli.bindingCount = kHitCompositeBindings;
-    sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mCompSetLayout) != VK_SUCCESS) {
-        err = "rayquery/hit: vkCreateDescriptorSetLayout failed";
-        return false;
-    }
+    // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h).
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, kHitCompositeBindings, kMaxTimedScenes * kReflectRing, mCompSetLayout, err, "rayquery/hit-composite")) return false;
     VkPipelineLayoutCreateInfo pli{};
     pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pli.setLayoutCount = 1;
@@ -7746,26 +7580,9 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
         err = "rayquery/hit: vkCreateComputePipelines failed";
         return false;
     }
-    const unsigned sets = kMaxTimedScenes * kReflectRing;
-    VkDescriptorPoolSize sizes[4] = {};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[0].descriptorCount = sets;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[1].descriptorCount = sets;
-    sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[2].descriptorCount = sets * 2u;
-    sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[3].descriptorCount = sets * 3u;
-    VkDescriptorPoolCreateInfo dpi{};
-    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpi.maxSets = sets;
-    dpi.poolSizeCount = 4;
-    dpi.pPoolSizes = sizes;
-    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mCompPool) != VK_SUCCESS) {
-        err = "rayquery/hit: vkCreateDescriptorPool failed";
+    // The pool its layout planned (VkDescriptorPools.h).
+    if (!plan.create(mVk, "rayquery/hit-composite", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mCompPool, err))
         return false;
-    }
     return ensureSamplers(err);
 }
 
