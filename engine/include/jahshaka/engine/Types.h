@@ -2578,11 +2578,12 @@ struct GiParams {
     // or freed by it); the BUDGET and the RADIUS are deliberately NOT — they
     // are read per frame by the residency pass, exactly like the three tuning
     // floats above, so dragging either of them re-captures nothing.
-    /// Off / Auto / On. AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): a card's reader
-    /// is the reflection trace's hit, so the cache runs exactly where that
-    /// trace does (the scene's ray row resolved against the machine) and costs
-    /// nothing elsewhere. A suite and the monitor force it On.
-    GiToggle  cards = GiToggle::Auto;
+    /// Off, or ON WHEREVER THE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): a
+    /// card's readers are the ray jobs' hits and its sun term is itself traced,
+    /// so the cache exists exactly where the ray tier does (the scene's ray row
+    /// resolved against the machine) and nowhere else. There is no "force on":
+    /// without rays nothing could fill a card's sun term or read it.
+    bool      cards = true;
     /// THE PER-FRAME TEXEL BUDGET — Lumen's shape (its capture budget is 512 x
     /// 512 texels a frame) and the number the whole capture cadence is sized
     /// by. 0 = the tier's own (kCardBudgetTexels below).

@@ -1881,9 +1881,8 @@ void OgreScene::updateSurfaceCache() {
     // jah_rq_card.glsl), and a card's sun term is itself TRACED (traceSun) — so
     // the cache exists exactly where the ray tier does (the World row resolved
     // against the machine, `rayReflectionsWanted`) and costs nothing elsewhere.
-    // Off refuses it; On and Auto both resolve against the rays (On no longer
-    // forces a cache without them: nothing could fill its sun term or read it).
-    const bool want = mGi.cards != GiToggle::Off && rayReflectionsWanted();
+    // Off refuses it; on (the default) resolves against the rays.
+    const bool want = mGi.cards && rayReflectionsWanted();
     if (!want) {
         if (mSurfaceCache) mSurfaceCache.reset();
         return;

@@ -7181,7 +7181,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // is a GiToggle and the ENGINE resolves Auto (on exactly where the
         // reflection trace runs — a ray's hit reads the card first), so the
         // mirror decides nothing.
-        gi.cards = toggle(mSource->giCards);
+        gi.cards = mSource->giCards != 0;
         gi.cardBudgetTexels = qMax(0, mSource->giCardBudgetTexels);
         gi.cardResidencyRadius = qMax(0.0f, mSource->giCardRadius);
         gi.cascadeCount = 0;

@@ -522,13 +522,13 @@ public:
     int giCascadeInstanceCap = 0;
     /// THE SURFACE CACHE (SURFACE-CACHE phase 2) — three per-project rows.
     ///
-    /// `giCards` takes the same three-state spelling every other GI toggle in
-    /// this struct takes — 0 OFF, 1 ON, anything else (-1) AUTO — and the
-    /// DEFAULT IS AUTO (PHOTON-CARDS-2): the engine resolves Auto to "on exactly
-    /// where the reflection trace runs" (a ray's hit reads the card first), so a
-    /// machine without rays pays nothing. The World Mode table's `giCards` row
-    /// writes Off at Low and Medium (no ray tier there) and Auto at High and Epic.
-    /// SceneReader's absent-key default is this constructor's (the trap).
+    /// `giCards` is 0 OFF or -1 AUTO (the default, PHOTON-CARDS-2): the engine
+    /// resolves Auto to "on exactly where the rays run" (a ray's hit reads the
+    /// card first, and a card's sun term is traced), so a machine without rays
+    /// pays nothing. There is no ON: it could only equal Auto (ATOM-S3-CARDCAP).
+    /// The World Mode table's `giCards` row writes Off at Low and Medium (no ray
+    /// tier there) and Auto at High and Epic. SceneReader's absent-key default is
+    /// this constructor's (the trap), and so is its answer to any other value.
     ///
     /// `giCardBudgetTexels` is the per-frame CAPTURE budget in TEXELS —
     /// Lumen's own shape (its capture budget is 512 x 512 a frame) — and 0 is
