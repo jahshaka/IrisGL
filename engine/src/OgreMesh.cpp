@@ -347,6 +347,22 @@ MeshId OgreScene::createMesh(const MeshData &data) {
             }
         }
     }
+    // EVERY LEVEL A CARD NAMES IS A LEVEL OF THE CHAIN (DAG-CHAIN-VALIDATE-1). A card's
+    // `lodLevel` is a capture DECISION the surface cache spends on the Item
+    // (SurfaceCache::passPreExecute -> Item::_setCurrentMeshLod), and the render queue
+    // indexes the Item's VAO lists with it — a level past the chain reads past the
+    // list's end. ATOM-SHADOWS-1's F1 was that input: a BAKED MeshData with its chain
+    // stripped (lodIndices / lodErrors / lodBounds cleared) and its cards kept crashed
+    // Ogre's caster queue (RenderQueue::addRenderable, RQ 10, the capture's shadow node
+    // then). NOT the DAG's depth: a product bake's DAG is routinely deeper than its
+    // chain (atom.dag_chain_validate prints both) and nothing indexes a VAO list by it.
+    for (size_t c = 0; c < data.cards.size(); ++c)
+        if (size_t(data.cards[c].lodLevel) > data.lodIndices.size()) {
+            mError = "createMesh: card " + std::to_string(c) + " captures LOD level " +
+                     std::to_string(unsigned(data.cards[c].lodLevel)) + " but the chain has " +
+                     std::to_string(data.lodIndices.size() + 1) + " level(s)";
+            return 0;
+        }
     if (!data.normals.empty() && data.normals.size() != data.positions.size()) { mError = "createMesh: normals count mismatch"; return 0; }
     if (!data.uvs.empty() && data.uvs.size() != nv * 2) { mError = "createMesh: uv count mismatch"; return 0; }
     if (!data.blendIndices.empty() && !data.hasSkinData()) {
