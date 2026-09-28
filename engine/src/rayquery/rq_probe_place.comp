@@ -36,8 +36,8 @@
 // AND THE INDIRECT DISPATCH ARGUMENT IS WRITTEN HERE, by the same atomic:
 // `atomicMax( args.x, uniformProbes + slot + 1 )`. The count is only final when
 // every thread has finished, and a monotonic max over the appended indices
-// reaches exactly that value without a second dispatch to compute it (patch
-// 0032's count/work pair is the same shape in the Hlms; a raw compute job can
+// reaches exactly that value without a second dispatch to compute it (fork 1bccc3f93+a98e2b0af
+// (was 0032)'s count/work pair is the same shape in the Hlms; a raw compute job can
 // write its own arguments and needs no patch). The buffer is pre-set to
 // `uniformProbes` by a transfer before this job, so a frame that appends
 // nothing still dispatches the grid.

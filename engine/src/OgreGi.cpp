@@ -585,7 +585,7 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
         case GiMode::Off:
             teardownGi();
             mGi = p;
-            mCascadeVoxelLod = p.cascadeVoxelLod && mCascadeLodAllowed;
+            mCascadeVoxelLod = p.cascadeVoxelLod;
             // Switching GI off is the user's own "start over": the hysteresis
             // floor forgets what used to be lit, so switching back on fits the
             // scene as it is now rather than as it was.
@@ -601,7 +601,7 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
             // by giStatus — never read per item, and deliberately NOT written
             // back into `mGi`, which must keep comparing equal to what the
             // document pushes or every push under the latch would rebuild.
-            mCascadeVoxelLod = p.cascadeVoxelLod && mCascadeLodAllowed;
+            mCascadeVoxelLod = p.cascadeVoxelLod;
             rebuildVct();
             return true;
         }
@@ -872,14 +872,14 @@ void OgreScene::reintegrateFieldAfterInjection() {
         // PHOTON_SPEC §7 E2 (9)). `VctLighting::update` with extra bounces
         // PING-PONGS its light voxel textures (`runBounce`), and the field
         // bound whatever was current ONCE, by pointer, at `initialize()`
-        // (ogre-patch 0044). So after an odd number of bounce passes — which
+        // (fork 822d538f5 (was 0044)). So after an odd number of bounce passes — which
         // a chain reaches whenever the document asks for an even total (two
         // total bounces = one pass per cascade) — a light move left the field
         // integrating from the texture the injection had just stopped
         // writing. Re-binding is five descriptor writes on a path that has
         // just run a compute dispatch per bounce; deciding whether it is
         // needed would mean comparing raw pointers that may have been
-        // recycled (the defect class patch 0041 exists for).
+        // recycled (the defect class fork 1bccc3f93+a98e2b0af (was 0041) exists for).
         //
         // The head, because the field rides cascade 0 and `mVctLighting`
         // IS cascade 0's lighting under a chain.
@@ -1180,7 +1180,7 @@ GiStatus OgreScene::giStatus() const {
             cs.voxelTriangles = (long long)(rd.indexTotal / 3u);
             cs.voxelRecords   = (long long)rd.records;
             cs.voxelOverflow  = (long long)rd.overflow;
-            // WHAT THE REBUILD COST IN DISPATCHES (ogre-patch 0065): counted by the
+            // WHAT THE REBUILD COST IN DISPATCHES (fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)): counted by the
             // voxeliser's last build() - one per store bucket per octant, 0 when it
             // only cleared. A dispatch is sized by the whole octant, so this is the
             // material-count half of a cascade's bill.
@@ -1453,8 +1453,8 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
             }
         }
 
-        // The DIRECT volume exists only on a cascade that bounces (ogre-patch
-        // 0076's D term). Its peak is the normalisation's own self-check.
+        // The DIRECT volume exists only on a cascade that bounces (fork ae2ed529f+155a56bf8
+        // (was 0076)'s D term). Its peak is the normalisation's own self-check.
         if (Ogre::TextureGpu *direct = lighting->getLightDirectTexture()) {
             Walk wd;
             if (walk(direct, wd)) {
@@ -1463,8 +1463,8 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
             }
         }
 
-        // AND THE SOURCE THE INJECTION SEEDS FROM (VOXEL-CLIP-1, ogre-patch
-        // 0087): the voxeliser's EMISSIVE volume, in scene radiance. The lit
+        // AND THE SOURCE THE INJECTION SEEDS FROM (VOXEL-CLIP-1, fork ad452604a+155a56bf8
+        // (was 0087)): the voxeliser's EMISSIVE volume, in scene radiance. The lit
         // volumes above are the injection's OUTPUT, and an emitter clipped on
         // its way in is indistinguishable there from a dimmer emitter — the
         // same argument that put the volumes in this readback in the first
@@ -2435,7 +2435,7 @@ static bool giIsSlab(const Ogre::Aabb &a, size_t ax) {
 // re-apply its own 1.005 padding to anything it was handed, so this function
 // divided both boxes by a copy of that constant on the way in — a private
 // number copied out of the pin, and a divide-then-multiply round trip that is
-// not even bit-exact. ogre-patch 0049 gave `set` a `bValuesAlreadyPadded`
+// not even bit-exact. fork 618d95cca (was 0049) gave `set` a `bValuesAlreadyPadded`
 // argument for exactly this: these ARE the probe's own boxes, padding included,
 // so they are handed back as they are and the constant is gone.
 void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
@@ -2486,7 +2486,7 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
         const Ogre::Aabb area = p->getArea();
         const Ogre::Aabb clamped = Ogre::Aabb::newFromExtents(cmn, cmx);
         p->set(cam, area, p->getAreaInnerRegion(), p->getOrientation(), clamped,
-               /*bValuesAlreadyPadded*/ true);   // ogre-patch 0049
+               /*bValuesAlreadyPadded*/ true);   // fork 618d95cca (was 0049)
         if (debug) {
             const auto toS = [](const Ogre::Vector3 &v) {
                 return Ogre::StringConverter::toString(v);
@@ -2590,7 +2590,7 @@ void OgreScene::noteGiCascadeDirty(const Ogre::Aabb *box) {
 // A DATABLOCK OR A TEXTURE THE MATERIAL STORE HOLDS IS DYING. Narrower than
 // `invalidateGiCaches`: the store keys its conversions on the datablock POINTER,
 // so a recycled address would silently paint the new material with the old one's
-// colour - the eviction below is what prevents it (ogre-patch 0081).
+// colour - the eviction below is what prevents it (fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081)).
 void OgreScene::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
     if (!dying) {
         // A TEXTURE a converted material bound died (the caller cannot name a
@@ -2732,7 +2732,7 @@ void OgreScene::endDragGestureIfStill() {
 //   * whether a DATABLOCK died or a material PARAMETER changed — the only case
 //     that needs a new voxeliser, and it gets one per cascade per frame with
 //     the chain's lighting objects (and so its raw `mExtraCascades` pointers)
-//     untouched (`VctLighting::setVoxelizer`, ogre-patch 0037).
+//     untouched (`VctLighting::setVoxelizer`, fork ae2ed529f+822d538f5 (was 0037)).
 //   * and, when nothing geometric moved at all, that a LIGHT changed — which is
 //     a re-INJECTION over the voxels that are already there, on every cascade,
 //     and never a re-voxelisation.
@@ -3969,14 +3969,7 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
         mProbeMotionRun = 1;
         mProbeMotionQuietFrames = 0;
     }
-    // THE DIAGNOSTIC THE MEASUREMENT DRIVES: this deferral is a claim about cost and about
-    // the picture at the drag's end, and both claims have to be checkable from
-    // outside against the behaviour it replaced, in ONE binary at one pose.
-    // Read per frame rather than cached because a test arms it between frames,
-    // and a getenv against a path that may issue a 512-square six-face capture
-    // is not a cost anyone can measure.
-    const bool deferMotion = std::getenv("JAHSHAKA_PROBE_NO_MOTION_DEFER") == nullptr;
-    bool deferring = deferMotion && mProbeDragActive && !mProbeStaleBeyondMotion;
+    bool deferring = mProbeDragActive && !mProbeStaleBeyondMotion;
     if (deferring) {
         // ...WITH A CEILING (DRAG-1 round 2, F4). A drag ends and a keyframed
         // object in play does not: without this, a motion that never stops is
@@ -4314,7 +4307,7 @@ bool OgreScene::rebuildVct() {
     // (This is where the arm used to REFUSE the field and say so. The refusal
     // was correct at the pin it was written against: `initialize()` is
     // upstream's only placement API and it re-creates the atlases, so a field
-    // on a scrolling cascade was either wrong or black. ogre-patch 0044 adds
+    // on a scrolling cascade was either wrong or black. fork 822d538f5 (was 0044) adds
     // the two hooks that were missing — `setFieldVolume` and `setVctLighting` —
     // and the refusal, and the measured cost it quoted (plain cone diffuse
     // leaking 0.97 of the light through a 0.5 m wall), are history.)
@@ -4382,7 +4375,7 @@ bool OgreScene::rebuildVct() {
 // `VctLighting`, and `VctLighting::addCascade` — the chaining that makes
 // HlmsPbs sample N volumes with the pin's own cone-continuation (its
 // per-cascade brightness stabilisation is NOT used: see cascadeBounces, and
-// ogre-patches 0074/0075 for the two defects it was compensating for). The
+// fork 8f09c0cd4+155a56bf8+5230c9390+8282f6d70 (was 0074/0075) for the two defects it was compensating for). The
 // cascade transforms reach the shader
 // from the LIVE voxelisers every frame (`VctLighting::fillConstBufferData`
 // builds `invXform` from `getVoxelOrigin()/getVoxelSize()`), so moving a
@@ -4526,7 +4519,7 @@ static inline long long jahQuantAxis(float pos, float size) {
 // resolution term, SEAM-1 §3). The pin reached for it because the OTHER half of
 // the same stabilisation, the shader's `( 1 - alpha )` de-amplification, and the
 // bounce's own extra 1/pi were both making the outer cascades too dark —
-// ogre-patches 0074 and 0075 fix those at the cause, so the compensation goes
+// fork 8f09c0cd4+155a56bf8+5230c9390+8282f6d70 (was 0074 and 0075) fix those at the cause, so the compensation goes
 // with them.
 //
 // It also priced: eight injection passes on Epic's outermost 64^3 volume per
@@ -4863,7 +4856,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     if (idx >= mVctCascades.size()) return false;
     VctCascade &c = mVctCascades[idx];
     if (!c.voxelizer || !c.lighting) return false;
-    // ONE MONITOR ROW PER CASCADE REBUILD, with the GPU pair (patch 0027) — the
+    // ONE MONITOR ROW PER CASCADE REBUILD, with the GPU pair (fork 1a81f866a+1bccc3f93 (was 0027)) — the
     // number P0 exists to measure. The detail is a compile-time constant per
     // cascade index for the reason EnginePrivate.h's CacheScope header gives:
     // nothing may be constructed at the call site while the monitor is off.
@@ -5730,7 +5723,7 @@ void OgreScene::buildPccFit() {
     // an upstream default change shows up as a diff instead of as moved probes.
     // The overlap default is 1.25 (upstream's own sample's value): fewer probe
     // volumes over each point, which is cheaper on the Forward+ cubemap slots.
-    // Its old workaround value is worth naming — before ogre-patch 0017, MORE
+    // Its old workaround value is worth naming — before fork 4d5fbef16 (was 0017), MORE
     // overlapping probes meant a DARKER reflection (the count division), so a
     // large overlap was quietly paying for itself in the wrong currency. With
     // 0017 the choice is purely about blend smoothness.
@@ -5742,7 +5735,7 @@ void OgreScene::buildPccFit() {
     const auto tPlace = std::chrono::steady_clock::now();
     // THE PLACEMENT RUNS AT THE SCOUT'S RESOLUTION (lane SKY-FALLBACK-1; the
     // debt R5-ROOM recorded). Everything buildStart/buildEnd consume is ONE
-    // 1x1 AVERAGED TEXEL per cube face — the fit's six reaches and patch 0047's
+    // 1x1 AVERAGED TEXEL per cube face — the fit's six reaches and fork 618d95cca (was 0047)'s
     // six ratios are read from the smallest mip — so a placement capture at the
     // real probe resolution renders 256 or 512 px faces to average them down to
     // one texel each, for every CANDIDATE, including the ones about to be
@@ -5762,7 +5755,7 @@ void OgreScene::buildPccFit() {
     // dropped candidates' slices stayed allocated for the life of the grid.
     placement.buildStart(kProbeScoutResolution, mGiCamera, mPccProbeFormat,
                          mProbeCamNear, mProbeCamFar);
-    // buildEnd's CLOSING RE-CAPTURE IS DEFERRED, not skipped (patch 0047's flag;
+    // buildEnd's CLOSING RE-CAPTURE IS DEFERRED, not skipped (fork 618d95cca (was 0047)'s flag;
     // second read, 2026-09-15). Upstream ends the fit by re-rendering every
     // probe, and that render is NOT redundant: `processProbeDepth` re-publishes
     // each probe through `CubemapProbe::set`, which raises mDirty
@@ -5786,7 +5779,7 @@ void OgreScene::buildPccFit() {
     // the probe itself.
     //
     // The placement has just read one averaged depth value per cube face and
-    // ogre-patch 0047 hands those six numbers back: each is the distance that
+    // fork 618d95cca (was 0047) hands those six numbers back: each is the distance that
     // face could see as a multiple of the distance from this probe's camera to
     // the region's face in the same direction: 1 means "on the region's face",
     // and 2 is the encoding's SATURATION — the compressor stores
@@ -5858,7 +5851,7 @@ void OgreScene::buildPccFit() {
             // WHAT SKY-FALLBACK-1 MEASURED, and it closes half of the original
             // argument. That argument had two halves, and the SECOND is gone:
             // a scene that gains a grid no longer loses the sky, because the
-            // sky has its own pass-level slot now (ogre-patch 0048) and answers
+            // sky has its own pass-level slot now (fork 4d5fbef16+8f09c0cd4 (was 0048)) and answers
             // wherever no probe's box does. What it does NOT close is the
             // avatar preview reading r3 g3 b4 under the any-axis form: that was
             // never the missing sky. Measured on this binary, it is upstream's
@@ -6010,7 +6003,7 @@ void OgreScene::buildPccFit() {
     // re-publishes the same camera, area and shape into the internal probe the
     // acquisition just re-created.
     //
-    // AND THE RE-PUBLISH IS EXACT, which needed ogre-patch 0049 (SOURCE):
+    // AND THE RE-PUBLISH IS EXACT, which needed fork 618d95cca (was 0049) (SOURCE):
     // `CubemapProbe::set` applied its 1.005 padding on EVERY call, so handing a
     // probe back its own boxes grew them half a percent — measured here as the
     // probe union leaving the region (gi.pcc_bounds' A2 invariant) and
@@ -6245,7 +6238,7 @@ void OgreScene::buildPccFinish() {
 // spike's closed room, the pure-indirect term goes from a mean 84/54/56 (VCT,
 // with a blown-out 1.0 in the dark corner where it leaks) to 6.4/3.3/4.0
 // (DDGI, smooth and plausible): the right SHAPE roughly 13x too dim — a reading
-// the pass-buffer misalignment ogre-patch 0050 fixed; the field is applied at its
+// the pass-buffer misalignment fork ae2ed529f+822d538f5 (was 0050) fixed; the field is applied at its
 // own answer (media/Hlms/Jahshaka/JahIfd_piece_ps.any), with no dial.
 //
 // WHERE IT LIVES IN THE LIFECYCLE. Inside the VCT arm and strictly within
@@ -6562,7 +6555,7 @@ void OgreScene::updateIrradianceField() {
 // pass, and the generation job's probe-to-voxel transform is re-derived from it
 // and from the voxel volume.
 // So "the field follows cascade 0" is two numbers (origin, size) plus a
-// re-integration; ogre-patch 0044 adds the setter that moves them without
+// re-integration; fork 822d538f5 (was 0044) adds the setter that moves them without
 // destroying the atlases, which is what made the refusal in `rebuildVct`
 // necessary before it.
 //
@@ -6619,7 +6612,7 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
     const VctCascade &c0 = mVctCascades[0];
     if (!c0.voxelizer || !c0.lighting) return;
     JAH_TRY {
-        // THE BINDING FIRST, AND UNCONDITIONALLY (ogre-patch 0044's second
+        // THE BINDING FIRST, AND UNCONDITIONALLY (fork 822d538f5 (was 0044)'s second
         // half). Cascade 0's lighting re-creates its light voxel textures
         // whenever it is moved to another voxeliser (VctLighting::setVoxelizer;
         // no path in this file does that since the A5b fix round deleted the
@@ -6627,7 +6620,7 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
         // exact) and the field bound those textures once, by pointer, at initialize().
         // Re-binding costs five descriptor writes on a rebuild frame; deciding
         // whether it is needed would mean comparing raw pointers that may have
-        // been recycled, which is the defect class patch 0041 exists for.
+        // been recycled, which is the defect class fork 1bccc3f93+a98e2b0af (was 0041) exists for.
         mIfd->setVctLighting(c0.lighting);
 
         const Ogre::Vector3 origin = c0.voxelizer->getVoxelOrigin();

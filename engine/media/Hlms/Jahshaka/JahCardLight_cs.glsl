@@ -357,7 +357,7 @@ void main()
 		const vec3 jahCardPlaneN = normalize( r.axisD.xyz );
 		const vec3 Ncone = dot( N, jahCardPlaneN ) > 0.99985 ? jahCardPlaneN : N;
 		vec2 sr = texelFetch( cardShadowRough, at, 0 ).xy;
-		// Patch 0043's range: stored = (alpha - 0.001) * 1.001001.
+		// fork 16d8e29d4 (was 0043)'s range: stored = (alpha - 0.001) * 1.001001.
 		float alpha = sr.y / 1.001001 + 0.001;
 		float perceptualRoughness = sqrt( max( alpha, 0.0 ) );
 		// Image row 0 is the card's +v side (the capture camera's +Y).

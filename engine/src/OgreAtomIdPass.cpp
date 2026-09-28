@@ -13,7 +13,7 @@
 //      (ATOM-CLUSTER-CUT, SPECS/v2/CLUSTER_CUT_DESIGN.md), the predicate "visible
 //      and routed to Atom" (kGpuVisible | kGpuAtom). Nothing is read back.
 //   2. THE EDGES the barrier solver cannot express — compute write -> indirect read
-//      (patch 0032's own reason) and the GPU scene's tables, read by the vertex
+//      (fork 1bccc3f93+a98e2b0af (was 0032)'s own reason) and the GPU scene's tables, read by the vertex
 //      stage through device addresses the solver never sees — as one raw memory
 //      barrier; and the write-after-read on the list against the previous frame's
 //      draw, as an execution barrier in front of the uploads.

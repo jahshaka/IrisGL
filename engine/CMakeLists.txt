@@ -452,8 +452,9 @@ endfunction()
 #    listener extends the pass buffer. Editing OgreEngine.cpp changes what
 #    shaders mean without changing one byte of any template.
 #
-# Configure-time, not build-time: both are inputs to a cache whose only failure
-# mode is "used a stale entry", and CMake re-configures whenever these files change.
+# Configure-time, not build-time: an input to a cache whose only failure mode is
+# "used a stale entry"; the submodule's HEAD files are configure dependencies (below),
+# so CMake re-configures whenever the checkout moves.
 #
 # HEAD, not the recorded gitlink: the sha that must fence the cache is the one the
 # engine was BUILT from. A lane that commits on the fork and builds before bumping
@@ -471,6 +472,26 @@ endif()
 if(NOT _ogre_fork_commit)
     set(_ogre_fork_commit "unknown")
 endif()
+# ...AND IT IS RE-READ WHEN THE CHECKOUT MOVES (D6-FORK-TOOLING, audit V2-D F12; the
+# bake key's pattern in irisgl/CMakeLists.txt). A configure-time value goes stale:
+# a pin bump or a fork commit moves the submodule without touching a CMake input, so
+# the term kept naming the previous engine until something unrelated re-configured —
+# a new engine's shaders filed under the old engine's cache key. The inputs are the
+# submodule's HEAD as git stores it: the HEAD file (a detached checkout rewrites it),
+# the branch ref it names (a commit on a branch moves only that) and logs/HEAD
+# (every HEAD move appends to it, packed refs included).
+set(_ogre_git "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ogre-next")
+set(_ogre_head_inputs "")
+execute_process(COMMAND git -C "${_ogre_git}" symbolic-ref -q HEAD
+                OUTPUT_VARIABLE _ogre_head_ref ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+foreach(_p HEAD logs/HEAD ${_ogre_head_ref})
+    execute_process(COMMAND git -C "${_ogre_git}" rev-parse --path-format=absolute --git-path ${_p}
+                    OUTPUT_VARIABLE _f ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_f AND EXISTS "${_f}")
+        list(APPEND _ogre_head_inputs "${_f}")
+    endif()
+endforeach()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_ogre_head_inputs})
 
 # JAHSHAKA_ENGINE_BUILD_ID IS GENERATED AT BUILD TIME, not here (LIGHTING_FIX
 # fix 10 / F5). It used to be a configure-time `file(SHA256 ...)` fold, which
@@ -551,13 +572,13 @@ set(OGRE_NEXT_IBL_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IBL")
 # (PHOTON-VIEW-1) — like VCT/Visualizer, its Voxels picture.
 #
 # ORDINARY MEDIA STAGING, and the distinction matters (P0 spike finding 1,
-# correcting the spec's own bullet): this is NOT the patch-0009/0017 class. The
+# correcting the spec's own bullet): this is NOT the fork c290052de+4d5fbef16 (was 0009/0017) class. The
 # files are upstream's, unpatched, copied from OGRE_NEXT_SOURCE by the normal
 # build step — a `cmake --build` picks them up and no tree has to re-run
 # build-ogre.sh. A tree that has not rebuilt simply has no IFD media, and DDGI
 # then fails LOUD (the compute jobs are missing) instead of rendering wrong.
 set(OGRE_NEXT_IFD_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IrradianceFields")
-# The overlay font (STATS_OVERLAY_SPEC §9.3 — patch-0009 class: staged from the
+# The overlay font (STATS_OVERLAY_SPEC §9.3 — fork c290052de (was 0009) class: staged from the
 # SOURCE tree, so EVERY tree and every worktree re-stages, and a tree that has
 # not rebuilt has no font and therefore no stats readout and no loading cover).
 #
@@ -704,6 +725,9 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_VCT_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/VCT"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Tools"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IBL_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IBL"
+    # IrradianceFields is WIPED first for the same reason: the fork deleted the raster
+    # source's jobs and shaders and every HLSL/Metal compute twin (D6-FORK-TOOLING).
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IrradianceFields"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IFD_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IrradianceFields"
     # The overlay font. `cmake -E tar` extracts named members, so only the three
     # files we ship land in bin/media/packs/DebugPack — which is exactly the

@@ -107,7 +107,7 @@ FogHlmsListener gFogListener;
 //   slot array through the pass's cumulative per-type light counts
 //                                                       [OgreHlms.cpp:3640-3695]
 // The first comes from a count only buildClosestLightList maintains, the second
-// from the array setLightFixedToShadowMap writes — which is why ogre-patch 0025
+// from the array setLightFixedToShadowMap writes — which is why fork 6130df9d1 (was 0025)
 // makes the second invalidate the first's cache.
 // G3-a — THE CONE DIFFUSE COMES BACK UNDER A CASCADE CHAIN (PHOTON_SPEC §13 G3,
 // the decided option; audit B1 is the finding).
@@ -246,7 +246,7 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
 }
 
 // THE SKY IS THE ENVIRONMENT WHEREVER NO PROBE COVERS THE PIXEL — the host half
-// of ogre-patch 0048. The whole mechanism is three listener overrides and one
+// of fork 4d5fbef16+8f09c0cd4 (was 0048). The whole mechanism is three listener overrides and one
 // float4 of pass data; the shader half is the patch.
 //
 // THE GATE IS `hlms_enable_cubemaps_auto`, i.e. exactly the passes where the
@@ -356,7 +356,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // both selftest hashes are unmoved.
     if (hlms && !casterPass && surfaceCardsCapturing())
         hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_card_capture", 1);
-    // THE ENVIRONMENT'S SLOT (PHOTON-ENV-1; first claimed by ogre-patch 0048 for
+    // THE ENVIRONMENT'S SLOT (PHOTON-ENV-1; first claimed by fork 4d5fbef16+8f09c0cd4 (was 0048) for
     // the probe-array pass alone), decided here and read twice afterwards: by
     // getNumExtraPassTextures (through the PROPERTY, on any thread) and by
     // hlmsTypeChanged (through this host's PassBinds, on this one).
@@ -534,7 +534,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                 std::to_string(needed) + " (the node reports " +
                 std::to_string(shadowNode->getNumActiveShadowCastingLights()) +
                 " active casting lights, slots " + slots +
-                "). The generated shader cannot compile — see ogre-patch 0025.",
+                "). The generated shader cannot compile — see fork 6130df9d1 (was 0025).",
             Ogre::LML_CRITICAL);
     }
 }
@@ -678,8 +678,8 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // mip count, declared only by a pass that claimed the environment's slot.
     //
     // Nothing here compensates for the irradiance field's block any more: its
-    // own getConstBufferSize() under-reported by one float4 until ogre-patch
-    // 0050, and this listener used to reserve four extra floats on a
+    // own getConstBufferSize() under-reported by one float4 until fork ae2ed529f+822d538f5
+    // (was 0050), and this listener used to reserve four extra floats on a
     // field-bound non-caster pass and then deliberately SKIP them, so that the
     // field's 24-float write and HlmsPbs's 20-float pointer advance could not
     // collide with our first float4. That correction depended on HlmsPbs
@@ -786,7 +786,7 @@ void OgreScene::ensureAtmosphere() {
         // The quad needs two things done to it that the component cannot know
         // about (render queue 0 instead of 212, kVisibleBit instead of the
         // default flags — tuneAtmosphereRenderable says why), and it names it
-        // since ogre-patch 0054. It used to be found by diffing the
+        // since fork 618d95cca (was 0054). It used to be found by diffing the
         // SceneManager's Rectangle2D set across the setSky call.
         mAtmosphere->setSky(mSceneMgr, true);      // creates the sky quad, registers
         mAtmoQuad = mAtmosphere->getSky(mSceneMgr);

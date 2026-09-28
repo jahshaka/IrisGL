@@ -11,7 +11,7 @@
 // WHY IT IS A COMPONENT AND NOT MORE CODE IN THE RAY TIER (the owner's rule,
 // 2026-09-21: full use of Ogre-Next's own extension shape, never a band-aid
 // around it). The tier owns the DEVICE and the structures: the TLAS, the
-// allocator with the retire window patch 0067 taught it, the frame's command
+// allocator with the retire window fork b028638c1 (was 0067) taught it, the frame's command
 // buffer, the black stand-ins every empty descriptor takes. The gather owns an
 // ALGORITHM: where probes go, what they trace, what an atlas holds, what a
 // pixel reads. Those are two lifetimes and two rates of change — phases 2 and 3

@@ -19,7 +19,7 @@
 // "leaks confined to the plane", the property the whole probe shape exists for.
 // A pixel whose weights sum below the floor (p.knobs4.y) gets NO answer (w = 0)
 // and keeps the fallback — the irradiance field's cage where one is bound
-// (the fork commit for patch 0086's hook), the environment where none is.
+// (the fork commit for fork b6c409c1f (was 0086)'s hook), the environment where none is.
 //
 // THE OUTPUT is `jahProbeIrradiance`: rgb = E/pi at the pixel's normal (what
 // `envColourD` is — the trace's header), w = 1 where probes answered and 0

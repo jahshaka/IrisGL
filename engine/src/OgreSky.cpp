@@ -1072,18 +1072,13 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
     if (mSkyShTicket) readSkyShTicket(true);
     const bool consecutive = mSkyCaptureIdleFrames <= kSkyCaptureDragFrames;
     mSkyCaptureIdleFrames = 0;
-    // The run-wide diagnostic latch every measurable rule in this engine
-    // carries (JAHSHAKA_NO_LOD_HYSTERESIS, JAHSHAKA_NO_RAY_QUERY): with it set
-    // every capture takes the synchronous path, so the A/B is a run of the
-    // shipped binary and not a build.
-    static const bool forceSync = std::getenv("JAHSHAKA_SKY_SH_SYNC") != nullptr;
     // A capture the cloud layer's SCROLL asked for (tickCloudClock) is not a
     // gesture but it is PERIODIC, and its ambient trailing by one more frame
     // is invisible, so it takes the no-wait read too: the cadence costs the
     // capture's GPU work and never a GPU->CPU stall on the UI thread.
     const bool asyncOnce = mSkyCaptureAsyncOnce;
     mSkyCaptureAsyncOnce = false;
-    if (mSkyShValid && (consecutive || asyncOnce) && !forceSync) { issueSkyShRead(cube); return; }
+    if (mSkyShValid && (consecutive || asyncOnce)) { issueSkyShRead(cube); return; }
     integrateSkyShNow(cube);
 }
 
@@ -1165,8 +1160,7 @@ void OgreScene::destroySkyShTicket() {
 }
 
 // The synchronous form — the first capture of a scene, and the oracle the
-// asynchronous one is measured against (JAHSHAKA_SKY_SH_SYNC forces it for
-// every capture, which is how the two are A/B'd on one binary).
+// asynchronous one is measured against.
 void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
     mSkyShValid = false;
     mSkyShFresh = false;
@@ -1720,7 +1714,7 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // is the fence; it goes black without this.
 //
 // WHAT CHANGED IS WHERE THE SKY WENT INSTEAD (lane SKY-FALLBACK-1,
-// ogre-patch 0048). The old note said "nothing is lost visually: the probe
+// fork 4d5fbef16+8f09c0cd4 (was 0048)). The old note said "nothing is lost visually: the probe
 // captures include the sky, so the probes ARE the environment". That was true
 // while a probe grid was an all-or-nothing scene-wide decision — a grid meant a
 // room, and in a room the probes are the environment. It stopped being true the
@@ -1733,7 +1727,7 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // So the sky has its OWN slot now, at the pass level, through the extra
 // pass texture HlmsPbs offers its Hlms listener
 // (FogHlmsListener::SkyEnvState / getNumExtraPassTextures / hlmsTypeChanged,
-// OgreFog.cpp; the composite is ogre-patch 0048, inside upstream's per-pixel
+// OgreFog.cpp; the composite is fork 4d5fbef16+8f09c0cd4 (was 0048), inside upstream's per-pixel
 // probe loop). It is bound for every colour pass of a scene whose grid has
 // taken the env slot, and the probe loop hands it every pixel no probe's box
 // contains. This function therefore still returns null under a PCC — the slot
@@ -2025,17 +2019,6 @@ constexpr float    kCloudFadeMetres   = 60000.0f;   // the distance the far shee
 // cells, so the ambient it photographs has not moved; a parameter change
 // still re-captures at once.
 constexpr unsigned kCloudCaptureFrames = 600u;
-/// The period in force: kCloudCaptureFrames, unless the run-wide measurement
-/// latch JAHSHAKA_CLOUD_CAPTURE_FRAMES names another (read once — the A/B of
-/// the cadence is a run of the shipped binary, like JAHSHAKA_SKY_SH_SYNC).
-unsigned cloudCapturePeriod() {
-    static const unsigned period = [] {
-        const char *v = std::getenv("JAHSHAKA_CLOUD_CAPTURE_FRAMES");
-        const long n = v ? std::strtol(v, nullptr, 10) : 0;
-        return n > 0 ? unsigned(n) : kCloudCaptureFrames;
-    }();
-    return period;
-}
 const char *kCloudBakeWorkspace = "JahshakaCloudBakeWorkspace";
 
 // ---- the noise: a fixed seed, integer hashing, every channel tiling --------
@@ -2178,7 +2161,7 @@ bool OgreScene::cloudLayerDrawn() const {
 void OgreScene::applyCloudLayer(bool fieldChanged) {
     const CloudLayerDesc &c = mSkyDesc.clouds;
     const unsigned period =
-        (c.enabled && (c.wind[0] != 0.0f || c.wind[1] != 0.0f)) ? cloudCapturePeriod() : 0u;
+        (c.enabled && (c.wind[0] != 0.0f || c.wind[1] != 0.0f)) ? kCloudCaptureFrames : 0u;
     // A wind that STARTS starts its period: the first scroll capture is one
     // period after the sheet began to move, never whatever an earlier wind left.
     if (period && !mCloudStatus.capturePeriodFrames) mCloudFramesSinceCapture = 0u;
@@ -2366,7 +2349,7 @@ void OgreScene::tickCloudClock() {
         ++mCloudStatus.clockTicks;
         mCloudClock += dt;
         // The capture cadence, in drawn frames that actually moved the sheet.
-        if (++mCloudFramesSinceCapture >= cloudCapturePeriod()) {
+        if (++mCloudFramesSinceCapture >= kCloudCaptureFrames) {
             mCloudFramesSinceCapture = 0u;
             mSkyCaptureAsyncOnce = true;
             requestSkyCapture();
