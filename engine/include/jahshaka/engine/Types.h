@@ -2853,7 +2853,8 @@ struct GiQualityFacts {
     /// WHAT IT DELETES, measured on Grand Showroom 2 at Epic (32 probes kept at
     /// 512 px HDR, app.textureMemory A/B): 838,987,760 bytes of texture — the
     /// probe array 536,739,840, its capture and IBL cubes 33,550,320, each probe
-    /// workspace's shadow targets 268,435,456 (8 MiB a probe) and the placement's
+    /// workspace's shadow node and capture depth 268,435,456 (7 + 1 MiB a probe at
+    /// the High shadow settings — PCC-BUDGET-2, giProbeGridBytes) and the placement's
     /// 256 px depth buffer 262,144 — and the
     /// open's placement, 713-799 ms of the UI thread.
     bool rayReflections = false;
