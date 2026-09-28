@@ -557,12 +557,6 @@ bool OgreScene::probeGridWanted() const {
     return mGi.mode == GiMode::VctPccHybrid && !probeGridByRays();
 }
 
-int OgreScene::reflectionTraceRow() const {
-    if (mGi.mode == GiMode::Off || !probeGridByRays()) return 0;
-    return giQualityFacts(mGi.quality,
-                          mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
-        .reflectTrace;
-}
 
 // THE DOWN HALF, in one place: the grid a ray tier does not build is taken down
 // (the binding lets go, the datablocks take their sky cube back) and the probe
@@ -596,6 +590,7 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
             // floor forgets what used to be lit, so switching back on fits the
             // scene as it is now rather than as it was.
             noteProbeFitVolume(Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO), false);
+            noteSceneTransformWrite();
             return true;
 
         case GiMode::Vct:
@@ -994,6 +989,14 @@ void OgreScene::runChainTick(bool inMotion) {
             // unless it is rebuilt again.
             for (VctCascade &c : mVctCascades) c.injectedSinceTick = false;
             work.setUnits(injections);
+            // AN AT-REST TICK THAT LANDED is a new radiance the cards' indirect must
+            // re-march (the surface cache's signature, OgreScene.cpp): counted per
+            // tick, never per injection and never for a moving tick, so a drag
+            // re-marches nothing and its closing at-rest tick re-marches once. The
+            // single volume's per-injection count did this job until D4-PHOTON-TIERS
+            // deleted that arm; the chain's settles alone missed a tick that paid
+            // the debt without a settle of its own (gi.card_lighting_indirect).
+            if (!inMotion && injections > 0u) ++mGiRestTicks;
         }
         reintegrateFieldAfterInjection();
         // WHOEVER PAYS THE INJECTION PAYS THE DEBT (LAMPREST-3 fix round item 3).
@@ -4288,6 +4291,11 @@ bool OgreScene::rebuildVct() {
     // LAST: the hysteresis floor inside giItemBounds must see the same record the
     // region was fitted against or the two could disagree about which items exist.
     if (haveBounds) noteProbeFitVolume(aabb, !probeRegionPinned());
+    // A BUILT ARM MOVES THE TRANSFORM EPOCH (it did through the single volume's fit
+    // record until D4-PHOTON-TIERS): the epoch-gated walks — the GI walk, the ray
+    // tier's instance update, the geometry signature — re-read the world once after
+    // a from-scratch build instead of trusting what they cached before it.
+    noteSceneTransformWrite();
 
     // The DDGI layer, over the volume this build just lit. After the VCT
     // binding (the field joins the same SceneGiBinding) and after the PCC

@@ -6893,12 +6893,29 @@ void SceneMirror::applyViewPostFx(View *view, bool record)
         fx.ssaoPower      = mSource->ssaoPower;
         fx.ssaoRadius     = mSource->ssaoRadius;
         fx.smaaPreset     = mSource->smaaPreset;
-        // The SSR ROW, as authored. At a ray tier the renderer does not read it
-        // (OgreScene::reflectionTraceRow — the rays are the reflection, at the
-        // tier's own resolution; the row reads "Traced" in the editor): pushed
-        // as it is because the same scene on a machine that traces nothing
-        // renders the screen march at exactly this value.
-        fx.ssr            = mSource->ssrMode;
+        // THE SSR ROW'S MEANING AT A RAY TIER (D4-PHOTON-TIERS). Where this
+        // scene's reflections are TRACED — Photon on, a quality whose facts say
+        // rayReflections (High, Epic), and rays resolved on this machine — the
+        // rays are the reflection and the document's SSR row is NOT fed: the
+        // view traces at the tier's own resolution (GiQualityFacts::reflectTrace,
+        // High one ray per 2x2 block, Epic every pixel — the row's own High/Epic
+        // columns), and the row reads "Traced" in the editor
+        // (worldmodes::reflectionsTraced). Everywhere else the row is fed as
+        // authored: the screen march, and the machine's rays with it.
+        {
+            const bool photonOn = mSource->giMode != iris::GiMode::OFF;
+            GiQuality q = GiQuality::Medium;
+            switch (mSource->giQuality) {
+            case iris::GiQuality::LOW:  q = GiQuality::Low; break;
+            case iris::GiQuality::HIGH: q = GiQuality::High; break;
+            case iris::GiQuality::EPIC: q = GiQuality::Epic; break;
+            default: break;
+            }
+            const GiQualityFacts facts = giQualityFacts(q);
+            fx.ssr = photonOn && facts.rayReflections && mTarget && mTarget->rayTracingResolved()
+                         ? facts.reflectTrace
+                         : mSource->ssrMode;
+        }
         fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
         // Percent in the document, a fraction in the renderer — one conversion,
         // here, so nothing downstream has to know which unit it is holding.

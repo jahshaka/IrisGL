@@ -3731,13 +3731,6 @@ public:
     /// and not a ray tier.
     bool probeGridByRays() const;
     bool probeGridWanted() const;
-    /// THE SSR ROW'S MEANING AT A RAY TIER (D4-PHOTON-TIERS). 0 where the rays
-    /// are not this scene's reflection (Photon off, a tier whose reflections are
-    /// not traced, or no traced rays on this machine) — the view's SSR row is
-    /// then the screen march and nothing else. Otherwise the tier's trace
-    /// resolution (GiQualityFacts::reflectTrace: 1 High, 2 Epic): the rays
-    /// replace the row, which the view does not read.
-    int reflectionTraceRow() const;
     /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
     void dropProbeGridByRays();
     /// THE LIGHTING SERIAL the gather's settled history counts from
@@ -6417,6 +6410,9 @@ private:
     /// one — a movable lamp never stales the probe grid, so nothing else sees
     /// it), and a light leaving the scene. Monotonic; only ever compared.
     unsigned long long mGiLightWriteSerial = 0;
+    /// The chain's at-rest light ticks that landed an injection (runChainTick) —
+    /// folded into the surface cache's indirect signature.
+    unsigned long long mGiRestTicks = 0;
     /// Whether the last full refresh took the chain's dirty path (G1) rather than
     /// a from-scratch build. Reported by giStatus; cleared by every such build.
     bool mGiReusedLastRefresh = false;

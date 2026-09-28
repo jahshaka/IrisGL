@@ -2027,6 +2027,7 @@ void OgreScene::updateSurfaceCache() {
             sig *= 1099511628211ull;
         };
         foldI((unsigned long long)mGiChainSettles);
+        foldI(mGiRestTicks);
         // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
         // injection at all: noteEnvironmentChanged hands the new sky to every
         // VctLighting at once (applyVctEnvironment) and the pixel reads it the
