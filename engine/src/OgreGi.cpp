@@ -549,8 +549,7 @@ static float probeShapeCellRatio(const Ogre::CubemapProbe *p) {
 // the IBL mip count follows that cube.
 bool OgreScene::probeGridByRays() const {
     if (!giQualityFacts(mGi.quality,
-                        mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
-                        mGi.epicTier)
+                        mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
              .rayReflections)
         return false;
     return rayTracingResolved();
@@ -632,10 +631,6 @@ bool OgreScene::setGiTuning(const GiParams &p) {
         // Component allocates on the first frame it is on and gives everything
         // back on the first frame it is off. Not one voxel is re-injected.
         mGi.gather               = p.gather;
-        // ...and the tier's Epic fact (the gather's density — the tier table's
-        // `epic` column): read by the ray tier each frame, re-sizing the
-        // gather's targets and nothing else.
-        mGi.epicTier             = p.epicTier;
         // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
         // moving it changes nothing at all until something else happens to
         // re-inject, and this file's own header calls a silently ignored slider
@@ -6110,8 +6105,8 @@ void OgreScene::buildPccScout(const Ogre::Aabb &litVolume) {
     // the one place that reaches every scene at once, and it is where Low's 128
     // and Medium's 256 already live.
     //
-    // High AND Epic take this branch: they share GiQuality::High (the tier
-    // table's quality column), which is exactly the pair the decision names.
+    // High AND Epic share the 512 row (giQualityFacts), which is exactly the
+    // pair the decision names.
     //
     // 0 = follow the dial; anything else is the author's, clamped to a sane
     // power of two because Ogre sizes the IBL mip chain from it.

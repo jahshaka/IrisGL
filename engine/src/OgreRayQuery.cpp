@@ -5983,8 +5983,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     // the scene's GI (every view of it then — the eyes, and the mono control an
     // eye screenshot compares with them — gathers at the headset's density).
     in.facts = giQualityFacts(scene->giParams().quality,
-                              scene->mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
-                              scene->giParams().epicTier)
+                              scene->mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                    .gather;
     in.tuning = scene->gatherTuning();
     in.restKey = scene->gatherRestKey();
@@ -6493,7 +6492,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     case SunContactResolution::Full: divisor = 1u; break;
     case SunContactResolution::Half: divisor = 2u; break;
     case SunContactResolution::Auto:
-    default: divisor = scene->giParams().quality == GiQuality::High ? 1u : 2u; break;
+    default: divisor = scene->giParams().quality >= GiQuality::High ? 1u : 2u; break;
     }
     // CEILING, so every pixel's `iFragCoord / divisor` lands inside the texture.
     const unsigned w = (fullW + divisor - 1u) / divisor, h = (fullH + divisor - 1u) / divisor;
@@ -8009,8 +8008,7 @@ bool OgreScene::probeGatherWanted() const {
     default:
         if (mGi.mode == GiMode::Off) return false;
         if (!giQualityFacts(mGi.quality,
-                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
-                            mGi.epicTier)
+                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                  .gather.on)
             return false;
         break;

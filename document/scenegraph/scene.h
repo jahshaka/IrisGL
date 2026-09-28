@@ -185,11 +185,14 @@ enum class GiMode : int
 	VCT_PCC_HYBRID
 };
 
+/// The Photon tier's engine row (jahshaka::engine::GiQuality): Epic is a row
+/// of its own, not a flag on High (D4-PHOTON-TIERS).
 enum class GiQuality : int
 {
 	LOW = 0,
 	MEDIUM,
-	HIGH
+	HIGH,
+	EPIC
 };
 
 /// THE ANALYTIC ("realistic") SKY's parameters — the ENGINE's own, since

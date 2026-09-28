@@ -2193,9 +2193,11 @@ enum class GiMode {
     VctPccHybrid        ///< VCT plus parallax-corrected cubemap probes: probe reflections
                         ///< near geometry, cone-traced reflections far from it
 };
-/// Coarse quality dial; each backend maps it to its own knobs (VPL/ray budget,
-/// voxel resolution, probe grid).
-enum class GiQuality { Low, Medium, High };
+/// THE PHOTON TIER, as the engine sees it: one row of `giQualityFacts` per value.
+/// Epic is a row of its own (D4-PHOTON-TIERS) — it used to ride on High through a
+/// separate `epicTier` flag, a second channel for one fact. Epic's facts are High's
+/// plus four times the gather's probes; the bounce count is the document's own row.
+enum class GiQuality { Low, Medium, High, Epic };
 
 /// A three-state knob whose default answer is "whatever the quality dial says".
 /// Used by the hybrid's two expensive probe-capture options
@@ -2557,13 +2559,6 @@ struct GiParams {
     /// again to turn a compute dispatch on -- which also made every A/B arm of
     /// every suite compare ACROSS a GI rebuild (the lead's read).
     GiToggle  gather = GiToggle::Auto;
-    /// THE DOCUMENT'S TIER IS EPIC — the one fact of the Studio's tier table the
-    /// three-valued `quality` cannot carry (Epic shares High's rows). The tier
-    /// table reads it for the gather's density alone (`giQualityFacts`'s `epic`:
-    /// four times the probes); PHOTON-TIERS-1 replaces it with a GiQuality. Per
-    /// frame, like `gather` (`giTuningEqual`): it re-sizes the gather's targets
-    /// and rebuilds nothing.
-    bool      epicTier = false;
     // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------
     //
     // WHY THEY LIVE ON GiParams AND NOT ON A STRUCT OF THEIR OWN: the cache is
@@ -2646,7 +2641,7 @@ struct GiParams {
                // with nothing torn down — and a host that only pushed on
                // `operator==` would swallow a radius change entirely, which is
                // the defect this line exists to prevent.
-               gather == o.gather && epicTier == o.epicTier &&
+               gather == o.gather &&
                cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
                cardResidencyRadius == o.cardResidencyRadius;
     }
@@ -2856,9 +2851,8 @@ struct GiQualityFacts {
     /// row; Low doubles it and High halves it. The honest floor — the tolerance
     /// below which the triangle saving falls under measurement — is A1's
     /// draw-call/vertex-bound instrument's to fix, and until it has, 0.5 is a
-    /// claim about the eye and not about the renderer. Epic shares High's row
-    /// because `GiQuality` is three-valued (it is the RESOLUTION dial; Epic
-    /// changes no resolution) and the design gives the two the same tolerance.
+    /// claim about the eye and not about the renderer. Epic shares High's row:
+    /// Epic changes no resolution, and the design gives the two the same tolerance.
     float    pixelTolerance = 1.0f;
     // ---- THE GATHER ROW (PHOTON-GATHER-1d) -----------------------------------
     /// The screen-probe gather at this tier (GiGatherFacts says what and why).
@@ -2886,12 +2880,9 @@ struct GiQualityFacts {
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
 /// with it. `profile` picks the column (see GiViewProfile for the measurement
 /// behind the VR one).
-/// `epic` is the document's EPIC tier (GiParams::epicTier), which the
-/// three-valued `GiQuality` cannot name: Epic shares High's rows except the
-/// gather's density (below) — until PHOTON-TIERS-1 makes Epic a GiQuality.
+/// Epic is High's rows plus the gather's density (below).
 inline GiQualityFacts giQualityFacts(GiQuality quality,
-                                     GiViewProfile profile = GiViewProfile::Desktop,
-                                     bool epic = false)
+                                     GiViewProfile profile = GiViewProfile::Desktop)
 {
     GiQualityFacts f;
     switch (quality) {
@@ -2921,6 +2912,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.gather.on = false;            // Low keeps the cone diffuse (T-A)
         break;
     case GiQuality::High:
+    case GiQuality::Epic:
         f.cascades[0] = {  5.0f, 128, 0.0f };
         f.cascades[1] = { 10.0f, 128, 0.0f };
         f.cascades[2] = { 15.0f,  64, 0.0f };
@@ -2959,7 +2951,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
     // ---- THE EPIC TIER'S GATHER: FOUR TIMES THE PROBES -----------------------
     // Keyed on the TIER, never on the view's SSR row (GA-TIERROW): the SSR row
     // is the reflections' own and stays what it is.
-    if (epic && f.gather.on) f.gather.stride = 8u;
+    if (quality == GiQuality::Epic && f.gather.on) f.gather.stride = 8u;
     // ---- THE VR COLUMN (GiViewProfile, above) ------------------------------
     // ONE transform over the desktop rows, so the two columns cannot drift: the
     // middle cascade goes and the outermost steps twice as far. `stepCells` on
@@ -3437,7 +3429,7 @@ constexpr float kSunContactMinRange = 0.05f;
 constexpr float kSunContactMaxRange = 50.0f;
 
 /// The job's resolution. `Auto` follows the tier: HALF at the Low and Medium GI
-/// quality rows (one ray per 2x2 block), FULL at High (Epic is a High row).
+/// quality rows (one ray per 2x2 block), FULL at High and Epic.
 enum class SunContactResolution { Auto, Full, Half };
 
 /// The project's row (pushed by the host from the document, like the ray row).
