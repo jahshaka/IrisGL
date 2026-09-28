@@ -1172,6 +1172,9 @@ private:
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
     struct MaterialSync;
     void syncTextures(Entry &e, const MaterialSync &ms);
+    /// The sync of a mesh node with NO material: the default surface's
+    /// parameters, no texture (NULL-MATERIAL-SYNC-1).
+    static const MaterialSync &defaultMaterialSync();
     jahshaka::engine::TextureId textureFor(const QString &path, bool srgb);
     /// The reflection SLOT takes a cubemap, so its bind cannot go through
     /// textureFor: the six faces are built here (from the document texture's
