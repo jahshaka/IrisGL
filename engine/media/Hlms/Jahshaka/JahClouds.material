@@ -163,6 +163,12 @@ material Jahshaka/CloudBake
 				tex_address_mode	wrap
 				filtering			bilinear
 			}
+			// The weather map scales the deck's coverage as it scales the clouds'.
+			texture_unit cloudWeather
+			{
+				tex_address_mode	wrap
+				filtering			bilinear
+			}
 		}
 	}
 }

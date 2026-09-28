@@ -28,11 +28,13 @@
 #version ogre_glsl_ver_330
 
 vulkan_layout( ogre_t0 ) uniform texture2D cloudBlurred;
+vulkan_layout( ogre_t1 ) uniform texture2D cloudWeather;
 vulkan( layout( ogre_s0 ) uniform sampler cloudBlurredSampler );
+vulkan( layout( ogre_s1 ) uniform sampler weatherSampler );
 
 vulkan( layout( ogre_P0 ) uniform Params { )
 	// x = coverage 0..1, y = the optical depth of a full column (density x the
-	// layer's constant), z unused, w = the tile in km
+	// layer's constant), z = 1 with a weather map, 0 without, w = the tile in km
 	uniform vec4 bakeParams;
 vulkan( }; )
 
@@ -50,7 +52,12 @@ out float fragColour;
 void main()
 {
 	const vec2 uv = inPs.uv0;
-	const float coverage = clamp( bakeParams.x, 0.0, 1.0 );
+	// THE WEATHER MAP SCALES THE COVERAGE HERE TOO (the footprint pass applies it
+	// to the clouds; the deck below is this pass's own): a black region of the map
+	// is clear sky at any dial, the deck included.
+	const float weatherMap = bakeParams.z > 0.0
+		? texture( vkSampler2D( cloudWeather, weatherSampler ), uv ).x : 1.0;
+	const float coverage = clamp( bakeParams.x * weatherMap, 0.0, 1.0 );
 	if( coverage <= 0.0 )
 	{
 		fragColour = 0.0;

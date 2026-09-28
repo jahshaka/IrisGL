@@ -2246,8 +2246,9 @@ void OgreScene::bakeCloudField() {
         if (weather) waitForTextureResident(weather);
         // No map: the white texel stands in for the unit (never read —
         // bakeParams.z is 0), because an unbound unit is not a thing a pass may have.
-        if (Ogre::TextureUnitState *tu = shape->getTextureUnitState("cloudWeather"))
-            tu->setTexture(weather ? weather : mCloudWeatherNone);
+        for (Ogre::Pass *p : { shape, bake })
+            if (Ogre::TextureUnitState *tu = p->getTextureUnitState("cloudWeather"))
+                tu->setTexture(weather ? weather : mCloudWeatherNone);
         const Ogre::Vector4 params(std::max(0.0f, std::min(1.0f, c.coverage)),
                                    std::max(0.0f, c.density) * kCloudTauFull,
                                    weather ? 1.0f : 0.0f, kCloudTileMetres / 1000.0f);

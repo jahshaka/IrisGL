@@ -128,6 +128,7 @@ fragment_program Jahshaka/CloudBake_ps_GLSL glsl
 	default_params
 	{
 		param_named cloudBlurred int 0
+		param_named cloudWeather int 1
 	}
 }
 fragment_program Jahshaka/CloudBake_ps_VK glslvk

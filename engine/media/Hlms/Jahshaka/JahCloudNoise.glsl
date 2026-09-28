@@ -2,7 +2,8 @@
 // fixed-seed, TILING lattices the field is built from, included by the shape
 // pass (JahCloudShape_ps.glsl) and the final bake (JahCloudBake_ps.glsl).
 // Integer hashes on lattices whose periods divide the tile: the field tiles
-// exactly and every run on every machine bakes the same sky.
+// exactly and the same box bakes the same sky every run (the gradients pass
+// through the GPU's sin and cos: another vendor may differ in the last bits).
 
 uint jahHash( uint x, uint y, uint seed )
 {
