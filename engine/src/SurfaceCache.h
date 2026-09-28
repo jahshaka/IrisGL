@@ -169,9 +169,6 @@ struct CardRec {
     /// ...and its INDIRECT half: stale (captured since, or the chain
     /// re-injected), present at all in the cached layer, and when last marched.
     bool relightIndirect = false;
-    /// The next capture changes the SURFACE (a new rect, a material), not only
-    /// the shadow term — so it re-marches the indirect too.
-    bool surfaceStale = false;
     bool indirectValid = false;
     unsigned long long lastIndirect = 0ull;
     /// THE MOVERS' TERM (PHOTON-CARDS-4): the card's rect in the mover-visibility

@@ -771,7 +771,6 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
                     return true;
                 }
                 r.queued = true;
-                r.surfaceStale = true;   // a new rect: its indirect has never been marched
                 r.lastUsed = mFrame;
                 r.lastUpdated = 0ull;
                 mCards.push_back(r);
@@ -863,7 +862,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         if (inst.material != cand.material) {
             inst.material = cand.material;
             for (unsigned c = 0; c < inst.cardCount; ++c)
-                mCards[inst.firstCard + c].queued = mCards[inst.firstCard + c].surfaceStale = true;
+                mCards[inst.firstCard + c].queued = true;
             ++mInvalidMaterial;
         }
     }
@@ -1156,21 +1155,16 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
         mIndirectMovingLastFrame = false;
     }
     if (!mRadiance) return;
-    // The cards captured THIS frame: their direct half is stale. Their
-    // INDIRECT half is stale only when the capture changed the SURFACE — a new
-    // rect, or a material (the kD, the normal, the roughness the march and its
-    // lobe read). A capture a light write asked for changed the shadow term
-    // alone, so the cached indirect stands (a dragged light recaptures every
-    // frame and must not re-march against voxels that did not move).
+    // The cards captured THIS frame: both halves are stale. Every capture
+    // changes the SURFACE — a new rect or a material (the kD, the normal, the
+    // roughness the march and its lobe read); no light re-queues a capture
+    // (ATOM-S3-CARDCAP) — so its cached indirect is re-marched.
     for (unsigned idx : mBatch) {
         CardRec &c = mCards[idx];
         c.relight = true;
-        if (c.surfaceStale) {
-            c.relightIndirect = true;
-            if (c.indirectValid) mTableDirty = true;   // the ray read falls back to the voxels
-            c.indirectValid = false;
-            c.surfaceStale = false;
-        }
+        c.relightIndirect = true;
+        if (c.indirectValid) mTableDirty = true;   // the ray read falls back to the voxels
+        c.indirectValid = false;
     }
     const auto ready = [this](unsigned i) {
         const CardRec &c = mCards[i];
@@ -1597,8 +1591,10 @@ void SurfaceCache::relightCards() {
 // its change stales the still term of the cards of its old and new footprints —
 // a re-TRACE, never a recapture (the capture holds no light quantity).
 namespace {
-/// The footprint's margin, metres: a caster's AABB is conservative already; the
-/// margin covers the lift and a texel on the boundary.
+/// The CASTER's footprint margin, metres: a caster's AABB is conservative already;
+/// this covers a PCF-free edge on the boundary. The RECEIVER's side carries the
+/// lift: a card's footprint is grown by its own still-trace lift plus one texel
+/// (cardFootprint's `margin`, sunLiftOf) — the ray starts that far off the card.
 constexpr float kFootprintMargin = 0.05f;
 /// THE STILL TRACE'S LIFT, in footprints (rq_card_movers.comp's head): the origin
 /// moves off the receiver along its normal by this many of the larger of the
@@ -1644,13 +1640,19 @@ Footprint boxFootprint(const SunFrame &f, const Ogre::Vector3 &mn, const Ogre::V
     p.b0 -= kFootprintMargin; p.b1 += kFootprintMargin;
     return p;
 }
-Footprint cardFootprint(const SunFrame &f, const CardRec &card) {
+/// `margin`: the card's still-trace lift plus one texel — a sun ray starts up to
+/// that far off the card's box, so its footprint grows by it (by construction,
+/// whatever the lift measures: 0.08-0.13 m in the suites' 192-px views).
+Footprint cardFootprint(const SunFrame &f, const CardRec &card, float margin) {
     Ogre::Vector3 c[8];
     for (int i = 0; i < 8; ++i)
         c[i] = card.centre + card.u * ((i & 1) ? card.halfU : -card.halfU) +
                card.v * ((i & 2) ? card.halfV : -card.halfV) +
                card.d * ((i & 4) ? card.halfDepth : -card.halfDepth);
-    return project(f, c, false);   // .top = the card's LOWEST point along the sun
+    Footprint p = project(f, c, false);   // .top = the card's LOWEST point along the sun
+    p.a0 -= margin; p.a1 += margin;
+    p.b0 -= margin; p.b1 += margin;
+    return p;
 }
 bool shades(const Footprint &caster, const Footprint &card) {
     return caster.a0 <= card.a1 && card.a0 <= caster.a1 && caster.b0 <= card.b1 &&
@@ -1705,7 +1707,11 @@ void SurfaceCache::traceSun() {
     const auto cardFpAt = [&](unsigned i) -> const Footprint & {
         if (cardFp.empty()) {
             cardFp.resize(mCards.size());
-            for (size_t k = 0; k < mCards.size(); ++k) cardFp[k] = cardFootprint(sf, mCards[k]);
+            for (size_t k = 0; k < mCards.size(); ++k) {
+                const CardRec &c = mCards[k];
+                const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
+                cardFp[k] = cardFootprint(sf, c, sunLiftOf(c) + texel);
+            }
         }
         return cardFp[i];
     };
@@ -2170,7 +2176,7 @@ void SurfaceCache::noteMaterialChanged(MaterialId material) {
     for (const InstanceRec &inst : mInstances) {
         if (!inst.cardCount || inst.material != material) continue;
         for (unsigned c = 0; c < inst.cardCount; ++c)
-            mCards[inst.firstCard + c].queued = mCards[inst.firstCard + c].surfaceStale = true;
+            mCards[inst.firstCard + c].queued = true;
         any = true;
     }
     if (any) ++mInvalidMaterial;
