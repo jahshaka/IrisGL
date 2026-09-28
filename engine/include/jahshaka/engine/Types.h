@@ -2197,9 +2197,11 @@ enum class GiMode {
     VctPccHybrid        ///< VCT plus parallax-corrected cubemap probes: probe reflections
                         ///< near geometry, cone-traced reflections far from it
 };
-/// Coarse quality dial; each backend maps it to its own knobs (VPL/ray budget,
-/// voxel resolution, probe grid).
-enum class GiQuality { Low, Medium, High };
+/// THE PHOTON TIER, as the engine sees it: one row of `giQualityFacts` per value.
+/// Epic is a row of its own (D4-PHOTON-TIERS) — it used to ride on High through a
+/// separate `epicTier` flag, a second channel for one fact. Epic's facts are High's
+/// plus four times the gather's probes; the bounce count is the document's own row.
+enum class GiQuality { Low, Medium, High, Epic };
 
 /// A three-state knob whose default answer is "whatever the quality dial says".
 /// Used by the hybrid's two expensive probe-capture options
@@ -2269,34 +2271,25 @@ enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, 
 struct GiParams {
     GiMode    mode    = GiMode::Off;
     GiQuality quality = GiQuality::Medium;
-    /// THE LIT VOLUME IS THE RENDERER'S, AND THESE THREE ARE TEST LEVERS
-    /// (owner decision D8, 2026-09-13; PHOTON_SPEC §10's E2 row).
+    /// THE REFLECTION-PROBE GRID'S PLACEMENT REGION — TEST LEVERS (owner
+    /// decision D8, 2026-09-13; renamed by D4-PHOTON-TIERS). The region is where a
+    /// probe grid is PLACED on a machine that does not trace its reflections (a
+    /// pinned hybrid, the rays Off, no ray hardware); it is a placement heuristic
+    /// pending A9's camera-centred window, NEVER a lighting volume — the voxels
+    /// are the camera's cascade chain and know nothing of it.
     ///
-    /// Nothing a user can reach writes them: the document carries no bounds at
-    /// all, `world.gi` refuses `boundsMin`/`boundsMax`/`autoBoundsMax` BY NAME,
-    /// the World panel's rows and its Fit Bounds button are deleted, and
-    /// SceneMirror never touches them. They survive for one reason — roughly
-    /// fifteen engine suites PIN a volume so that a pixel assertion is about the
-    /// thing it names and not about where the automatic fit happened to land —
-    /// and they carry `test` in their names so that reading this struct cannot
-    /// suggest otherwise. They stay inside `operator==` on purpose: a test that
-    /// moves the pinned volume must get a rebuild, like any other configuration.
+    /// Nothing a user can reach writes them: the document carries no region and
+    /// SceneMirror never touches them. Suites PIN a region so that a probe
+    /// assertion is about the thing it names and not about where the automatic
+    /// fit landed. Inside `operator==` on purpose: a moved pin is a re-placement.
     ///
-    /// `testBoundsMin == testBoundsMax` (the default) is "no pin": the backend
-    /// fits the volume to the scene's lit geometry, under `kAutoGiBoundsMax`.
-    Vec3      testBoundsMin, testBoundsMax;
-    /// The ceiling on an AUTOMATIC fit, in metres — a test lever over
-    /// `kAutoGiBoundsMax` (OgreGi.cpp), which is the shipped 64 m and the only
-    /// value anything outside a suite has ever used. Negative (the default) is
-    /// "the engine's own"; 0 disables the ceiling; anything else replaces it.
-    /// The rationale for 64 m — and for why the ceiling is in METRES rather
-    /// than metres-per-voxel, which would shrink the lit world as the quality
-    /// dial goes down — is at the constant.
-    float     testAutoBoundsMax = -1.0f;
-    /// The scene-fitted volume's resolution along its longest side - a test lever over the
-    /// tier's own (`giQualityFacts(...).voxelResolution`), for measuring the resolution as a
-    /// dial against its cost in one process. 0 (the default) is the tier's.
-    unsigned  testVoxelResolution = 0u;
+    /// `testProbeRegionMin == testProbeRegionMax` (the default) is "no pin": the
+    /// engine fits the region to the scene's content, under `kProbeGridFitMax`.
+    Vec3      testProbeRegionMin, testProbeRegionMax;
+    /// The ceiling on the AUTOMATIC probe-region fit, in metres — a test lever
+    /// over `kProbeGridFitMax` (OgreGi.cpp, 64 m). Negative (the default) is the
+    /// engine's own; 0 disables the ceiling; anything else replaces it.
+    float     testProbeGridFitMax = -1.0f;
     /// Total light bounces, 1..4 (1 = a single indirect bounce).
     int       numBounces = 1;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
@@ -2404,12 +2397,13 @@ struct GiParams {
     /// is the fallback cage for a pixel no probe answered, and the gather is the
     /// diffuse. At Low it is the diffuse.
     ///
-    /// GiToggle::Auto means "let the quality tier decide", and the deciding
-    /// happens DOCUMENT-SIDE: the Photon tier (GI_UNIFIED P2) writes a concrete
-    /// on/off through into the document field the mirror pushes here, so Auto
-    /// reaching the engine means "no tier was ever applied to this scene" and
-    /// resolves to OFF — which is what makes every already-serialized scene
-    /// render exactly as it did before this feature existed.
+    /// GiToggle::Auto means "the tier's": it resolves through the ONE tier table
+    /// (`giQualityFacts(...).fieldDefault` — on at every quality, the owner's
+    /// option (b)) exactly as probeHdr, probeShadows, gather and cards resolve
+    /// theirs (D4-PHOTON-TIERS deleted the "Auto is OFF so old scenes render as
+    /// they did" arm). The struct's own default is OFF: a bare GiParams asks for
+    /// no field, the way it asks for GI Off; a document's untouched field (-1)
+    /// arrives as Auto and gets the tier's answer.
     ///
     /// Ignored outside GiMode::Vct / GiMode::VctPccHybrid: the field is fed by
     /// VctLighting, so there is nothing to build without a voxel volume. A
@@ -2417,7 +2411,7 @@ struct GiParams {
     /// shader's ambient gate (`@property(vct_num_probes) if(vctSpecular.w==0)`)
     /// disappears and the sky/flat ambient would be counted twice on top of the
     /// field's own diffuse (P0 spike §5, measured).
-    GiToggle  ddgi = GiToggle::Auto;
+    GiToggle  ddgi = GiToggle::Off;
 
     // ---- PHOTON: camera-centred voxel cascades (PHOTON_SPEC P0) -------------
 
@@ -2442,16 +2436,9 @@ struct GiParams {
                    stepCells == o.stepCells;
         }
     };
-    /// THE PHOTON SWITCH. False (the default) is the single scene-fitted voxel
-    /// volume this engine has always built: one box around the content, and
-    /// nothing outside it bounces. True builds N camera-centred cascades
-    /// instead, chained through `VctLighting::addCascade`, so the bounce
-    /// follows the camera and what escapes the outermost cascade reads the
-    /// ambient (the Sky Light) rather than a wall of darkness.
-    ///
-    /// Only meaningful in `Vct` and `VctPccHybrid`. It changes NOTHING about
-    /// the picture when off — the arm it selects is chosen in `rebuildVct`.
-    bool      cascades = false;
+    /// (THE VOXELS ARE ALWAYS THE CAMERA-CENTRED CHAIN. The single scene-fitted
+    /// volume and its switch `cascades` are deleted — D4-PHOTON-TIERS, the
+    /// owner's law: no fixed GI volume, no "room" in any lighting definition.)
     /// How many cascades to build, 1..8. 0 means "the table below decides", and
     /// when the table is empty too, the engine's own tier table does.
     int       cascadeCount = 0;
@@ -2525,11 +2512,6 @@ struct GiParams {
     /// that the drag costs the voxels two re-voxelisations instead of one per
     /// frame. THE PICTURE AT REST IS IDENTICAL either way, which gi.drag_mover
     /// asserts by rendering it under both rules.
-    ///
-    /// CASCADES ONLY. The single-volume arm re-voxelises nothing during a drag
-    /// (its answer waits for the settle by construction), so there is nothing
-    /// there for this to save, and what that arm should do about the ghost it
-    /// keeps meanwhile is its own question.
     bool      dragMoverChannel = false;
 
     /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md). The diffuse
@@ -2561,13 +2543,6 @@ struct GiParams {
     /// again to turn a compute dispatch on -- which also made every A/B arm of
     /// every suite compare ACROSS a GI rebuild (the lead's read).
     GiToggle  gather = GiToggle::Auto;
-    /// THE DOCUMENT'S TIER IS EPIC — the one fact of the Studio's tier table the
-    /// three-valued `quality` cannot carry (Epic shares High's rows). The tier
-    /// table reads it for the gather's density alone (`giQualityFacts`'s `epic`:
-    /// four times the probes); PHOTON-TIERS-1 replaces it with a GiQuality. Per
-    /// frame, like `gather` (`giTuningEqual`): it re-sizes the gather's targets
-    /// and rebuilds nothing.
-    bool      epicTier = false;
     // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------
     //
     // WHY THEY LIVE ON GiParams AND NOT ON A STRUCT OF THEIR OWN: the cache is
@@ -2623,8 +2598,7 @@ struct GiParams {
     /// for the tuning.
     bool operator==(const GiParams &o) const {
         return mode == o.mode && quality == o.quality &&
-               numBounces == o.numBounces && testAutoBoundsMax == o.testAutoBoundsMax &&
-               testVoxelResolution == o.testVoxelResolution &&
+               numBounces == o.numBounces && testProbeGridFitMax == o.testProbeGridFitMax &&
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
                probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
@@ -2637,8 +2611,9 @@ struct GiParams {
                cascadeVoxelLod == o.cascadeVoxelLod &&
                dragMoverChannel == o.dragMoverChannel &&
                ddgi == o.ddgi &&
-               testBoundsMin == o.testBoundsMin && testBoundsMax == o.testBoundsMax &&
-               cascades == o.cascades && cascadeCount == o.cascadeCount &&
+               testProbeRegionMin == o.testProbeRegionMin &&
+               testProbeRegionMax == o.testProbeRegionMax &&
+               cascadeCount == o.cascadeCount &&
                cascadeInstanceCap == o.cascadeInstanceCap &&
                cascadeSetEqual(o);
     }
@@ -2651,7 +2626,7 @@ struct GiParams {
                // with nothing torn down — and a host that only pushed on
                // `operator==` would swallow a radius change entirely, which is
                // the defect this line exists to prevent.
-               gather == o.gather && epicTier == o.epicTier &&
+               gather == o.gather &&
                cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
                cardResidencyRadius == o.cardResidencyRadius;
     }
@@ -2789,9 +2764,6 @@ struct GiQualityFacts {
     GiParams::GiCascadeDesc cascades[4];
     /// How many entries of `cascades` are in use.
     int   cascadeCount = 0;
-    /// The SINGLE scene-fitted volume's resolution per axis — the arm used when
-    /// the chain is off (`GiParams::cascades == false`).
-    unsigned voxelResolution = 64u;
     /// One reflection-probe cube face, in pixels, when the scene pins no size.
     unsigned probeFaceSize = 256u;
     /// What `GiToggle::Auto` resolves to for the two expensive probe options.
@@ -2855,9 +2827,8 @@ struct GiQualityFacts {
     /// row; Low doubles it and High halves it. The honest floor — the tolerance
     /// below which the triangle saving falls under measurement — is A1's
     /// draw-call/vertex-bound instrument's to fix, and until it has, 0.5 is a
-    /// claim about the eye and not about the renderer. Epic shares High's row
-    /// because `GiQuality` is three-valued (it is the RESOLUTION dial; Epic
-    /// changes no resolution) and the design gives the two the same tolerance.
+    /// claim about the eye and not about the renderer. Epic shares High's row:
+    /// Epic changes no resolution, and the design gives the two the same tolerance.
     float    pixelTolerance = 1.0f;
     // ---- THE GATHER ROW (PHOTON-GATHER-1d) -----------------------------------
     /// The screen-probe gather at this tier (GiGatherFacts says what and why).
@@ -2880,17 +2851,75 @@ struct GiQualityFacts {
     /// 256 px depth buffer 262,144 — and the
     /// open's placement, 713-799 ms of the UI thread.
     bool rayReflections = false;
+    /// THE TRACE'S RESOLUTION WHERE THE RAYS ARE THE REFLECTION (D4-PHOTON-TIERS,
+    /// the SSR row's meaning at a ray tier): 1 = one reflection ray per 2x2 block
+    /// (High), 2 = every pixel (Epic), 0 where `rayReflections` is false. At a
+    /// ray tier the view's reflection trace reads THIS, never the document's SSR
+    /// row — the rays replace the screen march as the reflection, and the row
+    /// reads "traced" (worldmodes). The values are the SSR row's own High/Epic
+    /// columns, so the shipped pictures do not move.
+    int  reflectTrace = 0;
+    /// THE IRRADIANCE FIELD, what `GiParams::ddgi`'s Auto resolves to: ON at every
+    /// quality (owner option (b), 2026-09-09 — the field is the one diffuse arm
+    /// that is right in open and sealed scenes alike). The Studio tier table's
+    /// field column is READ from here (worldmodes::photonDdgi).
+    bool fieldDefault = true;
+    /// THE REFLECTION-PROBE GRID'S VRAM BUDGET (PCC-BUDGET-1), in bytes, for the
+    /// WHOLE grid: the probe array (6 faces x mips per probe), each probe's
+    /// shadow targets when its captures are shadowed, and the grid's fixed
+    /// capture + IBL cubes (`giProbeGridBytes`). The probe COUNT is derived from
+    /// it (`giProbeGridBudgetCount`), never the other way round: a placement that
+    /// keeps more probes than fit keeps the ones that see the most geometry and
+    /// logs the cut. Only where a grid is built at all — a tier whose reflections
+    /// are traced on this machine builds none (`rayReflections`).
+    /// MEASURED (PHOTON-F12-PCC, Grand Showroom 2 at Epic): 32 probes at 512 px
+    /// HDR and shadowed = 838,987,760 B (array 536,739,840 + shadow targets
+    /// 268,435,456 + cubes 33,550,320 + the placement's depth 262,144), i.e.
+    /// 25.2 MB a probe plus 33.8 MB fixed — the arithmetic below reproduces it to
+    /// the byte. The budgets: Epic 1 GiB (41 probes at its 512 px HDR shadowed —
+    /// the measured 32-probe Showroom grid fits), High 512 MiB (19), Medium
+    /// 128 MiB (61 at 256 px), Low 64 MiB (125 at 128 px). PROVISIONAL: the
+    /// per-tier numbers are the lead's to confirm; the arithmetic is not.
+    unsigned long long probeGridBudgetBytes = 128ull << 20;
 };
+
+/// THE BYTES A REFLECTION-PROBE GRID HOLDS (PCC-BUDGET-1): `probes` probes at
+/// `faceSize` px, RGBA16F when `hdr` else RGBA8, each with 8 MiB of shadow
+/// targets when `shadowed`, plus the grid's capture and IBL cubes and the
+/// placement's 256 px depth. A probe's array slice carries its mips down to
+/// 16x16 (the pin's IBL chain); the two cubes carry theirs to 1x1 between them
+/// (85 more texels a face). This reproduces the F12-PCC measurement EXACTLY:
+/// 32 probes at 512 px HDR shadowed = 838,987,760 B.
+inline unsigned long long giProbeGridBytes(unsigned faceSize, bool hdr, bool shadowed,
+                                           unsigned probes)
+{
+    const unsigned long long bpp = hdr ? 8ull : 4ull;
+    unsigned long long texels = 0ull;
+    for (unsigned r = faceSize; r >= 16u; r >>= 1u) texels += (unsigned long long)r * r;
+    const unsigned long long slice = 6ull * texels * bpp;
+    const unsigned long long shadow = shadowed ? (8ull << 20) : 0ull;
+    const unsigned long long fixed = 2ull * slice + 6ull * bpp * 85ull + 262144ull;
+    return fixed + (unsigned long long)probes * (slice + shadow);
+}
+
+/// How many probes a grid at this face size / format / shadowing may keep under
+/// `budget` bytes (at least 1: a budget smaller than one probe still keeps the
+/// probe that sees the most, rather than silently building nothing).
+inline unsigned giProbeGridBudgetCount(unsigned long long budget, unsigned faceSize, bool hdr,
+                                       bool shadowed)
+{
+    const unsigned long long fixed = giProbeGridBytes(faceSize, hdr, shadowed, 0u);
+    const unsigned long long each = giProbeGridBytes(faceSize, hdr, shadowed, 1u) - fixed;
+    if (budget <= fixed || !each) return 1u;
+    return unsigned(std::max<unsigned long long>(1ull, (budget - fixed) / each));
+}
 
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
 /// with it. `profile` picks the column (see GiViewProfile for the measurement
 /// behind the VR one).
-/// `epic` is the document's EPIC tier (GiParams::epicTier), which the
-/// three-valued `GiQuality` cannot name: Epic shares High's rows except the
-/// gather's density (below) — until PHOTON-TIERS-1 makes Epic a GiQuality.
+/// Epic is High's rows plus the gather's density (below).
 inline GiQualityFacts giQualityFacts(GiQuality quality,
-                                     GiViewProfile profile = GiViewProfile::Desktop,
-                                     bool epic = false)
+                                     GiViewProfile profile = GiViewProfile::Desktop)
 {
     GiQualityFacts f;
     switch (quality) {
@@ -2903,14 +2932,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[0] = {  5.0f, 64, 0.0f };
         f.cascades[1] = { 20.0f, 64, 0.0f };
         f.cascadeCount = 2;
-        // THE SCENE-FITTED VOLUME IS 64 TOO (PHOTON-VOXEL-4, the lead's decision): at 32
-        // cells along the longest side a room-sized box has 0.56 m cells, and the field's
-        // wall-foot darkening lands outside its own derived bracket (gi.ddgi_ambient:
-        // 85.0 % against 73.2-83.9); at 64 it lands inside (83.7 % in 76.1-84.0). The
-        // measured cost of the dial, paired in one process (tests/gi/voxel_dial_measure):
-        // the rebuild 0.158 -> 0.220 ms GPU, the store 0.45 -> 3.6 MB, the settle's GI
-        // work 20.9 -> 46.3 ms GPU once, the steady frame +0.005 ms.
-        f.voxelResolution = 64u;
         f.probeFaceSize   = 128u;
         f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
         f.cardResidencyRadius = 15.0f;
@@ -2918,14 +2939,15 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.pixelTolerance = 2.0f;        // the Atom column; see the field
         f.gather.on = false;            // Low keeps the cone diffuse (T-A)
+        f.probeGridBudgetBytes = 64ull << 20;
         break;
     case GiQuality::High:
+    case GiQuality::Epic:
         f.cascades[0] = {  5.0f, 128, 0.0f };
         f.cascades[1] = { 10.0f, 128, 0.0f };
         f.cascades[2] = { 15.0f,  64, 0.0f };
         f.cascades[3] = { 60.0f,  64, 0.0f };
         f.cascadeCount = 4;
-        f.voxelResolution = 128u;
         f.probeFaceSize   = 512u;
         // The two expensive probe options are ON at this tier and only here
         // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
@@ -2938,6 +2960,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
+        f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
+        f.probeGridBudgetBytes = quality == GiQuality::Epic ? (1024ull << 20) : (512ull << 20);
         break;
     default:   // Medium: the same reach as High, at its own resolution
         f.cascades[0] = {  5.0f, 64, 0.0f };
@@ -2945,7 +2969,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[2] = { 15.0f, 64, 0.0f };
         f.cascades[3] = { 60.0f, 64, 0.0f };
         f.cascadeCount = 4;
-        f.voxelResolution = 64u;
         f.probeFaceSize   = 256u;
         f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.2 ms
         f.cardResidencyRadius = 30.0f;
@@ -2953,12 +2976,13 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
         f.gather = { true, 16u, 6u, 4u };   // 36 rays a probe (T-A)
+        f.probeGridBudgetBytes = 128ull << 20;
         break;
     }
     // ---- THE EPIC TIER'S GATHER: FOUR TIMES THE PROBES -----------------------
     // Keyed on the TIER, never on the view's SSR row (GA-TIERROW): the SSR row
     // is the reflections' own and stays what it is.
-    if (epic && f.gather.on) f.gather.stride = 8u;
+    if (quality == GiQuality::Epic && f.gather.on) f.gather.stride = 8u;
     // ---- THE VR COLUMN (GiViewProfile, above) ------------------------------
     // ONE transform over the desktop rows, so the two columns cannot drift: the
     // middle cascade goes and the outermost steps twice as far. `stepCells` on
@@ -3436,7 +3460,7 @@ constexpr float kSunContactMinRange = 0.05f;
 constexpr float kSunContactMaxRange = 50.0f;
 
 /// The job's resolution. `Auto` follows the tier: HALF at the Low and Medium GI
-/// quality rows (one ray per 2x2 block), FULL at High (Epic is a High row).
+/// quality rows (one ray per 2x2 block), FULL at High and Epic.
 enum class SunContactResolution { Auto, Full, Half };
 
 /// The project's row (pushed by the host from the document, like the ray row).
@@ -3703,6 +3727,15 @@ struct GiStatus {
     /// clamped grid product (pccProbesX * pccProbesY * pccProbesZ); 0 in every
     /// other mode, and 0 in the hybrid when the probe arm failed to build.
     int    probeCount = 0;
+    /// THE PROBE GRID'S BUDGET (PCC-BUDGET-1): the tier's whole-grid VRAM budget
+    /// in bytes (GiQualityFacts::probeGridBudgetBytes), the probe count it
+    /// allows at the grid's face size / format / shadowing, the bytes the BUILT
+    /// grid holds by the same arithmetic (giProbeGridBytes), and how many kept
+    /// probes the last placement cut to fit. All 0 where no grid is placed.
+    unsigned long long probeGridBudgetBytes = 0;
+    int    probeGridBudgetProbes = 0;
+    unsigned long long probeGridBytes = 0;
+    int    probesOverBudget = 0;
     /// Whether THIS scene's passes sample its probe grid — i.e. whether probe
     /// reflections are actually being drawn in it (the binding is per scene and
     /// per pass: SceneGiBinding). False when the hybrid degraded to plain VCT,
@@ -3710,12 +3743,9 @@ struct GiStatus {
     bool   pccBound = false;
     /// Whether THIS scene's passes sample its VCT lighting.
     bool   vctBound = false;
-    /// The RESOLVED lit volume — what the voxelizer was actually given, after
-    /// the explicit-bounds check, the per-node exclude flag and the extent
-    /// outlier rejection (REFLECTIONS_ADOPTION_SPEC.md P1a). Equal corners mean
-    /// "no volume" (GI off, or nothing to light). This is the only way to see
-    /// what the auto-fit decided: the document's giBounds rows stay at 0,0,0
-    /// for every scene that never pinned them.
+    /// THE LIT VOLUME — the OUTERMOST cascade's box, i.e. where the voxels
+    /// reach around the camera. Equal corners mean "no volume" (GI off, or
+    /// nothing built yet).
     Vec3   boundsMin;
     Vec3   boundsMax;
     /// METRES PER VOXEL of the volume `boundsMin/Max` describe — and UNDER A
@@ -3724,11 +3754,7 @@ struct GiStatus {
     ///
     /// There is no single voxel size under a chain, so this scalar is the
     /// COARSEST one; `cascades[i].cell` is every one of them, and the innermost
-    /// is what the eye is usually looking at. In the single-volume arm it is
-    /// the largest axis divided by the tier's resolution
-    /// (LIGHTING_PIPELINE_AUDIT L4.4), and then it is the whole answer: the
-    /// shipped default project used to report 8.1 (a 1040 m volume at 128^3)
-    /// and reports 0.5 with the automatic ceiling in force. 0 when there is no
+    /// is what the eye is usually looking at. 0 when there is no
     /// volume. It is the number that says whether GI in a scene means anything
     /// at all — a kilometre-wide volume at 128^3 is computing a constant.
     float  voxelMetres = 0.0f;
@@ -3738,6 +3764,14 @@ struct GiStatus {
     /// but the hybrid.
     Vec3   probeRegionMin;
     Vec3   probeRegionMax;
+    /// THE PLACEMENT FIT the probe region was measured from (D4-PHOTON-TIERS): the
+    /// content's world box after the per-node probe-grid exclude flag, the outlier
+    /// trimming and the 64 m ceiling — a PLACEMENT HEURISTIC PENDING A9, never a
+    /// lighting volume. The region above is the scout's answer inside it. Equal
+    /// corners where no probe grid is placed (every tier whose reflections are
+    /// traced on this machine, or GI off).
+    Vec3   probeFitMin;
+    Vec3   probeFitMax;
     /// What the probe captures RESOLVED to (REFLECTIONS_ADOPTION_SPEC P3a/P3b),
     /// as opposed to what GiParams::probeHdr/probeShadows asked for: both are
     /// GiToggle::Auto by default, so the request alone never says what happened,
@@ -3888,16 +3922,13 @@ struct GiStatus {
     /// per side for its own borders; this is the volume it was given). Equal
     /// corners = no field.
     ///
-    /// In the single-volume arm this is the lit volume — the scene's fitted box
-    /// — and it never moves without a rebuild. Under a Photon cascade chain it
-    /// is CASCADE 0's box and it follows that cascade as the camera walks
+    /// It is CASCADE 0's box and it follows that cascade as the camera walks
     /// (PHOTON_SPEC E1), which is the only way to see, from outside, where the
     /// leak-free diffuse actually is.
     Vec3 ifdMin;
     Vec3 ifdMax;
     /// How many times the field has followed cascade 0 since the last build
-    /// (ifdScrolls + ifdReplacements, below): 0 in the single-volume arm and on a
-    /// still camera, one per cascade-0 step while walking. Reset by a build.
+    /// (ifdScrolls + ifdReplacements, below): 0 on a still camera, one per cascade-0 step while walking. Reset by a build.
     unsigned long long ifdFollows = 0;
     /// THE FIELD SCROLLS (PHOTON-WRITER-1): how many probes the LAST follow
     /// integrated in its step frame — the planes that entered the window, not
@@ -4088,8 +4119,9 @@ struct GiStatus {
         /// count), so a non-zero here is a defect, and it is logged critically.
         long long voxelOverflow = 0;
     };
-    /// The live cascade chain, innermost first. Empty unless
-    /// GiParams::cascades built one.
+    /// The live cascade chain, innermost first — the voxels of every Vct and
+    /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera
+    /// (cascadesAwaitingCamera).
     std::vector<CascadeStatus> cascades;
     /// THE FAR-FIELD PROXY, AS APPLIED: whether the cascades are voxelising the
     /// baked LOD levels (`GiParams::cascadeVoxelLod` met with the engine's
@@ -4111,7 +4143,7 @@ struct GiStatus {
     /// the wait is BOUNDED (30 deferrals) so a decode that never completes
     /// cannot park GI: after that the arm is built without them and this reads
     /// false again. The other half of `cascadesAwaitingCamera`'s question —
-    /// "the chain is empty, why?" — and true in the single-volume arm too.
+    /// "the chain is empty, why?".
     bool awaitingVoxelTextures = false;
     /// WHICH COLUMN OF THE TIER TABLE THIS CHAIN WAS BUILT FROM (V1-RIG item 4):
     /// true when the view driving GI is the HEADSET'S, so the chain is the VR
@@ -4130,8 +4162,7 @@ struct GiStatus {
     /// cascade rebuild injects one cascade once, over the radiance it held
     /// where it used to stand, so the chain owes an at-rest injection
     /// afterwards — paid on the first frame the rebuild queue is empty, once
-    /// per burst of rebuilds. Cumulative over the scene's life; 0 in the
-    /// single-volume arm, which has no chain to leave behind.
+    /// per burst of rebuilds. Cumulative over the scene's life.
     long long chainSettles = 0;
     /// THE ONE WRITER (PHOTON-WRITER-1). Every write to a voxel volume's light
     /// goes through one engine function, and a volume is injected AT MOST ONCE

@@ -4871,12 +4871,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
 
     // ---- THE VOXEL CACHE THE HITS ARE SHADED FROM (route A) -----------------
-    // Under a Photon cascade chain each cascade is its OWN VctLighting (they are
-    // chained with addCascade, OgreGi.cpp), innermost first — which is exactly
-    // the order the shader wants: it takes the first volume that contains the
-    // hit, so the finest one that can answer does. In the single-volume arm
-    // there is one. R5 works in both shapes and the cascade flag gates nothing
-    // here.
+    // Each cascade of the Photon chain is its OWN VctLighting (they are chained
+    // with addCascade, OgreGi.cpp), innermost first — which is exactly the order
+    // the shader wants: it takes the first volume that contains the hit, so the
+    // finest one that can answer does.
     Ogre::TextureGpu *vox[kMaxReflectCascades][kRayVoxelKinds] = {};   // kRayVoxelKinds' order
     Ogre::Vector3 voxOrigin[kMaxReflectCascades], voxSize[kMaxReflectCascades],
                   voxCell[kMaxReflectCascades];
@@ -4924,12 +4922,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         }
         ++voxCount;
     };
-    if (!scene->mVctCascades.empty()) {
-        for (const OgreScene::VctCascade &c : scene->mVctCascades)
-            if (c.built) takeVolume(c.lighting, c.voxelizer);
-    } else {
-        takeVolume(scene->mVctLighting, scene->mVctVoxelizer);
-    }
+    for (const OgreScene::VctCascade &c : scene->mVctCascades)
+        if (c.built) takeVolume(c.lighting, c.voxelizer);
     // NO VOXELS IS NOT "NO REFLECTIONS": an escaping ray still reads the sky,
     // and in an open scene that is the whole answer. A HIT with no cache behind
     // it is what the shader declines (see its note) — it hands the pixel back
@@ -5123,14 +5117,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // one the screen-space march gates on since lane SSR-3; the engine only
     // clamps it into the range a reflection means anything in.
     pp.knobs[0] = std::min(std::max(view->chainDesc().reflectionRoughnessCutoff, 0.0f), 1.0f);
-    // THE RAY'S LENGTH. Long enough to cross the lit volume it will be shaded
-    // from — a ray that outruns the cache finds geometry nothing can colour —
-    // and bounded by the camera's own far plane so an open scene's ray reaches
-    // the sky rather than marching the whole world.
-    {
-        float reach = voxCount ? voxSize[voxCount - 1u].length() : 0.0f;
-        pp.knobs[1] = std::min(cam->getFarClipDistance(), std::max(reach, 50.0f));
-    }
+    // THE RAY'S LENGTH: THE ONE REACH RULE (detail::photonRayReach — the gather
+    // reads the same function).
+    pp.knobs[1] = detail::photonRayReach(voxCount ? voxSize[voxCount - 1u].length() : 0.0f,
+                                         cam->getFarClipDistance());
     pp.knobs[2] = float(rv.frame & 0xFFFFu);
     pp.knobs[3] = float(voxCount);
     pp.knobs2[0] = anisotropic ? 1.0f : 0.0f;
@@ -5992,8 +5982,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     // the scene's GI (every view of it then — the eyes, and the mono control an
     // eye screenshot compares with them — gathers at the headset's density).
     in.facts = giQualityFacts(scene->giParams().quality,
-                              scene->mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
-                              scene->giParams().epicTier)
+                              scene->mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                    .gather;
     in.tuning = scene->gatherTuning();
     in.restKey = scene->gatherRestKey();
@@ -6030,12 +6019,8 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             baking > 1e-6f ? lighting->mMultiplier / baking : lighting->mMultiplier;
         ++in.cascadeCount;
     };
-    if (!scene->mVctCascades.empty()) {
-        for (const OgreScene::VctCascade &c : scene->mVctCascades)
-            if (c.built) takeVolume(c.lighting, c.voxelizer);
-    } else {
-        takeVolume(scene->mVctLighting, scene->mVctVoxelizer);
-    }
+    for (const OgreScene::VctCascade &c : scene->mVctCascades)
+        if (c.built) takeVolume(c.lighting, c.voxelizer);
     {
         // THE ONE ENVIRONMENT (PHOTON-ENV-1; OgreScene::rayEnvironment).
         const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();
@@ -6502,7 +6487,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     case SunContactResolution::Full: divisor = 1u; break;
     case SunContactResolution::Half: divisor = 2u; break;
     case SunContactResolution::Auto:
-    default: divisor = scene->giParams().quality == GiQuality::High ? 1u : 2u; break;
+    default: divisor = scene->giParams().quality >= GiQuality::High ? 1u : 2u; break;
     }
     // CEILING, so every pixel's `iFragCoord / divisor` lands inside the texture.
     const unsigned w = (fullW + divisor - 1u) / divisor, h = (fullH + divisor - 1u) / divisor;
@@ -8065,8 +8050,7 @@ bool OgreScene::probeGatherWanted() const {
     default:
         if (mGi.mode == GiMode::Off) return false;
         if (!giQualityFacts(mGi.quality,
-                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop,
-                            mGi.epicTier)
+                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                  .gather.on)
             return false;
         break;

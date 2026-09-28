@@ -421,8 +421,7 @@ void OgreScene::syncPhotonView() {
                         break;
                 }
             }
-            // No chain (the single volume), or a camera outside every cascade: the
-            // head of the chain.
+            // A camera outside every cascade: the head of the chain.
             if (!want) want = mVctLighting;
         }
         const void *source = want ? static_cast<const void *>(want->getVoxelizer()) : nullptr;

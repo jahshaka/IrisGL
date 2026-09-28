@@ -3535,15 +3535,15 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         }
     }
 
-    // "Do not let this object decide where GI happens" (P1a.2). ON CHANGE ONLY,
-    // for the same reason: setNodeGiBoundsExcluded invalidates the GI caches, so
-    // a per-frame push would re-voxelize the scene every frame.
+    // "Do not let this object decide where the probe grid is placed" (P1a.2).
+    // ON CHANGE ONLY, for the same reason: setNodeProbeGridExcluded invalidates
+    // the GI caches, so a per-frame push would flag a re-solve every frame.
     {
-        const int want = node->getGiBoundsExcluded() ? 1 : 0;
-        if (e.giBoundsExcluded != want) {
-            mTarget->setNodeGiBoundsExcluded(e.node, want != 0);
-            e.giBoundsExcluded = want;
-            notePush(node, "gi bounds");
+        const int want = node->getProbeGridExcluded() ? 1 : 0;
+        if (e.probeGridExcluded != want) {
+            mTarget->setNodeProbeGridExcluded(e.node, want != 0);
+            e.probeGridExcluded = want;
+            notePush(node, "probe grid excluded");
         }
     }
 
@@ -6893,7 +6893,31 @@ void SceneMirror::applyViewPostFx(View *view, bool record)
         fx.ssaoPower      = mSource->ssaoPower;
         fx.ssaoRadius     = mSource->ssaoRadius;
         fx.smaaPreset     = mSource->smaaPreset;
-        fx.ssr            = mSource->ssrMode;
+        // THE SSR ROW'S MEANING AT A RAY TIER (D4-PHOTON-TIERS). OFF IS HONOURED
+        // AT EVERY TIER: a document whose row is off gets no trace and no march
+        // (fx.ssr 0 — the ray tier rides the SSR chain, so nothing records).
+        // Where the row is ON and this scene's reflections are TRACED — Photon on,
+        // a quality whose facts say rayReflections (High, Epic), rays resolved on
+        // this machine — the rays are the reflection and the view traces at the
+        // tier's own resolution (GiQualityFacts::reflectTrace: High one ray per
+        // 2x2 block, Epic every pixel — the row's own High/Epic columns); the
+        // march's lq/hq means nothing there and the editor offers only "Off" and a
+        // disabled "Traced" (worldmodes::comboItems). Everywhere else the row is
+        // fed as authored: the screen march, and the machine's rays with it.
+        {
+            const bool photonOn = mSource->giMode != iris::GiMode::OFF;
+            GiQuality q = GiQuality::Medium;
+            switch (mSource->giQuality) {
+            case iris::GiQuality::LOW:  q = GiQuality::Low; break;
+            case iris::GiQuality::HIGH: q = GiQuality::High; break;
+            case iris::GiQuality::EPIC: q = GiQuality::Epic; break;
+            default: break;
+            }
+            const GiQualityFacts facts = giQualityFacts(q);
+            const bool traced = mSource->ssrMode > 0 && photonOn && facts.rayReflections &&
+                                mTarget && mTarget->rayTracingResolved();
+            fx.ssr = traced ? facts.reflectTrace : mSource->ssrMode;
+        }
         fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
         // Percent in the document, a fraction in the renderer — one conversion,
         // here, so nothing downstream has to know which unit it is holding.
@@ -7149,13 +7173,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         switch (mSource->giQuality) {
         case iris::GiQuality::LOW:             gi.quality = GiQuality::Low; break;
         case iris::GiQuality::HIGH:            gi.quality = GiQuality::High; break;
+        case iris::GiQuality::EPIC:            gi.quality = GiQuality::Epic; break;
         case iris::GiQuality::MEDIUM: default: gi.quality = GiQuality::Medium; break;
         }
-        // NO BOUNDS TRAVEL ANY MORE (owner decision D8): GiParams::boundsMin ==
-        // boundsMax == 0 is the engine's "fit it yourself", and leaving the
-        // field at its default is how this mirror says so. `autoBoundsMax`
-        // likewise keeps the engine's own default ceiling. The document has no
-        // bounds fields to push.
+        // NO REGION TRAVELS (owner decision D8): the probe grid's placement
+        // region is the engine's own fit (GiParams::testProbeRegion* are suite
+        // levers); the voxels are the camera's cascade chain.
         gi.numBounces = mSource->giNumBounces;
         gi.pccProbesX = qBound(1, qRound(mSource->giPccGrid.x()), 8);
         gi.pccProbesY = qBound(1, qRound(mSource->giPccGrid.y()), 8);
@@ -7170,11 +7193,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeHdr = toggle(mSource->giProbeHdr);
         gi.probeShadows = toggle(mSource->giProbeShadows);
         gi.probeOverlap = mSource->giProbeOverlap;
-        // PHOTON cascades (SPECS/PHOTON_SPEC.md P0): the switch and, optionally,
-        // the table. A row with a non-positive half size or resolution is not a
-        // request the renderer can honour halfway, so the whole table is dropped
+        // PHOTON cascades (SPECS/PHOTON_SPEC.md P0): always the chain; optionally
+        // a pinned table. A row with a non-positive half size or resolution is not
+        // a request the renderer can honour halfway, so the whole table is dropped
         // and the tier's own decides — the same rule the engine states.
-        gi.cascades = mSource->giCascades > 0;
         gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
         gi.dragMoverChannel   = mSource->giDragMoverChannel > 0;
         // THE SURFACE CACHE's three rows, pushed as they are authored. `cards`
@@ -7210,12 +7232,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // whether or not its SSR row asked for one — `ChainDesc::probeGather`),
         // so it rides the change debounce with the rest of the configuration.
         gi.gather = toggle(mSource->giGather);
-        // ...and the ONE fact of the document's tier the quality dial cannot
-        // carry (Epic shares High's quality): the engine's tier table reads it
-        // for the gather's density (Types.h `giQualityFacts`'s `epic` — four
-        // times the probes). The document's tier is `giTier` (PhotonTier's
-        // ordinal: Low 0 .. Epic 3).
-        gi.epicTier = mSource->giTier == 3;
         // EVERY LIGHT IS A VOXEL LIGHT. There is one GI arm now (PHOTON_SPEC
         // E2 (4) deleted Instant Radiosity, which traced from ONE driving light
         // and therefore hashed only that one): the voxel injection reads every
@@ -7296,34 +7312,14 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mGiLightPoseSignature = lightPoseSig;
             mTarget->noteLightsMoved();
         }
-        // ---- RE-FIT ON EXIT (LIGHTING_FIX fix 2) ---------------------------
-        //
-        // A light moving is not the only thing that invalidates a GI solve: an
-        // OBJECT leaving the lit volume does too, and it was the one nothing
-        // watched. Raise a cube above the auto-fitted volume and it kept the
-        // lighting it had at the old height for ever — until the user happened
-        // to nudge a light, at which point the volume re-fitted and everything
-        // "mysteriously" fixed itself. That workaround is the bug report.
-        //
-        // The engine answers the question as a SIGNATURE, not a flag, precisely
-        // so it can ride this machinery unchanged: it is 0 while everything is
-        // inside the volume, and while an object is outside it changes on every
-        // frame the object moves. Folded in beside the light signature, that
-        // gives the same two behaviours the debounce already guarantees for a
-        // dragged light — a continuous drag re-arms the window every frame and
-        // costs no rebuilds, and letting go costs exactly one.
-        //
-        // (Not folded in for Instant Radiosity: its signature is the ONE driving
-        // light by design, and IR's area of interest is re-derived from the same
-        // bounds on every re-trace anyway.)
         const bool vctLike = gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid;
         // The raw light term is kept so the post-refresh re-read below can
-        // recombine it with a FRESH escape term rather than re-hashing an
+        // recombine it with a FRESH geometry term rather than re-hashing an
         // already-combined value (which would never match the next frame's).
         const quint64 lightSigRaw = lightSig;
         // ---- THE MOVEMENT TERM (FIX WAVE B3) --------------------------------
         //
-        // Third term, same shape and the same debounce as the other two: a
+        // Second term, same shape and the same debounce as the light's: a
         // quantized hash of every GI item's world AABB. Before it, MOVING
         // geometry changed nothing at all — the panel's own Refresh tooltip said
         // so out loud ("moving objects does not do this automatically") — because
@@ -7337,13 +7333,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // Folded into the SAME signature rather than given its own gate, so that
         // moving a light and moving a box during one drag still cost one
         // re-solve between them rather than two.
-        const auto combine = [&](quint64 light, quint64 escape, quint64 geometry) {
+        const auto combine = [&](quint64 light, quint64 geometry) {
             if (!vctLike) return light;
-            Hasher h; h << light << escape << geometry; return h.h;
+            Hasher h; h << light << geometry; return h.h;
         };
         if (vctLike)
-            lightSig = combine(lightSigRaw, mTarget->giEscapeSignature(),
-                               mTarget->giGeometrySignature());
+            lightSig = combine(lightSigRaw, mTarget->giGeometrySignature());
         // The engine's half of the signature is read from DERIVED world AABBs,
         // and those are only correct once something has run updateSceneGraph —
         // which, on the very first sync, is the GI build itself. Reading it
@@ -7353,8 +7348,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // frames cost nothing at all"). So the push adopts the signature AFTER
         // it pushes, exactly as the two refresh branches below already do.
         const auto readEngineSignature = [&]() {
-            return combine(lightSigRaw, mTarget->giEscapeSignature(),
-                           mTarget->giGeometrySignature());
+            return combine(lightSigRaw, mTarget->giGeometrySignature());
         };
         // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), kept OUT of the
         // signature above on purpose: a material edit arms the same
@@ -7404,12 +7398,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // scripting.e2e.screenshot_grades lost a grade change that arrived
             // in the same frame as a tuning value.)
             // EVERY FIELD `giTuningEqual` COMPARES (PHOTON-GATHER-1d):
-            // the gather's row and the tier's Epic fact, the card cache's row,
+            // the gather's row, the card cache's row,
             // budget and radius. Left out, one change to any of them kept the
             // comparison unequal for ever and re-pushed the tuning (the field's
             // constants included) on EVERY frame after it.
             mLastGi.gather              = gi.gather;
-            mLastGi.epicTier            = gi.epicTier;
             mLastGi.cards               = gi.cards;
             mLastGi.cardBudgetTexels    = gi.cardBudgetTexels;
             mLastGi.cardResidencyRadius = gi.cardResidencyRadius;
@@ -7512,11 +7505,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 ++mGiStableFrames;
             }
 
-            // A re-solve RE-FITS the volume, so the escape term it may have been
-            // armed by is 0 again the moment it returns. Re-reading the
-            // signature after the rebuild and adopting it is what keeps "move a
-            // cube out of the volume" costing ONE re-solve instead of two (the
-            // second being the signature changing back).
+            // Re-reading the signature after the re-solve and adopting it is what
+            // keeps one gesture costing ONE re-solve (the re-solve itself brings
+            // the derived world boxes current).
             const auto adoptSignature = [&]() {
                 if (vctLike) mGiLightSignature = readEngineSignature();
                 mGiMaterialSignature = readMaterialSignature();

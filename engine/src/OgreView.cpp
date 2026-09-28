@@ -247,17 +247,12 @@ ChainDesc OgreView::chainDesc() const {
     d.ssrThickness   = mPostFx.ssrThickness;
     d.ssrIntensity   = mPostFx.ssrIntensity;
     d.reflectionRoughnessCutoff = mPostFx.reflectionRoughnessCutoff;
-    // RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5), and the whole tier rule in one
-    // line: AUTO means "traced wherever the machine can", which is this view's
-    // SSR row being on (the SSR contract already keeps that to High and Epic —
-    // no new World row exists or is wanted) AND the device advertising ray
-    // queries AND the application preference allowing them. Ray tracing is a
-    // property of the MACHINE and not of the document (PHOTON_SPEC §4 D4), so
-    // nothing here reads the scene.
+    // RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5).
     //
-    // The RESOLUTION comes free with the same row: `ssr == 2` (Epic) traces
-    // every pixel, `ssr == 1` (High) one in four, exactly as the march does —
-    // which is why the row is a scale factor here too and not a second setting.
+    // The RESOLUTION comes free with the same row: `ssr == 2` traces every
+    // pixel, `ssr == 1` one in four, exactly as the march does. (At a ray tier
+    // the HOST feeds the row the tier's own trace resolution rather than the
+    // document's SSR row — GiQualityFacts::reflectTrace, SceneMirror.)
     d.rayReflect     = d.ssr > 0 && mScene && mScene->rayReflectionsWanted();
     // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the same shape and the same
     // three terms as the gather's line above — the scene's resolved row, below

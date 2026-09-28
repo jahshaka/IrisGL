@@ -185,11 +185,14 @@ enum class GiMode : int
 	VCT_PCC_HYBRID
 };
 
+/// The Photon tier's engine row (jahshaka::engine::GiQuality): Epic is a row
+/// of its own, not a flag on High (D4-PHOTON-TIERS).
 enum class GiQuality : int
 {
 	LOW = 0,
 	MEDIUM,
-	HIGH
+	HIGH,
+	EPIC
 };
 
 /// THE ANALYTIC ("realistic") SKY's parameters — the ENGINE's own, since
@@ -472,47 +475,19 @@ public:
 
     // global illumination (world panel; rendered by the engine viewport only).
     //
-    // THE LIT VOLUME IS THE RENDERER'S (owner decision D8, 2026-09-13): the
-    // document carries no bounds at all any more — no min/max pin and no
-    // ceiling on the automatic fit. The engine fits the volume to the scene's
-    // content on every solve, and `world.giStatus()` reports what it decided,
-    // which is the only reading anyone ever needed. The three fields that used
-    // to live here (giBoundsMin, giBoundsMax, giAutoBoundsMax), their World
-    // panel rows, the Fit button and world.fitGiBounds are deleted under the
-    // CRUD law; an old scene that pinned a volume opens with the automatic one.
+    // THE DOCUMENT CARRIES NO GI VOLUME (owner decision D8, 2026-09-13; the
+    // owner's law: no fixed GI volume). The voxels follow the camera and
+    // `world.giStatus()` reports what the renderer built.
     GiMode giMode;
     GiQuality giQuality;
     int giNumBounces;          // 1..4
-    /// PHOTON — CAMERA-CENTRED VOXEL CASCADES (SPECS/PHOTON_SPEC.md P0).
-    ///
-    /// False (the default) is the single scene-fitted voxel volume: one box
-    /// around the content, and nothing outside it
-    /// bounces. True builds a chain of camera-centred cascades instead — fine
-    /// cells near the eye, coarse ones far out — so the bounce follows the
-    /// camera and what escapes the outermost cascade reads the Sky Light
-    /// instead of going dark. Only meaningful in the two VCT modes; a scene
-    /// that never sets it renders exactly as it did.
-    ///
-    /// `giCascadeSet` optionally pins the table, one entry per cascade as
-    /// (halfSize metres, resolution, stepCells); empty = the quality tier's own
-    /// table. A zero or negative halfSize/resolution in any entry means the
-    /// whole request is ignored — a half-specified cascade is not a request the
-    /// renderer can honour halfway.
-    /// 1 = on, 0 = off, and THE DEFAULT IS ON because every Photon tier's
-    /// column is (PHOTON_SPEC §7 E2 (6)).
-    ///
-    /// It is NOT a tri-state, and that is a decision with a scar: it was `-1 =
-    /// the tier decides` for an afternoon, which put a value in the document
-    /// that only the STUDIO could resolve — and SceneMirror is IrisGL and cannot
-    /// see the tier table, so it read -1 as off while the reader resolved it to
-    /// on, and a scene rendered one way before a save and another way after
-    /// (scene.reopen_fidelity, 42,42,42 vs 47,47,47 on the ground). A field the
-    /// renderer reads must mean the same thing to everyone who reads it. The
-    /// "was this authored?" question the tri-state existed for is answered where
-    /// it belongs instead: by the KEY BEING ABSENT in the file, which only the
-    /// reader can see and which the reader resolves through the tier there and
-    /// then (SceneReader).
-    int giCascades = 1;
+    /// PHOTON — THE VOXELS ARE ALWAYS CAMERA-CENTRED CASCADES (PHOTON_SPEC P0;
+    /// the single scene-fitted volume and its `giCascades` switch are deleted,
+    /// D4-PHOTON-TIERS). `giCascadeSet` optionally pins the table, one entry per
+    /// cascade as (halfSize metres, resolution, stepCells); empty = the quality
+    /// tier's own table. A zero or negative halfSize/resolution in any entry means
+    /// the whole request is ignored — a half-specified cascade is not a request
+    /// the renderer can honour halfway.
     QVector<iris::Vec3> giCascadeSet;
     /// THE PER-CASCADE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1)). How many
     /// objects ONE cascade may voxelise: the renderer keeps the ones that fill
@@ -599,11 +574,10 @@ public:
     /// document-side and writes a concrete 0/1 through, exactly like giMode and
     /// giQuality (services/worldmodes.h — a backing field is always the
     /// resolved value), so -1 survives only in a scene no tier has ever been
-    /// applied to. The engine reads a bare -1 as OFF; the reader never lets one
-    /// reach it, because a document without a tier DERIVES one and -1 then
-    /// means "the derived tier decides" (worldmodes::derivePhotonFromDocument,
-    /// owner option (b) 2026-09-09: Medium and High are DDGI-fed, so the
-    /// shipped vct+medium samples come up with the field on).
+    /// applied to. Where one reaches the engine it is Auto, and Auto is the
+    /// tier's (GiQualityFacts::fieldDefault — on at every quality, owner option
+    /// (b) 2026-09-09); the "a bare -1 renders as OFF" arm is deleted
+    /// (D4-PHOTON-TIERS).
     /// Only meaningful in the VCT modes: the field is fed by the voxel volume.
     int giDdgi = -1;
     /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md). The diffuse
