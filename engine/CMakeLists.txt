@@ -173,6 +173,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
                 "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)

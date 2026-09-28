@@ -3497,6 +3497,16 @@ public:
 
     // ---- Meshes and materials ----
     MeshId createMesh(const MeshData &data) override;
+    /// A MULTI-SUBMESH ITEM, for the suites that hold a per-submesh consumer to
+    /// it (REFLECT-MOVERS-2: the ray tier's cut-out table is per submesh). No
+    /// product path builds one — buildMeshV2 makes one submesh a mesh — so these
+    /// live on the engine-private scene, never on the Scene boundary.
+    /// `appendSubmesh` MOVES `from`'s submesh 0 (every LOD's VAOs, its shadow
+    /// VAOs) into `into` as its next submesh and grows `into`'s bounds; both
+    /// meshes unattached, the same LOD count. `from` is left empty (destroy it).
+    bool appendSubmesh(MeshId into, MeshId from);
+    /// One sub-item's material (setNodeMaterial sets all of them).
+    bool setSubItemMaterial(NodeId node, unsigned subItem, MaterialId mat);
     bool updateMeshVertices(MeshId id, const std::vector<float> &positions,
                             const std::vector<float> &normals) override;
     bool destroyMesh(MeshId id) override;

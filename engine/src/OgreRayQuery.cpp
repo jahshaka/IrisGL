@@ -4170,7 +4170,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         dropBuffer(qBuf);
         return false;
     }
-    if (!makeBuffer(4u * sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
+    if (!makeBuffer(8u * sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
         dropBuffer(qBuf);
         dropBuffer(aBuf);
         return false;
@@ -4189,7 +4189,11 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
             q[i * 8u + 6] = queries[i].facing.z;
             q[i * 8u + 7] = queries[i].trace ? 1.0f : 0.0f;
         }
-        const uint32_t counts[4] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), geomSlots };
+        // ...and the ALPHA TABLE (REFLECT-MOVERS-2): the parity job's trace agrees
+        // with the product's on a scene with cut-outs.
+        const uint64_t a = alphaTableOf(scene);
+        const uint32_t counts[8] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), geomSlots,
+                                     uint32_t(a & 0xFFFFFFFFu), uint32_t(a >> 32u), 0u, 0u };
         std::memcpy(ubo.mapped, counts, sizeof(counts));
     }
 
@@ -4232,7 +4236,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     }
     VkDescriptorBufferInfo ub{};
     ub.buffer = ubo.buffer;
-    ub.range = 4u * sizeof(uint32_t);
+    ub.range = 8u * sizeof(uint32_t);
     // 7-9: the TLAS (the scene's, or none when no question traces — a
     // descriptor must still be valid, so the stand-in is only for 8/9), the
     // per-slot rows (copied now), the GPU scene's rows.
@@ -5695,8 +5699,6 @@ constexpr uint32_t kAlphaMaskIdleFrames = 600u;
 /// Descriptor sets the mask job's pool holds (one per mask made, retired after
 /// the frames in flight).
 constexpr uint32_t kAlphaMaskSets = 64u;
-/// The table's words per entry (jah_rq_alpha.glsl: nine uvec4).
-constexpr uint32_t kAlphaEntryWords = 36u;
 constexpr uint32_t kAlphaNone = 0xFFFFFFFFu;
 constexpr uint32_t kAlphaConstant = 1u, kAlphaConstantSolid = 2u, kAlphaPending = 4u;
 /// Ogre's alpha test, the raster's way round (800.PixelShader: discard when
@@ -5895,69 +5897,85 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
     w.clear();
     const std::set<uint32_t> &slots = sa.feed.alpha;
     detail::GpuScene &gs = scene->mGpuScene;
-    if (!slots.empty() && gs.live()) {
+    // THE ROWS BY ADDRESS (the fable read's D1): a candidate reads its OWN submesh's
+    // row, base + geometry index, from the GPU scene's row buffer — which is
+    // re-created when the mesh table grows, so its address rides in the words and a
+    // grow re-makes the table.
+    Ogre::VaoManager *vaoMgr = mRs ? mRs->getVaoManager() : nullptr;
+    const uint64_t rowsAddress =
+        (gs.live() && gs.geomBuffer() && vaoMgr) ? vaoMgr->getBufferDeviceAddress(gs.geomBuffer()) : 0u;
+    if (!slots.empty() && gs.live() && rowsAddress) {
         const uint32_t n = *slots.rbegin() + 1u;
         w.assign(4u + ((n + 3u) & ~3u), kAlphaNone);
         w[0] = n;
         w[1] = 0u;
-        w[2] = w[3] = 0u;
+        w[2] = uint32_t(rowsAddress & 0xFFFFFFFFu);
+        w[3] = uint32_t(rowsAddress >> 32u);
         unsigned budget = kAlphaMasksPerFrame;
         for (const uint32_t slot : slots) {
             if (slot >= gs.slotCount() || slot >= scene->mItemNodes.size()) continue;
             const OgreScene::Node *node = scene->mItemNodes[slot];
             if (!node || !node->item || !node->item->getNumSubItems()) continue;
-            const Ogre::HlmsDatablock *db = node->item->getSubItem(0)->getDatablock();
-            if (!db) continue;
-            uint32_t e[kAlphaEntryWords] = {};
-            // THE ROWS: the near copy's (the feed's, a rigged slot's skin row) and
-            // the far copy's (the mesh's coarsest level; a rigged slot's own again).
+            // THE ROW BASES: submesh 0's row of the level each copy was built from (the
+            // feed's near row; the mesh's coarsest level for the far copy; a rigged
+            // slot's skin row for both — unknown until its first ready frame, and a
+            // candidate with no row is refused).
             const uint32_t nearRow = slot < sa.geomRowOfSlot.size() ? sa.geomRowOfSlot[slot]
                                                                      : detail::GpuScene::kNoGeomRow;
             uint32_t farRow = nearRow;
             if (slot < sa.feed.recs.size() && sa.feed.recs[slot].kind == 1u)
                 farRow = detail::GpuScene::geomRowIndex(sa.feed.recs[slot].meshIndex, sa.feed.recs[slot].farLevel, 0u);
-            if (nearRow != detail::GpuScene::kNoGeomRow)
-                if (const uint32_t *r = gs.geomRowAt(nearRow)) std::memcpy(e, r, 12u * sizeof(uint32_t));
-            if (farRow != detail::GpuScene::kNoGeomRow)
-                if (const uint32_t *r = gs.geomRowAt(farRow)) std::memcpy(e + 12, r, 12u * sizeof(uint32_t));
-            // THE MASK, or the constant answer of a test with no albedo map (the
-            // raster then tests the background diffuse's alpha, 800.PixelShader).
-            uint32_t flags = kAlphaConstant | kAlphaConstantSolid;
-            float uv0[4] = { 1.0f, 1.0f, 0.0f, 0.0f }, uv1[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
-            if (db->getCreator() && db->getCreator()->getType() == Ogre::HLMS_PBS) {
-                const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
-                const Ogre::CompareFunction cmp = db->getAlphaTest();
-                const float thr = db->getAlphaTestThreshold();
-                Ogre::TextureGpu *tex = pbs->getTexture(Ogre::PBSM_DIFFUSE);
-                if (!tex) {
-                    flags = kAlphaConstant | (alphaKept(cmp, thr, pbs->getBackgroundDiffuse().a) ? kAlphaConstantSolid : 0u);
-                } else {
-                    const int mi = alphaMaskFor(tex, uint32_t(cmp), thr, budget);
-                    if (mi < 0) {
-                        flags = kAlphaPending;
+            // ONE RECORD PER SUBMESH, its own datablock (a tree: the trunk opaque, the
+            // leaves cut out). Rows exist for kSubmeshesPerMesh submeshes; a geometry
+            // past them reads solid (the header of jah_rq_alpha.glsl).
+            const uint32_t subs = uint32_t(std::min<size_t>(node->item->getNumSubItems(),
+                                                            detail::GpuScene::kSubmeshesPerMesh));
+            w[4u + slot] = uint32_t(w.size());
+            ++w[1];
+            const uint32_t head[4] = { nearRow, farRow, subs, 0u };
+            w.insert(w.end(), head, head + 4);
+            for (uint32_t g = 0; g < subs; ++g) {
+                const Ogre::HlmsDatablock *db = node->item->getSubItem(g)->getDatablock();
+                uint32_t e[12] = {};
+                uint32_t flags = kAlphaConstant | kAlphaConstantSolid;
+                float uv0[4] = { 1.0f, 1.0f, 0.0f, 0.0f }, uv1[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+                if (db && db->getCreator() && db->getCreator()->getType() == Ogre::HLMS_PBS &&
+                    db->getAlphaTest() != Ogre::CMPF_ALWAYS_PASS) {
+                    const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
+                    const Ogre::CompareFunction cmp = db->getAlphaTest();
+                    const float thr = db->getAlphaTestThreshold();
+                    Ogre::TextureGpu *tex = pbs->getTexture(Ogre::PBSM_DIFFUSE);
+                    if (!tex) {
+                        // the raster then tests the background diffuse's alpha (800.PixelShader)
+                        flags = kAlphaConstant |
+                                (alphaKept(cmp, thr, pbs->getBackgroundDiffuse().a) ? kAlphaConstantSolid : 0u);
                     } else {
-                        const AlphaMask &m = mAlphaMasks[size_t(mi)];
-                        e[24] = uint32_t(m.address & 0xFFFFFFFFu);
-                        e[25] = uint32_t(m.address >> 32u);
-                        e[26] = (m.w & 0xFFFFu) | ((m.h & 0xFFFFu) << 16u);
-                        flags = 0u;
+                        const int mi = alphaMaskFor(tex, uint32_t(cmp), thr, budget);
+                        if (mi < 0) {
+                            flags = kAlphaPending;
+                        } else {
+                            const AlphaMask &m = mAlphaMasks[size_t(mi)];
+                            e[0] = uint32_t(m.address & 0xFFFFFFFFu);
+                            e[1] = uint32_t(m.address >> 32u);
+                            e[2] = (m.w & 0xFFFFu) | ((m.h & 0xFFFFu) << 16u);
+                            flags = 0u;
+                        }
+                    }
+                    // THE BASE-MAP UV TRANSFORM (OgreMaterials.cpp: user values 0 and 1)
+                    const Ogre::Vector4 a = pbs->getUserValue(0), b = pbs->getUserValue(1);
+                    uv0[0] = float(a.x); uv0[1] = float(a.y); uv0[2] = float(a.z); uv0[3] = float(a.w);
+                    uv1[0] = float(b.x); uv1[1] = float(b.y); uv1[2] = float(b.z); uv1[3] = float(b.w);
+                    // an untouched datablock's user values are zero: the identity then
+                    if (uv0[0] == 0.0f && uv0[1] == 0.0f && uv1[0] == 0.0f && uv1[3] == 0.0f) {
+                        uv0[0] = uv0[1] = 1.0f; uv0[2] = uv0[3] = 0.0f;
+                        uv1[0] = uv1[3] = 1.0f; uv1[1] = uv1[2] = 0.0f;
                     }
                 }
-                // THE BASE-MAP UV TRANSFORM (OgreMaterials.cpp: user values 0 and 1)
-                const Ogre::Vector4 a = pbs->getUserValue(0), b = pbs->getUserValue(1);
-                uv0[0] = float(a.x); uv0[1] = float(a.y); uv0[2] = float(a.z); uv0[3] = float(a.w);
-                uv1[0] = float(b.x); uv1[1] = float(b.y); uv1[2] = float(b.z); uv1[3] = float(b.w);
-                // an untouched datablock's user values are zero: the identity then
-                if (uv0[0] == 0.0f && uv0[1] == 0.0f && uv1[0] == 0.0f && uv1[3] == 0.0f) {
-                    uv0[0] = uv0[1] = 1.0f; uv0[2] = uv0[3] = 0.0f;
-                    uv1[0] = uv1[3] = 1.0f; uv1[1] = uv1[2] = 0.0f;
-                }
+                e[3] = flags;
+                std::memcpy(e + 4, uv0, sizeof(uv0));
+                std::memcpy(e + 8, uv1, sizeof(uv1));
+                w.insert(w.end(), e, e + 12);
             }
-            e[27] = flags;
-            std::memcpy(e + 28, uv0, sizeof(uv0));
-            std::memcpy(e + 32, uv1, sizeof(uv1));
-            w[4u + slot] = w[1]++;
-            w.insert(w.end(), e, e + kAlphaEntryWords);
         }
     }
     if (w == sa.alphaWords) return;
