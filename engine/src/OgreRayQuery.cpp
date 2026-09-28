@@ -68,6 +68,7 @@
 
 #include "OgreVulkanRenderSystem.h"
 #include "OgreVulkanTextureGpu.h"
+#include "OgreVulkanMappings.h"
 #include "OgreVulkanDevice.h"
 #include "OgreVulkanQueue.h"
 #include "Vao/OgreVulkanBufferInterface.h"
@@ -82,6 +83,7 @@
 #include "rayquery/rq_hit_composite_spv.h"
 #include "rayquery/rq_card_movers_spv.h"
 #include "rayquery/rq_tlas_write_spv.h"
+#include "rayquery/rq_alpha_mask_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
 // jobs, its atlases and its pipelines live in OgreScreenProbeGather.cpp; this
 // file is its HOST (the device, the retire window, the frame's command buffer,
@@ -96,6 +98,7 @@
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
+#include <OgreHlmsPbsDatablock.h>
 #include <OgreItem.h>
 #include <OgreResourceTransition.h>
 #include <OgreRoot.h>
@@ -454,6 +457,15 @@ private:
         /// rebuilds a hit's geometric normal from. Kept by the change feed (a
         /// rigged slot's row by the gather, from its ready skin cache).
         std::vector<uint32_t> geomRowOfSlot;
+        /// THE ALPHA TABLE (REFLECT-MOVERS-2; jah_rq_alpha.glsl has the layout): what
+        /// every ray query reads a CANDIDATE's cut-out from — per alpha-tested traced
+        /// slot its near/far geometry rows, its mask and its UV transform. A host-
+        /// visible buffer with a device address, re-made (the old one retired) only
+        /// when its words change; `alphaAddress` 0 = no alpha-tested item (the rays
+        /// stay opaque).
+        RawBuffer alphaTable;
+        VkDeviceAddress alphaAddress = 0;
+        std::vector<uint32_t> alphaWords, alphaScratch;
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
         /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
         std::vector<uint32_t> decodeWords;
@@ -493,6 +505,8 @@ private:
             /// Kind-2 slots (rigged, traced, with a mesh) and the skin pass' wants
             /// (rigged + traced), ascending — the order the old walks visited them.
             std::set<uint32_t> skinned, rigged;
+            /// Traced ALPHA-TESTED slots, ascending (the alpha table's rows).
+            std::set<uint32_t> alpha;
             /// The far copies' hand-over widths (a multiset; its largest is farOverlap).
             std::map<float, uint32_t> coarse;
             uint32_t traced = 0u;          ///< kind-1 slots
@@ -531,6 +545,10 @@ private:
             uint32_t row = 0xFFFFFFFFu;       ///< its level-0/submesh-0 row: the override
             unsigned long long poseSerial = 0ull;
             bool skinned = false;             ///< the job has written it at least once
+            /// The previous-pose slice differs from the posed vertices (the pose
+            /// moved last time it was skinned): the first frame with no pose change
+            /// copies it level (a SETTLE record, REFLECT-MOVERS-2).
+            bool prevBehind = false;
             bool seen = false;                ///< in this pass's traced set
             /// The structure, built once from the cache with ALLOW_UPDATE and
             /// REFIT in place on every pose change after that. Its own scratch,
@@ -542,6 +560,10 @@ private:
             unsigned triangles = 0;
         };
         std::unordered_map<uint32_t, Skin> skins;
+        /// The VaoManager frame on which a skin pass last MOVED a pose (a re-skin
+        /// that was not the cache's first): the reflection's "a mover moved in the
+        /// last two frames" counts a posed item's limbs too (REFLECT-MOVERS-2).
+        uint32_t skinPosedFrame = 0xFFFFFFFFu;
         /// What the instance writer reads for a rigged slot: the skin BLAS and the
         /// row, for the entries READY this pass (built and skinned).
         std::unordered_map<uint32_t, std::pair<VkDeviceAddress, uint32_t>> skinUse;
@@ -888,6 +910,35 @@ private:
     VkDescriptorPool      mMotionPool = VK_NULL_HANDLE;
     VkQueryPool           mMotionTimestamps = VK_NULL_HANDLE;
     bool                  mMotionFailed = false;
+    /// THE CUT-OUT MASKS (REFLECT-MOVERS-2): one per (albedo texture, alpha test),
+    /// shared by every scene — the texture's alpha at its first level no larger
+    /// than kMaxAlphaMask on a side, through the datablock's own test, one bit a
+    /// texel, made on the device by rq_alpha_mask.comp the first frame the texture
+    /// is resident; forgotten kAlphaMaskIdleFrames after its last use.
+    struct AlphaMask {
+        const Ogre::TextureGpu *tex = nullptr;
+        Ogre::IdString name;
+        uint32_t texW = 0, texH = 0, cmp = 0, thresholdBits = 0;
+        uint32_t w = 0, h = 0, level = 0;
+        RawBuffer bits;
+        VkDeviceAddress address = 0;
+        uint32_t lastUsed = 0;
+    };
+    std::vector<AlphaMask> mAlphaMasks;
+    bool makeAlphaMaskPipeline(std::string &err);
+    /// The mask for (tex, cmp, threshold): its index, or -1 while it cannot be made
+    /// yet (the texture not resident, this frame's budget spent, no pipeline).
+    int alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget);
+    /// Rebuilds `sa`'s alpha table from the feed's alpha-tested slots.
+    void updateAlphaTable(OgreScene *scene, SceneAs &sa);
+    /// The table's address a job hands its shader (0: none, or JAH_R6_NO_ALPHA).
+    uint64_t alphaTableOf(const OgreScene *scene) const;
+    VkDescriptorSetLayout mAlphaSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mAlphaPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mAlphaPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mAlphaModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mAlphaPool = VK_NULL_HANDLE;
+    bool                  mAlphaFailed = false;
     VkDescriptorSetLayout mReflectSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mReflectPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mReflectPipeline = VK_NULL_HANDLE;
@@ -1819,6 +1870,7 @@ void RayQueryTier::close() {
         dropBuffer(sa.tlasScratch);
         dropBuffer(sa.tlasOut);
         for (unsigned r = 0; r < kFramesInFlight; ++r) dropBuffer(sa.tlasIn[r]);
+        dropBuffer(sa.alphaTable);
         // THE SKIN CACHES, destroyed outright (the device is idle): the scene the
         // map is keyed by may already be gone, so the GpuScene side is not
         // touched — its tables die with it.
@@ -1969,6 +2021,16 @@ void RayQueryTier::close() {
     mMotionPool = VK_NULL_HANDLE; mMotionPipeline = VK_NULL_HANDLE;
     mMotionPipeLayout = VK_NULL_HANDLE; mMotionSetLayout = VK_NULL_HANDLE;
     mMotionModule = VK_NULL_HANDLE; mMotionFailed = false;
+    for (AlphaMask &m : mAlphaMasks) dropBuffer(m.bits);
+    mAlphaMasks.clear();
+    if (mAlphaPool) vkDestroyDescriptorPool(mVk, mAlphaPool, nullptr);
+    if (mAlphaPipeline) vkDestroyPipeline(mVk, mAlphaPipeline, nullptr);
+    if (mAlphaPipeLayout) vkDestroyPipelineLayout(mVk, mAlphaPipeLayout, nullptr);
+    if (mAlphaSetLayout) vkDestroyDescriptorSetLayout(mVk, mAlphaSetLayout, nullptr);
+    if (mAlphaModule) vkDestroyShaderModule(mVk, mAlphaModule, nullptr);
+    mAlphaPool = VK_NULL_HANDLE; mAlphaPipeline = VK_NULL_HANDLE;
+    mAlphaPipeLayout = VK_NULL_HANDLE; mAlphaSetLayout = VK_NULL_HANDLE;
+    mAlphaModule = VK_NULL_HANDLE; mAlphaFailed = false;
     if (mReflectPool) vkDestroyDescriptorPool(mVk, mReflectPool, nullptr);
     if (mReflectPipeline) vkDestroyPipeline(mVk, mReflectPipeline, nullptr);
     if (mFilterPipeline) vkDestroyPipeline(mVk, mFilterPipeline, nullptr);
@@ -2042,6 +2104,8 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
         retireSet(sa.tlasSets[r], mTwPool);
         sa.tlasSets[r] = VK_NULL_HANDLE;
     }
+    retire(sa.alphaTable);
+    sa.alphaAddress = 0;
     // THE SKIN CACHES (PHOTON-SKIN-1): each hands back its structure, its buffer
     // and its row block, and clears its node's override — the rows stop naming
     // a posed copy nobody will update again.
@@ -2069,9 +2133,11 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 // this path before it was deleted; the suite keeps the reference itself.)
 //
 // THE TRACED SET IS THE TABLE'S `kGpuRayTraced` — carries kVisibleBit or
-// kMovableBit, shown, below the overlay queues, not alpha-tested (every BLAS is
-// VK_GEOMETRY_OPAQUE_BIT_KHR and the rays use gl_RayFlagsOpaqueEXT, so a cut-out
-// leaf would intersect as a solid quad: audit C-16) — with a mesh. Editor
+// kMovableBit, shown, below the overlay queues — with a mesh. Every BLAS is
+// VK_GEOMETRY_OPAQUE_BIT_KHR (a mesh's structure is shared by every item wearing
+// it); an ALPHA-TESTED item's instance is FORCE_NO_OPAQUE and the ray queries
+// test its candidates against its material's mask (REFLECT-MOVERS-2,
+// jah_rq_alpha.glsl; the alpha table below). Editor
 // furniture, the backdrop, the sun disc and distortion objects carry their own
 // channel INSTEAD of kVisibleBit precisely so captures can exclude them.
 //
@@ -2145,6 +2211,14 @@ void RayQueryTier::SceneAs::Feed::take(uint32_t slot, const Rec &r, int sign) {
 /// (audit F2): the coarsest level's measured bound grown by the largest axis scale.
 void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) {
     ++visits;
+    {
+        // THE CUT-OUTS (REFLECT-MOVERS-2): a traced alpha-tested slot has an alpha
+        // table row; any other has none.
+        uint32_t f = 0u;
+        if (now) std::memcpy(&f, &now->boundsMax[3], sizeof(f));
+        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuAlphaTested)) alpha.insert(slot);
+        else alpha.erase(slot);
+    }
     words.set(slot, now ? now->raster[0] : detail::WordCounts::kNone);
     Rec next;
     if (now && scene) {
@@ -2199,6 +2273,7 @@ void RayQueryTier::SceneAs::Feed::gpuSceneReset() {
     keys.clear();
     skinned.clear();
     rigged.clear();
+    alpha.clear();
     coarse.clear();
     traced = 0u;
     structDirty = true;
@@ -2234,6 +2309,7 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
     w[12] = detail::kGpuMover;
     w[13] = detail::kGpuSkinned;
     w[14] = kRayMaskStillCaster;
+    w[15] = detail::kGpuAlphaTested;
     if (meshesCurrent) {
         std::copy(sa.tlasInWords.begin() + kTlasHeaderWords,
                   sa.tlasInWords.begin() + kTlasHeaderWords + ptrdiff_t(meshes) * kTlasMeshWords,
@@ -2504,7 +2580,7 @@ bool describeMesh(const Ogre::Mesh *mesh, uint32_t level, MeshGeometry &out,
         VkAccelerationStructureGeometryKHR g{};
         g.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;      // audit C-16: no any-hit exists
+        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;      // shared by every wearer; a cut-out is its INSTANCE (FORCE_NO_OPAQUE)
         g.geometry.triangles.sType =
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
@@ -2990,6 +3066,9 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
     //    seen are dropped AFTER the gather (updateScene).
     struct Dirty { uint32_t node = 0; SceneAs::Skin *sk = nullptr; OgreScene::Node *n = nullptr; };
     std::vector<Dirty> dirty;
+    // THE SETTLE LIST (REFLECT-MOVERS-2): caches whose pose stopped last frame —
+    // their previous-pose slice is copied level with the posed vertices, no skinning.
+    std::vector<SceneAs::Skin *> settle;
     bool rowsStaged = false;
     for (const Want &wt : wants) {
         const uint32_t node = uint32_t(wt.node->selfId);
@@ -3054,12 +3133,13 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
         // and costs nothing here: the cache is in the item's LOCAL space.
         const unsigned long long serial = skinPoseSerial(scene, *wt.node);
         if (!sk.skinned || !sk.built || serial != sk.poseSerial) dirty.push_back({ node, &sk, wt.node });
+        else if (sk.prevBehind) settle.push_back(&sk);
     }
     // A row not on the device is a zero address to the job (the ATOM-VOXEL-2 Xid):
     // the new rows go up NOW, before anything below binds the table.
     if (rowsStaged) gs.flushGeomRows();
 
-    if (!dirty.empty()) {
+    if (!dirty.empty() || !settle.empty()) {
         // 3. THE PALETTE: Ogre's own bone matrices for the renderable — the SAME
         //    `SkeletonInstance::_getBoneFullTransform` values, in the SAME
         //    blend-index order, that HlmsPbs::fillBuffersForV2 streams into its
@@ -3093,7 +3173,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             r.tangentOffset = d.sk->buf.tangentOffset;
             r.blendOffsets = (d.sk->buf.blendIndexOffset & 0xFFFFu) |
                              ((d.sk->buf.blendWeightOffset & 0xFFFFu) << 16u);
-            r.boneCount = uint32_t(map->size());
+            r.boneCount = uint32_t(map->size()) | (d.sk->skinned ? 0u : kSkinJobFirst);
             for (size_t b = 0; b < map->size(); ++b) {
                 // store4x3, not streamTo4x3: the stream form is a non-temporal
                 // store meant for a mapped GPU buffer; this is a stack copy.
@@ -3108,6 +3188,20 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             jobs.push_back(r);
             maxVerts = std::max(maxVerts, r.vertexCount);
         }
+        // THE SETTLE RECORDS: the slice takes the posed vertices, nothing is skinned
+        // (the job reads neither the row nor the palette for one).
+        for (SceneAs::Skin *sk : settle) {
+            SkinJobRecord r;
+            r.sourceRow = 0u;
+            r.vertexCount = sk->buf.vertexCount;
+            r.cacheAddressLo = uint32_t(sk->buf.address & 0xFFFFFFFFull);
+            r.cacheAddressHi = uint32_t(sk->buf.address >> 32u);
+            r.boneCount = kSkinJobSettle;
+            jobs.push_back(r);
+            maxVerts = std::max(maxVerts, r.vertexCount);
+        }
+        // A settle-only frame still binds a palette: one identity row set.
+        if (palette.empty()) palette.assign({ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 });
 
         if (!jobs.empty()) {
             // 4. THE INPUTS, grown by doubling and uploaded (Ogre's staging copy,
@@ -3188,8 +3282,12 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
                                  0, 1, &raw, 0, nullptr, 0, nullptr);
             if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 5u);
             ++sa.st.skinDispatches;
+            for (SceneAs::Skin *sk : settle) sk->prevBehind = false;
             for (const Dirty &d : dirty) {
                 if (!d.sk) continue;
+                // a re-skin leaves the slice one pose behind; the first leaves it level
+                d.sk->prevBehind = d.sk->skinned;
+                if (d.sk->skinned) sa.skinPosedFrame = vao->getFrameCount();
                 d.sk->skinned = true;
                 d.sk->poseSerial = skinPoseSerial(scene, *d.n);
                 ++sa.st.skinPasses;
@@ -3437,6 +3535,10 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     }
     readTimestamps(sa);
     drainRetired();
+    // THE CUT-OUTS' TABLE (REFLECT-MOVERS-2) every frame, before the still-scene
+    // gate: a mask that became ready, or a slot's near level the ray rule moved,
+    // changes it with nothing else moving.
+    updateAlphaTable(scene, sa);
     bool compactionPending = false;
     for (const Blas &bl : sa.blas)
         if (bl.compactState == 1u) { compactionPending = true; break; }
@@ -3669,7 +3771,8 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             sa.st.blasBytes += sk.storage.size;
             sa.st.skinBlasBytes += sk.storage.size;
         }
-        sa.st.skinCacheBytes += (unsigned long long)sk.buf.vertexCount * kSkinCacheStride;
+        sa.st.skinCacheBytes +=
+            (unsigned long long)sk.buf.vertexCount * (kSkinCacheStride + kSkinPrevStride);
     }
 }
 
@@ -3820,8 +3923,14 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
         dropBuffer(rayBuf);
         return false;
     }
-    struct Params { uint32_t counts[4] = {}; } params{};
+    struct Params { uint32_t counts[4] = {}; uint32_t alpha[4] = {}; } params{};
     params.counts[0] = uint32_t(count);
+    {
+        // THE CUT-OUTS (REFLECT-MOVERS-2): the same table the frame's queries read.
+        const uint64_t a = alphaTableOf(scene);
+        params.alpha[0] = uint32_t(a & 0xFFFFFFFFu);
+        params.alpha[1] = uint32_t(a >> 32u);
+    }
     if (!makeBuffer(sizeof(params), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
         dropBuffer(rayBuf);
         dropBuffer(hitBuf);
@@ -4061,7 +4170,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         dropBuffer(qBuf);
         return false;
     }
-    if (!makeBuffer(4u * sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
+    if (!makeBuffer(8u * sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
         dropBuffer(qBuf);
         dropBuffer(aBuf);
         return false;
@@ -4080,7 +4189,11 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
             q[i * 8u + 6] = queries[i].facing.z;
             q[i * 8u + 7] = queries[i].trace ? 1.0f : 0.0f;
         }
-        const uint32_t counts[4] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), geomSlots };
+        // ...and the ALPHA TABLE (REFLECT-MOVERS-2): the parity job's trace agrees
+        // with the product's on a scene with cut-outs.
+        const uint64_t a = alphaTableOf(scene);
+        const uint32_t counts[8] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), geomSlots,
+                                     uint32_t(a & 0xFFFFFFFFu), uint32_t(a >> 32u), 0u, 0u };
         std::memcpy(ubo.mapped, counts, sizeof(counts));
     }
 
@@ -4123,7 +4236,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     }
     VkDescriptorBufferInfo ub{};
     ub.buffer = ubo.buffer;
-    ub.range = 4u * sizeof(uint32_t);
+    ub.range = 8u * sizeof(uint32_t);
     // 7-9: the TLAS (the scene's, or none when no question traces — a
     // descriptor must still be valid, so the stand-in is only for 8/9), the
     // per-slot rows (copied now), the GPU scene's rows.
@@ -4347,6 +4460,8 @@ struct ReflectParams {
     /// A MOVING OBJECT (REFLECT-MOVERS-1; rq_reflect.comp's `motion`): x = 1 when
     /// the view's id image is bound at binding 37, yz = its size.
     float motion[4] = {};
+    /// THE ALPHA TABLE (REFLECT-MOVERS-2): xy = its device address, bit-copied.
+    float alpha[4] = {};
 };
 
 /// The card read's footprint gate (Types.h kCardFootprintTexels).
@@ -5156,9 +5271,17 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                 if (f & (detail::kGpuMover | detail::kGpuDragMover)) { moverMoved = true; break; }
             }
         }
+        // ...or a POSE moved (REFLECT-MOVERS-2): a character's limbs under a still node.
+        if (sa.skinPosedFrame == vaoFrame) moverMoved = true;
         rv.framesSinceMoverMoved = moverMoved ? 0u : std::min(rv.framesSinceMoverMoved + 1u, 1000u);
     }
     pp.motion[3] = !motionOn ? 0.0f : (rv.framesSinceMoverMoved <= 2u ? 2.0f : 1.0f);
+    {
+        const uint64_t a = alphaTableOf(scene);
+        const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
+        std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
+        std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
+    }
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -5554,6 +5677,332 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
     return ensureSamplers(err);
 }
 
+// ---------------------------------------------------------------------------
+// A CUT-OUT IS GEOMETRY WITH HOLES (REFLECT-MOVERS-2; audit C-16 answered).
+//
+// Every bottom-level structure stays VK_GEOMETRY_OPAQUE_BIT_KHR — a mesh's
+// structure is shared by every item that wears it, whatever the material — and
+// an ALPHA-TESTED item's instance is FORCE_NO_OPAQUE (rq_tlas_write.comp), so its
+// triangles reach every ray query as candidates. The queries test a candidate
+// through the scene's ALPHA TABLE (jah_rq_alpha.glsl: the layout) and the
+// material's MASK: its albedo texture's alpha through the datablock's own alpha
+// test, one bit a texel, made on the device here once per (texture, test).
+namespace {
+/// The mask's largest side, texels: the texture's first level no larger is the
+/// one thresholded (a 1024 x 1024 mask is 128 KB).
+constexpr uint32_t kMaxAlphaMask = 1024u;
+/// Masks made per frame at most (a scene opened with a forest of foliage
+/// materials makes them over a few frames; a candidate is refused meanwhile).
+constexpr unsigned kAlphaMasksPerFrame = 8u;
+/// A mask no scene asked for in this many frames is forgotten.
+constexpr uint32_t kAlphaMaskIdleFrames = 600u;
+/// Descriptor sets the mask job's pool holds (one per mask made, retired after
+/// the frames in flight).
+constexpr uint32_t kAlphaMaskSets = 64u;
+constexpr uint32_t kAlphaNone = 0xFFFFFFFFu;
+constexpr uint32_t kAlphaConstant = 1u, kAlphaConstantSolid = 2u, kAlphaPending = 4u;
+/// Ogre's alpha test, the raster's way round (800.PixelShader: discard when
+/// `threshold CMP alpha`): is a texel of this alpha KEPT?
+bool alphaKept(Ogre::CompareFunction cmp, float threshold, float alpha) {
+    switch (cmp) {
+    case Ogre::CMPF_LESS: return !(threshold < alpha);
+    case Ogre::CMPF_LESS_EQUAL: return !(threshold <= alpha);
+    case Ogre::CMPF_EQUAL: return !(threshold == alpha);
+    case Ogre::CMPF_NOT_EQUAL: return !(threshold != alpha);
+    case Ogre::CMPF_GREATER_EQUAL: return !(threshold >= alpha);
+    case Ogre::CMPF_GREATER: return !(threshold > alpha);
+    case Ogre::CMPF_ALWAYS_FAIL: return false;
+    default: return true;
+    }
+}
+}   // namespace
+
+bool RayQueryTier::makeAlphaMaskPipeline(std::string &err) {
+    VkDescriptorSetLayoutBinding b{};
+    b.binding = 0;
+    b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    b.descriptorCount = 1;
+    b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, &b, 1u, kAlphaMaskSets, mAlphaSetLayout, err, "rayquery/alpha-mask")) return false;
+    VkPushConstantRange pcr{};
+    pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcr.offset = 0;
+    pcr.size = 32u;
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mAlphaSetLayout;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pcr;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mAlphaPipeLayout) != VK_SUCCESS) {
+        err = "rayquery/alpha-mask: vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_alphaMaskSpv);
+    smi.pCode = krq_alphaMaskSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mAlphaModule) != VK_SUCCESS) {
+        err = "rayquery/alpha-mask: vkCreateShaderModule failed";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mAlphaModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mAlphaPipeLayout;
+    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mAlphaPipeline) != VK_SUCCESS) {
+        err = "rayquery/alpha-mask: vkCreateComputePipelines failed";
+        return false;
+    }
+    if (!plan.create(mVk, "rayquery/alpha-mask", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mAlphaPool, err))
+        return false;
+    return ensureSamplers(err);
+}
+
+int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget) {
+    uint32_t thresholdBits = 0;
+    std::memcpy(&thresholdBits, &threshold, sizeof(thresholdBits));
+    const uint32_t now = frameNow();
+    // THE IDENTITY: the pointer AND the name and size (a destroyed texture's
+    // address can come back as another texture).
+    for (size_t i = 0; i < mAlphaMasks.size(); ++i) {
+        AlphaMask &m = mAlphaMasks[i];
+        if (m.tex == tex && m.name == tex->getName() && m.texW == tex->getWidth() && m.texH == tex->getHeight() &&
+            m.cmp == cmp && m.thresholdBits == thresholdBits) {
+            m.lastUsed = now;
+            return int(i);
+        }
+    }
+    if (!budget || mAlphaFailed) return -1;
+    if (tex->getResidencyStatus() != Ogre::GpuResidency::Resident || !tex->isDataReady()) return -1;
+    if (tex->getTextureType() != Ogre::TextureTypes::Type2D &&
+        tex->getTextureType() != Ogre::TextureTypes::Type2DArray)
+        return -1;
+    std::string err;
+    if (!mAlphaPipeline && !makeAlphaMaskPipeline(err)) {
+        mAlphaFailed = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: cut-outs stay out of the rays' reach (" + err + ")");
+        return -1;
+    }
+    AlphaMask m;
+    m.tex = tex;
+    m.name = tex->getName();
+    m.texW = tex->getWidth();
+    m.texH = tex->getHeight();
+    m.cmp = cmp;
+    m.thresholdBits = thresholdBits;
+    while (m.level + 1u < tex->getNumMipmaps() &&
+           std::max(m.texW >> m.level, m.texH >> m.level) > kMaxAlphaMask)
+        ++m.level;
+    m.w = std::max(m.texW >> m.level, 1u);
+    m.h = std::max(m.texH >> m.level, 1u);
+    const uint32_t words = (m.w * m.h + 31u) / 32u;
+    if (!makeBuffer(VkDeviceSize(words) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, true, m.bits, err))
+        return -1;
+    m.address = addressOf(m.bits.buffer);
+    // ITS ONE LAYER AS A 2D-ARRAY VIEW: a pooled texture's slice or a plain 2D
+    // image's only layer — both legal, so one pipeline reads both.
+    auto *vt = static_cast<Ogre::VulkanTextureGpu *>(tex);
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = vt->getDisplayTextureName();
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    vci.format = Ogre::VulkanMappings::get(vt->getWorkaroundedPixelFormat(tex->getPixelFormat()));
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.baseMipLevel = 0u;
+    vci.subresourceRange.levelCount = tex->getNumMipmaps();
+    vci.subresourceRange.baseArrayLayer = tex->getInternalSliceStart();
+    vci.subresourceRange.layerCount = 1u;
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(mVk, &vci, nullptr, &view) != VK_SUCCESS) {
+        dropBuffer(m.bits);
+        return -1;
+    }
+    retireView(view);
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mAlphaPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mAlphaSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &set) != VK_SUCCESS) {
+            dropBuffer(m.bits);
+            return -1;   // the pool is full this frame: the retire window hands sets back
+        }
+    }
+    retireSet(set, mAlphaPool);
+    VkDescriptorImageInfo ii{};
+    ii.sampler = mPointSampler;
+    ii.imageView = view;
+    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet wr{};
+    wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wr.dstSet = set;
+    wr.dstBinding = 0;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &ii;
+    vkUpdateDescriptorSets(mVk, 1, &wr, 0, nullptr);
+    // THE TEXTURE READABLE FROM COMPUTE (Ogre's solver owns its layout), then
+    // the dispatch, then the edge to every ray query that reads the bits later
+    // in this frame (compute; written through an address, so the edge is ours).
+    {
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, tex, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                 1u << Ogre::GPT_COMPUTE_PROGRAM);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) {
+        dropBuffer(m.bits);
+        return -1;
+    }
+    uint32_t pc[8] = { m.w, m.h, m.level, cmp, uint32_t(m.address & 0xFFFFFFFFu), uint32_t(m.address >> 32u),
+                       thresholdBits, words };
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAlphaPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAlphaPipeLayout, 0, 1, &set, 0, nullptr);
+    vkCmdPushConstants(cmd, mAlphaPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+    vkCmdDispatch(cmd, (words + 63u) / 64u, 1u, 1u);
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb,
+                         0, nullptr, 0, nullptr);
+    --budget;
+    m.lastUsed = now;
+    mAlphaMasks.push_back(std::move(m));
+    return int(mAlphaMasks.size() - 1u);
+}
+
+void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
+    const uint32_t now = frameNow();
+    // FORGET THE IDLE MASKS (no scene asked for one in kAlphaMaskIdleFrames).
+    for (size_t i = 0; i < mAlphaMasks.size();) {
+        if (uint32_t(now - mAlphaMasks[i].lastUsed) > kAlphaMaskIdleFrames) {
+            retire(mAlphaMasks[i].bits);
+            mAlphaMasks.erase(mAlphaMasks.begin() + ptrdiff_t(i));
+        } else {
+            ++i;
+        }
+    }
+    std::vector<uint32_t> &w = sa.alphaScratch;
+    w.clear();
+    const std::set<uint32_t> &slots = sa.feed.alpha;
+    detail::GpuScene &gs = scene->mGpuScene;
+    // THE ROWS BY ADDRESS (the fable read's D1): a candidate reads its OWN submesh's
+    // row, base + geometry index, from the GPU scene's row buffer — which is
+    // re-created when the mesh table grows, so its address rides in the words and a
+    // grow re-makes the table.
+    Ogre::VaoManager *vaoMgr = mRs ? mRs->getVaoManager() : nullptr;
+    const uint64_t rowsAddress =
+        (gs.live() && gs.geomBuffer() && vaoMgr) ? vaoMgr->getBufferDeviceAddress(gs.geomBuffer()) : 0u;
+    if (!slots.empty() && gs.live() && rowsAddress) {
+        const uint32_t n = *slots.rbegin() + 1u;
+        w.assign(4u + ((n + 3u) & ~3u), kAlphaNone);
+        w[0] = n;
+        w[1] = 0u;
+        w[2] = uint32_t(rowsAddress & 0xFFFFFFFFu);
+        w[3] = uint32_t(rowsAddress >> 32u);
+        unsigned budget = kAlphaMasksPerFrame;
+        for (const uint32_t slot : slots) {
+            if (slot >= gs.slotCount() || slot >= scene->mItemNodes.size()) continue;
+            const OgreScene::Node *node = scene->mItemNodes[slot];
+            if (!node || !node->item || !node->item->getNumSubItems()) continue;
+            // THE ROW BASES: submesh 0's row of the level each copy was built from (the
+            // feed's near row; the mesh's coarsest level for the far copy; a rigged
+            // slot's skin row for both — unknown until its first ready frame, and a
+            // candidate with no row is refused).
+            const uint32_t nearRow = slot < sa.geomRowOfSlot.size() ? sa.geomRowOfSlot[slot]
+                                                                     : detail::GpuScene::kNoGeomRow;
+            uint32_t farRow = nearRow;
+            if (slot < sa.feed.recs.size() && sa.feed.recs[slot].kind == 1u)
+                farRow = detail::GpuScene::geomRowIndex(sa.feed.recs[slot].meshIndex, sa.feed.recs[slot].farLevel, 0u);
+            // ONE RECORD PER SUBMESH, its own datablock (a tree: the trunk opaque, the
+            // leaves cut out). Rows exist for kSubmeshesPerMesh submeshes; a geometry
+            // past them reads solid (the header of jah_rq_alpha.glsl).
+            const uint32_t subs = uint32_t(std::min<size_t>(node->item->getNumSubItems(),
+                                                            detail::GpuScene::kSubmeshesPerMesh));
+            w[4u + slot] = uint32_t(w.size());
+            ++w[1];
+            const uint32_t head[4] = { nearRow, farRow, subs, 0u };
+            w.insert(w.end(), head, head + 4);
+            for (uint32_t g = 0; g < subs; ++g) {
+                const Ogre::HlmsDatablock *db = node->item->getSubItem(g)->getDatablock();
+                uint32_t e[12] = {};
+                uint32_t flags = kAlphaConstant | kAlphaConstantSolid;
+                float uv0[4] = { 1.0f, 1.0f, 0.0f, 0.0f }, uv1[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+                if (db && db->getCreator() && db->getCreator()->getType() == Ogre::HLMS_PBS &&
+                    db->getAlphaTest() != Ogre::CMPF_ALWAYS_PASS) {
+                    const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
+                    const Ogre::CompareFunction cmp = db->getAlphaTest();
+                    const float thr = db->getAlphaTestThreshold();
+                    Ogre::TextureGpu *tex = pbs->getTexture(Ogre::PBSM_DIFFUSE);
+                    if (!tex) {
+                        // the raster then tests the background diffuse's alpha (800.PixelShader)
+                        flags = kAlphaConstant |
+                                (alphaKept(cmp, thr, pbs->getBackgroundDiffuse().a) ? kAlphaConstantSolid : 0u);
+                    } else {
+                        const int mi = alphaMaskFor(tex, uint32_t(cmp), thr, budget);
+                        if (mi < 0) {
+                            flags = kAlphaPending;
+                        } else {
+                            const AlphaMask &m = mAlphaMasks[size_t(mi)];
+                            e[0] = uint32_t(m.address & 0xFFFFFFFFu);
+                            e[1] = uint32_t(m.address >> 32u);
+                            e[2] = (m.w & 0xFFFFu) | ((m.h & 0xFFFFu) << 16u);
+                            flags = 0u;
+                        }
+                    }
+                    // THE BASE-MAP UV TRANSFORM (OgreMaterials.cpp: user values 0 and 1)
+                    const Ogre::Vector4 a = pbs->getUserValue(0), b = pbs->getUserValue(1);
+                    uv0[0] = float(a.x); uv0[1] = float(a.y); uv0[2] = float(a.z); uv0[3] = float(a.w);
+                    uv1[0] = float(b.x); uv1[1] = float(b.y); uv1[2] = float(b.z); uv1[3] = float(b.w);
+                    // an untouched datablock's user values are zero: the identity then
+                    if (uv0[0] == 0.0f && uv0[1] == 0.0f && uv1[0] == 0.0f && uv1[3] == 0.0f) {
+                        uv0[0] = uv0[1] = 1.0f; uv0[2] = uv0[3] = 0.0f;
+                        uv1[0] = uv1[3] = 1.0f; uv1[1] = uv1[2] = 0.0f;
+                    }
+                }
+                e[3] = flags;
+                std::memcpy(e + 4, uv0, sizeof(uv0));
+                std::memcpy(e + 8, uv1, sizeof(uv1));
+                w.insert(w.end(), e, e + 12);
+            }
+        }
+    }
+    if (w == sa.alphaWords) return;
+    retire(sa.alphaTable);
+    sa.alphaAddress = 0;
+    if (!w.empty()) {
+        std::string err;
+        if (makeBuffer(VkDeviceSize(w.size()) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, sa.alphaTable, err)) {
+            std::memcpy(sa.alphaTable.mapped, w.data(), w.size() * 4u);
+            sa.alphaAddress = addressOf(sa.alphaTable.buffer);
+        } else {
+            Ogre::LogManager::getSingleton().logMessage("rayquery: the alpha table: " + err);
+            w.clear();
+        }
+    }
+    sa.alphaWords.swap(w);
+}
+
+/// THE MEASURING DOOR (`JAH_R6_NO_ALPHA`, read per call so one process holds both
+/// arms of a paired A/B): no table — every ray query asks opaque, exactly the
+/// pre-lane traversal (a cut-out, still FORCE_NO_OPAQUE, then reads as its quad).
+uint64_t RayQueryTier::alphaTableOf(const OgreScene *scene) const {
+    if (getenv("JAH_R6_NO_ALPHA")) return 0u;
+    auto it = mScenes.find(const_cast<OgreScene *>(scene));
+    return it == mScenes.end() ? 0u : uint64_t(it->second.alphaAddress);
+}
+
 void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
                                 Ogre::CompositorPass *pass) {
     if (!isOpen() || mMotionFailed || !view || !pass) return;
@@ -5869,6 +6318,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.restKey = scene->gatherRestKey();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
+    in.alphaTable = alphaTableOf(scene);
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
     const auto takeVolume = [&](Ogre::VctLighting *lighting, Ogre::VctVoxelizer *voxelizer) {
@@ -6027,6 +6477,8 @@ struct SunContactParams {
     float toSun[4] = {};
     float resolution[4] = {};
     float knobs[4] = {};
+    /// THE ALPHA TABLE (REFLECT-MOVERS-2): xy = its device address, bit-copied.
+    float alpha[4] = {};
 };
 constexpr unsigned kSunContactBindings = 5u;
 /// THE LIFT, in full-resolution pixel footprints: the near copy's tolerance
@@ -6455,6 +6907,12 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     // either.
     pp.knobs[2] = float(kRayMaskCaster);
     pp.knobs[3] = float(divisor);
+    {
+        const uint64_t a = alphaTableOf(scene);
+        const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
+        std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
+        std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
+    }
     memcpy(sv.params[ring].mapped, &pp, sizeof(pp));
     sv.range = range;
     sv.toSun[0] = toSun.x; sv.toSun[1] = toSun.y; sv.toSun[2] = toSun.z;
@@ -6748,6 +7206,13 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     pp.toSun[3] = job.range;
     pp.knobs[0] = float(job.still ? kRayMaskStillCaster : kRayMaskMoverCaster);
     pp.knobs[1] = job.still ? 1.0f : 0.0f;
+    {
+        // THE ALPHA TABLE (REFLECT-MOVERS-2) in zw, bit-copied: a card sees a cut-out's holes.
+        const uint64_t a = alphaTableOf(scene);
+        const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
+        std::memcpy(&pp.knobs[2], &lo, sizeof(lo));
+        std::memcpy(&pp.knobs[3], &hi, sizeof(hi));
+    }
     memcpy(cv.params[ring].mapped, &pp, sizeof(pp));
     memcpy(cv.records[ring].mapped, job.records, size_t(count) * kCardMoverRecordFloats * sizeof(float));
 

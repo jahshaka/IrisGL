@@ -23,6 +23,16 @@
 // top-level instance carries the node's world transform - so a character that
 // walks without changing pose costs no skin pass at all.
 //
+// THE PREVIOUS POSE (REFLECT-MOVERS-2; SkinCache.h). The cache keeps the last
+// frame's positions in a slice after the posed vertices (float3 each, at the
+// vertex count times 48 bytes from the cache's address): a thread writes the
+// position it is about to overwrite there first, so the reflection's history
+// finds where a hit point of a posed item WAS. The record's bone-count word
+// carries two flags in its top bits: FIRST (the cache's first skin - there is
+// no old position, the slice takes the new one) and SETTLE (no skinning: the
+// slice takes the posed position once, on the first frame the pose stopped, so
+// an item at rest has prev equal to cur bit for bit).
+//
 // No Hlms directive mark appears in any comment of this file.
 @insertpiece( SetCrossPlatformSettings )
 
@@ -47,7 +57,7 @@ layout( std430, ogre_U0 ) readonly restrict buffer jobLayout { SkinJob jobs[]; }
 layout( std430, ogre_U1 ) readonly restrict buffer geomLayout { GeometryRow geometryTable[]; };
 layout( std430, ogre_U2 ) readonly restrict buffer paletteLayout { vec4 palette[]; };
 
-layout( buffer_reference, std430, buffer_reference_align = 4 ) writeonly buffer SkinOutRef
+layout( buffer_reference, std430, buffer_reference_align = 4 ) buffer SkinOutRef
 {
 	float v[];
 };
@@ -59,6 +69,16 @@ layout( local_size_x = @value( threads_per_group_x ),
 // The raster layout's float lanes (OgreMesh.cpp's `V`): 12 floats per vertex.
 #define SKIN_OUT_STRIDE_FLOATS 12u
 #define JAH_NONE 0xFFFFFFFFu
+#define JAH_SKIN_FIRST 0x40000000u
+#define JAH_SKIN_SETTLE 0x80000000u
+#define JAH_SKIN_BONES 0x3FFFFFFFu
+
+// The address a byte offset past a uvec2 address (the carry by hand: no int64).
+uvec2 jahAddressPlus( uvec2 a, uint bytes )
+{
+	const uint lo = a.x + bytes;
+	return uvec2( lo, a.y + ( lo < a.x ? 1u : 0u ) );
+}
 
 void main()
 {
@@ -66,6 +86,18 @@ void main()
 	const uint vtx = gl_GlobalInvocationID.x;
 	if( vtx >= job.a.y )
 		return;
+
+	SkinOutRef dst = SkinOutRef( uvec2( job.a.w, job.b.x ) );
+	SkinOutRef prev = SkinOutRef( jahAddressPlus( uvec2( job.a.w, job.b.x ), job.a.y * SKIN_OUT_STRIDE_FLOATS * 4u ) );
+	const uint o = vtx * SKIN_OUT_STRIDE_FLOATS;
+	const uint po = vtx * 3u;
+	if( ( job.b.w & JAH_SKIN_SETTLE ) != 0u )
+	{
+		prev.v[po + 0u] = dst.v[o + 0u];
+		prev.v[po + 1u] = dst.v[o + 1u];
+		prev.v[po + 2u] = dst.v[o + 2u];
+		return;
+	}
 
 	const GeometryRow row = geometryTable[job.a.x];
 	// A row the table never staged reads zero addresses; the host never queues a
@@ -89,7 +121,7 @@ void main()
 	// VET_UBYTE4 blend indices (one word) and VET_FLOAT4 weights.
 	const uint packedIdx = srcU.v[GEOM_LANE( row, vtx, job.b.z & 0xFFFFu )];
 	const uint wLane = GEOM_LANE( row, vtx, job.b.z >> 16u );
-	const uint lastBone = max( job.b.w, 1u ) - 1u;
+	const uint lastBone = max( job.b.w & JAH_SKIN_BONES, 1u ) - 1u;
 	const vec4 weights = vec4( srcF.v[wLane], srcF.v[wLane + 1u], srcF.v[wLane + 2u], srcF.v[wLane + 3u] );
 
 	vec3 outPos = vec3( 0.0 );
@@ -119,8 +151,11 @@ void main()
 	const float tl = length( outTan );
 	outTan = tl > 0.0 ? outTan / tl : vec3( 1.0, 0.0, 0.0 );
 
-	SkinOutRef dst = SkinOutRef( uvec2( job.a.w, job.b.x ) );
-	const uint o = vtx * SKIN_OUT_STRIDE_FLOATS;
+	// THE OLD POSITION TO THE SLICE FIRST (the new one on the cache's first skin).
+	const bool first = ( job.b.w & JAH_SKIN_FIRST ) != 0u;
+	prev.v[po + 0u] = first ? outPos.x : dst.v[o + 0u];
+	prev.v[po + 1u] = first ? outPos.y : dst.v[o + 1u];
+	prev.v[po + 2u] = first ? outPos.z : dst.v[o + 2u];
 	dst.v[o + 0u] = outPos.x;
 	dst.v[o + 1u] = outPos.y;
 	dst.v[o + 2u] = outPos.z;

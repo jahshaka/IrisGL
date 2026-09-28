@@ -18,15 +18,17 @@
 // no sample sequence, no history — a still camera on a still scene writes the
 // same bytes every frame, and a moving one has nothing to smear.
 //
-// OPAQUE ONLY (audit C-16): alpha-tested casters are not in the TLAS (a cut-out
-// leaf would intersect as a solid quad without an any-hit shader), so their
-// contact is the shadow map's alone; the min() keeps it.
+// A CUT-OUT CASTS ITS HOLES (REFLECT-MOVERS-2): an alpha-tested caster's
+// candidates are tested against its mask (jah_rq_alpha.glsl), so a fence's
+// contact shadow agrees with its shadow map's under the min().
 //
 // COMPILED AT BUILD TIME by glslangValidator at --target-env spirv1.4, like
 // every ray job beside it (Ogre's own GLSL path never sets a target
 // environment, which SPV_KHR_ray_query requires).
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -64,6 +66,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// ray per pixel, 2 = one per 2x2 block; the grid is the target's size over
 	/// it, rounded UP, so every pixel's iFragCoord / divisor has a texel).
 	vec4 knobs;
+	/// THE ALPHA TABLE (REFLECT-MOVERS-2): xy = its device address, float bits.
+	vec4 alpha;
 } p;
 
 layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
@@ -71,6 +75,7 @@ layout( set = 0, binding = 3 ) uniform sampler2D sceneDepth;
 layout( r8, set = 0, binding = 4 ) uniform writeonly image2D sunVis;
 
 /// THE SUN RAY is the one text the hit record shares (jah_rq_sun_ray.glsl).
+#define JAH_ALPHA_TABLE floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
 
 /// Metres along the camera's forward axis — rq_reflect.comp's line, the one

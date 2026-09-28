@@ -188,6 +188,9 @@ struct GatherInputs {
     /// at its instance's scale. The far query starts that far before the near
     /// length.
     float farOverlap = 0.0f;
+    /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): the
+    /// gather's rays test a cut-out's candidates too; 0 = none.
+    uint64_t alphaTable = 0u;
 
     unsigned width = 0u, height = 0u;
 

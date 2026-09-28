@@ -36,6 +36,13 @@
 
 #include "jah_geom_rows.glsl"
 
+/// A device address plus a byte offset (the carry by hand: shaderInt64 is off).
+uvec2 jahGeomAddressPlus( uvec2 a, uint bytes )
+{
+	const uint lo = a.x + bytes;
+	return uvec2( lo, a.y + ( lo < a.x ? 1u : 0u ) );
+}
+
 /// The hit triangle's geometric normal in WORLD space, turned to face the ray's
 /// origin (against `dir`). False when the slot has no geometry row.
 bool jahHitGeometricNormal( uint slot, uint geometryIndex, uint primitive, mat4x3 objectToWorld,

@@ -4394,7 +4394,8 @@ struct RayQueryStatus {
     /// items in the traced set this frame (each over its OWN structure, built
     /// from its posed vertices); `skinCaches`: caches held (one per rigged traced
     /// item, and its row block in the GPU scene); their bytes — the posed vertex
-    /// buffers and the per-item structures (also inside `blasBytes`).
+    /// buffers with their previous-pose slices (48 + 12 bytes a vertex) and the
+    /// per-item structures (also inside `blasBytes`).
     int  skinnedInstances = 0;
     int  skinCaches = 0;
     unsigned long long skinCacheBytes = 0;

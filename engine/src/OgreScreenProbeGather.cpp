@@ -179,6 +179,8 @@ struct GatherParams {
     float prevRayRight2[4] = {};
     float prevRayDown2[4] = {};
     float prevFwd2[4] = {};
+    /// THE ALPHA TABLE (REFLECT-MOVERS-2): xy = its device address, bit-copied.
+    float alpha[4] = {};
 };
 
 /// THE PIXEL HISTORY'S BLEND FLOOR (PHOTON-GATHER-1c item 1): the smallest
@@ -1262,6 +1264,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.hitSun2[1] = in.hit.lift;
     pp.hitSun2[2] = in.hit.sunRange;
     pp.hitSun2[3] = std::max(in.hit.farLift, in.farOverlap);
+    {
+        const uint32_t lo = uint32_t(in.alphaTable & 0xFFFFFFFFu), hi = uint32_t(in.alphaTable >> 32u);
+        std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
+        std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
+    }
     // THE SECOND EYE (PHOTON-GA-VR): the shape, and the right eye's basis now and
     // before (written, never read, with one eye).
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;

@@ -3497,6 +3497,16 @@ public:
 
     // ---- Meshes and materials ----
     MeshId createMesh(const MeshData &data) override;
+    /// A MULTI-SUBMESH ITEM, for the suites that hold a per-submesh consumer to
+    /// it (REFLECT-MOVERS-2: the ray tier's cut-out table is per submesh). No
+    /// product path builds one — buildMeshV2 makes one submesh a mesh — so these
+    /// live on the engine-private scene, never on the Scene boundary.
+    /// `appendSubmesh` MOVES `from`'s submesh 0 (every LOD's VAOs, its shadow
+    /// VAOs) into `into` as its next submesh and grows `into`'s bounds; both
+    /// meshes unattached, the same LOD count. `from` is left empty (destroy it).
+    bool appendSubmesh(MeshId into, MeshId from);
+    /// One sub-item's material (setNodeMaterial sets all of them).
+    bool setSubItemMaterial(NodeId node, unsigned subItem, MaterialId mat);
     bool updateMeshVertices(MeshId id, const std::vector<float> &positions,
                             const std::vector<float> &normals) override;
     bool destroyMesh(MeshId id) override;
@@ -3756,7 +3766,9 @@ public:
     /// compares these to the table BY NODE. Not the GPU scene's prevWorld: two
     /// updates in one frame (a reader before the frame, the frame's own) can
     /// re-stage a slot and erase it.
-    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; };
+    /// `material` = GpuInstance::raster[0] (the PBS material word): a cut-out's
+    /// shadow is its material's mask (REFLECT-MOVERS-2).
+    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; uint32_t material = 0u; };
     std::vector<CardCasterRec> mCardCasters;
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
     /// has none (every skinned mesh, every line mesh, every model opened
