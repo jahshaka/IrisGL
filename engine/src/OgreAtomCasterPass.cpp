@@ -12,7 +12,7 @@
 //      image — an error under one texel moves no texel's depth by more than the
 //      rasteriser's own quantisation. FRUSTUM ONLY: a light has no depth pyramid.
 //      The predicate is the node kind's caster channel on the GPU scene's flags:
-//      kGpuVisible | kGpuAtom | kGpuCaster, and for the probe kind (probes, cards —
+//      kGpuVisible | kGpuAtom | kGpuCaster, and for the probe kind (probes —
 //      the still world, shadowCasterChannels) not kGpuMover.
 //   2. THE EDGES the id pass records (the previous use's draw reads before this cut's
 //      writes; the cut's writes before the draw's indirect/index/vertex reads).
@@ -637,11 +637,10 @@ void recordCasterPass(AtomPassContext &ctx) {
     // THE MAP'S OWN HEIGHT in texels: the rule's footprint is one texel of this map.
     fillCullFrustum(cam, float(std::max(1u, rect[3])), req);
     req.flagsRequired = kGpuVisible | kGpuAtom | kGpuCaster;
-    // THE NODE KIND'S CHANNEL (shadowCasterChannels): a probe-kind node (probes, cards)
+    // THE NODE KIND'S CHANNEL (shadowCasterChannels): a probe-kind node (the probes)
     // draws the still world only.
     const Ogre::IdString nodeName = pass->getParentNode()->getName();
-    const bool probeKind = nodeName == Ogre::IdString(OgreView::kProbeShadowNodeName) ||
-                           nodeName == Ogre::IdString(OgreView::kCardShadowNodeName);
+    const bool probeKind = nodeName == Ogre::IdString(OgreView::kProbeShadowNodeName);
     req.flagsForbidden = probeKind ? kGpuMover : 0u;
     req.hzbLevels = 0u;
     req.pixelTolerance = kLodBudgetPixels * scene->lodBias();

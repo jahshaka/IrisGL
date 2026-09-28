@@ -25,7 +25,7 @@
 // THE ARITHMETIC IS THE OLD CPU WRITER'S, field for field (engine.tlas_compute
 // holds the array byte-equal to a reference writer): the transform is the table's
 // world rows (row-major 3x4 is exactly VkTransformMatrixKHR), the custom index the
-// slot, the near mask near | caster | mover-or-still | mover-caster, the far mask
+// slot, the near mask near | caster | mover-or-still | mover-caster | still-caster, the far mask
 // far alone, the flags TRIANGLE_FACING_CULL_DISABLE, the near level
 // min(ray level, coarsest).
 
@@ -71,6 +71,7 @@ layout( std430, set = 0, binding = 2 ) writeonly buffer Out { AsInstance outInst
 #define HDR_FLAG_CASTER		11u
 #define HDR_FLAG_MOVER		12u
 #define HDR_FLAG_SKINNED	13u
+#define HDR_MASK_STILLCAST	14u
 #define HDR_WORDS			16u
 #define LEVEL_SLOTS			16u
 #define MESH_WORDS			36u
@@ -118,6 +119,8 @@ void main()
 		mask |= mover ? words[HDR_MASK_MOVER] : words[HDR_MASK_STILL];
 		if( mover && ( flags & words[HDR_FLAG_CASTER] ) != 0u )
 			mask |= words[HDR_MASK_MOVERCAST];
+		if( !mover && ( flags & words[HDR_FLAG_CASTER] ) != 0u )
+			mask |= words[HDR_MASK_STILLCAST];
 
 		if( ( flags & words[HDR_FLAG_SKINNED] ) != 0u )
 		{

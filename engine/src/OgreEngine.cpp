@@ -3185,12 +3185,6 @@ void OgreEngine::createShadowNode() {
                         std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps),
                         mShadowPerMapClears, probeRes / 2u);
     }
-    // The CARD-CAPTURE node (OgreView::kCardShadowNodeName has the numbers):
-    // the sun's PSSM at the probe resolution, no focused maps, one whole-atlas
-    // clear — instantiated once per scene whose surface cache is on.
-    if (!cm->hasShadowNodeDefinition(OgreView::kCardShadowNodeName))
-        buildShadowNode(OgreView::kCardShadowNodeName, probeShadowResolution(mShadowResolution), 0u,
-                        false, 0u);
 }
 
 }  // namespace detail

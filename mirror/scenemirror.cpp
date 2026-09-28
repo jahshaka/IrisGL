@@ -7178,10 +7178,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
         gi.dragMoverChannel   = mSource->giDragMoverChannel > 0;
         // THE SURFACE CACHE's three rows, pushed as they are authored. `cards`
-        // is a GiToggle and the ENGINE resolves Auto (on exactly where the
-        // reflection trace runs — a ray's hit reads the card first), so the
-        // mirror decides nothing.
-        gi.cards = toggle(mSource->giCards);
+        // is off (0) or auto (-1): the engine's bool is "on wherever the rays
+        // run" and the ENGINE resolves it against the rays (a ray's hit reads the
+        // card first; a card's sun term is traced), so the mirror decides nothing.
+        gi.cards = mSource->giCards != 0;
         gi.cardBudgetTexels = qMax(0, mSource->giCardBudgetTexels);
         gi.cardResidencyRadius = qMax(0.0f, mSource->giCardRadius);
         gi.cascadeCount = 0;

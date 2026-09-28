@@ -3721,7 +3721,7 @@ public:
     bool cardMoverFrame(CardMoverFrame &out);
     bool traceCardMovers(const CardMoverTrace &job);
     void timeCardRelight(bool begin);
-    void cardMoverTimes(float &traceMs, float &relightMs);
+    void cardMoverTimes(float &traceMs, float &relightMs, float &stillMs);
     /// The mover list as last walked, and the slot count it was walked at: the
     /// walk runs only on a frame whose moved set is not empty or whose slot
     /// count changed (or a moved slot now holds another node).
@@ -3755,6 +3755,9 @@ public:
     }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     std::unique_ptr<SurfaceCache> mSurfaceCache;
+    /// The ray rule's footprint per metre of distance, as updateRayLevels last
+    /// computed it (the surface cache's still-trace lift, CardSceneView).
+    float mRayFootprintPerMetre = 0.0f;
     /// THE SCREEN-PROBE GATHER (GATHER-1a). Both are defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan — and both
@@ -6849,9 +6852,6 @@ public:
     /// PBS variants (numShadowMapLights differs from the main view's), compiled
     /// once and disk-cached, exactly like the reflect node's.
     static constexpr const char *kProbeShadowNodeName = "JahshakaProbeShadowNode";
-    /// The FOURTH shadow node: the surface cache's card capture only — the sun's
-    /// PSSM at the probe resolution, nothing else (why: DOCS/traps/ENGINE.md, "CARD SHADOW NODE").
-    static constexpr const char *kCardShadowNodeName = "JahshakaCardShadowNode";
 
     // ---- The workspace seam (POST_CHAIN_SPEC.md; the planar-reflection lane
     //      depends on it) ---------------------------------------------------

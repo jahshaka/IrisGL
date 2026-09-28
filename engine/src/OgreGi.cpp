@@ -7301,14 +7301,15 @@ void OgreScene::teardownGi() {
 // re-captures them a few at a time rather than the placement capturing the
 // whole grid inline.
 bool OgreScene::dropGiForShadowRebuild() {
-    // THE SURFACE CACHE'S CAPTURE WORKSPACE HOLDS ONE TOO (SURFACE-CACHE phase
-    // 2), on the SAME probe definition — a shadow-atlas rebuild removes that
-    // definition and creates it again, and a workspace left holding an instance
-    // of the removed one is risk R3's SEGV with a different owner. The cache is
-    // dropped WHOLE rather than re-created here: its atlas is a cache by
-    // definition, the next frame's `updateSurfaceCache` rebuilds it, and the
-    // residency pass re-queues everything inside the radius — which costs the
-    // tier's budget for a few frames and nothing else.
+    // THE SURFACE CACHE IS DROPPED TOO — no longer for a shadow node (its capture
+    // holds none since ATOM-S3-CARDCAP: the sun term is traced) but for its
+    // RESIDENCY: the atlas has no eviction yet (paging is E P2), so the resident
+    // set is first-come at the camera where the cache filled, and a rebuild here
+    // re-derives it at the current camera. Measured on gi.pcc_mirror.ray_tier:
+    // kept alive across the open's shadow-atlas growth, Showroom 2's full atlas held
+    // the open camera's nine instances where a rebuild holds eight, and the
+    // mirror's picture differed by 91/255 across a rays off/on round trip. Delete
+    // this with the eviction.
     if (mSurfaceCache) mSurfaceCache.reset();
     // The shadowed PCC probes hold live CompositorShadowNodes on the probe
     // definition, one workspace each.
