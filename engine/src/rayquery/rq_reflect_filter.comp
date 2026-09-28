@@ -133,6 +133,14 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 prevRayRight2;
 	vec4 prevRayDown2;
 	vec4 prevFwd2;
+	/// ...the trace's surface-cache and hit-record blocks (unread here), then
+	/// REFLECT-MOVERS-1's `motion`: w = 1 with the lane's rules on — the restart
+	/// band below reads it.
+	vec4 cards;
+	vec4 hitList;
+	vec4 hitSun;
+	vec4 hitSun2;
+	vec4 motion;
 } p;
 
 /// THE PER-EYE BASIS IS THE TRACE'S, NOT THIS PASS'. `rq_reflect.comp` shares
@@ -208,6 +216,21 @@ const int   kMaxRadius = 3;
 /// whose gradient is zero and whose only spread is the depth buffer's own
 /// precision.
 const float kDepthSigma = 3.0;
+/// A HISTORY THAT HAS JUST RESTARTED (REFLECT-MOVERS-1, the brief's disocclusion
+/// step). In a WARM view every restart — a surface revealed from behind a moving
+/// object, a surface that moved, a turn onto new floor — is seeded at exactly
+/// kWarmupFrames and counted from there (rq_reflect.comp's DRAG-1 seed), so a
+/// count within kFreshFrames of kWarmupFrames + 1 is a mean of that many real
+/// samples and no more: one noisy ray standing in for an integral. Such a texel
+/// widens its kernel to ceil( kFreshRadius x (1 - k / kFreshFrames) ) trace texels
+/// k frames after the restart — 3 for the first three frames, 2 for the next
+/// three, 1 for the last two — the same depth and normal
+/// weights, so never across a silhouette — shrinking back to the lobe's own as
+/// its samples arrive (the SVGF step that stands in for a history it does not
+/// have). A MIRROR is still never filtered: its one sample is exact. A YOUNG
+/// view is left alone (its pixels count up from one — the screenshot's fade).
+const float kFreshFrames = 8.0;
+const int   kFreshRadius = 3;
 const float kDepthFloorRel = 0.002;
 const float kNormalPower = 32.0;
 
@@ -289,9 +312,17 @@ void main()
 	// for four times the relative cost — 0.222 ms against a 0.2 ms bar on the
 	// saturated fixture, while full-res sat at 0.634 against 0.8.
 	const float texelsPerPixel = max( float( scale.x ), 1.0 );
-	const int radius = int( min( float( kMaxRadius ),
-								 floor( kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) /
-										texelsPerPixel ) ) );
+	int radius = int( min( float( kMaxRadius ),
+						   floor( kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) / texelsPerPixel ) ) );
+	bool fresh = false;
+	{
+		const float sinceRestart = count - ( kWarmupFrames + 1.0 );
+		fresh = p.motion.w > 0.5 && p.stereo.y >= kWarmupFrames + kFreshFrames + 1.0 && sinceRestart >= 0.0 &&
+				sinceRestart < kFreshFrames;
+		if( fresh )
+			radius = max( radius, int( ceil( float( kFreshRadius ) *
+											 ( 1.0 - sinceRestart / kFreshFrames ) ) ) );
+	}
 	if( radius > 0 && lobeAlpha > kMirrorAlpha )
 	{
 		const float centreDist = viewDistance( rawDepth );
@@ -367,6 +398,7 @@ void main()
 				// à-trous step of 1 is at this radius.
 				const float sw = max( 0.0, 1.0 - length( vec2( dx, dy ) ) / float( radius + 1 ) );
 				const float w = sw * pow( ndot, kNormalPower ) * ( 1.0 - dz / tol );
+
 				if( w <= 0.0 )
 					continue;
 				sum += h.xyz * w;

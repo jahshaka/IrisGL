@@ -325,6 +325,10 @@ public:
     /// piece (a pass with no `hlms_screen_pos_int` has no `iFragCoord`, one
     /// with no `needs_env_brdf` has no `envColourD`), which loses the frame.
     void passPosExecute(Ogre::CompositorPass *pass) override;
+    /// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1): in front of the SSR
+    /// resolve (kSsrResolvePassIdentifier), BEFORE the pass analyses its barriers,
+    /// so the velocity the job writes as a UAV is transitioned to the resolve's read.
+    void passEarlyPreExecute(Ogre::CompositorPass *pass) override;
     /// THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) shades with the prepass
     /// too, in front of the opaque pass: the ray jobs finish in front of IT, and its
     /// pass-scoped registrations stand until the opaque pass is over — one window
@@ -1053,6 +1057,10 @@ constexpr Ogre::uint32 kHitDecodePassIdentifier = 25002u;
 /// them; the ray tier's finishes its jobs in front of the first one that shades with
 /// the prepass. Stamped on exactly those passes.
 constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
+/// THE SCREEN MARCH'S RESOLVE (REFLECT-MOVERS-1): the ray tier writes the object
+/// motion the resolve reads (`jahSsrVelocity`, rq_motion.comp) in this pass' early
+/// pre-execute. Stamped on exactly that pass.
+constexpr Ogre::uint32 kSsrResolvePassIdentifier = 25004u;
 /// The hit list's height as a factor of the target's (ChainDesc::hitDecode).
 constexpr float kHitListHeightFactor = 0.5625f;
 

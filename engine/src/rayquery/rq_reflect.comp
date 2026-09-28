@@ -163,6 +163,16 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 hitList;
 	vec4 hitSun;
 	vec4 hitSun2;
+	/// ---- A MOVING OBJECT (REFLECT-MOVERS-1) --------------------------------
+	/// x = 1 when the VIEW'S ID IMAGE is bound (binding 37, the visibility
+	/// buffer's `jahAtomIds`: which slot drew each pixel) — then a pixel on a
+	/// moving slot reprojects through that slot's two poses (jah_reproject.glsl).
+	/// 0 = no id pass on this chain (a stereo chain, the split off): every
+	/// surface takes the camera path. yz = the id image's size in pixels.
+	/// w = 1 with the lane's hit-motion rules on, 2 when a mover also moved in the
+	/// last two frames (the departure rule's gate); 0 = JAH_R5_NO_MOTION, the
+	/// measuring door: the camera-only history of before.
+	vec4 motion;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -372,6 +382,37 @@ void photonHit( ivec2 tc, vec4 c )
 /// with the gather's histories (PHOTON-GATHER-1c).
 #include "jah_reproject.glsl"
 
+/// THE VIEW'S ID IMAGE (REFLECT-MOVERS-1): x = the slot that drew the pixel
+/// (jah_atom_id.glsl's encoding; 0xFFFFFFFF = nothing, or an item the id pass does
+/// not draw). Read only under p.motion.x; a 1x1 stand-in is bound otherwise.
+layout( set = 0, binding = 37 ) uniform usampler2D atomIds;
+#include "jah_atom_id.glsl"
+
+/// A SLOT THAT MOVED THIS FRAME, with its six rows (the instance table's lanes
+/// 0-2 = world, 3-5 = prevWorld — GpuScene.h). False for a slot the table does
+/// not hold, a still one and a mover at rest.
+struct MovedSlot
+{
+	bool  moved;
+	uvec4 w0, w1, w2, q0, q1, q2;
+};
+MovedSlot movedSlot( uint slot )
+{
+	MovedSlot m;
+	m.moved = false;
+	// THE FLAGS FIRST: a still slot (every pixel of a still world) costs one word.
+	if( slot >= JAH_HIT_INSTANCES || ( jahHitFlags( slot ) & kJahReprojectMoverFlags ) == 0u )
+		return m;
+	m.w0 = JAH_HIT_INSTANCE( slot, 0u ); m.w1 = JAH_HIT_INSTANCE( slot, 1u ); m.w2 = JAH_HIT_INSTANCE( slot, 2u );
+	m.q0 = JAH_HIT_INSTANCE( slot, 3u ); m.q1 = JAH_HIT_INSTANCE( slot, 4u ); m.q2 = JAH_HIT_INSTANCE( slot, 5u );
+	m.moved = jahInstanceMoved( jahHitFlags( slot ), m.w0, m.w1, m.w2, m.q0, m.q1, m.q2 );
+	return m;
+}
+vec3 movedPrevPosition( MovedSlot m, vec3 x )
+{
+	return jahInstancePrevPosition( m.w0, m.w1, m.w2, m.q0, m.q1, m.q2, x );
+}
+
 /// Metres along the camera's forward axis, with and without reverse Z — the
 /// same line JahSsrRayMarch_ps.glsl uses, from Camera::getProjectionParamsAB().
 float viewDistance( float rawDepth )
@@ -484,6 +525,29 @@ vec3 skyRadiance( vec3 dir, float lobeAlpha )
 	return jahSkyRadiance( dir, tanHalf );
 }
 
+/// THE MEAN'S MOVER AGE (REFLECT-MOVERS-1), carried in the six low mantissa bits
+/// of the mean ray length (historyDist .y — a relative error of 2^-17 on a length
+/// only ever compared at 25 %): how many frames ago a ray of this texel last hit a
+/// MOVING slot, saturating at 63, stored inverted so a cleared texel reads "never".
+/// A single sample's coin toss is not evidence about a glossy mean — its lobe's
+/// tail misses a moving object inside the object's own reflection, and its blurred
+/// edge hits it on some frames only — so the rules below read the age, never one
+/// sample's flag.
+const float kMoverMeanFrames = 16.0;
+float jahPackMeanLength( float len, float moverAge )
+{
+	const uint bits = floatBitsToUint( max( len, 1e-3 ) ) & ~63u;
+	return uintBitsToFloat( bits | ( 63u - uint( clamp( moverAge, 0.0, 63.0 ) ) ) );
+}
+float jahMeanLength( float y )
+{
+	return uintBitsToFloat( floatBitsToUint( y ) & ~63u );
+}
+float jahMeanMoverAge( float y )
+{
+	return float( 63u - ( floatBitsToUint( y ) & 63u ) );
+}
+
 /// THE TEMPORAL MEAN'S PREVIOUS VALUE, reprojected and VALIDATED. The history
 /// is a screen-space buffer, so last frame's texel at this pixel belongs to
 /// whatever the camera was looking at then: the world position is projected
@@ -508,10 +572,11 @@ vec3 skyRadiance( vec3 dir, float lobeAlpha )
 /// belongs to a different camera and whose distances belong to different
 /// silhouettes.
 vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float warmHeld,
-				out float wasHitT )
+				out float wasHitT, out float wasMoverAge )
 {
 	warmHeld = 0.0;
 	wasHitT = 0.0;
+	wasMoverAge = 63.0;
 	// A SURFACE THE CAMERA HAS JUST TURNED ONTO (PAN-SMEAR-1). It was behind the
 	// previous camera or outside its picture, so there is no texel to reproject
 	// from — and that used to read as "no history at all", the fresh-view case:
@@ -582,9 +647,53 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 	if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
 		return vec4( 0.0 );
 	// HOW FAR AWAY the thing in this mean was (the second channel): what main()
-	// compares this frame's ray against when the camera has moved.
-	wasHitT = finite1( wasPair.y ) ? max( wasPair.y, 0.0 ) : 0.0;
+	// compares this frame's ray against when the camera has moved — with the
+	// texel's MOVER AGE in its six low mantissa bits (jahPackMeanLength).
+	wasHitT = finite1( wasPair.y ) && wasPair.y > 0.0 ? jahMeanLength( wasPair.y ) : 0.0;
+	wasMoverAge = wasHitT > 0.0 ? jahMeanMoverAge( wasPair.y ) : 63.0;
 	return vec4( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), h.w );
+}
+
+/// THE REFLECTED IMAGE'S HISTORY (REFLECT-MOVERS-1): the mean at a CONTINUOUS
+/// previous-frame position, filtered BILINEARLY over the four texels around it —
+/// each one validated as the same surface (the 5 % test) and as a mean of the
+/// moving thing (its mover flag), the survivors' weights renormalised. A moving
+/// reflection is found at a sub-texel offset every frame; a nearest-texel read
+/// would resample the mean with a different rounding each frame, a shimmer of its
+/// own. Returns w = 0 when under a quarter of the footprint survived.
+vec4 historyAtImage( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float wasHitT )
+{
+	wasHitT = 0.0;
+	vec2 uv;
+	float z;
+	if( jahReproject( world, before.camPos, before.perspective, before.rayTL, before.rayRight,
+					  before.rayDown, before.fwd, uv, z ) != 0 )
+		return vec4( 0.0 );
+	const vec2 f = eyeGlobalUv( uv, eye ) * vec2( traceRes ) - 0.5;
+	const ivec2 base = ivec2( floor( f ) );
+	const vec2 fr = f - vec2( base );
+	vec4 sum = vec4( 0.0 );
+	float sumW = 0.0, sumT = 0.0;
+	for( int k = 0; k < 4; ++k )
+	{
+		const ivec2 o = ivec2( k & 1, k >> 1 );
+		const ivec2 pc = clamp( base + o, ivec2( 0 ), traceRes - 1 );
+		const float bw = ( o.x == 1 ? fr.x : 1.0 - fr.x ) * ( o.y == 1 ? fr.y : 1.0 - fr.y );
+		const vec2 pair = imageLoad( historyDistPrev, pc ).xy;
+		if( bw <= 0.0 || !jahSameDistance( pair.x, z ) || !finite1( pair.y ) || pair.y <= 0.0 ||
+			jahMeanMoverAge( pair.y ) >= kMoverMeanFrames )
+			continue;
+		const vec4 h = imageLoad( historyPrev, pc );
+		if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
+			continue;
+		sum += vec4( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), h.w ) * bw;
+		sumT += jahMeanLength( pair.y ) * bw;
+		sumW += bw;
+	}
+	if( sumW < 0.25 )
+		return vec4( 0.0 );
+	wasHitT = sumT / sumW;
+	return sum / sumW;
 }
 
 void main()
@@ -689,13 +798,31 @@ void main()
 	if( dot( L, worldN ) <= 0.0 )
 		L = reflect( -V, worldN );		// the lobe left the surface: take the mirror
 
-	// THE REPROJECTED HISTORY IS READ BEFORE THE RAY IS TRACED: the temporal
-	// mean below is computed from it whether this frame's radiance comes from
-	// the caches (now) or from the hit decode (rq_hit_composite.comp, after the
-	// decode pass — PHOTON-HIT-SHADE-1).
-	float warmHeld;
-	float wasHitT;
-	const vec4 prev = historyAt( eyeBefore( eye ), eye, world, traceRes, warmHeld, wasHitT );
+	// THIS SURFACE, LAST FRAME (REFLECT-MOVERS-1). A pixel the id pass drew for a
+	// slot that MOVED this frame was at that slot's previous pose: its point and
+	// normal are carried back through the slot's two transforms. Every other
+	// pixel — a still surface, a mover at rest, an item the id pass does not draw,
+	// a chain with no id pass — is where it is, and takes the camera path below
+	// exactly as before.
+	vec3 prevSurf = world;
+	vec3 prevSurfN = worldN;
+	bool ownMoving = false;
+	if( p.motion.x > 0.5 )
+	{
+		const ivec2 idPx = clamp( ivec2( uv * p.motion.yz ), ivec2( 0 ), ivec2( p.motion.yz ) - 1 );
+		const uint idX = texelFetch( atomIds, idPx, 0 ).x;
+		if( idX != JAH_ATOM_ID_EMPTY )
+		{
+			const MovedSlot own = movedSlot( idX & JAH_ATOM_ID_SLOT_MASK );
+			if( own.moved )
+			{
+				ownMoving = true;
+				prevSurf = movedPrevPosition( own, world );
+				prevSurfN = jahInstancePrevNormal( own.w0, own.w1, own.w2, own.q0, own.q1, own.q2,
+												   worldN );
+			}
+		}
+	}
 
 	// THE RAY. The origin is lifted off its own surface along the NORMAL rather
 	// than along the ray, so a grazing reflection cannot re-enter the surface it
@@ -753,13 +880,131 @@ void main()
 		ok = true;
 		photonSource = 3u;
 	}
+	// THE REPROJECTED HISTORY, read once the ray is known (REFLECT-MOVERS-1: a
+	// ray that hit a MOVING slot finds its history through the reflected image,
+	// below). The temporal mean is computed from it whether this frame's radiance
+	// comes from the caches (now) or from the hit decode (rq_hit_composite.comp,
+	// after the decode pass — PHOTON-HIT-SHADE-1).
+	const EyeImage before = eyeBefore( eye );
+	float warmHeld;
+	float wasHitT;
+	float wasMoverAge;
+	vec4 prev = historyAt( before, eye, prevSurf, traceRes, warmHeld, wasHitT, wasMoverAge );
+	// A RAY THAT HIT A MOVING SLOT: the reflection of that slot moved with it, so
+	// the texel whose reflection showed the same point of it last frame is where
+	// the point's REFLECTED IMAGE was — the virtual point on this pixel's view
+	// ray, the mean's distance beyond the surface, moved by the hit's own step
+	// mirrored in the surface's plane (the standard reflection motion vector). The
+	// previous camera's line to that image crosses the surface's plane at the point
+	// whose history holds it; historyAt's distance test validates the texel, and
+	// the mean found there must be of a moving thing as far away as this texel's.
+	// A virtual texel that fails keeps the surface's history, which the restart
+	// below then judges.
+	bool hitMoving = false;
+	bool hitMover = false;   // a mover-flagged slot, moving or parked (the age's input)
+	bool virtualHeld = false;   // the history was found through the reflected image
+	vec3 prevHit = world + worldN * bias + L * hitT;   // an escape: a point beyond every hit
+	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+	{
+		hitMover = p.motion.w > 0.5 && ( jahHitFlags( recSlot ) & kJahReprojectMoverFlags ) != 0u;
+		const MovedSlot hs = movedSlot( recSlot );
+		if( hs.moved && p.motion.w > 0.5 )
+		{
+			hitMoving = true;
+			prevHit = movedPrevPosition( hs, prevHit );
+		}
+	}
+	// (A MOVING REFLECTOR over a still world keeps its SURFACE's history: the
+	// virtual point is a flat mirror's construction, and on a curved one it names
+	// a texel whose normal — and so whose reflected direction — is another. What
+	// the reflector's step does to its reflection is the "moved" rule's, below.)
+	if( hitMoving )
+	{
+		// AT THE MEAN'S DISTANCE, NOT THIS SAMPLE'S: one GGX sample's length and
+		// direction jump from ray to ray across an object, and a lookup keyed on
+		// them sends neighbouring pixels to unrelated texels — the grain it was
+		// meant to remove. The lobe's centre at the distance the texel's mean
+		// holds is the same point every frame (at rest it IS this texel); this
+		// sample contributes only the hit's step.
+		const vec3 step = prevHit - ( world + worldN * bias + L * hitT );
+		const float imageT = wasHitT > 0.0 ? wasHitT : hitT;
+		const vec3 image = prevSurf - V * imageT + ( step - 2.0 * dot( step, prevSurfN ) * prevSurfN );
+		// the line the previous camera saw the image along: from its eye (a
+		// perspective camera) or along its one direction (an orthographic one)
+		const vec3 dir = before.perspective < 0.5 ? before.fwd : image - before.camPos;
+		const vec3 from = before.perspective < 0.5 ? image : before.camPos;
+		const float denom = dot( dir, prevSurfN );
+		if( abs( denom ) > 1e-6 )
+		{
+			const vec3 onSurf = from + dir * ( dot( prevSurf - from, prevSurfN ) / denom );
+			float vHitT;
+			const vec4 vPrev = historyAtImage( before, eye, onSurf, traceRes, vHitT );
+			const float nearer = max( min( imageT, vHitT ), 1e-3 );
+			// THE SAME THING, MOVING: every tap of that mean hit a moving slot within
+			// kMoverMeanFrames (historyAtImage's age test), and the mean went as far
+			// as this texel's mean did, to within
+			// the lobe's own spread (the tolerance the restart below uses). The
+			// distance is the MEAN's, never one sample's: a glossy lobe's samples
+			// land at many lengths on one object.
+			const float wideV = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
+			if( vPrev.w > 0.0 && vHitT > 0.0 &&
+				abs( imageT - vHitT ) / nearer < mix( 0.25, 4.0, wideV ) )
+			{
+				virtualHeld = true;
+				prev = vPrev;
+				warmHeld = 0.0;
+				wasHitT = vHitT;
+				wasMoverAge = 0.0;
+			}
+		}
+	}
+
+	// A MOVING THING'S REFLECTION WITH NO HISTORY THAT HOLDS IT: this ray hit a
+	// moving slot, or the rays in the mean did, the reflected image found nothing
+	// and the ray length disagrees with the mean's — the floor where a moving
+	// sphere's reflection WAS reflects the room now (or the sphere arrived where
+	// the room was). That is a DISOCCLUSION of the reflection, and it is answered
+	// as one: the mean restarts from this frame's sample at the warm view's seed
+	// (historyAt's rule), so the filter widens over it and the next samples average
+	// in at 1/n — never a memory drop that keeps the count, which would freeze
+	// this one noisy sample into the mean for thirty frames.
+	// THE MISSING SIDE WAITS FOR EVIDENCE: a ray that missed restarts a mean of the
+	// moving thing only on the SECOND consecutive miss (the stored age is 1 or more:
+	// the previous frame's ray missed too) — a trail drains in two frames; the
+	// lobe's tail inside the reflection, and the half-and-half edge, rarely miss
+	// twice running (gi.reflect_mover: the rays glossy floor's grain 2.18x -> 1.28x
+	// the still case's, one frame of trailing-edge trail more).
+	//
+	// THE AGE COUNTS HITS ON A MOVER, MOVING OR PARKED (hitMover): the mean of a
+	// parked mover's reflection must still know what it holds, or the moment the
+	// mover leaves its rays miss a mean that reads "no mover" and drain at the
+	// floor's 1/32 — the sphere's parked pose ghosted on the floor for sixty frames
+	// and more. And the departure rule runs only while movers are moving
+	// (motion.w = 2): at rest a lobe's tail that misses twice is noise.
+	const bool arrived = hitMoving;
+	const bool departed = p.motion.w > 1.5 && !hitMover && wasMoverAge < kMoverMeanFrames &&
+						  wasMoverAge >= 1.0;
+	if( ( arrived || departed ) && !virtualHeld && prev.w > 0.0 && wasHitT > 0.0 )
+	{
+		const float nearer = max( min( hitT, wasHitT ), 1e-3 );
+		const float wide = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
+		if( abs( hitT - wasHitT ) / nearer > mix( 0.25, 4.0, wide ) )
+		{
+			prev = vec4( 0.0 );
+			warmHeld = p.stereo.y >= kWarmupFrames ? 1.0 : 0.0;
+			wasHitT = 0.0;
+			wasMoverAge = 63.0;
+		}
+	}
+
 	if( !record && !finite3( traced ) )
 	{
 		// A NON-FINITE ESCAPE IS NOT EVIDENCE ABOUT THIS PIXEL: the history is
 		// carried through unchanged, and a texel that has never had an answer
 		// (prev.w == 0) writes a zero distance so the filter skips it this frame.
 		imageStore( historyCur, tc, prev );
-		imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
+		imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0,
+											  jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ), 0.0, 0.0 ) );
 		photonHit( tc, kPhotonDropped );
 		return;
 	}
@@ -830,17 +1075,42 @@ void main()
 	float hitMean = hitT;
 	if( prev.w > 0.0 && wasHitT > 0.0 )
 	{
-		const vec3 stepped = thisEye.camPos - eyeBefore( eye ).camPos;
+		const vec3 stepped = thisEye.camPos - before.camPos;
 		const float nearer = max( min( hitT, wasHitT ), 1e-3 );
 		const float apart  = abs( hitT - wasHitT ) / nearer;
 		const float wide   = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
 		const float eyePixels = float( p.stereo.x > 0.5 ? traceRes.x / 2 : traceRes.x );
 		const float halfPixelAngle = 0.5 * length( thisEye.rayRight ) / max( eyePixels, 1.0 );
-		const bool moved = thisEye.perspective > 0.5 && length( stepped ) > nearer * halfPixelAngle;
+		bool moved = thisEye.perspective > 0.5 && length( stepped ) > nearer * halfPixelAngle;
+		float drop = mix( 1.0, 0.35, wide );
+		// A MOVING REFLECTOR (REFLECT-MOVERS-1) sees the world from a new place just
+		// as a moved eye does: the step that matters is the eye's RELATIVE to the
+		// surface. But its reflection is not a new picture to be restarted — what
+		// it reflects slid by the parallax of that step, and a lobe as wide as the
+		// slide still integrates nearly the same things. So the memory given up is
+		// the slide measured against the lobe's width (about 2 alpha, the header's
+		// kMirrorAlpha note): a sharp lobe gives up all of it, a wide one little —
+		// "the memory is bought with the lobe's width", as the mirror ramp above
+		// has it. (Given up whole on every frame, a glossy moving sphere's horizon
+		// — where a lobe's rays land on both the floor and the sky, so every ray
+		// "disagrees" with the mean — sparkled.)
+		if( ownMoving )
+		{
+			const vec3 rel = ( thisEye.perspective > 0.5 ? stepped : vec3( 0.0 ) ) - ( world - prevSurf );
+			const float slide = length( rel ) / nearer;
+			moved = slide > halfPixelAngle;
+			drop *= clamp( slide / max( 2.0 * lobeAlpha, halfPixelAngle ), 0.0, 1.0 );
+		}
+		// (What it reflects moving by itself is the restart above, or a history
+		// found through the reflected image — validated as the same thing, so one
+		// glossy sample's length is no evidence against it.)
 		if( moved && apart > mix( 0.25, 4.0, wide ) )
-			blend = max( blend, mix( 1.0, 0.35, wide ) );
+			blend = max( blend, drop );
 		hitMean = mix( wasHitT, hitT, blend );
 	}
+	// THE MOVER AGE rides the mean length's low bits: 0 when this ray hit a mover
+	// (moving or parked), one frame older otherwise (saturating at 63).
+	const float hitMeanStored = jahPackMeanLength( hitMean, hitMover ? 0.0 : wasMoverAge + 1.0 );
 	const float seed = max( prev.w, warmHeld * kWarmupFrames );
 	const float count = min( seed + 1.0, 4096.0 );
 	if( record )
@@ -858,14 +1128,15 @@ void main()
 						  reflectFootprint( lobeAlpha, hitT ),
 						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false ) ) )
 		{
-			imageStore( historyDistCur, tc, vec4( dist, hitMean, 0.0, 0.0 ) );
+			imageStore( historyDistCur, tc, vec4( dist, hitMeanStored, 0.0, 0.0 ) );
 			photonHit( tc, kPhotonList );
 		}
 		else
 		{
 			// THE LIST WAS FULL (a dropped record, counted): this frame has no
 			// sample for the texel, which keeps what it had.
-			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, wasHitT, 0.0, 0.0 ) );
+			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0,
+												  jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ), 0.0, 0.0 ) );
 			photonHit( tc, kPhotonDropped );
 		}
 		return;
@@ -889,7 +1160,7 @@ void main()
 	// (a graded screenshot's, which lives about two frames) still fades in
 	// exactly as before, which is the guarantee the warm-up exists for.
 	imageStore( historyCur, tc, vec4( mean, count ) );
-	imageStore( historyDistCur, tc, vec4( dist, hitMean, 0.0, 0.0 ) );
+	imageStore( historyDistCur, tc, vec4( dist, hitMeanStored, 0.0, 0.0 ) );
 	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );
 
 	// THE COMPOSITE IS THE FILTER PASS' (round C). This shader now ends at the

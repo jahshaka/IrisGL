@@ -254,6 +254,7 @@ constexpr const char *kSsrPrepassRtv  = "jahSsrPrepassRtv";
 constexpr const char *kSsrRays        = "jahSsrRays";
 constexpr const char *kSsrReflection  = "jahSsrReflection";
 constexpr const char *kSsrPrev        = "jahSsrPrev";
+constexpr const char *kSsrVelocity    = "jahSsrVelocity";
 // THE HIT LIST (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): the names the ray
 // tier reads them by (OgreRayQuery.cpp).
 constexpr const char *kHitIds      = "jahHitIds";
@@ -1411,7 +1412,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
-    n->setNumLocalTextureDefinitions(32);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two
+    n->setNumLocalTextureDefinitions(33);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two + the march's velocity
     if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
@@ -1653,6 +1654,24 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // Its format follows the scene target's so the copy at the end of the
         // frame is an exact one. THE MARCH IS ITS ONLY READER — a rays-only
         // chain reflects the WORLD, not the last frame's picture of it.
+        // THE MARCH'S OBJECT MOTION (REFLECT-MOVERS-1): per pixel, where a MOVING
+        // slot's surface point would sit in this image at its previous pose — a
+        // delta in the target's uv and the depth value, w = 1 — written by the ray
+        // tier (rq_motion.comp) from the id image and the GPU scene's prevWorld;
+        // cleared to w = 0 ("the camera path") every frame in front of it, so a
+        // chain whose job does not run reads exactly the resolve it always did.
+        //
+        // FULL SIZE ONLY WHERE THE JOB RUNS (the ray tier and the id pass): 8 bytes a
+        // pixel — 16.6 MB at 1920x1080 — per march chain. Every other march chain
+        // (no rays, the split off) declares it 1x1: the resolve binds a texture it
+        // reads as "the camera path" everywhere, clamping its fetch into the texture.
+        if (ssrMarch) {
+            const bool velocityJob = desc.rayReflect && desc.atomDraw;
+            auto *td = velocityJob ? addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT)
+                                   : addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT, 1u, 1u);
+            td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+            if (velocityJob) td->textureFlags |= Ogre::TextureFlags::Uav;
+        }
         if (ssrMarch) {
             auto *td = addTex(n, kSsrPrev,
                               floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
@@ -1963,7 +1982,17 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // THE RESOLVE, always full resolution — HlmsPbs fetches this one at the
         // fragment's own pixel.
         if (ssrMarch) {
+            Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrVelocity);
+            t->setNumPasses(1);
+            auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+            c->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
+            c->mProfilingId = "Jahshaka SSR velocity clear";
+        }
+        if (ssrMarch) {
             auto *q = addQuad(n, kSsrReflection, "Jahshaka/SsrResolve", "Jahshaka SSR resolve");
+            // the ray tier's object-motion job runs in front of it (kSsrResolvePassIdentifier)
+            q->mIdentifier = kSsrResolvePassIdentifier;
+            q->addQuadTextureSource(4, kSsrVelocity);
             q->addQuadTextureSource(0, kSsrRays);
             q->addQuadTextureSource(1, kSsrShadowRough);
             q->addQuadTextureSource(2, kSsrPrev);

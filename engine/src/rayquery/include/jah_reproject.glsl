@@ -56,4 +56,63 @@ bool jahSameDistance( float wasDist, float dist )
 	return wasDist > 0.0 && abs( wasDist - dist ) <= 0.05 * max( dist, 1.0 );
 }
 
+// ---- A MOVING OBJECT (REFLECT-MOVERS-1) ------------------------------------
+// The camera path above is exact for everything that stood still. A point ON A
+// MOVER was somewhere else last frame, so the camera alone sends it to the
+// texel where the object USED to be — the distance test rejects that texel and
+// the temporal mean restarts from one sample, every frame the object moves: the
+// dither the owner saw on a moving glossy sphere. The GPU scene already keeps
+// both poses of every slot (GpuScene.h, GpuInstance::world / prevWorld: the
+// previous frame's EXACTLY, and prevWorld == world bit for bit for anything
+// that did not move this frame), so the point's previous position is the
+// inverse of this pose followed by the last one.
+//
+// A CALLER hands over the slot's six rows as read from the instance table (row
+// i of `world` is `w[i]`, of `prevWorld` is `q[i]`: ROW-MAJOR 3x4, the top three
+// rows of Ogre's Matrix4 — GpuScene.h's warning against reading them as a
+// mat3x4) and its flags word.
+
+/// GpuScene.h GpuInstanceFlag: kGpuMover (the document says it moves) and
+/// kGpuDragMover (the user holds it). Anything else never takes the branch.
+const uint kJahReprojectMoverFlags = ( 1u << 2u ) | ( 1u << 8u );
+
+/// Did this slot move between the last frame and this one? Only a mover can,
+/// and only when its two poses differ in some bit — a mover at rest takes the
+/// camera path exactly as a still object does, so no still pixel moves.
+bool jahInstanceMoved( uint flags, uvec4 w0, uvec4 w1, uvec4 w2, uvec4 q0, uvec4 q1, uvec4 q2 )
+{
+	if( ( flags & kJahReprojectMoverFlags ) == 0u )
+		return false;
+	return any( notEqual( w0, q0 ) ) || any( notEqual( w1, q1 ) ) || any( notEqual( w2, q2 ) );
+}
+
+/// WHERE A POINT OF THE SLOT WAS LAST FRAME: this pose inverted, the last one
+/// applied. The 3x3 is inverted whole (a scale, a shear from a scaled parent),
+/// never assumed to be a rotation.
+vec3 jahInstancePrevPosition( uvec4 w0, uvec4 w1, uvec4 w2, uvec4 q0, uvec4 q1, uvec4 q2,
+							  vec3 x )
+{
+	const vec4 a0 = uintBitsToFloat( w0 ), a1 = uintBitsToFloat( w1 ), a2 = uintBitsToFloat( w2 );
+	const vec4 b0 = uintBitsToFloat( q0 ), b1 = uintBitsToFloat( q1 ), b2 = uintBitsToFloat( q2 );
+	// GLSL matrices are built from COLUMNS: the transpose of the three rows.
+	const mat3 m = transpose( mat3( a0.xyz, a1.xyz, a2.xyz ) );
+	const vec3 local = inverse( m ) * ( x - vec3( a0.w, a1.w, a2.w ) );
+	const vec4 l4 = vec4( local, 1.0 );
+	return vec3( dot( b0, l4 ), dot( b1, l4 ), dot( b2, l4 ) );
+}
+
+/// ...and a DIRECTION of the slot (a normal: the inverse transpose), last frame.
+vec3 jahInstancePrevNormal( uvec4 w0, uvec4 w1, uvec4 w2, uvec4 q0, uvec4 q1, uvec4 q2, vec3 n )
+{
+	const vec4 a0 = uintBitsToFloat( w0 ), a1 = uintBitsToFloat( w1 ), a2 = uintBitsToFloat( w2 );
+	const vec4 b0 = uintBitsToFloat( q0 ), b1 = uintBitsToFloat( q1 ), b2 = uintBitsToFloat( q2 );
+	const mat3 m = transpose( mat3( a0.xyz, a1.xyz, a2.xyz ) );
+	const mat3 pm = transpose( mat3( b0.xyz, b1.xyz, b2.xyz ) );
+	// object-space normal = transpose(m) * n (up to scale); back out through pm's inverse transpose
+	const vec3 local = transpose( m ) * n;
+	const vec3 was = transpose( inverse( pm ) ) * local;
+	const float l2 = dot( was, was );
+	return l2 > 1e-20 ? was * inversesqrt( l2 ) : n;
+}
+
 #endif   // JAH_REPROJECT_GLSL

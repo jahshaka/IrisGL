@@ -75,6 +75,7 @@
 #include "rayquery/rq_rays_spv.h"
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
+#include "rayquery/rq_motion_spv.h"
 #include "rayquery/rq_card_parity_spv.h"
 #include "rayquery/rq_sun_contact_spv.h"
 #include "rayquery/rq_hit_composite_spv.h"
@@ -239,7 +240,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 37u;
+constexpr unsigned kReflectBindings = 38u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -273,8 +274,13 @@ constexpr unsigned kReflectCardViewBinding = 31u;
 /// ...and THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1): one storage image the trace
 /// writes the Hits picture into (36, rq_reflect.comp) — the set's last binding.
 constexpr unsigned kReflectPhotonBinding = kReflectCardViewBinding + SurfaceCache::kViewLayers;
-static_assert(kReflectBindings == kReflectPhotonBinding + 1u,
-              "the photon overlay is the reflection set's last binding");
+/// ...and THE VIEW'S ID IMAGE (REFLECT-MOVERS-1): the visibility buffer's
+/// `jahAtomIds` (which slot drew each pixel), so a pixel on a MOVING slot finds its
+/// history through that slot's two poses (37, rq_reflect.comp) — the set's last
+/// binding.
+constexpr unsigned kReflectIdBinding = kReflectPhotonBinding + 1u;
+static_assert(kReflectBindings == kReflectIdBinding + 1u,
+              "the id image is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas.
@@ -731,6 +737,10 @@ private:
     /// storage buffer for the two tables, with ZERO instance slots in the
     /// parameters, so the read declines every hit without touching them.
     ReflectImage mDummyCube, mDummyVolume, mDummyFlat;
+    /// ...and the reflection's ID IMAGE stand-in (REFLECT-MOVERS-1): a 1x1
+    /// R32G32_UINT cleared to "nothing drew here", bound where the view's chain
+    /// carries no id pass (the shader reads it only under `motion.x`).
+    ReflectImage mDummyIds;
     RawBuffer mDummyStorage;
     bool mDummiesReady = false;
     bool mDummiesNeedClear = false;
@@ -759,6 +769,11 @@ public:
     /// the composite, in front of the opaque pass — after the hit write-back has
     /// completed the temporal mean of every texel whose ray the decode shaded.
     void finishReflect(const ReflectPassListener *key);
+    /// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1): writes `jahSsrVelocity`
+    /// at every pixel of a slot that moved this frame (rq_motion.comp), in front of
+    /// the resolve that reads it. Does nothing — the chain's clear stands, the
+    /// camera path — when the chain carries no id pass or the switch is off.
+    void recordMotion(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
     /// Frees a view's reflection resources. Called from ~ReflectPassListener.
     void forgetReflect(const ReflectPassListener *key);
     /// How many rays the last recorded trace dispatched, and the GPU
@@ -780,6 +795,19 @@ private:
     };
 
     struct ReflectView {
+        /// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1, rq_motion.comp): its
+        /// own ring of sets and parameter buffers, recorded in front of the resolve.
+        VkDescriptorSet motionSets[3] = {};
+        RawBuffer       motionParams[3];
+        unsigned        motionFrame = 0;
+        /// ...and its timestamp pair, on the view's reflection query slot
+        /// (queryBase) in a pool of its own.
+        struct MotionPending { unsigned frame = 0; bool live = false; };
+        MotionPending   motionPending[3];
+        float           motionGpuMs = -1.0f;
+        /// Frames since a MOVER slot (kGpuMover | kGpuDragMover) last moved in this
+        /// view's scene — the trace's departure rule is live only just after one did.
+        unsigned        framesSinceMoverMoved = 1000u;
         /// The descriptor ring. A set that is bound by a command buffer still in
         /// flight may not be rewritten, and every input of this pass can be
         /// recreated behind our back (a workspace rebuild replaces every texture
@@ -850,6 +878,14 @@ private:
     void readReflectTimestamps(ReflectView &rv);
 
     std::unordered_map<const ReflectPassListener *, ReflectView> mReflects;
+    bool makeMotionPipeline(std::string &err);
+    VkDescriptorSetLayout mMotionSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mMotionPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mMotionPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mMotionModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mMotionPool = VK_NULL_HANDLE;
+    VkQueryPool           mMotionTimestamps = VK_NULL_HANDLE;
+    bool                  mMotionFailed = false;
     VkDescriptorSetLayout mReflectSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mReflectPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mReflectPipeline = VK_NULL_HANDLE;
@@ -1445,6 +1481,48 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
             return false;
         }
     }
+    {   // THE ID IMAGE'S STAND-IN (REFLECT-MOVERS-1): an unsigned image, for a usampler.
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = VK_FORMAT_R32G32_UINT;
+        ici.extent = { 1u, 1u, 1u };
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(mVk, &ici, nullptr, &mDummyIds.image) != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateImage (id stand-in) failed";
+            return false;
+        }
+        VkMemoryRequirements req{};
+        vkGetImageMemoryRequirements(mVk, mDummyIds.image, &req);
+        VkMemoryAllocateInfo mai{};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mai.memoryTypeIndex == uint32_t(-1) ||
+            vkAllocateMemory(mVk, &mai, nullptr, &mDummyIds.memory) != VK_SUCCESS) {
+            err = "rayquery/reflect: no memory for the id stand-in";
+            return false;
+        }
+        vkBindImageMemory(mVk, mDummyIds.image, mDummyIds.memory, 0);
+        VkImageViewCreateInfo vci{};
+        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image = mDummyIds.image;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = VK_FORMAT_R32G32_UINT;
+        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.levelCount = 1;
+        vci.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(mVk, &vci, nullptr, &mDummyIds.view) != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateImageView (id stand-in) failed";
+            return false;
+        }
+    }
     if (!mDummyStorage.buffer &&
         !makeBuffer(256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, mDummyStorage, err))
         return false;
@@ -1457,9 +1535,9 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
 void RayQueryTier::clearDummyImages(VkCommandBuffer cmd) {
     if (!mDummiesNeedClear) return;
     mDummiesNeedClear = false;
-    ReflectImage *imgs[3] = { &mDummyCube, &mDummyVolume, &mDummyFlat };
-    const uint32_t layers[3] = { 6u, 1u, 1u };
-    for (int i = 0; i < 3; ++i) {
+    ReflectImage *imgs[4] = { &mDummyCube, &mDummyVolume, &mDummyFlat, &mDummyIds };
+    const uint32_t layers[4] = { 6u, 1u, 1u, 1u };
+    for (int i = 0; i < 4; ++i) {
         VkImageSubresourceRange range{};
         range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         range.levelCount = 1;
@@ -1475,6 +1553,8 @@ void RayQueryTier::clearDummyImages(VkCommandBuffer cmd) {
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
         VkClearColorValue zero{};
+        // the id stand-in reads "nothing drew here" (jah_atom_id.glsl's empty word)
+        if (imgs[i] == &mDummyIds) zero.uint32[0] = zero.uint32[1] = 0xFFFFFFFFu;
         vkCmdClearColorImage(cmd, imgs[i]->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1,
                              &range);
         b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1817,7 +1897,7 @@ void RayQueryTier::close() {
     // (`mDummyArray` — SURFACE-CACHE-0's 1x1x6 stand-in for the card spike's
     // five bindings — went with the spike at SURFACE-CACHE-1b; nothing in the
     // gather or the reflect job binds a 2D ARRAY.)
-    for (ReflectImage *d : { &mDummyCube, &mDummyVolume, &mDummyFlat }) {
+    for (ReflectImage *d : { &mDummyCube, &mDummyVolume, &mDummyFlat, &mDummyIds }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
         if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
@@ -1890,6 +1970,16 @@ void RayQueryTier::close() {
     mCardParityPool = VK_NULL_HANDLE; mCardParityPipeline = VK_NULL_HANDLE;
     mCardParityModule = VK_NULL_HANDLE; mCardParityPipeLayout = VK_NULL_HANDLE;
     mCardParitySetLayout = VK_NULL_HANDLE;
+    if (mMotionPool) vkDestroyDescriptorPool(mVk, mMotionPool, nullptr);
+    if (mMotionTimestamps) vkDestroyQueryPool(mVk, mMotionTimestamps, nullptr);
+    mMotionTimestamps = VK_NULL_HANDLE;
+    if (mMotionPipeline) vkDestroyPipeline(mVk, mMotionPipeline, nullptr);
+    if (mMotionPipeLayout) vkDestroyPipelineLayout(mVk, mMotionPipeLayout, nullptr);
+    if (mMotionSetLayout) vkDestroyDescriptorSetLayout(mVk, mMotionSetLayout, nullptr);
+    if (mMotionModule) vkDestroyShaderModule(mVk, mMotionModule, nullptr);
+    mMotionPool = VK_NULL_HANDLE; mMotionPipeline = VK_NULL_HANDLE;
+    mMotionPipeLayout = VK_NULL_HANDLE; mMotionSetLayout = VK_NULL_HANDLE;
+    mMotionModule = VK_NULL_HANDLE; mMotionFailed = false;
     if (mReflectPool) vkDestroyDescriptorPool(mVk, mReflectPool, nullptr);
     if (mReflectPipeline) vkDestroyPipeline(mVk, mReflectPipeline, nullptr);
     if (mFilterPipeline) vkDestroyPipeline(mVk, mFilterPipeline, nullptr);
@@ -4294,6 +4384,9 @@ struct ReflectParams {
     float hitList[4] = {};
     float hitSun[4] = {};
     float hitSun2[4] = {};
+    /// A MOVING OBJECT (REFLECT-MOVERS-1; rq_reflect.comp's `motion`): x = 1 when
+    /// the view's id image is bound at binding 37, yz = its size.
+    float motion[4] = {};
 };
 
 /// The card read's footprint gate (Types.h kCardFootprintTexels).
@@ -4384,6 +4477,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 34 ...Albedo
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 ...Normal
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 36 the photon view's overlay (PHOTON-VIEW-1)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 37 the view's id image (REFLECT-MOVERS-1)
     };
 constexpr unsigned countReflect(VkDescriptorType type) {
     unsigned n = 0u;
@@ -4395,6 +4489,13 @@ constexpr unsigned countReflect(VkDescriptorType type) {
 /// (PHOTON-VIEW-1) — every one a single descriptor (no storage image is an arrayed
 /// binding: the cascade arrays are all sampled).
 constexpr unsigned kReflectStorageImages = countReflect(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              "the id image is sampled (the pool counts the layout's samplers)");
+/// The set's SAMPLED descriptors, counted from the layout: every single binding plus
+/// the cascade arrays' extra kMaxReflectCascades - 1 each.
+constexpr unsigned kReflectSampled =
+    countReflect(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) +
+    (4u + kReflectSplitKinds + kReflectSideKinds) * (kMaxReflectCascades - 1u);
 static_assert(kReflectTypes[kReflectPhotonBinding] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
                   kReflectTypes[kReflectHitBinding + 1u] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
                   kReflectTypes[kReflectHitBinding + 2u] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -4483,9 +4584,12 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     sizes[2].descriptorCount = sets * kReflectStorageImages;   // counted from the layout
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     // kRayVoxelKinds arrays a cascade (level 0's back side and normal among them,
-    // PHOTON-VOXEL-5), and the card read's view term (PHOTON-CARDS-5).
-    sizes[3].descriptorCount = sets * (3u + unsigned(kRayVoxelKinds) * kMaxReflectCascades + 1u + 2u +
-                                       SurfaceCache::kViewLayers);
+    // PHOTON-VOXEL-5), the card read's view term (PHOTON-CARDS-5) and the id image
+    // (REFLECT-MOVERS-1) — counted from the layout, never restated.
+    static_assert(kReflectSampled == 3u + unsigned(kRayVoxelKinds) * kMaxReflectCascades + 1u + 2u +
+                                         SurfaceCache::kViewLayers + 1u,
+                  "the reflection set's samplers: G-buffers, voxels, sky, cards, view term, ids");
+    sizes[3].descriptorCount = sets * kReflectSampled;
     sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     sizes[4].descriptorCount = sets * 6u;   // + the instances and the list's buffer
     VkDescriptorPoolCreateInfo dpi{};
@@ -4598,6 +4702,11 @@ void RayQueryTier::readReflectTimestamps(ReflectView &rv) {
 }
 
 void RayQueryTier::dropReflect(ReflectView &rv) {
+    for (unsigned i = 0; i < 3u; ++i) {
+        if (rv.motionSets[i]) retireSet(rv.motionSets[i], mMotionPool);
+        rv.motionSets[i] = VK_NULL_HANDLE;
+        retire(rv.motionParams[i]);
+    }
     for (unsigned i = 0; i < kReflectRing; ++i) {
         retireSet(rv.sets[i]);
         rv.sets[i] = VK_NULL_HANDLE;
@@ -4624,6 +4733,7 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         st.reflect = true;
         st.reflectRays += int(kv.second.rays);
         if (kv.second.gpuMs > st.reflectMs) st.reflectMs = kv.second.gpuMs;
+        if (kv.second.motionGpuMs > st.reflectMotionMs) st.reflectMotionMs = kv.second.motionGpuMs;
     }
 }
 
@@ -4700,6 +4810,20 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         depthTex  = node->getDefinedTexture(Ogre::IdString("jahDepth"));
     } catch (Ogre::Exception &) { return; }
     if (!ssrTex || !normalTex || !roughTex || !depthTex) return;
+    // THE VIEW'S ID IMAGE (REFLECT-MOVERS-1): present when the chain carries the id
+    // pass (ChainDesc::atomDraw), which ran before every scene pass of the frame.
+    // Absent is not an error — every surface then takes the camera path.
+    // ASKED ONLY OF A CHAIN THAT DECLARES IT (ChainDesc::atomDraw; a stereo chain
+    // never does): Ogre LOGS every getDefinedTexture miss as an exception before the
+    // catch — per frame, on every VR eye (the gate's vr.eye_grade read 4,254 of them).
+    Ogre::TextureGpu *idTex = nullptr;
+    if (view->chainDesc().atomDraw && !view->stereo()) {
+        try {
+            idTex = node->getDefinedTexture(Ogre::IdString(kAtomIdTexture));
+        } catch (Ogre::Exception &) { idTex = nullptr; }
+    }
+    if (idTex && (idTex->getWidth() != ssrTex->getWidth() || idTex->getHeight() != ssrTex->getHeight()))
+        idTex = nullptr;   // a different picture's ids
     // THE UAV FLAG IS THE CONTRACT (OgreChain.cpp, ChainDesc::rayReflect). A
     // texture declared without it has no storage-image usage and the view
     // creation below would be a validation error, so a chain built while the
@@ -5104,6 +5228,38 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.hitSun2[1] = hit.lift;
     pp.hitSun2[2] = hit.sunRange;
     pp.hitSun2[3] = hit.farLift;
+    // THE ARM THAT RE-MEASURES THE CLAIM (the shape of JAH_R5_MONO_EYES beside it):
+    // `JAH_R5_NO_MOTION=1` switches EVERY branch of REFLECT-MOVERS-1 off at once —
+    // the id image withheld (a surface's own motion), motion.w = 0 (a hit's motion,
+    // the reflected image, the mover restarts, the filter's restart band) and the
+    // march's velocity job (recordMotion) — so the paired cost arm of
+    // gi.reflect_mover measures all of it, read per frame so ONE process can hold
+    // both arms (trap 12). Off is the pre-lane picture up to the mover age's six
+    // low bits in the history's mean length (a 2^-17 relative change of a length).
+    const bool motionOn = getenv("JAH_R5_NO_MOTION") == nullptr;
+    if (!motionOn) idTex = nullptr;
+    pp.motion[0] = idTex ? 1.0f : 0.0f;
+    pp.motion[1] = idTex ? float(idTex->getWidth()) : 1.0f;
+    pp.motion[2] = idTex ? float(idTex->getHeight()) : 1.0f;
+    // ...AND WHETHER A MOVER MOVED IN THE LAST TWO FRAMES (motion.w = 2): the trace
+    // restarts a mean of a mover's reflection whose rays stopped finding it only
+    // then — at rest (every mover parked) a glossy lobe's tail that misses twice is
+    // noise, not a departure, and no still pixel may move.
+    {
+        bool moverMoved = false;
+        const uint32_t vaoFrame = mRs->getVaoManager()->getFrameCount();
+        if (gpuScn.live() && gpuScn.movedThisFrame(vaoFrame)) {
+            const detail::GpuInstance *mirror = gpuScn.mirrorData();
+            for (uint32_t slot : gpuScn.movedSlots()) {
+                if (slot >= gpuScn.slotCount()) continue;
+                uint32_t f;
+                std::memcpy(&f, &mirror[slot].boundsMax[3], sizeof(f));
+                if (f & (detail::kGpuMover | detail::kGpuDragMover)) { moverMoved = true; break; }
+            }
+        }
+        rv.framesSinceMoverMoved = moverMoved ? 0u : std::min(rv.framesSinceMoverMoved + 1u, 1000u);
+    }
+    pp.motion[3] = !motionOn ? 0.0f : (rv.framesSinceMoverMoved <= 2u ? 2.0f : 1.0f);
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -5321,6 +5477,15 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!photonImg.imageView) { bail("the photon overlay view is null"); return; }
     w[kReflectPhotonBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectPhotonBinding].pImageInfo = &photonImg;
+    // THE ID IMAGE (37, REFLECT-MOVERS-1): the chain's, or the "nothing drew here"
+    // stand-in with `motion.x` 0.
+    VkDescriptorImageInfo idImg{};
+    idImg.sampler = mPointSampler;
+    idImg.imageView = idTex ? sampledView(idTex) : mDummyIds.view;
+    idImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!idImg.imageView) { bail("the id image view is null"); return; }
+    w[kReflectIdBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectIdBinding].pImageInfo = &idImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -5354,6 +5519,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                      Ogre::ResourceAccess::Write, computeStage);
         for (Ogre::TextureGpu *t : { normalTex, roughTex, depthTex })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        if (idTex)
+            solver.resolveTransition(trans, idTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < voxCount; ++c)
             for (int axis = 0; axis < kRayVoxelKinds; ++axis)
@@ -5409,6 +5577,278 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     rv.curIdx = cur;
     rv.rays = traceW * traceH;
     ++rv.frame;
+}
+
+// ---- THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1) ----------------------
+namespace {
+/// rq_motion.comp's set 0, one type a binding.
+constexpr unsigned kMotionBindings = 5u;
+constexpr VkDescriptorType kMotionTypes[kMotionBindings] = {
+    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
+    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 1 depth
+    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the id image
+    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 3 the GPU scene's instances
+    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 jahSsrVelocity
+};
+/// rq_motion.comp's Params, member for member.
+struct MotionParams {
+    float camPos[4] = {};
+    float rayTL[4] = {};
+    float rayRight[4] = {};
+    float rayDown[4] = {};
+    float fwd[4] = {};
+    float projParams[4] = {};
+    float resolution[4] = {};
+};
+/// Sets in the pool: a ring a view, for as many views as the reflection pool serves.
+constexpr unsigned kMotionRing = 3u;
+}   // namespace
+
+bool RayQueryTier::makeMotionPipeline(std::string &err) {
+    VkDescriptorSetLayoutBinding b[kMotionBindings] = {};
+    for (unsigned i = 0; i < kMotionBindings; ++i) {
+        b[i].binding = i;
+        b[i].descriptorType = kMotionTypes[i];
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo sli{};
+    sli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sli.bindingCount = kMotionBindings;
+    sli.pBindings = b;
+    if (vkCreateDescriptorSetLayout(mVk, &sli, nullptr, &mMotionSetLayout) != VK_SUCCESS) {
+        err = "rayquery/motion: vkCreateDescriptorSetLayout failed";
+        return false;
+    }
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mMotionSetLayout;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mMotionPipeLayout) != VK_SUCCESS) {
+        err = "rayquery/motion: vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_motionSpv);
+    smi.pCode = krq_motionSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mMotionModule) != VK_SUCCESS) {
+        err = "rayquery/motion: vkCreateShaderModule failed";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mMotionModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mMotionPipeLayout;
+    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mMotionPipeline) != VK_SUCCESS) {
+        err = "rayquery/motion: vkCreateComputePipelines failed";
+        return false;
+    }
+    // The pool's arithmetic from the layout's table (the descriptor-overrun rule).
+    const unsigned sets = kMaxTimedScenes * kMotionRing;
+    VkDescriptorPoolSize sizes[kMotionBindings] = {};
+    for (unsigned i = 0; i < kMotionBindings; ++i) {
+        sizes[i].type = kMotionTypes[i];
+        sizes[i].descriptorCount = sets;
+    }
+    VkDescriptorPoolCreateInfo dpi{};
+    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = sets;
+    dpi.poolSizeCount = kMotionBindings;
+    dpi.pPoolSizes = sizes;
+    if (vkCreateDescriptorPool(mVk, &dpi, nullptr, &mMotionPool) != VK_SUCCESS) {
+        err = "rayquery/motion: vkCreateDescriptorPool failed";
+        return false;
+    }
+    if (mTimestampPeriod > 0.0f) {
+        VkQueryPoolCreateInfo qci{};
+        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qci.queryCount = kMaxTimedScenes * kFramesInFlight * 2u;
+        vkCreateQueryPool(mVk, &qci, nullptr, &mMotionTimestamps);
+    }
+    return ensureSamplers(err);
+}
+
+void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
+                                Ogre::CompositorPass *pass) {
+    if (!isOpen() || mMotionFailed || !view || !pass) return;
+    // THE MEASURING DOOR (JAH_R5_NO_MOTION, read per frame so one process holds
+    // both arms): the chain's clear stands and the resolve takes the camera path.
+    if (getenv("JAH_R5_NO_MOTION")) return;
+    OgreScene *scene = view->ogreScene();
+    Ogre::Camera *cam = view->camera();
+    if (!scene || !cam || view->stereo()) return;
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    if (!node) return;
+    // (the chain declares both only with the march and the id pass: never ask it
+    // otherwise — a miss is logged as an exception every frame)
+    if (!view->chainDesc().atomDraw) return;
+    Ogre::TextureGpu *vel = nullptr, *ids = nullptr, *depth = nullptr;
+    try {
+        vel = node->getDefinedTexture(Ogre::IdString("jahSsrVelocity"));
+        ids = node->getDefinedTexture(Ogre::IdString(kAtomIdTexture));
+        depth = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+    } catch (Ogre::Exception &) { return; }
+    if (!vel || !ids || !depth || !vel->isUav()) return;
+    const unsigned w = vel->getWidth(), h = vel->getHeight();
+    if (!w || !h || ids->getWidth() != w || ids->getHeight() != h || depth->getWidth() != w ||
+        depth->getHeight() != h)
+        return;
+    detail::GpuScene &gs = scene->gpuScene();
+    Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
+    if (!instances || !gs.slotCount()) return;
+    std::string err;
+    if (!mMotionPipeline) {
+        if (!makeMotionPipeline(err)) {
+            mMotionFailed = true;
+            Ogre::LogManager::getSingleton().logMessage("Jahshaka: the march's object motion off — " + err);
+            return;
+        }
+    }
+    ReflectView &rv = mReflects[key];
+    // THE LAST FRAMES' TIMESTAMPS (the trace's rule: a slot is read once the frames
+    // in flight have retired it, never with a wait).
+    if (mMotionTimestamps && rv.hasQueryBase) {
+        const uint32_t now = frameNow();
+        for (unsigned i = 0; i < kFramesInFlight; ++i) {
+            ReflectView::MotionPending &pd = rv.motionPending[i];
+            if (!pd.live || uint32_t(now - pd.frame) < framesInFlight()) continue;
+            uint64_t v[4] = {};
+            const uint32_t base = rv.queryBase + i * 2u;
+            if (vkGetQueryPoolResults(mVk, mMotionTimestamps, base, 2, sizeof(v), v, sizeof(uint64_t) * 2u,
+                                      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
+                    VK_SUCCESS &&
+                v[1] && v[3] && v[2] >= v[0])
+                rv.motionGpuMs = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
+            pd.live = false;
+        }
+    }
+    const unsigned ring = rv.motionFrame % kMotionRing;
+    if (!rv.motionParams[ring].buffer &&
+        !makeBuffer(sizeof(MotionParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
+                    rv.motionParams[ring], err))
+        return;
+    if (!rv.motionSets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mMotionPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mMotionSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &rv.motionSets[ring]) != VK_SUCCESS) {
+            rv.motionSets[ring] = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    // THE PARAMETERS: this camera's image basis expanded to the target (the trace's
+    // own form, so the two reconstruct one world point from one depth).
+    MotionParams mp{};
+    {
+        const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
+        Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
+        cam->getFrustumExtents(fl, fr, ft, fb, ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
+        EyeBasisF e = eyeBasis(ortho, cam->getDerivedPosition(), cam->getDerivedOrientation(), float(fl),
+                               float(fr), float(ft), float(fb));
+        expandEyeToTarget(e, view->chainDesc(), w, h);
+        memcpy(mp.camPos, e.camPos, sizeof(mp.camPos));
+        memcpy(mp.rayTL, e.rayTL, sizeof(mp.rayTL));
+        memcpy(mp.rayRight, e.rayRight, sizeof(mp.rayRight));
+        memcpy(mp.rayDown, e.rayDown, sizeof(mp.rayDown));
+        memcpy(mp.fwd, e.fwd, sizeof(mp.fwd));
+        const Ogre::Vector2 ab = cam->getProjectionParamsAB();
+        mp.projParams[0] = ab.x;
+        mp.projParams[1] = ab.y;
+        mp.resolution[0] = float(w);
+        mp.resolution[1] = float(h);
+        mp.resolution[2] = float(gs.slotCount());
+    }
+    memcpy(rv.motionParams[ring].mapped, &mp, sizeof(mp));
+    const auto sampledView = [this](Ogre::TextureGpu *t) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = t;
+        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+        retireView(v);
+        return v;
+    };
+    VkDescriptorBufferInfo ub{};
+    ub.buffer = rv.motionParams[ring].buffer;
+    ub.range = sizeof(MotionParams);
+    VkDescriptorImageInfo img[3] = {};
+    img[0].sampler = mPointSampler;
+    img[0].imageView = sampledView(depth);
+    img[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    img[1].sampler = mPointSampler;
+    img[1].imageView = sampledView(ids);
+    img[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = vel;
+        slot.access = Ogre::ResourceAccess::Write;
+        slot.pixelFormat = vel->getPixelFormat();
+        img[2].imageView = static_cast<Ogre::VulkanTextureGpu *>(vel)->createView(slot, false);
+        retireView(img[2].imageView);
+        img[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (!img[0].imageView || !img[1].imageView || !img[2].imageView) return;
+    VkDescriptorBufferInfo instInfo{};
+    {
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(instances->getBufferInterface());
+        instInfo.buffer = bi->getVboName();
+        instInfo.offset = VkDeviceSize(instances->_getFinalBufferStart()) * instances->getBytesPerElement();
+        instInfo.range = instances->getTotalSizeBytes();
+    }
+    VkWriteDescriptorSet wr[kMotionBindings] = {};
+    for (unsigned i = 0; i < kMotionBindings; ++i) {
+        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wr[i].dstSet = rv.motionSets[ring];
+        wr[i].dstBinding = i;
+        wr[i].descriptorCount = 1;
+        wr[i].descriptorType = kMotionTypes[i];
+    }
+    wr[0].pBufferInfo = &ub;
+    wr[1].pImageInfo = &img[0];
+    wr[2].pImageInfo = &img[1];
+    wr[3].pBufferInfo = &instInfo;
+    wr[4].pImageInfo = &img[2];
+    vkUpdateDescriptorSets(mVk, kMotionBindings, wr, 0, nullptr);
+    // THE LAYOUTS through Ogre's solver, before the command buffer is taken: the
+    // velocity (cleared by the chain as a render target) as a UAV; the resolve's own
+    // barrier analysis, after this early pre-execute, takes it back to a texture.
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, vel, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
+                                 computeStage);
+        for (Ogre::TextureGpu *t : { depth, ids })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                     computeStage);
+        solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
+    const bool timed = mMotionTimestamps && rv.hasQueryBase;
+    const uint32_t qbase = rv.queryBase + (rv.motionFrame % kFramesInFlight) * 2u;
+    if (timed) {
+        vkCmdResetQueryPool(cmd, mMotionTimestamps, qbase, 2);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mMotionTimestamps, qbase);
+    }
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeLayout, 0, 1,
+                            &rv.motionSets[ring], 0, nullptr);
+    vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
+    if (timed) {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mMotionTimestamps, qbase + 1u);
+        ReflectView::MotionPending &pd = rv.motionPending[rv.motionFrame % kFramesInFlight];
+        pd.frame = frameNow();
+        pd.live = true;
+    }
+    ++rv.motionFrame;
 }
 
 void RayQueryTier::finishReflect(const ReflectPassListener *key) {
@@ -6700,6 +7140,13 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     mRayJobsFinished = def->mIdentifier == kScreenDecodePassIdentifier;
 }
 
+void ReflectPassListener::passEarlyPreExecute(Ogre::CompositorPass *pass) {
+    if (!pass || !mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
+    if (pass->getType() != Ogre::PASS_QUAD) return;
+    if (pass->getDefinition()->mIdentifier != kSsrResolvePassIdentifier) return;
+    mView->mEngine->mRayTier->recordMotion(this, mView, pass);
+}
+
 /// GATHER-0 (fix round, D2). The registration made in `passPreExecute` names
 /// this view's full-resolution irradiance texture and is read by every colour
 /// pass of the same SceneManager; it is valid for exactly ONE pass — the one
@@ -7770,6 +8217,7 @@ bool OgreEngine::cardReadParity(Scene *, const std::vector<CardReadQuery> &,
 ReflectPassListener::~ReflectPassListener() {}
 void ReflectPassListener::passPreExecute(Ogre::CompositorPass *) {}
 void ReflectPassListener::passPosExecute(Ogre::CompositorPass *) {}
+void ReflectPassListener::passEarlyPreExecute(Ogre::CompositorPass *) {}
 void OgreView::syncReflectListener() {
     // No tier on this platform: the chain is built with `rayReflect` false by
     // construction (the predicate above answers false), so there is nothing to
