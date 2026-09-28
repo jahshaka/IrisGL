@@ -200,7 +200,12 @@ namespace
 // v16 (2026-09-28, CULL-MODE-1): a baked material carries its source's TWO-SIDED
 // flag (glTF doubleSided -> AI_MATKEY_TWOSIDED -> MeshMaterialData::twoSided), and
 // the fragment writes it onto the MeshNode as faceCullingMode None.
-constexpr int kFormatVersion = 16;
+// v17 (2026-09-28, DAG-LOCK-1): THE CLUSTER DAG HAS THE CHAIN'S DISPLACEMENT LOCK. A
+// removed vertex or a lost facet past 2x its group's own simplifier error, or an island
+// bigger than the group's error, is locked with its fan and the whole DAG rebuilt (at
+// most 16 builds; clusterlod's lock is one array per build). The primitives with no
+// lock taken keep their bytes; hp_sphere, hemisphere and every scan re-bake.
+constexpr int kFormatVersion = 17;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -3874,7 +3879,60 @@ float denseGroupReference(surface::TriangleGrid::Query &q, const float *position
     return worst;
 }
 
+/// THE DAG'S DISPLACEMENT LOCK (DAG-LOCK-1) — the chain's rule (`lodchain::kDisplacementBudget`,
+/// `kLockPasses`) applied to the cluster DAG. clusterlod.h keeps ONE lock array for the
+/// whole build (its `vertex_lock`, honoured by every group's simplification), so the lock
+/// is per BUILD, not per group: a removed level-0 vertex that sits more than
+/// kDagLockFactor x its group's own simplifier error from the group's surface is locked
+/// with its fan, and the whole DAG is rebuilt — at most kDagLockPasses builds. Past the
+/// budget the DAG keeps what it has and the measured error charges it honestly: the lock
+/// shapes the DAG, never the measurement.
+constexpr float kDagLockFactor = 2.0f;
+constexpr int   kDagLockPasses = 16;
+
+void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant,
+               const unsigned char *vertexLock, std::vector<unsigned> *overOut);
+
 void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant)
+{
+    std::vector<unsigned char> lock;
+    std::vector<unsigned> over;
+    int passes = 0, locked = 0;
+    for (;;) {
+        over.clear();
+        buildOnce(mesh, stats, variant, lock.empty() ? nullptr : lock.data(), &over);
+        ++passes;
+        if (over.empty() || passes >= kDagLockPasses || mesh.isNull()) break;
+        int posComps = 3; size_t nv = 0;
+        if (!lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv)) break;
+        const IndexBufferPtr ib = mesh->getIndexBuffer();
+        if (ib.isNull() || !ib->data) break;
+        const unsigned *idx = reinterpret_cast<const unsigned *>(ib->data);
+        const size_t ni = size_t(ib->dataSize) / sizeof(unsigned);
+        if (lock.empty()) lock.assign(nv, 0u);
+        std::vector<unsigned char> hit(nv, 0u);
+        for (unsigned v : over) if (v < nv) hit[v] = 1u;
+        // THE FAN: every level-0 triangle touching a displaced vertex keeps its corners.
+        int added = 0;
+        for (size_t t = 0; t + 2 < ni; t += 3) {
+            if (!hit[idx[t]] && !hit[idx[t + 1]] && !hit[idx[t + 2]]) continue;
+            for (size_t k = 0; k < 3; ++k) {
+                const unsigned v = idx[t + k];
+                if (v < nv && !lock[v]) { lock[v] = 1u; ++added; }   // meshopt_SimplifyVertex_Lock
+            }
+        }
+        locked += added;
+        if (!added) break;   // nothing new to lock: another build would be the same
+    }
+    if (stats) {
+        stats->lockPasses = passes;
+        stats->lockedVertices = locked;
+        stats->lockUnconverged = int(over.size());
+    }
+}
+
+void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant,
+               const unsigned char *vertexLock, std::vector<unsigned> *overOut)
 {
     if (mesh.isNull()) return;
     mesh->clusterDag = MeshClusterDag();
@@ -3949,7 +4007,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     cm.vertex_positions_stride = posStride;
     cm.vertex_attributes = attrCount ? attribs.data() : nullptr;
     cm.vertex_attributes_stride = sizeof(float) * attrCount;
-    cm.vertex_lock = nullptr;
+    cm.vertex_lock = vertexLock;   // the displacement lock's (DAG-LOCK-1), or none on the first build
     cm.attribute_weights = attrCount ? weights.data() : nullptr;
     cm.attribute_count = attrCount;
     cm.attribute_protect_mask = protectMaskFor(variant, normals != nullptr, uvs != nullptr);
@@ -4088,6 +4146,20 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     // over level 0, before the waves, and READ-ONLY inside them — every group's
     // level-0 side is capped at its island's extent.
     const lodchain::Islands islands = lodchain::findIslands(positions, posComps, nv, base);
+    // Each component's LARGEST level-0 triangle — what the lock keeps of an island a
+    // group would drop (DAG-LOCK-1).
+    std::vector<unsigned> largestTri(islands.count(), UINT_MAX);
+    if (overOut) {
+        std::vector<float> largestArea(islands.count(), -1.0f);
+        for (size_t t = 0; t < baseTris; ++t) {
+            const unsigned comp = islands.compOf[base[t * 3]];
+            if (comp >= islands.count()) continue;
+            const Vec3 a = vertexOf(positions, posComps, base[t * 3]), b = vertexOf(positions, posComps, base[t * 3 + 1]),
+                       c = vertexOf(positions, posComps, base[t * 3 + 2]);
+            const float area = Vec3::crossProduct(b - a, c - a).length();
+            if (area > largestArea[comp]) { largestArea[comp] = area; largestTri[comp] = unsigned(t); }
+        }
+    }
     QVector<MeshBake::ClusterDagStats::GroupTerms> *terms =
         stats && stats->wantTerms ? &stats->groupTerms : nullptr;
     if (terms) terms->resize(int(groups.size()));
@@ -4106,9 +4178,20 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     std::vector<size_t> groupFallbacks(groups.size(), 0);
     const bool termsLog = std::getenv("JAH_BAKE_DAG_TERMS") != nullptr;
     std::vector<QString> termLines(termsLog ? groups.size() : 0);
+    std::mutex overMutex;   // the lock's input list (DAG-LOCK-1): rare pushes from the waves
     const auto measureGroup = [&](size_t g, Scratch &sc) {
         if (groups[g].simplified.error == FLT_MAX || outputs[g].empty()) return;   // terminal
         std::vector<surface::Sample> &pts = sc.pts;
+        // THE DISPLACEMENT LOCK's thresholds (DAG-LOCK-1): an EXACT point past
+        // kDagLockFactor x the group's own simplifier error, a SAMPLED one past that over
+        // the sampling margin (the stored error multiplies the sampled terms by it).
+        const float lockExact = kDagLockFactor * groups[g].simplified.error;
+        const float lockSampled = lockExact / lodchain::kBoundMargin;
+        const auto lockVerts = [&](std::initializer_list<unsigned> vs) {
+            if (!overOut) return;
+            std::lock_guard<std::mutex> hold(overMutex);
+            for (unsigned v : vs) overOut->push_back(v);
+        };
         // S: the group's simplified output.
         std::vector<unsigned> simplifiedIdx, ownerOfTri;
         for (int o : outputs[g]) {
@@ -4296,7 +4379,9 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             unsigned tri = 0u;
             const float d = gridS.closest(q, vertexOf(positions, posComps, v), nullptr, nullptr, &tri);
             removedOwner[l] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);
-            return capped(d, v);
+            const float dc = capped(d, v);
+            if (dc > lockExact) lockVerts({ v });   // displaced past the budget (DAG-LOCK-1)
+            return dc;
         });
         const float termV = exact;
         std::vector<unsigned> lostIdx;
@@ -4317,10 +4402,18 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                                        samplesCap), &pts) > 0.0f)
             sampled = runningMax(pts.size(), sampled, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
                 const unsigned v0 = lostIdx[size_t(pts[i].tri) * 3];
-                if (!(islands.capOf[v0] > stop)) return 0.0f;     // this island cannot raise it
+                // The lock must SEE every point past its threshold, so the max-only
+                // query never stops above it (DAG-LOCK-1).
+                const float st = overOut ? std::min(stop, lockSampled) : stop;
+                if (!(islands.capOf[v0] > st)) return 0.0f;     // this island cannot raise it
                 const float d = whole ? gridS.closest(q, pts[i].pos)
-                                      : gridS.closest(q, pts[i].pos, nullptr, nullptr, nullptr, stop);
-                return capped(d, v0);
+                                      : gridS.closest(q, pts[i].pos, nullptr, nullptr, nullptr, st);
+                const float dc = capped(d, v0);
+                if (dc > lockSampled) {
+                    const size_t t = size_t(pts[i].tri) * 3;
+                    lockVerts({ lostIdx[t], lostIdx[t + 1], lostIdx[t + 2] });
+                }
+                return dc;
             });
         // THE PER-FACET WALK (the chain's F1, exact per point, no margin): the
         // distance from a union of triangles peaks inside a facet, where neither the
@@ -4346,8 +4439,9 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             out[5] = (b * 4.0f + c + a) * (1.0f / 6.0f);
             out[6] = (c * 4.0f + a + b) * (1.0f / 6.0f);
         };
-        exact = runningMax(lostIdx.size() / 3, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop) {
+        exact = runningMax(lostIdx.size() / 3, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop0) {
             const unsigned v0 = lostIdx[t * 3];
+            const float stop = overOut ? std::min(stop0, lockExact) : stop0;   // (DAG-LOCK-1, as above)
             if (!(islands.capOf[v0] > stop)) return 0.0f;
             Vec3 fp[7];
             facetPts(lostIdx[t * 3], lostIdx[t * 3 + 1], lostIdx[t * 3 + 2], fp);
@@ -4357,6 +4451,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                                       : gridS.closest(q, pt, nullptr, nullptr, nullptr, std::max(stop, m));
                 if (std::isfinite(d)) m = std::max(m, capped(d, v0));
             }
+            if (m > lockExact) lockVerts({ lostIdx[t * 3], lostIdx[t * 3 + 1], lostIdx[t * 3 + 2] });
             return m;
         });
         {
@@ -4388,6 +4483,28 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             });
         }
         measured[g] = std::max(std::max(sampled * lodchain::kBoundMargin, exact), floorLen);
+        // AN ISLAND BIGGER THAN THE GROUP'S ERROR IS NOT DROPPED (DAG-LOCK-1, the chain's
+        // rule): a level-0 component wholly inside the region with no vertex kept, whose
+        // extent passes what the group stores, keeps its largest triangle.
+        if (overOut) {
+            std::vector<unsigned> comps;
+            for (unsigned v : regionV)
+                if (islands.compOf[v] < islands.count()) comps.push_back(islands.compOf[v]);
+            std::sort(comps.begin(), comps.end());
+            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
+            for (unsigned comp : comps) {
+                if (!(islands.extent[comp] > measured[g]) || largestTri[comp] == UINT_MAX) continue;
+                bool dropped = true;
+                for (unsigned i = islands.vertStart[comp]; i < islands.vertStart[comp + 1] && dropped; ++i) {
+                    const size_t lw = local(islands.verts[i]);
+                    if (lw == kAbsent || !inRegion[lw] || kept[lw]) dropped = false;
+                }
+                if (dropped) {
+                    const size_t t = size_t(largestTri[comp]) * 3;
+                    lockVerts({ base[t], base[t + 1], base[t + 2] });
+                }
+            }
+        }
         if (measured[g] < groups[g].simplified.error) below[g] = 1;
         if (termsLog)
             termLines[g] = (QStringLiteral("dag terms: group %1 depth %2  R %3 verts  S %4 tris  S->L0 %5  "

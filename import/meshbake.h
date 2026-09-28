@@ -360,6 +360,12 @@ public:
             bool  capBound = false;     ///< an island cap lowered some point's distance
         };
         QVector<GroupTerms> groupTerms;
+        /// THE DAG'S DISPLACEMENT LOCK (DAG-LOCK-1): how many builds it took, how many
+        /// level-0 vertices it locked, and how many removed vertices were still past
+        /// the budget after the last build (0 = converged).
+        int    lockPasses = 0;
+        int    lockedVertices = 0;
+        int    lockUnconverged = 0;
         double buildMs = 0.0;          ///< clodBuild alone
         double measureMs = 0.0;        ///< the per-group measurement + provenance
         bool   wantRegions = false;
