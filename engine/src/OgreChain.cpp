@@ -3109,10 +3109,6 @@ Ogre::ColourValue fixedExposureColour(float exposureScale, float exposure) {
     return Ogre::ColourValue(invLum, invLum, invLum, invLum);
 }
 
-float fixedExposureScale(float exposureScale, float exposure) {
-    return resolveFixedInverseLuminance(exposureScale, exposure);
-}
-
 const char *exposureHistoryTextureName() { return kOldLum; }
 const char *reflectionTextureName() { return kSsrReflection; }
 

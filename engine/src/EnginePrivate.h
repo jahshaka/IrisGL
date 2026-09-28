@@ -1727,13 +1727,6 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
 /// re-seeded history starts exactly where a deterministic grade would land.
 float exposureSeed(float exposure);
 
-/// THE MULTIPLIER THE FIXED TONEMAP CLEARS ITS 1x1 TEXTURE WITH, in one place:
-/// the host's measured value when it handed one over (ChainDesc::exposureScale),
-/// else the grey-card constant derived from `exposure`. Both callers — the main
-/// chain and the picture-in-picture inset — resolve it here so "0 means derive
-/// it" is stated once.
-float fixedExposureScale(float exposureScale, float exposure);
-
 /// The name of the 1x1 texture the AUTOMATIC exposure's adaptation history
 /// lives in, inside a built chain's scene node. Readable between frames
 /// (keep_content, unlike the per-frame `jahLum` it is copied from), which is
@@ -3417,7 +3410,6 @@ public:
     /// in force — which is exactly the read-before-write guard every host used
     /// to hand-write around Engine::setShadowFilter/setShadowResolution.
     void setShadowSettings(const ShadowDesc &desc) override;
-    ShadowDesc shadowSettings() const override { return mShadowDesc; }
     ShadowDesc mShadowDesc;
     /// The engine that made this scene — the owner of the global shadow state
     /// above. Never null for a scene created through Engine::createScene().
@@ -3903,7 +3895,6 @@ public:
     /// Defined in OgreScene.cpp: a flip to Off also releases the scene's ray
     /// structures (forgetRayQuery) so Off costs nothing, as the verb promises.
     void setRayTracing(RayTracingMode mode) override;
-    RayTracingMode rayTracingMode() const override { return mRayTracing; }
     bool rayTracingResolved() const override;
     /// The scene's live PlanarReflections, or null when the budget is 0. Views
     /// read this once a frame to decide whether to arm their listener.
@@ -6913,7 +6904,6 @@ public:
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
     void setOffscreenContract(OffscreenContract c) override;
-    OffscreenContract offscreenContract() const override { return mOffscreenContract; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;

@@ -210,9 +210,6 @@ public:
     /// unchanged, so hosts push it per frame rather than guarding two global
     /// Engine setters by hand.
     virtual void        setShadowSettings(const ShadowDesc &) = 0;
-    /// What this scene last requested (not what is globally in force — read
-    /// Engine::shadowFilter()/shadowResolution() for that).
-    virtual ShadowDesc  shadowSettings() const = 0;
     /// Removes a node and everything it uniquely owns (mesh, material). Unknown or
     /// already-removed ids are ignored and return false. Children are NOT removed;
     /// they are re-parented to the scene root.
@@ -1391,8 +1388,6 @@ public:
     /// property met with what the machine can do. Idempotent and free: it
     /// stores an enum, builds nothing and destroys nothing.
     virtual void           setRayTracing(RayTracingMode) = 0;
-    /// What was last pushed (Auto until a host says otherwise).
-    virtual RayTracingMode rayTracingMode() const = 0;
     /// THE ONE PREDICATE EVERY RAY-CONSUMING STAGE READS: does THIS scene trace
     /// on THIS machine? = the scene's state is not Off, AND the device
     /// advertises ray queries, AND the process is not latched off
@@ -1627,7 +1622,6 @@ public:
     /// once in the log. Ignored on an on-screen view, which always gathers where
     /// its scene does. Graph shape (the prepass): set it once, at creation.
     virtual void setOffscreenContract(OffscreenContract) = 0;
-    virtual OffscreenContract offscreenContract() const = 0;
 
     /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
     /// tonemapper's own multiplier (SS1, 2026-09-13) — the number the shader

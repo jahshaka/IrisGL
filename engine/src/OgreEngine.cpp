@@ -2669,6 +2669,11 @@ OgreEngine::~OgreEngine() {
     // objects, after every view (whose workspaces recorded it) and before Root.
     try { releaseAtomIdPass(); } catch (...) {}
     try { releaseAtomCasterPass(); } catch (...) {}
+    // ...and THE PASS PROVIDER comes off the compositor manager (V2-E E9), after every
+    // workspace that could instantiate its passes died with the views above. The
+    // provider is a process static: left installed, it stayed armed across Root's
+    // teardown, holding the closures the two releases just emptied.
+    if (mRoot) { try { AtomPassProvider::uninstall(mRoot->getCompositorManager2()); } catch (...) {} }
     // AFTER every scene (each of which removed its own render-queue listener in
     // OgreScene::destroy) and BEFORE Root: ~OverlaySystem deletes the
     // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock

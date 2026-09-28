@@ -237,30 +237,6 @@ bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
 constexpr float kPlaneTolerance = 0.01f;
 constexpr float kNormalTolerance = 0.9f;
 
-/// IEEE half to float, for the readback (a test door; subnormals kept).
-float halfToFloat(uint16_t h) {
-    const uint32_t sign = uint32_t(h & 0x8000u) << 16;
-    uint32_t exp = (h >> 10) & 0x1Fu;
-    uint32_t mant = h & 0x3FFu;
-    uint32_t bits;
-    if (exp == 0u) {
-        if (mant == 0u) bits = sign;
-        else {
-            exp = 127u - 15u + 1u;
-            while (!(mant & 0x400u)) { mant <<= 1; --exp; }
-            mant &= 0x3FFu;
-            bits = sign | (exp << 23) | (mant << 13);
-        }
-    } else if (exp == 31u) {
-        bits = sign | 0x7F800000u | (mant << 13);
-    } else {
-        bits = sign | ((exp + 127u - 15u) << 23) | (mant << 13);
-    }
-    float f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
-}
-
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -658,7 +634,7 @@ void ScreenProbeGather::readPending(View &v) {
                 const uint16_t *src = reinterpret_cast<const uint16_t *>(
                     static_cast<const char *>(v.irrReadbackMapped) + i * texels * 8u);
                 v.irrHost.resize(texels * 4u);
-                for (size_t k = 0; k < texels * 4u; ++k) v.irrHost[k] = halfToFloat(src[k]);
+                for (size_t k = 0; k < texels * 4u; ++k) v.irrHost[k] = Ogre::Bitwise::halfToFloat(src[k]);
                 v.irrHostFrame = v.pending[i].gatherFrame;
                 v.pending[i].irradiance = false;
             }
