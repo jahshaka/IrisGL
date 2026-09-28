@@ -259,7 +259,11 @@ bool SurfaceCache::makeAtlas(std::string &err) {
         // THE ALBEDO AND NORMAL LAYERS ARE ALSO UAVs (PHOTON-CARDS-5): the
         // relight writes the texel's mean light direction into their alpha
         // (JahCardView), which the capture writes as 1 and nothing read.
-        const bool relightWrites = i == unsigned(CardLayer::Albedo) || i == unsigned(CardLayer::Normal);
+        // ...AND SO IS SHADOWROUGH (ATOM-S3-CARDCAP): the still world's sun term
+        // is TRACED into its x (rq_card_movers.comp, still mode), the capture's y
+        // (the GGX alpha) kept.
+        const bool relightWrites = i == unsigned(CardLayer::Albedo) || i == unsigned(CardLayer::Normal) ||
+                                   i == unsigned(CardLayer::ShadowRough);
         Ogre::TextureGpu *t =
             tm->createTexture(processUniqueName(name[i]), Ogre::GpuPageOutStrategy::Discard,
                               Ogre::TextureFlags::ManualTexture |
@@ -388,17 +392,9 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     for (unsigned i = 0; i < kCardLayers + 1u; ++i)
         n->addTextureSourceName(chan[i], i, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
 
-    // The same shadow node every pass names; a CompositorShadowNode is per
-    // WORKSPACE, so the batch shares one instance and each pass re-fits it.
-    const bool haveShadowNode =
-        cm->hasShadowNodeDefinition(detail::OgreView::kCardShadowNodeName);
-    static const bool debugLog = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
-    if (debugLog)
-        Ogre::LogManager::getSingleton().logMessage(
-            std::string("Jahshaka cards: capture shadow node ") +
-            (haveShadowNode ? detail::OgreView::kCardShadowNodeName : "NONE (a card's shadow"
-                                                                      " term will be the"
-                                                                      " prepass constant)"));
+    // NO SHADOW NODE (ATOM-S3-CARDCAP): the prepass writes its constant 1.0 into
+    // ShadowRough.x, and the still world's sun term is traced over it after the
+    // copies (traceSun) — one ray per card texel, no PSSM fit per card.
 
     n->setNumTargetPass(kCaptureBatch);
     for (unsigned b = 0; b < kCaptureBatch; ++b) {
@@ -420,7 +416,8 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
         mPassDef[b] = p;
         // THE PREPASS IS THE CAPTURE. `Ogre::PrePassCreate` writes the shading
-        // normal and (the shadow term, the GGX alpha) exactly, computes no
+        // normal and the GGX alpha exactly (and a constant 1.0 where a shadow
+        // term would go: no shadow node — the term is traced), computes no
         // lighting at all — which is what makes a capture cheap — and
         // JahCardCapture_piece_ps.any adds albedo, emissive and the card's own
         // depth through three hook pieces under one pass property.
@@ -439,23 +436,7 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
         // passPreExecute and taken away in passPosExecute. The mask is a single
         // LOW bit, so `cullFrustum`'s second term (`viewportMask &
         // ~RESERVED_VISIBILITY_FLAGS`) is zero and nothing leaks through it.
-        //
-        // AND A LIGHT MUST STILL REACH THIS PASS: `buildClosestLightList` culls
-        // the pass's lights through the VIEWPORT's visibility mask, which is this
-        // one — every light in this engine is born with Ogre's all-bits default
-        // and nothing narrows it. The day something does, a light without bit 10
-        // drops out of every capture and EVERY CARD'S SHADOW TERM GOES TO 1.0.
         p->mVisibilityMask = detail::kCardSubjectBit;
-        // THE SHADOW NODE: the card node (OgreView::kCardShadowNodeName — the
-        // sun's PSSM at the probe resolution and nothing else, because the
-        // prepass writes the directional term alone; the STILL world as its
-        // casters — the captured half of a card's sun term, the movers' half is
-        // traced: traceMovers), RECALCULATED PER PASS:
-        // every pass has its own camera, so every card gets its own fit.
-        if (haveShadowNode) {
-            p->mShadowNode = Ogre::IdString(detail::OgreView::kCardShadowNodeName);
-            p->mShadowNodeRecalculation = Ogre::SHADOW_NODE_RECALCULATE;
-        }
         // NO FORWARD+ FOR A PREPASS: the capture computes no lighting, and a
         // clustered light grid is built per CAMERA — eight of them a frame for
         // nothing.
@@ -1058,7 +1039,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     if (ws != mWs) return;
     gCapturing = false;
     if (mBatch.empty()) {
-        traceMovers();
+        traceSun();
         relightCards();
         // A card's flags moved (its indirect half marched): the ray read,
         // later in this frame, must see it.
@@ -1096,10 +1077,13 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     mWsMs = float(std::chrono::duration<double, std::milli>(tB - mBatchStart).count());
     mCopyMs = float(std::chrono::duration<double, std::milli>(tC - tB).count());
     mCaptureMs = mWsMs + mCopyMs;
+    mStillCpuMs = 0.0f;
     // THE MOVERS' TERM of the cards just captured and of every card a mover's
     // footprint reaches, traced here — after the copies (the trace reads the
-    // new Depth and Normal) and before the relight that multiplies it in.
-    traceMovers();
+    // new Depth and Normal) and before the relight that multiplies it in. The
+    // batch's STILL sun term is part of its capture: its CPU is in captureMs.
+    traceSun();
+    mCaptureMs += mStillCpuMs;
     mBatch.clear();
     mWs->setExecutionMask(0u);
     // ...and the cards just captured are relit from their new texels, in the
@@ -1576,19 +1560,28 @@ void SurfaceCache::relightCards() {
 }
 
 // ---------------------------------------------------------------------------
-// The movers' shadow (PHOTON-CARDS-4)
+// The sun on the cards (PHOTON-CARDS-4; ATOM-S3-CARDCAP)
 // ---------------------------------------------------------------------------
 //
-// A CARD'S SUN VISIBILITY IS TWO TERMS. The still world's is the capture's
-// (ShadowRough.x: the card shadow node draws the probe kind's casters,
-// kVisibleBit alone, and a mover carries kMovableBit INSTEAD — measured on the
-// base: a forced relight and a forced recapture both left a mover's floor at
-// shadow 1.000, a static crate's at 0.000). The movers' is TRACED here: a
-// shadow-casting mover's transform write traces one sun ray per texel of every
-// card its sun-projected footprint reaches — the footprint it left AND the one
-// it entered — against the movers alone (kRayMaskMoverCaster), into the R8
-// layer the relight multiplies into the sun's term. A mover at rest costs
-// nothing: no write, no trace, no relight.
+// A CARD'S SUN VISIBILITY IS TWO TERMS, BOTH TRACED, one ray per card texel
+// towards the sun (rq_card_movers.comp, its two modes).
+//
+// THE STILL WORLD'S (ATOM-S3-CARDCAP): against the still world's shadow casters
+// (kRayMaskStillCaster — a mover is never one, the one stillness rule the cards
+// keep), into ShadowRough.x. Traced for every card the frame its capture lands,
+// and for every card whose term went STALE: the sun turned, appeared or went
+// (every resident card), or a still caster changed (the cards of its old and new
+// footprints, below). The stale ones go oldest first, nearest among equals, under
+// the relight's budget — the movers' order. A card stores the still world's sun
+// term at its own texel scale, and one ray per texel IS that term: no shadow map
+// fit per card (the card shadow node's PSSM, three caster passes per card, was
+// 77 % of a capture's cost and is deleted), no filter.
+//
+// THE MOVERS' (PHOTON-CARDS-4): a shadow-casting mover's transform write traces
+// one sun ray per texel of every card its sun-projected footprint reaches — the
+// footprint it left AND the one it entered — against the movers alone
+// (kRayMaskMoverCaster), into the R8 layer the relight multiplies into the sun's
+// term. A mover at rest costs nothing: no write, no trace, no relight.
 //
 // WHICH LIGHTS: the SUN only — the first visible shadow-casting directional
 // light, the one light whose visibility a card holds at all (a point or spot
@@ -1601,12 +1594,19 @@ void SurfaceCache::relightCards() {
 // and never a missed shadow.
 //
 // A STILL CASTER THAT MOVES (finding 3): its shadow is the still world's, so
-// its transform write queues the cards of its old and new footprints for a
-// RECAPTURE — the capture's own budget and order, and the capture's own term.
+// its change stales the still term of the cards of its old and new footprints —
+// a re-TRACE, never a recapture (the capture holds no light quantity).
 namespace {
-/// The footprint's margin, metres: the capture's PSSM filter reaches a few
-/// shadow-map texels past a caster's silhouette.
+/// The footprint's margin, metres: a caster's AABB is conservative already; the
+/// margin covers the lift and a texel on the boundary.
 constexpr float kFootprintMargin = 0.05f;
+/// THE STILL TRACE'S LIFT, in footprints (rq_card_movers.comp's head): the origin
+/// moves off the receiver along its normal by this many of the larger of the
+/// card's texel and the ray tier's footprint at the card (the near copy it may hit
+/// lies up to one footprint off the captured level — the sun-contact job's rule,
+/// kSunContactLiftFootprints), plus the Depth layer's R16F quantum at the card's
+/// far end.
+constexpr float kSunLiftFootprints = 2.0f;
 /// A ray's length: the sun is at infinity; a mover beyond the residency radius
 /// casts onto no resident card anyway.
 constexpr float kMoverRayRange = 10000.0f;
@@ -1669,13 +1669,30 @@ const Ogre::Light *SurfaceCache::cardSun() const {
     return sun;
 }
 
-void SurfaceCache::traceMovers() {
+float SurfaceCache::sunLiftOf(const CardRec &c) const {
+    const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
+    const float dist = (c.centre - mViewerPos).length();
+    const float rayFootprint = mRayFootprintPerMetre * dist;
+    // R16F keeps 11 bits: the depth quantum at the card's far end.
+    const float depthQuantum = (2.0f * c.halfDepth + 2.0f * captureMargin(c.halfDepth)) / 1024.0f;
+    return kSunLiftFootprints * std::max(texel, rayFootprint) + depthQuantum;
+}
+
+void SurfaceCache::traceSun() {
     // THIS FRAME ONLY: `mLights` is the frame's list only when update() planned
     // this frame (workspacePreUpdate drops a stale plan the same way).
-    if (!mMoverHooks.frame || !mMoverVis || !mRadiance) return;
+    // A batch that cannot be traced this frame waits for its still term.
+    const auto batchWaits = [this]() {
+        for (unsigned idx : mBatch) {
+            CardRec &c = mCards[idx];
+            if (!c.stillPending) c.stillPendingSince = mFrame;
+            c.stillPending = true;
+        }
+    };
+    if (!mMoverHooks.frame || !mMoverVis || !mRadiance) { batchWaits(); return; }
     if (mBatchFrame != Ogre::Root::getSingleton().getCompositorManager2()->getFrameCount()) return;
     CardMoverFrame mf;
-    if (!mMoverHooks.frame(mf)) return;
+    if (!mMoverHooks.frame(mf)) { batchWaits(); return; }
     mMovers.swap(mf.movers);
 
     const Ogre::Light *sunLight = cardSun();
@@ -1694,32 +1711,131 @@ void SurfaceCache::traceMovers() {
     };
     // Captured (its Depth and Normal landed): this frame's batch has, by now.
     const auto landed = [this](const CardRec &c) { return c.lastUpdated != 0ull && !c.queued; };
+    const auto relightDirect = [this](unsigned i) {
+        CardRec &c = mCards[i];
+        if (std::find(mRelight.begin(), mRelight.end(), i) != mRelight.end()) return;
+        if (mRelight.size() >= kMaxRelights) { c.relight = true; return; }
+        mRelight.push_back(i);
+        mRelightMode.push_back(c.indirectValid ? 0u : 2u);
+    };
+    const auto pendStill = [this](CardRec &c) {
+        if (c.stillPending) return;
+        c.stillPending = true;
+        c.stillPendingSince = mFrame;
+    };
+
+    // 0. THE SUN CHANGED (turned, appeared, went, lost its shadows): every landed
+    //    card's still term is stale. One count per gesture (the leading edge).
+    {
+        const bool changed = !mStillSunKnown || (toSun - mStillSun).squaredLength() > 1e-8f;
+        if (changed && mStillSunKnown) {
+            for (CardRec &c : mCards)
+                if (landed(c)) pendStill(c);
+            if (!mSunMovingLastFrame) ++mInvalidSun;
+        }
+        mSunMovingLastFrame = changed && mStillSunKnown;
+        mStillSun = toSun;
+        mStillSunKnown = true;
+    }
 
     // 1. THE STILL CASTERS THAT MOVED — a transform, a show/hide, the caster
     //    bit, a class change (a drag's promotion and demotion, setNodeMovable),
-    //    a deletion: their old and new footprints' cards go back on
-    //    the capture queue (the captured term is theirs). A queued card that
-    //    carries a traced term KEEPS it until the capture lands (step 3 waits
-    //    for `landed`): a demoted mover's shadow passes from the trace to the
-    //    capture without a frame of neither.
+    //    a deletion: their old and new footprints' cards' still term is stale.
+    //    A card whose still term waits KEEPS its traced movers' term (step 3
+    //    waits for `stillPending`): a demoted mover's shadow passes from the
+    //    movers' trace to the still one without a frame of neither.
     if (haveSun) {
         for (const CardCasterMove &m : mf.casterMoves) {
             const Footprint o = boxFootprint(sf, m.oldMin, m.oldMax);
             const Footprint n = boxFootprint(sf, m.newMin, m.newMax);
             for (unsigned i = 0; i < mCards.size(); ++i) {
                 CardRec &c = mCards[i];
-                // Not yet captured, already queued, captured THIS frame (after the
-                // scene graph: it holds the caster where it is now), or the
-                // caster's own (a moved instance re-allocates its cards, a hidden
-                // one gives them back).
+                // Not yet captured, queued (its capture traces it), captured THIS
+                // frame (traced below, after the scene graph: it sees the caster
+                // where it is now), or the caster's own (a moved instance
+                // re-allocates its cards, a hidden one gives them back).
                 if (c.queued || !c.lastUpdated || c.lastUpdated == mFrame) continue;
                 if (mInstances[c.instance].node == m.node) continue;
                 const Footprint &cf = cardFpAt(i);
                 if (!shades(o, cf) && !shades(n, cf)) continue;
-                c.queued = true;
-                ++mCasterRecaptures;
+                if (!c.stillPending) ++mCasterRetraces;
+                pendStill(c);
             }
         }
+    }
+
+    // 1b. THE STILL TRACE: this frame's batch whole (a capture is not readable
+    //     until its sun term is), then the stale cards oldest first, nearest among
+    //     equals, under the relight's budget and the relight list's room.
+    {
+        const auto tStill = std::chrono::steady_clock::now();
+        std::vector<unsigned> still(mBatch.begin(), mBatch.end());
+        std::vector<unsigned> stale;
+        for (unsigned i = 0; i < mCards.size(); ++i)
+            if (mCards[i].stillPending && landed(mCards[i]) &&
+                std::find(still.begin(), still.end(), i) == still.end())
+                stale.push_back(i);
+        const Ogre::Vector3 eye = mViewerPos;
+        std::sort(stale.begin(), stale.end(), [this, &eye](unsigned a, unsigned b) {
+            if (mCards[a].stillPendingSince != mCards[b].stillPendingSince)
+                return mCards[a].stillPendingSince < mCards[b].stillPendingSince;
+            const float da = (mCards[a].centre - eye).squaredLength();
+            const float db = (mCards[b].centre - eye).squaredLength();
+            if (da != db) return da < db;
+            return a < b;
+        });
+        unsigned spent = 0u;
+        const size_t room = mRelight.size() < kMaxRelights ? kMaxRelights - mRelight.size() : 0u;
+        size_t taken = 0u;
+        for (unsigned idx : stale) {
+            const unsigned cost = mCards[idx].size * mCards[idx].size;
+            if (taken && spent + cost > mLightBudget) break;
+            if (still.size() >= room) break;
+            still.push_back(idx);
+            spent += cost;
+            ++taken;
+        }
+        mStillPending = unsigned(stale.size() - taken);
+        if (!still.empty()) {
+            mStillCpu.assign(still.size() * kRelightFloats, 0.0f);
+            for (size_t i = 0; i < still.size(); ++i) {
+                CardRec &c = mCards[still[i]];
+                c.sunLift = sunLiftOf(c);
+                float *r = &mStillCpu[i * kRelightFloats];
+                const Ogre::Vector3 cam = c.centre + c.d * (c.halfDepth + captureMargin(c.halfDepth));
+                r[0] = float(c.atlasX); r[1] = float(c.atlasY); r[2] = float(c.size); r[3] = c.sunLift;
+                r[4] = cam.x; r[5] = cam.y; r[6] = cam.z;
+                r[8] = c.u.x; r[9] = c.u.y; r[10] = c.u.z; r[11] = std::max(2.0f * c.halfU, 1e-4f);
+                r[12] = c.v.x; r[13] = c.v.y; r[14] = c.v.z; r[15] = std::max(2.0f * c.halfV, 1e-4f);
+                r[16] = c.d.x; r[17] = c.d.y; r[18] = c.d.z;
+            }
+            CardMoverTrace job;
+            job.records = mStillCpu.data();
+            job.count = unsigned(still.size());
+            job.depth = mAtlas[unsigned(CardLayer::Depth)];
+            job.normal = mAtlas[unsigned(CardLayer::Normal)];
+            job.vis = mMoverVis;
+            job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];
+            job.toSun = toSun;   // ZERO without a sun: every texel lit
+            job.range = kMoverRayRange;
+            job.still = true;
+            if (mMoverHooks.trace && mMoverHooks.trace(job)) {
+                for (unsigned idx : still) {
+                    CardRec &c = mCards[idx];
+                    c.stillPending = false;
+                    ++mStillTraces;
+                    ++mStillTracedLastFrame;
+                    mStillTexelsLastFrame += c.size * c.size;
+                    relightDirect(idx);
+                }
+            } else {
+                // No structure this frame: every one of them waits (the batch's
+                // cards read the capture's constant 1.0 until then).
+                for (unsigned idx : still) pendStill(mCards[idx]);
+                mStillPending = unsigned(still.size() + stale.size() - taken);
+            }
+        }
+        mStillCpuMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tStill).count());
     }
 
     // 2. THE MOVERS' BOXES THAT CHANGED: a moved mover's old and new box, a
@@ -1783,13 +1899,6 @@ void SurfaceCache::traceMovers() {
         if (!mMovers.empty() || mCards[idx].moverTraced) pend(mCards[idx]);
 
     std::vector<unsigned> trace;
-    const auto relightDirect = [this](unsigned i) {
-        CardRec &c = mCards[i];
-        if (std::find(mRelight.begin(), mRelight.end(), i) != mRelight.end()) return;
-        if (mRelight.size() >= kMaxRelights) { c.relight = true; return; }
-        mRelight.push_back(i);
-        mRelightMode.push_back(c.indirectValid ? 0u : 2u);
-    };
     const bool canTrace = haveSun && bool(mMoverHooks.trace);
     mMoverPending = 0u;
     mMoverPendingAge = 0u;
@@ -1804,6 +1913,9 @@ void SurfaceCache::traceMovers() {
                 if (shades(f, cf)) { reached = true; break; }
         }
         if (!reached) {
+            // Its still term is stale (a demoted mover): the movers' term stands
+            // until the still trace lands, never a frame of neither.
+            if (c.stillPending) continue;
             c.moverPending = false;
             if (c.moverTraced) {
                 c.moverTraced = false;
@@ -1985,7 +2097,10 @@ void SurfaceCache::update(const CardSceneView &view) {
     mLightMs = 0.0f;
     mMoverTracedLastFrame = 0u;
     mMoverTexelsLastFrame = 0u;
+    mStillTracedLastFrame = 0u;
+    mStillTexelsLastFrame = 0u;
     mViewerPos = view.viewerPos;
+    mRayFootprintPerMetre = view.rayFootprintPerMetre;
     mBudget = view.budgetTexels;
     mLightBudget = view.lightBudgetTexels;
     mIndirectBudget = view.indirectBudgetTexels;
@@ -1996,34 +2111,11 @@ void SurfaceCache::update(const CardSceneView &view) {
     // card lands in the same rect, so nothing here moves when the queue drains.
     syncBuffers();
 
-    // THE LIGHT SIGNATURE. A light write is a change to what every card
-    // RECORDS and to no card's RECTANGLE, so it throws every resident card back
-    // on the queue and frees nothing — the cheap half of the invalidation.
-    // (A material edit takes the precise door instead: `noteMaterialChanged`,
-    // which queues only the instances wearing it.)
-    //
-    // WHAT A FINER LIGHT RULE WOULD BE, since the brief asks: "recapture only
-    // the cards whose SHADOW moved" needs the shadow atlas's own per-lamp dirty
-    // set projected onto each card's box — the lamp-map cache has exactly that
-    // information (ENGINE_CACHE_POLICY_SPEC P2-P5) and phase 3, which owns the
-    // light list, is where it belongs. Measured here: a sun tilt on the shadow
-    // fixture re-captures every resident card, which at the tier's budget is
-    // two frames for one instance and is not worth a second dirty set yet.
-    if (view.lightSerial != mLightSerial) {
-        for (CardRec &c : mCards) c.queued = true;
-        // ONE PER GESTURE, NOT ONE PER FRAME — `gi.material_swap`'s model. A
-        // dragged lamp writes a new pose on every frame of the drag and every
-        // one of them genuinely stales the shadow term, so the QUEUEING is per
-        // frame and cannot be otherwise; what a counter is for is telling a
-        // drag from a defect, and a number that climbs by sixty for one gesture
-        // cannot. So the counter moves on the LEADING EDGE: the first frame
-        // whose signature differs after a frame whose signature did not.
-        if (!mLightMovingLastFrame) ++mInvalidLight;
-        mLightMovingLastFrame = true;
-        mLightSerial = view.lightSerial;
-    } else {
-        mLightMovingLastFrame = false;
-    }
+    // NO LIGHT RE-QUEUES A CAPTURE (ATOM-S3-CARDCAP): a capture holds albedo,
+    // normal, depth, emissive and roughness — no light quantity at all. The sun's
+    // visibility is traced (traceSun: a sun change re-traces every resident
+    // card's still term and captures nothing), and every other light is the
+    // relight's (radianceSerial, planRelights).
 
     // THE QUEUE, IN LUMEN'S ORDER: priority = lastUsed - lastUpdated, drained
     // oldest first. A card that has never been captured has `lastUpdated` 0 and
@@ -2157,10 +2249,10 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.captures = mCaptures;
     out.invalidTransform = mInvalidTransform;
     out.invalidMaterial = mInvalidMaterial;
-    out.invalidLight = mInvalidLight;
     out.captureMs = mCaptureMs;
     out.captureWorkspaceMs = mWsMs;
     out.captureCopyMs = mCopyMs;
+    out.captureTraceMs = mStillCpuMs;
     out.cardRecords = mCardRecords;
     out.instanceSlots = mInstanceSlots;
     out.moverCasters = unsigned(mMovers.size());
@@ -2170,8 +2262,13 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.moverRetired = mMoverRetired;
     out.moverPending = mMoverPending;
     out.moverPendingAge = mMoverPendingAge;
-    out.casterRecaptures = mCasterRecaptures;
-    if (mMoverHooks.readTimes) mMoverHooks.readTimes(out.moverGpuMs, out.relightGpuMs);
+    out.invalidSun = mInvalidSun;
+    out.stillTraces = mStillTraces;
+    out.stillTracedLastFrame = mStillTracedLastFrame;
+    out.stillTexelsLastFrame = mStillTexelsLastFrame;
+    out.stillPending = mStillPending;
+    out.casterRetraces = mCasterRetraces;
+    if (mMoverHooks.readTimes) mMoverHooks.readTimes(out.moverGpuMs, out.relightGpuMs, out.stillGpuMs);
 }
 
 long SurfaceCache::itemSlotOf(NodeId node) const {
@@ -2264,6 +2361,23 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
     out.texelX = tx;
     out.texelY = ty;
     out.lit = rec.indirectValid;
+    // THE TEXEL'S SURFACE, as the sun trace reconstructs it (rq_card_movers.comp,
+    // float for float): the capture camera, the ortho window, the depth back along
+    // the card's axis; the normal from the card's view space.
+    {
+        const Ogre::Vector3 cam = rec.centre + rec.d * (rec.halfDepth + captureMargin(rec.halfDepth));
+        const float fx = (float(tx - rec.atlasX) + 0.5f) / float(rec.size);
+        const float fy = (float(ty - rec.atlasY) + 0.5f) / float(rec.size);
+        const Ogre::Vector3 P = cam + rec.u * (std::max(2.0f * rec.halfU, 1e-4f) * (fx - 0.5f)) +
+                                rec.v * (std::max(2.0f * rec.halfV, 1e-4f) * (0.5f - fy)) - rec.d * out.depth;
+        Ogre::Vector3 N = rec.u * out.normal[0] + rec.v * out.normal[1] + rec.d * out.normal[2];
+        if (N.squaredLength() > 1e-12f) N.normalise();
+        for (int k = 0; k < 3; ++k) {
+            out.position[k] = P[k];
+            out.worldNormal[k] = N[k];
+        }
+        out.sunLift = rec.sunLift;
+    }
     out.ok = true;
     return true;
 }

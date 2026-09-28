@@ -1,25 +1,37 @@
 #version 460
 #extension GL_EXT_ray_query : require
 
-// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4).
+// THE SUN'S VISIBILITY ON THE CARDS: one ray per card texel towards the sun, in
+// two modes of one job (knobs.y).
 //
-// A card's sun visibility has two halves. The STILL WORLD's is the term its
-// capture stored (ShadowRough.x: the card shadow node draws the probe kind's
-// casters, which a mover never is). The MOVERS' is this job's: one ray per
-// texel of every card a shadow-casting mover's sun-projected footprint reaches,
-// from the texel's world point towards the sun, against the movers alone
-// (kRayMaskMoverCaster, their near copies). The answer (1 lit, 0 occluded) goes
-// into the cache's R8 mover-visibility layer at the texel's atlas address, and
-// the relight job (JahCardLight_cs.glsl) multiplies it into the sun's term for
-// the cards the host flags as carrying one.
+// A card's sun visibility has two halves, both TRACED:
+//   * THE STILL WORLD's (ATOM-S3-CARDCAP, mode 1): every texel of a card just
+//     captured, and of a card whose still term went stale (the sun turned, a
+//     still caster moved), against the still world's shadow casters
+//     (kRayMaskStillCaster, their near copies). The answer goes into the x
+//     channel of the card's ShadowRough layer (y, the GGX alpha the capture
+//     wrote, is kept). A card stores the still world's sun term at its own
+//     texel scale, and one ray per texel IS that term — no shadow map fit per
+//     card, no filter of a quantity the relight reads as a texel.
+//   * THE MOVERS' (PHOTON-CARDS-4, mode 0): one ray per texel of every card a
+//     shadow-casting mover's sun-projected footprint reaches, against the movers
+//     alone (kRayMaskMoverCaster), into the cache's R8 mover-visibility layer.
+// The relight job (JahCardLight_cs.glsl) multiplies the two into the sun's term.
 //
 // The texel's world point and normal are the relight's own reconstruction
 // (JahCardLight_cs.glsl main: the capture camera's position, the ortho window
 // on axisU/axisV, the depth back along axisD; the normal decoded from the card's
-// view space) — the two jobs must agree texel for texel.
+// view space) — the jobs must agree texel for texel.
 //
-// A HARD term: one ray, no filter. The captured term is the capture's PSSM
-// filter; a mover's edge is one texel wide here.
+// A HARD term: one ray, no filter; an edge is one card texel wide.
+//
+// THE LIFT (still mode only): the receiver IS a still caster, so the ray starts on
+// a surface it can hit. The origin moves along the normal by the record's lift
+// (rect.w, OgreSurfaceCache.cpp kSunLiftFootprints: two of the larger of the
+// card's texel and the ray tier's footprint at the card — the near copy traced
+// may lie a footprint off the captured level — plus the depth layer's quantum),
+// tMin zero: the sun-contact job's rule. The movers' mode lifts nothing: a
+// receiver is never a mover (movers carry no cards).
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -28,11 +40,11 @@ layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 layout( set = 0, binding = 1 ) uniform Params
 {
 	vec4 toSun;		// xyz = the unit direction TOWARDS the sun, w = the ray's length
-	vec4 knobs;		// x = the mask, yzw = unused
+	vec4 knobs;		// x = the mask, y = the mode (0 movers, 1 still), zw = unused
 } p;
 
 // ONE CARD, the relight's record layout (CardRelight): rect = (atlasX, atlasY,
-// size, unused); camPos; axisU.xyz/axisV.xyz with the ortho window's width /
+// size, the still mode's lift in metres); camPos; axisU.xyz/axisV.xyz with the ortho window's width /
 // height in .w; axisD.
 struct CardRec
 {
@@ -47,6 +59,7 @@ layout( std430, set = 0, binding = 2 ) readonly buffer Cards { CardRec cards[]; 
 layout( set = 0, binding = 3 ) uniform sampler2D cardDepth;
 layout( set = 0, binding = 4 ) uniform sampler2D cardNormal;
 layout( r8, set = 0, binding = 5 ) uniform writeonly image2D moverVis;
+layout( rg8, set = 0, binding = 6 ) uniform image2D shadowRough;
 
 void main()
 {
@@ -70,16 +83,24 @@ void main()
 			const vec2 f = ( vec2( t ) + 0.5 ) / float( size );
 			const vec3 P = r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) +
 						   r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) - r.axisD.xyz * depth;
-			// NO LIFT: a receiver is never a mover (movers carry no cards), so the
-			// ray cannot find the surface it starts on.
+			// THE LIFT (the head of this file): the still mode's, from the record.
+			const vec3 origin = p.knobs.y > 0.5 ? P + N * r.rect.w : P;
 			rayQueryEXT rq;
 			rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
-								   uint( p.knobs.x ), P, 0.0, L, p.toSun.w );
+								   uint( p.knobs.x ), origin, 0.0, L, p.toSun.w );
 			while( rayQueryProceedEXT( rq ) ) {}
 			if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
 				gl_RayQueryCommittedIntersectionTriangleEXT )
 				vis = 0.0;
 		}
 	}
-	imageStore( moverVis, at, vec4( vis ) );
+	if( p.knobs.y > 0.5 )
+	{
+		const vec4 was = imageLoad( shadowRough, at );
+		imageStore( shadowRough, at, vec4( vis, was.y, 0.0, 0.0 ) );
+	}
+	else
+	{
+		imageStore( moverVis, at, vec4( vis ) );
+	}
 }

@@ -1876,13 +1876,14 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 // inside Root's frame, after `updateSceneGraph`, as the first workspace in the
 // manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
 void OgreScene::updateSurfaceCache() {
-    // AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): the reader of a card is the
-    // reflection trace's hit (rq_reflect.comp, jah_rq_card.glsl), so the cache
-    // is on exactly where that trace runs — the World row resolved against the
-    // machine (`rayReflectionsWanted`) — and costs nothing where it cannot be
-    // read. On forces it (a suite, the monitor); Off refuses it.
-    const bool want = mGi.cards == GiToggle::On ||
-                      (mGi.cards == GiToggle::Auto && rayReflectionsWanted());
+    // THE CARDS RUN ONLY WHERE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): every
+    // reader of a card is a ray job's hit (rq_reflect.comp, the gather,
+    // jah_rq_card.glsl), and a card's sun term is itself TRACED (traceSun) — so
+    // the cache exists exactly where the ray tier does (the World row resolved
+    // against the machine, `rayReflectionsWanted`) and costs nothing elsewhere.
+    // Off refuses it; On and Auto both resolve against the rays (On no longer
+    // forces a cache without them: nothing could fill its sun term or read it).
+    const bool want = mGi.cards != GiToggle::Off && rayReflectionsWanted();
     if (!want) {
         if (mSurfaceCache) mSurfaceCache.reset();
         return;
@@ -1899,14 +1900,14 @@ void OgreScene::updateSurfaceCache() {
             mSurfaceCache.reset();
             return;
         }
-        // THE MOVERS' SHADOW (PHOTON-CARDS-4): the scene's in-frame answers and
-        // the ray tier's trace; a scene without rays answers "no trace" and the
-        // cards keep the still world's sun term alone.
+        // THE SUN ON THE CARDS (PHOTON-CARDS-4; ATOM-S3-CARDCAP): the scene's
+        // in-frame answers and the ray tier's two traces (the still world's, the
+        // movers').
         CardMoverHooks hooks;
         hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
         hooks.trace = [this](const CardMoverTrace &t) { return traceCardMovers(t); };
         hooks.timeRelight = [this](bool begin) { timeCardRelight(begin); };
-        hooks.readTimes = [this](float &a, float &b) { cardMoverTimes(a, b); };
+        hooks.readTimes = [this](float &a, float &b, float &c) { cardMoverTimes(a, b, c); };
         mSurfaceCache->setMoverHooks(hooks);
     }
     // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
@@ -1925,21 +1926,13 @@ void OgreScene::updateSurfaceCache() {
                                                  : facts.cardBudgetTexels;
     view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
                                                  : facts.cardResidencyRadius;
-    // THE TWO LIGHT SIGNATURES, and neither is `mGiLightWriteSerial` (which bumps on
-    // every `setLight` push and every pose write, a colour slider included).
-    //
-    // `lightSerial` — WHAT A CAPTURE STORES FROM A LIGHT: the sun's shadow term and
-    // nothing else (the capture is a prepass; its one shadow term is the directional
-    // light's, DOCS/traps/ENGINE.md). So it folds the DIRECTIONAL shadow-casting
-    // lights only — their `Node::lightShadowKey` (type, castShadows), their derived
-    // pose and whether they are shown. A point or spot lamp moving changes no
-    // captured byte and re-queues no card (ATOM-S3-CARDCAP: it used to re-capture
-    // the whole resident set — scale.atlas W9's 378 cards a lamp move).
-    //
-    // `radianceSerial` (below) — what a card's LIT radiance depends on: EVERY
-    // light's pose and shadow key (the relight lights a card with every lamp,
-    // unculled), plus colour, power, reach and cone. A lamp move relights the
-    // resident set under the relight's own budget and captures nothing.
+    // THE RADIANCE SIGNATURE — not `mGiLightWriteSerial` (which bumps on every
+    // `setLight` push and every pose write): what a card's LIT radiance depends on,
+    // EVERY light's pose and shadow key (the relight lights a card with every lamp,
+    // unculled) plus colour, power, reach and cone (below). A change relights the
+    // resident set under the relight's own budget and CAPTURES NOTHING: no light
+    // quantity is in a capture (ATOM-S3-CARDCAP — the sun's visibility is traced,
+    // SurfaceCache::traceSun, which follows the sun's direction itself).
     //
     // Over `mLightNodes`, which is the engine's own light index (a hint that is
     // a superset), so this is a handful of quantised folds and not a walk of
@@ -1951,7 +1944,6 @@ void OgreScene::updateSurfaceCache() {
     // transform epoch counts the document's and Scene::setNodeTransform's writes).
     std::optional<monitor::Stage> lightStage;
     lightStage.emplace("engine.cards.lights");
-    unsigned long long lightSig = 1469598103934665603ull;
     unsigned long long radianceSig = 1469598103934665603ull;
     const auto foldInto = [](unsigned long long &sig, unsigned long long v) {
         sig ^= v;
@@ -1959,7 +1951,7 @@ void OgreScene::updateSurfaceCache() {
     };
     const auto quant = [](float f) {
         // Quantised to a millimetre / a thousandth: float noise below the
-        // tolerance the whole pipeline works to must not re-capture a card.
+        // tolerance the whole pipeline works to must not relight a card.
         return (unsigned long long)(long long)std::lround(double(f) * 1000.0);
     };
     for (NodeId lid : mLightNodes) {
@@ -1974,10 +1966,8 @@ void OgreScene::updateSurfaceCache() {
             pose[5] = quant(q.x); pose[6] = quant(q.y); pose[7] = quant(q.z); pose[8] = quant(q.w);
         }
         for (unsigned long long v : pose) foldInto(radianceSig, v);
-        if (ln.light->getType() != Ogre::Light::LT_DIRECTIONAL || !ln.light->getCastShadows()) continue;
-        for (unsigned long long v : pose) foldInto(lightSig, v);
     }
-    view.lightSerial = lightSig;
+    view.rayFootprintPerMetre = mRayFootprintPerMetre;
     // THE RADIANCE SIGNATURE: every light's pose above plus everything a
     // card's LIT radiance depends on and its capture does not — the colour,
     // the power, the reach and the cone. A colour slider costs the cache a

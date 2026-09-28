@@ -1187,7 +1187,7 @@ public:
     bool traceCardMovers(OgreScene *scene, const CardMoverTrace &job);
     /// A timestamp pair around the scene's relight dispatch, and the read-back.
     void timeCardRelight(OgreScene *scene, bool begin);
-    void cardMoverTimes(OgreScene *scene, float &traceMs, float &relightMs);
+    void cardMoverTimes(OgreScene *scene, float &traceMs, float &relightMs, float &stillMs);
     void forgetCardMovers(OgreScene *scene);
 
 private:
@@ -1205,7 +1205,11 @@ private:
     bool makeCardMoverPipeline(std::string &err);
     bool cardMoverQueries(CardMoverView &cv);
     void readCardMoverTimestamps(CardMoverView &cv);
+    /// Per scene, one view per MODE of the job (rq_card_movers.comp): the movers'
+    /// trace and the still world's — each its own ring, sets and timestamps, since
+    /// both record in one frame.
     std::unordered_map<const OgreScene *, CardMoverView> mCardMovers;
+    std::unordered_map<const OgreScene *, CardMoverView> mCardStill;
     VkDescriptorSetLayout mCmSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mCmPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mCmPipeline = VK_NULL_HANDLE;
@@ -1938,12 +1942,14 @@ void RayQueryTier::close() {
     mSunSampler = VK_NULL_HANDLE; mSunTimestamps = VK_NULL_HANDLE;
     mSunQuerySlots = 0;
     // THE CARD MOVERS' state: sets dropped with the pool (the sun contact's rule).
-    for (auto &kv : mCardMovers)
-        for (unsigned i = 0; i < kReflectRing; ++i) {
-            dropBuffer(kv.second.params[i]);
-            dropBuffer(kv.second.records[i]);
-        }
-    mCardMovers.clear();
+    for (auto *views : { &mCardMovers, &mCardStill }) {
+        for (auto &kv : *views)
+            for (unsigned i = 0; i < kReflectRing; ++i) {
+                dropBuffer(kv.second.params[i]);
+                dropBuffer(kv.second.records[i]);
+            }
+        views->clear();
+    }
     if (mCmPool) vkDestroyDescriptorPool(mVk, mCmPool, nullptr);
     if (mTwPool) vkDestroyDescriptorPool(mVk, mTwPool, nullptr);
     if (mTwPipeline) vkDestroyPipeline(mVk, mTwPipeline, nullptr);
@@ -2093,7 +2099,8 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 //     AT-A8r, `OgreScene::updateRayLevels`; clamped to the chain), carrying the
 //     per-consumer bits of audit C-15 — a shadow caster, a mover or still world —
 //     and "near"; a shadow-casting mover's also kRayMaskMoverCaster (the surface
-//     cache's mover-shadow launch, PHOTON-CARDS-4).
+//     cache's mover-shadow launch, PHOTON-CARDS-4), a shadow-casting still
+//     object's kRayMaskStillCaster (its still-world launch, ATOM-S3-CARDCAP).
 //   * THE FAR COPY over the mesh's COARSEST level, carrying kRayMaskFar ALONE: only
 //     a launch that asks for the far field sees it, so no ray is answered twice by
 //     one object.
@@ -2243,6 +2250,7 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
     w[11] = detail::kGpuCaster;
     w[12] = detail::kGpuMover;
     w[13] = detail::kGpuSkinned;
+    w[14] = kRayMaskStillCaster;
     if (meshesCurrent) {
         std::copy(sa.tlasInWords.begin() + kTlasHeaderWords,
                   sa.tlasInWords.begin() + kTlasHeaderWords + ptrdiff_t(meshes) * kTlasMeshWords,
@@ -4574,7 +4582,8 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     }
     // Sized for kMaxTimedScenes views' worth of rings, which is the same ceiling
     // the timestamp pool uses and far more views than a product frame draws.
-    const unsigned sets = kMaxTimedScenes * kReflectRing;
+    // Two modes a scene (the movers' view and the still view), a ring each.
+    const unsigned sets = 2u * kMaxTimedScenes * kReflectRing;
     VkDescriptorPoolSize sizes[5] = {};
     sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     sizes[0].descriptorCount = sets;
@@ -6718,17 +6727,19 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
 }
 
 // ---------------------------------------------------------------------------
-// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the ray tier's half. The
-// surface cache selects the cards (OgreSurfaceCache.cpp, "The movers' shadow")
+// THE SUN ON THE CARDS (PHOTON-CARDS-4; ATOM-S3-CARDCAP) — the ray tier's half. The
+// surface cache selects the cards (OgreSurfaceCache.cpp, "The sun on the cards")
 // and hands over their records in the relight's layout; this records one ray
-// per texel towards the sun against the shadow-casting movers' near copies
-// (kRayMaskMoverCaster) into the cache's R8 mover-visibility layer.
+// per texel towards the sun: in the MOVERS' mode against the shadow-casting
+// movers' near copies (kRayMaskMoverCaster) into the cache's R8 mover-visibility
+// layer, in the STILL mode against the shadow-casting still objects' near copies
+// (kRayMaskStillCaster) into the ShadowRough layer's x.
 namespace {
 struct CardMoverParams {
     float toSun[4] = {};
     float knobs[4] = {};
 };
-constexpr unsigned kCardMoverBindings = 6u;
+constexpr unsigned kCardMoverBindings = 7u;
 /// Four timestamps a frame: the trace's pair and the relight's pair.
 constexpr unsigned kCardMoverQueries = 4u;
 /// The records ring's capacity: the relight list's (kMaxRelights, 80 B a card).
@@ -6741,6 +6752,14 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
         err = "the device cannot store to R8_UNORM (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)";
         return false;
     }
+    {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(mDev->mPhysicalDevice, VK_FORMAT_R8G8_UNORM, &props);
+        if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+            err = "the device cannot store to R8G8_UNORM (the ShadowRough layer's still term)";
+            return false;
+        }
+    }
     if (!ensureSamplers(err)) return false;
     VkDescriptorSetLayoutBinding b[kCardMoverBindings] = {};
     const VkDescriptorType types[kCardMoverBindings] = {
@@ -6750,6 +6769,7 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 3 cardDepth
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 4 cardNormal
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 5 moverVis
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 6 shadowRough (still mode)
     };
     for (unsigned i = 0; i < kCardMoverBindings; ++i) {
         b[i].binding = i;
@@ -6803,7 +6823,7 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
     sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sizes[3].descriptorCount = sets * 2u;
     sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    sizes[4].descriptorCount = sets;
+    sizes[4].descriptorCount = sets * 2u;
     VkDescriptorPoolCreateInfo dpi{};
     dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -6863,7 +6883,8 @@ void RayQueryTier::readCardMoverTimestamps(CardMoverView &cv) {
 }
 
 bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) {
-    if (!isOpen() || !scene || !job.count || !job.records || !job.depth || !job.normal || !job.vis)
+    if (!isOpen() || !scene || !job.count || !job.records || !job.depth || !job.normal || !job.vis ||
+        !job.shadowRough)
         return false;
     auto sceneIt = mScenes.find(scene);
     if (sceneIt == mScenes.end()) return false;
@@ -6879,7 +6900,7 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
             return false;
         }
     }
-    CardMoverView &cv = mCardMovers[scene];
+    CardMoverView &cv = job.still ? mCardStill[scene] : mCardMovers[scene];
     readCardMoverTimestamps(cv);
     const unsigned count = std::min(job.count, kCardMoverMaxRecords);
     std::string err;
@@ -6906,7 +6927,8 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     CardMoverParams pp{};
     pp.toSun[0] = job.toSun.x; pp.toSun[1] = job.toSun.y; pp.toSun[2] = job.toSun.z;
     pp.toSun[3] = job.range;
-    pp.knobs[0] = float(kRayMaskMoverCaster);
+    pp.knobs[0] = float(job.still ? kRayMaskStillCaster : kRayMaskMoverCaster);
+    pp.knobs[1] = job.still ? 1.0f : 0.0f;
     memcpy(cv.params[ring].mapped, &pp, sizeof(pp));
     memcpy(cv.records[ring].mapped, job.records, size_t(count) * kCardMoverRecordFloats * sizeof(float));
 
@@ -6927,7 +6949,7 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     ub.range = sizeof(CardMoverParams);
     rb.buffer = cv.records[ring].buffer;
     rb.range = recBytes;
-    VkDescriptorImageInfo depth{}, normal{}, store{};
+    VkDescriptorImageInfo depth{}, normal{}, store{}, rough{};
     depth.sampler = mPointSampler;
     depth.imageView = sampledView(job.depth);
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -6943,7 +6965,16 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
         retireView(store.imageView);
         store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
-    if (!depth.imageView || !normal.imageView || !store.imageView) return false;
+    {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = job.shadowRough;
+        slot.access = Ogre::ResourceAccess::ReadWrite;
+        slot.pixelFormat = job.shadowRough->getPixelFormat();
+        rough.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.shadowRough)->createView(slot, false);
+        retireView(rough.imageView);
+        rough.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (!depth.imageView || !normal.imageView || !store.imageView || !rough.imageView) return false;
     VkWriteDescriptorSet wds[kCardMoverBindings] = {};
     for (unsigned i = 0; i < kCardMoverBindings; ++i) {
         wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -6963,6 +6994,8 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     wds[4].pImageInfo = &normal;
     wds[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     wds[5].pImageInfo = &store;
+    wds[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    wds[6].pImageInfo = &rough;
     vkUpdateDescriptorSets(mVk, kCardMoverBindings, wds, 0, nullptr);
 
     // THE LAYOUTS through Ogre's own solver, before the command buffer is taken:
@@ -6973,8 +7006,14 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
         const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
         Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
         Ogre::ResourceTransitionArray trans;
+        // Both storage images are bound in either mode (GENERAL); the one the
+        // mode writes is resolved as written, the other as read.
         solver.resolveTransition(trans, job.vis, Ogre::ResourceLayout::Uav,
-                                 Ogre::ResourceAccess::Write, computeStage);
+                                 job.still ? Ogre::ResourceAccess::Read : Ogre::ResourceAccess::Write,
+                                 computeStage);
+        solver.resolveTransition(trans, job.shadowRough, Ogre::ResourceLayout::Uav,
+                                 job.still ? Ogre::ResourceAccess::ReadWrite : Ogre::ResourceAccess::Read,
+                                 computeStage);
         for (Ogre::TextureGpu *t : { job.depth, job.normal })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
@@ -6983,7 +7022,8 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     VkCommandBuffer cmd = frameCmd();
     if (!cmd) return false;
     {
-        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Caster, 0, "cards.movers", mRs);
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Caster, 0,
+                                         job.still ? "cards.still" : "cards.movers", mRs);
         work.setUnits(count);
         const bool timed = cardMoverQueries(cv);
         const unsigned slot = frameNow() % kFramesInFlight;
@@ -7028,7 +7068,12 @@ void RayQueryTier::timeCardRelight(OgreScene *scene, bool begin) {
     }
 }
 
-void RayQueryTier::cardMoverTimes(OgreScene *scene, float &traceMs, float &relightMs) {
+void RayQueryTier::cardMoverTimes(OgreScene *scene, float &traceMs, float &relightMs, float &stillMs) {
+    auto st = mCardStill.find(scene);
+    if (st != mCardStill.end()) {
+        readCardMoverTimestamps(st->second);
+        stillMs = st->second.traceMs;
+    }
     auto it = mCardMovers.find(scene);
     if (it == mCardMovers.end()) return;
     readCardMoverTimestamps(it->second);
@@ -7037,15 +7082,17 @@ void RayQueryTier::cardMoverTimes(OgreScene *scene, float &traceMs, float &relig
 }
 
 void RayQueryTier::forgetCardMovers(OgreScene *scene) {
-    auto it = mCardMovers.find(scene);
-    if (it == mCardMovers.end()) return;
-    for (unsigned i = 0; i < kReflectRing; ++i) {
-        retireSet(it->second.sets[i], mCmPool);
-        retire(it->second.params[i]);
-        retire(it->second.records[i]);
+    for (auto *views : { &mCardMovers, &mCardStill }) {
+        auto it = views->find(scene);
+        if (it == views->end()) continue;
+        for (unsigned i = 0; i < kReflectRing; ++i) {
+            retireSet(it->second.sets[i], mCmPool);
+            retire(it->second.params[i]);
+            retire(it->second.records[i]);
+        }
+        if (it->second.hasQueryBase) mCmQuerySlots &= ~(uint32_t(1) << it->second.querySlot);
+        views->erase(it);
     }
-    if (it->second.hasQueryBase) mCmQuerySlots &= ~(uint32_t(1) << it->second.querySlot);
-    mCardMovers.erase(it);
 }
 
 bool OgreScene::traceCardMovers(const CardMoverTrace &job) {
@@ -7054,8 +7101,8 @@ bool OgreScene::traceCardMovers(const CardMoverTrace &job) {
 void OgreScene::timeCardRelight(bool begin) {
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->timeCardRelight(this, begin);
 }
-void OgreScene::cardMoverTimes(float &traceMs, float &relightMs) {
-    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardMoverTimes(this, traceMs, relightMs);
+void OgreScene::cardMoverTimes(float &traceMs, float &relightMs, float &stillMs) {
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardMoverTimes(this, traceMs, relightMs, stillMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -8036,6 +8083,7 @@ unsigned long long OgreScene::gatherRestKey() const {
         CardCacheStatus cs;
         mSurfaceCache->fillStatus(cs);
         fold(cs.captures);
+        fold(cs.stillTraces);
         fold(cs.relights);
         fold(cs.indirectRelights);
     }
@@ -8061,7 +8109,7 @@ unsigned long long OgreScene::gatherRestartKey() const {
         CardCacheStatus cs;
         mSurfaceCache->fillStatus(cs);
         fold(cs.invalidMaterial);
-        fold(cs.invalidLight);
+        fold(cs.invalidSun);
     }
     return key;
 }
@@ -8189,7 +8237,7 @@ bool OgreScene::readTlasInstances(TlasReadback &, std::string &err) {
 bool OgreScene::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
 void OgreScene::timeCardRelight(bool) {}
-void OgreScene::cardMoverTimes(float &, float &) {}
+void OgreScene::cardMoverTimes(float &, float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
 void OgreScene::setSunContact(const SunContactDesc &d) { mSunContact = d; }
 bool OgreScene::sunContactWanted() const { return false; }

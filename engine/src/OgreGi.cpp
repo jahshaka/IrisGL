@@ -7301,15 +7301,8 @@ void OgreScene::teardownGi() {
 // re-captures them a few at a time rather than the placement capturing the
 // whole grid inline.
 bool OgreScene::dropGiForShadowRebuild() {
-    // THE SURFACE CACHE'S CAPTURE WORKSPACE HOLDS ONE TOO (SURFACE-CACHE phase
-    // 2), on the SAME probe definition — a shadow-atlas rebuild removes that
-    // definition and creates it again, and a workspace left holding an instance
-    // of the removed one is risk R3's SEGV with a different owner. The cache is
-    // dropped WHOLE rather than re-created here: its atlas is a cache by
-    // definition, the next frame's `updateSurfaceCache` rebuilds it, and the
-    // residency pass re-queues everything inside the radius — which costs the
-    // tier's budget for a few frames and nothing else.
-    if (mSurfaceCache) mSurfaceCache.reset();
+    // (The surface cache's capture workspace holds NO shadow node since
+    // ATOM-S3-CARDCAP — its sun term is traced — so it survives a rebuild.)
     // The shadowed PCC probes hold live CompositorShadowNodes on the probe
     // definition, one workspace each.
     if (!mPcc || !mPccShadowed) return false;
