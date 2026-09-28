@@ -413,6 +413,66 @@ vec3 movedPrevPosition( MovedSlot m, vec3 x )
 	return jahInstancePrevPosition( m.w0, m.w1, m.w2, m.q0, m.q1, m.q2, x );
 }
 
+/// A HIT'S POINT, LAST FRAME (REFLECT-MOVERS-2). A rigid mover's through its two
+/// poses (movedSlot). A POSED item's (kGpuSkinned) through its skin cache's
+/// PREVIOUS-POSE SLICE (SkinCache.h: the row's first pad word is the slice's byte
+/// offset from the vertex address): the hit triangle's three vertices as they
+/// were last frame, at this hit's barycentrics, through the instance's previous
+/// pose — the pose's motion and the node's together. Only the DIFFERENCE is
+/// applied to the hit point (the interpolated point's own float error cancels),
+/// so a triangle that did not move gives the hit back bit for bit. False when the
+/// point did not move: a still slot, a mover at rest, a pose that did not change,
+/// a slot whose cache is not ready (no row, or no slice).
+bool hitPrevPoint( uint slot, uint geomIdx, uint prim, vec2 bary, vec3 hitNow, out vec3 was )
+{
+	was = hitNow;
+	if( ( jahHitFlags( slot ) & kJahHitGpuSkinned ) == 0u )
+	{
+		const MovedSlot m = movedSlot( slot );
+		if( !m.moved )
+			return false;
+		was = movedPrevPosition( m, hitNow );
+		return true;
+	}
+	if( slot >= JAH_GEOM_SLOTS || slot >= JAH_HIT_INSTANCES )
+		return false;
+	uint row = JAH_GEOM_ROW_OF( slot );
+	if( row == 0xFFFFFFFFu )
+		return false;
+	row += geomIdx;
+	GeometryRow g;
+	g.addresses = JAH_GEOM_LANE( row, 0u );
+	g.layout0 = JAH_GEOM_LANE( row, 1u );
+	g.layout1 = JAH_GEOM_LANE( row, 2u );
+	if( g.layout1.z == 0u || ( g.addresses.x | g.addresses.y ) == 0u || ( g.addresses.z | g.addresses.w ) == 0u )
+		return false;
+	GeomFloatRef prevRef = GeomFloatRef( jahGeomAddressPlus( g.addresses.xy, g.layout1.z ) );
+	const vec3 b = vec3( 1.0 - bary.x - bary.y, bary.x, bary.y );
+	vec3 cur = vec3( 0.0 ), old = vec3( 0.0 );
+	bool poseMoved = false;
+	for( uint k = 0u; k < 3u; ++k )
+	{
+		const uint vtx = geomIndex( g, prim * 3u + k );
+		const vec3 c = geomPosition( g, vtx );
+		const vec3 o = vec3( prevRef.v[vtx * 3u], prevRef.v[vtx * 3u + 1u], prevRef.v[vtx * 3u + 2u] );
+		poseMoved = poseMoved || any( notEqual( floatBitsToUint( c ), floatBitsToUint( o ) ) );
+		cur += c * b[k];
+		old += o * b[k];
+	}
+	const uvec4 w0 = JAH_HIT_INSTANCE( slot, 0u ), w1 = JAH_HIT_INSTANCE( slot, 1u ), w2 = JAH_HIT_INSTANCE( slot, 2u );
+	const uvec4 q0 = JAH_HIT_INSTANCE( slot, 3u ), q1 = JAH_HIT_INSTANCE( slot, 4u ), q2 = JAH_HIT_INSTANCE( slot, 5u );
+	const bool nodeMoved = any( notEqual( w0, q0 ) ) || any( notEqual( w1, q1 ) ) || any( notEqual( w2, q2 ) );
+	if( !poseMoved && !nodeMoved )
+		return false;
+	const vec4 c4 = vec4( cur, 1.0 ), o4 = vec4( old, 1.0 );
+	const vec3 curW = vec3( dot( uintBitsToFloat( w0 ), c4 ), dot( uintBitsToFloat( w1 ), c4 ),
+							dot( uintBitsToFloat( w2 ), c4 ) );
+	const vec3 oldW = vec3( dot( uintBitsToFloat( q0 ), o4 ), dot( uintBitsToFloat( q1 ), o4 ),
+							dot( uintBitsToFloat( q2 ), o4 ) );
+	was = hitNow + ( oldW - curW );
+	return true;
+}
+
 /// Metres along the camera's forward axis, with and without reverse Z — the
 /// same line JahSsrRayMarch_ps.glsl uses, from Camera::getProjectionParamsAB().
 float viewDistance( float rawDepth )
@@ -849,7 +909,7 @@ void main()
 	// temporal mean below with that radiance. There is no hand-back to the
 	// probe: a hit is always shaded (a card, a voxel, or the decode).
 	bool record = false;
-	uint recSlot = 0u, recPrim = 0u;
+	uint recSlot = 0u, recPrim = 0u, recGeom = 0u;
 	vec2 recBary = vec2( 0.0 );
 	vec3 recN = -L;
 	uint photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceSourced); 3 the sky
@@ -871,6 +931,7 @@ void main()
 		record = decodeAlways || !ok || !finite3( traced );
 		recSlot = hitSlot;
 		recPrim = hitPrim;
+		recGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
 		recBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
 		recN = hitN;
 	}
@@ -906,12 +967,14 @@ void main()
 	vec3 prevHit = world + worldN * bias + L * hitT;   // an escape: a point beyond every hit
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
-		hitMover = p.motion.w > 0.5 && ( jahHitFlags( recSlot ) & kJahReprojectMoverFlags ) != 0u;
-		const MovedSlot hs = movedSlot( recSlot );
-		if( hs.moved && p.motion.w > 0.5 )
+		// a POSED item is a mover of the reflection's (its limbs move under a still node)
+		hitMover = p.motion.w > 0.5 &&
+				   ( jahHitFlags( recSlot ) & ( kJahReprojectMoverFlags | kJahHitGpuSkinned ) ) != 0u;
+		vec3 was;
+		if( p.motion.w > 0.5 && hitPrevPoint( recSlot, recGeom, recPrim, recBary, prevHit, was ) )
 		{
 			hitMoving = true;
-			prevHit = movedPrevPosition( hs, prevHit );
+			prevHit = was;
 		}
 	}
 	// (A MOVING REFLECTOR over a still world keeps its SURFACE's history: the

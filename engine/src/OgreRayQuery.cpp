@@ -531,6 +531,10 @@ private:
             uint32_t row = 0xFFFFFFFFu;       ///< its level-0/submesh-0 row: the override
             unsigned long long poseSerial = 0ull;
             bool skinned = false;             ///< the job has written it at least once
+            /// The previous-pose slice differs from the posed vertices (the pose
+            /// moved last time it was skinned): the first frame with no pose change
+            /// copies it level (a SETTLE record, REFLECT-MOVERS-2).
+            bool prevBehind = false;
             bool seen = false;                ///< in this pass's traced set
             /// The structure, built once from the cache with ALLOW_UPDATE and
             /// REFIT in place on every pose change after that. Its own scratch,
@@ -542,6 +546,10 @@ private:
             unsigned triangles = 0;
         };
         std::unordered_map<uint32_t, Skin> skins;
+        /// The VaoManager frame on which a skin pass last MOVED a pose (a re-skin
+        /// that was not the cache's first): the reflection's "a mover moved in the
+        /// last two frames" counts a posed item's limbs too (REFLECT-MOVERS-2).
+        uint32_t skinPosedFrame = 0xFFFFFFFFu;
         /// What the instance writer reads for a rigged slot: the skin BLAS and the
         /// row, for the entries READY this pass (built and skinned).
         std::unordered_map<uint32_t, std::pair<VkDeviceAddress, uint32_t>> skinUse;
@@ -2990,6 +2998,9 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
     //    seen are dropped AFTER the gather (updateScene).
     struct Dirty { uint32_t node = 0; SceneAs::Skin *sk = nullptr; OgreScene::Node *n = nullptr; };
     std::vector<Dirty> dirty;
+    // THE SETTLE LIST (REFLECT-MOVERS-2): caches whose pose stopped last frame —
+    // their previous-pose slice is copied level with the posed vertices, no skinning.
+    std::vector<SceneAs::Skin *> settle;
     bool rowsStaged = false;
     for (const Want &wt : wants) {
         const uint32_t node = uint32_t(wt.node->selfId);
@@ -3054,12 +3065,13 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
         // and costs nothing here: the cache is in the item's LOCAL space.
         const unsigned long long serial = skinPoseSerial(scene, *wt.node);
         if (!sk.skinned || !sk.built || serial != sk.poseSerial) dirty.push_back({ node, &sk, wt.node });
+        else if (sk.prevBehind) settle.push_back(&sk);
     }
     // A row not on the device is a zero address to the job (the ATOM-VOXEL-2 Xid):
     // the new rows go up NOW, before anything below binds the table.
     if (rowsStaged) gs.flushGeomRows();
 
-    if (!dirty.empty()) {
+    if (!dirty.empty() || !settle.empty()) {
         // 3. THE PALETTE: Ogre's own bone matrices for the renderable — the SAME
         //    `SkeletonInstance::_getBoneFullTransform` values, in the SAME
         //    blend-index order, that HlmsPbs::fillBuffersForV2 streams into its
@@ -3093,7 +3105,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             r.tangentOffset = d.sk->buf.tangentOffset;
             r.blendOffsets = (d.sk->buf.blendIndexOffset & 0xFFFFu) |
                              ((d.sk->buf.blendWeightOffset & 0xFFFFu) << 16u);
-            r.boneCount = uint32_t(map->size());
+            r.boneCount = uint32_t(map->size()) | (d.sk->skinned ? 0u : kSkinJobFirst);
             for (size_t b = 0; b < map->size(); ++b) {
                 // store4x3, not streamTo4x3: the stream form is a non-temporal
                 // store meant for a mapped GPU buffer; this is a stack copy.
@@ -3108,6 +3120,20 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             jobs.push_back(r);
             maxVerts = std::max(maxVerts, r.vertexCount);
         }
+        // THE SETTLE RECORDS: the slice takes the posed vertices, nothing is skinned
+        // (the job reads neither the row nor the palette for one).
+        for (SceneAs::Skin *sk : settle) {
+            SkinJobRecord r;
+            r.sourceRow = 0u;
+            r.vertexCount = sk->buf.vertexCount;
+            r.cacheAddressLo = uint32_t(sk->buf.address & 0xFFFFFFFFull);
+            r.cacheAddressHi = uint32_t(sk->buf.address >> 32u);
+            r.boneCount = kSkinJobSettle;
+            jobs.push_back(r);
+            maxVerts = std::max(maxVerts, r.vertexCount);
+        }
+        // A settle-only frame still binds a palette: one identity row set.
+        if (palette.empty()) palette.assign({ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 });
 
         if (!jobs.empty()) {
             // 4. THE INPUTS, grown by doubling and uploaded (Ogre's staging copy,
@@ -3188,8 +3214,12 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
                                  0, 1, &raw, 0, nullptr, 0, nullptr);
             if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 5u);
             ++sa.st.skinDispatches;
+            for (SceneAs::Skin *sk : settle) sk->prevBehind = false;
             for (const Dirty &d : dirty) {
                 if (!d.sk) continue;
+                // a re-skin leaves the slice one pose behind; the first leaves it level
+                d.sk->prevBehind = d.sk->skinned;
+                if (d.sk->skinned) sa.skinPosedFrame = vao->getFrameCount();
                 d.sk->skinned = true;
                 d.sk->poseSerial = skinPoseSerial(scene, *d.n);
                 ++sa.st.skinPasses;
@@ -3669,7 +3699,8 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             sa.st.blasBytes += sk.storage.size;
             sa.st.skinBlasBytes += sk.storage.size;
         }
-        sa.st.skinCacheBytes += (unsigned long long)sk.buf.vertexCount * kSkinCacheStride;
+        sa.st.skinCacheBytes +=
+            (unsigned long long)sk.buf.vertexCount * (kSkinCacheStride + kSkinPrevStride);
     }
 }
 
@@ -5156,6 +5187,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                 if (f & (detail::kGpuMover | detail::kGpuDragMover)) { moverMoved = true; break; }
             }
         }
+        // ...or a POSE moved (REFLECT-MOVERS-2): a character's limbs under a still node.
+        if (sa.skinPosedFrame == vaoFrame) moverMoved = true;
         rv.framesSinceMoverMoved = moverMoved ? 0u : std::min(rv.framesSinceMoverMoved + 1u, 1000u);
     }
     pp.motion[3] = !motionOn ? 0.0f : (rv.framesSinceMoverMoved <= 2u ? 2.0f : 1.0f);

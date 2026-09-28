@@ -1119,8 +1119,12 @@ bool createSkinCacheBuffer(Ogre::VaoManager *vao, const Ogre::Item *item, SkinCa
     // on a ray device). No initial data: the first skin pass writes every vertex
     // before anything reads it (the ray tier builds nothing from a cache that has
     // not been skinned).
+    // ...AND THE PREVIOUS-POSE SLICE after the posed vertices (SkinCache.h): n
+    // float3s, rounded up to whole 48-byte elements. The structure's build reads
+    // vertices 0..n-1 only (maxVertex), so the slice is never geometry.
+    const uint32_t slice = (n * kSkinPrevStride + kSkinCacheStride - 1u) / kSkinCacheStride;
     Ogre::VertexBufferPacked *vb =
-        vao->createVertexBuffer(decl, n, Ogre::BT_DEFAULT, nullptr, false);
+        vao->createVertexBuffer(decl, n + slice, Ogre::BT_DEFAULT, nullptr, false);
     if (!vb) {
         err = "skin cache: createVertexBuffer failed";
         return false;
@@ -1134,6 +1138,7 @@ bool createSkinCacheBuffer(Ogre::VaoManager *vao, const Ogre::Item *item, SkinCa
     out.vertices = vb;
     out.vertexCount = n;
     out.address = address;
+    out.prevOffset = n * kSkinCacheStride;
     out.tangentOffset = (tan && tan->mType == Ogre::VET_FLOAT4 && !(tanOffset & 3u))
                             ? uint32_t(tanOffset)
                             : 0xFFFFFFFFu;
@@ -1171,6 +1176,10 @@ bool describeSkinCacheRows(Ogre::VaoManager *vao, const Ogre::Item *item,
         row.posOffset = 0u;
         row.normalOffset = 12u;
         row.uvOffset = 40u;
+        // THE PREVIOUS POSE's place (REFLECT-MOVERS-2): the reflection's history
+        // reads a hit's last-frame position there; every other reader ignores it.
+        row.padding[0] = buf.prevOffset;
+        row.padding[1] = 0u;
         // The FLAGS stay the mesh row's: the index width is the mesh's, and the
         // normal/uv formats are the same float3/float2 the cache writes
         // (createSkinCacheBuffer refuses any other source).

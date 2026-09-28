@@ -25,6 +25,18 @@
 // Moving the character therefore costs no skin pass and no refit — only a pose
 // change does.
 //
+// THE PREVIOUS POSE (REFLECT-MOVERS-2). A reflection's temporal history needs
+// where a hit point WAS last frame; for a rigid mover that is the instance's
+// prevWorld, but a pose change moves the vertices under a still node. So the
+// cache keeps a SECOND SLICE: the previous frame's positions, float3 per vertex
+// (12 bytes, a quarter of the posed vertex), packed after the posed vertices in
+// the same buffer. The job writes it as it overwrites a position (the old
+// position to the slice, the new to the vertex), and on the first frame the pose
+// stops it copies once more (prev = cur), so prev == cur bit for bit for an item
+// at rest. The skin rows carry its byte offset from the vertex address in the
+// row's first pad word (GeometryRow::padding[0]; 0 = no slice: the geometry is
+// its own previous) — every other row reader ignores the pad.
+//
 // This header declares the BUFFER half, which lives beside the Item's own
 // buffers in OgreMesh.cpp; the dispatch lives with its consumer, the ray tier
 // (OgreRayQuery.cpp).
@@ -50,6 +62,15 @@ namespace detail {
 /// The cache's vertex: the raster's layout, 12 floats.
 constexpr uint32_t kSkinCacheStride = 48u;
 
+/// The previous-pose slice: float3 per vertex, packed after the posed vertices.
+constexpr uint32_t kSkinPrevStride = 12u;
+/// The job record's `boneCount` high bits (a palette holds at most 256 bones):
+/// FIRST = the cache's first skin (the slice takes the new position — there is no
+/// old one), SETTLE = no skinning at all, the slice takes the posed position (the
+/// first frame after the pose stopped).
+constexpr uint32_t kSkinJobFirst = 1u << 30u;
+constexpr uint32_t kSkinJobSettle = 1u << 31u;
+
 /// One `Jahshaka/SkinCache` job record, std430, 32 bytes — JahSkinCache_cs.glsl's
 /// `SkinJob`, word for word.
 struct SkinJobRecord {
@@ -64,7 +85,8 @@ struct SkinJobRecord {
     uint32_t blendOffsets = 0u;
     /// Bones in this item's palette (its blend-index map's length): the job
     /// clamps a blend index into it, so a malformed index reads this item's last
-    /// bone and never the next item's rows.
+    /// bone and never the next item's rows. Bits 30-31: kSkinJobFirst /
+    /// kSkinJobSettle.
     uint32_t boneCount = 0u;
 };
 static_assert(sizeof(SkinJobRecord) == 32, "the skin job's record is a shader contract");
@@ -75,13 +97,16 @@ struct SkinCacheBuffer {
     Ogre::VertexBufferPacked *vertices = nullptr;
     uint32_t vertexCount = 0u;
     uint64_t address = 0u;          ///< device address of vertex 0 (VaoManager's)
+    /// Bytes from `address` to the previous-pose slice (vertexCount x 48); the
+    /// buffer holds vertexCount x 48 + vertexCount x 12 bytes.
+    uint32_t prevOffset = 0u;
     uint32_t tangentOffset = 0xFFFFFFFFu;
     uint32_t blendIndexOffset = 0u;
     uint32_t blendWeightOffset = 0u;
 };
 
 /// Creates `item`'s cache: a device-local vertex buffer of the level-0 vertex
-/// count in the raster's layout, with a device address (the pools carry the
+/// count in the raster's layout (and the previous-pose slice after it), with a device address (the pools carry the
 /// STORAGE and SHADER_DEVICE_ADDRESS bits — fork a480b5e2f / fork b028638c1 (was 0039)) and the
 /// acceleration-structure build-input bit where the device has rays. Refuses (with
 /// `err`) an item whose level-0 source is not what the job reads: one submesh, one
