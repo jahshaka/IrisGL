@@ -59,7 +59,7 @@
 //   * DISTANCE: a sheet 100 km away is seen through that much air. The sky
 //     model draws no aerial perspective for us to composite into, so the far
 //     sheet fades into the sky itself with distance (a stated proxy), and is
-//     read through a coarser mip the more grazing the view (below).
+//     read along the ray's path through the slab's thickness (below).
 //
 // THE SUN'S IRRADIANCE arrives in the renderer's own units -- what a white
 // Lambert card facing the sun would reflect times pi -- so the sheet and a
@@ -94,13 +94,27 @@ in block
 vulkan_layout( location = 0 )
 out vec4 fragColour;
 
-// THE FAR EDGE, SOFTENED BY THE VIEW'S GRAZING ANGLE (CLOUDS-2D-3): towards the
-// horizon a pixel covers kilometres of sheet and the slant multiplies every
-// depth by 1 / mu, so the field is read through a coarser mip the more grazing
-// the ray -- half a mip per halving of mu -- and a far cloud's edge is its
-// footprint's average, not a texel's step magnified into a wall.
-float jahCloudBias = 0.0;
-#define JAH_CLOUD_TAU( uv ) texture( vkSampler2D( cloudField, cloudSampler ), uv, jahCloudBias ).x
+// THE FAR SHEET HAS A THICKNESS (CLOUDS-2D-3 fix round). A ray at a grazing angle
+// crosses the slab (cloudSunE.w metres thick, the self-shadow's) over kilometres of
+// sheet, and a flat sheet read at ONE point turned every far cloud into a sliver a
+// pixel high: the horizon band drew as horizontal streaks (a 2 km cloud 50 km away,
+// seen at mu 0.04, is 23 times wider than high on a flat sheet — and about as high as
+// wide once its kilometre of depth is in the view). The ray integrates the cloud
+// along its path through the slab, from where it enters the base to where it leaves
+// the top (kJahCloudPathSteps samples at their heights), each read over the pixel's
+// own footprint (the anisotropic fetch, from the sheet coordinate's derivatives taken
+// once in uniform control flow). A column's HEIGHT follows its depth — h = clamp( tau
+// / kJahCloudTallTau, 0.1, 1 ) of the slab, the density tau / h below it and none
+// above — so a thick core stands tall and a thin margin lies low (rounded, not a
+// can), and the COLUMN INTEGRAL IS THE FIELD'S tau: straight up (and for the ground
+// shadow, which reads the field) nothing changes.
+// A grazing LOD bias stood here first; it blurred the screen's horizontal and made the
+// slivers longer (spikes/d8-photon-debts-1/look-*).
+vec2 jahCloudDx = vec2( 0.0 );
+vec2 jahCloudDy = vec2( 0.0 );
+#define JAH_CLOUD_TAU( uv ) textureGrad( vkSampler2D( cloudField, cloudSampler ), uv, jahCloudDx, jahCloudDy ).x
+const int kJahCloudPathSteps = 12;
+const float kJahCloudTallTau = 16.0;   // half a full column at density 1 (OgreSky.cpp kCloudTauFull)
 #include "JahCloudLayer.glsl"
 
 float jahHenyeyGreenstein( float cosTheta, float g )
@@ -117,13 +131,37 @@ void main()
 {
 	const vec3 dir = normalize( inPs.cameraDir );
 	const JahCloudHit hit = jahCloudIntersect( dir, cameraPos.xyz, cloudLayer );
+	// The footprint, in uniform control flow (the derivatives need the quad).
+	jahCloudDx = dFdx( hit.uv );
+	jahCloudDy = dFdy( hit.uv );
 	if( hit.above <= 0.0 )
 	{
 		fragColour = vec4( 0.0, 0.0, 0.0, 0.0 );
 		return;
 	}
-	jahCloudBias = 0.5 * log2( 1.0 / max( hit.mu, 0.05 ) );
-	const float tau = JAH_CLOUD_TAU( hit.uv );
+	// THE COLUMN ALONG THE PATH THROUGH THE SLAB (the header above).
+	const JahCloudHit top = jahCloudIntersect(
+		dir, cameraPos.xyz, vec4( cloudLayer.x + cloudSunE.w, cloudLayer.yzw ) );
+	// The samples' places along the path are offset per pixel by an interleaved
+	// gradient noise (Jimenez 2014) within one step: a far cloud's discrete steps
+	// become a fine dither instead of stairs; at a fixed column (straight up) the
+	// offset moves nothing.
+	const float jitter = fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) ) - 0.5;
+	float tau = 0.0;
+	for( int k = 0; k < kJahCloudPathSteps; ++k )
+	{
+		const float f = ( float( k ) + 0.5 ) / float( kJahCloudPathSteps );   // the sample's height in the slab
+		const float column = JAH_CLOUD_TAU(
+			mix( hit.uv, top.uv, clamp( f + jitter / float( kJahCloudPathSteps ), 0.0, 1.0 ) ) );
+		const float h = clamp( column / kJahCloudTallTau, 0.1, 1.0 );
+		// the share of this sample's height interval that lies inside the column
+		// (so the sum over the path is exactly the column where the path is one
+		// point — no terraces at the step heights)
+		const float inside = clamp( ( h - ( f - 0.5 / float( kJahCloudPathSteps ) ) ) * float( kJahCloudPathSteps ),
+									0.0, 1.0 );
+		tau += inside * column / h;
+	}
+	tau /= float( kJahCloudPathSteps );
 	const float tView = jahCloudViewTransmittance( tau, hit );
 	const float opacity = 1.0 - tView;
 
