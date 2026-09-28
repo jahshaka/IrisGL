@@ -4862,12 +4862,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
 
     // ---- THE VOXEL CACHE THE HITS ARE SHADED FROM (route A) -----------------
-    // Under a Photon cascade chain each cascade is its OWN VctLighting (they are
-    // chained with addCascade, OgreGi.cpp), innermost first — which is exactly
-    // the order the shader wants: it takes the first volume that contains the
-    // hit, so the finest one that can answer does. In the single-volume arm
-    // there is one. R5 works in both shapes and the cascade flag gates nothing
-    // here.
+    // Each cascade of the Photon chain is its OWN VctLighting (they are chained
+    // with addCascade, OgreGi.cpp), innermost first — which is exactly the order
+    // the shader wants: it takes the first volume that contains the hit, so the
+    // finest one that can answer does.
     Ogre::TextureGpu *vox[kMaxReflectCascades][kRayVoxelKinds] = {};   // kRayVoxelKinds' order
     Ogre::Vector3 voxOrigin[kMaxReflectCascades], voxSize[kMaxReflectCascades],
                   voxCell[kMaxReflectCascades];
@@ -4915,12 +4913,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         }
         ++voxCount;
     };
-    if (!scene->mVctCascades.empty()) {
-        for (const OgreScene::VctCascade &c : scene->mVctCascades)
-            if (c.built) takeVolume(c.lighting, c.voxelizer);
-    } else {
-        takeVolume(scene->mVctLighting, scene->mVctVoxelizer);
-    }
+    for (const OgreScene::VctCascade &c : scene->mVctCascades)
+        if (c.built) takeVolume(c.lighting, c.voxelizer);
     // NO VOXELS IS NOT "NO REFLECTIONS": an escaping ray still reads the sky,
     // and in an open scene that is the whole answer. A HIT with no cache behind
     // it is what the shader declines (see its note) — it hands the pixel back
@@ -6020,12 +6014,8 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             baking > 1e-6f ? lighting->mMultiplier / baking : lighting->mMultiplier;
         ++in.cascadeCount;
     };
-    if (!scene->mVctCascades.empty()) {
-        for (const OgreScene::VctCascade &c : scene->mVctCascades)
-            if (c.built) takeVolume(c.lighting, c.voxelizer);
-    } else {
-        takeVolume(scene->mVctLighting, scene->mVctVoxelizer);
-    }
+    for (const OgreScene::VctCascade &c : scene->mVctCascades)
+        if (c.built) takeVolume(c.lighting, c.voxelizer);
     {
         // THE ONE ENVIRONMENT (PHOTON-ENV-1; OgreScene::rayEnvironment).
         const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();

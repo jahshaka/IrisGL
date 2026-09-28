@@ -794,11 +794,10 @@ private:
         // Arming a reflector derives a world plane and registers a PBS
         // receiver; it is not the kind of call to repeat 60 times a second.
         int planarReflector = -1;
-        // GI bounds exclusion (REFLECTIONS_ADOPTION_SPEC.md P1a.2), same
-        // push-on-change discipline: the engine invalidates its GI caches when
-        // the flag really changes, so re-pushing it every frame would flag a
-        // rebuild every frame. -1 = never pushed.
-        int giBoundsExcluded = -1;
+        // Probe-grid placement exclusion (REFLECTIONS_ADOPTION_SPEC.md P1a.2),
+        // same push-on-change discipline: the engine invalidates its GI caches
+        // when the flag really changes. -1 = never pushed.
+        int probeGridExcluded = -1;
         // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lanes R1/R2): the last
         // RESOLVED answer pushed to the engine, same push-on-change discipline.
         // -1 = never pushed. The discipline is load-bearing now that the engine

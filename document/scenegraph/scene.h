@@ -475,47 +475,19 @@ public:
 
     // global illumination (world panel; rendered by the engine viewport only).
     //
-    // THE LIT VOLUME IS THE RENDERER'S (owner decision D8, 2026-09-13): the
-    // document carries no bounds at all any more — no min/max pin and no
-    // ceiling on the automatic fit. The engine fits the volume to the scene's
-    // content on every solve, and `world.giStatus()` reports what it decided,
-    // which is the only reading anyone ever needed. The three fields that used
-    // to live here (giBoundsMin, giBoundsMax, giAutoBoundsMax), their World
-    // panel rows, the Fit button and world.fitGiBounds are deleted under the
-    // CRUD law; an old scene that pinned a volume opens with the automatic one.
+    // THE DOCUMENT CARRIES NO GI VOLUME (owner decision D8, 2026-09-13; the
+    // owner's law: no fixed GI volume). The voxels follow the camera and
+    // `world.giStatus()` reports what the renderer built.
     GiMode giMode;
     GiQuality giQuality;
     int giNumBounces;          // 1..4
-    /// PHOTON — CAMERA-CENTRED VOXEL CASCADES (SPECS/PHOTON_SPEC.md P0).
-    ///
-    /// False (the default) is the single scene-fitted voxel volume: one box
-    /// around the content, and nothing outside it
-    /// bounces. True builds a chain of camera-centred cascades instead — fine
-    /// cells near the eye, coarse ones far out — so the bounce follows the
-    /// camera and what escapes the outermost cascade reads the Sky Light
-    /// instead of going dark. Only meaningful in the two VCT modes; a scene
-    /// that never sets it renders exactly as it did.
-    ///
-    /// `giCascadeSet` optionally pins the table, one entry per cascade as
-    /// (halfSize metres, resolution, stepCells); empty = the quality tier's own
-    /// table. A zero or negative halfSize/resolution in any entry means the
-    /// whole request is ignored — a half-specified cascade is not a request the
-    /// renderer can honour halfway.
-    /// 1 = on, 0 = off, and THE DEFAULT IS ON because every Photon tier's
-    /// column is (PHOTON_SPEC §7 E2 (6)).
-    ///
-    /// It is NOT a tri-state, and that is a decision with a scar: it was `-1 =
-    /// the tier decides` for an afternoon, which put a value in the document
-    /// that only the STUDIO could resolve — and SceneMirror is IrisGL and cannot
-    /// see the tier table, so it read -1 as off while the reader resolved it to
-    /// on, and a scene rendered one way before a save and another way after
-    /// (scene.reopen_fidelity, 42,42,42 vs 47,47,47 on the ground). A field the
-    /// renderer reads must mean the same thing to everyone who reads it. The
-    /// "was this authored?" question the tri-state existed for is answered where
-    /// it belongs instead: by the KEY BEING ABSENT in the file, which only the
-    /// reader can see and which the reader resolves through the tier there and
-    /// then (SceneReader).
-    int giCascades = 1;
+    /// PHOTON — THE VOXELS ARE ALWAYS CAMERA-CENTRED CASCADES (PHOTON_SPEC P0;
+    /// the single scene-fitted volume and its `giCascades` switch are deleted,
+    /// D4-PHOTON-TIERS). `giCascadeSet` optionally pins the table, one entry per
+    /// cascade as (halfSize metres, resolution, stepCells); empty = the quality
+    /// tier's own table. A zero or negative halfSize/resolution in any entry means
+    /// the whole request is ignored — a half-specified cascade is not a request
+    /// the renderer can honour halfway.
     QVector<iris::Vec3> giCascadeSet;
     /// THE PER-CASCADE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1)). How many
     /// objects ONE cascade may voxelise: the renderer keeps the ones that fill

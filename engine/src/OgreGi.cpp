@@ -42,7 +42,7 @@ std::vector<std::pair<const Ogre::SceneManager *, const SceneGiBinding *>> sGiBi
 
 // THE GI SIDE'S OWN SCENE-GRAPH UPDATES, COUNTED (lane D1-SCALE-FIXTURES, the owed
 // "extra updateSceneGraph calls per frame during a drag" row): the light re-inject
-// (refreshVctFast, refreshGiLighting, runChainTick), the chain's settle step and the
+// (refreshGiLighting, runChainTick), the chain's settle step and the
 // arm / cascade builds each update the graph themselves, on top of the frame's own
 // update. Each call files a `gi.sceneGraph` monitor stage — one record
 // per call, so a frame's count and cost are readable — but only INSIDE a frame: a
@@ -308,8 +308,7 @@ void OgreScene::convertPendingMaterials() {
 }
 
 /// How many items carry the GI geometry channel - the existence test of the single
-/// volume and the chain (an arm over no geometry is not built), and the monitor's
-/// units for the single volume. A flag test per item, nothing handed to Ogre.
+/// chain (an arm over no geometry is not built). A flag test per item, nothing handed to Ogre.
 unsigned OgreScene::countGiItems() const {
     unsigned n = 0;
     for (const Node *np : mItemNodes)
@@ -369,7 +368,6 @@ const detail::VoxelReading &OgreScene::currentReading(detail::VoxelFeed *feed) {
 /// FRAME START: every feed's finished readout is collected and an owed one is
 /// requested while the frame's command buffer holds nothing (VoxelFeed::markReadoutOwed).
 void OgreScene::serviceVoxelReadouts() {
-    if (mVctFeed) mVctFeed->serviceReadout();
     for (VctCascade &c : mVctCascades)
         if (c.feed) c.feed->serviceReadout();
 }
@@ -589,7 +587,7 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
             // Switching GI off is the user's own "start over": the hysteresis
             // floor forgets what used to be lit, so switching back on fits the
             // scene as it is now rather than as it was.
-            noteGiAutoVolume(Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO), false);
+            noteProbeFitVolume(Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO), false);
             return true;
 
         case GiMode::Vct:
@@ -650,8 +648,7 @@ void OgreScene::refreshGlobalIllumination(GiRefreshReason reason) {
         // giStatus.
         mLastStaleReason = GiStaleReason::Refresh;
         if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
-            // THE PER-CASCADE DIRTY PATH FIRST (G1), then THE REUSE ARM (FIX
-            // WAVE B4). Both refuse in exactly the cases the from-scratch rule
+            // THE PER-CASCADE DIRTY PATH FIRST (G1). Both refuse in exactly the cases the from-scratch rule
             // exists for, and rebuildVct is what happens then — so these lines
             // can only make a refresh cheaper, never wrong.
             //
@@ -687,199 +684,9 @@ void OgreScene::refreshGlobalIllumination(GiRefreshReason reason) {
             // what it can and lets the stages keep their own pace.
             if (reason == GiRefreshReason::Explicit)
                 while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
-            if (!mVctCascades.empty()) { if (!refreshCascadesFast()) rebuildVct(); }
-            else if (!refreshVctFast()) rebuildVct();
+            if (mVctCascades.empty() || !refreshCascadesFast()) rebuildVct();
         }
     } JAH_CATCH(mError, );
-}
-
-// THE REUSE ARM (FIX WAVE B4) — what makes a settling drag affordable.
-//
-// `rebuildVct` is deliberately from-scratch: it decides the arm's SHAPE and
-// re-places the probe grid. A refresh triggered by an object MOVING destroys
-// nothing and re-shapes nothing.
-//
-// So the engine counts destructions instead of assuming them. Every site that
-// can invalidate what the GI arms point into already funnels through
-// `invalidateGiCaches` BEFORE the pointer dies (destroyNode, detachItem,
-// destroyMesh, destroyMaterial, setMaterialShading, destroyTexture, the light
-// path); that function now bumps `mGiDestroyGeneration`. When the generation the
-// arm was BUILT at is still current, nothing it holds can have died, and:
-//
-//   * the voxelizer re-runs on itself — `build()` re-derives its mesh buffers,
-//     re-buckets the items at their CURRENT world transforms and re-dispatches
-//     the voxelization compute jobs, reusing the same voxel textures whenever
-//     the resolution is unchanged (OgreVctVoxelizer.cpp createVoxelTextures'
-//     early-out) — which also means VctLighting's TextureGpuListener
-//     registrations stay pointed at the same textures;
-//   * items CREATED since the build are added first. Growth is safe for the same
-//     reason: a new Item cannot alias a dead one that never died;
-//   * the probes keep their shapes and the grid is marked STALE — re-captured
-//     under the budget over the next frames (P6), never all at once. Re-running
-//     PccPerPixelGridPlacement would mean `setEnabled(false)`/`setEnabled(true)`
-//     — destroying and recreating every probe, its workspace and the cube array
-//     — plus six face renders per probe and a GPU readback, which is the bulk of
-//     what a refresh costs.
-//
-// It REFUSES, and takes the full rebuild, when the probe REGION moved: the
-// shapes were derived from that region and no longer describe the space. That
-// is the honest reading of "probe shapes only re-derive when the geometry
-// changed" — small edits inside a room keep the room, so they keep the shapes.
-bool OgreScene::refreshVctFast() {
-    if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
-    if (!mVctVoxelizer || !mVctLighting) return false;
-    // THE PHOTON ARM HAS ITS OWN ARM, AND IT IS NOT THIS ONE. The reuse arm's
-    // whole argument is that the VOLUME did not move; under cascades there are N
-    // volumes and they move by construction, and the probe-region reasoning
-    // below has no cascade meaning. `refreshCascadesFast` is the chain's answer
-    // — the per-cascade dirty path (G1) — and every caller reaches for it first,
-    // so this is a belt: a chain must never take the single volume's path.
-    if (!mVctCascades.empty()) return false;
-    if (mGiCachesDirty) return false;                  // a flush is already owed; it rebuilds
-    if (mGiBuiltGeneration != mGiDestroyGeneration) return false;   // something may have died
-    // NO GRID CAN BE A BUILT STATE, not a failed one (buildPcc's depth rule):
-    // when every candidate probe photographed nothing but distance the scene has
-    // no grid ON PURPOSE and the sky is its reflection, and forcing a
-    // from-scratch rebuild on every refresh because it has none would make the
-    // cheapest scene in the editor pay the most. `mProbesDropped` is what
-    // separates that from a grid that failed to build at all.
-    if (probeGridWanted() && !mPcc && !mProbesDropped) return false;
-
-    Ogre::Vector3 mn, mx;
-    if (!computeGiBounds(mn, mx)) return false;
-    const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
-    // "Materially the same box", relative to its own size so it is scale-free.
-    static const float kReuseEpsilon = 0.02f;
-    const auto sameBox = [](const Ogre::Aabb &a, const Ogre::Aabb &b) {
-        const Ogre::Vector3 scale = a.getSize() + b.getSize();
-        const float tol = std::max(std::max(std::max(scale.x, scale.y), scale.z) * kReuseEpsilon,
-                                   1e-4f);
-        const Ogre::Vector3 dc = a.mCenter - b.mCenter, dh = a.mHalfSize - b.mHalfSize;
-        for (size_t ax = 0; ax < 3u; ++ax)
-            if (std::fabs(dc[ax]) > tol || std::fabs(dh[ax]) > tol) return false;
-        return true;
-    };
-    if (probeGridWanted()) {
-        // THE PROBE GRID IS A FUNCTION OF THE LIT VOLUME (R5-ROOM): the scout
-        // is spread through it, the space it measures is inside it, and the
-        // grid is placed in that. So THIS is the box to compare — not the probe
-        // region, which is the scout's ANSWER and is smaller by construction
-        // (comparing the answer against the question refused every reuse, and
-        // an albedo edit then paid for a from-scratch re-placement: measured
-        // 12 captures in one frame against a budget of 1, gi.probe_inputs).
-        //
-        // WHAT IS NOT RE-DECIDED HERE, and deliberately: which probes the rule
-        // keeps and where the space is. Both are PHOTOGRAPHS and can only be
-        // re-taken by re-capturing, which is the from-scratch rebuild this path
-        // exists to avoid. Small edits inside a space keep the space, so they
-        // keep its probes; a change big enough to move the lit volume takes the
-        // rebuild and is re-photographed there.
-        if (!sameBox(aabb, mGiLitVolume)) return false;
-    }
-
-    JAH_TRY {
-        // Timed for the JAHSHAKA_GI_DEBUG log: the settle frame's cost is the
-        // owner's "no hitches" number (CPU side, submission included).
-        const auto tStart = std::chrono::steady_clock::now();
-        // A MATERIAL the voxeliser read has changed since it was built (P7). NOT a
-        // fresh voxeliser any more (A5b fix round): the shared store re-reads its
-        // rows in place (mVctMaterialRefreshOwed, set with the generation), so the
-        // same voxeliser re-runs below, under the SAME probe grid.
-        const bool materialChanged = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
-        // ONE ROW FOR THE REFRESH'S VOXEL HALF (ENGINE-5 item 2): re-voxelise +
-        // re-inject, with the reason that staled the volume. `units` is the
-        // item count the voxeliser walked.
-        monitor::CacheScope voxelWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
-                                      "vct.refresh", mRoot->getRenderSystem());
-        {
-            // THE ITEM SET IS NOT HELD (ATOM P4b). The reuse arm used to keep
-            // `mVctItemIds` and compare it against the scene every refresh (an
-            // O(N) set walk: add what gained kGiGeometryBit, remove what lost
-            // it - DRAG-1). The gather reads the flags word of every instance on
-            // the device at every build, so a hide or show is answered by the
-            // build itself and there is no set to compare.
-            // World transforms first: the table reads them, and the whole reason
-            // this call exists is that something moved.
-            giUpdateSceneGraph(mSceneMgr);
-            if (!sameBox(aabb, mGiLitVolume)) {
-                mVctVoxelizer->setRegionToVoxelize(aabb);
-                mVctVoxelizer->dividideOctants(1u, 1u, 1u);
-            }
-            if (!mVctFeed) mVctFeed.reset(new detail::VoxelFeed());
-            gatherAndBuild(*mVctFeed, mVctVoxelizer, VoxelGatherInputs());
-            // The re-voxelised volume's light, through the one writer. A NEW
-            // VOXEL STATE: an injection earlier in this frame (the host's tick
-            // runs before this flush) lit voxels that no longer exist, so the
-            // latch is re-armed for the volume the build just wrote.
-            mGiSingleInjectedFrame = ~0ull;
-            injectCascade(0);
-        }
-        const auto tVoxels = std::chrono::steady_clock::now();
-        const unsigned giItems = countGiItems();
-        voxelWork.setUnits(giItems);
-        voxelWork.close();
-        mGiLitVolume = aabb;      // materially the box the grid was placed from
-        noteGiAutoVolume(aabb, !giBoundsExplicit());
-        // Nothing to re-bind: the arm's objects are the same ones this scene's
-        // passes already bind (SceneGiBinding).
-        // The probe CONTENTS are stale (the scene moved), the SHAPES are not.
-        // STALE the grid — never dirty it (ENGINE_CACHE_POLICY_SPEC P6). Raising
-        // mDirty on every probe here is what made a re-solve capture the WHOLE
-        // grid inline in one frame (Ogre renders every dirty probe it collects,
-        // mNumIterations 1, no cap): measured on the Showroom as 619 / 572 /
-        // 623 ms frames of 23 + 32 x 131 draws, fired by the settle after a
-        // drag, by a drag pausing for 250 ms, and by world.refreshGi(). Stale,
-        // the budget spreads the same captures over ceil(probes / catch-up)
-        // frames, and no frame costs more than an ordinary one.
-        //
-        // EXCEPT WHEN PAUSED (updateBudget 0). Then there is no budget to
-        // spread over — nothing would ever capture a stale probe — and a
-        // re-solve can only have come from an explicit demand (the mirror arms
-        // nothing while paused; world.refreshGi() and a direct call do), whose
-        // documented contract is "the picture is what was last built until
-        // world.refreshGi() asks for more". So a paused refresh captures the
-        // whole grid at once, as it always did, and leaves nothing stale.
-        if (mGi.updateBudget > 0) {
-            staleProbeGrid(GiStaleReason::Refresh);
-        } else if (mPcc) {
-            for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mDirty = true;
-            for (ProbeSlot &sl : mProbeSlots) sl.sweepPending = false;
-            mLastStaleReason = GiStaleReason::Refresh;
-            ++mStaleSerial;
-        }
-        // The DDGI field is re-INITIALIZED, not reset, on this path. The reuse
-        // arm keeps the VctLighting OBJECT but re-voxelizes underneath it and
-        // may have moved the volume (the region above), and the field's
-        // grid is a function of that volume's origin and size — a reset would
-        // leave the probes describing a box that no longer exists. Upstream's
-        // own rule, in its own words: minor changes to VctLighting -> reset(),
-        // major -> initialize() again.
-        {
-            monitor::CacheScope fieldWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
-                                          "ifd.build", mRoot->getRenderSystem());
-            buildIrradianceField();
-            fieldWork.setUnits(mIfdTotalProbes);
-        }
-        // A fresh voxel arm is not a reuse of the voxels (the probes were
-        // kept either way, and giStatus.rebuilds does not move).
-        mGiReusedLastRefresh = true;
-        mGiBuiltMaterialGeneration = mGiMaterialGeneration;
-        if (giDebug()) {
-            const auto tEnd = std::chrono::steady_clock::now();
-            const auto ms = [](std::chrono::steady_clock::time_point a,
-                               std::chrono::steady_clock::time_point b) {
-                return std::to_string(std::chrono::duration<double, std::milli>(b - a).count());
-            };
-            Ogre::LogManager::getSingleton().logMessage(
-                std::string("Jahshaka GI: refresh ") +
-                (materialChanged ? "REUSED the voxel arm, materials re-read in place"
-                                 : "REUSED the voxel arm") +
-                " (" + std::to_string(giItems) + " items, probe grid staled) in " +
-                ms(tStart, tEnd) + " ms: voxels + injection " + ms(tStart, tVoxels) +
-                " ms, irradiance field " + ms(tVoxels, tEnd) + " ms");
-        }
-        return true;
-    } JAH_CATCH(mError, false);
 }
 
 // The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2). VERIFIED AGAINST
@@ -991,7 +798,7 @@ void OgreScene::payChainSettleStep() {
 
 // THE ONE WRITER (PHOTON-WRITER-1; render audit F3/F13). Every write to a voxel
 // volume's light in this engine is this function: the from-scratch arm's
-// closing injection, a cascade rebuild's, the single volume's re-voxelisation,
+// closing injection, a cascade rebuild's,
 // the light tick (moving and at rest) and the incremental settle. What an
 // injection IS therefore has one definition — the environment the bounce job
 // reads where its cones escape, then `VctLighting::update` at the document's
@@ -1016,18 +823,13 @@ unsigned long long OgreScene::giWriterFrame() const {
 
 bool OgreScene::injectedThisFrame(size_t i) const {
     const unsigned long long frame = giWriterFrame();
-    if (!mVctCascades.empty())
-        return i < mVctCascades.size() && mVctCascades[i].injectedFrame == frame;
-    return i == 0u && mGiSingleInjectedFrame == frame;
+    return i < mVctCascades.size() && mVctCascades[i].injectedFrame == frame;
 }
 
 bool OgreScene::injectCascade(size_t i) {
-    const bool chain = !mVctCascades.empty();
-    Ogre::VctLighting *lighting =
-        chain ? (i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr)
-              : (i == 0u ? mVctLighting : nullptr);
+    Ogre::VctLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;
     if (!lighting) return false;
-    unsigned long long &stamp = chain ? mVctCascades[i].injectedFrame : mGiSingleInjectedFrame;
+    unsigned long long &stamp = mVctCascades[i].injectedFrame;
     const unsigned long long frame = giWriterFrame();
     if (stamp == frame) {
         ++mGiInjectionRefusals;
@@ -1040,10 +842,6 @@ bool OgreScene::injectCascade(size_t i) {
     applyCascadeEnvironment(lighting);
     lighting->update(mSceneMgr, cascadeBounces(i), true /*autoMultiplier*/);
     stamp = frame;
-    // The single volume's LANDED injections — the surface cache's indirect
-    // signature (PHOTON-CARDS-1; a chain folds its cascades' rebuild counts and
-    // settles instead). Counted here, inside the one writer, never at a caller.
-    if (!chain) ++mGiMonoInjections;
     if (mGiInjectionCountFrame != frame) {
         mGiInjectionCountFrame = frame;
         mGiInjectionsThisFrame = 0;
@@ -1109,27 +907,12 @@ void OgreScene::reintegrateFieldAfterInjection() {
 // rest it owes the chain a settle) and injects the others once each: a frame
 // never injects a cascade twice and never more than the chain's size.
 // A moving and an at-rest request in one frame run as the at-rest tick (it is
-// the superset). The single volume has no scheduler and nothing to order: its
-// tick runs here, now.
+// the superset).
 bool OgreScene::refreshGiLighting(bool inMotion) {
     JAH_TRY {
-        if (!mVctLighting || !mVctVoxelizer) return false;
-        if (!mVctCascades.empty()) {
-            const GiTickOwed ask = inMotion ? GiTickOwed::Moving : GiTickOwed::Rest;
-            if (int(ask) > int(mGiTickOwed)) mGiTickOwed = ask;
-            return true;
-        }
-        giUpdateSceneGraph(mSceneMgr);
-        {
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0,
-                                     inMotion ? "vct.light.moving" : "vct.light",
-                                     mRoot->getRenderSystem());
-            // The single volume is not an iteration: one injection, the one
-            // writer's, at the document's bounce count.
-            injectCascade(0);
-            work.setUnits(cascadeBounces(0) + 1u);
-        }
-        reintegrateFieldAfterInjection();
+        if (!mVctLighting || !mVctVoxelizer || mVctCascades.empty()) return false;
+        const GiTickOwed ask = inMotion ? GiTickOwed::Moving : GiTickOwed::Rest;
+        if (int(ask) > int(mGiTickOwed)) mGiTickOwed = ask;
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1244,13 +1027,13 @@ GiStatus OgreScene::giStatus() const {
         // and its resolution is that cascade's, which is not the tier's: at
         // High the outer cascade is 64^3 over 120 m, so dividing by the tier's
         // 128 reported 0.94 m for a 1.875 m voxel.
-        const Ogre::Vector3 litSize = mGiLitVolume.getSize();
-        st.voxelMetres    = !mVctCascades.empty()
-                                ? mVctCascades.back().cell()
-                                : std::max(std::max(litSize.x, litSize.y), litSize.z) /
-                                      float(std::max(giVoxelResolution(), 1u));
+        st.voxelMetres    = !mVctCascades.empty() ? mVctCascades.back().cell() : 0.0f;
         st.probeRegionMin = toV(mGiProbeRegion.getMinimum());
         st.probeRegionMax = toV(mGiProbeRegion.getMaximum());
+        if (probeGridWanted()) {
+            st.probeFitMin = toV(mProbeFitVolume.getMinimum());
+            st.probeFitMax = toV(mProbeFitVolume.getMaximum());
+        }
         // RESOLVED, not requested: both default to GiToggle::Auto, and the
         // shadow half additionally falls back when there is no shadow node.
         st.probeCaptureSize   = mPcc ? mPccCaptureSize : 0;
@@ -1336,7 +1119,7 @@ GiStatus OgreScene::giStatus() const {
         st.giScans         = mGiScans;
         st.giScanMicros    = mGiScanMicros;
         st.giAabbReads     = mGiAabbReads;
-        // THE PHOTON CHAIN, as BUILT (empty in the single-volume arm).
+        // THE PHOTON CHAIN, as BUILT.
         st.cascades.clear();
         st.cascades.reserve(mVctCascades.size());
         for (const VctCascade &c : mVctCascades) {
@@ -1432,7 +1215,6 @@ unsigned long long OgreScene::giLightingSerial() const {
     };
     fold(mGiLightWriteSerial);
     fold((unsigned long long)mGiChainSettles);
-    fold(mGiMonoInjections);
     for (const VctCascade &c : mVctCascades) {
         fold(c.rebuilds);
         fold((unsigned long long)c.latticeX);
@@ -1979,29 +1761,37 @@ void OgreScene::latchProbeCaptures(bool drawn) {
     mProbeDirtiedThisFrame.clear();
 }
 
-void OgreScene::setNodeGiBoundsExcluded(NodeId id, bool excluded) {
+void OgreScene::setNodeProbeGridExcluded(NodeId id, bool excluded) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
-    if (it->second.giBoundsExcluded == excluded) return;
-    it->second.giBoundsExcluded = excluded;
-    noteSceneTransformWrite();      // the escape signature reads this flag
-    // The flag changes WHERE GI happens, so it is exactly as much of a change
-    // as moving the geometry: flag the caches and let the frame-time flush
-    // rebuild once, however many nodes the caller toggles in a burst.
+    if (it->second.probeGridExcluded == excluded) return;
+    it->second.probeGridExcluded = excluded;
+    // The flag changes where the probe grid is placed, so it is as much of a
+    // change as moving the geometry: flag the caches and let the frame-time
+    // flush answer once, however many nodes the caller toggles in a burst.
     invalidateGiCaches();
 }
 
-bool OgreScene::nodeGiBoundsExcluded(NodeId id) const {
+bool OgreScene::nodeProbeGridExcluded(NodeId id) const {
     auto it = mNodes.find(id);
-    return it != mNodes.end() && it->second.giBoundsExcluded;
+    return it != mNodes.end() && it->second.probeGridExcluded;
 }
 
 // ---- GI internals ----
+// THE REFLECTION-PROBE GRID'S PLACEMENT REGION (D4-PHOTON-TIERS). Everything from
+// here to `computeProbeRegion` decides ONE thing: where a reflection-probe grid is
+// placed on a machine that does not trace its reflections (a pinned hybrid, the
+// scene's rays Off, no ray hardware). It is a PLACEMENT HEURISTIC PENDING A9 (the
+// camera-centred probe window, P4's) and NEVER a lighting volume: the voxels are
+// the camera's cascade chain and nothing here reaches them. The single scene-fitted
+// voxel volume this machinery used to size is deleted (the owner's law: no fixed
+// GI volume, no "room" in any lighting definition); where the notes below say
+// "lit volume" they describe that history, and the region they now size is the
+// probe grid's.
+//
 // The GI-participating items' world AABBs, AFTER the two document-driven
-// filters: the per-node "exclude from GI bounds" flag, and the extent-outlier
-// TRIMMING below. Everything that reasons about the shape of the lit world
-// starts here so that the lit volume and the probe region can never disagree
-// about which objects define it.
+// filters: the per-node probe-grid exclude flag, and the extent-outlier
+// TRIMMING below.
 //
 // WHY ANY OF THIS EXISTS. Every default scene has a ground plane 200 units
 // across under a handful of 1-2 unit primitives. Unioning it puts the voxel
@@ -2044,7 +1834,7 @@ bool OgreScene::nodeGiBoundsExcluded(NodeId id) const {
 //     when the scene's bounds are typed by hand, and when the item is removed
 //     or flagged out of the bounds — every deliberate user action still gets a
 //     fresh, tight fit.
-//     ITS ONE QUALIFIER, and it is load-bearing (see noteGiAutoVolume): the
+//     ITS ONE QUALIFIER, and it is load-bearing (see noteProbeFitVolume): the
 //     floor only remembers a fit made over a real POPULATION, two items or
 //     more. A scene holding nothing but a ground plane has nothing to be an
 //     outlier against, so the ground IS the volume — recording that would pin
@@ -2071,7 +1861,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
     for (const auto &kv : mNodes) {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        if (kv.second.giBoundsExcluded) continue;
+        if (kv.second.probeGridExcluded) continue;
         ++mGiAabbReads;
         all.push_back(const_cast<Ogre::Item *>(item)->getWorldAabbUpdated());
     }
@@ -2153,9 +1943,9 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     // the memo above, is one per content: the volume it reads is the one
     // adopted for the PREVIOUS content, which is exactly the question the floor
     // asks ("did this change take light away from something already lit?").
-    const bool havePrev = mGiAutoVolumeValid;
-    const Ogre::Vector3 prevMin = mGiAutoVolume.getMinimum();
-    const Ogre::Vector3 prevMax = mGiAutoVolume.getMaximum();
+    const bool havePrev = mProbeFitVolumeValid;
+    const Ogre::Vector3 prevMin = mProbeFitVolume.getMinimum();
+    const Ogre::Vector3 prevMax = mProbeFitVolume.getMaximum();
     const auto coveredByPrev = [&](const Ogre::Aabb &a) {
         if (!havePrev) return false;
         const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
@@ -2360,89 +2150,19 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     return adopt(out);
 }
 
-// Does any GI item's world AABB lie (even partly) OUTSIDE the volume that is
-// currently lit? Returns a signature rather than a bool: 0 when everything is
-// covered, otherwise a hash of the escaping items' quantized AABBs.
+// THE GEOMETRY SIGNATURE, ONE WALK, OVER THE ITEM INDEX (audit D4): the item
+// index rather than the node map, one getWorldAabbUpdated per GI item, on every
+// frame the movement epoch moved.
 //
-// WHY A SIGNATURE (LIGHTING_FIX fix 2). The mirror already knows how to debounce
-// "something changed that needs a re-solve": it compares a signature every
-// frame, restarts a stability window whenever it differs, and re-solves once the
-// value has held still. A bool cannot drive that — it stays true for the whole
-// of a drag, so the window would either fire mid-drag every time or never. A
-// hash of WHERE the escapee is changes on every frame of a drag (window keeps
-// restarting, no per-frame rebuilds) and stops changing when the user lets go
-// (exactly one re-solve). It is the same contract a light transform already has.
-//
-// Quantized to 1/64 of the lit volume's size so that sub-voxel jitter (a
-// physics body settling, an animation's idle sway) cannot keep the window open
-// forever.
-unsigned long long OgreScene::giEscapeSignature() const {
-    if (mGi.mode == GiMode::Off) return 0ull;
-    // NOTHING TO ESCAPE FROM UNDER A CAMERA-CENTRED CHAIN (audit D3). This term
-    // exists because a SCENE-FITTED volume has an outside: an object dragged
-    // past it kept the lighting it had at the old place until something else
-    // re-fitted. A cascade chain is fitted to the CAMERA, is re-centred by its
-    // own scheduler, and has no fit to leave — so the old fit, which
-    // `rebuildVct` still records for the probe half, was arming a settle and a
-    // whole-chain rebuild for a volume nobody builds.
-    if (mGi.cascades) return 0ull;
-    if (!mGiAutoVolumeValid) return 0ull;      // nothing resolved yet, or hand-typed bounds
-    // CACHED AGAINST THE MOVEMENT EPOCH (clean-2 lane, 2026-09-13). The mirror
-    // reads this every frame of every VCT-like scene, and it is a pure function
-    // of the GI items' boxes and the volume they are tested against — so on a
-    // frame where nothing wrote a transform and nothing structural changed, the
-    // answer is last frame's and the walk (a root-recursive
-    // getWorldAabbUpdated per GI item) is skipped outright.
-    // ...AND ONLY WHERE THE EPOCH CAN SEE THE HOST'S WRITES. Without a counter
-    // from the host (Engine::setTransformWriteCounter) a document-side move
-    // moves nothing the engine can read, so the cache would answer with a
-    // signature from before the drag — caught by gi.coalesce and gi.budget,
-    // which drive their drags through the document and wire no counter. Same
-    // rule as ensureGiWalk's: no epoch, no skipping.
+// (The MOVEMENT SCAN — ensureGiWalk/walkItems — is deliberately NOT folded in:
+// its `mGiMovedBoxes` are per FRAME and are consumed by the probe budget inside
+// `renderOneFrame`, while this is read by the mirror BEFORE it, after the mirror
+// has written this frame's transforms. One walk serving both would answer at two
+// different epochs in the same frame.)
+void OgreScene::computeGiGeometrySignature() const {
     const unsigned long long epoch = transformEpoch();
-    if (detail::gTransformWriteCounter &&
-        mEscapeSigValid && mEscapeSigEpoch == epoch && mEscapeSigMode == mGi.mode &&
-        mEscapeSigVolumeValid == mGiAutoVolumeValid &&
-        mEscapeSigVolume.mCenter == mGiAutoVolume.mCenter &&
-        mEscapeSigVolume.mHalfSize == mGiAutoVolume.mHalfSize)
-        return mEscapeSig;
-    computeGiSignatures();
-    return mEscapeSig;
-}
-
-// BOTH SIGNATURES, ONE WALK, OVER THE ITEM INDEX (audit D4).
-//
-// They used to be two separate functions, each walking `mNodes` — the node MAP,
-// every node in the scene, lights and empties and helpers included — and each
-// paying `getWorldAabbUpdated()` (a parent-chain walk that recomputes the whole
-// SIMD block) per GI item. The host reads them in ONE statement, on every frame
-// the movement epoch moved, and the epoch moves on EVERY frame of any animation
-// or physics: ENGINE-7's "0.02 ms flying" was a STILL-scene number, and an alive
-// scene was paying two O(all nodes) walks for two hashes of the same boxes. The
-// header at their declarations already said they are "pure functions of the same
-// boxes"; this is that sentence made true.
-//
-// (The MOVEMENT SCAN — ensureGiWalk/walkItems — is deliberately NOT folded in
-// with them, and the reason is a contract rather than an oversight: its
-// `mGiMovedBoxes` are per FRAME and are consumed by the probe budget inside
-// `renderOneFrame`, while these two are read by the mirror
-// BEFORE it, after the mirror has written this frame's transforms. One walk
-// serving both would have to answer at two different epochs in the same frame,
-// and the loser would be the probe budget's movers. Folding them needs the
-// moved-box lifetime changed from per-frame to per-epoch first — reported, not
-// built here.)
-void OgreScene::computeGiSignatures() const {
-    const unsigned long long epoch = transformEpoch();
-    // The escape half is computed only where it means something: an explicit or
-    // auto-fitted volume to be outside of, and not under a camera-centred chain
-    // (which has no fit to leave — audit D3).
-    const bool wantEscape = mGi.mode != GiMode::Off && !mGi.cascades && mGiAutoVolumeValid;
-    const Ogre::Vector3 vmn = mGiAutoVolume.getMinimum(), vmx = mGiAutoVolume.getMaximum();
-    const Ogre::Vector3 vsize = vmx - vmn;
-    const float vquantum =
-        std::max(std::max(std::max(vsize.x, vsize.y), vsize.z) / 64.0f, 1e-4f);
     static const unsigned long long kFnvBasis = 1469598103934665603ull;
-    unsigned long long hg = kFnvBasis, he = kFnvBasis;
+    unsigned long long hg = kFnvBasis;
     const auto fold = [](unsigned long long &h, unsigned long long v) {
         h ^= v; h *= 1099511628211ull;
     };
@@ -2472,39 +2192,15 @@ void OgreScene::computeGiSignatures() const {
                 fold(hg, (unsigned long long)(long long)std::floor(mx[ax] / quantum));
             }
         }
-        // The ESCAPE half: only what is OUTSIDE the fitted volume, quantised to a
-        // 64th of THAT volume.
-        if (!wantEscape || np->giBoundsExcluded) continue;
-        if (mn.x >= vmn.x && mn.y >= vmn.y && mn.z >= vmn.z &&
-            mx.x <= vmx.x && mx.y <= vmx.y && mx.z <= vmx.z) continue;
-        fold(he, (unsigned long long)np->selfId);
-        for (size_t ax = 0; ax < 3u; ++ax) {
-            fold(he, (unsigned long long)(long long)std::floor(mn[ax] / vquantum));
-            fold(he, (unsigned long long)(long long)std::floor(mx[ax] / vquantum));
-        }
     }
     mGeomSig = hg;
     mGeomSigEpoch = epoch;
     mGeomSigMode = mGi.mode;
     mGeomSigValid = true;
-    // THE ESCAPE HALF IS ONLY CACHED WHEN IT WAS COMPUTED (round-2 F9). A walk
-    // entered through `giGeometrySignature` with no fitted volume to escape from
-    // never folded a single item into `he`, and marking that answer valid would
-    // have served a 0 to the next `giEscapeSignature` call at the same epoch —
-    // after a `noteGiAutoVolume` had given the scene a volume, which is exactly
-    // when the term starts meaning something. Its own keys, its own validity.
-    if (wantEscape) {
-        mEscapeSig = he == kFnvBasis ? 0ull : he;    // untouched == nothing escaped
-        mEscapeSigEpoch = epoch;
-        mEscapeSigMode = mGi.mode;
-        mEscapeSigVolume = mGiAutoVolume;
-        mEscapeSigVolumeValid = mGiAutoVolumeValid;
-        mEscapeSigValid = true;
-    }
 }
 
-void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
-    mGiAutoVolume = fitted;
+void OgreScene::noteProbeFitVolume(const Ogre::Aabb &fitted, bool automatic) {
+    mProbeFitVolume = fitted;
     // THE FLOOR ONLY REMEMBERS A REAL POPULATION, and this qualifier is the
     // difference between a useful hysteresis and a broken heuristic.
     //
@@ -2521,7 +2217,7 @@ void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
     // CONTENT, adding more content can never collapse its lit volume. The very
     // first object to appear in an empty-but-for-scenery scene legitimately
     // re-centres the volume onto it, and that is the heuristic working.
-    mGiAutoVolumeValid = automatic && mGiLastItemCount >= 2u;
+    mProbeFitVolumeValid = automatic && mGiLastItemCount >= 2u;
     // THE MEMO IS NOT TOUCHED HERE, and that is the load-bearing half: every
     // re-solve is a teardown followed by a build, and the teardown comes
     // through this function with `automatic` false (the zero volume at the top
@@ -2530,69 +2226,35 @@ void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
     // SAME 16-item signature seven times — so the floor read its own output
     // again and the volume grew 48.10 -> 56.62. The memo is keyed on the
     // content and nothing else, because nothing else changes the answer.
-    noteSceneTransformWrite();      // the escape signature is relative to it
 }
 
-bool OgreScene::giBoundsExplicit() const {
-    const Vec3 &a = mGi.testBoundsMin, &b = mGi.testBoundsMax;
+bool OgreScene::probeRegionPinned() const {
+    const Vec3 &a = mGi.testProbeRegionMin, &b = mGi.testProbeRegionMax;
     return a.x != b.x || a.y != b.y || a.z != b.z;
 }
 
-// THE CEILING ON THE AUTOMATIC VOLUME (SMOKE_FIX S14 /
-// LIGHTING_PIPELINE_AUDIT L4.1).
+// THE CEILING ON THE AUTOMATIC PROBE REGION, kProbeGridFitMax (SMOKE_FIX S14 /
+// LIGHTING_PIPELINE_AUDIT L4.1; renamed by D4-PHOTON-TIERS). A PLACEMENT
+// HEURISTIC PENDING A9 — never a lighting volume.
 //
-// WHAT IT IS FOR, measured on the shipped default project as it was (born
-// Realtime/Epic, one 1024 m ground plane and two lights — mainwindow.cpp's
-// createDefaultScene; the same fix re-staged that plane to 100 m, and this
-// ceiling is what stops the class rather than that one number):
+// WHAT IT IS FOR: a scene that is one kilometre-wide ground plane has nothing to
+// trim (one item is no population), so without a ceiling its probe grid spreads
+// eighteen probes 346 m apart, nine of them under a solid floor. The ceiling
+// holds the region to a 64 m window, IN METRES and not per cell, so a tier
+// switch never moves where the probes stand. The window is CENTRED ON THE
+// CONTENT (giContentCentre: the mean of the centres of the items that fit inside
+// the ceiling, i.e. everything that is not scenery), then slid to stay inside
+// the union. It never touches a suite's pinned region.
 //
-//     Jahshaka GI: voxelized 1 items at 128^3 over -520 -8 -520 .. 520 8 520
-//     Jahshaka GI: DDGI field 64x2x64 (8192 probes) over ... size 1040 16 1040
-//     Jahshaka GI: PCC region ... grid 3x2x3 ... [all 18 probes CLAMPED]
-//
-// Voxels 8.1 m across, two irradiance probes on the whole vertical axis,
-// eighteen reflection probes 346 m apart with nine of them four metres under a
-// solid floor: 437 MB and milliseconds a frame computing a constant. The
-// trimming in giItemBounds cannot help here and is right not to — with ONE item
-// there is no population for an outlier to be an outlier against, and the
-// geometric mean of one extent is that extent, so the ramp is a no-op by
-// construction whatever gate it is behind. The ground IS the scene; it is just
-// that a scene a kilometre across cannot be lit by 128 voxels.
-//
-// THE CEILING IS IN METRES, NOT IN METRES PER VOXEL, and that is a deliberate
-// choice against the audit's preference (L4.4: metres-per-voxel is the quantity
-// that decides whether GI means anything, and it would be tier-independent).
-// Measured, a per-voxel ceiling SHRINKS the lit world as the quality dial goes
-// down — 0.5 m/voxel is 64 m at High but 16 m at Low — and that took gi.cliff's
-// "a scene that is only a ground plane" and gi.pcc_bounds' "a scene that IS one
-// big mesh keeps the whole mesh in the lit volume" red at Low: the "a scene
-// goes dark because a dial moved" class the LIGHTING_FIX lane exists to
-// prevent. A fixed 64 m holds at every tier and still kills the 8 m voxel
-// (High 0.5, Medium 1.0, Low 2.0 m per voxel), and GiStatus::voxelMetres
-// reports the per-voxel reading the audit wants exposed.
-//
-// IT NEVER TOUCHES A PINNED VOLUME: computeGiBounds returns the user's own box
-// before reaching here, which is what `world.fitGiBounds` and the bounds rows
-// are for once a scene outgrows the ceiling.
-//
-// THE WINDOW IS CENTRED ON THE CONTENT, not on the union: the point of a lit
-// volume is the things standing in it, and a ground plane's centre is only the
-// content's centre by accident. `giContentCentre` is the MEAN OF THE CENTRES of
-// the items that fit inside the ceiling (i.e. everything that is not scenery) —
-// a mean rather than the centre of their union, so a window narrower than the
-// content still lands where most of the geometry is instead of in the gap
-// between two distant clusters. With nothing but scenery in the scene it falls
-// back to the union's own centre, which for the default project is the origin
-// the camera is already looking at. The window then slides to stay inside the
-// union, so a content centre near an edge still spends the whole ceiling on
-// real geometry.
+// WHAT IT IS NOT: the camera-centred probe window A9 owes (the Mac's no-ray story
+// — walk out of this window and there are no probes, only the cones and the sky).
 bool OgreScene::giContentCentre(float maxEdge, Ogre::Vector3 &centre) const {
     Ogre::Vector3 sum(0.0f);
     size_t n = 0;
     for (const auto &kv : mNodes) {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        if (kv.second.giBoundsExcluded) continue;
+        if (kv.second.probeGridExcluded) continue;
         ++mGiAabbReads;
         const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
         const Ogre::Vector3 size = a.getSize();
@@ -2605,26 +2267,12 @@ bool OgreScene::giContentCentre(float maxEdge, Ogre::Vector3 &centre) const {
     return true;
 }
 
-void OgreScene::clampAutoGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
-    // THE 64 m CEILING IS THE ENGINE'S, NOT A PUSHED FIELD (PHOTON_SPEC §10's
-    // E2 row): nothing a user can reach has ever varied it — the document
-    // carries no bounds, `world.gi` refuses the key by name, and the mirror
-    // never writes it — so it is a constant here and `testAutoBoundsMax` is a
-    // suite's lever over it (negative = this value).
-    //
-    // WHY 64 METRES AND NOT METRES-PER-VOXEL, which is the quantity that really
-    // decides whether GI means anything (LIGHTING_PIPELINE_AUDIT L4.4) and would
-    // be tier-independent: a per-voxel ceiling SHRINKS the lit world as the
-    // quality dial goes down (0.5 m/voxel is 64 m at High but 16 m at Low), and
-    // that breaks standing contracts — measured, it took gi.cliff's "a scene
-    // that is only a ground plane" and gi.pcc_bounds' "a scene that IS one big
-    // mesh keeps the whole mesh" red at Low, the "scenes go dark when a dial
-    // moves" class the LIGHTING_FIX lane exists to prevent. A fixed 64 m holds
-    // at every tier and still kills the 8 m voxel a 1 km ground plane used to
-    // produce: High 0.5, Medium 1.0, Low 2.0 m per voxel.
-    static const float kAutoGiBoundsMax = 64.0f;
-    const float maxEdge = mGi.testAutoBoundsMax < 0.0f ? kAutoGiBoundsMax
-                                                       : mGi.testAutoBoundsMax;
+void OgreScene::clampProbeRegion(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
+    // A constant, and `testProbeGridFitMax` a suite's lever over it (negative =
+    // this value). Nothing a user can reach varies it.
+    static const float kProbeGridFitMax = 64.0f;
+    const float maxEdge = mGi.testProbeGridFitMax < 0.0f ? kProbeGridFitMax
+                                                       : mGi.testProbeGridFitMax;
     if (!(maxEdge > 0.0f)) return;
     const Ogre::Vector3 size = mx - mn;
     if (size.x <= maxEdge && size.y <= maxEdge && size.z <= maxEdge) return;
@@ -2644,9 +2292,9 @@ void OgreScene::clampAutoGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
     }
 }
 
-bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
-    const Vec3 &a = mGi.testBoundsMin, &b = mGi.testBoundsMax;
-    if (giBoundsExplicit()) {
+bool OgreScene::computeProbeRegion(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
+    const Vec3 &a = mGi.testProbeRegionMin, &b = mGi.testProbeRegionMax;
+    if (probeRegionPinned()) {
         mn = Ogre::Vector3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
         mx = Ogre::Vector3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
         return true;
@@ -2658,41 +2306,27 @@ bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
         mn.makeFloor(aabb.getMinimum());
         mx.makeCeil(aabb.getMaximum());
     }
-    clampAutoGiBounds(mn, mx);
-    // The margin is ONE VOXEL per axis, and no more (P1a). It exists for exactly
-    // one reason: a surface lying exactly on the union's boundary would sit on
-    // the volume's face, where it may or may not be rasterised into a voxel. One
-    // voxel of slack removes the question.
-    //
-    // It used to be 10% + 0.5 absolute, which was our invention — upstream's own
-    // `VctVoxelizer::autoCalculateRegion` is the plain union with NO margin at
-    // all — and it cost twice: a volume 20% larger per axis at a FIXED voxel
-    // resolution spends ~40% of its voxels on empty air, and (measured in
-    // gi.pcc_bounds) an over-inflated volume moves the VCT cone hit far enough
-    // from the probe's parallax hit that `getPccVctBlendWeight` hands the pixel
-    // to VCT and the probe reflection vanishes. In this room the old margin was
-    // 1.58 units and the reflection died between 1.0 and 1.3.
+    clampProbeRegion(mn, mx);
+    // THE MARGIN IS ONE CELL AT THE TIER'S FINEST DENSITY (P1a's one-cell slack):
+    // the region's extent over the resolution of the tier's innermost cascade
+    // (giQualityFacts — 64 at Low and Medium, 128 at High and Epic, the densities
+    // the deleted single volume used, so no placement moved with it). A surface
+    // lying exactly on the union's face stays inside the region. It is small on
+    // purpose — an over-inflated region moves the probe's parallax hit far enough
+    // from the cone hit that `getPccVctBlendWeight` hands the pixel to the cone
+    // and the probe reflection vanishes (gi.pcc_bounds: the old 10 % margin killed
+    // the reflection between 1.0 and 1.3 units).
+    const float kProbeRegionMarginDivisions =
+        float(std::max(giQualityFacts(mGi.quality).cascades[0].resolution, 1));
     const Ogre::Vector3 size = mx - mn;
-    const float res = float(giVoxelResolution());
-    Ogre::Vector3 margin = size / res;
+    Ogre::Vector3 margin = size / kProbeRegionMarginDivisions;
     // Degenerate axes (a single ground plane is flat in Y) get a real one from
     // the scene's own scale rather than a magic constant.
     const float maxExtent = std::max(std::max(size.x, size.y), size.z);
-    const float floorMargin = std::max(maxExtent / res, 1e-3f);
+    const float floorMargin = std::max(maxExtent / kProbeRegionMarginDivisions, 1e-3f);
     for (size_t a = 0; a < 3u; ++a) margin[a] = std::max(margin[a], floorMargin);
     mn -= margin; mx += margin;
     return true;
-}
-
-// Voxel volume resolution per axis, by quality. Shared so the bounds margin can
-// be expressed in voxels rather than in a made-up percentage.
-//
-// THE NUMBER COMES FROM THE ONE TIER TABLE (`giQualityFacts`, Types.h): the
-// app's tier descriptions are generated from the same function, so what a tier
-// SAYS and what it DOES cannot drift (render audit A5).
-unsigned OgreScene::giVoxelResolution() const {
-    if (mGi.testVoxelResolution) return mGi.testVoxelResolution;
-    return giQualityFacts(mGi.quality).voxelResolution;
 }
 
 // THE ONE SHAPE READING LEFT IN THIS FILE (ENGINE-4 item 5's ground clip).
@@ -2840,8 +2474,7 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
     }
 }
 
-void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged,
-                                   bool somethingDied) {
+void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged) {
     // EVERY STRUCTURAL CHANGE TO THE SCENE FUNNELS THROUGH HERE — a mesh
     // attached or detached, a node destroyed, a material or texture replaced,
     // a light removed. It deliberately does NOT touch the cached lamp maps any
@@ -2866,18 +2499,6 @@ void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsC
     // the space; it does NOT stop. Never from INSIDE a stage: those legitimately
     // touch the arm they are building.
     if (!mInGiStage) restartStagedProbeBuild();
-    // THE DESTRUCTION GENERATION (FIX WAVE B4). Bumped unconditionally, and
-    // unconditionally is the point: every caller of this function either
-    // destroys something the GI arms hold a raw pointer into, or wants a
-    // from-scratch rebuild for its own reasons. Being conservative here costs a
-    // full rebuild that could have been a reuse; being clever here costs heap
-    // corruption. The counter is the ONLY thing standing between the reuse arm
-    // and the rule this file's header spends a paragraph on.
-    // ...UNLESS NOTHING DIED (DRAG-1). A visibility edge is the one caller of
-    // this family that destroys nothing — see invalidateGiCachesForVisibility
-    // — and bumping here made a HIDE cost a from-scratch rebuild of the whole
-    // single-volume arm, more than the DELETE of the same object.
-    if (somethingDied) ++mGiDestroyGeneration;
     // (THE CHAIN'S `itemsStale` IS GONE, ATOM P4b. It closed a window in which a
     // scroll rebuild could dereference a dead `Item*` still attached to a
     // cascade's voxeliser; a voxeliser holds no Item* any more - the gather reads
@@ -2955,8 +2576,7 @@ void OgreScene::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
         mGiCascadeDirtyAll = true;
         return;
     }
-    // Evict from every voxeliser that may hold it (the single volume's and each
-    // cascade's; cascade 0 may share the single one). Erasing an entry twice is
+    // Evict from every voxeliser that may hold it (each cascade's). Erasing an entry twice is
     // a no-op. Nothing else moves: the voxels already hold the dead material's
     // albedo where its items stood, and the items' own detach re-voxelised
     // those boxes (destroyMaterial).
@@ -3068,12 +2688,11 @@ void OgreScene::endDragGestureIfStill() {
 }
 
 // THE PER-CASCADE DIRTY PATH (PHOTON_SPEC G1) — what makes an EDIT under the
-// cascade arm affordable, and the counterpart of `refreshVctFast` for a chain.
+// cascade arm affordable.
 //
 // Before it, every settle re-solve (a box dragged and released), every material
 // edit, every spawn, hide, delete, mobility flip and shadow-atlas growth went
-// `refreshVctFast` (refuses under cascades) -> `rebuildVct` -> `teardownVct` +
-// `buildCascadeArm`: N voxelisers destroyed and rebuilt from scratch in ONE
+// `rebuildVct` -> `teardownVct` + `buildCascadeArm`: N voxelisers destroyed and rebuilt from scratch in ONE
 // frame. At room scale that was N x (3-6 ms GPU + 1.2-1.6 ms CPU); on a dense
 // scene N x 17-108 ms.
 //
@@ -3109,7 +2728,7 @@ bool OgreScene::refreshCascadesFast() {
     // A CHAIN IS NOT A WHOLE ARM WHEN THE REST OF IT IS STILL OWED (fix round
     // item 1's belt). This path keeps a LIVE arm cheap, and a hybrid with no
     // probe grid — and no record of having dropped every candidate, which is a
-    // BUILT state (`refreshVctFast` says so in the same words) — or a scene
+    // BUILT state (buildPcc's depth rule) — or a scene
     // that wants an irradiance field and has none is not one. Refusing forces
     // the caller's `rebuildVct`, which is the only thing that can finish it.
     //
@@ -3119,6 +2738,30 @@ bool OgreScene::refreshCascadesFast() {
     if (mGiBuildStage == GiBuildStage::Idle) {
         if (probeGridWanted() && !mPcc && !mProbesDropped) return false;
         if (ddgiWanted() && !mIfd) return false;
+        // THE PROBE GRID IS PLACED IN THE CONTENT'S REGION (computeProbeRegion — a
+        // placement heuristic pending A9), so a refresh whose content MOVED that
+        // region materially re-places the grid through the from-scratch build —
+        // the rule the single-volume reuse arm kept for its probes, ported here
+        // when that arm was deleted (D4-PHOTON-TIERS): without it a grid placed
+        // around a hidden, deleted or moved object stayed there until the next
+        // configuration push. "Materially" is 2 % of the box's own size, scale-free.
+        // Small edits inside a space keep the space, so they keep its probes. The
+        // comparison is against the FIT the grid was placed from (mProbeFitVolume,
+        // the question), never against mGiProbeRegion — the scout's answer, smaller
+        // by construction, which would refuse every refresh.
+        if (probeGridWanted() && !mProbeFitVolume.mHalfSize.isZeroLength()) {
+            Ogre::Vector3 mn, mx;
+            if (computeProbeRegion(mn, mx)) {
+                const Ogre::Aabb now = Ogre::Aabb::newFromExtents(mn, mx);
+                const Ogre::Vector3 scale = now.getSize() + mProbeFitVolume.getSize();
+                const float tol = std::max(std::max(std::max(scale.x, scale.y), scale.z) * 0.02f,
+                                           1e-4f);
+                const Ogre::Vector3 dc = now.mCenter - mProbeFitVolume.mCenter;
+                const Ogre::Vector3 dh = now.mHalfSize - mProbeFitVolume.mHalfSize;
+                for (size_t ax = 0; ax < 3u; ++ax)
+                    if (std::fabs(dc[ax]) > tol || std::fabs(dh[ax]) > tol) return false;
+            }
+        }
     }
     JAH_TRY {
         // A MATERIAL PARAMETER THE VOXELISER READ HAS CHANGED.
@@ -3165,14 +2808,9 @@ bool OgreScene::refreshCascadesFast() {
         // whether to ask — and is recorded for the lead rather than guessed at
         // here.
         if (!marked) refreshGiLighting(false);
-        // NOTHING THE ARM HOLDS CAN STILL BE DANGLING: every cascade that could
-        // hold a dead pointer re-selects its item set before its next build, and
-        // the ones that need a new voxeliser are flagged for one.
-        mGiBuiltGeneration = mGiDestroyGeneration;
         mGiReusedLastRefresh = true;
         // The probe CONTENTS are stale (the scene changed), the SHAPES are not —
-        // the same decision, and the same paused-budget exception, as the
-        // single-volume reuse arm's.
+        // with the paused-budget exception (updateBudget 0 captures at once).
         if (mGi.updateBudget > 0) {
             staleProbeGrid(GiStaleReason::Refresh);
         } else if (mPcc) {
@@ -3342,7 +2980,7 @@ bool OgreScene::stepStagedGiBuild() {
             // the whole point of the rewind is that the grid is placed in the
             // world as it is now (`restartStagedProbeBuild`).
             Ogre::Vector3 mn, mx;
-            if (!computeGiBounds(mn, mx)) {      // nothing to place a grid in
+            if (!computeProbeRegion(mn, mx)) {      // nothing to place a grid in
                 mGiBuildStage = GiBuildStage::Field;
                 return false;
             }
@@ -3615,7 +3253,7 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo)
     // dirty flush rather than mutated: `resolveCascadeTable` reads this.
     if (driverStereo != mGiDriverStereo) {
         mGiDriverStereo = driverStereo;
-        if (mGi.cascades && (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid)) {
+        if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
             mGiChainShapeDirty = true;
             mGiCachesDirty = true;
         }
@@ -3707,8 +3345,7 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo)
 // contains a moved box goes to the front of the sweep) and — through the
 // separate, stateless giGeometrySignature() — the mirror's debounce.
 //
-// The comparison is QUANTIZED to a 64th of the lit volume for the same reason
-// giEscapeSignature is: sub-voxel jitter (a physics body settling, an idle
+// The comparison is QUANTIZED (giAabbQuantum): sub-voxel jitter (a physics body settling, an idle
 // animation's sway) must not read as movement for ever. An item seen for the
 // FIRST time is recorded, not reported — appearing is not moving, and the
 // arrival is already in the signature.
@@ -4036,12 +3673,9 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
                 if (!firstGi) mGiItemsAppeared = true;
                 // ...AND THE CHAIN HAS TO GROW INTO IT (PHOTON_SPEC E2 (2)).
                 //
-                // The single-volume arm answers an arrival inside the reuse arm
-                // (`refreshVctFast`'s "items born since the build" loop), and
-                // that path REFUSES under a chain by construction — so a NEW GI
-                // item that arrived after the chain was built cast no bounce at
-                // all under cascades, silently and for ever: nothing else ever
-                // re-selects a cascade's item set. (NEW is what this branch
+                // Without this a NEW GI item that arrived after the chain was
+                // built cast no bounce at all, silently and for ever: nothing
+                // else ever re-selects a cascade's item set. (NEW is what this branch
                 // sees: `scan.giKnown` is set the first time the walk meets a
                 // node and is never cleared, so an item that leaves the channel
                 // and comes back is not a second arrival — that edge goes
@@ -4421,8 +4055,7 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
 // full re-solve lands when the movement stops. Before this, moving an object
 // changed nothing at all until somebody pressed Refresh.
 //
-// Quantized to a 64th of the ITEM'S OWN largest extent, for giEscapeSignature's
-// reason: a settling physics body or an idle sway must not hold the mirror's
+// Quantized to a 64th of the ITEM'S OWN largest extent: a settling physics body or an idle sway must not hold the mirror's
 // stability window open for ever.
 //
 // PER ITEM, not per lit volume, and that is a correction rather than a taste:
@@ -4433,14 +4066,16 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
 // item, so the hash of a still scene is still whatever the volume does.
 unsigned long long OgreScene::giGeometrySignature() const {
     if (mGi.mode == GiMode::Off) return 0ull;
-    // CACHED AGAINST THE MOVEMENT EPOCH, exactly as giEscapeSignature is and
-    // for the same reason: the mirror reads it once a frame and it is a pure
-    // function of the GI items' boxes (clean-2 lane, 2026-09-13).
-    // Only where the epoch can see the host's writes — see giEscapeSignature.
+    // CACHED AGAINST THE MOVEMENT EPOCH: the mirror reads it once a frame and it
+    // is a pure function of the GI items' boxes (clean-2 lane, 2026-09-13).
+    // ONLY WHERE THE EPOCH CAN SEE THE HOST'S WRITES. Without a counter from the
+    // host (Engine::setTransformWriteCounter) a document-side move moves nothing
+    // the engine can read, so the cache would answer with a signature from before
+    // the drag (caught by gi.coalesce and gi.budget). No epoch, no skipping.
     const unsigned long long epoch = transformEpoch();
     if (detail::gTransformWriteCounter &&
         mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
-    computeGiSignatures();
+    computeGiGeometrySignature();
     return mGeomSig;
 }
 
@@ -4484,11 +4119,10 @@ bool OgreScene::giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after) {
 // shape debt itself, and every teardown is followed by a build from the current
 // table.
 bool OgreScene::rebuildVct() {
-    // THE PHOTON ARM (GiParams::cascades): camera-centred cascades instead of
-    // one scene-fitted box. The scene's own bounds are still computed — the
-    // probe half below is placed in the room, not around the camera — but the
-    // voxel volumes come from the cascade table and the tracked camera.
-    const bool cascadeArm = mGi.cascades;
+    // THE PHOTON ARM IS THE ONLY ARM: camera-centred cascades from the cascade
+    // table and the tracked camera. (The single scene-fitted volume is deleted —
+    // D4-PHOTON-TIERS; where a probe grid is wanted it is still PLACED in the
+    // content's region, computeProbeRegion, which is placement and not light.)
 
     // A CAMERA-CENTRED ARM NEEDS A CAMERA, AND WAITS FOR ONE (audit B3).
     // `mGiCamPos` is the authoritative view's last tracked position, and it is
@@ -4509,9 +4143,8 @@ bool OgreScene::rebuildVct() {
     // BEFORE THE REBUILD IS COUNTED OR TIMED (round-2 review F4/F5): waiting is
     // not a rebuild. Counting it left a cascade open reporting `rebuilds` 2 for
     // one build and filed a zero-length `gi.rebuild` event in every capture.
-    // The teardown still happens — a scene that had a single-volume arm and is
-    // then switched to cascades before its first frame must not keep it bound.
-    if (cascadeArm && !mGiCamPosKnown) {
+    // The teardown still happens — an arm from before must not stay bound.
+    if (!mGiCamPosKnown) {
         mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
         teardownVct();
         mGiCascadeAwaitingCamera = true;
@@ -4575,22 +4208,14 @@ bool OgreScene::rebuildVct() {
     // the chain shares one store, refreshed in place and evicted on a death.)
     teardownVct();
 
-    Ogre::Vector3 mn, mx;
-    const bool haveBounds = computeGiBounds(mn, mx);
-    if (!haveBounds && !cascadeArm)
-        return false;                        // nothing to voxelize (yet); stay armed via mGi
-    const Ogre::Aabb aabb = haveBounds ? Ogre::Aabb::newFromExtents(mn, mx)
-                                       : Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
-
     size_t itemCount = 0;
     {
         // The voxelisation and the first light injection: compute dispatches,
         // so the GPU half is a 0027 timestamp pair around them (the compositor
         // never sees this work and the frame's pass list cannot show it).
         monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
-                                 cascadeArm ? "vct.cascades.build" : "vct.rebuild",
-                                 mRoot->getRenderSystem());
-        itemCount = cascadeArm ? buildCascadeArm(mGiCamPos) : buildVoxelArm(aabb);
+                                 "vct.cascades.build", mRoot->getRenderSystem());
+        itemCount = buildCascadeArm(mGiCamPos);
         work.setUnits(unsigned(itemCount));
         // NOTHING TO VOXELISE IS NOT WORK (ENGINE-5 review, ledger §208). An
         // empty scene, or one whose every item is excluded, left a units-0
@@ -4602,29 +4227,22 @@ bool OgreScene::rebuildVct() {
     if (!itemCount) { teardownVct(); return false; }   // stay armed; next churn re-flags
 
     mGiBinding.vct = mVctLighting;   // this scene's passes read it from now on
-    // What this arm was built AT (B4): the reuse path re-runs it only while the
-    // count still matches, i.e. while nothing it points into can have died.
-    mGiBuiltGeneration = mGiDestroyGeneration;
     mGiReusedLastRefresh = false;
 
-    // WHAT THE ARM LIT. For the cascade arm that is the OUTERMOST cascade's
-    // box, which is what `giStatus().boundsMin/Max` and `voxelMetres` must
-    // report: the scene's fitted box describes nothing the renderer built.
-    mGiLitVolume = cascadeArm ? Ogre::Aabb(mVctCascades.back().centre,
-                                           Ogre::Vector3(mVctCascades.back().halfSize))
-                              : aabb;
-    // THE PROBE REGION IS THE SCENE'S OWN FITTED BOX (R5-ROOM). It used to be a
-    // separate, tighter box derived by measuring the scene's walls — and the
-    // measuring was the rule that retired, so what is left is the one box the
-    // renderer already fits to the content. The probes are spread through it and
+    // WHAT THE ARM LIT: the OUTERMOST cascade's box, which is what
+    // `giStatus().boundsMin/Max` and `voxelMetres` report.
+    mGiLitVolume = Ogre::Aabb(mVctCascades.back().centre,
+                              Ogre::Vector3(mVctCascades.back().halfSize));
+    // THE PROBE REGION IS THE CONTENT'S FITTED BOX (R5-ROOM; computeProbeRegion —
+    // a placement heuristic pending A9). The probes are spread through it and
     // each one then photographs its own surroundings; `buildPcc` keeps the ones
     // that saw something and drops the rest.
     // ...AND NOT AT A RAY TIER (PHOTON-F12-PCC): `probeGridWanted`.
-    if (probeGridWanted() && haveBounds) {
-        // DELIBERATELY the scene's fitted box and not a cascade: where the
-        // probes live is a property of the content, not of where the camera
-        // stands. The cascade arm changes where the BOUNCE is computed and
-        // nothing about where the probes live.
+    Ogre::Vector3 mn, mx;
+    const bool haveBounds = probeGridWanted() && computeProbeRegion(mn, mx);
+    const Ogre::Aabb aabb = haveBounds ? Ogre::Aabb::newFromExtents(mn, mx)
+                                       : Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+    if (haveBounds) {
         mGiProbeRegion = aabb;
         // STAGED, WHEN THE FRAME ASKED FOR IT (OPEN_COVER_SPEC §2 A). The
         // cascade arm above is 57 ms and the probe grid below is 673 on Grand
@@ -4645,10 +4263,9 @@ bool OgreScene::rebuildVct() {
             applyReflectionToAll();
         }
     }
-    // LAST, not beside `mGiLitVolume = aabb` above: the hysteresis floor inside
-    // giItemBounds must see the same record the lit volume was fitted against or
-    // the two could disagree about which items exist.
-    if (haveBounds) noteGiAutoVolume(aabb, !giBoundsExplicit());
+    // LAST: the hysteresis floor inside giItemBounds must see the same record the
+    // region was fitted against or the two could disagree about which items exist.
+    if (haveBounds) noteProbeFitVolume(aabb, !probeRegionPinned());
 
     // The DDGI layer, over the volume this build just lit. After the VCT
     // binding (the field joins the same SceneGiBinding) and after the PCC
@@ -4660,9 +4277,8 @@ bool OgreScene::rebuildVct() {
     // THE FIELD RIDES CASCADE 0 (PHOTON_SPEC E1). It needs no cascade-specific
     // code here at all: cascade 0 IS `mVctVoxelizer`/`mVctLighting` by the
     // chain's own rule 5, so `buildIrradianceField` fits its probes to the
-    // voxel box the innermost cascade was just built over, exactly as it fits
-    // them to the scene's box in the single-volume arm. What the cascade arm
-    // owes on top of that is the FOLLOWING — `followCascade0Field`, called from
+    // voxel box the innermost cascade was just built over. What the arm owes on
+    // top of that is the FOLLOWING — `followCascade0Field`, called from
     // the scheduler whenever cascade 0 is re-placed or re-voxelised.
     //
     // (This is where the arm used to REFUSE the field and say so. The refusal
@@ -4697,104 +4313,22 @@ bool OgreScene::rebuildVct() {
 
     if (giDebug())
         Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: voxelized " + std::to_string(itemCount) + " items at " +
-            std::to_string(giVoxelResolution()) + "^3 over " + Ogre::StringConverter::toString(mn) +
-            " .. " + Ogre::StringConverter::toString(mx) +
+            "Jahshaka GI: voxelized " + std::to_string(itemCount) + " items into " +
+            std::to_string(mVctCascades.size()) + " cascades" +
             (mPcc ? " (+PCC probe grid)" : ""));
     return true;                             // the arm was built, from the CURRENT table
-}
-
-// THE VOXEL ARM — the voxelizer and the lighting over `aabb`, from the live GI
-// items. rebuildVct's first half. (freshVoxelArm, the material-edit re-solve that
-// built a whole NEW voxeliser and lighting, is DELETED - A5b fix round: the shared
-// store re-reads its rows in place and the reuse arm re-runs the same voxeliser.)
-size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
-    // A FROM-SCRATCH ARM RE-READS EVERY MATERIAL (the VCT lifecycle's own rule): the
-    // store outlives rebuilds, so the refresh is owed and every GI slot is queued - a
-    // slot composed while there was no store could not have queued itself.
-    mVctMaterialRefreshOwed = true;
-    queueAllGiMaterials();
-    // Quality -> voxel volume resolution (the memory/compute knob: 32^3 =~ fast
-    // preview, 128^3 =~ crisp indirect shadows) and anisotropic cone mips.
-    const Ogre::uint32 res = giVoxelResolution();
-    const bool anisotropic = mGi.quality != GiQuality::Low;
-
-    // An arm over no GI geometry is not built (the caller stays armed).
-    const size_t itemCount = countGiItems();
-    if (!itemCount) return 0;
-
-    // World transforms must be current before voxelization: the GPU scene's table
-    // is brought current from them.
-    giUpdateSceneGraph(mSceneMgr);
-
-    mVctVoxelizer = new Ogre::VctVoxelizer(
-        Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
-        mRoot->getRenderSystem(), mRoot->getHlmsManager(),
-        true /*correctAreaLightShadows*/, vctMaterialStore());
-    // A VOXEL CELL IS A CUBE (PHOTON-VOXEL-4): a cone's footprint is isotropic, and one mip
-    // level is one footprint in every direction only on cubic cells. The cell is the box's
-    // longest side over the tier's resolution; each axis takes the next power of two of
-    // cells that covers its side (every level then halves every axis, as a cube's does).
-    // THE BOX IS THE BOUNDS PADDED TO THE POWER-OF-TWO COUNT ON THE FAR SIDE: anchored at
-    // the bounds' MIN corner, each axis grown only toward +a - the bounds' min faces are the
-    // box's, and bounds already on the lattice (every side the longest / 2^k) are the box
-    // exactly (gi.ddgi_edge's). A box grown about its centre moved both faces. The
-    // tier's budget is never exceeded (the longest axis takes exactly `res`). A box 18 x 9 x 18 m at 32: 32 x 16 x
-    // 32 cells of 0.5625 m - it had 32^3 cells of 0.5625 x 0.28 x 0.5625 m, on which the
-    // open floor's wall cone read 0.17-0.23 of its cone-trace reference 0.413 at 32-256
-    // cells, 0.39-0.42 on cubic ones (spikes/photon-voxel-4/lab).
-    Ogre::Aabb region = aabb;
-    Ogre::uint32 dims[3] = { res, res, res };
-    {
-        const Ogre::Vector3 size = aabb.getSize();
-        const Ogre::Real longest = std::max(size.x, std::max(size.y, size.z));
-        if (longest > Ogre::Real(0)) {
-            const Ogre::Real cell = longest / Ogre::Real(res);
-            Ogre::Vector3 half;
-            const Ogre::Vector3 lo = aabb.getMinimum();
-            for (int a = 0; a < 3; ++a) {
-                const Ogre::Real need = size[size_t(a)] / cell - Ogre::Real(1e-3);
-                Ogre::uint32 n = 8u;   // the octant's floor
-                while (n < res && Ogre::Real(n) < need) n <<= 1u;
-                dims[a] = n;
-                half[size_t(a)] = Ogre::Real(0.5) * cell * Ogre::Real(n);
-            }
-            region = Ogre::Aabb(lo + half, half);   // min corner = the bounds' min corner
-        }
-    }
-    mVctVoxelizer->setResolution(dims[0], dims[1], dims[2]);
-    mVctVoxelizer->setRegionToVoxelize(region);
-    mVctVoxelizer->dividideOctants(1u, 1u, 1u);
-    // THE SINGLE VOLUME IS A CASCADE OF ONE (A5b §2: one path, not two): the same
-    // feed, level 0, no size floor.
-    if (!mVctFeed) mVctFeed.reset(new detail::VoxelFeed());
-    gatherAndBuild(*mVctFeed, mVctVoxelizer, VoxelGatherInputs());
-
-    mVctLighting = new Ogre::VctLighting(
-        Ogre::Id::generateNewId<Ogre::VctLighting>(), mVctVoxelizer, anisotropic);
-    // Document bounces are total (1 = one indirect bounce, which light injection
-    // itself provides); VctLighting counts the extra propagation passes.
-    mVctLighting->setAllowMultipleBounces(cascadeBounces(0) > 0u);
-    // A NEW VOLUME: nothing has injected it, whatever this frame did to the one
-    // it replaces. Then the first injection, through the one writer.
-    mGiSingleInjectedFrame = ~0ull;
-    injectCascade(0);
-    // The materials this build read are the ones in force NOW.
-    mGiBuiltMaterialGeneration = mGiMaterialGeneration;
-    return itemCount;
 }
 
 // ===========================================================================
 // PHOTON — THE CAMERA-CENTRED CASCADE SCHEDULER (PHOTON_SPEC.md P0)
 // ===========================================================================
 //
-// WHAT IT REPLACES AND WHY IT IS OURS.
+// WHAT IT REPLACED AND WHY IT IS OURS.
 //
-// The single-volume arm above fits ONE voxel box around the scene's content
-// (`computeGiBounds`, capped at `autoBoundsMax`). It is an editor-at-rest
-// shape: stand inside it and the bounce is right; walk out of it and the world
-// goes unlit, and a scene bigger than the cap is voxelised at metres per cell.
-// Photon's arm is N camera-centred cascades instead — fine cells near the eye,
+// The single-volume arm (deleted, D4-PHOTON-TIERS) fitted ONE voxel box around
+// the scene's content under a 64 m cap: stand inside it and the bounce was
+// right; walk out of it and the world went unlit, and a scene bigger than the
+// cap was voxelised at metres per cell. Photon's arm is N camera-centred cascades — fine cells near the eye,
 // coarse ones far away, and what escapes the outermost cascade takes
 // `VctLighting`'s ambient hemisphere, i.e. the Sky Light (measured in
 // spikes/photon-s1 §4.2: the horizon reads exactly the GI-off value, so there
@@ -4977,15 +4511,16 @@ Ogre::uint32 OgreScene::cascadeBounces(size_t idx) const {
 }
 
 size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
-    // The same rule as buildVoxelArm's: a from-scratch chain re-reads every material.
+    // A FROM-SCRATCH CHAIN RE-READS EVERY MATERIAL (the VCT lifecycle's own rule):
+    // the store outlives rebuilds, so the refresh is owed and every GI slot is queued.
     mVctMaterialRefreshOwed = true;
     queueAllGiMaterials();
     const std::vector<GiParams::GiCascadeDesc> table = resolveCascadeTable();
     if (table.empty()) return 0;
     const bool anisotropic = mGi.quality != GiQuality::Low;
 
-    // World transforms must be current before voxelisation (the same rule
-    // buildVoxelArm keeps).
+    // World transforms must be current before voxelisation: the GPU scene's table
+    // is brought current from them.
     giUpdateSceneGraph(mSceneMgr);
 
     mVctCascades.clear();
@@ -5361,8 +4896,8 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
             // latch is per state: an injection earlier in this writer frame (a
             // from-scratch build the host asked for between frames, at the
             // placement this rebuild has just left) lit voxels that no longer
-            // exist, so the latch is re-armed for the volume the build just wrote
-            // (the same rule refreshVctFast keeps for the single volume). Within
+            // exist, so the latch is re-armed for the volume the build just wrote.
+            // Within
             // a frame nothing else injects a cascade before the scheduler's
             // rebuild (the host's tick is owed and runs after it), so a refusal
             // here would be a new path, and it is an error rather than a skip:
@@ -5681,9 +5216,6 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // whole at-rest tick in one frame. THE BYTES ARE THE SAME: the steps run in
     // the tick's own order (cascades outermost-first), and one sweep IS the
     // fixed point (kAtRestSweeps, EnginePrivate.h; gi.chain_converge).
-    //
-    // The single-volume arm owes nothing: its rebuild injects the one volume at
-    // the document's own bounce count, which IS what the tick would compute.
     //
     // `JAHSHAKA_GI_NO_REBUILD_SETTLE` stands the rule down for measurement:
     // gi.chain_converge drives it so the suite proves the defect it guards against rather than
@@ -6781,15 +6313,12 @@ void OgreScene::buildIrradianceField() {
         if (mGi.updateBudget <= 0) targetSamples = 1u;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
-        // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM — whichever arm
-        // built it. In the single-volume arm that is the scene's fitted box; in
-        // the cascade chain it is cascade 0's camera-centred box (the chain's
-        // rule 5: cascade 0 IS mVctVoxelizer/mVctLighting), and the scheduler
-        // keeps it there as that cascade scrolls (followCascade0Field). A
-        // single volume small enough to follow the camera would delete the
-        // far bounce (REFLECTIONS P5b measured it); under a chain the outer
-        // cascades hold the far field and hand the ring its bounce (G3), and
-        // gi.cascades' 20 m pixel is the bar that says so.
+        // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM: cascade 0's
+        // camera-centred box (the chain's rule 5: cascade 0 IS
+        // mVctVoxelizer/mVctLighting), and the scheduler keeps it there as that
+        // cascade scrolls (followCascade0Field). The outer cascades hold the far
+        // field and hand the ring its bounce (G3); gi.cascades' 20 m pixel is the
+        // bar that says so.
         const Ogre::Vector3 origin = mVctVoxelizer->getVoxelOrigin();
         const Ogre::Vector3 size   = mVctVoxelizer->getVoxelSize();
         ifdProbeCounts(size, settings.mNumProbes);
@@ -7194,10 +6723,6 @@ void OgreScene::teardownVct() {
     mProbesClampedToRegion = 0;
     mPccCaptureSize = 0;
     mProbesDropped = 0;
-    // The single volume's feed goes with the arm (a from-scratch rebuild makes a new
-    // one): its buffers must not outlive the VaoManager, and teardownVct runs first
-    // in the scene's destruction.
-    mVctFeed.reset();
     // A CHAIN THAT NO LONGER EXISTS OWES NO CASCADE ANYTHING (G1): whatever the
     // dirty path recorded is answered by the build that follows, and carrying it
     // across would mark every cascade of the NEXT chain pending on its first
@@ -7222,7 +6747,6 @@ void OgreScene::teardownVct() {
     // (`rebuildVct`, a mode or quality change, GI off) would make the next
     // flush spend one more whole rebuild for nothing.
     mGiChainShapeDirty = false;
-    mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;
     // THIS SCENE'S PASSES STOP READING ITS ARMS, and any PBS-family host the
     // last pass left them on lets go before the deletes below.

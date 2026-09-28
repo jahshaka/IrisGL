@@ -1140,11 +1140,10 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         markGpuSlotDirty(n);   // its flags word and its queue just changed
         n.materialRef = matId;
         if (!rec.unlit) {
-            // The voxels inside this box hold the old albedo; nothing died, so
-            // the destruction generation stays and the single-volume arm keeps
-            // its reuse — only the cascades the box reaches owe a rebuild (G1).
+            // The voxels inside this box hold the old albedo — only the cascades
+            // the box reaches owe a rebuild (G1).
             Ogre::Aabb box = n.item->getWorldAabbUpdated();
-            invalidateGiCaches(&box, true, false);
+            invalidateGiCaches(&box);
         } else if (probeSeesItem(n)) {
             staleProbeGrid(GiStaleReason::Moved);
         }

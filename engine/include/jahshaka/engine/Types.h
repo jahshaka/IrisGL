@@ -2267,34 +2267,25 @@ enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, 
 struct GiParams {
     GiMode    mode    = GiMode::Off;
     GiQuality quality = GiQuality::Medium;
-    /// THE LIT VOLUME IS THE RENDERER'S, AND THESE THREE ARE TEST LEVERS
-    /// (owner decision D8, 2026-09-13; PHOTON_SPEC §10's E2 row).
+    /// THE REFLECTION-PROBE GRID'S PLACEMENT REGION — TEST LEVERS (owner
+    /// decision D8, 2026-09-13; renamed by D4-PHOTON-TIERS). The region is where a
+    /// probe grid is PLACED on a machine that does not trace its reflections (a
+    /// pinned hybrid, the rays Off, no ray hardware); it is a placement heuristic
+    /// pending A9's camera-centred window, NEVER a lighting volume — the voxels
+    /// are the camera's cascade chain and know nothing of it.
     ///
-    /// Nothing a user can reach writes them: the document carries no bounds at
-    /// all, `world.gi` refuses `boundsMin`/`boundsMax`/`autoBoundsMax` BY NAME,
-    /// the World panel's rows and its Fit Bounds button are deleted, and
-    /// SceneMirror never touches them. They survive for one reason — roughly
-    /// fifteen engine suites PIN a volume so that a pixel assertion is about the
-    /// thing it names and not about where the automatic fit happened to land —
-    /// and they carry `test` in their names so that reading this struct cannot
-    /// suggest otherwise. They stay inside `operator==` on purpose: a test that
-    /// moves the pinned volume must get a rebuild, like any other configuration.
+    /// Nothing a user can reach writes them: the document carries no region and
+    /// SceneMirror never touches them. Suites PIN a region so that a probe
+    /// assertion is about the thing it names and not about where the automatic
+    /// fit landed. Inside `operator==` on purpose: a moved pin is a re-placement.
     ///
-    /// `testBoundsMin == testBoundsMax` (the default) is "no pin": the backend
-    /// fits the volume to the scene's lit geometry, under `kAutoGiBoundsMax`.
-    Vec3      testBoundsMin, testBoundsMax;
-    /// The ceiling on an AUTOMATIC fit, in metres — a test lever over
-    /// `kAutoGiBoundsMax` (OgreGi.cpp), which is the shipped 64 m and the only
-    /// value anything outside a suite has ever used. Negative (the default) is
-    /// "the engine's own"; 0 disables the ceiling; anything else replaces it.
-    /// The rationale for 64 m — and for why the ceiling is in METRES rather
-    /// than metres-per-voxel, which would shrink the lit world as the quality
-    /// dial goes down — is at the constant.
-    float     testAutoBoundsMax = -1.0f;
-    /// The scene-fitted volume's resolution along its longest side - a test lever over the
-    /// tier's own (`giQualityFacts(...).voxelResolution`), for measuring the resolution as a
-    /// dial against its cost in one process. 0 (the default) is the tier's.
-    unsigned  testVoxelResolution = 0u;
+    /// `testProbeRegionMin == testProbeRegionMax` (the default) is "no pin": the
+    /// engine fits the region to the scene's content, under `kProbeGridFitMax`.
+    Vec3      testProbeRegionMin, testProbeRegionMax;
+    /// The ceiling on the AUTOMATIC probe-region fit, in metres — a test lever
+    /// over `kProbeGridFitMax` (OgreGi.cpp, 64 m). Negative (the default) is the
+    /// engine's own; 0 disables the ceiling; anything else replaces it.
+    float     testProbeGridFitMax = -1.0f;
     /// Total light bounces, 1..4 (1 = a single indirect bounce).
     int       numBounces = 1;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
@@ -2440,16 +2431,9 @@ struct GiParams {
                    stepCells == o.stepCells;
         }
     };
-    /// THE PHOTON SWITCH. False (the default) is the single scene-fitted voxel
-    /// volume this engine has always built: one box around the content, and
-    /// nothing outside it bounces. True builds N camera-centred cascades
-    /// instead, chained through `VctLighting::addCascade`, so the bounce
-    /// follows the camera and what escapes the outermost cascade reads the
-    /// ambient (the Sky Light) rather than a wall of darkness.
-    ///
-    /// Only meaningful in `Vct` and `VctPccHybrid`. It changes NOTHING about
-    /// the picture when off — the arm it selects is chosen in `rebuildVct`.
-    bool      cascades = false;
+    /// (THE VOXELS ARE ALWAYS THE CAMERA-CENTRED CHAIN. The single scene-fitted
+    /// volume and its switch `cascades` are deleted — D4-PHOTON-TIERS, the
+    /// owner's law: no fixed GI volume, no "room" in any lighting definition.)
     /// How many cascades to build, 1..8. 0 means "the table below decides", and
     /// when the table is empty too, the engine's own tier table does.
     int       cascadeCount = 0;
@@ -2523,11 +2507,6 @@ struct GiParams {
     /// that the drag costs the voxels two re-voxelisations instead of one per
     /// frame. THE PICTURE AT REST IS IDENTICAL either way, which gi.drag_mover
     /// asserts by rendering it under both rules.
-    ///
-    /// CASCADES ONLY. The single-volume arm re-voxelises nothing during a drag
-    /// (its answer waits for the settle by construction), so there is nothing
-    /// there for this to save, and what that arm should do about the ghost it
-    /// keeps meanwhile is its own question.
     bool      dragMoverChannel = false;
 
     /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md). The diffuse
@@ -2613,8 +2592,7 @@ struct GiParams {
     /// for the tuning.
     bool operator==(const GiParams &o) const {
         return mode == o.mode && quality == o.quality &&
-               numBounces == o.numBounces && testAutoBoundsMax == o.testAutoBoundsMax &&
-               testVoxelResolution == o.testVoxelResolution &&
+               numBounces == o.numBounces && testProbeGridFitMax == o.testProbeGridFitMax &&
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
                probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
@@ -2627,8 +2605,9 @@ struct GiParams {
                cascadeVoxelLod == o.cascadeVoxelLod &&
                dragMoverChannel == o.dragMoverChannel &&
                ddgi == o.ddgi &&
-               testBoundsMin == o.testBoundsMin && testBoundsMax == o.testBoundsMax &&
-               cascades == o.cascades && cascadeCount == o.cascadeCount &&
+               testProbeRegionMin == o.testProbeRegionMin &&
+               testProbeRegionMax == o.testProbeRegionMax &&
+               cascadeCount == o.cascadeCount &&
                cascadeInstanceCap == o.cascadeInstanceCap &&
                cascadeSetEqual(o);
     }
@@ -2779,9 +2758,6 @@ struct GiQualityFacts {
     GiParams::GiCascadeDesc cascades[4];
     /// How many entries of `cascades` are in use.
     int   cascadeCount = 0;
-    /// The SINGLE scene-fitted volume's resolution per axis — the arm used when
-    /// the chain is off (`GiParams::cascades == false`).
-    unsigned voxelResolution = 64u;
     /// One reflection-probe cube face, in pixels, when the scene pins no size.
     unsigned probeFaceSize = 256u;
     /// What `GiToggle::Auto` resolves to for the two expensive probe options.
@@ -2895,14 +2871,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[0] = {  5.0f, 64, 0.0f };
         f.cascades[1] = { 20.0f, 64, 0.0f };
         f.cascadeCount = 2;
-        // THE SCENE-FITTED VOLUME IS 64 TOO (PHOTON-VOXEL-4, the lead's decision): at 32
-        // cells along the longest side a room-sized box has 0.56 m cells, and the field's
-        // wall-foot darkening lands outside its own derived bracket (gi.ddgi_ambient:
-        // 85.0 % against 73.2-83.9); at 64 it lands inside (83.7 % in 76.1-84.0). The
-        // measured cost of the dial, paired in one process (tests/gi/voxel_dial_measure):
-        // the rebuild 0.158 -> 0.220 ms GPU, the store 0.45 -> 3.6 MB, the settle's GI
-        // work 20.9 -> 46.3 ms GPU once, the steady frame +0.005 ms.
-        f.voxelResolution = 64u;
         f.probeFaceSize   = 128u;
         f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
         f.cardResidencyRadius = 15.0f;
@@ -2918,7 +2886,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[2] = { 15.0f,  64, 0.0f };
         f.cascades[3] = { 60.0f,  64, 0.0f };
         f.cascadeCount = 4;
-        f.voxelResolution = 128u;
         f.probeFaceSize   = 512u;
         // The two expensive probe options are ON at this tier and only here
         // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
@@ -2938,7 +2905,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[2] = { 15.0f, 64, 0.0f };
         f.cascades[3] = { 60.0f, 64, 0.0f };
         f.cascadeCount = 4;
-        f.voxelResolution = 64u;
         f.probeFaceSize   = 256u;
         f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.6 ms
         f.cardResidencyRadius = 30.0f;
@@ -3685,12 +3651,9 @@ struct GiStatus {
     bool   pccBound = false;
     /// Whether THIS scene's passes sample its VCT lighting.
     bool   vctBound = false;
-    /// The RESOLVED lit volume — what the voxelizer was actually given, after
-    /// the explicit-bounds check, the per-node exclude flag and the extent
-    /// outlier rejection (REFLECTIONS_ADOPTION_SPEC.md P1a). Equal corners mean
-    /// "no volume" (GI off, or nothing to light). This is the only way to see
-    /// what the auto-fit decided: the document's giBounds rows stay at 0,0,0
-    /// for every scene that never pinned them.
+    /// THE LIT VOLUME — the OUTERMOST cascade's box, i.e. where the voxels
+    /// reach around the camera. Equal corners mean "no volume" (GI off, or
+    /// nothing built yet).
     Vec3   boundsMin;
     Vec3   boundsMax;
     /// METRES PER VOXEL of the volume `boundsMin/Max` describe — and UNDER A
@@ -3699,11 +3662,7 @@ struct GiStatus {
     ///
     /// There is no single voxel size under a chain, so this scalar is the
     /// COARSEST one; `cascades[i].cell` is every one of them, and the innermost
-    /// is what the eye is usually looking at. In the single-volume arm it is
-    /// the largest axis divided by the tier's resolution
-    /// (LIGHTING_PIPELINE_AUDIT L4.4), and then it is the whole answer: the
-    /// shipped default project used to report 8.1 (a 1040 m volume at 128^3)
-    /// and reports 0.5 with the automatic ceiling in force. 0 when there is no
+    /// is what the eye is usually looking at. 0 when there is no
     /// volume. It is the number that says whether GI in a scene means anything
     /// at all — a kilometre-wide volume at 128^3 is computing a constant.
     float  voxelMetres = 0.0f;
@@ -3713,6 +3672,14 @@ struct GiStatus {
     /// but the hybrid.
     Vec3   probeRegionMin;
     Vec3   probeRegionMax;
+    /// THE PLACEMENT FIT the probe region was measured from (D4-PHOTON-TIERS): the
+    /// content's world box after the per-node probe-grid exclude flag, the outlier
+    /// trimming and the 64 m ceiling — a PLACEMENT HEURISTIC PENDING A9, never a
+    /// lighting volume. The region above is the scout's answer inside it. Equal
+    /// corners where no probe grid is placed (every tier whose reflections are
+    /// traced on this machine, or GI off).
+    Vec3   probeFitMin;
+    Vec3   probeFitMax;
     /// What the probe captures RESOLVED to (REFLECTIONS_ADOPTION_SPEC P3a/P3b),
     /// as opposed to what GiParams::probeHdr/probeShadows asked for: both are
     /// GiToggle::Auto by default, so the request alone never says what happened,
@@ -3863,16 +3830,13 @@ struct GiStatus {
     /// per side for its own borders; this is the volume it was given). Equal
     /// corners = no field.
     ///
-    /// In the single-volume arm this is the lit volume — the scene's fitted box
-    /// — and it never moves without a rebuild. Under a Photon cascade chain it
-    /// is CASCADE 0's box and it follows that cascade as the camera walks
+    /// It is CASCADE 0's box and it follows that cascade as the camera walks
     /// (PHOTON_SPEC E1), which is the only way to see, from outside, where the
     /// leak-free diffuse actually is.
     Vec3 ifdMin;
     Vec3 ifdMax;
     /// How many times the field has followed cascade 0 since the last build
-    /// (ifdScrolls + ifdReplacements, below): 0 in the single-volume arm and on a
-    /// still camera, one per cascade-0 step while walking. Reset by a build.
+    /// (ifdScrolls + ifdReplacements, below): 0 on a still camera, one per cascade-0 step while walking. Reset by a build.
     unsigned long long ifdFollows = 0;
     /// THE FIELD SCROLLS (PHOTON-WRITER-1): how many probes the LAST follow
     /// integrated in its step frame — the planes that entered the window, not
@@ -4086,7 +4050,7 @@ struct GiStatus {
     /// the wait is BOUNDED (30 deferrals) so a decode that never completes
     /// cannot park GI: after that the arm is built without them and this reads
     /// false again. The other half of `cascadesAwaitingCamera`'s question —
-    /// "the chain is empty, why?" — and true in the single-volume arm too.
+    /// "the chain is empty, why?".
     bool awaitingVoxelTextures = false;
     /// WHICH COLUMN OF THE TIER TABLE THIS CHAIN WAS BUILT FROM (V1-RIG item 4):
     /// true when the view driving GI is the HEADSET'S, so the chain is the VR
@@ -4105,8 +4069,7 @@ struct GiStatus {
     /// cascade rebuild injects one cascade once, over the radiance it held
     /// where it used to stand, so the chain owes an at-rest injection
     /// afterwards — paid on the first frame the rebuild queue is empty, once
-    /// per burst of rebuilds. Cumulative over the scene's life; 0 in the
-    /// single-volume arm, which has no chain to leave behind.
+    /// per burst of rebuilds. Cumulative over the scene's life.
     long long chainSettles = 0;
     /// THE ONE WRITER (PHOTON-WRITER-1). Every write to a voxel volume's light
     /// goes through one engine function, and a volume is injected AT MOST ONCE

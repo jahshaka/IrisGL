@@ -3535,15 +3535,15 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         }
     }
 
-    // "Do not let this object decide where GI happens" (P1a.2). ON CHANGE ONLY,
-    // for the same reason: setNodeGiBoundsExcluded invalidates the GI caches, so
-    // a per-frame push would re-voxelize the scene every frame.
+    // "Do not let this object decide where the probe grid is placed" (P1a.2).
+    // ON CHANGE ONLY, for the same reason: setNodeProbeGridExcluded invalidates
+    // the GI caches, so a per-frame push would flag a re-solve every frame.
     {
-        const int want = node->getGiBoundsExcluded() ? 1 : 0;
-        if (e.giBoundsExcluded != want) {
-            mTarget->setNodeGiBoundsExcluded(e.node, want != 0);
-            e.giBoundsExcluded = want;
-            notePush(node, "gi bounds");
+        const int want = node->getProbeGridExcluded() ? 1 : 0;
+        if (e.probeGridExcluded != want) {
+            mTarget->setNodeProbeGridExcluded(e.node, want != 0);
+            e.probeGridExcluded = want;
+            notePush(node, "probe grid excluded");
         }
     }
 
@@ -7152,11 +7152,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         case iris::GiQuality::EPIC:            gi.quality = GiQuality::Epic; break;
         case iris::GiQuality::MEDIUM: default: gi.quality = GiQuality::Medium; break;
         }
-        // NO BOUNDS TRAVEL ANY MORE (owner decision D8): GiParams::boundsMin ==
-        // boundsMax == 0 is the engine's "fit it yourself", and leaving the
-        // field at its default is how this mirror says so. `autoBoundsMax`
-        // likewise keeps the engine's own default ceiling. The document has no
-        // bounds fields to push.
+        // NO REGION TRAVELS (owner decision D8): the probe grid's placement
+        // region is the engine's own fit (GiParams::testProbeRegion* are suite
+        // levers); the voxels are the camera's cascade chain.
         gi.numBounces = mSource->giNumBounces;
         gi.pccProbesX = qBound(1, qRound(mSource->giPccGrid.x()), 8);
         gi.pccProbesY = qBound(1, qRound(mSource->giPccGrid.y()), 8);
@@ -7171,11 +7169,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeHdr = toggle(mSource->giProbeHdr);
         gi.probeShadows = toggle(mSource->giProbeShadows);
         gi.probeOverlap = mSource->giProbeOverlap;
-        // PHOTON cascades (SPECS/PHOTON_SPEC.md P0): the switch and, optionally,
-        // the table. A row with a non-positive half size or resolution is not a
-        // request the renderer can honour halfway, so the whole table is dropped
+        // PHOTON cascades (SPECS/PHOTON_SPEC.md P0): always the chain; optionally
+        // a pinned table. A row with a non-positive half size or resolution is not
+        // a request the renderer can honour halfway, so the whole table is dropped
         // and the tier's own decides — the same rule the engine states.
-        gi.cascades = mSource->giCascades > 0;
         gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
         gi.dragMoverChannel   = mSource->giDragMoverChannel > 0;
         // THE SURFACE CACHE's three rows, pushed as they are authored. `cards`
@@ -7291,34 +7288,14 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mGiLightPoseSignature = lightPoseSig;
             mTarget->noteLightsMoved();
         }
-        // ---- RE-FIT ON EXIT (LIGHTING_FIX fix 2) ---------------------------
-        //
-        // A light moving is not the only thing that invalidates a GI solve: an
-        // OBJECT leaving the lit volume does too, and it was the one nothing
-        // watched. Raise a cube above the auto-fitted volume and it kept the
-        // lighting it had at the old height for ever — until the user happened
-        // to nudge a light, at which point the volume re-fitted and everything
-        // "mysteriously" fixed itself. That workaround is the bug report.
-        //
-        // The engine answers the question as a SIGNATURE, not a flag, precisely
-        // so it can ride this machinery unchanged: it is 0 while everything is
-        // inside the volume, and while an object is outside it changes on every
-        // frame the object moves. Folded in beside the light signature, that
-        // gives the same two behaviours the debounce already guarantees for a
-        // dragged light — a continuous drag re-arms the window every frame and
-        // costs no rebuilds, and letting go costs exactly one.
-        //
-        // (Not folded in for Instant Radiosity: its signature is the ONE driving
-        // light by design, and IR's area of interest is re-derived from the same
-        // bounds on every re-trace anyway.)
         const bool vctLike = gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid;
         // The raw light term is kept so the post-refresh re-read below can
-        // recombine it with a FRESH escape term rather than re-hashing an
+        // recombine it with a FRESH geometry term rather than re-hashing an
         // already-combined value (which would never match the next frame's).
         const quint64 lightSigRaw = lightSig;
         // ---- THE MOVEMENT TERM (FIX WAVE B3) --------------------------------
         //
-        // Third term, same shape and the same debounce as the other two: a
+        // Second term, same shape and the same debounce as the light's: a
         // quantized hash of every GI item's world AABB. Before it, MOVING
         // geometry changed nothing at all — the panel's own Refresh tooltip said
         // so out loud ("moving objects does not do this automatically") — because
@@ -7332,13 +7309,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // Folded into the SAME signature rather than given its own gate, so that
         // moving a light and moving a box during one drag still cost one
         // re-solve between them rather than two.
-        const auto combine = [&](quint64 light, quint64 escape, quint64 geometry) {
+        const auto combine = [&](quint64 light, quint64 geometry) {
             if (!vctLike) return light;
-            Hasher h; h << light << escape << geometry; return h.h;
+            Hasher h; h << light << geometry; return h.h;
         };
         if (vctLike)
-            lightSig = combine(lightSigRaw, mTarget->giEscapeSignature(),
-                               mTarget->giGeometrySignature());
+            lightSig = combine(lightSigRaw, mTarget->giGeometrySignature());
         // The engine's half of the signature is read from DERIVED world AABBs,
         // and those are only correct once something has run updateSceneGraph —
         // which, on the very first sync, is the GI build itself. Reading it
@@ -7348,8 +7324,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // frames cost nothing at all"). So the push adopts the signature AFTER
         // it pushes, exactly as the two refresh branches below already do.
         const auto readEngineSignature = [&]() {
-            return combine(lightSigRaw, mTarget->giEscapeSignature(),
-                           mTarget->giGeometrySignature());
+            return combine(lightSigRaw, mTarget->giGeometrySignature());
         };
         // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), kept OUT of the
         // signature above on purpose: a material edit arms the same
@@ -7506,11 +7481,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 ++mGiStableFrames;
             }
 
-            // A re-solve RE-FITS the volume, so the escape term it may have been
-            // armed by is 0 again the moment it returns. Re-reading the
-            // signature after the rebuild and adopting it is what keeps "move a
-            // cube out of the volume" costing ONE re-solve instead of two (the
-            // second being the signature changing back).
+            // Re-reading the signature after the re-solve and adopting it is what
+            // keeps one gesture costing ONE re-solve (the re-solve itself brings
+            // the derived world boxes current).
             const auto adoptSignature = [&]() {
                 if (vctLike) mGiLightSignature = readEngineSignature();
                 mGiMaterialSignature = readMaterialSignature();

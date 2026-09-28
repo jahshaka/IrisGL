@@ -494,7 +494,7 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
         applyShownSubtree(n, inheritedShown(n), giChanged);
         // A REPARENT IS A VISIBILITY EDGE HERE TOO (DRAG-1): the node moved
         // under or out from under a hidden parent. Nothing died.
-        if (giChanged) invalidateGiCachesForVisibility(nullptr);
+        if (giChanged) invalidateGiCaches(nullptr);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1184,9 +1184,9 @@ void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentSh
             const bool subtree = n.node && n.node->numChildren() > 0;
             if (!subtree && n.item) {
                 const Ogre::Aabb box = n.item->getWorldAabb();
-                invalidateGiCachesForVisibility(&box);
+                invalidateGiCaches(&box);
             } else {
-                invalidateGiCachesForVisibility(nullptr);
+                invalidateGiCaches(nullptr);
             }
         }
     } JAH_CATCH(mError, );
@@ -1465,7 +1465,7 @@ bool OgreScene::removeLight(NodeId id) {
         // dirty path finds nothing marked, and it re-injects every cascade at
         // the full bounce count instead. Instant Radiosity's by-pointer caches
         // and the single arm's reuse rule are unaffected.
-        invalidateGiCaches(nullptr, false, true);
+        invalidateGiCaches(nullptr, false);
         // Its cached maps need nothing: the lamp leaves the cache's light list,
         // so the next frame releases its slot in every shadow-node instance.
         it->second.lightShadowKey = 0;
@@ -2014,8 +2014,7 @@ void OgreScene::updateSurfaceCache() {
     // bumps at the WRITE, and a dragged light re-marched the whole resident set
     // against voxels that had not moved, every frame): the chain's settles, each
     // cascade's rebuilds and lattice cell, the VctLighting objects themselves,
-    // the single volume's own landed-injection count (OgreGi.cpp), and the
-    // environment the escapes read (below).
+    // and the environment the escapes read (below).
     view.vct = mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
     // ...and THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's SH, the engine's
@@ -2028,7 +2027,6 @@ void OgreScene::updateSurfaceCache() {
             sig *= 1099511628211ull;
         };
         foldI((unsigned long long)mGiChainSettles);
-        foldI(mGiMonoInjections);
         // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
         // injection at all: noteEnvironmentChanged hands the new sky to every
         // VctLighting at once (applyVctEnvironment) and the pixel reads it the
