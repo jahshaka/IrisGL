@@ -347,15 +347,11 @@ cmake --install "$SRC/build" > /dev/null
 # manifest is the list of what this install IS; anything else under include/, lib/ and bin/
 # is an orphan. (Deleting include/ wholesale before installing would do it too, but would
 # touch every header's mtime and make every consumer recompile every Ogre TU.)
-if [ -f "$SRC/build/install_manifest.txt" ]; then
-    _orphans=0
-    while IFS= read -r -d '' _f; do
-        grep -qxF "$_f" "$SRC/build/install_manifest.txt" || { rm -f "$_f"; _orphans=$((_orphans + 1)); }
-    done < <(find "$PREFIX/include" "$PREFIX/lib" "$PREFIX/bin" \( -type f -o -type l \) -print0 2>/dev/null)
-    find "$PREFIX/include" "$PREFIX/lib" "$PREFIX/bin" -type d -empty -delete 2>/dev/null || true
-    [ "$_orphans" = "0" ] || echo "Pruned $_orphans orphaned file(s) from $PREFIX (not in this build's install manifest)."
-    unset _orphans _f
-fi
+# The prefix as CMake spells it in the manifest (from the cache; a trailing slash in
+# OGRE_PREFIX would otherwise make every path read as an orphan - prune-ogre-install.sh).
+_ip="$(sed -n 's/^CMAKE_INSTALL_PREFIX:[A-Z]*=//p' "$SRC/build/CMakeCache.txt")"
+"$REPO_ROOT/scripts/prune-ogre-install.sh" "${_ip:-$PREFIX}" "$SRC/build/install_manifest.txt"
+unset _ip
 
 # MULTITHREADED SHADER COMPILATION, on the INSTALL side (THREADING_ADOPTION_SPEC
 # P1, gate G1-a). Same class of guard as the three above, and it needs to be at
