@@ -818,6 +818,12 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     const bool metalRoughBlock = facts.valid ? facts.hasMetallicRoughness
                                              : (hasMetallic || hasRoughness);
     mat.unlit = facts.valid ? facts.unlit : assimpUnlit;
+    // TWO-SIDED (CULL-MODE-1): glTF's doubleSided arrives as AI_MATKEY_TWOSIDED
+    // (glTF2Importer.cpp ImportMaterial), as does every other format's flag.
+    {
+        int twoSided = 0;
+        mat.twoSided = aiMat->Get(AI_MATKEY_TWOSIDED, twoSided) == AI_SUCCESS && twoSided != 0;
+    }
 
     const QString baseTexName = getAiMaterialTexture(aiMat, aiTextureType_BASE_COLOR);
     resolveTex(baseTexName, mat.baseColorTexture);

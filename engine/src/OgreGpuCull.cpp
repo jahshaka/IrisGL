@@ -240,7 +240,7 @@ void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
 
 /// THE COST OF ONE JOB, as the queue sees it. There are no per-dispatch GPU
 /// timestamps available outside a compositor pass at this pin (patch 0027's
-/// samples are keyed to passes and come back two frames late), so the number is
+/// samples are keyed to passes and come back once the GPU finishes the frame), so the number is
 /// a SLOPE and says so: the job is dispatched `iterations` more times over the
 /// buffers it has already filled, the command buffer is flushed, and the wall
 /// clock of that is divided by the count after an empty flush's own cost has

@@ -344,6 +344,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
                 MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
+            if (meshMat.twoSided) meshNode->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1
         }
 
         meshNode->rootBone = rootBone;
@@ -376,6 +377,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
                 MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
+            if (meshMat.twoSided) meshNode->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1
         }
     }
 
@@ -492,6 +494,7 @@ MeshNode::loadAsSceneFragment(QString filePath,
             MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
         auto mat = createMaterialFunc(meshObj, meshMat);
         if (!!mat) node->setMaterial(mat);
+        if (meshMat.twoSided) node->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1
 
         _applyMeshNodeTransform(scene, node);
 
@@ -585,6 +588,7 @@ MeshNode::loadAsSceneFragment(
             MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
 		auto mat = createMaterialFunc(meshObj, meshMat);
 		if (!!mat) node->setMaterial(mat);
+		if (meshMat.twoSided) node->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1
 
 		_applyMeshNodeTransform(scene, node);
 

@@ -1753,6 +1753,16 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     releaseBoneTag(id, n, 0);
     releaseBoneRiders(id, n);
     unindexItemNode(n);   // always: the node is going away, and its pointer with it
+    // THE MESH TABLE'S REFERENCE goes with the Item, exactly as in detachItem
+    // (REMOVECHILD-LEAK-1): this path destroyed the Item and kept its reference,
+    // so a node REMOVED from the document (removeChild -> the mirror's eviction
+    // -> removeNode) left the GPU scene's mesh entry, its DAG and its MeshPtr
+    // alive for the life of the scene — measured: 625 items of one DAG mesh
+    // removed, no "mesh released" (atom.coverage_trace's W3 arm).
+    if (n.item && n.gpuMeshSlot != 0xFFFFFFFFu) {
+        releaseGpuMesh(n.item->getMesh().get());
+        n.gpuMeshSlot = 0xFFFFFFFFu;
+    }
     if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.
