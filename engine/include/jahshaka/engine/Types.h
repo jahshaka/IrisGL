@@ -2777,17 +2777,21 @@ struct GiQualityFacts {
     /// what was MEASURED on this pin, and the measurement is not the one phase
     /// 0 took.
     ///
-    /// THE NUMBER IT WAS SIZED ON (PHOTON-CARDS-1, SC-1b-ITEM8): 0.18-0.20 ms a
-    /// card, CPU, with the card shadow node's PSSM fit firing (0.295 at the
-    /// ATOM-SHADOWS-1 tip). THE NUMBER TODAY (ATOM-S3-CARDCAP, `sc1b_measure
-    /// showroom-sun`, a batch of eight): **0.05-0.06 ms a card** CPU — the shadow
-    /// node is deleted, the still world's sun term traced (~0.001 ms of GPU a card
-    /// in a batch of eight, 0.004 alone). The rows below still hold the cards
-    /// they were given — two, three and five a frame — which now cost about a
-    /// third of the milliseconds they were sized on (re-sizing them is the
-    /// lead's call, not this row's). One workspace update carries at most eight
-    /// (`kCaptureBatch`).
-    unsigned cardBudgetTexels = 49152u;   // 3 cards a frame ~ 0.2 ms
+    /// THE NUMBER THE ROWS ARE SIZED ON (CARD-BUDGET-1, D8): **0.057-0.061 ms a
+    /// card** CPU (ATOM-S3-CARDCAP, `sc1b_measure showroom-sun`, a batch of eight:
+    /// the card shadow node deleted, the still world's sun term traced at ~0.001
+    /// ms of GPU a card). The rows were sized on 0.18-0.20 ms (PHOTON-CARDS-1:
+    /// Low 2 cards ~0.4 ms, Medium 3 ~0.6, High 5 ~1.0), so the same milliseconds
+    /// now buy about five times the cards — CAPPED BY THE BATCH: one workspace
+    /// update carries at most eight cards (`kCaptureBatch`, Ogre's uint8
+    /// execution mask), and the drain captures one batch a frame. So Low buys 6
+    /// (~0.37 ms), and Medium and High/Epic the batch's 8 — MEASURED 0.50 ms a
+    /// capturing frame (`sc1b_measure showroom-sun`, the paired arm, two passes in
+    /// one process: 0.506 / 0.491, against 0.326 / 0.322 for the old five and the
+    /// 1.0 ms that five were sized on; 0.062 ms a card in the batch, 0.126 alone),
+    /// under every old sizing; a frame that wants more waits for the next. Cards
+    /// run only where the rays run (High and Epic in the World table).
+    unsigned cardBudgetTexels = 131072u;  // the batch: 8 cards a frame ~ 0.50 ms
     /// THE RESIDENCY RADIUS, metres. Beyond it an instance holds no pages. It
     /// is a tier row because the atlas is a fixed 2k at this phase: 256 pages
     /// of 128 texels is about forty six-card sets at full size, so the radius
@@ -2935,7 +2939,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[1] = { 20.0f, 64, 0.0f };
         f.cascadeCount = 2;
         f.probeFaceSize   = 128u;
-        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
+        f.cardBudgetTexels = 98304u;    // 6 cards a frame ~ 0.37 ms (sized 0.4)
         f.cardResidencyRadius = 15.0f;
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
@@ -2955,7 +2959,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
         f.probeHdrDefault     = true;
         f.probeShadowsDefault = true;
-        f.cardBudgetTexels = 81920u;    // 5 cards a frame ~ 1.0 ms on the measured cost
+        f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 1.0)
         f.cardResidencyRadius = 60.0f;
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
         f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
@@ -2972,7 +2976,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[3] = { 60.0f, 64, 0.0f };
         f.cascadeCount = 4;
         f.probeFaceSize   = 256u;
-        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.2 ms
+        f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 0.6)
         f.cardResidencyRadius = 30.0f;
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
@@ -3016,7 +3020,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // card of a frame through unconditionally (a budget that could never
         // buy anything would be a queue that never moves) — so a smaller number
         // would not be a smaller budget, it would be a budget the code has to
-        // ignore. Low's VR row is the one that reaches it.
+        // ignore. No shipped row reaches it since CARD-BUDGET-1 (Low's VR row
+        // is three cards); a host's override can.
         f.cardBudgetTexels = std::max(f.cardBudgetTexels, 16384u);
         // ...and the relight budget with it, on the same floor for the same reason.
         f.cardLightTexels = std::max(f.cardLightTexels / 2u, 16384u);
