@@ -1329,9 +1329,6 @@ struct PbrParams {
     float  alpha       = 1.0f;   ///< Blend mode: 1 opaque .. 0 invisible
     float  alphaCutoff = 0.5f;   ///< Cutout mode threshold
     bool   twoSided    = false;  ///< draw and light both faces (no back-face culling)
-    /// With `twoSided`: cull the FRONT faces instead of none — only the back faces
-    /// draw, lit as seen (CULL-MODE-1: a mesh node's `faceCullingMode` Front).
-    bool   cullFront   = false;
     float  normalMapWeight = 1.0f;   ///< strength of the bound normal map
     /// THE BASE-MAP UV TRANSFORM, applied to every bound base map as
     ///     uv' = R(uvRotation) * ((uv * uvScale + uvOffset) - 0.5) + 0.5
@@ -1524,7 +1521,7 @@ struct PbrParams {
     bool operator==(const PbrParams &o) const {
         return albedo == o.albedo && metalness == o.metalness && roughness == o.roughness &&
                emissive == o.emissive && alphaMode == o.alphaMode && alpha == o.alpha &&
-               alphaCutoff == o.alphaCutoff && twoSided == o.twoSided && cullFront == o.cullFront &&
+               alphaCutoff == o.alphaCutoff && twoSided == o.twoSided &&
                normalMapWeight == o.normalMapWeight &&
                // ELEMENT-WISE, deliberately: `uvScale == o.uvScale` on arrays
                // compares the two ADDRESSES, which are never equal, and the
