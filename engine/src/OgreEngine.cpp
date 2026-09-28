@@ -2624,8 +2624,6 @@ OgreEngine::~OgreEngine() {
     // detaches every listener while the workspaces live, frees the query pools
     // while the device lives, and clears the global.
     try { setFrameMonitor(MonitorLevel::Off); } catch (...) {}
-    if (monitor::gMonitor && (!mMonitor || monitor::gMonitor == mMonitor.get()))
-        monitor::gMonitor = nullptr;
     // THE VR SESSION GOES FIRST, and it has to: it owns a View (a workspace, a
     // camera, an RTT), a second workspace on somebody else's target and a set
     // of XR swapchains that name VkImages the runtime owns. Every one of those

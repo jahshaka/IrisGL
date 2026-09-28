@@ -1082,8 +1082,9 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
         st.gpuReason.clear();
 }
 
-// The frame's GPU bookkeeping: rotate the query pools, read back what the frame
-// two frames ago measured, and reset the pool about to be written. ONE call,
+// The frame's GPU bookkeeping: collect every query pool whose results are back
+// (the render system answers each sample once — a time, or negative for "never"),
+// and reset a free pool for this frame. ONE call,
 // at the top of the frame and outside every encoder — which is the only place
 // vkCmdResetQueryPool is legal (see ogre-patch 0027).
 void OgreEngine::gpuFrameBegin() {
