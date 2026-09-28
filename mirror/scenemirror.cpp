@@ -498,6 +498,8 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mMeshes.clear();
     for (MaterialId m : mMaterials) mTarget->destroyMaterial(m);
     mMaterials.clear();
+    for (MaterialId m : mCullVariants) mTarget->destroyMaterial(m);
+    mCullVariants.clear();
     for (TextureId t : mTextures) mTarget->destroyTexture(t);
     mTextures.clear();
     mLiveGenerations.clear();   // a key is here only while its engine texture is (code review 2026-09-10)
@@ -3298,17 +3300,25 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         // material generation, which the mirror answers with a full re-solve;
         // a material completed before it is worn bumps nothing, and the swap's
         // own box-scoped rebuild is what the volume pays.
-        if (mesh && e.hasMesh && e.meshPtr == mesh && !rigStale && e.materialPtr != material) {
-            pendingSwap = materialFor(material);
+        // THE NODE'S FACE CULL picks the material's VARIANT (CULL-MODE-1): a cull
+        // change is a material change for the Item (one datablock per cull), so it
+        // swaps in place exactly like a new material pointer.
+        const int cullVar = mesh ? cullVariantFor(meshNode, material ? materialSyncFor(material).pbr
+                                                                     : defaultMaterialSync().pbr)
+                                 : int(kCullOwn);
+        if (mesh && e.hasMesh && e.meshPtr == mesh && !rigStale &&
+            (e.materialPtr != material || e.cullVariant != cullVar)) {
+            pendingSwap = materialFor(material, cullVar);
             if (pendingSwap) {
                 noteMaterialUser(node, e.materialPtr, material);
-                e.material = pendingSwap; e.materialPtr = material;
+                e.material = pendingSwap; e.materialPtr = material; e.cullVariant = cullVar;
                 mReclaimPending = true;      // the old material may now be unreferenced
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // the family is the same; the model may not be
             }
         }
-        if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh || rigStale)) {
+        if (mesh && (!e.hasMesh || e.materialPtr != material || e.cullVariant != cullVar || e.meshPtr != mesh ||
+                     rigStale)) {
             // ONE memo probe for the whole branch — materialFor reads the same
             // entry, and the reference stays valid because nothing between here
             // and syncTextures inserts another material.
@@ -3321,7 +3331,7 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // MATERIAL-SYNC-1). The default IS the physics of an unassigned
             // surface, not a fallback picture.
             const MaterialSync &attachMs = material ? materialSyncFor(material) : defaultMaterialSync();
-            MaterialId mat = materialFor(material);
+            MaterialId mat = materialFor(material, cullVar);
             bool attached = false;
             e.gpuSkinned = false;
             e.boneCount = 0;
@@ -3385,7 +3395,8 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
                 notePush(node, "mesh attach");
                 ++mMeshAttaches;
                 if (e.materialPtr != material) noteMaterialUser(node, e.materialPtr, material);
-                e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
+                e.hasMesh = true; e.material = mat; e.materialPtr = material; e.cullVariant = cullVar;
+                e.mesh = m; e.meshPtr = mesh;
                 mReclaimPending = true;   // the old mesh/material may now be unreferenced
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // a NEW engine material may be in either family
@@ -3464,13 +3475,29 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
                 // fingerprint the memo computed anyway, not a second full
                 // PbrParams compare through a second hash.
                 MaterialSync &push = const_cast<MaterialSync &>(ms);
-                if (!push.pushed || push.pushedTo != e.material
-                    || push.pushedFingerprint != ms.fingerprint) {
-                    if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
-                        notePush(node, "pbr params");
-                        push.pushedTo = e.material;
-                        push.pushedFingerprint = ms.fingerprint;
-                        push.pushed = true;
+                if (e.cullVariant == kCullOwn) {
+                    if (!push.pushed || push.pushedTo != e.material
+                        || push.pushedFingerprint != ms.fingerprint) {
+                        if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
+                            notePush(node, "pbr params");
+                            push.pushedTo = e.material;
+                            push.pushedFingerprint = ms.fingerprint;
+                            push.pushed = true;
+                        }
+                    }
+                } else {
+                    // A CULL VARIANT (CULL-MODE-1): the same params, the node's cull,
+                    // behind the variant's own guard.
+                    MaterialSync::VariantPush &vp = push.variantPush[e.cullVariant & 3];
+                    if (!vp.pushed || vp.to != e.material || vp.fingerprint != ms.fingerprint) {
+                        PbrParams varied = ms.pbr;
+                        applyCullVariant(varied, e.cullVariant);
+                        if (mTarget->setPbrMaterial(e.material, varied)) {
+                            notePush(node, "pbr params (cull variant)");
+                            vp.to = e.material;
+                            vp.fingerprint = ms.fingerprint;
+                            vp.pushed = true;
+                        }
                     }
                 }
                 noteRefractive(e, ms.pbr.alphaMode == PbrAlphaMode::Refractive,
@@ -4062,6 +4089,13 @@ void SceneMirror::reclaimUnused()
     // a still frame (which runs no walk, so stamps nothing) would have thrown
     // the whole memo away once a second. It is dropped WITH the material here
     // instead, which is the only moment a key can go stale.
+    // The CULL VARIANTS (CULL-MODE-1) go the same way: a variant no entry wears
+    // is destroyed, and its key with it.
+    for (auto it = mCullVariants.begin(); it != mCullVariants.end();) {
+        if (usedMaterials.contains(it.value())) { ++it; continue; }
+        mMaterialItemSerial.remove(it.value());
+        mTarget->destroyMaterial(it.value()); it = mCullVariants.erase(it);
+    }
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
         if (usedMaterials.contains(it.value())) { ++it; continue; }
         // The two per-material records go WITH the material (lead review F7).
@@ -4569,6 +4603,49 @@ const SceneMirror::MaterialSync &SceneMirror::defaultMaterialSync()
         return d;
     }();
     return kDefault;
+}
+
+/// Which cull variant a node's material wears (CULL-MODE-1): the node's
+/// faceCullingMode where it names one, the material's own where it says
+/// DefinedInMaterial — and kCullOwn whenever the two already agree, so a node
+/// whose mode restates its material's shares the material itself.
+int SceneMirror::cullVariantFor(const iris::MeshNode *node, const PbrParams &own)
+{
+    if (!node) return kCullOwn;
+    switch (node->getFaceCullingMode()) {
+    case iris::FaceCullingMode::None:  return own.twoSided && !own.cullFront ? int(kCullOwn) : int(kCullNone);
+    case iris::FaceCullingMode::Back:  return !own.twoSided ? int(kCullOwn) : int(kCullBack);
+    case iris::FaceCullingMode::Front: return own.twoSided && own.cullFront ? int(kCullOwn) : int(kCullFront);
+    case iris::FaceCullingMode::DefinedInMaterial: break;
+    }
+    return kCullOwn;
+}
+
+void SceneMirror::applyCullVariant(PbrParams &p, int variant)
+{
+    switch (variant) {
+    case kCullNone:  p.twoSided = true;  p.cullFront = false; break;
+    case kCullBack:  p.twoSided = false; p.cullFront = false; break;
+    case kCullFront: p.twoSided = true;  p.cullFront = true;  break;
+    default: break;
+    }
+}
+
+/// The engine material a node wears: the document material's own, or its cull
+/// VARIANT (a second engine material with the node's cull; cached by (material,
+/// cull), swept by reclaimUnused like the material itself).
+MaterialId SceneMirror::materialFor(iris::Material *material, int cullVariant)
+{
+    if (cullVariant == kCullOwn) return materialFor(material);
+    const QPair<iris::Material *, int> key(material, cullVariant);
+    const auto hit = mCullVariants.constFind(key);
+    if (hit != mCullVariants.constEnd()) return hit.value();
+    PbrParams p;
+    if (!material || !toPbrParams(material, p)) p = defaultMaterialSync().pbr;
+    applyCullVariant(p, cullVariant);
+    const MaterialId id = mTarget->createPbrMaterial(p);
+    if (id) mCullVariants.insert(key, id);
+    return id;
 }
 
 const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *material)

@@ -80,6 +80,10 @@ struct MeshMaterialData
     /// PbrMaterial shadingModel 1 (the engine's Unlit family) — see
     /// BuiltinMaterials::fromMeshData for what carries the colour there.
     bool unlit = false;
+    /// glTF `doubleSided` (and every other format's two-sided flag), as assimp's
+    /// AI_MATKEY_TWOSIDED (CULL-MODE-1): the import writes it onto the MeshNode
+    /// as faceCullingMode None — the node's cull is what the mirror pushes.
+    bool twoSided = false;
     QString baseColorTexture;
     QString metallicTexture;    // split from the packed MR map (blue channel)
     QString roughnessTexture;   // split from the packed MR map (green channel)

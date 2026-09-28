@@ -197,7 +197,10 @@ namespace
 // per-facet walk (seven points a facet) joins the removed-vertex walk; the groups
 // sample 8 points per simplified triangle and 4 per lost facet. Every stored group
 // error can move, so the version is bumped (BAKEKEY-1).
-constexpr int kFormatVersion = 15;
+// v16 (2026-09-28, CULL-MODE-1): a baked material carries its source's TWO-SIDED
+// flag (glTF doubleSided -> AI_MATKEY_TWOSIDED -> MeshMaterialData::twoSided), and
+// the fragment writes it onto the MeshNode as faceCullingMode None.
+constexpr int kFormatVersion = 16;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -268,6 +271,7 @@ void writeMaterial(QDataStream &s, const MeshMaterialData &m)
     writeColor(s, m.baseColorFactor);
     s << float(m.metallicFactor) << float(m.roughnessFactor);
     s << m.baseColorTexture << m.metallicTexture << m.roughnessTexture << m.emissiveTexture;
+    s << qint32(m.twoSided);
 }
 
 MeshMaterialData readMaterial(QDataStream &s)
@@ -290,6 +294,9 @@ MeshMaterialData readMaterial(QDataStream &s)
     m.baseColorFactor = readColor(s);
     s >> m.metallicFactor >> m.roughnessFactor;
     s >> m.baseColorTexture >> m.metallicTexture >> m.roughnessTexture >> m.emissiveTexture;
+    qint32 twoSided = 0;
+    s >> twoSided;
+    m.twoSided = twoSided != 0;
     return m;
 }
 
@@ -5199,6 +5206,8 @@ SceneNodePtr buildFragmentNode(
             MeshMaterialData data = model.materials[n.materialIndex];
             auto mat = createMaterialFunc(mesh, data);
             if (!!mat) meshNode->setMaterial(mat);
+            // A TWO-SIDED source material draws both faces (CULL-MODE-1).
+            if (data.twoSided) meshNode->setFaceCullingMode(FaceCullingMode::None);
         }
     };
 
@@ -5269,6 +5278,7 @@ SceneNodePtr MeshBake::buildFragment(
             MeshMaterialData data = model.materials[model.root.materialIndex];
             auto mat = createMaterialFunc(mesh, data);
             if (!!mat) node->setMaterial(mat);
+            if (data.twoSided) node->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1
         }
         node->setLocalPos(model.root.pos);
         node->setLocalScale(model.root.scale);

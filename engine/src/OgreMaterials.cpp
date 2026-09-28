@@ -63,6 +63,15 @@ void OgreScene::setRefractionsActive(bool active) {
 // An unknown name is Default, NOT an error: a document written by a newer build
 // must still open, and a material silently falling back to the physically
 // accurate BRDF is the safe direction.
+/// THE FACE CULL a material's params ask for (CULL-MODE-1): one-sided culls the back
+/// faces (Ogre's CULL_CLOCKWISE), two-sided culls nothing, and two-sided with
+/// `cullFront` culls the FRONT faces (only the back faces draw — a mesh node's
+/// faceCullingMode Front; two-sided lighting flips their normals).
+static Ogre::CullingMode cullModeOf(const PbrParams &p) {
+    if (!p.twoSided) return Ogre::CULL_CLOCKWISE;
+    return p.cullFront ? Ogre::CULL_ANTICLOCKWISE : Ogre::CULL_NONE;
+}
+
 static Ogre::PbsBrdf::PbsBrdf brdfFromName(const std::string &name, bool *known = nullptr) {
     struct Row { const char *name = nullptr;
                  Ogre::PbsBrdf::PbsBrdf value = Ogre::PbsBrdf::Default; };
@@ -208,7 +217,7 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     if (db->getTwoSidedLighting() != p.twoSided) db->setTwoSidedLighting(p.twoSided, false);
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode want = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
+        const Ogre::CullingMode want = cullModeOf(p);
         if (macro.mCullMode != want) { macro.mCullMode = want; db->setMacroblock(macro); }
     }
     // NOTE HlmsPbs has NO ambient-occlusion slot and no roughness remap:
@@ -451,7 +460,7 @@ void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p) {
     }
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode wantCull = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
+        const Ogre::CullingMode wantCull = cullModeOf(p);
         // Anything that blends must not write depth — it cannot occlude what it
         // is blending over. Modulate blends too even though it ignores alpha.
         const bool wantDepthWrite = !blended && p.alphaMode != PbrAlphaMode::Modulate;
@@ -509,7 +518,7 @@ void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p
     }
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode wantCull = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
+        const Ogre::CullingMode wantCull = cullModeOf(p);
         if (macro.mCullMode != wantCull || macro.mDepthWrite || !macro.mDepthCheck) {
             macro.mCullMode = wantCull;
             macro.mDepthCheck = true;
@@ -638,7 +647,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                  o.uvRotation != p.uvRotation || o.alpha != p.alpha || samplersMoved);
             if (it->second.paramsPushed &&
                 (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff ||
-                 o.twoSided != p.twoSided || cutoutInputs))
+                 o.twoSided != p.twoSided || o.cullFront != p.cullFront || cutoutInputs))
                 noteShadowShapeChanged(id);
         }
         it->second.params = p;

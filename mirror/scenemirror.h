@@ -716,6 +716,10 @@ private:
         quint64 decalSignature = 0;                  // image guid+path+kind set; re-bind on change
         jahshaka::engine::MaterialId material = 0;   // per document material instance
         iris::Material *materialPtr = nullptr;
+        /// THE NODE'S FACE CULL (CULL-MODE-1): which variant of the material
+        /// `material` is — kCullOwn (the material's own), or the node's
+        /// faceCullingMode overriding it (kCullNone / kCullBack / kCullFront).
+        int cullVariant = 0;
         jahshaka::engine::MeshId mesh = 0;           // shared engine mesh this entry uses
         iris::Mesh *meshPtr = nullptr;
         /// The PBR state last pushed for `material`, and whether anything was.
@@ -1170,6 +1174,17 @@ private:
     bool buildEquirectCubeFaces(const QImage &equirect, jahshaka::engine::TextureId ids[6]);
     jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh, const QString &rigId = QString());
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
+    /// THE NODE'S CULL AS A MATERIAL VARIANT (CULL-MODE-1). A MeshNode's
+    /// `faceCullingMode` overrides its material's own culling (DefinedInMaterial
+    /// keeps it); the engine culls per MATERIAL (a datablock's macroblock), so a
+    /// node that overrides wears a VARIANT: the same document material's params
+    /// with the cull replaced, one engine material per (material, cull) pair,
+    /// kept in step by the per-frame push like the material itself.
+    enum CullVariant { kCullOwn = 0, kCullNone = 1, kCullBack = 2, kCullFront = 3 };
+    static int cullVariantFor(const iris::MeshNode *node, const jahshaka::engine::PbrParams &own);
+    static void applyCullVariant(jahshaka::engine::PbrParams &p, int variant);
+    jahshaka::engine::MaterialId materialFor(iris::Material *material, int cullVariant);
+    QHash<QPair<iris::Material *, int>, jahshaka::engine::MaterialId> mCullVariants;
     struct MaterialSync;
     void syncTextures(Entry &e, const MaterialSync &ms);
     /// The sync of a mesh node with NO material: the default surface's
@@ -1363,6 +1378,13 @@ private:
         jahshaka::engine::MaterialId  pushedTo = 0;
         quint64                       pushedFingerprint = 0;
         bool                          pushed = false;
+        /// ...and the same guard for each CULL VARIANT (CULL-MODE-1): a variant
+        /// is its own engine material, so it keeps its own last push.
+        struct VariantPush {
+            jahshaka::engine::MaterialId to = 0;
+            quint64 fingerprint = 0;
+            bool pushed = false;
+        } variantPush[4];
     };
     QHash<iris::Material *, MaterialSync> mMaterialSync;
     /// The PBR state last PUSHED to each engine material, and the guard that
