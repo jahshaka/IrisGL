@@ -1974,9 +1974,12 @@ void OgreScene::destroySky() {
 //     the environment capture's range (queue 0, visibility 0x1), so the ambient
 //     SH, the reflection cube and every Photon estimator that reads the one
 //     environment see the sheet with no further work (PHOTON B3). Premultiplied
-//     over the sky; lit by the sun (two-stream transmission plus a two-lobe
-//     single scatter, self-shadowed through the field towards the sun) and by
-//     the sky's own mean radiance (JahCloudLayer_ps.glsl says why each).
+//     over the sky; lit by the sun (the similarity-scaled two-stream
+//     transmission, its forward peak drawn in a lobe around the sun whose flux
+//     is exactly the peak's, self-shadowed through the field towards the sun)
+//     and by the sky's own mean radiance — ENERGY-CONSERVING: the sheet sends
+//     down at most what the beam loses crossing it (JahCloudLayer_ps.glsl says
+//     why each term, CLOUDS-2D-3).
 //   * THE DISC — the sun disc is drawn at queue 5, after the layer (it must stay
 //     out of the capture), so while a layer exists it wears a clouded variant
 //     of its material: the same disc times the sheet's transmittance along the
@@ -2006,6 +2009,7 @@ constexpr Ogre::uint32 kCloudNoiseSize = 256u;
 constexpr float    kCloudTauFull      = 32.0f;      // a full column's optical depth at density 1 (a thick stratocumulus deck; its base transmits ~22 % diffusely)
 constexpr float    kCloudSlabMetres   = 1000.0f;    // the sheet's thickness the self-shadow crosses
 constexpr float    kCloudFadeMetres   = 60000.0f;   // the distance the far sheet fades over
+constexpr float    kCloudForwardG     = 0.85f;      // the sheet's asymmetry: JahCloudLayer_ps.glsl's kG, the same number
 // THE SCROLL'S RE-CAPTURE PERIOD, SET FROM ITS MEASURED DOWNSTREAM COST
 // (spikes/clouds-2d-1/cadence/, 2026-09-23: Debug, Xvfb, one process, three
 // interleaved still/scroll pairs of 240 frames at a forced period of 10, the
@@ -2131,6 +2135,34 @@ const std::vector<std::vector<Ogre::uint8>> &cloudNoiseMips() {
         return out;
     }();
     return mips;
+}
+
+/// THE FORWARD LOBE'S FLUX THROUGH THE SHEET'S BASE (CLOUDS-2D-3): the
+/// Henyey-Greenstein lobe of asymmetry `g` around the direction TOWARDS the sun,
+/// integrated over the sky below the sheet (every view direction with y > 0)
+/// against the base's cosine. The layer divides its forward peak by this, so the
+/// peak's radiance, summed over the sky it is seen in, carries exactly the
+/// peak's share of the beam (JahCloudLayer_ps.glsl, T_forward) — no more. One
+/// sun direction per call, 64 x 256 midpoint cells (the lobe of g = 0.85 is
+/// ~0.15 rad wide; a cell is 0.025 rad). Run on a sun or layer change, never per
+/// frame.
+float cloudForwardLobeFlux(const Ogre::Vector3 &toSun, float g) {
+    if (toSun.y <= 0.0f) return 0.0f;
+    const int kTheta = 64, kPhi = 256;
+    const double dTheta = 0.5 * M_PI / kTheta, dPhi = 2.0 * M_PI / kPhi;
+    const double g2 = double(g) * g;
+    double sum = 0.0;
+    for (int i = 0; i < kTheta; ++i) {
+        const double th = (i + 0.5) * dTheta;
+        const double st = std::sin(th), ct = std::cos(th);
+        for (int j = 0; j < kPhi; ++j) {
+            const double ph = (j + 0.5) * dPhi;
+            const double c = st * std::cos(ph) * toSun.x + ct * toSun.y + st * std::sin(ph) * toSun.z;
+            const double den = std::max(1.0 + g2 - 2.0 * g * c, 1e-4);
+            sum += (1.0 - g2) / (4.0 * M_PI * den * std::sqrt(den)) * ct * st;
+        }
+    }
+    return float(sum * dTheta * dPhi);
 }
 
 /// A per-scene clone of one of our materials (the sun disc's reason: its
@@ -2269,6 +2301,10 @@ void OgreScene::applyCloudLayer(bool fieldChanged) {
         ps->setNamedConstant("cloudSun", Ogre::Vector4(toSun.x, toSun.y, toSun.z, c.hasSun ? 1.0f : 0.0f));
         ps->setNamedConstant("cloudSunE", Ogre::Vector4(c.sunIrradiance.r, c.sunIrradiance.g,
                                                         c.sunIrradiance.b, kCloudSlabMetres));
+        // The forward lobe's normaliser for THIS sun (the shader's kG).
+        const float lobeFlux = c.hasSun ? cloudForwardLobeFlux(toSun, kCloudForwardG) : 0.0f;
+        ps->setNamedConstant("cloudPhase",
+                             Ogre::Vector4(lobeFlux > 1e-6f ? 1.0f / lobeFlux : 0.0f, 0.0f, 0.0f, 0.0f));
         mCloudStatus.drawn = true;
         mCloudStatus.reason.clear();
         if (!mCloudClearValid) mCloudClearPending = true;
@@ -2405,10 +2441,10 @@ void OgreScene::updateCloudLayer() {
     } JAH_CATCH(mError, );
 }
 
-// THE SKY LIGHT ON THE SHEET: the CLEAR sky's mean radiance (SH band 0 in this
-// basis IS the mean over the sphere — ShAccum's k0), from a capture with the
-// sheet hidden (captureCloudClearSky's header says why never the environment
-// capture the sheet is itself in).
+// THE SKY LIGHT ON THE SHEET: the CLEAR sky's irradiance on the sheet's top
+// over pi (readCloudClearTicket: the SH evaluated for an up-facing normal), from
+// a capture with the sheet hidden (captureCloudClearSky's header says why never
+// the environment capture the sheet is itself in).
 void OgreScene::pushCloudAmbient() {
     if (!mCloudMaterial) return;
     JAH_TRY {
@@ -2475,7 +2511,14 @@ void OgreScene::readCloudClearTicket(bool force) {
         float sh[27];
         integrateSkyShFromBox(box, sh);
         mCloudClearTicket->unmap();
-        for (int c = 0; c < 3; ++c) mCloudClearMean[c] = sh[c];
+        // THE LIGHT ON THE SHEET'S TOP: the clear sky's irradiance on an
+        // UP-facing plate over pi (the SH evaluated for +Y: basis 1, y, 3z^2-1,
+        // x^2-y^2 at (0, 1, 0) is 1, 1, -1, -1) — the sky ABOVE the sheet, cosine
+        // weighted. Band 0 alone is the mean over the whole SPHERE, horizon glow
+        // and below-horizon half included, and lit a thin deck with up to 2.6x
+        // the sky light that reaches a plate (CLOUDS-2D-3, cloud_2d.energy E1).
+        for (int c = 0; c < 3; ++c)
+            mCloudClearMean[c] = sh[0 * 3 + c] + sh[1 * 3 + c] - sh[6 * 3 + c] - sh[8 * 3 + c];
         mCloudClearValid = true;
         pushCloudAmbient();
     } JAH_CATCH(mError, );
@@ -2546,6 +2589,44 @@ CloudStatus OgreScene::cloudStatus() const {
     else if (mSkyDesc.mode == SkyMode::NoSky) st.reason = "noSky";
     else if (st.reason.empty()) st.reason = "media";
     return st;
+}
+
+// THE CLOUD FIELD AS NUMBERS (Engine.h has the contract). The bake is a render
+// pass, so a pending one runs first; the read is a synchronous ticket after a
+// flush (DOCS/traps/ENGINE.md: a ticket without flushCommands reads stale VRAM).
+bool OgreScene::cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres) {
+    tau.clear();
+    size = 0u;
+    tileMetres = 0.0f;
+    if (!cloudLayerDrawn() || !mCloudField) return false;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    Ogre::AsyncTextureTicket *ticket = nullptr;
+    bool ok = false;
+    try {
+        if (mCloudFieldPending) bakeCloudField();
+        mRoot->getRenderSystem()->flushCommands();
+        const Ogre::uint32 n = mCloudField->getWidth();
+        ticket = tm->createAsyncTextureTicket(n, n, 1u, Ogre::TextureTypes::Type2D,
+                                              mCloudField->getPixelFormat());
+        ticket->download(mCloudField, 0, true);
+        const Ogre::TextureBox box = ticket->map(0);
+        tau.resize(size_t(n) * n);
+        for (Ogre::uint32 y = 0; y < n; ++y)
+            for (Ogre::uint32 x = 0; x < n; ++x)
+                tau[size_t(y) * n + x] = Ogre::Bitwise::halfToFloat(
+                    *reinterpret_cast<const Ogre::uint16 *>(box.at(x, y, 0)));
+        ticket->unmap();
+        size = n;
+        tileMetres = kCloudTileMetres;
+        ok = true;
+    } catch (Ogre::Exception &e) {
+        mError = describeOgreFailure(e);   // the ticket is released below either way
+    } catch (std::exception &e) {
+        mError = std::string("engine: ") + e.what();
+    }
+    if (ticket) { try { tm->destroyAsyncTextureTicket(ticket); } catch (...) {} }
+    if (!ok) tau.clear();
+    return ok;
 }
 
 // THE SKY AS A PICTURE (CLOUDS-2D-1's export bake; Engine.h has the contract).

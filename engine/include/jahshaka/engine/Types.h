@@ -960,8 +960,10 @@ struct CloudLayerDesc {
     TextureId weatherMap = 0;
     /// THE SUN THAT LIGHTS THE LAYER: the direction TOWARDS it and its
     /// irradiance in the renderer's units (the first directional light's
-    /// colour x tint x intensity x pi x pi — what a white Lambert plate facing
-    /// it reflects is that over pi). No sun = lit by the sky alone.
+    /// colour x tint x intensity x pi — what a white Lambert plate facing it
+    /// reflects is that over pi: the light's power is intensity x pi and
+    /// HlmsPbs divides the diffuse by pi, so the plate shows `intensity`;
+    /// cloud_2d.energy E0 measures it). No sun = lit by the sky alone.
     bool      hasSun = false;
     float     sunDir[3] = { 0.0f, 1.0f, 0.0f };
     Colour    sunIrradiance { 0.0f, 0.0f, 0.0f, 1.0f };

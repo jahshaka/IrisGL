@@ -8049,7 +8049,12 @@ void SceneMirror::applyCloudLayer()
             cl.sunDir[0] = toSun.x(); cl.sunDir[1] = toSun.y(); cl.sunDir[2] = toSun.z();
             const iris::LinearColor c = iris::linearOf(sunLight->color);
             const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
-            const float k = std::max(0.0f, sunLight->intensity) * float(M_PI * M_PI);
+            // THE PLATE'S UNITS (CloudLayerDesc::sunIrradiance): the engine
+            // lights with power intensity x pi and HlmsPbs divides the diffuse
+            // by pi (OgreScene's light push), so the irradiance is intensity x
+            // pi. A second pi here lit the sheet pi times brighter than the sun
+            // it stands in (CLOUDS-2D-3: a thin full deck doubled the ground).
+            const float k = std::max(0.0f, sunLight->intensity) * float(M_PI);
             cl.sunIrradiance = Colour(c.r * k * tint.r, c.g * k * tint.g, c.b * k * tint.b, 1.0f);
         }
     }

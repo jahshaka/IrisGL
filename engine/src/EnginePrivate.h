@@ -4801,6 +4801,7 @@ private:
     CloudStatus cloudStatus() const override;
     bool renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize, float exposure,
                            std::vector<unsigned char> &rgba) override;
+    bool cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres) override;
     /// Is the layer on screen: enabled, and a sky to draw over.
     bool cloudLayerDrawn() const;
     Ogre::Rectangle2D *mCloudQuad = nullptr;
@@ -4849,6 +4850,7 @@ private:
     void bindCloudInjection(Ogre::VctLighting *lighting);
     bool     mCloudClearPending = false;
     bool     mCloudClearValid = false;
+    /// The clear sky's irradiance on an up-facing plate / pi (CLOUDS-2D-3).
     float    mCloudClearMean[3] = { 0.0f, 0.0f, 0.0f };
     Ogre::AsyncTextureTicket *mCloudClearTicket = nullptr;
     CloudStatus mCloudStatus;
