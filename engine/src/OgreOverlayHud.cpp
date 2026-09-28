@@ -143,14 +143,14 @@ constexpr float kShadowOffset = 0.002f;
 /// for the same reason; a STATIC caption — the loading cover's title, the thing
 /// a user stares at while a world opens — was not.
 ///
-/// THAT CAUSE IS FIXED IN THE PIN (ogre-patch 0014, 2026-09-06): the font load
+/// THAT CAUSE IS FIXED IN THE PIN (fork 6130df9d1 (was 0014), 2026-09-06): the font load
 /// and the datablock assignment now run before `OverlayElement::_update()`, so
 /// the first build is against a loaded font. The one-shot re-caption this class
 /// used to arm (and the per-frame `hud::afterFrame()` walk that disarmed it)
 /// were a second mechanism for a bug with one fix, and are gone;
 /// test_engine's `hud_overlay_draws_where_it_says_when_allowed` asserts a
 /// static caption's pixels on the FIRST rendered frame, which is the assertion
-/// that catches a pin bump losing patch 0014.
+/// that catches a pin bump losing fork 6130df9d1 (was 0014).
 class Caption {
 public:
     void bind(Ogre::v1::TextAreaOverlayElement *el) { mEl = el; }

@@ -2478,7 +2478,7 @@ struct GiParams {
     /// rule is `lodLevelForWorldError` and the site is
     /// OgreScene::cascadeGatherInputs, applied by the gather). True (the default) spends the chain; false
     /// voxelises every cascade at the authored level, which is what the arm did
-    /// before ogre-patch 0064 existed.
+    /// before fork ad452604a+0338ca7f2 (was 0064) existed.
     ///
     /// It is here — an engine parameter rather than a document row — because it
     /// is the A/B: the same scene, the same chain, one term moved, so the cost
@@ -3042,7 +3042,7 @@ inline float giCascadeCell(const GiParams::GiCascadeDesc &c)
 //
 // It is NOT a claim about every cone sample. A cone aimed outward leaves the
 // box and hands over to the coarser cascade by construction, carrying its age
-// across the hop (SEAM-1, ogre-patch 0066), which is what a cone aimed outward
+// across the hop (SEAM-1, fork 8f09c0cd4 (was 0066)), which is what a cone aimed outward
 // should do. What the rule removes is the NEAR FIELD ITSELF changing resolution
 // as the walker moves — the hand-over arriving at the wearer's feet.
 //
@@ -3525,7 +3525,7 @@ struct CardSample {
     float emissive[3] = { 0, 0, 0 };    ///< radiance
     float depth = 0.0f;                 ///< world units from the card's near plane; 0 = nothing captured there
     float shadow = 0.0f;                ///< the still world's sun term: 1 lit, 0 occluded (one traced ray)
-    float roughness = 0.0f;             ///< the GGX ALPHA (perceptual squared), through patch 0043's range
+    float roughness = 0.0f;             ///< the GGX ALPHA (perceptual squared), through fork 16d8e29d4 (was 0043)'s range
     /// THE LIT CARD (the sixth layer, `Jahshaka/CardLight`): the texel's
     /// outgoing diffuse radiance — direct from the scene's lights (the sun
     /// through `shadow`) plus the indirect below plus the emissive. 0 until
@@ -3875,7 +3875,7 @@ struct GiStatus {
     /// How many material edits on this scene have CROSSED the reflection-probe
     /// gate — the point at which a material stops (or starts) being able to
     /// reflect anything, and its shader has to be rebuilt with or without the
-    /// per-pixel probe loop (ogre-patch 0028). An ordinary parameter push is
+    /// per-pixel probe loop (fork 36162ff37+16d8e29d4 (was 0028)). An ordinary parameter push is
     /// free; a crossing is a `flushRenderables` over every renderable wearing
     /// that datablock. The only workflow that crosses repeatedly is a user
     /// dragging Specular Color down through black and back, which crosses
@@ -4079,7 +4079,7 @@ struct GiStatus {
         /// frame's own thread). The GPU half is NOT here and cannot be: a
         /// timestamp pair is read back once the GPU has finished the frame, so
         /// it is reported where a late number belongs — the monitor's `vct.cascadeN`
-        /// cacheWork rows (ogre-patch 0027).
+        /// cacheWork rows (fork 1a81f866a+1bccc3f93 (was 0027)).
         float lastCpuMs = -1.0f;
         /// WHICH MESH LOD LEVELS THE ATTACH SET TOOK (ATOM stage 1's hand-off,
         /// ATOM P4 / AT-A10): `voxelLevels[L]` = SUBMESH PARTITIONS at level L,
@@ -4101,7 +4101,7 @@ struct GiStatus {
         /// of `items`, and it is the number the far-field proxy moves: the same
         /// cascade with the LOD chain off reads the authored total.
         long long voxelTriangles = 0;
-        /// HOW MANY COMPUTE DISPATCHES THE LAST BUILD ISSUED (ogre-patch 0065):
+        /// HOW MANY COMPUTE DISPATCHES THE LAST BUILD ISSUED (fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)):
         /// one per material pool of the chain's shared store per octant, each
         /// sized by the whole volume however few records the pool holds (the
         /// count is a loop bound read on the device). So this says whether a
@@ -4124,10 +4124,9 @@ struct GiStatus {
     /// (cascadesAwaitingCamera).
     std::vector<CascadeStatus> cascades;
     /// THE FAR-FIELD PROXY, AS APPLIED: whether the cascades are voxelising the
-    /// baked LOD levels (`GiParams::cascadeVoxelLod` met with the engine's
-    /// run-wide `JAHSHAKA_NO_CASCADE_LOD` diagnostic latch). It is here so the
-    /// arm a measurement is on has a NAME — a switch nothing can report is a
-    /// switch nobody can trust. True is the default and the shipped arm.
+    /// baked LOD levels (`GiParams::cascadeVoxelLod`). It is here so the arm a
+    /// measurement is on has a NAME — a switch nothing can report is a switch
+    /// nobody can trust. True is the default and the shipped arm.
     bool cascadeVoxelLod = true;
     /// The chain is WANTED but has not been built, because no view has tracked a
     /// camera yet — a camera-centred arm is built around the camera and there is
@@ -4323,8 +4322,6 @@ struct PlanarReflectionParams {
     Colour   background = Colour(0.0f, 0.0f, 0.0f, 1.0f);
 };
 
-enum class Backend { Vulkan, OpenGL };
-
 /// `Engine::createScene(name, kSceneMainThreadOnly)` — "this scene gets NO
 /// worker threads" (SPECS/THREADING_ADOPTION_SPEC.md P5).
 ///
@@ -4356,7 +4353,7 @@ using EngineLogSink = std::function<void(int level, const std::string &message)>
 ///
 /// The tier keeps a ray-traceable copy of the scene — one bottom-level
 /// acceleration structure per mesh, one top-level structure over the instances
-/// — built from Ogre's OWN vertex and index buffers (ogre-patches 0038/0039)
+/// — built from Ogre's OWN vertex and index buffers (fork d014b064f+b028638c1 (was 0038/0039))
 /// and recorded into the frame's command buffer. Nothing consumes it yet: R2
 /// (probe visibility), R3 (sun contact shadows) and R5 (reflections) are the
 /// consumers, and each of them reads the SAME structure.
@@ -5509,8 +5506,9 @@ struct VrStatus {
 /// runtime (next to the executable, an env override, or a compile-time default).
 /// Nothing in the engine is baked to a build-machine path.
 struct EngineConfig {
-    Backend     backend = Backend::Vulkan;
-    /// HEADLESS: boot the backend's NULL render system instead of `backend`
+    // The renderer is Vulkan, always (the Backend enum and its unreachable OpenGL
+    // value are gone with the GL3Plus build, D6-FORK-TOOLING).
+    /// HEADLESS: boot the NULL render system instead of Vulkan
     /// (SPECS/SCENEGRAPH_SPEC.md §3b, v2). Everything that is not pixels works
     /// exactly as it does on a real device — scenes, the document scene graph,
     /// nodes, meshes, materials, queries, transforms — and NOTHING renders:
@@ -5572,11 +5570,11 @@ struct EngineConfig {
     /// takes, and the one every ray-consuming suite must be able to run on this
     /// GPU so the fallback is proved on every push.
     ///
-    /// FALSE REACHES THE DEVICE, not just this tier. The host sets
-    /// JAHSHAKA_NO_RAY_QUERY alongside it, which ogre-patch 0038 reads at
-    /// vkCreateDevice, so the process comes up on exactly the instance,
-    /// extension list and feature set it would have had if the tier did not
-    /// exist. "The picture a machine without ray tracing renders" is therefore
+    /// FALSE REACHES THE DEVICE, not just this tier: the engine hands it to the
+    /// fork's VulkanDevice::msRayQueryAllowed before the render system loads (fork
+    /// 98a6f4d34's static, gating 0038's requests at vkCreateDevice), so the
+    /// process comes up on exactly the instance, extension list and feature set
+    /// it would have had if the tier did not exist. "The picture a machine without ray tracing renders" is therefore
     /// literal and not a manner of speaking — which is what makes the suites
     /// that assert the fallback worth anything.
     ///
@@ -6026,7 +6024,7 @@ struct PostFxDesc {
     ///
     /// THERE USED TO BE A SECOND ONE. `ssrRoughnessCutoff` (0.35) gated the
     /// march, nothing in the document ever wrote it, and it was compared
-    /// against a G-buffer channel the march decoded with the pre-ogre-patch-0043
+    /// against a G-buffer channel the march decoded with the pre-fork 16d8e29d4 (was 0043)
     /// range and never square-rooted — so the band the frame applied was
     /// perceptual 0.581, not 0.35 and not anything a user could read. It is
     /// deleted; the march reads this field (OgreChain::updateSsr).
@@ -6558,7 +6556,7 @@ struct ShadowStatus {
     /// THE CACHE'S SELF-CHECK, cumulative for the session: passes hashed while
     /// the shadow node declared FEWER shadow maps than its own light list
     /// indexes — the state that generates a pixel shader which cannot compile
-    /// (ogre-patch 0025 removes its cause; this counts any recurrence). Zero is
+    /// (fork 6130df9d1 (was 0025) removes its cause; this counts any recurrence). Zero is
     /// the only healthy value, and a suite may assert exactly that.
     unsigned shaderLightMismatches = 0;
     /// The same for the planar mirrors' shadow nodes (every budget slot) and
@@ -6769,7 +6767,7 @@ struct GpuCullRequest {
     /// OgreMesh.cpp): the footprint is 2 / (projScaleY * viewportHeight), i.e. the
     /// ortho window's height over the target's.
     bool orthographic = false;
-    /// THE VIEW'S LOD SWITCH BAND (ogre-patch 0075's `hysteresis`, the fraction of
+    /// THE VIEW'S LOD SWITCH BAND (fork 5230c9390+8282f6d70 (was 0075)'s `hysteresis`, the fraction of
     /// the threshold being crossed): 0 = the exact level. A banded request holds each
     /// slot's last banded level until the allowed error leaves the band. Levels only
     /// (modes 1-2): the CUT (mode 3, the id pass's) takes no band — its frontier
@@ -6799,7 +6797,7 @@ struct GpuCullRequest {
     /// each job is dispatched this many more times over the buffers it already
     /// filled and the wall clock of a flush of them, minus an empty flush's own
     /// cost, is divided by the count. There are no per-dispatch GPU timestamps
-    /// outside a compositor pass at this pin (patch 0027's samples are keyed to
+    /// outside a compositor pass at this pin (fork 1a81f866a+1bccc3f93 (was 0027)'s samples are keyed to
     /// passes and arrive once the GPU has finished the frame), so the three `*Ms` fields are that
     /// SLOPE: an upper bound that includes the per-dispatch driver cost, which
     /// is the number to compare a CPU cull against anyway.
@@ -7249,7 +7247,7 @@ struct CacheWork {
     /// (it is inside the pass records instead).
     float      ms = -1.0f;
     /// GPU milliseconds for this work's OWN dispatches, from the render
-    /// system's timestamp queries (ogre-patch 0027). NEGATIVE means NOT
+    /// system's timestamp queries (fork 1a81f866a+1bccc3f93 (was 0027)). NEGATIVE means NOT
     /// MEASURED — the build has no JAH_GPU_TIMESTAMPS, the device has no
     /// usable timestamps, the work ran outside a recorded frame, or the result
     /// has not come back yet. Never faked as 0.

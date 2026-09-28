@@ -21,7 +21,7 @@
 // so it was guarded by a configure-time sha256 of upstream's file that FAILED
 // the build when upstream moved.
 //
-// Ogre-patch 0058 puts the five insertion points into upstream's own piece
+// fork b6c409c1f (was 0058) puts the five insertion points into upstream's own piece
 // (prologue / probe-origin / per-probe / resolve / post), which is what this
 // file uses now. The copy and the hash tripwire are gone with it: ours is a set
 // of PIECES again, upstream's body is upstream's, and a pin bump either applies
@@ -94,9 +94,9 @@
 // ---- THE SAMPLE POINT, AND EVERYTHING THE CAGE LOOP BELOW NEEDS --------
 //
 // Inserted by upstream's piece with ifdGridPos and ifdSpaceNormal in scope and
-// before the cage is derived from them (ogre-patch 0058).
+// before the cage is derived from them (fork b6c409c1f (was 0058)).
 // THE FIELD STANDS DOWN WHERE A SCREEN PROBE ANSWERED THE PIXEL
-// (GATHER-1a, ogre-patch 0086). THE ACCOUNTING RULE OF THIS FILE, in its third
+// (GATHER-1a, fork b6c409c1f (was 0086)). THE ACCOUNTING RULE OF THIS FILE, in its third
 // and last half: a pixel receives exactly ONE diffuse-GI term. The voxel-cone
 // diffuse is compiled out by a pass property under the gather; the gather's own
 // term is added at upstream's irradiance-volumes insertion point; and the cage
@@ -231,7 +231,7 @@
 @piece( custom_ps_ifdCageProbeOrigin )
 		// THE CLAMP UPSTREAM'S COMMENT PROMISES AND UPSTREAM CANNOT PERFORM: the
 		// per-axis probe counts it needs are not in the render params (only Nx and
-		// Nx*Ny are), which is why ogre-patch 0058 makes this a hook rather than a
+		// Nx*Ny are), which is why fork b6c409c1f (was 0058) makes this a hook rather than a
 		// fix in place. The world->grid map has no clamp either
 		// (OgreIrradianceField.cpp:794-812). Without it a pixel outside the
 		// field indexes past the grid and getProbeIdx's flat index WRAPS into
@@ -449,7 +449,7 @@
 	ifdConfidence = 1.0;
 @end
 
-	// THE SCALE UPSTREAM'S COMPOSITE LINE APPLIES (ogre-patch 0058). Upstream
+	// THE SCALE UPSTREAM'S COMPOSITE LINE APPLIES (fork b6c409c1f (was 0058)). Upstream
 	// writes
 	//     pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight );
 	// with the scale at one, and we set it to the confidence and the weight fade

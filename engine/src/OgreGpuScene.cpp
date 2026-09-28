@@ -1222,7 +1222,7 @@ void OgreScene::ensureGpuSceneTimed(bool graphIsCurrent) const {
 //
 // WHAT IT IS NOT: a draw-time LOD. The picture's level is Ogre's own strategy
 // per pass (OgreMesh.cpp), evaluated every frame with no hysteresis but with
-// patch 0075's band; this is the RAY tier's, evaluated at build time, and the
+// fork 5230c9390+8282f6d70 (was 0075)'s band; this is the RAY tier's, evaluated at build time, and the
 // two are allowed to differ — a shadow ray does not need the silhouette the eye
 // does.
 void OgreScene::forgetRayLevel(uint32_t slot) {

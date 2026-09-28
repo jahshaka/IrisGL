@@ -108,7 +108,7 @@ layout( std430, ogre_U7 ) readonly restrict buffer priorLayout { uint prior[]; }
 // HlmsManager::getDescriptorSetTexture2 -> checkValidity, measured 2026-09-22),
 // and binding a dummy texture to satisfy it would be a lie in the root layout.
 // Both permutations keep FIXED-SIZE bindings, which is what the microcode cache
-// requires (ogre-patch 0063 skips a shader that reflects ARRAY bindings).
+// requires (fork 5bfe24cd9 (was 0063) skips a shader that reflects ARRAY bindings).
 @property( cull_hzb )
 	vulkan_layout( ogre_t0 ) uniform texture2D hzbTexture;
 @end
@@ -212,7 +212,7 @@ void main()
 		float allowed = jahAllowedWorldError(
 			params.lod.x, jahSampleFootprint( d, params.lod.y, params.lod.z ), scale );
 		uint level = jahLevelForAllowed( meshIndex, levelCount, allowed );
-		// THE SWITCH BAND (ogre-patch 0075's LodStrategy::lodSet, on the GPU): held is
+		// THE SWITCH BAND (fork 5230c9390+8282f6d70 (was 0075)'s LodStrategy::lodSet, on the GPU): held is
 		// this list's last BANDED level for the slot (0xFFFFFFFF = none, and so no
 		// band on the first sight). The band is measured on the threshold being
 		// crossed - the next level's bound going coarser, the held level's own going

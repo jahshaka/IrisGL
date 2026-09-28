@@ -22,7 +22,7 @@
 //   the texture gradients are the ray's FOOTPRINT at the hit, projected through
 //     the triangle's uv-per-metre, one isotropic LOD - a hit has no screen
 //     neighbours, so every screen derivative is zeroed (the normal-map specular
-//     anti-aliasing of the fork's patch 0022 among them);
+//     anti-aliasing of the fork's fork 16d8e29d4 (was 0022) among them);
 //   the eye vector is the reversed RAY, and the Forward+ cell is the hit's world
 //     position projected through the pass' view-projection (the fork's
 //     fwdCustomFragCoord hook) - a hit outside the frustum has no cell: no

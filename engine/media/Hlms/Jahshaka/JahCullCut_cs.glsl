@@ -1,7 +1,7 @@
 // Jahshaka — ATOM-CLUSTER-CUT: THE CUT, the cull's mode-3 job after the compaction
 // (SPECS/v2/CLUSTER_CUT_DESIGN.md D1 and D2). ONE WORKGROUP PER SURVIVOR, its 64
 // threads striding the survivor's mesh's clusters; the dispatch is sized by the GPU
-// (the compaction leaves the survivor count in count[5], ogre-patch 0032's indirect
+// (the compaction leaves the survivor count in count[5], fork 1bccc3f93+a98e2b0af (was 0032)'s indirect
 // dispatch reads it).
 //
 // THE RULE IS THE CLUSTER CUT'S (JahClusterCut.glsl, the twin of Types.h's

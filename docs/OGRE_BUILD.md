@@ -1,10 +1,13 @@
 # Ogre-Next — how IrisGL builds it
 
 The engine is the pinned `thirdparty/ogre-next` submodule, and that submodule is **our fork**:
-`github.com/jahshaka/ogre-next`, branch **`jahshaka`** = upstream's 52d1a7aaf (master, 4.0.0-unstable) plus our
-commits. `scripts/build-ogre.sh` is the whole build — it checks that the checkout really is the fork, configures,
+`github.com/jahshaka/ogre-next`, branch **`jahshaka`** = upstream's master at 475f783d7 (4.0.0-unstable; the old
+patch stack's base was 52d1a7aaf) plus our commits. `scripts/build-ogre.sh` is the whole build — it checks that the checkout really is the fork, configures,
 builds (RelWithDebInfo, shader-compile threading mode 2, an explicitly pinned Component set) and installs into
-THIS tree's `thirdparty/ogre-next-install`. Every tree and worktree owns its install. Never configure the
+THIS tree's `thirdparty/ogre-next-install`, then stamps it: `BUILT_FROM` = the fork commit, `dirty` when the
+checkout had edits, `buildsettings <sha256 of OgreBuildSettings.h>`. Studio's configure refuses an install whose
+stamp is not the checkout (`cmake/OgreInstallStamp.cmake`, suite `source.fork_stamp`) and re-runs itself when the
+submodule's HEAD or the stamp moves; Studio's gate refuses one that is not the PIN (`scripts/gate_runlog.py`). Every tree and worktree owns its install. Never configure the
 submodule by hand, and never build upstream's `master`: it compiles and runs, and renders a different picture.
 
 A stock `git submodule update --init` is now enough — there is nothing to apply, and the old "reset the submodule
@@ -23,11 +26,13 @@ sudo apt-get install -y libxrandr-dev libxaw7-dev rapidjson-dev libzzip-dev \
   and fails loudly.
 - Vulkan's XCB windowing needs `libxcb-randr0-dev` + `libx11-xcb-dev`.
 - macOS: Xcode, the LunarG Vulkan SDK (MoltenVK), rapidjson headers; the script switches on `uname` (no X11,
-  GL3Plus off, plain dylibs, the STBI codec, baked rpaths). Windows is not validated.
+  plain dylibs, the STBI codec, baked rpaths). Windows is not validated.
 
 ## What is built
 The Vulkan RenderSystem with `OGRE_VULKAN_WINDOW_NULL=ON` (the surfaceless `windowType=null` window beside XCB,
-selected at run time — every offscreen test uses it), GL3Plus on Linux, the NULL RenderSystem (headless),
+selected at run time — every offscreen test uses it) and the NULL RenderSystem (headless) — nothing else: GL3Plus
+and Ogre's tools (OgreMeshTool, OgreCmgenToCubemap) are OFF on every platform since D6-FORK-TOOLING, and the
+install is pruned to the build's own install manifest (a deleted header or library does not linger),
 ParticleFX + ParticleFX2, and the Components HlmsPbs, HlmsUnlit, SceneFormat, PlanarReflections, Atmosphere,
 MeshLodGenerator, Property, Overlay. The install is self-contained: `INSTALL_RPATH=$ORIGIN:$ORIGIN/..`, stale
 libraries pruned, and a self-check that every installed `.so` resolves with no `LD_LIBRARY_PATH`.
@@ -40,7 +45,8 @@ tree beside `engine/media`, so a media change on the fork reaches a tree through
 ## The fork — where our engine changes live
 - **Remotes.** `origin` = `github.com/jahshaka/ogre-next` (the `.gitmodules` url is the public https form, which
   clones without a key; the lead pushes over the `github-ogre` ssh alias). Add upstream once per clone:
-  `git -C thirdparty/ogre-next remote add upstream https://github.com/OGRECave/ogre-next.git`.
+  `git -C thirdparty/ogre-next remote add upstream https://github.com/OGRECave/ogre-next.git`. The canonical
+  clone is the MAIN tree's submodule (upstream + the push url on it); `scripts/lead/fork-pin-check.sh` reads it.
 - **Branches.** `master` is upstream's, never written by us. `jahshaka` carries our work. The tag
   `jahshaka-stack-v1` marks the commit the 88-patch stack became — proven byte-identical to the applied stack
   (one permitted difference: 0003's retirement). `build-ogre.sh` refuses to build anything that is not a
@@ -52,8 +58,9 @@ tree beside `engine/media`, so a media change on the fork reaches a tree through
 - **An upstream bump = `git fetch upstream && git merge upstream/master` on `jahshaka`**, then one
   `build-ogre.sh` and the gate. Git resolves what a patch replay used to fail at; a conflict is a file upstream
   genuinely moved under us, and the commit that carries our side of it is right there in `git log`.
-- **The numbers ended at 0089.** New work is named by its commit, not by a number. The 352 comments across the
-  tree that cite `ogre-patches NNNN` are NOT rewritten — the index below is what they resolve against.
+- **The numbers ended at 0089.** New work is named by its commit, not by a number. The comments across Studio,
+  IrisGL and the fork that cited `ogre-patch NNNN` were rewritten to `fork <sha> (was NNNN)` by D6-FORK-TOOLING's
+  script (from the index below); the index stays for old notes and specs.
 
 - **The LOG of every change we carry is `DOCS/OGRE_NEXT_CHANGES.md` in the workspace repo** (one entry per fork
   commit, newest first, with its upstream status; an upstream bump gets a section naming what conflicted and

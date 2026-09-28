@@ -588,7 +588,7 @@ CacheScope::CacheScope(CacheKind cache, WorkReason reason, unsigned long long id
     mArmed = true;
     mDetail = detail;
     mStart = std::chrono::steady_clock::now();
-    // THE GPU PAIR (ogre-patch 0027). This is the ONLY way a compute dispatch
+    // THE GPU PAIR (fork 1a81f866a+1bccc3f93 (was 0027)). This is the ONLY way a compute dispatch
     // can report GPU time: every other sample in the monitor rides a compositor
     // pass callback, and a GI voxelisation, a light injection or an irradiance
     // field's integration is not a pass. Work between frames samples too — the
@@ -1060,7 +1060,7 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
         st.gpuCompiled = true;
     } catch (...) {
         st.gpuReason = "this Ogre build has no GPU timestamp support "
-                       "(ogre-patch 0027 / JAH_GPU_TIMESTAMPS is off — a production build)";
+                       "(JAH_GPU_TIMESTAMPS is off — a production build)";
         return;
     }
     // LOCK 2, THE RUNTIME. `available` is true only while a query pool exists,
@@ -1086,7 +1086,7 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
 // (the render system answers each sample once — a time, or negative for "never"),
 // and reset a free pool for this frame. ONE call,
 // at the top of the frame and outside every encoder — which is the only place
-// vkCmdResetQueryPool is legal (see ogre-patch 0027).
+// vkCmdResetQueryPool is legal (see fork 1a81f866a+1bccc3f93 (was 0027)).
 void OgreEngine::gpuFrameBegin() {
     if (!mMonitor || !mMonitor->mGpu) return;
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;

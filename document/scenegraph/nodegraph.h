@@ -80,7 +80,7 @@ For more information see the LICENSE file
 //     onto one owner slot. FIXED WHERE IT LIVES:
 //     `ogre-patches/0015-id-generator-atomic-counter.patch` makes it a relaxed
 //     `std::atomic`. Re-run `irisgl/scripts/build-ogre.sh` after pulling: an
-//     engine built before patch 0015 still has the racy counter.
+//     engine built before fork 6130df9d1 (was 0015) still has the racy counter.
 //   * the POOLS, i.e. the use-after-free above. Fixed STRUCTURALLY, by the
 //     engine: `OgreEngine::renderOneFrame` no longer calls
 //     `Root::renderOneFrame` — it inlines its body and updates only the scenes

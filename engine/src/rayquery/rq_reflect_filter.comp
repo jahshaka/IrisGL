@@ -278,7 +278,7 @@ void main()
 
 	const float roughGate = p.knobs.x;
 	const float feather = p.projParams.w;
-	// The SAME decode as the trace: ogre-patch 0043 packs the GGX ALPHA over
+	// The SAME decode as the trace: fork 16d8e29d4 (was 0043) packs the GGX ALPHA over
 	// [0.001, 1], and the gate is stated in PERCEPTUAL roughness.
 	const float lobeAlpha = max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 );
 	const float roughness = sqrt( lobeAlpha );

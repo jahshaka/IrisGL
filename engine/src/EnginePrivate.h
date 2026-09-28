@@ -151,13 +151,13 @@ inline Ogre::Vector3     toOgre(const Vec3 &v)   { return Ogre::Vector3(v.x, v.y
 inline Ogre::ColourValue toOgre(const Colour &c) { return Ogre::ColourValue(c.r, c.g, c.b, c.a); }
 
 /// The LOD switch band a WATCHED view's scene passes carry, and the suite's
-/// offscreen latch (OgreMesh.cpp; ogre-patch 0075). @see ChainDesc::lodHysteresis.
+/// offscreen latch (OgreMesh.cpp; fork 5230c9390+8282f6d70 (was 0075)). @see ChainDesc::lodHysteresis.
 float jahLodHysteresis();
 
 /// ATOM stage 1's VIEW rule (OgreMesh.cpp): registers `jah_world_error` — the
 /// LOD strategy whose per-object value is the world-space error the pass's own
 /// camera and render target can hide — and makes it the process default. The
-/// switch BAND ogre-patch 0075 adds to `LodStrategy::lodSet` is per PASS and
+/// switch BAND fork 5230c9390+8282f6d70 (was 0075) adds to `LodStrategy::lodSet` is per PASS and
 /// comes from the chain (`ChainDesc::lodHysteresis`), not from here. Called
 /// once, after Root::initialise and before any mesh or Item exists.
 void installJahLodStrategy();
@@ -189,7 +189,7 @@ inline std::string processUniqueName(const char *prefix) {
 /// The pass cache is indexed by EIGHT BITS of the 32-bit shader hash
 /// (HlmsBits::PassBits): at entry 256 the index spills into the RENDERABLE
 /// field beside it and every later hash names the wrong renderable — which is
-/// the crash ogre-patch 0035 now catches at the disk-cache save (lane
+/// the crash fork d6348decd (was 0035) now catches at the disk-cache save (lane
 /// shadercache-2: the owner's session reached 1847 pass entries in an hour, and
 /// ONE SKY CHANGE = ONE ENTRY, measured; 30 changes, +30 entries).
 ///
@@ -1404,7 +1404,7 @@ struct ChainDesc {
     /// twice, when a session begins and when it ends.
     bool  stereo = false;
 
-    // ---- The LOD switch band, per pass (ogre-patch 0075, ATOM-3-FIX) -------
+    // ---- The LOD switch band, per pass (fork 5230c9390+8282f6d70 (was 0075), ATOM-3-FIX) -------
     /// The hysteresis band `chain::build` writes onto EVERY scene pass of this
     /// view's node (`CompositorPassSceneDef::mLodHysteresis`), as a fraction of
     /// the LOD threshold being crossed. 0 = upstream's behaviour to the bit.
@@ -1700,7 +1700,7 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
 /// from applyViewGlobals; separate only so its teardown twin has a name.
 void setDither(bool off);
 /// HOW MUCH of the blurred highlight the tonemap quad adds (PostFxDesc::
-/// bloomAmount; ogre-patch 0082). A uniform on the same material as the dither,
+/// bloomAmount; fork feab041c6 (was 0082)). A uniform on the same material as the dither,
 /// pushed from applyViewGlobals — and from OgreView::setPostFx, for the VR
 /// session's view, which the engine's per-frame loop never reaches.
 void setBloomAmount(float amount);
@@ -1726,13 +1726,6 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
 /// re-seeded history starts exactly where a deterministic grade would land.
 float exposureSeed(float exposure);
-
-/// THE MULTIPLIER THE FIXED TONEMAP CLEARS ITS 1x1 TEXTURE WITH, in one place:
-/// the host's measured value when it handed one over (ChainDesc::exposureScale),
-/// else the grey-card constant derived from `exposure`. Both callers — the main
-/// chain and the picture-in-picture inset — resolve it here so "0 means derive
-/// it" is stated once.
-float fixedExposureScale(float exposureScale, float exposure);
 
 /// The name of the 1x1 texture the AUTOMATIC exposure's adaptation history
 /// lives in, inside a built chain's scene node. Readable between frames
@@ -1844,7 +1837,7 @@ public:
     void beginFrame(unsigned long long frame, FrameCause cause, bool onscreen);
     void endFrame(unsigned scenesUpdated);
 
-    // ---- GPU timestamps (P1c, ogre-patch 0027) -----------------------------
+    // ---- GPU timestamps (P1c, fork 1a81f866a+1bccc3f93 (was 0027)) -----------------------------
     //
     // A GPU sample comes back WHEN THE GPU HAS FINISHED ITS FRAME (the fork
     // polls each written query pool non-blocking at the top of every frame and
@@ -2048,7 +2041,7 @@ void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
 /// the shape every expensive cached system uses for work it does INSIDE a
 /// frame (a GI voxelisation, a light injection, an irradiance-field batch).
 ///
-/// It also brackets the work with a GPU timestamp pair (ogre-patch 0027) when
+/// It also brackets the work with a GPU timestamp pair (fork 1a81f866a+1bccc3f93 (was 0027)) when
 /// the capture has GPU sampling live, which is the only way a compute dispatch
 /// can report GPU time at all: the monitor's other samples ride the compositor
 /// pass callbacks, and a compute job the engine dispatches itself is not a
@@ -2056,7 +2049,7 @@ void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
 /// dispatch and read back once the GPU has finished it, exactly like a pass's.
 ///
 /// A SCOPE MUST NOT STRADDLE A FRAME BOUNDARY. The render system's sample
-/// stack is cleared when the host opens a frame (patch 0027's
+/// stack is cleared when the host opens a frame (fork 1a81f866a+1bccc3f93 (was 0027)'s
 /// `JahGpuFrameBegin`, so that a frame which threw cannot corrupt the next
 /// one's nesting), and a `begin` on one side of that point with its `end` on
 /// the other would pop somebody else's sample. Every call site here is inside
@@ -2599,8 +2592,8 @@ public:
                                    bool, Ogre::SceneManager *) const override;
     float *preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
                              Ogre::SceneManager *sceneManager, float *passBufferPtr) override;
-    /// THE LAMP-MAP CACHE'S SELF-CHECK (ENGINE_CACHE_POLICY_SPEC E2, ogre-patch
-    /// 0025). Hlms declares `hlms_num_shadow_map_lights` from the shadow node's
+    /// THE LAMP-MAP CACHE'S SELF-CHECK (ENGINE_CACHE_POLICY_SPEC E2, fork 6130df9d1
+    /// (was 0025)). Hlms declares `hlms_num_shadow_map_lights` from the shadow node's
     /// ACTIVE COUNT but indexes shadow maps from the node's SLOT ARRAY; a lamp
     /// fixed into a slot after the node last built its light list makes the two
     /// disagree and generates a pixel shader that references a shadow map it
@@ -2753,7 +2746,7 @@ public:
     /// `propertiesMergedPreGenerationStep` / `hlmsTypeChanged`; upstream's own
     /// Terra sample is the reference implementation). The probe loop then
     /// blends the sky in with the weight the probes did not claim — see
-    /// ogre-patch 0048. The state is per scene because the sky is.
+    /// fork 4d5fbef16+8f09c0cd4 (was 0048). The state is per scene because the sky is.
     struct SkyEnvState {
         /// The scene's prefiltered sky cube (`mReflectionTex`), or null: null
         /// is "this scene has no sky reflection", which is also what a Sky
@@ -3255,7 +3248,7 @@ public:
     /// per-frame follow-the-camera. The equirect method needs a texture whose
     /// INTERNAL type is Type2DArray (automatic-batching pool slices are; our
     /// pixel-uploaded ManualTextures are not) — makeSkyArrayTexture() copies when
-    /// it must. And it needs ogre-patch 0009: upstream's Vulkan GLSL declares
+    /// it must. And it needs fork c290052de (was 0009): upstream's Vulkan GLSL declares
     /// `sliceIdx` but samples slice 0, so glslang strips the uniform and
     /// SceneManager::setSky throws on setNamedConstant AFTER attaching the sky.
     ///
@@ -3343,8 +3336,6 @@ public:
     /// colours), and every later one issues the download with INACCURATE
     /// tracking and maps it on a later frame — `pollSkyShRead` at the frame's
     /// top — with the previous coefficients staying valid meanwhile.
-    /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture,
-    /// which is how the two are A/B'd on one binary.
     void integrateSkyShFromCube(Ogre::TextureGpu *cube);
     void integrateSkyShNow(Ogre::TextureGpu *cube);
     void issueSkyShRead(Ogre::TextureGpu *cube);
@@ -3428,7 +3419,6 @@ public:
     /// in force — which is exactly the read-before-write guard every host used
     /// to hand-write around Engine::setShadowFilter/setShadowResolution.
     void setShadowSettings(const ShadowDesc &desc) override;
-    ShadowDesc shadowSettings() const override { return mShadowDesc; }
     ShadowDesc mShadowDesc;
     /// The engine that made this scene — the owner of the global shadow state
     /// above. Never null for a scene created through Engine::createScene().
@@ -3530,7 +3520,7 @@ public:
     };
     bool clusterStreamOf(MeshId mesh, ClusterStreamView &out) const;
     /// Writes `errors` (level 1 first, a length in mesh units each) into
-    /// `mesh`'s LOD value array at the current bias. Patch 0059 added the
+    /// `mesh`'s LOD value array at the current bias. fork 5230c9390 (was 0059) added the
     /// setter this needs.
     void  applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &bounds) const;
     std::string dumpMaterial(MaterialId id) const override;
@@ -3916,7 +3906,6 @@ public:
     /// Defined in OgreScene.cpp: a flip to Off also releases the scene's ray
     /// structures (forgetRayQuery) so Off costs nothing, as the verb promises.
     void setRayTracing(RayTracingMode mode) override;
-    RayTracingMode rayTracingMode() const override { return mRayTracing; }
     bool rayTracingResolved() const override;
     /// The scene's live PlanarReflections, or null when the budget is 0. Views
     /// read this once a frame to decide whether to arm their listener.
@@ -5369,7 +5358,7 @@ private:
     /// A DATABLOCK OR TEXTURE THE MATERIAL STORE HOLDS IS DYING. `VctMaterial`
     /// keys its conversions on the datablock POINTER and a recycled address
     /// would alias.
-    /// THE BY-POINTER ALIAS GUARD (MATERIAL-SWAP-GI-1, patch 0081): VctMaterial
+    /// THE BY-POINTER ALIAS GUARD (MATERIAL-SWAP-GI-1, fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081)): VctMaterial
     /// caches conversions by raw datablock pointer across builds, so a dying
     /// datablock is EVICTED from every live voxeliser's cache — no volume is
     /// re-voxelised for a death. With a null pointer (a caller that cannot name
@@ -5439,7 +5428,7 @@ private:
     /// cascade, `VctLighting::update` rebuilds the light from scratch every
     /// time: the injection dispatch writes the direct term D_i over the whole
     /// volume, and each bounce pass writes direct + rho * G(total) from the
-    /// volume the previous pass wrote (ogre-patch 0076's Jacobi form, the
+    /// volume the previous pass wrote (fork ae2ed529f+155a56bf8 (was 0076)'s Jacobi form, the
     /// direct volume kept beside it) — so one injection of cascade i is a
     /// function of its voxels, the lights, the environment and the CURRENT
     /// light of cascades i+1..N-1, and of NOTHING the volume held before.
@@ -5456,8 +5445,8 @@ private:
     /// at-rest sweep from a perturbed history and after a second one — equal,
     /// per cascade, everywhere (and a lamp that travelled leaves the bytes the
     /// same lamp jumped there leaves). The three sweeps LAMPREST-2 measured
-    /// were needed BEFORE patch 0067 (a recycled Vulkan block aliased a frame
-    /// in flight) and ogre-patch 0076 (the bounce re-gathered the total and
+    /// were needed BEFORE fork b028638c1 (was 0067) (a recycled Vulkan block aliased a frame
+    /// in flight) and fork ae2ed529f+155a56bf8 (was 0076) (the bounce re-gathered the total and
     /// added to it: history-dependent by construction); neither is true now.
     /// The moving tick is one sweep by the same argument.
     static constexpr int kAtRestSweeps = 1;
@@ -5514,7 +5503,7 @@ private:
                                         GiStaleReason reason);
     /// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1). Called by the
     /// cascade scheduler whenever cascade 0 has been re-placed or re-voxelised:
-    /// moves the field's volume onto cascade 0's voxel box (ogre-patch 0044's
+    /// moves the field's volume onto cascade 0's voxel box (fork 822d538f5 (was 0044)'s
     /// `setFieldVolume`), re-binds it if that cascade's lighting re-created its
     /// light voxel textures, and re-integrates — whole when the volume MOVED
     /// (the atlases describe another place and there is no per-probe validity),
@@ -5683,11 +5672,6 @@ private:
     /// `GiStatus::cascadeVoxelLod`. Kept apart from `mGi` on purpose — `mGi`
     /// must keep comparing equal to what the document pushes.
     bool mCascadeVoxelLod = true;
-    /// The latch itself, the shape `JAHSHAKA_NO_RAY_QUERY` uses
-    /// (OgreEngine.cpp:55): a measurement needs to move ONE term with one
-    /// binary and one scene, and a run-wide switch is how it does that. Read
-    /// ONCE, at construction, and never again.
-    const bool mCascadeLodAllowed = std::getenv("JAHSHAKA_NO_CASCADE_LOD") == nullptr;
     /// ATOM stage 1: the scene-wide LOD dial. 1 = the reference budget of one
     /// pixel of geometric error; 0 pins every object at level 0.
     float mLodBias = 1.0f;
@@ -5829,7 +5813,7 @@ private:
     /// The DDGI field, owned, null unless GiParams::ddgi resolved on over a
     /// live VCT arm. Dies BEFORE mVctLighting (it holds that pointer). The
     /// source switch, the placement and the accessors it needs are all public
-    /// API since ogre-patches 0044 and 0050, so this is the engine's own type —
+    /// API since fork 822d538f5+ae2ed529f (was 0044 and 0050), so this is the engine's own type —
     /// which also retires the slicing hazard of holding a derived type through
     /// a non-virtual ~IrradianceField.
     Ogre::IrradianceField            *mIfd          = nullptr;
@@ -5942,7 +5926,7 @@ private:
     /// the scene the author can act on (GiStatus::probesClampedToRegion).
     int mProbesClampedToRegion = 0;
     /// How many material pushes have CROSSED the reflection-probe gate
-    /// (ogre-patch 0028's HlmsPbsDatablock::hasZeroSpecularResponse) on this
+    /// (fork 36162ff37+16d8e29d4 (was 0028)'s HlmsPbsDatablock::hasZeroSpecularResponse) on this
     /// scene. A crossing flushes every renderable wearing the datablock so the
     /// shader is rebuilt with or without the per-pixel probe loop; an ordinary
     /// edit that leaves the material reflective either way costs nothing. The
@@ -6666,7 +6650,7 @@ private:
     // Planar-reflection arm. mPlanar is null unless mPlanarParams.budget > 0.
     // mReflectors is the DOCUMENT's set of reflector nodes and survives the arm
     // going up and down; mActors only exists while the arm is up.
-    /// Ogre's own type since ogre-patch 0052 gave PlanarReflections the two
+    /// Ogre's own type since fork 618d95cca (was 0052) gave PlanarReflections the two
     /// per-slot accessors the lamp-map cache and the frame monitor need
     /// (getNumActiveActorSlots / getActiveActorWorkspace) — it used to be a
     /// derived class of ours reaching into `mActiveActorData`.
@@ -6931,7 +6915,6 @@ public:
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
     void setOffscreenContract(OffscreenContract c) override;
-    OffscreenContract offscreenContract() const override { return mOffscreenContract; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -7457,7 +7440,7 @@ VrBoot *bootBegin(VrInfo &infoOut, std::string &reason);
 /// opaque pointer (the type belongs to the render system).
 void *bootExternalInstance(VrBoot *);
 /// Step 2: the physical device the runtime wants, the device-creation request
-/// ogre-patch 0068 exports, and xrCreateVulkanDeviceKHR. MUST be called AFTER
+/// fork d014b064f+1bccc3f93 (was 0068) exports, and xrCreateVulkanDeviceKHR. MUST be called AFTER
 /// Root::initialise (the exporter reads the instance-extension list the render
 /// system's constructor filled — phase 1a's finding §8.5) and BEFORE the first
 /// createRenderWindow. False = the boot is abandoned; `reason` says why.
@@ -7967,7 +7950,7 @@ public:
     /// The frame's GPU bookkeeping (P1c): rotate the query pools, read back the
     /// samples of the frame two frames ago and reset the pool about to be
     /// written. Must run at the TOP of the frame, outside every encoder. A
-    /// no-op with the monitor off or without ogre-patch 0027.
+    /// no-op with the monitor off or without fork 1a81f866a+1bccc3f93 (was 0027).
     void gpuFrameBegin();
     /// Builds the compositor-graph half of a snapshot (every live workspace,
     /// its nodes and passes, and which scene each renders).

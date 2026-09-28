@@ -2741,7 +2741,7 @@ void SceneMirror::syncVrProxies()
 // suggested): a strip's points ARE its vertex buffer, so a moving hand would
 // destroy and create twelve GPU buffers ninety times a second — and a recycled
 // Vulkan block aliasing a frame still in flight is what hung this box's driver
-// for a fortnight (XID-1, patch 0067). Twenty-four nodes sharing one static
+// for a fortnight (XID-1, fork b028638c1 (was 0067)). Twenty-four nodes sharing one static
 // two-vertex mesh costs nothing anybody can measure and rebuilds no memory.
 //
 // UNLIT, AND THAT IS PHYSICS RATHER THAN TASTE — the same argument the wands'

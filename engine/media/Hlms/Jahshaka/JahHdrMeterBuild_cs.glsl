@@ -10,7 +10,7 @@
 //     punctual specular lobe goes as 1/(pi*alpha^2), so a near-mirror surface
 //     stores +Inf; log() of that, or of a filtered fetch that came back below
 //     zero, is a NaN, and a NaN in a mean is the whole frame's answer (lane
-//     HDR-1, 2026-09-15; ogre-patches 0034 and 0042 bounded it by CLAMPING the
+//     HDR-1, 2026-09-15; fork feab041c6 (was 0034 and 0042) bounded it by CLAMPING the
 //     sample, because a mean cannot drop one). A HISTOGRAM CAN DROP IT: an
 //     unusable sample is simply NOT BINNED. It does not vote. Nothing else in
 //     the frame moves because of it, and no clamp constant has to be invented.
