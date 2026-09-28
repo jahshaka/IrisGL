@@ -2076,8 +2076,17 @@ MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool 
         rec.blended = c.a < kUnlitOpaqueAlpha;
         auto *hlmsUnlit = static_cast<Ogre::HlmsUnlit *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
         Ogre::HlmsMacroblock macro;
-        macro.mDepthCheck = depthTest;
-        macro.mDepthWrite = depthTest;
+        // BOTH KINDS TEST DEPTH (GIZMO-DEPTH-1). A depth-tested overlay tests
+        // the scene's; an ON-TOP one (depthTest=false, queue kOverlayRenderQueue)
+        // tests the overlay pass's OWN depth, which that pass clears
+        // (OgreChain.cpp kOverlayDepthNote) — so it is still never hidden by the
+        // scene, and its parts hide each other by distance instead of by a draw
+        // order nobody chose. An on-top part writes depth unless it BLENDS (a
+        // transparent part must not hide what is behind it; it is drawn after
+        // the opaque ones, back to front — setUnlitMaterial's note). A
+        // depth-tested overlay writes as it always did.
+        macro.mDepthCheck = true;
+        macro.mDepthWrite = depthTest || !rec.blended;
         macro.mCullMode = Ogre::CULL_NONE;
         if (wireframe) macro.mPolygonMode = Ogre::PM_WIREFRAME;
         Ogre::HlmsBlendblock blend;
@@ -2170,15 +2179,21 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
         //     (OgreRenderQueue.cpp:285-311) — so a blended overlay is drawn
         //     after the opaque ones of the same queue, back to front, with no
         //     ordering work of ours;
-        //   * the macroblock is left alone: an ON-TOP overlay
-        //     (createUnlitMaterial's depthTest=false) already has depth write
-        //     off, and a depth-TESTED one keeps whatever it was created with
-        //     rather than having its depth behaviour changed by a colour.
+        //   * an ON-TOP part's macroblock follows it: blended, it writes no
+        //     depth (it must not hide what is behind it), opaque it does — the
+        //     rule createUnlitMaterial applies at creation (GIZMO-DEPTH-1), so
+        //     the two paths cannot diverge either. A depth-TESTED overlay keeps
+        //     the depth behaviour it was created with.
         const bool wantBlend = c.a < kUnlitOpaqueAlpha;
         if (wantBlend != it->second.blended) {
             Ogre::HlmsBlendblock blend;
             if (wantBlend) blend.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
             db->setBlendblock(blend);
+            if (it->second.onTop) {
+                Ogre::HlmsMacroblock macro = *db->getMacroblock();
+                macro.mDepthWrite = !wantBlend;
+                db->setMacroblock(macro);
+            }
             it->second.blended = wantBlend;
         }
         db->setColour(toOgre(c));
