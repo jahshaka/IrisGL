@@ -2882,40 +2882,56 @@ struct GiQualityFacts {
     /// HDR and shadowed = 838,987,760 B (array 536,739,840 + shadow targets
     /// 268,435,456 + cubes 33,550,320 + the placement's depth 262,144), i.e.
     /// 25.2 MB a probe plus 33.8 MB fixed — the arithmetic below reproduces it to
-    /// the byte. The budgets: Epic 1 GiB (41 probes at its 512 px HDR shadowed —
-    /// the measured 32-probe Showroom grid fits), High 512 MiB (19), Medium
-    /// 128 MiB (61 at 256 px), Low 64 MiB (125 at 128 px). PROVISIONAL: the
+    /// the byte from its real terms (PCC-BUDGET-2: the node's textures at the live
+    /// shadow settings and each capture's depth buffer). The budgets: Epic 1 GiB
+    /// (41 probes at its 512 px HDR shadowed — the measured 32-probe Showroom grid
+    /// fits), High 512 MiB (19), Medium 128 MiB (55 at 256 px, unshadowed), Low
+    /// 64 MiB (111 at 128 px) — the two unshadowed rows 61 and 125 while the
+    /// capture's depth went uncounted. PROVISIONAL: the
     /// per-tier numbers are the lead's to confirm; the arithmetic is not.
     unsigned long long probeGridBudgetBytes = 128ull << 20;
 };
 
 /// THE BYTES A REFLECTION-PROBE GRID HOLDS (PCC-BUDGET-1): `probes` probes at
-/// `faceSize` px, RGBA16F when `hdr` else RGBA8, each with 8 MiB of shadow
-/// targets when `shadowed`, plus the grid's capture and IBL cubes and the
-/// placement's 256 px depth. A probe's array slice carries its mips down to
-/// 16x16 (the pin's IBL chain); the two cubes carry theirs to 1x1 between them
-/// (85 more texels a face). This reproduces the F12-PCC measurement EXACTLY:
-/// 32 probes at 512 px HDR shadowed = 838,987,760 B.
-inline unsigned long long giProbeGridBytes(unsigned faceSize, bool hdr, bool shadowed,
-                                           unsigned probes)
+/// `faceSize` px, RGBA16F when `hdr` else RGBA8, each with its capture's own
+/// `faceSize`^2 D32 depth buffer (one per probe workspace, shadowed or not) and
+/// `shadowBytes` of shadow targets (0 when its captures are unshadowed), plus the
+/// grid's capture and IBL cubes and the placement's 256 px depth. A probe's array
+/// slice carries its mips down to 16x16 (the pin's IBL chain); the two cubes
+/// carry theirs to 1x1 between them (85 more texels a face).
+///
+/// THE SHADOW TERM IS THE NODE'S REAL TEXTURES (PCC-BUDGET-2), handed in by the
+/// engine that owns them (OgreEngine::probeShadowNodeBytes: the probe node's
+/// atlas at its live resolution and focused-map count, plus its point-light
+/// scratch cube) — a constant 8 MiB stood here, which reproduced one fixture
+/// (Showroom 2 at the High shadow settings) and no other: it was the node's 7 MiB
+/// (a 512 x 2816 D32 atlas with four focused maps + a 256^2 x 6 R32F cube) PLUS
+/// the capture's own 1 MiB depth buffer, which every probe holds shadowed or not
+/// and which the constant hid (measured on Showroom 2, app.textureMemory by size:
+/// 32 x each of the three; with the probes' shadows off only the depth stays).
+/// The node is 3.5 MiB (two focused maps, no cube) to 7 MiB at a 2048 atlas.
+/// Showroom 2 at Epic: 32 x (16,773,120 + 1,048,576 + 7,340,032) + 33,812,464 =
+/// 838,987,760 B — the F12-PCC measurement, now from its real terms.
+inline unsigned long long giProbeGridBytes(unsigned faceSize, bool hdr,
+                                           unsigned long long shadowBytes, unsigned probes)
 {
     const unsigned long long bpp = hdr ? 8ull : 4ull;
     unsigned long long texels = 0ull;
     for (unsigned r = faceSize; r >= 16u; r >>= 1u) texels += (unsigned long long)r * r;
     const unsigned long long slice = 6ull * texels * bpp;
-    const unsigned long long shadow = shadowed ? (8ull << 20) : 0ull;
+    const unsigned long long captureDepth = 4ull * faceSize * faceSize;
     const unsigned long long fixed = 2ull * slice + 6ull * bpp * 85ull + 262144ull;
-    return fixed + (unsigned long long)probes * (slice + shadow);
+    return fixed + (unsigned long long)probes * (slice + captureDepth + shadowBytes);
 }
 
 /// How many probes a grid at this face size / format / shadowing may keep under
 /// `budget` bytes (at least 1: a budget smaller than one probe still keeps the
 /// probe that sees the most, rather than silently building nothing).
 inline unsigned giProbeGridBudgetCount(unsigned long long budget, unsigned faceSize, bool hdr,
-                                       bool shadowed)
+                                       unsigned long long shadowBytes)
 {
-    const unsigned long long fixed = giProbeGridBytes(faceSize, hdr, shadowed, 0u);
-    const unsigned long long each = giProbeGridBytes(faceSize, hdr, shadowed, 1u) - fixed;
+    const unsigned long long fixed = giProbeGridBytes(faceSize, hdr, shadowBytes, 0u);
+    const unsigned long long each = giProbeGridBytes(faceSize, hdr, shadowBytes, 1u) - fixed;
     if (budget <= fixed || !each) return 1u;
     return unsigned(std::max<unsigned long long>(1ull, (budget - fixed) / each));
 }

@@ -3797,6 +3797,9 @@ public:
     /// and not a ray tier.
     bool probeGridByRays() const;
     bool probeGridWanted() const;
+    /// One probe's shadow-node bytes when this grid's captures are shadowed, else
+    /// 0 (PCC-BUDGET-2: OgreEngine::probeShadowNodeBytes at the live settings).
+    unsigned long long probeShadowBytes() const;
     /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
     void dropProbeGridByRays();
     /// THE LIGHTING SERIAL the gather's settled history counts from
@@ -7806,6 +7809,14 @@ public:
     void setShadowMapBudget(unsigned maps) override;
     unsigned shadowMapBudget() const override;
     ShadowStatus shadowStatus() const override;
+    /// THE BYTES ONE SHADOWED REFLECTION PROBE HOLDS FOR ITS SHADOW NODE
+    /// (PCC-BUDGET-2): the probe node's atlas at this engine's live settings
+    /// (planShadowAtlas at probeShadowResolution, the derived focused count capped
+    /// at kProbeShadowMaxFocusedMaps — buildShadowNode's own arithmetic) plus its
+    /// point-light scratch cube (R/2 squared x 6, R32F) when it places a focused
+    /// map. The cube's depth buffer is POOLED (one per resolution for the whole
+    /// render system), never a probe's. What giProbeGridBytes counts per probe.
+    unsigned long long probeShadowNodeBytes() const;
     bool refreshShadows() override;
     /// THE LAMP-MAP CACHE, frame half one (OgreShadow.cpp; ENGINE_CACHE_POLICY
     /// P2): at the top of the frame, before any per-view work — switches the

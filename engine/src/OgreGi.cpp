@@ -1066,10 +1066,10 @@ GiStatus OgreScene::giStatus() const {
             st.probeGridBudgetBytes  = facts.probeGridBudgetBytes;
             st.probeGridBudgetProbes = mPccProbeRes
                 ? int(giProbeGridBudgetCount(facts.probeGridBudgetBytes, mPccProbeRes, mPccHdr,
-                                             mPccShadowed))
+                                             probeShadowBytes()))
                 : 0;
             st.probeGridBytes = mPcc && mPccProbeRes
-                ? giProbeGridBytes(mPccProbeRes, mPccHdr, mPccShadowed,
+                ? giProbeGridBytes(mPccProbeRes, mPccHdr, probeShadowBytes(),
                                    unsigned(mPcc->getProbes().size()))
                 : 0ull;
             st.probesOverBudget = mProbesOverBudget;
@@ -5912,7 +5912,7 @@ void OgreScene::buildPccFit() {
         {
             const GiQualityFacts facts = giQualityFacts(mGi.quality);
             const unsigned cap = giProbeGridBudgetCount(facts.probeGridBudgetBytes, mPccProbeRes,
-                                                        mPccHdr, mPccShadowed);
+                                                        mPccHdr, probeShadowBytes());
             if (keptBy.size() > cap) {
                 std::stable_sort(keptBy.begin(), keptBy.end(),
                                  [](const std::pair<float, Ogre::CubemapProbe *> &a,
@@ -6259,6 +6259,10 @@ void OgreScene::buildPccFinish() {
 // which is a FEATURE here: a re-converge runs progressively over the previous
 // converged data, so a light drag never flashes the room black.
 // ===========================================================================
+
+unsigned long long OgreScene::probeShadowBytes() const {
+    return mPccShadowed && mEngine ? mEngine->probeShadowNodeBytes() : 0ull;
+}
 
 bool OgreScene::ddgiWanted() const {
     // Fed by VctLighting: there is nothing to build without a voxel volume.
