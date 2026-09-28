@@ -2615,6 +2615,17 @@ void OgreEngine::shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
 }
 
 OgreEngine::~OgreEngine() {
+    // THE FRAME MONITOR GOES FIRST (MONITOR-RETIRE-1 F2; trap 1: teardown
+    // mirrors creation). It is a process-wide pointer (`monitor::gMonitor`)
+    // into THIS engine's member, and its listener sits on workspaces the loops
+    // below destroy: left on, the member died with the engine and the pointer
+    // did not — a second engine booted in the same process crashed in
+    // FrameMonitor::beginFrame on its first frame. Stopping the capture here
+    // detaches every listener while the workspaces live, frees the query pools
+    // while the device lives, and clears the global.
+    try { setFrameMonitor(MonitorLevel::Off); } catch (...) {}
+    if (monitor::gMonitor && (!mMonitor || monitor::gMonitor == mMonitor.get()))
+        monitor::gMonitor = nullptr;
     // THE VR SESSION GOES FIRST, and it has to: it owns a View (a workspace, a
     // camera, an RTT), a second workspace on somebody else's target and a set
     // of XR swapchains that name VkImages the runtime owns. Every one of those
