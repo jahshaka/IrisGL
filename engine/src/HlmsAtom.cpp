@@ -873,8 +873,8 @@ void HlmsAtom::uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorS
         for (const Ogre::LightClosest &lc : shadowNode->getShadowCastingLights())
             if (lc.light) casting.push_back(lc.light);
     struct Entry {
-        const Ogre::Light *light;
-        float power;
+        const Ogre::Light *light = nullptr;
+        float power = 0.0f;
     };
     std::vector<Entry> lights;
     const Ogre::uint32 mask = sm->getLightMask();
