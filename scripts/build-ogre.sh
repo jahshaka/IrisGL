@@ -331,6 +331,10 @@ grep -q "OgreNextOverlay" "$SRC/build/build.ninja" || {
 }
 
 cmake --build "$SRC/build" -j"$JOBS"
+# Outputs of targets the configure no longer has (a component switched off: GL3Plus,
+# the tools) stay in the build dir for ever otherwise — 63 MB of them per tree when
+# GL3Plus went (D6-FORK-TOOLING). Ninja knows exactly which they are.
+ninja -C "$SRC/build" -t cleandead > /dev/null
 # `cmake --install` overwrites, it never REMOVES: a component switched off (or
 # a rename upstream) leaves its old .so behind for ever, and an orphan that no
 # longer has its dependencies installed beside it fails the gate below with a
