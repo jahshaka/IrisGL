@@ -1819,7 +1819,11 @@ void SurfaceCache::traceSun() {
             job.toSun = toSun;   // ZERO without a sun: every texel lit
             job.range = kMoverRayRange;
             job.still = true;
-            if (mMoverHooks.trace && mMoverHooks.trace(job)) {
+            // THE LIFT NEEDS THE RAY RULE'S FOOTPRINT: before the ray tier has
+            // chosen its levels once (a scene's first frames, rays just turned on)
+            // the near copy's error is not known — the trace waits, as it waits
+            // for a structure.
+            if (mRayFootprintPerMetre > 0.0f && mMoverHooks.trace && mMoverHooks.trace(job)) {
                 for (unsigned idx : still) {
                     CardRec &c = mCards[idx];
                     c.stillPending = false;
@@ -1981,6 +1985,7 @@ void SurfaceCache::traceSun() {
     job.depth = mAtlas[unsigned(CardLayer::Depth)];
     job.normal = mAtlas[unsigned(CardLayer::Normal)];
     job.vis = mMoverVis;
+    job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];   // bound, not written, in this mode
     job.toSun = toSun;
     job.range = kMoverRayRange;
     if (!mMoverHooks.trace(job)) {

@@ -7003,6 +7003,15 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     // follows reads the layer as a UAV and its analyzeBarriers orders it after
     // this write (the solver now knows the layer was written in compute).
     {
+        // THE CAPTURE'S COPY ENCODER CLOSES FIRST (ATOM-S3-CARDCAP, measured under the
+        // validation layer: VUID-VkImageMemoryBarrier-oldLayout-01197 in the selftest).
+        // The atlas copies leave Ogre's copy encoder OPEN with the layers in
+        // TRANSFER_DST; the solver's barrier below moves them to their read/UAV
+        // layouts, and an encoder closed AFTER it would transition them back from
+        // TRANSFER_DST — a layout they no longer hold. (The movers' trace had the
+        // same order since PHOTON-CARDS-4; the still trace runs every capture frame,
+        // which is what surfaced it.)
+        mDev->mGraphicsQueue.endAllEncoders();
         const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
         Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
         Ogre::ResourceTransitionArray trans;
