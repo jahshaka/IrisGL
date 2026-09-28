@@ -6312,14 +6312,22 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
 /// updates LOD lists writes it — a planar reflector's mirrored camera, a PiP
 /// inset, a probe cube face, a thumbnail. So this is "the level the last LOD
 /// update chose", which in an ordinary editor frame is the main view's and in a
-/// frame that also rendered a mirror may be the mirror's. A per-pass reading
-/// would need a per-pass slot in the pin, which is a patch and not a diagnostic.
+/// frame that also rendered a mirror may be the mirror's. A shadow map's caster
+/// passes do NOT leave theirs behind (SHADOW-LOD-1: each walks LOD at its own
+/// camera and the shadow node puts the view's levels back after its passes).
+///
+/// `cut` = the item rides the Atom queue: the view draws it through the id pass's
+/// CLUSTER CUT, and no pass of the view walks its per-object level any more (the
+/// fork's LOD walk skips the queues a pass skips — SHADOW-LOD-1). Such a row has
+/// no view level: `level` is 0 and `triangles` level 0's (the authored mesh the
+/// cut refines), and the Levels view (world.setAtomView) is what shows its cut.
 struct ObjectLodDesc {
     NodeId             node = 0;
     std::string        name;
     unsigned           level = 0;
     unsigned           levels = 1;
     unsigned long long triangles = 0;
+    bool               cut = false;
 };
 
 /// What the renderer measured this frame (STATS_OVERLAY_SPEC.md §4).
