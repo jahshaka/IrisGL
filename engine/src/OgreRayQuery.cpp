@@ -4813,10 +4813,15 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE VIEW'S ID IMAGE (REFLECT-MOVERS-1): present when the chain carries the id
     // pass (ChainDesc::atomDraw), which ran before every scene pass of the frame.
     // Absent is not an error — every surface then takes the camera path.
+    // ASKED ONLY OF A CHAIN THAT DECLARES IT (ChainDesc::atomDraw; a stereo chain
+    // never does): Ogre LOGS every getDefinedTexture miss as an exception before the
+    // catch — per frame, on every VR eye (the gate's vr.eye_grade read 4,254 of them).
     Ogre::TextureGpu *idTex = nullptr;
-    try {
-        idTex = node->getDefinedTexture(Ogre::IdString(kAtomIdTexture));
-    } catch (Ogre::Exception &) { idTex = nullptr; }
+    if (view->chainDesc().atomDraw && !view->stereo()) {
+        try {
+            idTex = node->getDefinedTexture(Ogre::IdString(kAtomIdTexture));
+        } catch (Ogre::Exception &) { idTex = nullptr; }
+    }
     if (idTex && (idTex->getWidth() != ssrTex->getWidth() || idTex->getHeight() != ssrTex->getHeight()))
         idTex = nullptr;   // a different picture's ids
     // THE UAV FLAG IS THE CONTRACT (OgreChain.cpp, ChainDesc::rayReflect). A
@@ -5587,9 +5592,13 @@ constexpr VkDescriptorType kMotionTypes[kMotionBindings] = {
 };
 /// rq_motion.comp's Params, member for member.
 struct MotionParams {
-    float camPos[4], rayTL[4], rayRight[4], rayDown[4], fwd[4];
-    float projParams[4];
-    float resolution[4];
+    float camPos[4] = {};
+    float rayTL[4] = {};
+    float rayRight[4] = {};
+    float rayDown[4] = {};
+    float fwd[4] = {};
+    float projParams[4] = {};
+    float resolution[4] = {};
 };
 /// Sets in the pool: a ring a view, for as many views as the reflection pool serves.
 constexpr unsigned kMotionRing = 3u;
@@ -5676,6 +5685,9 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     if (!scene || !cam || view->stereo()) return;
     const Ogre::CompositorNode *node = pass->getParentNode();
     if (!node) return;
+    // (the chain declares both only with the march and the id pass: never ask it
+    // otherwise — a miss is logged as an exception every frame)
+    if (!view->chainDesc().atomDraw) return;
     Ogre::TextureGpu *vel = nullptr, *ids = nullptr, *depth = nullptr;
     try {
         vel = node->getDefinedTexture(Ogre::IdString("jahSsrVelocity"));
