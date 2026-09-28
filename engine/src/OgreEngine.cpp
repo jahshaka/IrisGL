@@ -1656,10 +1656,10 @@ bool OgreEngine::deviceLost() const { return mDeviceLost; }
 // an install that has to stay responsive).
 //
 // CALLING IT OUTSIDE A FRAME IS THE PIN'S TOLERATED SHAPE (its issue #433),
-// not its documented practice — the two upstream offline capture paths one
-// might cite (OgreParallaxCorrectedCubemapAuto.cpp:385-388,
-// OgreIrradianceFieldRaster.cpp:284-288) complete the bracket with
-// `_endFrameOnce()` every time. AND IT COMMITS ONLY EVERY SECOND CALL:
+// not its documented practice — upstream's offline capture path one might
+// cite (OgreParallaxCorrectedCubemapAuto.cpp:385-388; the raster irradiance
+// field's renderProbes did the same until the fork deleted it) completes the
+// bracket with `_endFrameOnce()` every time. AND IT COMMITS ONLY EVERY SECOND CALL:
 // `VulkanVaoManager::_update` (OgreVulkanVaoManager.cpp:2041-2070) issues the
 // `commitAndNextCommandBuffer( NewFrameIdx )` only when the previous _update was
 // not followed by a commit, so one bare call after a normal frame ARMS and the

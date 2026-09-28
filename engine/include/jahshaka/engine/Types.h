@@ -5570,11 +5570,11 @@ struct EngineConfig {
     /// takes, and the one every ray-consuming suite must be able to run on this
     /// GPU so the fallback is proved on every push.
     ///
-    /// FALSE REACHES THE DEVICE, not just this tier. The host sets
-    /// JAHSHAKA_NO_RAY_QUERY alongside it, which fork d014b064f (was 0038) reads at
-    /// vkCreateDevice, so the process comes up on exactly the instance,
-    /// extension list and feature set it would have had if the tier did not
-    /// exist. "The picture a machine without ray tracing renders" is therefore
+    /// FALSE REACHES THE DEVICE, not just this tier: the engine hands it to the
+    /// fork's VulkanDevice::msRayQueryAllowed before the render system loads (fork
+    /// 98a6f4d34's static, gating 0038's requests at vkCreateDevice), so the
+    /// process comes up on exactly the instance, extension list and feature set
+    /// it would have had if the tier did not exist. "The picture a machine without ray tracing renders" is therefore
     /// literal and not a manner of speaking — which is what makes the suites
     /// that assert the fallback worth anything.
     ///
