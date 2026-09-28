@@ -1925,17 +1925,21 @@ void OgreScene::updateSurfaceCache() {
                                                  : facts.cardBudgetTexels;
     view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
                                                  : facts.cardResidencyRadius;
-    // THE LIGHT SIGNATURE THE CACHE KEYS ON IS NOT `mGiLightWriteSerial`, and
-    // the difference is a slider drag. That serial bumps on EVERY `setLight`
-    // push and every light pose write, colour and intensity included — but the
-    // only thing a capture stores from a light is the SHADOW TERM, which a
-    // colour or an intensity cannot move. So the signature folded here is what
-    // a SHADOW depends on: `Node::lightShadowKey` (the LightDesc fields the
-    // shadow map depends on — type, range, spot cone, castShadows; colour and
-    // intensity deliberately absent, the same rule the lamp-map cache keeps),
-    // the light's derived POSE, and whether it is shown. A colour slider then
-    // costs the cache nothing at all, and a lamp that moves costs it exactly
-    // the cards whose shadows it could have changed.
+    // THE TWO LIGHT SIGNATURES, and neither is `mGiLightWriteSerial` (which bumps on
+    // every `setLight` push and every pose write, a colour slider included).
+    //
+    // `lightSerial` — WHAT A CAPTURE STORES FROM A LIGHT: the sun's shadow term and
+    // nothing else (the capture is a prepass; its one shadow term is the directional
+    // light's, DOCS/traps/ENGINE.md). So it folds the DIRECTIONAL shadow-casting
+    // lights only — their `Node::lightShadowKey` (type, castShadows), their derived
+    // pose and whether they are shown. A point or spot lamp moving changes no
+    // captured byte and re-queues no card (ATOM-S3-CARDCAP: it used to re-capture
+    // the whole resident set — scale.atlas W9's 378 cards a lamp move).
+    //
+    // `radianceSerial` (below) — what a card's LIT radiance depends on: EVERY
+    // light's pose and shadow key (the relight lights a card with every lamp,
+    // unculled), plus colour, power, reach and cone. A lamp move relights the
+    // resident set under the relight's own budget and captures nothing.
     //
     // Over `mLightNodes`, which is the engine's own light index (a hint that is
     // a superset), so this is a handful of quantised folds and not a walk of
@@ -1948,36 +1952,38 @@ void OgreScene::updateSurfaceCache() {
     std::optional<monitor::Stage> lightStage;
     lightStage.emplace("engine.cards.lights");
     unsigned long long lightSig = 1469598103934665603ull;
-    const auto fold = [&lightSig](unsigned long long v) {
-        lightSig ^= v;
-        lightSig *= 1099511628211ull;
+    unsigned long long radianceSig = 1469598103934665603ull;
+    const auto foldInto = [](unsigned long long &sig, unsigned long long v) {
+        sig ^= v;
+        sig *= 1099511628211ull;
     };
-    const auto foldF = [&fold](float f) {
+    const auto quant = [](float f) {
         // Quantised to a millimetre / a thousandth: float noise below the
         // tolerance the whole pipeline works to must not re-capture a card.
-        fold((unsigned long long)(long long)std::lround(double(f) * 1000.0));
+        return (unsigned long long)(long long)std::lround(double(f) * 1000.0);
     };
     for (NodeId lid : mLightNodes) {
         auto lit = mNodes.find(lid);
         if (lit == mNodes.end() || !lit->second.light) continue;
         const Node &ln = lit->second;
-        fold(ln.lightShadowKey);
-        fold(ln.shown ? 1ull : 0ull);
+        unsigned long long pose[9] = { ln.lightShadowKey, ln.shown ? 1ull : 0ull, 0, 0, 0, 0, 0, 0, 0 };
         if (ln.node) {
             const Ogre::Vector3 p = ln.node->_getDerivedPosition();
             const Ogre::Quaternion q = ln.node->_getDerivedOrientation();
-            foldF(p.x); foldF(p.y); foldF(p.z);
-            foldF(q.x); foldF(q.y); foldF(q.z); foldF(q.w);
+            pose[2] = quant(p.x); pose[3] = quant(p.y); pose[4] = quant(p.z);
+            pose[5] = quant(q.x); pose[6] = quant(q.y); pose[7] = quant(q.z); pose[8] = quant(q.w);
         }
+        for (unsigned long long v : pose) foldInto(radianceSig, v);
+        if (ln.light->getType() != Ogre::Light::LT_DIRECTIONAL || !ln.light->getCastShadows()) continue;
+        for (unsigned long long v : pose) foldInto(lightSig, v);
     }
     view.lightSerial = lightSig;
-    // THE RADIANCE SIGNATURE: the shadow signature above plus everything a
+    // THE RADIANCE SIGNATURE: every light's pose above plus everything a
     // card's LIT radiance depends on and its capture does not — the colour,
     // the power, the reach and the cone. A colour slider costs the cache a
     // relight of the resident set (the `Jahshaka/CardLight` job, under its own
     // budget) and not one capture. The lights themselves are handed over for
     // the job's light list (below).
-    unsigned long long radianceSig = lightSig;
     for (NodeId lid : mLightNodes) {
         auto lit = mNodes.find(lid);
         if (lit == mNodes.end() || !lit->second.light) continue;

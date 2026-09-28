@@ -196,13 +196,14 @@ struct CardSceneView {
     Ogre::Vector3 viewerPos;
     unsigned budgetTexels = 0u;
     float    radius = 0.0f;
-    /// THE LIGHT WRITE SERIAL — the one signature the cache still compares
-    /// rather than being told about. A light is not owned by an instance, so
-    /// there is nothing to be precise about: a light write stales every card's
-    /// shadow term, and the counter is where a suite sees it.
+    /// THE SUN SIGNATURE — the directional shadow-casting lights' pose and shadow
+    /// key (OgreScene::updateSurfaceCache): the one light quantity a capture
+    /// stores. Its change stales every card's shadow term; a point or spot lamp
+    /// is not in it (a card holds no lamp's shadow).
     unsigned long long lightSerial = 0ull;
-    /// THE RADIANCE SIGNATURE (PHOTON-CARDS-1): `lightSerial` plus what only a
-    /// card's LIT radiance depends on (colour, power, reach, cone) — a change
+    /// THE RADIANCE SIGNATURE (PHOTON-CARDS-1): every light's pose and shadow key
+    /// plus what only a card's LIT radiance depends on (colour, power, reach,
+    /// cone) — a change
     /// relights the resident set and recaptures nothing.
     unsigned long long radianceSerial = 0ull;
     /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
