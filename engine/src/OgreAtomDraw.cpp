@@ -72,6 +72,23 @@ OgreView *atomViewOf(const Ogre::CompositorWorkspace *ws) {
     return it == atomViews().end() ? nullptr : it->second;
 }
 
+namespace {
+std::unordered_map<const Ogre::SceneManager *, OgreScene *> &atomScenes() {
+    static std::unordered_map<const Ogre::SceneManager *, OgreScene *> sScenes;
+    return sScenes;
+}
+}  // namespace
+void atomRegisterScene(const Ogre::SceneManager *sm, OgreScene *scene) {
+    if (sm && scene) atomScenes()[sm] = scene;
+}
+void atomUnregisterScene(const Ogre::SceneManager *sm) {
+    if (sm) atomScenes().erase(sm);
+}
+OgreScene *atomSceneOf(const Ogre::SceneManager *sm) {
+    auto it = atomScenes().find(sm);
+    return it == atomScenes().end() ? nullptr : it->second;
+}
+
 // ---------------------------------------------------------------------------
 // THE SCREEN DECODE'S ARMING (ATOM S3-DRAW; ATOM-DECODE-CLASS-1). The view's SCREEN
 // DECODE PASSES (kScreenDecodePassIdentifier: one in front of the prepass, one in
@@ -353,7 +370,11 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
         return AtomRoute::Blended;
     // The id pass culls back faces (Ogre's default macroblock); a material drawn
     // with any other cull mode stays where its faces are drawn as authored.
-    if (db->getMacroblock()->mCullMode != Ogre::CULL_CLOCKWISE) return AtomRoute::TwoSided;
+    // ...AND ITS SHADOW WITH THE SAME FACES (ATOM-SHADOWS-1): the caster cut culls back
+    // faces too, so a caster macroblock set apart from the material's keeps it on PBS.
+    if (db->getMacroblock()->mCullMode != Ogre::CULL_CLOCKWISE ||
+        db->getMacroblock(true)->mCullMode != Ogre::CULL_CLOCKWISE)
+        return AtomRoute::TwoSided;
     // A PLANAR MIRROR: PBS matches the RENDERABLE to its actor at hash time and binds
     // that actor's reflection per draw (HlmsPbs::calculateHashForPreCreate / fillBuffersFor);
     // a decode twin serves a bucket, not a renderable, so the mirror stays on PBS.
@@ -547,6 +568,15 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         st.occlusion = v->atomOcclusionStats(st.occluded, st.disoccluded);
         break;
     }
+    // THE CASTER CUT'S COUNTERS (ATOM-SHADOWS-1): the scene's one caster list.
+    st.casterValid = mCasterStats.valid;
+    st.casterMaps = mCasterStats.maps;
+    st.casterClusters = mCasterStats.clusters;
+    st.casterInstances = mCasterStats.instances;
+    st.casterOverflow = mCasterStats.overflow;
+    st.casterMissing = mCasterStats.missing;
+    st.casterIndexBudget = mCasterStats.indexBudget;
+    st.casterTriangles = mCasterStats.triangles;
     return st;
 }
 

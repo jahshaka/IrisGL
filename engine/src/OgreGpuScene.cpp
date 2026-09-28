@@ -843,6 +843,11 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     if (item->getNumSubItems()) {
         const Ogre::SubItem *sub = item->getSubItem(0);
         out.raster[0] = detail::HlmsAtom::materialWordOf(sub->getDatablock());
+        // THE CASTER'S CONSTANT BIAS (ATOM-SHADOWS-1): the datablock's own, which the
+        // stock caster reads per draw (HlmsPbs::fillBuffersFor) and the caster cut per
+        // instance (atom_caster.vert).
+        if (const Ogre::HlmsDatablock *db = sub->getDatablock())
+            std::memcpy(&out.raster[3], &db->mShadowConstantBias, sizeof(uint32_t));
         const Ogre::VertexArrayObjectArray &vaos = sub->getSubMesh()->mVao[Ogre::VpNormal];
         if (!vaos.empty() && vaos[0]) {
             size_t posSource = 0u, posOffset = 0u, tanSource = 0u, tanOffset = 0u;

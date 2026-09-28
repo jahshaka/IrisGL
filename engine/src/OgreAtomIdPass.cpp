@@ -70,6 +70,7 @@
 #include "OgreVulkanQueue.h"
 #include "OgreVulkanRenderSystem.h"
 #include "Vao/OgreVulkanBufferInterface.h"
+#include "AtomVulkan.h"
 
 #include "rayquery/atom_id_frag_spv.h"
 #include "rayquery/atom_id_vert_spv.h"
@@ -176,29 +177,9 @@ void logOnce(const std::string &what) {
     Ogre::LogManager::getSingleton().logMessage("Jahshaka atom id pass: " + what, Ogre::LML_CRITICAL);
 }
 
-Ogre::VulkanRenderSystem *vulkanOf(Ogre::RenderSystem *rs) {
-    return rs ? dynamic_cast<Ogre::VulkanRenderSystem *>(rs) : nullptr;
-}
-
-/// The VkBuffer + byte offset of an Ogre buffer (the ray tier's own reach).
-template <typename T>
-void bufferOf(T *buf, VkBuffer &outBuffer, VkDeviceSize &outOffset) {
-    auto *bi = static_cast<Ogre::VulkanBufferInterface *>(buf->getBufferInterface());
-    outBuffer = bi->getVboName();
-    outOffset = VkDeviceSize(buf->_getFinalBufferStart()) * buf->getBytesPerElement();
-}
-
 /// A device address as the shader's uvec2 (lo, hi).
 void addressOf(Ogre::UavBufferPacked *buf, uint32_t out[2]) {
-    VkBuffer b = VK_NULL_HANDLE;
-    VkDeviceSize off = 0;
-    bufferOf(buf, b, off);
-    VkBufferDeviceAddressInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-    info.buffer = b;
-    const VkDeviceAddress a = gId.bufferDeviceAddress(gId.dev, &info) + off;
-    out[0] = uint32_t(a & 0xFFFFFFFFull);
-    out[1] = uint32_t(a >> 32u);
+    atomAddressOf(gId.dev, gId.bufferDeviceAddress, buf, out);
 }
 
 /// THE ID PASS'S STATS RING, per view: the cull's count words copied into host-visible
@@ -352,7 +333,7 @@ void cycleStats(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreView *vie
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
         VkBuffer src = VK_NULL_HANDLE;
         VkDeviceSize srcOff = 0;
-        bufferOf(cull->count(), src, srcOff);
+        atomBufferOf(cull->count(), src, srcOff);
         VkBufferCopy c{};
         c.srcOffset = srcOff;
         c.dstOffset = dst;
@@ -609,7 +590,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
     const Ogre::RenderPassDescriptor *rpd = pass->renderPassDesc();
     Ogre::TextureGpu *ids = rpd->mColour[0].texture;
     Ogre::TextureGpu *depthTex = rpd->mDepth.texture;
-    Ogre::VulkanRenderSystem *vkRs = vulkanOf(ctx.renderSystem);
+    Ogre::VulkanRenderSystem *vkRs = atomVulkanOf(ctx.renderSystem);
     if (!ids || !depthTex || !vkRs) return;
     OgreView *view = atomViewOf(pass->getParentNode()->getWorkspace());
     OgreScene *scene = view ? view->ogreScene() : nullptr;
@@ -816,12 +797,12 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         // replaced is deleted): each command's run holds real vertex indices.
         VkBuffer ib = VK_NULL_HANDLE;
         VkDeviceSize ibOff = 0;
-        bufferOf(cull.cutStream(), ib, ibOff);
+        atomBufferOf(cull.cutStream(), ib, ibOff);
         vkCmdBindIndexBuffer(cmd, ib, ibOff, VK_INDEX_TYPE_UINT32);
         VkBuffer drawBuf = VK_NULL_HANDLE, countBuf = VK_NULL_HANDLE;
         VkDeviceSize drawOff = 0, countOff = 0;
-        bufferOf(cull.draws(), drawBuf, drawOff);
-        bufferOf(cull.count(), countBuf, countOff);
+        atomBufferOf(cull.draws(), drawBuf, drawOff);
+        atomBufferOf(cull.count(), countBuf, countOff);
         gId.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff,
                                      std::min(cull.capacity(), gs->slotCount()),
                                      GpuCull::kDrawWords * sizeof(uint32_t));
@@ -851,7 +832,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
 }  // namespace
 
 bool atomIdPassSupported(Ogre::RenderSystem *rs) {
-    Ogre::VulkanRenderSystem *vkRs = vulkanOf(rs);
+    Ogre::VulkanRenderSystem *vkRs = atomVulkanOf(rs);
     if (!vkRs || !vkRs->getVulkanDevice() || gId.refused) return false;
     Ogre::VulkanDevice *d = vkRs->getVulkanDevice();
     return d->hasBufferDeviceAddress() &&

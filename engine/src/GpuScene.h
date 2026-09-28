@@ -128,7 +128,10 @@ struct GpuInstance {
     ///       two above, NOT `ids.z` (the light mask) and not the mesh index: the
     ///       mesh index keeps naming the MESH (its bounds, its levels, its BLAS key),
     ///       and only the geometry an item presents changes.
-    ///   w = 0.
+    ///   w = THE CASTER'S CONSTANT BIAS (ATOM-SHADOWS-1): sub-item 0's datablock
+    ///       `mShadowConstantBias`, bit-cast — what the stock caster reads per draw
+    ///       (HlmsPbs::fillBuffersFor) and the caster cut reads per instance
+    ///       (atom_caster.vert). 0 on a cleared slot.
     /// Written by ONE place, `OgreScene::composeGpuInstance`, beside the ids — at
     /// attach and at a material change (both mark the slot), and when the ray tier
     /// creates or drops a skin cache (`GpuScene::setSkinRow`, which marks it too).
