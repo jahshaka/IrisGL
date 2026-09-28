@@ -33,11 +33,11 @@ if [ "$(uname -s)" = "Darwin" ]; then
     # macOS: Vulkan via MoltenVK (LunarG SDK — source its setup-env.sh first).
     # No X11 exists: OGRE_CONFIG_UNIX_NO_X11 drops XCB windowing (which would
     # otherwise default ON — CMake counts APPLE as UNIX) and forces the null
-    # window on. GL3Plus is GLX-based; headless engine needs Vulkan only.
+    # window on.
     # LIBS_AS_FRAMEWORKS defaults ON for APPLE but its header-copy steps emit
     # Xcode-generator $(VARS) that break Ninja — plain dylibs, like Linux .so.
     # No FreeImage on macOS (no package manager): bundled STBI codec instead.
-    PLATFORM_FLAGS="-DOGRE_CONFIG_UNIX_NO_X11=TRUE -DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=OFF -DOGRE_BUILD_LIBS_AS_FRAMEWORKS=OFF -DOGRE_CONFIG_ENABLE_FREEIMAGE=OFF -DOGRE_CONFIG_ENABLE_STBI=ON"
+    PLATFORM_FLAGS="-DOGRE_CONFIG_UNIX_NO_X11=TRUE -DOGRE_BUILD_LIBS_AS_FRAMEWORKS=OFF -DOGRE_CONFIG_ENABLE_FREEIMAGE=OFF -DOGRE_CONFIG_ENABLE_STBI=ON"
     # rapidjson (header-only; apt's rapidjson-dev on Linux): FindRapidjson
     # honours Rapidjson_HOME. Look beside the (now per-tree) install prefix
     # first, then the legacy shared-workspace location the Mac vendored it to
@@ -80,8 +80,7 @@ else
     # Single quotes: $ORIGIN must reach the linker literally, not be expanded
     # by this shell. CMake applies it at INSTALL time, so the build tree is
     # unaffected.
-    PLATFORM_FLAGS="-DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=ON"
-    PLATFORM_FLAGS="$PLATFORM_FLAGS -DCMAKE_INSTALL_RPATH=\$ORIGIN;\$ORIGIN/.."
+    PLATFORM_FLAGS="-DCMAKE_INSTALL_RPATH=\$ORIGIN;\$ORIGIN/.."
 fi
 
 [ -f "$SRC/CMakeLists.txt" ] || {
@@ -151,8 +150,9 @@ echo "Ogre source: $(git -C "$SRC" rev-parse --short HEAD) (fork jahshaka, desce
 # supportsMultithreadedShaderCompilation() returns false, the parallel Hlms
 # compile queue never starts, and HlmsDiskCache::applyTo runs single-threaded.
 # Mode 2 drops the backwards-compatible tid-less overloads instead of using TLS
-# -- API we use nowhere (we subclass Hlms nowhere, and our one HlmsListener
-# overrides only the two tid-less hooks), which is what makes the flip free.
+# -- API we use nowhere (our two Hlms subclasses, ScenePbs and HlmsAtom, are
+# written against mode 2's tid-carrying virtuals, and our one HlmsListener
+# overrides only hooks both modes declare), which is what makes the flip free.
 #
 # PLATFORM-NEUTRAL ON PURPOSE: it belongs in this shared arg list, not in
 # PLATFORM_FLAGS. macOS runs the same VulkanRenderSystem through MoltenVK and
@@ -250,6 +250,15 @@ if [ "${OGRE_SAMPLES:-0}" = "1" ]; then
     SAMPLE_FLAGS="-DOGRE_BUILD_SAMPLES2=ON -DOGRE_INSTALL_SAMPLES=OFF -DOGRE_INSTALL_SAMPLES_SOURCE=OFF"
 fi
 
+# VULKAN, NULL AND NOTHING ELSE, ON EVERY PLATFORM (D6-FORK-TOOLING, audit V2-D F17).
+# Vulkan is the engine's only renderer and NULL is the headless one; the GL3Plus
+# render system used to be built and installed on Linux although nothing could
+# select it (the engine's Backend enum is gone), and OGRE_BUILD_TOOLS installed
+# OgreMeshTool and OgreCmgenToCubemap, which nothing runs (assets are baked by
+# irisgl's own importer). Both OFF: a smaller build dir and install per tree,
+# and the fewer upstream files compiled, the fewer an upstream merge can break.
+RENDERER_FLAGS="-DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=OFF -DOGRE_BUILD_RENDERSYSTEM_VULKAN=ON -DOGRE_BUILD_TOOLS=OFF"
+
 # Compiler cache when installed (2026-09-11): each tree builds its own Ogre, so a shared
 # ccache turns every tree's build after the first into cache hits.
 CCACHE_FLAGS=""
@@ -279,7 +288,7 @@ cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -DOGRE_SHADER_COMPILATION_THREADING_MODE=2 \
   -DOGRE_CONFIG_ENABLE_FINE_LIGHT_MASK_GRANULARITY=ON \
-  $PLATFORM_FLAGS -DOGRE_BUILD_RENDERSYSTEM_VULKAN=ON \
+  $PLATFORM_FLAGS $RENDERER_FLAGS \
   -DOGRE_VULKAN_WINDOW_NULL=ON \
   -DOGRE_BUILD_COMPONENT_HLMS_PBS=ON -DOGRE_BUILD_COMPONENT_HLMS_UNLIT=ON \
   -DOGRE_BUILD_COMPONENT_SCENE_FORMAT=ON \
@@ -288,7 +297,7 @@ cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DOGRE_BUILD_COMPONENT_PROPERTY=ON -DOGRE_BUILD_COMPONENT_OVERLAY=ON \
   -DOGRE_BUILD_COMPONENT_PAGING=OFF -DOGRE_BUILD_COMPONENT_VOLUME=OFF \
   -DOGRE_BUILD_COMPONENT_DEAR_IMGUI=OFF \
-  $SAMPLE_FLAGS -DOGRE_BUILD_TESTS=OFF -DOGRE_BUILD_TOOLS=ON
+  $SAMPLE_FLAGS -DOGRE_BUILD_TESTS=OFF
 
 # libshaderc gotcha: a missing dep silently drops the Vulkan RenderSystem while
 # configure still exits 0. Fail loudly instead.
@@ -296,6 +305,14 @@ grep -q "RenderSystem_Vulkan" "$SRC/build/build.ninja" || {
     echo "Vulkan RenderSystem was NOT configured — check dependencies (libshaderc-dev?)." >&2
     exit 1
 }
+
+# And the reverse: a STALE CMake cache in $SRC/build keeps a render system this
+# script no longer asks for (a -D that is not passed is not unset). Fail loudly.
+if grep -q "RenderSystem_GL3Plus" "$SRC/build/build.ninja"; then
+    echo "GL3Plus is still configured in $SRC/build — a stale cache from before it was switched" >&2
+    echo "off. Delete $SRC/build and re-run this script." >&2
+    exit 1
+fi
 
 # Same class of silent-drop guard for the PlanarReflections component: it is
 # OFF by default upstream, and without it HlmsPbs compiles a different layout
@@ -321,6 +338,20 @@ cmake --build "$SRC/build" -j"$JOBS"
 # prefix is safe to prune — this script owns it.
 rm -f "$PREFIX"/lib/libOgreNext*.so* "$PREFIX"/lib/OGRE-Next/*.so*
 cmake --install "$SRC/build" > /dev/null
+# ...and the same for every other file: a header the fork deleted (IrradianceFieldRaster.h),
+# a tool no longer built, a GL3Plus library stays behind unless something removes it. The
+# manifest is the list of what this install IS; anything else under include/, lib/ and bin/
+# is an orphan. (Deleting include/ wholesale before installing would do it too, but would
+# touch every header's mtime and make every consumer recompile every Ogre TU.)
+if [ -f "$SRC/build/install_manifest.txt" ]; then
+    _orphans=0
+    while IFS= read -r -d '' _f; do
+        grep -qxF "$_f" "$SRC/build/install_manifest.txt" || { rm -f "$_f"; _orphans=$((_orphans + 1)); }
+    done < <(find "$PREFIX/include" "$PREFIX/lib" "$PREFIX/bin" \( -type f -o -type l \) -print0 2>/dev/null)
+    find "$PREFIX/include" "$PREFIX/lib" "$PREFIX/bin" -type d -empty -delete 2>/dev/null || true
+    [ "$_orphans" = "0" ] || echo "Pruned $_orphans orphaned file(s) from $PREFIX (not in this build's install manifest)."
+    unset _orphans _f
+fi
 
 # MULTITHREADED SHADER COMPILATION, on the INSTALL side (THREADING_ADOPTION_SPEC
 # P1, gate G1-a). Same class of guard as the three above, and it needs to be at
@@ -397,11 +428,20 @@ if [ "$(uname -s)" != "Darwin" ] && command -v ldd > /dev/null 2>&1; then
     }
 fi
 
-# THE INSTALL NAMES ITS SOURCE (TESTING-DEBTS-1 T12): the fork commit this install was built from,
-# written LAST (a build that failed above leaves the previous record, or none). Studio's gate
-# (scripts/gate_runlog.py fork_pin_problem) refuses to run when it is not the pin irisgl records:
-# a stale install compiled media the pin's shaders no longer match (REFLECT-MOVERS-1: 76 reds).
+# THE INSTALL NAMES ITS SOURCE (TESTING-DEBTS-1 T12; D6-FORK-TOOLING): the fork commit this
+# install was built from, then `dirty` when the checkout had uncommitted edits, then
+# `buildsettings <sha256 of the installed OgreBuildSettings.h>` — the build options Ogre's own
+# ABI cookie does not hash (it covers the two threading macros only; the component switches
+# and the fine-light-mask flag change member layouts silently, see above). Written LAST (a
+# build that failed above leaves the previous record, or none). Two readers refuse a mismatch:
+# Studio's CONFIGURE (cmake/OgreInstallStamp.cmake: the install must be the ogre-next checkout
+# and its header the one recorded) and Studio's gate (scripts/gate_runlog.py fork_pin_problem:
+# the checkout and the install must be the PIN) — a stale install compiled media the pin's
+# shaders no longer match (REFLECT-MOVERS-1: 76 reds).
 { git -C "$SRC" rev-parse HEAD
-  [ -z "$(git -C "$SRC" status --porcelain --untracked-files=no)" ] || echo "dirty"; } > "$PREFIX/BUILT_FROM"
+  [ -z "$(git -C "$SRC" status --porcelain --untracked-files=no)" ] || echo "dirty"
+  if command -v sha256sum > /dev/null 2>&1; then _bs_sum=$(sha256sum "$PREFIX/include/OGRE-Next/OgreBuildSettings.h")
+  else _bs_sum=$(shasum -a 256 "$PREFIX/include/OGRE-Next/OgreBuildSettings.h"); fi
+  echo "buildsettings ${_bs_sum%% *}"; } > "$PREFIX/BUILT_FROM"
 
 echo "Ogre-Next installed to $PREFIX (built from $(head -1 "$PREFIX/BUILT_FROM" | cut -c1-9))"
