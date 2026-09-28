@@ -2580,7 +2580,7 @@ bool describeMesh(const Ogre::Mesh *mesh, uint32_t level, MeshGeometry &out,
         VkAccelerationStructureGeometryKHR g{};
         g.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;      // audit C-16: no any-hit exists
+        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;      // shared by every wearer; a cut-out is its INSTANCE (FORCE_NO_OPAQUE)
         g.geometry.triangles.sType =
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
