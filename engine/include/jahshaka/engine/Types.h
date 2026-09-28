@@ -2393,12 +2393,13 @@ struct GiParams {
     /// is the fallback cage for a pixel no probe answered, and the gather is the
     /// diffuse. At Low it is the diffuse.
     ///
-    /// GiToggle::Auto means "let the quality tier decide", and the deciding
-    /// happens DOCUMENT-SIDE: the Photon tier (GI_UNIFIED P2) writes a concrete
-    /// on/off through into the document field the mirror pushes here, so Auto
-    /// reaching the engine means "no tier was ever applied to this scene" and
-    /// resolves to OFF — which is what makes every already-serialized scene
-    /// render exactly as it did before this feature existed.
+    /// GiToggle::Auto means "the tier's": it resolves through the ONE tier table
+    /// (`giQualityFacts(...).fieldDefault` — on at every quality, the owner's
+    /// option (b)) exactly as probeHdr, probeShadows, gather and cards resolve
+    /// theirs (D4-PHOTON-TIERS deleted the "Auto is OFF so old scenes render as
+    /// they did" arm). The struct's own default is OFF: a bare GiParams asks for
+    /// no field, the way it asks for GI Off; a document's untouched field (-1)
+    /// arrives as Auto and gets the tier's answer.
     ///
     /// Ignored outside GiMode::Vct / GiMode::VctPccHybrid: the field is fed by
     /// VctLighting, so there is nothing to build without a voxel volume. A
@@ -2406,7 +2407,7 @@ struct GiParams {
     /// shader's ambient gate (`@property(vct_num_probes) if(vctSpecular.w==0)`)
     /// disappears and the sky/flat ambient would be counted twice on top of the
     /// field's own diffuse (P0 spike §5, measured).
-    GiToggle  ddgi = GiToggle::Auto;
+    GiToggle  ddgi = GiToggle::Off;
 
     // ---- PHOTON: camera-centred voxel cascades (PHOTON_SPEC P0) -------------
 
@@ -2851,7 +2852,68 @@ struct GiQualityFacts {
     /// 256 px depth buffer 262,144 — and the
     /// open's placement, 713-799 ms of the UI thread.
     bool rayReflections = false;
+    /// THE TRACE'S RESOLUTION WHERE THE RAYS ARE THE REFLECTION (D4-PHOTON-TIERS,
+    /// the SSR row's meaning at a ray tier): 1 = one reflection ray per 2x2 block
+    /// (High), 2 = every pixel (Epic), 0 where `rayReflections` is false. At a
+    /// ray tier the view's reflection trace reads THIS, never the document's SSR
+    /// row — the rays replace the screen march as the reflection, and the row
+    /// reads "traced" (worldmodes). The values are the SSR row's own High/Epic
+    /// columns, so the shipped pictures do not move.
+    int  reflectTrace = 0;
+    /// THE IRRADIANCE FIELD, what `GiParams::ddgi`'s Auto resolves to: ON at every
+    /// quality (owner option (b), 2026-09-09 — the field is the one diffuse arm
+    /// that is right in open and sealed scenes alike). The Studio tier table's
+    /// field column is READ from here (worldmodes::photonDdgi).
+    bool fieldDefault = true;
+    /// THE REFLECTION-PROBE GRID'S VRAM BUDGET (PCC-BUDGET-1), in bytes, for the
+    /// WHOLE grid: the probe array (6 faces x mips per probe), each probe's
+    /// shadow targets when its captures are shadowed, and the grid's fixed
+    /// capture + IBL cubes (`giProbeGridBytes`). The probe COUNT is derived from
+    /// it (`giProbeGridBudgetCount`), never the other way round: a placement that
+    /// keeps more probes than fit keeps the ones that see the most geometry and
+    /// logs the cut. Only where a grid is built at all — a tier whose reflections
+    /// are traced on this machine builds none (`rayReflections`).
+    /// MEASURED (PHOTON-F12-PCC, Grand Showroom 2 at Epic): 32 probes at 512 px
+    /// HDR and shadowed = 838,987,760 B (array 536,739,840 + shadow targets
+    /// 268,435,456 + cubes 33,550,320 + the placement's depth 262,144), i.e.
+    /// 25.2 MB a probe plus 33.8 MB fixed — the arithmetic below reproduces it to
+    /// the byte. The budgets: Epic 1 GiB (41 probes at its 512 px HDR shadowed —
+    /// the measured 32-probe Showroom grid fits), High 512 MiB (19), Medium
+    /// 128 MiB (61 at 256 px), Low 64 MiB (125 at 128 px). PROVISIONAL: the
+    /// per-tier numbers are the lead's to confirm; the arithmetic is not.
+    unsigned long long probeGridBudgetBytes = 128ull << 20;
 };
+
+/// THE BYTES A REFLECTION-PROBE GRID HOLDS (PCC-BUDGET-1): `probes` probes at
+/// `faceSize` px, RGBA16F when `hdr` else RGBA8, each with 8 MiB of shadow
+/// targets when `shadowed`, plus the grid's capture and IBL cubes and the
+/// placement's 256 px depth. A probe's array slice carries its mips down to
+/// 16x16 (the pin's IBL chain); the two cubes carry theirs to 1x1 between them
+/// (85 more texels a face). This reproduces the F12-PCC measurement EXACTLY:
+/// 32 probes at 512 px HDR shadowed = 838,987,760 B.
+inline unsigned long long giProbeGridBytes(unsigned faceSize, bool hdr, bool shadowed,
+                                           unsigned probes)
+{
+    const unsigned long long bpp = hdr ? 8ull : 4ull;
+    unsigned long long texels = 0ull;
+    for (unsigned r = faceSize; r >= 16u; r >>= 1u) texels += (unsigned long long)r * r;
+    const unsigned long long slice = 6ull * texels * bpp;
+    const unsigned long long shadow = shadowed ? (8ull << 20) : 0ull;
+    const unsigned long long fixed = 2ull * slice + 6ull * bpp * 85ull + 262144ull;
+    return fixed + (unsigned long long)probes * (slice + shadow);
+}
+
+/// How many probes a grid at this face size / format / shadowing may keep under
+/// `budget` bytes (at least 1: a budget smaller than one probe still keeps the
+/// probe that sees the most, rather than silently building nothing).
+inline unsigned giProbeGridBudgetCount(unsigned long long budget, unsigned faceSize, bool hdr,
+                                       bool shadowed)
+{
+    const unsigned long long fixed = giProbeGridBytes(faceSize, hdr, shadowed, 0u);
+    const unsigned long long each = giProbeGridBytes(faceSize, hdr, shadowed, 1u) - fixed;
+    if (budget <= fixed || !each) return 1u;
+    return unsigned(std::max<unsigned long long>(1ull, (budget - fixed) / each));
+}
 
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
 /// with it. `profile` picks the column (see GiViewProfile for the measurement
@@ -2878,6 +2940,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.pixelTolerance = 2.0f;        // the Atom column; see the field
         f.gather.on = false;            // Low keeps the cone diffuse (T-A)
+        f.probeGridBudgetBytes = 64ull << 20;
         break;
     case GiQuality::High:
     case GiQuality::Epic:
@@ -2898,6 +2961,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
+        f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
+        f.probeGridBudgetBytes = quality == GiQuality::Epic ? (1024ull << 20) : (512ull << 20);
         break;
     default:   // Medium: the same reach as High, at its own resolution
         f.cascades[0] = {  5.0f, 64, 0.0f };
@@ -2912,6 +2977,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
         f.gather = { true, 16u, 6u, 4u };   // 36 rays a probe (T-A)
+        f.probeGridBudgetBytes = 128ull << 20;
         break;
     }
     // ---- THE EPIC TIER'S GATHER: FOUR TIMES THE PROBES -----------------------
@@ -3644,6 +3710,15 @@ struct GiStatus {
     /// clamped grid product (pccProbesX * pccProbesY * pccProbesZ); 0 in every
     /// other mode, and 0 in the hybrid when the probe arm failed to build.
     int    probeCount = 0;
+    /// THE PROBE GRID'S BUDGET (PCC-BUDGET-1): the tier's whole-grid VRAM budget
+    /// in bytes (GiQualityFacts::probeGridBudgetBytes), the probe count it
+    /// allows at the grid's face size / format / shadowing, the bytes the BUILT
+    /// grid holds by the same arithmetic (giProbeGridBytes), and how many kept
+    /// probes the last placement cut to fit. All 0 where no grid is placed.
+    unsigned long long probeGridBudgetBytes = 0;
+    int    probeGridBudgetProbes = 0;
+    unsigned long long probeGridBytes = 0;
+    int    probesOverBudget = 0;
     /// Whether THIS scene's passes sample its probe grid — i.e. whether probe
     /// reflections are actually being drawn in it (the binding is per scene and
     /// per pass: SceneGiBinding). False when the hybrid degraded to plain VCT,

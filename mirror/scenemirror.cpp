@@ -6893,6 +6893,11 @@ void SceneMirror::applyViewPostFx(View *view, bool record)
         fx.ssaoPower      = mSource->ssaoPower;
         fx.ssaoRadius     = mSource->ssaoRadius;
         fx.smaaPreset     = mSource->smaaPreset;
+        // The SSR ROW, as authored. At a ray tier the renderer does not read it
+        // (OgreScene::reflectionTraceRow — the rays are the reflection, at the
+        // tier's own resolution; the row reads "Traced" in the editor): pushed
+        // as it is because the same scene on a machine that traces nothing
+        // renders the screen march at exactly this value.
         fx.ssr            = mSource->ssrMode;
         fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
         // Percent in the document, a fraction in the renderer — one conversion,

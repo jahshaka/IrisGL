@@ -247,18 +247,25 @@ ChainDesc OgreView::chainDesc() const {
     d.ssrThickness   = mPostFx.ssrThickness;
     d.ssrIntensity   = mPostFx.ssrIntensity;
     d.reflectionRoughnessCutoff = mPostFx.reflectionRoughnessCutoff;
-    // RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5), and the whole tier rule in one
-    // line: AUTO means "traced wherever the machine can", which is this view's
-    // SSR row being on (the SSR contract already keeps that to High and Epic —
-    // no new World row exists or is wanted) AND the device advertising ray
-    // queries AND the application preference allowing them. Ray tracing is a
-    // property of the MACHINE and not of the document (PHOTON_SPEC §4 D4), so
-    // nothing here reads the scene.
+    // RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5).
     //
-    // The RESOLUTION comes free with the same row: `ssr == 2` (Epic) traces
-    // every pixel, `ssr == 1` (High) one in four, exactly as the march does —
-    // which is why the row is a scale factor here too and not a second setting.
-    d.rayReflect     = d.ssr > 0 && mScene && mScene->rayReflectionsWanted();
+    // The RESOLUTION: `ssr == 2` traces every pixel, `ssr == 1` one in four,
+    // exactly as the march does.
+    //
+    // THE SSR ROW'S MEANING AT A RAY TIER (D4-PHOTON-TIERS). Where the tier's
+    // reflections are traced on this machine (GiQualityFacts::rayReflections,
+    // Photon on, rays resolved) the RAYS ARE THE REFLECTION and the document's
+    // SSR row is not read: the trace runs at the tier's own resolution
+    // (GiQualityFacts::reflectTrace — High one in four, Epic every pixel, the
+    // row's own High/Epic columns), and the row reads "traced" in the editor.
+    // Everywhere else the row is the screen march and nothing more — no tier
+    // below High traces its reflections (it used to, wherever a Low or Medium
+    // scene's SSR row was on and the machine traced: a second, undeclared
+    // reflection tier). A VR session's measurement arm (setVrSsrOverride) still
+    // pins the row it asks for.
+    const int traced = mScene ? mScene->reflectionTraceRow() : 0;
+    if (traced > 0 && !(mStereo && mVrSsrOverride >= 0)) d.ssr = traced;
+    d.rayReflect     = d.ssr > 0 && traced > 0 && mScene->rayReflectionsWanted();
     // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the same shape and the same
     // three terms as the gather's line above — the scene's resolved row, below
     // the offscreen early-out, and never in a stereo view (the job declines a

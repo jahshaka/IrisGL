@@ -5108,14 +5108,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // one the screen-space march gates on since lane SSR-3; the engine only
     // clamps it into the range a reflection means anything in.
     pp.knobs[0] = std::min(std::max(view->chainDesc().reflectionRoughnessCutoff, 0.0f), 1.0f);
-    // THE RAY'S LENGTH. Long enough to cross the lit volume it will be shaded
-    // from — a ray that outruns the cache finds geometry nothing can colour —
-    // and bounded by the camera's own far plane so an open scene's ray reaches
-    // the sky rather than marching the whole world.
-    {
-        float reach = voxCount ? voxSize[voxCount - 1u].length() : 0.0f;
-        pp.knobs[1] = std::min(cam->getFarClipDistance(), std::max(reach, 50.0f));
-    }
+    // THE RAY'S LENGTH: THE ONE REACH RULE (detail::photonRayReach — the gather
+    // reads the same function).
+    pp.knobs[1] = detail::photonRayReach(voxCount ? voxSize[voxCount - 1u].length() : 0.0f,
+                                         cam->getFarClipDistance());
     pp.knobs[2] = float(rv.frame & 0xFFFFu);
     pp.knobs[3] = float(voxCount);
     pp.knobs2[0] = anisotropic ? 1.0f : 0.0f;

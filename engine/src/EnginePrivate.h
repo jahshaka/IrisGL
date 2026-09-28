@@ -240,6 +240,20 @@ inline void releaseRecycledName(const std::string &name) {
 /// "VK_ERROR_OUT_OF_DEVICE_MEMORY" at the end of a paragraph. The two numbers
 /// are Vulkan's own (VkResult, core since 1.0); this header does not include
 /// Vulkan.
+/// THE ONE REACH RULE for every Photon ray that reads the voxel cascades
+/// (D4-PHOTON-TIERS — the reflections' rule, adopted by the screen-probe gather,
+/// which had its own: half the outer cascade's smallest side). A ray must be
+/// long enough to cross the lit volume it will be shaded from — the OUTERMOST
+/// cascade's full DIAGONAL, floored at 50 m for a chain too small to reach past
+/// a room — and bounded by the camera's own far plane (an infinite one, 0, reads
+/// as 1 km) so an open scene's ray reaches the sky rather than marching the
+/// world. What lies beyond it is the far query's (the coarse copies), never a
+/// second definition of the near one.
+inline float photonRayReach(float outerCascadeDiagonal, float farClip) {
+    const float far = farClip > 0.0f ? farClip : 1000.0f;
+    return std::min(far, std::max(outerCascadeDiagonal, 50.0f));
+}
+
 inline bool isVulkanOutOfMemory(const Ogre::Exception &e) {
     return dynamic_cast<const Ogre::RenderingAPIException *>(&e) &&
            (e.getNumber() == -1 || e.getNumber() == -2);   // VK_ERROR_OUT_OF_{HOST,DEVICE}_MEMORY
@@ -3717,6 +3731,13 @@ public:
     /// and not a ray tier.
     bool probeGridByRays() const;
     bool probeGridWanted() const;
+    /// THE SSR ROW'S MEANING AT A RAY TIER (D4-PHOTON-TIERS). 0 where the rays
+    /// are not this scene's reflection (Photon off, a tier whose reflections are
+    /// not traced, or no traced rays on this machine) — the view's SSR row is
+    /// then the screen march and nothing else. Otherwise the tier's trace
+    /// resolution (GiQualityFacts::reflectTrace: 1 High, 2 Epic): the rays
+    /// replace the row, which the view does not read.
+    int reflectionTraceRow() const;
     /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
     void dropProbeGridByRays();
     /// THE LIGHTING SERIAL the gather's settled history counts from
@@ -6351,6 +6372,9 @@ private:
     /// Non-zero with no grid at all means every probe saw nothing, which is a
     /// built state; zero with no grid in the hybrid means the build failed.
     int  mProbesDropped = 0;
+    /// Probes the last placement kept but cut to fit the tier's VRAM budget
+    /// (PCC-BUDGET-1; GiStatus::probesOverBudget).
+    int  mProbesOverBudget = 0;
     /// THE PROBE CACHE'S STALE SET (FIX WAVE B2; ENGINE_CACHE_POLICY_SPEC P1).
     /// One entry per probe, rebuilt with the grid. `sweepPending` is true while
     /// the probe is STALE — owes a capture because an input changed

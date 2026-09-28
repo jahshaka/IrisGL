@@ -557,6 +557,13 @@ bool OgreScene::probeGridWanted() const {
     return mGi.mode == GiMode::VctPccHybrid && !probeGridByRays();
 }
 
+int OgreScene::reflectionTraceRow() const {
+    if (mGi.mode == GiMode::Off || !probeGridByRays()) return 0;
+    return giQualityFacts(mGi.quality,
+                          mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
+        .reflectTrace;
+}
+
 // THE DOWN HALF, in one place: the grid a ray tier does not build is taken down
 // (the binding lets go, the datablocks take their sky cube back) and the probe
 // record goes with it, so giStatus reads the ray tier and not a drop verdict. A
@@ -568,6 +575,7 @@ void OgreScene::dropProbeGridByRays() {
     JAH_TRY {
         destroyProbeGrid();
         mProbesDropped = 0;
+        mProbesOverBudget = 0;
         mProbeSlots.clear();
         mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
         if (mGiBuildStage == GiBuildStage::ProbeScout || mGiBuildStage == GiBuildStage::ProbeFit ||
@@ -1041,6 +1049,20 @@ GiStatus OgreScene::giStatus() const {
         // caller can tell "no grid because every candidate probe saw nothing"
         // from "no grid because the mode does not build one".
         st.probesDropped      = mProbesDropped;
+        // THE PROBE GRID'S BUDGET (PCC-BUDGET-1), where a grid is placed.
+        if (probeGridWanted()) {
+            const GiQualityFacts facts = giQualityFacts(mGi.quality);
+            st.probeGridBudgetBytes  = facts.probeGridBudgetBytes;
+            st.probeGridBudgetProbes = mPccProbeRes
+                ? int(giProbeGridBudgetCount(facts.probeGridBudgetBytes, mPccProbeRes, mPccHdr,
+                                             mPccShadowed))
+                : 0;
+            st.probeGridBytes = mPcc && mPccProbeRes
+                ? giProbeGridBytes(mPccProbeRes, mPccHdr, mPccShadowed,
+                                   unsigned(mPcc->getProbes().size()))
+                : 0ull;
+            st.probesOverBudget = mProbesOverBudget;
+        }
         st.probeGridByRays    = mGi.mode == GiMode::VctPccHybrid && probeGridByRays();
         st.probePlacements    = mProbePlacements;
         st.probeCapturesTotal = mProbeCapturesTotal;
@@ -5449,6 +5471,7 @@ void OgreScene::buildPccScout(const Ogre::Aabb &litVolume) {
     mPccHdr = mPccShadowed = false;
     mPccCaptureSize = 0;
     mProbesDropped = 0;
+    mProbesOverBudget = 0;
 
     // The slots name probes that are about to be (re)created; the first
     // updateProbeBudget after the build re-sizes and re-fills them.
@@ -5796,6 +5819,9 @@ void OgreScene::buildPccFit() {
         const Ogre::Vector3 H = region.mHalfSize, W = aabb.getSize();
         const bool debugFit = giDebug();
         std::vector<Ogre::CubemapProbe *> drop;
+        // The survivors with their volume ratio: the budget below keeps the ones
+        // that saw the MOST (the smallest ratio) when they cannot all fit.
+        std::vector<std::pair<float, Ogre::CubemapProbe *>> keptBy;
         for (size_t i = 0; i < built.size(); ++i) {
             if ((i + 1u) * 6u > ratios.size()) break;      // no reading: keep it
             const float *r = &ratios[i * 6u];
@@ -5849,6 +5875,7 @@ void OgreScene::buildPccFit() {
             // the volume form pays less for the same picture.
             const bool keep = spanVol < kProbeSeesGeometry;
             if (!keep) drop.push_back(built[i]);
+            else       keptBy.push_back({ spanVol, built[i] });
             if (debugFit)
                 Ogre::LogManager::getSingleton().logMessage(
                     "Jahshaka GI:  probe " + std::to_string(i) + (keep ? " KEPT" : " DROPPED") +
@@ -5865,6 +5892,36 @@ void OgreScene::buildPccFit() {
                     Ogre::StringConverter::toString(kProbeSeesGeometry) + ")");
         }
         mProbesDropped = int(drop.size());
+        // THE VRAM BUDGET (PCC-BUDGET-1). The WHOLE grid — array, shadow targets,
+        // cubes — must fit the tier's budget (GiQualityFacts::probeGridBudgetBytes),
+        // so the count is DERIVED from it at this grid's face size, format and
+        // shadowing (giProbeGridBudgetCount). A scene whose placement keeps more
+        // keeps the probes that photographed the most (the smallest volume ratio)
+        // and the rest are cut here, before stage 3 sizes the array — with a log
+        // line, not a toast: nothing a user can fix, a budget the tier states.
+        mProbesOverBudget = 0;
+        {
+            const GiQualityFacts facts = giQualityFacts(mGi.quality);
+            const unsigned cap = giProbeGridBudgetCount(facts.probeGridBudgetBytes, mPccProbeRes,
+                                                        mPccHdr, mPccShadowed);
+            if (keptBy.size() > cap) {
+                std::stable_sort(keptBy.begin(), keptBy.end(),
+                                 [](const std::pair<float, Ogre::CubemapProbe *> &a,
+                                    const std::pair<float, Ogre::CubemapProbe *> &b) {
+                                     return a.first < b.first;
+                                 });
+                for (size_t i = cap; i < keptBy.size(); ++i) drop.push_back(keptBy[i].second);
+                mProbesOverBudget = int(keptBy.size() - cap);
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka GI: the probe grid's VRAM budget (" +
+                    std::to_string(facts.probeGridBudgetBytes >> 20) + " MiB at " +
+                    std::to_string(mPccProbeRes) + " px" + (mPccHdr ? " HDR" : "") +
+                    (mPccShadowed ? ", shadowed" : "") + ") holds " + std::to_string(cap) +
+                    " probes: " + std::to_string(mProbesOverBudget) + " of " +
+                    std::to_string(keptBy.size()) +
+                    " that saw geometry were cut, the ones that saw the least");
+            }
+        }
         for (Ogre::CubemapProbe *p : drop) mPcc->destroyProbe(p);
         if (mPcc->getProbes().empty()) {
             // NOTHING TO PHOTOGRAPH. No grid, and the sky cubemap goes back onto
@@ -6197,13 +6254,13 @@ void OgreScene::buildPccFinish() {
 bool OgreScene::ddgiWanted() const {
     // Fed by VctLighting: there is nothing to build without a voxel volume.
     if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
-    // Auto = "the quality tier decides", and the tier is resolved DOCUMENT-SIDE
-    // (GI_UNIFIED P2: the Photon tier writes a concrete 0/1 through into
-    // Scene::giDdgi, the same write-through every other tiered field uses), so
-    // what reaches the engine as Auto is a scene no tier has ever touched —
-    // OFF, which is what keeps every already-serialized scene rendering exactly
-    // as it did before P1 landed.
-    return resolveToggle(mGi.ddgi, false);
+    // Auto = the tier's (GiQualityFacts::fieldDefault), resolved here like every
+    // other Auto toggle (D4-PHOTON-TIERS deleted the "Auto is OFF so old scenes
+    // render as they did" arm).
+    return resolveToggle(mGi.ddgi,
+                         giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr
+                                                                     : GiViewProfile::Desktop)
+                             .fieldDefault);
 }
 
 void OgreScene::ifdProbeCounts(const Ogre::Vector3 &size, Ogre::uint32 outCounts[3]) {
@@ -6723,6 +6780,7 @@ void OgreScene::teardownVct() {
     mProbesClampedToRegion = 0;
     mPccCaptureSize = 0;
     mProbesDropped = 0;
+    mProbesOverBudget = 0;
     // A CHAIN THAT NO LONGER EXISTS OWES NO CASCADE ANYTHING (G1): whatever the
     // dirty path recorded is answered by the build that follows, and carrying it
     // across would mark every cascade of the NEXT chain pending on its first

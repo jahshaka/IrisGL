@@ -574,11 +574,10 @@ public:
     /// document-side and writes a concrete 0/1 through, exactly like giMode and
     /// giQuality (services/worldmodes.h — a backing field is always the
     /// resolved value), so -1 survives only in a scene no tier has ever been
-    /// applied to. The engine reads a bare -1 as OFF; the reader never lets one
-    /// reach it, because a document without a tier DERIVES one and -1 then
-    /// means "the derived tier decides" (worldmodes::derivePhotonFromDocument,
-    /// owner option (b) 2026-09-09: Medium and High are DDGI-fed, so the
-    /// shipped vct+medium samples come up with the field on).
+    /// applied to. Where one reaches the engine it is Auto, and Auto is the
+    /// tier's (GiQualityFacts::fieldDefault — on at every quality, owner option
+    /// (b) 2026-09-09); the "a bare -1 renders as OFF" arm is deleted
+    /// (D4-PHOTON-TIERS).
     /// Only meaningful in the VCT modes: the field is fed by the voxel volume.
     int giDdgi = -1;
     /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md). The diffuse
