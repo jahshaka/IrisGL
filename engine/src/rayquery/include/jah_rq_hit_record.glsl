@@ -63,9 +63,10 @@ const uint kJahHitFarBit = 1u << 27u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf` (two per record).
 const uint kJahHitAuxBase = 4u;
-/// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned.
+/// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuMover = 1u << 2u;
 const uint kJahHitGpuSkinned = 1u << 5u;
+const uint kJahHitGpuPlanar = 1u << 10u;
 
 uint jahHitFlags( uint slot )
 {
@@ -75,9 +76,13 @@ uint jahHitFlags( uint slot )
 }
 
 /// A mover or a rigged item: the caches cannot hold it, the decode always shades it.
+/// A PLANAR MIRROR (D3-HIT-SHADE-2): the caches hold only its diffuse (black for a
+/// metal mirror), and a second ray from every such hit is a second bounce; the
+/// decode shades its own material with the pass' specular environment (the voxel
+/// cone, the sky) — a mirror seen in a reflection, never a black one.
 bool jahHitAlwaysDecodes( uint slot )
 {
-	return ( jahHitFlags( slot ) & ( kJahHitGpuMover | kJahHitGpuSkinned ) ) != 0u;
+	return ( jahHitFlags( slot ) & ( kJahHitGpuMover | kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u;
 }
 
 /// The LEVEL the NEAR copy of `slot` was built from — the level its per-slot

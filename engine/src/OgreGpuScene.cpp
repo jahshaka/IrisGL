@@ -746,6 +746,14 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
         }
     }
     if (n.dragMover && n.shown) f |= kGpuDragMover;
+    // A PLANAR MIRROR (D3-HIT-SHADE-2): its picture is a reflection, and the caches
+    // are a DIFFUSE store (a metal mirror's card and voxels hold its kD = 0: black) —
+    // a ray that hits it is the decode's, which shades the mirror's own material with
+    // the specular environment the pass holds (jahHitAlwaysDecodes). Ogre's own
+    // per-renderable test (PlanarReflections::hasPlanarReflections); the backstop
+    // compare below re-stages a slot that became a reflector with nothing else.
+    if (mPlanar && item->getNumSubItems() && mPlanar->hasPlanarReflections(item->getSubItem(0)))
+        f |= kGpuPlanar;
     // ...and it must be IN the graph: an Item with no parent node draws nothing
     // and has no world transform to trace (the old walk skipped it outright).
     if ((f & kGpuVisible) && !(f & (kGpuOverlay | kGpuAlphaTested)) &&
