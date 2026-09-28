@@ -696,7 +696,10 @@ void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
         ObjectLodDesc d;
         d.node = kv.first;
         d.name = item->getName();
-        d.level = unsigned(item->getCurrentMeshLod());
+        // THE ATOM QUEUE'S ITEMS HAVE NO VIEW LEVEL (ObjectLodDesc::cut): the id
+        // pass draws their cluster cut and no view pass walks their level.
+        d.cut = item->getRenderQueueGroup() == kAtomRenderQueue;
+        d.level = d.cut ? 0u : unsigned(item->getCurrentMeshLod());
         d.levels = unsigned(mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size());
         if (d.levels == 0) d.levels = 1;
         for (unsigned si = 0; si < mesh->getNumSubMeshes(); ++si) {

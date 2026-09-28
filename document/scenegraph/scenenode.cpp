@@ -611,13 +611,13 @@ QList<Property*> SceneNode::getProperties()
     boolProp->value = planarReflector;
     props.append(boolProp);
 
-    // GI bounds exclusion (REFLECTIONS_ADOPTION_SPEC.md P1a.2) — beside the
-    // other per-object rendering flags, reached from scripts as
-    // node.setProperty(id, "giBoundsExcluded", true).
+    // Probe-grid placement exclusion (REFLECTIONS_ADOPTION_SPEC.md P1a.2) —
+    // beside the other per-object rendering flags, reached from scripts as
+    // node.setProperty(id, "probeGridExcluded", true).
     boolProp = new BoolProperty();
-    boolProp->displayName = "Exclude From GI Bounds";
-    boolProp->name = "giBoundsExcluded";
-    boolProp->value = giBoundsExcluded;
+    boolProp->displayName = "Exclude From Probe Placement";
+    boolProp->name = "probeGridExcluded";
+    boolProp->value = probeGridExcluded;
     props.append(boolProp);
 
     boolProp = new BoolProperty();
@@ -680,7 +680,7 @@ QVariant SceneNode::getPropertyValue(QString valueName)
     if (valueName == "visible")    return isVisible();
     if (valueName == "castShadow") return getShadowCastingEnabled();
     if (valueName == "planarReflector") return getPlanarReflector();
-    if (valueName == "giBoundsExcluded") return getGiBoundsExcluded();
+    if (valueName == "probeGridExcluded") return getProbeGridExcluded();
     if (valueName == "pickable")   return isPickable();
     if (valueName == "scaleLock")  return getScaleLock();
     // Signed, matching the row above: -1 is "all channels".
@@ -701,7 +701,7 @@ bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "visible")    { setVisible(value.toBool());                 return true; }
     if (valueName == "castShadow") { setShadowCastingEnabled(value.toBool());    return true; }
     if (valueName == "planarReflector") { setPlanarReflector(value.toBool());     return true; }
-    if (valueName == "giBoundsExcluded") { setGiBoundsExcluded(value.toBool());   return true; }
+    if (valueName == "probeGridExcluded") { setProbeGridExcluded(value.toBool());   return true; }
     if (valueName == "pickable")   { setPickable(value.toBool());                return true; }
     if (valueName == "scaleLock")  { setScaleLock(value.toBool());               return true; }
     // Accepts BOTH spellings of the same 32 bits: -1 (the signed row this node
@@ -1027,7 +1027,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	// keeping.
 	node->scaleLock		= this->scaleLock;
 	node->planarReflector = this->planarReflector;
-	node->giBoundsExcluded = this->giBoundsExcluded;
+	node->probeGridExcluded = this->probeGridExcluded;
 	node->lightMask		= this->lightMask;
 	node->attached		= this->attached;
 	// PHYSICS travels with the copy (platform audit B5.2): a duplicate of a rigid

@@ -434,15 +434,14 @@ public:
     // and still receives its GI bounce.
     quint32 lightMask = 0xFFFFFFFFu;
 
-    // GI BOUNDS EXCLUSION (REFLECTIONS_ADOPTION_SPEC.md P1a.2): "this object
-    // must not decide WHERE global illumination happens". It still voxelizes
-    // and still bounces light; it is only kept out of the two AABB reductions
-    // the renderer does — the lit volume and the reflection-probe region. The
-    // ground plane is the case it exists for: 200 units of it under a 2-unit
-    // scene spreads both over empty air. The auto-fit heuristic rejects extent
-    // outliers on its own; this flag is the deterministic override for when it
-    // guesses wrong in either direction.
-    bool giBoundsExcluded = false;
+    // PROBE-GRID EXCLUSION (REFLECTIONS_ADOPTION_SPEC.md P1a.2; renamed by
+    // D4-PHOTON-TIERS): "this object must not decide WHERE the reflection-probe
+    // grid is placed" on a machine that does not trace its reflections. It
+    // still voxelizes, bounces light and is photographed; it is only kept out of
+    // the probe grid's placement fit (a placement heuristic pending A9, never a
+    // lighting volume). The ground plane is the case it exists for: 200 units of
+    // it under a 2-unit scene spreads the grid over empty air.
+    bool probeGridExcluded = false;
 
 	mutable QString guid;
 
@@ -784,13 +783,13 @@ public:
         return planarReflector;
     }
 
-    void setGiBoundsExcluded(bool val) {
-        giBoundsExcluded = val;
+    void setProbeGridExcluded(bool val) {
+        probeGridExcluded = val;
         notifyChanged(NodeChange::Flags);
     }
 
-    bool getGiBoundsExcluded() const {
-        return giBoundsExcluded;
+    bool getProbeGridExcluded() const {
+        return probeGridExcluded;
     }
 
     /// SCENE_STATIC (SPECS/SCENEGRAPH_SPEC.md §6): "this node and everything

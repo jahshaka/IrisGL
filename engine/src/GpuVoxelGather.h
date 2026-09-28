@@ -95,7 +95,7 @@ struct VoxelReading {
 
 /// ONE ARM'S FEED: what one gather writes and one voxeliser reads. A chain owns one
 /// per cascade — so a cascade's rebuild can never overwrite records another
-/// cascade's recorded dispatches are about to read — and the single volume owns one.
+/// cascade's recorded dispatches are about to read.
 class VoxelFeed {
 public:
     ~VoxelFeed();

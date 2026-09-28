@@ -1109,26 +1109,9 @@ public:
         return false;
     }
 
-    /// "Has any object LEFT the volume that is currently lit?" — 0 when every
-    /// GI item is inside it, otherwise a hash of the escapees' quantized world
-    /// AABBs (LIGHTING_FIX fix 2).
-    ///
-    /// A HASH, NOT A BOOL, and that is the whole design. The host debounces
-    /// expensive re-solves by watching a signature: it restarts a stability
-    /// window whenever the value changes and re-solves once it has held still.
-    /// A bool would stay true for the entire duration of a drag, so the window
-    /// would either fire on every frame of it or never fire at all. A hash of
-    /// WHERE the escapee is changes on each frame the object moves and freezes
-    /// the moment the user lets go — one re-solve per gesture, which is exactly
-    /// the contract a light's transform signature already has. Zero when GI is
-    /// off, when nothing has been built yet, and whenever the document typed
-    /// its own bounds box (then the volume is the user's statement, not a fit).
-    ///
-    /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
-    virtual unsigned long long giEscapeSignature() const = 0;
     /// "Has any GI geometry MOVED?" — a quantized hash of every GI item's world
-    /// AABB (FIX WAVE B3). Same contract and the same debounce as
-    /// giEscapeSignature and the host's light-transform signature: it changes on
+    /// AABB (FIX WAVE B3). Same contract and the same debounce as the host's
+    /// light-transform signature: it changes on
     /// every frame of a drag and freezes when the drag stops, so a host that
     /// watches it spends the CHEAP paths during the gesture and exactly one full
     /// re-solve at the end of it. Stateless — reading it twice in a frame is
@@ -1145,15 +1128,17 @@ public:
     /// it (a material edit changes nothing a re-inject reads). 0 when GI is off;
     /// an idle scene never moves it. Cheap: returns a counter.
     virtual unsigned long long giMaterialSignature() const = 0;
-    /// "This object must not define WHERE global illumination happens"
-    /// (REFLECTIONS_ADOPTION_SPEC.md P1a). The object still voxelizes and still
-    /// bounces light — it is only kept out of the two AABB reductions, the lit
-    /// volume and the reflection-probe region. The case it exists for is the
-    /// ground plane: 200 units of it under a 2-unit scene drags the voxel
-    /// volume and the probe grid over empty air. Takes effect on the next GI
-    /// (re)build, exactly like moving the geometry would.
-    virtual void        setNodeGiBoundsExcluded(NodeId, bool) = 0;
-    virtual bool        nodeGiBoundsExcluded(NodeId) const = 0;
+    /// "This object must not decide WHERE the reflection-probe grid is placed"
+    /// (REFLECTIONS_ADOPTION_SPEC.md P1a; renamed by D4-PHOTON-TIERS). The object
+    /// still voxelizes, bounces light and is photographed by every probe — it is
+    /// only kept out of the probe grid's placement fit, which runs where a
+    /// machine does not trace its reflections. The case it exists for is the
+    /// ground plane: 200 units of it under a 2-unit scene drags the grid over
+    /// empty air. The region is a placement heuristic pending A9 (a
+    /// camera-centred window), never a lighting volume. Takes effect on the next
+    /// placement, exactly like moving the geometry would.
+    virtual void        setNodeProbeGridExcluded(NodeId, bool) = 0;
+    virtual bool        nodeProbeGridExcluded(NodeId) const = 0;
     /// "This node is an EDITOR HELPER" (REFLECTIONS_ADOPTION_SPEC.md P1b): the
     /// ground grid, light icons, range wires, camera helpers — geometry the
     /// user must see in the viewport and a reflection probe must never capture.
