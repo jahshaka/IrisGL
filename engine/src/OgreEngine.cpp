@@ -2668,6 +2668,7 @@ OgreEngine::~OgreEngine() {
     // THE ID PASS'S PIPELINE AND ITS IDENTITY INDEX BUFFER (ATOM S3-DRAW): device
     // objects, after every view (whose workspaces recorded it) and before Root.
     try { releaseAtomIdPass(); } catch (...) {}
+    try { releaseAtomCasterPass(); } catch (...) {}
     // AFTER every scene (each of which removed its own render-queue listener in
     // OgreScene::destroy) and BEFORE Root: ~OverlaySystem deletes the
     // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock
@@ -2819,6 +2820,7 @@ void OgreEngine::ensureHlms() {
     }
     AtomPassProvider::install(mRoot->getCompositorManager2());
     registerAtomIdPass();
+    registerAtomCasterPass();
     // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;
     // Scene::setAmbient converts the flat/hemisphere pair exactly). The mode is a
     // property of the HlmsPbs INSTANCE, not of a scene, so it cannot be chosen
@@ -3183,12 +3185,6 @@ void OgreEngine::createShadowNode() {
                         std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps),
                         mShadowPerMapClears, probeRes / 2u);
     }
-    // The CARD-CAPTURE node (OgreView::kCardShadowNodeName has the numbers):
-    // the sun's PSSM at the probe resolution, no focused maps, one whole-atlas
-    // clear — instantiated once per scene whose surface cache is on.
-    if (!cm->hasShadowNodeDefinition(OgreView::kCardShadowNodeName))
-        buildShadowNode(OgreView::kCardShadowNodeName, probeShadowResolution(mShadowResolution), 0u,
-                        false, 0u);
 }
 
 }  // namespace detail

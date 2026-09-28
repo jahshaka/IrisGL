@@ -61,6 +61,12 @@ struct AtomPassContext {
     bool boundRawState = false;
 };
 using AtomPassRecorder = std::function<void(AtomPassContext &)>;
+/// A pass's GATE (optional, ATOM-SHADOWS-1): asked BEFORE Ogre's render pass is closed.
+/// False = the pass has nothing to record this time and executes as NOTHING at all — the
+/// render pass Ogre has open stays open for the next pass (a closed and reopened pass is
+/// a load/store round trip per shadow map on a scene with no Atom casters). The
+/// context's `pass` and `sceneManager` are set; nothing else is.
+using AtomPassGate = std::function<bool(const AtomPassContext &)>;
 
 class AtomPassDef final : public Ogre::CompositorPassDef {
 public:
@@ -79,6 +85,9 @@ public:
     /// recorder that draws; false when the pass has no target.
     bool beginRenderPass();
     const Ogre::RenderPassDescriptor *renderPassDesc() const { return mRenderPassDesc; }
+    /// A cube face's camera turn — CompositorPass's own table (what a scene pass with
+    /// `mCameraCubemapReorient` applies), for a recorder drawing into that face.
+    static Ogre::Quaternion cubemapRotation(Ogre::uint32 face) { return CubemapRotations[face < 6u ? face : 5u]; }
 
 private:
     const AtomPassDef *mDef;
@@ -99,6 +108,9 @@ public:
     /// no-op (closed and reopened render pass, nothing recorded, no cache reset).
     void setRecorder(const std::string &customId, AtomPassRecorder recorder);
     const AtomPassRecorder *recorder(Ogre::IdString customId) const;
+    /// A customId's gate (AtomPassGate); an empty one removes it (the pass always runs).
+    void setGate(const std::string &customId, AtomPassGate gate);
+    const AtomPassGate *gate(Ogre::IdString customId) const;
 
     Ogre::CompositorPassDef *addPassDef(Ogre::CompositorPassType passType, Ogre::IdString customId,
                                         Ogre::CompositorTargetDef *parentTargetDef,
@@ -110,6 +122,7 @@ public:
 
 private:
     std::map<Ogre::IdString, AtomPassRecorder> mRecorders;
+    std::map<Ogre::IdString, AtomPassGate> mGates;
 };
 
 }  // namespace detail

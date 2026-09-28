@@ -397,4 +397,11 @@ if [ "$(uname -s)" != "Darwin" ] && command -v ldd > /dev/null 2>&1; then
     }
 fi
 
-echo "Ogre-Next installed to $PREFIX"
+# THE INSTALL NAMES ITS SOURCE (TESTING-DEBTS-1 T12): the fork commit this install was built from,
+# written LAST (a build that failed above leaves the previous record, or none). Studio's gate
+# (scripts/gate_runlog.py fork_pin_problem) refuses to run when it is not the pin irisgl records:
+# a stale install compiled media the pin's shaders no longer match (REFLECT-MOVERS-1: 76 reds).
+{ git -C "$SRC" rev-parse HEAD
+  [ -z "$(git -C "$SRC" status --porcelain --untracked-files=no)" ] || echo "dirty"; } > "$PREFIX/BUILT_FROM"
+
+echo "Ogre-Next installed to $PREFIX (built from $(head -1 "$PREFIX/BUILT_FROM" | cut -c1-9))"

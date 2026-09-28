@@ -43,11 +43,13 @@
 // object the only way Ogre's ANY-BIT visibility test allows — an INCLUDE
 // channel: `kCardSubjectBit` is granted to the subject Item for the duration of
 // its own capture passes and to nothing else, and the capture pass's visibility
-// mask is that bit alone. The shadow node is a different question and its own
-// mask: a shadow node draws its casters through `shadowCasterChannels(kind)`,
-// which the pass mask does not touch, so the whole still world casts into the
-// atlas while exactly one object is shaded out of it. That is what makes a
-// card's shadow term real, and `gi.card_shadow` measures it.
+// mask is that bit alone. The shadow term is not the capture's at all
+// (ATOM-S3-CARDCAP): it is TRACED, one ray per card texel towards the sun
+// against the still world's casters (the ray tier's TLAS, kRayMaskStillCaster),
+// so the whole still world occludes the card while exactly one object is shaded
+// into it — occlusion by other objects, and `gi.card_shadow` holds it to a
+// reference trace from the same texel. (It was the card shadow node's PSSM, one
+// fit and three caster passes per card: 77 % of a capture's cost, deleted.)
 //
 // WHY A SCRATCH TARGET AND A COPY, rather than rendering straight into the
 // atlas page. Vulkan's render-pass `renderArea` in this pin is the WHOLE
@@ -167,9 +169,6 @@ struct CardRec {
     /// ...and its INDIRECT half: stale (captured since, or the chain
     /// re-injected), present at all in the cached layer, and when last marched.
     bool relightIndirect = false;
-    /// The next capture changes the SURFACE (a new rect, a material), not only
-    /// the shadow term — so it re-marches the indirect too.
-    bool surfaceStale = false;
     bool indirectValid = false;
     unsigned long long lastIndirect = 0ull;
     /// THE MOVERS' TERM (PHOTON-CARDS-4): the card's rect in the mover-visibility
@@ -179,6 +178,12 @@ struct CardRec {
     bool moverTraced = false;
     bool moverPending = false;
     unsigned long long moverPendingSince = 0ull;
+    /// THE STILL WORLD'S SUN TERM (ATOM-S3-CARDCAP): stale and waiting for a
+    /// trace past the frame's budget (since `stillPendingSince`), and the lift
+    /// its last trace started at (CardSample::sunLift).
+    bool stillPending = false;
+    unsigned long long stillPendingSince = 0ull;
+    float sunLift = 0.0f;
 };
 
 /// WHAT THE CACHE IS HANDED EACH FRAME, and the reason it is handed anything at
@@ -196,13 +201,14 @@ struct CardSceneView {
     Ogre::Vector3 viewerPos;
     unsigned budgetTexels = 0u;
     float    radius = 0.0f;
-    /// THE LIGHT WRITE SERIAL — the one signature the cache still compares
-    /// rather than being told about. A light is not owned by an instance, so
-    /// there is nothing to be precise about: a light write stales every card's
-    /// shadow term, and the counter is where a suite sees it.
-    unsigned long long lightSerial = 0ull;
-    /// THE RADIANCE SIGNATURE (PHOTON-CARDS-1): `lightSerial` plus what only a
-    /// card's LIT radiance depends on (colour, power, reach, cone) — a change
+    /// THE RAY TIER'S FOOTPRINT PER METRE of distance from the viewer (the ray
+    /// rule's `sampleFootprintPerspective` at one metre, OgreScene::updateRayLevels):
+    /// the near copy a sun ray hits may lie one footprint off the captured level,
+    /// so the still trace's lift is sized by it (kSunLiftFootprints).
+    float rayFootprintPerMetre = 0.0f;
+    /// THE RADIANCE SIGNATURE (PHOTON-CARDS-1): every light's pose and shadow key
+    /// plus what only a card's LIT radiance depends on (colour, power, reach,
+    /// cone) — a change
     /// relights the resident set and recaptures nothing.
     unsigned long long radianceSerial = 0ull;
     /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
@@ -257,12 +263,12 @@ struct CardSceneView {
     std::vector<Candidate> candidates;
 };
 
-/// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — what the scene tells the
+/// THE SUN ON THE CARDS (PHOTON-CARDS-4; ATOM-S3-CARDCAP) — what the scene tells the
 /// cache INSIDE the frame (after the scene graph and the GPU scene's update, so
 /// every box and the moved set are this frame's), and the trace the ray tier
-/// records for it. A card's sun visibility is the CAPTURED term (the still
-/// world's casters: the card shadow node is the probe kind, kVisibleBit alone)
-/// times the MOVERS' term, traced; see OgreSurfaceCache.cpp, "The movers' shadow".
+/// records for it. A card's sun visibility is the STILL world's term times the
+/// MOVERS' term, both traced one ray per texel; see OgreSurfaceCache.cpp, "The sun
+/// on the cards".
 struct CardMoverBox {
     NodeId node = 0;
     Ogre::Vector3 min, max;      ///< the world AABB
@@ -281,26 +287,31 @@ struct CardMoverFrame {
     /// The movers in the frame's moved set (a transform write — a walk without
     /// a pose change moves the node and counts — a flags change, a birth).
     std::vector<NodeId> moved;
-    /// The STILL casters whose captured shadow this frame changed: a transform,
+    /// The STILL casters whose shadow this frame changed: a transform,
     /// visibility, caster-bit or class change, or a deletion (which names its
     /// one box as both old and new).
     std::vector<CardCasterMove> casterMoves;
 };
 struct CardMoverTrace {
-    /// `count` records of 20 floats, the relight's own layout.
+    /// `count` records of 20 floats, the relight's own layout (the still mode's
+    /// lift in float 3).
     const float *records = nullptr;
     unsigned count = 0u;
-    Ogre::TextureGpu *depth = nullptr, *normal = nullptr, *vis = nullptr;
+    /// `vis` = the R8 mover layer, `shadowRough` = the RG8 ShadowRough layer: both
+    /// bound in either mode; `still` picks the one written (rq_card_movers.comp).
+    Ogre::TextureGpu *depth = nullptr, *normal = nullptr, *vis = nullptr, *shadowRough = nullptr;
     Ogre::Vector3 toSun;
     float range = 0.0f;
+    bool still = false;
 };
 struct CardMoverHooks {
     std::function<bool(CardMoverFrame &)> frame;
     std::function<bool(const CardMoverTrace &)> trace;
     /// A GPU timestamp pair around the relight dispatch (begin = true first).
     std::function<void(bool)> timeRelight;
-    /// The last GPU milliseconds read back: the trace's and the relight's (-1 unread).
-    std::function<void(float &, float &)> readTimes;
+    /// The last GPU milliseconds read back: the movers' trace's, the relight's and
+    /// the still trace's (-1 unread).
+    std::function<void(float &, float &, float &)> readTimes;
 };
 
 /// ONE CARD AS THE PHOTON VIEW DRAWS IT (PHOTON-VIEW-1, PhotonView::Cards): the
@@ -389,9 +400,9 @@ public:
     /// because "a hover preview costs the object under the mouse" is the whole
     /// point of the model MATERIAL-SWAP-GI-1 built.
     void noteMaterialChanged(MaterialId material);
-    /// The scene's in-frame answers and the ray tier's trace (PHOTON-CARDS-4);
-    /// set once by the scene that owns the cache. Absent (no rays), a card's sun
-    /// term is the captured one alone and a still caster's move still recaptures.
+    /// The scene's in-frame answers and the ray tier's trace (PHOTON-CARDS-4,
+    /// ATOM-S3-CARDCAP); set once by the scene that owns the cache, which exists
+    /// only where rays run (OgreScene::updateSurfaceCache).
     void setMoverHooks(const CardMoverHooks &hooks) { mMoverHooks = hooks; }
 
     Ogre::CompositorWorkspace *workspace() const { return mWs; }
@@ -487,13 +498,16 @@ private:
     /// capture's copies, with the frame's lights).
     void planRelights(const CardSceneView &view);
     void relightCards();
-    /// THE MOVERS' SHADOW, in the frame after the capture's copies and before the
-    /// relight: selects the cards the movers' and the moved still casters'
-    /// sun-projected footprints reach, records the trace, and hands the traced
-    /// and the retired cards to the relight.
-    void traceMovers();
+    /// THE SUN ON THE CARDS, in the frame after the capture's copies and before the
+    /// relight: the still world's term (the batch just captured, and the cards a
+    /// sun change or a moved still caster made stale) and the movers' (the cards
+    /// their sun-projected footprints reach) — records both traces and hands the
+    /// traced and the retired cards to the relight.
+    void traceSun();
+    /// The still trace's lift for `card` (kSunLiftFootprints; CardSample::sunLift).
+    float sunLiftOf(const CardRec &card) const;
     /// The first visible shadow-casting directional light of `mLights` (the
-    /// capture's PSSM light, the relight's sun), or null.
+    /// relight's sun, the traces' direction), or null.
     const Ogre::Light *cardSun() const;
     /// Rebuilds the two GPU tables from `mCards` / `mInstances` and uploads
     /// them. Called only when the ALLOCATION changed — never per capture.
@@ -538,7 +552,18 @@ private:
     /// This frame's relight additions from the movers (card index, mode).
     unsigned mMoverTracedLastFrame = 0u, mMoverTexelsLastFrame = 0u, mMoverPending = 0u,
              mMoverPendingAge = 0u;
-    unsigned long long mMoverTraces = 0ull, mMoverRetired = 0ull, mCasterRecaptures = 0ull;
+    unsigned long long mMoverTraces = 0ull, mMoverRetired = 0ull;
+    /// THE STILL TERM (ATOM-S3-CARDCAP): the sun it was last traced towards (ZERO =
+    /// no sun), whether the sun moved last frame (`invalidSun` counts gestures),
+    /// the records, and the counters CardCacheStatus names.
+    Ogre::Vector3 mStillSun = Ogre::Vector3::ZERO;
+    bool mStillSunKnown = false;
+    bool mSunMovingLastFrame = false;
+    std::vector<float> mStillCpu;
+    float mRayFootprintPerMetre = 0.0f;
+    float mStillCpuMs = 0.0f;   ///< the still trace's CPU this frame (in captureMs with a batch)
+    unsigned mStillTracedLastFrame = 0u, mStillTexelsLastFrame = 0u, mStillPending = 0u;
+    unsigned long long mStillTraces = 0ull, mInvalidSun = 0ull, mCasterRetraces = 0ull;
     Ogre::UavBufferPacked *mGiBuffer = nullptr;
     std::vector<float> mGiCpu;
     Ogre::VctLighting *mVct = nullptr;
@@ -625,11 +650,6 @@ private:
     unsigned mBudget = 0u;
     unsigned long long mInvalidTransform = 0ull;
     unsigned long long mInvalidMaterial = 0ull;
-    unsigned long long mInvalidLight = 0ull;
-    /// The light signature as the last frame saw it, and whether it moved on
-    /// that frame (so `invalidLight` counts gestures and not frames).
-    unsigned long long mLightSerial = 0ull;
-    bool mLightMovingLastFrame = false;
 };
 
 }   // namespace engine

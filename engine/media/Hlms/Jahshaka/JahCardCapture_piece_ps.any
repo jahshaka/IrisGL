@@ -16,13 +16,11 @@
 // the four channels a card wants, exactly and for free:
 //
 //     location 0  outNormals          the shading normal, *0.5+0.5
-//     location 1  outShadowRoughness  x = the shadow term, y = the GGX alpha
-//                                     (the term is a CONSTANT 1.0 wherever the
-//                                     pass has no shadow-casting light -- the
-//                                     spike's capture scene has none, so this
-//                                     channel's plumbing is proven and its
-//                                     content is not; OgreSurfaceCards.cpp's
-//                                     makeWorkspace says what phase 2 must do)
+//     location 1  outShadowRoughness  x = a CONSTANT 1.0 (the capture pass has
+//                                     no shadow node: the still world's sun
+//                                     term is TRACED over it after the copy,
+//                                     one ray per card texel -- ATOM-S3-CARDCAP,
+//                                     SurfaceCache::traceSun), y = the GGX alpha
 //
 // and it computes no lighting at all, which is what makes a capture cheap. What
 // it does NOT compute is the albedo (upstream skips SampleDiffuseMap in a

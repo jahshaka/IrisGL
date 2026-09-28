@@ -586,6 +586,10 @@ constexpr unsigned kRayMaskFar = 0x10u;      ///< every far copy, and nothing el
 /// matches an instance on ANY common bit, so "a mover AND a caster" cannot be
 /// asked with bits 0 and 1 — it is its own bit. No other launch names it.
 constexpr unsigned kRayMaskMoverCaster = 0x20u;
+/// A SHADOW-CASTING STILL OBJECT'S NEAR COPY (ATOM-S3-CARDCAP): the surface cache's
+/// still-world sun launch traces this bit alone — the card's still sun term, one ray
+/// per card texel (the MoverCaster bit's reason: "a caster AND still" is its own bit).
+constexpr unsigned kRayMaskStillCaster = 0x40u;
 constexpr unsigned kRayMaskNearField = kRayMaskCaster | kRayMaskMover | kRayMaskStill | kRayMaskNear;
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
@@ -2549,11 +2553,12 @@ struct GiParams {
     // or freed by it); the BUDGET and the RADIUS are deliberately NOT — they
     // are read per frame by the residency pass, exactly like the three tuning
     // floats above, so dragging either of them re-captures nothing.
-    /// Off / Auto / On. AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): a card's reader
-    /// is the reflection trace's hit, so the cache runs exactly where that
-    /// trace does (the scene's ray row resolved against the machine) and costs
-    /// nothing elsewhere. A suite and the monitor force it On.
-    GiToggle  cards = GiToggle::Auto;
+    /// Off, or ON WHEREVER THE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): a
+    /// card's readers are the ray jobs' hits and its sun term is itself traced,
+    /// so the cache exists exactly where the ray tier does (the scene's ray row
+    /// resolved against the machine) and nowhere else. There is no "force on":
+    /// without rays nothing could fill a card's sun term or read it.
+    bool      cards = true;
     /// THE PER-FRAME TEXEL BUDGET — Lumen's shape (its capture budget is 512 x
     /// 512 texels a frame) and the number the whole capture cadence is sized
     /// by. 0 = the tier's own (kCardBudgetTexels below).
@@ -2770,23 +2775,17 @@ struct GiQualityFacts {
     /// what was MEASURED on this pin, and the measurement is not the one phase
     /// 0 took.
     ///
-    /// THE NUMBER IT STANDS ON (PHOTON-CARDS-1, SC-1b-ITEM8): **0.18-0.20 ms a
-    /// card**, CPU, with the shadow fit FIRING — `sc1b_measure showroom`, a
-    /// Showroom-2-shaped scene (45 carded instances, a sun, three shadowed point
-    /// lamps), all arms in one process: 0.218 ms a card at one card per
-    /// workspace update, 0.200 at three, 0.184 at a full batch of eight. About
-    /// 0.13 of it is the card's own PSSM fit (three caster passes over the
-    /// still world; 0.053-0.076 with nothing casting), because the capture now
-    /// runs inside Ogre's frame with the frame's light list and a camera per
-    /// pass — the 0.33 ms this row was first sized on was a hand-driven
-    /// workspace update per card whose fit never fired (its light list was
-    /// empty). The capture's shadow node is PSSM-only (kCardShadowNodeName):
-    /// with the probe node's point-lamp cubes it was ~1.0 ms a card.
-    ///
-    /// So the rows keep the milliseconds they were given — ~0.4 / ~0.6 /
-    /// ~1.0 ms a frame — and buy two, three and five cards with them. One
-    /// workspace update carries at most eight (`kCaptureBatch`).
-    unsigned cardBudgetTexels = 49152u;   // 3 cards a frame ~ 0.6 ms
+    /// THE NUMBER IT WAS SIZED ON (PHOTON-CARDS-1, SC-1b-ITEM8): 0.18-0.20 ms a
+    /// card, CPU, with the card shadow node's PSSM fit firing (0.295 at the
+    /// ATOM-SHADOWS-1 tip). THE NUMBER TODAY (ATOM-S3-CARDCAP, `sc1b_measure
+    /// showroom-sun`, a batch of eight): **0.05-0.06 ms a card** CPU — the shadow
+    /// node is deleted, the still world's sun term traced (~0.001 ms of GPU a card
+    /// in a batch of eight, 0.004 alone). The rows below still hold the cards
+    /// they were given — two, three and five a frame — which now cost about a
+    /// third of the milliseconds they were sized on (re-sizing them is the
+    /// lead's call, not this row's). One workspace update carries at most eight
+    /// (`kCaptureBatch`).
+    unsigned cardBudgetTexels = 49152u;   // 3 cards a frame ~ 0.2 ms
     /// THE RESIDENCY RADIUS, metres. Beyond it an instance holds no pages. It
     /// is a tier row because the atlas is a fixed 2k at this phase: 256 pages
     /// of 128 texels is about forty six-card sets at full size, so the radius
@@ -2971,7 +2970,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[3] = { 60.0f, 64, 0.0f };
         f.cascadeCount = 4;
         f.probeFaceSize   = 256u;
-        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.6 ms
+        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.2 ms
         f.cardResidencyRadius = 30.0f;
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
@@ -3525,7 +3524,7 @@ struct CardSample {
     float normal[3] = { 0, 0, 0 };      ///< the shading normal in the CARD's own view space
     float emissive[3] = { 0, 0, 0 };    ///< radiance
     float depth = 0.0f;                 ///< world units from the card's near plane; 0 = nothing captured there
-    float shadow = 0.0f;                ///< 1 = fully lit by the shadowed lights, 0 = fully occluded
+    float shadow = 0.0f;                ///< the still world's sun term: 1 lit, 0 occluded (one traced ray)
     float roughness = 0.0f;             ///< the GGX ALPHA (perceptual squared), through patch 0043's range
     /// THE LIT CARD (the sixth layer, `Jahshaka/CardLight`): the texel's
     /// outgoing diffuse radiance — direct from the scene's lights (the sun
@@ -3542,6 +3541,13 @@ struct CardSample {
     int      card = -1;
     unsigned texelX = 0u, texelY = 0u;
     bool     lit = false;
+    /// THE TEXEL'S OWN SURFACE (ATOM-S3-CARDCAP): the world point and world normal
+    /// the sun trace reconstructs from the texel's depth and normal (the relight's
+    /// arithmetic), and the lift along the normal its still-world ray started at
+    /// (0 until traced) — what gi.card_shadow's reference trace repeats.
+    float position[3] = { 0, 0, 0 };
+    float worldNormal[3] = { 0, 0, 0 };
+    float sunLift = 0.0f;
 };
 
 /// ONE QUESTION FOR THE RAY JOB'S CARD READ (Engine::cardReadParity): a world
@@ -3608,10 +3614,10 @@ struct CardCacheStatus {
     /// ...and the life of the cache, so a suite can difference across an edit.
     unsigned long long captures = 0ull;
     /// Why cards were thrown back on the queue, counted for the life of the
-    /// cache: a moved instance, a material edit, a light change, an arrival.
+    /// cache: a moved instance, a material edit. (No light re-queues a capture: a
+    /// capture holds no light quantity — the sun term is traced, below.)
     unsigned long long invalidTransform = 0ull;
     unsigned long long invalidMaterial = 0ull;
-    unsigned long long invalidLight = 0ull;
     /// CPU milliseconds the last frame's captures cost, measured around the
     /// capture workspace's own update.
     float captureMs = 0.0f;
@@ -3622,6 +3628,9 @@ struct CardCacheStatus {
     /// page into the atlas.
     float captureWorkspaceMs = 0.0f;
     float captureCopyMs = 0.0f;
+    /// ...and the CPU of recording the still world's sun trace (ATOM-S3-CARDCAP):
+    /// part of a capture, since a card is not readable before its sun term.
+    float captureTraceMs = 0.0f;
     /// THE RAY READ'S TABLES, as they stand: how many card records the GPU
     /// buffer describes, and how many item slots the instance buffer is indexed
     /// over — what the reflection trace's card read (jah_rq_card.glsl) binds.
@@ -3654,9 +3663,27 @@ struct CardCacheStatus {
     /// Lights the relight job could not hold (past its 64) at the last relight;
     /// the engine log says so once per cache.
     unsigned lightsDropped = 0u;
+    /// THE STILL WORLD'S SUN TERM (ATOM-S3-CARDCAP): one ray per card texel towards
+    /// the sun against the still world's shadow casters (`kRayMaskStillCaster`),
+    /// into the ShadowRough layer's x — every card the frame it is captured, and
+    /// every card whose term went stale: the sun turned (every resident card) or a
+    /// still caster moved (the cards of its old and new sun-projected footprints),
+    /// oldest first under the relight's budget. `invalidSun` = sun changes (one per
+    /// gesture, the leading edge); `stillTraces` = cards traced for the life of
+    /// the cache; the last frame's cards and texels; `stillPending` = stale cards
+    /// past the budget; `stillGpuMs` = the job's GPU milliseconds on the last
+    /// frame that ran it (-1 until read). `casterRetraces` = cards a still
+    /// caster's change made stale (a transform write, a show/hide, its caster
+    /// bit, a change of class, its deletion).
+    unsigned long long invalidSun = 0ull;
+    unsigned long long stillTraces = 0ull;
+    unsigned stillTracedLastFrame = 0u;
+    unsigned stillTexelsLastFrame = 0u;
+    unsigned stillPending = 0u;
+    float stillGpuMs = -1.0f;
+    unsigned long long casterRetraces = 0ull;
     /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4). A card's sun visibility
-    /// is the captured term (the still world's casters) TIMES a traced term for
-    /// the movers: a transform write of a shadow-casting mover traces sun rays
+    /// is the still term (above) TIMES a traced term for the movers: a transform write of a shadow-casting mover traces sun rays
     /// against the movers alone (`kRayMaskMoverCaster`) from every texel of the
     /// cards inside its sun-projected footprint, old and new, and relights them
     /// in the same frame. `moverCasters` = the traced shadow-casting movers the
@@ -3682,16 +3709,6 @@ struct CardCacheStatus {
     unsigned moverPendingAge = 0u;
     float moverGpuMs = -1.0f;
     float relightGpuMs = -1.0f;
-    /// A STILL CASTER THAT MOVES (PHOTON-CARDS-4 finding 3): its shadow is the
-    /// still world's, held by the CAPTURED term, so any change to what the
-    /// capture holds of it — a transform write, a show/hide, its caster bit, a
-    /// change of class (a drag's promotion to the mover channel and its
-    /// demotion at rest; setNodeMovable), its deletion — queues
-    /// the cards of its old and new sun-projected footprints for a recapture
-    /// (the capture's own budget and order). A queued card keeps its traced
-    /// movers' term until the capture lands. Cards queued so, for the life of
-    /// the cache.
-    unsigned long long casterRecaptures = 0ull;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
@@ -4578,6 +4595,18 @@ struct AtomDrawStatus {
     /// pyramid, found visible against this frame's, drawn by the late pass).
     bool     occlusion = false;
     unsigned occluded = 0, disoccluded = 0;
+    /// THE CASTER CUT (ATOM-SHADOWS-1): the shadow maps' Atom casters, each map drawn from
+    /// its light view's own cluster cut (the rule at the map's texel), as the scene last
+    /// read its caster counters back (a few frames late, never waited on) — of the last
+    /// frame that rendered any map: the caster draws recorded (one per map or cube face
+    /// re-rendered), the triangles and clusters they drew and the instances that survived
+    /// their frusta (summed over the maps), the instances drawn COARSE and drawn NOTHING
+    /// (summed; 0 is the invariant for the second), and the caster stream's budget in
+    /// indices (one stream, reused map after map). `casterValid` false before any read.
+    bool     casterValid = false;
+    unsigned casterMaps = 0, casterClusters = 0, casterInstances = 0;
+    unsigned casterOverflow = 0, casterMissing = 0, casterIndexBudget = 0;
+    unsigned long long casterTriangles = 0ull;
     /// The render system's frame counter at this read — the stamp the engine's
     /// JAHSHAKA_ATOM_TRACE log lines carry (ATOM-BLACK-FRAMES-1's coverage trace).
     unsigned long long frame = 0ull;

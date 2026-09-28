@@ -843,6 +843,11 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     if (item->getNumSubItems()) {
         const Ogre::SubItem *sub = item->getSubItem(0);
         out.raster[0] = detail::HlmsAtom::materialWordOf(sub->getDatablock());
+        // THE CASTER'S CONSTANT BIAS (ATOM-SHADOWS-1): the datablock's own, which the
+        // stock caster reads per draw (HlmsPbs::fillBuffersFor) and the caster cut per
+        // instance (atom_caster.vert).
+        if (const Ogre::HlmsDatablock *db = sub->getDatablock())
+            std::memcpy(&out.raster[3], &db->mShadowConstantBias, sizeof(uint32_t));
         const Ogre::VertexArrayObjectArray &vaos = sub->getSubMesh()->mVao[Ogre::VpNormal];
         if (!vaos.empty() && vaos[0]) {
             size_t posSource = 0u, posOffset = 0u, tanSource = 0u, tanOffset = 0u;
@@ -1229,6 +1234,8 @@ void OgreScene::updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, floa
     if (!mGpuScene.live()) return;
     const float footprintPerMetre = sampleFootprintPerspective(1.0f, projScaleY, viewportHeight);
     if (!(footprintPerMetre > 0.0f)) return;
+    // ...kept for the surface cache's still trace, whose lift is sized by it.
+    mRayFootprintPerMetre = footprintPerMetre;
     const uint32_t n = mGpuScene.slotCount();
     if (!n) return;
     // A STILL CAMERA IN A STILL SCENE RUNS NOTHING. The eye is compared

@@ -23,6 +23,9 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     registerSceneGiBinding(mSceneMgr, &mGiBinding);
+    // WHICH SCENE A SHADOW NODE'S CASTER PASS DRAWS (ATOM-SHADOWS-1): the recorder is
+    // handed the pass's scene manager.
+    atomRegisterScene(mSceneMgr, this);
     // THE SELFTEST'S DOORS, a pair: JAHSHAKA_ATOM_DRAW_OFF shuts the split (every item
     // through PBS) and JAHSHAKA_ATOM_OCCLUSION_OFF the id pass's occlusion (frustum-only,
     // ATOM-OCCLUSION-1) — the scriptless --engine-selftest has no other way to take its
@@ -1517,6 +1520,9 @@ void OgreScene::destroy() {
         // this tree's VaoManager is alive, and the mesh table HOLDS MeshPtrs —
         // and a MeshPtr outliving Root throws in VaoManager (trap 1).
         mGpuScene.destroy();
+        // THE CASTER CUT'S LIST and its stats ring, with the tables it reads.
+        mCasterCull.destroy();
+        atomCasterPassForgetScene(this);
         // FIRST, before anything else in this scene goes: the overlay system's
         // render-queue listener is registered on THIS SceneManager, and the
         // teardown order the component needs is
@@ -1590,6 +1596,7 @@ void OgreScene::destroy() {
     } JAH_CATCH(mError, );
     FogHlmsListener::unregisterScene(mSceneMgr);
     unregisterSceneGiBinding(mSceneMgr);
+    atomUnregisterScene(mSceneMgr);
     mSceneMgr = nullptr;
 }
 
@@ -1869,13 +1876,13 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 // inside Root's frame, after `updateSceneGraph`, as the first workspace in the
 // manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
 void OgreScene::updateSurfaceCache() {
-    // AUTO FOLLOWS THE RAYS (PHOTON-CARDS-2): the reader of a card is the
-    // reflection trace's hit (rq_reflect.comp, jah_rq_card.glsl), so the cache
-    // is on exactly where that trace runs — the World row resolved against the
-    // machine (`rayReflectionsWanted`) — and costs nothing where it cannot be
-    // read. On forces it (a suite, the monitor); Off refuses it.
-    const bool want = mGi.cards == GiToggle::On ||
-                      (mGi.cards == GiToggle::Auto && rayReflectionsWanted());
+    // THE CARDS RUN ONLY WHERE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): every
+    // reader of a card is a ray job's hit (rq_reflect.comp, the gather,
+    // jah_rq_card.glsl), and a card's sun term is itself TRACED (traceSun) — so
+    // the cache exists exactly where the ray tier does (the World row resolved
+    // against the machine, `rayReflectionsWanted`) and costs nothing elsewhere.
+    // Off refuses it; on (the default) resolves against the rays.
+    const bool want = mGi.cards && rayReflectionsWanted();
     if (!want) {
         if (mSurfaceCache) mSurfaceCache.reset();
         return;
@@ -1892,14 +1899,14 @@ void OgreScene::updateSurfaceCache() {
             mSurfaceCache.reset();
             return;
         }
-        // THE MOVERS' SHADOW (PHOTON-CARDS-4): the scene's in-frame answers and
-        // the ray tier's trace; a scene without rays answers "no trace" and the
-        // cards keep the still world's sun term alone.
+        // THE SUN ON THE CARDS (PHOTON-CARDS-4; ATOM-S3-CARDCAP): the scene's
+        // in-frame answers and the ray tier's two traces (the still world's, the
+        // movers').
         CardMoverHooks hooks;
         hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
         hooks.trace = [this](const CardMoverTrace &t) { return traceCardMovers(t); };
         hooks.timeRelight = [this](bool begin) { timeCardRelight(begin); };
-        hooks.readTimes = [this](float &a, float &b) { cardMoverTimes(a, b); };
+        hooks.readTimes = [this](float &a, float &b, float &c) { cardMoverTimes(a, b, c); };
         mSurfaceCache->setMoverHooks(hooks);
     }
     // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
@@ -1918,17 +1925,13 @@ void OgreScene::updateSurfaceCache() {
                                                  : facts.cardBudgetTexels;
     view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
                                                  : facts.cardResidencyRadius;
-    // THE LIGHT SIGNATURE THE CACHE KEYS ON IS NOT `mGiLightWriteSerial`, and
-    // the difference is a slider drag. That serial bumps on EVERY `setLight`
-    // push and every light pose write, colour and intensity included — but the
-    // only thing a capture stores from a light is the SHADOW TERM, which a
-    // colour or an intensity cannot move. So the signature folded here is what
-    // a SHADOW depends on: `Node::lightShadowKey` (the LightDesc fields the
-    // shadow map depends on — type, range, spot cone, castShadows; colour and
-    // intensity deliberately absent, the same rule the lamp-map cache keeps),
-    // the light's derived POSE, and whether it is shown. A colour slider then
-    // costs the cache nothing at all, and a lamp that moves costs it exactly
-    // the cards whose shadows it could have changed.
+    // THE RADIANCE SIGNATURE — not `mGiLightWriteSerial` (which bumps on every
+    // `setLight` push and every pose write): what a card's LIT radiance depends on,
+    // EVERY light's pose and shadow key (the relight lights a card with every lamp,
+    // unculled) plus colour, power, reach and cone (below). A change relights the
+    // resident set under the relight's own budget and CAPTURES NOTHING: no light
+    // quantity is in a capture (ATOM-S3-CARDCAP — the sun's visibility is traced,
+    // SurfaceCache::traceSun, which follows the sun's direction itself).
     //
     // Over `mLightNodes`, which is the engine's own light index (a hint that is
     // a superset), so this is a handful of quantised folds and not a walk of
@@ -1940,37 +1943,36 @@ void OgreScene::updateSurfaceCache() {
     // transform epoch counts the document's and Scene::setNodeTransform's writes).
     std::optional<monitor::Stage> lightStage;
     lightStage.emplace("engine.cards.lights");
-    unsigned long long lightSig = 1469598103934665603ull;
-    const auto fold = [&lightSig](unsigned long long v) {
-        lightSig ^= v;
-        lightSig *= 1099511628211ull;
+    unsigned long long radianceSig = 1469598103934665603ull;
+    const auto foldInto = [](unsigned long long &sig, unsigned long long v) {
+        sig ^= v;
+        sig *= 1099511628211ull;
     };
-    const auto foldF = [&fold](float f) {
+    const auto quant = [](float f) {
         // Quantised to a millimetre / a thousandth: float noise below the
-        // tolerance the whole pipeline works to must not re-capture a card.
-        fold((unsigned long long)(long long)std::lround(double(f) * 1000.0));
+        // tolerance the whole pipeline works to must not relight a card.
+        return (unsigned long long)(long long)std::lround(double(f) * 1000.0);
     };
     for (NodeId lid : mLightNodes) {
         auto lit = mNodes.find(lid);
         if (lit == mNodes.end() || !lit->second.light) continue;
         const Node &ln = lit->second;
-        fold(ln.lightShadowKey);
-        fold(ln.shown ? 1ull : 0ull);
+        unsigned long long pose[9] = { ln.lightShadowKey, ln.shown ? 1ull : 0ull, 0, 0, 0, 0, 0, 0, 0 };
         if (ln.node) {
             const Ogre::Vector3 p = ln.node->_getDerivedPosition();
             const Ogre::Quaternion q = ln.node->_getDerivedOrientation();
-            foldF(p.x); foldF(p.y); foldF(p.z);
-            foldF(q.x); foldF(q.y); foldF(q.z); foldF(q.w);
+            pose[2] = quant(p.x); pose[3] = quant(p.y); pose[4] = quant(p.z);
+            pose[5] = quant(q.x); pose[6] = quant(q.y); pose[7] = quant(q.z); pose[8] = quant(q.w);
         }
+        for (unsigned long long v : pose) foldInto(radianceSig, v);
     }
-    view.lightSerial = lightSig;
-    // THE RADIANCE SIGNATURE: the shadow signature above plus everything a
+    view.rayFootprintPerMetre = mRayFootprintPerMetre;
+    // THE RADIANCE SIGNATURE: every light's pose above plus everything a
     // card's LIT radiance depends on and its capture does not — the colour,
     // the power, the reach and the cone. A colour slider costs the cache a
     // relight of the resident set (the `Jahshaka/CardLight` job, under its own
     // budget) and not one capture. The lights themselves are handed over for
     // the job's light list (below).
-    unsigned long long radianceSig = lightSig;
     for (NodeId lid : mLightNodes) {
         auto lit = mNodes.find(lid);
         if (lit == mNodes.end() || !lit->second.light) continue;
