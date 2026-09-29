@@ -3901,17 +3901,22 @@ float denseGroupReference(surface::TriangleGrid::Query &q, const float *position
 /// distance (5 % of the group's own error `scale`, at least `floorTol`) and returns an
 /// UPPER bound — no point of the facet reads more. Seven fixed points a facet read 0.139
 /// where the dense reference found 0.207 inside one sliver of the endless plane's depth-4
-/// group once the DAG's lock became per group (atom.dag_bound_bar's (a)). `dist(p, tri)`
-/// answers the nearest distance at p and the corners of the triangle it lies on. Returns
-/// a value <= `stop` when the facet's maximum is at most `stop`.
+/// group once the DAG's lock became per group (atom.dag_bound_bar's (a)). `dist(p, tri, st)`
+/// answers the nearest distance at p and the corners of the triangle it lies on — or, with
+/// st >= 0, any value <= st as soon as something is within st (the triangle then unset).
+/// Returns a value <= `stop` when the facet's maximum is at most `stop`.
 constexpr int kFacetMaxLevels = 10;
 /// The nearest distance from p to a grid's soup, and the corners of the triangle it lies on.
-/// (`idx` is the soup the grid was built over, on `positions`.)
+/// (`idx` is the soup the grid was built over, on `positions`.) With `within` >= 0 it
+/// answers any distance <= within as soon as one is found (and no triangle); past it the
+/// walk is the exact nearest and names its triangle.
 float nearestOn(const float *positions, int posComps, const surface::TriangleGrid &grid,
-                const std::vector<unsigned> &idx, surface::TriangleGrid::Query &q, const Vec3 &p, Vec3 *tri)
+                const std::vector<unsigned> &idx, surface::TriangleGrid::Query &q, const Vec3 &p, Vec3 *tri,
+                float within)
 {
     unsigned t = 0u;
-    const float d = grid.closest(q, p, nullptr, nullptr, &t);
+    const float d = grid.closest(q, p, nullptr, nullptr, &t, within);
+    if (within >= 0.0f && d <= within) return d;
     if (std::isfinite(d) && size_t(t) * 3 + 2 < idx.size())
         for (int k = 0; k < 3; ++k) tri[k] = vertexOf(positions, posComps, idx[size_t(t) * 3 + size_t(k)]);
     return d;
@@ -3929,16 +3934,20 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
     while (top) {
         const Piece piece = stack[--top];
         const Vec3 centre = (piece.a + piece.b + piece.c) * (1.0f / 3.0f);
-        const float d = dist(centre, tri);
-        if (!std::isfinite(d)) continue;
+        float radius = 0.0f;
+        for (const Vec3 *corner : { &piece.a, &piece.b, &piece.c })
+            radius = std::max(radius, (*corner - centre).length());
+        // Anything within bound - radius of the centre holds the whole piece within the
+        // bound (1-Lipschitz): the query stops at the first such triangle.
+        const float within = std::max(std::max(stop, best), upper) - radius;
+        const float d = dist(centre, tri, within >= 0.0f ? within : -1.0f);
+        if (!std::isfinite(d) || (within >= 0.0f && d <= within)) continue;
         // Two upper bounds, the tighter wins: the corners against the centre's triangle
         // (convex), and the centre's distance + the piece's radius (1-Lipschitz — the one
         // left when that triangle is degenerate and its closest point is not a number).
-        float convex = d, radius = 0.0f;
-        for (const Vec3 *corner : { &piece.a, &piece.b, &piece.c }) {
+        float convex = d;
+        for (const Vec3 *corner : { &piece.a, &piece.b, &piece.c })
             convex = std::max(convex, (*corner - surface::closestOnTriangle(*corner, tri[0], tri[1], tri[2])).length());
-            radius = std::max(radius, (*corner - centre).length());
-        }
         const float ub = std::isfinite(convex) ? std::min(convex, d + radius) : d + radius;
         best = std::max(best, d);
         if (ub <= std::max(std::max(stop, best), upper)) continue;   // this piece cannot pass the bound
@@ -3968,8 +3977,10 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
 /// it honestly: the lock shapes the DAG, never the measurement.
 constexpr float kDagLockFactor = 2.0f;
 constexpr int   kGroupRetries = 4;
-/// A verify loop runs on the pool past this many items (a small group stays inline).
-constexpr size_t kVerifyGrain = 512;
+/// A verify loop's chunk: the pool's query grain (the verify runs inside clusterlod's
+/// serial level loop, so every group's loops go wide; 512 kept mid-size groups inline
+/// and the temple's slowest mesh spent 0.6 s more in them).
+constexpr size_t kVerifyGrain = lodchain::kQueryGrain;
 
 struct TriKey
 {
@@ -4158,30 +4169,57 @@ private:
             for (const std::vector<unsigned> &f : found) offenders.insert(offenders.end(), f.begin(), f.end());
         };
 
-        // 1. EVERY REMOVED VERTEX against S, exactly and island-capped; it also names
-        //    the simplified triangle it now stands under (the hand-on).
-        std::vector<unsigned> nearestTri(removed.size(), 0u);
-        std::vector<float> displaced(removed.size(), 0.0f);
-        gather(removed.size(), [&](size_t i, surface::TriangleGrid::Query &q, std::vector<unsigned> &found) {
-            const unsigned v = mRegionV[removed[i]];
-            unsigned tri = 0u;
-            const float d = gridS.closest(q, vertexOf(mPositions, mPosComps, v), nullptr, nullptr, &tri);
-            nearestTri[i] = tri;
-            displaced[i] = std::min(d, mIslands.capOf[v]);
-            if (displaced[i] > lockExact) found.push_back(removed[i]);
-        });
+        // 1. EVERY REMOVED VERTEX against S, exactly and island-capped.
+        //    Max-only: a query stops at anything within the chunk's running maximum or the
+        //    lock's bound, whichever is lower (it can neither raise the one nor pass the other).
+        float vertexTerm = 0.0f;
+        {
+            const bakepool::Range range(removed.size(), kVerifyGrain);
+            std::vector<std::vector<unsigned>> found(range.count);
+            std::vector<float> chunkMax(range.count, 0.0f);
+            bakepool::forRange(range, mWidth, [&](size_t c, size_t begin, size_t end, int slot) {
+                float local = 0.0f;
+                for (size_t i = begin; i < end; ++i) {
+                    const unsigned v = mRegionV[removed[i]];
+                    const float stop = std::min(local, lockExact);
+                    if (!(mIslands.capOf[v] > stop)) continue;
+                    const float d = std::min(gridS.closest(mQueries[size_t(slot)], vertexOf(mPositions, mPosComps, v),
+                                                           nullptr, nullptr, nullptr, stop > 0.0f ? stop : -1.0f),
+                                             mIslands.capOf[v]);
+                    if (!std::isfinite(d) || d <= stop) continue;
+                    local = std::max(local, d);
+                    if (d > lockExact) found[c].push_back(removed[i]);
+                }
+                chunkMax[c] = local;
+            });
+            for (size_t c = 0; c < range.count; ++c) {
+                offenders.insert(offenders.end(), found[c].begin(), found[c].end());
+                vertexTerm = std::max(vertexTerm, chunkMax[c]);
+            }
+        }
         // THE ISLANDS' BOUND is what the group will store, as far as the verify knows it:
         // its exact vertex term (a lower bound of the measured error), at most the lock's
         // bound, at least the precision floor — an island bigger than the group's stored
         // error is never dropped (atom.dag_bound_bar's (c)).
-        float vertexTerm = 0.0f;
-        for (float d : displaced)
-            if (std::isfinite(d)) vertexTerm = std::max(vertexTerm, d);
         const float islandBound = std::max(std::min(vertexTerm, lockExact), mFloorLen);
-        const size_t sTris = simplifiedCount / 3;
-        for (size_t i = 0; i < removed.size(); ++i)
-            mPending.emplace_back(triKeyOf(simplified + std::min<size_t>(nearestTri[i], sTris - 1) * 3),
-                                  mRegionV[removed[i]]);
+        // THE HAND-ON, for the result the group keeps (computed only when the verify
+        // answers NULL — a retried result is never kept, a stuck one is terminal): every
+        // removed vertex goes to the simplified triangle it stands nearest.
+        const auto handOn = [&]() {
+            std::vector<unsigned> nearestTri(removed.size(), 0u);
+            bakepool::forRange(bakepool::Range(removed.size(), kVerifyGrain), mWidth,
+                               [&](size_t, size_t begin, size_t end, int slot) {
+                                   for (size_t i = begin; i < end; ++i)
+                                       gridS.closest(mQueries[size_t(slot)],
+                                                     vertexOf(mPositions, mPosComps, mRegionV[removed[i]]), nullptr,
+                                                     nullptr, &nearestTri[i]);
+                               });
+            const size_t sTris = simplifiedCount / 3;
+            for (size_t i = 0; i < removed.size(); ++i)
+                mPending.emplace_back(triKeyOf(simplified + std::min<size_t>(nearestTri[i], sTris - 1) * 3),
+                                      mRegionV[removed[i]]);
+            return nullptr;
+        };
 
         // 2. THE LOST FACETS (the measurement's term 3 and its per-facet walk): the
         //    level-0 facets that lost all three corners here or below, walked EXACTLY
@@ -4203,8 +4241,8 @@ private:
             const float m = facetMax(vertexOf(mPositions, mPosComps, lostIdx[t * 3]),
                                      vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 1]),
                                      vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 2]), lockSampled, error, mFloorLen,
-                                     [&](const Vec3 &p, Vec3 *tri) {
-                                         return nearestOn(mPositions, mPosComps, gridS, sIdx, q, p, tri);
+                                     [&](const Vec3 &p, Vec3 *tri, float within) {
+                                         return nearestOn(mPositions, mPosComps, gridS, sIdx, q, p, tri, within);
                                      });
             if (std::min(m, mIslands.capOf[v0]) > lockSampled)
                 for (size_t k = 0; k < 3; ++k) found.push_back(mRegionIdx[lostIdx[t * 3 + k]]);
@@ -4246,9 +4284,9 @@ private:
                     for (size_t c = 0; c < 3; ++c) offenders.push_back(mRegionIdx[group[size_t(islandTri[k]) * 3 + c]]);
         }
 
-        if (offenders.empty()) return nullptr;
+        if (offenders.empty()) return handOn();
         mLastOffended = true;
-        if (mRetries >= kGroupRetries) return nullptr;   // past the retries: the measurement charges it
+        if (mRetries >= kGroupRetries) return handOn();   // past the retries: the measurement charges it
 
         // THE LOCK: an offender still in the group locks its fan; one removed below
         // this depth locks the corners of the input triangle it was handed to.
@@ -4285,7 +4323,7 @@ private:
         for (unsigned u : mLockTouched) mPosLockedAt[mWeld[u]] = mRegionStamp;
         for (size_t i = 0; i < groupCount; ++i)
             if (mPosLockedAt[mWeld[group[i]]] == mRegionStamp && !mLock[group[i]]) ++mSplit;
-        if (!added) return nullptr;   // nothing new to lock: another attempt would be the same
+        if (!added) return handOn();   // nothing new to lock: another attempt would be the same
         ++mRetries;
         return mLock.data();
     }
@@ -4789,7 +4827,10 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             if (!(islands.capOf[v0] > stop)) return 0.0f;
             const float m = facetMax(corner(lostIdx, t, 0), corner(lostIdx, t, 1), corner(lostIdx, t, 2), stop,
                                      groups[g].simplified.error, floorLen,
-                                     [&](const Vec3 &p, Vec3 *tri) { return nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri); });
+                                     [&](const Vec3 &p, Vec3 *tri, float within) {
+                                         return whole ? nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri, -1.0f)
+                                                      : nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri, within);
+                                     });
             return capped(m, v0);
         });
         {
