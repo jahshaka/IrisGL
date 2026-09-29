@@ -3891,6 +3891,81 @@ float denseGroupReference(surface::TriangleGrid::Query &q, const float *position
     return worst;
 }
 
+/// A FACET LYING ON THE SURFACE (CLUSTER-LOCK-3): when the S triangles near a lost
+/// facet Q that are parallel to it and within `tol` of its plane cover all of Q (their
+/// intersections with Q, projected into Q's plane, sum to Q's area), every point of Q
+/// stands over one of them, and its distance is at most that triangle's plane offset
+/// at Q's corners (linear over Q) over the planes' cosine — the facet's exact maximum
+/// with no refinement. Returns it, or -1 when the cover is not proven (not parallel, not
+/// covered, or triangles overlapping). facetMax's bounds cannot close on a flat stretch
+/// finer than S (every piece across an S edge needs refining to the tolerance: the
+/// 2178-triangle ground plane's DAG took 2.5 s against 22 ms).
+float coplanarCover(const float *positions, int posComps, const surface::TriangleGrid &grid,
+                    const std::vector<unsigned> &idx, const Vec3 &a, const Vec3 &b, const Vec3 &c, float tol,
+                    std::vector<unsigned> &scratch)
+{
+    Vec3 n = Vec3::crossProduct(b - a, c - a);
+    const float area2 = n.length();
+    if (!(area2 > 0.0f)) return -1.0f;
+    n = n * (1.0f / area2);
+    const Vec3 u = (b - a).normalized(), v = Vec3::crossProduct(n, u);
+    const auto to2 = [&](const Vec3 &p) { const Vec3 d = p - a; return std::array<float, 2> { Vec3::dotProduct(d, u), Vec3::dotProduct(d, v) }; };
+    Vec3 lo(std::min({ a.x(), b.x(), c.x() }), std::min({ a.y(), b.y(), c.y() }), std::min({ a.z(), b.z(), c.z() }));
+    Vec3 hi(std::max({ a.x(), b.x(), c.x() }), std::max({ a.y(), b.y(), c.y() }), std::max({ a.z(), b.z(), c.z() }));
+    const Vec3 grow(tol, tol, tol);
+    grid.collect(lo - grow, hi + grow, scratch);
+    const std::array<float, 2> q0 = to2(a), q1 = to2(b), q2 = to2(c);
+    const float areaQ = 0.5f * area2;
+    double covered = 0.0;
+    float worst = 0.0f;
+    std::vector<std::array<float, 2>> poly, next;
+    for (unsigned t : scratch) {
+        const Vec3 t0 = vertexOf(positions, posComps, idx[size_t(t) * 3]), t1 = vertexOf(positions, posComps, idx[size_t(t) * 3 + 1]),
+                   t2 = vertexOf(positions, posComps, idx[size_t(t) * 3 + 2]);
+        Vec3 m = Vec3::crossProduct(t1 - t0, t2 - t0);
+        const float ml = m.length();
+        if (!(ml > 0.0f)) continue;
+        m = m * (1.0f / ml);
+        const float cosine = std::fabs(Vec3::dotProduct(m, n));
+        if (cosine < 0.9999f) continue;
+        float off = 0.0f;
+        for (const Vec3 *p : { &a, &b, &c }) off = std::max(off, std::fabs(Vec3::dotProduct(m, *p - t0)));
+        if (off > tol) continue;
+        // Q clipped by T's three edges, in Q's plane (T's corners projected along n).
+        std::array<std::array<float, 2>, 3> T = { to2(t0), to2(t1), to2(t2) };
+        const float orient = (T[1][0] - T[0][0]) * (T[2][1] - T[0][1]) - (T[1][1] - T[0][1]) * (T[2][0] - T[0][0]);
+        if (orient == 0.0f) continue;
+        poly = { q0, q1, q2 };
+        for (int e = 0; e < 3 && !poly.empty(); ++e) {
+            const std::array<float, 2> &P = T[size_t(e)], &R = T[size_t((e + 1) % 3)];
+            const auto side = [&](const std::array<float, 2> &x) {
+                return ((R[0] - P[0]) * (x[1] - P[1]) - (R[1] - P[1]) * (x[0] - P[0])) * (orient > 0.0f ? 1.0f : -1.0f);
+            };
+            next.clear();
+            for (size_t i = 0; i < poly.size(); ++i) {
+                const std::array<float, 2> &A = poly[i], &B = poly[(i + 1) % poly.size()];
+                const float sa = side(A), sb = side(B);
+                if (sa >= 0.0f) next.push_back(A);
+                if ((sa >= 0.0f) != (sb >= 0.0f)) {
+                    const float k = sa / (sa - sb);
+                    next.push_back({ A[0] + k * (B[0] - A[0]), A[1] + k * (B[1] - A[1]) });
+                }
+            }
+            poly.swap(next);
+        }
+        double ar = 0.0;
+        for (size_t i = 0; i + 2 < poly.size() + 0 && poly.size() >= 3; ++i) {
+            const std::array<float, 2> &A = poly[0], &B = poly[i + 1], &C = poly[i + 2];
+            ar += 0.5 * double((B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0]));
+        }
+        if (ar <= 0.0) continue;
+        covered += ar;
+        worst = std::max(worst, off / cosine);
+    }
+    if (covered < double(areaQ) * (1.0 - 1e-4) || covered > double(areaQ) * (1.0 + 1e-3)) return -1.0f;
+    return worst;
+}
+
 /// THE MAXIMUM OF A DISTANCE OVER ONE FACET, EXACT TO A TOLERANCE (CLUSTER-LOCK-3). The
 /// distance to a union of triangles is at most the distance to ANY one of them, and the
 /// distance to one triangle is convex — so over a piece of the facet it is at most the
@@ -3924,7 +3999,7 @@ float nearestOn(const float *positions, int posComps, const surface::TriangleGri
 template <class Dist>
 float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float scale, float floorTol, Dist &&dist)
 {
-    struct Piece { Vec3 a, b, c; int level; };
+    struct Piece { Vec3 a, b, c; int level = 0; };
     std::array<Piece, 3 * kFacetMaxLevels + 4> stack;
     size_t top = 0;
     stack[top++] = Piece { a, b, c, 0 };
@@ -3939,7 +4014,9 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
             radius = std::max(radius, (*corner - centre).length());
         // Anything within bound - radius of the centre holds the whole piece within the
         // bound (1-Lipschitz): the query stops at the first such triangle.
-        const float within = std::max(std::max(stop, best), upper) - radius;
+        // (Nothing below the precision floor can move the answer: every stored error is
+        // at least the floor.)
+        const float within = std::max(std::max(std::max(stop, best), upper), floorTol) - radius;
         const float d = dist(centre, tri, within >= 0.0f ? within : -1.0f);
         if (!std::isfinite(d) || (within >= 0.0f && d <= within)) continue;
         // Two upper bounds, the tighter wins: the corners against the centre's triangle
@@ -3950,7 +4027,7 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
             convex = std::max(convex, (*corner - surface::closestOnTriangle(*corner, tri[0], tri[1], tri[2])).length());
         const float ub = std::isfinite(convex) ? std::min(convex, d + radius) : d + radius;
         best = std::max(best, d);
-        if (ub <= std::max(std::max(stop, best), upper)) continue;   // this piece cannot pass the bound
+        if (ub <= std::max(std::max(std::max(stop, best), upper), floorTol)) continue;   // cannot pass the bound
         if (ub - d <= tol || piece.level >= kFacetMaxLevels) { upper = std::max(upper, ub); continue; }
         const Vec3 ab = (piece.a + piece.b) * 0.5f, bc = (piece.b + piece.c) * 0.5f, ca = (piece.c + piece.a) * 0.5f;
         const int next = piece.level + 1;
@@ -4825,6 +4902,12 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         exact = runningMax(lostIdx.size() / 3, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop) {
             const unsigned v0 = lostIdx[t * 3];
             if (!(islands.capOf[v0] > stop)) return 0.0f;
+            // A lost facet lying on S (a flat stretch) is answered exactly by its cover.
+            thread_local std::vector<unsigned> coverScratch;
+            const float flat = coplanarCover(positions, posComps, gridS, simplifiedIdx, corner(lostIdx, t, 0),
+                                             corner(lostIdx, t, 1), corner(lostIdx, t, 2),
+                                             std::max(floorLen, 0.05f * groups[g].simplified.error), coverScratch);
+            if (flat >= 0.0f) return capped(flat, v0);
             const float m = facetMax(corner(lostIdx, t, 0), corner(lostIdx, t, 1), corner(lostIdx, t, 2), stop,
                                      groups[g].simplified.error, floorLen,
                                      [&](const Vec3 &p, Vec3 *tri, float within) {
