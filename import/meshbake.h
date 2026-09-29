@@ -360,22 +360,26 @@ public:
             bool  capBound = false;     ///< an island cap lowered some point's distance
         };
         QVector<GroupTerms> groupTerms;
-        /// THE DAG'S DISPLACEMENT LOCK (DAG-LOCK-1): how many builds it took, how many
-        /// level-0 vertices it locked, and how many removed vertices were still past
-        /// the budget after the last build (0 = converged).
-        int    lockPasses = 0;
-        int    lockedVertices = 0;
-        int    lockUnconverged = 0;
+        /// THE DAG'S DISPLACEMENT LOCK, PER GROUP (DAG-LOCK-1's rule, CLUSTER-LOCK-3's
+        /// shape): every group is verified as clusterlod simplifies it and re-simplified
+        /// with its offenders locked, at most 4 times. `groupRetries` = the
+        /// re-simplifications over all groups; `retryHistogram[k]` = the groups that
+        /// took k; `groupsUnconverged` = groups still past the bound after their last
+        /// attempt (the measurement charges them); `lockedVertices` = the locks summed
+        /// over groups; `verifyMs` = the verify's share of `buildMs`; `retriesByDepth[d]`
+        /// = the re-simplifications of depth-d groups (where the bound binds).
         int    groupRetries = 0;
         int    groupsUnconverged = 0;
+        int    lockedVertices = 0;
         QVector<int> retryHistogram;
+        QVector<int> retriesByDepth;
         double verifyMs = 0.0;
         /// The lock is by POSITION (CLUSTER-LOCK-1): how many locked positions are held
         /// by several indices (a seam, a pole), and how many are locked on only some of
         /// their indices — always 0; a split position opens the cut (the sloppy fallback).
         int    lockedSharedPositions = 0;
         int    lockedSplitPositions = 0;
-        double buildMs = 0.0;          ///< clodBuild alone
+        double buildMs = 0.0;          ///< clodBuild alone (the verify included)
         double measureMs = 0.0;        ///< the per-group measurement + provenance
         bool   wantRegions = false;
         QVector<QVector<quint32>> clusterRegions;
