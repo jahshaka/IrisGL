@@ -73,6 +73,7 @@
 // readbacks. The planar-reflection pass (OgrePlanar.cpp) sets it false too,
 // even though its RQ range already excludes 254 — the guarantee must not
 // depend on an RQ constant somebody may widen later.
+#include <random>
 #include <algorithm>
 #include <cmath>
 #include "EnginePrivate.h"
@@ -3426,13 +3427,22 @@ Ogre::TextureGpu *gSsaoNoise = nullptr;
 bool gSsaoInitialised = false;
 int  gSmaaPreset = -1;
 
+/// THE KERNEL'S OWN GENERATOR, SEEDED (SSAO-DOUBLE-1): the hemisphere kernel and the
+/// rotation tile used to come from std::rand — the process's GLOBAL stream — so the AO's
+/// strength depended on whatever had drawn from it before the first chain wanted SSAO
+/// (the same cube read -13.5 or -15.4 codes by run order). initSsao reseeds this before
+/// it draws, so every process builds the same kernel.
+std::minstd_rand gSsaoRng;
+constexpr std::uint_fast32_t kSsaoSeed = 0x55A0u;
 float rangeRandom(float lo, float hi) {
-    return lo + (hi - lo) * (float(std::rand()) / float(RAND_MAX));
+    return lo + (hi - lo) * (float(gSsaoRng() - gSsaoRng.min()) /
+                             float(gSsaoRng.max() - gSsaoRng.min()));
 }
 }   // namespace
 
 void initSsao(Ogre::Root *root) {
     if (gSsaoInitialised) return;
+    gSsaoRng.seed(kSsaoSeed);
     Ogre::Pass *pass = materialPass("SSAO/HS");
     if (!pass) return;
 

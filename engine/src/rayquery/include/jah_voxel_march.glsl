@@ -34,7 +34,7 @@
 //                               c's radiance over cascade 0's (the stored units
 //                               of each cascade differ by its own multiplier)
 //     JAH_VOX_FROM_PREV_OFFSET(c) vec4, c >= 1: xyz = the offset of that map,
-//                               w = the specular walk's per-hop weight slope
+//                               w unused
 //     JAH_VOX_SDF_MAXMIP, JAH_VOX_SDF_FACTOR   (only with JAH_MARCH_SDF) the
 //                               specular empty-space skip's two parameters
 //
@@ -351,12 +351,16 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 /// THE WALK: cascade 0 from `posLS0` (already off the surface - the caller's own start
 /// bias, jahConeStart: one cell of cascade 0 along the normal), then every cascade out
 /// while the cone is not yet opaque.
-JahConeResult jahConeMarch( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec4 origin, uint flags )
+/// ...from a start `startingTravelled` along its own axis from the apex (cascade 0's normalised
+/// units; the specular cone's start, jahSpecularConeStart): the footprint grows from the apex.
+JahConeResult jahConeMarchAged( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec4 origin, uint flags,
+								float startingTravelled )
 {
 	const bool specular = ( flags & JAH_MARCH_SPECULAR ) != 0u;
 	// THE SHARE OF THE CONE BELOW ITS SURFACE (origin.w, the caller's jahConeBelow) is stopped
 	// by the surface - the hemisphere's boundary is opaque from above - and starts the composite.
-	JahConeResult result = jahConeMarchCascade( 0, posLS0, dirLS, tanHalfAngle, 0.0, origin.w, 0.0, origin, flags );
+	JahConeResult result = jahConeMarchCascade( 0, posLS0, dirLS, tanHalfAngle, 0.0, origin.w,
+												startingTravelled, origin, flags );
 #if JAH_VOX_MAX_CASCADES > 1
 	float toC0 = 1.0;	// cascade j's normalised units to cascade 0's, along dirLS
 	for( int j = 1; j < JAH_VOX_COUNT && result.alpha < 0.95; ++j )
@@ -381,20 +385,18 @@ JahConeResult jahConeMarch( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec4 or
 			specular ? 0.0 : max( result.lodLevel - prevCascadeMaxLod, 0.0 ), result.alpha,
 			specular ? 0.0 : result.travelled * hopScale, origin, flags );
 
-		if( specular )
-		{
-			// The specular hop weight: upstream's per-cascade brightness ramp on
-			// the cascade multiplier, by how far into the new cascade's mips the
-			// cone has got (its own "hacky" equalisation, kept as it stands).
-			float strength = mix( 0.5, fromPrevScale.w,
-								  clamp( newRes.lodLevel * fromPrevOffset.w, 0.0, 1.0 ) );
-			result.colour += newRes.colour * strength;
-		}
-		else
-		{
-			result.colour += newRes.colour * fromPrevScale.w;
+		// THE HOP'S UNITS, ONE RULE FOR EVERY CONE (PHOTON-PHYSICS-1, CONE-EMITTER-1): the new
+		// cascade's colour is in ITS stored units, and fromPrevScale.w is exactly its radiance over
+		// cascade 0's - the conversion, nothing else. The specular walk used to take upstream's
+		// "hacky" brightness ramp instead, mix( 0.5, w, lod / mips^3 ): a near-mirror cone's lod
+		// stays near 0, so everything a specular cone read past cascade 0 came back at HALF its
+		// radiance (gi.cone_emitter: a 1 m panel of L = 5 in a roughness-0.05 lobe read 1.000 L
+		// with the panel in cascade 0 and 0.450 L with the same panel in cascade 1; gi.hit_planar's
+		// screen cone 0.39 of the true picture). The ramp dated from the store's PI-too-bright
+		// injection, since fixed at its source (fork 8f09c0cd4+155a56bf8).
+		result.colour += newRes.colour * fromPrevScale.w;
+		if( !specular )
 			result.travelled = newRes.travelled;
-		}
 		result.alpha = newRes.alpha;
 		result.lodLevel = newRes.lodLevel;
 		result.posLS = newRes.posLS;
@@ -404,6 +406,11 @@ JahConeResult jahConeMarch( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec4 or
 	}
 #endif
 	return result;
+}
+
+JahConeResult jahConeMarch( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec4 origin, uint flags )
+{
+	return jahConeMarchAged( posLS0, dirLS, tanHalfAngle, origin, flags, 0.0 );
 }
 
 #endif   // JAH_VOXEL_MARCH_GLSL

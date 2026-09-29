@@ -1023,6 +1023,9 @@ void OgreScene::runChainTick(bool inMotion) {
 GiStatus OgreScene::giStatus() const {
     GiStatus st;
     st.mode = mGi.mode;
+    // SSAO-DOUBLE-1: the chain's refusal, from the one rule OgreView::chainDesc reads.
+    st.ssaoSuppressed = ssaoRefused();
+    if (st.ssaoSuppressed) st.ssaoSuppressedReason = ssaoSuppressedReason();
     // THE SURFACE CACHE (SURFACE-CACHE phase 2) — outside the try, because it
     // touches no Ogre object of its own: it copies counters the Component holds
     // and leaves the struct's zeroed defaults when there is no cache, which is

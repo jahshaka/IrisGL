@@ -57,6 +57,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     mChainHitDecode = chainDesc().hitDecode;
     mChainAtomDraw = chainDesc().atomDraw;
     mChainAtomOcclusion = chainDesc().atomOcclusion;
+    mChainSsao = chainDesc().ssao;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -214,7 +215,13 @@ ChainDesc OgreView::chainDesc() const {
     d.bloomThreshold = mPostFx.bloomThreshold;
     d.bloomKnee      = mPostFx.bloomKnee;
     d.bloomAmount    = mPostFx.bloomAmount;
-    d.ssao           = mPostFx.ssao;
+    // SSAO IS A REQUEST, AND THE GI REFUSES IT (SSAO-DOUBLE-1; giCarriesOcclusion):
+    // wherever the scene's GI carries the diffuse, its visibility is already in the
+    // picture, and an AO multiply of the finished colour would count occlusion twice
+    // (-11 codes on a cube's contact band at Epic where the GI alone reads -0.4,
+    // spikes/reflect-leak-2). The scene's mode is read here, so every view of it —
+    // the viewport, a screenshot, the Player — builds the same chain.
+    d.ssao           = mPostFx.ssao && !(mScene && mScene->ssaoRefused());
     d.ssaoScale      = mPostFx.ssaoScale;
     d.ssaoPower      = mPostFx.ssaoPower;
     d.ssaoRadius     = mPostFx.ssaoRadius;
@@ -311,6 +318,16 @@ ChainDesc OgreView::chainDesc() const {
     d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
     finishAtomOcclusion(d);
     return d;
+}
+
+/// THE SHAPE THE SCENE DECIDES and the definition was not built with: the id pass
+/// and its occlusion (the scene's split) and SSAO (the scene's GI mode refuses it,
+/// SSAO-DOUBLE-1). A view learns its scene late, its sample count can change under
+/// it, and a scene's GI mode moves between frames — one comparison for all three.
+bool OgreView::sceneShapeMoved() const {
+    const ChainDesc d = chainDesc();
+    return mChainAtomDraw != d.atomDraw || mChainAtomOcclusion != d.atomOcclusion ||
+           mChainSsao != d.ssao;
 }
 
 /// THE ID PASS'S OCCLUSION (ChainDesc::atomOcclusion), decided LAST — after every rule
@@ -920,8 +937,7 @@ bool OgreView::setScene(Scene *scene) {
         // THE SCENE DECIDES THE ID PASS (ChainDesc::atomDraw): a view built before it
         // had a scene carries none, and the graph is re-derived HERE, before its first
         // attach, never one frame later.
-        if (mChainAtomDraw != chainDesc().atomDraw || mChainAtomOcclusion != chainDesc().atomOcclusion)
-            rebuildDetachedWorkspaceDef();
+        if (sceneShapeMoved()) rebuildDetachedWorkspaceDef();
         return attachWorkspace();
     } JAH_CATCH(mError, false);
 }
@@ -1430,6 +1446,7 @@ void OgreView::rebuildDetachedWorkspaceDef() {
     mChainHitDecode = chainDesc().hitDecode;
     mChainAtomDraw = chainDesc().atomDraw;
     mChainAtomOcclusion = chainDesc().atomOcclusion;
+    mChainSsao = chainDesc().ssao;
 }
 
 bool OgreView::dropWorkspaceForShadowRebuild() {
@@ -1519,9 +1536,7 @@ void OgreView::rebuildRtt(unsigned w, unsigned h) {
     // shape carries the id pass at 1x only), and the old definition's passes would
     // throw building their render pass against the new target — re-derived before
     // the attach, never a frame later.
-    if (hadWorkspace && (mChainAtomDraw != chainDesc().atomDraw ||
-                         mChainAtomOcclusion != chainDesc().atomOcclusion))
-        rebuildDetachedWorkspaceDef();
+    if (hadWorkspace && sceneShapeMoved()) rebuildDetachedWorkspaceDef();
     if (hadWorkspace) attachWorkspace();
 }
 

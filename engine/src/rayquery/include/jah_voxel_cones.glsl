@@ -110,6 +110,30 @@ vec3 jahConeStart( vec3 posLS, vec3 biasDirLS )
 	return posLS + biasDirLS * JAH_VOX_INVRES( 0 );
 }
 
+/// THE SPECULAR START: ON ITS OWN AXIS, AT THE DIFFUSE START'S HEIGHT (PHOTON-PHYSICS-1,
+/// CONE-EMITTER-1). The diffuse set starts one cell along the normal (jahConeStart); a specular
+/// cone started there too walked a line PARALLEL to the reflection, displaced one cell of
+/// cascade 0 along the normal - the mirror image of everything it read slid by that cell (a
+/// 1 m emitter panel in a roughness-0.05 lobe read 0.74 of its radiance where the true
+/// reflection met it 0.25 m below its edge: the displaced line met it 0.09 m below). It starts
+/// on the reflection instead, where the reflection has risen the same one cell above the
+/// surface - the same height, so the surface's own voxels stay behind it as before (and the
+/// origin plane keeps them out of every read) - at most FOUR cells along a grazing reflection
+/// (below a rise of 1/4 it starts lower than a cell, which the origin plane still covers).
+/// THE CONE'S APEX STAYS AT THE SURFACE: w is the length skipped, the age the march starts with
+/// (jahConeMarchAged), so the footprint at a distance is the lobe's from the surface and not
+/// from the start (started along its axis with no age, a roughness-0.5 cone read a 1 m panel
+/// 1.4 m away with a footprint 16 % narrow).
+/// `surfaceLS` the surface point, `dirLS` the unit reflection and `biasDirLS` the unit normal,
+/// cascade 0's normalised space (cubic cells: a unit direction times the inverse resolution is
+/// one cell long, and its rise along the normal is dot( dir, normal ) cells).
+vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
+{
+	const float cells = 1.0 / max( dot( dirLS, biasDirLS ), 0.25 );
+	const vec3 step = dirLS * JAH_VOX_INVRES( 0 ) * cells;
+	return vec4( surfaceLS + step, length( step ) );
+}
+
 /// THE DIFFUSE GI AT A SURFACE POINT: the cone set walked from `posLS` (already
 /// off the surface: jahConeStart), in the frame `basis` (third axis = the
 /// normal, in the caller's space).
