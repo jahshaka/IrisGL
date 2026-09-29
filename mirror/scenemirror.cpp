@@ -8016,12 +8016,13 @@ void SceneMirror::applyCloudLayer()
         mCloudWeatherPath = weatherPath;
         if (!weatherPath.isEmpty()) {
             // DATA, not a colour: uploaded linear (srgb false), and held at a
-            // size that covers one 16 km tile with no waste (a larger map adds
-            // nothing the 1024^2 field could keep).
+            // size that covers one 64 km tile with no waste (the bake reads it
+            // on its 512^2 footprint grid, CLOUDS-2D-3 — a larger map adds
+            // nothing the bake could keep).
             QImage img(weatherPath);
             if (!img.isNull()) {
-                if (img.width() > 1024 || img.height() > 1024)
-                    img = img.scaled(1024, 1024, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                if (img.width() > 512 || img.height() > 512)
+                    img = img.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 img = img.convertToFormat(QImage::Format_RGBA8888);
                 mCloudWeatherTexture = mTarget->createTexture(unsigned(img.width()),
                                                               unsigned(img.height()),
@@ -8049,7 +8050,12 @@ void SceneMirror::applyCloudLayer()
             cl.sunDir[0] = toSun.x(); cl.sunDir[1] = toSun.y(); cl.sunDir[2] = toSun.z();
             const iris::LinearColor c = iris::linearOf(sunLight->color);
             const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
-            const float k = std::max(0.0f, sunLight->intensity) * float(M_PI * M_PI);
+            // THE PLATE'S UNITS (CloudLayerDesc::sunIrradiance): the engine
+            // lights with power intensity x pi and HlmsPbs divides the diffuse
+            // by pi (OgreScene's light push), so the irradiance is intensity x
+            // pi. A second pi here lit the sheet pi times brighter than the sun
+            // it stands in (CLOUDS-2D-3: a thin full deck doubled the ground).
+            const float k = std::max(0.0f, sunLight->intensity) * float(M_PI);
             cl.sunIrradiance = Colour(c.r * k * tint.r, c.g * k * tint.g, c.b * k * tint.b, 1.0f);
         }
     }

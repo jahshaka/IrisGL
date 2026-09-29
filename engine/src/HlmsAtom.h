@@ -84,6 +84,9 @@ void tellEveryHlms(Ogre::HlmsManager *manager, bool force = false);
 /// head of its analyzeBarriers and preparePassHash, so it is NOT relayed by
 /// tellEveryHlms.
 void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm);
+/// THE SCENE'S LIGHT DIRT (SceneGiBinding::lightWriteSerial / lightsRemoved, D3-HIT-
+/// SHADE-2) — false for a SceneManager that registered no record.
+bool sceneLightDirt(const Ogre::SceneManager *sm, unsigned long long &serial, unsigned long long &removed);
 
 /// The registered HlmsAtom's forgetDecodeTwinOf — a no-op before registration, after
 /// Root, or for a datablock that is not PBS's. The one call every PBS-datablock
@@ -365,7 +368,13 @@ public:
     /// cluster table, read by the screen decode.
     static constexpr Ogre::uint8 kMeshBufSlot = 6u;
     static constexpr Ogre::uint8 kClusterBufSlot = 7u;
-    static constexpr Ogre::uint8 kReservedBufSlots = 8u;
+    /// HIT MODE's WORLD LIGHT LIST (D3-HIT-SHADE-2): every point and spot light of
+    /// the pass's scene that the pass buffer does not already carry (the shadow
+    /// node's casting lights are there), world space, Forward+'s six float4 a light
+    /// behind a header float4 (the count, the per-hit cap) — what a hit with no
+    /// Forward+ cell (outside the camera's frustum) is lit by. uploadWorldLights.
+    static constexpr Ogre::uint8 kWorldLightBufSlot = 8u;
+    static constexpr Ogre::uint8 kReservedBufSlots = 9u;
 
 protected:
     Ogre::Hlms::PropertiesMergeStatus notifyPropertiesMergedPreGenerationStep(
@@ -380,8 +389,19 @@ protected:
     /// other pass — the hit decode, a harness — draws with.
     void applyStrongMacroblockRules(Ogre::HlmsMacroblock &macroblock, const size_t tid) const override;
 
+    /// The world light list's last upload: the lights it holds (0 before the first
+    /// hit decode pass) and the per-hit cap (Forward+'s lights per cell).
+    unsigned worldLightCount() const { return mWorldLightCount; }
+    unsigned worldLightCap() const { return mWorldLightCap; }
+
 private:
     void uploadBucketTable();
+    /// THE WORLD LIGHT LIST of a hit decode pass (kWorldLightBufSlot): rebuilt on the
+    /// CPU per pass from the scene's own light collection (never the camera-culled
+    /// global list — a lamp whose range misses every frustum still lights a hit),
+    /// uploaded only when its bytes change. Called from preparePassHash (every
+    /// upload of a pass happens there, before its render pass begins).
+    void uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorShadowNode *shadowNode);
 
     void ensureStandIns();
 
@@ -427,6 +447,24 @@ private:
     /// can only be a HELPER lane there, the early depth test rejected it.
     Ogre::ReadOnlyBufferPacked *mBucketBuf = nullptr;
     std::vector<uint32_t> mBucketMirror;
+    /// The world light list (uploadWorldLights) and the bytes it last uploaded.
+    Ogre::ReadOnlyBufferPacked *mWorldLightBuf = nullptr;
+    std::vector<float> mWorldLightMirror;
+    /// Per SceneManager: the list as last BUILT and the dirt it was built at (the
+    /// scene's light serial and removal count, the shadow node's casting set, the
+    /// cap). A pass whose dirt matches reuses it — no walk, no sort.
+    struct WorldLights {
+        unsigned long long serial = ~0ull, removed = ~0ull;
+        std::vector<const Ogre::Light *> casting;
+        Ogre::uint32 cap = 0u;
+        unsigned count = 0u;
+        std::vector<float> data;
+    };
+    std::unordered_map<const Ogre::SceneManager *, WorldLights> mWorldLightScenes;
+    /// Builds (rebuilds) the list of one scene into `out` (uploadWorldLights' walk).
+    void buildWorldLights(Ogre::SceneManager *sm, WorldLights &out);
+    unsigned mWorldLightCount = 0u;
+    unsigned mWorldLightCap = 0u;
     bool mBucketDirty = true;
     /// Moves with every bucket-table change (a bucket gained or lost a member):
     /// the Atom view's Buckets table re-walks only when it moved.

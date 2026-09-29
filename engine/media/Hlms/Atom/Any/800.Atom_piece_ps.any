@@ -26,8 +26,9 @@
 //   the eye vector is the reversed RAY, and the Forward+ cell is the hit's world
 //     position projected through the pass' view-projection (the fork's
 //     fwdCustomFragCoord hook) - a hit outside the frustum has no cell: no
-//     clustered light, decal or cubemap probe reaches it, only the sun, the
-//     field, the voxel cones and the scene's bound reflection;
+//     decal or cubemap probe reaches it, and its point and spot lights are the
+//     WORLD light list's (D3-HIT-SHADE-2, the piece AtomHitWorldLights), beside
+//     the sun, the field, the voxel cones and the scene's bound reflection;
 //   the SUN'S shadow term is the record's shadow ray, replacing the shadow map
 //     (which covers the camera's frustum only); every other shadowed light keeps
 //     its map, read at the hit's world position.
@@ -79,6 +80,10 @@
 	vulkan_layout( ogre_t@value(atomIdTex) ) uniform utexture2D atomIdTex;
 	@property( atom_hit_mode )
 		ReadOnlyBufferU( @value(atomHitBuf), uint, atomHitBuf );
+		// THE WORLD LIGHT LIST (D3-HIT-SHADE-2; HlmsAtom::uploadWorldLights): the
+		// scene's point and spot lights the pass buffer does not hold, world space,
+		// Forward+'s six float4 a light after a header (the count, the per-hit cap).
+		ReadOnlyBufferF( @value(atomWorldLightBuf), float4, atomWorldLights );
 		// A HIT HAS NO SCREEN NEIGHBOURS: the fragments of one quad are four
 		// unrelated rays, so every screen derivative of the body is zero - the
 		// footprint in the record is the only width a hit has.
@@ -603,6 +608,11 @@
 			// outside that frustum.
 			fwdCustomHasCell = atomOk && atomHitClip.w > 0.0 &&
 							   all( lessThanEqual( abs( atomHitClip.xy ), float2( atomHitClip.w, atomHitClip.w ) ) );
+			@property( atom_hit_world_all )
+				// THE MEASUREMENT DOOR's "one list" arm (JAHSHAKA_HIT_WORLD_LIGHTS=all):
+				// no hit takes a cell, every hit takes the world list.
+				fwdCustomHasCell = false;
+			@end
 			{
 				float2 atomRes = float2( textureSize( atomIdTex, 0 ) );
 				float2 atomNdc = fwdCustomHasCell ? atomHitClip.xy / atomHitClip.w : float2( 0.0, 0.0 );
@@ -818,8 +828,8 @@
 	@piece( DeclareObjLightMask )uint objLightMask = atomLightMask;@end
 @end
 
-// HIT MODE'S THREE PIECES (see the header): the eye vector, the sun, and the
-// record's "shaded" mark.
+// HIT MODE'S PIECES (see the header): the eye vector and the world's lights, the
+// sun, and the record's "shaded" mark.
 @property( atom_hit_mode )
 	// THE MARK THE WRITE-BACK READS: w = 1 where a record was shaded, whatever
 	// alpha the material computes (a transparent surface's hit is shaded as its
@@ -841,8 +851,8 @@
 	// behind the camera) and the hemisphere ambient's specular weight, which
 	// DoAmbientHeader formed from that reflDir. The Fresnel terms read NdotV and
 	// the lights' half vectors read viewDir inside BRDF, after this piece.
+	@piece( custom_ps_preLights )
 	@property( needs_view_dir )
-		@piece( custom_ps_preLights )
 			pixelData.viewDir = atomHitViewDir;
 			pixelData.NdotV = saturate( dot( pixelData.normal, pixelData.viewDir ) );
 			@property( needs_refl_dir )
@@ -853,7 +863,67 @@
 								_h( 0.5 );
 				@end
 			@end
+		@property( !atom_hit_world_off )
+			@insertpiece( AtomHitWorldLights )
 		@end
+	@end
+	@end
+	// THE WORLD'S LIGHTS AT A HIT WITH NO CELL (D3-HIT-SHADE-2). Inside the camera's
+	// frustum the hit's Forward+ cell holds exactly the lights whose range reaches
+	// that cell - the screen's answer, the hit keeps it: the cell is a SPATIAL
+	// index, and this list is not - a hit here walks EVERY world light (the cap
+	// counts only the lights that shade), so its cost grows with the scene's lamp
+	// count; that scan, and the cell's decals and cubemap probes, are why the
+	// in-frustum hits keep the cell (a world-space light grid is its own lane). Outside the frustum there is no cell, and the
+	// clustered list itself holds only the lights that touch the frustum; the
+	// physics is the same everywhere (a lamp lights every point inside its range),
+	// so such a hit loops the WORLD list (HlmsAtom::uploadWorldLights): every point
+	// and spot light the pass buffer does not carry, brightest first, at most the
+	// forward list's lights per cell of those in range - the same lighting text as
+	// the forward loop (Forward+'s attenuation, range fade, spot cone and profile,
+	// the same BRDF), in view space through the pass's view.
+	@piece( AtomHitWorldLights )
+		if( !fwdCustomHasCell )
+		{
+			uint atomWlLen = uint( atomWorldLights.length() );
+			float4 atomWlHead = readOnlyFetch( atomWorldLights, 0 );
+			uint atomWlCount = min( floatBitsToUint( atomWlHead.x ), ( max( atomWlLen, 1u ) - 1u ) / 6u );
+			uint atomWlCap = floatBitsToUint( atomWlHead.y );
+			uint atomWlShaded = 0u;
+			for( uint atomWl = 0u; atomWl < atomWlCount && atomWlShaded < atomWlCap; ++atomWl )
+			{
+				int atomWlAt = int( 1u + atomWl * 6u );
+				float4 atomWlPos = readOnlyFetch( atomWorldLights, atomWlAt );
+				float4 lightDiffuse = readOnlyFetch( atomWorldLights, atomWlAt + 1 );
+				float4 atomWlSpec = readOnlyFetch( atomWorldLights, atomWlAt + 2 );
+				float4 atomWlAtt = readOnlyFetch( atomWorldLights, atomWlAt + 3 );
+				float4 atomWlSpotDir = readOnlyFetch( atomWorldLights, atomWlAt + 4 );
+				float4 atomWlSpot = readOnlyFetch( atomWorldLights, atomWlAt + 5 );
+				float3 atomWlDir = mul( float4( atomWlPos.xyz, 1.0 ), passBuf.view ).xyz - inPs.pos;
+				float atomWlDist = length( atomWlDir );
+				if( atomWlDist <= atomWlAtt.x && atomWlDist > 0.0 @insertpiece( andObjLightMaskFwdPlusCmp ) )
+				{
+					atomWlDir *= 1.0 / atomWlDist;
+					float atomWlAtten = jahLightDistanceAttenuation( atomWlDist, atomWlAtt );
+					@property( hlms_forward_fade_attenuation_range )
+						atomWlAtten *= jahLightRangeFade( atomWlDist, atomWlAtt );
+					@end
+					float atomWlCos = dot( -atomWlDir, normalize( mul( float4( atomWlSpotDir.xyz, 0.0 ), passBuf.view ).xyz ) );
+					if( atomWlPos.w > 1.5 )
+						atomWlAtten *= atomWlCos >= atomWlSpot.y ? jahSpotAttenuation( atomWlCos, atomWlSpot.xyz ) : 0.0;
+					@property( light_profiles_texture )
+						atomWlAtten *= float( getPhotometricAttenuation( midf_c( atomWlCos ), atomWlSpotDir.w
+																		 OGRE_PHOTOMETRIC_ARG ) );
+					@end
+					if( atomWlAtten > 0.0 )
+					{
+						finalColour += BRDF( midf3_c( atomWlDir ), midf3_c( lightDiffuse.xyz ), midf3_c( atomWlSpec.xyz ),
+											 pixelData PASSBUF_ARG ) * midf_c( atomWlAtten );
+						++atomWlShaded;
+					}
+				}
+			}
+		}
 	@end
 	// THE SUN'S SHADOW IS THE RECORD'S SHADOW RAY. Upstream's piece reads the PSSM
 	// splits at the fragment's depth; a hit may lie anywhere, and the maps cover

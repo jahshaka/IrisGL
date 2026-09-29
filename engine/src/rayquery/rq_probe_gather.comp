@@ -137,6 +137,7 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 #define JAH_HIT_SUN_RANGE   p.hitSun2.z
 #define JAH_HIT_LIFT        p.hitSun2.y
 #define JAH_HIT_FAR_LIFT    p.hitSun2.w
+#define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
 #include "jah_rq_hit_record.glsl"
 
@@ -229,8 +230,8 @@ void main()
 		const vec3 origin = posW.xyz + n * bias;
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, origin, bias, dir, maxT );
-		while( rayQueryProceedEXT( rq ) ) {}
+		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, bias, dir, maxT );
+		JAH_RQ_PROCEED( rq )
 		bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) ==
 				   gl_RayQueryCommittedIntersectionTriangleEXT;
 		float tHit = hit ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;
@@ -261,9 +262,9 @@ void main()
 		if( !hit && farT > maxT )
 		{
 			rayQueryEXT rqFar;
-			rayQueryInitializeEXT( rqFar, tlas, gl_RayFlagsOpaqueEXT, 0x10u, origin, p.plane.z,
-								   dir, farT );
-			while( rayQueryProceedEXT( rqFar ) ) {}
+			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin,
+								   p.plane.z, dir, farT );
+			JAH_RQ_PROCEED( rqFar )
 			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) ==
 				gl_RayQueryCommittedIntersectionTriangleEXT )
 			{

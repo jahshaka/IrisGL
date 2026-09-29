@@ -205,12 +205,13 @@ enum GpuInstanceFlag : uint32_t {
     kGpuCaster = 1u << 1,       ///< casts a shadow in at least one caster channel
     kGpuMover = 1u << 2,        ///< kMovableBit: the document says it moves
     kGpuGiVisible = 1u << 3,    ///< kGiGeometryBit: it bounces light
-    kGpuAlphaTested = 1u << 4,  ///< a sub-item's datablock has an alpha test (no any-hit shader)
+    kGpuAlphaTested = 1u << 4,  ///< a sub-item's datablock has an alpha test: its TLAS instance is FORCE_NO_OPAQUE
     kGpuSkinned = 1u << 5,      ///< it has a skeleton instance (its MESH's buffers hold the bind pose; its skin cache the pose)
     kGpuOverlay = 1u << 6,      ///< its render queue is at or above the overlay queues
     kGpuRayTraced = 1u << 7,    ///< the TRACED SET: the conjunction the ray tier used to walk for
     kGpuDragMover = 1u << 8,    ///< MOVER-1: the user has hold of it right now
     kGpuAtom = 1u << 9,         ///< ATOM S3-DRAW: the id pass draws it, the decode shades it (OgreScene::atomRouteFor)
+    kGpuPlanar = 1u << 10,      ///< a PLANAR MIRROR's renderable (D3-HIT-SHADE-2): a ray hit on it always decodes
 };
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the

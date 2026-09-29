@@ -26,7 +26,8 @@
 // holds the array byte-equal to a reference writer): the transform is the table's
 // world rows (row-major 3x4 is exactly VkTransformMatrixKHR), the custom index the
 // slot, the near mask near | caster | mover-or-still | mover-caster | still-caster, the far mask
-// far alone, the flags TRIANGLE_FACING_CULL_DISABLE, the near level
+// far alone, the flags TRIANGLE_FACING_CULL_DISABLE (| FORCE_NO_OPAQUE for an
+// alpha-tested slot), the near level
 // min(ray level, coarsest).
 
 layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
@@ -72,19 +73,28 @@ layout( std430, set = 0, binding = 2 ) writeonly buffer Out { AsInstance outInst
 #define HDR_FLAG_MOVER		12u
 #define HDR_FLAG_SKINNED	13u
 #define HDR_MASK_STILLCAST	14u
+#define HDR_FLAG_ALPHA		15u
 #define HDR_WORDS			16u
 #define LEVEL_SLOTS			16u
 #define MESH_WORDS			36u
 // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
 #define INSTANCE_FLAGS		1u
+// ...and for an ALPHA-TESTED slot VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR
+// (REFLECT-MOVERS-2): every bottom-level structure is opaque (a mesh's structure
+// is SHARED by every item that wears it, whatever its material), so the cut-out
+// is the INSTANCE's: its triangles reach the ray queries as candidates, which
+// jah_rq_alpha.glsl tests against the material's mask.
+#define INSTANCE_FORCE_NO_OPAQUE	8u
 
 void writeInstance( uint at, uint slot, uint mask, uvec2 address )
 {
+	const uint iflags = INSTANCE_FLAGS |
+		( ( floatBitsToUint( instances[slot].boundsMax.w ) & words[HDR_FLAG_ALPHA] ) != 0u ? INSTANCE_FORCE_NO_OPAQUE : 0u );
 	AsInstance o;
 	o.transform[0] = instances[slot].world[0];
 	o.transform[1] = instances[slot].world[1];
 	o.transform[2] = instances[slot].world[2];
-	o.tail = uvec4( ( slot & 0xFFFFFFu ) | ( ( mask & 0xFFu ) << 24u ), INSTANCE_FLAGS << 24u, address.x,
+	o.tail = uvec4( ( slot & 0xFFFFFFu ) | ( ( mask & 0xFFu ) << 24u ), iflags << 24u, address.x,
 					address.y );
 	outInstances[at] = o;
 }

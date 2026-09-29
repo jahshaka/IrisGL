@@ -3095,6 +3095,13 @@ struct SceneGiBinding {
     /// sky's, an authored map's) — never a process-wide maximum. Resolved once per
     /// frame (OgreScene::resolveIblMipmaps), read per pass.
     float iblMipmaps = 1.0f;
+    /// THE SCENE'S LIGHT DIRT (D3-HIT-SHADE-2): the hit decode's world light list
+    /// (HlmsAtom::uploadWorldLights) is rebuilt only when one of these moved —
+    /// the light write serial (every setLight push, a light node's pose or
+    /// visibility write, the mirror's noteLightsMoved, the environment) and the
+    /// count of lights destroyed. Point at the owning OgreScene's counters.
+    const unsigned long long *lightWriteSerial = nullptr;
+    const unsigned long long *lightsRemoved = nullptr;
 };
 /// The record registered for `sm` — null for a SceneManager that registered none.
 /// What giStatus reports as "bound" is read through this, the same lookup the pass
@@ -3490,6 +3497,16 @@ public:
 
     // ---- Meshes and materials ----
     MeshId createMesh(const MeshData &data) override;
+    /// A MULTI-SUBMESH ITEM, for the suites that hold a per-submesh consumer to
+    /// it (REFLECT-MOVERS-2: the ray tier's cut-out table is per submesh). No
+    /// product path builds one — buildMeshV2 makes one submesh a mesh — so these
+    /// live on the engine-private scene, never on the Scene boundary.
+    /// `appendSubmesh` MOVES `from`'s submesh 0 (every LOD's VAOs, its shadow
+    /// VAOs) into `into` as its next submesh and grows `into`'s bounds; both
+    /// meshes unattached, the same LOD count. `from` is left empty (destroy it).
+    bool appendSubmesh(MeshId into, MeshId from);
+    /// One sub-item's material (setNodeMaterial sets all of them).
+    bool setSubItemMaterial(NodeId node, unsigned subItem, MaterialId mat);
     bool updateMeshVertices(MeshId id, const std::vector<float> &positions,
                             const std::vector<float> &normals) override;
     bool destroyMesh(MeshId id) override;
@@ -3749,7 +3766,9 @@ public:
     /// compares these to the table BY NODE. Not the GPU scene's prevWorld: two
     /// updates in one frame (a reader before the frame, the frame's own) can
     /// re-stage a slot and erase it.
-    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; };
+    /// `material` = GpuInstance::raster[0] (the PBS material word): a cut-out's
+    /// shadow is its material's mask (REFLECT-MOVERS-2).
+    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; uint32_t material = 0u; };
     std::vector<CardCasterRec> mCardCasters;
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
     /// has none (every skinned mesh, every line mesh, every model opened
@@ -3790,6 +3809,9 @@ public:
     /// and not a ray tier.
     bool probeGridByRays() const;
     bool probeGridWanted() const;
+    /// One probe's shadow-node bytes when this grid's captures are shadowed, else
+    /// 0 (PCC-BUDGET-2: OgreEngine::probeShadowNodeBytes at the live settings).
+    unsigned long long probeShadowBytes() const;
     /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
     void dropProbeGridByRays();
     /// THE LIGHTING SERIAL the gather's settled history counts from
@@ -4794,14 +4816,15 @@ private:
     CloudStatus cloudStatus() const override;
     bool renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize, float exposure,
                            std::vector<unsigned char> &rgba) override;
+    bool cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres) override;
     /// Is the layer on screen: enabled, and a sky to draw over.
     bool cloudLayerDrawn() const;
     Ogre::Rectangle2D *mCloudQuad = nullptr;
     Ogre::MaterialPtr  mCloudMaterial;          // per-scene clone of Jahshaka/CloudLayer
     Ogre::MaterialPtr  mCloudBakeMaterial;      // Jahshaka/CloudBake itself (the bake binds per render)
     Ogre::MaterialPtr  mSunDiscCloudMaterial;   // ...of Jahshaka/SunDiscClouded
-    Ogre::TextureGpu  *mCloudNoise = nullptr;   // 256^2 RGBA8, fixed seed, ManualTexture
-    Ogre::TextureGpu  *mCloudField = nullptr;   // 1024^2 R16F optical depth, one tile
+    Ogre::TextureGpu  *mCloudWeatherNone = nullptr;   // 1x1 white, ManualTexture: the bake's no-map unit
+    Ogre::TextureGpu  *mCloudField = nullptr;   // 2048^2 R16F optical depth, one 64 km tile
     Ogre::Camera      *mCloudBakeCamera = nullptr;
     bool     mCloudFieldPending = false;
     /// The layer's own clock: the sum of the frame deltas of the frames this
@@ -4842,6 +4865,7 @@ private:
     void bindCloudInjection(Ogre::VctLighting *lighting);
     bool     mCloudClearPending = false;
     bool     mCloudClearValid = false;
+    /// The clear sky's irradiance on an up-facing plate / pi (CLOUDS-2D-3).
     float    mCloudClearMean[3] = { 0.0f, 0.0f, 0.0f };
     Ogre::AsyncTextureTicket *mCloudClearTicket = nullptr;
     CloudStatus mCloudStatus;
@@ -6465,6 +6489,9 @@ private:
     /// one — a movable lamp never stales the probe grid, so nothing else sees
     /// it), and a light leaving the scene. Monotonic; only ever compared.
     unsigned long long mGiLightWriteSerial = 0;
+    /// Lights destroyed (removeLight, removeNode) — the world light list's dirt
+    /// beside mGiLightWriteSerial (SceneGiBinding::lightsRemoved).
+    unsigned long long mLightsRemoved = 0;
     /// The chain's at-rest light ticks that landed an injection (runChainTick) —
     /// folded into the surface cache's indirect signature.
     unsigned long long mGiRestTicks = 0;
@@ -6626,6 +6653,7 @@ private:
     /// Cumulative over the scene's life (GiStatus::probePlacements /
     /// probeCapturesTotal): scouts started, and probe captures rendered.
     unsigned           mProbePlacements = 0;
+    unsigned           mProbeReplacements = 0;   // GiStatus::probeReplacements
     unsigned long long mProbeCapturesTotal = 0;
     unsigned long long mGiRebuilds = 0;
     /// How many of those rebuilds a MOBILITY change caused (MobilityStatus::
@@ -7794,6 +7822,14 @@ public:
     void setShadowMapBudget(unsigned maps) override;
     unsigned shadowMapBudget() const override;
     ShadowStatus shadowStatus() const override;
+    /// THE BYTES ONE SHADOWED REFLECTION PROBE HOLDS FOR ITS SHADOW NODE
+    /// (PCC-BUDGET-2): the probe node's atlas at this engine's live settings
+    /// (planShadowAtlas at probeShadowResolution, the derived focused count capped
+    /// at kProbeShadowMaxFocusedMaps — buildShadowNode's own arithmetic) plus its
+    /// point-light scratch cube (R/2 squared x 6, R32F) when it places a focused
+    /// map. The cube's depth buffer is POOLED (one per resolution for the whole
+    /// render system), never a probe's. What giProbeGridBytes counts per probe.
+    unsigned long long probeShadowNodeBytes() const;
     bool refreshShadows() override;
     /// THE LAMP-MAP CACHE, frame half one (OgreShadow.cpp; ENGINE_CACHE_POLICY
     /// P2): at the top of the frame, before any per-view work — switches the

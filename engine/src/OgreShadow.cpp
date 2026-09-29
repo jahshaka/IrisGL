@@ -151,6 +151,23 @@ ShadowAtlasPlan planShadowAtlas(unsigned baseResolution, unsigned focusedMaps, u
     return plan;
 }
 
+unsigned long long OgreEngine::probeShadowNodeBytes() const {
+    const Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
+    const unsigned maxDim = std::min(16384u, unsigned(rs && rs->getCapabilities()
+                                                          ? rs->getCapabilities()->getMaximumResolution2D()
+                                                          : 16384u));
+    const unsigned probeRes = probeShadowResolution(mShadowResolution);
+    const ShadowAtlasPlan plan =
+        planShadowAtlas(probeRes, std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps), maxDim);
+    unsigned long long bytes = plan.bytes();
+    if (plan.focusedMaps) {
+        // buildShadowNode's tmpCubemap: max(64, R/2) square, six faces, R32F.
+        const unsigned long long c = std::max(64u, probeRes / 2u);
+        bytes += 6ull * c * c * 4ull;
+    }
+    return bytes;
+}
+
 // ---------------------------------------------------------------------------
 // The clear material
 // ---------------------------------------------------------------------------

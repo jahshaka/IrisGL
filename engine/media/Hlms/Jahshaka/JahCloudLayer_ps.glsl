@@ -5,34 +5,61 @@
 // added. It is inside the environment capture's range, so the ambient SH and
 // every reflection see what this draws.
 //
-// THE LIGHT, per pixel of sheet (a medium, nothing about an enclosure):
-//   * SUN, DIFFUSELY TRANSMITTED -- the Eddington two-stream answer for a
-//     conservative slab of optical depth tau lit by a collimated beam at
-//     cosine mu_s (Meador and Weaver 1980; asymmetry g folded in as the
-//     similarity factor 1 - g):
-//         T_total  = [ (1/2 + 3/4 mu_s) + (1/2 - 3/4 mu_s) exp(-tau / mu_s) ]
-//                    / ( 1 + 3/4 (1 - g) tau )
-//         T_direct = exp( -tau / mu_s )
-//     and the base glows with the diffusely transmitted part,
-//         L = E mu_s ( T_total - T_direct ) / pi
-//     (a thick deck's base under a high sun is about a third as bright as a
-//     white card facing the same sun, and a low sun reaches it far less --
-//     which is what an overcast base looks like).
-//   * SUN, SINGLY SCATTERED towards the eye through the thin parts -- a two-lobe
-//     Henyey-Greenstein phase (a strong forward lobe: the bright rim of a cloud
-//     around the sun; a weak back lobe), attenuated by the unscattered beam.
+// THE LIGHT, per pixel of sheet (a medium, nothing about an enclosure). The
+// sheet CONSERVES ENERGY (CLOUDS-2D-3): what it sends down is never more than
+// the sun's beam loses crossing it, and its base is never brighter than the
+// light arriving on its top.
+//   * SUN, TRANSMITTED -- the Eddington two-stream answer for a conservative
+//     slab lit by a collimated beam at cosine mu_s (Meador and Weaver 1980),
+//     in its SIMILARITY form: the strongly forward phase function is a
+//     forward peak plus an isotropic rest, so the slab the two-stream solves
+//     has the scaled depth tau' = (1 - g) tau, and EVERY term uses tau'
+//         T_total = [ (1/2 + 3/4 mu_s) + (1/2 - 3/4 mu_s) exp(-tau' / mu_s) ]
+//                   / ( 1 + 3/4 tau' )
+//     which is at most 1 for every tau' and mu_s (for mu_s >= 2/3 the
+//     numerator's excess over 1 is below 3/4 tau'; below 2/3 it is negative).
+//     The earlier sheet divided by the scaled depth but decayed the numerator
+//     with the UNSCALED one, which returned up to 1.04 of the beam at a high
+//     sun (tau ~ 1) -- and added a single-scatter lobe ON TOP of a
+//     transmission that already held every scattered photon: the thin
+//     margins sent down up to twice what they took out of the beam.
+//     The beam that crosses splits three ways, and they sum to T_total:
+//       T_direct  = exp( -tau / mu_s )         unscattered -- the ground
+//                                              shadow's own factor, drawn
+//                                              by the sun disc, not here
+//       T_forward = exp( -tau' / mu_s ) - T_direct
+//                                              the forward peak: seen in a
+//                                              Henyey-Greenstein lobe of the
+//                                              same g around the sun, scaled
+//                                              so its flux through the base
+//                                              is exactly T_forward (the
+//                                              lobe's integral over the sky
+//                                              below the sheet is taken on
+//                                              the CPU, cloudPhase.x)
+//       T_diffuse = T_total - exp( -tau' / mu_s )
+//                                              the multiply scattered rest,
+//                                              the same radiance every way
+//     so the radiance the base shows is E mu_s ( T_diffuse / pi +
+//     T_forward HG(cos) / norm ), and its flux is E mu_s ( T_total - T_direct ):
+//     exactly what the beam lost, less what the top reflects.
 //   * SELF-SHADOW: N steps through the field TOWARDS THE SUN across one slab
 //     thickness; where the neighbours on the sun's side are thicker than this
 //     column, this column sits in their shadow (the low-sun case -- at a high
 //     sun the steps collapse onto the column itself and change nothing).
-//   * SKY LIGHT: the CLEAR sky's mean radiance (SH band 0 of a capture taken
-//     with the sheet hidden -- never of the capture the sheet is in, which
-//     would light the sheet by itself), diffusely transmitted through it:
-//     a thin sheet in that light returns it (a conservative scatterer in a
-//     uniform field), a thick one passes 1 / ( 1 + 3/4 (1 - g) tau ) of it.
+//     It only ever removes light.
+//   * SKY LIGHT: the light the CLEAR sky puts on the sheet's top -- its
+//     irradiance on an up-facing plate over pi, from a capture taken with the
+//     sheet hidden (never the capture the sheet is in, which would light the
+//     sheet by itself; never the SPHERE's mean, whose horizon glow and lower
+//     half lit a thin deck with 2.6x the sky light a plate receives) --
+//     diffusely transmitted through it:
+//     the sky behind keeps exp( -tau / mu ) of itself and the sheet adds
+//     ( 1 - exp( -tau / mu ) ) / ( 1 + 3/4 tau' ) of the mean, so a pixel of
+//     sheet never shows more sky light than the clear sky did.
 //   * DISTANCE: a sheet 100 km away is seen through that much air. The sky
 //     model draws no aerial perspective for us to composite into, so the far
-//     sheet fades into the sky itself with distance (a stated proxy).
+//     sheet fades into the sky itself with distance (a stated proxy), and is
+//     read along the ray's path through the slab's thickness (below).
 //
 // THE SUN'S IRRADIANCE arrives in the renderer's own units -- what a white
 // Lambert card facing the sun would reflect times pi -- so the sheet and a
@@ -50,8 +77,12 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 cloudSun;
 	// rgb = the sun's irradiance, w = the slab thickness the self-shadow crosses (m)
 	uniform vec4 cloudSunE;
-	// rgb = the sky's mean radiance (SH band 0), w = the distance fade (m)
+	// rgb = the clear sky's irradiance on the sheet's top / pi, w = the distance fade (m)
 	uniform vec4 cloudAmbient;
+	// x = 1 / the forward lobe's flux through the base (the HG lobe of g
+	// around the sun integrated over the sky below the sheet, cosine
+	// weighted; OgreSky.cpp cloudForwardLobeFlux), yzw unused
+	uniform vec4 cloudPhase;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -63,7 +94,27 @@ in block
 vulkan_layout( location = 0 )
 out vec4 fragColour;
 
-#define JAH_CLOUD_TAU( uv ) texture( vkSampler2D( cloudField, cloudSampler ), uv ).x
+// THE FAR SHEET HAS A THICKNESS (CLOUDS-2D-3 fix round). A ray at a grazing angle
+// crosses the slab (cloudSunE.w metres thick, the self-shadow's) over kilometres of
+// sheet, and a flat sheet read at ONE point turned every far cloud into a sliver a
+// pixel high: the horizon band drew as horizontal streaks (a 2 km cloud 50 km away,
+// seen at mu 0.04, is 23 times wider than high on a flat sheet — and about as high as
+// wide once its kilometre of depth is in the view). The ray integrates the cloud
+// along its path through the slab, from where it enters the base to where it leaves
+// the top (kJahCloudPathSteps samples at their heights), each read over the pixel's
+// own footprint (the anisotropic fetch, from the sheet coordinate's derivatives taken
+// once in uniform control flow). A column's HEIGHT follows its depth — h = clamp( tau
+// / kJahCloudTallTau, 0.1, 1 ) of the slab, the density tau / h below it and none
+// above — so a thick core stands tall and a thin margin lies low (rounded, not a
+// can), and the COLUMN INTEGRAL IS THE FIELD'S tau: straight up (and for the ground
+// shadow, which reads the field) nothing changes.
+// A grazing LOD bias stood here first; it blurred the screen's horizontal and made the
+// slivers longer (spikes/d8-photon-debts-1/look-*).
+vec2 jahCloudDx = vec2( 0.0 );
+vec2 jahCloudDy = vec2( 0.0 );
+#define JAH_CLOUD_TAU( uv ) textureGrad( vkSampler2D( cloudField, cloudSampler ), uv, jahCloudDx, jahCloudDy ).x
+const int kJahCloudPathSteps = 12;
+const float kJahCloudTallTau = 16.0;   // half a full column at density 1 (OgreSky.cpp kCloudTauFull)
 #include "JahCloudLayer.glsl"
 
 float jahHenyeyGreenstein( float cosTheta, float g )
@@ -80,17 +131,44 @@ void main()
 {
 	const vec3 dir = normalize( inPs.cameraDir );
 	const JahCloudHit hit = jahCloudIntersect( dir, cameraPos.xyz, cloudLayer );
+	// The footprint, in uniform control flow (the derivatives need the quad).
+	jahCloudDx = dFdx( hit.uv );
+	jahCloudDy = dFdy( hit.uv );
 	if( hit.above <= 0.0 )
 	{
 		fragColour = vec4( 0.0, 0.0, 0.0, 0.0 );
 		return;
 	}
-	const float tau = JAH_CLOUD_TAU( hit.uv );
+	// THE COLUMN ALONG THE PATH THROUGH THE SLAB (the header above).
+	const JahCloudHit top = jahCloudIntersect(
+		dir, cameraPos.xyz, vec4( cloudLayer.x + cloudSunE.w, cloudLayer.yzw ) );
+	// The samples' places along the path are offset per pixel by an interleaved
+	// gradient noise (Jimenez 2014) within one step: a far cloud's discrete steps
+	// become a fine dither instead of stairs; at a fixed column (straight up) the
+	// offset moves nothing.
+	const float jitter = fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) ) - 0.5;
+	float tau = 0.0;
+	for( int k = 0; k < kJahCloudPathSteps; ++k )
+	{
+		const float f = ( float( k ) + 0.5 ) / float( kJahCloudPathSteps );   // the sample's height in the slab
+		const float column = JAH_CLOUD_TAU(
+			mix( hit.uv, top.uv, clamp( f + jitter / float( kJahCloudPathSteps ), 0.0, 1.0 ) ) );
+		const float h = clamp( column / kJahCloudTallTau, 0.1, 1.0 );
+		// the share of this sample's height interval that lies inside the column
+		// (so the sum over the path is exactly the column where the path is one
+		// point — no terraces at the step heights)
+		const float inside = clamp( ( h - ( f - 0.5 / float( kJahCloudPathSteps ) ) ) * float( kJahCloudPathSteps ),
+									0.0, 1.0 );
+		tau += inside * column / h;
+	}
+	tau /= float( kJahCloudPathSteps );
 	const float tView = jahCloudViewTransmittance( tau, hit );
 	const float opacity = 1.0 - tView;
 
+	// THE SIMILARITY SCALING (the header): one g, one scaled depth, every term.
 	const float kG = 0.85;
-	const float similarity = 1.0 + 0.75 * ( 1.0 - kG ) * tau;
+	const float tauScaled = ( 1.0 - kG ) * tau;
+	const float similarity = 1.0 + 0.75 * tauScaled;
 	vec3 radiance = cloudAmbient.rgb * ( opacity / similarity );
 	if( cloudSun.w > 0.0 && cloudSun.y > 0.0 )
 	{
@@ -107,12 +185,16 @@ void main()
 		const vec3 sunE = cloudSunE.rgb * shadowed;
 
 		const float tDirect = exp( -tau / muS );
-		const float tTotal = ( ( 0.5 + 0.75 * muS ) + ( 0.5 - 0.75 * muS ) * tDirect ) / similarity;
-		const float tDiffuse = max( tTotal - tDirect, 0.0 );
+		const float tPeak = exp( -tauScaled / muS );
+		const float tTotal = min( ( ( 0.5 + 0.75 * muS ) + ( 0.5 - 0.75 * muS ) * tPeak ) / similarity,
+								  1.0 );
+		// The three shares of the crossing beam sum to max( T_total, T_direct )
+		// whatever the two-stream's own small-depth error does.
+		const float tForward = max( min( tPeak, tTotal ) - tDirect, 0.0 );
+		const float tDiffuse = max( tTotal - tPeak, 0.0 );
 		const float cosTheta = dot( dir, cloudSun.xyz );
-		const float phase = 0.8 * jahHenyeyGreenstein( cosTheta, 0.7 ) +
-							0.2 * jahHenyeyGreenstein( cosTheta, -0.2 );
-		radiance += sunE * ( muS * tDiffuse * ( 1.0 / 3.14159265 ) + phase * opacity * tDirect );
+		radiance += sunE * muS * ( tDiffuse * ( 1.0 / 3.14159265 ) +
+								   tForward * jahHenyeyGreenstein( cosTheta, kG ) * cloudPhase.x );
 	}
 
 	const float fade = exp( -hit.dist / max( cloudAmbient.w, 1.0 ) );

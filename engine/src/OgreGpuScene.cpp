@@ -721,9 +721,11 @@ static_assert(sizeof(Ogre::Real) == sizeof(float),
 /// The TRACED SET is the conjunction `gatherRayInstances` used to walk for, and
 /// each exclusion is load-bearing for the same reasons it always was: editor
 /// furniture and the backdrop carry their own channel instead of kVisibleBit;
-/// the overlay queues are unlit and depth-test-off; an ALPHA-TESTED datablock
-/// has no any-hit shader to cut it out, so a leaf would intersect as a solid
-/// quad (audit C-16). A SKINNED item is IN since PHOTON-SKIN-1: the ray tier
+/// the overlay queues are unlit and depth-test-off. An ALPHA-TESTED item is IN
+/// since REFLECT-MOVERS-2: its instance is written FORCE_NO_OPAQUE and every ray
+/// query tests its candidates against the material's mask (jah_rq_alpha.glsl),
+/// so a fence casts a ray shadow with holes and shows in a ray reflection (audit
+/// C-16 answered). A SKINNED item is IN since PHOTON-SKIN-1: the ray tier
 /// traces it through its own structure over its skin cache (its posed
 /// vertices), and leaves it out on a frame the cache is not ready — never at the
 /// mesh's bind pose (audit C-5's T-pose, which is what the exclusion was for).
@@ -746,10 +748,17 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
         }
     }
     if (n.dragMover && n.shown) f |= kGpuDragMover;
+    // A PLANAR MIRROR (D3-HIT-SHADE-2): its picture is a reflection, and the caches
+    // are a DIFFUSE store (a metal mirror's card and voxels hold its kD = 0: black) —
+    // a ray that hits it is the decode's, which shades the mirror's own material with
+    // the specular environment the pass holds (jahHitAlwaysDecodes). Ogre's own
+    // per-renderable test (PlanarReflections::hasPlanarReflections); the backstop
+    // compare below re-stages a slot that became a reflector with nothing else.
+    if (mPlanar && item->getNumSubItems() && mPlanar->hasPlanarReflections(item->getSubItem(0)))
+        f |= kGpuPlanar;
     // ...and it must be IN the graph: an Item with no parent node draws nothing
     // and has no world transform to trace (the old walk skipped it outright).
-    if ((f & kGpuVisible) && !(f & (kGpuOverlay | kGpuAlphaTested)) &&
-        item->getMesh() && item->getParentNode())
+    if ((f & kGpuVisible) && !(f & kGpuOverlay) && item->getMesh() && item->getParentNode())
         f |= kGpuRayTraced;
     // THE RENDER-QUEUE SPLIT (ATOM S3-DRAW): the id pass draws it, the decode
     // shades it (atomRouteFor, OgreAtomDraw.cpp). Here, so the backstop compare
@@ -1429,6 +1438,7 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
         r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
         r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
         r.flags = flagsOf(e);
+        r.material = e.raster[0];
     };
     // WHAT THE CAPTURED TERM LOSES OR GAINS between the record and the table:
     // a still caster before or after, and its world, visibility, caster bit or
@@ -1437,8 +1447,13 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
         const Ogre::uint32 f = flagsOf(e);
         if (!stillCaster(f) && !stillCaster(r.flags)) return;
         const bool turned = std::memcmp(r.world, e.world, sizeof(r.world)) != 0;
-        const bool flagsMoved = ((r.flags ^ f) & (kGpuVisible | kGpuCaster | kGpuMover)) != 0u;
-        if (!turned && !flagsMoved) return;
+        // ...and what the RAYS see of it (REFLECT-MOVERS-2): the traced set, the
+        // cut-out bit, and a cut-out's material (its mask is its shadow) — a
+        // material swap in place changes a card's sun term with nothing moving.
+        const bool flagsMoved =
+            ((r.flags ^ f) & (kGpuVisible | kGpuCaster | kGpuMover | kGpuRayTraced | kGpuAlphaTested)) != 0u;
+        const bool maskMoved = ((r.flags | f) & kGpuAlphaTested) && r.material != e.raster[0];
+        if (!turned && !flagsMoved && !maskMoved) return;
         CardCasterMove m;
         m.node = r.node;
         m.oldMin = r.min;

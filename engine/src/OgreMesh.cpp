@@ -1,6 +1,9 @@
 // Mesh creation, update and destruction, plus the v2 geometry builder.
 #include "EnginePrivate.h"
 #include "SkinCache.h"
+#include <OgreItem.h>
+#include <OgreSubItem.h>
+#include <OgreSubMesh2.h>
 
 #include <OgreLodStrategy.h>
 #include <OgreLodStrategyManager.h>
@@ -504,6 +507,52 @@ MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip) {
         mMeshes[++mNextMeshId] = std::move(rec);
         return mNextMeshId;
     } JAH_CATCH(mError, 0);
+}
+
+bool OgreScene::appendSubmesh(MeshId into, MeshId from) {
+    auto a = mMeshes.find(into), b = mMeshes.find(from);
+    if (a == mMeshes.end() || b == mMeshes.end() || into == from) { mError = "appendSubmesh: unknown mesh"; return false; }
+    for (const auto &kv : mNodes)
+        if (kv.second.meshRef == into || kv.second.meshRef == from) {
+            mError = "appendSubmesh: a mesh is attached";
+            return false;
+        }
+    Ogre::Mesh *ma = a->second.mesh.get(), *mb = b->second.mesh.get();
+    if (!ma || !mb || mb->getNumSubMeshes() != 1u || !ma->getNumSubMeshes()) { mError = "appendSubmesh: no submesh"; return false; }
+    Ogre::SubMesh *src = mb->getSubMesh(0);
+    if (src->mVao[Ogre::VpNormal].size() != ma->getSubMesh(0)->mVao[Ogre::VpNormal].size()) {
+        mError = "appendSubmesh: the LOD counts differ";
+        return false;
+    }
+    JAH_TRY {
+        Ogre::SubMesh *dst = ma->createSubMesh();
+        for (int vp = 0; vp < Ogre::NumVertexPass; ++vp) {
+            dst->mVao[vp] = src->mVao[vp];
+            src->mVao[vp].clear();
+        }
+        Ogre::Aabb box = ma->getAabb();
+        box.merge(mb->getAabb());
+        ma->_setBounds(box, false);
+        ma->_setBoundingSphereRadius(std::max(box.getRadius(), 0.001f));
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+bool OgreScene::setSubItemMaterial(NodeId id, unsigned subItem, MaterialId matId) {
+    auto nit = mNodes.find(id);
+    auto tit = mMaterials.find(matId);
+    if (nit == mNodes.end() || tit == mMaterials.end() || !nit->second.item ||
+        subItem >= nit->second.item->getNumSubItems()) {
+        mError = "setSubItemMaterial: unknown node, material or sub-item";
+        return false;
+    }
+    JAH_TRY {
+        const MaterialRec &rec = tit->second;
+        nit->second.item->getSubItem(subItem)->setDatablock(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
+        markShadowShapeDirty(nit->second);
+        markGpuSlotDirty(nit->second);   // its flags word (the cut-out bit is any sub-item's)
+        return true;
+    } JAH_CATCH(mError, false);
 }
 
 namespace {
@@ -1119,8 +1168,12 @@ bool createSkinCacheBuffer(Ogre::VaoManager *vao, const Ogre::Item *item, SkinCa
     // on a ray device). No initial data: the first skin pass writes every vertex
     // before anything reads it (the ray tier builds nothing from a cache that has
     // not been skinned).
+    // ...AND THE PREVIOUS-POSE SLICE after the posed vertices (SkinCache.h): n
+    // float3s, rounded up to whole 48-byte elements. The structure's build reads
+    // vertices 0..n-1 only (maxVertex), so the slice is never geometry.
+    const uint32_t slice = (n * kSkinPrevStride + kSkinCacheStride - 1u) / kSkinCacheStride;
     Ogre::VertexBufferPacked *vb =
-        vao->createVertexBuffer(decl, n, Ogre::BT_DEFAULT, nullptr, false);
+        vao->createVertexBuffer(decl, n + slice, Ogre::BT_DEFAULT, nullptr, false);
     if (!vb) {
         err = "skin cache: createVertexBuffer failed";
         return false;
@@ -1134,6 +1187,7 @@ bool createSkinCacheBuffer(Ogre::VaoManager *vao, const Ogre::Item *item, SkinCa
     out.vertices = vb;
     out.vertexCount = n;
     out.address = address;
+    out.prevOffset = n * kSkinCacheStride;
     out.tangentOffset = (tan && tan->mType == Ogre::VET_FLOAT4 && !(tanOffset & 3u))
                             ? uint32_t(tanOffset)
                             : 0xFFFFFFFFu;
@@ -1171,6 +1225,10 @@ bool describeSkinCacheRows(Ogre::VaoManager *vao, const Ogre::Item *item,
         row.posOffset = 0u;
         row.normalOffset = 12u;
         row.uvOffset = 40u;
+        // THE PREVIOUS POSE's place (REFLECT-MOVERS-2): the reflection's history
+        // reads a hit's last-frame position there; every other reader ignores it.
+        row.padding[0] = buf.prevOffset;
+        row.padding[1] = 0u;
         // The FLAGS stay the mesh row's: the index width is the mesh's, and the
         // normal/uv formats are the same float3/float2 the cache writes
         // (createSkinCacheBuffer refuses any other source).
