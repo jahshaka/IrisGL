@@ -641,6 +641,7 @@ private:
     /// before the gather that references them. Timestamps into `qBase` + 4..6
     /// when `timed`. Returns false only when the frame must not trace skinned
     /// items at all (the job is missing); the entries simply stay unready then.
+    void settleStillSkins(OgreScene *scene, SceneAs &sa);
     bool skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed, unsigned qBase,
                   std::string &err);
     /// Frees one entry: its structure retired, its buffer destroyed (Ogre's
@@ -3020,6 +3021,25 @@ void RayQueryTier::dropSkinBuffers(SceneAs &sa) {
     sa.skinJobCap = sa.skinPaletteCap = 0;
 }
 
+/// A POSE THAT STOPPED LAST FRAME STILL OWES ITS SETTLE (REFLECT-EDGE-2, measured).
+/// The frame a pose stops is a still frame by every test updateScene makes, and its
+/// early returns never ran the skin pass' copy-only record: the previous-pose slice
+/// kept the LAST MOVING pose for as long as the item stood still, so every ray hit on
+/// a parked character read as a pose step (6 cm and more on gi.reflect_mover's parked
+/// skinned sphere — 60-84 % of its reflected texels "moving" every frame and the mean
+/// restarting on 8 % of them per frame). The settle writes no structure and no
+/// instance, so it runs alone on such a frame: no gather, no build.
+void RayQueryTier::settleStillSkins(OgreScene *scene, SceneAs &sa) {
+    bool owed = false;
+    for (const auto &kv : sa.skins)
+        if (kv.second.prevBehind) { owed = true; break; }
+    if (!owed) return;
+    std::string err;
+    VkCommandBuffer cmd = frameCmd();
+    if (cmd && !skinPass(scene, sa, cmd, false, 0u, err) && !err.empty())
+        Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
+}
+
 bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed,
                             unsigned qBase, std::string &err) {
     sa.skinUse.clear();
@@ -3542,7 +3562,10 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     bool compactionPending = false;
     for (const Blas &bl : sa.blas)
         if (bl.compactState == 1u) { compactionPending = true; break; }
-    if (!moved && sa.tlas && !compactionPending) return;
+    if (!moved && sa.tlas && !compactionPending) {
+        settleStillSkins(scene, sa);
+        return;
+    }
 
     // COMPACTION FIRST, BEFORE THE GATHER. It REPLACES a bottom-level
     // structure's device address, and the gather writes those addresses into
@@ -3566,7 +3589,10 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // TLAS rebuild once per in-flight frame for nothing — two wasted passes
     // over every instance after each batch. It only has work if compaction
     // actually replaced an address.
-    if (!moved && sa.tlas && !didCompact) return;
+    if (!moved && sa.tlas && !didCompact) {
+        settleStillSkins(scene, sa);
+        return;
+    }
 
     // --- the gather, straight into this frame's instance slot ---------------
     // gatherMs MEASURES THE GATHER (finding 14). It used to span everything
