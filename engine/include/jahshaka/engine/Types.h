@@ -2199,6 +2199,25 @@ enum class GiMode {
     VctPccHybrid        ///< VCT plus parallax-corrected cubemap probes: probe reflections
                         ///< near geometry, cone-traced reflections far from it
 };
+/// THE GI CARRIES OCCLUSION (SSAO-DOUBLE-1, 2026-09-29, measured). Every GI mode
+/// routes the diffuse through the irradiance field, the cards and the cones, and
+/// each carries its own visibility (the probes' depth, the cones' opacity, the
+/// cards' traced sun). Screen-space AO is a PROXY for occlusion a renderer did not
+/// compute, and it multiplies the FINISHED colour — so over a GI it counts
+/// occlusion twice and darkens by a factor that knows nothing of the surface's
+/// albedo (a cube on a floor: -11 codes on the contact band at Epic, -13 on a
+/// white floor, where the GI alone reads -0.4 / +1.3; spikes/reflect-leak-2).
+/// So the chain REFUSES the SSAO passes in every view of a scene whose mode is
+/// not Off, whatever the view's PostFxDesc asks (OgreView::chainDesc), and
+/// GiStatus::ssaoSuppressed says so. GI Off — a flat ambient with no bounce — is
+/// the one honest case for the proxy, and there it runs. THE ONE RULE: the chain,
+/// the status and Studio's World row all read it here.
+inline bool giCarriesOcclusion(GiMode mode) { return mode != GiMode::Off; }
+inline const char *ssaoSuppressedReason() {
+    return "the GI carries occlusion (the field's probe depth, the cones' opacity, the cards' "
+           "traced sun): screen-space AO over it would count occlusion twice, so the chain "
+           "builds without the SSAO passes; SSAO applies with GI off";
+}
 /// THE PHOTON TIER, as the engine sees it: one row of `giQualityFacts` per value.
 /// Epic is a row of its own (D4-PHOTON-TIERS) — it used to ride on High through a
 /// separate `epicTier` flag, a second channel for one fact. Epic's facts are High's
@@ -3992,6 +4011,13 @@ struct GiStatus {
     /// "the picture has stopped moving" check wait on it, in frames. True with
     /// GI off. (Reflection-probe captures are `staleProbes`, separately.)
     bool giAtRest = true;
+    /// SSAO IS REFUSED IN THIS SCENE (SSAO-DOUBLE-1; giCarriesOcclusion): true
+    /// whenever the mode is not Off — every view that draws this scene builds its
+    /// chain without the SSAO passes, whatever its PostFxDesc::ssao asks — with
+    /// `ssaoSuppressedReason` saying why (empty when false). False with GI off,
+    /// where a view's SSAO runs as asked.
+    bool ssaoSuppressed = false;
+    std::string ssaoSuppressedReason;
 
     // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
     // Reflection probes are re-captured only while STALE. These say what the
@@ -5925,6 +5951,8 @@ struct PostFxDesc {
     /// added radiance, which is what "2x the bloom" has to mean.
     float bloomAmount = 1.0f;
     /// Screen-space ambient occlusion. Adds a normals G-buffer to the main pass.
+    /// A REQUEST: the chain refuses it in a view whose scene's GI mode is not Off
+    /// (giCarriesOcclusion — the GI carries the occlusion; GiStatus::ssaoSuppressed).
     bool  ssao = false;
     /// AO buffer resolution, as a factor of the view (0.5 or 1.0). The tap count
     /// is fixed at 64 by the shader and is deliberately not exposed.
