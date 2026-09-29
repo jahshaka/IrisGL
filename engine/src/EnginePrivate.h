@@ -3989,6 +3989,9 @@ public:
     /// The GI parameters as LAST APPLIED — what was asked for, beside what
     /// giStatus() says it resolved to. The capture snapshot carries both.
     const GiParams &giParams() const { return mGi; }
+    /// SSAO-DOUBLE-1: the GI carries this scene's occlusion (giCarriesOcclusion on
+    /// the mode last applied), so every view that draws it builds without SSAO.
+    bool ssaoRefused() const { return giCarriesOcclusion(mGi.mode); }
     /// The planar-reflection arm's parameters, same contract.
     const PlanarReflectionParams &planarParams() const { return mPlanarParams; }
     /// Each live reflection probe's placement and dirty state, for the snapshot.
@@ -6917,6 +6920,9 @@ public:
     ChainDesc chainDesc() const;
     /// chainDesc's last word: ChainDesc::atomOcclusion and the pyramid it needs.
     void finishAtomOcclusion(ChainDesc &d) const;
+    /// The scene-decided shape (atomDraw, atomOcclusion, ssao) differs from the one
+    /// the definition was built with (OgreView.cpp).
+    bool sceneShapeMoved() const;
 
     // ---- VR (SPECS/VR_SPEC.md §4.3) ---------------------------------------
     /// Makes this view's chain a STEREO one: every scene pass renders both eyes
@@ -7403,6 +7409,10 @@ private:
     /// never reads the buffers the first one is still drawing from) and the history
     /// the first cull tests against.
     bool mChainAtomOcclusion = false;
+    /// SSAO-DOUBLE-1: whether the definition was built WITH the SSAO passes. The
+    /// scene's GI mode decides it (OgreScene::ssaoRefused) and a view learns its
+    /// scene late, so it is compared once a frame beside the id pass's shape.
+    bool mChainSsao = false;
     detail::GpuCull mAtomCullLate;
     AtomOcclusionHistory mAtomOcclHistory;
     bool mAtomFirstTested = false;

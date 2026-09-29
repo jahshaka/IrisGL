@@ -221,8 +221,10 @@ void OgreView::syncAtomDraw() {
         mScene->noteAtomPbsView(this, on && mStereo, on && !mStereo && !atomDraw);
     }
     // THE SHAPE: the scene's split decides it, and a view learns its scene late
-    // (and its target's sample count can change under it).
-    if (mChainAtomDraw != atomDraw || mChainAtomOcclusion != cd.atomOcclusion) rebuildWorkspaceDef();
+    // (and its target's sample count can change under it). ...AND SSAO's
+    // (SSAO-DOUBLE-1): the scene's GI mode refuses it, and that mode moves between
+    // frames — sceneShapeMoved compares all three.
+    if (sceneShapeMoved()) rebuildWorkspaceDef();
     const bool wanted = mChainAtomDraw && mScene && mCamera;
     if (!wanted) {
         if (mAtomListener) {
