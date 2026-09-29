@@ -1358,6 +1358,20 @@ public:
     virtual void        setNodeCastShadow(NodeId, bool) = 0;
     virtual bool        nodeCastShadow(NodeId) const = 0;
 
+    /// PER-OBJECT FACE CULL (CULL-MODE-2; the document's MeshNode::faceCullingMode).
+    /// `FaceCull::Material` (the default) wears the material as authored; any other
+    /// value culls THIS node's faces that way whatever its material says. A node whose
+    /// cull differs from its material's wears the material's CULL TWIN: one datablock
+    /// per (material, cull) actually worn, differing from the material's in the cull
+    /// and the two-sided lighting only, made on first use, kept in step with every
+    /// later edit of the material (params, maps, pieces, the reflection slot) and
+    /// destroyed once nothing wears it. Same shape as setNodeCastShadow: applies
+    /// immediately, survives an Item rebuild, may be set before geometry arrives.
+    virtual void        setNodeFaceCull(NodeId, FaceCull) = 0;
+    virtual FaceCull    nodeFaceCull(NodeId) const = 0;
+    /// Cull twins alive in this scene right now (a diagnostic: mirror.cull_twin).
+    virtual unsigned    cullTwinCount() const = 0;
+
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
     /// Applies the reflection state idempotently. Pushing the same params twice is
     /// free; a CHANGE rebuilds the whole arm (render targets, cameras, private

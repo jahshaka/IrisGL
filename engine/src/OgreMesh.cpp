@@ -547,8 +547,10 @@ bool OgreScene::setSubItemMaterial(NodeId id, unsigned subItem, MaterialId matId
         return false;
     }
     JAH_TRY {
-        const MaterialRec &rec = tit->second;
-        nit->second.item->getSubItem(subItem)->setDatablock(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
+        MaterialRec &rec = tit->second;
+        // The NODE'S cull picks the master or its twin (CULL-MODE-2).
+        nit->second.item->getSubItem(subItem)->setDatablock(wornDatablock(nit->second, rec));
+        if (mCullTwinCount) mCullTwinSweep = true;
         markShadowShapeDirty(nit->second);
         markGpuSlotDirty(nit->second);   // its flags word (the cut-out bit is any sub-item's)
         return true;

@@ -3,6 +3,7 @@
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"
 #include <cmath>
+#include <unordered_set>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -48,6 +49,7 @@ void OgreScene::setRefractionsActive(bool active) {
             db->setTransparency(db->getTransparency(),
                                 active ? Ogre::HlmsPbsDatablock::Refractive
                                        : Ogre::HlmsPbsDatablock::Transparent);
+            syncCullTwins(kv.second);   // applyPbr reads mRefractionsActive
         }
     } JAH_CATCH(mError, );
 }
@@ -88,8 +90,16 @@ static void warnUnknownBrdfOnce(const std::string &name) {
         Ogre::LML_CRITICAL);
 }
 
+Ogre::CullingMode OgreScene::ogreCullOf(FaceCull c) {
+    switch (c) {
+    case FaceCull::TwoSided: return Ogre::CULL_NONE;
+    case FaceCull::Front:    return Ogre::CULL_ANTICLOCKWISE;
+    default:                 return Ogre::CULL_CLOCKWISE;
+    }
+}
+
 void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
-                         bool refractionsActive) {
+                         bool refractionsActive, FaceCull cull) {
     db->setDiffuse(Ogre::Vector3(p.albedo.r, p.albedo.g, p.albedo.b));
     // ---- THE WORKFLOW, and the one rule that makes it safe ----------------
     //
@@ -205,10 +215,16 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     // second (deep audit 2026-09, area 5). The mirror now skips unchanged
     // pushes as well; this guard is the engine-side half, and it also protects
     // every other caller of applyPbr.
-    if (db->getTwoSidedLighting() != p.twoSided) db->setTwoSidedLighting(p.twoSided, false);
+    //
+    // THE CULL IS RESOLVED FIRST (CULL-MODE-2): the params' own two-sidedness, or a
+    // node's through a cull twin. Anything that draws a back face lights it as seen
+    // (Front draws ONLY back faces), so the two-sided lighting follows the cull.
+    const FaceCull resolved = resolveCull(p, cull);
+    const bool twoSidedLit = resolved != FaceCull::Back;
+    if (db->getTwoSidedLighting() != twoSidedLit) db->setTwoSidedLighting(twoSidedLit, false);
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode want = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
+        const Ogre::CullingMode want = ogreCullOf(resolved);
         if (macro.mCullMode != want) { macro.mCullMode = want; db->setMacroblock(macro); }
     }
     // NOTE HlmsPbs has NO ambient-occlusion slot and no roughness remap:
@@ -401,7 +417,7 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
 // clear coat, a BRDF or shadow reception into. Those values are not consumed
 // and not destroyed — the document keeps them, the panel greys them out with a
 // reason, and switching back to Lit brings them all back.
-void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p) {
+void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p, FaceCull cull) {
     // The alpha modes that mean something without lighting. Glass and
     // Refractive are defined ENTIRELY by what light does at the surface (glass
     // keeps its specular while its diffuse fades; refraction bends what is
@@ -451,7 +467,7 @@ void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p) {
     }
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode wantCull = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
+        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(p, cull));
         // Anything that blends must not write depth — it cannot occlude what it
         // is blending over. Modulate blends too even though it ignores alpha.
         const bool wantDepthWrite = !blended && p.alphaMode != PbrAlphaMode::Modulate;
@@ -488,7 +504,7 @@ void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p) {
 // there is no albedo, no metalness, no roughness and no BRDF. The panel hides
 // those rows rather than letting a user discover it (PbrMaterial::
 // rowsUnusedWhenDistortion).
-void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p) {
+void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p, FaceCull cull) {
     db->setUseColour(true);
     // The alpha IS the strength. Clamped, not because the shader would break
     // above 1 but because a strength of 40 is not an authoring intent the
@@ -509,7 +525,7 @@ void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p
     }
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode wantCull = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
+        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(p, cull));
         if (macro.mCullMode != wantCull || macro.mDepthWrite || !macro.mDepthCheck) {
             macro.mCullMode = wantCull;
             macro.mDepthCheck = true;
@@ -641,6 +657,10 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                  o.twoSided != p.twoSided || cutoutInputs))
                 noteShadowShapeChanged(id);
         }
+        // THE MATERIAL'S OWN CULL MOVED (CULL-MODE-2): a node that named a cull
+        // wears the master or a twin depending on whether the two agree, so every
+        // wearer re-picks — after the master holds the new state.
+        const bool ownCullMoved = it->second.paramsPushed && it->second.params.twoSided != p.twoSided;
         it->second.params = p;
         it->second.paramsPushed = true;
         if (it->second.shadingUnlit) {
@@ -648,6 +668,8 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             if (it->second.distortion) applyDistortion(udb, p);
             else                       applyUnlit(udb, p);
             if (samplersMoved) bindTrackedTextures(it->second);
+            syncCullTwins(it->second);
+            if (ownCullMoved) repointCullWearers(id);
             return true;   // an unlit material is never refractive
         }
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
@@ -692,6 +714,8 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         const bool wasRefractive = it->second.refractive;
         it->second.refractive = p.alphaMode == PbrAlphaMode::Refractive;
         if (wasRefractive != it->second.refractive) refileItems(id, it->second);
+        syncCullTwins(it->second);
+        if (ownCullMoved) repointCullWearers(id);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -765,6 +789,10 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
             detachItem(kv.first, kv.second);
         }
 
+        // Its CULL TWINS first (the Items wearing them were just detached): a twin
+        // is a datablock of the OLD family, and attachMesh below makes each one
+        // the re-attached nodes still ask for anew, in the new family.
+        destroyCullTwins(rec);
         Ogre::Hlms *oldHlms = hlmsFor(rec);
         if (Ogre::HlmsDatablock *old = oldHlms->getDatablock(Ogre::IdString(rec.datablockName))) {
             forgetDecodeTwinOf(old);   // its decode twin dies first (HlmsAtom.h)
@@ -819,7 +847,7 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         // "what did I last write" guard is stale by construction here, and
         // trusting it would skip every slot and leave the new material
         // textureless. The one place that must defeat the guard.
-        rec.everBound = false;
+        rec.bound.everBound = false;
         bindTrackedTextures(rec);
         // ...and the same for a generated piece: the new datablock is a blank
         // one, so a graph material that took a detour through Unlit would come
@@ -901,6 +929,7 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
             if (slot == 1u && !rec.customPiece[slot].empty()) noteShadowShapeChanged(id);
             rec.customPiece[slot].clear();
             applyClockProperty(db, rec);
+            syncCullTwins(rec);
             return true;
         }
         const size_t sep = path.find_last_of("/\\");
@@ -930,6 +959,7 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
         // A generated piece changes what the surface looks like, so it is a
         // probe input (P7); the voxelizer never runs the piece.
         if (pieceChanged) noteMaterialChanged(id, false);
+        syncCullTwins(rec);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -963,15 +993,26 @@ void OgreScene::bindTrackedPieces(const MaterialRec &rec) {
     if (rec.unlit) return;
     auto *db = static_cast<Ogre::HlmsPbsDatablock *>(
         hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
-    if (!db) return;
+    if (db) bindTrackedPiecesInto(rec, db);
+}
+
+void OgreScene::bindTrackedPiecesInto(const MaterialRec &rec, Ogre::HlmsPbsDatablock *db) {
+    if (rec.unlit || !db) return;
     for (size_t slot = 0; slot < 2; ++slot) {
-        if (rec.customPiece[slot].empty()) continue;
+        const Ogre::CustomPieceStage::CustomPieceStage stage =
+            ogrePieceStage(slot == 1 ? CustomPieceStage::VertexPreTransform
+                                     : CustomPieceStage::PixelPreLights);
+        if (rec.customPiece[slot].empty()) {
+            // A piece the record no longer carries leaves a CULL TWIN too (a blank
+            // master datablock has none to clear; the guard keeps it free).
+            if (db->getCustomPieceFileIdHash(stage))
+                db->setCustomPieceFile(Ogre::BLANKSTRING, Ogre::BLANKSTRING, stage);
+            continue;
+        }
         const std::string &path = rec.customPiece[slot];
         const size_t sep = path.find_last_of("/\\");
         const std::string file = sep == std::string::npos ? path : path.substr(sep + 1);
-        db->setCustomPieceFile(file, "Jahshaka",
-                               ogrePieceStage(slot == 1 ? CustomPieceStage::VertexPreTransform
-                                                        : CustomPieceStage::PixelPreLights));
+        db->setCustomPieceFile(file, "Jahshaka", stage);   // Ogre's own setter is idempotent
     }
     applyClockProperty(db, rec);
 }
@@ -1001,6 +1042,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
         }
         (void)anyWorn;   // worn by nothing: nothing in the volume changed
         Ogre::Hlms *hlms = hlmsFor(it->second);
+        destroyCullTwins(it->second);   // unworn now (detached above); before their master
         Ogre::HlmsDatablock *dying = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
         noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081))
         forgetDecodeTwinOf(dying);    // its decode twin dies first (HlmsAtom.h)
@@ -1043,7 +1085,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
             return false;
         }
         n.item = mSceneMgr->createItem(mit->second.mesh, cls);
-        n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
+        n.item->setDatablock(wornDatablock(n, tit->second));   // the node's cull (CULL-MODE-2)
         // A REBUILT ITEM IS A NEW CASTER SHAPE (lamp-map cache): a mesh or
         // material swap detaches and recreates in this one call, and the
         // allocator routinely hands the new Item the freed one's address — same
@@ -1117,7 +1159,7 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         mError = "setNodeMaterial: the item's mesh or material is gone — re-attach";
         return false;
     }
-    const MaterialRec &rec = tit->second;
+    MaterialRec &rec = tit->second;
     const MaterialRec &old = oit->second;
     // A family crossing is a different KIND of renderable (its own queue, its
     // own visibility bit, its own blocks — setShadingModel has the story) and
@@ -1133,7 +1175,8 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         return false;
     }
     JAH_TRY {
-        n.item->setDatablock(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
+        n.item->setDatablock(wornDatablock(n, rec));   // the node's cull (CULL-MODE-2)
+        if (mCullTwinCount) mCullTwinSweep = true;     // the old material's twin may be free
         markShadowShapeDirty(n);
         n.item->setVisibilityFlags(itemVisibilityFlags(n, rec.unlit, rec.distortion));
         n.item->setRenderQueueGroup(renderQueueFor(rec));
@@ -1844,8 +1887,18 @@ Ogre::HlmsSamplerblock OgreScene::guardSamplerCeiling(Ogre::HlmsSamplerblock sam
 }
 
 void OgreScene::bindTrackedTextures(MaterialRec &rec) {
-    auto *raw = hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName));
-    if (!raw) return;
+    if (auto *raw = hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)))
+        bindTrackedTexturesInto(rec, raw, rec.bound);
+    // ...and every CULL TWIN, each against its own record (CULL-MODE-2).
+    for (CullTwin &t : rec.cullTwins) {
+        if (t.datablockName.empty()) continue;
+        if (auto *raw = hlmsFor(rec)->getDatablock(Ogre::IdString(t.datablockName)))
+            bindTrackedTexturesInto(rec, raw, t.bound);
+    }
+}
+
+void OgreScene::bindTrackedTexturesInto(MaterialRec &rec, Ogre::HlmsDatablock *raw,
+                                        TextureBindState &st) {
     const Ogre::HlmsSamplerblock sampler =
         guardSamplerCeiling(materialSamplerblock(rec.params.address[0], rec.params.anisotropy));
     auto textureOf = [this](TextureId id) -> Ogre::TextureGpu * {
@@ -1884,8 +1937,8 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
     // samplerblock rides the binding, so anisotropy and the address modes (A-2)
     // only reach the GPU through setTexture.
     const bool samplerMoved =
-        !rec.everBound || rec.lastAnisotropy != rec.params.anisotropy ||
-        !std::equal(std::begin(rec.lastAddress), std::end(rec.lastAddress),
+        !st.everBound || st.lastAnisotropy != rec.params.anisotropy ||
+        !std::equal(std::begin(st.lastAddress), std::end(st.lastAddress),
                     std::begin(rec.params.address));
     for (size_t s = 0; s < kPbrTextureSlotCount; ++s) {
         // THE REFLECTION SLOT IS NOT A PLAIN TRACKED BINDING (A-5). Its value
@@ -1900,12 +1953,12 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
             // The reflection slot is the one exception to the blank-slot skip:
             // its value is DERIVED (the scene's global cube), so "no override"
             // does not mean "nothing to bind".
-            if (samplerMoved || rec.lastBoundTextures[s] != rec.boundTextures[s]) {
+            if (samplerMoved || st.lastBoundTextures[s] != rec.boundTextures[s]) {
                 if (Ogre::TextureGpu *rt = reflectionTexFor(rec))
                     db->setTexture(Ogre::PBSM_REFLECTION, rt);
-                else if (rec.everBound)
+                else if (st.everBound)
                     db->setTexture(Ogre::PBSM_REFLECTION, nullptr);
-                rec.lastBoundTextures[s] = rec.boundTextures[s];
+                st.lastBoundTextures[s] = rec.boundTextures[s];
                 markIblMipmapsDirty();
             }
             continue;
@@ -1916,8 +1969,8 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
         // slot. Six of the eleven are null for a material with no detail maps,
         // which is almost all of them, and this is the COLD path where nothing
         // else can be skipped (e.first_sync).
-        if (!rec.everBound && rec.boundTextures[s] == 0) continue;
-        if (!samplerMoved && rec.lastBoundTextures[s] == rec.boundTextures[s]) continue;
+        if (!st.everBound && rec.boundTextures[s] == 0) continue;
+        if (!samplerMoved && st.lastBoundTextures[s] == rec.boundTextures[s]) continue;
         Ogre::TextureGpu *tex = textureOf(rec.boundTextures[s]);
         // PER SLOT: the addressing is a per-slot row (A-2), which is exactly
         // what the detail layers need — a tiled detail map over a clamped base
@@ -1926,12 +1979,12 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
             guardSamplerCeiling(materialSamplerblock(rec.params.address[s], rec.params.anisotropy));
         db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(PbrTextureSlot(s))), tex,
                        tex ? &slotSampler : nullptr);
-        rec.lastBoundTextures[s] = rec.boundTextures[s];
+        st.lastBoundTextures[s] = rec.boundTextures[s];
     }
-    rec.lastAnisotropy = rec.params.anisotropy;
+    st.lastAnisotropy = rec.params.anisotropy;
     std::copy(std::begin(rec.params.address), std::end(rec.params.address),
-              std::begin(rec.lastAddress));
-    rec.everBound = true;
+              std::begin(st.lastAddress));
+    st.everBound = true;
 }
 
 // OVERRIDE-ELSE-GLOBAL-ELSE-NULL, all three gated by PCC (ADDENDUM A-5).
@@ -2032,6 +2085,7 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
             // The record is already updated above; ask the one function.
             db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(mit->second));
             markIblMipmapsDirty();
+            syncCullTwins(mit->second);
             return true;
         }
         Ogre::TextureGpu *tex = nullptr;
@@ -2058,6 +2112,7 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
                                                      mit->second.params.anisotropy));
         db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(slot)), tex,
                        tex ? &sampler : nullptr);
+        syncCullTwins(mit->second);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -2199,6 +2254,181 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
         db->setColour(toOgre(c));
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// ---- THE CULL TWINS (CULL-MODE-2) ----
+//
+// The owner's rule (2026-09-29): a primitive is one-sided like every imported
+// model, and a user makes ONE OBJECT two-sided. The document says it per node
+// (MeshNode::faceCullingMode); Ogre culls per DATABLOCK (the macroblock), and a
+// material is worn by many nodes. So a node whose cull differs from its
+// material's own wears the material's CULL TWIN: a second datablock of the same
+// Hlms, built from the same record the family switch builds from, differing in
+// the macroblock's cull and the two-sided lighting only. One per (material, cull)
+// actually worn — never one per node — made on first wear, written by every write
+// to its master (syncCullTwins), destroyed when no Item wears it (sweepCullTwins)
+// and always before its master (destroyCullTwins). A twin is an ordinary PBS
+// datablock to everyone downstream: the Atom split routes it by its own
+// macroblock (a Back twin of a two-sided material goes to Atom and joins its
+// master's decode bucket — HlmsAtom's key is the permutation, the texture set and
+// the const-buffer pool, not the macro state; a TwoSided twin stays on PBS like
+// any two-sided datablock), the voxelisers convert it by pointer and are told
+// when it dies (noteGiDatablockDied), and HlmsAtom forgets it first
+// (forgetDecodeTwinOf). THE RAYS need nothing: every instance is traced
+// two-sided (TRIANGLE_FACING_CULL_DISABLE), so a one-sided object's back face is
+// still hit — which is the physics of a closed shape, seen from outside or in.
+
+Ogre::HlmsDatablock *OgreScene::wornDatablock(const Node &n, MaterialRec &rec) {
+    if (n.faceCull == FaceCull::Material || !cullTwinnable(rec) ||
+        n.faceCull == ownCullOf(rec.params))
+        return hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName));
+    return cullTwinOf(rec, n.faceCull);
+}
+
+void OgreScene::applyRecTo(MaterialRec &rec, Ogre::HlmsDatablock *db, FaceCull cull) {
+    if (rec.shadingUnlit) {
+        auto *udb = static_cast<Ogre::HlmsUnlitDatablock *>(db);
+        if (rec.distortion) applyDistortion(udb, rec.params, cull);
+        else                applyUnlit(udb, rec.params, cull);
+        return;
+    }
+    applyPbr(static_cast<Ogre::HlmsPbsDatablock *>(db), rec.params, mRefractionsActive, cull);
+}
+
+Ogre::HlmsDatablock *OgreScene::cullTwinOf(MaterialRec &rec, FaceCull cull) {
+    CullTwin &t = rec.cullTwins[cullTwinIndex(cull)];
+    Ogre::Hlms *hlms = hlmsFor(rec);
+    if (!t.datablockName.empty())
+        if (Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(t.datablockName))) return db;
+    t = CullTwin();
+    t.datablockName = processUniqueName("cull");
+    Ogre::HlmsDatablock *db = hlms->createDatablock(
+        Ogre::IdString(t.datablockName), t.datablockName,
+        Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec());
+    ++mCullTwinCount;
+    // THE FAMILY SWITCH'S BUILD, with the node's cull: params, then every tracked
+    // map (the reflection slot included — a blank record binds it), then pieces.
+    applyRecTo(rec, db, cull);
+    bindTrackedTexturesInto(rec, db, t.bound);
+    if (!rec.unlit) bindTrackedPiecesInto(rec, static_cast<Ogre::HlmsPbsDatablock *>(db));
+    markIblMipmapsDirty();
+    return db;
+}
+
+void OgreScene::syncCullTwins(MaterialRec &rec) {
+    if (!mCullTwinCount || !cullTwinnable(rec)) return;
+    Ogre::Hlms *hlms = hlmsFor(rec);
+    for (size_t i = 0; i < 3; ++i) {
+        CullTwin &t = rec.cullTwins[i];
+        if (t.datablockName.empty()) continue;
+        Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(t.datablockName));
+        if (!db) continue;
+        applyRecTo(rec, db, FaceCull(i + 1));
+        bindTrackedTexturesInto(rec, db, t.bound);
+        if (rec.unlit) continue;
+        auto *pdb = static_cast<Ogre::HlmsPbsDatablock *>(db);
+        // The reflection slot's value is DERIVED (override, else the scene's cube,
+        // gated on PCC) and can move with no tracked map moving — the master's
+        // writers set it directly, so the twin asks the same one function.
+        Ogre::TextureGpu *rt = reflectionTexFor(rec);
+        if (pdb->getTexture(Ogre::PBSM_REFLECTION) != rt) pdb->setTexture(Ogre::PBSM_REFLECTION, rt);
+        bindTrackedPiecesInto(rec, pdb);
+    }
+}
+
+void OgreScene::destroyCullTwins(MaterialRec &rec) {
+    for (CullTwin &t : rec.cullTwins) {
+        if (t.datablockName.empty()) continue;
+        Ogre::Hlms *hlms = hlmsFor(rec);
+        if (Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(t.datablockName))) {
+            noteGiDatablockDied(db);   // the voxelisers cache conversions by pointer
+            forgetDecodeTwinOf(db);    // its decode twin dies first (HlmsAtom.h)
+            hlms->destroyDatablock(Ogre::IdString(t.datablockName));
+        }
+        t = CullTwin();
+        if (mCullTwinCount) --mCullTwinCount;
+    }
+}
+
+void OgreScene::sweepCullTwins() {
+    if (!mCullTwinSweep) return;
+    mCullTwinSweep = false;
+    if (!mCullTwinCount) return;
+    JAH_TRY {
+        std::unordered_set<const Ogre::HlmsDatablock *> worn;
+        for (auto &kv : mNodes) {
+            Ogre::Item *item = kv.second.item;
+            if (!item) continue;
+            for (size_t i = 0; i < item->getNumSubItems(); ++i)
+                worn.insert(item->getSubItem(i)->getDatablock());
+        }
+        for (auto &mk : mMaterials) {
+            MaterialRec &rec = mk.second;
+            for (CullTwin &t : rec.cullTwins) {
+                if (t.datablockName.empty()) continue;
+                Ogre::Hlms *hlms = hlmsFor(rec);
+                Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(t.datablockName));
+                if (db && worn.count(db)) continue;
+                if (db) {
+                    noteGiDatablockDied(db);
+                    forgetDecodeTwinOf(db);
+                    hlms->destroyDatablock(Ogre::IdString(t.datablockName));
+                }
+                t = CullTwin();
+                if (mCullTwinCount) --mCullTwinCount;
+            }
+        }
+    } JAH_CATCH(mError, );
+}
+
+void OgreScene::repointCullWearers(MaterialId id) {
+    auto mit = mMaterials.find(id);
+    if (mit == mMaterials.end() || !cullTwinnable(mit->second)) return;
+    for (auto &kv : mNodes) {
+        Node &n = kv.second;
+        if (n.materialRef != id || !n.item || n.faceCull == FaceCull::Material) continue;
+        Ogre::HlmsDatablock *db = wornDatablock(n, mit->second);
+        if (!db || n.item->getSubItem(0)->getDatablock() == db) continue;
+        n.item->setDatablock(db);
+        markShadowShapeDirty(n);
+        markGpuSlotDirty(n);
+        mCullTwinSweep = true;
+    }
+}
+
+void OgreScene::setNodeFaceCull(NodeId id, FaceCull cull) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
+    Node &n = it->second;
+    if (n.faceCull == cull) return;
+    n.faceCull = cull;
+    if (!n.item || !n.materialRef) return;   // applied when the geometry arrives
+    auto mit = mMaterials.find(n.materialRef);
+    if (mit == mMaterials.end()) return;
+    JAH_TRY {
+        Ogre::HlmsDatablock *db = wornDatablock(n, mit->second);
+        if (!db || n.item->getSubItem(0)->getDatablock() == db) return;
+        // THE setNodeMaterial SHAPE: the live Item changes datablock in place; its
+        // caster shape and its GPU-scene flags word follow, and the volume owes the
+        // ITEM'S BOX only (the voxelisers convert the new datablock by pointer).
+        n.item->setDatablock(db);
+        if (mCullTwinCount) mCullTwinSweep = true;   // the one it wore may be free now
+        markShadowShapeDirty(n);
+        markGpuSlotDirty(n);
+        if (!mit->second.unlit) {
+            Ogre::Aabb box = n.item->getWorldAabbUpdated();
+            invalidateGiCaches(&box);
+        } else if (probeSeesItem(n)) {
+            staleProbeGrid(GiStaleReason::Moved);
+        }
+        // A planar mirror refuses a two-sided item (OgrePlanar.cpp): re-derived.
+        if (mReflectors.count(id)) armReflector(id, n);
+    } JAH_CATCH(mError, );
+}
+
+FaceCull OgreScene::nodeFaceCull(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it == mNodes.end() ? FaceCull::Material : it->second.faceCull;
 }
 
 }}}  // namespace jahshaka::engine::detail

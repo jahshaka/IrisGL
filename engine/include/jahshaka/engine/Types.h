@@ -1319,6 +1319,17 @@ enum class ShadingModel {
 /// already folded in (colour * intensity). Roughness remap bounds are applied by
 /// the CALLER as a clamp before filling `roughness` — the backend has no
 /// per-texel remap. Texture maps bind separately via setPbrTexture().
+/// THE FACE CULL A NODE ASKS FOR (CULL-MODE-2; the document's MeshNode::faceCullingMode).
+/// `Material` leaves it to the material (one-sided unless PbrParams::twoSided); the
+/// other three override the material for THIS node only. The engine culls per
+/// datablock, so a node whose cull differs from its material's wears the material's
+/// CULL TWIN — a second datablock that differs in the macroblock's cull (and the
+/// two-sided lighting that goes with it) only, kept in step with every edit of its
+/// master and dropped when nothing wears it (Scene::setNodeFaceCull). `TwoSided`
+/// draws both faces, `Front` culls the front faces (only the back draws, lit as seen).
+/// (Not `None`: X11's macro.)
+enum class FaceCull { Material, Back, Front, TwoSided };
+
 struct PbrParams {
     Colour albedo   = Colour(0.8f, 0.8f, 0.8f);
     float  metalness = 0.0f;

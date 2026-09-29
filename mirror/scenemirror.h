@@ -708,6 +708,9 @@ private:
         /// PER-OBJECT SHADOW CASTING (SceneNode::castShadow). Change-guarded
         /// like the light mask; -1 = never pushed.
         int     castShadowPushed = -1;
+        /// THE NODE'S FACE CULL last pushed (Scene::setNodeFaceCull, CULL-MODE-2),
+        /// as an int of FaceCull; -1 = never pushed.
+        int     faceCullPushed = -1;
         /// The sync() this entry was last reached by. See mSyncStamp.
         quint32 lastSeen = 0;
         bool hasMesh  = false;

@@ -1812,6 +1812,7 @@ void OgreScene::applyReflectionToAllImpl() {
         // carries that gate. This loop used to compute one answer for the whole
         // scene, which is exactly what an override cannot survive.
         if (db) db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(kv.second));
+        syncCullTwins(kv.second);   // its cull twins' env slot too (CULL-MODE-2)
     }
 }
 

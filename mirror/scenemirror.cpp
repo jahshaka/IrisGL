@@ -3258,6 +3258,25 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         // stops being the floor and when its entry is released.
         if (meshNode->defaultFloor) { if (!mHorizonFloor) mHorizonFloor = meshNode; }
         else if (mHorizonFloor == meshNode) mHorizonFloor = nullptr;
+        // THE NODE'S FACE CULL (CULL-MODE-2). The engine holds it per node and picks
+        // the material or its CULL TWIN for the Item (Scene::setNodeFaceCull), so this
+        // is a node fact like the cast-shadow flag above: change-guarded, pushed
+        // before the geometry (an Item is born wearing the right datablock), never
+        // re-pushed on a material or mesh swap. DefinedInMaterial = the material's own.
+        {
+            FaceCull wantCull = FaceCull::Material;
+            switch (meshNode->getFaceCullingMode()) {
+            case iris::FaceCullingMode::None:  wantCull = FaceCull::TwoSided; break;
+            case iris::FaceCullingMode::Back:  wantCull = FaceCull::Back; break;
+            case iris::FaceCullingMode::Front: wantCull = FaceCull::Front; break;
+            case iris::FaceCullingMode::DefinedInMaterial: break;
+            }
+            if (e.faceCullPushed != int(wantCull)) {
+                mTarget->setNodeFaceCull(e.node, wantCull);
+                e.faceCullPushed = int(wantCull);
+                notePush(node, "faceCull");
+            }
+        }
         // The members, not the by-value getters: `getMesh()`/`getMaterial()`/
         // `getSkeleton()` each return a QSharedPointer BY VALUE, so reading
         // them costs an atomic increment and decrement per mesh per frame for
