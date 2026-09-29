@@ -1066,16 +1066,17 @@ GiStatus OgreScene::giStatus() const {
             st.probeGridBudgetBytes  = facts.probeGridBudgetBytes;
             st.probeGridBudgetProbes = mPccProbeRes
                 ? int(giProbeGridBudgetCount(facts.probeGridBudgetBytes, mPccProbeRes, mPccHdr,
-                                             mPccShadowed))
+                                             probeShadowBytes()))
                 : 0;
             st.probeGridBytes = mPcc && mPccProbeRes
-                ? giProbeGridBytes(mPccProbeRes, mPccHdr, mPccShadowed,
+                ? giProbeGridBytes(mPccProbeRes, mPccHdr, probeShadowBytes(),
                                    unsigned(mPcc->getProbes().size()))
                 : 0ull;
             st.probesOverBudget = mProbesOverBudget;
         }
         st.probeGridByRays    = mGi.mode == GiMode::VctPccHybrid && probeGridByRays();
         st.probePlacements    = mProbePlacements;
+        st.probeReplacements  = mProbeReplacements;
         st.probeCapturesTotal = mProbeCapturesTotal;
         st.probeHdr     = mPcc && mPccHdr;
         st.probeShadows = mPcc && mPccShadowed;
@@ -2758,6 +2759,8 @@ bool OgreScene::refreshCascadesFast() {
     if (mVctCascades.empty() || !mVctCascades[0].built || !mVctCascades[0].lighting)
         return false;
     if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
+    bool replaceProbes = false;
+    Ogre::Aabb replacedRegion;
     // A CHAIN IS NOT A WHOLE ARM WHEN THE REST OF IT IS STILL OWED (fix round
     // item 1's belt). This path keeps a LIVE arm cheap, and a hybrid with no
     // probe grid — and no record of having dropped every candidate, which is a
@@ -2773,15 +2776,19 @@ bool OgreScene::refreshCascadesFast() {
         if (ddgiWanted() && !mIfd) return false;
         // THE PROBE GRID IS PLACED IN THE CONTENT'S REGION (computeProbeRegion — a
         // placement heuristic pending A9), so a refresh whose content MOVED that
-        // region materially re-places the grid through the from-scratch build —
-        // the rule the single-volume reuse arm kept for its probes, ported here
-        // when that arm was deleted (D4-PHOTON-TIERS): without it a grid placed
-        // around a hidden, deleted or moved object stayed there until the next
-        // configuration push. "Materially" is 2 % of the box's own size, scale-free.
-        // Small edits inside a space keep the space, so they keep its probes. The
-        // comparison is against the FIT the grid was placed from (mProbeFitVolume,
-        // the question), never against mGiProbeRegion — the scout's answer, smaller
-        // by construction, which would refuse every refresh.
+        // region materially RE-PLACES THE GRID — the grid ALONE (REGION-REBUILD-1):
+        // the chain is camera-relative and re-voxelises the moved item's box on
+        // its own dirt below, so tearing it down for a probe placement (what this
+        // did through `rebuildVct` until D8) rebuilt every cascade for nothing.
+        // Without the re-placement a grid placed around a hidden, deleted or moved
+        // object stayed there until the next configuration push. "Materially" is
+        // 2 % of the box's own size, scale-free. Small edits inside a space keep
+        // the space, so they keep its probes. The comparison is against the FIT
+        // the grid was placed from (mProbeFitVolume, the question), never against
+        // mGiProbeRegion — the scout's answer, smaller by construction, which
+        // would re-place on every refresh. The walk is memoised on the content
+        // (giItemBounds' signature): a refresh over unchanged content pays the
+        // boxes' read, not the fit.
         if (probeGridWanted() && !mProbeFitVolume.mHalfSize.isZeroLength()) {
             Ogre::Vector3 mn, mx;
             if (computeProbeRegion(mn, mx)) {
@@ -2792,7 +2799,8 @@ bool OgreScene::refreshCascadesFast() {
                 const Ogre::Vector3 dc = now.mCenter - mProbeFitVolume.mCenter;
                 const Ogre::Vector3 dh = now.mHalfSize - mProbeFitVolume.mHalfSize;
                 for (size_t ax = 0; ax < 3u; ++ax)
-                    if (std::fabs(dc[ax]) > tol || std::fabs(dh[ax]) > tol) return false;
+                    if (std::fabs(dc[ax]) > tol || std::fabs(dh[ax]) > tol) replaceProbes = true;
+                replacedRegion = now;
             }
         }
     }
@@ -2842,9 +2850,23 @@ bool OgreScene::refreshCascadesFast() {
         // here.
         if (!marked) refreshGiLighting(false);
         mGiReusedLastRefresh = true;
-        // The probe CONTENTS are stale (the scene changed), the SHAPES are not —
-        // with the paused-budget exception (updateBudget 0 captures at once).
-        if (mGi.updateBudget > 0) {
+        if (replaceProbes) {
+            // THE GRID, RE-PLACED IN THE MOVED REGION — rebuildVct's probe half
+            // and nothing else: staged over the next frames when the frame asked
+            // for staging (the streaming open), whole here otherwise. A fresh grid
+            // captures every probe, so there is nothing to mark stale after it.
+            destroyProbeGrid();
+            mGiProbeRegion = replacedRegion;
+            ++mProbeReplacements;
+            if (mGiStageBuild) {
+                mGiStagedVolume = replacedRegion;
+                mGiBuildStage = GiBuildStage::ProbeScout;
+            } else {
+                buildPcc(mGiProbeRegion);
+                applyReflectionToAll();
+            }
+            noteProbeFitVolume(replacedRegion, !probeRegionPinned());
+        } else if (mGi.updateBudget > 0) {
             staleProbeGrid(GiStaleReason::Refresh);
         } else if (mPcc) {
             for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mDirty = true;
@@ -5912,7 +5934,7 @@ void OgreScene::buildPccFit() {
         {
             const GiQualityFacts facts = giQualityFacts(mGi.quality);
             const unsigned cap = giProbeGridBudgetCount(facts.probeGridBudgetBytes, mPccProbeRes,
-                                                        mPccHdr, mPccShadowed);
+                                                        mPccHdr, probeShadowBytes());
             if (keptBy.size() > cap) {
                 std::stable_sort(keptBy.begin(), keptBy.end(),
                                  [](const std::pair<float, Ogre::CubemapProbe *> &a,
@@ -6259,6 +6281,10 @@ void OgreScene::buildPccFinish() {
 // which is a FEATURE here: a re-converge runs progressively over the previous
 // converged data, so a light drag never flashes the room black.
 // ===========================================================================
+
+unsigned long long OgreScene::probeShadowBytes() const {
+    return mPccShadowed && mEngine ? mEngine->probeShadowNodeBytes() : 0ull;
+}
 
 bool OgreScene::ddgiWanted() const {
     // Fed by VctLighting: there is nothing to build without a voxel volume.

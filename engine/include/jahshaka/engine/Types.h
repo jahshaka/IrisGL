@@ -960,8 +960,10 @@ struct CloudLayerDesc {
     TextureId weatherMap = 0;
     /// THE SUN THAT LIGHTS THE LAYER: the direction TOWARDS it and its
     /// irradiance in the renderer's units (the first directional light's
-    /// colour x tint x intensity x pi x pi — what a white Lambert plate facing
-    /// it reflects is that over pi). No sun = lit by the sky alone.
+    /// colour x tint x intensity x pi — what a white Lambert plate facing it
+    /// reflects is that over pi: the light's power is intensity x pi and
+    /// HlmsPbs divides the diffuse by pi, so the plate shows `intensity`;
+    /// cloud_2d.energy E0 measures it). No sun = lit by the sky alone.
     bool      hasSun = false;
     float     sunDir[3] = { 0.0f, 1.0f, 0.0f };
     Colour    sunIrradiance { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -2775,17 +2777,21 @@ struct GiQualityFacts {
     /// what was MEASURED on this pin, and the measurement is not the one phase
     /// 0 took.
     ///
-    /// THE NUMBER IT WAS SIZED ON (PHOTON-CARDS-1, SC-1b-ITEM8): 0.18-0.20 ms a
-    /// card, CPU, with the card shadow node's PSSM fit firing (0.295 at the
-    /// ATOM-SHADOWS-1 tip). THE NUMBER TODAY (ATOM-S3-CARDCAP, `sc1b_measure
-    /// showroom-sun`, a batch of eight): **0.05-0.06 ms a card** CPU — the shadow
-    /// node is deleted, the still world's sun term traced (~0.001 ms of GPU a card
-    /// in a batch of eight, 0.004 alone). The rows below still hold the cards
-    /// they were given — two, three and five a frame — which now cost about a
-    /// third of the milliseconds they were sized on (re-sizing them is the
-    /// lead's call, not this row's). One workspace update carries at most eight
-    /// (`kCaptureBatch`).
-    unsigned cardBudgetTexels = 49152u;   // 3 cards a frame ~ 0.2 ms
+    /// THE NUMBER THE ROWS ARE SIZED ON (CARD-BUDGET-1, D8): **0.057-0.061 ms a
+    /// card** CPU (ATOM-S3-CARDCAP, `sc1b_measure showroom-sun`, a batch of eight:
+    /// the card shadow node deleted, the still world's sun term traced at ~0.001
+    /// ms of GPU a card). The rows were sized on 0.18-0.20 ms (PHOTON-CARDS-1:
+    /// Low 2 cards ~0.4 ms, Medium 3 ~0.6, High 5 ~1.0), so the same milliseconds
+    /// now buy about five times the cards — CAPPED BY THE BATCH: one workspace
+    /// update carries at most eight cards (`kCaptureBatch`, Ogre's uint8
+    /// execution mask), and the drain captures one batch a frame. So Low buys 6
+    /// (~0.37 ms), and Medium and High/Epic the batch's 8 — MEASURED 0.50 ms a
+    /// capturing frame (`sc1b_measure showroom-sun`, the paired arm, two passes in
+    /// one process: 0.506 / 0.491, against 0.326 / 0.322 for the old five and the
+    /// 1.0 ms that five were sized on; 0.062 ms a card in the batch, 0.126 alone),
+    /// under every old sizing; a frame that wants more waits for the next. Cards
+    /// run only where the rays run (High and Epic in the World table).
+    unsigned cardBudgetTexels = 131072u;  // the batch: 8 cards a frame ~ 0.50 ms
     /// THE RESIDENCY RADIUS, metres. Beyond it an instance holds no pages. It
     /// is a tier row because the atlas is a fixed 2k at this phase: 256 pages
     /// of 128 texels is about forty six-card sets at full size, so the radius
@@ -2847,7 +2853,8 @@ struct GiQualityFacts {
     /// WHAT IT DELETES, measured on Grand Showroom 2 at Epic (32 probes kept at
     /// 512 px HDR, app.textureMemory A/B): 838,987,760 bytes of texture — the
     /// probe array 536,739,840, its capture and IBL cubes 33,550,320, each probe
-    /// workspace's shadow targets 268,435,456 (8 MiB a probe) and the placement's
+    /// workspace's shadow node and capture depth 268,435,456 (7 + 1 MiB a probe at
+    /// the High shadow settings — PCC-BUDGET-2, giProbeGridBytes) and the placement's
     /// 256 px depth buffer 262,144 — and the
     /// open's placement, 713-799 ms of the UI thread.
     bool rayReflections = false;
@@ -2876,40 +2883,56 @@ struct GiQualityFacts {
     /// HDR and shadowed = 838,987,760 B (array 536,739,840 + shadow targets
     /// 268,435,456 + cubes 33,550,320 + the placement's depth 262,144), i.e.
     /// 25.2 MB a probe plus 33.8 MB fixed — the arithmetic below reproduces it to
-    /// the byte. The budgets: Epic 1 GiB (41 probes at its 512 px HDR shadowed —
-    /// the measured 32-probe Showroom grid fits), High 512 MiB (19), Medium
-    /// 128 MiB (61 at 256 px), Low 64 MiB (125 at 128 px). PROVISIONAL: the
+    /// the byte from its real terms (PCC-BUDGET-2: the node's textures at the live
+    /// shadow settings and each capture's depth buffer). The budgets: Epic 1 GiB
+    /// (41 probes at its 512 px HDR shadowed — the measured 32-probe Showroom grid
+    /// fits), High 512 MiB (19), Medium 128 MiB (55 at 256 px, unshadowed), Low
+    /// 64 MiB (111 at 128 px) — the two unshadowed rows 61 and 125 while the
+    /// capture's depth went uncounted. PROVISIONAL: the
     /// per-tier numbers are the lead's to confirm; the arithmetic is not.
     unsigned long long probeGridBudgetBytes = 128ull << 20;
 };
 
 /// THE BYTES A REFLECTION-PROBE GRID HOLDS (PCC-BUDGET-1): `probes` probes at
-/// `faceSize` px, RGBA16F when `hdr` else RGBA8, each with 8 MiB of shadow
-/// targets when `shadowed`, plus the grid's capture and IBL cubes and the
-/// placement's 256 px depth. A probe's array slice carries its mips down to
-/// 16x16 (the pin's IBL chain); the two cubes carry theirs to 1x1 between them
-/// (85 more texels a face). This reproduces the F12-PCC measurement EXACTLY:
-/// 32 probes at 512 px HDR shadowed = 838,987,760 B.
-inline unsigned long long giProbeGridBytes(unsigned faceSize, bool hdr, bool shadowed,
-                                           unsigned probes)
+/// `faceSize` px, RGBA16F when `hdr` else RGBA8, each with its capture's own
+/// `faceSize`^2 D32 depth buffer (one per probe workspace, shadowed or not) and
+/// `shadowBytes` of shadow targets (0 when its captures are unshadowed), plus the
+/// grid's capture and IBL cubes and the placement's 256 px depth. A probe's array
+/// slice carries its mips down to 16x16 (the pin's IBL chain); the two cubes
+/// carry theirs to 1x1 between them (85 more texels a face).
+///
+/// THE SHADOW TERM IS THE NODE'S REAL TEXTURES (PCC-BUDGET-2), handed in by the
+/// engine that owns them (OgreEngine::probeShadowNodeBytes: the probe node's
+/// atlas at its live resolution and focused-map count, plus its point-light
+/// scratch cube) — a constant 8 MiB stood here, which reproduced one fixture
+/// (Showroom 2 at the High shadow settings) and no other: it was the node's 7 MiB
+/// (a 512 x 2816 D32 atlas with four focused maps + a 256^2 x 6 R32F cube) PLUS
+/// the capture's own 1 MiB depth buffer, which every probe holds shadowed or not
+/// and which the constant hid (measured on Showroom 2, app.textureMemory by size:
+/// 32 x each of the three; with the probes' shadows off only the depth stays).
+/// The node is 3.5 MiB (two focused maps, no cube) to 7 MiB at a 2048 atlas.
+/// Showroom 2 at Epic: 32 x (16,773,120 + 1,048,576 + 7,340,032) + 33,812,464 =
+/// 838,987,760 B — the F12-PCC measurement, now from its real terms.
+inline unsigned long long giProbeGridBytes(unsigned faceSize, bool hdr,
+                                           unsigned long long shadowBytes, unsigned probes)
 {
     const unsigned long long bpp = hdr ? 8ull : 4ull;
     unsigned long long texels = 0ull;
     for (unsigned r = faceSize; r >= 16u; r >>= 1u) texels += (unsigned long long)r * r;
     const unsigned long long slice = 6ull * texels * bpp;
-    const unsigned long long shadow = shadowed ? (8ull << 20) : 0ull;
+    const unsigned long long captureDepth = 4ull * faceSize * faceSize;
     const unsigned long long fixed = 2ull * slice + 6ull * bpp * 85ull + 262144ull;
-    return fixed + (unsigned long long)probes * (slice + shadow);
+    return fixed + (unsigned long long)probes * (slice + captureDepth + shadowBytes);
 }
 
 /// How many probes a grid at this face size / format / shadowing may keep under
 /// `budget` bytes (at least 1: a budget smaller than one probe still keeps the
 /// probe that sees the most, rather than silently building nothing).
 inline unsigned giProbeGridBudgetCount(unsigned long long budget, unsigned faceSize, bool hdr,
-                                       bool shadowed)
+                                       unsigned long long shadowBytes)
 {
-    const unsigned long long fixed = giProbeGridBytes(faceSize, hdr, shadowed, 0u);
-    const unsigned long long each = giProbeGridBytes(faceSize, hdr, shadowed, 1u) - fixed;
+    const unsigned long long fixed = giProbeGridBytes(faceSize, hdr, shadowBytes, 0u);
+    const unsigned long long each = giProbeGridBytes(faceSize, hdr, shadowBytes, 1u) - fixed;
     if (budget <= fixed || !each) return 1u;
     return unsigned(std::max<unsigned long long>(1ull, (budget - fixed) / each));
 }
@@ -2933,7 +2956,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[1] = { 20.0f, 64, 0.0f };
         f.cascadeCount = 2;
         f.probeFaceSize   = 128u;
-        f.cardBudgetTexels = 32768u;    // 2 cards a frame ~ 0.4 ms
+        f.cardBudgetTexels = 98304u;    // 6 cards a frame ~ 0.37 ms (sized 0.4)
         f.cardResidencyRadius = 15.0f;
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
@@ -2953,7 +2976,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
         f.probeHdrDefault     = true;
         f.probeShadowsDefault = true;
-        f.cardBudgetTexels = 81920u;    // 5 cards a frame ~ 1.0 ms on the measured cost
+        f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 1.0)
         f.cardResidencyRadius = 60.0f;
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
         f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
@@ -2970,7 +2993,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascades[3] = { 60.0f, 64, 0.0f };
         f.cascadeCount = 4;
         f.probeFaceSize   = 256u;
-        f.cardBudgetTexels = 49152u;    // 3 cards a frame ~ 0.2 ms
+        f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 0.6)
         f.cardResidencyRadius = 30.0f;
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
@@ -3014,7 +3037,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // card of a frame through unconditionally (a budget that could never
         // buy anything would be a queue that never moves) — so a smaller number
         // would not be a smaller budget, it would be a budget the code has to
-        // ignore. Low's VR row is the one that reaches it.
+        // ignore. No shipped row reaches it since CARD-BUDGET-1 (Low's VR row
+        // is three cards); a host's override can.
         f.cardBudgetTexels = std::max(f.cardBudgetTexels, 16384u);
         // ...and the relight budget with it, on the same floor for the same reason.
         f.cardLightTexels = std::max(f.cardLightTexels / 2u, 16384u);
@@ -3820,6 +3844,11 @@ struct GiStatus {
     /// (the placement's and the budget's) — cumulative, never reset. A ray tier
     /// moves neither.
     unsigned probePlacements = 0;
+    /// ...of which RE-PLACEMENTS (REGION-REBUILD-1): a refresh whose content moved
+    /// the grid's region past its tolerance re-places the grid ALONE — the chain
+    /// keeps its cascades and re-voxelises only the edit's own box — and counts
+    /// here as well as in `probePlacements`. Cumulative, never reset.
+    unsigned probeReplacements = 0;
     unsigned long long probeCapturesTotal = 0;
     /// How many probes the renderer re-captures per frame — the RESOLVED
     /// `GiParams::updateBudget`, clamped to the probes that actually exist, and

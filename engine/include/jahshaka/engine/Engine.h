@@ -160,6 +160,14 @@ public:
     virtual bool        renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize,
                                           float exposure, std::vector<unsigned char> &rgba)
     { (void)width; (void)height; (void)faceSize; (void)exposure; (void)rgba; return false; }
+    /// THE CLOUD FIELD AS NUMBERS (CLOUDS-2D-3's suites): the baked tile of the
+    /// layer's VERTICAL optical depth, `size` x `size` floats, row-major, row 0
+    /// at tile v = 0, covering one tile of `tileMetres` (a world point (x, z)
+    /// reads the tile at ((x, z) + the scroll) / tileMetres, wrapped). Bakes a
+    /// pending field first. Synchronous — a GPU wait; a test-time call, never a
+    /// frame-time one. False with no layer drawn (or headless).
+    virtual bool        cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres)
+    { tau.clear(); size = 0; tileMetres = 0.0f; return false; }
     /// THE ATMOSPHERE'S TINT ON A LIGHT COMING FROM `toSun` (SUN_FOLLOWS_
     /// ATMOSPHERE, lane ENGINE-7 item 6). White (1,1,1) unless the scene's sky
     /// IS the analytic atmosphere — every other sky is a picture, and a picture

@@ -3809,6 +3809,9 @@ public:
     /// and not a ray tier.
     bool probeGridByRays() const;
     bool probeGridWanted() const;
+    /// One probe's shadow-node bytes when this grid's captures are shadowed, else
+    /// 0 (PCC-BUDGET-2: OgreEngine::probeShadowNodeBytes at the live settings).
+    unsigned long long probeShadowBytes() const;
     /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
     void dropProbeGridByRays();
     /// THE LIGHTING SERIAL the gather's settled history counts from
@@ -4813,14 +4816,15 @@ private:
     CloudStatus cloudStatus() const override;
     bool renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize, float exposure,
                            std::vector<unsigned char> &rgba) override;
+    bool cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres) override;
     /// Is the layer on screen: enabled, and a sky to draw over.
     bool cloudLayerDrawn() const;
     Ogre::Rectangle2D *mCloudQuad = nullptr;
     Ogre::MaterialPtr  mCloudMaterial;          // per-scene clone of Jahshaka/CloudLayer
     Ogre::MaterialPtr  mCloudBakeMaterial;      // Jahshaka/CloudBake itself (the bake binds per render)
     Ogre::MaterialPtr  mSunDiscCloudMaterial;   // ...of Jahshaka/SunDiscClouded
-    Ogre::TextureGpu  *mCloudNoise = nullptr;   // 256^2 RGBA8, fixed seed, ManualTexture
-    Ogre::TextureGpu  *mCloudField = nullptr;   // 1024^2 R16F optical depth, one tile
+    Ogre::TextureGpu  *mCloudWeatherNone = nullptr;   // 1x1 white, ManualTexture: the bake's no-map unit
+    Ogre::TextureGpu  *mCloudField = nullptr;   // 2048^2 R16F optical depth, one 64 km tile
     Ogre::Camera      *mCloudBakeCamera = nullptr;
     bool     mCloudFieldPending = false;
     /// The layer's own clock: the sum of the frame deltas of the frames this
@@ -4861,6 +4865,7 @@ private:
     void bindCloudInjection(Ogre::VctLighting *lighting);
     bool     mCloudClearPending = false;
     bool     mCloudClearValid = false;
+    /// The clear sky's irradiance on an up-facing plate / pi (CLOUDS-2D-3).
     float    mCloudClearMean[3] = { 0.0f, 0.0f, 0.0f };
     Ogre::AsyncTextureTicket *mCloudClearTicket = nullptr;
     CloudStatus mCloudStatus;
@@ -6648,6 +6653,7 @@ private:
     /// Cumulative over the scene's life (GiStatus::probePlacements /
     /// probeCapturesTotal): scouts started, and probe captures rendered.
     unsigned           mProbePlacements = 0;
+    unsigned           mProbeReplacements = 0;   // GiStatus::probeReplacements
     unsigned long long mProbeCapturesTotal = 0;
     unsigned long long mGiRebuilds = 0;
     /// How many of those rebuilds a MOBILITY change caused (MobilityStatus::
@@ -7816,6 +7822,14 @@ public:
     void setShadowMapBudget(unsigned maps) override;
     unsigned shadowMapBudget() const override;
     ShadowStatus shadowStatus() const override;
+    /// THE BYTES ONE SHADOWED REFLECTION PROBE HOLDS FOR ITS SHADOW NODE
+    /// (PCC-BUDGET-2): the probe node's atlas at this engine's live settings
+    /// (planShadowAtlas at probeShadowResolution, the derived focused count capped
+    /// at kProbeShadowMaxFocusedMaps — buildShadowNode's own arithmetic) plus its
+    /// point-light scratch cube (R/2 squared x 6, R32F) when it places a focused
+    /// map. The cube's depth buffer is POOLED (one per resolution for the whole
+    /// render system), never a probe's. What giProbeGridBytes counts per probe.
+    unsigned long long probeShadowNodeBytes() const;
     bool refreshShadows() override;
     /// THE LAMP-MAP CACHE, frame half one (OgreShadow.cpp; ENGINE_CACHE_POLICY
     /// P2): at the top of the frame, before any per-view work — switches the

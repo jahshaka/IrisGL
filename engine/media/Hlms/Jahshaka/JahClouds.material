@@ -69,7 +69,79 @@ material Jahshaka/SunDiscClouded
 	}
 }
 
-// THE FIELD BAKE: one full-target quad, no depth.
+// THE FIELD BAKE (CLOUDS-2D-3): four full-target quads, no depth
+// (JahshakaClouds.compositor): the footprint, the blur along x, along y, the
+// field. Every grid TILES, so every unit wraps.
+material Jahshaka/CloudShape
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+			fragment_program_ref Jahshaka/CloudShape_ps
+			{
+			}
+			// The weather map covers one tile and wraps with it.
+			texture_unit cloudWeather
+			{
+				tex_address_mode	wrap
+				filtering			bilinear
+			}
+		}
+	}
+}
+material Jahshaka/CloudBlurH
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+			fragment_program_ref Jahshaka/CloudBlurH_ps
+			{
+			}
+			texture_unit cloudIn
+			{
+				tex_address_mode	wrap
+				filtering			none
+			}
+		}
+	}
+}
+material Jahshaka/CloudBlurV
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+			fragment_program_ref Jahshaka/CloudBlurV_ps
+			{
+			}
+			texture_unit cloudIn
+			{
+				tex_address_mode	wrap
+				filtering			none
+			}
+		}
+	}
+}
 material Jahshaka/CloudBake
 {
 	technique
@@ -79,19 +151,19 @@ material Jahshaka/CloudBake
 			depth_check off
 			depth_write off
 			cull_hardware none
-
 			vertex_program_ref Ogre/Compositor/Quad_vs
 			{
 			}
 			fragment_program_ref Jahshaka/CloudBake_ps
 			{
 			}
-			// The noise TILES; the weather map covers one tile and wraps with it.
-			texture_unit cloudNoise
+			// The blurred profile, 512^2, read bilinearly into the 2048^2 field.
+			texture_unit cloudBlurred
 			{
 				tex_address_mode	wrap
 				filtering			bilinear
 			}
+			// The weather map scales the deck's coverage as it scales the clouds'.
 			texture_unit cloudWeather
 			{
 				tex_address_mode	wrap
