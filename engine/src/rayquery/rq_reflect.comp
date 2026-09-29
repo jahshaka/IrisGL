@@ -174,7 +174,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// measuring door: the camera-only history of before.
 	vec4 motion;
 	/// THE ALPHA TABLE (REFLECT-MOVERS-2, jah_rq_alpha.glsl): xy = its device
-	/// address, float bits (0 = none: the rays stay opaque).
+	/// address, float bits (0 = none: the rays stay opaque). z = the edge-class
+	/// overlay's mode (REFLECT-EDGE-2's instrument, JAH_R7_EDGE_CLASSES; 0 = off).
 	vec4 alpha;
 } p;
 
@@ -353,10 +354,13 @@ const vec4 kPhotonVoxel   = vec4( 0.15, 0.35, 1.0, 1.0 );
 const vec4 kPhotonSky     = vec4( 0.2, 0.95, 1.0, 1.0 );
 const vec4 kPhotonList    = vec4( 1.0, 0.2, 1.0, 1.0 );
 const vec4 kPhotonDropped = vec4( 1.0, 0.1, 0.05, 1.0 );
+/// (Under the edge-class overlay the source colours give way to the class colour,
+/// written with w = 2.5 so it passes here, and stored at 1.)
 void photonHit( ivec2 tc, vec4 c )
 {
-	if( p.stereo.z < 0.5 )
+	if( p.stereo.z < 0.5 || ( p.alpha.z > 0.5 && c.w >= 1.0 && c.w < 2.0 ) )
 		return;
+	c.w = min( c.w, 1.0 );
 	const ivec2 full = ivec2( p.resolution.zw );
 	const ivec2 traceRes = max( ivec2( p.resolution.xy ), ivec2( 1 ) );
 	const ivec2 scale = max( full / traceRes, ivec2( 1 ) );
@@ -725,9 +729,12 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 /// reflection is found at a sub-texel offset every frame; a nearest-texel read
 /// would resample the mean with a different rounding each frame, a shimmer of its
 /// own. Returns w = 0 when under a quarter of the footprint survived.
+/// ...and how much of that footprint survived (0 when none), for the caller's weight.
+float gImageCover = 0.0;
 vec4 historyAtImage( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float wasHitT )
 {
 	wasHitT = 0.0;
+	gImageCover = 0.0;
 	vec2 uv;
 	float z;
 	if( jahReproject( world, before.camPos, before.perspective, before.rayTL, before.rayRight,
@@ -754,6 +761,7 @@ vec4 historyAtImage( EyeImage before, int eye, vec3 world, ivec2 traceRes, out f
 		sumT += jahMeanLength( pair.y ) * bw;
 		sumW += bw;
 	}
+	gImageCover = sumW;
 	if( sumW < 0.25 )
 		return vec4( 0.0 );
 	wasHitT = sumT / sumW;
@@ -993,8 +1001,19 @@ void main()
 		// meant to remove. The lobe's centre at the distance the texel's mean
 		// holds is the same point every frame (at rest it IS this texel); this
 		// sample contributes only the hit's step.
+		//
+		// ...UNLESS THE MEAN IS NOT A MEAN OF THE MOVER (REFLECT-EDGE-2, measured): at
+		// the reflected silhouette the texel's mean is a COVERAGE MIXTURE of the mover
+		// and what lies beyond it (the sky's escape length and the sphere's 3 m, mixed
+		// by how much of the lobe the mover covers), and a mixed length names no point
+		// of either — the lookup landed nowhere and the texel restarted (12 % of the
+		// leading band's texels every frame, gi.reflect_mover --edge). A mean that
+		// held no mover lately, or whose length is more than the ray's own apart from
+		// this hit's, is keyed on this hit.
 		const vec3 step = prevHit - ( world + worldN * bias + L * hitT );
-		const float imageT = wasHitT > 0.0 ? wasHitT : hitT;
+		const bool meanIsTheMover = wasHitT > 0.0 && wasMoverAge < kMoverMeanFrames &&
+									abs( hitT - wasHitT ) / max( min( hitT, wasHitT ), 1e-3 ) < 1.0;
+		const float imageT = meanIsTheMover ? wasHitT : hitT;
 		const vec3 image = prevSurf - V * imageT + ( step - 2.0 * dot( step, prevSurfN ) * prevSurfN );
 		// the line the previous camera saw the image along: from its eye (a
 		// perspective camera) or along its one direction (an orthographic one)
@@ -1006,19 +1025,24 @@ void main()
 			const vec3 onSurf = from + dir * ( dot( prevSurf - from, prevSurfN ) / denom );
 			float vHitT;
 			const vec4 vPrev = historyAtImage( before, eye, onSurf, traceRes, vHitT );
-			const float nearer = max( min( imageT, vHitT ), 1e-3 );
 			// THE SAME THING, MOVING: every tap of that mean hit a moving slot within
-			// kMoverMeanFrames (historyAtImage's age test), and the mean went as far
-			// as this texel's mean did, to within
-			// the lobe's own spread (the tolerance the restart below uses). The
-			// distance is the MEAN's, never one sample's: a glossy lobe's samples
-			// land at many lengths on one object.
-			const float wideV = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
-			if( vPrev.w > 0.0 && vHitT > 0.0 &&
-				abs( imageT - vHitT ) / nearer < mix( 0.25, 4.0, wideV ) )
+			// kMoverMeanFrames (historyAtImage's age test) and passed the 5 % surface
+			// test. NO LENGTH TEST ON TOP (REFLECT-EDGE-2): at the silhouette both
+			// means are coverage mixtures, and two mixtures' lengths disagree by the
+			// coverage's own noise — the test refused a valid history on a coin toss.
+			//
+			// A WEIGHT, NOT A CHOICE (REFLECT-EDGE-2, the SVGF/TAA lesson for a moving
+			// edge): the reflected image's history is taken by how much of its
+			// bilinear footprint survived the tests (historyAtImage's coverage, 0.25
+			// to 1 mapped to 0 to 1), and the surface's own history keeps the rest.
+			// Inside the reflection the footprint survives whole and the image's
+			// history is taken whole, as before; at the edge a texel's history is no
+			// longer swapped between the two every frame on one sample's coin toss.
+			if( vPrev.w > 0.0 && vHitT > 0.0 )
 			{
 				virtualHeld = true;
-				prev = vPrev;
+				const float cover = clamp( ( gImageCover - 0.25 ) / 0.75, 0.0, 1.0 );
+				prev = prev.w > 0.0 ? mix( prev, vPrev, cover ) : vPrev;
 				warmHeld = 0.0;
 				wasHitT = vHitT;
 				wasMoverAge = 0.0;
@@ -1030,8 +1054,8 @@ void main()
 	// moving slot, or the rays in the mean did, the reflected image found nothing
 	// and the ray length disagrees with the mean's — the floor where a moving
 	// sphere's reflection WAS reflects the room now (or the sphere arrived where
-	// the room was). That is a DISOCCLUSION of the reflection, and it is answered
-	// as one: the mean restarts from this frame's sample at the warm view's seed
+	// the room was). That is a DISOCCLUSION of the reflection, and a DEPARTURE is
+	// answered as one (an arrival is distrusted instead — the last paragraph): the mean restarts from this frame's sample at the warm view's seed
 	// (historyAt's rule), so the filter widens over it and the next samples average
 	// in at 1/n — never a memory drop that keeps the count, which would freeze
 	// this one noisy sample into the mean for thirty frames.
@@ -1048,6 +1072,16 @@ void main()
 	// floor's 1/32 — the sphere's parked pose ghosted on the floor for sixty frames
 	// and more. And the departure rule runs only while movers are moving
 	// (motion.w = 2): at rest a lobe's tail that misses twice is noise.
+	//
+	// AN ARRIVAL IS NOT RESTARTED, IT IS DISTRUSTED (REFLECT-EDGE-2, measured): a ray
+	// that hit the mover where the reflected image held no history of it is, at the
+	// silhouette, one Bernoulli sample of a coverage mixture — restarting on it froze
+	// that one raw ray into the mean at the warm seed's weight (8/9, then 9/10, ...),
+	// which WAS the band's grain (2.14x the still case's). The mean is kept and its
+	// count capped at the warm seed, so this sample and the next weigh 1/10 each and
+	// the old picture drains over a few frames instead of one: the leading edge
+	// trails by less than a pixel (the edge's 10-90 % width 6.75 -> 7.12 px against
+	// 8.12 settled). A young view still restarts (its count is the warm-up's own).
 	const bool arrived = hitMoving;
 	const bool departed = p.motion.w > 1.5 && !hitMover && wasMoverAge < kMoverMeanFrames &&
 						  wasMoverAge >= 1.0;
@@ -1057,13 +1091,31 @@ void main()
 		const float wide = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
 		if( abs( hitT - wasHitT ) / nearer > mix( 0.25, 4.0, wide ) )
 		{
-			prev = vec4( 0.0 );
-			warmHeld = p.stereo.y >= kWarmupFrames ? 1.0 : 0.0;
-			wasHitT = 0.0;
-			wasMoverAge = 63.0;
+			if( arrived && p.stereo.y >= kWarmupFrames )
+				prev.w = min( prev.w, kWarmupFrames + 1.0 );
+			else
+			{
+				prev = vec4( 0.0 );
+				warmHeld = p.stereo.y >= kWarmupFrames ? 1.0 : 0.0;
+				wasHitT = 0.0;
+				wasMoverAge = 63.0;
+			}
 		}
 	}
 
+	// THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, gi.reflect_mover
+	// --edge): with alpha.z set (JAH_R7_EDGE_CLASSES) on the Hits photon view, a traced
+	// texel writes its HISTORY CLASS instead of its ray's source — mode 1: r = the ray
+	// hit a mover, g = the mean restarted, b = the history came through the reflected
+	// image; mode 2: the new count's bins (<= 9, <= 17, <= 33). Nothing else reads it.
+	if( p.alpha.z > 0.5 )
+	{
+		const float newCount = min( max( prev.w, warmHeld * kWarmupFrames ) + 1.0, 4096.0 );
+		const vec4 cls = p.alpha.z < 1.5
+			? vec4( hitMover ? 1.0 : 0.0, prev.w <= 0.0 ? 1.0 : 0.0, virtualHeld ? 1.0 : 0.0, 2.5 )
+			: vec4( newCount <= 9.5 ? 1.0 : 0.0, newCount <= 17.5 ? 1.0 : 0.0, newCount <= 33.5 ? 1.0 : 0.0, 2.5 );
+		photonHit( tc, cls );
+	}
 	if( !record && !finite3( traced ) )
 	{
 		// A NON-FINITE ESCAPE IS NOT EVIDENCE ABOUT THIS PIXEL: the history is

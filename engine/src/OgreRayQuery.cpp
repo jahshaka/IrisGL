@@ -5308,6 +5308,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
     }
+    // THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, read per frame:
+    // gi.reflect_mover --edge alternates its two modes). Only the Hits photon view
+    // shows it; the reflection's own arithmetic never reads it.
+    {
+        const char *c = getenv("JAH_R7_EDGE_CLASSES");
+        pp.alpha[2] = c ? float(atoi(c)) : 0.0f;
+    }
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
