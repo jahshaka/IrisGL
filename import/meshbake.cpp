@@ -205,7 +205,11 @@ namespace
 // bigger than the group's error, is locked with its fan and the whole DAG rebuilt (at
 // most 16 builds; clusterlod's lock is one array per build). The primitives with no
 // lock taken keep their bytes; hp_sphere, hemisphere and every scan re-bake.
-constexpr int kFormatVersion = 17;
+// v18 (2026-09-29, CLUSTER-LOCK-1): THE DAG'S LOCK IS BY POSITION. A locked vertex
+// locks every index at its position (a seam's, a pole's twins) and the fan of each; a
+// twin left free was moved by clusterlod's sloppy fallback and opened the cut. Every
+// mesh whose lock touched a shared position re-bakes (hp_sphere, hemisphere, scans).
+constexpr int kFormatVersion = 18;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -3896,6 +3900,7 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
 void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant)
 {
     std::vector<unsigned char> lock;
+    std::vector<unsigned> weld;   // vertex -> the first vertex at its position (built with the lock)
     std::vector<unsigned> over;
     int passes = 0, locked = 0;
     for (;;) {
@@ -3904,27 +3909,51 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         ++passes;
         if (over.empty() || passes >= kDagLockPasses || mesh.isNull()) break;
         int posComps = 3; size_t nv = 0;
-        if (!lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv)) break;
+        const float *positions = lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+        if (!positions) break;
         const IndexBufferPtr ib = mesh->getIndexBuffer();
         if (ib.isNull() || !ib->data) break;
         const unsigned *idx = reinterpret_cast<const unsigned *>(ib->data);
         const size_t ni = size_t(ib->dataSize) / sizeof(unsigned);
-        if (lock.empty()) lock.assign(nv, 0u);
-        std::vector<unsigned char> hit(nv, 0u);
-        for (unsigned v : over) if (v < nv) hit[v] = 1u;
-        // THE FAN: every level-0 triangle touching a displaced vertex keeps its corners.
-        int added = 0;
-        for (size_t t = 0; t + 2 < ni; t += 3) {
-            if (!hit[idx[t]] && !hit[idx[t + 1]] && !hit[idx[t + 2]]) continue;
-            for (size_t k = 0; k < 3; ++k) {
-                const unsigned v = idx[t + k];
-                if (v < nv && !lock[v]) { lock[v] = 1u; ++added; }   // meshopt_SimplifyVertex_Lock
-            }
+        // THE LOCK IS BY POSITION (CLUSTER-LOCK-1). A seam (UV / normal) or a pole
+        // holds one position under several indices; clusterlod honours the lock per
+        // INDEX, and its sloppy fallback (simplifySloppy on the group's de-indexed
+        // corners) keeps a locked corner where it is while moving its unlocked twin
+        // to the grid cell's representative — the cut opens along the seam. So every
+        // index sharing a locked position is locked, and the fan is taken over every
+        // triangle touching that position (clusterlod's own connectivity:
+        // meshopt_generatePositionRemap's exact equality, as its boundary lock).
+        if (lock.empty()) {
+            lock.assign(nv, 0u);
+            weld.resize(nv);
+            meshopt_generatePositionRemap(weld.data(), positions, nv, sizeof(float) * size_t(posComps));
         }
+        std::vector<unsigned char> hit(nv, 0u), keep(nv, 0u);   // both indexed by a weld id
+        for (unsigned v : over) if (v < nv) hit[weld[v]] = 1u;
+        // THE FAN: every level-0 triangle touching a displaced position keeps its corners' positions.
+        for (size_t t = 0; t + 2 < ni; t += 3) {
+            if (idx[t] >= nv || idx[t + 1] >= nv || idx[t + 2] >= nv) continue;
+            if (!hit[weld[idx[t]]] && !hit[weld[idx[t + 1]]] && !hit[weld[idx[t + 2]]]) continue;
+            for (size_t k = 0; k < 3; ++k) keep[weld[idx[t + k]]] = 1u;
+        }
+        int added = 0;
+        for (size_t v = 0; v < nv; ++v)
+            if (keep[weld[v]] && !lock[v]) { lock[v] = 1u; ++added; }   // meshopt_SimplifyVertex_Lock
         locked += added;
         if (!added) break;   // nothing new to lock: another build would be the same
     }
     if (stats) {
+        // THE WELD'S ACCOUNT (CLUSTER-LOCK-1): locked positions shared by several
+        // indices, and positions locked on some of their indices only (always 0).
+        if (!lock.empty()) {
+            std::vector<int> at(weld.size(), 0), lockedAt(weld.size(), 0);
+            for (size_t v = 0; v < weld.size(); ++v) { ++at[weld[v]]; if (lock[v]) ++lockedAt[weld[v]]; }
+            for (size_t v = 0; v < weld.size(); ++v) {
+                if (weld[v] != v || !lockedAt[v]) continue;
+                if (at[v] > 1) ++stats->lockedSharedPositions;
+                if (lockedAt[v] < at[v]) ++stats->lockedSplitPositions;
+            }
+        }
         stats->lockPasses = passes;
         stats->lockedVertices = locked;
         stats->lockUnconverged = int(over.size());

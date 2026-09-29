@@ -366,6 +366,11 @@ public:
         int    lockPasses = 0;
         int    lockedVertices = 0;
         int    lockUnconverged = 0;
+        /// The lock is by POSITION (CLUSTER-LOCK-1): how many locked positions are held
+        /// by several indices (a seam, a pole), and how many are locked on only some of
+        /// their indices — always 0; a split position opens the cut (the sloppy fallback).
+        int    lockedSharedPositions = 0;
+        int    lockedSplitPositions = 0;
         double buildMs = 0.0;          ///< clodBuild alone
         double measureMs = 0.0;        ///< the per-group measurement + provenance
         bool   wantRegions = false;
