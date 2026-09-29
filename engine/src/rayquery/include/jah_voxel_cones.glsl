@@ -164,4 +164,40 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 	}
 }
 
+/// THE SKY'S SHARE ON A FINER QUADRATURE (CONTACT-OCCLUSION-1): what jahDiffuseCones'
+/// `envD` estimates, on sixteen 20.4-degree cones instead of the set's four 44.5-degree
+/// (or six 30-degree) ones - cosine-distributed, four rings of four, equal weights (each
+/// the same projected solid angle), the ring below the horizon's rim stopped by the
+/// surface (jahConeBelow), over the same march and the same environment lookup.
+///
+/// WHY A SECOND QUADRATURE FOR THE SKY. The four-cone set puts two axes ON the horizon of
+/// a vertical surface standing on a floor, and a cone that wide marching along an infinite
+/// plane saturates on it although half of it is sky: a white wall under the sky alone
+/// stored 0.39-0.49 of its analytic sky share (albedo x the lobe x 1/2) where an open floor
+/// stored 0.99 (gi.contact_occlusion's store readout); with this set 0.81-0.96. The sky
+/// term a SURFACE STORE re-emits - the voxel's (the bounce job) and the card's (the
+/// relight) - is computed once per injection or relight, so it takes the finer set; the
+/// per-pixel diffuse keeps the fast one (a pixel's own cones run only with the field off).
+vec3 jahSkyShareFine( vec3 posLS, vec4 origin, mat3 basis )
+{
+	const float kTan = 0.372;
+	vec3 sky = vec3( 0.0, 0.0, 0.0 );
+	for( int i = 0; i < 4; ++i )
+	{
+		const float u1 = ( float( i ) + 0.5 ) * 0.25;
+		const float r = sqrt( u1 );
+		const float z = sqrt( 1.0 - u1 );
+		for( int j = 0; j < 4; ++j )
+		{
+			const float phi = 1.5707963 * ( float( j ) + 0.5 * float( i & 1 ) ) + 0.3926991;
+			const vec3 d = basis * vec3( r * cos( phi ), r * sin( phi ), z );
+			vec4 o = origin;
+			o.w = jahConeBelow( normalize( d ), basis[2], kTan );
+			JahConeResult res = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), kTan, o, 0u );
+			sky += ( 1.0 - min( 1.0, res.alpha / 0.95 ) ) * jahEnvCone( JAH_CONES_TO_WORLD( d ), kTan );
+		}
+	}
+	return sky * 0.0625;
+}
+
 #endif   // JAH_VOXEL_CONES_GLSL

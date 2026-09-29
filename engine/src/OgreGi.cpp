@@ -4638,9 +4638,11 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         gatherAndBuild(*c.feed, c.voxelizer, in);
         c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
                                            c.voxelizer, anisotropic);
-        const Ogre::uint32 extraBounces =
-            Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-        c.lighting->setAllowMultipleBounces(extraBounces > 0u);
+        // THE BOUNCE VOLUMES AT EVERY BOUNCE COUNT (CONTACT-OCCLUSION-1): the sky's
+        // direct term is a bounce-job pass (VctLighting::update's sky pass, fork), so a
+        // one-bounce document needs them too — without them a surface lit only by the
+        // sky re-emitted nothing (gi.contact_occlusion's arm B).
+        c.lighting->setAllowMultipleBounces(true);
         if (i + 1u < table.size()) {
             c.lighting->reserveExtraCascades(table.size() - i - 1u);
             for (size_t j = i + 1u; j < table.size(); ++j)
