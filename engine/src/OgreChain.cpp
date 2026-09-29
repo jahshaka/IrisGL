@@ -317,6 +317,27 @@ inline Ogre::uint32 overlayVisibilityMask() {
     return Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS & ~kDistortionBit;
 }
 
+/// kOverlayDepthNote — THE OVERLAYS DEPTH-TEST AMONG THEMSELVES, NOT AGAINST THE
+/// SCENE (GIZMO-DEPTH-1, D7). The on-top set (queue kOverlayRenderQueue and up:
+/// gizmos, wires, always-on-top markers) must never be hidden by the scene, and it
+/// used to get that by drawing with NO depth at all — so where two of its parts
+/// overlapped, the one drawn later won, and that order was a TIE in the render
+/// queue's sort key broken by VAO ids: allocation history decided whether the
+/// translate gizmo's shaft or its centre ball was in front (two B1/B2 selftest
+/// pixels moved with every unrelated allocation change; ATOM-CPU-WALKS-1). Each of
+/// the three overlay passes (the passthrough shape, the effect shape, the blank
+/// chain) now CLEARS its own depth and the on-top material tests and writes it
+/// (OgreScene::createUnlitMaterial): the nearer part wins, whatever the order,
+/// and still nothing of the scene can hide an overlay. The depth is scratch — the
+/// store stays DontCare. (The passthrough shape's pass used to LOAD the scene's
+/// depth; nothing in it tested against that depth.)
+inline void clearOverlayDepth(Ogre::CompositorPassSceneDef *p) {
+    p->mLoadActionDepth   = Ogre::LoadAction::Clear;
+    p->mLoadActionStencil = Ogre::LoadAction::Clear;
+    p->mClearDepth = 1.0f;
+    p->mClearStencil = 0u;
+}
+
 /// DISTORTION (POST_LOOKS_SPEC.md §5.3). Two textures: the displacement field
 /// the distortion objects render into, and the warped copy of the scene.
 ///
@@ -1339,10 +1360,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         {
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
-            // Load actions keep the compositor defaults (Load everywhere); the
-            // colour store is kMultiWorkspaceStore — see the note there. This is
-            // the last pass of THIS workspace on the target, so it is where the
-            // MSAA resolve belongs, but it must not be the DISCARDING kind.
+            // The colour loads (the compositor default) and its store is
+            // kMultiWorkspaceStore — see the note there. This is the last pass
+            // of THIS workspace on the target, so it is where the MSAA resolve
+            // belongs, but it must not be the DISCARDING kind. THE DEPTH IS THE
+            // OVERLAYS' OWN (kOverlayDepthNote): cleared, not the scene's.
+            clearOverlayDepth(p);
             p->mStoreActionColour[0] = kMultiWorkspaceStore;
             p->mStoreActionDepth   = Ogre::StoreAction::DontCare;
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
@@ -2565,8 +2588,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         t->setNumPasses(1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
         p->mLoadActionColour[0] = Ogre::LoadAction::Load;
-        p->mLoadActionDepth     = Ogre::LoadAction::DontCare;
-        p->mLoadActionStencil   = Ogre::LoadAction::DontCare;
+        clearOverlayDepth(p);                              // kOverlayDepthNote
         p->mStoreActionColour[0] = kMultiWorkspaceStore;   // see kMultiWorkspaceStore
         p->mStoreActionDepth    = Ogre::StoreAction::DontCare;
         p->mStoreActionStencil  = Ogre::StoreAction::DontCare;
@@ -2640,6 +2662,7 @@ void buildBlank(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     }
     {
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        clearOverlayDepth(p);                              // kOverlayDepthNote
         p->mStoreActionColour[0] = kMultiWorkspaceStore;
         p->mStoreActionDepth     = Ogre::StoreAction::DontCare;
         p->mStoreActionStencil   = Ogre::StoreAction::DontCare;
