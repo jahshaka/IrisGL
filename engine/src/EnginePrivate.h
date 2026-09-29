@@ -3917,6 +3917,14 @@ public:
     unsigned nodeLightMask(NodeId id) const override;
     void setNodeCastShadow(NodeId id, bool on) override;
     bool nodeCastShadow(NodeId id) const override;
+    void setNodeFaceCull(NodeId id, FaceCull cull) override;
+    FaceCull nodeFaceCull(NodeId id) const override;
+    unsigned cullTwinCount() const override { return mCullTwinCount; }
+    /// THE CULL TWINS' SWEEP (CULL-MODE-2): destroys every twin no Item wears. Cheap
+    /// when nothing can have changed (a flag, set when an Item wearing a twin could
+    /// have let go of it); called once per frame before the frame's first reader of
+    /// the Items' datablocks (OgreEngine's frame, beside drainPbsChanges).
+    void sweepCullTwins();
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
@@ -4369,6 +4377,12 @@ private:
         /// on every attach, and a host may say "this never casts" before the
         /// geometry arrives.
         bool                      castShadow = true;
+        /// PER-OBJECT FACE CULL (Scene::setNodeFaceCull, CULL-MODE-2). Remembered
+        /// for the castShadow reasons: every attach rebuilds the Item, and the host
+        /// may say it before the geometry arrives. `Material` wears the material's
+        /// own datablock; anything else that differs from the material's own cull
+        /// wears the material's cull twin (MaterialRec::cullTwins).
+        FaceCull                  faceCull = FaceCull::Material;
         /// Whether the attached material is UNLIT, recorded at attach time.
         /// Needed because the helper flag can be toggled after the fact and the
         /// item's own flags cannot answer it once kVisibleBit is gone: a helper
@@ -4520,6 +4534,22 @@ private:
         Ogre::SkeletonInstance *owner = nullptr;
         unsigned long long      ownerGeneration = 0;
     };
+    /// What bindTrackedTextures LAST WROTE to ONE datablock, per slot, and whether
+    /// it has ever written (MaterialRec::bound says why it exists).
+    struct TextureBindState {
+        TextureId lastBoundTextures[kPbrTextureSlotCount] = {};
+        bool      everBound = false;
+        /// The sampler state those bindings were made with: a change to
+        /// anisotropy or an address mode (A-2) has to re-bind every slot even
+        /// when no texture moved, because the sampler rides the binding.
+        float     lastAnisotropy = 1.0f;
+        PbrParams::AddressMode lastAddress[kPbrTextureSlotCount] = {};
+    };
+    /// One cull twin of a material (MaterialRec::cullTwins).
+    struct CullTwin {
+        std::string      datablockName;   // uniquely owned; empty = none
+        TextureBindState bound;
+    };
     struct MaterialRec {
         std::string datablockName;
         bool unlit = false;
@@ -4573,13 +4603,19 @@ private:
         /// datablock's descriptor set — for slots that are null and were
         /// already null. Measured as +31% on e.first_sync@1000, the cold
         /// scene-open path. Skipping unchanged slots removes it.
-        TextureId lastBoundTextures[kPbrTextureSlotCount] = {};
-        bool      everBound = false;
-        /// The sampler state those bindings were made with: a change to
-        /// anisotropy or an address mode (A-2) has to re-bind every slot even
-        /// when no texture moved, because the sampler rides the binding.
-        float     lastAnisotropy = 1.0f;
-        PbrParams::AddressMode lastAddress[kPbrTextureSlotCount] = {};
+        /// (Per DATABLOCK: the master's here, each cull twin's in its CullTwin.)
+        TextureBindState bound;
+        /// THE CULL TWINS (CULL-MODE-2), indexed by cullTwinIndex (Back, Front,
+        /// TwoSided): a second datablock of this material whose cull — and the
+        /// two-sided lighting that goes with it — is a NODE's (Scene::setNodeFaceCull)
+        /// instead of the material's own. Everything else is the master's: built from
+        /// this record the way the family switch builds (params, tracked maps, pieces,
+        /// the reflection slot) and kept in step by every write to the master
+        /// (syncCullTwins). Made on first wear, destroyed by sweepCullTwins once no
+        /// Item wears it, and ALWAYS before the master dies (destroyCullTwins: a
+        /// datablock is destroyed with no renderable linked, ~HlmsDatablock asserts).
+        /// An empty name = no twin in that slot.
+        CullTwin cullTwins[3];
         /// The parameters LAST APPLIED to this material (PBR materials only).
         /// setShadingModel destroys the datablock and builds a new one in the
         /// other family, and it takes no parameters — it rebuilds from this.
@@ -4704,18 +4740,54 @@ private:
     static constexpr auto kTransparencyNone = static_cast<Ogre::HlmsPbsDatablock::TransparencyModes>(0);
     /// `refractionsActive` false downgrades PbrAlphaMode::Refractive to plain
     /// glass — see setRefractionsActive for why that is not optional.
+    /// `cull` other than FaceCull::Material overrides the params' own two-sidedness
+    /// (a CULL TWIN's datablock, CULL-MODE-2): the macroblock's cull and the
+    /// two-sided lighting follow it, and nothing else does.
     static void applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
-                         bool refractionsActive);
+                         bool refractionsActive, FaceCull cull = FaceCull::Material);
     /// The UNLIT half of applyPbr (HLMS_ADOPTION P4a): the subset of PbrParams
     /// the Unlit family can actually honour — base colour, alpha and its mode,
     /// two-sidedness. Everything else is dropped, deliberately and visibly
     /// (see ShadingModel in Types.h; the panel disables the rows this cannot
     /// carry rather than letting a user discover them).
-    static void applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p);
+    static void applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p,
+                           FaceCull cull = FaceCull::Material);
     /// The DISTORTION datablock (POST_LOOKS_SPEC.md §5.2): an HlmsUnlit block
     /// whose texture is a screen-space displacement field and whose colour
     /// alpha is the strength. See the definition for why each block is set.
-    static void applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p);
+    static void applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p,
+                                FaceCull cull = FaceCull::Material);
+    // ---- THE CULL TWINS (CULL-MODE-2; MaterialRec::cullTwins) ----
+    /// The cull a material's params ask for on their own (Back or TwoSided).
+    static FaceCull ownCullOf(const PbrParams &p) {
+        return p.twoSided ? FaceCull::TwoSided : FaceCull::Back;
+    }
+    /// The Ogre cull of a resolved FaceCull (never Material).
+    static Ogre::CullingMode ogreCullOf(FaceCull c);
+    /// `cull` resolved against `p`: Material -> the params' own.
+    static FaceCull resolveCull(const PbrParams &p, FaceCull cull) {
+        return cull == FaceCull::Material ? ownCullOf(p) : cull;
+    }
+    static size_t cullTwinIndex(FaceCull c) { return size_t(c) - 1u; }
+    /// Only a PBR material has twins (either family); an overlay (grid, gizmo,
+    /// outline) is drawn as it was made, whatever its node says.
+    static bool cullTwinnable(const MaterialRec &rec) { return !rec.unlit || rec.shadingUnlit; }
+    /// The datablock node `n` wears for `rec`: the master when the node's cull is the
+    /// material's own (or the material has no twins), else its twin — made now if
+    /// nothing wore it yet.
+    Ogre::HlmsDatablock *wornDatablock(const Node &n, MaterialRec &rec);
+    Ogre::HlmsDatablock *cullTwinOf(MaterialRec &rec, FaceCull cull);
+    /// Writes the record's params into one datablock of it with `cull`.
+    void applyRecTo(MaterialRec &rec, Ogre::HlmsDatablock *db, FaceCull cull);
+    /// Every twin of `rec` brought to the master's state (params, maps, pieces, the
+    /// reflection slot): the one call each write to a master ends with.
+    void syncCullTwins(MaterialRec &rec);
+    /// Destroys every twin of `rec` — the caller has taken every Item off them.
+    void destroyCullTwins(MaterialRec &rec);
+    /// A material whose OWN cull moved: every node wearing it re-picks master/twin.
+    void repointCullWearers(MaterialId id);
+    unsigned mCullTwinCount = 0;
+    bool     mCullTwinSweep = false;
     /// The visibility bits a node's PFX2 def carries when visible:
     /// kDistortionBit for a distortion emitter, else helper/visible.
     static Ogre::uint32 particleVisibilityBits(const Node &n);
@@ -4724,6 +4796,9 @@ private:
     /// family has one usable slot (Albedo -> texture unit 0); the rest are kept
     /// in the record so switching back to Lit restores them.
     void bindTrackedTextures(MaterialRec &rec);   // records what it bound (see MaterialRec)
+    /// ...onto ONE datablock of the material, guarded by that datablock's own record
+    /// (the master's or a cull twin's). bindTrackedTextures = the master, then twins.
+    void bindTrackedTexturesInto(MaterialRec &rec, Ogre::HlmsDatablock *raw, TextureBindState &st);
     /// THE SAMPLERBLOCK REFERENCE CEILING (ENGINE-6 item 2, ENGINE-5 review F2).
     /// Every textured slot on every datablock holds a REFERENCE on the
     /// samplerblock it was bound with, `BasicBlock::mRefCount` is a uint16, and
@@ -4741,6 +4816,7 @@ private:
     /// switch back to Lit renders the graph again instead of the plain surface
     /// underneath it.
     void bindTrackedPieces(const MaterialRec &rec);
+    void bindTrackedPiecesInto(const MaterialRec &rec, Ogre::HlmsPbsDatablock *db);
     /// Sets or clears `jah_shader_clock` — our datablock property gating the
     /// pass-buffer clock's DECLARATION — to match whether `rec` carries a
     /// generated piece. The whole pixel-suite isolation contract rests on this

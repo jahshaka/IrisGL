@@ -1560,6 +1560,9 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // THE PBS CHANGE LOG FIRST (ATOM-CPU-WALKS-1): the Items an in-place
         // material edit re-hashed are marked here, so the scan below re-composes
         // them — route, queue, word, flags — in this frame.
+        // THE CULL TWINS NOTHING WEARS ANY MORE (CULL-MODE-2), before the drain and
+        // every reader of an Item's datablock: a flag test for a scene with none.
+        for (OgreScene *s : drawn) s->sweepCullTwins();
         drainPbsChanges();
         for (OgreScene *s : drawn) s->ensureGpuScene(/*graphIsCurrent=*/true);
         // THE RAY LEVEL (ATOM P3's AT-A8r), immediately after the table it

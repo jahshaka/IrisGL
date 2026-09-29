@@ -1560,6 +1560,7 @@ void OgreScene::destroy() {
         // SceneManager's memory manager, so it dies before the manager does.
         releaseQueueDepthAnchor();
         for (auto &kv : mMaterials) {
+            destroyCullTwins(kv.second);   // every Item is gone; twins before masters
             Ogre::Hlms *hlms = hlmsFor(kv.second);
             if (Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(kv.second.datablockName))) {
                 forgetDecodeTwinOf(db);   // its decode twin dies first (HlmsAtom.h)
@@ -1638,6 +1639,9 @@ void OgreScene::detachItem(NodeId id, Node &n) {
     // attach overwriting the only pointer to it. An engine that cannot destroy
     // a renderable it created has no way back to one-item-per-node.
     if (n.item) {
+        // A CULL TWIN this Item wore may be worn by nothing now (CULL-MODE-2): the
+        // frame's sweep finds out, once, before anything reads a datablock.
+        if (mCullTwinCount) mCullTwinSweep = true;
         // Only GI-participating (lit) geometry invalidates — detaching a selection
         // outline or wire overlay must not trigger a re-voxelize. BEFORE the
         // destroy: the voxelizer/IR hold raw pointers into the dying geometry.
@@ -1728,6 +1732,8 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // the component tracks by raw pointer dies.
     disarmReflector(id, n);
     mReflectors.erase(id);
+    // A CULL TWIN its Item wore may be worn by nothing now (CULL-MODE-2; detachItem).
+    if (n.item && mCullTwinCount) mCullTwinSweep = true;
     // Invalidate BEFORE anything dies (IR frees its by-pointer caches inside):
     // VCT holds the raw Item*, IR caches the mesh's VAO and any node-owned mesh.
     if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit))) {
