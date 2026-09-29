@@ -170,8 +170,11 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// 0 = no id pass on this chain (a stereo chain, the split off): every
 	/// surface takes the camera path. yz = the id image's size in pixels.
 	/// w = 1 with the lane's hit-motion rules on, 2 when a mover also moved in the
-	/// last two frames (the departure rule's gate); 0 = JAH_R5_NO_MOTION, the
-	/// measuring door: the camera-only history of before.
+	/// last two frames (the departure rule's gate), 3 when a POSE moved in the last
+	/// two frames (SKINNED-VELOCITY-1: the pixels no moving Atom item drew are
+	/// identified through the TLAS; JAH_R7_NO_POSED keeps it at 2 — the paired cost
+	/// arm's door); 0 = JAH_R5_NO_MOTION, the measuring door: the camera-only
+	/// history of before.
 	vec4 motion;
 	/// THE ALPHA TABLE (REFLECT-MOVERS-2, jah_rq_alpha.glsl): xy = its device
 	/// address, float bits (0 = none: the rays stay opaque). z = the edge-class
@@ -385,6 +388,8 @@ void photonHit( ivec2 tc, vec4 c )
 #define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
 #include "jah_rq_hit_record.glsl"
+#define JAH_SKIN_INSTANCE( s, k ) JAH_HIT_INSTANCE( s, k )
+#include "jah_skin_prev.glsl"
 
 /// WHERE A SURFACE WAS IN THE LAST FRAME'S PICTURE, and the 5 % test — shared
 /// with the gather's histories (PHOTON-GATHER-1c).
@@ -442,43 +447,9 @@ bool hitPrevPoint( uint slot, uint geomIdx, uint prim, vec2 bary, vec3 hitNow, o
 		was = movedPrevPosition( m, hitNow );
 		return true;
 	}
-	if( slot >= JAH_GEOM_SLOTS || slot >= JAH_HIT_INSTANCES )
+	if( slot >= JAH_HIT_INSTANCES )
 		return false;
-	uint row = JAH_GEOM_ROW_OF( slot );
-	if( row == 0xFFFFFFFFu )
-		return false;
-	row += geomIdx;
-	GeometryRow g;
-	g.addresses = JAH_GEOM_LANE( row, 0u );
-	g.layout0 = JAH_GEOM_LANE( row, 1u );
-	g.layout1 = JAH_GEOM_LANE( row, 2u );
-	if( g.layout1.z == 0u || ( g.addresses.x | g.addresses.y ) == 0u || ( g.addresses.z | g.addresses.w ) == 0u )
-		return false;
-	GeomFloatRef prevRef = GeomFloatRef( jahGeomAddressPlus( g.addresses.xy, g.layout1.z ) );
-	const vec3 b = vec3( 1.0 - bary.x - bary.y, bary.x, bary.y );
-	vec3 cur = vec3( 0.0 ), old = vec3( 0.0 );
-	bool poseMoved = false;
-	for( uint k = 0u; k < 3u; ++k )
-	{
-		const uint vtx = geomIndex( g, prim * 3u + k );
-		const vec3 c = geomPosition( g, vtx );
-		const vec3 o = vec3( prevRef.v[vtx * 3u], prevRef.v[vtx * 3u + 1u], prevRef.v[vtx * 3u + 2u] );
-		poseMoved = poseMoved || any( notEqual( floatBitsToUint( c ), floatBitsToUint( o ) ) );
-		cur += c * b[k];
-		old += o * b[k];
-	}
-	const uvec4 w0 = JAH_HIT_INSTANCE( slot, 0u ), w1 = JAH_HIT_INSTANCE( slot, 1u ), w2 = JAH_HIT_INSTANCE( slot, 2u );
-	const uvec4 q0 = JAH_HIT_INSTANCE( slot, 3u ), q1 = JAH_HIT_INSTANCE( slot, 4u ), q2 = JAH_HIT_INSTANCE( slot, 5u );
-	const bool nodeMoved = any( notEqual( w0, q0 ) ) || any( notEqual( w1, q1 ) ) || any( notEqual( w2, q2 ) );
-	if( !poseMoved && !nodeMoved )
-		return false;
-	const vec4 c4 = vec4( cur, 1.0 ), o4 = vec4( old, 1.0 );
-	const vec3 curW = vec3( dot( uintBitsToFloat( w0 ), c4 ), dot( uintBitsToFloat( w1 ), c4 ),
-							dot( uintBitsToFloat( w2 ), c4 ) );
-	const vec3 oldW = vec3( dot( uintBitsToFloat( q0 ), o4 ), dot( uintBitsToFloat( q1 ), o4 ),
-							dot( uintBitsToFloat( q2 ), o4 ) );
-	was = hitNow + ( oldW - curW );
-	return true;
+	return jahSkinnedPrevPoint( slot, geomIdx, prim, bary, hitNow, was );
 }
 
 /// Metres along the camera's forward axis, with and without reverse Z — the
@@ -892,6 +863,40 @@ void main()
 				prevSurf = movedPrevPosition( own, world );
 				prevSurfN = jahInstancePrevNormal( own.w0, own.w1, own.w2, own.q0, own.q1, own.q2,
 												   worldN );
+			}
+		}
+		if( !ownMoving && p.motion.w > 2.5 && thisEye.perspective > 0.5 )
+		{
+			// A PIXEL NO MOVING ATOM ITEM DREW, WHILE A POSE MOVES (SKINNED-VELOCITY-1):
+			// a character is stock-drawn (atomRouteFor keeps a skinned item on PBS), so
+			// the id image cannot say it moved — and it is not EMPTY there either: the
+			// id pass has its own depth and holds whatever Atom surface lies BEHIND the
+			// character (the floor), measured on gi.reflect_mover. One ray along this pixel's own view
+			// ray over a 1 % window around its depth asks the TLAS — built over this
+			// frame's pose — which surface it is; a posed hit's previous point comes
+			// from the skin cache's previous-pose slice (jah_skin_prev.glsl, the
+			// march's velocity job's own text). The normal is taken as it is now:
+			// one frame of a limb's turn moves the virtual-image construction by far
+			// less than the lobe it averages.
+			const vec3 ray = thisEye.rayTL + thisEye.rayRight * localUv.x + thisEye.rayDown * localUv.y;
+			rayQueryEXT idq;
+			rayQueryInitializeEXT( idq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, thisEye.camPos, dist * 0.99, ray,
+								   dist * 1.01 );
+			while( rayQueryProceedEXT( idq ) )
+			{
+			}
+			if( rayQueryGetIntersectionTypeEXT( idq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+			{
+				const uint idSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( idq, true ) );
+				vec3 was;
+				if( idSlot < JAH_HIT_INSTANCES && ( jahHitFlags( idSlot ) & kJahHitGpuSkinned ) != 0u &&
+					jahSkinnedPrevPoint( idSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( idq, true ) ),
+										 uint( rayQueryGetIntersectionPrimitiveIndexEXT( idq, true ) ),
+										 rayQueryGetIntersectionBarycentricsEXT( idq, true ), world, was ) )
+				{
+					ownMoving = true;
+					prevSurf = was;
+				}
 			}
 		}
 	}
