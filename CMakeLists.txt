@@ -186,6 +186,47 @@ target_compile_options(meshoptimizer PRIVATE $<$<CONFIG:Debug>:-O2> ${_jah_bake_
 set(BUILD_SHARED_LIBS "${_jah_outer_shared_libs}")
 set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
+# clusterlod.h's PATCH STACK (CLUSTER-LOCK-3, 2026-09-29). The vendored copy
+# (thirdparty/meshoptimizer-clusterlod/, PROVENANCE.md) is never edited in place;
+# our changes to it are numbered patches in thirdparty/meshoptimizer-clusterlod-patches/
+# (0002: a terminal group's border stays locked; 0003: clodMesh::verify_group,
+# the per-group displacement lock — PROVENANCE.md lists them). Every
+# configure copies the vendored header into a fresh stage in the build tree,
+# applies the stack there (cmake/ApplyVendorPatches.cmake — loud when a patch
+# stops applying) and copies the result to vendor-patched/ only when its bytes
+# changed, so an unrelated re-configure recompiles nothing. The bake's two TUs
+# include "meshoptimizer-clusterlod/clusterlod.h" from vendor-patched/; the
+# header AND every patch are in the bake's producer hash below.
+set(_clod_vendored "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/meshoptimizer-clusterlod/clusterlod.h")
+set(_clod_patch_dir "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/meshoptimizer-clusterlod-patches")
+set(_clod_stage "${CMAKE_CURRENT_BINARY_DIR}/vendor-stage/meshoptimizer-clusterlod")
+set(_clod_patched_root "${CMAKE_CURRENT_BINARY_DIR}/vendor-patched")
+file(REMOVE_RECURSE "${_clod_stage}")
+file(MAKE_DIRECTORY "${_clod_stage}" "${_clod_patched_root}/meshoptimizer-clusterlod")
+file(COPY_FILE "${_clod_vendored}" "${_clod_stage}/clusterlod.h")
+execute_process(
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC=${_clod_stage}
+            -DPATCHES=${_clod_patch_dir}
+            -DMARKER=clusterlod.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyVendorPatches.cmake
+    RESULT_VARIABLE _clod_patch_result
+    OUTPUT_VARIABLE _clod_patch_output
+    ERROR_VARIABLE  _clod_patch_output)
+string(REGEX REPLACE "(^|\n)-- " "\\1" _clod_patch_output "${_clod_patch_output}")
+string(STRIP "${_clod_patch_output}" _clod_patch_output)
+if(_clod_patch_output)
+    message(STATUS "${_clod_patch_output}")
+endif()
+if(NOT _clod_patch_result EQUAL 0)
+    message(FATAL_ERROR "clusterlod.h patches could not be applied — see above")
+endif()
+file(COPY_FILE "${_clod_stage}/clusterlod.h"
+     "${_clod_patched_root}/meshoptimizer-clusterlod/clusterlod.h" ONLY_IF_DIFFERENT)
+file(GLOB _clod_patches RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+     "${_clod_patch_dir}/*.patch")
+list(SORT _clod_patches)
+
 set(SRCS
     document/assets/mesh.cpp
     document/scenegraph/meshnode.cpp
@@ -431,6 +472,9 @@ endif()
 #       here: its position remap is an equality test with one answer.
 #       import/clusterlod.cpp is not either: it is three include lines and a
 #       define, and cannot change a byte without the header changing.
+#   thirdparty/meshoptimizer-clusterlod-patches/*.patch — ADDED by CLUSTER-LOCK-3
+#       (2026-09-29): the header the bake compiles is the vendored copy WITH its
+#       patch stack (above SRCS), so every patch is a producer file too.
 set(_mesh_bake_hashed_sources
     import/meshbake.cpp
     import/meshbake.h
@@ -438,6 +482,7 @@ set(_mesh_bake_hashed_sources
     thirdparty/meshoptimizer/src/meshoptimizer.h
     thirdparty/meshoptimizer/src/simplifier.cpp
     thirdparty/meshoptimizer-clusterlod/clusterlod.h
+    ${_clod_patches}
     thirdparty/meshoptimizer/src/clusterizer.cpp
     thirdparty/meshoptimizer/src/partition.cpp
     thirdparty/meshoptimizer/src/spatialorder.cpp
@@ -500,7 +545,8 @@ target_link_libraries (IrisGL PRIVATE assimp)
 # only TU that does.
 target_link_libraries (IrisGL PRIVATE meshoptimizer)
 target_include_directories(IrisGL PRIVATE
-    "${PROJECT_SOURCE_DIR}/thirdparty/meshoptimizer/src")
+    "${PROJECT_SOURCE_DIR}/thirdparty/meshoptimizer/src"
+    "${_clod_patched_root}")   # clusterlod.h with its patch stack (above)
 
 # THE scene graph is Ogre-Next's (SPECS/SCENEGRAPH_SPEC.md D2), so the document
 # library links it. PRIVATE, exactly like the engine does: Ogre must not reach

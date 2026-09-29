@@ -24,4 +24,4 @@ For more information see the LICENSE file
 #include <assert.h>
 #include "meshoptimizer.h"
 #define CLUSTERLOD_IMPLEMENTATION
-#include "thirdparty/meshoptimizer-clusterlod/clusterlod.h"
+#include "meshoptimizer-clusterlod/clusterlod.h"   // the vendored copy + its patch stack (build tree)

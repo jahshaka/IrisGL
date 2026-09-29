@@ -50,7 +50,7 @@ For more information see the LICENSE file
 // this and import/clusterlod.cpp (the one TU that compiles clusterlod.h's
 // implementation, ATOM stage 2) are the only translation units that include it.
 #include "meshoptimizer.h"
-#include "thirdparty/meshoptimizer-clusterlod/clusterlod.h"
+#include "meshoptimizer-clusterlod/clusterlod.h"   // the vendored copy + its patch stack (build tree)
 #include <chrono>
 
 #include "core/geometry/trimesh.h"
