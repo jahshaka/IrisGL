@@ -3946,9 +3946,9 @@ class GroupVerifier
 public:
     GroupVerifier(const float *positions, int posComps, size_t nv, const std::vector<unsigned> &base,
                   const std::vector<std::vector<unsigned>> &trisByAnchor, const lodchain::Islands &islands,
-                  size_t samplesCap)
+                  size_t samplesCap, float floorLen)
         : mPositions(positions), mPosComps(posComps), mBase(base), mTrisByAnchor(trisByAnchor),
-          mIslands(islands), mSamplesCap(samplesCap), mWidth(bakepool::width()),
+          mIslands(islands), mSamplesCap(samplesCap), mFloorLen(floorLen), mWidth(bakepool::width()),
           mQueries(static_cast<size_t>(mWidth)), mWeld(nv), mRegionAt(nv, 0u), mRegionIdx(nv, 0u),
           mPosLockedAt(nv, 0u), mKeptAt(nv, 0u), mHitAt(nv, 0u), mKeepAt(nv, 0u), mLock(nv, 0u)
     {
@@ -4105,13 +4105,23 @@ private:
         // 1. EVERY REMOVED VERTEX against S, exactly and island-capped; it also names
         //    the simplified triangle it now stands under (the hand-on).
         std::vector<unsigned> nearestTri(removed.size(), 0u);
+        std::vector<float> displaced(removed.size(), 0.0f);
         gather(removed.size(), [&](size_t i, surface::TriangleGrid::Query &q, std::vector<unsigned> &found) {
             const unsigned v = mRegionV[removed[i]];
             unsigned tri = 0u;
             const float d = gridS.closest(q, vertexOf(mPositions, mPosComps, v), nullptr, nullptr, &tri);
             nearestTri[i] = tri;
-            if (std::min(d, mIslands.capOf[v]) > lockExact) found.push_back(removed[i]);
+            displaced[i] = std::min(d, mIslands.capOf[v]);
+            if (displaced[i] > lockExact) found.push_back(removed[i]);
         });
+        // THE ISLANDS' BOUND is what the group will store, as far as the verify knows it:
+        // its exact vertex term (a lower bound of the measured error), at most the lock's
+        // bound, at least the precision floor — an island bigger than the group's stored
+        // error is never dropped (atom.dag_bound_bar's (c)).
+        float vertexTerm = 0.0f;
+        for (float d : displaced)
+            if (std::isfinite(d)) vertexTerm = std::max(vertexTerm, d);
+        const float islandBound = std::max(std::min(vertexTerm, lockExact), mFloorLen);
         const size_t sTris = simplifiedCount / 3;
         for (size_t i = 0; i < removed.size(); ++i)
             mPending.emplace_back(triKeyOf(simplified + std::min<size_t>(nearestTri[i], sTris - 1) * 3),
@@ -4120,16 +4130,18 @@ private:
         // 2. THE LOST FACETS (the measurement's term 3 and its per-facet walk): the
         //    level-0 facets that lost all three corners here or below, sampled against
         //    S at the sampled bound and walked at seven points a facet at the exact one.
-        std::vector<unsigned> lostIdx;
-        for (unsigned ri : removed) {
-            const unsigned v = mRegionV[ri];
-            for (unsigned t : mTrisByAnchor[v]) {
+        //    In level-0 triangle order, as the measurement's (its samples are the same
+        //    points, so the verify sees exactly the sampled maximum the group stores).
+        std::vector<unsigned> lostTris, lostIdx;
+        for (unsigned ri : removed)
+            for (unsigned t : mTrisByAnchor[mRegionV[ri]]) {
                 const unsigned b = mBase[t * 3 + 1], c = mBase[t * 3 + 2];
                 if (mRegionAt[b] != mRegionStamp || mRegionAt[c] != mRegionStamp) continue;
                 if (mKeptAt[b] == mKeptStamp || mKeptAt[c] == mKeptStamp) continue;
-                lostIdx.insert(lostIdx.end(), { v, b, c });
+                lostTris.push_back(t);
             }
-        }
+        std::sort(lostTris.begin(), lostTris.end());
+        for (unsigned t : lostTris) lostIdx.insert(lostIdx.end(), { mBase[t * 3], mBase[t * 3 + 1], mBase[t * 3 + 2] });
         const auto facetCorners = [&](size_t t, std::vector<unsigned> &found) {
             for (size_t k = 0; k < 3; ++k) found.push_back(mRegionIdx[lostIdx[t * 3 + k]]);
         };
@@ -4168,7 +4180,7 @@ private:
             std::vector<unsigned> comps;
             for (unsigned ri : removed) {
                 const unsigned comp = mIslands.compOf[mRegionV[ri]];
-                if (comp < mIslands.count() && mIslands.extent[comp] > lockExact) comps.push_back(comp);
+                if (comp < mIslands.count() && mIslands.extent[comp] > islandBound) comps.push_back(comp);
             }
             std::sort(comps.begin(), comps.end());
             comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
@@ -4203,6 +4215,37 @@ private:
                 mHitAt[mWeld[tri[2]]] != mHitStamp) continue;
             for (size_t k = 0; k < 3; ++k) mKeepAt[mWeld[tri[k]]] = mHitStamp;
         }
+        // EVERY ISLAND AT RISK, AT ONCE: a group that must be re-simplified keeps the
+        // largest input triangle of every level-0 component wholly inside its region
+        // and bigger than its bound — not only the ones this attempt dropped. (Held one
+        // at a time, a debris field is whack-a-mole: the simplifier reaches its target by
+        // dropping the next island, measured on the scan stand-in's depth-2 groups.)
+        {
+            std::vector<unsigned> atRisk;   // component -> its largest input triangle (UINT_MAX: none)
+            std::vector<float> area;
+            std::unordered_map<unsigned, size_t> slot;
+            for (size_t t = 0; t < inputTris; ++t) {
+                const unsigned *tri = group + t * 3;
+                const unsigned comp = mIslands.compOf[tri[0]];
+                if (comp >= mIslands.count() || !(mIslands.extent[comp] > islandBound)) continue;
+                auto it = slot.find(comp);
+                if (it == slot.end()) {
+                    bool inside = true;
+                    for (unsigned i = mIslands.vertStart[comp]; i < mIslands.vertStart[comp + 1] && inside; ++i)
+                        if (mRegionAt[mIslands.verts[i]] != mRegionStamp) inside = false;
+                    it = slot.emplace(comp, inside ? atRisk.size() : SIZE_MAX).first;
+                    if (inside) { atRisk.push_back(UINT_MAX); area.push_back(-1.0f); }
+                }
+                if (it->second == SIZE_MAX) continue;
+                const Vec3 a = vertexOf(mPositions, mPosComps, tri[0]), b = vertexOf(mPositions, mPosComps, tri[1]),
+                           c = vertexOf(mPositions, mPosComps, tri[2]);
+                const float ar = Vec3::crossProduct(b - a, c - a).length();
+                if (ar > area[it->second]) { area[it->second] = ar; atRisk[it->second] = unsigned(t); }
+            }
+            for (unsigned t : atRisk)
+                if (t != UINT_MAX)
+                    for (size_t k = 0; k < 3; ++k) mKeepAt[mWeld[group[size_t(t) * 3 + k]]] = mHitStamp;
+        }
         size_t added = 0;
         for (size_t i = 0; i < groupCount; ++i) {
             const unsigned u = group[i];
@@ -4227,6 +4270,7 @@ private:
     const std::vector<std::vector<unsigned>> &mTrisByAnchor;
     const lodchain::Islands &mIslands;
     size_t mSamplesCap;
+    float mFloorLen;
     int mWidth;
     surface::Queries mQueries;
     std::vector<unsigned> mWeld;          ///< vertex -> the first vertex at its position
@@ -4338,7 +4382,8 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     const size_t samplesCap = baseTris > size_t(lodchain::kBoundBigTriangles)
                                   ? size_t(lodchain::kBoundSamplesBig) : size_t(lodchain::kBoundSamples);
     // THE DISPLACEMENT LOCK, PER GROUP (patch 0003's hook, `GroupVerifier` above).
-    GroupVerifier verifier(positions, posComps, nv, base, trisByAnchor, islands, samplesCap);
+    GroupVerifier verifier(positions, posComps, nv, base, trisByAnchor, islands, samplesCap,
+                           extent > 0.0f ? extent * lodchain::kBoundFloorRel : 0.0f);
     cm.verify_group = &GroupVerifier::hook;
     cm.verify_group_context = &verifier;
 
@@ -4680,7 +4725,10 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             return capped(d, v);
         });
         const float termV = exact;
-        std::vector<unsigned> lostIdx;
+        // (In level-0 triangle order: the samples below are a function of the facet
+        // order, and the group's verify (`GroupVerifier`) walks the same order — so the
+        // lock saw exactly the sampled maximum stored here.)
+        std::vector<unsigned> lostTris, lostIdx;
         for (size_t i = 0; i < regionV.size(); ++i) {
             const unsigned v = regionV[i];
             if (kept[regionL[i]]) continue;
@@ -4689,9 +4737,11 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                 const size_t lb = local(b), lc = local(c);
                 if (lb == kAbsent || lc == kAbsent || !inRegion[lb] || !inRegion[lc]) continue;
                 if (kept[lb] || kept[lc]) continue;
-                lostIdx.insert(lostIdx.end(), { v, b, c });
+                lostTris.push_back(t);
             }
         }
+        std::sort(lostTris.begin(), lostTris.end());
+        for (unsigned t : lostTris) lostIdx.insert(lostIdx.end(), { base[t * 3], base[t * 3 + 1], base[t * 3 + 2] });
         if (!lostIdx.empty() &&
             surface::sample(positions, posComps, lostIdx,
                             std::clamp(lostIdx.size() / 3 * size_t(kGroupSamplesPerLostFacet), size_t(kGroupSamplesMin),
