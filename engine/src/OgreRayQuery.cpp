@@ -78,6 +78,7 @@
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
 #include "rayquery/rq_motion_spv.h"
+#include "rayquery/rq_motion_skin_spv.h"
 #include "rayquery/rq_card_parity_spv.h"
 #include "rayquery/rq_sun_contact_spv.h"
 #include "rayquery/rq_hit_composite_spv.h"
@@ -641,6 +642,7 @@ private:
     /// before the gather that references them. Timestamps into `qBase` + 4..6
     /// when `timed`. Returns false only when the frame must not trace skinned
     /// items at all (the job is missing); the entries simply stay unready then.
+    void settleStillSkins(OgreScene *scene, SceneAs &sa);
     bool skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed, unsigned qBase,
                   std::string &err);
     /// Frees one entry: its structure retired, its buffer destroyed (Ogre's
@@ -823,6 +825,9 @@ private:
         /// own ring of sets and parameter buffers, recorded in front of the resolve.
         VkDescriptorSet motionSets[3] = {};
         RawBuffer       motionParams[3];
+        /// The per-slot geometry rows the POSED motion job reads (SKINNED-VELOCITY-1),
+        /// a copy per ring slot like the trace's own.
+        RawBuffer       motionGeomRowOfSlot[3];
         unsigned        motionFrame = 0;
         /// ...and its timestamp pair, on the view's reflection query slot
         /// (queryBase) in a pool of its own.
@@ -832,6 +837,9 @@ private:
         /// Frames since a MOVER slot (kGpuMover | kGpuDragMover) last moved in this
         /// view's scene — the trace's departure rule is live only just after one did.
         unsigned        framesSinceMoverMoved = 1000u;
+        /// ...and since a POSE moved (SKINNED-VELOCITY-1): motion.w = 3 while it is
+        /// 2 or less — the trace then identifies the pixels the id pass did not draw.
+        unsigned        framesSincePoseMoved = 1000u;
         /// The descriptor ring. A set that is bound by a command buffer still in
         /// flight may not be rewritten, and every input of this pass can be
         /// recreated behind our back (a workspace rebuild replaces every texture
@@ -907,6 +915,10 @@ private:
     VkPipelineLayout      mMotionPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mMotionPipeline = VK_NULL_HANDLE;
     VkShaderModule        mMotionModule = VK_NULL_HANDLE;
+    /// THE POSED TWIN (rq_motion_skin.comp, SKINNED-VELOCITY-1): the same layout and
+    /// set; null when it could not be made (the rigid job runs alone).
+    VkPipeline            mMotionSkinPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mMotionSkinModule = VK_NULL_HANDLE;
     VkDescriptorPool      mMotionPool = VK_NULL_HANDLE;
     VkQueryPool           mMotionTimestamps = VK_NULL_HANDLE;
     bool                  mMotionFailed = false;
@@ -2018,6 +2030,9 @@ void RayQueryTier::close() {
     if (mMotionPipeLayout) vkDestroyPipelineLayout(mVk, mMotionPipeLayout, nullptr);
     if (mMotionSetLayout) vkDestroyDescriptorSetLayout(mVk, mMotionSetLayout, nullptr);
     if (mMotionModule) vkDestroyShaderModule(mVk, mMotionModule, nullptr);
+    if (mMotionSkinPipeline) vkDestroyPipeline(mVk, mMotionSkinPipeline, nullptr);
+    if (mMotionSkinModule) vkDestroyShaderModule(mVk, mMotionSkinModule, nullptr);
+    mMotionSkinPipeline = VK_NULL_HANDLE; mMotionSkinModule = VK_NULL_HANDLE;
     mMotionPool = VK_NULL_HANDLE; mMotionPipeline = VK_NULL_HANDLE;
     mMotionPipeLayout = VK_NULL_HANDLE; mMotionSetLayout = VK_NULL_HANDLE;
     mMotionModule = VK_NULL_HANDLE; mMotionFailed = false;
@@ -3020,6 +3035,25 @@ void RayQueryTier::dropSkinBuffers(SceneAs &sa) {
     sa.skinJobCap = sa.skinPaletteCap = 0;
 }
 
+/// A POSE THAT STOPPED LAST FRAME STILL OWES ITS SETTLE (REFLECT-EDGE-2, measured).
+/// The frame a pose stops is a still frame by every test updateScene makes, and its
+/// early returns never ran the skin pass' copy-only record: the previous-pose slice
+/// kept the LAST MOVING pose for as long as the item stood still, so every ray hit on
+/// a parked character read as a pose step (6 cm and more on gi.reflect_mover's parked
+/// skinned sphere — 60-84 % of its reflected texels "moving" every frame and the mean
+/// restarting on 8 % of them per frame). The settle writes no structure and no
+/// instance, so it runs alone on such a frame: no gather, no build.
+void RayQueryTier::settleStillSkins(OgreScene *scene, SceneAs &sa) {
+    bool owed = false;
+    for (const auto &kv : sa.skins)
+        if (kv.second.prevBehind) { owed = true; break; }
+    if (!owed) return;
+    std::string err;
+    VkCommandBuffer cmd = frameCmd();
+    if (cmd && !skinPass(scene, sa, cmd, false, 0u, err) && !err.empty())
+        Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
+}
+
 bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed,
                             unsigned qBase, std::string &err) {
     sa.skinUse.clear();
@@ -3542,7 +3576,10 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     bool compactionPending = false;
     for (const Blas &bl : sa.blas)
         if (bl.compactState == 1u) { compactionPending = true; break; }
-    if (!moved && sa.tlas && !compactionPending) return;
+    if (!moved && sa.tlas && !compactionPending) {
+        settleStillSkins(scene, sa);
+        return;
+    }
 
     // COMPACTION FIRST, BEFORE THE GATHER. It REPLACES a bottom-level
     // structure's device address, and the gather writes those addresses into
@@ -3566,7 +3603,10 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // TLAS rebuild once per in-flight frame for nothing — two wasted passes
     // over every instance after each batch. It only has work if compaction
     // actually replaced an address.
-    if (!moved && sa.tlas && !didCompact) return;
+    if (!moved && sa.tlas && !didCompact) {
+        settleStillSkins(scene, sa);
+        return;
+    }
 
     // --- the gather, straight into this frame's instance slot ---------------
     // gatherMs MEASURES THE GATHER (finding 14). It used to span everything
@@ -4735,6 +4775,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
         if (rv.motionSets[i]) retireSet(rv.motionSets[i], mMotionPool);
         rv.motionSets[i] = VK_NULL_HANDLE;
         retire(rv.motionParams[i]);
+        retire(rv.motionGeomRowOfSlot[i]);
     }
     for (unsigned i = 0; i < kReflectRing; ++i) {
         retireSet(rv.sets[i]);
@@ -5272,15 +5313,31 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             }
         }
         // ...or a POSE moved (REFLECT-MOVERS-2): a character's limbs under a still node.
-        if (sa.skinPosedFrame == vaoFrame) moverMoved = true;
+        const bool poseMoved = sa.skinPosedFrame == vaoFrame;
+        if (poseMoved) moverMoved = true;
         rv.framesSinceMoverMoved = moverMoved ? 0u : std::min(rv.framesSinceMoverMoved + 1u, 1000u);
+        rv.framesSincePoseMoved = poseMoved ? 0u : std::min(rv.framesSincePoseMoved + 1u, 1000u);
     }
-    pp.motion[3] = !motionOn ? 0.0f : (rv.framesSinceMoverMoved <= 2u ? 2.0f : 1.0f);
+    // THE POSED IDENTIFICATION'S MEASURING DOOR (`JAH_R7_NO_POSED`, read per frame so
+    // one process holds both arms of gi.reflect_mover --cost-posed): the trace and the
+    // march's velocity take the id image alone, the pre-lane motion for a character.
+    const bool posedOn = getenv("JAH_R7_NO_POSED") == nullptr;
+    pp.motion[3] = !motionOn ? 0.0f
+                   : (posedOn && rv.framesSincePoseMoved <= 2u) ? 3.0f
+                   : rv.framesSinceMoverMoved <= 2u ? 2.0f
+                                                    : 1.0f;
     {
         const uint64_t a = alphaTableOf(scene);
         const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
+    }
+    // THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, read per frame:
+    // gi.reflect_mover --edge alternates its two modes). Only the Hits photon view
+    // shows it; the reflection's own arithmetic never reads it.
+    {
+        const char *c = getenv("JAH_R7_EDGE_CLASSES");
+        pp.alpha[2] = c ? float(atoi(c)) : 0.0f;
     }
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
@@ -5603,14 +5660,21 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
 
 // ---- THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1) ----------------------
 namespace {
-/// rq_motion.comp's set 0, one type a binding.
-constexpr unsigned kMotionBindings = 5u;
+/// rq_motion.comp's set 0, one type a binding — and rq_motion_skin.comp's, which
+/// reads 0-4 and the ray's three after them. The rigid job never reads 5-7, so a
+/// frame with no pose moving leaves them unwritten (a binding a pipeline does not
+/// statically use need not hold a valid descriptor).
+constexpr unsigned kMotionBindings = 8u;
+constexpr unsigned kMotionRigidBindings = 5u;
 constexpr VkDescriptorType kMotionTypes[kMotionBindings] = {
     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 1 depth
     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the id image
     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 3 the GPU scene's instances
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 jahSsrVelocity
+    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 5 the scene's TLAS (posed job)
+    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 6 the per-slot geometry rows
+    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 7 the GPU scene's geometry rows
 };
 /// rq_motion.comp's Params, member for member.
 struct MotionParams {
@@ -5621,6 +5685,8 @@ struct MotionParams {
     float fwd[4] = {};
     float projParams[4] = {};
     float resolution[4] = {};
+    /// rq_motion_skin.comp's: x = 1 when it runs, y = the per-slot row entries.
+    float skin[4] = {};
 };
 /// Sets in the pool: a ring a view, for as many views as the reflection pool serves.
 constexpr unsigned kMotionRing = 3u;
@@ -5663,6 +5729,22 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
     if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mMotionPipeline) != VK_SUCCESS) {
         err = "rayquery/motion: vkCreateComputePipelines failed";
         return false;
+    }
+    // THE POSED TWIN, same layout. A failure is logged and leaves the rigid job whole.
+    {
+        VkShaderModuleCreateInfo ssi{};
+        ssi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        ssi.codeSize = sizeof(krq_motionSkinSpv);
+        ssi.pCode = krq_motionSkinSpv;
+        VkComputePipelineCreateInfo spi = cpi;
+        if (vkCreateShaderModule(mVk, &ssi, nullptr, &mMotionSkinModule) == VK_SUCCESS) {
+            spi.stage.module = mMotionSkinModule;
+            if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &spi, nullptr, &mMotionSkinPipeline) != VK_SUCCESS)
+                mMotionSkinPipeline = VK_NULL_HANDLE;
+        }
+        if (!mMotionSkinPipeline)
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: the march's posed object motion off — its pipeline could not be made");
     }
     // The pool its layout planned (VkDescriptorPools.h): a ring a view.
     if (!plan.create(mVk, "rayquery/motion", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mMotionPool, err))
@@ -6095,6 +6177,37 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
         mp.resolution[1] = float(h);
         mp.resolution[2] = float(gs.slotCount());
     }
+    // THE POSED JOB (SKINNED-VELOCITY-1): only while a POSE moved in the last two
+    // frames (the skin pass' own stamp) and the scene holds a TLAS to ask; its rows
+    // are the ones the TLAS was written with, flushed first (a row staged but not
+    // uploaded is a zero address — the GPU SCENE TABLES rule).
+    SceneAs *skinSa = nullptr;
+    Ogre::UavBufferPacked *skinGeomRows = nullptr;
+    uint32_t skinGeomSlots = 0u;
+    if (mMotionSkinPipeline && !getenv("JAH_R7_NO_POSED")) {
+        auto sit = mScenes.find(scene);
+        const uint32_t vaoFrame = mRs->getVaoManager()->getFrameCount();
+        if (sit != mScenes.end() && sit->second.tlas && sit->second.st.enabled &&
+            sit->second.skinPosedFrame != 0xFFFFFFFFu && uint32_t(vaoFrame - sit->second.skinPosedFrame) <= 2u) {
+            skinSa = &sit->second;
+            gs.flushGeomRows();
+            skinGeomRows = gs.geomBuffer();
+            skinGeomSlots = skinGeomRows ? uint32_t(skinSa->geomRowOfSlot.size()) : 0u;
+            if (skinGeomSlots) {
+                RawBuffer &rb = rv.motionGeomRowOfSlot[ring];
+                const VkDeviceSize want = VkDeviceSize(skinGeomSlots) * sizeof(uint32_t);
+                if (rb.buffer && rb.size < want) retire(rb);
+                if (!rb.buffer && !makeBuffer(std::max<VkDeviceSize>(want, 1024u), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              true, false, rb, err))
+                    skinGeomSlots = 0u;
+                else
+                    std::memcpy(rb.mapped, skinSa->geomRowOfSlot.data(), size_t(want));
+            }
+            if (!skinGeomSlots) skinSa = nullptr;
+        }
+    }
+    mp.skin[0] = skinSa ? 1.0f : 0.0f;
+    mp.skin[1] = float(skinGeomSlots);
     memcpy(rv.motionParams[ring].mapped, &mp, sizeof(mp));
     const auto sampledView = [this](Ogre::TextureGpu *t) {
         Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
@@ -6143,7 +6256,23 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     wr[2].pImageInfo = &img[1];
     wr[3].pBufferInfo = &instInfo;
     wr[4].pImageInfo = &img[2];
-    vkUpdateDescriptorSets(mVk, kMotionBindings, wr, 0, nullptr);
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+    VkDescriptorBufferInfo geomBufs[2] = {};
+    if (skinSa) {
+        asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        asWrite.accelerationStructureCount = 1;
+        asWrite.pAccelerationStructures = &skinSa->tlas;
+        wr[5].pNext = &asWrite;
+        geomBufs[0].buffer = rv.motionGeomRowOfSlot[ring].buffer;
+        geomBufs[0].range = VK_WHOLE_SIZE;
+        auto *gbi = static_cast<Ogre::VulkanBufferInterface *>(skinGeomRows->getBufferInterface());
+        geomBufs[1].buffer = gbi->getVboName();
+        geomBufs[1].offset = VkDeviceSize(skinGeomRows->_getFinalBufferStart()) * skinGeomRows->getBytesPerElement();
+        geomBufs[1].range = skinGeomRows->getTotalSizeBytes();
+        wr[6].pBufferInfo = &geomBufs[0];
+        wr[7].pBufferInfo = &geomBufs[1];
+    }
+    vkUpdateDescriptorSets(mVk, skinSa ? kMotionBindings : kMotionRigidBindings, wr, 0, nullptr);
     // THE LAYOUTS through Ogre's solver, before the command buffer is taken: the
     // velocity (cleared by the chain as a render target) as a UAV; the resolve's own
     // barrier analysis, after this early pre-execute, takes it back to a texture.
@@ -6171,6 +6300,18 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeLayout, 0, 1,
                             &rv.motionSets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
+    if (skinSa) {
+        // THE POSED PIXELS, after the rigid ones: the two write disjoint pixels (the
+        // id pass drew them or it did not), ordered anyway so no write races a write.
+        VkMemoryBarrier waw{};
+        waw.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        waw.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        waw.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &waw, 0, nullptr, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionSkinPipeline);
+        vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
+    }
     if (timed) {
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mMotionTimestamps, qbase + 1u);
         ReflectView::MotionPending &pd = rv.motionPending[rv.motionFrame % kFramesInFlight];

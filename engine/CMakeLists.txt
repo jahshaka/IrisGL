@@ -156,6 +156,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_skin_prev.glsl"
                 "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
@@ -188,6 +189,22 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
         COMMENT "Compiling the screen march's object-motion compute shader at SPIR-V 1.4"
+        VERBATIM)
+    # ...and its POSED twin (SKINNED-VELOCITY-1, REFLECT-EDGE-2): the pixels the id
+    # pass does not draw, identified through the TLAS while a pose moves; same rule.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                --vn krq_motionSkinSpv -o "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion_skin.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion_skin.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_skin_prev.glsl"
+        COMMENT "Compiling the march's posed object-motion compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
     add_custom_command(
@@ -373,6 +390,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
