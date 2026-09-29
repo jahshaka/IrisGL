@@ -47,6 +47,6 @@ file re-applies the stack or refuses loudly.
 | Patch | What |
 |---|---|
 | `0002-terminal-group-border-stays-locked.patch` | a terminal (stuck) group's border stays locked at every later level — an upstream defect in v1.2 (`lockBoundary` sees only the current level's groups; 16 open edges on round-bar-40m), an upstream PR candidate |
-| `0003-per-group-verify-hook.patch` | `clodMesh::verify_group` — the caller verifies every simplified group and may re-simplify THAT group with added locks (the bake's displacement lock is per group; one `vertex_lock` bound every level up to the root) |
+| `0003-per-group-verify-hook.patch` | `clodMesh::verify_group` — the caller verifies every simplified group and may re-simplify THAT group with added locks, never through the sloppy fallback; a re-simplification stuck under its locks makes the group terminal (the bake's displacement lock is per group; one `vertex_lock` bound every level up to the root) |
 
 (0001 was CLUSTER-LOCK-2's per-level lock prototype, never landed; the number is retired, never reused.)

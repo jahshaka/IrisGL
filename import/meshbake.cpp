@@ -212,10 +212,11 @@ namespace
 // mesh whose lock touched a shared position re-bakes (hp_sphere, hemisphere, scans).
 // v19 (2026-09-29, CLUSTER-LOCK-3): THE DAG'S LOCK IS PER GROUP. clusterlod verifies
 // each group as it simplifies it (patch 0003) and re-simplifies THAT group with its
-// offenders locked (at most 4 times); nothing carries to another group or level, and
-// the whole-DAG rebuild is gone. Patch 0002 keeps a terminal group's border locked.
-// Roots collapse again (uv-sphere-20k 2916 -> 76 triangles, physics-model 306 -> 76,
-// round-bar-40m 4806 -> 50); every DAG re-bakes.
+// offenders locked (at most 4 times; a group stuck under its locks is output terminal);
+// nothing carries to another group or level, and the whole-DAG rebuild is gone. Patch
+// 0002 keeps a terminal group's border locked. The lost facets are walked exactly
+// (`facetMax`). Roots collapse again (uv-sphere-20k 2916 -> 76 triangles, physics-model
+// 306 -> 76, round-bar-40m 4806 -> 24); every DAG re-bakes.
 constexpr int kFormatVersion = 19;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
