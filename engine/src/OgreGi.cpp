@@ -4645,7 +4645,11 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         // direct term is a bounce-job pass (VctLighting::update's sky pass, fork), so a
         // one-bounce document needs them too — without them a surface lit only by the
         // sky re-emitted nothing (gi.contact_occlusion's arm B).
-        c.lighting->setAllowMultipleBounces(true);
+        // `JAHSHAKA_GI_NO_SKY_PASS` is a MEASUREMENT switch (the paired arm a suite's
+        // verdict needs): the bounce volumes only where the document asks for extra
+        // bounces, i.e. the store as it was before the sky pass at one bounce.
+        static const bool noSkyPass = std::getenv("JAHSHAKA_GI_NO_SKY_PASS") != nullptr;
+        c.lighting->setAllowMultipleBounces(!noSkyPass || mGi.numBounces > 1);
         if (i + 1u < table.size()) {
             c.lighting->reserveExtraCascades(table.size() - i - 1u);
             for (size_t j = i + 1u; j < table.size(); ++j)
