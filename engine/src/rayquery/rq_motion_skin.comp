@@ -1,0 +1,125 @@
+#version 460
+// THE MARCH'S OBJECT MOTION FOR A POSED ITEM (SKINNED-VELOCITY-1, lane REFLECT-EDGE-2).
+//
+// rq_motion.comp writes the velocity of every pixel the id pass drew for a slot that
+// moved. The id pass draws Atom-routed items only — atomRouteFor keeps a skinned item
+// on stock HlmsPbs — so a character's pixels read EMPTY there and the resolve took
+// the camera path: the march's reflection of a walking character, and the
+// character's own glossy surface, lagged a frame (gi.reflect_mover: the skinned
+// march arms 4.5 / 5.2 codes against the rigid sphere's 1.96 / 1.7).
+//
+// This job runs after it, only while a POSE moved in the last two frames, over the
+// pixels the id pass did NOT draw: one ray along the pixel's own view ray, over a
+// short window around its depth, asks the TLAS — built this frame over this frame's
+// pose (the skin cache's) — which surface the depth buffer holds; a posed hit takes
+// its previous point from the cache's previous-pose slice (jah_skin_prev.glsl, the
+// reflection trace's own text) and writes the same delta rq_motion.comp writes. Any
+// other hit (a still stock-drawn item, the ground's backdrop) leaves the camera path.
+// It shares rq_motion.comp's descriptor set layout (bindings 0-4 its, 5-7 the ray's
+// three) and Params (plus `skin`): one set, two pipelines.
+//
+// COMPILED AT BUILD TIME at SPIR-V 1.4, like every ray job beside it.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform Params
+{
+	/// rq_motion.comp's, member for member...
+	vec4 camPos;
+	vec4 rayTL;
+	vec4 rayRight;
+	vec4 rayDown;
+	vec4 fwd;
+	vec4 projParams;
+	vec4 resolution;
+	/// ...then x = 1 when this job runs (a pose moved; the ray bindings are
+	/// written), y = the per-slot geometry-row entries bound.
+	vec4 skin;
+} p;
+layout( set = 0, binding = 1 ) uniform sampler2D sceneDepth;
+layout( set = 0, binding = 2 ) uniform usampler2D atomIds;
+layout( std430, set = 0, binding = 3 ) readonly buffer Instances { uvec4 inst[]; };
+layout( rgba16f, set = 0, binding = 4 ) uniform writeonly image2D velocity;
+layout( set = 0, binding = 5 ) uniform accelerationStructureEXT tlas;
+layout( std430, set = 0, binding = 6 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 7 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+
+#define JAH_GEOM_SLOTS uint( p.skin.y )
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
+#define JAH_SKIN_INSTANCE( s, k ) inst[( s ) * 10u + ( k )]
+#include "jah_skin_prev.glsl"
+#include "jah_atom_id.glsl"
+#include "jah_reproject.glsl"
+
+/// The instance flags' posed bit (GpuScene.h kGpuSkinned; jah_rq_hit_record.glsl's).
+const uint kJahMotionSkinned = 1u << 5u;
+/// THE IDENTIFYING RAY'S WINDOW around the pixel's depth, as a fraction of the
+/// distance: the depth buffer's own spread plus the raster's and the skin cache's
+/// float disagreement over one pose (the same bone matrices, two evaluations).
+const float kSkinWindow = 0.01;
+
+float viewDistance( float rawDepth )
+{
+	return p.projParams.y / ( rawDepth - p.projParams.x );
+}
+
+void main()
+{
+	const ivec2 px = ivec2( gl_GlobalInvocationID.xy );
+	const ivec2 res = ivec2( p.resolution.xy );
+	if( any( greaterThanEqual( px, res ) ) || p.skin.x < 0.5 || p.camPos.w < 0.5 )
+		return;
+	// A MOVING slot the id pass drew is rq_motion.comp's pixel. Any other id is NOT
+	// proof of the surface: the id pass has its own depth, so behind a stock-drawn
+	// character it holds the Atom surface the character covers (the floor).
+	const uint idX = texelFetch( atomIds, px, 0 ).x;
+	if( idX != JAH_ATOM_ID_EMPTY )
+	{
+		const uint idSlot = idX & JAH_ATOM_ID_SLOT_MASK;
+		if( idSlot < uint( p.resolution.z ) )
+		{
+			const uint f = inst[idSlot * 10u + 7u].w;
+			if( ( f & kJahReprojectMoverFlags ) != 0u &&
+				jahInstanceMoved( f, inst[idSlot * 10u + 0u], inst[idSlot * 10u + 1u], inst[idSlot * 10u + 2u],
+								  inst[idSlot * 10u + 3u], inst[idSlot * 10u + 4u], inst[idSlot * 10u + 5u] ) )
+				return;
+		}
+	}
+	const float raw = texelFetch( sceneDepth, px, 0 ).x;
+	if( raw <= 0.0 || raw >= 1.0 )
+		return;
+	const vec2 uv = ( vec2( px ) + 0.5 ) / vec2( res );
+	const float dist = viewDistance( raw );
+	const vec3 ray = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
+	const vec3 world = p.camPos.xyz + ray * dist;
+	rayQueryEXT rq;
+	rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, p.camPos.xyz, dist * ( 1.0 - kSkinWindow ), ray,
+						   dist * ( 1.0 + kSkinWindow ) );
+	while( rayQueryProceedEXT( rq ) )
+	{
+	}
+	if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+		return;
+	const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+	if( slot >= uint( p.resolution.z ) || ( inst[slot * 10u + 7u].w & kJahMotionSkinned ) == 0u )
+		return;
+	vec3 was;
+	if( !jahSkinnedPrevPoint( slot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
+							  uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
+							  rayQueryGetIntersectionBarycentricsEXT( rq, true ), world, was ) )
+		return;
+	vec2 uvWas;
+	float zWas;
+	// Behind the camera: no image position — leave the camera path (w = 0).
+	if( jahReproject( was, p.camPos.xyz, p.camPos.w, p.rayTL.xyz, p.rayRight.xyz, p.rayDown.xyz,
+					  p.fwd.xyz, uvWas, zWas ) == 1 )
+		return;
+	const float rawWas = p.projParams.x + p.projParams.y / max( zWas, 1e-6 );
+	imageStore( velocity, px, vec4( uvWas - uv, rawWas - raw, 1.0 ) );
+}
