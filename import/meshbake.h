@@ -365,11 +365,14 @@ public:
         /// with its offenders locked, at most 4 times. `groupRetries` = the
         /// re-simplifications over all groups; `retryHistogram[k]` = the groups that
         /// took k; `groupsUnconverged` = groups still past the bound after their last
-        /// attempt (the measurement charges them); `lockedVertices` = the locks summed
+        /// attempt (the measurement charges them); `groupsMadeTerminal` = groups whose
+        /// re-simplification got stuck under their locks (output terminal, not
+        /// simplified: they cannot simplify within their bound); `lockedVertices` = the locks summed
         /// over groups; `verifyMs` = the verify's share of `buildMs`; `retriesByDepth[d]`
         /// = the re-simplifications of depth-d groups (where the bound binds).
         int    groupRetries = 0;
         int    groupsUnconverged = 0;
+        int    groupsMadeTerminal = 0;
         int    lockedVertices = 0;
         QVector<int> retryHistogram;
         QVector<int> retriesByDepth;
