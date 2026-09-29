@@ -366,6 +366,10 @@ public:
         int    lockPasses = 0;
         int    lockedVertices = 0;
         int    lockUnconverged = 0;
+        int    groupRetries = 0;
+        int    groupsUnconverged = 0;
+        QVector<int> retryHistogram;
+        double verifyMs = 0.0;
         /// The lock is by POSITION (CLUSTER-LOCK-1): how many locked positions are held
         /// by several indices (a seam, a pole), and how many are locked on only some of
         /// their indices — always 0; a split position opens the cut (the sloppy fallback).
