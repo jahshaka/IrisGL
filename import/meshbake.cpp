@@ -3979,8 +3979,10 @@ float coplanarCover(const float *positions, int posComps, const surface::Triangl
 /// group once the DAG's lock became per group (atom.dag_bound_bar's (a)). `dist(p, tri, st)`
 /// answers the nearest distance at p and the corners of the triangle it lies on — or, with
 /// st >= 0, any value <= st as soon as something is within st (the triangle then unset).
-/// Returns a value <= `stop` when the facet's maximum is at most `stop`.
+/// Returns a value <= `stop` when the facet's maximum is at most `stop`; NaN when more
+/// than `budget` pieces would be walked.
 constexpr int kFacetMaxLevels = 10;
+constexpr size_t kFacetQuickPieces = 64;   ///< the measurement's first try before the flat-facet cover
 /// The nearest distance from p to a grid's soup, and the corners of the triangle it lies on.
 /// (`idx` is the soup the grid was built over, on `positions`.) With `within` >= 0 it
 /// answers any distance <= within as soon as one is found (and no triangle); past it the
@@ -3997,7 +3999,8 @@ float nearestOn(const float *positions, int posComps, const surface::TriangleGri
     return d;
 }
 template <class Dist>
-float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float scale, float floorTol, Dist &&dist)
+float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float scale, float floorTol, Dist &&dist,
+               size_t budget = SIZE_MAX)
 {
     struct Piece { Vec3 a, b, c; int level = 0; };
     std::array<Piece, 3 * kFacetMaxLevels + 4> stack;
@@ -4007,6 +4010,7 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
     float best = 0.0f, upper = 0.0f;
     Vec3 tri[3];
     while (top) {
+        if (budget-- == 0) return std::numeric_limits<float>::quiet_NaN();   // the caller's budget ran out
         const Piece piece = stack[--top];
         const Vec3 centre = (piece.a + piece.b + piece.c) * (1.0f / 3.0f);
         float radius = 0.0f;
@@ -4902,19 +4906,24 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         exact = runningMax(lostIdx.size() / 3, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop) {
             const unsigned v0 = lostIdx[t * 3];
             if (!(islands.capOf[v0] > stop)) return 0.0f;
-            // A lost facet lying on S (a flat stretch) is answered exactly by its cover.
+            const auto walk = [&](size_t budget) {
+                return facetMax(corner(lostIdx, t, 0), corner(lostIdx, t, 1), corner(lostIdx, t, 2), stop,
+                                groups[g].simplified.error, floorLen,
+                                [&](const Vec3 &p, Vec3 *tri, float within) {
+                                    return whole ? nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri, -1.0f)
+                                                 : nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri, within);
+                                }, budget);
+            };
+            // Most facets close in a few pieces; one that does not is usually lying on S
+            // (a flat stretch), which its cover answers exactly; the rest walk in full.
+            const float quick = walk(kFacetQuickPieces);
+            if (!std::isnan(quick)) return capped(quick, v0);
             thread_local std::vector<unsigned> coverScratch;
             const float flat = coplanarCover(positions, posComps, gridS, simplifiedIdx, corner(lostIdx, t, 0),
                                              corner(lostIdx, t, 1), corner(lostIdx, t, 2),
                                              std::max(floorLen, 0.05f * groups[g].simplified.error), coverScratch);
             if (flat >= 0.0f) return capped(flat, v0);
-            const float m = facetMax(corner(lostIdx, t, 0), corner(lostIdx, t, 1), corner(lostIdx, t, 2), stop,
-                                     groups[g].simplified.error, floorLen,
-                                     [&](const Vec3 &p, Vec3 *tri, float within) {
-                                         return whole ? nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri, -1.0f)
-                                                      : nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri, within);
-                                     });
-            return capped(m, v0);
+            return capped(walk(SIZE_MAX), v0);
         });
         {
             const bool useSoup = !whole && haveSoup;
