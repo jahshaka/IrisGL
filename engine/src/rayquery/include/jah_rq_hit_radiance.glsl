@@ -82,7 +82,7 @@ uint jahHitSeed = 0u;
 /// quarter turn apart, the whole set turned by the hit's seed (the golden angle per
 /// frame on a per-pixel hash) — against the MOVERS' near copies alone (kRayMaskMover; the
 /// still world is in the store already), cut-outs honoured: the fraction that escapes.
-float jahMoverSkyVisibility( vec3 p, vec3 n )
+float jahMoverSkyVisibility( vec3 hitP, vec3 n )
 {
 	if( !( JAH_HIT_MOVERS_ON ) )
 		return 1.0;
@@ -103,7 +103,7 @@ float jahMoverSkyVisibility( vec3 p, vec3 n )
 		const vec3 d = normalize( n * z + ( t * cos( phi ) + b * sin( phi ) ) * r );
 		rayQueryEXT q;
 		rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), 0x02u,
-							   p + n * 0.02, 0.0, d, JAH_MOVER_SKY_LENGTH );
+							   hitP + n * 0.02, 0.0, d, JAH_MOVER_SKY_LENGTH );
 		JAH_RQ_PROCEED( q )
 		if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 			open += 0.25;
