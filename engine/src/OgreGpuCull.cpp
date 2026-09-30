@@ -495,6 +495,8 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
             out.cutOverflowIndices = counter[11];
             out.cutEvaluated = counter[14];
             out.cutIndexBudget = mGpuCull.cutIndexBudget();
+            // THE FIRST RANGE ONLY: a kGpuTwoSided survivor's command lives in the two-sided
+            // range (GpuCull::twoSidedFirst, count[17]) and reads here as indexCount 0.
             if (readBack && out.survivors)
                 readUints(mGpuCull.draws(), 0u, out.survivors * GpuCull::kDrawWords, out.drawCommands);
             if (readBack && out.cutClusters) {
