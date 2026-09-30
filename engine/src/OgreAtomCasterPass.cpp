@@ -61,6 +61,7 @@
 #include <Vao/OgreVaoManager.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -298,15 +299,33 @@ VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &
     gp.layout = gC.layout;
     gp.renderPass = e.compatible;
     gp.subpass = 0;
+    const auto t0 = std::chrono::steady_clock::now();
     const VkResult r = vkCreateGraphicsPipelines(gC.dev, device->mPipelineCache, 1, &gp, nullptr, &e.pipeline);
+    const double createMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     vkDestroyShaderModule(gC.dev, vs, nullptr);
     if (fs) vkDestroyShaderModule(gC.dev, fs, nullptr);
     if (r != VK_SUCCESS) {
         vkDestroyRenderPass(gC.dev, e.compatible, nullptr);
+        e.compatible = VK_NULL_HANDLE;
+        e.pipeline = VK_NULL_HANDLE;
+        if (key.cullNone) {
+            // THE NO-CULL PIPELINE IS OPTIONAL (ATOM-TWO-SIDED-1): refused, the map still draws
+            // its one-sided Atom casters — only the two-sided range goes undrawn. Remembered as
+            // a null entry, so it is asked of the device once, never per map.
+            logOnce("vkCreateGraphicsPipelines failed for the no-cull (two-sided) caster pipeline: "
+                    "two-sided Atom items cast no shadow on this device");
+            gC.entries.push_back(e);
+            return VK_NULL_HANDLE;
+        }
         gC.refused = true;
         logOnce("vkCreateGraphicsPipelines failed");
         return VK_NULL_HANDLE;
     }
+    Ogre::LogManager::getSingleton().logMessage(
+        "Jahshaka atom caster pass: pipeline (" + std::string(point ? "point" : "depth") +
+            (key.cullNone ? ", no cull" : key.cullFront ? ", front cull" : ", back cull") + ") created in " +
+            std::to_string(createMs) + " ms",
+        Ogre::LML_NORMAL);
     gC.entries.push_back(e);
     return e.pipeline;
 }
@@ -684,14 +703,18 @@ void recordCasterPass(AtomPassContext &ctx) {
     const VkPipeline pipeline = pipelineFor(vkRs, key);
     if (!pipeline) return;
     // THE TWO-SIDED RANGE'S PIPELINE (ATOM-TWO-SIDED-1): the same state culling nothing —
-    // a CULL_NONE material's stock caster draws both faces too.
+    // a CULL_NONE material's stock caster draws both faces too. WARMED with its one-sided
+    // twin (the first map of each key creates both: one small depth-only pipeline through
+    // the device's pipeline cache, its time in the Ogre log), so the first frame that
+    // gains a two-sided caster compiles nothing. A refused one draws the one-sided range
+    // alone (pipelineFor logs it once) — never the map's whole Atom set dropped.
     VkPipeline pipelineTwoSided = VK_NULL_HANDLE;
-    if (scene->hasTwoSidedAtomItems()) {
+    {
         CasterPipelineKey two = key;
         two.cullFront = false;
         two.cullNone = true;
-        pipelineTwoSided = pipelineFor(vkRs, two);
-        if (!pipelineTwoSided) return;
+        const VkPipeline warmed = pipelineFor(vkRs, two);
+        if (scene->hasTwoSidedAtomItems()) pipelineTwoSided = warmed;
     }
 
     // THE CUBE FACE: the scene pass turned the camera to its face for its own length and
