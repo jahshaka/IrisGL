@@ -1639,17 +1639,15 @@ private:
         /// Gradient: the three stops and the horizon offset.
         QColor  gradientTop, gradientMid, gradientBot;
         float   gradientOffset = 0.0f;
-        /// Realistic: the analytic sky's five parameters. They are the
-        /// ENGINE's (SKY-GPU) — pushed into Ogre's AtmosphereNpr, evaluated per
-        /// pixel on the GPU — so a change here is a const-buffer write and a
-        /// re-capture of the environment, never a CPU bake. There is no
-        /// debounce any more for exactly that reason.
-        float   density = 0.0f, diffusion = 0.0f, horizon = 0.0f, power = 0.0f;
-        QColor  skyColour;
-        /// Realistic: the SUN ray's air (the atmosphere's turbidity). It is a
-        /// sky-source field because it lives on the sky block, but it changes
-        /// no sky pixel — it is the only input to the engine's sun-tint model.
-        float   sunHaze = 0.0f;
+        /// Realistic: the planet's atmosphere's dials (iris::SkyRealistic;
+        /// the engine's AtmosphereSky). A change is a table rebuild and a
+        /// re-capture of the environment in the engine — never a CPU bake —
+        /// except the aerial scale, which the engine applies as a constant.
+        float   sunHaze = 0.0f, aerialScale = 0.0f, groundAlbedo = 0.0f, rayleighScale = 0.0f;
+        bool    ozone = true;
+        /// Realistic: the sun light's NOON illuminance in the renderer's units
+        /// (linear colour x intensity x pi, untinted) — the sky is lit by it.
+        iris::Vec3 sunIlluminance;
         /// Realistic: the SUN LIGHT's direction (towards the sun) and whether
         /// the scene has one at all — the sky's only sun input since D15.
         /// Compared with a dot-product band rather than exactly, so a gizmo

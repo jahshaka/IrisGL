@@ -98,73 +98,19 @@ bool vrTurnModeFromName(const QString &name, VrTurnMode &out)
     return false;
 }
 
-// The ENGINE's own defaults (SKY-GPU): these are Ogre AtmosphereNpr's preset
-// values, which is what the sky is drawn with. The dials they replace described
-// a CPU bake that no longer exists.
+// THE CLEAR EARTH (SKY-ATMOSPHERE-1): every scale at 1 is the reference's
+// atmosphere (Hillaire, EGSR 2020; jahshaka::engine::AtmosphereSky carries the
+// coefficients and MUST agree with these), the ozone layer on, and a ground of
+// albedo 0.3 — a mixed land surface (grass 0.25, dry soil 0.3, the planet's
+// mean ~0.3).
 SkyRealistic SkyRealistic::defaults()
 {
     SkyRealistic s;
-    // THE CLEAR-SKY FIT (lane SKY-TUNE-1, 2026-09-14; spikes/sky-tune-1/).
-    //
-    // These were Ogre's own SHIPPED preset (densityCoeff 0.47, densityDiffusion
-    // 2.0), which is TUNED FOR SUNSETS: it turns the whole horizon ring golden
-    // from a sun 24 degrees up and the zenith reads 107,000 K — four times the
-    // colour temperature a clear zenith has — so a mid-afternoon sun rendered as
-    // evening and every ported Ogre sample came out warmer and darker than
-    // Ogre's own screenshots.  (Upstream's older 0.27 / 0.75, commented out in
-    // OgreAtmosphereNpr.h, is not the answer either: it deletes the sunset.)
-    //
-    // AtmosphereNpr is not a physical model, so these are a FIT, not a
-    // derivation.  The reference is Preetham's analytic daylight model
-    // (SIGGRAPH 1999) at turbidity 2.5, evaluated at ten sky directions over sun
-    // elevations 5..90 degrees; the fitted quantity is CIE u'v' chromaticity
-    // plus the scale-free luminance ratios (probe/zenith and elevation/45 deg),
-    // weighted to the 30-75 degree working range.  The mean chromatic residual
-    // falls from du'v' 0.0196 to 0.0137 and the worst probe at a 36-degree sun
-    // from 0.0306 to 0.0146; the zenith at 36 degrees lands at 33,900 K against
-    // the reference's 25,600 (it was 107,000).  The same density also sets the
-    // SUN's transmittance (OgreSky.cpp atmosphereSunTint), which is checkable
-    // against Rayleigh optical depth directly, and 0.25 is inside the flat joint
-    // optimum of the two (0.22..0.32).  Sunset warmth now begins at a 10-degree
-    // sun instead of a 25-degree one.
-    //
-    // DIFFUSION AND HORIZON DO NOT MOVE.  2.0 sits inside the fit's optimum
-    // basin (1.5..3.05 is within 1% of the minimum), and horizonLimit is INERT
-    // in this application: the diffusion warp lifts every direction down to
-    // about -11 degrees elevation above 0.025 before the clamp is reached, and
-    // the ground covers what is below that.
-    //
-    // POWER IS THE LEVEL RE-ANCHOR, not a look choice.  The model's radiance is
-    // proportional to densityCoeff, so the fit alone would drop the Sky Light's
-    // ambient to 0.66 of what the tree is tuned around; 1.5 puts it back (0.99
-    // at a 45-degree sun, measured as the cosine-weighted hemisphere integral).
-    // The elevation FALL-OFF stays where the fit put it, which is the physical
-    // part: the ambient from a 15-degree sun is now 4.8x below noon's, against
-    // 1.7x before and Preetham's 7.5x.
-    //
-    // skyColour is Ogre's (0.334, 0.57, 1.0) linear, written as the sRGB colour
-    // a user would pick to mean it — the decode at the boundary turns it back
-    // into those three numbers.  It is very nearly the Rayleigh spectral shape
-    // (lambda^-4 at 600/550/450 nm normalises to 0.30 / 0.45 / 1.0) and is left
-    // alone.
-    //
-    // ...AND THE SUN'S OWN AIR IS NO LONGER THIS DIAL (lane SKY-DENSITY-1,
-    // 2026-09-15; the follow-up the paragraph above asked for).  `density` was
-    // doing two jobs: the sky's look AND the transmittance that colours the
-    // SUNLIGHT, where the fit wanted 0.20-0.25 and the physics wanted ~0.47.
-    // The sun's half is now derived rather than borrowed — Beer-Lambert along
-    // the ray to the sun, at Kasten-Young airmass, from Rayleigh + Angstrom
-    // aerosol + ozone optical depths (OgreSky.cpp::atmosphereSunTint carries
-    // the formula and its reference) — and `sunHaze` is its one input: the
-    // atmosphere's turbidity.  2.5 is the turbidity the sky above was FITTED
-    // to, so the sky and the sunlight now describe the same air through two
-    // dials instead of disagreeing through one.
-    s.density   = 0.25f;
-    s.diffusion = 2.0f;
-    s.horizon   = 0.025f;
-    s.skyColour = QColor(157, 198, 255);
-    s.power     = 1.5f;
-    s.sunHaze   = 2.5f;
+    s.sunHaze       = 1.0f;
+    s.aerialScale   = 1.0f;
+    s.groundAlbedo  = 0.3f;
+    s.rayleighScale = 1.0f;
+    s.ozone         = true;
     return s;
 }
 
@@ -187,24 +133,6 @@ SkyRealistic SkyRealistic::defaults()
 // JSON block, so a field added to SkyRealistic and forgotten there would be
 // reverted by any undo. All of that is deleted; this is the one path.
 // ---------------------------------------------------------------------------
-namespace {
-QJsonObject skyColourJson(const QColor &c)
-{
-    QJsonObject o;
-    o["r"] = c.red(); o["g"] = c.green(); o["b"] = c.blue(); o["a"] = c.alpha();
-    return o;
-}
-QColor skyColourFromJson(const QJsonObject &o, const QColor &fallback)
-{
-    if (o.isEmpty()) return fallback;
-    QColor c;
-    c.setRed(o["r"].toInt(0));
-    c.setGreen(o["g"].toInt(0));
-    c.setBlue(o["b"].toInt(0));
-    c.setAlpha(o.contains("a") ? o["a"].toInt(255) : 255);
-    return c;
-}
-}   // namespace
 
 CloudLayer CloudLayer::clamped(CloudLayer c)
 {
@@ -301,45 +229,37 @@ SunContact SunContact::fromJson(const QJsonObject &o)
 
 SkyRealistic Scene::clampSkyRealistic(SkyRealistic r)
 {
-    // The panel rows' own ranges, in the DOCUMENT: a value a dial cannot
-    // express must not survive a visit to the panel, and must not reach the
-    // renderer from a verb either.
-    r.density   = qBound(0.01f, r.density,   1.0f);
-    r.diffusion = qBound(0.0f,  r.diffusion, 4.0f);
-    r.horizon   = qBound(0.0f,  r.horizon,   0.5f);
-    r.power     = qBound(0.0f,  r.power,     4.0f);
-    // Held at or above a purely molecular atmosphere, where the aerosol term is
-    // zero: below that it would amplify the sun's beam instead of absorbing it.
-    // Above 10 every non-zenith sun is black.
-    r.sunHaze   = qBound(1.0f,  r.sunHaze,   10.0f);
+    // The model's own bands, in the DOCUMENT: a value a dial cannot express
+    // must not survive a visit to the panel, and must not reach the renderer
+    // from a verb either.
+    r.sunHaze       = qBound(0.0f, r.sunHaze,       100.0f);
+    r.aerialScale   = qBound(0.0f, r.aerialScale,   1.0f);
+    r.groundAlbedo  = qBound(0.0f, r.groundAlbedo,  1.0f);
+    r.rayleighScale = qBound(0.0f, r.rayleighScale, 10.0f);
     return r;
 }
 
 QJsonObject Scene::skyRealisticJson(const SkyRealistic &r)
 {
     QJsonObject o;
-    o.insert("density",   double(r.density));
-    o.insert("diffusion", double(r.diffusion));
-    o.insert("horizon",   double(r.horizon));
-    o.insert("power",     double(r.power));
-    o.insert("sunHaze",   double(r.sunHaze));
-    o.insert("skyColour", skyColourJson(r.skyColour));
+    o.insert("sunHaze",       double(r.sunHaze));
+    o.insert("aerialScale",   double(r.aerialScale));
+    o.insert("groundAlbedo",  double(r.groundAlbedo));
+    o.insert("rayleighScale", double(r.rayleighScale));
+    o.insert("ozone",         r.ozone);
     return o;
 }
 
 SkyRealistic Scene::skyRealisticFromJson(const QJsonObject &o)
 {
-    // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults trap): a
-    // document written before a dial existed opens at the fitted default, never
-    // at zero and never at an uninitialised float.
+    // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults trap).
     const SkyRealistic d = SkyRealistic::defaults();
     SkyRealistic r = d;
-    r.density   = float(o.value("density").toDouble(d.density));
-    r.diffusion = float(o.value("diffusion").toDouble(d.diffusion));
-    r.horizon   = float(o.value("horizon").toDouble(d.horizon));
-    r.power     = float(o.value("power").toDouble(d.power));
-    r.sunHaze   = float(o.value("sunHaze").toDouble(d.sunHaze));
-    r.skyColour = skyColourFromJson(o.value("skyColour").toObject(), d.skyColour);
+    r.sunHaze       = float(o.value("sunHaze").toDouble(d.sunHaze));
+    r.aerialScale   = float(o.value("aerialScale").toDouble(d.aerialScale));
+    r.groundAlbedo  = float(o.value("groundAlbedo").toDouble(d.groundAlbedo));
+    r.rayleighScale = float(o.value("rayleighScale").toDouble(d.rayleighScale));
+    r.ozone         = o.value("ozone").toBool(d.ozone);
     return r;
 }
 

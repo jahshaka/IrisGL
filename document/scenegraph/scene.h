@@ -169,7 +169,11 @@ enum class SkyType : int
 	EQUIRECTANGULAR,
 	GRADIENT,
 	MATERIAL,
-	REALISTIC
+	REALISTIC,
+	/// NO SKY AT ALL (SKY-ATMOSPHERE-1): a black background, nothing captured,
+	/// no ambient from the sky. The Empty template's sky; the mirror maps it to
+	/// the engine's SkyMode::NoSky.
+	NONE
 };
 
 // Global illumination (world panel). Values are serialized by ordinal-stable
@@ -195,61 +199,37 @@ enum class GiQuality : int
 	EPIC
 };
 
-/// THE ANALYTIC ("realistic") SKY's parameters — the ENGINE's own, since
-/// SKY-GPU (2026-09-13).
+/// THE REALISTIC SKY: THE PLANET'S ATMOSPHERE (SKY-ATMOSPHERE-1). A physical
+/// model of the air around a planet, drawn by the engine
+/// (jahshaka::engine::AtmosphereSky carries the model and its constants): the
+/// sky, the sun's colour, the Sky Light's environment, the clouds' air and the
+/// aerial perspective on every lit surface are one atmosphere. Every dial means
+/// a physical thing, and 1 is the clear Earth of the reference (Hillaire,
+/// EGSR 2020). The sun is the scene's sun light — the first directional,
+/// Scene::sunLight() — and nothing else; a scene without one has a night sky.
 ///
-/// The five Preetham dials this replaces (luminance, reileigh, mieCoefficient,
-/// mieDirectionalG, turbidity) described a CPU bake that no longer exists: the
-/// sky is Ogre's AtmosphereNpr, evaluated per pixel on the GPU, and these are
-/// its parameters. There is no mapping from the old names and none is owed —
-/// the arithmetic is different, not re-parameterised — so `world.sky realistic`
-/// refuses them BY NAME and an old file's Realistic block reads as the
-/// defaults below (no migrations, ever; the crud law).
+/// FORWARD ONLY: the non-physical model's dials this replaced (density,
+/// diffusion, horizon, skyColour, power) are deleted and an old file's keys are
+/// not read.
 struct SkyRealistic
 {
-	/// How much atmosphere the ray travels through — the blue's depth.
-	float density = 0.25f;
-	/// How fast the colour changes with altitude — the horizon's spread.
-	float diffusion = 2.0f;
-	/// The lowest point the sky is drawn at; raises the band in a sunset.
-	float horizon = 0.025f;
-	/// The sky's own colour before absorption, as a colour a user PICKS
-	/// (decoded sRGB->linear at the boundary, like every other one).
-	QColor skyColour;
-	/// Multiplies the whole sky (HDR).
-	float power = 1.5f;
-	/// THE AIR THE SUNLIGHT TRAVELS THROUGH — the atmosphere's turbidity, and
-	/// the ONLY thing that decides the sun's colour (lane SKY-DENSITY-1).
-	///
-	/// It is a SECOND dial because there are two quantities. The sky's radiance
-	/// is an integral of scattering along every view ray and `density` above is
-	/// the artistic dial of the non-physical model that draws it; the SUN's
-	/// colour is the extinction along the ONE ray from the sun to the ground,
-	/// which is Beer-Lambert and needs no art. Sharing one number made tuning
-	/// the sky move the sunlight and tuning the sunlight move the sky.
-	///
-	/// The value is Linke turbidity, the standard clear-sky measure: 1 is a
-	/// purely molecular atmosphere (Rayleigh plus ozone, a mountain-top sky),
-	/// 2-3 a clear day, 4-6 hazy, and the default 2.5 is exactly the turbidity
-	/// the SKY's own defaults were fitted to (SKY-TUNE-1), so the two describe
-	/// the same air. Below 1 the aerosol term would amplify rather than absorb;
-	/// it is held there. OgreSky.cpp::atmosphereSunTint carries the model.
-	///
-	/// ONE AIR, TWO EFFECTS (FOG-ATMO-1): the same turbidity is the AERIAL
-	/// PERSPECTIVE every lit surface gets under this sky — the air's sea-level
-	/// extinction along the view ray (OgreSky.cpp::airFogDensity; 1.38e-4 per
-	/// metre at 2.5, 76 % of a surface left at 2 km), always on, fogging
-	/// towards the sky's own colour. No sky pixel reads it.
-	float sunHaze = 2.5f;
-
-	// THE SKY HAS NO SUN OF ITS OWN (SKY_LIGHT_SPEC.md §3, owner decision D15).
-	// The analytic sky's sun DIRECTION comes from the scene's sun — the first
-	// directional light, Scene::sunLight() — and nowhere else. The sunPosX/Y/Z
-	// vector, setSunAngles/sunAzimuth/sunElevation and the panel's Azimuth /
-	// Elevation sliders were the hack that let a sky carry a light; they are
-	// deleted, along with the `skyDrivesSun` steering that pushed the light
-	// around from them. A scene with a sky and no directional light bakes the
-	// model's own night — correct, and the panel says so.
+	/// THE HAZE: the aerosol (Mie) density as a multiple of the reference's
+	/// very clear air (aerosol optical depth 0.005). 0 = none (a purely
+	/// molecular sky), ~10 an ordinary clear day, ~50 hazy, 100 thick haze.
+	/// It moves the sky (a whiter horizon, a brighter glow round the sun), the
+	/// sun's colour and the aerial perspective together — one air.
+	float sunHaze = 1.0f;
+	/// THE AERIAL PERSPECTIVE ON GEOMETRY, a distance scale: 1 = the real air
+	/// between a surface and the camera, 0 = none (a lit surface reads as with
+	/// no air before it). No sky pixel reads it.
+	float aerialScale = 1.0f;
+	/// The planet's surface albedo (grey, 0..1), seen under the horizon.
+	float groundAlbedo = 0.3f;
+	/// The molecular (Rayleigh) density as a multiple of Earth's — the sky's
+	/// blue.
+	float rayleighScale = 1.0f;
+	/// The ozone layer on or off.
+	bool  ozone = true;
 
 	/// The ONE set of starting values: iris::Scene's constructor and every
 	/// per-key deserializer default read them from here.
@@ -941,13 +921,12 @@ public:
 	/// The only supported way to change them.
 	void setSkyRealistic(const SkyRealistic &r);
 
-	/// Every dial held inside the band the model can actually use. The ranges
-	/// are the panel rows' own (density past ~1 is a night sky at noon,
-	/// diffusion past 4 flattens the gradient into a wall, the horizon limit is
-	/// a fraction of the sphere, and sunHaze below 1 would amplify the sun's
-	/// beam rather than absorb it — see SkyRealistic::sunHaze). Clamping in the
-	/// DOCUMENT, not in the display, is what keeps a value no dial can express
-	/// from surviving a visit to the panel.
+	/// Every dial held inside the band the model can use: the haze 0..100, the
+	/// Rayleigh scale 0..10
+	/// (a negative density would amplify the light rather than absorb it), the
+	/// aerial scale and the albedo 0..1 (a surface reflects at most what
+	/// arrives). Clamping in the DOCUMENT, not in the display, is what keeps a
+	/// value no dial can express from surviving a visit to the panel.
 	static SkyRealistic clampSkyRealistic(SkyRealistic r);
 
 	/// The JSON half of the same fact, in the shape the serializer and the
