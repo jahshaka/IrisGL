@@ -12,22 +12,13 @@ For more information see the LICENSE file
 #include "import/meshprewarm.h"
 #include "import/parsecensus.h"
 
-#include <QFileInfo>
 #include <QMutexLocker>
 
-#include "import/scenesource.h"
 
 namespace iris {
 
 MeshPrewarm::MeshPrewarm() = default;
 MeshPrewarm::~MeshPrewarm() = default;
-
-void MeshPrewarm::parse(const QString &path)
-{
-    PrewarmItem item;
-    item.path = path;
-    parse(item);
-}
 
 void MeshPrewarm::parse(const PrewarmItem &item)
 {
@@ -35,52 +26,18 @@ void MeshPrewarm::parse(const PrewarmItem &item)
     if (path.isEmpty() || path.startsWith(':')) return;   // built-in primitives
     {
         QMutexLocker locked(&mLock);
-        if (mEntries.contains(path)) return;
+        if (mTried.contains(path)) return;
     }
-
-    // THE BAKE, first. A hit costs one file read and a handful of memcpys and
-    // the assimp parse below never happens — the whole point of MESH_BAKE
-    // phase 1. Any failure (missing, truncated, wrong format, stale
-    // fingerprint) returns an invalid model and falls through.
-    if (!item.bakePath.isEmpty()) {
-        MeshBake::Model model = MeshBake::read(item.bakePath, item.bakeFingerprint);
-        ParseCensus::recordBake(model.valid);   // app.openStats(): why a parse follows
-        if (model.valid) {
-            QMutexLocker locked(&mLock);
-            mBaked.insert(path, std::make_shared<const MeshBake::Model>(std::move(model)));
-            mEntries.insert(path, std::shared_ptr<SceneSource>());
-            return;
-        }
-    }
-
-    if (item.bakePath.isEmpty())
-        ParseCensus::recordBake(false);   // no bake exists for this content yet
-
-    if (!QFileInfo::exists(path)) {
-        QMutexLocker locked(&mLock);
-        mEntries.insert(path, std::shared_ptr<SceneSource>());
-        return;
-    }
-
-    // Its OWN importer: assimp is thread-safe only across independent
-    // Importer instances, and the aiScene must outlive this call (the entry
-    // owns the importer, so it does).
-    auto source = std::make_shared<SceneSource>();
-    // The asset's import transform, resolved with the plan on the catalog
-    // thread (PrewarmItem::transform): a fallback parse that dropped it would
-    // hand the open geometry of a different size from the bake it replaced.
-    const bool parsed = source->read(path, item.transform);
-
+    // THE BAKE, AND ONLY THE BAKE (FORWARD-ONLY-1). A missing, stale or
+    // corrupt bake is a miss — the open shows the model missing; there is no
+    // parse behind it.
+    MeshBake::Model model;
+    if (!item.bakePath.isEmpty()) model = MeshBake::read(item.bakePath, item.bakeFingerprint);
+    ParseCensus::recordBake(model.valid);   // app.openStats()
     QMutexLocker locked(&mLock);
-    mEntries.insert(path, parsed ? source : std::shared_ptr<SceneSource>());
-}
-
-const SceneSource *MeshPrewarm::source(const QString &path) const
-{
-    QMutexLocker locked(&mLock);
-    const auto it = mEntries.constFind(path);
-    if (it == mEntries.constEnd() || !it->get()) return nullptr;
-    return it->get();
+    mTried.insert(path);
+    if (model.valid)
+        mBaked.insert(path, std::make_shared<const MeshBake::Model>(std::move(model)));
 }
 
 BakedModelPtr MeshPrewarm::baked(const QString &path) const
@@ -92,16 +49,13 @@ BakedModelPtr MeshPrewarm::baked(const QString &path) const
 bool MeshPrewarm::contains(const QString &path) const
 {
     QMutexLocker locked(&mLock);
-    return mEntries.contains(path);
+    return mTried.contains(path);
 }
 
 int MeshPrewarm::count() const
 {
     QMutexLocker locked(&mLock);
-    int n = 0;
-    for (const auto &entry : mEntries)
-        if (entry) ++n;
-    return n + mBaked.size();
+    return mBaked.size();
 }
 
 int MeshPrewarm::bakedCount() const
@@ -113,16 +67,13 @@ int MeshPrewarm::bakedCount() const
 QStringList MeshPrewarm::paths() const
 {
     QMutexLocker locked(&mLock);
-    QStringList out;
-    for (auto it = mEntries.constBegin(); it != mEntries.constEnd(); ++it)
-        if (it.value() || mBaked.contains(it.key())) out.append(it.key());
-    return out;
+    return mBaked.keys();
 }
 
 void MeshPrewarm::clear()
 {
     QMutexLocker locked(&mLock);
-    mEntries.clear();
+    mTried.clear();
     mBaked.clear();
 }
 
