@@ -934,9 +934,10 @@ void OgreScene::setHeightFog(const HeightFogDesc &desc) {
     if (on == mHeightFogOn && (!on || desc == mHeightFog)) return;
     mHeightFog = desc;
     mHeightFogOn = on;
-    // The probe grid's faces are PBS renders the fog now reaches (the World
-    // fog's rule, ENGINE_CACHE_POLICY_SPEC P7).
-    staleProbeGrid(GiStaleReason::Fog);
+    // NO probe-grid stale: the height fog never reaches a probe face (its pass
+    // property is withheld while a cubemap probe renders, JahAtmosphere::
+    // preparePassHash), so the probes' photograph of the world is the same with
+    // it on or off.
     if (on) {
         ensureAtmosphere();
         if (!mAtmosphere) return;   // media missing: mError says why

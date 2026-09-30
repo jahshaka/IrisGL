@@ -13,6 +13,8 @@
 #include "Atmosphere.h"
 
 #include <OgreHlmsCompute.h>
+#include <OgreHlmsPbs.h>
+#include <Cubemaps/OgreParallaxCorrectedCubemapBase.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreShaderParams.h>
 #include <OgreMaterialManager.h>
@@ -531,8 +533,19 @@ Ogre::uint32 JahAtmosphere::preparePassHash(Ogre::Hlms *hlms, size_t constBuffer
     hlms->_setProperty(Ogre::Hlms::kNoTid, Ogre::HlmsBaseProp::Fog, 1);
     hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_atmo_buf", Ogre::int32(constBufferSlot));
     // THE HEIGHT FOG'S VARIANT (SKY-DEFAULTS-1): its block is in the buffer
-    // always; the code that reads it is in the shader only while it is on.
-    if (mHfOn) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_height_fog", 1);
+    // always; the code that reads it is in the shader only while it is on —
+    // and NEVER in a cubemap probe's face (a PCC capture: HlmsPbs's own
+    // isRendering() test, the one it withholds the probes' sampling by). The
+    // probe faces photograph the sky without the fog quad (visibility 0x1), so
+    // fogged geometry in them would sit against an unfogged sky, and the near
+    // scene's indirect light would change with a medium that begins 100 m away.
+    if (mHfOn) {
+        bool probeFace = false;
+        if (auto *pbs = dynamic_cast<Ogre::HlmsPbs *>(hlms))
+            if (const Ogre::ParallaxCorrectedCubemapBase *pcc = pbs->getParallaxCorrectedCubemap())
+                probeFace = pcc->isRendering();
+        if (!probeFace) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_height_fog", 1);
+    }
     return 1u;
 }
 
