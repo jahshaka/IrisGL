@@ -276,6 +276,10 @@ layout( local_size_x = @value( threads_per_group_x ),
 		vec3 light;
 		vec3 envD;
 		jahDiffuseCones( posLS, jahConeOrigin( posLS, biasDirLS ), jahConeBasisWorld( N ), light, envD );
+		// THE SKY'S SHARE ON THE FINER QUADRATURE (CONTACT-OCCLUSION-1, jahSkyShareFine):
+		// a card is relit once per event, and the four-cone set under-read a vertical
+		// surface's sky by half.
+		envD = jahSkyShareFine( posLS, jahConeOrigin( posLS, biasDirLS ), jahConeBasisWorld( N ) );
 		return light * gp.counts.y + envD;
 	}
 @end

@@ -104,6 +104,15 @@
 
 const float kMaxRadiance = 1024.0;
 
+#ifndef JAH_HIT_GATE_DECLARED
+#define JAH_HIT_GATE_DECLARED
+/// THE STORE'S NON-DIRECT SHARE AT A HIT, AS SEEN PAST THE MOVERS (MOVER-OCCLUSION-1):
+/// the fraction of the hit's hemisphere no mover blocks, set by jahHitRadianceSourced
+/// (jah_rq_hit_radiance.glsl) around the card or voxel read it makes; 1 everywhere else.
+float jahHitIndirectGate = 1.0;
+#endif
+
+
 /// The radiance leaving `hitPos` towards where the ray came from, read out of
 /// the cascade chain's light volumes.
 ///
@@ -152,6 +161,9 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		// Both texels are read whole (their centres along the axis, the lateral position
 		// kept) and the one holding the surface - the larger opacity along the ray - answers.
 		vec4 s;
+#ifdef JAH_VOX_SAMPLE_DIRECT
+		vec3 lsPick = ls;
+#endif
 		{
 			const vec3 ir = JAH_VOX_INVRES( c );
 			const int ax = jahVoxelAxis( dir, ir );
@@ -164,6 +176,9 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 			const vec4 sA = jahVoxelSample( c, lsA, dir, lod );
 			const vec4 sB = jahVoxelSample( c, lsB, dir, lod );
 			s = sB.w > sA.w ? sB : sA;
+#ifdef JAH_VOX_SAMPLE_DIRECT
+			lsPick = sB.w > sA.w ? lsB : lsA;
+#endif
 		}
 		if( !jahVoxelSampleUsable( s ) )
 			continue;					// this cascade holds nothing here
@@ -180,7 +195,21 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		w = min( w, 1.0 - accW );
 		if( w <= 0.0 )
 			continue;
-		acc += ( s.xyz / s.w ) * ( w * max( origin.w, 0.0 ) );
+		vec3 rad = s.xyz / s.w;
+#ifdef JAH_VOX_SAMPLE_DIRECT
+		// MOVER-OCCLUSION-1: THE SHARE A MOVER ABOVE THE HIT OCCLUDES. The store holds the
+		// lamps' direct term (D, its own volume and chain) plus what the sky and the bounce
+		// gave the surface; a mover blocks part of the hemisphere that second share came
+		// from, and the store was built without movers. So the read keeps D and gates the
+		// rest by the mover visibility jahHitRadianceSourced traced (1 = no mover: exact).
+		if( jahHitIndirectGate < 1.0 )
+		{
+			const vec4 d = JAH_VOX_SAMPLE_DIRECT( c, lsPick, lod );
+			const vec3 dRad = d.w > 1e-4 ? d.xyz / d.w : vec3( 0.0 );
+			rad -= ( 1.0 - jahHitIndirectGate ) * max( rad - dRad, vec3( 0.0 ) );
+		}
+#endif
+		acc += rad * ( w * max( origin.w, 0.0 ) );
 		accW += w;
 		ok = true;
 	}

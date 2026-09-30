@@ -169,19 +169,21 @@ OgreScene::RayEnvironment OgreScene::rayEnvironment() const {
 // reads it (an escaping bounce cone sees the sky), so a change is what a light
 // write is to an injection: the serial every injection and every incremental
 // settle trusts moves, the in-motion tick stops skipping cascades injected
-// before it, and an owed settle restarts over the new environment. A chain that
-// is bouncing (more than one bounce) is owed a settle outright — nothing else
-// would re-inject a still scene whose only change was its sky. And the
+// before it, and an owed settle restarts over the new environment. EVERY chain
+// is owed a settle outright — nothing else would re-inject a still scene whose
+// only change was its sky, and every chain's store holds the sky's direct term
+// (the sky pass, CONTACT-OCCLUSION-1). And the
 // irradiance field re-integrates: its probe rays read the environment where
 // they escape, so its atlas holds the sky (progressively, over the converged
 // data — the field never flashes).
 void OgreScene::noteEnvironmentChanged() {
     ++mGiLightWriteSerial;
     applyVctEnvironment();
-    // A BOUNCING chain is owed a settle (the bounce job reads the environment
-    // where its cones escape); with one bounce the voxels hold the direct light
-    // only and the pixel reads the environment itself.
-    if (mGi.numBounces > 1) oweChainSettle();
+    // EVERY chain is owed a settle: the store holds the sky's direct term at every
+    // bounce count (VctLighting::update's sky pass reads the environment where its
+    // cones escape — CONTACT-OCCLUSION-1; with one bounce it used to hold the lamps
+    // only, and a sky-lit surface re-emitted nothing).
+    oweChainSettle();
     if (mIfd) reintegrateFieldAfterInjection();
 }
 

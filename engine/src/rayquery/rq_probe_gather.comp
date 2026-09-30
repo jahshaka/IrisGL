@@ -86,6 +86,10 @@ layout( set = 0, binding = 18 ) uniform sampler3D voxelPosN[kMaxCascades];
 // PHOTON-VOXEL-5: level 0's back side and the voxeliser's normal (the side a hit meets).
 layout( set = 0, binding = 23 ) uniform sampler3D voxelBack[kMaxCascades];
 layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
+// MOVER-OCCLUSION-1: the lamps' direct term per cascade (its own chain), the share a
+// hit keeps when a mover occludes the rest (jah_rq_hit.glsl).
+layout( set = 0, binding = 30 ) uniform sampler3D voxelDirect[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
 
 #define JAH_VOX_COUNT       int( p.knobs.w )
 #define JAH_VOX_ANISO       ( p.knobs2.x > 0.5 )
@@ -118,7 +122,6 @@ layout( std430, set = 0, binding = 14 ) readonly buffer JahGeomRows { uvec4 jahG
 #define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
 #include "jah_rq_geom.glsl"
 
-#include "jah_rq_hit_radiance.glsl"
 
 /// THE HIT RECORD (PHOTON-HIT-SHADE-1): the GPU scene's instance table (binding
 /// 19), the compacted list's two images (20-21) and its buffer (22) — the
@@ -140,6 +143,10 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 #define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
 #include "jah_rq_hit_record.glsl"
+// THE HIT'S RADIANCE, after the alpha table (MOVER-OCCLUSION-1: the read traces the
+// movers above the hit, cut-outs honoured).
+#define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
+#include "jah_rq_hit_radiance.glsl"
 
 void main()
 {
@@ -297,6 +304,8 @@ void main()
 			// rq_hit_composite.comp (PHOTON-HIT-SHADE-1). There is no black: a hit
 			// is always shaded (a card, a voxel, or the decode).
 			const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
+			// The mover gate's rotation: this probe's cell and ray, this frame.
+			jahHitSeed = cellIndex * 73856093u ^ lane * 19349663u ^ frame * 2654435761u;
 			if( !decodeAlways )
 				radiance = jahHitRadiance( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
 										   max( tHit * spread, 1e-4 ), false, false, ok );

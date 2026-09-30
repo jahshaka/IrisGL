@@ -162,7 +162,7 @@ struct GatherInputs {
     /// 1..3 the anisotropic chains, 4/5 the coverage per half-axis (+a, -a), 6/7 the
     /// surface position per half (by name, RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 level 0's back
     /// side and 9 the voxelizer's normal (PHOTON-VOXEL-5; the isotropic volume on a Low chain).
-    Ogre::TextureGpu *voxel[kGatherMaxCascades][10] = {};
+    Ogre::TextureGpu *voxel[kGatherMaxCascades][11] = {};   // ...[10] the direct term (MOVER-OCCLUSION-1)
     float voxelOrigin[kGatherMaxCascades][3] = {};
     float voxelSize[kGatherMaxCascades][3] = {};
     float voxelCell[kGatherMaxCascades] = {};
@@ -191,6 +191,8 @@ struct GatherInputs {
     /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): the
     /// gather's rays test a cut-out's candidates too; 0 = none.
     uint64_t alphaTable = 0u;
+    /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs).
+    bool movers = false;
 
     unsigned width = 0u, height = 0u;
 
