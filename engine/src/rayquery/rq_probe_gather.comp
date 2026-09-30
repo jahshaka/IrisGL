@@ -145,6 +145,7 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 #include "jah_rq_hit_record.glsl"
 // THE HIT'S RADIANCE, after the alpha table (MOVER-OCCLUSION-1: the read traces the
 // movers above the hit, cut-outs honoured).
+#define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
 #include "jah_rq_hit_radiance.glsl"
 
 void main()
@@ -303,6 +304,8 @@ void main()
 			// rq_hit_composite.comp (PHOTON-HIT-SHADE-1). There is no black: a hit
 			// is always shaded (a card, a voxel, or the decode).
 			const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
+			// The mover gate's rotation: this probe's cell and ray, this frame.
+			jahHitSeed = cellIndex * 73856093u ^ lane * 19349663u ^ frame * 2654435761u;
 			if( !decodeAlways )
 				radiance = jahHitRadiance( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
 										   max( tHit * spread, 1e-4 ), false, false, ok );

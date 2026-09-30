@@ -191,6 +191,8 @@ struct GatherInputs {
     /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): the
     /// gather's rays test a cut-out's candidates too; 0 = none.
     uint64_t alphaTable = 0u;
+    /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs).
+    bool movers = false;
 
     unsigned width = 0u, height = 0u;
 

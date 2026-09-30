@@ -1273,6 +1273,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
     }
+    pp.alpha[3] = in.movers ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     // THE SECOND EYE (PHOTON-GA-VR): the shape, and the right eye's basis now and
     // before (written, never read, with one eye).
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;

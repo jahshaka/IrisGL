@@ -533,6 +533,7 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 /// CARD first, the VOXELS where no card answers — ONE function, read by this
 /// trace and by the gather's hits (PHOTON-GATHER-1d, GA-1e), whose header says
 /// what each read does. What this trace hands it is its FOOTPRINT, below.
+#define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
 #include "jah_rq_hit_radiance.glsl"
 
 /// A lobe at or below this GGX alpha is a MIRROR: the card texel-exact, the
@@ -945,6 +946,8 @@ void main()
 		jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
 							   hitPrim, rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
 		const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
+		// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
+		jahHitSeed = uint( tc.x ) * 73856093u ^ uint( tc.y ) * 19349663u ^ uint( p.knobs.z ) * 2654435761u;
 		if( !decodeAlways )
 			traced = jahHitRadianceSourced( hitSlot, world + worldN * bias + L * t, hitN, L,
 											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,

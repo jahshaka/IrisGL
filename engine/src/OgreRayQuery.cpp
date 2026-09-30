@@ -949,6 +949,9 @@ private:
     void updateAlphaTable(OgreScene *scene, SceneAs &sa);
     /// The table's address a job hands its shader (0: none, or JAH_R6_NO_ALPHA).
     uint64_t alphaTableOf(const OgreScene *scene) const;
+    /// MOVER-OCCLUSION-1: does any ray-traced slot carry the mover flag? A hit's mover
+    /// gate (jah_rq_hit_radiance.glsl) traces nothing when none does.
+    bool rayMoversOf(const OgreScene *scene) const;
     VkDescriptorSetLayout mAlphaSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mAlphaPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mAlphaPipeline = VK_NULL_HANDLE;
@@ -5347,6 +5350,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const char *c = getenv("JAH_R7_EDGE_CLASSES");
         pp.alpha[2] = c ? float(atoi(c)) : 0.0f;
     }
+    pp.alpha[3] = rayMoversOf(scene) ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -6090,6 +6094,18 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
 /// THE MEASURING DOOR (`JAH_R6_NO_ALPHA`, read per call so one process holds both
 /// arms of a paired A/B): no table — every ray query asks opaque, exactly the
 /// pre-lane traversal (a cut-out, still FORCE_NO_OPAQUE, then reads as its quad).
+bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
+    const detail::GpuScene &gs = scene->mGpuScene;
+    const detail::GpuInstance *m = gs.mirrorData();
+    if (!m) return false;
+    for (uint32_t i = 0; i < gs.slotCount(); ++i) {
+        uint32_t f;
+        std::memcpy(&f, &m[i].boundsMax[3], sizeof(f));
+        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuMover)) return true;
+    }
+    return false;
+}
+
 uint64_t RayQueryTier::alphaTableOf(const OgreScene *scene) const {
     if (getenv("JAH_R6_NO_ALPHA")) return 0u;
     auto it = mScenes.find(const_cast<OgreScene *>(scene));
@@ -6471,6 +6487,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
     in.alphaTable = alphaTableOf(scene);
+    in.movers = rayMoversOf(scene);
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
     const auto takeVolume = [&](Ogre::VctLighting *lighting, Ogre::VctVoxelizer *voxelizer) {

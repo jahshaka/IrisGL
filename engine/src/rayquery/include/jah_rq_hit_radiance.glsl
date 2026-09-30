@@ -64,22 +64,43 @@
 /// read in the share (a 2 m cube 4 m up covers 6 % of a cosine hemisphere).
 #define JAH_MOVER_SKY_LENGTH 4.0
 #endif
+/// THE ROTATION OF THE FOUR RAYS (MOVER-OCCLUSION-1 fix round): the caller sets it per
+/// hit before the read — a hash of the pixel (or the probe's cell and ray) and the frame —
+/// so the four directions turn from hit to hit and frame to frame and the histories the
+/// reads land in average the estimate to the true fraction. 0 = unrotated.
+uint jahHitSeed = 0u;
+#ifndef JAH_HIT_MOVERS_ON
+/// A ray-traced mover exists in the scene (the host's flag); none = no rays at all.
+#define JAH_HIT_MOVERS_ON true
+#endif
+
 /// THE HEMISPHERE ABOVE A HIT, AS THE MOVERS LEAVE IT (MOVER-OCCLUSION-1): the store
 /// (voxels, cards) is built without movers, so the sky and the bounce it holds at a
 /// point a mover hangs over are too bright on every hit read. Four cosine-distributed
-/// rays (45 degrees off the normal, azimuths 45 + 90k — the quadrature's equal-weight
-/// four) against the MOVERS' near copies alone (kRayMaskMover; the still world is in
-/// the store already), cut-outs honoured: the fraction that escapes.
+/// rays — two rings of the cosine hemisphere's equal-weight quadrature (u = 1/4 and 3/4:
+/// 30 and 60 degrees off the normal), two rays each, opposite in azimuth, the rings a
+/// quarter turn apart, the whole set turned by the hit's seed (the golden angle per
+/// frame on a per-pixel hash) — against the MOVERS' near copies alone (kRayMaskMover; the
+/// still world is in the store already), cut-outs honoured: the fraction that escapes.
 float jahMoverSkyVisibility( vec3 p, vec3 n )
 {
+	if( !( JAH_HIT_MOVERS_ON ) )
+		return 1.0;
 	const vec3 t = abs( n.z ) < 0.999 ? normalize( cross( n, vec3( 0.0, 0.0, 1.0 ) ) )
 									  : vec3( 1.0, 0.0, 0.0 );
 	const vec3 b = cross( n, t );
+	uint h = jahHitSeed * 747796405u + 2891336453u;
+	h = ( ( h >> ( ( h >> 28u ) + 4u ) ) ^ h ) * 277803737u;
+	h = ( h >> 22u ) ^ h;
+	const float phi0 = 6.2831853 * ( float( h ) * ( 1.0 / 4294967296.0 ) );
 	float open = 0.0;
 	for( int k = 0; k < 4; ++k )
 	{
-		const float phi = 1.5707963 * float( k ) + 0.7853982;
-		const vec3 d = normalize( n + t * cos( phi ) + b * sin( phi ) );
+		const float u = ( k < 2 ) ? 0.25 : 0.75;
+		const float r = sqrt( u );
+		const float z = sqrt( 1.0 - u );
+		const float phi = phi0 + 3.1415927 * float( k & 1 ) + 1.5707963 * float( k >> 1 );
+		const vec3 d = normalize( n * z + ( t * cos( phi ) + b * sin( phi ) ) * r );
 		rayQueryEXT q;
 		rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), 0x02u,
 							   p + n * 0.02, 0.0, d, JAH_MOVER_SKY_LENGTH );
