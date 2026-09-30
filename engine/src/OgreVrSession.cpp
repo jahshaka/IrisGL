@@ -1227,18 +1227,16 @@ bool VrSession::create(std::string &reason) {
     // time on the way out.
     //
     // WHAT WE HAND IT. The eye target is `PFG_RGBA8_UNORM` (OgreView::createRtt)
-    // and the chain writes what it calls a DISPLAY-REFERRED picture into it —
-    // but NOTHING in it applies an sRGB encode (SKY-DEFAULTS-1's merge read,
-    // corrected here): the pin hardcodes `hw_gamma_write` to 1
-    // (OgreHlmsPbs.cpp preparePassHash), so HlmsPbs NEVER writes its
-    // `sqrt( finalColour )` branch and emits linear radiance, and the HDR chain's
-    // composite writes the film curve's output (FinalToneMapping_ps.glsl: Hable +
-    // the grade tail, no OETF). The bytes are therefore the film curve's LINEAR
-    // value stored as codes, which the desktop window (UNORM, no `gamma` on the
-    // Vulkan path) shows as-is. Declaring them _SRGB makes the runtime show them
-    // exactly as the desktop does — the same picture, which is what the
-    // measurement below established — not a correctly encoded one: VR is dark by
-    // the same missing OETF the desktop is (an owner decision, its own lane).
+    // and the chain writes a DISPLAY-ENCODED picture into it (SRGB-ENCODE-1):
+    // the HDR chain's tonemap quad ends in the exact sRGB OETF
+    // (FinalToneMapping_ps.glsl, jahSrgbEncode) and an ungraded chain ends in
+    // Jahshaka/DisplayEncode — the same bytes the desktop window shows. So the
+    // bytes ARE sRGB-encoded, and declaring them _SRGB is literally true: the
+    // runtime decodes them to linear and encodes once for the panel, and the
+    // wearer sees exactly what the desk sees, encoded exactly once (ours).
+    // (Before SRGB-ENCODE-1 nothing encoded — `hw_gamma_write` is hardcoded to 1
+    // at the pin, so HlmsPbs never takes its sqrt branch — and VR was as dark as
+    // the desktop by the same missing OETF.)
     //
     // MEASURED, because phase 1a's comment reasoned the other way round and was
     // wrong (spikes/smoke-50/f5b): through Monado's XCB compositor the runtime's

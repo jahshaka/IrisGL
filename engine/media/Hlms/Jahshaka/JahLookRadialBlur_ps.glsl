@@ -12,6 +12,14 @@
 // mix(src, blurred, amount * attenuation) so the identity at 0 is exact — the
 // coinciding taps would already very nearly give it, and "very nearly" is not
 // the contract.
+//
+// IT AVERAGES LIGHT (SRGB-ENCODE-1). The looks run on the DISPLAY-encoded
+// picture, and an average of display codes is not the average of the light
+// that made them (it darkens every bright tap it mixes with a dark one). So
+// each tap is decoded to linear, the seven are averaged there, and the mean is
+// encoded back -- the one look whose maths is about light rather than about
+// the display value. The blend with the source stays in display space, which
+// is what keeps amount 0 the exact identity.
 #version ogre_glsl_ver_330
 
 vulkan_layout( ogre_t0 ) uniform texture2D sourceTexture;
@@ -32,6 +40,8 @@ vulkan_layout( location = 0 )
 out vec4 fragColour;
 
 #define NUM_SAMPLES 7
+
+#include "JahSrgb.glsl"
 
 void main()
 {
@@ -60,10 +70,10 @@ void main()
 	for( int i = 0; i < NUM_SAMPLES; ++i )
 	{
 		const float m = mix( 1.0, multipliers[i], amount );
-		acc += texture( vkSampler2D( sourceTexture, srcSampler ),
-						( inPs.uv0 - centre ) * m + centre ).rgb;
+		acc += jahSrgbDecode( texture( vkSampler2D( sourceTexture, srcSampler ),
+									   ( inPs.uv0 - centre ) * m + centre ).rgb );
 	}
-	const vec3 blurred = acc * ( 1.0 / float( NUM_SAMPLES ) );
+	const vec3 blurred = jahSrgbEncode( acc * ( 1.0 / float( NUM_SAMPLES ) ) );
 
 	fragColour = vec4( mix( src.rgb, blurred, amount * atten ), src.a );
 }
