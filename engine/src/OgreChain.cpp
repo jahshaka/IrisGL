@@ -3342,16 +3342,25 @@ void resolveTonemapParams() {
         gTonemapParams->_findNamedConstantDefinition("jahDitherOff", false) != nullptr;
     gTonemapHasBloomAmount =
         gTonemapParams->_findNamedConstantDefinition("jahBloomAmountMinusOne", false) != nullptr;
+}
+}   // namespace
+
+void verifyTonemapMedia() {
     // The HDR media ships with the build (build-ogre.sh stages the fork's
     // media), so a tonemap quad without either constant is a BUILD error, not
-    // a tree to tolerate (FORWARD-ONLY-1).
-    if (!gTonemapHasDither || !gTonemapHasBloomAmount)
+    // a tree to tolerate (FORWARD-ONLY-1). Checked ONCE, at engine init — never
+    // mid-frame from a view listener.
+    resolveTonemapParams();
+    const bool mismatch = gTonemapParams && (!gTonemapHasDither || !gTonemapHasBloomAmount);
+    // The frame path resolves its own cache: nothing learned here (including
+    // "no quad yet") may stick.
+    forgetTonemapParams();
+    if (mismatch)
         OGRE_EXCEPT(Ogre::Exception::ERR_ITEM_NOT_FOUND,
                     "HDR/FinalToneMapping lacks jahDitherOff/jahBloomAmountMinusOne: the "
                     "staged media is not this fork's - re-run irisgl/scripts/build-ogre.sh",
-                    "resolveTonemapParams");
+                    "verifyTonemapMedia");
 }
-}   // namespace
 
 void forgetTonemapParams() {
     gTonemapParams.reset();

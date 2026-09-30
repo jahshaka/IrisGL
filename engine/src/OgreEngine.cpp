@@ -3155,6 +3155,8 @@ void OgreEngine::registerCommonMaterials() {
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage("Jahshaka: common material scripts not registered: " + e.getFullDescription());
     }
+    // Outside the try: a staged-media mismatch must stop the engine here.
+    chain::verifyTonemapMedia();
 }
 
 void OgreEngine::createShadowNode() {
