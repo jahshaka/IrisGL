@@ -179,6 +179,46 @@ CloudLayer CloudLayer::fromJson(const QJsonObject &o)
     return clamped(c);
 }
 
+HeightFog HeightFog::clamped(HeightFog h)
+{
+    // A NaN takes the constructor's value; the bands are Unreal's panel's
+    // (density 0..10, falloff 0.001..2) and a scene's reach for the distances.
+    const HeightFog d;
+    if (!std::isfinite(h.density)) h.density = d.density;
+    if (!std::isfinite(h.heightFalloff)) h.heightFalloff = d.heightFalloff;
+    if (!std::isfinite(h.baseHeight)) h.baseHeight = d.baseHeight;
+    if (!std::isfinite(h.startDistance)) h.startDistance = d.startDistance;
+    h.density       = qBound(0.0f,      h.density,       10.0f);
+    h.heightFalloff = qBound(0.001f,    h.heightFalloff, 2.0f);
+    h.baseHeight    = qBound(-10000.0f, h.baseHeight,    10000.0f);
+    h.startDistance = qBound(0.0f,      h.startDistance, 100000.0f);
+    return h;
+}
+
+QJsonObject HeightFog::toJson() const
+{
+    QJsonObject o;
+    o.insert("enabled",       enabled);
+    o.insert("density",       double(density));
+    o.insert("heightFalloff", double(heightFalloff));
+    o.insert("baseHeight",    double(baseHeight));
+    o.insert("startDistance", double(startDistance));
+    return o;
+}
+
+HeightFog HeightFog::fromJson(const QJsonObject &o)
+{
+    // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law).
+    const HeightFog d;
+    HeightFog h;
+    h.enabled       = o.value("enabled").toBool(d.enabled);
+    h.density       = float(o.value("density").toDouble(d.density));
+    h.heightFalloff = float(o.value("heightFalloff").toDouble(d.heightFalloff));
+    h.baseHeight    = float(o.value("baseHeight").toDouble(d.baseHeight));
+    h.startDistance = float(o.value("startDistance").toDouble(d.startDistance));
+    return clamped(h);
+}
+
 SunContact SunContact::clamped(SunContact c)
 {
 	// A NaN takes the default; the band is the renderer's (scene.h).

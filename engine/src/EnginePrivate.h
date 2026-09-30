@@ -3316,6 +3316,15 @@ public:
     void syncAtmosphere();
     bool mAtmoSkyOn = false;   // the planet's atmosphere is the scene's sky
     bool mAtmoFogOn = false;   // the World fog is on
+    /// THE HEIGHT FOG (HeightFogDesc; SKY-DEFAULTS-1) — the component's THIRD
+    /// customer: registered while it is on, whatever the sky and the World fog
+    /// say. pushHeightFog hands the component the dials and the colour in force
+    /// (the sky's SH at +Y), and runs again whenever a new SH lands.
+    void setHeightFog(const HeightFogDesc &desc) override;
+    HeightFogStatus heightFogStatus() const override;
+    void pushHeightFog();
+    HeightFogDesc mHeightFog;
+    bool mHeightFogOn = false;
     /// atmosphereSunTint's memo: the direction asked about, the answer, and the
     /// model generation it was computed under. A sun that has not moved costs a
     /// compare.

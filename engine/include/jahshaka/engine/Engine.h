@@ -89,6 +89,11 @@ public:
     /// was ever mentioned. Cheap to call every frame while enabled; the enabled
     /// EDGE costs a shader rebuild (fog is a shader variant, not a uniform).
     virtual void        setFog(const FogDesc &) = 0;
+    /// THE EXPONENTIAL HEIGHT FOG (HeightFogDesc: the world's medium, beyond a
+    /// start distance, over the sky's pixels too). Off by default and OFF IS
+    /// EXACT: no shader carries its code. The enabled edge is a shader variant.
+    virtual void        setHeightFog(const HeightFogDesc &) {}
+    virtual HeightFogStatus heightFogStatus() const { return HeightFogStatus(); }
     /// THE SCENE'S SKY AND ITS ENVIRONMENT REFLECTIONS, as one description —
     /// SkyDesc carries the whole model (modes, face order, what
     /// `reflections == false` means, and why the flat colour and the CPU-baked

@@ -33,3 +33,29 @@ material Jahshaka/AtmosphereSky
 		}
 	}
 }
+
+// THE HEIGHT FOG OVER THE SKY (SKY-DEFAULTS-1): a full-screen quad at queue 5,
+// subgroup 1 (JahAtmosphere::createFogQuad) — after the sky, the clouds and the
+// sun disc, before the geometry that covers it. Depth CHECK on, WRITE off, at
+// the far plane; alpha-blended over whatever sky is below it. The constants
+// are pushed per scene (no param_named here, the Vulkan trap above).
+material Jahshaka/HeightFogSky
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write off
+			cull_hardware none
+			scene_blend alpha_blend
+
+			vertex_program_ref Jahshaka/SunDisc_vs
+			{
+			}
+			fragment_program_ref Jahshaka/HeightFogSky_ps
+			{
+			}
+		}
+	}
+}

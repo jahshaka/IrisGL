@@ -659,6 +659,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_atmosphere.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_height_fog.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
@@ -744,6 +745,17 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DRAW=1
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahAtmosphere.glsl
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_atmosphere.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE EXPONENTIAL HEIGHT FOG (SKY-DEFAULTS-1): its integral, one file — the
+    # PBS pixel shader inserts the piece, the height fog's sky quad includes the
+    # raw copy.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahHeightFog
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahHeightFog_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_height_fog.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    COMMAND ${CMAKE_COMMAND} -DRAW=1
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahHeightFog.glsl
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_height_fog.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # A CARD READ FROM A DIRECTION (PHOTON-CARDS-5): the relight writes the mean
     # light direction the ray jobs' card read restores the lobe's view term with.

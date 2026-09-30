@@ -26,3 +26,30 @@ fragment_program Jahshaka/AtmosphereSky_ps unified
 	delegate Jahshaka/AtmosphereSky_ps_GLSL
 	delegate Jahshaka/AtmosphereSky_ps_VK
 }
+
+// THE HEIGHT FOG'S SKY QUAD (SKY-DEFAULTS-1; JahAtmosphere.material): the
+// shared screen-ray vertex program, and this fragment program with the eye as
+// an auto-param (default_params, the form that works under Vulkan).
+fragment_program Jahshaka/HeightFogSky_ps_GLSL glsl
+{
+	source JahHeightFogSky_ps.glsl
+	enable_include_header true
+	default_params
+	{
+		param_named_auto	cameraPos	camera_position
+	}
+}
+fragment_program Jahshaka/HeightFogSky_ps_VK glslvk
+{
+	source JahHeightFogSky_ps.glsl
+	enable_include_header true
+	default_params
+	{
+		param_named_auto	cameraPos	camera_position
+	}
+}
+fragment_program Jahshaka/HeightFogSky_ps unified
+{
+	delegate Jahshaka/HeightFogSky_ps_GLSL
+	delegate Jahshaka/HeightFogSky_ps_VK
+}

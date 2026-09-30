@@ -858,7 +858,7 @@ void OgreScene::setFog(const FogDesc &desc) {
         // leaves the air's aerial perspective on, without the World fog's
         // density, height layer or breakthrough.
         mAtmoFogOn = false;
-        if (mAtmoSkyOn) {
+        if (mAtmoSkyOn || mHeightFogOn) {
             syncAtmosphere();
         } else {
             destroyAtmosphere();
@@ -886,8 +886,17 @@ void OgreScene::setFog(const FogDesc &desc) {
 void OgreScene::pushFogState() {
     const bool fogOn = mAtmoFogOn && mFogDescKnown;
     const bool airRead = mAtmoSkyOn && mAtmosphere && mAtmosphere->aerialScale() > 0.0f;
-    if (!mAtmosphere || (!fogOn && !airRead)) {
+    pushHeightFog();
+    if (!mAtmosphere || (!fogOn && !airRead && !mHeightFogOn)) {
         FogHlmsListener::unregisterFog(mSceneMgr);
+        return;
+    }
+    if (!fogOn && !airRead) {
+        // THE HEIGHT FOG ALONE (SKY-DEFAULTS-1): the component is registered for
+        // its own block, and the World fog's state is the identity — no colour,
+        // no height layer, no aerial table claimed, upstream's block at density 0.
+        FogHlmsListener::registerScene(mSceneMgr, FogState());
+        mAtmosphere->setFogBlock(0.0f, 0.0f, 0.0f);
         return;
     }
     const FogDesc &desc = mLastFogDesc;
@@ -910,6 +919,66 @@ void OgreScene::pushFogState() {
     mAtmosphere->setFogBlock(mAtmoSkyOn ? 0.0f : worldDensity,
                              fogOn ? std::max(desc.breakMinBrightness, 0.0f) : 0.0f,
                              fogOn ? std::max(desc.breakFalloff, 0.0f) : 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// THE HEIGHT FOG (HeightFogDesc; SKY-DEFAULTS-1)
+// ---------------------------------------------------------------------------
+// The atmosphere component's third customer. It needs none of the atmosphere's
+// tables: its colour is a constant per environment (the sky's SH at +Y) and its
+// medium is a closed-form integral, so it rides the component's const buffer
+// (the PBS passes, through the JahFog piece) and the component's second quad
+// (the sky's pixels). Under ANY sky: a colour sky's in-scatter is its colour.
+void OgreScene::setHeightFog(const HeightFogDesc &desc) {
+    const bool on = desc.enabled && desc.density > 0.0f;
+    if (on == mHeightFogOn && (!on || desc == mHeightFog)) return;
+    mHeightFog = desc;
+    mHeightFogOn = on;
+    // The probe grid's faces are PBS renders the fog now reaches (the World
+    // fog's rule, ENGINE_CACHE_POLICY_SPEC P7).
+    staleProbeGrid(GiStaleReason::Fog);
+    if (on) {
+        ensureAtmosphere();
+        if (!mAtmosphere) return;   // media missing: mError says why
+        syncAtmosphere();
+        return;
+    }
+    if (!mAtmosphere) return;
+    if (mAtmoSkyOn || mAtmoFogOn) { syncAtmosphere(); return; }
+    // Nobody else wants the component: gone, exactly as the World fog leaves it.
+    destroyAtmosphere();
+    FogHlmsListener::unregisterFog(mSceneMgr);
+}
+
+// THE COLOUR IN FORCE: the mean radiance an upward-facing surface receives from
+// the environment in force (the SH, Engine.h setAmbientSh's basis
+// 1, y, z, x, xy, yz, 3z^2 - 1, zx, x^2 - y^2 evaluated at n = +Y), UNSCALED by
+// the Sky Light: the fog is lit by the sky, not by the node that lights the
+// scene with it. No environment yet: black, and the status says so.
+void OgreScene::pushHeightFog() {
+    if (!mAtmosphere) return;
+    float rgb[3] = { 0.0f, 0.0f, 0.0f };
+    if (mSkyShInForceValid) {
+        for (int c = 0; c < 3; ++c) {
+            const float *k = mSkyShInForce;
+            rgb[c] = std::max(0.0f, k[0 * 3 + c] + k[1 * 3 + c] - k[6 * 3 + c] - k[8 * 3 + c]);
+        }
+    }
+    JAH_TRY {
+        mAtmosphere->setHeightFog(mHeightFogOn, mHeightFog.density, mHeightFog.heightFalloff,
+                                  mHeightFog.baseHeight, std::max(0.0f, mHeightFog.startDistance),
+                                  rgb, kSunDiscBit);
+    } JAH_CATCH(mError, );
+}
+
+HeightFogStatus OgreScene::heightFogStatus() const {
+    HeightFogStatus st;
+    if (!mAtmosphere || !mHeightFogOn) return st;
+    st.on = mSceneMgr->getAtmosphereRaw() == mAtmosphere;
+    const Ogre::Vector3 c = mAtmosphere->heightFogColour();
+    st.colour[0] = c.x; st.colour[1] = c.y; st.colour[2] = c.z;
+    st.colourFromSky = mSkyShInForceValid;
+    return st;
 }
 
 }}}  // namespace jahshaka::engine::detail
