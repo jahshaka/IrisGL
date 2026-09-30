@@ -3337,11 +3337,19 @@ void resolveTonemapParams() {
     if (Ogre::Pass *pass = materialPass("HDR/FinalToneMapping")) {
         if (pass->hasFragmentProgram()) gTonemapParams = pass->getFragmentProgramParameters();
     }
+    if (!gTonemapParams) return;   // no tonemap quad in this pipeline
     gTonemapHasDither =
-        gTonemapParams && gTonemapParams->_findNamedConstantDefinition("jahDitherOff", false);
+        gTonemapParams->_findNamedConstantDefinition("jahDitherOff", false) != nullptr;
     gTonemapHasBloomAmount =
-        gTonemapParams &&
-        gTonemapParams->_findNamedConstantDefinition("jahBloomAmountMinusOne", false);
+        gTonemapParams->_findNamedConstantDefinition("jahBloomAmountMinusOne", false) != nullptr;
+    // The HDR media ships with the build (build-ogre.sh stages the fork's
+    // media), so a tonemap quad without either constant is a BUILD error, not
+    // a tree to tolerate (FORWARD-ONLY-1).
+    if (!gTonemapHasDither || !gTonemapHasBloomAmount)
+        OGRE_EXCEPT(Ogre::Exception::ERR_ITEM_NOT_FOUND,
+                    "HDR/FinalToneMapping lacks jahDitherOff/jahBloomAmountMinusOne: the "
+                    "staged media is not this fork's - re-run irisgl/scripts/build-ogre.sh",
+                    "resolveTonemapParams");
 }
 }   // namespace
 
@@ -3369,21 +3377,7 @@ void forgetTonemapParams() {
 /// silently disappear from a frame drawn through a path that does not push.
 void setBloomAmount(float amount) {
     resolveTonemapParams();
-    if (!gTonemapHasBloomAmount) {
-        // Staged media that predates fork feab041c6 (was 0082): the amount is simply not
-        // there, the picture is the amount-1 one, and that is a correct
-        // picture. Said once, like the dither's own note, and by the same
-        // resolve-once flag so it cannot repeat per frame.
-        static bool said = false;
-        if (!said) {
-            said = true;
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka: the staged HDR media has no jahBloomAmountMinusOne - the Bloom "
-                "Amount dial does nothing (every scene renders at 1x). Re-run "
-                "irisgl/scripts/build-ogre.sh; fork feab041c6 (was 0082) is missing from this tree.");
-        }
-        return;
-    }
+    if (!gTonemapHasBloomAmount) return;   // no tonemap quad in this pipeline
     // Clamped to the document's own range rather than trusted: this is the
     // last place the number is a number, and a negative amount would SUBTRACT
     // light from the picture.
@@ -3395,19 +3389,7 @@ void setBloomAmount(float amount) {
 
 void setDither(bool off) {
     resolveTonemapParams();
-    {
-        static bool said = false;
-        if (!gTonemapHasDither && !said) {
-            said = true;
-            // Staged media that predates fork feab041c6 (was 0079). Say so ONCE — the picture
-            // is the old banded one, which is a defect, not a crash.
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka: the staged HDR media has no jahDitherOff - the graded "
-                "picture is NOT dithered (8-bit contour banding). Re-run "
-                "irisgl/scripts/build-ogre.sh; fork feab041c6 (was 0079) is missing from this tree.");
-        }
-    }
-    if (!gTonemapHasDither) return;
+    if (!gTonemapHasDither) return;   // no tonemap quad in this pipeline
     const float v = (off || noDitherEnv()) ? 1.0f : 0.0f;
     // Debounced on the LAST VALUE PUSHED, not on a per-view memo: two views
     // that disagree alternate and each still writes before its own passes.
