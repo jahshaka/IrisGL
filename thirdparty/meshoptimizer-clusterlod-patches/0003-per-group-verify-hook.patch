@@ -1,0 +1,122 @@
+From: jahshaka <jahshaka@gmail.com>
+Subject: [PATCH] clusterlod: a per-group verify hook (clodMesh::verify_group)
+
+CLUSTER-LOCK-3, 2026-09-29. The mesh bake bounds how far a group's
+simplification may move the surface: a group at depth d may not move any
+level-0 point past kDagLockFactor x ITS OWN error (DAG-LOCK-1). That bound is
+a property of ONE group at the moment it is simplified; the only lock input
+clusterlod had was clodMesh::vertex_lock, ONE array honoured by every level,
+so the bake had to lock a vertex for the whole build and rebuild the whole DAG
+(up to 16 builds): a vertex a depth-1 group needed stayed locked up to the
+root (uv-sphere-20k root 78 -> 2916 triangles) and the temple's bake went
+3.7 -> 8.1 s. (Patch 0001, the per-LEVEL lock of CLUSTER-LOCK-2, was the
+parked prototype of the same idea; it never landed and its number is retired.)
+
+The hook: an optional callback on clodMesh, called for every group that
+simplified (not stuck), after its simplification and before it is output,
+with the group's input indices, its simplified indices and the error it will
+be output with. NULL accepts. A lock array re-simplifies THIS group with those
+locks added to the level's (boundary, terminal, vertex_lock) locks, and the
+result is verified again; the added locks are restored before the next group,
+so nothing carries to another group or level. A re-simplification never takes
+the sloppy fallback (it snaps every unlocked vertex to a grid and can drop a
+locked vertex with its triangles: measured on the bake's scan stand-in, the
+retries of a depth-2 group re-offended four times running with the error
+doubling each time). One that gets STUCK makes the group terminal exactly as a
+stuck first result does (its clusters stay as they are; patch 0002 keeps their
+border): a group that cannot simplify within the bound its caller holds it to
+is not simplified (measured: a 109-triangle pile of 33 debris islands on the
+stand-in). THE LIBRARY BOUNDS THE ATTEMPTS: at most CLOD_VERIFY_MAX_RETRIES (4,
+overridable at compile time) re-simplifications per group; the result after the
+last is still verified (the caller always sees the result the group keeps) and a
+lock array returned for it is ignored — a callback that never returns NULL cannot
+loop. Unset keeps upstream's behaviour exactly. Upstream candidate: two fields on clodMesh and two static helpers.
+
+Applied at configure (irisgl/CMakeLists.txt) to a copy of the vendored header
+in the build tree; the vendored file itself is never edited.
+---
+--- a/clusterlod.h
++++ b/clusterlod.h
+@@ -83,6 +83,18 @@
+ 	// input vertex locks; allows to preserve additional seams (when not using attribute_protect_mask) or lock vertices via meshopt_SimplifyVertex_* flags
+ 	const unsigned char* vertex_lock;
+ 
++	// optional verification of every simplified group: called after a group at the given depth has been simplified (and is not
++	// stuck), with the group's input indices, its simplified indices and the error the group will be output with; attempt is 0
++	// for the first result of the group and counts the re-simplifications after it
++	// returns NULL to accept the result, or a lock array (vertex_count entries, same flags as vertex_lock) to re-simplify the group
++	// with these locks added to the ones the group already has; the array must stay valid until the next call
++	// a re-simplification honours the added locks: it never takes the sloppy fallback (which snaps every unlocked vertex to a grid
++	// and can drop a locked vertex with its triangles); one that gets stuck makes the group terminal, like a stuck first result
++	// at most CLOD_VERIFY_MAX_RETRIES re-simplifications per group: the result after the last one is verified too (so the last call
++	// always saw the result the group keeps), and a lock array returned for it is ignored
++	const unsigned char* (*verify_group)(void* context, int depth, int attempt, const unsigned int* group_indices, size_t group_index_count, const unsigned int* simplified_indices, size_t simplified_index_count, float error);
++	void* verify_group_context;
++
+ 	// attribute weights for attribute-aware simplification; maps to meshopt_simplifyWithAttributes parameters
+ 	const float* attribute_weights;
+ 	size_t attribute_count;
+@@ -518,6 +530,51 @@
+ 	return lod;
+ }
+ 
++static float groupError(const clodConfig& config, float merged_error, float error)
++{
++	return std::max(merged_error * config.simplify_error_merge_previous, error) + error * config.simplify_error_merge_additive;
++}
++
++#ifndef CLOD_VERIFY_MAX_RETRIES
++#define CLOD_VERIFY_MAX_RETRIES 4
++#endif
++
++static void verifyGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& merged, std::vector<unsigned char>& locks, size_t target_size, float merged_error, int depth, std::vector<unsigned int>& simplified, float& error)
++{
++	// locks added for this group only; restored before the next group is simplified
++	std::vector<std::pair<unsigned int, unsigned char> > saved;
++
++	// the sloppy fallback ignores the locks' purpose (it snaps unlocked vertices to a grid and may drop a locked one), so a
++	// re-simplification only uses the attribute-aware simplifier
++	clodConfig retry_config = config;
++	retry_config.simplify_fallback_sloppy = false;
++
++	for (int attempt = 0;; ++attempt)
++	{
++		const unsigned char* extra = mesh.verify_group(mesh.verify_group_context, depth, attempt, &merged[0], merged.size(), simplified.data(), simplified.size(), groupError(config, merged_error, error));
++		if (!extra || attempt >= CLOD_VERIFY_MAX_RETRIES)
++			break;
++
++		for (size_t k = 0; k < merged.size(); ++k)
++		{
++			unsigned int v = merged[k];
++
++			if (extra[v] & ~locks[v])
++			{
++				saved.push_back(std::make_pair(v, locks[v]));
++				locks[v] |= extra[v];
++			}
++		}
++
++		simplified = simplify(retry_config, mesh, merged, locks, target_size, &error);
++		if (simplified.size() > merged.size() * config.simplify_threshold)
++			break; // the added locks got the group stuck; the caller makes it terminal
++	}
++
++	for (size_t k = saved.size(); k > 0; --k)
++		locks[saved[k - 1].first] = saved[k - 1].second;
++}
++
+ static int outputGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<Cluster>& clusters, const std::vector<int>& group, const clodBounds& simplified, int depth, void* output_context, clodOutput output_callback)
+ {
+ 	std::vector<clodCluster> group_clusters(group.size());
+@@ -673,6 +730,11 @@
+ 
+ 			float error = 0.f;
+ 			std::vector<unsigned int> simplified = simplify(config, mesh, merged, locks, target_size, &error);
++
++			// let the caller verify the simplified group; it may re-simplify it with more locks (and get it stuck)
++			if (mesh.verify_group && simplified.size() <= merged.size() * config.simplify_threshold)
++				verifyGroup(config, mesh, merged, locks, target_size, bounds.error, depth, simplified, error);
++
+ 			if (simplified.size() > merged.size() * config.simplify_threshold)
+ 			{
+ 				bounds.error = FLT_MAX; // terminal group, won't simplify further

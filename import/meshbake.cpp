@@ -50,8 +50,9 @@ For more information see the LICENSE file
 // this and import/clusterlod.cpp (the one TU that compiles clusterlod.h's
 // implementation, ATOM stage 2) are the only translation units that include it.
 #include "meshoptimizer.h"
-#include "thirdparty/meshoptimizer-clusterlod/clusterlod.h"
+#include "meshoptimizer-clusterlod/clusterlod.h"   // the vendored copy + its patch stack (build tree)
 #include <chrono>
+#include <unordered_map>
 
 #include "core/geometry/trimesh.h"
 #include "core/logger.h"
@@ -209,7 +210,14 @@ namespace
 // locks every index at its position (a seam's, a pole's twins) and the fan of each; a
 // twin left free was moved by clusterlod's sloppy fallback and opened the cut. Every
 // mesh whose lock touched a shared position re-bakes (hp_sphere, hemisphere, scans).
-constexpr int kFormatVersion = 18;
+// v19 (2026-09-29, CLUSTER-LOCK-3): THE DAG'S LOCK IS PER GROUP. clusterlod verifies
+// each group as it simplifies it (patch 0003) and re-simplifies THAT group with its
+// offenders locked (at most 4 times; a group stuck under its locks is output terminal);
+// nothing carries to another group or level, and the whole-DAG rebuild is gone. Patch
+// 0002 keeps a terminal group's border locked. The lost facets are walked exactly
+// (`facetMax`). Roots collapse again (uv-sphere-20k 2916 -> 76 triangles, physics-model
+// 306 -> 76, round-bar-40m 4806 -> 24); every DAG re-bakes.
+constexpr int kFormatVersion = 19;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -1483,7 +1491,10 @@ public:
     /// walk returns the first distance at or below it, which is NOT the nearest
     /// — only for a caller taking a MAXIMUM of distances whose running value is
     /// that threshold, where no such answer can move the maximum (the cluster
-    /// DAG's area terms). Never with a point, a normal or a triangle asked for.
+    /// DAG's area terms). Never with a point or a normal asked for; a triangle asked
+    /// for is written only when the walk returns the nearest (a return above the
+    /// stop) — at or below it the triangle is whichever was nearest so far and
+    /// callers must not read it (`nearestOn`).
     float closest(Query &query, const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr,
                   unsigned *triangleOut = nullptr, float stopAtOrBelow = -1.0f) const
     {
@@ -3883,85 +3894,555 @@ float denseGroupReference(surface::TriangleGrid::Query &q, const float *position
     return worst;
 }
 
-/// THE DAG'S DISPLACEMENT LOCK (DAG-LOCK-1) — the chain's rule (`lodchain::kDisplacementBudget`,
-/// `kLockPasses`) applied to the cluster DAG. clusterlod.h keeps ONE lock array for the
-/// whole build (its `vertex_lock`, honoured by every group's simplification), so the lock
-/// is per BUILD, not per group: a removed level-0 vertex that sits more than
-/// kDagLockFactor x its group's own simplifier error from the group's surface is locked
-/// with its fan, and the whole DAG is rebuilt — at most kDagLockPasses builds. Past the
-/// budget the DAG keeps what it has and the measured error charges it honestly: the lock
-/// shapes the DAG, never the measurement.
-constexpr float kDagLockFactor = 2.0f;
-constexpr int   kDagLockPasses = 16;
-
-void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant,
-               const unsigned char *vertexLock, std::vector<unsigned> *overOut);
-
-void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant)
+/// A FACET LYING ON THE SURFACE (CLUSTER-LOCK-3): when the S triangles near a lost
+/// facet Q that are parallel to it and within `tol` of its plane cover all of Q (their
+/// intersections with Q, projected into Q's plane, sum to Q's area), every point of Q
+/// stands over one of them, and its distance is at most that triangle's plane offset
+/// at Q's corners (linear over Q) over the planes' cosine — the facet's exact maximum
+/// with no refinement. Returns it, or -1 when the cover is not proven (not parallel, not
+/// covered, or triangles overlapping). facetMax's bounds cannot close on a flat stretch
+/// finer than S (every piece across an S edge needs refining to the tolerance: the
+/// 2178-triangle ground plane's DAG took 2.5 s against 22 ms).
+float coplanarCover(const float *positions, int posComps, const surface::TriangleGrid &grid,
+                    const std::vector<unsigned> &idx, const Vec3 &a, const Vec3 &b, const Vec3 &c, float tol,
+                    std::vector<unsigned> &scratch)
 {
-    std::vector<unsigned char> lock;
-    std::vector<unsigned> weld;   // vertex -> the first vertex at its position (built with the lock)
-    std::vector<unsigned> over;
-    int passes = 0, locked = 0;
-    for (;;) {
-        over.clear();
-        buildOnce(mesh, stats, variant, lock.empty() ? nullptr : lock.data(), &over);
-        ++passes;
-        if (over.empty() || passes >= kDagLockPasses || mesh.isNull()) break;
-        int posComps = 3; size_t nv = 0;
-        const float *positions = lodchain::attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
-        if (!positions) break;
-        const IndexBufferPtr ib = mesh->getIndexBuffer();
-        if (ib.isNull() || !ib->data) break;
-        const unsigned *idx = reinterpret_cast<const unsigned *>(ib->data);
-        const size_t ni = size_t(ib->dataSize) / sizeof(unsigned);
-        // THE LOCK IS BY POSITION (CLUSTER-LOCK-1). A seam (UV / normal) or a pole
-        // holds one position under several indices; clusterlod honours the lock per
-        // INDEX, and its sloppy fallback (simplifySloppy on the group's de-indexed
-        // corners) keeps a locked corner where it is while moving its unlocked twin
-        // to the grid cell's representative — the cut opens along the seam. So every
-        // index sharing a locked position is locked, and the fan is taken over every
-        // triangle touching that position (clusterlod's own connectivity:
-        // meshopt_generatePositionRemap's exact equality, as its boundary lock).
-        if (lock.empty()) {
-            lock.assign(nv, 0u);
-            weld.resize(nv);
-            meshopt_generatePositionRemap(weld.data(), positions, nv, sizeof(float) * size_t(posComps));
-        }
-        std::vector<unsigned char> hit(nv, 0u), keep(nv, 0u);   // both indexed by a weld id
-        for (unsigned v : over) if (v < nv) hit[weld[v]] = 1u;
-        // THE FAN: every level-0 triangle touching a displaced position keeps its corners' positions.
-        for (size_t t = 0; t + 2 < ni; t += 3) {
-            if (idx[t] >= nv || idx[t + 1] >= nv || idx[t + 2] >= nv) continue;
-            if (!hit[weld[idx[t]]] && !hit[weld[idx[t + 1]]] && !hit[weld[idx[t + 2]]]) continue;
-            for (size_t k = 0; k < 3; ++k) keep[weld[idx[t + k]]] = 1u;
-        }
-        int added = 0;
-        for (size_t v = 0; v < nv; ++v)
-            if (keep[weld[v]] && !lock[v]) { lock[v] = 1u; ++added; }   // meshopt_SimplifyVertex_Lock
-        locked += added;
-        if (!added) break;   // nothing new to lock: another build would be the same
-    }
-    if (stats) {
-        // THE WELD'S ACCOUNT (CLUSTER-LOCK-1): locked positions shared by several
-        // indices, and positions locked on some of their indices only (always 0).
-        if (!lock.empty()) {
-            std::vector<int> at(weld.size(), 0), lockedAt(weld.size(), 0);
-            for (size_t v = 0; v < weld.size(); ++v) { ++at[weld[v]]; if (lock[v]) ++lockedAt[weld[v]]; }
-            for (size_t v = 0; v < weld.size(); ++v) {
-                if (weld[v] != v || !lockedAt[v]) continue;
-                if (at[v] > 1) ++stats->lockedSharedPositions;
-                if (lockedAt[v] < at[v]) ++stats->lockedSplitPositions;
+    Vec3 n = Vec3::crossProduct(b - a, c - a);
+    const float area2 = n.length();
+    if (!(area2 > 0.0f)) return -1.0f;
+    n = n * (1.0f / area2);
+    const Vec3 u = (b - a).normalized(), v = Vec3::crossProduct(n, u);
+    const auto to2 = [&](const Vec3 &p) { const Vec3 d = p - a; return std::array<float, 2> { Vec3::dotProduct(d, u), Vec3::dotProduct(d, v) }; };
+    Vec3 lo(std::min({ a.x(), b.x(), c.x() }), std::min({ a.y(), b.y(), c.y() }), std::min({ a.z(), b.z(), c.z() }));
+    Vec3 hi(std::max({ a.x(), b.x(), c.x() }), std::max({ a.y(), b.y(), c.y() }), std::max({ a.z(), b.z(), c.z() }));
+    const Vec3 grow(tol, tol, tol);
+    grid.collect(lo - grow, hi + grow, scratch);
+    const std::array<float, 2> q0 = to2(a), q1 = to2(b), q2 = to2(c);
+    const float areaQ = 0.5f * area2;
+    double covered = 0.0;
+    float worst = 0.0f;
+    std::vector<std::array<float, 2>> poly, next;
+    for (unsigned t : scratch) {
+        const Vec3 t0 = vertexOf(positions, posComps, idx[size_t(t) * 3]), t1 = vertexOf(positions, posComps, idx[size_t(t) * 3 + 1]),
+                   t2 = vertexOf(positions, posComps, idx[size_t(t) * 3 + 2]);
+        Vec3 m = Vec3::crossProduct(t1 - t0, t2 - t0);
+        const float ml = m.length();
+        if (!(ml > 0.0f)) continue;
+        m = m * (1.0f / ml);
+        const float cosine = std::fabs(Vec3::dotProduct(m, n));
+        if (cosine < 0.9999f) continue;
+        float off = 0.0f;
+        for (const Vec3 *p : { &a, &b, &c }) off = std::max(off, std::fabs(Vec3::dotProduct(m, *p - t0)));
+        if (off > tol) continue;
+        // Q clipped by T's three edges, in Q's plane (T's corners projected along n).
+        std::array<std::array<float, 2>, 3> T = { to2(t0), to2(t1), to2(t2) };
+        const float orient = (T[1][0] - T[0][0]) * (T[2][1] - T[0][1]) - (T[1][1] - T[0][1]) * (T[2][0] - T[0][0]);
+        if (orient == 0.0f) continue;
+        poly = { q0, q1, q2 };
+        for (int e = 0; e < 3 && !poly.empty(); ++e) {
+            const std::array<float, 2> &P = T[size_t(e)], &R = T[size_t((e + 1) % 3)];
+            const auto side = [&](const std::array<float, 2> &x) {
+                return ((R[0] - P[0]) * (x[1] - P[1]) - (R[1] - P[1]) * (x[0] - P[0])) * (orient > 0.0f ? 1.0f : -1.0f);
+            };
+            next.clear();
+            for (size_t i = 0; i < poly.size(); ++i) {
+                const std::array<float, 2> &A = poly[i], &B = poly[(i + 1) % poly.size()];
+                const float sa = side(A), sb = side(B);
+                if (sa >= 0.0f) next.push_back(A);
+                if ((sa >= 0.0f) != (sb >= 0.0f)) {
+                    const float k = sa / (sa - sb);
+                    next.push_back({ A[0] + k * (B[0] - A[0]), A[1] + k * (B[1] - A[1]) });
+                }
             }
+            poly.swap(next);
         }
-        stats->lockPasses = passes;
-        stats->lockedVertices = locked;
-        stats->lockUnconverged = int(over.size());
+        double ar = 0.0;
+        for (size_t i = 0; i + 2 < poly.size() + 0 && poly.size() >= 3; ++i) {
+            const std::array<float, 2> &A = poly[0], &B = poly[i + 1], &C = poly[i + 2];
+            ar += 0.5 * double((B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0]));
+        }
+        if (ar <= 0.0) continue;
+        covered += ar;
+        worst = std::max(worst, off / cosine);
     }
+    if (covered < double(areaQ) * (1.0 - 1e-4) || covered > double(areaQ) * (1.0 + 1e-3)) return -1.0f;
+    return worst;
 }
 
-void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant,
-               const unsigned char *vertexLock, std::vector<unsigned> *overOut)
+/// THE MAXIMUM OF A DISTANCE OVER ONE FACET, EXACT TO A TOLERANCE (CLUSTER-LOCK-3). The
+/// distance to a union of triangles is at most the distance to ANY one of them, and the
+/// distance to one triangle is convex — so over a piece of the facet it is at most the
+/// largest of the piece's CORNERS' distances to the triangle nearest the piece's centre
+/// (and, the distance being 1-Lipschitz, at most the centre's distance + the piece's radius).
+/// A branch and bound over the 1-to-4 split prunes every piece whose bound cannot pass the
+/// running maximum, refines the rest until the bound is within `tol` of the centre's
+/// distance (5 % of the group's own error `scale`, at least `floorTol`) and returns an
+/// UPPER bound — no point of the facet reads more. Seven fixed points a facet read 0.139
+/// where the dense reference found 0.207 inside one sliver of the endless plane's depth-4
+/// group once the DAG's lock became per group (atom.dag_bound_bar's (a)). `dist(p, tri, st)`
+/// answers the nearest distance at p and the corners of the triangle it lies on — or, with
+/// st >= 0, any value <= st as soon as something is within st (the triangle then unset).
+/// Returns a value <= `stop` when the facet's maximum is at most `stop`; NaN when more
+/// than `budget` pieces would be walked. (The lock decides on this UPPER bound too, not on
+/// the largest distance found: the measurement stores the upper bound, so a lock that
+/// read the lower one lets a group store up to the tolerance past its bound — measured,
+/// CLUSTER-LOCK-3's audit round: the hemisphere's depth-2 group stored 2.004x its error,
+/// and no retry went away on the temple: 271 -> 277.)
+constexpr int kFacetMaxLevels = 10;
+constexpr size_t kFacetQuickPieces = 64;   ///< the measurement's first try before the flat-facet cover
+/// The nearest distance from p to a grid's soup, and the corners of the triangle it lies on.
+/// (`idx` is the soup the grid was built over, on `positions`.) With `within` >= 0 it
+/// answers any distance <= within as soon as one is found (and no triangle); past it the
+/// walk is the exact nearest and names its triangle.
+float nearestOn(const float *positions, int posComps, const surface::TriangleGrid &grid,
+                const std::vector<unsigned> &idx, surface::TriangleGrid::Query &q, const Vec3 &p, Vec3 *tri,
+                float within)
+{
+    unsigned t = 0u;
+    const float d = grid.closest(q, p, nullptr, nullptr, &t, within);
+    if (within >= 0.0f && d <= within) return d;
+    if (std::isfinite(d) && size_t(t) * 3 + 2 < idx.size())
+        for (int k = 0; k < 3; ++k) tri[k] = vertexOf(positions, posComps, idx[size_t(t) * 3 + size_t(k)]);
+    return d;
+}
+template <class Dist>
+float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float scale, float floorTol, Dist &&dist,
+               size_t budget = SIZE_MAX)
+{
+    struct Piece { Vec3 a, b, c; int level = 0; };
+    std::array<Piece, 3 * kFacetMaxLevels + 4> stack;
+    size_t top = 0;
+    stack[top++] = Piece { a, b, c, 0 };
+    const float tol = std::max(floorTol, 0.05f * scale);
+    float best = 0.0f, upper = 0.0f;
+    Vec3 tri[3];
+    while (top) {
+        if (budget-- == 0) return std::numeric_limits<float>::quiet_NaN();   // the caller's budget ran out
+        const Piece piece = stack[--top];
+        const Vec3 centre = (piece.a + piece.b + piece.c) * (1.0f / 3.0f);
+        float radius = 0.0f;
+        for (const Vec3 *corner : { &piece.a, &piece.b, &piece.c })
+            radius = std::max(radius, (*corner - centre).length());
+        // Anything within bound - radius of the centre holds the whole piece within the
+        // bound (1-Lipschitz): the query stops at the first such triangle.
+        // (Nothing below the precision floor can move the answer: every stored error is
+        // at least the floor.)
+        const float within = std::max(std::max(std::max(stop, best), upper), floorTol) - radius;
+        const float d = dist(centre, tri, within >= 0.0f ? within : -1.0f);
+        if (!std::isfinite(d) || (within >= 0.0f && d <= within)) continue;
+        // Two upper bounds, the tighter wins: the corners against the centre's triangle
+        // (convex), and the centre's distance + the piece's radius (1-Lipschitz — the one
+        // left when that triangle is degenerate and its closest point is not a number).
+        float convex = d;
+        for (const Vec3 *corner : { &piece.a, &piece.b, &piece.c })
+            convex = std::max(convex, (*corner - surface::closestOnTriangle(*corner, tri[0], tri[1], tri[2])).length());
+        const float ub = std::isfinite(convex) ? std::min(convex, d + radius) : d + radius;
+        best = std::max(best, d);
+        if (ub <= std::max(std::max(std::max(stop, best), upper), floorTol)) continue;   // cannot pass the bound
+        if (ub - d <= tol || piece.level >= kFacetMaxLevels) { upper = std::max(upper, ub); continue; }
+        const Vec3 ab = (piece.a + piece.b) * 0.5f, bc = (piece.b + piece.c) * 0.5f, ca = (piece.c + piece.a) * 0.5f;
+        const int next = piece.level + 1;
+        stack[top++] = Piece { piece.a, ab, ca, next };
+        stack[top++] = Piece { ab, piece.b, bc, next };
+        stack[top++] = Piece { ca, bc, piece.c, next };
+        stack[top++] = Piece { ab, bc, ca, next };
+    }
+    return std::max(best, upper);
+}
+
+/// THE DAG'S DISPLACEMENT LOCK, PER GROUP (DAG-LOCK-1's rule; CLUSTER-LOCK-3's shape).
+/// A group at depth d may not move any level-0 point past kDagLockFactor x ITS OWN
+/// error — the chain's rule (`lodchain::kDisplacementBudget`) applied to one group at
+/// the moment it is simplified. clusterlod calls `GroupVerifier::verify` for every
+/// group that simplified (patch 0003, `clodMesh::verify_group`); the verifier samples
+/// the group's simplified surface against the level-0 surface the group stands for
+/// and, when a point is past the bound, hands back a lock on the group's own vertices
+/// there: clusterlod re-simplifies THAT group with it and asks again, at most
+/// kGroupRetries times. The locks are the group's alone — restored before the next
+/// group, carried to no other group or level — so a coarser group, whose error is
+/// larger, keeps its own bound and can collapse what a finer one had to keep. Past the
+/// retries the group keeps what it has and the measurement (after the build) charges
+/// it honestly: the lock shapes the DAG, never the measurement.
+constexpr float kDagLockFactor = 2.0f;
+constexpr int   kGroupRetries = 4;
+/// A verify loop's chunk: the pool's query grain (the verify runs inside clusterlod's
+/// serial level loop, so every group's loops go wide; 512 kept mid-size groups inline
+/// and the temple's slowest mesh spent 0.6 s more in them).
+constexpr size_t kVerifyGrain = lodchain::kQueryGrain;
+
+struct TriKey
+{
+    unsigned a = 0, b = 0, c = 0;
+    bool operator==(const TriKey &o) const { return a == o.a && b == o.b && c == o.c; }
+};
+struct TriKeyHash
+{
+    size_t operator()(const TriKey &k) const
+    {
+        return (size_t(k.a) * 0x9E3779B97F4A7C15ull) ^ (size_t(k.b) * 0xC2B2AE3D27D4EB4Full) ^
+               (size_t(k.c) * 0x165667B19E3779F9ull);
+    }
+};
+TriKey triKeyOf(const unsigned *t)
+{
+    std::array<unsigned, 3> s = { t[0], t[1], t[2] };
+    std::sort(s.begin(), s.end());
+    return TriKey { s[0], s[1], s[2] };
+}
+
+/// THE VERIFIER'S PROVENANCE is the measurement's (the removed level-0 vertices a
+/// group stands for, below `build`), kept BY TRIANGLE while the build runs: a
+/// removed vertex is handed to the simplified triangle it stands nearest, and the
+/// triangle ends up in exactly one output cluster — so the group that merges that
+/// cluster at the next level reads it back from the triangles it is given. A group's
+/// region = the vertices of its input triangles + the removed ones handed to them.
+///
+/// THE LOCK IS BY POSITION (CLUSTER-LOCK-1): every index of the group sharing a
+/// locked position is locked (a seam twin left free opens the cut through the sloppy
+/// fallback). A vertex past the bound that is still IN the group locks its fan (every
+/// input triangle touching its position keeps its corners); one removed below this
+/// depth locks the corners of the input triangle it was handed to — the lock can only
+/// hold what the group still has.
+class GroupVerifier
+{
+public:
+    GroupVerifier(const float *positions, int posComps, size_t nv, const std::vector<unsigned> &base,
+                  const std::vector<std::vector<unsigned>> &trisByAnchor, const lodchain::Islands &islands,
+                  float floorLen)
+        : mPositions(positions), mPosComps(posComps), mBase(base), mTrisByAnchor(trisByAnchor),
+          mIslands(islands), mFloorLen(floorLen), mWidth(bakepool::width()),
+          mQueries(static_cast<size_t>(mWidth)), mWeld(nv), mRegionAt(nv, 0u), mRegionIdx(nv, 0u),
+          mPosLockedAt(nv, 0u), mKeptAt(nv, 0u), mHitAt(nv, 0u), mKeepAt(nv, 0u), mLock(nv, 0u)
+    {
+        meshopt_generatePositionRemap(mWeld.data(), positions, nv, sizeof(float) * size_t(posComps));
+    }
+
+    static const unsigned char *hook(void *context, int depth, int attempt, const unsigned *group, size_t groupCount,
+                                     const unsigned *simplified, size_t simplifiedCount, float error)
+    {
+        GroupVerifier *self = static_cast<GroupVerifier *>(context);
+        self->mDepth = depth;
+        return self->verify(attempt, group, groupCount, simplified, simplifiedCount, error);
+    }
+
+    /// clusterlod's output callback, for every group in output order: a group that
+    /// simplified commits the hand-on of the result its last verify saw; one whose
+    /// re-simplification got stuck under its locks is output TERMINAL (patch 0003) — it
+    /// cannot simplify within its bound, so it is not simplified.
+    void output(bool terminal)
+    {
+        if (mPendingValid) {
+            ++mRetryHistogram[std::min(mRetries, kGroupRetries)];
+            mTotalRetries += mRetries;
+            if (mRetries) {
+                if (mRetriesByDepth.size() <= size_t(mDepth)) mRetriesByDepth.resize(size_t(mDepth) + 1, 0);
+                mRetriesByDepth[size_t(mDepth)] += mRetries;
+            }
+            if (terminal) ++mTerminal;
+            else if (mLastOffended) ++mUnconverged;
+            mLockedVertices += int(mLockTouched.size());
+            // THE WELD'S ACCOUNT (CLUSTER-LOCK-1): the group's locked positions held by
+            // several of its indices (a seam, a pole); the split ones are counted by
+            // `verify`, where the group's indices are.
+            std::vector<unsigned> positions;
+            for (unsigned u : mLockTouched) positions.push_back(mWeld[u]);
+            std::sort(positions.begin(), positions.end());
+            for (size_t i = 0; i + 1 < positions.size(); ++i)
+                if (positions[i] == positions[i + 1] && (i == 0 || positions[i - 1] != positions[i])) ++mShared;
+            if (!terminal) {
+                for (const TriKey &k : mInputKeys) mHanded.erase(k);
+                for (const auto &p : mPending) mHanded[p.first].push_back(p.second);
+            }
+        }
+        mPendingValid = false;
+        clearLock();
+    }
+
+    void fill(MeshBake::ClusterDagStats *stats) const
+    {
+        stats->groupRetries = mTotalRetries;
+        stats->groupsUnconverged = mUnconverged;
+        stats->groupsMadeTerminal = mTerminal;
+        stats->lockedVertices = mLockedVertices;
+        stats->lockedSharedPositions = mShared;
+        stats->lockedSplitPositions = mSplit;
+        stats->retryHistogram = QVector<int>(mRetryHistogram.begin(), mRetryHistogram.end());
+        stats->retriesByDepth = QVector<int>(mRetriesByDepth.begin(), mRetriesByDepth.end());
+        stats->verifyMs = mVerifyMs;
+    }
+
+private:
+    void clearLock()
+    {
+        for (unsigned u : mLockTouched) mLock[u] = 0u;
+        mLockTouched.clear();
+    }
+
+    const unsigned char *verify(int attempt, const unsigned *group, size_t groupCount, const unsigned *simplified,
+                                size_t simplifiedCount, float error)
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        const unsigned char *answer = verifyTimed(attempt, group, groupCount, simplified, simplifiedCount, error);
+        mVerifyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return answer;
+    }
+
+    const unsigned char *verifyTimed(int attempt, const unsigned *group, size_t groupCount,
+                                     const unsigned *simplified, size_t simplifiedCount, float error)
+    {
+        const size_t inputTris = groupCount / 3;
+        if (attempt == 0) {
+            // THE REGION, once per group (its input does not change between attempts).
+            clearLock();
+            mRetries = 0;
+            ++mRegionStamp;
+            mInputKeys.resize(inputTris);
+            mRegionV.clear();
+            mHostOf.clear();
+            for (size_t i = 0; i < groupCount; ++i) {
+                const unsigned v = group[i];
+                if (mRegionAt[v] != mRegionStamp) {
+                    mRegionAt[v] = mRegionStamp;
+                    mRegionIdx[v] = unsigned(mRegionV.size());
+                    mRegionV.push_back(v);
+                    mHostOf.push_back(-1);
+                }
+            }
+            for (size_t t = 0; t < inputTris; ++t) {
+                mInputKeys[t] = triKeyOf(group + t * 3);
+                const auto it = mHanded.find(mInputKeys[t]);
+                if (it == mHanded.end()) continue;
+                for (unsigned v : it->second)
+                    if (mRegionAt[v] != mRegionStamp) {
+                        mRegionAt[v] = mRegionStamp;
+                        mRegionIdx[v] = unsigned(mRegionV.size());
+                        mRegionV.push_back(v);
+                        mHostOf.push_back(int(t));
+                    }
+            }
+        }
+        mPendingValid = true;
+        mPending.clear();
+        mLastOffended = false;
+        if (simplifiedCount < 3 || mRegionV.empty()) return nullptr;
+
+        ++mKeptStamp;
+        for (size_t i = 0; i < simplifiedCount; ++i) mKeptAt[simplified[i]] = mKeptStamp;
+        std::vector<unsigned> removed;   // region indices
+        for (size_t i = 0; i < mRegionV.size(); ++i)
+            if (mKeptAt[mRegionV[i]] != mKeptStamp) removed.push_back(unsigned(i));
+
+        const float lockExact = kDagLockFactor * error;
+        const float lockSampled = lockExact / lodchain::kBoundMargin;
+        const std::vector<unsigned> sIdx(simplified, simplified + simplifiedCount);
+        Vec3 glo = vertexOf(mPositions, mPosComps, sIdx[0]), ghi = glo;
+        const auto grow = [&](unsigned v) {
+            const Vec3 p = vertexOf(mPositions, mPosComps, v);
+            glo = Vec3(std::min(glo.x(), p.x()), std::min(glo.y(), p.y()), std::min(glo.z(), p.z()));
+            ghi = Vec3(std::max(ghi.x(), p.x()), std::max(ghi.y(), p.y()), std::max(ghi.z(), p.z()));
+        };
+        for (unsigned v : mRegionV) grow(v);
+        for (unsigned v : sIdx) grow(v);
+        surface::TriangleGrid gridS;
+        gridS.build(mPositions, mPosComps, sIdx, glo, ghi, soupGridRes(mPositions, mPosComps, sIdx, glo, ghi));
+
+        // Each loop gathers its offenders per chunk (region indices), in chunk order.
+        std::vector<unsigned> offenders;
+        const auto gather = [&](size_t n, auto &&visit) {
+            const bakepool::Range range(n, kVerifyGrain);
+            std::vector<std::vector<unsigned>> found(range.count);
+            bakepool::forRange(range, mWidth, [&](size_t c, size_t begin, size_t end, int slot) {
+                for (size_t i = begin; i < end; ++i) visit(i, mQueries[size_t(slot)], found[c]);
+            });
+            for (const std::vector<unsigned> &f : found) offenders.insert(offenders.end(), f.begin(), f.end());
+        };
+
+        // 1. EVERY REMOVED VERTEX against S, exactly and island-capped.
+        //    Max-only: a query stops at anything within the chunk's running maximum or the
+        //    lock's bound, whichever is lower (it can neither raise the one nor pass the other).
+        float vertexTerm = 0.0f;
+        {
+            const bakepool::Range range(removed.size(), kVerifyGrain);
+            std::vector<std::vector<unsigned>> found(range.count);
+            std::vector<float> chunkMax(range.count, 0.0f);
+            bakepool::forRange(range, mWidth, [&](size_t c, size_t begin, size_t end, int slot) {
+                float local = 0.0f;
+                for (size_t i = begin; i < end; ++i) {
+                    const unsigned v = mRegionV[removed[i]];
+                    const float stop = std::min(local, lockExact);
+                    if (!(mIslands.capOf[v] > stop)) continue;
+                    const float d = std::min(gridS.closest(mQueries[size_t(slot)], vertexOf(mPositions, mPosComps, v),
+                                                           nullptr, nullptr, nullptr, stop > 0.0f ? stop : -1.0f),
+                                             mIslands.capOf[v]);
+                    if (!std::isfinite(d) || d <= stop) continue;
+                    local = std::max(local, d);
+                    if (d > lockExact) found[c].push_back(removed[i]);
+                }
+                chunkMax[c] = local;
+            });
+            for (size_t c = 0; c < range.count; ++c) {
+                offenders.insert(offenders.end(), found[c].begin(), found[c].end());
+                vertexTerm = std::max(vertexTerm, chunkMax[c]);
+            }
+        }
+        // THE ISLANDS' BOUND is what the group will store, as far as the verify knows it:
+        // its exact vertex term (a lower bound of the measured error), at most the lock's
+        // bound, at least the precision floor — an island bigger than the group's stored
+        // error is never dropped (atom.dag_bound_bar's (c)).
+        const float islandBound = std::max(std::min(vertexTerm, lockExact), mFloorLen);
+        // THE HAND-ON, for the result the group keeps (computed only when the verify
+        // answers NULL — a retried result is never kept, a stuck one is terminal): every
+        // removed vertex goes to the simplified triangle it stands nearest.
+        const auto handOn = [&]() {
+            std::vector<unsigned> nearestTri(removed.size(), 0u);
+            bakepool::forRange(bakepool::Range(removed.size(), kVerifyGrain), mWidth,
+                               [&](size_t, size_t begin, size_t end, int slot) {
+                                   for (size_t i = begin; i < end; ++i)
+                                       gridS.closest(mQueries[size_t(slot)],
+                                                     vertexOf(mPositions, mPosComps, mRegionV[removed[i]]), nullptr,
+                                                     nullptr, &nearestTri[i]);
+                               });
+            const size_t sTris = simplifiedCount / 3;
+            for (size_t i = 0; i < removed.size(); ++i)
+                mPending.emplace_back(triKeyOf(simplified + std::min<size_t>(nearestTri[i], sTris - 1) * 3),
+                                      mRegionV[removed[i]]);
+            return nullptr;
+        };
+
+        // 2. THE LOST FACETS (the measurement's term 3 and its per-facet walk): the
+        //    level-0 facets that lost all three corners here or below, walked EXACTLY
+        //    (`facetMax`) against the SAMPLED bound — the measurement multiplies its area
+        //    samples by the sampling margin, and a sample never reads more than its
+        //    facet's maximum, so a facet within lockExact / margin keeps both the samples
+        //    and the exact walk within the lock's bound, whatever points the samples are.
+        std::vector<unsigned> lostIdx;
+        for (unsigned ri : removed)
+            for (unsigned t : mTrisByAnchor[mRegionV[ri]]) {
+                const unsigned b = mBase[t * 3 + 1], c = mBase[t * 3 + 2];
+                if (mRegionAt[b] != mRegionStamp || mRegionAt[c] != mRegionStamp) continue;
+                if (mKeptAt[b] == mKeptStamp || mKeptAt[c] == mKeptStamp) continue;
+                lostIdx.insert(lostIdx.end(), { mBase[t * 3], b, c });
+            }
+        gather(lostIdx.size() / 3, [&](size_t t, surface::TriangleGrid::Query &q, std::vector<unsigned> &found) {
+            const unsigned v0 = lostIdx[t * 3];
+            if (!(mIslands.capOf[v0] > lockSampled)) return;
+            const float m = facetMax(vertexOf(mPositions, mPosComps, lostIdx[t * 3]),
+                                     vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 1]),
+                                     vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 2]), lockSampled, error, mFloorLen,
+                                     [&](const Vec3 &p, Vec3 *tri, float within) {
+                                         return nearestOn(mPositions, mPosComps, gridS, sIdx, q, p, tri, within);
+                                     });
+            if (std::min(m, mIslands.capOf[v0]) > lockSampled)
+                for (size_t k = 0; k < 3; ++k) found.push_back(mRegionIdx[lostIdx[t * 3 + k]]);
+        });
+
+        // 3. AN ISLAND BIGGER THAN THE GROUP'S BOUND IS NOT DROPPED (DAG-LOCK-1, the
+        //    chain's rule), PART BY PART: a level-0 component bigger than the bound that
+        //    the group's input holds some of must keep some of it — a group that would
+        //    remove all of its part keeps the part's largest input triangle. (By part, not
+        //    "wholly inside the region": an island straddling two groups had each remove
+        //    its half, and the group above found it dropped with nothing left to hold —
+        //    the scan stand-in's 8.4 m island under a 5.4 m bound.)
+        std::vector<unsigned> islandTri;   // per component at risk: its largest input triangle
+        {
+            std::unordered_map<unsigned, size_t> slot;
+            std::vector<float> area;
+            std::vector<unsigned char> keeps;
+            for (size_t t = 0; t < inputTris; ++t) {
+                const unsigned *tri = group + t * 3;
+                const unsigned comp = mIslands.compOf[tri[0]];
+                if (comp >= mIslands.count() || !(mIslands.extent[comp] > islandBound)) continue;
+                auto it = slot.find(comp);
+                if (it == slot.end()) {
+                    it = slot.emplace(comp, islandTri.size()).first;
+                    islandTri.push_back(unsigned(t));
+                    area.push_back(-1.0f);
+                    keeps.push_back(0u);
+                }
+                const size_t k = it->second;
+                for (size_t c = 0; c < 3; ++c)
+                    if (mKeptAt[tri[c]] == mKeptStamp) keeps[k] = 1u;
+                const Vec3 a = vertexOf(mPositions, mPosComps, tri[0]), b = vertexOf(mPositions, mPosComps, tri[1]),
+                           c = vertexOf(mPositions, mPosComps, tri[2]);
+                const float ar = Vec3::crossProduct(b - a, c - a).length();
+                if (ar > area[k]) { area[k] = ar; islandTri[k] = unsigned(t); }
+            }
+            for (size_t k = 0; k < islandTri.size(); ++k)
+                if (!keeps[k])
+                    for (size_t c = 0; c < 3; ++c) offenders.push_back(mRegionIdx[group[size_t(islandTri[k]) * 3 + c]]);
+        }
+
+        if (offenders.empty()) return handOn();
+        mLastOffended = true;
+        if (mRetries >= kGroupRetries) return handOn();   // past the retries: the measurement charges it
+
+        // THE LOCK: an offender still in the group locks its fan; one removed below
+        // this depth locks the corners of the input triangle it was handed to.
+        ++mHitStamp;
+        for (unsigned ri : offenders) {
+            const unsigned v = mRegionV[ri];
+            if (mHostOf[ri] < 0) { mHitAt[mWeld[v]] = mHitStamp; continue; }
+            const unsigned *t = group + size_t(mHostOf[ri]) * 3;
+            for (size_t k = 0; k < 3; ++k) mKeepAt[mWeld[t[k]]] = mHitStamp;
+        }
+        for (size_t t = 0; t < inputTris; ++t) {
+            const unsigned *tri = group + t * 3;
+            if (mHitAt[mWeld[tri[0]]] != mHitStamp && mHitAt[mWeld[tri[1]]] != mHitStamp &&
+                mHitAt[mWeld[tri[2]]] != mHitStamp) continue;
+            for (size_t k = 0; k < 3; ++k) mKeepAt[mWeld[tri[k]]] = mHitStamp;
+        }
+        // EVERY ISLAND AT RISK, AT ONCE: a group that must be re-simplified keeps the
+        // largest input triangle of every component bigger than its bound — not only
+        // the ones this attempt dropped. (Held one at a time, a debris field is
+        // whack-a-mole: the simplifier reaches its target by dropping the next island,
+        // measured on the scan stand-in's depth-2 groups.)
+        for (unsigned t : islandTri)
+            for (size_t k = 0; k < 3; ++k) mKeepAt[mWeld[group[size_t(t) * 3 + k]]] = mHitStamp;
+        size_t added = 0;
+        for (size_t i = 0; i < groupCount; ++i) {
+            const unsigned u = group[i];
+            if (mKeepAt[mWeld[u]] != mHitStamp || mLock[u]) continue;
+            mLock[u] = 1u;   // meshopt_SimplifyVertex_Lock
+            mLockTouched.push_back(u);
+            ++added;
+        }
+        // A position locked on only SOME of the group's indices opens the cut (the
+        // sloppy fallback moves the free twin): counted, always 0 by construction.
+        for (unsigned u : mLockTouched) mPosLockedAt[mWeld[u]] = mRegionStamp;
+        for (size_t i = 0; i < groupCount; ++i)
+            if (mPosLockedAt[mWeld[group[i]]] == mRegionStamp && !mLock[group[i]]) ++mSplit;
+        if (!added) return handOn();   // nothing new to lock: another attempt would be the same
+        ++mRetries;
+        return mLock.data();
+    }
+
+    const float *mPositions;
+    int mPosComps;
+    const std::vector<unsigned> &mBase;
+    const std::vector<std::vector<unsigned>> &mTrisByAnchor;
+    const lodchain::Islands &mIslands;
+    float mFloorLen;
+    int mWidth;
+    surface::Queries mQueries;
+    std::vector<unsigned> mWeld;          ///< vertex -> the first vertex at its position
+    std::vector<unsigned> mRegionAt, mRegionIdx, mPosLockedAt, mKeptAt, mHitAt, mKeepAt;
+    unsigned mRegionStamp = 0, mKeptStamp = 0, mHitStamp = 0;
+    std::vector<unsigned char> mLock;     ///< the current group's lock (vertex-indexed)
+    std::vector<unsigned> mLockTouched;
+    std::vector<unsigned> mRegionV;       ///< the group's region (level-0 vertices)
+    std::vector<int> mHostOf;             ///< per region vertex: its input triangle, or -1 when it is an input vertex
+    std::vector<TriKey> mInputKeys;
+    std::unordered_map<TriKey, std::vector<unsigned>, TriKeyHash> mHanded;
+    std::vector<std::pair<TriKey, unsigned>> mPending;
+    bool mPendingValid = false, mLastOffended = false;
+    int mRetries = 0, mTotalRetries = 0, mUnconverged = 0, mTerminal = 0, mLockedVertices = 0, mShared = 0, mSplit = 0;
+    std::array<int, kGroupRetries + 1> mRetryHistogram {};
+    std::vector<int> mRetriesByDepth;
+    int mDepth = 0;
+    double mVerifyMs = 0.0;
+};
+
+void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant variant)
 {
     if (mesh.isNull()) return;
     mesh->clusterDag = MeshClusterDag();
@@ -4036,10 +4517,24 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
     cm.vertex_positions_stride = posStride;
     cm.vertex_attributes = attrCount ? attribs.data() : nullptr;
     cm.vertex_attributes_stride = sizeof(float) * attrCount;
-    cm.vertex_lock = vertexLock;   // the displacement lock's (DAG-LOCK-1), or none on the first build
     cm.attribute_weights = attrCount ? weights.data() : nullptr;
     cm.attribute_count = attrCount;
     cm.attribute_protect_mask = protectMaskFor(variant, normals != nullptr, uvs != nullptr);
+
+    // Level-0 triangles by their first corner, for the lost facets, the area term and the stats.
+    std::vector<std::vector<unsigned>> trisByAnchor(nv);
+    for (size_t t = 0; t < baseTris; ++t) trisByAnchor[base[t * 3]].push_back(unsigned(t));
+    // THE ISLANDS (the chain's represented-surface rule, `lodchain::Islands`): once,
+    // over level 0, before the build, and READ-ONLY after — every group's level-0
+    // side is capped at its island's extent (the verify and the measurement).
+    const lodchain::Islands islands = lodchain::findIslands(positions, posComps, nv, base);
+    const size_t samplesCap = baseTris > size_t(lodchain::kBoundBigTriangles)
+                                  ? size_t(lodchain::kBoundSamplesBig) : size_t(lodchain::kBoundSamples);
+    // THE DISPLACEMENT LOCK, PER GROUP (patch 0003's hook, `GroupVerifier` above).
+    GroupVerifier verifier(positions, posComps, nv, base, trisByAnchor, islands,
+                           extent > 0.0f ? extent * lodchain::kBoundFloorRel : 0.0f);
+    cm.verify_group = &GroupVerifier::hook;
+    cm.verify_group_context = &verifier;
 
     // ---- the build ------------------------------------------------------
     struct RawCluster
@@ -4055,6 +4550,7 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
     clodBuild(configFor(variant), cm,
               [&](clodGroup group, const clodCluster *clusters, size_t count) -> int {
                   const int id = int(groups.size());
+                  verifier.output(group.simplified.error == FLT_MAX);
                   groups.push_back(group);
                   for (size_t i = 0; i < count; ++i) {
                       RawCluster rc;
@@ -4067,6 +4563,7 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
                   return id;
               });
     const auto t1 = std::chrono::steady_clock::now();
+    if (stats) verifier.fill(stats);
     if (raw.empty() || groups.empty()) return;
 
     // ---- provenance + the measured error ---------------------------------
@@ -4131,9 +4628,6 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
                 if (!ownStamp[v]) { ownStamp[v] = 1; regionOwn[c].push_back(v); }
         }
     }
-    // Level-0 triangles by their first corner, for the area term and the stats.
-    std::vector<std::vector<unsigned>> trisByAnchor(nv);
-    for (size_t t = 0; t < baseTris; ++t) trisByAnchor[base[t * 3]].push_back(unsigned(t));
 
     // The WHOLE level-0 surface, once: the simplified geometry is measured
     // against it (the "did it add surface" direction needs no provenance).
@@ -4146,8 +4640,6 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
     surface::TriangleGrid baseGrid;
     baseGrid.build(positions, posComps, base, mlo, mhi, lodchain::boundGridRes(baseTris));
 
-    const size_t samplesCap = baseTris > size_t(lodchain::kBoundBigTriangles)
-                                  ? size_t(lodchain::kBoundSamplesBig) : size_t(lodchain::kBoundSamples);
     const float floorLen = extent > 0.0f ? extent * lodchain::kBoundFloorRel : 0.0f;
     // A group whose region holds this many level-0 vertices runs its own query
     // loops on the pool (the roots of a big mesh; see `measureGroup`).
@@ -4171,24 +4663,6 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
     std::vector<std::vector<size_t>> byWave(static_cast<size_t>(waves));
     for (size_t g = 0; g < groups.size(); ++g) byWave[size_t(wave[g])].push_back(g);
 
-    // THE ISLANDS (the chain's represented-surface rule, `lodchain::Islands`): once,
-    // over level 0, before the waves, and READ-ONLY inside them — every group's
-    // level-0 side is capped at its island's extent.
-    const lodchain::Islands islands = lodchain::findIslands(positions, posComps, nv, base);
-    // Each component's LARGEST level-0 triangle — what the lock keeps of an island a
-    // group would drop (DAG-LOCK-1).
-    std::vector<unsigned> largestTri(islands.count(), UINT_MAX);
-    if (overOut) {
-        std::vector<float> largestArea(islands.count(), -1.0f);
-        for (size_t t = 0; t < baseTris; ++t) {
-            const unsigned comp = islands.compOf[base[t * 3]];
-            if (comp >= islands.count()) continue;
-            const Vec3 a = vertexOf(positions, posComps, base[t * 3]), b = vertexOf(positions, posComps, base[t * 3 + 1]),
-                       c = vertexOf(positions, posComps, base[t * 3 + 2]);
-            const float area = Vec3::crossProduct(b - a, c - a).length();
-            if (area > largestArea[comp]) { largestArea[comp] = area; largestTri[comp] = unsigned(t); }
-        }
-    }
     QVector<MeshBake::ClusterDagStats::GroupTerms> *terms =
         stats && stats->wantTerms ? &stats->groupTerms : nullptr;
     if (terms) terms->resize(int(groups.size()));
@@ -4207,20 +4681,9 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
     std::vector<size_t> groupFallbacks(groups.size(), 0);
     const bool termsLog = std::getenv("JAH_BAKE_DAG_TERMS") != nullptr;
     std::vector<QString> termLines(termsLog ? groups.size() : 0);
-    std::mutex overMutex;   // the lock's input list (DAG-LOCK-1): rare pushes from the waves
     const auto measureGroup = [&](size_t g, Scratch &sc) {
         if (groups[g].simplified.error == FLT_MAX || outputs[g].empty()) return;   // terminal
         std::vector<surface::Sample> &pts = sc.pts;
-        // THE DISPLACEMENT LOCK's thresholds (DAG-LOCK-1): an EXACT point past
-        // kDagLockFactor x the group's own simplifier error, a SAMPLED one past that over
-        // the sampling margin (the stored error multiplies the sampled terms by it).
-        const float lockExact = kDagLockFactor * groups[g].simplified.error;
-        const float lockSampled = lockExact / lodchain::kBoundMargin;
-        const auto lockVerts = [&](std::initializer_list<unsigned> vs) {
-            if (!overOut) return;
-            std::lock_guard<std::mutex> hold(overMutex);
-            for (unsigned v : vs) overOut->push_back(v);
-        };
         // S: the group's simplified output.
         std::vector<unsigned> simplifiedIdx, ownerOfTri;
         for (int o : outputs[g]) {
@@ -4408,9 +4871,7 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
             unsigned tri = 0u;
             const float d = gridS.closest(q, vertexOf(positions, posComps, v), nullptr, nullptr, &tri);
             removedOwner[l] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);
-            const float dc = capped(d, v);
-            if (dc > lockExact) lockVerts({ v });   // displaced past the budget (DAG-LOCK-1)
-            return dc;
+            return capped(d, v);
         });
         const float termV = exact;
         std::vector<unsigned> lostIdx;
@@ -4431,57 +4892,45 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
                                        samplesCap), &pts) > 0.0f)
             sampled = runningMax(pts.size(), sampled, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
                 const unsigned v0 = lostIdx[size_t(pts[i].tri) * 3];
-                // The lock must SEE every point past its threshold, so the max-only
-                // query never stops above it (DAG-LOCK-1).
-                const float st = overOut ? std::min(stop, lockSampled) : stop;
-                if (!(islands.capOf[v0] > st)) return 0.0f;     // this island cannot raise it
+                if (!(islands.capOf[v0] > stop)) return 0.0f;     // this island cannot raise it
                 const float d = whole ? gridS.closest(q, pts[i].pos)
-                                      : gridS.closest(q, pts[i].pos, nullptr, nullptr, nullptr, st);
-                const float dc = capped(d, v0);
-                if (dc > lockSampled) {
-                    const size_t t = size_t(pts[i].tri) * 3;
-                    lockVerts({ lostIdx[t], lostIdx[t + 1], lostIdx[t + 2] });
-                }
-                return dc;
+                                      : gridS.closest(q, pts[i].pos, nullptr, nullptr, nullptr, stop);
+                return capped(d, v0);
             });
-        // THE PER-FACET WALK (the chain's F1, exact per point, no margin): the
-        // distance from a union of triangles peaks inside a facet, where neither the
-        // removed vertices nor the samples need look. Every LOST level-0 facet (term
-        // 3's set: a facet with a kept corner can sit half under a neighbour's
-        // surface — the staircase term 3 already refuses) against S, island-capped;
-        // and every facet of S that is not a level-0 facet against level 0 (surface
-        // the group ADDED; the local soup answers within `reach`, the whole grid past
-        // it — the term-1 rule). SEVEN POINTS a facet — the centroid, the three edge
-        // midpoints and the centroids of the 1-to-4 split (the corners are the vertex
-        // term's) — not the chain's four: a group is a patch whose facets can be long
-        // slivers against a rim, and the four-point walk read 0.042 where the dense
-        // reference found 0.139 inside one such facet (the endless plane's depth-4
-        // group, measured by atom.lod_bound_bar's DAG half).
-        const auto facetPts = [&](unsigned ia, unsigned ib, unsigned ic, Vec3 *out) {
-            const Vec3 a = vertexOf(positions, posComps, ia), b = vertexOf(positions, posComps, ib),
-                       c = vertexOf(positions, posComps, ic);
-            out[0] = (a + b + c) * (1.0f / 3.0f);
-            out[1] = (a + b) * 0.5f;
-            out[2] = (b + c) * 0.5f;
-            out[3] = (c + a) * 0.5f;
-            out[4] = (a * 4.0f + b + c) * (1.0f / 6.0f);
-            out[5] = (b * 4.0f + c + a) * (1.0f / 6.0f);
-            out[6] = (c * 4.0f + a + b) * (1.0f / 6.0f);
+        // THE PER-FACET WALK (the chain's F1, no margin): the distance from a union of
+        // triangles peaks inside a facet, where neither the removed vertices nor the
+        // samples need look. Every LOST level-0 facet (term 3's set: a facet with a kept
+        // corner can sit half under a neighbour's surface — the staircase term 3 already
+        // refuses) against S, island-capped; and every facet of S that is not a level-0
+        // facet against level 0 (surface the group ADDED; the local soup answers within
+        // `reach`, the whole grid past it — the term-1 rule). EXACT PER FACET to a
+        // tolerance (`facetMax`, CLUSTER-LOCK-3; was seven fixed points): a group is a
+        // patch whose facets can be long slivers against a rim, and fixed points missed
+        // the peak inside one (the endless plane's depth-4 group).
+        const auto corner = [&](const std::vector<unsigned> &idx, size_t t, int k) {
+            return vertexOf(positions, posComps, idx[t * 3 + size_t(k)]);
         };
-        exact = runningMax(lostIdx.size() / 3, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop0) {
+        exact = runningMax(lostIdx.size() / 3, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop) {
             const unsigned v0 = lostIdx[t * 3];
-            const float stop = overOut ? std::min(stop0, lockExact) : stop0;   // (DAG-LOCK-1, as above)
             if (!(islands.capOf[v0] > stop)) return 0.0f;
-            Vec3 fp[7];
-            facetPts(lostIdx[t * 3], lostIdx[t * 3 + 1], lostIdx[t * 3 + 2], fp);
-            float m = 0.0f;
-            for (const Vec3 &pt : fp) {
-                const float d = whole ? gridS.closest(q, pt)
-                                      : gridS.closest(q, pt, nullptr, nullptr, nullptr, std::max(stop, m));
-                if (std::isfinite(d)) m = std::max(m, capped(d, v0));
-            }
-            if (m > lockExact) lockVerts({ lostIdx[t * 3], lostIdx[t * 3 + 1], lostIdx[t * 3 + 2] });
-            return m;
+            const auto walk = [&](size_t budget) {
+                return facetMax(corner(lostIdx, t, 0), corner(lostIdx, t, 1), corner(lostIdx, t, 2), stop,
+                                groups[g].simplified.error, floorLen,
+                                [&](const Vec3 &p, Vec3 *tri, float within) {
+                                    return whole ? nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri, -1.0f)
+                                                 : nearestOn(positions, posComps, gridS, simplifiedIdx, q, p, tri, within);
+                                }, budget);
+            };
+            // Most facets close in a few pieces; one that does not is usually lying on S
+            // (a flat stretch), which its cover answers exactly; the rest walk in full.
+            const float quick = walk(kFacetQuickPieces);
+            if (!std::isnan(quick)) return capped(quick, v0);
+            thread_local std::vector<unsigned> coverScratch;
+            const float flat = coplanarCover(positions, posComps, gridS, simplifiedIdx, corner(lostIdx, t, 0),
+                                             corner(lostIdx, t, 1), corner(lostIdx, t, 2),
+                                             std::max(floorLen, 0.05f * groups[g].simplified.error), coverScratch);
+            if (flat >= 0.0f) return capped(flat, v0);
+            return capped(walk(SIZE_MAX), v0);
         });
         {
             const bool useSoup = !whole && haveSoup;
@@ -4499,8 +4948,10 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
                                               simplifiedIdx[t * 3 + 2] };
                 std::sort(f.begin(), f.end());
                 if (std::binary_search(present.begin(), present.end(), f)) return 0.0f;
-                Vec3 fp[7];
-                facetPts(simplifiedIdx[t * 3], simplifiedIdx[t * 3 + 1], simplifiedIdx[t * 3 + 2], fp);
+                const Vec3 a = corner(simplifiedIdx, t, 0), b = corner(simplifiedIdx, t, 1), c = corner(simplifiedIdx, t, 2);
+                const Vec3 fp[7] = { (a + b + c) * (1.0f / 3.0f), (a + b) * 0.5f, (b + c) * 0.5f, (c + a) * 0.5f,
+                                     (a * 4.0f + b + c) * (1.0f / 6.0f), (b * 4.0f + c + a) * (1.0f / 6.0f),
+                                     (c * 4.0f + a + b) * (1.0f / 6.0f) };
                 float m = 0.0f;
                 for (const Vec3 &pt : fp) {
                     const float st = std::max(stop, m);
@@ -4512,28 +4963,6 @@ void buildOnce(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant va
             });
         }
         measured[g] = std::max(std::max(sampled * lodchain::kBoundMargin, exact), floorLen);
-        // AN ISLAND BIGGER THAN THE GROUP'S ERROR IS NOT DROPPED (DAG-LOCK-1, the chain's
-        // rule): a level-0 component wholly inside the region with no vertex kept, whose
-        // extent passes what the group stores, keeps its largest triangle.
-        if (overOut) {
-            std::vector<unsigned> comps;
-            for (unsigned v : regionV)
-                if (islands.compOf[v] < islands.count()) comps.push_back(islands.compOf[v]);
-            std::sort(comps.begin(), comps.end());
-            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
-            for (unsigned comp : comps) {
-                if (!(islands.extent[comp] > measured[g]) || largestTri[comp] == UINT_MAX) continue;
-                bool dropped = true;
-                for (unsigned i = islands.vertStart[comp]; i < islands.vertStart[comp + 1] && dropped; ++i) {
-                    const size_t lw = local(islands.verts[i]);
-                    if (lw == kAbsent || !inRegion[lw] || kept[lw]) dropped = false;
-                }
-                if (dropped) {
-                    const size_t t = size_t(largestTri[comp]) * 3;
-                    lockVerts({ base[t], base[t + 1], base[t + 2] });
-                }
-            }
-        }
         if (measured[g] < groups[g].simplified.error) below[g] = 1;
         if (termsLog)
             termLines[g] = (QStringLiteral("dag terms: group %1 depth %2  R %3 verts  S %4 tris  S->L0 %5  "
@@ -5015,12 +5444,14 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards)
         const MeshBake::ClusterDagStats &st = dagStats[i];
         if (st.clusters > 0)
             irisLog(QStringLiteral("mesh bake: cluster DAG %1 (mesh %2): %3 clusters, %4 groups, depth %5; "
-                                   "fixes: %6 monotone, %7 sphere; %8 ms (clodBuild %9, measure %10)")
+                                   "fixes: %6 monotone, %7 sphere; %8 ms (clodBuild %9 incl. verify %10, measure %11); "
+                                   "lock: %12 group retries, %13 unconverged, %14 made terminal")
                         .arg(QFileInfo(filePath).fileName()).arg(i).arg(st.clusters)
                         .arg(st.groups).arg(st.depth).arg(st.monotoneFixes)
                         .arg(st.sphereFixes)
                         .arg(st.buildMs + st.measureMs, 0, 'f', 1)
-                        .arg(st.buildMs, 0, 'f', 1).arg(st.measureMs, 0, 'f', 1));
+                        .arg(st.buildMs, 0, 'f', 1).arg(st.verifyMs, 0, 'f', 1).arg(st.measureMs, 0, 'f', 1)
+                        .arg(st.groupRetries).arg(st.groupsUnconverged).arg(st.groupsMadeTerminal));
     }
 }
 
