@@ -3,7 +3,9 @@
 // A 3D table: two axes are the view DIRECTION in the sky view's own
 // parameterisation (the azimuth from the sun, the zenith angle sqrt-spaced
 // towards the horizon), the third is DISTANCE — slice s at planet.w * (s / (N-1))^2,
-// slice 0 the eye itself. Each texel is the light the air scatters towards the
+// slice 0 the eye itself — plus one last slice holding the SKY: the light
+// scattered along the whole ray to the top of the air (what the World fog fades
+// towards; read for the rays that reach space only). Each texel is the light the air scatters towards the
 // eye between the eye and that distance along that direction (rgb, a sun of
 // unit illuminance, single + multiple scattering) and the mean transmittance
 // over the same stretch (a) — what every lit pixel, the cloud sheet and the
@@ -74,13 +76,13 @@ void main()
 	const float cosTheta = dot( rd, toSun );
 	const float phaseR = jahAtmoRayleighPhase( cosTheta );
 	const float phaseM = jahAtmoMiePhase( atmoMie.w, cosTheta );
-	const float slices = float( size.z );
+	const float slices = float( size.z - 1 );   // the distance slices; the last is the sky
 
 	vec3 L = vec3( 0.0 );
 	vec3 throughput = vec3( 1.0 );
 	imageStore( aerialLut, ivec3( px, 0 ), vec4( 0.0, 0.0, 0.0, 1.0 ) );
 	const int kSub = 4;
-	for( int s = 1; s < size.z; ++s )
+	for( int s = 1; s < size.z - 1; ++s )
 	{
 		const float a = jahAtmoApSliceKm( float( s - 1 ), atmoPlanet, slices );
 		const float b = jahAtmoApSliceKm( float( s ), atmoPlanet, slices );
@@ -109,5 +111,40 @@ void main()
 		}
 		imageStore( aerialLut, ivec3( px, s ),
 					vec4( L, dot( throughput, vec3( 1.0 / 3.0 ) ) ) );
+	}
+	// THE SKY SLICE: on from the far distance slice to where the ray leaves the
+	// air (or meets the planet), quadratic steps, no ground term.
+	{
+		const float a = jahAtmoApSliceKm( slices - 1.0, atmoPlanet, slices );
+		const float tBottom = jahAtmoRaySphere( ro, rd, atmoPlanet.x );
+		const float tTop = max( jahAtmoRaySphere( ro, rd, atmoPlanet.y ), 0.0 );
+		const float tEnd = tBottom > 0.0 ? tBottom : tTop;
+		const int kSky = 32;
+		for( int k = 0; k < kSky && tEnd > a; ++k )
+		{
+			const float f0 = float( k ) / float( kSky ), f1 = float( k + 1 ) / float( kSky );
+			const float t0 = a + ( tEnd - a ) * f0 * f0;
+			const float t1 = a + ( tEnd - a ) * f1 * f1;
+			const float dt = t1 - t0;
+			vec3 p = ro + rd * ( t0 + 0.5 * dt );
+			float pr = length( p );
+			if( pr < atmoPlanet.x + 1e-3 )
+			{
+				p *= ( atmoPlanet.x + 1e-3 ) / pr;
+				pr = atmoPlanet.x + 1e-3;
+			}
+			const vec3 up = p / pr;
+			vec3 scatR, ext;
+			float scatM;
+			jahAtmoMedium( pr - atmoPlanet.x, atmoRayleigh, atmoMie, atmoOzone, scatR, scatM, ext );
+			const vec3 stepT = exp( -ext * dt );
+			const float sunCos = dot( up, toSun );
+			const float shadow = jahAtmoRaySphere( p, toSun, atmoPlanet.x - 1e-3 ) >= 0.0 ? 0.0 : 1.0;
+			const vec3 S = shadow * jahTransmittance( pr, sunCos ) * ( scatR * phaseR + vec3( scatM * phaseM ) ) +
+						   jahMultiScatter( pr, sunCos ) * ( scatR + vec3( scatM ) );
+			L += throughput * ( S - S * stepT ) / max( ext, vec3( 1e-9 ) );
+			throughput *= stepT;
+		}
+		imageStore( aerialLut, ivec3( px, size.z - 1 ), vec4( L, dot( throughput, vec3( 1.0 / 3.0 ) ) ) );
 	}
 }

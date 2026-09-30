@@ -782,9 +782,11 @@ enum class SkyMode { NoSky, Equirectangular, Cubemap, Atmosphere };   // 'None' 
 /// never per frame (Scene::atmosphereStatus counts the rebuilds).
 ///
 /// THE SUN IS THE HOST'S LIGHT. `sunDir` and `sunIlluminance` are pushed from
-/// the scene's sun light; the sky is LIT by it, so a scene with no sun has a
-/// black sky (the night) and a brighter sun makes a brighter sky. The sun disc
-/// is SunDisc's (one mechanism over every sky type).
+/// the scene's sun light; the sky is LIT by it, so a brighter sun makes a
+/// brighter sky and a sun of zero illuminance a black one (the mirror pushes
+/// zero for a scene with no sun light: the night). A DIRECT engine caller that
+/// says nothing gets the defaults: a white sun of intensity 1 at the zenith.
+/// The sun disc is SunDisc's (one mechanism over every sky type).
 ///
 /// THE DIALS MEAN PHYSICAL THINGS, and 1 is the paper's clear Earth for each
 /// scale (Rayleigh scattering (5.802, 13.558, 33.1)e-6 per metre over an 8 km
@@ -824,7 +826,8 @@ struct AtmosphereSky {
     float planetRadiusKm = 6360.0f;
     float atmosphereHeightKm = 100.0f;
     /// Unit vector FROM the scene TOWARDS the sun, in world space — the scene's
-    /// sun light's direction, reversed, pushed by the host.
+    /// sun light's direction, reversed, pushed by the host. With `hasSun` false
+    /// the sun stands at the zenith.
     float sunDir[3] = { 0.0f, 1.0f, 0.0f };
     bool  hasSun    = false;
     /// THE SUN'S ILLUMINANCE in the renderer's units — the sun light's linear
@@ -833,8 +836,8 @@ struct AtmosphereSky {
     /// the sun at NOON receives), untinted by the air: the engine divides by the
     /// zenith transmittance to get the light at the top of the atmosphere, so
     /// the picked colour stays the noon colour (atmosphereSunTint's contract).
-    /// Zero, or `hasSun` false: the sky is black.
-    Colour sunIlluminance { 0.0f, 0.0f, 0.0f, 1.0f };
+    /// Zero: the sky is black. The default is a white sun of intensity 1 (pi).
+    Colour sunIlluminance { 3.14159265f, 3.14159265f, 3.14159265f, 1.0f };
 
     /// "Is this the same SKY?" — every field that moves a sky pixel (a change
     /// tears nothing down any more, but it re-captures the environment the Sky

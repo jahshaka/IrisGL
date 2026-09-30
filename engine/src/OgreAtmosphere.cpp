@@ -45,13 +45,13 @@ constexpr float kOzoneAbsorb[3] = { 0.650e-3f, 1.881e-3f, 0.085e-3f };
 /// layout JahFog_piece_vs_piece_ps.any declares (`JahAtmoSettings`, instance
 /// `atmoSettings` — upstream's fog block reads its first three floats by name).
 struct AtmoSettingsGpu {
-    float fogDensity;
-    float fogBreakMinBrightness;   ///< upstream's packing: min x falloff
-    float fogBreakFalloff;         ///< ...and -falloff
-    float aerialScale;
-    float skyE[4];                 ///< rgb = the sun at the top of the air, w = 1 with the air on
-    float sunDir[4];               ///< xyz = towards the sun
-    float planet[4];               ///< bottom radius, top radius, observer radius, aerial far (km)
+    float fogDensity = 0.0f;
+    float fogBreakMinBrightness = 0.0f;   ///< upstream's packing: min x falloff
+    float fogBreakFalloff = 0.0f;         ///< ...and -falloff
+    float aerialScale = 1.0f;
+    float skyE[4] = { 0.0f, 0.0f, 0.0f, 0.0f };     ///< rgb = the sun at the top of the air, w = 1 with the air on
+    float sunDir[4] = { 0.0f, 1.0f, 0.0f, 0.0f };   ///< xyz = towards the sun
+    float planet[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   ///< bottom radius, top radius, observer radius, aerial far (km)
 };
 
 Ogre::TextureGpu *makeLut(Ogre::TextureGpuManager *tm, const std::string &name,
@@ -99,7 +99,7 @@ void JahAtmosphere::createTextures() {
     mTrans = makeLut(tm, "JahAtmo/Transmittance/" + id, Ogre::TextureTypes::Type2D, kTransW, kTransH, 1u);
     mMs = makeLut(tm, "JahAtmo/MultiScatter/" + id, Ogre::TextureTypes::Type2D, kMsSize, kMsSize, 1u);
     mSkyView = makeLut(tm, "JahAtmo/SkyView/" + id, Ogre::TextureTypes::Type2D, kSkyW, kSkyH, 1u);
-    mAerial = makeLut(tm, "JahAtmo/Aerial/" + id, Ogre::TextureTypes::Type3D, kApW, kApH, kApD);
+    mAerial = makeLut(tm, "JahAtmo/Aerial/" + id, Ogre::TextureTypes::Type3D, kApW, kApH, kApD + 1u);
 }
 
 // THE SKY QUAD — the sun disc's recipe and its three traps (DOCS/traps/ENGINE.md:
@@ -150,7 +150,10 @@ void JahAtmosphere::setModel(const AtmosphereModel &m) {
 }
 
 void JahAtmosphere::setSun(const Ogre::Vector3 &toSun, bool hasSun) {
-    Ogre::Vector3 d = toSun.squaredLength() > 1e-12f ? toSun.normalisedCopy() : Ogre::Vector3::UNIT_Y;
+    // No sun direction: the zenith (AtmosphereSky's contract — whether the sky
+    // is LIT is the illuminance's business, not this flag's).
+    Ogre::Vector3 d = hasSun && toSun.squaredLength() > 1e-12f ? toSun.normalisedCopy()
+                                                               : Ogre::Vector3::UNIT_Y;
     if (d == mToSun && hasSun == mHasSun) return;
     mToSun = d;
     mHasSun = hasSun;
@@ -220,9 +223,8 @@ Ogre::Vector3 JahAtmosphere::transmittance(float rKm, float mu) const {
 // The sun at the top of the air: the noon illuminance the host pushed, over
 // the zenith transmittance at the observer, so a white sun at noon lights the
 // ground exactly as white as the user's colour says (atmosphereSunTint's
-// contract). Zero with no sun.
+// contract). Zero with a sun of zero illuminance (the host's night).
 Ogre::Vector3 JahAtmosphere::topIlluminance() const {
-    if (!mHasSun) return Ogre::Vector3::ZERO;
     const Ogre::Vector3 tz = transmittance(observerRadiusKm(), 1.0f);
     return Ogre::Vector3(mSunNoon.x / std::max(tz.x, 1e-6f), mSunNoon.y / std::max(tz.y, 1e-6f),
                          mSunNoon.z / std::max(tz.z, 1e-6f));
@@ -378,7 +380,12 @@ bool JahAtmosphere::measure(unsigned iterations, AtmosphereCost &out) {
     out = AtmosphereCost();
     if (!iterations) return false;
     Ogre::RenderSystem *rs = mRoot->getRenderSystem();
-    struct Row { const char *job; Ogre::TextureGpu *dst, *a, *b; unsigned gx, gy; double *ms; };
+    struct Row {
+        const char *job = nullptr;
+        Ogre::TextureGpu *dst = nullptr, *a = nullptr, *b = nullptr;
+        unsigned gx = 0u, gy = 0u;
+        double *ms = nullptr;
+    };
     const Row rows[] = {
         { "Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u, &out.transmittanceMs },
         { "Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize / 8u, kMsSize / 8u, &out.multiScatterMs },

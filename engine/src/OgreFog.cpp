@@ -54,7 +54,7 @@ std::map<const Ogre::SceneManager *, FogHlmsListener::AtmoBind>
 namespace {
 // THE EXTRA PASS TEXTURES, IN THEIR ONE FIXED ORDER (the sky's environment,
 // then the gather's irradiance, then the cloud field — CLOUDS-2D-1 — then the
-// sun contact visibility — PHOTON-RAYS-1 — then the atmosphere's sky view and
+// sun contact visibility — PHOTON-RAYS-1 — then the atmosphere's
 // aerial-perspective volume — SKY-ATMOSPHERE-1). Three
 // places must agree about it: the count (getNumExtraPassTextures), the
 // registers (propertiesMergedPreGenerationStep) and the bindings
@@ -70,7 +70,6 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_probe_gather", "jahProbeIrradiance" },
     { "jah_cloud_shadow", "jahCloudField" },
     { "jah_sun_contact",  "jahSunVis" },
-    { "jah_atmo_sky",     "jahAtmoSky" },
     { "jah_atmo_ap",      "jahAtmoAerial" },
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
@@ -83,7 +82,6 @@ const Ogre::IdString &extraSlotProperty(size_t i) {
         Ogre::IdString(kExtraPassSlots[2].property),
         Ogre::IdString(kExtraPassSlots[3].property),
         Ogre::IdString(kExtraPassSlots[4].property),
-        Ogre::IdString(kExtraPassSlots[5].property),
     };
     return ids[i];
 }
@@ -268,7 +266,7 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
     if (casterPass || !commandBuffer || !datablock || !datablock->getCreator()) return;
     const PassBinds &pb = sPass[datablock->getCreator()->getType()];
     // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance,
-    // the cloud field, the sun contact visibility, the atmosphere's two tables.
+    // the cloud field, the sun contact visibility, the atmosphere's volume.
     // Each pair was set together in preparePassHash with its property, or not
     // at all.
     const struct { Ogre::TextureGpu *tex; const Ogre::HlmsSamplerblock *sampler; } bound[] = {
@@ -276,7 +274,6 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
         { pb.probeGather, pb.probeGatherSampler },
         { pb.cloudField, pb.cloudSampler },
         { pb.sunVis, pb.sunVisSampler },
-        { pb.atmoSky, pb.atmoSampler },
         { pb.atmoAerial, pb.atmoSampler },
     };
     static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
@@ -338,8 +335,8 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                                       bool, Ogre::SceneManager *sceneManager, Ogre::Hlms *hlms) {
     PassBinds unused;
     PassBinds &pb = hlms ? sPass[hlms->getType()] : unused;
-    // THE PLANET'S ATMOSPHERE'S TABLES (SKY-ATMOSPHERE-1), first and
-    // unconditionally for a colour pass: the pair of PROPERTIES is also the
+    // THE PLANET'S ATMOSPHERE'S VOLUME (SKY-ATMOSPHERE-1), first and
+    // unconditionally for a colour pass: its PROPERTY is also the
     // fog's colour mode (the media file's air and its per-pixel World fog are
     // gated on them, and upstream's per-vertex colour is redefined away), so it
     // has to be set before any of the early returns below — and it takes part
@@ -347,18 +344,15 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // than silently keep the old shader. The textures, the sampler and the
     // properties are set together or not at all (an unbound claimed slot is an
     // undefined descriptor).
-    pb.atmoSky = nullptr;
     pb.atmoAerial = nullptr;
     pb.atmoSampler = nullptr;
     if (hlms && !casterPass && sceneManager && !sAtmo.empty() && lookup(sceneManager).atmosphere) {
         auto it = sAtmo.find(sceneManager);
-        if (it != sAtmo.end() && it->second.skyView && it->second.aerial) {
+        if (it != sAtmo.end() && it->second.aerial) {
             const Ogre::HlmsSamplerblock *linear = acquireSampler(hlms->getHlmsManager(), true);
             if (linear) {
-                pb.atmoSky = it->second.skyView;
                 pb.atmoAerial = it->second.aerial;
                 pb.atmoSampler = linear;
-                hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_atmo_sky", 1);
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_atmo_ap", 1);
             }
         }
@@ -595,7 +589,7 @@ void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
 
 void FogHlmsListener::setAtmosphere(const Ogre::SceneManager *sm, const AtmoBind &bind) {
     if (!sm) return;
-    if (!bind.skyView || !bind.aerial) { sAtmo.erase(sm); return; }
+    if (!bind.aerial) { sAtmo.erase(sm); return; }
     sAtmo[sm] = bind;
 }
 

@@ -59,6 +59,8 @@ public:
     static constexpr unsigned kTransW = 256u, kTransH = 64u;
     static constexpr unsigned kMsSize = 32u;
     static constexpr unsigned kSkyW = 192u, kSkyH = 108u;
+    /// kApD distance slices and one more for the sky (the texture is kApD + 1
+    /// deep; jah_atmosphere.glsl, jahAtmoApW).
     static constexpr unsigned kApW = 32u, kApH = 64u, kApD = 32u;
     /// The aerial volume's far slice (km): past it the air in front of a surface
     /// is held at this distance's. 100 km reaches the cloud sheet's far edge.
@@ -105,7 +107,7 @@ public:
     const Ogre::Vector3 &sunDir() const { return mToSun; }
     /// The sun at the top of the air, in the renderer's units (0 with no sun).
     Ogre::Vector3 topOfAir() const { return topIlluminance(); }
-    Ogre::TextureGpu *skyViewLut() const { return mSkyView; }
+    Ogre::TextureGpu *skyViewLut() const { return mSkyView; }   // the sky quad's alone
     Ogre::TextureGpu *aerialLut() const { return mAerial; }
     AtmosphereStatus status() const;
     bool measure(unsigned iterations, AtmosphereCost &out);

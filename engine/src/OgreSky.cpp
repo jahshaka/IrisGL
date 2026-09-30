@@ -525,7 +525,6 @@ void OgreScene::syncAtmosphere() {
         mAtmosphere->setAirOn(mAtmoSkyOn);
         FogHlmsListener::AtmoBind bind;
         if (mAtmoSkyOn) {
-            bind.skyView = mAtmosphere->skyViewLut();
             bind.aerial = mAtmosphere->aerialLut();
         }
         FogHlmsListener::setAtmosphere(mSceneMgr, bind);

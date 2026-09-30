@@ -191,18 +191,17 @@
 	@property( jah_sun_contact )
 		vulkan_layout( ogre_t@value(jahSunVis) ) uniform texture2D jahSunVis;
 	@end
-	// THE PLANET'S ATMOSPHERE'S TABLES (SKY-ATMOSPHERE-1): the sky view and the
-	// aerial-perspective volume, both read with the environment's trilinear
-	// clamped block (one sampler per slot, the pair bound by
-	// FogHlmsListener::hlmsTypeChanged), then the model's arithmetic (the piece
-	// the build wraps from src/rayquery/include/jah_atmosphere.glsl) and the two
-	// reads the fog below makes. The tables hold radiance for a sun of unit
-	// illuminance; atmoSettings.skyE is the sun at the top of the air.
+	// THE PLANET'S ATMOSPHERE'S AERIAL-PERSPECTIVE VOLUME (SKY-ATMOSPHERE-1),
+	// ONE pass texture (the pin's pass-texture table is 64 slots and a busy
+	// pass is near it): its distance slices and, in its last slice, the sky
+	// itself. Read with the environment's trilinear clamped block (bound by
+	// FogHlmsListener::hlmsTypeChanged), then the model's arithmetic (the
+	// piece the build wraps from src/rayquery/include/jah_atmosphere.glsl) and
+	// the two reads the fog below makes. The volume holds radiance for a sun of
+	// unit illuminance; atmoSettings.skyE is the sun at the top of the air.
 	@property( jah_atmo_ap )
-		vulkan_layout( ogre_t@value(jahAtmoSky) ) uniform texture2D jahAtmoSky;
 		vulkan_layout( ogre_t@value(jahAtmoAerial) ) uniform texture3D jahAtmoAerial;
 		@property( syntax == glslvk )
-			layout( ogre_s@value(jahAtmoSky) ) uniform sampler jahAtmoSkySampler;
 			layout( ogre_s@value(jahAtmoAerial) ) uniform sampler jahAtmoAerialSampler;
 		@end
 		@insertpiece( JahAtmosphere )
@@ -215,11 +214,12 @@
 			return OGRE_SampleLevel( jahAtmoAerial, jahAtmoAerialSampler, float3( uv, w ), 0.0 );
 		}
 		// The sky's radiance (unit sun) at the direction's azimuth, held above the
-		// horizon: what a medium that hides the planet fades towards.
+		// horizon: what a medium that hides the planet fades towards (the
+		// volume's sky slice).
 		float3 jahAtmoSkyAbove( float3 dir )
 		{
-			const float2 uv = jahAtmoDirUvAbove( dir, atmoSettings.sunDir.xyz, atmoSettings.planet, float2( 192.0, 108.0 ) );
-			return OGRE_SampleLevel( jahAtmoSky, jahAtmoSkySampler, uv, 0.0 ).xyz;
+			const float2 uv = jahAtmoDirUvAbove( dir, atmoSettings.sunDir.xyz, atmoSettings.planet, float2( 32.0, 64.0 ) );
+			return OGRE_SampleLevel( jahAtmoAerial, jahAtmoAerialSampler, float3( uv, jahAtmoApSkyW( 32.0 ) ), 0.0 ).xyz;
 		}
 	@end
 @end

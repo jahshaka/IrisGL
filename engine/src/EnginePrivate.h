@@ -2574,7 +2574,7 @@ struct FogState {
     float heightLevel   = 0.0f;
     /// The planet's atmosphere is the scene's sky — read in preparePassHash,
     /// where it claims the atmosphere's two tables as pass textures
-    /// (`jah_atmo_sky`, `jah_atmo_ap`): our media file then does the WHOLE fog
+    /// (`jah_atmo_ap`): our media file then does the WHOLE fog
     /// per pixel — the air's aerial perspective, then the World fog towards the
     /// sky's own radiance (upstream's block is left an identity, the
     /// component's density 0); with it false the authored colour (r, g, b
@@ -2729,14 +2729,15 @@ public:
     static void             setCloudShadow(const Ogre::SceneManager *sm, const CloudShadowState &state);
     static CloudShadowState cloudShadow(const Ogre::SceneManager *sm);
 
-    /// THE PLANET'S ATMOSPHERE'S TABLES (SKY-ATMOSPHERE-1): the sky view and
-    /// the aerial-perspective volume, two more extra pass textures on the same
-    /// three-hook route (`jah_atmo_sky` / `jah_atmo_ap`, registers `jahAtmoSky`
-    /// / `jahAtmoAerial`), claimed by every colour pass of a scene whose sky is
-    /// the atmosphere (FogState::atmosphere) and read by JahFog's piece.
-    /// Registered by OgreScene::syncAtmosphere; null = not the sky.
+    /// THE PLANET'S ATMOSPHERE'S VOLUME (SKY-ATMOSPHERE-1): the aerial
+    /// perspective, with the sky in its last slice — ONE more extra pass
+    /// texture on the same three-hook route (`jah_atmo_ap`, register
+    /// `jahAtmoAerial`; ONE because the pin's pass-texture table is 64 slots and
+    /// a pass with the gather, the clouds and the sun contact claimed filled it
+    /// with two), claimed by every colour pass of a scene whose sky is the
+    /// atmosphere (FogState::atmosphere) and read by JahFog's piece. Registered
+    /// by OgreScene::syncAtmosphere; null = not the sky.
     struct AtmoBind {
-        Ogre::TextureGpu *skyView = nullptr;
         Ogre::TextureGpu *aerial = nullptr;
     };
     static void setAtmosphere(const Ogre::SceneManager *sm, const AtmoBind &bind);
@@ -2852,8 +2853,7 @@ private:
         const Ogre::HlmsSamplerblock *cloudSampler = nullptr;
         Ogre::TextureGpu             *sunVis = nullptr;               // PHOTON-RAYS-1
         const Ogre::HlmsSamplerblock *sunVisSampler = nullptr;
-        Ogre::TextureGpu             *atmoSky = nullptr;              // SKY-ATMOSPHERE-1
-        Ogre::TextureGpu             *atmoAerial = nullptr;
+        Ogre::TextureGpu             *atmoAerial = nullptr;             // SKY-ATMOSPHERE-1
         const Ogre::HlmsSamplerblock *atmoSampler = nullptr;
     };
     static PassBinds sPass[Ogre::HLMS_MAX];                            // render thread only

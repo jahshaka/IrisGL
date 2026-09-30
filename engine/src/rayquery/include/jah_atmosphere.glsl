@@ -217,13 +217,21 @@ vec2 jahAtmoDirUvAbove( vec3 dir, vec3 toSun, vec4 planet, vec2 res )
 }
 
 // ---- the aerial-perspective volume's depth axis -----------------------------
-// `slices` slices, slice s at distance planet.w * ( s / ( slices - 1 ) )^2 — slice
-// 0 is the eye itself (nothing in front of it), the near slices metres apart.
-// Returns the texture coordinate for a distance in km.
+// `slices` DISTANCE slices, slice s at planet.w * ( s / ( slices - 1 ) )^2 —
+// slice 0 is the eye itself (nothing in front of it), the near slices metres
+// apart — and ONE MORE slice after them (index `slices`): the sky itself, the
+// light scattered along the whole ray to the top of the air, for the rays that
+// reach space (a medium that hides the planet fades towards it). The texture is
+// `slices` + 1 deep. Returns the texture coordinate for a distance in km (held
+// on the distance slices: a distance past the far one reads the far one).
 float jahAtmoApW( float distKm, vec4 planet, float slices )
 {
 	const float s = sqrt( clamp( distKm / planet.w, 0.0, 1.0 ) ) * ( slices - 1.0 );
-	return ( s + 0.5 ) / slices;
+	return ( s + 0.5 ) / ( slices + 1.0 );
+}
+float jahAtmoApSkyW( float slices )
+{
+	return ( slices + 0.5 ) / ( slices + 1.0 );
 }
 float jahAtmoApSliceKm( float s, vec4 planet, float slices )
 {
