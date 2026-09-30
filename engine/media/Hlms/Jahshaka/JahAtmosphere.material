@@ -1,0 +1,35 @@
+// THE PLANET'S ATMOSPHERE'S SKY (SKY-ATMOSPHERE-1): a full-screen quad at render
+// queue 0, subgroup 1 — the sky's place, inside the environment capture's range
+// — whose fragment program reads the sky-view table for the camera ray
+// (JahAtmosphereSky_ps.glsl). Depth CHECK on, depth WRITE off, at the far plane:
+// the scene drawn afterwards covers it exactly as it covers any sky. The
+// constants and the table are pushed per scene (OgreAtmosphere.cpp): NO
+// param_named defaults here (a param_named in a fragment_program_ref is applied
+// before the Vulkan constant table exists — DOCS/traps/ENGINE.md).
+material Jahshaka/AtmosphereSky
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Jahshaka/SunDisc_vs
+			{
+			}
+			fragment_program_ref Jahshaka/AtmosphereSky_ps
+			{
+			}
+
+			// The table spans the whole sphere of directions; its u wraps
+			// nowhere (the azimuth is folded about the sun) — clamped, bilinear.
+			texture_unit skyViewLut
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}

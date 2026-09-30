@@ -1,0 +1,428 @@
+// THE PLANET'S ATMOSPHERE (SKY-ATMOSPHERE-1) — Atmosphere.h says what the
+// component owns and why it has Ogre's AtmosphereComponent shape; Types.h
+// (AtmosphereSky) states the model and its constants.
+//
+// THE FRAME. Nothing here runs per frame unless an input moved: `update()` is
+// called once a frame per drawn scene, inside the frame and before the sky
+// capture (OgreEngine::renderOneFrame), and on a still frame it compares four
+// flags and returns. A dial change rebuilds all four tables (their dispatches
+// are measured by Scene::measureAtmosphere); a sun change rebuilds the sky view
+// and the aerial volume; the aerial scale, the fog and the sun's intensity are
+// constants in a buffer and cost an upload.
+#include "EnginePrivate.h"
+#include "Atmosphere.h"
+
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreShaderParams.h>
+#include <OgreMaterialManager.h>
+#include <OgreTechnique.h>
+#include <OgrePass.h>
+#include <OgreTextureUnitState.h>
+#include <CommandBuffer/OgreCbShaderBuffer.h>
+#include <CommandBuffer/OgreCommandBuffer.h>
+#include <Vao/OgreConstBufferPacked.h>
+
+#include <chrono>
+#include <cmath>
+
+namespace jahshaka { namespace engine { namespace detail {
+
+namespace {
+
+// THE CLEAR EARTH (Hillaire 2020, the reference implementation's defaults), per
+// KILOMETRE. The Mie pair is scattering and EXTINCTION (absorption 0.444e-3 is
+// their difference) — the brief's "sigma_a 4.40e-6" reads the extinction.
+constexpr float kRayleighScatter[3] = { 5.802e-3f, 13.558e-3f, 33.1e-3f };
+constexpr float kRayleighScaleHeightKm = 8.0f;
+constexpr float kMieScatter = 3.996e-3f;
+constexpr float kMieExtinction = 4.440e-3f;
+constexpr float kMieScaleHeightKm = 1.2f;
+constexpr float kMieG = 0.8f;
+constexpr float kOzoneAbsorb[3] = { 0.650e-3f, 1.881e-3f, 0.085e-3f };
+
+/// The const buffer HlmsPbs binds while the component is registered, in the
+/// layout JahFog_piece_vs_piece_ps.any declares (`JahAtmoSettings`, instance
+/// `atmoSettings` — upstream's fog block reads its first three floats by name).
+struct AtmoSettingsGpu {
+    float fogDensity;
+    float fogBreakMinBrightness;   ///< upstream's packing: min x falloff
+    float fogBreakFalloff;         ///< ...and -falloff
+    float aerialScale;
+    float skyE[4];                 ///< rgb = the sun at the top of the air, w = 1 with the air on
+    float sunDir[4];               ///< xyz = towards the sun
+    float planet[4];               ///< bottom radius, top radius, observer radius, aerial far (km)
+};
+
+Ogre::TextureGpu *makeLut(Ogre::TextureGpuManager *tm, const std::string &name,
+                          Ogre::TextureTypes::TextureTypes type, unsigned w, unsigned h,
+                          unsigned d) {
+    Ogre::TextureGpu *t = tm->createTexture(name, Ogre::GpuPageOutStrategy::Discard,
+                                            Ogre::TextureFlags::Uav, type);
+    t->setResolution(w, h, d);
+    t->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
+    t->setNumMipmaps(1u);
+    // Resident for good (the probe gather's rule): these tables live as long as
+    // the scene's atmosphere does.
+    t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    return t;
+}
+
+}  // namespace
+
+JahAtmosphere::JahAtmosphere(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::uint32 visibleBit)
+    : mRoot(root), mSceneMgr(sm), mVisibleBit(visibleBit) {
+    Ogre::VaoManager *vao = mRoot->getRenderSystem()->getVaoManager();
+    mBuffer = vao->createConstBuffer(sizeof(AtmoSettingsGpu), Ogre::BT_DEFAULT, nullptr, false);
+    createTextures();
+    createQuad();
+}
+
+JahAtmosphere::~JahAtmosphere() {
+    // Unregistered first: a SceneManager must never hold a dead component.
+    if (mSceneMgr && mSceneMgr->getAtmosphereRaw() == this) mSceneMgr->_setAtmosphere(nullptr);
+    if (mQuad) { mSceneMgr->destroyRectangle2D(mQuad); mQuad = nullptr; }
+    if (mQuadMaterial) {
+        Ogre::MaterialManager::getSingleton().remove(mQuadMaterial);
+        mQuadMaterial.reset();
+    }
+    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+    Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+    for (Ogre::TextureGpu **t : { &mTrans, &mMs, &mSkyView, &mAerial })
+        if (*t) { tm->destroyTexture(*t); *t = nullptr; }
+    if (mBuffer) { rs->getVaoManager()->destroyConstBuffer(mBuffer); mBuffer = nullptr; }
+}
+
+void JahAtmosphere::createTextures() {
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    const std::string id = Ogre::StringConverter::toString(mSceneMgr->getId());
+    mTrans = makeLut(tm, "JahAtmo/Transmittance/" + id, Ogre::TextureTypes::Type2D, kTransW, kTransH, 1u);
+    mMs = makeLut(tm, "JahAtmo/MultiScatter/" + id, Ogre::TextureTypes::Type2D, kMsSize, kMsSize, 1u);
+    mSkyView = makeLut(tm, "JahAtmo/SkyView/" + id, Ogre::TextureTypes::Type2D, kSkyW, kSkyH, 1u);
+    mAerial = makeLut(tm, "JahAtmo/Aerial/" + id, Ogre::TextureTypes::Type3D, kApW, kApH, kApD);
+}
+
+// THE SKY QUAD — the sun disc's recipe and its three traps (DOCS/traps/ENGINE.md:
+// update() after setGeometry, the identity flags OFF, the static AABB), the
+// camera ray derived by the shared screen-ray vertex program (so the VR
+// session's stereo swap recognises it by name, OgreVrSession syncStereoQuads).
+void JahAtmosphere::createQuad() {
+    Ogre::MaterialManager &mm = Ogre::MaterialManager::getSingleton();
+    Ogre::MaterialPtr base = std::static_pointer_cast<Ogre::Material>(
+        mm.load("Jahshaka/AtmosphereSky", Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME));
+    if (!base)
+        OGRE_EXCEPT(Ogre::Exception::ERR_FILE_NOT_FOUND,
+                    "the atmosphere's sky material Jahshaka/AtmosphereSky is not staged",
+                    "JahAtmosphere::createQuad");
+    // A per-SCENE clone: the constants below are this scene's sky.
+    const Ogre::String name =
+        "Jahshaka/AtmosphereSky" + Ogre::StringConverter::toString(mSceneMgr->getId());
+    if (Ogre::MaterialPtr stale = mm.getByName(name)) mm.remove(stale);
+    mQuadMaterial = base->clone(name);
+    mQuadMaterial->load();
+
+    mQuad = mSceneMgr->createRectangle2D(Ogre::SCENE_STATIC);
+    mQuad->initialize(Ogre::BT_DEFAULT, Ogre::Rectangle2D::GeometryFlagQuad);
+    mQuad->setGeometry(-Ogre::Vector2::UNIT_SCALE, Ogre::Vector2(2.0f));
+    mQuad->update();
+    mQuad->setUseIdentityView(false);
+    mQuad->setUseIdentityProjection(false);
+    // QUEUE 0, SUBGROUP 1: the sky's place (Ogre's own sky quad's, which this
+    // scene then does not have) — after a VR eye's hidden-area mesh at subgroup
+    // 0, before the cloud sheet at 2, inside the environment capture's range.
+    mQuad->setRenderQueueGroup(0u);
+    mQuad->setRenderQueueSubGroup(1u);
+    mQuad->setCastShadows(false);
+    mQuad->setVisibilityFlags(0u);   // hidden until the air is the sky
+    mSceneMgr->getRootSceneNode(Ogre::SCENE_STATIC)->attachObject(mQuad);
+    mSceneMgr->notifyStaticAabbDirty(mQuad);
+    mQuad->setMaterial(mQuadMaterial);
+    Ogre::Pass *pass = mQuadMaterial->getTechnique(0)->getPass(0);
+    if (Ogre::TextureUnitState *tu = pass->getTextureUnitState("skyViewLut")) tu->setTexture(mSkyView);
+}
+
+// ---- the inputs -------------------------------------------------------------
+void JahAtmosphere::setModel(const AtmosphereModel &m) {
+    if (m == mModel) return;
+    mModel = m;
+    ++mModelGeneration;
+    mDirtyTables = mDirtySun = mDirtyBuffer = mDirtyQuad = true;
+}
+
+void JahAtmosphere::setSun(const Ogre::Vector3 &toSun, bool hasSun) {
+    Ogre::Vector3 d = toSun.squaredLength() > 1e-12f ? toSun.normalisedCopy() : Ogre::Vector3::UNIT_Y;
+    if (d == mToSun && hasSun == mHasSun) return;
+    mToSun = d;
+    mHasSun = hasSun;
+    mDirtySun = mDirtyBuffer = mDirtyQuad = true;
+}
+
+void JahAtmosphere::setSunIlluminance(const Ogre::Vector3 &noon) {
+    if (noon == mSunNoon) return;
+    mSunNoon = noon;
+    mDirtyBuffer = mDirtyQuad = true;
+}
+
+void JahAtmosphere::setAerialScale(float s) {
+    s = std::max(0.0f, s);
+    if (s == mAerialScale) return;
+    mAerialScale = s;
+    mDirtyBuffer = true;
+}
+
+void JahAtmosphere::setFogBlock(float density, float breakMin, float breakFalloff) {
+    if (density == mFogDensity && breakMin == mFogBreakMin && breakFalloff == mFogBreakFalloff) return;
+    mFogDensity = density;
+    mFogBreakMin = breakMin;
+    mFogBreakFalloff = breakFalloff;
+    mDirtyBuffer = true;
+}
+
+void JahAtmosphere::setAirOn(bool on) {
+    if (on == mAirOn) return;
+    mAirOn = on;
+    mDirtyBuffer = true;
+    if (mQuad) mQuad->setVisibilityFlags(on ? mVisibleBit : 0u);
+}
+
+// ---- the CPU half of the model ------------------------------------------------
+// THE TRANSMITTANCE TABLE'S INTEGRAL, on the CPU: the same medium
+// (jah_atmosphere.glsl, jahAtmoMedium) along the same ray to the top of the air,
+// with more steps than the table uses (the table is interpolated; this is not).
+Ogre::Vector3 JahAtmosphere::transmittance(float rKm, float mu) const {
+    const double Rb = mModel.planetRadiusKm, Rt = Rb + mModel.atmosphereHeightKm;
+    const double r = std::max(double(rKm), Rb);
+    mu = std::max(-1.0f, std::min(1.0f, mu));
+    // distance to the top of the air
+    const double b = r * mu;
+    const double c = r * r - Rt * Rt;
+    const double disc = b * b - c;
+    const double tTop = disc > 0.0 ? std::max(0.0, -b + std::sqrt(disc)) : 0.0;
+    const int kSteps = 256;
+    const double dt = tTop / kSteps;
+    const double sinT = std::sqrt(std::max(0.0, 1.0 - double(mu) * mu));
+    double depth[3] = { 0.0, 0.0, 0.0 };
+    for (int i = 0; i < kSteps; ++i) {
+        const double t = (i + 0.5) * dt;
+        const double px = sinT * t, py = r + double(mu) * t;
+        const double h = std::max(0.0, std::sqrt(px * px + py * py) - Rb);
+        const double dR = std::exp(-h / kRayleighScaleHeightKm);
+        const double dM = std::exp(-h / kMieScaleHeightKm);
+        const double dO = mModel.ozone ? std::max(0.0, 1.0 - std::fabs(h - 25.0) / 15.0) : 0.0;
+        for (int k = 0; k < 3; ++k)
+            depth[k] += (kRayleighScatter[k] * mModel.rayleighScale * dR +
+                         kMieExtinction * mModel.mieScale * dM + kOzoneAbsorb[k] * dO) * dt;
+    }
+    return Ogre::Vector3(float(std::exp(-depth[0])), float(std::exp(-depth[1])),
+                         float(std::exp(-depth[2])));
+}
+
+// The sun at the top of the air: the noon illuminance the host pushed, over
+// the zenith transmittance at the observer, so a white sun at noon lights the
+// ground exactly as white as the user's colour says (atmosphereSunTint's
+// contract). Zero with no sun.
+Ogre::Vector3 JahAtmosphere::topIlluminance() const {
+    if (!mHasSun) return Ogre::Vector3::ZERO;
+    const Ogre::Vector3 tz = transmittance(observerRadiusKm(), 1.0f);
+    return Ogre::Vector3(mSunNoon.x / std::max(tz.x, 1e-6f), mSunNoon.y / std::max(tz.y, 1e-6f),
+                         mSunNoon.z / std::max(tz.z, 1e-6f));
+}
+
+// ---- the GPU half -----------------------------------------------------------
+void JahAtmosphere::pushJobParams(Ogre::HlmsComputeJob *job) const {
+    Ogre::ShaderParams &sp = job->getShaderParams("default");
+    const float Rb = mModel.planetRadiusKm, Rt = Rb + mModel.atmosphereHeightKm;
+    const auto set = [&sp](const char *name, const Ogre::Vector4 &v) {
+        if (Ogre::ShaderParams::Param *p = sp.findParameter(name)) p->setManualValue(v);
+    };
+    set("atmoPlanet", Ogre::Vector4(Rb, Rt, Rb + kObserverKm, kApMaxKm));
+    set("atmoRayleigh", Ogre::Vector4(kRayleighScatter[0] * mModel.rayleighScale,
+                                      kRayleighScatter[1] * mModel.rayleighScale,
+                                      kRayleighScatter[2] * mModel.rayleighScale, kRayleighScaleHeightKm));
+    set("atmoMie", Ogre::Vector4(kMieScatter * mModel.mieScale, kMieExtinction * mModel.mieScale,
+                                 kMieScaleHeightKm, kMieG));
+    const float oz = mModel.ozone ? 1.0f : 0.0f;
+    set("atmoOzone", Ogre::Vector4(kOzoneAbsorb[0] * oz, kOzoneAbsorb[1] * oz, kOzoneAbsorb[2] * oz, 0.0f));
+    set("atmoGround", Ogre::Vector4(mModel.groundAlbedo, mModel.groundAlbedo, mModel.groundAlbedo, 0.0f));
+    set("atmoSun", Ogre::Vector4(mToSun.x, mToSun.y, mToSun.z, 0.0f));
+    sp.setDirty();
+}
+
+// One table job, the compositor's own compute discipline (bind, the job's
+// barriers through Ogre's solver, dispatch), the bindings released after it
+// (a job's descriptor sets hold raw pointers). `repeats` > 1 is the cost
+// measurement's slope.
+bool JahAtmosphere::runJob(const char *name, Ogre::TextureGpu *target, Ogre::TextureGpu *in0,
+                           Ogre::TextureGpu *in1, unsigned gx, unsigned gy, unsigned repeats) {
+    Ogre::HlmsManager *hm = mRoot->getHlmsManager();
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(name) : nullptr;
+    if (!job) {
+        Ogre::LogManager::getSingleton().logMessage(
+            std::string("Jahshaka atmosphere: compute job ") + name + " is not staged", Ogre::LML_CRITICAL);
+        return false;
+    }
+    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+    pushJobParams(job);
+    Ogre::HlmsSamplerblock ref;
+    ref.setFiltering(Ogre::TFO_BILINEAR);
+    ref.setAddressingMode(Ogre::TAM_CLAMP);
+    Ogre::TextureGpu *ins[2] = { in0, in1 };
+    for (Ogre::uint8 i = 0; i < 2; ++i) {
+        if (!ins[i]) continue;
+        Ogre::DescriptorSetTexture2::TextureSlot slot(Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+        slot.texture = ins[i];
+        job->setTexture(i, slot, &ref);
+    }
+    Ogre::DescriptorSetUav::TextureSlot uav = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+    uav.texture = target;
+    uav.access = Ogre::ResourceAccess::Write;
+    job->_setUavTexture(0u, uav);
+    job->setNumThreadGroups(gx, gy, 1u);
+    rs->endRenderPassDescriptor();
+    for (unsigned k = 0; k < repeats; ++k) {
+        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+        job->analyzeBarriers(rt);
+        rs->executeResourceTransition(rt);
+        hc->dispatch(job, nullptr, nullptr);
+    }
+    for (Ogre::uint8 i = 0; i < 2; ++i)
+        if (ins[i]) job->setTexture(i, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+    job->_setUavTexture(0u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+    return true;
+}
+
+// THE TABLES ARE HANDED TO THE SAMPLERS (the reflection cube's rule,
+// ENVPROBE-LAYOUT-1): no compositor pass names them, so nothing else would
+// move them out of the UAV layout the jobs left them in.
+void JahAtmosphere::handOver() {
+    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+    rs->endCopyEncoder();
+    Ogre::BarrierSolver &solver = rs->getBarrierSolver();
+    Ogre::ResourceTransitionArray trans;
+    for (Ogre::TextureGpu *t : { mSkyView, mAerial })
+        solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                 Ogre::c_allGraphicStagesMask);
+    rs->executeResourceTransition(trans);
+}
+
+void JahAtmosphere::uploadSettings() {
+    AtmoSettingsGpu g{};
+    // THE FOG BLOCK IN UPSTREAM'S PACKING (AtmosphereNpr::_update): the
+    // breakthrough as min x falloff and -falloff, so the stock block's
+    // arithmetic is unchanged under every sky that is not this one.
+    g.fogDensity = mFogDensity;
+    g.fogBreakMinBrightness = mFogBreakMin * mFogBreakFalloff;
+    g.fogBreakFalloff = -mFogBreakFalloff;
+    g.aerialScale = mAerialScale;
+    const Ogre::Vector3 e = topIlluminance();
+    g.skyE[0] = e.x; g.skyE[1] = e.y; g.skyE[2] = e.z; g.skyE[3] = mAirOn ? 1.0f : 0.0f;
+    g.sunDir[0] = mToSun.x; g.sunDir[1] = mToSun.y; g.sunDir[2] = mToSun.z; g.sunDir[3] = 0.0f;
+    const float Rb = mModel.planetRadiusKm;
+    g.planet[0] = Rb;
+    g.planet[1] = Rb + mModel.atmosphereHeightKm;
+    g.planet[2] = Rb + kObserverKm;
+    g.planet[3] = kApMaxKm;
+    mBuffer->upload(&g, 0u, sizeof(g));
+}
+
+void JahAtmosphere::pushQuadConstants() {
+    if (!mQuadMaterial) return;
+    Ogre::Pass *pass = mQuadMaterial->getTechnique(0)->getPass(0);
+    Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+    const float Rb = mModel.planetRadiusKm;
+    ps->setNamedConstant("atmoPlanet", Ogre::Vector4(Rb, Rb + mModel.atmosphereHeightKm,
+                                                     Rb + kObserverKm, kApMaxKm));
+    ps->setNamedConstant("atmoSunDir", Ogre::Vector4(mToSun.x, mToSun.y, mToSun.z, 0.0f));
+    const Ogre::Vector3 e = topIlluminance();
+    ps->setNamedConstant("atmoSkyE", Ogre::Vector4(e.x, e.y, e.z, 0.0f));
+}
+
+void JahAtmosphere::update() {
+    // The tables only while the air is the sky: a fog-only registration (the
+    // World fog under another sky) reads none of them, and the flags wait.
+    const bool tables = mDirtyTables;
+    const bool sun = mDirtySun || tables;
+    if (mAirOn && (tables || sun)) {
+        if (tables) {
+            if (runJob("Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u))
+                ++mStatus.transmittanceBuilds;
+            if (runJob("Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize / 8u, kMsSize / 8u))
+                ++mStatus.multiScatterBuilds;
+        }
+        if (runJob("Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u))
+            ++mStatus.skyViewBuilds;
+        if (runJob("Jahshaka/AtmoAerial", mAerial, mTrans, mMs, kApW / 8u, kApH / 8u))
+            ++mStatus.aerialBuilds;
+        handOver();
+        mDirtyTables = mDirtySun = false;
+    }
+    if (mDirtyBuffer) { uploadSettings(); mDirtyBuffer = false; }
+    if (mDirtyQuad) { pushQuadConstants(); mDirtyQuad = false; }
+}
+
+AtmosphereStatus JahAtmosphere::status() const {
+    AtmosphereStatus s = mStatus;
+    s.on = mAirOn;
+    const Ogre::Vector3 e = topIlluminance();
+    s.topIlluminance[0] = e.x; s.topIlluminance[1] = e.y; s.topIlluminance[2] = e.z;
+    return s;
+}
+
+// THE COST, as a SLOPE (OgreGpuCull.cpp measureJob's method and caveat: there
+// are no per-dispatch timestamps outside a compositor pass at this pin): each
+// job dispatched `iterations` times over its own inputs, flushed, the wall
+// clock of that less an empty flush's, per dispatch. An upper bound — it holds
+// the driver's per-dispatch cost too.
+bool JahAtmosphere::measure(unsigned iterations, AtmosphereCost &out) {
+    out = AtmosphereCost();
+    if (!iterations) return false;
+    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+    struct Row { const char *job; Ogre::TextureGpu *dst, *a, *b; unsigned gx, gy; double *ms; };
+    const Row rows[] = {
+        { "Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u, &out.transmittanceMs },
+        { "Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize / 8u, kMsSize / 8u, &out.multiScatterMs },
+        { "Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u, &out.skyViewMs },
+        { "Jahshaka/AtmoAerial", mAerial, mTrans, mMs, kApW / 8u, kApH / 8u, &out.aerialMs },
+    };
+    for (const Row &r : rows) {
+        rs->flushCommands();
+        const auto t0 = std::chrono::steady_clock::now();
+        rs->flushCommands();
+        const auto t1 = std::chrono::steady_clock::now();
+        if (!runJob(r.job, r.dst, r.a, r.b, r.gx, r.gy, iterations)) return false;
+        rs->flushCommands();
+        const auto t2 = std::chrono::steady_clock::now();
+        const double empty = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        const double full = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        *r.ms = std::max(0.0, full - empty) / double(iterations);
+    }
+    handOver();
+    return true;
+}
+
+// ---- Ogre::AtmosphereComponent -------------------------------------------------
+// HlmsPbs asks for this on every colour pass while the component is registered
+// (OgreHlmsPbs.cpp preparePassHash): `hlms_fog` switches upstream's fog block
+// and our piece on, and the slot is where our const buffer lands. The tables
+// themselves are pass textures claimed by FogHlmsListener (jah_atmo_*), which
+// also decides whether the air is on for the pass.
+Ogre::uint32 JahAtmosphere::preparePassHash(Ogre::Hlms *hlms, size_t constBufferSlot) {
+    hlms->_setProperty(Ogre::Hlms::kNoTid, Ogre::HlmsBaseProp::Fog, 1);
+    hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_atmo_buf", Ogre::int32(constBufferSlot));
+    return 1u;
+}
+
+Ogre::uint32 JahAtmosphere::bindConstBuffers(Ogre::CommandBuffer *commandBuffer, size_t slotIdx) {
+    *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
+        Ogre::VertexShader, Ogre::uint16(slotIdx), mBuffer, 0, Ogre::uint32(mBuffer->getTotalSizeBytes()));
+    *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
+        Ogre::PixelShader, Ogre::uint16(slotIdx), mBuffer, 0, Ogre::uint32(mBuffer->getTotalSizeBytes()));
+    return 1u;
+}
+
+// Nothing per camera: the sky quad derives each camera's ray itself, and every
+// constant here is the scene's, uploaded once per change in update().
+void JahAtmosphere::_update(Ogre::SceneManager *, Ogre::Camera *) {}
+
+}}}  // namespace jahshaka::engine::detail

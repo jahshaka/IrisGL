@@ -2892,9 +2892,9 @@ void OgreEngine::ensureHlms() {
         pbs->setStaticBranchingLights(true);
     }
     // Fog: append the per-scene fog colour + height parameters to every PBS pass
-    // buffer (the exponential distance term itself comes from the scene's
-    // AtmosphereNpr — OgreFog.cpp). Unlit gets no listener: gizmos, wires and
-    // billboards stay unfogged.
+    // buffer (the exponential distance term itself is upstream's block, fed by
+    // the scene's atmosphere component — OgreFog.cpp, Atmosphere.h). Unlit gets
+    // no listener: gizmos, wires and billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
     // generated shader (and its properties) there, for EVERY PBS-family host (a

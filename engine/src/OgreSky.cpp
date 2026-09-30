@@ -10,6 +10,7 @@
 // shares the scene (Ogre feeds the rectangle each camera's corner rays).
 #include <vector>
 #include "EnginePrivate.h"
+#include "Atmosphere.h"
 
 #include <cstdlib>
 
@@ -201,25 +202,17 @@ bool OgreScene::setSky(const SkyDesc &desc) {
             if (mSkyDesc.mode != SkyMode::NoSky) requestSkyCapture();
         }
     }
-    // THE SUN'S AIR is a fourth independent piece (lane SKY-DENSITY-1), for the
-    // same reason as the disc above: `sunHaze` is the only input to
-    // atmosphereSunTint and it changes NO sky pixel and no reflection, so
-    // dragging it must not tear the sky down, re-render the six capture faces,
-    // re-convolve the IBL cube or stale the probe grid. It is not part of
-    // AtmosphereSky's equality (Types.h says why); it is applied here.
+    // THE AERIAL PERSPECTIVE'S SCALE is an independent piece, for the same
+    // reason as the disc above: it moves the air on every lit surface and NO
+    // sky pixel, so dragging it must not re-capture the environment or rebuild
+    // a table. It is not part of AtmosphereSky's equality (Types.h says why);
+    // it is a constant in the atmosphere's buffer. The probe faces are fogged
+    // PBS renders, so they are stale exactly as a World fog edit makes them.
     if (desc.mode == SkyMode::Atmosphere &&
-        desc.atmosphere.sunHaze != mSkyDesc.atmosphere.sunHaze) {
-        mSkyDesc.atmosphere.sunHaze = desc.atmosphere.sunHaze;
-        mAtmoSunHaze = std::max(1.0f, desc.atmosphere.sunHaze);
-        ++mAtmoPresetGeneration;   // the tint's memo is keyed on this
-        // ...AND THE AIR'S AERIAL PERSPECTIVE (FOG-ATMO-1): the same turbidity is
-        // the air's extinction along every view ray, so a far surface's haze
-        // moves with it. No sky pixel does — but the probe faces are fogged PBS
-        // renders, so they are stale exactly as a World fog edit makes them.
-        if (mAtmoSkyOn) {
-            pushFogState();
-            staleProbeGrid(GiStaleReason::Fog);
-        }
+        desc.atmosphere.aerialScale != mSkyDesc.atmosphere.aerialScale) {
+        mSkyDesc.atmosphere.aerialScale = desc.atmosphere.aerialScale;
+        if (mAtmosphere) mAtmosphere->setAerialScale(desc.atmosphere.aerialScale);
+        if (mAtmoSkyOn) staleProbeGrid(GiStaleReason::Fog);
     }
     // THE CLOUD LAYER (CLOUDS-2D-1) is the fourth independent half. Three kinds
     // of change, three costs: the FIELD (coverage, density, the weather map)
@@ -397,49 +390,18 @@ bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
 }
 
 // ---------------------------------------------------------------------------
-// THE ANALYTIC SKY — Ogre's AtmosphereNpr (SKY-GPU, owner pick 5)
+// THE PLANET'S ATMOSPHERE (SKY-ATMOSPHERE-1)
 // ---------------------------------------------------------------------------
-// The "realistic" sky used to be a Preetham evaluation the HOST ran on the CPU,
-// up to 1024x512 pixels of pow/exp/acos per parameter change, on the UI thread,
-// into an equirect image that was then uploaded, resampled into six cube faces
-// and integrated for its ambient. The engine has its own analytic sky —
-// Components/Atmosphere, already built and already in this process for the FOG
-// — whose whole model is a fragment shader over the camera ray. This is the
-// adoption (ALL-IN ON OGRE): the sky is evaluated where a sky belongs.
-//
-// THREE THINGS THE COMPONENT DOES THAT WE DO NOT WANT, and how each is refused:
-//
-//   1. IT OVERWRITES THE LINKED LIGHT. syncToLight() sets the light's type,
-//      direction, diffuse AND specular colour and power scale from its own
-//      model, and pushes an ambient hemisphere pair into the SceneManager
-//      (OgreAtmosphereNpr.cpp:199-213). All of that is OURS: the sun is the
-//      user's directional light and the ambient is the Sky Light's SH. The
-//      refusal costs nothing and needs no patch — syncToLight() returns at its
-//      first line when no light is linked, and we never call setLight(). The
-//      link runs the OTHER way instead: the host pushes the sun light's
-//      direction into `sunDir` and this pushes it into the component.
-//
-//   2. ITS OWN SUN DISC. `sunPower` scales a pow(LdotV, ...) term in the sky
-//      shader; zero removes it. The disc is SunDisc's — one mechanism, over
-//      every sky type, at the sun light's angular size, with its own visibility
-//      channel so probe captures can exclude it. Two discs would be two suns.
-//
-//   3. ITS FOG, IN EVERY PBS SHADER — which is NOT refused any more (lane
-//      FOG-ATMO-1; it was zeroed until then). preparePassHash sets
-//      HlmsBaseProp::Fog for any scene the component is registered on, and
-//      registration is not optional: _update() — which writes the quad's
-//      per-camera corner rays — only runs for the SceneManager's registered
-//      atmosphere. So a scene with the analytic sky compiles the fog block
-//      whether or not the World fog is on — and under this sky that block is
-//      left an exact identity (density 0) while OUR piece does the fog per
-//      pixel: the AIR's aerial perspective at the atmosphere's own extinction
-//      (airFogDensity, below — the same turbidity the sun's tint reads, one
-//      atmosphere, one density) plus the World fog's when it is on, towards
-//      the sky quad's own radiance for the pixel's view ray. A far surface
-//      therefore fades into exactly the sky behind it, and the 2 km horizon
-//      plane with it (JahFog_piece_vs_piece_ps.any says why upstream's
-//      per-vertex colour could not do that). A scene with no analytic sky and
-//      no fog registers no atmosphere at all and its shaders are untouched.
+// The realistic sky is a physical model of a planet's air (Types.h,
+// AtmosphereSky; Atmosphere.h, the component that draws it). It replaced
+// Ogre's AtmosphereNpr, a non-physical gradient that pushed every view ray up
+// and clamped it at a border limit — so every pixel under the horizon repeated
+// the horizon's colour (a smear where sky met world, by design, and no dial
+// fixed it) — and a hand-matched aerial perspective beside it (a sea-level
+// extinction fogging towards that gradient). ONE model now answers the sky's
+// pixels, the sun's colour (atmosphereSunTint, below), the environment the Sky
+// Light captures, the cloud sheet's air and the aerial perspective on every
+// lit pixel.
 bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
     ensureAtmosphere();
     if (!mAtmosphere) return false;   // media missing: mError says so
@@ -455,312 +417,131 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
             mSkyOwnedTex = nullptr;
         }
-
-        Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
-        preset.densityCoeff     = std::max(0.0f, sky.density);
-        preset.densityDiffusion = std::max(0.0f, sky.diffusion);
-        preset.horizonLimit     = sky.horizon;
-        preset.skyColour        = Ogre::Vector3(sky.skyColour.r, sky.skyColour.g, sky.skyColour.b);
-        preset.skyPower         = std::max(0.0f, sky.skyPower);
-        preset.sunPower         = 0.0f;    // (2) above: the disc is SunDisc's
-        // THE FOG HALF (fogDensity and the breakthrough pair) is pushFogState's,
-        // reached through syncAtmosphere below once mAtmoSunHaze and
-        // mAtmoSkyOn hold this sky — never upstream's constructor default
-        // (`fogDensity( 0.0001f )`, a number with no physical source).
-        mAtmosphere->setPreset(preset);
-        // THE SUN'S OWN AIR IS NOT A PRESET FIELD (lane SKY-DENSITY-1): the
-        // component draws the sky, the transmittance below the atmosphere is
-        // ours, and nothing about this number reaches the sky pass. Held at or
-        // above a purely molecular atmosphere — under 1 the aerosol term would
-        // turn negative and AMPLIFY the beam.
-        mAtmoSunHaze = std::max(1.0f, sky.sunHaze);
-        ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
-
-        // THE SUN, PUSHED IN. setSunDir takes the direction the light TRAVELS
-        // (it negates internally: mSunDir = -sunDir) plus a normalised time of
-        // day, which the model uses for the sun's height terms; sin(elevation)
-        // of our own unit vector is that number, and asin/PI puts it in the
-        // [0;1] the component wants. With no sun light in the scene the sky is
-        // evaluated at the ZENITH sun (SKY-SUN-1): the same formula at toSun =
-        // +Y gives 0.5, a plain noon sky. timeOfDay 0 is the model's HORIZON — a
-        // sunset — which painted every sunless realistic-sky scene pink.
-        const Ogre::Vector3 toSun = sky.hasSun
-            ? Ogre::Vector3(sky.sunDir[0], sky.sunDir[1], sky.sunDir[2]).normalisedCopy()
-            : Ogre::Vector3::UNIT_Y;
-        const float elevation = std::max(-1.0f, std::min(1.0f, float(toSun.y)));
-        const float timeOfDay =
-            std::max(0.0f, std::min(1.0f - 1e-6f, std::asin(elevation) / float(M_PI)));
-        mAtmosphere->setSunDir(-toSun, timeOfDay);
-        mAtmoSunDir = -toSun;          // what the component is holding, for the tint query
-
+        AtmosphereModel m;
+        m.mieScale = std::max(0.0f, sky.sunHaze);
+        m.rayleighScale = std::max(0.0f, sky.rayleighScale);
+        m.ozone = sky.ozone;
+        m.groundAlbedo = std::max(0.0f, std::min(1.0f, sky.groundAlbedo));
+        m.planetRadiusKm = std::max(1.0f, sky.planetRadiusKm);
+        m.atmosphereHeightKm = std::max(1.0f, sky.atmosphereHeightKm);
+        mAtmosphere->setModel(m);
+        mAtmosphere->setSun(Ogre::Vector3(sky.sunDir[0], sky.sunDir[1], sky.sunDir[2]), sky.hasSun);
+        mAtmosphere->setSunIlluminance(
+            Ogre::Vector3(sky.sunIlluminance.r, sky.sunIlluminance.g, sky.sunIlluminance.b));
+        mAtmosphere->setAerialScale(sky.aerialScale);
         mAtmoSkyOn = true;
         syncAtmosphere();
         return true;
     } JAH_CATCH(mError, false);
 }
 
-// THE ATMOSPHERE'S TINT ON THE DIRECT SUNLIGHT (SUN_FOLLOWS_ATMOSPHERE, lane
-// ENGINE-7 item 6; the model below is lane SKY-DENSITY-1's; Engine.h states the
-// contract).
-//
-// WHAT IT IS. The fraction of the sun's beam that survives the trip down, per
-// channel, relative to the trip it makes at the zenith. That is Beer-Lambert
-// along ONE ray:
-//
-//     T(elevation) = exp( -tau * m(elevation) )
-//     tint         = T(elevation) / T(90 degrees)
-//
-// with `m` the relative AIRMASS and `tau` the atmosphere's optical depth per
-// channel. Divided by its own value at the zenith so the answer is exactly
-// (1,1,1) at noon — the user's picked colour IS the noon colour — and falls,
-// blue first, as the sun goes down.
-//
-// WHY IT IS NOT THE SKY'S DIAL ANY MORE (the defect this lane closes). Until
-// 2026-09-15 this quantity was read out of AtmosphereNpr's own preset:
-//
-//     lightDensity = densityCoeff / max(sunHeight, 0.0035)^0.75
-//     absorption   = 2 * exp2(-lightDensity * skyColour)
-//
-// — the NPR model's internal absorption term, which meant `densityCoeff` set
-// BOTH the sky dome's look and the colour of the sunlight. The two are
-// different physical quantities: the sky's radiance is an integral of
-// scattering over a whole view ray (and AtmosphereNpr is explicitly NOT a
-// physical model of it — its density is an artistic dial, fitted by SKY-TUNE-1
-// to a Preetham reference at turbidity 2.5), while the sun's colour is the
-// extinction along the single ray to the sun, which needs no art at all. One
-// dial for two jobs meant every sky tune moved the sunlight and every sunlight
-// tune moved the sky: SKY-TUNE-1 measured the residual at 0.046 stops when the
-// dial was where the SUN wanted it (0.47) and 0.189 stops where the SKY wanted
-// it (0.25), and had to ship a compromise inside the joint optimum.
-//
-// THE MODEL, AND WHERE ITS NUMBERS COME FROM. The optical depths are the
-// standard clear-atmosphere terms of Preetham et al. 1999 (appendix A.2, the
-// direct solar attenuation) — the SAME model, at the same turbidity, the sky's
-// own defaults were fitted to, so the sky and the sunlight now describe one
-// atmosphere through two dials instead of disagreeing through one:
-//
-//     tau_rayleigh(l) = 0.008735 * l^-4.08                   (l in micrometres)
-//     tau_aerosol(l)  = beta * l^-1.3,  beta = 0.04608*T - 0.04586   (Angstrom)
-//     tau_ozone(l)    = k_o(l) * 0.35 cm                     (the Chappuis band)
-//
-// evaluated at 600 / 550 / 450 nm for linear sRGB R / G / B, and `T` is the
-// atmosphere's Linke TURBIDITY — the one dial, `AtmosphereSky::sunHaze`
-// (1 = purely molecular, 2.5 = the clear day the sky was fitted to, 4-6 hazy).
-// The mixed-gas and water-vapour terms of the same model are 760 nm and beyond:
-// zero across the visible, so they are not carried.
-//
-// Airmass is Kasten-Young (1989), which is the one part a low sun cannot do
-// without: 1/sin(h) is 28% wrong by 5 degrees and diverges at the horizon,
-// while this form is within 0.1% down to zero:
-//
-//     m(h) = 1 / ( sin(h) + 0.50572 * (h_deg + 6.07995)^-1.6364 )
-//
-// HOW FAITHFUL IT IS, MEASURED (spikes/skyd/, this lane). Against the same
-// model integrated SPECTRALLY at 5 nm from 380 to 750 nm through the CIE 1931
-// observer and into linear sRGB — i.e. against what three channels can only
-// approximate — the three-wavelength form above agrees to 0.04 stops at a
-// 30-degree sun, 0.08 at 20, 0.19 at 10 and 0.39 at 5 (R and G; by then B is
-// under 0.02 in both and the sRGB primaries no longer contain the beam). The
-// old preset-derived form was 0.7 to 3.3 stops BRIGHT over the same range —
-// it lost 0.7 stops by a 5-degree sun where the air really takes 3.7.
-//
-// WHAT MOVED, AT THE SHIPPED DEFAULTS (haze 2.5, and it is only the SUN that
-// moved — no sky pixel reads this function):
-//
-//     elevation   old (density 0.25)      new (haze 2.5)      reference
-//        30 deg   0.961 0.935 0.889      0.781 0.756 0.656   0.804 0.753 0.642
-//        10 deg   0.854 0.765 0.624      0.320 0.276 0.143   0.365 0.268 0.126
-//         5 deg   0.739 0.596 0.404      0.099 0.073 0.019   0.130 0.068 0.013
-//         2 deg   0.517 0.325 0.139      0.010 0.006 0.000   0.018 0.005 0.000
-//
-// WHY NOT THE COMPONENT'S OWN LIGHT LINK. `setLight` takes the light over
-// completely — type, direction, diffuse, specular and power — so it would
-// delete the user's colour and intensity rather than tint them, and its colour
-// is normalised to max 1, i.e. it reddens without dimming (and makes the NOON
-// sun blue, because the quantity it normalises is the sky's radiance looking at
-// the sun, not the sunlight). The link stays unarmed, as SKY-GPU left it.
-//
-// WHY NOT getAtmosphereAt. That is the sky's in-scattered radiance in a
-// direction — it gets BRIGHTER as the sun sets (measured: 0.09/0.24/0.55 at the
-// zenith against 6.92/3.38/0.69 at 5 degrees, which is the sunset glow) — so it
-// is the wrong quantity for "what reached the ground".
-namespace {
-// Optical depth per linear-sRGB channel at 600 / 550 / 450 nm (see above).
-constexpr float kTauRayleigh[3]   = { 0.07021f, 0.10013f, 0.22707f };
-constexpr float kTauOzone[3]      = { 0.04375f, 0.02975f, 0.00105f };
-// The Angstrom aerosol term at unit beta: lambda^-1.3 with lambda in microns.
-constexpr float kTauAerosolPerBeta[3] = { 1.94269f, 2.17535f, 2.82373f };
-
-/// Kasten-Young (1989) relative airmass. `elevDeg` is the sun's geometric
-/// elevation; below the horizon the formula's own guard (the +6.08 offset)
-/// keeps it finite, and the Earth's occlusion below takes the answer to zero
-/// long before it matters.
-inline float relativeAirmass(float elevDeg) {
-    const float h = elevDeg * float(M_PI) / 180.0f;
-    const float denom = std::sin(h)
-        + 0.50572f * std::pow(std::max(elevDeg + 6.07995f, 1e-3f), -1.6364f);
-    return denom > 1e-6f ? 1.0f / denom : 1.0f / 1e-6f;
-}
-}   // namespace
-
+// THE ATMOSPHERE'S TINT ON THE DIRECT SUNLIGHT (SUN_FOLLOWS_ATMOSPHERE; Engine.h
+// states the contract). The fraction of the sun's beam that survives the trip
+// from the top of the air to the observer, per channel, relative to the trip
+// it makes at the zenith — the transmittance table's own integral
+// (JahAtmosphere::transmittance: the same three species with the same
+// coefficients along the same ray), so the sunlight, the sun disc and the sky
+// the capture photographs are one atmosphere. Divided by its zenith value so
+// the answer is exactly (1,1,1) at noon — the user's picked colour IS the noon
+// colour — and falls, blue first, as the sun goes down.
 Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
     const Colour white(1.0f, 1.0f, 1.0f, 1.0f);
     if (!mAtmosphere || !mAtmoSkyOn) return white;
     Ogre::Vector3 toSun(toSunIn.x, toSunIn.y, toSunIn.z);
     if (toSun.squaredLength() < 1e-12f) return white;
     toSun.normalise();
-    if (mAtmoTintGeneration == mAtmoPresetGeneration &&
+    if (mAtmoTintGeneration == mAtmosphere->modelGeneration() &&
         (mAtmoTintDir - toSun).squaredLength() < 1e-12f)
         return mAtmoTint;
     Colour tint = white;
     JAH_TRY {
-        // THE BEAM'S TRANSMITTANCE, RELATIVE TO THE ZENITH. Only the airmass
-        // DIFFERENCE survives the ratio, so the absolute column (which a
-        // renderer has no use for — the user's sun colour is the noon colour by
-        // contract) cancels and the whole model is three exponentials.
-        const float beta = std::max(0.0f, 0.04608f * mAtmoSunHaze - 0.04586f);
+        const float r0 = mAtmosphere->observerRadiusKm();
+        const Ogre::Vector3 t = mAtmosphere->transmittance(r0, toSun.y);
+        const Ogre::Vector3 tz = mAtmosphere->transmittance(r0, 1.0f);
+        float rgb[3] = { t.x / std::max(tz.x, 1e-6f), t.y / std::max(tz.y, 1e-6f),
+                         t.z / std::max(tz.z, 1e-6f) };
+        for (float &c : rgb) c = std::max(0.0f, std::min(1.0f, c));
+        tint = Colour(rgb[0], rgb[1], rgb[2], 1.0f);
+        // ...AND THEN THE EARTH GETS IN THE WAY (lane SUN-DISC-1). The table
+        // integrates to the top of the air and does not know the ground; the
+        // term that ends sunlight is geometry, and it is exact. The sun's own
+        // disc is 0.53 degrees wide (0.265 of radius) and refraction lifts the
+        // apparent disc by about 0.57 degrees at the horizon, so direct sunlight
+        // starts to be cut at a GEOMETRIC centre elevation of -(0.57 - 0.265) =
+        // -0.305 degrees and has ended by -(0.57 + 0.265) = -0.835 — the
+        // astronomical definition of sunset. A smoothstep across that band
+        // makes the crossing CONTINUOUS: the light, the disc and the shadow all
+        // ride the same tint and fade together.
         const float elevDeg = float(std::asin(std::max(-1.0, std::min(1.0, double(toSun.y))))
                                     * 180.0 / M_PI);
-        const float dm = relativeAirmass(elevDeg) - relativeAirmass(90.0f);
-        float rgb[3];
-        for (int c = 0; c < 3; ++c) {
-            const float tau = kTauRayleigh[c] + kTauOzone[c] + beta * kTauAerosolPerBeta[c];
-            rgb[c] = std::max(0.0f, std::min(1.0f, std::exp(-tau * dm)));
+        constexpr float kSunSetStartDeg = -0.305f;   // lower limb touches the horizon
+        constexpr float kSunSetEndDeg   = -0.835f;   // upper limb goes under
+        float occl = 1.0f;
+        if (elevDeg <= kSunSetEndDeg) {
+            occl = 0.0f;
+        } else if (elevDeg < kSunSetStartDeg) {
+            const float u = (elevDeg - kSunSetEndDeg) / (kSunSetStartDeg - kSunSetEndDeg);
+            occl = u * u * (3.0f - 2.0f * u);        // smoothstep, C1 at both ends
         }
-        tint = Colour(rgb[0], rgb[1], rgb[2], 1.0f);
-        // ...AND THEN THE EARTH GETS IN THE WAY (lane SUN-DISC-1; the rig's
-        // horizon-crossing capture, 2026-09-14).
-        //
-        // NO TRANSMITTANCE MODEL HAS AN ANSWER BELOW THE HORIZON, and each is
-        // wrong in its own way: the preset-derived one this lane replaced FROZE
-        // there (its inputs clamped, so a sun 30 degrees under the ground went
-        // on lighting the scene at a constant fraction of noon, disc drawn and
-        // shadows cast upwards — measured, 2026-09-14), and an airmass formula
-        // is fitted to a ray that still reaches the ground, which a ray from
-        // below does not. Neither is a reason to guess: the term that ends
-        // sunlight is geometry, not chemistry, and it is exact.
-        //
-        // The Earth occludes the
-        // sun. The sun's own disc is 0.53 degrees wide (0.265 of radius) and
-        // refraction lifts the apparent disc by about 0.57 degrees at the
-        // horizon, so direct sunlight starts to be cut at a GEOMETRIC centre
-        // elevation of -(0.57 - 0.265) = -0.305 degrees and has ended by
-        // -(0.57 + 0.265) = -0.835 — the astronomical definition of sunset.
-        // A smoothstep across that band is the whole fix, and it makes the
-        // crossing CONTINUOUS: the light, the disc and the shadow all ride the
-        // same tint, so they fade together and the night rule now trips on a
-        // value that is already zero instead of deciding when night begins.
-        {
-            constexpr float kSunSetStartDeg = -0.305f;   // lower limb touches the horizon
-            constexpr float kSunSetEndDeg   = -0.835f;   // upper limb goes under
-            float occl = 1.0f;
-            if (elevDeg <= kSunSetEndDeg) {
-                occl = 0.0f;
-            } else if (elevDeg < kSunSetStartDeg) {
-                const float t = (elevDeg - kSunSetEndDeg) / (kSunSetStartDeg - kSunSetEndDeg);
-                occl = t * t * (3.0f - 2.0f * t);        // smoothstep, C1 at both ends
-            }
-            tint = Colour(tint.r * occl, tint.g * occl, tint.b * occl, 1.0f);
-        }
+        tint = Colour(tint.r * occl, tint.g * occl, tint.b * occl, 1.0f);
     } JAH_CATCH(mError, white);
     mAtmoTintDir = toSun;
     mAtmoTint = tint;
-    mAtmoTintGeneration = mAtmoPresetGeneration;
+    mAtmoTintGeneration = mAtmosphere->modelGeneration();
     return tint;
 }
 
-// THE AIR'S AERIAL PERSPECTIVE (lane FOG-ATMO-1) — THE SAME ATMOSPHERE AS THE
-// SUN'S TINT ABOVE, ALONG A HORIZONTAL RAY INSTEAD OF A SLANT ONE.
-//
-// The tint integrates the optical depths over the whole COLUMN (tau, per
-// channel, the Preetham A.2 terms above). A view ray across the ground stays
-// inside the lowest few hundred metres, where the extinction COEFFICIENT is the
-// sea-level one, and for an exponentially stratified species that is the
-// column depth divided by its scale height:
-//
-//     sigma = tau_rayleigh(550) / H_R  +  beta(T) * lambda^-1.3 (550) / H_A
-//
-//     H_R = 8.0 km   the molecular scale height
-//     H_A = 1.2 km   the aerosol (Mie) scale height
-//                    (both as in Bruneton & Neyret 2008, the standard pair)
-//
-// Ozone is left out: it lives in the stratosphere, and a ground-level ray
-// crosses none of it. At the shipped turbidity 2.5 (beta = 0.06934):
-//
-//     sigma = 0.10013/8000 + 0.06934 * 2.17535/1200 = 1.252e-5 + 1.257e-4
-//           = 1.382e-4 per metre                (meteorological visibility
-//             3.912/sigma = 28 km — a clear day, which is what T 2.5 is)
-//
-// so a surface keeps exp(-sigma d): 98.6 % at 100 m, 87.1 % at 1 km (the
-// editor camera's far plane), 75.8 % at the 2 km horizon plane. At T 1 (pure
-// air) it is 1.26e-5 — 300 km visibility; at T 6, 4.3e-4 — 9 km.
-//
-// The component's fog is exp2(-d * fogDensity), so the number handed over is
-// sigma / ln 2. And it is ONE channel, 550 nm (the photopic peak, which is what
-// a visibility is defined at): upstream's fog weight is a scalar, so the air's
-// blue-over-red extinction is not carried — the colour it fogs TOWARDS is the
-// sky's own scattering, which is where the blue of distance comes from.
-float OgreScene::airFogDensity() const {
-    if (!mAtmoSkyOn) return 0.0f;
-    constexpr float kRayleighScaleHeightM = 8000.0f;
-    constexpr float kAerosolScaleHeightM  = 1200.0f;
-    constexpr float kLn2 = 0.69314718f;
-    const float beta = std::max(0.0f, 0.04608f * mAtmoSunHaze - 0.04586f);
-    const float sigma = kTauRayleigh[1] / kRayleighScaleHeightM +
-                        beta * kTauAerosolPerBeta[1] / kAerosolScaleHeightM;
-    return sigma / kLn2;
+AtmosphereStatus OgreScene::atmosphereStatus() const {
+    if (!mAtmosphere) return AtmosphereStatus();
+    AtmosphereStatus st = mAtmosphere->status();
+    st.on = mAtmoSkyOn;
+    return st;
 }
 
-// ONE COMPONENT, TWO CUSTOMERS (the analytic sky and the fog). Registration on
-// the SceneManager is what makes the quad update and what sets hlms_fog, so it
-// is decided HERE from both flags rather than by whichever of setSky/setFog ran
+bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
+    out = AtmosphereCost();
+    if (!mAtmosphere || !mAtmoSkyOn) { mError = "measureAtmosphere: the sky is not the atmosphere"; return false; }
+    JAH_TRY {
+        return mAtmosphere->measure(iterations, out);
+    } JAH_CATCH(mError, false);
+}
+
+void OgreScene::updateAtmosphere() {
+    if (!mAtmosphere) return;
+    JAH_TRY {
+        mAtmosphere->update();
+    } JAH_CATCH(mError, );
+}
+
+// ONE COMPONENT, TWO CUSTOMERS (the atmosphere as the sky, and the fog under
+// any sky). Registration on the SceneManager is what sets hlms_fog, so it is
+// decided HERE from both flags rather than by whichever of setSky/setFog ran
 // last — the bug that would otherwise be written twice is "turning the fog off
 // takes the sky down with it".
 void OgreScene::syncAtmosphere() {
     if (!mAtmosphere) return;
     JAH_TRY {
+        mAtmosphere->setAirOn(mAtmoSkyOn);
+        FogHlmsListener::AtmoBind bind;
+        if (mAtmoSkyOn) {
+            bind.skyView = mAtmosphere->skyViewLut();
+            bind.aerial = mAtmosphere->aerialLut();
+        }
+        FogHlmsListener::setAtmosphere(mSceneMgr, bind);
         if (!mAtmoSkyOn && !mAtmoFogOn) {
-            // Neither: hide the quad AND unregister, which is what makes "no
-            // fog" bit-exact (no hlms_fog, no fog code in any shader) — and the
-            // fog state the shader would read goes with it.
-            mAtmosphere->setSky(mSceneMgr, false);
+            // Neither: unregister, which is what makes "no fog" bit-exact (no
+            // hlms_fog, no fog code in any shader) — and the fog state the
+            // shader would read goes with it.
+            if (mSceneMgr->getAtmosphereRaw() == mAtmosphere) mSceneMgr->_setAtmosphere(nullptr);
             FogHlmsListener::unregisterFog(mSceneMgr);
             return;
         }
-        // setSky(true) shows the quad and registers; setSky(false) hides and
-        // unregisters, so "fog only" is the documented two-step: hide, then
-        // register again.
-        mAtmosphere->setSky(mSceneMgr, mAtmoSkyOn);
-        if (!mAtmoSkyOn) mSceneMgr->_setAtmosphere(mAtmosphere);
-        tuneAtmosphereRenderable();
-        // ...and the FOG with it — its colour mode and the air's density both
-        // follow whether the analytic sky is the sky, so they are re-derived
-        // here rather than pinned at the moment setFog happened to run
-        // (pushFogState's header has the defect that made this a function).
+        mSceneMgr->_setAtmosphere(mAtmosphere);
+        // ...and the FOG with it — its colour mode follows whether the
+        // atmosphere is the sky, so it is re-derived here rather than pinned at
+        // the moment setFog happened to run.
         pushFogState();
     } JAH_CATCH(mError, );
-}
-
-// The component parks its quad at render queue 212 with default visibility
-// flags. Both are wrong here, for the same reasons Ogre's own sky is moved in
-// tuneSkyRenderable: 212 is inside the OVERLAY pass's range [210,255), so the
-// sky would be painted over every gizmo, wire and selection outline in the
-// scene; and default flags carry kGiGeometryBit, which is what Instant
-// Radiosity casts its rays against — a sky that is GI geometry is a bounce
-// surface wrapped around the world.
-//
-// The quad pointer is taken from the SceneManager's Rectangle2D list at the
-// moment the component creates it (ensureAtmosphere), because the component
-// keeps its per-SceneManager map private and offers no accessor.
-void OgreScene::tuneAtmosphereRenderable() {
-    if (!mAtmoQuad) return;
-    mAtmoQuad->setRenderQueueGroup(0u);
-    // Subgroup 1, for the reason tuneSkyRenderable's own note gives: the
-    // hidden-area mesh occupies subgroup 0 of this queue inside a VR eye and
-    // this quad has to be behind it to be masked by it.
-    mAtmoQuad->setRenderQueueSubGroup(1u);
-    mAtmoQuad->setVisibilityFlags(kVisibleBit);
-    mAtmoQuad->setCastShadows(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -867,6 +648,7 @@ void OgreScene::destroyPendingReflection() {
 // named from the recycled pool, and returns it (the caller frees it with
 // destroyRecycled). Throws through Ogre's exceptions; the callers catch.
 Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips) {
+    updateAtmosphere();   // the export's bake can run outside a frame: the tables it draws, current
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::TextureGpu *cube = tm->createTexture(
@@ -941,6 +723,10 @@ Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint
 // updateSceneGraph/applyShadowCacheDirties, still inside the frame; its
 // convolution runs right behind it, before the frame draws (applyPendingIbl).
 void OgreScene::applyPendingSkyCapture() {
+    // THE ATMOSPHERE'S TABLES FIRST (SKY-ATMOSPHERE-1): the sky quad the
+    // capture photographs reads them, and a dial or a sun that moved this frame
+    // rebuilds them here, inside the frame. A no-op on a still frame.
+    updateAtmosphere();
     // THE CLOUD FIELD FIRST (CLOUDS-2D-1): it is a render pass too, and a
     // change that re-bakes it also re-captures — the capture must photograph
     // the new field, not the old one.
@@ -2006,15 +1792,15 @@ void OgreScene::destroySky() {
 // surface cache's indirect half (the environment is in its signature). The
 // period below is set from that measured cost.
 namespace {
-// ONE TILE IS WIDER THAN THE SHEET ONE SEES (CLOUDS-2D-3): the far sheet fades
-// over kCloudFadeMetres, so a 64 km period never shows the same cloud twice in
-// one sky (at 16 km a 2 km layer repeated itself ten times towards the horizon).
+// ONE TILE IS WIDER THAN THE SHEET ONE SEES (CLOUDS-2D-3): the far sheet is seen
+// through the atmosphere's air (SKY-ATMOSPHERE-1), which has taken two thirds of
+// it by 100 km, so a 64 km period rarely shows the same cloud twice in one sky
+// (at 16 km a 2 km layer repeated itself ten times towards the horizon).
 constexpr float    kCloudTileMetres   = 64000.0f;   // one tile of the field, in world metres
 constexpr Ogre::uint32 kCloudFieldSize = 2048u;     // ~31 m a texel: the km edge ramp spans 50+
 constexpr Ogre::uint32 kCloudFootprintSize = 512u;  // the bake's footprint + blur grid (JahshakaClouds.compositor)
 constexpr float    kCloudTauFull      = 32.0f;      // a full column's optical depth at density 1 (a thick stratocumulus deck; its base transmits ~22 % diffusely)
 constexpr float    kCloudSlabMetres   = 1000.0f;    // the sheet's thickness the self-shadow crosses
-constexpr float    kCloudFadeMetres   = 60000.0f;   // the distance the far sheet fades over
 constexpr float    kCloudForwardG     = 0.85f;      // the sheet's asymmetry: JahCloudLayer_ps.glsl's kG, the same number
 // THE SCROLL'S RE-CAPTURE PERIOD, SET FROM ITS MEASURED DOWNSTREAM COST
 // (spikes/clouds-2d-1/cadence/, 2026-09-23: Debug, Xvfb, one process, three
@@ -2199,10 +1985,52 @@ void OgreScene::applyCloudLayer(bool fieldChanged) {
         mCloudStatus.drawn = true;
         mCloudStatus.reason.clear();
         if (!mCloudClearValid) mCloudClearPending = true;
+        bindCloudAir();
     } JAH_CATCH(mError, );
     updateCloudLayer();   // the scroll, the SH term and the ground shadow, now
     syncSunDiscClouds();
     snapshotCloudGi();    // the voxels' and the cards' copy (CLOUDS-2D-2)
+}
+
+// THE AIR IN FRONT OF THE SHEET (SKY-ATMOSPHERE-1): under the planet's
+// atmosphere its aerial-perspective table and the constants that read it; under
+// any other sky a one-texel volume of no air (in-scatter 0, transmittance 1)
+// and the "no air" flag — the unit must hold a 3D texture either way.
+void OgreScene::bindCloudAir() {
+    if (!mCloudMaterial) return;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    const bool air = mAtmoSkyOn && mAtmosphere;
+    if (!air && !mCloudNoAir) {
+        mCloudNoAir = tm->createTexture(recycledName("cloudnoair"), Ogre::GpuPageOutStrategy::SaveToSystemRam,
+                                        Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type3D);
+        mCloudNoAir->setResolution(1u, 1u, 1u);
+        mCloudNoAir->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+        mCloudNoAir->setNumMipmaps(1u);
+        // Immediate, and NO notifyDataIsReady (DOCS/traps/ENGINE.md).
+        mCloudNoAir->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
+        mCloudNoAir->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
+        Ogre::StagingTexture *staging = tm->getStagingTexture(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+        staging->startMapRegion();
+        Ogre::TextureBox box = staging->mapRegion(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+        const Ogre::uint8 none[4] = { 0u, 0u, 0u, 255u };
+        std::memcpy(box.at(0, 0, 0), none, 4u);
+        staging->stopMapRegion();
+        staging->upload(box, mCloudNoAir, 0, 0, 0);
+        tm->removeStagingTexture(staging);
+    }
+    Ogre::Pass *pass = mCloudMaterial->getTechnique(0)->getPass(0);
+    if (Ogre::TextureUnitState *tu = pass->getTextureUnitState("atmoAerial"))
+        tu->setTexture(air ? mAtmosphere->aerialLut() : mCloudNoAir);
+    Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+    const AtmosphereModel &m = air ? mAtmosphere->model() : AtmosphereModel();
+    ps->setNamedConstant("atmoPlanet",
+                         Ogre::Vector4(m.planetRadiusKm, m.planetRadiusKm + m.atmosphereHeightKm,
+                                       m.planetRadiusKm + JahAtmosphere::kObserverKm,
+                                       JahAtmosphere::kApMaxKm));
+    const Ogre::Vector3 toSun = air ? mAtmosphere->sunDir() : Ogre::Vector3::UNIT_Y;
+    ps->setNamedConstant("atmoSunDir", Ogre::Vector4(toSun.x, toSun.y, toSun.z, 0.0f));
+    const Ogre::Vector3 e = air ? mAtmosphere->topOfAir() : Ogre::Vector3::ZERO;
+    ps->setNamedConstant("atmoSkyE", Ogre::Vector4(e.x, e.y, e.z, air ? 1.0f : 0.0f));
 }
 
 void OgreScene::bakeCloudField() {
@@ -2362,8 +2190,8 @@ void OgreScene::pushCloudAmbient() {
     JAH_TRY {
         const Ogre::Vector4 amb = mCloudClearValid
             ? Ogre::Vector4(std::max(0.0f, mCloudClearMean[0]), std::max(0.0f, mCloudClearMean[1]),
-                            std::max(0.0f, mCloudClearMean[2]), kCloudFadeMetres)
-            : Ogre::Vector4(0.0f, 0.0f, 0.0f, kCloudFadeMetres);
+                            std::max(0.0f, mCloudClearMean[2]), 0.0f)
+            : Ogre::Vector4(0.0f, 0.0f, 0.0f, 0.0f);
         mCloudMaterial->getTechnique(0)->getPass(0)->getFragmentProgramParameters()
             ->setNamedConstant("cloudAmbient", amb);
     } JAH_CATCH(mError, );
@@ -2476,6 +2304,7 @@ void OgreScene::destroyCloudLayer() {
     // before it draws again (applyCloudLayer, syncSunDiscClouds, bakeCloudField).
     if (mCloudField) { destroyRecycled(tm, mCloudField); mCloudField = nullptr; }
     if (mCloudWeatherNone) { destroyRecycled(tm, mCloudWeatherNone); mCloudWeatherNone = nullptr; }
+    if (mCloudNoAir) { destroyRecycled(tm, mCloudNoAir); mCloudNoAir = nullptr; }
     if (mCloudBakeCamera) { mSceneMgr->destroyCamera(mCloudBakeCamera); mCloudBakeCamera = nullptr; }
     mCloudMaterial.reset();
     mCloudBakeMaterial.reset();

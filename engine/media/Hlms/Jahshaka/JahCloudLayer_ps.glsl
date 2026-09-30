@@ -56,10 +56,13 @@
 //     the sky behind keeps exp( -tau / mu ) of itself and the sheet adds
 //     ( 1 - exp( -tau / mu ) ) / ( 1 + 3/4 tau' ) of the mean, so a pixel of
 //     sheet never shows more sky light than the clear sky did.
-//   * DISTANCE: a sheet 100 km away is seen through that much air. The sky
-//     model draws no aerial perspective for us to composite into, so the far
-//     sheet fades into the sky itself with distance (a stated proxy), and is
-//     read along the ray's path through the slab's thickness (below).
+//   * DISTANCE: a sheet 100 km away is seen through that much air — the planet's
+//     atmosphere's aerial-perspective table at the sheet's distance along the
+//     ray (SKY-ATMOSPHERE-1): what of the sheet's light survives the air in
+//     front of it, and the light that air scatters in, composited so that the
+//     sky behind keeps exactly what it had (below). Under a sky that is not the
+//     atmosphere there is no air to be seen through. The sheet is read along
+//     the ray's path through the slab's thickness (below).
 //
 // THE SUN'S IRRADIANCE arrives in the renderer's own units -- what a white
 // Lambert card facing the sun would reflect times pi -- so the sheet and a
@@ -67,7 +70,9 @@
 #version ogre_glsl_ver_330
 
 vulkan_layout( ogre_t0 ) uniform texture2D cloudField;
+vulkan_layout( ogre_t1 ) uniform texture3D atmoAerial;
 vulkan( layout( ogre_s0 ) uniform sampler cloudSampler );
+vulkan( layout( ogre_s1 ) uniform sampler atmoSampler );
 
 vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 cameraPos;
@@ -77,12 +82,18 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 cloudSun;
 	// rgb = the sun's irradiance, w = the slab thickness the self-shadow crosses (m)
 	uniform vec4 cloudSunE;
-	// rgb = the clear sky's irradiance on the sheet's top / pi, w = the distance fade (m)
+	// rgb = the clear sky's irradiance on the sheet's top / pi, w unused
 	uniform vec4 cloudAmbient;
 	// x = 1 / the forward lobe's flux through the base (the HG lobe of g
 	// around the sun integrated over the sky below the sheet, cosine
 	// weighted; OgreSky.cpp cloudForwardLobeFlux), yzw unused
 	uniform vec4 cloudPhase;
+	// THE AIR (SKY-ATMOSPHERE-1): the planet (bottom, top, observer radius, the
+	// aerial table's far distance, km), the sun, and the sun at the top of the
+	// air (rgb; w = 1 while the atmosphere is the sky, 0 = no air)
+	uniform vec4 atmoPlanet;
+	uniform vec4 atmoSunDir;
+	uniform vec4 atmoSkyE;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -116,6 +127,7 @@ vec2 jahCloudDy = vec2( 0.0 );
 const int kJahCloudPathSteps = 12;
 const float kJahCloudTallTau = 16.0;   // half a full column at density 1 (OgreSky.cpp kCloudTauFull)
 #include "JahCloudLayer.glsl"
+#include "JahAtmosphere.glsl"
 
 float jahHenyeyGreenstein( float cosTheta, float g )
 {
@@ -197,8 +209,20 @@ void main()
 								   tForward * jahHenyeyGreenstein( cosTheta, kG ) * cloudPhase.x );
 	}
 
-	const float fade = exp( -hit.dist / max( cloudAmbient.w, 1.0 ) );
-	vec4 outColour = vec4( radiance * fade, opacity * fade );
+	// THE AIR IN FRONT OF THE SHEET (SKY-ATMOSPHERE-1). Premultiplied over the
+	// sky S, which is the air's own light to the end of the ray: the pixel must
+	// be I + T * ( radiance + tView * S_beyond ), I and T the air's in-scatter
+	// and transmittance to the sheet and S = I + T * S_beyond. Solved for this
+	// pass's (rgb, a) with a = opacity: rgb = T * radiance + opacity * I.
+	vec4 air = vec4( 0.0, 0.0, 0.0, 1.0 );
+	if( atmoSkyE.w > 0.0 )
+	{
+		const vec2 apUv = jahAtmoDirUv( dir, atmoSunDir.xyz, atmoPlanet, vec2( 32.0, 64.0 ) );
+		const float apW = jahAtmoApW( hit.dist * 0.001, atmoPlanet, 32.0 );
+		air = textureLod( vkSampler3D( atmoAerial, atmoSampler ), vec3( apUv, apW ), 0.0 );
+		air.rgb *= atmoSkyE.rgb;
+	}
+	vec4 outColour = vec4( radiance * air.a + opacity * air.rgb, opacity );
 	if( !( jahFinite( outColour.x ) && jahFinite( outColour.y ) && jahFinite( outColour.z ) &&
 		   jahFinite( outColour.w ) ) )
 		outColour = vec4( 0.0 );

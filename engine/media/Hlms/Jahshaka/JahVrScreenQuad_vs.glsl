@@ -22,9 +22,9 @@
 // from that eye's own inverse view-projection instead of read out of a normal.
 // The session writes the pair every frame (the same two matrices VrData holds).
 //
-// IT SERVES ALL THREE QUADS. Every consumer normalizes the interpolated ray
-// (SkyCubemap_ps, SkyEquirectangular_ps, AtmosphereNprSky_ps.any:41, our own
-// JahSunDisc_ps), so the ray's LENGTH is free and one program can feed them
+// IT SERVES ALL THE QUADS. Every consumer normalizes the interpolated ray
+// (SkyCubemap_ps, SkyEquirectangular_ps, our own JahAtmosphereSky_ps,
+// JahCloudLayer_ps and JahSunDisc_ps), so the ray's LENGTH is free and one program can feed them
 // all; and all three quads are full-screen rectangles whose vertices are
 // already normalised device coordinates, so there is no transform to apply.
 //

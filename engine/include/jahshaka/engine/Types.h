@@ -765,89 +765,115 @@ struct ClipState {
 using TextureId = unsigned int;
 enum class SkyMode { NoSky, Equirectangular, Cubemap, Atmosphere };   // 'None' collides with X11's macro
 
-/// THE ANALYTIC SKY, drawn by the engine itself (SKY-GPU, owner pick 5).
+/// THE PLANET'S ATMOSPHERE, drawn by the engine itself (SKY-ATMOSPHERE-1).
 ///
-/// It is Ogre's `AtmosphereNpr` component: a full-screen quad whose fragment
-/// shader turns the camera ray into a scattering colour, evaluated on the GPU
-/// every frame. It replaces a CPU "Preetham" bake that cost up to 1024x512
-/// pixels of transcendental math on the UI thread per parameter change, and its
-/// dials are the component's own — there is no mapping from the old ones and
-/// none is owed (the model is different arithmetic, not a re-parameterisation).
+/// A physical model of the air around a planet (Hillaire, "A Scalable and
+/// Production Ready Sky and Atmosphere Rendering Technique", EGSR 2020 — what
+/// Unreal's Sky Atmosphere is): a planet of radius `planetRadiusKm` inside a
+/// shell of air `atmosphereHeightKm` deep, Rayleigh and Mie scattering with
+/// exponential density profiles and an ozone layer that only absorbs. ONE model
+/// answers everything the air does to light in the scene: the sky's pixels
+/// (with the planet under the horizon — a sharp horizon over a darker ground
+/// band), the sun's colour (Scene::atmosphereSunTint: the transmittance towards
+/// the sun), the environment the Sky Light captures, the cloud sheet's air and
+/// the AERIAL PERSPECTIVE on every lit pixel (the light the air scatters into
+/// the view ray and the transmittance along it, by distance). The engine holds
+/// it in four look-up tables it rebuilds only when a dial or the sun changes —
+/// never per frame (Scene::atmosphereStatus counts the rebuilds).
 ///
-/// THE SUN IS NOT THE COMPONENT'S. `sunDir` is pushed by the host from the
-/// scene's sun light, and the component's own light/ambient link is never armed
-/// (see OgreSky.cpp): the light keeps the colour and the power the user gave it.
-/// The component's own sun DISC is off too — the disc is SunDisc's, one
-/// mechanism over every sky type.
-/// THESE FIVE DEFAULTS ARE THE CLEAR-SKY FIT (lane SKY-TUNE-1, 2026-09-14) and
-/// they MUST stay equal to `iris::SkyRealistic::defaults()` in the document
-/// (irisgl/document/scenegraph/scene.cpp), which carries the derivation. They
-/// are written out twice because the engine's public headers may not include
-/// the document's — the boundary — and a host that pushes a whole sky
-/// overwrites all five anyway; what this default decides is what a DIRECT
-/// engine caller (test_engine, the spikes) gets. Ogre's own shipped preset
-/// (0.47 / 2.0 / 1.0) is tuned for sunsets and is what these used to be.
+/// THE SUN IS THE HOST'S LIGHT. `sunDir` and `sunIlluminance` are pushed from
+/// the scene's sun light; the sky is LIT by it, so a scene with no sun has a
+/// black sky (the night) and a brighter sun makes a brighter sky. The sun disc
+/// is SunDisc's (one mechanism over every sky type).
+///
+/// THE DIALS MEAN PHYSICAL THINGS, and 1 is the paper's clear Earth for each
+/// scale (Rayleigh scattering (5.802, 13.558, 33.1)e-6 per metre over an 8 km
+/// scale height; Mie scattering 3.996e-6, extinction 4.44e-6 per metre over
+/// 1.2 km with g 0.8; ozone absorption (0.650, 1.881, 0.085)e-6 per metre in a
+/// tent 30 km wide centred at 25 km). They MUST stay equal to
+/// `iris::SkyRealistic::defaults()` in the document (the boundary forbids the
+/// include, so they are written twice).
 struct AtmosphereSky {
-    /// How much atmosphere the ray travels through: the blue's depth. (0; 1]-ish.
-    float density   = 0.25f;
-    /// How fast the colour changes with altitude — the horizon's spread.
-    float diffusion = 2.0f;
-    /// The lowest the sky is drawn at; raises the horizon band in a sunset.
-    float horizon   = 0.025f;
-    /// The sky's own colour, before absorption. Ogre's default is a daylight blue.
-    Colour skyColour { 0.334f, 0.57f, 1.0f, 1.0f };
-    /// Multiplies the whole sky (HDR). 1.5 re-anchors the Sky Light's ambient to
-    /// the level the tree is tuned around after the density fit dropped it to
-    /// 0.66 (the model's radiance is proportional to densityCoeff).
-    float skyPower  = 1.5f;
-    /// THE AIR — the atmosphere's turbidity (lane SKY-DENSITY-1), and the ONE
-    /// density of this atmosphere. It decides two things, both Beer-Lambert
-    /// physics of the same air: the colour the SUNLIGHT arrives in
-    /// (`Scene::atmosphereSunTint`, the extinction along the ray to the sun)
-    /// and, since FOG-ATMO-1, the AERIAL PERSPECTIVE — the air's extinction
-    /// along every view ray, always on under this sky (OgreSky.cpp states the
-    /// sea-level coefficient it derives). It is NOT a sky-look dial and it
-    /// reaches the sky dome nowhere: the sky's radiance is the NPR model's
-    /// business (`density` above). 1 = a purely molecular atmosphere, 2.5 = the
-    /// clear day the sky's own defaults were fitted to, 4-6 = hazy; held at or
-    /// above 1 (below it the aerosol term amplifies).
-    ///
-    /// It is deliberately ABSENT from the comparison below, which asks "is this
-    /// the same SKY?" and decides whether the backend tears the sky down and
-    /// re-captures the environment. This dial changes no sky pixel, so it is
-    /// applied on its own, like the sun disc (Scene::setSky) — which stales the
-    /// probe grid for the fog it changes on surfaces, and nothing else.
-    float sunHaze   = 2.5f;
+    /// THE HAZE: the aerosol (Mie) density as a multiple of the paper's clear
+    /// air. 1 = the reference's very clear air (an aerosol optical depth of
+    /// 0.005 over the whole column), 0 = no aerosol at all (a purely molecular
+    /// sky), ~10 = an ordinary clear day (0.05), ~50 = hazy (0.25), 100 = thick
+    /// haze (0.5). The aerosol is grey: it dims and whitens, the molecules
+    /// redden. It changes the sky (a whiter horizon, a brighter glow round the
+    /// sun), the sun's colour and the aerial perspective together, because it
+    /// is one air.
+    float sunHaze   = 1.0f;
+    /// The molecular (Rayleigh) density as a multiple of Earth's: the sky's
+    /// blue. 1 = Earth.
+    float rayleighScale = 1.0f;
+    /// The ozone layer's absorption on (Earth) or off. Its visible effect is
+    /// the blue of the sky with the sun low (Chappuis band).
+    bool  ozone     = true;
+    /// The planet's surface albedo (Lambert, grey), seen under the horizon and
+    /// part of the light the sky scatters back down.
+    float groundAlbedo = 0.3f;
+    /// THE AERIAL PERSPECTIVE ON GEOMETRY, a distance scale (Unreal's
+    /// "aerial perspective view distance scale"): 1 = the real air between a
+    /// surface and the camera, 0 = none at all (a lit surface reads exactly as
+    /// it would with no air before it), in between = the air a surface that
+    /// much closer would be seen through. Changes no sky pixel, so it is ABSENT
+    /// from the comparison below and applied on its own (Scene::setSky).
+    float aerialScale = 1.0f;
+    /// The planet, fixed at Earth (not dials yet): the bottom radius and the
+    /// depth of the air above it.
+    float planetRadiusKm = 6360.0f;
+    float atmosphereHeightKm = 100.0f;
     /// Unit vector FROM the scene TOWARDS the sun, in world space — the scene's
-    /// sun light's direction, reversed, pushed by the host. With `hasSun` false
-    /// the sky is evaluated with the sun straight overhead at its lowest time
-    /// of day, which is this model's night.
+    /// sun light's direction, reversed, pushed by the host.
     float sunDir[3] = { 0.0f, 1.0f, 0.0f };
     bool  hasSun    = false;
+    /// THE SUN'S ILLUMINANCE in the renderer's units — the sun light's linear
+    /// colour x its intensity x pi (HlmsPbs lights with intensity x pi and
+    /// divides the diffuse by pi, so this is what a white Lambert card facing
+    /// the sun at NOON receives), untinted by the air: the engine divides by the
+    /// zenith transmittance to get the light at the top of the atmosphere, so
+    /// the picked colour stays the noon colour (atmosphereSunTint's contract).
+    /// Zero, or `hasSun` false: the sky is black.
+    Colour sunIlluminance { 0.0f, 0.0f, 0.0f, 1.0f };
 
-    /// THE COST, stated where the mode is chosen: an analytic sky is drawn by a
-    /// component the backend has to REGISTER on the scene (its quad's per-camera
-    /// rays come from that registration), and registering it puts `hlms_fog`
-    /// into every PBS pass hash for as long as the sky is bound — a second
-    /// permutation set for the scene's materials and, on a cold shader cache,
-    /// a compile hitch the first time the sky is switched on. Under this sky
-    /// the fog is not an identity: every lit pixel pays the air's own aerial
-    /// perspective (FogDesc, FOG-ATMO-1) whether or not the World fog is on,
-    /// fogging per pixel towards the sky's own radiance for the pixel's view
-    /// ray (upstream's block is left an identity). MEASURED on a
-    /// floor + a metal sphere with the fog OFF: 100 shader compiles with a
-    /// colour sky, 104 after switching to the analytic one — four permutations
-    /// and one hitch, once, warm-cached afterwards. With the fog ON (which is
-    /// every scene this engine ships) the property is already in the hash and
-    /// the analytic sky adds nothing at all: 96 either way.
+    /// "Is this the same SKY?" — every field that moves a sky pixel (a change
+    /// tears nothing down any more, but it re-captures the environment the Sky
+    /// Light and every reflection read).
     bool operator==(const AtmosphereSky &o) const {
-        return density == o.density && diffusion == o.diffusion && horizon == o.horizon &&
-               skyColour.r == o.skyColour.r && skyColour.g == o.skyColour.g &&
-               skyColour.b == o.skyColour.b && skyPower == o.skyPower &&
-               hasSun == o.hasSun && sunDir[0] == o.sunDir[0] && sunDir[1] == o.sunDir[1] &&
-               sunDir[2] == o.sunDir[2];
+        return sunHaze == o.sunHaze && rayleighScale == o.rayleighScale && ozone == o.ozone &&
+               groundAlbedo == o.groundAlbedo && planetRadiusKm == o.planetRadiusKm &&
+               atmosphereHeightKm == o.atmosphereHeightKm && hasSun == o.hasSun &&
+               sunDir[0] == o.sunDir[0] && sunDir[1] == o.sunDir[1] && sunDir[2] == o.sunDir[2] &&
+               sunIlluminance.r == o.sunIlluminance.r && sunIlluminance.g == o.sunIlluminance.g &&
+               sunIlluminance.b == o.sunIlluminance.b;
     }
     bool operator!=(const AtmosphereSky &o) const { return !(*this == o); }
+};
+
+/// THE ATMOSPHERE'S LOOK-UP TABLES, counted (Scene::atmosphereStatus). The
+/// transmittance and multiple-scattering tables depend on the model's dials
+/// alone; the sky view and the aerial-perspective volume on the dials and the
+/// sun. None of them is rebuilt on a still frame.
+struct AtmosphereStatus {
+    /// The analytic atmosphere is the scene's sky.
+    bool     on = false;
+    unsigned transmittanceBuilds = 0;
+    unsigned multiScatterBuilds = 0;
+    unsigned skyViewBuilds = 0;
+    unsigned aerialBuilds = 0;
+    /// The sun at the top of the air, in the renderer's units (what the LUTs'
+    /// unit-illuminance radiance is multiplied by).
+    float    topIlluminance[3] = { 0.0f, 0.0f, 0.0f };
+};
+
+/// THE ATMOSPHERE'S COST (Scene::measureAtmosphere): GPU milliseconds per
+/// rebuild of each table, as a slope over repeated dispatches (an upper bound:
+/// it includes the per-dispatch driver cost). -1 where it could not be measured.
+struct AtmosphereCost {
+    double transmittanceMs = -1.0;
+    double multiScatterMs = -1.0;
+    double skyViewMs = -1.0;
+    double aerialMs = -1.0;
 };
 
 /// A SCENE'S WHOLE SKY, as one value (ENGINEERING_DEBT_SPEC.md item 4).
@@ -1080,7 +1106,7 @@ struct SkyDesc {
     /// `reflectionFaces`. Ignored in every other mode.
     TextureId faces[6] = { 0, 0, 0, 0, 0, 0 };
 
-    /// SkyMode::Atmosphere: the analytic sky's parameters. Ignored otherwise.
+    /// SkyMode::Atmosphere: the planet's atmosphere. Ignored otherwise.
     AtmosphereSky atmosphere;
 
     /// ENVIRONMENT REFLECTIONS (IBL), independently of the sky.
@@ -4277,16 +4303,15 @@ struct GiStatus {
 /// where only 5% of it survives. (The document maps the legacy linear start/end
 /// pair onto it by matching the half-fogged distance — iris::Scene.)
 ///
-/// THE COLOUR DEPENDS ON THE SKY, NOT ON A SWITCH (lane FOG-ATMO-1). Under the
-/// ANALYTIC sky (SkyMode::Atmosphere) the air itself is a medium: the backend
-/// keeps the atmosphere's own AERIAL PERSPECTIVE on whether or not this fog is
-/// enabled — the air's extinction, derived from the same turbidity that tints
-/// the sun (AtmosphereSky::sunHaze; OgreSky.cpp states the model and the
-/// number) — and `density` / the height layer ADD haze on top of it. Every
-/// layer then fogs towards the sky's own scattering colour for the direction
-/// each surface is seen from, so a far surface fades into the sky behind it
-/// and follows the sun. `colour` is used only under the other skies (a colour,
-/// a gradient, an image), which have no atmosphere to ask.
+/// THE COLOUR DEPENDS ON THE SKY, NOT ON A SWITCH. Under the planet's
+/// atmosphere (SkyMode::Atmosphere) the air itself is a medium: every lit pixel
+/// is seen through the atmosphere's own AERIAL PERSPECTIVE whether or not this
+/// fog is enabled (AtmosphereSky::aerialScale; SKY-ATMOSPHERE-1), and this fog
+/// composes ON TOP of it — `density` and the height layer fog towards the sky's
+/// own radiance just above the horizon at the direction each surface is seen
+/// from, so a fully fogged world reads as the horizon sky behind it. `colour`
+/// is used only under the other skies (a colour, a gradient, an image), which
+/// have no atmosphere to ask.
 ///
 /// Only lit (PBR) surfaces are fogged; unlit overlays (gizmos, wires,
 /// billboards) and the sky never are.

@@ -13,6 +13,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreMesh.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreMaterials.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSky.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtmosphere.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGrid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShadow.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGi.cpp
@@ -657,6 +658,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_atmosphere.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
@@ -731,6 +733,17 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahCloudShadow
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCloudShadow_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE PLANET'S ATMOSPHERE (SKY-ATMOSPHERE-1): its arithmetic, one file — the
+    # four table jobs and the pixel shader's aerial perspective insert the piece,
+    # the sky quad's and the cloud sheet's plain GLSL programs include the raw copy.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahAtmosphere
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahAtmosphere_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_atmosphere.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    COMMAND ${CMAKE_COMMAND} -DRAW=1
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahAtmosphere.glsl
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_atmosphere.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # A CARD READ FROM A DIRECTION (PHOTON-CARDS-5): the relight writes the mean
     # light direction the ray jobs' card read restores the lobe's view term with.

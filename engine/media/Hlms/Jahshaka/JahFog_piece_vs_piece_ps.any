@@ -1,22 +1,26 @@
-// Jahshaka fog — Ogre's AtmosphereNpr fog MATH with Jahshaka's authorable colour,
-// plus a height-varying second layer that is entirely ours.
+// Jahshaka fog — Ogre's fog block with Jahshaka's authorable colour, a
+// height-varying second layer, and the planet's atmosphere's aerial perspective.
 //
 // WHO DOES WHAT
-//   * The distance term is upstream's: OgreScene registers an AtmosphereNpr on the
-//     SceneManager (sky quad hidden, sun/ambient never linked), which sets the
-//     hlms_fog property and binds its own const buffer. The stock Pbs pixel shader
-//     then does
+//   * The distance term under every sky but the atmosphere is upstream's:
+//     OgreScene registers OUR atmosphere component (Atmosphere.h, an
+//     Ogre::AtmosphereComponent) on the SceneManager, which sets the hlms_fog
+//     property and binds its own const buffer (declared below as the piece the
+//     stock shaders insert, AtmosphereNprSkyStructDecl). The stock Pbs pixel
+//     shader then does
 //         fogWeight = exp2( -eyeDistance * fogDensity )   (plus the brightness
 //                     "breakthrough" term), colour = lerp( inPs.fog.xyz, colour, w )
 //     and we never maintain that code.
-//   * The COLOUR is ours: upstream computes a procedural sky colour per vertex and
-//     writes it to outVs.fog.xyz. We replace that whole computation (see below) with
-//     the authored fog colour out of the pass buffer — which also deletes ~30 ALU of
-//     sky evaluation per vertex that we would never look at.
+//   * The COLOUR is ours: upstream's per-vertex sky colour piece is replaced by
+//     the authored fog colour out of the pass buffer.
 //   * HEIGHT FOG is ours, applied after the built-in fog. Two absorbing layers of the
 //     same colour compose exactly by multiplying their transmittances, so a second
 //     lerp toward the same colour is not an approximation of "one combined density"
 //     — it IS it:  lerp(F, lerp(F, S, T1), T2) = F + (S-F)*T1*T2.
+//   * UNDER THE PLANET'S ATMOSPHERE (jah_atmo_ap, SKY-ATMOSPHERE-1) the whole
+//     fog is per pixel, below: the air first — the aerial-perspective table at
+//     the pixel's direction and distance — then the World fog and its height
+//     layer on top, towards the sky just above the horizon.
 //
 // THIS FILE IS AN Hlms LIBRARY FILE, not a per-datablock custom piece: the folder is
 // appended to HlmsPbs's library paths in OgreEngine::ensureHlms(). That is what lets
@@ -32,9 +36,10 @@
 //
 // The pass-buffer members below are appended to the END of the PassData struct and
 // filled by FogHlmsListener (OgreFog.cpp); the two layouts line up by construction.
-// They exist only when fog is on: fog off unregisters the atmosphere, which drops
-// hlms_fog, which removes every line of this file from the generated shader — the
-// bit-exact "no fog" the offscreen pixel suites depend on.
+// They exist only when fog is on: fog off (under any sky but the atmosphere)
+// unregisters the component, which drops hlms_fog, which removes every line of
+// this file from the generated shader — the bit-exact "no fog" the offscreen
+// pixel suites depend on.
 
 // THE PASS-BUFFER EXTENSION, and it is ONE piece for two features (the parser
 // fails the whole shader on a duplicate piece NAME, so there can only ever be
@@ -75,8 +80,8 @@
 // source BYTE-IDENTICAL to a build where none of this existed.
 @piece( custom_passBuffer )
 	@property( hlms_fog )
-		float4 jahFogColour;	// rgb = fog colour (linear; under the analytic sky x = the air's density instead), w = height-layer density (0 = off)
-		float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w = the World fog's distance density under the analytic sky
+		float4 jahFogColour;	// rgb = fog colour (linear; not read under the atmosphere), w = height-layer density (0 = off)
+		float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w = the World fog's distance density under the atmosphere
 	@end
 	@property( jah_shader_clock || irradiance_field || jah_env )
 		@property( !hlms_fog )
@@ -153,7 +158,7 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact )
+@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_atmo_ap )
 @piece( custom_ps_uniformDeclaration )
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
@@ -186,6 +191,60 @@
 	@property( jah_sun_contact )
 		vulkan_layout( ogre_t@value(jahSunVis) ) uniform texture2D jahSunVis;
 	@end
+	// THE PLANET'S ATMOSPHERE'S TABLES (SKY-ATMOSPHERE-1): the sky view and the
+	// aerial-perspective volume, both read with the environment's trilinear
+	// clamped block (one sampler per slot, the pair bound by
+	// FogHlmsListener::hlmsTypeChanged), then the model's arithmetic (the piece
+	// the build wraps from src/rayquery/include/jah_atmosphere.glsl) and the two
+	// reads the fog below makes. The tables hold radiance for a sun of unit
+	// illuminance; atmoSettings.skyE is the sun at the top of the air.
+	@property( jah_atmo_ap )
+		vulkan_layout( ogre_t@value(jahAtmoSky) ) uniform texture2D jahAtmoSky;
+		vulkan_layout( ogre_t@value(jahAtmoAerial) ) uniform texture3D jahAtmoAerial;
+		@property( syntax == glslvk )
+			layout( ogre_s@value(jahAtmoSky) ) uniform sampler jahAtmoSkySampler;
+			layout( ogre_s@value(jahAtmoAerial) ) uniform sampler jahAtmoAerialSampler;
+		@end
+		@insertpiece( JahAtmosphere )
+		// The light the air scatters towards the eye (xyz, unit sun) and the
+		// transmittance (w) between the eye and `km` along the world direction.
+		float4 jahAtmoAerialAt( float3 dir, float km )
+		{
+			const float2 uv = jahAtmoDirUv( dir, atmoSettings.sunDir.xyz, atmoSettings.planet, float2( 32.0, 64.0 ) );
+			const float w = jahAtmoApW( km, atmoSettings.planet, 32.0 );
+			return OGRE_SampleLevel( jahAtmoAerial, jahAtmoAerialSampler, float3( uv, w ), 0.0 );
+		}
+		// The sky's radiance (unit sun) at the direction's azimuth, held above the
+		// horizon: what a medium that hides the planet fades towards.
+		float3 jahAtmoSkyAbove( float3 dir )
+		{
+			const float2 uv = jahAtmoDirUvAbove( dir, atmoSettings.sunDir.xyz, atmoSettings.planet, float2( 192.0, 108.0 ) );
+			return OGRE_SampleLevel( jahAtmoSky, jahAtmoSkySampler, uv, 0.0 ).xyz;
+		}
+	@end
+@end
+@end
+
+// THE ATMOSPHERE COMPONENT'S CONST BUFFER (SKY-ATMOSPHERE-1; OgreAtmosphere.cpp
+// AtmoSettingsGpu is the writer): the piece the stock vertex and pixel shaders
+// insert where the component's struct goes. The first three floats are the
+// names upstream's fog block reads.
+@property( jah_atmo_buf )
+@piece( AtmosphereNprSkyStructDecl )
+	struct JahAtmoSettings
+	{
+		float fogDensity;
+		float fogBreakMinBrightness;
+		float fogBreakFalloff;
+		float aerialScale;
+		float4 skyE;
+		float4 sunDir;
+		float4 planet;
+	};
+	CONST_BUFFER( JahAtmoSettingsBuf, @value(jah_atmo_buf) )
+	{
+		JahAtmoSettings atmoSettings;
+	};
 @end
 @end
 
@@ -247,34 +306,24 @@ midf jahCloudSunTransmittance( float3 viewPos )
 
 @property( hlms_fog )
 
-// Replace upstream's per-vertex sky evaluation. Redefinition needs the undef
-// first (the parser rejects a duplicate piece) and needs this folder to be the
-// LAST library folder, after Hlms/Pbs/Any/Atmosphere.
+// Replace upstream's per-vertex sky colour. Redefinition needs the undef first
+// (the parser rejects a duplicate piece) and needs this folder to be the LAST
+// library folder.
 //
-// UNDER ANY SKY BUT THE ANALYTIC ONE the fog colour is the authored one, out of
+// UNDER ANY SKY BUT THE ATMOSPHERE the fog colour is the authored one, out of
 // the pass buffer, and upstream's own fog block does the distance fog with it.
 //
-// UNDER THE ANALYTIC SKY (jah_fog_atmo, set by FogHlmsListener whenever it is
-// the sky — FOG-ATMO-1: the sky decides, there is no switch) THE WHOLE FOG IS
-// PER PIXEL, below, and upstream's block is an exact identity: the host hands
-// the component a fog density of 0 and carries the medium's density in our
-// pass buffer instead (jahFogHeight.w — the air's own aerial perspective plus
-// the World fog). Upstream's per-vertex colour is NOT used there, for two
-// measured reasons (spikes/fog-atmo-1): it is a DIFFERENT function from the
-// one the sky quad is drawn with (a lifted elevation and a fixed density
-// exponent), so a fully fogged horizon met the sky at sunset in a band of the
-// wrong colour; and per-vertex it is evaluated at the corners of whatever is
-// drawn — the 4 km horizon plane is two triangles, so its whole far edge took
-// one blend of four corner directions whatever the sun's azimuth, and the
-// 100 m floor's edge met it in a seam. The piece is therefore redefined to
-// nothing there (the ~30 ALU per vertex are not paid for a colour nobody reads).
+// UNDER THE ATMOSPHERE (jah_atmo_ap, set by FogHlmsListener whenever it is the
+// sky — the sky decides, there is no switch) THE WHOLE FOG IS PER PIXEL, below,
+// and upstream's block is an exact identity (the component hands it a density
+// of 0). The vertex colour is then not read, so it is written as zero.
 //
 // The height layer's interpolant is written in BOTH modes, so it cannot live in
 // that piece: custom_vs_posExecution is inserted at the end of the same
 // function (Hlms/Pbs/GLSL/VertexShader_vs.glsl:73), where worldPos is still in
 // scope.
 @undefpiece( DoAtmosphereNprSky )
-@property( !jah_fog_atmo )
+@property( !jah_atmo_ap )
 	@piece( DoAtmosphereNprSky )
 		outVs.fog.xyz = midf3_c( passBuf.jahFogColour.xyz );
 	@end
@@ -287,17 +336,6 @@ midf jahCloudSunTransmittance( float3 viewPos )
 @property( hlms_normal || hlms_qtangent )
 	@piece( custom_vs_posExecution )
 		outVs.jahFogWorldY = worldPos.y;
-	@end
-@end
-
-// The sky's radiance function at the pixel shader's global scope, under the
-// analytic sky only (the fork's shared piece; the uniform-struct hook is the
-// global-scope slot DefaultHeaderPS offers, after the atmosphere's own struct).
-// The insertion stands on its own line: the piece ends in a comment marker.
-@property( jah_fog_atmo )
-	@piece( custom_ps_uniformStructDeclaration )
-@insertpiece( DeclAtmosphereNprSkyRadiance )
-
 	@end
 @end
 
@@ -321,59 +359,44 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	// which owns this hook for its pass and draws one lighting term with no fog at all.
 	@property( !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 	@piece( custom_ps_posExecution )
-	@property( jah_fog_atmo )
+	@property( jah_atmo_ap )
 	{
-		// THE WHOLE FOG, PER PIXEL, UNDER THE ANALYTIC SKY (see the header of
-		// this section). Ogre-Next 4.0 hardcodes hw_gamma_write to 1 (OgreHlmsPbs
-		// preparePassHash), i.e. the shader emits LINEAR and the target encodes;
-		// the other branches are the correct answer if that ever changes.
+		// THE WHOLE FOG, PER PIXEL, UNDER THE PLANET'S ATMOSPHERE (the header
+		// of this section). Ogre-Next 4.0 hardcodes hw_gamma_write to 1
+		// (OgreHlmsPbs preparePassHash), i.e. the shader emits LINEAR and the
+		// target encodes; the other branches are the correct answer if that
+		// ever changes.
 		const float jahL = length( inPs.pos.xyz );
 		@property( !hw_gamma_write )
 			const float3 jahSurf = float3( outPs_colour0.xyz ) * float3( outPs_colour0.xyz );
 		@else
 			const float3 jahSurf = float3( outPs_colour0.xyz );
 		@end
-		// THE SKY'S OWN RADIANCE FOR THIS PIXEL'S VIEW RAY — the sky quad's
-		// function itself, ONE text on the fork (Hlms/Common/Any/
-		// AtmosphereNprSkyRadiance_piece_all.any: the sky material includes it,
-		// this shader inserts its piece at global scope below), on the
-		// component's own constants, which it uploads for the sky material and
-		// for this buffer from one preset. Its sun disc is not in it (ours is
-		// SunDisc's). A fully fogged surface is therefore exactly the sky behind
-		// it: the horizon has no line to draw.
-		//
-		// The ray is the pixel's own: the view-space position turned into world
-		// axes by the pass's view rotation (the particle system's idiom, the
-		// same product with toFloat3x3 of passBuf.view), so a probe face or a
-		// mirror camera asks its own direction. THE SCATTERING ANGLE IS THE
-		// RAY'S OWN (the last argument, the fix round's F5): the phase term
-		// reads the direction before the horizon clamp — identical to the sky's
-		// for every ray the sky draws above its border — while the radiance
-		// lookup keeps the clamped one. Read after the clamp, a ground ray's
-		// phase made the whole ground glow like the sunset horizon.
-		const float3 jahFogLin = atmoNprSkyRadiance(
-			normalize( mul( toFloat3x3( passBuf.view ), inPs.pos.xyz ) ),
-			atmoSettings.cameraDisplacement.xyz, atmoSettings.packedParams2.xyz,
-			atmoSettings.packedParams2.w, atmoSettings.packedParams3.w, atmoSettings.densityCoeff,
-			atmoSettings.sunHeight, atmoSettings.sunHeightWeight, atmoSettings.lightDensity,
-			atmoSettings.packedParams3.xyz, atmoSettings.sunAbsorption.xyz,
-			atmoSettings.skyLightAbsorption.xyz, atmoSettings.packedParams1.xyz,
-			atmoSettings.packedParams1.w, true );
+		// The pixel's own ray: the view-space position turned into world axes
+		// by the pass's view rotation (the particle system's idiom), so a probe
+		// face or a mirror camera asks its own direction.
+		const float3 jahDir = normalize( mul( toFloat3x3( passBuf.view ), inPs.pos.xyz ) );
 
-		// THE DISTANCE MEDIUM, TWO MEDIA ON ONE RAY (the fix round's F4): the
-		// AIR is pure extinction, exp2( -L * air ) with the air's density in
-		// jahFogColour.x (the authored colour is not read under this sky), and
-		// the World fog alone carries upstream's breakthrough on the unfogged
-		// colour's luminance, exp2( -L * world ) in jahFogHeight.w. The
-		// breakthrough weight is clamped to [0; 1]: upstream's max( exp2, 0 )
-		// is 1.017 at luminance 0 with the shipped pair (the component packs it
-		// as min * falloff and -falloff), which lerped PAST the fog colour.
+		// THE AIR (SKY-ATMOSPHERE-1): the aerial-perspective table at this ray
+		// and this distance times the aerial scale — the light the air between
+		// the eye and the surface scatters in (xyz, times the sun at the top of
+		// the air) and what of the surface survives it (w). Scale 0 reads the
+		// table's first slice, the eye itself: exactly (0, 0, 0, 1).
+		const float4 jahAp = jahAtmoAerialAt( jahDir, jahL * 0.001 * atmoSettings.aerialScale );
+		float3 jahOut = jahSurf * jahAp.w + jahAp.xyz * atmoSettings.skyE.xyz;
+
+		// THE WORLD FOG, ON TOP: its own medium, fogging towards the sky just
+		// above the horizon at this azimuth (a fog thick enough to hide the
+		// ground reads as the horizon sky behind it — no line). The breakthrough
+		// bends it on the unfogged colour's luminance, clamped to [0; 1]
+		// (upstream's max( exp2, 0 ) is 1.017 at luminance 0 with the shipped
+		// pair, which lerped PAST the fog colour).
+		const float3 jahFogLin = jahAtmoSkyAbove( jahDir ) * atmoSettings.skyE.xyz;
 		const float jahLum = dot( jahSurf, float3( 0.212655, 0.715158, 0.072187 ) );
 		const float jahBreak = clamp( exp2( atmoSettings.fogBreakFalloff * jahLum +
 											atmoSettings.fogBreakMinBrightness ), 0.0, 1.0 );
-		const float jahTd = exp2( -jahL * passBuf.jahFogColour.x ) *
-							lerp( 1.0, exp2( -jahL * passBuf.jahFogHeight.w ), jahBreak );
-		float3 jahOut = lerp( jahFogLin, jahSurf, jahTd );
+		const float jahTd = lerp( 1.0, exp2( -jahL * passBuf.jahFogHeight.w ), jahBreak );
+		jahOut = lerp( jahFogLin, jahOut, jahTd );
 		if( passBuf.jahFogColour.w > 0.0 )
 		{
 			// The height layer (its integral is written out in the other branch),

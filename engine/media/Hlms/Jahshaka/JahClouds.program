@@ -7,11 +7,13 @@
 fragment_program Jahshaka/CloudLayer_ps_GLSL glsl
 {
 	source JahCloudLayer_ps.glsl
-	// JahCloudLayer.glsl, the one copy of the sheet's geometry.
+	// JahCloudLayer.glsl, the one copy of the sheet's geometry, and
+	// JahAtmosphere.glsl, the air's.
 	enable_include_header true
 	default_params
 	{
 		param_named cloudField int 0
+		param_named atmoAerial int 1
 	}
 }
 fragment_program Jahshaka/CloudLayer_ps_VK glslvk

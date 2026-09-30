@@ -169,49 +169,38 @@ public:
     virtual bool        cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres)
     { tau.clear(); size = 0; tileMetres = 0.0f; return false; }
     /// THE ATMOSPHERE'S TINT ON A LIGHT COMING FROM `toSun` (SUN_FOLLOWS_
-    /// ATMOSPHERE, lane ENGINE-7 item 6). White (1,1,1) unless the scene's sky
-    /// IS the analytic atmosphere — every other sky is a picture, and a picture
-    /// knows nothing about what the air does to sunlight.
+    /// ATMOSPHERE). White (1,1,1) unless the scene's sky IS the planet's
+    /// atmosphere — every other sky is a picture, and a picture knows nothing
+    /// about what the air does to sunlight.
     ///
-    /// WHAT IT IS. The DIRECT BEAM's transmittance through the atmosphere at
-    /// the sun's elevation, divided by its value with the sun at the zenith,
-    /// per channel — Beer-Lambert, exp(-tau * airmass), with Rayleigh, aerosol
-    /// and ozone optical depths and Kasten-Young airmass (OgreSky.cpp carries
-    /// the constants and the reference). So it is 1,1,1 at noon — the user's
-    /// picked colour IS the noon value — and falls, blue first, as the sun goes
-    /// down: the reddening AND the dimming a low sun really does to direct
-    /// light.
+    /// WHAT IT IS. The DIRECT BEAM's transmittance through the atmosphere from
+    /// the observer towards the sun, divided by its value with the sun at the
+    /// zenith, per channel — the SAME model the sky is drawn with
+    /// (AtmosphereSky; the transmittance table's integral, evaluated on the CPU
+    /// with the same coefficients, OgreAtmosphere.cpp). So it is 1,1,1 at noon
+    /// — the user's picked colour IS the noon value — and falls, blue first, as
+    /// the sun goes down: the reddening AND the dimming a low sun really does
+    /// to direct light. Every dial of the air moves it (the haze most).
     ///
-    /// ITS ONE INPUT IS `AtmosphereSky::sunHaze`, the atmosphere's turbidity,
-    /// and NOT the sky's `density` (lane SKY-DENSITY-1). The sky's radiance and
-    /// the sun's extinction are two physical quantities: the first is an
-    /// integral of scattering over every view ray, drawn by a non-physical
-    /// model whose density dial is artistic, the second is the absorption along
-    /// one ray and is physics. They shared a dial until 2026-09-15, so tuning
-    /// the sky's look moved the sunlight's colour and back. Moving `density`
-    /// now leaves this value untouched, and moving `sunHaze` leaves every sky
-    /// pixel untouched. (The component's own light link is still never armed —
-    /// it would take the light's colour and power over entirely.)
+    /// ...TIMES THE EARTH: a smooth occlusion that runs 1 to 0 between
+    /// geometric elevations -0.305 and -0.835 degrees — the sun's own
+    /// 0.53-degree disc setting through the horizon, lifted by 0.57 degrees of
+    /// refraction. So this value REACHES ZERO, continuously, and the light, the
+    /// sun disc and the sun's shadow all ride this one number and fade together.
     ///
-    /// ...TIMES THE EARTH. The scattering model is frozen below the horizon
-    /// (its own inputs clamp there), so on its own it would light the scene
-    /// from a sun that has set — at 0.2 of noon with a thin sky. The answer is
-    /// multiplied by a smooth occlusion that runs 1 to 0 between geometric
-    /// elevations -0.305 and -0.835 degrees: the sun's own 0.53-degree disc
-    /// setting through the horizon, lifted by 0.57 degrees of refraction. So
-    /// this value REACHES ZERO, continuously, and a host does not need a
-    /// threshold to decide when night starts — the light, the sun disc and the
-    /// sun's shadow all ride this one number and fade together. (With the
-    /// physical extinction the beam is already a thousandth of noon by an
-    /// elevation of 0.7 degrees, so a host's night threshold trips just before
-    /// the occlusion band rather than inside it — on a value that is three
-    /// hundred times below one 8-bit step either way.)
-    ///
-    /// `toSun` points AT the sun (the opposite of the direction the light
-    /// travels), in world space; it does not have to be normalised. Cheap to
-    /// call per frame: the answer is memoised against the direction and the
-    /// preset, and an unchanged sun costs a compare.
+    /// `toSun` points AT the sun, in world space; it does not have to be
+    /// normalised. Memoised against the direction and the model: an unchanged
+    /// sun costs a compare.
     virtual Colour      atmosphereSunTint(const Vec3 &toSun) const = 0;
+    /// THE ATMOSPHERE'S TABLES, counted (AtmosphereStatus). A scene without
+    /// the planet's atmosphere answers `on` false and zeros.
+    virtual AtmosphereStatus atmosphereStatus() const { return AtmosphereStatus(); }
+    /// THE ATMOSPHERE'S COST: each of the four table jobs dispatched
+    /// `iterations` more times over its own inputs, flushed and timed
+    /// (AtmosphereCost). Synchronous — a GPU wait; a measurement, never a
+    /// frame-time call. False without the atmosphere (or headless).
+    virtual bool        measureAtmosphere(unsigned iterations, AtmosphereCost &out)
+    { (void)iterations; out = AtmosphereCost(); return false; }
     /// THIS SCENE'S SHADOW REQUEST — ShadowDesc says what the shape means and
     /// why it exists (the backend's filter and atlas are global; this hides
     /// that rather than pretending otherwise). Idempotent, and cheap when

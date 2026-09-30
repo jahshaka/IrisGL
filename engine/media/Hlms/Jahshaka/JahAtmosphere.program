@@ -1,0 +1,28 @@
+// THE PLANET'S ATMOSPHERE'S SKY PASS (SKY-ATMOSPHERE-1): the fragment program
+// the sky quad draws with (JahAtmosphere.material). The vertex program is the
+// shared screen-ray one (JahSunDisc.program) — which is also how the VR
+// session's stereo swap recognises the quad.
+//
+// GLSL + Vulkan only, like every other program we own in this folder.
+
+fragment_program Jahshaka/AtmosphereSky_ps_GLSL glsl
+{
+	source JahAtmosphereSky_ps.glsl
+	// JahAtmosphere.glsl, the model's one copy (raw, staged from
+	// src/rayquery/include/jah_atmosphere.glsl).
+	enable_include_header true
+	default_params
+	{
+		param_named skyViewLut int 0
+	}
+}
+fragment_program Jahshaka/AtmosphereSky_ps_VK glslvk
+{
+	source JahAtmosphereSky_ps.glsl
+	enable_include_header true
+}
+fragment_program Jahshaka/AtmosphereSky_ps unified
+{
+	delegate Jahshaka/AtmosphereSky_ps_GLSL
+	delegate Jahshaka/AtmosphereSky_ps_VK
+}
