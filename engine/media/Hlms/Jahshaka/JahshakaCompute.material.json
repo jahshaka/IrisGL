@@ -15,6 +15,85 @@
 			}
 		},
 
+		"Jahshaka/AtmoTransmittance" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAtmoTransmittance_cs",
+			"inform_shader_of_texture_data_change" : true,
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahAtmosphere_piece_all.any"],
+			"uav_units" : 1,
+			"params" :
+			[
+				["atmoPlanet", [6360.0, 6460.0, 6360.002, 100.0], "float"],
+				["atmoRayleigh", [0.005802, 0.013558, 0.0331, 8.0], "float"],
+				["atmoMie", [0.003996, 0.00444, 1.2, 0.8], "float"],
+				["atmoOzone", [0.00065, 0.001881, 0.000085, 0.0], "float"],
+				["atmoGround", [0.3, 0.3, 0.3, 0.0], "float"],
+				["atmoSun", [0.0, 1.0, 0.0, 0.0], "float"]
+			]
+		},
+
+		"Jahshaka/AtmoMultiScatter" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAtmoMultiScatter_cs",
+			"inform_shader_of_texture_data_change" : true,
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahAtmosphere_piece_all.any"],
+			"textures" : [ {} ],
+			"uav_units" : 1,
+			"params" :
+			[
+				["atmoPlanet", [6360.0, 6460.0, 6360.002, 100.0], "float"],
+				["atmoRayleigh", [0.005802, 0.013558, 0.0331, 8.0], "float"],
+				["atmoMie", [0.003996, 0.00444, 1.2, 0.8], "float"],
+				["atmoOzone", [0.00065, 0.001881, 0.000085, 0.0], "float"],
+				["atmoGround", [0.3, 0.3, 0.3, 0.0], "float"],
+				["atmoSun", [0.0, 1.0, 0.0, 0.0], "float"]
+			]
+		},
+
+		"Jahshaka/AtmoSkyView" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAtmoSkyView_cs",
+			"inform_shader_of_texture_data_change" : true,
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahAtmosphere_piece_all.any"],
+			"textures" : [ {}, {} ],
+			"uav_units" : 1,
+			"params" :
+			[
+				["atmoPlanet", [6360.0, 6460.0, 6360.002, 100.0], "float"],
+				["atmoRayleigh", [0.005802, 0.013558, 0.0331, 8.0], "float"],
+				["atmoMie", [0.003996, 0.00444, 1.2, 0.8], "float"],
+				["atmoOzone", [0.00065, 0.001881, 0.000085, 0.0], "float"],
+				["atmoGround", [0.3, 0.3, 0.3, 0.0], "float"],
+				["atmoSun", [0.0, 1.0, 0.0, 0.0], "float"]
+			]
+		},
+
+		"Jahshaka/AtmoAerial" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAtmoAerial_cs",
+			"inform_shader_of_texture_data_change" : true,
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahAtmosphere_piece_all.any"],
+			"textures" : [ {}, {} ],
+			"uav_units" : 1,
+			"params" :
+			[
+				["atmoPlanet", [6360.0, 6460.0, 6360.002, 100.0], "float"],
+				["atmoRayleigh", [0.005802, 0.013558, 0.0331, 8.0], "float"],
+				["atmoMie", [0.003996, 0.00444, 1.2, 0.8], "float"],
+				["atmoOzone", [0.00065, 0.001881, 0.000085, 0.0], "float"],
+				["atmoGround", [0.3, 0.3, 0.3, 0.0], "float"],
+				["atmoSun", [0.0, 1.0, 0.0, 0.0], "float"]
+			]
+		},
+
 		"Jahshaka/EnvironmentCones" :
 		{
 			"threads_per_group" : [64, 1, 1],

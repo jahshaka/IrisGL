@@ -1,41 +1,27 @@
-// Fog: Ogre's AtmosphereNpr adopted for its exponential fog MATH, wired to
-// Jahshaka's authored colour and extended with a height layer.
+// Fog: Ogre's fog block (HlmsPbs, under `hlms_fog`) fed by OUR atmosphere
+// component, wired to Jahshaka's authored colour and extended with a height
+// layer — and, under the planet's atmosphere, the air's own aerial perspective.
 //
-// WHY A COMPONENT WE ONLY HALF WANT
-// AtmosphereNpr bundles four things: a procedural sky quad, a fog model, a
-// sun-light link and an ambient link. We want the second only. The component
-// makes that separable, but the recipe is not obvious and is load-bearing:
+// THE COMPONENT (Atmosphere.h, JahAtmosphere) is an Ogre::AtmosphereComponent:
+// registered on a SceneManager (`_setAtmosphere`) it sets `hlms_fog` in every
+// colour pass and binds the const buffer upstream's block reads its density
+// and brightness breakthrough from. It serves two customers — the sky, when it
+// is the planet's atmosphere, and the World fog under any sky — and is
+// registered while either wants it (OgreScene::syncAtmosphere).
 //
-//   setSky( sm, true );        // creates the sky Rectangle2D and registers us
-//   setSky( sm, false );       // hides the quad (Rectangle2D honours setVisible,
-//                              // unlike BillboardSet2) and UNregisters us
-//   sm->_setAtmosphere( this ) // registers again — fog only, no visible sky
+// What upstream's block CANNOT give: an authored fog colour and height fog.
+// Those ride the pass-buffer extension below and
+// media/Hlms/Jahshaka/JahFog_piece_vs_piece_ps.any.
 //
-// The first call is not optional: AtmosphereNpr::_update() asserts on, and then
-// dereferences, the per-SceneManager Rectangle2D. The last call is what actually
-// puts hlms_fog into the pass properties, via preparePassHash.
-//
-// setLight() is NEVER called. syncToLight() returns immediately without a linked
-// light, so the component cannot touch SceneManager::setAmbientLight — our SH
-// ambient (and everything the sky/IBL lane computes) stays exactly as it was.
-// This is by construction, not by luck: there is no other path from the component
-// to the ambient.
-//
-// What the component gives the shader: hlms_fog + a const buffer with fogDensity
-// and the two breakthrough terms, consumed by the stock HlmsPbs pixel shader,
-// and its procedural sky colour per vertex. What it CANNOT give: an authored
-// fog colour (for the skies that are not it) and height fog. Those two ride the
-// pass-buffer extension below and media/Hlms/Jahshaka/JahFog_piece_vs_piece_ps.any.
-//
-// UNDER THE ANALYTIC SKY THE AIR IS A MEDIUM (lane FOG-ATMO-1). The component
-// stays registered with the sky; the medium's density — the air's own
-// (OgreScene::airFogDensity) whether or not the World fog is on, plus the World
-// fog's — rides OUR pass buffer, and our piece fogs every layer per pixel
-// towards the sky quad's own radiance for the pixel's ray, leaving upstream's
-// block an identity (density 0; its per-vertex colour is a different function
-// from the sky's and was evaluated at the corners of 4 km triangles — the media
-// file has the measurements). The authored colour is only for the other skies.
+// UNDER THE PLANET'S ATMOSPHERE THE AIR IS A MEDIUM. Every lit pixel is seen
+// through the aerial-perspective table at its own direction and distance (the
+// light the air scatters in, the transmittance), whether or not the World fog
+// is on; the World fog and its height layer compose on top, fogging towards
+// the sky's own radiance just above the horizon at the pixel's azimuth. The
+// block's own density is 0 there (an identity) and our piece does all of it.
+// The authored colour is only for the other skies.
 #include "EnginePrivate.h"
+#include "Atmosphere.h"
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
 
@@ -62,11 +48,14 @@ std::map<const Ogre::SceneManager *, FogHlmsListener::SunContactBind>
 std::map<const Ogre::SceneManager *, int>
                               FogHlmsListener::sPhotonIsolation;              // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sCloudSampler = nullptr;       // render thread only
+std::map<const Ogre::SceneManager *, FogHlmsListener::AtmoBind>
+                              FogHlmsListener::sAtmo;                         // render thread only
 
 namespace {
 // THE EXTRA PASS TEXTURES, IN THEIR ONE FIXED ORDER (the sky's environment,
 // then the gather's irradiance, then the cloud field — CLOUDS-2D-1 — then the
-// sun contact visibility — PHOTON-RAYS-1). Three
+// sun contact visibility — PHOTON-RAYS-1 — then the atmosphere's
+// aerial-perspective volume — SKY-ATMOSPHERE-1). Three
 // places must agree about it: the count (getNumExtraPassTextures), the
 // registers (propertiesMergedPreGenerationStep) and the bindings
 // (hlmsTypeChanged). They all walk THIS table, so a fourth slot is one row
@@ -81,8 +70,26 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_probe_gather", "jahProbeIrradiance" },
     { "jah_cloud_shadow", "jahCloudField" },
     { "jah_sun_contact",  "jahSunVis" },
+    { "jah_atmo_ap",      "jahAtmoAerial" },
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
+// THE PASS-TEXTURE TABLE HAS A HARD SIZE, AND A PASS OVER IT IS NOT SURVIVABLE
+// (SKY-ATMOSPHERE-1's gate: world_sky.clouds_2d asked for 65 of 64 —
+// VulkanRootLayout threw "set 0 needs 65 texture slots; the global binding table
+// holds 64" and the process died with SIGSEGV). The table is the fork's
+// NUM_BIND_TEXTURES (RenderSystems/Vulkan/include/OgreVulkanGlobalBindingTable.h,
+// 64); the pin's own share of the fullest pass this engine builds — Epic, the
+// gather, the sun contact, the cloud field and the environment claimed — is 59,
+// MEASURED as that crash's 65 less its six extras. So the extras may never
+// exceed five, and adding a sixth is a BUILD error here rather than a crash in
+// one arm of one pool. Five today: the fullest pass is at 64 of 64 with every
+// extra claimed; the atmosphere's volume is claimed only where it is read
+// (aerialScale > 0 or the World fog), so a default scene's fullest pass is 63.
+constexpr size_t kPassTextureTable = 64u;
+constexpr size_t kPinPassTexturesFullest = 59u;
+static_assert(kPinPassTexturesFullest + kNumExtraPassSlots <= kPassTextureTable,
+              "the PBS pass-texture table overflows: the pin's fullest pass plus kExtraPassSlots "
+              "exceeds the fork's 64 slots — fold an extra into an existing texture first");
 /// The slot's property as a hashed IdString, hashed once (these run per
 /// renderable hash, not per frame).
 const Ogre::IdString &extraSlotProperty(size_t i) {
@@ -91,6 +98,7 @@ const Ogre::IdString &extraSlotProperty(size_t i) {
         Ogre::IdString(kExtraPassSlots[1].property),
         Ogre::IdString(kExtraPassSlots[2].property),
         Ogre::IdString(kExtraPassSlots[3].property),
+        Ogre::IdString(kExtraPassSlots[4].property),
     };
     return ids[i];
 }
@@ -275,13 +283,15 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
     if (casterPass || !commandBuffer || !datablock || !datablock->getCreator()) return;
     const PassBinds &pb = sPass[datablock->getCreator()->getType()];
     // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance,
-    // the cloud field, the sun contact visibility. Each pair was set together
-    // in preparePassHash with its property, or not at all.
+    // the cloud field, the sun contact visibility, the atmosphere's volume.
+    // Each pair was set together in preparePassHash with its property, or not
+    // at all.
     const struct { Ogre::TextureGpu *tex; const Ogre::HlmsSamplerblock *sampler; } bound[] = {
         { pb.skyCube, pb.skySampler },
         { pb.probeGather, pb.probeGatherSampler },
         { pb.cloudField, pb.cloudSampler },
         { pb.sunVis, pb.sunVisSampler },
+        { pb.atmoAerial, pb.atmoSampler },
     };
     static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
                   "one binding per extra pass slot, in kExtraPassSlots' order");
@@ -340,17 +350,34 @@ Ogre::TextureGpu *FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
 
 void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
                                       bool, Ogre::SceneManager *sceneManager, Ogre::Hlms *hlms) {
-    // THE FOG'S COLOUR MODE, first and unconditionally for a colour pass: it is
-    // a SHADER property (the media file's @undefpiece of upstream's per-vertex
-    // sky colour is gated on it), so it has to be set before any of the early
-    // returns below — and it participates in the pass hash, which is what makes
-    // flipping the row recompile rather than silently keep the old shader.
-    if (hlms && !casterPass && sceneManager && lookup(sceneManager).atmosphere)
-        hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_fog_atmo", 1);
+    PassBinds unused;
+    PassBinds &pb = hlms ? sPass[hlms->getType()] : unused;
+    // THE PLANET'S ATMOSPHERE'S VOLUME (SKY-ATMOSPHERE-1), first and
+    // unconditionally for a colour pass: its PROPERTY is also the
+    // fog's colour mode (the media file's air and its per-pixel World fog are
+    // gated on them, and upstream's per-vertex colour is redefined away), so it
+    // has to be set before any of the early returns below — and it takes part
+    // in the pass hash, which is what makes switching the sky recompile rather
+    // than silently keep the old shader. The textures, the sampler and the
+    // properties are set together or not at all (an unbound claimed slot is an
+    // undefined descriptor).
+    pb.atmoAerial = nullptr;
+    pb.atmoSampler = nullptr;
+    if (hlms && !casterPass && sceneManager && !sAtmo.empty() && lookup(sceneManager).atmosphere) {
+        auto it = sAtmo.find(sceneManager);
+        if (it != sAtmo.end() && it->second.aerial) {
+            const Ogre::HlmsSamplerblock *linear = acquireSampler(hlms->getHlmsManager(), true);
+            if (linear) {
+                pb.atmoAerial = it->second.aerial;
+                pb.atmoSampler = linear;
+                hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_atmo_ap", 1);
+            }
+        }
+    }
     // SURFACE-CACHE phase 2. The capture workspace's five-target G-buffer is
     // written by JahCardCapture_piece_ps.any under this ONE pass property, and
-    // this is where it is set — the same hook and the same shape as
-    // `jah_fog_atmo` above. It is true only while the surface cache's capture
+    // this is where it is set — the same hook and the same shape as the
+    // atmosphere's properties above. It is true only while the surface cache's capture
     // workspace is inside its own `_update()`, so every OTHER pass in the
     // process generates the shader it generated before this lane existed and
     // both selftest hashes are unmoved.
@@ -373,8 +400,6 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // ITS OWN SAMPLER, acquired ONCE per manager and never per pass (the
     // samplerblock reference count is a uint16 — DOCS/traps/ENGINE.md): the slot
     // exists without a PCC now, so the PCC's block cannot be borrowed.
-    PassBinds unused;
-    PassBinds &pb = hlms ? sPass[hlms->getType()] : unused;
     pb.skyCube = nullptr;
     pb.skySampler = nullptr;
     if (hlms && !casterPass && sceneManager) {
@@ -576,6 +601,13 @@ void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
     sCloudShadow.erase(sm);
     sSunContact.erase(sm);
     sPhotonIsolation.erase(sm);
+    sAtmo.erase(sm);
+}
+
+void FogHlmsListener::setAtmosphere(const Ogre::SceneManager *sm, const AtmoBind &bind) {
+    if (!sm) return;
+    if (!bind.aerial) { sAtmo.erase(sm); return; }
+    sAtmo[sm] = bind;
 }
 
 void FogHlmsListener::setCloudShadow(const Ogre::SceneManager *sm, const CloudShadowState &state) {
@@ -773,37 +805,25 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
 
 void OgreScene::ensureAtmosphere() {
     if (mAtmosphere) return;
-    Ogre::VaoManager *vao = mRoot->getRenderSystem()->getVaoManager();
-    if (!vao) return;
-    // The constructor loads the "Ogre/Atmo/NprSky" material and THROWS when the
-    // Atmosphere media is missing, so it runs inside the guard like every other
-    // Ogre call here: a scene with no fog is the failure mode, never an exception
-    // crossing the boundary. It can only run after registerCommonMaterials() (and
-    // therefore after the first render window and Hlms registration), which every
-    // caller satisfies — scenes exist only after Engine::createView().
+    if (!mRoot->getRenderSystem()->getVaoManager()) return;
+    // The component loads its sky material and THROWS when the media is not
+    // staged, so it runs inside the guard like every other Ogre call here: a
+    // scene with no fog and no atmosphere is the failure mode, never an
+    // exception crossing the boundary. Scenes exist only after
+    // Engine::createView(), so the window and the Hlms are up.
     JAH_TRY {
-        mAtmosphere = new Ogre::AtmosphereNpr(vao);
-        // The quad needs two things done to it that the component cannot know
-        // about (render queue 0 instead of 212, kVisibleBit instead of the
-        // default flags — tuneAtmosphereRenderable says why), and it names it
-        // since fork 618d95cca (was 0054). It used to be found by diffing the
-        // SceneManager's Rectangle2D set across the setSky call.
-        mAtmosphere->setSky(mSceneMgr, true);      // creates the sky quad, registers
-        mAtmoQuad = mAtmosphere->getSky(mSceneMgr);
-        tuneAtmosphereRenderable();
+        mAtmosphere = new JahAtmosphere(mRoot, mSceneMgr, kVisibleBit);
         // The state the two customers left behind decides what happens next
-        // (ONE component, two customers — syncAtmosphere's header). A first
-        // creation from setFog leaves the quad hidden and the component
-        // registered; from the analytic sky it leaves both on.
+        // (ONE component, two customers — syncAtmosphere's header).
         syncAtmosphere();
     } JAH_CATCH(mError, );
 }
 
 void OgreScene::destroyAtmosphere() {
     if (!mAtmosphere) return;
-    mAtmoQuad = nullptr;   // the component destroys it in its own destructor
-    // ~AtmosphereNpr un-registers itself from every SceneManager it knows and
-    // destroys their Rectangle2Ds — which is why this must precede the manager.
+    FogHlmsListener::setAtmosphere(mSceneMgr, FogHlmsListener::AtmoBind());
+    // The component unregisters itself and destroys its quad through the
+    // SceneManager — which is why this must precede the manager.
     JAH_TRY {
         delete mAtmosphere;
     } JAH_CATCH(mError, );
@@ -829,16 +849,14 @@ void OgreScene::setFog(const FogDesc &desc) {
         if (!same) staleProbeGrid(GiStaleReason::Fog);   // a no-op before a grid exists
     }
     if (!desc.enabled) {
-        // Bit-exact off: no atmosphere means no hlms_fog property, which means the
-        // fog code is not compiled into the shader at all. Every offscreen pixel
-        // suite depends on this.
+        // Bit-exact off: no component registered means no hlms_fog property,
+        // which means the fog code is not compiled into the shader at all.
+        // Every offscreen pixel suite depends on this.
         //
-        // UNLESS THE ANALYTIC SKY IS BOUND (SKY-GPU): the same component draws
-        // it, and its registration is what makes the quad update at all, so the
-        // fog cannot take it down — and under that sky the AIR is still a medium
-        // (FOG-ATMO-1): syncAtmosphere -> pushFogState leaves the air's own
-        // aerial perspective in the fog block, without the World fog's density,
-        // height layer or breakthrough.
+        // UNLESS THE ATMOSPHERE IS THE SKY: the same component draws it, and
+        // under it the AIR is still a medium — syncAtmosphere -> pushFogState
+        // leaves the air's aerial perspective on, without the World fog's
+        // density, height layer or breakthrough.
         mAtmoFogOn = false;
         if (mAtmoSkyOn) {
             syncAtmosphere();
@@ -851,7 +869,7 @@ void OgreScene::setFog(const FogDesc &desc) {
     mAtmoFogOn = true;
     ensureAtmosphere();
     if (!mAtmosphere) return;   // media missing: the scene renders unfogged, mError says why
-    syncAtmosphere();           // ...which ends in pushFogState: the preset's fog block and the FogState
+    syncAtmosphere();           // ...which ends in pushFogState: the component's fog block and the FogState
 }
 
 // THE FOG THE SHADER READS, derived from the LAST description the host pushed
@@ -859,14 +877,16 @@ void OgreScene::setFog(const FogDesc &desc) {
 // being a function (the colour mode used to be decided once, at setFog time,
 // and outlived the sky it was made of).
 //
-// FOG-ATMO-1: under the ANALYTIC sky the colour is that sky's own scattering
-// for every layer — there is no switch, the sky decides — and the air is a
-// medium whether or not the World fog is on: the preset's fog density is the
-// air's (airFogDensity, OgreSky.cpp) plus the World fog's. Under any other sky
-// the World fog is the only medium and it takes the authored colour.
+// Under the planet's atmosphere the colour is that sky's own radiance for
+// every layer — there is no switch, the sky decides — and the air's aerial
+// perspective is the piece's whether or not the World fog is on; the
+// component's block is then an identity (density 0). Under any other sky the
+// World fog is the only medium and upstream's block does it in the authored
+// colour.
 void OgreScene::pushFogState() {
     const bool fogOn = mAtmoFogOn && mFogDescKnown;
-    if (!mAtmosphere || (!fogOn && !mAtmoSkyOn)) {
+    const bool airRead = mAtmoSkyOn && mAtmosphere && mAtmosphere->aerialScale() > 0.0f;
+    if (!mAtmosphere || (!fogOn && !airRead)) {
         FogHlmsListener::unregisterFog(mSceneMgr);
         return;
     }
@@ -879,34 +899,17 @@ void OgreScene::pushFogState() {
         s.heightLevel   = desc.heightLevel;
     }
     s.atmosphere = mAtmoSkyOn;
-    // ONE MEDIUM PER RAY: two absorbing media along the same ray compose by
-    // adding their densities (the transmittances multiply), so the air and the
-    // World fog share one exponential exactly. Under the analytic sky it is OUR
-    // piece's (per pixel, in the sky's colour — the media file says why
-    // upstream's per-vertex colour could not be used); under any other sky the
-    // World fog alone is upstream's.
-    // THE AIR IS PURE EXTINCTION AND ONLY THE WORLD FOG BENDS (the fix
-    // round's F4): the piece takes exp2(-L*air) * lerp(1, exp2(-L*world),
-    // breakthrough), so the air's density rides the authored colour's slot
-    // (unread under the analytic sky) and the World fog's its own.
     const float worldDensity = fogOn ? std::max(desc.density, 0.0f) : 0.0f;
+    // Under the atmosphere the World fog's density rides our pass buffer (the
+    // piece fogs per pixel towards the sky), and upstream's block is left an
+    // identity; under any other sky the block carries it.
     s.distanceDensity = mAtmoSkyOn ? worldDensity : 0.0f;
-    if (mAtmoSkyOn) { s.r = airFogDensity(); s.g = 0.0f; s.b = 0.0f; }
     FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassHash / preparePassBuffer
-
-    JAH_TRY {
-        Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
-        // Under the analytic sky upstream's block is an exact identity
-        // (exp2(0) = 1); the breakthrough pair below is still the component's,
-        // because our piece reads it from the same constant buffer.
-        preset.fogDensity = mAtmoSkyOn ? 0.0f : worldDensity;
-        // The breakthrough is the World fog's authored bend of the curve; the
-        // air alone is pure extinction (falloff 0 makes lumFogWeight exactly 1).
-        preset.fogBreakMinBrightness = fogOn ? std::max(desc.breakMinBrightness, 0.0f) : 0.0f;
-        preset.fogBreakFalloff       = fogOn ? std::max(desc.breakFalloff, 0.0f) : 0.0f;
-        mAtmosphere->setPreset(preset);
-        ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
-    } JAH_CATCH(mError, );
+    // The breakthrough is the World fog's authored bend of the curve (the
+    // piece reads the pair from the same buffer under the atmosphere).
+    mAtmosphere->setFogBlock(mAtmoSkyOn ? 0.0f : worldDensity,
+                             fogOn ? std::max(desc.breakMinBrightness, 0.0f) : 0.0f,
+                             fogOn ? std::max(desc.breakFalloff, 0.0f) : 0.0f);
 }
 
 }}}  // namespace jahshaka::engine::detail

@@ -4428,10 +4428,9 @@ void VrSession::syncStereoQuads() {
             ct->getPass(0u)->setVertexProgram("Jahshaka/VrScreenQuad_vs");
             // THE CLONE SHARES THE BASE'S FRAGMENT PARAMETERS — the same
             // object, not a copy (V2F-3's real cause). The owners of these
-            // materials write into their pass PER CAMERA, inside the frame:
-            // `AtmosphereNpr::_update` pushes its whole preset — including a
-            // camera-dependent displacement — once for every camera that
-            // renders (OgreSceneManager.cpp:1484). A copy taken once a frame is
+            // materials may write into their pass PER CAMERA, inside the frame
+            // (the retired AtmosphereNpr pushed a camera-dependent preset for
+            // every camera that rendered, OgreSceneManager.cpp:1484). A copy taken once a frame is
             // therefore whatever the LAST camera of the previous frame left,
             // which in a session is the desktop mirror's, and the headset's sky
             // would be graded for a camera the wearer is not looking through.

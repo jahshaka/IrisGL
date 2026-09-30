@@ -36,6 +36,14 @@ material Jahshaka/CloudLayer
 				filtering			anisotropic
 				max_anisotropy		8
 			}
+			// THE AIR IN FRONT OF THE SHEET (SKY-ATMOSPHERE-1): the planet's
+			// atmosphere's aerial-perspective table, or a one-texel "no air"
+			// volume under any other sky (OgreScene::applyCloudLayer binds it).
+			texture_unit atmoAerial
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
 		}
 	}
 }

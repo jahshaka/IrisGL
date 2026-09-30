@@ -102,10 +102,10 @@ inline bool isDefaultFloorNode(const iris::SceneNode *node)
 /// one: drop both once the atmosphere's tint fell below a thousandth of its
 /// noon value. A tint is a transmittance, so a fraction of noon is a fraction
 /// of a quantity nobody measured, and the elevation at which it is crossed
-/// moves with the air: with SKY-DENSITY-1's physical transmittance (Beer-
-/// Lambert with a Kasten-Young airmass, OgreSky.cpp::atmosphereSunTint) the
-/// crossing sits at +0.74 degrees of sun elevation at the default haze 2.5, at
-/// +3.61 at haze 6 and at +6.27 at haze 10 — measured, this lane. A hazy dial
+/// moves with the air: with a physical transmittance (Beer-Lambert through the
+/// atmosphere, OgreSky.cpp::atmosphereSunTint) the crossing sat at +0.74
+/// degrees of sun elevation on a clear day, at +3.61 and +6.27 on hazier ones —
+/// measured by lane SKY-SMALL on the model of its day. A hazy dial
 /// therefore took the disc and the shadow off while the sun was VISIBLY UP: at
 /// the cut the disc still carried 8 x intensity x 1e-3 of radiance, a 5-10/255
 /// dot that vanished between two frames.
@@ -7572,10 +7572,14 @@ bool SceneMirror::SkySource::operator==(const SkySource &o) const
     case Kind::Color:
         return skyColor == o.skyColor;
     case Kind::Realistic: {
-        if (!(same(density, o.density) && same(diffusion, o.diffusion) &&
-              same(horizon, o.horizon) && same(power, o.power) &&
-              same(sunHaze, o.sunHaze) && atmosphereHaze == o.atmosphereHaze &&
-              skyColour == o.skyColour))
+        if (!(same(sunHaze, o.sunHaze) && same(aerialScale, o.aerialScale) &&
+              same(skyBrightness, o.skyBrightness) &&
+              same(groundAlbedo, o.groundAlbedo) && same(rayleighScale, o.rayleighScale) &&
+              ozone == o.ozone))
+            return false;
+        if (!(same(sunIlluminance.x(), o.sunIlluminance.x()) &&
+              same(sunIlluminance.y(), o.sunIlluminance.y()) &&
+              same(sunIlluminance.z(), o.sunIlluminance.z())))
             return false;
         if (hasSun != o.hasSun) return false;
         if (!hasSun) return true;
@@ -7617,21 +7621,29 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
     } else if (scene.skyType == iris::SkyType::REALISTIC) {
         const iris::SkyRealistic &r = scene.skyRealistic;
         src.kind = SkySource::Kind::Realistic;
-        src.density = r.density;
-        src.diffusion = r.diffusion;
-        src.horizon = r.horizon;
-        src.power = r.power;
-        src.skyColour = r.skyColour;
         src.sunHaze = r.sunHaze;
-        src.atmosphereHaze = r.atmosphereHaze;
-        // D15: the analytic sky's sun is the SCENE'S SUN LIGHT, and there is no
+        src.aerialScale = r.aerialScale;
+        src.skyBrightness = r.skyBrightness;
+        src.groundAlbedo = r.groundAlbedo;
+        src.rayleighScale = r.rayleighScale;
+        src.ozone = r.ozone;
+        // D15: the atmosphere's sun is the SCENE'S SUN LIGHT, and there is no
         // other source for it. A document light emits down its local -Y, so the
-        // direction TOWARDS the sun is the reverse of the light's travel.
-        if (const auto sun = scene.sunLight()) {
+        // direction TOWARDS the sun is the reverse of the light's travel. The
+        // sky is LIT by it (SKY-ATMOSPHERE-1): its noon illuminance in the
+        // renderer's units — HlmsPbs lights with intensity x pi and divides the
+        // diffuse by pi, so a white card facing the sun receives colour x
+        // intensity x pi (the cloud sheet's convention, applyCloudLayer). No
+        // visible sun, no sunlight: the sky is the night's.
+        const auto sun = scene.sunLight();
+        if (sun && sun->isVisibleInScene()) {
             const iris::Vec3 travel = sun->getLightDir();
             if (travel.lengthSquared() > 1e-12f) {
                 src.sunDir = -travel.normalized();
                 src.hasSun = true;
+                const iris::LinearColor c = iris::linearOf(sun->color);
+                const float k = std::max(0.0f, sun->intensity) * float(M_PI);
+                src.sunIlluminance = iris::Vec3(c.r * k, c.g * k, c.b * k);
             }
         }
     } else if (scene.skyType == iris::SkyType::SINGLE_COLOR) {
@@ -7665,7 +7677,8 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
 // over every texel of the panorama (CPU_GPU_LIGHTING_AUDIT F2). The engine now
 // CAPTURES its own sky into a cubemap on the GPU and integrates that, so this
 // function's whole job is the sky itself. The Preetham bake is gone with it:
-// the analytic sky is Ogre's AtmosphereNpr, five numbers pushed into a shader.
+// the realistic sky is the engine's planet atmosphere (SKY-ATMOSPHERE-1), a few
+// dials and the sun pushed into its tables.
 void SceneMirror::applySky(View *view)
 {
     if (!mSource || !view) return;
@@ -7724,29 +7737,23 @@ void SceneMirror::applySky(View *view)
             break;
         }
         case SkySource::Kind::Realistic: {
-            // THE ANALYTIC SKY IS THE ENGINE'S (SKY-GPU, owner pick 5). Five
-            // parameters and the sun's direction; no image, no upload, no
-            // debounce — the Preetham bake that used to live here cost up to
-            // 524 k pixels of transcendental math per slider event.
+            // THE PLANET'S ATMOSPHERE IS THE ENGINE'S (SKY-ATMOSPHERE-1): the
+            // dials, the sun's direction and its illuminance; the engine builds
+            // its tables and draws the sky from them.
             mSkyDesc.mode = SkyMode::Atmosphere;
             AtmosphereSky &a = mSkyDesc.atmosphere;
-            a.density   = mSource->skyRealistic.density;
-            a.diffusion = mSource->skyRealistic.diffusion;
-            a.horizon   = mSource->skyRealistic.horizon;
-            a.skyPower  = mSource->skyRealistic.power;
-            // The SUN's air, not the sky's (lane SKY-DENSITY-1): it reaches the
-            // engine's transmittance model and no sky pixel at all.
-            a.sunHaze   = mSource->skyRealistic.sunHaze;
-            // The air's haze on geometry, switchable (AIR-HAZE-TOGGLE-1).
-            a.atmosphereHaze = mSource->skyRealistic.atmosphereHaze;
-            // The sky's colour is a colour a user PICKS, so it is decoded like
-            // every other one (§4) — the component's own numbers are linear.
-            const iris::LinearColor c = iris::linearOf(mSource->skyRealistic.skyColour);
-            a.skyColour = Colour(c.r, c.g, c.b, 1.0f);
+            a.sunHaze = src.sunHaze;
+            a.aerialScale = src.aerialScale;
+            a.skyBrightness = src.skyBrightness;
+            a.groundAlbedo = src.groundAlbedo;
+            a.rayleighScale = src.rayleighScale;
+            a.ozone = src.ozone;
             a.hasSun = src.hasSun;
             a.sunDir[0] = src.sunDir.x();
             a.sunDir[1] = src.sunDir.y();
             a.sunDir[2] = src.sunDir.z();
+            a.sunIlluminance = Colour(src.sunIlluminance.x(), src.sunIlluminance.y(),
+                                      src.sunIlluminance.z(), 1.0f);
             break;
         }
         case SkySource::Kind::Color: {
@@ -7864,6 +7871,11 @@ void SceneMirror::applySky(View *view)
         // for instead of being 2.3x brighter than it.
         const iris::LinearColor c = iris::linearOf(mSource->skyColor);
         view->setBackground(Colour(c.r, c.g, c.b, 1.0f));
+    } else if (mSource->skyType == iris::SkyType::NONE) {
+        // NO SKY (SKY-ATMOSPHERE-1): the engine holds SkyMode::NoSky — nothing
+        // drawn, nothing captured, no ambient from a sky — and the frame's
+        // background is black.
+        view->setBackground(Colour(0.0f, 0.0f, 0.0f, 1.0f));
     }
 }
 

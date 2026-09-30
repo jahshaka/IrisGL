@@ -1006,6 +1006,10 @@ void OgreEngine::renderOneFrame() {
                                        *driverSlot(v->ogreScene()) == v.get();
             v->applyPendingResize(); v->updateParticles();
             if (authoritative) v->updateGi();
+            // THE ATMOSPHERE'S OBSERVER is the same driving camera (SKY-ATMOSPHERE-1):
+            // its altitude decides the horizon's dip and the air it looks through.
+            if (authoritative && v->camera())
+                v->ogreScene()->noteAtmosphereObserver(float(v->camera()->getDerivedPosition().y));
             // Both ends of the planar-reflection wiring move between frames (the
             // scene rebuilds its arm on a parameter change, the view recreates
             // its camera on setScene), so the listener is re-synced rather than
@@ -2894,9 +2898,9 @@ void OgreEngine::ensureHlms() {
         pbs->setStaticBranchingLights(true);
     }
     // Fog: append the per-scene fog colour + height parameters to every PBS pass
-    // buffer (the exponential distance term itself comes from the scene's
-    // AtmosphereNpr — OgreFog.cpp). Unlit gets no listener: gizmos, wires and
-    // billboards stay unfogged.
+    // buffer (the exponential distance term itself is upstream's block, fed by
+    // the scene's atmosphere component — OgreFog.cpp, Atmosphere.h). Unlit gets
+    // no listener: gizmos, wires and billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
     // generated shader (and its properties) there, for EVERY PBS-family host (a
