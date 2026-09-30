@@ -52,7 +52,12 @@ QElapsedTimer &clockFor(qint64 &slot)
     return timer;
 }
 
+thread_local int tBakeBuildDepth = 0;
+
 }   // namespace
+
+BakeBuildScope::BakeBuildScope() { ++tBakeBuildDepth; }
+BakeBuildScope::~BakeBuildScope() { --tBakeBuildDepth; }
 
 Counts snapshot()
 {
@@ -93,7 +98,10 @@ Record::~Record()
     Counts &c = counts();
     const bool resource = mPath.startsWith(QLatin1Char(':'))
                           || mPath.startsWith(QLatin1String("qrc:"));
-    if (main && resource) {
+    if (tBakeBuildDepth > 0) {
+        ++c.bakeBuilds;
+        c.bakeBuildMs += ms;
+    } else if (main && resource) {
         ++c.mainThreadResourceParses;
         c.mainThreadResourceMs += ms;
     } else if (main) {
