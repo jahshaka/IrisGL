@@ -32,8 +32,7 @@ namespace iris
 /// scene it holds are assimp types, and assimp is a PRIVATE dependency of
 /// this library — Studio's include path does not carry its headers. What
 /// Studio can do with one is read() it, ask whether it hasScene(), and hand
-/// it to the IrisGL entry points that consume one (MeshNode::loadAsSceneFragment,
-/// GraphicsHelper::loadAllMeshesAndAnimationsFromSource, ModelSceneInfo::fromSource,
+/// it to the IrisGL entry points that consume one (ModelSceneInfo::fromSource,
 /// MeshBake::buildFromScene). The two accessors at the bottom return
 /// forward-declared assimp types and are usable only by a translation unit
 /// that includes assimp itself, i.e. IrisGL's own.

@@ -1708,6 +1708,10 @@ void setBloomAmount(float amount);
 /// bloom amount). Called from destroySsao, i.e. from ~OgreEngine, because the
 /// cache is a SharedPtr into a material that is about to stop existing.
 void forgetTonemapParams();
+/// Engine init, once: THROWS when the staged HDR tonemap media lacks the
+/// constants this build pushes (a build error — FORWARD-ONLY-1). A pipeline
+/// with no tonemap quad passes.
+void verifyTonemapMedia();
 void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc);
 /// WHERE A VIEW'S PICTURE WAS ONE FRAME AGO (PAN-SMEAR-1): the world-to-image
 /// matrix the view's last frame was drawn with — image = (u, v, the depth
@@ -8184,6 +8188,10 @@ private:
     void           *mDisplay = nullptr;
 #endif
     bool            mHlmsRegistered = false;
+    /// A FATAL ensureHlms failure (FORWARD-ONLY-1 D2: the staged tonemap media
+    /// is not this build's). Sticky: every later ensureHlms — every later view —
+    /// re-reports it instead of running a half-initialised engine.
+    std::string     mFatalInitError;
     /// EngineConfig::headless: the NULL render system is loaded, mNullWindow is
     /// the 1x1 window IT created at boot, and no View can exist.
     bool            mHeadless = false;

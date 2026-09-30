@@ -78,6 +78,12 @@ struct Counts
     /// fall back to a parse", never as a model count.
     int bakeHits   = 0;
     int bakeMisses = 0;
+    /// Parses that BUILT A BAKE (an import's, a stale bake's rebuild — the
+    /// derived data being made, on a worker), counted apart from the parses
+    /// above: those are a model read in place of its bake, and since
+    /// FORWARD-ONLY-1 an open makes none. See BakeBuildScope.
+    int    bakeBuilds  = 0;
+    double bakeBuildMs = 0.0;
     /// The last FILE parsed on the main thread — the one a failing assertion
     /// wants named. Empty when there has been none.
     QString lastMainThreadPath;
@@ -89,6 +95,18 @@ void reset();
 /// One bake ASKED FOR: `hit` = a usable bake was read, false = there was none
 /// (or it was stale) and the caller parses instead.
 void recordBake(bool hit);
+
+/// RAII, per thread: while one is alive, a Record on THIS thread counts as a
+/// bake build (Counts::bakeBuilds), not as a parse.
+class BakeBuildScope
+{
+public:
+    BakeBuildScope();
+    ~BakeBuildScope();
+private:
+    BakeBuildScope(const BakeBuildScope &) = delete;
+    BakeBuildScope &operator=(const BakeBuildScope &) = delete;
+};
 
 /// RAII: one assimp read. Wraps the ReadFile call; the destructor banks the
 /// elapsed time against the thread it ran on.

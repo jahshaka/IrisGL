@@ -46,13 +46,6 @@ public:
                                                    QMap<QString, SkeletalAnimationPtr> &animations,
                                                    const ImportTransform &xf = ImportTransform());
 
-    /// The meshes and clips of a parse the caller already holds (the threaded
-    /// open's prewarm): a copy out of the scene, never a file read.
-    static void loadAllMeshesAndAnimationsFromSource(const SceneSource &source,
-                                                     const QString &filePath,
-                                                     QList<MeshPtr> &meshes,
-                                                     QMap<QString, SkeletalAnimationPtr> &animations);
-
     /// IrisGL-internal (a complete aiScene needs assimp's headers).
     static QList<MeshPtr> loadAllMeshesFromAssimpScene(const aiScene* scene);
 

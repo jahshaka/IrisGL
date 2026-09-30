@@ -767,15 +767,6 @@ public:
     /// 10 and 90. Kept ordered; a degenerate pair means "the whole frame".
     float exposureMeterLowPercent;
     float exposureMeterHighPercent;
-    /// TRANSIENT, NEVER SERIALISED (EXPOSURE-1). True when the file this scene
-    /// was read from carried the RETIRED chain-unit `exposure` keys and nothing
-    /// else, so the reader ignored them and the scene opened at the
-    /// constructor's grade. There is no migration and there will not be one —
-    /// the same number means a different picture in the two units — but the
-    /// user is entitled to be told once, which is what `services/sceneissues`
-    /// does with it. Cleared by the writer: once the file carries the new keys
-    /// the statement is no longer true.
-    bool  legacyExposureKeyIgnored = false;
     bool  bloomEnabled;      ///< highlight bloom; rides the HDR node, needs hdrEnabled
     float bloomThreshold;    ///< where the bright pass starts, in tonemapper units
     /// How WIDE the ramp above that threshold is (ADDENDUM A-6). A width, not a

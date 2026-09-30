@@ -119,16 +119,6 @@ public:
         const ImportTransform &xf = ImportTransform()
     );
 
-    /// The fragment from a parse a caller already holds (the threaded open's
-    /// prewarm, import's one-parse rule): no file access at all.
-    static SceneNodePtr loadAsSceneFragment(
-        const QString &filePath,
-        const SceneSource &source,
-        std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-        const QString &extractDir = QString(),
-        const ImportTransform &xf = ImportTransform()
-    );
-
     /// IrisGL-internal form of the above (a complete aiScene needs assimp's
     /// headers, which only this library's own translation units and the
     /// white-box importer suites include).

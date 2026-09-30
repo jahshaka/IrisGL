@@ -2746,6 +2746,8 @@ bool OgreEngine::viewNameTaken(const std::string &name) {
 }
 
 void OgreEngine::ensureHlms() {
+    if (!mFatalInitError.empty())
+        OGRE_EXCEPT(Ogre::Exception::ERR_INVALID_STATE, mFatalInitError, "OgreEngine::ensureHlms");
     if (mHlmsRegistered) return;
     // WHAT A HEADLESS ENGINE SKIPS, and why (EngineConfig::headless). Three of
     // the steps below exist only to make PIXELS possible, and one of them is
@@ -2979,6 +2981,16 @@ void OgreEngine::ensureHlms() {
     applyShadowFilter();   // replaces Ogre's PCF_3x3 default with ours (Soft = 4x4)
     if (!pixels) return;   // the rest is rendering-only — see the top of this function
     registerCommonMaterials();
+    // THE STAGED MEDIA IS THIS BUILD'S, OR THE ENGINE STOPS HERE (FORWARD-ONLY-1
+    // D2) — before the blue noise, the overlay and the shadow node, and
+    // STICKILY: every later ensureHlms re-reports the same error rather than
+    // running views on an engine this function never finished.
+    try {
+        chain::verifyTonemapMedia();
+    } catch (Ogre::Exception &e) {
+        mFatalInitError = e.getDescription();
+        throw;
+    }
     // BLUE NOISE FOR ALPHA HASHING (MATERIAL_GAPS_SPEC A-3). The hashing piece
     // falls back to an ALU white-noise hash unless HlmsManager::mBlueNoise is
     // set (Hlms/Common/Any/AlphaHashing_piece_ps.any:8-25 picks the branch on
