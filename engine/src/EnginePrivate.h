@@ -8167,6 +8167,10 @@ private:
     void           *mDisplay = nullptr;
 #endif
     bool            mHlmsRegistered = false;
+    /// A FATAL ensureHlms failure (FORWARD-ONLY-1 D2: the staged tonemap media
+    /// is not this build's). Sticky: every later ensureHlms — every later view —
+    /// re-reports it instead of running a half-initialised engine.
+    std::string     mFatalInitError;
     /// EngineConfig::headless: the NULL render system is loaded, mNullWindow is
     /// the 1x1 window IT created at boot, and no View can exist.
     bool            mHeadless = false;

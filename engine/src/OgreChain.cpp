@@ -3350,15 +3350,21 @@ void verifyTonemapMedia() {
     // media), so a tonemap quad without either constant is a BUILD error, not
     // a tree to tolerate (FORWARD-ONLY-1). Checked ONCE, at engine init — never
     // mid-frame from a view listener.
+    // The material itself must be there WITH its fragment program: a staged
+    // tonemap pass without one would otherwise pass this check vacuously.
+    Ogre::Pass *pass = materialPass("HDR/FinalToneMapping");
+    const bool noProgram = !pass || !pass->hasFragmentProgram();
     resolveTonemapParams();
-    const bool mismatch = gTonemapParams && (!gTonemapHasDither || !gTonemapHasBloomAmount);
+    const bool mismatch = noProgram || !gTonemapParams || !gTonemapHasDither
+                          || !gTonemapHasBloomAmount;
     // The frame path resolves its own cache: nothing learned here (including
     // "no quad yet") may stick.
     forgetTonemapParams();
     if (mismatch)
         OGRE_EXCEPT(Ogre::Exception::ERR_ITEM_NOT_FOUND,
-                    "HDR/FinalToneMapping lacks jahDitherOff/jahBloomAmountMinusOne: the "
-                    "staged media is not this fork's - re-run irisgl/scripts/build-ogre.sh",
+                    "HDR/FinalToneMapping (its fragment program, jahDitherOff, "
+                    "jahBloomAmountMinusOne) is not this build's: the staged media is not this "
+                    "fork's - re-run irisgl/scripts/build-ogre.sh",
                     "verifyTonemapMedia");
 }
 
