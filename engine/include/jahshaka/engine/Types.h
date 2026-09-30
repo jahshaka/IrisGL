@@ -4573,13 +4573,17 @@ struct RayQueryStatus {
 /// decides for this scene's items and how many decode draws their materials need.
 /// Every count is over the items the scene SHOWS (hidden ones are neither).
 ///   atomItems    items the id pass draws and the decode shades: a GPU-scene row,
-///                an opaque PBS material the decode can serve, one submesh.
+///                an opaque PBS material the decode can serve, one submesh;
+///   atomTwoSided those of them drawn from BOTH sides (a CULL_NONE material: the
+///                id pass and the caster cut draw both faces, the decode lights
+///                the facing one — ATOM-TWO-SIDED-1).
 ///   pbsItems     items that stay on stock HlmsPbs, split by the FIRST reason
 ///                that holds, in this order: `notPbs` (an Unlit or other non-PBS
 ///                datablock), `customPiece` (a per-datablock custom piece — the
 ///                twin cannot carry one), `blended` (a transparent, faded or
-///                refractive material), `twoSided` (a material drawn without back-
-///                face culling: the id pass culls back faces), `pending` (its
+///                refractive material), `cullFront` (a material that culls its
+///                FRONT faces — only back faces drawn, an inverted hull — or whose
+///                shadow caster culls unlike its surface), `pending` (its
 ///                textures are still being baked, so its bucket is not known yet:
 ///                PBS draws it for those frames), `alphaTested`,
 ///                `skinned` (the id pass reads the mesh's bind-pose rows), `noRow`
@@ -4601,6 +4605,7 @@ struct AtomDrawStatus {
     /// the measurement door is open. Off, every item draws through PBS.
     bool     on = false;
     unsigned atomItems = 0;
+    unsigned atomTwoSided = 0;
     unsigned pbsItems = 0;
     /// Shown, but in no world channel (a backdrop such as the ground's horizon
     /// quad, or a helper): the id pass draws the world channels only.
@@ -4608,7 +4613,7 @@ struct AtomDrawStatus {
     unsigned notPbs = 0;
     unsigned customPiece = 0;
     unsigned blended = 0;
-    unsigned twoSided = 0;
+    unsigned cullFront = 0;
     /// A planar mirror (Scene::setNodePlanarReflector): PBS binds its reflection per
     /// renderable, which a decode serving a whole bucket cannot.
     unsigned planar = 0;

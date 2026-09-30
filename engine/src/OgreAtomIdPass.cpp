@@ -36,8 +36,9 @@
 // the default macroblock (VulkanRenderSystem's PSO: frontFace CLOCKWISE,
 // CULL_CLOCKWISE -> VK_CULL_MODE_BACK_BIT) — and FRONT faces where the pass
 // requires texture flipping, Hlms's InvertCullingMode rule; depth test GREATER_OR_EQUAL under
-// reverse-Z, write on. A two-sided material never reaches it (the split's
-// `twoSided` reason keeps it on PBS).
+// reverse-Z, write on. A TWO-SIDED material (CULL_NONE, ATOM-TWO-SIDED-1) rides the list's
+// two-sided range and a third pipeline that culls nothing: both faces rasterised, the
+// nearer one kept by the depth test (a closed mesh's back faces never win it).
 #include "EnginePrivate.h"
 #include "AtomPass.h"
 #include "GpuCull.h"
@@ -162,8 +163,9 @@ struct IdPipeline {
     VkRenderPass compatible = VK_NULL_HANDLE;
     /// [0] culls BACK faces, [1] FRONT faces: the pass that requires texture
     /// flipping gets its y row negated AND its culling inverted (Hlms's own
-    /// InvertCullingMode rule, OgreHlms.cpp) — the same pair here.
-    VkPipeline pipeline[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    /// InvertCullingMode rule, OgreHlms.cpp) — the same pair here. [2] culls NOTHING:
+    /// the list's two-sided range (ATOM-TWO-SIDED-1), flipped or not.
+    VkPipeline pipeline[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkFormat colour = VK_FORMAT_UNDEFINED;
     VkFormat depth = VK_FORMAT_UNDEFINED;
     bool refused = false;   ///< a creation failed; said once, the pass records nothing
@@ -517,6 +519,10 @@ bool ensurePipeline(Ogre::VulkanRenderSystem *vkRs, VkFormat colour, VkFormat de
         rast.cullMode = VK_CULL_MODE_FRONT_BIT;
         r = vkCreateGraphicsPipelines(gId.dev, device->mPipelineCache, 1, &gp, nullptr, &gId.pipeline[1]);
     }
+    if (r == VK_SUCCESS) {
+        rast.cullMode = VK_CULL_MODE_NONE;
+        r = vkCreateGraphicsPipelines(gId.dev, device->mPipelineCache, 1, &gp, nullptr, &gId.pipeline[2]);
+    }
     vkDestroyShaderModule(gId.dev, vs, nullptr);
     vkDestroyShaderModule(gId.dev, fs, nullptr);
     if (r != VK_SUCCESS) {
@@ -803,9 +809,20 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         VkDeviceSize drawOff = 0, countOff = 0;
         atomBufferOf(cull.draws(), drawBuf, drawOff);
         atomBufferOf(cull.count(), countBuf, countOff);
-        gId.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff,
-                                     std::min(cull.capacity(), gs->slotCount()),
+        const uint32_t maxDraws = std::min(cull.capacity(), gs->slotCount());
+        gId.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, maxDraws,
                                      GpuCull::kDrawWords * sizeof(uint32_t));
+        // THE TWO-SIDED RANGE (ATOM-TWO-SIDED-1): the survivors flagged kGpuTwoSided,
+        // both faces rasterised and resolved by the depth test — the same push
+        // constants, viewport and index buffer (one layout), only the cull differs.
+        // Recorded only while the scene has such an item.
+        if (scene->hasTwoSidedAtomItems()) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gId.pipeline[2]);
+            gId.drawIndexedIndirectCount(
+                cmd, drawBuf, drawOff + VkDeviceSize(cull.twoSidedFirst()) * GpuCull::kDrawWords * sizeof(uint32_t),
+                countBuf, countOff + GpuCull::kTwoSidedCountOffsetBytes, maxDraws,
+                GpuCull::kDrawWords * sizeof(uint32_t));
+        }
     }
     // THE RENDERER'S COUNTERS SEE THIS DRAW TOO: an indirect draw never passes
     // through Ogre's render queue, so its share is added here, in the pass — the

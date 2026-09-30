@@ -5541,7 +5541,7 @@ MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QS
         MeshMaterialData data;
         if (xf.materials && aiMatIndex < scene->mNumMaterials)
             MaterialHelper::extractMaterialData(scene, scene->mMaterials[aiMatIndex],
-                                                dir, data, extractDir, filePath);
+                                                dir, data, extractDir, filePath, xf.faceCulling);
         // TEXTURE REFERENCES ARE REDUCED TO BARE FILE NAMES, for two reasons.
         // (1) Determinism: extractMaterialData resolves embedded textures to
         //     paths inside a per-run staging directory, so keeping them would

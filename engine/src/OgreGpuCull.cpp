@@ -159,7 +159,9 @@ bool GpuCull::ensure(Ogre::VaoManager *vao, uint32_t slotCapacity, std::string &
     mLevels = vao->createUavBuffer(want, sizeof(uint32_t), 0, zeros.data(), false);
     mSurvivors = vao->createUavBuffer(want, sizeof(uint32_t), 0, zeros.data(), false);
     mCount = vao->createUavBuffer(kCountElements, sizeof(uint32_t), 0, zeros.data(), false);
-    mDraws = vao->createUavBuffer(size_t(want) * kDrawWords, sizeof(uint32_t), 0, zeros.data(),
+    // Two ranges of commands: the survivors' and the two-sided range (twoSidedFirst).
+    zeros.resize(size_t(want) * kDrawWords * 2u, 0u);
+    mDraws = vao->createUavBuffer(size_t(want) * kDrawWords * 2u, sizeof(uint32_t), 0, zeros.data(),
                                   false);
     {
         // Three words a slot: the held level, and the node id and mesh it was held for.
@@ -342,6 +344,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.cut[0] = cutMode ? cull.cutIndexBudget() : 0u;
         p.cut[1] = cutMode ? cull.cutRecordBudget() : 0u;
         p.cut[2] = cutMode ? cull.cutMainBudget() : 0u;
+        p.cut[3] = cutMode ? cull.twoSidedFirst() : 0u;
         for (int i = 0; i < 4; ++i) p.hzbRect[i] = hzb ? req.hzbRect[i] : 0u;
         cull.params()->upload(&p, 0, 1u);
         const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u, 0u, 1u,
@@ -492,6 +495,8 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
             out.cutOverflowIndices = counter[11];
             out.cutEvaluated = counter[14];
             out.cutIndexBudget = mGpuCull.cutIndexBudget();
+            // THE FIRST RANGE ONLY: a kGpuTwoSided survivor's command lives in the two-sided
+            // range (GpuCull::twoSidedFirst, count[17]) and reads here as indexCount 0.
             if (readBack && out.survivors)
                 readUints(mGpuCull.draws(), 0u, out.survivors * GpuCull::kDrawWords, out.drawCommands);
             if (readBack && out.cutClusters) {
@@ -517,7 +522,7 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
                 // from the counters the compaction left: survivors and the dispatch
                 // arguments kept, the cut's own words zeroed. The emit job only reads.
                 std::vector<uint32_t> again(counter.begin(), counter.end());
-                again[4] = again[8] = again[11] = again[12] = again[13] = again[14] = again[15] = 0u;
+                again[4] = again[8] = again[11] = again[12] = again[13] = again[14] = again[15] = again[17] = 0u;
                 const auto t0 = std::chrono::steady_clock::now();
                 rs->flushCommands();
                 const auto t1 = std::chrono::steady_clock::now();

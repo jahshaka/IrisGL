@@ -3704,6 +3704,9 @@ public:
     /// True while this scene files any item in the Atom queue (the split's word set is
     /// not empty): the caster pass's gate.
     bool hasAtomItems() const { return !mAtomWords.empty(); }
+    /// True while the GPU scene holds an Atom item drawn from both sides (kGpuTwoSided):
+    /// the id pass and the caster cut record their no-cull draw of the two-sided range.
+    bool hasTwoSidedAtomItems() const { return mAtomFeed.twoSidedCount != 0u; }
     /// THE CASTER CUT'S TEST DOOR (shadow.atom_cut; never a mode): arm it for ONE map of
     /// the VIEW kind's shadow node (`map` = the shadow map index, `face` = the cube face of
     /// a point map, 0 otherwise); the next frame that renders that map copies its cut —
@@ -6120,7 +6123,7 @@ private:
     /// first reason (AtomDrawStatus names them in order). `Stock` = an item in a
     /// queue the split never touches.
     enum class AtomRoute : uint8_t {
-        Atom, NotWorld, NotPbs, CustomPiece, Blended, TwoSided, Planar, Pending, AlphaTested, Skinned, NoRow, Stock
+        Atom, NotWorld, NotPbs, CustomPiece, Blended, CullFront, Planar, Pending, AlphaTested, Skinned, NoRow, Stock
     };
     AtomRoute atomRouteFor(const Node &n, Ogre::uint32 flags) const;
 public:
@@ -6253,12 +6256,27 @@ private:
     /// drain (drainPbsChanges), which re-composes the Items it re-hashed.
     struct AtomWordFeed final : detail::GpuSceneObserver {
         detail::WordCounts words;
+        /// THE TWO-SIDED ATOM SLOTS (ATOM-TWO-SIDED-1): kGpuAtom | kGpuTwoSided, per slot
+        /// and counted — what gates the passes' no-cull draw of the two-sided range.
+        std::vector<uint8_t> twoSided;
+        unsigned twoSidedCount = 0u;
         void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override {
             uint32_t flags = 0u;
             if (now) std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
             words.set(slot, (now && (flags & detail::kGpuAtom)) ? now->raster[0] : detail::WordCounts::kNone);
+            const uint8_t two = (now && (flags & detail::kGpuAtom) && (flags & detail::kGpuTwoSided)) ? 1u : 0u;
+            if (slot >= twoSided.size()) {
+                if (!two) return;
+                twoSided.resize(size_t(slot) + 1u, 0u);
+            }
+            twoSidedCount = twoSidedCount - twoSided[slot] + two;
+            twoSided[slot] = two;
         }
-        void gpuSceneReset() override { words.reset(); }
+        void gpuSceneReset() override {
+            words.reset();
+            twoSided.clear();
+            twoSidedCount = 0u;
+        }
     };
     AtomWordFeed mAtomFeed;
     /// THE CARD CANDIDATES, kept by the change feed (ATOM-CPU-WALKS-1). The surface
