@@ -1227,12 +1227,18 @@ bool VrSession::create(std::string &reason) {
     // time on the way out.
     //
     // WHAT WE HAND IT. The eye target is `PFG_RGBA8_UNORM` (OgreView::createRtt)
-    // and the chain writes a DISPLAY-REFERRED picture into it: with the target
-    // not sRGB, `hw_gamma_write` is off and the HlmsPbs pixel shader encodes
-    // itself (`outPs_colour0.xyz = sqrt( finalColour )`), and the HDR chain's
-    // composite writes the tonemapped, display-referred value (OgreChain's
-    // kLook* note: "the composite quad writes a DISPLAY-REFERRED value"). So our
-    // bytes are ENCODED, and the format that says so is the _SRGB one.
+    // and the chain writes what it calls a DISPLAY-REFERRED picture into it —
+    // but NOTHING in it applies an sRGB encode (SKY-DEFAULTS-1's merge read,
+    // corrected here): the pin hardcodes `hw_gamma_write` to 1
+    // (OgreHlmsPbs.cpp preparePassHash), so HlmsPbs NEVER writes its
+    // `sqrt( finalColour )` branch and emits linear radiance, and the HDR chain's
+    // composite writes the film curve's output (FinalToneMapping_ps.glsl: Hable +
+    // the grade tail, no OETF). The bytes are therefore the film curve's LINEAR
+    // value stored as codes, which the desktop window (UNORM, no `gamma` on the
+    // Vulkan path) shows as-is. Declaring them _SRGB makes the runtime show them
+    // exactly as the desktop does — the same picture, which is what the
+    // measurement below established — not a correctly encoded one: VR is dark by
+    // the same missing OETF the desktop is (an owner decision, its own lane).
     //
     // MEASURED, because phase 1a's comment reasoned the other way round and was
     // wrong (spikes/smoke-50/f5b): through Monado's XCB compositor the runtime's

@@ -98,6 +98,19 @@ public:
     void setSkyBrightness(float b);
     /// The World fog's distance block, in upstream's packing (0 = none).
     void setFogBlock(float density, float breakMinBrightness, float breakFalloff);
+    /// THE HEIGHT FOG (HeightFogDesc; SKY-DEFAULTS-1): its block in this
+    /// component's const buffer (the PBS passes read it under the pass property
+    /// `jah_height_fog`) and its OWN quad over the sky's pixels (queue 5, after
+    /// the sky, the clouds and the sun disc, at the far plane, alpha-blended:
+    /// the geometry drawn afterwards covers it, and fogs itself). `visibleBit`
+    /// is the quad's channel: the sun disc's, so the probe faces and the sky
+    /// capture never photograph it (the Sky Light's environment is the SKY, and
+    /// the fog's colour is made of that environment). Density and falloff per
+    /// metre (exp2), the colour linear.
+    void setHeightFog(bool on, float density, float falloff, float baseHeight,
+                      float startDistance, const float rgb[3], Ogre::uint32 visibleBit);
+    bool heightFogOn() const { return mHfOn; }
+    Ogre::Vector3 heightFogColour() const { return mHfColour; }
     /// The atmosphere is the scene's sky: the quad is drawn and the pass reads
     /// the tables (the aerial perspective).
     void setAirOn(bool on);
@@ -150,6 +163,8 @@ private:
     Ogre::Vector3 topIlluminance() const;
     void uploadSettings();
     void pushQuadConstants();
+    void createFogQuad();
+    void pushFogQuadConstants();
 
     Ogre::Root *mRoot = nullptr;
     Ogre::SceneManager *mSceneMgr = nullptr;
@@ -165,6 +180,13 @@ private:
     unsigned mObserverRebuilds = 0;
     float mFogDensity = 0.0f, mFogBreakMin = 0.0f, mFogBreakFalloff = 0.0f;
     bool mAirOn = false;
+    bool mHfOn = false;
+    float mHf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   ///< density, falloff (per m), base Y, start (m)
+    Ogre::Vector3 mHfColour = Ogre::Vector3::ZERO;
+    Ogre::uint32 mHfBit = 0u;
+    bool mDirtyFogQuad = true;
+    Ogre::Rectangle2D *mFogQuad = nullptr;
+    Ogre::MaterialPtr mFogQuadMaterial;
 
     bool mDirtyTrans = true;    ///< the transmittance (the species and the planet, NOT the albedo)
     bool mDirtyTables = true;   ///< multiple scattering (+ both below)

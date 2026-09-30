@@ -254,18 +254,34 @@ float keyIrradiance(float sunIntensity, float skyLightIntensity, float skyRadian
     return float(kPi * (sun + sky));
 }
 
-/// The key irradiance of the DEFAULT TEMPLATE (MainWindow::createDefaultScene):
-/// a sun and a Sky Light, both at intensity 1.0, over a 96-grey sky. 96/255 =
-/// 0.37647 in sRGB; its linear decode is 0.11697 (the number SKY_LIGHT_SPEC
-/// §9.1 quotes for this sky's hemispherical integral), and the decode is
-/// spelled out rather than the 0.117 so the two cannot drift.
+/// The key irradiance of the DEFAULT TEMPLATE (MainWindow::createDefaultScene),
+/// RE-DERIVED FROM THE PHYSICAL SKY (SKY-DEFAULTS-1): the floor of a new Basic
+/// scene, i.e. an UPWARD-facing Lambert card, under
+///
+///   the sun   intensity 1 at 50 degrees of elevation (scenetemplate::
+///             kSunElevationDegrees), coloured by the default atmosphere
+///             (Sun Follows Atmosphere: its noon colour, x 0.94 at 50 degrees)
+///   the Sky Light  intensity 1 over the REALISTIC sky at the default haze 10
+///             and brightness 1 — the environment's SH at +Y is a mean incident
+///             radiance of 0.1325 (luminance), pi x that = 0.416 by the formula
+///
+/// MEASURED THROUGH THE RENDERER, not assumed: an 18 % card (#767676) at the
+/// origin read 0.1146 of plain radiance under the sun alone and 0.1380 under
+/// both, so the floor receives
+///     sun   pi x 0.1146 / 0.1812 = 1.987
+///     sky   pi x 0.0234 / 0.1812 = 0.406
+/// (the sun's number is sin 50 x 0.94 x pi x the renderer's own Lambert response
+/// at that angle, 0.88 of the ideal — which is the whole reason it is measured
+/// rather than written as pi sin 50: the chain must put the CARD, as drawn, on
+/// the grey card). The old anchor was the retired 96-grey flat sky with the sun
+/// facing the card: pi x (1 + 0.117) = 3.509, 0.55 stops too little exposure
+/// for the physical sky (the Auto meter read +0.53 stops on the same scene).
+/// Keyed through keyIrradiance's own form: pi x (sun + skyLight x sky).
 static float defaultKeyIrradiance()
 {
-    constexpr double kDefaultSkySrgb = 96.0 / 255.0;
-    const double skyLinear = kDefaultSkySrgb <= 0.04045
-                                 ? kDefaultSkySrgb / 12.92
-                                 : std::pow((kDefaultSkySrgb + 0.055) / 1.055, 2.4);
-    return keyIrradiance(1.0f /*sun*/, 1.0f /*sky light*/, float(skyLinear));
+    constexpr double kSunAtFloor = 1.987;   // renderer units, measured (above)
+    constexpr double kSkyAtFloor = 0.406;   // renderer units, measured (above)
+    return keyIrradiance(float(kSunAtFloor / kPi), 1.0f /*sky light*/, float(kSkyAtFloor / kPi));
 }
 
 float exposureForKeyIrradiance(float keyIrradianceValue)

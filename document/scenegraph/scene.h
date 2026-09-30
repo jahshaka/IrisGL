@@ -302,6 +302,56 @@ struct CloudLayer
 	static CloudLayer fromJson(const QJsonObject &o);
 };
 
+/// THE EXPONENTIAL HEIGHT FOG (SKY-DEFAULTS-1) — Unreal's Exponential Height
+/// Fog, its non-volumetric core, as a medium of the WORLD: nothing nearer than
+/// `startDistance` is fogged, so the scene an author builds stays exactly
+/// itself while the far world, the horizon and the sky under it take the fog
+/// (owner 2026-09-30: "it does not affect the scene, just the world"). It is
+/// NOT the World fog (fogEnabled and its dials), which is separate and
+/// untouched. Its colour is the SKY's in-scatter — never a pick (the renderer:
+/// jahshaka::engine::HeightFogDesc).
+///
+/// THE DIALS ARE UNREAL'S NUMBERS: `density` and `heightFalloff` are in the
+/// units Unreal's panel shows, which its component divides by 1000 per
+/// CENTIMETRE (SceneCore.cpp, FExponentialHeightFogSceneInfo) — i.e. by 10 per
+/// METRE, the conversion SceneMirror makes. So Unreal's defaults 0.02 / 0.2 are
+/// 0.002 and 0.02 per metre, and an Unreal scene's numbers type straight in.
+/// `baseHeight` is metres (Unreal's actor height), `startDistance` metres.
+///
+/// THE CONSTRUCTOR IS OFF (a scene written before this lane has no key and reads
+/// as off — the reader-defaults law), and its dials are the ones the Basic and
+/// World templates switch on (MainWindow::createDefaultScene): Unreal's
+/// defaults, except the start distance, which clears the Basic floor from the
+/// default camera. A scene at the constructor writes no `heightFog` key.
+struct HeightFog
+{
+	bool enabled = false;
+	/// Unreal's Fog Density (0.02 default): the density at `baseHeight`.
+	float density = 0.02f;
+	/// Unreal's Fog Height Falloff (0.2 default): how fast it thins upwards.
+	float heightFalloff = 0.2f;
+	/// World Y (m) where `density` applies — Unreal's actor height.
+	float baseHeight = 0.0f;
+	/// Metres from the eye before anything is fogged. 100 m clears the Basic
+	/// floor from the default editor camera (its far corner is 81 m away);
+	/// Unreal ships 0, which fogs the floor itself (5 % at its 64 m edge).
+	float startDistance = 100.0f;
+
+	bool operator==(const HeightFog &o) const {
+		return enabled == o.enabled && density == o.density && heightFalloff == o.heightFalloff &&
+		       baseHeight == o.baseHeight && startDistance == o.startDistance;
+	}
+	bool operator!=(const HeightFog &o) const { return !(*this == o); }
+
+	/// Every dial held inside its band (the verb, the reader and the panel).
+	static HeightFog clamped(HeightFog h);
+	/// The file's form; an ABSENT key takes the constructor's value.
+	QJsonObject toJson() const;
+	static HeightFog fromJson(const QJsonObject &o);
+	/// Unreal's dial units -> per metre (x 0.1; the header above).
+	static constexpr float kUnrealDialToPerMetre = 0.1f;
+};
+
 /// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3; lane PHOTON-RAYS-1) — the
 /// PROJECT's row: one hardware ray per pixel towards the sun from the surface
 /// the camera sees, out to `range`, folded into the sun's shadow term as
@@ -412,6 +462,10 @@ public:
     /// THE CLOUD LAYER (CloudLayer above). Serialized as the scene's `clouds`
     /// block — and only when it differs from the default.
     CloudLayer clouds;
+    /// THE EXPONENTIAL HEIGHT FOG (HeightFog above), serialized as `heightFog`
+    /// when it is not the constructor's; edited through the sceneprops key
+    /// "heightFog" (world.heightFog, the World panel's Height Fog blade).
+    HeightFog heightFog;
     /// HARD SUN CONTACT SHADOWS (SunContact above). Serialized as the scene's
     /// `sunContact` block — and only when it differs from the default.
     SunContact sunContact;

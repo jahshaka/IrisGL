@@ -179,6 +179,46 @@ CloudLayer CloudLayer::fromJson(const QJsonObject &o)
     return clamped(c);
 }
 
+HeightFog HeightFog::clamped(HeightFog h)
+{
+    // A NaN takes the constructor's value; the bands are Unreal's panel's
+    // (density 0..10, falloff 0.001..2) and a scene's reach for the distances.
+    const HeightFog d;
+    if (!std::isfinite(h.density)) h.density = d.density;
+    if (!std::isfinite(h.heightFalloff)) h.heightFalloff = d.heightFalloff;
+    if (!std::isfinite(h.baseHeight)) h.baseHeight = d.baseHeight;
+    if (!std::isfinite(h.startDistance)) h.startDistance = d.startDistance;
+    h.density       = qBound(0.0f,      h.density,       10.0f);
+    h.heightFalloff = qBound(0.001f,    h.heightFalloff, 2.0f);
+    h.baseHeight    = qBound(-10000.0f, h.baseHeight,    10000.0f);
+    h.startDistance = qBound(0.0f,      h.startDistance, 100000.0f);
+    return h;
+}
+
+QJsonObject HeightFog::toJson() const
+{
+    QJsonObject o;
+    o.insert("enabled",       enabled);
+    o.insert("density",       double(density));
+    o.insert("heightFalloff", double(heightFalloff));
+    o.insert("baseHeight",    double(baseHeight));
+    o.insert("startDistance", double(startDistance));
+    return o;
+}
+
+HeightFog HeightFog::fromJson(const QJsonObject &o)
+{
+    // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law).
+    const HeightFog d;
+    HeightFog h;
+    h.enabled       = o.value("enabled").toBool(d.enabled);
+    h.density       = float(o.value("density").toDouble(d.density));
+    h.heightFalloff = float(o.value("heightFalloff").toDouble(d.heightFalloff));
+    h.baseHeight    = float(o.value("baseHeight").toDouble(d.baseHeight));
+    h.startDistance = float(o.value("startDistance").toDouble(d.startDistance));
+    return clamped(h);
+}
+
 SunContact SunContact::clamped(SunContact c)
 {
 	// A NaN takes the default; the band is the renderer's (scene.h).
@@ -370,10 +410,11 @@ Scene::Scene()
     // a World Mode (or turns a row on); nothing changes under anyone's feet.
     hdrEnabled = false;
     // EXPOSURE (EXPOSURE-1): MANUAL, at the exposure the default template's
-    // lights DERIVE (iris::lens::defaultExposureChain — a sun and a Sky Light
-    // at intensity 1 over a 96-grey sky put PI*(1+0.117) = 3.5091 on a surface
-    // facing them, and an 18 % grey card under that develops at chain
-    // E = 0.5960 once the film curve's own transfer is inverted). Zero stops IS
+    // lights DERIVE (iris::lens::defaultExposureChain, re-derived from the
+    // PHYSICAL sky by SKY-DEFAULTS-1 — the sun at 50 degrees and the Sky Light
+    // over the realistic sky put 1.987 + 0.406 = 2.393 on the floor, measured
+    // through the renderer, and an 18 % grey card under that develops at chain
+    // E = 0.9788 once the film curve's own transfer is inverted). Zero stops IS
     // that grade, so a new scene reads 0.00 in the World panel.
     //
     // The old +0.6 was a number fitted by eye against 8-bit content and it was

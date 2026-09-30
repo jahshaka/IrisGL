@@ -7007,6 +7007,20 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mLastFog.breakFalloff != fog.breakFalloff;
         if (changed) { mTarget->setFog(fog); mLastFog = fog; mFogPushed = true; }
     }
+    // THE EXPONENTIAL HEIGHT FOG (SKY-DEFAULTS-1): the document's dials are
+    // Unreal's numbers, the renderer's per metre (iris::HeightFog's header).
+    // setHeightFog is idempotent (HeightFogDesc's operator==), so a push per
+    // frame costs a compare; the enabled edge is a shader variant there.
+    {
+        const iris::HeightFog &hf = mSource->heightFog;
+        HeightFogDesc d;
+        d.enabled = hf.enabled;
+        d.density = hf.density * iris::HeightFog::kUnrealDialToPerMetre;
+        d.heightFalloff = hf.heightFalloff * iris::HeightFog::kUnrealDialToPerMetre;
+        d.baseHeight = hf.baseHeight;
+        d.startDistance = hf.startDistance;
+        mTarget->setHeightFog(d);
+    }
     // HARDWARE RAY TRACING (owner, 2026-09-15; ledger §425). The PROJECT's
     // state, which is half of the answer — the machine's own capability is the
     // other half and lives in the renderer, where Scene::rayTracingResolved()

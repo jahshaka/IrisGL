@@ -13,6 +13,8 @@
 #include "Atmosphere.h"
 
 #include <OgreHlmsCompute.h>
+#include <OgreHlmsPbs.h>
+#include <Cubemaps/OgreParallaxCorrectedCubemapBase.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreShaderParams.h>
 #include <OgreMaterialManager.h>
@@ -52,6 +54,11 @@ struct AtmoSettingsGpu {
     float skyE[4] = { 0.0f, 0.0f, 0.0f, 0.0f };     ///< rgb = the sun at the top of the air, w = 1 with the air on
     float sunDir[4] = { 0.0f, 1.0f, 0.0f, 0.0f };   ///< xyz = towards the sun
     float planet[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   ///< bottom radius, top radius, observer radius, aerial far (km)
+    /// THE HEIGHT FOG (SKY-DEFAULTS-1): density and falloff per metre (exp2),
+    /// the base height and the start distance (m) — read only under the pass
+    /// property jah_height_fog, which is set only while it is on.
+    float heightFog[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float heightFogColour[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   ///< rgb linear, w unused
 };
 
 Ogre::TextureGpu *makeLut(Ogre::TextureGpuManager *tm, const std::string &name,
@@ -76,6 +83,7 @@ JahAtmosphere::JahAtmosphere(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::uin
     mBuffer = vao->createConstBuffer(sizeof(AtmoSettingsGpu), Ogre::BT_DEFAULT, nullptr, false);
     createTextures();
     createQuad();
+    createFogQuad();
 }
 
 JahAtmosphere::~JahAtmosphere() {
@@ -85,6 +93,11 @@ JahAtmosphere::~JahAtmosphere() {
     if (mQuadMaterial) {
         Ogre::MaterialManager::getSingleton().remove(mQuadMaterial);
         mQuadMaterial.reset();
+    }
+    if (mFogQuad) { mSceneMgr->destroyRectangle2D(mFogQuad); mFogQuad = nullptr; }
+    if (mFogQuadMaterial) {
+        Ogre::MaterialManager::getSingleton().remove(mFogQuadMaterial);
+        mFogQuadMaterial.reset();
     }
     Ogre::RenderSystem *rs = mRoot->getRenderSystem();
     Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
@@ -139,6 +152,65 @@ void JahAtmosphere::createQuad() {
     mQuad->setMaterial(mQuadMaterial);
     Ogre::Pass *pass = mQuadMaterial->getTechnique(0)->getPass(0);
     if (Ogre::TextureUnitState *tu = pass->getTextureUnitState("skyViewLut")) tu->setTexture(mSkyView);
+}
+
+// THE HEIGHT FOG'S SKY QUAD (SKY-DEFAULTS-1) — the sky quad's recipe (the same
+// three traps), its own material, QUEUE 5 at subgroup 1: after the sky (0), the
+// cloud sheet (0/2) and the sun disc (5/0), before any geometry (10), which
+// covers it through the depth test exactly as it covers the sky and fogs
+// itself in its own shader. Out of the sky capture's range (queue 0 and the
+// one above it) and, on the sun disc's channel, out of every probe face.
+void JahAtmosphere::createFogQuad() {
+    Ogre::MaterialManager &mm = Ogre::MaterialManager::getSingleton();
+    Ogre::MaterialPtr base = std::static_pointer_cast<Ogre::Material>(
+        mm.load("Jahshaka/HeightFogSky", Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME));
+    if (!base)
+        OGRE_EXCEPT(Ogre::Exception::ERR_FILE_NOT_FOUND,
+                    "the height fog's sky material Jahshaka/HeightFogSky is not staged",
+                    "JahAtmosphere::createFogQuad");
+    const Ogre::String name =
+        "Jahshaka/HeightFogSky" + Ogre::StringConverter::toString(mSceneMgr->getId());
+    if (Ogre::MaterialPtr stale = mm.getByName(name)) mm.remove(stale);
+    mFogQuadMaterial = base->clone(name);
+    mFogQuadMaterial->load();
+
+    mFogQuad = mSceneMgr->createRectangle2D(Ogre::SCENE_STATIC);
+    mFogQuad->initialize(Ogre::BT_DEFAULT, Ogre::Rectangle2D::GeometryFlagQuad);
+    mFogQuad->setGeometry(-Ogre::Vector2::UNIT_SCALE, Ogre::Vector2(2.0f));
+    mFogQuad->update();
+    mFogQuad->setUseIdentityView(false);
+    mFogQuad->setUseIdentityProjection(false);
+    mFogQuad->setRenderQueueGroup(5u);
+    mFogQuad->setRenderQueueSubGroup(1u);
+    mFogQuad->setCastShadows(false);
+    mFogQuad->setVisibilityFlags(0u);   // hidden until the height fog is on
+    mSceneMgr->getRootSceneNode(Ogre::SCENE_STATIC)->attachObject(mFogQuad);
+    mSceneMgr->notifyStaticAabbDirty(mFogQuad);
+    mFogQuad->setMaterial(mFogQuadMaterial);
+}
+
+void JahAtmosphere::setHeightFog(bool on, float density, float falloff, float baseHeight,
+                                 float startDistance, const float rgb[3], Ogre::uint32 visibleBit) {
+    const Ogre::Vector3 colour(rgb[0], rgb[1], rgb[2]);
+    const float hf[4] = { std::max(0.0f, density), falloff, baseHeight, std::max(0.0f, startDistance) };
+    const bool same = on == mHfOn && visibleBit == mHfBit && colour == mHfColour &&
+                      hf[0] == mHf[0] && hf[1] == mHf[1] && hf[2] == mHf[2] && hf[3] == mHf[3];
+    if (same) return;
+    mHfOn = on;
+    mHfBit = visibleBit;
+    mHfColour = colour;
+    for (int i = 0; i < 4; ++i) mHf[i] = hf[i];
+    mDirtyBuffer = mDirtyFogQuad = true;
+    if (mFogQuad) mFogQuad->setVisibilityFlags(on ? visibleBit : 0u);
+}
+
+void JahAtmosphere::pushFogQuadConstants() {
+    if (!mFogQuadMaterial) return;
+    Ogre::Pass *pass = mFogQuadMaterial->getTechnique(0)->getPass(0);
+    Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+    ps->setNamedConstant("heightFog", Ogre::Vector4(mHf[0], mHf[1], mHf[2], mHf[3]));
+    ps->setNamedConstant("heightFogColour",
+                         Ogre::Vector4(mHfColour.x, mHfColour.y, mHfColour.z, kHeightFogSkyDistance));
 }
 
 // ---- the inputs -------------------------------------------------------------
@@ -359,6 +431,9 @@ void JahAtmosphere::uploadSettings() {
     g.planet[1] = Rb + mModel.atmosphereHeightKm;
     g.planet[2] = Rb + mObserverKm;
     g.planet[3] = kApMaxKm;
+    for (int i = 0; i < 4; ++i) g.heightFog[i] = mHfOn ? mHf[i] : 0.0f;
+    g.heightFogColour[0] = mHfColour.x; g.heightFogColour[1] = mHfColour.y;
+    g.heightFogColour[2] = mHfColour.z; g.heightFogColour[3] = 0.0f;
     mBuffer->upload(&g, 0u, sizeof(g));
 }
 
@@ -398,6 +473,7 @@ void JahAtmosphere::update() {
     }
     if (mDirtyBuffer) { uploadSettings(); mDirtyBuffer = false; }
     if (mDirtyQuad) { pushQuadConstants(); mDirtyQuad = false; }
+    if (mDirtyFogQuad) { pushFogQuadConstants(); mDirtyFogQuad = false; }
 }
 
 AtmosphereStatus JahAtmosphere::status() const {
@@ -456,6 +532,20 @@ bool JahAtmosphere::measure(unsigned iterations, AtmosphereCost &out) {
 Ogre::uint32 JahAtmosphere::preparePassHash(Ogre::Hlms *hlms, size_t constBufferSlot) {
     hlms->_setProperty(Ogre::Hlms::kNoTid, Ogre::HlmsBaseProp::Fog, 1);
     hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_atmo_buf", Ogre::int32(constBufferSlot));
+    // THE HEIGHT FOG'S VARIANT (SKY-DEFAULTS-1): its block is in the buffer
+    // always; the code that reads it is in the shader only while it is on —
+    // and NEVER in a cubemap probe's face (a PCC capture: HlmsPbs's own
+    // isRendering() test, the one it withholds the probes' sampling by). The
+    // probe faces photograph the sky without the fog quad (visibility 0x1), so
+    // fogged geometry in them would sit against an unfogged sky, and the near
+    // scene's indirect light would change with a medium that begins 100 m away.
+    if (mHfOn) {
+        bool probeFace = false;
+        if (auto *pbs = dynamic_cast<Ogre::HlmsPbs *>(hlms))
+            if (const Ogre::ParallaxCorrectedCubemapBase *pcc = pbs->getParallaxCorrectedCubemap())
+                probeFace = pcc->isRendering();
+        if (!probeFace) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_height_fog", 1);
+    }
     return 1u;
 }
 

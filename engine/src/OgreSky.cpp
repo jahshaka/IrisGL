@@ -567,7 +567,10 @@ void OgreScene::syncAtmosphere() {
         FogHlmsListener::AtmoBind bind;
         if (mAtmoSkyOn && (airRead || mAtmoFogOn)) bind.aerial = mAtmosphere->aerialLut();
         FogHlmsListener::setAtmosphere(mSceneMgr, bind);
-        if (!airRead && !mAtmoFogOn) {
+        // THE HEIGHT FOG (SKY-DEFAULTS-1) is the third customer: it reads no
+        // table, but its block rides the component's buffer, so it registers.
+        if (!airRead && !mAtmoFogOn && !mHeightFogOn) {
+            pushHeightFog();   // hides its quad
             // Neither: unregister, which is what makes "no fog" bit-exact (no
             // hlms_fog, no fog code in any shader) — and the fog state the
             // shader would read goes with it.
@@ -601,6 +604,7 @@ void OgreScene::forgetSkySh() {
     mSkyShInForceValid = false;
     // No sky, no sky light: the ambient it was lighting goes to zero with it.
     if (wasLighting) applySkyAmbient(GiStaleReason::Sky);
+    pushHeightFog();   // ...and the height fog's in-scatter
 }
 
 // THE SKY'S AMBIENT IS FORMED HERE (PHOTON-SKY-TRANSIENT-1): the SH in force
@@ -662,6 +666,7 @@ void OgreScene::landEnvironmentIfComplete() {
         std::memcpy(mSkyShInForce, mSkySh, sizeof mSkyShInForce);
         mSkyShInForceValid = true;
         applySkyAmbient(GiStaleReason::Sky);   // the sky's edit, not the light's
+        pushHeightFog();                       // its colour is this environment's
     }
 }
 

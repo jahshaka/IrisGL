@@ -158,7 +158,7 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_atmo_ap )
+@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_atmo_ap || jah_height_fog )
 @piece( custom_ps_uniformDeclaration )
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
@@ -222,6 +222,12 @@
 			return OGRE_SampleLevel( jahAtmoAerial, jahAtmoAerialSampler, float3( uv, jahAtmoApSkyW( 32.0 ) ), 0.0 ).xyz;
 		}
 	@end
+	// THE EXPONENTIAL HEIGHT FOG'S INTEGRAL (SKY-DEFAULTS-1): the piece the
+	// build wraps from src/rayquery/include/jah_height_fog.glsl, the same text
+	// the height fog's sky quad includes.
+	@property( jah_height_fog )
+		@insertpiece( JahHeightFog )
+	@end
 @end
 @end
 
@@ -240,6 +246,8 @@
 		float4 skyE;
 		float4 sunDir;
 		float4 planet;
+		float4 heightFog;		// SKY-DEFAULTS-1: density, falloff (per m), base Y, start (m)
+		float4 heightFogColour;	// rgb = the sky's in-scatter (linear)
 	};
 	CONST_BUFFER( JahAtmoSettingsBuf, @value(jah_atmo_buf) )
 	{
@@ -446,6 +454,27 @@ midf jahCloudSunTransmittance( float3 viewPos )
 			const midf3 jahFogCol = midf3_c( passBuf.jahFogColour.xyz );
 		@end
 		outPs_colour0.xyz = lerp( jahFogCol, outPs_colour0.xyz, midf_c( jahT ) );
+	}
+	@end
+	// THE EXPONENTIAL HEIGHT FOG (SKY-DEFAULTS-1; Types.h HeightFogDesc), the
+	// outermost medium: the ray from the start distance to this surface through
+	// the height layer, towards the sky's in-scatter. The eye's height is the
+	// surface's less the ray's rise (no camera term in the pass buffer needed),
+	// and the direction is the air's own (the view rotation of the view-space
+	// position, as above). A surface-cache capture never runs this: it is a
+	// prepass, excluded by this piece's own guard.
+	@property( jah_height_fog )
+	{
+		const float jahHfL = length( inPs.pos.xyz );
+		const float3 jahHfDir = normalize( mul( toFloat3x3( passBuf.view ), inPs.pos.xyz ) );
+		const float jahHfT = jahHeightFogT( inPs.jahFogWorldY - jahHfDir.y * jahHfL, jahHfDir.y,
+											jahHfL, atmoSettings.heightFog );
+		@property( !hw_gamma_write )
+			const float3 jahHfCol = sqrt( atmoSettings.heightFogColour.xyz );
+		@else
+			const float3 jahHfCol = atmoSettings.heightFogColour.xyz;
+		@end
+		outPs_colour0.xyz = midf3_c( lerp( jahHfCol, float3( outPs_colour0.xyz ), jahHfT ) );
 	}
 	@end
 	@end
