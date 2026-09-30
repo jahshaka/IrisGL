@@ -521,16 +521,6 @@ MeshNode::loadAsSceneFragment(QString filePath,
 
 QSharedPointer<iris::SceneNode>
 MeshNode::loadAsSceneFragment(
-    const QString &filePath,
-    const SceneSource &source,
-    std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-    const QString &extractDir, const ImportTransform &xf)
-{
-    return loadAsSceneFragment(filePath, source.scene(), createMaterialFunc, extractDir, xf);
-}
-
-QSharedPointer<iris::SceneNode>
-MeshNode::loadAsSceneFragment(
 	const QString &filePath,
 	const aiScene* scene_,
 	std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
