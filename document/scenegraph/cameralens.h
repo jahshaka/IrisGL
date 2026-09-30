@@ -331,23 +331,19 @@ float keyIrradiance(float sunIntensity, float skyLightIntensity, float skyRadian
 float exposureForKeyIrradiance(float keyIrradianceValue);
 
 /// THE DEFAULT WORLD GRADE, derived: the formula above for the lights a NEW
-/// SCENE is born with (MainWindow::createDefaultScene) —
+/// SCENE is born with (MainWindow::createDefaultScene; SKY-DEFAULTS-1) — the
+/// sun at intensity 1 and 50 degrees of elevation, the Sky Light at 1 over the
+/// REALISTIC sky (haze 10, brightness 1), on the upward-facing floor:
 ///
-///     sun (Directional Light)  intensity 1.0, white
-///     Sky Light                intensity 1.0, white
-///     sky                      96-grey, sRGB 96/255 = 0.37647 -> linear 0.11697
-///
-///     E_key = PI * (1 + 0.11697)               = 3.50907
+///     E_key = 1.987 (the sun) + 0.406 (the Sky Light)   = 2.393
 ///     x*    = 0.274352                         (the film curve, inverted)
-///     E     = 2 + ln(0.274352 * PI / 3.50907)  = 0.59604
+///     E     = 2 + ln(0.274352 * PI / 2.393)   = 0.97882
 ///
-/// MEASURED AGAINST THE METER IT REPLACES (EXPOSURE-1, 2026-09-17): the
-/// automatic exposure converges on the default scene at multiplier 1.41406 and
-/// this exposure is 1.36456 — 0.051 STOPS apart, so the default picture does
-/// not move when the default becomes a number instead of a measurement. The
-/// hand-tuned +0.6 that stood here for a fortnight was 0.006 stops from the
-/// physics; it was right, and it was underived, which is what made it
-/// impossible to move the default lights without re-tuning by eye.
+/// (both terms MEASURED through the renderer on an 18 % card — cameralens.cpp
+/// defaultKeyIrradiance has the numbers.) The grade it replaced was derived for
+/// the retired flat 96-grey sky with the sun facing the card (E_key 3.509,
+/// E 0.59604): 0.55 stops dark on the physical sky, which the Auto meter
+/// confirmed on the same scene (+0.53 stops).
 float defaultExposureChain();
 /// The chain exposure zero stops corresponds to — `defaultExposureChain()`.
 float exposureAnchorChain();
