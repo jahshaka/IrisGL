@@ -1006,6 +1006,10 @@ void OgreEngine::renderOneFrame() {
                                        *driverSlot(v->ogreScene()) == v.get();
             v->applyPendingResize(); v->updateParticles();
             if (authoritative) v->updateGi();
+            // THE ATMOSPHERE'S OBSERVER is the same driving camera (SKY-ATMOSPHERE-1):
+            // its altitude decides the horizon's dip and the air it looks through.
+            if (authoritative && v->camera())
+                v->ogreScene()->noteAtmosphereObserver(float(v->camera()->getDerivedPosition().y));
             // Both ends of the planar-reflection wiring move between frames (the
             // scene rebuilds its arm on a parameter change, the view recreates
             // its camera on setScene), so the listener is re-synced rather than

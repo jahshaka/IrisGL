@@ -213,7 +213,10 @@ bool OgreScene::setSky(const SkyDesc &desc) {
         desc.atmosphere.aerialScale != mSkyDesc.atmosphere.aerialScale) {
         mSkyDesc.atmosphere.aerialScale = desc.atmosphere.aerialScale;
         if (mAtmosphere) mAtmosphere->setAerialScale(desc.atmosphere.aerialScale);
-        if (mAtmoSkyOn) staleProbeGrid(GiStaleReason::Fog);
+        if (mAtmoSkyOn) {
+            syncAtmosphere();   // 0 <-> > 0 binds or frees the pass's volume
+            staleProbeGrid(GiStaleReason::Fog);
+        }
     }
     // THE CLOUD LAYER (CLOUDS-2D-1) is the fourth independent half. Three kinds
     // of change, three costs: the FIELD (coverage, density, the weather map)
@@ -430,6 +433,7 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         mAtmosphere->setSunIlluminance(
             Ogre::Vector3(sky.sunIlluminance.r, sky.sunIlluminance.g, sky.sunIlluminance.b));
         mAtmosphere->setAerialScale(sky.aerialScale);
+        mAtmosphere->setSkyBrightness(sky.skyBrightness);
         mAtmoSkyOn = true;
         syncAtmosphere();
         return true;
@@ -497,6 +501,7 @@ AtmosphereStatus OgreScene::atmosphereStatus() const {
     AtmosphereStatus st = mAtmosphere->status();
     st.on = mAtmoSkyOn;
     return st;
+    st.aerialBound = mAtmoSkyOn && (mAtmosphere->aerialScale() > 0.0f || mAtmoFogOn);
 }
 
 bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
@@ -505,6 +510,20 @@ bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
     JAH_TRY {
         return mAtmosphere->measure(iterations, out);
     } JAH_CATCH(mError, false);
+}
+
+// THE DRIVING CAMERA'S ALTITUDE (OgreEngine::renderOneFrame, the GI driver of
+// this scene, once a frame): the observer the sky view and the aerial volume are
+// built for. A band change rebuilds them and re-captures the environment the
+// Sky Light reads; the cloud sheet's constants name the observer too.
+void OgreScene::noteAtmosphereObserver(float cameraY) {
+    if (!mAtmosphere || !mAtmoSkyOn) return;
+    JAH_TRY {
+        if (mAtmosphere->setObserverAltitude(std::max(0.0f, cameraY))) {
+            requestSkyCapture();
+            bindCloudAir();
+        }
+    } JAH_CATCH(mError, );
 }
 
 void OgreScene::updateAtmosphere() {
@@ -523,12 +542,17 @@ void OgreScene::syncAtmosphere() {
     if (!mAtmosphere) return;
     JAH_TRY {
         mAtmosphere->setAirOn(mAtmoSkyOn);
+        // THE PASS READS THE AIR ONLY WHERE SOMETHING USES IT (the merge read's
+        // D3): the aerial perspective on the scene (aerialScale > 0) or the World
+        // fog, which fades towards the sky's own radiance from the same volume.
+        // The default — the atmosphere with no scene air and no fog — binds no
+        // pass texture and registers no fog block at all: the sky quad needs
+        // neither, and every PBS shader is the one a fog-less scene compiles.
+        const bool airRead = mAtmoSkyOn && mAtmosphere->aerialScale() > 0.0f;
         FogHlmsListener::AtmoBind bind;
-        if (mAtmoSkyOn) {
-            bind.aerial = mAtmosphere->aerialLut();
-        }
+        if (mAtmoSkyOn && (airRead || mAtmoFogOn)) bind.aerial = mAtmosphere->aerialLut();
         FogHlmsListener::setAtmosphere(mSceneMgr, bind);
-        if (!mAtmoSkyOn && !mAtmoFogOn) {
+        if (!airRead && !mAtmoFogOn) {
             // Neither: unregister, which is what makes "no fog" bit-exact (no
             // hlms_fog, no fog code in any shader) — and the fog state the
             // shader would read goes with it.
@@ -2025,11 +2049,13 @@ void OgreScene::bindCloudAir() {
     const AtmosphereModel &m = air ? mAtmosphere->model() : AtmosphereModel();
     ps->setNamedConstant("atmoPlanet",
                          Ogre::Vector4(m.planetRadiusKm, m.planetRadiusKm + m.atmosphereHeightKm,
-                                       m.planetRadiusKm + JahAtmosphere::kObserverKm,
+                                       m.planetRadiusKm + (air ? mAtmosphere->observerKm()
+                                                                : JahAtmosphere::kMinObserverKm),
                                        JahAtmosphere::kApMaxKm));
     const Ogre::Vector3 toSun = air ? mAtmosphere->sunDir() : Ogre::Vector3::UNIT_Y;
     ps->setNamedConstant("atmoSunDir", Ogre::Vector4(toSun.x, toSun.y, toSun.z, 0.0f));
-    const Ogre::Vector3 e = air ? mAtmosphere->topOfAir() : Ogre::Vector3::ZERO;
+    // the air's in-scatter in front of the sheet: scattered light, so the sky's brightness
+    const Ogre::Vector3 e = air ? mAtmosphere->skyRadianceScale() : Ogre::Vector3::ZERO;
     ps->setNamedConstant("atmoSkyE", Ogre::Vector4(e.x, e.y, e.z, air ? 1.0f : 0.0f));
 }
 

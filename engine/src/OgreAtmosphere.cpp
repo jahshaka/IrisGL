@@ -144,8 +144,15 @@ void JahAtmosphere::createQuad() {
 // ---- the inputs -------------------------------------------------------------
 void JahAtmosphere::setModel(const AtmosphereModel &m) {
     if (m == mModel) return;
+    // THE ALBEDO IS NOT IN THE TRANSMITTANCE (the merge read's W3): the ground
+    // is a boundary of the multiple scattering and the sky view, never of the
+    // air's own optical depth.
+    const bool species = m.rayleighScale != mModel.rayleighScale || m.mieScale != mModel.mieScale ||
+                         m.ozone != mModel.ozone || m.planetRadiusKm != mModel.planetRadiusKm ||
+                         m.atmosphereHeightKm != mModel.atmosphereHeightKm;
     mModel = m;
     ++mModelGeneration;
+    if (species) mDirtyTrans = true;
     mDirtyTables = mDirtySun = mDirtyBuffer = mDirtyQuad = true;
 }
 
@@ -171,6 +178,26 @@ void JahAtmosphere::setAerialScale(float s) {
     if (s == mAerialScale) return;
     mAerialScale = s;
     mDirtyBuffer = true;
+}
+
+bool JahAtmosphere::setObserverAltitude(float metres) {
+    const float km = std::max(kMinObserverKm, metres * 0.001f);
+    if (std::fabs(std::log2(km / mObserverKm)) <= kObserverBandOctaves) return false;
+    mObserverKm = km;
+    ++mObserverRebuilds;
+    // The view-dependent tables (the transmittance and multiple-scattering
+    // ones are functions of altitude already), the constants that name the
+    // observer, and the sun's tint memo (the beam crosses less air from up here).
+    ++mModelGeneration;
+    mDirtySun = mDirtyBuffer = mDirtyQuad = true;
+    return true;
+}
+
+void JahAtmosphere::setSkyBrightness(float b) {
+    b = std::max(0.0f, b);
+    if (b == mSkyBrightness) return;
+    mSkyBrightness = b;
+    mDirtyBuffer = mDirtyQuad = true;
 }
 
 void JahAtmosphere::setFogBlock(float density, float breakMin, float breakFalloff) {
@@ -237,7 +264,7 @@ void JahAtmosphere::pushJobParams(Ogre::HlmsComputeJob *job) const {
     const auto set = [&sp](const char *name, const Ogre::Vector4 &v) {
         if (Ogre::ShaderParams::Param *p = sp.findParameter(name)) p->setManualValue(v);
     };
-    set("atmoPlanet", Ogre::Vector4(Rb, Rt, Rb + kObserverKm, kApMaxKm));
+    set("atmoPlanet", Ogre::Vector4(Rb, Rt, Rb + mObserverKm, kApMaxKm));
     set("atmoRayleigh", Ogre::Vector4(kRayleighScatter[0] * mModel.rayleighScale,
                                       kRayleighScatter[1] * mModel.rayleighScale,
                                       kRayleighScatter[2] * mModel.rayleighScale, kRayleighScaleHeightKm));
@@ -255,7 +282,8 @@ void JahAtmosphere::pushJobParams(Ogre::HlmsComputeJob *job) const {
 // (a job's descriptor sets hold raw pointers). `repeats` > 1 is the cost
 // measurement's slope.
 bool JahAtmosphere::runJob(const char *name, Ogre::TextureGpu *target, Ogre::TextureGpu *in0,
-                           Ogre::TextureGpu *in1, unsigned gx, unsigned gy, unsigned repeats) {
+                           Ogre::TextureGpu *in1, unsigned gx, unsigned gy, unsigned repeats,
+                           int reason) {
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(name) : nullptr;
@@ -282,6 +310,12 @@ bool JahAtmosphere::runJob(const char *name, Ogre::TextureGpu *target, Ogre::Tex
     job->_setUavTexture(0u, uav);
     job->setNumThreadGroups(gx, gy, 1u);
     rs->endRenderPassDescriptor();
+    // THE COST, AS THE GPU SEES IT (the merge read's D1): a frame-monitor cache
+    // row with its own timestamp pair (the only way a dispatch outside a
+    // compositor pass reports GPU time; CacheWork::gpuMs). Nothing while the
+    // monitor is off.
+    monitor::CacheScope scope(CacheKind::Atmosphere,
+                              reason >= 0 ? WorkReason(reason) : WorkReason::Sky, 0, name, rs);
     for (unsigned k = 0; k < repeats; ++k) {
         Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
         job->analyzeBarriers(rt);
@@ -317,13 +351,13 @@ void JahAtmosphere::uploadSettings() {
     g.fogBreakMinBrightness = mFogBreakMin * mFogBreakFalloff;
     g.fogBreakFalloff = -mFogBreakFalloff;
     g.aerialScale = mAerialScale;
-    const Ogre::Vector3 e = topIlluminance();
+    const Ogre::Vector3 e = skyRadianceScale();   // scattered light only: the sky's brightness
     g.skyE[0] = e.x; g.skyE[1] = e.y; g.skyE[2] = e.z; g.skyE[3] = mAirOn ? 1.0f : 0.0f;
     g.sunDir[0] = mToSun.x; g.sunDir[1] = mToSun.y; g.sunDir[2] = mToSun.z; g.sunDir[3] = 0.0f;
     const float Rb = mModel.planetRadiusKm;
     g.planet[0] = Rb;
     g.planet[1] = Rb + mModel.atmosphereHeightKm;
-    g.planet[2] = Rb + kObserverKm;
+    g.planet[2] = Rb + mObserverKm;
     g.planet[3] = kApMaxKm;
     mBuffer->upload(&g, 0u, sizeof(g));
 }
@@ -334,22 +368,25 @@ void JahAtmosphere::pushQuadConstants() {
     Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
     const float Rb = mModel.planetRadiusKm;
     ps->setNamedConstant("atmoPlanet", Ogre::Vector4(Rb, Rb + mModel.atmosphereHeightKm,
-                                                     Rb + kObserverKm, kApMaxKm));
+                                                     Rb + mObserverKm, kApMaxKm));
     ps->setNamedConstant("atmoSunDir", Ogre::Vector4(mToSun.x, mToSun.y, mToSun.z, 0.0f));
-    const Ogre::Vector3 e = topIlluminance();
+    const Ogre::Vector3 e = skyRadianceScale();
     ps->setNamedConstant("atmoSkyE", Ogre::Vector4(e.x, e.y, e.z, 0.0f));
 }
 
 void JahAtmosphere::update() {
     // The tables only while the air is the sky: a fog-only registration (the
     // World fog under another sky) reads none of them, and the flags wait.
-    const bool tables = mDirtyTables;
+    const bool trans = mDirtyTrans;
+    const bool tables = mDirtyTables || trans;
     const bool sun = mDirtySun || tables;
     if (mAirOn && (tables || sun)) {
-        if (tables) {
+        if (trans) {
             if (runJob("Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u))
                 ++mStatus.transmittanceBuilds;
-            if (runJob("Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize / 8u, kMsSize / 8u))
+        }
+        if (tables) {
+            if (runJob("Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize, kMsSize))
                 ++mStatus.multiScatterBuilds;
         }
         if (runJob("Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u))
@@ -357,7 +394,7 @@ void JahAtmosphere::update() {
         if (runJob("Jahshaka/AtmoAerial", mAerial, mTrans, mMs, kApW / 8u, kApH / 8u))
             ++mStatus.aerialBuilds;
         handOver();
-        mDirtyTables = mDirtySun = false;
+        mDirtyTrans = mDirtyTables = mDirtySun = false;
     }
     if (mDirtyBuffer) { uploadSettings(); mDirtyBuffer = false; }
     if (mDirtyQuad) { pushQuadConstants(); mDirtyQuad = false; }
@@ -366,6 +403,8 @@ void JahAtmosphere::update() {
 AtmosphereStatus JahAtmosphere::status() const {
     AtmosphereStatus s = mStatus;
     s.on = mAirOn;
+    s.observerAltitudeM = mObserverKm * 1000.0f;
+    s.observerRebuilds = mObserverRebuilds;
     const Ogre::Vector3 e = topIlluminance();
     s.topIlluminance[0] = e.x; s.topIlluminance[1] = e.y; s.topIlluminance[2] = e.z;
     return s;
@@ -388,7 +427,7 @@ bool JahAtmosphere::measure(unsigned iterations, AtmosphereCost &out) {
     };
     const Row rows[] = {
         { "Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u, &out.transmittanceMs },
-        { "Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize / 8u, kMsSize / 8u, &out.multiScatterMs },
+        { "Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize, kMsSize, &out.multiScatterMs },
         { "Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u, &out.skyViewMs },
         { "Jahshaka/AtmoAerial", mAerial, mTrans, mMs, kApW / 8u, kApH / 8u, &out.aerialMs },
     };

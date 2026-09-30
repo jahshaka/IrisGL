@@ -73,6 +73,23 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_atmo_ap",      "jahAtmoAerial" },
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
+// THE PASS-TEXTURE TABLE HAS A HARD SIZE, AND A PASS OVER IT IS NOT SURVIVABLE
+// (SKY-ATMOSPHERE-1's gate: world_sky.clouds_2d asked for 65 of 64 —
+// VulkanRootLayout threw "set 0 needs 65 texture slots; the global binding table
+// holds 64" and the process died with SIGSEGV). The table is the fork's
+// NUM_BIND_TEXTURES (RenderSystems/Vulkan/include/OgreVulkanGlobalBindingTable.h,
+// 64); the pin's own share of the fullest pass this engine builds — Epic, the
+// gather, the sun contact, the cloud field and the environment claimed — is 59,
+// MEASURED as that crash's 65 less its six extras. So the extras may never
+// exceed five, and adding a sixth is a BUILD error here rather than a crash in
+// one arm of one pool. Five today: the fullest pass is at 64 of 64 with every
+// extra claimed; the atmosphere's volume is claimed only where it is read
+// (aerialScale > 0 or the World fog), so a default scene's fullest pass is 63.
+constexpr size_t kPassTextureTable = 64u;
+constexpr size_t kPinPassTexturesFullest = 59u;
+static_assert(kPinPassTexturesFullest + kNumExtraPassSlots <= kPassTextureTable,
+              "the PBS pass-texture table overflows: the pin's fullest pass plus kExtraPassSlots "
+              "exceeds the fork's 64 slots — fold an extra into an existing texture first");
 /// The slot's property as a hashed IdString, hashed once (these run per
 /// renderable hash, not per frame).
 const Ogre::IdString &extraSlotProperty(size_t i) {
@@ -868,7 +885,8 @@ void OgreScene::setFog(const FogDesc &desc) {
 // colour.
 void OgreScene::pushFogState() {
     const bool fogOn = mAtmoFogOn && mFogDescKnown;
-    if (!mAtmosphere || (!fogOn && !mAtmoSkyOn)) {
+    const bool airRead = mAtmoSkyOn && mAtmosphere && mAtmosphere->aerialScale() > 0.0f;
+    if (!mAtmosphere || (!fogOn && !airRead)) {
         FogHlmsListener::unregisterFog(mSceneMgr);
         return;
     }

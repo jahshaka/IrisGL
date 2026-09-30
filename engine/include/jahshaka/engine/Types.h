@@ -799,12 +799,15 @@ struct AtmosphereSky {
     /// THE HAZE: the aerosol (Mie) density as a multiple of the paper's clear
     /// air. 1 = the reference's very clear air (an aerosol optical depth of
     /// 0.005 over the whole column), 0 = no aerosol at all (a purely molecular
-    /// sky), ~10 = an ordinary clear day (0.05), ~50 = hazy (0.25), 100 = thick
-    /// haze (0.5). The aerosol is grey: it dims and whitens, the molecules
-    /// redden. It changes the sky (a whiter horizon, a brighter glow round the
-    /// sun), the sun's colour and the aerial perspective together, because it
-    /// is one air.
-    float sunHaze   = 1.0f;
+    /// sky), 10 = THE DEFAULT, a clean ordinary clear day (optical depth 0.053:
+    /// 4.44e-3 per km x 1.2 km scale height x 10), ~50 = hazy (0.27), 100 =
+    /// thick haze (0.53). The aerosol is grey: it dims and whitens, the
+    /// molecules redden. It is the SKY's haze (owner 2026-09-30: "the haze
+    /// should mainly be the horizon, not the scene; fog is for the scene"): the
+    /// sky's pixels, the horizon's whiteness, the glow round the sun, the sun's
+    /// colour and the Sky Light's capture. It reaches a scene surface only
+    /// through `aerialScale`, which is off by default.
+    float sunHaze   = 10.0f;
     /// The molecular (Rayleigh) density as a multiple of Earth's: the sky's
     /// blue. 1 = Earth.
     float rayleighScale = 1.0f;
@@ -814,13 +817,20 @@ struct AtmosphereSky {
     /// The planet's surface albedo (Lambert, grey), seen under the horizon and
     /// part of the light the sky scatters back down.
     float groundAlbedo = 0.3f;
-    /// THE AERIAL PERSPECTIVE ON GEOMETRY, a distance scale (Unreal's
-    /// "aerial perspective view distance scale"): 1 = the real air between a
-    /// surface and the camera, 0 = none at all (a lit surface reads exactly as
-    /// it would with no air before it), in between = the air a surface that
-    /// much closer would be seen through. Changes no sky pixel, so it is ABSENT
-    /// from the comparison below and applied on its own (Scene::setSky).
-    float aerialScale = 1.0f;
+    /// THE AERIAL PERSPECTIVE ON THE SCENE, a distance scale (Unreal's
+    /// "aerial perspective view distance scale"): 0 = THE DEFAULT, no air
+    /// between a surface and the camera (scene haze is the World fog's job,
+    /// owner 2026-09-30), 1 = the real air of this atmosphere, in between = the
+    /// air a surface that much closer would be seen through. Changes no sky
+    /// pixel, so it is ABSENT from the comparison below and applied on its own
+    /// (Scene::setSky).
+    float aerialScale = 0.0f;
+    /// THE SKY'S BRIGHTNESS (Unreal's Sky Atmosphere "sky luminance factor"):
+    /// scales the light the air SCATTERS — the sky's pixels, the environment
+    /// the Sky Light and every reflection capture, and the aerial perspective's
+    /// in-scatter — and NOT the sun's direct light, its colour or its
+    /// transmittance. 1 = the physical sky (the default), 0..10.
+    float skyBrightness = 1.0f;
     /// The planet, fixed at Earth (not dials yet): the bottom radius and the
     /// depth of the air above it.
     float planetRadiusKm = 6360.0f;
@@ -845,7 +855,8 @@ struct AtmosphereSky {
     bool operator==(const AtmosphereSky &o) const {
         return sunHaze == o.sunHaze && rayleighScale == o.rayleighScale && ozone == o.ozone &&
                groundAlbedo == o.groundAlbedo && planetRadiusKm == o.planetRadiusKm &&
-               atmosphereHeightKm == o.atmosphereHeightKm && hasSun == o.hasSun &&
+               atmosphereHeightKm == o.atmosphereHeightKm && skyBrightness == o.skyBrightness &&
+               hasSun == o.hasSun &&
                sunDir[0] == o.sunDir[0] && sunDir[1] == o.sunDir[1] && sunDir[2] == o.sunDir[2] &&
                sunIlluminance.r == o.sunIlluminance.r && sunIlluminance.g == o.sunIlluminance.g &&
                sunIlluminance.b == o.sunIlluminance.b;
@@ -865,8 +876,16 @@ struct AtmosphereStatus {
     unsigned skyViewBuilds = 0;
     unsigned aerialBuilds = 0;
     /// The sun at the top of the air, in the renderer's units (what the LUTs'
-    /// unit-illuminance radiance is multiplied by).
+    /// unit-illuminance radiance is multiplied by, times skyBrightness).
     float    topIlluminance[3] = { 0.0f, 0.0f, 0.0f };
+    /// The observer the view-dependent tables were built for (metres over
+    /// y = 0, the scene's driving camera, banded) and how many band changes
+    /// have rebuilt them.
+    float    observerAltitudeM = 2.0f;
+    unsigned observerRebuilds = 0;
+    /// The aerial-perspective volume is bound to the scene's colour passes
+    /// (aerialScale > 0 or the World fog on): one pass texture.
+    bool     aerialBound = false;
 };
 
 /// THE ATMOSPHERE'S COST (Scene::measureAtmosphere): GPU milliseconds per
@@ -7300,7 +7319,8 @@ enum class CacheKind {
     Gi,         ///< the GI volume: voxelize / IR trace / IFD converge
     Planar,     ///< a planar reflector's render (view-dependent: always justified)
     Shader,     ///< a shader/PSO compile (detail = the permutation)
-    Texture     ///< a texture load (units = bytes/1024, detail = the name)
+    Texture,    ///< a texture load (units = bytes/1024, detail = the name)
+    Atmosphere  ///< one of the planet's atmosphere's tables (detail = the job)
 };
 
 /// WHY a cache redid its work. `None` is the important value: the cache did the

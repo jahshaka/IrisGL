@@ -65,17 +65,25 @@ public:
     /// The aerial volume's far slice (km): past it the air in front of a surface
     /// is held at this distance's. 100 km reaches the cloud sheet's far edge.
     static constexpr float kApMaxKm = 100.0f;
-    /// The observer's altitude (km): the tables are evaluated for ONE observer,
-    /// at the ground (a camera's own height is not tracked — the air a scene's
-    /// cameras see differs from it by their height over the aerosol's 1.2 km
-    /// scale height).
-    static constexpr float kObserverKm = 0.002f;
+    /// THE OBSERVER (the merge read's D2). The tables are evaluated for ONE
+    /// observer — the scene's driving camera (the GI driver's rule: the first
+    /// enabled on-screen view, else the first enabled one) — at its altitude
+    /// over the ground plane y = 0, never under kMinObserverKm: at exactly the
+    /// planet's radius a ray-sphere test returns t = 0 and a ray under the
+    /// horizon would go through the planet (JahAtmoSkyView_cs). The altitude is
+    /// BANDED: the sky view and the aerial volume are rebuilt only when the
+    /// camera leaves a quarter octave (x0.84 .. x1.19) of the altitude they were
+    /// built at — a 19 % altitude error is a 9 % horizon-dip error (the dip goes
+    /// as sqrt(h)), under one pixel of a 1080p frame at any altitude.
+    static constexpr float kMinObserverKm = 0.002f;
+    static constexpr float kObserverBandOctaves = 0.25f;
 
     JahAtmosphere(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::uint32 visibleBit);
     ~JahAtmosphere() override;
 
     void setModel(const AtmosphereModel &m);
     const AtmosphereModel &model() const { return mModel; }
+    float aerialScale() const { return mAerialScale; }
     /// The sun (towards it) and whether there is one; the sky view and the
     /// aerial volume are rebuilt when either changes.
     void setSun(const Ogre::Vector3 &toSun, bool hasSun);
@@ -84,6 +92,10 @@ public:
     /// transmittance. A constant, never a rebuild.
     void setSunIlluminance(const Ogre::Vector3 &noon);
     void setAerialScale(float s);
+    /// AtmosphereSky::skyBrightness: a scale on the SCATTERED light only (the
+    /// sky quad, the aerial in-scatter and the World fog's sky colour); a
+    /// constant, never a rebuild.
+    void setSkyBrightness(float b);
     /// The World fog's distance block, in upstream's packing (0 = none).
     void setFogBlock(float density, float breakMinBrightness, float breakFalloff);
     /// The atmosphere is the scene's sky: the quad is drawn and the pass reads
@@ -100,16 +112,25 @@ public:
     /// top of the air — the table's integral, on the CPU (the sun's tint).
     Ogre::Vector3 transmittance(float rKm, float mu) const;
     /// The observer's radius (km).
-    float observerRadiusKm() const { return mModel.planetRadiusKm + kObserverKm; }
+    float observerRadiusKm() const { return mModel.planetRadiusKm + mObserverKm; }
+    float observerKm() const { return mObserverKm; }
+    /// The driving camera's altitude over y = 0, in metres. True when it left
+    /// the band and the view-dependent tables will be rebuilt (the caller
+    /// re-captures the environment).
+    bool setObserverAltitude(float metres);
     /// Bumped by every model change (the sun tint's memo key).
     unsigned long long modelGeneration() const { return mModelGeneration; }
 
     const Ogre::Vector3 &sunDir() const { return mToSun; }
     /// The sun at the top of the air, in the renderer's units (0 with no sun).
     Ogre::Vector3 topOfAir() const { return topIlluminance(); }
+    /// The sun at the top of the air times the sky's brightness: what the
+    /// tables' unit-illuminance SCATTERED radiance is multiplied by.
+    Ogre::Vector3 skyRadianceScale() const { return topIlluminance() * mSkyBrightness; }
     Ogre::TextureGpu *skyViewLut() const { return mSkyView; }   // the sky quad's alone
     Ogre::TextureGpu *aerialLut() const { return mAerial; }
     AtmosphereStatus status() const;
+    unsigned observerRebuilds() const { return mObserverRebuilds; }
     bool measure(unsigned iterations, AtmosphereCost &out);
 
     // ---- Ogre::AtmosphereComponent -----------------------------------------
@@ -123,7 +144,8 @@ private:
     void createQuad();
     void pushJobParams(Ogre::HlmsComputeJob *job) const;
     bool runJob(const char *name, Ogre::TextureGpu *target, Ogre::TextureGpu *in0,
-                Ogre::TextureGpu *in1, unsigned gx, unsigned gy, unsigned repeats = 1u);
+                Ogre::TextureGpu *in1, unsigned gx, unsigned gy, unsigned repeats = 1u,
+                int reason = -1);
     void handOver();
     Ogre::Vector3 topIlluminance() const;
     void uploadSettings();
@@ -137,11 +159,15 @@ private:
     Ogre::Vector3 mToSun = Ogre::Vector3::UNIT_Y;
     bool mHasSun = false;
     Ogre::Vector3 mSunNoon = Ogre::Vector3::ZERO;
-    float mAerialScale = 1.0f;
+    float mAerialScale = 0.0f;
+    float mSkyBrightness = 1.0f;
+    float mObserverKm = kMinObserverKm;
+    unsigned mObserverRebuilds = 0;
     float mFogDensity = 0.0f, mFogBreakMin = 0.0f, mFogBreakFalloff = 0.0f;
     bool mAirOn = false;
 
-    bool mDirtyTables = true;   ///< transmittance + multiple scattering (+ both below)
+    bool mDirtyTrans = true;    ///< the transmittance (the species and the planet, NOT the albedo)
+    bool mDirtyTables = true;   ///< multiple scattering (+ both below)
     bool mDirtySun = true;      ///< the sky view + the aerial volume
     bool mDirtyBuffer = true;
     bool mDirtyQuad = true;

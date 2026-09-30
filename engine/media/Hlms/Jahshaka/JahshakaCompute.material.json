@@ -36,7 +36,7 @@
 
 		"Jahshaka/AtmoMultiScatter" :
 		{
-			"threads_per_group" : [8, 8, 1],
+			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahAtmoMultiScatter_cs",
 			"inform_shader_of_texture_data_change" : true,

@@ -6,8 +6,7 @@
 // the second order L_2 (single scattering of a unit sun, isotropic phase, the
 // lit ground included) and f_ms, the fraction of isotropic light the
 // surroundings send back; every higher order is the geometric series
-// L_2 / ( 1 - f_ms ). One thread per texel: the job runs only when a dial of
-// the model changes.
+// L_2 / ( 1 - f_ms ). One workgroup per texel, one thread per direction.
 @insertpiece( SetCrossPlatformSettings )
 @insertpiece( DeclUavCrossPlatform )
 
@@ -38,12 +37,19 @@ layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
 		local_size_z = @value( threads_per_group_z ) ) in;
 
+// ONE WORKGROUP PER TEXEL, ONE THREAD PER DIRECTION (Hillaire's own layout):
+// the 64 directions' integrals run side by side and are summed in shared
+// memory — the serial form, one thread walking all 64, measured 0.44 ms on this
+// GPU against the whole atmosphere's 0.3 ms budget (a latency-bound 1024
+// threads of 1280 steps each).
+shared vec3 jahMsL[64];
+shared vec3 jahMsF[64];
+
 void main()
 {
-	const ivec2 px = ivec2( gl_GlobalInvocationID.xy );
+	const ivec2 px = ivec2( gl_WorkGroupID.xy );
 	const ivec2 size = imageSize( multiScatterLut );
-	if( px.x >= size.x || px.y >= size.y )
-		return;
+	const uint lane = gl_LocalInvocationIndex;
 	const float u = clamp( jahAtmoFromSubUv( ( float( px.x ) + 0.5 ) / float( size.x ), float( size.x ) ), 0.0, 1.0 );
 	const float v = clamp( jahAtmoFromSubUv( ( float( px.y ) + 0.5 ) / float( size.y ), float( size.y ) ), 0.0, 1.0 );
 	const float muS = u * 2.0 - 1.0;
@@ -54,60 +60,67 @@ void main()
 
 	const int kSqrt = 8;
 	const int kSteps = 20;
-	vec3 sumL = vec3( 0.0 );
-	vec3 sumF = vec3( 0.0 );
-	for( int j = 0; j < kSqrt; ++j )
+	// this thread's direction: uniform over the sphere, phi even, cos(theta) even
+	const int i = int( lane ) % kSqrt;
+	const int j = int( lane ) / kSqrt;
+	const float phi = 2.0 * JAH_ATMO_PI * ( float( i ) + 0.5 ) / float( kSqrt );
+	const float cosT = 1.0 - 2.0 * ( float( j ) + 0.5 ) / float( kSqrt );
+	const float sinT = sqrt( max( 1.0 - cosT * cosT, 0.0 ) );
+	const vec3 rd = vec3( sinT * cos( phi ), cosT, sinT * sin( phi ) );
+	const float tBottom = jahAtmoRaySphere( ro, rd, atmoPlanet.x );
+	const float tTop = jahAtmoRaySphere( ro, rd, atmoPlanet.y );
+	const bool hitsGround = tBottom > 0.0;
+	const float tMax = hitsGround ? tBottom : max( tTop, 0.0 );
+	const float dt = tMax / float( kSteps );
+	vec3 throughput = vec3( 1.0 );
+	vec3 L = vec3( 0.0 );
+	vec3 F = vec3( 0.0 );
+	for( int s = 0; s < kSteps; ++s )
 	{
-		for( int i = 0; i < kSqrt; ++i )
-		{
-			// uniform over the sphere: phi even, cos(theta) even
-			const float phi = 2.0 * JAH_ATMO_PI * ( float( i ) + 0.5 ) / float( kSqrt );
-			const float cosT = 1.0 - 2.0 * ( float( j ) + 0.5 ) / float( kSqrt );
-			const float sinT = sqrt( max( 1.0 - cosT * cosT, 0.0 ) );
-			const vec3 rd = vec3( sinT * cos( phi ), cosT, sinT * sin( phi ) );
-			const float tBottom = jahAtmoRaySphere( ro, rd, atmoPlanet.x );
-			const float tTop = jahAtmoRaySphere( ro, rd, atmoPlanet.y );
-			const bool hitsGround = tBottom > 0.0;
-			const float tMax = hitsGround ? tBottom : max( tTop, 0.0 );
-			const float dt = tMax / float( kSteps );
-			vec3 throughput = vec3( 1.0 );
-			vec3 L = vec3( 0.0 );
-			vec3 F = vec3( 0.0 );
-			for( int s = 0; s < kSteps; ++s )
-			{
-				const vec3 p = ro + rd * ( ( float( s ) + 0.5 ) * dt );
-				const float pr = length( p );
-				const vec3 up = p / pr;
-				vec3 scatR, ext;
-				float scatM;
-				jahAtmoMedium( pr - atmoPlanet.x, atmoRayleigh, atmoMie, atmoOzone, scatR, scatM, ext );
-				const vec3 scat = scatR + vec3( scatM );
-				const vec3 stepT = exp( -ext * dt );
-				const float sunCos = dot( up, toSun );
-				const float shadow = jahAtmoRaySphere( p, toSun, atmoPlanet.x - 1e-3 ) >= 0.0 ? 0.0 : 1.0;
-				const vec3 S = scat * isotropic * shadow * jahTransmittance( pr, sunCos );
-				const vec3 safeExt = max( ext, vec3( 1e-9 ) );
-				L += throughput * ( S - S * stepT ) / safeExt;
-				F += throughput * ( scat - scat * stepT ) / safeExt;
-				throughput *= stepT;
-			}
-			if( hitsGround )
-			{
-				const vec3 p = ro + rd * tBottom;
-				const vec3 up = normalize( p );
-				const float sunCos = dot( up, toSun );
-				L += throughput * jahTransmittance( atmoPlanet.x, sunCos ) * max( sunCos, 0.0 ) *
-					 atmoGround.rgb / JAH_ATMO_PI;
-			}
-			sumL += L;
-			sumF += F;
-		}
+		const vec3 p = ro + rd * ( ( float( s ) + 0.5 ) * dt );
+		const float pr = length( p );
+		const vec3 up = p / pr;
+		vec3 scatR, ext;
+		float scatM;
+		jahAtmoMedium( pr - atmoPlanet.x, atmoRayleigh, atmoMie, atmoOzone, scatR, scatM, ext );
+		const vec3 scat = scatR + vec3( scatM );
+		const vec3 stepT = exp( -ext * dt );
+		const float sunCos = dot( up, toSun );
+		const float shadow = jahAtmoRaySphere( p, toSun, atmoPlanet.x - 1e-3 ) >= 0.0 ? 0.0 : 1.0;
+		const vec3 S = scat * isotropic * shadow * jahTransmittance( pr, sunCos );
+		const vec3 safeExt = max( ext, vec3( 1e-9 ) );
+		L += throughput * ( S - S * stepT ) / safeExt;
+		F += throughput * ( scat - scat * stepT ) / safeExt;
+		throughput *= stepT;
 	}
-	// each direction stands for 4 pi / 64 of the sphere, and the isotropic
-	// phase of the NEXT event is 1 / 4 pi: the two cancel into a plain mean
-	const float n = float( kSqrt * kSqrt );
-	const vec3 L2 = sumL / n;
-	const vec3 fms = sumF / n;
-	const vec3 psi = L2 / max( vec3( 1.0 ) - fms, vec3( 1e-4 ) );
-	imageStore( multiScatterLut, px, vec4( psi, 1.0 ) );
+	if( hitsGround )
+	{
+		const vec3 p = ro + rd * tBottom;
+		const vec3 up = normalize( p );
+		const float sunCos = dot( up, toSun );
+		L += throughput * jahTransmittance( atmoPlanet.x, sunCos ) * max( sunCos, 0.0 ) *
+			 atmoGround.rgb / JAH_ATMO_PI;
+	}
+	jahMsL[lane] = L;
+	jahMsF[lane] = F;
+	barrier();
+	// the sum, halving
+	for( uint stride = 32u; stride > 0u; stride >>= 1u )
+	{
+		if( lane < stride )
+		{
+			jahMsL[lane] += jahMsL[lane + stride];
+			jahMsF[lane] += jahMsF[lane + stride];
+		}
+		barrier();
+	}
+	if( lane == 0u && px.x < size.x && px.y < size.y )
+	{
+		// each direction stands for 4 pi / 64 of the sphere, and the isotropic
+		// phase of the NEXT event is 1 / 4 pi: the two cancel into a plain mean
+		const vec3 L2 = jahMsL[0] / 64.0;
+		const vec3 fms = jahMsF[0] / 64.0;
+		const vec3 psi = L2 / max( vec3( 1.0 ) - fms, vec3( 1e-4 ) );
+		imageStore( multiScatterLut, px, vec4( psi, 1.0 ) );
+	}
 }
