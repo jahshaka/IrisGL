@@ -37,3 +37,16 @@ at `-Wall -Wextra`), and the mesh bake (`import/meshbake.cpp`, `clusterdag::buil
 
 **Vendored, never edit** — the rule that covers `thirdparty/{assimp,bullet3,zip,ogre-next,meshoptimizer}`
 covers this copy too. A change we need becomes a patch beside it, never an edit in place.
+
+**Our patch stack** (since CLUSTER-LOCK-3, 2026-09-29): `thirdparty/meshoptimizer-clusterlod-patches/*.patch`,
+applied in order at every configure by `irisgl/CMakeLists.txt` to a COPY of this header in the build tree
+(`<build>/irisgl/vendor-patched/meshoptimizer-clusterlod/clusterlod.h`, which is what the bake's two TUs include);
+a patch that stops applying is a configure error. Each patch is in the bake's producer hash. A re-copy of this
+file re-applies the stack or refuses loudly.
+
+| Patch | What |
+|---|---|
+| `0002-terminal-group-border-stays-locked.patch` | a terminal (stuck) group's border stays locked at every later level — an upstream defect in v1.2 (`lockBoundary` sees only the current level's groups; 16 open edges on round-bar-40m), an upstream PR candidate |
+| `0003-per-group-verify-hook.patch` | `clodMesh::verify_group` — the caller verifies every simplified group and may re-simplify THAT group with added locks, never through the sloppy fallback; a re-simplification stuck under its locks makes the group terminal (the bake's displacement lock is per group; one `vertex_lock` bound every level up to the root) |
+
+(0001 was CLUSTER-LOCK-2's per-level lock prototype, never landed; the number is retired, never reused.)

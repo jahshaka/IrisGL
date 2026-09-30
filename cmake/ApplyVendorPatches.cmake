@@ -7,7 +7,7 @@
 #
 # Run it directly (any platform, no shell needed):
 #
-#   cmake -DSRC=<vendored source dir> -DPATCHES=<patch dir> \
+#   cmake -DSRC=<vendored source dir> -DPATCHES=<patch dir> [-DMARKER=<file>] \
 #         -P irisgl/cmake/ApplyVendorPatches.cmake
 #
 # or let the build do it — irisgl/CMakeLists.txt invokes it at configure time,
@@ -55,8 +55,14 @@ endif()
 get_filename_component(SRC "${SRC}" ABSOLUTE)
 get_filename_component(PATCHES "${PATCHES}" ABSOLUTE)
 get_filename_component(_name "${SRC}" NAME)
+# MARKER: the file whose presence says the source is there (a submodule's
+# CMakeLists.txt by default; clusterlod.h for the header copy the build patches,
+# irisgl/CMakeLists.txt, CLUSTER-LOCK-3).
+if(NOT DEFINED MARKER)
+    set(MARKER CMakeLists.txt)
+endif()
 
-if(NOT EXISTS "${SRC}/CMakeLists.txt")
+if(NOT EXISTS "${SRC}/${MARKER}")
     message(FATAL_ERROR
         "ApplyVendorPatches: no source at ${SRC}\n"
         "  run: git submodule update --init ${_name}")

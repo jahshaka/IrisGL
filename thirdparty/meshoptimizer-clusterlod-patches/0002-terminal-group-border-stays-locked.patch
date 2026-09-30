@@ -1,0 +1,54 @@
+From: jahshaka <jahshaka@gmail.com>
+Subject: [PATCH] clusterlod: a terminal group's border stays locked at every later level
+
+CLUSTER-LOCK-2 (found), CLUSTER-LOCK-3 (landed), 2026-09-29. An upstream
+defect in demo/clusterlod.h v1.2 (an upstream PR candidate).
+A group whose simplification gets stuck is output as TERMINAL and its
+clusters are never merged again. lockBoundary locks a position only when two
+groups of the CURRENT level share it, so from the next level on the border
+between a terminal group's clusters and a neighbour that keeps simplifying is
+an open border of the neighbour's merged mesh: the simplifier may slide it,
+and the cut opens between the terminal clusters and the neighbour's coarser
+clusters. Measured (atom.cluster_cut, round-bar-40m, once the bake's
+displacement lock stopped binding every level): 16 open edges at 4 of the 64
+thresholds, all on a terminal group's border.
+
+The fix: every position of a terminal group's clusters is remembered and
+locked at every later level. Only positions shared with clusters that are
+still pending can matter, so this moves nothing else.
+---
+--- a/clusterlod.h
++++ b/clusterlod.h
+@@ -608,6 +608,10 @@
+ 
+ 	std::vector<unsigned char> locks(mesh.vertex_count);
+ 
++	// positions of clusters in abandoned (terminal) groups; these clusters stay in the output as they are, so their border with
++	// clusters that keep simplifying must stay fixed at every later level (lockBoundary only sees the groups of the current level)
++	std::vector<unsigned char> stuck(mesh.vertex_count);
++
+ 	// for cluster connectivity, we need a position-only remap that maps vertices with the same position to the same index
+ 	std::vector<unsigned int> remap(mesh.vertex_count);
+ 	meshopt_generatePositionRemap(&remap[0], mesh.vertex_positions, mesh.vertex_count, mesh.vertex_positions_stride);
+@@ -650,6 +654,9 @@
+ 		// mark boundaries between groups with a lock bit to avoid gaps in simplified result
+ 		lockBoundary(locks, groups, clusters, remap, mesh.vertex_lock);
+ 
++		for (size_t i = 0; i < locks.size(); ++i)
++			locks[i] |= stuck[remap[i]];
++
+ 		// every group needs to be simplified now
+ 		for (size_t i = 0; i < groups.size(); ++i)
+ 		{
+@@ -670,6 +677,11 @@
+ 			{
+ 				bounds.error = FLT_MAX; // terminal group, won't simplify further
+ 				outputGroup(config, mesh, clusters, groups[i], bounds, depth, output_context, output_callback);
++
++				for (size_t j = 0; j < groups[i].size(); ++j)
++					for (unsigned int v : clusters[groups[i][j]].indices)
++						stuck[remap[v]] = 1;
++
+ 				continue; // simplification is stuck; abandon the merge
+ 			}
+ 
