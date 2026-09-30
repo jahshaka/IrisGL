@@ -26,15 +26,18 @@ doubling each time). One that gets STUCK makes the group terminal exactly as a
 stuck first result does (its clusters stay as they are; patch 0002 keeps their
 border): a group that cannot simplify within the bound its caller holds it to
 is not simplified (measured: a 109-triangle pile of 33 debris islands on the
-stand-in). The callback bounds the attempts. Unset keeps upstream's behaviour
-exactly. Upstream candidate: two fields on clodMesh and two static helpers.
+stand-in). THE LIBRARY BOUNDS THE ATTEMPTS: at most CLOD_VERIFY_MAX_RETRIES (4,
+overridable at compile time) re-simplifications per group; the result after the
+last is still verified (the caller always sees the result the group keeps) and a
+lock array returned for it is ignored — a callback that never returns NULL cannot
+loop. Unset keeps upstream's behaviour exactly. Upstream candidate: two fields on clodMesh and two static helpers.
 
 Applied at configure (irisgl/CMakeLists.txt) to a copy of the vendored header
 in the build tree; the vendored file itself is never edited.
 ---
 --- a/clusterlod.h
 +++ b/clusterlod.h
-@@ -83,6 +83,17 @@
+@@ -83,6 +83,18 @@
  	// input vertex locks; allows to preserve additional seams (when not using attribute_protect_mask) or lock vertices via meshopt_SimplifyVertex_* flags
  	const unsigned char* vertex_lock;
  
@@ -45,14 +48,15 @@ in the build tree; the vendored file itself is never edited.
 +	// with these locks added to the ones the group already has; the array must stay valid until the next call
 +	// a re-simplification honours the added locks: it never takes the sloppy fallback (which snaps every unlocked vertex to a grid
 +	// and can drop a locked vertex with its triangles); one that gets stuck makes the group terminal, like a stuck first result
-+	// the callback bounds the number of attempts (it must eventually return NULL)
++	// at most CLOD_VERIFY_MAX_RETRIES re-simplifications per group: the result after the last one is verified too (so the last call
++	// always saw the result the group keeps), and a lock array returned for it is ignored
 +	const unsigned char* (*verify_group)(void* context, int depth, int attempt, const unsigned int* group_indices, size_t group_index_count, const unsigned int* simplified_indices, size_t simplified_index_count, float error);
 +	void* verify_group_context;
 +
  	// attribute weights for attribute-aware simplification; maps to meshopt_simplifyWithAttributes parameters
  	const float* attribute_weights;
  	size_t attribute_count;
-@@ -518,6 +529,47 @@
+@@ -518,6 +530,51 @@
  	return lod;
  }
  
@@ -60,6 +64,10 @@ in the build tree; the vendored file itself is never edited.
 +{
 +	return std::max(merged_error * config.simplify_error_merge_previous, error) + error * config.simplify_error_merge_additive;
 +}
++
++#ifndef CLOD_VERIFY_MAX_RETRIES
++#define CLOD_VERIFY_MAX_RETRIES 4
++#endif
 +
 +static void verifyGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& merged, std::vector<unsigned char>& locks, size_t target_size, float merged_error, int depth, std::vector<unsigned int>& simplified, float& error)
 +{
@@ -74,7 +82,7 @@ in the build tree; the vendored file itself is never edited.
 +	for (int attempt = 0;; ++attempt)
 +	{
 +		const unsigned char* extra = mesh.verify_group(mesh.verify_group_context, depth, attempt, &merged[0], merged.size(), simplified.data(), simplified.size(), groupError(config, merged_error, error));
-+		if (!extra)
++		if (!extra || attempt >= CLOD_VERIFY_MAX_RETRIES)
 +			break;
 +
 +		for (size_t k = 0; k < merged.size(); ++k)
@@ -100,7 +108,7 @@ in the build tree; the vendored file itself is never edited.
  static int outputGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<Cluster>& clusters, const std::vector<int>& group, const clodBounds& simplified, int depth, void* output_context, clodOutput output_callback)
  {
  	std::vector<clodCluster> group_clusters(group.size());
-@@ -673,6 +725,11 @@
+@@ -673,6 +730,11 @@
  
  			float error = 0.f;
  			std::vector<unsigned int> simplified = simplify(config, mesh, merged, locks, target_size, &error);

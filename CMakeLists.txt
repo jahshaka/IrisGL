@@ -223,8 +223,8 @@ if(NOT _clod_patch_result EQUAL 0)
 endif()
 file(COPY_FILE "${_clod_stage}/clusterlod.h"
      "${_clod_patched_root}/meshoptimizer-clusterlod/clusterlod.h" ONLY_IF_DIFFERENT)
-file(GLOB _clod_patches RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-     "${_clod_patch_dir}/*.patch")
+file(GLOB _clod_patches CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+     "${_clod_patch_dir}/*.patch")   # CONFIGURE_DEPENDS: a new patch re-configures (applied AND hashed)
 list(SORT _clod_patches)
 
 set(SRCS

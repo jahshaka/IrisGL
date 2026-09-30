@@ -1491,7 +1491,10 @@ public:
     /// walk returns the first distance at or below it, which is NOT the nearest
     /// — only for a caller taking a MAXIMUM of distances whose running value is
     /// that threshold, where no such answer can move the maximum (the cluster
-    /// DAG's area terms). Never with a point, a normal or a triangle asked for.
+    /// DAG's area terms). Never with a point or a normal asked for; a triangle asked
+    /// for is written only when the walk returns the nearest (a return above the
+    /// stop) — at or below it the triangle is whichever was nearest so far and
+    /// callers must not read it (`nearestOn`).
     float closest(Query &query, const Vec3 &p, Vec3 *pointOut = nullptr, Vec3 *normalOut = nullptr,
                   unsigned *triangleOut = nullptr, float stopAtOrBelow = -1.0f) const
     {
@@ -3980,7 +3983,11 @@ float coplanarCover(const float *positions, int posComps, const surface::Triangl
 /// answers the nearest distance at p and the corners of the triangle it lies on — or, with
 /// st >= 0, any value <= st as soon as something is within st (the triangle then unset).
 /// Returns a value <= `stop` when the facet's maximum is at most `stop`; NaN when more
-/// than `budget` pieces would be walked.
+/// than `budget` pieces would be walked. (The lock decides on this UPPER bound too, not on
+/// the largest distance found: the measurement stores the upper bound, so a lock that
+/// read the lower one lets a group store up to the tolerance past its bound — measured,
+/// CLUSTER-LOCK-3's audit round: the hemisphere's depth-2 group stored 2.004x its error,
+/// and no retry went away on the temple: 271 -> 277.)
 constexpr int kFacetMaxLevels = 10;
 constexpr size_t kFacetQuickPieces = 64;   ///< the measurement's first try before the flat-facet cover
 /// The nearest distance from p to a grid's soup, and the corners of the triangle it lies on.
@@ -5438,13 +5445,13 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards)
         if (st.clusters > 0)
             irisLog(QStringLiteral("mesh bake: cluster DAG %1 (mesh %2): %3 clusters, %4 groups, depth %5; "
                                    "fixes: %6 monotone, %7 sphere; %8 ms (clodBuild %9 incl. verify %10, measure %11); "
-                                   "lock: %12 group retries, %13 unconverged")
+                                   "lock: %12 group retries, %13 unconverged, %14 made terminal")
                         .arg(QFileInfo(filePath).fileName()).arg(i).arg(st.clusters)
                         .arg(st.groups).arg(st.depth).arg(st.monotoneFixes)
                         .arg(st.sphereFixes)
                         .arg(st.buildMs + st.measureMs, 0, 'f', 1)
                         .arg(st.buildMs, 0, 'f', 1).arg(st.verifyMs, 0, 'f', 1).arg(st.measureMs, 0, 'f', 1)
-                        .arg(st.groupRetries).arg(st.groupsUnconverged));
+                        .arg(st.groupRetries).arg(st.groupsUnconverged).arg(st.groupsMadeTerminal));
     }
 }
 
