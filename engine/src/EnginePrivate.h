@@ -3272,6 +3272,9 @@ public:
     /// The scene's driving camera's world height (the GI driver's rule), once a
     /// frame: the atmosphere's observer altitude, banded (Atmosphere.h).
     void noteAtmosphereObserver(float cameraY);
+    /// The observer altitude (km) the environment was last re-captured for
+    /// because the observer moved (noteAtmosphereObserver: past an octave).
+    float mAtmoCapturedObserverKm = 0.05f;
 
     /// Ogre's OWN sky (SceneManager::setSky): a full-screen Rectangle2D at the far
     /// plane whose camera-direction shader samples an equirect or cube texture.

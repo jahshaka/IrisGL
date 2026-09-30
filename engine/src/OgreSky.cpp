@@ -516,11 +516,26 @@ bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
 // this scene, once a frame): the observer the sky view and the aerial volume are
 // built for. A band change rebuilds them and re-captures the environment the
 // Sky Light reads; the cloud sheet's constants name the observer too.
+//
+// THE ENVIRONMENT IS RE-CAPTURED ONLY FOR AN OBSERVER THAT HAS REALLY CLIMBED:
+// past an octave of altitude, counted from 50 m (every observer under 50 m is
+// the same environment). A capture is a real cost downstream — a new cube, a
+// GGX convolution, the SH, every datablock re-bound to the new cube and the
+// hit decode's twins re-made for it (measured: a VR head at 2 m against the
+// editor's camera at 5 m re-captured on every session begin and compiled eight
+// permutations the warm-up had not seen, vr.warmup) — and the sky a reflection
+// or the ambient sees differs by nothing a picture shows under 50 m (a horizon
+// dip of 0.23 degrees at 50 m). The drawn sky and the aerial volume follow the
+// quarter-octave band from 2 m.
 void OgreScene::noteAtmosphereObserver(float cameraY) {
     if (!mAtmosphere || !mAtmoSkyOn) return;
     JAH_TRY {
         if (mAtmosphere->setObserverAltitude(std::max(0.0f, cameraY))) {
-            requestSkyCapture();
+            const float km = std::max(mAtmosphere->observerKm(), 0.05f);
+            if (std::fabs(std::log2(km / mAtmoCapturedObserverKm)) >= 1.0f) {
+                mAtmoCapturedObserverKm = km;
+                requestSkyCapture();
+            }
             bindCloudAir();
         }
     } JAH_CATCH(mError, );
