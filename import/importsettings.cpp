@@ -114,6 +114,27 @@ bool ImportSettings::unitFromName(const QString &name, Units *out)
     return false;
 }
 
+const char *ImportSettings::faceCullingName(FaceCullingImport mode)
+{
+    switch (mode) {
+    case FaceCullingImport::File:   return "file";
+    case FaceCullingImport::Single: return "single";
+    case FaceCullingImport::Double: return "double";
+    }
+    return "file";
+}
+
+bool ImportSettings::faceCullingFromName(const QString &name, FaceCullingImport *out)
+{
+    const QString n = name.trimmed().toLower();
+    for (FaceCullingImport m : { FaceCullingImport::File, FaceCullingImport::Single, FaceCullingImport::Double })
+        if (n == QLatin1String(faceCullingName(m))) {
+            if (out) *out = m;
+            return true;
+        }
+    return false;
+}
+
 bool ImportSettings::axisFromName(const QString &name, Vec3 *out)
 {
     const QString n = name.trimmed().toUpper();
@@ -148,7 +169,8 @@ ImportSettings ImportSettings::fromJson(const QJsonObject &record, QString *erro
                                        QStringLiteral("rotate"),  QStringLiteral("translate"),
                                        QStringLiteral("skeleton"),QStringLiteral("clips"),
                                        QStringLiteral("materials"),
-                                       QStringLiteral("maxCards") };
+                                       QStringLiteral("maxCards"),
+                                       QStringLiteral("faceCulling") };
     const auto refuse = [&](const QString &why) {
         if (errorOut && errorOut->isEmpty()) *errorOut = why;
         return ImportSettings();
@@ -255,6 +277,13 @@ ImportSettings ImportSettings::fromJson(const QJsonObject &record, QString *erro
         out.maxCards = int(asked);
     }
 
+    if (record.contains(QStringLiteral("faceCulling"))) {
+        const QJsonValue v = record.value(QStringLiteral("faceCulling"));
+        if (!v.isString() || !faceCullingFromName(v.toString(), &out.faceCulling))
+            return refuse(QStringLiteral("unknown faceCulling '%1' (file, single, double)")
+                              .arg(v.toVariant().toString()));
+    }
+
     if (record.contains(QStringLiteral("version"))) {
         const int version = record.value(QStringLiteral("version")).toInt(kVersion);
         if (version != kVersion)
@@ -291,6 +320,7 @@ QJsonObject ImportSettings::toJson() const
     out[QStringLiteral("materials")] = materials == MaterialMode::None
                                            ? QStringLiteral("none") : QStringLiteral("import");
     out[QStringLiteral("maxCards")] = maxCards;
+    out[QStringLiteral("faceCulling")] = QLatin1String(faceCullingName(faceCulling));
     return out;
 }
 
@@ -312,6 +342,9 @@ QByteArray ImportSettings::canonicalJson() const
     } else {
         out += clips ? "true" : "false";
     }
+    out += ",\"faceCulling\":\"";
+    out += faceCullingName(faceCulling);
+    out += '"';
     out += ",\"materials\":";
     out += materials == MaterialMode::None ? "\"none\"" : "\"import\"";
     out += ",\"maxCards\":" + QByteArray::number(maxCards);
@@ -396,6 +429,7 @@ ImportTransform ImportSettings::transform(double declaredUnitScale) const
     out.clipNames = clipNames;
     out.materials = materials == MaterialMode::Import;
     out.maxCards = maxCards;
+    out.faceCulling = faceCulling;
     return out;
 }
 
