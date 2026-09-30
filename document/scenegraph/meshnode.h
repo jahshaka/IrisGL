@@ -63,14 +63,15 @@ public:
 
     FaceCullingMode faceCullingMode;
 
-    /// THE SCENE'S DEFAULT FLOOR (owner, 2026-09-12). Marks the node Studio's
-    /// default-floor factory built — the one whose OWN default material a
-    /// "reset material" restores (Studio services/defaultfloor.h). A document
-    /// flag, serialized as `defaultFloor` and reflected as the "defaultFloor"
-    /// property, so it survives save/reopen and archives and is never
-    /// inferred from a name or a mesh path (`isBuiltIn` cannot carry it: it is
-    /// set on many runtime-only nodes and is not serialized). NOT copied by
-    /// createDuplicate: a scene has one default floor, and a copy is a mesh.
+    /// A TEMPLATE FLOOR (owner, 2026-09-12; WORLD-MODEL-1). Marks the floors
+    /// Studio's scene templates built — ordinary nodes whose OWN default
+    /// material a "reset material" restores (Studio
+    /// services/defaultfloormaterial.h) and which the Player's "hide the
+    /// floor" setting hides. A document flag, serialized as `defaultFloor` and
+    /// reflected as the "defaultFloor" property, so it survives save/reopen
+    /// and archives and is never inferred from a name or a mesh path
+    /// (`isBuiltIn` cannot carry it: it is set on many runtime-only nodes and
+    /// is not serialized). NOT copied by createDuplicate: a copy is a mesh.
     bool defaultFloor = false;
 
     // For animated meshes, the rootBone's transform is what will be used as its transform

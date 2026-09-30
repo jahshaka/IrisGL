@@ -357,7 +357,7 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     if (rq != kOpaqueItemQueue && rq != kAtomRenderQueue && rq != kRefractiveRenderQueue)
         return AtomRoute::Stock;
     // THE ID PASS DRAWS THE WORLD CHANNELS ONLY (its cull asks for kGpuVisible): a
-    // backdrop (the ground's 4 km horizon quad) or a helper draws in the views that
+    // backdrop (the editor's 4 km Ground plane quad) or a helper draws in the views that
     // show it through PBS, or the split would skip it where nothing draws it.
     if (!(flags & kGpuVisible)) return AtomRoute::NotWorld;
     const Ogre::HlmsDatablock *db = item->getSubItem(0)->getDatablock();

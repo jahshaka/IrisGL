@@ -460,7 +460,7 @@ public:
     /// shells carry `scene->outlinePrimaryColor` — brighter — while the rest
     /// carry `scene->outlineColor`. It is passed EXPLICITLY rather than read
     /// off the front of `nodes` because the viewport filters the set before it
-    /// gets here (the World root and the built-in ground never outline), so
+    /// gets here (the World root never outlines), so
     /// "first in the list" and "the primary" are not the same node.
     ///
     /// The two colours are used only when the set has MORE THAN ONE member: a
@@ -635,8 +635,7 @@ public:
     /// the models off and leaves the wands. Set it before a session starts.
     void setVrProxyModels(const QString &leftPath, const QString &rightPath);
 
-    /// HIDE THE APP'S OWN DEFAULT FLOOR (and the horizon that extends it) in
-    /// the views of whoever asked — PLAYER-FLOOR-1, the project setting
+    /// HIDE THE TEMPLATE FLOORS in the views of whoever asked — PLAYER-FLOOR-1, the project setting
     /// `iris::Scene::playerHidesFloor`, owner 2026-09-18.
     ///
     /// The HOST decides when: the Player switches it on while it owns the
@@ -644,15 +643,52 @@ public:
     /// AND the Player is showing". Nothing in the DOCUMENT changes — the floor
     /// node keeps its own visibility, its material, its physics and its place
     /// in the outliner — and the editor, which never asks for this, is
-    /// untouched. Only the floor the app MADE (`MeshNode::defaultFloor`) and
-    /// the mirror's own horizon plane are affected; an authored ground is the
-    /// scene's own content and is never hidden by a setting.
+    /// untouched. Only the floors the app MADE (`MeshNode::defaultFloor`) are
+    /// affected; an authored ground is the scene's own content and is never
+    /// hidden by a setting.
     ///
     /// Idempotent, and cheap to flip: it is one more AND term in the node
     /// walk's effective-visibility rule, so the change is pushed by the same
     /// latch that pushes a user's hide (one setNodeVisibleUnder, on change).
     void setHideDefaultFloor(bool hidden);
     bool hideDefaultFloor() const { return mHideDefaultFloor; }
+
+    /// THE GROUND PLANE WIDGET (WORLD-MODEL-1, owner 2026-09-30). An infinite
+    /// matte ground the EDITOR draws just under y = 0 so a scene with no floor
+    /// still stands on something — a widget like the grid, not geometry: the
+    /// document never hears of it (no node, no outliner row, nothing in
+    /// scene.bounds, nothing saved).
+    ///
+    /// ONE mirror-owned quad, 4 km on a side (twice the editor camera's far
+    /// clip in every direction, so its edge is never in view), a BACKDROP in
+    /// the engine's sense (Scene::setNodeBackdrop): every view draws it, and
+    /// it is out of every capture — no shadow caster or receiver fit, no GI
+    /// geometry, no reflection-probe face, no planar mirror, no ray query, and
+    /// not on Atom (the id pass draws the world channels only: it counts under
+    /// AtomDrawStatus::notWorld). It sits kGroundPlaneSink under y = 0 so a
+    /// real surface AT y = 0 — the Basic template's floor top — always wins the
+    /// depth test where both are drawn.
+    ///
+    /// Its material is the HOST's (setGroundPlaneMaterial): Studio hands it
+    /// the default floor material, so the plane and a template floor wear the
+    /// same checker; its UVs are a FIXED 1/100 per metre — the density of a
+    /// template floor's top face — so the two register where they meet.
+    ///
+    /// The host owns WHEN: the editor pushes its per-scene View Options row,
+    /// the Assets module turns it on, the Player turns it off. A hide keeps
+    /// the quad and its material (a show is one visibility flip).
+    void setGroundPlane(bool visible);
+    bool groundPlane() const { return mGroundPlaneVisible; }
+    /// The height the plane stands at (its top; default 0 — the editor's). The
+    /// Assets module's preview stands its subjects on a ground 5 m down.
+    void setGroundPlaneHeight(float y);
+    float groundPlaneHeight() const { return mGroundPlaneHeight; }
+    /// The material the plane wears (a document material the mirror converts
+    /// like any other and holds for the plane's life). Null: nothing is drawn.
+    void setGroundPlaneMaterial(const iris::MaterialPtr &material);
+    /// The plane's engine node, 0 before it has been drawn (a test reads its
+    /// flags through Scene::nodeBackdrop).
+    jahshaka::engine::NodeId groundPlaneNode() const { return mGroundPlaneNode; }
 
 private:
     /// applyEnvironment's per-view half, shared with applyViewEnvironment.
@@ -1001,36 +1037,11 @@ private:
     jahshaka::engine::TextureId iconTextureFor(const QString &path);
     void syncHighlight();
     void syncGrid();
-    /// THE GROUND'S HORIZON (owner, 2026-09-13: "should the default ground not
-    /// also be infinite in the Grand Showroom 2? It seems cut off"). A single
-    /// mirror-owned plane, far beyond anything a user flies to, drawn under the
-    /// scene's DEFAULT FLOOR in the floor's own material so the checker simply
-    /// carries on to the horizon instead of ending in a square edge. It is an
-    /// EDITOR HELPER in the engine's sense (kHelperBit): drawn by the view and
-    /// by nothing else — no GI geometry, no voxel bounce, no reflection-probe
-    /// capture, no shadow map, no probe staleness — so it changes no cache at
-    /// all. IT IS A SEPARATE ITEM on the floor's datablock, so the price is
-    /// ONE MORE DRAW CALL and two triangles, plus the shading of the pixels it
-    /// fills (measured: +0.15 ms on the rig in the worst view, nothing when it
-    /// is occluded or at rest). The document never hears about it: no node, no
-    /// outliner row, nothing in scene.bounds and nothing saved.
-    ///
-    /// WHY NOT THE OBVIOUS TWO (measured, spikes/gf1-ground/):
-    ///   * a BIGGER default ground re-opens exactly what lane L3 closed. At 24x
-    ///     (2.4 km) the automatic lit volume of a default scene collapsed from
-    ///     +-23.1 m to +-1.8 m and the voxel size from 0.362 m to 0.029 m: the
-    ///     ground becomes such an outlier that giItemBounds' trim drops it, so
-    ///     the floor stops being lit and stops bouncing.
-    ///   * the ground FOLLOWING the camera moves still geometry the probes
-    ///     capture: the move raised `lastStaleReason = moved` on Showroom 2's
-    ///     32-probe grid (192 cube faces to re-capture) and, in a scene the
-    ///     ground dominates, drags the automatic volume along with it.
-    void syncGroundHorizon();
-    /// The default floor's own UV map, fitted over its ENGINE-SIDE vertices
-    /// (u = ux*x + uc, v = vz*z + vc) so the horizon's checker crosses the
-    /// floor's edge in phase — density, offset and sign alike, whatever the
-    /// importer did to them. False when the mesh has no usable linear map.
-    bool fitGroundUvMap(iris::Mesh *mesh, float &ux, float &uc, float &vz, float &vc);
+    /// Draws (or hides) the Ground plane widget — setGroundPlane's note.
+    void syncGroundPlane();
+    /// Drops the plane's node and mesh and forgets its material id (the
+    /// material cache it lives in is the caller's to sweep).
+    void releaseGroundPlane();
     void syncGiVolume();
     /// The two controller markers, positioned from the status last pushed
     /// (setVrProxies). Draws nothing at all while no session is running.
@@ -1708,23 +1719,18 @@ private:
     float mGridExtent = 100.0f;
     jahshaka::engine::Colour mGridMinorColour{ 0.46f, 0.48f, 0.52f, 0.28f };
     jahshaka::engine::Colour mGridMajorColour{ 0.62f, 0.64f, 0.68f, 0.50f };
-    // The ground's horizon (syncGroundHorizon). `mHorizonFloor` is the default
-    // floor this walk found — a RAW pointer, valid only for the walk that set
-    // it, which is why the sync reads it through mEntries and never dereferences
-    // it after the walk.
-    const iris::MeshNode *mHorizonFloor = nullptr;
-    /// The floor MESH the horizon's UV map was fitted from; a floor that
-    /// changes mesh rebuilds the quad against the new map.
-    const iris::Mesh *mHorizonMeshSource = nullptr;
-    jahshaka::engine::NodeId mHorizonNode = 0;
-    jahshaka::engine::MeshId mHorizonMesh = 0;
-    jahshaka::engine::MaterialId mHorizonMaterial = 0;
-    int mHorizonVisible = -1;
-    iris::Mat4 mHorizonWorld;     ///< the floor transform last pushed (nothing at rest)
-    /// The document's transform-write count when the horizon's world was last
-    /// resolved. Nothing wrote a transform => the floor cannot have moved, and
-    /// the derived-transform walk below can be skipped entirely.
-    unsigned long long mHorizonWrites = ~0ull;
+    // The Ground plane widget (syncGroundPlane).
+    bool mGroundPlaneVisible = false;
+    float mGroundPlaneHeight = 0.0f;
+    bool mGroundPlanePlaced = false;       ///< its transform matches mGroundPlaneHeight
+    iris::MaterialPtr mGroundPlaneDoc;     ///< the host's material, held for the plane's life
+    jahshaka::engine::NodeId mGroundPlaneNode = 0;
+    jahshaka::engine::MeshId mGroundPlaneMesh = 0;
+    /// The material and texture ids the plane holds. It is not an entry, so
+    /// reclaimUnused cannot see them through mEntries: they are pinned there.
+    jahshaka::engine::MaterialId mGroundPlaneMaterial = 0;
+    std::vector<jahshaka::engine::TextureId> mGroundPlaneTextures;
+    int mGroundPlaneShown = -1;
     // The GI volume overlay: one node per box, rebuilt only when the reported
     // bounds actually move (a GI rebuild is rare; this sync runs every frame).
     bool mGiVolumeVisible = false;

@@ -474,9 +474,9 @@ constexpr Ogre::uint32 kSunDiscBit     = 1u << 6;
 //
 // `setNodeHelper` says "no capture may see this": the probes, the shadow nodes
 // and the GI gathers all ask for kVisibleBit, so a helper drops out of every
-// one of them for free. That is exactly what the ground's 2 km HORIZON plane
-// wants (nothing that size may size a shadow atlas or a voxel volume) — but the
-// horizon is PART OF THE PICTURE, not editor furniture, and the moment one view
+// one of them for free. That is exactly what the editor's 4 km GROUND PLANE
+// widget wants (nothing that size may size a shadow atlas or a voxel volume) — but
+// the plane is PART OF THE PICTURE, not editor furniture, and the moment one view
 // of a scene has to hide the furniture (the Player page, which is a second View
 // on the editor's scene) "helper" can no longer answer both questions.
 //
@@ -1345,7 +1345,7 @@ struct ChainDesc {
     /// scene and two views draw it. It is a per-pass VISIBILITY MASK instead —
     /// every scene pass in this view's node gets kHelperBit taken out of its
     /// mask (chain::build) — which is free, needs no second scene and cannot
-    /// desynchronise. Backdrops (kBackdropBit: the ground's horizon) and the
+    /// desynchronise. Backdrops (kBackdropBit: the Ground plane widget) and the
     /// sun disc are NOT furniture and stay in every view.
     ///
     /// GRAPH SHAPE (sameShape): the mask lives on the pass DEFINITION, so a
@@ -4326,7 +4326,7 @@ private:
         /// must not capture. Carries kHelperBit instead of kVisibleBit.
         bool                      helper = false;
         /// A helper that is PART OF THE PICTURE (kBackdropBit's note): the
-        /// ground's horizon plane. Implies `helper` — same exclusion from every
+        /// editor's Ground plane widget. Implies `helper` — same exclusion from every
         /// capture — but carries kBackdropBit instead of kHelperBit, so a view
         /// that masks the editor's furniture out still draws it.
         bool                      backdrop = false;

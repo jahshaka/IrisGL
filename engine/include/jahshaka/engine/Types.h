@@ -4612,7 +4612,7 @@ struct AtomDrawStatus {
     bool     on = false;
     unsigned atomItems = 0;
     unsigned pbsItems = 0;
-    /// Shown, but in no world channel (a backdrop such as the ground's horizon
+    /// Shown, but in no world channel (a backdrop such as the Ground plane widget's
     /// quad, or a helper): the id pass draws the world channels only.
     unsigned notWorld = 0;
     unsigned notPbs = 0;
