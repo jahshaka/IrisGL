@@ -285,6 +285,10 @@ layout( set = 0, binding = 24 ) uniform sampler3D voxelPosN[kMaxCascades];
 // PHOTON-VOXEL-5: level 0's back side and the voxeliser's normal (the side a hit meets).
 layout( set = 0, binding = 29 ) uniform sampler3D voxelBack[kMaxCascades];
 layout( set = 0, binding = 30 ) uniform sampler3D voxelNrm[kMaxCascades];
+// MOVER-OCCLUSION-1: the lamps' direct term per cascade (its own chain), the share a
+// hit keeps when a mover occludes the rest (jah_rq_hit.glsl) — the set's last binding.
+layout( set = 0, binding = 38 ) uniform sampler3D voxelDirect[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
 
 /// The same ceiling JahSsrResolve_ps.glsl and JahSsrHistory_ps.glsl hold the
 /// SSR loop to, and for the same reason: about twelve stops above white, six

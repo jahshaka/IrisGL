@@ -100,11 +100,14 @@ constexpr unsigned kPlaceBindings = 6u;
 /// the voxelizer's normal (23, 24: PHOTON-VOXEL-5); then the card read's VIEW
 /// TERM's five (25-29, PHOTON-CARDS-5: jah_rq_card_bindings.glsl at
 /// JAH_CARD_VIEW_BINDING_BASE 25).
-constexpr unsigned kTraceBindings = 30u;
+constexpr unsigned kTraceBindings = 31u;
 constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kTraceCardViewBinding = 25u;
-static_assert(kTraceBindings == kTraceCardViewBinding + SurfaceCache::kViewLayers,
-              "the card read's view-term layers are the trace set's last bindings");
+/// ...and THE DIRECT TERM's volume per cascade (30, MOVER-OCCLUSION-1: jah_rq_hit.glsl).
+constexpr unsigned kTraceDirectBinding = 30u;
+static_assert(kTraceBindings == kTraceDirectBinding + 1u &&
+                  kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
+              "the direct volume follows the card read's view-term layers");
 constexpr unsigned kFilterBindings = 3u;
 /// The integrate's nine: params, records, normals, depth, the irradiance, the
 /// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean and
@@ -319,6 +322,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 27 ...ShadowRough
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 28 ...Albedo
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 29 ...Normal
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 voxelDirect[] (MOVER-OCCLUSION-1)
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
@@ -327,7 +331,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              1u, 1u, 1u, 1u,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u, 1u };
+                                             1u, 1u, 1u, 1u, 1u, kGatherMaxCascades };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -1354,8 +1358,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     VkDescriptorImageInfo atlasStore{};
     atlasStore.imageView = v.atlasView;
     atlasStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo volumes[10][kGatherMaxCascades] = {}, sky{};
-    for (int axis = 0; axis < 10; ++axis)
+    VkDescriptorImageInfo volumes[11][kGatherMaxCascades] = {}, sky{};
+    for (int axis = 0; axis < 11; ++axis)
         for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
             const unsigned src =
                 c < in.cascadeCount ? c : (in.cascadeCount ? in.cascadeCount - 1u : 0u);
@@ -1476,6 +1480,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             w[kTraceCardViewBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             w[kTraceCardViewBinding + i].pImageInfo = &cardViewImgs[i];
         }
+        w[kTraceDirectBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kTraceDirectBinding].descriptorCount = kGatherMaxCascades;
+        w[kTraceDirectBinding].pImageInfo = volumes[10];
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 
@@ -1594,7 +1601,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < in.cascadeCount; ++c)
-            for (int axis = 0; axis < 10; ++axis)
+            for (int axis = 0; axis < 11; ++axis)
                 if (in.voxel[c][axis])
                     solver.resolveTransition(trans, in.voxel[c][axis],
                                              Ogre::ResourceLayout::Texture,

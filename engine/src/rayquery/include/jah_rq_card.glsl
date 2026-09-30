@@ -151,6 +151,14 @@ JahCardPick jahCardPick( uint slot, vec3 hitPos, vec3 facingDir )
 /// indirect half marched yet, or when `footprint` (world metres) is wider than
 /// JAH_CARD_FOOTPRINT_TEXELS of that card's texels — the caller then reads the
 /// voxels. The atlas is read texel-exact (no mips until SC-2).
+#ifndef JAH_HIT_GATE_DECLARED
+#define JAH_HIT_GATE_DECLARED
+/// THE STORE'S NON-DIRECT SHARE AT A HIT, AS SEEN PAST THE MOVERS (MOVER-OCCLUSION-1):
+/// the fraction of the hit's hemisphere no mover blocks, set by jahHitRadianceSourced
+/// (jah_rq_hit_radiance.glsl) around the card or voxel read it makes; 1 everywhere else.
+float jahHitIndirectGate = 1.0;
+#endif
+
 vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, float footprint,
 					  out bool ok )
 {
@@ -177,8 +185,14 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, floa
 	const float alpha = JAH_CARD_SHADOW_ROUGH( pick.texel ).y / 1.001001 + 0.001;
 	const float r = sqrt( max( alpha, 0.0 ) );
 	const vec3 L = jahCardOctDecode( vec2( albedo.w, normal.w ) );
-	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ), JAH_CARD_INDIRECT( pick.texel ),
+	// MOVER-OCCLUSION-1: the card's INDIRECT half (the sky and the bounce its relight
+	// gathered) gated by the mover visibility above the hit; the direct half keeps its
+	// own traced mover term (cardMoverVis) and the emissive is the surface's own.
+	const vec3 indirect = JAH_CARD_INDIRECT( pick.texel );
+	const vec3 cut = ( 1.0 - jahHitIndirectGate ) * indirect;
+	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cut, indirect - cut,
 								JAH_CARD_EMISSIVE( pick.texel ), N, L, r, normalize( viewDir ) );
 }
 
 #endif   // JAH_RQ_CARD_GLSL
+
