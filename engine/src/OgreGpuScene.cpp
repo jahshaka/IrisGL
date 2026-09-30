@@ -763,7 +763,13 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     // THE RENDER-QUEUE SPLIT (ATOM S3-DRAW): the id pass draws it, the decode
     // shades it (atomRouteFor, OgreAtomDraw.cpp). Here, so the backstop compare
     // below re-composes a slot whose route moved with nothing else.
-    if (atomDrawOn() && atomRouteFor(n, f) == AtomRoute::Atom) f |= kGpuAtom;
+    if (atomDrawOn() && atomRouteFor(n, f) == AtomRoute::Atom) {
+        f |= kGpuAtom;
+        // ...BOTH FACES (ATOM-TWO-SIDED-1): the route admits a no-cull material only
+        // with a no-cull caster, so one flag says it for the id pass and the caster cut.
+        if (n.item->getSubItem(0)->getDatablock()->getMacroblock()->mCullMode == Ogre::CULL_NONE)
+            f |= kGpuTwoSided;
+    }
     return f;
 }
 

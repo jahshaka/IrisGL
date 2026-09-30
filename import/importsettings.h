@@ -85,6 +85,15 @@ constexpr int kDefaultMaxCards = 12;
 /// .jmb reader that refuses a blob above it. It had three copies for a day.
 constexpr int kMaxCardsCeiling = 64;
 
+/// FACE CULLING AT IMPORT (ATOM-TWO-SIDED-1): which faces an imported model's materials
+/// draw. `File` keeps the file's own flag (glTF `doubleSided`, AI_MATKEY_TWOSIDED — an
+/// exporter default as often as an authored choice: Blender writes it on every
+/// material); `Single` imports every material back-culled, `Double` every material
+/// two-sided. The override REPLACES the file's flag where the importer reads it
+/// (MaterialHelper::extractMaterialData). No automatic mode: a closure measurement
+/// could not tell a scan's open shell from a genuinely open mesh (the lane's evidence).
+enum class FaceCullingImport { File, Single, Double };
+
 struct ImportTransform
 {
     /// The user's uniform scale (> 0). Composed with the unit terms below.
@@ -139,6 +148,11 @@ struct ImportTransform
     /// different bakes.
     int maxCards = kDefaultMaxCards;
 
+    /// Which faces the materials draw (FaceCullingImport). A BUILD knob like
+    /// `maxCards`: the parse is the same parse, the material records differ — in the
+    /// bake key.
+    FaceCullingImport faceCulling = FaceCullingImport::File;
+
     /// True when `name` survives the clip filter.
     bool wantsClip(const QString &name) const;
 
@@ -151,7 +165,7 @@ struct ImportTransform
     bool buildsEverything() const
     {
         return skeleton && clips && clipNames.isEmpty() && materials
-               && maxCards == kDefaultMaxCards;
+               && maxCards == kDefaultMaxCards && faceCulling == FaceCullingImport::File;
     }
     bool isIdentity() const
     {
@@ -249,6 +263,10 @@ public:
     QStringList clipNames;                      ///< non-empty = only these clips
     MaterialMode materials = MaterialMode::Import;
     int maxCards = kDefaultMaxCards;            ///< surface cards per mesh (0..64); see ImportTransform::maxCards
+    FaceCullingImport faceCulling = FaceCullingImport::File;   ///< "file" | "single" | "double"
+
+    static const char *faceCullingName(FaceCullingImport mode);
+    static bool faceCullingFromName(const QString &name, FaceCullingImport *out);
 };
 
 }   // namespace iris

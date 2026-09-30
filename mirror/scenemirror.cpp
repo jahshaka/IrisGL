@@ -471,15 +471,9 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     for (MeshId &m : mWireMeshes) { if (m) mTarget->destroyMesh(m); m = 0; }
     // The grid is the engine's own quad (GRID-2): a disabled description hides it.
     mTarget->setGrid(jahshaka::engine::GridDesc());
-    // The ground's horizon: same discipline as the grid. Its MATERIAL is the
-    // floor's own and belongs to mMaterials, which is swept below — dropping it
-    // here would destroy the floor's material out from under the floor.
-    if (mHorizonNode) { mTarget->removeNode(mHorizonNode); mHorizonNode = 0; }
-    if (mHorizonMesh) { mTarget->destroyMesh(mHorizonMesh); mHorizonMesh = 0; }
-    mHorizonMeshSource = nullptr;
-    mHorizonMaterial = 0;
-    mHorizonVisible = -1;
-    mHorizonFloor = nullptr;
+    // The Ground plane widget: same discipline as the grid. Its MATERIAL and
+    // textures live in mMaterials/mTextures, which are torn down below.
+    releaseGroundPlane();
     // The GI volume overlay's two boxes (fix 9): same discipline as the grid.
     if (mGiVolLitNode)   { mTarget->removeNode(mGiVolLitNode);   mGiVolLitNode = 0; }
     if (mGiVolProbeNode) { mTarget->removeNode(mGiVolProbeNode); mGiVolProbeNode = 0; }
@@ -573,18 +567,10 @@ void SceneMirror::evacuateEngineObjects()
     mHighlighted.clear();
     mHighlightSet.clear();
     mHighlightRequestedPrimary.clear();
-    // THE GROUND'S HORIZON GOES TOO (lead review). Its `mHorizonFloor` is a raw
-    // pointer into the document that is leaving; its material PIN is what keeps
-    // the floor's datablock out of the sweep, and every entry that referenced
-    // that datablock has just been released — so a horizon left behind holds a
-    // material alive, on an Item, in a scene nobody renders, until the page
-    // switches back. Same three lines setSource has.
-    if (mHorizonNode) { mTarget->removeNode(mHorizonNode); mHorizonNode = 0; }
-    if (mHorizonMesh) { mTarget->destroyMesh(mHorizonMesh); mHorizonMesh = 0; }
-    mHorizonMeshSource = nullptr;
-    mHorizonMaterial = 0;
-    mHorizonVisible = -1;
-    mHorizonFloor = nullptr;
+    // THE GROUND PLANE GOES TOO: its material PIN would otherwise hold a
+    // datablock alive, on an Item, in a scene nobody renders, until the page
+    // switches back. The next sync rebuilds it if the host still wants it.
+    releaseGroundPlane();
     mReclaimPending = true;
 }
 
@@ -693,10 +679,9 @@ int SceneMirror::sync()
     // see, and a full walk would have covered it anyway — this is only ever the
     // still-frame route.
     //
-    // EVERY DEFAULT-FLOOR ENTRY, not just `mHorizonFloor`: the TERM is per node
-    // (`MeshNode::defaultFloor`) and a mark with a narrower scope than the term
-    // it exists for is the same defect one level down — mirror.ground_horizon's
-    // case D holds exactly that shape (a second node carrying the flag). One
+    // EVERY DEFAULT-FLOOR ENTRY: the TERM is per node (`MeshNode::defaultFloor`,
+    // and a World template carries twenty-five) — mirror.ground_plane's case D
+    // holds exactly that shape (a second node carrying the flag). One
     // pass over the entry map per FLIP, which is a user gesture (a play, a
     // stop, a shot) and not a frame: the verifier's own note measures a full
     // pass over an 8,404-entry map at 0.370 ms, and this does strictly less.
@@ -823,10 +808,10 @@ int SceneMirror::sync()
             mFullWalkPending = true;
         }
     }
-    // (mHorizonFloor / mAnyRefractive / mAnyDistortion are no longer reset
-    // here: the first is sticky and the other two are entry counts. A still
-    // frame would have reset them to nothing and left them there — the
-    // refraction pass turning off under a glass object nobody touched. §3.7.)
+    // (mAnyRefractive / mAnyDistortion are no longer reset here: they are
+    // entry counts. A still frame would have reset them to nothing and left
+    // them there — the refraction pass turning off under a glass object nobody
+    // touched. §3.7.)
     // ---- THE CHOICE (SPECS/DIRTY_SET_MIRROR_SPEC.md, owner option A) ------
     //
     // The FULL WALK is the explicit, rare answer: a bind, a graph re-take, an
@@ -947,7 +932,7 @@ int SceneMirror::sync()
     { MirrorStage s(mon, "mirror.helpers");
     syncHighlight();
     syncGrid();
-    syncGroundHorizon();
+    syncGroundPlane();
     syncVrProxies();
     }
     // AFTER removeMissing: a rider deleted from the document is a dangling key
@@ -1370,7 +1355,7 @@ void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
     mHighlightSet.clear();
     for (const auto &n : nodes) if (n) { mHighlighted.append(n); mHighlightSet.insert(n.data()); }
     // The primary only counts when it is actually IN the list: the viewport
-    // filters the World root and the built-in ground out of the highlight, and
+    // filters the World root out of the highlight, and
     // a primary that was filtered away must not colour somebody else's shell.
     mHighlightPrimary.clear();
     if (primary)
@@ -1974,240 +1959,127 @@ void SceneMirror::syncGrid()
     mTarget->setGrid(desc);
 }
 
-// ---- the ground's horizon ---------------------------------------------------
+// ---- the Ground plane widget (WORLD-MODEL-1) ---------------------------------
 //
-// Owner, 2026-09-13 (testing push #18): "should the default ground not also be
-// infinite in the Grand Showroom 2? It seems cut off." It is: the default floor
-// is a 100 m square (lane L3 cut it from 1024 m so a new project would stop
-// voxelising a square kilometre) and Showroom 2's hall alone is 48 m, so flying
-// out of the hall shows the floor end in mid-air with sky underneath.
-//
-// This is the floor's own material carried on to the horizon by ONE extra plane
-// that belongs to the mirror, not to the document. The rationale for the shape,
-// and the two rejected alternatives with their measurements, are on
-// syncGroundHorizon's declaration in the header.
-//
-// THE NUMBERS. `kHorizonHalfExtent` is twice the editor camera's far clip
+// setGroundPlane's note in the header says what it is and why it is a backdrop.
+// THE NUMBERS. `kGroundPlaneHalfExtent` is twice the editor camera's far clip
 // (1000 m, EngineSceneViewport::createEditorCamera), so the plane's own edge is
-// always beyond the far plane and what a user can see is the far plane's own
-// distance horizon, in every direction, at every height -- never a corner and
-// never an edge that can be flown to. `kHorizonSink` puts it just under the
-// floor so the floor always wins where they overlap; 5 mm reads as 0.006
-// degrees at the floor's 50 m edge, an order of magnitude under a pixel on a
-// 1080-line view.
-//
-// THE UV MAP IS MEASURED, NOT ASSUMED (lead review, and it was a real defect:
-// the first cut used a hand-picked 0.0625 UV per metre with no offset and got
-// the right DENSITY with the wrong PHASE and the wrong V SIGN -- the geometry
-// edge came back as a texture seam, misregistered by 0.195 of a repeat and
-// cycling along the north/south edges because v was mirrored). `fitGroundUvMap`
-// fits u = ux*x + uc and v = vz*z + vc over the floor's OWN engine-side
-// vertices -- the very arrays its Item is drawn from, after toMeshData's V flip
-// -- so the horizon inherits ground.obj's density, offset and sign whatever the
-// importer did with them, and survives a re-stage of that model. Measured on
-// the shipped ground.obj: the FILE carries u = 0.0625x + 0.048828 and
-// v = -0.0625z + 0.048828 (a non-zero offset, v running against +z), and the
-// importer's flip (v = 1 - v) turns the second into v = 0.0625z + 0.951172.
-// The material's own textureScale multiplies both meshes alike on top of it.
-//
-// WHAT THE HELPER BIT COSTS, stated rather than discovered later: kHelperBit
-// keeps the horizon out of the reflection-probe captures and the planar
-// reflection pass, so a mirror surface reflects the floor ENDING at its own
-// 100 m edge with sky beyond. Indoors -- where every planar reflector and
-// probe in the shipped content lives -- it cannot be seen; widening a capture
-// mask to fix it would put a 4 km plane into every probe face, which is the
-// worse trade.
-static constexpr float kHorizonHalfExtent = 2000.0f;
-static constexpr float kHorizonUvPerMetre = 0.0625f;   // the fallback density only
-static constexpr float kHorizonSink       = 0.005f;
+// always beyond the far plane — never a corner and never an edge that can be
+// flown to. `kGroundPlaneSink` puts it just under y = 0 so a real surface there
+// (the Basic template's floor top) always wins: 5 mm reads as 0.006 degrees at
+// 50 m, an order of magnitude under a pixel on a 1080-line view.
+// `kGroundPlaneUvPerMetre` is a template floor's own map (the cube primitive's
+// top face spans one UV over its 100 m, u = x/100 - 0.5 and v = z/100 + 0.5 after
+// the V flip), so the default floor material's checker registers across the
+// floor's edge.
+static constexpr float kGroundPlaneHalfExtent = 2000.0f;
+static constexpr float kGroundPlaneSink       = 0.005f;
+static constexpr float kGroundPlaneUvPerMetre = 0.01f;
 
-// The floor's own UV map, fitted over its engine-side vertices. False when the
-// mesh carries no usable map (no UVs, or a degenerate one) -- the caller then
-// falls back to the shipped density with no offset, which is the old behaviour
-// and is only ever reached by a floor whose mesh is not ground.obj.
-bool SceneMirror::fitGroundUvMap(iris::Mesh *mesh, float &ux, float &uc, float &vz, float &vc)
+void SceneMirror::setGroundPlane(bool visible)
 {
-    if (!mesh) return false;
-    MeshData data;
-    if (!toMeshData(mesh, data)) return false;
-    const size_t nv = data.positions.size() / 3;
-    if (nv < 3 || data.uvs.size() != nv * 2) return false;
-    // Least squares, one axis at a time: the floor is a plane in XZ, so u is a
-    // function of x alone and v of z alone. A fit that does not describe the
-    // mesh (a floor whose map is rotated, or per-face) is REFUSED on its
-    // residual rather than half-applied.
-    auto axis = [&](size_t posOff, size_t uvOff, float &k, float &c) {
-        double sa = 0, sb = 0;
-        for (size_t i = 0; i < nv; ++i) { sa += data.positions[i*3 + posOff]; sb += data.uvs[i*2 + uvOff]; }
-        const double ma = sa / double(nv), mb = sb / double(nv);
-        double num = 0, den = 0;
-        for (size_t i = 0; i < nv; ++i) {
-            const double da = data.positions[i*3 + posOff] - ma;
-            num += da * (data.uvs[i*2 + uvOff] - mb);
-            den += da * da;
-        }
-        if (!(den > 1e-6)) return false;
-        k = float(num / den);
-        c = float(mb - (num / den) * ma);
-        double worst = 0;
-        for (size_t i = 0; i < nv; ++i)
-            worst = std::max(worst, std::abs(double(k) * data.positions[i*3 + posOff] + double(c)
-                                             - data.uvs[i*2 + uvOff]));
-        return worst < 1e-3 && std::abs(k) > 1e-9f;
-    };
-    return axis(0, 0, ux, uc) && axis(2, 1, vz, vc);
+    mGroundPlaneVisible = visible;
 }
 
-void SceneMirror::syncGroundHorizon()
+void SceneMirror::setGroundPlaneHeight(float y)
 {
-    const iris::MeshNode *floor = mHorizonFloor;
-    // A scene with no default floor (a thumbnail scene, a preview, a project
-    // whose floor was deleted) has no horizon, and a hidden floor takes its
-    // horizon with it — by the DOCUMENT's rule (a user's hide) or by the host's
-    // one override (PLAYER-FLOOR-1: the Player hiding the app's own floor).
-    // The horizon is the floor's extension and has no separate existence; it
-    // must never be the thing that stays behind.
-    const bool want = floor && floor->isVisibleInScene() && !mHideDefaultFloor;
+    if (!(y == y) || mGroundPlaneHeight == y) return;   // a NaN is refused (host-side float)
+    mGroundPlaneHeight = y;
+    mGroundPlanePlaced = false;
+}
+
+void SceneMirror::setGroundPlaneMaterial(const iris::MaterialPtr &material)
+{
+    if (mGroundPlaneDoc == material) return;
+    // A different material re-attaches on the next sync; the old one's id
+    // leaves the pin, so arm the sweep to reclaim it.
+    if (mGroundPlaneNode && mGroundPlaneMaterial) mTarget->detachMesh(mGroundPlaneNode);
+    mGroundPlaneDoc = material;
+    mGroundPlaneMaterial = 0;
+    mGroundPlaneTextures.clear();
+    mGroundPlaneShown = -1;
+    mReclaimPending = true;
+}
+
+void SceneMirror::releaseGroundPlane()
+{
+    if (mGroundPlaneNode) { mTarget->removeNode(mGroundPlaneNode); mGroundPlaneNode = 0; }
+    if (mGroundPlaneMesh) { mTarget->destroyMesh(mGroundPlaneMesh); mGroundPlaneMesh = 0; }
+    mGroundPlanePlaced = false;
+    mGroundPlaneMaterial = 0;
+    mGroundPlaneTextures.clear();
+    mGroundPlaneShown = -1;
+}
+
+void SceneMirror::syncGroundPlane()
+{
+    const bool want = mGroundPlaneVisible && mGroundPlaneDoc;
     if (!want) {
-        if (mHorizonNode && mHorizonVisible != 0) {
-            mTarget->setNodeVisible(mHorizonNode, false);
-            mHorizonVisible = 0;
-        }
-        // A HIDE IS NOT A DELETE (DRAG-1, RENDER_AUDIT I-2). What stood here
-        // detached the horizon's mesh and released its material on EITHER —
-        // and the visible consequence of doing that for a HIDE was the owner's
-        // "hiding the plane changed its size": un-hiding the floor rebuilt the
-        // 4 km plane from scratch (a mesh build, a UV fit over the floor's
-        // vertices, a material creation), and in the frames between, the ground
-        // the user could still see through the horizon was the floor's own
-        // 100 m square. Hiding a thing must not destroy it.
-        //
-        // The release itself is right and is KEPT for the case it was written
-        // for: there is no floor at all any more — it was deleted, or this is a
-        // thumbnail or preview scene that never had one. Then the horizon's
-        // material must go, because while the horizon holds one the cache sweep
-        // keeps it alive (reclaimUnused) and a deleted floor has to take its
-        // material with it.
-        if (!floor && mHorizonMaterial) {
-            mTarget->detachMesh(mHorizonNode);
-            mHorizonMaterial = 0;
-            mReclaimPending = true;
+        // A HIDE IS NOT A DELETE (DRAG-1): the quad and its material stay, so
+        // a show is one visibility flip in the very next frame.
+        if (mGroundPlaneNode && mGroundPlaneShown != 0) {
+            mTarget->setNodeVisible(mGroundPlaneNode, false);
+            mGroundPlaneShown = 0;
         }
         return;
     }
-
-    if (!mHorizonNode) {
-        mHorizonNode = mTarget->createNode();
-        if (!mHorizonNode) return;
-        // A BACKDROP, in the engine's sense (EnginePrivate.h's bit scheme):
-        // kBackdropBit instead of kVisibleBit takes the plane out of every
-        // reflection-probe capture, out of the shadow nodes (nothing this size
-        // may ever be a shadow caster or the atlas fits the horizon instead of
-        // the scene) and out of kGiGeometryBit — exactly what setNodeHelper
-        // used to buy here — while EVERY view goes on drawing it.
-        //
-        // Not setNodeHelper any more (lane PLAYER-1): the Player page is a
-        // second View on the editor's scene and hides the editor's FURNITURE by
-        // masking kHelperBit out of its passes. The horizon is not furniture,
-        // it is the ground; it needed the other half of the old flag's meaning.
-        mTarget->setNodeBackdrop(mHorizonNode, true);
+    if (!mGroundPlaneNode) {
+        mGroundPlaneNode = mTarget->createNode();
+        if (!mGroundPlaneNode) return;
+        // A BACKDROP (EnginePrivate.h's bit scheme): out of every capture —
+        // shadow casters, GI geometry, probe faces, planar mirrors, the Atom id
+        // pass (it still RECEIVES shadows: its material samples the maps) —
+        // and drawn by every view, the Player's included (the Player's host
+        // turns the widget off rather than masking it).
+        mTarget->setNodeBackdrop(mGroundPlaneNode, true);
+        mGroundPlanePlaced = false;
+        mGroundPlaneShown = -1;
     }
-    // THE FLOOR'S MESH decides the horizon's UV map, so a floor that changes
-    // mesh rebuilds it (the map is measured off that mesh, above).
-    iris::Mesh *floorMesh = floor->mesh.data();
-    if (mHorizonMesh && floorMesh != mHorizonMeshSource) {
-        mTarget->detachMesh(mHorizonNode);
-        mTarget->destroyMesh(mHorizonMesh);
-        mHorizonMesh = 0;
-        mHorizonMaterial = 0;
-        mReclaimPending = true;
+    if (!mGroundPlanePlaced) {
+        mTarget->setNodeTransform(mGroundPlaneNode,
+                                  Vec3(0.0f, mGroundPlaneHeight - kGroundPlaneSink, 0.0f),
+                                  Quat(0.0f, 0.0f, 0.0f, 1.0f), Vec3(1.0f, 1.0f, 1.0f));
+        mGroundPlanePlaced = true;
     }
-    if (!mHorizonMesh) {
-        // Four corners, wound to face UP and no other way. The single winding is
-        // load-bearing: the default floor is invisible from below (its
-        // datablock culls back faces), and a horizon that was not would hide
-        // whatever a camera dipping under y = 0 was looking at — which is not
-        // an exotic pose at all, it is what editor.frameNode does whenever it
-        // frames a small object from above (five pixel suites caught exactly
-        // that: the camera lands at y = -0.09 and the subject went grey).
-        //
-        // The UVs come from the FLOOR'S OWN map (fitGroundUvMap) so the checker
-        // crosses the floor's edge in phase; only a floor whose mesh has no
-        // usable map falls back to the shipped density.
-        float ux = kHorizonUvPerMetre, uc = 0.0f, vz = kHorizonUvPerMetre, vc = 0.0f;
-        if (!fitGroundUvMap(floorMesh, ux, uc, vz, vc)) {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                irisLog("SceneMirror: the default floor's mesh carries no linear UV map — the "
-                        "horizon falls back to the shipped checker density and may not line up");
-            }
-        }
-        const float h = kHorizonHalfExtent;
-        const float u0 = -h * ux + uc, u1 = h * ux + uc;
-        const float v0 = -h * vz + vc, v1 = h * vz + vc;
+    if (!mGroundPlaneMesh) {
+        // Four corners, wound to face UP and no other way: a camera dipping
+        // under y = 0 (editor.frameNode framing a small object from above
+        // lands at y < 0) must see through it, not a grey wall.
+        const float h = kGroundPlaneHalfExtent, k = kGroundPlaneUvPerMetre;
+        const float u0 = -h * k - 0.5f, u1 = h * k - 0.5f;
+        const float v0 = -h * k + 0.5f, v1 = h * k + 0.5f;
         MeshData quad;
         quad.positions = { -h, 0.0f, -h,   h, 0.0f, -h,   h, 0.0f, h,   -h, 0.0f, h };
         quad.normals   = { 0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f,
                            0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f };
         quad.uvs       = { u0, v0,   u1, v0,   u1, v1,   u0, v1 };
         quad.indices   = { 0, 2, 1,  0, 3, 2 };
-        mHorizonMesh = mTarget->createMesh(quad);
-        if (!mHorizonMesh) return;
-        mHorizonMeshSource = floorMesh;
-        mHorizonMaterial = 0;      // nothing is attached yet
+        mGroundPlaneMesh = mTarget->createMesh(quad);
+        if (!mGroundPlaneMesh) return;
+        mGroundPlaneMaterial = 0;      // nothing is attached yet
     }
-
-    // THE FLOOR'S OWN MATERIAL, by id: every edit a user makes to the floor --
-    // its colour, its checker, its tiling, a whole library material dropped on
-    // it -- reaches the horizon with no work here, because both items point at
-    // the same datablock. Only a material SWAP re-attaches.
-    const MaterialId mat = materialFor(floor->material.data());
-    if (mat && mat != mHorizonMaterial) {
-        mTarget->attachMesh(mHorizonNode, mHorizonMesh, mat);
-        mHorizonMaterial = mat;
-        // ARM THE SWEEP. reclaimUnused runs BEFORE this stage and keeps the id
-        // the horizon was holding alive (it is not an entry, so the sweep can
-        // only see it through that pin); dropping the old one here without
-        // re-arming leaves the previous datablock alive until something
-        // unrelated arms the sweep — a library material dropped on the floor
-        // leaked exactly that (lead review).
+    if (!mGroundPlaneMaterial) {
+        iris::Material *doc = mGroundPlaneDoc.data();
+        const MaterialId mat = materialFor(doc);
+        if (!mat || !mTarget->attachMesh(mGroundPlaneNode, mGroundPlaneMesh, mat)) return;
+        mGroundPlaneMaterial = mat;
+        // ITS MAPS, bound here: an entry binds its material's textures in its
+        // own visit (syncTextures), and the plane is not an entry.
+        mGroundPlaneTextures.clear();
+        if (mat != mDefaultMaterial) {
+            const MaterialSync &ms = materialSyncFor(doc);
+            for (const TextureBind &b : ms.binds) {
+                const TextureId t = b.slot == PbrTextureSlot::Reflection ? reflectionCubeFor(b.path)
+                                                                         : textureFor(b.path, b.srgb);
+                if (t && mTarget->setPbrTexture(mat, b.slot, t)) mGroundPlaneTextures.push_back(t);
+            }
+        }
         mReclaimPending = true;
+        mGroundPlaneShown = -1;
     }
-    if (!mHorizonMaterial) return;
-
-    // The floor's world transform, sunk. Rotation and scale ride along so a
-    // scaled or tilted floor keeps its horizon attached to it (and its checker
-    // density, which the scale multiplies on both meshes alike).
-    //
-    // AND NOTHING AT REST. The claim used to be "three pointer tests"; the line
-    // below it resolved the floor's DERIVED WORLD TRANSFORM every frame, which
-    // walks the node's parent chain (MIRROR_SCALE lane). The document's global
-    // transform-write counter answers "can the floor have moved?" without
-    // asking the graph anything: no write anywhere, no new world.
-    const unsigned long long writes = iris::graph::transformWrites();
-    if (writes == mHorizonWrites && mHorizonVisible == 1) return;
-    mHorizonWrites = writes;
-    const iris::Mat4 world = const_cast<iris::MeshNode *>(floor)->getGlobalTransform();
-    if (world == mHorizonWorld && mHorizonVisible == 1) return;
-    mHorizonWorld = world;
-    const iris::Vec3 cx = world.column(0).toVector3D(), cy = world.column(1).toVector3D(),
-                     cz = world.column(2).toVector3D();
-    const iris::Vec3 scale(cx.length(), cy.length(), cz.length());
-    const iris::Vec3 pos = world.column(3).toVector3D();
-    const float sx = scale.x() > 1e-8f ? scale.x() : 1.0f, sy = scale.y() > 1e-8f ? scale.y() : 1.0f,
-                sz = scale.z() > 1e-8f ? scale.z() : 1.0f;
-    float m[9] = { cx.x() / sx, cy.x() / sy, cz.x() / sz,
-                   cx.y() / sx, cy.y() / sy, cz.y() / sz,
-                   cx.z() / sx, cy.z() / sy, cz.z() / sz };
-    const iris::Quat rot = iris::Quat::fromRotationMatrix(iris::Mat3(m));
-    mTarget->setNodeTransform(mHorizonNode,
-                              Vec3(pos.x(), pos.y() - kHorizonSink * sy, pos.z()),
-                              Quat(rot.x(), rot.y(), rot.z(), rot.scalar()),
-                              Vec3(scale.x(), scale.y(), scale.z()));
-    if (mHorizonVisible != 1) {
-        mTarget->setNodeVisible(mHorizonNode, true);
-        mHorizonVisible = 1;
+    if (mGroundPlaneShown != 1) {
+        mTarget->setNodeVisible(mGroundPlaneNode, true);
+        mGroundPlaneShown = 1;
     }
 }
 
@@ -3250,14 +3122,6 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
     MaterialId pendingSwap = 0;
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto *meshNode = static_cast<iris::MeshNode *>(node);
-        // THE SCENE'S DEFAULT FLOOR, remembered for syncGroundHorizon. Recorded
-        // here rather than searched for afterwards: the walk is already at every
-        // mesh node, and the flag is the document's own (never the name).
-        // STICKY, not re-found per walk (§3.7): a still frame runs no walk at
-        // all, so the pointer has to survive one. It is dropped when this node
-        // stops being the floor and when its entry is released.
-        if (meshNode->defaultFloor) { if (!mHorizonFloor) mHorizonFloor = meshNode; }
-        else if (mHorizonFloor == meshNode) mHorizonFloor = nullptr;
         // THE NODE'S FACE CULL (CULL-MODE-2). The engine holds it per node and picks
         // the material or its CULL TWIN for the Item (Scene::setNodeFaceCull), so this
         // is a node fact like the cast-shadow flag above: change-guarded, pushed
@@ -4066,12 +3930,11 @@ void SceneMirror::reclaimUnused()
     QSet<MeshId> usedMeshes; QSet<MaterialId> usedMaterials;
     for (const Entry &e : mEntries) { if (e.mesh) usedMeshes.insert(e.mesh); if (e.material) usedMaterials.insert(e.material); }
     for (const HighlightShell &s : mHighlightShells) if (s.mesh) usedMeshes.insert(s.mesh);
-    // The ground's horizon holds the FLOOR's material by id and is not an entry,
-    // so the sweep cannot see it. A floor deleted in the same frame would
-    // otherwise destroy a datablock the horizon's Item still points at — the
-    // stale-binding crash, reached from the one object in the scene nobody can
-    // select. Its own mesh is not in mMeshes at all (like the grid's).
-    if (mHorizonMaterial) usedMaterials.insert(mHorizonMaterial);
+    // The Ground plane widget holds its material by id and is not an entry, so
+    // the sweep cannot see it; destroying a datablock its Item still points at
+    // is the stale-binding crash. Its own mesh is not in mMeshes at all (like
+    // the grid's); its textures are pinned below.
+    if (mGroundPlaneMaterial) usedMaterials.insert(mGroundPlaneMaterial);
     for (auto it = mMeshes.begin(); it != mMeshes.end();) {
         if (usedMeshes.contains(it.value())) { ++it; continue; }
         mTarget->destroyMesh(it.value()); it = mMeshes.erase(it);
@@ -4125,6 +3988,7 @@ void SceneMirror::reclaimUnused()
     // The equirect sky samples a plain cache texture, and the engine keeps it
     // until the sky changes — mSkySource owns that lifetime, not this.
     if (mSkyTexture) usedTextures.insert(mSkyTexture);
+    for (TextureId t : mGroundPlaneTextures) usedTextures.insert(t);
     for (auto it = mTextures.begin(); it != mTextures.end();) {
         if (usedTextures.contains(it.value())) { ++it; continue; }
         mTarget->destroyTexture(it.value());
@@ -4156,8 +4020,6 @@ void SceneMirror::releaseEntry(Entry &e)
         if (it != mMovableLights.end()) mMovableLights.erase(it);
     }
     if (e.docNode && e.materialPtr) noteMaterialUser(e.docNode, e.materialPtr, nullptr);
-    if (mHorizonFloor && static_cast<const iris::SceneNode *>(mHorizonFloor) == e.docNode)
-        mHorizonFloor = nullptr;
     if (e.wireNode) mTarget->removeNode(e.wireNode);
     if (e.wireMaterial) mTarget->destroyMaterial(e.wireMaterial);
     // The camera body/frustum mesh belongs to this entry alone (it is derived

@@ -341,7 +341,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
 
             MeshMaterialData meshMat;
             if (xf.materials)
-                MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
+                MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath, xf.faceCulling);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
             if (meshMat.twoSided) meshNode->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1
@@ -374,7 +374,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
 
             MeshMaterialData meshMat;
             if (xf.materials)
-                MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
+                MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath, xf.faceCulling);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
             if (meshMat.twoSided) meshNode->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1
@@ -491,7 +491,7 @@ MeshNode::loadAsSceneFragment(QString filePath,
 
         MeshMaterialData meshMat;
         if (xf.materials)
-            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath, xf.faceCulling);
         auto mat = createMaterialFunc(meshObj, meshMat);
         if (!!mat) node->setMaterial(mat);
         if (meshMat.twoSided) node->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1
@@ -585,7 +585,7 @@ MeshNode::loadAsSceneFragment(
 
 		MeshMaterialData meshMat;
         if (xf.materials)
-            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath, xf.faceCulling);
 		auto mat = createMaterialFunc(meshObj, meshMat);
 		if (!!mat) node->setMaterial(mat);
 		if (meshMat.twoSided) node->setFaceCullingMode(FaceCullingMode::None);   // CULL-MODE-1

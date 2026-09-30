@@ -723,7 +723,8 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                     QString assetPath,
                     MeshMaterialData& mat,
                     const QString &writeDir,
-                    const QString &sourceFile)
+                    const QString &sourceFile,
+                    FaceCullingImport faceCulling)
 {
     // Extraction output target: the pipeline's staging dir when given, else
     // (legacy) the source's own directory.
@@ -819,10 +820,16 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                                              : (hasMetallic || hasRoughness);
     mat.unlit = facts.valid ? facts.unlit : assimpUnlit;
     // TWO-SIDED (CULL-MODE-1): glTF's doubleSided arrives as AI_MATKEY_TWOSIDED
-    // (glTF2Importer.cpp ImportMaterial), as does every other format's flag.
-    {
+    // (glTF2Importer.cpp ImportMaterial), as does every other format's flag — unless the
+    // import's face culling (ATOM-TWO-SIDED-1, importsettings.h) overrides the file.
+    switch (faceCulling) {
+    case FaceCullingImport::Single: mat.twoSided = false; break;
+    case FaceCullingImport::Double: mat.twoSided = true; break;
+    case FaceCullingImport::File: {
         int twoSided = 0;
         mat.twoSided = aiMat->Get(AI_MATKEY_TWOSIDED, twoSided) == AI_SUCCESS && twoSided != 0;
+        break;
+    }
     }
 
     const QString baseTexName = getAiMaterialTexture(aiMat, aiTextureType_BASE_COLOR);

@@ -1145,9 +1145,9 @@ public:
     /// Same exclusions as setNodeHelper (no reflection-probe capture, no shadow
     /// map, no GI geometry), and it IMPLIES setNodeHelper — but a view that
     /// hides the editor's furniture (View::setHelpersVisible(false), what the
-    /// Player page is) still draws it. The case it exists for is the ground's
-    /// 2 km horizon plane: real picture, and nothing that size may ever size a
-    /// shadow atlas or a voxel volume.
+    /// Player page is) still draws it. The case it exists for is the editor's
+    /// 4 km Ground plane widget: real picture, and nothing that size may ever
+    /// size a shadow atlas or a voxel volume.
     ///
     /// setNodeHelper(id, false) clears it too — one flag pair, one meaning.
     /// Not inherited; may be set before the geometry arrives.
@@ -1565,7 +1565,7 @@ public:
     /// it rebuilds this view's workspace (and restarts its adaptation history:
     /// see seedExposureHistory). Set it once, when the view is created.
     ///
-    /// NOT affected: backdrops (Scene::setNodeBackdrop — the ground's horizon),
+    /// NOT affected: backdrops (Scene::setNodeBackdrop — the Ground plane widget),
     /// the sun disc, and every piece of real scene content.
     virtual void setHelpersVisible(bool) = 0;
     virtual bool helpersVisible() const = 0;

@@ -357,7 +357,7 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     if (rq != kOpaqueItemQueue && rq != kAtomRenderQueue && rq != kRefractiveRenderQueue)
         return AtomRoute::Stock;
     // THE ID PASS DRAWS THE WORLD CHANNELS ONLY (its cull asks for kGpuVisible): a
-    // backdrop (the ground's 4 km horizon quad) or a helper draws in the views that
+    // backdrop (the editor's 4 km Ground plane quad) or a helper draws in the views that
     // show it through PBS, or the split would skip it where nothing draws it.
     if (!(flags & kGpuVisible)) return AtomRoute::NotWorld;
     const Ogre::HlmsDatablock *db = item->getSubItem(0)->getDatablock();
@@ -370,13 +370,18 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     if (rq == kRefractiveRenderQueue || db->getBlendblock()->isAutoTransparent() ||
         pbs->getTransparencyMode() == Ogre::HlmsPbsDatablock::Refractive)
         return AtomRoute::Blended;
-    // The id pass culls back faces (Ogre's default macroblock); a material drawn
-    // with any other cull mode stays where its faces are drawn as authored.
-    // ...AND ITS SHADOW WITH THE SAME FACES (ATOM-SHADOWS-1): the caster cut culls back
-    // faces too, so a caster macroblock set apart from the material's keeps it on PBS.
-    if (db->getMacroblock()->mCullMode != Ogre::CULL_CLOCKWISE ||
-        db->getMacroblock(true)->mCullMode != Ogre::CULL_CLOCKWISE)
-        return AtomRoute::TwoSided;
+    // THE FACES (ATOM-TWO-SIDED-1): the id pass and the caster cut draw back-culled
+    // (Ogre's default macroblock) or BOTH faces (CULL_NONE: the item's command rides
+    // the list's two-sided range, kGpuTwoSided, drawn by the no-cull pipelines) — one
+    // flag serves both passes, so the caster macroblock must cull as the material
+    // does. A FRONT-culled material (only back faces drawn: an inverted hull) or a
+    // caster set apart from its material stays on PBS.
+    {
+        const Ogre::CullingMode cull = db->getMacroblock()->mCullMode;
+        if ((cull != Ogre::CULL_CLOCKWISE && cull != Ogre::CULL_NONE) ||
+            db->getMacroblock(true)->mCullMode != cull)
+            return AtomRoute::CullFront;
+    }
     // A PLANAR MIRROR: PBS matches the RENDERABLE to its actor at hash time and binds
     // that actor's reflection per draw (HlmsPbs::calculateHashForPreCreate / fillBuffersFor);
     // a decode twin serves a bucket, not a renderable, so the mirror stays on PBS.
@@ -521,7 +526,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         case AtomRoute::NotPbs: ++st.notPbs; break;
         case AtomRoute::CustomPiece: ++st.customPiece; break;
         case AtomRoute::Blended: ++st.blended; break;
-        case AtomRoute::TwoSided: ++st.twoSided; break;
+        case AtomRoute::CullFront: ++st.cullFront; break;
         case AtomRoute::Planar: ++st.planar; break;
         case AtomRoute::AlphaTested: ++st.alphaTested; break;
         case AtomRoute::Skinned: ++st.skinned; break;
@@ -534,6 +539,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
             continue;
         }
         ++st.atomItems;
+        if (flags & kGpuTwoSided) ++st.atomTwoSided;
         const auto *db =
             static_cast<const Ogre::HlmsPbsDatablock *>(n->item->getSubItem(0)->getDatablock());
         if (!words.insert(HlmsAtom::materialWordOf(db)).second) continue;

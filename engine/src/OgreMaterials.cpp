@@ -2269,10 +2269,11 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
 // to its master (syncCullTwins), destroyed when no Item wears it (sweepCullTwins)
 // and always before its master (destroyCullTwins). A twin is an ordinary PBS
 // datablock to everyone downstream: the Atom split routes it by its own
-// macroblock (a Back twin of a two-sided material goes to Atom and joins its
-// master's decode bucket — HlmsAtom's key is the permutation, the texture set and
-// the const-buffer pool, not the macro state; a TwoSided twin stays on PBS like
-// any two-sided datablock), the voxelisers convert it by pointer and are told
+// macroblock (a Back twin of a two-sided material goes to Atom in the one-sided
+// bucket of its permutation — HlmsAtom's key is the permutation, the texture set and
+// the const-buffer pool, not the macro state; a TwoSided twin goes to Atom drawn from
+// both sides, in the two-sided permutation's bucket — ATOM-TWO-SIDED-1; a Front twin
+// stays on PBS, the split's `cullFront`), the voxelisers convert it by pointer and are told
 // when it dies (noteGiDatablockDied), and HlmsAtom forgets it first
 // (forgetDecodeTwinOf). THE RAYS need nothing: every instance is traced
 // two-sided (TRIANGLE_FACING_CULL_DISABLE), so a one-sided object's back face is

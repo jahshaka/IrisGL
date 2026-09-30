@@ -208,6 +208,7 @@ bool OgreScene::setSky(const SkyDesc &desc) {
     // a table. It is not part of AtmosphereSky's equality (Types.h says why);
     // it is a constant in the atmosphere's buffer. The probe faces are fogged
     // PBS renders, so they are stale exactly as a World fog edit makes them.
+    // (It replaced AIR-HAZE-TOGGLE-1's on/off switch: 0 is off.)
     if (desc.mode == SkyMode::Atmosphere &&
         desc.atmosphere.aerialScale != mSkyDesc.atmosphere.aerialScale) {
         mSkyDesc.atmosphere.aerialScale = desc.atmosphere.aerialScale;

@@ -212,6 +212,11 @@ enum GpuInstanceFlag : uint32_t {
     kGpuDragMover = 1u << 8,    ///< MOVER-1: the user has hold of it right now
     kGpuAtom = 1u << 9,         ///< ATOM S3-DRAW: the id pass draws it, the decode shades it (OgreScene::atomRouteFor)
     kGpuPlanar = 1u << 10,      ///< a PLANAR MIRROR's renderable (D3-HIT-SHADE-2): a ray hit on it always decodes
+    /// ATOM-TWO-SIDED-1: an Atom item whose material draws BOTH faces (CULL_NONE, its
+    /// caster the same): the cut writes its command into the list's two-sided range
+    /// (GpuCull::twoSidedFirst), which the id pass and the caster cut draw with their
+    /// no-cull pipeline; the decode lights the facing side.
+    kGpuTwoSided = 1u << 11,
 };
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the

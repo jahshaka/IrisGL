@@ -15,7 +15,9 @@
 // WHAT IT WRITES — the compaction's first half:
 //   1. the survivor's DRAW COMMAND: indexCount = the drawn clusters' indices,
 //      firstIndex = where its contiguous run of the view's stream starts (one
-//      atomic on count[11] per survivor), firstInstance = the slot;
+//      atomic on count[11] per survivor), firstInstance = the slot — at the
+//      survivor's index, or, for a TWO-SIDED survivor, at the next command of the
+//      list's two-sided range (cut.w on, one atomic on count[17]);
 //   2. per drawn cluster a RECORD (slot, the cluster's global index, its first
 //      index in the stream, its depth) — the emit job's work list, one atomic on
 //      count[8] per survivor, the offsets inside the run a workgroup prefix sum;
@@ -77,6 +79,7 @@ layout( std430, ogre_U8 ) writeonly restrict buffer recordLayout { uvec4 records
 layout( std430, ogre_U9 ) writeonly restrict buffer slotBaseLayout { uint slotBase[]; };
 
 #define JAH_INSTANCE_LANES 10u
+#define JAH_FLAG_TWO_SIDED 0x800u   // GpuScene.h kGpuTwoSided
 #define JAH_NO_GROUP 0xFFFFFFFFu
 #define JAH_TERMINAL 3.0e38
 #define JAH_CUT_WIDTH @value( threads_per_group_x )
@@ -280,6 +283,20 @@ void main()
 		if( mode != 0u )
 			atomicAdd( counter[4], drawnIdx / 3u );
 		uint o = i * 5u;
+		// A TWO-SIDED survivor's command (ATOM-TWO-SIDED-1, the flags word's bit 11):
+		// in the list's two-sided range, which the passes draw with their no-cull
+		// pipeline (count[17] its length); its command at the survivor index draws
+		// nothing. The flags word is the instance's lane 7, w.
+		uint flags = floatBitsToUint( instanceWords[slot * JAH_INSTANCE_LANES + 7u].w );
+		if( params.cut.w != 0u && ( flags & JAH_FLAG_TWO_SIDED ) != 0u && mode != 0u )
+		{
+			draws[o + 0u] = 0u;
+			draws[o + 1u] = 0u;
+			draws[o + 2u] = 0u;
+			draws[o + 3u] = 0u;
+			draws[o + 4u] = slot;
+			o = ( params.cut.w + atomicAdd( counter[17], 1u ) ) * 5u;
+		}
 		draws[o + 0u] = drawnIdx;
 		draws[o + 1u] = 1u;
 		draws[o + 2u] = mode != 0u ? base : 0u;

@@ -18,6 +18,7 @@ For more information see the LICENSE file
 struct aiScene;
 struct aiMaterial;
 struct aiTexture;
+#include "import/importsettings.h"   // FaceCullingImport
 #include <QColor>
 #include <QFuture>
 #include <QStringList>
@@ -49,7 +50,8 @@ public:
                                     QString assetPath,
                                     MeshMaterialData& mat,
                                     const QString &writeDir = QString(),
-                                    const QString &sourceFile = QString());
+                                    const QString &sourceFile = QString(),
+                                    FaceCullingImport faceCulling = FaceCullingImport::File);
 
     /// KHR_materials_pbrSpecularGlossiness → metallic-roughness, the
     /// conversion published in the extension's own appendix (the same one

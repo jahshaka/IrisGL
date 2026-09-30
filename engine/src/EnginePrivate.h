@@ -471,9 +471,9 @@ constexpr Ogre::uint32 kSunDiscBit     = 1u << 6;
 //
 // `setNodeHelper` says "no capture may see this": the probes, the shadow nodes
 // and the GI gathers all ask for kVisibleBit, so a helper drops out of every
-// one of them for free. That is exactly what the ground's 2 km HORIZON plane
-// wants (nothing that size may size a shadow atlas or a voxel volume) — but the
-// horizon is PART OF THE PICTURE, not editor furniture, and the moment one view
+// one of them for free. That is exactly what the editor's 4 km GROUND PLANE
+// widget wants (nothing that size may size a shadow atlas or a voxel volume) — but
+// the plane is PART OF THE PICTURE, not editor furniture, and the moment one view
 // of a scene has to hide the furniture (the Player page, which is a second View
 // on the editor's scene) "helper" can no longer answer both questions.
 //
@@ -1343,7 +1343,7 @@ struct ChainDesc {
     /// scene and two views draw it. It is a per-pass VISIBILITY MASK instead —
     /// every scene pass in this view's node gets kHelperBit taken out of its
     /// mask (chain::build) — which is free, needs no second scene and cannot
-    /// desynchronise. Backdrops (kBackdropBit: the ground's horizon) and the
+    /// desynchronise. Backdrops (kBackdropBit: the Ground plane widget) and the
     /// sun disc are NOT furniture and stay in every view.
     ///
     /// GRAPH SHAPE (sameShape): the mask lives on the pass DEFINITION, so a
@@ -3708,6 +3708,9 @@ public:
     /// True while this scene files any item in the Atom queue (the split's word set is
     /// not empty): the caster pass's gate.
     bool hasAtomItems() const { return !mAtomWords.empty(); }
+    /// True while the GPU scene holds an Atom item drawn from both sides (kGpuTwoSided):
+    /// the id pass and the caster cut record their no-cull draw of the two-sided range.
+    bool hasTwoSidedAtomItems() const { return mAtomFeed.twoSidedCount != 0u; }
     /// THE CASTER CUT'S TEST DOOR (shadow.atom_cut; never a mode): arm it for ONE map of
     /// the VIEW kind's shadow node (`map` = the shadow map index, `face` = the cube face of
     /// a point map, 0 otherwise); the next frame that renders that map copies its cut —
@@ -4327,7 +4330,7 @@ private:
         /// must not capture. Carries kHelperBit instead of kVisibleBit.
         bool                      helper = false;
         /// A helper that is PART OF THE PICTURE (kBackdropBit's note): the
-        /// ground's horizon plane. Implies `helper` — same exclusion from every
+        /// editor's Ground plane widget. Implies `helper` — same exclusion from every
         /// capture — but carries kBackdropBit instead of kHelperBit, so a view
         /// that masks the editor's furniture out still draws it.
         bool                      backdrop = false;
@@ -6130,7 +6133,7 @@ private:
     /// first reason (AtomDrawStatus names them in order). `Stock` = an item in a
     /// queue the split never touches.
     enum class AtomRoute : uint8_t {
-        Atom, NotWorld, NotPbs, CustomPiece, Blended, TwoSided, Planar, Pending, AlphaTested, Skinned, NoRow, Stock
+        Atom, NotWorld, NotPbs, CustomPiece, Blended, CullFront, Planar, Pending, AlphaTested, Skinned, NoRow, Stock
     };
     AtomRoute atomRouteFor(const Node &n, Ogre::uint32 flags) const;
 public:
@@ -6263,12 +6266,27 @@ private:
     /// drain (drainPbsChanges), which re-composes the Items it re-hashed.
     struct AtomWordFeed final : detail::GpuSceneObserver {
         detail::WordCounts words;
+        /// THE TWO-SIDED ATOM SLOTS (ATOM-TWO-SIDED-1): kGpuAtom | kGpuTwoSided, per slot
+        /// and counted — what gates the passes' no-cull draw of the two-sided range.
+        std::vector<uint8_t> twoSided;
+        unsigned twoSidedCount = 0u;
         void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override {
             uint32_t flags = 0u;
             if (now) std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
             words.set(slot, (now && (flags & detail::kGpuAtom)) ? now->raster[0] : detail::WordCounts::kNone);
+            const uint8_t two = (now && (flags & detail::kGpuAtom) && (flags & detail::kGpuTwoSided)) ? 1u : 0u;
+            if (slot >= twoSided.size()) {
+                if (!two) return;
+                twoSided.resize(size_t(slot) + 1u, 0u);
+            }
+            twoSidedCount = twoSidedCount - twoSided[slot] + two;
+            twoSided[slot] = two;
         }
-        void gpuSceneReset() override { words.reset(); }
+        void gpuSceneReset() override {
+            words.reset();
+            twoSided.clear();
+            twoSidedCount = 0u;
+        }
     };
     AtomWordFeed mAtomFeed;
     /// THE CARD CANDIDATES, kept by the change feed (ATOM-CPU-WALKS-1). The surface
