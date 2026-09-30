@@ -2027,7 +2027,8 @@ void SceneMirror::syncGroundPlane()
         mGroundPlaneNode = mTarget->createNode();
         if (!mGroundPlaneNode) return;
         // A BACKDROP (EnginePrivate.h's bit scheme): out of every capture —
-        // shadows, GI geometry, probe faces, planar mirrors, the Atom id pass —
+        // shadow casters, GI geometry, probe faces, planar mirrors, the Atom id
+        // pass (it still RECEIVES shadows: its material samples the maps) —
         // and drawn by every view, the Player's included (the Player's host
         // turns the widget off rather than masking it).
         mTarget->setNodeBackdrop(mGroundPlaneNode, true);

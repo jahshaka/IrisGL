@@ -662,8 +662,9 @@ public:
     /// ONE mirror-owned quad, 4 km on a side (twice the editor camera's far
     /// clip in every direction, so its edge is never in view), a BACKDROP in
     /// the engine's sense (Scene::setNodeBackdrop): every view draws it, and
-    /// it is out of every capture — no shadow caster or receiver fit, no GI
-    /// geometry, no reflection-probe face, no planar mirror, no ray query, and
+    /// it is out of every capture — it casts no shadow (and so never sizes a
+    /// shadow fit) but RECEIVES shadows through its material in the main pass;
+    /// no GI geometry, no reflection-probe face, no planar mirror, no ray query, and
     /// not on Atom (the id pass draws the world channels only: it counts under
     /// AtomDrawStatus::notWorld). It sits kGroundPlaneSink under y = 0 so a
     /// real surface AT y = 0 — the Basic template's floor top — always wins the
