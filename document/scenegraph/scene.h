@@ -1208,7 +1208,8 @@ public:
 		"Equirectangular",
 		"Gradient",
 		"Material",
-		"Realistic"
+		"Realistic",
+		"None"
 	};
 
     void setSkyTexture(Texture2DPtr tex);
