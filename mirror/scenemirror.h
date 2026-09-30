@@ -1655,7 +1655,8 @@ private:
         /// the engine's AtmosphereSky). A change is a table rebuild and a
         /// re-capture of the environment in the engine — never a CPU bake —
         /// except the aerial scale, which the engine applies as a constant.
-        float   sunHaze = 0.0f, aerialScale = 0.0f, groundAlbedo = 0.0f, rayleighScale = 0.0f;
+        float   sunHaze = 0.0f, aerialScale = 0.0f, groundAlbedo = 0.0f, rayleighScale = 0.0f,
+                skyBrightness = 1.0f;
         bool    ozone = true;
         /// Realistic: the sun light's NOON illuminance in the renderer's units
         /// (linear colour x intensity x pi, untinted) — the sky is lit by it.

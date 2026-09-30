@@ -98,16 +98,18 @@ bool vrTurnModeFromName(const QString &name, VrTurnMode &out)
     return false;
 }
 
-// THE CLEAR EARTH (SKY-ATMOSPHERE-1): every scale at 1 is the reference's
-// atmosphere (Hillaire, EGSR 2020; jahshaka::engine::AtmosphereSky carries the
-// coefficients and MUST agree with these), the ozone layer on, and a ground of
-// albedo 0.3 — a mixed land surface (grass 0.25, dry soil 0.3, the planet's
-// mean ~0.3).
+// THE EARTH ON AN ORDINARY CLEAR DAY (SKY-ATMOSPHERE-1; the owner's defaults of
+// 2026-09-30): the reference's atmosphere (Hillaire, EGSR 2020;
+// jahshaka::engine::AtmosphereSky carries the coefficients and MUST agree with
+// these) with ten times its very clean aerosol, the ozone layer on, a ground of
+// albedo 0.3 (a mixed land surface), the physical sky's brightness, and no air
+// on the scene (the World fog's job).
 SkyRealistic SkyRealistic::defaults()
 {
     SkyRealistic s;
-    s.sunHaze       = 1.0f;
-    s.aerialScale   = 1.0f;
+    s.sunHaze       = 10.0f;    // a clean ordinary day: aerosol optical depth 0.053
+    s.aerialScale   = 0.0f;     // scene haze is the World fog's (owner 2026-09-30)
+    s.skyBrightness = 1.0f;     // the physical sky
     s.groundAlbedo  = 0.3f;
     s.rayleighScale = 1.0f;
     s.ozone         = true;
@@ -234,6 +236,7 @@ SkyRealistic Scene::clampSkyRealistic(SkyRealistic r)
     // from a verb either.
     r.sunHaze       = qBound(0.0f, r.sunHaze,       100.0f);
     r.aerialScale   = qBound(0.0f, r.aerialScale,   1.0f);
+    r.skyBrightness = qBound(0.0f, r.skyBrightness, 10.0f);
     r.groundAlbedo  = qBound(0.0f, r.groundAlbedo,  1.0f);
     r.rayleighScale = qBound(0.0f, r.rayleighScale, 10.0f);
     return r;
@@ -244,6 +247,7 @@ QJsonObject Scene::skyRealisticJson(const SkyRealistic &r)
     QJsonObject o;
     o.insert("sunHaze",       double(r.sunHaze));
     o.insert("aerialScale",   double(r.aerialScale));
+    o.insert("skyBrightness", double(r.skyBrightness));
     o.insert("groundAlbedo",  double(r.groundAlbedo));
     o.insert("rayleighScale", double(r.rayleighScale));
     o.insert("ozone",         r.ozone);
@@ -257,6 +261,7 @@ SkyRealistic Scene::skyRealisticFromJson(const QJsonObject &o)
     SkyRealistic r = d;
     r.sunHaze       = float(o.value("sunHaze").toDouble(d.sunHaze));
     r.aerialScale   = float(o.value("aerialScale").toDouble(d.aerialScale));
+    r.skyBrightness = float(o.value("skyBrightness").toDouble(d.skyBrightness));
     r.groundAlbedo  = float(o.value("groundAlbedo").toDouble(d.groundAlbedo));
     r.rayleighScale = float(o.value("rayleighScale").toDouble(d.rayleighScale));
     r.ozone         = o.value("ozone").toBool(d.ozone);
@@ -294,12 +299,11 @@ Scene::Scene()
     skyColor = QColor(96, 96, 96);
 
     fogColor = QColor(250, 250, 250);
-    // THE WORLD FOG IS OFF BY DEFAULT (FOG-ATMO-1 fix round). Under the
-    // realistic sky — the new scene's — the AIR already hazes the distance on
-    // its own, at the atmosphere's density (OgreSky.cpp airFogDensity): a
-    // default fog of half-gone-at-140 m on top of it, fading to the sky's own
-    // radiance, turned the ground yellow at a low sun. The fog is an authored
-    // medium (mist, smoke, a valley's haze), asked for, not a default. The
+    // THE WORLD FOG IS OFF BY DEFAULT (FOG-ATMO-1 fix round). It is an
+    // authored medium (mist, smoke, a valley's haze), asked for, not a default —
+    // and since SKY-ATMOSPHERE-1 it is THE scene's haze: the realistic sky's own
+    // air on the scene (SkyRealistic::aerialScale) is off by default too, and
+    // under that sky the fog fades towards the sky's own radiance. The
     // reader's absent-key default is this value (SceneReader reads
     // `fogEnabled` with scene->fogEnabled as its fallback); every shipped
     // sample carries its own fogEnabled/fogDensity and is untouched.

@@ -215,14 +215,23 @@ struct SkyRealistic
 {
 	/// THE HAZE: the aerosol (Mie) density as a multiple of the reference's
 	/// very clear air (aerosol optical depth 0.005). 0 = none (a purely
-	/// molecular sky), ~10 an ordinary clear day, ~50 hazy, 100 thick haze.
+	/// molecular sky), 10 = THE DEFAULT, a clean ordinary clear day (optical
+	/// depth 0.053), ~50 hazy, 100 thick haze. It is the SKY's haze (the
+	/// horizon, the sun's glow and colour, the Sky Light); a scene surface is
+	/// hazed only by `aerialScale` (off by default) and the World fog.
 	/// It moves the sky (a whiter horizon, a brighter glow round the sun), the
 	/// sun's colour and the aerial perspective together — one air.
-	float sunHaze = 1.0f;
-	/// THE AERIAL PERSPECTIVE ON GEOMETRY, a distance scale: 1 = the real air
-	/// between a surface and the camera, 0 = none (a lit surface reads as with
-	/// no air before it). No sky pixel reads it.
-	float aerialScale = 1.0f;
+	float sunHaze = 10.0f;
+	/// THE AERIAL PERSPECTIVE ON THE SCENE, a distance scale: 0 = THE DEFAULT,
+	/// none (scene haze is the World fog's job, owner 2026-09-30), 1 = the real
+	/// air of this atmosphere between a surface and the camera. No sky pixel
+	/// reads it.
+	float aerialScale = 0.0f;
+	/// THE SKY'S BRIGHTNESS (Unreal's "sky luminance factor"): scales the light
+	/// the air scatters — the sky's pixels, the Sky Light and reflections, the
+	/// aerial in-scatter — never the sun's direct light or its colour. 1 = the
+	/// physical sky, 0..10.
+	float skyBrightness = 1.0f;
 	/// The planet's surface albedo (grey, 0..1), seen under the horizon.
 	float groundAlbedo = 0.3f;
 	/// The molecular (Rayleigh) density as a multiple of Earth's — the sky's
@@ -922,7 +931,7 @@ public:
 	void setSkyRealistic(const SkyRealistic &r);
 
 	/// Every dial held inside the band the model can use: the haze 0..100, the
-	/// Rayleigh scale 0..10
+	/// sky's brightness 0..10, the Rayleigh scale 0..10
 	/// (a negative density would amplify the light rather than absorb it), the
 	/// aerial scale and the albedo 0..1 (a surface reflects at most what
 	/// arrives). Clamping in the DOCUMENT, not in the display, is what keeps a

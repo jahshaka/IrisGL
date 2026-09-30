@@ -7573,6 +7573,7 @@ bool SceneMirror::SkySource::operator==(const SkySource &o) const
         return skyColor == o.skyColor;
     case Kind::Realistic: {
         if (!(same(sunHaze, o.sunHaze) && same(aerialScale, o.aerialScale) &&
+              same(skyBrightness, o.skyBrightness) &&
               same(groundAlbedo, o.groundAlbedo) && same(rayleighScale, o.rayleighScale) &&
               ozone == o.ozone))
             return false;
@@ -7622,6 +7623,7 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
         src.kind = SkySource::Kind::Realistic;
         src.sunHaze = r.sunHaze;
         src.aerialScale = r.aerialScale;
+        src.skyBrightness = r.skyBrightness;
         src.groundAlbedo = r.groundAlbedo;
         src.rayleighScale = r.rayleighScale;
         src.ozone = r.ozone;
@@ -7742,6 +7744,7 @@ void SceneMirror::applySky(View *view)
             AtmosphereSky &a = mSkyDesc.atmosphere;
             a.sunHaze = src.sunHaze;
             a.aerialScale = src.aerialScale;
+            a.skyBrightness = src.skyBrightness;
             a.groundAlbedo = src.groundAlbedo;
             a.rayleighScale = src.rayleighScale;
             a.ozone = src.ozone;
