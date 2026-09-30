@@ -3303,6 +3303,9 @@ public:
     /// density never reaches the sunlight. The default matches
     /// `AtmosphereSky::sunHaze` and `iris::SkyRealistic::defaults()`.
     float         mAtmoSunHaze = 2.5f;
+    /// AtmosphereSky::atmosphereHaze (AIR-HAZE-TOGGLE-1): false zeroes the
+    /// air's aerial perspective (airFogDensity) and nothing else.
+    bool          mAtmoHaze = true;
     /// atmosphereSunTint's memo: the direction asked about, the answer, and the
     /// preset generation it was computed under (bumped by every setPreset).
     /// A sun that has not moved costs a compare.

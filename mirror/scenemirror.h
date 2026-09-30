@@ -1650,6 +1650,9 @@ private:
         /// sky-source field because it lives on the sky block, but it changes
         /// no sky pixel — it is the only input to the engine's sun-tint model.
         float   sunHaze = 0.0f;
+        /// Realistic: the air's haze on geometry is on (AIR-HAZE-TOGGLE-1) —
+        /// like sunHaze, no sky pixel moves with it.
+        bool    atmosphereHaze = true;
         /// Realistic: the SUN LIGHT's direction (towards the sun) and whether
         /// the scene has one at all — the sky's only sun input since D15.
         /// Compared with a dot-product band rather than exactly, so a gizmo
