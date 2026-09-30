@@ -1138,6 +1138,16 @@ Ogre::Hlms::PropertiesMergeStatus HlmsAtom::notifyPropertiesMergedPreGenerationS
 
 void HlmsAtom::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) {
     Ogre::HlmsPbs::calculateHashForPreCreate(renderable, inOutPieces);
+    // A TWO-SIDED MATERIAL'S BUCKET (ATOM-TWO-SIDED-1). PBS lights the face it sees by
+    // gl_FrontFacing (two_sided_flip_normal), which a full-screen decode draw cannot
+    // answer — so the property moves to the decode's own, which flips the shading normal
+    // by the decoded triangle's facing (800.Atom_piece_ps.any, atomFacing). It stays in
+    // the permutation (the bucket key reads this property set): a two-sided material is
+    // a bucket of its own.
+    if (getProperty(kNoTid, Ogre::PbsProperty::TwoSidedLighting)) {
+        setProperty(kNoTid, Ogre::PbsProperty::TwoSidedLighting, 0);
+        setProperty(kNoTid, Ogre::IdString("atom_two_sided"), 1);
+    }
     if (mClassifyDb && renderable && renderable->getDatablock() == mClassifyDb)
         setProperty(kNoTid, Ogre::IdString("atom_classify"), 1);
 }

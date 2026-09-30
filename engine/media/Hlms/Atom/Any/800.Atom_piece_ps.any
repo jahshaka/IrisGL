@@ -591,6 +591,10 @@
 		float3 w0 = mul( float4( p0, 1.0 ), atomWorld );
 		float3 w1 = mul( float4( p1, 1.0 ), atomWorld );
 		float3 w2 = mul( float4( p2, 1.0 ), atomWorld );
+		// THE FACING of the triangle (ATOM-TWO-SIDED-1): positive for a front face, as the
+		// rasteriser decided it - read below by a two-sided bucket, which lights the side
+		// it sees (PBS's own flip reads gl_FrontFacing, which a full-screen draw cannot).
+		float atomFacing = 1.0;
 		@property( atom_hit_mode )
 			// THE BARYCENTRICS ARE THE RAY'S (the record), and the hit point is on
 			// the triangle the ray committed to; nothing is recomputed through the
@@ -628,6 +632,9 @@
 				float3 atomDirW = atomOctDecode( unpackSnorm2x16( atomRec.w ) );
 				float3 atomDirV = mul( float4( atomDirW, 0.0 ), passBuf.view ).xyz;
 				atomHitViewDir = midf3_c( normalize( -atomDirV ) );
+				// A RAY SEES THE FACE ITS DIRECTION OPPOSES: the world winding's normal
+				// against the reversed ray.
+				atomFacing = dot( cross( w1 - w0, w2 - w0 ), -atomDirW );
 			}
 			atomHitSun = clamp( atomAux.x, 0.0, 1.0 );
 			if( !atomOk )
@@ -646,6 +653,15 @@
 		float4 c0 = mul( float4( w0, 1.0 ), passBuf.viewProj );
 		float4 c1 = mul( float4( w1, 1.0 ), passBuf.viewProj );
 		float4 c2 = mul( float4( w2, 1.0 ), passBuf.viewProj );
+		// THE RASTERISER'S OWN TEST in homogeneous form: the sign of the determinant of
+		// the three clip (x, y, w) rows is the screen winding for any w (a triangle across
+		// the eye plane included), perspective or orthographic; positive = counter-
+		// clockwise in y-up clip space, Ogre's front face - and the other way round in a
+		// pass whose projection flips y (the pass buffer's viewProj carries the flip).
+		atomFacing = determinant( float3x3( c0.xyw, c1.xyw, c2.xyw ) );
+		@property( hlms_forwardplus_flipY )
+			atomFacing = -atomFacing;
+		@end
 
 		float2 s0 = atomToPixels( c0, atomVpOrigin, atomVpSize );
 		float2 s1 = atomToPixels( c1, atomVpOrigin, atomVpSize );
@@ -744,6 +760,15 @@
 			inPs.normal = midf3_c( b.w.x * mul( midf3_c( n0 ), atomNormalMat ) +
 								   b.w.y * mul( midf3_c( n1 ), atomNormalMat ) +
 								   b.w.z * mul( midf3_c( n2 ), atomNormalMat ) );
+			@property( atom_two_sided )
+				// A TWO-SIDED BUCKET LIGHTS THE SIDE IT SEES (HlmsAtom maps PBS's
+				// two_sided_lighting onto atom_two_sided): the normal a back face is shaded
+				// with is the flipped one - PBS's two_sided_flip_normal, applied before the
+				// pieces normalise it, so every later derivation (the normal map's frame,
+				// the geometric normal) inherits it exactly as PBS's does.
+				if( atomFacing < 0.0 )
+					inPs.normal = -inPs.normal;
+			@end
 			@property( normal_map )
 				midf3x3 atomTangentMat = mul( toMidf3x3( atomWorld ), atomViewAdj );
 				inPs.tangent = midf3_c( b.w.x * mul( midf3_c( t0.xyz ), atomTangentMat ) +

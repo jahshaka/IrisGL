@@ -34,11 +34,12 @@
 //
 // THE PIPELINES: no vertex attributes, push constants only (128 bytes), a render pass
 // COMPATIBLE with Ogre's (the map's formats), per (formats, cull face, depth clamp).
-// The stock caster's state: the datablock's caster macroblock is the default one for
-// every Atom item (atomRouteFor keeps any other on PBS) — back faces culled, FRONT
-// where the pass flips (Hlms's InvertCullingMode), depth GREATER_OR_EQUAL under
-// reverse-Z with writes, depth CLAMP where the shadow camera asks for it (a
-// directional light's maps, OgreCompositorShadowNode.cpp).
+// The stock caster's state: an Atom item's caster macroblock culls as its material does
+// (atomRouteFor keeps any other on PBS) — back faces culled, FRONT where the pass flips
+// (Hlms's InvertCullingMode), or NOTHING for a two-sided item (ATOM-TWO-SIDED-1: the
+// list's two-sided range, a second draw with the no-cull pipeline); depth
+// GREATER_OR_EQUAL under reverse-Z with writes, depth CLAMP where the shadow camera
+// asks for it (a directional light's maps, OgreCompositorShadowNode.cpp).
 #include "EnginePrivate.h"
 #include "AtomPass.h"
 #include "GpuCull.h"
@@ -102,9 +103,11 @@ struct CasterPipelineKey {
     VkFormat colour = VK_FORMAT_UNDEFINED;   ///< UNDEFINED = depth only (a directional/spot map)
     VkFormat depth = VK_FORMAT_UNDEFINED;
     bool cullFront = false;                  ///< the pass flips: Hlms's InvertCullingMode
+    bool cullNone = false;                   ///< the two-sided range (ATOM-TWO-SIDED-1): both faces
     bool depthClamp = false;
     bool operator==(const CasterPipelineKey &o) const {
-        return colour == o.colour && depth == o.depth && cullFront == o.cullFront && depthClamp == o.depthClamp;
+        return colour == o.colour && depth == o.depth && cullFront == o.cullFront && cullNone == o.cullNone &&
+               depthClamp == o.depthClamp;
     }
 };
 
@@ -258,7 +261,7 @@ VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &
     rast.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rast.depthClampEnable = key.depthClamp ? VK_TRUE : VK_FALSE;
     rast.polygonMode = VK_POLYGON_MODE_FILL;
-    rast.cullMode = key.cullFront ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
+    rast.cullMode = key.cullNone ? VK_CULL_MODE_NONE : key.cullFront ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
     rast.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rast.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo ms{};
@@ -680,6 +683,16 @@ void recordCasterPass(AtomPassContext &ctx) {
     key.depthClamp = cam->getNeedsDepthClamp();
     const VkPipeline pipeline = pipelineFor(vkRs, key);
     if (!pipeline) return;
+    // THE TWO-SIDED RANGE'S PIPELINE (ATOM-TWO-SIDED-1): the same state culling nothing —
+    // a CULL_NONE material's stock caster draws both faces too.
+    VkPipeline pipelineTwoSided = VK_NULL_HANDLE;
+    if (scene->hasTwoSidedAtomItems()) {
+        CasterPipelineKey two = key;
+        two.cullFront = false;
+        two.cullNone = true;
+        pipelineTwoSided = pipelineFor(vkRs, two);
+        if (!pipelineTwoSided) return;
+    }
 
     // THE CUBE FACE: the scene pass turned the camera to its face for its own length and
     // back (CompositorPassScene::execute); this pass turns it the same way for its own.
@@ -825,8 +838,16 @@ void recordCasterPass(AtomPassContext &ctx) {
         VkDeviceSize drawOff = 0, countOff = 0;
         atomBufferOf(cull.draws(), drawBuf, drawOff);
         atomBufferOf(cull.count(), countBuf, countOff);
-        gC.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, std::min(cull.capacity(), gs.slotCount()),
+        const uint32_t maxDraws = std::min(cull.capacity(), gs.slotCount());
+        gC.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, maxDraws,
                                     GpuCull::kDrawWords * sizeof(uint32_t));
+        if (pipelineTwoSided) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineTwoSided);
+            gC.drawIndexedIndirectCount(
+                cmd, drawBuf, drawOff + VkDeviceSize(cull.twoSidedFirst()) * GpuCull::kDrawWords * sizeof(uint32_t),
+                countBuf, countOff + GpuCull::kTwoSidedCountOffsetBytes, maxDraws,
+                GpuCull::kDrawWords * sizeof(uint32_t));
+        }
     }
     // THE RENDERER'S COUNTERS SEE THIS DRAW TOO (the id pass's rule): this use's share,
     // from the last read (exact for a still scene, a few frames behind a moving one).
