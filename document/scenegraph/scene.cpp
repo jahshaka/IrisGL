@@ -165,6 +165,7 @@ SkyRealistic SkyRealistic::defaults()
     s.skyColour = QColor(157, 198, 255);
     s.power     = 1.5f;
     s.sunHaze   = 2.5f;
+    s.atmosphereHaze = true;
     return s;
 }
 
@@ -323,6 +324,7 @@ QJsonObject Scene::skyRealisticJson(const SkyRealistic &r)
     o.insert("horizon",   double(r.horizon));
     o.insert("power",     double(r.power));
     o.insert("sunHaze",   double(r.sunHaze));
+    o.insert("atmosphereHaze", r.atmosphereHaze);
     o.insert("skyColour", skyColourJson(r.skyColour));
     return o;
 }
@@ -339,6 +341,7 @@ SkyRealistic Scene::skyRealisticFromJson(const QJsonObject &o)
     r.horizon   = float(o.value("horizon").toDouble(d.horizon));
     r.power     = float(o.value("power").toDouble(d.power));
     r.sunHaze   = float(o.value("sunHaze").toDouble(d.sunHaze));
+    r.atmosphereHaze = o.value("atmosphereHaze").toBool(d.atmosphereHaze);
     r.skyColour = skyColourFromJson(o.value("skyColour").toObject(), d.skyColour);
     return r;
 }

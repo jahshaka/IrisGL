@@ -818,6 +818,16 @@ struct AtmosphereSky {
     /// applied on its own, like the sun disc (Scene::setSky) — which stales the
     /// probe grid for the fog it changes on surfaces, and nothing else.
     float sunHaze   = 2.5f;
+    /// THE AIR'S HAZE ON GEOMETRY, switchable (AIR-HAZE-TOGGLE-1, owner
+    /// 2026-09-30). True (the default): the aerial perspective above — the
+    /// air's extinction along every view ray at `sunHaze`'s turbidity. False:
+    /// the air's extinction on surfaces is ZERO (OgreScene::airFogDensity), so
+    /// a lit surface reads exactly as it does with no air between it and the
+    /// camera. The sun's tint still follows `sunHaze`, the sky dome is
+    /// untouched, and the World fog is its own switch. Like `sunHaze` it
+    /// changes no sky pixel, so it is ABSENT from the comparison below and
+    /// applied on its own (Scene::setSky).
+    bool  atmosphereHaze = true;
     /// Unit vector FROM the scene TOWARDS the sun, in world space — the scene's
     /// sun light's direction, reversed, pushed by the host. With `hasSun` false
     /// the sky is evaluated with the sun straight overhead at its lowest time
@@ -4607,7 +4617,7 @@ struct AtomDrawStatus {
     unsigned atomItems = 0;
     unsigned atomTwoSided = 0;
     unsigned pbsItems = 0;
-    /// Shown, but in no world channel (a backdrop such as the ground's horizon
+    /// Shown, but in no world channel (a backdrop such as the Ground plane widget's
     /// quad, or a helper): the id pass draws the world channels only.
     unsigned notWorld = 0;
     unsigned notPbs = 0;

@@ -221,6 +221,17 @@ bool OgreScene::setSky(const SkyDesc &desc) {
             staleProbeGrid(GiStaleReason::Fog);
         }
     }
+    // THE AIR'S HAZE SWITCH (AIR-HAZE-TOGGLE-1) rides the same road: it moves
+    // the aerial perspective on surfaces and no sky pixel.
+    if (desc.mode == SkyMode::Atmosphere &&
+        desc.atmosphere.atmosphereHaze != mSkyDesc.atmosphere.atmosphereHaze) {
+        mSkyDesc.atmosphere.atmosphereHaze = desc.atmosphere.atmosphereHaze;
+        mAtmoHaze = desc.atmosphere.atmosphereHaze;
+        if (mAtmoSkyOn) {
+            pushFogState();
+            staleProbeGrid(GiStaleReason::Fog);
+        }
+    }
     // THE CLOUD LAYER (CLOUDS-2D-1) is the fourth independent half. Three kinds
     // of change, three costs: the FIELD (coverage, density, the weather map)
     // re-bakes the optical-depth field; the LOOK (the field, the altitude, the
@@ -474,6 +485,7 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         // above a purely molecular atmosphere — under 1 the aerosol term would
         // turn negative and AMPLIFY the beam.
         mAtmoSunHaze = std::max(1.0f, sky.sunHaze);
+        mAtmoHaze = sky.atmosphereHaze;
         ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
 
         // THE SUN, PUSHED IN. setSunDir takes the direction the light TRAVELS
@@ -692,7 +704,7 @@ Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
 //             3.912/sigma = 28 km — a clear day, which is what T 2.5 is)
 //
 // so a surface keeps exp(-sigma d): 98.6 % at 100 m, 87.1 % at 1 km (the
-// editor camera's far plane), 75.8 % at the 2 km horizon plane. At T 1 (pure
+// editor camera's far plane), 75.8 % at 2 km. At T 1 (pure
 // air) it is 1.26e-5 — 300 km visibility; at T 6, 4.3e-4 — 9 km.
 //
 // The component's fog is exp2(-d * fogDensity), so the number handed over is
@@ -701,7 +713,9 @@ Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
 // blue-over-red extinction is not carried — the colour it fogs TOWARDS is the
 // sky's own scattering, which is where the blue of distance comes from.
 float OgreScene::airFogDensity() const {
-    if (!mAtmoSkyOn) return 0.0f;
+    // No analytic sky, or its haze switched off (AtmosphereSky::atmosphereHaze):
+    // no air between a surface and the camera.
+    if (!mAtmoSkyOn || !mAtmoHaze) return 0.0f;
     constexpr float kRayleighScaleHeightM = 8000.0f;
     constexpr float kAerosolScaleHeightM  = 1200.0f;
     constexpr float kLn2 = 0.69314718f;

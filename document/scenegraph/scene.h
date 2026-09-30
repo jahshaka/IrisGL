@@ -241,6 +241,14 @@ struct SkyRealistic
 	/// metre at 2.5, 76 % of a surface left at 2 km), always on, fogging
 	/// towards the sky's own colour. No sky pixel reads it.
 	float sunHaze = 2.5f;
+	/// THE AIR'S HAZE ON GEOMETRY, switchable (AIR-HAZE-TOGGLE-1, owner
+	/// 2026-09-30: "a toggle to disable the atmosphere haze"). True — the
+	/// default — is the aerial perspective `sunHaze` describes; false takes the
+	/// air's extinction off every surface (the engine's airFogDensity reads
+	/// zero). The sun's tint still follows `sunHaze`; the World fog is its own
+	/// switch and is untouched. Serialized as "atmosphereHaze"; an absent key
+	/// reads as this default (the reader-defaults trap).
+	bool atmosphereHaze = true;
 
 	// THE SKY HAS NO SUN OF ITS OWN (SKY_LIGHT_SPEC.md §3, owner decision D15).
 	// The analytic sky's sun DIRECTION comes from the scene's sun — the first
@@ -1081,9 +1089,8 @@ public:
 	/// exactly like the tier or the VR rows, because it is a property of the
 	/// work and not of the machine or the session.
 	///
-	/// It hides the floor the app itself made (MeshNode::defaultFloor) and, with
-	/// it, the mirror-owned horizon plane that extends it — never an authored
-	/// ground, and never by deleting or unticking anything in the document: the
+	/// It hides the floors the app's templates made (MeshNode::defaultFloor) —
+	/// never an authored ground, and never by deleting or unticking anything in the document: the
 	/// EDITOR is untouched with this on, and the node keeps its own visibility.
 	/// SceneMirror::setHideDefaultFloor is the one place it is carried out.
 	/// Default false — a new project plays on its floor until somebody says
