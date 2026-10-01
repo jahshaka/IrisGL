@@ -230,7 +230,6 @@ list(SORT _clod_patches)
 set(SRCS
     document/assets/mesh.cpp
     document/scenegraph/meshnode.cpp
-    import/graphicshelper.cpp
     import/meshprewarm.cpp
     import/parsecensus.cpp
     import/meshbake.cpp
@@ -246,6 +245,7 @@ set(SRCS
     document/scenegraph/cameranode.cpp
     document/scenegraph/cameralens.cpp
     document/assets/livetextures.cpp
+    document/assets/shippedmeshes.cpp
     document/assets/texture2d.cpp
     document/materials/material.cpp
     core/geometry/trimesh.cpp
@@ -294,6 +294,7 @@ set (HEADERS
     document/scenegraph/lightnode.h
     document/scenegraph/decalnode.h
     document/assets/livetextures.h
+    document/assets/shippedmeshes.h
     document/assets/texture2d.h
     document/assets/texture.h
     document/scenegraph/shadowmap.h
@@ -305,7 +306,6 @@ set (HEADERS
     document/assets/vertexlayout.h
     document/assets/vertexbuffer.h
     core/viewport.h
-    import/graphicshelper.h
     import/meshprewarm.h
     import/parsecensus.h
     import/meshbake.h
@@ -431,13 +431,8 @@ endif()
 #       the VALUE of ImportFlags::Canonical, and producerId already hashes that
 #       value NUMERICALLY (`flags%4`). Hashing the files adds nothing the exact
 #       integer misses and would stale every library on a comment edit; the
-#       headers are ~90% prose. (ClipNamesOnly never reaches a bake at all.)
-#   import/graphicshelper.cpp — holds no conversion of its own: five thin
-#       wrappers around `new Mesh(aiMesh*)`, Mesh::extractSkeleton/
-#       extractAnimations and ReadFile(ImportFlags::…). MeshBake does its own
-#       ReadFile and its own loop, so no baked byte passes through this file.
-#       It is the PARSE twin the bake must agree with, which is what the lint
-#       watches it for.
+#       headers are ~90% prose. (ClipNamesOnly reaches the CLIP bake the same
+#       way — as its exact integer in MeshBake::clipFingerprintFor.)
 #   import/materialhelper.h — declarations only: no inline bodies, no
 #       constants. A behaviour change there cannot avoid editing the .cpp.
 #   document/assets/mesh.{cpp,h}, document/assets/skeleton.{cpp,h},

@@ -103,8 +103,11 @@ For more information see the LICENSE file
 #include <QStringList>
 #include <QVector>
 #include <functional>
+#include <memory>
 
 #include "irisglfwd.h"
+#include "import/clipfileinfo.h"
+#include "import/modelsceneinfo.h"
 #include "import/scenesource.h"
 #include "document/assets/mesh.h"   // MeshMaterialData
 
@@ -151,6 +154,13 @@ public:
         /// single-mesh shortcut (one MeshNode, no children).
         BakedNode root;
         bool singleMesh = false;
+        /// THE FACTS OF THE PARSE THE BAKE WAS BUILT FROM (SHIPPED-BAKES-1):
+        /// counts, texture references, bone and node names, the clip table, the
+        /// measured extent and the file's declared unit — exactly what
+        /// ModelSceneInfo reads off the same aiScene. Studio's metadata backfill
+        /// reads it from here (services/assetmetadata.cpp), so describing a
+        /// library model after its import is a bake read, never a parse.
+        ModelSceneInfo describe;
         /// WHAT THE BAKE COST, per mesh and per stage (IMPORT-SPEED-1): the import's
         /// log line carries it, so the next slow file is diagnosed from the log
         /// alone. Never serialized — it describes the run, not the product.
@@ -445,6 +455,61 @@ public:
     /// compared instead of silently disagreeing.
     static int cardCaptureResolution();
 
+    // ---- THE CLIP BAKE (SHIPPED-BAKES-1) -----------------------------------
+    //
+    // An ANIMATION CLIP FILE (Studio's ModelTypes::Animation — a Mixamo
+    // download "without skin", a .bvh capture) has no geometry for a mesh bake
+    // and used to be PARSED by every reader: the avatar module's Load
+    // Animation, avatar.loadClip, the scene reader's clip branch, the
+    // thumbnail's pose strip and the metadata backfill. This is its built form,
+    // a second KIND beside the model bake: the same producer key, the same
+    // store role, its own magic and its own name.
+    //
+    // ONE BAKE PER CONTENT, BUILT AT IDENTITY. A clip's position keys have to
+    // land on a rig baked under the CHARACTER's import settings, and one clip
+    // drives many rigs — so the bake keeps the keys in the file's own units
+    // (the file's declared unit applied, ImportFlags::ClipNamesOnly, exactly
+    // what a clip read with an identity transform produced) and the rig's
+    // uniform factor is applied when it is READ (`clipAnimations`), the one
+    // thing assimp's ScaleProcess would have done to a position key with it.
+    struct Clip
+    {
+        bool valid = false;
+        QString fingerprint;
+        /// Names, numbers, the node hierarchy and the pose-strip poses
+        /// (ClipFileInfo::stripFractions()) of the parse.
+        ClipFileInfo info;
+        /// Mesh::extractAnimations of the parse, at identity.
+        QMap<QString, SkeletalAnimationPtr> animations;
+        /// Metres per source unit as the FILE declares it — what a rig's UNIT
+        /// OVERRIDE is resolved against (import/scenesource.h) without a probe.
+        double declaredUnitScale = 1.0;
+    };
+
+    /// The clip bake's key for a source whose content id is `sourceOid`.
+    static QString clipFingerprintFor(const QString &sourceOid);
+    /// `<oid16>-clip.jcb` — content only: the rig's settings are applied at read.
+    static QString clipFileNameFor(const QString &sourceOid);
+    /// Parse `filePath` (ImportFlags::ClipNamesOnly, identity) and build its
+    /// clip bake. AN IMPORT-TIME / REBUILD CALL (source.assimp_import_only).
+    static Clip buildClipFromFile(const QString &filePath, const QString &fingerprint);
+    /// IrisGL-internal form (a complete aiScene needs assimp's headers).
+    static Clip buildClipFromScene(const aiScene *scene, const QString &filePath,
+                                   const QString &fingerprint);
+    static QByteArray serializeClip(const Clip &clip);
+    static Clip deserializeClip(const QByteArray &blob,
+                                const QString &expectFingerprint = QString());
+    static Clip readClip(const QString &path, const QString &expectFingerprint = QString());
+    static bool writeClip(const QString &path, const Clip &clip, QString *errorOut);
+    static bool clipHeaderMatches(const QString &path, const QString &expectFingerprint);
+    /// The clip's animations for a RIG imported under `rig` (its keysOnly()
+    /// transform): FRESH copies every call (a caller owns what it is handed),
+    /// `source` stamped on each, position keys scaled by the rig's uniform
+    /// factor exactly as readSceneFile would have handed it to assimp.
+    static QMap<QString, SkeletalAnimationPtr> clipAnimations(const Clip &clip,
+                                                              const ImportTransform &rig,
+                                                              const QString &source);
+
     /// Build the bake from an ALREADY PARSED scene (the import side pays no
     /// second parse). `extractDir` is handed to MaterialHelper exactly as
     /// loadAsSceneFragment would.
@@ -490,6 +555,13 @@ public:
     /// generation" test, not a full deserialize per stale row.
     static bool headerMatches(const QString &path, const QString &expectFingerprint);
 
+    /// THE FACTS OF THE IMPORT'S PARSE alone (Model::describe), read from the
+    /// bake's HEADER — the read stops there, no geometry is deserialized. What
+    /// the metadata backfill describes a model from. False on a blob of another
+    /// format, another key (when one is given) or a truncated header.
+    static bool readDescribe(const QString &path, ModelSceneInfo *out,
+                             const QString &expectFingerprint = QString());
+
     /// Write ATOMICALLY (temp + rename in the same directory): a bake at its
     /// final path is either absent or complete, even through a SIGKILL.
     static bool write(const QString &path, const Model &model, QString *errorOut);
@@ -507,6 +579,9 @@ private:
                                          const QString &fingerprint, const QString &extractDir,
                                          const ImportTransform &xf);
 };
+
+/// A read clip bake, shared (Studio's MeshBakeStore::loadClip).
+using BakedClipPtr = std::shared_ptr<const MeshBake::Clip>;
 
 }   // namespace iris
 

@@ -17,6 +17,8 @@ For more information see the LICENSE file
 #include <QVector>
 #include <QVector3D>
 
+struct aiScene;
+
 namespace iris
 {
 
@@ -69,9 +71,23 @@ struct ClipFileInfo
     };
     QVector<Pose> poses;
 
-    /// ONE parse. `poseFractions` empty = names and numbers only.
+    /// ONE parse. `poseFractions` empty = names and numbers only. AN IMPORT-TIME
+    /// CALL (source.assimp_import_only): the clip bake (import/meshbake.h,
+    /// MeshBake::Clip) carries this struct, and every reader after the import
+    /// reads it from there.
     static ClipFileInfo read(const QString &filePath,
                              const QVector<double> &poseFractions = QVector<double>());
+
+    /// The moments of the first clip a POSE STRIP samples (three poses — enough
+    /// to read a walk from a stride, and to tell two clip files apart at tile
+    /// size). The clip bake samples exactly these, so a thumbnail redrawn from
+    /// the bake is the import's own strip.
+    static QVector<double> stripFractions();
+
+    /// IrisGL-internal (a complete aiScene needs assimp's headers): the same
+    /// facts, off a scene already parsed with ImportFlags::ClipNamesOnly.
+    static ClipFileInfo fromScene(const aiScene *scene,
+                                  const QVector<double> &poseFractions = QVector<double>());
 };
 
 } // namespace iris

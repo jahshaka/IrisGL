@@ -38,7 +38,7 @@
 #include "irisgl/document/assets/livetextures.h"
 #include "irisgl/document/assets/texture2d.h"
 #include "irisgl/document/scenegraph/shadowmap.h"
-#include "irisgl/import/graphicshelper.h"   // the VR controller models (phase 4b stage 1)
+#include "irisgl/document/assets/shippedmeshes.h"   // the VR controller models (SHIPPED-BAKES-1)
 #include <QFileInfo>
 #include <functional>
 #include <chrono>
@@ -2282,12 +2282,15 @@ void SceneMirror::setVrProxyModels(const QString &leftPath, const QString &right
 // THE VENDORED CONTROLLER MODEL, LOADED ONCE (phase 4b stage 1).
 //
 // ONE MESH, BAKED AT VENDORING. The upstream glTF places its six parts (body,
-// trigger, squeeze, thumbstick, two buttons) by NODE TRANSFORM, and this tree's
-// one assimp read site hands back `aiScene::mMeshes` with no node tree at all —
-// six parts loaded that way land on top of each other. So the transforms are
-// baked into ONE mesh at vendoring (app/content/vr/make-controller-obj.py) and
-// this is an ordinary model read, through the same choke point every other
-// model in the tree goes through.
+// trigger, squeeze, thumbstick, two buttons) by NODE TRANSFORM, so the
+// transforms are baked into ONE mesh at vendoring
+// (app/content/vr/make-controller-obj.py).
+//
+// AND BAKED AGAIN AT SEED (SHIPPED-BAKES-1): the pair are shipped meshes like
+// the primitives — seed rows the library bakes once (Studio's
+// src/data/primitives.h) — and the slot's paths are their SEED KEYS, resolved
+// through the host's shipped-mesh resolver (document/assets/shippedmeshes.h).
+// Nothing here parses: a key the host cannot resolve leaves the wand.
 //
 // NO TEXTURES, DELIBERATELY: unlit grey. A helper's material is the mirror's,
 // not the asset's, and a controller that lit the room or sampled an albedo map
@@ -2301,31 +2304,30 @@ jahshaka::engine::MeshId SceneMirror::vrProxyModelMesh(int hand)
     const QString path = mVrProxyModelPath[hand];
     if (path.isEmpty()) return 0;
 
-    const QList<iris::MeshPtr> parts = iris::GraphicsHelper::loadAllMeshesFromFile(path);
-    MeshData merged;
-    for (const iris::MeshPtr &part : parts) {
-        MeshData one;
-        if (!part || !toMeshData(part.data(), one) || one.positions.empty()) continue;
-        const unsigned base = unsigned(merged.positions.size() / 3);
-        merged.positions.insert(merged.positions.end(), one.positions.begin(),
-                                one.positions.end());
-        // NORMALS ARE PADDED RATHER THAN DROPPED when a part has none: the
-        // vertex declaration is decided by the FIRST part, so a mesh that is
-        // half normalled would upload a buffer of the wrong length.
-        const size_t verts = one.positions.size() / 3;
-        if (one.normals.size() == verts * 3)
-            merged.normals.insert(merged.normals.end(), one.normals.begin(), one.normals.end());
-        else
-            merged.normals.insert(merged.normals.end(), verts * 3, 0.0f);
-        for (unsigned idx : one.indices) merged.indices.push_back(base + idx);
-    }
-    if (merged.positions.empty() || merged.indices.empty()) {
+    // ONE baked mesh (the vendoring merged the parts; the seed baked it).
+    const iris::MeshPtr baked = iris::ShippedMeshes::mesh(path);
+    MeshData data;
+    if (!baked || !toMeshData(baked.data(), data) || data.positions.empty()
+        || data.indices.empty()) {
         qWarning("SceneMirror: the VR controller model '%s' has no geometry - the wand stands in",
                  qUtf8Printable(path));
         return 0;
     }
-    mVrProxyModelMesh[hand] = mTarget->createMesh(merged);
+    mVrProxyModelTriangles[hand] = int(data.indices.size() / 3);
+    mVrProxyModelMesh[hand] = mTarget->createMesh(data);
     return mVrProxyModelMesh[hand];
+}
+
+SceneMirror::VrProxyDrawn SceneMirror::vrProxyDrawn(int hand) const
+{
+    VrProxyDrawn out;
+    if (hand < 0 || hand > 1) return out;
+    out.model = mVrProxyMesh[hand] != 0 && mVrProxyMesh[hand] == mVrProxyModelMesh[hand];
+    if (out.model) {
+        out.key = mVrProxyModelPath[hand];
+        out.triangles = mVrProxyModelTriangles[hand];
+    }
+    return out;
 }
 
 // THE SESSION BUILDS THEM; THE USER'S SWITCH DECIDES ONLY THE HAND MARKERS

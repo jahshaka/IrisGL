@@ -101,6 +101,11 @@ Record::~Record()
     if (tBakeBuildDepth > 0) {
         ++c.bakeBuilds;
         c.bakeBuildMs += ms;
+        if (main) {
+            ++c.mainThreadBakeBuilds;
+            c.mainThreadBakeBuildMs += ms;
+            c.lastMainThreadBakePath = mPath;
+        }
     } else if (main && resource) {
         ++c.mainThreadResourceParses;
         c.mainThreadResourceMs += ms;

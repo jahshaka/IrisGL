@@ -217,8 +217,17 @@ namespace
 // 0002 keeps a terminal group's border locked. The lost facets are walked exactly
 // (`facetMax`). Roots collapse again (uv-sphere-20k 2916 -> 76 triangles, physics-model
 // 306 -> 76, round-bar-40m 4806 -> 24); every DAG re-bakes.
-constexpr int kFormatVersion = 19;
-constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
+// v20 (2026-10-01, SHIPPED-BAKES-1): THE BAKE CARRIES THE FACTS OF ITS PARSE.
+// Every model bake gains a trailing DESCRIBE block (ModelSceneInfo: counts,
+// texture references, bone and node names, the clip table, the extent, the
+// declared unit) so the metadata backfill reads a bake instead of parsing; and a
+// second bake KIND, the CLIP bake ('JCLP', MeshBake::Clip), is written under the
+// same version for every animation clip file. The container changed, so every
+// .jmb written before today is rejected by this line and every library re-bakes
+// once (BAKEKEY-1).
+constexpr int kFormatVersion = 20;
+constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
+constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
 /// bytes on every machine and every Qt version, because the bake's content id
@@ -848,6 +857,176 @@ bool readNode(QDataStream &s, BakedNode &n, int depth)
     for (qint32 i = 0; i < childCount; ++i)
         if (!readNode(s, n.children[i], depth + 1)) return false;
     return true;
+}
+
+// ---- plain facts (the describe block, the clip bake) ------------------------
+//
+// A DOUBLE IS WRITTEN AS ITS BITS. The stream is pinned to single precision (the
+// geometry is float), and a clip's length or a file's unit declaration rounded
+// to a float would make the backfill disagree with the import's own numbers.
+
+void writeF64(QDataStream &s, double v)
+{
+    quint64 bits = 0;
+    static_assert(sizeof(bits) == sizeof(v), "double is 64-bit");
+    std::memcpy(&bits, &v, sizeof(bits));
+    s << bits;
+}
+
+double readF64(QDataStream &s)
+{
+    quint64 bits = 0;
+    s >> bits;
+    double v = 0.0;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+bool readStrings(QDataStream &s, QStringList &out)
+{
+    qint32 n = 0;
+    s >> n;
+    if (s.status() != QDataStream::Ok || n < 0 || n > 10000000) return false;
+    out.clear();
+    out.reserve(n);
+    for (qint32 i = 0; i < n; ++i) {
+        QString v;
+        s >> v;
+        out.append(v);
+    }
+    return s.status() == QDataStream::Ok;
+}
+
+void writeStrings(QDataStream &s, const QStringList &list)
+{
+    s << qint32(list.size());
+    for (const QString &v : list) s << v;
+}
+
+void writeDescribe(QDataStream &s, const ModelSceneInfo &d)
+{
+    s << qint32(d.parsed ? 1 : 0);
+    s << qint64(d.vertices) << qint64(d.triangles) << qint32(d.meshes) << qint32(d.materials);
+    writeStrings(s, d.textureReferences);
+    s << qint32(d.embeddedTextures);
+    writeStrings(s, d.boneNames);
+    writeStrings(s, d.nodeNames);
+    s << qint32(d.animations.size());
+    for (const ModelSceneInfo::Animation &a : d.animations) {
+        s << a.name;
+        writeF64(s, a.ticksPerSecond);
+        writeF64(s, a.durationTicks);
+        writeF64(s, a.lengthSeconds);
+        writeStrings(s, a.channelNames);
+    }
+    writeF64(s, d.extentX);
+    writeF64(s, d.extentY);
+    writeF64(s, d.extentZ);
+    s << qint32(d.extentValid ? 1 : 0);
+    writeF64(s, d.declaredUnitScale);
+}
+
+bool readDescribe(QDataStream &s, ModelSceneInfo &d)
+{
+    qint32 parsed = 0, meshes = 0, materials = 0, embedded = 0, animCount = 0;
+    qint64 vertices = 0, triangles = 0;
+    s >> parsed >> vertices >> triangles >> meshes >> materials;
+    if (!readStrings(s, d.textureReferences)) return false;
+    s >> embedded;
+    if (!readStrings(s, d.boneNames) || !readStrings(s, d.nodeNames)) return false;
+    s >> animCount;
+    if (s.status() != QDataStream::Ok || animCount < 0 || animCount > 100000) return false;
+    d.parsed = parsed != 0;
+    d.vertices = vertices;
+    d.triangles = triangles;
+    d.meshes = meshes;
+    d.materials = materials;
+    d.embeddedTextures = embedded;
+    d.animations.clear();
+    for (qint32 i = 0; i < animCount; ++i) {
+        ModelSceneInfo::Animation a;
+        s >> a.name;
+        a.ticksPerSecond = readF64(s);
+        a.durationTicks = readF64(s);
+        a.lengthSeconds = readF64(s);
+        if (!readStrings(s, a.channelNames)) return false;
+        d.animations.append(a);
+    }
+    d.extentX = readF64(s);
+    d.extentY = readF64(s);
+    d.extentZ = readF64(s);
+    qint32 extentValid = 0;
+    s >> extentValid;
+    d.extentValid = extentValid != 0;
+    d.declaredUnitScale = readF64(s);
+    return s.status() == QDataStream::Ok;
+}
+
+void writeClipInfo(QDataStream &s, const ClipFileInfo &info)
+{
+    s << qint32(info.parsed ? 1 : 0) << qint32(info.meshes) << qint32(info.animations);
+    s << qint32(info.clips.size());
+    for (const ClipFileInfo::Clip &c : info.clips) {
+        s << c.name;
+        writeF64(s, c.ticksPerSecond);
+        writeF64(s, c.durationTicks);
+        writeF64(s, c.lengthSeconds);
+        writeStrings(s, c.channelNames);
+    }
+    writeStrings(s, info.nodeNames);
+    s << qint32(info.nodeParents.size());
+    for (int parent : info.nodeParents) s << qint32(parent);
+    s << qint32(info.poses.size());
+    for (const ClipFileInfo::Pose &pose : info.poses) {
+        s << qint32(pose.positions.size());
+        for (const QVector3D &p : pose.positions) s << float(p.x()) << float(p.y()) << float(p.z());
+    }
+}
+
+bool readClipInfo(QDataStream &s, ClipFileInfo &info)
+{
+    qint32 parsed = 0, meshes = 0, animations = 0, clipCount = 0;
+    s >> parsed >> meshes >> animations >> clipCount;
+    if (s.status() != QDataStream::Ok || clipCount < 0 || clipCount > 100000) return false;
+    info.parsed = parsed != 0;
+    info.meshes = meshes;
+    info.animations = animations;
+    for (qint32 i = 0; i < clipCount; ++i) {
+        ClipFileInfo::Clip c;
+        s >> c.name;
+        c.ticksPerSecond = readF64(s);
+        c.durationTicks = readF64(s);
+        c.lengthSeconds = readF64(s);
+        if (!readStrings(s, c.channelNames)) return false;
+        info.clips.append(c);
+    }
+    if (!readStrings(s, info.nodeNames)) return false;
+    qint32 parents = 0;
+    s >> parents;
+    if (s.status() != QDataStream::Ok || parents < 0 || parents > 10000000) return false;
+    info.nodeParents.reserve(parents);
+    for (qint32 i = 0; i < parents; ++i) {
+        qint32 parent = -1;
+        s >> parent;
+        info.nodeParents.append(parent);
+    }
+    qint32 poseCount = 0;
+    s >> poseCount;
+    if (s.status() != QDataStream::Ok || poseCount < 0 || poseCount > 64) return false;
+    for (qint32 i = 0; i < poseCount; ++i) {
+        qint32 n = 0;
+        s >> n;
+        if (s.status() != QDataStream::Ok || n < 0 || n > 10000000) return false;
+        ClipFileInfo::Pose pose;
+        pose.positions.reserve(n);
+        for (qint32 j = 0; j < n; ++j) {
+            float x = 0, y = 0, z = 0;
+            s >> x >> y >> z;
+            pose.positions.append(QVector3D(x, y, z));
+        }
+        info.poses.append(pose);
+    }
+    return s.status() == QDataStream::Ok;
 }
 
 }   // namespace
@@ -5593,6 +5772,10 @@ MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QS
         model.animations = kept;
     }
 
+    // The facts of THIS parse, for every reader after the import (the
+    // metadata backfill) — read off the same aiScene ModelSceneInfo reads.
+    model.describe = ModelSceneInfo::fromScene(scene);
+
     // Same shortcut condition as both loadAsSceneFragment overloads.
     model.singleMesh = scene->mNumMeshes == 1 && scene->mMeshes[0]->mNumBones == 0;
     if (model.singleMesh) {
@@ -5642,6 +5825,17 @@ QByteArray MeshBake::serialize(const Model &model)
     QDataStream s(&blob, QIODevice::WriteOnly);
     configure(s);
     s << quint32(kMagic) << qint32(kFormatVersion) << model.fingerprint;
+    // THE DESCRIBE BLOCK IN THE HEADER (SHIPPED-BAKES-1): the facts of the
+    // import's parse, as one length-prefixed blob right after the key, so the
+    // metadata backfill (readDescribe) reads them and stops — no geometry, no
+    // LOD chain, no cards, no field is ever deserialized to describe a model.
+    {
+        QByteArray facts;
+        QDataStream d(&facts, QIODevice::WriteOnly);
+        configure(d);
+        writeDescribe(d, model.describe);
+        s << facts;
+    }
     s << qint32(model.singleMesh ? 1 : 0);
 
     s << qint32(model.meshes.size());
@@ -5696,6 +5890,14 @@ MeshBake::Model MeshBake::deserialize(const QByteArray &blob, const QString &exp
     s >> model.fingerprint;
     if (s.status() != QDataStream::Ok) return Model();
     if (!expectFingerprint.isEmpty() && model.fingerprint != expectFingerprint) return Model();
+    {
+        QByteArray facts;
+        s >> facts;
+        if (s.status() != QDataStream::Ok) return Model();
+        QDataStream d(facts);
+        configure(d);
+        if (!::iris::readDescribe(d, model.describe)) return Model();
+    }
 
     qint32 singleMesh = 0, meshCount = 0;
     s >> singleMesh >> meshCount;
@@ -5726,6 +5928,35 @@ MeshBake::Model MeshBake::deserialize(const QByteArray &blob, const QString &exp
 
     model.valid = true;
     return model;
+}
+
+bool MeshBake::readDescribe(const QString &path, ModelSceneInfo *out,
+                            const QString &expectFingerprint)
+{
+    if (path.isEmpty() || !out) return false;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    // SEQUENTIAL off the file: the header's magic, version, key and the facts
+    // blob, then the read stops — the geometry behind it is never touched.
+    QDataStream s(&file);
+    configure(s);
+    quint32 magic = 0;
+    qint32 version = 0;
+    QString fingerprint;
+    s >> magic >> version;
+    if (magic != kMagic || version != kFormatVersion) return false;
+    s >> fingerprint;
+    if (s.status() != QDataStream::Ok) return false;
+    if (!expectFingerprint.isEmpty() && fingerprint != expectFingerprint) return false;
+    QByteArray facts;
+    s >> facts;
+    if (s.status() != QDataStream::Ok) return false;
+    QDataStream d(facts);
+    configure(d);
+    ModelSceneInfo info;
+    if (!::iris::readDescribe(d, info) || !info.parsed) return false;
+    *out = info;
+    return true;
 }
 
 MeshBake::Model MeshBake::read(const QString &path, const QString &expectFingerprint)
@@ -5759,6 +5990,180 @@ bool MeshBake::write(const QString &path, const Model &model, QString *errorOut)
         return false;
     }
     return true;
+}
+
+// ---- the clip bake (SHIPPED-BAKES-1) ---------------------------------------
+
+QString MeshBake::clipFingerprintFor(const QString &sourceOid)
+{
+    if (sourceOid.isEmpty()) return QString();
+    // The producer key, the CLIP read's own flags (not the canonical preset's)
+    // and the strip's sample points — a change to any of them is a different
+    // bake.
+    QStringList fractions;
+    for (double f : ClipFileInfo::stripFractions()) fractions << QString::number(f, 'g', 17);
+    const QByteArray key = (producerId() + QStringLiteral("|clip|flags")
+                            + QString::number(quint64(ImportFlags::ClipNamesOnly))
+                            + QStringLiteral("|poses") + fractions.join(QLatin1Char(','))
+                            + QLatin1Char('|') + sourceOid).toUtf8();
+    return QString::fromLatin1(QCryptographicHash::hash(key, QCryptographicHash::Sha256).toHex());
+}
+
+QString MeshBake::clipFileNameFor(const QString &sourceOid)
+{
+    return QStringLiteral("%1-clip.jcb").arg(sourceOid.left(16));
+}
+
+MeshBake::Clip MeshBake::buildClipFromScene(const aiScene *scene, const QString &filePath,
+                                            const QString &fingerprint)
+{
+    Clip clip;
+    if (!scene) return clip;
+    clip.info = ClipFileInfo::fromScene(scene, ClipFileInfo::stripFractions());
+    if (!clip.info.parsed) return Clip();
+    clip.animations = Mesh::extractAnimations(scene, filePath);
+    clip.declaredUnitScale = ModelSceneInfo::fromScene(scene).declaredUnitScale;
+    clip.fingerprint = fingerprint;
+    clip.valid = true;
+    return clip;
+}
+
+MeshBake::Clip MeshBake::buildClipFromFile(const QString &filePath, const QString &fingerprint)
+{
+    Assimp::Importer importer;
+    // IDENTITY, ClipNamesOnly: the file's own declared unit applies (a clip's
+    // keys are in its file's units) and nothing else — the rig's factor is
+    // applied at read (clipAnimations).
+    const aiScene *scene = readSceneFile(importer, filePath, ImportFlags::ClipNamesOnly);
+    if (!scene) {
+        irisLog("clip bake: assimp could not read " + filePath);
+        return Clip();
+    }
+    return buildClipFromScene(scene, filePath, fingerprint);
+}
+
+QByteArray MeshBake::serializeClip(const Clip &clip)
+{
+    QByteArray blob;
+    QDataStream s(&blob, QIODevice::WriteOnly);
+    configure(s);
+    s << quint32(kClipMagic) << qint32(kFormatVersion) << clip.fingerprint;
+    writeClipInfo(s, clip.info);
+    writeF64(s, clip.declaredUnitScale);
+    writeAnimations(s, clip.animations);
+    s << quint32(kClipMagic);
+    return blob;
+}
+
+MeshBake::Clip MeshBake::deserializeClip(const QByteArray &blob, const QString &expectFingerprint)
+{
+    Clip clip;
+    if (blob.size() < 16) return clip;
+    QDataStream s(blob);
+    configure(s);
+    quint32 magic = 0;
+    qint32 version = 0;
+    s >> magic >> version;
+    if (magic != kClipMagic || version != kFormatVersion) return clip;
+    s >> clip.fingerprint;
+    if (s.status() != QDataStream::Ok) return Clip();
+    if (!expectFingerprint.isEmpty() && clip.fingerprint != expectFingerprint) return Clip();
+    if (!readClipInfo(s, clip.info)) return Clip();
+    clip.declaredUnitScale = readF64(s);
+    if (!readAnimations(s, QString(), clip.animations)) return Clip();
+    quint32 tail = 0;
+    s >> tail;
+    if (s.status() != QDataStream::Ok || tail != kClipMagic) return Clip();
+    clip.valid = true;
+    return clip;
+}
+
+MeshBake::Clip MeshBake::readClip(const QString &path, const QString &expectFingerprint)
+{
+    if (path.isEmpty()) return Clip();
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return Clip();
+    const QByteArray blob = file.readAll();
+    file.close();
+    return deserializeClip(blob, expectFingerprint);
+}
+
+bool MeshBake::writeClip(const QString &path, const Clip &clip, QString *errorOut)
+{
+    if (!clip.valid) {
+        if (errorOut) *errorOut = QStringLiteral("clip bake: nothing to write");
+        return false;
+    }
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        if (errorOut) *errorOut = QStringLiteral("clip bake: cannot write %1").arg(path);
+        return false;
+    }
+    const QByteArray blob = serializeClip(clip);
+    if (file.write(blob) != blob.size() || !file.commit()) {
+        if (errorOut) *errorOut = QStringLiteral("clip bake: short write to %1").arg(path);
+        return false;
+    }
+    return true;
+}
+
+bool MeshBake::clipHeaderMatches(const QString &path, const QString &expectFingerprint)
+{
+    if (path.isEmpty() || expectFingerprint.isEmpty()) return false;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    const QByteArray head = file.read(4096);
+    file.close();
+    if (head.size() < 16) return false;
+    QDataStream s(head);
+    configure(s);
+    quint32 magic = 0;
+    qint32 version = 0;
+    QString fingerprint;
+    s >> magic >> version;
+    if (magic != kClipMagic || version != kFormatVersion) return false;
+    s >> fingerprint;
+    return s.status() == QDataStream::Ok && fingerprint == expectFingerprint;
+}
+
+QMap<QString, SkeletalAnimationPtr> MeshBake::clipAnimations(const Clip &clip,
+                                                             const ImportTransform &rig,
+                                                             const QString &source)
+{
+    // THE RIG'S UNIFORM FACTOR, resolved exactly as readSceneFile resolves it
+    // for a clip read under `rig` — with the CLIP file's own declaration
+    // standing in for the probe parse a unit override would otherwise pay.
+    double k = rig.scale;
+    if (rig.overridesUnit())
+        k = rig.globalScaleFactor(rig.declaredUnitScale > 0.0 ? rig.declaredUnitScale
+                                                              : clip.declaredUnitScale);
+    const float factor = float(k);
+    const bool scaled = factor != 1.0f;
+
+    QMap<QString, SkeletalAnimationPtr> out;
+    for (auto it = clip.animations.constBegin(); it != clip.animations.constEnd(); ++it) {
+        const SkeletalAnimationPtr &from = it.value();
+        if (!from) continue;
+        auto anim = SkeletalAnimation::create();
+        anim->name = from->name;
+        anim->source = source;
+        anim->declaredLength = from->declaredLength;
+        for (auto b = from->boneAnimations.constBegin(); b != from->boneAnimations.constEnd(); ++b) {
+            auto *bone = new BoneAnimation();
+            // ScaleProcess touches POSITION keys only — rotations and scales
+            // come out as authored, so they are copied as they are.
+            for (const auto *key : b.value()->posKeys->keys)
+                bone->posKeys->addKey(scaled ? key->value * factor : key->value, key->time);
+            for (const auto *key : b.value()->rotKeys->keys)
+                bone->rotKeys->addKey(key->value, key->time);
+            for (const auto *key : b.value()->scaleKeys->keys)
+                bone->scaleKeys->addKey(key->value, key->time);
+            anim->addBoneAnimation(b.key(), bone);
+        }
+        out.insert(it.key(), anim);
+    }
+    return out;
 }
 
 // ---- the fragment ----------------------------------------------------------
