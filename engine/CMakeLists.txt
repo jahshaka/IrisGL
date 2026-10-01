@@ -49,7 +49,28 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSurfaceCache.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVrSession.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVrSession.cpp
+    # PHOTON'S VOXEL GI, OURS (OWN-GI-1): the voxel cascades, their voxeliser and
+    # material store, the irradiance field and the two debug drawables — an owned
+    # copy of what was Ogre-Next's Vct/IrradianceField component, the way an
+    # application owns Terra — and the listener half that binds them to every
+    # PBS-family pass (HlmsPbs never holds them).
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonPassBinding.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonPassBinding.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelizerSourceBase.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelizerSourceBase.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelizer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelizer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelMaterial.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelMaterial.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelLighting.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelLighting.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelVisualizer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelVisualizer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIrradianceField.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIrradianceField.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 
 # --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------
@@ -594,32 +615,26 @@ set(_hlms_stamp "${CMAKE_CURRENT_BINARY_DIR}/hlms-media.stamp")
 # depth utilities): Samples/Media/2.0/scripts/materials/Common, ~540K.
 get_filename_component(_ogre_media_root "${OGRE_NEXT_HLMS_SOURCE_DIR}" DIRECTORY)
 set(OGRE_NEXT_COMMON_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Common")
-# VCT voxelizer/lighting compute jobs, Ogre's ComputeTools (clearUav — the
-# voxelizer clears its UAV textures through it) and the IBL specular integrator
-# the PCC probe workspace uses (GI_SPEC.md phases 2-3), ~400K together.
+# Ogre's ComputeTools (clearUav — the voxeliser clears its UAV textures through it)
+# and the IBL specular integrator the PCC probe workspace uses (GI_SPEC.md phases
+# 2-3).
 # Post-chain effect media (POST_CHAIN_SPEC.md §4.1): the HDR/tonemap/bloom node's
 # materials and shaders, SSAO's, and SMAA's (which also carries two DDS lookup
 # textures). ~800K together; registered folder-by-folder like the rest.
 set(OGRE_NEXT_HDR_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/HDR")
 set(OGRE_NEXT_SSAO_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Tutorial_SSAO")
 set(OGRE_NEXT_SMAA_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Tutorial_SMAA")
-set(OGRE_NEXT_VCT_MEDIA_DIR "${_ogre_media_root}/VCT")
 set(OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR "${_ogre_media_root}/Compute/Tools")
 set(OGRE_NEXT_IBL_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IBL")
-# The DDGI (IrradianceField) compute jobs — GI_UNIFIED_SPEC.md §4 P1. Five jobs
-# (GenFromVct, depth + colour integration, two border mirrors) plus their .any
-# pieces and the generation compositor, ~120K. `Visualizer/` travels with the
-# folder (copy_directory) and is registered as a resource location: it is
-# upstream's debug probe-sphere material, the photon view's Probes picture
-# (PHOTON-VIEW-1) — like VCT/Visualizer, its Voxels picture.
-#
-# ORDINARY MEDIA STAGING, and the distinction matters (P0 spike finding 1,
-# correcting the spec's own bullet): this is NOT the fork c290052de+4d5fbef16 (was 0009/0017) class. The
-# files are upstream's, unpatched, copied from OGRE_NEXT_SOURCE by the normal
-# build step — a `cmake --build` picks them up and no tree has to re-run
-# build-ogre.sh. A tree that has not rebuilt simply has no IFD media, and DDGI
-# then fails LOUD (the compute jobs are missing) instead of rendering wrong.
-set(OGRE_NEXT_IFD_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IrradianceFields")
+# PHOTON'S OWN MEDIA (OWN-GI-1): `media/Photon/Voxel` (the voxeliser's and the
+# voxel lighting's compute jobs, Voxelizer.material.json, + `Visualizer/`, the photon
+# view's Voxels picture), `media/Photon/IrradianceField` (the field's jobs and its
+# generation compositor, + `Visualizer/`, the Probes picture) and `media/Photon/Hlms`
+# (a PBS library: the voxel and field pixel pieces, which replace upstream's of the
+# same names). Ours, copied from the fork when the component moved; Ogre-Next's VCT
+# and IrradianceFields folders are not staged at all. Every folder is WIPED first: a
+# renamed piece left behind by copy_directory would be parsed beside its replacement.
+set(JAHSHAKA_PHOTON_MEDIA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/media/Photon")
 # The overlay font (STATS_OVERLAY_SPEC §9.3 — fork c290052de (was 0009) class: staged from the
 # SOURCE tree, so EVERY tree and every worktree re-stages, and a tree that has
 # not rebuilt has no font and therefore no stats readout and no loading cover).
@@ -634,8 +649,8 @@ file(GLOB_RECURSE _hlms_inputs CONFIGURE_DEPENDS
      "${OGRE_NEXT_HLMS_SOURCE_DIR}/Unlit/*" "${OGRE_NEXT_COMMON_MATERIALS_DIR}/*"
      "${OGRE_NEXT_HDR_MATERIALS_DIR}/*" "${OGRE_NEXT_SSAO_MATERIALS_DIR}/*"
      "${OGRE_NEXT_SMAA_MATERIALS_DIR}/*"
-     "${OGRE_NEXT_VCT_MEDIA_DIR}/*" "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}/*"
-     "${OGRE_NEXT_IBL_MEDIA_DIR}/*" "${OGRE_NEXT_IFD_MEDIA_DIR}/*"
+     "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}/*"
+     "${OGRE_NEXT_IBL_MEDIA_DIR}/*" "${JAHSHAKA_PHOTON_MEDIA_DIR}/*"
      "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*"
      "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Atom/*")
 list(APPEND _hlms_inputs "${OGRE_NEXT_DEBUGPACK_ZIP}")
@@ -783,18 +798,10 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HDR_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/HDR"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SSAO_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SSAO"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SMAA_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SMAA"
-    # VCT is WIPED first, like Hlms/Jahshaka: the fork deleted the image voxeliser,
-    # the per-voxeliser AABB job and the partial clear (ATOM P4b), and a file
-    # copy_directory left behind would still be staged beside the JSON that no
-    # longer names it.
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/VCT"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_VCT_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/VCT"
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Photon"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${JAHSHAKA_PHOTON_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Photon"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Tools"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IBL_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IBL"
-    # IrradianceFields is WIPED first for the same reason: the fork deleted the raster
-    # source's jobs and shaders and every HLSL/Metal compute twin (D6-FORK-TOOLING).
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IrradianceFields"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IFD_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IrradianceFields"
     # The overlay font. `cmake -E tar` extracts named members, so only the three
     # files we ship land in bin/media/packs/DebugPack — which is exactly the
     # directory OgreEngine::registerCommonMaterials adds as a resource location

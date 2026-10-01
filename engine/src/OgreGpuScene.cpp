@@ -22,8 +22,8 @@
 #include "HlmsAtom.h"
 #include "SurfaceCache.h"
 
-#include "Vct/OgreVctMaterial.h"
-#include "Vct/OgreVctVoxelizer.h"
+#include "photon/voxel/PhotonVoxelMaterial.h"
+#include "photon/voxel/PhotonVoxelizer.h"
 #include <Vao/OgreIndexBufferPacked.h>
 #include <Vao/OgreTexBufferPacked.h>
 
@@ -249,7 +249,7 @@ bool GpuScene::ensurePartitions(Ogre::HlmsManager *hlmsManager, Ogre::RenderSyst
     }
     mPartBuffer->upload(parts.data(), 0, parts.size() * sizeof(uint32_t));
     ++mCopies;
-    Ogre::VctVoxelizer::computePartitionAabbs(hlmsManager, renderSystem, mGeomBuffer, mPartBuffer,
+    Ogre::PhotonVoxelizer::computePartitionAabbs(hlmsManager, renderSystem, mGeomBuffer, mPartBuffer,
                                               mPartAabbBuffer, count);
     return true;
 }
@@ -650,7 +650,7 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
     if (hadDag) mClusterDirty = true;   // ...and its clusters
     if (atomTraceOn()) atomTrace("mesh released: entry " + std::to_string(index) + (hadDag ? " (with a DAG)" : ""));
     // THE ENTRY IS ZEROED, not left behind: a slot recycled to a different mesh
-    // must never be readable as the dead one's geometry (the VctMaterial
+    // must never be readable as the dead one's geometry (the PhotonVoxelMaterial
     // by-pointer aliasing lesson, DOCS/traps/ENGINE.md).
     mMeshMirror[index] = GpuMesh();
     for (uint32_t l = 0; l < kLevelsPerMesh; ++l)
@@ -775,7 +775,7 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
 
 /// THE MATERIAL WORD (ATOM P4b) — `gpuFlagsFor`'s sibling, and the ONE place
 /// GpuInstance::ids.y is decided: {pool : 16 | slot : 16} of the item's material in
-/// the chain's shared VctMaterial store.
+/// the chain's shared PhotonVoxelMaterial store.
 ///
 /// A LOOKUP, NEVER A CONVERSION. Converting can render a texture into the store's
 /// pool and needs the store's temp resources, which exist only inside a GI build's
@@ -793,14 +793,14 @@ uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const 
         return detail::GpuScene::kNoMaterialWord;
     const Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
     if (!db) return detail::GpuScene::kNoMaterialWord;
-    const Ogre::VctMaterial::DatablockConversionResult *r = mVctMaterialStore->lookupDatablock(db);
+    const Ogre::PhotonVoxelMaterial::DatablockConversionResult *r = mVctMaterialStore->lookupDatablock(db);
     if (!r) {
         // Only a GI-visible item is worth converting: nothing else is ever gathered.
         if ((flags & detail::kGpuGiVisible) && n.itemSlot != size_t(-1))
             mVctPendingMaterialSlots.push_back(uint32_t(n.itemSlot));
         return detail::GpuScene::kNoMaterialWord;
     }
-    // Sixteen bits each: a pool holds 1,024 rows (VctMaterial's const-buffer size), and
+    // Sixteen bits each: a pool holds 1,024 rows (PhotonVoxelMaterial's const-buffer size), and
     // 65,535 pools is 67 million materials.
     return (r->bucketIdx << 16u) | (r->slotIdx & 0xFFFFu);
 }
@@ -915,7 +915,7 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
     uint32_t levelCount = 0u;
     struct StagedRow {
         uint32_t level = 0u, submesh = 0u;
-        Ogre::VctVoxelizer::GeometryRow row;
+        Ogre::PhotonVoxelizer::GeometryRow row;
     };
     std::vector<StagedRow> rows;
     bool levelHasBase[detail::GpuScene::kLevelsPerMesh] = {};
@@ -972,8 +972,8 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
             mRoot ? mRoot->getRenderSystem()->getVaoManager() : nullptr;
         for (uint32_t l = 0; vaoMgr && l < levelCount && l < detail::GpuScene::kLevelsPerMesh; ++l) {
             for (uint32_t sm = 0; sm < submeshes; ++sm) {
-                Ogre::VctVoxelizer::GeometryRow row;
-                if (!Ogre::VctVoxelizer::describeGeometryRow(rec.mesh, l, sm, vaoMgr, row))
+                Ogre::PhotonVoxelizer::GeometryRow row;
+                if (!Ogre::PhotonVoxelizer::describeGeometryRow(rec.mesh, l, sm, vaoMgr, row))
                     continue;
                 rows.push_back(StagedRow{ l, sm, row });
                 if (sm == 0u) levelHasBase[l] = true;
@@ -1009,7 +1009,7 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
     if (base0 && vaoMgr) {
         std::vector<detail::GpuCluster> clusters;
         std::vector<detail::GpuClusterGroup> groups;
-        Ogre::VctVoxelizer::GeometryRow crow = base0->row;
+        Ogre::PhotonVoxelizer::GeometryRow crow = base0->row;
         const Ogre::IndexBufferPacked *stream = rec.clusterStream.get();
         const uint64_t rawIdx = stream ? vaoMgr->getBufferDeviceAddress(stream) : 0u;
         if (stream && rawIdx && !rec.clusters.empty() && !rec.clusterGroups.empty()) {
@@ -1019,7 +1019,7 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
             crow.idxAddress[0] = uint32_t(floored & 0xFFFFFFFFu);
             crow.idxAddress[1] = uint32_t(floored >> 32u);
             // Bit 0 of the row's flags is "32-bit indices" (the row format's own bit,
-            // VoxelizerGeomFlag::Index32bit in OgreVctVoxelizer.cpp; the decode's
+            // PhotonVoxelizerGeomFlag::Index32bit in PhotonVoxelizer.cpp; the decode's
             // ATOM_GEOM_INDEX32): the stream's width, which is level 0's.
             constexpr uint32_t kRowIndex32 = 1u;
             crow.flags = (crow.flags & ~kRowIndex32) |

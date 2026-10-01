@@ -2807,6 +2807,10 @@ void OgreEngine::ensureHlms() {
     {
         Ogre::ArchiveVec libs;
         for (const auto &p : libPaths) libs.push_back(am.load(mMediaDir + p, "FileSystem", true));
+        // PHOTON'S PIXEL PIECES (OWN-GI-1): the voxel cascades' and the irradiance
+        // field's, which replace upstream's of the same names (`@undefpiece`) — so
+        // AFTER Pbs's own library, and before Hlms/Jahshaka, as in HlmsAtom's list.
+        libs.push_back(am.load(mMediaDir + "Photon/Hlms", "FileSystem", true));
         // Jahshaka's own pieces (fog colour + height fog, base-map UV tiling) go in
         // as a LIBRARY folder rather than as per-datablock custom pieces: one
         // _piece_vs_piece_ps file then defines the pass-buffer members for BOTH
@@ -3036,10 +3040,12 @@ void OgreEngine::ensureHlms() {
 //                         the ambient mode (SH), the non-caster directional budget,
 //                         static-branching lights (and the per-pixel shadow receive
 //                         it forces)
-//   OgreGi.cpp,           NOTHING relayed: the VctLighting, the field, the PCC,
-//   OgrePlanar.cpp,       the planar mirrors and the IBL chain length are bound
-//   OgreSky.cpp           per PASS on every host (bindSceneGi, SceneGiBinding) —
-//                         the scene being drawn, not a relay
+//   OgreGi.cpp,           NOTHING relayed: the PCC, the planar mirrors and the IBL
+//   OgrePlanar.cpp,       chain length are bound per PASS on every host (bindSceneGi,
+//   OgreSky.cpp           SceneGiBinding) — the scene being drawn, not a relay; the
+//                         Photon volumes are no host's at all (OWN-GI-1: the
+//                         listener binds them, PhotonPassBinding, and reads the
+//                         cone count from PBS itself)
 //   OgreLights.cpp        setAreaLightForwardSettings, setAreaLightMasks,
 //                         setLightProfilesTexture, loadLtcMatrix
 //   OgreShadow.cpp        setShadowSettings (the PCF kernel)
@@ -3054,7 +3060,7 @@ void OgreEngine::ensureHlms() {
 // the first time a host reads it — HlmsAtom's analyzeBarriers/preparePassHash, which
 // run before any of its draws. Every engine setter runs on the update thread before
 // or after renderOneFrame, never between two passes of one frame, so a pointer PBS
-// was told to DROP (a VctLighting about to be deleted) is off every host before the
+// was told to DROP (a PhotonVoxelLighting about to be deleted) is off every host before the
 // next frame's first read. Unchanged state costs one compare per field.
 namespace {
 unsigned long sRelayFrame = ~0ul;
@@ -3087,17 +3093,15 @@ void tellEveryHlms(Ogre::HlmsManager *manager, bool force) {
         if (host->getShadowFilter() != pbs->getShadowFilter())
             host->setShadowSettings(pbs->getShadowFilter());
         if (host->getEsmK() != pbs->getEsmK()) host->setEsmK(pbs->getEsmK());
-        if (host->getVctFullConeCount() != pbs->getVctFullConeCount())
-            host->setVctFullConeCount(pbs->getVctFullConeCount());
         if (host->getIrradianceVolume() != pbs->getIrradianceVolume())
             host->setIrradianceVolume(pbs->getIrradianceVolume());
         if (host->getAreaLightMasks() != pbs->getAreaLightMasks())
             host->setAreaLightMasks(pbs->getAreaLightMasks());
         if (host->getLightProfilesTexture() != pbs->getLightProfilesTexture())
             host->setLightProfilesTexture(pbs->getLightProfilesTexture());
-        // NOT the VctLighting, the field, the PCC, the planar mirrors or the IBL
-        // chain length: those are the SCENE's, and every host binds the pass's
-        // own scene's per pass (bindSceneGi).
+        // NOT the PCC, the planar mirrors or the IBL chain length: those are the
+        // SCENE's, and every host binds the pass's own scene's per pass
+        // (bindSceneGi). Nor the Photon volumes, which no host holds (OWN-GI-1).
         // THE LTC MATRIX: loaded once and never unloaded (OgreLights.cpp); the host
         // retrieves the same pooled textures.
         if (pbs->getLtcMatrixTexture() && !host->getLtcMatrixTexture()) host->loadLtcMatrix();
@@ -3114,13 +3118,16 @@ void OgreEngine::registerCommonMaterials() {
                                "2.0/scripts/materials/Common/GLSL", "2.0/scripts/materials/Common/HLSL",
                                "2.0/scripts/materials/Common/Metal",
                                "Hlms/Common/Any", "Hlms/Common/GLSL", "Hlms/Common/HLSL", "Hlms/Common/Metal",
-                               // The VCT LightInjection compute job includes PBS pieces (area-light
-                               // LTC) by bare file name through the resource system.
+                               // The voxel LightInjection compute job includes PBS pieces (area-light
+                               // LTC, JahDiffuseAlbedo) by bare file name through the resource system.
                                "Hlms/Pbs/Any",
-                               // VCT voxelizer/lighting compute jobs (Voxelizer.material.json)
-                               // and the IBL specular integrator the PCC probe workspace's
+                               // PHOTON'S OWN MEDIA (OWN-GI-1; irisgl engine/media/Photon, staged
+                               // beside the binary): the voxeliser/lighting compute jobs
+                               // (Voxelizer.material.json) — Ogre's VCT folder is not registered
+                               // at all, our copy replaces it — and, below, the field's.
+                               "Photon/Voxel",
+                               // The IBL specular integrator the PCC probe workspace's
                                // ibl_specular pass wants (falls back to mips if absent).
-                               "VCT",
                                "Compute/Tools", "Compute/Tools/Any", "Compute/Tools/GLSL",
                                "Compute/Tools/HLSL", "Compute/Tools/Metal",
                                "Compute/Algorithms/IBL",
@@ -3128,14 +3135,14 @@ void OgreEngine::registerCommonMaterials() {
                                // P1). ONE location, flat folder — the .any
                                // pieces sit beside the per-syntax shaders, like
                                // IBL's.
-                               "Compute/Algorithms/IrradianceFields",
+                               "Photon/IrradianceField",
                                // THE PHOTON VIEW's two Ogre pictures (PHOTON-VIEW-1):
-                               // upstream's own debug materials for the lit voxels
-                               // (VctLighting::setDebugVisualization) and the field's
-                               // probe spheres (IrradianceField::setDebugVisualization),
+                               // the debug materials (upstream's, in our copy) for the lit voxels
+                               // (PhotonVoxelLighting::setDebugVisualization) and the field's
+                               // probe spheres (PhotonIrradianceField::setDebugVisualization),
                                // parsed here and compiled only when a view first asks.
-                               "VCT/Visualizer",
-                               "Compute/Algorithms/IrradianceFields/Visualizer",
+                               "Photon/Voxel/Visualizer",
+                               "Photon/IrradianceField/Visualizer",
                                // Post chain (POST_CHAIN_SPEC.md §4.1). The Vulkan
                                // (glslvk) programs source the SAME .glsl files as
                                // the GL ones, so GLSL is the folder that matters;

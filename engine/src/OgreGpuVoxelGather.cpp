@@ -14,8 +14,8 @@
 #include <Vao/OgreAsyncTicket.h>
 #include <Vao/OgreUavBufferPacked.h>
 #include <Vao/OgreVaoManager.h>
-#include <Vct/OgreVctMaterial.h>
-#include <Vct/OgreVctVoxelizer.h>
+#include "photon/voxel/PhotonVoxelMaterial.h"
+#include "photon/voxel/PhotonVoxelizer.h"
 
 #include <algorithm>
 #include <cstring>
@@ -78,7 +78,7 @@ bool VoxelFeed::ensure(Ogre::VaoManager *vao, uint64_t recordCapacity, uint32_t 
         if (mRecords) vao->destroyUavBuffer(mRecords);
         // UAV (the gather writes it) AND READONLY (the voxeliser reads it through a
         // read-only view, exactly as it read the buffer it used to fill itself).
-        mRecords = vao->createUavBuffer(size_t(cap), Ogre::VctVoxelizer::kInstanceRecordBytes,
+        mRecords = vao->createUavBuffer(size_t(cap), Ogre::PhotonVoxelizer::kInstanceRecordBytes,
                                         Ogre::BB_FLAG_UAV | Ogre::BB_FLAG_READONLY, nullptr, false);
         mRecordCapacity = cap;
     }
@@ -180,7 +180,7 @@ static void unbindGather(Ogre::HlmsComputeJob *count, Ogre::HlmsComputeJob *scan
 
 // ---------------------------------------------------------------------------
 // (OgreScene lives in `detail` - EnginePrivate.h.)
-bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxelizer,
+bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *voxelizer,
                                const VoxelGatherInputs &in) {
     using namespace detail;
     if (!voxelizer) return false;
@@ -205,7 +205,7 @@ bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxe
     // replaces the ticket, and a reading nobody took would be lost.
     feed.harvest();
 
-    Ogre::VctMaterial *store = mVctMaterialStore;
+    Ogre::PhotonVoxelMaterial *store = mVctMaterialStore;
     const uint32_t numBuckets = store ? uint32_t(store->getNumBuckets()) : 0u;
     const uint32_t numOctants = uint32_t(std::min<size_t>(voxelizer->getNumOctants(), 8u));
     Ogre::UavBufferPacked *partAabbs = mGpuScene.partitionAabbBuffer();
@@ -225,7 +225,7 @@ bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxe
     // device ceiling; past it the records are DROPPED AND COUNTED (the readout's
     // overflow word), never written out of bounds.
     uint64_t capacity = std::max<uint64_t>(mGpuScene.recordBound() * numOctants, 64u);
-    const uint64_t viewMax = vao->getReadOnlyBufferMaxSize() / Ogre::VctVoxelizer::kInstanceRecordBytes;
+    const uint64_t viewMax = vao->getReadOnlyBufferMaxSize() / Ogre::PhotonVoxelizer::kInstanceRecordBytes;
     if (viewMax && capacity > viewMax) capacity = viewMax;
     std::string err;
     if (!feed.ensure(vao, capacity, numRanges, (mGpuScene.slotCapacity() + 31u) / 32u, err)) {
@@ -242,7 +242,7 @@ bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxe
     p.counts[3] = (in.lod ? kGatherLod : 0u) | (in.budgetMask ? kGatherBudgeted : 0u);
     p.caps[0] = uint32_t(std::min<uint64_t>(feed.recordCapacity(), capacity));
     p.caps[1] = numRanges;
-    p.caps[2] = Ogre::VctVoxelizer::kIndicesPerPartition;
+    p.caps[2] = Ogre::PhotonVoxelizer::kIndicesPerPartition;
     p.lod[0] = in.cell;
     p.lod[1] = in.tolerance;
     p.lod[2] = in.minExtent;

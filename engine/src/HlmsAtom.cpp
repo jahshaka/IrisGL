@@ -7,6 +7,7 @@
 // fillBuffersForV2 calls PBS's and then binds what is ours. Terra copies the whole of
 // PBS's fillBuffersFor (300 lines); this does not have to.
 #include "HlmsAtom.h"
+#include "photon/voxel/PhotonPassBinding.h"
 
 #include <CommandBuffer/OgreCbShaderBuffer.h>
 #include <CommandBuffer/OgreCbTexture.h>
@@ -220,6 +221,8 @@ void HlmsAtom::getDefaultPaths(Ogre::String &outDataFolderPath,
     // with a decal (PHOTON-HIT-SHADE-1) samples undeclared textures. A library
     // folder loads piece files only, never the templates beside them.
     outLibraryFoldersPaths.push_back(pbsData);
+    // The Photon volumes' pieces (OWN-GI-1) after PBS's own, which they replace by name.
+    outLibraryFoldersPaths.push_back("Photon/Hlms");
     outLibraryFoldersPaths.push_back("Hlms/Jahshaka");
     outLibraryFoldersPaths.push_back("Hlms/Atom/Any");
     // PBS's data folder is Hlms/Pbs/<syntax>; ours is its sibling.
@@ -992,6 +995,10 @@ void HlmsAtom::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
     bindSceneGi(this, renderingCamera ? renderingCamera->getSceneManager() : nullptr);
     Ogre::HlmsPbs::analyzeBarriers(barrierSolver, resourceTransitions, renderingCamera, bCasterPass);
     if (bCasterPass) return;
+    // The Photon volumes this pass's scene binds through the listener (OWN-GI-1).
+    PhotonPassBinding::analyzeBarriers(barrierSolver, resourceTransitions,
+                                       renderingCamera ? renderingCamera->getSceneManager() : nullptr,
+                                       bCasterPass);
     // WHAT THE DECODE READS, declared to Ogre's solver like every other pass input:
     // the id image as a texture, the GPU scene's tables as read-only buffers in the
     // pixel stage (their writes are the frame's staging copies — without this the

@@ -22,6 +22,7 @@
 // The authored colour is only for the other skies.
 #include "EnginePrivate.h"
 #include "Atmosphere.h"
+#include "photon/voxel/PhotonPassBinding.h"
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
 
@@ -78,18 +79,25 @@ constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPas
 // VulkanRootLayout threw "set 0 needs 65 texture slots; the global binding table
 // holds 64" and the process died with SIGSEGV). The table is the fork's
 // NUM_BIND_TEXTURES (RenderSystems/Vulkan/include/OgreVulkanGlobalBindingTable.h,
-// 64); the pin's own share of the fullest pass this engine builds — Epic, the
-// gather, the sun contact, the cloud field and the environment claimed — is 59,
-// MEASURED as that crash's 65 less its six extras. So the extras may never
-// exceed five, and adding a sixth is a BUILD error here rather than a crash in
-// one arm of one pool. Five today: the fullest pass is at 64 of 64 with every
-// extra claimed; the atmosphere's volume is claimed only where it is read
-// (aerialScale > 0 or the World fog), so a default scene's fullest pass is 63.
+// 64); the fullest pass this engine builds — Epic, the gather, the sun contact, the
+// cloud field and the environment claimed — holds 59 before these extras, MEASURED as
+// that crash's 65 less its six extras. Since OWN-GI-1 those 59 are Ogre's own 17 and
+// the Photon volumes' 42 (PhotonPassBinding: four cascades x ten anisotropic light
+// volumes + the irradiance field's two), claimed through this same listener just
+// ahead of the extras below — the same slots, numbered at the end of set 0 instead
+// of in its middle. So the extras may never exceed five, and adding a sixth is a
+// BUILD error here rather than a crash in one arm of one pool. Five today: the
+// fullest pass is at 64 of 64 with every extra claimed; the atmosphere's volume is
+// claimed only where it is read (aerialScale > 0 or the World fog), so a default
+// scene's fullest pass is 63.
 constexpr size_t kPassTextureTable = 64u;
-constexpr size_t kPinPassTexturesFullest = 59u;
-static_assert(kPinPassTexturesFullest + kNumExtraPassSlots <= kPassTextureTable,
-              "the PBS pass-texture table overflows: the pin's fullest pass plus kExtraPassSlots "
-              "exceeds the fork's 64 slots — fold an extra into an existing texture first");
+constexpr size_t kOgrePassTexturesFullest = 17u;
+constexpr size_t kPhotonPassTexturesFullest = 4u * 10u + 2u;
+static_assert(kOgrePassTexturesFullest + kPhotonPassTexturesFullest + kNumExtraPassSlots <=
+                  kPassTextureTable,
+              "the PBS pass-texture table overflows: the pin's fullest pass plus the Photon volumes "
+              "plus kExtraPassSlots exceeds the fork's 64 slots — fold an extra into an existing "
+              "texture first");
 /// The slot's property as a hashed IdString, hashed once (these run per
 /// renderable hash, not per frame).
 const Ogre::IdString &extraSlotProperty(size_t i) {
@@ -120,8 +128,9 @@ FogHlmsListener gFogListener;
 // G3-a — THE CONE DIFFUSE COMES BACK UNDER A CASCADE CHAIN (PHOTON_SPEC §13 G3,
 // the decided option; audit B1 is the finding).
 //
-// HlmsPbs sets `vct_disable_diffuse` whenever an irradiance field is bound
-// (OgreHlmsPbs.cpp:1846-1850) and the whole cone-diffuse block in
+// `vct_disable_diffuse` is set whenever an irradiance field is bound (upstream
+// HlmsPbs's rule, kept by PhotonPassBinding::preparePassHash) and the whole
+// cone-diffuse block in
 // Vct_piece_ps.any is `@property( !vct_disable_diffuse )`. For ONE volume that
 // is right: the field covers the entire lit box, so the cones would be a second
 // computation of the same term. For a CHAIN it is wrong — the field rides
@@ -138,10 +147,11 @@ FogHlmsListener gFogListener;
 // can only set new properties that are DERIVED from existing properties ... a
 // property set from external information will break caches"): the condition is
 // exactly that. `irradiance_field` and `vct_num_probes` are both already in the
-// merged set — the second is the bound VctLighting's cascade count, written by
-// HlmsPbs::preparePassHash (OgreHlmsPbs.cpp:1832-1834) — so two passes with the
-// same properties always generate the same shader, and a pass that turns the
-// chain on or off changes `vct_num_probes` and therefore the pass hash.
+// merged set — the second is the bound voxel lighting's cascade count, carried by the
+// pass property `jah_vct_cascades` (PhotonPassBinding, which runs first in this hook)
+// — so two passes with the same properties always generate the same shader, and a
+// pass that turns the chain on or off changes `jah_vct_cascades` and therefore the
+// pass hash.
 //
 // WHY NOT A SOURCE PATCH on HlmsPbs, which would be the other honest answer
 // (ledger §325): the decision "does a bound field replace the cone diffuse
@@ -152,6 +162,17 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
     Ogre::Hlms *hlms, const Ogre::HlmsCache &, const Ogre::HlmsPropertyVec &,
     const Ogre::PiecesMap *, const Ogre::HlmsPropertyVec &, const Ogre::QueuedRenderable &,
     size_t tid) {
+    static const Ogre::IdString kSet0End("set0_texture_slot_end");
+    // THE PHOTON VOLUMES FIRST (OWN-GI-1): upstream's `vct_num_probes` /
+    // `irradiance_field` and the volumes' registers, which end just below this
+    // listener's own extras (getNumExtraPassTextures counts them first) — so
+    // everything below that reads those two properties reads them set.
+    {
+        Ogre::int32 extras = 0;
+        for (size_t i = 0; i < kNumExtraPassSlots; ++i)
+            if (hlms->_getProperty(tid, extraSlotProperty(i)) != 0) ++extras;
+        PhotonPassBinding::propertiesMerged(hlms, tid, hlms->_getProperty(tid, kSet0End) - extras);
+    }
     // THE SKY'S TEXTURE REGISTER (lane SKY-FALLBACK-1). HlmsPbs reserved the
     // slot for us in calculateHashFor — `texUnit += getNumExtraPassTextures()`
     // immediately before it writes `set0_texture_slot_end` — so the register is
@@ -164,7 +185,6 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
     // set, and `jah_env` is a PASS property set in preparePassHash,
     // so the same property set always yields the same shader.
     {
-        static const Ogre::IdString kSet0End("set0_texture_slot_end");
         static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
         if (!hlms->_getProperty(tid, kShadowCaster)) {
             bool claimed[kNumExtraPassSlots];
@@ -268,10 +288,16 @@ Ogre::uint16 FogHlmsListener::getNumExtraPassTextures(const Ogre::HlmsPropertyVe
     // THE EXTRAS AND THEIR ORDER are kExtraPassSlots' (the top of this file):
     // this count, the registers claimed in propertiesMergedPreGenerationStep
     // and the bindings emitted in hlmsTypeChanged all walk that one table.
-    Ogre::uint16 n = 0u;
+    // The Photon volumes' slots first (OWN-GI-1), then this table's.
+    Ogre::uint16 n = PhotonPassBinding::numExtraPassTextures(properties, casterPass);
     for (size_t i = 0; i < kNumExtraPassSlots; ++i)
         if (Ogre::Hlms::getProperty(properties, extraSlotProperty(i)) != 0) ++n;
     return n;
+}
+
+void FogHlmsListener::setupRootLayout(Ogre::RootLayout &rootLayout,
+                                      const Ogre::HlmsPropertyVec &properties, size_t) const {
+    PhotonPassBinding::setupRootLayout(rootLayout, properties);
 }
 
 void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *commandBuffer,
@@ -281,6 +307,8 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
     // and the two conditions must therefore be the SAME condition. The host is
     // the datablock's creator: its own pass's copy, never another host's.
     if (casterPass || !commandBuffer || !datablock || !datablock->getCreator()) return;
+    // The Photon volumes first, at the slots they were numbered at (OWN-GI-1).
+    texUnit = PhotonPassBinding::bind(casterPass, commandBuffer, datablock, texUnit);
     const PassBinds &pb = sPass[datablock->getCreator()->getType()];
     // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance,
     // the cloud field, the sun contact visibility, the atmosphere's volume.
@@ -352,6 +380,10 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                                       bool, Ogre::SceneManager *sceneManager, Ogre::Hlms *hlms) {
     PassBinds unused;
     PassBinds &pb = hlms ? sPass[hlms->getType()] : unused;
+    // THE PHOTON VOLUMES (OWN-GI-1), FIRST: the voxel cascades and the irradiance
+    // field of the pass's own scene, which HlmsPbs used to be handed and now never
+    // is — their pass properties are read further down (the environment's reader).
+    PhotonPassBinding::preparePassHash(casterPass, sceneManager, hlms);
     // THE PLANET'S ATMOSPHERE'S VOLUME (SKY-ATMOSPHERE-1), first and
     // unconditionally for a colour pass: its PROPERTY is also the
     // fog's colour mode (the media file's air and its per-pixel World fog are
@@ -404,10 +436,10 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     pb.skySampler = nullptr;
     if (hlms && !casterPass && sceneManager) {
         static const Ogre::IdString kCubemapsAuto("hlms_enable_cubemaps_auto");
-        static const Ogre::IdString kVctNumProbes("vct_num_probes");
+        static const Ogre::IdString kVctCascades("jah_vct_cascades");
         const SkyEnvState sky = skyEnv(sceneManager);
         const bool reader = hlms->_getProperty(Ogre::Hlms::kNoTid, kCubemapsAuto) != 0 ||
-                            hlms->_getProperty(Ogre::Hlms::kNoTid, kVctNumProbes) > 0;
+                            hlms->_getProperty(Ogre::Hlms::kNoTid, kVctCascades) > 0;
         if (sky.cube && reader) {
             const Ogre::HlmsSamplerblock *envSampler =
                 acquireSampler(hlms->getHlmsManager(), true);
@@ -694,10 +726,11 @@ void FogHlmsListener::releaseSamplers() {
     sSamplerMgr = nullptr;
     sEnvSampler = sGatherSampler = sCloudSampler = nullptr;
     for (PassBinds &pb : sPass) pb = PassBinds();
+    PhotonPassBinding::releaseSamplers();
 }
 
-Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool, bool,
-                                                Ogre::SceneManager *) const {
+Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool casterPass,
+                                                bool, Ogre::SceneManager *sceneManager) const {
     // Constant, fog on or off, caster or not: the shader's struct may be SHORTER
     // than the buffer (it is, whenever fog is off), never longer. Four for the
     // shader clock (HLMS_ADOPTION P5) — declared only by materials that carry a
@@ -719,11 +752,19 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // simply right now.
     // Plus the cloud layer's ground shadow (CLOUDS-2D-1): five float4, the
     // last members, declared only by a pass that claimed the cloud field.
-    return 40u * sizeof(float);
+    //
+    // AHEAD OF ALL OF IT, THE PHOTON VOLUMES' BLOCKS (OWN-GI-1): the voxel cascades'
+    // and the irradiance field's, which HlmsPbs wrote last in its own buffer — i.e.
+    // immediately before this extension — while it held them. Writing them first
+    // here keeps every byte where the shader's struct (DeclVctUniform,
+    // DeclIrradianceFieldUniform, then custom_passBuffer) has always put it.
+    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + 40u * sizeof(float);
 }
 
-float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool, bool,
+float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
                                           Ogre::SceneManager *sceneManager, float *passBufferPtr) {
+    // The Photon volumes' blocks first — see getPassBufferSize.
+    passBufferPtr = PhotonPassBinding::preparePassBuffer(casterPass, sceneManager, passBufferPtr);
     const FogState p = lookup(sceneManager);
     // The height layer integrates from the CAMERA's altitude, so the shader needs
     // it; this hook runs inside HlmsPbs::preparePassBuffer, where the camera of

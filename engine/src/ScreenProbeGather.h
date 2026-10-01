@@ -1,4 +1,4 @@
-// THE SCREEN-PROBE GATHER — a Component of ours, beside VctLighting and
+// THE SCREEN-PROBE GATHER — a Component of ours, beside PhotonVoxelLighting and
 // IrradianceField (GATHER-1a, 2026-09-21; SPECS/SCREEN_PROBE_GATHER_SPEC.md
 // section 9, phase 1).
 //

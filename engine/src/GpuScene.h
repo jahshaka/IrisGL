@@ -96,7 +96,7 @@ struct GpuInstance {
     /// mesh's coarsest.
     ///
     /// y = THE MATERIAL WORD (ATOM P4b): {pool : 16 | slot : 16} in the chain's ONE
-    /// shared `VctMaterial` store — the bucket whose const buffer holds this item's
+    /// shared `PhotonVoxelMaterial` store — the bucket whose const buffer holds this item's
     /// material and the row inside it. It is a SCENE-WIDE fact only because every
     /// cascade shares that store (a per-cascade store numbered the same datablock
     /// differently in each). 0xFFFFFFFF until the store has converted the item's
@@ -113,7 +113,7 @@ struct GpuInstance {
     ///       datablock is not HlmsPbs's (unlit furniture), which the decode skips.
     ///   y = the byte offset of the float4 VES_TANGENT in the vertex, 0xFFFFFFFF
     ///       when the mesh has none. It rides HERE because the geometry row is
-    ///       Ogre's format (VctVoxelizer::GeometryRow) and has no tangent lane at
+    ///       Ogre's format (PhotonVoxelizer::GeometryRow) and has no tangent lane at
     ///       this pin; a fork commit giving the row one moves it there.
     ///   z = THE SKIN ROW (PHOTON-SKIN-1, RY-R4): the PER-INSTANCE ROW OVERRIDE of a
     ///       rigged item — the geometry row (level 0, submesh 0) of THIS ITEM's skin
@@ -244,7 +244,7 @@ enum GpuInstanceFlag : uint32_t {
 ///
 /// `partBase`/`partCount` (ATOM P4b, the row grew from 16 to 32 bytes) name this
 /// level's PARTITIONS in the partition tables: its index range split into pieces
-/// of `VctVoxelizer::kIndicesPerPartition`, each with its own mesh-local AABB, so
+/// of `PhotonVoxelizer::kIndicesPerPartition`, each with its own mesh-local AABB, so
 /// a voxel group that misses a piece skips it whole. A partition is a fact about
 /// the MESH (like its rows), so the table is rebuilt only when the mesh set
 /// changes and never per voxelisation.
@@ -347,7 +347,7 @@ public:
     /// bakes has exactly one; a mesh with more than this is CLAMPED and says so
     /// once, like the level bound above.
     static constexpr uint32_t kSubmeshesPerMesh = 8u;
-    /// A geometry row is `Ogre::VctVoxelizer::GeometryRow` — 12 words, 48 bytes.
+    /// A geometry row is `Ogre::PhotonVoxelizer::GeometryRow` — 12 words, 48 bytes.
     /// THE FORMAT IS OGRE'S ON PURPOSE (the shader that reads it is Ogre's), so
     /// this header does not name the type and no consumer of GpuScene.h drags in
     /// HlmsPbs; the writer (`OgreScene::acquireGpuMesh`) hands over 48 bytes.
@@ -553,7 +553,7 @@ public:
     /// THE GEOMETRY ROW TABLE (ATOM P4b): the vertex and index device addresses and
     /// the vertex layout of every (mesh, level, submesh) the scene holds, written
     /// ONCE at attach. The voxeliser binds it for every dispatch
-    /// (`VctVoxelizer::setGeometrySource`) instead of re-describing the world's
+    /// (`PhotonVoxelizer::setGeometrySource`) instead of re-describing the world's
     /// geometry on the CPU per build; phase D's raster decode reads the same rows.
     Ogre::UavBufferPacked *geomBuffer() const { return mGeomBuffer; }
 

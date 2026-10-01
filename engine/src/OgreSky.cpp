@@ -2511,7 +2511,7 @@ void OgreScene::snapshotCloudGi(bool fieldRebaked) {
     if (mVctLighting) refreshGiLighting(false);
 }
 
-void OgreScene::bindCloudInjection(Ogre::VctLighting *lighting) {
+void OgreScene::bindCloudInjection(Ogre::PhotonVoxelLighting *lighting) {
     Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
     Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow("VCT/LightInjection") : nullptr;
     if (!job) return;

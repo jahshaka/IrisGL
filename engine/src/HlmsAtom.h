@@ -77,12 +77,13 @@ namespace detail {
 void tellEveryHlms(Ogre::HlmsManager *manager, bool force = false);
 
 /// THE SCENE BEING DRAWN IS THE SCENE THE SHADER READS (PHOTON-SCENE-SWITCH-1;
-/// OgreGi.cpp, SceneGiBinding in EnginePrivate.h): points `host` at the VctLighting,
-/// IrradianceField, PCC (+ its two distances), planar mirrors and IBL chain length
-/// of the pass's own SceneManager — null arms (and a 1-level chain) for one that
-/// registered none. Every PBS-family host calls it at the
-/// head of its analyzeBarriers and preparePassHash, so it is NOT relayed by
-/// tellEveryHlms.
+/// OgreGi.cpp, SceneGiBinding in EnginePrivate.h): points `host` at the PCC (+ its two
+/// distances), planar mirrors and IBL chain length of the pass's own SceneManager —
+/// null arms (and a 1-level chain) for one that registered none. Every PBS-family
+/// host calls it at the head of its analyzeBarriers and preparePassHash, so it is
+/// NOT relayed by tellEveryHlms. The Photon volumes (voxel cascades, irradiance
+/// field) are never a host's (OWN-GI-1): the listener resolves the same record per
+/// pass (photon/voxel/PhotonPassBinding.h), for every host it is set on.
 void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm);
 /// THE SCENE'S LIGHT DIRT (SceneGiBinding::lightWriteSerial / lightsRemoved, D3-HIT-
 /// SHADE-2) — false for a SceneManager that registered no record.

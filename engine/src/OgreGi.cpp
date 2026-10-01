@@ -1,7 +1,7 @@
 // Global illumination: voxel cone tracing (VCT), the VCT +
 // parallax-corrected-cubemap hybrid and Photon's camera-centred cascade chain —
 // the public verbs and the internals that drive Ogre's
-// VctVoxelizer/VctLighting, IrradianceField and ParallaxCorrectedCubemapAuto.
+// PhotonVoxelizer/VctLighting, IrradianceField and ParallaxCorrectedCubemapAuto.
 // (Instant Radiosity was the fourth arm and was deleted 2026-09-15,
 // PHOTON_SPEC §7 E2 (4).)
 //
@@ -12,8 +12,9 @@
 // keep their names by the rename's own mapping rule.
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"       // bindSceneGi's declaration (every PBS-family host calls it)
+#include "photon/voxel/PhotonPassBinding.h"
 #include "SurfaceCache.h"   // SURFACE-CACHE phase 2: giStatus copies the Component's counters
-#include <Vct/OgreVctMaterial.h>
+#include "photon/voxel/PhotonVoxelMaterial.h"
 
 #include <algorithm>
 #include <chrono>
@@ -84,9 +85,9 @@ void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm) {
     const SceneGiBinding *b = sceneGiBindingOf(sm);
     if (!b) b = &kNone;
     // Compared first: a pass of the scene the previous pass drew (every pass of
-    // one view, the shadow node's casters in between) costs three compares.
-    if (host->getVctLighting() != b->vct) host->setVctLighting(b->vct);
-    if (host->getIrradianceField() != b->ifd) host->setIrradianceField(b->ifd);
+    // one view, the shadow node's casters in between) costs a few compares. The
+    // Photon volumes are not HlmsPbs's (OWN-GI-1): the listener resolves them from
+    // the same record (PhotonPassBinding).
     if (host->getParallaxCorrectedCubemap() != b->pcc ||
         (b->pcc && (host->getPccVctMinDistance() != b->pccMinDist ||
                     host->getPccVctMaxDistance() != b->pccMaxDist)))
@@ -100,16 +101,16 @@ void bindSceneGi(Ogre::HlmsPbs *host, const Ogre::SceneManager *sm) {
         host->resetIblSpecMipmap(Ogre::uint8(b->iblMipmaps));
 }
 
-void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
-                  const Ogre::IrradianceField *ifd,
+void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::PhotonVoxelLighting *vct,
+                  const Ogre::PhotonIrradianceField *ifd,
                   const Ogre::ParallaxCorrectedCubemapBase *pcc,
                   const Ogre::PlanarReflections *planar) {
+    PhotonPassBinding::forget(vct);
+    PhotonPassBinding::forget(ifd);
     if (!manager) return;
     for (int t = Ogre::HLMS_LOW_LEVEL + 1; t < Ogre::HLMS_MAX; ++t) {
         auto *host = dynamic_cast<Ogre::HlmsPbs *>(manager->getHlms(Ogre::HlmsTypes(t)));
         if (!host) continue;
-        if (vct && host->getVctLighting() == vct) host->setVctLighting(nullptr);
-        if (ifd && host->getIrradianceField() == ifd) host->setIrradianceField(nullptr);
         if (pcc && host->getParallaxCorrectedCubemap() == pcc) host->setParallaxCorrectedCubemap(nullptr);
 #ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
         if (planar && host->getPlanarReflections() == planar) host->setPlanarReflections(nullptr);
@@ -122,8 +123,12 @@ void forgetGiArms(Ogre::HlmsManager *manager, const Ogre::VctLighting *vct,
 void ScenePbs::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
                                Ogre::ResourceTransitionArray &resourceTransitions,
                                Ogre::Camera *renderingCamera, const bool bCasterPass) {
-    bindSceneGi(this, renderingCamera ? renderingCamera->getSceneManager() : nullptr);
+    const Ogre::SceneManager *sm = renderingCamera ? renderingCamera->getSceneManager() : nullptr;
+    bindSceneGi(this, sm);
     Ogre::HlmsPbs::analyzeBarriers(barrierSolver, resourceTransitions, renderingCamera, bCasterPass);
+    // The Photon volumes the pixel stage reads (HlmsPbs's own walk did this while it
+    // held them — OWN-GI-1).
+    PhotonPassBinding::analyzeBarriers(barrierSolver, resourceTransitions, sm, bCasterPass);
 }
 
 Ogre::HlmsCache ScenePbs::preparePassHash(const Ogre::CompositorShadowNode *shadowNode,
@@ -201,12 +206,12 @@ void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::Pie
 /// LIFETIME: created here, before any voxeliser asks for it, and destroyed in
 /// `destroyVctMaterialStore` AFTER every voxeliser is gone. Measured at the code
 /// (A5b's lifetime check): the ONLY reader of `getTexturePool()` is the voxeliser's
-/// own dispatch binding — no `VctLighting` touches it — so "outlive every voxeliser"
+/// own dispatch binding — no `PhotonVoxelLighting` touches it — so "outlive every voxeliser"
 /// is the whole constraint.
-Ogre::VctMaterial *OgreScene::vctMaterialStore() {
+Ogre::PhotonVoxelMaterial *OgreScene::vctMaterialStore() {
     if (!mVctMaterialStore && mRoot) {
-        mVctMaterialStore = new Ogre::VctMaterial(
-            Ogre::Id::generateNewId<Ogre::VctMaterial>(),
+        mVctMaterialStore = new Ogre::PhotonVoxelMaterial(
+            Ogre::Id::generateNewId<Ogre::PhotonVoxelMaterial>(),
             mRoot->getRenderSystem()->getVaoManager(), mRoot->getCompositorManager2(),
             mRoot->getRenderSystem()->getTextureGpuManager());
     }
@@ -228,13 +233,13 @@ void OgreScene::destroyVctMaterialStore() {
 /// are sequential on the render thread and share the one store's resources. Both halves
 /// are idempotent, so a rebuild that throws between them cannot poison the next.
 void OgreScene::beginVctMaterialBracket() {
-    if (Ogre::VctMaterial *store = vctMaterialStore()) store->initTempResources(mSceneMgr);
+    if (Ogre::PhotonVoxelMaterial *store = vctMaterialStore()) store->initTempResources(mSceneMgr);
 }
 void OgreScene::endVctMaterialBracket() {
     if (mVctMaterialStore) mVctMaterialStore->destroyTempResources();
 }
 
-void OgreScene::bindGeometrySource(Ogre::VctVoxelizer *v) {
+void OgreScene::bindGeometrySource(Ogre::PhotonVoxelizer *v) {
     ensureGpuTables();
     // THE ROWS MUST BE ON THE DEVICE, NOT MERELY IN THE MIRROR. `GpuScene::update`
     // uploads them once per frame with the other tables, but a GI rebuild runs outside
@@ -250,7 +255,7 @@ void OgreScene::bindGeometrySource(Ogre::VctVoxelizer *v) {
 // THE VOXEL FEED (ATOM P4b, A5b §2) - what replaced `addItem`.
 //
 // A voxel build used to be fed from the CPU: an `addItem` per GI item, a
-// `VctMaterial` conversion and a bucket per sub-item, a queued instance per
+// `PhotonVoxelMaterial` conversion and a bucket per sub-item, a queued instance per
 // (item, octant) and a CPU-filled instance buffer uploaded per build. Now the
 // GPU scene already holds every instance (transform, bounds, flags, mesh, and
 // since this lane the MATERIAL WORD in ids.y), so a build is: bring that table
@@ -271,13 +276,13 @@ void OgreScene::queueAllGiMaterials() {
 /// INSIDE THE STORE'S BRACKET: the owed refresh, then every pending slot's datablock
 /// converted and its slot marked, so the next scan re-composes it with a real word.
 ///
-/// THE REFRESH IS IN PLACE (VctMaterial::refreshAll): a converted datablock keeps its
+/// THE REFRESH IS IN PLACE (PhotonVoxelMaterial::refreshAll): a converted datablock keeps its
 /// (pool, slot) and only its row is re-written - which is what keeps every instance's
 /// word valid across a material edit. A datablock whose texture CLASS changed (it
 /// gained or lost a diffuse or emissive map) moves pool; only then do words change,
 /// and every GI slot is re-composed.
 void OgreScene::convertPendingMaterials() {
-    Ogre::VctMaterial *store = vctMaterialStore();
+    Ogre::PhotonVoxelMaterial *store = vctMaterialStore();
     if (!store) return;
     // A SLOT IS RE-COMPOSED ONLY WHEN ITS WORD CHANGES. A from-scratch arm queues
     // every GI slot and a refresh re-reads every row, but a datablock that keeps its
@@ -286,7 +291,7 @@ void OgreScene::convertPendingMaterials() {
     const detail::GpuInstance *mirror = mGpuScene.live() ? mGpuScene.mirrorData() : nullptr;
     const auto restageIfChanged = [&](const Node &n) {
         if (n.itemSlot == size_t(-1) || !n.item || !n.item->getNumSubItems()) return;
-        const Ogre::VctMaterial::DatablockConversionResult *r =
+        const Ogre::PhotonVoxelMaterial::DatablockConversionResult *r =
             store->lookupDatablock(n.item->getSubItem(0)->getDatablock());
         const uint32_t word = r ? ((r->bucketIdx << 16u) | (r->slotIdx & 0xFFFFu))
                                 : detail::GpuScene::kNoMaterialWord;
@@ -326,7 +331,7 @@ unsigned OgreScene::countGiItems() const {
 
 /// ONE VOXEL BUILD over the device-side feed. The caller has placed the voxeliser's
 /// region and brought the scene graph current.
-bool OgreScene::gatherAndBuild(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxelizer,
+bool OgreScene::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *voxelizer,
                                const VoxelGatherInputs &in) {
     if (!voxelizer) return false;
     // THE TABLE, CURRENT - the transforms and flags the gather reads. Composing a slot
@@ -346,7 +351,7 @@ bool OgreScene::gatherAndBuild(detail::VoxelFeed &feed, Ogre::VctVoxelizer *voxe
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::RenderSystem *rs = mRoot->getRenderSystem();
     // Rebuilt only when the mesh set changed; its answer is "did work", not "exists".
-    mGpuScene.ensurePartitions(hm, rs, Ogre::VctVoxelizer::kIndicesPerPartition);
+    mGpuScene.ensurePartitions(hm, rs, Ogre::PhotonVoxelizer::kIndicesPerPartition);
     bindGeometrySource(voxelizer);
     // THE REFUSAL HOOK (gi.voxel_resident case 5): the state a device with no buffer
     // device addresses is in for the whole scene - no geometry the voxeliser can
@@ -701,18 +706,18 @@ void OgreScene::refreshGlobalIllumination(GiRefreshReason reason) {
 }
 
 // The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2). VERIFIED AGAINST
-// THE PIN by this lane, because the spec listed it as unproven: VctLighting::
+// THE PIN by this lane, because the spec listed it as unproven: PhotonVoxelLighting::
 // update() re-collects the scene's lights, re-maps its const buffer and
 // re-dispatches the injection compute job against the voxelizer's EXISTING
-// albedo/normal/emissive textures (OgreVctLighting.cpp). It touches neither the
-// VctVoxelizer's raw Item* cache nor VctMaterial's datablock cache, which is
+// albedo/normal/emissive textures (PhotonVoxelLighting.cpp). It touches neither the
+// PhotonVoxelizer's raw Item* cache nor PhotonVoxelMaterial's datablock cache, which is
 // what the "always from scratch" rule in rebuildVct exists to protect — and
 // upstream's own Voxelizer sample re-calls it on a keypress without rebuilding
 // anything (Samples/2.0/Tests/Voxelizer, the F4/F5 handlers). So it is safe to
 // re-run, and the from-scratch rule stays exactly as strict for the voxelizer.
 //
 // updateSceneGraph() first: light injection reads each light's DERIVED position
-// (VctLighting::addLight -> getParentNode()->_getDerivedPosition()), and the
+// (PhotonVoxelLighting::addLight -> getParentNode()->_getDerivedPosition()), and the
 // whole point of this call is that a light just moved.
 // THE CHAIN IS SETTLED FOR THESE INPUTS (LAMPREST-3 fix round item 3). Recorded
 // by WHOEVER pays a full at-rest chain injection — the light tick, or the last
@@ -812,7 +817,7 @@ void OgreScene::payChainSettleStep() {
 // closing injection, a cascade rebuild's,
 // the light tick (moving and at rest) and the incremental settle. What an
 // injection IS therefore has one definition — the environment the bounce job
-// reads where its cones escape, then `VctLighting::update` at the document's
+// reads where its cones escape, then `PhotonVoxelLighting::update` at the document's
 // own bounce count with the scene's own ray march — and no path can hand a
 // volume a different answer from another (DRAG-1: the flicker was two writers
 // with two answers alternating on cascade 0).
@@ -838,7 +843,7 @@ bool OgreScene::injectedThisFrame(size_t i) const {
 }
 
 bool OgreScene::injectCascade(size_t i) {
-    Ogre::VctLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;
+    Ogre::PhotonVoxelLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;
     if (!lighting) return false;
     unsigned long long &stamp = mVctCascades[i].injectedFrame;
     const unsigned long long frame = giWriterFrame();
@@ -865,7 +870,7 @@ bool OgreScene::injectCascade(size_t i) {
 // radiance has finished moving — once, after the LAST injection of a tick or of
 // an incremental settle, never per injection (LAMPREST-3 fix round).
 void OgreScene::reintegrateFieldAfterInjection() {
-    // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
+    // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same PhotonVoxelLighting
     // object, same voxel textures, same field geometry — only the radiance
     // in the volume changed. reset() re-arms the integration counter and
     // does NOT clear the atlases, so the probes re-converge progressively
@@ -877,7 +882,7 @@ void OgreScene::reintegrateFieldAfterInjection() {
     // the budget is above 0, so this is the belt to that braces.)
     if (mIfd) {
         // THE FIELD'S BINDING FIRST, AND UNCONDITIONALLY (E1 reader F2,
-        // PHOTON_SPEC §7 E2 (9)). `VctLighting::update` with extra bounces
+        // PHOTON_SPEC §7 E2 (9)). `PhotonVoxelLighting::update` with extra bounces
         // PING-PONGS its light voxel textures (`runBounce`), and the field
         // bound whatever was current ONCE, by pointer, at `initialize()`
         // (fork 822d538f5 (was 0044)). So after an odd number of bounce passes — which
@@ -1322,8 +1327,8 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
     GiVoxelStats st;
     st.cascade = cascadeIdx;
     JAH_TRY {
-        Ogre::VctLighting *lighting = nullptr;
-        Ogre::VctVoxelizer *voxelizer = nullptr;
+        Ogre::PhotonVoxelLighting *lighting = nullptr;
+        Ogre::PhotonVoxelizer *voxelizer = nullptr;
         if (!mVctCascades.empty()) {
             if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return st;
             lighting = mVctCascades[size_t(cascadeIdx)].lighting;
@@ -1504,8 +1509,8 @@ GiVoxelStats OgreScene::giVoxelStats(int cascadeIdx) {
 bool OgreScene::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
     out = GiVoxelVolume();
     JAH_TRY {
-        Ogre::VctLighting *lighting = nullptr;
-        Ogre::VctVoxelizer *voxelizer = nullptr;
+        Ogre::PhotonVoxelLighting *lighting = nullptr;
+        Ogre::PhotonVoxelizer *voxelizer = nullptr;
         if (!mVctCascades.empty()) {
             if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return false;
             lighting = mVctCascades[size_t(cascadeIdx)].lighting;
@@ -2607,7 +2612,7 @@ void OgreScene::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
     if (!dying) {
         // A TEXTURE a converted material bound died (the caller cannot name a
         // datablock): the store's texture pool is re-copied by the owed refresh
-        // (VctMaterial::refreshAll forgets its by-pointer slice cache), and every
+        // (PhotonVoxelMaterial::refreshAll forgets its by-pointer slice cache), and every
         // cascade re-voxelises in place.
         mVctMaterialRefreshOwed = true;
         mGiCascadeDirtyAll = true;
@@ -2744,7 +2749,7 @@ void OgreScene::endDragGestureIfStill() {
 //   * whether a DATABLOCK died or a material PARAMETER changed — the only case
 //     that needs a new voxeliser, and it gets one per cascade per frame with
 //     the chain's lighting objects (and so its raw `mExtraCascades` pointers)
-//     untouched (`VctLighting::setVoxelizer`, fork ae2ed529f+822d538f5 (was 0037)).
+//     untouched (`PhotonVoxelLighting::setVoxelizer`, fork ae2ed529f+822d538f5 (was 0037)).
 //   * and, when nothing geometric moved at all, that a LIGHT changed — which is
 //     a re-INJECTION over the voxels that are already there, on every cascade,
 //     and never a re-voxelisation.
@@ -2894,7 +2899,7 @@ bool OgreScene::refreshCascadesFast() {
 // (BOOTVOX-1, 2026-09-18, measured on the default scene at boot).
 //
 // THE DEFECT. The voxeliser reads a material's ALBEDO and EMISSIVE textures
-// (VctMaterial copies exactly those two into its texture pool), so voxelising
+// (PhotonVoxelMaterial copies exactly those two into its texture pool), so voxelising
 // before they are resident stores the wrong albedo — and the engine knows it
 // does: `settleTextureResidency` bumps `mGiMaterialGeneration` when the pixels
 // arrive, and the next refresh gives every cascade a FRESH voxeliser through
@@ -4386,7 +4391,7 @@ bool OgreScene::rebuildVct() {
 // right; walk out of it and the world went unlit, and a scene bigger than the
 // cap was voxelised at metres per cell. Photon's arm is N camera-centred cascades — fine cells near the eye,
 // coarse ones far away, and what escapes the outermost cascade takes
-// `VctLighting`'s ambient hemisphere, i.e. the Sky Light (measured in
+// `PhotonVoxelLighting`'s ambient hemisphere, i.e. the Sky Light (measured in
 // spikes/photon-s1 §4.2: the horizon reads exactly the GI-off value, so there
 // is no wall of darkness at the boundary).
 //
@@ -4404,13 +4409,13 @@ bool OgreScene::rebuildVct() {
 //     from outside" move lost the GPU (`VK_ERROR_DEVICE_LOST`), a 2 km jump
 //     segfaulted the next frame (§4.4).
 //
-// What we DO use is everything underneath it: `VctVoxelizer` (the rasteriser),
-// `VctLighting`, and `VctLighting::addCascade` — the chaining that makes
+// What we DO use is everything underneath it: `PhotonVoxelizer` (the rasteriser),
+// `PhotonVoxelLighting`, and `PhotonVoxelLighting::addCascade` — the chaining that makes
 // HlmsPbs sample N volumes with the pin's own cone-continuation (its
 // per-cascade brightness stabilisation is NOT used: see cascadeBounces, and
 // fork 8f09c0cd4+155a56bf8+5230c9390+8282f6d70 (was 0074/0075) for the two defects it was compensating for). The
 // cascade transforms reach the shader
-// from the LIVE voxelisers every frame (`VctLighting::fillConstBufferData`
+// from the LIVE voxelisers every frame (`PhotonVoxelLighting::fillConstBufferData`
 // builds `invXform` from `getVoxelOrigin()/getVoxelSize()`), so moving a
 // cascade's region is picked up by the next frame with no extra push.
 //
@@ -4437,7 +4442,7 @@ bool OgreScene::rebuildVct() {
 //      surprise.)
 //   4. The ambient pair goes into EVERY cascade after every update that creates
 //      or refreshes one. Upstream never does this and the room renders 2,2,2:
-//      binding a `VctLighting` suppresses HlmsPbs' own ambient scene-wide
+//      binding a `PhotonVoxelLighting` suppresses HlmsPbs' own ambient scene-wide
 //      (`vctSpecular.w == 1` unconditionally), so a cascade with black
 //      hemispheres is a cascade with no ambient at all (S1 §4.3).
 //   5. Cascade 0 IS `mVctVoxelizer`/`mVctLighting`. Every binding, teardown,
@@ -4598,7 +4603,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         // upstream's own recommendation (its VctCascadeSetting, not in our fork): it is a
         // per-cascade memory and time cost and the near field is the only place
         // an area light's shadow is legible.
-        c.voxelizer = new Ogre::VctVoxelizer(Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
+        c.voxelizer = new Ogre::PhotonVoxelizer(Ogre::Id::generateNewId<Ogre::PhotonVoxelizer>(),
                                              mRoot->getRenderSystem(), mRoot->getHlmsManager(),
                                              i == 0u /*correctAreaLightShadows*/,
                                              vctMaterialStore());
@@ -4639,10 +4644,10 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         std::vector<uint32_t> mask;
         const VoxelGatherInputs in = cascadeGatherInputs(c, mask);
         gatherAndBuild(*c.feed, c.voxelizer, in);
-        c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
+        c.lighting = new Ogre::PhotonVoxelLighting(Ogre::Id::generateNewId<Ogre::PhotonVoxelLighting>(),
                                            c.voxelizer, anisotropic);
         // THE BOUNCE VOLUMES AT EVERY BOUNCE COUNT (CONTACT-OCCLUSION-1): the sky's
-        // direct term is a bounce-job pass (VctLighting::update's sky pass, fork), so a
+        // direct term is a bounce-job pass (PhotonVoxelLighting::update's sky pass, fork), so a
         // one-bounce document needs them too — without them a surface lit only by the
         // sky re-emitted nothing (gi.contact_occlusion's arm B).
         c.lighting->setAllowMultipleBounces(true);
@@ -4913,7 +4918,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     // (A MATERIAL EDIT IS A PLAIN DIRTY HIT NOW, A5b fix round. It used to buy this
     // cascade a REPLACEMENT voxeliser - new volumes, swapped into the lighting -
     // because each voxeliser owned a material cache keyed by raw pointer. The chain
-    // shares one store, refreshed IN PLACE (VctMaterial::refreshAll) and evicted on
+    // shares one store, refreshed IN PLACE (PhotonVoxelMaterial::refreshAll) and evicted on
     // a death (0081), so the rebuild below re-reads the edited rows into the same
     // voxeliser.)
     bool built = false;               // the volumes on the GPU describe the NEW placement
@@ -4974,7 +4979,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
         } JAH_CATCH(mError, false);
     };
     const bool ok = attempt();
-    // A THROW AFTER THE BUILD (the ambient push, `VctLighting::update`'s dispatch -
+    // A THROW AFTER THE BUILD (the ambient push, `PhotonVoxelLighting::update`'s dispatch -
     // the VK_ERROR_OUT_OF_DEVICE_MEMORY class is real on this box) leaves volumes
     // that are correct and current for the NEW placement with only the light
     // injection missing: the caller must NOT put the placement back, because the
@@ -5230,7 +5235,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     //
     // THE DEFECT (LAMPREST-3, 2026-09-18, measured at full resolution). A
     // cascade rebuild ends with ONE injection of THAT cascade
-    // (`rebuildCascade`'s closing `VctLighting::update`) over the radiance that
+    // (`rebuildCascade`'s closing `PhotonVoxelLighting::update`) over the radiance that
     // cascade happened to hold — which, after a scroll, is the light of
     // wherever it was standing before. That is one Jacobi pass of a fixed point
     // over COUPLED volumes (the same mathematics `refreshGiLighting`'s at-rest
@@ -6265,7 +6270,7 @@ void OgreScene::buildPccFinish() {
 // the depth test is what stops a probe on the far side of a wall from lighting
 // it — the leak the cone-traced diffuse term could not avoid. Ours is the
 // VCT-FED path: the probes are integrated by cone-tracing the voxel volume
-// VctLighting already lit, so DDGI costs no second scene representation.
+// PhotonVoxelLighting already lit, so DDGI costs no second scene representation.
 //
 // WHAT IT REPLACES, and this is the fact to carry: binding a field makes
 // HlmsPbs set `VctDisableDiffuse` (OgreHlmsPbs.cpp:1784-1788). The field does
@@ -6277,11 +6282,11 @@ void OgreScene::buildPccFinish() {
 // own answer (media/Hlms/Jahshaka/JahIfd_piece_ps.any), with no dial.
 //
 // WHERE IT LIVES IN THE LIFECYCLE. Inside the VCT arm and strictly within
-// VctLighting's lifetime: the field holds that pointer and binds its voxel
+// PhotonVoxelLighting's lifetime: the field holds that pointer and binds its voxel
 // textures on every update. So it is built at the end of a VCT (re)build, it
 // dies FIRST in teardownVct, and the only thing that may re-use an existing
 // field is the light-only cheap path (`refreshGiLighting`), which leaves the
-// VctLighting object in place and merely re-injects — upstream's `reset()`
+// PhotonVoxelLighting object in place and merely re-injects — upstream's `reset()`
 // case exactly. `reset()` does not clear the atlases (spike §4 methodology),
 // which is a FEATURE here: a re-converge runs progressively over the previous
 // converged data, so a light drag never flashes the room black.
@@ -6292,7 +6297,7 @@ unsigned long long OgreScene::probeShadowBytes() const {
 }
 
 bool OgreScene::ddgiWanted() const {
-    // Fed by VctLighting: there is nothing to build without a voxel volume.
+    // Fed by PhotonVoxelLighting: there is nothing to build without a voxel volume.
     if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
     // Auto = the tier's (GiQualityFacts::fieldDefault), resolved here like every
     // other Auto toggle (D4-PHOTON-TIERS deleted the "Auto is OFF so old scenes
@@ -6310,7 +6315,7 @@ void OgreScene::ifdProbeCounts(const Ogre::Vector3 &size, Ogre::uint32 outCounts
     // grid must therefore come from the volume's aspect, not from a constant.
     //
     // Every axis count must be a power of two: upstream only OGRE_ASSERT_LOWs
-    // it (OgreIrradianceField.h:96) and that assert is compiled out of our
+    // it (PhotonIrradianceField.h:96) and that assert is compiled out of our
     // release-built engine, and `getDepthProbeFullResolution` additionally
     // assumes the TOTAL is one (it takes ctz32 of it). So the fit hands out the
     // total's 13 doublings one at a time, each to whichever axis currently has
@@ -6355,7 +6360,7 @@ void OgreScene::ifdProbeCounts(const Ogre::Vector3 &size, Ogre::uint32 outCounts
     outCounts[0] = n[0]; outCounts[1] = n[1]; outCounts[2] = n[2];
 }
 
-Ogre::uint32 OgreScene::ifdProbesPerFrame(const Ogre::IrradianceFieldSettings &settings,
+Ogre::uint32 OgreScene::ifdProbesPerFrame(const Ogre::PhotonIrradianceFieldSettings &settings,
                                           int updateBudget, Ogre::uint32 totalProbes) {
     // Paused is paused (GiParams::updateBudget == 0): no re-converge, and — the
     // reason this returns 0 rather than 1 — update() is then never called at
@@ -6391,7 +6396,7 @@ void OgreScene::buildIrradianceField() {
     if (!ddgiWanted() || !mVctLighting || !mVctVoxelizer) { teardownIrradianceField(); return; }
 
     JAH_TRY {
-        Ogre::IrradianceFieldSettings settings;
+        Ogre::PhotonIrradianceFieldSettings settings;
         // `JAHSHAKA_GI_FIELD_RAYS` (rays per depth texel), `_SAMPLES` (the target
         // sample count) and `_STATIC` (no rotation) are MEASUREMENT switches, like
         // `JAHSHAKA_GI_FIELD_NO_SCROLL`: gi.field_alias drives the arms in one process.
@@ -6446,7 +6451,7 @@ void OgreScene::buildIrradianceField() {
         // field is bound to HlmsPbs by POINTER, and initialize() re-creates the
         // atlases for the new settings on its own. Upstream's own instruction
         // for "major changes to VctLighting" is exactly this call.
-        if (!mIfd) mIfd = new Ogre::IrradianceField(mRoot, mSceneMgr);
+        if (!mIfd) mIfd = new Ogre::PhotonIrradianceField(mRoot, mSceneMgr);
         mIfd->setIntegrationPolicy(targetSamples, kIfdKeepOnChange, rotateRays);
         mIfd->initialize(settings, origin, size, mVctLighting);
         // WHERE THE FIELD IS, recorded as asked for (the field enlarges it by a
@@ -6576,7 +6581,7 @@ void OgreScene::updateIrradianceField() {
             // RE-PLACEMENT's slabs (PHOTON-FIELD-ROTATE-1 part 3: the work has no
             // history) are filed as "ifd.replace", a change's as "ifd.converge".
             const bool replacing =
-                mIfd->getWorkMode() == Ogre::IrradianceField::IntegrateFresh;
+                mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateFresh;
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0,
                                      replacing ? "ifd.replace" : "ifd.converge",
                                      mRoot->getRenderSystem());
@@ -6653,7 +6658,7 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
     JAH_TRY {
         // THE BINDING FIRST, AND UNCONDITIONALLY (fork 822d538f5 (was 0044)'s second
         // half). Cascade 0's lighting re-creates its light voxel textures
-        // whenever it is moved to another voxeliser (VctLighting::setVoxelizer;
+        // whenever it is moved to another voxeliser (PhotonVoxelLighting::setVoxelizer;
         // no path in this file does that since the A5b fix round deleted the
         // material-edit replacement, but the binding costs nothing to keep
         // exact) and the field bound those textures once, by pointer, at initialize().
@@ -6808,7 +6813,7 @@ void OgreScene::teardownVct() {
     mGiBuildStage = GiBuildStage::Idle;
     // THE DDGI FIELD DIES FIRST (spike §8, verified across all four shapes: GI
     // off under a bound field, a refresh under one, a rebuild over a refreshed
-    // arm, and the Engine destroyed with one live). It holds a raw VctLighting*
+    // arm, and the Engine destroyed with one live). It holds a raw PhotonVoxelLighting*
     // and binds that object's voxel textures on every update, and its own
     // generation workspace lives in the SceneManager — so it must be gone
     // before either. Unbinding it from HlmsPbs is part of the same call.
@@ -6852,8 +6857,8 @@ void OgreScene::teardownVct() {
     mGiBinding.pcc = nullptr;
     forgetGiArms(mRoot->getHlmsManager(), mVctLighting, nullptr, mPcc);
     // Reverse dependency order, all while the SceneManager is still alive:
-    // PCC (probe workspaces + cubemap textures) -> VctLighting (reads the
-    // voxelizer's textures) -> VctVoxelizer (drops its MeshPtr refs).
+    // PCC (probe workspaces + cubemap textures) -> PhotonVoxelLighting (reads the
+    // voxelizer's textures) -> PhotonVoxelizer (drops its MeshPtr refs).
     delete mPcc;          mPcc = nullptr;
     delete mVctLighting;  mVctLighting = nullptr;
     delete mVctVoxelizer; mVctVoxelizer = nullptr;

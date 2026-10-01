@@ -931,7 +931,7 @@ void addAtomViewPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHan
 ///     effects read is never written; a chain with no NAMED scene depth clears
 ///     instead) or CLEARED (kPhotonDepthClearBit, Voxels and Probes);
 ///   * ONE PASS_SCENE drawing the kPhotonViewBit channel alone — Ogre's
-///     VoxelVisualizer and IfdProbeVisualizer, the cards' quads — into the photon
+///     VoxelVisualizer and PhotonIfdProbeVisualizer, the cards' quads — into the photon
 ///     LAYER (a transparent RGBA8 texture at the target's size) through that depth
 ///     (kPhotonSceneExecutionBit). Its mask is written by the caller AFTER the
 ///     helper sweep (which drops the channel from every other scene pass), which is

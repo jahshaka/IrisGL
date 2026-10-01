@@ -117,16 +117,16 @@ void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
 
 // THE ENVIRONMENT, INTO EVERY CASCADE'S BOUNCE (PHOTON-ENV-1). The pixel shader
 // reads the environment from its own pass slot (FogHlmsListener, `jah_env`); the
-// one other reader is each VctLighting's BOUNCE job, which runs inside
-// VctLighting::update and sees the sky where a bounce cone escapes. It gets the
+// one other reader is each PhotonVoxelLighting's BOUNCE job, which runs inside
+// PhotonVoxelLighting::update and sees the sky where a bounce cone escapes. It gets the
 // cube the pass gets (none while the Sky Light is out — the sky goes dark by not
 // being bound), the per-channel gain, and the SH coefficients in WORLD axes.
 //
 // It REPLACES the hemisphere pair this function used to push (upstream's
-// VctLighting::setAmbient, `ambientUpperHemi/LowerHemi` in the probe pass
+// PhotonVoxelLighting::setAmbient, `ambientUpperHemi/LowerHemi` in the probe pass
 // buffer, and the `vct_ambient_hemisphere` variant its epsilon existed to pin):
 // the pair was a two-band pole approximation of the SH that every escape was
-// filled with. Called before every VctLighting::update, and whenever the
+// filled with. Called before every PhotonVoxelLighting::update, and whenever the
 // environment's cube, gain or coefficients change.
 void OgreScene::applyVctEnvironment() {
     if (!mVctLighting) return;
@@ -137,7 +137,7 @@ void OgreScene::applyVctEnvironment() {
         applyCascadeEnvironment(mVctCascades[i].lighting);
 }
 
-void OgreScene::applyCascadeEnvironment(Ogre::VctLighting *lighting) {
+void OgreScene::applyCascadeEnvironment(Ogre::PhotonVoxelLighting *lighting) {
     if (!lighting) return;
     // THE CLOUD LAYER'S SHADOW ON THE INJECTION (CLOUDS-2D-2), bound or cleared
     // on the shared job for THIS volume, beside its environment.
@@ -180,7 +180,7 @@ void OgreScene::noteEnvironmentChanged() {
     ++mGiLightWriteSerial;
     applyVctEnvironment();
     // EVERY chain is owed a settle: the store holds the sky's direct term at every
-    // bounce count (VctLighting::update's sky pass reads the environment where its
+    // bounce count (PhotonVoxelLighting::update's sky pass reads the environment where its
     // cones escape — CONTACT-OCCLUSION-1; with one bounce it used to hold the lamps
     // only, and a sky-lit surface re-emitted nothing).
     oweChainSettle();
@@ -1551,7 +1551,7 @@ void OgreScene::destroy() {
         // Before the nodes: PlanarReflections holds raw Renderable pointers, and
         // it destroys its own cameras through the SceneManager. It also has to
         // leave this scene's binding and every HlmsPbs host, which its destructor
-        // (like VctLighting's) does not do.
+        // (like PhotonVoxelLighting's) does not do.
         teardownPlanar();
         destroySky();   // also unbinds + destroys the reflection cubemap
         destroyGrid();
@@ -2032,12 +2032,12 @@ void OgreScene::updateSurfaceCache() {
     view.radianceSerial = radianceSig;
     view.lightBudgetTexels = facts.cardLightTexels;
     // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0
-    // VctLighting the pass buffer is filled from), and THE RE-INJECTION
+    // PhotonVoxelLighting the pass buffer is filled from), and THE RE-INJECTION
     // SIGNATURE — folded ONLY from what moves when an injection LANDS, never
     // from the write-time serials (a light write or a material generation
     // bumps at the WRITE, and a dragged light re-marched the whole resident set
     // against voxels that had not moved, every frame): the chain's settles, each
-    // cascade's rebuilds and lattice cell, the VctLighting objects themselves,
+    // cascade's rebuilds and lattice cell, the PhotonVoxelLighting objects themselves,
     // and the environment the escapes read (below).
     view.vct = mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
@@ -2054,7 +2054,7 @@ void OgreScene::updateSurfaceCache() {
         foldI(mGiRestTicks);
         // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
         // injection at all: noteEnvironmentChanged hands the new sky to every
-        // VctLighting at once (applyVctEnvironment) and the pixel reads it the
+        // PhotonVoxelLighting at once (applyVctEnvironment) and the pixel reads it the
         // same frame, so the card's escape must too. The values
         // applyCascadeEnvironment hands over, quantised.
         {

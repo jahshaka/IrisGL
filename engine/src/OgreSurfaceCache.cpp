@@ -12,8 +12,8 @@
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
 #include <OgreHlmsPbs.h>
-#include <Vct/OgreVctLighting.h>
-#include <Vct/OgreVctVoxelizerSourceBase.h>
+#include "photon/voxel/PhotonVoxelLighting.h"
+#include "photon/voxel/PhotonVoxelizerSourceBase.h"
 #include <OgreDescriptorSetTexture.h>
 #include <OgreDescriptorSetUav.h>
 #include <OgreMesh2.h>
@@ -1108,7 +1108,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
 // per CAMERA in that camera's view space (clusters of a screen), which is
 // meaningless for a card texel anywhere in the world — so the job gets the
 // pass buffer's own light layout, in world coordinates, from the scene's
-// lights (the shape VctLighting's own light injection takes).
+// lights (the shape PhotonVoxelLighting's own light injection takes).
 namespace {
 /// The most cards one frame relights (the relight list's size, 80 B a card).
 constexpr unsigned kMaxRelights = 1024u;
@@ -1340,9 +1340,9 @@ void SurfaceCache::relightCards() {
     else
         mLightBuffer->upload(mLightCpu.data(), 0, 1u + size_t(numLights) * kLightFloats / 4u);
 
-    // ---- THE CHAIN AND THE ENVIRONMENT, from the one VctLighting every reader
+    // ---- THE CHAIN AND THE ENVIRONMENT, from the one PhotonVoxelLighting every reader
     // takes them from (the pixel's pass buffer is filled from the same calls).
-    Ogre::VctLighting *vct = mVct;
+    Ogre::PhotonVoxelLighting *vct = mVct;
     unsigned numCascades = 0u;
     bool aniso = false;
     Ogre::TextureGpu *envCube = nullptr;
@@ -1423,7 +1423,7 @@ void SurfaceCache::relightCards() {
     }
     // Every light volume a reader binds per cascade: the total, the anisotropic
     // axes, the per-axis coverage (PHOTON-VOXEL-3), the surface position
-    // (PHOTON-VOXEL-4) - VctLighting's list.
+    // (PHOTON-VOXEL-4) - PhotonVoxelLighting's list.
     const unsigned kinds = numCascades ? unsigned(vct->getNumVoxelTextures()) : 0u;
     const unsigned vctUnits = numCascades ? kinds * numCascades + (envCube ? 1u : 0u) : 0u;
     // THE CLOUD FIELD, the LAST texture unit (after the chain and the
