@@ -2464,7 +2464,7 @@ struct GiParams {
     /// On, and in a VCT mode, the engine builds an `Ogre::PhotonIrradianceField` over
     /// the SAME voxel volume VCT already lit (Majercik et al.: octahedral
     /// irradiance + depth-visibility probes, cone-traced out of PhotonVoxelLighting) and
-    /// binds it to HlmsPbs. It is a DIFFUSE layer only: VCT keeps the specular
+    /// binds it to every PBS pass. It is a DIFFUSE layer only: VCT keeps the specular
     /// cones, the probes/planar/SSR keep everything they had.
     ///
     /// THE ONE THING TO KNOW BEFORE TURNING IT ON: binding a field makes
@@ -2836,12 +2836,18 @@ struct GiGatherFacts {
     unsigned adaptiveCapDivisor = 4u;
 };
 
+/// THE MOST CASCADES A SHIPPED TIER BUILDS (giQualityFacts' longest chain). The
+/// PBS pass-texture budget is sized on it (OgreFog.cpp, PhotonPassBinding): a
+/// SCRIPTED chain (GiParams::cascadeSet, up to 8) longer than this claims more
+/// set-0 slots than the fullest shipped pass.
+constexpr int kGiTierMaxCascades = 4;
+
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as
     /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
     /// left at 0 — the step is DERIVED from the chain (resolveCascadeTable does
     /// it), not a property of the tier.
-    GiParams::GiCascadeDesc cascades[4];
+    GiParams::GiCascadeDesc cascades[kGiTierMaxCascades];
     /// How many entries of `cascades` are in use.
     int   cascadeCount = 0;
     /// One reflection-probe cube face, in pixels, when the scene pins no size.
@@ -7162,7 +7168,7 @@ enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects };
 /// time, over every view of the renderer's SCENE that draws the post chain. A
 /// property of the scene, never saved; switching it rebuilds no workspace (its
 /// passes are gated by the workspace's execution mask) and Off is byte-identical.
-///   Voxels        the lit voxels of ONE cascade as cubes (Ogre's PhotonVoxelLighting debug
+///   Voxels        the lit voxels of ONE cascade as cubes (PhotonVoxelLighting's debug
 ///                 visualizer): the finest that holds the scene's lit content, or
 ///                 the one Scene::setPhotonVoxelCascade names
 ///   Probes        the irradiance field's probes as spheres coloured by their

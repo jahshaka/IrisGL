@@ -1,7 +1,8 @@
 // Global illumination: voxel cone tracing (VCT), the VCT +
 // parallax-corrected-cubemap hybrid and Photon's camera-centred cascade chain —
-// the public verbs and the internals that drive Ogre's
-// PhotonVoxelizer/VctLighting, IrradianceField and ParallaxCorrectedCubemapAuto.
+// the public verbs and the internals that drive Photon's own PhotonVoxelizer,
+// PhotonVoxelLighting and PhotonIrradianceField (photon/voxel/) and Ogre's
+// ParallaxCorrectedCubemapAuto.
 // (Instant Radiosity was the fourth arm and was deleted 2026-09-15,
 // PHOTON_SPEC §7 E2 (4).)
 //
@@ -6261,7 +6262,7 @@ void OgreScene::buildPccFinish() {
 }
 
 // ===========================================================================
-// DDGI — Ogre's IrradianceField as the diffuse GI layer (GI_UNIFIED_SPEC.md
+// DDGI — PhotonIrradianceField (photon/voxel/) as the diffuse GI layer (GI_UNIFIED_SPEC.md
 // §4 P1; the P0 spike that gates it: spikes/ddgi-vulkan/FINDINGS.md).
 //
 // WHAT IT IS. Majercik et al.'s Dynamic Diffuse GI: a grid of probes, each
@@ -6448,9 +6449,10 @@ void OgreScene::buildIrradianceField() {
         }
 
         // Re-INITIALIZE an existing field rather than churning the object: the
-        // field is bound to HlmsPbs by POINTER, and initialize() re-creates the
-        // atlases for the new settings on its own. Upstream's own instruction
-        // for "major changes to VctLighting" is exactly this call.
+        // field is bound to every pass by POINTER (SceneGiBinding, read by
+        // PhotonPassBinding), and initialize() re-creates the atlases for the new
+        // settings on its own — the instruction the class carries over from
+        // upstream for "major changes to the voxel lighting" is exactly this call.
         if (!mIfd) mIfd = new Ogre::PhotonIrradianceField(mRoot, mSceneMgr);
         mIfd->setIntegrationPolicy(targetSamples, kIfdKeepOnChange, rotateRays);
         mIfd->initialize(settings, origin, size, mVctLighting);

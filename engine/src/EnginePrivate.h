@@ -594,7 +594,7 @@ constexpr Ogre::uint32 kCardSubjectBit = 1u << 10;
 
 // THE PHOTON VIEW'S CHANNEL (PHOTON-VIEW-1). The NINTH bit, and like
 // kCardSubjectBit not an inversion: the only objects that ever carry it are the
-// photon view's debug drawables (Ogre's VoxelVisualizer and PhotonIfdProbeVisualizer,
+// photon view's debug drawables (PhotonVoxelVisualizer and PhotonIfdProbeVisualizer,
 // the cards' quads), and they carry it ALONE.
 //
 // WHAT IT BUYS: those objects live in the scene's own SceneManager (Ogre's
@@ -5261,8 +5261,8 @@ private:
     /// mode is one that produces a PhotonVoxelLighting to feed it.
     bool ddgiWanted() const;
     /// Creates + initializes the field over the CURRENT voxel volume, converges
-    /// it in one dispatch, binds it to HlmsPbs and takes the process-wide
-    /// binding. No-op (and unbinds) when ddgiWanted() is false. Called at the
+    /// it in one dispatch, binds it to every PBS pass (SceneGiBinding, read by
+    /// PhotonPassBinding) and takes the process-wide binding. No-op (and unbinds) when ddgiWanted() is false. Called at the
     /// end of rebuildVct — a VCT (re)build invalidates the
     /// field entirely, which upstream answers with re-initialize, not reset.
     void buildIrradianceField();
@@ -5356,7 +5356,7 @@ private:
     // longer than a cascade (three GPU losses in that spike).
     //
     // Cascade 0 IS mVctVoxelizer/mVctLighting — the head of the chain, the
-    // object bound to HlmsPbs — so every existing binding, teardown, status
+    // object every pass binds (PhotonPassBinding) — so every existing binding, teardown, status
     // and irradiance-field rule keeps working unchanged; mVctCascades[0]
     // mirrors those two pointers and 1..N-1 are owned here.
     /// What a voxel gather is asked (GpuVoxelGather.h's params, in engine terms).

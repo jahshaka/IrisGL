@@ -19,7 +19,6 @@
 #include <OgreCamera.h>
 #include <OgreHlms.h>
 #include <OgreHlmsManager.h>
-#include <OgreHlmsPbs.h>
 #include <OgreRenderSystem.h>
 #include <OgreRoot.h>
 #include <OgreRootLayout.h>
@@ -55,8 +54,17 @@ const Ogre::IdString kQTangent("hlms_qtangent");
 const Ogre::IdString kShadowCaster("hlms_shadowcaster");
 
 /// The light volumes per cascade, in the order the voxel lighting lists them
-/// (PhotonVoxelLighting::getLightVoxelTextures) and the pieces declare them.
-Ogre::int32 volumesPerCascade(bool anisotropic) { return anisotropic ? 10 : 5; }
+/// (PhotonVoxelLighting::getLightVoxelTextures) and the pieces declare them — the
+/// voxel lighting's own count, so the two cannot disagree.
+Ogre::int32 volumesPerCascade(bool anisotropic) {
+    return Ogre::int32(Ogre::PhotonVoxelLighting::volumesPerCascade(anisotropic));
+}
+constexpr Ogre::int32 kFieldTextures = Ogre::int32(Ogre::PhotonIrradianceField::kPassTextures);
+
+/// THE ONE CONDITION for the field in a pass: its pass properties, its textures
+/// and its pass-buffer block all follow it (they must agree, or the shader's
+/// struct and the buffer the listener writes drift apart).
+bool fieldBound(const SceneGiBinding *b) { return b && b->ifd; }
 
 /// What one host binds in the pass it last prepared. One per Hlms type, like
 /// FogHlmsListener::PassBinds: RenderQueue::renderPassPrepare prepares EVERY
@@ -119,23 +127,20 @@ void PhotonPassBinding::preparePassHash(bool casterPass, Ogre::SceneManager *sce
     if (b->vct) {
         hb.vct = b->vct;
         hlms->_setProperty(tid, kJahVctCascades, Ogre::int32(b->vct->getNumCascades()));
-        // The cone count is HLMS_PBS's setting (setVctFullConeCount, upstream API)
-        // for every PBS-family host: PBS is where the engine tells it.
-        const auto *pbs =
-            dynamic_cast<const Ogre::HlmsPbs *>(hlms->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-        hlms->_setProperty(tid, kVctConeDirs, (pbs && pbs->getVctFullConeCount()) ? 6 : 4);
+        // The cone set every reader of the store walks (kConeDirs, four).
+        hlms->_setProperty(tid, kVctConeDirs, Ogre::PhotonVoxelLighting::kConeDirs);
         hlms->_setProperty(tid, kVctAnisotropic, b->vct->isAnisotropic());
         hlms->_setProperty(tid, kVctSdfQuality, b->vct->shouldEnableSpecularSdfQuality());
         // 'Static' reflections on cubemaps look horrible (upstream's own words).
         if (b->pcc && b->pcc->isRendering()) hlms->_setProperty(tid, kVctDisableSpecular, 1);
     }
-    if (b->ifd) {
-        const Ogre::HlmsSamplerblock *sampler = fieldSampler(hlms->getHlmsManager());
-        if (sampler) {
-            hb.ifd = b->ifd;
-            hlms->_setProperty(tid, kJahIfd, 1);
-            hlms->_setProperty(tid, kVctDisableDiffuse, 1);
-        }
+    if (fieldBound(b)) {
+        // The bind needs the field's sampler; a registered Hlms always has a manager,
+        // and the manager always hands back a block.
+        fieldSampler(hlms->getHlmsManager());
+        hb.ifd = b->ifd;
+        hlms->_setProperty(tid, kJahIfd, 1);
+        hlms->_setProperty(tid, kVctDisableDiffuse, 1);
     }
 }
 
@@ -145,7 +150,7 @@ Ogre::uint16 PhotonPassBinding::numExtraPassTextures(const Ogre::HlmsPropertyVec
     const Ogre::int32 cascades = Ogre::Hlms::getProperty(properties, kJahVctCascades);
     const bool aniso = Ogre::Hlms::getProperty(properties, kVctAnisotropic) != 0;
     const bool ifd = Ogre::Hlms::getProperty(properties, kJahIfd) != 0;
-    return Ogre::uint16(cascades * volumesPerCascade(aniso) + (ifd ? 2 : 0));
+    return Ogre::uint16(cascades * volumesPerCascade(aniso) + (ifd ? kFieldTextures : 0));
 }
 
 void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int32 endSlot) {
@@ -157,7 +162,7 @@ void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int
     Ogre::int32 slot =
         endSlot - (cascades > 0 ? cascades * volumesPerCascade(hlms->_getProperty(tid, kVctAnisotropic) != 0)
                                 : 0) -
-        (ifd ? 2 : 0);
+        (ifd ? kFieldTextures : 0);
     if (cascades > 0) {
         hlms->_setProperty(tid, kVctNumProbes, cascades);
         // HlmsPbs: "If decals normals are enabled or VCT is used, we need to
@@ -177,6 +182,11 @@ void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int
                                               "vctProbeZ",    "vctProbeCovP", "vctProbeCovN",
                                               "vctProbePosP", "vctProbePosN", "vctProbeBack",
                                               "vctProbeNrm" };
+        static_assert(sizeof(kIso) / sizeof(kIso[0]) ==
+                          Ogre::PhotonVoxelLighting::kVolumesPerCascadeIsotropic &&
+                      sizeof(kAniso) / sizeof(kAniso[0]) ==
+                          Ogre::PhotonVoxelLighting::kVolumesPerCascadeAnisotropic,
+                      "one register name per light volume the voxel lighting lists");
         const char *const *names = aniso ? kAniso : kIso;
         for (Ogre::int32 i = 0; i < volumesPerCascade(aniso); ++i) {
             hlms->_setTextureReg(tid, Ogre::PixelShader, names[i], slot);
@@ -219,7 +229,7 @@ Ogre::uint32 PhotonPassBinding::passBufferSize(bool casterPass, Ogre::SceneManag
     if (!b) return 0u;
     size_t bytes = 0u;
     if (b->vct) bytes += b->vct->getConstBufferSize();
-    if (b->ifd) bytes += b->ifd->getConstBufferSize();
+    if (fieldBound(b)) bytes += b->ifd->getConstBufferSize();
     return Ogre::uint32(bytes);
 }
 
@@ -227,7 +237,7 @@ float *PhotonPassBinding::preparePassBuffer(bool casterPass, Ogre::SceneManager 
                                             float *passBufferPtr) {
     if (casterPass) return passBufferPtr;
     const SceneGiBinding *b = bindingOf(sceneManager);
-    if (!b || (!b->vct && !b->ifd)) return passBufferPtr;
+    if (!b || (!b->vct && !fieldBound(b))) return passBufferPtr;
     // The view matrix HlmsPbs::preparePassHash fills its own blocks with.
     const Ogre::Camera *cam = sceneManager->getCamerasInProgress().renderingCamera;
     const Ogre::Matrix4 viewMatrix = cam ? cam->getVrViewMatrix(0) : Ogre::Matrix4::IDENTITY;
@@ -235,7 +245,7 @@ float *PhotonPassBinding::preparePassBuffer(bool casterPass, Ogre::SceneManager 
         b->vct->fillConstBufferData(viewMatrix, passBufferPtr);
         passBufferPtr += b->vct->getConstBufferSize() >> 2u;
     }
-    if (b->ifd) {
+    if (fieldBound(b)) {
         b->ifd->fillConstBufferData(viewMatrix, passBufferPtr);
         passBufferPtr += b->ifd->getConstBufferSize() >> 2u;
     }
@@ -285,7 +295,8 @@ void PhotonPassBinding::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
                                                 Ogre::ResourceAccess::Read, 1u << Ogre::PixelShader);
         }
     }
-    if (Ogre::PhotonIrradianceField *ifd = b->ifd) {
+    if (fieldBound(b)) {
+        Ogre::PhotonIrradianceField *ifd = b->ifd;
         barrierSolver.resolveTransition(resourceTransitions, ifd->getIrradianceTex(),
                                         Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
                                         1u << Ogre::PixelShader);

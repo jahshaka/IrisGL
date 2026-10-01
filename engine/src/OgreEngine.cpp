@@ -2820,8 +2820,9 @@ void OgreEngine::ensureHlms() {
         // and a redefinition only works after the original has been collected.
         libs.push_back(am.load(mMediaDir + "Hlms/Jahshaka", "FileSystem", true));
         // ScenePbs: upstream's HlmsPbs plus the per-pass GI binding (every scene
-        // pass binds ITS scene's voxel lighting, field and probe grid —
-        // SceneGiBinding, EnginePrivate.h).
+        // pass binds ITS scene's probe grid, mirrors and IBL length — SceneGiBinding,
+        // EnginePrivate.h; the voxel lighting and field are bound by the listener,
+        // PhotonPassBinding).
         mRoot->getHlmsManager()->registerHlms(
             OGRE_NEW ScenePbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }

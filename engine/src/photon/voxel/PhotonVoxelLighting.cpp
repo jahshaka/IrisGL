@@ -36,7 +36,6 @@ THE SOFTWARE.
 #include "OgreHlmsCompute.h"
 #include "OgreHlmsComputeJob.h"
 #include "OgreHlmsManager.h"
-#include "OgreHlmsPbs.h"
 #include "OgreLight.h"
 #include "OgreLwString.h"
 #include "OgrePixelFormatGpuUtils.h"
@@ -729,16 +728,12 @@ namespace Ogre
         }
         // Jahshaka (PHOTON-VOXEL-4, CONE-SET-1): THE PIXEL'S CONE SET. The bounce is the
         // store's own integral of the diffuse the pixel reads, so it walks the pixel's
-        // cones - Vct_piece_ps.any's `vct_cone_dirs`, which HlmsPbs sets from
-        // getVctFullConeCount (the surface cache's card job does the same). It carried
-        // the six-cone set hard-coded while the pixel and the cards ran four: two
-        // quadratures of one store, the bounce's error not the pixel's.
-        {
-            HlmsPbs *pbs = dynamic_cast<HlmsPbs *>( hlmsManager->getHlms( HLMS_PBS ) );
-            const int32 cones = ( pbs && pbs->getVctFullConeCount() ) ? 6 : 4;
-            if( mLightVctBounceInject->getProperty( "vct_cone_dirs" ) != cones )
-                mLightVctBounceInject->setProperty( "vct_cone_dirs", cones );
-        }
+        // cones - kConeDirs, the pixel's `vct_cone_dirs` (the surface cache's card job
+        // reads the same constant). It carried the six-cone set hard-coded while the
+        // pixel and the cards ran four: two quadratures of one store, the bounce's
+        // error not the pixel's.
+        if( mLightVctBounceInject->getProperty( "vct_cone_dirs" ) != kConeDirs )
+            mLightVctBounceInject->setProperty( "vct_cone_dirs", kConeDirs );
         if( mEnvCube )
         {
             texSlot.texture = mEnvCube;

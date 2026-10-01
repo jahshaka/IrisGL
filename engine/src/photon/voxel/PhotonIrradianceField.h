@@ -508,6 +508,8 @@ namespace Ogre
 
         TextureGpu *getIrradianceTex() const { return mIrradianceTex; }
         TextureGpu *getDepthVarianceTex() const { return mDepthVarianceTex; }
+        /// Jahshaka (OWN-GI-1): the textures a PBS pass reads (the two above).
+        static constexpr uint32 kPassTextures = 2u;
     };
 }  // namespace Ogre
 

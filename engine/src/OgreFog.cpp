@@ -23,6 +23,8 @@
 #include "EnginePrivate.h"
 #include "Atmosphere.h"
 #include "photon/voxel/PhotonPassBinding.h"
+#include "photon/voxel/PhotonIrradianceField.h"
+#include "photon/voxel/PhotonVoxelLighting.h"
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
 
@@ -92,7 +94,13 @@ constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPas
 // scene's fullest pass is 63.
 constexpr size_t kPassTextureTable = 64u;
 constexpr size_t kOgrePassTexturesFullest = 17u;
-constexpr size_t kPhotonPassTexturesFullest = 4u * 10u + 2u;
+// The Photon share, from the constants that decide it: the longest shipped
+// tier chain x the anisotropic volumes per cascade + the field's two.
+constexpr size_t kPhotonPassTexturesFullest =
+    size_t(kGiTierMaxCascades) * Ogre::PhotonVoxelLighting::kVolumesPerCascadeAnisotropic +
+    Ogre::PhotonIrradianceField::kPassTextures;
+static_assert(kPhotonPassTexturesFullest == 42u,
+              "the measured 59 = Ogre's 17 + Photon's 42; a change here re-measures the table");
 static_assert(kOgrePassTexturesFullest + kPhotonPassTexturesFullest + kNumExtraPassSlots <=
                   kPassTextureTable,
               "the PBS pass-texture table overflows: the pin's fullest pass plus the Photon volumes "

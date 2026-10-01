@@ -391,7 +391,7 @@ void OgreScene::syncPhotonView() {
     if (!mSceneMgr) return;
     const PhotonView view = mPhotonView;
 
-    // ---- VOXELS: Ogre's VoxelVisualizer on the finest cascade holding the camera.
+    // ---- VOXELS: PhotonVoxelVisualizer on the finest cascade holding the camera.
     {
         Ogre::PhotonVoxelLighting *want = nullptr;
         if (view == PhotonView::Voxels) {
@@ -446,7 +446,7 @@ void OgreScene::syncPhotonView() {
         }
     }
 
-    // ---- PROBES: Ogre's PhotonIfdProbeVisualizer on the field. The fork keeps it placed:
+    // ---- PROBES: PhotonIfdProbeVisualizer on the field. Our copy keeps it placed:
     // a re-initialize re-points it, a follow (setFieldVolume / scrollWindow) moves its
     // static node and its window offset (PhotonIrradianceField::placeDebugVisualizer).
     {
