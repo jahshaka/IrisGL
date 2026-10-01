@@ -53,8 +53,8 @@ struct Counts
     /// name.
     ///
     /// THE APP MAKES NONE since SHIPPED-BAKES-1: every mesh it ships — the
-    /// primitives, the samples' Ground and Teapot, the preview docks' subjects,
-    /// the VR controllers — is a baked seed row (jahshaka/src/data/
+    /// primitives, the Teapot, the preview docks' subjects, the VR
+    /// controllers — is a baked seed row (jahshaka/src/data/
     /// primitives.h) read through the store, and nothing parses one at run
     /// time (`source.assimp_import_only`). What could still land here is a test
     /// suite's fixture parse of a resource.
