@@ -4941,7 +4941,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
 
     // ---- THE VOXEL CACHE THE HITS ARE SHADED FROM (route A) -----------------
-    // Each cascade of the Photon chain is its OWN VctLighting (they are chained
+    // Each cascade of the Photon chain is its OWN PhotonVoxelLighting (they are chained
     // with addCascade, OgreGi.cpp), innermost first — which is exactly the order
     // the shader wants: it takes the first volume that contains the hit, so the
     // finest one that can answer does.
@@ -4949,10 +4949,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     Ogre::Vector3 voxOrigin[kMaxReflectCascades], voxSize[kMaxReflectCascades],
                   voxCell[kMaxReflectCascades];
     /// THE CASCADE'S RADIANCE MULTIPLIER (DRAG-1, RENDER_AUDIT PHOTON F2).
-    /// `VctLighting::update` with autoMultiplier normalises everything it
+    /// `PhotonVoxelLighting::update` with autoMultiplier normalises everything it
     /// injects by the brightest light's radiance over pi, and the PIXEL path
     /// multiplies it back out (`finalMultiplier = mInvBakingMultiplier *
-    /// mMultiplier`, OgreVctLighting.cpp; read in Vct_piece_ps.any as
+    /// mMultiplier`, PhotonVoxelLighting.cpp; read in Vct_piece_ps.any as
     /// `probeParams.multiplier`). The ray arm read the voxel raw, so a traced
     /// reflection was in baking units — right only when the brightest light has
     /// radiance pi, which is a sun at intensity 1 and every fixture the suites
@@ -4962,8 +4962,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     float voxMultiplier[kMaxReflectCascades];
     unsigned voxCount = 0;
     bool anisotropic = false;
-    const auto takeVolume = [&](Ogre::VctLighting *lighting,
-                                Ogre::VctVoxelizer *voxelizer) {
+    const auto takeVolume = [&](Ogre::PhotonVoxelLighting *lighting,
+                                Ogre::PhotonVoxelizer *voxelizer) {
         if (voxCount >= kMaxReflectCascades || !lighting || !voxelizer) return;
         Ogre::TextureGpu **tex = lighting->getLightVoxelTextures();
         if (!tex || !tex[0]) return;
@@ -4972,7 +4972,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         else if (anisotropic != aniso) return;   // one shader path per dispatch
         // BY NAME (RQ-COV-SLOT-1): the isotropic volume, the three directional ones (the
         // isotropic volume stands in on a Low chain, whose shader never reads them) and
-        // the coverage from VctLighting's own index.
+        // the coverage from PhotonVoxelLighting's own index.
         vox[voxCount][0] = tex[0];
         for (int i = 1; i < 4; ++i) vox[voxCount][i] = (aniso && tex[i]) ? tex[i] : tex[0];
         for (unsigned h = 0; h < 2u; ++h) {
@@ -6490,7 +6490,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.movers = rayMoversOf(scene);
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
-    const auto takeVolume = [&](Ogre::VctLighting *lighting, Ogre::VctVoxelizer *voxelizer) {
+    const auto takeVolume = [&](Ogre::PhotonVoxelLighting *lighting, Ogre::PhotonVoxelizer *voxelizer) {
         if (in.cascadeCount >= kGatherMaxCascades || !lighting || !voxelizer) return;
         Ogre::TextureGpu **tex = lighting->getLightVoxelTextures();
         if (!tex || !tex[0]) return;

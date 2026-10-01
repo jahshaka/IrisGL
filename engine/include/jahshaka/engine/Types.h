@@ -2461,10 +2461,10 @@ struct GiParams {
     int       updateBudget = 1;
     /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
     ///
-    /// On, and in a VCT mode, the engine builds an `Ogre::IrradianceField` over
+    /// On, and in a VCT mode, the engine builds an `Ogre::PhotonIrradianceField` over
     /// the SAME voxel volume VCT already lit (Majercik et al.: octahedral
-    /// irradiance + depth-visibility probes, cone-traced out of VctLighting) and
-    /// binds it to HlmsPbs. It is a DIFFUSE layer only: VCT keeps the specular
+    /// irradiance + depth-visibility probes, cone-traced out of PhotonVoxelLighting) and
+    /// binds it to every PBS pass. It is a DIFFUSE layer only: VCT keeps the specular
     /// cones, the probes/planar/SSR keep everything they had.
     ///
     /// THE ONE THING TO KNOW BEFORE TURNING IT ON: binding a field makes
@@ -2486,7 +2486,7 @@ struct GiParams {
     /// arrives as Auto and gets the tier's answer.
     ///
     /// Ignored outside GiMode::Vct / GiMode::VctPccHybrid: the field is fed by
-    /// VctLighting, so there is nothing to build without a voxel volume. A
+    /// PhotonVoxelLighting, so there is nothing to build without a voxel volume. A
     /// DDGI-only mode is deliberately NOT offered — with no VCT bound the
     /// shader's ambient gate (`@property(vct_num_probes) if(vctSpecular.w==0)`)
     /// disappears and the sky/flat ambient would be counted twice on top of the
@@ -2836,12 +2836,18 @@ struct GiGatherFacts {
     unsigned adaptiveCapDivisor = 4u;
 };
 
+/// THE MOST CASCADES A SHIPPED TIER BUILDS (giQualityFacts' longest chain). The
+/// PBS pass-texture budget is sized on it (OgreFog.cpp, PhotonPassBinding): a
+/// SCRIPTED chain (GiParams::cascadeSet, up to 8) longer than this claims more
+/// set-0 slots than the fullest shipped pass.
+constexpr int kGiTierMaxCascades = 4;
+
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as
     /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
     /// left at 0 — the step is DERIVED from the chain (resolveCascadeTable does
     /// it), not a property of the tier.
-    GiParams::GiCascadeDesc cascades[4];
+    GiParams::GiCascadeDesc cascades[kGiTierMaxCascades];
     /// How many entries of `cascades` are in use.
     int   cascadeCount = 0;
     /// One reflection-probe cube face, in pixels, when the scene pins no size.
@@ -4846,7 +4852,7 @@ struct GiVoxelStats {
     /// UNORM, 0.0 for a float format (no ceiling worth naming).
     float formatMax = 0.0f;
     /// The store's normalisation `k`: a voxel holds `k` times the surface's
-    /// outgoing radiance (`VctLighting`'s baking multiplier, k = pi /
+    /// outgoing radiance (`PhotonVoxelLighting`'s baking multiplier, k = pi /
     /// (headroom * D_max) in this engine).
     float multiplier = 0.0f;
     /// The peak channel over the whole TOTAL volume, and over the DIRECT
@@ -7162,7 +7168,7 @@ enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects };
 /// time, over every view of the renderer's SCENE that draws the post chain. A
 /// property of the scene, never saved; switching it rebuilds no workspace (its
 /// passes are gated by the workspace's execution mask) and Off is byte-identical.
-///   Voxels        the lit voxels of ONE cascade as cubes (Ogre's VctLighting debug
+///   Voxels        the lit voxels of ONE cascade as cubes (PhotonVoxelLighting's debug
 ///                 visualizer): the finest that holds the scene's lit content, or
 ///                 the one Scene::setPhotonVoxelCascade names
 ///   Probes        the irradiance field's probes as spheres coloured by their

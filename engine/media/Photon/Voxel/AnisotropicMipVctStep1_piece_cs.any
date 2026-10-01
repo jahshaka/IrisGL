@@ -1,0 +1,140 @@
+
+//#include "SyntaxHighlightingMisc.h"
+
+//in uvec3 gl_NumWorkGroups;
+//in uvec3 gl_WorkGroupID;
+//in uvec3 gl_LocalInvocationID;
+//in uvec3 gl_GlobalInvocationID;
+//in uint  gl_LocalInvocationIndex;
+
+@piece( HeaderCS )
+	// Jahshaka (PHOTON-VOXEL-3): TWO TEXELS ALONG THE AXIS, the one the reader meets
+	// first (`front`) then the other, composited ADDITIVELY - the rule the mip-0 read
+	// and step 0 use (jah_voxel_sample.glsl, AnisotropicMipVctStep0_piece_cs.any): the
+	// back texel's opacity is taken up to what the front one left, its light with it.
+	// The pin composited front + back x (1 - front.a), which is the multiplicative rule
+	// for independent occluders; the pieces of one surface split between two texels
+	// add up to that surface.
+	float4 compositeAlongAxis( float4 front, float4 back )
+	{
+		float take = min( back.w, 1.0f - front.w );
+		float3 colour = front.xyz;
+		if( back.w > 0.0f )
+			colour += back.xyz * ( take / back.w );
+		return float4( colour, front.w + max( take, 0.0f ) );
+	}
+
+	@insertpiece( DeclSRgbFuncs )
+	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): THE STORE'S ENCODING FOLLOWS ITS FORMAT.
+	// `uav0_orig_pf_srgb` is the property HlmsComputeJob derives from the pixel
+	// format of the texture actually bound, so this one branch covers both
+	// stores: an 8-bit UNORM_SRGB volume is written through the sRGB encode --
+	// which is the dark-end precision an 8-bit store lives on -- and a float one
+	// is written LINEAR. A format with no fixed range has no transfer function to
+	// apply, and encoding into one would throw away the headroom it is there for
+	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
+	// the UNORM write clamps it -- which is the clip this patch removes).
+	@property( uav0_orig_pf_srgb )
+		#define jahStoreLight( x ) toSRGB( x )
+	@else
+		#define jahStoreLight( x ) ( x )
+	@end
+@end
+
+@piece( BodyCS )
+	if( gl_GlobalInvocationID.x >= uint( p_higherMipHalfRes.x ) ||
+		gl_GlobalInvocationID.y >= uint( p_higherMipHalfRes.y ) ||
+		gl_GlobalInvocationID.z >= uint( p_higherMipHalfRes.z ) )
+	{
+		return;
+	}
+
+	int3 offsets[8] =
+	OGRE_ARRAY_START( int3 )
+		int3( 1, 1, 1 ),
+		int3( 1, 1, 0 ),
+		int3( 1, 0, 1 ),
+		int3( 1, 0, 0 ),
+		int3( 0, 1, 1 ),
+		int3( 0, 1, 0 ),
+		int3( 0, 0, 1 ),
+		int3( 0, 0, 0 )
+	OGRE_ARRAY_END;
+
+	float4 samples[8];
+	float4 finalValue;
+
+	wshort3 negAxisDstIUvw = wshort3( gl_GlobalInvocationID.xyz );
+	wshort3 posAxisDstIUvw = negAxisDstIUvw;
+	posAxisDstIUvw.x += p_higherMipHalfRes.x;
+
+	int3 negISourceUvw = int3( gl_GlobalInvocationID.xyz << 1u );
+	int3 posISourceUvw = negISourceUvw;
+	posISourceUvw.x += p_lowerMipHalfWidth;
+
+	//-X
+	@foreach( 8, n )
+		samples[@n] = OGRE_Load3D( inLightLowerMip0, negISourceUvw.xyz + offsets[@n], 0 );@end
+
+	finalValue =
+			( compositeAlongAxis( samples[4], samples[0] ) +
+			  compositeAlongAxis( samples[5], samples[1] ) +
+			  compositeAlongAxis( samples[6], samples[2] ) +
+			  compositeAlongAxis( samples[7], samples[3] ) ) * 0.25f;
+	OGRE_imageWrite3D4( outLightHigherMip0, negAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+
+	//+X
+	@foreach( 8, n )
+		samples[@n] = OGRE_Load3D( inLightLowerMip0, posISourceUvw.xyz + offsets[@n], 0 );@end
+
+	finalValue =
+			( compositeAlongAxis( samples[0], samples[4] ) +
+			  compositeAlongAxis( samples[1], samples[5] ) +
+			  compositeAlongAxis( samples[2], samples[6] ) +
+			  compositeAlongAxis( samples[3], samples[7] ) ) * 0.25f;
+	OGRE_imageWrite3D4( outLightHigherMip0, posAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+
+	//-Y
+	@foreach( 8, n )
+		samples[@n] = OGRE_Load3D( inLightLowerMip1, negISourceUvw.xyz + offsets[@n], 0 );@end
+
+	finalValue =
+			( compositeAlongAxis( samples[2], samples[0] ) +
+			  compositeAlongAxis( samples[3], samples[1] ) +
+			  compositeAlongAxis( samples[7], samples[5] ) +
+			  compositeAlongAxis( samples[6], samples[4] ) ) * 0.25f;
+	OGRE_imageWrite3D4( outLightHigherMip1, negAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+
+	//+Y
+	@foreach( 8, n )
+		samples[@n] = OGRE_Load3D( inLightLowerMip1, posISourceUvw.xyz + offsets[@n], 0 );@end
+
+	finalValue =
+			( compositeAlongAxis( samples[0], samples[2] ) +
+			  compositeAlongAxis( samples[1], samples[3] ) +
+			  compositeAlongAxis( samples[5], samples[7] ) +
+			  compositeAlongAxis( samples[4], samples[6] ) ) * 0.25f;
+	OGRE_imageWrite3D4( outLightHigherMip1, posAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+
+	//-Z
+	@foreach( 8, n )
+		samples[@n] = OGRE_Load3D( inLightLowerMip2, negISourceUvw.xyz + offsets[@n], 0 );@end
+
+	finalValue =
+			( compositeAlongAxis( samples[1], samples[0] ) +
+			  compositeAlongAxis( samples[3], samples[2] ) +
+			  compositeAlongAxis( samples[5], samples[4] ) +
+			  compositeAlongAxis( samples[7], samples[6] ) ) * 0.25f;
+	OGRE_imageWrite3D4( outLightHigherMip2, negAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+
+	//+Z
+	@foreach( 8, n )
+		samples[@n] = OGRE_Load3D( inLightLowerMip2, posISourceUvw.xyz + offsets[@n], 0 );@end
+
+	finalValue =
+			( compositeAlongAxis( samples[0], samples[1] ) +
+			  compositeAlongAxis( samples[2], samples[3] ) +
+			  compositeAlongAxis( samples[4], samples[5] ) +
+			  compositeAlongAxis( samples[6], samples[7] ) ) * 0.25f;
+	OGRE_imageWrite3D4( outLightHigherMip2, posAxisDstIUvw, jahStoreLight( finalValue.xyzw ) );
+@end

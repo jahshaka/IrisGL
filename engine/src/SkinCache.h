@@ -121,7 +121,7 @@ void destroySkinCacheBuffer(Ogre::VaoManager *vao, SkinCacheBuffer &buf);
 /// THE CACHE'S GEOMETRY ROWS, one per level of the item's mesh (submesh 0): each is
 /// the mesh's own row for that level (its index address, index width, bias) with
 /// the vertex address, the stride and the layout replaced by the cache's. 48 bytes
-/// each, `Ogre::VctVoxelizer::GeometryRow`, handed out as raw words so no
+/// each, `Ogre::PhotonVoxelizer::GeometryRow`, handed out as raw words so no
 /// consumer of this header drags in HlmsPbs. `levels[l]` is empty when the mesh's
 /// level l has no row (no index buffer, no address).
 bool describeSkinCacheRows(Ogre::VaoManager *vao, const Ogre::Item *item,

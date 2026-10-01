@@ -1,0 +1,534 @@
+// PHOTON (OWN-GI-1): the voxel and irradiance-field pieces of the PBS pixel shader, an owned
+// copy (Ogre-Next's Vct_piece_ps.any as it stood on fork 24b2436c9). This library is registered AFTER
+// Hlms/Pbs/Any, so the pieces upstream's file of the same name defines are taken away first and
+// ours collected in their place: the PBS templates keep inserting them by their upstream names.
+@undefpiece( DeclVctTextures )
+@undefpiece( DeclVctFuncs )
+@undefpiece( DeclVctConeFuncs )
+@undefpiece( applyVctRoughSpecular )
+@undefpiece( applyVoxelConeTracing )
+
+#include "/media/matias/Datos/SyntaxHighlightingMisc.h"
+
+@property( vct_num_probes )
+
+@piece( DeclVctTextures )
+	@property( syntax == glsl || syntax == glslvk )
+		vulkan_layout( ogre_t@value(vctProbes) ) uniform texture3D vctProbes[@value( vct_num_probes )];
+		vulkan( layout( ogre_s@value(vctProbes) ) uniform sampler vctProbeSampler );
+		@property( vct_anisotropic )
+			vulkan_layout( ogre_t@value(vctProbeX) ) uniform texture3D vctProbeX[@value( vct_num_probes )];
+			vulkan_layout( ogre_t@value(vctProbeY) ) uniform texture3D vctProbeY[@value( vct_num_probes )];
+			vulkan_layout( ogre_t@value(vctProbeZ) ) uniform texture3D vctProbeZ[@value( vct_num_probes )];
+		@end
+		// Jahshaka (PHOTON-VOXEL-3/-4): the per-half-axis coverage (HlmsPbs registers it after
+		// the anisotropic arrays, VctLighting's last light-volume entry).
+		vulkan_layout( ogre_t@value(vctProbeCovP) ) uniform texture3D vctProbeCovP[@value( vct_num_probes )];
+		vulkan_layout( ogre_t@value(vctProbeCovN) ) uniform texture3D vctProbeCovN[@value( vct_num_probes )];
+		// Jahshaka (PHOTON-VOXEL-4): the surface position per half-axis, the list's last entries.
+		vulkan_layout( ogre_t@value(vctProbePosP) ) uniform texture3D vctProbePosP[@value( vct_num_probes )];
+		vulkan_layout( ogre_t@value(vctProbePosN) ) uniform texture3D vctProbePosN[@value( vct_num_probes )];
+		@property( vct_anisotropic )
+			// Jahshaka (PHOTON-VOXEL-5): level 0's BACK side and the voxeliser's normal (its side) -
+			// the list's last two entries on the anisotropic tiers.
+			vulkan_layout( ogre_t@value(vctProbeBack) ) uniform texture3D vctProbeBack[@value( vct_num_probes )];
+			vulkan_layout( ogre_t@value(vctProbeNrm) ) uniform texture3D vctProbeNrm[@value( vct_num_probes )];
+		@end
+		// THE CONE FUNCTIONS COME AFTER THE VOLUMES THEY READ (PHOTON-READER-1): the
+		// march reads the volumes as globals through its macro convention, and this
+		// piece is the first point in the pixel shader where they are declared
+		// (DeclVctFuncs is inserted earlier, with the pass-buffer helpers).
+		@insertpiece( DeclVctConeFuncs )
+	@end
+	@property( syntax == hlsl )
+		Texture3D vctProbes[@value( vct_num_probes )]		: register(t@value(vctProbes));
+		SamplerState vctProbeSampler	: register(s@value(vctProbes));
+		@property( vct_anisotropic )
+			Texture3D vctProbeX[@value( vct_num_probes )]	: register(t@value(vctProbeX));
+			Texture3D vctProbeY[@value( vct_num_probes )]	: register(t@value(vctProbeY));
+			Texture3D vctProbeZ[@value( vct_num_probes )]	: register(t@value(vctProbeZ));
+		@end
+	@end
+	@property( syntax == metal )
+		, array<texture3d<float> vctProbes, @value( vct_num_probes )>	[[texture(@value(vctProbes))]]
+		, sampler vctProbeSampler			[[sampler(@value(vctProbes))]]
+		@property( vct_anisotropic )
+			, array<texture3d<float> vctProbeX, @value( vct_num_probes )>	[[texture(@value(vctProbeX))]]
+			, array<texture3d<float> vctProbeY, @value( vct_num_probes )>	[[texture(@value(vctProbeY))]]
+			, array<texture3d<float> vctProbeZ, @value( vct_num_probes )>	[[texture(@value(vctProbeZ))]]
+		@end
+	@end
+@end
+
+@piece( DeclVctFuncs )
+	// THE CONE FRAME (fork change 0083) is jahConeBasis in Jahshaka's JahVoxelCones
+	// piece (jah_voxel_cones.glsl), with its rationale; applyVoxelConeTracing below
+	// builds it in the camera-independent cubemap frame and composes it into view space.
+
+
+	INLINE float3 toVctProbeSpacePos( float3 pos, VctProbeParams probeParams )
+	{
+		float3 posLS;
+		posLS.x = dot( probeParams.xform_row0.xyzw, float4( pos, 1.0 ) );
+		posLS.y = dot( probeParams.xform_row1.xyzw, float4( pos, 1.0 ) );
+		posLS.z = dot( probeParams.xform_row2.xyzw, float4( pos, 1.0 ) );
+		return posLS;
+	}
+
+	INLINE float3 toVctProbeSpaceDir( float3 dir, VctProbeParams probeParams )
+	{
+		float3 dirLS;
+		dirLS.x = dot( probeParams.xform_row0.xyz, dir );
+		dirLS.y = dot( probeParams.xform_row1.xyz, dir );
+		dirLS.z = dot( probeParams.xform_row2.xyz, dir );
+		return normalize( dirLS );
+	}
+
+
+	// Jahshaka (CONE-FRAME-2): a CUBEMAP-frame direction (world, z negated) to
+	// the probe's normalised space through the pass buffer's diagonal
+	// (VctLighting::fillConstBufferData's xformCube rows): one exact step, so an
+	// axis direction keeps exact zeros. The cone frame is built in that frame.
+	INLINE float3 jahCubeToVctProbeSpaceDir( float3 dir, VctProbeParams probeParams )
+	{
+		float3 dirLS;
+		dirLS.x = dot( probeParams.xformCube_row0.xyz, dir );
+		dirLS.y = dot( probeParams.xformCube_row1.xyz, dir );
+		dirLS.z = dot( probeParams.xformCube_row2.xyz, dir );
+		return normalize( dirLS );
+	}
+
+	INLINE float3 fromVctToViewSpace( float3 pos, VctProbeParams probeParams )
+	{
+		float3 posVS;
+		posVS.x = dot( probeParams.invXform_row0.xyzw, float4( pos, 1.0 ) );
+		posVS.y = dot( probeParams.invXform_row1.xyzw, float4( pos, 1.0 ) );
+		posVS.z = dot( probeParams.invXform_row2.xyzw, float4( pos, 1.0 ) );
+		return posVS;
+	}
+
+
+
+	#define M_PI 3.141592654f
+
+	INLINE float getPccVctBlendWeight( float3 inPsPos, float3 reflDir, float fDist,
+									   float roughness, float3 cubemapPosVS,
+									   float3 vctSpecPosVS, float vctSpecularW,
+									   float pccVctMinDistanceVar, float invPccVctInvDistanceVar,
+									   float pccCompressedDepth )
+	{
+		//Calculate interesectionPosVS as the intersection between the reflection ray and a cube
+		float3 interesectionPosVS = inPsPos + reflDir * fDist;
+
+		//Now increase interesectionPosVS accuracy (it will no longer be a box)
+		//by taking the compressed PCC depth stored in pccCompressedDepth
+		//The compressed PCC depth is in the form of:
+		//	interesectionPosVS = cubemapPosVS + reflDirLS * (pccCompressedDir * 2.0);
+		interesectionPosVS = cubemapPosVS.xyz +
+							 (interesectionPosVS - cubemapPosVS.xyz) * (pccCompressedDepth * 2.0);
+		float3 vctSpecPosToPccSpecPos = interesectionPosVS - vctSpecPosVS;
+		//Calculate distance to VCT pos and blend based on that
+		float distToVct = max3( abs( vctSpecPosToPccSpecPos ).x,
+								abs( vctSpecPosToPccSpecPos ).y,
+								abs( vctSpecPosToPccSpecPos ).z );
+		float vctLerp = (distToVct - pccVctMinDistanceVar) * invPccVctInvDistanceVar;
+		vctLerp = saturate( vctLerp );
+
+		//vctLerp has quantization artifacts due to 8-bit precision when interpolating via HW
+		//texture filtering present in vctSpecPosVS. They're very noticeable at non-zero roughness.
+		//Hide these artifacts by reusing the PCC compressed depth as a mask.
+		float pccErrorMask = ( pccCompressedDepth - 0.5f ) * ( pccCompressedDepth - 0.5f ) * 4.0f;
+		float roughThreshWeight = roughness - 0.02f;
+		roughThreshWeight = min( roughThreshWeight * 200.0f, 1.0f );
+		vctLerp = lerp( vctLerp, vctLerp * pccErrorMask, roughThreshWeight );
+
+		//At very high roughness, VCT (anisotropic) is much more accurate. Thus bias towards VCT
+		vctLerp = min( vctLerp + roughness * roughness * roughness, 1.0f );
+
+		//If no VCT probe was found, fallback to PCC
+		vctLerp = (vctSpecularW == 0) ? 0.0f : vctLerp;
+
+		return vctLerp;
+	}
+@end
+
+@piece( DeclVctConeFuncs )
+	// THE ONE VOXEL RADIANCE READER, BOUND TO THE PIXEL SHADER (PHOTON-READER-1).
+	// The cone march this piece used to hold — and its twin in the bounce job and
+	// the third one in the irradiance field's generation job — is now ONE pair of
+	// plain-GLSL files, irisgl/engine/src/rayquery/include/jah_voxel_sample.glsl
+	// and jah_voxel_march.glsl, that Jahshaka's build wraps into the library pieces
+	// JahVoxelSample and JahVoxelMarch (Hlms/Jahshaka). Every rule of the march
+	// and the fork change that made it (the age carry, the escape estimate, the
+	// one-cell hop bias, the single transmittance) is written there once. What is
+	// left here is the binding: which volumes, which pass-buffer members.
+	#define JAH_VOX_MAX_CASCADES @value( vct_num_probes )
+	#define JAH_VOX_COUNT @value( vct_num_probes )
+	#define JAH_VOX_SAMPLE_ISO( c, u, l ) OGRE_SampleLevel( vctProbes[c], vctProbeSampler, u, l )
+	// Jahshaka (PHOTON-VOXEL-3): the PER-AXIS COVERAGE, VctLighting's last light-volume
+	// entry - the march's mip-0 read takes the opacity along its ray from it.
+	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( vctProbeCovP[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_COVN( c, u, l ) OGRE_SampleLevel( vctProbeCovN[c], vctProbeSampler, u, l )
+	// Jahshaka (PHOTON-VOXEL-4): the SURFACE POSITION, the list's last entry - the gate.
+	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( vctProbePosP[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_POSN( c, u, l ) OGRE_SampleLevel( vctProbePosN[c], vctProbeSampler, u, l )
+	@property( vct_anisotropic )
+		#define JAH_VOX_HAS_ANISO 1
+		#define JAH_VOX_ANISO true
+		#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], vctProbeSampler, u, l )
+		#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], vctProbeSampler, u, l )
+		#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], vctProbeSampler, u, l )
+		// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
+		#define JAH_VOX_HAS_BACK 1
+		#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], vctProbeSampler, u, l )
+		#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], vctProbeSampler, u, l )
+	@else
+		#define JAH_VOX_HAS_ANISO 0
+		#define JAH_VOX_ANISO false
+	@end
+	#define JAH_VOX_INVRES( c ) passBuf.vctProbeParams.vctInvResolution_cascadeMaxLod[c].xyz
+	#define JAH_VOX_MAXLOD( c ) passBuf.vctProbeParams.vctInvResolution_cascadeMaxLod[c].w
+	@property( vct_num_probes > 1 )
+		#define JAH_VOX_FROM_PREV_SCALE( c ) passBuf.vctProbeParams.fromPreviousProbeToNext[(c) - 1][0]
+		#define JAH_VOX_FROM_PREV_OFFSET( c ) passBuf.vctProbeParams.fromPreviousProbeToNext[(c) - 1][1]
+	@end
+	@property( vct_enable_specular_sdf_quality && vct_num_probes <= 1 )
+		#define JAH_VOX_SDF_MAXMIP passBuf.vctProbeParams.specSdfMaxMip
+		#define JAH_VOX_SDF_FACTOR passBuf.vctProbeParams.specularSdfFactor
+	@end
+	@insertpiece( JahVoxelSample )
+	@insertpiece( JahVoxelMarch )
+
+	// THE ONE ENVIRONMENT, BOUND TO THE PIXEL SHADER (PHOTON-ENV-1). What every
+	// escape sees - a diffuse cone's, the specular cone's, and the fallbacks the
+	// irradiance field and the screen-probe gather hand a pixel - is ONE plain-GLSL
+	// file, irisgl/engine/src/rayquery/include/jah_environment.glsl, wrapped by
+	// Jahshaka's build into the library piece JahEnvironment: the disc-free sky
+	// cube read at the mip whose lobe matches the cone, or (no cube bound) the
+	// radiance the SH describes in the cone's direction (the coefficients
+	// de-convolved: they are the cosine-convolved irradiance). The cube and its
+	// gain come from the pass slot
+	// Jahshaka's Hlms listener claims (jah_env); the SH is HlmsPbs's own
+	// coefficients, stored in HlmsPbs's frame -- the world turned half a turn
+	// about Y, which the engine writes by multiplying each world coefficient by
+	// its basis function's sign under that turn (OgreScene::setAmbientSh's
+	// kAxisSign: + + - - - - + + +) -- and read back into WORLD axes here by the
+	// same signs. The packing is AmbientLighting_piece_ps.any's irradianceSH.
+	// This replaces the two-band hemisphere pair every escape used to be filled
+	// with (the pair is gone from VctLighting and from this pass buffer).
+	@property( jah_env )
+		#define JAH_ENV_CUBE_ON true
+		#define JAH_ENV_SAMPLE( d, l ) float3( OGRE_SampleLevelF16( jahEnvCube, jahEnvSampler, d, l ).xyz )
+		#define JAH_ENV_MIPS passBuf.jahEnv.w
+		#define JAH_ENV_GAIN passBuf.jahEnv.xyz
+	@else
+		#define JAH_ENV_CUBE_ON false
+		#define JAH_ENV_SAMPLE( d, l ) float3( 0, 0, 0 )
+		#define JAH_ENV_MIPS 1.0
+		#define JAH_ENV_GAIN float3( 0, 0, 0 )
+	@end
+	@property( ambient_sh && !ambient_sh_monochrome )
+		#define JAH_ENV_SH_C0 passBuf.sh0.xyz
+		#define JAH_ENV_SH_C1 float3( passBuf.sh0.w, passBuf.sh1.x, passBuf.sh1.y )
+		#define JAH_ENV_SH_C2 ( -float3( passBuf.sh1.z, passBuf.sh1.w, passBuf.sh2.x ) )
+		#define JAH_ENV_SH_C3 ( -float3( passBuf.sh2.y, passBuf.sh2.z, passBuf.sh2.w ) )
+		#define JAH_ENV_SH_C4 ( -passBuf.sh3.xyz )
+		#define JAH_ENV_SH_C5 ( -float3( passBuf.sh3.w, passBuf.sh4.x, passBuf.sh4.y ) )
+		#define JAH_ENV_SH_C6 float3( passBuf.sh4.z, passBuf.sh4.w, passBuf.sh5.x )
+		#define JAH_ENV_SH_C7 float3( passBuf.sh5.y, passBuf.sh5.z, passBuf.sh5.w )
+		#define JAH_ENV_SH_C8 passBuf.sh6.xyz
+	@else
+		#define JAH_ENV_SH_C0 float3( 0, 0, 0 )
+		#define JAH_ENV_SH_C1 float3( 0, 0, 0 )
+		#define JAH_ENV_SH_C2 float3( 0, 0, 0 )
+		#define JAH_ENV_SH_C3 float3( 0, 0, 0 )
+		#define JAH_ENV_SH_C4 float3( 0, 0, 0 )
+		#define JAH_ENV_SH_C5 float3( 0, 0, 0 )
+		#define JAH_ENV_SH_C6 float3( 0, 0, 0 )
+		#define JAH_ENV_SH_C7 float3( 0, 0, 0 )
+		#define JAH_ENV_SH_C8 float3( 0, 0, 0 )
+	@end
+	@insertpiece( JahEnvironment )
+
+	/// A view-space direction in WORLD axes: the camera-independent frame the
+	/// environment is stored in. `invViewMatCubemap` read vector-first takes a
+	/// view-space direction to the left-handed cubemap frame (the same line the
+	/// env-probe piece uses); undoing the frame's z flip gives the world.
+	INLINE float3 jahViewToWorldDir( float3 dirVS )
+	{
+		float3 c = mul( dirVS, passBuf.invViewMatCubemap );
+		return float3( c.x, c.y, -c.z );
+	}
+
+	// THE ONE DIFFUSE CONE INTEGRATOR, BOUND TO THE PIXEL SHADER (PHOTON-CARDS-2): the
+	// cone frame, the two cone sets, their weights and apertures, the start bias and
+	// the escape weight are ONE plain-GLSL file,
+	// irisgl/engine/src/rayquery/include/jah_voxel_cones.glsl, wrapped by Jahshaka's
+	// build into the library piece JahVoxelCones - the text the surface cache's card
+	// job and the bounce-injection job run too. The pixel's cone frame is in the
+	// CUBEMAP frame (CONE-FRAME-2); the integrator takes a cubemap direction to the
+	// volume's normalised space (one diagonal) and to the world (the z un-flip)
+	// through these two macros.
+	@property( vct_cone_dirs == 6 )
+		#define JAH_CONES_SIX 1
+	@else
+		#define JAH_CONES_SIX 0
+	@end
+	#define JAH_CONES_TO_LS( d ) jahCubeToVctProbeSpaceDir( d, passBuf.vctProbeParams )
+	#define JAH_CONES_TO_WORLD( d ) float3( ( d ).x, ( d ).y, -( d ).z )
+	@insertpiece( JahVoxelCones )
+
+	INLINE void computeVctProbe
+	(
+		OGRE_INOUT_REF( float3, outDiffuse ), OGRE_INOUT_REF( float4, outSpecular ),
+		OGRE_INOUT_REF( float, outRoughOcclusion ),
+		OGRE_INOUT_REF( float3, outDiffuseVoxel ),
+		PixelData pixelData, float3 pos, float3x3 TBN,
+	@property( use_parallax_correct_cubemaps )
+		OGRE_INOUT_REF( float3, vctSpecPosVS ),
+	@end
+		VctProbeParams probeParams
+	)
+	{
+		float3 posLS = toVctProbeSpacePos( pos, probeParams );
+
+		// THE START BIAS: one cell of cascade 0 along the normal, whichever way the
+		// surface faces (fork change 0070; the rationale is JahVoxelCones'). The
+		// specular cone starts from the same point.
+		// ...from the normal in the CUBEMAP frame (the cone frame's third axis),
+		// through the same diagonal the card job's construction uses.
+		float3 dirLS = jahCubeToVctProbeSpaceDir( TBN[2], probeParams );
+		float3 biasDirLS = jahConeBiasDir( dirLS );
+		posLS = jahConeStart( posLS, biasDirLS );
+		const float4 jahOrigin = jahConeOrigin( posLS, biasDirLS );
+
+		@property( vct_num_probes > 1 )
+			/*float3 blendv = abs( posLS * 2.0f - 1.0f );
+			float blend = saturate( 1.0f - max3( blendv.x, blendv.y, blendv.z ) );*/
+			float blend = 1.0f;
+		@else
+			float blend = 1.0f;
+		@end
+
+		@property( !vct_disable_diffuse )
+			// THE DIFFUSE CONES (JahVoxelCones): the voxels' share, and each cone's
+			// escape reading the one environment in that cone's direction at that
+			// cone's aperture - radiance, added after the voxels' decode below.
+			float3 light;
+			float3 jahEnvD;
+			jahDiffuseCones( posLS, jahOrigin, TBN, light, jahEnvD );
+		@end
+
+		float blendWeight = probeParams.blendFade * blend * probeParams.multiplier;
+
+		@property( !vct_disable_diffuse )
+			// The voxels' share decoded by the volume's multiplier; the
+			// environment's share is radiance already.
+			outDiffuse.xyz += light.xyz * blendWeight + jahEnvD * ( probeParams.blendFade * blend );
+			// ...and the voxels' share ALONE, for the rough lobe's occluded share
+			// (applyVctRoughSpecular): the split made at its source.
+			outDiffuseVoxel += light.xyz * blendWeight;
+		@end
+
+		//Irradiance / specular
+		@property( !vct_disable_specular )
+			float3 reflVecLS = toVctProbeSpaceDir( pixelData.reflDir, probeParams );
+			// 1 / (1 - 0.02) = 1.020408163
+			float vctRoughness = (pixelData.perceptualRoughness - 0.02f) * 1.020408163f;
+			float specConeAngleTan = max( 0.0f, tan( vctRoughness * 0.5f * M_PI * 0.99f ) );
+			// A LOBE WIDER THAN 45 DEGREES IS NOT A CONE (PHOTON-VOXEL-3). At tan > 1 a
+			// cone's footprint at its first sample reaches behind its own origin (radius
+			// tan x distance > distance): at roughness 0.9 (tan 5.7) the leak room's
+			// specular cone read the lamp outside through a 0.5 m wall. Such a lobe is
+			// read in two shares. THE SKY'S: the prefiltered lobe (jahEnvLobe - exactly
+			// what PBS reads outside every volume, the split-sum) times the share the
+			// voxels did not stop; THE OCCLUDED ONE: the diffuse estimator's voxel light
+			// (applyVctRoughSpecular, after the field has written envColourD). The
+			// occlusion comes from this march CAPPED AT TAN 1 - an occlusion query along
+			// the reflection, its colour unused - handed out in outRoughOcclusion.
+			const bool jahRoughLobe = specConeAngleTan > 1.0f;
+			// the lobe's share below the surface is stopped by it (jahConeBelow)
+			float4 jahSpecOrigin = jahOrigin;
+			jahSpecOrigin.w = jahConeBelow( normalize( pixelData.reflDir ), normalize( pixelData.normal ), min( specConeAngleTan, 1.0f ) );
+			// ...and it starts ON the reflection, one cell above the surface, aged by the stretch
+			// it skipped (jahSpecularConeStart: the parallel line one cell along the normal slid
+			// the mirror image by that cell)
+			float4 jahSpecStart = jahSpecularConeStart( posLS - biasDirLS * JAH_VOX_INVRES( 0 ),
+														reflVecLS, biasDirLS );
+			// A LOBE WIDER THAN tan 1 has no image to slide: its march is the occlusion query of
+			// a lobe spread over most of the hemisphere, and it keeps the diffuse set's start (on
+			// the reflection, the sealed room's rough walls let 3 more codes of sky through the
+			// reader's lattice residual: gi.sealed_room_chain_target, eye at the centre 3 -> 6).
+			if( jahRoughLobe )
+				jahSpecStart = float4( posLS, 0.0f );
+			JahConeResult irrLight = jahConeMarchAged( jahSpecStart.xyz, reflVecLS, min( specConeAngleTan, 1.0f ), jahSpecOrigin,
+			@property( vct_enable_specular_sdf_quality && vct_num_probes <= 1 )
+												   JAH_MARCH_SPECULAR | JAH_MARCH_SDF, jahSpecStart.w );
+			@else
+												   JAH_MARCH_SPECULAR, jahSpecStart.w );
+			@end
+
+			float specAlpha = ( 1.0f - min( 1.0f, irrLight.alpha / 0.95f ) );
+
+			// THE SPECULAR CONE'S ESCAPE SEES THE ENVIRONMENT IN THE REFLECTED
+			// DIRECTION AT THE CONE'S OWN APERTURE (PHOTON-ENV-1) - the rule that
+			// fork 4d5fbef16+8f09c0cd4 (was 0048) used to apply downstream as a swap (the cone added a
+			// flat ambient, exported what it added, and the probe piece traded it
+			// for the sky). Radiance, weighted by the share of the cone the voxels
+			// did not stop, beside the voxels' own share decoded by the volume's
+			// multiplier.
+			// AT THE SURFACE'S OWN ROUGHNESS, not at the cone's aperture: the
+			// prefiltered chain holds exactly this GGX lobe (jahEnvLobe), the mip
+			// the convolution stored this roughness at and HlmsPbs reads (audit F3).
+			//
+			// ONE SPECULAR ENVIRONMENT PER PIXEL. Where the datablock carries an
+			// environment cube and no probe array holds the slot (use_envprobe_map
+			// without parallax-corrected cubemaps), HlmsPbs's CubemapGlobal adds
+			// that cube, unoccluded, to every pixel, the cone's included - so the
+			// escape adds NOTHING there (adding it counted the sky twice: 1.6-1.95x
+			// on an open metal plate, gi.env_cone). Everywhere else - a probe-array
+			// pass, a material with no cube - the escape IS the specular
+			// environment, weighted by the share the voxels did not stop. (The
+			// escape as THE environment everywhere - occluded sky reflections inside
+			// rooms - waits for the specular walk to stop over-reading its own
+			// surface at a coarse mip: a gold dragon read (33,21,3) with the cube
+			// removed. REFLECT-1 / PCC-1, beside gi.volume_edge_spec_target.)
+		@property( use_envprobe_map && !use_parallax_correct_cubemaps )
+			float3 jahEnvS = float3( 0.0f, 0.0f, 0.0f );
+		@else
+			// ...ALONG THE LOBE'S DOMINANT DIRECTION, not the mirror one
+			// (ENV-RAY-MATCH: jahEnvDominantDir, the same fit at every reader).
+			float3 jahEnvS = jahEnvLobe( jahViewToWorldDir( jahEnvDominantDir(
+											 float3( pixelData.normal ), float3( pixelData.reflDir ),
+											 float( pixelData.perceptualRoughness * pixelData.perceptualRoughness ) ) ),
+										 float( pixelData.perceptualRoughness ) ) * specAlpha;
+		@end
+
+			// JAHSHAKA fork 8f09c0cd4+155a56bf8 (was 0077): THE FUDGE IS GONE, AT ITS CAUSE.
+			// Upstream's comment here read "0.31831 = 1 / PI, but I'm not sure why
+			// is it even needed. It's clearly overbrightened when it's not there".
+			// It was needed because the light injection stored PI times the
+			// surface's outgoing radiance (LightInjection_piece_cs.any: the direct
+			// term had no 1/PI), so every cone result -- diffuse and specular
+			// alike -- came back PI times too bright. The diffuse composite above
+			// never carried the correction and was therefore PI times too bright
+			// for as long as this line hid the same error on the specular one.
+			// With the injection fixed the voxel holds radiance, a specular cone
+			// returns radiance, and the pre-integrated BRDF downstream wants
+			// exactly that: no factor.
+			outSpecular += float4( ( jahRoughLobe ? float3( 0.0f, 0.0f, 0.0f )
+												  : irrLight.colour.xyz * blendWeight ) +
+								   jahEnvS * ( probeParams.blendFade * blend ), blend );
+			if( jahRoughLobe )
+				outRoughOcclusion = 1.0f - specAlpha;
+
+			@property( use_parallax_correct_cubemaps )
+				vctSpecPosVS = fromVctToViewSpace( irrLight.posLS.xyz, probeParams );
+			@end
+		@else
+			outSpecular.w += blend;
+		@end
+	}
+
+@end
+
+
+@piece( applyVctRoughSpecular )
+	// THE ROUGH LOBE'S OCCLUDED SHARE (PHOTON-VOXEL-3/4, computeVctProbe's comment): a
+	// lobe wider than tan 1 took its sky share already (the prefiltered lobe times what
+	// the capped occlusion query let through); what the voxels stopped it reads from the
+	// DIFFUSE estimator's VOXEL light - never its sky. Where the cones answer the pixel
+	// the split is made at the source: computeVctProbe hands the voxels' share alone
+	// (vctDiffuseVoxel). Subtracting an analytic sky from the cones' total instead
+	// (PHOTON-VOXEL-3) added the four-cone set's quadrature error against the SH as
+	// voxel light the moment ANY occlusion appeared - gi.env_cone's metal plate read
+	// 1.052x at roughness 0.8 on an occlusion sliver. Where the field or the gather
+	// wrote envColourD (their atlas and probes hold the SUM), the sky part is the
+	// unoccluded sky irradiance at the normal times the query's transmittance, as
+	// before - their sky is an exact 144-ray / per-probe integral, not four cones.
+	// The split-sum downstream applies the specular albedo. 0 for every lobe that marched.
+	@property( !vct_disable_specular )
+		if( vctRoughOcclusion > 0.0f )
+		{
+		@property( !vct_disable_diffuse && !irradiance_field )
+			pixelData.envColourS += vctDiffuseVoxel;
+		@else
+			float3 jahSkyD = jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) );
+			pixelData.envColourS += max( float3( pixelData.envColourD ) -
+											 jahSkyD * ( 1.0f - vctRoughOcclusion ),
+										 float3( 0.0f, 0.0f, 0.0f ) );
+		@end
+		}
+	@end
+@end
+
+@piece( applyVoxelConeTracing )
+	// Jahshaka fork 8f09c0cd4 (was 0083): the cones get their own frame, and THE FRAME IS
+	// ANCHORED IN THE WORLD, not in the camera.
+	//
+	// Everything in this shader is in VIEW space -- the vertex shader
+	// multiplies the normal by worldView, and the voxel transform
+	// (VctLighting's xform = voxel * view^-1) takes view-space directions to
+	// voxel space -- so a frame built from `pixelData.geomNormal` as it stands
+	// would turn about the normal with the camera's own rotation. For a level
+	// camera the floor's tangent would simply BE the camera's right vector, and
+	// the bounce would swim as you orbit and move on every head turn in VR.
+	// That is a worse defect than the one this patch is here to fix, and it is
+	// not one the material tangent frame had: a tangent is a world-attached
+	// vertex attribute that merely arrives rotated into view space.
+	//
+	// `passBuf.invViewMatCubemap` is the inverse view rotation (with Ogre's
+	// left-handed cubemap z flip) and is in every non-caster Pbs pass buffer,
+	// which is exactly the set of passes this piece runs in. Read
+	// vector-first it takes a view-space direction to that camera-independent
+	// space -- the same line the env-probe piece uses a few hundred lines below
+	// -- and read matrix-first it brings one back, the matrix being orthogonal.
+	// So the frame is built out there — and, since Jahshaka's CONE-FRAME-2, it
+	// STAYS there: the cone directions go cubemap -> probe space in one exact
+	// diagonal step (jahCubeToVctProbeSpaceDir) and cubemap -> world by the z
+	// un-flip, instead of being composed back into view space and taken to the
+	// probe through the view inverse (two float rotations, which left an
+	// axis-aligned surface's off-axis components non-zero). This is the card
+	// job's construction exactly (jahConeBasisWorld + the volume's diagonal):
+	// the pixel and the card are one frame.
+	float3x3 jahConeBasis = jahConeBasis( mul( float3( pixelData.geomNormal ), passBuf.invViewMatCubemap ) );
+
+	@property( use_parallax_correct_cubemaps )
+		float3 vctSpecPosVS = float3( 0, 0, 0 );
+	@end
+
+	float3 vctDiffuse = float3( 0, 0, 0 );
+	float4 vctSpecular = float4( 0, 0, 0, 0 );
+	float vctRoughOcclusion = 0.0f;
+	float3 vctDiffuseVoxel = float3( 0, 0, 0 );
+	computeVctProbe( vctDiffuse, vctSpecular, vctRoughOcclusion, vctDiffuseVoxel,
+					 pixelData, inPs.pos, jahConeBasis,
+				@property( use_parallax_correct_cubemaps )
+					 vctSpecPosVS,
+				@end
+					 passBuf.vctProbeParams );
+
+	@property( !vct_disable_diffuse )
+		@property( irradiance_field )
+			// Jahshaka fork 8f09c0cd4 (was 0045): an irradiance field over PART of what the
+			// cones cover. With a cascade chain the field rides the innermost
+			// cascade only, so the cone diffuse is the answer for every pixel
+			// the field cannot reach and the two must be blended rather than
+			// one of them chosen scene-wide. The blend is by the field's own
+			// confidence and it lives in Jahshaka's JahIfd piece, which runs
+			// immediately after this one, in this same scope, and reads
+			// `vctDiffuse` from here.
+			//
+			// Nothing changes for upstream's own arrangement: with one volume
+			// HlmsPbs sets vct_disable_diffuse for any bound field and this
+			// whole block is absent from the generated shader.
+		@else
+			pixelData.envColourD.xyz += vctDiffuse.xyz;
+		@end
+	@end
+	@property( !vct_disable_specular )
+		pixelData.envColourS.xyz += vctSpecular.xyz;
+	@end
+@end
+
+@end

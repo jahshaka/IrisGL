@@ -4,15 +4,15 @@
 //
 // WHICH PICTURE IS WHOSE:
 //   * OGRE'S (the engine's own facilities, wired under the view's lifetime):
-//       Voxels  VctLighting::setDebugVisualization — a VoxelVisualizer (a
+//       Voxels  PhotonVoxelLighting::setDebugVisualization — a VoxelVisualizer (a
 //               MovableObject + Renderable of the Hlms/Pbs component, drawn with
 //               upstream's VCT/VoxelVisualizer material) over the lit voxels of
 //               ONE cascade: the finest that holds the scene's lit content;
-//       Probes  IrradianceField::setDebugVisualization — an IfdProbeVisualizer
+//       Probes  PhotonIrradianceField::setDebugVisualization — an PhotonIfdProbeVisualizer
 //               (the same shape) drawing every probe as a sphere shaded by the
 //               field's irradiance atlas.
 //     Both attach themselves to the scene's SceneManager on a SCENE_STATIC node
-//     of their own and are destroyed by their owner (VctLighting's and
+//     of their own and are destroyed by their owner (PhotonVoxelLighting's and
 //     IrradianceField's destructors switch the picture off first), so their
 //     lifetime is the GI arm's: the scene only puts the picture up (its owner's
 //     getDebugVisualizer hands it out for the photon channel), re-puts it when the
@@ -37,8 +37,8 @@
 #include <Compositor/OgreCompositorWorkspaceListener.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
-#include <IrradianceField/OgreIfdProbeVisualizer.h>
-#include <IrradianceField/OgreIrradianceField.h>
+#include "photon/voxel/PhotonIfdProbeVisualizer.h"
+#include "photon/voxel/PhotonIrradianceField.h"
 #include <OgreGpuProgramParams.h>
 #include <OgreHlmsManager.h>
 #include <OgreHlmsUnlit.h>
@@ -55,9 +55,9 @@
 #include <OgreTechnique.h>
 #include <OgreTextureGpuManager.h>
 #include <OgreTextureUnitState.h>
-#include <Vct/OgreVctLighting.h>
-#include <Vct/OgreVctVoxelizerSourceBase.h>
-#include <Vct/OgreVoxelVisualizer.h>
+#include "photon/voxel/PhotonVoxelLighting.h"
+#include "photon/voxel/PhotonVoxelizerSourceBase.h"
+#include "photon/voxel/PhotonVoxelVisualizer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -313,7 +313,7 @@ bool OgreScene::photonVoxelLive() const {
 }
 
 void OgreScene::photonVoxelsOff() {
-    // A lighting that died took its visualizer with it (~VctLighting switches the
+    // A lighting that died took its visualizer with it (~PhotonVoxelLighting switches the
     // picture off); only a LIVE one is asked to.
     if (photonVoxelLive()) mPhotonVoxelLighting->setDebugVisualization(false, mSceneMgr);
     mPhotonVoxelLighting = nullptr;
@@ -325,8 +325,8 @@ void OgreScene::photonProbesOff() {
     // mPhotonIfd is always the LIVE field or null: teardownIrradianceField
     // forgets it before the field (and Ogre's visualizer with it) is deleted.
     if (mPhotonIfd && mPhotonIfd == mIfd &&
-        mPhotonIfd->getDebugVisualizationMode() != Ogre::IrradianceField::DebugVisualizationNone)
-        mPhotonIfd->setDebugVisualization(Ogre::IrradianceField::DebugVisualizationNone, mSceneMgr,
+        mPhotonIfd->getDebugVisualizationMode() != Ogre::PhotonIrradianceField::DebugVisualizationNone)
+        mPhotonIfd->setDebugVisualization(Ogre::PhotonIrradianceField::DebugVisualizationNone, mSceneMgr,
                                           mPhotonIfd->getDebugTessellation());
     mPhotonIfd = nullptr;
 }
@@ -391,9 +391,9 @@ void OgreScene::syncPhotonView() {
     if (!mSceneMgr) return;
     const PhotonView view = mPhotonView;
 
-    // ---- VOXELS: Ogre's VoxelVisualizer on the finest cascade holding the camera.
+    // ---- VOXELS: PhotonVoxelVisualizer on the finest cascade holding the camera.
     {
-        Ogre::VctLighting *want = nullptr;
+        Ogre::PhotonVoxelLighting *want = nullptr;
         if (view == PhotonView::Voxels) {
             if (mPhotonVoxelCascade >= 0 && !mVctCascades.empty()) {
                 // THE CASCADE ASKED FOR, clamped to the chain.
@@ -435,7 +435,7 @@ void OgreScene::syncPhotonView() {
             photonVoxelsOff();
             if (want && source && tex) {
                 // The fork places the static visualizer and keeps its world box
-                // current (VctLighting::setDebugVisualization / update).
+                // current (PhotonVoxelLighting::setDebugVisualization / update).
                 want->setDebugVisualization(true, mSceneMgr);
                 toPhotonChannel(want->getDebugVisualizer());
                 mPhotonVoxelLighting = want;
@@ -446,17 +446,17 @@ void OgreScene::syncPhotonView() {
         }
     }
 
-    // ---- PROBES: Ogre's IfdProbeVisualizer on the field. The fork keeps it placed:
+    // ---- PROBES: PhotonIfdProbeVisualizer on the field. Our copy keeps it placed:
     // a re-initialize re-points it, a follow (setFieldVolume / scrollWindow) moves its
-    // static node and its window offset (IrradianceField::placeDebugVisualizer).
+    // static node and its window offset (PhotonIrradianceField::placeDebugVisualizer).
     {
-        Ogre::IrradianceField *want = view == PhotonView::Probes ? mIfd : nullptr;
+        Ogre::PhotonIrradianceField *want = view == PhotonView::Probes ? mIfd : nullptr;
         if (want != mPhotonIfd) {
             photonProbesOff();
             if (want) {
                 // Tessellation 4: a 7 x 16 band sphere, ~110 triangles a probe (8
                 // would be 32,000 — 266 M triangles for a 8,192-probe field).
-                want->setDebugVisualization(Ogre::IrradianceField::DebugVisualizationColour, mSceneMgr, 4u);
+                want->setDebugVisualization(Ogre::PhotonIrradianceField::DebugVisualizationColour, mSceneMgr, 4u);
                 toPhotonChannel(want->getDebugVisualizer());
                 mPhotonIfd = want;
             }

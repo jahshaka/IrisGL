@@ -9,7 +9,7 @@
 #include <OgreLodStrategyManager.h>
 #include <OgreViewport.h>
 #include <OgreLodStrategyPrivate.inl>
-#include <Vct/OgreVctVoxelizer.h>
+#include "photon/voxel/PhotonVoxelizer.h"
 
 #include <cstring>
 #include <string>
@@ -1213,14 +1213,14 @@ bool describeSkinCacheRows(Ogre::VaoManager *vao, const Ogre::Item *item,
     const size_t count = mesh->getSubMesh(0)->mVao[Ogre::VpNormal].size();
     levels.resize(count);
     bool any = false;
-    static_assert(sizeof(Ogre::VctVoxelizer::GeometryRow) == 48u, "the row is 12 words");
+    static_assert(sizeof(Ogre::PhotonVoxelizer::GeometryRow) == 48u, "the row is 12 words");
     for (size_t l = 0; l < count; ++l) {
-        Ogre::VctVoxelizer::GeometryRow row;
+        Ogre::PhotonVoxelizer::GeometryRow row;
         // THE MESH'S OWN ROW FOR THIS LEVEL (its index address, width and bias —
         // Ogre's description, never re-derived here), then the vertex half swapped
         // for the cache's: its address, its stride, and the raster layout's
         // offsets (position 0, normal 12, uv 40).
-        if (!Ogre::VctVoxelizer::describeGeometryRow(mesh, uint32_t(l), 0u, vao, row)) continue;
+        if (!Ogre::PhotonVoxelizer::describeGeometryRow(mesh, uint32_t(l), 0u, vao, row)) continue;
         row.posAddress[0] = uint32_t(buf.address & 0xFFFFFFFFull);
         row.posAddress[1] = uint32_t(buf.address >> 32u);
         row.vertexStride = kSkinCacheStride;

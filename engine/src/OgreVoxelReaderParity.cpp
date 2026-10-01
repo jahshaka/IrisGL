@@ -19,7 +19,7 @@
 //     the material `Jahshaka/VoxelReaderParity`, whose program is GENERATED at
 //     media staging from the SAME files (irisgl/engine/CMakeLists.txt).
 //
-// Both read the chain's parameters from VctLighting::getCascadeChainParams - the
+// Both read the chain's parameters from PhotonVoxelLighting::getCascadeChainParams - the
 // one definition the pixel pass buffer and the generation job take them from.
 //
 // A MEASUREMENT: renders one quad, dispatches one job, flushes and stalls on two
@@ -52,7 +52,7 @@
 #include <Vao/OgreAsyncTicket.h>
 #include <Vao/OgreUavBufferPacked.h>
 #include <Vao/OgreVaoManager.h>
-#include <Vct/OgreVctLighting.h>
+#include "photon/voxel/PhotonVoxelLighting.h"
 
 #include <algorithm>
 #include <cstring>
@@ -111,7 +111,7 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
     compute.clear();
     if (!mRoot) return false;
     OgreScene *s = static_cast<OgreScene *>(scene);
-    Ogre::VctLighting *vct = s ? s->voxelLighting() : nullptr;
+    Ogre::PhotonVoxelLighting *vct = s ? s->voxelLighting() : nullptr;
     if (!vct) {
         mLastError = "voxelReaderParity: the scene has no voxel lighting built";
         return false;
@@ -189,7 +189,7 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         params.counts[1] = float(numCascades);
         params.counts[2] = aniso ? 1.0f : 0.0f;
         // The specular empty-space skip's two parameters, at the values
-        // VctLighting's pass buffer gives a 64^3 volume (the harness exercises the
+        // PhotonVoxelLighting's pass buffer gives a 64^3 volume (the harness exercises the
         // branch; its numbers are not the subject).
         params.sdf[0] = 7.0f;
         params.sdf[1] = 16.0f;
@@ -252,7 +252,7 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
             // volume on a Low chain: the program never reads X/Y/Z there (its count and
             // its anisotropic switch say so), and the isotropic volume standing in for
             // the back reads the one light either side; a descriptor must not be empty.
-            // By NAME, VctLighting's indices.
+            // By NAME, PhotonVoxelLighting's indices.
             const unsigned kind = u / 4u;
             const unsigned c = std::min(unsigned(u % 4u), numCascades - 1u);
             Ogre::TextureUnitState *tus = pass->getTextureUnitState(u);

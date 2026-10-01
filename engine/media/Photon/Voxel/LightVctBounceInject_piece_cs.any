@@ -1,0 +1,232 @@
+
+#include "/media/matias/Datos/SyntaxHighlightingMisc.h"
+
+@piece( HeaderCS )
+	// THE BOUNCE'S CONE MARCH IS JAHSHAKA'S ONE VOXEL RADIANCE READER
+	// (PHOTON-READER-1). This job used to carry its own copy of the pixel
+	// shader's march - the age carry, but no escape estimate, no one-cell bias at
+	// a cascade hop, its own start bias and mip rule - so the bounce a cascade
+	// injected and the bounce the pixel read were two integrals of one volume.
+	// It now calls the march the pixel shader, the irradiance field's generation
+	// job and (for the read) the ray hit share: jah_voxel_sample.glsl +
+	// jah_voxel_march.glsl, wrapped by Jahshaka's build into the pieces
+	// JahVoxelSample / JahVoxelMarch (this job's piece list names both files).
+	// Every rule and its fork-change number is written there once; what is here
+	// is the binding.
+	//
+	// The chain's parameters are VctLighting::getCascadeChainParams' arrays (the one
+	// definition the pixel pass buffer and the field's generation job read too).
+	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
+	#define JAH_VOX_COUNT @value( hlms_num_vct_cascades )
+	#define JAH_VOX_SAMPLE_ISO( c, u, l ) OGRE_SampleLevel( vctProbes[c], vctProbeSampler, u, l )
+	// Jahshaka (PHOTON-VOXEL-3): the PER-AXIS COVERAGE, VctLighting's last light-volume
+	// entry - the march's mip-0 read takes the opacity along its ray from it.
+	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( vctProbeCovP[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_COVN( c, u, l ) OGRE_SampleLevel( vctProbeCovN[c], vctProbeSampler, u, l )
+	// Jahshaka (PHOTON-VOXEL-4): the SURFACE POSITION, the list's last entry - the gate.
+	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( vctProbePosP[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_POSN( c, u, l ) OGRE_SampleLevel( vctProbePosN[c], vctProbeSampler, u, l )
+	@property( vct_anisotropic )
+		#define JAH_VOX_HAS_ANISO 1
+		#define JAH_VOX_ANISO true
+		#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], vctProbeSampler, u, l )
+		#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], vctProbeSampler, u, l )
+		#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], vctProbeSampler, u, l )
+	@else
+		#define JAH_VOX_HAS_ANISO 0
+		#define JAH_VOX_ANISO false
+	@end
+	#define JAH_VOX_INVRES( c ) p_vctInvResMaxLod[c].xyz
+	#define JAH_VOX_MAXLOD( c ) p_vctInvResMaxLod[c].w
+	@property( hlms_num_vct_cascades > 1 )
+		#define JAH_VOX_FROM_PREV_SCALE( c ) p_vctFromPreviousProbeToNext[(c) - 1][0]
+		#define JAH_VOX_FROM_PREV_OFFSET( c ) p_vctFromPreviousProbeToNext[(c) - 1][1]
+	@end
+	@insertpiece( JahVoxelSample )
+	@insertpiece( JahVoxelMarch )
+
+	// THE ONE ENVIRONMENT (Jahshaka, PHOTON-ENV-1; jah_environment.glsl, wrapped
+	// into the piece JahEnvironment): what an escaping cone sees. The sky enters the
+	// store HERE and only here, as the light the escaping cones bring to the voxel they
+	// leave: the SKY PASS first (jah_env_only, run by VctLighting::update at every bounce
+	// count, CONTACT-OCCLUSION-1) writes the sky's direct term, and every bounce pass after
+	// it builds on the lamps' direct volume, so a pixel's own escape (the sky it sees) and
+	// a hit on the store (the surface's sky-lit radiance) never count it twice. The gain and the SH arrive already
+	// divided by this volume's decode multiplier, so the result is in the volume's
+	// stored units like the cone's own colour.
+	@property( jah_env )
+		#define JAH_ENV_CUBE_ON true
+		#define JAH_ENV_SAMPLE( d, l ) OGRE_SampleLevel( envCube, vctProbeSampler, d, l ).xyz
+	@else
+		#define JAH_ENV_CUBE_ON false
+		#define JAH_ENV_SAMPLE( d, l ) float3( 0, 0, 0 )
+	@end
+	#define JAH_ENV_MIPS p_envGainMips.w
+	#define JAH_ENV_GAIN p_envGainMips.xyz
+	#define JAH_ENV_SH_C0 p_envSh[0].xyz
+	#define JAH_ENV_SH_C1 p_envSh[1].xyz
+	#define JAH_ENV_SH_C2 p_envSh[2].xyz
+	#define JAH_ENV_SH_C3 p_envSh[3].xyz
+	#define JAH_ENV_SH_C4 p_envSh[4].xyz
+	#define JAH_ENV_SH_C5 p_envSh[5].xyz
+	#define JAH_ENV_SH_C6 p_envSh[6].xyz
+	#define JAH_ENV_SH_C7 p_envSh[7].xyz
+	#define JAH_ENV_SH_C8 p_envSh[8].xyz
+	@insertpiece( JahEnvironment )
+	// Jahshaka (PHOTON-WRITER-1): the diffuse lobe's albedo (jah_diffuse_albedo.glsl).
+	@insertpiece( JahDiffuseAlbedo )
+
+	// THE ONE DIFFUSE CONE INTEGRATOR (Jahshaka, PHOTON-CARDS-2; jah_voxel_cones.glsl,
+	// wrapped into the piece JahVoxelCones): the cone frame, the pixel's cone set
+	// (the job's vct_cone_dirs, set by VctLighting from HlmsPbs - PHOTON-VOXEL-4,
+	// CONE-SET-1: it was the six-cone set hard-coded), its weights and aperture, the start bias and the escape weight - the text the pixel
+	// shader and the surface cache's card job run. This job used to carry its own
+	// integrator: a cross-product frame about world X (a different azimuth from the
+	// pixel's for every normal), and the volume's normalised axes taken for the
+	// world's (true only for a cubic box). The frame is now built from the WORLD
+	// normal, and a world direction reaches the volume's normalised space through the
+	// box's size (the cell size over the inverse resolution).
+	@property( vct_cone_dirs == 6 )
+		#define JAH_CONES_SIX 1
+	@else
+		#define JAH_CONES_SIX 0
+	@end
+	#define JAH_CONES_TO_LS( d ) normalize( ( d ) * ( p_invVoxelResolution / p_voxelCellSize ) )
+	#define JAH_CONES_TO_WORLD( d ) ( d )
+	@insertpiece( JahVoxelCones )
+	// Jahshaka (CONTACT-OCCLUSION-1): the sky's share a voxel re-emits is gathered on
+	// the finer sky quadrature (jahSkyShareFine, JahVoxelCones - the card relight's
+	// too); the voxels' share (the bounce proper) keeps the pixel's own cone set.
+
+	/// The bounce gathered at a voxel: posLS = the voxel's centre in the volume's
+	/// normalised space, nWorld = its (unit) world normal. The result is in the
+	/// volume's stored units: the environment's gain and SH arrive divided by the
+	/// decode multiplier (VctLighting::runBounce).
+	INLINE void computeVctProbe( OGRE_INOUT_REF( float3, outDiffuse ),
+								 float3 posLS, float3 nWorld )
+	{
+		const float3 normalLS = jahConeBiasDir( nWorld * ( p_invVoxelResolution / p_voxelCellSize ) );
+		posLS = jahConeStart( posLS, normalLS );
+
+		if( posLS.x < 0.0 || posLS.x > 1.0 ||
+			posLS.y < 0.0 || posLS.y > 1.0 ||
+			posLS.z < 0.0 || posLS.z > 1.0 )
+		{
+			return;
+		}
+
+		// Jahshaka (CONTACT-OCCLUSION-1): the sky's share on the finer sky set
+		// (jahSkyShareFine). The SKY PASS (VctLighting::update runs it first, jah_env_only)
+		// gathers that alone - the sky's direct term; every other pass adds the voxels'
+		// share on the pixel's own cone set, which the sky pass does not march at all.
+		const float3 envD =
+			jahSkyShareFine( posLS, jahConeOrigin( posLS, normalLS ), jahConeBasisWorld( nWorld ) );
+		@property( jah_env_only )
+			outDiffuse.xyz = envD;
+		@else
+			float3 light;
+			float3 envCoarse;
+			jahDiffuseCones( posLS, jahConeOrigin( posLS, normalLS ), jahConeBasisWorld( nWorld ), light,
+							 envCoarse );
+			outDiffuse.xyz = light + envD;
+		@end
+	}
+
+	@insertpiece( DeclSRgbFuncs )
+	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): THE STORE'S ENCODING FOLLOWS ITS FORMAT.
+	// `uav0_orig_pf_srgb` is the property HlmsComputeJob derives from the pixel
+	// format of the texture actually bound, so this one branch covers both
+	// stores: an 8-bit UNORM_SRGB volume is written through the sRGB encode --
+	// which is the dark-end precision an 8-bit store lives on -- and a float one
+	// is written LINEAR. A format with no fixed range has no transfer function to
+	// apply, and encoding into one would throw away the headroom it is there for
+	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
+	// the UNORM write clamps it -- which is the clip this patch removes).
+	@property( uav0_orig_pf_srgb )
+		#define jahStoreLight( x ) toSRGB( x )
+	@else
+		#define jahStoreLight( x ) ( x )
+	@end
+@end
+
+//in uvec3 gl_NumWorkGroups;
+//in uvec3 gl_WorkGroupID;
+//in uvec3 gl_LocalInvocationID;
+//in uvec3 gl_GlobalInvocationID;
+//in uint  gl_LocalInvocationIndex;
+
+@piece( BodyCS )
+	float3 voxelUvwPos = p_invVoxelResolution * (float3( gl_GlobalInvocationID.xyz ) + 0.5f);
+
+	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, gl_GlobalInvocationID.xyz, 0 );
+	float4 normalVal = OGRE_Load3D( voxelNormalTex, gl_GlobalInvocationID.xyz, 0 );
+	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): JACOBI, NOT ACCUMULATION.
+	//
+	// What this pass writes is  new = direct + rho * G( total )  -- the fixed point
+	// of the radiance in the volume, iterated once. The base term is therefore the
+	// DIRECT injection, read from its own volume; the GATHER below still reads the
+	// running total (`vctProbes`), which is what makes the second pass see the first
+	// bounce and the chain see the cascades outside it.
+	//
+	// What stood here was `OGRE_Load3D( vctProbes[0], ... )`: the running TOTAL as
+	// the base, so the pass computed  new = total + rho * G( total )  and the series
+	// was S_n = (1 + rho*G)^n * D -- binomial. It never contracts; every pass
+	// re-amplifies the first bounce's energy, which is why upstream needed a 1/pi
+	// dampening (and a commented-out per-pass one, and "more bounces for coarser
+	// cascades") to keep the picture from running away. With this line the series
+	// contracts by rho * f per pass on its own, and the dampening is 1.
+	//
+	// The alpha channel is the voxel's COVERAGE, identical in both volumes (the
+	// injection writes albedoVal.w to each), so reading it here keeps it exactly as
+	// the accumulating form did.
+	float4 currentLight = OGRE_Load3D( directVoxel, gl_GlobalInvocationID.xyz, 0 );
+	@property( vct_anisotropic )
+		float4 backLight = OGRE_Load3D( directBackVoxel, gl_GlobalInvocationID.xyz, 0 );
+	@end
+
+	if( anyInvocationARB( albedoVal.a > 0 ) )
+	{
+		const bool twoSided = normalVal.a > 0.0f;
+		normalVal.xyz = normalVal.xyz * 2.0f - 1.0f;
+		normalVal.xyz = normalize( normalVal.xyz );
+
+		// A TWO-SIDED VOXEL GATHERS BOTH HEMISPHERES (PHOTON-VOXEL-5): its front (the canonical
+		// normal's side, VoxelMerge) and its back are two surfaces, each lit by what IT faces - a
+		// roof's top by the sky, its underside by the room. The total keeps their mean, the back
+		// its own (the front is twice the mean minus it).
+		// ONE call site in a loop over the sides, not two: the gather is the whole cone march,
+		// inlined per call (a second call doubled the job's compile time).
+		float3 gathered[2];
+		gathered[0] = float3( 0, 0, 0 );
+		gathered[1] = float3( 0, 0, 0 );
+		for( int side = 0; side < ( twoSided ? 2 : 1 ); ++side )
+		{
+			float3 g = float3( 0, 0, 0 );
+			computeVctProbe( g, voxelUvwPos, side == 0 ? normalVal.xyz : -normalVal.xyz );
+			gathered[side] = g;
+		}
+		const float3 vctDiffuse = gathered[0];
+		const float3 vctDiffuseBack = twoSided ? gathered[1] : gathered[0];
+		// THE BOUNCE RE-EMITS WHAT THE SURFACE RENDERS (PHOTON-WRITER-1): a voxel lit
+		// by the diffuse gather of its surroundings reflects the normalised Disney
+		// lobe's HEMISPHERICAL albedo of it (jahDiffuseAlbedoHemi, the lobe's
+		// directional albedo averaged over a uniform incoming hemisphere), at the
+		// voxel's own roughness (the emissive volume's alpha).
+		const float voxelRoughness =
+			OGRE_Load3D( voxelEmissiveTex, gl_GlobalInvocationID.xyz, 0 ).w;
+		// ...times the voxel's opacity c (the albedo's alpha, PHOTON-VOXEL-3): the albedo
+		// is the surfaces' area MEAN, and what the voxel re-emits is premultiplied by
+		// how much of it they fill, exactly like the direct term it is added to.
+		const float3 reemit = albedoVal.xyz * p_iterationDampening * jahDiffuseAlbedoHemi( voxelRoughness ) * albedoVal.w;
+		currentLight.xyz += reemit * ( 0.5f * ( vctDiffuse + vctDiffuseBack ) );
+		@property( vct_anisotropic )
+			backLight.xyz += reemit * vctDiffuseBack;
+		@end
+	}
+
+	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
+	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
+	@property( vct_anisotropic )
+		OGRE_imageWrite3D4( backVoxel, voxelCelUvw, float4( backLight.xyz, currentLight.w ) );
+	@end
+@end

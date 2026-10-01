@@ -1,7 +1,7 @@
 // SURFACE-CACHE phase 2 — THE CAPTURE COMPONENT (SURFACE-CACHE-1b, 2026-09-21).
 //
 // WHAT THIS IS. `jahshaka::engine::SurfaceCache` is an Ogre-Next COMPONENT in
-// the shape `VctLighting`, `IrradianceField` and `ParallaxCorrectedCubemap` are
+// the shape `PhotonVoxelLighting`, `IrradianceField` and `ParallaxCorrectedCubemap` are
 // built in (SPECS/SURFACE_CACHE_ASSESSMENT.md §6): a C++ class using only the
 // public engine API — `TextureGpuManager::createTexture`, a
 // `CompositorWorkspace` of its own, `Camera`s in the scene it serves — with its
@@ -89,7 +89,7 @@ class UavBufferPacked;
 class Item;
 class Light;
 class HlmsComputeJob;
-class VctLighting;
+class PhotonVoxelLighting;
 class CompositorPassSceneDef;
 class Node;
 class SceneManager;
@@ -217,10 +217,10 @@ struct CardSceneView {
     /// light list and its sun (a card lights surfaces no camera sees).
     std::vector<Ogre::Light *> lights;
     /// THE INDIRECT HALF: the chain the march reads (the scene's cascade-0
-    /// VctLighting — the same object the pixel's pass buffer is filled from;
+    /// PhotonVoxelLighting — the same object the pixel's pass buffer is filled from;
     /// null when GI is not the voxel arm, and the indirect is then zero), the
     /// signature that says it re-injected, and its own budget.
-    Ogre::VctLighting *vct = nullptr;
+    Ogre::PhotonVoxelLighting *vct = nullptr;
     unsigned long long indirectSerial = 0ull;
     /// THE CLOUD LAYER'S SHADOW (CLOUDS-2D-2): the field and its mapping the
     /// pixel's direct sun is darkened by (JahCloudShadow's cloudMap / cloudSun),
@@ -566,7 +566,7 @@ private:
     unsigned long long mStillTraces = 0ull, mInvalidSun = 0ull, mCasterRetraces = 0ull;
     Ogre::UavBufferPacked *mGiBuffer = nullptr;
     std::vector<float> mGiCpu;
-    Ogre::VctLighting *mVct = nullptr;
+    Ogre::PhotonVoxelLighting *mVct = nullptr;
     /// This frame's cloud shadow (CardSceneView's), for the relight.
     Ogre::TextureGpu *mCloudField = nullptr;
     float mCloudMap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };

@@ -621,7 +621,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // parameter change on a material that visible geometry wears changes
         // what every reflection probe would capture, so the grid goes stale
         // (it used to be refreshed only by an endless sweep). The fields the
-        // VOXELIZER converts — diffuse, emissive, transparency (OgreVctMaterial
+        // VOXELIZER converts — diffuse, emissive, transparency (PhotonVoxelMaterial
         // addDatablockToBucket) — additionally move the material generation,
         // which re-voxelizes once when the edit settles.
         {
@@ -2037,7 +2037,7 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
     // uploaded rather than re-derived per call.
     JAH_TRY {
         // P7: a different map on visible geometry is a probe input; an albedo
-        // or emissive map is a VOXEL input too (VctMaterial copies exactly those
+        // or emissive map is a VOXEL input too (PhotonVoxelMaterial copies exactly those
         // two into its texture pool, by TextureGpu pointer, once).
         if (mit->second.boundTextures[size_t(slot)] != texId) {
             const bool voxelInput = slot == PbrTextureSlot::Albedo || slot == PbrTextureSlot::Emissive;

@@ -1,0 +1,381 @@
+
+//#include "SyntaxHighlightingMisc.h"
+
+@piece( HeaderCS )
+	CONST_BUFFER_STRUCT_BEGIN( IrradianceFieldGenParams, 0 )
+	{
+		// Jahshaka (PHOTON-FIELD-ROTATE-1): one float4 of scalars (groups per
+		// dispatch row, the environment's bin cone, the work's first position, a pad),
+		// then the probe counts (w unused).
+		uint probesPerRow;
+		float coneAngleTan;
+		uint numProcessedProbes;
+		uint padding0;
+
+		uint4 numProbes;
+
+		// Jahshaka (PHOTON-WRITER-1): the work's boxes and the window's offset
+		// (IrradianceField::scrollWindow; jah_field_window.glsl says what they mean).
+		uint4 boxLo[3];
+		uint4 boxSize[3];
+		uint4 windowOffset;
+
+		float4x4 irrProbeToVctTransform;
+
+		// Jahshaka (PHOTON-READER-1): the cascade chain, as VctLighting's one
+		// definition writes it (getCascadeChainParams) - sized by
+		// IrradianceField::kMaxChainCascades = 8.
+		float4 vctInvResMaxLod[8];
+		float4 vctFromPrev[14];
+
+		// Jahshaka (PHOTON-ENV-1): THE ONE ENVIRONMENT an escaping probe ray sees,
+		// in cascade 0's STORED units (IrradianceField::update divides by its
+		// decode multiplier): rgb = the environment light's gain on the cube,
+		// w = the cube's mip count; and its nine-band SH, world axes.
+		float4 envGainMips;
+		float4 envSh[9];
+
+		// Jahshaka (PHOTON-FIELD-ROTATE-1): the world lattice coordinate of the
+		// window's first probe (xyz, two's complement), and the history rule: x = the
+		// mode (IrradianceField::IntegrationMode, as the job properties ifd_mode_fresh / _change / _refine / _invalidate), y = the target sample
+		// count, z = the samples a change keeps, w = 1 to rotate the rays
+		// (IrradianceField::update).
+		uint4 latticeOrigin;
+		uint4 sweep;
+		// Jahshaka (PHOTON-VOXEL-4, FIELD-DIR-1): a world direction to cascade 0's
+		// normalised space, per axis (all ones in a cube: no transform).
+		float4 worldToVolumeDir;
+	}
+	CONST_BUFFER_STRUCT_END( p );
+
+	// Jahshaka (PHOTON-WRITER-1): the field's window, one definition for this job,
+	// its sibling and the pixel's reader (the build wraps jah_field_window.glsl).
+	@insertpiece( JahFieldWindow )
+
+
+	struct Probe
+	{
+		float3 center;
+	};
+
+	// THE PROBE RAY IS A CONE OF THE ONE VOXEL RADIANCE READER (Jahshaka,
+	// PHOTON-READER-1; render audit F7). This job used to carry a THIRD march:
+	// cascade 0 only (`while( dist < 1.414 && alpha < 0.95 )` in cascade 0's unit
+	// box, the outer cascades never read), no cone age (the footprint restarted
+	// from the bias), and the escape it computed thrown away - so inside a hall the
+	// field integrated cascade 0's bounce alone while the pixel's cones walked the
+	// chain, and the pixel blended two integrals of two radiance fields. Each ray
+	// is now `jahConeMarch` over the WHOLE chain with the pixel's rules
+	// (jah_voxel_sample.glsl + jah_voxel_march.glsl, wrapped by Jahshaka's build
+	// into the pieces JahVoxelSample / JahVoxelMarch, named in this job's piece
+	// list). A probe is a point in free space: no surface bias at the start or at a
+	// hop, and the hop's step back is measured along the ray.
+	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
+	#define JAH_VOX_COUNT @value( hlms_num_vct_cascades )
+	#define JAH_VOX_SAMPLE_ISO( c, u, l ) OGRE_SampleLevel( vctProbes[c], probeSampler, u, l )
+	// Jahshaka (PHOTON-VOXEL-3): the PER-AXIS COVERAGE, VctLighting's last light-volume
+	// entry - the march's mip-0 read takes the opacity along its ray from it.
+	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( vctProbeCovP[c], probeSampler, u, l )
+	#define JAH_VOX_SAMPLE_COVN( c, u, l ) OGRE_SampleLevel( vctProbeCovN[c], probeSampler, u, l )
+	// Jahshaka (PHOTON-VOXEL-4): the SURFACE POSITION, the list's last entry - the gate.
+	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( vctProbePosP[c], probeSampler, u, l )
+	#define JAH_VOX_SAMPLE_POSN( c, u, l ) OGRE_SampleLevel( vctProbePosN[c], probeSampler, u, l )
+	@property( vct_anisotropic )
+		#define JAH_VOX_HAS_ANISO 1
+		#define JAH_VOX_ANISO true
+		#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], probeSampler, u, l )
+		#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], probeSampler, u, l )
+		#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], probeSampler, u, l )
+		// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
+		#define JAH_VOX_HAS_BACK 1
+		#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], probeSampler, u, l )
+		#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], probeSampler, u, l )
+	@else
+		#define JAH_VOX_HAS_ANISO 0
+		#define JAH_VOX_ANISO false
+	@end
+	#define JAH_VOX_INVRES( c ) p.vctInvResMaxLod[c].xyz
+	#define JAH_VOX_MAXLOD( c ) p.vctInvResMaxLod[c].w
+	#define JAH_VOX_FROM_PREV_SCALE( c ) p.vctFromPrev[( (c) - 1 ) * 2]
+	#define JAH_VOX_FROM_PREV_OFFSET( c ) p.vctFromPrev[( (c) - 1 ) * 2 + 1]
+	@insertpiece( JahVoxelSample )
+	@insertpiece( JahVoxelMarch )
+
+	// THE ONE ENVIRONMENT (Jahshaka, PHOTON-ENV-1; jah_environment.glsl, wrapped
+	// into the piece JahEnvironment): the cube at the unit after every volume
+	// (IrradianceField::bindChainToGenerationJob, job property jah_env), sampled
+	// with the volumes' sampler.
+	@property( jah_env )
+		#define JAH_ENV_CUBE_ON true
+		#define JAH_ENV_SAMPLE( d, l ) OGRE_SampleLevel( envCube, probeSampler, d, l ).xyz
+	@else
+		#define JAH_ENV_CUBE_ON false
+		#define JAH_ENV_SAMPLE( d, l ) float3( 0, 0, 0 )
+	@end
+	#define JAH_ENV_MIPS p.envGainMips.w
+	#define JAH_ENV_GAIN p.envGainMips.xyz
+	#define JAH_ENV_SH_C0 p.envSh[0].xyz
+	#define JAH_ENV_SH_C1 p.envSh[1].xyz
+	#define JAH_ENV_SH_C2 p.envSh[2].xyz
+	#define JAH_ENV_SH_C3 p.envSh[3].xyz
+	#define JAH_ENV_SH_C4 p.envSh[4].xyz
+	#define JAH_ENV_SH_C5 p.envSh[5].xyz
+	#define JAH_ENV_SH_C6 p.envSh[6].xyz
+	#define JAH_ENV_SH_C7 p.envSh[7].xyz
+	#define JAH_ENV_SH_C8 p.envSh[8].xyz
+	@insertpiece( JahEnvironment )
+
+	#define ProbeIndex uint
+
+	// THE OCTAHEDRAL DIRECTION OF A TEXEL'S CENTRE (Jahshaka, PHOTON-FIELD-ROTATE-1):
+	// Ogre's own decode (Math::octahedronMappingDecode) at the point the pixel's reader
+	// addresses - texel xy of a tile of res texels is read at ( xy + 0.5 ) / res
+	// (IrradianceField_piece_ps.any, getIrradianceFieldXY). Upstream's integration
+	// taps took the texel CORNER ( xy / res ), half a texel away from both the rays
+	// and the reader.
+	INLINE float3 jahIfdTexelDir( uint2 xy, float res )
+	{
+		float2 f = ( float2( xy ) + 0.5 ) * ( 2.0 / res ) - 1.0;
+		float3 n = float3( f.x, f.y, 1.0 - abs( f.x ) - abs( f.y ) );
+		float t = saturate( -n.z );
+		n.x += n.x >= 0.0 ? -t : t;
+		n.y += n.y >= 0.0 ? -t : t;
+		return normalize( n );
+	}
+
+	// PCG hash (Jarzynski and Olano 2020, "Hash Functions for GPU Rendering").
+	INLINE uint jahIfdPcg( uint v )
+	{
+		uint state = v * 747796405u + 2891336453u;
+		uint word = ( ( state >> ( ( state >> 28u ) + 4u ) ) ^ state ) * 277803737u;
+		return ( word >> 22u ) ^ word;
+	}
+
+	// THE PROBE'S RAY ROTATION FOR ITS SAMPLE m: a uniformly random rotation
+	// (Shoemake's quaternion from three uniforms) hashed from the probe's WORLD
+	// lattice coordinate and m, so a probe at one lattice point integrates the same
+	// K rotations whatever happened before - a converged field is a deterministic
+	// function of the world. Rows of the rotation matrix.
+	INLINE void jahIfdRotation( uint3 lattice, uint m, out float3 r0, out float3 r1, out float3 r2 )
+	{
+		uint h = jahIfdPcg( lattice.x ^ jahIfdPcg( lattice.y ^ jahIfdPcg( lattice.z ^ jahIfdPcg( m ) ) ) );
+		float u1 = float( jahIfdPcg( h ) ) * ( 1.0 / 4294967296.0 );
+		float u2 = float( jahIfdPcg( h + 1u ) ) * ( 1.0 / 4294967296.0 );
+		float u3 = float( jahIfdPcg( h + 2u ) ) * ( 1.0 / 4294967296.0 );
+		float s1 = sqrt( 1.0 - u1 );
+		float s2 = sqrt( u1 );
+		float w = s2 * cos( 6.283185307 * u3 );
+		float x = s1 * sin( 6.283185307 * u2 );
+		float y = s1 * cos( 6.283185307 * u2 );
+		float z = s2 * sin( 6.283185307 * u3 );
+		r0 = float3( 1.0 - 2.0 * ( y * y + z * z ), 2.0 * ( x * y - w * z ), 2.0 * ( x * z + w * y ) );
+		r1 = float3( 2.0 * ( x * y + w * z ), 1.0 - 2.0 * ( x * x + z * z ), 2.0 * ( y * z - w * x ) );
+		r2 = float3( 2.0 * ( x * z - w * y ), 2.0 * ( y * z + w * x ), 1.0 - 2.0 * ( x * x + y * y ) );
+	}
+
+	// The first interior texel of probe probeIdx's tile in an atlas of fullWidth
+	// texels whose tiles are res + 2 wide (upstream's layout, one texel of border).
+	INLINE uint2 jahIfdTileOrigin( uint probeIdx, uint res, uint fullWidth )
+	{
+		uint bordered = res + 2u;
+		return uint2( ( probeIdx * bordered ) % fullWidth,
+					  ( ( probeIdx * bordered ) / fullWidth ) * bordered ) + uint2( 1u, 1u );
+	}
+@end
+
+//in uvec3 gl_NumWorkGroups;
+//in uvec3 gl_WorkGroupID;
+//in uvec3 gl_LocalInvocationID;
+//in uvec3 gl_GlobalInvocationID;
+//in uint  gl_LocalInvocationIndex;
+
+
+@piece( BodyCS )
+	// ONE WORK GROUP PER PROBE (Jahshaka, PHOTON-FIELD-ROTATE-1; DDGI's estimator,
+	// Majercik et al. 2019). The group's position in the WORK (the boxes of
+	// JahFieldWindow) names the probe's slot; a group past the work's end exits
+	// before any barrier (the condition is the same for every thread of it).
+	uint listPos = gl_WorkGroupID.x + gl_WorkGroupID.y * p.probesPerRow + p.numProcessedProbes;
+	if( listPos >= p.windowOffset.w )
+		return;
+	uint3 slot3 = jahFieldWorkSlot( listPos, p.boxLo[0], p.boxLo[1], p.boxLo[2],
+									p.boxSize[0], p.boxSize[1], p.boxSize[2], p.numProbes.xyz );
+	ProbeIndex probeIdx = jahFieldSlotIndex( slot3, p.numProbes.xyz );
+	uint2 irradTile = jahIfdTileOrigin( probeIdx, @value( irrad_resolution )u, @value( irrad_full_width )u );
+	uint2 depthTile = jahIfdTileOrigin( probeIdx, @value( depth_resolution )u, @value( depth_full_width )u );
+	uint lid = gl_LocalInvocationIndex;
+
+	// THE INVALIDATION (a re-placement): no rays - the probe's irradiance
+	// tile to value 0 and sample count 0, so the pixel's reader gives it no weight
+	// until an integration reaches it. The same for every thread of the group.
+	if( p.sweep.x == @value( ifd_mode_invalidate )u )
+	{
+		for( uint t = lid; t < @value( irrad_resolution )u * @value( irrad_resolution )u;
+			 t += @value( threads_per_group_x )u )
+		{
+			uint2 xy = uint2( t % @value( irrad_resolution )u, t / @value( irrad_resolution )u );
+			OGRE_imageWrite2D4( irradianceField, irradTile + xy, float4( 0, 0, 0, 0 ) );
+		}
+		return;
+	}
+
+	// THE PROBE'S HISTORY: how many integrations its value is the mean of, stored in
+	// the irradiance atlas's alpha (every texel of the tile, the border mirror
+	// included - the pixel's reader reads it as the probe's validity). A FRESH
+	// integration keeps nothing, a CHANGE keeps at most sweep.z samples' weight, a
+	// REFINEMENT skips a probe that already holds sweep.y samples.
+	if( lid == 0u )
+	{
+		float held = OGRE_imageLoad2D( irradianceField, irradTile ).w;
+		float kept = p.sweep.x == @value( ifd_mode_fresh )u
+						 ? 0.0
+						 : ( p.sweep.x == @value( ifd_mode_change )u ? min( held, float( p.sweep.z ) ) : held );
+		float skip = ( p.sweep.x == @value( ifd_mode_refine )u && held >= float( p.sweep.y ) ) ? 1.0 : 0.0;
+		g_probeHistory = float2( kept, skip );
+	}
+	__sharedOnlyBarrier;
+	float2 history = g_probeHistory;
+	if( history.y != 0.0 )
+		return;
+
+	uint3 probeLocal = jahFieldLocal( slot3, p.windowOffset.xyz, p.numProbes.xyz );
+	float3 probeCenter = float3( probeLocal );
+	float3 posLS = mul( float4( probeCenter, 1.0f ), p.irrProbeToVctTransform ).xyz;
+
+	// This sample's rotation: the probe's world lattice point and its sample index
+	// (history.x, the samples the blend keeps, IS this sample's index).
+	float3 rot0 = float3( 1, 0, 0 );
+	float3 rot1 = float3( 0, 1, 0 );
+	float3 rot2 = float3( 0, 0, 1 );
+	if( p.sweep.w != 0u )
+		jahIfdRotation( p.latticeOrigin.xyz + probeLocal, uint( history.x ), rot0, rot1, rot2 );
+
+	// EVERY RAY OF THE PROBE: the spherical-Fibonacci set (IrradianceField::fillDirections)
+	// under this sample's random rotation - so the set's gaps land somewhere new every
+	// sample and the mean over a probe's samples converges on the irradiance, where a
+	// fixed set converged on its own aliasing.
+	for( uint r = lid; r < @value( num_rays_per_probe )u; r += @value( threads_per_group_x )u )
+	{
+		float3 setDir = bufferFetch( directionsBuffer, int( r ) ).xyz;
+		float3 dir = normalize( float3( dot( rot0, setDir ), dot( rot1, setDir ), dot( rot2, setDir ) ) );
+		// THE RAY IN THE VOLUME'S SPACE (PHOTON-VOXEL-4, FIELD-DIR-1): `dir` is a WORLD
+		// direction; the march walks cascade 0's normalised space, where it is the world
+		// direction over the box's size. This job used to pass the world direction as the
+		// normalised one - right in a cube only: in gi.ddgi_ambient's 18 x 9 x 18 m box a
+		// 45-degree ray marched at 26.6 degrees and its depth was integrated as 45. A cube
+		// (every cascade of the chain) takes the world direction's own bits.
+		float3 dirLS = dir;
+		if( any( notEqual( p.worldToVolumeDir.xyz, float3( 1.0, 1.0, 1.0 ) ) ) )
+			dirLS = normalize( dir * p.worldToVolumeDir.xyz );
+
+		// THE START BIAS (0070's rule, the ray's own direction as the bias direction).
+		// A probe sits at a lattice point, and one standing in or beside a surface's
+		// own cell would otherwise meet that cell's opacity on its first sample. The
+		// ray leaves by one cell of cascade 0 along itself, componentwise (in the volume's
+		// space: dirLS), and the plane march reads on from there - the pixel cone's
+		// geometry (surface, one cell along the normal). Measured at 0 / 1 / 2 extra
+		// cells (PHOTON-READER-1): gi.ddgi_ambient's floor 0.914 / 0.915 / 0.915 of its
+		// truth, the sealed room 1 / 1 / 3 codes, gi.leak_room's thin walls within
+		// 0.004 of each other at 0 and 1 - nothing overrules the pixel's geometry.
+		float3 startBias = dirLS * JAH_VOX_INVRES( 0 );
+		// A RAY, NOT A CONE (Jahshaka, PHOTON-WRITER-1): aperture ZERO, so the march
+		// crosses the voxels at the store's own resolution (its diameter floor is one
+		// cell of the cascade it is in). A cone's composite transmittance is not the
+		// radiance along a ray: its footprint grows into geometry the axis never meets,
+		// so it OVER-OCCLUDES, most where the footprint lies along a surface - the
+		// grazing directions over a floor, where a low sun's sky is brightest. Measured
+		// on the two target rows (the chain's field over an open floor, and the low
+		// sun's cascade-0 face): the bin's own cone (tan 0.1686) 0.530 of the analytic
+		// sky / a 2.56-2.70x face step; upstream's tan 0.0437 0.662 / 1.67-1.77x; a ray
+		// 0.729 / 1.18-1.31x (with the reader's backface rule 0.927 / 1.08-1.19x). The
+		// bin's cone stays where it IS the right estimate: the environment, below.
+		JahConeResult ray = jahConeMarch( posLS + startBias, dirLS, 0.0, kJahVoxelNoOrigin, 0u );
+		// THE SKY IS PART OF THE PROBE'S IRRADIANCE (Jahshaka, PHOTON-ENV-1). The share
+		// of this ray the voxels did not stop - one minus min( 1, opacity / 0.95 ), the
+		// same escape the pixel's cones weight theirs by - sees the ONE ENVIRONMENT in
+		// the ray's direction prefiltered over the ray's own BIN (the cone of solid
+		// angle 4 pi / N, coneAngleTan - IrradianceField derives it from the ray
+		// count). THE OPACITY IS THE RAY'S OWN COMPOSITE, NOT THE MARCH'S OCCUPANCY
+		// ESTIMATE, and that is physics: the occupancy estimate exists for a cone that
+		// STARTS ON A SURFACE. A probe ray starts in free space and CROSSES what it
+		// meets, and for a ray crossing a wall the directional composite IS the
+		// transmittance - measured on gi.ddgi_ambient's sealed room (PHOTON-READER-1):
+		// the occupancy estimate let 11/255 of sky through the walls, the composite
+		// 1/255. The march reads the direction in the volume's space (dirLS), the
+		// environment reads the world direction.
+		const float escape = 1.0 - min( 1.0, ray.alpha / 0.95 );
+		const float3 sky = escape * jahEnvCone( dir, p.coneAngleTan );
+		// THE DEPTH STAYS CASCADE-0-LOCAL AND IS MEASURED FROM THE PROBE: the march's
+		// age converted back into cascade 0's normalised units, plus the start bias's
+		// own length - and BOUNDED at cascade 0's diagonal, 1.414, the old march's own
+		// exit. A miss has no distance; the moments feed the Chebyshev visibility
+		// test, and an unbounded miss distance blows up the variance of every texel
+		// that mixes hits and misses (DDGI bounds a miss the same way).
+		// NO NON-FINITE SAMPLE ENTERS THE MEAN (F5; the tree's NaN rule - the test is
+		// on the BITS, a self-compare folds to true on this compiler): a NaN or Inf
+		// radiance would poison the probe's running mean until the next change, so it
+		// counts as black (the environment's inputs are refused at the host too).
+		float3 rayColour = ray.colour + sky;
+		uint3 rayBits = floatBitsToUint( rayColour ) & uint3( 0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu );
+		if( rayBits.x >= 0x7F800000u || rayBits.y >= 0x7F800000u || rayBits.z >= 0x7F800000u )
+			rayColour = float3( 0, 0, 0 );
+		g_rayColourDepth[r] = float4( rayColour,
+									  min( ray.travelledC0 + length( startBias ), 1.414213562 ) *
+										  dot( abs( dirLS ), float3( p.numProbes.xyz ) ) );
+		g_rayDir[r] = float4( dir, 0.0 );
+	}
+	__sharedOnlyBarrier;
+
+	// THE PROBE'S MEAN: this integration enters with weight 1 / ( kept + 1 ), so after
+	// m integrations with no restart the value is the plain mean of m independent
+	// estimates. A fresh probe (kept 0) takes this integration whole - a select, not
+	// a mix, so whatever the atlas held before (recycled VRAM included) never
+	// reaches the answer.
+	float blend = 1.0 / ( history.x + 1.0 );
+	float heldAfter = history.x + 1.0;
+
+	// THE DEPTH MOMENTS: each texel is the cosine-weighted mean of every ray's
+	// distance and squared distance about the texel's own direction - upstream's
+	// kernel (its integration taps were the same clamped cosine over texels),
+	// estimated over rays uniform in solid angle instead of over texels that are not.
+	for( uint t = lid; t < @value( depth_resolution )u * @value( depth_resolution )u;
+		 t += @value( threads_per_group_x )u )
+	{
+		uint2 xy = uint2( t % @value( depth_resolution )u, t / @value( depth_resolution )u );
+		float3 texelDir = jahIfdTexelDir( xy, float( @value( depth_resolution ) ) );
+		float3 acc = float3( 0, 0, 0 );
+		for( uint r = 0u; r < @value( num_rays_per_probe )u; ++r )
+		{
+			float w = max( 0.0, dot( texelDir, g_rayDir[r].xyz ) );
+			float d = g_rayColourDepth[r].w;
+			acc += w * float3( d, d * d, 1.0 );
+		}
+		float2 sampled = acc.z > 0.0 ? acc.xy / acc.z : float2( 0, 0 );
+		uint2 at = depthTile + xy;
+		float2 value = sampled;
+		if( blend < 1.0 )
+			value = lerp( OGRE_imageLoad2D( irradianceFieldDepth, at ).xy, sampled, blend );
+		OGRE_imageWrite2D4( irradianceFieldDepth, at, float4( value, 0.0, 0.0 ) );
+	}
+
+	// THE IRRADIANCE: each texel is the cosine-weighted mean radiance about its own
+	// direction (E / pi, in cascade 0's stored units), and alpha carries the count.
+	for( uint t = lid; t < @value( irrad_resolution )u * @value( irrad_resolution )u;
+		 t += @value( threads_per_group_x )u )
+	{
+		uint2 xy = uint2( t % @value( irrad_resolution )u, t / @value( irrad_resolution )u );
+		float3 texelDir = jahIfdTexelDir( xy, float( @value( irrad_resolution ) ) );
+		float4 acc = float4( 0, 0, 0, 0 );
+		for( uint r = 0u; r < @value( num_rays_per_probe )u; ++r )
+		{
+			float w = max( 0.0, dot( texelDir, g_rayDir[r].xyz ) );
+			acc += w * float4( g_rayColourDepth[r].xyz, 1.0 );
+		}
+		float3 sampled = acc.w > 0.0 ? acc.xyz / acc.w : float3( 0, 0, 0 );
+		uint2 at = irradTile + xy;
+		float3 value = sampled;
+		if( blend < 1.0 )
+			value = lerp( OGRE_imageLoad2D( irradianceField, at ).xyz, sampled, blend );
+		OGRE_imageWrite2D4( irradianceField, at, float4( value, heldAfter ) );
+	}
+@end

@@ -2,7 +2,7 @@
 // (SPECS/atom/A5b_VOXELISER_FEED_AND_FAR_BLAS_DESIGN.md §2-§3).
 //
 // WHAT IT REPLACES. Every voxeliser rebuild used to walk the scene's items on the
-// CPU: addItem per GI item, a VctMaterial conversion and a bucket per sub-item, an
+// CPU: addItem per GI item, a PhotonVoxelMaterial conversion and a bucket per sub-item, an
 // octant test per partition, a 96-byte record per survivor written into a CPU
 // array and uploaded. None of it is here. Three compute jobs read the GPU scene's
 // tables and write the records the voxelise shader reads, and the CPU's share of a

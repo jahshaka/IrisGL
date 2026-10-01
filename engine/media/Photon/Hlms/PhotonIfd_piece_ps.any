@@ -1,0 +1,310 @@
+// PHOTON (OWN-GI-1): the voxel and irradiance-field pieces of the PBS pixel shader, an owned
+// copy (Ogre-Next's IrradianceField_piece_ps.any as it stood on fork 24b2436c9). This library is registered AFTER
+// Hlms/Pbs/Any, so the pieces upstream's file of the same name defines are taken away first and
+// ours collected in their place: the PBS templates keep inserting them by their upstream names.
+@undefpiece( DeclIrradianceFieldTextures )
+@undefpiece( DeclIrradianceFieldFuncs )
+@undefpiece( applyIrradianceField )
+
+#include "/media/matias/Datos/SyntaxHighlightingMisc.h"
+
+@property( irradiance_field )
+
+// clang-format off
+@piece( DeclIrradianceFieldTextures )
+	@property( syntax == glsl || syntax == glslvk )
+		vulkan_layout( ogre_t@value(ifdColour) ) uniform texture2D ifdColour;
+		vulkan_layout( ogre_t@value(ifdDepth) ) uniform texture2D ifdDepth;
+		vulkan( layout( ogre_s@value(ifdColour) ) uniform sampler ifdSampler );
+	@end
+	@property( syntax == hlsl )
+		Texture2D<float4> ifdColour		: register(t@value(ifdColour));
+		Texture2D<float2> ifdDepth		: register(t@value(ifdDepth));
+		SamplerState ifdSampler         : register(s@value(ifdColour));
+	@end
+	@property( syntax == metal )
+		, texture2d<float> ifdColour	[[texture(@value(ifdColour))]]
+		, texture2d<float> ifdDepth		[[texture(@value(ifdDepth))]]
+		, sampler ifdSampler            [[sampler(@value(ifdColour))]]
+	@end
+@end
+// clang-format on
+
+{
+@piece( DeclIrradianceFieldFuncs )
+	#define IrfProbeIndex uint
+
+	// Jahshaka (PHOTON-WRITER-1): the field's window - which atlas tile holds which
+	// probe - one definition shared with the generation and integration jobs.
+	@insertpiece( JahFieldWindow )
+
+	INLINE float2 octahedronMappingWrap( float2 v )
+	{
+		float2 signVal;
+		signVal.x = v.x >= 0.0 ? 1.0 : -1.0;
+		signVal.y = v.y >= 0.0 ? 1.0 : -1.0;
+		return ( 1.0 - abs( v.yx ) ) * signVal;
+	}
+
+	INLINE float2 octahedronMappingEncode( float3 n )
+	{
+		// https://twitter.com/Stubbesaurus/status/937994790553227264
+		n /= ( abs( n.x ) + abs( n.y ) + abs( n.z ) );
+		n.xy = n.z >= 0.0 ? n.xy : octahedronMappingWrap( n.xy );
+		n.xy = n.xy * 0.5 + 0.5;
+		return n.xy;
+	}
+
+	INLINE float3 transformPos3( float3 position, float4 row0, float4 row1, float4 row2 )
+	{
+		float3 retVal;
+		retVal.x = dot( row0.xyzw, float4( position, 1.0 ) );
+		retVal.y = dot( row1.xyzw, float4( position, 1.0 ) );
+		retVal.z = dot( row2.xyzw, float4( position, 1.0 ) );
+		return retVal;
+	}
+
+	INLINE float3 transformDir3( float3 dir, float4 row0, float4 row1, float4 row2 )
+	{
+		float3 retVal;
+		retVal.x = dot( row0.xyz, dir );
+		retVal.y = dot( row1.xyz, dir );
+		retVal.z = dot( row2.xyz, dir );
+		return retVal;
+	}
+
+	INLINE float2 getIrradianceFieldXY( float3 dir, IrfProbeIndex probeIdx, float borderedRes,
+										float fullWidth, float2 invFullResolution )
+	{
+		float2 retVal;
+		/* Perform the following, but in floating point:
+		retVal.x = ( probeIdx * borderedRes ) % fullWidth;
+		retVal.y = ( ( probeIdx * borderedRes ) / fullWidth ) * borderedRes;*/
+		float temp = probeIdx * borderedRes;
+		retVal.y = floor( temp * invFullResolution.x );
+		retVal.x = temp - retVal.y * fullWidth;
+		retVal.y *= borderedRes;
+
+		// Skip top-left border
+		retVal.xy += 1.0f;
+
+		//dir.y = -dir.y;
+		// Quantize direction to fix noise artifacts where the texels output from
+		// octahedronMappingEncode keep jumping due to octahedronMappingWrap being too sharp
+		// https://github.com/OGRECave/ogre-next/issues/29#issuecomment-541491145
+		dir = ceil( dir * 1048576.0 );
+		dir *= 1.0 / 1048576.0;
+		float2 uv = octahedronMappingEncode( dir ) * ( borderedRes - 2.0f );
+
+		retVal += uv;
+		retVal *= invFullResolution;
+		return retVal;
+	}
+
+	/**
+	\param probeOrigin
+	\param numProbesAggregated
+		numProbesAggregated.x must contain IrradianceFieldSettings::mNumProbes[0]
+		numProbesAggregated.x must contain ( mNumProbes[0] * mNumProbes[1] )
+	\return
+	*/
+	IrfProbeIndex getProbeIdx( float3 probeOrigin, float2 numProbesAggregated )
+	{
+		return IrfProbeIndex( probeOrigin.x + probeOrigin.y * numProbesAggregated.x +
+							  probeOrigin.z * numProbesAggregated.y );
+	}
+@end
+}
+
+{
+@piece( applyIrradianceField )
+
+	// ifdGridPos in range [0; mNumProbes)
+	float3 ifdGridPos =
+		transformPos3( inPs.pos.xyz, //
+					   passBuf.irradianceField.viewToIrradianceFieldRow0,
+					   passBuf.irradianceField.viewToIrradianceFieldRow1,
+					   passBuf.irradianceField.viewToIrradianceFieldRow2 );
+
+	float3 ifdSpaceNormal = normalize( transformDir3( pixelData.normal, //
+									   passBuf.irradianceField.viewToIrradianceFieldRow0,
+									   passBuf.irradianceField.viewToIrradianceFieldRow1,
+									   passBuf.irradianceField.viewToIrradianceFieldRow2 ) );
+
+	// A HOST PIECE MAY RUN HERE, with ifdGridPos and ifdSpaceNormal in scope and
+	// before anything has been derived from them -- which is what a DDGI sample-point
+	// bias needs (the paper's normal/view offset, in probe spacings), and what any
+	// declaration the two hooks inside the cage loop need. The grid origin below moved
+	// one line down for it; nothing between the two reads it.
+	@insertpiece( custom_ps_ifdCagePrologue )
+
+	// A HOST PIECE MAY DECLINE THE WHOLE CAGE FOR THIS PIXEL, which is the one thing
+	// no hook INSIDE this body can do. Every insertion point above and below runs
+	// within the cage's own arithmetic; a host that has already answered a pixel's
+	// diffuse GI by some other means -- a screen-probe gather, a lightmap, a cached
+	// surface -- can only subtract the field's answer back out afterwards, which is
+	// not the same thing: the eight probe fetches, the depth fetches and the
+	// Chebyshev test have all been paid by then, and the two terms have already been
+	// summed in a half-float.
+	//
+	// Left at one this is exactly what this piece always computed, and a build with
+	// no host piece for the hook below has one constant and one dead branch.
+	float ifdCageEnabled = 1.0;
+	@insertpiece( custom_ps_ifdCageGate )
+
+	float3 ifdGridProbeOrigin = trunc( ifdGridPos );
+
+	// ifdAlpha is how far from the floor( ifdGridPos ). on [0, 1] for each axis.
+	float3 ifdAlpha = saturate( fract( ifdGridPos ) );
+
+	float3 ifdIrradiance = float3( 0, 0, 0 );
+	float sumIfdWeight = 0;
+	// Jahshaka (PHOTON-FIELD-ROTATE-1): the weight of the probes that HOLD a value -
+	// the composite below divides by it, while sumIfdWeight stays the whole cage's.
+	float sumIfdValidWeight = 0;
+
+	// Iterate over adjacent probe cage
+	// ...UNLESS THE HOST DECLINED IT. The loop's body keeps its own indentation so
+	// that this is three added lines rather than a re-indentation of fifty: what the
+	// brace changes is whether the cage RUNS, not what it computes.
+	if( ifdCageEnabled != 0.0 )
+	{
+	for( int i = 0; i < 8; ++i )
+	//for( int i = 0; i < 1; ++i )
+	{
+		// Compute the offset grid coord and clamp to the probe grid boundary
+		// Offset = 0 or 1 along each axis
+		float3 probeOffset = float3( int3( i, i >> 1, i >> 2 ) & int3( 1, 1, 1 ) );
+		float3 probeOrigin = ifdGridProbeOrigin + probeOffset;
+		// ...and a host piece may adjust it. The comment above promises a clamp to the
+		// probe grid boundary that this piece cannot perform: the render params carry
+		// only numProbes.x and numProbes.x * numProbes.y, so the per-axis probe counts
+		// a clamp needs are not here. A pixel outside the field therefore indexes past
+		// the grid and getProbeIdx's flat index wraps into another row.
+		@insertpiece( custom_ps_ifdCageProbeOrigin )
+
+		// Jahshaka (PHOTON-WRITER-1): the probe's ATLAS SLOT. The cage is built in the
+		// window's own coordinates (probeOrigin, and dir below); the tile that holds
+		// that probe is where the window's offset puts it - the host's hook applies
+		// it (a field that never scrolls has the slot equal to the coordinate).
+		float3 ifdProbeSlot = probeOrigin;
+		@insertpiece( custom_ps_ifdCageProbeSlot )
+		IrfProbeIndex probeIdx =
+			getProbeIdx( ifdProbeSlot, passBuf.irradianceField.numProbesAggregated.xy );
+
+		float3 dir = probeOrigin - ifdGridPos;
+		// max(): a probe can sit exactly under the shaded pixel -- a pixel landing on a
+		// grid integer hits it, and a host piece that clamps the cage to the grid makes
+		// the coincidence reachable by a whole half-space rather than by a measure-zero
+		// plane -- and 1/0 would make dir NaN and poison the whole cage sum.
+		float r = max( length( dir ), 1e-6 );
+		dir *= 1.0 / r;
+
+		// A PROBE BEHIND THE SHADED POINT'S TANGENT PLANE HAS NO SAY (Jahshaka,
+		// PHOTON-WRITER-1). Upstream kept a floor of 0.2 for it so a detailed surface
+		// never runs out of probes - but the cage always holds a probe on the point's
+		// own side (the sample point is inside the cage and in front of its plane), the
+		// sum is normalised, and a probe behind an opaque surface measured the other
+		// side's light: under a thin floor it is the underside, and the floor of 0.2
+		// handed it a sixth of a front probe's weight (the chain's field over an open
+		// floor read 0.729 of its analytic sky visibility with it, 0.927 without; the
+		// depth moments cannot reject it - their cosine-wide integration averages a
+		// probe's upward texel over its grazing rays, so the Chebyshev test passes).
+		float weight;
+		weight = dot( dir, ifdSpaceNormal ) * 200.0;
+		weight = saturate( weight );
+
+		// Compute the trilinear weights based on the grid cell vertex to smoothly
+		// transition between probes. Avoid ever going entirely to zero because that
+		// will cause problems at the border probes.
+		// We're using 1-a when offset = 0 and a when offset = 1.
+		float3 trilinear;
+		trilinear.x = probeOffset.x < 1 ? ( 1.0 - ifdAlpha.x ) : ifdAlpha.x;
+		trilinear.y = probeOffset.y < 1 ? ( 1.0 - ifdAlpha.y ) : ifdAlpha.y;
+		trilinear.z = probeOffset.z < 1 ? ( 1.0 - ifdAlpha.z ) : ifdAlpha.z;
+
+		// Visibility (Chebyshev)
+		float2 ifdDepthUV = getIrradianceFieldXY(
+			-dir, probeIdx, passBuf.irradianceField.depthBorderedRes,
+			passBuf.irradianceField.depthFullWidth, passBuf.irradianceField.depthInvFullResolution );
+		float2 temp = OGRE_SampleLevel( ifdDepth, ifdSampler, ifdDepthUV, 0 ).xy;
+		float mean = temp.x;
+		float meanSq = temp.y;
+		if( r > mean )
+		{
+			float variance = abs( mean * mean - meanSq ) + 1e-6;
+			float dev = ( r - mean );
+			float chebyshevWeight = variance / ( variance + dev * dev );
+			chebyshevWeight = max( chebyshevWeight * chebyshevWeight * chebyshevWeight, 0.0 );
+
+			weight *= chebyshevWeight;
+		}
+
+		// Avoid zero weight
+		weight = max( 0.000001, weight );
+
+		const float crushThreshold = 0.2;
+		if (weight < crushThreshold) {
+			weight *= weight * weight * (1.0 / (crushThreshold*crushThreshold));
+		}
+
+		weight *= trilinear.x * trilinear.y * trilinear.z;
+
+		float2 ifdColourUV = getIrradianceFieldXY(
+			ifdSpaceNormal, probeIdx, passBuf.irradianceField.irradBorderedRes,
+			passBuf.irradianceField.irradFullWidth, passBuf.irradianceField.irradInvFullResolution );
+
+		float4 irrSample = OGRE_SampleLevel( ifdColour, ifdSampler, ifdColourUV, 0 );
+		float3 irrColour = irrSample.xyz;
+//		irrColour = sqrt(irrColour);
+		sumIfdWeight += weight;
+		// A PROBE NO INTEGRATION HAS REACHED HAS NO SAY (Jahshaka, PHOTON-FIELD-ROTATE-1).
+		// The atlas's alpha is the probe's sample count (the generation job's mean;
+		// every texel of the tile, border included, so the bilinear fetch returns it
+		// whole), and a re-placed field clears it to 0 and integrates the new
+		// placement over several frames: until a probe's first integration its weight
+		// is 0. The cage's value is then the mean of the probes that hold one, and the
+		// host's per-probe hook below sees the validated weight - a cage with no valid
+		// probe in front of the surface reads as having no probe there, which is what
+		// hands its pixel to the host's fallback. A converged field (every count >= 1)
+		// computes exactly what it always did.
+		weight *= saturate( irrSample.w );
+		ifdIrradiance += irrColour * weight;
+		sumIfdValidWeight += weight;
+
+		// A host piece may accumulate its own per-probe quantities here, with this
+		// probe's index, its normalised direction and its final weight all in scope
+		// (a front-facing share of the cage's weight, a sky-visibility estimate from
+		// the same depth atlas, a debug counter).
+		@insertpiece( custom_ps_ifdCageProbe )
+	}
+	}
+
+//	ifdIrradiance = ifdIrradiance * ifdIrradiance;
+
+	// THE SCALE IS A VARIABLE so that a host piece can modulate the field's answer
+	// without replacing this piece: a DDGI intensity, a confidence that fades the
+	// field out where it has nothing to say, a per-channel tint. Left at one it is
+	// exactly what this line always computed.
+	float3 ifdIrradianceScale = float3( 1.0, 1.0, 1.0 );
+	@insertpiece( custom_ps_ifdCageResolve )
+
+	// THE COMPOSITE IS UNDER THE SAME CONDITION, and that is not tidiness: with the
+	// cage declined `sumIfdWeight` is zero and this line would divide by it. The
+	// resolve hook above stays OUTSIDE the branch on purpose -- a host declares its
+	// own quantities there and reads them in the post hook below, which runs for
+	// every pixel because the pixels the field does NOT answer are exactly the ones
+	// a host's fallback is for.
+	if( ifdCageEnabled != 0.0 && sumIfdValidWeight > 0.0 )
+	{
+		pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdValidWeight );
+	}
+
+	// ...and a host piece may add its own diffuse-GI terms after it (a fallback for
+	// the pixels the field faded out of, an ambient term the voxel volume swallowed),
+	// in this order, so that the accumulation order of the existing term is unchanged.
+	@insertpiece( custom_ps_ifdCagePost )
+@end
+}
+
+@end

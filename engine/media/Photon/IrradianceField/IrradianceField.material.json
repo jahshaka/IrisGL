@@ -1,0 +1,69 @@
+{
+    "compute" :
+    {
+        "IrradianceField/Gen" :
+        {
+            "threads_per_group" : [64, 1, 1],
+            "thread_groups" : [1, 1, 1],
+
+            "source" : "IrradianceFieldGenFromVct_cs",
+            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "sRGB.any", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any", "JahFieldWindow_piece_all.any", "IrradianceFieldGenFromVct_piece_cs.any"],
+            "inform_shader_of_texture_data_change" : true,
+
+            "uav_units" : 2,
+
+            "textures" :
+            [
+                {}
+            ],
+
+            "properties" :
+            {
+                "vct_anisotropic" : 0,
+                "hlms_num_vct_cascades" : 1
+            },
+
+            "params_glsl" :
+            [
+                ["directionsBuffer",        [0], "int"],
+
+                ["irradianceField",         [0], "int"],
+                ["irradianceFieldDepth",    [1], "int"]
+            ]
+        },
+
+        "IrradianceField/BorderMirror/Depth" :
+        {
+            "threads_per_group" : [64, 1, 1],
+            "thread_groups" : [1, 1, 1],
+
+            "source" : "IrradianceFieldBorderMirror_cs",
+            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "IrradianceFieldBorderMirror_piece_cs.any"],
+            "inform_shader_of_texture_data_change" : true,
+
+            "uav_units" : 1,
+
+            "properties" :
+            {
+                "full_width" : 256
+            }
+        },
+
+        "IrradianceField/BorderMirror/Colour" :
+        {
+            "threads_per_group" : [64, 1, 1],
+            "thread_groups" : [1, 1, 1],
+
+            "source" : "IrradianceFieldBorderMirror_cs",
+            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "IrradianceFieldBorderMirror_piece_cs.any"],
+            "inform_shader_of_texture_data_change" : true,
+
+            "uav_units" : 1,
+
+            "properties" :
+            {
+                "full_width" : 256
+            }
+        }
+    }
+}
