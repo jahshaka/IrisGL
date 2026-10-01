@@ -27,6 +27,10 @@ vulkan( }; )
 vulkan_layout( location = 0 )
 out vec4 fragColour;
 
+#ifdef PHOTON_ENCODE
+#include "JahSrgb.glsl"
+#endif
+
 void main()
 {
 	ivec2 size = textureSize( photonOverlay, 0 );
@@ -35,7 +39,11 @@ void main()
 #ifdef PHOTON_COVERAGE
 	// The photon scene pass' layer: covered wherever anything was drawn.
 	const bool covered = any( greaterThan( o, vec4( 0.0 ) ) );
+#ifdef PHOTON_ENCODE
+	fragColour = vec4( jahSrgbEncode( o.rgb ), covered ? 1.0 : 0.0 );
+#else
 	fragColour = vec4( clamp( o.rgb, vec3( 0.0 ), vec3( 1.0 ) ), covered ? 1.0 : 0.0 );
+#endif
 #else
 	const float valid = photonParams.x > 0.5 ? 1.0 : 0.0;
 	fragColour = vec4( clamp( o.rgb, vec3( 0.0 ), vec3( 1.0 ) ), clamp( o.a, 0.0, 1.0 ) * valid );

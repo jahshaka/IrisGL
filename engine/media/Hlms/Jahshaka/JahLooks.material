@@ -140,6 +140,8 @@ material Jahshaka/Look/GlassWarp
 fragment_program Jahshaka/Look/RadialBlur_ps_GLSL glsl
 {
 	source JahLookRadialBlur_ps.glsl
+	// SRGB-ENCODE-1: the blur averages light through JahSrgb.glsl.
+	enable_include_header true
 	default_params
 	{
 		param_named sourceTexture int 0
@@ -148,6 +150,7 @@ fragment_program Jahshaka/Look/RadialBlur_ps_GLSL glsl
 fragment_program Jahshaka/Look/RadialBlur_ps_VK glslvk
 {
 	source JahLookRadialBlur_ps.glsl
+	enable_include_header true
 }
 fragment_program Jahshaka/Look/RadialBlur_ps unified
 {

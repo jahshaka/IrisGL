@@ -25,6 +25,7 @@
 #include "GpuScene.h"
 #include "GpuVoxelGather.h"
 
+#include <cmath>
 #include <OgreRoot.h>
 #include <OgreAbiUtils.h>
 #include <OgreWindow.h>
@@ -146,6 +147,16 @@ namespace detail {
 
 inline Ogre::Vector3     toOgre(const Vec3 &v)   { return Ogre::Vector3(v.x, v.y, v.z); }
 inline Ogre::ColourValue toOgre(const Colour &c) { return Ogre::ColourValue(c.r, c.g, c.b, c.a); }
+/// The exact sRGB OETF on the CPU (SRGB-ENCODE-1): the same curve as
+/// jahSrgbEncode in Jahshaka media JahSrgb.glsl, for a clear colour that
+/// reaches a display target without passing through a shader. Alpha untouched.
+inline float srgbEncode(float v) {
+    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+}
+inline Colour srgbEncode(const Colour &c) {
+    return Colour(srgbEncode(c.r), srgbEncode(c.g), srgbEncode(c.b), c.a);
+}
 
 /// The LOD switch band a WATCHED view's scene passes carry, and the suite's
 /// offscreen latch (OgreMesh.cpp; fork 5230c9390+8282f6d70 (was 0075)). @see ChainDesc::lodHysteresis.
@@ -878,7 +889,8 @@ constexpr Ogre::uint8 kPhotonExecutionBits = kPhotonSceneExecutionBit | kPhotonO
                                              kPhotonDepthCopyBit | kPhotonDepthClearBit;
 /// The two composites' materials (engine media, Hlms/Jahshaka/JahPhotonView.material):
 /// the scene pass' layer, and the tier's overlay.
-constexpr const char *kPhotonLayerMaterial   = "Jahshaka/PhotonLayer";
+constexpr const char *kPhotonLayerMaterial   = "Jahshaka/PhotonLayer";         ///< display-encoded (SRGB-ENCODE-1)
+constexpr const char *kPhotonLayerLinearMaterial = "Jahshaka/PhotonLayerLinear"; ///< the Plain instrument's
 constexpr const char *kPhotonOverlayMaterial = "Jahshaka/PhotonOverlay";
 /// The cards' quads' material (the same file).
 constexpr const char *kPhotonCardsMaterial = "Jahshaka/PhotonCards";
@@ -1174,6 +1186,17 @@ struct ChainDesc {
     /// The environment variable JAHSHAKA_NO_DITHER forces it on for the whole
     /// process; it is read ONCE (chain::noDitherEnv) and ORed with this.
     bool  ditherOff = false;
+    /// THE DISPLAY ENCODE (SRGB-ENCODE-1): is this view's picture something a
+    /// person LOOKS AT? Then its ungraded composite runs the exact sRGB encode
+    /// (Jahshaka/DisplayEncode) and its scene target is float, exactly as the
+    /// tonemap quad encodes the graded picture — ONE encode on every display
+    /// path. True for every on-screen view and for every offscreen view that
+    /// opted into the post chain (PostFxDesc::allowOffscreen: the graded
+    /// screenshots, thumbnails, the VR eye pair); FALSE for an offscreen view
+    /// that did not, which is the PLAIN grade — the measuring instrument whose
+    /// bytes are linear radiance by contract (IEditorViewport::gradeEncoding).
+    /// Shape, not a uniform: it adds a target and a quad.
+    bool  displayEncode = false;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
     /// Does the screen-space MARCH contribute (PostFxDesc::ssrScreenMarch)?
@@ -1526,8 +1549,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 /// `overlays` is the view's own entitlement (OgreView::overlaysAllowed) — the
 /// same gate the scene chain's overlay pass takes, so a view that may not draw
 /// the HUD does not start drawing it because its scene went away.
+///
+/// `displayEncode` is the view's ChainDesc::displayEncode: the background is a
+/// LINEAR scene colour, so a display view clears to its sRGB encoding (the
+/// same code the scene chain's encode quad would write for it).
 void buildBlank(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
-                const Colour &background, bool overlays,
+                const Colour &background, bool overlays, bool displayEncode,
                 std::vector<std::string> &nodeDefsOut);
 /// The inner rectangle for a letterboxed view: the largest `aspect`-shaped
 /// rectangle centred in a target of `targetAspect`. Normalised coordinates.
@@ -1597,8 +1624,12 @@ struct PipHandles {
 /// shader samples unconditionally is cleared to black. Grading the swatch too
 /// is deliberate: the letterbox bars must not disagree with the background
 /// inside the shot.
+///
+/// Ungraded, the two quads run `Jahshaka/DisplayEncode` over an RGBA16F inset
+/// when `displayEncode` (the host view's ChainDesc::displayEncode, SRGB-ENCODE-1)
+/// and a plain copy of an RGBA8 inset otherwise (the Plain instrument).
 void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDesc &pip,
-              float texWidthFactor, float texHeightFactor,
+              float texWidthFactor, float texHeightFactor, bool displayEncode,
               std::vector<std::string> &nodeDefsOut, PipHandles &handlesOut);
 /// The colour a fixed-exposure clear must carry for `exposure` (chain units).
 /// The one conversion, shared by the main chain, the inset and every live
@@ -7526,6 +7557,7 @@ private:
     /// it follows one for free) from rebuilding anything per frame.
     float                      mPipTexWidthFactor = 0.0f, mPipTexHeightFactor = 0.0f;
     bool                       mPipTexTonemap = false;
+    bool                       mPipTexEncode = false;   ///< the host's displayEncode the inset was built with
     /// The TARGET size the inset was built against. A change means the window
     /// resized, and the inset is rebuilt for it — see applyPip for the
     /// validation error that made this necessary rather than tidy.

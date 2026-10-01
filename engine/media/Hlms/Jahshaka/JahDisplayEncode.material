@@ -1,0 +1,51 @@
+// THE UNGRADED COMPOSITE (SRGB-ENCODE-1): Jahshaka/DisplayEncode copies a
+// linear scene target onto a display target through the exact sRGB encode.
+// It replaces Ogre/Copy/4xFP32 wherever the chain wrote an ungraded picture to
+// a target somebody looks at (OgreChain.cpp: the passthrough shape, the HDR-off
+// post chain, the ungraded picture-in-picture inset).
+fragment_program Jahshaka/DisplayEncode_ps_GLSL glsl
+{
+	source JahDisplayEncode_ps.glsl
+	enable_include_header true
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/DisplayEncode_ps_VK glslvk
+{
+	source JahDisplayEncode_ps.glsl
+	enable_include_header true
+}
+fragment_program Jahshaka/DisplayEncode_ps unified
+{
+	delegate Jahshaka/DisplayEncode_ps_GLSL
+	delegate Jahshaka/DisplayEncode_ps_VK
+}
+
+material Jahshaka/DisplayEncode
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/DisplayEncode_ps
+			{
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+		}
+	}
+}

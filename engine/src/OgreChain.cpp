@@ -225,6 +225,14 @@ constexpr const char *kSceneRtv = "jahSceneRtv";
 constexpr const char *kAtomIds          = kAtomIdTexture;
 constexpr const char *kAtomIdRtv        = "jahAtomIdRtv";
 constexpr const char *kPassthroughRtv   = "jahPassthroughRtv";
+/// THE PASSTHROUGH SHAPE'S LINEAR SCENE (SRGB-ENCODE-1, ChainDesc::displayEncode):
+/// a display view renders its scene here, RGBA16F at the target's size and
+/// sample count, and ONE Jahshaka/DisplayEncode quad writes the target. Float
+/// because an 8-bit LINEAR picture encoded afterwards bands in the darks (code 1
+/// linear is code 13 encoded). The Plain instrument never has it.
+constexpr const char *kPassScene        = "jahPassScene";
+/// The one ungraded display encode (JahSrgb.glsl says where else it runs).
+constexpr const char *kDisplayEncodeMaterial = "Jahshaka/DisplayEncode";
 /// THE ATOM VIEW (D0-ATOM-VIEW): the id pass's depth, copied right after it (its
 /// PASS_DEPTHCOPY carries kAtomViewExecutionBit — it runs only while the view is
 /// on). The view's quad paints only where the scene's FINAL depth still equals this
@@ -555,6 +563,18 @@ Ogre::CompositorPassQuadDef *addTonemapQuad(Ogre::CompositorNodeDef *n, const ch
     return q;
 }
 
+/// THE UNGRADED DISPLAY ENCODE, in one place (SRGB-ENCODE-1): a linear scene
+/// texture onto a display target through the exact sRGB OETF. The graded twin
+/// of this is addTonemapQuad (the encode is at the end of that shader); between
+/// them every picture a person looks at is encoded exactly once.
+Ogre::CompositorPassQuadDef *addDisplayEncodeQuad(Ogre::CompositorNodeDef *n, const char *target,
+                                                  const char *sceneTex, const char *profilingId) {
+    auto *q = addQuad(n, target, kDisplayEncodeMaterial, profilingId);
+    q->addQuadTextureSource(0, sceneTex);
+    q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+    return q;
+}
+
 /// DOES THIS CHAIN SHAPE CARRY THE SCREEN-SPACE MARCH? One predicate, read by
 /// `build` (which passes and textures exist) and by the per-frame update (whose
 /// material parameters to push) — two answers that must never disagree, and did
@@ -622,6 +642,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            // it used to rebuild the whole workspace, dropping every history.
            a.prepass() == b.prepass() &&
            a.refractions == b.refractions && a.hdrReadback == b.hdrReadback &&
+           a.displayEncode == b.displayEncode &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
@@ -933,7 +954,9 @@ Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, co
     {
         // The layer and its depth: local textures at the target's size, so the two
         // attach together (a render WINDOW takes no manually specified depth).
-        addTex(n, kPhotonColour, Ogre::PFG_RGBA8_UNORM);
+        // Float under the display encode (SRGB-ENCODE-1): the layer is radiance the
+        // composite encodes, and an 8-bit linear copy would band its darks.
+        addTex(n, kPhotonColour, desc.displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         if (!desc.atomDraw) {
             auto *td = addTex(n, kPhotonDepth, Ogre::PFG_D32_FLOAT);
             td->preferDepthTexture = true;
@@ -1007,7 +1030,9 @@ Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, co
         if (desc.letterbox) scissor(handles, q, /*clear=*/false);
         return q;
     };
-    composite(kPhotonLayerMaterial, kPhotonSceneExecutionBit, "Jahshaka photon layer")
+    // The layer is LIGHT: encoded on a display picture, linear in the Plain instrument's.
+    composite(desc.displayEncode ? kPhotonLayerMaterial : kPhotonLayerLinearMaterial,
+              kPhotonSceneExecutionBit, "Jahshaka photon layer")
         ->addQuadTextureSource(0, kPhotonColour);
     composite(kPhotonOverlayMaterial, kPhotonOverlayExecutionBit, "Jahshaka photon overlay");
     return scene;
@@ -1281,13 +1306,28 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // every offscreen view still has. Bit-identical to createBasicWorkspaceDef.
     if (!desc.anyEffect()) {
         n->setNumLocalTextureDefinitions((desc.letterbox ? 1u : 0u) + (desc.atomDraw ? 4u : 0u) +
-                                         (desc.atomOcclusion ? 1u : 0u));
+                                         (desc.atomOcclusion ? 1u : 0u) +
+                                         (desc.displayEncode ? 1u : 0u));
+        // THE DISPLAY ENCODE (kPassScene): the scene renders LINEAR into a float
+        // copy of the target and one quad encodes it onto the target; the atom
+        // view and the overlays then draw on the encoded picture, as they do
+        // after the post chain. Without it (the Plain instrument) the scene
+        // renders straight into the target, as it always has.
+        const char *sceneColour = desc.displayEncode ? kPassScene : kTargetChannel;
+        if (desc.displayEncode) {
+            auto *td = addTex(n, kPassScene, Ogre::PFG_RGBA16_FLOAT);
+            td->fsaa = "";                 // the target's own sample count, resolved implicitly
+            td->depthBufferId = 1u;        // the scene needs depth (unless the RTV below names one)
+            syncRtvDepth(n, kPassScene, td);
+        }
         if (desc.letterbox) {
             // Bars first, background inside them; the scene passes below then
             // LOAD colour instead of clearing it (a clear is full-target and
             // would wipe the bars) and confine themselves to the inner rect.
-            addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
-            addLetterboxPrologue(n, desc, kTargetChannel, handlesOut);
+            // Float under the display encode (SRGB-ENCODE-1): the swatch is the
+            // LINEAR background the encode reads; 8-bit linear quantises its darks.
+            addTex(n, kLetterboxFill, desc.displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+            addLetterboxPrologue(n, desc, sceneColour, handlesOut);
         }
         // THE VISIBILITY BUFFER IN THE PASSTHROUGH SHAPE: the id pass needs a depth
         // it can hand the scene pass, so the target gets a NAMED depth through an
@@ -1298,7 +1338,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             addAtomIdTargets(n);
             Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kPassthroughRtv);
             Ogre::RenderTargetViewEntry colour0;
-            colour0.textureName = kTargetChannel;
+            colour0.textureName = sceneColour;
             rtv->colourAttachments.push_back(colour0);
             rtv->depthAttachment.textureName = kDepth;
             rtv->stencilAttachment.textureName = kDepth;
@@ -1311,11 +1351,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         Ogre::CompositorPassSceneDef *decode =
             desc.atomDraw ? addAtomDecodePass(n, kPassthroughRtv, true, false, "Jahshaka atom decode") : nullptr;
         Ogre::CompositorTargetDef *t =
-            n->addTargetPass(desc.atomDraw ? kPassthroughRtv : kTargetChannel);
+            n->addTargetPass(desc.atomDraw ? kPassthroughRtv : sceneColour);
         // With the id pass the opaque pass and the overlay pass are two TARGET
         // passes on the same RTV, the Atom view's quad between them on the colour
         // alone (it samples this depth, which it therefore cannot have attached).
-        t->setNumPasses(desc.atomDraw ? 1 : 2);
+        // With the display encode the overlays are on the TARGET, after the quad.
+        t->setNumPasses(desc.atomDraw || desc.displayEncode ? 1 : 2);
         {
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
             p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
@@ -1353,8 +1394,18 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // the one that samples a planar reflection, so the one that renders it.
             p->mIdentifier = planar::kPlanarUpdatePassIdentifier;
             if (decode) finishAtomDecodePass(handlesOut, decode, p);
+            // The LAST pass on kPassScene: it resolves (at 1x, the same as Store).
+            if (desc.displayEncode) p->mStoreActionColour[0] = kMultiWorkspaceStore;
         }
-        if (desc.atomDraw) {
+        if (desc.displayEncode) {
+            // THE ONE ENCODE of the ungraded picture (ChainDesc::displayEncode).
+            // Full target: the letterbox bars are in kPassScene too (black
+            // encodes to black), so nothing needs a scissor.
+            addDisplayEncodeQuad(n, kTargetChannel, kPassScene, "Jahshaka display encode");
+            if (desc.atomDraw) addAtomViewPass(n, desc, handlesOut);
+            t = n->addTargetPass(kTargetChannel);
+            t->setNumPasses(1);
+        } else if (desc.atomDraw) {
             addAtomViewPass(n, desc, handlesOut);
             t = n->addTargetPass(kPassthroughRtv);
             t->setNumPasses(1);
@@ -1437,7 +1488,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
     n->setNumLocalTextureDefinitions(33);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two + the march's velocity
-    if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+    // Float under the display encode, as in the passthrough shape (SRGB-ENCODE-1).
+    if (desc.letterbox)
+        addTex(n, kLetterboxFill, desc.displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
     // once here because half the shape below reads it.
@@ -1481,7 +1534,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // The scene target. RGBA16_FLOAT whenever HDR is on — that is the whole
     // point: light values above 1.0 survive to the tonemapper. Without HDR the
     // chain still needs an offscreen colour target (SSAO/SMAA/SSR/refraction
-    // all composite), and it stays RGBA8_UNORM so colours do not move.
+    // all composite); it is RGBA8_UNORM only for the Plain instrument (no
+    // display encode, below), whose linear bytes are its contract.
     //
     // ...UNLESS THE VIEW ASKED TO READ ITS RADIANCE (HDR-READBACK-1). Then every
     // texture that carries the SCENE RESULT — this one, the refraction clone,
@@ -1491,7 +1545,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // the tonemap with it) still writes the 8-bit target, and `readPixels`
     // still reads that. No pass is added: the radiance target IS this chain's
     // own scene target (ChainHandles::radianceTexture).
-    const bool floatScene = desc.hdr || desc.hdrReadback;
+    // ...AND WHENEVER THE PICTURE IS DISPLAY-ENCODED (SRGB-ENCODE-1): the
+    // ungraded composite encodes LINEAR values, and an 8-bit linear target
+    // would band in the darks after the encode (code 1 linear = code 13
+    // encoded). The Plain instrument's post shape (refraction, the radiance
+    // readback) keeps what it had.
+    const bool floatScene = desc.hdr || desc.hdrReadback || desc.displayEncode;
     {
         auto *td = addTex(n, kRt0, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         td->depthBufferId = 1u;                      // the scene needs depth
@@ -2471,7 +2530,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         Ogre::CompositorPassQuadDef *q = nullptr;
         if (desc.hdr) {
             q = addTonemapQuad(n, ldrTarget, sceneResult, kLum, kBlur0);
+        } else if (desc.displayEncode) {
+            // THE UNGRADED PICTURE, ENCODED ONCE (ChainDesc::displayEncode).
+            q = addDisplayEncodeQuad(n, ldrTarget, sceneResult, "Jahshaka composite");
         } else {
+            // The Plain instrument: linear radiance, copied as it is.
             q = addQuad(n, ldrTarget, "Ogre/Copy/4xFP32", "Jahshaka composite");
             q->addQuadTextureSource(0, sceneResult);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
@@ -2641,7 +2704,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 // there; this chain has no letterbox, no inset and no helpers because it has no
 // picture for them to be part of.
 void buildBlank(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
-                const Colour &background, bool overlays,
+                const Colour &background, bool overlays, bool displayEncode,
                 std::vector<std::string> &nodeDefsOut) {
     const std::string nodeName = workspaceDef + "/Blank";
     Ogre::CompositorNodeDef *n = cm->addNodeDefinition(nodeName);
@@ -2652,7 +2715,9 @@ void buildBlank(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     t->setNumPasses(2);
     {
         auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
-        c->setAllClearColours(toOgre(background));
+        // The background is a LINEAR colour: a display view shows its encoding,
+        // which is what the scene chain's encode quad writes for the same clear.
+        c->setAllClearColours(toOgre(displayEncode ? srgbEncode(background) : background));
         c->setAllLoadActions(Ogre::LoadAction::Clear);
         // Store, not StoreOrResolve: the overlay pass below still has to render
         // into these samples (the note on kMultiWorkspaceStore).
@@ -2998,7 +3063,7 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 // main view's store/load semantics changes — the inset still only ever LOADs
 // the window and never clears it.
 void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDesc &pip,
-              float texWidthFactor, float texHeightFactor,
+              float texWidthFactor, float texHeightFactor, bool displayEncode,
               std::vector<std::string> &nodeDefsOut, PipHandles &handlesOut) {
     Ogre::CompositorManager2 *cm = root->getCompositorManager2();
     handlesOut = PipHandles();
@@ -3014,7 +3079,9 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
     // views use, which is also what makes the copy land on the same value a
     // clear would write: both carry the linear value the caller asked for, and
     // an sRGB window encodes both of them identically on the way in.
-    addTex(n, kPipFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+    // Float under the display encode: the swatch is a LINEAR colour the encode
+    // quad reads, and an 8-bit linear copy would quantise a dark background.
+    addTex(n, kPipFill, displayEncode && !graded ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM, 4u, 4u);
     {
         // THE INSET'S SCENE TARGET. Sized by FRACTION of the view's target, and
         // the fraction is the INNER rect's — the composite quad stretches this
@@ -3024,7 +3091,7 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
         // target resize: a window drag moves the inset for free, and only a
         // change to the RECT's size re-creates anything (OgreView::applyPip).
         auto *td = addTex(n, kPipScene,
-                          graded ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM,
+                          graded || displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM,
                           0u, 0u, texWidthFactor, texHeightFactor);
         td->depthBufferId = 1u;          // the inset's OWN depth: a scene pass needs one
         td->fsaa = "1";                  // the inset is composited, never resolved
@@ -3107,6 +3174,9 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
             Ogre::CompositorPassQuadDef *q;
             if (graded) {
                 q = addTonemapQuad(n, kTargetChannel, source, kPipLum, kPipBloom);
+            } else if (displayEncode) {
+                // Ungraded on a display view: the one encode (SRGB-ENCODE-1).
+                q = addDisplayEncodeQuad(n, kTargetChannel, source, profilingId);
             } else {
                 q = addQuad(n, kTargetChannel, "Ogre/Copy/4xFP32", profilingId);
                 q->addQuadTextureSource(0, source);

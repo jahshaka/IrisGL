@@ -199,8 +199,11 @@ ChainDesc OgreView::chainDesc() const {
         d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
         d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
         finishAtomOcclusion(d);
-        return d;
+        return d;   // displayEncode stays false: the Plain instrument (ChainDesc::displayEncode)
     }
+    // A PICTURE SOMEBODY LOOKS AT (ChainDesc::displayEncode): on screen, or an
+    // offscreen view that opted into the post chain.
+    d.displayEncode  = true;
     d.hdr            = mPostFx.hdr;
     d.tonemapFixed   = mPostFx.tonemapFixed;
     d.exposure       = mPostFx.exposure;
@@ -472,11 +475,12 @@ void OgreView::syncPip() {
             // camera and a window resize all leave this alone.
             pipTexFactors(mPipTexWidthFactor, mPipTexHeightFactor);
             mPipTexTonemap = pipTonemapEffective();
+            mPipTexEncode = chainDesc().displayEncode;
             mPipTargetW = width(); mPipTargetH = height();
             ViewPipDesc built = mPip;
             built.tonemap = mPipTexTonemap;
             chain::buildPip(mRoot, mPipWorkspaceDef, built, mPipTexWidthFactor,
-                            mPipTexHeightFactor, mPipNodeDefs, mPipHandles);
+                            mPipTexHeightFactor, mPipTexEncode, mPipNodeDefs, mPipHandles);
         }
         if (!mPipCamera) {
             // POOLED, and created with isVisible = false: an idle camera costs
@@ -591,7 +595,8 @@ void OgreView::applyPip() {
             texPixels(mPipTexWidthFactor, tw)  != texPixels(std::max(0.001f, inner[2]), tw) ||
             texPixels(mPipTexHeightFactor, th) != texPixels(std::max(0.001f, inner[3]), th) ||
             mPipTargetW != tw || mPipTargetH != th ||
-            mPipTexTonemap != pipTonemapEffective();
+            mPipTexTonemap != pipTonemapEffective() ||
+            mPipTexEncode != chainDesc().displayEncode;
         if (sizeMoved) {
             destroyPip();
             syncPip();
@@ -1084,7 +1089,7 @@ bool OgreView::attachBlankWorkspace() {
         // for a scene-less view as well.
         chain::destroy(mRoot->getCompositorManager2(), mBlankWorkspaceDef, mBlankNodeDefs);
         chain::buildBlank(mRoot->getCompositorManager2(), mBlankWorkspaceDef, mBackground,
-                          overlaysAllowed(), mBlankNodeDefs);
+                          overlaysAllowed(), chainDesc().displayEncode, mBlankNodeDefs);
         mBlankWorkspace = mRoot->getCompositorManager2()->addWorkspace(
             sm, t, mBlankCamera, mBlankWorkspaceDef, mEnabled);
         return mBlankWorkspace != nullptr;
