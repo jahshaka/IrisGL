@@ -54,6 +54,9 @@ void main()
 	// display-referred image, where mid grey is the middle of the range.
 	c = ( c - vec3( 0.5 ) ) * contrast + vec3( 0.5 );
 
+	// The tint and the vignette below multiply DISPLAY values by design (the looks run on the
+	// sRGB-encoded picture since SRGB-ENCODE-1): a grade is a picture operation, so a tint of t
+	// is a factor of t on the display code, about t^2.2 in light.
 	c *= tint;
 
 	// Vignette: a quadratic falloff from the centre, normalised so the corner
