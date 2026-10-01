@@ -585,6 +585,13 @@ public:
     /// The two proxy nodes — left hand, right hand — or 0 where none has been
     /// created. For the suite that asserts which channels they are in.
     void vrProxyNodes(jahshaka::engine::NodeId out[2]) const;
+    /// WHAT A HAND'S PROXY NODE IS WEARING NOW (SHIPPED-BAKES-1): `model` when
+    /// the attached mesh is the controller model built from the BAKED seed row
+    /// (`key` its seed key, `triangles` the triangles uploaded from the bake),
+    /// false for the wand or no proxy at all. The suite reads it through
+    /// `vr.proxyPose` to prove the baked controller is what is drawn.
+    struct VrProxyDrawn { bool model = false; QString key; int triangles = 0; };
+    VrProxyDrawn vrProxyDrawn(int hand) const;
     /// The ray's two nodes — the line, then the hit marker — or 0 before they
     /// exist. Placed by the running session (Scene::setVrRayNodes).
     void vrRayNodes(jahshaka::engine::NodeId out[2]) const;
@@ -623,16 +630,19 @@ public:
     /// (2026-09-17 answer 6: "the controller/hand models are a slot games can
     /// fill later").
     ///
-    /// Defaults to the vendored Meta Quest Touch Pro pair in the app's
-    /// resources (`:/content/vr/meta-quest-touch-pro/{left,right}.obj`,
-    /// MIT — app/content/vr/PROVENANCE.md), loaded LAZILY the first frame the
+    /// Defaults to the vendored Meta Quest Touch Pro pair
+    /// (`:/content/vr/meta-quest-touch-pro/{left,right}.obj`, MIT —
+    /// app/content/vr/PROVENANCE.md), BAKED seed rows read through the host's
+    /// shipped-mesh resolver (document/assets/shippedmeshes.h) — never parsed
+    /// here — and fetched LAZILY the first frame the
     /// runtime says the wearer is holding a Touch controller and never loaded
     /// at all otherwise. Every other profile — the simple controller, WMR,
     /// bare hands, nothing bound — gets the hand-made WAND, which is the
     /// honest drawing when we do not know what is in the wearer's hand.
     ///
-    /// A path this can open may be a qrc path or a file; an empty pair turns
-    /// the models off and leaves the wands. Set it before a session starts.
+    /// Each path is a SEED KEY the resolver knows (a key it does not know
+    /// leaves that hand's wand); an empty pair turns the models off and leaves
+    /// the wands. Set it before a session starts.
     void setVrProxyModels(const QString &leftPath, const QString &rightPath);
 
     /// HIDE THE TEMPLATE FLOORS in the views of whoever asked — PLAYER-FLOOR-1, the project setting
@@ -1764,6 +1774,7 @@ private:
     jahshaka::engine::MeshId mVrProxyModelMesh[2] = { 0, 0 };
     jahshaka::engine::MaterialId mVrProxyModelMaterial = 0;
     bool mVrProxyModelTried[2] = { false, false };
+    int mVrProxyModelTriangles[2] = { 0, 0 };
     QString mVrProxyModelPath[2] = {
         QStringLiteral(":/content/vr/meta-quest-touch-pro/left.obj"),
         QStringLiteral(":/content/vr/meta-quest-touch-pro/right.obj") };
