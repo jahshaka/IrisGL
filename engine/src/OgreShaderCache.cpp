@@ -380,6 +380,13 @@ void ShaderCache::configure(const std::string &dir, const std::string &appBuildI
       << "|ogre=" << JAHSHAKA_OGRE_FORK_COMMIT
       // Belt and braces over the staged templates (see hashTree).
       << "|media=" << hashTree(mMediaDir + "Hlms")
+      // PHOTON'S OWN MEDIA BY ITS OWN CONTENT (OWN-GI-1, audit K11): the voxel and
+      // field compute jobs and their PBS pieces live in irisgl (media/Photon), so an
+      // edit to them is an irisgl edit that moves neither the fork commit above nor
+      // any Ogre-side hash of a compute job — without this term the old microcode
+      // would load. Hashed like the templates: a change to any staged byte under
+      // Photon/ is a new cache.
+      << "|photon=" << hashTree(mMediaDir + "Photon")
       // Ogre rejects a cache across these three anyway; failing here is faster
       // and, for the microcode file (which has NO version field at all), it is
       // the only check that exists.
