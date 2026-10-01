@@ -26,14 +26,30 @@ fragment_program Jahshaka/PhotonOverlay_ps unified
 {
 	delegate Jahshaka/PhotonOverlay_ps_VK
 }
+// THE LAYER IS LIGHT (SRGB-ENCODE-1): the voxels, probes and cards it shows are
+// radiance, so on a display picture the layer is ENCODED like the picture under
+// it (PHOTON_ENCODE, Jahshaka/PhotonLayer); the Plain instrument's chain takes
+// Jahshaka/PhotonLayerLinear and stays linear. The overlay is not light: its
+// discs and hit classes are display colours and composite as they are.
 fragment_program Jahshaka/PhotonLayer_ps_VK glslvk
 {
 	source JahPhotonView_ps.glsl
-	preprocessor_defines PHOTON_COVERAGE=1
+	enable_include_header true
+	preprocessor_defines PHOTON_COVERAGE=1,PHOTON_ENCODE=1
 }
 fragment_program Jahshaka/PhotonLayer_ps unified
 {
 	delegate Jahshaka/PhotonLayer_ps_VK
+}
+fragment_program Jahshaka/PhotonLayerLinear_ps_VK glslvk
+{
+	source JahPhotonView_ps.glsl
+	enable_include_header true
+	preprocessor_defines PHOTON_COVERAGE=1
+}
+fragment_program Jahshaka/PhotonLayerLinear_ps unified
+{
+	delegate Jahshaka/PhotonLayerLinear_ps_VK
 }
 
 material Jahshaka/PhotonOverlay
@@ -80,6 +96,34 @@ material Jahshaka/PhotonLayer
 			}
 
 			fragment_program_ref Jahshaka/PhotonLayer_ps
+			{
+			}
+
+			texture_unit photonLayer
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+		}
+	}
+}
+
+material Jahshaka/PhotonLayerLinear
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+			scene_blend alpha_blend
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/PhotonLayerLinear_ps
 			{
 			}
 

@@ -889,7 +889,8 @@ constexpr Ogre::uint8 kPhotonExecutionBits = kPhotonSceneExecutionBit | kPhotonO
                                              kPhotonDepthCopyBit | kPhotonDepthClearBit;
 /// The two composites' materials (engine media, Hlms/Jahshaka/JahPhotonView.material):
 /// the scene pass' layer, and the tier's overlay.
-constexpr const char *kPhotonLayerMaterial   = "Jahshaka/PhotonLayer";
+constexpr const char *kPhotonLayerMaterial   = "Jahshaka/PhotonLayer";         ///< display-encoded (SRGB-ENCODE-1)
+constexpr const char *kPhotonLayerLinearMaterial = "Jahshaka/PhotonLayerLinear"; ///< the Plain instrument's
 constexpr const char *kPhotonOverlayMaterial = "Jahshaka/PhotonOverlay";
 /// The cards' quads' material (the same file).
 constexpr const char *kPhotonCardsMaterial = "Jahshaka/PhotonCards";

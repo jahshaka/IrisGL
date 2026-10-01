@@ -954,7 +954,9 @@ Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, co
     {
         // The layer and its depth: local textures at the target's size, so the two
         // attach together (a render WINDOW takes no manually specified depth).
-        addTex(n, kPhotonColour, Ogre::PFG_RGBA8_UNORM);
+        // Float under the display encode (SRGB-ENCODE-1): the layer is radiance the
+        // composite encodes, and an 8-bit linear copy would band its darks.
+        addTex(n, kPhotonColour, desc.displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         if (!desc.atomDraw) {
             auto *td = addTex(n, kPhotonDepth, Ogre::PFG_D32_FLOAT);
             td->preferDepthTexture = true;
@@ -1028,7 +1030,9 @@ Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, co
         if (desc.letterbox) scissor(handles, q, /*clear=*/false);
         return q;
     };
-    composite(kPhotonLayerMaterial, kPhotonSceneExecutionBit, "Jahshaka photon layer")
+    // The layer is LIGHT: encoded on a display picture, linear in the Plain instrument's.
+    composite(desc.displayEncode ? kPhotonLayerMaterial : kPhotonLayerLinearMaterial,
+              kPhotonSceneExecutionBit, "Jahshaka photon layer")
         ->addQuadTextureSource(0, kPhotonColour);
     composite(kPhotonOverlayMaterial, kPhotonOverlayExecutionBit, "Jahshaka photon overlay");
     return scene;
