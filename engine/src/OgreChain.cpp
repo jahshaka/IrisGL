@@ -1324,7 +1324,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // Bars first, background inside them; the scene passes below then
             // LOAD colour instead of clearing it (a clear is full-target and
             // would wipe the bars) and confine themselves to the inner rect.
-            addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+            // Float under the display encode (SRGB-ENCODE-1): the swatch is the
+            // LINEAR background the encode reads; 8-bit linear quantises its darks.
+            addTex(n, kLetterboxFill, desc.displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM, 4u, 4u);
             addLetterboxPrologue(n, desc, sceneColour, handlesOut);
         }
         // THE VISIBILITY BUFFER IN THE PASSTHROUGH SHAPE: the id pass needs a depth
@@ -1486,7 +1488,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
     n->setNumLocalTextureDefinitions(33);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two + the march's velocity
-    if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+    // Float under the display encode, as in the passthrough shape (SRGB-ENCODE-1).
+    if (desc.letterbox)
+        addTex(n, kLetterboxFill, desc.displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
     // once here because half the shape below reads it.
