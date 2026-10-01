@@ -52,12 +52,17 @@
 		#define ATOM_NOTE( k ) if( atomCode == 0u && !atomOk ) atomCode = k;
 		float3 atomCodeColour( uint code )
 		{
-			// base 3 of code + 1, one digit a channel: never black (the clear).
+			// base 3 of code + 1, one digit a channel: never black (the clear). The
+			// two lit levels sit inside the film's straight part at the default
+			// exposure (IMAGE-1: Unreal's film desaturates a channel driven far into
+			// its shoulder toward its neighbours, so 16 merged codes after the grade),
+			// and the low level differs per channel so no code is a GREY a lit
+			// surface could also be (code 12 is all three low digits).
 			uint v = code + 1u;
 			float3 lv = float3( float( v % 3u ), float( ( v / 3u ) % 3u ), float( ( v / 9u ) % 3u ) );
-			return float3( lv.x == 0.0 ? 0.0 : ( lv.x == 1.0 ? 0.3 : 16.0 ),
-						   lv.y == 0.0 ? 0.0 : ( lv.y == 1.0 ? 0.3 : 16.0 ),
-						   lv.z == 0.0 ? 0.0 : ( lv.z == 1.0 ? 0.3 : 16.0 ) );
+			return float3( lv.x == 0.0 ? 0.0 : ( lv.x == 1.0 ? 0.15 : 0.6 ),
+						   lv.y == 0.0 ? 0.0 : ( lv.y == 1.0 ? 0.04 : 0.6 ),
+						   lv.z == 0.0 ? 0.0 : ( lv.z == 1.0 ? 0.3 : 0.6 ) );
 		}
 	@else
 		#define ATOM_NOTE( k )
