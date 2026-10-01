@@ -246,6 +246,7 @@ set(SRCS
     document/scenegraph/cameranode.cpp
     document/scenegraph/cameralens.cpp
     document/assets/livetextures.cpp
+    document/assets/shippedmeshes.cpp
     document/assets/texture2d.cpp
     document/materials/material.cpp
     core/geometry/trimesh.cpp
@@ -294,6 +295,7 @@ set (HEADERS
     document/scenegraph/lightnode.h
     document/scenegraph/decalnode.h
     document/assets/livetextures.h
+    document/assets/shippedmeshes.h
     document/assets/texture2d.h
     document/assets/texture.h
     document/scenegraph/shadowmap.h
@@ -431,7 +433,8 @@ endif()
 #       the VALUE of ImportFlags::Canonical, and producerId already hashes that
 #       value NUMERICALLY (`flags%4`). Hashing the files adds nothing the exact
 #       integer misses and would stale every library on a comment edit; the
-#       headers are ~90% prose. (ClipNamesOnly never reaches a bake at all.)
+#       headers are ~90% prose. (ClipNamesOnly reaches the CLIP bake the same
+#       way — as its exact integer in MeshBake::clipFingerprintFor.)
 #   import/graphicshelper.cpp — holds no conversion of its own: five thin
 #       wrappers around `new Mesh(aiMesh*)`, Mesh::extractSkeleton/
 #       extractAnimations and ReadFile(ImportFlags::…). MeshBake does its own

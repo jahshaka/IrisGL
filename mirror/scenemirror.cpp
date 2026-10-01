@@ -38,7 +38,7 @@
 #include "irisgl/document/assets/livetextures.h"
 #include "irisgl/document/assets/texture2d.h"
 #include "irisgl/document/scenegraph/shadowmap.h"
-#include "irisgl/import/graphicshelper.h"   // the VR controller models (phase 4b stage 1)
+#include "irisgl/document/assets/shippedmeshes.h"   // the VR controller models (SHIPPED-BAKES-1)
 #include <QFileInfo>
 #include <functional>
 #include <chrono>
@@ -2282,12 +2282,15 @@ void SceneMirror::setVrProxyModels(const QString &leftPath, const QString &right
 // THE VENDORED CONTROLLER MODEL, LOADED ONCE (phase 4b stage 1).
 //
 // ONE MESH, BAKED AT VENDORING. The upstream glTF places its six parts (body,
-// trigger, squeeze, thumbstick, two buttons) by NODE TRANSFORM, and this tree's
-// one assimp read site hands back `aiScene::mMeshes` with no node tree at all —
-// six parts loaded that way land on top of each other. So the transforms are
-// baked into ONE mesh at vendoring (app/content/vr/make-controller-obj.py) and
-// this is an ordinary model read, through the same choke point every other
-// model in the tree goes through.
+// trigger, squeeze, thumbstick, two buttons) by NODE TRANSFORM, so the
+// transforms are baked into ONE mesh at vendoring
+// (app/content/vr/make-controller-obj.py).
+//
+// AND BAKED AGAIN AT SEED (SHIPPED-BAKES-1): the pair are shipped meshes like
+// the primitives — seed rows the library bakes once (Studio's
+// src/data/primitives.h) — and the slot's paths are their SEED KEYS, resolved
+// through the host's shipped-mesh resolver (document/assets/shippedmeshes.h).
+// Nothing here parses: a key the host cannot resolve leaves the wand.
 //
 // NO TEXTURES, DELIBERATELY: unlit grey. A helper's material is the mirror's,
 // not the asset's, and a controller that lit the room or sampled an albedo map
@@ -2301,7 +2304,9 @@ jahshaka::engine::MeshId SceneMirror::vrProxyModelMesh(int hand)
     const QString path = mVrProxyModelPath[hand];
     if (path.isEmpty()) return 0;
 
-    const QList<iris::MeshPtr> parts = iris::GraphicsHelper::loadAllMeshesFromFile(path);
+    const iris::MeshPtr baked = iris::ShippedMeshes::mesh(path);
+    QList<iris::MeshPtr> parts;
+    if (baked) parts.append(baked);
     MeshData merged;
     for (const iris::MeshPtr &part : parts) {
         MeshData one;

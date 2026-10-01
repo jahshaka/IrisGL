@@ -52,14 +52,12 @@ struct Counts
     /// the binary, which no prewarm can hoist because the caller asks for it by
     /// name.
     ///
-    /// AN OPEN MAKES NONE since ATOM P2: the shipped primitives, the Ground and
-    /// the Teapot are baked library assets (jahshaka/src/services/
-    /// primitiveassets.h) read from the store like any imported model, and
-    /// `Mesh::loadMesh`, its weak cache and the pin over it are deleted. (Before
-    /// that a world that closed dropped its primitives and the next open
-    /// re-parsed them here: 1-4 parses and 17-95 ms per open of a shipped
-    /// sample.) What still lands on this counter is a preview dock's own
-    /// furniture, parsed once per process (jahshaka/src/bridge/previewmesh.h).
+    /// THE APP MAKES NONE since SHIPPED-BAKES-1: every mesh it ships — the
+    /// primitives, the samples' Ground and Teapot, the preview docks' subjects,
+    /// the VR controllers — is a baked seed row (jahshaka/src/data/
+    /// primitives.h) read through the store, and nothing parses one at run
+    /// time (`source.assimp_import_only`). What could still land here is a test
+    /// suite's fixture parse of a resource.
     int    mainThreadResourceParses = 0;
     double mainThreadResourceMs     = 0.0;
     int    workerParses     = 0;   ///< parses that ran on any other thread
@@ -78,10 +76,10 @@ struct Counts
     /// fall back to a parse", never as a model count.
     int bakeHits   = 0;
     int bakeMisses = 0;
-    /// Parses that BUILT A BAKE (an import's, a stale bake's rebuild — the
-    /// derived data being made, on a worker), counted apart from the parses
-    /// above: those are a model read in place of its bake, and since
-    /// FORWARD-ONLY-1 an open makes none. See BakeBuildScope.
+    /// Parses that BUILT A BAKE (an import's — a library seed's included — a
+    /// stale bake's rebuild: the derived data being made), counted apart from
+    /// the parses above: those are a model read in place of its bake, and
+    /// since SHIPPED-BAKES-1 the app makes none. See BakeBuildScope.
     int    bakeBuilds  = 0;
     double bakeBuildMs = 0.0;
     /// The last FILE parsed on the main thread — the one a failing assertion

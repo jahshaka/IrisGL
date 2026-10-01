@@ -623,16 +623,19 @@ public:
     /// (2026-09-17 answer 6: "the controller/hand models are a slot games can
     /// fill later").
     ///
-    /// Defaults to the vendored Meta Quest Touch Pro pair in the app's
-    /// resources (`:/content/vr/meta-quest-touch-pro/{left,right}.obj`,
-    /// MIT — app/content/vr/PROVENANCE.md), loaded LAZILY the first frame the
+    /// Defaults to the vendored Meta Quest Touch Pro pair
+    /// (`:/content/vr/meta-quest-touch-pro/{left,right}.obj`, MIT —
+    /// app/content/vr/PROVENANCE.md), BAKED seed rows read through the host's
+    /// shipped-mesh resolver (document/assets/shippedmeshes.h) — never parsed
+    /// here — and fetched LAZILY the first frame the
     /// runtime says the wearer is holding a Touch controller and never loaded
     /// at all otherwise. Every other profile — the simple controller, WMR,
     /// bare hands, nothing bound — gets the hand-made WAND, which is the
     /// honest drawing when we do not know what is in the wearer's hand.
     ///
-    /// A path this can open may be a qrc path or a file; an empty pair turns
-    /// the models off and leaves the wands. Set it before a session starts.
+    /// Each path is a SEED KEY the resolver knows (a key it does not know
+    /// leaves that hand's wand); an empty pair turns the models off and leaves
+    /// the wands. Set it before a session starts.
     void setVrProxyModels(const QString &leftPath, const QString &rightPath);
 
     /// HIDE THE TEMPLATE FLOORS in the views of whoever asked — PLAYER-FLOOR-1, the project setting

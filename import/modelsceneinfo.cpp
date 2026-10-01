@@ -190,6 +190,11 @@ ModelSceneInfo describe(const aiScene *scene)
 
 } // namespace
 
+ModelSceneInfo ModelSceneInfo::fromScene(const aiScene *scene)
+{
+    return describe(scene);
+}
+
 ModelSceneInfo ModelSceneInfo::fromSource(const SceneSource &source)
 {
     ModelSceneInfo out = describe(source.scene());
@@ -265,18 +270,6 @@ ModelPreRead ModelPreRead::read(const QString &filePath, const QString &formatHi
             clipNameFor(QString::fromUtf8(anim->mName.C_Str()), i, out.clipNames));
     }
     return out;
-}
-
-ModelSceneInfo ModelSceneInfo::read(const QString &filePath, const ImportTransform &xf)
-{
-    SceneSource source;
-    if (!source.read(filePath, xf)) {
-        ModelSceneInfo out;
-        out.error = source.errorString();
-        if (out.error.isEmpty()) out.error = QStringLiteral("the file could not be read");
-        return out;
-    }
-    return fromSource(source);
 }
 
 QString ModelSceneInfo::importerVersion()

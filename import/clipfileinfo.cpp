@@ -104,15 +104,30 @@ void listHierarchy(const aiNode *node, int parent, ClipFileInfo &out)
 
 ClipFileInfo ClipFileInfo::read(const QString &filePath, const QVector<double> &poseFractions)
 {
-    ClipFileInfo out;
     Assimp::Importer importer;
     // Through the choke point with an IDENTITY transform, deliberately: this
     // read is names, counts and key TIMES for the metadata block, never
     // geometry that has to agree with a bake (import/scenesource.h).
     const aiScene *scene = readSceneFile(importer, filePath, ImportFlags::ClipNamesOnly);
     if (!scene) {
+        ClipFileInfo out;
         out.error = QString::fromUtf8(importer.GetErrorString());
         if (out.error.isEmpty()) out.error = QStringLiteral("the file could not be read");
+        return out;
+    }
+    return fromScene(scene, poseFractions);
+}
+
+QVector<double> ClipFileInfo::stripFractions()
+{
+    return { 0.1, 0.5, 0.9 };
+}
+
+ClipFileInfo ClipFileInfo::fromScene(const aiScene *scene, const QVector<double> &poseFractions)
+{
+    ClipFileInfo out;
+    if (!scene) {
+        out.error = QStringLiteral("the file could not be read");
         return out;
     }
     out.parsed = true;

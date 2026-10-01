@@ -28,45 +28,17 @@ namespace iris
 class GraphicsHelper
 {
 public:
-    /**
-     * Loads all meshes from mesh file
-     * Useful for loading a mesh file containing multiple meshes
-     * Caller is responsible for releasing returned Mesh pointers
-     * @param filePath
-     * @return
-     */
+    /// Every mesh of a model file, PARSED (the canonical preset, through the
+    /// choke point). NOT A RUN-TIME CALL (SHIPPED-BAKES-1): the app reads every
+    /// mesh it draws from a bake, and `source.assimp_import_only` refuses this
+    /// outside the import pipeline. What is left calling it is the test suites'
+    /// fixture parse (tests/support/testmesh.h) — geometry for a node in a
+    /// suite with no library behind it.
     static QList<MeshPtr> loadAllMeshesFromFile(QString filePath,
                                                 const ImportTransform &xf = ImportTransform());
 
-    /// `xf` is the ASSET's import transform (import/importsettings.h) — the
-    /// scale, rotation and origin its settings baked in. Identity for a raw
-    /// path with no library row behind it.
-    static void loadAllMeshesAndAnimationsFromFile(QString filePath,
-                                                   QList<MeshPtr> &meshes,
-                                                   QMap<QString, SkeletalAnimationPtr> &animations,
-                                                   const ImportTransform &xf = ImportTransform());
-
     /// IrisGL-internal (a complete aiScene needs assimp's headers).
     static QList<MeshPtr> loadAllMeshesFromAssimpScene(const aiScene* scene);
-
-    /**
-     * Reads a file for its animation CLIPS only (ImportFlags::ClipNamesOnly —
-     * no geometry post-processing, the file's unit factor still applied so the
-     * translation keys match a character parsed with the canonical preset).
-     * Returns the clips uniquified the way Mesh::extractAnimations uniquifies
-     * them. An unreadable file returns an empty map and sets *error (never
-     * empty); a readable file with no animation returns an empty map and an
-     * empty *error. Studio's clip readers go through here so that assimp stays
-     * an irisgl-private import dependency.
-     *
-     * `xf` is the RIG's import transform, not the clip file's own: the keys
-     * have to land on a skeleton that was baked under the character asset's
-     * import settings.
-     */
-    static QMap<QString, SkeletalAnimationPtr> loadAnimationsFromClipFile(const QString &filePath,
-                                                                          QString *error = nullptr,
-                                                                          const ImportTransform &xf
-                                                                              = ImportTransform());
 };
 
 }
