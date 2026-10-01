@@ -585,6 +585,13 @@ public:
     /// The two proxy nodes — left hand, right hand — or 0 where none has been
     /// created. For the suite that asserts which channels they are in.
     void vrProxyNodes(jahshaka::engine::NodeId out[2]) const;
+    /// WHAT A HAND'S PROXY NODE IS WEARING NOW (SHIPPED-BAKES-1): `model` when
+    /// the attached mesh is the controller model built from the BAKED seed row
+    /// (`key` its seed key, `triangles` the triangles uploaded from the bake),
+    /// false for the wand or no proxy at all. The suite reads it through
+    /// `vr.proxyPose` to prove the baked controller is what is drawn.
+    struct VrProxyDrawn { bool model = false; QString key; int triangles = 0; };
+    VrProxyDrawn vrProxyDrawn(int hand) const;
     /// The ray's two nodes — the line, then the hit marker — or 0 before they
     /// exist. Placed by the running session (Scene::setVrRayNodes).
     void vrRayNodes(jahshaka::engine::NodeId out[2]) const;
@@ -1767,6 +1774,7 @@ private:
     jahshaka::engine::MeshId mVrProxyModelMesh[2] = { 0, 0 };
     jahshaka::engine::MaterialId mVrProxyModelMaterial = 0;
     bool mVrProxyModelTried[2] = { false, false };
+    int mVrProxyModelTriangles[2] = { 0, 0 };
     QString mVrProxyModelPath[2] = {
         QStringLiteral(":/content/vr/meta-quest-touch-pro/left.obj"),
         QStringLiteral(":/content/vr/meta-quest-touch-pro/right.obj") };

@@ -5825,6 +5825,17 @@ QByteArray MeshBake::serialize(const Model &model)
     QDataStream s(&blob, QIODevice::WriteOnly);
     configure(s);
     s << quint32(kMagic) << qint32(kFormatVersion) << model.fingerprint;
+    // THE DESCRIBE BLOCK IN THE HEADER (SHIPPED-BAKES-1): the facts of the
+    // import's parse, as one length-prefixed blob right after the key, so the
+    // metadata backfill (readDescribe) reads them and stops — no geometry, no
+    // LOD chain, no cards, no field is ever deserialized to describe a model.
+    {
+        QByteArray facts;
+        QDataStream d(&facts, QIODevice::WriteOnly);
+        configure(d);
+        writeDescribe(d, model.describe);
+        s << facts;
+    }
     s << qint32(model.singleMesh ? 1 : 0);
 
     s << qint32(model.meshes.size());
@@ -5835,7 +5846,6 @@ QByteArray MeshBake::serialize(const Model &model)
 
     writeAnimations(s, model.animations);
     writeNode(s, model.root);
-    writeDescribe(s, model.describe);
     // A trailing sentinel: a truncated blob that happens to parse this far
     // still fails, and the reader never has to trust "no error so far".
     s << quint32(kMagic);
@@ -5880,6 +5890,14 @@ MeshBake::Model MeshBake::deserialize(const QByteArray &blob, const QString &exp
     s >> model.fingerprint;
     if (s.status() != QDataStream::Ok) return Model();
     if (!expectFingerprint.isEmpty() && model.fingerprint != expectFingerprint) return Model();
+    {
+        QByteArray facts;
+        s >> facts;
+        if (s.status() != QDataStream::Ok) return Model();
+        QDataStream d(facts);
+        configure(d);
+        if (!::iris::readDescribe(d, model.describe)) return Model();
+    }
 
     qint32 singleMesh = 0, meshCount = 0;
     s >> singleMesh >> meshCount;
@@ -5903,7 +5921,6 @@ MeshBake::Model MeshBake::deserialize(const QByteArray &blob, const QString &exp
 
     if (!readAnimations(s, QString(), model.animations)) return Model();
     if (!readNode(s, model.root, 0)) return Model();
-    if (!readDescribe(s, model.describe)) return Model();
 
     quint32 tail = 0;
     s >> tail;
@@ -5911,6 +5928,35 @@ MeshBake::Model MeshBake::deserialize(const QByteArray &blob, const QString &exp
 
     model.valid = true;
     return model;
+}
+
+bool MeshBake::readDescribe(const QString &path, ModelSceneInfo *out,
+                            const QString &expectFingerprint)
+{
+    if (path.isEmpty() || !out) return false;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    // SEQUENTIAL off the file: the header's magic, version, key and the facts
+    // blob, then the read stops — the geometry behind it is never touched.
+    QDataStream s(&file);
+    configure(s);
+    quint32 magic = 0;
+    qint32 version = 0;
+    QString fingerprint;
+    s >> magic >> version;
+    if (magic != kMagic || version != kFormatVersion) return false;
+    s >> fingerprint;
+    if (s.status() != QDataStream::Ok) return false;
+    if (!expectFingerprint.isEmpty() && fingerprint != expectFingerprint) return false;
+    QByteArray facts;
+    s >> facts;
+    if (s.status() != QDataStream::Ok) return false;
+    QDataStream d(facts);
+    configure(d);
+    ModelSceneInfo info;
+    if (!::iris::readDescribe(d, info) || !info.parsed) return false;
+    *out = info;
+    return true;
 }
 
 MeshBake::Model MeshBake::read(const QString &path, const QString &expectFingerprint)

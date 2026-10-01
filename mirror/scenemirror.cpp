@@ -2304,33 +2304,30 @@ jahshaka::engine::MeshId SceneMirror::vrProxyModelMesh(int hand)
     const QString path = mVrProxyModelPath[hand];
     if (path.isEmpty()) return 0;
 
+    // ONE baked mesh (the vendoring merged the parts; the seed baked it).
     const iris::MeshPtr baked = iris::ShippedMeshes::mesh(path);
-    QList<iris::MeshPtr> parts;
-    if (baked) parts.append(baked);
-    MeshData merged;
-    for (const iris::MeshPtr &part : parts) {
-        MeshData one;
-        if (!part || !toMeshData(part.data(), one) || one.positions.empty()) continue;
-        const unsigned base = unsigned(merged.positions.size() / 3);
-        merged.positions.insert(merged.positions.end(), one.positions.begin(),
-                                one.positions.end());
-        // NORMALS ARE PADDED RATHER THAN DROPPED when a part has none: the
-        // vertex declaration is decided by the FIRST part, so a mesh that is
-        // half normalled would upload a buffer of the wrong length.
-        const size_t verts = one.positions.size() / 3;
-        if (one.normals.size() == verts * 3)
-            merged.normals.insert(merged.normals.end(), one.normals.begin(), one.normals.end());
-        else
-            merged.normals.insert(merged.normals.end(), verts * 3, 0.0f);
-        for (unsigned idx : one.indices) merged.indices.push_back(base + idx);
-    }
-    if (merged.positions.empty() || merged.indices.empty()) {
+    MeshData data;
+    if (!baked || !toMeshData(baked.data(), data) || data.positions.empty()
+        || data.indices.empty()) {
         qWarning("SceneMirror: the VR controller model '%s' has no geometry - the wand stands in",
                  qUtf8Printable(path));
         return 0;
     }
-    mVrProxyModelMesh[hand] = mTarget->createMesh(merged);
+    mVrProxyModelTriangles[hand] = int(data.indices.size() / 3);
+    mVrProxyModelMesh[hand] = mTarget->createMesh(data);
     return mVrProxyModelMesh[hand];
+}
+
+SceneMirror::VrProxyDrawn SceneMirror::vrProxyDrawn(int hand) const
+{
+    VrProxyDrawn out;
+    if (hand < 0 || hand > 1) return out;
+    out.model = mVrProxyMesh[hand] != 0 && mVrProxyMesh[hand] == mVrProxyModelMesh[hand];
+    if (out.model) {
+        out.key = mVrProxyModelPath[hand];
+        out.triangles = mVrProxyModelTriangles[hand];
+    }
+    return out;
 }
 
 // THE SESSION BUILDS THEM; THE USER'S SWITCH DECIDES ONLY THE HAND MARKERS

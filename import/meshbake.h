@@ -555,6 +555,13 @@ public:
     /// generation" test, not a full deserialize per stale row.
     static bool headerMatches(const QString &path, const QString &expectFingerprint);
 
+    /// THE FACTS OF THE IMPORT'S PARSE alone (Model::describe), read from the
+    /// bake's HEADER — the read stops there, no geometry is deserialized. What
+    /// the metadata backfill describes a model from. False on a blob of another
+    /// format, another key (when one is given) or a truncated header.
+    static bool readDescribe(const QString &path, ModelSceneInfo *out,
+                             const QString &expectFingerprint = QString());
+
     /// Write ATOMICALLY (temp + rename in the same directory): a bake at its
     /// final path is either absent or complete, even through a SIGKILL.
     static bool write(const QString &path, const Model &model, QString *errorOut);

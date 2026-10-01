@@ -82,6 +82,13 @@ struct Counts
     /// since SHIPPED-BAKES-1 the app makes none. See BakeBuildScope.
     int    bakeBuilds  = 0;
     double bakeBuildMs = 0.0;
+    /// ...and the ones of those that ran ON THE MAIN THREAD (an import a verb
+    /// ran synchronously, the library seed at boot): derived data being made,
+    /// but a frozen window while it is. Counted inside `bakeBuilds` too.
+    int    mainThreadBakeBuilds  = 0;
+    double mainThreadBakeBuildMs = 0.0;
+    /// The last file a main-thread bake build parsed. Empty when none.
+    QString lastMainThreadBakePath;
     /// The last FILE parsed on the main thread — the one a failing assertion
     /// wants named. Empty when there has been none.
     QString lastMainThreadPath;
