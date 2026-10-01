@@ -72,9 +72,9 @@ namespace Ogre
         typedef set<HlmsDatablock *>::type HlmsDatablockSet;
         struct MaterialBucket
         {
-            ConstBufferPacked *buffer;
-            bool               hasDiffuse;
-            bool               hasEmissive;
+            ConstBufferPacked *buffer = nullptr;
+            bool               hasDiffuse = false;
+            bool               hasEmissive = false;
             HlmsDatablockSet   datablocks;
         };
         typedef vector<MaterialBucket>::type BucketVec;

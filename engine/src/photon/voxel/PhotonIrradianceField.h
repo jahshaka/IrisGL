@@ -164,10 +164,10 @@ namespace Ogre
             // (invNumRaysPerPixel / invNumRaysPerIrradiancePixel), the old cone start
             // bias pair and the threads-per-row packing are gone - nothing reads them.
             // One float4 of scalars, then the counts (w unused).
-            uint32 probesPerRow;  // groups per dispatch row (one probe per group)
-            float  coneAngleTan;
-            uint32 numProcessedProbes;
-            uint32 padding0;
+            uint32 probesPerRow = 0u;  // groups per dispatch row (one probe per group)
+            float  coneAngleTan = 0.0f;
+            uint32 numProcessedProbes = 0u;
+            uint32 padding0 = 0u;
 
             uint4 numProbes;
 
@@ -221,14 +221,14 @@ namespace Ogre
 
         struct IfdBorderMirrorParams
         {
-            uint32 probeBorderedRes;
-            uint32 numPixelsInEdges;
-            uint32 numTopBottomPixels;
-            uint32 numGlobalThreadsForEdges;
+            uint32 probeBorderedRes = 0u;
+            uint32 numPixelsInEdges = 0u;
+            uint32 numTopBottomPixels = 0u;
+            uint32 numGlobalThreadsForEdges = 0u;
 
-            uint32 maxThreadId;
-            uint32 threadsPerThreadRow;
-            uint32 padding[2];
+            uint32 maxThreadId = 0u;
+            uint32 threadsPerThreadRow = 0u;
+            uint32 padding[2] = {};
         };
 
         PhotonIrradianceFieldSettings mSettings;
@@ -241,8 +241,8 @@ namespace Ogre
         /// the planes that entered the window) - and its probe count.
         struct ProbeBox
         {
-            uint32 lo[3];
-            uint32 size[3];
+            uint32 lo[3] = {};
+            uint32 size[3] = {};
         };
         ProbeBox mWorkBoxes[3];
         uint32   mNumWorkBoxes;

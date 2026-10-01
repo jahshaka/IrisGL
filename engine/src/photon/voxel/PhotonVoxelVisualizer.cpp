@@ -123,8 +123,8 @@ namespace Ogre
         GpuProgramParametersSharedPtr vsParams = pass->getVertexProgramParameters();
         vsParams->setNamedConstant( "vertexBase", uint32( 0u ) );
 
-        uint32 voxelResolution[4] = { width, height, depth, 1u };
-        vsParams->setNamedConstant( "voxelResolution", voxelResolution, 1u, 3u );
+        uint32 resolution[4] = { width, height, depth, 1u };
+        vsParams->setNamedConstant( "voxelResolution", resolution, 1u, 3u );
 
         if( !anyColour )
         {

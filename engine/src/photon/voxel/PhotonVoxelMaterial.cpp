@@ -52,16 +52,16 @@ namespace Ogre
 
     struct PhotonShaderVoxelMaterial
     {
-        float bgDiffuse[4];
-        float diffuse[4];
-        float emissive[4];
-        uint32 diffuseTexIdx;
-        uint32 emissiveTexIdx;
+        float bgDiffuse[4] = {};
+        float diffuse[4] = {};
+        float emissive[4] = {};
+        uint32 diffuseTexIdx = 0u;
+        uint32 emissiveTexIdx = 0u;
         // Jahshaka (PHOTON-WRITER-1): the datablock's perceptual roughness, so the
         // voxel's stored radiance can be what its surface renders (the diffuse
         // lobe's directional albedo depends on it; LightInjection reads it).
-        float roughness;
-        uint32 padding0;
+        float roughness = 0.0f;
+        uint32 padding0 = 0u;
     };
     //-------------------------------------------------------------------------
     PhotonVoxelMaterial::PhotonVoxelMaterial( IdType id, VaoManager *vaoManager, CompositorManager2 *compositorManager,

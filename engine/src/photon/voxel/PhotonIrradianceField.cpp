@@ -910,15 +910,15 @@ namespace Ogre
             float4x3 viewToIrradianceFieldRows;
 
             float2 numProbesAggregated;
-            float padding0;
-            float padding1;
+            float padding0 = 0.0f;
+            float padding1 = 0.0f;
 
-            float depthBorderedRes;
-            float depthFullWidth;
+            float depthBorderedRes = 0.0f;
+            float depthFullWidth = 0.0f;
             float2 depthInvFullResolution;
 
-            float irradBorderedRes;
-            float irradFullWidth;
+            float irradBorderedRes = 0.0f;
+            float irradFullWidth = 0.0f;
             float2 irradInvFullResolution;
         };
 

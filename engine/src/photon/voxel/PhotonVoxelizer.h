@@ -110,22 +110,22 @@ namespace Ogre
             /// 0 of this (submesh, level)'s index range. Split into two uint32 because
             /// shaderInt64 is not enabled on this device; GLSL rebuilds the reference
             /// from a uvec2 (GL_EXT_buffer_reference_uvec2).
-            uint32 posAddress[2];
-            uint32 idxAddress[2];
-            uint32 vertexStride;   ///< bytes between vertices
-            uint32 posOffset;      ///< bytes from the vertex start to VES_POSITION
-            uint32 normalOffset;   ///< ditto VES_NORMAL; 0xFFFFFFFF when absent
-            uint32 uvOffset;       ///< ditto VES_TEXTURE_COORDINATES; 0xFFFFFFFF absent
+            uint32 posAddress[2] = {};
+            uint32 idxAddress[2] = {};
+            uint32 vertexStride = 0u;   ///< bytes between vertices
+            uint32 posOffset = 0u;      ///< bytes from the vertex start to VES_POSITION
+            uint32 normalOffset = 0u;   ///< ditto VES_NORMAL; 0xFFFFFFFF when absent
+            uint32 uvOffset = 0u;       ///< ditto VES_TEXTURE_COORDINATES; 0xFFFFFFFF absent
             /// bit 0: indices are 32-bit. bit 1: positions are float3 (always, today -
             /// reserved so a packed position format becomes data, not a permutation).
-            uint32 flags;
+            uint32 flags = 0u;
             /// Index ELEMENTS skipped by rounding `idxAddress` down to a 4-byte
             /// boundary. A 16-bit index buffer can start at an odd uint16, and a
             /// buffer_reference of uints must be 4-byte aligned, so the address is
             /// floored and the remainder rides here - the same bookkeeping upstream's
             /// adjustIndexOffsets16 did for its private copy, now costing no copy.
-            uint32 idxBias;
-            uint32 padding[2];
+            uint32 idxBias = 0u;
+            uint32 padding[2] = {};
         };
 
         /** JAHSHAKA (ATOM P4b): DESCRIBE ONE (mesh, level, submesh) WITHOUT A VOXELIZER.
@@ -254,8 +254,8 @@ namespace Ogre
 
         struct Octant
         {
-            uint32 x, y, z;
-            uint32 width, height, depth;
+            uint32 x = 0u, y = 0u, z = 0u;
+            uint32 width = 0u, height = 0u, depth = 0u;
             Aabb   region;
         };
 

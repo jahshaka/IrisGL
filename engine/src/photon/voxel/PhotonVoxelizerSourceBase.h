@@ -66,25 +66,25 @@ namespace Ogre
         /// travelling +a reads the -a half (VoxelMerge_piece_cs.any, THE DIRECTIONAL
         /// COVERAGE); PhotonVoxelLighting exposes both as entries of its light-volume list, so every
         /// reader that binds the list binds them too.
-        TextureGpu *mCoverageVox[2];
+        TextureGpu *mCoverageVox[2] = {};
         /// Jahshaka (PHOTON-VOXEL-4): THE SURFACE POSITION per half-axis (RGBA16_UNORM, xyz)
         /// - the coverage-weighted mean position of each half's surfaces along each axis,
         /// ABSOLUTE in the volume's normalised coordinate and premultiplied by that half's
         /// coverage (VoxelMerge_piece_cs.any, THE SURFACE POSITION): the origin plane's
         /// test. The list's last two entries.
-        TextureGpu *mPositionVox[2];
+        TextureGpu *mPositionVox[2] = {};
 
-        RenderSystem      *mRenderSystem;
-        VaoManager        *mVaoManager;
-        HlmsManager       *mHlmsManager;
-        TextureGpuManager *mTextureGpuManager;
+        RenderSystem      *mRenderSystem = nullptr;
+        VaoManager        *mVaoManager = nullptr;
+        HlmsManager       *mHlmsManager = nullptr;
+        TextureGpuManager *mTextureGpuManager = nullptr;
 
-        DebugVisualizationMode mDebugVisualizationMode;
-        PhotonVoxelVisualizer       *mDebugVoxelVisualizer;
+        DebugVisualizationMode mDebugVisualizationMode = DebugVisualizationNone;
+        PhotonVoxelVisualizer       *mDebugVoxelVisualizer = nullptr;
 
-        uint32 mWidth;
-        uint32 mHeight;
-        uint32 mDepth;
+        uint32 mWidth = 0u;
+        uint32 mHeight = 0u;
+        uint32 mDepth = 0u;
 
         Aabb mRegionToVoxelize;
 

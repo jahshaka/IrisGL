@@ -54,16 +54,16 @@ namespace Ogre
     {
         // Pre-mul by PI? -No because we lose a ton of precision
         //.w contains lightDistThreshold
-        float diffuse[4];
+        float diffuse[4] = {};
         // For directional lights, pos.xyz contains -dir.xyz and pos.w = 0;
         // For the rest of lights, pos.xyz contains pos.xyz and pos.w = 1;
-        float pos[4];
+        float pos[4] = {};
         // uvwPos.w contains the light type
-        float uvwPos[4];
+        float uvwPos[4] = {};
 
         // Used by area lights
         // points[0].w contains double sided info
-        float points[4][4];
+        float points[4][4] = {};
     };
 
     const uint16 PhotonVoxelLighting::msDistanceThresholdCustomParam = 3876u;
