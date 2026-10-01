@@ -1,0 +1,40 @@
+// ----------------------------------------------------------------------------
+// IFD based on Voxelization
+// ----------------------------------------------------------------------------
+compositor_node IrradianceField/Gen
+{
+	in 0 colour_if
+	in 1 depth_if
+
+	target colour_if
+	{
+		// Jahshaka (PHOTON-FIELD-ROTATE-1): the generation job integrates every texel
+		// from every ray of its probe and blends it with the texel's history, so it
+		// READS both atlases (upstream's per-texel integration passes are gone with
+		// the raster source they served).
+		pass compute
+		{
+			job IrradianceField/Gen
+			uav 0 colour_if read write
+			uav 1 depth_if read write
+		}
+
+		pass compute
+		{
+			job IrradianceField/BorderMirror/Depth
+			uav 0 depth_if read write
+		}
+
+		pass compute
+		{
+			job IrradianceField/BorderMirror/Colour
+			uav 0 colour_if read write
+		}
+	}
+}
+
+workspace IrradianceField/Gen/Workspace
+{
+	connect_external 0 IrradianceField/Gen 0
+	connect_external 1 IrradianceField/Gen 1
+}

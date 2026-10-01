@@ -1,0 +1,49 @@
+// PHOTON (OWN-GI-1): the voxel and irradiance-field pieces of the PBS pixel shader, an owned
+// copy (Ogre-Next's Vct_piece_all.any as it stood on fork 24b2436c9). This library is registered AFTER
+// Hlms/Pbs/Any, so the pieces upstream's file of the same name defines are taken away first and
+// ours collected in their place: the PBS templates keep inserting them by their upstream names.
+@undefpiece( DeclVctStruct )
+@undefpiece( DeclVctUniform )
+
+
+@property( vct_num_probes )
+
+@piece( DeclVctStruct )
+	struct VctProbeParams
+	{
+		// .xyz vctResolution
+		// .w = cascadeMaxLod
+		float4 vctInvResolution_cascadeMaxLod[@value( vct_num_probes )];
+@property( vct_num_probes > 1 )
+		// fromPreviousProbeToNext[probeIdx-1][0].w = cascadeFinalMultiplier
+		// fromPreviousProbeToNext[probeIdx-1][1].w unused
+		float4 fromPreviousProbeToNext[@value( vct_num_probes ) - 1][2];
+@end
+
+		float specSdfMaxMip;
+		float specularSdfFactor;
+		float blendFade;
+		float multiplier;
+
+		float4 xform_row0;
+		float4 xform_row1;
+		float4 xform_row2;
+
+		float4 invXform_row0;
+		float4 invXform_row1;
+		float4 invXform_row2;
+
+		// Jahshaka (CONE-FRAME-2): a direction in the CUBEMAP frame (world, z
+		// negated) to the probe's normalised space - a diagonal (the volume's
+		// per-axis scale after the z un-flip), so the cone frame goes cubemap ->
+		// probe in ONE exact step.
+		float4 xformCube_row0;
+		float4 xformCube_row1;
+		float4 xformCube_row2;
+	};
+@end
+@piece( DeclVctUniform )
+	VctProbeParams vctProbeParams;
+@end
+
+@end

@@ -1,0 +1,28 @@
+//#include "SyntaxHighlightingMisc.h"
+
+// Jahshaka (PHOTON-VOXEL-5): THE DIRECTIONAL LEVEL 0'S COMPOSITE, the one text of it. The light
+// injection writes the directional volumes' level 0 from each voxel's light PER HALF-AXIS (the
+// fused step 0), and the anisotropic mip step 0 adds a bounce's part to it - both pair a 2x2x2
+// block's children exactly as step 1 pairs texels, so the chain starts where the march leaves off.
+@piece( JahDirectionalComposite )
+	// Two voxels along the axis, the one the reader meets first (`front`) then the other: the
+	// per-length ADDITIVE composite of the mip-0 read (the pieces of a surface split between the
+	// two layers add up to the surface, capped at opaque). Each is (radiance x k, k), k the
+	// coverage of the half the reader meets. Linear in the colours for given coverages - which
+	// is what lets a bounce's part be composited apart and added (AnisotropicMipVctStep0).
+	float4 compositeAlongAxis( float4 front, float4 back )
+	{
+		float take = min( back.w, 1.0f - front.w );
+		float3 colour = front.xyz;
+		if( back.w > 0.0f )
+			colour += back.xyz * ( take / back.w );
+		return float4( colour, front.w + take );
+	}
+
+	// The block's children (the 2x2x2 offsets) and, per travel direction, the four (front,
+	// back) pairs as step 1 pairs them: the -a texel (even direction) is read travelling +a, so
+	// its front is the a-low child and it holds the faces looking -a; the +a texel the +a faces.
+	#define JAH_DIR_OFFSETS int3 jahDirOffsets[8] = OGRE_ARRAY_START( int3 ) int3( 1, 1, 1 ), int3( 1, 1, 0 ), int3( 1, 0, 1 ), int3( 1, 0, 0 ), int3( 0, 1, 1 ), int3( 0, 1, 0 ), int3( 0, 0, 1 ), int3( 0, 0, 0 ) OGRE_ARRAY_END
+	#define JAH_DIR_FRONT int jahDirFront[24] = OGRE_ARRAY_START( int ) 4, 5, 6, 7, 0, 1, 2, 3, 2, 3, 7, 6, 0, 1, 5, 4, 1, 3, 5, 7, 0, 2, 4, 6 OGRE_ARRAY_END
+	#define JAH_DIR_BACK int jahDirBack[24] = OGRE_ARRAY_START( int ) 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 5, 4, 2, 3, 7, 6, 0, 2, 4, 6, 1, 3, 5, 7 OGRE_ARRAY_END
+@end

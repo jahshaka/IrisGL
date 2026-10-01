@@ -1,0 +1,104 @@
+//#include "SyntaxHighlightingMisc.h"
+
+//in uvec3 gl_NumWorkGroups;
+//in uvec3 gl_WorkGroupID;
+//in uvec3 gl_LocalInvocationID;
+//in uvec3 gl_GlobalInvocationID;
+//in uint  gl_LocalInvocationIndex;
+
+@piece( HeaderCS )
+	@insertpiece( JahDirectionalComposite )
+
+	@insertpiece( DeclSRgbFuncs )
+	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): THE STORE'S ENCODING FOLLOWS ITS FORMAT (the directional volumes are
+	// float: written linear).
+	@property( uav0_orig_pf_srgb )
+		#define jahStoreLight( x ) toSRGB( x )
+	@else
+		#define jahStoreLight( x ) ( x )
+	@end
+@end
+
+@piece( BodyCS )
+	// Jahshaka (PHOTON-VOXEL-5): STEP 0 IS THE BOUNCE'S PART OF THE DIRECTIONAL LEVEL 0. The light
+	// injection composites the directional level 0 itself, from each voxel's light PER HALF-AXIS
+	// (LightInjection_piece_cs.any, the fused step 0); with a bounce it writes the DIRECT part of
+	// it into its own volumes (`dirDirect0..2`) and this pass, after every bounce, adds the
+	// bounce's: per child and half the side's total minus the side's direct term - the front
+	// (twice the total's mean minus the back) or the back, the side the half's faces look to
+	// through the canonical normal - composited with the same pairs and the same coverages. The
+	// composite is linear in the colours for given coverages, so the sum is the composite of the
+	// sums; the opacity is the coverages' composite, as the injection's.
+	JAH_DIR_OFFSETS;
+	JAH_DIR_FRONT;
+	JAH_DIR_BACK;
+
+	int3 iSourceUvw = int3( gl_GlobalInvocationID.xyz << 1u );
+
+	float3 bounceF[8];
+	float3 bounceB[8];
+	float3 nrms[8];
+	bool twoSided[8];
+	float3 coveragesP[8];
+	float3 coveragesN[8];
+	for( int n = 0; n < 8; ++n )
+	{
+		const int3 uvw = iSourceUvw + jahDirOffsets[n];
+		const float4 total = OGRE_Load3D( inLightTotal, uvw, 0 );
+		const float4 back = OGRE_Load3D( inLightBack, uvw, 0 );
+		const float4 dTotal = OGRE_Load3D( inDirectTotal, uvw, 0 );
+		const float4 dBack = OGRE_Load3D( inDirectBack, uvw, 0 );
+		const float4 nrm = OGRE_Load3D( inNormal, uvw, 0 );
+		coveragesP[n] = OGRE_Load3D( inCoveragePTex, uvw, 0 ).xyz;
+		coveragesN[n] = OGRE_Load3D( inCoverageNTex, uvw, 0 ).xyz;
+		nrms[n] = nrm.xyz * 2.0f - 1.0f;
+		twoSided[n] = nrm.w > 0.0f;
+		const float c = total.w;
+		const float invC = c > 0.0f ? 1.0f / c : 0.0f;
+		bounceB[n] = max( back.xyz - dBack.xyz, float3( 0, 0, 0 ) ) * invC;
+		bounceF[n] = max( ( 2.0f * total.xyz - back.xyz ) - ( 2.0f * dTotal.xyz - dBack.xyz ), float3( 0, 0, 0 ) ) * invC;
+	}
+
+	wshort3 outIUvw;
+	for( int dir = 0; dir < 6; ++dir )
+	{
+		const int axis = dir >> 1;
+		// the -a texel (even) is read travelling +a: the faces looking -a; the +a one the +a faces
+		const bool plusHalf = ( dir & 1 ) != 0;
+		const float hs = plusHalf ? 1.0f : -1.0f;
+		float4 accumVal = float4( 0, 0, 0, 0 );
+		for( int p = 0; p < 4; ++p )
+		{
+			float4 pair[2];
+			for( int e = 0; e < 2; ++e )
+			{
+				const int n = e == 0 ? jahDirFront[dir * 4 + p] : jahDirBack[dir * 4 + p];
+				const float k = min( plusHalf ? coveragesP[n][axis] : coveragesN[n][axis], 1.0f );
+				const float along = hs * nrms[n][axis];
+				float3 b = 0.5f * ( bounceF[n] + bounceB[n] );
+				if( along > 0.0f || !twoSided[n] )
+					b = bounceF[n];
+				else if( along < 0.0f )
+					b = bounceB[n];
+				pair[e] = k > 0.0f ? float4( b * k, k ) : float4( 0, 0, 0, 0 );
+			}
+			accumVal += compositeAlongAxis( pair[0], pair[1] );
+		}
+		accumVal *= 0.25f;
+
+		outIUvw.xyz = wshort3( gl_GlobalInvocationID.xyz );
+		if( plusHalf )
+			outIUvw.x += p_higherMipHalfWidth;
+		// the direct part the injection composited (8-bit sRGB, read linear)
+		const float3 direct = axis == 0 ? OGRE_Load3D( inDirectDir0, outIUvw, 0 ).xyz
+							: ( axis == 1 ? OGRE_Load3D( inDirectDir1, outIUvw, 0 ).xyz
+										  : OGRE_Load3D( inDirectDir2, outIUvw, 0 ).xyz );
+		accumVal.xyz += direct;
+		if( axis == 0 )
+			OGRE_imageWrite3D4( outLightHigherMip0, outIUvw, jahStoreLight( accumVal ) );
+		else if( axis == 1 )
+			OGRE_imageWrite3D4( outLightHigherMip1, outIUvw, jahStoreLight( accumVal ) );
+		else
+			OGRE_imageWrite3D4( outLightHigherMip2, outIUvw, jahStoreLight( accumVal ) );
+	}
+@end
