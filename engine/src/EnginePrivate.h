@@ -1167,6 +1167,9 @@ struct ChainDesc {
     /// threshold next to it, and so deliberately NOT part of sameShape():
     /// scrubbing the amount must not rebuild a compositor graph.
     float bloomAmount = 1.0f;
+    /// THE IMAGE BLOCK (IMAGE-1; PostFxDesc::image): uniforms on the tonemap
+    /// quad, deliberately NOT part of sameShape().
+    ImageGrade image;
     bool  ssao = false;
     float ssaoScale = 1.0f;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower = 1.5f;
@@ -1733,6 +1736,10 @@ void setDither(bool off);
 /// pushed from applyViewGlobals — and from OgreView::setPostFx, for the VR
 /// session's view, which the engine's per-frame loop never reaches.
 void setBloomAmount(float amount);
+/// THE IMAGE BLOCK (IMAGE-1): pushes PostFxDesc::image into the tonemap quad's
+/// uniforms (offsets from the defaults; the white balance as its matrix).
+/// Debounced on the last grade pushed.
+void setImageGrade(const ImageGrade &grade);
 /// Drops the cached tonemap parameter block (the dither's off switch and the
 /// bloom amount). Called from destroySsao, i.e. from ~OgreEngine, because the
 /// cache is a SharedPtr into a material that is about to stop existing.

@@ -60,7 +60,6 @@ enum class LookKind
     OldMovie,
     Posterize,
     Sharpen,
-    FilmGrade,
     Count
 };
 

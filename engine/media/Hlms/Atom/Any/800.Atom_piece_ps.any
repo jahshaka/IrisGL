@@ -905,7 +905,7 @@
 	// so such a hit loops the WORLD list (HlmsAtom::uploadWorldLights): every point
 	// and spot light the pass buffer does not carry, brightest first, at most the
 	// forward list's lights per cell of those in range - the same lighting text as
-	// the forward loop (Forward+'s attenuation, range fade, spot cone and profile,
+	// the forward loop (the one falloff, the spot cone and profile,
 	// the same BRDF), in view space through the pass's view.
 	@piece( AtomHitWorldLights )
 		if( !fwdCustomHasCell )
@@ -929,10 +929,7 @@
 				if( atomWlDist <= atomWlAtt.x && atomWlDist > 0.0 @insertpiece( andObjLightMaskFwdPlusCmp ) )
 				{
 					atomWlDir *= 1.0 / atomWlDist;
-					float atomWlAtten = jahLightDistanceAttenuation( atomWlDist, atomWlAtt );
-					@property( hlms_forward_fade_attenuation_range )
-						atomWlAtten *= jahLightRangeFade( atomWlDist, atomWlAtt );
-					@end
+					float atomWlAtten = jahLightAttenuation( atomWlDist, atomWlAtt );
 					float atomWlCos = dot( -atomWlDir, normalize( mul( float4( atomWlSpotDir.xyz, 0.0 ), passBuf.view ).xyz ) );
 					if( atomWlPos.w > 1.5 )
 						atomWlAtten *= atomWlCos >= atomWlSpot.y ? jahSpotAttenuation( atomWlCos, atomWlSpot.xyz ) : 0.0;

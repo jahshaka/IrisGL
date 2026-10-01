@@ -93,6 +93,45 @@ inline bool isDefaultFloorNode(const iris::SceneNode *node)
     return static_cast<const iris::MeshNode *>(node)->defaultFloor;
 }
 
+/// THE IMAGE BLOCK between the document's table (iris::lens::ImageParam order)
+/// and the engine's ImageGrade (IMAGE-1). Both directions, so a camera's
+/// overrides land field by field on whatever the world resolved.
+static void imageGradeFromTable(const float t[iris::lens::ImageParamCount],
+                                jahshaka::engine::ImageGrade &g)
+{
+    using namespace iris::lens;
+    g.contrast = t[ImageContrast];
+    g.saturation = t[ImageSaturation];
+    g.shadows = t[ImageShadows];
+    g.highlights = t[ImageHighlights];
+    g.whiteTemperature = t[ImageWhiteTemperature];
+    g.whiteTint = t[ImageWhiteTint];
+    g.vignette = t[ImageVignette];
+    g.filmSlope = t[ImageFilmSlope];
+    g.filmToe = t[ImageFilmToe];
+    g.filmShoulder = t[ImageFilmShoulder];
+    g.filmBlackClip = t[ImageFilmBlackClip];
+    g.filmWhiteClip = t[ImageFilmWhiteClip];
+}
+
+static void imageTableFromGrade(const jahshaka::engine::ImageGrade &g,
+                                float t[iris::lens::ImageParamCount])
+{
+    using namespace iris::lens;
+    t[ImageContrast] = g.contrast;
+    t[ImageSaturation] = g.saturation;
+    t[ImageShadows] = g.shadows;
+    t[ImageHighlights] = g.highlights;
+    t[ImageWhiteTemperature] = g.whiteTemperature;
+    t[ImageWhiteTint] = g.whiteTint;
+    t[ImageVignette] = g.vignette;
+    t[ImageFilmSlope] = g.filmSlope;
+    t[ImageFilmToe] = g.filmToe;
+    t[ImageFilmShoulder] = g.filmShoulder;
+    t[ImageFilmBlackClip] = g.filmBlackClip;
+    t[ImageFilmWhiteClip] = g.filmWhiteClip;
+}
+
 /// ONE 8-BIT CODE, IN POST-EXPOSURE UNITS (lane SKY-SMALL, item SKY-NIGHT-1).
 /// The smallest change to the frame that can still move an output code — and
 /// therefore the point below which the sun's disc, and its three PSSM shadow
@@ -118,44 +157,30 @@ inline bool isDefaultFloorNode(const iris::SceneNode *node)
 ///   1. AUTO EXPOSURE multiplies the whole frame — that is `sunExposureGain`
 ///      below, and it is NOT a constant. It is carried separately because it
 ///      depends on two document dials the user can move eight stops either way.
-///   2-4. THE TONEMAP, THE CONTRAST STRETCH AND THE sRGB ENCODE, which between
-///      them decide how many output codes one unit of POST-EXPOSURE radiance is
-///      worth. That number is what is frozen here.
+///   2-3. THE FILM CURVE AND THE sRGB ENCODE, which between them decide how
+///      many output codes one unit of POST-EXPOSURE radiance is worth. That
+///      number is what is frozen here.
 ///
 /// THE NUMBER, AND WHY IT IS A MAXIMUM AND NOT A SLOPE AT ZERO. The chain is
 ///
-///     code(x) = 255 * srgbEncode( 1.25 * ( f(x)/f(W) - 0.5 ) + 0.61 )
+///     code(x) = 255 * srgbEncode( film(x) )
 ///
-/// with f = Hable's filmic curve and W = 11.2 (HDR/FinalToneMapping_ps.glsl),
-/// so the codes per unit of post-exposure radiance are
+/// with film = Unreal's filmic tonemapper at its defaults (IMAGE-1;
+/// iris::lens::filmCurve, HDR/FinalToneMapping_ps.glsl), so the codes per unit
+/// of post-exposure radiance are g(x) = 255 * srgbEncode'(film(x)) * film'(x).
+/// The film has a TOE (film'(x) runs to zero at black) and the encode's slope is
+/// largest on its own linear toe, so g PEAKS between them: on this exact
+/// arithmetic, g_max = 1198.4 codes per unit at x = 0.0146 post-exposure, so
+/// ONE CODE IS 1/1198.4 = 8.34e-4 of post-exposure radiance.
 ///
-///     g(x) = 255 * srgbEncode'(c(x)) * 1.25 * f'(x) / f(W).
-///
-/// The first cut of this lane evaluated that at x = 0 and got 1582.8. THAT IS
-/// THE WRONG END OF THE CURVE: Hable with these constants has a TOE, so f'(0)
-/// = 1/3 is its MINIMUM slope, not its maximum (f' is 0.4276 by x = 0.033), and
-/// the sRGB encode's own slope is largest on its linear toe, which ends at a
-/// tonemapped 0.0031. Both terms are therefore at their largest at the SAME
-/// place, and g PEAKS there: measured on this exact arithmetic,
-///
-///     g_max = 2030.4 codes per unit, at x = 0.0327 post-exposure,
-///
-/// so ONE CODE IS 1/2030.4 = 4.93e-4 of post-exposure radiance. (The old
-/// 3.7e-4-of-scene-radiance figure was 28 % ABOVE the true bound at the default
-/// grade, and the "rounded down for safety" in its comment rounded the wrong
-/// way.)
-///
-/// WHY THE PEAK IS THE OPERATING POINT AND NOT A CORNER CASE. The contrast
-/// stretch ends at 0.61 with a 0.5 pivot, so c(0) = -0.015: a BLACK background
-/// stays at code 0 until 0.0275 of post-exposure radiance, and a disc on black
-/// needs that much before it shows at all. But a sun disc is never on black —
-/// it is drawn over a TWILIGHT SKY, and what makes it visible is the
-/// DIFFERENCE it adds to that sky. A twilight sky sits exactly in the region
-/// where g is largest (a post-exposure value of a few hundredths), so the peak
-/// is where this decision is actually made. Taking the maximum is also the only
-/// safe direction: it is the most sensitive the picture can be to the disc, so
-/// a disc below it cannot be visible anywhere in the frame.
-constexpr float kOneCodePostExposure = 4.93e-4f;
+/// WHY THE PEAK IS THE OPERATING POINT AND NOT A CORNER CASE. A sun disc is
+/// never on black — it is drawn over a TWILIGHT SKY, and what makes it visible
+/// is the DIFFERENCE it adds to that sky. A twilight sky sits exactly in the
+/// region where g is largest (a post-exposure value of a few hundredths), so the
+/// peak is where this decision is actually made. Taking the maximum is also the
+/// only safe direction: it is the most sensitive the picture can be to the disc,
+/// so a disc below it cannot be visible anywhere in the frame.
+constexpr float kOneCodePostExposure = 8.34e-4f;
 
 /// ...AND THE SHADOW GETS THE SAME STEP WITH THE PIPELINE'S OWN HEADROOM. A
 /// shadow's visible effect is the DIFFERENCE between a lit and an unlit
@@ -4814,6 +4839,7 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     if (!light->iesProfilePath.isEmpty() && light->iesNormalisation > 1e-6f)
         d.intensity = light->intensity / light->iesNormalisation;
     d.range = light->distance;
+    d.sourceRadius = light->sourceRadius;
     d.spotAngleDegrees = light->spotCutOff;
     d.spotSoftness = light->spotCutOffSoftness;
     d.spotFalloff = light->spotFalloff;
@@ -6671,7 +6697,6 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
         case iris::LookKind::OldMovie:   desc.kind = LookKind::OldMovie;   break;
         case iris::LookKind::Posterize:  desc.kind = LookKind::Posterize;  break;
         case iris::LookKind::Sharpen:    desc.kind = LookKind::Sharpen;    break;
-        case iris::LookKind::FilmGrade:  desc.kind = LookKind::FilmGrade;  break;
         case iris::LookKind::Count:      continue;
         }
         iris::lookParamValues(*def, entry, desc.p);
@@ -6784,6 +6809,9 @@ void SceneMirror::applyViewPostFx(View *view, bool record)
         fx.bloomThreshold = mSource->bloomThreshold;
         fx.bloomKnee      = mSource->bloomKnee;
         fx.bloomAmount    = mSource->bloomAmount;
+        // THE IMAGE BLOCK (IMAGE-1): the world's development; the driving
+        // camera's overrides land on top in applyCameraPostFx.
+        imageGradeFromTable(mSource->image, fx.image);
         fx.ssao           = mSource->ssaoEnabled;
         fx.ssaoScale      = mSource->ssaoScale;
         fx.ssaoPower      = mSource->ssaoPower;
@@ -8252,6 +8280,17 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
     num("bloomThreshold", fx.bloomThreshold);
     num("bloomKnee", fx.bloomKnee);
     num("bloomAmount", fx.bloomAmount);
+    // THE IMAGE BLOCK (IMAGE-1): each field the camera overrides replaces the
+    // world's, through the same table the world's values came from.
+    {
+        float image[iris::lens::ImageParamCount];
+        imageTableFromGrade(fx.image, image);
+        for (int i = 0; i < iris::lens::ImageParamCount; ++i) {
+            const QVariant v = camera->postOverride(QLatin1String(iris::lens::imageParams()[i].id));
+            if (v.isValid()) image[i] = v.toFloat();
+        }
+        imageGradeFromTable(image, fx.image);
+    }
     flag("ssao", fx.ssao);
     num("ssaoPower", fx.ssaoPower);
     num("ssaoRadius", fx.ssaoRadius);

@@ -6,6 +6,7 @@
 #include "document/animation/propertyanim.h"
 #include "core/properties/property.h"
 #include "document/scenegraph/shadowmap.h"
+#include <algorithm>
 
 namespace iris
 {
@@ -27,9 +28,15 @@ QList<Property*> LightNode::getProperties()
     props.append(prop);
 
     prop = new FloatProperty();
-    prop->displayName = "Distance";
+    prop->displayName = "Range";
     prop->name = "distance";
     prop->value = distance;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Source Radius";
+    prop->name = "sourceRadius";
+    prop->value = sourceRadius;
     props.append(prop);
 
     prop = new FloatProperty();
@@ -136,6 +143,8 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return color;
     if(valueName == "distance")
         return distance;
+    if(valueName == "sourceRadius")
+        return sourceRadius;
     if(valueName == "spotCutOff")
         return spotCutOff;
     if(valueName == "spotCutOffSoftness")
@@ -184,6 +193,7 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "intensity")         { intensity = value.toFloat();         return markedParams(); }
     if (valueName == "lightColor")        { color = value.value<QColor>();       return markedParams(); }
     if (valueName == "distance")          { distance = value.toFloat();          return markedParams(); }
+    if (valueName == "sourceRadius")      { sourceRadius = std::max(value.toFloat(), 0.001f); return markedParams(); }
     if (valueName == "spotCutOff")        { spotCutOff = value.toFloat();        return markedParams(); }
     if (valueName == "spotCutOffSoftness"){ spotCutOffSoftness = value.toFloat();return markedParams(); }
     if (valueName == "spotFalloff")       { spotFalloff = value.toFloat();       return markedParams(); }
@@ -241,6 +251,7 @@ LightNode::LightNode()
     lightType = LightType::Point;
 
     distance = 10;
+    sourceRadius = 0.1f;   // a bulb's size: the falloff caps at 1 / 0.01 m^2 inside it
     color = QColor(255, 255, 255);
     intensity = 1.0f;
     spotCutOff = 30.0f;
@@ -278,6 +289,7 @@ SceneNodePtr LightNode::createDuplicate()
 	light->color = this->color;
 	light->intensity = this->intensity;
 	light->distance = this->distance;
+	light->sourceRadius = this->sourceRadius;
 	light->spotCutOff = this->spotCutOff;
 	light->spotCutOffSoftness = this->spotCutOffSoftness;
 	light->spotFalloff = this->spotFalloff;

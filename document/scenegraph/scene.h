@@ -817,6 +817,12 @@ public:
     /// rebuilds nothing. 0 renders the bloom-off picture with the chain still
     /// standing; turning `bloomEnabled` off is what stops paying for it.
     float bloomAmount;
+    /// THE IMAGE BLOCK (IMAGE-1): the world camera's development — contrast,
+    /// saturation, shadows/highlights, white balance, vignette and the film
+    /// curve — indexed by iris::lens::ImageParam, defaults and ranges from
+    /// iris::lens::imageParams(). The editor's view develops with these, and so
+    /// does every camera for each field it does not override.
+    float image[lens::ImageParamCount];
     bool  ssaoEnabled;
     float ssaoScale;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower;         ///< contrast of the occlusion term

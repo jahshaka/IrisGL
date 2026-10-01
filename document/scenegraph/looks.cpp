@@ -72,18 +72,6 @@ const LookParamDef kSharpenParams[] = {
     { "amount", 0.5f, 0.0f, 1.0f },
 };
 
-const LookParamDef kFilmGradeParams[] = {
-    { "amount",     1.0f, 0.0f, 1.0f },
-    // 1 is neutral for both, which is why the grade at amount 1 with untouched
-    // parameters is still (very nearly) the original picture: the look is the
-    // FOUR knobs, not a preset.
-    { "saturation", 1.0f, 0.0f, 2.0f },
-    { "contrast",   1.0f, 0.0f, 2.0f },
-    { "vignette",   0.0f, 0.0f, 1.0f },
-    { "tintR",      1.0f, 0.0f, 2.0f },
-    { "tintG",      1.0f, 0.0f, 2.0f },
-    { "tintB",      1.0f, 0.0f, 2.0f },
-};
 
 const LookDef kCatalogue[] = {
     { "desaturate", LookKind::Desaturate, kDesaturateParams, 1 },
@@ -92,7 +80,6 @@ const LookDef kCatalogue[] = {
     { "oldMovie",   LookKind::OldMovie,   kOldMovieParams,   4 },
     { "posterize",  LookKind::Posterize,  kPosterizeParams,  3 },
     { "sharpen",    LookKind::Sharpen,    kSharpenParams,    1 },
-    { "filmGrade",  LookKind::FilmGrade,  kFilmGradeParams,  7 },
 };
 
 constexpr int kCatalogueCount = int(sizeof(kCatalogue) / sizeof(kCatalogue[0]));

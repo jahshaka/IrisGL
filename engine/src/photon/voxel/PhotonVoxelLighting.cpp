@@ -52,7 +52,8 @@ namespace Ogre
     struct PhotonShaderVoxelLight
     {
         // Pre-mul by PI? -No because we lose a ton of precision
-        //.w contains lightDistThreshold
+        // .w = the light's RANGE (point/spot; 0 for directional and area), the
+        // window of the one falloff (IMAGE-1, JahBrdf's jahLightAttenuation)
         float diffuse[4] = {};
         // For directional lights, pos.xyz contains -dir.xyz and pos.w = 0;
         // For the rest of lights, pos.xyz contains pos.xyz and pos.w = 1;
@@ -62,10 +63,10 @@ namespace Ogre
 
         // Used by area lights
         // points[0].w contains double sided info
+        // Point/spot: points[0].xyz the spot direction, points[1].xyz the spot
+        // parameters, points[2].x the SOURCE RADIUS of the one falloff
         float points[4][4] = {};
     };
-
-    const uint16 PhotonVoxelLighting::msDistanceThresholdCustomParam = 3876u;
 
     static const IdString NumVctCascadesProp = "hlms_num_vct_cascades";
 
@@ -102,7 +103,6 @@ namespace Ogre
         mInjectHigherMipHalfWidth( 0 ),
         mBakingMultiplier( 1.0f ),
         mInvBakingMultiplier( 1.0f ),
-        mDefaultLightDistThreshold( 0.5f ),
         mAnisotropic( bAnisotropic ),
         mNumLights( 0 ),
         mBakingMultiplierParam( 0 ),
@@ -231,6 +231,18 @@ namespace Ogre
         }
     }
     //-------------------------------------------------------------------------
+    /// Whether a point or spot light's range sphere touches the box
+    /// [origin, origin + size] (the closest point of the box to the light).
+    static bool rangeTouchesCascade( const Light *light, const Vector3 &origin, const Vector3 &size )
+    {
+        const Vector3 p = light->getParentNode()->_getDerivedPosition();
+        const Real r = light->getAttenuationRange();
+        Vector3 closest = p;
+        closest.makeCeil( origin );
+        closest.makeFloor( origin + size );
+        return closest.squaredDistance( p ) <= r * r;
+    }
+    //-------------------------------------------------------------------------
     float PhotonVoxelLighting::addLight( PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight, Light *light,
                                  const Vector3 &voxelOrigin, const Vector3 &invVoxelSize )
     {
@@ -238,13 +250,16 @@ namespace Ogre
         for( size_t i = 0; i < 3u; ++i )
             vctLight->diffuse[i] = static_cast<float>( diffuseColour[i] );
 
-        const Vector4 *lightDistThreshold =
-            light->getCustomParameterNoThrow( msDistanceThresholdCustomParam );
-        vctLight->diffuse[3] = lightDistThreshold
-                                   ? ( lightDistThreshold->x * lightDistThreshold->x )
-                                   : ( mDefaultLightDistThreshold * mDefaultLightDistThreshold );
+        // THE ONE FALLOFF (IMAGE-1): a point or spot light's voxel radiance is
+        // windowed and inverse-square exactly as the pixel's is — the range here,
+        // the source radius in points[2].x below (OgreScene packs them into the
+        // light's attenuation as range and "linear"). Directional and area
+        // lights carry 0: the shader applies the falloff to points and spots only.
+        const Light::LightTypes srcType = light->getType();
+        const bool punctual = srcType == Light::LT_POINT || srcType == Light::LT_SPOTLIGHT;
+        vctLight->diffuse[3] = punctual ? static_cast<float>( light->getAttenuationRange() ) : 0.0f;
 
-        Light::LightTypes lightType = light->getType();
+        Light::LightTypes lightType = srcType;
         if( lightType == Light::LT_AREA_APPROX )
             lightType = Light::LT_AREA_LTC;
 
@@ -297,6 +312,8 @@ namespace Ogre
                 rectPoints[1].y = cosf( outerAngle.valueRadians() * 0.5f );
                 rectPoints[1].z = light->getSpotlightFalloff();
             }
+            if( punctual )
+                rectPoints[2].x = light->getAttenuationLinear();  // the source radius
         }
 
         const float isDoubleSided = light->getDoubleSided() ? 1.0f : 0.0f;
@@ -1325,6 +1342,7 @@ namespace Ogre
         const Vector3 voxelOrigin = mVoxelizer->getVoxelOrigin();
         const Vector3 invVoxelRes = 1.0f / mVoxelizer->getVoxelResolution();
         const Vector3 invVoxelSize = 1.0f / mVoxelizer->getVoxelSize();
+        const Vector3 cascadeSize = mVoxelizer->getVoxelSize();
 
         PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight = reinterpret_cast<PhotonShaderVoxelLight *>(
             mLightsConstBuffer->map( 0, mLightsConstBuffer->getNumElements() ) );
@@ -1353,6 +1371,16 @@ namespace Ogre
                         visibilityFlags[k] & lightMask )
                     {
                         Light *light = static_cast<Light *>( objData.mOwner[k] );
+                        // THE RANGE CULL (IMAGE-1): a point or spot light whose
+                        // range sphere misses this cascade's box lights none of
+                        // its voxels (the falloff is zero past the range), so it
+                        // takes no slot and costs no march.
+                        if( ( light->getType() == Light::LT_POINT ||
+                              light->getType() == Light::LT_SPOTLIGHT ) &&
+                            !rangeTouchesCascade( light, voxelOrigin, cascadeSize ) )
+                        {
+                            continue;
+                        }
                         if( light->getType() == Light::LT_DIRECTIONAL ||
                             light->getType() == Light::LT_POINT ||
                             light->getType() == Light::LT_SPOTLIGHT ||

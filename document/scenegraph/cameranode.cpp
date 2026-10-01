@@ -82,6 +82,21 @@ static const CameraPostKey kPostKeys[] = {
     // recompile a shader — so a cut to a camera with its own looks does not
     // hitch.
     { "looks",          CameraPostKeyType::Stack  },
+    // THE IMAGE BLOCK (IMAGE-1; iris::lens::imageParams, the same ids and order):
+    // each field a Number override, so a camera can take the world's contrast
+    // and its own white balance.
+    { "contrast",         CameraPostKeyType::Number },
+    { "saturation",       CameraPostKeyType::Number },
+    { "shadows",          CameraPostKeyType::Number },
+    { "highlights",       CameraPostKeyType::Number },
+    { "whiteTemperature", CameraPostKeyType::Number },
+    { "whiteTint",        CameraPostKeyType::Number },
+    { "vignette",         CameraPostKeyType::Number },
+    { "filmSlope",        CameraPostKeyType::Number },
+    { "filmToe",          CameraPostKeyType::Number },
+    { "filmShoulder",     CameraPostKeyType::Number },
+    { "filmBlackClip",    CameraPostKeyType::Number },
+    { "filmWhiteClip",    CameraPostKeyType::Number },
 };
 
 const CameraPostKey *cameraPostKeys(int &count)
