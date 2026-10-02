@@ -1365,6 +1365,9 @@ public:
     virtual FaceCull    nodeFaceCull(NodeId) const = 0;
     /// Cull twins alive in this scene right now (a diagnostic: mirror.cull_twin).
     virtual unsigned    cullTwinCount() const = 0;
+    /// Twins waiting for the sweep (a diagnostic: mirror.cull_twin) — never more
+    /// than the twins alive, drawn or not.
+    virtual unsigned    cullTwinCandidateCount() const = 0;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
     /// Applies the reflection state idempotently. Pushing the same params twice is

@@ -2,8 +2,8 @@
 // verbs that bind them onto a node.
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"
+#include <algorithm>
 #include <cmath>
-#include <unordered_set>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -2358,6 +2358,9 @@ void OgreScene::destroyCullTwin(MaterialRec &rec, CullTwin &t) {
     if (t.datablockName.empty()) return;
     Ogre::Hlms *hlms = hlmsFor(rec);
     if (Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(t.datablockName))) {
+        if (t.candidate)   // the list holds each twin once; a dead one leaves it now
+            mTwinCandidates.erase(std::remove(mTwinCandidates.begin(), mTwinCandidates.end(), db),
+                                  mTwinCandidates.end());
         mTwinOwners.erase(db);
         noteGiDatablockDied(db);   // the voxelisers cache conversions by pointer
         forgetDecodeTwinOf(db);    // its decode twin dies first (HlmsAtom.h)
@@ -2372,9 +2375,13 @@ void OgreScene::destroyCullTwins(MaterialRec &rec) {
 }
 
 void OgreScene::noteTwinLetGo(const Ogre::HlmsDatablock *db) {
-    if (!db || mTwinOwners.empty() || !mTwinOwners.count(db)) return;
-    mTwinCandidates.push_back(db);
+    if (!db || mTwinOwners.empty()) return;
+    auto it = mTwinOwners.find(db);
+    if (it == mTwinOwners.end()) return;
     mCullTwinSweep = true;
+    if (it->second.twin->candidate) return;   // listed already: the list stays bounded
+    it->second.twin->candidate = true;
+    mTwinCandidates.push_back(db);
 }
 
 void OgreScene::noteTwinsLetGo(const Ogre::Item *item) {
@@ -2408,15 +2415,14 @@ void OgreScene::sweepCullTwins() {
     mCullTwinSweep = false;
     JAH_TRY {
         std::vector<const Ogre::HlmsDatablock *> keep;
-        std::unordered_set<const Ogre::HlmsDatablock *> seen;
         for (const Ogre::HlmsDatablock *db : mTwinCandidates) {
-            if (!seen.insert(db).second) continue;
             auto it = mTwinOwners.find(db);
-            if (it == mTwinOwners.end()) continue;   // died since (its material went)
+            if (it == mTwinOwners.end()) continue;   // (a dead twin leaves the list as it dies)
             CullTwin &t = *it->second.twin;
-            if (!db->getLinkedRenderables().empty()) { t.unwornSince = 0; continue; }
+            if (!db->getLinkedRenderables().empty()) { t.unwornSince = 0; t.candidate = false; continue; }
             if (!t.unwornSince) t.unwornSince = mCullSweepTick + 1u;
             if (mCullSweepTick + 1u - t.unwornSince >= kCullTwinGraceFrames) {
+                t.candidate = false;   // off the list by the swap below, not by destroyCullTwin
                 destroyCullTwin(*it->second.rec, t);
                 continue;
             }

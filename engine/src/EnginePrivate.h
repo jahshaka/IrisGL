@@ -4023,6 +4023,7 @@ public:
     void setNodeFaceCull(NodeId id, FaceCull cull) override;
     FaceCull nodeFaceCull(NodeId id) const override;
     unsigned cullTwinCount() const override { return mCullTwinCount; }
+    unsigned cullTwinCandidateCount() const override { return unsigned(mTwinCandidates.size()); }
     /// THE CULL TWINS' SWEEP (CULL-MODE-2; CULL-TWIN-DEBTS-1): destroys a twin that
     /// no renderable has worn for kCullTwinGraceFrames of this scene's frames. It
     /// visits only the CANDIDATES — twins an Item let go of since (noteTwinLetGo) —
@@ -4664,6 +4665,9 @@ private:
         /// The sweep tick (+1) at which the sweep first found it unworn; 0 = worn
         /// (or not looked at since it was last worn).
         unsigned long long unwornSince = 0;
+        /// Listed in mTwinCandidates — ONCE: the list is bounded by the live twins,
+        /// however many let-gos a scene that is never drawn (so never swept) sees.
+        bool candidate = false;
     };
     struct MaterialRec {
         std::string datablockName;
@@ -4911,8 +4915,8 @@ private:
     /// Every live twin's datablock -> its record and slot (the candidates' lookup).
     struct TwinOwner { MaterialRec *rec = nullptr; CullTwin *twin = nullptr; };
     std::unordered_map<const Ogre::HlmsDatablock *, TwinOwner> mTwinOwners;
-    /// Twins let go of since the sweep last settled them (may repeat; resolved
-    /// through mTwinOwners, so a dead one simply drops out).
+    /// Twins let go of since the sweep last settled them: each live twin at most
+    /// once (CullTwin::candidate), a destroyed one taken out as it dies.
     std::vector<const Ogre::HlmsDatablock *> mTwinCandidates;
     /// This scene's sweep calls (one per drawn frame): the grace clock.
     unsigned long long mCullSweepTick = 0;
