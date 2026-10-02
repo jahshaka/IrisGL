@@ -31,6 +31,12 @@ For more information see the LICENSE file
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <pthread.h>
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #if defined(__GLIBC__)
 #include <malloc.h>   // malloc_trim — bakeStages hands the pool threads' freed arenas back
 #endif
@@ -1272,6 +1278,20 @@ private:
 
     void worker()
     {
+        // AT IDLE PRIORITY (BAKE-WIDTH-2). A bake is background work the person did not
+        // ask to watch; the render loop and the UI thread are what they are looking at.
+        // D7 measured the editor's frame p95 at 2-5x idle while a temple baked on 20
+        // threads at the default priority. The lowest NICE on Linux (per thread: a
+        // weight of 15 against the render threads' 1024) — not SCHED_IDLE, which starves
+        // outright under any other load (a gate's own nice-19 suites included) and would
+        // turn every concurrent bake into a single-threaded one; the BACKGROUND QoS class
+        // on macOS. The caller (slot 0) is the import's own worker and keeps its
+        // priority: a bake always progresses.
+#if defined(__linux__)
+        setpriority(PRIO_PROCESS, pid_t(syscall(SYS_gettid)), 19);
+#elif defined(__APPLE__)
+        pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+#endif
         std::unique_lock<std::mutex> lock(mMutex);
         for (;;) {
             Job *job = nullptr;
