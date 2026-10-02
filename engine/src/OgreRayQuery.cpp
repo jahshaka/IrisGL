@@ -8256,7 +8256,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     std::string err;
     // x = capacity, y = grid width, z/w = the consumers bound; then the reflection's
     // media along its ray (PHOTON-I-1 fix 5, OgreScene::fogAlong).
-    struct CompositeParams { float list[4]; float fog[8][4]; };
+    struct CompositeParams { float list[4] = {}; float fog[8][4] = {}; };
     if (!hv.params[ring].buffer &&
         !makeBuffer(sizeof(CompositeParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, hv.params[ring], err))
         return;
