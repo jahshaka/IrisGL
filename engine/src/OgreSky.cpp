@@ -541,6 +541,41 @@ void OgreScene::noteAtmosphereObserver(float cameraY) {
     } JAH_CATCH(mError, );
 }
 
+// THE FOG ALONG A REFLECTION (PHOTON-I-1 fix 5): what the colour passes compile
+// and read, so the ray jobs fog a reflection with the passes' own media. The
+// conditions are the passes': `hlms_fog` while the component is registered on the
+// manager (syncAtmosphere), the air's branch (`jah_atmo_ap`) while the fog state
+// says the atmosphere is the sky AND its table is claimed (FogHlmsListener::
+// hlmsTypeChanged), the height fog's variant while it is on.
+void OgreScene::fogAlong(float out[8][4], Ogre::TextureGpu *&aerial) const {
+    for (int i = 0; i < 8; ++i)
+        for (int k = 0; k < 4; ++k) out[i][k] = 0.0f;
+    aerial = nullptr;
+    // A MEASUREMENT DOOR (gi.reflect_fog --cost, read per frame so one process holds
+    // both arms): the reflection fogged by nothing, the picture before the fix.
+    if (std::getenv("JAHSHAKA_REFLECT_FOG_OFF")) return;
+    if (!mAtmosphere || !mSceneMgr || mSceneMgr->getAtmosphereRaw() != mAtmosphere) return;
+    const FogState f = FogHlmsListener::lookup(mSceneMgr);
+    const bool airRead = mAtmoSkyOn && mAtmosphere->aerialScale() > 0.0f;
+    const bool ap = f.atmosphere && mAtmoSkyOn && (airRead || mAtmoFogOn) && mAtmosphere->aerialLut();
+    float g[JahAtmosphere::kSettingsFloats];
+    mAtmosphere->settingsFloats(g);
+    out[0][0] = f.r; out[0][1] = f.g; out[0][2] = f.b; out[0][3] = f.heightDensity;
+    out[1][0] = f.heightFalloff; out[1][1] = f.heightLevel; out[1][2] = ap ? 1.0f : 0.0f;
+    out[1][3] = f.distanceDensity;
+    for (int k = 0; k < 4; ++k) out[2][k] = g[k];            // density, the breakthrough pair, aerial scale
+    for (int k = 0; k < 3; ++k) out[3][k] = g[4 + k];        // skyE
+    out[3][3] = 1.0f;                                         // hlms_fog
+    for (int k = 0; k < 4; ++k) {
+        out[4][k] = g[8 + k];                                 // sunDir
+        out[5][k] = g[12 + k];                                // planet
+        out[6][k] = g[16 + k];                                // heightFog
+        out[7][k] = g[20 + k];                                // heightFogColour
+    }
+    out[7][3] = mAtmosphere->heightFogOn() ? 1.0f : 0.0f;     // jah_height_fog
+    if (ap) aerial = mAtmosphere->aerialLut();
+}
+
 void OgreScene::updateAtmosphere() {
     if (!mAtmosphere) return;
     JAH_TRY {

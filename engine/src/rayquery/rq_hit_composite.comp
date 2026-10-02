@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 // THE HIT WRITE-BACK (PHOTON-HIT-SHADE-1; SPECS/atom/D2_HIT_SHADING_DESIGN.md
 // section 2.3 with the lead's F3).
 //
@@ -35,6 +36,9 @@ layout( set = 0, binding = 0 ) uniform Params
 	/// x = the list's capacity, y = its grid width, z = 1 when the reflection's
 	/// history is bound, w = 1 when the gather's atlas is bound.
 	vec4 list;
+	/// THE MEDIA ALONG A REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's
+	/// eight, the reflection's own (jah_fog_along.glsl).
+	vec4 fog[8];
 } p;
 /// The list's buffer: [0] the records appended, then two words per record from
 /// word 4 (jah_rq_hit_record.glsl) — this job reads the second, the weight.
@@ -42,8 +46,26 @@ layout( std430, set = 0, binding = 1 ) readonly buffer JahHitBuf { uint jahHitBu
 layout( set = 0, binding = 2 ) uniform usampler2D jahHitDest;
 layout( set = 0, binding = 3 ) uniform sampler2D jahHitRadiance;
 layout( rgba16f, set = 0, binding = 4 ) uniform image2D historyCur;
-layout( rg32f, set = 0, binding = 5 ) uniform image2D historyDistCur;
+layout( rgba32f, set = 0, binding = 5 ) uniform image2D historyDistCur;
 layout( rgba16f, set = 0, binding = 6 ) uniform image2D probeAtlas;
+/// The list's records (the ray's direction, jah_rq_hit_record.glsl) and the air's
+/// table — the reflection's fog along its ray (PHOTON-I-1 fix 5).
+layout( rgba32ui, set = 0, binding = 7 ) uniform readonly uimage2D jahHitIds;
+layout( set = 0, binding = 8 ) uniform sampler3D fogAerial;
+#define JAH_FOG_P( k ) p.fog[k]
+#define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
+#include "jah_atmosphere.glsl"
+#include "jah_height_fog.glsl"
+#include "jah_fog_along.glsl"
+
+/// The record's direction (jah_rq_hit_record.glsl jahOctEncode, inverted).
+vec3 jahOctDecodeDir( vec2 e )
+{
+	vec3 n = vec3( e, 1.0 - abs( e.x ) - abs( e.y ) );
+	if( n.z < 0.0 )
+		n.xy = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 );
+	return normalize( n );
+}
 
 /// rq_reflect.comp's ceiling and warm-up, the same numbers (jah_rq_hit.glsl's
 /// kMaxRadiance; rq_reflect.comp's kWarmupFrames).
@@ -86,17 +108,21 @@ void main()
 		any( greaterThanEqual( xy, imageSize( historyDistCur ) ) ) )
 		return;
 	const vec4 prev = imageLoad( historyCur, xy );
+	const vec4 d = imageLoad( historyDistCur, xy );
 	if( shaded )
 	{
 		const bool warmHeld = weight < 0.0;
 		const float blend = clamp( abs( weight ), 0.0, 1.0 );
 		const float seed = max( prev.w, warmHeld ? kWarmupFrames : 0.0 );
 		const float count = min( seed + 1.0, 4096.0 );
-		imageStore( historyCur, xy, vec4( mix( prev.xyz, radiance, blend ), count ) );
+		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): the decoded light crossed
+		// the ray's length (the trace left it in z, the ray's origin height in w)
+		// before the surface reflected it — rq_reflect.comp fogs a card's, a voxel's
+		// and the sky's the same way.
+		const vec3 dir = jahOctDecodeDir( unpackSnorm2x16( imageLoad( jahHitIds, at ).w ) );
+		const vec3 fogged = d.z > 0.0 ? jahFogAlong( radiance, d.w, dir, d.z ) : radiance;
+		imageStore( historyCur, xy, vec4( mix( prev.xyz, fogged, blend ), count ) );
 	}
 	else
-	{
-		const vec4 d = imageLoad( historyDistCur, xy );
-		imageStore( historyDistCur, xy, vec4( prev.w > 0.0 ? d.x : 0.0, d.y, 0.0, 0.0 ) );
-	}
+		imageStore( historyDistCur, xy, vec4( prev.w > 0.0 ? d.x : 0.0, d.y, d.z, d.w ) );
 }

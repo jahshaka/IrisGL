@@ -3321,6 +3321,13 @@ public:
     /// The scene's driving camera's world height (the GI driver's rule), once a
     /// frame: the atmosphere's observer altitude, banded (Atmosphere.h).
     void noteAtmosphereObserver(float cameraY);
+    /// THE MEDIA A RAY CROSSES THAT DID NOT START AT THE EYE (PHOTON-I-1 fix 5;
+    /// src/rayquery/include/jah_fog_along.glsl states the layout): the World fog,
+    /// its height layer, the air and the height fog exactly as this scene's PBS
+    /// colour passes read them (the fog state, the atmosphere's const buffer and
+    /// whether the passes compile each medium in), as eight vec4; `aerial` is the
+    /// air's table when the passes read it, else null.
+    void fogAlong(float out[8][4], Ogre::TextureGpu *&aerial) const;
     /// The observer altitude (km) the environment was last re-captured for
     /// because the observer moved (noteAtmosphereObserver: past an octave).
     float mAtmoCapturedObserverKm = 0.05f;

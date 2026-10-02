@@ -150,6 +150,11 @@ public:
     Ogre::Vector3 skyRadianceScale() const { return topIlluminance() * mSkyBrightness; }
     Ogre::TextureGpu *skyViewLut() const { return mSkyView; }   // the sky quad's alone
     Ogre::TextureGpu *aerialLut() const { return mAerial; }
+    /// The const buffer the passes read (JahFog's `JahAtmoSettings`), as floats:
+    /// fog density, the breakthrough pair, aerial scale; skyE; sunDir; planet;
+    /// heightFog; heightFogColour.
+    static constexpr unsigned kSettingsFloats = 24u;
+    void settingsFloats(float out[kSettingsFloats]) const;
     AtmosphereStatus status() const;
     unsigned observerRebuilds() const { return mObserverRebuilds; }
     bool measure(unsigned iterations, AtmosphereCost &out);

@@ -12,6 +12,8 @@
 #include "EnginePrivate.h"
 #include "Atmosphere.h"
 
+#include <cstring>
+
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsPbs.h>
 #include <Cubemaps/OgreParallaxCorrectedCubemapBase.h>
@@ -436,6 +438,15 @@ void JahAtmosphere::handOver() {
 }
 
 void JahAtmosphere::uploadSettings() {
+    float g[kSettingsFloats];
+    settingsFloats(g);
+    mBuffer->upload(g, 0u, sizeof(g));
+}
+
+// THE CONST BUFFER'S CONTENTS, ONCE: what HlmsPbs's passes read (uploadSettings)
+// and what the ray jobs' fog along a reflection reads (OgreScene::fogAlong).
+void JahAtmosphere::settingsFloats(float out[kSettingsFloats]) const {
+    static_assert(sizeof(AtmoSettingsGpu) == kSettingsFloats * sizeof(float), "the settings block's size");
     AtmoSettingsGpu g{};
     // THE FOG BLOCK IN UPSTREAM'S PACKING (AtmosphereNpr::_update): the
     // breakthrough as min x falloff and -falloff, so the stock block's
@@ -455,7 +466,7 @@ void JahAtmosphere::uploadSettings() {
     for (int i = 0; i < 4; ++i) g.heightFog[i] = mHfOn ? mHf[i] : 0.0f;
     g.heightFogColour[0] = mHfColour.x; g.heightFogColour[1] = mHfColour.y;
     g.heightFogColour[2] = mHfColour.z; g.heightFogColour[3] = 0.0f;
-    mBuffer->upload(&g, 0u, sizeof(g));
+    std::memcpy(out, &g, sizeof(g));
 }
 
 void JahAtmosphere::pushQuadConstants() {
