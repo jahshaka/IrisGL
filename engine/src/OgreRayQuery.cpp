@@ -1198,8 +1198,9 @@ public:
 private:
     struct HitView {
         /// The list's buffer: [0] records appended (may pass the capacity), [1]
-        /// records dropped, then two words per record (the sun, the footprint, the
-        /// weight — jah_rq_hit_record.glsl). An Ogre UAV buffer: HlmsAtom reads it
+        /// records dropped, then four words per record (the sun, the footprint, the
+        /// weight, the ray's origin height, its length and the eye's distance to
+        /// its origin — jah_rq_hit_record.glsl). An Ogre UAV buffer: HlmsAtom reads it
         /// through a read-only view (a buffer, not an image: the decode's pixel
         /// shader's pass textures already reach the pin's table's end —
         /// kHitBufSlot, HlmsAtom.h).
@@ -4715,10 +4716,10 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h,
     rv.w = w; rv.h = h;
     // The second image: x = the surface's distance (the reprojection's validity
     // test), y = the mean distance the rays in the mean travelled (what a moved
-    // camera's ray is compared against — rq_reflect.comp, PAN-SMEAR-1), z and w a
-    // RECORD's ray length and origin height this frame (its write-back's fog along
-    // the reflection, PHOTON-I-1 fix 5). 16 bytes a trace texel.
-    const VkFormat formats[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT };
+    // camera's ray is compared against — rq_reflect.comp, PAN-SMEAR-1). 8 bytes a
+    // trace texel: a record's ray length and origin height ride the RECORD
+    // (jah_rq_hit_record.glsl), never a full-resolution image.
+    const VkFormat formats[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32_SFLOAT };
     for (int i = 0; i < 2; ++i) {
         if (!makeStorageImage(w, h, formats[0], rv.hist[i], err)) return false;
         if (!makeStorageImage(w, h, formats[1], rv.dist[i], err)) return false;
@@ -7845,7 +7846,7 @@ bool RayQueryTier::ensureHitDummies(std::string &err) {
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32B32A32_UINT, mHitDummyIds, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyColour, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32_UINT, mHitDummyDest, err)) return false;
-    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32B32A32_SFLOAT, mHitDummyDist, err)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_SFLOAT, mHitDummyDist, err)) return false;
     mHitDummiesReady = true;
     mHitDummiesNeedInit = true;
     return true;
@@ -7927,11 +7928,11 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
     if (!instances) return false;
     Ogre::VaoManager *vao = mRs->getVaoManager();
-    // THE LIST'S BUFFER, sized to the list: the four counter words, then two per
-    // record. Re-made when the list grows (Ogre's destroy is delayed past every
+    // THE LIST'S BUFFER, sized to the list: the four counter words, then four per
+    // record (jah_rq_hit_record.glsl kJahHitAuxWords). Re-made when the list grows (Ogre's destroy is delayed past every
     // frame in flight; every reader re-reads `hv.buf` before it binds).
     {
-        const size_t words = 4u + 2u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
+        const size_t words = 4u + 4u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
         if (hv.buf && hv.buf->getNumElements() < words) {
             vao->destroyUavBuffer(hv.buf);
             hv.buf = nullptr;
@@ -8457,14 +8458,14 @@ void OgreEngine::setRayTracing(bool on) {
 // rayReflect, the cards' Auto, the status) reads that same answer.
 //
 // JAHSHAKA_RAY_DENY_STORAGE_FORMAT names a format (R16G16B16A16_SFLOAT or
-// R32G32B32A32_SFLOAT) to treat as unsupported: FAULT INJECTION, the refusal path's
+// R32G32_SFLOAT) to treat as unsupported: FAULT INJECTION, the refusal path's
 // only door on conformant hardware (a measurement switch for
 // gi.rt_reflect_format_refused_lavapipe, not a mode).
 namespace {
 struct RayStorageFormat { VkFormat format{}; const char *name{}; };
 constexpr RayStorageFormat kRayStorageFormats[] = {
     { VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT" },   // the reflection mean, the gather atlas
-    { VK_FORMAT_R32G32B32A32_SFLOAT, "R32G32B32A32_SFLOAT" },   // the reflection's distances
+    { VK_FORMAT_R32G32_SFLOAT,       "R32G32_SFLOAT" },         // the reflection's distance pair
 };
 
 /// Empty when every format stores; otherwise the first one that does not.

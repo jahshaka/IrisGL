@@ -46,7 +46,7 @@ layout( std430, set = 0, binding = 1 ) readonly buffer JahHitBuf { uint jahHitBu
 layout( set = 0, binding = 2 ) uniform usampler2D jahHitDest;
 layout( set = 0, binding = 3 ) uniform sampler2D jahHitRadiance;
 layout( rgba16f, set = 0, binding = 4 ) uniform image2D historyCur;
-layout( rgba32f, set = 0, binding = 5 ) uniform image2D historyDistCur;
+layout( rg32f, set = 0, binding = 5 ) uniform image2D historyDistCur;
 layout( rgba16f, set = 0, binding = 6 ) uniform image2D probeAtlas;
 /// The list's records (the ray's direction, jah_rq_hit_record.glsl) and the air's
 /// table — the reflection's fog along its ray (PHOTON-I-1 fix 5).
@@ -89,7 +89,9 @@ void main()
 	const uint w = max( uint( p.list.y ), 1u );
 	const ivec2 at = ivec2( int( i % w ), int( i / w ) );
 	const uint dest = texelFetch( jahHitDest, at, 0 ).x;
-	const float weight = uintBitsToFloat( jahHitBuf[4u + 2u * i + 1u] );
+	// The record's words (jah_rq_hit_record.glsl: kJahHitAuxBase 4, four a record).
+	const uint aux = 4u + 4u * i;
+	const float weight = uintBitsToFloat( jahHitBuf[aux + 1u] );
 	const vec4 rad = texelFetch( jahHitRadiance, at, 0 );
 	const bool shaded = rad.w > 0.5 && finite3( rad.xyz );
 	const vec3 radiance = shaded ? clamp( rad.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
@@ -108,21 +110,25 @@ void main()
 		any( greaterThanEqual( xy, imageSize( historyDistCur ) ) ) )
 		return;
 	const vec4 prev = imageLoad( historyCur, xy );
-	const vec4 d = imageLoad( historyDistCur, xy );
 	if( shaded )
 	{
 		const bool warmHeld = weight < 0.0;
 		const float blend = clamp( abs( weight ), 0.0, 1.0 );
 		const float seed = max( prev.w, warmHeld ? kWarmupFrames : 0.0 );
 		const float count = min( seed + 1.0, 4096.0 );
-		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): the decoded light crossed
-		// the ray's length (the trace left it in z, the ray's origin height in w)
-		// before the surface reflected it — rq_reflect.comp fogs a card's, a voxel's
+		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1): the decoded light crossed the
+		// ray's length before the surface reflected it — the RECORD carries the ray's
+		// origin height and length — and rq_reflect.comp fogs a card's, a voxel's
 		// and the sky's the same way.
 		const vec3 dir = jahOctDecodeDir( unpackSnorm2x16( imageLoad( jahHitIds, at ).w ) );
-		const vec3 fogged = d.z > 0.0 ? jahFogAlong( radiance, d.w, dir, d.z ) : radiance;
+		const float originY = uintBitsToFloat( jahHitBuf[aux + 2u] );
+		const vec2 lengths = unpackHalf2x16( jahHitBuf[aux + 3u] );
+		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x );
 		imageStore( historyCur, xy, vec4( mix( prev.xyz, fogged, blend ), count ) );
 	}
 	else
-		imageStore( historyDistCur, xy, vec4( prev.w > 0.0 ? d.x : 0.0, d.y, d.z, d.w ) );
+	{
+		const vec4 d = imageLoad( historyDistCur, xy );
+		imageStore( historyDistCur, xy, vec4( prev.w > 0.0 ? d.x : 0.0, d.y, 0.0, 0.0 ) );
+	}
 }
