@@ -746,14 +746,6 @@ namespace Ogre
             if( mLightVctBounceInject->getProperty( "jah_env" ) != envOn )
                 mLightVctBounceInject->setProperty( "jah_env", envOn );
         }
-        // Jahshaka (PHOTON-VOXEL-4, CONE-SET-1): THE PIXEL'S CONE SET. The bounce is the
-        // store's own integral of the diffuse the pixel reads, so it walks the pixel's
-        // cones - kConeDirs, the pixel's `vct_cone_dirs` (the surface cache's card job
-        // reads the same constant). It carried the six-cone set hard-coded while the
-        // pixel and the cards ran four: two quadratures of one store, the bounce's
-        // error not the pixel's.
-        if( mLightVctBounceInject->getProperty( "vct_cone_dirs" ) != kConeDirs )
-            mLightVctBounceInject->setProperty( "vct_cone_dirs", kConeDirs );
         if( mEnvCube )
         {
             texSlot.texture = mEnvCube;

@@ -477,11 +477,6 @@ namespace Ogre
         uint32       getNumVoxelTextures() const { return volumesPerCascade( mAnisotropic ); }
         /// Jahshaka (OWN-GI-1): the same count without an instance — what the PBS
         /// pass claims per cascade (PhotonPassBinding) and the pass budget is sized on.
-        /// Jahshaka (OWN-GI-1): THE CONE SET every reader of the store walks — the
-        /// pixel (`vct_cone_dirs`, PhotonPassBinding), the bounce injection and the
-        /// cards' light job. Four. Upstream's HlmsPbs::setVctFullConeCount (six) is
-        /// never called by the engine, so it is not read either.
-        static constexpr int32 kConeDirs = 4;
         static constexpr uint32 kVolumesPerCascadeIsotropic = 5u;
         static constexpr uint32 kVolumesPerCascadeAnisotropic = 10u;
         static constexpr uint32 volumesPerCascade( bool anisotropic )

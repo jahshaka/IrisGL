@@ -20,8 +20,6 @@
 //
 // HOW A CALLER BINDS IT — the march's macros and the environment's, and:
 //
-//     JAH_CONES_SIX           1 = the six-cone set (HlmsPbs's vct_cone_dirs 6,
-//                             setVctFullConeCount), 0 = the four-cone set
 //     JAH_CONES_TO_LS(d)      a direction in the BASIS's space (the space the
 //                             caller built the cone frame in) to cascade 0's
 //                             normalised space, unit length
@@ -146,10 +144,9 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 ///            are read) times the one environment IN THAT CONE'S DIRECTION AT
 ///            THAT CONE'S APERTURE, weighted — radiance, in whatever units the
 ///            caller bound the environment in
-/// THE TWO CONE SETS: six cones (one on the normal weighted 0.25, five at 60
-/// degrees weighted 0.15, tan of the half angle 0.577 = 30 degrees) or four
-/// (at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees). The engine leaves
-/// HlmsPbs at four. The weights carry the cosine.
+/// THE CONE SET: four cones at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees
+/// (the one set: upstream's six-cone alternative is deleted, SIX-CONE-DEAD-1). The
+/// weights carry the cosine.
 ///
 /// THE ESCAPE READS THE DIFFUSE ENVIRONMENT AT THE SET'S OWN BAND WEIGHTS
 /// (CARD-VIEW-BIAS-1). What the escapes estimate is the cosine integral of the sky
@@ -167,18 +164,6 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 					  out vec3 light, out vec3 envD )
 {
-#if JAH_CONES_SIX
-	const int kCones = 6;
-	const vec3 coneDirs[6] = vec3[6]( vec3( 0.0, 0.0, 1.0 ),
-									  vec3( 0.866025, 0.0, 0.5 ),
-									  vec3( 0.267617, 0.823639, 0.5 ),
-									  vec3( -0.700629, 0.509037, 0.5 ),
-									  vec3( -0.700629, -0.509037, 0.5 ),
-									  vec3( 0.267617, -0.823639, 0.5 ) );
-	const float coneWeights[6] = float[6]( 0.25, 0.15, 0.15, 0.15, 0.15, 0.15 );
-	const float coneAngleTan = 0.577;
-	const uint coneFlags = 0u;
-#else
 	const int kCones = 4;
 	const vec3 coneDirs[4] = vec3[4]( vec3( 0.707107, 0.0, 0.707107 ),
 									  vec3( 0.0, 0.707107, 0.707107 ),
@@ -187,7 +172,6 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 	const float coneWeights[4] = float[4]( 0.25, 0.25, 0.25, 0.25 );
 	const float coneAngleTan = 0.98269;
 	const uint coneFlags = 0u;
-#endif
 	// the set's band weights: 1 / P_l( cos 45 ) (the comment above)
 	const float kBand1 = 1.41421356;
 	const float kBand2 = 4.0;
@@ -207,7 +191,7 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 
 /// THE SKY'S SHARE ON A FINER QUADRATURE (CONTACT-OCCLUSION-1): what jahDiffuseCones'
 /// `envD` estimates, on sixteen 20.4-degree cones instead of the set's four 44.5-degree
-/// (or six 30-degree) ones - cosine-distributed, four rings of four, equal weights (each
+/// ones - cosine-distributed, four rings of four, equal weights (each
 /// the same projected solid angle), the ring below the horizon's rim stopped by the
 /// surface (jahConeBelow), over the same march and the same environment lookup.
 ///

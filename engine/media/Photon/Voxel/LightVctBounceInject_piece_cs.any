@@ -77,20 +77,15 @@
 	@insertpiece( JahDiffuseAlbedo )
 
 	// THE ONE DIFFUSE CONE INTEGRATOR (Jahshaka, PHOTON-CARDS-2; jah_voxel_cones.glsl,
-	// wrapped into the piece JahVoxelCones): the cone frame, the pixel's cone set
-	// (the job's vct_cone_dirs, set by VctLighting from HlmsPbs - PHOTON-VOXEL-4,
-	// CONE-SET-1: it was the six-cone set hard-coded), its weights and aperture, the start bias and the escape weight - the text the pixel
+	// wrapped into the piece JahVoxelCones): the cone frame, the one cone set (four;
+	// it was a hard-coded six-cone set until CONE-SET-1, and the six-cone branch is
+	// deleted - SIX-CONE-DEAD-1), its weights and aperture, the start bias and the escape weight - the text the pixel
 	// shader and the surface cache's card job run. This job used to carry its own
 	// integrator: a cross-product frame about world X (a different azimuth from the
 	// pixel's for every normal), and the volume's normalised axes taken for the
 	// world's (true only for a cubic box). The frame is now built from the WORLD
 	// normal, and a world direction reaches the volume's normalised space through the
 	// box's size (the cell size over the inverse resolution).
-	@property( vct_cone_dirs == 6 )
-		#define JAH_CONES_SIX 1
-	@else
-		#define JAH_CONES_SIX 0
-	@end
 	#define JAH_CONES_TO_LS( d ) normalize( ( d ) * ( p_invVoxelResolution / p_voxelCellSize ) )
 	#define JAH_CONES_TO_WORLD( d ) ( d )
 	@insertpiece( JahVoxelCones )

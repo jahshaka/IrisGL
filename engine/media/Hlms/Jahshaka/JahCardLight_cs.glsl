@@ -256,11 +256,6 @@ layout( local_size_x = @value( threads_per_group_x ),
 	// construction, brought back to world axes), a world direction reaches the
 	// volume's normalised space through the box, and the environment is read in
 	// world axes as it is.
-	@property( vct_cone_dirs == 6 )
-		#define JAH_CONES_SIX 1
-	@else
-		#define JAH_CONES_SIX 0
-	@end
 	#define JAH_CONES_TO_LS( d ) normalize( ( d ) * gp.volumeInvSize.xyz )
 	#define JAH_CONES_TO_WORLD( d ) ( d )
 	@insertpiece( JahVoxelCones )
