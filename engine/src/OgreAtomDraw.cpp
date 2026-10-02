@@ -139,7 +139,7 @@ public:
         if (!pass || pass->getType() != Ogre::PASS_SCENE || !mView) return;
         const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
         if (!def || def->mIdentifier != kScreenDecodePassIdentifier) return;
-        // A MEASUREMENT SWITCH, never a mode (JAHSHAKA_HIT_LIST_OFF's kind): the
+        // A MEASUREMENT SWITCH, never a mode (engine.atom_draw reads it): the
         // decode left unarmed, so the Atom items are drawn by NOTHING in this pass —
         // engine.atom_draw's proof that the view's passes really skip their queue.
         if (std::getenv("JAHSHAKA_ATOM_DECODE_OFF")) return;

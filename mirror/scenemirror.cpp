@@ -4434,7 +4434,6 @@ quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMate
           << pbr->normalFactor
           << pbr->textureScale << pbr->textureScaleV
           << pbr->textureOffsetU << pbr->textureOffsetV << pbr->textureRotation
-          << int(pbr->renderStates.rasterState.cullMode)
           << pbr->shadingModel << pbr->brdf
           << pbr->clearCoat << pbr->clearCoatRoughness
           << pbr->receiveShadows << pbr->emissiveAsLightmap
@@ -4685,7 +4684,8 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.uvOffset[0]     = pbr->textureOffsetU;
         out.uvOffset[1]     = pbr->textureOffsetV;
         out.uvRotation      = pbr->textureRotation;
-        out.twoSided        = pbr->renderStates.rasterState.cullMode == iris::CullMode::None;
+        // No cull here: a document material has none of its own — the NODE's face
+        // cull is the authority (CULL-MODE-2).
         // HLMS_ADOPTION P1. The BRDF crosses as a NAME, never as the document's
         // index and never as the renderer's enum value: the index is a document
         // convention and the enum is a renderer bitfield, and the boundary

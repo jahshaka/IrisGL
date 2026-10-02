@@ -179,12 +179,6 @@ void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::Pie
 #endif
 }
 
-// THE DIAGNOSTIC LATCH, READ ONCE (the lead's fix-round item 5). This file asked
-// `getenv("JAHSHAKA_GI_DEBUG")` at sixteen sites, several of them per cascade
-// per rebuild; the answer cannot change inside a process, so it is read on the
-// first call and kept. Function-local rather than a namespace-scope global so
-// the read happens on first use and not in a static initialiser whose order
-// against Ogre's own is nobody's to promise.
 /// EVERY VOXELISER READS THE SCENE'S GEOMETRY ROW TABLE (ATOM P4b), and it is bound
 /// IMMEDIATELY BEFORE EVERY BUILD, never once at construction.
 ///
@@ -384,11 +378,6 @@ const detail::VoxelReading &OgreScene::currentReading(detail::VoxelFeed *feed) {
 void OgreScene::serviceVoxelReadouts() {
     for (VctCascade &c : mVctCascades)
         if (c.feed) c.feed->serviceReadout();
-}
-
-static bool giDebug() {
-    static const bool on = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
-    return on;
 }
 
 /// GiToggle::Auto defers to the quality dial; Off/On pin it either way. Exists
@@ -1676,10 +1665,6 @@ void OgreScene::settleTextureResidency() {
         // re-reads every converted datablock IN PLACE (convertPendingMaterials) - the
         // slots stay, so every instance's material word stays valid.
         mVctMaterialRefreshOwed = true;
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: material generation -> " + std::to_string(mGiMaterialGeneration) +
-                " (a voxel-input texture finished streaming)");
     }
 }
 
@@ -1728,10 +1713,6 @@ void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
     if (bumpVoxels) {
         ++mGiMaterialGeneration;
         mVctMaterialRefreshOwed = true;   // see the sibling above
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: material generation -> " + std::to_string(mGiMaterialGeneration) +
-                " (material " + std::to_string((unsigned long long)id) + " changed a voxel input)");
     }
 }
 
@@ -2469,7 +2450,6 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
     const Ogre::Aabb padded(region.mCenter, region.mHalfSize * kClampPad);
     const Ogre::Vector3 rmn = padded.getMinimum(), rmx = padded.getMaximum();
     const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
-    const bool debug = giDebug();
     mProbesClampedToRegion = 0;
     for (size_t i = 0; i < probes.size(); ++i) {
         Ogre::CubemapProbe *p = probes[i];
@@ -2505,15 +2485,6 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
         const Ogre::Aabb clamped = Ogre::Aabb::newFromExtents(cmn, cmx);
         p->set(cam, area, p->getAreaInnerRegion(), p->getOrientation(), clamped,
                /*bValuesAlreadyPadded*/ true);   // fork 618d95cca (was 0049)
-        if (debug) {
-            const auto toS = [](const Ogre::Vector3 &v) {
-                return Ogre::StringConverter::toString(v);
-            };
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI:  probe " + std::to_string(i) + " shape CLAMPED to region: " +
-                toS(smn) + " .. " + toS(smx) + "  ->  " + toS(cmn) + " .. " + toS(cmx) +
-                (degenerate ? "  (fit had left the region on some axis)" : ""));
-        }
     }
 }
 
@@ -2626,25 +2597,6 @@ void OgreScene::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
     // ONE STORE, ONE EVICTION (A5b §2). This used to be the head voxeliser's store and
     // then every cascade's, one by one, because each owned its own cache.
     if (mVctMaterialStore) mVctMaterialStore->removeDatablock(dying);
-}
-
-// The stale reasons by name, for the JAHSHAKA_GI_DEBUG log alone (the monitor
-// has its own mapping to WorkReason, and the host's to a script string).
-static const char *giStaleReasonName(GiStaleReason r) {
-    switch (r) {
-    case GiStaleReason::None:     return "none";
-    case GiStaleReason::Rebuild:  return "rebuild";
-    case GiStaleReason::Refresh:  return "refresh";
-    case GiStaleReason::Moved:    return "moved";
-    case GiStaleReason::Light:    return "light";
-    case GiStaleReason::Material: return "material";
-    case GiStaleReason::Sky:      return "sky";
-    case GiStaleReason::Ambient:  return "ambient";
-    case GiStaleReason::Fog:      return "fog";
-    case GiStaleReason::Mobility: return "mobility";
-    case GiStaleReason::Camera:   return "camera";
-    }
-    return "?";
 }
 
 // The cascades the recorded dirty region can be seen from, marked `pending`.
@@ -2883,15 +2835,6 @@ bool OgreScene::refreshCascadesFast() {
             mLastStaleReason = GiStaleReason::Refresh;
             ++mStaleSerial;
         }
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: cascade refresh marked " + std::to_string(marked) + " of " +
-                std::to_string(mVctCascades.size()) +
-                " cascades pending (one per frame); nothing was torn down — reason " +
-                std::string(giStaleReasonName(mLastStaleReason)) +
-                ", dirtyAll " + (dirtyAllNow ? "yes" : "no") +
-                ", dirty boxes " + std::to_string(dirtyBoxes) +
-                ", material generation " + (materialGen ? "changed" : "same"));
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -2974,11 +2917,6 @@ bool OgreScene::giVoxelTexturesPending() {
     // up on WAITING is not giving up on the texture.
     if (mGiVoxelTextureWaitGaveUp) return false;
     if (++mGiVoxelTextureWaitFrames > kGiVoxelTextureWaitFrames) {
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: a voxel-input texture never became ready in " +
-                std::to_string(kGiVoxelTextureWaitFrames) +
-                " frames — building the arm anyway, and not waiting again for this one");
         mGiVoxelTextureWaitGaveUp = true;
         mGiVoxelTextureWaitFrames = 0u;
         return false;
@@ -3075,10 +3013,6 @@ bool OgreScene::stepStagedGiBuild() {
             if (monitor::live())
                 monitor::noteCacheWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
                                        "vct.field.build", 1u, float(msField));
-            if (giDebug())
-                Ogre::LogManager::getSingleton().logMessage(
-                    "Jahshaka GI: irradiance field built in " + std::to_string(msField) +
-                    " ms (staged) — the arm is complete");
             mGiBuildStage = GiBuildStage::Idle;
             return true;
         }
@@ -4356,10 +4290,6 @@ bool OgreScene::rebuildVct() {
     // compute-shader compile.
     if (mGiStageBuild) {
         if (mGiBuildStage == GiBuildStage::Idle) mGiBuildStage = GiBuildStage::Field;
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: arm staged — the chain is built, the probe grid and the "
-                "irradiance field follow one frame at a time");
         return true;                     // the chain IS built; the stages owe the rest
     }
     const auto tField = std::chrono::steady_clock::now();
@@ -4369,15 +4299,7 @@ bool OgreScene::rebuildVct() {
     if (monitor::live())
         monitor::noteCacheWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
                                "vct.field.build", 1u, float(msField));
-    if (giDebug())
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: irradiance field built in " + std::to_string(msField) + " ms");
 
-    if (giDebug())
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: voxelized " + std::to_string(itemCount) + " items into " +
-            std::to_string(mVctCascades.size()) + " cascades" +
-            (mPcc ? " (+PCC probe grid)" : ""));
     return true;                             // the arm was built, from the CURRENT table
 }
 
@@ -4665,24 +4587,12 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         // WHAT A BOOT COSTS, AND HOW OFTEN (BOOTVOX-1 needed it and nothing
         // reported it per rebuild): giStatus carries only the LAST rebuild's
         // cost, so a burst — a boot's, a teleport's — could not be added up.
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: cascade " + std::to_string(i) + " BUILT (rebuild #" +
-                std::to_string(c.rebuilds) + ") in " + std::to_string(c.lastCpuMs) + " ms CPU");
     }
 
     // The head IS cascade 0 — from here on every existing rule in this file
     // (binding, teardown, material generation, status) sees the arm it knows.
     } JAH_CATCH(mError, abandonCascadeChain());
     if (mVctCascades.empty() || !mVctCascades[0].lighting) return abandonCascadeChain();
-    if (giDebug()) {
-        std::string row;
-        for (size_t i = 0; i < mVctCascades.size(); ++i)
-            row += (i ? " / " : "") + std::to_string(cascadeBounces(i));
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: cascade bounce counts (the document's own count on every cascade, at " +
-            std::to_string(std::min(std::max(mGi.numBounces, 1), 4)) + " total bounces): " + row);
-    }
     mVctVoxelizer = mVctCascades[0].voxelizer;
     mVctLighting  = mVctCascades[0].lighting;
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
@@ -4988,11 +4898,6 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     if (!ok && built && placementCommitted) *placementCommitted = true;
     c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0).count());
-    if (giDebug())
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: cascade " + std::to_string(idx) + (ok ? " re-voxelised" : " FAILED") +
-            " (rebuild #" + std::to_string(c.rebuilds) + ", reason " +
-            std::string(giStaleReasonName(reason)) + ") in " + std::to_string(c.lastCpuMs) + " ms CPU");
     if (!ok) {
         // The row STANDS (the frame really did spend that time) with no units:
         // nothing was voxelised. Logged once per scene — a cascade that throws
@@ -5125,11 +5030,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         // worthless work by construction: `pending` is a FLAG ("this cascade is
         // behind"), and a burst of steps while the budget is spent elsewhere
         // collapses into the one rebuild that catches it up.
-        // `JAHSHAKA_GI_NO_RECENTRE` (PHOTON-VOXEL-5), a MEASUREMENT switch like
-        // JAHSHAKA_GI_FIELD_NO_SCROLL: the chain keeps its placement while the camera
-        // moves (a suite's A/B of what a re-centre's re-voxelisation costs a picture).
-        static const bool noRecentre = std::getenv("JAHSHAKA_GI_NO_RECENTRE") != nullptr;
-        if ((moved || jumped) && !noRecentre) {
+        if (moved || jumped) {
             // A SCROLL CLAIMS A PENDING FLAG AN EDIT MAY ALREADY HAVE RAISED —
             // and the work is the same one rebuild either way. The REASON,
             // though, is the edit's: a capture must not read "the camera did
@@ -5661,15 +5562,6 @@ void OgreScene::buildPccScout(const Ogre::Aabb &litVolume) {
             for (size_t ax = 0; ax < 3u; ++ax)
                 if (!(size[ax] > 0.05f * std::max(whole[ax], 1e-4f))) usable = false;
             if (usable) region = Ogre::Aabb::newFromExtents(mn, mx);
-            if (giDebug()) {
-                const auto toS = [](const Ogre::Vector3 &v) {
-                    return Ogre::StringConverter::toString(v);
-                };
-                Ogre::LogManager::getSingleton().logMessage(
-                    "Jahshaka GI: scout — volume " + toS(aabb.getMinimum()) + " .. " +
-                    toS(aabb.getMaximum()) + " -> space " + toS(region.getMinimum()) + " .. " +
-                    toS(region.getMaximum()) + (usable ? "" : " (unusable)"));
-            }
         }
         scoutPcc.destroyAllProbes();
     }
@@ -5859,7 +5751,6 @@ void OgreScene::buildPccFit() {
         const Ogre::FastArray<float> &ratios = placement.getProbeDepthRatios();
         const Ogre::CubemapProbeVec &built = mPcc->getProbes();
         const Ogre::Vector3 H = region.mHalfSize, W = aabb.getSize();
-        const bool debugFit = giDebug();
         std::vector<Ogre::CubemapProbe *> drop;
         // The survivors with their volume ratio: the budget below keeps the ones
         // that saw the MOST (the smallest ratio) when they cannot all fit.
@@ -5918,20 +5809,6 @@ void OgreScene::buildPccFit() {
             const bool keep = spanVol < kProbeSeesGeometry;
             if (!keep) drop.push_back(built[i]);
             else       keptBy.push_back({ spanVol, built[i] });
-            if (debugFit)
-                Ogre::LogManager::getSingleton().logMessage(
-                    "Jahshaka GI:  probe " + std::to_string(i) + (keep ? " KEPT" : " DROPPED") +
-                    " — faces " + Ogre::StringConverter::toString(r[0]) + " " +
-                    Ogre::StringConverter::toString(r[1]) + " " +
-                    Ogre::StringConverter::toString(r[2]) + " " +
-                    Ogre::StringConverter::toString(r[3]) + " " +
-                    Ogre::StringConverter::toString(r[4]) + " " +
-                    Ogre::StringConverter::toString(r[5]) + ", spans " +
-                    Ogre::StringConverter::toString(span[0]) + " " +
-                    Ogre::StringConverter::toString(span[1]) + " " +
-                    Ogre::StringConverter::toString(span[2]) + " vol " +
-                    Ogre::StringConverter::toString(spanVol) + " (keep below " +
-                    Ogre::StringConverter::toString(kProbeSeesGeometry) + ")");
         }
         mProbesDropped = int(drop.size());
         // THE VRAM BUDGET (PCC-BUDGET-1). The WHOLE grid — array, shadow targets,
@@ -5979,15 +5856,6 @@ void OgreScene::buildPccFit() {
             mPccPhaseMs[2] = pccPhaseSplit();
             notePlacementPhases(mPccPhaseMs[0], mPccPhaseMs[1], mPccPhaseMs[2], 0.0, 0.0,
                                 unsigned(mProbesDropped), 0u);
-            if (giDebug())
-                Ogre::LogManager::getSingleton().logMessage(
-                    "Jahshaka GI: probe placement " +
-                    std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                       std::chrono::steady_clock::now() - tPlace).count()) +
-                    " ms — " + std::to_string(mProbesDropped) + " candidates at " +
-                    std::to_string(kProbeScoutResolution) + " px, 0 kept — scout " +
-                    std::to_string(mPccPhaseMs[0]) + " place " + std::to_string(mPccPhaseMs[1]) +
-                    " drop " + std::to_string(mPccPhaseMs[2]) + " ms");
             destroyProbeGrid();
             return;
         }
@@ -6123,54 +5991,6 @@ void OgreScene::buildPccFinish() {
     // silently drops probes and paints black rectangles on every reflective
     // surface it covers.
     ensureCubemapProbeSlots(mPcc->getProbes().size());
-
-    // Diagnostic: JAHSHAKA_GI_DEBUG=1 dumps where every probe ENDED UP. This is
-    // the only window onto PccPerPixelGridPlacement's depth-readback shrink-fit,
-    // and the shape is what decides whether a surface gets probe reflections at
-    // all: the PBS per-pixel path skips any probe whose SHAPE does not contain
-    // the shaded point (getProbeFade > 0, ForwardPlus_DecalsCubemaps_piece_ps),
-    // so a shape that lost the room reads downstream as "reflections are black"
-    // with probeCount and pccBound both still healthy.
-    if (giDebug()) {
-        // THE PLACEMENT'S WALL COST, which is the number lane SKY-FALLBACK-1
-        // moved: it covers the scout-resolution placement, the drop, the clamp,
-        // the re-create at the real resolution and the survivors' single
-        // capture. It was previously two full-resolution captures of every
-        // CANDIDATE.
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: probe placement " +
-            std::to_string(mPccPhaseMs[0] + mPccPhaseMs[1] + mPccPhaseMs[2] +
-                           mPccPhaseMs[3] + mPccPhaseMs[4]) +
-            " ms — " + std::to_string(mProbesDropped + int(mPcc->getProbes().size())) +
-            " candidates at " + std::to_string(kProbeScoutResolution) + " px, " +
-            std::to_string(mPcc->getProbes().size()) + " kept at " +
-            std::to_string(probeRes) + " px — scout " + std::to_string(mPccPhaseMs[0]) +
-            " place " + std::to_string(mPccPhaseMs[1]) + " drop " + std::to_string(mPccPhaseMs[2]) +
-            " recreate " + std::to_string(mPccPhaseMs[3]) + " capture " +
-            std::to_string(mPccPhaseMs[4]) + " ms");
-        Ogre::LogManager &lm = Ogre::LogManager::getSingleton();
-        const auto toS = [](const Ogre::Vector3 &v) {
-            return Ogre::StringConverter::toString(v);
-        };
-        lm.logMessage("Jahshaka GI: PCC region " + toS(region.getMinimum()) + " .. " +
-                      toS(region.getMaximum()) + " grid " + std::to_string(mPccNumProbes[0]) + "x" +
-                      std::to_string(mPccNumProbes[1]) + "x" +
-                      std::to_string(mPccNumProbes[2]) +
-                      " res " + std::to_string(probeRes) +
-                      (mPccHdr ? " RGBA16F" : " RGBA8_SRGB") +
-                      (mPccShadowed ? " shadowed" : " unshadowed") +
-                      " overlap " + Ogre::StringConverter::toString(mGi.probeOverlap));
-        const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
-        for (size_t i = 0; i < probes.size(); ++i) {
-            const Ogre::CubemapProbe *p = probes[i];
-            const Ogre::Aabb shape = p->getProbeShape();
-            const Ogre::Aabb area  = p->getArea();
-            lm.logMessage("Jahshaka GI:  probe " + std::to_string(i) +
-                          " cam " + toS(p->getProbeCameraPos()) +
-                          " shape " + toS(shape.getMinimum()) + " .. " + toS(shape.getMaximum()) +
-                          " area " + toS(area.getMinimum()) + " .. " + toS(area.getMaximum()));
-        }
-    }
 
     // The hybrid blend: reflections whose PCC-vs-VCT parallax error is below
     // minDistance come from the probes (near geometry, sharp), above maxDistance
@@ -6499,14 +6319,6 @@ void OgreScene::buildIrradianceField() {
         // WHOLE, so this scene's passes read it from now on (SceneGiBinding).
         mGiBinding.ifd = mIfd;
 
-        if (giDebug())
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: DDGI field " + std::to_string(settings.mNumProbes[0]) + "x" +
-                std::to_string(settings.mNumProbes[1]) + "x" +
-                std::to_string(settings.mNumProbes[2]) + " (" + std::to_string(total) +
-                " probes) over " + Ogre::StringConverter::toString(origin) + " size " +
-                Ogre::StringConverter::toString(size) + ", re-converge " +
-                std::to_string(mIfdProbesPerFrame) + " probes/frame");
     } JAH_CATCH(mError, );
 }
 

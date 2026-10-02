@@ -32,6 +32,9 @@
 #include <OgreRoot.h>
 #include <OgreMesh2.h>
 #include <OgreSubItem.h>
+#include <OgreItem.h>
+#include <OgreHlms.h>
+#include <OgreHlmsPbsDatablock.h>
 #include <OgreSubMesh2.h>
 #include <Vao/OgreVertexArrayObject.h>
 #include <Vao/OgreAsyncTicket.h>
@@ -1418,6 +1421,19 @@ namespace detail {
 //     capture permutation on a frame a VR wearer is shown (vr.warmup, measured
 //     in the PHOTON-CARDS-4 fix round), so the arrival waits for the capture
 //     pass to be warmed.
+uint32_t OgreScene::cutoutMaskGeneration(uint32_t slot) const {
+    if (slot >= mItemNodes.size() || !mItemNodes[slot] || !mItemNodes[slot]->item) return 0u;
+    const Ogre::Item *item = mItemNodes[slot]->item;
+    uint32_t sum = 0u;
+    for (size_t g = 0; g < item->getNumSubItems(); ++g) {
+        const Ogre::HlmsDatablock *db = item->getSubItem(g)->getDatablock();
+        if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) continue;
+        if (const Ogre::TextureGpu *t = static_cast<const Ogre::HlmsPbsDatablock *>(db)->getTexture(Ogre::PBSM_DIFFUSE))
+            sum += textureUploadGeneration(t);
+    }
+    return sum;
+}
+
 bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
     out = CardMoverFrame();
     if (!mGpuScene.live() || !mRoot || !mRoot->getRenderSystem()) return false;
@@ -1445,6 +1461,7 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
         r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
         r.flags = flagsOf(e);
         r.material = e.raster[0];
+        r.maskGen = (r.flags & kGpuAlphaTested) ? cutoutMaskGeneration(i) : 0u;
     };
     // WHAT THE CAPTURED TERM LOSES OR GAINS between the record and the table:
     // a still caster before or after, and its world, visibility, caster bit or
@@ -1458,7 +1475,11 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
         // material swap in place changes a card's sun term with nothing moving.
         const bool flagsMoved =
             ((r.flags ^ f) & (kGpuVisible | kGpuCaster | kGpuMover | kGpuRayTraced | kGpuAlphaTested)) != 0u;
-        const bool maskMoved = ((r.flags | f) & kGpuAlphaTested) && r.material != e.raster[0];
+        // ...and a cut-out's MASK re-uploaded in place (ALPHA-MASK-IDENTITY-1): the
+        // same material word, new texels — keyed on the textures' upload generation.
+        const bool maskMoved = ((r.flags | f) & kGpuAlphaTested) &&
+            (r.material != e.raster[0] ||
+             ((f & kGpuAlphaTested) && r.maskGen != cutoutMaskGeneration(uint32_t(&e - mirror))));
         if (!turned && !flagsMoved && !maskMoved) return;
         CardCasterMove m;
         m.node = r.node;
@@ -1509,6 +1530,24 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
             if (slot >= slots) continue;
             casterChange(mCardCasters[slot], mirror[slot]);
             record(slot);
+        }
+    }
+    // NEW TEXELS WITH NOTHING MOVED (ALPHA-MASK-IDENTITY-1): on a frame where this
+    // scene uploaded into a texture, every still cut-out caster whose mask
+    // generation moved changes its footprint's sun term, in place.
+    if (mTextureUploadSerial != mCardUploadSerialSeen) {
+        mCardUploadSerialSeen = mTextureUploadSerial;
+        for (uint32_t i = 0; i < slots && i < mCardCasters.size(); ++i) {
+            CardCasterRec &r = mCardCasters[i];
+            if (!(r.flags & kGpuAlphaTested) || !stillCaster(r.flags)) continue;
+            const uint32_t g = cutoutMaskGeneration(i);
+            if (g == r.maskGen) continue;
+            r.maskGen = g;
+            CardCasterMove m;
+            m.node = r.node;
+            m.oldMin = m.newMin = r.min;
+            m.oldMax = m.newMax = r.max;
+            out.casterMoves.push_back(m);
         }
     }
     if (moved || walk) {
