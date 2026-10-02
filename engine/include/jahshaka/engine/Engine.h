@@ -200,6 +200,13 @@ public:
     /// THE ATMOSPHERE'S TABLES, counted (AtmosphereStatus). A scene without
     /// the planet's atmosphere answers `on` false and zeros.
     virtual AtmosphereStatus atmosphereStatus() const { return AtmosphereStatus(); }
+    /// THE MEASURING DOOR OF THE FOG ALONG A REFLECTION (PHOTON-I-1; a tool's A/B,
+    /// never a mode, not saved): open (the default) the ray jobs and the screen
+    /// reflection's resolve carry the fog law along a reflection's own path
+    /// (jah_fog_along.glsl); shut, they fog nothing there — gi.reflect_fog's paired
+    /// cost arm, both in one process. The colour pass and the voxel march's share
+    /// keep the law either way (it is compiled into their shaders).
+    virtual void setReflectionFogEnabled(bool on) { (void)on; }
     /// THE ATMOSPHERE'S COST: each of the four table jobs dispatched
     /// `iterations` more times over its own inputs, flushed and timed
     /// (AtmosphereCost). Synchronous — a GPU wait; a measurement, never a
@@ -1365,6 +1372,9 @@ public:
     virtual FaceCull    nodeFaceCull(NodeId) const = 0;
     /// Cull twins alive in this scene right now (a diagnostic: mirror.cull_twin).
     virtual unsigned    cullTwinCount() const = 0;
+    /// Twins waiting for the sweep (a diagnostic: mirror.cull_twin) — never more
+    /// than the twins alive, drawn or not.
+    virtual unsigned    cullTwinCandidateCount() const = 0;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
     /// Applies the reflection state idempotently. Pushing the same params twice is
@@ -1396,6 +1406,10 @@ public:
     /// number against the requested budget (planes off screen do not render).
     /// 0 when reflections are off or nothing has rendered yet.
     virtual int         activePlanarReflectors() const = 0;
+    /// Reflectors ARMED (an Ogre actor made) since the scene was created — a
+    /// diagnostic (engine.planar): an edit that does not move a mirror-relevant
+    /// state re-arms nothing.
+    virtual unsigned    planarReflectorArms() const = 0;
 
     // ---- Hardware ray tracing (owner, 2026-09-15; ledger §425) -----------
     /// WHAT THE SCENE WAS AUTHORED FOR (RayTracingMode). Scene-level, like GI

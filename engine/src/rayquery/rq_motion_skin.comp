@@ -15,7 +15,7 @@
 // its previous point from the cache's previous-pose slice (jah_skin_prev.glsl, the
 // reflection trace's own text) and writes the same delta rq_motion.comp writes. Any
 // other hit (a still stock-drawn item, the ground's backdrop) leaves the camera path.
-// It shares rq_motion.comp's descriptor set layout (bindings 0-4 its, 5-7 the ray's
+// It shares rq_motion.comp's descriptor set layout (bindings 0-5 its, 6-8 the ray's
 // three) and Params (plus `skin`): one set, two pipelines.
 //
 // COMPILED AT BUILD TIME at SPIR-V 1.4, like every ray job beside it.
@@ -44,9 +44,10 @@ layout( set = 0, binding = 1 ) uniform sampler2D sceneDepth;
 layout( set = 0, binding = 2 ) uniform usampler2D atomIds;
 layout( std430, set = 0, binding = 3 ) readonly buffer Instances { uvec4 inst[]; };
 layout( rgba16f, set = 0, binding = 4 ) uniform writeonly image2D velocity;
-layout( set = 0, binding = 5 ) uniform accelerationStructureEXT tlas;
-layout( std430, set = 0, binding = 6 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
-layout( std430, set = 0, binding = 7 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+layout( set = 0, binding = 5 ) uniform sampler2D idDepth;
+layout( set = 0, binding = 6 ) uniform accelerationStructureEXT tlas;
+layout( std430, set = 0, binding = 7 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 8 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
 
 #define JAH_GEOM_SLOTS uint( p.skin.y )
 #define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
@@ -56,6 +57,15 @@ layout( std430, set = 0, binding = 7 ) readonly buffer JahGeomRows { uvec4 jahGe
 #include "jah_skin_prev.glsl"
 #include "jah_atom_id.glsl"
 #include "jah_reproject.glsl"
+
+/// IS THE PIXEL'S SURFACE NOT THE ONE THE ID PASS DREW? (ID-DEPTH-1) The scene's final
+/// depth against the id pass's own, as view distances: nearer by more than the
+/// depth's own float spread means a stock-drawn surface was added in front after the
+/// id pass. (rq_motion.comp and rq_motion_skin.comp carry the same three lines.)
+bool jahNotIdSurface( float sceneDist, float idDist )
+{
+	return sceneDist < idDist * ( 1.0 - 1e-4 );
+}
 
 /// The instance flags' posed bit (GpuScene.h kGpuSkinned; jah_rq_hit_record.glsl's).
 const uint kJahMotionSkinned = 1u << 5u;
@@ -75,11 +85,17 @@ void main()
 	const ivec2 res = ivec2( p.resolution.xy );
 	if( any( greaterThanEqual( px, res ) ) || p.skin.x < 0.5 || p.camPos.w < 0.5 )
 		return;
-	// A MOVING slot the id pass drew is rq_motion.comp's pixel. Any other id is NOT
-	// proof of the surface: the id pass has its own depth, so behind a stock-drawn
-	// character it holds the Atom surface the character covers (the floor).
+	const float raw = texelFetch( sceneDepth, px, 0 ).x;
+	if( raw <= 0.0 || raw >= 1.0 )
+		return;
+	const float dist = viewDistance( raw );
+	// A MOVING slot the id pass drew is rq_motion.comp's pixel — WHERE THE PIXEL STILL
+	// SHOWS IT (ID-DEPTH-1): the id pass has its own depth, so behind a stock-drawn
+	// character it holds the Atom surface the character covers (a floor, a mover);
+	// the scene depth nearer than the id's says so without a ray, and the TLAS below
+	// then names what the pixel shows.
 	const uint idX = texelFetch( atomIds, px, 0 ).x;
-	if( idX != JAH_ATOM_ID_EMPTY )
+	if( idX != JAH_ATOM_ID_EMPTY && !jahNotIdSurface( dist, viewDistance( texelFetch( idDepth, px, 0 ).x ) ) )
 	{
 		const uint idSlot = idX & JAH_ATOM_ID_SLOT_MASK;
 		if( idSlot < uint( p.resolution.z ) )
@@ -91,11 +107,7 @@ void main()
 				return;
 		}
 	}
-	const float raw = texelFetch( sceneDepth, px, 0 ).x;
-	if( raw <= 0.0 || raw >= 1.0 )
-		return;
 	const vec2 uv = ( vec2( px ) + 0.5 ) / vec2( res );
-	const float dist = viewDistance( raw );
 	const vec3 ray = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
 	const vec3 world = p.camPos.xyz + ray * dist;
 	rayQueryEXT rq;

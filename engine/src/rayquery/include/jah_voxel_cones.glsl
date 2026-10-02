@@ -146,21 +146,13 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 ///            caller bound the environment in
 /// THE CONE SET: four cones at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees
 /// (the one set: upstream's six-cone alternative is deleted, SIX-CONE-DEAD-1). The
-/// weights carry the cosine.
-///
-/// THE ESCAPE READS THE DIFFUSE ENVIRONMENT AT THE SET'S OWN BAND WEIGHTS
-/// (CARD-VIEW-BIAS-1). What the escapes estimate is the cosine integral of the sky
-/// over the share the voxels did not stop - and the engine's statement of that
-/// integral is the nine-band SH irradiance (jahEnvIrradiance: the GI-off pixel's
-/// diffuse, the card's environment half on an open floor). So each cone reads the
-/// SH in its own direction with the band weights that make the SET'S open-sky sum
-/// that irradiance EXACTLY: a ring of N >= 3 equally spaced directions at polar
-/// angle t about the normal averages a band-l harmonic to P_l( cos t ) times its
-/// value on the normal (the addition theorem; the azimuthal orders 1..2 cancel
-/// over the ring), so band l takes 1 / P_l( cos t ) - for the four-cone set at
-/// 45 degrees sqrt( 2 ) and 4. The cone lookup's radiance de-convolution (3/2, 4)
-/// read band 1 at 3/2 cos 45 = 1.061 of the irradiance: an open floor under a
-/// hemisphere sky read high (gi.card_view's quadrature term, 1.05 %).
+/// weights carry the cosine. Each cone's escape reads its azimuthal QUADRANT of the
+/// hemisphere, cosine-weighted (jahEnvQuadrant, PHOTON-I-1): the four quadrants sum
+/// to the exact irradiance. With no environment cube the quadrant reads the nine-band
+/// SH at the set's own band weights 1 / P_l( cos 45 ) = sqrt( 2 ), 4 (CARD-VIEW-BIAS-1:
+/// a ring of N >= 3 directions at polar angle t averages a band-l harmonic to
+/// P_l( cos t ) times its value on the normal, so those weights make the open-sky sum
+/// the SH irradiance exactly).
 void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 					  out vec3 light, out vec3 envD )
 {
@@ -172,9 +164,6 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 	const float coneWeights[4] = float[4]( 0.25, 0.25, 0.25, 0.25 );
 	const float coneAngleTan = 0.98269;
 	const uint coneFlags = 0u;
-	// the set's band weights: 1 / P_l( cos 45 ) (the comment above)
-	const float kBand1 = 1.41421356;
-	const float kBand2 = 4.0;
 	light = vec3( 0.0, 0.0, 0.0 );
 	envD = vec3( 0.0, 0.0, 0.0 );
 	for( int i = 0; i < kCones; ++i )
@@ -185,7 +174,7 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 		JahConeResult result = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), coneAngleTan, coneOrigin, coneFlags );
 		light += coneWeights[i] * result.colour;
 		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.alpha / 0.95 ) ) *
-				max( jahEnvShEval( JAH_CONES_TO_WORLD( d ), kBand1, kBand2 ), vec3( 0.0 ) );
+				jahEnvQuadrant( JAH_CONES_TO_WORLD( d ), JAH_CONES_TO_WORLD( basis[2] ) );   // its quadrant, cosine-weighted
 	}
 }
 

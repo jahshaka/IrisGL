@@ -2,8 +2,8 @@
 // verbs that bind them onto a node.
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"
+#include <algorithm>
 #include <cmath>
-#include <unordered_set>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -219,7 +219,7 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     // THE CULL IS RESOLVED FIRST (CULL-MODE-2): the params' own two-sidedness, or a
     // node's through a cull twin. Anything that draws a back face lights it as seen
     // (Front draws ONLY back faces), so the two-sided lighting follows the cull.
-    const FaceCull resolved = resolveCull(p, cull);
+    const FaceCull resolved = resolveCull(cull);
     const bool twoSidedLit = resolved != FaceCull::Back;
     if (db->getTwoSidedLighting() != twoSidedLit) db->setTwoSidedLighting(twoSidedLit, false);
     {
@@ -467,7 +467,7 @@ void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p, Fac
     }
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(p, cull));
+        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(cull));
         // Anything that blends must not write depth — it cannot occlude what it
         // is blending over. Modulate blends too even though it ignores alpha.
         const bool wantDepthWrite = !blended && p.alphaMode != PbrAlphaMode::Modulate;
@@ -525,7 +525,7 @@ void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p
     }
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(p, cull));
+        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(cull));
         if (macro.mCullMode != wantCull || macro.mDepthWrite || !macro.mDepthCheck) {
             macro.mCullMode = wantCull;
             macro.mDepthCheck = true;
@@ -653,14 +653,9 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                  o.uvOffset[0] != p.uvOffset[0] || o.uvOffset[1] != p.uvOffset[1] ||
                  o.uvRotation != p.uvRotation || o.alpha != p.alpha || samplersMoved);
             if (it->second.paramsPushed &&
-                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff ||
-                 o.twoSided != p.twoSided || cutoutInputs))
+                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff || cutoutInputs))
                 noteShadowShapeChanged(id);
         }
-        // THE MATERIAL'S OWN CULL MOVED (CULL-MODE-2): a node that named a cull
-        // wears the master or a twin depending on whether the two agree, so every
-        // wearer re-picks — after the master holds the new state.
-        const bool ownCullMoved = it->second.paramsPushed && it->second.params.twoSided != p.twoSided;
         it->second.params = p;
         it->second.paramsPushed = true;
         if (it->second.shadingUnlit) {
@@ -669,7 +664,6 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             else                       applyUnlit(udb, p);
             if (samplersMoved) bindTrackedTextures(it->second);
             syncCullTwins(it->second);
-            if (ownCullMoved) repointCullWearers(id);
             return true;   // an unlit material is never refractive
         }
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
@@ -695,7 +689,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         //
         // TODAY THAT CANNOT HAPPEN: the shadow-shape guard above already calls
         // noteShadowShapeChanged for every edit that can reach setAlphaTest
-        // (alphaMode, alphaCutoff, twoSided, the cutout inputs), and that ends
+        // (alphaMode, alphaCutoff, the cutout inputs), and that ends
         // in noteShadowScanInput. This line states the same invariant WHERE THE
         // STATE CHANGES instead of inferring it from a parameter list that has
         // to be kept in step with applyPbr: "did the caster shape change" and
@@ -715,7 +709,6 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         it->second.refractive = p.alphaMode == PbrAlphaMode::Refractive;
         if (wasRefractive != it->second.refractive) refileItems(id, it->second);
         syncCullTwins(it->second);
-        if (ownCullMoved) repointCullWearers(id);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1085,7 +1078,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
             return false;
         }
         n.item = mSceneMgr->createItem(mit->second.mesh, cls);
-        n.item->setDatablock(wornDatablock(n, tit->second));   // the node's cull (CULL-MODE-2)
+        wearDatablock(n.item, wornDatablock(n, tit->second));   // the node's cull (CULL-MODE-2)
         // A REBUILT ITEM IS A NEW CASTER SHAPE (lamp-map cache): a mesh or
         // material swap detaches and recreates in this one call, and the
         // allocator routinely hands the new Item the freed one's address — same
@@ -1175,8 +1168,12 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         return false;
     }
     JAH_TRY {
-        n.item->setDatablock(wornDatablock(n, rec));   // the node's cull (CULL-MODE-2)
-        if (mCullTwinCount) mCullTwinSweep = true;     // the old material's twin may be free
+        // THE MIRROR CARES ABOUT ONE THING A SWAP CAN MOVE: whether the worn
+        // datablock is two-sided (the refusal). Read before and after; only a
+        // change re-derives the reflector — an ordinary swap leaves it armed.
+        const bool reflector = mReflectors.count(id) != 0;
+        const bool wasTwoSided = reflector && planar::isTwoSided(n.item);
+        wearDatablock(n.item, wornDatablock(n, rec));   // the node's cull; the old twin may be free
         markShadowShapeDirty(n);
         n.item->setVisibilityFlags(itemVisibilityFlags(n, rec.unlit, rec.distortion));
         n.item->setRenderQueueGroup(renderQueueFor(rec));
@@ -1190,7 +1187,8 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         } else if (probeSeesItem(n)) {
             staleProbeGrid(GiStaleReason::Moved);
         }
-        if (mReflectors.count(id)) armReflector(id, n);
+        if (reflector && planar::isTwoSided(n.item) != wasTwoSided)
+            rederiveReflector(id, n);   // the worn datablock's cull moved across the refusal
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1445,6 +1443,27 @@ std::unordered_map<Ogre::TextureGpu *, unsigned> &sharedTextureRefs() {
 }
 }   // namespace
 
+namespace {
+/// The upload generations (EnginePrivate.h: textureUploadGeneration). Leaked for
+/// sharedTextureRefs' reason above; main thread only, like every upload.
+std::unordered_map<const Ogre::TextureGpu *, uint32_t> &textureUploadGenerations() {
+    static auto *sGen = new std::unordered_map<const Ogre::TextureGpu *, uint32_t>();
+    return *sGen;
+}
+}   // namespace
+
+uint32_t textureUploadGeneration(const Ogre::TextureGpu *tex) {
+    const auto &g = textureUploadGenerations();
+    auto it = g.find(tex);
+    return it == g.end() ? 0u : it->second;
+}
+
+void noteTextureUploaded(const Ogre::TextureGpu *tex) {
+    if (tex) ++textureUploadGenerations()[tex];
+}
+
+void forgetTextureUploads(const Ogre::TextureGpu *tex) { textureUploadGenerations().erase(tex); }
+
 void retainSharedTexture(Ogre::TextureGpu *tex) {
     if (tex) ++sharedTextureRefs()[tex];
 }
@@ -1459,7 +1478,7 @@ bool releaseSharedTexture(Ogre::TextureGpu *tex) {
     return true;
 }
 
-void resetSharedTextures() { sharedTextureRefs().clear(); }
+void resetSharedTextures() { sharedTextureRefs().clear(); textureUploadGenerations().clear(); }
 
 namespace {
 /// One box-filter step: halve `w` x `h` RGBA8 pixels (odd dimensions clamp, the
@@ -1564,7 +1583,13 @@ void OgreScene::uploadRgbaLevels(Ogre::TextureGpu *tex, unsigned w, unsigned h,
         staging->stopMapRegion();
         staging->upload(box, tex, static_cast<Ogre::uint8>(mip), nullptr, nullptr, true);
         tm->removeStagingTexture(staging);
-        if (mip + 1u >= levels) break;
+        if (mip + 1u >= levels) {
+            // NEW TEXELS IN THIS TEXTURE: its content-derived products re-make
+            // (ALPHA-MASK-IDENTITY-1 — the rays' cut-out mask, the cards' sun term).
+            noteTextureUploaded(tex);
+            ++mTextureUploadSerial;
+            break;
+        }
         unsigned nw = 0, nh = 0;
         downsampleRgba(levelData, lw, lh, scratch, nw, nh);
         prev.swap(scratch);
@@ -1648,6 +1673,7 @@ void OgreScene::releaseTextureRec(const TextureRec &rec) {
     // (drainTextureStreaming's no-progress budget).
     if (rec.texture && !rec.texture->isManualTexture() && !rec.texture->isDataReady() && mEngine)
         mEngine->waitForTextureLoads();
+    forgetTextureUploads(rec.texture);   // a recycled pointer starts at generation 0
     tm->destroyTexture(rec.texture);
 }
 
@@ -2057,13 +2083,6 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
                     for (auto &e : mMaterialsAwaitingTexture)
                         if (e.first == mat) { e.second = e.second || voxelInput; parked = true; break; }
                     if (!parked) mMaterialsAwaitingTexture.push_back({ mat, voxelInput });
-                    if (std::getenv("JAHSHAKA_GI_DEBUG"))
-                        Ogre::LogManager::getSingleton().logMessage(
-                            "Jahshaka GI: material " + std::to_string((unsigned long long)mat) +
-                            " waits for texture '" +
-                            (tit->second.texture ? tit->second.texture->getNameStr() : std::string("?")) +
-                            "' on slot " + std::to_string(int(slot)) +
-                            (voxelInput ? " (a VOXEL input)" : " (a probe input)"));
                 }
             }
             // A cutout's alpha comes from the albedo map: a new one is a new
@@ -2281,7 +2300,7 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
 
 Ogre::HlmsDatablock *OgreScene::wornDatablock(const Node &n, MaterialRec &rec) {
     if (n.faceCull == FaceCull::Material || !cullTwinnable(rec) ||
-        n.faceCull == ownCullOf(rec.params))
+        n.faceCull == resolveCull(FaceCull::Material))
         return hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName));
     return cullTwinOf(rec, n.faceCull);
 }
@@ -2307,6 +2326,10 @@ Ogre::HlmsDatablock *OgreScene::cullTwinOf(MaterialRec &rec, FaceCull cull) {
         Ogre::IdString(t.datablockName), t.datablockName,
         Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec());
     ++mCullTwinCount;
+    mTwinOwners[db] = TwinOwner{ &rec, &t };
+    // A candidate from birth: made for a wearer that may never arrive (a throw
+    // between here and the setDatablock), it must not outlive its grace unworn.
+    noteTwinLetGo(db);
     // THE FAMILY SWITCH'S BUILD, with the node's cull: params, then every tracked
     // map (the reflection slot included — a blank record binds it), then pieces.
     applyRecTo(rec, db, cull);
@@ -2337,64 +2360,83 @@ void OgreScene::syncCullTwins(MaterialRec &rec) {
     }
 }
 
-void OgreScene::destroyCullTwins(MaterialRec &rec) {
-    for (CullTwin &t : rec.cullTwins) {
-        if (t.datablockName.empty()) continue;
-        Ogre::Hlms *hlms = hlmsFor(rec);
-        if (Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(t.datablockName))) {
-            noteGiDatablockDied(db);   // the voxelisers cache conversions by pointer
-            forgetDecodeTwinOf(db);    // its decode twin dies first (HlmsAtom.h)
-            hlms->destroyDatablock(Ogre::IdString(t.datablockName));
-        }
-        t = CullTwin();
-        if (mCullTwinCount) --mCullTwinCount;
+void OgreScene::destroyCullTwin(MaterialRec &rec, CullTwin &t) {
+    if (t.datablockName.empty()) return;
+    Ogre::Hlms *hlms = hlmsFor(rec);
+    if (Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(t.datablockName))) {
+        if (t.candidate)   // the list holds each twin once; a dead one leaves it now
+            mTwinCandidates.erase(std::remove(mTwinCandidates.begin(), mTwinCandidates.end(), db),
+                                  mTwinCandidates.end());
+        mTwinOwners.erase(db);
+        noteGiDatablockDied(db);   // the voxelisers cache conversions by pointer
+        forgetDecodeTwinOf(db);    // its decode twin dies first (HlmsAtom.h)
+        hlms->destroyDatablock(Ogre::IdString(t.datablockName));
     }
+    t = CullTwin();
+    if (mCullTwinCount) --mCullTwinCount;
 }
 
+void OgreScene::destroyCullTwins(MaterialRec &rec) {
+    for (CullTwin &t : rec.cullTwins) destroyCullTwin(rec, t);
+}
+
+void OgreScene::noteTwinLetGo(const Ogre::HlmsDatablock *db) {
+    if (!db || mTwinOwners.empty()) return;
+    auto it = mTwinOwners.find(db);
+    if (it == mTwinOwners.end()) return;
+    mCullTwinSweep = true;
+    if (it->second.twin->candidate) return;   // listed already: the list stays bounded
+    it->second.twin->candidate = true;
+    mTwinCandidates.push_back(db);
+}
+
+void OgreScene::noteTwinsLetGo(const Ogre::Item *item) {
+    if (!item || mTwinOwners.empty()) return;
+    for (size_t i = 0; i < item->getNumSubItems(); ++i)
+        noteTwinLetGo(item->getSubItem(i)->getDatablock());
+}
+
+void OgreScene::wearDatablock(Ogre::Item *item, Ogre::HlmsDatablock *db) {
+    noteTwinsLetGo(item);
+    item->setDatablock(db);
+}
+
+void OgreScene::wearDatablock(Ogre::SubItem *sub, Ogre::HlmsDatablock *db) {
+    noteTwinLetGo(sub->getDatablock());
+    sub->setDatablock(db);
+}
+
+// THE SWEEP VISITS THE CANDIDATES ONLY (CULL-TWIN-DEBTS-1). It used to collect the
+// datablock of every sub-item of every Item in the scene into a set whenever any
+// attach, detach or material swap happened while a twin lived — O(items) for an
+// event that concerns one Item. A twin's wearers are what Ogre itself keeps for
+// every datablock (the linked renderables a setDatablock adds and removes), so
+// the question "is it free?" is one read of that list, for the twins somebody let
+// go of. And a twin found free is not destroyed on the spot: it waits
+// kCullTwinGraceFrames of this scene's frames, so a cull toggled per frame wears
+// the same twin again instead of building a datablock per frame.
 void OgreScene::sweepCullTwins() {
+    ++mCullSweepTick;
     if (!mCullTwinSweep) return;
     mCullTwinSweep = false;
-    if (!mCullTwinCount) return;
     JAH_TRY {
-        std::unordered_set<const Ogre::HlmsDatablock *> worn;
-        for (auto &kv : mNodes) {
-            Ogre::Item *item = kv.second.item;
-            if (!item) continue;
-            for (size_t i = 0; i < item->getNumSubItems(); ++i)
-                worn.insert(item->getSubItem(i)->getDatablock());
-        }
-        for (auto &mk : mMaterials) {
-            MaterialRec &rec = mk.second;
-            for (CullTwin &t : rec.cullTwins) {
-                if (t.datablockName.empty()) continue;
-                Ogre::Hlms *hlms = hlmsFor(rec);
-                Ogre::HlmsDatablock *db = hlms->getDatablock(Ogre::IdString(t.datablockName));
-                if (db && worn.count(db)) continue;
-                if (db) {
-                    noteGiDatablockDied(db);
-                    forgetDecodeTwinOf(db);
-                    hlms->destroyDatablock(Ogre::IdString(t.datablockName));
-                }
-                t = CullTwin();
-                if (mCullTwinCount) --mCullTwinCount;
+        std::vector<const Ogre::HlmsDatablock *> keep;
+        for (const Ogre::HlmsDatablock *db : mTwinCandidates) {
+            auto it = mTwinOwners.find(db);
+            if (it == mTwinOwners.end()) continue;   // (a dead twin leaves the list as it dies)
+            CullTwin &t = *it->second.twin;
+            if (!db->getLinkedRenderables().empty()) { t.unwornSince = 0; t.candidate = false; continue; }
+            if (!t.unwornSince) t.unwornSince = mCullSweepTick + 1u;
+            if (mCullSweepTick + 1u - t.unwornSince >= kCullTwinGraceFrames) {
+                t.candidate = false;   // off the list by the swap below, not by destroyCullTwin
+                destroyCullTwin(*it->second.rec, t);
+                continue;
             }
+            keep.push_back(db);
         }
+        mTwinCandidates.swap(keep);
+        mCullTwinSweep = !mTwinCandidates.empty();
     } JAH_CATCH(mError, );
-}
-
-void OgreScene::repointCullWearers(MaterialId id) {
-    auto mit = mMaterials.find(id);
-    if (mit == mMaterials.end() || !cullTwinnable(mit->second)) return;
-    for (auto &kv : mNodes) {
-        Node &n = kv.second;
-        if (n.materialRef != id || !n.item || n.faceCull == FaceCull::Material) continue;
-        Ogre::HlmsDatablock *db = wornDatablock(n, mit->second);
-        if (!db || n.item->getSubItem(0)->getDatablock() == db) continue;
-        n.item->setDatablock(db);
-        markShadowShapeDirty(n);
-        markGpuSlotDirty(n);
-        mCullTwinSweep = true;
-    }
 }
 
 void OgreScene::setNodeFaceCull(NodeId id, FaceCull cull) {
@@ -2412,18 +2454,17 @@ void OgreScene::setNodeFaceCull(NodeId id, FaceCull cull) {
         // THE setNodeMaterial SHAPE: the live Item changes datablock in place; its
         // caster shape and its GPU-scene flags word follow, and the volume owes the
         // ITEM'S BOX only (the voxelisers convert the new datablock by pointer).
-        n.item->setDatablock(db);
-        if (mCullTwinCount) mCullTwinSweep = true;   // the one it wore may be free now
+        wearDatablock(n.item, db);   // the one it wore may be free now
         markShadowShapeDirty(n);
         markGpuSlotDirty(n);
-        if (!mit->second.unlit) {
-            Ogre::Aabb box = n.item->getWorldAabbUpdated();
-            invalidateGiCaches(&box);
-        } else if (probeSeesItem(n)) {
-            staleProbeGrid(GiStaleReason::Moved);
-        }
+        // NO VOXEL MOVED (CULL-TWIN-DEBTS-1): the voxelisers read neither the
+        // macroblock's cull nor the two-sided lighting (they convert the datablock
+        // by pointer to the same albedo/emissive), so a cull edit used to buy a
+        // re-voxelisation of the Item's box for an identical volume. What DOES see
+        // a cull is a rasterised capture: the probe grid, when it sees the item.
+        if (probeSeesItem(n)) staleProbeGrid(GiStaleReason::Moved);
         // A planar mirror refuses a two-sided item (OgrePlanar.cpp): re-derived.
-        if (mReflectors.count(id)) armReflector(id, n);
+        rederiveReflector(id, n);
     } JAH_CATCH(mError, );
 }
 

@@ -180,6 +180,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// address, float bits (0 = none: the rays stay opaque). z = the edge-class
 	/// overlay's mode (REFLECT-EDGE-2's instrument, JAH_R7_EDGE_CLASSES; 0 = off).
 	vec4 alpha;
+	/// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's eight
+	/// (jah_fog_along.glsl states them).
+	vec4 fog[8];
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -289,6 +292,9 @@ layout( set = 0, binding = 30 ) uniform sampler3D voxelNrm[kMaxCascades];
 // hit keeps when a mover occludes the rest (jah_rq_hit.glsl) — the set's last binding.
 layout( set = 0, binding = 38 ) uniform sampler3D voxelDirect[kMaxCascades];
 #define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
+/// THE AIR'S TABLE (PHOTON-I-1 fix 5): the aerial-perspective volume the colour
+/// passes read, or a stand-in while they read none — the set's last binding.
+layout( set = 0, binding = 39 ) uniform sampler3D fogAerial;
 
 /// The same ceiling JahSsrResolve_ps.glsl and JahSsrHistory_ps.glsl hold the
 /// SSR loop to, and for the same reason: about twelve stops above white, six
@@ -404,6 +410,13 @@ void photonHit( ivec2 tc, vec4 c )
 /// not draw). Read only under p.motion.x; a 1x1 stand-in is bound otherwise.
 layout( set = 0, binding = 37 ) uniform usampler2D atomIds;
 #include "jah_atom_id.glsl"
+#define JAH_FOG_P( k ) p.fog[k]
+#define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
+#define JAH_FOG_HAS_AIR
+#define JAH_FOG_HAS_HEIGHT_FOG
+#include "jah_atmosphere.glsl"
+#include "jah_height_fog.glsl"
+#include "jah_fog_along.glsl"
 
 /// A SLOT THAT MOVED THIS FRAME, with its six rows (the instance table's lanes
 /// 0-2 = world, 3-5 = prevWorld — GpuScene.h). False for a slot the table does
@@ -541,6 +554,8 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 /// sizes is still a blur, and a mirror is the one surface that must not be
 /// blurred — LOD 0 is still two cells, so only hit lighting sharpens it).
 const float kMirrorAlpha = 0.01;
+/// A MOVING REFLECTOR'S MEAN REMEMBERS EIGHT FRAMES (REFLECT-CONVERGE-1; main()).
+const float kMovingReflectorFloor = 0.125;
 
 /// THIS TRACE'S SAMPLE FOOTPRINT at a hit `t` away along a lobe of GGX alpha
 /// `lobeAlpha` — the currency both reads select on. Not the WHOLE lobe: the
@@ -953,6 +968,16 @@ void main()
 											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
 											true, ok, photonSource );
 		record = decodeAlways || !ok || !finite3( traced );
+		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1, the one law jah_fog_along.glsl):
+		// the hit's light crossed the leg from the hit to the REFLECTING SURFACE — not
+		// to the ray's biased origin (`bias` along the normal, a metre at the shipped
+		// knob: measured as a metre of fog missing from every reflection) — and the
+		// colour pass fogs the eye's leg, which the height fog's start already spent.
+		// A record is fogged at its write-back, which has the decoded radiance
+		// (rq_hit_composite.comp; the record carries the same three numbers).
+		if( !record )
+			traced = jahFogAlong( traced, world.y, L, length( world + worldN * bias + L * t - world ),
+								  length( world - thisEye.camPos ) );
 		recSlot = hitSlot;
 		recPrim = hitPrim;
 		recGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
@@ -961,7 +986,7 @@ void main()
 	}
 	else
 	{
-		traced = skyRadiance( L, lobeAlpha );		// route C: the escape
+		traced = jahFogAlongSky( skyRadiance( L, lobeAlpha ), world.y, L, length( world - thisEye.camPos ) );   // route C: the escape
 		ok = true;
 		photonSource = 3u;
 	}
@@ -1172,6 +1197,23 @@ void main()
 	// 1: a mirror in a two-frame view would show 2.8 % probe, and a
 	// perceptual-0.08 surface 30 % of it on its first frame.
 	blend = max( blend, 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ) );
+	// A MOVING REFLECTOR'S MEAN IS AN EIGHT-FRAME MEAN (REFLECT-CONVERGE-1, measured on
+	// gi.reflect_mover's glossy sphere). The floor's thirty-two frames are bought for
+	// the noise of one ray on a STILL surface; a surface that moves sees the world from
+	// a new place every frame, and what its lobe integrates changes with it — after the
+	// sky pass brightened the floor the sphere reflects, its moving reflection trailed
+	// the settled one by 4.7 codes at the first checkpoint. The slide rule below (the
+	// step against the lobe's width, at the MEAN's ray length) never fired there: a
+	// glossy lobe's mean length is dominated by its far rays (sky, the far floor) while
+	// its near tail moves, so the parallax it measures is the far content's. Tried and
+	// refused, measured: a variance-driven floor (the mean's own second moment: a glossy
+	// lobe's per-ray sigma is 20-30 % of its mean, so no arrival weight above the floor
+	// follows from it) and a fast/slow history clamp (an eight-frame luminance mean,
+	// 2.5 of its sigmas: the 4 % lag sits inside one texel's noise) — both left the
+	// checkpoint at 4.6. A PARKED mover is not moving (motion vectors), so a still
+	// picture keeps its thirty-two frames and its grain; a mirror is at 1 already.
+	if( ownMoving )
+		blend = max( blend, kMovingReflectorFloor );
 	// THE SURFACE IS THE SAME; WHAT IT REFLECTS IS NOT (PAN-SMEAR-1). The
 	// reprojection above validates the SURFACE — same floor, same distance — and
 	// under a camera that TRANSLATES that is not enough for any lobe, only
@@ -1257,7 +1299,8 @@ void main()
 		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
 		if( jahHitAppend( recSlot, jahHitNearLevel( recSlot ), false, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),
-						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false ) ) )
+						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false ),
+						  world.y, length( hitPos - world ), length( world - thisEye.camPos ) ) )
 		{
 			imageStore( historyDistCur, tc, vec4( dist, hitMeanStored, 0.0, 0.0 ) );
 			photonHit( tc, kPhotonList );

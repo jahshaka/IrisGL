@@ -880,16 +880,22 @@ void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandl
     // THE TWO-PASS OCCLUSION (ChainDesc::atomOcclusion): the pyramid from this depth,
     // then the late id pass over the rejected set.
     if (desc.atomOcclusion) addAtomOcclusionPasses(n, desc, handles);
-    // THE ATOM VIEW'S DEPTH, copied before any scene pass adds a stock-PBR surface
-    // to it (the prepass and the opaque pass LOAD this depth and draw into it).
-    // Executed only while the view is on (kAtomViewExecutionBit).
+    // THE ID PASS'S OWN DEPTH, copied before any scene pass adds a stock-PBR surface
+    // to it (the prepass and the opaque pass LOAD this depth and draw into it). Two
+    // readers: the Atom view's quad (kAtomViewExecutionBit) and THE MARCH'S OBJECT
+    // MOTION (ID-DEPTH-1): rq_motion.comp writes a moving slot's velocity only where
+    // the scene's final depth is still this one — a stock-drawn character standing in
+    // front of a moving Atom mover is not the id's surface and keeps the camera path —
+    // and rq_motion_skin.comp identifies such a pixel by the same test. So on a chain
+    // whose velocity job runs (the march, the ray tier, the id pass) it runs every frame.
     {
         Ogre::CompositorTargetDef *ct = n->addTargetPass(kAtomViewDepth);
         ct->setNumPasses(1);
         auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(ct->addPass(Ogre::PASS_DEPTHCOPY));
         c->setDepthTextureCopy(kDepth, kAtomViewDepth);
-        c->mExecutionMask = kAtomViewExecutionBit;
-        c->mProfilingId = "Jahshaka atom view depth";
+        const bool velocityJob = marchesInScreenSpace(desc) && desc.rayReflect && desc.atomDraw;
+        c->mExecutionMask = velocityJob ? Ogre::uint8(0xFFu) : kAtomViewExecutionBit;
+        c->mProfilingId = "Jahshaka atom id depth";
     }
 }
 
@@ -3869,7 +3875,7 @@ void initSmaa(Ogre::Root *root, int preset) {
 //   3. left-multiply by the clip→image matrix — the *0.5+0.5 and the y flip, so
 //      the shader divides by w and has a texture coordinate, full stop.
 void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
-               SsrReprojection &reprojection) {
+               SsrReprojection &reprojection, OgreScene *scene) {
     if (!camera || desc.ssr <= 0) return;
     Ogre::Pass *march = materialPass("Jahshaka/SsrRayMarch");
     if (!march) return;
@@ -3978,9 +3984,11 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
     // pixel a hundred metres from the origin, and a bilinear fetch moved by a
     // ten-thousandth of a pixel can turn an 8-bit code.
     Ogre::Matrix4 reproject = Ogre::Matrix4::IDENTITY;
+    Ogre::Matrix4 imageToWorld = Ogre::Matrix4::IDENTITY;
     {
         const Ogre::Matrix4 worldToImage =
             kClipToImage * camera->getProjectionMatrixWithRSDepth() * camera->getViewMatrix(true);
+        imageToWorld = worldToImage.inverse();
         if (reprojection.have && !(reprojection.prevWorldToImage == worldToImage)) {
             const Ogre::Matrix4 candidate = reprojection.prevWorldToImage * worldToImage.inverse();
             bool finite = true;
@@ -4000,6 +4008,18 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
                                            kRayReflectFeather, 0.0f));
         rp->setNamedConstant("reprojectMatrix", reproject);
         rp->setNamedConstant("shotInset", shotInset);
+        // THE FOG LAW ON A SCREEN HIT (PHOTON-I-1, JahSsrResolve_ps.glsl
+        // jahSsrRefog): the scene's media as its colour passes read them, where a
+        // screen point is in the world, and the eye; the air's table or no air.
+        float fog[8][4] = {};
+        Ogre::TextureGpu *aerial = nullptr;
+        if (scene) scene->fogAlong(fog, aerial);
+        rp->setNamedConstant("fogP", &fog[0][0], 8u, 4u);
+        rp->setNamedConstant("imageToWorld", imageToWorld);
+        const Ogre::Vector3 eye = camera->getDerivedPosition();
+        rp->setNamedConstant("eyePos", Ogre::Vector4(eye.x, eye.y, eye.z, 1.0f));
+        if (Ogre::TextureUnitState *tu = resolve->getTextureUnitState("fogAerial"))
+            if (Ogre::TextureGpu *t = aerial ? aerial : scene ? scene->noAirVolume() : nullptr) tu->setTexture(t);
     }
 }
 
@@ -4053,7 +4073,8 @@ void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
 }
 
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection) {
+                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
+                      OgreScene *scene) {
     if (desc.hdr) {
         // The tonemap quad's 8-bit write is dithered (fork feab041c6 (was 0079)); this pushes
         // only the diagnostic off switch, and the shader's default is
@@ -4094,7 +4115,7 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         if (desc.letterbox && viewHeight)
             letterboxRect(desc.letterboxAspect, float(viewWidth) / float(viewHeight), shot);
-        updateSsr(camera, desc, shot, reprojection);
+        updateSsr(camera, desc, shot, reprojection, scene);
     } else {
         reprojection.have = false;
     }
@@ -4125,7 +4146,7 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *) {
     // so two workspaces in one frame can carry two different exposures even
     // though the materials themselves are process-wide singletons.
     applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(),
-                     mView->width(), mView->height(), mSsrReprojection);
+                     mView->width(), mView->height(), mSsrReprojection, mView->ogreScene());
 }
 
 }   // namespace chain

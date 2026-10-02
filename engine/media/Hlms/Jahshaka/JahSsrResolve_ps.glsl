@@ -115,8 +115,14 @@ vulkan_layout( ogre_t3 ) uniform texture2D depthTexture;
 // delta in the target's uv, z = the depth value's delta, w = 1; w = 0 elsewhere.
 vulkan_layout( ogre_t4 ) uniform texture2D velocityTexture;
 
+// THE AIR'S TABLE (PHOTON-I-1, the fog law's JAH_FOG_AERIAL): the planet's
+// aerial-perspective volume, or a one-texel "no air" volume under any other sky
+// (OgreChain's updateSsr binds it per view).
+vulkan_layout( ogre_t5 ) uniform texture3D fogAerial;
+
 vulkan( layout( ogre_s0 ) uniform sampler pointSampler );
 vulkan( layout( ogre_s2 ) uniform sampler linearSampler );
+vulkan( layout( ogre_s5 ) uniform sampler fogSampler );
 
 vulkan_layout( location = 0 )
 in block
@@ -140,6 +146,12 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// only a texture read converts. x, y = the letterbox rectangle's corner,
 	// z, w = 1 - its size; zeros = no letterbox.
 	uniform vec4 shotInset;
+	// THE FOG LAW'S INPUTS (PHOTON-I-1): OgreScene::fogAlong's eight (all zero:
+	// no medium), the shot's image point (u, v, the depth buffer's own value) to
+	// WORLD — the inverse of the reprojection's world-to-image — and the eye.
+	uniform vec4 fogP[8];
+	uniform mat4 imageToWorld;
+	uniform vec4 eyePos;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -170,6 +182,50 @@ const float kSsrMaxRadiance = 1024.0;
 /// neighbourhood instead, because a single sample of a value the buffer could
 /// not represent carries no information about the lobe, and the neighbourhood
 /// does.
+#define JAH_FOG_P( k ) fogP[k]
+#define JAH_FOG_AERIAL( uvw ) textureLod( vkSampler3D( fogAerial, fogSampler ), uvw, 0.0 )
+#define JAH_FOG_HAS_AIR
+#define JAH_FOG_HAS_HEIGHT_FOG
+#include "JahAtmosphere.glsl"
+#include "JahHeightFog.glsl"
+#include "JahFogAlong.glsl"
+
+/// THE SCREEN HIT, RE-FOGGED (PHOTON-I-1: one fog law on every reflection path).
+/// The history holds the hit as the EYE saw it — the fog law along the eye's ray
+/// to the hit (upstream's distance block, then jahFogMedia) — and the reflection
+/// must carry it as the mirror's virtual eye sees it: the law along the ray from
+/// the reflecting surface to the hit, the height fog's start spent by the eye's
+/// leg (jahFogAlong). The eye's law is affine in the surface's radiance but for
+/// the breakthrough's luminance, so it is undone by its affine pair (the law at 0
+/// and at 1) and one correction step through the law itself; a channel the eye's
+/// medium all but hid (transmittance under 1e-3) carries what the screen holds.
+vec3 jahSsrRefog( vec3 screen, vec3 surface, vec3 hit )
+{
+	if( JAH_FOG_P( 3 ).w < 0.5 && JAH_FOG_P( 7 ).w < 0.5 )
+		return screen;
+	const vec3 toHit = hit - eyePos.xyz;
+	const float le = length( toHit );
+	const vec3 dirE = toHit / max( le, 1e-6 );
+	const vec3 s0 = jahFogAlong( vec3( 0.0 ), eyePos.y, dirE, le, 0.0 );
+	const vec3 t1 = jahFogAlong( vec3( 1.0 ), eyePos.y, dirE, le, 0.0 ) - s0;
+	const bvec3 seen = greaterThan( t1, vec3( 1e-3 ) );
+	vec3 c = mix( screen, ( screen - s0 ) / max( t1, vec3( 1e-3 ) ), vec3( seen ) );
+	c = max( c, vec3( 0.0 ) );
+	c = max( c + mix( vec3( 0.0 ), ( screen - jahFogAlong( c, eyePos.y, dirE, le, 0.0 ) ) /
+										  max( t1, vec3( 1e-3 ) ), vec3( seen ) ),
+			 vec3( 0.0 ) );
+	const vec3 leg = hit - surface;
+	const float l1 = length( leg );
+	return jahFogAlong( c, surface.y, leg / max( l1, 1e-6 ), l1, length( surface - eyePos.xyz ) );
+}
+
+/// The shot's image point (u, v, depth) in world space.
+vec3 jahSsrWorldAt( vec2 shotUv, float depth )
+{
+	const vec4 w = imageToWorld * vec4( shotUv, depth, 1.0 );
+	return w.xyz / w.w;
+}
+
 // The shot's uv -> the target's (exact in float without a letterbox).
 vec2 jahShotToTex( vec2 uv )
 {
@@ -638,5 +694,13 @@ void main()
 			reflected *= ceiling / lum;
 	}
 
+	// THE FOG LAW ON THE SCREEN'S ANSWER (jahSsrRefog): the hit and this pixel's
+	// surface, both from this frame's depth.
+	{
+		const vec2 shotUv = ( inPs.uv0 - shotInset.xy ) / max( vec2( 1.0 ) - shotInset.zw, vec2( 1e-6 ) );
+		const ivec2 here = min( ivec2( inPs.uv0 * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) );
+		const float hereDepth = texelFetch( vkSampler2D( depthTexture, pointSampler ), here, 0 ).x;
+		reflected = jahSsrRefog( reflected, jahSsrWorldAt( shotUv, hereDepth ), jahSsrWorldAt( ray.xy, hitDepth ) );
+	}
 	fragColour = vec4( reflected, weight * historyFade );
 }

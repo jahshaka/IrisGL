@@ -179,6 +179,9 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_skin_prev.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atmosphere.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_height_fog.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_fog_along.glsl"
                 "${JAH_RQ_FORK_BRDF}"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
@@ -322,9 +325,13 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_hitCompositeSpv -o "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atmosphere.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_height_fog.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_fog_along.glsl"
         COMMENT "Compiling the hit write-back at SPIR-V 1.4"
         VERBATIM)
     # THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4): sun rays from the texels
@@ -675,6 +682,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_atmosphere.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_height_fog.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_fog_along.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
@@ -771,6 +779,18 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DRAW=1
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahHeightFog.glsl
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_height_fog.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE FOG LAW (PHOTON-I-1): the media between a surface and whoever looks at it,
+    # one file — the PBS pixel shader inserts the piece (JahFog maps its pass buffer
+    # onto it), the ray jobs include it through glslang, the screen reflection's
+    # resolve includes the raw copy.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahFogAlong
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahFogAlong_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_fog_along.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    COMMAND ${CMAKE_COMMAND} -DRAW=1
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahFogAlong.glsl
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_fog_along.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # A CARD READ FROM A DIRECTION (PHOTON-CARDS-5): the relight writes the mean
     # light direction the ray jobs' card read restores the lobe's view term with.

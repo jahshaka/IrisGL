@@ -500,8 +500,13 @@ AtmosphereStatus OgreScene::atmosphereStatus() const {
     if (!mAtmosphere) return AtmosphereStatus();
     AtmosphereStatus st = mAtmosphere->status();
     st.on = mAtmoSkyOn;
-    return st;
     st.aerialBound = mAtmoSkyOn && (mAtmosphere->aerialScale() > 0.0f || mAtmoFogOn);
+    st.environmentObserverM = environmentObserverKm() * 1000.0f;
+    return st;
+}
+
+float OgreScene::environmentObserverKm() const {
+    return mAtmoCapturedObserverKm > 0.05f ? mAtmoCapturedObserverKm : JahAtmosphere::kMinObserverKm;
 }
 
 bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
@@ -527,18 +532,106 @@ bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
 // or the ambient sees differs by nothing a picture shows under 50 m (a horizon
 // dip of 0.23 degrees at 50 m). The drawn sky and the aerial volume follow the
 // quarter-octave band from 2 m.
+//
+// ...AND AT REST THE STATE IS A FUNCTION OF THE CAMERA, NOT OF ITS HISTORY
+// (REOPEN-SKY-1, measured: the bands' hysteresis made a fresh scene and the same
+// scene reopened draw and capture different skies whenever the motion that led
+// to the saved camera left a band inside its tolerance). While the camera MOVES
+// both keep their hysteresis (no rebuild per frame, no capture per octave
+// boundary a hand-held head wobbles across); once it has held its altitude to a
+// millimetre for kRestFrames frames the drawn observer is set to its altitude
+// exactly and the environment to the octave lattice point 50 m x 2^n nearest it
+// (50 m for every observer under 71 m, the lattice's midpoint). A fresh scene and the reopened one at
+// rest are then the same sky, drawn and captured, at any altitude.
+// THE REST IS A LEVEL, NOT AN EDGE (PHOTON-I-1 round 3): every frame at rest re-asserts it
+// (both settles are no-ops once true). Fired once at frame 8, an atmosphere created
+// (OgreFog) or a sky re-enabled after that frame never settled: it kept its default
+// observer wherever the camera sat inside the band's tolerance, so the picture depended
+// on whether the scene finished opening before or after the camera's eighth rest frame.
 void OgreScene::noteAtmosphereObserver(float cameraY) {
     if (!mAtmosphere || !mAtmoSkyOn) return;
+    constexpr unsigned kRestFrames = 8u;
+    constexpr float kRestMetres = 0.001f;
+    constexpr float kLatticeKm = 0.05f;
     JAH_TRY {
-        if (mAtmosphere->setObserverAltitude(std::max(0.0f, cameraY))) {
-            const float km = std::max(mAtmosphere->observerKm(), 0.05f);
-            if (std::fabs(std::log2(km / mAtmoCapturedObserverKm)) >= 1.0f) {
-                mAtmoCapturedObserverKm = km;
+        const float y = std::max(0.0f, cameraY);
+        if (!mAtmoRestAnchored || std::fabs(y - mAtmoRestAnchorY) > kRestMetres) {
+            mAtmoRestAnchorY = y;
+            mAtmoRestAnchored = true;
+            mAtmoRestFrames = 0u;
+        } else if (mAtmoRestFrames <= kRestFrames) {
+            ++mAtmoRestFrames;
+        }
+        const bool settle = mAtmoRestFrames >= kRestFrames;
+        const bool rebuilt = settle ? mAtmosphere->settleObserverAltitude(y) : mAtmosphere->setObserverAltitude(y);
+        if (rebuilt || settle) {
+            const float km = std::max(mAtmosphere->observerKm(), kLatticeKm);
+            const float lattice = kLatticeKm * std::exp2(std::round(std::log2(km / kLatticeKm)));
+            if (lattice != mAtmoCapturedObserverKm &&
+                (settle || std::fabs(std::log2(km / mAtmoCapturedObserverKm)) >= 1.0f)) {
+                mAtmoCapturedObserverKm = lattice;
                 requestSkyCapture();
             }
-            bindCloudAir();
+            if (rebuilt) bindCloudAir();
         }
     } JAH_CATCH(mError, );
+}
+
+// THE FOG ALONG A REFLECTION (PHOTON-I-1 fix 5): what the colour passes compile
+// and read, so the ray jobs fog a reflection with the passes' own media. The
+// conditions are the passes': `hlms_fog` while the component is registered on the
+// manager (syncAtmosphere), the air's branch (`jah_atmo_ap`) while the fog state
+// says the atmosphere is the sky AND its table is claimed (FogHlmsListener::
+// hlmsTypeChanged), the height fog's variant while it is on.
+void OgreScene::fogAlong(float out[8][4], Ogre::TextureGpu *&aerial) const {
+    for (int i = 0; i < 8; ++i)
+        for (int k = 0; k < 4; ++k) out[i][k] = 0.0f;
+    aerial = nullptr;
+    // THE MEASURING DOOR (Scene::setReflectionFogEnabled; gi.reflect_fog --cost holds
+    // both arms in one process): shut, the reflection is fogged by nothing.
+    if (!mReflectionFogOn) return;
+    if (!mAtmosphere || !mSceneMgr || mSceneMgr->getAtmosphereRaw() != mAtmosphere) return;
+    const FogState f = FogHlmsListener::lookup(mSceneMgr);
+    const bool airRead = mAtmoSkyOn && mAtmosphere->aerialScale() > 0.0f;
+    const bool ap = f.atmosphere && mAtmoSkyOn && (airRead || mAtmoFogOn) && mAtmosphere->aerialLut();
+    float g[JahAtmosphere::kSettingsFloats];
+    mAtmosphere->settingsFloats(g);
+    out[0][0] = f.r; out[0][1] = f.g; out[0][2] = f.b; out[0][3] = f.heightDensity;
+    out[1][0] = f.heightFalloff; out[1][1] = f.heightLevel; out[1][2] = ap ? 1.0f : 0.0f;
+    out[1][3] = f.distanceDensity;
+    for (int k = 0; k < 4; ++k) out[2][k] = g[k];            // density, the breakthrough pair, aerial scale
+    for (int k = 0; k < 3; ++k) out[3][k] = g[4 + k];        // skyE
+    out[3][3] = 1.0f;                                         // hlms_fog
+    for (int k = 0; k < 4; ++k) {
+        out[4][k] = g[8 + k];                                 // sunDir
+        out[5][k] = g[12 + k];                                // planet
+        out[6][k] = g[16 + k];                                // heightFog
+        out[7][k] = g[20 + k];                                // heightFogColour
+    }
+    out[7][3] = mAtmosphere->heightFogOn() ? 1.0f : 0.0f;     // jah_height_fog
+    if (ap) aerial = mAtmosphere->aerialLut();
+}
+
+Ogre::TextureGpu *OgreScene::noAirVolume() {
+    if (mNoAirVolume) return mNoAirVolume;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    mNoAirVolume = tm->createTexture(recycledName("noairvolume"), Ogre::GpuPageOutStrategy::SaveToSystemRam,
+                                     Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type3D);
+    mNoAirVolume->setResolution(1u, 1u, 1u);
+    mNoAirVolume->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+    mNoAirVolume->setNumMipmaps(1u);
+    // Immediate, and NO notifyDataIsReady (DOCS/traps/ENGINE.md).
+    mNoAirVolume->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
+    mNoAirVolume->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
+    Ogre::StagingTexture *staging = tm->getStagingTexture(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+    staging->startMapRegion();
+    Ogre::TextureBox box = staging->mapRegion(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+    const Ogre::uint8 none[4] = { 0u, 0u, 0u, 255u };
+    std::memcpy(box.at(0, 0, 0), none, 4u);
+    staging->stopMapRegion();
+    staging->upload(box, mNoAirVolume, 0, 0, 0);
+    tm->removeStagingTexture(staging);
+    return mNoAirVolume;
 }
 
 void OgreScene::updateAtmosphere() {
@@ -693,6 +786,21 @@ void OgreScene::destroyPendingReflection() {
 // destroyRecycled). Throws through Ogre's exceptions; the callers catch.
 Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips) {
     updateAtmosphere();   // the export's bake can run outside a frame: the tables it draws, current
+    // THE ENVIRONMENT IS PHOTOGRAPHED FROM ITS OWN OBSERVER (REOPEN-SKY-1, measured):
+    // the capture used to see the sky from the DRAWN observer, whose quarter-octave
+    // band remembers the camera's history — a fresh scene captured from 5 m (its
+    // default camera), the same scene reopened from 2 m (the band's floor, its saved
+    // camera at 1.69 m inside it), and the sky's mean differed by 0.04-0.06 % on every
+    // reopen. The environment's observer is the octave state the capture is
+    // re-requested on (noteAtmosphereObserver): under 50 m the ground's 2 m, above it
+    // the octave that asked for the capture.
+    struct EnvironmentObserver {
+        JahAtmosphere *a = nullptr;
+        ~EnvironmentObserver() { if (a) { try { a->endEnvironmentObserver(); } catch (...) {} } }
+    } envObserver;
+    if (mAtmosphere && mAtmoSkyOn) {
+        if (mAtmosphere->beginEnvironmentObserver(environmentObserverKm())) envObserver.a = mAtmosphere;
+    }
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::TextureGpu *cube = tm->createTexture(
@@ -2048,29 +2156,10 @@ void OgreScene::applyCloudLayer(bool fieldChanged) {
 // and the "no air" flag — the unit must hold a 3D texture either way.
 void OgreScene::bindCloudAir() {
     if (!mCloudMaterial) return;
-    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     const bool air = mAtmoSkyOn && mAtmosphere;
-    if (!air && !mCloudNoAir) {
-        mCloudNoAir = tm->createTexture(recycledName("cloudnoair"), Ogre::GpuPageOutStrategy::SaveToSystemRam,
-                                        Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type3D);
-        mCloudNoAir->setResolution(1u, 1u, 1u);
-        mCloudNoAir->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
-        mCloudNoAir->setNumMipmaps(1u);
-        // Immediate, and NO notifyDataIsReady (DOCS/traps/ENGINE.md).
-        mCloudNoAir->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
-        mCloudNoAir->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
-        Ogre::StagingTexture *staging = tm->getStagingTexture(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
-        staging->startMapRegion();
-        Ogre::TextureBox box = staging->mapRegion(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
-        const Ogre::uint8 none[4] = { 0u, 0u, 0u, 255u };
-        std::memcpy(box.at(0, 0, 0), none, 4u);
-        staging->stopMapRegion();
-        staging->upload(box, mCloudNoAir, 0, 0, 0);
-        tm->removeStagingTexture(staging);
-    }
     Ogre::Pass *pass = mCloudMaterial->getTechnique(0)->getPass(0);
     if (Ogre::TextureUnitState *tu = pass->getTextureUnitState("atmoAerial"))
-        tu->setTexture(air ? mAtmosphere->aerialLut() : mCloudNoAir);
+        tu->setTexture(air ? mAtmosphere->aerialLut() : noAirVolume());
     Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
     const AtmosphereModel &m = air ? mAtmosphere->model() : AtmosphereModel();
     ps->setNamedConstant("atmoPlanet",
@@ -2356,7 +2445,7 @@ void OgreScene::destroyCloudLayer() {
     // before it draws again (applyCloudLayer, syncSunDiscClouds, bakeCloudField).
     if (mCloudField) { destroyRecycled(tm, mCloudField); mCloudField = nullptr; }
     if (mCloudWeatherNone) { destroyRecycled(tm, mCloudWeatherNone); mCloudWeatherNone = nullptr; }
-    if (mCloudNoAir) { destroyRecycled(tm, mCloudNoAir); mCloudNoAir = nullptr; }
+    if (mNoAirVolume) { destroyRecycled(tm, mNoAirVolume); mNoAirVolume = nullptr; }
     if (mCloudBakeCamera) { mSceneMgr->destroyCamera(mCloudBakeCamera); mCloudBakeCamera = nullptr; }
     mCloudMaterial.reset();
     mCloudBakeMaterial.reset();

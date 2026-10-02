@@ -1702,8 +1702,9 @@ struct SsrReprojection;
 /// `shot` is the letterbox's inner rectangle in the target's uv (x, y, w, h) —
 /// (0, 0, 1, 1) without a letterbox — the map between the SHOT's uv, which the
 /// march, the resolve and the reprojection work in, and the textures they read.
+/// `scene` is the view's (its fog law re-fogs a screen hit; null = no medium).
 void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
-               SsrReprojection &reprojection);
+               SsrReprojection &reprojection, OgreScene *scene);
 // ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
 //
 // This was ONE function, `applyGlobals`, called once a frame from the primary
@@ -1760,7 +1761,8 @@ struct SsrReprojection {
     bool          have = false;
 };
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection);
+                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
+                      OgreScene *scene);
 
 /// The seed value the HDR adaptation history holds for a given exposure — the
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
@@ -2486,6 +2488,12 @@ public:
     bool dirty(Ogre::Root *root) const;
     /// Deletes every file we wrote. The running process is unaffected.
     bool clear();
+    /// A compute pipeline the ENGINE built outside Ogre's Hlms (the ray tier's,
+    /// through Ogre's VkPipelineCache), counted as dirt: a pipeline built lazily
+    /// after the last save (a first cut-out material, a first mover's velocity
+    /// job) reaches the disk even when no Hlms shader compiled that run. Any
+    /// thread; process-wide (one device, one VkPipelineCache).
+    static void noteEnginePipeline(double ms);
 
     ShaderCacheStats stats(Ogre::Root *root) const;
     void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;
@@ -2517,6 +2525,7 @@ private:
         std::vector<std::string>       names;
         std::vector<std::vector<char>> blobs;
         unsigned                       compileCount = 0;
+        unsigned                       enginePipelines = 0;   ///< sEnginePipelines when serialized
     };
 
     /// THE WRITER THREAD's body: publish every blob atomically, carry the
@@ -2572,6 +2581,9 @@ private:
     /// writer thread, so a write that FAILED leaves the cache dirty and the
     /// next save tries again.
     std::atomic<unsigned> mSavedAtCompileCount { 0 };
+    std::atomic<unsigned> mSavedAtEnginePipelines { 0 };
+    static std::atomic<unsigned>  sEnginePipelines;   ///< noteEnginePipeline's count
+    static std::atomic<long long> sEnginePipelineUs;  ///< ...and their build time
     /// Set by clear(): the next save writes even though nothing new compiled.
     bool        mForceSave = false;
     /// save() is running. Guards the re-entrant call a nested event loop can
@@ -3000,6 +3012,9 @@ struct Plane {
 constexpr float kPlateRatio = 0.1f;
 bool derivePlane(Ogre::SceneNode *node, const Ogre::Item *item, Plane &out,
                  std::string &error);
+/// The one mirror-relevant property of the datablock an item wears: a CULL_NONE
+/// reflector fills its own reflection with itself and is refused.
+bool isTwoSided(const Ogre::Item *item);
 
 /// Drives one Ogre::PlanarReflections from one view's workspace.
 ///
@@ -3123,6 +3138,16 @@ bool        releaseDecalTexture(Ogre::TextureGpuManager *tm, DecalMap kind, Ogre
 void retainSharedTexture(Ogre::TextureGpu *tex);
 /// True when this was the LAST reference (the caller destroys the texture).
 bool releaseSharedTexture(Ogre::TextureGpu *tex);
+/// THE TEXTURE'S UPLOAD GENERATION (ALPHA-MASK-IDENTITY-1): how many times the
+/// engine has written texels into this TextureGpu (OgreScene::uploadRgbaLevels —
+/// createTexture's upload and every updateTexture). A consumer that derives data
+/// from a texture's CONTENT (the rays' cut-out masks, the cards' sun term) keys
+/// on it: the pointer, name and size do not move when new texels land in place.
+/// 0 for a texture never uploaded through it (a file load — its content is
+/// fixed for its life). Forgotten when the texture is destroyed.
+uint32_t textureUploadGeneration(const Ogre::TextureGpu *tex);
+void     noteTextureUploaded(const Ogre::TextureGpu *tex);
+void     forgetTextureUploads(const Ogre::TextureGpu *tex);
 void resetSharedTextures();
 
 // ---------------------------------------------------------------------------
@@ -3321,9 +3346,31 @@ public:
     /// The scene's driving camera's world height (the GI driver's rule), once a
     /// frame: the atmosphere's observer altitude, banded (Atmosphere.h).
     void noteAtmosphereObserver(float cameraY);
-    /// The observer altitude (km) the environment was last re-captured for
-    /// because the observer moved (noteAtmosphereObserver: past an octave).
+    /// THE MEDIA A RAY CROSSES THAT DID NOT START AT THE EYE (PHOTON-I-1 fix 5;
+    /// src/rayquery/include/jah_fog_along.glsl states the layout): the World fog,
+    /// its height layer, the air and the height fog exactly as this scene's PBS
+    /// colour passes read them (the fog state, the atmosphere's const buffer and
+    /// whether the passes compile each medium in), as eight vec4; `aerial` is the
+    /// air's table when the passes read it, else null.
+    void fogAlong(float out[8][4], Ogre::TextureGpu *&aerial) const;
+    /// A one-texel "no air" volume (RGBA 0, 0, 0, 1: no in-scatter, full
+    /// transmittance) a low-level material binds where the air's table would be —
+    /// the cloud sheet's and the screen reflection's resolve. Made on first ask.
+    Ogre::TextureGpu *noAirVolume();
+    /// The observer altitude (km) the environment is captured from: a point of the
+    /// octave lattice 50 m x 2^n (noteAtmosphereObserver), 50 m for every observer
+    /// under it (the capture then photographs from the ground's 2 m).
     float mAtmoCapturedObserverKm = 0.05f;
+    /// Scene::setReflectionFogEnabled's door (fogAlong answers no medium when shut).
+    bool mReflectionFogOn = true;
+    /// The altitude (km) the capture photographs the sky from: the ground's 2 m
+    /// for the 50 m lattice point, else the lattice point itself.
+    float environmentObserverKm() const;
+    /// THE CAMERA AT REST (REOPEN-SKY-1, noteAtmosphereObserver): the altitude it
+    /// was last seen moving from, and the frames it has stayed within 1 mm of it.
+    float mAtmoRestAnchorY = 0.0f;
+    unsigned mAtmoRestFrames = 0;
+    bool mAtmoRestAnchored = false;
 
     /// Ogre's OWN sky (SceneManager::setSky): a full-screen Rectangle2D at the far
     /// plane whose camera-direction shader samples an equirect or cube texture.
@@ -3382,6 +3429,7 @@ public:
     mutable unsigned long long mAtmoTintGeneration = 0;
     Colour atmosphereSunTint(const Vec3 &toSun) const override;
     AtmosphereStatus atmosphereStatus() const override;
+    void setReflectionFogEnabled(bool on) override { mReflectionFogOn = on; }
     bool measureAtmosphere(unsigned iterations, AtmosphereCost &out) override;
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
@@ -3843,8 +3891,16 @@ public:
     /// re-stage a slot and erase it.
     /// `material` = GpuInstance::raster[0] (the PBS material word): a cut-out's
     /// shadow is its material's mask (REFLECT-MOVERS-2).
-    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; uint32_t material = 0u; };
+    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; uint32_t material = 0u; uint32_t maskGen = 0u; };
     std::vector<CardCasterRec> mCardCasters;
+    /// Bumped by every texel upload this scene makes (uploadRgbaLevels): the card
+    /// sun-term trigger re-reads its cut-out casters' mask generations only on a
+    /// frame where it moved (ALPHA-MASK-IDENTITY-1).
+    unsigned long long mTextureUploadSerial = 0;
+    unsigned long long mCardUploadSerialSeen = 0;
+    /// The sum of the upload generations of a slot's sub-items' albedo textures —
+    /// what an in-place re-upload of a cut-out's mask moves (cardMoverFrame).
+    uint32_t cutoutMaskGeneration(uint32_t slot) const;
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
     /// has none (every skinned mesh, every line mesh, every model opened
     /// without a bake). Indexed by `Ogre::Mesh *` because all a cache holds is
@@ -3995,17 +4051,26 @@ public:
     void setNodeFaceCull(NodeId id, FaceCull cull) override;
     FaceCull nodeFaceCull(NodeId id) const override;
     unsigned cullTwinCount() const override { return mCullTwinCount; }
-    /// THE CULL TWINS' SWEEP (CULL-MODE-2): destroys every twin no Item wears. Cheap
-    /// when nothing can have changed (a flag, set when an Item wearing a twin could
-    /// have let go of it); called once per frame before the frame's first reader of
-    /// the Items' datablocks (OgreEngine's frame, beside drainPbsChanges).
+    unsigned cullTwinCandidateCount() const override { return unsigned(mTwinCandidates.size()); }
+    /// THE CULL TWINS' SWEEP (CULL-MODE-2; CULL-TWIN-DEBTS-1): destroys a twin that
+    /// no renderable has worn for kCullTwinGraceFrames of this scene's frames. It
+    /// visits only the CANDIDATES — twins an Item let go of since (noteTwinLetGo) —
+    /// and asks each one's own wearer count, Ogre's linked-renderable list, so the
+    /// cost is per release, never a walk of the scene's items. Called once per drawn
+    /// frame before the frame's first reader of the Items' datablocks.
     void sweepCullTwins();
+    /// An unworn twin lives this many of its scene's frames before it dies, so a cull
+    /// toggled every frame re-uses one datablock instead of making and destroying one
+    /// per frame. One second at the engine's fixed 1/60 s.
+    static constexpr unsigned kCullTwinGraceFrames = 60u;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
     bool setNodePlanarReflector(NodeId id, bool on) override;
     bool nodePlanarReflector(NodeId id) const override;
     int  activePlanarReflectors() const override;
+    unsigned planarReflectorArms() const override { return mPlanarArms; }
+    unsigned mPlanarArms = 0;   ///< armReflector's actors made (a diagnostic)
 
     // ---- Hardware ray tracing, per scene (ledger §425; impl OgreScene.cpp) ----
     /// Defined in OgreScene.cpp: a flip to Off also releases the scene's ray
@@ -4627,6 +4692,12 @@ private:
     struct CullTwin {
         std::string      datablockName;   // uniquely owned; empty = none
         TextureBindState bound;
+        /// The sweep tick (+1) at which the sweep first found it unworn; 0 = worn
+        /// (or not looked at since it was last worn).
+        unsigned long long unwornSince = 0;
+        /// Listed in mTwinCandidates — ONCE: the list is bounded by the live twins,
+        /// however many let-gos a scene that is never drawn (so never swept) sees.
+        bool candidate = false;
     };
     struct MaterialRec {
         std::string datablockName;
@@ -4836,15 +4907,12 @@ private:
     static void applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p,
                                 FaceCull cull = FaceCull::Material);
     // ---- THE CULL TWINS (CULL-MODE-2; MaterialRec::cullTwins) ----
-    /// The cull a material's params ask for on their own (Back or TwoSided).
-    static FaceCull ownCullOf(const PbrParams &p) {
-        return p.twoSided ? FaceCull::TwoSided : FaceCull::Back;
-    }
     /// The Ogre cull of a resolved FaceCull (never Material).
     static Ogre::CullingMode ogreCullOf(FaceCull c);
-    /// `cull` resolved against `p`: Material -> the params' own.
-    static FaceCull resolveCull(const PbrParams &p, FaceCull cull) {
-        return cull == FaceCull::Material ? ownCullOf(p) : cull;
+    /// `cull` resolved: Material -> Back (a material has no cull of its own; the
+    /// NODE is the authority, CULL-MODE-2).
+    static FaceCull resolveCull(FaceCull cull) {
+        return cull == FaceCull::Material ? FaceCull::Back : cull;
     }
     static size_t cullTwinIndex(FaceCull c) { return size_t(c) - 1u; }
     /// Only a PBR material has twins (either family); an overlay (grid, gizmo,
@@ -4862,10 +4930,26 @@ private:
     void syncCullTwins(MaterialRec &rec);
     /// Destroys every twin of `rec` — the caller has taken every Item off them.
     void destroyCullTwins(MaterialRec &rec);
-    /// A material whose OWN cull moved: every node wearing it re-picks master/twin.
-    void repointCullWearers(MaterialId id);
+    /// AN ITEM (OR ONE SUB-ITEM) LETS GO OF `db`: a twin among them becomes a sweep
+    /// candidate. Every site that re-points or destroys an Item calls it with the
+    /// datablock(s) it is leaving, BEFORE it leaves them.
+    void noteTwinLetGo(const Ogre::HlmsDatablock *db);
+    void noteTwinsLetGo(const Ogre::Item *item);
+    /// Item / sub-item re-pointed at `db`, the datablock it leaves noted first.
+    void wearDatablock(Ogre::Item *item, Ogre::HlmsDatablock *db);
+    void wearDatablock(Ogre::SubItem *sub, Ogre::HlmsDatablock *db);
+    /// Destroys one twin (the caller knows no renderable wears it).
+    void destroyCullTwin(MaterialRec &rec, CullTwin &t);
     unsigned mCullTwinCount = 0;
     bool     mCullTwinSweep = false;
+    /// Every live twin's datablock -> its record and slot (the candidates' lookup).
+    struct TwinOwner { MaterialRec *rec = nullptr; CullTwin *twin = nullptr; };
+    std::unordered_map<const Ogre::HlmsDatablock *, TwinOwner> mTwinOwners;
+    /// Twins let go of since the sweep last settled them: each live twin at most
+    /// once (CullTwin::candidate), a destroyed one taken out as it dies.
+    std::vector<const Ogre::HlmsDatablock *> mTwinCandidates;
+    /// This scene's sweep calls (one per drawn frame): the grace clock.
+    unsigned long long mCullSweepTick = 0;
     /// The visibility bits a node's PFX2 def carries when visible:
     /// kDistortionBit for a distortion emitter, else helper/visible.
     static Ogre::uint32 particleVisibilityBits(const Node &n);
@@ -4978,9 +5062,10 @@ private:
     Ogre::MaterialPtr  mCloudBakeMaterial;      // Jahshaka/CloudBake itself (the bake binds per render)
     Ogre::MaterialPtr  mSunDiscCloudMaterial;   // ...of Jahshaka/SunDiscClouded
     Ogre::TextureGpu  *mCloudWeatherNone = nullptr;   // 1x1 white, ManualTexture: the bake's no-map unit
-    /// 1x1x1 (0,0,0,1), ManualTexture: the sheet's "no air" unit under a sky
-    /// that is not the planet's atmosphere (SKY-ATMOSPHERE-1).
-    Ogre::TextureGpu  *mCloudNoAir = nullptr;
+    /// 1x1x1 (0,0,0,1), ManualTexture: the "no air" unit under a sky that is not
+    /// the planet's atmosphere (the cloud sheet's, SKY-ATMOSPHERE-1; the screen
+    /// reflection's resolve, PHOTON-I-1) — noAirVolume().
+    Ogre::TextureGpu  *mNoAirVolume = nullptr;
     /// The sheet's air: the atmosphere's aerial table (or no air) and its
     /// constants, bound on every layer or sky change (applyCloudLayer).
     void bindCloudAir();
@@ -5793,6 +5878,12 @@ private:
     /// destroyed: PlanarReflections keeps raw Renderable pointers and its own
     /// header says so in as many words.
     void disarmReflector(NodeId id, Node &n);
+    /// A REFLECTOR WHOSE DATABLOCK'S CULL MAY HAVE MOVED (a node cull edit, its
+    /// material's own two-sidedness flipping): disarmed and armed again, because
+    /// armReflector returns early for a node that already has an actor and so
+    /// never re-checks the two-sided refusal. The FLAG stays: a mirror refused now
+    /// arms again the moment its datablock is one-sided again.
+    void rederiveReflector(NodeId id, Node &n);
     /// disarmReflector for every reflector, keeping the flags — used when the
     /// arm itself is being torn down and rebuilt.
     void disarmAllReflectors();

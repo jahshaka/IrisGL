@@ -24,14 +24,22 @@
 //                        reflection's history)
 //   jahHitBuf[] (uint)   [0] = records appended (may pass the capacity), [1] =
 //                        records DROPPED because the list was full (a stat, never
-//                        a crash), [2..3] unused; then TWO WORDS PER RECORD from
-//                        word kJahHitAuxBase: packHalf2x16( the SUN'S VISIBILITY
-//                        at the hit (a shadow ray, jah_rq_sun_ray.glsl — replacing
-//                        the shadow map, which covers the camera's frustum only),
-//                        the ray's FOOTPRINT at the hit in metres (the decode's
-//                        texture LOD) ), and the write-back weight's float bits
-//                        (the reflection's temporal blend, negated when the
-//                        history is warm-held; the gather's texel re-weight).
+//                        a crash), [2..3] unused; then kJahHitAuxWords (FOUR)
+//                        WORDS PER RECORD from word kJahHitAuxBase:
+//                        [0] packHalf2x16( the SUN'S VISIBILITY at the hit (a
+//                        shadow ray, jah_rq_sun_ray.glsl — replacing the shadow
+//                        map, which covers the camera's frustum only), the ray's
+//                        FOOTPRINT at the hit in metres (the decode's texture
+//                        LOD) ), [1] the write-back weight's float bits (the
+//                        reflection's temporal blend, negated when the history is
+//                        warm-held; the gather's texel re-weight), [2] the ray's
+//                        ORIGIN HEIGHT's float bits (world Y) and [3]
+//                        packHalf2x16( the ray's LENGTH to the hit, the EYE'S
+//                        DISTANCE to the ray's origin ), both in metres and held
+//                        under the half's range — what the write-back fogs a
+//                        reflection's decoded light along (PHOTON-I-1: the
+//                        record, not a full-resolution image, carries them; the
+//                        gather's records write them too and nothing reads them).
 // WHY A BUFFER AND NOT A THIRD IMAGE: the decode is a PBS pixel shader, and the
 // pin's Vulkan table of PASS textures holds 32 slots (NUM_BIND_TEXTURES, its
 // bounds assert compiled out; a datablock's own textures are a baked set and do
@@ -61,8 +69,9 @@
 const uint kJahHitEmpty = 0xFFFFFFFFu;
 const uint kJahHitFarBit = 1u << 27u;
 const uint kJahHitDestGather = 0x80000000u;
-/// The first per-record word of `jahHitBuf` (two per record).
+/// The first per-record word of `jahHitBuf`, and the words per record.
 const uint kJahHitAuxBase = 4u;
+const uint kJahHitAuxWords = 4u;
 /// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuMover = 1u << 2u;
 const uint kJahHitGpuSkinned = 1u << 5u;
@@ -130,7 +139,7 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 /// counted) or not bound this dispatch — the caller then treats the hit as the
 /// write-back's "unshaded" case.
 bool jahHitAppend( uint slot, uint level, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
-				   float footprint, float weight, uint dest )
+				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance )
 {
 	if( !( JAH_HIT_ON ) || JAH_HIT_CAPACITY == 0u )
 		return false;
@@ -145,8 +154,11 @@ bool jahHitAppend( uint slot, uint level, bool far, uint prim, vec2 bary, vec3 d
 	imageStore( jahHitIds, at,
 				uvec4( slotLevel, prim, packUnorm2x16( clamp( bary, vec2( 0.0 ), vec2( 1.0 ) ) ),
 					   packSnorm2x16( jahOctEncode( dir ) ) ) );
-	jahHitBuf[kJahHitAuxBase + 2u * i] = packHalf2x16( vec2( sunVis, footprint ) );
-	jahHitBuf[kJahHitAuxBase + 2u * i + 1u] = floatBitsToUint( weight );
+	const uint aux = kJahHitAuxBase + kJahHitAuxWords * i;
+	jahHitBuf[aux] = packHalf2x16( vec2( sunVis, footprint ) );
+	jahHitBuf[aux + 1u] = floatBitsToUint( weight );
+	jahHitBuf[aux + 2u] = floatBitsToUint( originY );
+	jahHitBuf[aux + 3u] = packHalf2x16( clamp( vec2( rayLength, eyeDistance ), vec2( 0.0 ), vec2( 65504.0 ) ) );
 	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
 	return true;
 }

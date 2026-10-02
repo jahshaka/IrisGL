@@ -44,9 +44,21 @@ layout( set = 0, binding = 1 ) uniform sampler2D sceneDepth;
 layout( set = 0, binding = 2 ) uniform usampler2D atomIds;
 layout( std430, set = 0, binding = 3 ) readonly buffer Instances { uvec4 inst[]; };
 layout( rgba16f, set = 0, binding = 4 ) uniform writeonly image2D velocity;
+/// THE ID PASS'S OWN DEPTH (ID-DEPTH-1): the scene depth copied right after the id
+/// pass, before any stock-drawn surface is added to it.
+layout( set = 0, binding = 5 ) uniform sampler2D idDepth;
 
 #include "jah_atom_id.glsl"
 #include "jah_reproject.glsl"
+
+/// IS THE PIXEL'S SURFACE NOT THE ONE THE ID PASS DREW? (ID-DEPTH-1) The scene's final
+/// depth against the id pass's own, as view distances: nearer by more than the
+/// depth's own float spread means a stock-drawn surface was added in front after the
+/// id pass. (rq_motion.comp and rq_motion_skin.comp carry the same three lines.)
+bool jahNotIdSurface( float sceneDist, float idDist )
+{
+	return sceneDist < idDist * ( 1.0 - 1e-4 );
+}
 
 float viewDistance( float rawDepth )
 {
@@ -79,6 +91,12 @@ void main()
 		return;
 	const vec2 uv = ( vec2( px ) + 0.5 ) / vec2( res );
 	const float dist = viewDistance( raw );
+	// NOT THE ID'S SURFACE (ID-DEPTH-1): a stock-drawn surface (a character, a
+	// front-culled twin) in front of the mover wrote a nearer depth after the id
+	// pass. The id says what the Atom pass drew, not what the pixel shows — it keeps
+	// the camera path here (rq_motion_skin.comp asks the TLAS about a posed one).
+	if( jahNotIdSurface( dist, viewDistance( texelFetch( idDepth, px, 0 ).x ) ) )
+		return;
 	const vec3 plane = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
 	const vec3 world = p.camPos.w < 0.5 ? p.camPos.xyz + plane + p.fwd.xyz * dist
 										: p.camPos.xyz + plane * dist;

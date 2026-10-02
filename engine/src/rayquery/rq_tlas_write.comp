@@ -52,8 +52,9 @@ struct AsInstance
 };
 
 layout( std430, set = 0, binding = 0 ) readonly buffer InstanceTable { GpuInstance instances[]; };
-// THE INPUTS (RayQueryTier::writeTlasInputs): a 16-word header, then a 36-word
-// record per mesh-table entry (sixteen uvec2 level addresses, the coarsest level),
+// THE INPUTS (RayQueryTier::writeTlasInputs): a 16-word header, then a 20-word
+// record per mesh-table entry (eight uvec2 level addresses — the levels the rays
+// trace — and the coarsest level),
 // then a 4-word record per ready rigged slot (slot, address lo, address hi, 0),
 // ascending by slot.
 layout( std430, set = 0, binding = 1 ) readonly buffer Inputs { uint words[]; };
@@ -75,8 +76,8 @@ layout( std430, set = 0, binding = 2 ) writeonly buffer Out { AsInstance outInst
 #define HDR_MASK_STILLCAST	14u
 #define HDR_FLAG_ALPHA		15u
 #define HDR_WORDS			16u
-#define LEVEL_SLOTS			16u
-#define MESH_WORDS			36u
+#define LEVEL_SLOTS			8u
+#define MESH_WORDS			20u
 // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
 #define INSTANCE_FLAGS		1u
 // ...and for an ALPHA-TESTED slot VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR

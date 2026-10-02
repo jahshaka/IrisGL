@@ -31,6 +31,12 @@ For more information see the LICENSE file
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <pthread.h>
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #if defined(__GLIBC__)
 #include <malloc.h>   // malloc_trim — bakeStages hands the pool threads' freed arenas back
 #endif
@@ -1129,7 +1135,17 @@ namespace
 // adds a thread.
 namespace bakepool {
 
-std::atomic<int> gWidth { 0 };   ///< MeshBake::setBakeThreads; 0 = the hardware's
+std::atomic<int> gWidth { 0 };   ///< MeshBake::setBakeThreads; 0 = kDefaultWidth
+
+/// THE DEFAULT WIDTH, MEASURED (BAKE-WIDTH-2, spikes/atom-engine-1/fix10-width-series.txt):
+/// the editor's frames while the greek temple scan bakes, workers at idle priority, the
+/// app at nice 0 on the 20-thread box, two runs per width. Frames over 33 / 50 ms during
+/// the bake: 20 threads 39/31 and 37/27, 8 threads 34/25 and 39/30, 6 and 5 threads p95
+/// still 66-84 ms, 4 threads 11/3 and 11/2 (p95 28-30 ms against 73-87). The import's
+/// wall: 5.3-5.4 s at 5-20 threads (the serial verify chain sets it), 6.3 s at 4. Idle
+/// priority alone does not keep the render loop whole above 4 — so 4, capped at the
+/// hardware: a hitch-free editor beats 0.9 s of a background bake.
+constexpr int kDefaultWidth = 4;
 
 int hardware()
 {
@@ -1137,11 +1153,12 @@ int hardware()
     return n > 0 ? int(n) : 1;
 }
 
-/// The width a bake started now uses: the configured count, capped at the hardware.
+/// The width a bake started now uses: the configured count (else kDefaultWidth),
+/// capped at the hardware.
 int width()
 {
     const int w = gWidth.load(std::memory_order_relaxed);
-    return w > 0 ? std::min(w, hardware()) : hardware();
+    return std::min(w > 0 ? w : kDefaultWidth, hardware());
 }
 
 /// [0, n) in chunks of a size that depends on `n` and `grain` alone (rule 1): at
@@ -1272,6 +1289,20 @@ private:
 
     void worker()
     {
+        // AT IDLE PRIORITY (BAKE-WIDTH-2). A bake is background work the person did not
+        // ask to watch; the render loop and the UI thread are what they are looking at.
+        // D7 measured the editor's frame p95 at 2-5x idle while a temple baked on 20
+        // threads at the default priority. The lowest NICE on Linux (per thread: a
+        // weight of 15 against the render threads' 1024) — not SCHED_IDLE, which starves
+        // outright under any other load (a gate's own nice-19 suites included) and would
+        // turn every concurrent bake into a single-threaded one; the BACKGROUND QoS class
+        // on macOS. The caller (slot 0) is the import's own worker and keeps its
+        // priority: a bake always progresses.
+#if defined(__linux__)
+        setpriority(PRIO_PROCESS, pid_t(syscall(SYS_gettid)), 19);
+#elif defined(__APPLE__)
+        pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+#endif
         std::unique_lock<std::mutex> lock(mMutex);
         for (;;) {
             Job *job = nullptr;
@@ -4186,7 +4217,7 @@ float nearestOn(const float *positions, int posComps, const surface::TriangleGri
 }
 template <class Dist>
 float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float scale, float floorTol, Dist &&dist,
-               size_t budget = SIZE_MAX)
+               size_t budget = SIZE_MAX, bool decideOnly = false)
 {
     struct Piece { Vec3 a, b, c; int level = 0; };
     std::array<Piece, 3 * kFacetMaxLevels + 4> stack;
@@ -4217,8 +4248,18 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
             convex = std::max(convex, (*corner - surface::closestOnTriangle(*corner, tri[0], tri[1], tri[2])).length());
         const float ub = std::isfinite(convex) ? std::min(convex, d + radius) : d + radius;
         best = std::max(best, d);
+        // THE DECISION ALONE (`decideOnly`, the per-group verify; CLUSTER-VERIFY-PAR-1): a
+        // caller that asks only "past `stop`?" has its answer the moment the walk's value
+        // is — what it returns is at least `best` and at least `upper`, so walking on
+        // could only confirm it. Measured on the temple's mesh 2: the verify 4.5 -> 2.0 s
+        // (single facets of a scan walked for up to 0.6 s to find a maximum nobody read).
+        if (decideOnly && best > stop) return best;
         if (ub <= std::max(std::max(std::max(stop, best), upper), floorTol)) continue;   // cannot pass the bound
-        if (ub - d <= tol || piece.level >= kFacetMaxLevels) { upper = std::max(upper, ub); continue; }
+        if (ub - d <= tol || piece.level >= kFacetMaxLevels) {
+            upper = std::max(upper, ub);
+            if (decideOnly && upper > stop) return upper;
+            continue;
+        }
         const Vec3 ab = (piece.a + piece.b) * 0.5f, bc = (piece.b + piece.c) * 0.5f, ca = (piece.c + piece.a) * 0.5f;
         const int next = piece.level + 1;
         stack[top++] = Piece { piece.a, ab, ca, next };
@@ -4510,7 +4551,8 @@ private:
                                      vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 2]), lockSampled, error, mFloorLen,
                                      [&](const Vec3 &p, Vec3 *tri, float within) {
                                          return nearestOn(mPositions, mPosComps, gridS, sIdx, q, p, tri, within);
-                                     });
+                                     },
+                                     SIZE_MAX, /*decideOnly=*/true);   // only the decision is read
             if (std::min(m, mIslands.capOf[v0]) > lockSampled)
                 for (size_t k = 0; k < 3; ++k) found.push_back(mRegionIdx[lostIdx[t * 3 + k]]);
         });

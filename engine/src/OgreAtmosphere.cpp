@@ -12,6 +12,8 @@
 #include "EnginePrivate.h"
 #include "Atmosphere.h"
 
+#include <cstring>
+
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsPbs.h>
 #include <Cubemaps/OgreParallaxCorrectedCubemapBase.h>
@@ -265,6 +267,56 @@ bool JahAtmosphere::setObserverAltitude(float metres) {
     return true;
 }
 
+bool JahAtmosphere::settleObserverAltitude(float metres) {
+    const float km = std::max(kMinObserverKm, metres * 0.001f);
+    if (km == mObserverKm) return false;
+    mObserverKm = km;
+    ++mObserverRebuilds;
+    ++mModelGeneration;
+    mDirtySun = mDirtyBuffer = mDirtyQuad = true;
+    return true;
+}
+
+bool JahAtmosphere::beginEnvironmentObserver(float km) {
+    km = std::max(kMinObserverKm, km);
+    if (!mAirOn || km == mObserverKm) return false;
+    mDrawnObserverKm = mObserverKm;
+    mObserverKm = km;
+    // A THROW HERE MUST NOT LEAVE THE CAPTURE'S ALTITUDE BEHIND (the caller undoes
+    // only a begin that returned): the drawn observer goes back, and the tables are
+    // marked for the next update to rebuild at it.
+    try {
+        rebuildObserverView();
+    } catch (...) {
+        restoreDrawnObserver();
+        throw;
+    }
+    return true;
+}
+
+void JahAtmosphere::endEnvironmentObserver() {
+    mObserverKm = mDrawnObserverKm;
+    try {
+        rebuildObserverView();
+    } catch (...) {
+        restoreDrawnObserver();
+        throw;
+    }
+}
+
+void JahAtmosphere::restoreDrawnObserver() {
+    mObserverKm = mDrawnObserverKm;
+    ++mModelGeneration;
+    mDirtySun = mDirtyBuffer = mDirtyQuad = true;
+}
+
+void JahAtmosphere::rebuildObserverView() {
+    runJob("Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u);
+    handOver();
+    uploadSettings();
+    pushQuadConstants();
+}
+
 void JahAtmosphere::setSkyBrightness(float b) {
     b = std::max(0.0f, b);
     if (b == mSkyBrightness) return;
@@ -415,6 +467,15 @@ void JahAtmosphere::handOver() {
 }
 
 void JahAtmosphere::uploadSettings() {
+    float g[kSettingsFloats];
+    settingsFloats(g);
+    mBuffer->upload(g, 0u, sizeof(g));
+}
+
+// THE CONST BUFFER'S CONTENTS, ONCE: what HlmsPbs's passes read (uploadSettings)
+// and what the ray jobs' fog along a reflection reads (OgreScene::fogAlong).
+void JahAtmosphere::settingsFloats(float out[kSettingsFloats]) const {
+    static_assert(sizeof(AtmoSettingsGpu) == kSettingsFloats * sizeof(float), "the settings block's size");
     AtmoSettingsGpu g{};
     // THE FOG BLOCK IN UPSTREAM'S PACKING (AtmosphereNpr::_update): the
     // breakthrough as min x falloff and -falloff, so the stock block's
@@ -434,7 +495,7 @@ void JahAtmosphere::uploadSettings() {
     for (int i = 0; i < 4; ++i) g.heightFog[i] = mHfOn ? mHf[i] : 0.0f;
     g.heightFogColour[0] = mHfColour.x; g.heightFogColour[1] = mHfColour.y;
     g.heightFogColour[2] = mHfColour.z; g.heightFogColour[3] = 0.0f;
-    mBuffer->upload(&g, 0u, sizeof(g));
+    std::memcpy(out, &g, sizeof(g));
 }
 
 void JahAtmosphere::pushQuadConstants() {
