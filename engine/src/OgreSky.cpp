@@ -543,6 +543,11 @@ bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
 // exactly and the environment to the octave lattice point 50 m x 2^n nearest it
 // (50 m for every observer under 71 m, the lattice's midpoint). A fresh scene and the reopened one at
 // rest are then the same sky, drawn and captured, at any altitude.
+// THE REST IS A LEVEL, NOT AN EDGE (PHOTON-I-1 round 3): every frame at rest re-asserts it
+// (both settles are no-ops once true). Fired once at frame 8, an atmosphere created
+// (OgreFog) or a sky re-enabled after that frame never settled: it kept its default
+// observer wherever the camera sat inside the band's tolerance, so the picture depended
+// on whether the scene finished opening before or after the camera's eighth rest frame.
 void OgreScene::noteAtmosphereObserver(float cameraY) {
     if (!mAtmosphere || !mAtmoSkyOn) return;
     constexpr unsigned kRestFrames = 8u;
@@ -557,7 +562,7 @@ void OgreScene::noteAtmosphereObserver(float cameraY) {
         } else if (mAtmoRestFrames <= kRestFrames) {
             ++mAtmoRestFrames;
         }
-        const bool settle = mAtmoRestFrames == kRestFrames;
+        const bool settle = mAtmoRestFrames >= kRestFrames;
         const bool rebuilt = settle ? mAtmosphere->settleObserverAltitude(y) : mAtmosphere->setObserverAltitude(y);
         if (rebuilt || settle) {
             const float km = std::max(mAtmosphere->observerKm(), kLatticeKm);
