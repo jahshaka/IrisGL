@@ -1399,6 +1399,10 @@ public:
     /// number against the requested budget (planes off screen do not render).
     /// 0 when reflections are off or nothing has rendered yet.
     virtual int         activePlanarReflectors() const = 0;
+    /// Reflectors ARMED (an Ogre actor made) since the scene was created — a
+    /// diagnostic (engine.planar): an edit that does not move a mirror-relevant
+    /// state re-arms nothing.
+    virtual unsigned    planarReflectorArms() const = 0;
 
     // ---- Hardware ray tracing (owner, 2026-09-15; ledger §425) -----------
     /// WHAT THE SCENE WAS AUTHORED FOR (RayTracingMode). Scene-level, like GI

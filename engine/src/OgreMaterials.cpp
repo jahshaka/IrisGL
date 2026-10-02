@@ -1168,6 +1168,11 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         return false;
     }
     JAH_TRY {
+        // THE MIRROR CARES ABOUT ONE THING A SWAP CAN MOVE: whether the worn
+        // datablock is two-sided (the refusal). Read before and after; only a
+        // change re-derives the reflector — an ordinary swap leaves it armed.
+        const bool reflector = mReflectors.count(id) != 0;
+        const bool wasTwoSided = reflector && planar::isTwoSided(n.item);
         wearDatablock(n.item, wornDatablock(n, rec));   // the node's cull; the old twin may be free
         markShadowShapeDirty(n);
         n.item->setVisibilityFlags(itemVisibilityFlags(n, rec.unlit, rec.distortion));
@@ -1182,7 +1187,8 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         } else if (probeSeesItem(n)) {
             staleProbeGrid(GiStaleReason::Moved);
         }
-        rederiveReflector(id, n);   // its datablock's cull may have moved
+        if (reflector && planar::isTwoSided(n.item) != wasTwoSided)
+            rederiveReflector(id, n);   // the worn datablock's cull moved across the refusal
         return true;
     } JAH_CATCH(mError, false);
 }

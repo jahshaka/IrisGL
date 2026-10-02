@@ -417,6 +417,7 @@ bool OgreScene::armReflector(NodeId id, Node &n) {
     Ogre::PlanarReflectionActor *actor =
         mPlanar->addActor(Ogre::PlanarReflectionActor(pl.centre, pl.halfSize, pl.orientation));
     mActors[id] = actor;
+    ++mPlanarArms;
     // The mirror is kept out of its own reflection by the reflected camera's
     // clip plane and by inverted winding — both upstream's, neither ours (file
     // header). It must RECEIVE one, though. PBS matches registered renderables to actors

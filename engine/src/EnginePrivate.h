@@ -3010,6 +3010,9 @@ struct Plane {
 constexpr float kPlateRatio = 0.1f;
 bool derivePlane(Ogre::SceneNode *node, const Ogre::Item *item, Plane &out,
                  std::string &error);
+/// The one mirror-relevant property of the datablock an item wears: a CULL_NONE
+/// reflector fills its own reflection with itself and is refused.
+bool isTwoSided(const Ogre::Item *item);
 
 /// Drives one Ogre::PlanarReflections from one view's workspace.
 ///
@@ -4041,6 +4044,8 @@ public:
     bool setNodePlanarReflector(NodeId id, bool on) override;
     bool nodePlanarReflector(NodeId id) const override;
     int  activePlanarReflectors() const override;
+    unsigned planarReflectorArms() const override { return mPlanarArms; }
+    unsigned mPlanarArms = 0;   ///< armReflector's actors made (a diagnostic)
 
     // ---- Hardware ray tracing, per scene (ledger §425; impl OgreScene.cpp) ----
     /// Defined in OgreScene.cpp: a flip to Off also releases the scene's ray
