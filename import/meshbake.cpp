@@ -4186,7 +4186,7 @@ float nearestOn(const float *positions, int posComps, const surface::TriangleGri
 }
 template <class Dist>
 float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float scale, float floorTol, Dist &&dist,
-               size_t budget = SIZE_MAX)
+               size_t budget = SIZE_MAX, bool decideOnly = false)
 {
     struct Piece { Vec3 a, b, c; int level = 0; };
     std::array<Piece, 3 * kFacetMaxLevels + 4> stack;
@@ -4217,8 +4217,18 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
             convex = std::max(convex, (*corner - surface::closestOnTriangle(*corner, tri[0], tri[1], tri[2])).length());
         const float ub = std::isfinite(convex) ? std::min(convex, d + radius) : d + radius;
         best = std::max(best, d);
+        // THE DECISION ALONE (`decideOnly`, the per-group verify; CLUSTER-VERIFY-PAR-1): a
+        // caller that asks only "past `stop`?" has its answer the moment the walk's value
+        // is — what it returns is at least `best` and at least `upper`, so walking on
+        // could only confirm it. Measured on the temple's mesh 2: the verify 4.5 -> 2.0 s
+        // (single facets of a scan walked for up to 0.6 s to find a maximum nobody read).
+        if (decideOnly && best > stop) return best;
         if (ub <= std::max(std::max(std::max(stop, best), upper), floorTol)) continue;   // cannot pass the bound
-        if (ub - d <= tol || piece.level >= kFacetMaxLevels) { upper = std::max(upper, ub); continue; }
+        if (ub - d <= tol || piece.level >= kFacetMaxLevels) {
+            upper = std::max(upper, ub);
+            if (decideOnly && upper > stop) return upper;
+            continue;
+        }
         const Vec3 ab = (piece.a + piece.b) * 0.5f, bc = (piece.b + piece.c) * 0.5f, ca = (piece.c + piece.a) * 0.5f;
         const int next = piece.level + 1;
         stack[top++] = Piece { piece.a, ab, ca, next };
@@ -4510,7 +4520,8 @@ private:
                                      vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 2]), lockSampled, error, mFloorLen,
                                      [&](const Vec3 &p, Vec3 *tri, float within) {
                                          return nearestOn(mPositions, mPosComps, gridS, sIdx, q, p, tri, within);
-                                     });
+                                     },
+                                     SIZE_MAX, /*decideOnly=*/true);   // only the decision is read
             if (std::min(m, mIslands.capOf[v0]) > lockSampled)
                 for (size_t k = 0; k < 3; ++k) found.push_back(mRegionIdx[lostIdx[t * 3 + k]]);
         });
