@@ -1043,6 +1043,16 @@ struct CloudLayerDesc {
 };
 
 /// What the cloud layer is DOING in a scene (world.clouds().live).
+/// THE CLOUD LAYER'S TEXTURE BUDGET (CLOUD-BAKE-MEMORY-1), the same at every tier: one
+/// field over the 64 km tile, 2048^2 R16F (~31 m a texel) with its full mip chain —
+/// 2 B x (4^12 - 1) / 3 = 11,184,810 B (10.67 MiB). The layer DRAWS the field (its
+/// optical depth is the deck's look overhead, read with the pixel's own gradients), so a
+/// coarser far field is a coarser sky, not a cheaper one: the mips are the far field. The
+/// bake's three 512^2 intermediates live only inside the workspace that makes them.
+/// OgreSky.cpp builds the field from this number (a static_assert ties its size to it);
+/// cloud_2d.budget holds the live textures to it.
+constexpr unsigned long long kCloudFieldBytes = 11184810ull;
+
 struct CloudStatus {
     /// The layer quad exists and is visible (enabled, over a sky it may draw on).
     bool     drawn = false;

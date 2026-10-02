@@ -1842,6 +1842,12 @@ namespace {
 // (at 16 km a 2 km layer repeated itself ten times towards the horizon).
 constexpr float    kCloudTileMetres   = 64000.0f;   // one tile of the field, in world metres
 constexpr Ogre::uint32 kCloudFieldSize = 2048u;     // ~31 m a texel: the km edge ramp spans 50+
+// THE BUDGET IS THE PUBLIC NUMBER (Types.h kCloudFieldBytes): R16F, every mip to 1 x 1.
+constexpr unsigned long long cloudFieldChainBytes(Ogre::uint32 n) {
+    return n == 0u ? 0ull : 2ull * n * n + cloudFieldChainBytes(n / 2u);
+}
+static_assert(cloudFieldChainBytes(kCloudFieldSize) == kCloudFieldBytes,
+              "the cloud field's size and its stated budget (Types.h kCloudFieldBytes) disagree");
 constexpr Ogre::uint32 kCloudFootprintSize = 512u;  // the bake's footprint + blur grid (JahshakaClouds.compositor)
 constexpr float    kCloudTauFull      = 32.0f;      // a full column's optical depth at density 1 (a thick stratocumulus deck; its base transmits ~22 % diffusely)
 constexpr float    kCloudSlabMetres   = 1000.0f;    // the sheet's thickness the self-shadow crosses
