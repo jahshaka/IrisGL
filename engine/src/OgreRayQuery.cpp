@@ -2205,15 +2205,18 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 // `instanceCustomIndex` is the SLOT on both copies: a hit reads the object's entry
 // with one fetch whichever copy it hit; the copy is told apart by the launch's MASK.
 namespace {
-/// Level slots per mesh record in the job's inputs (rq_tlas_write.comp's
-/// LEVEL_SLOTS) — the record's LAYOUT.
-constexpr uint32_t kTlasLevels = 16u;
-/// THE LEVELS THE RAYS MAY TRACE (architecture audit D1): no deeper than the GPU
-/// scene keeps — its level table, its geometry rows (geomRowIndex: eight a mesh) and
-/// the hit record's 3-bit level. A chain deeper than eight is traced at level 7 at
-/// most: more triangles than its error allows, the right ones. Past it a near copy
-/// had no geometry row and a far copy indexed the NEXT mesh's rows (gi.ray_levels).
-constexpr uint32_t kRayLevels = std::min<uint32_t>(kTlasLevels, detail::GpuScene::kLevelsPerMesh);
+/// THE LEVELS THE RAYS MAY TRACE, and the level slots per mesh record in the job's
+/// inputs (rq_tlas_write.comp's LEVEL_SLOTS — the record's LAYOUT). No deeper than
+/// the GPU scene keeps (architecture audit D1): its level table, its geometry rows
+/// (geomRowIndex: eight a mesh) and the hit record's 3-bit level. A chain deeper
+/// than eight is traced at level 7 at most: more triangles than its error allows,
+/// the right ones. Past it a near copy had no geometry row and a far copy indexed
+/// the NEXT mesh's rows (gi.ray_levels). The record carries exactly these slots:
+/// it used to carry sixteen, and the eight past the cap were written and never
+/// read (no BLAS is ever built past it).
+constexpr uint32_t kTlasLevels = detail::GpuScene::kLevelsPerMesh;
+static_assert(kTlasLevels == 8u, "rq_tlas_write.comp's LEVEL_SLOTS and MESH_WORDS");
+constexpr uint32_t kRayLevels = kTlasLevels;
 /// The inputs' layout (the shader's HDR_* / MESH_WORDS).
 constexpr uint32_t kTlasHeaderWords = 16u;
 constexpr uint32_t kTlasMeshWords = kTlasLevels * 2u + 4u;
