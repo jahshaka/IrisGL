@@ -54,6 +54,8 @@ layout( rgba32ui, set = 0, binding = 7 ) uniform readonly uimage2D jahHitIds;
 layout( set = 0, binding = 8 ) uniform sampler3D fogAerial;
 #define JAH_FOG_P( k ) p.fog[k]
 #define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
+#define JAH_FOG_HAS_AIR
+#define JAH_FOG_HAS_HEIGHT_FOG
 #include "jah_atmosphere.glsl"
 #include "jah_height_fog.glsl"
 #include "jah_fog_along.glsl"
@@ -123,7 +125,7 @@ void main()
 		const vec3 dir = jahOctDecodeDir( unpackSnorm2x16( imageLoad( jahHitIds, at ).w ) );
 		const float originY = uintBitsToFloat( jahHitBuf[aux + 2u] );
 		const vec2 lengths = unpackHalf2x16( jahHitBuf[aux + 3u] );
-		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x );
+		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
 		imageStore( historyCur, xy, vec4( mix( prev.xyz, fogged, blend ), count ) );
 	}
 	else

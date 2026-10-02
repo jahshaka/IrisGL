@@ -412,6 +412,8 @@ layout( set = 0, binding = 37 ) uniform usampler2D atomIds;
 #include "jah_atom_id.glsl"
 #define JAH_FOG_P( k ) p.fog[k]
 #define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
+#define JAH_FOG_HAS_AIR
+#define JAH_FOG_HAS_HEIGHT_FOG
 #include "jah_atmosphere.glsl"
 #include "jah_height_fog.glsl"
 #include "jah_fog_along.glsl"
@@ -966,12 +968,16 @@ void main()
 											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
 											true, ok, photonSource );
 		record = decodeAlways || !ok || !finite3( traced );
-		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): the hit's light crossed
-		// the reflection ray's length before the surface reflected it; the colour
-		// pass fogs only the eye's leg. A record is fogged at its write-back, which
-		// has the decoded radiance (rq_hit_composite.comp).
+		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1, the one law jah_fog_along.glsl):
+		// the hit's light crossed the leg from the hit to the REFLECTING SURFACE — not
+		// to the ray's biased origin (`bias` along the normal, a metre at the shipped
+		// knob: measured as a metre of fog missing from every reflection) — and the
+		// colour pass fogs the eye's leg, which the height fog's start already spent.
+		// A record is fogged at its write-back, which has the decoded radiance
+		// (rq_hit_composite.comp; the record carries the same three numbers).
 		if( !record )
-			traced = jahFogAlong( traced, ( world + worldN * bias ).y, L, t );
+			traced = jahFogAlong( traced, world.y, L, length( world + worldN * bias + L * t - world ),
+								  length( world - thisEye.camPos ) );
 		recSlot = hitSlot;
 		recPrim = hitPrim;
 		recGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
@@ -980,7 +986,7 @@ void main()
 	}
 	else
 	{
-		traced = jahFogAlongSky( skyRadiance( L, lobeAlpha ), ( world + worldN * bias ).y, L );   // route C: the escape
+		traced = jahFogAlongSky( skyRadiance( L, lobeAlpha ), world.y, L, length( world - thisEye.camPos ) );   // route C: the escape
 		ok = true;
 		photonSource = 3u;
 	}
@@ -1294,7 +1300,7 @@ void main()
 		if( jahHitAppend( recSlot, jahHitNearLevel( recSlot ), false, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),
 						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false ),
-						  ( world + worldN * bias ).y, hitT, length( world + worldN * bias - thisEye.camPos ) ) )
+						  world.y, length( hitPos - world ), length( world - thisEye.camPos ) ) )
 		{
 			imageStore( historyDistCur, tc, vec4( dist, hitMeanStored, 0.0, 0.0 ) );
 			photonHit( tc, kPhotonList );

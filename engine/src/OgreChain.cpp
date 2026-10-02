@@ -3869,7 +3869,7 @@ void initSmaa(Ogre::Root *root, int preset) {
 //   3. left-multiply by the clip→image matrix — the *0.5+0.5 and the y flip, so
 //      the shader divides by w and has a texture coordinate, full stop.
 void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
-               SsrReprojection &reprojection) {
+               SsrReprojection &reprojection, OgreScene *scene) {
     if (!camera || desc.ssr <= 0) return;
     Ogre::Pass *march = materialPass("Jahshaka/SsrRayMarch");
     if (!march) return;
@@ -3978,9 +3978,11 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
     // pixel a hundred metres from the origin, and a bilinear fetch moved by a
     // ten-thousandth of a pixel can turn an 8-bit code.
     Ogre::Matrix4 reproject = Ogre::Matrix4::IDENTITY;
+    Ogre::Matrix4 imageToWorld = Ogre::Matrix4::IDENTITY;
     {
         const Ogre::Matrix4 worldToImage =
             kClipToImage * camera->getProjectionMatrixWithRSDepth() * camera->getViewMatrix(true);
+        imageToWorld = worldToImage.inverse();
         if (reprojection.have && !(reprojection.prevWorldToImage == worldToImage)) {
             const Ogre::Matrix4 candidate = reprojection.prevWorldToImage * worldToImage.inverse();
             bool finite = true;
@@ -4000,6 +4002,18 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
                                            kRayReflectFeather, 0.0f));
         rp->setNamedConstant("reprojectMatrix", reproject);
         rp->setNamedConstant("shotInset", shotInset);
+        // THE FOG LAW ON A SCREEN HIT (PHOTON-I-1, JahSsrResolve_ps.glsl
+        // jahSsrRefog): the scene's media as its colour passes read them, where a
+        // screen point is in the world, and the eye; the air's table or no air.
+        float fog[8][4] = {};
+        Ogre::TextureGpu *aerial = nullptr;
+        if (scene) scene->fogAlong(fog, aerial);
+        rp->setNamedConstant("fogP", &fog[0][0], 8u, 4u);
+        rp->setNamedConstant("imageToWorld", imageToWorld);
+        const Ogre::Vector3 eye = camera->getDerivedPosition();
+        rp->setNamedConstant("eyePos", Ogre::Vector4(eye.x, eye.y, eye.z, 1.0f));
+        if (Ogre::TextureUnitState *tu = resolve->getTextureUnitState("fogAerial"))
+            if (Ogre::TextureGpu *t = aerial ? aerial : scene ? scene->noAirVolume() : nullptr) tu->setTexture(t);
     }
 }
 
@@ -4053,7 +4067,8 @@ void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
 }
 
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection) {
+                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
+                      OgreScene *scene) {
     if (desc.hdr) {
         // The tonemap quad's 8-bit write is dithered (fork feab041c6 (was 0079)); this pushes
         // only the diagnostic off switch, and the shader's default is
@@ -4094,7 +4109,7 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         if (desc.letterbox && viewHeight)
             letterboxRect(desc.letterboxAspect, float(viewWidth) / float(viewHeight), shot);
-        updateSsr(camera, desc, shot, reprojection);
+        updateSsr(camera, desc, shot, reprojection, scene);
     } else {
         reprojection.have = false;
     }
@@ -4125,7 +4140,7 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *) {
     // so two workspaces in one frame can carry two different exposures even
     // though the materials themselves are process-wide singletons.
     applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(),
-                     mView->width(), mView->height(), mSsrReprojection);
+                     mView->width(), mView->height(), mSsrReprojection, mView->ogreScene());
 }
 
 }   // namespace chain

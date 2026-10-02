@@ -142,6 +142,12 @@ struct JahConeResult
 	float travelled;	///< the cone's age, in lastCascade's normalised units
 	float travelledC0;	///< the same age in cascade 0's normalised units
 	int lastCascade;
+	/// THE OPACITY-WEIGHTED DISTANCE (PHOTON-I-1): the sum over the planes taken of
+	/// the opacity each gave times its distance from the cone's apex, in cascade 0's
+	/// normalised units — over `alpha`, where the light the cone gathered came from
+	/// (a reflection's leg through the fog law, PhotonVct). A cascade's own march
+	/// hands its sum in ITS units from its own start age; the walk converts.
+	float takeAtC0;
 };
 
 /// THE ORIGIN PLANE of a cone set that starts at `startLS` (jahConeStart's point) biased
@@ -238,6 +244,7 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 	float prevMip = -1.0;
 	bool done = !jahMarchInsideBox( posLS ) || da == 0.0;
 	int steps = 0;
+	float takeAt = 0.0;
 	while( !done && alpha < 0.95 && steps < 256 )
 	{
 		++steps;
@@ -328,6 +335,7 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 		else if( sampleColour.w > 0.0 )
 			color += sampleColour.xyz * ( take / sampleColour.w );
 		alpha += take;
+		takeAt += take * ( startingTravelled + tCentre );
 
 		readTo = nextReadTo;
 		if( sgn > 0.0 ? readTo >= 1.0 : readTo <= 0.0 )
@@ -345,6 +353,7 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 	result.travelled = max( startingTravelled + tEnd, vctInvResolution );
 	result.travelledC0 = result.travelled;
 	result.lastCascade = c;
+	result.takeAtC0 = takeAt;
 	return result;
 }
 
@@ -363,6 +372,9 @@ JahConeResult jahConeMarchAged( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec
 												startingTravelled, origin, flags );
 #if JAH_VOX_MAX_CASCADES > 1
 	float toC0 = 1.0;	// cascade j's normalised units to cascade 0's, along dirLS
+	// Where the walk has read up to, from the apex, in cascade 0's units (a specular
+	// hop starts its own age at 0; a diffuse one carries the age across).
+	float endC0 = result.travelled;
 	for( int j = 1; j < JAH_VOX_COUNT && result.alpha < 0.95; ++j )
 	{
 		const float prevCascadeMaxLod = JAH_VOX_MAXLOD( j - 1 );
@@ -395,6 +407,17 @@ JahConeResult jahConeMarchAged( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec
 		// screen cone 0.39 of the true picture). The ramp dated from the store's PI-too-bright
 		// injection, since fixed at its source (fork 8f09c0cd4+155a56bf8).
 		result.colour += newRes.colour * fromPrevScale.w;
+		const float hopToC0 = toC0 * hopScale;
+		if( specular )
+		{
+			result.takeAtC0 += ( newRes.alpha - result.alpha ) * endC0 + newRes.takeAtC0 / hopToC0;
+			endC0 += newRes.travelled / hopToC0;
+		}
+		else
+		{
+			result.takeAtC0 += newRes.takeAtC0 / hopToC0;
+			endC0 = newRes.travelled / hopToC0;
+		}
 		if( !specular )
 			result.travelled = newRes.travelled;
 		result.alpha = newRes.alpha;

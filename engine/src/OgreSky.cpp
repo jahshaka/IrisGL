@@ -576,6 +576,28 @@ void OgreScene::fogAlong(float out[8][4], Ogre::TextureGpu *&aerial) const {
     if (ap) aerial = mAtmosphere->aerialLut();
 }
 
+Ogre::TextureGpu *OgreScene::noAirVolume() {
+    if (mNoAirVolume) return mNoAirVolume;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    mNoAirVolume = tm->createTexture(recycledName("noairvolume"), Ogre::GpuPageOutStrategy::SaveToSystemRam,
+                                     Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type3D);
+    mNoAirVolume->setResolution(1u, 1u, 1u);
+    mNoAirVolume->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+    mNoAirVolume->setNumMipmaps(1u);
+    // Immediate, and NO notifyDataIsReady (DOCS/traps/ENGINE.md).
+    mNoAirVolume->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
+    mNoAirVolume->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
+    Ogre::StagingTexture *staging = tm->getStagingTexture(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+    staging->startMapRegion();
+    Ogre::TextureBox box = staging->mapRegion(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+    const Ogre::uint8 none[4] = { 0u, 0u, 0u, 255u };
+    std::memcpy(box.at(0, 0, 0), none, 4u);
+    staging->stopMapRegion();
+    staging->upload(box, mNoAirVolume, 0, 0, 0);
+    tm->removeStagingTexture(staging);
+    return mNoAirVolume;
+}
+
 void OgreScene::updateAtmosphere() {
     if (!mAtmosphere) return;
     JAH_TRY {
@@ -2093,29 +2115,10 @@ void OgreScene::applyCloudLayer(bool fieldChanged) {
 // and the "no air" flag — the unit must hold a 3D texture either way.
 void OgreScene::bindCloudAir() {
     if (!mCloudMaterial) return;
-    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     const bool air = mAtmoSkyOn && mAtmosphere;
-    if (!air && !mCloudNoAir) {
-        mCloudNoAir = tm->createTexture(recycledName("cloudnoair"), Ogre::GpuPageOutStrategy::SaveToSystemRam,
-                                        Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type3D);
-        mCloudNoAir->setResolution(1u, 1u, 1u);
-        mCloudNoAir->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
-        mCloudNoAir->setNumMipmaps(1u);
-        // Immediate, and NO notifyDataIsReady (DOCS/traps/ENGINE.md).
-        mCloudNoAir->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
-        mCloudNoAir->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
-        Ogre::StagingTexture *staging = tm->getStagingTexture(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
-        staging->startMapRegion();
-        Ogre::TextureBox box = staging->mapRegion(1u, 1u, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
-        const Ogre::uint8 none[4] = { 0u, 0u, 0u, 255u };
-        std::memcpy(box.at(0, 0, 0), none, 4u);
-        staging->stopMapRegion();
-        staging->upload(box, mCloudNoAir, 0, 0, 0);
-        tm->removeStagingTexture(staging);
-    }
     Ogre::Pass *pass = mCloudMaterial->getTechnique(0)->getPass(0);
     if (Ogre::TextureUnitState *tu = pass->getTextureUnitState("atmoAerial"))
-        tu->setTexture(air ? mAtmosphere->aerialLut() : mCloudNoAir);
+        tu->setTexture(air ? mAtmosphere->aerialLut() : noAirVolume());
     Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
     const AtmosphereModel &m = air ? mAtmosphere->model() : AtmosphereModel();
     ps->setNamedConstant("atmoPlanet",
@@ -2401,7 +2404,7 @@ void OgreScene::destroyCloudLayer() {
     // before it draws again (applyCloudLayer, syncSunDiscClouds, bakeCloudField).
     if (mCloudField) { destroyRecycled(tm, mCloudField); mCloudField = nullptr; }
     if (mCloudWeatherNone) { destroyRecycled(tm, mCloudWeatherNone); mCloudWeatherNone = nullptr; }
-    if (mCloudNoAir) { destroyRecycled(tm, mCloudNoAir); mCloudNoAir = nullptr; }
+    if (mNoAirVolume) { destroyRecycled(tm, mNoAirVolume); mNoAirVolume = nullptr; }
     if (mCloudBakeCamera) { mSceneMgr->destroyCamera(mCloudBakeCamera); mCloudBakeCamera = nullptr; }
     mCloudMaterial.reset();
     mCloudBakeMaterial.reset();
