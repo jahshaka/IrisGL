@@ -5678,20 +5678,21 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
 // ---- THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1) ----------------------
 namespace {
 /// rq_motion.comp's set 0, one type a binding — and rq_motion_skin.comp's, which
-/// reads 0-4 and the ray's three after them. The rigid job never reads 5-7, so a
+/// reads 0-5 and the ray's three after them. The rigid job never reads 6-8, so a
 /// frame with no pose moving leaves them unwritten (a binding a pipeline does not
 /// statically use need not hold a valid descriptor).
-constexpr unsigned kMotionBindings = 8u;
-constexpr unsigned kMotionRigidBindings = 5u;
+constexpr unsigned kMotionBindings = 9u;
+constexpr unsigned kMotionRigidBindings = 6u;
 constexpr VkDescriptorType kMotionTypes[kMotionBindings] = {
     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 1 depth
     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the id image
     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 3 the GPU scene's instances
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 jahSsrVelocity
-    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 5 the scene's TLAS (posed job)
-    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 6 the per-slot geometry rows
-    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 7 the GPU scene's geometry rows
+    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 5 the id pass's own depth (ID-DEPTH-1)
+    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 6 the scene's TLAS (posed job)
+    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 7 the per-slot geometry rows
+    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 8 the GPU scene's geometry rows
 };
 /// rq_motion.comp's Params, member for member.
 struct MotionParams {
@@ -6138,16 +6139,19 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     // (the chain declares both only with the march and the id pass: never ask it
     // otherwise — a miss is logged as an exception every frame)
     if (!view->chainDesc().atomDraw) return;
-    Ogre::TextureGpu *vel = nullptr, *ids = nullptr, *depth = nullptr;
+    Ogre::TextureGpu *vel = nullptr, *ids = nullptr, *depth = nullptr, *idDepth = nullptr;
     try {
         vel = node->getDefinedTexture(Ogre::IdString("jahSsrVelocity"));
         ids = node->getDefinedTexture(Ogre::IdString(kAtomIdTexture));
         depth = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+        // THE ID PASS'S OWN DEPTH (ID-DEPTH-1; the chain copies it every frame on a
+        // chain whose job runs — OgreChain.cpp, the atom id depth).
+        idDepth = node->getDefinedTexture(Ogre::IdString("jahAtomViewDepth"));
     } catch (Ogre::Exception &) { return; }
-    if (!vel || !ids || !depth || !vel->isUav()) return;
+    if (!vel || !ids || !depth || !idDepth || !vel->isUav()) return;
     const unsigned w = vel->getWidth(), h = vel->getHeight();
     if (!w || !h || ids->getWidth() != w || ids->getHeight() != h || depth->getWidth() != w ||
-        depth->getHeight() != h)
+        depth->getHeight() != h || idDepth->getWidth() != w || idDepth->getHeight() != h)
         return;
     detail::GpuScene &gs = scene->gpuScene();
     Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
@@ -6258,10 +6262,13 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     VkDescriptorBufferInfo ub{};
     ub.buffer = rv.motionParams[ring].buffer;
     ub.range = sizeof(MotionParams);
-    VkDescriptorImageInfo img[3] = {};
+    VkDescriptorImageInfo img[4] = {};
     img[0].sampler = mPointSampler;
     img[0].imageView = sampledView(depth);
     img[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    img[3].sampler = mPointSampler;
+    img[3].imageView = sampledView(idDepth);
+    img[3].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     img[1].sampler = mPointSampler;
     img[1].imageView = sampledView(ids);
     img[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -6274,7 +6281,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
         retireView(img[2].imageView);
         img[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
-    if (!img[0].imageView || !img[1].imageView || !img[2].imageView) return;
+    if (!img[0].imageView || !img[1].imageView || !img[2].imageView || !img[3].imageView) return;
     VkDescriptorBufferInfo instInfo{};
     {
         auto *bi = static_cast<Ogre::VulkanBufferInterface *>(instances->getBufferInterface());
@@ -6295,21 +6302,22 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     wr[2].pImageInfo = &img[1];
     wr[3].pBufferInfo = &instInfo;
     wr[4].pImageInfo = &img[2];
+    wr[5].pImageInfo = &img[3];
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
     VkDescriptorBufferInfo geomBufs[2] = {};
     if (skinSa) {
         asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
         asWrite.accelerationStructureCount = 1;
         asWrite.pAccelerationStructures = &skinSa->tlas;
-        wr[5].pNext = &asWrite;
+        wr[6].pNext = &asWrite;
         geomBufs[0].buffer = rv.motionGeomRowOfSlot[ring].buffer;
         geomBufs[0].range = VK_WHOLE_SIZE;
         auto *gbi = static_cast<Ogre::VulkanBufferInterface *>(skinGeomRows->getBufferInterface());
         geomBufs[1].buffer = gbi->getVboName();
         geomBufs[1].offset = VkDeviceSize(skinGeomRows->_getFinalBufferStart()) * skinGeomRows->getBytesPerElement();
         geomBufs[1].range = skinGeomRows->getTotalSizeBytes();
-        wr[6].pBufferInfo = &geomBufs[0];
-        wr[7].pBufferInfo = &geomBufs[1];
+        wr[7].pBufferInfo = &geomBufs[0];
+        wr[8].pBufferInfo = &geomBufs[1];
     }
     vkUpdateDescriptorSets(mVk, skinSa ? kMotionBindings : kMotionRigidBindings, wr, 0, nullptr);
     // THE LAYOUTS through Ogre's solver, before the command buffer is taken: the
@@ -6321,7 +6329,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
         Ogre::ResourceTransitionArray trans;
         solver.resolveTransition(trans, vel, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
                                  computeStage);
-        for (Ogre::TextureGpu *t : { depth, ids })
+        for (Ogre::TextureGpu *t : { depth, ids, idDepth })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
                                      computeStage);
         solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
