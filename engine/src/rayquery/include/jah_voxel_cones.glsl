@@ -148,8 +148,9 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 /// THE TWO CONE SETS: six cones (one on the normal weighted 0.25, five at 60
 /// degrees weighted 0.15, tan of the half angle 0.577 = 30 degrees) or four
 /// (at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees). The engine leaves
-/// HlmsPbs at four. The weights carry the cosine; each cone's escape reads its
-/// solid angle uniformly (the environment's cone lookup does the same).
+/// HlmsPbs at four. The weights carry the cosine; each of the four cones' escapes
+/// reads its azimuthal quadrant of the hemisphere cosine-weighted (jahEnvQuadrant),
+/// the six-cone set its own solid angle (jahEnvCone).
 void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 					  out vec3 light, out vec3 envD )
 {
@@ -184,7 +185,11 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 		JahConeResult result = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), coneAngleTan, coneOrigin, coneFlags );
 		light += coneWeights[i] * result.colour;
 		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.alpha / 0.95 ) ) *
+#if JAH_CONES_SIX
 				jahEnvCone( JAH_CONES_TO_WORLD( d ), coneAngleTan );
+#else
+				jahEnvQuadrant( JAH_CONES_TO_WORLD( d ), JAH_CONES_TO_WORLD( basis[2] ) );   // its quadrant, cosine-weighted
+#endif
 	}
 }
 

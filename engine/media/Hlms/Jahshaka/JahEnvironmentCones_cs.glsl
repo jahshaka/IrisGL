@@ -49,7 +49,9 @@ void main()
 	const vec3 axis = normalize( params.queries[q].xyz );
 	const float t = max( params.queries[q].w, 0.0 );
 
-	const vec3 lookup = jahEnvCone( axis, t );
+	// A NEGATIVE tan asks for the four-cone set's escape about a +Y normal (jahEnvQuadrant).
+	const vec3 lookup = params.queries[q].w < 0.0 ? jahEnvQuadrant( axis, vec3( 0.0, 1.0, 0.0 ) )
+												 : jahEnvCone( axis, t );
 
 	// The frame about the axis (any orthonormal one: the cap is symmetric).
 	const vec3 helper = abs( axis.y ) < 0.99 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
@@ -65,6 +67,21 @@ void main()
 		const float phi = golden * float( k );
 		const vec3 d = axis * c + ( tx * cos( phi ) + ty * sin( phi ) ) * sn;
 		sum += textureLod( samplerCube( envCube, envSmp ), vec3( d.x, d.y, -d.z ), 0.0 ).xyz;
+	}
+	if( params.queries[q].w < 0.0 )
+	{
+		// ...and its reference is the cone's quadrant of the +Y hemisphere, cosine-weighted,
+		// over the same 1024 directions (32 strata in sin^2 theta by 32 in azimuth).
+		const vec3 az = normalize( vec3( axis.x, 0.0, axis.z ) );
+		const vec3 bz = cross( vec3( 0.0, 1.0, 0.0 ), az );
+		sum = vec3( 0.0 );
+		for( int k = 0; k < 1024; ++k )
+		{
+			const float u = ( float( k / 32 ) + 0.5 ) / 32.0;
+			const float phi = ( ( float( k % 32 ) + 0.5 ) / 32.0 - 0.5 ) * 1.5707963;
+			const vec3 d = vec3( 0.0, sqrt( 1.0 - u ), 0.0 ) + ( az * cos( phi ) + bz * sin( phi ) ) * sqrt( u );
+			sum += textureLod( samplerCube( envCube, envSmp ), vec3( d.x, d.y, -d.z ), 0.0 ).xyz;
+		}
 	}
 	answers[2 * q + 0] = vec4( lookup, jahEnvLodForCone( t ) );
 	answers[2 * q + 1] = vec4( sum / 1024.0, 0.0 );

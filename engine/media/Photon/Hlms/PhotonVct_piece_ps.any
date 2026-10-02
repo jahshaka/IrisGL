@@ -380,8 +380,9 @@
 			// along this direction by the volume's transform) — to this surface, then
 			// the eye's leg, which the colour hook fogs. Unpremultiplied for the law
 			// (its breakthrough reads the surface's own luminance), then the cone's
-			// coverage again. The escape's share is the sky, as the probes and the
-			// split-sum outside every volume read it.
+			// coverage again. THE ESCAPE'S SKY SHARE STAYS UNFOGGED (ruled in PHOTON-I-1's
+			// round 2): it is the sky the probes and the split-sum read, unfogged, outside
+			// every volume; fogging it here alone would seam at the volume's edge.
 		@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 			if( irrLight.alpha > 0.0f )
 			{
