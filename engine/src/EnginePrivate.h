@@ -4904,7 +4904,7 @@ private:
     unsigned mCullTwinCount = 0;
     bool     mCullTwinSweep = false;
     /// Every live twin's datablock -> its record and slot (the candidates' lookup).
-    struct TwinOwner { MaterialRec *rec; CullTwin *twin; };
+    struct TwinOwner { MaterialRec *rec = nullptr; CullTwin *twin = nullptr; };
     std::unordered_map<const Ogre::HlmsDatablock *, TwinOwner> mTwinOwners;
     /// Twins let go of since the sweep last settled them (may repeat; resolved
     /// through mTwinOwners, so a dead one simply drops out).
