@@ -935,6 +935,8 @@ private:
         const Ogre::TextureGpu *tex = nullptr;
         Ogre::IdString name;
         uint32_t texW = 0, texH = 0, cmp = 0, thresholdBits = 0;
+        /// The texture's upload generation the mask was made from (ALPHA-MASK-IDENTITY-1).
+        uint32_t generation = 0;
         uint32_t w = 0, h = 0, level = 0;
         RawBuffer bits;
         VkDeviceAddress address = 0;
@@ -5865,16 +5867,25 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
     std::memcpy(&thresholdBits, &threshold, sizeof(thresholdBits));
     const uint32_t now = frameNow();
     // THE IDENTITY: the pointer AND the name and size (a destroyed texture's
-    // address can come back as another texture).
+    // address can come back as another texture) — and the CONTENT's: the
+    // texture's upload generation (ALPHA-MASK-IDENTITY-1), which is the only
+    // thing that moves when new texels are written into the same texture.
+    const uint32_t generation = detail::textureUploadGeneration(tex);
+    int stale = -1;
     for (size_t i = 0; i < mAlphaMasks.size(); ++i) {
         AlphaMask &m = mAlphaMasks[i];
         if (m.tex == tex && m.name == tex->getName() && m.texW == tex->getWidth() && m.texH == tex->getHeight() &&
             m.cmp == cmp && m.thresholdBits == thresholdBits) {
             m.lastUsed = now;
-            return int(i);
+            if (m.generation == generation) return int(i);
+            stale = int(i);
         }
     }
-    if (!budget || mAlphaFailed) return -1;
+    if (!budget || mAlphaFailed) return stale;   // the old holes until a mask can be made
+    if (stale >= 0) {
+        retire(mAlphaMasks[size_t(stale)].bits);
+        mAlphaMasks.erase(mAlphaMasks.begin() + stale);
+    }
     if (tex->getResidencyStatus() != Ogre::GpuResidency::Resident || !tex->isDataReady()) return -1;
     if (tex->getTextureType() != Ogre::TextureTypes::Type2D &&
         tex->getTextureType() != Ogre::TextureTypes::Type2DArray)
@@ -5893,6 +5904,7 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
     m.texH = tex->getHeight();
     m.cmp = cmp;
     m.thresholdBits = thresholdBits;
+    m.generation = generation;
     while (m.level + 1u < tex->getNumMipmaps() &&
            std::max(m.texW >> m.level, m.texH >> m.level) > kMaxAlphaMask)
         ++m.level;

@@ -3123,6 +3123,16 @@ bool        releaseDecalTexture(Ogre::TextureGpuManager *tm, DecalMap kind, Ogre
 void retainSharedTexture(Ogre::TextureGpu *tex);
 /// True when this was the LAST reference (the caller destroys the texture).
 bool releaseSharedTexture(Ogre::TextureGpu *tex);
+/// THE TEXTURE'S UPLOAD GENERATION (ALPHA-MASK-IDENTITY-1): how many times the
+/// engine has written texels into this TextureGpu (OgreScene::uploadRgbaLevels —
+/// createTexture's upload and every updateTexture). A consumer that derives data
+/// from a texture's CONTENT (the rays' cut-out masks, the cards' sun term) keys
+/// on it: the pointer, name and size do not move when new texels land in place.
+/// 0 for a texture never uploaded through it (a file load — its content is
+/// fixed for its life). Forgotten when the texture is destroyed.
+uint32_t textureUploadGeneration(const Ogre::TextureGpu *tex);
+void     noteTextureUploaded(const Ogre::TextureGpu *tex);
+void     forgetTextureUploads(const Ogre::TextureGpu *tex);
 void resetSharedTextures();
 
 // ---------------------------------------------------------------------------
@@ -3843,8 +3853,16 @@ public:
     /// re-stage a slot and erase it.
     /// `material` = GpuInstance::raster[0] (the PBS material word): a cut-out's
     /// shadow is its material's mask (REFLECT-MOVERS-2).
-    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; uint32_t material = 0u; };
+    struct CardCasterRec { NodeId node = 0; float world[12] = {}; Ogre::Vector3 min, max; Ogre::uint32 flags = 0u; uint32_t material = 0u; uint32_t maskGen = 0u; };
     std::vector<CardCasterRec> mCardCasters;
+    /// Bumped by every texel upload this scene makes (uploadRgbaLevels): the card
+    /// sun-term trigger re-reads its cut-out casters' mask generations only on a
+    /// frame where it moved (ALPHA-MASK-IDENTITY-1).
+    unsigned long long mTextureUploadSerial = 0;
+    unsigned long long mCardUploadSerialSeen = 0;
+    /// The sum of the upload generations of a slot's sub-items' albedo textures —
+    /// what an in-place re-upload of a cut-out's mask moves (cardMoverFrame).
+    uint32_t cutoutMaskGeneration(uint32_t slot) const;
     /// The cards the bake authored for an Ogre mesh, or null for a mesh that
     /// has none (every skinned mesh, every line mesh, every model opened
     /// without a bake). Indexed by `Ogre::Mesh *` because all a cache holds is

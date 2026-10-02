@@ -1444,6 +1444,27 @@ std::unordered_map<Ogre::TextureGpu *, unsigned> &sharedTextureRefs() {
 }
 }   // namespace
 
+namespace {
+/// The upload generations (EnginePrivate.h: textureUploadGeneration). Leaked for
+/// sharedTextureRefs' reason above; main thread only, like every upload.
+std::unordered_map<const Ogre::TextureGpu *, uint32_t> &textureUploadGenerations() {
+    static auto *sGen = new std::unordered_map<const Ogre::TextureGpu *, uint32_t>();
+    return *sGen;
+}
+}   // namespace
+
+uint32_t textureUploadGeneration(const Ogre::TextureGpu *tex) {
+    const auto &g = textureUploadGenerations();
+    auto it = g.find(tex);
+    return it == g.end() ? 0u : it->second;
+}
+
+void noteTextureUploaded(const Ogre::TextureGpu *tex) {
+    if (tex) ++textureUploadGenerations()[tex];
+}
+
+void forgetTextureUploads(const Ogre::TextureGpu *tex) { textureUploadGenerations().erase(tex); }
+
 void retainSharedTexture(Ogre::TextureGpu *tex) {
     if (tex) ++sharedTextureRefs()[tex];
 }
@@ -1458,7 +1479,7 @@ bool releaseSharedTexture(Ogre::TextureGpu *tex) {
     return true;
 }
 
-void resetSharedTextures() { sharedTextureRefs().clear(); }
+void resetSharedTextures() { sharedTextureRefs().clear(); textureUploadGenerations().clear(); }
 
 namespace {
 /// One box-filter step: halve `w` x `h` RGBA8 pixels (odd dimensions clamp, the
@@ -1563,7 +1584,13 @@ void OgreScene::uploadRgbaLevels(Ogre::TextureGpu *tex, unsigned w, unsigned h,
         staging->stopMapRegion();
         staging->upload(box, tex, static_cast<Ogre::uint8>(mip), nullptr, nullptr, true);
         tm->removeStagingTexture(staging);
-        if (mip + 1u >= levels) break;
+        if (mip + 1u >= levels) {
+            // NEW TEXELS IN THIS TEXTURE: its content-derived products re-make
+            // (ALPHA-MASK-IDENTITY-1 — the rays' cut-out mask, the cards' sun term).
+            noteTextureUploaded(tex);
+            ++mTextureUploadSerial;
+            break;
+        }
         unsigned nw = 0, nh = 0;
         downsampleRgba(levelData, lw, lh, scratch, nw, nh);
         prev.swap(scratch);
@@ -1647,6 +1674,7 @@ void OgreScene::releaseTextureRec(const TextureRec &rec) {
     // (drainTextureStreaming's no-progress budget).
     if (rec.texture && !rec.texture->isManualTexture() && !rec.texture->isDataReady() && mEngine)
         mEngine->waitForTextureLoads();
+    forgetTextureUploads(rec.texture);   // a recycled pointer starts at generation 0
     tm->destroyTexture(rec.texture);
 }
 
