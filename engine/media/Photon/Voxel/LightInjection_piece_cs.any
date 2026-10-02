@@ -278,6 +278,16 @@
 				const float lightDist = length( light.pos.xyz - voxelAabbCenter );
 				lightAtten = jahLightAttenuation( lightDist, light.lightRange, light.lightSourceRadius );
 			}
+			// AN AREA LIGHT's LTC form factor below is its own distance law; the injection
+			// adds the RANGE WINDOW the pixel's area approximation carries (the one falloff's
+			// saturate( 1 - ( d / R )^4 )^2, d to the rectangle's centre), so an area lamp's
+			// bounce ends where its direct light does.
+			if( light.lightType == LT_AREA_LTC && light.lightRange > 0.0f )
+			{
+				const float x = length( light.pos.xyz - voxelAabbCenter ) / light.lightRange;
+				const float w = clamp( 1.0f - x * x * x * x, 0.0f, 1.0f );
+				lightAtten = w * w;
+			}
 			if( light.lightType == LT_SPOTLIGHT )
 			{
 				float spotCosAngle = dot( -lightDir, light.spotDirection.xyz );

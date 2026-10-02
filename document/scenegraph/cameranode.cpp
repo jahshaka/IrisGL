@@ -145,8 +145,13 @@ bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
     switch (key->type) {
     case CameraPostKeyType::Number: {
         bool ok = false;
-        const double v = value.toDouble(&ok);
-        if (!ok) return false;
+        double v = value.toDouble(&ok);
+        if (!ok || !std::isfinite(v)) return false;
+        // THE IMAGE BLOCK'S RANGES HOLD FOR A CAMERA TOO (IMAGE-1 fix round): the
+        // override is the same quantity as the world's row, so it is clamped to
+        // the same table (a contrast of 1000 would be a power the curve never sees).
+        if (const lens::ImageParamDef *d = lens::imageParam(id.toLatin1().constData()))
+            v = std::min(std::max(v, double(d->minValue)), double(d->maxValue));
         postOverrides.insert(id, v);
         return markedParams();
     }

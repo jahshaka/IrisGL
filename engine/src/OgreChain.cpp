@@ -297,7 +297,7 @@ constexpr const char *kSmaaBlend = "jahSmaaBlend";
 ///      every shader was correct.
 ///   2. IT WAS THE WRONG SPACE. These looks run on the TONEMAPPED image and
 ///      every one of them says so: Posterize bends gamma about display values,
-///      the Film Grade pivots contrast about 0.5 = mid grey, Desaturate uses
+///      Sharpen's unsharp mask works on display codes, Desaturate uses
 ///      broadcast luma weights. An sRGB attachment hands the shader a
 ///      LINEARISED value, where 0.5 is not mid grey at all (it is ~0.74 of the
 ///      display range) and every one of those constants means something else.

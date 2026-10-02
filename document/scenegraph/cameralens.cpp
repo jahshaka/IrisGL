@@ -222,10 +222,12 @@ float shiftFromOgreFrustumOffset(float frustumOffset, float halfExtent, float ne
 //
 // THE DERIVATION. The header carries the physics; these are the numbers.
 
-float filmCurve(float xIn, const FilmParams &p)
+namespace {
+/// Unreal Engine 4.15+, TonemapCommon.ush FilmToneMap's curve on ONE channel of
+/// the AP1 working colour. Every line maps one-to-one onto
+/// FinalToneMapping_ps.glsl's jahFilmToneMap.
+double filmChannel(double x, const FilmParams &p)
 {
-    // Unreal Engine 4.15+, TonemapCommon.ush FilmToneMap, on a grey. Every
-    // line maps one-to-one onto FinalToneMapping_ps.glsl's jahFilmToneMap.
     const double slope = std::max(double(p.slope), 0.01);
     const double toe = p.toe, shoulder = p.shoulder;
     const double black = p.blackClip, white = p.whiteClip;
@@ -241,7 +243,7 @@ float filmCurve(float xIn, const FilmParams &p)
     }
     const double straightMatch = (1.0 - toe) / slope - toeMatch;
     const double shoulderMatch = shoulder / slope - straightMatch;
-    const double lc = std::log10(std::max(double(xIn), 1e-10));
+    const double lc = std::log10(std::max(x, 1e-10));
     const double straight = slope * (lc + straightMatch);
     double toeC = -black + (2.0 * toeScale) / (1.0 + std::exp((-2.0 * slope / toeScale) * (lc - toeMatch)));
     double shC = (1.0 + white) -
@@ -252,7 +254,72 @@ float filmCurve(float xIn, const FilmParams &p)
     t = std::min(std::max(t, 0.0), 1.0);
     if (shoulderMatch < toeMatch) t = 1.0 - t;
     t = (3.0 - 2.0 * t) * t * t;
-    return float(std::max(0.0, toeC + (shC - toeC) * t));
+    return toeC + (shC - toeC) * t;
+}
+
+void mul3(const double m[9], const double v[3], double o[3])
+{
+    for (int r = 0; r < 3; ++r) o[r] = m[r * 3] * v[0] + m[r * 3 + 1] * v[1] + m[r * 3 + 2] * v[2];
+}
+}   // namespace
+
+void filmRGB(const double in[3], double out[3], const FilmParams &p)
+{
+    // The shader's matrices, rows: sRGB -> ACEScg (Bradford D65 -> D60, rows
+    // normalised so white maps to white), AP1 <-> AP0, ACEScg -> sRGB.
+    static const double S2A[9] = { 0.6131486203, 0.3394883591, 0.0473630206, 0.0702074147, 0.9163424763,
+                                   0.0134501090, 0.0206231422, 0.1095899890, 0.8697868689 };
+    static const double A2S[9] = { 1.7050473375, -0.6217891459, -0.0832581917, -0.1302575067, 1.1408060644,
+                                   -0.0105485577, -0.0240032831, -0.1289688126, 1.1529720957 };
+    static const double A1T0[9] = { 0.6954522414, 0.1406786965, 0.1638690622, 0.0447945634, 0.8596711185,
+                                    0.0955343182, -0.0055258826, 0.0040252103, 1.0015006723 };
+    static const double A0T1[9] = { 1.4514393161, -0.2365107469, -0.2149285693, -0.0765537734, 1.1762296998,
+                                    -0.0996759264, 0.0083161484, -0.0060324498, 0.9977163014 };
+    static const double Y[3] = { 0.2722287168, 0.6740817658, 0.0536895174 };
+    double ap1[3], c0[3];
+    mul3(S2A, in, ap1);
+    mul3(A1T0, ap1, c0);
+    // The RRT's glow module.
+    const double mi = std::min({ c0[0], c0[1], c0[2] }), ma = std::max({ c0[0], c0[1], c0[2] });
+    const double sat = (std::max(ma, 1e-10) - std::max(mi, 1e-10)) / std::max(ma, 1e-2);
+    const double chroma = std::sqrt(std::max(0.0, c0[2] * (c0[2] - c0[1]) + c0[1] * (c0[1] - c0[0]) +
+                                                     c0[0] * (c0[0] - c0[2])));
+    const double yc = (c0[0] + c0[1] + c0[2] + 1.75 * chroma) / 3.0;
+    const double sx = (sat - 0.4) / 0.2;
+    const double tt = std::max(1.0 - std::fabs(0.5 * sx), 0.0);
+    const double s = 0.5 * (1.0 + (sx > 0 ? 1.0 : sx < 0 ? -1.0 : 0.0) * (1.0 - tt * tt));
+    const double gIn = 0.05 * s, mid = 0.08;
+    const double glow = yc <= 2.0 / 3.0 * mid ? gIn : yc >= 2.0 * mid ? 0.0 : gIn * (mid / yc - 0.5);
+    for (double &v : c0) v *= 1.0 + glow;
+    // The RRT's red modifier (scale 0.82, pivot 0.03, hue 0, width 135).
+    double hue = 0.0;
+    if (!(c0[0] == c0[1] && c0[1] == c0[2])) {
+        hue = 57.2957795131 * std::atan2(1.7320508076 * (c0[1] - c0[2]), 2.0 * c0[0] - c0[1] - c0[2]);
+        if (hue < 0.0) hue += 360.0;
+    }
+    const double ch = hue > 180.0 ? hue - 360.0 : hue;
+    double hw = std::min(std::max(1.0 - std::fabs(2.0 * ch / 135.0), 0.0), 1.0);
+    hw = hw * hw * (3.0 - 2.0 * hw);
+    hw *= hw;
+    c0[0] += hw * sat * (0.03 - c0[0]) * (1.0 - 0.82);
+    // ACEScg, pre-desaturated; the curve per channel; post-desaturated; back to sRGB.
+    double w[3];
+    mul3(A0T1, c0, w);
+    for (double &v : w) v = std::max(v, 0.0);
+    double l = w[0] * Y[0] + w[1] * Y[1] + w[2] * Y[2];
+    for (double &v : w) v = l + (v - l) * 0.96;
+    double t[3];
+    for (int k = 0; k < 3; ++k) t[k] = filmChannel(w[k], p);
+    l = t[0] * Y[0] + t[1] * Y[1] + t[2] * Y[2];
+    for (double &v : t) v = std::max(l + (v - l) * 0.93, 0.0);
+    mul3(A2S, t, out);
+    for (int k = 0; k < 3; ++k) out[k] = std::max(out[k], 0.0);
+}
+
+float filmCurve(float xIn, const FilmParams &p)
+{
+    // On a grey the colour terms are the identity: the curve on one channel.
+    return float(std::max(0.0, filmChannel(double(xIn), p)));
 }
 
 float greyCardFilmInput()

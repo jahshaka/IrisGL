@@ -288,6 +288,13 @@ struct FilmParams {
 /// that point), so an 18 % card exposed to 0.18 displays as code 118.
 float filmCurve(float x, const FilmParams &params = FilmParams());
 
+/// THE FILM ON A COLOUR — the shader's jahFilmToneMap, the ONE C++ transcription:
+/// linear sRGB in (post-exposure), linear sRGB out (before the encode), through
+/// ACEScg, the RRT's glow and red modifier, the pre/post desaturation and the
+/// curve per channel. `filmCurve` is this on a grey (the colour terms are the
+/// identity there, the matrices' rows normalised so white maps to white).
+void filmRGB(const double in[3], double out[3], const FilmParams &params = FilmParams());
+
 /// THE TONEMAPPER INPUT THAT DISPLAYS AS AN 18 % GREY CARD — the curve
 /// inverted at `kGreyCardDisplay`. 0.18 by the curve's construction; computed
 /// (a bisection on the log axis, cached) rather than written so that the

@@ -1840,7 +1840,8 @@ struct LightDesc {
     /// THE RANGE (point/spot): where the light's window reaches zero. The light
     /// follows the inverse square law, I / d^2, windowed by
     /// saturate(1 - (d/range)^4)^2 (Karis 2013) — the one falloff every consumer
-    /// shares (the fork's JahBrdf piece, `jahLightAttenuation`). An intensity of
+    /// shares (the fork's JahBrdf piece, `jahLightAttenuation`; the suites' closed
+    /// form is tests/support/lightfalloff.h). An intensity of
     /// I at 1 m lights a facing surface exactly as a sun of intensity I does.
     float     range = 10.0f;
     /// THE SOURCE RADIUS, metres (point/spot; IMAGE-1): the size of the emitter.
@@ -1955,25 +1956,6 @@ struct LightDesc {
     }
     bool operator!=(const LightDesc &o) const { return !(*this == o); }
 };
-
-/// THE ONE FALLOFF OF A POINT OR SPOT LIGHT, in C++ (IMAGE-1): the factor its
-/// intensity is scaled by at distance `d` — the inverse square law from a
-/// source of radius `sourceRadius`, windowed to zero at `range` (Karis 2013,
-/// "Real Shading in Unreal Engine 4", eq. 9; the source clamp is Frostbite's):
-///
-///     saturate(1 - (d / range)^4)^2 / max(d^2, sourceRadius^2)
-///
-/// The renderer's own statement is the fork's JahBrdf piece
-/// (`jahLightAttenuation`), which every shader consumer calls; this is its
-/// closed form for the suites that hold the picture to it.
-inline double lightFalloff(double d, double range, double sourceRadius) {
-    const double x = range > 0.0 ? d / range : 1.0;
-    double w = 1.0 - x * x * x * x;
-    w = w < 0.0 ? 0.0 : (w > 1.0 ? 1.0 : w);
-    const double r2 = sourceRadius * sourceRadius;
-    const double d2 = d * d;
-    return (w * w) / (d2 > r2 ? d2 : r2);
-}
 
 /// A projected-texture decal attached to a node (DECALS_SPEC.md §5.2).
 ///
@@ -3402,6 +3384,11 @@ struct GatherTuning {
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
     bool     jitterOff = false;
+    /// THE RAYS AT THEIR TEXELS' CENTRES (IMAGE-1): every ray of a probe leaves
+    /// through its octahedral texel's centre instead of a jittered point in it —
+    /// with jitterOff, a still view's estimate is then the same every frame, the
+    /// arm gi.gather_stable holds the packed history's own storage flicker on.
+    bool     rayJitterOff = false;
     /// THE FAR QUERY OFF (ATOM-FARBLAS-1): a ray that escapes its near length
     /// reads the sky directly instead of tracing the far copies (the coarse
     /// levels) out to the far plane -- the A/B that prices the far field.
@@ -6065,8 +6052,8 @@ struct ImageGrade {
 /// them. Documented rather than hidden: it is a property of the upstream
 /// implementation, not a choice.
 struct PostFxDesc {
-    /// Render the scene into a floating-point target and tonemap it (filmic,
-    /// Hable/Uncharted2). The prerequisite for bloom. The exposure may be
+    /// Render the scene into a floating-point target and tonemap it (Unreal's
+    /// filmic curve and the image block, `image` below). The prerequisite for bloom. The exposure may be
     /// MANUAL (`tonemapFixed`, the editor's default since EXPOSURE-1) or
     /// metered; this flag only says the chain exists.
     bool  hdr = false;

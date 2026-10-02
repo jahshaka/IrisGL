@@ -8286,8 +8286,11 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
         float image[iris::lens::ImageParamCount];
         imageTableFromGrade(fx.image, image);
         for (int i = 0; i < iris::lens::ImageParamCount; ++i) {
-            const QVariant v = camera->postOverride(QLatin1String(iris::lens::imageParams()[i].id));
-            if (v.isValid()) image[i] = v.toFloat();
+            const iris::lens::ImageParamDef &d = iris::lens::imageParams()[i];
+            const QVariant v = camera->postOverride(QLatin1String(d.id));
+            // Clamped to the table here too: a file or an older writer may hold any number.
+            if (v.isValid() && std::isfinite(v.toDouble()))
+                image[i] = std::min(std::max(v.toFloat(), d.minValue), d.maxValue);
         }
         imageGradeFromTable(image, fx.image);
     }

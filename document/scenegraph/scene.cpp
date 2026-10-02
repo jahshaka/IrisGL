@@ -410,12 +410,11 @@ Scene::Scene()
     // a World Mode (or turns a row on); nothing changes under anyone's feet.
     hdrEnabled = false;
     // EXPOSURE (EXPOSURE-1): MANUAL, at the exposure the default template's
-    // lights DERIVE (iris::lens::defaultExposureChain, re-derived from the
-    // PHYSICAL sky by SKY-DEFAULTS-1 — the sun at 50 degrees and the Sky Light
-    // over the realistic sky put 1.987 + 0.406 = 2.393 on the floor, measured
-    // through the renderer, and an 18 % grey card under that develops at chain
-    // E = 0.9788 once the film curve's own transfer is inverted). Zero stops IS
-    // that grade, so a new scene reads 0.00 in the World panel.
+    // lights DERIVE (iris::lens::defaultExposureChain: the sun at 50 degrees and
+    // the Sky Light over the realistic sky put 1.653 + 0.383 = 2.036 on the
+    // floor, measured through the renderer by IMAGE-1, and an 18 % grey card
+    // under that develops at chain E = 0.71894, Unreal's film taking 0.18 to
+    // 0.18). Zero stops IS that grade, so a new scene reads 0.00 in the World panel.
     //
     // The old +0.6 was a number fitted by eye against 8-bit content and it was
     // the AUTO midpoint, which is a different thing again: the meter then moved

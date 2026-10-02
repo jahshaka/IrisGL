@@ -257,7 +257,10 @@ namespace Ogre
         // lights carry 0: the shader applies the falloff to points and spots only.
         const Light::LightTypes srcType = light->getType();
         const bool punctual = srcType == Light::LT_POINT || srcType == Light::LT_SPOTLIGHT;
-        vctLight->diffuse[3] = punctual ? static_cast<float>( light->getAttenuationRange() ) : 0.0f;
+        // An AREA light carries its range too: the injection windows its LTC form
+        // factor to it exactly as the pixel windows the area approximation (IMAGE-1).
+        const bool ranged = punctual || srcType == Light::LT_AREA_APPROX || srcType == Light::LT_AREA_LTC;
+        vctLight->diffuse[3] = ranged ? static_cast<float>( light->getAttenuationRange() ) : 0.0f;
 
         Light::LightTypes lightType = srcType;
         if( lightType == Light::LT_AREA_APPROX )
@@ -1371,12 +1374,14 @@ namespace Ogre
                         visibilityFlags[k] & lightMask )
                     {
                         Light *light = static_cast<Light *>( objData.mOwner[k] );
-                        // THE RANGE CULL (IMAGE-1): a point or spot light whose
+                        // THE RANGE CULL (IMAGE-1): a point, spot or area light whose
                         // range sphere misses this cascade's box lights none of
                         // its voxels (the falloff is zero past the range), so it
                         // takes no slot and costs no march.
                         if( ( light->getType() == Light::LT_POINT ||
-                              light->getType() == Light::LT_SPOTLIGHT ) &&
+                              light->getType() == Light::LT_SPOTLIGHT ||
+                              light->getType() == Light::LT_AREA_APPROX ||
+                              light->getType() == Light::LT_AREA_LTC ) &&
                             !rangeTouchesCascade( light, voxelOrigin, cascadeSize ) )
                         {
                             continue;
