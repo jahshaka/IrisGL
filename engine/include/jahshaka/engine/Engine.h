@@ -200,6 +200,13 @@ public:
     /// THE ATMOSPHERE'S TABLES, counted (AtmosphereStatus). A scene without
     /// the planet's atmosphere answers `on` false and zeros.
     virtual AtmosphereStatus atmosphereStatus() const { return AtmosphereStatus(); }
+    /// THE MEASURING DOOR OF THE FOG ALONG A REFLECTION (PHOTON-I-1; a tool's A/B,
+    /// never a mode, not saved): open (the default) the ray jobs and the screen
+    /// reflection's resolve carry the fog law along a reflection's own path
+    /// (jah_fog_along.glsl); shut, they fog nothing there — gi.reflect_fog's paired
+    /// cost arm, both in one process. The colour pass and the voxel march's share
+    /// keep the law either way (it is compiled into their shaders).
+    virtual void setReflectionFogEnabled(bool on) { (void)on; }
     /// THE ATMOSPHERE'S COST: each of the four table jobs dispatched
     /// `iterations` more times over its own inputs, flushed and timed
     /// (AtmosphereCost). Synchronous — a GPU wait; a measurement, never a

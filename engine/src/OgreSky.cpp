@@ -582,9 +582,9 @@ void OgreScene::fogAlong(float out[8][4], Ogre::TextureGpu *&aerial) const {
     for (int i = 0; i < 8; ++i)
         for (int k = 0; k < 4; ++k) out[i][k] = 0.0f;
     aerial = nullptr;
-    // A MEASUREMENT DOOR (gi.reflect_fog --cost, read per frame so one process holds
-    // both arms): the reflection fogged by nothing, the picture before the fix.
-    if (std::getenv("JAHSHAKA_REFLECT_FOG_OFF")) return;
+    // THE MEASURING DOOR (Scene::setReflectionFogEnabled; gi.reflect_fog --cost holds
+    // both arms in one process): shut, the reflection is fogged by nothing.
+    if (!mReflectionFogOn) return;
     if (!mAtmosphere || !mSceneMgr || mSceneMgr->getAtmosphereRaw() != mAtmosphere) return;
     const FogState f = FogHlmsListener::lookup(mSceneMgr);
     const bool airRead = mAtmoSkyOn && mAtmosphere->aerialScale() > 0.0f;

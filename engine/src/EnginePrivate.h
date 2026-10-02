@@ -3338,6 +3338,8 @@ public:
     /// octave lattice 50 m x 2^n (noteAtmosphereObserver), 50 m for every observer
     /// under it (the capture then photographs from the ground's 2 m).
     float mAtmoCapturedObserverKm = 0.05f;
+    /// Scene::setReflectionFogEnabled's door (fogAlong answers no medium when shut).
+    bool mReflectionFogOn = true;
     /// The altitude (km) the capture photographs the sky from: the ground's 2 m
     /// for the 50 m lattice point, else the lattice point itself.
     float environmentObserverKm() const;
@@ -3404,6 +3406,7 @@ public:
     mutable unsigned long long mAtmoTintGeneration = 0;
     Colour atmosphereSunTint(const Vec3 &toSun) const override;
     AtmosphereStatus atmosphereStatus() const override;
+    void setReflectionFogEnabled(bool on) override { mReflectionFogOn = on; }
     bool measureAtmosphere(unsigned iterations, AtmosphereCost &out) override;
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
