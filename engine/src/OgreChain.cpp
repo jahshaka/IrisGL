@@ -880,16 +880,22 @@ void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandl
     // THE TWO-PASS OCCLUSION (ChainDesc::atomOcclusion): the pyramid from this depth,
     // then the late id pass over the rejected set.
     if (desc.atomOcclusion) addAtomOcclusionPasses(n, desc, handles);
-    // THE ATOM VIEW'S DEPTH, copied before any scene pass adds a stock-PBR surface
-    // to it (the prepass and the opaque pass LOAD this depth and draw into it).
-    // Executed only while the view is on (kAtomViewExecutionBit).
+    // THE ID PASS'S OWN DEPTH, copied before any scene pass adds a stock-PBR surface
+    // to it (the prepass and the opaque pass LOAD this depth and draw into it). Two
+    // readers: the Atom view's quad (kAtomViewExecutionBit) and THE MARCH'S OBJECT
+    // MOTION (ID-DEPTH-1): rq_motion.comp writes a moving slot's velocity only where
+    // the scene's final depth is still this one — a stock-drawn character standing in
+    // front of a moving Atom mover is not the id's surface and keeps the camera path —
+    // and rq_motion_skin.comp identifies such a pixel by the same test. So on a chain
+    // whose velocity job runs (the march, the ray tier, the id pass) it runs every frame.
     {
         Ogre::CompositorTargetDef *ct = n->addTargetPass(kAtomViewDepth);
         ct->setNumPasses(1);
         auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(ct->addPass(Ogre::PASS_DEPTHCOPY));
         c->setDepthTextureCopy(kDepth, kAtomViewDepth);
-        c->mExecutionMask = kAtomViewExecutionBit;
-        c->mProfilingId = "Jahshaka atom view depth";
+        const bool velocityJob = marchesInScreenSpace(desc) && desc.rayReflect && desc.atomDraw;
+        c->mExecutionMask = velocityJob ? Ogre::uint8(0xFFu) : kAtomViewExecutionBit;
+        c->mProfilingId = "Jahshaka atom id depth";
     }
 }
 

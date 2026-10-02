@@ -303,7 +303,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         // (OgreSubItem.cpp:67-73), which is the only place mHasSkeletonAnimation
         // is ever set — and that is what puts `hlms_skeleton` in the shader hash.
         n.item = mSceneMgr->createItem(mit->second.mesh, Ogre::SCENE_DYNAMIC);
-        n.item->setDatablock(wornDatablock(n, tit->second));   // the node's cull (CULL-MODE-2)
+        wearDatablock(n.item, wornDatablock(n, tit->second));   // the node's cull (CULL-MODE-2)
         markShadowShapeDirty(n);     // a rebuilt Item is a new caster shape (attachMesh says why)
         indexItemNode(n);
         n.item->setVisibilityFlags(

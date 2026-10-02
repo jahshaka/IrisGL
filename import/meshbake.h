@@ -175,7 +175,8 @@ public:
     /// THE BAKE'S WIDTH (IMPORT-SPEED-1): how many threads one bake may use — the
     /// meshes of a model concurrently, and inside each mesh the bound's queries,
     /// the cluster DAG's group measurement and the SDF's exact band. 0 (the
-    /// default) = the hardware's thread count; the pool behind it is ONE process-
+    /// default) = 4, measured (BAKE-WIDTH-2: wider bakes hitch the editor's frames),
+    /// capped at the hardware's thread count; the pool behind it is ONE process-
     /// wide set of hardware-size workers, however many bakes run. The OUTPUT does
     /// not depend on it — every reduction is ordered (meshbake.cpp, `bakepool`) —
     /// which is what `bake.determinism` proves byte for byte (1 thread against the

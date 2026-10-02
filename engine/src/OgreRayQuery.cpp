@@ -661,6 +661,14 @@ private:
     /// acceleration-structure build may not be recorded inside a render pass,
     /// and Ogre tracks the encoder state itself (VulkanQueue::getEncoderState).
     VkCommandBuffer frameCmd();
+    /// EVERY COMPUTE PIPELINE THE TIER BUILDS GOES THROUGH THE DEVICE'S PIPELINE CACHE
+    /// (architecture audit D9): Ogre's VkPipelineCache, which OgreShaderCache saves beside
+    /// the shader cache and loads at boot — so a warm boot re-uses what a cold one
+    /// compiled instead of compiling it again where the driver keeps no cache of its own.
+    /// Counted and timed (the log's "rayquery: compute pipelines" line).
+    VkResult createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out);
+    unsigned mPipelinesBuilt = 0;
+    double   mPipelineBuildMs = 0.0;
 
     Ogre::VulkanRenderSystem *mRs = nullptr;
     Ogre::VulkanDevice *mDev = nullptr;
@@ -935,6 +943,8 @@ private:
         const Ogre::TextureGpu *tex = nullptr;
         Ogre::IdString name;
         uint32_t texW = 0, texH = 0, cmp = 0, thresholdBits = 0;
+        /// The texture's upload generation the mask was made from (ALPHA-MASK-IDENTITY-1).
+        uint32_t generation = 0;
         uint32_t w = 0, h = 0, level = 0;
         RawBuffer bits;
         VkDeviceAddress address = 0;
@@ -1716,6 +1726,20 @@ void RayQueryTier::drainRetired() {
     }
 }
 
+VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const VkResult r = vkCreateComputePipelines(mVk, mDev ? mDev->mPipelineCache : VK_NULL_HANDLE, 1, &cpi, nullptr, out);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    ++mPipelinesBuilt;
+    mPipelineBuildMs += ms;
+    if (r == VK_SUCCESS) ShaderCache::noteEnginePipeline(ms);   // dirt for the pipeline layer
+    Ogre::LogManager::getSingleton().logMessage(
+        "rayquery: compute pipelines " + std::to_string(mPipelinesBuilt) + " built, this one " +
+        std::to_string(ms) + " ms, " + std::to_string(mPipelineBuildMs) + " ms in all" +
+        (mDev && mDev->mPipelineCache ? " (through the device's pipeline cache)" : " (no pipeline cache)"));
+    return r;
+}
+
 VkCommandBuffer RayQueryTier::frameCmd() {
     // OUTSIDE ANY ENCODER. Ogre tracks whether it is inside a render, compute
     // or copy encoder; vkCmdBuildAccelerationStructuresKHR may not be recorded
@@ -1861,7 +1885,7 @@ bool RayQueryTier::makePipeline(std::string &err) {
     cpi.stage.module = mModule;
     cpi.stage.pName = "main";
     cpi.layout = mPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mPipeline) != VK_SUCCESS) {
         err = "rayquery: vkCreateComputePipelines failed";
         return false;
     }
@@ -2181,10 +2205,18 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 // `instanceCustomIndex` is the SLOT on both copies: a hit reads the object's entry
 // with one fetch whichever copy it hit; the copy is told apart by the launch's MASK.
 namespace {
-/// Level slots per mesh record in the job's inputs (rq_tlas_write.comp's
-/// LEVEL_SLOTS). The bake tops out at six levels (GpuScene::kLevelsPerMesh holds
-/// eight); a chain deeper than this is traced at this depth at most.
-constexpr uint32_t kTlasLevels = 16u;
+/// THE LEVELS THE RAYS MAY TRACE, and the level slots per mesh record in the job's
+/// inputs (rq_tlas_write.comp's LEVEL_SLOTS — the record's LAYOUT). No deeper than
+/// the GPU scene keeps (architecture audit D1): its level table, its geometry rows
+/// (geomRowIndex: eight a mesh) and the hit record's 3-bit level. A chain deeper
+/// than eight is traced at level 7 at most: more triangles than its error allows,
+/// the right ones. Past it a near copy had no geometry row and a far copy indexed
+/// the NEXT mesh's rows (gi.ray_levels). The record carries exactly these slots:
+/// it used to carry sixteen, and the eight past the cap were written and never
+/// read (no BLAS is ever built past it).
+constexpr uint32_t kTlasLevels = detail::GpuScene::kLevelsPerMesh;
+static_assert(kTlasLevels == 8u, "rq_tlas_write.comp's LEVEL_SLOTS and MESH_WORDS");
+constexpr uint32_t kRayLevels = kTlasLevels;
 /// The inputs' layout (the shader's HDR_* / MESH_WORDS).
 constexpr uint32_t kTlasHeaderWords = 16u;
 constexpr uint32_t kTlasMeshWords = kTlasLevels * 2u + 4u;
@@ -2256,7 +2288,7 @@ void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::Gp
                 next.kind = 1u;
                 next.mesh = mp.get();
                 next.meshIndex = meshIndex;
-                const uint32_t coarsest = std::min(coarsestLevelOf(mp.get()), kTlasLevels - 1u);
+                const uint32_t coarsest = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
                 next.farLevel = coarsest;
                 next.nearLevel = std::min(now->ids[3], coarsest);
                 if (coarsest > 0u) {
@@ -2348,7 +2380,7 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
                 rec[2u * l] = uint32_t(a & 0xFFFFFFFFu);
                 rec[2u * l + 1u] = uint32_t(a >> 32u);
             }
-            rec[2u * kTlasLevels] = std::min(coarsestLevelOf(mp.get()), kTlasLevels - 1u);
+            rec[2u * kTlasLevels] = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
         }
         sa.inputsBlasVersion = sa.blasVersion;
         sa.inputsMeshSerial = gs.meshSetSerial();
@@ -2428,7 +2460,7 @@ bool RayQueryTier::makeTlasWritePipeline(std::string &err) {
     cpi.stage.module = mTwModule;
     cpi.stage.pName = "main";
     cpi.layout = mTwPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mTwPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mTwPipeline) != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed (the instance job)";
         return false;
     }
@@ -4150,7 +4182,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         cpi.stage.module = mCardParityModule;
         cpi.stage.pName = "main";
         cpi.layout = mCardParityPipeLayout;
-        if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mCardParityPipeline) !=
+        if (createComputePipeline(cpi, &mCardParityPipeline) !=
             VK_SUCCESS) {
             err = "cardReadParity: vkCreateComputePipelines failed";
             return false;
@@ -5676,20 +5708,21 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
 // ---- THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1) ----------------------
 namespace {
 /// rq_motion.comp's set 0, one type a binding — and rq_motion_skin.comp's, which
-/// reads 0-4 and the ray's three after them. The rigid job never reads 5-7, so a
+/// reads 0-5 and the ray's three after them. The rigid job never reads 6-8, so a
 /// frame with no pose moving leaves them unwritten (a binding a pipeline does not
 /// statically use need not hold a valid descriptor).
-constexpr unsigned kMotionBindings = 8u;
-constexpr unsigned kMotionRigidBindings = 5u;
+constexpr unsigned kMotionBindings = 9u;
+constexpr unsigned kMotionRigidBindings = 6u;
 constexpr VkDescriptorType kMotionTypes[kMotionBindings] = {
     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 1 depth
     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the id image
     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 3 the GPU scene's instances
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 jahSsrVelocity
-    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 5 the scene's TLAS (posed job)
-    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 6 the per-slot geometry rows
-    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 7 the GPU scene's geometry rows
+    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 5 the id pass's own depth (ID-DEPTH-1)
+    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 6 the scene's TLAS (posed job)
+    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 7 the per-slot geometry rows
+    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 8 the GPU scene's geometry rows
 };
 /// rq_motion.comp's Params, member for member.
 struct MotionParams {
@@ -5741,7 +5774,7 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
     cpi.stage.module = mMotionModule;
     cpi.stage.pName = "main";
     cpi.layout = mMotionPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mMotionPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mMotionPipeline) != VK_SUCCESS) {
         err = "rayquery/motion: vkCreateComputePipelines failed";
         return false;
     }
@@ -5754,7 +5787,7 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
         VkComputePipelineCreateInfo spi = cpi;
         if (vkCreateShaderModule(mVk, &ssi, nullptr, &mMotionSkinModule) == VK_SUCCESS) {
             spi.stage.module = mMotionSkinModule;
-            if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &spi, nullptr, &mMotionSkinPipeline) != VK_SUCCESS)
+            if (createComputePipeline(spi, &mMotionSkinPipeline) != VK_SUCCESS)
                 mMotionSkinPipeline = VK_NULL_HANDLE;
         }
         if (!mMotionSkinPipeline)
@@ -5851,7 +5884,7 @@ bool RayQueryTier::makeAlphaMaskPipeline(std::string &err) {
     cpi.stage.module = mAlphaModule;
     cpi.stage.pName = "main";
     cpi.layout = mAlphaPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mAlphaPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mAlphaPipeline) != VK_SUCCESS) {
         err = "rayquery/alpha-mask: vkCreateComputePipelines failed";
         return false;
     }
@@ -5865,16 +5898,25 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
     std::memcpy(&thresholdBits, &threshold, sizeof(thresholdBits));
     const uint32_t now = frameNow();
     // THE IDENTITY: the pointer AND the name and size (a destroyed texture's
-    // address can come back as another texture).
+    // address can come back as another texture) — and the CONTENT's: the
+    // texture's upload generation (ALPHA-MASK-IDENTITY-1), which is the only
+    // thing that moves when new texels are written into the same texture.
+    const uint32_t generation = detail::textureUploadGeneration(tex);
+    int stale = -1;
     for (size_t i = 0; i < mAlphaMasks.size(); ++i) {
         AlphaMask &m = mAlphaMasks[i];
         if (m.tex == tex && m.name == tex->getName() && m.texW == tex->getWidth() && m.texH == tex->getHeight() &&
             m.cmp == cmp && m.thresholdBits == thresholdBits) {
             m.lastUsed = now;
-            return int(i);
+            if (m.generation == generation) return int(i);
+            stale = int(i);
         }
     }
-    if (!budget || mAlphaFailed) return -1;
+    if (!budget || mAlphaFailed) return stale;   // the old holes until a mask can be made
+    if (stale >= 0) {
+        retire(mAlphaMasks[size_t(stale)].bits);
+        mAlphaMasks.erase(mAlphaMasks.begin() + stale);
+    }
     if (tex->getResidencyStatus() != Ogre::GpuResidency::Resident || !tex->isDataReady()) return -1;
     if (tex->getTextureType() != Ogre::TextureTypes::Type2D &&
         tex->getTextureType() != Ogre::TextureTypes::Type2DArray)
@@ -5893,6 +5935,7 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
     m.texH = tex->getHeight();
     m.cmp = cmp;
     m.thresholdBits = thresholdBits;
+    m.generation = generation;
     while (m.level + 1u < tex->getNumMipmaps() &&
            std::max(m.texW >> m.level, m.texH >> m.level) > kMaxAlphaMask)
         ++m.level;
@@ -6126,16 +6169,19 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     // (the chain declares both only with the march and the id pass: never ask it
     // otherwise — a miss is logged as an exception every frame)
     if (!view->chainDesc().atomDraw) return;
-    Ogre::TextureGpu *vel = nullptr, *ids = nullptr, *depth = nullptr;
+    Ogre::TextureGpu *vel = nullptr, *ids = nullptr, *depth = nullptr, *idDepth = nullptr;
     try {
         vel = node->getDefinedTexture(Ogre::IdString("jahSsrVelocity"));
         ids = node->getDefinedTexture(Ogre::IdString(kAtomIdTexture));
         depth = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+        // THE ID PASS'S OWN DEPTH (ID-DEPTH-1; the chain copies it every frame on a
+        // chain whose job runs — OgreChain.cpp, the atom id depth).
+        idDepth = node->getDefinedTexture(Ogre::IdString("jahAtomViewDepth"));
     } catch (Ogre::Exception &) { return; }
-    if (!vel || !ids || !depth || !vel->isUav()) return;
+    if (!vel || !ids || !depth || !idDepth || !vel->isUav()) return;
     const unsigned w = vel->getWidth(), h = vel->getHeight();
     if (!w || !h || ids->getWidth() != w || ids->getHeight() != h || depth->getWidth() != w ||
-        depth->getHeight() != h)
+        depth->getHeight() != h || idDepth->getWidth() != w || idDepth->getHeight() != h)
         return;
     detail::GpuScene &gs = scene->gpuScene();
     Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
@@ -6246,10 +6292,13 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     VkDescriptorBufferInfo ub{};
     ub.buffer = rv.motionParams[ring].buffer;
     ub.range = sizeof(MotionParams);
-    VkDescriptorImageInfo img[3] = {};
+    VkDescriptorImageInfo img[4] = {};
     img[0].sampler = mPointSampler;
     img[0].imageView = sampledView(depth);
     img[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    img[3].sampler = mPointSampler;
+    img[3].imageView = sampledView(idDepth);
+    img[3].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     img[1].sampler = mPointSampler;
     img[1].imageView = sampledView(ids);
     img[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -6262,7 +6311,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
         retireView(img[2].imageView);
         img[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
-    if (!img[0].imageView || !img[1].imageView || !img[2].imageView) return;
+    if (!img[0].imageView || !img[1].imageView || !img[2].imageView || !img[3].imageView) return;
     VkDescriptorBufferInfo instInfo{};
     {
         auto *bi = static_cast<Ogre::VulkanBufferInterface *>(instances->getBufferInterface());
@@ -6283,21 +6332,22 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     wr[2].pImageInfo = &img[1];
     wr[3].pBufferInfo = &instInfo;
     wr[4].pImageInfo = &img[2];
+    wr[5].pImageInfo = &img[3];
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
     VkDescriptorBufferInfo geomBufs[2] = {};
     if (skinSa) {
         asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
         asWrite.accelerationStructureCount = 1;
         asWrite.pAccelerationStructures = &skinSa->tlas;
-        wr[5].pNext = &asWrite;
+        wr[6].pNext = &asWrite;
         geomBufs[0].buffer = rv.motionGeomRowOfSlot[ring].buffer;
         geomBufs[0].range = VK_WHOLE_SIZE;
         auto *gbi = static_cast<Ogre::VulkanBufferInterface *>(skinGeomRows->getBufferInterface());
         geomBufs[1].buffer = gbi->getVboName();
         geomBufs[1].offset = VkDeviceSize(skinGeomRows->_getFinalBufferStart()) * skinGeomRows->getBytesPerElement();
         geomBufs[1].range = skinGeomRows->getTotalSizeBytes();
-        wr[6].pBufferInfo = &geomBufs[0];
-        wr[7].pBufferInfo = &geomBufs[1];
+        wr[7].pBufferInfo = &geomBufs[0];
+        wr[8].pBufferInfo = &geomBufs[1];
     }
     vkUpdateDescriptorSets(mVk, skinSa ? kMotionBindings : kMotionRigidBindings, wr, 0, nullptr);
     // THE LAYOUTS through Ogre's solver, before the command buffer is taken: the
@@ -6309,7 +6359,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
         Ogre::ResourceTransitionArray trans;
         solver.resolveTransition(trans, vel, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
                                  computeStage);
-        for (Ogre::TextureGpu *t : { depth, ids })
+        for (Ogre::TextureGpu *t : { depth, ids, idDepth })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
                                      computeStage);
         solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
@@ -6723,7 +6773,7 @@ bool RayQueryTier::makeSunContactPipeline(std::string &err) {
     cpi.stage.module = mSunModule;
     cpi.stage.pName = "main";
     cpi.layout = mSunPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mSunPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mSunPipeline) != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed";
         return false;
     }
@@ -7274,7 +7324,7 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
     cpi.stage.module = mCmModule;
     cpi.stage.pName = "main";
     cpi.layout = mCmPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mCmPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mCmPipeline) != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed";
         return false;
     }
@@ -7882,12 +7932,6 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     hitStandIns(out);
     HitView &hv = mHits[key];
     hv.live = false;
-    // `JAHSHAKA_HIT_LIST_OFF` — a MEASUREMENT switch, not a mode (read once): the
-    // traces bind no list, so a hit no cache shades has no sample this frame (the
-    // reflection keeps its history; the gather's ray reads zero) — the picture
-    // before PHOTON-HIT-SHADE-1, for attributing a moved hash to the records.
-    static const bool sListOff = std::getenv("JAHSHAKA_HIT_LIST_OFF") != nullptr;
-    if (sListOff) return false;
     OgreScene *scene = view ? view->ogreScene() : nullptr;
     Ogre::Camera *cam = view ? view->camera() : nullptr;
     if (!scene || !cam || !pass || !out.ids) return false;
@@ -8206,7 +8250,7 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
     cpi.stage.module = mCompModule;
     cpi.stage.pName = "main";
     cpi.layout = mCompPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mCompPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mCompPipeline) != VK_SUCCESS) {
         err = "rayquery/hit: vkCreateComputePipelines failed";
         return false;
     }
