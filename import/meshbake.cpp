@@ -1135,7 +1135,17 @@ namespace
 // adds a thread.
 namespace bakepool {
 
-std::atomic<int> gWidth { 0 };   ///< MeshBake::setBakeThreads; 0 = the hardware's
+std::atomic<int> gWidth { 0 };   ///< MeshBake::setBakeThreads; 0 = kDefaultWidth
+
+/// THE DEFAULT WIDTH, MEASURED (BAKE-WIDTH-2, spikes/atom-engine-1/fix10-width-series.txt):
+/// the editor's frames while the greek temple scan bakes, workers at idle priority, the
+/// app at nice 0 on the 20-thread box, two runs per width. Frames over 33 / 50 ms during
+/// the bake: 20 threads 39/31 and 37/27, 8 threads 34/25 and 39/30, 6 and 5 threads p95
+/// still 66-84 ms, 4 threads 11/3 and 11/2 (p95 28-30 ms against 73-87). The import's
+/// wall: 5.3-5.4 s at 5-20 threads (the serial verify chain sets it), 6.3 s at 4. Idle
+/// priority alone does not keep the render loop whole above 4 — so 4, capped at the
+/// hardware: a hitch-free editor beats 0.9 s of a background bake.
+constexpr int kDefaultWidth = 4;
 
 int hardware()
 {
@@ -1143,11 +1153,12 @@ int hardware()
     return n > 0 ? int(n) : 1;
 }
 
-/// The width a bake started now uses: the configured count, capped at the hardware.
+/// The width a bake started now uses: the configured count (else kDefaultWidth),
+/// capped at the hardware.
 int width()
 {
     const int w = gWidth.load(std::memory_order_relaxed);
-    return w > 0 ? std::min(w, hardware()) : hardware();
+    return std::min(w > 0 ? w : kDefaultWidth, hardware());
 }
 
 /// [0, n) in chunks of a size that depends on `n` and `grain` alone (rule 1): at
