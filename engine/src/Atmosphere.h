@@ -131,6 +131,14 @@ public:
     /// the band and the view-dependent tables will be rebuilt (the caller
     /// re-captures the environment).
     bool setObserverAltitude(float metres);
+    /// THE ENVIRONMENT'S OBSERVER (REOPEN-SKY-1). The sky capture photographs the
+    /// sky from a fixed altitude band, never from wherever the driving camera's
+    /// quarter-octave band happens to sit: `begin` re-evaluates the sky view (and
+    /// the constants that name the observer) at `km` for the capture, `end` puts
+    /// the drawn observer back. False (nothing to undo) when the air is not the sky
+    /// or the drawn observer already is `km`. Two sky-view dispatches a capture.
+    bool beginEnvironmentObserver(float km);
+    void endEnvironmentObserver();
     /// Bumped by every model change (the sun tint's memo key).
     unsigned long long modelGeneration() const { return mModelGeneration; }
 
@@ -163,6 +171,9 @@ private:
     Ogre::Vector3 topIlluminance() const;
     void uploadSettings();
     void pushQuadConstants();
+    /// The observer-dependent half at the current observer: the sky view, handed
+    /// to the samplers, the const buffer and the quad's constants.
+    void rebuildObserverView();
     void createFogQuad();
     void pushFogQuadConstants();
 
@@ -177,6 +188,7 @@ private:
     float mAerialScale = 0.0f;
     float mSkyBrightness = 1.0f;
     float mObserverKm = kMinObserverKm;
+    float mDrawnObserverKm = kMinObserverKm;   ///< held across a capture's environment observer
     unsigned mObserverRebuilds = 0;
     float mFogDensity = 0.0f, mFogBreakMin = 0.0f, mFogBreakFalloff = 0.0f;
     bool mAirOn = false;

@@ -693,6 +693,22 @@ void OgreScene::destroyPendingReflection() {
 // destroyRecycled). Throws through Ogre's exceptions; the callers catch.
 Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips) {
     updateAtmosphere();   // the export's bake can run outside a frame: the tables it draws, current
+    // THE ENVIRONMENT IS PHOTOGRAPHED FROM ITS OWN OBSERVER (REOPEN-SKY-1, measured):
+    // the capture used to see the sky from the DRAWN observer, whose quarter-octave
+    // band remembers the camera's history — a fresh scene captured from 5 m (its
+    // default camera), the same scene reopened from 2 m (the band's floor, its saved
+    // camera at 1.69 m inside it), and the sky's mean differed by 0.04-0.06 % on every
+    // reopen. The environment's observer is the octave state the capture is
+    // re-requested on (noteAtmosphereObserver): under 50 m the ground's 2 m, above it
+    // the octave that asked for the capture.
+    struct EnvironmentObserver {
+        JahAtmosphere *a = nullptr;
+        ~EnvironmentObserver() { if (a) { try { a->endEnvironmentObserver(); } catch (...) {} } }
+    } envObserver;
+    if (mAtmosphere && mAtmoSkyOn) {
+        const float km = mAtmoCapturedObserverKm > 0.05f ? mAtmoCapturedObserverKm : JahAtmosphere::kMinObserverKm;
+        if (mAtmosphere->beginEnvironmentObserver(km)) envObserver.a = mAtmosphere;
+    }
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::TextureGpu *cube = tm->createTexture(

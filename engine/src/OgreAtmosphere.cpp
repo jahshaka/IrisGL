@@ -265,6 +265,27 @@ bool JahAtmosphere::setObserverAltitude(float metres) {
     return true;
 }
 
+bool JahAtmosphere::beginEnvironmentObserver(float km) {
+    km = std::max(kMinObserverKm, km);
+    if (!mAirOn || km == mObserverKm) return false;
+    mDrawnObserverKm = mObserverKm;
+    mObserverKm = km;
+    rebuildObserverView();
+    return true;
+}
+
+void JahAtmosphere::endEnvironmentObserver() {
+    mObserverKm = mDrawnObserverKm;
+    rebuildObserverView();
+}
+
+void JahAtmosphere::rebuildObserverView() {
+    runJob("Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u);
+    handOver();
+    uploadSettings();
+    pushQuadConstants();
+}
+
 void JahAtmosphere::setSkyBrightness(float b) {
     b = std::max(0.0f, b);
     if (b == mSkyBrightness) return;
