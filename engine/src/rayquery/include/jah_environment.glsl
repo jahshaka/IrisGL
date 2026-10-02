@@ -119,6 +119,17 @@ float jahEnvRoughnessForCone( float tanHalfAngle )
 	return mix( kLut[i], kLut[i + 1], clamp( x - float( i ), 0.0, 1.0 ) );
 }
 
+/// CONE-ENV-EDGE-1: the aperture above which a cone is read as seven cells (the
+/// diffuse sets' 30 and 44.5 degree cones; the sky pass's 20.4 degree fine set, the
+/// field's probe rays and every specular lobe stay one fetch), the
+/// centre cell's half-angle as a fraction of the cone's (a seventh of its solid
+/// angle: 1 / sqrt(7) in the small-angle limit) and the six outer cells' centroid
+/// angle (the annulus from that fraction to the rim, its centroid at
+/// 2/3 (1 - f^3) / (1 - f^2) of the half-angle).
+const float kJahEnvConeTapTan = 0.45;
+const float kJahEnvConeCell = 0.378;
+const float kJahEnvConeRing = 0.736;
+
 /// The mip of the prefiltered chain that holds the cone's lobe.
 float jahEnvLodForCone( float tanHalfAngle )
 {
@@ -140,6 +151,31 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 	if( JAH_ENV_CUBE_ON )
 	{
 		const vec3 d = vec3( dirWorld.x, dirWorld.y, -dirWorld.z );
+		if( tanHalfAngle > kJahEnvConeTapTan )
+		{
+			// A WIDE CONE IS SEVEN NARROW ONES (CONE-ENV-EDGE-1): the cone cut into
+			// seven equal solid angles, a centre cap of a seventh of the cone's and six
+			// cells of the annulus round it, each read through the chain as a cone of
+			// that cell's own size — a lobe that narrow keeps a step (the physical
+			// sky's horizon over the dark planet, the glow round a low sun) in the
+			// cells it falls in, where one wide GGX lobe weighed it by the lobe's
+			// peak instead of by the cone's area.
+			const float theta = atan( tanHalfAngle );
+			const float lod = jahEnvLodForCone( tan( theta * kJahEnvConeCell ) );
+			const vec3 t = normalize( abs( d.y ) < 0.99 ? cross( d, vec3( 0.0, 1.0, 0.0 ) )
+														: cross( d, vec3( 1.0, 0.0, 0.0 ) ) );
+			const vec3 b = cross( d, t );
+			const float ring = theta * kJahEnvConeRing;
+			const float cr = cos( ring ), sr = sin( ring );
+			vec3 sum = max( JAH_ENV_SAMPLE( d, lod ), vec3( 0.0 ) );
+			for( int k = 0; k < 6; ++k )
+			{
+				const float phi = float( k ) * 1.0471976;
+				sum += max( JAH_ENV_SAMPLE( d * cr + ( t * cos( phi ) + b * sin( phi ) ) * sr, lod ),
+							vec3( 0.0 ) );
+			}
+			return sum * ( 1.0 / 7.0 ) * JAH_ENV_GAIN;
+		}
 		return max( JAH_ENV_SAMPLE( d, jahEnvLodForCone( tanHalfAngle ) ), vec3( 0.0 ) ) *
 			   JAH_ENV_GAIN;
 	}
