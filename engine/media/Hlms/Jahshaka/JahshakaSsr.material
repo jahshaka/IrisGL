@@ -103,6 +103,8 @@ material Jahshaka/SsrRayMarch
 fragment_program Jahshaka/SsrResolve_ps_GLSL glsl
 {
 	source JahSsrResolve_ps.glsl
+	// the fog law (JahFogAlong.glsl and the two files it reads), PHOTON-I-1
+	enable_include_header true
 	default_params
 	{
 		param_named rayTexture				int 0
@@ -110,6 +112,7 @@ fragment_program Jahshaka/SsrResolve_ps_GLSL glsl
 		param_named prevFrame				int 2
 		param_named depthTexture			int 3
 		param_named velocityTexture			int 4
+		param_named fogAerial				int 5
 	}
 }
 
@@ -128,7 +131,9 @@ vertex_program Jahshaka/SsrResolveQuad_vs_VK glslvk
 fragment_program Jahshaka/SsrResolve_ps_VK glslvk
 {
 	source JahSsrResolve_ps.glsl
-	// FIVE textures since REFLECT-MOVERS-1 (the object motion is the fifth): the
+	enable_include_header true
+	// SIX textures since PHOTON-I-1 (the air's table for the fog law; REFLECT-MOVERS-1
+	// made it five, the object motion): the
 	// standard prefab layout holds four.
 	root_layout high
 }
@@ -199,6 +204,15 @@ material Jahshaka/SsrResolve
 			{
 				tex_address_mode	clamp
 				filtering			none
+			}
+
+			// THE AIR'S TABLE for the fog law's re-fog of a screen hit (PHOTON-I-1):
+			// the planet's aerial-perspective volume, or a one-texel "no air" volume
+			// (OgreChain's updateSsr binds it per view).
+			texture_unit fogAerial
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
 			}
 		}
 	}

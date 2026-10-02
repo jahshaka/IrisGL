@@ -131,6 +131,20 @@ public:
     /// the band and the view-dependent tables will be rebuilt (the caller
     /// re-captures the environment).
     bool setObserverAltitude(float metres);
+    /// THE OBSERVER AT REST (REOPEN-SKY-1): the camera has stopped, so the tables
+    /// are built for its altitude EXACTLY, whatever band the motion left them in —
+    /// the drawn sky is then a function of where the camera is, never of where it
+    /// has been (a fresh scene and the same scene reopened draw the same sky at
+    /// any altitude). True when that rebuilt them.
+    bool settleObserverAltitude(float metres);
+    /// THE ENVIRONMENT'S OBSERVER (REOPEN-SKY-1). The sky capture photographs the
+    /// sky from a fixed altitude band, never from wherever the driving camera's
+    /// quarter-octave band happens to sit: `begin` re-evaluates the sky view (and
+    /// the constants that name the observer) at `km` for the capture, `end` puts
+    /// the drawn observer back. False (nothing to undo) when the air is not the sky
+    /// or the drawn observer already is `km`. Two sky-view dispatches a capture.
+    bool beginEnvironmentObserver(float km);
+    void endEnvironmentObserver();
     /// Bumped by every model change (the sun tint's memo key).
     unsigned long long modelGeneration() const { return mModelGeneration; }
 
@@ -142,6 +156,11 @@ public:
     Ogre::Vector3 skyRadianceScale() const { return topIlluminance() * mSkyBrightness; }
     Ogre::TextureGpu *skyViewLut() const { return mSkyView; }   // the sky quad's alone
     Ogre::TextureGpu *aerialLut() const { return mAerial; }
+    /// The const buffer the passes read (JahFog's `JahAtmoSettings`), as floats:
+    /// fog density, the breakthrough pair, aerial scale; skyE; sunDir; planet;
+    /// heightFog; heightFogColour.
+    static constexpr unsigned kSettingsFloats = 24u;
+    void settingsFloats(float out[kSettingsFloats]) const;
     AtmosphereStatus status() const;
     unsigned observerRebuilds() const { return mObserverRebuilds; }
     bool measure(unsigned iterations, AtmosphereCost &out);
@@ -163,6 +182,12 @@ private:
     Ogre::Vector3 topIlluminance() const;
     void uploadSettings();
     void pushQuadConstants();
+    /// The observer-dependent half at the current observer: the sky view, handed
+    /// to the samplers, the const buffer and the quad's constants.
+    void rebuildObserverView();
+    /// A failed capture observer's undo: the drawn observer back, and the tables
+    /// marked for the next update() to rebuild at it.
+    void restoreDrawnObserver();
     void createFogQuad();
     void pushFogQuadConstants();
 
@@ -177,6 +202,7 @@ private:
     float mAerialScale = 0.0f;
     float mSkyBrightness = 1.0f;
     float mObserverKm = kMinObserverKm;
+    float mDrawnObserverKm = kMinObserverKm;   ///< held across a capture's environment observer
     unsigned mObserverRebuilds = 0;
     float mFogDensity = 0.0f, mFogBreakMin = 0.0f, mFogBreakFalloff = 0.0f;
     bool mAirOn = false;

@@ -883,6 +883,11 @@ struct AtmosphereStatus {
     /// have rebuilt them.
     float    observerAltitudeM = 2.0f;
     unsigned observerRebuilds = 0;
+    /// The altitude the ENVIRONMENT (the sky capture the Sky Light reads) is
+    /// photographed from (metres): the ground's 2 m under 71 m, else a point of the
+    /// octave lattice 50 m x 2^n. At rest both altitudes are functions of the
+    /// camera's (REOPEN-SKY-1).
+    float    environmentObserverM = 2.0f;
     /// The aerial-perspective volume is bound to the scene's colour passes
     /// (aerialScale > 0 or the World fog on): one pass texture.
     bool     aerialBound = false;

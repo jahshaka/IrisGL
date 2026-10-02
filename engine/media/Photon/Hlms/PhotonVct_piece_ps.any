@@ -287,6 +287,9 @@
 	@property( use_parallax_correct_cubemaps )
 		OGRE_INOUT_REF( float3, vctSpecPosVS ),
 	@end
+	@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
+		float jahFogSurfY, float jahFogEyeDist,
+	@end
 		VctProbeParams probeParams
 	)
 	{
@@ -369,6 +372,30 @@
 			@end
 
 			float specAlpha = ( 1.0f - min( 1.0f, irrLight.alpha / 0.95f ) );
+
+			// THE FOG LAW ON THE VOXELS' SHARE (PHOTON-I-1: one law on every reflection
+			// path, jah_fog_along.glsl). The light the cone gathered crossed the medium
+			// from where it came — the opacity-weighted distance of the planes it took
+			// (takeAtC0 over alpha, cascade 0's normalised units, turned into metres
+			// along this direction by the volume's transform) — to this surface, then
+			// the eye's leg, which the colour hook fogs. Unpremultiplied for the law
+			// (its breakthrough reads the surface's own luminance), then the cone's
+			// coverage again. THE ESCAPE'S SKY SHARE STAYS UNFOGGED (ruled in PHOTON-I-1's
+			// round 2): it is the sky the probes and the split-sum read, unfogged, outside
+			// every volume; fogging it here alone would seam at the volume's edge.
+		@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
+			if( irrLight.alpha > 0.0f )
+			{
+				const float3 jahSpecLS = float3( dot( probeParams.xform_row0.xyz, pixelData.reflDir ),
+												 dot( probeParams.xform_row1.xyz, pixelData.reflDir ),
+												 dot( probeParams.xform_row2.xyz, pixelData.reflDir ) );
+				const float jahSpecAt = irrLight.takeAtC0 / irrLight.alpha / max( length( jahSpecLS ), 1e-6f );
+				irrLight.colour = irrLight.alpha *
+								  jahFogAlong( irrLight.colour / irrLight.alpha, jahFogSurfY,
+											   jahViewToWorldDir( float3( pixelData.reflDir ) ), jahSpecAt,
+											   jahFogEyeDist );
+			}
+		@end
 
 			// THE SPECULAR CONE'S ESCAPE SEES THE ENVIRONMENT IN THE REFLECTED
 			// DIRECTION AT THE CONE'S OWN APERTURE (PHOTON-ENV-1) - the rule that
@@ -505,6 +532,9 @@
 					 pixelData, inPs.pos, jahConeBasis,
 				@property( use_parallax_correct_cubemaps )
 					 vctSpecPosVS,
+				@end
+				@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
+					 inPs.jahFogWorldY, length( inPs.pos.xyz ),
 				@end
 					 passBuf.vctProbeParams );
 

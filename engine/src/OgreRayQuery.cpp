@@ -246,7 +246,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 39u;
+constexpr unsigned kReflectBindings = 40u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -289,12 +289,16 @@ constexpr unsigned kReflectIdBinding = kReflectPhotonBinding + 1u;
 /// store radiance less it is the share a MOVER above the hit occludes and the store
 /// cannot know (jah_rq_hit.glsl); the total stands in where a cascade has none.
 constexpr unsigned kReflectDirectBinding = kReflectIdBinding + 1u;
-static_assert(kReflectBindings == kReflectDirectBinding + 1u,
-              "the direct volume is the reflection set's last binding");
+/// ...and THE AIR'S TABLE (39, PHOTON-I-1 fix 5): the aerial-perspective volume the
+/// colour passes read, for the fog along the reflection (jah_fog_along.glsl).
+constexpr unsigned kReflectFogBinding = kReflectDirectBinding + 1u;
+static_assert(kReflectBindings == kReflectFogBinding + 1u,
+              "the air's table is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
-/// distance, the gather's atlas.
-constexpr unsigned kHitCompositeBindings = 7u;
+/// distance, the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the
+/// ray's direction) and the air's table, the reflection's fog along its ray.
+constexpr unsigned kHitCompositeBindings = 9u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -1204,8 +1208,9 @@ public:
 private:
     struct HitView {
         /// The list's buffer: [0] records appended (may pass the capacity), [1]
-        /// records dropped, then two words per record (the sun, the footprint, the
-        /// weight — jah_rq_hit_record.glsl). An Ogre UAV buffer: HlmsAtom reads it
+        /// records dropped, then four words per record (the sun, the footprint, the
+        /// weight, the ray's origin height, its length and the eye's distance to
+        /// its origin — jah_rq_hit_record.glsl). An Ogre UAV buffer: HlmsAtom reads it
         /// through a read-only view (a buffer, not an image: the decode's pixel
         /// shader's pass textures already reach the pin's table's end —
         /// kHitBufSlot, HlmsAtom.h).
@@ -4541,6 +4546,8 @@ struct ReflectParams {
     float motion[4] = {};
     /// THE ALPHA TABLE (REFLECT-MOVERS-2): xy = its device address, bit-copied.
     float alpha[4] = {};
+    /// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong.
+    float fog[8][4] = {};
 };
 
 /// The card read's footprint gate (Types.h kCardFootprintTexels).
@@ -4632,6 +4639,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 36 the photon view's overlay (PHOTON-VIEW-1)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 37 the view's id image (REFLECT-MOVERS-1)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 38 voxelDirect[] (MOVER-OCCLUSION-1)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 39 the air's table (PHOTON-I-1 fix 5)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -4738,9 +4746,11 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h,
     rv.havePrev = false;
     rv.historyFrames = 0;
     rv.w = w; rv.h = h;
-    // The second image is a PAIR: x = the surface's distance (the reprojection's
-    // validity test), y = the mean distance the rays in the mean travelled (what a
-    // moved camera's ray is compared against — rq_reflect.comp, PAN-SMEAR-1).
+    // The second image: x = the surface's distance (the reprojection's validity
+    // test), y = the mean distance the rays in the mean travelled (what a moved
+    // camera's ray is compared against — rq_reflect.comp, PAN-SMEAR-1). 8 bytes a
+    // trace texel: a record's ray length and origin height ride the RECORD
+    // (jah_rq_hit_record.glsl), never a full-resolution image.
     const VkFormat formats[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32_SFLOAT };
     for (int i = 0; i < 2; ++i) {
         if (!makeStorageImage(w, h, formats[0], rv.hist[i], err)) return false;
@@ -5383,6 +5393,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         pp.alpha[2] = c ? float(atoi(c)) : 0.0f;
     }
     pp.alpha[3] = rayMoversOf(scene) ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
+    Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
+    scene->fogAlong(pp.fog, fogAerial);
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -5612,6 +5624,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     w[kReflectDirectBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[kReflectDirectBinding].descriptorCount = kMaxReflectCascades;
     w[kReflectDirectBinding].pImageInfo = volumes[10];
+    // THE AIR'S TABLE (39): the passes', or the volume stand-in while they read none.
+    VkDescriptorImageInfo fogImg{};
+    fogImg.sampler = mLinearSampler;
+    fogImg.imageView = fogAerial ? sampledView(fogAerial) : mDummyVolume.view;
+    fogImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!fogImg.imageView) { bail("the air's table view is null"); return; }
+    w[kReflectFogBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectFogBinding].pImageInfo = &fogImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -5656,6 +5676,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                              Ogre::ResourceAccess::Read, computeStage);
         if (skyTex)
             solver.resolveTransition(trans, skyTex, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        if (fogAerial)
+            solver.resolveTransition(trans, fogAerial, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         // THE CARD READ'S INPUTS: the Radiance layer the CardLight job wrote
         // (a UAV) and the Depth layer the capture copied into, read as
@@ -7949,11 +7972,11 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
     if (!instances) return false;
     Ogre::VaoManager *vao = mRs->getVaoManager();
-    // THE LIST'S BUFFER, sized to the list: the four counter words, then two per
-    // record. Re-made when the list grows (Ogre's destroy is delayed past every
+    // THE LIST'S BUFFER, sized to the list: the four counter words, then four per
+    // record (jah_rq_hit_record.glsl kJahHitAuxWords). Re-made when the list grows (Ogre's destroy is delayed past every
     // frame in flight; every reader re-reads `hv.buf` before it binds).
     {
-        const size_t words = 4u + 2u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
+        const size_t words = 4u + 4u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
         if (hv.buf && hv.buf->getNumElements() < words) {
             vao->destroyUavBuffer(hv.buf);
             hv.buf = nullptr;
@@ -8217,6 +8240,8 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the reflection's mean
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 ...its distances
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 the gather's atlas
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 the list's records (PHOTON-I-1 fix 5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 8 the air's table
     };
     for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
         b[i].binding = i;
@@ -8274,8 +8299,11 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     }
     const unsigned ring = hv.frame % kReflectRing;
     std::string err;
+    // x = capacity, y = grid width, z/w = the consumers bound; then the reflection's
+    // media along its ray (PHOTON-I-1 fix 5, OgreScene::fogAlong).
+    struct CompositeParams { float list[4] = {}; float fog[8][4] = {}; };
     if (!hv.params[ring].buffer &&
-        !makeBuffer(16u, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, hv.params[ring], err))
+        !makeBuffer(sizeof(CompositeParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, hv.params[ring], err))
         return;
     if (!hv.sets[ring]) {
         VkDescriptorSetAllocateInfo dai{};
@@ -8301,9 +8329,12 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     if (mGather) {
         if (VkImageView a = mGather->tracedAtlas(key)) { atlasView = a; gatherBound = true; }
     }
-    const float pp[4] = { float(hv.capacity), float(hv.width), reflectBound ? 1.0f : 0.0f,
-                          gatherBound ? 1.0f : 0.0f };
-    std::memcpy(hv.params[ring].mapped, pp, sizeof(pp));
+    CompositeParams pp{};
+    pp.list[0] = float(hv.capacity); pp.list[1] = float(hv.width);
+    pp.list[2] = reflectBound ? 1.0f : 0.0f; pp.list[3] = gatherBound ? 1.0f : 0.0f;
+    Ogre::TextureGpu *fogAerial = nullptr;
+    if (hv.scene) hv.scene->fogAlong(pp.fog, fogAerial);
+    std::memcpy(hv.params[ring].mapped, &pp, sizeof(pp));
 
     const auto sampledView = [this](Ogre::TextureGpu *t) {
         Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
@@ -8314,7 +8345,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     };
     VkDescriptorBufferInfo ub{};
     ub.buffer = hv.params[ring].buffer;
-    ub.range = 16u;
+    ub.range = sizeof(CompositeParams);
     const VkDescriptorBufferInfo bufInfo = rawBufferInfo(hv.buf);
     VkDescriptorImageInfo sampled[2] = {}, storage[3] = {};
     Ogre::TextureGpu *const src[2] = { hv.dest, hv.radiance };
@@ -8349,6 +8380,26 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         w[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[4 + i].pImageInfo = &storage[i];
     }
+    // THE RECORDS (7) and THE AIR'S TABLE (8): the reflection's fog along its ray.
+    VkDescriptorImageInfo idsImg{}, fogImg{};
+    {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = hv.ids;
+        slot.access = Ogre::ResourceAccess::Read;
+        slot.pixelFormat = hv.ids->getPixelFormat();
+        idsImg.imageView = static_cast<Ogre::VulkanTextureGpu *>(hv.ids)->createView(slot, false);
+        retireView(idsImg.imageView);
+        idsImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        if (!idsImg.imageView) return;
+    }
+    fogImg.sampler = mLinearSampler;
+    fogImg.imageView = fogAerial ? sampledView(fogAerial) : mDummyVolume.view;
+    fogImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!fogImg.imageView) return;
+    w[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[7].pImageInfo = &idsImg;
+    w[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[8].pImageInfo = &fogImg;
     vkUpdateDescriptorSets(mVk, kHitCompositeBindings, w, 0, nullptr);
 
     {
@@ -8358,6 +8409,11 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         for (Ogre::TextureGpu *t : { hv.dest, hv.radiance })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
                                      computeStage);
+        solver.resolveTransition(trans, hv.ids, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Read,
+                                 computeStage);
+        if (fogAerial)
+            solver.resolveTransition(trans, fogAerial, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
         solver.resolveTransition(trans, hv.buf, Ogre::ResourceAccess::Read, computeStage);
         mRs->executeResourceTransition(trans);
     }
@@ -8433,8 +8489,8 @@ void OgreEngine::setRayTracing(bool on) {
 // THE TIER'S STORAGE FORMATS, ASKED OF THE DEVICE (RAY-FMT-CHECK, PHOTON P3).
 //
 // Every image the tier writes from a compute shader is a STORAGE image: the
-// reflection's temporal pair (the radiance mean, RGBA16F, and the distance pair,
-// RG32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
+// reflection's temporal pair (the radiance mean, RGBA16F, and the distances,
+// RGBA32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
 // CORE-MANDATORY STORAGE FORMATS in Vulkan 1.0 (the spec's Required Format
 // Support; shaderStorageImageExtendedFormats covers the R16G16*, R16*, R8*,
 // A2B10G10R10 and B10G11R11 family, not these), so on a conformant driver this

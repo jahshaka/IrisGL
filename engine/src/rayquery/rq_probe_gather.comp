@@ -317,7 +317,7 @@ void main()
 				const ivec2 dest = block + texel;
 				recorded = jahHitAppend( hitSlot, far ? 0u : jahHitNearLevel( hitSlot ), far, hitPrim,
 										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight,
-										 jahHitDestPack( dest, true ) );
+										 jahHitDestPack( dest, true ), origin.y, tHit, 0.0 );
 				// THE COMPOSITE writes the radiance; a DROPPED record (the list was
 				// full — counted) leaves this ray's texel at zero radiance.
 				radiance = vec3( 0.0 );

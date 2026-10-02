@@ -1702,8 +1702,9 @@ struct SsrReprojection;
 /// `shot` is the letterbox's inner rectangle in the target's uv (x, y, w, h) —
 /// (0, 0, 1, 1) without a letterbox — the map between the SHOT's uv, which the
 /// march, the resolve and the reprojection work in, and the textures they read.
+/// `scene` is the view's (its fog law re-fogs a screen hit; null = no medium).
 void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
-               SsrReprojection &reprojection);
+               SsrReprojection &reprojection, OgreScene *scene);
 // ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
 //
 // This was ONE function, `applyGlobals`, called once a frame from the primary
@@ -1760,7 +1761,8 @@ struct SsrReprojection {
     bool          have = false;
 };
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection);
+                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
+                      OgreScene *scene);
 
 /// The seed value the HDR adaptation history holds for a given exposure — the
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
@@ -3344,9 +3346,31 @@ public:
     /// The scene's driving camera's world height (the GI driver's rule), once a
     /// frame: the atmosphere's observer altitude, banded (Atmosphere.h).
     void noteAtmosphereObserver(float cameraY);
-    /// The observer altitude (km) the environment was last re-captured for
-    /// because the observer moved (noteAtmosphereObserver: past an octave).
+    /// THE MEDIA A RAY CROSSES THAT DID NOT START AT THE EYE (PHOTON-I-1 fix 5;
+    /// src/rayquery/include/jah_fog_along.glsl states the layout): the World fog,
+    /// its height layer, the air and the height fog exactly as this scene's PBS
+    /// colour passes read them (the fog state, the atmosphere's const buffer and
+    /// whether the passes compile each medium in), as eight vec4; `aerial` is the
+    /// air's table when the passes read it, else null.
+    void fogAlong(float out[8][4], Ogre::TextureGpu *&aerial) const;
+    /// A one-texel "no air" volume (RGBA 0, 0, 0, 1: no in-scatter, full
+    /// transmittance) a low-level material binds where the air's table would be —
+    /// the cloud sheet's and the screen reflection's resolve. Made on first ask.
+    Ogre::TextureGpu *noAirVolume();
+    /// The observer altitude (km) the environment is captured from: a point of the
+    /// octave lattice 50 m x 2^n (noteAtmosphereObserver), 50 m for every observer
+    /// under it (the capture then photographs from the ground's 2 m).
     float mAtmoCapturedObserverKm = 0.05f;
+    /// Scene::setReflectionFogEnabled's door (fogAlong answers no medium when shut).
+    bool mReflectionFogOn = true;
+    /// The altitude (km) the capture photographs the sky from: the ground's 2 m
+    /// for the 50 m lattice point, else the lattice point itself.
+    float environmentObserverKm() const;
+    /// THE CAMERA AT REST (REOPEN-SKY-1, noteAtmosphereObserver): the altitude it
+    /// was last seen moving from, and the frames it has stayed within 1 mm of it.
+    float mAtmoRestAnchorY = 0.0f;
+    unsigned mAtmoRestFrames = 0;
+    bool mAtmoRestAnchored = false;
 
     /// Ogre's OWN sky (SceneManager::setSky): a full-screen Rectangle2D at the far
     /// plane whose camera-direction shader samples an equirect or cube texture.
@@ -3405,6 +3429,7 @@ public:
     mutable unsigned long long mAtmoTintGeneration = 0;
     Colour atmosphereSunTint(const Vec3 &toSun) const override;
     AtmosphereStatus atmosphereStatus() const override;
+    void setReflectionFogEnabled(bool on) override { mReflectionFogOn = on; }
     bool measureAtmosphere(unsigned iterations, AtmosphereCost &out) override;
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
@@ -5037,9 +5062,10 @@ private:
     Ogre::MaterialPtr  mCloudBakeMaterial;      // Jahshaka/CloudBake itself (the bake binds per render)
     Ogre::MaterialPtr  mSunDiscCloudMaterial;   // ...of Jahshaka/SunDiscClouded
     Ogre::TextureGpu  *mCloudWeatherNone = nullptr;   // 1x1 white, ManualTexture: the bake's no-map unit
-    /// 1x1x1 (0,0,0,1), ManualTexture: the sheet's "no air" unit under a sky
-    /// that is not the planet's atmosphere (SKY-ATMOSPHERE-1).
-    Ogre::TextureGpu  *mCloudNoAir = nullptr;
+    /// 1x1x1 (0,0,0,1), ManualTexture: the "no air" unit under a sky that is not
+    /// the planet's atmosphere (the cloud sheet's, SKY-ATMOSPHERE-1; the screen
+    /// reflection's resolve, PHOTON-I-1) — noAirVolume().
+    Ogre::TextureGpu  *mNoAirVolume = nullptr;
     /// The sheet's air: the atmosphere's aerial table (or no air) and its
     /// constants, bound on every layer or sky change (applyCloudLayer).
     void bindCloudAir();
