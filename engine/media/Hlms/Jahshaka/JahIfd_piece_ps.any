@@ -196,7 +196,22 @@
 										   passBuf.irradianceField.viewToIrradianceFieldRow0,
 										   passBuf.irradianceField.viewToIrradianceFieldRow1,
 										   passBuf.irradianceField.viewToIrradianceFieldRow2 );
-	ifdGridPos += ifdSpaceNormal * ifdNormalBias + ifdViewDirGrid * ifdViewBias;
+	// THE BIAS'S SHARE ALONG THE NORMAL IS CONSTANT (FIELD-EDGE-1, measured). Applied as
+	// the paper writes it, the view half's component along the normal is ifdViewBias x
+	// (v.n): it shrinks with the distance from the eye on any surface not facing it, so
+	// across an open floor the lookup point sank through the probe lattice - the cage's
+	// layers changed with the distance from the eye, and where the point crossed a layer
+	// that layer's probes lay in its own tangent plane (weight 0) while the layer under
+	// the floor was behind: the field faded to black along a ring (0.861 at 4 m from a
+	// 3 m eye, gi.field_edge). The normal share is now the head-on value, nb + vb (0.25
+	// spacings), everywhere: the lookup point stands a fixed height above the surface, so
+	// one cage serves the whole floor, and a probe layer closer to the surface than that
+	// (inside or hugging the surface's own voxel row, which reads low - 0.97 for a layer
+	// one cell up) is behind the lookup point and has no say. The view half keeps only its
+	// TANGENTIAL share - the part that moves a grazing lookup towards the eye, which is
+	// what the leak pair needed (a wall seen edge-on).
+	const float3 ifdViewTangent = ifdViewDirGrid - ifdSpaceNormal * dot( ifdViewDirGrid, ifdSpaceNormal );
+	ifdGridPos += ifdSpaceNormal * ( ifdNormalBias + ifdViewBias ) + ifdViewTangent * ifdViewBias;
 
 	// OURS, AND THE THIRD THING THAT IS NOT UPSTREAM'S: THE FIELD'S EDGE
 	// (ENGINE_CACHE_POLICY_SPEC P9). Two numbers the cage loop below needs and
@@ -218,6 +233,9 @@
 	// How much of the cage's final weight comes from probes IN FRONT of the
 	// shading surface (P9; the fade after the loop says what it is for).
 	float ifdFrontWeight = 0;
+	// ...and the share the front probes' TRILINEAR weights alone would give it, before
+	// visibility (FIELD-EDGE-1): the denominator of the crush fade (c) below.
+	float ifdFrontTrilinear = 0;
 	// THE FIELD'S WINDOW (PHOTON-WRITER-1): the atlas slot of the window's first
 	// probe per axis, packed x + 128 y + 16384 z in jahIfd.x by the host
 	// (OgreScene::pushIfdState). The cage below is built in window coordinates;
@@ -268,6 +286,7 @@
 		// normalised `dir` the weight was built from, so the same value.
 		float ifdFrontSide = saturate( dot( dir, ifdSpaceNormal ) * 200.0 + 0.5 );
 		ifdFrontWeight += weight * ifdFrontSide;
+		ifdFrontTrilinear += trilinear.x * trilinear.y * trilinear.z * ifdFrontSide;
 
 		// WHY THERE IS NO VISIBILITY TERM OF OURS HERE, and it was measured
 		// rather than assumed (the lead's question, P9). The Chebyshev weight
@@ -414,16 +433,17 @@
 	// sharply bought 4-24 % of the leak, because the renormalisation gives it
 	// back.)
 	//
-	// WHAT THE NUMBER MEANS. `weight` starts at `saturate( dot ) + 0.2`, so a
-	// probe that is merely behind the surface still carries 0.2, and the
-	// trilinear factors sum to 1 over the cage: an UNCRUSHED cage therefore
-	// sums to at least 0.2 and a well-lit one to about 1.2. The crush cubes
-	// anything under 0.2, and a fully crushed cage lands at ~1e-17. There is
-	// no legitimate cage anywhere in between, which is why the fade can sit
-	// four orders of magnitude BELOW the uncrushed floor and still separate
-	// the two cases perfectly: it is a guard against a division, not a dial on
-	// the picture. The measured cost of it on gi.ddgi_edge's legitimate red
-	// bounce is zero (lane report).
+	// WHAT THE NUMBER MEANS (FIELD-EDGE-1). The fade reads the cage's weight AS A SHARE
+	// OF WHAT ITS FRONT PROBES' TRILINEAR WEIGHTS ALONE WOULD GIVE - the visibility the
+	// Chebyshev test left them: about 1 for a cage that sees the surface, ~1e-17 for a
+	// fully crushed one (upstream's 1e-6 floor, cubed by the crush), and nothing a
+	// legitimate cage can produce in between at the knee, which is why the knee may sit
+	// three orders of magnitude below 1: it is a guard against a division, not a dial
+	// on the picture. (It used to read the RAW sum, on the assumption - upstream's,
+	// whose `+ 0.2` floor on every probe PHOTON-WRITER-1 deleted - that an uncrushed
+	// cage sums to at least 0.2. Without the floor a cage whose front layer's trilinear
+	// weight is small sums to as little as that weight, and the raw-sum fade took the
+	// field to black where the lookup point sat near the layer behind the surface.)
 	//
 	// WHAT IT FADES TO: nothing, deliberately -- not to the VCT ambient
 	// fallback below. `ifdConfidence` means "this pixel is outside the field's
@@ -433,7 +453,8 @@
 	// unoccluded ambient for it would re-open the leak in a different colour.
 	const float ifdWeightLo = 0.0005;
 	const float ifdWeightHi = 0.0050;
-	float ifdWeightFade = smoothstep( ifdWeightLo, ifdWeightHi, sumIfdWeight );
+	float ifdWeightFade = smoothstep( ifdWeightLo, ifdWeightHi,
+									  ifdFrontTrilinear > 0.0 ? sumIfdWeight / ifdFrontTrilinear : sumIfdWeight );
 
 @property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 	// ...AND WHERE THE CAGE WAS DECLINED, THE FIELD OWES NOTHING EITHER. Both
