@@ -2184,9 +2184,14 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 // with one fetch whichever copy it hit; the copy is told apart by the launch's MASK.
 namespace {
 /// Level slots per mesh record in the job's inputs (rq_tlas_write.comp's
-/// LEVEL_SLOTS). The bake tops out at six levels (GpuScene::kLevelsPerMesh holds
-/// eight); a chain deeper than this is traced at this depth at most.
+/// LEVEL_SLOTS) — the record's LAYOUT.
 constexpr uint32_t kTlasLevels = 16u;
+/// THE LEVELS THE RAYS MAY TRACE (architecture audit D1): no deeper than the GPU
+/// scene keeps — its level table, its geometry rows (geomRowIndex: eight a mesh) and
+/// the hit record's 3-bit level. A chain deeper than eight is traced at level 7 at
+/// most: more triangles than its error allows, the right ones. Past it a near copy
+/// had no geometry row and a far copy indexed the NEXT mesh's rows (gi.ray_levels).
+constexpr uint32_t kRayLevels = std::min<uint32_t>(kTlasLevels, detail::GpuScene::kLevelsPerMesh);
 /// The inputs' layout (the shader's HDR_* / MESH_WORDS).
 constexpr uint32_t kTlasHeaderWords = 16u;
 constexpr uint32_t kTlasMeshWords = kTlasLevels * 2u + 4u;
@@ -2258,7 +2263,7 @@ void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::Gp
                 next.kind = 1u;
                 next.mesh = mp.get();
                 next.meshIndex = meshIndex;
-                const uint32_t coarsest = std::min(coarsestLevelOf(mp.get()), kTlasLevels - 1u);
+                const uint32_t coarsest = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
                 next.farLevel = coarsest;
                 next.nearLevel = std::min(now->ids[3], coarsest);
                 if (coarsest > 0u) {
@@ -2350,7 +2355,7 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
                 rec[2u * l] = uint32_t(a & 0xFFFFFFFFu);
                 rec[2u * l + 1u] = uint32_t(a >> 32u);
             }
-            rec[2u * kTlasLevels] = std::min(coarsestLevelOf(mp.get()), kTlasLevels - 1u);
+            rec[2u * kTlasLevels] = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
         }
         sa.inputsBlasVersion = sa.blasVersion;
         sa.inputsMeshSerial = gs.meshSetSerial();
