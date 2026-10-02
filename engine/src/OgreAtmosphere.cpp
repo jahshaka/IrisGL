@@ -267,18 +267,47 @@ bool JahAtmosphere::setObserverAltitude(float metres) {
     return true;
 }
 
+bool JahAtmosphere::settleObserverAltitude(float metres) {
+    const float km = std::max(kMinObserverKm, metres * 0.001f);
+    if (km == mObserverKm) return false;
+    mObserverKm = km;
+    ++mObserverRebuilds;
+    ++mModelGeneration;
+    mDirtySun = mDirtyBuffer = mDirtyQuad = true;
+    return true;
+}
+
 bool JahAtmosphere::beginEnvironmentObserver(float km) {
     km = std::max(kMinObserverKm, km);
     if (!mAirOn || km == mObserverKm) return false;
     mDrawnObserverKm = mObserverKm;
     mObserverKm = km;
-    rebuildObserverView();
+    // A THROW HERE MUST NOT LEAVE THE CAPTURE'S ALTITUDE BEHIND (the caller undoes
+    // only a begin that returned): the drawn observer goes back, and the tables are
+    // marked for the next update to rebuild at it.
+    try {
+        rebuildObserverView();
+    } catch (...) {
+        restoreDrawnObserver();
+        throw;
+    }
     return true;
 }
 
 void JahAtmosphere::endEnvironmentObserver() {
     mObserverKm = mDrawnObserverKm;
-    rebuildObserverView();
+    try {
+        rebuildObserverView();
+    } catch (...) {
+        restoreDrawnObserver();
+        throw;
+    }
+}
+
+void JahAtmosphere::restoreDrawnObserver() {
+    mObserverKm = mDrawnObserverKm;
+    ++mModelGeneration;
+    mDirtySun = mDirtyBuffer = mDirtyQuad = true;
 }
 
 void JahAtmosphere::rebuildObserverView() {

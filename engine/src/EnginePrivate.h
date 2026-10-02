@@ -3334,9 +3334,18 @@ public:
     /// transmittance) a low-level material binds where the air's table would be —
     /// the cloud sheet's and the screen reflection's resolve. Made on first ask.
     Ogre::TextureGpu *noAirVolume();
-    /// The observer altitude (km) the environment was last re-captured for
-    /// because the observer moved (noteAtmosphereObserver: past an octave).
+    /// The observer altitude (km) the environment is captured from: a point of the
+    /// octave lattice 50 m x 2^n (noteAtmosphereObserver), 50 m for every observer
+    /// under it (the capture then photographs from the ground's 2 m).
     float mAtmoCapturedObserverKm = 0.05f;
+    /// The altitude (km) the capture photographs the sky from: the ground's 2 m
+    /// for the 50 m lattice point, else the lattice point itself.
+    float environmentObserverKm() const;
+    /// THE CAMERA AT REST (REOPEN-SKY-1, noteAtmosphereObserver): the altitude it
+    /// was last seen moving from, and the frames it has stayed within 1 mm of it.
+    float mAtmoRestAnchorY = 0.0f;
+    unsigned mAtmoRestFrames = 0;
+    bool mAtmoRestAnchored = false;
 
     /// Ogre's OWN sky (SceneManager::setSky): a full-screen Rectangle2D at the far
     /// plane whose camera-direction shader samples an equirect or cube texture.

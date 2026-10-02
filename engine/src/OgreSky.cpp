@@ -500,8 +500,13 @@ AtmosphereStatus OgreScene::atmosphereStatus() const {
     if (!mAtmosphere) return AtmosphereStatus();
     AtmosphereStatus st = mAtmosphere->status();
     st.on = mAtmoSkyOn;
-    return st;
     st.aerialBound = mAtmoSkyOn && (mAtmosphere->aerialScale() > 0.0f || mAtmoFogOn);
+    st.environmentObserverM = environmentObserverKm() * 1000.0f;
+    return st;
+}
+
+float OgreScene::environmentObserverKm() const {
+    return mAtmoCapturedObserverKm > 0.05f ? mAtmoCapturedObserverKm : JahAtmosphere::kMinObserverKm;
 }
 
 bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
@@ -527,16 +532,42 @@ bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
 // or the ambient sees differs by nothing a picture shows under 50 m (a horizon
 // dip of 0.23 degrees at 50 m). The drawn sky and the aerial volume follow the
 // quarter-octave band from 2 m.
+//
+// ...AND AT REST THE STATE IS A FUNCTION OF THE CAMERA, NOT OF ITS HISTORY
+// (REOPEN-SKY-1, measured: the bands' hysteresis made a fresh scene and the same
+// scene reopened draw and capture different skies whenever the motion that led
+// to the saved camera left a band inside its tolerance). While the camera MOVES
+// both keep their hysteresis (no rebuild per frame, no capture per octave
+// boundary a hand-held head wobbles across); once it has held its altitude to a
+// millimetre for kRestFrames frames the drawn observer is set to its altitude
+// exactly and the environment to the octave lattice point 50 m x 2^n nearest it
+// (50 m for every observer under 71 m, the lattice's midpoint). A fresh scene and the reopened one at
+// rest are then the same sky, drawn and captured, at any altitude.
 void OgreScene::noteAtmosphereObserver(float cameraY) {
     if (!mAtmosphere || !mAtmoSkyOn) return;
+    constexpr unsigned kRestFrames = 8u;
+    constexpr float kRestMetres = 0.001f;
+    constexpr float kLatticeKm = 0.05f;
     JAH_TRY {
-        if (mAtmosphere->setObserverAltitude(std::max(0.0f, cameraY))) {
-            const float km = std::max(mAtmosphere->observerKm(), 0.05f);
-            if (std::fabs(std::log2(km / mAtmoCapturedObserverKm)) >= 1.0f) {
-                mAtmoCapturedObserverKm = km;
+        const float y = std::max(0.0f, cameraY);
+        if (!mAtmoRestAnchored || std::fabs(y - mAtmoRestAnchorY) > kRestMetres) {
+            mAtmoRestAnchorY = y;
+            mAtmoRestAnchored = true;
+            mAtmoRestFrames = 0u;
+        } else if (mAtmoRestFrames <= kRestFrames) {
+            ++mAtmoRestFrames;
+        }
+        const bool settle = mAtmoRestFrames == kRestFrames;
+        const bool rebuilt = settle ? mAtmosphere->settleObserverAltitude(y) : mAtmosphere->setObserverAltitude(y);
+        if (rebuilt || settle) {
+            const float km = std::max(mAtmosphere->observerKm(), kLatticeKm);
+            const float lattice = kLatticeKm * std::exp2(std::round(std::log2(km / kLatticeKm)));
+            if (lattice != mAtmoCapturedObserverKm &&
+                (settle || std::fabs(std::log2(km / mAtmoCapturedObserverKm)) >= 1.0f)) {
+                mAtmoCapturedObserverKm = lattice;
                 requestSkyCapture();
             }
-            bindCloudAir();
+            if (rebuilt) bindCloudAir();
         }
     } JAH_CATCH(mError, );
 }
@@ -763,8 +794,7 @@ Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint
         ~EnvironmentObserver() { if (a) { try { a->endEnvironmentObserver(); } catch (...) {} } }
     } envObserver;
     if (mAtmosphere && mAtmoSkyOn) {
-        const float km = mAtmoCapturedObserverKm > 0.05f ? mAtmoCapturedObserverKm : JahAtmosphere::kMinObserverKm;
-        if (mAtmosphere->beginEnvironmentObserver(km)) envObserver.a = mAtmosphere;
+        if (mAtmosphere->beginEnvironmentObserver(environmentObserverKm())) envObserver.a = mAtmosphere;
     }
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();

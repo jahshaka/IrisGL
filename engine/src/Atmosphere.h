@@ -131,6 +131,12 @@ public:
     /// the band and the view-dependent tables will be rebuilt (the caller
     /// re-captures the environment).
     bool setObserverAltitude(float metres);
+    /// THE OBSERVER AT REST (REOPEN-SKY-1): the camera has stopped, so the tables
+    /// are built for its altitude EXACTLY, whatever band the motion left them in —
+    /// the drawn sky is then a function of where the camera is, never of where it
+    /// has been (a fresh scene and the same scene reopened draw the same sky at
+    /// any altitude). True when that rebuilt them.
+    bool settleObserverAltitude(float metres);
     /// THE ENVIRONMENT'S OBSERVER (REOPEN-SKY-1). The sky capture photographs the
     /// sky from a fixed altitude band, never from wherever the driving camera's
     /// quarter-octave band happens to sit: `begin` re-evaluates the sky view (and
@@ -179,6 +185,9 @@ private:
     /// The observer-dependent half at the current observer: the sky view, handed
     /// to the samplers, the const buffer and the quad's constants.
     void rebuildObserverView();
+    /// A failed capture observer's undo: the drawn observer back, and the tables
+    /// marked for the next update() to rebuild at it.
+    void restoreDrawnObserver();
     void createFogQuad();
     void pushFogQuadConstants();
 
