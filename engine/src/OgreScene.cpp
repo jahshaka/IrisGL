@@ -1633,9 +1633,6 @@ void OgreScene::detachItem(NodeId id, Node &n) {
     // attach overwriting the only pointer to it. An engine that cannot destroy
     // a renderable it created has no way back to one-item-per-node.
     if (n.item) {
-        // A CULL TWIN this Item wore may be worn by nothing now (CULL-MODE-2): the
-        // frame's sweep finds out, once, before anything reads a datablock.
-        if (mCullTwinCount) mCullTwinSweep = true;
         // Only GI-participating (lit) geometry invalidates — detaching a selection
         // outline or wire overlay must not trigger a re-voxelize. BEFORE the
         // destroy: the voxelizer/IR hold raw pointers into the dying geometry.
@@ -1656,6 +1653,8 @@ void OgreScene::detachItem(NodeId id, Node &n) {
             releaseGpuMesh(n.item->getMesh().get());
             n.gpuMeshSlot = 0xFFFFFFFFu;
         }
+        // A CULL TWIN this Item wore may be worn by nothing now (CULL-MODE-2).
+        noteTwinsLetGo(n.item);
         n.item->detachFromParent(); mSceneMgr->destroyItem(n.item); n.item = nullptr;
         // AND THE CLIPS (S16, SMOKE_FIX_SPEC_2026_09_11 §1.1). The
         // SkeletonInstance belongs to the Item and has just died with it, while
@@ -1726,8 +1725,6 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // the component tracks by raw pointer dies.
     disarmReflector(id, n);
     mReflectors.erase(id);
-    // A CULL TWIN its Item wore may be worn by nothing now (CULL-MODE-2; detachItem).
-    if (n.item && mCullTwinCount) mCullTwinSweep = true;
     // Invalidate BEFORE anything dies (IR frees its by-pointer caches inside):
     // VCT holds the raw Item*, IR caches the mesh's VAO and any node-owned mesh.
     if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit))) {
@@ -1766,7 +1763,8 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
         releaseGpuMesh(n.item->getMesh().get());
         n.gpuMeshSlot = 0xFFFFFFFFu;
     }
-    if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
+    if (n.item)  { noteTwinsLetGo(n.item);   // a twin it wore may be free (CULL-MODE-2)
+                   n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.
     if (n.light) {

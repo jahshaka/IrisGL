@@ -3995,11 +3995,17 @@ public:
     void setNodeFaceCull(NodeId id, FaceCull cull) override;
     FaceCull nodeFaceCull(NodeId id) const override;
     unsigned cullTwinCount() const override { return mCullTwinCount; }
-    /// THE CULL TWINS' SWEEP (CULL-MODE-2): destroys every twin no Item wears. Cheap
-    /// when nothing can have changed (a flag, set when an Item wearing a twin could
-    /// have let go of it); called once per frame before the frame's first reader of
-    /// the Items' datablocks (OgreEngine's frame, beside drainPbsChanges).
+    /// THE CULL TWINS' SWEEP (CULL-MODE-2; CULL-TWIN-DEBTS-1): destroys a twin that
+    /// no renderable has worn for kCullTwinGraceFrames of this scene's frames. It
+    /// visits only the CANDIDATES — twins an Item let go of since (noteTwinLetGo) —
+    /// and asks each one's own wearer count, Ogre's linked-renderable list, so the
+    /// cost is per release, never a walk of the scene's items. Called once per drawn
+    /// frame before the frame's first reader of the Items' datablocks.
     void sweepCullTwins();
+    /// An unworn twin lives this many of its scene's frames before it dies, so a cull
+    /// toggled every frame re-uses one datablock instead of making and destroying one
+    /// per frame. One second at the engine's fixed 1/60 s.
+    static constexpr unsigned kCullTwinGraceFrames = 60u;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
@@ -4627,6 +4633,9 @@ private:
     struct CullTwin {
         std::string      datablockName;   // uniquely owned; empty = none
         TextureBindState bound;
+        /// The sweep tick (+1) at which the sweep first found it unworn; 0 = worn
+        /// (or not looked at since it was last worn).
+        unsigned long long unwornSince = 0;
     };
     struct MaterialRec {
         std::string datablockName;
@@ -4864,8 +4873,26 @@ private:
     void destroyCullTwins(MaterialRec &rec);
     /// A material whose OWN cull moved: every node wearing it re-picks master/twin.
     void repointCullWearers(MaterialId id);
+    /// AN ITEM (OR ONE SUB-ITEM) LETS GO OF `db`: a twin among them becomes a sweep
+    /// candidate. Every site that re-points or destroys an Item calls it with the
+    /// datablock(s) it is leaving, BEFORE it leaves them.
+    void noteTwinLetGo(const Ogre::HlmsDatablock *db);
+    void noteTwinsLetGo(const Ogre::Item *item);
+    /// Item / sub-item re-pointed at `db`, the datablock it leaves noted first.
+    void wearDatablock(Ogre::Item *item, Ogre::HlmsDatablock *db);
+    void wearDatablock(Ogre::SubItem *sub, Ogre::HlmsDatablock *db);
+    /// Destroys one twin (the caller knows no renderable wears it).
+    void destroyCullTwin(MaterialRec &rec, CullTwin &t);
     unsigned mCullTwinCount = 0;
     bool     mCullTwinSweep = false;
+    /// Every live twin's datablock -> its record and slot (the candidates' lookup).
+    struct TwinOwner { MaterialRec *rec; CullTwin *twin; };
+    std::unordered_map<const Ogre::HlmsDatablock *, TwinOwner> mTwinOwners;
+    /// Twins let go of since the sweep last settled them (may repeat; resolved
+    /// through mTwinOwners, so a dead one simply drops out).
+    std::vector<const Ogre::HlmsDatablock *> mTwinCandidates;
+    /// This scene's sweep calls (one per drawn frame): the grace clock.
+    unsigned long long mCullSweepTick = 0;
     /// The visibility bits a node's PFX2 def carries when visible:
     /// kDistortionBit for a distortion emitter, else helper/visible.
     static Ogre::uint32 particleVisibilityBits(const Node &n);
@@ -5793,6 +5820,12 @@ private:
     /// destroyed: PlanarReflections keeps raw Renderable pointers and its own
     /// header says so in as many words.
     void disarmReflector(NodeId id, Node &n);
+    /// A REFLECTOR WHOSE DATABLOCK'S CULL MAY HAVE MOVED (a node cull edit, its
+    /// material's own two-sidedness flipping): disarmed and armed again, because
+    /// armReflector returns early for a node that already has an actor and so
+    /// never re-checks the two-sided refusal. The FLAG stays: a mirror refused now
+    /// arms again the moment its datablock is one-sided again.
+    void rederiveReflector(NodeId id, Node &n);
     /// disarmReflector for every reflector, keeping the flags — used when the
     /// arm itself is being torn down and rebuilt.
     void disarmAllReflectors();

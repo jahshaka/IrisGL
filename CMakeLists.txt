@@ -278,8 +278,6 @@ set(SRCS
     core/logger.cpp
     document/assets/linemeshbuilder.cpp
     document/assets/shapehelper.cpp
-	document/materials/renderstates.cpp
-    document/materials/rasterizerstate.cpp
     document/physics/avatarmovement.cpp
     document/physics/environment.cpp
     document/physics/physicshelper.cpp
@@ -349,10 +347,8 @@ set (HEADERS
     core/geometry/frustum.h
     core/geometry/aabb.h
     core/logger.h
-    document/materials/renderstates.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h
-    document/materials/rasterizerstate.h
     document/physics/avatarmovement.h
     document/physics/environment.h
     document/physics/physicshelper.h

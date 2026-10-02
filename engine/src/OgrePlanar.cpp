@@ -221,12 +221,10 @@ void destroyWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspace
 // visibility test is any-bit-set), so the honest answer is to refuse the
 // reflector and say why, exactly as a mesh that is not flat enough is refused.
 //
-// CHECKED AT ARM TIME, which covers the ordering the mirror actually uses (it
-// pushes a node's MATERIAL before that node's reflector flag, scenemirror.cpp
-// — so the first sync already sees the real datablock). Turning a material
-// two-sided AFTER its node armed is not re-checked; the next reflector-flag
-// change is what re-arms. Recorded, not silently patched over with a per-frame
-// datablock poll.
+// CHECKED AT ARM TIME, and again whenever the datablock's cull can have moved
+// under an armed node: a node cull edit (setNodeFaceCull), a material swap, and
+// the node's material turning two-sided itself (repointCullWearers) all re-derive
+// the reflector (rederiveReflector) — no per-frame datablock poll.
 constexpr const char *kTwoSidedRefusal =
     "planar reflector: the mesh's material is two-sided, and a two-sided mirror fills its "
     "own reflection with itself. Turn double-sided off on the reflector's material.";
@@ -445,6 +443,12 @@ void OgreScene::disarmReflector(NodeId id, Node &n) {
     } JAH_CATCH(mError, );
     mActors.erase(it);
     if (n.item) markGpuSlotDirty(n);   // its split route moves (atomRouteFor: planar)
+}
+
+void OgreScene::rederiveReflector(NodeId id, Node &n) {
+    if (!mReflectors.count(id)) return;
+    disarmReflector(id, n);
+    armReflector(id, n);   // a refusal leaves lastError() naming the reason
 }
 
 void OgreScene::disarmAllReflectors() {

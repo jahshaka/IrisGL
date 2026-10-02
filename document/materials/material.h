@@ -13,7 +13,6 @@ For more information see the LICENSE file
 #define MATERIAL_H
 
 #include "irisglfwd.h"
-#include "document/materials/renderstates.h"
 
 #include <QtGlobal>
 #include <atomic>
@@ -107,7 +106,6 @@ public:
     }
 
     bool acceptsLighting;
-    RenderStates renderStates;
 
     Material() {
         acceptsLighting = true;
@@ -121,12 +119,6 @@ public:
     void setRenderLayer(int layer) {
         this->renderLayer = layer;
     }
-
-	// setter for render states
-	void setBlendState(const iris::BlendState& blendState);
-	void setRasterizerState(const iris::RasterizerState& rasterState);
-	void setDepthState(const iris::DepthState& depthState);
-	iris::RenderStates getRenderState() { return renderStates; }
 
 	// Preprocessor-define flags (only "SKINNING_ENABLED", set by MeshNode).
 	// They used to be forwarded to the GLSL carrier; with that gone nothing
