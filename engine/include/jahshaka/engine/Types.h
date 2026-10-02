@@ -1347,7 +1347,7 @@ enum class PbrAlphaMode {
 ///     why it reuses that slot rather than inventing one;
 ///   * `alpha`, as the per-material STRENGTH, multiplied by the world's
 ///     `distortionStrength`. 0 is inert;
-///   * `twoSided` and `alphaCutoff`, which behave as they always do.
+///   * `alphaCutoff`, which behaves as it always does (the face cull is the node's).
 /// Everything else — albedo, metalness, roughness, emissive, the BRDF, the
 /// clear coat, every other map — is ignored, because there is no lighting.
 ///
@@ -1368,7 +1368,8 @@ enum class ShadingModel {
 /// the CALLER as a clamp before filling `roughness` — the backend has no
 /// per-texel remap. Texture maps bind separately via setPbrTexture().
 /// THE FACE CULL A NODE ASKS FOR (CULL-MODE-2; the document's MeshNode::faceCullingMode).
-/// `Material` leaves it to the material (one-sided unless PbrParams::twoSided); the
+/// `Material` is the default, one-sided (back faces culled: a material has no cull of
+/// its own); the
 /// other three override the material for THIS node only. The engine culls per
 /// datablock, so a node whose cull differs from its material's wears the material's
 /// CULL TWIN — a second datablock that differs in the macroblock's cull (and the
@@ -1389,7 +1390,6 @@ struct PbrParams {
     PbrAlphaMode alphaMode = PbrAlphaMode::Opaque;
     float  alpha       = 1.0f;   ///< Blend mode: 1 opaque .. 0 invisible
     float  alphaCutoff = 0.5f;   ///< Cutout mode threshold
-    bool   twoSided    = false;  ///< draw and light both faces (no back-face culling)
     float  normalMapWeight = 1.0f;   ///< strength of the bound normal map
     /// THE BASE-MAP UV TRANSFORM, applied to every bound base map as
     ///     uv' = R(uvRotation) * ((uv * uvScale + uvOffset) - 0.5) + 0.5
@@ -1582,7 +1582,7 @@ struct PbrParams {
     bool operator==(const PbrParams &o) const {
         return albedo == o.albedo && metalness == o.metalness && roughness == o.roughness &&
                emissive == o.emissive && alphaMode == o.alphaMode && alpha == o.alpha &&
-               alphaCutoff == o.alphaCutoff && twoSided == o.twoSided &&
+               alphaCutoff == o.alphaCutoff &&
                normalMapWeight == o.normalMapWeight &&
                // ELEMENT-WISE, deliberately: `uvScale == o.uvScale` on arrays
                // compares the two ADDRESSES, which are never equal, and the

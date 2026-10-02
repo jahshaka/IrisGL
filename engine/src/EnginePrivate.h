@@ -4873,15 +4873,12 @@ private:
     static void applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p,
                                 FaceCull cull = FaceCull::Material);
     // ---- THE CULL TWINS (CULL-MODE-2; MaterialRec::cullTwins) ----
-    /// The cull a material's params ask for on their own (Back or TwoSided).
-    static FaceCull ownCullOf(const PbrParams &p) {
-        return p.twoSided ? FaceCull::TwoSided : FaceCull::Back;
-    }
     /// The Ogre cull of a resolved FaceCull (never Material).
     static Ogre::CullingMode ogreCullOf(FaceCull c);
-    /// `cull` resolved against `p`: Material -> the params' own.
-    static FaceCull resolveCull(const PbrParams &p, FaceCull cull) {
-        return cull == FaceCull::Material ? ownCullOf(p) : cull;
+    /// `cull` resolved: Material -> Back (a material has no cull of its own; the
+    /// NODE is the authority, CULL-MODE-2).
+    static FaceCull resolveCull(FaceCull cull) {
+        return cull == FaceCull::Material ? FaceCull::Back : cull;
     }
     static size_t cullTwinIndex(FaceCull c) { return size_t(c) - 1u; }
     /// Only a PBR material has twins (either family); an overlay (grid, gizmo,
@@ -4899,8 +4896,6 @@ private:
     void syncCullTwins(MaterialRec &rec);
     /// Destroys every twin of `rec` — the caller has taken every Item off them.
     void destroyCullTwins(MaterialRec &rec);
-    /// A material whose OWN cull moved: every node wearing it re-picks master/twin.
-    void repointCullWearers(MaterialId id);
     /// AN ITEM (OR ONE SUB-ITEM) LETS GO OF `db`: a twin among them becomes a sweep
     /// candidate. Every site that re-points or destroys an Item calls it with the
     /// datablock(s) it is leaving, BEFORE it leaves them.

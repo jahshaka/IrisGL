@@ -222,9 +222,8 @@ void destroyWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspace
 // reflector and say why, exactly as a mesh that is not flat enough is refused.
 //
 // CHECKED AT ARM TIME, and again whenever the datablock's cull can have moved
-// under an armed node: a node cull edit (setNodeFaceCull), a material swap, and
-// the node's material turning two-sided itself (repointCullWearers) all re-derive
-// the reflector (rederiveReflector) — no per-frame datablock poll.
+// under an armed node: a node cull edit (setNodeFaceCull) and a material swap
+// re-derive the reflector (rederiveReflector) — no per-frame datablock poll.
 constexpr const char *kTwoSidedRefusal =
     "planar reflector: the mesh's material is two-sided, and a two-sided mirror fills its "
     "own reflection with itself. Turn double-sided off on the reflector's material.";

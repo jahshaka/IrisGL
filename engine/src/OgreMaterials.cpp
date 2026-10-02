@@ -219,7 +219,7 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     // THE CULL IS RESOLVED FIRST (CULL-MODE-2): the params' own two-sidedness, or a
     // node's through a cull twin. Anything that draws a back face lights it as seen
     // (Front draws ONLY back faces), so the two-sided lighting follows the cull.
-    const FaceCull resolved = resolveCull(p, cull);
+    const FaceCull resolved = resolveCull(cull);
     const bool twoSidedLit = resolved != FaceCull::Back;
     if (db->getTwoSidedLighting() != twoSidedLit) db->setTwoSidedLighting(twoSidedLit, false);
     {
@@ -467,7 +467,7 @@ void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p, Fac
     }
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(p, cull));
+        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(cull));
         // Anything that blends must not write depth — it cannot occlude what it
         // is blending over. Modulate blends too even though it ignores alpha.
         const bool wantDepthWrite = !blended && p.alphaMode != PbrAlphaMode::Modulate;
@@ -525,7 +525,7 @@ void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p
     }
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(p, cull));
+        const Ogre::CullingMode wantCull = ogreCullOf(resolveCull(cull));
         if (macro.mCullMode != wantCull || macro.mDepthWrite || !macro.mDepthCheck) {
             macro.mCullMode = wantCull;
             macro.mDepthCheck = true;
@@ -653,14 +653,9 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                  o.uvOffset[0] != p.uvOffset[0] || o.uvOffset[1] != p.uvOffset[1] ||
                  o.uvRotation != p.uvRotation || o.alpha != p.alpha || samplersMoved);
             if (it->second.paramsPushed &&
-                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff ||
-                 o.twoSided != p.twoSided || cutoutInputs))
+                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff || cutoutInputs))
                 noteShadowShapeChanged(id);
         }
-        // THE MATERIAL'S OWN CULL MOVED (CULL-MODE-2): a node that named a cull
-        // wears the master or a twin depending on whether the two agree, so every
-        // wearer re-picks — after the master holds the new state.
-        const bool ownCullMoved = it->second.paramsPushed && it->second.params.twoSided != p.twoSided;
         it->second.params = p;
         it->second.paramsPushed = true;
         if (it->second.shadingUnlit) {
@@ -669,7 +664,6 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             else                       applyUnlit(udb, p);
             if (samplersMoved) bindTrackedTextures(it->second);
             syncCullTwins(it->second);
-            if (ownCullMoved) repointCullWearers(id);
             return true;   // an unlit material is never refractive
         }
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
@@ -695,7 +689,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         //
         // TODAY THAT CANNOT HAPPEN: the shadow-shape guard above already calls
         // noteShadowShapeChanged for every edit that can reach setAlphaTest
-        // (alphaMode, alphaCutoff, twoSided, the cutout inputs), and that ends
+        // (alphaMode, alphaCutoff, the cutout inputs), and that ends
         // in noteShadowScanInput. This line states the same invariant WHERE THE
         // STATE CHANGES instead of inferring it from a parameter list that has
         // to be kept in step with applyPbr: "did the caster shape change" and
@@ -715,7 +709,6 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         it->second.refractive = p.alphaMode == PbrAlphaMode::Refractive;
         if (wasRefractive != it->second.refractive) refileItems(id, it->second);
         syncCullTwins(it->second);
-        if (ownCullMoved) repointCullWearers(id);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -2301,7 +2294,7 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
 
 Ogre::HlmsDatablock *OgreScene::wornDatablock(const Node &n, MaterialRec &rec) {
     if (n.faceCull == FaceCull::Material || !cullTwinnable(rec) ||
-        n.faceCull == ownCullOf(rec.params))
+        n.faceCull == resolveCull(FaceCull::Material))
         return hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName));
     return cullTwinOf(rec, n.faceCull);
 }
@@ -2432,26 +2425,6 @@ void OgreScene::sweepCullTwins() {
         mTwinCandidates.swap(keep);
         mCullTwinSweep = !mTwinCandidates.empty();
     } JAH_CATCH(mError, );
-}
-
-void OgreScene::repointCullWearers(MaterialId id) {
-    auto mit = mMaterials.find(id);
-    if (mit == mMaterials.end()) return;
-    for (auto &kv : mNodes) {
-        Node &n = kv.second;
-        if (n.materialRef != id || !n.item) continue;
-        if (cullTwinnable(mit->second) && n.faceCull != FaceCull::Material) {
-            Ogre::HlmsDatablock *db = wornDatablock(n, mit->second);
-            if (db && n.item->getSubItem(0)->getDatablock() != db) {
-                wearDatablock(n.item, db);
-                markShadowShapeDirty(n);
-                markGpuSlotDirty(n);
-            }
-        }
-        // ...AND A MIRROR WEARING IT re-derives its two-sided refusal (CULL-TWIN-DEBTS-1:
-        // a reflector whose material turned two-sided after it armed stayed armed).
-        rederiveReflector(kv.first, n);
-    }
 }
 
 void OgreScene::setNodeFaceCull(NodeId id, FaceCull cull) {
