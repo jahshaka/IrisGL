@@ -14,8 +14,9 @@
 //
 // WHAT IT IS NOT: the march. Every cone is walked by jahConeMarch
 // (jah_voxel_march.glsl, the piece JahVoxelMarch) and every escape reads the
-// one environment (jahEnvCone, jah_environment.glsl, the piece JahEnvironment);
-// both pieces are inserted BEFORE this one.
+// one environment (jah_environment.glsl, the piece JahEnvironment: the diffuse
+// set its SH irradiance, the fine sky set its cone lookup); both pieces are
+// inserted BEFORE this one.
 //
 // HOW A CALLER BINDS IT — the march's macros and the environment's, and:
 //
@@ -148,8 +149,21 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 /// THE TWO CONE SETS: six cones (one on the normal weighted 0.25, five at 60
 /// degrees weighted 0.15, tan of the half angle 0.577 = 30 degrees) or four
 /// (at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees). The engine leaves
-/// HlmsPbs at four. The weights carry the cosine; each cone's escape reads its
-/// solid angle uniformly (the environment's cone lookup does the same).
+/// HlmsPbs at four. The weights carry the cosine.
+///
+/// THE ESCAPE READS THE DIFFUSE ENVIRONMENT AT THE SET'S OWN BAND WEIGHTS
+/// (CARD-VIEW-BIAS-1). What the escapes estimate is the cosine integral of the sky
+/// over the share the voxels did not stop - and the engine's statement of that
+/// integral is the nine-band SH irradiance (jahEnvIrradiance: the GI-off pixel's
+/// diffuse, the card's environment half on an open floor). So each cone reads the
+/// SH in its own direction with the band weights that make the SET'S open-sky sum
+/// that irradiance EXACTLY: a ring of N >= 3 equally spaced directions at polar
+/// angle t about the normal averages a band-l harmonic to P_l( cos t ) times its
+/// value on the normal (the addition theorem; the azimuthal orders 1..2 cancel
+/// over the ring), so band l takes 1 / P_l( cos t ) - for the four-cone set at
+/// 45 degrees sqrt( 2 ) and 4. The cone lookup's radiance de-convolution (3/2, 4)
+/// read band 1 at 3/2 cos 45 = 1.061 of the irradiance: an open floor under a
+/// hemisphere sky read high (gi.card_view's quadrature term, 1.05 %).
 void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 					  out vec3 light, out vec3 envD )
 {
@@ -174,6 +188,9 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 	const float coneAngleTan = 0.98269;
 	const uint coneFlags = 0u;
 #endif
+	// the set's band weights: 1 / P_l( cos 45 ) (the comment above)
+	const float kBand1 = 1.41421356;
+	const float kBand2 = 4.0;
 	light = vec3( 0.0, 0.0, 0.0 );
 	envD = vec3( 0.0, 0.0, 0.0 );
 	for( int i = 0; i < kCones; ++i )
@@ -184,7 +201,7 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 		JahConeResult result = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), coneAngleTan, coneOrigin, coneFlags );
 		light += coneWeights[i] * result.colour;
 		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.alpha / 0.95 ) ) *
-				jahEnvCone( JAH_CONES_TO_WORLD( d ), coneAngleTan );
+				max( jahEnvShEval( JAH_CONES_TO_WORLD( d ), kBand1, kBand2 ), vec3( 0.0 ) );
 	}
 }
 
