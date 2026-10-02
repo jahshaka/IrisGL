@@ -4457,7 +4457,7 @@ bool OgreScene::rebuildVct() {
 
 std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
     std::vector<GiParams::GiCascadeDesc> table;
-    const int wanted = std::min(std::max(mGi.cascadeCount, 0), 8);
+    const int wanted = std::min(std::max(mGi.cascadeCount, 0), kGiTierMaxCascades);
     for (int i = 0; i < wanted; ++i) {
         const GiParams::GiCascadeDesc &d = mGi.cascadeSet[i];
         // A half-specified row is not a request the engine can honour halfway:

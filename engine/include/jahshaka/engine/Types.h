@@ -2370,6 +2370,13 @@ enum class RayTracingMode { Auto, Off, On };
 enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog, Mobility,
                            Camera };
 
+/// THE MOST CASCADES ANY CHAIN BUILDS — a tier's (giQualityFacts' longest
+/// chain) and a scripted one (GiParams::cascadeSet) alike (CASCADE-CAP-1). The
+/// PBS pass-texture budget is sized on it (OgreFog.cpp, PhotonPassBinding): a
+/// longer chain would claim more set-0 slots than the 64-slot table holds (a
+/// fifth anisotropic cascade alone overflows it). world.gi refuses above it.
+constexpr int kGiTierMaxCascades = 4;
+
 /// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
 struct GiParams {
     GiMode    mode    = GiMode::Off;
@@ -2542,14 +2549,14 @@ struct GiParams {
     /// (THE VOXELS ARE ALWAYS THE CAMERA-CENTRED CHAIN. The single scene-fitted
     /// volume and its switch `cascades` are deleted — D4-PHOTON-TIERS, the
     /// owner's law: no fixed GI volume, no "room" in any lighting definition.)
-    /// How many cascades to build, 1..8. 0 means "the table below decides", and
+    /// How many cascades to build, 1..kGiTierMaxCascades. 0 means "the table below decides", and
     /// when the table is empty too, the engine's own tier table does.
     int       cascadeCount = 0;
     /// The cascade table. Entries [0, cascadeCount) are used; a zero
     /// `resolution` or `halfSize` in a used entry falls back to the tier table.
     /// The engine's default is the Ogre sample's set (5 m@128, 10 m@128,
     /// 15 m@64, 60 m@64), which PHOTON_SPEC §5 measured the cadence of.
-    GiCascadeDesc cascadeSet[8];
+    GiCascadeDesc cascadeSet[kGiTierMaxCascades];
     /// THE PER-CASCADE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1), audit B7).
     ///
     /// The raster voxeliser's price is the GEOMETRY INSIDE THE REGION and
@@ -2736,7 +2743,7 @@ struct GiParams {
     /// The cascade table, compared only over the entries in USE — a table
     /// beyond `cascadeCount` is not part of the configuration.
     bool cascadeSetEqual(const GiParams &o) const {
-        for (int i = 0; i < cascadeCount && i < 8; ++i)
+        for (int i = 0; i < cascadeCount && i < kGiTierMaxCascades; ++i)
             if (!(cascadeSet[i] == o.cascadeSet[i])) return false;
         return true;
     }
@@ -2858,12 +2865,6 @@ struct GiGatherFacts {
     /// by this (4 = a quarter of the grid).
     unsigned adaptiveCapDivisor = 4u;
 };
-
-/// THE MOST CASCADES A SHIPPED TIER BUILDS (giQualityFacts' longest chain). The
-/// PBS pass-texture budget is sized on it (OgreFog.cpp, PhotonPassBinding): a
-/// SCRIPTED chain (GiParams::cascadeSet, up to 8) longer than this claims more
-/// set-0 slots than the fullest shipped pass.
-constexpr int kGiTierMaxCascades = 4;
 
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as

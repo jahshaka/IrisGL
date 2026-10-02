@@ -7146,7 +7146,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.cardResidencyRadius = qMax(0.0f, mSource->giCardRadius);
         gi.cascadeCount = 0;
         for (const iris::Vec3 &row : mSource->giCascadeSet) {
-            if (gi.cascadeCount >= 8) break;
+            if (gi.cascadeCount >= jahshaka::engine::kGiTierMaxCascades) break;
             if (row.x() <= 0.0f || row.y() <= 0.0f) { gi.cascadeCount = 0; break; }
             gi.cascadeSet[gi.cascadeCount].halfSize   = row.x();
             gi.cascadeSet[gi.cascadeCount].resolution = int(row.y());
