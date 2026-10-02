@@ -782,6 +782,14 @@ void ShaderCache::load(Ogre::Root *root) {
 }
 
 // ---------------------------------------------------------------------------
+std::atomic<unsigned>  ShaderCache::sEnginePipelines { 0 };
+std::atomic<long long> ShaderCache::sEnginePipelineUs { 0 };
+
+void ShaderCache::noteEnginePipeline(double ms) {
+    sEnginePipelines.fetch_add(1);
+    sEnginePipelineUs.fetch_add(static_cast<long long>(ms * 1000.0));
+}
+
 bool ShaderCache::dirty(Ogre::Root *root) const {
     if (!mEnabled || !mWriter || !root) return false;
     // Nothing has compiled since the last successful write. Ogre's own dirty
@@ -789,9 +797,14 @@ bool ShaderCache::dirty(Ogre::Root *root) const {
     // clean cache but never clears the flag), so without this the clean-quit
     // path would serialize and rewrite every layer twice — once from
     // EngineHost::shutdown and again from ~OgreEngine.
+    // An engine-built compute pipeline since the last save is dirt of its own
+    // (PIPELINE-CACHE-1 fix round): no Hlms flag sees it, and a warm-Hlms run
+    // that first builds one (a cut-out mask, a velocity job) compiles nothing.
+    const bool newEnginePipelines = sEnginePipelines.load() != mSavedAtEnginePipelines.load();
     if (mCounter && mSavedAtCompileCount == mCounter->compiled.load() + mCounter->fromCache.load()
-        && mLastSavedUnixMs != 0)
+        && mLastSavedUnixMs != 0 && !newEnginePipelines)
         return false;
+    if (newEnginePipelines) return true;
     if (Ogre::GpuProgramManager::getSingletonPtr() &&
         Ogre::GpuProgramManager::getSingleton().isCacheDirty())
         return true;
@@ -949,6 +962,7 @@ bool ShaderCache::save(Ogre::Root *root) {
         mExpectedShaders = mCounter->compiled.load() + mCounter->fromCache.load();
         job->compileCount = mExpectedShaders;
     }
+    job->enginePipelines = sEnginePipelines.load();
     logLine("serialized " + std::to_string(job->names.size()) + " file(s) in " +
             std::to_string(int(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - serializeStart).count())) +
@@ -1008,6 +1022,7 @@ bool ShaderCache::runWrite(const PendingWrite &job) {
     }
     mLastSavedUnixMs.store(nowUnixMs());
     mSavedAtCompileCount.store(job.compileCount);
+    mSavedAtEnginePipelines.store(job.enginePipelines);
 
     // Size cap: wipe the generation rather than evict (§4.3 rule 6).
     unsigned n = 0;
@@ -1100,6 +1115,8 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.loadedThisRun   = mCounter ? mCounter->fromCache.load() : 0u;
     s.expectedShaders = mExpectedShaders;
     s.lastSavedUnixMs = mLastSavedUnixMs;
+    s.enginePipelinesThisRun = sEnginePipelines.load();
+    s.enginePipelineMs = double(sEnginePipelineUs.load()) / 1000.0;
 
     // THE SHADER HASH'S TWO INDEX SPACES, LIVE (HLMSBITS-1). Ogre packs every
     // shader lookup as [type:3][renderable:16][pass:13] and grows both caches

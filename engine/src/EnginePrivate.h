@@ -2486,6 +2486,12 @@ public:
     bool dirty(Ogre::Root *root) const;
     /// Deletes every file we wrote. The running process is unaffected.
     bool clear();
+    /// A compute pipeline the ENGINE built outside Ogre's Hlms (the ray tier's,
+    /// through Ogre's VkPipelineCache), counted as dirt: a pipeline built lazily
+    /// after the last save (a first cut-out material, a first mover's velocity
+    /// job) reaches the disk even when no Hlms shader compiled that run. Any
+    /// thread; process-wide (one device, one VkPipelineCache).
+    static void noteEnginePipeline(double ms);
 
     ShaderCacheStats stats(Ogre::Root *root) const;
     void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;
@@ -2517,6 +2523,7 @@ private:
         std::vector<std::string>       names;
         std::vector<std::vector<char>> blobs;
         unsigned                       compileCount = 0;
+        unsigned                       enginePipelines = 0;   ///< sEnginePipelines when serialized
     };
 
     /// THE WRITER THREAD's body: publish every blob atomically, carry the
@@ -2572,6 +2579,9 @@ private:
     /// writer thread, so a write that FAILED leaves the cache dirty and the
     /// next save tries again.
     std::atomic<unsigned> mSavedAtCompileCount { 0 };
+    std::atomic<unsigned> mSavedAtEnginePipelines { 0 };
+    static std::atomic<unsigned>  sEnginePipelines;   ///< noteEnginePipeline's count
+    static std::atomic<long long> sEnginePipelineUs;  ///< ...and their build time
     /// Set by clear(): the next save writes even though nothing new compiled.
     bool        mForceSave = false;
     /// save() is running. Guards the re-entrant call a nested event loop can

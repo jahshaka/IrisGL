@@ -5888,6 +5888,11 @@ struct ShaderCacheStats {
     unsigned  expectedShaders = 0;
     /// Wall-clock of the last successful save, ms since the Unix epoch; 0 = never.
     long long lastSavedUnixMs = 0;
+    /// Compute pipelines the engine built outside the Hlms this PROCESS (the ray
+    /// tier's, through the device's pipeline cache), and their build time — a warm
+    /// pipeline layer makes the second near zero.
+    unsigned enginePipelinesThisRun = 0;
+    double   enginePipelineMs = 0.0;
 
     // ---- the two caches the shader HASH addresses (HLMSBITS-1) -------------
     /// THE NUMBER THAT CRASHED THE EDITOR ON 2026-09-14, now readable while the

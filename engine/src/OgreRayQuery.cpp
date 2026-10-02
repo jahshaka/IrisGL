@@ -1732,6 +1732,7 @@ VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     ++mPipelinesBuilt;
     mPipelineBuildMs += ms;
+    if (r == VK_SUCCESS) ShaderCache::noteEnginePipeline(ms);   // dirt for the pipeline layer
     Ogre::LogManager::getSingleton().logMessage(
         "rayquery: compute pipelines " + std::to_string(mPipelinesBuilt) + " built, this one " +
         std::to_string(ms) + " ms, " + std::to_string(mPipelineBuildMs) + " ms in all" +
