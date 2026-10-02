@@ -7907,12 +7907,6 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     hitStandIns(out);
     HitView &hv = mHits[key];
     hv.live = false;
-    // `JAHSHAKA_HIT_LIST_OFF` — a MEASUREMENT switch, not a mode (read once): the
-    // traces bind no list, so a hit no cache shades has no sample this frame (the
-    // reflection keeps its history; the gather's ray reads zero) — the picture
-    // before PHOTON-HIT-SHADE-1, for attributing a moved hash to the records.
-    static const bool sListOff = std::getenv("JAHSHAKA_HIT_LIST_OFF") != nullptr;
-    if (sListOff) return false;
     OgreScene *scene = view ? view->ogreScene() : nullptr;
     Ogre::Camera *cam = view ? view->camera() : nullptr;
     if (!scene || !cam || !pass || !out.ids) return false;
