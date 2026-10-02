@@ -541,6 +541,8 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 /// sizes is still a blur, and a mirror is the one surface that must not be
 /// blurred — LOD 0 is still two cells, so only hit lighting sharpens it).
 const float kMirrorAlpha = 0.01;
+/// A MOVING REFLECTOR'S MEAN REMEMBERS EIGHT FRAMES (REFLECT-CONVERGE-1; main()).
+const float kMovingReflectorFloor = 0.125;
 
 /// THIS TRACE'S SAMPLE FOOTPRINT at a hit `t` away along a lobe of GGX alpha
 /// `lobeAlpha` — the currency both reads select on. Not the WHOLE lobe: the
@@ -1172,6 +1174,23 @@ void main()
 	// 1: a mirror in a two-frame view would show 2.8 % probe, and a
 	// perceptual-0.08 surface 30 % of it on its first frame.
 	blend = max( blend, 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ) );
+	// A MOVING REFLECTOR'S MEAN IS AN EIGHT-FRAME MEAN (REFLECT-CONVERGE-1, measured on
+	// gi.reflect_mover's glossy sphere). The floor's thirty-two frames are bought for
+	// the noise of one ray on a STILL surface; a surface that moves sees the world from
+	// a new place every frame, and what its lobe integrates changes with it — after the
+	// sky pass brightened the floor the sphere reflects, its moving reflection trailed
+	// the settled one by 4.7 codes at the first checkpoint. The slide rule below (the
+	// step against the lobe's width, at the MEAN's ray length) never fired there: a
+	// glossy lobe's mean length is dominated by its far rays (sky, the far floor) while
+	// its near tail moves, so the parallax it measures is the far content's. Tried and
+	// refused, measured: a variance-driven floor (the mean's own second moment: a glossy
+	// lobe's per-ray sigma is 20-30 % of its mean, so no arrival weight above the floor
+	// follows from it) and a fast/slow history clamp (an eight-frame luminance mean,
+	// 2.5 of its sigmas: the 4 % lag sits inside one texel's noise) — both left the
+	// checkpoint at 4.6. A PARKED mover is not moving (motion vectors), so a still
+	// picture keeps its thirty-two frames and its grain; a mirror is at 1 already.
+	if( ownMoving )
+		blend = max( blend, kMovingReflectorFloor );
 	// THE SURFACE IS THE SAME; WHAT IT REFLECTS IS NOT (PAN-SMEAR-1). The
 	// reprojection above validates the SURFACE — same floor, same distance — and
 	// under a camera that TRANSLATES that is not enough for any lobe, only
