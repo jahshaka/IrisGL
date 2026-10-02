@@ -119,22 +119,75 @@ float jahEnvRoughnessForCone( float tanHalfAngle )
 	return mix( kLut[i], kLut[i + 1], clamp( x - float( i ), 0.0, 1.0 ) );
 }
 
-/// CONE-ENV-EDGE-1: the aperture above which a cone is read as seven cells (the
-/// diffuse sets' 30 and 44.5 degree cones; the sky pass's 20.4 degree fine set, the
-/// field's probe rays and every specular lobe stay one fetch), the
-/// centre cell's half-angle as a fraction of the cone's (a seventh of its solid
-/// angle: 1 / sqrt(7) in the small-angle limit) and the six outer cells' centroid
-/// angle (the annulus from that fraction to the rim, its centroid at
-/// 2/3 (1 - f^3) / (1 - f^2) of the half-angle).
-const float kJahEnvConeTapTan = 0.45;
-const float kJahEnvConeCell = 0.378;
-const float kJahEnvConeRing = 0.736;
+/// CONE-ENV-EDGE-1: A CONE IS READ AS EQUAL CELLS, AND THE CELL COUNT GROWS WITH
+/// THE APERTURE. One fetch of the GGX chain weighs a step inside the cone (the
+/// physical sky's hard horizon over the dark planet, the glow round a low sun)
+/// by its lobe's peak, not by the cone's area, and the wider the cone the worse.
+/// The cone is cut into rings of equal-solid-angle cells — the centre cap, then
+/// 6, then 12 round it (7, 19 cells) — each read as a cone of its own cell's
+/// size. MEASURED (gi.env_cone, 26 directions, 5-degree sun, against a
+/// 1024-direction integral): one fetch 4.1 % at tan 0.15, 6.8 % at tan 0.372,
+/// 19.6 % at tan 0.983; 7 cells 0.7 %, 2.0 % and 9.7 %; 19 cells 0.3 %, 1.0 % and
+/// 3.4 % (35-degree sun, tan 0.983: one fetch 5.9 %, 7 cells 2.2 %, 19 cells
+/// 1.0 %); 37 cells buy nothing more at tan 0.983 (3.5 %).
+///
+/// THE COUNT NEVER STEPS. A caller's aperture varies continuously (a reflection's
+/// footprint lobeAlpha / sqrt(N), a gather ray's sqrt(2 / rays)), so a change of
+/// count must be crossed where the two reads agree. One fetch and 7 cells agree
+/// only as the cone closes — at a 5-degree sun they differ by six times the sky's
+/// mean luminance toward the sun's glow at tan 0.35, and a smoothstep over
+/// 0.20-0.35 still stepped the read 23 % of that mean per 0.0025 of tan — while
+/// 7 cells shrink to the one fetch at tan 0 (every cell on the axis at mip 0).
+/// So EVERY open cone reads at least 7 cells (only a mirror's, tan 0, is the one
+/// fetch the cells collapse to — even a switch at tan 0.01 stepped the read 3.8 %
+/// of the sky's mean toward a 5-degree sun's glow), and 7 cells hand over to 19
+/// through a smoothstep over [kJahEnvCells19Lo, kJahEnvCells19Hi], where the two
+/// agree to a few per cent and both are read (gi.env_cone sweeps tan 0 to 1.1 and
+/// asserts the read never steps).
+const float kJahEnvCells19Lo = 0.50;
+const float kJahEnvCells19Hi = 0.65;
 
 /// The mip of the prefiltered chain that holds the cone's lobe.
 float jahEnvLodForCone( float tanHalfAngle )
 {
 	const float r = jahEnvRoughnessForCone( tanHalfAngle );
 	return max( JAH_ENV_MIPS - 1.0, 0.0 ) * r * ( 2.0 - r );
+}
+
+/// The cone about CUBE-FRAME direction `d` whose cap is `omega` = 1 - cos(half-angle)
+/// (2 pi omega steradians) as 1 + 3 rings (rings + 1) cells of equal solid angle:
+/// the centre cap and `rings` rings of 6 k cells. A ring's cells sit at the ring's
+/// median solid angle, the odd rings turned half a cell, and every cell is read
+/// through the chain as the cap of its own solid angle. Exact solid angles, no
+/// small-angle constants; every angle from its cap through the half-angle form
+/// (1 - cos a = 2 sin^2(a/2)), which keeps a narrow cone exact in float.
+vec3 jahEnvConeCells( vec3 d, float omega, int rings )
+{
+	const float n = 1.0 + 3.0 * float( rings * ( rings + 1 ) );
+	const float cellHalf = 2.0 * asin( sqrt( 0.5 * omega / n ) );
+	const float lod = jahEnvLodForCone( tan( cellHalf ) );
+	const vec3 tx = normalize( abs( d.y ) < 0.99 ? cross( d, vec3( 0.0, 1.0, 0.0 ) )
+											: cross( d, vec3( 1.0, 0.0, 0.0 ) ) );
+	const vec3 ty = cross( d, tx );
+	vec3 sum = max( JAH_ENV_SAMPLE( d, lod ), vec3( 0.0 ) );
+	for( int k = 1; k <= rings; ++k )
+	{
+		const float inner = 1.0 + 3.0 * float( ( k - 1 ) * k );
+		const float outer = 1.0 + 3.0 * float( k * ( k + 1 ) );
+		const float ringAngle = 2.0 * asin( sqrt( 0.25 * ( inner + outer ) / n * omega ) );
+		const float c = cos( ringAngle );
+		const float sn = sin( ringAngle );
+		const int cells = 6 * k;
+		const float dphi = 6.2831853 / float( cells );
+		const float turn = ( k & 1 ) == 1 ? 0.5 : 0.0;
+		for( int j = 0; j < cells; ++j )
+		{
+			const float phi = ( float( j ) + turn ) * dphi;
+			sum += max( JAH_ENV_SAMPLE( d * c + ( tx * cos( phi ) + ty * sin( phi ) ) * sn, lod ),
+						vec3( 0.0 ) );
+		}
+	}
+	return sum / n;
 }
 
 /// What a CONE of half-angle atan( tanHalfAngle ) about `dirWorld` sees of the
@@ -151,33 +204,17 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 	if( JAH_ENV_CUBE_ON )
 	{
 		const vec3 d = vec3( dirWorld.x, dirWorld.y, -dirWorld.z );
-		if( tanHalfAngle > kJahEnvConeTapTan )
-		{
-			// A WIDE CONE IS SEVEN NARROW ONES (CONE-ENV-EDGE-1): the cone cut into
-			// seven equal solid angles, a centre cap of a seventh of the cone's and six
-			// cells of the annulus round it, each read through the chain as a cone of
-			// that cell's own size — a lobe that narrow keeps a step (the physical
-			// sky's horizon over the dark planet, the glow round a low sun) in the
-			// cells it falls in, where one wide GGX lobe weighed it by the lobe's
-			// peak instead of by the cone's area.
-			const float theta = atan( tanHalfAngle );
-			const float lod = jahEnvLodForCone( tan( theta * kJahEnvConeCell ) );
-			const vec3 t = normalize( abs( d.y ) < 0.99 ? cross( d, vec3( 0.0, 1.0, 0.0 ) )
-														: cross( d, vec3( 1.0, 0.0, 0.0 ) ) );
-			const vec3 b = cross( d, t );
-			const float ring = theta * kJahEnvConeRing;
-			const float cr = cos( ring ), sr = sin( ring );
-			vec3 sum = max( JAH_ENV_SAMPLE( d, lod ), vec3( 0.0 ) );
-			for( int k = 0; k < 6; ++k )
-			{
-				const float phi = float( k ) * 1.0471976;
-				sum += max( JAH_ENV_SAMPLE( d * cr + ( t * cos( phi ) + b * sin( phi ) ) * sr, lod ),
-							vec3( 0.0 ) );
-			}
-			return sum * ( 1.0 / 7.0 ) * JAH_ENV_GAIN;
-		}
-		return max( JAH_ENV_SAMPLE( d, jahEnvLodForCone( tanHalfAngle ) ), vec3( 0.0 ) ) *
-			   JAH_ENV_GAIN;
+		const float t = max( tanHalfAngle, 0.0 );
+		if( t <= 0.0 )
+			return max( JAH_ENV_SAMPLE( d, jahEnvLodForCone( t ) ), vec3( 0.0 ) ) * JAH_ENV_GAIN;
+		// 1 - cos(atan t), cancellation-free.
+		const float root = sqrt( 1.0 + t * t );
+		const float omega = t * t / ( root * ( 1.0 + root ) );
+		const vec3 seven = jahEnvConeCells( d, omega, 1 );
+		if( t <= kJahEnvCells19Lo )
+			return seven * JAH_ENV_GAIN;
+		const float w = smoothstep( kJahEnvCells19Lo, kJahEnvCells19Hi, t );
+		return mix( seven, jahEnvConeCells( d, omega, 2 ), w ) * JAH_ENV_GAIN;
 	}
 	return max( jahEnvShEval( dirWorld, 1.5, 4.0 ), vec3( 0.0 ) );
 }

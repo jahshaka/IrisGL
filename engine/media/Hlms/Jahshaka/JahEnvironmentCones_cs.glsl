@@ -3,10 +3,12 @@
 //
 // `lookup` is jahEnvCone exactly as every consumer runs it (the piece
 // JahEnvironment, wrapped from src/rayquery/include/jah_environment.glsl) with
-// a unit gain; `reference` is the mean of the cube's FINEST mip over 64
+// a unit gain; `reference` is the mean of the cube's FINEST mip over 1024
 // directions spread uniformly over the cone's solid angle — stratified in
-// cos(theta) and turned by the golden angle in phi, so the 64 samples tile the
-// cap evenly. Both read the same trilinear sampler.
+// cos(theta) and turned by the golden angle in phi, so the samples tile the
+// cap evenly. Both read the same trilinear sampler. (1024, not 64: against the
+// physical sky's hard horizon 64 directions put 1.7 % of error of their own into
+// the four-cone aperture's mean at a 5-degree sun — CONE-ENV-EDGE-1.)
 @insertpiece( SetCrossPlatformSettings )
 
 vulkan_layout( ogre_t0 ) uniform textureCube envCube;
@@ -56,14 +58,14 @@ void main()
 	const float cosMax = 1.0 / sqrt( 1.0 + t * t );
 	const float golden = 2.39996323;
 	vec3 sum = vec3( 0.0 );
-	for( int k = 0; k < 64; ++k )
+	for( int k = 0; k < 1024; ++k )
 	{
-		const float c = 1.0 - ( float( k ) + 0.5 ) / 64.0 * ( 1.0 - cosMax );
+		const float c = 1.0 - ( float( k ) + 0.5 ) / 1024.0 * ( 1.0 - cosMax );
 		const float sn = sqrt( max( 1.0 - c * c, 0.0 ) );
 		const float phi = golden * float( k );
 		const vec3 d = axis * c + ( tx * cos( phi ) + ty * sin( phi ) ) * sn;
 		sum += textureLod( samplerCube( envCube, envSmp ), vec3( d.x, d.y, -d.z ), 0.0 ).xyz;
 	}
 	answers[2 * q + 0] = vec4( lookup, jahEnvLodForCone( t ) );
-	answers[2 * q + 1] = vec4( sum / 64.0, 0.0 );
+	answers[2 * q + 1] = vec4( sum / 1024.0, 0.0 );
 }
