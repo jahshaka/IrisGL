@@ -1468,7 +1468,7 @@ namespace Ogre
         // sky, a HIT reads the surface - and the surface's radiance includes the sky that
         // lights it. It needs the bounce volumes (setAllowMultipleBounces) and an
         // environment that carries light; a store without either is unchanged.
-        const bool skyPass = getAllowMultipleBounces() && hasEnvironmentLight();
+        const bool skyPass = mStoreSkyLight && getAllowMultipleBounces() && hasEnvironmentLight();
         if( skyPass )
             runBounce( true );
 

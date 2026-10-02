@@ -523,7 +523,7 @@ public:
     // `world.giStatus()` reports what the renderer built.
     GiMode giMode;
     GiQuality giQuality;
-    int giNumBounces;          // 1..4
+    int giNumBounces;          // 0..4 (0 = the direct store alone, BOUNCES-ZERO-1)
     /// PHOTON — THE VOXELS ARE ALWAYS CAMERA-CENTRED CASCADES (PHOTON_SPEC P0;
     /// the single scene-fitted volume and its `giCascades` switch are deleted,
     /// D4-PHOTON-TIERS). `giCascadeSet` optionally pins the table, one entry per

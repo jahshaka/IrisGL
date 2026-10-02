@@ -2400,7 +2400,9 @@ struct GiParams {
     /// over `kProbeGridFitMax` (OgreGi.cpp, 64 m). Negative (the default) is the
     /// engine's own; 0 disables the ceiling; anything else replaces it.
     float     testProbeGridFitMax = -1.0f;
-    /// Total light bounces, 1..4 (1 = a single indirect bounce).
+    /// Total light bounces, 0..4 (1 = a single indirect bounce: every surface re-emits the
+    /// lamps' and the sky's light once). 0 = THE DIRECT STORE ALONE (BOUNCES-ZERO-1): the
+    /// voxels hold the lamps' direct light and nothing a surface re-emits of the sky.
     int       numBounces = 1;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
     /// bounds (the parallax-corrected cubemap grid). Clamped to 1..8 per axis.
