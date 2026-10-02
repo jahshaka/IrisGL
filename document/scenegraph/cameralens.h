@@ -266,34 +266,43 @@ float shiftFromOgreFrustumOffset(float frustumOffset, float halfExtent, float ne
 constexpr float kGreyCardReflectance = 0.18f;
 constexpr float kGreyCardDisplay     = 0.18f;
 
-/// THE FILM CURVE, as the pin's media actually ships it
-/// (`Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl` —
-/// UNPATCHED by us; 0034 and 0042 touch the METER, not the curve):
-///
-///     out = ( Hable(x) / Hable(W) - 0.5 ) * 1.25 + 0.5 + 0.11
-///     Hable(x) = (x(Ax + CB) + DE) / (x(Ax + B) + DF) - E/F
-///
-/// with Ogre's SECOND constant set (the commented-out first one is Hable's
-/// original). The `*1.25 + 0.11` tail is a hand grade with real contrast and
-/// lift in it, so the curve does NOT map 0.18 in to 0.18 out — which is exactly
-/// why an exposure derived as "put the grey card at the tonemapper's 0.18
-/// input" comes out 0.6 stops dark. The derivation below inverts the WHOLE
-/// curve instead. CHANGE THE MEDIA AND THIS NUMBER MOVES: the suite recomputes
-/// it by hand from these constants, so a curve edit fails loudly here.
-constexpr float kFilmA = 0.22f, kFilmB = 0.30f, kFilmC = 0.10f;
-constexpr float kFilmD = 0.20f, kFilmE = 0.01f, kFilmF = 0.30f;
-constexpr float kFilmW = 11.2f;
-constexpr float kFilmContrast = 1.25f, kFilmPivot = 0.5f, kFilmLift = 0.61f;
+/// THE FILM CURVE (IMAGE-1): Unreal Engine's filmic tonemapper, the ACES-based
+/// curve of Unreal 4.15 (TonemapCommon.ush, FilmToneMap), as the fork's
+/// `Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl`
+/// runs it: five parameters, Unreal's defaults below. For a NEUTRAL input (a
+/// grey) the colour terms of the shader — the RRT's glow and red modifier, the
+/// pre and post desaturation and the AP0/AP1 round trip — are all the identity,
+/// so this scalar is the curve a grey card sees. The tonemap suite holds the
+/// GPU to it at nine exposures.
+struct FilmParams {
+    float slope = 0.88f;
+    float toe = 0.55f;
+    float shoulder = 0.26f;
+    float blackClip = 0.0f;
+    float whiteClip = 0.04f;
+};
 
-/// THE TONEMAPPER INPUT THAT DISPLAYS AS AN 18 % GREY CARD — the curve above,
-/// inverted. `Hable` is a ratio of two quadratics, so the inverse is a
-/// quadratic root and not an iteration. ~0.2744 for the shipped constants.
+/// The curve: linear film input (post-exposure, scene-referred) to linear
+/// display output, before the sRGB encode. The curve is BUILT so that
+/// filmCurve(0.18) == 0.18 for any parameters (Unreal solves the toe through
+/// that point), so an 18 % card exposed to 0.18 displays as code 118.
+float filmCurve(float x, const FilmParams &params = FilmParams());
+
+/// THE FILM ON A COLOUR — the shader's jahFilmToneMap, the ONE C++ transcription:
+/// linear sRGB in (post-exposure), linear sRGB out (before the encode), through
+/// ACEScg, the RRT's glow and red modifier, the pre/post desaturation and the
+/// curve per channel. `filmCurve` is this on a grey (the colour terms are the
+/// identity there, the matrices' rows normalised so white maps to white).
+void filmRGB(const double in[3], double out[3], const FilmParams &params = FilmParams());
+
+/// THE TONEMAPPER INPUT THAT DISPLAYS AS AN 18 % GREY CARD — the curve
+/// inverted at `kGreyCardDisplay`. 0.18 by the curve's construction; computed
+/// (a bisection on the log axis, cached) rather than written so that the
+/// statement is "the inverse of the curve", not a number that happens to agree.
 ///
-/// (The window's target is `PFG_RGBA8_UNORM_SRGB` and the render window is
-/// created with `gamma=true`, so the shader's LINEAR output is sRGB-encoded by
-/// the hardware: "the display emits 18 %" is the shader value 0.18. An
-/// OFFSCREEN plain readback is NOT encoded, which is why a screenshot PNG of
-/// this looks darker than the viewport — a separate, recorded item.)
+/// The window and every offscreen target are plain UNORM and the shader
+/// applies the exact sRGB encode itself (SRGB-ENCODE-1), so "the display emits
+/// 18 %" is the curve's output 0.18, code 118 on screen and in a screenshot.
 float greyCardFilmInput();
 
 /// THE KEY IRRADIANCE of a scene's lights, in the renderer's own units.
@@ -335,16 +344,23 @@ float exposureForKeyIrradiance(float keyIrradianceValue);
 /// sun at intensity 1 and 50 degrees of elevation, the Sky Light at 1 over the
 /// REALISTIC sky (haze 10, brightness 1), on the upward-facing floor:
 ///
-///     E_key = 1.987 (the sun) + 0.406 (the Sky Light)   = 2.393
-///     x*    = 0.274352                         (the film curve, inverted)
-///     E     = 2 + ln(0.274352 * PI / 2.393)   = 0.97882
+///     E_key = 1.653 (the sun) + 0.383 (the Sky Light)   = 2.036
+///     x*    = 0.18                     (Unreal's film curve, inverted at 0.18)
+///     E     = 2 + ln(0.18 * PI / 2.036)   = 0.71894
 ///
 /// (both terms MEASURED through the renderer on an 18 % card — cameralens.cpp
-/// defaultKeyIrradiance has the numbers.) The grade it replaced was derived for
-/// the retired flat 96-grey sky with the sun facing the card (E_key 3.509,
-/// E 0.59604): 0.55 stops dark on the physical sky, which the Auto meter
-/// confirmed on the same scene (+0.53 stops).
+/// defaultKeyIrradiance has the numbers; IMAGE-1 re-measured them.) So an
+/// 18 % card on a new scene's floor develops to the film's 0.18: code 118.
 float defaultExposureChain();
+/// THE NEW LAMP'S INTENSITY (IMAGE-1): a point or spot light added to a scene
+/// puts an 18 % card 3 m away, facing it, on the film's grey (code 118) at the
+/// default exposure, by itself. MEASURED through the renderer
+/// (spikes/image-1/scripts/lamp.js): a lamp of intensity 1, 3 m above an 18 %
+/// card with the sun and the sky off, gives the card 0.2523 of the default key
+/// irradiance's units (the renderer's own response at normal incidence), so
+/// 2.036 / 0.2523 = 8.07 -> 8. (The units: a lamp of intensity I lights a
+/// surface 1 m away, facing it, exactly as a sun of intensity I does.)
+constexpr float kDefaultLampIntensity = 8.0f;
 /// The chain exposure zero stops corresponds to — `defaultExposureChain()`.
 float exposureAnchorChain();
 
@@ -504,6 +520,49 @@ struct LensPreset {
 /// The tables and their sizes. Stable order — the verbs report them as-is.
 const FilmbackPreset *filmbackPresets(int &count);
 const LensPreset     *lensPresets(int &count);
+
+// ---- THE IMAGE BLOCK (IMAGE-1) ---------------------------------------------
+//
+// How a camera develops the picture after the exposure: contrast, saturation,
+// shadows/highlights, white balance, vignette and the film curve. The WORLD
+// holds the defaults (Scene::image — the editor's view and every camera that
+// does not say otherwise); a camera overrides any field, tri-state, through
+// its post-override map under the same id. ONE TABLE, read by the scene's
+// constructor, the reader and the writer, the camera's override keys, the
+// world.postFx / camera.postFx verbs and both panels, so an id, a default or
+// a range can never mean two things. The engine's twin is
+// jahshaka::engine::ImageGrade (Types.h), which carries the meaning of each.
+enum ImageParam {
+    ImageContrast = 0,
+    ImageSaturation,
+    ImageShadows,
+    ImageHighlights,
+    ImageWhiteTemperature,
+    ImageWhiteTint,
+    ImageVignette,
+    ImageFilmSlope,
+    ImageFilmToe,
+    ImageFilmShoulder,
+    ImageFilmBlackClip,
+    ImageFilmWhiteClip,
+    ImageParamCount
+};
+
+struct ImageParamDef {
+    const char *id = nullptr;       ///< the verb key, the file key, the override key
+    const char *label = nullptr;    ///< the panel's
+    float defaultValue = 0.0f;
+    float minValue = 0.0f, maxValue = 1.0f;
+    double perPixelStep = 0.01;
+    int decimals = 2;
+    bool advanced = false;          ///< the film's five: the "Film (advanced)" rows
+    const char *doc = nullptr;      ///< the row tooltip and the verb's documentation
+};
+
+/// The table, in panel order, indexed by ImageParam.
+const ImageParamDef *imageParams();
+/// The entry with this id, or null.
+const ImageParamDef *imageParam(const char *id);
 
 }   // namespace lens
 }   // namespace iris

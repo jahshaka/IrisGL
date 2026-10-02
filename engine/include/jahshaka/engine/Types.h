@@ -1837,7 +1837,19 @@ struct LightDesc {
     LightType type = LightType::Point;
     Colour    colour = Colour(1.0f, 1.0f, 1.0f);
     float     intensity = 1.0f;        // radiometric scale (Jahshaka's "intensity")
-    float     range = 10.0f;           // point/spot falloff distance
+    /// THE RANGE (point/spot): where the light's window reaches zero. The light
+    /// follows the inverse square law, I / d^2, windowed by
+    /// saturate(1 - (d/range)^4)^2 (Karis 2013) — the one falloff every consumer
+    /// shares (the fork's JahBrdf piece, `jahLightAttenuation`; the suites' closed
+    /// form is tests/support/lightfalloff.h). An intensity of
+    /// I at 1 m lights a facing surface exactly as a sun of intensity I does.
+    float     range = 10.0f;
+    /// THE SOURCE RADIUS, metres (point/spot; IMAGE-1): the size of the emitter.
+    /// Inside it the light cannot get brighter: the falloff is
+    /// 1 / max(d^2, sourceRadius^2). It changes the falloff only — Ogre's
+    /// shadow maps have no source size. Area lights ignore it: their source
+    /// is their rectangle.
+    float     sourceRadius = 0.1f;
     /// The spot cone's HALF angle, in degrees — the angle between the light's
     /// axis and the cone's edge, which is what the document has always stored
     /// and what the editor's cone wire is drawn from
@@ -1931,7 +1943,8 @@ struct LightDesc {
     /// the struct it had to track.)
     bool operator==(const LightDesc &o) const {
         return type == o.type && colour == o.colour && intensity == o.intensity &&
-               range == o.range && spotAngleDegrees == o.spotAngleDegrees &&
+               range == o.range && sourceRadius == o.sourceRadius &&
+               spotAngleDegrees == o.spotAngleDegrees &&
                spotSoftness == o.spotSoftness && spotFalloff == o.spotFalloff &&
                castShadows == o.castShadows &&
                rectWidth == o.rectWidth && rectHeight == o.rectHeight &&
@@ -3371,6 +3384,11 @@ struct GatherTuning {
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
     bool     jitterOff = false;
+    /// THE RAYS AT THEIR TEXELS' CENTRES (IMAGE-1): every ray of a probe leaves
+    /// through its octahedral texel's centre instead of a jittered point in it —
+    /// with jitterOff, a still view's estimate is then the same every frame, the
+    /// arm gi.gather_stable holds the packed history's own storage flicker on.
+    bool     rayJitterOff = false;
     /// THE FAR QUERY OFF (ATOM-FARBLAS-1): a ray that escapes its near length
     /// reads the sky directly instead of tracing the far copies (the coarse
     /// levels) out to the far plane -- the A/B that prices the far field.
@@ -5910,10 +5928,6 @@ enum class LookKind {
     Posterize,
     /// 3x3 unsharp mask. p[0] = amount.
     Sharpen,
-    /// The film grade (the unbuilt CAMERA_LENS_SPEC §6 P5, absorbed here):
-    /// p[0] = amount, p[1] = saturation, p[2] = contrast, p[3] = vignette,
-    /// p[4..6] = tint rgb.
-    FilmGrade,
     /// Not a look: the count, for range checks on the host side.
     Count
 };
@@ -5982,6 +5996,47 @@ constexpr float kCentreWeightedPedestal = 0.05f;
 constexpr float kSpotAreaFraction = 0.025f;
 }   // namespace meter
 
+/// THE IMAGE BLOCK (IMAGE-1): how a camera develops the picture after the
+/// exposure — the world's defaults, a camera's overrides layered over them by
+/// the host. All of it is UNIFORMS on the tonemap quad (HDR/FinalToneMapping):
+/// moving any field rebuilds nothing. Every default is the neutral picture.
+///
+///  * contrast / saturation: Unreal's colour correction, in ACEScg — saturation
+///    about the pixel's luminance, contrast as a power about the grey card.
+///  * shadows / highlights: GAINS IN STOPS on Unreal's two luminance masks
+///    (shadows below 0.09, highlights from 0.5 to 1 of post-exposure luminance).
+///    They are a lift and a gain, NOT the film curve's toe and shoulder (those
+///    are the film fields below).
+///  * whiteTemperature (K) / whiteTint: a Bradford chromatic adaptation from
+///    the white at that temperature and tint (Unreal's WhiteBalance) to the
+///    white at 6500 K and tint 0, so the default is exactly the identity.
+///  * vignette: 0..1 of the cos^4 lens falloff, the frame's corner at 45 degrees.
+///  * film*: Unreal's filmic tonemapper (ACES-based), its five parameters at
+///    Unreal's defaults. 0.18 always leaves the curve at 0.18.
+struct ImageGrade {
+    float contrast = 1.0f;
+    float saturation = 1.0f;
+    float shadows = 0.0f;
+    float highlights = 0.0f;
+    float whiteTemperature = 6500.0f;
+    float whiteTint = 0.0f;
+    float vignette = 0.0f;
+    float filmSlope = 0.88f;
+    float filmToe = 0.55f;
+    float filmShoulder = 0.26f;
+    float filmBlackClip = 0.0f;
+    float filmWhiteClip = 0.04f;
+
+    bool operator==(const ImageGrade &o) const {
+        return contrast == o.contrast && saturation == o.saturation && shadows == o.shadows &&
+               highlights == o.highlights && whiteTemperature == o.whiteTemperature &&
+               whiteTint == o.whiteTint && vignette == o.vignette && filmSlope == o.filmSlope &&
+               filmToe == o.filmToe && filmShoulder == o.filmShoulder &&
+               filmBlackClip == o.filmBlackClip && filmWhiteClip == o.filmWhiteClip;
+    }
+    bool operator!=(const ImageGrade &o) const { return !(*this == o); }
+};
+
 /// The post-processing chain for a View (POST_CHAIN_SPEC.md).
 ///
 /// Everything here is OFF by default, and every field is IGNORED on an offscreen
@@ -5997,8 +6052,8 @@ constexpr float kSpotAreaFraction = 0.025f;
 /// them. Documented rather than hidden: it is a property of the upstream
 /// implementation, not a choice.
 struct PostFxDesc {
-    /// Render the scene into a floating-point target and tonemap it (filmic,
-    /// Hable/Uncharted2). The prerequisite for bloom. The exposure may be
+    /// Render the scene into a floating-point target and tonemap it (Unreal's
+    /// filmic curve and the image block, `image` below). The prerequisite for bloom. The exposure may be
     /// MANUAL (`tonemapFixed`, the editor's default since EXPOSURE-1) or
     /// metered; this flag only says the chain exists.
     bool  hdr = false;
@@ -6356,9 +6411,13 @@ struct PostFxDesc {
     /// reflects the clipped one — readPixels of the two differ wherever the
     /// reflected radiance exceeds 1.
     bool  hdrReadback = false;
+    /// THE IMAGE BLOCK (IMAGE-1): contrast, saturation, shadows/highlights, white
+    /// balance, vignette and the film curve. Read only under `hdr` (it lives in
+    /// the tonemap quad); uniforms, never graph shape.
+    ImageGrade image;
 
     bool operator==(const PostFxDesc &o) const {
-        return hdr == o.hdr && exposure == o.exposure && exposureMin == o.exposureMin &&
+        return hdr == o.hdr && image == o.image && exposure == o.exposure && exposureMin == o.exposureMin &&
                exposureMax == o.exposureMax &&
                meterPattern == o.meterPattern &&
                meterLowPercent == o.meterLowPercent &&
@@ -6472,11 +6531,6 @@ inline bool stereoSafeLook(LookKind k) {
     // two thousand would be the larger error.
     case LookKind::Sharpen:
         return true;
-    // THE GRADE RIDES, ITS VIGNETTE DOES NOT (see applyVrViewPolicy, which
-    // zeroes p[3]): saturation, contrast and tint are pointwise; the vignette
-    // is the one term measured from the frame's centre.
-    case LookKind::FilmGrade:
-        return true;
     // MEASURED FROM THE CENTRE, OR ACROSS THE WHOLE FRAME. RadialBlur samples
     // along a line towards a centre (and one centre cannot serve two eyes);
     // GlassWarp's ripple is a frame-wide pattern, so the same world point
@@ -6501,16 +6555,18 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     fx.hzbFarthest    = true;
     fx.refractions    = false;
     fx.distortion     = false;
+    // THE IMAGE BLOCK RIDES, ITS VIGNETTE DOES NOT (IMAGE-1): contrast,
+    // saturation, the white balance and the film are pointwise; the vignette is
+    // the one term measured from the frame's centre, and one centre cannot
+    // serve two eyes.
+    fx.image.vignette = 0.0f;
     if (ssrOverride >= 0) fx.ssr = ssrOverride;
     if (!fx.looks.empty()) {
         std::vector<LookDesc> kept;
         kept.reserve(fx.looks.size());
         for (const LookDesc &l : fx.looks) {
             if (!stereoSafeLook(l.kind)) continue;
-            LookDesc copy = l;
-            // The film grade's vignette is its p[3] (LookKind::FilmGrade).
-            if (copy.kind == LookKind::FilmGrade) copy.p[3] = 0.0f;
-            kept.push_back(copy);
+            kept.push_back(l);
         }
         fx.looks.swap(kept);
     }

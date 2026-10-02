@@ -1284,37 +1284,29 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             // until this runs. Same lazy arm point, same reasoning.
             lightextras::armAreaLightBudgets(mRoot);
         }
-        // HlmsPbs divides diffuse by pi (Lambert BRDF); IrisGL's default shader does
-        // not, so matching legacy exposure needs powerScale = intensity * pi. (An
-        // earlier 'calibration' removed this while the light DIRECTION mapping was
-        // broken — the overexposure it fixed was side-lit faces, not the scale.)
+        // HlmsPbs divides the diffuse by pi (the Lambert BRDF), so a light of
+        // intensity I is handed to it as I * pi: a sun of intensity I then lights
+        // a facing surface of albedo a to radiance a * I, and a point light of
+        // intensity I does the same at 1 m (the falloff below is 1 / d^2).
         L->setPowerScale(d.intensity * Ogre::Math::PI);
         if (d.type != LightType::Directional) {
-            // THE AUTHORED RANGE IS THE RANGE (LIGHTING_FIX fix 4 / F-A1..A4).
-            //
-            // This used to be `setAttenuationBasedOnRadius(range, 0.01f)`, which
-            // takes the range as the radius of the falloff CURVE and then solves
-            // for the distance at which the light dims to 1% — and that distance
-            // is 14.1 times the number the user typed (OgreLight.cpp:194-217:
-            // q = 0.5/r^2, threshold 0.01 => mRange = sqrt(199) * r). So a light
-            // authored at range 5 lit out to 70 units, the Forward+ cut-off sat
-            // 14x too far away, and the range wire the editor draws at 5 was a
-            // decoration rather than a statement about the picture.
-            //
-            // Same curve, range authored: keep Ogre's own constants (the shader
-            // hardcodes the 0.5 numerator, so the curve must keep its 0.5
-            // constant term) and set mRange to R directly.
-            //
-            // KNOWN AND ACCEPTED CONSEQUENCE: the Forward+ fade now ramps across
-            // [0, R] instead of [0, 14.1R], so mid-range brightness drops
-            // measurably — the fade at d = R/2 goes from ~0.96 to 0.5. Any
-            // scene authored against the old 14x reach is dimmer and must be
-            // re-lit. MEASURED on the 203-suite gate: no shipped pixel suite
-            // moved, because every one of them lights with a DIRECTIONAL light,
-            // whose branch this does not touch. lights.falloff is the suite
-            // that pins the new curve.
+            // THE ONE FALLOFF (IMAGE-1): inverse square from a source of radius
+            // rSrc, windowed to zero at the authored range R — the fork's
+            // JahBrdf `jahLightAttenuation`, which every consumer of a light's
+            // falloff calls (the pixel, Forward+, the area approximation, the
+            // surface cache's cards, Atom's hit decode, Photon's voxels). The
+            // shader reads the attenuation vector as (R, rSrc, -, 1/R): Ogre's
+            // range keeps its meaning (the Forward+ cut-off, the shadow far
+            // plane, every reach box), its "linear" slot carries the source
+            // radius and nothing reads the other two. An area light's source is
+            // a disc of its rectangle's area (AreaLights_piece_ps.any).
             const float r = std::max(d.range, 0.01f);
-            L->setAttenuation(r, 0.5f, 0.0f, 0.5f / (r * r));
+            const float src =
+                d.type == LightType::Area
+                    ? std::sqrt(std::max(d.rectWidth, 0.01f) * std::max(d.rectHeight, 0.01f) /
+                                Ogre::Math::PI)
+                    : std::max(d.sourceRadius, 0.001f);
+            L->setAttenuation(r, 1.0f, src, 0.0f);
         } else {
             // NO FALLOFF ON A DIRECTIONAL LIGHT. Ogre's default attenuation
             // (const 0.5, quad 0.5) is never used to SHADE a directional light,

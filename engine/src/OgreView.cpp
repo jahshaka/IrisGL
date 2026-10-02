@@ -218,6 +218,7 @@ ChainDesc OgreView::chainDesc() const {
     d.bloomThreshold = mPostFx.bloomThreshold;
     d.bloomKnee      = mPostFx.bloomKnee;
     d.bloomAmount    = mPostFx.bloomAmount;
+    d.image          = mPostFx.image;
     // SSAO IS A REQUEST, AND THE GI REFUSES IT (SSAO-DOUBLE-1; giCarriesOcclusion):
     // wherever the scene's GI carries the diffuse, its visibility is already in the
     // picture, and an AO multiply of the finished colour would count occlusion twice
@@ -746,6 +747,9 @@ void OgreView::setPostFx(const PostFxDesc &pushed) {
     // applyViewGlobals for its own view before its update instead of relying
     // on this line; until then this costs one debounced float comparison.
     if (chainDesc().hdr && chainDesc().bloom) chain::setBloomAmount(chainDesc().bloomAmount);
+    // ...and the image block (IMAGE-1), the same material's uniforms, pushed for
+    // every graded view so a view never develops with another view's settings.
+    if (chainDesc().hdr) chain::setImageGrade(chainDesc().image);
 }
 
 const PostFxDesc &OgreView::postFx() const { return mPostFx; }

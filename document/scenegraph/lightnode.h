@@ -58,9 +58,16 @@ public:
     ShadowMap* shadowMap;
 
     /**
-     * light's radius. This is only used for pointlights.
+     * THE RANGE of a point or spot light, metres: where its falloff's window
+     * reaches zero (IMAGE-1: inverse square, windowed to the range — the
+     * engine's LightDesc::range). Also the area light's reach.
      */
     float distance;
+    /// THE SOURCE RADIUS of a point or spot light, metres (IMAGE-1): the size
+    /// of the emitter. The falloff is 1 / max(d^2, sourceRadius^2) — inside the
+    /// source a light cannot get brighter. Falloff only: Ogre's shadow maps
+    /// have no source size. Default 0.1 m.
+    float sourceRadius;
     QColor color;
     float intensity;
 

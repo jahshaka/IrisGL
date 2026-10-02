@@ -222,7 +222,8 @@ constexpr unsigned kRestSequenceBase = 0x10000u;
 bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
     return a.probeStride == b.probeStride && a.octRes == b.octRes && a.rayLength == b.rayLength &&
            a.adaptiveCap == b.adaptiveCap && a.freezeFrameIndex == b.freezeFrameIndex &&
-           a.jitterOff == b.jitterOff && a.farQueryOff == b.farQueryOff &&
+           a.jitterOff == b.jitterOff && a.rayJitterOff == b.rayJitterOff &&
+           a.farQueryOff == b.farQueryOff &&
            a.shBands == b.shBands && a.filterOff == b.filterOff &&
            a.historyFrames == b.historyFrames &&
            a.historyValidationOff == b.historyValidationOff && a.restOff == b.restOff;
@@ -1217,6 +1218,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // history's stochastic rounding is keyed on it, never on the sample
     // sequence's frame above, which a frozen A/B holds still.
     pp.knobs6[2] = float(v.frame & 0xFFFFu);
+    pp.knobs6[3] = in.tuning.rayJitterOff ? 1.0f : 0.0f;   // the rays at their texels' centres
     pp.knobs5[2] = temporal ? 1.0f : 0.0f;
     pp.knobs5[3] = in.tuning.historyValidationOff ? 1.0f : 0.0f;
     // PHOTON-GATHER-1d (GA-1e): the surface cache the hits read first, and the

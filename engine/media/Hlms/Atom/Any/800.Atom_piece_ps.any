@@ -52,12 +52,17 @@
 		#define ATOM_NOTE( k ) if( atomCode == 0u && !atomOk ) atomCode = k;
 		float3 atomCodeColour( uint code )
 		{
-			// base 3 of code + 1, one digit a channel: never black (the clear).
+			// base 3 of code + 1, one digit a channel: never black (the clear). The
+			// two lit levels sit inside the film's straight part at the default
+			// exposure (IMAGE-1: Unreal's film desaturates a channel driven far into
+			// its shoulder toward its neighbours, so 16 merged codes after the grade),
+			// and the low level differs per channel so no code is a GREY a lit
+			// surface could also be (code 12 is all three low digits).
 			uint v = code + 1u;
 			float3 lv = float3( float( v % 3u ), float( ( v / 3u ) % 3u ), float( ( v / 9u ) % 3u ) );
-			return float3( lv.x == 0.0 ? 0.0 : ( lv.x == 1.0 ? 0.3 : 16.0 ),
-						   lv.y == 0.0 ? 0.0 : ( lv.y == 1.0 ? 0.3 : 16.0 ),
-						   lv.z == 0.0 ? 0.0 : ( lv.z == 1.0 ? 0.3 : 16.0 ) );
+			return float3( lv.x == 0.0 ? 0.0 : ( lv.x == 1.0 ? 0.15 : 0.6 ),
+						   lv.y == 0.0 ? 0.0 : ( lv.y == 1.0 ? 0.04 : 0.6 ),
+						   lv.z == 0.0 ? 0.0 : ( lv.z == 1.0 ? 0.3 : 0.6 ) );
 		}
 	@else
 		#define ATOM_NOTE( k )
@@ -905,7 +910,7 @@
 	// so such a hit loops the WORLD list (HlmsAtom::uploadWorldLights): every point
 	// and spot light the pass buffer does not carry, brightest first, at most the
 	// forward list's lights per cell of those in range - the same lighting text as
-	// the forward loop (Forward+'s attenuation, range fade, spot cone and profile,
+	// the forward loop (the one falloff, the spot cone and profile,
 	// the same BRDF), in view space through the pass's view.
 	@piece( AtomHitWorldLights )
 		if( !fwdCustomHasCell )
@@ -929,10 +934,7 @@
 				if( atomWlDist <= atomWlAtt.x && atomWlDist > 0.0 @insertpiece( andObjLightMaskFwdPlusCmp ) )
 				{
 					atomWlDir *= 1.0 / atomWlDist;
-					float atomWlAtten = jahLightDistanceAttenuation( atomWlDist, atomWlAtt );
-					@property( hlms_forward_fade_attenuation_range )
-						atomWlAtten *= jahLightRangeFade( atomWlDist, atomWlAtt );
-					@end
+					float atomWlAtten = jahLightAttenuation( atomWlDist, atomWlAtt );
 					float atomWlCos = dot( -atomWlDir, normalize( mul( float4( atomWlSpotDir.xyz, 0.0 ), passBuf.view ).xyz ) );
 					if( atomWlPos.w > 1.5 )
 						atomWlAtten *= atomWlCos >= atomWlSpot.y ? jahSpotAttenuation( atomWlCos, atomWlSpot.xyz ) : 0.0;

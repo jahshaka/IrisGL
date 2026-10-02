@@ -82,6 +82,21 @@ static const CameraPostKey kPostKeys[] = {
     // recompile a shader — so a cut to a camera with its own looks does not
     // hitch.
     { "looks",          CameraPostKeyType::Stack  },
+    // THE IMAGE BLOCK (IMAGE-1; iris::lens::imageParams, the same ids and order):
+    // each field a Number override, so a camera can take the world's contrast
+    // and its own white balance.
+    { "contrast",         CameraPostKeyType::Number },
+    { "saturation",       CameraPostKeyType::Number },
+    { "shadows",          CameraPostKeyType::Number },
+    { "highlights",       CameraPostKeyType::Number },
+    { "whiteTemperature", CameraPostKeyType::Number },
+    { "whiteTint",        CameraPostKeyType::Number },
+    { "vignette",         CameraPostKeyType::Number },
+    { "filmSlope",        CameraPostKeyType::Number },
+    { "filmToe",          CameraPostKeyType::Number },
+    { "filmShoulder",     CameraPostKeyType::Number },
+    { "filmBlackClip",    CameraPostKeyType::Number },
+    { "filmWhiteClip",    CameraPostKeyType::Number },
 };
 
 const CameraPostKey *cameraPostKeys(int &count)
@@ -130,8 +145,13 @@ bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
     switch (key->type) {
     case CameraPostKeyType::Number: {
         bool ok = false;
-        const double v = value.toDouble(&ok);
-        if (!ok) return false;
+        double v = value.toDouble(&ok);
+        if (!ok || !std::isfinite(v)) return false;
+        // THE IMAGE BLOCK'S RANGES HOLD FOR A CAMERA TOO (IMAGE-1 fix round): the
+        // override is the same quantity as the world's row, so it is clamped to
+        // the same table (a contrast of 1000 would be a power the curve never sees).
+        if (const lens::ImageParamDef *d = lens::imageParam(id.toLatin1().constData()))
+            v = std::min(std::max(v, double(d->minValue)), double(d->maxValue));
         postOverrides.insert(id, v);
         return markedParams();
     }

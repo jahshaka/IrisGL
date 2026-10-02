@@ -23,8 +23,8 @@
 // diffuse lobe — jahDisneyDiffuse, the fork's JahBrdf piece
 // (Hlms/Pbs/Any/JahBrdf_piece_all.any), the SAME function BRDF_Default calls —
 // with the light terms of 800.PixelShader_piece_ps.any's DoPointLights /
-// DoSpotLights (the attenuation 1 / (0.5 + (linear + quadratic d) d), the
-// range fade of fork change 0018, the spot cone) as JahBrdf's
+// DoSpotLights (the one falloff, inverse square windowed to the range, and
+// the spot cone) as JahBrdf's
 // jahLightAttenuation / jahSpotAttenuation — the functions 800.PixelShader's
 // own light loops call (PHOTON-CARDS-5 measured a lamp at three distances: the
 // card 0.987-0.993 of the head-on pixel). `pbsDirect()` in test_gi_field_energy.cpp

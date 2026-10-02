@@ -205,7 +205,8 @@ void main()
 		// than a fixed quadrature that would alias a small bright source in
 		// and out as the probe moves.
 		const ivec2 t = ivec2( int( lane ) % octRes, int( lane ) / octRes );
-		const vec2 j = jahSample2( jahLocalCell( cell ), sequence + lane + 1u, frame );
+		const vec2 j = p.knobs6.w > 0.5 ? vec2( 0.5 )
+										: jahSample2( jahLocalCell( cell ), sequence + lane + 1u, frame );
 		const vec2 uv = ( vec2( t ) + j ) / float( octRes );
 		const vec3 octPoint = jahOctPoint( uv );
 		const float invR = 1.0 / max( length( octPoint ), 1e-6 );

@@ -46,7 +46,6 @@ namespace Ogre
     class PhotonVoxelLighting : public IdObject, public TextureGpuListener
     {
     public:
-        static const uint16 msDistanceThresholdCustomParam;
 
     protected:
         /// When mAnisotropic == false, mLightVoxel[0] contains all the mips.
@@ -155,7 +154,6 @@ namespace Ogre
         float       mEnvGain[3];
         float       mEnvSh[27];  ///< world basis {1,y,z,x,xy,yz,3z^2-1,zx,x^2-y^2}, radiance units
 
-        float mDefaultLightDistThreshold;
         bool  mAnisotropic;
 
         /// When we do multiple bounces, cascades can be used to improve accuracy

@@ -116,14 +116,20 @@
 		shared float4 jahHalfLight[64 * 6];
 		@insertpiece( JahDirectionalComposite )
 	@end
+	// Jahshaka (IMAGE-1): THE ONE FALLOFF of a point or spot light, the function the
+	// pixel, Forward+, the cards and Atom call (the fork's JahBrdf piece). Inserted
+	// BEFORE the member macros below: its spot function names a parameter
+	// spotParams, which the macro would turn into an array declaration.
+	@insertpiece( JahBrdf )
 	#define LT_DIRECTIONAL 0.0f
+	#define LT_POINT 1.0f
 	#define LT_SPOTLIGHT 2.0f
 	#define LT_AREA_LTC 5.0f
 
 	struct Light
 	{
 		//Pre-mul by PI? -No because we lose a ton of precision
-		//.w contains lightSqDistThreshold
+		//.w contains the range (point/spot; 0 otherwise)
 		float4 diffuse;
 		//For directional lights, pos.xyz contains -dir.xyz and pos.w = 0;
 		//For the rest of lights, pos.xyz contains pos.xyz and pos.w = 1;
@@ -146,7 +152,8 @@
 		};
 	@end
 
-	#define lightSqDistThreshold diffuse.w
+	#define lightRange diffuse.w
+	#define lightSourceRadius points[2].x
 	#define lightType uvwPos.w
 	#define spotDirection points[0].xyz
 	#define spotParams points[1]
@@ -261,11 +268,31 @@
 			// the spot's cone and (for a directional light) the cloud sheet: one factor for every
 			// face of the voxel
 			float lightAtten = 1.0f;
+			// IMAGE-1: A POINT OR SPOT LIGHT FALLS OFF HERE EXACTLY AS IT DOES ON THE PIXEL -
+			// inverse square from its source radius, windowed to zero at its range (JahBrdf's
+			// jahLightAttenuation; the engine culls a light whose range misses this cascade).
+			// It used to carry no distance term at all: every voxel received the lamp's
+			// full intensity at any distance, past its range too.
+			if( light.lightType == LT_POINT || light.lightType == LT_SPOTLIGHT )
+			{
+				const float lightDist = length( light.pos.xyz - voxelAabbCenter );
+				lightAtten = jahLightAttenuation( lightDist, light.lightRange, light.lightSourceRadius );
+			}
+			// AN AREA LIGHT's LTC form factor below is its own distance law; the injection
+			// adds the RANGE WINDOW the pixel's area approximation carries (the one falloff's
+			// saturate( 1 - ( d / R )^4 )^2, d to the rectangle's centre), so an area lamp's
+			// bounce ends where its direct light does.
+			if( light.lightType == LT_AREA_LTC && light.lightRange > 0.0f )
+			{
+				const float x = length( light.pos.xyz - voxelAabbCenter ) / light.lightRange;
+				const float w = clamp( 1.0f - x * x * x * x, 0.0f, 1.0f );
+				lightAtten = w * w;
+			}
 			if( light.lightType == LT_SPOTLIGHT )
 			{
 				float spotCosAngle = dot( -lightDir, light.spotDirection.xyz );
 				float spotAtten = saturate( (spotCosAngle - light.spotParams.y) * light.spotParams.x );
-				lightAtten = pow( spotAtten, light.spotParams.z );
+				lightAtten *= pow( spotAtten, light.spotParams.z );
 			}
 			// JAHSHAKA (CLOUDS-2D-2): A DIRECTIONAL LIGHT CROSSES THE CLOUD SHEET on
 			// its way to this voxel -- the same transmittance the pixel's direct

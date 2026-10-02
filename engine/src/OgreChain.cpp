@@ -297,7 +297,7 @@ constexpr const char *kSmaaBlend = "jahSmaaBlend";
 ///      every shader was correct.
 ///   2. IT WAS THE WRONG SPACE. These looks run on the TONEMAPPED image and
 ///      every one of them says so: Posterize bends gamma about display values,
-///      the Film Grade pivots contrast about 0.5 = mid grey, Desaturate uses
+///      Sharpen's unsharp mask works on display codes, Desaturate uses
 ///      broadcast luma weights. An sRGB attachment hands the shader a
 ///      LINEARISED value, where 0.5 is not mid grey at all (it is ~0.74 of the
 ///      display range) and every one of those constants means something else.
@@ -411,7 +411,6 @@ const char *lookMaterial(LookKind kind) {
     case LookKind::OldMovie:   return "Jahshaka/Look/OldMovie";
     case LookKind::Posterize:  return "Jahshaka/Look/Posterize";
     case LookKind::Sharpen:    return "Jahshaka/Look/Sharpen";
-    case LookKind::FilmGrade:  return "Jahshaka/Look/FilmGrade";
     case LookKind::Count:      break;
     }
     return "Jahshaka/Look/Desaturate";
@@ -3394,6 +3393,9 @@ Ogre::GpuProgramParametersSharedPtr gTonemapParams;
 bool  gTonemapResolved = false;
 bool  gTonemapHasDither = false;
 bool  gTonemapHasBloomAmount = false;
+bool  gTonemapHasImage = false;      // the IMAGE-1 block (jahImage0 .. jahWhite2)
+bool  gImagePushed = false;
+ImageGrade gImageGradePushed;
 float gDitherOffPushed = -1.0f;      // no value pushed yet
 float gBloomAmountPushed = -1.0f;    // ...nor here (a valid amount is >= 0)
 
@@ -3412,6 +3414,11 @@ void resolveTonemapParams() {
         gTonemapParams->_findNamedConstantDefinition("jahDitherOff", false) != nullptr;
     gTonemapHasBloomAmount =
         gTonemapParams->_findNamedConstantDefinition("jahBloomAmountMinusOne", false) != nullptr;
+    gTonemapHasImage = true;
+    for (const char *n : { "jahImage0", "jahImage1", "jahFilm0", "jahFilm1", "jahWhite0",
+                           "jahWhite1", "jahWhite2" })
+        gTonemapHasImage = gTonemapHasImage &&
+                           gTonemapParams->_findNamedConstantDefinition(n, false) != nullptr;
 }
 }   // namespace
 
@@ -3426,14 +3433,15 @@ void verifyTonemapMedia() {
     const bool noProgram = !pass || !pass->hasFragmentProgram();
     resolveTonemapParams();
     const bool mismatch = noProgram || !gTonemapParams || !gTonemapHasDither
-                          || !gTonemapHasBloomAmount;
+                          || !gTonemapHasBloomAmount || !gTonemapHasImage;
     // The frame path resolves its own cache: nothing learned here (including
     // "no quad yet") may stick.
     forgetTonemapParams();
     if (mismatch)
         OGRE_EXCEPT(Ogre::Exception::ERR_ITEM_NOT_FOUND,
                     "HDR/FinalToneMapping (its fragment program, jahDitherOff, "
-                    "jahBloomAmountMinusOne) is not this build's: the staged media is not this "
+                    "jahBloomAmountMinusOne, the jahImage/jahFilm/jahWhite block) is not this "
+                    "build's: the staged media is not this "
                     "fork's - re-run irisgl/scripts/build-ogre.sh",
                     "verifyTonemapMedia");
 }
@@ -3443,6 +3451,8 @@ void forgetTonemapParams() {
     gTonemapResolved = false;
     gTonemapHasDither = false;
     gTonemapHasBloomAmount = false;
+    gTonemapHasImage = false;
+    gImagePushed = false;
     gDitherOffPushed = -1.0f;
     gBloomAmountPushed = -1.0f;
 }
@@ -3470,6 +3480,117 @@ void setBloomAmount(float amount) {
     if (v == gBloomAmountPushed) return;   // debounced on the last value pushed
     gBloomAmountPushed = v;
     gTonemapParams->setNamedConstant("jahBloomAmountMinusOne", v - 1.0f);
+}
+
+namespace {
+/// CIE 1931 chromaticity of the white at `temp` kelvin and `tint` (Unreal's
+/// WhiteBalance, TonemapCommon.ush: the CIE daylight locus above 4000 K, the
+/// Planckian locus below, offset along the isotherm by the tint; Krystek's
+/// rational fits for the locus and its derivative).
+void whiteChromaticity(double temp, double tint, double &x, double &y) {
+    temp = std::min(std::max(temp, 1000.0), 40000.0);
+    const double t2 = temp * temp;
+    double u = (0.860117757 + 1.54118254e-4 * temp + 1.28641212e-7 * t2) /
+               (1.0 + 8.42420235e-4 * temp + 7.08145163e-7 * t2);
+    double v = (0.317398726 + 4.22806245e-5 * temp + 4.20481691e-8 * t2) /
+               (1.0 - 2.89741816e-5 * temp + 1.61456053e-7 * t2);
+    const double px = 3.0 * u / (2.0 * u - 8.0 * v + 4.0);
+    const double py = 2.0 * v / (2.0 * u - 8.0 * v + 4.0);
+    if (temp < 4000.0) {
+        x = px; y = py;
+    } else {
+        const double tt = temp * 1.4388 / 1.438;
+        const double it = 1.0 / tt;
+        x = tt <= 7000.0
+                ? 0.244063 + (0.09911e3 + (2.9678e6 - 4.6070e9 * it) * it) * it
+                : 0.237040 + (0.24748e3 + (1.9018e6 - 2.0064e9 * it) * it) * it;
+        y = -3.0 * x * x + 2.87 * x - 0.275;
+    }
+    // Along the isotherm: the tint moves the white perpendicular to the locus.
+    const double ud = (-1.13758118e9 - 1.91615621e6 * temp - 1.53177 * t2) /
+                      std::pow(1.41213984e6 + 1189.62 * temp + t2, 2.0);
+    const double vd = (1.97471536e9 - 705674.0 * temp - 308.607 * t2) /
+                      std::pow(6.19363586e6 - 179.456 * temp + t2, 2.0);
+    const double len = std::sqrt(ud * ud + vd * vd);
+    if (len > 0.0) {
+        u += -vd / len * tint * 0.05;
+        v += ud / len * tint * 0.05;
+    }
+    const double ix = 3.0 * u / (2.0 * u - 8.0 * v + 4.0);
+    const double iy = 2.0 * v / (2.0 * u - 8.0 * v + 4.0);
+    x += ix - px;
+    y += iy - py;
+}
+
+void mul3(const double a[9], const double b[9], double out[9]) {
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            out[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+}
+
+/// THE WHITE BALANCE MATRIX in linear sRGB, row-major: a Bradford adaptation
+/// from the white at (temp, tint) to the white at (6500 K, 0) — the identity at
+/// the default, and "warmer" (a lower temperature) corrects a warm source to
+/// neutral, i.e. it COOLS the picture, as Unreal's and every camera's does.
+void whiteBalanceMatrix(double temp, double tint, double out[9]) {
+    static const double kSrgbToXyz[9] = { 0.4124564, 0.3575761, 0.1804375, 0.2126729, 0.7151522,
+                                          0.0721750, 0.0193339, 0.1191920, 0.9503041 };
+    static const double kXyzToSrgb[9] = { 3.2409699419,  -1.5373831776, -0.4986107603,
+                                          -0.9692436363, 1.8759675015,  0.0415550574,
+                                          0.0556300797,  -0.2039769589, 1.0569715142 };
+    static const double kCone[9] = { 0.8951, 0.2664, -0.1614, -0.7502, 1.7135,
+                                     0.0367, 0.0389, -0.0685, 1.0296 };
+    static const double kInvCone[9] = { 0.9869929, -0.1470543, 0.1599627, 0.4323053, 0.5183603,
+                                        0.0492912, -0.0085287, 0.0400428, 0.9684867 };
+    double sx, sy, dx, dy;
+    whiteChromaticity(temp, tint, sx, sy);
+    whiteChromaticity(6500.0, 0.0, dx, dy);
+    const double src[3] = { sx / sy, 1.0, (1.0 - sx - sy) / sy };
+    const double dst[3] = { dx / dy, 1.0, (1.0 - dx - dy) / dy };
+    double scale[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (int i = 0; i < 3; ++i) {
+        const double s = kCone[i * 3] * src[0] + kCone[i * 3 + 1] * src[1] + kCone[i * 3 + 2] * src[2];
+        const double d = kCone[i * 3] * dst[0] + kCone[i * 3 + 1] * dst[1] + kCone[i * 3 + 2] * dst[2];
+        scale[i * 4] = s != 0.0 ? d / s : 1.0;
+    }
+    double a[9], b[9], c[9];
+    mul3(scale, kCone, a);
+    mul3(kInvCone, a, b);      // the adaptation in XYZ
+    mul3(b, kSrgbToXyz, c);
+    mul3(kXyzToSrgb, c, out);
+}
+}   // namespace
+
+/// THE IMAGE BLOCK (IMAGE-1). Every uniform is the field's OFFSET FROM ITS
+/// DEFAULT (FinalToneMapping_ps.glsl says why: a zero-filled buffer is then
+/// the default picture), and the white balance arrives as its matrix minus the
+/// identity, one row per vec4. At the default temperature and tint the matrix
+/// is the identity by construction, and it is written as exact zeros.
+void setImageGrade(const ImageGrade &g) {
+    resolveTonemapParams();
+    if (!gTonemapHasImage) return;   // no tonemap quad in this pipeline
+    if (gImagePushed && g == gImageGradePushed) return;
+    gImagePushed = true;
+    gImageGradePushed = g;
+    const ImageGrade d;
+    gTonemapParams->setNamedConstant(
+        "jahImage0", Ogre::Vector4(g.contrast - d.contrast, g.saturation - d.saturation,
+                                   g.shadows, g.highlights));
+    gTonemapParams->setNamedConstant("jahImage1", Ogre::Vector4(g.vignette, 0.0f, 0.0f, 0.0f));
+    gTonemapParams->setNamedConstant(
+        "jahFilm0", Ogre::Vector4(g.filmSlope - d.filmSlope, g.filmToe - d.filmToe,
+                                  g.filmShoulder - d.filmShoulder, g.filmBlackClip));
+    gTonemapParams->setNamedConstant(
+        "jahFilm1", Ogre::Vector4(g.filmWhiteClip - d.filmWhiteClip, 0.0f, 0.0f, 0.0f));
+    double m[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    if (g.whiteTemperature != d.whiteTemperature || g.whiteTint != d.whiteTint)
+        whiteBalanceMatrix(g.whiteTemperature, g.whiteTint, m);
+    const char *rows[3] = { "jahWhite0", "jahWhite1", "jahWhite2" };
+    for (int i = 0; i < 3; ++i)
+        gTonemapParams->setNamedConstant(
+            rows[i], Ogre::Vector4(float(m[i * 3] - (i == 0 ? 1.0 : 0.0)),
+                                   float(m[i * 3 + 1] - (i == 1 ? 1.0 : 0.0)),
+                                   float(m[i * 3 + 2] - (i == 2 ? 1.0 : 0.0)), 0.0f));
 }
 
 void setDither(bool off) {
@@ -3938,6 +4059,7 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         // only the diagnostic off switch, and the shader's default is
         // "dithered".
         setDither(desc.ditherOff);
+        setImageGrade(desc.image);
         setExposure(desc.exposure, desc.exposureMin, desc.exposureMax);
         // The meter's own two settings. Pushed only for the form that measures:
         // the fixed grade has no meter, and writing a process-wide job's
