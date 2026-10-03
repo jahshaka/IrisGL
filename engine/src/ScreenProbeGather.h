@@ -118,6 +118,11 @@ public:
     /// FIRST pass to bind them can order (see the tier's note).
     virtual void gatherClearDummies(VkCommandBuffer cmd) = 0;
     virtual VkSampler gatherPointSampler() const = 0;
+    /// A compute pipeline THROUGH THE DEVICE'S PIPELINE CACHE (PHOTON-II-1 item 12): the
+    /// tier's own builder (persisted with the shader cache, counted and named in
+    /// ShaderCacheStats) — never a pipeline of the gather's own outside it.
+    virtual VkResult gatherCreatePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
+                                          const char *name) = 0;
     virtual VkSampler gatherLinearSampler() const = 0;
 };
 

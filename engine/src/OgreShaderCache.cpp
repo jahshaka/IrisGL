@@ -785,9 +785,16 @@ void ShaderCache::load(Ogre::Root *root) {
 std::atomic<unsigned>  ShaderCache::sEnginePipelines { 0 };
 std::atomic<long long> ShaderCache::sEnginePipelineUs { 0 };
 
-void ShaderCache::noteEnginePipeline(double ms) {
+namespace {
+std::mutex gEnginePipelineNamesMutex;
+std::vector<std::string> gEnginePipelineNames;
+}   // namespace
+
+void ShaderCache::noteEnginePipeline(double ms, const char *name) {
     sEnginePipelines.fetch_add(1);
     sEnginePipelineUs.fetch_add(static_cast<long long>(ms * 1000.0));
+    std::lock_guard<std::mutex> lock(gEnginePipelineNamesMutex);
+    gEnginePipelineNames.emplace_back(name ? name : "");
 }
 
 bool ShaderCache::dirty(Ogre::Root *root) const {
@@ -1117,6 +1124,10 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.lastSavedUnixMs = mLastSavedUnixMs;
     s.enginePipelinesThisRun = sEnginePipelines.load();
     s.enginePipelineMs = double(sEnginePipelineUs.load()) / 1000.0;
+    {
+        std::lock_guard<std::mutex> lock(gEnginePipelineNamesMutex);
+        s.enginePipelineNames = gEnginePipelineNames;
+    }
 
     // THE SHADER HASH'S TWO INDEX SPACES, LIVE (HLMSBITS-1). Ogre packs every
     // shader lookup as [type:3][renderable:16][pass:13] and grows both caches

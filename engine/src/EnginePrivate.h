@@ -2493,7 +2493,7 @@ public:
     /// after the last save (a first cut-out material, a first mover's velocity
     /// job) reaches the disk even when no Hlms shader compiled that run. Any
     /// thread; process-wide (one device, one VkPipelineCache).
-    static void noteEnginePipeline(double ms);
+    static void noteEnginePipeline(double ms, const char *name);
 
     ShaderCacheStats stats(Ogre::Root *root) const;
     void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;

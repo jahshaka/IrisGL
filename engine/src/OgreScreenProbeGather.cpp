@@ -385,7 +385,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
         cpi.stage.module = module;
         cpi.stage.pName = "main";
         cpi.layout = pipeLayout;
-        if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipeline) !=
+        // THROUGH THE DEVICE'S PIPELINE CACHE (PHOTON-II-1 item 12): the tier's builder.
+        if (mHost.gatherCreatePipeline(cpi, &pipeline, (std::string("gather ") + what).c_str()) !=
             VK_SUCCESS) {
             err = std::string("gather: vkCreateComputePipelines (") + what + ") failed";
             return false;

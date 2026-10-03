@@ -5911,6 +5911,10 @@ struct ShaderCacheStats {
     /// pipeline layer makes the second near zero.
     unsigned enginePipelinesThisRun = 0;
     double   enginePipelineMs = 0.0;
+    /// ...and WHICH: each engine pipeline's name in build order (PHOTON-II-1 item 12 —
+    /// the reflection's two and the gather's joined the cache; a pipeline built
+    /// outside it would be missing here).
+    std::vector<std::string> enginePipelineNames;
 
     // ---- the two caches the shader HASH addresses (HLMSBITS-1) -------------
     /// THE NUMBER THAT CRASHED THE EDITOR ON 2026-09-14, now readable while the

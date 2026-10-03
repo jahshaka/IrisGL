@@ -675,7 +675,7 @@ private:
     /// the shader cache and loads at boot — so a warm boot re-uses what a cold one
     /// compiled instead of compiling it again where the driver keeps no cache of its own.
     /// Counted and timed (the log's "rayquery: compute pipelines" line).
-    VkResult createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out);
+    VkResult createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out, const char *name);
     unsigned mPipelinesBuilt = 0;
     double   mPipelineBuildMs = 0.0;
 
@@ -1092,6 +1092,10 @@ public:
     /// safe to call twice in one frame — the flag is cleared by the first.
     void gatherClearDummies(VkCommandBuffer cmd) override { clearDummyImages(cmd); }
     VkSampler gatherPointSampler() const override { return mPointSampler; }
+    VkResult gatherCreatePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
+                                  const char *name) override {
+        return createComputePipeline(cpi, out, name);
+    }
     VkSampler gatherLinearSampler() const override { return mLinearSampler; }
 
 private:
@@ -1736,15 +1740,17 @@ void RayQueryTier::drainRetired() {
     }
 }
 
-VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out) {
+VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
+                                             const char *name) {
     const auto t0 = std::chrono::steady_clock::now();
     const VkResult r = vkCreateComputePipelines(mVk, mDev ? mDev->mPipelineCache : VK_NULL_HANDLE, 1, &cpi, nullptr, out);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     ++mPipelinesBuilt;
     mPipelineBuildMs += ms;
-    if (r == VK_SUCCESS) ShaderCache::noteEnginePipeline(ms);   // dirt for the pipeline layer
+    if (r == VK_SUCCESS) ShaderCache::noteEnginePipeline(ms, name);   // dirt for the pipeline layer
     Ogre::LogManager::getSingleton().logMessage(
-        "rayquery: compute pipelines " + std::to_string(mPipelinesBuilt) + " built, this one " +
+        "rayquery: compute pipelines " + std::to_string(mPipelinesBuilt) + " built, this one (" +
+        std::string(name ? name : "") + ") " +
         std::to_string(ms) + " ms, " + std::to_string(mPipelineBuildMs) + " ms in all" +
         (mDev && mDev->mPipelineCache ? " (through the device's pipeline cache)" : " (no pipeline cache)"));
     return r;
@@ -1895,7 +1901,7 @@ bool RayQueryTier::makePipeline(std::string &err) {
     cpi.stage.module = mModule;
     cpi.stage.pName = "main";
     cpi.layout = mPipeLayout;
-    if (createComputePipeline(cpi, &mPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mPipeline, "rays") != VK_SUCCESS) {
         err = "rayquery: vkCreateComputePipelines failed";
         return false;
     }
@@ -2470,7 +2476,7 @@ bool RayQueryTier::makeTlasWritePipeline(std::string &err) {
     cpi.stage.module = mTwModule;
     cpi.stage.pName = "main";
     cpi.layout = mTwPipeLayout;
-    if (createComputePipeline(cpi, &mTwPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mTwPipeline, "tlas write") != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed (the instance job)";
         return false;
     }
@@ -4192,7 +4198,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         cpi.stage.module = mCardParityModule;
         cpi.stage.pName = "main";
         cpi.layout = mCardParityPipeLayout;
-        if (createComputePipeline(cpi, &mCardParityPipeline) !=
+        if (createComputePipeline(cpi, &mCardParityPipeline, "card parity") !=
             VK_SUCCESS) {
             err = "cardReadParity: vkCreateComputePipelines failed";
             return false;
@@ -4694,7 +4700,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     cpi.stage.module = mReflectModule;
     cpi.stage.pName = "main";
     cpi.layout = mReflectPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mReflectPipeline) !=
+    if (createComputePipeline(cpi, &mReflectPipeline, "reflect") !=
         VK_SUCCESS) {
         err = "rayquery/reflect: vkCreateComputePipelines failed";
         return false;
@@ -4715,7 +4721,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         fcpi.stage.module = mFilterModule;
         fcpi.stage.pName = "main";
         fcpi.layout = mReflectPipeLayout;
-        if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &fcpi, nullptr, &mFilterPipeline) !=
+        if (createComputePipeline(fcpi, &mFilterPipeline, "reflect filter") !=
             VK_SUCCESS) {
             err = "rayquery/reflect: vkCreateComputePipelines (filter) failed";
             return false;
@@ -5827,7 +5833,7 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
     cpi.stage.module = mMotionModule;
     cpi.stage.pName = "main";
     cpi.layout = mMotionPipeLayout;
-    if (createComputePipeline(cpi, &mMotionPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mMotionPipeline, "motion") != VK_SUCCESS) {
         err = "rayquery/motion: vkCreateComputePipelines failed";
         return false;
     }
@@ -5840,7 +5846,7 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
         VkComputePipelineCreateInfo spi = cpi;
         if (vkCreateShaderModule(mVk, &ssi, nullptr, &mMotionSkinModule) == VK_SUCCESS) {
             spi.stage.module = mMotionSkinModule;
-            if (createComputePipeline(spi, &mMotionSkinPipeline) != VK_SUCCESS)
+            if (createComputePipeline(spi, &mMotionSkinPipeline, "motion skin") != VK_SUCCESS)
                 mMotionSkinPipeline = VK_NULL_HANDLE;
         }
         if (!mMotionSkinPipeline)
@@ -5937,7 +5943,7 @@ bool RayQueryTier::makeAlphaMaskPipeline(std::string &err) {
     cpi.stage.module = mAlphaModule;
     cpi.stage.pName = "main";
     cpi.layout = mAlphaPipeLayout;
-    if (createComputePipeline(cpi, &mAlphaPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mAlphaPipeline, "alpha mask") != VK_SUCCESS) {
         err = "rayquery/alpha-mask: vkCreateComputePipelines failed";
         return false;
     }
@@ -6826,7 +6832,7 @@ bool RayQueryTier::makeSunContactPipeline(std::string &err) {
     cpi.stage.module = mSunModule;
     cpi.stage.pName = "main";
     cpi.layout = mSunPipeLayout;
-    if (createComputePipeline(cpi, &mSunPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mSunPipeline, "sun contact") != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed";
         return false;
     }
@@ -7377,7 +7383,7 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
     cpi.stage.module = mCmModule;
     cpi.stage.pName = "main";
     cpi.layout = mCmPipeLayout;
-    if (createComputePipeline(cpi, &mCmPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mCmPipeline, "card movers") != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed";
         return false;
     }
@@ -8305,7 +8311,7 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
     cpi.stage.module = mCompModule;
     cpi.stage.pName = "main";
     cpi.layout = mCompPipeLayout;
-    if (createComputePipeline(cpi, &mCompPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mCompPipeline, "hit composite") != VK_SUCCESS) {
         err = "rayquery/hit: vkCreateComputePipelines failed";
         return false;
     }
