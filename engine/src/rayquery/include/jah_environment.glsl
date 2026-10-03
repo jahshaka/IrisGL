@@ -238,7 +238,11 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 /// sun). Measured: 1.002x at 35 degrees, 0.979x at 5. Nine fetches a cone (the cap
 /// read took 26). With no cube, the SH at the set's own band weights 1 / P_l( cos
 /// 45 ) - sqrt( 2 ) and 4 (CARD-VIEW-BIAS-1's ring rule: the set's sum IS the SH
-/// irradiance).
+/// irradiance) - UNCLAMPED: under a directional SH a single quadrant's band-weighted
+/// value can be negative while the set's sum is not, and clamping each cone broke
+/// that sum (the merge read's worth-a-look 3: a high light, no ambient - 94 % of
+/// normals had a negative cone; spikes/photon-ii-1/p2/wal3). The CALLER clamps the
+/// set's sum (jahDiffuseCones).
 vec3 jahEnvQuadrant( vec3 coneWorld, vec3 normalWorld )
 {
 	if( JAH_ENV_CUBE_ON )
@@ -262,7 +266,7 @@ vec3 jahEnvQuadrant( vec3 coneWorld, vec3 normalWorld )
 		}
 		return sum * ( 1.0 / 9.0 ) * JAH_ENV_GAIN;
 	}
-	return max( jahEnvShEval( coneWorld, 1.41421356, 4.0 ), vec3( 0.0 ) );
+	return jahEnvShEval( coneWorld, 1.41421356, 4.0 );
 }
 
 /// What a GGX LOBE of perceptual roughness `r` about `dirWorld` sees of the

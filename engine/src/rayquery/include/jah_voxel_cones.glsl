@@ -176,6 +176,9 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.alpha / 0.95 ) ) *
 				jahEnvQuadrant( JAH_CONES_TO_WORLD( d ), JAH_CONES_TO_WORLD( basis[2] ) );   // its quadrant, cosine-weighted
 	}
+	// THE SET'S SUM is what is clamped, never a cone (jahEnvQuadrant's note): the four
+	// quadrants' exact sum survives a negative band-weighted quadrant.
+	envD = max( envD, vec3( 0.0, 0.0, 0.0 ) );
 }
 
 /// THE SKY'S SHARE ON A FINER QUADRATURE (CONTACT-OCCLUSION-1): what jahDiffuseCones'
