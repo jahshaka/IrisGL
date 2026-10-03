@@ -1099,7 +1099,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         n.item->setLightMask(n.lightMask);
         // PER-OBJECT SHADOW CASTING, re-applied for the same reason: a rebuilt
         // Item is born casting (Scene::setNodeCastShadow).
-        n.item->setCastShadows(n.castShadow);
+        applyNodeCasterBit(n);   // castShadow AND a caster channel (SHADOW-FIT-1)
         // Render-queue policy (POST_CHAIN_SPEC.md §6): on-top overlays go in the
         // chain's overlay pass, refractive items in its refraction pass, and
         // everything else stays on Ogre's default queue.

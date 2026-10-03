@@ -5800,6 +5800,14 @@ private:
     /// to whatever `n` currently carries. Needed because the helper flag can be
     /// set before or after the geometry is attached.
     void applyNodeVisibilityFlags(Node &n);
+    /// THE CASTER BIT FOLLOWS THE CHANNEL (SHADOW-FIT-1): Ogre's LAYER_SHADOW_CASTER
+    /// bit on `n`'s Item and billboards = the node's own castShadow AND a channel
+    /// some shadow node draws (allShadowCasterChannels). The bit is what the shadow
+    /// node's CASTERS BOX reads (SceneManager::_calculateCurrentCastersBox, under
+    /// the VIEWPORT's mask, not the shadow passes'), so an editor helper left
+    /// "casting" re-fitted the sun's splits around the light's icon in the editor
+    /// viewport and not in a screenshot. Call after every channel or castShadow write.
+    void applyNodeCasterBit(Node &n);
     /// The registry record hanging off an Ogre node, or null (an engine-owned
     /// helper child such as a light's -Y adapter, a document node the host has
     /// not adopted yet, the scene root).
