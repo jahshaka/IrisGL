@@ -370,7 +370,7 @@
 	// an open floor whatever the ramp did). Since PHOTON-READER-1 both march the
 	// same chain through the same reader and both weight the sky by the same
 	// escape, so what is left between them is the integration (144 rays per
-	// probe against six cones per pixel) and the environment term.
+	// probe against four cones per pixel) and the environment term.
 	float3 ifdQ = ifdProbeCounts / ( ifdProbeCounts + float3( 2.0, 2.0, 2.0 ) );
 	float3 ifdInside = min( ifdGridPos - ifdQ, ( ifdProbeCounts - ifdQ ) - ifdGridPos );
 	// `ifdInside` is the signed distance to the nearest authored face in PROBE
@@ -530,7 +530,7 @@
 	// intensity 0: 2/255 against 36/255 with no field at all).
 	//
 	// It is written as the closed form rather than by re-enabling the cone
-	// block, because the block is six cone marches per pixel and this is a
+	// block, because the block is four cone marches per pixel and this is a
 	// lerp: the fallback costs nothing where it is not used (1 - confidence is
 	// 0 inside the field) and nothing that scales with anything where it is.
 	//

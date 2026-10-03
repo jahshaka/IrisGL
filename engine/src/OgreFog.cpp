@@ -265,7 +265,7 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
     {
         // WHERE THE GATHER ANSWERS, THE CONES DO NOT (GATHER-0; the tier's fact
         // since PHOTON-GATHER-1d: a pass gathers exactly on a gather tier). The
-        // six cone marches per pixel and the probe's 64 rays estimate the SAME
+        // four cone marches per pixel and the probe's 64 rays estimate the SAME
         // integral; adding them is that integral twice. So on a gather pass the
         // cone diffuse is compiled out of every renderable — the gathering ones
         // and the translucent ones above alike — and the cones' diffuse remains

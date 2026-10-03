@@ -48,7 +48,7 @@
 /// AND IT IS BUILT ABOUT THAT SPACE'S OWN AXES, a decision measured rather than
 /// argued: Frisvad's special direction is the antipode of (0,0,1), and a fixed
 /// pre-rotation (onto a body diagonal, which no axis-aligned surface has) turns
-/// the six cones of every axis-aligned surface to odd angles, where each sample
+/// the cones of every axis-aligned surface to odd angles, where each sample
 /// is a three-way blend of the anisotropic volumes, and the bounce comes out
 /// dimmer — gi.field_follows' red-wall bounce read 0.0174 with the axes and
 /// 0.0105 with the body diagonal. The price: the special direction is a world

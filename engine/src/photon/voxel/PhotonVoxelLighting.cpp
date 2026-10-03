@@ -911,7 +911,7 @@ namespace Ogre
         mBounceInvVoxelResolution->setManualValue( 1.0f / mVoxelizer->getVoxelResolution() );
         // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): ONE, AND IT IS THE PHYSICS.
         //
-        // The bounce adds `albedo * G` where G is the six-cone weighted mean of the
+        // The bounce adds `albedo * G` where G is the four-cone weighted mean of the
         // voxel radiance -- weights that sum to 1 over a cosine-ish set, i.e. an
         // ESTIMATE OF E / PI already (that is exactly why HlmsPbs consumes the same
         // gather as `envColourD` with no division of its own,

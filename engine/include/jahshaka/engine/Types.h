@@ -2924,8 +2924,8 @@ struct GiQualityFacts {
     /// land, inside this budget, and a light write relights the resident set
     /// over as many frames as it takes.
     unsigned cardLightTexels = 131072u;
-    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (six cones
-    /// over the chain) per texel, spent when a card is captured and when the
+    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (the four-cone
+    /// set over the chain, the sky on the sixteen-cone quadrature) per texel, spent when a card is captured and when the
     /// chain re-injects. Lumen's own indirect budget, 512 square, is the
     /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
     /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
@@ -7972,7 +7972,10 @@ struct VoxelReaderAnswer {
 /// half-angle as its tangent — exactly what jahEnvCone takes.
 struct EnvironmentConeQuery {
     Vec3  dirWorld;              ///< unit direction, world axes
-    float tanHalfAngle = 0.577f; ///< the six-cone diffuse set's half angle
+    /// The cone's half angle as its tangent. Every caller sets its own; the default is
+    /// the ONE diffuse set's, the four 44.5-degree cones (jah_voxel_cones.glsl's
+    /// coneAngleTan) - the six-cone set it named is deleted (SIX-CONE-DEAD-1).
+    float tanHalfAngle = 0.98269f;
 };
 
 /// What the harness answers for one cone, linear radiance with the Sky Light's

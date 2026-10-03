@@ -95,10 +95,10 @@ vec3 jahEnvShEval( vec3 n, float k1, float k2 )
 /// radiance — but a GGX lobe's moment is carried by its long tail, so the
 /// matched lobe reaches far past the cone's rim and pulls the bright horizon
 /// into a zenith-pointing cone (measured on the shipped sky, low sun: 10 % mean
-/// error at the six-cone aperture). The 0.6 is MEASURED, not derived: gi.env_cone
+/// error at the deleted six-cone set's aperture). The 0.6 is MEASURED, not derived: gi.env_cone
 /// swept it (1.0 / 0.7 / 0.6 / 0.5 / 0.35) over 26 directions, three apertures
 /// and two sun heights; 0.5-0.7 is the flat optimum and 0.6 keeps every
-/// aperture under 4 % mean error at both (six-cone 1.4 / 3.8 %, the field's
+/// aperture under 4 % mean error at both (the deleted six-cone set 1.4 / 3.8 %, the field's
 /// probe ray 0.7 / 1.2 %, a 0.1 rad specular cone 1.0 / 2.3 %, noon / low sun).
 /// The GGX moment is numerical (400,000 stratified samples per roughness, 801
 /// roughnesses; its maximum is exactly 1/3, at r = 1), tabulated below against
@@ -197,7 +197,7 @@ vec3 jahEnvConeCells( vec3 d, float omega, int rings )
 /// de-convolved, NOT the irradiance: a set of cones that each read the
 /// irradiance at its own axis and are then weighted by the cosine convolves the
 /// sky twice (measured: a hemisphere ambient's zenith band came back at 0.63 of
-/// itself through the six cones, and the voxel volume's face stepped against the
+/// itself through the deleted six-cone set, and the voxel volume's face stepped against the
 /// SH outside it).
 vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 {
