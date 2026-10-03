@@ -3568,6 +3568,10 @@ struct GatherStatus {
     /// Which gather frame the readback is of (the view's frame counter), so a
     /// suite can tell a fresh copy from a repeat.
     unsigned irradianceFrame = 0u;
+    /// ...and THE SAME FRAME'S ADAPTIVE TWINS (the readback door too; PHOTON-II-1 F3): per
+    /// uniform cell, row-major over the probe grid (probesX x probesY), 1 where the cell got
+    /// its second probe that frame. How a suite proves the budget's ranking starves no cell.
+    std::vector<unsigned char> adaptiveCells;
     /// WHY IT IS NOT RUNNING, when `on` is true and `running` is false and the
     /// reason is the engine's rather than the view's (no ray device, no
     /// pipelines on this driver, no room for the atlas). Empty is "nothing went

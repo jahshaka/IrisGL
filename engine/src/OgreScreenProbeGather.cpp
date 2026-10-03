@@ -482,7 +482,8 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
                                v.atlasMemory, v.atlasView, err))
         return false;
     if (!mHost.gatherMakeBuffer(VkDeviceSize(total) * kRecordBytes,
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, v.records,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                false, v.records,
                                 v.recordsMemory, nullptr, err))
         return false;
     for (unsigned k = 0; k < 2u; ++k) {
@@ -595,6 +596,11 @@ void ScreenProbeGather::drop(View &v) {
     mHost.gatherRetireBuffer(v.args, v.argsMemory);
     mHost.gatherRetireBuffer(v.readback, v.readbackMemory);
     mHost.gatherRetireBuffer(v.irrReadback, v.irrReadbackMemory);
+    mHost.gatherRetireBuffer(v.recReadback, v.recReadbackMemory);
+    v.recReadback = VK_NULL_HANDLE;
+    v.recReadbackMemory = VK_NULL_HANDLE;
+    v.recReadbackMapped = nullptr;
+    v.adaptiveHost.clear();
     v.irrReadback = VK_NULL_HANDLE;
     v.irrReadbackMemory = VK_NULL_HANDLE;
     v.irrReadbackMapped = nullptr;
@@ -653,6 +659,17 @@ void ScreenProbeGather::readPending(View &v) {
                 for (size_t k = 0; k < texels * 4u; ++k) v.irrHost[k] = Ogre::Bitwise::halfToFloat(src[k]);
                 v.irrHostFrame = v.pending[i].gatherFrame;
                 v.pending[i].irradiance = false;
+                // ...and the uniform cells' twin links (each record's normalW.w).
+                if (v.recReadbackMapped) {
+                    const char *rec = static_cast<const char *>(v.recReadbackMapped) +
+                                      size_t(i) * v.uniformProbes * kRecordBytes;
+                    v.adaptiveHost.assign(v.uniformProbes, 0u);
+                    for (unsigned c = 0; c < v.uniformProbes; ++c) {
+                        float link = 0.0f;
+                        std::memcpy(&link, rec + size_t(c) * kRecordBytes + 28u, sizeof(link));
+                        v.adaptiveHost[c] = link > 0.5f ? 1u : 0u;
+                    }
+                }
             }
         }
     }
@@ -847,6 +864,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.irradianceW = v.irrHost.empty() ? 0u : v.w;
     out.irradianceH = v.irrHost.empty() ? 0u : v.h;
     out.irradianceFrame = v.irrHostFrame;
+    out.adaptiveCells = v.adaptiveHost;
     // THE SETTLED HISTORY (GatherStatus says what and why): every latest view's
     // history N frames past its last RESTART. The rest (and its hold) is
     // reported beside it and is NOT part of the predicate: a scene with a
@@ -905,6 +923,21 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             vkCmdCopyImageToBuffer(
                 cmd, static_cast<Ogre::VulkanTextureGpu *>(v.irradiance)->getFinalTextureName(),
                 VK_IMAGE_LAYOUT_GENERAL, v.irrReadback, 1, &region);
+            // ...THE UNIFORM CELLS' RECORDS of the same frame (their twin links).
+            const VkDeviceSize recBytes = VkDeviceSize(v.uniformProbes) * kRecordBytes;
+            if (!v.recReadback) {
+                std::string rerr;
+                if (!mHost.gatherMakeBuffer(recBytes * kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                            true, v.recReadback, v.recReadbackMemory,
+                                            &v.recReadbackMapped, rerr))
+                    v.recReadback = VK_NULL_HANDLE;
+            }
+            if (v.recReadback) {
+                VkBufferCopy rc{};
+                rc.dstOffset = VkDeviceSize(v.frame % kFramesInFlight) * recBytes;
+                rc.size = recBytes;
+                vkCmdCopyBuffer(cmd, v.records, v.recReadback, 1, &rc);
+            }
             VkMemoryBarrier toHost{};
             toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1887,6 +1920,21 @@ void ScreenProbeGather::finish(const void *key) {
             vkCmdCopyImageToBuffer(
                 cmd, static_cast<Ogre::VulkanTextureGpu *>(v.irradiance)->getFinalTextureName(),
                 VK_IMAGE_LAYOUT_GENERAL, v.irrReadback, 1, &region);
+            // ...THE UNIFORM CELLS' RECORDS of the same frame (their twin links).
+            const VkDeviceSize recBytes = VkDeviceSize(v.uniformProbes) * kRecordBytes;
+            if (!v.recReadback) {
+                std::string rerr;
+                if (!mHost.gatherMakeBuffer(recBytes * kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                            true, v.recReadback, v.recReadbackMemory,
+                                            &v.recReadbackMapped, rerr))
+                    v.recReadback = VK_NULL_HANDLE;
+            }
+            if (v.recReadback) {
+                VkBufferCopy rc{};
+                rc.dstOffset = VkDeviceSize(v.frame % kFramesInFlight) * recBytes;
+                rc.size = recBytes;
+                vkCmdCopyBuffer(cmd, v.records, v.recReadback, 1, &rc);
+            }
             // The host reads it after the frame retires; and the copy is ordered
             // before whatever the layout transition below does to the image (an
             // execution chain through the compute stage Ogre's barrier starts at).

@@ -423,6 +423,12 @@ private:
         /// ring of kFramesInFlight full-resolution copies, allocated on the first
         /// frame that asks and freed with the view, and the last retired copy
         /// decoded to floats for GatherStatus.
+        /// ...and the uniform cells' records of the same frames (their twin links,
+        /// GatherStatus::adaptiveCells), decoded beside the irradiance.
+        VkBuffer recReadback = VK_NULL_HANDLE;
+        VkDeviceMemory recReadbackMemory = VK_NULL_HANDLE;
+        void *recReadbackMapped = nullptr;
+        std::vector<unsigned char> adaptiveHost;
         VkBuffer irrReadback = VK_NULL_HANDLE;
         VkDeviceMemory irrReadbackMemory = VK_NULL_HANDLE;
         void *irrReadbackMapped = nullptr;

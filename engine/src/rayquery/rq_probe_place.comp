@@ -36,10 +36,11 @@
 //   probe is not enough stashes the worst pixel's surface in the cell's own record
 //   (sh[0..1], which the filter overwrites later) and counts the cell in its 8 x 8
 //   tile's tally — integer adds, so every count is the same whatever the order.
-//   PASS 2 (JAH_PLACE_SELECT) ranks the failing cells in ONE FIXED ORDER — the tiles in
-//   an order rotated by the frame index (so the budget's shortfall wanders over the
-//   picture instead of always starving its bottom), the cells of a tile row by row —
-//   and the first `cap` of them get their probe at slot = their rank. The picture is a
+//   PASS 2 (JAH_PLACE_SELECT) ranks the failing cells in ONE FIXED ORDER (the tiles row by
+//   row, the cells of a tile row by row) and gives the budget to a WINDOW of `cap` of
+//   them that slides on by `cap` every frame — so no cell, row or tile is starved: every
+//   asking cell is served within ceil(demand / cap) frames (gi.gather_adaptive_fair) —
+//   the winner at slot = its place in the window. The picture is a
 //   pure function of (scene, frame), the property spec section 5 item 2 asks for.
 // THE INDIRECT DISPATCH ARGUMENT is written by pass 2: `atomicMax( args.x,
 // uniformProbes + slot + 1 )` over the appended slots reaches exactly the count (fork
@@ -130,17 +131,15 @@ void main()
 	const uint lane = gl_LocalInvocationIndex;
 	const bool wants = inGrid && records.r[index].sh[1].w > 0.5;
 	sWants[lane] = wants ? 1u : 0u;
-	// THE TILE'S BASE: every tile ahead of this one in this frame's order, its count
-	// summed by the 64 lanes in strides and then in one fixed-order tree.
+	// THE RAW RANK: every asking cell in ONE FIXED ORDER — the tiles row by row, the
+	// cells of a tile row by row. The tile's base (the asking cells of every tile ahead
+	// of it) is summed by the 64 lanes in strides, then in one fixed-order tree.
 	const uint tilesX = ( uint( grid.x ) + 7u ) / 8u;
 	const uint tiles = tilesX * ( ( uint( grid.y ) + 7u ) / 8u );
-	const uint rot = ( uint( p.knobs.z ) * 7919u ) % max( tiles, 1u );
 	const uint own = jahPlaceTile();
-	const uint ownOrder = ( own + tiles - rot ) % max( tiles, 1u );
 	uint part = 0u;
-	for( uint t = lane; t < tiles; t += 64u )
-		if( ( t + tiles - rot ) % tiles < ownOrder )
-			part += counter.tile[t];
+	for( uint t = lane; t < own && t < tiles; t += 64u )
+		part += counter.tile[t];
 	sBase[lane] = part;
 	for( uint s = 32u; s > 0u; s >>= 1u )
 	{
@@ -151,10 +150,16 @@ void main()
 	barrier();
 	if( !wants )
 		return;
-	uint rank = sBase[0];
+	uint raw = sBase[0];
 	for( uint k = 0u; k < lane; ++k )
-		rank += sWants[k];
+		raw += sWants[k];
+	// THE WINDOW SLIDES (the merge read's F3): the budget's `cap` winners are a window of
+	// that order that moves on by `cap` every frame, so every asking cell is served within
+	// ceil(demand / cap) frames whatever its place — no tile and no row is starved.
 	const uint cap = uint( max( p.knobs3.y, 0.0 ) );
+	const uint demand = max( counter.appended, 1u );
+	const uint shift = ( ( uint( p.knobs.z ) % demand ) * ( cap % demand ) ) % demand;   // no 32-bit overflow
+	const uint rank = ( raw + demand - shift ) % demand;
 	if( rank >= cap )
 		return;
 	const uint adaptiveIndex = uint( p.knobs3.x ) + rank;
