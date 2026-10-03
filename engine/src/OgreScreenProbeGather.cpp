@@ -504,11 +504,11 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     if (!mHost.gatherMakeImage(restW, restH, VK_FORMAT_R16G16B16A16_SFLOAT, v.restMean,
                                v.restMeanMemory, v.restMeanView, err))
         return false;
-    // THE COUNTER: the demand (one word, read back) and then each 8 x 8 tile's count
+    // THE COUNTER: the demand (one word, read back) and then each eye's row's count
     // of the cells asking for a second probe — what the placement's select pass ranks
     // in a fixed order (rq_probe_place.comp, PHOTON-VIEW-NOISE-1).
-    v.placeTiles = ((v.gridW + 7u) / 8u) * ((v.gridH + 7u) / 8u);
-    if (!mHost.gatherMakeBuffer(16u + 4ull * v.placeTiles,
+    v.placeRows = (in.stereo ? 2u : 1u) * v.gridH;   // one word per eye and grid row
+    if (!mHost.gatherMakeBuffer(16u + 4ull * v.placeRows,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

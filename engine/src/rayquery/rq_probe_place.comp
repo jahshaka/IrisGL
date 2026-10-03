@@ -34,13 +34,13 @@
 // the job runs TWICE over the grid:
 //   PASS 1 (this file as written) places every cell's probe, tests it, and where one
 //   probe is not enough stashes the worst pixel's surface in the cell's own record
-//   (sh[0..1], which the filter overwrites later) and counts the cell in its 8 x 8
-//   tile's tally — integer adds, so every count is the same whatever the order.
-//   PASS 2 (JAH_PLACE_SELECT) ranks the failing cells in ONE FIXED ORDER (the tiles row by
-//   row, the cells of a tile row by row) and gives the budget to a WINDOW of `cap` of
-//   them that slides on by `cap` every frame — so no cell, row or tile is starved: every
-//   asking cell is served within ceil(demand / cap) frames (gi.gather_adaptive_fair) —
-//   the winner at slot = its place in the window. The picture is a
+//   (sh[0..1], which the filter overwrites later) and counts the cell in its eye's
+//   row's tally — integer adds, so every count is the same whatever the order.
+//   PASS 2 (JAH_PLACE_SELECT) ranks each EYE's failing cells in ONE FIXED ORDER (row by
+//   row) and gives the eye's share of the budget to a WINDOW of them that slides on by
+//   its size every frame — so no cell is starved (every asking cell is served within
+//   ceil(demand / share) frames, gi.gather_adaptive_fair) and the two eyes of one pose
+//   choose the same cells (vr.session) — the winner at slot = eye x share + its place. The picture is a
 //   pure function of (scene, frame), the property spec section 5 item 2 asks for.
 // THE INDIRECT DISPATCH ARGUMENT is written by pass 2: `atomicMax( args.x,
 // uniformProbes + slot + 1 )` over the appended slots reaches exactly the count (fork
@@ -59,8 +59,8 @@ layout( set = 0, binding = 1 ) uniform sampler2D gBufNormals;
 layout( set = 0, binding = 2 ) uniform sampler2D sceneDepth;
 layout( std430, set = 0, binding = 3 ) buffer Records { JahProbeRecord r[]; } records;
 /// `appended` = how many cells asked for a second probe this frame (the DEMAND, the
-/// budget aside); then each 8 x 8 tile's count of them (pass 1 adds, pass 2 ranks).
-layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[3]; uint tile[]; } counter;
+/// budget aside); then each eye row's count of them (pass 1 adds, pass 2 ranks).
+layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[3]; uint row[]; } counter;
 layout( std430, set = 0, binding = 5 ) buffer Args { uint x; uint y; uint z; } args;
 
 /// The surface a pixel drew, or `valid` false where it drew none (the sky, a
@@ -110,59 +110,55 @@ void writeRecord( uint index, Surface s, float adaptiveLink )
 	records.r[index].irradiance = vec4( 0.0 );
 }
 
-/// The 8 x 8 tile (this job's workgroup) a cell belongs to, row-major.
-uint jahPlaceTile()
+/// The counter's word for a cell: its EYE'S ROW (eye x grid rows + row) — the asking
+/// cells are counted per eye and row, so each eye ranks its own (PHOTON-GA-VR: the two
+/// eyes of one pose must choose the same cells).
+uint jahPlaceRow( ivec2 cell )
 {
-	const uint tilesX = ( uint( p.resolution.x ) + 7u ) / 8u;
-	return gl_WorkGroupID.y * tilesX + gl_WorkGroupID.x;
+	return uint( jahEyeOfCell( cell.x ) ) * uint( p.resolution.y ) + uint( cell.y );
 }
 
 #ifdef JAH_PLACE_SELECT
 // ---- PASS 2: THE RANK (see the header) ---------------------------------------
-shared uint sWants[64];
-shared uint sBase[64];
-
 void main()
 {
 	const ivec2 grid = ivec2( p.resolution.xy );
 	const ivec2 cell = ivec2( gl_GlobalInvocationID.xy );
-	const bool inGrid = all( lessThan( cell, grid ) );
-	const uint index = inGrid ? uint( cell.y * grid.x + cell.x ) : 0u;
-	const uint lane = gl_LocalInvocationIndex;
-	const bool wants = inGrid && records.r[index].sh[1].w > 0.5;
-	sWants[lane] = wants ? 1u : 0u;
-	// THE RAW RANK: every asking cell in ONE FIXED ORDER — the tiles row by row, the
-	// cells of a tile row by row. The tile's base (the asking cells of every tile ahead
-	// of it) is summed by the 64 lanes in strides, then in one fixed-order tree.
-	const uint tilesX = ( uint( grid.x ) + 7u ) / 8u;
-	const uint tiles = tilesX * ( ( uint( grid.y ) + 7u ) / 8u );
-	const uint own = jahPlaceTile();
-	uint part = 0u;
-	for( uint t = lane; t < own && t < tiles; t += 64u )
-		part += counter.tile[t];
-	sBase[lane] = part;
-	for( uint s = 32u; s > 0u; s >>= 1u )
-	{
-		barrier();
-		if( lane < s )
-			sBase[lane] += sBase[lane + s];
-	}
-	barrier();
-	if( !wants )
+	if( any( greaterThanEqual( cell, grid ) ) )
 		return;
-	uint raw = sBase[0];
-	for( uint k = 0u; k < lane; ++k )
-		raw += sWants[k];
-	// THE WINDOW SLIDES (the merge read's F3): the budget's `cap` winners are a window of
-	// that order that moves on by `cap` every frame, so every asking cell is served within
-	// ceil(demand / cap) frames whatever its place — no tile and no row is starved.
-	const uint cap = uint( max( p.knobs3.y, 0.0 ) );
-	const uint demand = max( counter.appended, 1u );
+	const uint index = uint( cell.y * grid.x + cell.x );
+	if( records.r[index].sh[1].w < 0.5 )
+		return;
+	// THE RAW RANK, IN THE CELL'S OWN EYE: its asking cells in ONE FIXED ORDER, row by row
+	// (the rows above from the counter, this row's cells to the left from their stash).
+	const int eye = jahEyeOfCell( cell.x );
+	const int eyeGridW = jahEyeGridW();
+	const int x0 = eye * eyeGridW;
+	const uint rowBase = uint( eye ) * uint( grid.y );
+	uint raw = 0u, demand = 0u;
+	for( uint y = 0u; y < uint( grid.y ); ++y )
+	{
+		const uint n = counter.row[rowBase + y];
+		demand += n;
+		if( y < uint( cell.y ) )
+			raw += n;
+	}
+	for( int x = x0; x < cell.x; ++x )
+		if( records.r[uint( cell.y * grid.x + x )].sh[1].w > 0.5 )
+			++raw;
+	// THE WINDOW SLIDES (the merge read's F3): each eye's share of the budget is a window
+	// of that order that moves on by its size every frame, so every asking cell is served
+	// within ceil(demand / share) frames whatever its place; and both eyes of one pose
+	// choose the same cells (each eye ranks its own, with the same share and shift).
+	const uint eyes = jahStereo() ? 2u : 1u;
+	const uint cap = uint( max( p.knobs3.y, 0.0 ) ) / eyes;
+	demand = max( demand, 1u );
 	const uint shift = ( ( uint( p.knobs.z ) % demand ) * ( cap % demand ) ) % demand;   // no 32-bit overflow
 	const uint rank = ( raw + demand - shift ) % demand;
 	if( rank >= cap )
 		return;
-	const uint adaptiveIndex = uint( p.knobs3.x ) + rank;
+	const uint slot = uint( eye ) * cap + rank;
+	const uint adaptiveIndex = uint( p.knobs3.x ) + slot;
 	Surface w;
 	w.world = records.r[index].sh[0].xyz;
 	w.dist = records.r[index].sh[0].w;
@@ -257,7 +253,7 @@ void main()
 	if( wants )
 	{
 		atomicAdd( counter.appended, 1u );
-		atomicAdd( counter.tile[jahPlaceTile()], 1u );
+		atomicAdd( counter.row[jahPlaceRow( cell )], 1u );
 	}
 	writeRecord( index, probe, 0.0 );
 	// THE STASH for pass 2: the worst pixel's surface, and whether the cell asks.

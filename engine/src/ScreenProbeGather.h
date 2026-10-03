@@ -401,8 +401,8 @@ private:
         const detail::OgreScene *scene = nullptr;
         Ogre::SceneManager *sceneMgr = nullptr;
         unsigned w = 0u, h = 0u, stride = 0u, octRes = 0u;
-        /// The placement's 8 x 8 tiles (its workgroups): the counter's per-tile words.
-        unsigned placeTiles = 0u;
+        /// The placement counter's per-row words (one per eye and grid row).
+        unsigned placeRows = 0u;
         unsigned gridW = 0u, gridH = 0u, uniformProbes = 0u, adaptiveCap = 0u, atlasCols = 0u;
         /// THE TARGET'S SHAPE (PHOTON-GA-VR): two eyes side by side, each `eyeW`
         /// pixels and `eyeGridW` probe columns wide (gridW = 2 x eyeGridW); one
