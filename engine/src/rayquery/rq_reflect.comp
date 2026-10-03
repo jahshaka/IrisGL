@@ -880,7 +880,7 @@ void main()
 		// (a character, a front-culled twin) nearer than the id pass's own depth was drawn
 		// after it, and the id names the mover BEHIND it. Such a pixel is not that
 		// mover's: it takes the posed identification below, else the camera path.
-		const bool idSurface = dist >= viewDistance( texelFetch( idDepth, idPx, 0 ).x ) * ( 1.0 - 1e-4 );
+		const bool idSurface = !jahNotIdSurface( dist, viewDistance( texelFetch( idDepth, idPx, 0 ).x ) );
 		const uint idX = idSurface ? texelFetch( atomIds, idPx, 0 ).x : JAH_ATOM_ID_EMPTY;
 		if( idX != JAH_ATOM_ID_EMPTY )
 		{

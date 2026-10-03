@@ -51,15 +51,6 @@ layout( set = 0, binding = 5 ) uniform sampler2D idDepth;
 #include "jah_atom_id.glsl"
 #include "jah_reproject.glsl"
 
-/// IS THE PIXEL'S SURFACE NOT THE ONE THE ID PASS DREW? (ID-DEPTH-1) The scene's final
-/// depth against the id pass's own, as view distances: nearer by more than the
-/// depth's own float spread means a stock-drawn surface was added in front after the
-/// id pass. (rq_motion.comp and rq_motion_skin.comp carry the same three lines.)
-bool jahNotIdSurface( float sceneDist, float idDist )
-{
-	return sceneDist < idDist * ( 1.0 - 1e-4 );
-}
-
 float viewDistance( float rawDepth )
 {
 	if( p.camPos.w < 0.5 )
