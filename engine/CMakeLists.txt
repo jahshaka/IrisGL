@@ -264,6 +264,16 @@ if(JAH_RAY_QUERY_OK)
         COMMENT "Compiling the screen-probe placement job at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x -DJAH_PLACE_SELECT
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_probePlaceSelectSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_place.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_place.comp"
+                ${JAH_RQ_HEADERS}
+        COMMENT "Compiling the screen-probe placement's select pass at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
                 "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
@@ -422,6 +432,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h")

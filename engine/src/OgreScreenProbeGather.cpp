@@ -56,6 +56,7 @@
 #include "Vao/OgreVulkanBufferInterface.h"
 
 #include "rayquery/rq_probe_place_spv.h"
+#include "rayquery/rq_probe_place_select_spv.h"
 #include "rayquery/rq_probe_gather_spv.h"
 #include "rayquery/rq_probe_filter_spv.h"
 #include "rayquery/rq_probe_integrate_spv.h"
@@ -391,6 +392,9 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
         }
         return true;
     };
+    if (!makeOne(mPlaceLayout, krq_probePlaceSelectSpv, sizeof(krq_probePlaceSelectSpv),
+                 mPlaceSelectPipeLayout, mPlaceSelectModule, mPlaceSelectPipeline, "place select"))
+        return false;
     if (!makeOne(mPlaceLayout, krq_probePlaceSpv, sizeof(krq_probePlaceSpv), mPlacePipeLayout,
                  mPlaceModule, mPlacePipeline, "place"))
         return false;
@@ -498,7 +502,11 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     if (!mHost.gatherMakeImage(restW, restH, VK_FORMAT_R16G16B16A16_SFLOAT, v.restMean,
                                v.restMeanMemory, v.restMeanView, err))
         return false;
-    if (!mHost.gatherMakeBuffer(64u,
+    // THE COUNTER: the demand (one word, read back) and then each 8 x 8 tile's count
+    // of the cells asking for a second probe — what the placement's select pass ranks
+    // in a fixed order (rq_probe_place.comp, PHOTON-VIEW-NOISE-1).
+    v.placeTiles = ((v.gridW + 7u) / 8u) * ((v.gridH + 7u) / 8u);
+    if (!mHost.gatherMakeBuffer(16u + 4ull * v.placeTiles,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -763,6 +771,12 @@ void ScreenProbeGather::close() {
     if (!dev) return;
     if (mPool) vkDestroyDescriptorPool(dev, mPool, nullptr);
     if (mPlacePipeline) vkDestroyPipeline(dev, mPlacePipeline, nullptr);
+    if (mPlaceSelectPipeline) vkDestroyPipeline(dev, mPlaceSelectPipeline, nullptr);
+    if (mPlaceSelectModule) vkDestroyShaderModule(dev, mPlaceSelectModule, nullptr);
+    if (mPlaceSelectPipeLayout) vkDestroyPipelineLayout(dev, mPlaceSelectPipeLayout, nullptr);
+    mPlaceSelectPipeline = VK_NULL_HANDLE;
+    mPlaceSelectModule = VK_NULL_HANDLE;
+    mPlaceSelectPipeLayout = VK_NULL_HANDLE;
     if (mTracePipeline) vkDestroyPipeline(dev, mTracePipeline, nullptr);
     if (mFilterPipeline) vkDestroyPipeline(dev, mFilterPipeline, nullptr);
     if (mIntegratePipeline) vkDestroyPipeline(dev, mIntegratePipeline, nullptr);
@@ -1665,7 +1679,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             " probes of each frame (a coarser stride is the cure)");
     }
     const uint32_t argsInit[4] = { std::min(v.uniformProbes, maxGroups), 1u, 1u, 0u };
-    vkCmdFillBuffer(cmd, v.counter, 0, 16, 0u);
+    vkCmdFillBuffer(cmd, v.counter, 0, VK_WHOLE_SIZE, 0u);   // the demand and every tile's count
     vkCmdUpdateBuffer(cmd, v.args, 0, sizeof(argsInit), argsInit);
     {
         VkMemoryBarrier b{};
@@ -1697,6 +1711,21 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeLayout, 0, 1,
+                                &v.placeSets[ring], 0, nullptr);
+        vkCmdDispatch(cmd, (v.gridW + 7u) / 8u, (v.gridH + 7u) / 8u, 1u);
+        // ...AND THE SECOND PASS: the cells that asked for a second probe, ranked in a
+        // fixed order, the first `cap` of them given one (rq_probe_place.comp's header).
+        {
+            VkMemoryBarrier b{};
+            b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0, nullptr, 0,
+                                 nullptr);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlaceSelectPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlaceSelectPipeLayout, 0, 1,
                                 &v.placeSets[ring], 0, nullptr);
         vkCmdDispatch(cmd, (v.gridW + 7u) / 8u, (v.gridH + 7u) / 8u, 1u);
         if (timed)

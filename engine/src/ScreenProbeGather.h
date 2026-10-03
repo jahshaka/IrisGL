@@ -396,6 +396,8 @@ private:
         const detail::OgreScene *scene = nullptr;
         Ogre::SceneManager *sceneMgr = nullptr;
         unsigned w = 0u, h = 0u, stride = 0u, octRes = 0u;
+        /// The placement's 8 x 8 tiles (its workgroups): the counter's per-tile words.
+        unsigned placeTiles = 0u;
         unsigned gridW = 0u, gridH = 0u, uniformProbes = 0u, adaptiveCap = 0u, atlasCols = 0u;
         /// THE TARGET'S SHAPE (PHOTON-GA-VR): two eyes side by side, each `eyeW`
         /// pixels and `eyeGridW` probe columns wide (gridW = 2 x eyeGridW); one
@@ -470,6 +472,11 @@ private:
     VkPipelineLayout mFilterPipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout mIntegratePipeLayout = VK_NULL_HANDLE;
     VkPipeline mPlacePipeline = VK_NULL_HANDLE;
+    /// THE PLACEMENT'S SECOND PASS (PHOTON-VIEW-NOISE-1): the same source built with
+    /// JAH_PLACE_SELECT, on the placement's layout — the budget's winners in a fixed order.
+    VkPipelineLayout mPlaceSelectPipeLayout = VK_NULL_HANDLE;
+    VkPipeline mPlaceSelectPipeline = VK_NULL_HANDLE;
+    VkShaderModule mPlaceSelectModule = VK_NULL_HANDLE;
     VkPipeline mTracePipeline = VK_NULL_HANDLE;
     VkPipeline mFilterPipeline = VK_NULL_HANDLE;
     VkPipeline mIntegratePipeline = VK_NULL_HANDLE;
