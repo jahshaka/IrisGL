@@ -67,7 +67,9 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	//
 	// Order: eye * 4 + corner, with the corners 0 = bottom-left,
 	// 1 = bottom-right, 2 = top-left, 3 = top-right in the quad's own
-	// normalised device coordinates.
+	// normalised device coordinates — and Vulkan's clip space is Y-down, so
+	// "bottom" (y = -1) is the picture's TOP row: the session hands corners 0
+	// and 1 the eye's up-tangent (measured, VR-MONO-PARITY-1).
 	uniform vec4 jahEyeCorner[8];
 vulkan( }; )
 

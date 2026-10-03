@@ -3077,15 +3077,22 @@ void VrSession::applyEyeViews() {
         const XrFovf &f = mViews[eye].fov;
         const float l = std::tan(f.angleLeft), r = std::tan(f.angleRight);
         const float u = std::tan(f.angleUp), d = std::tan(f.angleDown);
-        // THE QUAD'S v = 1 EDGE IS THE TOP OF THE PICTURE, and that is
-        // CALIBRATED, not assumed: the same convention question has two
-        // plausible answers on a Vulkan backend (the API's clip space is
-        // Y-down, the quad's own vertex data is not), and the suite settles it
-        // — with the up-tangent at v = 1 the second eye reads mean 0.66/255
-        // against a mono render of that eye, with the down-tangent 1.86 and
-        // three times as many pixels past the tolerance.
+        // THE QUAD'S v = 0 EDGE IS THE TOP OF THE PICTURE: Vulkan's clip space
+        // is Y-down, and the quad's vertices are used as clip coordinates
+        // unchanged, so the vertex at y = -1 lands on the eye's first row. This
+        // is MEASURED (VR-MONO-PARITY-1), and it reverses the F2 calibration
+        // that stood here: with the up-tangent at v = 1 the second eye drew,
+        // across the top of its picture, the sky BELOW the horizon — a flat
+        // grey band where the left eye and a mono render of the right eye show
+        // the zenith. vr.session read it as the sky rows' mean 1.9-3.2/255
+        // (worst 93) in the right eye against 0.01 in the left, and as the
+        // hidden-area case's eye 1 failing at mean 1.03-1.10 (bar 1.0); how
+        // much it weighs depends on how much sky Monado's wall-clock head has
+        // in view at the read, which is what made the red come and go. With
+        // the up-tangent at v = 0 the right eye's sky rows read 0.31 (worst 1:
+        // the dither) and eye 1 0.35.
         const float xs[4] = { l, r, l, r };
-        const float ys[4] = { d, d, u, u };
+        const float ys[4] = { u, u, d, d };
         for (int c = 0; c < 4; ++c)
             mEyeCornerRay[eye][c] = mEyeWorldRot[eye] * Ogre::Vector3(xs[c], ys[c], -1.0f);
     }

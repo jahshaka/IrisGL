@@ -784,6 +784,16 @@ void main()
 	const int eye = eyeOfColumn( tc.x, traceRes.x );
 	const vec2 localUv = eyeLocalUv( uv, eye );
 	const EyeImage thisEye = eyeNow( eye );
+	// THE SAMPLE SEQUENCE IS KEYED ON THE EYE'S OWN PIXEL, never the target's
+	// (VR-MONO-PARITY-1). Keyed on `tc`, the right eye of a stereo target took
+	// another pixel's rays than the same pixel of the left eye and of a mono
+	// render at that eye's pose: at worldScale 0 the halves differed at the
+	// pillar's silhouette by 19/255 (vr.session_undithered, 4 runs in 6). The
+	// ray NOISE of the two eyes is then the same at one pose, and that is
+	// correct: unlike the grade's dither it is not seen as noise but averaged
+	// into a temporal mean, and an eye's mean must not depend on which half of
+	// the target it was drawn into. With one eye this is `tc` itself.
+	const ivec2 seedPix = ivec2( tc.x - eye * ( traceRes.x / 2 ), tc.y );
 
 	const float rawDepth = texture( sceneDepth, uv ).x;
 	// Cleared depth at EITHER extreme is "nothing was drawn here" — correct with
@@ -858,7 +868,7 @@ void main()
 	const vec3 T = vec3( 1.0 + sg * worldN.x * worldN.x * a0, sg * b0, -sg * worldN.x );
 	const vec3 B = vec3( b0, sg + worldN.y * worldN.y * a0, -worldN.y );
 	const vec3 Ve = vec3( dot( V, T ), dot( V, B ), dot( V, worldN ) );
-	const vec3 Ht = sampleGgxVndf( Ve, lobeAlpha, sample2( tc, uint( p.knobs.z ) ) );
+	const vec3 Ht = sampleGgxVndf( Ve, lobeAlpha, sample2( seedPix, uint( p.knobs.z ) ) );
 	const vec3 H = normalize( Ht.x * T + Ht.y * B + Ht.z * worldN );
 	vec3 L = reflect( -V, H );
 	if( dot( L, worldN ) <= 0.0 )
@@ -970,7 +980,7 @@ void main()
 							   hitPrim, rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
 		const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
 		// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
-		jahHitSeed = uint( tc.x ) * 73856093u ^ uint( tc.y ) * 19349663u ^ uint( p.knobs.z ) * 2654435761u;
+		jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^ uint( p.knobs.z ) * 2654435761u;
 		if( !decodeAlways )
 			traced = jahHitRadianceSourced( hitSlot, world + worldN * bias + L * t, hitN, L,
 											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
