@@ -3527,6 +3527,15 @@ public:
     float mSkyShInForce[27] = { 0.0f };
     Ogre::TextureGpu *mReflPendingTex = nullptr;
     void landEnvironmentIfComplete();
+    /// THE CUBES A SWAP REPLACED (SKY-SWAP-1): kept alive until no holder
+    /// listens to them, so no draw of the change frame samples a destroyed cube
+    /// (Ogre's blank texture — the presented black flash). See
+    /// reapRetiredReflections; `force` destroys them all (the sky is going).
+    struct RetiredReflection { Ogre::TextureGpu *tex = nullptr; unsigned frames = 0u; };
+    std::vector<RetiredReflection> mRetiredReflections;
+    static constexpr unsigned kRetiredReflectionMaxFrames = 120u;
+    static constexpr unsigned kRetiredJobFrames = 4u;
+    void reapRetiredReflections(bool force);
     /// Drops the next set's cube (and its owned convolution source) unlanded.
     void destroyPendingReflection();
     /// No sky, no sky light: every SH this scene holds, the one in force too.
