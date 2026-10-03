@@ -311,7 +311,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         n.item->setLightMask(n.lightMask);   // same reason as attachMesh's
         // PER-OBJECT SHADOW CASTING, re-applied for the same reason: a rebuilt
         // Item is born casting (Scene::setNodeCastShadow).
-        n.item->setCastShadows(n.castShadow);
+        applyNodeCasterBit(n);   // castShadow AND a caster channel (SHADOW-FIT-1)
         n.item->setRenderQueueGroup(renderQueueFor(tit->second));
         n.gpuMeshSlot = acquireGpuMesh(mit->second);   // the GPU scene's mesh table
         markGpuSlotDirty(n);

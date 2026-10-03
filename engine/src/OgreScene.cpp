@@ -682,6 +682,7 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     // carries kHelperBit alone.
     if (n.item) n.item->setVisibilityFlags(
                     itemVisibilityFlags(n, n.materialUnlit, n.materialDistortion));
+    applyNodeCasterBit(n);             // SHADOW-FIT-1: the caster bit follows the channel
     if (n.item) markGpuSlotDirty(n);   // the table's flags word follows the channels
     // (A CASCADE CHAIN NO LONGER HOLDS ITS OWN COPY OF THAT DECISION, audit D2:
     // the gather reads the flags word the line above re-stages, at every build,
@@ -695,7 +696,22 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
                                               : (kHelperBit | (n.vrHelper ? kVrHelperBit : 0u)))
                                 : ((n.movable || n.dragMover) ? kMovableBit : kVisibleBit);
     if (n.billboards) n.billboards->setVisibilityFlags(n.shown ? on : 0u);
+    if (n.billboards) n.billboards->setCastShadows(n.castShadow && (on & allShadowCasterChannels()));
     if (n.particleDef) n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
+}
+
+// THE CASTER BIT FOLLOWS THE CHANNEL (SHADOW-FIT-1; EnginePrivate.h has the
+// why). An object no shadow pass draws must not carry Ogre's caster bit either:
+// the shadow node sizes every split's depth range and the focused maps' fit
+// from the casters box, which reads that bit under the VIEWPORT's mask — so a
+// light icon or a gizmo part "casting" moved the sun's fit in the editor
+// viewport (where the helper channel is open) and not in a screenshot (where
+// it is not). The GPU scene's flags word already asks the same question
+// (OgreGpuScene.cpp, kGpuCaster).
+void OgreScene::applyNodeCasterBit(Node &n) {
+    if (!n.item) return;
+    n.item->setCastShadows(n.castShadow &&
+                           (n.item->getVisibilityFlags() & allShadowCasterChannels()));
 }
 
 OgreScene::Node *OgreScene::registryNode(const Ogre::Node *sn) {
@@ -1092,7 +1108,7 @@ void OgreScene::setNodeCastShadow(NodeId id, bool on) {
     const bool changed = it->second.castShadow != on;
     it->second.castShadow = on;
     if (it->second.item) {
-        it->second.item->setCastShadows(on);
+        applyNodeCasterBit(it->second);   // castShadow AND a caster channel
         markGpuSlotDirty(it->second);   // the caster bit of the flags word
     }
     // A caster that just appeared or vanished is exactly what the lamp-map
