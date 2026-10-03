@@ -118,6 +118,11 @@ public:
     /// FIRST pass to bind them can order (see the tier's note).
     virtual void gatherClearDummies(VkCommandBuffer cmd) = 0;
     virtual VkSampler gatherPointSampler() const = 0;
+    /// A compute pipeline THROUGH THE DEVICE'S PIPELINE CACHE (PHOTON-II-1 item 12): the
+    /// tier's own builder (persisted with the shader cache, counted and named in
+    /// ShaderCacheStats) — never a pipeline of the gather's own outside it.
+    virtual VkResult gatherCreatePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
+                                          const char *name) = 0;
     virtual VkSampler gatherLinearSampler() const = 0;
 };
 
@@ -396,6 +401,8 @@ private:
         const detail::OgreScene *scene = nullptr;
         Ogre::SceneManager *sceneMgr = nullptr;
         unsigned w = 0u, h = 0u, stride = 0u, octRes = 0u;
+        /// The placement counter's per-row words (one per eye and grid row).
+        unsigned placeRows = 0u;
         unsigned gridW = 0u, gridH = 0u, uniformProbes = 0u, adaptiveCap = 0u, atlasCols = 0u;
         /// THE TARGET'S SHAPE (PHOTON-GA-VR): two eyes side by side, each `eyeW`
         /// pixels and `eyeGridW` probe columns wide (gridW = 2 x eyeGridW); one
@@ -416,6 +423,12 @@ private:
         /// ring of kFramesInFlight full-resolution copies, allocated on the first
         /// frame that asks and freed with the view, and the last retired copy
         /// decoded to floats for GatherStatus.
+        /// ...and the uniform cells' records of the same frames (their twin links,
+        /// GatherStatus::adaptiveCells), decoded beside the irradiance.
+        VkBuffer recReadback = VK_NULL_HANDLE;
+        VkDeviceMemory recReadbackMemory = VK_NULL_HANDLE;
+        void *recReadbackMapped = nullptr;
+        std::vector<unsigned char> adaptiveHost;
         VkBuffer irrReadback = VK_NULL_HANDLE;
         VkDeviceMemory irrReadbackMemory = VK_NULL_HANDLE;
         void *irrReadbackMapped = nullptr;
@@ -470,6 +483,11 @@ private:
     VkPipelineLayout mFilterPipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout mIntegratePipeLayout = VK_NULL_HANDLE;
     VkPipeline mPlacePipeline = VK_NULL_HANDLE;
+    /// THE PLACEMENT'S SECOND PASS (PHOTON-VIEW-NOISE-1): the same source built with
+    /// JAH_PLACE_SELECT, on the placement's layout — the budget's winners in a fixed order.
+    VkPipelineLayout mPlaceSelectPipeLayout = VK_NULL_HANDLE;
+    VkPipeline mPlaceSelectPipeline = VK_NULL_HANDLE;
+    VkShaderModule mPlaceSelectModule = VK_NULL_HANDLE;
     VkPipeline mTracePipeline = VK_NULL_HANDLE;
     VkPipeline mFilterPipeline = VK_NULL_HANDLE;
     VkPipeline mIntegratePipeline = VK_NULL_HANDLE;

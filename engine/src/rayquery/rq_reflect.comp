@@ -409,6 +409,9 @@ void photonHit( ivec2 tc, vec4 c )
 /// (jah_atom_id.glsl's encoding; 0xFFFFFFFF = nothing, or an item the id pass does
 /// not draw). Read only under p.motion.x; a 1x1 stand-in is bound otherwise.
 layout( set = 0, binding = 37 ) uniform usampler2D atomIds;
+/// ...AND THE ID PASS'S OWN DEPTH (ID-DEPTH-1, PHOTON-II-1 item 11): the scene depth
+/// copied right after the id pass, before any stock-drawn surface is added to it.
+layout( set = 0, binding = 40 ) uniform sampler2D idDepth;
 #include "jah_atom_id.glsl"
 #define JAH_FOG_P( k ) p.fog[k]
 #define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
@@ -873,7 +876,12 @@ void main()
 	if( p.motion.x > 0.5 )
 	{
 		const ivec2 idPx = clamp( ivec2( uv * p.motion.yz ), ivec2( 0 ), ivec2( p.motion.yz ) - 1 );
-		const uint idX = texelFetch( atomIds, idPx, 0 ).x;
+		// NOT THE ID'S SURFACE (ID-DEPTH-1, rq_motion.comp's test): a stock-drawn surface
+		// (a character, a front-culled twin) nearer than the id pass's own depth was drawn
+		// after it, and the id names the mover BEHIND it. Such a pixel is not that
+		// mover's: it takes the posed identification below, else the camera path.
+		const bool idSurface = !jahNotIdSurface( dist, viewDistance( texelFetch( idDepth, idPx, 0 ).x ) );
+		const uint idX = idSurface ? texelFetch( atomIds, idPx, 0 ).x : JAH_ATOM_ID_EMPTY;
 		if( idX != JAH_ATOM_ID_EMPTY )
 		{
 			const MovedSlot own = movedSlot( idX & JAH_ATOM_ID_SLOT_MASK );

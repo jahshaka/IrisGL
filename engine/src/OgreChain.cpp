@@ -886,15 +886,19 @@ void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandl
     // MOTION (ID-DEPTH-1): rq_motion.comp writes a moving slot's velocity only where
     // the scene's final depth is still this one — a stock-drawn character standing in
     // front of a moving Atom mover is not the id's surface and keeps the camera path —
-    // and rq_motion_skin.comp identifies such a pixel by the same test. So on a chain
-    // whose velocity job runs (the march, the ray tier, the id pass) it runs every frame.
+    // and rq_motion_skin.comp identifies such a pixel by the same test; so does the ray
+    // reflection (rq_reflect.comp, PHOTON-II-1 item 11). So on a chain whose velocity job
+    // or ray reflection reads the ids it runs every frame.
     {
         Ogre::CompositorTargetDef *ct = n->addTargetPass(kAtomViewDepth);
         ct->setNumPasses(1);
         auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(ct->addPass(Ogre::PASS_DEPTHCOPY));
         c->setDepthTextureCopy(kDepth, kAtomViewDepth);
-        const bool velocityJob = marchesInScreenSpace(desc) && desc.rayReflect && desc.atomDraw;
-        c->mExecutionMask = velocityJob ? Ogre::uint8(0xFFu) : kAtomViewExecutionBit;
+        // ...and the RAY REFLECTION's own motion (PHOTON-II-1 item 11): rq_reflect.comp
+        // reads a moving slot's previous pose only where this depth is still the
+        // pixel's, so wherever the ray tier reflects over the id pass the copy runs.
+        const bool idReaders = desc.rayReflect && desc.atomDraw;
+        c->mExecutionMask = idReaders ? Ogre::uint8(0xFFu) : kAtomViewExecutionBit;
         c->mProfilingId = "Jahshaka atom id depth";
     }
 }

@@ -746,14 +746,6 @@ namespace Ogre
             if( mLightVctBounceInject->getProperty( "jah_env" ) != envOn )
                 mLightVctBounceInject->setProperty( "jah_env", envOn );
         }
-        // Jahshaka (PHOTON-VOXEL-4, CONE-SET-1): THE PIXEL'S CONE SET. The bounce is the
-        // store's own integral of the diffuse the pixel reads, so it walks the pixel's
-        // cones - kConeDirs, the pixel's `vct_cone_dirs` (the surface cache's card job
-        // reads the same constant). It carried the six-cone set hard-coded while the
-        // pixel and the cards ran four: two quadratures of one store, the bounce's
-        // error not the pixel's.
-        if( mLightVctBounceInject->getProperty( "vct_cone_dirs" ) != kConeDirs )
-            mLightVctBounceInject->setProperty( "vct_cone_dirs", kConeDirs );
         if( mEnvCube )
         {
             texSlot.texture = mEnvCube;
@@ -919,7 +911,7 @@ namespace Ogre
         mBounceInvVoxelResolution->setManualValue( 1.0f / mVoxelizer->getVoxelResolution() );
         // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): ONE, AND IT IS THE PHYSICS.
         //
-        // The bounce adds `albedo * G` where G is the six-cone weighted mean of the
+        // The bounce adds `albedo * G` where G is the four-cone weighted mean of the
         // voxel radiance -- weights that sum to 1 over a cosine-ish set, i.e. an
         // ESTIMATE OF E / PI already (that is exactly why HlmsPbs consumes the same
         // gather as `envColourD` with no division of its own,
@@ -1476,7 +1468,7 @@ namespace Ogre
         // sky, a HIT reads the surface - and the surface's radiance includes the sky that
         // lights it. It needs the bounce volumes (setAllowMultipleBounces) and an
         // environment that carries light; a store without either is unchanged.
-        const bool skyPass = getAllowMultipleBounces() && hasEnvironmentLight();
+        const bool skyPass = mStoreSkyLight && getAllowMultipleBounces() && hasEnvironmentLight();
         if( skyPass )
             runBounce( true );
 

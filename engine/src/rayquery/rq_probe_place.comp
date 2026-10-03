@@ -24,23 +24,30 @@
 //      counter and capped per frame. A flat wall appends nothing; a railing, a
 //      silhouette or a step appends one per cell it crosses.
 //
-// WHAT THE ATOMIC DOES AND DOES NOT DECIDE (spec section 5 item 2). The
-// counter's ORDER is the scheduler's, so which SLOT a cell's adaptive probe
-// lands in varies run to run. Nothing reads a probe by slot: a cell records
-// its own adaptive probe's index in its record, every stochastic input of that
-// probe is keyed on its CELL and its frame, and the pixels that read it reach
-// it through the cell. So the picture is a pure function of (scene, frame) even
-// though the list's order is not — which is the property the determinism case
-// asserts.
-//
-// AND THE INDIRECT DISPATCH ARGUMENT IS WRITTEN HERE, by the same atomic:
-// `atomicMax( args.x, uniformProbes + slot + 1 )`. The count is only final when
-// every thread has finished, and a monotonic max over the appended indices
-// reaches exactly that value without a second dispatch to compute it (fork 1bccc3f93+a98e2b0af
-// (was 0032)'s count/work pair is the same shape in the Hlms; a raw compute job can
-// write its own arguments and needs no patch). The buffer is pre-set to
-// `uniformProbes` by a transfer before this job, so a frame that appends
-// nothing still dispatches the grid.
+// WHICH CELLS GET THEIR SECOND PROBE IS DECIDED IN A FIXED ORDER, NEVER BY AN ATOMIC
+// (PHOTON-VIEW-NOISE-1, 2026-10-03). The budget (`cap`, a quarter of the grid) binds
+// whenever more cells fail than it allows — a small view (a screenshot's 160 x 90 is
+// 60 cells and a cap of 15), a busy one. While the winners were the first `cap` cells
+// to reach an atomic counter, WHICH cells got a probe was the scheduler's choice: two
+// shots of one still scene differed by up to 14 codes over a whole cell (photon.view's
+// "noise", 780 px of 14,400; bit-identical 13 times out of 13 with the cap lifted). So
+// the job runs TWICE over the grid:
+//   PASS 1 (this file as written) places every cell's probe, tests it, and where one
+//   probe is not enough stashes the worst pixel's surface in the cell's own record
+//   (sh[0..1], which the filter overwrites later) and counts the cell in its eye's
+//   row's tally — integer adds, so every count is the same whatever the order.
+//   PASS 2 (JAH_PLACE_SELECT) ranks each EYE's failing cells in ONE FIXED ORDER (row by
+//   row) and gives the eye's share of the budget to a WINDOW of them that slides on by
+//   its size every frame — so no cell is starved (every asking cell is served within
+//   ceil(demand / share) frames, gi.gather_adaptive_fair) and the two eyes of one pose
+//   choose the same cells (vr.session) — the winner at slot = eye x share + its place. The picture is a
+//   pure function of (scene, frame), the property spec section 5 item 2 asks for.
+// THE INDIRECT DISPATCH ARGUMENT is written by pass 2: `atomicMax( args.x,
+// uniformProbes + slot + 1 )` over the appended slots reaches exactly the count (fork
+// 1bccc3f93+a98e2b0af (was 0032)'s count/work pair is the same shape in the Hlms; a raw
+// compute job can write its own arguments and needs no patch). The buffer is pre-set to
+// `uniformProbes` by a transfer before pass 1, so a frame that appends nothing still
+// dispatches the grid.
 #extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
@@ -51,9 +58,9 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 layout( set = 0, binding = 1 ) uniform sampler2D gBufNormals;
 layout( set = 0, binding = 2 ) uniform sampler2D sceneDepth;
 layout( std430, set = 0, binding = 3 ) buffer Records { JahProbeRecord r[]; } records;
-/// x = how many adaptive probes have been appended this frame; the three
-/// components after it are the trace's INDIRECT DISPATCH arguments.
-layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[3]; } counter;
+/// `appended` = how many cells asked for a second probe this frame (the DEMAND, the
+/// budget aside); then each eye row's count of them (pass 1 adds, pass 2 ranks).
+layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[3]; uint row[]; } counter;
 layout( std430, set = 0, binding = 5 ) buffer Args { uint x; uint y; uint z; } args;
 
 /// The surface a pixel drew, or `valid` false where it drew none (the sky, a
@@ -103,6 +110,68 @@ void writeRecord( uint index, Surface s, float adaptiveLink )
 	records.r[index].irradiance = vec4( 0.0 );
 }
 
+/// The counter's word for a cell: its EYE'S ROW (eye x grid rows + row) — the asking
+/// cells are counted per eye and row, so each eye ranks its own (PHOTON-GA-VR: the two
+/// eyes of one pose must choose the same cells).
+uint jahPlaceRow( ivec2 cell )
+{
+	return uint( jahEyeOfCell( cell.x ) ) * uint( p.resolution.y ) + uint( cell.y );
+}
+
+#ifdef JAH_PLACE_SELECT
+// ---- PASS 2: THE RANK (see the header) ---------------------------------------
+void main()
+{
+	const ivec2 grid = ivec2( p.resolution.xy );
+	const ivec2 cell = ivec2( gl_GlobalInvocationID.xy );
+	if( any( greaterThanEqual( cell, grid ) ) )
+		return;
+	const uint index = uint( cell.y * grid.x + cell.x );
+	if( records.r[index].sh[1].w < 0.5 )
+		return;
+	// THE RAW RANK, IN THE CELL'S OWN EYE: its asking cells in ONE FIXED ORDER, row by row
+	// (the rows above from the counter, this row's cells to the left from their stash).
+	const int eye = jahEyeOfCell( cell.x );
+	const int eyeGridW = jahEyeGridW();
+	const int x0 = eye * eyeGridW;
+	const uint rowBase = uint( eye ) * uint( grid.y );
+	uint raw = 0u, demand = 0u;
+	for( uint y = 0u; y < uint( grid.y ); ++y )
+	{
+		const uint n = counter.row[rowBase + y];
+		demand += n;
+		if( y < uint( cell.y ) )
+			raw += n;
+	}
+	for( int x = x0; x < cell.x; ++x )
+		if( records.r[uint( cell.y * grid.x + x )].sh[1].w > 0.5 )
+			++raw;
+	// THE WINDOW SLIDES (the merge read's F3): each eye's share of the budget is a window
+	// of that order that moves on by its size every frame, so every asking cell is served
+	// within ceil(demand / share) frames whatever its place; and both eyes of one pose
+	// choose the same cells (each eye ranks its own, with the same share and shift).
+	const uint eyes = jahStereo() ? 2u : 1u;
+	const uint cap = uint( max( p.knobs3.y, 0.0 ) ) / eyes;
+	demand = max( demand, 1u );
+	const uint shift = ( ( uint( p.knobs.z ) % demand ) * ( cap % demand ) ) % demand;   // no 32-bit overflow
+	const uint rank = ( raw + demand - shift ) % demand;
+	if( rank >= cap )
+		return;
+	const uint slot = uint( eye ) * cap + rank;
+	const uint adaptiveIndex = uint( p.knobs3.x ) + slot;
+	Surface w;
+	w.world = records.r[index].sh[0].xyz;
+	w.dist = records.r[index].sh[0].w;
+	w.normal = records.r[index].sh[1].xyz;
+	w.valid = true;
+	// ITS SOURCE CELL travels with it, in the same float the uniform records use for
+	// their link: the trace keys an adaptive probe's ray directions on the CELL it was
+	// placed for (rq_probe_gather.comp's note).
+	writeRecord( adaptiveIndex, w, float( index + 1u ) );
+	records.r[index].normalW.w = float( adaptiveIndex + 1u );
+	atomicMax( args.x, adaptiveIndex + 1u );
+}
+#else
 void main()
 {
 	const ivec2 grid = ivec2( p.resolution.xy );
@@ -142,6 +211,7 @@ void main()
 		// hands its pixels back to whatever the pixel path already had. A probe
 		// on the sky is not an error, it is most of the border.
 		writeRecord( index, probe, 0.0 );
+		records.r[index].sh[1] = vec4( 0.0 );
 		return;
 	}
 
@@ -176,28 +246,18 @@ void main()
 		}
 	}
 
-	float adaptiveLink = 0.0;
-	const uint cap = uint( max( p.knobs3.y, 0.0 ) );
-	// THE DEMAND IS COUNTED WHATEVER THE BUDGET IS, and the budget decides only
-	// what is APPENDED. Counting inside `cap > 0` made the raw counter agree
-	// with the clamped one by construction -- a reading that cannot say whether
-	// a cap is costing anything, which is the one question a budget's reading
-	// exists to answer. One atomic per failing cell, on the cells that fail.
-	if( worstError > 1.0 )
+	// THE DEMAND IS COUNTED WHATEVER THE BUDGET IS (the budget decides only what is
+	// appended, in pass 2): a reading that could not say whether the cap is costing
+	// anything would not answer the one question a budget's reading exists for.
+	const bool wants = worstError > 1.0;
+	if( wants )
 	{
-		const uint slot = atomicAdd( counter.appended, 1u );
-		if( slot < cap )
-		{
-			const uint adaptiveIndex = uint( p.knobs3.x ) + slot;
-			// ITS SOURCE CELL travels with it, in the same float the uniform
-			// records use for their link: the trace keys an adaptive probe's
-			// ray directions on the CELL it was placed for, never on the slot
-			// the atomic handed it (rq_probe_gather.comp's note).
-			writeRecord( adaptiveIndex, worstSurface, float( index + 1u ) );
-			adaptiveLink = float( adaptiveIndex + 1u );
-			// THE INDIRECT ARGUMENT, by a monotonic max — see the header.
-			atomicMax( args.x, adaptiveIndex + 1u );
-		}
+		atomicAdd( counter.appended, 1u );
+		atomicAdd( counter.row[jahPlaceRow( cell )], 1u );
 	}
-	writeRecord( index, probe, adaptiveLink );
+	writeRecord( index, probe, 0.0 );
+	// THE STASH for pass 2: the worst pixel's surface, and whether the cell asks.
+	records.r[index].sh[0] = vec4( worstSurface.world, worstSurface.dist );
+	records.r[index].sh[1] = vec4( worstSurface.normal, wants ? 1.0 : 0.0 );
 }
+#endif   // JAH_PLACE_SELECT

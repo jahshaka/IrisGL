@@ -95,10 +95,10 @@ vec3 jahEnvShEval( vec3 n, float k1, float k2 )
 /// radiance — but a GGX lobe's moment is carried by its long tail, so the
 /// matched lobe reaches far past the cone's rim and pulls the bright horizon
 /// into a zenith-pointing cone (measured on the shipped sky, low sun: 10 % mean
-/// error at the six-cone aperture). The 0.6 is MEASURED, not derived: gi.env_cone
+/// error at the deleted six-cone set's aperture). The 0.6 is MEASURED, not derived: gi.env_cone
 /// swept it (1.0 / 0.7 / 0.6 / 0.5 / 0.35) over 26 directions, three apertures
 /// and two sun heights; 0.5-0.7 is the flat optimum and 0.6 keeps every
-/// aperture under 4 % mean error at both (six-cone 1.4 / 3.8 %, the field's
+/// aperture under 4 % mean error at both (the deleted six-cone set 1.4 / 3.8 %, the field's
 /// probe ray 0.7 / 1.2 %, a 0.1 rad specular cone 1.0 / 2.3 %, noon / low sun).
 /// The GGX moment is numerical (400,000 stratified samples per roughness, 801
 /// roughnesses; its maximum is exactly 1/3, at r = 1), tabulated below against
@@ -197,7 +197,7 @@ vec3 jahEnvConeCells( vec3 d, float omega, int rings )
 /// de-convolved, NOT the irradiance: a set of cones that each read the
 /// irradiance at its own axis and are then weighted by the cosine convolves the
 /// sky twice (measured: a hemisphere ambient's zenith band came back at 0.63 of
-/// itself through the six cones, and the voxel volume's face stepped against the
+/// itself through the deleted six-cone set, and the voxel volume's face stepped against the
 /// SH outside it).
 vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 {
@@ -238,7 +238,11 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 /// sun). Measured: 1.002x at 35 degrees, 0.979x at 5. Nine fetches a cone (the cap
 /// read took 26). With no cube, the SH at the set's own band weights 1 / P_l( cos
 /// 45 ) - sqrt( 2 ) and 4 (CARD-VIEW-BIAS-1's ring rule: the set's sum IS the SH
-/// irradiance).
+/// irradiance) - UNCLAMPED: under a directional SH a single quadrant's band-weighted
+/// value can be negative while the set's sum is not, and clamping each cone broke
+/// that sum (the merge read's worth-a-look 3: a high light, no ambient - 94 % of
+/// normals had a negative cone; spikes/photon-ii-1/p2/wal3). The CALLER clamps the
+/// set's sum (jahDiffuseCones).
 vec3 jahEnvQuadrant( vec3 coneWorld, vec3 normalWorld )
 {
 	if( JAH_ENV_CUBE_ON )
@@ -262,7 +266,7 @@ vec3 jahEnvQuadrant( vec3 coneWorld, vec3 normalWorld )
 		}
 		return sum * ( 1.0 / 9.0 ) * JAH_ENV_GAIN;
 	}
-	return max( jahEnvShEval( coneWorld, 1.41421356, 4.0 ), vec3( 0.0 ) );
+	return jahEnvShEval( coneWorld, 1.41421356, 4.0 );
 }
 
 /// What a GGX LOBE of perceptual roughness `r` about `dirWorld` sees of the

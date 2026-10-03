@@ -1048,6 +1048,16 @@ struct CloudLayerDesc {
 };
 
 /// What the cloud layer is DOING in a scene (world.clouds().live).
+/// THE CLOUD LAYER'S TEXTURE BUDGET (CLOUD-BAKE-MEMORY-1), the same at every tier: one
+/// field over the 64 km tile, 2048^2 R16F (~31 m a texel) with its full mip chain —
+/// 2 B x (4^12 - 1) / 3 = 11,184,810 B (10.67 MiB). The layer DRAWS the field (its
+/// optical depth is the deck's look overhead, read with the pixel's own gradients), so a
+/// coarser far field is a coarser sky, not a cheaper one: the mips are the far field. The
+/// bake's three 512^2 intermediates live only inside the workspace that makes them.
+/// OgreSky.cpp builds the field from this number (a static_assert ties its size to it);
+/// cloud_2d.budget holds the live textures to it.
+constexpr unsigned long long kCloudFieldBytes = 11184810ull;
+
 struct CloudStatus {
     /// The layer quad exists and is visible (enabled, over a sky it may draw on).
     bool     drawn = false;
@@ -2365,6 +2375,13 @@ enum class RayTracingMode { Auto, Off, On };
 enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog, Mobility,
                            Camera };
 
+/// THE MOST CASCADES ANY CHAIN BUILDS — a tier's (giQualityFacts' longest
+/// chain) and a scripted one (GiParams::cascadeSet) alike (CASCADE-CAP-1). The
+/// PBS pass-texture budget is sized on it (OgreFog.cpp, PhotonPassBinding): a
+/// longer chain would claim more set-0 slots than the 64-slot table holds (a
+/// fifth anisotropic cascade alone overflows it). world.gi refuses above it.
+constexpr int kGiTierMaxCascades = 4;
+
 /// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
 struct GiParams {
     GiMode    mode    = GiMode::Off;
@@ -2388,7 +2405,9 @@ struct GiParams {
     /// over `kProbeGridFitMax` (OgreGi.cpp, 64 m). Negative (the default) is the
     /// engine's own; 0 disables the ceiling; anything else replaces it.
     float     testProbeGridFitMax = -1.0f;
-    /// Total light bounces, 1..4 (1 = a single indirect bounce).
+    /// Total light bounces, 0..4 (1 = a single indirect bounce: every surface re-emits the
+    /// lamps' and the sky's light once). 0 = THE DIRECT STORE ALONE (BOUNCES-ZERO-1): the
+    /// voxels hold the lamps' direct light and nothing a surface re-emits of the sky.
     int       numBounces = 1;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
     /// bounds (the parallax-corrected cubemap grid). Clamped to 1..8 per axis.
@@ -2537,14 +2556,14 @@ struct GiParams {
     /// (THE VOXELS ARE ALWAYS THE CAMERA-CENTRED CHAIN. The single scene-fitted
     /// volume and its switch `cascades` are deleted — D4-PHOTON-TIERS, the
     /// owner's law: no fixed GI volume, no "room" in any lighting definition.)
-    /// How many cascades to build, 1..8. 0 means "the table below decides", and
+    /// How many cascades to build, 1..kGiTierMaxCascades. 0 means "the table below decides", and
     /// when the table is empty too, the engine's own tier table does.
     int       cascadeCount = 0;
     /// The cascade table. Entries [0, cascadeCount) are used; a zero
     /// `resolution` or `halfSize` in a used entry falls back to the tier table.
     /// The engine's default is the Ogre sample's set (5 m@128, 10 m@128,
     /// 15 m@64, 60 m@64), which PHOTON_SPEC §5 measured the cadence of.
-    GiCascadeDesc cascadeSet[8];
+    GiCascadeDesc cascadeSet[kGiTierMaxCascades];
     /// THE PER-CASCADE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1), audit B7).
     ///
     /// The raster voxeliser's price is the GEOMETRY INSIDE THE REGION and
@@ -2731,7 +2750,7 @@ struct GiParams {
     /// The cascade table, compared only over the entries in USE — a table
     /// beyond `cascadeCount` is not part of the configuration.
     bool cascadeSetEqual(const GiParams &o) const {
-        for (int i = 0; i < cascadeCount && i < 8; ++i)
+        for (int i = 0; i < cascadeCount && i < kGiTierMaxCascades; ++i)
             if (!(cascadeSet[i] == o.cascadeSet[i])) return false;
         return true;
     }
@@ -2854,12 +2873,6 @@ struct GiGatherFacts {
     unsigned adaptiveCapDivisor = 4u;
 };
 
-/// THE MOST CASCADES A SHIPPED TIER BUILDS (giQualityFacts' longest chain). The
-/// PBS pass-texture budget is sized on it (OgreFog.cpp, PhotonPassBinding): a
-/// SCRIPTED chain (GiParams::cascadeSet, up to 8) longer than this claims more
-/// set-0 slots than the fullest shipped pass.
-constexpr int kGiTierMaxCascades = 4;
-
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as
     /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
@@ -2911,8 +2924,8 @@ struct GiQualityFacts {
     /// land, inside this budget, and a light write relights the resident set
     /// over as many frames as it takes.
     unsigned cardLightTexels = 131072u;
-    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (six cones
-    /// over the chain) per texel, spent when a card is captured and when the
+    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (the four-cone
+    /// set over the chain, the sky on the sixteen-cone quadrature) per texel, spent when a card is captured and when the
     /// chain re-injects. Lumen's own indirect budget, 512 square, is the
     /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
     /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
@@ -3555,6 +3568,10 @@ struct GatherStatus {
     /// Which gather frame the readback is of (the view's frame counter), so a
     /// suite can tell a fresh copy from a repeat.
     unsigned irradianceFrame = 0u;
+    /// ...and THE SAME FRAME'S ADAPTIVE TWINS (the readback door too; PHOTON-II-1 F3): per
+    /// uniform cell, row-major over the probe grid (probesX x probesY), 1 where the cell got
+    /// its second probe that frame. How a suite proves the budget's ranking starves no cell.
+    std::vector<unsigned char> adaptiveCells;
     /// WHY IT IS NOT RUNNING, when `on` is true and `running` is false and the
     /// reason is the engine's rather than the view's (no ray device, no
     /// pipelines on this driver, no room for the atlas). Empty is "nothing went
@@ -5898,6 +5915,10 @@ struct ShaderCacheStats {
     /// pipeline layer makes the second near zero.
     unsigned enginePipelinesThisRun = 0;
     double   enginePipelineMs = 0.0;
+    /// ...and WHICH: each engine pipeline's name in build order (PHOTON-II-1 item 12 —
+    /// the reflection's two and the gather's joined the cache; a pipeline built
+    /// outside it would be missing here).
+    std::vector<std::string> enginePipelineNames;
 
     // ---- the two caches the shader HASH addresses (HLMSBITS-1) -------------
     /// THE NUMBER THAT CRASHED THE EDITOR ON 2026-09-14, now readable while the
@@ -7951,7 +7972,10 @@ struct VoxelReaderAnswer {
 /// half-angle as its tangent — exactly what jahEnvCone takes.
 struct EnvironmentConeQuery {
     Vec3  dirWorld;              ///< unit direction, world axes
-    float tanHalfAngle = 0.577f; ///< the six-cone diffuse set's half angle
+    /// The cone's half angle as its tangent. Every caller sets its own; the default is
+    /// the ONE diffuse set's, the four 44.5-degree cones (jah_voxel_cones.glsl's
+    /// coneAngleTan) - the six-cone set it named is deleted (SIX-CONE-DEAD-1).
+    float tanHalfAngle = 0.98269f;
 };
 
 /// What the harness answers for one cone, linear radiance with the Sky Light's

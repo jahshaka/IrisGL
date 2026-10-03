@@ -131,6 +131,8 @@ namespace Ogre
         /// exactly as long as mLightBounce does (see setAllowMultipleBounces): a
         /// volume that cannot bounce has no use for it.
         TextureGpu *mLightDirect;
+        /// setStoreSkyLight (BOUNCES-ZERO-1).
+        bool mStoreSkyLight = true;
         /// Jahshaka (PHOTON-VOXEL-5), the anisotropic tiers with a bounce: the BACK side's direct
         /// term and the directional level 0's direct part per axis (float like mLightDirect and
         /// the total since CONTACT-OCCLUSION-1 - an emitter exceeds the lamps' ceiling; level 0 only; both signs packed along x like mLightVoxel[1..3]) - what
@@ -292,6 +294,13 @@ namespace Ogre
         */
         void setAllowMultipleBounces( bool bAllowMultipleBounces );
         bool getAllowMultipleBounces() const;
+
+        /// Jahshaka (BOUNCES-ZERO-1): whether update() stores the SKY's light on the surfaces
+        /// (the sky pass). True by default: the sky is a light like any lamp. False is the
+        /// document's numBounces 0 - THE DIRECT STORE ALONE: the lamps' direct light and
+        /// nothing a surface re-emits of the sky or of another surface.
+        void setStoreSkyLight( bool on ) { mStoreSkyLight = on; }
+        bool getStoreSkyLight() const { return mStoreSkyLight; }
 
         /** Sets baking multiplier for HDR rendering.
 
@@ -477,11 +486,6 @@ namespace Ogre
         uint32       getNumVoxelTextures() const { return volumesPerCascade( mAnisotropic ); }
         /// Jahshaka (OWN-GI-1): the same count without an instance — what the PBS
         /// pass claims per cascade (PhotonPassBinding) and the pass budget is sized on.
-        /// Jahshaka (OWN-GI-1): THE CONE SET every reader of the store walks — the
-        /// pixel (`vct_cone_dirs`, PhotonPassBinding), the bounce injection and the
-        /// cards' light job. Four. Upstream's HlmsPbs::setVctFullConeCount (six) is
-        /// never called by the engine, so it is not read either.
-        static constexpr int32 kConeDirs = 4;
         static constexpr uint32 kVolumesPerCascadeIsotropic = 5u;
         static constexpr uint32 kVolumesPerCascadeAnisotropic = 10u;
         static constexpr uint32 volumesPerCascade( bool anisotropic )

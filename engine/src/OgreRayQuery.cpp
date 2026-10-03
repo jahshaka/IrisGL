@@ -246,7 +246,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 40u;
+constexpr unsigned kReflectBindings = 41u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -292,8 +292,13 @@ constexpr unsigned kReflectDirectBinding = kReflectIdBinding + 1u;
 /// ...and THE AIR'S TABLE (39, PHOTON-I-1 fix 5): the aerial-perspective volume the
 /// colour passes read, for the fog along the reflection (jah_fog_along.glsl).
 constexpr unsigned kReflectFogBinding = kReflectDirectBinding + 1u;
-static_assert(kReflectBindings == kReflectFogBinding + 1u,
-              "the air's table is the reflection set's last binding");
+/// ...and THE ID PASS'S OWN DEPTH (40, ID-DEPTH-1 for the reflection — PHOTON-II-1
+/// item 11): the scene depth copied right after the id pass, so a pixel whose final
+/// surface is NEARER than the id's (a stock-drawn character in front of a moving
+/// Atom mover) is not taken for the mover (rq_reflect.comp).
+constexpr unsigned kReflectIdDepthBinding = kReflectFogBinding + 1u;
+static_assert(kReflectBindings == kReflectIdDepthBinding + 1u,
+              "the id pass's depth is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the
@@ -670,7 +675,7 @@ private:
     /// the shader cache and loads at boot — so a warm boot re-uses what a cold one
     /// compiled instead of compiling it again where the driver keeps no cache of its own.
     /// Counted and timed (the log's "rayquery: compute pipelines" line).
-    VkResult createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out);
+    VkResult createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out, const char *name);
     unsigned mPipelinesBuilt = 0;
     double   mPipelineBuildMs = 0.0;
 
@@ -1087,6 +1092,10 @@ public:
     /// safe to call twice in one frame — the flag is cleared by the first.
     void gatherClearDummies(VkCommandBuffer cmd) override { clearDummyImages(cmd); }
     VkSampler gatherPointSampler() const override { return mPointSampler; }
+    VkResult gatherCreatePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
+                                  const char *name) override {
+        return createComputePipeline(cpi, out, name);
+    }
     VkSampler gatherLinearSampler() const override { return mLinearSampler; }
 
 private:
@@ -1731,15 +1740,17 @@ void RayQueryTier::drainRetired() {
     }
 }
 
-VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out) {
+VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
+                                             const char *name) {
     const auto t0 = std::chrono::steady_clock::now();
     const VkResult r = vkCreateComputePipelines(mVk, mDev ? mDev->mPipelineCache : VK_NULL_HANDLE, 1, &cpi, nullptr, out);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     ++mPipelinesBuilt;
     mPipelineBuildMs += ms;
-    if (r == VK_SUCCESS) ShaderCache::noteEnginePipeline(ms);   // dirt for the pipeline layer
+    if (r == VK_SUCCESS) ShaderCache::noteEnginePipeline(ms, name);   // dirt for the pipeline layer
     Ogre::LogManager::getSingleton().logMessage(
-        "rayquery: compute pipelines " + std::to_string(mPipelinesBuilt) + " built, this one " +
+        "rayquery: compute pipelines " + std::to_string(mPipelinesBuilt) + " built, this one (" +
+        std::string(name ? name : "") + ") " +
         std::to_string(ms) + " ms, " + std::to_string(mPipelineBuildMs) + " ms in all" +
         (mDev && mDev->mPipelineCache ? " (through the device's pipeline cache)" : " (no pipeline cache)"));
     return r;
@@ -1890,7 +1901,7 @@ bool RayQueryTier::makePipeline(std::string &err) {
     cpi.stage.module = mModule;
     cpi.stage.pName = "main";
     cpi.layout = mPipeLayout;
-    if (createComputePipeline(cpi, &mPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mPipeline, "rays") != VK_SUCCESS) {
         err = "rayquery: vkCreateComputePipelines failed";
         return false;
     }
@@ -2465,7 +2476,7 @@ bool RayQueryTier::makeTlasWritePipeline(std::string &err) {
     cpi.stage.module = mTwModule;
     cpi.stage.pName = "main";
     cpi.layout = mTwPipeLayout;
-    if (createComputePipeline(cpi, &mTwPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mTwPipeline, "tlas write") != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed (the instance job)";
         return false;
     }
@@ -4187,7 +4198,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         cpi.stage.module = mCardParityModule;
         cpi.stage.pName = "main";
         cpi.layout = mCardParityPipeLayout;
-        if (createComputePipeline(cpi, &mCardParityPipeline) !=
+        if (createComputePipeline(cpi, &mCardParityPipeline, "card parity") !=
             VK_SUCCESS) {
             err = "cardReadParity: vkCreateComputePipelines failed";
             return false;
@@ -4640,6 +4651,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 37 the view's id image (REFLECT-MOVERS-1)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 38 voxelDirect[] (MOVER-OCCLUSION-1)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 39 the air's table (PHOTON-I-1 fix 5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 40 the id pass's depth (ID-DEPTH-1)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -4688,7 +4700,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     cpi.stage.module = mReflectModule;
     cpi.stage.pName = "main";
     cpi.layout = mReflectPipeLayout;
-    if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &cpi, nullptr, &mReflectPipeline) !=
+    if (createComputePipeline(cpi, &mReflectPipeline, "reflect") !=
         VK_SUCCESS) {
         err = "rayquery/reflect: vkCreateComputePipelines failed";
         return false;
@@ -4709,7 +4721,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         fcpi.stage.module = mFilterModule;
         fcpi.stage.pName = "main";
         fcpi.layout = mReflectPipeLayout;
-        if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &fcpi, nullptr, &mFilterPipeline) !=
+        if (createComputePipeline(fcpi, &mFilterPipeline, "reflect filter") !=
             VK_SUCCESS) {
             err = "rayquery/reflect: vkCreateComputePipelines (filter) failed";
             return false;
@@ -4945,6 +4957,19 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     if (idTex && (idTex->getWidth() != ssrTex->getWidth() || idTex->getHeight() != ssrTex->getHeight()))
         idTex = nullptr;   // a different picture's ids
+    // ...AND THE ID PASS'S OWN DEPTH (ID-DEPTH-1, the velocity jobs' test, here for the
+    // reflection): the chain copies it every frame wherever the ray tier reflects over
+    // an id pass (OgreChain.cpp). Without it the ids are not read at all — an id with
+    // no depth to say whether the pixel still shows its surface is the defect.
+    Ogre::TextureGpu *idDepthTex = nullptr;
+    if (idTex) {
+        try {
+            idDepthTex = node->getDefinedTexture(Ogre::IdString("jahAtomViewDepth"));
+        } catch (Ogre::Exception &) { idDepthTex = nullptr; }
+        if (!idDepthTex || idDepthTex->getWidth() != idTex->getWidth() ||
+            idDepthTex->getHeight() != idTex->getHeight())
+            idTex = idDepthTex = nullptr;
+    }
     // THE UAV FLAG IS THE CONTRACT (OgreChain.cpp, ChainDesc::rayReflect). A
     // texture declared without it has no storage-image usage and the view
     // creation below would be a validation error, so a chain built while the
@@ -5345,7 +5370,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // both arms (trap 12). Off is the pre-lane picture up to the mover age's six
     // low bits in the history's mean length (a 2^-17 relative change of a length).
     const bool motionOn = getenv("JAH_R5_NO_MOTION") == nullptr;
-    if (!motionOn) idTex = nullptr;
+    if (!motionOn) idTex = idDepthTex = nullptr;
     pp.motion[0] = idTex ? 1.0f : 0.0f;
     pp.motion[1] = idTex ? float(idTex->getWidth()) : 1.0f;
     pp.motion[2] = idTex ? float(idTex->getHeight()) : 1.0f;
@@ -5632,6 +5657,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!fogImg.imageView) { bail("the air's table view is null"); return; }
     w[kReflectFogBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[kReflectFogBinding].pImageInfo = &fogImg;
+    // THE ID PASS'S DEPTH (40): the chain's copy, or the flat stand-in with `motion.x` 0.
+    VkDescriptorImageInfo idDepthImg{};
+    idDepthImg.sampler = mPointSampler;
+    idDepthImg.imageView = idDepthTex ? sampledView(idDepthTex) : mDummyFlat.view;
+    idDepthImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!idDepthImg.imageView) { bail("the id depth view is null"); return; }
+    w[kReflectIdDepthBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectIdDepthBinding].pImageInfo = &idDepthImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -5668,6 +5701,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                      Ogre::ResourceAccess::Read, computeStage);
         if (idTex)
             solver.resolveTransition(trans, idTex, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        if (idDepthTex)
+            solver.resolveTransition(trans, idDepthTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < voxCount; ++c)
             for (int axis = 0; axis < kRayVoxelKinds; ++axis)
@@ -5797,7 +5833,7 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
     cpi.stage.module = mMotionModule;
     cpi.stage.pName = "main";
     cpi.layout = mMotionPipeLayout;
-    if (createComputePipeline(cpi, &mMotionPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mMotionPipeline, "motion") != VK_SUCCESS) {
         err = "rayquery/motion: vkCreateComputePipelines failed";
         return false;
     }
@@ -5810,7 +5846,7 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
         VkComputePipelineCreateInfo spi = cpi;
         if (vkCreateShaderModule(mVk, &ssi, nullptr, &mMotionSkinModule) == VK_SUCCESS) {
             spi.stage.module = mMotionSkinModule;
-            if (createComputePipeline(spi, &mMotionSkinPipeline) != VK_SUCCESS)
+            if (createComputePipeline(spi, &mMotionSkinPipeline, "motion skin") != VK_SUCCESS)
                 mMotionSkinPipeline = VK_NULL_HANDLE;
         }
         if (!mMotionSkinPipeline)
@@ -5907,7 +5943,7 @@ bool RayQueryTier::makeAlphaMaskPipeline(std::string &err) {
     cpi.stage.module = mAlphaModule;
     cpi.stage.pName = "main";
     cpi.layout = mAlphaPipeLayout;
-    if (createComputePipeline(cpi, &mAlphaPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mAlphaPipeline, "alpha mask") != VK_SUCCESS) {
         err = "rayquery/alpha-mask: vkCreateComputePipelines failed";
         return false;
     }
@@ -6796,7 +6832,7 @@ bool RayQueryTier::makeSunContactPipeline(std::string &err) {
     cpi.stage.module = mSunModule;
     cpi.stage.pName = "main";
     cpi.layout = mSunPipeLayout;
-    if (createComputePipeline(cpi, &mSunPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mSunPipeline, "sun contact") != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed";
         return false;
     }
@@ -7347,7 +7383,7 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
     cpi.stage.module = mCmModule;
     cpi.stage.pName = "main";
     cpi.layout = mCmPipeLayout;
-    if (createComputePipeline(cpi, &mCmPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mCmPipeline, "card movers") != VK_SUCCESS) {
         err = "vkCreateComputePipelines failed";
         return false;
     }
@@ -8275,7 +8311,7 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
     cpi.stage.module = mCompModule;
     cpi.stage.pName = "main";
     cpi.layout = mCompPipeLayout;
-    if (createComputePipeline(cpi, &mCompPipeline) != VK_SUCCESS) {
+    if (createComputePipeline(cpi, &mCompPipeline, "hit composite") != VK_SUCCESS) {
         err = "rayquery/hit: vkCreateComputePipelines failed";
         return false;
     }

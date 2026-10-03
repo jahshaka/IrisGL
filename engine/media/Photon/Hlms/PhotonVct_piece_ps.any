@@ -269,11 +269,6 @@
 	// CUBEMAP frame (CONE-FRAME-2); the integrator takes a cubemap direction to the
 	// volume's normalised space (one diagonal) and to the world (the z un-flip)
 	// through these two macros.
-	@property( vct_cone_dirs == 6 )
-		#define JAH_CONES_SIX 1
-	@else
-		#define JAH_CONES_SIX 0
-	@end
 	#define JAH_CONES_TO_LS( d ) jahCubeToVctProbeSpaceDir( d, passBuf.vctProbeParams )
 	#define JAH_CONES_TO_WORLD( d ) float3( ( d ).x, ( d ).y, -( d ).z )
 	@insertpiece( JahVoxelCones )

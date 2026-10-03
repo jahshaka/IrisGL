@@ -38,7 +38,6 @@ const Ogre::IdString kJahVctCascades("jah_vct_cascades");
 const Ogre::IdString kJahIfd("jah_ifd");
 // Upstream's names (PbsProperty::*), read by its pieces and by ours.
 const Ogre::IdString kVctNumProbes("vct_num_probes");
-const Ogre::IdString kVctConeDirs("vct_cone_dirs");
 const Ogre::IdString kVctAnisotropic("vct_anisotropic");
 const Ogre::IdString kVctSdfQuality("vct_enable_specular_sdf_quality");
 const Ogre::IdString kVctDisableSpecular("vct_disable_specular");
@@ -127,8 +126,6 @@ void PhotonPassBinding::preparePassHash(bool casterPass, Ogre::SceneManager *sce
     if (b->vct) {
         hb.vct = b->vct;
         hlms->_setProperty(tid, kJahVctCascades, Ogre::int32(b->vct->getNumCascades()));
-        // The cone set every reader of the store walks (kConeDirs, four).
-        hlms->_setProperty(tid, kVctConeDirs, Ogre::PhotonVoxelLighting::kConeDirs);
         hlms->_setProperty(tid, kVctAnisotropic, b->vct->isAnisotropic());
         hlms->_setProperty(tid, kVctSdfQuality, b->vct->shouldEnableSpecularSdfQuality());
         // 'Static' reflections on cubemaps look horrible (upstream's own words).

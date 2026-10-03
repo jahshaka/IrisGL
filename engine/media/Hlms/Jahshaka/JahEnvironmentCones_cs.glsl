@@ -50,7 +50,7 @@ void main()
 	const float t = max( params.queries[q].w, 0.0 );
 
 	// A NEGATIVE tan asks for the four-cone set's escape about a +Y normal (jahEnvQuadrant).
-	const vec3 lookup = params.queries[q].w < 0.0 ? jahEnvQuadrant( axis, vec3( 0.0, 1.0, 0.0 ) )
+	const vec3 lookup = params.queries[q].w < 0.0 ? max( jahEnvQuadrant( axis, vec3( 0.0, 1.0, 0.0 ) ), vec3( 0.0 ) )
 												 : jahEnvCone( axis, t );
 
 	// The frame about the axis (any orthonormal one: the cap is symmetric).

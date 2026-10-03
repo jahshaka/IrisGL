@@ -43,4 +43,14 @@ uvec4 jahAtomIdDecode( uvec2 id )
 	return uvec4( id.x & JAH_ATOM_ID_SLOT_MASK, id.x >> 24u, id.y >> 8u, id.y & 0xFFu );
 }
 
+/// IS THE PIXEL'S SURFACE NOT THE ONE THE ID PASS DREW? (ID-DEPTH-1) The scene's final
+/// depth against the id pass's own, as view distances: nearer by more than the depth's
+/// own float spread means a stock-drawn surface (a character, a front-culled twin) was
+/// added in front after the id pass, and the id names what lies BEHIND it. The one test
+/// the id's readers take: rq_motion.comp, rq_motion_skin.comp and rq_reflect.comp.
+bool jahNotIdSurface( float sceneDist, float idDist )
+{
+	return sceneDist < idDist * ( 1.0 - 1e-4 );
+}
+
 #endif   // JAH_ATOM_ID_GLSL

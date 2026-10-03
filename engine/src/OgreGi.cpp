@@ -846,6 +846,9 @@ bool OgreScene::injectCascade(size_t i) {
         return false;
     }
     applyCascadeEnvironment(lighting);
+    // numBounces 0 = THE DIRECT STORE ALONE (BOUNCES-ZERO-1): no surface re-emits the sky
+    // either (the sky pass is a bounce of the sky's light); 1 = the sky and the lamps once.
+    lighting->setStoreSkyLight(mGi.numBounces > 0);
     lighting->update(mSceneMgr, cascadeBounces(i), true /*autoMultiplier*/);
     stamp = frame;
     if (mGiInjectionCountFrame != frame) {
@@ -4379,7 +4382,7 @@ bool OgreScene::rebuildVct() {
 
 std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
     std::vector<GiParams::GiCascadeDesc> table;
-    const int wanted = std::min(std::max(mGi.cascadeCount, 0), 8);
+    const int wanted = std::min(std::max(mGi.cascadeCount, 0), kGiTierMaxCascades);
     for (int i = 0; i < wanted; ++i) {
         const GiParams::GiCascadeDesc &d = mGi.cascadeSet[i];
         // A half-specified row is not a request the engine can honour halfway:
@@ -4491,7 +4494,8 @@ static inline long long jahQuantAxis(float pos, float size) {
 // passes), so the default leaves every cascade at 0 exactly as before.
 Ogre::uint32 OgreScene::cascadeBounces(size_t idx) const {
     (void)idx;
-    return Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
+    // 0 and 1 both run no extra pass: 0 also skips the sky pass (setStoreSkyLight above)
+    return Ogre::uint32(std::max(std::min(mGi.numBounces, 4) - 1, 0));
 }
 
 size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {

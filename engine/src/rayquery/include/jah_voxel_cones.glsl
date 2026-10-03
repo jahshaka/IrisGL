@@ -14,13 +14,12 @@
 //
 // WHAT IT IS NOT: the march. Every cone is walked by jahConeMarch
 // (jah_voxel_march.glsl, the piece JahVoxelMarch) and every escape reads the
-// one environment (jahEnvCone, jah_environment.glsl, the piece JahEnvironment);
-// both pieces are inserted BEFORE this one.
+// one environment (jah_environment.glsl, the piece JahEnvironment: the diffuse
+// set its SH irradiance, the fine sky set its cone lookup); both pieces are
+// inserted BEFORE this one.
 //
 // HOW A CALLER BINDS IT — the march's macros and the environment's, and:
 //
-//     JAH_CONES_SIX           1 = the six-cone set (HlmsPbs's vct_cone_dirs 6,
-//                             setVctFullConeCount), 0 = the four-cone set
 //     JAH_CONES_TO_LS(d)      a direction in the BASIS's space (the space the
 //                             caller built the cone frame in) to cascade 0's
 //                             normalised space, unit length
@@ -49,7 +48,7 @@
 /// AND IT IS BUILT ABOUT THAT SPACE'S OWN AXES, a decision measured rather than
 /// argued: Frisvad's special direction is the antipode of (0,0,1), and a fixed
 /// pre-rotation (onto a body diagonal, which no axis-aligned surface has) turns
-/// the six cones of every axis-aligned surface to odd angles, where each sample
+/// the cones of every axis-aligned surface to odd angles, where each sample
 /// is a three-way blend of the anisotropic volumes, and the bounce comes out
 /// dimmer — gi.field_follows' red-wall bounce read 0.0174 with the axes and
 /// 0.0105 with the body diagonal. The price: the special direction is a world
@@ -145,27 +144,18 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 ///            are read) times the one environment IN THAT CONE'S DIRECTION AT
 ///            THAT CONE'S APERTURE, weighted — radiance, in whatever units the
 ///            caller bound the environment in
-/// THE TWO CONE SETS: six cones (one on the normal weighted 0.25, five at 60
-/// degrees weighted 0.15, tan of the half angle 0.577 = 30 degrees) or four
-/// (at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees). The engine leaves
-/// HlmsPbs at four. The weights carry the cosine; each of the four cones' escapes
-/// reads its azimuthal quadrant of the hemisphere cosine-weighted (jahEnvQuadrant),
-/// the six-cone set its own solid angle (jahEnvCone).
+/// THE CONE SET: four cones at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees
+/// (the one set: upstream's six-cone alternative is deleted, SIX-CONE-DEAD-1). The
+/// weights carry the cosine. Each cone's escape reads its azimuthal QUADRANT of the
+/// hemisphere, cosine-weighted (jahEnvQuadrant, PHOTON-I-1): the four quadrants sum
+/// to the exact irradiance. With no environment cube the quadrant reads the nine-band
+/// SH at the set's own band weights 1 / P_l( cos 45 ) = sqrt( 2 ), 4 (CARD-VIEW-BIAS-1:
+/// a ring of N >= 3 directions at polar angle t averages a band-l harmonic to
+/// P_l( cos t ) times its value on the normal, so those weights make the open-sky sum
+/// the SH irradiance exactly).
 void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 					  out vec3 light, out vec3 envD )
 {
-#if JAH_CONES_SIX
-	const int kCones = 6;
-	const vec3 coneDirs[6] = vec3[6]( vec3( 0.0, 0.0, 1.0 ),
-									  vec3( 0.866025, 0.0, 0.5 ),
-									  vec3( 0.267617, 0.823639, 0.5 ),
-									  vec3( -0.700629, 0.509037, 0.5 ),
-									  vec3( -0.700629, -0.509037, 0.5 ),
-									  vec3( 0.267617, -0.823639, 0.5 ) );
-	const float coneWeights[6] = float[6]( 0.25, 0.15, 0.15, 0.15, 0.15, 0.15 );
-	const float coneAngleTan = 0.577;
-	const uint coneFlags = 0u;
-#else
 	const int kCones = 4;
 	const vec3 coneDirs[4] = vec3[4]( vec3( 0.707107, 0.0, 0.707107 ),
 									  vec3( 0.0, 0.707107, 0.707107 ),
@@ -174,7 +164,6 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 	const float coneWeights[4] = float[4]( 0.25, 0.25, 0.25, 0.25 );
 	const float coneAngleTan = 0.98269;
 	const uint coneFlags = 0u;
-#endif
 	light = vec3( 0.0, 0.0, 0.0 );
 	envD = vec3( 0.0, 0.0, 0.0 );
 	for( int i = 0; i < kCones; ++i )
@@ -185,17 +174,16 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 		JahConeResult result = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), coneAngleTan, coneOrigin, coneFlags );
 		light += coneWeights[i] * result.colour;
 		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.alpha / 0.95 ) ) *
-#if JAH_CONES_SIX
-				jahEnvCone( JAH_CONES_TO_WORLD( d ), coneAngleTan );
-#else
 				jahEnvQuadrant( JAH_CONES_TO_WORLD( d ), JAH_CONES_TO_WORLD( basis[2] ) );   // its quadrant, cosine-weighted
-#endif
 	}
+	// THE SET'S SUM is what is clamped, never a cone (jahEnvQuadrant's note): the four
+	// quadrants' exact sum survives a negative band-weighted quadrant.
+	envD = max( envD, vec3( 0.0, 0.0, 0.0 ) );
 }
 
 /// THE SKY'S SHARE ON A FINER QUADRATURE (CONTACT-OCCLUSION-1): what jahDiffuseCones'
 /// `envD` estimates, on sixteen 20.4-degree cones instead of the set's four 44.5-degree
-/// (or six 30-degree) ones - cosine-distributed, four rings of four, equal weights (each
+/// ones - cosine-distributed, four rings of four, equal weights (each
 /// the same projected solid angle), the ring below the horizon's rim stopped by the
 /// surface (jahConeBelow), over the same march and the same environment lookup.
 ///

@@ -1412,11 +1412,6 @@ void SurfaceCache::relightCards() {
         if (mLightJob->getProperty("jah_card_round_r11g11b10") != round)
             mLightJob->setProperty("jah_card_round_r11g11b10", round);
     }
-    // THE PIXEL'S CONE SET (PhotonVoxelLighting::kConeDirs, the pixel's
-    // `vct_cone_dirs`): the card's indirect is the pixel's integral, so it walks
-    // the pixel's cones.
-    if (mLightJob->getProperty("vct_cone_dirs") != Ogre::PhotonVoxelLighting::kConeDirs)
-        mLightJob->setProperty("vct_cone_dirs", Ogre::PhotonVoxelLighting::kConeDirs);
     // Every light volume a reader binds per cascade: the total, the anisotropic
     // axes, the per-axis coverage (PHOTON-VOXEL-3), the surface position
     // (PHOTON-VOXEL-4) - PhotonVoxelLighting's list.

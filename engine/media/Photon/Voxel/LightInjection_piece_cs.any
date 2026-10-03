@@ -278,16 +278,13 @@
 				const float lightDist = length( light.pos.xyz - voxelAabbCenter );
 				lightAtten = jahLightAttenuation( lightDist, light.lightRange, light.lightSourceRadius );
 			}
-			// AN AREA LIGHT's LTC form factor below is its own distance law; the injection
-			// adds the RANGE WINDOW the pixel's area approximation carries (the one falloff's
-			// saturate( 1 - ( d / R )^4 )^2, d to the rectangle's centre), so an area lamp's
-			// bounce ends where its direct light does.
+			// AN AREA LIGHT's LTC form factor below is its own distance law; the range is
+			// JahBrdf's window (jahLightWindow, d to the rectangle's centre) - the ONE law the
+			// pixel's LTC light takes too since fork 18e0b9350 (PHOTON-II-1 F5; before it the
+			// pixel cut hard at the range) - so an area lamp's bounce ends where its direct
+			// light does (gi.area_energy's range arm).
 			if( light.lightType == LT_AREA_LTC && light.lightRange > 0.0f )
-			{
-				const float x = length( light.pos.xyz - voxelAabbCenter ) / light.lightRange;
-				const float w = clamp( 1.0f - x * x * x * x, 0.0f, 1.0f );
-				lightAtten = w * w;
-			}
+				lightAtten = jahLightWindow( length( light.pos.xyz - voxelAabbCenter ), light.lightRange );
 			if( light.lightType == LT_SPOTLIGHT )
 			{
 				float spotCosAngle = dot( -lightDir, light.spotDirection.xyz );

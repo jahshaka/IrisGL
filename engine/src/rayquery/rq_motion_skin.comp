@@ -58,15 +58,6 @@ layout( std430, set = 0, binding = 8 ) readonly buffer JahGeomRows { uvec4 jahGe
 #include "jah_atom_id.glsl"
 #include "jah_reproject.glsl"
 
-/// IS THE PIXEL'S SURFACE NOT THE ONE THE ID PASS DREW? (ID-DEPTH-1) The scene's final
-/// depth against the id pass's own, as view distances: nearer by more than the
-/// depth's own float spread means a stock-drawn surface was added in front after the
-/// id pass. (rq_motion.comp and rq_motion_skin.comp carry the same three lines.)
-bool jahNotIdSurface( float sceneDist, float idDist )
-{
-	return sceneDist < idDist * ( 1.0 - 1e-4 );
-}
-
 /// The instance flags' posed bit (GpuScene.h kGpuSkinned; jah_rq_hit_record.glsl's).
 const uint kJahMotionSkinned = 1u << 5u;
 /// THE IDENTIFYING RAY'S WINDOW around the pixel's depth, as a fraction of the
