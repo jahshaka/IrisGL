@@ -1080,6 +1080,17 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	// (SCENEGRAPH_SPEC §6b). The folder itself is untouched; this is metadata.
 	node->folderPath	= this->folderPath;
 
+	// THE ANIMATIONS travel with the copy (CLIP-REF-1): a duplicated avatar
+	// that came back with no clips stood in its bind pose. Each animation is
+	// cloned (own property keys, the SAME skeletal clip and its reference),
+	// and the copy plays the clip the original plays.
+	for (const auto &anim : this->animations) {
+		if (anim.isNull()) continue;
+		auto copy = anim->clone();
+		node->addAnimation(copy);
+		if (anim == this->animation) node->setAnimation(copy);
+	}
+
     auto id = QUuid::createUuid();
     auto guid = id.toString().remove(0, 1);
     guid.chop(1);
