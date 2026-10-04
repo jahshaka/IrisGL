@@ -43,6 +43,7 @@ void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &no
 	hashBodies.insert(node->getGUID(), body);
 	nodeTransforms.insert(node->getGUID(),
 	                      SavedLocal{ node->getLocalPos(), node->getLocalScale(), node->getLocalRot() });
+	indexBody(body, node);
 }
 
 void Environment::addBodyToWorld(PhysicsBody &owned, const iris::SceneNodePtr &node)
@@ -70,15 +71,18 @@ void Environment::removeBodyFromWorld(btRigidBody *body)
     world->removeRigidBody(body);
     hashBodies.remove(guid);
     nodeTransforms.remove(guid);
+    unindexBody(body);
 }
 
 void Environment::removeBodyFromWorld(const QString &guid)
 {
     if (!hashBodies.contains(guid)) return;
 
-    world->removeRigidBody(hashBodies.value(guid));
+    btRigidBody *body = hashBodies.value(guid);
+    world->removeRigidBody(body);
     hashBodies.remove(guid);
     nodeTransforms.remove(guid);
+    unindexBody(body);
 }
 
 void Environment::storeCollisionShape(btCollisionShape *shape)
@@ -211,6 +215,10 @@ void Environment::stepSimulation(float delta)
 		// simulation's speed was the frame rate's (ENGINEERING_DEBT_SPEC
 		// ADDENDUM 4).
 		world->stepSimulation(delta, 0);
+		// WHICH BODIES THIS STEP MOVED (writeBack): read now, per step, because
+		// a body can integrate in one step of a frame and be put to sleep in
+		// the next — the frame's last state alone would miss its last move.
+		noteActiveBodies();
 		// AVATAR_LOCOMOTION_SPEC §6.3: the seam the 2016 controller update
 		// left. AFTER the rigid-body solve, so the sweeps see this frame's
 		// world, and OUTSIDE bullet's stepping, so a component is stepped
@@ -420,6 +428,151 @@ bool Environment::syncBodyToNode(const iris::SceneNodePtr &node)
 	// under it would stay asleep at the new pose and never fall.
 	body->activate(true);
 	return true;
+}
+
+// ---- THE WRITE-BACK (see environment.h) ------------------------------------
+
+void Environment::indexBody(btRigidBody *body, const iris::SceneNodePtr &node)
+{
+	if (!body || !node) return;
+	BodyRecord rec;
+	rec.guid = node->getGUID();
+	// NESTED: a body under another body's node is moved by THAT body's write
+	// too, which the epoch test cannot see (it is our own write); a node whose
+	// writes are not scene movement (a camera) is moved without the epoch
+	// moving. Both are re-checked every frame.
+	rec.nested = !node->_countsAsMovement();
+	for (iris::SceneNodePtr p = node->getParent(); p; p = p->getParent()) {
+		++rec.depth;
+		if (p->isPhysicsBody && hashBodies.contains(p->getGUID())) rec.nested = true;
+	}
+	bodyRecords.insert(body, rec);
+	if (rec.nested) {
+		// Shallowest first, so a parent body is written before its children.
+		int at = 0;
+		while (at < nestedBodies.size() && bodyRecords.value(nestedBodies[at]).depth <= rec.depth) ++at;
+		nestedBodies.insert(at, body);
+	}
+	// A body added under bodies that are already in the world (a runtime add;
+	// initializePhysicsWorldFromScene goes parents first) makes them nested.
+	std::function<void(const iris::SceneNodePtr &)> markBelow = [&](const iris::SceneNodePtr &n) {
+		for (const iris::SceneNodePtr &c : n->children()) {
+			if (c->isPhysicsBody) {
+				btRigidBody *cb = hashBodies.value(c->getGUID(), nullptr);
+				auto it = cb ? bodyRecords.find(cb) : bodyRecords.end();
+				if (it != bodyRecords.end() && !it->nested) {
+					it->nested = true;
+					int at = 0;
+					while (at < nestedBodies.size() && bodyRecords.value(nestedBodies[at]).depth <= it->depth) ++at;
+					nestedBodies.insert(at, cb);
+				}
+			}
+			markBelow(c);
+		}
+	};
+	markBelow(node);
+	// The next write-back looks at every body once: a new one must be written
+	// even if it never wakes (a static body, the first frame of a simulation).
+	writeBackValid = false;
+}
+
+void Environment::unindexBody(const btRigidBody *body)
+{
+	if (!body) return;
+	bodyRecords.remove(body);
+	movedBodies.removeAll(const_cast<btRigidBody *>(body));
+	nestedBodies.removeAll(const_cast<btRigidBody *>(body));
+}
+
+void Environment::resetWriteBack()
+{
+	bodyRecords.clear();
+	movedBodies.clear();
+	nestedBodies.clear();
+	writeBackValid = false;
+	lastWrites = 0;
+}
+
+void Environment::noteActiveBodies()
+{
+	// The world is always a btDiscreteDynamicsWorld (createPhysicsWorld), whose
+	// non-static list is exactly the bodies Bullet can integrate.
+	auto *dynamics = static_cast<btDiscreteDynamicsWorld *>(world);
+	if (!dynamics) return;
+	const btAlignedObjectArray<btRigidBody *> &bodies = dynamics->getNonStaticRigidBodies();
+	for (int i = 0; i < bodies.size(); ++i) {
+		btRigidBody *body = bodies[i];
+		if (!body->isActive()) continue;
+		auto it = bodyRecords.find(body);
+		if (it == bodyRecords.end() || it->moved) continue;
+		it->moved = true;
+		movedBodies.append(body);
+	}
+}
+
+void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
+{
+	lastWrites = 0;
+	// Writes this world's pose into the body's node, and remembers what the
+	// node holds afterwards. A deleted node (or a stale hash after a scene
+	// switch) is skipped, NULL-CHECKED (deep-audit F3); a node the editor's
+	// hand holds (disablePhysicsTransform, PLAY-SELECT-1) is left to the hand.
+	auto write = [&](btRigidBody *body, BodyRecord &rec) {
+		const iris::SceneNodePtr node = nodes.value(rec.guid);
+		if (!node || node->disablePhysicsTransform) { rec.pinned = false; return; }
+		// Since the physics is detached from the engine rendering, this is VERY
+		// important to retain object scale: ONE write of the simulated pose, not
+		// two (MIRROR_SCALE lane).
+		const btTransform &t = body->getWorldTransform();
+		const btVector3 pos = t.getOrigin();
+		const btQuaternion rot = t.getRotation();
+		node->setGlobalPosRot(iris::Vec3(pos.x(), pos.y(), pos.z()),
+		                      iris::Quat(rot.w(), rot.x(), rot.y(), rot.z()));
+		rec.witness = graph::poseWitness(node->graphNode());
+		rec.pinned = true;
+		++lastWrites;
+	};
+	// A sleeping body: written only if its node no longer holds what the last
+	// write left there (or was never written).
+	auto check = [&](btRigidBody *body, BodyRecord &rec) {
+		if (rec.pinned) {
+			const iris::SceneNodePtr node = nodes.value(rec.guid);
+			if (!node) return;
+			if (graph::poseWitness(node->graphNode()) == rec.witness) return;
+		}
+		write(body, rec);
+	};
+
+	// SOMETHING ELSE MOVED since the last write-back (or this world has bodies
+	// no write-back has seen): every sleeping body is re-checked.
+	const bool recheck = !writeBackValid || graph::transformWrites() != writesAfterWriteBack;
+
+	// 1. The bodies Bullet moved this frame (top-level and plain-parented).
+	for (btRigidBody *body : movedBodies) {
+		auto it = bodyRecords.find(body);
+		if (it != bodyRecords.end() && !it->nested) write(body, *it);
+	}
+	// 2. The re-check of every other sleeping body.
+	if (recheck) {
+		for (auto it = bodyRecords.begin(); it != bodyRecords.end(); ++it)
+			if (!it->nested && !it->moved) check(const_cast<btRigidBody *>(it.key()), *it);
+	}
+	// 3. The nested ones, every frame, parents first: written if Bullet moved
+	//    them, re-checked otherwise (a write above may have moved their parent).
+	for (btRigidBody *body : nestedBodies) {
+		auto it = bodyRecords.find(body);
+		if (it == bodyRecords.end()) continue;
+		if (it->moved) write(body, *it);
+		else check(body, *it);
+	}
+
+	for (btRigidBody *body : movedBodies) {
+		auto it = bodyRecords.find(body);
+		if (it != bodyRecords.end()) it->moved = false;
+	}
+	movedBodies.clear();
+	writesAfterWriteBack = graph::transformWrites();
+	writeBackValid = true;
 }
 
 void Environment::restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node)
@@ -734,6 +887,7 @@ void Environment::destroyPhysicsWorld()
 
 	hashBodies.clear();
 	hashBodies.squeeze();
+	resetWriteBack();
 	// nodeTransforms is deliberately NOT cleared here: restartPhysics() runs
 	// this, and its caller then calls restoreNodeTransformations() to put the
 	// scene back where it was before Play. Clearing it would restore every

@@ -249,6 +249,7 @@ set(SRCS
     document/assets/texture2d.cpp
     document/materials/material.cpp
     core/geometry/trimesh.cpp
+    core/geometry/trianglebvh.cpp
     document/assets/vertexlayout.cpp
     document/scenegraph/shadowmap.cpp
     document/animation/animation.cpp
@@ -314,6 +315,7 @@ set (HEADERS
     import/modelsceneinfo.h
     import/clipfileinfo.h
     core/geometry/trimesh.h
+    core/geometry/trianglebvh.h
     core/math/mathhelper.h
     irisglfwd.h
     irisgl.h
@@ -505,6 +507,14 @@ string(REPLACE ";" "|" _mesh_bake_hashed_list "${_mesh_bake_hashed_sources}")
 # The bake's own TUs at -O2 in Debug, and never contracting (see the meshoptimizer
 # block above for both).
 set_source_files_properties(import/meshbake.cpp import/clusterlod.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
+# THE PICKING INDEX'S BUILD AND WALK TOO (SPEED-CPU): the bake reader builds a
+# TriangleBvh per picking mesh on every open, and at -O0 a 233k-triangle scan's
+# median-split build is the bake's own inner-loop story again. It computes only
+# min/max boxes and box tests (no triangle arithmetic — the hit test stays in
+# trimesh.cpp), so the optimisation level cannot change an answer; the same
+# never-contract rule anyway, so it could not even in principle.
+set_source_files_properties(core/geometry/trianglebvh.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 

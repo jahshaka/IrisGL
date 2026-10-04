@@ -316,6 +316,21 @@ void setGlobalRot(NodeHandle n, const Quat &q);
 /// document root is, and what a physics body's parent almost always is —
 /// writes the world values straight through with no inverse at all.
 void setGlobalPosRot(NodeHandle n, const Vec3 &v, const Quat &q);
+/// EVERYTHING setGlobalPosRot READS AND WRITES, bit for bit: the parent's
+/// identity and its derived position, orientation and scale (what the write
+/// undoes), and the node's own local position and orientation (what it
+/// writes). Two equal witnesses of one node mean a setGlobalPosRot of the SAME
+/// world pose would write exactly the locals the node already holds — the
+/// physics write-back's proof that a sleeping body's node needs no write
+/// (Environment::writeBack, SPEED-CPU). A plain value; compare with ==.
+struct PoseWitness
+{
+    NodeHandle parent = nullptr;
+    float values[17] = {};   ///< parent pos 3, rot 4, scale 3; local pos 3, rot 4
+    bool operator==(const PoseWitness &o) const;
+    bool operator!=(const PoseWitness &o) const { return !(*this == o); }
+};
+PoseWitness poseWitness(NodeHandle n);
 void setGlobalTransform(NodeHandle n, const Mat4 &m);
 
 // ---- flags ----------------------------------------------------------------

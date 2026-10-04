@@ -19,6 +19,7 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <mutex>
 #include <unordered_map>
@@ -743,6 +744,38 @@ std::size_t socketRiderCount() { return gRiderParent.size(); }
 Vec3 localPos(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getPosition()) : Vec3(); }
 Quat localRot(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getOrientation()) : Quat(); }
 Vec3 localScale(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getScale()) : Vec3(1, 1, 1); }
+
+bool PoseWitness::operator==(const PoseWitness &o) const
+{
+    // BITS, not floats: -0 against +0 and a NaN against itself are differences
+    // a write could make, so `==` on the values would be the wrong question.
+    return parent == o.parent && std::memcmp(values, o.values, sizeof values) == 0;
+}
+
+PoseWitness poseWitness(NodeHandle n)
+{
+    PoseWitness w;
+    if (!n || !engineAlive()) return w;
+    const Ogre::SceneNode *o = nd(n);
+    float *v = w.values;
+    // The parent half: what setGlobalPosRot resolves (the same three Updated
+    // reads, so a parent moved since the last write shows up here).
+    if (Ogre::Node *p = o->getParent()) {
+        w.parent = reinterpret_cast<NodeHandle>(p);
+        const Ogre::Vector3 pp = p->_getDerivedPositionUpdated();
+        const Ogre::Quaternion pr = p->_getDerivedOrientationUpdated();
+        const Ogre::Vector3 ps = p->_getDerivedScaleUpdated();
+        v[0] = pp.x; v[1] = pp.y; v[2] = pp.z;
+        v[3] = pr.w; v[4] = pr.x; v[5] = pr.y; v[6] = pr.z;
+        v[7] = ps.x; v[8] = ps.y; v[9] = ps.z;
+    }
+    // The node half: what setGlobalPosRot writes.
+    const Ogre::Vector3 lp = o->getPosition();
+    const Ogre::Quaternion lr = o->getOrientation();
+    v[10] = lp.x; v[11] = lp.y; v[12] = lp.z;
+    v[13] = lr.w; v[14] = lr.x; v[15] = lr.y; v[16] = lr.z;
+    return w;
+}
 
 namespace
 {

@@ -13,6 +13,7 @@
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "document/physics/physicshelper.h"
+#include "document/scenegraph/nodegraph.h"
 
 #include <QVector>
 #include <QHash>
@@ -142,6 +143,34 @@ public:
 	/// itself.
 	bool syncBodyToNode(const iris::SceneNodePtr &node);
 
+	// ---- THE WRITE-BACK (SPEED-CPU item 1; perf audit 2026-10-03 D1) -------
+	//
+	// Bullet integrates a body only while its island is awake, so a body that
+	// was asleep through every step of a frame is exactly where it was: its
+	// node needs no write. The write-back used to write EVERY body EVERY frame,
+	// asleep or not, which turned a resting pile into a mover per body per
+	// frame — a mirror visit each and the movement epoch moving, so every gated
+	// engine walk re-ran over every item. Now:
+	//   * the bodies ACTIVE in any step of the frame are written (noted after
+	//     each step: a body integrates only in a step it is active in, and
+	//     Bullet puts an island to sleep before the integration, never after);
+	//   * a sleeping body is RE-CHECKED only when something else in the
+	//     document wrote a transform since the last write-back (the epoch,
+	//     graph::transformWrites()) — an undo, a reparent, a property track, a
+	//     moved parent — and written only when its node no longer holds what the
+	//     last write left there (graph::PoseWitness: bit-exact, so a re-check
+	//     writes exactly when the old write-everything loop would have changed
+	//     something);
+	//   * a body NESTED under another body, or on a node whose writes do not
+	//     count as scene movement (a camera), is re-checked every frame, after
+	//     the others and parents first — the epoch cannot see its parent move.
+	// So a sleeping pile's frame makes ZERO writes, and the document it leaves
+	// is bit-identical to the one the write-everything loop left
+	// (document.physics_writeback).
+	void writeBack(const QHash<QString, iris::SceneNodePtr> &nodes);
+	/// Nodes the last writeBack wrote (a suite and monitor read).
+	int lastWriteBackWrites() const { return lastWrites; }
+
 	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
 	void restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node);
 
@@ -171,6 +200,27 @@ private:
     btDynamicsWorld             *world = nullptr;
 	
 	QHash<int, PickingHandle> pickingHandles;
+
+	/// THE WRITE-BACK'S BOOKKEEPING, per body (see writeBack).
+	struct BodyRecord
+	{
+		QString guid;
+		int depth = 0;                 ///< ancestors of the node: parents are written first
+		bool nested = false;           ///< a body ancestor, or a node whose writes are not movement
+		bool moved = false;            ///< active in one of this frame's steps
+		bool pinned = false;           ///< `witness` holds the node as the last write left it
+		graph::PoseWitness witness;
+	};
+	QHash<const btRigidBody *, BodyRecord> bodyRecords;
+	QVector<btRigidBody *> movedBodies;     ///< this frame's, de-duplicated by BodyRecord::moved
+	QVector<btRigidBody *> nestedBodies;    ///< re-checked every frame, shallowest first
+	unsigned long long writesAfterWriteBack = 0;
+	bool writeBackValid = false;           ///< false until a write-back ran over every body
+	int lastWrites = 0;
+	void noteActiveBodies();
+	void indexBody(btRigidBody *body, const iris::SceneNodePtr &node);
+	void unindexBody(const btRigidBody *body);
+	void resetWriteBack();
 
     /// The registered avatars, WEAKLY. A strong reference here would make the
     /// world the thing that keeps a deleted avatar alive, and "delete a moving
