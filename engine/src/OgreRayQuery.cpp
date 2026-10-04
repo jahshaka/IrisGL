@@ -8526,7 +8526,7 @@ void OgreEngine::setRayTracing(bool on) {
 //
 // Every image the tier writes from a compute shader is a STORAGE image: the
 // reflection's temporal pair (the radiance mean, RGBA16F, and the distances,
-// RGBA32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
+// RG32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
 // CORE-MANDATORY STORAGE FORMATS in Vulkan 1.0 (the spec's Required Format
 // Support; shaderStorageImageExtendedFormats covers the R16G16*, R16*, R8*,
 // A2B10G10R10 and B10G11R11 family, not these), so on a conformant driver this

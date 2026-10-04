@@ -240,10 +240,12 @@ void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
     hc->dispatch(job, 0, 0);
 }
 
-/// THE COST OF ONE JOB, as the queue sees it. There are no per-dispatch GPU
-/// timestamps available outside a compositor pass at this pin (fork 1a81f866a+1bccc3f93 (was 0027)'s
-/// samples are keyed to passes and come back once the GPU finishes the frame), so the number is
-/// a SLOPE and says so: the job is dispatched `iterations` more times over the
+/// THE COST OF ONE JOB, as the queue sees it, measured WITHOUT the frame monitor.
+/// A per-dispatch GPU timestamp pair outside a compositor pass does exist —
+/// monitor::CacheScope, a CacheWork row with its own gpuMs (JahAtmosphere's bake
+/// dispatches use it) — but it records only while the monitor runs and comes back
+/// frames later with the monitor's records; this verb answers on its own call, so
+/// the number is a SLOPE and says so: the job is dispatched `iterations` more times over the
 /// buffers it has already filled, the command buffer is flushed, and the wall
 /// clock of that is divided by the count after an empty flush's own cost has
 /// been taken off. It is therefore an upper bound on the GPU time and includes

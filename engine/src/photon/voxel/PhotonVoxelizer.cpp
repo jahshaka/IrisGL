@@ -973,8 +973,8 @@ namespace Ogre
         // two, so the residency round trip never actually saves anything -- it
         // only returns memory the next build immediately asks for again.
         // THE COST is one accumulator per voxeliser held for its lifetime:
-        // width * height * depth * 13 * 4 bytes (13.6 MB at 64^3, 109 MB at
-        // 128^3). A future lane may share ONE scratch volume across a chain's
+        // width * height * depth * 18 * 4 bytes (the eighteen sums of
+        // mMergeAccumTex; 18.9 MB at 64^3, 151 MB at 128^3). A future lane may share ONE scratch volume across a chain's
         // cascades; that is an optimisation, not a correctness matter.
 
         if( mNeedsAlbedoMipmaps || mNeedsAllMipmaps )

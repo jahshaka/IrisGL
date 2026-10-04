@@ -18,21 +18,16 @@ For more information see the LICENSE file
 
 namespace iris
 {
-/*
-struct Plane {
-    iris::Vec3 n; // Plane normal. Points x on the plane satisfy Dot(n,x) = d
-    float d; // d = dot(n,p) for a given point p on the plane
-};
-*/
-
 class IntersectionHelper
 {
 public:
-    // Given three noncollinear points (ordered ccw), compute plane equation
+    // Given three noncollinear points (ordered ccw), compute plane equation.
+    // The normal is computed FIRST and the plane built from it: the old
+    // `Plane p = { n, dot(p.normal, a) }` was a constructor call reading
+    // p.normal before p existed (undefined behaviour, an uninitialised d).
     static Plane computePlaneND(iris::Vec3 a, iris::Vec3 b, iris::Vec3 c) {
-        Plane p = { iris::Vec3::crossProduct(b - a, c - a).normalized(),
-                    iris::Vec3::dotProduct(p.normal, a) };
-        return p;
+        const iris::Vec3 n = iris::Vec3::crossProduct(b - a, c - a).normalized();
+        return Plane(n, iris::Vec3::dotProduct(n, a));
     }
 
     // realtime collision detection page 178
