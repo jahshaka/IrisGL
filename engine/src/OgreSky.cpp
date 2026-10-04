@@ -9,6 +9,7 @@
 // mesh, no datablock, no per-frame node work, and correct in every view that
 // shares the scene (Ogre feeds the rectangle each camera's corner rays).
 #include <vector>
+#include <set>
 #include "EnginePrivate.h"
 #include "Atmosphere.h"
 
@@ -737,16 +738,24 @@ void OgreScene::landEnvironmentIfComplete() {
     if (mReflPendingTex) {
         Ogre::TextureGpu *next = mReflPendingTex;
         mReflPendingTex = nullptr;
-        // DESTROY THE OLD FIRST, then bind the new — destroyReflection's order
-        // and reason (its Deleted listener is what kills the datablocks' stale
-        // descriptor sets). The new cube is a different, live texture, so the
-        // recycled-address trap cannot alias it.
-        if (Ogre::TextureGpu *old = mReflectionTex) {
-            mReflectionTex = nullptr;
-            try { destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), old); }
-            catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
-            catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
-        }
+        // THE OLD CUBE IS RETIRED, NOT DESTROYED (SKY-SWAP-1, measured). It used
+        // to be destroyed here, before the new one was bound, and that was the
+        // presented one-frame flash on every sky re-capture (the gold sphere of
+        // 'were' 102 -> 0.4 codes in Medium, the floor -6 in Epic): this frame's
+        // draws do not all read mReflectionTex through applyReflectionToAll. The
+        // Atom path's decode twins (HlmsAtom::decodeTwinForBucket — JSON clones
+        // of the PBS datablocks, re-keyed by the NEXT frame's drain) and a
+        // compute job still held the old cube, and a destroyed TextureGpu
+        // samples Ogre's blank texture (VulkanTextureGpu::_setToDisplayDummy
+        // Texture) — black, for exactly the frame before they let go. Destroying
+        // it after the rebind flashed identically; only keeping it alive cured it.
+        // So every holder samples a WRITTEN cube on the change frame (the
+        // previous one, until it re-keys) and the cube dies once nothing holds it
+        // (reapRetiredReflections). The recycled-address trap stays closed: the
+        // retired cube is alive while the new one is created and bound, and when
+        // it does die every descriptor set that named it has already been
+        // released by its holder's rebind.
+        if (Ogre::TextureGpu *old = mReflectionTex) mRetiredReflections.push_back({ old, 0u });
         mReflectionTex = next;
         // The roughness->LOD map's chain length follows the new cube
         // (envSpecularRoughness, 800.PixelShader_piece_ps.any:4, multiplies by
@@ -760,6 +769,60 @@ void OgreScene::landEnvironmentIfComplete() {
         mSkyShInForceValid = true;
         applySkyAmbient(GiStaleReason::Sky);   // the sky's edit, not the light's
         pushHeightFog();                       // its colour is this environment's
+    }
+}
+
+// THE RETIRED CUBES DIE WHEN NOTHING HOLDS THEM (SKY-SWAP-1). Every holder that
+// samples a TextureGpu — a datablock, an Atom decode twin, a compute job — is
+// one of its TextureGpuListeners, and drops out of that list when it rebinds.
+// So a retired cube is destroyed at the top of the first drawn frame after the
+// swap in which its listener list is empty; its VkImage is freed by Ogre's own
+// frames-in-flight delay (delayed_vkDestroyImage), so the GPU never loses an
+// image a submitted frame reads. A datablock still listening after
+// kRetiredReflectionMaxFrames is a holder that never re-reads the scene's
+// cube: it is named in the log and the cube is destroyed anyway (its Deleted
+// listener unbinds it) — the behaviour before this lane, for that holder only.
+void OgreScene::reapRetiredReflections(bool force) {
+    if (mRetiredReflections.empty()) return;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    for (size_t i = 0; i < mRetiredReflections.size();) {
+        RetiredReflection &r = mRetiredReflections[i];
+        ++r.frames;
+        // A COMPUTE JOB is a holder only until its next dispatch, which binds
+        // whatever cube its owner holds THEN (PhotonVoxelLighting::update binds
+        // mEnvCube per dispatch, environmentCones per call) — an idle job keeps
+        // its last binding indefinitely without reading it. So it is waited
+        // on for kRetiredJobFrames, never for the cap.
+        bool held = false;
+        for (Ogre::TextureGpuListener *l : r.tex->getListeners())
+            if (!dynamic_cast<Ogre::HlmsComputeJob *>(l) || r.frames < kRetiredJobFrames) { held = true; break; }
+        if (!force && (r.frames < 2u || (held && r.frames < kRetiredReflectionMaxFrames))) { ++i; continue; }
+        if (held && !force) {
+            // ONCE PER HOLDER NAME, not per cube or per frame: a holder that
+            // never rebinds is met again on every capture of a drag.
+            static std::set<std::string> sSaid;
+            std::string who;
+            for (Ogre::TextureGpuListener *l : r.tex->getListeners()) {
+                std::string name;
+                if (auto *db = dynamic_cast<Ogre::HlmsDatablock *>(l)) {
+                    const Ogre::String *n = db->getNameStr();
+                    name = "'" + (n ? *n : db->getName().getFriendlyText()) + "'";
+                } else if (auto *job = dynamic_cast<Ogre::HlmsComputeJob *>(l)) {
+                    name = "compute job '" + job->getNameStr() + "'";
+                } else {
+                    name = "(a non-datablock listener)";
+                }
+                if (sSaid.insert(name).second) who += " " + name;
+            }
+            if (!who.empty())
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka: a retired sky reflection cube is still held after " +
+                    std::to_string(r.frames) + " frames, destroyed anyway; new holders:" + who);
+        }
+        try { destroyRecycled(tm, r.tex); }
+        catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+        catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+        mRetiredReflections.erase(mRetiredReflections.begin() + long(i));
     }
 }
 
@@ -1050,6 +1113,7 @@ void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
 // contract: `queryIsTransferDone` with inaccurate tracking is a frame-counter
 // comparison.
 void OgreScene::pollSkyShRead() {
+    reapRetiredReflections(false);   // the frame's top, before anything rebinds
     if (mSkyCaptureIdleFrames < 1000u) ++mSkyCaptureIdleFrames;   // the gesture's clock
     readSkyShTicket(false);
     readCloudClearTicket(false);
@@ -1469,10 +1533,18 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
 // outlive it: VulkanTextureGpuManager::mCachedTex (the image views a
 // descriptor set is built from) and DescriptorSetTexture::operator!= (which is
 // how bakeTextures decides a datablock's set is unchanged and can be kept). A
-// recycled address therefore makes an old, dead view look current — which is
-// why the swap destroys the old cube FIRST (its TextureGpuListener::Deleted
-// kills the stale sets) and only then binds the new one. Do not "optimise" the
-// order in landEnvironmentIfComplete or destroyReflection.
+// recycled address therefore makes an old, dead view look current. The swap
+// (landEnvironmentIfComplete) never lets that happen because the old cube is
+// still ALIVE when the new one is allocated and bound, and dies only once every
+// holder has BAKED its new set: a datablock leaves the cube's listener list at
+// setTexture, but its stale DescriptorSetTexture is released only in
+// bakeTextures (HlmsPbs::preparePassHash -> uploadDirtyDatablocks, at the first
+// colour pass of the frame after the rebind). The reap therefore waits for an
+// empty listener list AND for two frame tops after the swap
+// (reapRetiredReflections), by which time a whole frame of passes has drained
+// every dirty datablock. destroyReflection, which has no
+// successor, destroys FIRST (its TextureGpuListener::Deleted kills the stale
+// sets) and only then unbinds — do not "optimise" that order.
 void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource) {
     // An unlanded next set is superseded by this one.
     destroyPendingReflection();
@@ -1585,6 +1657,7 @@ void OgreScene::convolvePendingIbl() {
 
 void OgreScene::destroyReflection() {
     destroyPendingReflection();
+    reapRetiredReflections(true);   // no successor to bridge to: the sky is going
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     if (!mReflectionTex) return;
     Ogre::TextureGpu *tex = mReflectionTex;
