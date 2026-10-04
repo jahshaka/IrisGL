@@ -148,23 +148,6 @@ float jahVoxelConeRate( float c, float k )
 	return 0.63661977 * ( c * ( aOne - aT ) - k * bT );
 }
 
-/// THE CONE'S SIX CROSSING RATES, once per march (SPEED-GPU, audit MA-9 / C1): the rate a
-/// plane's kernel takes along axis b for half h depends on the direction, the aperture and h
-/// only - never on the plane - so the march evaluates them once and every plane reads them.
-/// `rateN` is half 0 (the faces looking +b, met by the rays heading -b), `rateP` half 1; a ray
-/// takes both halves at |d_b| (jahVoxelReadPlane's rule). The same expressions the plane
-/// evaluated, so the same bits.
-void jahVoxelConeRates( vec3 dir, float tanHalf, out vec3 rateN, out vec3 rateP )
-{
-	const bool ray = !( tanHalf > 0.0 );
-	for( int b = 0; b < 3; ++b )
-	{
-		const float k = tanHalf * sqrt( max( 1.0 - dir[b] * dir[b], 0.0 ) );
-		rateP[b] = jahVoxelConeRate( ray ? abs( dir[b] ) : dir[b], k );
-		rateN[b] = jahVoxelConeRate( ray ? abs( dir[b] ) : -dir[b], k );
-	}
-}
-
 /// THE ORIGIN PLANE'S GATE for the surfaces a fetch holds along the origin's axis n (their
 /// O-premultiplied position pO and coverage o): 0 at or behind the origin's depth plus one
 /// fine cell (`invResN`), 1 half a cell beyond, a tent's CDF between.
@@ -240,12 +223,11 @@ float jahVoxelKernelLevel( float lod, float texelCells, float mip )
 /// cone's `tanHalf`; `axis` the plane's axis, `mip` and `directional` its level and volume,
 /// `w` its unread part and `readTo` the coordinate along the axis read up to (the first
 /// plane's surface by position), `lenLS` the length the cone spends in it (w T / |d_a|), `lk`
-/// the kernel's fractional level (jahVoxelKernelLevel), `org` the origin plane, `rateN` /
-/// `rateP` the cone's crossing rates (jahVoxelConeRates, once per march). Returns the
+/// the kernel's fractional level (jahVoxelKernelLevel), `org` the origin plane. Returns the
 /// premultiplied light and the opacity, uncapped.
 vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, float mip,
 						bool directional, float w, float readTo, float lenLS, float lk, float tanHalf,
-						vec4 org, vec3 rateN, vec3 rateP )
+						vec4 org )
 {
 	const vec3 invRes = JAH_VOX_INVRES( c );
 	const int n = int( org.x );
@@ -347,7 +329,8 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 			if( b == axis || !( ok[b] > 0.0 ) )
 				continue;
 			// rays heading +b meet the faces looking -b (h = 1), rays heading -b the +b ones
-			const float rate = h == 1 ? rateP[b] : rateN[b];
+			const float cb = ray ? abs( dir[b] ) : ( h == 1 ? dir[b] : -dir[b] );
+			const float rate = jahVoxelConeRate( cb, tanHalf * sqrt( max( 1.0 - dir[b] * dir[b], 0.0 ) ) );
 			const float xb = ( b == n ? gN : 1.0 ) * ok[b] * ( rate * lenLS / invRes[b] );
 			if( !( xb > 0.0 ) )
 				continue;
@@ -393,11 +376,9 @@ vec4 jahVoxelSample( int c, vec3 posLS, vec3 dir, float lod )
 	const float texelCells = jahVoxelTexelCells( directional );
 	const float mip = ( anisoTier && !directional ) ? 0.0 : floor( jahVoxelKernelMip( lod, texelCells ) );
 	const float texelLS = texelCells * exp2( mip ) * invRes[axis];
-	vec3 rateN, rateP;
-	jahVoxelConeRates( dir, 0.0, rateN, rateP );
 	const vec4 r = jahVoxelReadPlane( c, posLS, posLS, dir, axis, mip, directional, 1.0, 0.0,
 									  texelLS * invAbsDa, jahVoxelKernelLevel( lod, texelCells, mip ), 0.0,
-									  kJahVoxelNoOrigin, rateN, rateP );
+									  kJahVoxelNoOrigin );
 	return r.w > 1.0 ? vec4( r.xyz * ( 1.0 / r.w ), 1.0 ) : r;
 }
 

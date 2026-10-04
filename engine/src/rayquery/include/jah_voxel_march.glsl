@@ -228,9 +228,6 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 	const float sgn = da > 0.0 ? 1.0 : -1.0;
 	const float invAbsDa = 1.0 / abs( da );
 	const float startA = posLS[axis];
-	// the cone's crossing rates, constant over the march (jahVoxelConeRates)
-	vec3 rateN, rateP;
-	jahVoxelConeRates( dirLS, tanHalfAngle, rateN, rateP );
 
 #if JAH_VOX_HAS_ANISO
 	const bool aniso = JAH_VOX_ANISO;
@@ -306,7 +303,7 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 		const vec4 sampleColour = jahVoxelReadPlane( c, samplePosLS, kernelLS, dirLS, axis, mip, directional,
 													 w, readTo, w * texelLS * invAbsDa,
 													 jahVoxelKernelLevel( lodLevel, texelCells, mip ),
-													 tanHalfAngle, origin, rateN, rateP );
+													 tanHalfAngle, origin );
 		float nextReadTo = faces.y;
 
 #ifdef JAH_VOX_SDF_FACTOR

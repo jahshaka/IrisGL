@@ -258,14 +258,20 @@ vec2 traceUv( ivec2 tc, ivec2 scale, ivec2 fullRes )
 /// 196 x 4 per group, every tap then reading this tile. Each entry holds EXACTLY what the tap
 /// computed from its own fetches (the same calls at the same coordinates), and the taps keep
 /// their order and their arithmetic, so the filtered mean is the same bits. A group none of
-/// whose texels filters (mirrors, declined texels, the sky) loads nothing.
+/// whose texels filters (mirrors, declined texels, the sky) loads nothing, and a group loads only
+/// as far as its widest kernel reaches.
 const int kTileReach = kMaxRadius > kFreshRadius ? kMaxRadius : kFreshRadius;
 const int kTileSide = 8 + 2 * kTileReach;
-shared float sTapDist[kTileSide * kTileSide];
-shared vec4  sTapMean[kTileSide * kTileSide];
+// 24 bytes an entry (the group's shared memory is its occupancy): the mean as the four halves it
+// was stored as (an rgba16f texel - exact both ways), and the written-this-frame flag folded into
+// the depth (a texel the trace declined this frame stores depth 0, which the tap rejects exactly
+// as it rejected the flag: both are a `continue` before anything is accumulated).
+shared uvec2 sTapMean[kTileSide * kTileSide];
 shared float sTapDepth[kTileSide * kTileSide];
 shared vec3  sTapNormal[kTileSide * kTileSide];
-shared uint  sGroupFilters;
+/// The widest kernel any texel of the group filters with (0: none filters): the tile is loaded
+/// only as far as that reach - a half-resolution or a mostly-mirror group loads a fraction of it.
+shared uint  sGroupReach;
 
 void main()
 {
@@ -345,17 +351,23 @@ void main()
 
 	// THE TILE (above): loaded by the whole group, only when some texel of it filters.
 	if( gl_LocalInvocationIndex == 0u )
-		sGroupFilters = 0u;
+		sGroupReach = 0u;
 	barrier();
 	if( filters )
-		atomicOr( sGroupFilters, 1u );
+		atomicMax( sGroupReach, uint( radius ) );
 	barrier();
 	const ivec2 tileOrigin = ivec2( gl_WorkGroupID.xy ) * 8 - ivec2( kTileReach );
-	if( sGroupFilters != 0u )
+	const int groupReach = int( sGroupReach );
+	if( groupReach > 0 )
 	{
-		for( uint i = gl_LocalInvocationIndex; i < uint( kTileSide * kTileSide ); i += 64u )
+		// the entries within the group's reach of its 8 x 8 block, numbered over that square
+		const int side = 8 + 2 * groupReach;
+		const int skip = kTileReach - groupReach;
+		for( int i = int( gl_LocalInvocationIndex ); i < side * side; i += 64 )
 		{
-			const ivec2 t = tileOrigin + ivec2( int( i ) % kTileSide, int( i ) / kTileSide );
+			const ivec2 local = ivec2( skip + i % side, skip + i / side );
+			const int entry = local.y * kTileSide + local.x;
+			const ivec2 t = tileOrigin + local;
 			float tapDist = 0.0;
 			vec4 h = vec4( 0.0 );
 			float td = 0.0;
@@ -368,10 +380,9 @@ void main()
 				td = texture( sceneDepth, tuv ).x;
 				tn = normalize( texture( gBufNormals, tuv ).xyz * 2.0 - 1.0 );
 			}
-			sTapDist[i] = tapDist;
-			sTapMean[i] = h;
-			sTapDepth[i] = td;
-			sTapNormal[i] = tn;
+			sTapMean[entry] = uvec2( packHalf2x16( h.xy ), packHalf2x16( h.zw ) );
+			sTapDepth[entry] = tapDist > 0.0 ? td : 0.0;
+			sTapNormal[entry] = tn;
 		}
 		barrier();
 	}
@@ -425,10 +436,9 @@ void main()
 				// a neighbour that was traced before a dial drag took it above
 				// the cutoff is averaged into this pixel FOR EVER, because
 				// nothing ever writes over it again.
-				const float tapDist = sTapDist[tile];
-				if( tapDist <= 0.0 )
-					continue;
-				const vec4 h = sTapMean[tile];
+				// (the written-this-frame flag rides the depth: 0 where the trace declined)
+				const uvec2 hp = sTapMean[tile];
+				const vec4 h = vec4( unpackHalf2x16( hp.x ), unpackHalf2x16( hp.y ) );
 				if( h.w <= 0.0 || !finite3( h.xyz ) )
 					continue;
 				const float td = sTapDepth[tile];
