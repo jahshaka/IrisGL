@@ -537,6 +537,7 @@ SceneNodePtr ParticleSystemNode::createDuplicate()
     ps->particlesPerSecond  = this->particlesPerSecond;
     ps->speed               = this->speed;
     ps->texture             = this->texture;
+    ps->textureGuid         = this->textureGuid;
 
     ps->dissipate           = this->dissipate;
     ps->dissipateInv        = this->dissipateInv;

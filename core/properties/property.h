@@ -147,7 +147,15 @@ struct ColorProperty : public Property
 
 struct TextureProperty : public Property
 {
+    /// The file this session renders from (a store object's path, or a
+    /// "live://" reference) — what the panel shows and material.get reports.
     QString value;
+    /// THE ROW'S IDENTITY (TEX-REF-1): the library asset `value` is, kept from
+    /// the moment the row is bound until it is written. A saved scene persists
+    /// THIS, never a guid derived back from the path; a reference the store
+    /// could not resolve keeps its guid with an empty `value`
+    /// (iris::Material::textureRef says how a row is bound).
+    QString assetGuid;
     QString toggleValue;
     bool toggle = false;
 
@@ -160,8 +168,18 @@ struct TextureProperty : public Property
         return value;
     }
 
+    /// A {path, guid} map binds both; a bare path binds a file nobody named,
+    /// so the identity goes — unless it is the path already held.
     void setValue(QVariant val) {
-        value = val.toString();
+        if (val.typeId() == QMetaType::QVariantMap) {
+            const QVariantMap ref = val.toMap();
+            value = ref.value(QStringLiteral("path")).toString();
+            assetGuid = ref.value(QStringLiteral("guid")).toString();
+        } else {
+            const QString path = val.toString();
+            if (path != value) assetGuid.clear();
+            value = path;
+        }
         toggle = !value.isEmpty();
     }
 };

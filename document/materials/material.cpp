@@ -11,11 +11,37 @@ For more information see the LICENSE file
 
 #include "document/materials/material.h"
 #include "document/assets/texture2d.h"
+#include "core/properties/property.h"
+
+#include <QVariantMap>
 
 namespace iris
 {
 
 std::atomic<quint64> Material::sGlobalRevision{1};
+
+QVariant Material::textureRef(const QString &path, const QString &guid)
+{
+    return QVariantMap{ { QStringLiteral("path"), path }, { QStringLiteral("guid"), guid } };
+}
+
+QString Material::textureGuid(const QString &row) const
+{
+    for (const Property *prop : properties)
+        if (prop && prop->name == row && prop->type == PropertyType::Texture)
+            return static_cast<const TextureProperty *>(prop)->assetGuid;
+    return QString();
+}
+
+QVariant Material::textureRefOf(const QString &row) const
+{
+    for (const Property *prop : properties)
+        if (prop && prop->name == row && prop->type == PropertyType::Texture) {
+            const auto *texture = static_cast<const TextureProperty *>(prop);
+            return textureRef(texture->value, texture->assetGuid);
+        }
+    return textureRef(QString(), QString());
+}
 
 void Material::addTexture(QString name,Texture2DPtr texture)
 {

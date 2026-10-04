@@ -83,6 +83,11 @@ public:
     float particlesPerSecond = 24.0f;
     float speed = 12.0f;
     iris::Texture2DPtr texture;
+    /// THE BILLBOARD IMAGE'S IDENTITY (TEX-REF-1): the library asset `texture`
+    /// was loaded from — what a saved scene persists, never derived back from
+    /// the texture's path. Empty for an image nobody named (the shipped default
+    /// with no project open), which a save cannot keep.
+    QString textureGuid;
 
     bool dissipate = true, dissipateInv = false;
     bool randomRotation = true;
@@ -203,7 +208,16 @@ public:
     float getLife() const                 { return lifeLength; }
     void setSpeed(float s)                { if (speed == s) return; speed = s; notifyChanged(NodeChange::Params); }
     float getSpeed() const                { return speed; }
-    void setTexture(QSharedPointer<iris::Texture2D> tex) { if (texture == tex) return; texture = tex; notifyChanged(NodeChange::Params); }
+    /// Binds the billboard image and the asset it is (TEX-REF-1). A null `tex`
+    /// with a guid is a reference the store could not resolve: kept, so the
+    /// next save writes it back.
+    void setTexture(QSharedPointer<iris::Texture2D> tex, const QString &guid)
+    {
+        if (texture == tex && textureGuid == guid) return;
+        texture = tex;
+        textureGuid = guid;
+        notifyChanged(NodeChange::Params);
+    }
 
     /// The "Random ..." sliders send a FRACTION of the mean; the fields hold
     /// the absolute spread. (These three were edited by the panel and never
