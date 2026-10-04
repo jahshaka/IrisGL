@@ -7935,44 +7935,34 @@ private:
 /// the engine can hold one and the frame can call it; nothing else in this
 /// header knows what an XrSession is.
 ///
-/// TWO OBJECTS, TWO LIFETIMES, and the split is forced by the pin (§2.1):
-///   * `VrBoot` is the INSTANCE and the DEVICE. It is created inside
-///     OgreEngine::init, interleaved with the Root/plugin/initialise order,
-///     because the render system reads `external_instance` in its CONSTRUCTOR
-///     and the first createRenderWindow reads `external_device`. It lives for
-///     the engine's life and outlives any number of sessions.
+/// TWO OBJECTS, ONE LIFETIME (VR-START-1):
+///   * `VrConnection` is the XrInstance and the system, bound through
+///     XR_KHR_vulkan_enable to the engine's OWN Vulkan instance and device
+///     (created at boot with the fork's OpenXR interop set). It is made when a
+///     session begins (or a probe asks) and destroyed when the session ends,
+///     so every session connects afresh — a headset connected after launch, or
+///     reconnected after a drop (WiVRn's fresh streaming process), is simply
+///     the next connection. It owns no Vulkan object.
 ///   * `VrSession` is the XrSession, the swapchains, the both-eyes target, the
 ///     stereo View and the pump. It lives for as long as the user is in the
 ///     headset.
-class VrBoot;
+class VrConnection;
 class VrSession;
 
-/// The four calls OgreEngine.cpp makes into that TU. Free functions rather
+/// The calls OgreEngine.cpp makes into that TU. Free functions rather
 /// than methods so the engine never has to see either class's definition.
 namespace vr {
-/// Step 1 of the init order: the XrInstance, the system, and the VkInstance
-/// the RUNTIME creates from our own VkInstanceCreateInfo. Returns null and
-/// fills `reason` when anything refuses — which is not an error anywhere:
-/// the caller boots plainly and answers vrAvailable() false.
-/// MUST be called BEFORE Root::loadPlugin (the external instance is consumed
-/// in the render system's constructor).
-VrBoot *bootBegin(VrInfo &infoOut, std::string &reason);
-/// The `VulkanExternalInstance *` for loadPlugin's `external_instance`, as an
-/// opaque pointer (the type belongs to the render system).
-void *bootExternalInstance(VrBoot *);
-/// Step 2: the physical device the runtime wants, the device-creation request
-/// fork d014b064f+1bccc3f93 (was 0068) exports, and xrCreateVulkanDeviceKHR. MUST be called AFTER
-/// Root::initialise (the exporter reads the instance-extension list the render
-/// system's constructor filled — phase 1a's finding §8.5) and BEFORE the first
-/// createRenderWindow. False = the boot is abandoned; `reason` says why.
-bool bootDevice(VrBoot *, Ogre::Root *root, VrInfo &infoOut, std::string &reason);
-/// The `VulkanExternalDevice *` for the first window's `external_device`.
-void *bootExternalDevice(VrBoot *);
-/// Destroys the XrInstance and the VkDevice/VkInstance WE own. Call after
-/// Root is deleted (Ogre destroys neither — §2.1 row 8).
-void bootEnd(VrBoot *);
+/// The policy check (no loader), the XrInstance, the system, the graphics
+/// requirements, the runtime's GPU against the engine's and its interop
+/// extensions against what the engine enabled. Null + `info.failure` +
+/// `reason` when anything refuses. `root` must have a Vulkan device (any
+/// window or view created).
+VrConnection *connect(Ogre::Root *root, const VrPolicy &policy, VrInfo &info,
+                      std::string &reason);
+/// Destroys the XrInstance. Call after the connection's session has ended.
+void disconnect(VrConnection *);
 /// Creates the session. Null + `reason` on refusal.
-VrSession *sessionBegin(VrBoot *, OgreEngine *, OgreScene *, const VrConfig &,
+VrSession *sessionBegin(VrConnection *, OgreEngine *, OgreScene *, const VrConfig &,
                         std::string &reason);
 void sessionEnd(VrSession *);
 /// IS THE LIVE SESSION'S PICTURE ENCODED EXACTLY ONCE between this renderer and
@@ -8124,7 +8114,10 @@ public:
     void advanceResources() override;
 
     // ---- VR (SPECS/VR_SPEC.md §4) -----------------------------------------
-    bool vrAvailable() const override { return mVrBoot && !mVrDeviceFailed; }
+    bool vrAvailable() const override;
+    void setVrPolicy(const VrPolicy &policy) override { mVrPolicy = policy; }
+    const VrPolicy &vrPolicy() const override { return mVrPolicy; }
+    bool vrProbe() override;
     const VrInfo &vrInfo() const override { return mVrInfo; }
     bool beginVrSession(Scene *scene, const VrConfig &cfg) override;
     void endVrSession() override;
@@ -8195,10 +8188,10 @@ public:
     /// The live session, for the TU that owns it and for the frame. Null when
     /// none runs.
     VrSession *vrSession() const { return mVrSession; }
-    /// Puts `external_device` on a window's misc params the FIRST time a window
-    /// is created on a VR boot, and never again (the render system reads it
-    /// only while `!mInitialized` — §2.1 row 5). A no-op on a plain boot.
-    void applyVrExternalDevice(Ogre::NameValuePairList &params);
+    /// Makes `mVrConnection` for a session or a probe (VR-START-1); false +
+    /// mVrInfo.failure/reason when nothing answers. Ensures a Vulkan device
+    /// exists first (the surfaceless window, as documentGraphScene does).
+    bool vrConnect(std::string &why);
 
     bool updateScene(Scene *scene) override;
     bool hasEnabledViews() const override;
@@ -8249,15 +8242,10 @@ public:
     // ---- VR state (all four RAW: the types are incomplete everywhere but
     //      OgreVrSession.cpp, and a unique_ptr would need them complete
     //      wherever ~OgreEngine is compiled — the mRayTier rule) ------------
-    VrBoot    *mVrBoot = nullptr;      ///< the instance + device; engine lifetime
+    VrConnection *mVrConnection = nullptr;  ///< the XrInstance; a session's lifetime
     VrSession *mVrSession = nullptr;   ///< the session; user lifetime
     VrInfo     mVrInfo;
-    /// Has a window consumed `external_device` yet? Only the first one can.
-    bool       mVrDeviceConsumed = false;
-    /// The RUNTIME made the instance but refused (or could not make) the
-    /// device. The boot object must stay alive — Ogre is running on its
-    /// VkInstance — but no session can ever be created on it.
-    bool       mVrDeviceFailed = false;
+    VrPolicy   mVrPolicy;
     /// The host's mirror wish, remembered across sessions (Engine::
     /// setVrMirrorView may be called before one exists).
     OgreView  *mVrMirrorView = nullptr;
