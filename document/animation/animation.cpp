@@ -10,6 +10,7 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "document/animation/animation.h"
+#include "document/animation/keyframeanimation.h"
 #include "document/animation/keyframeset.h"
 #include "document/animation/propertyanim.h"
 #include "document/animation/skeletalanimation.h"
@@ -190,6 +191,37 @@ AnimationPtr Animation::createFromSkeletalAnimation(SkeletalAnimationPtr skelAni
     auto anim = new Animation(skelAnim->name);
     anim->setSkeletalAnimation(skelAnim);
     return AnimationPtr(anim);
+}
+
+AnimationPtr Animation::clone() const
+{
+    auto copy = AnimationPtr(new Animation(name));
+    copy->loop = loop;
+    copy->frameRate = frameRate;
+    for (auto it = properties.constBegin(); it != properties.constEnd(); ++it) {
+        PropertyAnim *src = it.value();
+        if (!src) continue;
+        PropertyAnim *dst = nullptr;
+        if (dynamic_cast<FloatPropertyAnim *>(src)) dst = new FloatPropertyAnim();
+        else if (dynamic_cast<Vector3DPropertyAnim *>(src)) dst = new Vector3DPropertyAnim();
+        else if (dynamic_cast<ColorPropertyAnim *>(src)) dst = new ColorPropertyAnim();
+        else continue;   // no other track type exists
+        dst->setName(src->getName());
+        const auto from = src->getKeyFrames();
+        for (int i = 0; i < from.size(); ++i) {
+            FloatKeyFrame *a = from[i].keyFrame;
+            FloatKeyFrame *b = dst->getKeyFrame(i);
+            if (!a || !b) continue;
+            b->clear();
+            b->name = a->name;
+            b->length = a->length;
+            for (const auto *key : a->keys) b->keys.append(new Key<float>(*key));
+        }
+        copy->properties.insert(it.key(), dst);
+    }
+    copy->skeletalAnimation = skeletalAnimation;   // shared clip data, same reference
+    copy->length = length;
+    return copy;
 }
 
 int Animation::getFrameRate() const

@@ -621,11 +621,9 @@ SceneNodePtr MeshNode::createDuplicate()
     // original.
     node->faceCullingMode = this->faceCullingMode;
 
-	// todo: clone instead of copying (Nick)
-	for (auto anim : animations) {
-		node->addAnimation(anim);
-	}
-	node->setAnimation(animation);
+    // The animations are cloned by SceneNode::duplicateInto for EVERY node
+    // type (CLIP-REF-1); this used to hand a mesh copy the SAME Animation
+    // objects, and every other node type none at all.
 
     // Sockets are per-node authoring (see meshnode.h), so a duplicate carries
     // its own copy of the list — a second character has the same head socket

@@ -64,6 +64,12 @@ public:
 
     static AnimationPtr createFromSkeletalAnimation(SkeletalAnimationPtr skelAnim);
 
+    /// A COPY for a duplicated node (CLIP-REF-1): its own property tracks (the
+    /// keys deep-copied, so editing one node's keys never moves the other's),
+    /// and the SAME skeletal clip — clip data is shared, read-only, and its
+    /// {assetGuid, name} reference is what both nodes persist.
+    AnimationPtr clone() const;
+
     QString getName() const;
     void setName(const QString &value);
 
