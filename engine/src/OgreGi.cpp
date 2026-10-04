@@ -6571,11 +6571,11 @@ bool OgreScene::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::V
         }
         return true;
     }
-    // `JAHSHAKA_GI_FIELD_NO_SCROLL`, for MEASUREMENT only: the same snapped window,
+    // The arm "gi.fieldScroll" = 0, for MEASUREMENT only: the same snapped window,
     // re-placed WHOLE (offset 0, every probe integrated in the step frame) — the
     // behaviour the scroll replaced, on the same lattice, so gi.field_scroll can
     // walk one path both ways in one process and compare the pictures.
-    if (std::getenv("JAHSHAKA_GI_FIELD_NO_SCROLL")) {
+    if (mEngine && !mEngine->armRegistry().on(ArmId::FieldScroll)) {
         Ogre::Vector3 target = mIfdVolumeOrigin;
         for (int a = 0; a < 3; ++a) target[a] += float(d[a]) * spacing[a];
         mIfd->setFieldVolume(target, size);

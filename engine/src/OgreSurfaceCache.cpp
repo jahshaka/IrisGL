@@ -204,7 +204,10 @@ bool SurfaceCache::capturing() { return gCapturing; }
 
 SurfaceCache::SurfaceCache() : mEmissiveFormat(Ogre::PFG_R9G9B9E5_SHAREDEXP) {}
 
-SurfaceCache::~SurfaceCache() { destroyAll(); }
+SurfaceCache::~SurfaceCache() {
+    destroyAll();
+    detail::monitor::forgetGpuOwner(this);   // its "cards.relight" readings
+}
 
 // ---------------------------------------------------------------------------
 // The atlas
@@ -1503,9 +1506,13 @@ void SurfaceCache::relightCards() {
         Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
         mLightJob->analyzeBarriers(rt);
         rs->executeResourceTransition(rt);
-        if (mMoverHooks.timeRelight) mMoverHooks.timeRelight(true);
+        // THE RELIGHT'S MONITOR ROW (lane TEST-1, the perf audit's F1): it runs in
+        // this workspace's own end callback, after its passes closed, so no pass
+        // row holds it — and before, its GPU time lived only in the ray tier's
+        // private ring (absent at the no-ray tier). One row at every tier now.
+        detail::monitor::CacheScope relight(CacheKind::Gi, WorkReason::Light, 0, "cards.relight", rs, this);
+        relight.setUnits(unsigned(mRelight.size()));
         hc->dispatch(mLightJob, nullptr, nullptr);
-        if (mMoverHooks.timeRelight) mMoverHooks.timeRelight(false);
     }
     {
         const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
@@ -2270,7 +2277,8 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.stillTexelsLastFrame = mStillTexelsLastFrame;
     out.stillPending = mStillPending;
     out.casterRetraces = mCasterRetraces;
-    if (mMoverHooks.readTimes) mMoverHooks.readTimes(out.moverGpuMs, out.relightGpuMs, out.stillGpuMs);
+    if (mMoverHooks.readTimes) mMoverHooks.readTimes(out.moverGpuMs, out.stillGpuMs);
+    out.relightGpuMs = detail::monitor::lastGpuMs("cards.relight", this);
 }
 
 long SurfaceCache::itemSlotOf(NodeId node) const {

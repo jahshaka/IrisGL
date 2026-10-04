@@ -1859,7 +1859,7 @@ bool OgreView::warmUpShaders() {
                         recordOcclusionPyramid(rs, depth, hzb);
                         req.hzbLevels = hzb->getNumMipmaps();
                         mScene->recordGpuCull(mAtomCull, req, hzb, err);
-                        mScene->recordGpuCull(mAtomCullLate, req, hzb, err, false, nullptr, &mAtomCull);
+                        mScene->recordGpuCull(mAtomCullLate, req, hzb, err, nullptr, &mAtomCull);
                     }
                 }
             }

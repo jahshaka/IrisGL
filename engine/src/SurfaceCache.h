@@ -307,11 +307,10 @@ struct CardMoverTrace {
 struct CardMoverHooks {
     std::function<bool(CardMoverFrame &)> frame;
     std::function<bool(const CardMoverTrace &)> trace;
-    /// A GPU timestamp pair around the relight dispatch (begin = true first).
-    std::function<void(bool)> timeRelight;
-    /// The last GPU milliseconds read back: the movers' trace's, the relight's and
-    /// the still trace's (-1 unread).
-    std::function<void(float &, float &, float &)> readTimes;
+    /// The ray tier's two traces' last GPU milliseconds — the movers' and the
+    /// still world's monitor rows ("cards.movers" / "cards.still"; -1 outside a
+    /// capture). The relight's own row ("cards.relight") is this cache's.
+    std::function<void(float &, float &)> readTimes;
 };
 
 /// ONE CARD AS THE PHOTON VIEW DRAWS IT (PHOTON-VIEW-1, PhotonView::Cards): the

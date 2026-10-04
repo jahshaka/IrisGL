@@ -163,7 +163,6 @@ public:
     void settingsFloats(float out[kSettingsFloats]) const;
     AtmosphereStatus status() const;
     unsigned observerRebuilds() const { return mObserverRebuilds; }
-    bool measure(unsigned iterations, AtmosphereCost &out);
 
     // ---- Ogre::AtmosphereComponent -----------------------------------------
     Ogre::uint32 preparePassHash(Ogre::Hlms *hlms, size_t constBufferSlot) override;
@@ -176,8 +175,7 @@ private:
     void createQuad();
     void pushJobParams(Ogre::HlmsComputeJob *job) const;
     bool runJob(const char *name, Ogre::TextureGpu *target, Ogre::TextureGpu *in0,
-                Ogre::TextureGpu *in1, unsigned gx, unsigned gy, unsigned repeats = 1u,
-                int reason = -1);
+                Ogre::TextureGpu *in1, unsigned gx, unsigned gy);
     void handOver();
     Ogre::Vector3 topIlluminance() const;
     void uploadSettings();

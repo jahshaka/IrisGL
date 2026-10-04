@@ -824,6 +824,9 @@ void OgreEngine::renderOneFrame() {
             monitor::gMonitor->beginFrame(mShadowFrame + 1ull, mNextFrameCause, onscreen);
         }
         mNextFrameCause = FrameCause::Driver;
+        // THE MEASUREMENT ARMS (lane TEST-1) take what was set since the last frame:
+        // one value of each for the whole of this one.
+        mArms.latch();
         // WHAT THIS FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1), consumed exactly
         // like the cause and reset to `Complete` — so a caller that sets
         // nothing renders the frame it always did. Pushed to every scene here,
@@ -837,7 +840,11 @@ void OgreEngine::renderOneFrame() {
             monPre.reset(new monitor::Stage("engine.pre"));
             // BEFORE anything renders and outside every encoder — the only
             // place a Vulkan query pool may be reset (fork 1a81f866a+1bccc3f93 (was 0027)).
-            gpuFrameBegin();
+            // Only on a capture's FIRST frame: every later turnover ran at the
+            // close of the frame before (closeRenderFrame), which opened this
+            // frame's own GPU pair (lane TEST-1, F5).
+            if (!monitor::gMonitor->mTurnedOver) gpuFrameBegin();
+            monitor::gMonitor->mTurnedOver = false;
         }
         // THE ONE TEXTURE WAIT (THREADING_ADOPTION_SPEC.md P2 item 3, decision
         // D-C(1)). `loadTexture` no longer waits per texture; it schedules, and
@@ -1426,6 +1433,9 @@ void OgreEngine::closeRenderFrame() noexcept {
     frameCloseStep(mLastError, [this] {
         if (monitor::live() && monitor::gMonitor->inFrame())
             monitor::gMonitor->endFrame(mUpdatedScenes);
+        // THE POOLS TURN OVER HERE, and the next frame's GPU pair opens
+        // (gpuFrameBegin's note): the between-frames work is that frame's.
+        if (monitor::live()) gpuFrameBegin();
     });
     // ---- 3. a lost or stopped session ------------------------------------
     frameCloseStep(mLastError, [this] { endLostOrStoppedVrSession(); });

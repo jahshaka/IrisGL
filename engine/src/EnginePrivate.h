@@ -107,6 +107,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <thread>
+#include <array>
+#include <cstdint>
 #include <map>
 #include <chrono>
 #include <deque>
@@ -1806,6 +1808,48 @@ public:
 // OgreEngine in scope. `monitor::live()` is one load and one branch — the
 // entire cost of the monitor when it is off. Engine calls are UI-thread-only by
 // contract, so nothing here is atomic.
+// ---------------------------------------------------------------------------
+// THE ARM REGISTRY (lane TEST-1, the perf audit's A2; Types.h ArmInfo)
+// ---------------------------------------------------------------------------
+//
+// The engine's MEASUREMENT ARMS, one table. Each was a process-environment read in
+// shipped per-frame code (the measuring doors: `getenv("JAH_R5_NO_MOTION")` read
+// every frame so one process could hold both arms of an A/B) — deleted; a suite or
+// the A/B harness (scripts/perf-ab.py) sets an arm through Engine::setArm, the verb
+// engine.arm(name, value). The value a code path reads is the one LATCHED at the top
+// of the frame (`latch`, from renderOneFrame), so an arm set mid-frame — a script
+// verb between two passes of a frame never happens, but a VR pump's early return
+// does — changes whole frames only. Every default is the shipped picture.
+enum class ArmId : unsigned {
+    ReflectMotion,       ///< "reflect.motion" — the march's object motion + the trace's mover branches
+    ReflectPosed,        ///< "reflect.posed" — the posed (skinned) identification
+    ReflectAlphaTested,  ///< "reflect.alphaTested" — cut-out geometry traced as cut-out
+    ReflectEdgeClasses,  ///< "reflect.edgeClasses" — the Hits view's class overlay (0 off, 1, 2)
+    ReflectMonoEyes,     ///< "reflect.monoEyes" — a stereo trace with the mono basis
+    TlasRefit,           ///< "rayquery.tlasRefit" — refit the TLAS instead of rebuilding it
+    GatherTemporal,      ///< "gather.temporal" — the screen-probe gather's pixel history
+    AtomDecode,          ///< "atom.decode" — the screen decode armed (0: the Atom items drawn by nothing)
+    CardFootprint,       ///< "cards.footprintTexels" — the card read's footprint gate
+    FieldScroll,         ///< "gi.fieldScroll" — the irradiance field scrolls (0: re-placed whole)
+    Count
+};
+class ArmRegistry {
+public:
+    ArmRegistry();
+    /// The value is PENDING until the next latch. False (and `err`) for an
+    /// unknown name or a value outside the arm's range.
+    bool set(const std::string &name, double value, std::string &err);
+    /// The latched value / its truth (anything but 0).
+    double value(ArmId a) const { return mLive[unsigned(a)]; }
+    bool on(ArmId a) const { return mLive[unsigned(a)] != 0.0; }
+    /// The top of a frame: what was set since the last frame takes effect now.
+    void latch() { mLive = mPending; }
+    std::vector<ArmInfo> list() const;
+private:
+    std::array<double, unsigned(ArmId::Count)> mPending{};
+    std::array<double, unsigned(ArmId::Count)> mLive{};
+};
+
 namespace monitor {
 
 /// THE RING'S SIZE. 4096 records is ~68 s at 60 Hz and ~13 s at 300 Hz — more
@@ -1900,6 +1944,12 @@ public:
         FrameRecord           rec;
         std::vector<unsigned> passSampleIds;    ///< parallel to rec.passes
         std::vector<unsigned> cacheSampleIds;   ///< parallel to rec.cacheWork
+        /// Parallel to the two lists above: the row's sample opened with no other
+        /// row of ours open and inside the frame's own pair (`beginRowSample`).
+        std::vector<char>     passTop, cacheTop;
+        unsigned              frameSampleId = 0u; ///< the frame pair's sample (0 = none)
+        std::vector<unsigned> gapIds;             ///< the frame pair's gaps (registered at its close)
+        bool                  gapLost = false;    ///< a gap's sample never answered
         unsigned              outstanding = 0u; ///< sample ids not yet answered
     };
     /// Frames published before every sample answered (kMaxHeldFrames).
@@ -1918,10 +1968,11 @@ public:
     /// Where a sample id's result belongs: which frame in the holding queue,
     /// which row of it, and whether that row is a PASS or a CACHE-WORK entry
     /// (a compute dispatch the compositor never sees).
+    enum class SampleKind : unsigned char { Pass, Cache, Frame, Gap };
     struct GpuSampleSlot {
-        unsigned frame = 0;   ///< index into mPending
-        unsigned row = 0;     ///< index into rec.passes or rec.cacheWork
-        bool     cache = false;
+        unsigned   frame = 0;   ///< index into mPending
+        unsigned   row = 0;     ///< index into rec.passes or rec.cacheWork
+        SampleKind kind = SampleKind::Pass;
     };
     /// id -> where its result goes. Rebuilt as frames retire.
     std::unordered_map<unsigned, GpuSampleSlot> mGpuSampleIndex;
@@ -1932,6 +1983,86 @@ public:
     /// The same, for `mCurrent.cacheWork` — held index-parallel, which is why
     /// `adoptPendingCacheWork` files a 0 for every row it adopts.
     std::vector<unsigned> mCacheSampleIds;
+    /// Index-parallel to the two lists above: was the row's sample TOP-LEVEL.
+    std::vector<char>     mPassTop, mCacheTop;
+
+    // ---- THE ONE GPU-TIMING FACILITY (lane TEST-1, the perf audit's F3/F5) ----
+    //
+    // Every GPU millisecond the engine reports is a sample on the fork's stack
+    // (fork 1a81f866a+1bccc3f93): a compositor pass's (PassListener), a dispatch's
+    // (CacheScope), or the frame's own pair below. There is no other timestamp
+    // query in the engine — the ray tier's five private rings, the screen-probe
+    // gather's pool and the wall-clock "slopes" were folded into CacheScope and
+    // deleted — so, by owner decision D3's second lock, no query pool exists
+    // outside a capture, and a GPU reading is -1 outside one.
+    //
+    /// THE FRAME'S OWN PAIR (F5). Opened when the pools turn over at the close of
+    /// the previous frame (`OgreEngine::gpuFrameBegin`, from closeRenderFrame), so
+    /// the between-frames half of a frame (the mirror's GI work the next record
+    /// adopts) lies inside it; closed when the frame's recording ends
+    /// (`frameRenderingQueued`, or `endFrame` for a frame that rendered nothing).
+    /// It is a SPAN — the first command of the frame's submission to the last —
+    /// so a mid-frame flush's CPU bubble is inside it; FrameRecord::unattributedGpuMs
+    /// is the span less the top-level rows.
+    unsigned mFrameSampleId = 0u;
+    bool     mFrameSampleOpen = false;
+    /// THE GAPS (TEST-1 fix round: coverage over BUSY spans). While the frame pair
+    /// is open and no row of ours is, a "gap" sample is open; each row's sample
+    /// closes it and the last row's end opens the next. A gap whose Ogre command
+    /// buffer changed under it crossed a SUBMISSION (the GPU idled for the CPU):
+    /// FrameRecord::gpuIdleMs; the others are GPU work no row names:
+    /// FrameRecord::unattributedGpuMs. Registered with the pair's owner record when
+    /// the pair closes (the pair outlives the record's end: it closes at the frame's
+    /// close, after the VR eye copy).
+    unsigned mGapId = 0u;
+    bool     mGapOpen = false;
+    std::uintptr_t mGapCmd = 0u;
+    std::vector<unsigned> mFrameGaps;
+    std::unordered_map<unsigned, bool> mGapSpanned;
+    /// The record that owns the open frame pair (its `frame` number), set by endFrame.
+    unsigned long long mFrameOwner = 0ull;
+    bool     mFrameOwned = false;
+    void openGap();
+    void closeGap();
+    /// PASSES OUTSIDE A FRAME (a one-shot sky bake between frames — F2): banked and
+    /// adopted by the next frame, like a between-frames cache row.
+    std::vector<FramePass> mPendingPasses;
+    std::vector<unsigned>  mPendingPassSampleIds;
+    std::vector<char>      mPendingPassTop;
+    /// The pools were turned over at the close of the last frame: the next
+    /// renderOneFrame must not turn them over again (it would end the open pair).
+    bool     mTurnedOver = false;
+    /// Turnovers so far. The fork CLEARS its sample stack at each, so a sample
+    /// opened before one and closed after it would pop somebody else's: a
+    /// CacheScope remembers this number and refuses to close its GPU sample
+    /// across a change (it files its row untimed instead).
+    unsigned long long mTurnovers = 0ull;
+    /// The render system the frame pair was opened on.
+    Ogre::RenderSystem *mFrameRs = nullptr;
+    /// How many of OUR row samples (passes, cache scopes) are open right now, the
+    /// frame pair excluded. A row whose sample opens at depth 0 inside the frame
+    /// pair is TOP-LEVEL: its time is inside the frame's and inside nobody
+    /// else's, so the top-level rows are what the pair is compared with.
+    unsigned mOpenRowSamples = 0u;
+    /// Opens a row's sample on `rs` (0 = not sampling); `top` = was it top-level.
+    unsigned beginRowSample(Ogre::RenderSystem *rs, const std::string &name, bool &top);
+    /// Closes the innermost row sample (the fork's stack is LIFO, like ours).
+    void endRowSample(Ogre::RenderSystem *rs, const std::string &name);
+    void openFrameSample(Ogre::RenderSystem *rs);
+    /// Closes the frame pair — only when no row sample is open, because the fork
+    /// pops the INNERMOST sample: closing over an open row would end that row's
+    /// sample instead. A pair that cannot close is abandoned (never answered,
+    /// never waited for) and the record says `frameGpuMs` -1.
+    void closeFrameSample();
+    /// THE LAST GPU TIME, BY NAME AND OWNER: the status readouts that used to keep
+    /// a private timestamp ring (RayQueryStatus::reflectMs, the gather's four
+    /// jobs, the cards' relight...) read the CacheScope rows their owner filed.
+    /// One frame's rows of the same key are SUMMED (a job dispatched twice in a
+    /// frame costs both); a later frame replaces the value.
+    struct LastGpu { unsigned long long frame = 0ull; float ms = -1.0f; };
+    std::map<std::pair<std::string, const void *>, LastGpu> mLastGpu;
+    /// sample id -> the key its answer updates (cache rows that named an owner).
+    std::unordered_map<unsigned, std::pair<std::string, const void *>> mSampleKeys;
     /// Files a GPU result against the pass that asked for it. Unknown ids (a
     /// frame that already aged out) are dropped.
     void noteGpuSample(unsigned sampleId, float ms);
@@ -1949,8 +2080,8 @@ public:
     /// Banks a between-frames stage, coalescing by name past
     /// kPendingStageCoalesce so the pending list cannot grow without bound.
     void bankPending(const std::string &name, float ms);
-    void cacheWork(const CacheWork &w, unsigned gpuSampleId = 0u);
-    void pass(FramePass &&p, unsigned gpuSampleId = 0u);
+    void cacheWork(const CacheWork &w, unsigned gpuSampleId = 0u, bool top = false);
+    void pass(FramePass &&p, unsigned gpuSampleId = 0u, bool top = false);
     void event(MonitorEvent &&e);
     /// Cache work recorded BEFORE the frame opened — the probe budget and the
     /// lamp-map caster scan both run in the engine's pre-frame half — belongs
@@ -1973,6 +2104,7 @@ public:
         /// The GPU sample this pass opened (0 = none). Held here because the
         /// render system's begin/end hooks are a STACK, exactly like this one.
         unsigned gpuSampleId = 0u;
+        bool     gpuTop = false;   ///< the sample opened top-level (beginRowSample)
     };
     std::vector<PassFrame> mPassStack;
     /// The pass-stack depth each OPEN workspace update started at. A workspace
@@ -2035,6 +2167,7 @@ private:
     /// buffer the next frame's passes will — and the id is registered when the
     /// row is adopted.
     std::vector<unsigned>     mPendingCacheSampleIds;
+    std::vector<char>         mPendingCacheTop;
     FrameRecord               mCurrent;
     std::chrono::steady_clock::time_point mFrameStart;
     /// The number of the last frame that BEGAN. Events recorded between frames
@@ -2090,7 +2223,9 @@ void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
 /// compositor pass. The pair is written into the same command buffer as the
 /// dispatch and read back once the GPU has finished it, exactly like a pass's.
 ///
-/// A SCOPE MUST NOT STRADDLE A FRAME BOUNDARY. The render system's sample
+/// A SCOPE MUST NOT STRADDLE A FRAME BOUNDARY — and since lane TEST-1 it
+/// cannot: a scope that closes after a turnover files its row with no GPU time
+/// rather than pop a sample of the next frame. The render system's sample
 /// stack is cleared when the host opens a frame (fork 1a81f866a+1bccc3f93 (was 0027)'s
 /// `JahGpuFrameBegin`, so that a frame which threw cannot corrupt the next
 /// one's nesting), and a `begin` on one side of that point with its `end` on
@@ -2101,8 +2236,12 @@ void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
 /// may be constructed at the call site while the monitor is off.
 class CacheScope {
 public:
+    /// `owner` (optional) names WHO filed the row, for `lastGpuMs(detail, owner)`:
+    /// a status readout of this job's GPU time reads it back by the same pair.
+    /// Never written to the record (an address means nothing in a bundle).
     CacheScope(CacheKind cache, WorkReason reason, unsigned long long id,
-               const char *detail, Ogre::RenderSystem *rs = nullptr);
+               const char *detail, Ogre::RenderSystem *rs = nullptr,
+               const void *owner = nullptr);
     ~CacheScope();
     CacheScope(const CacheScope &) = delete;
     CacheScope &operator=(const CacheScope &) = delete;
@@ -2124,6 +2263,8 @@ private:
     WorkReason         mReason;
     unsigned           mUnits = 0;
     unsigned           mGpuSampleId = 0u;
+    bool               mGpuTop = false;
+    unsigned long long mTurnover = 0ull;   ///< FrameMonitor::mTurnovers at the open
     bool               mCancelled = false;
     /// The monitor was live when the scope OPENED. A capture that starts in the
     /// middle of one must not file a row timed from an unset clock.
@@ -2152,6 +2293,21 @@ private:
     WorkReason       mReason;
     std::chrono::steady_clock::time_point mStart;
 };
+
+/// THE LAST GPU MILLISECONDS of the CacheScope rows `owner` filed under `detail`
+/// (one frame's rows summed), or -1: no capture is running (no query pool exists
+/// outside one — owner decision D3), the job has not run since it started, or its
+/// answer has not come back yet. The ONE way a status readout reads a GPU time.
+float lastGpuMs(const char *detail, const void *owner);
+/// Drops `owner`'s readings — called where the owner dies, so a new object at the
+/// same address never reads its predecessor's time.
+void forgetGpuOwner(const void *owner);
+/// A ONE-SHOT WORKSPACE is watched too (lane TEST-1, F2): the sky capture, the IBL
+/// convolution and the cloud bake each make a workspace, update it once and destroy
+/// it, so the per-frame attach never sees them — and a sky change was a hitch
+/// nobody could attribute. Call between addWorkspace and the update; nothing to
+/// undo (the workspace dies with its listener list). A no-op while the monitor is off.
+void watchWorkspace(Ogre::CompositorWorkspace *ws);
 
 /// A discrete event with its cause.
 void noteEvent(MonitorEventKind kind, WorkReason reason, const std::string &label,
@@ -3440,7 +3596,6 @@ public:
     Colour atmosphereSunTint(const Vec3 &toSun) const override;
     AtmosphereStatus atmosphereStatus() const override;
     void setReflectionFogEnabled(bool on) override { mReflectionFogOn = on; }
-    bool measureAtmosphere(unsigned iterations, AtmosphereCost &out) override;
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
     /// environment reflections and its ambient SH, for every sky that is not
@@ -3900,8 +4055,7 @@ public:
     /// ray tier's trace and timestamps (OgreRayQuery.cpp).
     bool cardMoverFrame(CardMoverFrame &out);
     bool traceCardMovers(const CardMoverTrace &job);
-    void timeCardRelight(bool begin);
-    void cardMoverTimes(float &traceMs, float &relightMs, float &stillMs);
+    void cardMoverTimes(float &traceMs, float &stillMs);
     /// The mover list as last walked, and the slot count it was walked at: the
     /// walk runs only on a frame whose moved set is not empty or whose slot
     /// count changed (or a moved slot now holds another node).
@@ -6584,7 +6738,7 @@ public:
     /// null (or a request with hzbLevels 0) is the frustum-only mode.
     /// The recording half of runGpuCull: the request uploaded and the jobs
     /// dispatched, nothing read back — for a consumer inside a frame (the id pass).
-    /// `keepBindings` leaves the jobs bound for a measurement's re-dispatches. The
+    /// Each job is a monitor row in a capture ("cull.test" ... "cull.emit"). The
     /// answer lands in `cull`'s buffers: the scene's own (runGpuCull) or a view's
     /// (the id pass — one instance per view, so two views of one scene in a frame
     /// never share the list one of them is drawing from).
@@ -6593,9 +6747,13 @@ public:
     /// `prior` (ATOM-OCCLUSION-1's DISOCCLUSION PASS): another list's cull of this frame —
     /// only the instances ITS depth test rejected are tested (the `cull_retest`
     /// permutation), against `hzb`; null is an ordinary request.
+    /// `rows` names the jobs' monitor rows (CacheKind::Cull) by WHO records them:
+    /// the id pass's "id.cull.cut", a tool's or the chain warm-up's plain
+    /// "cull.cut"; a shadow map's caster cull files none (its pass row holds it).
+    enum class CullRows { Tool, IdPass, Caster };
     bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
-                       std::string &err, bool keepBindings = false, double *requestMs = nullptr,
-                       const GpuCull *prior = nullptr);
+                       std::string &err, double *requestMs = nullptr,
+                       const GpuCull *prior = nullptr, CullRows rows = CullRows::Tool);
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
@@ -7297,6 +7455,14 @@ public:
     /// workspace census and its compositor-graph snapshot; nothing mutates a
     /// view's workspace from outside the seam.
     Ogre::CompositorWorkspace *workspace() const { return mWorkspace; }
+    /// The view's OTHER workspaces the frame monitor watches (lane TEST-1, F2):
+    /// the picture-in-picture inset and the blank one. Neither takes the view's
+    /// own listeners (they are the main chain's), so the monitor attaches to them
+    /// directly, each frame, as it does to a scene's private workspaces.
+    void monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out) const {
+        if (mPipWorkspace) out.push_back(mPipWorkspace);
+        if (mBlankWorkspace) out.push_back(mBlankWorkspace);
+    }
     /// The texture this view draws into: the window's swapchain texture on an
     /// on-screen view, the RTT on an offscreen one. The VR session needs it for
     /// both of its jobs — the eye copy reads the session View's target, and the
@@ -7821,6 +7987,9 @@ bool colourEncodedOnce();
 /// swapchain images and submits the projection layer.
 void    vrSessionBeginFrame(VrSession *);
 void    vrSessionEndFrame(VrSession *);
+/// The session's desktop MIRROR workspace (null without one) — the frame
+/// monitor's listener rides it (lane TEST-1, the perf audit's F2).
+Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *);
 VrState vrSessionState(const VrSession *);
 /// IS THE SESSION OVER? (lane VR-3b.) True once nothing can come of it any
 /// more: the runtime stopped it, the runtime went away, or the device was lost.
@@ -8276,6 +8445,9 @@ public:
     // ---- The render-loop monitor (OgreFrameMonitor.cpp) ----
     void setFrameMonitor(MonitorLevel level) override;
     MonitorLevel frameMonitor() const override;
+    bool setArm(const std::string &name, double value) override;
+    std::vector<ArmInfo> arms() const override;
+    const ArmRegistry &armRegistry() const { return mArms; }
     MonitorStatus monitorStatus() const override;
     unsigned takeFrameRecords(std::vector<FrameRecord> &out) override;
     unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) override;
@@ -8638,6 +8810,10 @@ private:
     /// structurally: nothing to allocate, nothing to read, and every
     /// instrumentation site in every TU is one `if (monitor::live())` test.
     std::unique_ptr<monitor::FrameMonitor> mMonitor;
+    /// THE MEASUREMENT ARMS (lane TEST-1): latched at the top of every frame.
+    ArmRegistry mArms;
+    /// Ogre's metrics recording when the capture started (F6 restores it).
+    bool mMetricsBeforeCapture = false;
     /// Set by the host for the NEXT frame only (Engine::setNextFrameCause).
     FrameCause mNextFrameCause = FrameCause::Driver;
     /// What the next frame may put off (OPEN_COVER_SPEC §2.1). `Complete` is

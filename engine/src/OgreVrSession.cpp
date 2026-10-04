@@ -114,6 +114,7 @@ bool colourEncodedOnce() { return true; }   // no session is ever wrong about co
 // The engine's four session entry points, for the same reason.
 void vrSessionBeginFrame(VrSession *) {}
 void vrSessionEndFrame(VrSession *) {}
+Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *) { return nullptr; }
 VrState vrSessionState(const VrSession *) { return VrState::Unavailable; }
 VrStatus vrSessionStatus(const VrSession *) { return VrStatus(); }
 View *vrSessionView(const VrSession *) { return nullptr; }
@@ -708,6 +709,8 @@ bool VrBoot::device(Ogre::Root *root, VrInfo &info, std::string &reason) {
 // ===========================================================================
 class VrSession final : public Ogre::CompositorWorkspaceListener {
 public:
+    /// The desktop mirror's workspace, for the frame monitor's listener (F2).
+    Ogre::CompositorWorkspace *mirrorWorkspace() const { return mMirrorWorkspace; }
     VrSession(VrBoot *boot, OgreEngine *engine, OgreScene *scene, const VrConfig &cfg)
         : mBoot(boot), mEngine(engine), mScene(scene), mConfig(cfg) {}
     /// NOT `override`: Ogre's CompositorWorkspaceListener has no virtual
@@ -4759,6 +4762,7 @@ bool colourEncodedOnce() { return sColourEncodedOnce; }
 }  // namespace vr
 
 void vrSessionBeginFrame(VrSession *s) { if (s) s->beginFrame(); }
+Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *s) { return s ? s->mirrorWorkspace() : nullptr; }
 void vrSessionEndFrame(VrSession *s) { if (s) s->endFrame(); }
 VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Unavailable; }
 bool vrSessionIsOver(const VrSession *s) { return s && s->isOver(); }

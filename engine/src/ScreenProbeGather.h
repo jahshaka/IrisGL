@@ -92,6 +92,8 @@ public:
     /// then waits a fraction of what it promised).
     virtual uint32_t gatherFrameNow() const = 0;
     virtual uint32_t gatherFramesInFlight() const = 0;
+    /// The measurement arm "gather.temporal" (lane TEST-1): the pixel history on.
+    virtual bool gatherTemporalArm() const = 0;
     /// Outside every encoder, ready for compute and barriers.
     virtual VkCommandBuffer gatherFrameCmd() = 0;
 
@@ -435,27 +437,28 @@ private:
         std::vector<float> irrHost;
         unsigned irrHostFrame = 0u;
 
-        unsigned querySlot = 0u, queryBase = 0u;
-        bool hasQueryBase = false;
         struct Pending {
             uint32_t frame = 0u;
             bool live = false;
             bool irradiance = false;     ///< this slot of the readback ring was written
             unsigned gatherFrame = 0u;   ///< ...by this gather frame
             /// A HELD frame (the rest, PHOTON-GATHER-1d): only the readback was
-            /// recorded — no counter copy and no timestamps to read back.
+            /// recorded — no counter copy to read back.
             bool held = false;
         };
         Pending pending[3];
-        float placeMs = -1.0f, traceMs = -1.0f, filterMs = -1.0f, integrateMs = -1.0f, cpuMs = -1.0f;
+        /// The four jobs' GPU times are the monitor's rows "gather.place" /
+        /// "gather.trace" / "gather.filter" / "gather.integrate" (owner = the
+        /// view's key; lane TEST-1) — -1 outside a capture.
+        float cpuMs = -1.0f;
         /// THE FRAME BETWEEN ITS TWO HALVES (record -> finish, PHOTON-HIT-SHADE-1):
         /// what the second half needs of the first.
         bool finishPending = false;
         bool finishHold = false;
         bool finishTraced = false;
         GatherInputs finishIn;
-        unsigned finishRing = 0u, finishQbase = 0u;
-        bool finishTimed = false, finishTemporal = false;
+        unsigned finishRing = 0u;
+        bool finishTemporal = false;
         double finishCpuMs = 0.0;
     };
 
@@ -463,7 +466,7 @@ private:
     bool ensureTargets(View &v, const GatherInputs &in, unsigned stride, unsigned octRes,
                        unsigned adaptiveCap, std::string &err);
     void drop(View &v);
-    /// The timestamps AND the adaptive count of the frames that have retired.
+    /// The adaptive count (and the irradiance readback) of the frames that have retired.
     void readPending(View &v);
     /// A HELD frame (PHOTON-GATHER-1d): the view has been at rest for N frames,
     /// its answer IS the rest mean, and nothing is dispatched — the irradiance
@@ -496,9 +499,6 @@ private:
     VkShaderModule mFilterModule = VK_NULL_HANDLE;
     VkShaderModule mIntegrateModule = VK_NULL_HANDLE;
     VkDescriptorPool mPool = VK_NULL_HANDLE;
-    VkQueryPool mTimestamps = VK_NULL_HANDLE;
-    uint32_t mQuerySlots = 0u;
-    float mTimestampPeriod = 0.0f;
     /// The pipelines could not be made on this device: say so ONCE and take the
     /// fallback picture (the cones and the field) for the rest of the process.
     /// A failed ALLOCATION does not latch — see `record`.
