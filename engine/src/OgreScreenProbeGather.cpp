@@ -997,9 +997,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     mLastError.clear();
 
     // ---- THE PIXEL HISTORY'S INPUTS (PHOTON-GATHER-1c) -----------------------
-    // THE MEASUREMENT LEVER, read at every frame so a suite drives both arms in
-    // one process: each frame's estimate alone, no history read or written.
-    const bool temporal = std::getenv("JAHSHAKA_GATHER_NO_TEMPORAL") == nullptr;
+    // THE MEASUREMENT LEVER (the arm "gather.temporal", latched per frame) so a suite
+    // drives both arms in one process: off, each frame's estimate alone, no history
+    // read or written.
+    const bool temporal = mHost.gatherTemporalArm();
     // The history restarts when it would otherwise average two estimators: the
     // history switched back on (its images were not written meanwhile), or a
     // tuning field that changes the estimator (an A/B arm).

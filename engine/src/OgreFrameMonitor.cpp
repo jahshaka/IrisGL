@@ -27,6 +27,9 @@
 // THREADING: engine calls are UI-thread-only by contract, so nothing here is
 // atomic and nothing is locked.
 #include "EnginePrivate.h"
+#include "OgreVulkanRenderSystem.h"
+#include "OgreVulkanDevice.h"
+#include "OgreVulkanQueue.h"
 
 #include <algorithm>
 #include <cstring>
@@ -137,6 +140,17 @@ void FrameMonitor::beginFrame(unsigned long long frame, FrameCause cause, bool o
     mCurrent.stages.swap(mPendingHostStages);
     mPendingHostStages.clear();
     adoptPendingCacheWork();
+    // ...and the passes a workspace executed between frames (a one-shot sky bake, F2).
+    for (size_t i = 0; i < mPendingPasses.size(); ++i) {
+        mCurrent.passes.push_back(std::move(mPendingPasses[i]));
+        if (mGpu) {
+            mPassSampleIds.push_back(i < mPendingPassSampleIds.size() ? mPendingPassSampleIds[i] : 0u);
+            mPassTop.push_back(i < mPendingPassTop.size() ? mPendingPassTop[i] : char(0));
+        }
+    }
+    mPendingPasses.clear();
+    mPendingPassSampleIds.clear();
+    mPendingPassTop.clear();
     mOverheadMs += std::chrono::duration<double, std::milli>(
                        std::chrono::steady_clock::now() - t0).count();
 }
@@ -170,17 +184,16 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     // finished the frame, so the record waits here until every sample it asked
     // for has answered (MONITOR-RETIRE-1); without GPU sampling the queue is
     // one deep and the record is published immediately.
-    // THE FRAME'S PAIR closes here when the frame rendered nothing (no
-    // frameRenderingQueued fired); a frame that rendered closed it already.
-    closeFrameSample();
     PendingFrame pf;
     pf.rec = std::move(mCurrent);
     pf.passSampleIds.swap(mPassSampleIds);
     pf.cacheSampleIds.swap(mCacheSampleIds);
     pf.passTop.swap(mPassTop);
     pf.cacheTop.swap(mCacheTop);
-    pf.frameSampleId = mFrameSampleId;
-    mFrameSampleId = 0u;
+    // THE FRAME'S PAIR is this record's, and it is STILL OPEN: it closes at the
+    // frame's close (after the VR eye copy), with the gaps it holds.
+    pf.frameSampleId = mFrameSampleOpen ? mFrameSampleId : 0u;
+    if (pf.frameSampleId) { mFrameOwner = pf.rec.frame; mFrameOwned = true; }
     if (mGpu) {
         const unsigned slot = unsigned(mPending.size());
         for (unsigned i = 0; i < pf.passSampleIds.size(); ++i)
@@ -221,6 +234,12 @@ void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
         // query room, a wrapped counter, a lost pool): it answers the sample
         // and leaves the row unmeasured.
         if (ms < 0.0f) {
+            if (where.kind == SampleKind::Gap) pf.gapLost = true;
+        } else if (where.kind == SampleKind::Gap) {
+            const auto sp = mGapSpanned.find(sampleId);
+            float &acc = (sp != mGapSpanned.end() && sp->second) ? rec.gpuIdleMs : rec.unattributedGpuMs;
+            if (acc < 0.0f) acc = 0.0f;
+            acc += ms;
         } else if (where.kind == SampleKind::Frame) {
             rec.frameGpuMs = ms;
         } else if (where.kind == SampleKind::Cache) {
@@ -237,6 +256,7 @@ void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
         }
     }
     if (key != mSampleKeys.end()) mSampleKeys.erase(key);
+    mGapSpanned.erase(sampleId);
     mGpuSampleIndex.erase(it);
 }
 
@@ -272,27 +292,24 @@ void FrameMonitor::retirePending(bool all) {
                 pf.rec.gpuMs += p.gpuMs;
             }
         }
-        // COVERAGE (F5): the frame's own span less every top-level timed row,
-        // passes and cache rows alike. A top-level row that asked for a sample
-        // and has no time leaves the remainder unknowable, and it says so (-1).
+        // COVERAGE (F5), from the GAPS (TEST-1 fix round): what no row covers, split
+        // into the GPU waiting for a submission (idle) and GPU work no row names.
+        // A gap whose sample was lost leaves both unknowable (-1); a frame whose
+        // rows left no gap reads 0.
         if (pf.rec.frameGpuMs >= 0.0f) {
-            double rows = 0.0;
-            bool whole = true;
-            for (size_t i = 0; i < pf.rec.passes.size(); ++i)
-                if (top(pf.passTop, i)) {
-                    if (pf.rec.passes[i].gpuMs >= 0.0f) rows += pf.rec.passes[i].gpuMs;
-                    else whole = false;
-                }
-            for (size_t i = 0; i < pf.rec.cacheWork.size(); ++i)
-                if (top(pf.cacheTop, i)) {
-                    if (pf.rec.cacheWork[i].gpuMs >= 0.0f) rows += pf.rec.cacheWork[i].gpuMs;
-                    else whole = false;
-                }
-            pf.rec.unattributedGpuMs = whole ? float(double(pf.rec.frameGpuMs) - rows) : -1.0f;
+            if (pf.gapLost) {
+                pf.rec.gpuIdleMs = pf.rec.unattributedGpuMs = -1.0f;
+            } else {
+                if (pf.rec.gpuIdleMs < 0.0f) pf.rec.gpuIdleMs = 0.0f;
+                if (pf.rec.unattributedGpuMs < 0.0f) pf.rec.unattributedGpuMs = 0.0f;
+            }
+        } else {
+            pf.rec.gpuIdleMs = pf.rec.unattributedGpuMs = -1.0f;
         }
         for (unsigned id : pf.passSampleIds) mGpuSampleIndex.erase(id);
         for (unsigned id : pf.cacheSampleIds) { mGpuSampleIndex.erase(id); mSampleKeys.erase(id); }
         if (pf.frameSampleId) mGpuSampleIndex.erase(pf.frameSampleId);
+        for (unsigned id : pf.gapIds) { mGpuSampleIndex.erase(id); mGapSpanned.erase(id); }
         push(std::move(pf.rec));
         // Every surviving frame moved down one slot.
         for (auto &kv : mGpuSampleIndex)
@@ -375,7 +392,15 @@ void FrameMonitor::cacheWork(const CacheWork &w, unsigned gpuSampleId, bool top)
     }
 }
 void FrameMonitor::pass(FramePass &&p, unsigned gpuSampleId, bool top) {
-    if (!mInFrame) return;
+    if (!mInFrame) {
+        // BETWEEN FRAMES (a one-shot sky bake, an IBL convolution — F2): the row
+        // is the next frame's, like a between-frames cache row, and so is its
+        // sample. Bounded: past it the row is dropped (its sample answers nobody).
+        if (mPendingPasses.size() >= 4096u) return;
+        mPendingPasses.push_back(std::move(p));
+        if (mGpu) { mPendingPassSampleIds.push_back(gpuSampleId); mPendingPassTop.push_back(char(top)); }
+        return;
+    }
     mCurrent.passes.push_back(std::move(p));
     if (mGpu) { mPassSampleIds.push_back(gpuSampleId); mPassTop.push_back(char(top)); }
 }
@@ -386,8 +411,9 @@ unsigned FrameMonitor::beginRowSample(Ogre::RenderSystem *rs, const std::string 
     if (!mGpu || !rs) return 0u;
     const unsigned id = nextGpuSampleId();
     if (!id) return 0u;
+    if (mOpenRowSamples == 0u) closeGap();   // the stretch with no row ends here
     unsigned hash = id;
-    try { rs->beginGPUSampleProfile(name, &hash); } catch (...) { return 0u; }
+    try { rs->beginGPUSampleProfile(name, &hash); } catch (...) { if (mOpenRowSamples == 0u) openGap(); return 0u; }
     top = mFrameSampleOpen && mOpenRowSamples == 0u;
     ++mOpenRowSamples;
     return id;
@@ -396,6 +422,41 @@ void FrameMonitor::endRowSample(Ogre::RenderSystem *rs, const std::string &name)
     if (!rs) return;
     try { rs->endGPUSampleProfile(name); } catch (...) {}
     if (mOpenRowSamples) --mOpenRowSamples;
+    if (mOpenRowSamples == 0u) openGap();   // ...and the next one begins
+}
+
+namespace {
+/// Ogre's CURRENT command buffer, as a tag: it changes exactly when the queue
+/// submits (commitAndNextCommandBuffer begins a new one), which is what tells a
+/// gap that crossed a submission from one that did not. 0 = cannot tell.
+std::uintptr_t cmdTag(Ogre::RenderSystem *rs) {
+    auto *vk = dynamic_cast<Ogre::VulkanRenderSystem *>(rs);
+    if (!vk || !vk->getVulkanDevice()) return 0u;
+    try {
+        return reinterpret_cast<std::uintptr_t>(vk->getVulkanDevice()->mGraphicsQueue.getCurrentCmdBuffer());
+    } catch (...) {
+        return 0u;
+    }
+}
+}   // namespace
+
+void FrameMonitor::openGap() {
+    if (!mGpu || !mFrameSampleOpen || mGapOpen || mOpenRowSamples != 0u || !mFrameRs) return;
+    const unsigned id = nextGpuSampleId();
+    if (!id) return;
+    unsigned hash = id;
+    try { mFrameRs->beginGPUSampleProfile("gap", &hash); } catch (...) { return; }
+    mGapOpen = true;
+    mGapId = id;
+    mGapCmd = cmdTag(mFrameRs);
+}
+void FrameMonitor::closeGap() {
+    if (!mGapOpen) return;
+    mGapOpen = false;
+    try { mFrameRs->endGPUSampleProfile("gap"); } catch (...) { return; }
+    const std::uintptr_t now = cmdTag(mFrameRs);
+    mGapSpanned[mGapId] = now != mGapCmd || now == 0u;
+    mFrameGaps.push_back(mGapId);
 }
 void FrameMonitor::openFrameSample(Ogre::RenderSystem *rs) {
     if (!mGpu || !rs || mFrameSampleOpen) return;
@@ -408,17 +469,48 @@ void FrameMonitor::openFrameSample(Ogre::RenderSystem *rs) {
     mFrameSampleId = id;
     mFrameSampleOpen = true;
     mFrameRs = rs;
+    mFrameOwned = false;
+    mFrameGaps.clear();
+    mGapOpen = false;
+    openGap();
 }
 void FrameMonitor::closeFrameSample() {
     if (!mFrameSampleOpen) return;
+    closeGap();
     mFrameSampleOpen = false;
-    if (mOpenRowSamples != 0u || !mFrameRs) {
-        // Closing now would end an open ROW's sample (the fork pops the
-        // innermost). The pair is abandoned: never registered, never waited for.
-        mFrameSampleId = 0u;
-        return;
+    // The record this pair belongs to (endFrame named it), still waiting for its
+    // samples: the pair's own id is registered there already; its gaps join now.
+    PendingFrame *owner = nullptr;
+    unsigned slot = 0u;
+    if (mFrameOwned)
+        for (unsigned i = 0; i < mPending.size(); ++i)
+            if (mPending[i].rec.frame == mFrameOwner && mPending[i].frameSampleId == mFrameSampleId) {
+                owner = &mPending[i];
+                slot = i;
+                break;
+            }
+    bool ended = false;
+    if (mOpenRowSamples == 0u && mFrameRs) {
+        try { mFrameRs->endGPUSampleProfile("frame"); ended = true; } catch (...) {}
     }
-    try { mFrameRs->endGPUSampleProfile("frame"); } catch (...) { mFrameSampleId = 0u; }
+    if (!ended) {
+        // Closing now would end an open ROW's sample (the fork pops the innermost):
+        // the pair is abandoned, and the record stops waiting for it.
+        if (owner && mGpuSampleIndex.erase(mFrameSampleId) && owner->outstanding) --owner->outstanding;
+        if (owner) owner->frameSampleId = 0u;
+    }
+    if (owner) {
+        for (unsigned g : mFrameGaps) {
+            mGpuSampleIndex[g] = { slot, unsigned(owner->gapIds.size()), SampleKind::Gap };
+            owner->gapIds.push_back(g);
+            ++owner->outstanding;
+        }
+    } else {
+        for (unsigned g : mFrameGaps) mGapSpanned.erase(g);
+    }
+    mFrameGaps.clear();
+    mFrameSampleId = 0u;
+    mFrameOwned = false;
 }
 void FrameMonitor::event(MonitorEvent &&e) {
     if (mEvents.size() >= kEventCapacity) { ++mEventsDropped; return; }
@@ -449,8 +541,8 @@ void FrameMonitor::adoptPendingCacheWork() {
 bool FrameSplitListener::frameRenderingQueued(const Ogre::FrameEvent &) {
     mMark = std::chrono::steady_clock::now();
     mMarked = true;
-    // THE FRAME'S RECORDING ENDS HERE (F5): the last command of its submission.
-    if (gMonitor) gMonitor->closeFrameSample();
+    // (The frame's own GPU pair does NOT close here: it closes at the frame's close,
+    // after the VR eye copy and anything else the close records — the fix round.)
     return true;      // never veto a frame; the monitor changes nothing
 }
 
@@ -908,6 +1000,22 @@ const ArmDef kArms[] = {
       "Refit the top-level structure when the traced SET is unchanged, instead of rebuilding "
       "it (the rebuild is the default: the better tree, 0.21-0.35 ms at 8,001 instances). "
       "far_blas_measure --tlas. Was JAH_RQ_REFIT (read once per process)." },
+    { "gather.temporal", 1.0, 0.0, 1.0,
+      "The screen-probe gather's pixel history (PHOTON-GATHER-1c). 0 = each frame's estimate alone, "
+      "no history read or written (the measurement lever: gi.gather, gi.gather_temporal, "
+      "gi.gather_reference, gi.gather_phase2). Was JAHSHAKA_GATHER_NO_TEMPORAL (a per-frame read)." },
+    { "atom.decode", 1.0, 0.0, 1.0,
+      "The screen decode armed in the decode pass. 0 = unarmed: the Atom items are drawn by NOTHING "
+      "in that pass (engine.atom_draw's proof that the view's passes skip their queue; scale's "
+      "negative control). Was JAHSHAKA_ATOM_DECODE_OFF (a per-frame read)." },
+    { "cards.footprintTexels", 4.0, 0.0, 1e12,
+      "The card read's footprint gate in texels (Types.h kCardFootprintTexels = 4): the sweep that "
+      "chose it (test_rt_reflect --footprint-sweep) sets it per arm, 1e12 = the gate open, 0 = shut. "
+      "Was JAHSHAKA_CARD_FOOTPRINT_K (a per-frame read)." },
+    { "gi.fieldScroll", 1.0, 0.0, 1.0,
+      "The irradiance field SCROLLS on a cascade-0 step (keeps the probes that stay inside). 0 = the "
+      "same snapped window re-placed WHOLE, the behaviour the scroll replaced (gi.field_scroll walks "
+      "one path both ways). Was JAHSHAKA_GI_FIELD_NO_SCROLL (a per-step read)." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

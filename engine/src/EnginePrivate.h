@@ -108,6 +108,7 @@
 #include <condition_variable>
 #include <thread>
 #include <array>
+#include <cstdint>
 #include <map>
 #include <chrono>
 #include <deque>
@@ -1826,6 +1827,10 @@ enum class ArmId : unsigned {
     ReflectEdgeClasses,  ///< "reflect.edgeClasses" — the Hits view's class overlay (0 off, 1, 2)
     ReflectMonoEyes,     ///< "reflect.monoEyes" — a stereo trace with the mono basis
     TlasRefit,           ///< "rayquery.tlasRefit" — refit the TLAS instead of rebuilding it
+    GatherTemporal,      ///< "gather.temporal" — the screen-probe gather's pixel history
+    AtomDecode,          ///< "atom.decode" — the screen decode armed (0: the Atom items drawn by nothing)
+    CardFootprint,       ///< "cards.footprintTexels" — the card read's footprint gate
+    FieldScroll,         ///< "gi.fieldScroll" — the irradiance field scrolls (0: re-placed whole)
     Count
 };
 class ArmRegistry {
@@ -1943,6 +1948,8 @@ public:
         /// row of ours open and inside the frame's own pair (`beginRowSample`).
         std::vector<char>     passTop, cacheTop;
         unsigned              frameSampleId = 0u; ///< the frame pair's sample (0 = none)
+        std::vector<unsigned> gapIds;             ///< the frame pair's gaps (registered at its close)
+        bool                  gapLost = false;    ///< a gap's sample never answered
         unsigned              outstanding = 0u; ///< sample ids not yet answered
     };
     /// Frames published before every sample answered (kMaxHeldFrames).
@@ -1961,7 +1968,7 @@ public:
     /// Where a sample id's result belongs: which frame in the holding queue,
     /// which row of it, and whether that row is a PASS or a CACHE-WORK entry
     /// (a compute dispatch the compositor never sees).
-    enum class SampleKind : unsigned char { Pass, Cache, Frame };
+    enum class SampleKind : unsigned char { Pass, Cache, Frame, Gap };
     struct GpuSampleSlot {
         unsigned   frame = 0;   ///< index into mPending
         unsigned   row = 0;     ///< index into rec.passes or rec.cacheWork
@@ -1999,6 +2006,29 @@ public:
     /// is the span less the top-level rows.
     unsigned mFrameSampleId = 0u;
     bool     mFrameSampleOpen = false;
+    /// THE GAPS (TEST-1 fix round: coverage over BUSY spans). While the frame pair
+    /// is open and no row of ours is, a "gap" sample is open; each row's sample
+    /// closes it and the last row's end opens the next. A gap whose Ogre command
+    /// buffer changed under it crossed a SUBMISSION (the GPU idled for the CPU):
+    /// FrameRecord::gpuIdleMs; the others are GPU work no row names:
+    /// FrameRecord::unattributedGpuMs. Registered with the pair's owner record when
+    /// the pair closes (the pair outlives the record's end: it closes at the frame's
+    /// close, after the VR eye copy).
+    unsigned mGapId = 0u;
+    bool     mGapOpen = false;
+    std::uintptr_t mGapCmd = 0u;
+    std::vector<unsigned> mFrameGaps;
+    std::unordered_map<unsigned, bool> mGapSpanned;
+    /// The record that owns the open frame pair (its `frame` number), set by endFrame.
+    unsigned long long mFrameOwner = 0ull;
+    bool     mFrameOwned = false;
+    void openGap();
+    void closeGap();
+    /// PASSES OUTSIDE A FRAME (a one-shot sky bake between frames — F2): banked and
+    /// adopted by the next frame, like a between-frames cache row.
+    std::vector<FramePass> mPendingPasses;
+    std::vector<unsigned>  mPendingPassSampleIds;
+    std::vector<char>      mPendingPassTop;
     /// The pools were turned over at the close of the last frame: the next
     /// renderOneFrame must not turn them over again (it would end the open pair).
     bool     mTurnedOver = false;

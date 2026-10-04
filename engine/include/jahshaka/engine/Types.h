@@ -3386,7 +3386,7 @@ struct GatherTuning {
     /// packed history's rounding dither (GA-VR) is keyed on the view's ADVANCING
     /// frame counter and ignores this freeze, so a pixel A/B is byte-exact only
     /// where the rest mean holds (a still view past its rest frames) or under
-    /// JAHSHAKA_GATHER_NO_TEMPORAL; a moving arm or a stereo view (which never
+    /// the arm "gather.temporal" = 0; a moving arm or a stereo view (which never
     /// rests) compares within the rounding's amplitude, not exactly.
     bool     freezeFrameIndex = false;
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
@@ -3446,10 +3446,10 @@ struct GatherTuning {
 };
 
 // THE PIXEL HISTORY'S MEASUREMENT LEVER (PHOTON-GATHER-1c item 3) is an
-// ENVIRONMENT variable, not a tuning field: `JAHSHAKA_GATHER_NO_TEMPORAL` set
+// MEASUREMENT ARM, not a tuning field: Engine::setArm("gather.temporal", 0)
 // makes every gathering view publish each frame's estimate alone (no history
-// read or written), read at every frame so a suite drives both arms in one
-// process (setenv / unsetenv). It is the frozen-frame rule's pair: a frozen frame
+// read or written), latched per frame so a suite drives both arms in one
+// process (lane TEST-1 deleted the JAHSHAKA_GATHER_NO_TEMPORAL door). It is the frozen-frame rule's pair: a frozen frame
 // index makes consecutive frames the same estimate; this makes each frame's
 // picture that frame's estimate.
 
@@ -3511,7 +3511,7 @@ struct GatherStatus {
     /// ...and the FILTER in probe space (PHOTON-GATHER-1b), its own dispatch.
     float filterMs = -1.0f;
     /// THE PIXEL HISTORY (PHOTON-GATHER-1c): whether it ran on the last frame
-    /// (false under `JAHSHAKA_GATHER_NO_TEMPORAL`) and the view's age
+    /// (false with the arm "gather.temporal" at 0) and the view's age
     /// (consecutive frames it has been written; 0 on a first frame, a resize, a
     /// scene bind, a tuning change).
     bool temporal = false;
@@ -7667,17 +7667,23 @@ struct FrameRecord {
     /// time and are not added twice.
     float       gpuMs = -1.0f;
     /// THE FRAME'S OWN GPU SPAN (lane TEST-1, the perf audit's F5): one timestamp
-    /// pair from the first command of the frame's submission (opened when the
-    /// pools turn over at the close of the previous frame, so the between-frames
-    /// work this record adopts is inside it) to the last (when its recording
-    /// ends). A SPAN: a mid-frame flush's CPU bubble is inside it. NEGATIVE when
-    /// unmeasured.
+    /// pair opened when the pools turn over at the close of the previous frame
+    /// (so the between-frames work this record adopts — a readback, a one-shot
+    /// sky bake — is inside it) and closed at this frame's close (after the VR
+    /// eye copy). A SPAN, first command to last: the GPU's idle time between
+    /// submissions is inside it (gpuIdleMs). NEGATIVE when unmeasured.
     float       frameGpuMs = -1.0f;
-    /// `frameGpuMs` less every TOP-LEVEL timed row — passes and cache rows alike
-    /// (a row whose pair opened with no other row of ours open). What no row
-    /// accounts for: the coverage reading `engine.monitor_gpu_coverage` bounds.
-    /// NEGATIVE when unmeasured, or when a top-level row lost its sample (the sum
-    /// would be short and the remainder overstated).
+    /// THE GAPS between top-level rows, measured: the monitor times every stretch
+    /// in which none of its rows is open, and splits them by whether the CPU
+    /// SUBMITTED inside the stretch (Ogre's command buffer changed under it):
+    /// `gpuIdleMs` = the gaps that crossed a submission — the GPU waiting for the
+    /// CPU to submit more (a mid-frame flush: the irradiance field's raster
+    /// submits every 8 probes) — a frame-schedule reading, not a coverage hole;
+    /// `unattributedGpuMs` = the gaps inside one submission — GPU work no row
+    /// names, the coverage hole `scale.gpu_coverage` bounds against the BUSY span
+    /// (frameGpuMs - gpuIdleMs). A row that itself encloses a submission carries
+    /// its bubble in its own time. NEGATIVE when unmeasured or a gap's sample was lost.
+    float       gpuIdleMs = -1.0f;
     float       unattributedGpuMs = -1.0f;
     /// GPU timing MARKS this frame issued that the render system's query pool
     /// had no room for (a pass or a dispatch with no GPU time because of it,

@@ -665,6 +665,11 @@ private:
     /// "rayquery.tlasRefit" so it can be measured against the rebuild rather than
     /// assumed better.
     bool preferRefit() const { return arm(ArmId::TlasRefit, false); }
+    /// The card read's footprint gate (Types.h kCardFootprintTexels): the arm
+    /// "cards.footprintTexels" (its default IS the constant), latched per frame.
+    float cardFootprintTexels() const {
+        return mArms ? float(mArms->value(ArmId::CardFootprint)) : kCardFootprintTexels;
+    }
 
     Ogre::VulkanRenderSystem *mRs = nullptr;
     Ogre::VulkanDevice *mDev = nullptr;
@@ -1000,6 +1005,7 @@ public:
     Ogre::RenderSystem *gatherRenderSystem() const override { return mRs; }
     uint32_t gatherFrameNow() const override { return frameNow(); }
     uint32_t gatherFramesInFlight() const override { return framesInFlight(); }
+    bool gatherTemporalArm() const override { return arm(ArmId::GatherTemporal, true); }
     VkCommandBuffer gatherFrameCmd() override { return frameCmd(); }
     bool gatherMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible,
                           VkBuffer &buffer, VkDeviceMemory &memory, void **mapped,
@@ -4433,13 +4439,7 @@ struct ReflectParams {
     float fog[8][4] = {};
 };
 
-/// The card read's footprint gate (Types.h kCardFootprintTexels).
-/// `JAHSHAKA_CARD_FOOTPRINT_K` is a MEASUREMENT switch, not a mode: the sweep
-/// that chose the constant (test_rt_reflect --footprint-sweep) sets it per arm.
-float cardFootprintTexels() {
-    if (const char *e = std::getenv("JAHSHAKA_CARD_FOOTPRINT_K")) return float(std::atof(e));
-    return kCardFootprintTexels;
-}
+
 
 void put3(float *dst, const Ogre::Vector3 &v, float w) {
     dst[0] = v.x; dst[1] = v.y; dst[2] = v.z; dst[3] = w;
@@ -5156,7 +5156,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.stereo[2] = photon ? 1.0f : 0.0f;
     pp.cards[0] = cardsBound ? float(cardCache->instanceSlots()) : 0.0f;
     pp.cards[1] = cardsBound ? float(cardCache->cardRecords()) : 0.0f;
-    pp.cards[2] = cardFootprintTexels();
+    pp.cards[2] = cardFootprintTexels();   // the arm "cards.footprintTexels"
     // ---- THE HIT'S GEOMETRIC NORMAL: the per-slot row table (a copy per frame in
     // flight) and the GPU scene's geometry rows, flushed first (a row staged but
     // not uploaded is a zero address - the trap file's GPU SCENE TABLES rule) and
@@ -6439,7 +6439,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             in.cardSlots = cache->instanceSlots();
             in.cardRecords = cache->cardRecords();
         }
-        in.cardFootprintTexels = cardFootprintTexels();
+        in.cardFootprintTexels = cardFootprintTexels();   // the arm "cards.footprintTexels"
     }
     // ...AND THE HIT'S GEOMETRIC NORMAL: the per-slot row table the TLAS was
     // written with and the GPU scene's rows, FLUSHED first (a row staged but not

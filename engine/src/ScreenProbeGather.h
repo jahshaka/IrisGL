@@ -92,6 +92,8 @@ public:
     /// then waits a fraction of what it promised).
     virtual uint32_t gatherFrameNow() const = 0;
     virtual uint32_t gatherFramesInFlight() const = 0;
+    /// The measurement arm "gather.temporal" (lane TEST-1): the pixel history on.
+    virtual bool gatherTemporalArm() const = 0;
     /// Outside every encoder, ready for compute and barriers.
     virtual VkCommandBuffer gatherFrameCmd() = 0;
 

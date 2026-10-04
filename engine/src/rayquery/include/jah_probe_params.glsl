@@ -92,7 +92,7 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// switched back on — and then the previous images hold nothing and are
 	/// never read); y = the history's blend FLOOR (the smallest weight a new
 	/// frame takes: 1 / the frames it remembers); z = 1 runs the history (0 =
-	/// `JAHSHAKA_GATHER_NO_TEMPORAL`, the measurement lever); w = 1 accepts every
+	/// the arm "gather.temporal", the measurement lever); w = 1 accepts every
 	/// reprojected texel (the distance and normal tests off — the test door
 	/// GatherTuning::historyValidationOff; 0 shipped).
 	vec4 knobs5;
