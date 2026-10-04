@@ -954,9 +954,10 @@ void addAtomViewPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHan
 /// kAtomViewDepth is a full-target D32 of the graph that only the Atom view's quad
 /// reads, and that quad has run (above) before the photon passes prepare their depth,
 /// so the photon view borrows it rather than holding a second one.
-/// The price, on or off: the RGBA8 layer, 4 bytes a pixel of the target (8.3 MB at
-/// 1920x1080), and — on a chain without the id pass — its own D32 beside it (8 bytes
-/// a pixel, 16.6 MB).
+/// The price, on or off: the layer — RGBA16F under the display encode (8 bytes a
+/// pixel of the target, 16.6 MB at 1920x1080), RGBA8 without it (4 bytes, 8.3 MB) —
+/// and, on a chain without the id pass, its own D32 beside it (VK_FORMAT_D32_SFLOAT,
+/// 4 bytes a pixel, 8.3 MB).
 Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
                                                   ChainHandles &handles, bool namedDepth) {
     const char *depth = desc.atomDraw ? kAtomViewDepth : kPhotonDepth;

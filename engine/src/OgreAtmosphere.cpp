@@ -547,10 +547,11 @@ AtmosphereStatus JahAtmosphere::status() const {
     return s;
 }
 
-// THE COST, as a SLOPE (OgreGpuCull.cpp measureJob's method and caveat: there
-// are no per-dispatch timestamps outside a compositor pass at this pin): each
-// job dispatched `iterations` times over its own inputs, flushed, the wall
-// clock of that less an empty flush's, per dispatch. An upper bound — it holds
+// THE COST, as a SLOPE (OgreGpuCull.cpp measureJob's method and caveat: it
+// answers on its own call, without the frame monitor; the bake's GPU time as
+// the GPU sees it is the CacheScope row in runJob() above): each job
+// dispatched `iterations` times over its own inputs, flushed, the wall clock
+// of that less an empty flush's, per dispatch. An upper bound — it holds
 // the driver's per-dispatch cost too.
 bool JahAtmosphere::measure(unsigned iterations, AtmosphereCost &out) {
     out = AtmosphereCost();
