@@ -7450,7 +7450,11 @@ enum class CacheKind {
     Planar,     ///< a planar reflector's render (view-dependent: always justified)
     Shader,     ///< a shader/PSO compile (detail = the permutation)
     Texture,    ///< a texture load (units = bytes/1024, detail = the name)
-    Atmosphere  ///< one of the planet's atmosphere's tables (detail = the job)
+    Atmosphere, ///< one of the planet's atmosphere's tables (detail = the job)
+    /// The Atom GPU cull's jobs (detail = "id.cull.cut", "caster.cull.test", ...):
+    /// per-frame VIEW work, not a cache — a row so its GPU time is attributable
+    /// (lane TEST-1), never "the GI did work".
+    Cull
 };
 
 /// WHY a cache redid its work. `None` is the important value: the cache did the

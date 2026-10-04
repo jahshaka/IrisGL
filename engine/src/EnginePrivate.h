@@ -6707,9 +6707,9 @@ public:
     /// `prior` (ATOM-OCCLUSION-1's DISOCCLUSION PASS): another list's cull of this frame —
     /// only the instances ITS depth test rejected are tested (the `cull_retest`
     /// permutation), against `hzb`; null is an ordinary request.
-    /// `rows` names the jobs' monitor rows by WHO records them, so a capture tells
-    /// the id pass's cull from a shadow map's ("id.cull.cut" / "caster.cull.cut";
-    /// a tool's or the chain warm-up's is plain "cull.cut").
+    /// `rows` names the jobs' monitor rows (CacheKind::Cull) by WHO records them:
+    /// the id pass's "id.cull.cut", a tool's or the chain warm-up's plain
+    /// "cull.cut"; a shadow map's caster cull files none (its pass row holds it).
     enum class CullRows { Tool, IdPass, Caster };
     bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
                        std::string &err, double *requestMs = nullptr,

@@ -242,7 +242,8 @@ void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
     Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
     job->analyzeBarriers(rt);
     rs->executeResourceTransition(rt);
-    monitor::CacheScope scope(CacheKind::Gi, WorkReason::Camera, 0, row, rs);
+    if (!row) { hc->dispatch(job, 0, 0); return; }
+    monitor::CacheScope scope(CacheKind::Cull, WorkReason::Camera, 0, row, rs);
     hc->dispatch(job, 0, 0);
 }
 
@@ -256,12 +257,15 @@ void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
 bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
                               std::string &err, double *requestMs, const GpuCull *prior,
                               CullRows rows) {
-    // The rows' names, static (a CacheScope keeps the pointer for its sample).
+    // The rows' names, static (a CacheScope keeps the pointer for its sample). A CASTER's
+    // cull files NO rows: it runs once per shadow map re-rendered, inside the caster pass
+    // whose own row already holds its time: five scopes (ten timestamps) a map would be a
+    // capture's cost per shadow map for a detail no reading needs, and nested rows add
+    // nothing to the frame's coverage.
     static const char *const kRows[3][5] = {
         { "cull.test", "cull.compact", "cull.draws", "cull.cut", "cull.emit" },
         { "id.cull.test", "id.cull.compact", "id.cull.draws", "id.cull.cut", "id.cull.emit" },
-        { "caster.cull.test", "caster.cull.compact", "caster.cull.draws", "caster.cull.cut",
-          "caster.cull.emit" } };
+        { nullptr, nullptr, nullptr, nullptr, nullptr } };
     const char *const *row = kRows[unsigned(rows)];
     ensureGpuTables();
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
