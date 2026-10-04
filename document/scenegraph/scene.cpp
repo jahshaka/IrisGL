@@ -800,29 +800,15 @@ float Scene::advance(float dt)
         environment->stepSimulation(h);
     }
 
-	// Iterate over all rigid bodies and update the corresponding scenenode
-	QHashIterator<QString, btRigidBody*> physicsBodies(environment->hashBodies);
-	while (physicsBodies.hasNext()) {
-		physicsBodies.next();
-		// Match the bodies' hash to the scenenode's and override the mesh's transform if it's a known physics body
-		auto rigidBodyWorldTransform = physicsBodies.value()->getWorldTransform();
-		// Get the matching scenenode. NULL-CHECKED (deep-audit F3): a body
-		// whose node was deleted mid-simulation (or a stale hash after a
-		// scene switch) otherwise dereferences null here every frame.
-		auto mesh = nodes.value(physicsBodies.key());
-		if (!mesh || mesh->disablePhysicsTransform)
-			continue;
-
-		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
-		// Set our scenenode to the simulated transform for the duration of the sim
-		// ONE write, not two (MIRROR_SCALE lane): setGlobalPos and setGlobalRot
-		// each resolved this body's parent and inverted it, so a falling crate
-		// paid two parent resolutions and two inverses per step for one pose.
-		const auto pos = rigidBodyWorldTransform.getOrigin();
-		const auto rot = rigidBodyWorldTransform.getRotation();
-		mesh->setGlobalPosRot(iris::Vec3(pos.x(), pos.y(), pos.z()),
-		                      iris::Quat(rot.w(), rot.x(), rot.y(), rot.z()));
-	}
+    // THE WRITE-BACK: the bodies Bullet moved this frame into their nodes,
+    // and nothing for a body that slept through every step (Environment::
+    // writeBack — a resting pile's frame writes nothing; SPEED-CPU).
+    environment->writeBack(nodes);
+    // THE DOCUMENT STEP CLOSES THE WRITE JOURNAL (nodegraph.h): its readers —
+    // the write-back above — have read it; the next frame's writes start a new
+    // one.
+    graph::closeWriteJournal();
+    environment->noteWriteJournalClosed();
 
     // POSSESSION, second half: the spring arm follows the pose the steps just
     // produced, so the camera never lags the character by a frame. It writes

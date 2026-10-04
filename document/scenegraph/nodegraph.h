@@ -269,6 +269,28 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
 /// beside `setStagingScene`, the suites in tests/support/documentgraph.h), and
 /// an engine that was never given one keeps scanning every frame.
 unsigned long long transformWrites();
+/// THE WRITE JOURNAL — the first piece of ENGINE_V2_SPEC V2-1's change journal
+/// (SPEED-CPU, 2026-10-04). The counter above says THAT something moved; the
+/// journal says WHAT: every write the counter counts (a transform setter
+/// through the one funnel, a reparent, a detach) also records its node, once,
+/// until the journal is CLOSED. A reader walks the written nodes' subtrees
+/// instead of the whole document.
+///
+/// THE FRAME CLOSE is the document step's (Scene::advance, after its readers —
+/// today the physics write-back, Environment::writeBack). A reader that runs
+/// on another schedule compares writeJournalGeneration() with the generation it
+/// saw at its own last look: a different value means someone closed in
+/// between, the journal no longer holds every write since that look, and the
+/// reader must fall back to its full pass. V2's walks join as readers before
+/// the close; they extend this, never a second record beside it.
+/// The DOCUMENT nodes written since the close, as live handles (a node destroyed
+/// since its write is gone from the answer; a node migrated to another manager
+/// answers with its new handle). False when a write landed on a node with no
+/// document owner — one a reader cannot walk from — so the reader must take its
+/// full pass.
+bool writeJournal(std::vector<NodeHandle> &out);
+unsigned long long writeJournalGeneration();
+void closeWriteJournal();
 /// The counter itself, for the host that hands its address to the engine.
 /// Its lifetime is the process's.
 const std::atomic<unsigned long long> &transformWriteCounter();
@@ -316,6 +338,21 @@ void setGlobalRot(NodeHandle n, const Quat &q);
 /// document root is, and what a physics body's parent almost always is —
 /// writes the world values straight through with no inverse at all.
 void setGlobalPosRot(NodeHandle n, const Vec3 &v, const Quat &q);
+/// EVERYTHING setGlobalPosRot READS AND WRITES, bit for bit: the parent's
+/// identity and its derived position, orientation and scale (what the write
+/// undoes), and the node's own local position and orientation (what it
+/// writes). Two equal witnesses of one node mean a setGlobalPosRot of the SAME
+/// world pose would write exactly the locals the node already holds — the
+/// physics write-back's proof that a sleeping body's node needs no write
+/// (Environment::writeBack, SPEED-CPU). A plain value; compare with ==.
+struct PoseWitness
+{
+    NodeHandle parent = nullptr;
+    float values[17] = {};   ///< parent pos 3, rot 4, scale 3; local pos 3, rot 4
+    bool operator==(const PoseWitness &o) const;
+    bool operator!=(const PoseWitness &o) const { return !(*this == o); }
+};
+PoseWitness poseWitness(NodeHandle n);
 void setGlobalTransform(NodeHandle n, const Mat4 &m);
 
 // ---- flags ----------------------------------------------------------------

@@ -64,8 +64,30 @@ namespace {
 
 /// Our container's own format version. Bump it and every existing cache on
 /// every machine is discarded — the escape hatch for a change in THIS file that
-/// none of the other fingerprint terms would notice.
-constexpr int kCacheFormat = 1;
+/// none of the other fingerprint terms would notice. 2 = one key PER LAYER
+/// (SPEED-CPU, perf audit CS-1): the manifest names each file's layer key.
+constexpr int kCacheFormat = 2;
+
+/// The three layers, by file name: each is kept or dropped on its own key.
+enum class Layer { Pipeline, Microcode, Hlms, Unknown };
+Layer layerOf(const std::string &name) {
+    if (name == "pipeline.cache") return Layer::Pipeline;
+    if (name == "microcode.cache") return Layer::Microcode;
+    if (name.compare(0, 5, "hlms.") == 0) return Layer::Hlms;
+    return Layer::Unknown;
+}
+
+/// The SPIR-V compiler the fork's Vulkan render system links (statically, from
+/// the system's glslang at build-ogre.sh time). A compiler upgrade under an
+/// unchanged fork commit is a different microcode producer.
+#if __has_include(<glslang/build_info.h>)
+#include <glslang/build_info.h>
+#define JAH_GLSLANG_VERSION_TERM \
+    (std::to_string(GLSLANG_VERSION_MAJOR) + "." + std::to_string(GLSLANG_VERSION_MINOR) + "." + \
+     std::to_string(GLSLANG_VERSION_PATCH) + GLSLANG_VERSION_FLAVOR)
+#else
+#define JAH_GLSLANG_VERSION_TERM std::string("unknown")
+#endif
 
 /// Directory size cap (§4.3 rule 6). On exceed we wipe and re-warm rather than
 /// evict: the microcode map has no eviction upstream, and an LRU we maintain
@@ -354,23 +376,44 @@ ShaderCache::~ShaderCache() {
 }
 
 // ---------------------------------------------------------------------------
-void ShaderCache::configure(const std::string &dir, const std::string &appBuildId,
-                            const std::string &mediaDir) {
+void ShaderCache::configure(const std::string &dir, const std::string &mediaDir) {
     mDir = dir;
-    mAppBuildId = appBuildId;
     mMediaDir = mediaDir;
     mEnabled = !dir.empty();
     if (!mEnabled) return;
     while (!mDir.empty() && mDir.back() == '/') mDir.pop_back();
 
-    // The composite key (§4.2). Terms Ogre cannot see for itself come first;
-    // the ones that mirror Ogre's own reject conditions are there so we fail at
-    // the DIRECTORY level instead of three files in.
-    std::ostringstream k;
-    k << "format=" << kCacheFormat
-      // The app's build identity. Our C++ decides which Hlms properties get set
-      // and which datablocks exist; no hash inside Ogre can see that.
-      << "|app=" << mAppBuildId
+    // ONE KEY PER LAYER (SPEED-CPU, perf audit CS-1; §4.2's terms, each on the
+    // layer whose bytes it can change). One key over all three used to throw
+    // the whole directory away whenever ANY term moved — and its `app=` term
+    // (the Studio commit) moved on every Studio build, while no Studio change
+    // can make a cached byte wrong:
+    //   * pipeline.cache is validated by the driver and by Ogre (its header
+    //     names vendor, device, driver and UUID); it needs only the container
+    //     format and the GPU terms load() appends;
+    //   * microcode.cache is CONTENT-ADDRESSED — an entry's key is a hash of the
+    //     generated source (fork OgreGpuProgramManager) — so a different source
+    //     is a different entry, never a stale one. What can make an entry wrong
+    //     is the PRODUCER: the fork's compile path (ogre=), the SPIR-V compiler it
+    //     links (glslang=), the build type, and the render system (load());
+    //   * hlms.N.bin is the template parse and the property sets: the engine's
+    //     own C++ (engine= decides which Hlms properties are set and which
+    //     datablocks exist), the fork, the staged templates and Photon's media,
+    //     and the IdString/hash layout terms — plus the GPU (load()), whose caps
+    //     are properties. Studio reaches Hlms only through property VALUES, which
+    //     are hash inputs: a new set is a new entry.
+    const std::string format = "format=" + std::to_string(kCacheFormat);
+    const std::string build =
+#if OGRE_DEBUG_MODE
+        "|build=debug";
+#else
+        "|build=release";
+#endif
+    mLayerKey[0] = format;
+    mLayerKey[1] = format + "|ogre=" + JAHSHAKA_OGRE_FORK_COMMIT +
+                   "|glslang=" + JAH_GLSLANG_VERSION_TERM + build;
+    std::ostringstream h;
+    h << format
       // The engine library's own build identity, and the commit of our Ogre fork
       // that produced the .so and staged the media. An engine-side change to a
       // shader piece changes SHADER BEHAVIOUR while leaving every Ogre-side hash
@@ -383,13 +426,9 @@ void ShaderCache::configure(const std::string &dir, const std::string &appBuildI
       // PHOTON'S OWN MEDIA BY ITS OWN CONTENT (OWN-GI-1, audit K11): the voxel and
       // field compute jobs and their PBS pieces live in irisgl (media/Photon), so an
       // edit to them is an irisgl edit that moves neither the fork commit above nor
-      // any Ogre-side hash of a compute job — without this term the old microcode
-      // would load. Hashed like the templates: a change to any staged byte under
-      // Photon/ is a new cache.
+      // any Ogre-side hash of a compute job.
       << "|photon=" << hashTree(mMediaDir + "Photon")
-      // Ogre rejects a cache across these three anyway; failing here is faster
-      // and, for the microcode file (which has NO version field at all), it is
-      // the only check that exists.
+      // Ogre rejects an Hlms cache across these anyway; failing here is faster.
 #ifdef OGRE_DEBUG_STR_SIZE
       << "|dbgstr=" << OGRE_DEBUG_STR_SIZE
 #else
@@ -399,16 +438,26 @@ void ShaderCache::configure(const std::string &dir, const std::string &appBuildI
       // cache cannot load into Debug — so the term must appear either way.
       << "|dbgstr=0"
 #endif
-      << "|hashbits=" << OGRE_HASH_BITS
-#if OGRE_DEBUG_MODE
-      << "|build=debug"
-#else
-      << "|build=release"
-#endif
-        ;
+      << "|hashbits=" << OGRE_HASH_BITS << build;
+    mLayerKey[2] = h.str();
     // The GPU terms are appended by load(): mDeviceProperties does not exist
     // until the render system has a device, and configure() runs earlier.
-    mFingerprint = k.str();
+    composeFingerprint();
+}
+
+void ShaderCache::composeFingerprint() {
+    mFingerprint = "pipeline{" + mLayerKey[0] + "}microcode{" + mLayerKey[1] + "}hlms{" +
+                   mLayerKey[2] + "}";
+}
+
+std::string ShaderCache::layerKeyFor(const std::string &name) const {
+    switch (layerOf(name)) {
+    case Layer::Pipeline:  return hexOf(mLayerKey[0]);
+    case Layer::Microcode: return hexOf(mLayerKey[1]);
+    case Layer::Hlms:      return hexOf(mLayerKey[2]);
+    case Layer::Unknown:   break;
+    }
+    return std::string();
 }
 
 void ShaderCache::attachCounters() {
@@ -490,14 +539,16 @@ void ShaderCache::releaseLock() {
 // anything missing or malformed rejects the whole directory.
 //
 //   jahshaka-shader-cache <format>
-//   fingerprint <key>
 //   saved <unix-ms>
 //   shaders <count>
-//   file <name> <bytes> <hash128>
+//   file <name> <bytes> <hash128> <layer key>
+//
+// Each file carries the hex of its LAYER's key (see configure): readManifest
+// hands every entry back and the caller keeps the ones whose key is current.
 bool ShaderCache::readManifest(std::vector<Entry> &filesOut, bool adopt) const {
     std::ifstream f(path(kManifest));
     if (!f) return false;
-    std::string line, storedFingerprint;
+    std::string line;
     bool header = false;
     long long saved = 0;
     unsigned shaders = 0;
@@ -506,13 +557,12 @@ bool ShaderCache::readManifest(std::vector<Entry> &filesOut, bool adopt) const {
         std::string tag;
         ls >> tag;
         if (tag == "jahshaka-shader-cache") { int v = -1; ls >> v; header = (v == kCacheFormat); }
-        else if (tag == "fingerprint") { std::getline(ls >> std::ws, storedFingerprint); }
         else if (tag == "saved")    ls >> saved;
         else if (tag == "shaders")  ls >> shaders;
         else if (tag == "file") {
             Entry e{};
-            ls >> e.name >> e.bytes >> e.hash;
-            if (e.name.empty() || e.hash.size() != 32) return false;
+            ls >> e.name >> e.bytes >> e.hash >> e.key;
+            if (e.name.empty() || e.hash.size() != 32 || e.key.empty()) return false;
             // A name that could escape the directory is a corrupt manifest, not
             // a file to open.
             if (e.name.find('/') != std::string::npos || e.name.find("..") != std::string::npos)
@@ -521,10 +571,6 @@ bool ShaderCache::readManifest(std::vector<Entry> &filesOut, bool adopt) const {
         }
     }
     if (!header) return false;
-    if (storedFingerprint != mFingerprint) {
-        logLine("fingerprint changed — discarding the cache");
-        return false;
-    }
     if (adopt) {
         const_cast<ShaderCache *>(this)->mLastSavedUnixMs = saved;
         const_cast<ShaderCache *>(this)->mExpectedShaders = shaders;
@@ -535,10 +581,10 @@ bool ShaderCache::readManifest(std::vector<Entry> &filesOut, bool adopt) const {
 bool ShaderCache::writeManifest(const std::vector<Entry> &files, unsigned shaders) const {
     std::ostringstream o;
     o << "jahshaka-shader-cache " << kCacheFormat << "\n"
-      << "fingerprint " << mFingerprint << "\n"
       << "saved " << nowUnixMs() << "\n"
       << "shaders " << shaders << "\n";
-    for (const Entry &e : files) o << "file " << e.name << " " << e.bytes << " " << e.hash << "\n";
+    for (const Entry &e : files)
+        o << "file " << e.name << " " << e.bytes << " " << e.hash << " " << e.key << "\n";
     const std::string s = o.str();
     return writeAtomic(mDir, kManifest, s.data(), s.size());
 }
@@ -636,13 +682,20 @@ void ShaderCache::load(Ogre::Root *root) {
     // of silently loading two stale files and one rejected one. The values come
     // from the capabilities the render system already published — no new Ogre
     // type crosses the boundary.
+    // Per layer: the pipeline blob and the Hlms layer take all four (a GPU's
+    // caps are Hlms properties); the microcode only the render system's name,
+    // which is what Ogre folds into its own microcode keys — SPIR-V is not a
+    // property of the device.
     if (const Ogre::RenderSystemCapabilities *caps = rs->getCapabilities()) {
         std::ostringstream g;
         g << "|rs=" << rs->getName()
           << "|vendor=" << static_cast<int>(caps->getVendor())
           << "|device=" << caps->getDeviceName()
           << "|driver=" << caps->getDriverVersion().toString();
-        mFingerprint += g.str();
+        mLayerKey[0] += g.str();
+        mLayerKey[1] += "|rs=" + rs->getName();
+        mLayerKey[2] += g.str();
+        composeFingerprint();
     }
 
     if (!mkpath(mDir)) { logLine("cannot create " + mDir + " — cache disabled"); mEnabled = false; return; }
@@ -656,6 +709,19 @@ void ShaderCache::load(Ogre::Root *root) {
 
     std::vector<Entry> files;
     if (!readManifest(files)) { if (mayWipe()) wipe(); return; }
+
+    // A LAYER WHOSE KEY MOVED IS DROPPED ALONE (CS-1): its file is not read and
+    // — by the writer, the only process that may delete — removed now; the
+    // other layers load. The next save writes the dropped layer afresh.
+    {
+        std::vector<Entry> current;
+        for (const Entry &e : files) {
+            if (e.key == layerKeyFor(e.name)) { current.push_back(e); continue; }
+            logLine(e.name + ": its layer's key changed — dropped, the other layers stand");
+            if (mWriter) ::unlink(path(e.name).c_str());
+        }
+        files.swap(current);
+    }
 
     // Read and VERIFY everything before handing a single byte to Ogre. If any
     // file is short, corrupt or missing, the whole generation goes: a cache that
@@ -1004,18 +1070,23 @@ bool ShaderCache::runWrite(const PendingWrite &job) {
             logLine("could not write " + job.names[i]);
             continue;
         }
-        files.push_back({job.names[i], bytes.size(), hex128(bytes.data(), bytes.size())});
+        files.push_back({job.names[i], bytes.size(), hex128(bytes.data(), bytes.size()),
+                         layerKeyFor(job.names[i])});
     }
 
-    // Files we did not rewrite this time are still valid: carry their manifest
-    // entries forward, or the next run would reject a perfectly good file.
+    // Files we did not rewrite this time are still valid IF THEIR LAYER'S KEY IS
+    // CURRENT: carry those entries forward, or the next run would reject a
+    // perfectly good file. One whose key moved is gone from the manifest and
+    // from the disk (load() already removed it when this process could).
     std::vector<Entry> previous;
     readManifest(previous, /*adopt*/ false);   // the writer thread: never publish
     for (const Entry &p : previous) {
         const bool rewritten = std::any_of(files.begin(), files.end(),
                                            [&](const Entry &e) { return e.name == p.name; });
+        if (rewritten) continue;
+        if (p.key != layerKeyFor(p.name)) { ::unlink(path(p.name).c_str()); continue; }
         struct stat st {};
-        if (!rewritten && ::stat(path(p.name).c_str(), &st) == 0) files.push_back(p);
+        if (::stat(path(p.name).c_str(), &st) == 0) files.push_back(p);
     }
 
     // THE MANIFEST IS THE PUBLICATION. Every file above is already in place and

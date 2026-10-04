@@ -724,7 +724,10 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
     // THE PICKING MESH IS REBUILT, NOT STORED. It is positions + indices with
     // one cross product per triangle — cheaper to recompute than to read, and
     // recomputing is what makes it impossible for a bake to hand picking a
-    // geometry the renderer does not have.
+    // geometry the renderer does not have. ITS SPATIAL INDEX TOO (SPEED-CPU,
+    // perf audit P1): built here, on the reading thread (the prewarm worker on
+    // an open), so the first pick of a 233k-triangle scan is already a
+    // tree walk and not the 20 ms loop over every triangle.
     mesh->triMesh = new TriMesh();
     if (positions && !indexBytes.isEmpty()) {
         const unsigned *idx = reinterpret_cast<const unsigned *>(indexBytes.constData());
@@ -742,6 +745,7 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
                 iris::Vec3(positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2]),
                 iris::Vec3(positions[c * 3], positions[c * 3 + 1], positions[c * 3 + 2]));
         }
+        mesh->triMesh->buildIndex();
     }
     return mesh;
 }

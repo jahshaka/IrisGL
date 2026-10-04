@@ -6,6 +6,7 @@
 #include <optional>
 
 #include <cstdlib>
+#include <cstring>
 #include "HlmsAtom.h"
 
 #include <cmath>
@@ -1903,6 +1904,65 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 // PLANS (residency, invalidation, this frame's batch); the capture executes
 // inside Root's frame, after `updateSceneGraph`, as the first workspace in the
 // manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
+// THE RADIANCE SIGNATURE'S LIGHT HALF (updateSurfaceCache): what a card's LIT
+// radiance depends on, EVERY light's pose and shadow key (the relight lights a
+// card with every lamp, unculled) plus colour, power, reach and cone. A change
+// relights the resident set under the relight's own budget and CAPTURES
+// NOTHING: no light quantity is in a capture (ATOM-S3-CARDCAP — the sun's
+// visibility is traced, SurfaceCache::traceSun, which follows the sun's
+// direction itself). Over `mLightNodes`, the engine's own light index (a hint
+// that is a superset), so this is a handful of quantised folds and not a walk
+// of the node map. `lights` receives the lights themselves, for the relight
+// job: EVERY light node, world space, unculled — the frame's global list is
+// culled against the frame's cameras, and a card lights surfaces off screen.
+unsigned long long OgreScene::walkCardLights(std::vector<Ogre::Light *> &lights) const {
+    lights.clear();
+    unsigned long long radianceSig = 1469598103934665603ull;
+    const auto foldInto = [](unsigned long long &sig, unsigned long long v) {
+        sig ^= v;
+        sig *= 1099511628211ull;
+    };
+    const auto quant = [](float f) {
+        // Quantised to a millimetre / a thousandth: float noise below the
+        // tolerance the whole pipeline works to must not relight a card.
+        return (unsigned long long)(long long)std::lround(double(f) * 1000.0);
+    };
+    for (NodeId lid : mLightNodes) {
+        auto lit = mNodes.find(lid);
+        if (lit == mNodes.end() || !lit->second.light) continue;
+        const Node &ln = lit->second;
+        unsigned long long pose[9] = { ln.lightShadowKey, ln.shown ? 1ull : 0ull, 0, 0, 0, 0, 0, 0, 0 };
+        if (ln.node) {
+            const Ogre::Vector3 p = ln.node->_getDerivedPosition();
+            const Ogre::Quaternion q = ln.node->_getDerivedOrientation();
+            pose[2] = quant(p.x); pose[3] = quant(p.y); pose[4] = quant(p.z);
+            pose[5] = quant(q.x); pose[6] = quant(q.y); pose[7] = quant(q.z); pose[8] = quant(q.w);
+        }
+        for (unsigned long long v : pose) foldInto(radianceSig, v);
+    }
+    // ...the colour, the power, the reach and the cone: a colour slider costs
+    // the cache a relight of the resident set (the `Jahshaka/CardLight` job,
+    // under its own budget) and not one capture.
+    for (NodeId lid : mLightNodes) {
+        auto lit = mNodes.find(lid);
+        if (lit == mNodes.end() || !lit->second.light) continue;
+        const Ogre::Light *l = lit->second.light;
+        const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
+        const auto foldR = [&radianceSig](float f) {
+            radianceSig ^= (unsigned long long)(long long)std::lround(double(f) * 1000.0);
+            radianceSig *= 1099511628211ull;
+        };
+        foldR(c.r); foldR(c.g); foldR(c.b);
+        foldR(l->getAttenuationRange()); foldR(l->getAttenuationLinear());
+        foldR(l->getAttenuationQuadric());
+        foldR(l->getSpotlightInnerAngle().valueRadians());
+        foldR(l->getSpotlightOuterAngle().valueRadians());
+        foldR(l->getSpotlightFalloff());
+        lights.push_back(lit->second.light);
+    }
+    return radianceSig;
+}
+
 void OgreScene::updateSurfaceCache() {
     // THE CARDS RUN ONLY WHERE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): every
     // reader of a card is a ray job's hit (rq_reflect.comp, the gather,
@@ -1953,74 +2013,42 @@ void OgreScene::updateSurfaceCache() {
                                                  : facts.cardBudgetTexels;
     view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
                                                  : facts.cardResidencyRadius;
-    // THE RADIANCE SIGNATURE — not `mGiLightWriteSerial` (which bumps on every
-    // `setLight` push and every pose write): what a card's LIT radiance depends on,
-    // EVERY light's pose and shadow key (the relight lights a card with every lamp,
-    // unculled) plus colour, power, reach and cone (below). A change relights the
-    // resident set under the relight's own budget and CAPTURES NOTHING: no light
-    // quantity is in a capture (ATOM-S3-CARDCAP — the sun's visibility is traced,
-    // SurfaceCache::traceSun, which follows the sun's direction itself).
-    //
-    // Over `mLightNodes`, which is the engine's own light index (a hint that is
-    // a superset), so this is a handful of quantised folds and not a walk of
-    // the node map.
-    // THE LIGHT WALK IS ITS OWN MONITOR STAGE (ATOM-CPU-WALKS-1): O(lights) every
-    // frame, not the candidate walk — 0.55 ms of engine.cards at the world's 500
-    // lamps once the candidates stopped being a walk. It stays a walk: the fold reads
-    // each lamp's DERIVED pose, and not every writer of a lamp's node says so (the
-    // transform epoch counts the document's and Scene::setNodeTransform's writes).
+    // THE RADIANCE SIGNATURE (walkCardLights) — not `mGiLightWriteSerial`,
+    // which bumps on every `setLight` push and every pose write: what a card's
+    // LIT radiance depends on, folded from the lights themselves.
+    // THE LIGHT WALK IS ITS OWN MONITOR STAGE (ATOM-CPU-WALKS-1), and it walks
+    // ONLY WHEN AN INPUT CAN HAVE CHANGED (SPEED-CPU, perf audit E4: 0.42 ms of
+    // every still frame at the world's 500 lamps). Everything the two folds
+    // read moves one of four counters first:
+    //   * a lamp's DERIVED pose — any transform write that can move it: the
+    //     document's (the host's write counter: a write on a light or on any
+    //     node with children counts, nodegraph.h) and the engine's own
+    //     (setNodeTransform, a socket rider, mSceneTransformWrites) — together
+    //     transformEpoch();
+    //   * its parameters, shadow key and shown flag — setLight and the
+    //     visibility push bump mGiLightWriteSerial;
+    //   * a lamp leaving — mLightsRemoved; one arriving — setLight again, and
+    //     mLightNodes' size.
+    // A DERIVED pose is read without an update (`_getDerivedPosition`), so a
+    // write lands in it at the frame's updateSceneGraph, AFTER this fold — the
+    // walk therefore runs on the frame the key moves AND the one after, which
+    // reads the pose the write produced. A frame whose key has stood still for
+    // two frames folds exactly what the last walk folded.
     std::optional<monitor::Stage> lightStage;
     lightStage.emplace("engine.cards.lights");
-    unsigned long long radianceSig = 1469598103934665603ull;
-    const auto foldInto = [](unsigned long long &sig, unsigned long long v) {
-        sig ^= v;
-        sig *= 1099511628211ull;
-    };
-    const auto quant = [](float f) {
-        // Quantised to a millimetre / a thousandth: float noise below the
-        // tolerance the whole pipeline works to must not relight a card.
-        return (unsigned long long)(long long)std::lround(double(f) * 1000.0);
-    };
-    for (NodeId lid : mLightNodes) {
-        auto lit = mNodes.find(lid);
-        if (lit == mNodes.end() || !lit->second.light) continue;
-        const Node &ln = lit->second;
-        unsigned long long pose[9] = { ln.lightShadowKey, ln.shown ? 1ull : 0ull, 0, 0, 0, 0, 0, 0, 0 };
-        if (ln.node) {
-            const Ogre::Vector3 p = ln.node->_getDerivedPosition();
-            const Ogre::Quaternion q = ln.node->_getDerivedOrientation();
-            pose[2] = quant(p.x); pose[3] = quant(p.y); pose[4] = quant(p.z);
-            pose[5] = quant(q.x); pose[6] = quant(q.y); pose[7] = quant(q.z); pose[8] = quant(q.w);
-        }
-        for (unsigned long long v : pose) foldInto(radianceSig, v);
+    const unsigned long long lightKey[4] = { transformEpoch(), mGiLightWriteSerial, mLightsRemoved,
+                                             (unsigned long long)mLightNodes.size() };
+    const bool keyMoved = !mCardLightFoldValid ||
+                          std::memcmp(lightKey, mCardLightKey, sizeof lightKey) != 0;
+    if (keyMoved || mCardLightKeyMovedLastFrame) {
+        std::memcpy(mCardLightKey, lightKey, sizeof lightKey);
+        mCardLightFoldValid = true;
+        mCardLightFold = walkCardLights(mCardLights);
     }
+    mCardLightKeyMovedLastFrame = keyMoved;
+    unsigned long long radianceSig = mCardLightFold;
+    view.lights = mCardLights;
     view.rayFootprintPerMetre = mRayFootprintPerMetre;
-    // THE RADIANCE SIGNATURE: every light's pose above plus everything a
-    // card's LIT radiance depends on and its capture does not — the colour,
-    // the power, the reach and the cone. A colour slider costs the cache a
-    // relight of the resident set (the `Jahshaka/CardLight` job, under its own
-    // budget) and not one capture. The lights themselves are handed over for
-    // the job's light list (below).
-    for (NodeId lid : mLightNodes) {
-        auto lit = mNodes.find(lid);
-        if (lit == mNodes.end() || !lit->second.light) continue;
-        const Ogre::Light *l = lit->second.light;
-        const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
-        const auto foldR = [&radianceSig](float f) {
-            radianceSig ^= (unsigned long long)(long long)std::lround(double(f) * 1000.0);
-            radianceSig *= 1099511628211ull;
-        };
-        foldR(c.r); foldR(c.g); foldR(c.b);
-        foldR(l->getAttenuationRange()); foldR(l->getAttenuationLinear());
-        foldR(l->getAttenuationQuadric());
-        foldR(l->getSpotlightInnerAngle().valueRadians());
-        foldR(l->getSpotlightOuterAngle().valueRadians());
-        foldR(l->getSpotlightFalloff());
-        // ...and the light itself, for the relight job: EVERY light node,
-        // world space, unculled — the frame's global list is culled against
-        // the frame's cameras, and a card lights surfaces off screen.
-        view.lights.push_back(lit->second.light);
-    }
     lightStage.reset();
     // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected
     // with, and its serial in the radiance signature — a layer change or a

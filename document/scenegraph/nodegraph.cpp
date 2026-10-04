@@ -19,9 +19,11 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <QDebug>
@@ -168,6 +170,29 @@ std::size_t gStaticNodes = 0;
 /// whole-tree pass. Relaxed: it is a CHANGE TEST read once per frame, exactly
 /// like gTransformWrites beside it.
 std::atomic<unsigned long long> gStaticDemotions{0};
+
+/// THE WRITE JOURNAL (see graph::writeJournal): the nodes the movement counter
+/// counted since the last close, each once, in first-write order — by Ogre's
+/// node ID, never by pointer. A node can die between its write and the read
+/// through paths that never pass destroyRecursive (a staging migration's drop,
+/// a scene manager torn down whole), and a pointer kept here would be read
+/// after free (the play_select SIGSEGV that found it); an ID resolves through
+/// the owner table, which every destroy path clears, so a dead node simply
+/// resolves to nothing. `owned` records whether a DOCUMENT node was written: an
+/// engine-owned one cannot be resolved later, so its presence makes the read
+/// incomplete. A mutex, not the graph's: a document can be built on a worker
+/// against the staging scene, and every write path touches the journal.
+std::mutex gJournalMutex;
+std::vector<std::pair<Ogre::IdType, bool>> gJournal;
+std::unordered_set<Ogre::IdType> gJournalSet;
+std::atomic<unsigned long long> gJournalGeneration{0};
+
+inline void journalWrite(Ogre::SceneNode *n)
+{
+    const Ogre::IdType id = n->getId();
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    if (gJournalSet.insert(id).second) gJournal.emplace_back(id, ownerById(id) != nullptr);
+}
 
 Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
 {
@@ -565,6 +590,7 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     // caller today happens to preserve the pose, which is exactly the kind of
     // thing that stops being true silently.
     gTransformWrites.fetch_add(1, std::memory_order_relaxed);
+    journalWrite(c);
     if (c->getParent()) c->getParent()->removeChild(c);
     // APPEND is the overwhelming majority (addChild passes -1) and must not pay
     // for the sibling-index machinery below: at a fan-out of k that scan is
@@ -613,6 +639,7 @@ NodeHandle detach(NodeHandle child)
     // it off the socket.)
     if (riderParentOf(c)) { forgetRider(c); return child; }
     gTransformWrites.fetch_add(1, std::memory_order_relaxed);   // see attach (F4)
+    journalWrite(c);
     // Out of its parent and under its scene manager's root — NOT migrated to
     // the staging manager, which is what this used to do. A migration rebuilds
     // the whole subtree, which changes every handle in it, which makes the
@@ -744,6 +771,38 @@ Vec3 localPos(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getPos
 Quat localRot(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getOrientation()) : Quat(); }
 Vec3 localScale(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getScale()) : Vec3(1, 1, 1); }
 
+bool PoseWitness::operator==(const PoseWitness &o) const
+{
+    // BITS, not floats: -0 against +0 and a NaN against itself are differences
+    // a write could make, so `==` on the values would be the wrong question.
+    return parent == o.parent && std::memcmp(values, o.values, sizeof values) == 0;
+}
+
+PoseWitness poseWitness(NodeHandle n)
+{
+    PoseWitness w;
+    if (!n || !engineAlive()) return w;
+    const Ogre::SceneNode *o = nd(n);
+    float *v = w.values;
+    // The parent half: what setGlobalPosRot resolves (the same three Updated
+    // reads, so a parent moved since the last write shows up here).
+    if (Ogre::Node *p = o->getParent()) {
+        w.parent = reinterpret_cast<NodeHandle>(p);
+        const Ogre::Vector3 pp = p->_getDerivedPositionUpdated();
+        const Ogre::Quaternion pr = p->_getDerivedOrientationUpdated();
+        const Ogre::Vector3 ps = p->_getDerivedScaleUpdated();
+        v[0] = pp.x; v[1] = pp.y; v[2] = pp.z;
+        v[3] = pr.w; v[4] = pr.x; v[5] = pr.y; v[6] = pr.z;
+        v[7] = ps.x; v[8] = ps.y; v[9] = ps.z;
+    }
+    // The node half: what setGlobalPosRot writes.
+    const Ogre::Vector3 lp = o->getPosition();
+    const Ogre::Quaternion lr = o->getOrientation();
+    v[10] = lp.x; v[11] = lp.y; v[12] = lp.z;
+    v[13] = lr.w; v[14] = lr.x; v[15] = lr.y; v[16] = lr.z;
+    return w;
+}
+
 namespace
 {
 /// RULE 4 (nodegraph.h): MOVING A STATIC NODE PROMOTES IT.
@@ -809,7 +868,10 @@ inline bool writeIsSceneMovement(Ogre::SceneNode *n)
 
 inline void markMoved(Ogre::SceneNode *n)
 {
-    if (writeIsSceneMovement(n)) gTransformWrites.fetch_add(1, std::memory_order_relaxed);
+    if (writeIsSceneMovement(n)) {
+        gTransformWrites.fetch_add(1, std::memory_order_relaxed);
+        journalWrite(n);
+    }
     if (n->isStatic()) { promoteOnWrite(n); return; }
     // The root-moved case (see promoteStaticChildren). Two loads, and only in a
     // process that has static nodes at all.
@@ -927,6 +989,31 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s)
 unsigned long long transformWrites()
 {
     return gTransformWrites.load(std::memory_order_relaxed);
+}
+
+bool writeJournal(std::vector<NodeHandle> &out)
+{
+    out.clear();
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    out.reserve(gJournal.size());
+    bool complete = true;
+    for (const auto &entry : gJournal) {
+        if (!entry.second) { complete = false; continue; }   // engine-owned: no way back to it
+        SceneNode *owner = ownerById(entry.first);
+        if (!owner || !owner->graphNode()) continue;          // destroyed since its write
+        out.push_back(owner->graphNode());
+    }
+    return complete;
+}
+
+unsigned long long writeJournalGeneration() { return gJournalGeneration.load(std::memory_order_relaxed); }
+
+void closeWriteJournal()
+{
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    gJournal.clear();
+    gJournalSet.clear();
+    gJournalGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 
 void setCountsAsMovement(NodeHandle n, bool counts)

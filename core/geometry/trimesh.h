@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef TRIMESH_H
 #define TRIMESH_H
 
+#include "core/geometry/trianglebvh.h"
 #include "core/math/vec.h"
 #include <QList>
 
@@ -50,25 +51,42 @@ public:
 
     /**
      * Adds points for triangle. Assumes points are in a counter-clockwise rotation.
-     * @param a
-     * @param b
-     * @param c
+     * Drops the spatial index (an index over a list that has changed is not
+     * trusted; buildIndex() again once the list is complete).
      */
     void addTriangle(const iris::Vec3& a, const iris::Vec3& b, const iris::Vec3& c);
 
-    //https://github.com/qt/qt3d/blob/5476bc6b4b6a12c921da502c24c4e078b04dd3b3/src/render/jobs/pickboundingvolumejob.cpp
-    //realtime rendering page 192
-    //no need to get uvw, just return true at the first sign of a hit
-    bool isHitBySegment(const iris::Vec3& segmentStart, const iris::Vec3& segmentEnd, iris::Vec3& hitPoint);
+    /**
+     * THE NARROW PHASE'S SPATIAL INDEX (SPEED-CPU, perf audit 2026-10-03 P1):
+     * builds a TriangleBvh over `triangles`, after which getSegmentIntersections
+     * tests only the triangles whose boxes the segment touches — the same
+     * hits, in the same order, with the same numbers (picking.trimesh_index).
+     * Called where a picking mesh is completed (the bake reader); a mesh that
+     * never built one keeps the brute-force loop.
+     */
+    void buildIndex();
+    bool hasIndex() const { return index.isBuilt() && index.triangleCount() == triangles.size(); }
+    int indexNodeCount() const { return index.nodeCount(); }
 
     /**
-     * Does a segment-mesh intersection test
+     * THE ONE TRIANGLE TEST (realtime rendering p.192; two-sided): does the
+     * segment a->b cross `tri`, and where. `t` is the hit's fraction of the
+     * segment (0..1). Both narrow-phase paths — and the index suite's
+     * brute-force reference — call this and nothing else.
+     */
+    static bool segmentHitsTriangle(const Triangle& tri, const iris::Vec3& segmentStart,
+                                    const iris::Vec3& segmentEnd, float& t, iris::Vec3& hitPoint);
+
+    /**
+     * Does a segment-mesh intersection test: every triangle the segment
+     * crosses, in ascending triangle order.
      * Returns number of intersections
      * @return
      */
-    int getSegmentIntersections(const iris::Vec3& segmentStart, const iris::Vec3& segmentEnd, QList<TriangleIntersectionResult>& results);
+    int getSegmentIntersections(const iris::Vec3& segmentStart, const iris::Vec3& segmentEnd, QList<TriangleIntersectionResult>& results) const;
 
-
+private:
+    TriangleBvh index;
 };
 
 

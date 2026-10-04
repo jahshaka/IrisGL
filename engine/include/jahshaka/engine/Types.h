@@ -5830,12 +5830,6 @@ struct EngineConfig {
     /// directory is DERIVED DATA — deleting it costs one slow launch and never
     /// anything a user could miss.
     std::string shaderCacheDir;
-    /// The HOST's contribution to the cache fingerprint: its own build identity
-    /// (app version + commit, and anything else that changes which Hlms
-    /// properties the host asks for). Any change to this string invalidates the
-    /// whole cache directory, which is the point — the application's C++ decides
-    /// what shaders exist, and no hash inside the engine can see that.
-    std::string appBuildId;
 };
 
 /// The device the engine is actually running on (SESSION_LOG_SPEC §4).
