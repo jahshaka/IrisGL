@@ -283,7 +283,12 @@ unsigned long long transformWrites();
 /// between, the journal no longer holds every write since that look, and the
 /// reader must fall back to its full pass. V2's walks join as readers before
 /// the close; they extend this, never a second record beside it.
-std::vector<NodeHandle> writeJournal();
+/// The DOCUMENT nodes written since the close, as live handles (a node destroyed
+/// since its write is gone from the answer; a node migrated to another manager
+/// answers with its new handle). False when a write landed on a node with no
+/// document owner — one a reader cannot walk from — so the reader must take its
+/// full pass.
+bool writeJournal(std::vector<NodeHandle> &out);
 unsigned long long writeJournalGeneration();
 void closeWriteJournal();
 /// The counter itself, for the host that hands its address to the engine.

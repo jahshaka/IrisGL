@@ -172,25 +172,26 @@ std::size_t gStaticNodes = 0;
 std::atomic<unsigned long long> gStaticDemotions{0};
 
 /// THE WRITE JOURNAL (see graph::writeJournal): the nodes the movement counter
-/// counted since the last close, each once, in first-write order. A mutex, not
-/// the graph's: a document can be built on a worker against the staging scene,
-/// and the journal is the one structure every write path touches.
+/// counted since the last close, each once, in first-write order — by Ogre's
+/// node ID, never by pointer. A node can die between its write and the read
+/// through paths that never pass destroyRecursive (a staging migration's drop,
+/// a scene manager torn down whole), and a pointer kept here would be read
+/// after free (the play_select SIGSEGV that found it); an ID resolves through
+/// the owner table, which every destroy path clears, so a dead node simply
+/// resolves to nothing. `owned` records whether a DOCUMENT node was written: an
+/// engine-owned one cannot be resolved later, so its presence makes the read
+/// incomplete. A mutex, not the graph's: a document can be built on a worker
+/// against the staging scene, and every write path touches the journal.
 std::mutex gJournalMutex;
-std::vector<Ogre::SceneNode *> gJournal;
-std::unordered_set<Ogre::SceneNode *> gJournalSet;
+std::vector<std::pair<Ogre::IdType, bool>> gJournal;
+std::unordered_set<Ogre::IdType> gJournalSet;
 std::atomic<unsigned long long> gJournalGeneration{0};
 
 inline void journalWrite(Ogre::SceneNode *n)
 {
+    const Ogre::IdType id = n->getId();
     std::lock_guard<std::mutex> lock(gJournalMutex);
-    if (gJournalSet.insert(n).second) gJournal.push_back(n);
-}
-
-/// A destroyed node leaves the journal with its handle (a reader walks from it).
-inline void journalForget(Ogre::SceneNode *n)
-{
-    std::lock_guard<std::mutex> lock(gJournalMutex);
-    if (gJournalSet.erase(n)) gJournal.erase(std::remove(gJournal.begin(), gJournal.end(), n), gJournal.end());
+    if (gJournalSet.insert(id).second) gJournal.emplace_back(id, ownerById(id) != nullptr);
 }
 
 Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
@@ -381,7 +382,6 @@ void forgetRiderRelations(Ogre::SceneNode *n)
 void destroyRecursive(Ogre::SceneNode *n)
 {
     forgetRiderRelations(n);
-    journalForget(n);
     Ogre::SceneNode *sceneRoot = rootOf(n->getCreator());
     while (n->numChildren() > 0) {
         Ogre::SceneNode *c = static_cast<Ogre::SceneNode *>(n->getChild(0));
@@ -991,13 +991,19 @@ unsigned long long transformWrites()
     return gTransformWrites.load(std::memory_order_relaxed);
 }
 
-std::vector<NodeHandle> writeJournal()
+bool writeJournal(std::vector<NodeHandle> &out)
 {
+    out.clear();
     std::lock_guard<std::mutex> lock(gJournalMutex);
-    std::vector<NodeHandle> out;
     out.reserve(gJournal.size());
-    for (Ogre::SceneNode *n : gJournal) out.push_back(wrap(n));
-    return out;
+    bool complete = true;
+    for (const auto &entry : gJournal) {
+        if (!entry.second) { complete = false; continue; }   // engine-owned: no way back to it
+        SceneNode *owner = ownerById(entry.first);
+        if (!owner || !owner->graphNode()) continue;          // destroyed since its write
+        out.push_back(owner->graphNode());
+    }
+    return complete;
 }
 
 unsigned long long writeJournalGeneration() { return gJournalGeneration.load(std::memory_order_relaxed); }

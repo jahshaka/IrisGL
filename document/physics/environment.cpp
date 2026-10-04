@@ -551,9 +551,10 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 	// last look (its generation moved) does the re-check fall back to every body.
 	// Read BEFORE step 1, whose own writes are bodies this pass writes anyway.
 	const bool recheck = !writeBackValid || graph::transformWrites() != writesAfterWriteBack;
-	const bool journalComplete = writeBackValid && graph::writeJournalGeneration() == journalGenerationSeen;
-	const std::vector<graph::NodeHandle> written =
-		recheck && journalComplete ? graph::writeJournal() : std::vector<graph::NodeHandle>();
+	std::vector<graph::NodeHandle> written;
+	const bool journalComplete = recheck && writeBackValid &&
+	                             graph::writeJournalGeneration() == journalGenerationSeen &&
+	                             graph::writeJournal(written);
 	lastRechecks = 0;
 
 	// 1. The bodies Bullet moved this frame (top-level and plain-parented).
