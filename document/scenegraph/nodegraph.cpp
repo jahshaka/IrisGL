@@ -23,6 +23,7 @@ For more information see the LICENSE file
 #include <functional>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <QDebug>
@@ -169,6 +170,28 @@ std::size_t gStaticNodes = 0;
 /// whole-tree pass. Relaxed: it is a CHANGE TEST read once per frame, exactly
 /// like gTransformWrites beside it.
 std::atomic<unsigned long long> gStaticDemotions{0};
+
+/// THE WRITE JOURNAL (see graph::writeJournal): the nodes the movement counter
+/// counted since the last close, each once, in first-write order. A mutex, not
+/// the graph's: a document can be built on a worker against the staging scene,
+/// and the journal is the one structure every write path touches.
+std::mutex gJournalMutex;
+std::vector<Ogre::SceneNode *> gJournal;
+std::unordered_set<Ogre::SceneNode *> gJournalSet;
+std::atomic<unsigned long long> gJournalGeneration{0};
+
+inline void journalWrite(Ogre::SceneNode *n)
+{
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    if (gJournalSet.insert(n).second) gJournal.push_back(n);
+}
+
+/// A destroyed node leaves the journal with its handle (a reader walks from it).
+inline void journalForget(Ogre::SceneNode *n)
+{
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    if (gJournalSet.erase(n)) gJournal.erase(std::remove(gJournal.begin(), gJournal.end(), n), gJournal.end());
+}
 
 Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
 {
@@ -358,6 +381,7 @@ void forgetRiderRelations(Ogre::SceneNode *n)
 void destroyRecursive(Ogre::SceneNode *n)
 {
     forgetRiderRelations(n);
+    journalForget(n);
     Ogre::SceneNode *sceneRoot = rootOf(n->getCreator());
     while (n->numChildren() > 0) {
         Ogre::SceneNode *c = static_cast<Ogre::SceneNode *>(n->getChild(0));
@@ -566,6 +590,7 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     // caller today happens to preserve the pose, which is exactly the kind of
     // thing that stops being true silently.
     gTransformWrites.fetch_add(1, std::memory_order_relaxed);
+    journalWrite(c);
     if (c->getParent()) c->getParent()->removeChild(c);
     // APPEND is the overwhelming majority (addChild passes -1) and must not pay
     // for the sibling-index machinery below: at a fan-out of k that scan is
@@ -614,6 +639,7 @@ NodeHandle detach(NodeHandle child)
     // it off the socket.)
     if (riderParentOf(c)) { forgetRider(c); return child; }
     gTransformWrites.fetch_add(1, std::memory_order_relaxed);   // see attach (F4)
+    journalWrite(c);
     // Out of its parent and under its scene manager's root — NOT migrated to
     // the staging manager, which is what this used to do. A migration rebuilds
     // the whole subtree, which changes every handle in it, which makes the
@@ -842,7 +868,10 @@ inline bool writeIsSceneMovement(Ogre::SceneNode *n)
 
 inline void markMoved(Ogre::SceneNode *n)
 {
-    if (writeIsSceneMovement(n)) gTransformWrites.fetch_add(1, std::memory_order_relaxed);
+    if (writeIsSceneMovement(n)) {
+        gTransformWrites.fetch_add(1, std::memory_order_relaxed);
+        journalWrite(n);
+    }
     if (n->isStatic()) { promoteOnWrite(n); return; }
     // The root-moved case (see promoteStaticChildren). Two loads, and only in a
     // process that has static nodes at all.
@@ -960,6 +989,25 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s)
 unsigned long long transformWrites()
 {
     return gTransformWrites.load(std::memory_order_relaxed);
+}
+
+std::vector<NodeHandle> writeJournal()
+{
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    std::vector<NodeHandle> out;
+    out.reserve(gJournal.size());
+    for (Ogre::SceneNode *n : gJournal) out.push_back(wrap(n));
+    return out;
+}
+
+unsigned long long writeJournalGeneration() { return gJournalGeneration.load(std::memory_order_relaxed); }
+
+void closeWriteJournal()
+{
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    gJournal.clear();
+    gJournalSet.clear();
+    gJournalGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 
 void setCountsAsMovement(NodeHandle n, bool counts)

@@ -170,6 +170,13 @@ public:
 	void writeBack(const QHash<QString, iris::SceneNodePtr> &nodes);
 	/// Nodes the last writeBack wrote (a suite and monitor read).
 	int lastWriteBackWrites() const { return lastWrites; }
+	/// Sleeping bodies the last writeBack RE-CHECKED (step 2: under the write
+	/// journal's nodes, or all of them when the journal was incomplete) — the
+	/// suite's count of what a write elsewhere costs.
+	int lastWriteBackRechecks() const { return lastRechecks; }
+	/// The write journal's generation right after the document step closed it
+	/// (Scene::advance) — the "was it this world that closed it last?" test.
+	void noteWriteJournalClosed() { journalGenerationSeen = graph::writeJournalGeneration(); }
 
 	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
 	void restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node);
@@ -217,6 +224,8 @@ private:
 	unsigned long long writesAfterWriteBack = 0;
 	bool writeBackValid = false;           ///< false until a write-back ran over every body
 	int lastWrites = 0;
+	int lastRechecks = 0;
+	unsigned long long journalGenerationSeen = 0;
 	void noteActiveBodies();
 	void indexBody(btRigidBody *body, const iris::SceneNodePtr &node);
 	void unindexBody(const btRigidBody *body);

@@ -544,18 +544,51 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 	};
 
 	// SOMETHING ELSE MOVED since the last write-back (or this world has bodies
-	// no write-back has seen): every sleeping body is re-checked.
+	// no write-back has seen)? Then the sleeping bodies a write can have moved
+	// are re-checked: those at or under a node in the WRITE JOURNAL
+	// (graph::writeJournal — every write since the document step last closed
+	// it). Only when the journal was closed by someone else since this world's
+	// last look (its generation moved) does the re-check fall back to every body.
+	// Read BEFORE step 1, whose own writes are bodies this pass writes anyway.
 	const bool recheck = !writeBackValid || graph::transformWrites() != writesAfterWriteBack;
+	const bool journalComplete = writeBackValid && graph::writeJournalGeneration() == journalGenerationSeen;
+	const std::vector<graph::NodeHandle> written =
+		recheck && journalComplete ? graph::writeJournal() : std::vector<graph::NodeHandle>();
+	lastRechecks = 0;
 
 	// 1. The bodies Bullet moved this frame (top-level and plain-parented).
 	for (btRigidBody *body : movedBodies) {
 		auto it = bodyRecords.find(body);
 		if (it != bodyRecords.end() && !it->nested) write(body, *it);
 	}
-	// 2. The re-check of every other sleeping body.
-	if (recheck) {
+	// 2. The re-check of the sleeping bodies a write can have moved: under the
+	//    journal's nodes, or (journal incomplete) all of them.
+	auto recheckBody = [&](btRigidBody *body, BodyRecord &rec) {
+		if (rec.nested || rec.moved) return;
+		++lastRechecks;
+		check(body, rec);
+	};
+	if (recheck && !journalComplete) {
 		for (auto it = bodyRecords.begin(); it != bodyRecords.end(); ++it)
-			if (!it->nested && !it->moved) check(const_cast<btRigidBody *>(it.key()), *it);
+			recheckBody(const_cast<btRigidBody *>(it.key()), *it);
+	} else if (recheck) {
+		std::vector<graph::NodeHandle> stack(written.begin(), written.end());
+		QSet<QString> seen;
+		while (!stack.empty()) {
+			const graph::NodeHandle h = stack.back();
+			stack.pop_back();
+			if (const iris::SceneNode *owner = graph::ownerOf(h)) {
+				if (owner->isPhysicsBody && !seen.contains(owner->getGUID())) {
+					seen.insert(owner->getGUID());
+					if (btRigidBody *body = hashBodies.value(owner->getGUID(), nullptr)) {
+						auto it = bodyRecords.find(body);
+						if (it != bodyRecords.end()) recheckBody(body, *it);
+					}
+				}
+			}
+			const std::size_t kids = graph::childCount(h);
+			for (std::size_t i = 0; i < kids; ++i) stack.push_back(graph::childAt(h, i));
+		}
 	}
 	// 3. The nested ones, every frame, parents first: written if Bullet moved
 	//    them, re-checked otherwise (a write above may have moved their parent).

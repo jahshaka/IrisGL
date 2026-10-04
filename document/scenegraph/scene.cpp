@@ -804,6 +804,11 @@ float Scene::advance(float dt)
     // and nothing for a body that slept through every step (Environment::
     // writeBack — a resting pile's frame writes nothing; SPEED-CPU).
     environment->writeBack(nodes);
+    // THE DOCUMENT STEP CLOSES THE WRITE JOURNAL (nodegraph.h): its readers —
+    // the write-back above — have read it; the next frame's writes start a new
+    // one.
+    graph::closeWriteJournal();
+    environment->noteWriteJournalClosed();
 
     // POSSESSION, second half: the spring arm follows the pose the steps just
     // produced, so the camera never lags the character by a frame. It writes

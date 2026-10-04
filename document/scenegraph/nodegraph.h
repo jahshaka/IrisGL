@@ -269,6 +269,23 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
 /// beside `setStagingScene`, the suites in tests/support/documentgraph.h), and
 /// an engine that was never given one keeps scanning every frame.
 unsigned long long transformWrites();
+/// THE WRITE JOURNAL — the first piece of ENGINE_V2_SPEC V2-1's change journal
+/// (SPEED-CPU, 2026-10-04). The counter above says THAT something moved; the
+/// journal says WHAT: every write the counter counts (a transform setter
+/// through the one funnel, a reparent, a detach) also records its node, once,
+/// until the journal is CLOSED. A reader walks the written nodes' subtrees
+/// instead of the whole document.
+///
+/// THE FRAME CLOSE is the document step's (Scene::advance, after its readers —
+/// today the physics write-back, Environment::writeBack). A reader that runs
+/// on another schedule compares writeJournalGeneration() with the generation it
+/// saw at its own last look: a different value means someone closed in
+/// between, the journal no longer holds every write since that look, and the
+/// reader must fall back to its full pass. V2's walks join as readers before
+/// the close; they extend this, never a second record beside it.
+std::vector<NodeHandle> writeJournal();
+unsigned long long writeJournalGeneration();
+void closeWriteJournal();
 /// The counter itself, for the host that hands its address to the engine.
 /// Its lifetime is the process's.
 const std::atomic<unsigned long long> &transformWriteCounter();
