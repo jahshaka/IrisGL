@@ -2344,7 +2344,7 @@ public:
     /// Resolves the directory and computes the key. No I/O. An empty `dir`
     /// leaves the cache off — every method below then does nothing, and
     /// `channels()` always misses, which is exactly today's behaviour.
-    void configure(const std::string &dir, const std::string &appBuildId);
+    void configure(const std::string &dir);
 
     /// Reads both files (after verifying the manifest) and hands Ogre's half to
     /// `importTextureMetadataCache`. Call from ensureHlms(), after the Hlms is
@@ -2423,8 +2423,10 @@ TextureCache &textureCache();
 //                     parsing, not pipeline creation.
 //
 // THE RULES, in order of how much they cost to get wrong:
-//   1. Never load stale. Any doubt -> delete the directory and start cold. A
-//      cold start costs seconds; a bad SPIR-V blob costs a GPU hang.
+//   1. Never load stale. A layer whose key moved is dropped (CS-1: one key per
+//      layer, each naming only what can change that layer's bytes); a file that
+//      fails its checksum deletes the directory and starts cold. A cold start
+//      costs seconds; a bad SPIR-V blob costs a GPU hang.
 //   2. WE checksum every file, because layer 2 does not.
 //   3. Every write is atomic: *.tmp in the same directory, flushed, renamed.
 //   4. One writer. A second process gets a READ-ONLY cache, never a failed run.
@@ -2440,8 +2442,7 @@ public:
     /// hashing the staged Hlms media tree. An empty `dir` leaves the cache off
     /// (but the compile COUNTERS still run — the startup progress display and
     /// the tests need them whether or not anything is persisted).
-    void configure(const std::string &dir, const std::string &appBuildId,
-                   const std::string &mediaDir);
+    void configure(const std::string &dir, const std::string &mediaDir);
 
     /// Starts counting compiles. Call as soon as the log exists (i.e. right
     /// after Root), long before any shader is built.
@@ -2517,7 +2518,8 @@ public:
     ~ShaderCache();
 
 private:
-    struct Entry { std::string name; unsigned long long bytes = 0; std::string hash; };
+    /// `key` is the hex of the file's LAYER key when it was written (CS-1).
+    struct Entry { std::string name; unsigned long long bytes = 0; std::string hash; std::string key; };
     /// One dispatched save: the serialized layers, waiting for the writer
     /// thread. `blobs` is parallel to `names`; `compileCount` is the counter
     /// reading this write makes true once it lands.
@@ -2558,7 +2560,15 @@ private:
     void  releaseLock();
     std::string path(const std::string &name) const;
 
-    std::string mDir, mFingerprint, mMediaDir, mAppBuildId;
+    std::string mDir, mFingerprint, mMediaDir;
+    /// ONE KEY PER LAYER (SPEED-CPU, perf audit CS-1): pipeline, microcode,
+    /// Hlms — see configure(). `mFingerprint` is the three composed, for the
+    /// status readout only.
+    std::string mLayerKey[3];
+    void composeFingerprint();
+    /// The current key (hex) of the layer `name` belongs to; empty for a file
+    /// that is no layer of ours.
+    std::string layerKeyFor(const std::string &name) const;
     bool        mEnabled = false;
     bool        mWriter = false;      ///< we hold the single-writer lock
     int         mLockFd = -1;
@@ -6766,6 +6776,16 @@ private:
     /// Lights destroyed (removeLight, removeNode) — the world light list's dirt
     /// beside mGiLightWriteSerial (SceneGiBinding::lightsRemoved).
     unsigned long long mLightsRemoved = 0;
+    /// THE CARDS' LIGHT FOLD, kept between frames (SPEED-CPU, perf audit E4):
+    /// updateSurfaceCache re-walks the lights only when one of the four counters
+    /// it reads moved, this frame or the last (see there). `mCardLights` is the
+    /// relight job's light list from the same walk.
+    unsigned long long mCardLightKey[4] = {};
+    bool mCardLightFoldValid = false;
+    bool mCardLightKeyMovedLastFrame = false;
+    unsigned long long mCardLightFold = 0;
+    std::vector<Ogre::Light *> mCardLights;
+    unsigned long long walkCardLights(std::vector<Ogre::Light *> &lights) const;
     /// The chain's at-rest light ticks that landed an injection (runChainTick) —
     /// folded into the surface cache's indirect signature.
     unsigned long long mGiRestTicks = 0;

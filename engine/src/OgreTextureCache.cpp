@@ -17,6 +17,7 @@
 //    files here are written atomically and a torn read fails the manifest check,
 //    which costs one cold run and nothing else.
 #include "EnginePrivate.h"
+#include "jahshaka_engine_build_id.h"
 
 #include <OgreLogManager.h>
 #include <OgreRenderSystem.h>
@@ -95,7 +96,7 @@ TextureCache::~TextureCache() = default;
 
 std::string TextureCache::path(const std::string &name) const { return mDir + "/" + name; }
 
-void TextureCache::configure(const std::string &dir, const std::string &appBuildId) {
+void TextureCache::configure(const std::string &dir) {
     mDir = dir;
     mChannels.clear();
     mDirty = false;
@@ -103,13 +104,17 @@ void TextureCache::configure(const std::string &dir, const std::string &appBuild
     if (!mEnabled) return;
     while (!mDir.empty() && mDir.back() == '/') mDir.pop_back();
     // THE VALIDITY KEY, and everything it deliberately leaves out (I-5).
-    // format: this file's own layout. app: our build identity, because the app
-    // is what decides which flags a texture is created with (sRGB preference,
-    // AutomaticBatching, the mipmap filter) and those decide the pool a metadata
-    // entry names. NOT the GPU, NOT the driver, NOT the Hlms media tree — none
-    // of them can change what a PNG's channel count is.
+    // format: this file's own layout. engine + ogre: the code that decides which
+    // flags a texture is created with (sRGB preference, AutomaticBatching, the
+    // mipmap filter — OgreScene::loadTexture is ENGINE code) and so the pool a
+    // metadata entry names, and the fork whose metadata cache writes the file.
+    // NOT the app's commit (SPEED-CPU, perf audit CS-1/CS-4: it used to be, and
+    // every Studio build threw the cache away — no Studio change reaches a
+    // texture's flags), NOT the GPU, NOT the driver, NOT the Hlms media tree —
+    // none of them can change what a PNG's channel count is.
     std::ostringstream k;
-    k << "format=" << kTextureCacheFormat << "|app=" << appBuildId;
+    k << "format=" << kTextureCacheFormat << "|engine=" << JAHSHAKA_ENGINE_BUILD_ID
+      << "|ogre=" << JAHSHAKA_OGRE_FORK_COMMIT;
     mKey = cachefile::hexOf(k.str());
 }
 

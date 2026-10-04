@@ -851,8 +851,7 @@ add_custom_target(JahshakaEngineMedia DEPENDS "${_hlms_stamp}")
 
 add_dependencies(JahshakaEngine JahshakaEngineMedia)
 
-# Compile-time DEFAULTS for the host. The engine never reads these; the host puts
-# them into EngineConfig after trying <exe dir>/media and the env overrides.
-target_compile_definitions(JahshakaEngine PUBLIC
-    JAHSHAKA_OGRE_PLUGIN_DIR_DEFAULT="${OGRE_NEXT_PLUGIN_DIR}"
-    JAHSHAKA_OGRE_MEDIA_DIR_DEFAULT="${JAHSHAKA_MEDIA_DIR}/")
+# (The host's compile-time DEFAULTS for the plugin and media directories are
+# JAHSHAKA_OGRE_{PLUGIN,MEDIA}_DIR_DEFAULT on src/bridge/enginehost.cpp alone —
+# the root CMakeLists. They were PUBLIC here: the engine never read them, one
+# Studio TU did, and 2,363 TUs carried two absolute paths — SPEED-CPU B2.)
