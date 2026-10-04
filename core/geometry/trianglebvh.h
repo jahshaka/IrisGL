@@ -66,8 +66,8 @@ public:
 private:
     struct Node
     {
-        float lo[3];
-        float hi[3];
+        float lo[3] = {};
+        float hi[3] = {};
         int first = 0;   ///< leaf: first slot in mOrder; inner: the LEFT child (the right is first + 1)
         int count = 0;   ///< leaf: triangle count (> 0); inner: 0
     };

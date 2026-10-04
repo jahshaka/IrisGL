@@ -88,7 +88,7 @@ void TriangleBvh::build(const Triangle *triangles, int count)
 
     // Depth-first, left child laid out right after its parent; the right
     // child's index is patched in when the left subtree is done.
-    struct Task { int node; int begin; int end; };
+    struct Task { int node = 0; int begin = 0; int end = 0; };
     std::vector<Task> stack;
     stack.reserve(64);
     mNodes.emplace_back();
