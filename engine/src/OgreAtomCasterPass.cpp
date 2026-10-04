@@ -773,7 +773,7 @@ void recordCasterPass(AtomPassContext &ctx) {
     std::string err;
     gs.flushClusterTables();
     if (!gs.clusterBuffer() || !gs.groupBuffer()) return;
-    if (!scene->recordGpuCull(cull, req, nullptr, err, false, nullptr, nullptr)) {
+    if (!scene->recordGpuCull(cull, req, nullptr, err, nullptr, nullptr, OgreScene::CullRows::Caster)) {
         logOnce("the caster cut did not record (" + err + ")");
         return;
     }

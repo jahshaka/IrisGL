@@ -510,14 +510,6 @@ float OgreScene::environmentObserverKm() const {
     return mAtmoCapturedObserverKm > 0.05f ? mAtmoCapturedObserverKm : JahAtmosphere::kMinObserverKm;
 }
 
-bool OgreScene::measureAtmosphere(unsigned iterations, AtmosphereCost &out) {
-    out = AtmosphereCost();
-    if (!mAtmosphere || !mAtmoSkyOn) { mError = "measureAtmosphere: the sky is not the atmosphere"; return false; }
-    JAH_TRY {
-        return mAtmosphere->measure(iterations, out);
-    } JAH_CATCH(mError, false);
-}
-
 // THE DRIVING CAMERA'S ALTITUDE (OgreEngine::renderOneFrame, the GI driver of
 // this scene, once a frame): the observer the sky view and the aerial volume are
 // built for. A band change rebuilds them and re-captures the environment the
@@ -902,6 +894,7 @@ Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint
         externals.push_back(cube);
         ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
                               Ogre::IdString(kSkyCaptureWorkspace), false);
+        monitor::watchWorkspace(ws);   // a one-shot workspace: its passes are monitor rows too
         ws->_beginUpdate(false);
         ws->_update();
         ws->_endUpdate(false);
@@ -1625,6 +1618,7 @@ void OgreScene::convolvePendingIbl() {
         externals.push_back(target);
         ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
                               Ogre::IdString(kIblWorkspace), false);
+        monitor::watchWorkspace(ws);   // a one-shot workspace: its passes are monitor rows too
         ws->_beginUpdate(false);
         ws->_update();
         ws->_endUpdate(false);
@@ -2305,6 +2299,7 @@ void OgreScene::bakeCloudField() {
         externals.push_back(mCloudField);
         ws = cm->addWorkspace(mSceneMgr, externals, mCloudBakeCamera,
                               Ogre::IdString(kCloudBakeWorkspace), false);
+        monitor::watchWorkspace(ws);   // a one-shot workspace: its passes are monitor rows too
         ws->_beginUpdate(false);
         ws->_update();
         ws->_endUpdate(false);

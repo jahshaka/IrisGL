@@ -231,38 +231,19 @@ void unbindCutJobs(Ogre::HlmsComputeJob *cut, Ogre::HlmsComputeJob *emit) {
     }
 }
 
-/// One dispatch with the barriers its bindings imply.
+/// One dispatch with the barriers its bindings imply — and ITS OWN MONITOR ROW
+/// (lane TEST-1, the perf audit's F3): the cull's jobs used to report a wall-clock
+/// "slope" through a measuring door (GpuCullRequest::measureIterations, deleted —
+/// it measured the CPU's recording and submission, not the GPU). In a capture each
+/// job is a CacheScope row now, nested in the pass that records it (the Atom id
+/// pass, a caster pass) or adopted by the next frame when a tool records it.
 void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
-                          Ogre::HlmsComputeJob *job) {
+                          Ogre::HlmsComputeJob *job, const char *row) {
     Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
     job->analyzeBarriers(rt);
     rs->executeResourceTransition(rt);
+    monitor::CacheScope scope(CacheKind::Gi, WorkReason::Camera, 0, row, rs);
     hc->dispatch(job, 0, 0);
-}
-
-/// THE COST OF ONE JOB, as the queue sees it, measured WITHOUT the frame monitor.
-/// A per-dispatch GPU timestamp pair outside a compositor pass does exist —
-/// monitor::CacheScope, a CacheWork row with its own gpuMs (JahAtmosphere's bake
-/// dispatches use it) — but it records only while the monitor runs and comes back
-/// frames later with the monitor's records; this verb answers on its own call, so
-/// the number is a SLOPE and says so: the job is dispatched `iterations` more times over the
-/// buffers it has already filled, the command buffer is flushed, and the wall
-/// clock of that is divided by the count after an empty flush's own cost has
-/// been taken off. It is therefore an upper bound on the GPU time and includes
-/// the per-dispatch driver cost, which is the honest thing to compare against a
-/// CPU cull anyway.
-double measureJob(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job,
-                  unsigned iterations) {
-    if (!iterations) return -1.0;
-    const auto t0 = std::chrono::steady_clock::now();
-    rs->flushCommands();
-    const auto t1 = std::chrono::steady_clock::now();
-    for (unsigned i = 0; i < iterations; ++i) dispatchWithBarriers(rs, hc, job);
-    rs->flushCommands();
-    const auto t2 = std::chrono::steady_clock::now();
-    const double empty = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    const double full = std::chrono::duration<double, std::milli>(t2 - t1).count();
-    return std::max(0.0, (full - empty)) / double(iterations);
 }
 
 }  // namespace
@@ -273,8 +254,15 @@ double measureJob(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc, Ogre::HlmsCompu
 // OgreAtomIdPass.cpp) calls from inside a pass, where a readback would stall the
 // frame. The answer stays in the cull's buffers (count, survivors, levels, draws).
 bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
-                              std::string &err, bool keepBindings, double *requestMs,
-                              const GpuCull *prior) {
+                              std::string &err, double *requestMs, const GpuCull *prior,
+                              CullRows rows) {
+    // The rows' names, static (a CacheScope keeps the pointer for its sample).
+    static const char *const kRows[3][5] = {
+        { "cull.test", "cull.compact", "cull.draws", "cull.cut", "cull.emit" },
+        { "id.cull.test", "id.cull.compact", "id.cull.draws", "id.cull.cut", "id.cull.emit" },
+        { "caster.cull.test", "caster.cull.compact", "caster.cull.draws", "caster.cull.cut",
+          "caster.cull.emit" } };
+    const char *const *row = kRows[unsigned(rows)];
     ensureGpuTables();
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
     Ogre::HlmsCompute *hc =
@@ -430,20 +418,17 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
             *requestMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tRequest)
                              .count();
 
-        dispatchWithBarriers(rs, hc, test);
-        dispatchWithBarriers(rs, hc, compact);
-        if (req.mode == 2u) dispatchWithBarriers(rs, hc, draws);
+        dispatchWithBarriers(rs, hc, test, row[0]);
+        dispatchWithBarriers(rs, hc, compact, row[1]);
+        if (req.mode == 2u) dispatchWithBarriers(rs, hc, draws, row[2]);
         if (cutMode) {
-            dispatchWithBarriers(rs, hc, cutJob);
-            dispatchWithBarriers(rs, hc, emitJob);
+            dispatchWithBarriers(rs, hc, cutJob, row[3]);
+            dispatchWithBarriers(rs, hc, emitJob, row[4]);
         }
         // The descriptor sets the dispatches bound were built at dispatch time;
-        // the jobs' CPU-side bindings go now (a later grow must not find them),
-        // unless a measurement re-dispatches them as they stand.
-        if (!keepBindings) {
-            unbindCullJobs(test, compact, draws);
-            unbindCutJobs(cutJob, emitJob);
-        }
+        // the jobs' CPU-side bindings go now (a later grow must not find them).
+        unbindCullJobs(test, compact, draws);
+        unbindCutJobs(cutJob, emitJob);
         return true;
     }
     catch (Ogre::Exception &e) {
@@ -468,7 +453,7 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
     out.instances = instances;
 
     std::string err;
-    if (!recordGpuCull(mGpuCull, req, hzb, err, req.measureIterations > 0u, &out.requestMs)) {
+    if (!recordGpuCull(mGpuCull, req, hzb, err, &out.requestMs)) {
         mError = err;
         out.supported = false;
         return false;
@@ -517,35 +502,6 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
                     out.cutDrawn.push_back(rec[r * 4u + 3u]);
                 }
             }
-            if (req.measureIterations) {
-                Ogre::HlmsComputeJob *cutJob = hc->findComputeJobNoThrow("Jahshaka/CullCut");
-                Ogre::HlmsComputeJob *emitJob = hc->findComputeJobNoThrow("Jahshaka/CullEmit");
-                // THE CUT JOB ACCUMULATES (its cursors), so each measured dispatch starts
-                // from the counters the compaction left: survivors and the dispatch
-                // arguments kept, the cut's own words zeroed. The emit job only reads.
-                std::vector<uint32_t> again(counter.begin(), counter.end());
-                again[4] = again[8] = again[11] = again[12] = again[13] = again[14] = again[15] = again[17] = 0u;
-                const auto t0 = std::chrono::steady_clock::now();
-                rs->flushCommands();
-                const auto t1 = std::chrono::steady_clock::now();
-                for (unsigned i = 0; i < req.measureIterations; ++i) {
-                    mGpuCull.count()->upload(again.data(), 0, GpuCull::kCountElements);
-                    dispatchWithBarriers(rs, hc, cutJob);
-                }
-                rs->flushCommands();
-                const auto t2 = std::chrono::steady_clock::now();
-                // ...minus the counter uploads alone.
-                for (unsigned i = 0; i < req.measureIterations; ++i)
-                    mGpuCull.count()->upload(again.data(), 0, GpuCull::kCountElements);
-                rs->flushCommands();
-                const auto t3 = std::chrono::steady_clock::now();
-                const double empty = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                const double full = std::chrono::duration<double, std::milli>(t2 - t1).count();
-                const double uploads = std::chrono::duration<double, std::milli>(t3 - t2).count();
-                out.cutMs = std::max(0.0, full - std::max(empty, uploads)) / double(req.measureIterations);
-                out.emitMs = measureJob(rs, hc, emitJob, req.measureIterations);
-                unbindCutJobs(cutJob, emitJob);
-            }
         }
         if (req.mode == 2u) {
             out.draws = out.survivors;
@@ -568,29 +524,10 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
                 if (mesh && mesh->getNumSubMeshes() > 1u) ++out.multiSubmeshSurvivors;
             }
         }
-
-        if (req.measureIterations) {
-            Ogre::HlmsComputeJob *test = hc->findComputeJobNoThrow("Jahshaka/CullTest");
-            Ogre::HlmsComputeJob *compact = hc->findComputeJobNoThrow("Jahshaka/CullCompact");
-            Ogre::HlmsComputeJob *draws = hc->findComputeJobNoThrow("Jahshaka/CullDraws");
-            // The request kept the bindings for this: each job re-dispatches
-            // over the buffers the request filled.
-            out.testMs = measureJob(rs, hc, test, req.measureIterations);
-            out.compactMs = measureJob(rs, hc, compact, req.measureIterations);
-            if (req.mode == 2u) out.drawsMs = measureJob(rs, hc, draws, req.measureIterations);
-            unbindCullJobs(test, compact, draws);
-        }
         return true;
     }
     catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
-        if (req.measureIterations) {
-            unbindCullJobs(hc->findComputeJobNoThrow("Jahshaka/CullTest"),
-                           hc->findComputeJobNoThrow("Jahshaka/CullCompact"),
-                           hc->findComputeJobNoThrow("Jahshaka/CullDraws"));
-            unbindCutJobs(hc->findComputeJobNoThrow("Jahshaka/CullCut"),
-                          hc->findComputeJobNoThrow("Jahshaka/CullEmit"));
-        }
         return false;
     }
 }

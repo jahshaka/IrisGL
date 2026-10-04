@@ -129,16 +129,10 @@ inline double msSince(const Clock::time_point &t0) {
 /// Three is Ogre's own dynamic-buffer multiplier, i.e. the depth of the
 /// pipeline this work rides.
 constexpr unsigned kFramesInFlight = 3u;
-/// Two timestamps per pass (BLAS batch, TLAS), per frame slot, then THE SKIN
-/// CACHE's three (PHOTON-SKIN-1): before the skin dispatch, between it and the
-/// skinned structures' builds/refits, and after them.
-constexpr unsigned kQueriesPerFrame = 8u;
-/// HOW MANY SCENES MAY HOLD TIMESTAMP SLOTS AT ONCE. The product case is more
-/// than one drawn scene per frame — the editor plus a material-preview or
-/// thumbnail scene — and each needs its OWN query range, or the second scene of
-/// a frame overwrites the first's timestamps before they are read.
+/// HOW MANY VIEWS the reflect pool plans descriptor rings for (it used to be
+/// the timestamp pools' ceiling; the tier keeps no timestamp pool since lane
+/// TEST-1 — every GPU time is a monitor CacheScope row).
 constexpr unsigned kMaxTimedScenes = 8u;
-constexpr unsigned kQueryCount = kMaxTimedScenes * kFramesInFlight * kQueriesPerFrame;
 /// Compaction size queries live in a RING, not at slots 0..n: two BLAS batches
 /// within the read-back window would otherwise write the same slots and the
 /// second batch's sizes would be read as the first's — a COMPACT copy into a
@@ -184,15 +178,6 @@ struct RtFuncs {
     }
 };
 
-/// THE REFIT, off by default. A full TLAS rebuild is NVIDIA's own recommendation
-/// ("consider PREFER_FAST_TRACE and perform only rebuilds") and it measures
-/// 0.21-0.35 ms GPU at 8,001 instances on this rig — inside any budget — while
-/// making the better tree. The refit is the OPTIMISATION, kept behind this
-/// switch so it can be measured against the rebuild rather than assumed better.
-inline bool preferRefit() {
-    static const bool k = getenv("JAH_RQ_REFIT") != nullptr;
-    return k;
-}
 
 /// One scratch ARENA per batch, handed out at offsets — NOT the spike's one
 /// shared buffer with a serialising barrier between every build (which is why
@@ -597,24 +582,14 @@ private:
         /// job's inputs (every BLAS address, the ready rigged slots): a refit is
         /// legal only when neither moved and the feed saw no change of the set.
         uint32_t builtSlots = 0u;
+        /// The TLAS was last BUILT with ALLOW_UPDATE (the refit arm on): only such a
+        /// tree may be refit, and only with the same flags (the arm is per frame now,
+        /// so a tree built with it off must be rebuilt when it turns on).
+        bool tlasUpdatable = false;
 
-        /// THIS SCENE'S OWN timestamp range in the shared pool, and its own
-        /// in-flight record. Both are per SCENE, not per frame: two scenes
-        /// drawn in one frame each write timestamps, and a single shared ring
-        /// indexed by the frame number would have the second overwrite the
-        /// first (audit round 2, finding 3).
-        /// This scene's timestamp SLOT (not a running count) and the query
-        /// index it resolves to. The slot is held until forgetScene hands it
-        /// back — see mTimedSceneSlots.
-        unsigned querySlot = 0;
-        unsigned queryBase = 0;
-        bool     hasQueryBase = false;
-        struct PendingTimes {
-            unsigned frame = 0; bool blas = false; bool tlas = false; bool live = false;
-            bool skin = false;   ///< queries 4..6: the skin dispatch and the skinned builds
-        };
-        PendingTimes pending[kFramesInFlight];
-
+        /// The GPU times (blasMs, tlasMs, skinMs, skinRefitMs) are NOT kept here:
+        /// they are the monitor's CacheScope rows this scene filed (owner = this
+        /// SceneAs), read back by `status` — -1 outside a capture (lane TEST-1).
         RayQueryStatus st;
     };
 
@@ -648,16 +623,15 @@ private:
     /// True when it actually recorded a compaction copy this frame.
     bool runCompaction(SceneAs &sa, VkCommandBuffer cmd);
     bool buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::string &err);
-    void readTimestamps(SceneAs &sa);
     /// THE SKIN CACHE's frame (PHOTON-SKIN-1): reconciles the rigged traced set
     /// with `sa.skins`, re-skins every item whose POSE moved (one dispatch for all
     /// of them) and builds or refits their structures — all recorded into `cmd`
-    /// before the gather that references them. Timestamps into `qBase` + 4..6
-    /// when `timed`. Returns false only when the frame must not trace skinned
+    /// before the gather that references them. The dispatch and the builds are
+    /// the monitor rows "rq.skin.dispatch" and "rq.skin.build" (owner `&sa`).
+    /// Returns false only when the frame must not trace skinned
     /// items at all (the job is missing); the entries simply stay unready then.
     void settleStillSkins(OgreScene *scene, SceneAs &sa);
-    bool skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed, unsigned qBase,
-                  std::string &err);
+    bool skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, std::string &err);
     /// Frees one entry: its structure retired, its buffer destroyed (Ogre's
     /// delayed destruction), its row block handed back and the node's override
     /// cleared. `scene` may be null (the tier's close: the GpuScene dies with it).
@@ -678,13 +652,25 @@ private:
     VkResult createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out, const char *name);
     unsigned mPipelinesBuilt = 0;
     double   mPipelineBuildMs = 0.0;
+public:
+    /// THE MEASUREMENT ARMS (lane TEST-1): the engine's registry, latched each frame.
+    void setArms(const ArmRegistry *arms) { mArms = arms; }
+private:
+    const ArmRegistry *mArms = nullptr;
+    bool arm(ArmId a, bool otherwise) const { return mArms ? mArms->on(a) : otherwise; }
+    /// THE REFIT, off by default. A full TLAS rebuild is NVIDIA's own recommendation
+    /// ("consider PREFER_FAST_TRACE and perform only rebuilds") and it measures
+    /// 0.21-0.35 ms GPU at 8,001 instances on this rig — inside any budget — while
+    /// making the better tree. The refit is the OPTIMISATION, kept behind the arm
+    /// "rayquery.tlasRefit" so it can be measured against the rebuild rather than
+    /// assumed better.
+    bool preferRefit() const { return arm(ArmId::TlasRefit, false); }
 
     Ogre::VulkanRenderSystem *mRs = nullptr;
     Ogre::VulkanDevice *mDev = nullptr;
     VkDevice mVk = VK_NULL_HANDLE;
     RtFuncs mFn;
     VkPhysicalDeviceAccelerationStructurePropertiesKHR mAsProps{};
-    float mTimestampPeriod = 1.0f;
 
     VkDescriptorSetLayout mSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout mPipeLayout = VK_NULL_HANDLE;
@@ -692,7 +678,6 @@ private:
     VkShaderModule mModule = VK_NULL_HANDLE;
     VkDescriptorPool mDescPool = VK_NULL_HANDLE;
 
-    VkQueryPool mTimestamps = VK_NULL_HANDLE;
     VkQueryPool mCompactSizes = VK_NULL_HANDLE;
     /// WHICH COMPACTION SLOTS ARE OWED A READ — one bit per slot, not a count
     /// (round 3, finding 1). A count plus a cursor could not express "slot 3 is
@@ -709,17 +694,6 @@ private:
     /// Contiguous because the pin's cmdWriteProperties takes ONE first-query
     /// index for the whole batch.
     int takeCompactRun(unsigned n) const;
-    /// WHICH TIMESTAMP RANGES ARE TAKEN — one bit per slot, not a count
-    /// (round 3, finding 2). Allocating positionally from a count
-    /// (`base = count * stride`) is only correct if scenes are destroyed in
-    /// exactly the reverse of their creation order, which nothing guarantees:
-    /// editor/preview/thumbnail hold slots 0/1/2, the preview closes, the count
-    /// drops to 2, and the NEXT thumbnail is handed slot 2 — the live
-    /// thumbnail's range. Both then reset, write and read the same queries, and
-    /// the per-scene split that fixed round 2's finding 3 is undone by ordinary
-    /// panel churn. Diagnostics only (the numbers go wrong, nothing renders
-    /// wrong), which is exactly why it would have gone unnoticed.
-    uint32_t mTimedSceneSlots = 0;
 
     /// THE FRAME CLOCK IS OGRE'S, NOT OURS (finding 3). The counter this used to
     /// keep was incremented once per updateScene CALL, and updateRayQuery calls
@@ -850,11 +824,7 @@ private:
         /// a copy per ring slot like the trace's own.
         RawBuffer       motionGeomRowOfSlot[3];
         unsigned        motionFrame = 0;
-        /// ...and its timestamp pair, on the view's reflection query slot
-        /// (queryBase) in a pool of its own.
-        struct MotionPending { unsigned frame = 0; bool live = false; };
-        MotionPending   motionPending[3];
-        float           motionGpuMs = -1.0f;
+        /// Its GPU time is the monitor row "rq.reflect.motion" (owner = the key).
         /// Frames since a MOVER slot (kGpuMover | kGpuDragMover) last moved in this
         /// view's scene — the trace's departure rule is live only just after one did.
         unsigned        framesSinceMoverMoved = 1000u;
@@ -903,15 +873,15 @@ private:
         /// What the last recorded dispatch covered, for the status readings.
         OgreScene *scene = nullptr;
         unsigned   rays = 0;
-        /// This view's own timestamp pair (the same ring discipline as the
-        /// structures': a slot held until the view goes away, read with the
-        /// availability bit and never with a wait).
-        unsigned querySlot = 0;
-        unsigned queryBase = 0;
-        bool     hasQueryBase = false;
-        struct Pending { unsigned frame = 0; bool live = false; };
-        Pending  pending[kFramesInFlight];
-        float    gpuMs = -1.0f;
+        /// THE REFLECTION'S GPU TIME is two monitor rows, the trace's
+        /// ("rq.reflect.trace") and the filter's ("rq.reflect.filter"), owner =
+        /// the key; RayQueryStatus::reflectMs is their sum. NOT one span from the
+        /// trace to the filter, which the private ring was: the halves run in
+        /// two different compositor passes' callbacks, and a sample opened in
+        /// one pass and closed in another breaks the render system's sample
+        /// STACK (the enclosing pass's end pops it — measured: the glossy arm
+        /// read 1.03 ms for a span the ring read at 1.61, the filter left out).
+        /// The hit decode between the halves is its own pass row.
         /// THE FRAME BETWEEN ITS TWO HALVES (trace -> finishReflect): the ring slot
         /// the trace bound, its grid, and which of the pair is this frame's mean.
         bool     finishPending = false;
@@ -928,7 +898,6 @@ private:
     /// note on the transitions in recordReflect).
     void clearReflectImages(ReflectView &rv, VkCommandBuffer cmd);
     void dropReflect(ReflectView &rv);
-    void readReflectTimestamps(ReflectView &rv);
 
     std::unordered_map<const ReflectPassListener *, ReflectView> mReflects;
     bool makeMotionPipeline(std::string &err);
@@ -941,7 +910,6 @@ private:
     VkPipeline            mMotionSkinPipeline = VK_NULL_HANDLE;
     VkShaderModule        mMotionSkinModule = VK_NULL_HANDLE;
     VkDescriptorPool      mMotionPool = VK_NULL_HANDLE;
-    VkQueryPool           mMotionTimestamps = VK_NULL_HANDLE;
     bool                  mMotionFailed = false;
     /// THE CUT-OUT MASKS (REFLECT-MOVERS-2): one per (albedo texture, alpha test),
     /// shared by every scene — the texture's alpha at its first level no larger
@@ -1004,10 +972,6 @@ private:
     /// The pipeline could not be made on this device; say so ONCE and take the
     /// fallback picture for the rest of the process.
     bool                  mReflectFailed = false;
-    /// Timestamp slots for reflect passes, the same bitmask discipline as
-    /// mTimedSceneSlots (and for the same round-3 reason).
-    uint32_t              mReflectQuerySlots = 0;
-    VkQueryPool           mReflectTimestamps = VK_NULL_HANDLE;
 
     // ---- THE SCREEN-PROBE GATHER (GATHER-1a) ---------------------------
     // Three more compute dispatches on the SAME frame command buffer and the
@@ -1147,12 +1111,7 @@ private:
         float     toSun[3] = { 0.0f, 0.0f, 0.0f };
         float     cpuMs = -1.0f;
         std::string reason;
-        unsigned querySlot = 0;
-        unsigned queryBase = 0;
-        bool     hasQueryBase = false;
-        struct Pending { unsigned frame = 0; bool live = false; };
-        Pending  pending[kFramesInFlight];
-        float    gpuMs = -1.0f;
+        /// Its GPU time is the monitor row "sun.contact" (owner = the key).
         /// The rays were traced this frame; finishSunContact registers them.
         bool     finishPending = false;
         /// finishSunContact registered them and the pass has not ended yet.
@@ -1160,7 +1119,6 @@ private:
     };
     bool makeSunContactPipeline(std::string &err);
     void dropSunContact(SunContactView &sv);
-    void readSunContactTimestamps(SunContactView &sv);
     std::unordered_map<const ReflectPassListener *, SunContactView> mSunContacts;
     struct SuspendedBindings {
         const Ogre::SceneManager *gatherSm = nullptr;
@@ -1176,8 +1134,6 @@ private:
     /// Its own point sampler: the reflection's are made with the reflection
     /// pipeline, which a view with the SSR row off never builds.
     VkSampler             mSunSampler = VK_NULL_HANDLE;
-    VkQueryPool           mSunTimestamps = VK_NULL_HANDLE;
-    uint32_t              mSunQuerySlots = 0;
     /// The pipeline (or the R8 storage format) is not available on this device:
     /// said ONCE, and the shadow map renders alone for the rest of the process.
     bool                  mSunFailed = false;
@@ -1281,9 +1237,8 @@ private:
     // (updateScene, before any render target).
 public:
     bool traceCardMovers(OgreScene *scene, const CardMoverTrace &job);
-    /// A timestamp pair around the scene's relight dispatch, and the read-back.
-    void timeCardRelight(OgreScene *scene, bool begin);
-    void cardMoverTimes(OgreScene *scene, float &traceMs, float &relightMs, float &stillMs);
+    /// The two traces' last GPU milliseconds (the monitor's rows, owner = the scene).
+    void cardMoverTimes(OgreScene *scene, float &traceMs, float &stillMs);
     void forgetCardMovers(OgreScene *scene);
 
 private:
@@ -1292,17 +1247,10 @@ private:
         RawBuffer       params[kReflectRing];
         RawBuffer       records[kReflectRing];
         unsigned frame = 0;
-        unsigned querySlot = 0, queryBase = 0;
-        bool     hasQueryBase = false;
-        struct Pending { uint32_t frame = 0; bool trace = false; bool relight = false; };
-        Pending  pending[kFramesInFlight];
-        float    traceMs = -1.0f, relightMs = -1.0f;
     };
     bool makeCardMoverPipeline(std::string &err);
-    bool cardMoverQueries(CardMoverView &cv);
-    void readCardMoverTimestamps(CardMoverView &cv);
     /// Per scene, one view per MODE of the job (rq_card_movers.comp): the movers'
-    /// trace and the still world's — each its own ring, sets and timestamps, since
+    /// trace and the still world's — each its own ring and sets, since
     /// both record in one frame.
     std::unordered_map<const OgreScene *, CardMoverView> mCardMovers;
     std::unordered_map<const OgreScene *, CardMoverView> mCardStill;
@@ -1320,8 +1268,6 @@ private:
     VkPipeline            mTwPipeline = VK_NULL_HANDLE;
     VkDescriptorPool      mTwPool = VK_NULL_HANDLE;
     bool                  mTwFailed = false;
-    VkQueryPool           mCmTimestamps = VK_NULL_HANDLE;
-    uint32_t              mCmQuerySlots = 0;
     bool                  mCmFailed = false;
 
     /// ONE IMAGE'S BASIS from a pose and a frustum (rq_reflect.comp's five
@@ -1815,13 +1761,6 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
     props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     props2.pNext = &mAsProps;
     vkGetPhysicalDeviceProperties2(mDev->mPhysicalDevice, &props2);
-    mTimestampPeriod = props2.properties.limits.timestampPeriod;
-
-    VkQueryPoolCreateInfo qci{};
-    qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-    qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    qci.queryCount = kQueryCount;
-    if (mTimestampPeriod > 0.0f) vkCreateQueryPool(mVk, &qci, nullptr, &mTimestamps);
 
     // COMPACTED SIZES. One slot per in-flight frame; a BLAS asks for its
     // compacted size in the frame it is built and reads the answer back later
@@ -1838,7 +1777,7 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
     }
     // OUR FIXED RINGS MUST COVER THE PIN'S PIPELINE DEPTH (round 3, finding 4).
     // The retire logic reads the VaoManager's dynamic-buffer multiplier, but
-    // the instance-slot ring, the per-scene timestamp ring and kQueryCount are
+    // the instance-slot ring and the descriptor rings are
     // sized by kFramesInFlight. They agree today (both 3) and would disagree
     // silently if the pin ever deepened: the gather would write the slot a
     // queued build is still reading. Refusing is the honest answer — the tier
@@ -2030,11 +1969,9 @@ void RayQueryTier::close() {
     if (mSunPipeLayout) vkDestroyPipelineLayout(mVk, mSunPipeLayout, nullptr);
     if (mSunSetLayout) vkDestroyDescriptorSetLayout(mVk, mSunSetLayout, nullptr);
     if (mSunSampler) vkDestroySampler(mVk, mSunSampler, nullptr);
-    if (mSunTimestamps) vkDestroyQueryPool(mVk, mSunTimestamps, nullptr);
     mSunPool = VK_NULL_HANDLE; mSunPipeline = VK_NULL_HANDLE; mSunModule = VK_NULL_HANDLE;
     mSunPipeLayout = VK_NULL_HANDLE; mSunSetLayout = VK_NULL_HANDLE;
-    mSunSampler = VK_NULL_HANDLE; mSunTimestamps = VK_NULL_HANDLE;
-    mSunQuerySlots = 0;
+    mSunSampler = VK_NULL_HANDLE;
     // THE CARD MOVERS' state: sets dropped with the pool (the sun contact's rule).
     for (auto *views : { &mCardMovers, &mCardStill }) {
         for (auto &kv : *views)
@@ -2056,10 +1993,8 @@ void RayQueryTier::close() {
     if (mCmModule) vkDestroyShaderModule(mVk, mCmModule, nullptr);
     if (mCmPipeLayout) vkDestroyPipelineLayout(mVk, mCmPipeLayout, nullptr);
     if (mCmSetLayout) vkDestroyDescriptorSetLayout(mVk, mCmSetLayout, nullptr);
-    if (mCmTimestamps) vkDestroyQueryPool(mVk, mCmTimestamps, nullptr);
     mCmPool = VK_NULL_HANDLE; mCmPipeline = VK_NULL_HANDLE; mCmModule = VK_NULL_HANDLE;
-    mCmPipeLayout = VK_NULL_HANDLE; mCmSetLayout = VK_NULL_HANDLE; mCmTimestamps = VK_NULL_HANDLE;
-    mCmQuerySlots = 0;
+    mCmPipeLayout = VK_NULL_HANDLE; mCmSetLayout = VK_NULL_HANDLE;
     if (mCardParityPool) vkDestroyDescriptorPool(mVk, mCardParityPool, nullptr);
     if (mCardParitySampler) vkDestroySampler(mVk, mCardParitySampler, nullptr);
     mCardParitySampler = VK_NULL_HANDLE;
@@ -2071,8 +2006,6 @@ void RayQueryTier::close() {
     mCardParityModule = VK_NULL_HANDLE; mCardParityPipeLayout = VK_NULL_HANDLE;
     mCardParitySetLayout = VK_NULL_HANDLE;
     if (mMotionPool) vkDestroyDescriptorPool(mVk, mMotionPool, nullptr);
-    if (mMotionTimestamps) vkDestroyQueryPool(mVk, mMotionTimestamps, nullptr);
-    mMotionTimestamps = VK_NULL_HANDLE;
     if (mMotionPipeline) vkDestroyPipeline(mVk, mMotionPipeline, nullptr);
     if (mMotionPipeLayout) vkDestroyPipelineLayout(mVk, mMotionPipeLayout, nullptr);
     if (mMotionSetLayout) vkDestroyDescriptorSetLayout(mVk, mMotionSetLayout, nullptr);
@@ -2100,12 +2033,11 @@ void RayQueryTier::close() {
     if (mReflectPipeLayout) vkDestroyPipelineLayout(mVk, mReflectPipeLayout, nullptr);
     if (mReflectSetLayout) vkDestroyDescriptorSetLayout(mVk, mReflectSetLayout, nullptr);
     if (mReflectModule) vkDestroyShaderModule(mVk, mReflectModule, nullptr);
-    if (mReflectTimestamps) vkDestroyQueryPool(mVk, mReflectTimestamps, nullptr);
     if (mPointSampler) vkDestroySampler(mVk, mPointSampler, nullptr);
     if (mLinearSampler) vkDestroySampler(mVk, mLinearSampler, nullptr);
     mReflectPool = VK_NULL_HANDLE; mReflectPipeline = VK_NULL_HANDLE;
     mReflectPipeLayout = VK_NULL_HANDLE; mReflectSetLayout = VK_NULL_HANDLE;
-    mReflectModule = VK_NULL_HANDLE; mReflectTimestamps = VK_NULL_HANDLE;
+    mReflectModule = VK_NULL_HANDLE;
     mFilterPipeline = VK_NULL_HANDLE; mFilterModule = VK_NULL_HANDLE;
     mPointSampler = VK_NULL_HANDLE; mLinearSampler = VK_NULL_HANDLE;
     if (mDescPool) vkDestroyDescriptorPool(mVk, mDescPool, nullptr);
@@ -2113,14 +2045,12 @@ void RayQueryTier::close() {
     if (mPipeLayout) vkDestroyPipelineLayout(mVk, mPipeLayout, nullptr);
     if (mSetLayout) vkDestroyDescriptorSetLayout(mVk, mSetLayout, nullptr);
     if (mModule) vkDestroyShaderModule(mVk, mModule, nullptr);
-    if (mTimestamps) vkDestroyQueryPool(mVk, mTimestamps, nullptr);
     if (mCompactSizes) vkDestroyQueryPool(mVk, mCompactSizes, nullptr);
     mDescPool = VK_NULL_HANDLE;
     mPipeline = VK_NULL_HANDLE;
     mPipeLayout = VK_NULL_HANDLE;
     mSetLayout = VK_NULL_HANDLE;
     mModule = VK_NULL_HANDLE;
-    mTimestamps = VK_NULL_HANDLE;
     mCompactSizes = VK_NULL_HANDLE;
     mVk = VK_NULL_HANDLE;
 }
@@ -2180,7 +2110,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     // for EVERY scene (round 3, finding 1: a parked preview did exactly that).
     for (const Blas &bl : sa.blas)
         if (bl.compactState == 1u) mCompactBusy &= ~(uint64_t(1) << bl.compactSlot);
-    if (sa.hasQueryBase) mTimedSceneSlots &= ~(uint32_t(1) << sa.querySlot);
+    detail::monitor::forgetGpuOwner(&sa);
     mScenes.erase(it);
     forgetCardMovers(scene);
 }
@@ -2931,8 +2861,12 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     // is actually going to be taken (finding 13). The default is a full rebuild
     // — NVIDIA's own guidance for a TLAS, 0.21-0.24 ms at 8,001 instances — so
     // the flag rides the same switch the refit does.
+    const bool updatable = preferRefit();
     build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    if (preferRefit()) build.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    if (updatable) build.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    // An UPDATE needs a source built with ALLOW_UPDATE and the SAME flags: a tree
+    // built while the arm was off is rebuilt the frame it turns on.
+    if (!updatable || !sa.tlasUpdatable) refit = false;
     build.mode = refit ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
                        : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     build.geometryCount = 1;
@@ -3027,6 +2961,7 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
 
     sa.st.tlasBytes = sizes.accelerationStructureSize;
     sa.st.lastWasRefit = (build.mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR);
+    if (!sa.st.lastWasRefit) sa.tlasUpdatable = updatable;
     if (sa.st.lastWasRefit) ++sa.st.tlasRefits; else ++sa.st.tlasBuilds;
     return true;
 }
@@ -3105,12 +3040,11 @@ void RayQueryTier::settleStillSkins(OgreScene *scene, SceneAs &sa) {
     if (!owed) return;
     std::string err;
     VkCommandBuffer cmd = frameCmd();
-    if (cmd && !skinPass(scene, sa, cmd, false, 0u, err) && !err.empty())
+    if (cmd && !skinPass(scene, sa, cmd, err) && !err.empty())
         Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
 }
 
-bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, bool timed,
-                            unsigned qBase, std::string &err) {
+bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd, std::string &err) {
     sa.skinUse.clear();
     sa.st.skinLastItems = 0;
     sa.st.skinLastVertices = 0;
@@ -3319,7 +3253,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             //    must not overwrite what they have not read. Ogre's barrier solver
             //    cannot see a buffer written through a device address (F5's lesson).
             cmd = frameCmd();
-            if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 4u);
+            monitor::CacheScope skinJob(CacheKind::Gi, WorkReason::Moved, 0, "rq.skin.dispatch", mRs, &sa);
             VkMemoryBarrier war{};
             war.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             war.srcAccessMask = 0;
@@ -3369,7 +3303,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
                                  VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
                                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  0, 1, &raw, 0, nullptr, 0, nullptr);
-            if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 5u);
+            skinJob.close();
             ++sa.st.skinDispatches;
             for (SceneAs::Skin *sk : settle) sk->prevBehind = false;
             for (const Dirty &d : dirty) {
@@ -3478,6 +3412,8 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             builds.push_back(b);
         }
         if (!builds.empty()) {
+            monitor::CacheScope skinBuild(CacheKind::Gi, WorkReason::Moved, 0, "rq.skin.build", mRs, &sa);
+            skinBuild.setUnits(unsigned(builds.size()));
             std::vector<const VkAccelerationStructureBuildRangeInfoKHR *> rangePtrs;
             for (size_t i = 0; i < builds.size(); ++i) {
                 builds[i].pGeometries = &geoms[i];
@@ -3508,8 +3444,6 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
                                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  0, 1, &post, 0, nullptr, 0, nullptr);
         }
-        if (timed && sa.st.skinLastItems > 0)
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 6u);
     }
 
     // 9. WHAT THE GATHER MAY WRITE: the entries skinned AND built.
@@ -3519,36 +3453,6 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             sa.skinUse.emplace(kv.first, std::make_pair(sk.address, sk.row));
     }
     return true;
-}
-
-// ---------------------------------------------------------------------------
-/// Reads back the timestamp pairs a frame old enough to have finished wrote —
-/// with the availability bit, NEVER with a wait.
-void RayQueryTier::readTimestamps(SceneAs &sa) {
-    if (!mTimestamps || !sa.hasQueryBase) return;
-    const uint32_t now = frameNow(), inFlight = framesInFlight();
-    for (unsigned i = 0; i < kFramesInFlight; ++i) {
-        SceneAs::PendingTimes &p = sa.pending[i];
-        if (!p.live || uint32_t(now - p.frame) < inFlight) continue;
-        uint64_t data[kQueriesPerFrame * 2] = {};   // value + availability per query
-        const VkResult r = vkGetQueryPoolResults(
-            mVk, mTimestamps, sa.queryBase + i * kQueriesPerFrame, kQueriesPerFrame, sizeof(data),
-            data, 2 * sizeof(uint64_t),
-            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
-        if (r != VK_SUCCESS && r != VK_NOT_READY) { p.live = false; continue; }
-        auto span = [&](unsigned a, unsigned b, float &out) {
-            if (!data[a * 2 + 1] || !data[b * 2 + 1]) return;        // not available
-            if (data[b * 2] <= data[a * 2]) return;
-            out = float(double(data[b * 2] - data[a * 2]) * double(mTimestampPeriod) / 1.0e6);
-        };
-        if (p.blas) span(0, 1, sa.st.blasMs);
-        if (p.tlas) span(2, 3, sa.st.tlasMs);
-        if (p.skin) {
-            span(4, 5, sa.st.skinMs);
-            span(5, 6, sa.st.skinRefitMs);
-        }
-        p.live = false;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3606,23 +3510,6 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // test or a route edited in place, a skinned item's rig) is a new set — the
     // feed says so; the old writer re-read the set only when the epoch moved.
     const bool moved = !sa.haveEpoch || epoch != sa.lastEpoch || sa.feed.structDirty;
-    // THIS SCENE'S OWN timestamp range, handed out once. Past the budget a
-    // scene simply reports no GPU milliseconds — a thumbnail scene's timings
-    // are worth nothing and a missing number is better than a wrong one.
-    if (!sa.hasQueryBase) {
-        for (unsigned slot = 0; slot < kMaxTimedScenes; ++slot) {
-            if (mTimedSceneSlots & (uint32_t(1) << slot)) continue;
-            mTimedSceneSlots |= uint32_t(1) << slot;
-            sa.querySlot = slot;
-            sa.queryBase = slot * kFramesInFlight * kQueriesPerFrame;
-            sa.hasQueryBase = true;
-            break;
-        }
-        // Past the budget a scene simply reports no GPU milliseconds. A
-        // thumbnail's timings are worth nothing and a missing number is better
-        // than one taken from somebody else's range.
-    }
-    readTimestamps(sa);
     drainRetired();
     // THE CUT-OUTS' TABLE (REFLECT-MOVERS-2) every frame, before the still-scene
     // gate: a mask that became ready, or a slot's near level the ray rule moved,
@@ -3672,17 +3559,6 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     double gatherMs = 0.0;
     const uint32_t frame = frameNow();
 
-    // THIS FRAME'S TIMESTAMP RANGE, reset once and before anything writes into
-    // it: the skin pass below writes its three before the gather's four.
-    const bool timed = mTimestamps && sa.hasQueryBase;
-    const unsigned ring = frame % kFramesInFlight;
-    const unsigned qBase = sa.queryBase + ring * kQueriesPerFrame;
-    if (timed) vkCmdResetQueryPool(cmd, mTimestamps, qBase, kQueriesPerFrame);
-    SceneAs::PendingTimes &pend = sa.pending[ring];
-    pend = SceneAs::PendingTimes();
-    pend.frame = frame;
-    pend.live = timed;
-
     std::string err;
     // THE SKIN CACHE FIRST (PHOTON-SKIN-1): the gather writes the rigged items'
     // structure addresses, so those structures must exist — and be built or
@@ -3692,10 +3568,9 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         monitor::CacheScope scope(CacheKind::Gi, WorkReason::Moved, 0, "rq.skin", mRs);
         const unsigned long long before = sa.st.skinPasses;
         const Clock::time_point tSkin = Clock::now();
-        if (!skinPass(scene, sa, cmd, timed, qBase, err) && !err.empty())
+        if (!skinPass(scene, sa, cmd, err) && !err.empty())
             Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
         if (sa.st.skinPasses != before) sa.st.skinCpuMs = float(msSince(tSkin));
-        pend.skin = sa.st.skinPasses != before;
         scope.setUnits(unsigned(sa.st.skinPasses - before));
         if (sa.st.skinPasses == before) scope.cancel();
     }
@@ -3727,9 +3602,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             wants.reserve(missing.size());
             for (auto &m : missing) wants.push_back(m.second);
             unsigned built = 0;
-            if (timed)
-                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 0);
-            monitor::CacheScope scope(CacheKind::Gi, WorkReason::Added, 0, "rq.blas", mRs);
+            monitor::CacheScope scope(CacheKind::Gi, WorkReason::Added, 0, "rq.blas", mRs, &sa);
             if (!ensureBlas(sa, wants, cmd, built, err)) {
                 Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
                 scope.cancel();
@@ -3742,9 +3615,6 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 return;
             }
             scope.setUnits(built);
-            if (timed)
-                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 1);
-            pend.blas = built != 0u;
             sa.st.blasBuilds += built;
             if (built) ++sa.blasVersion;
         }
@@ -3783,11 +3653,9 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         // (the inputs) — and only when the tuning asks for it.
         const bool sameSet = sa.tlas && !fd.structDirty && !inputsChanged && sa.builtSlots == slots;
         const bool refit = preferRefit() && sameSet;
-        if (timed)
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 2);
         {
             monitor::CacheScope scope(CacheKind::Gi, refit ? WorkReason::Moved : WorkReason::Rebuild,
-                                      0, "rq.tlas", mRs);
+                                      0, "rq.tlas", mRs, &sa);
             if (!buildTlas(sa, cmd, refit, err)) {
                 Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
                 scope.cancel();
@@ -3812,9 +3680,6 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                                     0, "rq.tlas.far", nullptr);
             far.setUnits(sa.farInstanceCount);
         }
-        if (timed)
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 3);
-        pend.tlas = true;
         fd.structDirty = false;
         sa.builtSlots = slots;
     }
@@ -3886,6 +3751,13 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
     }
     RayQueryStatus st = it->second.st;
     st.feedSlotVisits = it->second.feed.visits;
+    // THE GPU TIMES are the monitor's rows this scene filed (lane TEST-1): -1
+    // outside a capture, and a still scene's last value held, as before.
+    const void *owner = &it->second;
+    st.blasMs = monitor::lastGpuMs("rq.blas", owner);
+    st.tlasMs = monitor::lastGpuMs("rq.tlas", owner);
+    st.skinMs = monitor::lastGpuMs("rq.skin.dispatch", owner);
+    st.skinRefitMs = monitor::lastGpuMs("rq.skin.build", owner);
     return st;
 }
 
@@ -4727,20 +4599,12 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
             return false;
         }
     }
-    // The pool its layout planned: kMaxTimedScenes views' worth of rings (the
-    // timestamp pool's ceiling, far more views than a product frame draws), two
-    // modes a scene (the movers' view and the still view), a ring each.
+    // The pool its layout planned: kMaxTimedScenes views' worth of rings (far
+    // more views than a product frame draws), two modes a scene (the movers'
+    // view and the still view), a ring each.
     if (!plan.create(mVk, "rayquery/reflect", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mReflectPool, err))
         return false;
-    if (!ensureSamplers(err)) return false;
-    if (mTimestampPeriod > 0.0f) {
-        VkQueryPoolCreateInfo qci{};
-        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qci.queryCount = kMaxTimedScenes * kFramesInFlight * 2u;
-        vkCreateQueryPool(mVk, &qci, nullptr, &mReflectTimestamps);
-    }
-    return true;
+    return ensureSamplers(err);
 }
 
 bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h,
@@ -4809,30 +4673,6 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
                          0, 1, &toCompute, 0, nullptr, 0, nullptr);
 }
 
-void RayQueryTier::readReflectTimestamps(ReflectView &rv) {
-    if (!mReflectTimestamps || !rv.hasQueryBase) return;
-    const uint32_t now = frameNow(), inFlight = framesInFlight();
-    for (unsigned i = 0; i < kFramesInFlight; ++i) {
-        ReflectView::Pending &pd = rv.pending[i];
-        // `< inFlight`, not `<= inFlight`, and the difference is the whole
-        // reading: the pending ring is kFramesInFlight deep, so a slot is
-        // REUSED after that many frames — waiting one frame longer than the
-        // ring is deep threw every measurement away (measured: 0 readings over
-        // 90 frames). This is the same condition the structures' own
-        // readTimestamps uses, for the same reason.
-        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
-        uint64_t v[4] = {};
-        const uint32_t base = rv.queryBase + i * 2u;
-        if (vkGetQueryPoolResults(mVk, mReflectTimestamps, base, 2, sizeof(v), v,
-                                  sizeof(uint64_t) * 2u,
-                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
-                VK_SUCCESS &&
-            v[1] && v[3] && v[2] >= v[0])
-            rv.gpuMs = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
-        pd.live = false;
-    }
-}
-
 void RayQueryTier::dropReflect(ReflectView &rv) {
     for (unsigned i = 0; i < 3u; ++i) {
         if (rv.motionSets[i]) retireSet(rv.motionSets[i], mMotionPool);
@@ -4847,8 +4687,6 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
         retire(rv.geomRowOfSlot[i]);
     }
     for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.dist[i]); }
-    if (rv.hasQueryBase) mReflectQuerySlots &= ~(uint32_t(1) << rv.querySlot);
-    rv.hasQueryBase = false;
     rv.imagesReady = false;
     rv.needsClear = false;
 }
@@ -4858,6 +4696,7 @@ void RayQueryTier::forgetReflect(const ReflectPassListener *key) {
     if (it == mReflects.end()) return;
     dropReflect(it->second);
     mReflects.erase(it);
+    monitor::forgetGpuOwner(key);
 }
 
 void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) const {
@@ -4865,8 +4704,12 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         if (kv.second.scene != scene) continue;
         st.reflect = true;
         st.reflectRays += int(kv.second.rays);
-        if (kv.second.gpuMs > st.reflectMs) st.reflectMs = kv.second.gpuMs;
-        if (kv.second.motionGpuMs > st.reflectMotionMs) st.reflectMotionMs = kv.second.motionGpuMs;
+        // The views' GPU times are the monitor's rows (lane TEST-1): the worst view.
+        const float tr = monitor::lastGpuMs("rq.reflect.trace", kv.first);
+        const float fi = monitor::lastGpuMs("rq.reflect.filter", kv.first);
+        if (tr >= 0.0f || fi >= 0.0f)
+            st.reflectMs = std::max(st.reflectMs, std::max(tr, 0.0f) + std::max(fi, 0.0f));
+        st.reflectMotionMs = std::max(st.reflectMotionMs, monitor::lastGpuMs("rq.reflect.motion", kv.first));
     }
 }
 
@@ -5106,17 +4949,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         said.push_back(reason);
         Ogre::LogManager::getSingleton().logMessage(std::string("R5 declined: ") + reason);
     };
-    readReflectTimestamps(rv);
-    if (!rv.hasQueryBase && mReflectTimestamps) {
-        for (unsigned s = 0; s < kMaxTimedScenes; ++s) {
-            if (mReflectQuerySlots & (uint32_t(1) << s)) continue;
-            mReflectQuerySlots |= uint32_t(1) << s;
-            rv.querySlot = s;
-            rv.queryBase = s * kFramesInFlight * 2u;
-            rv.hasQueryBase = true;
-            break;
-        }
-    }
 
     std::string err;
     if (!ensureDummyImages(err)) {
@@ -5179,7 +5011,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // axis lands in the wrong eye or in neither — the owner's "no reflections
     // in the headset", measured).
     EyeBasisF eyeB[2];
-    // THE ARM THAT RE-MEASURES THE CLAIM: `JAH_R5_MONO_EYES=1` traces a stereo target through the RENDERING
+    // THE ARM THAT RE-MEASURES THE CLAIM: the arm "reflect.monoEyes" traces a stereo target through the RENDERING
     // camera for both halves — the behaviour before lane REFLECT-VR-1 — so the
     // cost of getting this wrong can be measured rather than argued. On the
     // `vr.session` mirror fixture it moves an eye from a mean of 0.34/255
@@ -5187,11 +5019,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // the LEFT eye and 6.26 at 12.8 % in the RIGHT one — the asymmetry being
     // that the rendering camera carries the left eye's projection, so one
     // camera is nearly right for one half and wrong for the other.
-    // Read ONCE per process, like `JAH_RQ_REFIT` beside it: an environment
-    // variable cannot change under a running process, and this sits in a
-    // per-frame path.
-    static const bool sMonoEyesArm = getenv("JAH_R5_MONO_EYES") != nullptr;
-    const bool monoEyes = stereo && sMonoEyesArm;
+    // (A measurement arm, latched per frame — lane TEST-1 deleted its env door.)
+    const bool monoEyes = stereo && arm(ArmId::ReflectMonoEyes, false);
     if (stereo && !monoEyes) {
         if (!eyes) { bail("a stereo view with no located eyes"); return; }
         for (int i = 0; i < 2; ++i)
@@ -5361,15 +5190,15 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.hitSun2[1] = hit.lift;
     pp.hitSun2[2] = hit.sunRange;
     pp.hitSun2[3] = hit.farLift;
-    // THE ARM THAT RE-MEASURES THE CLAIM (the shape of JAH_R5_MONO_EYES beside it):
-    // `JAH_R5_NO_MOTION=1` switches EVERY branch of REFLECT-MOVERS-1 off at once —
+    // THE ARM THAT RE-MEASURES THE CLAIM (the shape of "reflect.monoEyes" beside it):
+    // the arm "reflect.motion" = 0 switches EVERY branch of REFLECT-MOVERS-1 off at once —
     // the id image withheld (a surface's own motion), motion.w = 0 (a hit's motion,
     // the reflected image, the mover restarts, the filter's restart band) and the
     // march's velocity job (recordMotion) — so the paired cost arm of
-    // gi.reflect_mover measures all of it, read per frame so ONE process can hold
+    // gi.reflect_mover measures all of it, latched per frame so ONE process can hold
     // both arms (trap 12). Off is the pre-lane picture up to the mover age's six
     // low bits in the history's mean length (a 2^-17 relative change of a length).
-    const bool motionOn = getenv("JAH_R5_NO_MOTION") == nullptr;
+    const bool motionOn = arm(ArmId::ReflectMotion, true);
     if (!motionOn) idTex = idDepthTex = nullptr;
     pp.motion[0] = idTex ? 1.0f : 0.0f;
     pp.motion[1] = idTex ? float(idTex->getWidth()) : 1.0f;
@@ -5396,10 +5225,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         rv.framesSinceMoverMoved = moverMoved ? 0u : std::min(rv.framesSinceMoverMoved + 1u, 1000u);
         rv.framesSincePoseMoved = poseMoved ? 0u : std::min(rv.framesSincePoseMoved + 1u, 1000u);
     }
-    // THE POSED IDENTIFICATION'S MEASURING DOOR (`JAH_R7_NO_POSED`, read per frame so
-    // one process holds both arms of gi.reflect_mover --cost-posed): the trace and the
+    // THE POSED IDENTIFICATION'S ARM ("reflect.posed", latched per frame so one
+    // process holds both arms of gi.reflect_mover --cost-posed): off, the trace and the
     // march's velocity take the id image alone, the pre-lane motion for a character.
-    const bool posedOn = getenv("JAH_R7_NO_POSED") == nullptr;
+    const bool posedOn = arm(ArmId::ReflectPosed, true);
     pp.motion[3] = !motionOn ? 0.0f
                    : (posedOn && rv.framesSincePoseMoved <= 2u) ? 3.0f
                    : rv.framesSinceMoverMoved <= 2u ? 2.0f
@@ -5410,13 +5239,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
     }
-    // THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, read per frame:
-    // gi.reflect_mover --edge alternates its two modes). Only the Hits photon view
-    // shows it; the reflection's own arithmetic never reads it.
-    {
-        const char *c = getenv("JAH_R7_EDGE_CLASSES");
-        pp.alpha[2] = c ? float(atoi(c)) : 0.0f;
-    }
+    // THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, the arm
+    // "reflect.edgeClasses": gi.reflect_mover --edge alternates its two modes). Only the
+    // Hits photon view shows it; the reflection's own arithmetic never reads it.
+    pp.alpha[2] = mArms ? float(mArms->value(ArmId::ReflectEdgeClasses)) : 0.0f;
     pp.alpha[3] = rayMoversOf(scene) ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
@@ -5740,11 +5566,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!cmd) { bail("frameCmd"); return; }   // device lost: record nothing
     clearDummyImages(cmd);
     clearReflectImages(rv, cmd);
-    if (mReflectTimestamps && rv.hasQueryBase) {
-        const uint32_t base = rv.queryBase + (rv.frame % kFramesInFlight) * 2u;
-        vkCmdResetQueryPool(cmd, mReflectTimestamps, base, 2);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mReflectTimestamps, base);
-    }
+    monitor::CacheScope traceRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.trace", mRs, key);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
@@ -5856,13 +5678,6 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
     // The pool its layout planned (VkDescriptorPools.h): a ring a view.
     if (!plan.create(mVk, "rayquery/motion", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mMotionPool, err))
         return false;
-    if (mTimestampPeriod > 0.0f) {
-        VkQueryPoolCreateInfo qci{};
-        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qci.queryCount = kMaxTimedScenes * kFramesInFlight * 2u;
-        vkCreateQueryPool(mVk, &qci, nullptr, &mMotionTimestamps);
-    }
     return ensureSamplers(err);
 }
 
@@ -6209,7 +6024,8 @@ bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
 }
 
 uint64_t RayQueryTier::alphaTableOf(const OgreScene *scene) const {
-    if (getenv("JAH_R6_NO_ALPHA")) return 0u;
+    // The arm "reflect.alphaTested" = 0 traces every cut-out opaque (the cost arm).
+    if (!arm(ArmId::ReflectAlphaTested, true)) return 0u;
     auto it = mScenes.find(const_cast<OgreScene *>(scene));
     return it == mScenes.end() ? 0u : uint64_t(it->second.alphaAddress);
 }
@@ -6217,9 +6033,9 @@ uint64_t RayQueryTier::alphaTableOf(const OgreScene *scene) const {
 void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
                                 Ogre::CompositorPass *pass) {
     if (!isOpen() || mMotionFailed || !view || !pass) return;
-    // THE MEASURING DOOR (JAH_R5_NO_MOTION, read per frame so one process holds
-    // both arms): the chain's clear stands and the resolve takes the camera path.
-    if (getenv("JAH_R5_NO_MOTION")) return;
+    // THE ARM ("reflect.motion", latched per frame so one process holds both arms):
+    // off, the chain's clear stands and the resolve takes the camera path.
+    if (!arm(ArmId::ReflectMotion, true)) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
     if (!scene || !cam || view->stereo()) return;
@@ -6254,23 +6070,6 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
         }
     }
     ReflectView &rv = mReflects[key];
-    // THE LAST FRAMES' TIMESTAMPS (the trace's rule: a slot is read once the frames
-    // in flight have retired it, never with a wait).
-    if (mMotionTimestamps && rv.hasQueryBase) {
-        const uint32_t now = frameNow();
-        for (unsigned i = 0; i < kFramesInFlight; ++i) {
-            ReflectView::MotionPending &pd = rv.motionPending[i];
-            if (!pd.live || uint32_t(now - pd.frame) < framesInFlight()) continue;
-            uint64_t v[4] = {};
-            const uint32_t base = rv.queryBase + i * 2u;
-            if (vkGetQueryPoolResults(mVk, mMotionTimestamps, base, 2, sizeof(v), v, sizeof(uint64_t) * 2u,
-                                      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
-                    VK_SUCCESS &&
-                v[1] && v[3] && v[2] >= v[0])
-                rv.motionGpuMs = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
-            pd.live = false;
-        }
-    }
     const unsigned ring = rv.motionFrame % kMotionRing;
     if (!rv.motionParams[ring].buffer &&
         !makeBuffer(sizeof(MotionParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
@@ -6316,7 +6115,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     SceneAs *skinSa = nullptr;
     Ogre::UavBufferPacked *skinGeomRows = nullptr;
     uint32_t skinGeomSlots = 0u;
-    if (mMotionSkinPipeline && !getenv("JAH_R7_NO_POSED")) {
+    if (mMotionSkinPipeline && arm(ArmId::ReflectPosed, true)) {
         auto sit = mScenes.find(scene);
         const uint32_t vaoFrame = mRs->getVaoManager()->getFrameCount();
         if (sit != mScenes.end() && sit->second.tlas && sit->second.st.enabled &&
@@ -6426,12 +6225,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     }
     VkCommandBuffer cmd = frameCmd();
     if (!cmd) return;
-    const bool timed = mMotionTimestamps && rv.hasQueryBase;
-    const uint32_t qbase = rv.queryBase + (rv.motionFrame % kFramesInFlight) * 2u;
-    if (timed) {
-        vkCmdResetQueryPool(cmd, mMotionTimestamps, qbase, 2);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mMotionTimestamps, qbase);
-    }
+    monitor::CacheScope motionJob(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.motion", mRs, key);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeLayout, 0, 1,
                             &rv.motionSets[ring], 0, nullptr);
@@ -6448,12 +6242,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionSkinPipeline);
         vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
     }
-    if (timed) {
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mMotionTimestamps, qbase + 1u);
-        ReflectView::MotionPending &pd = rv.motionPending[rv.motionFrame % kFramesInFlight];
-        pd.frame = frameNow();
-        pd.live = true;
-    }
+    motionJob.close();
     ++rv.motionFrame;
 }
 
@@ -6479,7 +6268,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                              nullptr);
     }
     // THE FILTER AND THE COMPOSITE — the same descriptor set, a different
-    // pipeline. Its timestamp is the SAME pair as the trace's, deliberately:
+    // pipeline. Its time is the SAME row as the trace's, deliberately:
     // what a budget cares about is what the reflection costs, and the split
     // between tracing and filtering is ours, not the frame's.
     // The set is the trace's (the same layout); a second command-buffer bind,
@@ -6487,16 +6276,9 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
-    vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
-    if (mReflectTimestamps && rv.hasQueryBase) {
-        // rv.frame was advanced by the trace: its pair is the previous slot's.
-        const unsigned tf = rv.frame - 1u;
-        const uint32_t base = rv.queryBase + (tf % kFramesInFlight) * 2u;
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mReflectTimestamps,
-                            base + 1u);
-        ReflectView::Pending &pd = rv.pending[tf % kFramesInFlight];
-        pd.frame = frameNow();
-        pd.live = true;
+    {
+        monitor::CacheScope filterRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.filter", mRs, key);
+        vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
     }
 }
 
@@ -6850,33 +6632,7 @@ bool RayQueryTier::makeSunContactPipeline(std::string &err) {
         err = "vkCreateSampler failed";
         return false;
     }
-    if (mTimestampPeriod > 0.0f) {
-        VkQueryPoolCreateInfo qci{};
-        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qci.queryCount = kMaxTimedScenes * kFramesInFlight * 2u;
-        vkCreateQueryPool(mVk, &qci, nullptr, &mSunTimestamps);
-    }
     return true;
-}
-
-void RayQueryTier::readSunContactTimestamps(SunContactView &sv) {
-    if (!mSunTimestamps || !sv.hasQueryBase) return;
-    const uint32_t now = frameNow(), inFlight = framesInFlight();
-    for (unsigned i = 0; i < kFramesInFlight; ++i) {
-        SunContactView::Pending &pd = sv.pending[i];
-        // The reflection's rule, and its reason: `<`, not `<=` (the ring is
-        // kFramesInFlight deep and a slot is reused after that many frames).
-        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
-        uint64_t v[4] = {};
-        const uint32_t base = sv.queryBase + i * 2u;
-        if (vkGetQueryPoolResults(mVk, mSunTimestamps, base, 2, sizeof(v), v, sizeof(uint64_t) * 2u,
-                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
-                VK_SUCCESS &&
-            v[1] && v[3] && v[2] >= v[0])
-            sv.gpuMs = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
-        pd.live = false;
-    }
 }
 
 void RayQueryTier::dropSunContact(SunContactView &sv) {
@@ -6889,8 +6645,6 @@ void RayQueryTier::dropSunContact(SunContactView &sv) {
         retire(sv.params[i]);
     }
     retireTexture(sv.vis);
-    if (sv.hasQueryBase) mSunQuerySlots &= ~(uint32_t(1) << sv.querySlot);
-    sv.hasQueryBase = false;
 }
 
 void RayQueryTier::forgetSunContact(const ReflectPassListener *key) {
@@ -6898,6 +6652,7 @@ void RayQueryTier::forgetSunContact(const ReflectPassListener *key) {
     if (it == mSunContacts.end()) return;
     dropSunContact(it->second);
     mSunContacts.erase(it);
+    monitor::forgetGpuOwner(key);
 }
 
 void RayQueryTier::finishSunContact(const ReflectPassListener *key) {
@@ -6969,7 +6724,7 @@ void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus 
         st.rays += sv.rays;
         st.range = sv.range;
         for (int i = 0; i < 3; ++i) st.toSun[i] = sv.toSun[i];
-        if (sv.gpuMs > st.gpuMs) st.gpuMs = sv.gpuMs;
+        st.gpuMs = std::max(st.gpuMs, monitor::lastGpuMs("sun.contact", kv.first));
         if (sv.cpuMs > st.cpuMs) st.cpuMs = sv.cpuMs;
         st.reason.clear();
     }
@@ -6999,7 +6754,6 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     /// map alone — the picture without the row. The reason is kept for the
     /// status, because a row that silently does nothing is the worst outcome.
     const auto decline = [&sv](const char *why) { sv.reason = why; };
-    readSunContactTimestamps(sv);
 
     auto sceneIt = mScenes.find(scene);
     if (sceneIt == mScenes.end()) { decline("the scene has no ray structures yet"); return; }
@@ -7105,16 +6859,6 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     sv.fullH = fullH;
     sv.divisor = divisor;
 
-    if (!sv.hasQueryBase && mSunTimestamps) {
-        for (unsigned s = 0; s < kMaxTimedScenes; ++s) {
-            if (mSunQuerySlots & (uint32_t(1) << s)) continue;
-            mSunQuerySlots |= uint32_t(1) << s;
-            sv.querySlot = s;
-            sv.queryBase = s * kFramesInFlight * 2u;
-            sv.hasQueryBase = true;
-            break;
-        }
-    }
 
     std::string err;
     const unsigned ring = sv.frame % kReflectRing;
@@ -7275,24 +7019,12 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
         // while the monitor is off, a GPU-timed row in a capture. `Camera`,
         // not `None`: a view-dependent answer re-made every frame because the
         // thing it describes is the picture.
-        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "sun.contact", mRs);
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "sun.contact", mRs, key);
         work.setUnits(w * h / 1000u);
-        const bool timed = mSunTimestamps && sv.hasQueryBase;
-        const uint32_t base = sv.queryBase + (sv.frame % kFramesInFlight) * 2u;
-        if (timed) {
-            vkCmdResetQueryPool(cmd, mSunTimestamps, base, 2);
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mSunTimestamps, base);
-        }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mSunPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mSunPipeLayout, 0, 1,
                                 &sv.sets[ring], 0, nullptr);
         vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
-        if (timed) {
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mSunTimestamps, base + 1u);
-            SunContactView::Pending &pd = sv.pending[sv.frame % kFramesInFlight];
-            pd.frame = frameNow();
-            pd.live = true;
-        }
     }
 
     // THE REGISTRATION IS THE SECOND HALF'S (finishSunContact, in front of the
@@ -7320,8 +7052,6 @@ struct CardMoverParams {
     float knobs[4] = {};
 };
 constexpr unsigned kCardMoverBindings = 7u;
-/// Four timestamps a frame: the trace's pair and the relight's pair.
-constexpr unsigned kCardMoverQueries = 4u;
 /// The records ring's capacity: the relight list's (kMaxRelights, 80 B a card).
 constexpr unsigned kCardMoverMaxRecords = 1024u;
 constexpr unsigned kCardMoverRecordFloats = 20u;
@@ -7388,54 +7118,7 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
         return false;
     }
     // The pool its layout planned (VkDescriptorPools.h).
-    if (!plan.create(mVk, "rayquery/card-movers", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mCmPool, err))
-        return false;
-    if (mTimestampPeriod > 0.0f) {
-        VkQueryPoolCreateInfo qci{};
-        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qci.queryCount = kMaxTimedScenes * kFramesInFlight * kCardMoverQueries;
-        vkCreateQueryPool(mVk, &qci, nullptr, &mCmTimestamps);
-    }
-    return true;
-}
-
-bool RayQueryTier::cardMoverQueries(CardMoverView &cv) {
-    if (!mCmTimestamps) return false;
-    if (cv.hasQueryBase) return true;
-    for (unsigned s = 0; s < kMaxTimedScenes; ++s) {
-        if (mCmQuerySlots & (uint32_t(1) << s)) continue;
-        mCmQuerySlots |= uint32_t(1) << s;
-        cv.querySlot = s;
-        cv.queryBase = s * kFramesInFlight * kCardMoverQueries;
-        cv.hasQueryBase = true;
-        return true;
-    }
-    return false;
-}
-
-void RayQueryTier::readCardMoverTimestamps(CardMoverView &cv) {
-    if (!mCmTimestamps || !cv.hasQueryBase) return;
-    const uint32_t now = frameNow(), inFlight = framesInFlight();
-    for (unsigned i = 0; i < kFramesInFlight; ++i) {
-        CardMoverView::Pending &pd = cv.pending[i];
-        if ((!pd.trace && !pd.relight) || uint32_t(now - pd.frame) < inFlight) continue;
-        const uint32_t base = cv.queryBase + i * kCardMoverQueries;
-        for (unsigned pair = 0; pair < 2u; ++pair) {
-            bool &live = pair ? pd.relight : pd.trace;
-            if (!live) continue;
-            uint64_t v[4] = {};
-            if (vkGetQueryPoolResults(mVk, mCmTimestamps, base + pair * 2u, 2, sizeof(v), v,
-                                      sizeof(uint64_t) * 2u,
-                                      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
-                    VK_SUCCESS &&
-                v[1] && v[3] && v[2] >= v[0]) {
-                const float ms = float(double(v[2] - v[0]) * double(mTimestampPeriod) * 1e-6);
-                (pair ? cv.relightMs : cv.traceMs) = ms;
-            }
-            live = false;
-        }
-    }
+    return plan.create(mVk, "rayquery/card-movers", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mCmPool, err);
 }
 
 bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) {
@@ -7457,7 +7140,6 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
         }
     }
     CardMoverView &cv = job.still ? mCardStill[scene] : mCardMovers[scene];
-    readCardMoverTimestamps(cv);
     const unsigned count = std::min(job.count, kCardMoverMaxRecords);
     std::string err;
     const unsigned ring = cv.frame % kReflectRing;
@@ -7595,62 +7277,20 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     if (!cmd) return false;
     {
         detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Caster, 0,
-                                         job.still ? "cards.still" : "cards.movers", mRs);
+                                         job.still ? "cards.still" : "cards.movers", mRs, scene);
         work.setUnits(count);
-        const bool timed = cardMoverQueries(cv);
-        const unsigned slot = frameNow() % kFramesInFlight;
-        const uint32_t base = cv.queryBase + slot * kCardMoverQueries;
-        if (timed) {
-            vkCmdResetQueryPool(cmd, mCmTimestamps, base, 2);
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mCmTimestamps, base);
-        }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCmPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCmPipeLayout, 0, 1,
                                 &cv.sets[ring], 0, nullptr);
         vkCmdDispatch(cmd, kCardPageSize / 8u, kCardPageSize / 8u, count);
-        if (timed) {
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mCmTimestamps, base + 1u);
-            CardMoverView::Pending &pd = cv.pending[slot];
-            if (pd.frame != frameNow()) { pd.frame = frameNow(); pd.relight = false; }
-            pd.trace = true;
-        }
     }
     ++cv.frame;
     return true;
 }
 
-void RayQueryTier::timeCardRelight(OgreScene *scene, bool begin) {
-    if (!isOpen() || !mCmTimestamps || !scene) return;
-    auto it = mCardMovers.find(scene);
-    if (it == mCardMovers.end()) return;   // timed only once the scene has traced
-    CardMoverView &cv = it->second;
-    if (!cardMoverQueries(cv)) return;
-    const unsigned slot = frameNow() % kFramesInFlight;
-    const uint32_t base = cv.queryBase + slot * kCardMoverQueries + 2u;
-    VkCommandBuffer cmd = frameCmd();
-    if (!cmd) return;
-    if (begin) {
-        vkCmdResetQueryPool(cmd, mCmTimestamps, base, 2);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mCmTimestamps, base);
-    } else {
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mCmTimestamps, base + 1u);
-        CardMoverView::Pending &pd = cv.pending[slot];
-        if (pd.frame != frameNow()) { pd.frame = frameNow(); pd.trace = false; }
-        pd.relight = true;
-    }
-}
-
-void RayQueryTier::cardMoverTimes(OgreScene *scene, float &traceMs, float &relightMs, float &stillMs) {
-    auto st = mCardStill.find(scene);
-    if (st != mCardStill.end()) {
-        readCardMoverTimestamps(st->second);
-        stillMs = st->second.traceMs;
-    }
-    auto it = mCardMovers.find(scene);
-    if (it == mCardMovers.end()) return;
-    readCardMoverTimestamps(it->second);
-    traceMs = it->second.traceMs;
-    relightMs = it->second.relightMs;
+void RayQueryTier::cardMoverTimes(OgreScene *scene, float &traceMs, float &stillMs) {
+    traceMs = monitor::lastGpuMs("cards.movers", scene);
+    stillMs = monitor::lastGpuMs("cards.still", scene);
 }
 
 void RayQueryTier::forgetCardMovers(OgreScene *scene) {
@@ -7662,19 +7302,16 @@ void RayQueryTier::forgetCardMovers(OgreScene *scene) {
             retire(it->second.params[i]);
             retire(it->second.records[i]);
         }
-        if (it->second.hasQueryBase) mCmQuerySlots &= ~(uint32_t(1) << it->second.querySlot);
         views->erase(it);
     }
+    monitor::forgetGpuOwner(scene);
 }
 
 bool OgreScene::traceCardMovers(const CardMoverTrace &job) {
     return mEngine && mEngine->mRayTier && mEngine->mRayTier->traceCardMovers(this, job);
 }
-void OgreScene::timeCardRelight(bool begin) {
-    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->timeCardRelight(this, begin);
-}
-void OgreScene::cardMoverTimes(float &traceMs, float &relightMs, float &stillMs) {
-    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardMoverTimes(this, traceMs, relightMs, stillMs);
+void OgreScene::cardMoverTimes(float &traceMs, float &stillMs) {
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardMoverTimes(this, traceMs, stillMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -8589,6 +8226,7 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     if (!mRayTier) {
         if (!rayQueryAvailable()) return;             // the fallback picture, silently
         mRayTier = new detail::RayQueryTier();
+        mRayTier->setArms(&mArms);
         std::string err;
         if (!mRayTier->open(mRoot->getRenderSystem(), err)) {
             Ogre::LogManager::getSingleton().logMessage("Jahshaka: ray-query tier off — " + err);
@@ -8812,8 +8450,7 @@ bool OgreScene::readTlasInstances(TlasReadback &, std::string &err) {
 }
 bool OgreScene::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
-void OgreScene::timeCardRelight(bool) {}
-void OgreScene::cardMoverTimes(float &, float &, float &) {}
+void OgreScene::cardMoverTimes(float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
 void OgreScene::setSunContact(const SunContactDesc &d) { mSunContact = d; }
 bool OgreScene::sunContactWanted() const { return false; }

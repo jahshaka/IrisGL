@@ -207,12 +207,6 @@ public:
     /// cost arm, both in one process. The colour pass and the voxel march's share
     /// keep the law either way (it is compiled into their shaders).
     virtual void setReflectionFogEnabled(bool on) { (void)on; }
-    /// THE ATMOSPHERE'S COST: each of the four table jobs dispatched
-    /// `iterations` more times over its own inputs, flushed and timed
-    /// (AtmosphereCost). Synchronous — a GPU wait; a measurement, never a
-    /// frame-time call. False without the atmosphere (or headless).
-    virtual bool        measureAtmosphere(unsigned iterations, AtmosphereCost &out)
-    { (void)iterations; out = AtmosphereCost(); return false; }
     /// THIS SCENE'S SHADOW REQUEST — ShadowDesc says what the shape means and
     /// why it exists (the backend's filter and atlas are global; this hides
     /// that rather than pretending otherwise). Idempotent, and cheap when
@@ -2681,6 +2675,16 @@ public:
     /// GI rebuild and a workspace recreation.
     virtual void setFrameMonitor(MonitorLevel level) = 0;
     virtual MonitorLevel frameMonitor() const = 0;
+
+    // ---- THE ARM REGISTRY (lane TEST-1; Types.h ArmInfo) -------------------
+    /// Sets a measurement arm by name. The value is LATCHED at the start of the
+    /// next frame (a frame never reads two values of one arm). False, with
+    /// lastError(), for a name the registry does not hold or a value outside the
+    /// arm's range — nothing changes then.
+    virtual bool setArm(const std::string &name, double value) = 0;
+    /// Every registered arm: its name, the value the current frame reads, its
+    /// default, its range and what it changes.
+    virtual std::vector<ArmInfo> arms() const = 0;
     /// What the monitor is doing, including the four zero-cost assertions and
     /// the state of both GPU-timing off-switches.
     virtual MonitorStatus monitorStatus() const = 0;

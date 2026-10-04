@@ -6,7 +6,7 @@
 // called once a frame per drawn scene, inside the frame and before the sky
 // capture (OgreEngine::renderOneFrame), and on a still frame it compares four
 // flags and returns. A dial change rebuilds all four tables (their dispatches
-// are measured by Scene::measureAtmosphere); a sun change rebuilds the sky view
+// are each a monitor row, named for the job); a sun change rebuilds the sky view
 // and the aerial volume; the aerial scale, the fog and the sun's intensity are
 // constants in a buffer and cost an upload.
 #include "EnginePrivate.h"
@@ -403,11 +403,11 @@ void JahAtmosphere::pushJobParams(Ogre::HlmsComputeJob *job) const {
 
 // One table job, the compositor's own compute discipline (bind, the job's
 // barriers through Ogre's solver, dispatch), the bindings released after it
-// (a job's descriptor sets hold raw pointers). `repeats` > 1 is the cost
-// measurement's slope.
+// (a job's descriptor sets hold raw pointers). Its GPU time is the monitor row
+// named for the job (CacheKind::Atmosphere) — the only measure of a table's cost
+// since lane TEST-1 deleted the wall-clock slope (measureAtmosphere).
 bool JahAtmosphere::runJob(const char *name, Ogre::TextureGpu *target, Ogre::TextureGpu *in0,
-                           Ogre::TextureGpu *in1, unsigned gx, unsigned gy, unsigned repeats,
-                           int reason) {
+                           Ogre::TextureGpu *in1, unsigned gx, unsigned gy) {
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(name) : nullptr;
@@ -438,9 +438,8 @@ bool JahAtmosphere::runJob(const char *name, Ogre::TextureGpu *target, Ogre::Tex
     // row with its own timestamp pair (the only way a dispatch outside a
     // compositor pass reports GPU time; CacheWork::gpuMs). Nothing while the
     // monitor is off.
-    monitor::CacheScope scope(CacheKind::Atmosphere,
-                              reason >= 0 ? WorkReason(reason) : WorkReason::Sky, 0, name, rs);
-    for (unsigned k = 0; k < repeats; ++k) {
+    monitor::CacheScope scope(CacheKind::Atmosphere, WorkReason::Sky, 0, name, rs);
+    {
         Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
         job->analyzeBarriers(rt);
         rs->executeResourceTransition(rt);
@@ -545,44 +544,6 @@ AtmosphereStatus JahAtmosphere::status() const {
     const Ogre::Vector3 e = topIlluminance();
     s.topIlluminance[0] = e.x; s.topIlluminance[1] = e.y; s.topIlluminance[2] = e.z;
     return s;
-}
-
-// THE COST, as a SLOPE (OgreGpuCull.cpp measureJob's method and caveat: it
-// answers on its own call, without the frame monitor; the bake's GPU time as
-// the GPU sees it is the CacheScope row in runJob() above): each job
-// dispatched `iterations` times over its own inputs, flushed, the wall clock
-// of that less an empty flush's, per dispatch. An upper bound — it holds
-// the driver's per-dispatch cost too.
-bool JahAtmosphere::measure(unsigned iterations, AtmosphereCost &out) {
-    out = AtmosphereCost();
-    if (!iterations) return false;
-    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
-    struct Row {
-        const char *job = nullptr;
-        Ogre::TextureGpu *dst = nullptr, *a = nullptr, *b = nullptr;
-        unsigned gx = 0u, gy = 0u;
-        double *ms = nullptr;
-    };
-    const Row rows[] = {
-        { "Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u, &out.transmittanceMs },
-        { "Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize, kMsSize, &out.multiScatterMs },
-        { "Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u, &out.skyViewMs },
-        { "Jahshaka/AtmoAerial", mAerial, mTrans, mMs, kApW / 8u, kApH / 8u, &out.aerialMs },
-    };
-    for (const Row &r : rows) {
-        rs->flushCommands();
-        const auto t0 = std::chrono::steady_clock::now();
-        rs->flushCommands();
-        const auto t1 = std::chrono::steady_clock::now();
-        if (!runJob(r.job, r.dst, r.a, r.b, r.gx, r.gy, iterations)) return false;
-        rs->flushCommands();
-        const auto t2 = std::chrono::steady_clock::now();
-        const double empty = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        const double full = std::chrono::duration<double, std::milli>(t2 - t1).count();
-        *r.ms = std::max(0.0, full - empty) / double(iterations);
-    }
-    handOver();
-    return true;
 }
 
 // ---- Ogre::AtmosphereComponent -------------------------------------------------

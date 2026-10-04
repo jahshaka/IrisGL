@@ -85,12 +85,10 @@ inline double msSince(const Clock::time_point &t0) {
 /// buffer still holds may not be rewritten, and this one is rewritten every
 /// frame because every input can be recreated behind our back.
 constexpr unsigned kRing = 3u;
-/// How many views may hold a timestamp range at once.
-constexpr unsigned kMaxTimedViews = 8u;
-/// Frames of timestamps in flight (Ogre's dynamic-buffer multiplier).
+/// How many views the descriptor pool plans sets for (far more than a frame draws).
+constexpr unsigned kMaxViews = 8u;
+/// Frames of readbacks in flight (Ogre's dynamic-buffer multiplier).
 constexpr unsigned kFramesInFlight = 3u;
-/// Eight timestamps a frame: a pair around each of the four jobs.
-constexpr unsigned kQueriesPerFrame = 8u;
 
 constexpr unsigned kPlaceBindings = 6u;
 /// The trace's nine, then GA-1e's six: the card read's four (9-12, the
@@ -253,7 +251,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
     VkDevice dev = mHost.gatherDevice();
     // PER VIEW AND RING SLOT, four sets (place, trace, filter, integrate): the pool is
     // planned from the four layouts as each is made (VkDescriptorPools.h).
-    const unsigned groups = kMaxTimedViews * kRing;
+    const unsigned groups = kMaxViews * kRing;
     detail::DescriptorPoolPlan plan;
     const auto makeLayout = [&](unsigned count, const VkDescriptorType *types,
                                 const unsigned *counts, VkDescriptorSetLayout &out,
@@ -414,18 +412,9 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
 
     auto *rs = static_cast<Ogre::VulkanRenderSystem *>(mHost.gatherRenderSystem());
     if (rs && rs->getVulkanDevice()) {
-        mTimestampPeriod =
-            rs->getVulkanDevice()->mDeviceProperties.limits.timestampPeriod * 1.0f;
         mMaxWorkGroupX =
             rs->getVulkanDevice()->mDeviceProperties.limits.maxComputeWorkGroupCount[0];
         mMaxImageDim = rs->getVulkanDevice()->mDeviceProperties.limits.maxImageDimension2D;
-    }
-    if (mTimestampPeriod > 0.0f) {
-        VkQueryPoolCreateInfo qci{};
-        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qci.queryCount = kMaxTimedViews * kFramesInFlight * kQueriesPerFrame;
-        vkCreateQueryPool(dev, &qci, nullptr, &mTimestamps);
     }
     return true;
 }
@@ -615,27 +604,23 @@ void ScreenProbeGather::drop(View &v) {
     v.atlasView = VK_NULL_HANDLE;
     if (v.irradiance) mHost.gatherRetireTexture(v.irradiance);
     v.irradiance = nullptr;
-    if (v.hasQueryBase) mQuerySlots &= ~(uint32_t(1) << v.querySlot);
-    v.hasQueryBase = false;
     v.targetsReady = false;
     v.atlasNeedsClear = false;
     // ...AND THE IN-FLIGHT RECORDS GO WITH THE BUFFERS THEY NAME. A resize frees
-    // the readback ring and the timestamp slot; leaving `pending[]` live would
-    // make the next `readPending` read a slot of a buffer that no longer exists
-    // (and a query range this view no longer owns). The frame counter goes back
-    // to zero for the same reason: it indexes both rings.
+    // the readback ring; leaving `pending[]` live would make the next
+    // `readPending` read a slot of a buffer that no longer exists. The frame
+    // counter goes back to zero for the same reason: it indexes the ring.
     for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i] = View::Pending();
     v.frame = 0u;
     v.adaptiveLast = 0u;
     v.adaptiveAsked = 0u;
-    v.placeMs = v.traceMs = v.filterMs = v.integrateMs = v.cpuMs = -1.0f;
+    v.cpuMs = -1.0f;
 }
 
 void ScreenProbeGather::readPending(View &v) {
     const uint32_t nowAll = mHost.gatherFrameNow(), inFlightAll = mHost.gatherFramesInFlight();
-    // THE ADAPTIVE COUNT first, because it is read even on a device with no
-    // timestamp support: it is a COUNT, not a measurement, and `giStatus()`
-    // reports it beside the probe grid.
+    // THE ADAPTIVE COUNT: a COUNT, not a measurement, and `giStatus()` reports
+    // it beside the probe grid.
     if (v.readbackMapped) {
         for (unsigned i = 0; i < kFramesInFlight; ++i) {
             if (!v.pending[i].live || uint32_t(nowAll - v.pending[i].frame) < inFlightAll) continue;
@@ -673,37 +658,10 @@ void ScreenProbeGather::readPending(View &v) {
             }
         }
     }
-    if (!mTimestamps || !v.hasQueryBase) {
-        if (v.readbackMapped)
-            for (unsigned i = 0; i < kFramesInFlight; ++i)
-                if (v.pending[i].live && uint32_t(nowAll - v.pending[i].frame) >= inFlightAll)
-                    v.pending[i].live = false;
-        return;
-    }
-    const uint32_t now = mHost.gatherFrameNow(), inFlight = mHost.gatherFramesInFlight();
-    for (unsigned i = 0; i < kFramesInFlight; ++i) {
-        View::Pending &pd = v.pending[i];
-        // `< inFlight`, not `<=`: the ring is kFramesInFlight deep and a slot is
-        // REUSED after that many frames (the reflect path's lesson).
-        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
-        if (pd.held) { pd.live = false; continue; }   // a held frame wrote no timestamps
-        uint64_t q[kQueriesPerFrame * 2] = {};
-        const uint32_t base = v.queryBase + i * kQueriesPerFrame;
-        if (vkGetQueryPoolResults(mHost.gatherDevice(), mTimestamps, base, kQueriesPerFrame,
-                                  sizeof(q), q, sizeof(uint64_t) * 2u,
-                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
-            VK_SUCCESS) {
-            const auto span = [&](unsigned a, unsigned b, float &out) {
-                if (q[a * 2 + 1] && q[b * 2 + 1] && q[b * 2] >= q[a * 2])
-                    out = float(double(q[b * 2] - q[a * 2]) * double(mTimestampPeriod) * 1e-6);
-            };
-            span(0, 1, v.placeMs);
-            span(2, 3, v.traceMs);
-            span(4, 5, v.filterMs);
-            span(6, 7, v.integrateMs);
-        }
-        pd.live = false;
-    }
+    // A retired frame's record is done with (its readbacks were read above).
+    for (unsigned i = 0; i < kFramesInFlight; ++i)
+        if (v.pending[i].live && uint32_t(nowAll - v.pending[i].frame) >= inFlightAll)
+            v.pending[i].live = false;
 }
 
 void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
@@ -760,6 +718,7 @@ void ScreenProbeGather::forget(const void *key) {
     if (it->second.sceneMgr) detail::FogHlmsListener::setProbeGather(it->second.sceneMgr, nullptr);
     drop(it->second);
     mViews.erase(it);
+    detail::monitor::forgetGpuOwner(key);
 }
 
 void ScreenProbeGather::close() {
@@ -810,14 +769,11 @@ void ScreenProbeGather::close() {
     if (mTraceLayout) vkDestroyDescriptorSetLayout(dev, mTraceLayout, nullptr);
     if (mFilterLayout) vkDestroyDescriptorSetLayout(dev, mFilterLayout, nullptr);
     if (mIntegrateLayout) vkDestroyDescriptorSetLayout(dev, mIntegrateLayout, nullptr);
-    if (mTimestamps) vkDestroyQueryPool(dev, mTimestamps, nullptr);
     mPool = VK_NULL_HANDLE;
     mPlacePipeline = mTracePipeline = mFilterPipeline = mIntegratePipeline = VK_NULL_HANDLE;
     mPlaceModule = mTraceModule = mFilterModule = mIntegrateModule = VK_NULL_HANDLE;
     mPlacePipeLayout = mTracePipeLayout = mFilterPipeLayout = mIntegratePipeLayout = VK_NULL_HANDLE;
     mPlaceLayout = mTraceLayout = mFilterLayout = mIntegrateLayout = VK_NULL_HANDLE;
-    mTimestamps = VK_NULL_HANDLE;
-    mQuerySlots = 0u;
 }
 
 void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long long restKey,
@@ -829,10 +785,11 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     // latest view's, and the settled history is every latest view's — a young
     // shot view is not settled because the quiet viewport was.
     const View *latest = nullptr;
+    const void *latestKey = nullptr;
     for (const auto &kv : mViews) {
         const View &v = kv.second;
         if (v.scene != scene || !v.targetsReady) continue;
-        if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) latest = &v;
+        if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) { latest = &v; latestKey = kv.first; }
     }
     if (!latest) return;
     const View &v = *latest;
@@ -853,10 +810,10 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.eyeProbesX = v.eyeGridW;
     out.vramBytes = v.vramBytes;
     out.historyBytes = v.historyBytes;
-    out.placeMs = v.placeMs;
-    out.traceMs = v.traceMs;
-    out.filterMs = v.filterMs;
-    out.integrateMs = v.integrateMs;
+    out.placeMs = detail::monitor::lastGpuMs("gather.place", latestKey);
+    out.traceMs = detail::monitor::lastGpuMs("gather.trace", latestKey);
+    out.filterMs = detail::monitor::lastGpuMs("gather.filter", latestKey);
+    out.integrateMs = detail::monitor::lastGpuMs("gather.integrate", latestKey);
     out.cpuMs = v.cpuMs;
     out.temporal = v.lastTemporal;
     out.historyAge = v.age;
@@ -1139,16 +1096,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         !allocSet(mFilterLayout, v.filterSets[ring]) ||
         !allocSet(mIntegrateLayout, v.integrateSets[ring]))
         return;
-    if (!v.hasQueryBase && mTimestamps) {
-        for (unsigned s = 0; s < kMaxTimedViews; ++s) {
-            if (mQuerySlots & (uint32_t(1) << s)) continue;
-            mQuerySlots |= uint32_t(1) << s;
-            v.querySlot = s;
-            v.queryBase = s * kFramesInFlight * kQueriesPerFrame;
-            v.hasQueryBase = true;
-            break;
-        }
-    }
 
     // ---- THE PARAMETERS ----------------------------------------------------
     GatherParams pp{};
@@ -1688,9 +1635,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // one — `gi.gather_reference` is exactly that chain.
     mHost.gatherClearDummies(cmd);
     clearAtlas(v, cmd);
-    const bool timed = mTimestamps && v.hasQueryBase;
-    const uint32_t qbase = v.queryBase + (v.frame % kFramesInFlight) * kQueriesPerFrame;
-    if (timed) vkCmdResetQueryPool(cmd, mTimestamps, qbase, kQueriesPerFrame);
 
     // The frame's counters: the adaptive count to zero, and the trace's
     // indirect arguments to the uniform grid (the placement job raises x by an
@@ -1740,9 +1684,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // the picture, not because nothing told it to stop.
     {
         detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0,
-                                         "gather.place", rs);
+                                         "gather.place", rs, key);
         work.setUnits(v.uniformProbes);
-        if (timed) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeLayout, 0, 1,
                                 &v.placeSets[ring], 0, nullptr);
@@ -1762,9 +1705,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlaceSelectPipeLayout, 0, 1,
                                 &v.placeSets[ring], 0, nullptr);
         vkCmdDispatch(cmd, (v.gridW + 7u) / 8u, (v.gridH + 7u) / 8u, 1u);
-        if (timed)
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps,
-                                qbase + 1u);
     }
     {
         // The records and the argument buffer the trace is about to read — and
@@ -1798,10 +1738,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
 
     detail::monitor::CacheScope traceWork(CacheKind::Gi, WorkReason::Camera, 0,
-                                          "gather.trace", rs);
+                                          "gather.trace", rs, key);
     traceWork.setUnits(v.uniformProbes + v.adaptiveLast);
-    if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 2u);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTracePipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTracePipeLayout, 0, 1,
                             &v.traceSets[ring], 0, nullptr);
@@ -1809,8 +1747,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // the COUNT is the GPU's own (fork 1bccc3f93+a98e2b0af (was 0032)'s shape: a count nobody on the CPU
     // can know without a round trip).
     vkCmdDispatchIndirect(cmd, v.args, 0);
-    if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 3u);
     traceWork.close();
     // ---- THE FRAME'S FIRST HALF ENDS HERE (PHOTON-HIT-SHADE-1): the trace has
     // appended the hits no cache can shade to the hit list; the hit decode pass
@@ -1821,8 +1757,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     v.finishTraced = true;
     v.finishIn = in;
     v.finishRing = ring;
-    v.finishQbase = qbase;
-    v.finishTimed = timed;
     v.finishTemporal = temporal;
     v.finishCpuMs = msSince(cpuStart);
 }
@@ -1847,8 +1781,6 @@ void ScreenProbeGather::finish(const void *key) {
         return;
     }
     const unsigned ring = v.finishRing;
-    const uint32_t qbase = v.finishQbase;
-    const bool timed = v.finishTimed;
     Ogre::RenderSystem *rs = mHost.gatherRenderSystem();
     VkCommandBuffer cmd = mHost.gatherFrameCmd();
     if (!cmd) return;
@@ -1867,30 +1799,23 @@ void ScreenProbeGather::finish(const void *key) {
     // per probe again, from the SAME indirect arguments — every probe the trace
     // traced is filtered, and none it did not.
     detail::monitor::CacheScope filterWork(CacheKind::Gi, WorkReason::Camera, 0,
-                                           "gather.filter", rs);
+                                           "gather.filter", rs, key);
     filterWork.setUnits(v.uniformProbes + v.adaptiveLast);
-    if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 4u);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeLayout, 0, 1,
                             &v.filterSets[ring], 0, nullptr);
     vkCmdDispatchIndirect(cmd, v.args, 0);
-    if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 5u);
     filterWork.close();
     computeToCompute();
 
     detail::monitor::CacheScope integrateWork(CacheKind::Gi, WorkReason::Camera, 0,
-                                              "gather.integrate", rs);
+                                              "gather.integrate", rs, key);
     integrateWork.setUnits(in.width * in.height / 1000u);
-    if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qbase + 6u);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeLayout, 0, 1,
                             &v.integrateSets[ring], 0, nullptr);
     vkCmdDispatch(cmd, (in.width + 7u) / 8u, (in.height + 7u) / 8u, 1u);
-    if (timed)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qbase + 7u);
+    integrateWork.close();
     // THE IRRADIANCE READBACK (a test door): the integrate's output, still in
     // the GENERAL layout its storage writes left it in, copied into this frame's
     // slot of a host ring and decoded once the frame has retired (readPending).
@@ -1949,8 +1874,7 @@ void ScreenProbeGather::finish(const void *key) {
         }
     }
     {
-        // The pending record is written whether or not the device timestamps:
-        // it is also what retires this frame's adaptive-count readback.
+        // The pending record is what retires this frame's adaptive-count readback.
         View::Pending &pd = v.pending[v.frame % kFramesInFlight];
         pd.frame = mHost.gatherFrameNow();
         pd.live = true;

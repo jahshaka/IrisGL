@@ -1933,8 +1933,7 @@ void OgreScene::updateSurfaceCache() {
         CardMoverHooks hooks;
         hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
         hooks.trace = [this](const CardMoverTrace &t) { return traceCardMovers(t); };
-        hooks.timeRelight = [this](bool begin) { timeCardRelight(begin); };
-        hooks.readTimes = [this](float &a, float &b, float &c) { cardMoverTimes(a, b, c); };
+        hooks.readTimes = [this](float &a, float &b) { cardMoverTimes(a, b); };
         mSurfaceCache->setMoverHooks(hooks);
     }
     // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain

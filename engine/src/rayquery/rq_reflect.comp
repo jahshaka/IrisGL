@@ -172,13 +172,13 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// w = 1 with the lane's hit-motion rules on, 2 when a mover also moved in the
 	/// last two frames (the departure rule's gate), 3 when a POSE moved in the last
 	/// two frames (SKINNED-VELOCITY-1: the pixels no moving Atom item drew are
-	/// identified through the TLAS; JAH_R7_NO_POSED keeps it at 2 — the paired cost
-	/// arm's door); 0 = JAH_R5_NO_MOTION, the measuring door: the camera-only
+	/// identified through the TLAS; the arm "reflect.posed" off keeps it at 2 — the paired
+	/// cost arm); 0 = the arm "reflect.motion" off: the camera-only
 	/// history of before.
 	vec4 motion;
 	/// THE ALPHA TABLE (REFLECT-MOVERS-2, jah_rq_alpha.glsl): xy = its device
 	/// address, float bits (0 = none: the rays stay opaque). z = the edge-class
-	/// overlay's mode (REFLECT-EDGE-2's instrument, JAH_R7_EDGE_CLASSES; 0 = off).
+	/// overlay's mode (REFLECT-EDGE-2's instrument, the arm "reflect.edgeClasses"; 0 = off).
 	vec4 alpha;
 	/// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's eight
 	/// (jah_fog_along.glsl states them).
@@ -1159,7 +1159,7 @@ void main()
 	}
 
 	// THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, gi.reflect_mover
-	// --edge): with alpha.z set (JAH_R7_EDGE_CLASSES) on the Hits photon view, a traced
+	// --edge): with alpha.z set (the arm "reflect.edgeClasses") on the Hits photon view, a traced
 	// texel writes its HISTORY CLASS instead of its ray's source — mode 1: r = the ray
 	// hit a mover, g = the mean restarted, b = the history came through the reflected
 	// image; mode 2: the new count's bins (<= 9, <= 17, <= 33). Nothing else reads it.

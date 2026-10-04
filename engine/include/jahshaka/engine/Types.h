@@ -893,16 +893,6 @@ struct AtmosphereStatus {
     bool     aerialBound = false;
 };
 
-/// THE ATMOSPHERE'S COST (Scene::measureAtmosphere): GPU milliseconds per
-/// rebuild of each table, as a slope over repeated dispatches (an upper bound:
-/// it includes the per-dispatch driver cost). -1 where it could not be measured.
-struct AtmosphereCost {
-    double transmittanceMs = -1.0;
-    double multiScatterMs = -1.0;
-    double skyViewMs = -1.0;
-    double aerialMs = -1.0;
-};
-
 /// A SCENE'S WHOLE SKY, as one value (ENGINEERING_DEBT_SPEC.md item 4).
 ///
 /// It replaces the three entry points this boundary used to have —
@@ -3509,9 +3499,11 @@ struct GatherStatus {
     /// texel each; the rgba16f + r32ui pairs before it were 24).
     unsigned long long vramBytes = 0ull;
     unsigned long long historyBytes = 0ull;
-    /// GPU milliseconds per stage, read back several frames late through the
-    /// tier's own timestamp pool (negative = not measured yet), and the CPU
-    /// cost of RECORDING them on the thread that draws.
+    /// GPU milliseconds per stage — each the frame monitor's row for its job
+    /// ("gather.place" ... "gather.integrate"; one GPU-timing facility, lane
+    /// TEST-1): -1 unless a capture is running (no query pool exists outside
+    /// one) and until the first answer comes back, several frames later — and
+    /// the CPU cost of RECORDING them on the thread that draws.
     float placeMs = -1.0f;
     float traceMs = -1.0f;
     float integrateMs = -1.0f;
@@ -3639,9 +3631,8 @@ struct SunContactStatus {
     /// cast along (towards the sun: the first directional shadow caster's).
     float range = 0.0f;
     float toSun[3] = { 0.0f, 0.0f, 0.0f };
-    /// GPU milliseconds of the dispatch, read back several frames late through
-    /// the tier's timestamps (negative = not measured yet), and the CPU cost of
-    /// recording it.
+    /// GPU milliseconds of the dispatch ("sun.contact", the frame monitor's row:
+    /// -1 unless a capture is running, lane TEST-1), and the CPU cost of recording it.
     float gpuMs = -1.0f;
     float cpuMs = -1.0f;
     /// Why it is not running when `on` is true; empty when nothing declined.
@@ -3820,7 +3811,7 @@ struct CardCacheStatus {
     /// gesture, the leading edge); `stillTraces` = cards traced for the life of
     /// the cache; the last frame's cards and texels; `stillPending` = stale cards
     /// past the budget; `stillGpuMs` = the job's GPU milliseconds on the last
-    /// frame that ran it (-1 until read). `casterRetraces` = cards a still
+    /// frame that ran it (the monitor's "cards.still" row: -1 outside a capture). `casterRetraces` = cards a still
     /// caster's change made stale (a transform write, a show/hide, its caster
     /// bit, a change of class, its deletion).
     unsigned long long invalidSun = 0ull;
@@ -3844,7 +3835,7 @@ struct CardCacheStatus {
     /// The budget is the relight's own number (`lightBudgetTexels`), spent a
     /// second time on the mover term. `moverGpuMs` / `relightGpuMs` = the trace
     /// job's and the relight job's GPU milliseconds on the last frame that ran
-    /// them (timestamps; -1 until read).
+    /// them (the monitor's "cards.movers" / "cards.relight" rows: -1 outside a capture).
     unsigned moverCasters = 0u;
     unsigned moverTracedLastFrame = 0u;
     unsigned moverTexelsLastFrame = 0u;
@@ -4624,8 +4615,8 @@ struct RayQueryStatus {
     unsigned long long skinRefits = 0;
     /// The last skin dispatch: items and vertices it wrote, and the GPU
     /// milliseconds of the dispatch and of the skinned builds/refits after it
-    /// (timestamps read several frames late, never with a wait; -1 until one has
-    /// been measured).
+    /// (the monitor's rows "rq.skin.dispatch" / "rq.skin.build": -1 unless a
+    /// capture is running, and until one has been measured — lane TEST-1).
     int  skinLastItems = 0;
     unsigned long long skinLastVertices = 0;
     float skinMs = -1.0f;
@@ -4653,12 +4644,12 @@ struct RayQueryStatus {
     /// compaction plus the top level.
     unsigned long long blasBytes = 0;
     unsigned long long tlasBytes = 0;
-    /// GPU milliseconds of the LAST top-level build or refit, read back from a
-    /// timestamp pair several frames later (never with a wait on the frame
-    /// thread). -1 until one has been measured.
+    /// GPU milliseconds of the LAST top-level build or refit — the monitor's
+    /// "rq.tlas" row: -1 unless a capture is running, and until one has been
+    /// measured (lane TEST-1).
     float tlasMs = -1.0f;
-    /// GPU milliseconds of the last batch of bottom-level builds, same reading.
-    /// -1 until one has been measured; a still scene never rebuilds one.
+    /// GPU milliseconds of the last batch of bottom-level builds ("rq.blas"), the
+    /// same reading; a still scene never rebuilds one.
     float blasMs = -1.0f;
     /// CPU milliseconds of THE INSTANCE UPDATE's host side — since ATOM-CPU-WALKS-1
     /// the instances are written ON THE DEVICE (the instance job rq_tlas_write.comp, one
@@ -4707,12 +4698,14 @@ struct RayQueryStatus {
     /// the shader's own gates (the sky, the roughness band, a pixel the march
     /// already answered) decline most of them.
     int  reflectRays = 0;
-    /// GPU milliseconds of that dispatch, read back from a timestamp pair
-    /// several frames later and never with a wait. -1 until measured.
+    /// GPU milliseconds of the reflection: its trace's and its filter's monitor
+    /// rows summed ("rq.reflect.trace" + "rq.reflect.filter"; the hit decode
+    /// between them is a pass row of its own) — -1 unless a capture is running,
+    /// and until measured.
     float reflectMs = -1.0f;
     /// GPU milliseconds of the screen march's OBJECT-MOTION job (REFLECT-MOVERS-1,
-    /// rq_motion.comp, in front of the SSR resolve), read back the same way. -1
-    /// until measured, and on a chain that carries no march or no id pass.
+    /// rq_motion.comp, in front of the SSR resolve): the "rq.reflect.motion" row,
+    /// the same reading; -1 too on a chain that carries no march or no id pass.
     float reflectMotionMs = -1.0f;
 };
 
@@ -7062,15 +7055,6 @@ struct GpuCullRequest {
     /// the drawn clusters' indices compacted into the list's stream and one command
     /// per survivor over its run of it (the id pass's request).
     unsigned mode = 0u;
-    /// MEASUREMENT ONLY, and 0 in every real request: after the functional run,
-    /// each job is dispatched this many more times over the buffers it already
-    /// filled and the wall clock of a flush of them, minus an empty flush's own
-    /// cost, is divided by the count. There are no per-dispatch GPU timestamps
-    /// outside a compositor pass at this pin (fork 1a81f866a+1bccc3f93 (was 0027)'s samples are keyed to
-    /// passes and arrive once the GPU has finished the frame), so the three `*Ms` fields are that
-    /// SLOPE: an upper bound that includes the per-dispatch driver cost, which
-    /// is the number to compare a CPU cull against anyway.
-    unsigned measureIterations = 0u;
 };
 
 /// WHAT THE CHAIN DID, and what it cost. The buffers themselves stay on the
@@ -7099,9 +7083,9 @@ struct GpuCullResult {
     /// describe submesh 0 only, because the level table does (GpuScene.h). A
     /// non-zero number here is a FINDING for the consumer, not an error.
     unsigned multiSubmeshSurvivors = 0;
-    /// The three jobs' GPU milliseconds, when the device has timestamps
-    /// (negative = not measured, never faked as 0).
-    double testMs = -1.0, compactMs = -1.0, drawsMs = -1.0;
+    /// (The jobs' GPU time is no field here: in a capture each is a monitor row,
+    /// "cull.test" / "cull.compact" / "cull.draws" / "cull.cut" / "cull.emit" —
+    /// lane TEST-1 deleted the wall-clock slope these fields carried.)
     /// What the HOST spent: writing the request and dispatching. The design's
     /// claim is that this is ~0 — a small uniform write — and it is measured
     /// rather than asserted.
@@ -7128,8 +7112,6 @@ struct GpuCullResult {
     /// the cluster's index in ITS MESH's DAG (`MeshData::clusters`) and its depth —
     /// in the records' (arrival) order, which is not stable between runs.
     std::vector<unsigned> cutDrawn;
-    /// The two cut jobs' cost, measured as the three above are (a slope).
-    double cutMs = -1.0, emitMs = -1.0;
 };
 
 /// THE HIERARCHICAL DEPTH PYRAMID, as built (PostFxDesc::hzb; NANITE_SPEC
@@ -7675,8 +7657,24 @@ struct FrameRecord {
     /// seen so far; a non-zero one means this frame's pass tree is incomplete.
     unsigned    orphanedPasses = 0;
     float       textureWaitMs = 0.0f;   ///< the frame-head streaming drain
-    /// Σ of the passes' GPU milliseconds, or NEGATIVE when unmeasured.
+    /// Σ of the TOP-LEVEL passes' GPU milliseconds, or NEGATIVE when unmeasured.
+    /// A pass's `gpuMs` is INCLUSIVE (its timestamp pair encloses the shadow
+    /// node's passes it executes), so the nested ones are inside their parent's
+    /// time and are not added twice.
     float       gpuMs = -1.0f;
+    /// THE FRAME'S OWN GPU SPAN (lane TEST-1, the perf audit's F5): one timestamp
+    /// pair from the first command of the frame's submission (opened when the
+    /// pools turn over at the close of the previous frame, so the between-frames
+    /// work this record adopts is inside it) to the last (when its recording
+    /// ends). A SPAN: a mid-frame flush's CPU bubble is inside it. NEGATIVE when
+    /// unmeasured.
+    float       frameGpuMs = -1.0f;
+    /// `frameGpuMs` less every TOP-LEVEL timed row — passes and cache rows alike
+    /// (a row whose pair opened with no other row of ours open). What no row
+    /// accounts for: the coverage reading `engine.monitor_gpu_coverage` bounds.
+    /// NEGATIVE when unmeasured, or when a top-level row lost its sample (the sum
+    /// would be short and the remainder overstated).
+    float       unattributedGpuMs = -1.0f;
     /// GPU timing MARKS this frame issued that the render system's query pool
     /// had no room for (a pass or a dispatch with no GPU time because of it,
     /// never because it cost nothing). Non-zero means THIS frame's GPU numbers
@@ -7685,6 +7683,22 @@ struct FrameRecord {
     unsigned    gpuMarksDropped = 0;
     /// What the monitor itself cost this frame, so analysis can subtract it.
     float       overheadMs = 0.0f;
+};
+
+/// ONE MEASUREMENT ARM (lane TEST-1, the perf audit's A2): a named switch the
+/// engine reads ONCE PER FRAME — a value set between two frames takes effect from
+/// the next one whole, never half-way through it — registered with its default.
+/// It replaces the measuring doors that were process-environment reads inside
+/// per-frame code (`getenv("JAH_R5_NO_MOTION")` ...): two arms of an A/B are two
+/// calls in ONE process (trap 12's paired arms), and the switch set is a table a
+/// harness can list instead of a grep. NOT a mode: the default is the shipped
+/// picture, and nothing in the product sets an arm.
+struct ArmInfo {
+    std::string name;            ///< "reflect.motion" — the verb's key
+    double      value = 0.0;     ///< what the current frame reads
+    double      defaultValue = 0.0;
+    double      minValue = 0.0, maxValue = 0.0;
+    std::string what;            ///< what the arm changes, and the suite that measures it
 };
 
 /// A discrete thing that happened, with its cause.

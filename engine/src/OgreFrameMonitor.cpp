@@ -129,6 +129,8 @@ void FrameMonitor::beginFrame(unsigned long long frame, FrameCause cause, bool o
     mWorkspaceDepths.clear();
     mPassSampleIds.clear();
     mCacheSampleIds.clear();
+    mPassTop.clear();
+    mCacheTop.clear();
     // Host stages pushed before the frame opened (the driver's tick wraps the
     // engine's frame, so `tick` and the mirror's sub-stages are known first)
     // lead the stage list.
@@ -168,22 +170,33 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     // finished the frame, so the record waits here until every sample it asked
     // for has answered (MONITOR-RETIRE-1); without GPU sampling the queue is
     // one deep and the record is published immediately.
+    // THE FRAME'S PAIR closes here when the frame rendered nothing (no
+    // frameRenderingQueued fired); a frame that rendered closed it already.
+    closeFrameSample();
     PendingFrame pf;
     pf.rec = std::move(mCurrent);
     pf.passSampleIds.swap(mPassSampleIds);
     pf.cacheSampleIds.swap(mCacheSampleIds);
+    pf.passTop.swap(mPassTop);
+    pf.cacheTop.swap(mCacheTop);
+    pf.frameSampleId = mFrameSampleId;
+    mFrameSampleId = 0u;
     if (mGpu) {
         const unsigned slot = unsigned(mPending.size());
         for (unsigned i = 0; i < pf.passSampleIds.size(); ++i)
             if (pf.passSampleIds[i]) {
-                mGpuSampleIndex[pf.passSampleIds[i]] = { slot, i, false };
+                mGpuSampleIndex[pf.passSampleIds[i]] = { slot, i, SampleKind::Pass };
                 ++pf.outstanding;
             }
         for (unsigned i = 0; i < pf.cacheSampleIds.size(); ++i)
             if (pf.cacheSampleIds[i]) {
-                mGpuSampleIndex[pf.cacheSampleIds[i]] = { slot, i, true };
+                mGpuSampleIndex[pf.cacheSampleIds[i]] = { slot, i, SampleKind::Cache };
                 ++pf.outstanding;
             }
+        if (pf.frameSampleId) {
+            mGpuSampleIndex[pf.frameSampleId] = { slot, 0u, SampleKind::Frame };
+            ++pf.outstanding;
+        }
     }
     mPending.push_back(std::move(pf));
     retirePending(false);
@@ -194,7 +207,11 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
 
 void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
     auto it = mGpuSampleIndex.find(sampleId);
-    if (it == mGpuSampleIndex.end()) return;     // its frame already aged out
+    auto key = mSampleKeys.find(sampleId);
+    if (it == mGpuSampleIndex.end()) {           // its frame already aged out
+        if (key != mSampleKeys.end()) mSampleKeys.erase(key);
+        return;
+    }
     const GpuSampleSlot where = it->second;
     if (where.frame < mPending.size()) {
         PendingFrame &pf = mPending[where.frame];
@@ -204,12 +221,22 @@ void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
         // query room, a wrapped counter, a lost pool): it answers the sample
         // and leaves the row unmeasured.
         if (ms < 0.0f) {
-        } else if (where.cache) {
+        } else if (where.kind == SampleKind::Frame) {
+            rec.frameGpuMs = ms;
+        } else if (where.kind == SampleKind::Cache) {
             if (where.row < rec.cacheWork.size()) rec.cacheWork[where.row].gpuMs = ms;
+            // THE STATUS READOUT'S VALUE (lastGpuMs): one frame's rows of a key
+            // summed, a later frame's replacing them.
+            if (key != mSampleKeys.end()) {
+                LastGpu &l = mLastGpu[key->second];
+                if (l.frame == rec.frame && l.ms >= 0.0f) l.ms += ms;
+                else { l.frame = rec.frame; l.ms = ms; }
+            }
         } else if (where.row < rec.passes.size()) {
             rec.passes[where.row].gpuMs = ms;
         }
     }
+    if (key != mSampleKeys.end()) mSampleKeys.erase(key);
     mGpuSampleIndex.erase(it);
 }
 
@@ -233,19 +260,39 @@ void FrameMonitor::retirePending(bool all) {
         if (!answered && !all && mGpu) ++mGpuFramesAgedOut;
         PendingFrame pf = std::move(mPending.front());
         mPending.pop_front();
-        // The frame's GPU total, from whatever came back. NEGATIVE stays
-        // negative: a pass with no sample is "not measured", never zero.
-        for (const FramePass &p : pf.rec.passes)
-            if (p.gpuMs >= 0.0f) {
+        // The frame's GPU total over its passes, from whatever came back: the
+        // TOP-LEVEL passes only (a pass's pair is inclusive — the scene pass's
+        // encloses its shadow node's). NEGATIVE stays negative: a pass with no
+        // sample is "not measured", never zero.
+        const auto top = [](const std::vector<char> &v, size_t i) { return i < v.size() && v[i]; };
+        for (size_t i = 0; i < pf.rec.passes.size(); ++i) {
+            const FramePass &p = pf.rec.passes[i];
+            if (p.gpuMs >= 0.0f && top(pf.passTop, i)) {
                 if (pf.rec.gpuMs < 0.0f) pf.rec.gpuMs = 0.0f;
                 pf.rec.gpuMs += p.gpuMs;
             }
+        }
+        // COVERAGE (F5): the frame's own span less every top-level timed row,
+        // passes and cache rows alike. A top-level row that asked for a sample
+        // and has no time leaves the remainder unknowable, and it says so (-1).
+        if (pf.rec.frameGpuMs >= 0.0f) {
+            double rows = 0.0;
+            bool whole = true;
+            for (size_t i = 0; i < pf.rec.passes.size(); ++i)
+                if (top(pf.passTop, i)) {
+                    if (pf.rec.passes[i].gpuMs >= 0.0f) rows += pf.rec.passes[i].gpuMs;
+                    else whole = false;
+                }
+            for (size_t i = 0; i < pf.rec.cacheWork.size(); ++i)
+                if (top(pf.cacheTop, i)) {
+                    if (pf.rec.cacheWork[i].gpuMs >= 0.0f) rows += pf.rec.cacheWork[i].gpuMs;
+                    else whole = false;
+                }
+            pf.rec.unattributedGpuMs = whole ? float(double(pf.rec.frameGpuMs) - rows) : -1.0f;
+        }
         for (unsigned id : pf.passSampleIds) mGpuSampleIndex.erase(id);
-        for (unsigned id : pf.cacheSampleIds) mGpuSampleIndex.erase(id);
-        // The frame's GPU total stays the sum of its PASSES. A cache row's
-        // gpuMs is a compute dispatch outside every pass, reported on the row
-        // and only there, so `passes sum to the frame` keeps meaning what it
-        // says (the invariant monitor_passes_sum_to_the_frame asserts).
+        for (unsigned id : pf.cacheSampleIds) { mGpuSampleIndex.erase(id); mSampleKeys.erase(id); }
+        if (pf.frameSampleId) mGpuSampleIndex.erase(pf.frameSampleId);
         push(std::move(pf.rec));
         // Every surviving frame moved down one slot.
         for (auto &kv : mGpuSampleIndex)
@@ -288,12 +335,10 @@ void FrameMonitor::closeOrphanPass() {
     // recorded as such (negative CPU time, no draw counts) rather than invented,
     // and its GPU sample is closed so the render system's own stack stays
     // balanced. Seeing one of these in a capture IS the finding.
-    if (mGpu && f.gpuSampleId && mOrphanRs) {
-        try { mOrphanRs->endGPUSampleProfile(f.rec.pass); } catch (...) {}
-    }
+    if (mGpu && f.gpuSampleId && mOrphanRs) endRowSample(mOrphanRs, f.rec.pass);
     f.rec.cpuMs = -1.0f;
     f.rec.orphaned = true;
-    pass(std::move(f.rec), f.gpuSampleId);
+    pass(std::move(f.rec), f.gpuSampleId, f.gpuTop);
 }
 
 /// Banks a stage that arrived between frames. Past kPendingStageCoalesce the
@@ -314,25 +359,66 @@ void FrameMonitor::hostStage(const std::string &name, float ms) {
     if (mInFrame) mCurrent.stages.push_back({ name, ms });
     else          bankPending(name, ms);
 }
-void FrameMonitor::cacheWork(const CacheWork &w, unsigned gpuSampleId) {
+void FrameMonitor::cacheWork(const CacheWork &w, unsigned gpuSampleId, bool top) {
     if (mInFrame) {
         mCurrent.cacheWork.push_back(w);
         // INDEX-PARALLEL, always — including the rows that carry no sample, or
         // a late result would be filed against the wrong row.
-        if (mGpu) mCacheSampleIds.push_back(gpuSampleId);
+        if (mGpu) { mCacheSampleIds.push_back(gpuSampleId); mCacheTop.push_back(char(top)); }
     } else {
         // BETWEEN FRAMES the row is adopted by the next frame — and so is its
         // sample id: the timestamp pair was written into the command buffer
         // that frame's passes will also write into, so the result comes back
         // on the same two-frame schedule as theirs.
         mPendingCacheWork.push_back(w);
-        if (mGpu) mPendingCacheSampleIds.push_back(gpuSampleId);
+        if (mGpu) { mPendingCacheSampleIds.push_back(gpuSampleId); mPendingCacheTop.push_back(char(top)); }
     }
 }
-void FrameMonitor::pass(FramePass &&p, unsigned gpuSampleId) {
+void FrameMonitor::pass(FramePass &&p, unsigned gpuSampleId, bool top) {
     if (!mInFrame) return;
     mCurrent.passes.push_back(std::move(p));
-    if (mGpu) mPassSampleIds.push_back(gpuSampleId);
+    if (mGpu) { mPassSampleIds.push_back(gpuSampleId); mPassTop.push_back(char(top)); }
+}
+
+// ---- the one GPU-timing facility (lane TEST-1) ------------------------------
+unsigned FrameMonitor::beginRowSample(Ogre::RenderSystem *rs, const std::string &name, bool &top) {
+    top = false;
+    if (!mGpu || !rs) return 0u;
+    const unsigned id = nextGpuSampleId();
+    if (!id) return 0u;
+    unsigned hash = id;
+    try { rs->beginGPUSampleProfile(name, &hash); } catch (...) { return 0u; }
+    top = mFrameSampleOpen && mOpenRowSamples == 0u;
+    ++mOpenRowSamples;
+    return id;
+}
+void FrameMonitor::endRowSample(Ogre::RenderSystem *rs, const std::string &name) {
+    if (!rs) return;
+    try { rs->endGPUSampleProfile(name); } catch (...) {}
+    if (mOpenRowSamples) --mOpenRowSamples;
+}
+void FrameMonitor::openFrameSample(Ogre::RenderSystem *rs) {
+    if (!mGpu || !rs || mFrameSampleOpen) return;
+    // The fork cleared its sample stack at the turnover; ours must agree.
+    mOpenRowSamples = 0u;
+    const unsigned id = nextGpuSampleId();
+    if (!id) return;
+    unsigned hash = id;
+    try { rs->beginGPUSampleProfile("frame", &hash); } catch (...) { return; }
+    mFrameSampleId = id;
+    mFrameSampleOpen = true;
+    mFrameRs = rs;
+}
+void FrameMonitor::closeFrameSample() {
+    if (!mFrameSampleOpen) return;
+    mFrameSampleOpen = false;
+    if (mOpenRowSamples != 0u || !mFrameRs) {
+        // Closing now would end an open ROW's sample (the fork pops the
+        // innermost). The pair is abandoned: never registered, never waited for.
+        mFrameSampleId = 0u;
+        return;
+    }
+    try { mFrameRs->endGPUSampleProfile("frame"); } catch (...) { mFrameSampleId = 0u; }
 }
 void FrameMonitor::event(MonitorEvent &&e) {
     if (mEvents.size() >= kEventCapacity) { ++mEventsDropped; return; }
@@ -349,17 +435,22 @@ void FrameMonitor::adoptPendingCacheWork() {
         mCurrent.cacheWork.push_back(std::move(mPendingCacheWork[i]));
         // Index-parallel, always: a row banked before GPU sampling started
         // carries 0 and simply reports no GPU time.
-        if (mGpu)
+        if (mGpu) {
             mCacheSampleIds.push_back(i < mPendingCacheSampleIds.size()
                                           ? mPendingCacheSampleIds[i] : 0u);
+            mCacheTop.push_back(i < mPendingCacheTop.size() ? mPendingCacheTop[i] : char(0));
+        }
     }
     mPendingCacheWork.clear();
     mPendingCacheSampleIds.clear();
+    mPendingCacheTop.clear();
 }
 
 bool FrameSplitListener::frameRenderingQueued(const Ogre::FrameEvent &) {
     mMark = std::chrono::steady_clock::now();
     mMarked = true;
+    // THE FRAME'S RECORDING ENDS HERE (F5): the last command of its submission.
+    if (gMonitor) gMonitor->closeFrameSample();
     return true;      // never veto a frame; the monitor changes nothing
 }
 
@@ -465,13 +556,7 @@ void PassListener::passPreExecute(Ogre::CompositorPass *pass) {
     // these hooks and it is compiled out here (OGRE_PROFILING = 0), so the
     // monitor calls them itself: one sample per pass, nested exactly like the
     // CPU stack. Costs two vkCmdWriteTimestamp calls; nothing is read back.
-    if (gMonitor->mGpu && rs) {
-        f.gpuSampleId = gMonitor->nextGpuSampleId();
-        if (f.gpuSampleId) {
-            unsigned hash = f.gpuSampleId;
-            try { rs->beginGPUSampleProfile(f.rec.pass, &hash); } catch (...) {}
-        }
-    }
+    f.gpuSampleId = gMonitor->beginRowSample(rs, f.rec.pass, f.gpuTop);
     gMonitor->mPassStack.push_back(std::move(f));
     gMonitor->addOverhead(std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count());
@@ -499,9 +584,7 @@ void PassListener::passPosExecute(Ogre::CompositorPass *pass) {
 
     const Ogre::CompositorNode *node = pass->getParentNode();
     Ogre::RenderSystem *rs = node ? node->getRenderSystem() : nullptr;
-    if (gMonitor->mGpu && rs && f.gpuSampleId) {
-        try { rs->endGPUSampleProfile(f.rec.pass); } catch (...) {}
-    }
+    if (gMonitor->mGpu && rs && f.gpuSampleId) gMonitor->endRowSample(rs, f.rec.pass);
     unsigned draws = 0, batches = 0, instances = 0;
     unsigned long long tris = 0;
     readMetrics(rs, draws, batches, tris, instances);
@@ -529,7 +612,7 @@ void PassListener::passPosExecute(Ogre::CompositorPass *pass) {
         parent.childInstances += f.rec.instances + f.childInstances;
         parent.childTriangles += f.rec.triangles + f.childTriangles;
     }
-    gMonitor->pass(std::move(f.rec), f.gpuSampleId);
+    gMonitor->pass(std::move(f.rec), f.gpuSampleId, f.gpuTop);
     gMonitor->addOverhead(std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t1).count());
 }
@@ -582,7 +665,7 @@ void noteEvent(MonitorEventKind kind, WorkReason reason, const std::string &labe
 }
 
 CacheScope::CacheScope(CacheKind cache, WorkReason reason, unsigned long long id,
-                       const char *detail, Ogre::RenderSystem *rs)
+                       const char *detail, Ogre::RenderSystem *rs, const void *owner)
     : mId(id), mCache(cache), mReason(reason) {
     if (!gMonitor) return;
     mArmed = true;
@@ -594,13 +677,11 @@ CacheScope::CacheScope(CacheKind cache, WorkReason reason, unsigned long long id
     // field's integration is not a pass. Work between frames samples too — the
     // pair goes into the command buffer the next frame will keep writing, and
     // the row it belongs to is adopted by that frame.
-    if (rs && gMonitor->mGpu) {
-        mGpuSampleId = gMonitor->nextGpuSampleId();
-        if (mGpuSampleId) {
-            mRs = rs;
-            unsigned hash = mGpuSampleId;
-            try { rs->beginGPUSampleProfile(detail ? detail : "cache", &hash); } catch (...) {}
-        }
+    mGpuSampleId = gMonitor->beginRowSample(rs, detail ? detail : "cache", mGpuTop);
+    if (mGpuSampleId) {
+        mRs = rs;
+        mTurnover = gMonitor->mTurnovers;
+        if (owner && detail) gMonitor->mSampleKeys[mGpuSampleId] = { std::string(detail), owner };
     }
 }
 
@@ -609,8 +690,19 @@ CacheScope::~CacheScope() { close(); }
 void CacheScope::close() {
     if (!mArmed || !gMonitor) return;
     mArmed = false;                       // idempotent: the destructor follows
-    if (mRs) { try { mRs->endGPUSampleProfile(mDetail ? mDetail : "cache"); } catch (...) {} }
-    if (mCancelled) return;
+    if (mRs && mTurnover != gMonitor->mTurnovers) {
+        // OPENED BEFORE A TURNOVER: the fork cleared its stack there, so an end
+        // now would pop a sample of this frame. Filed untimed.
+        gMonitor->mSampleKeys.erase(mGpuSampleId);
+        mRs = nullptr;
+        mGpuSampleId = 0u;
+    }
+    if (mRs) gMonitor->endRowSample(mRs, mDetail ? mDetail : "cache");
+    if (mCancelled) {
+        // The sample is written and will be answered; nobody files it.
+        if (mGpuSampleId) gMonitor->mSampleKeys.erase(mGpuSampleId);
+        return;
+    }
     CacheWork w;
     w.cache = mCache;
     w.reason = mReason;
@@ -619,7 +711,25 @@ void CacheScope::close() {
     w.units = mUnits;
     w.ms = float(std::chrono::duration<double, std::milli>(
                      std::chrono::steady_clock::now() - mStart).count());
-    gMonitor->cacheWork(w, mGpuSampleId);
+    gMonitor->cacheWork(w, mGpuSampleId, mGpuTop);
+}
+
+float lastGpuMs(const char *detail, const void *owner) {
+    if (!gMonitor || !detail) return -1.0f;
+    const auto it = gMonitor->mLastGpu.find({ std::string(detail), owner });
+    return it == gMonitor->mLastGpu.end() ? -1.0f : it->second.ms;
+}
+
+void watchWorkspace(Ogre::CompositorWorkspace *ws) {
+    if (gMonitor && ws) ws->addListener(&gMonitor->mListener);
+}
+
+void forgetGpuOwner(const void *owner) {
+    if (!gMonitor || !owner) return;
+    for (auto it = gMonitor->mLastGpu.begin(); it != gMonitor->mLastGpu.end();)
+        it = it->first.second == owner ? gMonitor->mLastGpu.erase(it) : std::next(it);
+    for (auto it = gMonitor->mSampleKeys.begin(); it != gMonitor->mSampleKeys.end();)
+        it = it->second.second == owner ? gMonitor->mSampleKeys.erase(it) : std::next(it);
 }
 
 EventScope::EventScope(MonitorEventKind kind, WorkReason reason, const char *label,
@@ -691,7 +801,15 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
         // that never had it costs one failed search, and what survives is a
         // COUNT (`mAttachedCount`) that is only ever reported.
         JAH_TRY {
-            for (auto &v : mViews) v->removeWorkspaceListener(&mMonitor->mListener);
+            for (auto &v : mViews) {
+                v->removeWorkspaceListener(&mMonitor->mListener);
+                std::vector<Ogre::CompositorWorkspace *> vws;
+                v->monitorWorkspaces(vws);
+                for (Ogre::CompositorWorkspace *w : vws) w->removeListener(&mMonitor->mListener);
+            }
+            if (mVrSession)
+                if (Ogre::CompositorWorkspace *w = vrSessionMirrorWorkspace(mVrSession))
+                    w->removeListener(&mMonitor->mListener);
             for (auto &s : mScenes) {
                 std::vector<Ogre::CompositorWorkspace *> ws;
                 s->monitorWorkspaces(ws);
@@ -709,9 +827,12 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
         mMonitor->retirePending(true);
         mFinalRecords.clear();
         mMonitor->drainFrames(mFinalRecords);
-        if (mMonitor->mGpu)
-            if (Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr)
-                try { rs->deinitGPUProfiling(); } catch (...) {}
+        if (Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr) {
+            if (mMonitor->mGpu) try { rs->deinitGPUProfiling(); } catch (...) {}
+            // ...and the metrics go back to what they were (renderStats arms them
+            // lazily again if anybody asks).
+            if (!mMetricsBeforeCapture) rs->setMetricsRecordingEnabled(false);
+        }
         monitor::gMonitor = nullptr;
         mMonitor.reset();
         return;
@@ -731,6 +852,12 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
     // created when a capture starts and destroyed when it stops, so a dev build
     // with no capture running owns no pool at all (owner decision D3, lock 2).
     if (Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr) {
+        // A CAPTURE ARMS OGRE'S METRICS (F6): a pass's draw and triangle counts
+        // read the render system's counters, which are off until something turns
+        // them on — before this, a capture with no renderStats() call before it
+        // recorded zeros (`metricsRecording` false). Restored when it stops.
+        mMetricsBeforeCapture = rs->getMetrics().mIsRecordingMetrics;
+        rs->setMetricsRecordingEnabled(true);
         try {
             rs->initGPUProfiling();
             bool available = false;
@@ -743,6 +870,88 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
     if (mRoot) mRoot->addFrameListener(&mMonitor->mSplit);
     monitor::noteEvent(MonitorEventKind::Host, WorkReason::Request, "monitor.start");
 }
+
+// ---------------------------------------------------------------------------
+// THE ARM REGISTRY (lane TEST-1, the perf audit's A2) — beside the monitor because
+// both are the measuring facility: the monitor reads a frame, an arm switches what
+// the frame does for a paired measurement.
+// ---------------------------------------------------------------------------
+namespace {
+struct ArmDef {
+    const char *name = nullptr;
+    double def = 0.0, lo = 0.0, hi = 0.0;
+    const char *what = nullptr;
+};
+// THE TABLE, in ArmId's order (asserted below). Each row names the door it replaced.
+const ArmDef kArms[] = {
+    { "reflect.motion", 1.0, 0.0, 1.0,
+      "The screen march's object-motion job and the reflection trace's mover branches "
+      "(REFLECT-MOVERS-1). 0 = the camera path alone: the pre-lane picture. gi.reflect_mover's "
+      "paired cost arm. Was the JAH_R5_NO_MOTION environment door (two per-frame reads)." },
+    { "reflect.posed", 1.0, 0.0, 1.0,
+      "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
+      "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "
+      "gi.reflect_mover --cost-posed. Was JAH_R7_NO_POSED (two per-frame reads)." },
+    { "reflect.alphaTested", 1.0, 0.0, 1.0,
+      "Alpha-tested (cut-out) geometry traced as cut-out by the reflection, the gather and the "
+      "sun contact (REFLECT-MOVERS-2's alpha table). 0 = every cut-out traced opaque. "
+      "gi.rt_alpha_tested's cost arm. Was JAH_R6_NO_ALPHA (a per-frame read)." },
+    { "reflect.edgeClasses", 0.0, 0.0, 2.0,
+      "The Hits photon view's history-class overlay (REFLECT-EDGE-2's instrument): 1 = mover "
+      "hit / restart / reflected-image path, 2 = the new count's bins; 0 = off. Nothing but "
+      "that view reads it. gi.reflect_mover --edge. Was JAH_R7_EDGE_CLASSES (a per-frame read)." },
+    { "reflect.monoEyes", 0.0, 0.0, 1.0,
+      "A stereo view's trace reconstructs with the MONO basis (the pre-REFLECT-VR-1 arm, "
+      "wrong for one eye by construction): the A/B that proves the per-eye basis. Was "
+      "JAH_R5_MONO_EYES (read once per process)." },
+    { "rayquery.tlasRefit", 0.0, 0.0, 1.0,
+      "Refit the top-level structure when the traced SET is unchanged, instead of rebuilding "
+      "it (the rebuild is the default: the better tree, 0.21-0.35 ms at 8,001 instances). "
+      "far_blas_measure --tlas. Was JAH_RQ_REFIT (read once per process)." },
+};
+static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
+              "ArmId grew: give the new arm its row in kArms, in the same order");
+}   // namespace
+
+ArmRegistry::ArmRegistry() {
+    for (unsigned i = 0; i < unsigned(ArmId::Count); ++i) mPending[i] = mLive[i] = kArms[i].def;
+}
+
+bool ArmRegistry::set(const std::string &name, double value, std::string &err) {
+    for (unsigned i = 0; i < unsigned(ArmId::Count); ++i) {
+        if (name != kArms[i].name) continue;
+        if (!(value >= kArms[i].lo && value <= kArms[i].hi)) {   // a NaN fails too
+            err = "arm " + name + ": " + std::to_string(value) + " is outside [" +
+                  std::to_string(kArms[i].lo) + ", " + std::to_string(kArms[i].hi) + "]";
+            return false;
+        }
+        mPending[i] = value;
+        return true;
+    }
+    err = "no arm named '" + name + "' (Engine::arms() lists them)";
+    return false;
+}
+
+std::vector<ArmInfo> ArmRegistry::list() const {
+    std::vector<ArmInfo> out;
+    for (unsigned i = 0; i < unsigned(ArmId::Count); ++i) {
+        ArmInfo a;
+        a.name = kArms[i].name;
+        a.value = mLive[i];
+        a.defaultValue = kArms[i].def;
+        a.minValue = kArms[i].lo;
+        a.maxValue = kArms[i].hi;
+        a.what = kArms[i].what;
+        out.push_back(std::move(a));
+    }
+    return out;
+}
+
+bool OgreEngine::setArm(const std::string &name, double value) {
+    return mArms.set(name, value, mLastError);
+}
+
+std::vector<ArmInfo> OgreEngine::arms() const { return mArms.list(); }
 
 MonitorLevel OgreEngine::frameMonitor() const {
     return mMonitor ? mMonitor->mLevel : MonitorLevel::Off;
@@ -854,11 +1063,24 @@ void OgreEngine::syncMonitorListeners(const std::vector<OgreScene *> &drawn) {
     if (!mMonitor) return;
     JAH_TRY {
         unsigned attached = 0u;
+        const auto attach = [&](Ogre::CompositorWorkspace *w) {
+            if (!w) return;
+            const Ogre::CompositorWorkspaceListenerVec &ls = w->getListeners();
+            if (std::find(ls.begin(), ls.end(), &mMonitor->mListener) == ls.end())
+                w->addListener(&mMonitor->mListener);
+            ++attached;
+        };
         for (auto &v : mViews) {
             if (!v->isEnabled()) continue;
             v->addWorkspaceListener(&mMonitor->mListener);   // idempotent, rides rebuilds
             if (v->workspace()) ++attached;
+            // ...AND ITS OTHER WORKSPACES (lane TEST-1, F2): the inset, the blank one.
+            std::vector<Ogre::CompositorWorkspace *> ws;
+            v->monitorWorkspaces(ws);
+            for (Ogre::CompositorWorkspace *w : ws) attach(w);
         }
+        // THE HEADSET'S DESKTOP MIRROR (F2): a workspace of the session's own.
+        if (mVrSession) attach(vrSessionMirrorWorkspace(mVrSession));
         for (OgreScene *s : drawn) {
             std::vector<Ogre::CompositorWorkspace *> ws;
             s->monitorWorkspaces(ws);
@@ -1087,10 +1309,22 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
 // and reset a free pool for this frame. ONE call,
 // at the top of the frame and outside every encoder — which is the only place
 // vkCmdResetQueryPool is legal (see fork 1a81f866a+1bccc3f93 (was 0027)).
+//
+// THE TURNOVER RUNS AT THE CLOSE OF A FRAME (lane TEST-1, F5), not at the top of
+// the next: closeRenderFrame calls it after the record is closed, and then opens
+// the NEXT frame's own pair, so everything recorded before that frame's passes —
+// the mirror's between-frames GI half, which its record adopts — is inside the
+// span it reports. Between frames nothing is open (the swap ended every encoder),
+// which is all vkCmdResetQueryPool asks. The top of renderOneFrame turns over only
+// on a capture's first frame (`mTurnedOver` false).
 void OgreEngine::gpuFrameBegin() {
     if (!mMonitor || !mMonitor->mGpu) return;
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
     if (!rs) return;
+    // An open pair belongs to the pool being turned over: close it first (the
+    // fork clears its stack at the turnover and would never answer it).
+    mMonitor->closeFrameSample();
+    ++mMonitor->mTurnovers;
     try {
         rs->getCustomAttribute("JahGpuFrameBegin", nullptr);
         // THE MARKS THE POOL COULD NOT HOLD in the frame that just ended — the
@@ -1102,6 +1336,8 @@ void OgreEngine::gpuFrameBegin() {
         std::vector<std::pair<Ogre::uint32, float>> results;
         rs->getCustomAttribute("JahGpuSampleResults", &results);
         for (const auto &r : results) mMonitor->noteGpuSample(unsigned(r.first), r.second);
+        mMonitor->openFrameSample(rs);
+        mMonitor->mTurnedOver = true;
     } catch (...) {
         // A render system that stopped answering (a device loss took the pools)
         // turns GPU sampling off for the rest of the capture rather than
