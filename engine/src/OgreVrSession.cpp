@@ -3,7 +3,7 @@
 // to include Vulkan.
 //
 // WHAT IT IS. Phase 1a proved the hard half as a standalone binary
-// (tests/vr/xr_spike.cpp, ~/Developer/spikes/openxr-vulkan/FINDINGS.md): an
+// (the deleted tests/vr/xr_spike.cpp, ~/Developer/spikes/openxr-vulkan/FINDINGS.md): an
 // engine booted on a Vulkan device the RUNTIME created renders, byte for byte,
 // what an engine on its own device renders, and a session paced by xrWaitFrame
 // submits frames the runtime accepts. Phase 1b put that picture in a Quest Pro.
@@ -56,6 +56,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <chrono>
@@ -473,13 +474,22 @@ bool VrConnection::connect(Ogre::Root *root, const VrPolicy &policy, VrInfo &inf
             return refuse(VrFailure::NoRuntime,
                           "no OpenXR runtime is active (no active_runtime.json) - start " + allowed +
                               " and connect the headset");
-        const std::string n = lowered(manifestName);
-        const std::string lib = lowered(library.substr(library.find_last_of('/') + 1));
+        // NAME, LIBRARY OR MANIFEST PATH: SteamVR's manifest may carry no `name`
+        // and its library is `vrclient.so`; its manifest PATH is the one place it
+        // says "steamvr" (…/SteamVR/steamxr_linux64.json). The full path is
+        // matched, so a symlinked active_runtime.json is read through its target.
+        std::string target = manifest;
+        {
+            std::error_code ec;
+            const std::filesystem::path real = std::filesystem::canonical(manifest, ec);
+            if (!ec) target = real.string();
+        }
+        const std::string haystack = lowered(manifestName + "\n" + library + "\n" + manifest +
+                                             "\n" + target);
         bool match = false;
         for (const std::string &r : policy.runtimes) {
             const std::string w = lowered(r);
-            match = match || (!w.empty() && (n.find(w) != std::string::npos ||
-                                             lib.find(w) != std::string::npos));
+            match = match || (!w.empty() && haystack.find(w) != std::string::npos);
         }
         if (!match)
             return refuse(VrFailure::WrongRuntime,
@@ -655,9 +665,19 @@ bool VrConnection::connect(Ogre::Root *root, const VrPolicy &policy, VrInfo &inf
     XrGraphicsRequirementsVulkanKHR req{ XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR };
     if (XR_FAILED(getRequirements(mInstance, mSystemId, &req)))
         return refuse(VrFailure::RuntimeBroken, "xrGetVulkanGraphicsRequirementsKHR failed");
-    const XrVersion want12 = XR_MAKE_VERSION(1, 2, 0);
-    if (want12 < req.minApiVersionSupported || want12 > req.maxApiVersionSupported)
-        return refuse(VrFailure::DeviceMismatch, "the runtime does not admit a Vulkan 1.2 instance");
+    // THE MINIMUM ONLY (the spec: maxApiVersionSupported is "the maximum version
+    // tested", not a limit - hello_xr checks the minimum alone), against the
+    // version Ogre's instance ACTUALLY asked for (fork e9d058530).
+    const uint32_t vkApi = dev->mInstance->mApiVersion;
+    const XrVersion have = XR_MAKE_VERSION(VK_API_VERSION_MAJOR(vkApi), VK_API_VERSION_MINOR(vkApi), 0);
+    if (have < req.minApiVersionSupported) {
+        char v[96];
+        std::snprintf(v, sizeof(v), "the runtime needs Vulkan %u.%u, the engine's instance is %u.%u",
+                      unsigned(XR_VERSION_MAJOR(req.minApiVersionSupported)),
+                      unsigned(XR_VERSION_MINOR(req.minApiVersionSupported)),
+                      VK_API_VERSION_MAJOR(vkApi), VK_API_VERSION_MINOR(vkApi));
+        return refuse(VrFailure::DeviceMismatch, v);
+    }
 
     VkPhysicalDevice runtimeGpu = VK_NULL_HANDLE;
     if (XR_FAILED(getDevice(mInstance, mSystemId, mVkInstance, &runtimeGpu)))
