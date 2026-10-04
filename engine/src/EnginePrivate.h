@@ -5192,10 +5192,11 @@ private:
     void bindTrackedPieces(const MaterialRec &rec);
     void bindTrackedPiecesInto(const MaterialRec &rec, Ogre::HlmsPbsDatablock *db);
     /// Sets or clears `jah_shader_clock` — our datablock property gating the
-    /// pass-buffer clock's DECLARATION — to match whether `rec` carries a
-    /// generated piece. The whole pixel-suite isolation contract rests on this
-    /// being false for every material that has none.
-    static void applyClockProperty(Ogre::HlmsPbsDatablock *db, const MaterialRec &rec);
+    /// pass-buffer clock's DECLARATION — to match whether the datablock carries
+    /// a generated piece or `p` scrolls its maps, and `jah_uv_scroll` to match
+    /// the scroll alone (TORNADO-1). The whole pixel-suite isolation contract
+    /// rests on both being false for every material that has neither.
+    static void applyClockProperty(Ogre::HlmsPbsDatablock *db, const PbrParams &p);
     /// Builds (or finds) the in-memory v1 skeleton `rig` translates to and hands
     /// the resulting SkeletonDef to `mesh`. v1 is a BUILD-TIME SCAFFOLD ONLY —
     /// SkeletonDef has exactly one constructor and it takes a v1::Skeleton

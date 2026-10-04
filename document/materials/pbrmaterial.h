@@ -474,6 +474,14 @@ public:
     /// setters above for why these are a cache reference rather than content.
     QString customPiecePixel;
     QString customPieceVertex;
+    /// THE UV SCROLL (TORNADO-1): UV units per second of the shader clock,
+    /// added after the texture transform — what a graph's constant-speed
+    /// `panner` feeding every sampler folds to (GraphBaker's animated UV fold).
+    /// Like the pieces it is GRAPH-OWNED, not a Property row: the fold writes
+    /// it (value key `textureVelocity`, a two-element array), the scene file
+    /// carries it as that key, and zero — the default — is inert.
+    float textureVelocityU = 0.0f;
+    float textureVelocityV = 0.0f;
 
     /// The shading BRDF, as an INDEX into PbrMaterial::brdfNames() — never the
     /// renderer's own enum value. Ogre's PbsBrdf is a bitfield and a document

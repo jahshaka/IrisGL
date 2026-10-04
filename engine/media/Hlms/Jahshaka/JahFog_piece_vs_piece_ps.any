@@ -445,7 +445,17 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	#undef UV_SPECULAR
 	#undef UV_ROUGHNESS
 	#undef UV_EMISSIVE
+	// THE UV SCROLL (TORNADO-1): a material whose maps scroll on the shader
+	// clock adds userValue[2].xy (UV units per second) times passBuf.jahClock.x
+	// AFTER the transform -- the shape a graph's constant-speed panner feeding
+	// every sampler folds to. Only under our datablock property jah_uv_scroll
+	// (which also sets jah_shader_clock, so the clock is declared): every other
+	// material keeps the expression below, byte for byte.
+	@property( jah_uv_scroll )
+	#define JAH_UV_XFORM(x) (float2( dot( material.userValue[1].xy, (x) * material.userValue[0].xy ), dot( material.userValue[1].zw, (x) * material.userValue[0].xy ) ) + material.userValue[0].zw + material.userValue[2].xy * passBuf.jahClock.x)
+	@else
 	#define JAH_UV_XFORM(x) (float2( dot( material.userValue[1].xy, (x) * material.userValue[0].xy ), dot( material.userValue[1].zw, (x) * material.userValue[0].xy ) ) + material.userValue[0].zw)
+	@end
 	#define UV_DIFFUSE(x) JAH_UV_XFORM(x)
 	#define UV_NORMAL(x) JAH_UV_XFORM(x)
 	#define UV_SPECULAR(x) JAH_UV_XFORM(x)

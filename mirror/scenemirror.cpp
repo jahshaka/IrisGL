@@ -4160,6 +4160,8 @@ void SceneMirror::syncCustomPieces(iris::Material *material, MaterialId id)
 {
     auto *pbr = dynamic_cast<iris::PbrMaterial *>(material);
     if (!pbr) return;
+    // A scrolling material (TORNADO-1) reads the clock with or without a piece.
+    if (pbr->textureVelocityU != 0.0f || pbr->textureVelocityV != 0.0f) mAnyCustomPiece = true;
     if (pbr->customPiecePixel.isEmpty() && pbr->customPieceVertex.isEmpty()) return;
     if (!pbr->customPiecePixel.isEmpty())
         mTarget->setMaterialCustomPiece(id, pbr->customPiecePixel.toStdString(),
@@ -4434,6 +4436,7 @@ quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMate
           << pbr->normalFactor
           << pbr->textureScale << pbr->textureScaleV
           << pbr->textureOffsetU << pbr->textureOffsetV << pbr->textureRotation
+          << pbr->textureVelocityU << pbr->textureVelocityV
           << pbr->shadingModel << pbr->brdf
           << pbr->clearCoat << pbr->clearCoatRoughness
           << pbr->receiveShadows << pbr->emissiveAsLightmap
@@ -4534,6 +4537,11 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     MaterialSync &ms = it.value();
     ++mMaterialBuilds;
     ms.hasPbr = toPbrParams(material, ms.pbr);
+    // A SCROLLING MATERIAL READS THE SHADER CLOCK (TORNADO-1) with no piece at
+    // all: its maps move by uvVelocity times the clock, so the clock has to be
+    // pushed for it exactly as for a generated piece.
+    if (ms.hasPbr && (ms.pbr.uvVelocity[0] != 0.0f || ms.pbr.uvVelocity[1] != 0.0f))
+        mAnyCustomPiece = true;
 
     // Document slot name -> engine slot.
     // There is no occlusion entry because there is no occlusion ROW any more
@@ -4684,6 +4692,8 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.uvOffset[0]     = pbr->textureOffsetU;
         out.uvOffset[1]     = pbr->textureOffsetV;
         out.uvRotation      = pbr->textureRotation;
+        out.uvVelocity[0]   = pbr->textureVelocityU;   // TORNADO-1: the UV scroll
+        out.uvVelocity[1]   = pbr->textureVelocityV;
         // No cull here: a document material has none of its own — the NODE's face
         // cull is the authority (CULL-MODE-2).
         // HLMS_ADOPTION P1. The BRDF crosses as a NAME, never as the document's
