@@ -9,6 +9,7 @@
 // mesh, no datablock, no per-frame node work, and correct in every view that
 // shares the scene (Ogre feeds the rectangle each camera's corner rays).
 #include <vector>
+#include <set>
 #include "EnginePrivate.h"
 #include "Atmosphere.h"
 
@@ -797,20 +798,26 @@ void OgreScene::reapRetiredReflections(bool force) {
             if (!dynamic_cast<Ogre::HlmsComputeJob *>(l) || r.frames < kRetiredJobFrames) { held = true; break; }
         if (!force && (r.frames < 2u || (held && r.frames < kRetiredReflectionMaxFrames))) { ++i; continue; }
         if (held && !force) {
+            // ONCE PER HOLDER NAME, not per cube or per frame: a holder that
+            // never rebinds is met again on every capture of a drag.
+            static std::set<std::string> sSaid;
             std::string who;
             for (Ogre::TextureGpuListener *l : r.tex->getListeners()) {
+                std::string name;
                 if (auto *db = dynamic_cast<Ogre::HlmsDatablock *>(l)) {
                     const Ogre::String *n = db->getNameStr();
-                    who += " '" + (n ? *n : db->getName().getFriendlyText()) + "'";
+                    name = "'" + (n ? *n : db->getName().getFriendlyText()) + "'";
                 } else if (auto *job = dynamic_cast<Ogre::HlmsComputeJob *>(l)) {
-                    who += " compute job '" + job->getNameStr() + "'";
+                    name = "compute job '" + job->getNameStr() + "'";
                 } else {
-                    who += " (a non-datablock listener)";
+                    name = "(a non-datablock listener)";
                 }
+                if (sSaid.insert(name).second) who += " " + name;
             }
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka: a retired sky reflection cube is still held after " +
-                std::to_string(r.frames) + " frames, destroyed anyway; holders:" + who);
+            if (!who.empty())
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka: a retired sky reflection cube is still held after " +
+                    std::to_string(r.frames) + " frames, destroyed anyway; new holders:" + who);
         }
         try { destroyRecycled(tm, r.tex); }
         catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
@@ -1529,7 +1536,13 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
 // recycled address therefore makes an old, dead view look current. The swap
 // (landEnvironmentIfComplete) never lets that happen because the old cube is
 // still ALIVE when the new one is allocated and bound, and dies only once every
-// holder has rebound (reapRetiredReflections). destroyReflection, which has no
+// holder has BAKED its new set: a datablock leaves the cube's listener list at
+// setTexture, but its stale DescriptorSetTexture is released only in
+// bakeTextures (HlmsPbs::preparePassHash -> uploadDirtyDatablocks, at the first
+// colour pass of the frame after the rebind). The reap therefore waits for an
+// empty listener list AND for two frame tops after the swap
+// (reapRetiredReflections), by which time a whole frame of passes has drained
+// every dirty datablock. destroyReflection, which has no
 // successor, destroys FIRST (its TextureGpuListener::Deleted kills the stale
 // sets) and only then unbinds — do not "optimise" that order.
 void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource) {

@@ -3531,6 +3531,12 @@ public:
     /// listens to them, so no draw of the change frame samples a destroyed cube
     /// (Ogre's blank texture — the presented black flash). See
     /// reapRetiredReflections; `force` destroys them all (the sky is going).
+    /// THE VRAM BOUND: a swap lands at most once per frame per scene, and a
+    /// retired cube lives at most kRetiredReflectionMaxFrames drawn frames, so
+    /// the list holds at most 120 cubes x ~1.05 MB (a 128^2 RGBA16F cube with
+    /// its mips) = ~126 MB per scene — the worst case, a datablock that never
+    /// rebakes during a sky drag that re-captures every frame. Ordinarily every
+    /// holder lets go within the reap's 2-frame floor, i.e. 1-3 cubes (1-3 MB).
     struct RetiredReflection { Ogre::TextureGpu *tex = nullptr; unsigned frames = 0u; };
     std::vector<RetiredReflection> mRetiredReflections;
     static constexpr unsigned kRetiredReflectionMaxFrames = 120u;
