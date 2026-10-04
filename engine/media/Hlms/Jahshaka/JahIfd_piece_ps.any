@@ -579,7 +579,29 @@
 	// (Vct_piece_ps.any), as every probe ray of the field does, so the ring gets
 	// precisely the picture it had before any field existed, weighted out as the
 	// pixel enters the field's reach.
-	pixelData.envColourD.xyz += vctDiffuse.xyz * ifdFallbackAmbient;
+	//
+	// THE CONES ARE MARCHED ONLY WHERE THAT WEIGHT IS ABOVE ZERO (SPEED-GPU, audit PH-2).
+	// Inside the field the confidence is exactly 1, the weight exactly 0, and four whole
+	// cone marches per pixel used to be multiplied by it - most of the screen. The weight
+	// is known before the march now, so the march runs where it is read and nowhere else:
+	// the same arithmetic in the same order where it runs, and an add of nothing where it
+	// does not (the arm photon.diffuseConeSkip = 0 marches everywhere; gi.cone_skip holds
+	// the two to the same bytes).
+@property( jah_cones_always )
+	if( true )
+@else
+	if( ifdFallbackAmbient > 0.0 )
+@end
+	{
+		float3 jahConeBiasLS;
+		float4 jahConeOriginLS;
+		const float3 jahConePosLS = jahVctPixelStart( inPs.pos, jahConeBasis, passBuf.vctProbeParams,
+													  jahConeBiasLS, jahConeOriginLS );
+		float3 jahConeVoxelOnly = float3( 0, 0, 0 );
+		jahVctDiffuse( vctDiffuse, jahConeVoxelOnly, jahConePosLS, jahConeOriginLS, jahConeBasis,
+					   passBuf.vctProbeParams );
+		pixelData.envColourD.xyz += vctDiffuse.xyz * ifdFallbackAmbient;
+	}
 @end
 @end
 

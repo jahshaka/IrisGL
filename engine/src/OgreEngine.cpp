@@ -827,6 +827,8 @@ void OgreEngine::renderOneFrame() {
         // THE MEASUREMENT ARMS (lane TEST-1) take what was set since the last frame:
         // one value of each for the whole of this one.
         mArms.latch();
+        FogHlmsListener::setConeSkipArms(mArms.on(ArmId::DiffuseConeSkip),
+                                         mArms.on(ArmId::SpecularConeSkip));
         // WHAT THIS FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1), consumed exactly
         // like the cause and reset to `Complete` — so a caller that sets
         // nothing renders the frame it always did. Pushed to every scene here,

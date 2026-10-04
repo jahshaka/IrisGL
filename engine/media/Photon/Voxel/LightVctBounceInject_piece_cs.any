@@ -154,7 +154,6 @@
 	float3 voxelUvwPos = p_invVoxelResolution * (float3( gl_GlobalInvocationID.xyz ) + 0.5f);
 
 	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, gl_GlobalInvocationID.xyz, 0 );
-	float4 normalVal = OGRE_Load3D( voxelNormalTex, gl_GlobalInvocationID.xyz, 0 );
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): JACOBI, NOT ACCUMULATION.
 	//
 	// What this pass writes is  new = direct + rho * G( total )  -- the fixed point
@@ -181,6 +180,9 @@
 
 	if( anyInvocationARB( albedoVal.a > 0 ) )
 	{
+		// the normal only where the wave gathers (SPEED-GPU, audit PH-10): an empty wave
+		// writes its direct term and reads nothing else
+		float4 normalVal = OGRE_Load3D( voxelNormalTex, gl_GlobalInvocationID.xyz, 0 );
 		const bool twoSided = normalVal.a > 0.0f;
 		normalVal.xyz = normalVal.xyz * 2.0f - 1.0f;
 		normalVal.xyz = normalize( normalVal.xyz );

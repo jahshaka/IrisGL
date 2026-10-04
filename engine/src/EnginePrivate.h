@@ -1831,6 +1831,8 @@ enum class ArmId : unsigned {
     AtomDecode,          ///< "atom.decode" — the screen decode armed (0: the Atom items drawn by nothing)
     CardFootprint,       ///< "cards.footprintTexels" — the card read's footprint gate
     FieldScroll,         ///< "gi.fieldScroll" — the irradiance field scrolls (0: re-placed whole)
+    DiffuseConeSkip,     ///< "photon.diffuseConeSkip" — the pixel's cone diffuse only where the field's fallback weight is > 0
+    SpecularConeSkip,    ///< "photon.specularConeSkip" — the pixel's specular cone only where the reflection's w < 1
     Count
 };
 class ArmRegistry {
@@ -3038,6 +3040,13 @@ public:
     /// shader. 0 takes it away.
     static void setPhotonIsolation(const Ogre::SceneManager *sm, int mode);
 
+    /// THE CONE SKIPS' MEASUREMENT ARMS (SPEED-GPU), latched by the engine at the top of
+    /// every frame (ArmId::DiffuseConeSkip / SpecularConeSkip). A skip that is OFF sets
+    /// its pass property (`jah_cones_always` / `jah_spec_cone_always`), which takes part
+    /// in the pass hash: the arm selects a permutation, never a runtime branch, and the
+    /// shipped permutation (both on) sets nothing.
+    static void setConeSkipArms(bool diffuseSkip, bool specularSkip);
+
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
     /// because this may be called from any thread and must be a pure function
@@ -3090,6 +3099,7 @@ private:
     struct SunContactBind { Ogre::TextureGpu *tex = nullptr; unsigned divisor = 1u; };
     static std::map<const Ogre::SceneManager *, SunContactBind> sSunContact;  // render thread
     static std::map<const Ogre::SceneManager *, int> sPhotonIsolation;  // render thread
+    static bool sDiffuseConeSkip, sSpecularConeSkip;                    // render thread
     /// The cloud field per SceneManager (CLOUDS-2D-1); the pass's copy of it is
     /// PassBinds::cloudField.
     static std::map<const Ogre::SceneManager *, CloudShadowState> sCloudShadow;  // render thread

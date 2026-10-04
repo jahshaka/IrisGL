@@ -1016,6 +1016,16 @@ const ArmDef kArms[] = {
       "The irradiance field SCROLLS on a cascade-0 step (keeps the probes that stay inside). 0 = the "
       "same snapped window re-placed WHOLE, the behaviour the scroll replaced (gi.field_scroll walks "
       "one path both ways). Was JAHSHAKA_GI_FIELD_NO_SCROLL (a per-step read)." },
+    { "photon.diffuseConeSkip", 1.0, 0.0, 1.0,
+      "The pixel's four-cone diffuse is marched only where the irradiance field's fallback weight "
+      "(1 - confidence) is above zero - the only pixels it reaches (SPEED-GPU, audit PH-2). 0 = "
+      "marched in every pixel of a chain with a field, the cost before the skip; the picture is "
+      "the same bytes (gi.cone_skip)." },
+    { "photon.specularConeSkip", 1.0, 0.0, 1.0,
+      "The pixel's specular cone is marched only where the screen/ray reflection's confidence w "
+      "is below 1 - the composite replaces the whole environment term where it is 1 (SPEED-GPU, "
+      "audit PH-1 / S1). 0 = marched in every pixel, the cost before the skip; the picture is the "
+      "same bytes (gi.cone_skip)." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
