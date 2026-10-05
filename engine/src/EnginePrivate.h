@@ -3849,6 +3849,9 @@ public:
     bool setMaterialCustomPiece(MaterialId id, const std::string &path,
                                 CustomPieceStage stage) override;
     void setShaderTime(float seconds) override;
+    /// TORNADO-1: writes every scrolling material's offset (velocity x clock,
+    /// wrapped) into its datablocks' userValue[2].zw, master and cull twins.
+    void applyScrollOffsets();
     float shaderTime() const override;
     /// ATOM stage 1: the scene-wide LOD dial (OgreMesh.cpp).
     void  setLodBias(float bias) override;
@@ -5193,8 +5196,8 @@ private:
     void bindTrackedPiecesInto(const MaterialRec &rec, Ogre::HlmsPbsDatablock *db);
     /// Sets or clears `jah_shader_clock` — our datablock property gating the
     /// pass-buffer clock's DECLARATION — to match whether the datablock carries
-    /// a generated piece or `p` scrolls its maps, and `jah_uv_scroll` to match
-    /// the scroll alone (TORNADO-1). The whole pixel-suite isolation contract
+    /// a generated piece, and `jah_uv_scroll` to match whether `p` scrolls its
+    /// maps (TORNADO-1). The whole pixel-suite isolation contract
     /// rests on both being false for every material that has neither.
     static void applyClockProperty(Ogre::HlmsPbsDatablock *db, const PbrParams &p);
     /// Builds (or finds) the in-memory v1 skeleton `rig` translates to and hands

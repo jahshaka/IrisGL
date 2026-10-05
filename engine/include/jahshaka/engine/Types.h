@@ -1452,9 +1452,10 @@ struct PbrParams {
     /// the SHADER CLOCK, added after the transform above —
     ///     uv'' = uv' + uvVelocity * t
     /// — the shape a shader graph's constant-speed `panner` feeding every
-    /// sampler folds to. Zero (the default) is INERT and costs nothing: the
-    /// shader only reads it, and the clock, on a material whose velocity is
-    /// non-zero (our `jah_uv_scroll` datablock property), so every other
+    /// sampler folds to. The backend turns it into a per-frame OFFSET (wrapped
+    /// to [0,1)) at every setShaderTime. Zero (the default) is INERT and costs
+    /// nothing: the shader reads the offset only on a material whose velocity
+    /// is non-zero (our `jah_uv_scroll` datablock property), so every other
     /// material generates exactly the source it generated before.
     float  uvVelocity[2]   = { 0.0f, 0.0f };
     /// Refractive mode only: how far the surface displaces what it samples from
