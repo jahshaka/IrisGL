@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #include "document/input/inputmap.h"
 
 #include <QKeySequence>
-#include <QSettings>
+#include "core/keyvaluestore.h"
 #include <cmath>
 
 namespace iris {
@@ -269,7 +269,7 @@ bool InputMap::fromVariantMap(const QVariantMap &m)
     return understoodAny;
 }
 
-void InputMap::load(QSettings &settings)
+void InputMap::load(const KeyValueStore &settings)
 {
     QVariantMap m;
     for (int i = 0; i < kInputActionCount; ++i) {
@@ -280,14 +280,14 @@ void InputMap::load(QSettings &settings)
     if (!m.isEmpty()) fromVariantMap(m);
 }
 
-void InputMap::save(QSettings &settings) const
+void InputMap::save(KeyValueStore &settings) const
 {
     const QVariantMap m = toVariantMap();
     for (auto it = m.constBegin(); it != m.constEnd(); ++it)
         settings.setValue(QStringLiteral("input/") + it.key(), it.value().toStringList());
 }
 
-void InputMap::clearPersisted(QSettings &settings)
+void InputMap::clearPersisted(KeyValueStore &settings)
 {
     for (int i = 0; i < kInputActionCount; ++i)
         settings.remove(QStringLiteral("input/") + actionName(InputAction(i)));
@@ -385,7 +385,7 @@ void InputSystem::setLook(float x, float y) { mState.look.x = x; mState.look.y =
 void InputSystem::setSprint(bool on)        { mState.sprint = on; }
 void InputSystem::requestJump()             { mState.jump = true; }
 
-void InputSystem::setSettings(QSettings *settings)
+void InputSystem::setSettings(KeyValueStore *settings)
 {
     mSettings = settings;
     if (mSettings) mMap.load(*mSettings);

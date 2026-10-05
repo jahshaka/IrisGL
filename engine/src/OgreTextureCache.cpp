@@ -145,15 +145,6 @@ bool TextureCache::readManifest(std::vector<FileRec> &out) const {
     return true;
 }
 
-bool TextureCache::writeManifest(const std::vector<FileRec> &files) const {
-    std::ostringstream s;
-    s << "jahshaka-texture-cache " << kTextureCacheFormat << "\n";
-    s << "key " << mKey << "\n";
-    for (const FileRec &f : files) s << "file " << f.name << " " << f.bytes << " " << f.hash << "\n";
-    const std::string text = s.str();
-    return cachefile::writeAtomic(mDir, kManifestFile, text.data(), text.size());
-}
-
 void TextureCache::wipe() const {
     if (mDir.empty()) return;
     ::unlink(path(kManifestFile).c_str());
@@ -232,11 +223,11 @@ void TextureCache::load(Ogre::Root *root) {
     logLine("loaded " + std::to_string(mChannels.size()) + " channel rows");
 }
 
-bool TextureCache::save(Ogre::Root *root) {
+bool TextureCache::save(Ogre::Root *root,
+                        const std::function<void(std::function<void()>)> &dispatch) {
     if (!mEnabled) return false;
     Ogre::TextureGpuManager *tm = textureManager(root);
     if (!tm) return false;
-    if (!cachefile::mkpath(mDir)) return false;
 
     Ogre::String json;
     tm->exportTextureMetadataCache(json);
@@ -260,23 +251,56 @@ bool TextureCache::save(Ogre::Root *root) {
         channels += '\n';
     }
 
-    std::vector<FileRec> manifest;
-    if (!cachefile::writeAtomic(mDir, kMetaFile, json.data(), json.size())) return false;
-    manifest.push_back({ kMetaFile, json.size(), cachefile::hex128(json.data(), json.size()) });
-    if (!cachefile::writeAtomic(mDir, kChannelFile, channels.data(), channels.size())) return false;
-    manifest.push_back({ kChannelFile, channels.size(),
-                         cachefile::hex128(channels.data(), channels.size()) });
-    // The manifest LAST, always: it is the thing that makes the other two
-    // readable, so a crash between the two writes leaves a container that fails
-    // its own check and starts cold, never one that half-loads.
-    if (!writeManifest(manifest)) return false;
+    // NOTHING NEW, NOTHING WRITTEN: the clean quit and the engine's destructor
+    // both save, and the second used to rewrite (and fsync) the same three files.
+    const std::string metaHash = cachefile::hex128(json.data(), json.size());
+    const std::string channelHash = cachefile::hex128(channels.data(), channels.size());
+    const std::string both = metaHash + channelHash;
+    {
+        std::lock_guard<std::mutex> lock(mLastWrittenMutex);
+        if (both == mLastWritten) { mDirty = false; return true; }
+    }
     mDirty = false;
+
+    // THE WRITE, on the writer thread (SHADER-WARM-2: no file sync on the UI
+    // thread). Everything it touches is captured by value — bytes, names, the
+    // key — so it reads nothing of this object.
+    const std::string dir = mDir;
+    const std::string key = mKey;
+    // `this` is the process-wide, never-destroyed cache (textureCache()); the
+    // task touches only mLastWritten, under its mutex, and ONLY after all three
+    // files are in place — a failed write leaves the old record, so the next save
+    // writes again instead of believing the disk has these bytes.
+    auto write = [this, both, dir, key, json = std::string(json), channels = std::move(channels),
+                  metaHash, channelHash]() {
+        if (!cachefile::mkpath(dir)) return;
+        if (!cachefile::writeAtomic(dir, kMetaFile, json.data(), json.size())) return;
+        if (!cachefile::writeAtomic(dir, kChannelFile, channels.data(), channels.size())) return;
+        // The manifest LAST, always: it is the thing that makes the other two
+        // readable, so a crash between the two writes leaves a container that
+        // fails its own check and starts cold, never one that half-loads.
+        std::ostringstream m;
+        m << "jahshaka-texture-cache " << kTextureCacheFormat << "\n";
+        m << "key " << key << "\n";
+        m << "file " << kMetaFile << " " << json.size() << " " << metaHash << "\n";
+        m << "file " << kChannelFile << " " << channels.size() << " " << channelHash << "\n";
+        const std::string text = m.str();
+        if (!cachefile::writeAtomic(dir, kManifestFile, text.data(), text.size())) return;
+        std::lock_guard<std::mutex> lock(mLastWrittenMutex);
+        mLastWritten = both;
+    };
+    if (dispatch) dispatch(std::move(write));
+    else write();
     return true;
 }
 
 bool TextureCache::clear() {
     mChannels.clear();
     mDirty = false;
+    {
+        std::lock_guard<std::mutex> lock(mLastWrittenMutex);
+        mLastWritten.clear();
+    }
     if (!mEnabled) return true;
     wipe();
     return true;

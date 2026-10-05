@@ -44,7 +44,7 @@ For more information see the LICENSE file
 #include <QVariantMap>
 #include <QVector>
 
-class QSettings;
+namespace iris { class KeyValueStore; }
 
 namespace iris {
 
@@ -150,13 +150,13 @@ public:
 
     /// jahsettings.ini "input/<Action>" — the same shape ShortcutRegistry uses
     /// for "shortcut/<id>". An action with no stored row keeps its default.
-    void load(QSettings &settings);
-    void save(QSettings &settings) const;
+    void load(const KeyValueStore &settings);
+    void save(KeyValueStore &settings) const;
     /// Removes every stored row. Back-to-defaults must leave NO override keys
     /// behind — the same contract ShortcutRegistry::resetAll has, and the
     /// reason a test that rebinds can restore the shared settings file it ran
     /// against byte-for-byte.
-    static void clearPersisted(QSettings &settings);
+    static void clearPersisted(KeyValueStore &settings);
 
 private:
     QVector<InputKeyBinding> mBindings[kInputActionCount];
@@ -205,7 +205,7 @@ public:
     // ---- bindings + persistence ------------------------------------------
     /// jahsettings.ini, wired by the shell. Null in headless runs (no
     /// persistence, everything else works). Loads immediately when set.
-    void setSettings(QSettings *settings);
+    void setSettings(KeyValueStore *settings);
     /// map().bind() plus a save(). Returns false, changing nothing, on conflict.
     bool bind(InputAction a, const QVector<InputKeyBinding> &keys,
               QString *conflictAction = nullptr, QString *conflictKey = nullptr);
@@ -225,7 +225,7 @@ private:
     InputMap  mMap;
     InputState mState;
     QSet<int> mHeld;
-    QSettings *mSettings = nullptr;
+    KeyValueStore *mSettings = nullptr;
 };
 
 /// THE §8.3 PREDICATE, in one place because two widgets have to agree on it.

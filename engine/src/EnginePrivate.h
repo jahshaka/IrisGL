@@ -2520,9 +2520,13 @@ public:
     /// both files and starts cold. Never throws, never fatal.
     void load(Ogre::Root *root);
 
-    /// Writes both files and the manifest. Cheap and idempotent; a no-op when
-    /// the cache is off or nothing changed since the last write.
-    bool save(Ogre::Root *root);
+    /// SERIALIZES both files on the calling thread (Ogre's half needs it) and
+    /// hands the WRITE — three files, each fsynced, the manifest last — to
+    /// `dispatch` (the shader cache's writer thread: SHADER-WARM-2, no file
+    /// sync on the UI thread). A null `dispatch` writes inline (a process with
+    /// no writer). A no-op when the cache is off or the bytes are the ones the
+    /// last save wrote.
+    bool save(Ogre::Root *root, const std::function<void(std::function<void()>)> &dispatch);
 
     /// Forgets everything, in memory and on disk. The engine's clearShaderCache
     /// calls this too — the two caches share a directory, so "delete the cache"
@@ -2549,13 +2553,18 @@ public:
 private:
     struct FileRec { std::string name; unsigned long long bytes = 0; std::string hash; };
     bool readManifest(std::vector<FileRec> &out) const;
-    bool writeManifest(const std::vector<FileRec> &files) const;
     void wipe() const;
     std::string path(const std::string &name) const;
 
     std::string mDir, mKey;
     bool        mEnabled = false;
     bool        mDirty = false;
+    /// hex128 of the last bytes WRITTEN (meta + channels; set by the writer
+    /// thread once all three files landed): a save
+    /// with nothing new writes nothing (the clean quit and the engine's
+    /// destructor both save).
+    std::string mLastWritten;          // GUARDED_BY(mLastWrittenMutex)
+    std::mutex  mLastWrittenMutex;     ///< the writer thread sets it after a write lands
     /// path -> (components, compressed). The channel sidecar, in memory.
     std::map<std::string, std::pair<unsigned, bool>> mChannels;
 };
@@ -2646,6 +2655,13 @@ public:
     /// True while the writer holds or is running a job (FSYNC-1): a save that
     /// meets one SKIPS — it never waits on the calling thread.
     bool writeInFlight() const;
+    /// Runs `task` on the writer thread, after the job (if any) and the tasks
+    /// queued before it — the OTHER files this directory holds (the texture
+    /// cache's three, SHADER-WARM-2) go through the same one writer, so no
+    /// fsync of the cache directory ever runs on the caller's thread.
+    /// flushWrites() waits for queued tasks too. The task touches no Ogre
+    /// object (bytes the caller already serialized).
+    void dispatchTask(std::function<void()> task);
     /// Waits for an in-flight write (bounded) and then JOINS the writer thread
     /// (unbounded — the bytes are never abandoned). The engine's destructor
     /// calls it before Ogre's Root, whose LogManager the writer logs through,
@@ -2673,6 +2689,10 @@ public:
     /// `on` is set, and the frame loop drains it on the UI thread.
     /// Off by default: nothing is recorded and no string is built.
     void recordCompileNames(bool on);
+    /// Engine::setCompileObserver's store: `observer` runs after every compile
+    /// made on the thread calling this (the counter's log listener checks the
+    /// thread). An empty function clears it.
+    void setCompileObserver(std::function<void()> observer);
     /// Moves what has been recorded since the last call into `out`. Returns how
     /// many compiles happened in that window (which can exceed out.size() when
     /// the bounded queue overflowed).
@@ -2778,7 +2798,8 @@ private:
     std::condition_variable mWriteCv;       ///< wakes the writer
     std::condition_variable mWriteDoneCv;   ///< wakes a flushWrites() caller
     std::unique_ptr<PendingWrite> mWriteJob;    ///< handed over, not yet taken
-    bool                    mWriteBusy = false; ///< a job is being written NOW
+    std::deque<std::function<void()>> mWriteTasks;  ///< dispatchTask(), not yet run
+    bool                    mWriteBusy = false; ///< a job or task is being written NOW
     bool                    mWriteStop = false;
     std::thread             mWriteThread;
 };
@@ -8491,6 +8512,7 @@ public:
     bool saveShaderCache() override;
     bool flushShaderCache(unsigned budgetMs) override;
     bool clearShaderCache() override;
+    void setCompileObserver(std::function<void()> observer) override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;
 
