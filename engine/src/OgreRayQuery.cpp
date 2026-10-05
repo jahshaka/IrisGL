@@ -1018,6 +1018,7 @@ public:
     uint32_t gatherFrameNow() const override { return frameNow(); }
     uint32_t gatherFramesInFlight() const override { return framesInFlight(); }
     bool gatherTemporalArm() const override { return arm(ArmId::GatherTemporal, true); }
+    bool gatherDecodeHitsArm() const override { return arm(ArmId::GatherDecodeHits, false); }
     VkCommandBuffer gatherFrameCmd() override { return frameCmd(); }
     bool gatherMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible,
                           VkBuffer &buffer, VkDeviceMemory &memory, void **mapped,

@@ -15,7 +15,9 @@
 // (i % LIST_W, i / LIST_W), and one buffer:
 //   jahHitIds  RGBA32UI  x = the item slot | the LEVEL the hit BLAS was built
 //                            from << 24 (bit 27: "the far copy — the mesh's
-//                            coarsest level", which the decode resolves), y = the
+//                            coarsest level", which the decode resolves; bit 28:
+//                            "the DIFFUSE response only" — every gather record,
+//                            set by jahHitAppend from the destination), y = the
 //                            primitive (the triangle within that level), z = the
 //                            barycentrics u, v (16-bit normalised: 1.5e-5 of an
 //                            edge), w = the ray's direction, octahedral, snorm16
@@ -68,6 +70,17 @@
 
 const uint kJahHitEmpty = 0xFFFFFFFFu;
 const uint kJahHitFarBit = 1u << 27u;
+/// THE GATHER'S HITS ARE DIFFUSE-ONLY (SPECKLE-FIX-1, the owner's option 1 — the
+/// Lumen choice): a screen-probe ray estimates the IRRADIANCE at its origin, and the
+/// caches that answer most of its hits (the cards, the voxels) store the diffuse
+/// response alone (albedo x irradiance, plus the emissive). A decoded hit shaded
+/// with its specular lobe answered the same ray with a different quantity — on a
+/// glossy metal under the sun, the highlight at hundreds x the sky — so a probe
+/// whose hit changed route (a moved object's cards re-allocate) flashed a disc on
+/// the floor. The decode reads this bit and drops every specular term (the
+/// lights', the environment's, the clear coat's). The REFLECTION's records keep
+/// the full lobe: a mirror shows the highlight.
+const uint kJahHitDiffuseOnlyBit = 1u << 28u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
 const uint kJahHitAuxBase = 4u;
@@ -153,7 +166,8 @@ bool jahHitAppend( uint slot, uint level, bool far, uint prim, vec2 bary, vec3 d
 		return false;
 	}
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
-	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( ( level & 0x7u ) << 24u ) | ( far ? kJahHitFarBit : 0u );
+	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( ( level & 0x7u ) << 24u ) | ( far ? kJahHitFarBit : 0u ) |
+						   ( ( dest & kJahHitDestGather ) != 0u ? kJahHitDiffuseOnlyBit : 0u );
 	imageStore( jahHitIds, at,
 				uvec4( slotLevel, prim, packUnorm2x16( clamp( bary, vec2( 0.0 ), vec2( 1.0 ) ) ),
 					   packSnorm2x16( jahOctEncode( dir ) ) ) );

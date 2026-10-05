@@ -142,7 +142,9 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 prevRayDown2;
 	vec4 prevFwd2;
 	/// THE ALPHA TABLE (REFLECT-MOVERS-2, jah_rq_alpha.glsl): xy = its device
-	/// address, float bits (0 = none: the rays stay opaque).
+	/// address, float bits (0 = none: the rays stay opaque); z = 1 decodes EVERY
+	/// hit (the arm "gather.decodeHits", SPECKLE-FIX-1); w = 1 runs the hit's
+	/// mover gate (MOVER-OCCLUSION-1).
 	vec4 alpha;
 } p;
 

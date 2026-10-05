@@ -1834,6 +1834,7 @@ enum class ArmId : unsigned {
     FieldScroll,         ///< "gi.fieldScroll" — the irradiance field scrolls (0: re-placed whole)
     DiffuseConeSkip,     ///< "photon.diffuseConeSkip" — the pixel's cone diffuse only where the field's fallback weight is > 0
     SpecularConeSkip,    ///< "photon.specularConeSkip" — the pixel's specular cone only where the reflection's w < 1
+    GatherDecodeHits,    ///< "gather.decodeHits" — every gather hit a record (the decode route), never the caches
     Count
 };
 class ArmRegistry {

@@ -427,6 +427,9 @@
 		// whether the hit has a cell at all).
 		float atomHitSun = 1.0;
 		midf3 atomHitViewDir = midf3_c( 0.0, 0.0, 1.0 );
+		// THE GATHER'S RECORD (the record's bit 28, jah_rq_hit_record.glsl): the
+		// diffuse response only (the piece custom_ps_preLights below).
+		bool atomHitDiffuseOnly = false;
 		float2 fwdCustomFragCoord = float2( 0.0, 0.0 );
 		bool fwdCustomHasCell = false;
 	@end
@@ -642,6 +645,7 @@
 				atomFacing = dot( cross( w1 - w0, w2 - w0 ), -atomDirW );
 			}
 			atomHitSun = clamp( atomAux.x, 0.0, 1.0 );
+			atomHitDiffuseOnly = ( atomIds.x & 0x10000000u ) != 0u;
 			if( !atomOk )
 			{
 				b.w = float3( 1.0, 0.0, 0.0 );
@@ -882,6 +886,23 @@
 	// DoAmbientHeader formed from that reflDir. The Fresnel terms read NdotV and
 	// the lights' half vectors read viewDir inside BRDF, after this piece.
 	@piece( custom_ps_preLights )
+		// THE GATHER'S HITS ARE DIFFUSE-ONLY (SPECKLE-FIX-1, the owner's option 1):
+		// a screen-probe ray estimates irradiance, and the caches that answer its
+		// other hits store the diffuse response alone (the cards: albedo times
+		// irradiance plus the emissive; the voxels the same). Every specular term
+		// of the body is the material's specular colour times a lobe - the
+		// lights' BRDF, the area lights', the environment's (the cones, the probe,
+		// the sky) and the clear coat's environment term - and the clear coat's
+		// light lobe and its attenuation of the base are the coat's weight times a
+		// lobe, so zeroing the two drops exactly the specular and leaves the
+		// diffuse untouched. The REFLECTION's records keep the full lobe.
+		if( atomHitDiffuseOnly )
+		{
+			pixelData.specular.xyz = midf3_c( 0.0, 0.0, 0.0 );
+			@property( clear_coat )
+				pixelData.clearCoat = _h( 0.0 );
+			@end
+		}
 	@property( needs_view_dir )
 			pixelData.viewDir = atomHitViewDir;
 			pixelData.NdotV = saturate( dot( pixelData.normal, pixelData.viewDir ) );
