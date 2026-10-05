@@ -98,6 +98,8 @@
 #include <OgreTechnique.h>
 #include <OgrePass.h>
 #include <OgreGpuProgram.h>
+#include <OgreHighLevelGpuProgram.h>
+#include <OgreHighLevelGpuProgramManager.h>
 #include <OgreVisibilityFlags.h>
 #include <OgreGpuProgramParams.h>
 #include <OgrePixelFormatGpuUtils.h>
@@ -1183,44 +1185,131 @@ void maskOutHelpers(Ogre::CompositorNodeDef *n, Ogre::uint32 drop) {
     }
 }
 
-/// INSTANCED STEREO, ON EVERY SCENE PASS THIS NODE CARRIES (ChainDesc::stereo).
+/// THE MULTIVIEW TWIN OF A QUAD MATERIAL (LAYERED-STEREO-1), by name: "<name>/Multiview",
+/// made once per process and kept for its lifetime (MaterialManager owns it, the way
+/// it owns the original). The twin is the original's clone with every fragment
+/// program replaced by a twin PROGRAM — the same source with JAH_MULTIVIEW=1 added
+/// to its defines, which switches its screen-sized inputs to arrays read at
+/// gl_ViewIndex (JahScreen.glsl; the tonemap's own arm in the fork's HDR media) —
+/// and the pass's own constants copied across. A program with no such arm still
+/// compiles and draws both layers from layer 0's texture, which is wrong: every
+/// quad a stereo chain builds has its arm, and a new one must add it.
+std::string multiviewMaterial(const std::string &name) {
+    const std::string twinName = name + "/Multiview";
+    Ogre::MaterialManager &mm = Ogre::MaterialManager::getSingleton();
+    if (mm.resourceExists(twinName)) return twinName;
+    Ogre::MaterialPtr src = mm.getByName(name);
+    if (!src)
+        OGRE_EXCEPT(Ogre::Exception::ERR_ITEM_NOT_FOUND, "no material '" + name + "'",
+                    "chain::multiviewMaterial");
+    src->load();
+    Ogre::MaterialPtr twin = src->clone(twinName);
+    Ogre::HighLevelGpuProgramManager &pm = Ogre::HighLevelGpuProgramManager::getSingleton();
+    for (unsigned short ti = 0; ti < twin->getNumTechniques(); ++ti) {
+        Ogre::Technique *tech = twin->getTechnique(ti);
+        for (unsigned short pi = 0; pi < tech->getNumPasses(); ++pi) {
+            Ogre::Pass *pass = tech->getPass(pi);
+            if (!pass->hasFragmentProgram()) continue;
+            Ogre::GpuProgram *bound = pass->getFragmentProgram()->_getBindingDelegate();
+            auto *hl = dynamic_cast<Ogre::HighLevelGpuProgram *>(bound);
+            if (!hl)
+                OGRE_EXCEPT(Ogre::Exception::ERR_INVALIDPARAMS,
+                            "material '" + name + "': its fragment program is not high-level",
+                            "chain::multiviewMaterial");
+            const std::string progName = hl->getName() + "/Multiview";
+            if (!pm.resourceExists(progName)) {
+                Ogre::HighLevelGpuProgramPtr prog = pm.createProgram(
+                    // The SYNTAX code ("glslvk"), not getLanguage(): the Vulkan
+                    // program reports "glsl" as its language, which names the GL
+                    // factory and a syntax this render system does not run.
+                    progName, hl->getGroup(), hl->getSyntaxCode(), Ogre::GPT_FRAGMENT_PROGRAM);
+                // What the script translator gives every program it creates
+                // (OgreScriptTranslator.cpp, GpuProgramTranslator): the STANDARD
+                // root layout — every quad a stereo chain builds is declared with
+                // it (none names a `root_layout`, and the prefab cannot be read
+                // back from a program to be copied) — and the version macro.
+                prog->setMorphAnimationIncluded(false);
+                prog->setPoseAnimationIncluded(0);
+                prog->setSkeletalAnimationIncluded(false);
+                prog->setVertexTextureFetchRequired(false);
+                prog->setPrefabRootLayout(Ogre::PrefabRootLayout::Standard);
+                prog->setReplaceVersionMacro(true);
+                // ...then every parameter the original carries (its include switch,
+                // its defines, its reflection flags). The dictionary is shared by
+                // every program type and a fragment program REFUSES the vertex-only
+                // setters (num_clip_distances throws), so those are skipped; the
+                // root layout is the prefab above.
+                for (const Ogre::ParameterDef &d : hl->getParameters()) {
+                    if (d.name == "root_layout") continue;
+                    try {
+                        prog->setParameter(d.name, hl->getParameter(d.name));
+                    } catch (const Ogre::Exception &) {
+                    }
+                }
+                const std::string defines = hl->getParameter("preprocessor_defines");
+                prog->setParameter("preprocessor_defines",
+                                   defines.empty() ? std::string("JAH_MULTIVIEW=1")
+                                                   : defines + ",JAH_MULTIVIEW=1");
+                prog->setSourceFile(hl->getSourceFile());
+                prog->load();
+                if (hl->hasDefaultParameters() && prog->hasDefaultParameters())
+                    prog->getDefaultParameters()->copyMatchingNamedConstantsFrom(
+                        *hl->getDefaultParameters());
+            }
+            const Ogre::GpuProgramParametersSharedPtr old = pass->getFragmentProgramParameters();
+            pass->setFragmentProgram(progName);
+            pass->getFragmentProgramParameters()->copyMatchingNamedConstantsFrom(*old);
+        }
+    }
+    twin->load();
+    // The tonemap's per-view constants are pushed to its twin too, from the next
+    // resolve on (gTonemapMvParams).
+    forgetTonemapParams();
+    return twinName;
+}
+
+/// THE STEREO CHAIN IS LAYERED AND MULTIVIEW (ChainDesc::stereo; LAYERED-STEREO-1).
 ///
-/// The same sweep as maskOutHelpers and for the same reason: `build` below
-/// produces one of half a dozen shapes, each with its own set of PASS_SCENE
-/// sites (the opaque pass, the overlay pass, the SSR prepass, the depth/
-/// distortion/refraction passes, the shape's own extras — nine sites across the
-/// file as of this writing), and a stereo flag applied at some of them would
-/// draw some of the frame once, across both eyes, at the left eye's
-/// projection. Applying it HERE, to whatever the shape came out as, is what
-/// makes "all of them or none" structural rather than a checklist.
+/// A stereo view's target is a two-layer array, one eye per layer, and every
+/// pass that draws into a screen-sized texture of this node draws BOTH layers at
+/// once through VK_KHR_multiview (CompositorPassDef::mNumViews = 2): one draw,
+/// broadcast by the render pass, the eye being gl_ViewIndex in every shader. The
+/// eyes therefore rasterise at the SAME origin of their own layer, so identical
+/// inputs give identical bytes by construction — the side-by-side layout this
+/// replaced put the eyes at two viewport origins of one texture, and the
+/// rasteriser is not translation-invariant across viewport positions
+/// (spikes/vr-undithered-2: 51/300 frames differed at the shipped placement,
+/// 300/300 when the origins moved).
 ///
-/// What each pass gets (the pin's own recipe — Tutorial_OpenVR.cpp:135-160 and
-/// Tutorial_OpenVRWorkspace.compositor:23-29; the first Vulkan use of it at
-/// this pin, VR_SPEC §2.5):
-///   * mInstancedStereo  — HlmsBaseProp::InstancedStereo on every shader the
-///     pass compiles (OgreHlms.cpp:3532), two instances per draw with the
-///     viewport index taken from the instance's low bit (OgreRenderQueue.cpp
-///     :697-699), and the per-eye viewProj pair + leftToRightView written into
-///     the pass buffer from the camera's VrData (OgreHlmsPbs.cpp:2149-2280).
-///   * two viewports — the left eye in [0, .5] of the target's width and the
-///     right in [.5, 1]. `mNumViewports` is what makes the viewport index
-///     mean anything.
-///   * the cull camera — ONE frustum for both eyes, so the two eyes cull and
-///     light identically (Forward+ builds its grid from the cull camera and
-///     the shader transforms into its clip space).
+/// The same sweep as maskOutHelpers and for the same reason: `build` produces
+/// one of half a dozen shapes, each with its own scene, quad and clear sites,
+/// and a layer flag applied at some of them would leave a pass drawing one eye.
+/// Applying it HERE, to whatever the shape came out as, is what makes "all of
+/// them or none" structural rather than a checklist:
+///   * every screen-sized local texture (sized relative to the target) becomes
+///     a Type2DArray of two layers — except the hit list's three (kHitIds,
+///     kHitDest, kHitRadiance), which are a LIST and not a picture of either
+///     eye;
+///   * every scene, quad and clear pass into a layered target is multiview;
+///   * a scene pass also gets mInstancedStereo (the pass buffer's per-eye
+///     viewProj pair and leftToRightView from the camera's VrData,
+///     OgreHlmsPbs.cpp) and the cull camera — ONE frustum for both eyes, so they
+///     cull and light identically; with mNumViews the fork draws each object
+///     ONCE (hlms_multiview, F3) instead of once per eye;
+///   * a quad's material becomes its multiview twin (multiviewMaterial): the
+///     same program text with JAH_MULTIVIEW, reading its screen-sized inputs as
+///     arrays at gl_ViewIndex (JahScreen.glsl).
+/// The hit decode pass is not a picture of either eye and keeps one view.
 ///
 /// `mReuseCullData` is deliberately NOT set: it is an optimisation for a
 /// SECOND pass that culls the same set as a first one, and our shapes' scene
 /// passes have different render-queue ranges and different visibility masks.
 ///
 /// AND NO MATERIAL SCHEME IS SET HERE, which is worth a line because it is the
-/// obvious thing to try (V2F-4): `CompositorPassSceneDef::mMaterialScheme`
-/// exists, the pass pushes it onto the viewport and the scene manager pushes it
-/// into MaterialManager — but a LOW-LEVEL material's technique is resolved into
-/// the renderable's cached Hlms hash when its MATERIAL is set
+/// obvious thing to try (V2F-4): a LOW-LEVEL material's technique is resolved
+/// into the renderable's cached Hlms hash when its MATERIAL is set
 /// (`HlmsLowLevel::calculateHashFor`), not per pass, so a scheme switched on
-/// here selects nothing and costs every low-level draw in the pass a scheme
-/// miss and an arbitration call. The screen quads are made stereo by swapping
+/// here selects nothing. The scene's screen quads are made stereo by swapping
 /// their MATERIAL instead (OgreVrSession.cpp, syncStereoQuads).
 /// THE LOD SWITCH BAND, ON EVERY SCENE PASS THIS NODE CARRIES
 /// (ChainDesc::lodHysteresis, fork 5230c9390+8282f6d70 (was 0075)).
@@ -1258,29 +1347,73 @@ void applyLodHysteresis(Ogre::CompositorNodeDef *n, float band) {
 void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
     const Ogre::IdString cull = cullCamera.empty() ? Ogre::IdString()
                                                    : Ogre::IdString(cullCamera);
+    // THE LAYERED TEXTURES: the target, and every texture sized relative to it
+    // that is a picture (not the hit list).
+    std::unordered_set<Ogre::uint32> layered;
+    layered.insert(Ogre::IdString(kTargetChannel).getU32Value());
+    const Ogre::IdString hitList[] = { Ogre::IdString(kHitIds), Ogre::IdString(kHitDest),
+                                       Ogre::IdString(kHitRadiance) };
+    for (auto &td : n->getLocalTextureDefinitionsNonConst()) {
+        if (td.width != 0u || td.height != 0u) continue;          // fixed size: not a picture
+        if (std::find(std::begin(hitList), std::end(hitList), td.getName()) != std::end(hitList))
+            continue;
+        td.textureType = Ogre::TextureTypes::Type2DArray;
+        td.depthOrSlices = 2u;
+        layered.insert(td.getName().getU32Value());
+    }
+    const auto isLayered = [&](Ogre::IdString name) {
+        return layered.count(name.getU32Value()) != 0u;
+    };
+    // A target pass names a texture or an RTV; an RTV is layered when what it
+    // attaches is.
+    const auto targetLayered = [&](Ogre::IdString name) {
+        if (isLayered(name)) return true;
+        const Ogre::RenderTargetViewDef *rtv = n->getRenderTargetViewDefNonConstNoThrow(name);
+        if (!rtv) return false;
+        if (!rtv->colourAttachments.empty()) return isLayered(rtv->colourAttachments[0].textureName);
+        return isLayered(rtv->depthAttachment.textureName);
+    };
     const size_t targets = n->getNumTargetPasses();
     for (size_t t = 0; t < targets; ++t) {
         Ogre::CompositorTargetDef *td = n->getTargetPass(t);
         if (!td) continue;
+        const bool targetIsLayered = targetLayered(td->getRenderTargetName());
         for (Ogre::CompositorPassDef *p : td->getCompositorPasses()) {
-            if (!p || p->getType() != Ogre::PASS_SCENE) continue;
-            // THE HIT DECODE IS NOT A PICTURE OF EITHER EYE: its target is the hit
-            // list, one fragment per record (ChainDesc::hitDecode).
-            if (p->mIdentifier == kHitDecodePassIdentifier) continue;
-            auto *sp = static_cast<Ogre::CompositorPassSceneDef *>(p);
-            sp->mInstancedStereo = true;
-            sp->mCullCameraName  = cull;
-            sp->mNumViewports    = 2u;
-            for (int eye = 0; eye < 2; ++eye) {
-                const float left = eye == 0 ? 0.0f : 0.5f;
-                sp->mVpRect[eye].mVpLeft   = left; sp->mVpRect[eye].mVpTop    = 0.0f;
-                sp->mVpRect[eye].mVpWidth  = 0.5f; sp->mVpRect[eye].mVpHeight = 1.0f;
-                // The SCISSOR follows the viewport: without it each eye's pass
-                // would scissor the whole target and a clear or a full-target
-                // quad inside the pass would reach into the other eye.
-                sp->mVpRect[eye].mVpScissorLeft   = left; sp->mVpRect[eye].mVpScissorTop    = 0.0f;
-                sp->mVpRect[eye].mVpScissorWidth  = 0.5f; sp->mVpRect[eye].mVpScissorHeight = 1.0f;
+            if (!p) continue;
+            if (p->getType() == Ogre::PASS_QUAD) {
+                auto *q = static_cast<Ogre::CompositorPassQuadDef *>(p);
+                bool readsLayered = false;
+                for (const auto &src : q->getTextureSources())
+                    readsLayered = readsLayered || isLayered(src.textureName);
+                if (readsLayered && !targetIsLayered)
+                    OGRE_EXCEPT(Ogre::Exception::ERR_INVALID_STATE,
+                                "stereo chain: quad '" + q->mProfilingId +
+                                    "' reads a layered texture into a single-layer target",
+                                "chain::applyStereo");
             }
+            if (!targetIsLayered) continue;
+            switch (p->getType()) {
+            case Ogre::PASS_SCENE: {
+                // THE HIT DECODE IS NOT A PICTURE OF EITHER EYE: its target is the
+                // hit list, one fragment per record (ChainDesc::hitDecode) — and a
+                // list texture is never layered, so it never reaches here.
+                auto *sp = static_cast<Ogre::CompositorPassSceneDef *>(p);
+                sp->mInstancedStereo = true;
+                sp->mCullCameraName  = cull;
+                break;
+            }
+            case Ogre::PASS_QUAD: {
+                auto *q = static_cast<Ogre::CompositorPassQuadDef *>(p);
+                q->mMaterialName = multiviewMaterial(q->mMaterialName);
+                break;
+            }
+            case Ogre::PASS_CLEAR:
+            case Ogre::PASS_STENCIL:
+                break;
+            default:
+                continue;   // copies and computes open no render pass
+            }
+            p->mNumViews = 2u;
         }
     }
 }
@@ -3315,22 +3448,16 @@ void setExposure(float exposure, float minAutoExposure, float maxAutoExposure) {
 /// coefficient that puts half weight at `kCentreWeightedHalfRadius` half-frame-
 /// heights from the centre, and the spot's radius is derived in the shader from
 /// its AREA fraction so that the same 2.5 % holds on any window shape.
-void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent, bool stereo) {
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent) {
     const float k = float(std::log(2.0)) /
                     (meter::kCentreWeightedHalfRadius * meter::kCentreWeightedHalfRadius);
     setMeterParam(kMeterBuildJob, "meterParams",
                   Ogre::Vector4(float(int(pattern)), k, meter::kSpotAreaFraction,
                                 meter::kCentreWeightedPedestal));
-    // HOW MANY EYES ARE IN THE TARGET (lane EYE-GRADE-1). A stereo view renders
-    // the two eyes side by side into one texture, so the target's CENTRE — the
-    // origin of every metering pattern — is the pair's inner edge and is nowhere
-    // in either picture: a centre-weighted meter would weight both nasal edges
-    // and a spot would meter the wearer's nose. The shader evaluates the
-    // pattern in the EYE's own frame when this is 2, and bins both eyes into
-    // the one histogram (one measurement, two patterns —
-    // JahHdrMeterBuild_cs.glsl says why a per-eye exposure would be worse).
-    setMeterParam(kMeterBuildJob, "meterEyes",
-                  Ogre::Vector4(stereo ? 2.0f : 1.0f, 0.0f, 0.0f, 0.0f));
+    // A STEREO view's target is LAYERED (LAYERED-STEREO-1): each eye is a whole
+    // frame in its own layer, so the pattern's centre is each eye's own and
+    // both eyes bin into the one histogram (JahHdrMeterBuild_cs.glsl says why a
+    // per-eye exposure would be worse). Nothing about eyes is pushed.
     // Percentiles in, FRACTIONS out, ordered and inside [0, 1]: the shader walks
     // a cumulative weight and a reversed or out-of-range pair would silently
     // select nothing.
@@ -3388,6 +3515,13 @@ bool noDitherEnv() {
 /// the lookup is done on first use and dropped in destroySsao (which is this
 /// file's material-state teardown, called from ~OgreEngine).
 Ogre::GpuProgramParametersSharedPtr gTonemapParams;
+/// ...and its MULTIVIEW twin's (a stereo chain's tonemap, multiviewMaterial), once
+/// a stereo view made it: the same constants, pushed to both.
+Ogre::GpuProgramParametersSharedPtr gTonemapMvParams;
+template <typename T> void tonemapSet(const char *name, const T &value) {
+    gTonemapParams->setNamedConstant(name, value);
+    if (gTonemapMvParams) gTonemapMvParams->setNamedConstant(name, value);
+}
 bool  gTonemapResolved = false;
 bool  gTonemapHasDither = false;
 bool  gTonemapHasBloomAmount = false;
@@ -3406,6 +3540,10 @@ void resolveTonemapParams() {
     gTonemapResolved = true;
     if (Ogre::Pass *pass = materialPass("HDR/FinalToneMapping")) {
         if (pass->hasFragmentProgram()) gTonemapParams = pass->getFragmentProgramParameters();
+    }
+    if (Ogre::MaterialManager::getSingleton().resourceExists("HDR/FinalToneMapping/Multiview")) {
+        if (Ogre::Pass *mv = materialPass("HDR/FinalToneMapping/Multiview"))
+            if (mv->hasFragmentProgram()) gTonemapMvParams = mv->getFragmentProgramParameters();
     }
     if (!gTonemapParams) return;   // no tonemap quad in this pipeline
     gTonemapHasDither =
@@ -3446,6 +3584,7 @@ void verifyTonemapMedia() {
 
 void forgetTonemapParams() {
     gTonemapParams.reset();
+    gTonemapMvParams.reset();
     gTonemapResolved = false;
     gTonemapHasDither = false;
     gTonemapHasBloomAmount = false;
@@ -3477,7 +3616,7 @@ void setBloomAmount(float amount) {
     const float v = std::min(std::max(amount, 0.0f), 2.0f);
     if (v == gBloomAmountPushed) return;   // debounced on the last value pushed
     gBloomAmountPushed = v;
-    gTonemapParams->setNamedConstant("jahBloomAmountMinusOne", v - 1.0f);
+    tonemapSet("jahBloomAmountMinusOne", v - 1.0f);
 }
 
 namespace {
@@ -3571,21 +3710,21 @@ void setImageGrade(const ImageGrade &g) {
     gImagePushed = true;
     gImageGradePushed = g;
     const ImageGrade d;
-    gTonemapParams->setNamedConstant(
+    tonemapSet(
         "jahImage0", Ogre::Vector4(g.contrast - d.contrast, g.saturation - d.saturation,
                                    g.shadows, g.highlights));
-    gTonemapParams->setNamedConstant("jahImage1", Ogre::Vector4(g.vignette, 0.0f, 0.0f, 0.0f));
-    gTonemapParams->setNamedConstant(
+    tonemapSet("jahImage1", Ogre::Vector4(g.vignette, 0.0f, 0.0f, 0.0f));
+    tonemapSet(
         "jahFilm0", Ogre::Vector4(g.filmSlope - d.filmSlope, g.filmToe - d.filmToe,
                                   g.filmShoulder - d.filmShoulder, g.filmBlackClip));
-    gTonemapParams->setNamedConstant(
+    tonemapSet(
         "jahFilm1", Ogre::Vector4(g.filmWhiteClip - d.filmWhiteClip, 0.0f, 0.0f, 0.0f));
     double m[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
     if (g.whiteTemperature != d.whiteTemperature || g.whiteTint != d.whiteTint)
         whiteBalanceMatrix(g.whiteTemperature, g.whiteTint, m);
     const char *rows[3] = { "jahWhite0", "jahWhite1", "jahWhite2" };
     for (int i = 0; i < 3; ++i)
-        gTonemapParams->setNamedConstant(
+        tonemapSet(
             rows[i], Ogre::Vector4(float(m[i * 3] - (i == 0 ? 1.0 : 0.0)),
                                    float(m[i * 3 + 1] - (i == 1 ? 1.0 : 0.0)),
                                    float(m[i * 3 + 2] - (i == 2 ? 1.0 : 0.0)), 0.0f));
@@ -3599,7 +3738,7 @@ void setDither(bool off) {
     // that disagree alternate and each still writes before its own passes.
     if (v == gDitherOffPushed) return;
     gDitherOffPushed = v;
-    gTonemapParams->setNamedConstant("jahDitherOff", v);
+    tonemapSet("jahDitherOff", v);
 }
 
 // ---- SSAO -----------------------------------------------------------------
@@ -4079,8 +4218,7 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         // uniforms for a view that never dispatches it would hand the next
         // auto-exposed view somebody else's pattern.
         if (!desc.tonemapFixed)
-            setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent,
-                     desc.stereo);
+            setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent);
         if (desc.bloom) {
             setBloomThreshold(desc.bloomThreshold,
                               desc.bloomThreshold + std::max(0.01f, desc.bloomKnee));

@@ -81,24 +81,29 @@
 	#define ogre_u0 binding = 0
 @end
 
-vulkan_layout( ogre_t0 ) uniform texture2D hdrTexture;
+// A STEREO VIEW'S TARGET IS LAYERED (LAYERED-STEREO-1): one eye per layer of a
+// two-layer array, the dispatch's z is the layer (thread groups are based on the
+// texture, whose depth is its layer count), and each eye is a whole frame with
+// its own centre - so the pattern below needs no notion of eyes at all.
+@property( texture0_texture_type == TextureTypes_Type2DArray )
+	vulkan_layout( ogre_t0 ) uniform texture2DArray hdrTexture;
+	#define jahHdrFetch( p ) texelFetch( hdrTexture, ivec3( p, int( gl_GlobalInvocationID.z ) ), 0 )
+@else
+	vulkan_layout( ogre_t0 ) uniform texture2D hdrTexture;
+	#define jahHdrFetch( p ) texelFetch( hdrTexture, p, 0 )
+@end
 
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece( uav0_pf_type ) )
 uniform restrict uimage2D histogram;
 
 vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 meterParams;
-	uniform vec4 meterEyes;
 vulkan( }; )
 
 #define p_pattern       meterParams.x
 #define p_gaussK        meterParams.y
 #define p_spotArea      meterParams.z
 #define p_pedestal      meterParams.w
-// HOW MANY EYES ARE IN THIS TARGET (lane EYE-GRADE-1): 1 for every ordinary
-// view, 2 for the VR session's pair, which renders the two eyes side by side
-// into ONE texture. See jahMeterWeight.
-#define p_eyes          meterEyes.x
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
@@ -126,26 +131,17 @@ const float c_weightScale = 256.0;
 const float c_logScale    = 4096.0;
 const float c_spotFeather = 0.15;
 
-// THE PATTERN IS PER EYE, AND THE MEASUREMENT IS ONE (lane EYE-GRADE-1).
-//
-// A stereo target carries the two eyes side by side, so its geometric centre is
-// the pair's INNER EDGE and is nowhere in either picture: a centre-weighted
-// meter would have weighted each eye's nasal edge and a spot would have metered
-// the wearer's nose. `uv` is therefore mapped into the EYE's own frame before
-// the pattern is evaluated (and the aspect is the eye's, not the pair's), so
-// the same circle-in-pixels rule holds per eye.
+// THE PATTERN IS PER EYE, AND THE MEASUREMENT IS ONE (lane EYE-GRADE-1). Each
+// eye is its own layer, so `uv` and the aspect are already the eye's.
 //
 // BOTH EYES STILL BIN INTO ONE HISTOGRAM, deliberately: the two pictures differ
 // by an interpupillary distance, and a per-eye exposure — two chains converging
 // separately — is binocular rivalry in the one dimension the visual system is
 // least forgiving about. One measurement, two patterns.
-float jahMeterWeight( vec2 uv, float aspect, float eyes )
+float jahMeterWeight( vec2 uv, float aspect )
 {
-	const float n = max( eyes, 1.0 );
-	// The eye-local u: 0..1 inside whichever half (or whole) this texel is in,
-	// and the EYE's own aspect, which is the target's divided by the eye count.
-	const vec2 eyeUv = vec2( fract( uv.x * n ), uv.y );
-	const float a = aspect / n;
+	const vec2 eyeUv = uv;
+	const float a = aspect;
 	// q: the offset from the centre in units of half the frame HEIGHT, so the
 	// pattern is a circle in pixels on any window shape.
 	const vec2 q = ( eyeUv - 0.5 ) * 2.0 * vec2( a, 1.0 );
@@ -164,7 +160,7 @@ float jahMeterWeight( vec2 uv, float aspect, float eyes )
 
 void main()
 {
-	const ivec2 texSize = textureSize( hdrTexture, 0 );
+	const ivec2 texSize = textureSize( hdrTexture, 0 ).xy;
 	// ONE SAMPLE PER 4x4 PIXELS. The job's `thread_groups_based_on_texture`
 	// divisor is 4, and Ogre reads that as "one INVOCATION per 4 pixels on each
 	// axis" before it divides by the 8x8 threads per group
@@ -178,7 +174,7 @@ void main()
 	if( px.x >= texSize.x || px.y >= texSize.y )
 		return;
 
-	const vec3 rgb = texelFetch( hdrTexture, px, 0 ).xyz;
+	const vec3 rgb = jahHdrFetch( px ).xyz;
 	float lum = dot( rgb, c_luminanceCoeffs );
 
 	// AN UNUSABLE SAMPLE IS NOT BINNED - it does not vote, and nothing else in
@@ -204,7 +200,7 @@ void main()
 
 	const vec2 uv = ( vec2( px ) + 0.5 ) / vec2( texSize );
 	const float aspect = float( texSize.x ) / float( texSize.y );
-	const float w = clamp( jahMeterWeight( uv, aspect, p_eyes ), 0.0, 1.0 );
+	const float w = clamp( jahMeterWeight( uv, aspect ), 0.0, 1.0 );
 
 	const uint wq = uint( w * c_weightScale + 0.5 );
 	if( wq == 0u )

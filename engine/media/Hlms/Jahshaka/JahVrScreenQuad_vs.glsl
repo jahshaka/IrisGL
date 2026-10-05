@@ -1,26 +1,23 @@
-// THE STEREO SCREEN QUAD (SPECS/VR_SPEC.md §4.3; lane VR-2's F2).
+// THE STEREO SCREEN QUAD (SPECS/VR_SPEC.md §4.3; lane VR-2's F2, LAYERED-STEREO-1).
 //
-// THE DEFECT IT EXISTS FOR. Under instanced stereo the pass draws EVERYTHING
-// twice (OgreRenderQueue.cpp:697-699 — two instances, the base instance shifted
-// by one) and the second instance reaches the second eye only if the vertex
-// shader sends it there with `gl_ViewportIndex`. Every Hlms vertex shader does
-// (Pbs/Unlit/Terra's 800.VertexShader_piece_vs.any). The three SCREEN QUADS in
-// this engine — Ogre's sky, Ogre's atmosphere and our sun disc — do not: they
-// are low-level materials whose vertex programs were written for one viewport,
-// so both copies land in viewport 0 and THE RIGHT EYE HAS NO SKY.
+// THE DEFECT IT EXISTS FOR. The stereo chain is MULTIVIEW: each eye is a layer
+// of the target at the same origin and the render pass broadcasts every draw to
+// both, the eye being gl_ViewIndex. Every Hlms vertex shader picks its eye's
+// matrices by it (hlms_multiview). The three SCREEN QUADS in this engine —
+// Ogre's sky, Ogre's atmosphere and our sun disc — are low-level materials whose
+// vertex programs know one camera, so both eyes would get the same ray.
 //
-// And the ray is wrong in the left eye too, which is the half that is easy to
-// miss. Upstream's `Ogre/Compositor/QuadCameraDirNoUV_vs` does not compute the
-// camera ray at all: it reads it out of the quad's NORMALS, which
-// SceneManager writes once per camera from that camera's own frustum corners
+// And the ray would be wrong in the left eye too, which is the half that is easy
+// to miss. Upstream's `Ogre/Compositor/QuadCameraDirNoUV_vs` does not compute the
+// camera ray at all: it reads it out of the quad's NORMALS, which SceneManager
+// writes once per camera from that camera's own frustum corners
 // (OgreSceneManager.cpp:1487-1499). In a VR session the rendering camera is the
 // HEAD — its own projection is the View's CameraDesc, not either eye's — so the
-// sky is drawn through a frustum nobody is looking through.
+// sky would be drawn through a frustum nobody is looking through.
 //
-// THIS SHADER FIXES BOTH, and it fixes them the way our sun disc already
-// worked: the eye index comes from the instance, and the ray is UNPROJECTED
-// from that eye's own inverse view-projection instead of read out of a normal.
-// The session writes the pair every frame (the same two matrices VrData holds).
+// THIS SHADER FIXES BOTH: the eye is the view, and the ray is UNPROJECTED from
+// that eye's own inverse view-projection instead of read out of a normal. The
+// session writes the pair every frame (the same two matrices VrData holds).
 //
 // IT SERVES ALL THE QUADS. Every consumer normalizes the interpolated ray
 // (SkyCubemap_ps, SkyEquirectangular_ps, our own JahAtmosphereSky_ps,
@@ -28,13 +25,10 @@
 // all; and all three quads are full-screen rectangles whose vertices are
 // already normalised device coordinates, so there is no transform to apply.
 //
-// VULKAN ONLY, deliberately: `gl_InstanceIndex` is the Vulkan spelling and
-// instanced stereo is a Vulkan feature of this engine. A GL3Plus build would
-// need `gl_InstanceID` and a second delegate; it would also need instanced
-// stereo, which it does not have.
+// VULKAN ONLY, deliberately: multiview stereo is a Vulkan path of this engine.
 #version ogre_glsl_ver_330
 
-#extension GL_ARB_shader_viewport_layer_array : require
+#extension GL_EXT_multiview : require
 
 vulkan_layout( OGRE_POSITION ) in vec2 vertex;
 
@@ -86,12 +80,11 @@ out block
 
 void main()
 {
-	// THE EYE IS THE INSTANCE'S LOW BIT, which is the same convention every
-	// Hlms shader uses (`inVs_stereoDrawId & 0x01u`): the queue shifts the base
-	// instance left by one and draws two instances, so the low bit is the eye
-	// whether or not the device supports a base instance at all.
-	const int eye = gl_InstanceIndex & 1;
-	gl_ViewportIndex = eye;
+	// THE EYE IS THE VIEW (LAYERED-STEREO-1): the stereo chain is a multiview
+	// one, each eye a layer of the target at the same origin, and the render
+	// pass broadcasts this one draw to both — so the eye is gl_ViewIndex, as it
+	// is in every Hlms shader under hlms_multiview.
+	const int eye = int( gl_ViewIndex );
 
 	gl_Position = vec4( vertex.xy, rsDepthRange.y, 1.0 );
 

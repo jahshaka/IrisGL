@@ -40,6 +40,7 @@
 fragment_program Jahshaka/Look/Desaturate_ps_GLSL glsl
 {
 	source JahLookDesaturate_ps.glsl
+	enable_include_header true
 	default_params
 	{
 		param_named sourceTexture int 0
@@ -48,6 +49,7 @@ fragment_program Jahshaka/Look/Desaturate_ps_GLSL glsl
 fragment_program Jahshaka/Look/Desaturate_ps_VK glslvk
 {
 	source JahLookDesaturate_ps.glsl
+	enable_include_header true
 }
 fragment_program Jahshaka/Look/Desaturate_ps unified
 {
@@ -91,6 +93,7 @@ material Jahshaka/Look/Desaturate
 fragment_program Jahshaka/Look/GlassWarp_ps_GLSL glsl
 {
 	source JahLookGlassWarp_ps.glsl
+	enable_include_header true
 	default_params
 	{
 		param_named sourceTexture int 0
@@ -99,6 +102,7 @@ fragment_program Jahshaka/Look/GlassWarp_ps_GLSL glsl
 fragment_program Jahshaka/Look/GlassWarp_ps_VK glslvk
 {
 	source JahLookGlassWarp_ps.glsl
+	enable_include_header true
 }
 fragment_program Jahshaka/Look/GlassWarp_ps unified
 {
@@ -194,6 +198,7 @@ material Jahshaka/Look/RadialBlur
 fragment_program Jahshaka/Look/OldMovie_ps_GLSL glsl
 {
 	source JahLookOldMovie_ps.glsl
+	enable_include_header true
 	default_params
 	{
 		param_named sourceTexture int 0
@@ -202,6 +207,7 @@ fragment_program Jahshaka/Look/OldMovie_ps_GLSL glsl
 fragment_program Jahshaka/Look/OldMovie_ps_VK glslvk
 {
 	source JahLookOldMovie_ps.glsl
+	enable_include_header true
 }
 fragment_program Jahshaka/Look/OldMovie_ps unified
 {
@@ -246,6 +252,7 @@ material Jahshaka/Look/OldMovie
 fragment_program Jahshaka/Look/Posterize_ps_GLSL glsl
 {
 	source JahLookPosterize_ps.glsl
+	enable_include_header true
 	default_params
 	{
 		param_named sourceTexture int 0
@@ -254,6 +261,7 @@ fragment_program Jahshaka/Look/Posterize_ps_GLSL glsl
 fragment_program Jahshaka/Look/Posterize_ps_VK glslvk
 {
 	source JahLookPosterize_ps.glsl
+	enable_include_header true
 }
 fragment_program Jahshaka/Look/Posterize_ps unified
 {
@@ -295,6 +303,7 @@ material Jahshaka/Look/Posterize
 fragment_program Jahshaka/Look/Sharpen_ps_GLSL glsl
 {
 	source JahLookSharpen_ps.glsl
+	enable_include_header true
 	default_params
 	{
 		param_named sourceTexture int 0
@@ -303,6 +312,7 @@ fragment_program Jahshaka/Look/Sharpen_ps_GLSL glsl
 fragment_program Jahshaka/Look/Sharpen_ps_VK glslvk
 {
 	source JahLookSharpen_ps.glsl
+	enable_include_header true
 }
 fragment_program Jahshaka/Look/Sharpen_ps unified
 {

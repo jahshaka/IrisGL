@@ -18,7 +18,9 @@
 // knob is the product, and adding one to a sample shader would fork it.
 #version ogre_glsl_ver_330
 
-vulkan_layout( ogre_t0 ) uniform texture2D sourceTexture;
+#include "JahScreen.glsl"
+
+vulkan_layout( ogre_t0 ) uniform JahScreenTexture sourceTexture;
 
 vulkan( layout( ogre_s0 ) uniform sampler pointSampler );
 
@@ -37,7 +39,7 @@ out vec4 fragColour;
 
 void main()
 {
-	const vec4 src = texture( vkSampler2D( sourceTexture, pointSampler ), inPs.uv0 );
+	const vec4 src = texture( jahScreenSampler( sourceTexture, pointSampler ), jahScreenUv( inPs.uv0 ) );
 	// Rec.601 luma, the sample's weights.
 	const float luma = dot( src.rgb, vec3( 0.3, 0.59, 0.11 ) );
 	const float amount = clamp( lookParams0.x, 0.0, 1.0 );

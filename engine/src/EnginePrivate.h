@@ -1695,8 +1695,7 @@ bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef)
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
 /// THE METER'S PATTERN AND CLIPS (EXPOSURE-2). Uniforms on the histogram
 /// meter's compute jobs; only meaningful for the form that measures.
-void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent,
-               bool stereo);
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent);
 void setBloomThreshold(float minThreshold, float fullColourThreshold);
 void initSsao(Ogre::Root *root);
 void destroySsao(Ogre::Root *root);
@@ -7745,8 +7744,12 @@ public:
     /// `samples` > 1 asks for an implicit-resolve MSAA target: the sample
     /// description MUST be set before scheduleTransitionTo(Resident) (Ogre
     /// asserts OnStorage); the achieved count is validated at the transition.
+    /// `layers` > 1 = a LAYERED target (a stereo view, LAYERED-STEREO-1): a
+    /// Type2DArray of w / layers x h, one layer per eye, so every eye renders at
+    /// the same origin of its own layer (multiview). `w` stays the PAIR's width.
     static Ogre::TextureGpu *createRtt(Ogre::Root *root, const std::string &name,
-                                       unsigned w, unsigned h, unsigned samples = 1);
+                                       unsigned w, unsigned h, unsigned samples = 1,
+                                       unsigned layers = 1);
     /// Rounds down to a power of two and clamps to [1, 16] — what the backend
     /// will even ask the driver for (the driver may still clamp further).
     static unsigned sanitizeSamples(unsigned samples);

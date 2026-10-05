@@ -1,0 +1,36 @@
+// THE HIDDEN-AREA MASK'S MATERIAL (LAYERED-STEREO-1): Ogre's
+// `Ogre/VR/HiddenAreaMeshVr` pass state with a multiview vertex program
+// (JahVrHiddenArea_vs.glsl). Depth only, no colour: the mask writes the near
+// plane over the pixels the lens never shows, and every later draw fails the
+// depth test there.
+vertex_program Jahshaka/VrHiddenArea_vs glslvk
+{
+	source JahVrHiddenArea_vs.glsl
+
+	default_params
+	{
+		param_named_auto	projectionMatrix	projection_matrix
+		param_named_auto	rsDepthRange		rs_depth_range
+	}
+}
+
+material Jahshaka/VrHiddenArea
+{
+	technique
+	{
+		pass
+		{
+			cull_hardware none
+			depth_func always_pass
+			channel_mask 0
+
+			vertex_program_ref Jahshaka/VrHiddenArea_vs
+			{
+			}
+
+			fragment_program_ref Ogre/VR/HiddenAreaMeshVr_ps
+			{
+			}
+		}
+	}
+}

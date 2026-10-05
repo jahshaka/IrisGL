@@ -69,6 +69,7 @@
 #include "OgreVulkanRenderSystem.h"
 #include "OgreVulkanTextureGpu.h"
 #include "OgreVulkanMappings.h"
+#include <OgrePixelFormatGpuUtils.h>
 #include "OgreVulkanDevice.h"
 #include "OgreVulkanQueue.h"
 #include "Vao/OgreVulkanBufferInterface.h"
@@ -770,8 +771,18 @@ private:
     RawBuffer mDummyStorage;
     bool mDummiesReady = false;
     bool mDummiesNeedClear = false;
+    /// `layers` 0 = a plain 2D image and view (the hit list's stand-ins); n >= 1 =
+    /// a SCREEN image of n layers (one per eye, LAYERED-STEREO-1) and a 2D_ARRAY
+    /// view of all of them, which is what every screen shader declares.
     bool makeStorageImage(unsigned w, unsigned h, VkFormat fmt, ReflectImage &out,
-                          std::string &err);
+                          std::string &err, unsigned layers = 0u);
+    /// A 2D_ARRAY VIEW OF EVERY LAYER of an Ogre screen texture (LAYERED-STEREO-1):
+    /// a mono view's texture is a 2D image and gets a one-layer array view, a
+    /// stereo view's is a two-layer array — so every screen shader of the tier
+    /// declares arrays, the eye being the layer. Uncached and retired, for the
+    /// reason sampledView's note gives (a cached view of a texture recreated at the
+    /// same address is a view of a dead image).
+    VkImageView layerView(Ogre::TextureGpu *t, bool storage);
     void drainRetired();
     void evictStaleBlas(SceneAs &sa);
 
@@ -1017,10 +1028,10 @@ public:
         if (mapped) *mapped = b.mapped;
         return true;
     }
-    bool gatherMakeImage(unsigned w, unsigned h, VkFormat fmt, VkImage &image,
+    bool gatherMakeImage(unsigned w, unsigned h, unsigned layers, VkFormat fmt, VkImage &image,
                          VkDeviceMemory &memory, VkImageView &view, std::string &err) override {
         ReflectImage img;
-        if (!makeStorageImage(w, h, fmt, img, err)) return false;
+        if (!makeStorageImage(w, h, fmt, img, err, layers)) return false;
         image = img.image;
         memory = img.memory;
         view = img.view;
@@ -1040,6 +1051,9 @@ public:
         retireImage(img);
     }
     void gatherRetireView(VkImageView view) override { retireView(view); }
+    VkImageView gatherLayerView(Ogre::TextureGpu *t, bool storage) override {
+        return layerView(t, storage);
+    }
     void gatherRetireSet(VkDescriptorSet set, VkDescriptorPool pool) override {
         retireSet(set, pool);
     }
@@ -1620,14 +1634,14 @@ void RayQueryTier::clearDummyImages(VkCommandBuffer cmd) {
 }
 
 bool RayQueryTier::makeStorageImage(unsigned w, unsigned h, VkFormat fmt, ReflectImage &out,
-                                    std::string &err) {
+                                    std::string &err, unsigned layers) {
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = fmt;
     ici.extent = { w, h, 1u };
     ici.mipLevels = 1;
-    ici.arrayLayers = 1;
+    ici.arrayLayers = std::max(layers, 1u);
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -1654,11 +1668,11 @@ bool RayQueryTier::makeStorageImage(unsigned w, unsigned h, VkFormat fmt, Reflec
     VkImageViewCreateInfo vci{};
     vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     vci.image = out.image;
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.viewType = layers ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     vci.format = fmt;
     vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vci.subresourceRange.levelCount = 1;
-    vci.subresourceRange.layerCount = 1;
+    vci.subresourceRange.layerCount = std::max(layers, 1u);
     if (vkCreateImageView(mVk, &vci, nullptr, &out.view) != VK_SUCCESS) {
         vkFreeMemory(mVk, out.memory, nullptr);
         vkDestroyImage(mVk, out.image, nullptr);
@@ -1667,6 +1681,32 @@ bool RayQueryTier::makeStorageImage(unsigned w, unsigned h, VkFormat fmt, Reflec
         return false;
     }
     return true;
+}
+
+VkImageView RayQueryTier::layerView(Ogre::TextureGpu *t, bool storage) {
+    if (!t) return VK_NULL_HANDLE;
+    auto *vt = static_cast<Ogre::VulkanTextureGpu *>(t);
+    // The format Ogre's own views use: a storage view takes the LINEAR equivalent
+    // (an sRGB format has no storage), a sampled one the texture's own.
+    Ogre::PixelFormatGpu pf = t->getPixelFormat();
+    if (storage) pf = Ogre::PixelFormatGpuUtils::getEquivalentLinear(pf);
+    VkImageViewUsageCreateInfo usage{};
+    usage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+    usage.usage = storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.pNext = &usage;
+    vci.image = vt->getFinalTextureName();
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    vci.format = Ogre::VulkanMappings::get(pf);
+    // A depth texture is sampled through its DEPTH aspect alone.
+    vci.subresourceRange.aspectMask = Ogre::VulkanMappings::getImageAspect(pf, true);
+    vci.subresourceRange.levelCount = storage ? 1u : std::max<uint32_t>(t->getNumMipmaps(), 1u);
+    vci.subresourceRange.layerCount = std::max<uint32_t>(t->getNumSlices(), 1u);
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(mVk, &vci, nullptr, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
+    retireView(view);
+    return view;
 }
 
 void RayQueryTier::drainRetired() {
@@ -6358,13 +6398,16 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     // by the integrate when the scene's view asks and it is the gather's size.
     if (scene->photonView() == PhotonView::ScreenProbes) {
         Ogre::TextureGpu *o = view->photonOverlay();
-        if (o && o->getWidth() == in.width && o->getHeight() == in.height) {
+        if (o && o->getWidth() == in.width && o->getHeight() == in.height &&
+            o->getNumSlices() == depthTex->getNumSlices()) {
             in.photonOverlay = o;
             in.photonOverlayGeneration = view->photonOverlayGeneration();
         }
     }
-    // A two-eye target must split into two whole eyes (the reflection's guard).
-    if (stereo && (in.width < 2u || (in.width & 1u))) return;
+    // A STEREO VIEW'S TEXTURES ARE LAYERED, one eye per layer (LAYERED-STEREO-1):
+    // `width` is one eye's, and a stereo chain whose depth is not two layers is
+    // not a picture the gather can split.
+    if (stereo != (depthTex->getNumSlices() == 2u)) return;
     in.stereo = stereo;
     // THE TIER TABLE'S GATHER ROW (GA-TIERROW: the table, never the SSR row), in
     // the column `probeGatherWanted` reads: the VR column while a headset drives
