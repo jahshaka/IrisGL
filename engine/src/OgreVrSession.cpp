@@ -3,7 +3,7 @@
 // to include Vulkan.
 //
 // WHAT IT IS. Phase 1a proved the hard half as a standalone binary
-// (tests/vr/xr_spike.cpp, ~/Developer/spikes/openxr-vulkan/FINDINGS.md): an
+// (the deleted tests/vr/xr_spike.cpp, ~/Developer/spikes/openxr-vulkan/FINDINGS.md): an
 // engine booted on a Vulkan device the RUNTIME created renders, byte for byte,
 // what an engine on its own device renders, and a session paced by xrWaitFrame
 // submits frames the runtime accepts. Phase 1b put that picture in a Quest Pro.
@@ -39,9 +39,11 @@
 // ray the host computed.
 //
 // THE CONSTRAINT THAT OUTRANKS EVERYTHING HERE (VR_SPEC §0): without a headset
-// the tool is today's tool, unchanged. `EngineConfig::vr` defaults to Disabled,
-// nothing below runs on a plain boot, and the desktop selftest hash does not
-// move for VR work.
+// the tool is today's tool, unchanged. Since VR-START-1 nothing here runs at
+// boot at all: the engine boots on its own device (with the fork's OpenXR
+// interop set), and a session connects through XR_KHR_vulkan_enable when one
+// is asked for — so VR start can never fail the app, and a headset connected
+// later is simply the next session.
 #include "EnginePrivate.h"
 
 #include <Compositor/OgreCompositorManager2.h>
@@ -53,6 +55,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
@@ -88,21 +94,16 @@ namespace jahshaka { namespace engine { namespace detail {
 // knows the difference. This is the ray-query tier's rule: a build without the
 // capability is a supported build, never a broken one.
 namespace vr {
-VrBoot *bootBegin(VrInfo &info, std::string &reason) {
-    info = VrInfo();
+VrConnection *connect(Ogre::Root *, const VrPolicy &, VrInfo &info, std::string &reason) {
     reason = "this build has no OpenXR support (the loader or the Vulkan render "
              "system headers were absent at configure time)";
+    info.available = false;
+    info.failure = VrFailure::NoRuntime;
     info.reason = reason;
     return nullptr;
 }
-void *bootExternalInstance(VrBoot *) { return nullptr; }
-bool bootDevice(VrBoot *, Ogre::Root *, VrInfo &, std::string &reason) {
-    reason = "this build has no OpenXR support";
-    return false;
-}
-void *bootExternalDevice(VrBoot *) { return nullptr; }
-void bootEnd(VrBoot *) {}
-VrSession *sessionBegin(VrBoot *, OgreEngine *, OgreScene *, const VrConfig &,
+void disconnect(VrConnection *) {}
+VrSession *sessionBegin(VrConnection *, OgreEngine *, OgreScene *, const VrConfig &,
                         std::string &reason) {
     reason = "this build has no OpenXR support";
     return nullptr;
@@ -163,6 +164,8 @@ constexpr unsigned kDesktopHoldFrames = 6u;
 /// process and the reader is chain code with no session pointer: raised when a
 /// session takes its swapchain format, lowered when that session dies.
 bool sColourEncodedOnce = true;
+/// Connections that reached the OpenXR loader, process-wide (VrInfo::openxrCalls).
+unsigned sOpenXrCalls = 0;
 
 void vrLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vrLog(const char *fmt, ...) {
@@ -312,24 +315,103 @@ unsigned vrTestBlinkFrames() {
 }   // namespace
 
 // ===========================================================================
-// VrBoot — the XrInstance, the VkInstance and the VkDevice.
+// VrConnection — the XrInstance and the system, bound to the ENGINE'S device.
 //
-// THE ORDER IS THE PRODUCT (phase 1a §8.5, the one correction the spike made to
-// VR_SPEC §4.1): `loadPlugin` must come BEFORE buildDeviceCreationRequest,
-// because fork d014b064f+1bccc3f93 (was 0068)'s exporter tests
-// `VulkanInstance::hasExtension(VK_KHR_get_physical_device_properties2)` against
-// the static list the RENDER SYSTEM'S CONSTRUCTOR fills. Build the request
-// first and the feature chain is silently skipped — i.e. Ogre would compile
-// shaders for features the device never enabled.
+// VR-START-1: XR_KHR_vulkan_enable (v1) has the APPLICATION create the Vulkan
+// instance and device with the extensions the runtime lists. The fork creates
+// every instance and device with that list already (the OpenXR interop set,
+// Monado 25's and WiVRn 26's exactly), so a connection can be made at ANY time
+// in the process and bound to the device Ogre already runs on:
 //
-//   xrCreateInstance -> xrGetSystem -> xrGetVulkanGraphicsRequirements2KHR
-//   -> xrCreateVulkanInstanceKHR (OUR VkInstanceCreateInfo)          [bootBegin]
-//   -> Root -> loadPlugin(external_instance) -> setRenderSystem -> initialise
-//   -> xrGetVulkanGraphicsDevice2KHR -> buildDeviceCreationRequest
-//   -> xrCreateVulkanDeviceKHR (OGRE'S OWN VkDeviceCreateInfo)       [bootDevice]
-//   -> createRenderWindow(external_device) -> Hlms -> scene -> xrCreateSession
+//   [policy: the active manifest, resolved like the loader, no loader opened]
+//   -> xrCreateInstance -> xrGetSystem (no headset = FORM_FACTOR_UNAVAILABLE)
+//   -> xrGetVulkanGraphicsRequirementsKHR (mandatory before a session)
+//   -> xrGetVulkanGraphicsDeviceKHR == Ogre's physical device
+//   -> the runtime's instance/device extension lists ⊆ what Ogre enabled
+//   -> xrCreateSession(XrGraphicsBindingVulkanKHR)                  [VrSession]
+//
+// One connection per session: destroyed when the session ends, so the next
+// session — after a headset was plugged in, or after WiVRn's reconnect started
+// a fresh streaming process — gets a fresh instance. It owns no Vulkan object.
 // ===========================================================================
-class VrBoot {
+
+/// THE ACTIVE RUNTIME, AS THE LOADER WOULD FIND IT — WITHOUT THE LOADER. The
+/// OpenXR loader's Linux order: XR_RUNTIME_JSON alone when set; otherwise
+/// `openxr/1/active_runtime.<arch>.json` then `active_runtime.json` in
+/// $XDG_CONFIG_HOME (~/.config), each of $XDG_CONFIG_DIRS (/etc/xdg), then /etc.
+/// Opening the loader is what reaches a runtime; for a socket-activated one
+/// (the system Monado) reaching it SPAWNS it, on the desktop's display — so a
+/// policy that names runtimes is checked here, before anything is opened.
+bool resolveActiveManifest(std::string &path, std::string &name, std::string &library) {
+    auto readable = [](const std::string &p) { return std::ifstream(p).good(); };
+    std::vector<std::string> candidates;
+    if (const char *env = std::getenv("XR_RUNTIME_JSON"); env && *env) {
+        candidates.push_back(env);
+    } else {
+        std::vector<std::string> dirs;
+        const char *home = std::getenv("HOME");
+        const char *xch = std::getenv("XDG_CONFIG_HOME");
+        if (xch && *xch) dirs.push_back(xch);
+        else if (home && *home) dirs.push_back(std::string(home) + "/.config");
+        const char *xcd = std::getenv("XDG_CONFIG_DIRS");
+        std::string list = (xcd && *xcd) ? xcd : "/etc/xdg";
+        for (size_t at = 0; at <= list.size();) {
+            const size_t colon = std::min(list.find(':', at), list.size());
+            if (colon > at) dirs.push_back(list.substr(at, colon - at));
+            at = colon + 1;
+        }
+        dirs.push_back("/etc");
+#if defined(__x86_64__)
+        const char *arch = "x86_64";
+#elif defined(__aarch64__)
+        const char *arch = "aarch64";
+#else
+        const char *arch = "";
+#endif
+        for (const std::string &d : dirs) {
+            if (*arch) candidates.push_back(d + "/openxr/1/active_runtime." + arch + ".json");
+            candidates.push_back(d + "/openxr/1/active_runtime.json");
+        }
+    }
+    for (const std::string &c : candidates) {
+        if (!readable(c)) continue;
+        std::ifstream f(c);
+        const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        // A MANIFEST IS FOUR KEYS DEEP AT MOST; the two strings it carries are
+        // read by key inside the "runtime" object. No JSON library in the engine.
+        auto stringAt = [&text](const char *key, size_t from) -> std::string {
+            const std::string k = std::string("\"") + key + "\"";
+            size_t at = text.find(k, from);
+            if (at == std::string::npos) return std::string();
+            at = text.find(':', at + k.size());
+            if (at == std::string::npos) return std::string();
+            at = text.find('"', at + 1);
+            if (at == std::string::npos) return std::string();
+            std::string out;
+            for (size_t i = at + 1; i < text.size() && text[i] != '"'; ++i) {
+                if (text[i] == '\\' && i + 1 < text.size()) ++i;
+                out += text[i];
+            }
+            return out;
+        };
+        const size_t runtimeAt = text.find("\"runtime\"");
+        path = c;
+        name = runtimeAt == std::string::npos ? std::string() : stringAt("name", runtimeAt);
+        library = runtimeAt == std::string::npos ? std::string() : stringAt("library_path", runtimeAt);
+        return true;
+    }
+    path = candidates.empty() ? std::string() : candidates.front();
+    name.clear();
+    library.clear();
+    return false;
+}
+
+std::string lowered(std::string s) {
+    for (char &c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+class VrConnection {
 public:
     XrInstance   mInstance = XR_NULL_HANDLE;
     XrSystemId   mSystemId = XR_NULL_SYSTEM_ID;
@@ -351,15 +433,12 @@ public:
     PFN_xrDestroyHandTrackerEXT DestroyHandTracker = nullptr;
     PFN_xrLocateHandJointsEXT   LocateHandJoints = nullptr;
 
+    /// OGRE'S OWN handles — borrowed, never destroyed here.
     VkInstance       mVkInstance = VK_NULL_HANDLE;
     VkPhysicalDevice mPhysicalDevice = VK_NULL_HANDLE;
     VkDevice         mDevice = VK_NULL_HANDLE;
-    VkQueue          mQueue = VK_NULL_HANDLE;
     uint32_t         mGraphicsFamily = uint32_t(-1);
-
-    Ogre::VulkanExternalInstance      mExternalInstance;
-    Ogre::VulkanExternalDevice        mExternalDevice;
-    Ogre::VulkanDeviceCreationRequest mRequest;
+    uint32_t         mQueueIndex = 0;
 
     /// THE EYE'S OWN MASK (lane HAM-1). Resolved only when the runtime
     /// advertises `XR_KHR_visibility_mask` — the instance asks for the
@@ -367,70 +446,99 @@ public:
     /// xrCreateInstance outright.
     PFN_xrGetVisibilityMaskKHR GetVisibilityMask = nullptr;
 
-    PFN_xrGetVulkanGraphicsRequirements2KHR GetVulkanGraphicsRequirements2 = nullptr;
-    PFN_xrCreateVulkanInstanceKHR           CreateVulkanInstance = nullptr;
-    PFN_xrGetVulkanGraphicsDevice2KHR       GetVulkanGraphicsDevice2 = nullptr;
-    PFN_xrCreateVulkanDeviceKHR             CreateVulkanDevice = nullptr;
-
-    ~VrBoot() {
-        // WE destroy both, because Ogre destroys NEITHER an external instance
-        // nor an external device (VR_SPEC §2.1 row 8). Called after Root is
-        // deleted, which is the only order in which the device is free.
+    ~VrConnection() {
         if (mInstance != XR_NULL_HANDLE) xrDestroyInstance(mInstance);
-        if (mDevice != VK_NULL_HANDLE) vkDestroyDevice(mDevice, nullptr);
-        if (mVkInstance != VK_NULL_HANDLE) vkDestroyInstance(mVkInstance, nullptr);
     }
 
-    bool begin(VrInfo &info, std::string &reason);
-    bool device(Ogre::Root *root, VrInfo &info, std::string &reason);
+    bool connect(Ogre::Root *root, const VrPolicy &policy, VrInfo &info, std::string &reason);
 };
 
-bool VrBoot::begin(VrInfo &info, std::string &reason) {
-    uint32_t extCount = 0;
-    if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &extCount, nullptr))) {
-        reason = "no OpenXR runtime answered (no manifest, or the loader found none)";
+bool VrConnection::connect(Ogre::Root *root, const VrPolicy &policy, VrInfo &info,
+                           std::string &reason) {
+    auto refuse = [&info, &reason](VrFailure f, const std::string &why) {
+        info.available = false;
+        info.failure = f;
+        info.reason = reason = why;
         return false;
+    };
+
+    // ---- 1. THE POLICY, BEFORE THE LOADER --------------------------------
+    std::string manifest, manifestName, library;
+    const bool found = resolveActiveManifest(manifest, manifestName, library);
+    info.manifest = found ? manifest : std::string();
+    info.manifestRuntime = manifestName;
+    if (!policy.runtimes.empty()) {
+        std::string allowed;
+        for (const std::string &r : policy.runtimes) allowed += (allowed.empty() ? "" : ", ") + r;
+        if (!found)
+            return refuse(VrFailure::NoRuntime,
+                          "no OpenXR runtime is active (no active_runtime.json) - start " + allowed +
+                              " and connect the headset");
+        // NAME, LIBRARY OR MANIFEST PATH: SteamVR's manifest may carry no `name`
+        // and its library is `vrclient.so`; its manifest PATH is the one place it
+        // says "steamvr" (…/SteamVR/steamxr_linux64.json). The full path is
+        // matched, so a symlinked active_runtime.json is read through its target.
+        std::string target = manifest;
+        {
+            std::error_code ec;
+            const std::filesystem::path real = std::filesystem::canonical(manifest, ec);
+            if (!ec) target = real.string();
+        }
+        const std::string haystack = lowered(manifestName + "\n" + library + "\n" + manifest +
+                                             "\n" + target);
+        bool match = false;
+        for (const std::string &r : policy.runtimes) {
+            const std::string w = lowered(r);
+            match = match || (!w.empty() && haystack.find(w) != std::string::npos);
+        }
+        if (!match)
+            return refuse(VrFailure::WrongRuntime,
+                          "the active OpenXR runtime is '" +
+                              (manifestName.empty() ? manifest : manifestName) + "', not " + allowed +
+                              " - start " + allowed + " and connect the headset (" + manifest + ")");
     }
+
+    // ---- 2. THE ENGINE'S DEVICE -------------------------------------------
+    auto *vkRs = dynamic_cast<Ogre::VulkanRenderSystem *>(root ? root->getRenderSystem() : nullptr);
+    Ogre::VulkanDevice *dev = vkRs ? vkRs->getVulkanDevice() : nullptr;
+    if (!dev || dev->mDevice == VK_NULL_HANDLE || !dev->mInstance)
+        return refuse(VrFailure::RuntimeBroken, "the engine has no Vulkan device yet");
+    mVkInstance = dev->mInstance->mVkInstance;
+    mPhysicalDevice = dev->mPhysicalDevice;
+    mDevice = dev->mDevice;
+    mGraphicsFamily = dev->mGraphicsQueue.mFamilyIdx;
+    mQueueIndex = dev->mGraphicsQueue.mQueueIdx;
+
+    // ---- 3. THE RUNTIME ---------------------------------------------------
+    ++sOpenXrCalls;
+    uint32_t extCount = 0;
+    if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &extCount, nullptr)))
+        return refuse(VrFailure::NoRuntime,
+                      "no OpenXR runtime answered (no manifest, or the loader found none)");
     std::vector<XrExtensionProperties> exts(extCount, { XR_TYPE_EXTENSION_PROPERTIES });
     xrEnumerateInstanceExtensionProperties(nullptr, extCount, &extCount, exts.data());
-    bool hasEnable2 = false;
+    bool hasEnable = false;
     for (const auto &e : exts) {
-        if (!std::strcmp(e.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME)) hasEnable2 = true;
+        if (!std::strcmp(e.extensionName, XR_KHR_VULKAN_ENABLE_EXTENSION_NAME)) hasEnable = true;
         if (!std::strcmp(e.extensionName, "XR_KHR_visibility_mask")) mHasVisibilityMask = true;
         if (!std::strcmp(e.extensionName, "XR_KHR_composition_layer_depth")) mHasDepthLayer = true;
         if (!std::strcmp(e.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME))
             mHasHandTrackingExt = true;
         // XR_EXT_hand_interaction (phase 4b stage 1, the owner's answer 9): the
         // profile that lets BARE HANDS press the same actions a controller
-        // presses — pinch for select, grasp for grab. Bound in stage 1 because
-        // a suggested-bindings block is forty lines and a runtime refusal is
-        // worth finding now; ACTED ON in stage 3, where the hand ergonomics
-        // live. Suggesting bindings for it needs the extension ENABLED, so the
-        // instance asks for it when the runtime advertises it.
+        // presses. Suggesting bindings for it needs the extension ENABLED, so
+        // the instance asks for it when the runtime advertises it.
         if (!std::strcmp(e.extensionName, "XR_EXT_hand_interaction"))
             mHasHandInteractionExt = true;
     }
-    if (!hasEnable2) {
-        reason = "the runtime does not advertise XR_KHR_vulkan_enable2";
-        return false;
-    }
+    if (!hasEnable)
+        return refuse(VrFailure::RuntimeBroken, "the runtime does not advertise XR_KHR_vulkan_enable");
 
     // THE API VERSION IS NEGOTIATED, NOT ASSUMED (the Oculus audit, ledger
-    // §580): everything used here is OpenXR 1.0 core plus vulkan_enable2, and
-    // Meta's PC runtime has no 1.1 conformance — so 1.1 is asked for and 1.0 is
-    // the retry, on exactly XR_ERROR_API_VERSION_UNSUPPORTED.
-    //
-    // XR_EXT_hand_tracking rides the same list when the runtime advertises it
-    // (phase 4): it is how a wearer with NO controllers still gets two hand
-    // proxies. Asked for only when advertised — an unknown extension in this
-    // list fails the whole xrCreateInstance, which would take VR away from
-    // every runtime that does not have it.
-    // THE LIST IS BUILT BELOW, NOT HERE: the first entry is the only one that
-    // is unconditional, and the two optional ones are appended by the counter.
-    // (It used to be spelled as a three-name initialiser that the appends then
-    // overwrote — the same names twice, and the second copy read as a claim
-    // that all three are always asked for.)
-    const char *want[4] = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, nullptr, nullptr, nullptr };
+    // §580): 1.1 is asked for and 1.0 is the retry, on exactly
+    // XR_ERROR_API_VERSION_UNSUPPORTED. An optional extension is asked for only
+    // when advertised — an unknown one fails the whole xrCreateInstance.
+    const char *want[4] = { XR_KHR_VULKAN_ENABLE_EXTENSION_NAME, nullptr, nullptr, nullptr };
     unsigned wantCount = 1u;
     if (mHasVisibilityMask) want[wantCount++] = "XR_KHR_visibility_mask";
     if (mHasHandTrackingExt) want[wantCount++] = XR_EXT_HAND_TRACKING_EXTENSION_NAME;
@@ -454,15 +562,16 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
               int(XR_VERSION_MAJOR(v)), int(XR_VERSION_MINOR(v)));
     }
     if (XR_FAILED(created)) {
-        reason = "xrCreateInstance failed: " + xrResultName(XR_NULL_HANDLE, created);
-        return false;
+        mInstance = XR_NULL_HANDLE;
+        return refuse(created == XR_ERROR_RUNTIME_UNAVAILABLE ? VrFailure::NoRuntime
+                                                              : VrFailure::RuntimeBroken,
+                      "xrCreateInstance failed: " + xrResultName(XR_NULL_HANDLE, created));
     }
     info.apiMajor = unsigned(XR_VERSION_MAJOR(mApiVersion));
     info.apiMinor = unsigned(XR_VERSION_MINOR(mApiVersion));
 
     // THE RUNTIME'S NAME AND VERSION, ALWAYS LOGGED (VR_SPEC §2.6's manifest
-    // law): the user manifest is whatever a headset last wrote, so a transcript
-    // that does not name its runtime cannot be read a week later.
+    // law): a transcript that does not name its runtime cannot be read later.
     XrInstanceProperties ip{ XR_TYPE_INSTANCE_PROPERTIES };
     if (XR_SUCCEEDED(xrGetInstanceProperties(mInstance, &ip))) {
         info.runtime = ip.runtimeName;
@@ -472,28 +581,28 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
                       int(XR_VERSION_PATCH(ip.runtimeVersion)));
         info.runtimeVersion = v;
     }
-    vrLog("runtime '%s' %s, OpenXR %u.%u, visibility_mask=%d depth_layer=%d",
+    vrLog("runtime '%s' %s, OpenXR %u.%u, visibility_mask=%d depth_layer=%d (manifest %s)",
           info.runtime.c_str(), info.runtimeVersion.c_str(), info.apiMajor, info.apiMinor,
-          int(mHasVisibilityMask), int(mHasDepthLayer));
+          int(mHasVisibilityMask), int(mHasDepthLayer), manifest.c_str());
     info.visibilityMask = mHasVisibilityMask;
     info.depthLayer = mHasDepthLayer;
 
     XrSystemGetInfo sgi{ XR_TYPE_SYSTEM_GET_INFO };
     sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-    XrResult sys = xrGetSystem(mInstance, &sgi, &mSystemId);
+    const XrResult sys = xrGetSystem(mInstance, &sgi, &mSystemId);
     if (XR_FAILED(sys)) {
-        // THE ORDINARY "no headset is plugged in" ANSWER, and not an error:
-        // WiVRn writes its manifest on connect, so a box with the runtime
-        // installed and the cable out lands exactly here.
-        reason = "no head-mounted display: " + xrResultName(mInstance, sys);
-        return false;
+        // THE ORDINARY "no headset is connected" ANSWER (the spec's
+        // XR_ERROR_FORM_FACTOR_UNAVAILABLE: supported, not available now).
+        const bool noHeadset = sys == XR_ERROR_FORM_FACTOR_UNAVAILABLE ||
+                               sys == XR_ERROR_FORM_FACTOR_UNSUPPORTED;
+        return refuse(noHeadset ? VrFailure::NoHeadset : VrFailure::RuntimeBroken,
+                      (noHeadset ? std::string("no headset is connected to ")
+                                 : std::string("xrGetSystem failed on ")) +
+                          (info.runtime.empty() ? std::string("the runtime") : info.runtime) +
+                          ": " + xrResultName(mInstance, sys));
     }
     XrSystemProperties sp{ XR_TYPE_SYSTEM_PROPERTIES };
     // THE SYSTEM'S ANSWER ABOUT HANDS, WHICH IS NOT THE RUNTIME'S (phase 4).
-    // The extension being advertised says the runtime KNOWS about hand
-    // tracking; this says the headset in front of it can do it. WiVRn advertises
-    // it for a Quest whose hand tracking the wearer may have switched off, and
-    // Monado's simulated HMD advertises nothing of the sort.
     XrSystemHandTrackingPropertiesEXT handProps{ XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT };
     if (mHasHandTrackingExt) sp.next = &handProps;
     if (XR_SUCCEEDED(xrGetSystemProperties(mInstance, mSystemId, &sp))) {
@@ -517,10 +626,8 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
     if (XR_FAILED(xrEnumerateViewConfigurationViews(
             mInstance, mSystemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &viewCount,
             nullptr)) ||
-        viewCount != 2u) {
-        reason = "the system's primary view configuration is not stereo";
-        return false;
-    }
+        viewCount != 2u)
+        return refuse(VrFailure::RuntimeBroken, "the system's primary view configuration is not stereo");
     for (auto &v : mViewCfg) v.type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
     xrEnumerateViewConfigurationViews(mInstance, mSystemId,
                                       XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &viewCount,
@@ -530,17 +637,7 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
     vrLog("system '%s', recommended %ux%u per eye", info.system.c_str(), info.eyeWidth,
           info.eyeHeight);
 
-    xrGetInstanceProcAddr(mInstance, "xrGetVulkanGraphicsRequirements2KHR",
-                          reinterpret_cast<PFN_xrVoidFunction *>(&GetVulkanGraphicsRequirements2));
-    xrGetInstanceProcAddr(mInstance, "xrCreateVulkanInstanceKHR",
-                          reinterpret_cast<PFN_xrVoidFunction *>(&CreateVulkanInstance));
-    xrGetInstanceProcAddr(mInstance, "xrGetVulkanGraphicsDevice2KHR",
-                          reinterpret_cast<PFN_xrVoidFunction *>(&GetVulkanGraphicsDevice2));
-    xrGetInstanceProcAddr(mInstance, "xrCreateVulkanDeviceKHR",
-                          reinterpret_cast<PFN_xrVoidFunction *>(&CreateVulkanDevice));
-    // The hidden-area mesh's one entry point (HAM-1). NOT fatal if it fails to
-    // resolve: a session without it renders the whole eye, which is what every
-    // session before this lane did.
+    // The hidden-area mesh's one entry point (HAM-1); not fatal if missing.
     if (mHasVisibilityMask) {
         xrGetInstanceProcAddr(mInstance, "xrGetVisibilityMaskKHR",
                               reinterpret_cast<PFN_xrVoidFunction *>(&GetVisibilityMask));
@@ -548,159 +645,81 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
             vrLog("the runtime advertises XR_KHR_visibility_mask but xrGetVisibilityMaskKHR "
                   "did not resolve - no hidden-area mesh");
     }
-    if (!GetVulkanGraphicsRequirements2 || !CreateVulkanInstance || !GetVulkanGraphicsDevice2 ||
-        !CreateVulkanDevice) {
-        reason = "the XR_KHR_vulkan_enable2 entry points did not resolve";
-        return false;
+
+    // ---- 4. THE GRAPHICS BINDING'S PRECONDITIONS (XR_KHR_vulkan_enable) -----
+    PFN_xrGetVulkanGraphicsRequirementsKHR getRequirements = nullptr;
+    PFN_xrGetVulkanGraphicsDeviceKHR getDevice = nullptr;
+    PFN_xrGetVulkanInstanceExtensionsKHR getInstanceExts = nullptr;
+    PFN_xrGetVulkanDeviceExtensionsKHR getDeviceExts = nullptr;
+    xrGetInstanceProcAddr(mInstance, "xrGetVulkanGraphicsRequirementsKHR",
+                          reinterpret_cast<PFN_xrVoidFunction *>(&getRequirements));
+    xrGetInstanceProcAddr(mInstance, "xrGetVulkanGraphicsDeviceKHR",
+                          reinterpret_cast<PFN_xrVoidFunction *>(&getDevice));
+    xrGetInstanceProcAddr(mInstance, "xrGetVulkanInstanceExtensionsKHR",
+                          reinterpret_cast<PFN_xrVoidFunction *>(&getInstanceExts));
+    xrGetInstanceProcAddr(mInstance, "xrGetVulkanDeviceExtensionsKHR",
+                          reinterpret_cast<PFN_xrVoidFunction *>(&getDeviceExts));
+    if (!getRequirements || !getDevice || !getInstanceExts || !getDeviceExts)
+        return refuse(VrFailure::RuntimeBroken, "the XR_KHR_vulkan_enable entry points did not resolve");
+    // MANDATORY BEFORE xrCreateSession (else XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING).
+    XrGraphicsRequirementsVulkanKHR req{ XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR };
+    if (XR_FAILED(getRequirements(mInstance, mSystemId, &req)))
+        return refuse(VrFailure::RuntimeBroken, "xrGetVulkanGraphicsRequirementsKHR failed");
+    // THE MINIMUM ONLY (the spec: maxApiVersionSupported is "the maximum version
+    // tested", not a limit - hello_xr checks the minimum alone), against the
+    // version Ogre's instance ACTUALLY asked for (fork e9d058530).
+    const uint32_t vkApi = dev->mInstance->mApiVersion;
+    const XrVersion have = XR_MAKE_VERSION(VK_API_VERSION_MAJOR(vkApi), VK_API_VERSION_MINOR(vkApi), 0);
+    if (have < req.minApiVersionSupported) {
+        char v[96];
+        std::snprintf(v, sizeof(v), "the runtime needs Vulkan %u.%u, the engine's instance is %u.%u",
+                      unsigned(XR_VERSION_MAJOR(req.minApiVersionSupported)),
+                      unsigned(XR_VERSION_MINOR(req.minApiVersionSupported)),
+                      VK_API_VERSION_MAJOR(vkApi), VK_API_VERSION_MINOR(vkApi));
+        return refuse(VrFailure::DeviceMismatch, v);
     }
 
-    XrGraphicsRequirementsVulkan2KHR req{ XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR };
-    if (XR_FAILED(GetVulkanGraphicsRequirements2(mInstance, mSystemId, &req))) {
-        reason = "xrGetVulkanGraphicsRequirements2KHR failed";
-        return false;
+    VkPhysicalDevice runtimeGpu = VK_NULL_HANDLE;
+    if (XR_FAILED(getDevice(mInstance, mSystemId, mVkInstance, &runtimeGpu)))
+        return refuse(VrFailure::RuntimeBroken, "xrGetVulkanGraphicsDeviceKHR failed");
+    if (runtimeGpu != mPhysicalDevice) {
+        VkPhysicalDeviceProperties a{}, b{};
+        vkGetPhysicalDeviceProperties(runtimeGpu, &a);
+        vkGetPhysicalDeviceProperties(mPhysicalDevice, &b);
+        return refuse(VrFailure::DeviceMismatch,
+                      std::string("the runtime drives '") + a.deviceName + "' but the engine runs on '" +
+                          b.deviceName + "'");
     }
-    // Ogre asks for a 1.2 instance when the loader allows it (fork d014b064f (was 0038)'s
-    // ray query needs 1.2), so 1.2 must fall inside the runtime's window. Monado
-    // answers 1.0 .. 1023.1023.1023 and WiVRn the same; a runtime that capped
-    // below 1.2 would be a real refusal and is reported as one.
-    const XrVersion want12 = XR_MAKE_VERSION(1, 2, 0);
-    if (want12 < req.minApiVersionSupported || want12 > req.maxApiVersionSupported) {
-        reason = "the runtime does not admit a Vulkan 1.2 instance";
-        return false;
-    }
-
-    // OUR VkInstanceCreateInfo, created BY THE RUNTIME. The extension list is
-    // ours and not Ogre's on this path (VR_SPEC §2.1 row 3): the external branch
-    // copies this struct's list verbatim, and `VK_KHR_xcb_surface` in it is what
-    // decides whether the xcb window backend is usable at all — which the
-    // desktop mirror needs.
-    std::vector<const char *> instExt = {
-        VK_KHR_SURFACE_EXTENSION_NAME,
-#if defined(__linux__) && !defined(__APPLE__)
-        "VK_KHR_xcb_surface",
-#endif
-        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+    auto listed = [this](PFN_xrGetVulkanInstanceExtensionsKHR fn) {
+        uint32_t n = 0;
+        std::string s;
+        if (XR_SUCCEEDED(fn(mInstance, mSystemId, 0, &n, nullptr)) && n) {
+            s.resize(n);
+            fn(mInstance, mSystemId, n, &n, s.data());
+            s.resize(std::strlen(s.c_str()));
+        }
+        std::vector<std::string> out;
+        for (size_t at = 0; at < s.size();) {
+            const size_t sp2 = std::min(s.find(' ', at), s.size());
+            if (sp2 > at) out.push_back(s.substr(at, sp2 - at));
+            at = sp2 + 1;
+        }
+        return out;
     };
-    VkApplicationInfo app{};
-    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app.pApplicationName = "Jahshaka";
-    app.pEngineName = "Ogre-Next";
-    app.apiVersion = VK_API_VERSION_1_2;
-    VkInstanceCreateInfo vici{};
-    vici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    vici.pApplicationInfo = &app;
-    vici.enabledExtensionCount = uint32_t(instExt.size());
-    vici.ppEnabledExtensionNames = instExt.data();
-
-    XrVulkanInstanceCreateInfoKHR xrIci{ XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR };
-    xrIci.systemId = mSystemId;
-    xrIci.pfnGetInstanceProcAddr = &vkGetInstanceProcAddr;
-    xrIci.vulkanCreateInfo = &vici;
-    VkResult vkErr = VK_SUCCESS;
-    const XrResult made = CreateVulkanInstance(mInstance, &xrIci, &mVkInstance, &vkErr);
-    if (XR_FAILED(made) || vkErr != VK_SUCCESS || mVkInstance == VK_NULL_HANDLE) {
-        reason = "xrCreateVulkanInstanceKHR failed (VkResult " + std::to_string(int(vkErr)) + ")";
-        mVkInstance = VK_NULL_HANDLE;
-        return false;
-    }
-
-    mExternalInstance.instance = mVkInstance;
-    for (const char *e : instExt) {
-        VkExtensionProperties p{};
-        std::strncpy(p.extensionName, e, VK_MAX_EXTENSION_NAME_SIZE - 1);
-        mExternalInstance.instanceExtensions.push_back(p);
-    }
-    return true;
-}
-
-bool VrBoot::device(Ogre::Root *root, VrInfo &info, std::string &reason) {
-    (void)info;
-    auto *vkRs = dynamic_cast<Ogre::VulkanRenderSystem *>(root->getRenderSystem());
-    if (!vkRs) {
-        reason = "the render system is not Vulkan";
-        return false;
-    }
-    XrVulkanGraphicsDeviceGetInfoKHR gdi{ XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR };
-    gdi.systemId = mSystemId;
-    gdi.vulkanInstance = mVkInstance;
-    if (XR_FAILED(GetVulkanGraphicsDevice2(mInstance, &gdi, &mPhysicalDevice))) {
-        reason = "xrGetVulkanGraphicsDevice2KHR failed";
-        return false;
-    }
-    VkPhysicalDeviceProperties pdp{};
-    vkGetPhysicalDeviceProperties(mPhysicalDevice, &pdp);
-    vrLog("the runtime picked '%s'", pdp.deviceName);
-
-    // THE DEVICE OGRE WOULD HAVE BUILT (fork d014b064f+1bccc3f93 (was 0068) hunk 2): the exact
-    // extension list and the exact VkPhysicalDeviceFeatures2 chain
-    // `VulkanDevice::createDevice` would have passed, so the device the runtime
-    // creates is the device Ogre believes it has. Without it Ogre reads the
-    // feature bits back from what the PHYSICAL device supports and compiles
-    // shaders for features nobody enabled (VR_SPEC §2.1 row 6).
-    uint32_t numExt = 0;
-    vkEnumerateDeviceExtensionProperties(mPhysicalDevice, nullptr, &numExt, nullptr);
-    Ogre::FastArray<VkExtensionProperties> availExt;
-    availExt.resize(numExt);
-    vkEnumerateDeviceExtensionProperties(mPhysicalDevice, nullptr, &numExt, availExt.begin());
-    Ogre::VulkanDevice::buildDeviceCreationRequest(mVkInstance, mPhysicalDevice, availExt,
-                                                   mRequest);
-
-    // ONE queue from the FIRST graphics family: what Ogre's own
-    // `findGraphicsQueue` picks, and what `VulkanQueue::setExternalQueue` can
-    // find again by matching vkGetDeviceQueue — it THROWS when it cannot.
-    uint32_t numFam = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &numFam, nullptr);
-    std::vector<VkQueueFamilyProperties> fam(numFam);
-    vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &numFam, fam.data());
-    for (uint32_t i = 0; i < numFam; ++i)
-        if (fam[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { mGraphicsFamily = i; break; }
-    if (mGraphicsFamily == uint32_t(-1)) {
-        reason = "the device the runtime chose has no graphics queue family";
-        return false;
-    }
-
-    const float prio = 1.0f;
-    VkDeviceQueueCreateInfo qci{};
-    qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    qci.queueFamilyIndex = mGraphicsFamily;
-    qci.queueCount = 1;
-    qci.pQueuePriorities = &prio;
-
-    VkDeviceCreateInfo dci{};
-    dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    dci.queueCreateInfoCount = 1;
-    dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = uint32_t(mRequest.extensions.size());
-    dci.ppEnabledExtensionNames = mRequest.extensions.begin();
-    if (mRequest.hasFeatures2) dci.pNext = mRequest.pNext();
-    else                       dci.pEnabledFeatures = &mRequest.features;
-
-    XrVulkanDeviceCreateInfoKHR xrDci{ XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR };
-    xrDci.systemId = mSystemId;
-    xrDci.pfnGetInstanceProcAddr = &vkGetInstanceProcAddr;
-    xrDci.vulkanPhysicalDevice = mPhysicalDevice;
-    xrDci.vulkanCreateInfo = &dci;
-    VkResult vkErr = VK_SUCCESS;
-    const XrResult made = CreateVulkanDevice(mInstance, &xrDci, &mDevice, &vkErr);
-    if (XR_FAILED(made) || vkErr != VK_SUCCESS || mDevice == VK_NULL_HANDLE) {
-        reason = "xrCreateVulkanDeviceKHR failed (VkResult " + std::to_string(int(vkErr)) + ")";
-        mDevice = VK_NULL_HANDLE;
-        return false;
-    }
-    vkGetDeviceQueue(mDevice, mGraphicsFamily, 0, &mQueue);
-
-    mExternalDevice.physicalDevice = mPhysicalDevice;
-    mExternalDevice.device = mDevice;
-    mExternalDevice.graphicsQueue = mQueue;
-    mExternalDevice.presentQueue = mQueue;
-    mExternalDevice.creationRequest = &mRequest;   // fork d014b064f+1bccc3f93 (was 0068): the ENABLED set
-    for (const char *e : mRequest.extensions) {
-        VkExtensionProperties p{};
-        std::strncpy(p.extensionName, e, VK_MAX_EXTENSION_NAME_SIZE - 1);
-        mExternalDevice.deviceExtensions.push_back(p);
-    }
-    vrLog("the runtime created the VkDevice from Ogre's own createInfo (%zu extensions)",
-          mRequest.extensions.size());
+    std::string missing;
+    for (const std::string &e : listed(getInstanceExts))
+        if (!Ogre::VulkanInstance::hasExtension(e.c_str())) missing += " " + e;
+    // xrGetVulkanDeviceExtensionsKHR has the same signature as the instance one.
+    for (const std::string &e : listed(reinterpret_cast<PFN_xrGetVulkanInstanceExtensionsKHR>(getDeviceExts)))
+        if (!dev->hasDeviceExtension(Ogre::IdString(e))) missing += " " + e;
+    if (!missing.empty())
+        return refuse(VrFailure::DeviceMismatch,
+                      "the engine's Vulkan device lacks what the runtime needs:" + missing);
+    vrLog("connected on the engine's own device ('%s' family %u queue %u)", info.system.c_str(),
+          mGraphicsFamily, mQueueIndex);
+    info.available = true;
+    info.failure = VrFailure::None;
+    info.reason.clear();
     return true;
 }
 
@@ -711,8 +730,8 @@ class VrSession final : public Ogre::CompositorWorkspaceListener {
 public:
     /// The desktop mirror's workspace, for the frame monitor's listener (F2).
     Ogre::CompositorWorkspace *mirrorWorkspace() const { return mMirrorWorkspace; }
-    VrSession(VrBoot *boot, OgreEngine *engine, OgreScene *scene, const VrConfig &cfg)
-        : mBoot(boot), mEngine(engine), mScene(scene), mConfig(cfg) {}
+    VrSession(VrConnection *conn, OgreEngine *engine, OgreScene *scene, const VrConfig &cfg)
+        : mBoot(conn), mEngine(engine), mScene(scene), mConfig(cfg) {}
     /// NOT `override`: Ogre's CompositorWorkspaceListener has no virtual
     /// destructor (the ReflectPassListener rule). Nothing ever deletes one of
     /// these through the base pointer.
@@ -939,7 +958,7 @@ public:
     bool handsEnabled() const { return mConfig.hands; }
 private:
 
-    VrBoot     *mBoot;
+    VrConnection *mBoot;   ///< the session's connection (owned by the engine)
     OgreEngine *mEngine;
     OgreScene  *mScene;
     VrConfig    mConfig;
@@ -1173,12 +1192,12 @@ bool VrSession::create(std::string &reason) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root) { reason = "no Ogre::Root"; return false; }
 
-    XrGraphicsBindingVulkan2KHR binding{ XR_TYPE_GRAPHICS_BINDING_VULKAN2_KHR };
+    XrGraphicsBindingVulkanKHR binding{ XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR };
     binding.instance = mBoot->mVkInstance;
     binding.physicalDevice = mBoot->mPhysicalDevice;
     binding.device = mBoot->mDevice;
     binding.queueFamilyIndex = mBoot->mGraphicsFamily;
-    binding.queueIndex = 0;
+    binding.queueIndex = mBoot->mQueueIndex;
     XrSessionCreateInfo sci{ XR_TYPE_SESSION_CREATE_INFO };
     sci.next = &binding;
     sci.systemId = mBoot->mSystemId;
@@ -4708,44 +4727,26 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
 // The engine's entry points (declared in EnginePrivate.h).
 namespace vr {
 
-VrBoot *bootBegin(VrInfo &info, std::string &reason) {
+VrConnection *connect(Ogre::Root *root, const VrPolicy &policy, VrInfo &info, std::string &reason) {
+    // The runtime's description is the LAST connection's: cleared here, kept
+    // after a disconnect so a host can still name the runtime it used.
     info = VrInfo();
-    VrBoot *boot = new VrBoot();
-    if (!boot->begin(info, reason)) {
-        info.available = false;
-        info.reason = reason;
-        delete boot;
+    VrConnection *c = new VrConnection();
+    const bool ok = c->connect(root, policy, info, reason);
+    info.openxrCalls = sOpenXrCalls;
+    if (!ok) {
+        delete c;
         return nullptr;
     }
-    return boot;
+    return c;
 }
 
-void *bootExternalInstance(VrBoot *boot) {
-    return boot ? static_cast<void *>(&boot->mExternalInstance) : nullptr;
-}
+void disconnect(VrConnection *c) { delete c; }
 
-bool bootDevice(VrBoot *boot, Ogre::Root *root, VrInfo &info, std::string &reason) {
-    if (!boot) { reason = "no VR boot"; return false; }
-    if (!boot->device(root, info, reason)) {
-        info.available = false;
-        info.reason = reason;
-        return false;
-    }
-    info.available = true;
-    info.reason.clear();
-    return true;
-}
-
-void *bootExternalDevice(VrBoot *boot) {
-    return boot ? static_cast<void *>(&boot->mExternalDevice) : nullptr;
-}
-
-void bootEnd(VrBoot *boot) { delete boot; }
-
-VrSession *sessionBegin(VrBoot *boot, OgreEngine *engine, OgreScene *scene, const VrConfig &cfg,
+VrSession *sessionBegin(VrConnection *conn, OgreEngine *engine, OgreScene *scene, const VrConfig &cfg,
                         std::string &reason) {
-    if (!boot) { reason = "no OpenXR runtime"; return nullptr; }
-    VrSession *s = new VrSession(boot, engine, scene, cfg);
+    if (!conn) { reason = "no OpenXR connection"; return nullptr; }
+    VrSession *s = new VrSession(conn, engine, scene, cfg);
     if (!s->create(reason)) { delete s; return nullptr; }
     return s;
 }

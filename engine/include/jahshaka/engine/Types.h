@@ -4984,27 +4984,37 @@ struct GiVoxelVolume {
 // links (every call answers "unavailable").
 // ---------------------------------------------------------------------------
 
-/// Whether this process may talk to an OpenXR runtime at all (EngineConfig::vr).
-///
-/// `Disabled` is BIT-IDENTICAL to an engine that has never heard of VR: no
-/// loader is opened, no XrInstance is created, and — the part that matters —
-/// Ogre creates its own VkInstance and VkDevice exactly as it always did. That
-/// is the constraint of VR_SPEC §0: "without a headset the tool is today's
-/// tool, unchanged", and it is why the desktop selftest hash cannot move for
-/// VR work.
-///
-/// `IfAvailable` asks the loader once, at boot, BEFORE the render system is
-/// loaded — because on the `XR_KHR_vulkan_enable2` route the RUNTIME creates
-/// the Vulkan instance and device the engine then runs on, and Ogre reads
-/// `external_instance` in the render system's constructor. A failure at any
-/// step (no loader, no manifest, no runtime, no headset, a device the runtime
-/// refuses) is NOT an error: the reason is recorded in VrInfo::reason, the
-/// plain boot continues, and vrAvailable() answers false for the life of the
-/// process. VR CAPABILITY IS FIXED AT BOOT — plugging a headset in later needs
-/// a restart, because WiVRn only writes its runtime manifest on connect.
-enum class VrMode {
-    Disabled = 0,
-    IfAvailable
+/// WHY A VR START DID NOT HAPPEN (VR-START-1): one value per failure a host
+/// must tell a person about, each with its own sentence in VrInfo::reason.
+/// VR IS NO LONGER DECIDED AT BOOT: every engine boots on its OWN Vulkan
+/// device, created with the OpenXR interop extensions (the fork's interop
+/// set), and each session CONNECTS through XR_KHR_vulkan_enable — a fresh
+/// XrInstance per session, bound to that device. So a headset connected after
+/// launch, or reconnected after a drop, is simply the next session.
+enum class VrFailure {
+    None = 0,
+    Disabled,        ///< the host's policy forbids VR in this process (VrPolicy::enabled)
+    Headless,        ///< the NULL render system has no device to share
+    NoRuntime,       ///< no active OpenXR runtime manifest, or the loader found none
+    WrongRuntime,    ///< the active runtime is not one the policy allows — NO OpenXR call was made
+    NoHeadset,       ///< the runtime answered, no head-mounted display is connected
+    RuntimeBroken,   ///< instance/system/graphics setup or session creation failed
+    DeviceMismatch,  ///< the runtime drives a different GPU (or lacks an interop extension) than the engine's
+    ConnectionLost   ///< the runtime or the headset went away during a session
+};
+
+/// THE PROCESS'S VR POLICY (VR-START-1), set by the host: may this process talk
+/// to an OpenXR runtime at all, and to which ones. `runtimes` empty = ANY
+/// runtime (a developer's `--vr`, the suites' private Monado); otherwise the
+/// ACTIVE runtime's manifest (resolved the way the loader resolves it, WITHOUT
+/// opening the loader) must name one of them — "WiVRn", "SteamVR", "Monado",
+/// matched case-insensitively against the manifest's name and library file —
+/// or the start fails WrongRuntime with no OpenXR call at all. That is what
+/// keeps a socket-activated system runtime from ever being spawned by a
+/// desktop that has no headset.
+struct VrPolicy {
+    bool enabled = false;
+    std::vector<std::string> runtimes;
 };
 
 /// The OpenXR session's lifecycle, as the runtime reports it
@@ -5051,10 +5061,22 @@ enum class VrDesktopPicture {
 /// half) and completed when a session begins (the size/refresh half, which
 /// needs no session on any runtime measured but is reported from one place).
 struct VrInfo {
+    /// The LAST connection (a session's, or Engine::vrProbe's) reached a runtime
+    /// with a headset. The fields below describe that runtime and stay readable
+    /// after its session has ended.
     bool        available = false;
     /// Why not, when `available` is false: the loader's or the runtime's own
     /// failure, in words, at the step it happened. Empty when available.
     std::string reason;
+    VrFailure   failure = VrFailure::None;
+    /// The active runtime's manifest as the loader would resolve it (path and
+    /// its `runtime.name`), empty when none was found.
+    std::string manifest;
+    std::string manifestRuntime;
+    /// How many connections this PROCESS has let reach the OpenXR loader. A
+    /// start refused by the policy (WrongRuntime, or NoRuntime with no manifest)
+    /// does not move it — the proof that no runtime was opened.
+    unsigned    openxrCalls = 0;
     std::string runtime;        ///< XrInstanceProperties::runtimeName ("Monado(XRT) ...")
     std::string runtimeVersion; ///< "M.m.p" of XrInstanceProperties::runtimeVersion
     std::string system;         ///< XrSystemProperties::systemName ("Meta Quest Pro on WiVRn")
@@ -5803,12 +5825,11 @@ struct EngineConfig {
     /// It is NOT a quality dial: with rays off the tier builds nothing at all,
     /// costs nothing at all, and `giStatus().rayQuery.enabled` reads false.
     bool rayTracing = true;
-    /// OPENXR (SPECS/VR_SPEC.md §4.1). Disabled by default and on purpose: the
-    /// `IfAvailable` route creates the Vulkan instance and device through the
-    /// RUNTIME, which is a different boot, so a host opts in per process (Studio:
-    /// `--vr` / JAHSHAKA_VR=1) rather than inheriting whatever manifest the last
-    /// headset connection happened to write. See VrMode.
-    VrMode vr = VrMode::Disabled;
+    /// OPENXR (VR-START-1): the process's VR policy (see VrPolicy). Disabled by
+    /// default; a host enables it per process. It changes NOTHING about the
+    /// boot — every engine runs on its own device — only whether, and to which
+    /// runtime, a session may connect. Engine::setVrPolicy changes it later.
+    VrPolicy vr;
     /// Vertical sync for ON-SCREEN views, as they are created (fps audit F1).
     /// True is what every window did unconditionally before this field existed.
     /// False asks for an immediate, tearing present mode — the "unlimited"

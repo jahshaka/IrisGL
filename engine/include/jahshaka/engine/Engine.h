@@ -2042,18 +2042,31 @@ public:
     virtual void advanceResources() = 0;
 
     // ---- VR (SPECS/VR_SPEC.md v3 phase 2) ---------------------------------
-    /// Did the boot reach an OpenXR runtime? False on every engine booted with
-    /// `EngineConfig::vr == VrMode::Disabled` (the default), on a build with no
-    /// loader, and on a box whose runtime refused — vrInfo().reason says which.
-    /// Fixed for the life of the process.
+    /// MAY THIS PROCESS ATTEMPT A VR SESSION? (VR-START-1) True when the policy
+    /// enables VR, the build has OpenXR and the engine renders (not headless).
+    /// It says nothing about a headset: that is the session's (or vrProbe's)
+    /// answer, in vrInfo(). VR is NOT fixed at boot any more — every engine
+    /// runs on its own device with the interop extensions, and each session
+    /// connects afresh.
     virtual bool vrAvailable() const = 0;
-    /// The runtime's identity and what it wants. Always safe to read; every
-    /// field is empty or zero when unavailable.
+    /// The process's VR policy (VrPolicy). Takes effect at the next connection;
+    /// a running session is not touched.
+    virtual void setVrPolicy(const VrPolicy &policy) = 0;
+    virtual const VrPolicy &vrPolicy() const = 0;
+    /// CONNECT, ASK, DISCONNECT: does a runtime the policy allows answer with a
+    /// head-mounted display right now? Fills vrInfo() (failure + reason on no)
+    /// and creates no session. With a policy that names runtimes, a
+    /// non-matching active runtime is refused BEFORE the loader is opened.
+    /// Never throws; returns quickly when nothing answers.
+    virtual bool vrProbe() = 0;
+    /// The last connection's runtime and what it wants, or why it failed
+    /// (VrInfo::failure / reason). Always safe to read.
     virtual const VrInfo &vrInfo() const = 0;
     /// Begins ONE session on `scene` (there is one per engine, like Root).
     ///
-    /// What it creates: an XrSession on the Vulkan device the runtime made at
-    /// boot, a reference space (STAGE where the runtime offers one — a FLOOR
+    /// What it creates: a CONNECTION (a fresh XrInstance and system, bound
+    /// through XR_KHR_vulkan_enable to the engine's own Vulkan device — the
+    /// policy's runtime check first), an XrSession, a reference space (STAGE where the runtime offers one — a FLOOR
     /// origin, VR_SPEC §0's phase-1b lesson — LOCAL otherwise), one swapchain
     /// per eye, a both-eyes render target of 2w x h, and a View of `scene`
     /// drawn with INSTANCED STEREO into it (one scene pass, two eyes). The
@@ -2067,12 +2080,18 @@ public:
     /// (Engine::setVsync) for the duration; nothing breaks if it does not,
     /// the loop simply paces to the slower of the two.
     ///
-    /// False = no runtime, a session already running, no such scene, or the
-    /// runtime refused; `lastError()` says which. Never throws, never hangs.
+    /// False = no runtime, no headset, a session already running, no such
+    /// scene, or the runtime refused; `lastError()` says which and
+    /// `vrInfo().failure` classifies it. Never throws, never hangs. A false
+    /// leaves no connection behind, so trying again after connecting a headset
+    /// is simply calling this again.
     virtual bool beginVrSession(Scene *scene, const VrConfig &cfg) = 0;
     /// Ends the session and puts everything back: the mirror, the View, the
     /// target, the swapchains, the frame's pacing and the render profile the
-    /// session imposed. Safe when none is running.
+    /// session imposed — and the connection (its XrInstance) with it, so the
+    /// next session connects afresh (a headset reconnect is just that). A
+    /// session the runtime or the headset dropped leaves
+    /// `vrInfo().failure == ConnectionLost`. Safe when none is running.
     virtual void endVrSession() = 0;
     /// The runtime's lifecycle state (VrState::Unavailable when no session).
     virtual VrState vrState() const = 0;
