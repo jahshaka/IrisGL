@@ -234,33 +234,17 @@ EyeImage eyeBefore( int eye )
 	return e;
 }
 
-/// WHICH EYE OWNS A COLUMN, and the whole of the stereo layout in one place:
-/// the left eye is the left half of the image, the right eye the right half.
-int eyeOfColumn( int x, int width )
-{
-	return ( p.stereo.x > 0.5 && x >= width / 2 ) ? 1 : 0;
-}
-/// That eye's own 0..1 image coordinate from a coordinate over the whole
-/// target. Horizontally it is the half's own fraction; vertically nothing is
-/// split, so it passes straight through.
-vec2 eyeLocalUv( vec2 uv, int eye )
-{
-	if( p.stereo.x <= 0.5 )
-		return uv;
-	return vec2( clamp( uv.x * 2.0 - float( eye ), 0.0, 1.0 ), uv.y );
-}
-/// ...and back: a coordinate in the eye's own image, as one over the target.
-vec2 eyeGlobalUv( vec2 local, int eye )
-{
-	if( p.stereo.x <= 0.5 )
-		return local;
-	return vec2( ( local.x + float( eye ) ) * 0.5, local.y );
-}
+/// THE EYE IS THE LAYER (LAYERED-STEREO-1): every screen image here is an array
+/// with one layer per eye (one layer with one eye), the dispatch's z walks them,
+/// and a coordinate is always its own eye's — so both eyes run the same
+/// arithmetic, and nothing below knows about a seam. Set once, first thing in
+/// main; every screen read and write goes through it.
+int gEye = 0;
 
-layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
-layout( set = 0, binding = 3 ) uniform sampler2D gBufShadowRoughness;
-layout( set = 0, binding = 4 ) uniform sampler2D sceneDepth;
-layout( rgba16f, set = 0, binding = 5 ) uniform image2D ssrReflection;
+layout( set = 0, binding = 2 ) uniform sampler2DArray gBufNormals;
+layout( set = 0, binding = 3 ) uniform sampler2DArray gBufShadowRoughness;
+layout( set = 0, binding = 4 ) uniform sampler2DArray sceneDepth;
+layout( rgba16f, set = 0, binding = 5 ) uniform image2DArray ssrReflection;
 /// THE TEMPORAL MEAN, PING-PONGED. Two buffers and not one, because a pixel
 /// reads the mean at its own REPROJECTED coordinate — any pixel of the buffer —
 /// while its neighbours are writing theirs. One buffer makes that a read/write
@@ -268,13 +252,13 @@ layout( rgba16f, set = 0, binding = 5 ) uniform image2D ssrReflection;
 /// frame's depending on the scheduler), and a temporal filter fed by a race is
 /// how a stable picture acquires a shimmer nobody can reproduce. The pair costs
 /// one extra image of 8 bytes per traced pixel.
-layout( rgba16f, set = 0, binding = 6 ) uniform readonly  image2D historyPrev;
-layout( rgba16f, set = 0, binding = 7 ) uniform image2D historyCur;
+layout( rgba16f, set = 0, binding = 6 ) uniform readonly  image2DArray historyPrev;
+layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray historyCur;
 /// ...and the distance beside it, which is what makes the reprojection a TEST
 /// rather than a hope: the surface found at the reprojected pixel is the same
 /// surface only if it was the same distance away.
-layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2D historyDistPrev;
-layout( rg32f, set = 0, binding = 9 ) uniform image2D historyDistCur;
+layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2DArray historyDistPrev;
+layout( rg32f, set = 0, binding = 9 ) uniform image2DArray historyDistCur;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
@@ -360,7 +344,7 @@ layout( std430, set = 0, binding = 28 ) buffer JahHitBuf { uint jahHitBuf[]; };
 /// the reflection's own images and arithmetic are untouched by the view. With the
 /// knob off the binding holds a stand-in (the reflection target's own view) that
 /// is never written.
-layout( rgba16f, set = 0, binding = 36 ) uniform writeonly image2D photonOverlay;
+layout( rgba16f, set = 0, binding = 36 ) uniform writeonly image2DArray photonOverlay;
 const vec4 kPhotonNoRay   = vec4( 0.0, 0.0, 0.0, 0.6 );
 const vec4 kPhotonCard    = vec4( 0.1, 0.9, 0.2, 1.0 );
 const vec4 kPhotonVoxel   = vec4( 0.15, 0.35, 1.0, 1.0 );
@@ -383,7 +367,7 @@ void photonHit( ivec2 tc, vec4 c )
 	const ivec2 hi = min( mix( lo + scale, full, greaterThanEqual( tc, traceRes - 1 ) ), full );
 	for( int y = lo.y; y < hi.y; ++y )
 		for( int x = lo.x; x < hi.x; ++x )
-			imageStore( photonOverlay, ivec2( x, y ), c );
+			imageStore( photonOverlay, ivec3( ivec2( x, y ), gEye ), c );
 }
 #define JAH_HIT_ON          ( p.hitList.w > 0.5 )
 #define JAH_HIT_CAPACITY    uint( p.hitList.x )
@@ -668,9 +652,9 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 		warmHeld = viewIsWarm;			// behind the camera, or outside the previous picture
 		return vec4( 0.0 );
 	}
-	const ivec2 pc = clamp( ivec2( eyeGlobalUv( uv, eye ) * vec2( traceRes ) ),
+	const ivec2 pc = clamp( ivec2( uv * vec2( traceRes ) ),
 							ivec2( 0 ), traceRes - 1 );
-	const vec2 wasPair = imageLoad( historyDistPrev, pc ).xy;
+	const vec2 wasPair = imageLoad( historyDistPrev, ivec3( pc, gEye ) ).xy;
 	const float wasDist = wasPair.x;
 	const float dist = z;   // what THIS surface's distance was last frame
 	// THE 5 % TEST (jah_reproject.glsl): far enough not to reject a surface the
@@ -690,7 +674,7 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 		// that HAD a warm history hands its warm-up on, and nothing else.
 		if( wasDist > 0.0 )
 		{
-			const vec4 hj = imageLoad( historyPrev, pc );
+			const vec4 hj = imageLoad( historyPrev, ivec3( pc, gEye ) );
 			if( finite1( hj.w ) && hj.w >= kWarmupFrames )
 				warmHeld = 1.0;
 		}
@@ -705,7 +689,7 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 		warmHeld = max( warmHeld, viewIsWarm );
 		return vec4( 0.0 );
 	}
-	const vec4 h = imageLoad( historyPrev, pc );
+	const vec4 h = imageLoad( historyPrev, ivec3( pc, gEye ) );
 	if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
 		return vec4( 0.0 );
 	// HOW FAR AWAY the thing in this mean was (the second channel): what main()
@@ -734,7 +718,7 @@ vec4 historyAtImage( EyeImage before, int eye, vec3 world, ivec2 traceRes, out f
 	if( jahReproject( world, before.camPos, before.perspective, before.rayTL, before.rayRight,
 					  before.rayDown, before.fwd, uv, z ) != 0 )
 		return vec4( 0.0 );
-	const vec2 f = eyeGlobalUv( uv, eye ) * vec2( traceRes ) - 0.5;
+	const vec2 f = uv * vec2( traceRes ) - 0.5;
 	const ivec2 base = ivec2( floor( f ) );
 	const vec2 fr = f - vec2( base );
 	vec4 sum = vec4( 0.0 );
@@ -744,11 +728,11 @@ vec4 historyAtImage( EyeImage before, int eye, vec3 world, ivec2 traceRes, out f
 		const ivec2 o = ivec2( k & 1, k >> 1 );
 		const ivec2 pc = clamp( base + o, ivec2( 0 ), traceRes - 1 );
 		const float bw = ( o.x == 1 ? fr.x : 1.0 - fr.x ) * ( o.y == 1 ? fr.y : 1.0 - fr.y );
-		const vec2 pair = imageLoad( historyDistPrev, pc ).xy;
+		const vec2 pair = imageLoad( historyDistPrev, ivec3( pc, gEye ) ).xy;
 		if( bw <= 0.0 || !jahSameDistance( pair.x, z ) || !finite1( pair.y ) || pair.y <= 0.0 ||
 			jahMeanMoverAge( pair.y ) >= kMoverMeanFrames )
 			continue;
-		const vec4 h = imageLoad( historyPrev, pc );
+		const vec4 h = imageLoad( historyPrev, ivec3( pc, gEye ) );
 		if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
 			continue;
 		sum += vec4( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), h.w ) * bw;
@@ -775,32 +759,25 @@ void main()
 	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
 	const ivec2 blockOrigin = tc * scale;
 	const vec2 uv = ( vec2( blockOrigin ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
-	// WHICH EYE THIS PIXEL BELONGS TO, and its coordinate in that eye's own
-	// image (lane REFLECT-VR-1). Every TEXTURE fetch below uses `uv` — the
-	// coordinate over the whole target, which already lands in the right eye's
-	// half of the depth, normal and roughness buffers — and every RAY below is
-	// built from `localUv` through that eye's basis. With one eye the two are
-	// the same coordinate and nothing branches.
-	const int eye = eyeOfColumn( tc.x, traceRes.x );
-	const vec2 localUv = eyeLocalUv( uv, eye );
+	// WHICH EYE THIS PIXEL BELONGS TO (lane REFLECT-VR-1, LAYERED-STEREO-1): the
+	// dispatch's z, the layer of every screen image; `uv` is that eye's own
+	// image coordinate, and every RAY below is built through that eye's basis.
+	gEye = int( gl_GlobalInvocationID.z );
+	const int eye = gEye;
+	const vec2 localUv = uv;
 	const EyeImage thisEye = eyeNow( eye );
-	// THE SAMPLE SEQUENCE IS KEYED ON THE EYE'S OWN PIXEL, never the target's
-	// (VR-MONO-PARITY-1). Keyed on `tc`, the right eye of a stereo target took
-	// another pixel's rays than the same pixel of the left eye and of a mono
-	// render at that eye's pose: at worldScale 0 the halves differed at the
-	// pillar's silhouette by 19/255 (vr.session_undithered, 4 runs in 6). The
-	// ray NOISE of the two eyes is then the same at one pose, and that is
-	// correct: unlike the grade's dither it is not seen as noise but averaged
-	// into a temporal mean, and an eye's mean must not depend on which half of
-	// the target it was drawn into. With one eye this is `tc` itself.
-	const ivec2 seedPix = ivec2( tc.x - eye * ( traceRes.x / 2 ), tc.y );
+	// THE SAMPLE SEQUENCE IS KEYED ON THE EYE'S OWN PIXEL (VR-MONO-PARITY-1): the
+	// ray NOISE of the two eyes is the same at one pose, and that is correct —
+	// it is averaged into a temporal mean, and an eye's mean must not depend on
+	// which eye it is. With layers the pixel IS the eye's own.
+	const ivec2 seedPix = tc;
 
-	const float rawDepth = texture( sceneDepth, uv ).x;
+	const float rawDepth = texture( sceneDepth, vec3( uv, float( gEye ) ) ).x;
 	// Cleared depth at EITHER extreme is "nothing was drawn here" — correct with
 	// and without reverse Z, the same test the march makes.
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
 	{
-		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( 0.0 ) );
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
@@ -818,21 +795,21 @@ void main()
 	// The gate and the feather below are compared in PERCEPTUAL roughness,
 	// because that is the number the World row shows and the owner states the
 	// dial in. alpha 0.4 would be perceptual 0.63 — a different surface.
-	const float alpha = max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 );
+	const float alpha = max( texture( gBufShadowRoughness, vec3( uv, float( gEye ) ) ).y * 0.999 + 0.001, 1e-6 );
 	const float roughness = sqrt( alpha );
 	// TRACED UP TO THE FEATHER'S FAR EDGE, not to the cutoff: the band above the
 	// cutoff is exactly where the two answers are being crossfaded, and a pixel
 	// in it with no ray would make the crossfade a step again.
 	if( roughness > roughGate + feather )
 	{
-		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( 0.0 ) );
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
-	vec3 normalVS = texture( gBufNormals, uv ).xyz * 2.0 - 1.0;
+	vec3 normalVS = texture( gBufNormals, vec3( uv, float( gEye ) ) ).xyz * 2.0 - 1.0;
 	if( dot( normalVS, normalVS ) < 1e-6 )
 	{
-		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( 0.0 ) );
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
@@ -853,7 +830,7 @@ void main()
 												: normalize( thisEye.camPos - world );
 	if( dot( worldN, V ) <= 0.0 )
 	{
-		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( 0.0 ) );
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
@@ -1176,8 +1153,8 @@ void main()
 		// A NON-FINITE ESCAPE IS NOT EVIDENCE ABOUT THIS PIXEL: the history is
 		// carried through unchanged, and a texel that has never had an answer
 		// (prev.w == 0) writes a zero distance so the filter skips it this frame.
-		imageStore( historyCur, tc, prev );
-		imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0,
+		imageStore( historyCur, ivec3( tc, gEye ), prev );
+		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( prev.w > 0.0 ? dist : 0.0,
 											  jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ), 0.0, 0.0 ) );
 		photonHit( tc, kPhotonDropped );
 		return;
@@ -1270,7 +1247,7 @@ void main()
 		const float nearer = max( min( hitT, wasHitT ), 1e-3 );
 		const float apart  = abs( hitT - wasHitT ) / nearer;
 		const float wide   = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
-		const float eyePixels = float( p.stereo.x > 0.5 ? traceRes.x / 2 : traceRes.x );
+		const float eyePixels = float( traceRes.x );
 		const float halfPixelAngle = 0.5 * length( thisEye.rayRight ) / max( eyePixels, 1.0 );
 		bool moved = thisEye.perspective > 0.5 && length( stepped ) > nearer * halfPixelAngle;
 		float drop = mix( 1.0, 0.35, wide );
@@ -1312,22 +1289,22 @@ void main()
 		// warm-held seed ) + 1, 4096 ) — the same mean as the lines below, the
 		// radiance arriving one pass later. The blend travels negated when the
 		// history is warm-held, which is the seed's only other input.
-		imageStore( historyCur, tc, prev );
+		imageStore( historyCur, ivec3( tc, gEye ), prev );
 		const vec3 hitPos = world + worldN * bias + L * hitT;
 		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
 		if( jahHitAppend( recSlot, jahHitNearLevel( recSlot ), false, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),
-						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false ),
+						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false, gEye ),
 						  world.y, length( hitPos - world ), length( world - thisEye.camPos ) ) )
 		{
-			imageStore( historyDistCur, tc, vec4( dist, hitMeanStored, 0.0, 0.0 ) );
+			imageStore( historyDistCur, ivec3( tc, gEye ), vec4( dist, hitMeanStored, 0.0, 0.0 ) );
 			photonHit( tc, kPhotonList );
 		}
 		else
 		{
 			// THE LIST WAS FULL (a dropped record, counted): this frame has no
 			// sample for the texel, which keeps what it had.
-			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0,
+			imageStore( historyDistCur, ivec3( tc, gEye ), vec4( prev.w > 0.0 ? dist : 0.0,
 												  jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ), 0.0, 0.0 ) );
 			photonHit( tc, kPhotonDropped );
 		}
@@ -1351,8 +1328,8 @@ void main()
 	// own history is kWarmupFrames old (`historyAt`) — so a freshly created view
 	// (a graded screenshot's, which lives about two frames) still fades in
 	// exactly as before, which is the guarantee the warm-up exists for.
-	imageStore( historyCur, tc, vec4( mean, count ) );
-	imageStore( historyDistCur, tc, vec4( dist, hitMeanStored, 0.0, 0.0 ) );
+	imageStore( historyCur, ivec3( tc, gEye ), vec4( mean, count ) );
+	imageStore( historyDistCur, ivec3( tc, gEye ), vec4( dist, hitMeanStored, 0.0, 0.0 ) );
 	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );
 
 	// THE COMPOSITE IS THE FILTER PASS' (round C). This shader now ends at the

@@ -45,8 +45,8 @@ layout( set = 0, binding = 0 ) uniform Params
 layout( std430, set = 0, binding = 1 ) readonly buffer JahHitBuf { uint jahHitBuf[]; };
 layout( set = 0, binding = 2 ) uniform usampler2D jahHitDest;
 layout( set = 0, binding = 3 ) uniform sampler2D jahHitRadiance;
-layout( rgba16f, set = 0, binding = 4 ) uniform image2D historyCur;
-layout( rg32f, set = 0, binding = 5 ) uniform image2D historyDistCur;
+layout( rgba16f, set = 0, binding = 4 ) uniform image2DArray historyCur;
+layout( rg32f, set = 0, binding = 5 ) uniform image2DArray historyDistCur;
 layout( rgba16f, set = 0, binding = 6 ) uniform image2D probeAtlas;
 /// The list's records (the ray's direction, jah_rq_hit_record.glsl) and the air's
 /// table — the reflection's fog along its ray (PHOTON-I-1 fix 5).
@@ -108,10 +108,13 @@ void main()
 	}
 	// A texel outside the image is never written (no robustness on this device:
 	// an out-of-range store is undefined).
-	if( p.list.z < 0.5 || any( greaterThanEqual( xy, imageSize( historyCur ) ) ) ||
-		any( greaterThanEqual( xy, imageSize( historyDistCur ) ) ) )
+	// THE EYE'S LAYER (bit 30, LAYERED-STEREO-1): the reflection's history is an
+	// array with one layer per eye.
+	const ivec3 at3 = ivec3( xy, int( ( dest >> 30u ) & 1u ) );
+	if( p.list.z < 0.5 || any( greaterThanEqual( at3, imageSize( historyCur ) ) ) ||
+		any( greaterThanEqual( at3, imageSize( historyDistCur ) ) ) )
 		return;
-	const vec4 prev = imageLoad( historyCur, xy );
+	const vec4 prev = imageLoad( historyCur, at3 );
 	if( shaded )
 	{
 		const bool warmHeld = weight < 0.0;
@@ -126,11 +129,11 @@ void main()
 		const float originY = uintBitsToFloat( jahHitBuf[aux + 2u] );
 		const vec2 lengths = unpackHalf2x16( jahHitBuf[aux + 3u] );
 		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
-		imageStore( historyCur, xy, vec4( mix( prev.xyz, fogged, blend ), count ) );
+		imageStore( historyCur, at3, vec4( mix( prev.xyz, fogged, blend ), count ) );
 	}
 	else
 	{
-		const vec4 d = imageLoad( historyDistCur, xy );
-		imageStore( historyDistCur, xy, vec4( prev.w > 0.0 ? d.x : 0.0, d.y, 0.0, 0.0 ) );
+		const vec4 d = imageLoad( historyDistCur, at3 );
+		imageStore( historyDistCur, at3, vec4( prev.w > 0.0 ? d.x : 0.0, d.y, 0.0, 0.0 ) );
 	}
 }

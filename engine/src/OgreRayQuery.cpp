@@ -861,7 +861,7 @@ private:
         /// [frame & 1], written to [~frame & 1]. See rq_reflect.comp's note on
         /// why one buffer is a race.
         ReflectImage hist[2], dist[2];
-        unsigned w = 0, h = 0;
+        unsigned w = 0, h = 0, layers = 1;
         unsigned frame = 0;              ///< the sample sequence's input
         bool     imagesReady = false;
         /// The pair has been made but not yet zeroed (the clear needs a command
@@ -907,7 +907,8 @@ private:
     bool makeReflectPipeline(std::string &err);
     /// The point and linear samplers every job of the tier binds (made once).
     bool ensureSamplers(std::string &err);
-    bool ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, std::string &err);
+    bool ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, unsigned layers,
+                             std::string &err);
     /// Records the UNDEFINED -> GENERAL transition and the zero clear for a pair
     /// that was just made. Separate from the creation because the descriptor set
     /// needs the image VIEWS before the command buffer may be taken (see the
@@ -1247,6 +1248,10 @@ private:
     /// list's two formats, the RGBA16F of the reflection's mean and the gather's
     /// atlas, and the reflection's distance format.
     ReflectImage mHitDummyIds, mHitDummyColour, mHitDummyDest, mHitDummyDist;
+    /// The reflection history's stand-in: a SCREEN image (one layer, an array
+    /// view — what the composite declares since LAYERED-STEREO-1). mHitDummyDist
+    /// is one too; mHitDummyColour stays the probe atlas's 2D stand-in.
+    ReflectImage mHitDummyHist;
     bool mHitDummiesReady = false;
     bool mHitDummiesNeedInit = false;
     // ---- THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) ----------------
@@ -1943,7 +1948,8 @@ void RayQueryTier::close() {
         dropBuffer(hv.readback);
     }
     mHits.clear();
-    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist }) {
+    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist,
+                             &mHitDummyHist }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
         if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
@@ -4647,9 +4653,9 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
     return ensureSamplers(err);
 }
 
-bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h,
+bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, unsigned layers,
                                        std::string &err) {
-    if (rv.imagesReady && rv.w == w && rv.h == h) return true;
+    if (rv.imagesReady && rv.w == w && rv.h == h && rv.layers == layers) return true;
     // A RESIZE INVALIDATES THE MEAN, which is correct and not a loss: the
     // history is screen space, and every pixel of it now means a different
     // direction. The images are RETIRED rather than destroyed — frames that
@@ -4662,6 +4668,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h,
     rv.havePrev = false;
     rv.historyFrames = 0;
     rv.w = w; rv.h = h;
+    rv.layers = layers;
     // The second image: x = the surface's distance (the reprojection's validity
     // test), y = the mean distance the rays in the mean travelled (what a moved
     // camera's ray is compared against — rq_reflect.comp, PAN-SMEAR-1). 8 bytes a
@@ -4669,8 +4676,9 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h,
     // (jah_rq_hit_record.glsl), never a full-resolution image.
     const VkFormat formats[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32_SFLOAT };
     for (int i = 0; i < 2; ++i) {
-        if (!makeStorageImage(w, h, formats[0], rv.hist[i], err)) return false;
-        if (!makeStorageImage(w, h, formats[1], rv.dist[i], err)) return false;
+        // ONE LAYER PER EYE (LAYERED-STEREO-1): the trace's z is the eye.
+        if (!makeStorageImage(w, h, formats[0], rv.hist[i], err, layers)) return false;
+        if (!makeStorageImage(w, h, formats[1], rv.dist[i], err, layers)) return false;
     }
     rv.imagesReady = true;
     rv.needsClear = true;
@@ -4693,7 +4701,7 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
         toGeneral[i].image = imgs[i]->image;
         toGeneral[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         toGeneral[i].subresourceRange.levelCount = 1;
-        toGeneral[i].subresourceRange.layerCount = 1;
+        toGeneral[i].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
         toGeneral[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
@@ -4702,7 +4710,7 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     VkImageSubresourceRange range{};
     range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     range.levelCount = 1;
-    range.layerCount = 1;
+    range.layerCount = VK_REMAINING_ARRAY_LAYERS;
     for (int i = 0; i < 4; ++i)
         vkCmdClearColorImage(cmd, imgs[i]->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
     VkMemoryBarrier toCompute{};
@@ -4882,13 +4890,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     const StereoEyeBasis *eyes = view->stereoEyes();
     unsigned traceW = ssrRow >= 2 ? fullW : std::max(1u, fullW / 2u);
     unsigned traceH = ssrRow >= 2 ? fullH : std::max(1u, fullH / 2u);
-    if (stereo) {
-        const unsigned eyeW = fullW / 2u;
-        if (!eyeW || fullW != eyeW * 2u) return;      // not a two-eye target after all
-        const unsigned eyeTraceW = ssrRow >= 2 ? eyeW : eyeW / 2u;
-        traceW = eyeTraceW * 2u;
-        if (!eyeTraceW || fullW % traceW != 0u) { traceW = fullW; traceH = fullH; }
-    }
+    // A STEREO VIEW'S TEXTURES ARE LAYERED, one eye per layer (LAYERED-STEREO-1):
+    // fullW is one eye's, the trace is per layer, and the dispatch's z is the eye.
+    const unsigned eyeLayers = ssrTex->getNumSlices();
+    if (stereo != (eyeLayers == 2u)) return;   // a chain that is not the view's shape yet
 
     // ---- THE VOXEL CACHE THE HITS ARE SHADED FROM (route A) -----------------
     // Each cascade of the Photon chain is its OWN PhotonVoxelLighting (they are chained
@@ -4996,7 +5001,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         Ogre::LogManager::getSingleton().logMessage("Jahshaka: ray-traced reflections off — " + err);
         return;
     }
-    if (!ensureReflectImages(rv, traceW, traceH, err)) {
+    if (!ensureReflectImages(rv, traceW, traceH, eyeLayers, err)) {
         mReflectFailed = true;
         Ogre::LogManager::getSingleton().logMessage("Jahshaka: ray-traced reflections off — " + err);
         return;
@@ -5192,7 +5197,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // trace when the scene's view asks and the view holds one at the full size.
     Ogre::TextureGpu *photon =
         scene->photonView() == PhotonView::Hits ? view->photonOverlay() : nullptr;
-    if (photon && (photon->getWidth() != fullW || photon->getHeight() != fullH)) photon = nullptr;
+    if (photon && (photon->getWidth() != fullW || photon->getHeight() != fullH ||
+                   photon->getNumSlices() != eyeLayers))
+        photon = nullptr;
     pp.stereo[2] = photon ? 1.0f : 0.0f;
     pp.cards[0] = cardsBound ? float(cardCache->instanceSlots()) : 0.0f;
     pp.cards[1] = cardsBound ? float(cardCache->cardRecords()) : 0.0f;
@@ -5318,16 +5325,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         retireView(v);
         return v;
     };
-    const auto uavView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetUav::TextureSlot slot =
-            Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = t;
-        slot.access = Ogre::ResourceAccess::ReadWrite;
-        slot.pixelFormat = t->getPixelFormat();
-        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        retireView(v);
-        return v;
-    };
     const unsigned prev = rv.frame & 1u, cur = 1u - prev;
 
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
@@ -5342,14 +5339,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     Ogre::TextureGpu *const sampledSrc[3] = { normalTex, roughTex, depthTex };
     for (int i = 0; i < 3; ++i) {
         sampled[i].sampler = mPointSampler;
-        sampled[i].imageView = sampledView(sampledSrc[i]);
+        sampled[i].imageView = layerView(sampledSrc[i], false);   // every eye's layer
         sampled[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
     // The depth texture's view carries the DEPTH aspect, but its LAYOUT under
     // `ResourceLayout::Texture` is the plain shader-read one for every format
     // (OgreVulkanMappings.cpp:603) — which is the layout the transition below
     // asks the solver for, so the descriptor and the barrier agree.
-    storage[0].imageView = uavView(ssrTex);
+    storage[0].imageView = layerView(ssrTex, true);
     storage[1].imageView = rv.hist[prev].view;
     storage[2].imageView = rv.hist[cur].view;
     storage[3].imageView = rv.dist[prev].view;
@@ -5498,7 +5495,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE PHOTON VIEW'S OVERLAY (36): the view's, or — the knob off — the reflection
     // target's own storage view as a stand-in of the same format, never written.
     VkDescriptorImageInfo photonImg{};
-    photonImg.imageView = photon ? uavView(photon) : storage[0].imageView;
+    photonImg.imageView = photon ? layerView(photon, true) : storage[0].imageView;
     photonImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     if (!photonImg.imageView) { bail("the photon overlay view is null"); return; }
     w[kReflectPhotonBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -5610,7 +5607,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
-    vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
+    vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, eyeLayers);   // z = the eye
     // The overlay holds this frame's picture from here; the photon listener takes it
     // to the texture layout in front of its composite.
     if (photon) view->notePhotonOverlayWritten();
@@ -6318,7 +6315,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                             &rv.sets[ring], 0, nullptr);
     {
         monitor::CacheScope filterRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.filter", mRs, key);
-        vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
+        vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, rv.layers);   // z = the eye
     }
 }
 
@@ -7612,7 +7609,8 @@ bool RayQueryTier::ensureHitDummies(std::string &err) {
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32B32A32_UINT, mHitDummyIds, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyColour, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32_UINT, mHitDummyDest, err)) return false;
-    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_SFLOAT, mHitDummyDist, err)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_SFLOAT, mHitDummyDist, err, 1u)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyHist, err, 1u)) return false;
     mHitDummiesReady = true;
     mHitDummiesNeedInit = true;
     return true;
@@ -7621,9 +7619,10 @@ bool RayQueryTier::ensureHitDummies(std::string &err) {
 void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
     if (!mHitDummiesNeedInit || !cmd) return;
     mHitDummiesNeedInit = false;
-    VkImageMemoryBarrier b[4] = {};
-    ReflectImage *imgs[4] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist };
-    for (int i = 0; i < 4; ++i) {
+    VkImageMemoryBarrier b[5] = {};
+    ReflectImage *imgs[5] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist,
+                              &mHitDummyHist };
+    for (int i = 0; i < 5; ++i) {
         b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -7635,7 +7634,7 @@ void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
         b[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 4, b);
+                         0, 0, nullptr, 0, nullptr, 5, b);
 }
 
 void RayQueryTier::hitStandIns(HitListBinding &out) {
@@ -8035,7 +8034,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     // THE DESTINATIONS: the reflection's mean and distance of THIS frame (the
     // pair the trace wrote), the gather's atlas the trace wrote — or stand-ins
     // with the consumer's flag down (its records, if any, are skipped).
-    VkImageView histView = mHitDummyColour.view, distView = mHitDummyDist.view, atlasView = mHitDummyColour.view;
+    VkImageView histView = mHitDummyHist.view, distView = mHitDummyDist.view, atlasView = mHitDummyColour.view;
     bool reflectBound = false, gatherBound = false;
     if (auto rit = mReflects.find(key); rit != mReflects.end() && rit->second.finishPending) {
         histView = rit->second.hist[rit->second.curIdx].view;

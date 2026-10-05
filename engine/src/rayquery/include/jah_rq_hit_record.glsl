@@ -115,10 +115,13 @@ vec2 jahOctEncode( vec3 n )
 	return e;
 }
 
-uint jahHitDestPack( ivec2 xy, bool gather )
+/// A destination: x in bits 0-14, y in 15-29, THE EYE'S LAYER in bit 30 (a
+/// stereo target is a two-layer array, LAYERED-STEREO-1; a probe-atlas
+/// destination has none), the gather flag in bit 31.
+uint jahHitDestPack( ivec2 xy, bool gather, int layer )
 {
 	return ( uint( xy.x ) & 0x7FFFu ) | ( ( uint( xy.y ) & 0x7FFFu ) << 15u ) |
-		   ( gather ? kJahHitDestGather : 0u );
+		   ( uint( layer & 1 ) << 30u ) | ( gather ? kJahHitDestGather : 0u );
 }
 
 /// THE SUN AT A HIT: a shadow ray from the hit, lifted along `liftDir` (the hit
