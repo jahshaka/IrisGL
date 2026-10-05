@@ -250,12 +250,36 @@ vec2 traceUv( ivec2 tc, ivec2 scale, ivec2 fullRes )
 	return ( vec2( tc * scale ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
 }
 
+/// THE TAPS' NEIGHBOURHOOD, ONCE PER GROUP (SPEED-GPU, audit MA-10). A tap reads four
+/// things at its texel - the written-this-frame flag, the temporal mean, the depth and the
+/// normal - and the 8 x 8 texels of a group share a 14 x 14 neighbourhood at the kernel's
+/// widest reach (kTileReach, the larger of kMaxRadius and kFreshRadius - 3): 49 taps a pixel of
+/// global reads became
+/// 196 x 4 per group, every tap then reading this tile. Each entry holds EXACTLY what the tap
+/// computed from its own fetches (the same calls at the same coordinates), and the taps keep
+/// their order and their arithmetic, so the filtered mean is the same bits. A group none of
+/// whose texels filters (mirrors, declined texels, the sky) loads nothing, and a group loads only
+/// as far as its widest kernel reaches.
+const int kTileReach = kMaxRadius > kFreshRadius ? kMaxRadius : kFreshRadius;
+const int kTileSide = 8 + 2 * kTileReach;
+// 24 bytes an entry (the group's shared memory is its occupancy): the mean as the four halves it
+// was stored as (an rgba16f texel - exact both ways), and the written-this-frame flag folded into
+// the depth (a texel the trace declined this frame stores depth 0, which the tap rejects exactly
+// as it rejected the flag: both are a `continue` before anything is accumulated).
+shared uvec2 sTapMean[kTileSide * kTileSide];
+shared float sTapDepth[kTileSide * kTileSide];
+shared vec3  sTapNormal[kTileSide * kTileSide];
+/// The widest kernel any texel of the group filters with (0: none filters): the tile is loaded
+/// only as far as that reach - a half-resolution or a mostly-mirror group loads a fraction of it.
+shared uint  sGroupReach;
+
 void main()
 {
 	const ivec2 traceRes = ivec2( p.resolution.xy );
 	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
-	if( any( greaterThanEqual( tc, traceRes ) ) )
-		return;
+	// EVERY INVOCATION REACHES THE TILE'S BARRIER: the early exits of the texel are a flag
+	// until the filter has run, and a texel outside the trace still loads its share.
+	bool texelLive = !any( greaterThanEqual( tc, traceRes ) );
 
 	const ivec2 fullRes = ivec2( p.resolution.zw );
 	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
@@ -272,18 +296,18 @@ void main()
 	const int eyeX0 = p.stereo.x > 0.5 ? eye * ( traceRes.x / 2 ) : 0;
 	const int eyeX1 = p.stereo.x > 0.5 ? eyeX0 + traceRes.x / 2 : traceRes.x;
 
-	const float rawDepth = texture( sceneDepth, uv ).x;
+	const float rawDepth = texelLive ? texture( sceneDepth, uv ).x : 0.0;
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
-		return;						// nothing was drawn here; the trace wrote nothing either
+		texelLive = false;				// nothing was drawn here; the trace wrote nothing either
 
 	const float roughGate = p.knobs.x;
 	const float feather = p.projParams.w;
 	// The SAME decode as the trace: fork 16d8e29d4 (was 0043) packs the GGX ALPHA over
 	// [0.001, 1], and the gate is stated in PERCEPTUAL roughness.
-	const float lobeAlpha = max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 );
+	const float lobeAlpha = texelLive ? max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 ) : 1.0;
 	const float roughness = sqrt( lobeAlpha );
 	if( roughness > roughGate + feather )
-		return;
+		texelLive = false;
 
 	// WRITTEN THIS FRAME? THE DISTANCE IS THE FLAG (third reader, item 1). The
 	// two history buffers PING-PONG, so `historyCur` at a texel the trace
@@ -292,11 +316,11 @@ void main()
 	// decline is for: handing that pixel back to the probe. `historyDistCur` is
 	// zeroed by every decline and written by every answer, so it is exactly the
 	// "this texel has an answer this frame" bit, and it costs one r32 load.
-	if( imageLoad( historyDistCur, tc ).x <= 0.0 )
-		return;
-	const vec4 centre = imageLoad( historyCur, tc );
+	if( texelLive && imageLoad( historyDistCur, tc ).x <= 0.0 )
+		texelLive = false;
+	const vec4 centre = texelLive ? imageLoad( historyCur, tc ) : vec4( 0.0 );
 	if( centre.w <= 0.0 )
-		return;						// this texel has no answer to filter or composite
+		texelLive = false;				// this texel has no answer to filter or composite
 
 	vec3 mean = clamp( centre.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
 	float count = centre.w;
@@ -323,7 +347,47 @@ void main()
 			radius = max( radius, int( ceil( float( kFreshRadius ) *
 											 ( 1.0 - sinceRestart / kFreshFrames ) ) ) );
 	}
-	if( radius > 0 && lobeAlpha > kMirrorAlpha )
+	const bool filters = texelLive && radius > 0 && lobeAlpha > kMirrorAlpha;
+
+	// THE TILE (above): loaded by the whole group, only when some texel of it filters.
+	if( gl_LocalInvocationIndex == 0u )
+		sGroupReach = 0u;
+	barrier();
+	if( filters )
+		atomicMax( sGroupReach, uint( radius ) );
+	barrier();
+	const ivec2 tileOrigin = ivec2( gl_WorkGroupID.xy ) * 8 - ivec2( kTileReach );
+	const int groupReach = int( sGroupReach );
+	if( groupReach > 0 )
+	{
+		// the entries within the group's reach of its 8 x 8 block, numbered over that square
+		const int side = 8 + 2 * groupReach;
+		const int skip = kTileReach - groupReach;
+		for( int i = int( gl_LocalInvocationIndex ); i < side * side; i += 64 )
+		{
+			const ivec2 local = ivec2( skip + i % side, skip + i / side );
+			const int entry = local.y * kTileSide + local.x;
+			const ivec2 t = tileOrigin + local;
+			float tapDist = 0.0;
+			vec4 h = vec4( 0.0 );
+			float td = 0.0;
+			vec3 tn = vec3( 0.0 );
+			if( all( greaterThanEqual( t, ivec2( 0 ) ) ) && all( lessThan( t, traceRes ) ) )
+			{
+				tapDist = imageLoad( historyDistCur, t ).x;
+				h = imageLoad( historyCur, t );
+				const vec2 tuv = traceUv( t, scale, fullRes );
+				td = texture( sceneDepth, tuv ).x;
+				tn = normalize( texture( gBufNormals, tuv ).xyz * 2.0 - 1.0 );
+			}
+			sTapMean[entry] = uvec2( packHalf2x16( h.xy ), packHalf2x16( h.zw ) );
+			sTapDepth[entry] = tapDist > 0.0 ? td : 0.0;
+			sTapNormal[entry] = tn;
+		}
+		barrier();
+	}
+
+	if( filters )
 	{
 		const float centreDist = viewDistance( rawDepth );
 		const vec3 centreN = normalize( texture( gBufNormals, uv ).xyz * 2.0 - 1.0 );
@@ -365,18 +429,19 @@ void main()
 				const ivec2 t = tc + ivec2( dx, dy );
 				if( t.x < eyeX0 || t.x >= eyeX1 || t.y < 0 || t.y >= traceRes.y )
 					continue;			// outside this EYE's own picture
+				// the tap's entry in the tile (always inside it: |dx|, |dy| <= kTileReach)
+				const ivec2 ti = t - tileOrigin;
+				const int tile = ti.y * kTileSide + ti.x;
 				// The SAME flag for a tap, and for a sharper reason: without it
 				// a neighbour that was traced before a dial drag took it above
 				// the cutoff is averaged into this pixel FOR EVER, because
 				// nothing ever writes over it again.
-				const float tapDist = imageLoad( historyDistCur, t ).x;
-				if( tapDist <= 0.0 )
-					continue;
-				const vec4 h = imageLoad( historyCur, t );
+				// (the written-this-frame flag rides the depth: 0 where the trace declined)
+				const uvec2 hp = sTapMean[tile];
+				const vec4 h = vec4( unpackHalf2x16( hp.x ), unpackHalf2x16( hp.y ) );
 				if( h.w <= 0.0 || !finite3( h.xyz ) )
 					continue;
-				const vec2 tuv = traceUv( t, scale, fullRes );
-				const float td = texture( sceneDepth, tuv ).x;
+				const float td = sTapDepth[tile];
 				if( td <= 0.0 || td >= 1.0 )
 					continue;
 				// DEPTH: against the plane the centre's own gradient predicts,
@@ -392,7 +457,7 @@ void main()
 					continue;
 				// ORIENTATION: two texels that face differently reflect
 				// differently, however close they are.
-				const vec3 tn = normalize( texture( gBufNormals, tuv ).xyz * 2.0 - 1.0 );
+				const vec3 tn = sTapNormal[tile];
 				const float ndot = max( dot( tn, centreN ), 0.0 );
 				// SPATIAL: a plain tent over the kernel, which is what an
 				// à-trous step of 1 is at this radius.
@@ -412,7 +477,7 @@ void main()
 		mean = sum / sumW;
 		count = sumCount / sumW;
 	}
-	if( !finite3( mean ) )
+	if( !texelLive || !finite3( mean ) )
 		return;
 
 	// ---- THE WRITE, per full-resolution texel of this block ------------------

@@ -273,6 +273,47 @@
 	#define JAH_CONES_TO_WORLD( d ) float3( ( d ).x, ( d ).y, -( d ).z )
 	@insertpiece( JahVoxelCones )
 
+	// THE PIXEL'S CONE START, one definition for the diffuse set and the specular cone.
+	// THE START BIAS: one cell of cascade 0 along the normal, whichever way the
+	// surface faces (fork change 0070; the rationale is JahVoxelCones'). The
+	// specular cone starts from the same point.
+	// ...from the normal in the CUBEMAP frame (the cone frame's third axis),
+	// through the same diagonal the card job's construction uses.
+	INLINE float3 jahVctPixelStart( float3 pos, float3x3 TBN, VctProbeParams probeParams,
+									OGRE_OUT_REF( float3, biasDirLS ), OGRE_OUT_REF( float4, jahOrigin ) )
+	{
+		float3 posLS = toVctProbeSpacePos( pos, probeParams );
+		float3 dirLS = jahCubeToVctProbeSpaceDir( TBN[2], probeParams );
+		biasDirLS = jahConeBiasDir( dirLS );
+		posLS = jahConeStart( posLS, biasDirLS );
+		jahOrigin = jahConeOrigin( posLS, biasDirLS );
+		return posLS;
+	}
+
+	@property( !vct_disable_diffuse )
+	// THE DIFFUSE CONES (JahVoxelCones): the voxels' share, and each cone's escape
+	// reading the one environment in that cone's direction at that cone's aperture -
+	// radiance, added after the voxels' decode. Under a field this runs from JahIfd's
+	// post hook, and only where the field's fallback weight is above zero (SPEED-GPU,
+	// audit PH-2): inside the field that weight is exactly 0 and the four marches were
+	// multiplied by it.
+	INLINE void jahVctDiffuse( OGRE_INOUT_REF( float3, outDiffuse ), OGRE_INOUT_REF( float3, outDiffuseVoxel ),
+							   float3 posLS, float4 jahOrigin, float3x3 TBN, VctProbeParams probeParams )
+	{
+		float3 light;
+		float3 jahEnvD;
+		jahDiffuseCones( posLS, jahOrigin, TBN, light, jahEnvD );
+		const float blend = 1.0f;
+		float blendWeight = probeParams.blendFade * blend * probeParams.multiplier;
+		// The voxels' share decoded by the volume's multiplier; the
+		// environment's share is radiance already.
+		outDiffuse.xyz += light.xyz * blendWeight + jahEnvD * ( probeParams.blendFade * blend );
+		// ...and the voxels' share ALONE, for the rough lobe's occluded share
+		// (applyVctRoughSpecular): the split made at its source.
+		outDiffuseVoxel += light.xyz * blendWeight;
+	}
+	@end
+
 	INLINE void computeVctProbe
 	(
 		OGRE_INOUT_REF( float3, outDiffuse ), OGRE_INOUT_REF( float4, outSpecular ),
@@ -285,20 +326,13 @@
 	@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 		float jahFogSurfY, float jahFogEyeDist,
 	@end
+		bool jahSpecAnswered,
 		VctProbeParams probeParams
 	)
 	{
-		float3 posLS = toVctProbeSpacePos( pos, probeParams );
-
-		// THE START BIAS: one cell of cascade 0 along the normal, whichever way the
-		// surface faces (fork change 0070; the rationale is JahVoxelCones'). The
-		// specular cone starts from the same point.
-		// ...from the normal in the CUBEMAP frame (the cone frame's third axis),
-		// through the same diagonal the card job's construction uses.
-		float3 dirLS = jahCubeToVctProbeSpaceDir( TBN[2], probeParams );
-		float3 biasDirLS = jahConeBiasDir( dirLS );
-		posLS = jahConeStart( posLS, biasDirLS );
-		const float4 jahOrigin = jahConeOrigin( posLS, biasDirLS );
+		float3 biasDirLS;
+		float4 jahOrigin;
+		float3 posLS = jahVctPixelStart( pos, TBN, probeParams, biasDirLS, jahOrigin );
 
 		@property( vct_num_probes > 1 )
 			/*float3 blendv = abs( posLS * 2.0f - 1.0f );
@@ -308,28 +342,27 @@
 			float blend = 1.0f;
 		@end
 
-		@property( !vct_disable_diffuse )
-			// THE DIFFUSE CONES (JahVoxelCones): the voxels' share, and each cone's
-			// escape reading the one environment in that cone's direction at that
-			// cone's aperture - radiance, added after the voxels' decode below.
-			float3 light;
-			float3 jahEnvD;
-			jahDiffuseCones( posLS, jahOrigin, TBN, light, jahEnvD );
+		@property( !vct_disable_diffuse && !irradiance_field )
+			jahVctDiffuse( outDiffuse, outDiffuseVoxel, posLS, jahOrigin, TBN, probeParams );
 		@end
 
 		float blendWeight = probeParams.blendFade * blend * probeParams.multiplier;
 
-		@property( !vct_disable_diffuse )
-			// The voxels' share decoded by the volume's multiplier; the
-			// environment's share is radiance already.
-			outDiffuse.xyz += light.xyz * blendWeight + jahEnvD * ( probeParams.blendFade * blend );
-			// ...and the voxels' share ALONE, for the rough lobe's occluded share
-			// (applyVctRoughSpecular): the split made at its source.
-			outDiffuseVoxel += light.xyz * blendWeight;
-		@end
-
 		//Irradiance / specular
 		@property( !vct_disable_specular )
+		// WHERE THE REFLECTION IS ALREADY ANSWERED, NOTHING HERE IS READ (SPEED-GPU, audit
+		// PH-1 / S1). The fork's SSR composite replaces the whole environment term by the
+		// screen march's or the ray tier's reflection weighted by its confidence w, and at
+		// w = 1 that is all of it: the cone, its escape, the rough lobe's occlusion and the
+		// PCC blend position below were computed and then multiplied by zero. What survives
+		// the composite is the cone's coverage `w` (outSpecular.w, which the probe, the
+		// ambient and the sky pieces read), and it is written exactly as the march writes it.
+		if( jahSpecAnswered )
+		{
+			outSpecular.w += blend;
+		}
+		else
+		{
 			float3 reflVecLS = toVctProbeSpaceDir( pixelData.reflDir, probeParams );
 			// 1 / (1 - 0.02) = 1.020408163
 			float vctRoughness = (pixelData.perceptualRoughness - 0.02f) * 1.020408163f;
@@ -447,6 +480,7 @@
 			@property( use_parallax_correct_cubemaps )
 				vctSpecPosVS = fromVctToViewSpace( irrLight.posLS.xyz, probeParams );
 			@end
+		}
 		@else
 			outSpecular.w += blend;
 		@end
@@ -519,6 +553,17 @@
 		float3 vctSpecPosVS = float3( 0, 0, 0 );
 	@end
 
+	// THE REFLECTION'S CONFIDENCE, read before the cone it may make redundant (SPEED-GPU,
+	// audit PH-1): the same texel the fork's SSR composite loads further down (the two
+	// loads are one), w = 1 where the screen march or the ray tier answered the whole lobe.
+	// NOT under a clear coat with parallax-corrected probes: there the cone's hit position
+	// also weighs the coat's own PCC term, which the composite does not replace.
+	@property( hlms_use_ssr && hlms_screen_pos_int && !jah_spec_cone_always && ( !clear_coat || !use_parallax_correct_cubemaps ) )
+		const bool jahSpecAnswered = OGRE_Load2D( ssrTexture, iFragCoord, 0 ).w >= 1.0f;
+	@else
+		const bool jahSpecAnswered = false;
+	@end
+
 	float3 vctDiffuse = float3( 0, 0, 0 );
 	float4 vctSpecular = float4( 0, 0, 0, 0 );
 	float vctRoughOcclusion = 0.0f;
@@ -531,7 +576,7 @@
 				@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 					 inPs.jahFogWorldY, length( inPs.pos.xyz ),
 				@end
-					 passBuf.vctProbeParams );
+					 jahSpecAnswered, passBuf.vctProbeParams );
 
 	@property( !vct_disable_diffuse )
 		@property( irradiance_field )
@@ -541,8 +586,9 @@
 			// the field cannot reach and the two must be blended rather than
 			// one of them chosen scene-wide. The blend is by the field's own
 			// confidence and it lives in Jahshaka's JahIfd piece, which runs
-			// immediately after this one, in this same scope, and reads
-			// `vctDiffuse` from here.
+			// immediately after this one, in this same scope: it MARCHES the
+			// cones into `vctDiffuse` (declared here, with `jahConeBasis`) only
+			// where its fallback weight is above zero (SPEED-GPU, audit PH-2).
 			//
 			// Nothing changes for upstream's own arrangement: with one volume
 			// HlmsPbs sets vct_disable_diffuse for any bound field and this
