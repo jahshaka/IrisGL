@@ -2559,10 +2559,12 @@ private:
     std::string mDir, mKey;
     bool        mEnabled = false;
     bool        mDirty = false;
-    /// hex128 of the last bytes handed to a write (meta + channels): a save
+    /// hex128 of the last bytes WRITTEN (meta + channels; set by the writer
+    /// thread once all three files landed): a save
     /// with nothing new writes nothing (the clean quit and the engine's
     /// destructor both save).
-    std::string mLastWritten;
+    std::string mLastWritten;          // GUARDED_BY(mLastWrittenMutex)
+    std::mutex  mLastWrittenMutex;     ///< the writer thread sets it after a write lands
     /// path -> (components, compressed). The channel sidecar, in memory.
     std::map<std::string, std::pair<unsigned, bool>> mChannels;
 };

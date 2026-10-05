@@ -256,8 +256,10 @@ bool TextureCache::save(Ogre::Root *root,
     const std::string metaHash = cachefile::hex128(json.data(), json.size());
     const std::string channelHash = cachefile::hex128(channels.data(), channels.size());
     const std::string both = metaHash + channelHash;
-    if (both == mLastWritten) { mDirty = false; return true; }
-    mLastWritten = both;
+    {
+        std::lock_guard<std::mutex> lock(mLastWrittenMutex);
+        if (both == mLastWritten) { mDirty = false; return true; }
+    }
     mDirty = false;
 
     // THE WRITE, on the writer thread (SHADER-WARM-2: no file sync on the UI
@@ -265,7 +267,11 @@ bool TextureCache::save(Ogre::Root *root,
     // key — so it reads nothing of this object.
     const std::string dir = mDir;
     const std::string key = mKey;
-    auto write = [dir, key, json = std::string(json), channels = std::move(channels),
+    // `this` is the process-wide, never-destroyed cache (textureCache()); the
+    // task touches only mLastWritten, under its mutex, and ONLY after all three
+    // files are in place — a failed write leaves the old record, so the next save
+    // writes again instead of believing the disk has these bytes.
+    auto write = [this, both, dir, key, json = std::string(json), channels = std::move(channels),
                   metaHash, channelHash]() {
         if (!cachefile::mkpath(dir)) return;
         if (!cachefile::writeAtomic(dir, kMetaFile, json.data(), json.size())) return;
@@ -279,7 +285,9 @@ bool TextureCache::save(Ogre::Root *root,
         m << "file " << kMetaFile << " " << json.size() << " " << metaHash << "\n";
         m << "file " << kChannelFile << " " << channels.size() << " " << channelHash << "\n";
         const std::string text = m.str();
-        cachefile::writeAtomic(dir, kManifestFile, text.data(), text.size());
+        if (!cachefile::writeAtomic(dir, kManifestFile, text.data(), text.size())) return;
+        std::lock_guard<std::mutex> lock(mLastWrittenMutex);
+        mLastWritten = both;
     };
     if (dispatch) dispatch(std::move(write));
     else write();
@@ -289,7 +297,10 @@ bool TextureCache::save(Ogre::Root *root,
 bool TextureCache::clear() {
     mChannels.clear();
     mDirty = false;
-    mLastWritten.clear();
+    {
+        std::lock_guard<std::mutex> lock(mLastWrittenMutex);
+        mLastWritten.clear();
+    }
     if (!mEnabled) return true;
     wipe();
     return true;
