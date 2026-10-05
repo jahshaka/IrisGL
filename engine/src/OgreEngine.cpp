@@ -2247,7 +2247,11 @@ unsigned OgreEngine::textureChannelCacheEntries() const {
 
 bool OgreEngine::saveTextureCache() {
     if (!mRoot) return false;
-    JAH_TRY { return textureCache().save(mRoot); } JAH_CATCH(mLastError, false);
+    JAH_TRY {
+        return textureCache().save(mRoot, [this](std::function<void()> write) {
+            mShaderCache.dispatchTask(std::move(write));
+        });
+    } JAH_CATCH(mLastError, false);
 }
 
 void OgreEngine::setVsync(bool on) {
@@ -2648,6 +2652,10 @@ bool OgreEngine::clearShaderCache() {
     } JAH_CATCH(mLastError, false);
 }
 
+void OgreEngine::setCompileObserver(std::function<void()> observer) {
+    mShaderCache.setCompileObserver(std::move(observer));
+}
+
 void OgreEngine::shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                                      unsigned &expected) const {
     mShaderCache.progress(compiled, fromCache, expected);
@@ -2691,7 +2699,13 @@ OgreEngine::~OgreEngine() {
     // The host also saves it explicitly at shutdown (EngineHost::shutdown, next
     // to saveShaderCache) — this is the point that runs even when the Engine
     // outlives that call, and save() is idempotent.
-    if (mRoot) { try { textureCache().save(mRoot); } catch (...) {} }
+    if (mRoot) {
+        try {
+            textureCache().save(mRoot, [this](std::function<void()> write) {
+                mShaderCache.dispatchTask(std::move(write));
+            });
+        } catch (...) {}
+    }
     // THE RAY-QUERY TIER'S acceleration structures, buffers and pipeline: all
     // of them are VkDevice objects and the device dies with the render system a
     // few lines below. Same rule, same reason, as the MeshPtrs — and the tier

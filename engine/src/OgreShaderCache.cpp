@@ -314,6 +314,11 @@ public:
     /// the UI thread. Bounded: a compile burst must never grow this without
     /// limit, and the count above is the honest total either way.
     std::atomic<bool>        recordNames{false};
+    /// Engine::setCompileObserver (SHADER-WARM-2): called after a compile made
+    /// on `observerThread` only. Set and cleared on that thread, between
+    /// compiles; read here on whatever thread compiled.
+    std::function<void()>    observer;
+    std::atomic<std::thread::id> observerThread{};
     std::mutex               namesMutex;
     std::vector<std::string> names;
     static constexpr size_t  kMaxNames = 256u;
@@ -339,6 +344,9 @@ public:
         if (message.size() >= 8 && message.compare(0, 7, "Shader ") == 0) {
             if (message.find(" compiled successfully") != Ogre::String::npos) {
                 ++compiled;
+                if (observerThread.load(std::memory_order_relaxed) == std::this_thread::get_id() &&
+                    observer)
+                    observer();
                 if (recordNames.load(std::memory_order_relaxed)) {
                     std::lock_guard<std::mutex> lock(namesMutex);
                     if (names.size() < kMaxNames) names.push_back(message);
@@ -465,6 +473,14 @@ void ShaderCache::attachCounters() {
     mCounter.reset(new Counter);
     if (Ogre::LogManager::getSingletonPtr() && Ogre::LogManager::getSingleton().getDefaultLog())
         Ogre::LogManager::getSingleton().getDefaultLog()->addListener(mCounter.get());
+}
+
+void ShaderCache::setCompileObserver(std::function<void()> observer) {
+    if (!mCounter) return;
+    mCounter->observerThread.store(std::thread::id(), std::memory_order_relaxed);
+    mCounter->observer = std::move(observer);
+    if (mCounter->observer)
+        mCounter->observerThread.store(std::this_thread::get_id(), std::memory_order_relaxed);
 }
 
 void ShaderCache::detachCounters() {
@@ -1116,12 +1132,29 @@ bool ShaderCache::runWrite(const PendingWrite &job) {
 void ShaderCache::writerLoop() {
     for (;;) {
         std::unique_ptr<PendingWrite> job;
+        std::function<void()> task;
         {
             std::unique_lock<std::mutex> lock(mWriteMutex);
-            mWriteCv.wait(lock, [this]() { return mWriteStop || mWriteJob != nullptr; });
-            if (!mWriteJob) return;           // stopping, and nothing left to write
-            job = std::move(mWriteJob);
+            mWriteCv.wait(lock, [this]() {
+                return mWriteStop || mWriteJob != nullptr || !mWriteTasks.empty(); });
+            if (mWriteJob) {
+                job = std::move(mWriteJob);
+            } else if (!mWriteTasks.empty()) {
+                task = std::move(mWriteTasks.front());
+                mWriteTasks.pop_front();
+            } else {
+                return;                       // stopping, and nothing left to write
+            }
             mWriteBusy = true;
+        }
+        if (task) {
+            task();
+            {
+                std::lock_guard<std::mutex> lock(mWriteMutex);
+                mWriteBusy = false;
+            }
+            mWriteDoneCv.notify_all();
+            continue;
         }
         const auto began = std::chrono::steady_clock::now();
         const bool ok = runWrite(*job);
@@ -1152,7 +1185,18 @@ bool ShaderCache::dispatchWrite(std::unique_ptr<PendingWrite> job) {
 
 bool ShaderCache::writeInFlight() const {
     std::lock_guard<std::mutex> lock(mWriteMutex);
-    return mWriteJob || mWriteBusy;
+    return mWriteJob || mWriteBusy || !mWriteTasks.empty();
+}
+
+void ShaderCache::dispatchTask(std::function<void()> task) {
+    std::unique_lock<std::mutex> lock(mWriteMutex);
+    mWriteTasks.push_back(std::move(task));
+    if (!mWriteThread.joinable()) {
+        mWriteStop = false;
+        mWriteThread = std::thread([this]() { writerLoop(); });
+    }
+    lock.unlock();
+    mWriteCv.notify_one();
 }
 
 void ShaderCache::finishWrites() {
@@ -1162,9 +1206,9 @@ void ShaderCache::finishWrites() {
 
 bool ShaderCache::flushWrites(unsigned budgetMs) {
     std::unique_lock<std::mutex> lock(mWriteMutex);
-    if (!mWriteJob && !mWriteBusy) return true;
-    return mWriteDoneCv.wait_for(lock, std::chrono::milliseconds(budgetMs),
-                                 [this]() { return !mWriteJob && !mWriteBusy; });
+    auto idle = [this]() { return !mWriteJob && !mWriteBusy && mWriteTasks.empty(); };
+    if (idle()) return true;
+    return mWriteDoneCv.wait_for(lock, std::chrono::milliseconds(budgetMs), idle);
 }
 
 void ShaderCache::stopWriter() {

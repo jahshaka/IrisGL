@@ -2435,8 +2435,10 @@ public:
     /// ask: it is a container size.
     virtual unsigned textureChannelCacheEntries() const = 0;
 
-    /// Writes the texture cache (metadata + the channel sidecar) now. Called on
-    /// clean shutdown beside saveShaderCache(); a no-op when the cache is off.
+    /// Serializes the texture cache (metadata + the channel sidecar) now and
+    /// hands the file write to the shader cache's writer thread —
+    /// flushShaderCache() waits for it. Called on clean shutdown beside
+    /// saveShaderCache(); a no-op when the cache is off or nothing changed.
     virtual bool saveTextureCache() = 0;
 
     // ---- Presentation pacing (fps audit F1) --------------------------------
@@ -2856,6 +2858,16 @@ public:
     // DEFAULT datablock on every warm launch, none of them ever bound. What
     // warms this renderer is the per-scene PSO precache (`View::warmUpShaders`)
     // and the persistent shader cache, both untouched.
+
+    /// THE COMPILE OBSERVER (SHADER-WARM-2). Called on the thread that set it,
+    /// right after each shader compiled ON THAT THREAD — a compute job compiled
+    /// at its first dispatch, a low-level material, a serial Hlms compile — and
+    /// never from the parallel compile workers. A frame that builds a lighting
+    /// arm compiles thirty compute permutations in one call; the startup splash
+    /// and an open's compile dialog repaint their bar from here so it moves
+    /// thirty times instead of once. Keep it to a repaint: it runs inside the
+    /// compile, under Ogre's log dispatch. An empty function clears it.
+    virtual void setCompileObserver(std::function<void()> observer) = 0;
 
     /// The startup progress counter's source: shaders compiled so far, shaders
     /// served from the cache so far, and how many the last saved run needed in

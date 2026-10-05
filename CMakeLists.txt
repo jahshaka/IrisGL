@@ -305,6 +305,7 @@ set (HEADERS
     document/assets/vertexlayout.h
     document/assets/vertexbuffer.h
     core/viewport.h
+    core/keyvaluestore.h
     import/meshprewarm.h
     import/parsecensus.h
     import/meshbake.h
