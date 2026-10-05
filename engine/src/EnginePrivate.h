@@ -8111,6 +8111,13 @@ public:
 
     View *createOffscreenView(const std::string &name, unsigned width, unsigned height,
                               const Colour &background) override;
+    /// THE VR SESSION'S EYE PAIR (LAYERED-STEREO-1): an offscreen view whose target
+    /// is BORN a two-layer array (one eye per layer, `eyeW` x `eyeH`), so the
+    /// session's setStereo has nothing to re-create. Its width() is the pair's.
+    OgreView *createStereoPairView(const std::string &name, unsigned eyeW, unsigned eyeH,
+                                   const Colour &background);
+    OgreView *createOffscreen(const std::string &name, unsigned width, unsigned height,
+                              const Colour &background, unsigned layers);
 
     void destroyView(View *view) override;
 

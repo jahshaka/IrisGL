@@ -1203,6 +1203,27 @@ std::string multiviewMaterial(const std::string &name) {
         OGRE_EXCEPT(Ogre::Exception::ERR_ITEM_NOT_FOUND, "no material '" + name + "'",
                     "chain::multiviewMaterial");
     src->load();
+    // EVERY FRAGMENT PROGRAM MUST HAVE THE ARM, checked BEFORE the twin exists: a
+    // program with no JAH_MULTIVIEW arm would compile and draw layer 0's texture
+    // into both eyes — the left eye in both, silently. The arm is either the
+    // shared header (JahScreen.glsl) or the define spelled in the program itself.
+    for (unsigned short ti = 0; ti < src->getNumTechniques(); ++ti) {
+        Ogre::Technique *tech = src->getTechnique(ti);
+        for (unsigned short pi = 0; pi < tech->getNumPasses(); ++pi) {
+            Ogre::Pass *pass = tech->getPass(pi);
+            if (!pass->hasFragmentProgram()) continue;
+            auto *hl = dynamic_cast<Ogre::HighLevelGpuProgram *>(
+                pass->getFragmentProgram()->_getBindingDelegate());
+            const std::string &text = hl ? hl->getSource() : std::string();
+            if (text.find("JAH_MULTIVIEW") == std::string::npos &&
+                text.find("JahScreen.glsl") == std::string::npos)
+                OGRE_EXCEPT(Ogre::Exception::ERR_INVALIDPARAMS,
+                            "material '" + name + "' has no multiview arm (its fragment program "
+                            "neither includes JahScreen.glsl nor reads JAH_MULTIVIEW): in a "
+                            "stereo chain it would draw one eye's input into both",
+                            "chain::multiviewMaterial");
+        }
+    }
     Ogre::MaterialPtr twin = src->clone(twinName);
     Ogre::HighLevelGpuProgramManager &pm = Ogre::HighLevelGpuProgramManager::getSingleton();
     for (unsigned short ti = 0; ti < twin->getNumTechniques(); ++ti) {

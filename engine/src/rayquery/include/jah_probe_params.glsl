@@ -124,12 +124,12 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// carries TWO EYES, one per LAYER of every full-resolution image here (the
 	/// dispatch's z, or a probe cell's eye); then the camera's five vectors above
 	/// are the LEFT eye's and the ten below the right eye's (now and the previous
-	/// frame's), each over its own layer as a 0..1 image. y is unused (an eye's
-	/// image is the whole layer, resolution.zw). z = THE PROBE COLUMNS PER EYE:
-	/// the probe LIST is two grids side by side, the right eye's cells numbered
-	/// after the left eye's, so a probe's cell names its eye. With x = 0 the
-	/// block is unread, z is the whole grid, and every helper below reduces to
-	/// the one-camera arithmetic exactly.
+	/// frame's), each over its own layer as a 0..1 image (an eye's image is the
+	/// whole layer, resolution.zw). y = THE PROBE COLUMNS PER EYE: the probe LIST
+	/// is two grids side by side, the right eye's cells numbered after the left
+	/// eye's, so a probe's cell names its eye. With x = 0 the block is unread, y
+	/// is the whole grid, and every helper below reduces to the one-camera
+	/// arithmetic exactly. zw unused.
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;
@@ -199,7 +199,7 @@ bool jahStereo() { return p.stereo.x > 0.5; }
 /// One eye's width in pixels: its layer's (LAYERED-STEREO-1).
 int jahEyeWidth() { return int( p.resolution.z ); }
 /// One eye's probe columns (the whole grid's with one eye).
-int jahEyeGridW() { return jahStereo() ? int( p.stereo.z ) : int( p.resolution.x ); }
+int jahEyeGridW() { return jahStereo() ? int( p.stereo.y ) : int( p.resolution.x ); }
 /// WHICH EYE OWNS A PROBE CELL column (a pixel's eye is its layer).
 int jahEyeOfCell( int cx ) { return ( jahStereo() && cx >= jahEyeGridW() ) ? 1 : 0; }
 /// A cell's coordinate in ITS EYE'S OWN grid — what every stochastic input is

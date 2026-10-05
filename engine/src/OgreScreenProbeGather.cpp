@@ -169,8 +169,8 @@ struct GatherParams {
     float hitSun[4] = {};
     float hitSun2[4] = {};
     /// THE SECOND EYE (PHOTON-GA-VR; jah_probe_params.glsl's `stereo` block):
-    /// x = 1 stereo, y = one eye's width, z = one eye's probe columns; then the
-    /// right eye's five vectors, now and the previous frame's.
+    /// x = 1 stereo, y = one eye's probe columns (zw unused); then the right
+    /// eye's five vectors, now and the previous frame's.
     float stereo[4] = {};
     float camPos2[4] = {};
     float rayTL2[4] = {};
@@ -1287,8 +1287,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // THE SECOND EYE (PHOTON-GA-VR): the shape, and the right eye's basis now and
     // before (written, never read, with one eye).
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;
-    pp.stereo[1] = 0.0f;   // unused: an eye's image is its whole layer (resolution.zw)
-    pp.stereo[2] = float(v.eyeGridW);
+    pp.stereo[1] = float(v.eyeGridW);
     std::memcpy(pp.camPos2, in.camPos2, sizeof(pp.camPos2));
     put3(pp.rayTL2, in.rayTL2, 0.0f);
     put3(pp.rayRight2, in.rayRight2, 0.0f);

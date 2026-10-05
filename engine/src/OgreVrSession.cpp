@@ -1440,9 +1440,11 @@ bool VrSession::create(std::string &reason) {
     //     BEFORE a host's first environment push — the warm-up frames, and an
     //     engine-only caller (tests/vr) that has no mirror at all. Every other
     //     field is the struct's default and is replaced on the first push.
-    View *v = mEngine->createOffscreenView("jahshaka-vr", mEyeWidth * 2u, mEyeHeight,
-                                           Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
-    if (!v) { reason = "createOffscreenView failed: " + mEngine->lastError(); return false; }
+    // BORN LAYERED (LAYERED-STEREO-1): the target is the two-layer eye pair from
+    // the start, so setStereo below re-creates nothing.
+    View *v = mEngine->createStereoPairView("jahshaka-vr", mEyeWidth, mEyeHeight,
+                                            Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
+    if (!v) { reason = "createStereoPairView failed: " + mEngine->lastError(); return false; }
     // NO OFFSCREEN CONTRACT: the eye pair PRESENTS to the wearer, so it gathers
     // by the scene's row — the VR column of the tier table — like a window
     // (OgreView's chain rule for a stereo view, PHOTON-GA-VR).

@@ -1038,7 +1038,9 @@ void OgreView::setStereo(bool on, const std::string &cullCamera) {
     // it is recreated between the detach and the rebuild — one rebuild.
     JAH_TRY {
         const bool hadWorkspace = detachWorkspace();
-        if (mTexture) {
+        // Only when the shape is wrong: the session's pair is BORN layered
+        // (OgreEngine::createStereoPairView), and ending a session makes it 2D.
+        if (mTexture && mTexture->getNumSlices() != (mStereo ? 2u : 1u)) {
             mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mTexture);
             mTexture = createRtt(mRoot, processUniqueName("rtt"), mWidth, mHeight,
                                  mRequestedSamples, mStereo ? 2u : 1u);

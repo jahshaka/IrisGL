@@ -33,9 +33,9 @@
 // `jahHitRadiance`, GA-1e), and the row is ON BY TIER — `GiToggle::Auto`
 // resolves through the tier table's gather row (Types.h `GiGatherFacts`: High
 // and Epic on, Medium at 36 rays, Low off). SINCE PHOTON-GA-VR: STEREO — a
-// two-eye target gathers per EYE in the same four dispatches (the grid is two
-// grids side by side, split at the seam; each eye reconstructs and reprojects
-// through its own basis — the reflection's REFLECT-VR-1 rule), and the pixel
+// two-eye target gathers per EYE in the same four dispatches (each eye its own
+// layer and its own probe grid, LAYERED-STEREO-1; each eye reconstructs and
+// reprojects through its own basis — the reflection's REFLECT-VR-1 rule), and the pixel
 // history is ONE PACKED 8-byte texel (16 B a pixel for the pair, every view).
 #pragma once
 
@@ -184,7 +184,7 @@ struct GatherInputs {
     bool anisotropic = false;
 
     /// The camera's basis, in the five vectors the shaders reconstruct with.
-    /// Under STEREO these are the LEFT eye's, over its own half as a 0..1 image.
+    /// Under STEREO these are the LEFT eye's, over its own layer as a 0..1 image.
     float camPos[4] = { 0, 0, 0, 1 };
     float rayTL[3] = {}, rayRight[3] = {}, rayDown[3] = {}, fwd[3] = {};
     /// A TWO-EYE TARGET (PHOTON-GA-VR, LAYERED-STEREO-1): every screen texture is
