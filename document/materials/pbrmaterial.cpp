@@ -433,8 +433,21 @@ Texture2DPtr PbrMaterial::loadTexture(const QString& path)
     return Texture2D::load(path);
 }
 
-void PbrMaterial::setValue(const QString& name, const QVariant& value)
+void PbrMaterial::setValue(const QString& name, const QVariant& in)
 {
+    // A TEXTURE ROW takes its file AND its identity (TEX-REF-1, Material's
+    // header): the row itself keeps the guid (TextureProperty::setValue reads a
+    // {path, guid} reference, and a bare path that differs from the held one
+    // clears it). From here on the row is driven by its path alone.
+    QVariant value = in;
+    for (Property *prop : properties) {
+        if (prop->name != name) continue;
+        if (prop->type != PropertyType::Texture) break;
+        prop->setValue(in);
+        value = prop->getValue();
+        break;
+    }
+
     if      (name == "baseColor")         baseColor         = value.value<QColor>();
     else if (name == "metallic")          metallicFactor    = value.toFloat();
     else if (name == "roughness")         roughnessFactor   = value.toFloat();
@@ -552,7 +565,16 @@ MaterialPtr PbrMaterial::duplicate() const
     copy->createProperties();
     for (Property *row : copy->properties) {
         for (Property *mine : properties) {
-            if (mine->name == row->name) { row->setValue(mine->getValue()); break; }
+            if (mine->name != row->name) continue;
+            // A texture row carries its asset too (TEX-REF-1): the copy names
+            // the same asset, not a file nobody named.
+            if (row->type == PropertyType::Texture)
+                row->setValue(static_cast<TextureProperty *>(mine)->assetGuid.isEmpty()
+                                  ? mine->getValue()
+                                  : textureRefOf(mine->name));
+            else
+                row->setValue(mine->getValue());
+            break;
         }
     }
     return copy;

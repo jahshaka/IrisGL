@@ -14,6 +14,8 @@ For more information see the LICENSE file
 
 #include "irisglfwd.h"
 
+#include <QString>
+#include <QVariant>
 #include <QtGlobal>
 #include <atomic>
 
@@ -71,6 +73,33 @@ public:
     // scene reader can drive any material without knowing its concrete type.
     // Default is a no-op: materials with no editable parameters ignore it.
     virtual void setValue(const QString& name, const QVariant& value) { Q_UNUSED(name); Q_UNUSED(value); }
+
+    // ---- A TEXTURE ROW'S IDENTITY (TEX-REF-1) ------------------------------
+    //
+    // A texture row's VALUE is the file this session renders from — a store
+    // object's resolved path, or a "live://" reference: what the mirror loads,
+    // what the panel thumbnails, what material.get reports. Its IDENTITY is the
+    // library asset the row names, carried ON THE ROW (TextureProperty::
+    // assetGuid) from the moment it is bound — a scene read, a pick, a verb, an
+    // import — until it is written. The scene writer persists the guid and
+    // nothing else, never deriving one back from the path; a reader binds the
+    // guid it read even when the store cannot resolve it, so the next save
+    // writes the same guid again and the scene raises `texture.missing` (the
+    // path a miss used to fall back to was saved as a meaningless relative
+    // path, and the reference was gone for good).
+    //
+    // HOW A ROW GETS ONE: setValue(row, textureRef(path, guid)) binds both;
+    // setValue(row, "<path>") binds a file nobody named and so CLEARS the guid —
+    // unless the path is the one the row already holds (a refill, a panel
+    // re-apply), which keeps it. A row with a path and no guid is a texture a
+    // saved scene cannot keep. An undo entry restores textureRefOf(row).
+
+    /// The asset guid a texture row names; empty for no row / no identity.
+    QString textureGuid(const QString &row) const;
+    /// The value that binds a texture row's file AND its asset: {path, guid}.
+    static QVariant textureRef(const QString &path, const QString &guid);
+    /// The row's current {path, guid} — what an undo entry restores.
+    QVariant textureRefOf(const QString &row) const;
 
     // ---- THE CHANGE MARK (SPECS/DIRTY_SET_MIRROR_SPEC.md §3.6) ------------
     //
