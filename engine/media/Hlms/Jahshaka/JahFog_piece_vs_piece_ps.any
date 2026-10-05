@@ -452,7 +452,9 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	// (which also sets jah_shader_clock, so the clock is declared): every other
 	// material keeps the expression below, byte for byte.
 	@property( jah_uv_scroll )
-	#define JAH_UV_XFORM(x) (float2( dot( material.userValue[1].xy, (x) * material.userValue[0].xy ), dot( material.userValue[1].zw, (x) * material.userValue[0].xy ) ) + material.userValue[0].zw + material.userValue[2].xy * passBuf.jahClock.x)
+	// (The parameter is NOT named x here: a macro parameter substitutes into a
+	// swizzle too, and jahClock.x would become jahClock.<the argument>.)
+	#define JAH_UV_XFORM(jahUvIn) (float2( dot( material.userValue[1].xy, (jahUvIn) * material.userValue[0].xy ), dot( material.userValue[1].zw, (jahUvIn) * material.userValue[0].xy ) ) + material.userValue[0].zw + material.userValue[2].xy * passBuf.jahClock.x)
 	@else
 	#define JAH_UV_XFORM(x) (float2( dot( material.userValue[1].xy, (x) * material.userValue[0].xy ), dot( material.userValue[1].zw, (x) * material.userValue[0].xy ) ) + material.userValue[0].zw)
 	@end
