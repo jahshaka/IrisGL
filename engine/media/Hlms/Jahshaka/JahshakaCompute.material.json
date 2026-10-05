@@ -227,18 +227,6 @@
 			]
 		},
 
-		"Jahshaka/HzbSeed" :
-		{
-			"threads_per_group" : [8, 8, 1],
-			"thread_groups" : [1, 1, 1],
-			"source" : "JahHzbSeed_cs",
-			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
-			"inform_shader_of_texture_data_change" : true,
-			"textures" : [ {} ],
-			"thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [1, 1, 1] },
-			"uav_units" : 1
-		},
-
 		"Jahshaka/CardLight" :
 		{
 			"threads_per_group" : [8, 8, 1],
@@ -257,15 +245,23 @@
 			}
 		},
 
-		"Jahshaka/HzbReduce" :
+		"Jahshaka/HzbBuild" :
 		{
-			"threads_per_group" : [8, 8, 1],
+			"threads_per_group" : [16, 16, 1],
 			"thread_groups" : [1, 1, 1],
-			"source" : "JahHzbReduce_cs",
+			"source" : "JahHzbBuild_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
 			"inform_shader_of_texture_data_change" : true,
-			"thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [1, 1, 1] },
-			"uav_units" : 2
+			"textures" : [ {} ],
+			"thread_groups_based_on_texture" : { "slot" : 0, "divisor" : [4, 4, 1] },
+			"uav_units" : 17,
+			"properties" :
+			{
+				"hzb_slots" : 16,
+				"hzb_tile_slots" : 6,
+				"hzb_reverse_z" : 1,
+				"hzb_farthest" : 1
+			}
 		}
 	}
 }

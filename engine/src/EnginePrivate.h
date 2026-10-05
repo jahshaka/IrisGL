@@ -925,9 +925,18 @@ void atomRegisterScene(const Ogre::SceneManager *sm, OgreScene *scene);
 void atomUnregisterScene(const Ogre::SceneManager *sm);
 OgreScene *atomSceneOf(const Ogre::SceneManager *sm);
 /// THE OCCLUSION'S PYRAMID (ATOM-OCCLUSION-1, OgreAtomIdPass.cpp): `hzb`'s every level
-/// rebuilt from `depth` — the seed and a reduce per level (farthest), dispatched through
-/// HlmsCompute with Ogre's barrier solver. False when the jobs are not staged.
+/// rebuilt from `depth` — ONE dispatch of the single-pass build (JahHzbBuild_cs,
+/// farthest), through HlmsCompute with Ogre's barrier solver. False when the job is not
+/// staged.
 bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb);
+/// THE SINGLE-PASS BUILD'S JOB (JahHzbBuild_cs): UAV slots 0..kHzbMaxLevels-1 are the
+/// pyramid's mips, slot kHzbCounterSlot the engine-lifetime arrival counter, which
+/// `hzbBuildJob` creates and binds at its first call and `releaseHzbBuild` frees
+/// (~OgreEngine, before Root). Null when the job is not staged.
+constexpr Ogre::uint8 kHzbMaxLevels = 16u;
+constexpr Ogre::uint8 kHzbCounterSlot = 16u;
+Ogre::HlmsComputeJob *hzbBuildJob();
+void releaseHzbBuild();
 /// OgreAtomDraw.cpp — which view a workspace with an id pass belongs to (the
 /// recorder is handed a pass, not a view), and the view's listener that arms the
 /// screen decode for the passes that skip the Atom queue.
@@ -1284,8 +1293,8 @@ struct ChainDesc {
     /// THE ID PASS'S OCCLUSION (ATOM-OCCLUSION-1; Scene::setAtomOcclusionEnabled, the
     /// measuring door): the two-pass form. The id pass culls against the PREVIOUS
     /// frame's pyramid (`jahHzb`, still holding it: nothing has rebuilt it yet this
-    /// frame) and draws the survivors; the pyramid is rebuilt from that depth (a seed +
-    /// a reduce per level, FARTHEST, `hzbLevels` of them); the LATE id pass
+    /// frame) and draws the survivors; the pyramid is rebuilt from that depth (ONE
+    /// dispatch of the single-pass build, every level, FARTHEST); the LATE id pass
     /// (kAtomIdLatePassId) tests the rejected set again against it and draws the
     /// disoccluded ones into the same id image and depth. Only with `atomDraw`, and not
     /// where the view asked for a CLOSEST pyramid of its own (the reduce direction is
@@ -4030,6 +4039,7 @@ public:
         float biasScale = 0;              ///< the shadow camera's constant-bias scale
         float depthNear = 0, depthFar = 0;   ///< the map's depth range (the caster's depthRange)
         float viewProj[16] = {};          ///< rows, the cut's (the camera's RS-depth VP)
+        float planes[24] = {};            ///< the request's six planes (the cut's per-cluster frustum test)
         unsigned rect[4] = { 0, 0, 0, 0 };   ///< the map's rectangle in its target, texels
         unsigned survivors = 0, overflow = 0, missing = 0;
         unsigned long long triangles = 0ull;

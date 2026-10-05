@@ -266,7 +266,33 @@ struct ClusterCutView {
     float projScaleY = 0.0f;      ///< proj[1][1]
     float viewportHeight = 0.0f;  ///< the pass's target height
     bool  orthographic = false;   ///< no distance term: one metre (the level walk's ortho case)
+    /// THE REQUEST'S SIX PLANES (SPEED-VR-MEM, the cut's per-cluster frustum test,
+    /// JahCullCut_cs.glsl `jahClusterInFrustum`): inward, normalised (a, b, c, d), world
+    /// space — the cull request's own. `cullPlanes` false = no frustum term (a DAG-only
+    /// question: the threshold sweeps, the crack proofs).
+    bool  cullPlanes = false;
+    float planes[6][4] = {};
 };
+
+/// THE CLUSTER'S FRUSTUM TEST, spelled operation for operation the way the GLSL twin
+/// spells it: the cluster's mesh-space sphere carried to world space by the instance's
+/// rows (the centre transformed, the radius by the largest axis scale), a relative margin
+/// of 2^-12 plus 1 micrometre, and dropped only when wholly behind one of the four SIDE
+/// planes (0-3; never the depth pair - a shadow camera's depth clamp draws a caster in
+/// front of its near plane).
+inline bool clusterInFrustum(const MeshCluster &c, const ClusterCutView &v) {
+    if (!v.cullPlanes) return true;
+    float w[3];
+    for (int r = 0; r < 3; ++r)
+        w[r] = v.worldRow[r][0] * c.centre[0] + v.worldRow[r][1] * c.centre[1] +
+               v.worldRow[r][2] * c.centre[2] + v.worldRow[r][3];
+    float rad = c.radius * v.scale;
+    rad += rad * (1.0f / 4096.0f) + 1.0e-6f;
+    for (int i = 0; i < 4; ++i)   // the four SIDE planes: a shadow camera draws with depth clamp
+        if (v.planes[i][0] * w[0] + v.planes[i][1] * w[1] + v.planes[i][2] * w[2] + v.planes[i][3] < -rad)
+            return false;
+    return true;
+}
 
 /// What the consumer can afford AT ONE GROUP, in mesh units. The arithmetic is
 /// spelled operation for operation the way the GLSL twin spells it.
@@ -318,7 +344,17 @@ inline size_t clusterCut(const std::vector<MeshClusterGroup> &groups,
     std::vector<unsigned char> affordable(groups.size(), 0);
     for (size_t g = 0; g < groups.size(); ++g)
         affordable[g] = clusterGroupAffordable(groups[g].error, clusterGroupAllowed(groups[g], view)) ? 1 : 0;
-    return clusterCutFromAffordable(clusters, affordable, out);
+    const size_t triangles = clusterCutFromAffordable(clusters, affordable, out);
+    if (!view.cullPlanes) return triangles;
+    // ...and the view's frustum, cluster by cluster (the cut job's own test).
+    size_t kept = 0, keptTris = 0;
+    for (unsigned c : out)
+        if (clusterInFrustum(clusters[c], view)) {
+            out[kept++] = c;
+            keptTris += clusters[c].indexCount / 3u;
+        }
+    out.resize(kept);
+    return keptTris;
 }
 
 /// THE CUT AT ONE ALLOWED ERROR FOR EVERY GROUP (a threshold sweep, and the

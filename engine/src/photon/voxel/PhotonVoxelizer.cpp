@@ -63,6 +63,88 @@ THE SOFTWARE.
 
 namespace Ogre
 {
+    namespace
+    {
+        /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
+        /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
+        /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at
+        /// the build's start, summed into by its voxelise dispatches and resolved by them, all
+        /// recorded in that one call. Builds are recorded one after another and Ogre's barrier
+        /// solver orders the next build's clear after the last one's reads, because it is the
+        /// same texture. So every voxeliser of one volume size shares ONE accumulator, still
+        /// resident for its whole life (the Xid-109 cure below is untouched: nothing is
+        /// created or destroyed per build). Keyed by SIZE, not merely the largest: a 64^3
+        /// cascade binding a 128^3 accumulator would clear eight times the texels every
+        /// build. High and Epic (two 128^3 + two 64^3 cascades) hold 170 MB less, Medium (four
+        /// 64^3) 57 MB, Low 19 MB; the clears and the picture are what they were.
+        struct SharedMergeAccum
+        {
+            TextureGpuManager *manager = nullptr;
+            uint32 width = 0u, height = 0u, depth = 0u;
+            TextureGpu *texture = nullptr;
+            uint32 users = 0u;
+        };
+        /// TEARDOWN ORDER: every entry is released by its voxelisers' destroyVoxelTextures
+        /// while their TextureGpuManager lives (the scenes' GI dies before Root), so the
+        /// pool is EMPTY before any manager it names dies; the process static outlives
+        /// them holding nothing, and a second engine's manager is a different key.
+        std::vector<SharedMergeAccum> &sharedMergeAccums()
+        {
+            static std::vector<SharedMergeAccum> pool;
+            return pool;
+        }
+
+        TextureGpu *acquireMergeAccum( TextureGpuManager *manager, uint32 width, uint32 height,
+                                       uint32 depth )
+        {
+            std::vector<SharedMergeAccum> &pool = sharedMergeAccums();
+            for( SharedMergeAccum &e : pool )
+            {
+                if( e.manager == manager && e.width == width && e.height == height &&
+                    e.depth == depth )
+                {
+                    ++e.users;
+                    return e.texture;
+                }
+            }
+            SharedMergeAccum e;
+            e.manager = manager;
+            e.width = width;
+            e.height = height;
+            e.depth = depth;
+            e.users = 1u;
+            e.texture = manager->createTexture(
+                "PhotonMergeAccum/" + StringConverter::toString( width ) + "x" +
+                    StringConverter::toString( height ) + "x" + StringConverter::toString( depth ),
+                GpuPageOutStrategy::Discard, TextureFlags::NotTexture | TextureFlags::Uav,
+                TextureTypes::Type3D );
+            // R32_UINT, eighteen texels per voxel interleaved in Z (VoxelMerge_piece_cs.any,
+            // voxelMergeUvw): see the history at the voxeliser's own sizing note.
+            e.texture->setPixelFormat( PFG_R32_UINT );
+            e.texture->setResolution( width, height, depth * 18u );
+            e.texture->setNumMipmaps( 1u );
+            e.texture->scheduleTransitionTo( GpuResidency::Resident );
+            pool.push_back( e );
+            return e.texture;
+        }
+
+        void releaseMergeAccum( TextureGpuManager *manager, TextureGpu *texture )
+        {
+            std::vector<SharedMergeAccum> &pool = sharedMergeAccums();
+            for( size_t i = 0u; i < pool.size(); ++i )
+            {
+                if( pool[i].manager != manager || pool[i].texture != texture )
+                    continue;
+                if( --pool[i].users == 0u )
+                {
+                    manager->destroyTexture( texture );
+                    pool.erase( pool.begin() + std::ptrdiff_t( i ) );
+                }
+                return;
+            }
+        }
+    }  // namespace
+
     static const uint32 c_numVctProperties = 2u;
 
     struct PhotonVoxelizerProp
@@ -379,7 +461,7 @@ namespace Ogre
     {
         if( mMergeAccumTex )
         {
-            mTextureGpuManager->destroyTexture( mMergeAccumTex );
+            releaseMergeAccum( mTextureGpuManager, mMergeAccumTex );
             mMergeAccumTex = 0;
         }
         PhotonVoxelizerSourceBase::destroyVoxelTextures();
@@ -452,11 +534,6 @@ namespace Ogre
                     TextureTypes::Type3D );
             }
 
-            // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065) — the order-independent merge's accumulator.
-            mMergeAccumTex = mTextureGpuManager->createTexture(
-                "VctVoxelizer" + StringConverter::toString( getId() ) + "/MergeAccum",
-                GpuPageOutStrategy::Discard,
-                TextureFlags::NotTexture | TextureFlags::Uav, TextureTypes::Type3D );
         }
 
         TextureGpu *textures[4] = { mAlbedoVox, mEmissiveVox, mNormalVox, mAccumValVox };
@@ -498,22 +575,20 @@ namespace Ogre
         else
             mAccumValVox->setPixelFormat( PFG_R32_UINT );
 
-        // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): thirteen texels per voxel, interleaved in Z — the
-        // shader derives their coordinates from the voxel's own, so a dispatch
-        // that covers one OCTANT needs to know nothing about the volume's depth.
-        // R32_UINT rather than RGBA32_UINT because ComputeTools' clear of a
-        // 128-bit 3D uav loses the device on this driver (VoxelMerge_piece_cs),
-        // and thirteen rather than sixteen because only thirteen carry anything.
-        mMergeAccumTex->scheduleTransitionTo( GpuResidency::OnStorage );
-        mMergeAccumTex->setPixelFormat( PFG_R32_UINT );
-        // Jahshaka (PHOTON-WRITER-1): FOURTEEN scalar sums per voxel - the thirteen of
-        // fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065) and the material roughness; (PHOTON-VOXEL-3) FIFTEEN - the three
-        // per-axis coverage sums packed into one (VoxelMerge_piece_cs.any, voxelMergeUvw);
-        // (PHOTON-VOXEL-4) EIGHTEEN - the coverage split by the side a face looks to
-        // (two packed sums) and the two position-weighted sums.
-        mMergeAccumTex->setResolution( mWidth, mHeight, mDepth * 18u );
-        mMergeAccumTex->setNumMipmaps( 1u );
-        mMergeAccumTex->scheduleTransitionTo( GpuResidency::Resident );
+        // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the sums are texels
+        // interleaved in Z - the shader derives their coordinates from the voxel's own, so a
+        // dispatch that covers one OCTANT needs to know nothing about the volume's depth.
+        // Jahshaka (SPEED-VR-MEM, M-13): THE MERGE ACCUMULATOR is the one every voxeliser of
+        // this size shares (acquireMergeAccum, above), at this volume's size: eighteen sums
+        // per voxel - fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)'s thirteen,
+        // (PHOTON-WRITER-1) the material roughness, (PHOTON-VOXEL-3) the three per-axis
+        // coverage sums packed into one, (PHOTON-VOXEL-4) the coverage split by the side a
+        // face looks to (two packed sums) and the two position-weighted sums. R32_UINT
+        // rather than RGBA32_UINT because ComputeTools' clear of a 128-bit 3D uav lost the
+        // device on this driver (VoxelMerge_piece_cs).
+        if( mMergeAccumTex )
+            releaseMergeAccum( mTextureGpuManager, mMergeAccumTex );
+        mMergeAccumTex = acquireMergeAccum( mTextureGpuManager, mWidth, mHeight, mDepth );
 
         // Jahshaka (PHOTON-VOXEL-4): THE CHAIN STOPS WHERE THE SHORTEST AXIS REACHES ONE TEXEL.
         // A cell is a cube and every level halves every axis, so every texel stays a cube -
@@ -972,10 +1047,9 @@ namespace Ogre
         // the right design: under a cascade chain a build happens every frame or
         // two, so the residency round trip never actually saves anything -- it
         // only returns memory the next build immediately asks for again.
-        // THE COST is one accumulator per voxeliser held for its lifetime:
-        // width * height * depth * 18 * 4 bytes (the eighteen sums of
-        // mMergeAccumTex; 18.9 MB at 64^3, 151 MB at 128^3). A future lane may share ONE scratch volume across a chain's
-        // cascades; that is an optimisation, not a correctness matter.
+        // THE COST is one accumulator per volume SIZE, held while any voxeliser of that
+        // size lives: width * height * depth * 18 * 4 bytes (18.9 MB at 64^3, 151 MB at
+        // 128^3), shared by every cascade of that size (SPEED-VR-MEM, acquireMergeAccum).
 
         if( mNeedsAlbedoMipmaps || mNeedsAllMipmaps )
             mAlbedoVox->_autogenerateMipmaps();

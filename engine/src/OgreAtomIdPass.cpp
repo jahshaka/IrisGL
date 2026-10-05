@@ -81,59 +81,98 @@ namespace jahshaka {
 namespace engine {
 namespace detail {
 
-/// THE OCCLUSION'S PYRAMID (EnginePrivate.h): the compositor's own compute-pass discipline
-/// (CompositorPassCompute::execute — bind, the job's barriers through Ogre's solver,
-/// dispatch) once per level, the level count read off the texture as it is.
+/// THE PYRAMID'S ARRIVAL COUNTER (JahHzbBuild_cs, UAV slot kHzbCounterSlot): one
+/// engine-lifetime buffer, ZERO at creation and put back to zero by the last workgroup of
+/// every build, so every build — the id pass's and any view's own — shares it. Builds are
+/// recorded in sequence and Ogre's barrier solver orders each one's counter traffic after
+/// the previous one's. Bound on the job once and left there (no pass declares it);
+/// releaseHzbBuild unbinds and destroys it before Root.
+namespace {
+Ogre::UavBufferPacked *gHzbCounter = nullptr;
+}
+
+Ogre::HlmsComputeJob *hzbBuildJob() {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbBuild") : nullptr;
+    if (!job) return nullptr;
+    if (!gHzbCounter) {
+        Ogre::VaoManager *vao = root->getRenderSystem() ? root->getRenderSystem()->getVaoManager() : nullptr;
+        if (!vao) return nullptr;
+        const uint32_t zeros[4] = { 0u, 0u, 0u, 0u };
+        gHzbCounter = vao->createUavBuffer(1u, sizeof(zeros), 0, const_cast<uint32_t *>(zeros), false);
+        Ogre::DescriptorSetUav::BufferSlot slot(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        slot.buffer = gHzbCounter;
+        slot.offset = 0;
+        slot.sizeBytes = 0;
+        slot.access = Ogre::ResourceAccess::ReadWrite;
+        job->_setUavBuffer(kHzbCounterSlot, slot);
+    }
+    return job;
+}
+
+void releaseHzbBuild() {
+    if (!gHzbCounter) return;
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
+    if (Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbBuild") : nullptr)
+        job->_setUavBuffer(kHzbCounterSlot, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+    if (root && root->getRenderSystem() && root->getRenderSystem()->getVaoManager())
+        root->getRenderSystem()->getVaoManager()->destroyUavBuffer(gHzbCounter);
+    gHzbCounter = nullptr;
+}
+
+/// THE OCCLUSION'S PYRAMID (EnginePrivate.h): ONE dispatch of the single-pass build
+/// (JahHzbBuild_cs — mip 0's copy and every level, the tail by the last workgroup), the
+/// compositor's own compute-pass discipline (CompositorPassCompute::execute — bind, the
+/// job's barriers through Ogre's solver, dispatch), the level count read off the texture
+/// as it is.
 bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
-    Ogre::HlmsComputeJob *seed = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbSeed") : nullptr;
-    Ogre::HlmsComputeJob *reduce = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbReduce") : nullptr;
-    if (!rs || !depth || !hzb || !seed || !reduce) return false;
-    // FARTHEST, in the render system's depth direction (JahHzbReduce_cs; the job's
+    Ogre::HlmsComputeJob *job = hzbBuildJob();
+    if (!rs || !hc || !depth || !hzb || !job) return false;
+    const Ogre::uint8 levels = hzb->getNumMipmaps();
+    if (levels == 0u || levels > kHzbMaxLevels) return false;
+    // FARTHEST, in the render system's depth direction (JahHzbBuild_cs; the job's
     // properties, shared with a view's own pyramid — which is farthest wherever this
     // one is built, ChainDesc::atomOcclusion).
-    // THE PROPERTIES ARE PUT BACK after the build: a view's own pyramid's compute passes
-    // (PostFxDesc::hzb) set them once, at their chain's build, on this same job — a
+    // THE PROPERTIES ARE PUT BACK after the build: a view's own pyramid's compute pass
+    // (PostFxDesc::hzb) sets them once, at its chain's build, on this same job — a
     // CLOSEST one elsewhere would otherwise be built farthest (chain.hzb caught it).
     const Ogre::int32 reverse = rs->isReverseDepth() ? 1 : 0;
-    const Ogre::int32 wasReverse = reduce->getProperty("hzb_reverse_z");
-    const Ogre::int32 wasFarthest = reduce->getProperty("hzb_farthest");
-    if (wasReverse != reverse) reduce->setProperty("hzb_reverse_z", reverse);
-    if (wasFarthest != 1) reduce->setProperty("hzb_farthest", 1);
-    auto run = [&](Ogre::HlmsComputeJob *job) {
-        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
-        job->analyzeBarriers(rt);
-        rs->executeResourceTransition(rt);
-        hc->dispatch(job, nullptr, nullptr);
-    };
-    auto uav = [&](Ogre::uint8 mip, Ogre::ResourceAccess::ResourceAccess access) {
-        Ogre::DescriptorSetUav::TextureSlot t = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        t.texture = hzb;
-        t.access = access;
-        t.mipmapLevel = mip;
-        return t;
-    };
+    const Ogre::int32 wasReverse = job->getProperty("hzb_reverse_z");
+    const Ogre::int32 wasFarthest = job->getProperty("hzb_farthest");
+    if (wasReverse != reverse) job->setProperty("hzb_reverse_z", reverse);
+    if (wasFarthest != 1) job->setProperty("hzb_farthest", 1);
     rs->endRenderPassDescriptor();
     {
         Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
         ts.texture = depth;
-        seed->setTexture(0u, ts);
-        seed->_setUavTexture(0u, uav(0u, Ogre::ResourceAccess::Write));
-        run(seed);
-        seed->setTexture(0u, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
-        seed->_setUavTexture(0u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        job->setTexture(0u, ts);
     }
-    for (Ogre::uint8 m = 1u; m < hzb->getNumMipmaps(); ++m) {
-        reduce->_setUavTexture(0u, uav(m, Ogre::ResourceAccess::Write));
-        reduce->_setUavTexture(1u, uav(Ogre::uint8(m - 1u), Ogre::ResourceAccess::Read));
-        run(reduce);
+    // Every mip in its own slot; the slots past the last level hold the last level
+    // again (the shader stops at the texture's own count and never writes them).
+    for (Ogre::uint8 m = 0u; m < kHzbMaxLevels; ++m) {
+        Ogre::DescriptorSetUav::TextureSlot t = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        t.texture = hzb;
+        t.access = Ogre::ResourceAccess::ReadWrite;
+        t.mipmapLevel = std::min<Ogre::uint8>(m, Ogre::uint8(levels - 1u));
+        job->_setUavTexture(m, t);
     }
-    // The jobs' descriptor sets hold raw pointers: no binding outlives this build.
-    reduce->_setUavTexture(0u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-    reduce->_setUavTexture(1u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-    if (wasReverse != reverse) reduce->setProperty("hzb_reverse_z", wasReverse);
-    if (wasFarthest != 1) reduce->setProperty("hzb_farthest", wasFarthest);
+    {
+        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+        job->analyzeBarriers(rt);
+        rs->executeResourceTransition(rt);
+        hc->dispatch(job, nullptr, nullptr);
+    }
+    // The job's descriptor sets hold raw pointers: no texture binding outlives this
+    // build (the counter's is the engine's, and stays).
+    job->setTexture(0u, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+    for (Ogre::uint8 m = 0u; m < kHzbMaxLevels; ++m)
+        job->_setUavTexture(m, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+    if (wasReverse != reverse) job->setProperty("hzb_reverse_z", wasReverse);
+    if (wasFarthest != 1) job->setProperty("hzb_farthest", wasFarthest);
     return true;
 }
 

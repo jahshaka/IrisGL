@@ -738,6 +738,19 @@ void recordCasterPass(AtomPassContext &ctx) {
     GpuCullRequest req;
     // THE MAP'S OWN HEIGHT in texels: the rule's footprint is one texel of this map.
     fillCullFrustum(cam, float(std::max(1u, rect[3])), req);
+    // THE SIDE PLANES ONLY (SPEED-VR-MEM fix round): a shadow camera draws with DEPTH
+    // CLAMP (Camera::getNeedsDepthClamp, the pipeline key above), so a caster between the
+    // light and the near plane still writes the near depth and shadows what lies under it.
+    // The depth pair (planes 4 and 5, fillCullFrustum's order) culled such a caster at
+    // INSTANCE level - its shadow went missing while the stock caster drew it
+    // (shadow.atom_parity's high casters). Opened here, never in the shader: the cut's
+    // per-cluster test reads the side planes only already.
+    for (int p = 4; p < 6; ++p) {
+        req.planes[p * 4 + 0] = 0.0f;
+        req.planes[p * 4 + 1] = 0.0f;
+        req.planes[p * 4 + 2] = 0.0f;
+        req.planes[p * 4 + 3] = 1.0f;
+    }
     req.flagsRequired = kGpuVisible | kGpuAtom | kGpuCaster;
     // THE NODE KIND'S CHANNEL (shadowCasterChannels): a probe-kind node (the probes)
     // draws the still world only.
@@ -798,6 +811,7 @@ void recordCasterPass(AtomPassContext &ctx) {
             info.depthNear = float(nearD);
             info.depthFar = float(farD);
             std::memcpy(info.viewProj, req.viewProj, sizeof(info.viewProj));
+            std::memcpy(info.planes, req.planes, sizeof(info.planes));
             std::copy(rect, rect + 4, info.rect);
             captureProbe(device, p, cull, vao->getFrameCount());
         }
