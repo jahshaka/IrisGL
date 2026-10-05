@@ -2872,7 +2872,7 @@ constexpr float kCardFootprintTexels = 4.0f;
 /// allocation of the same order, and a flat scene spends none of it).
 ///
 /// THE VR COLUMN IS THE DESKTOP'S ROW (PHOTON-GA-VR, decided by arithmetic): a
-/// stereo target gathers per EYE (the grid split at the seam, each eye through
+/// stereo target gathers per EYE (each eye's layer its own grid, each eye through
 /// its own basis) with the packed 16 B-a-pixel history, and in a headset the
 /// gather is CHEAPER than the diffuse it removes — the cone diffuse is compiled
 /// out and the field's cage stands down where a probe answered. Measured at the
@@ -3522,9 +3522,9 @@ struct GatherStatus {
     unsigned long long raysPerFrame = 0ull;
     /// The view the numbers below were measured on.
     unsigned targetW = 0u, targetH = 0u;
-    /// A TWO-EYE TARGET (PHOTON-GA-VR): the grid is two grids side by side,
-    /// `eyeProbesX` columns over each eye (probesX = 2 x eyeProbesX), split at
-    /// the seam; with one eye `eyeProbesX` = probesX.
+    /// A TWO-EYE TARGET (PHOTON-GA-VR): the probe list is two grids, one per
+    /// eye's layer, `eyeProbesX` columns each (probesX = 2 x eyeProbesX); with
+    /// one eye `eyeProbesX` = probesX. `targetW` is the eye PAIR's width.
     bool stereo = false;
     unsigned eyeProbesX = 0u;
     /// THE VIEW'S RESIDENT VRAM, in bytes (PHOTON-GA-VR): the octahedral
@@ -5074,9 +5074,9 @@ enum class VrState {
 /// What the desktop shows while a session runs (VrConfig::mirror).
 enum class VrMirrorMode {
     None = 0,
-    Left,     ///< the left eye's half of the both-eyes target — the default
+    Left,     ///< the left eye's layer of the eye pair — the default
     Right,
-    Both      ///< both halves, squeezed into the mirror's own aspect
+    Both      ///< both eyes side by side, squeezed into the mirror's own aspect
 };
 
 /// WHAT IS ON THE DESKTOP RIGHT NOW (lane MIRROR-LIVE-1, the owner's F2 of the
@@ -6266,13 +6266,11 @@ struct PostFxDesc {
     /// the reflection is then whatever the rays answer, and every pixel they
     /// decline keeps the probe/sky answer it has today.
     ///
-    /// WHO SETS IT FALSE, AND WHY IT IS NOT A QUALITY DIAL: a STEREO target
-    /// carries two eyes side by side in one texture, and a screen-space march
-    /// is a walk through THAT texture — it reads the other eye's pixels across
-    /// the seam, reconstructs its positions through one camera for two eyes,
-    /// and reprojects its colour history the same way. None of those is
-    /// repairable by a threshold. The rays have no such term: a ray is traced
-    /// in the world from the eye that owns its pixel. So the VR session asks
+    /// WHO SETS IT FALSE, AND WHY IT IS NOT A QUALITY DIAL: the march's passes
+    /// (its prepass history, its resolve, its colour history) are not per layer
+    /// in the layered stereo chain, which draws each eye into its own layer.
+    /// The rays are: a ray is traced in the world from the eye that owns its
+    /// pixel, per layer (LAYERED-STEREO-1). So the VR session asks
     /// for this, and `chain::build` ENFORCES it for any stereo chain whatever a
     /// host asked (OgreChain.cpp) — the flag exists so that a MONO view of the
     /// same picture (the per-eye control `vrEyeScreenshot` renders) can be
@@ -6521,105 +6519,53 @@ struct PostFxDesc {
 };
 
 /// ---------------------------------------------------------------------------
-/// THE VR VIEW POLICY — the project's post chain, minus what a side-by-side
-/// stereo target cannot carry (lane EYE-GRADE-1, 2026-09-18).
+/// THE VR VIEW POLICY — the project's post chain, minus what the stereo chain
+/// does not run per eye yet (lane EYE-GRADE-1, 2026-09-18; LAYERED-STEREO-1).
 ///
 /// WHAT IT IS FOR. The picture in the headset is a VIEW OF THE PROJECT'S SCENE
 /// and is graded by the project, exactly like the desktop's: the exposure mode
 /// and its stops, the meter's pattern and its percentile clips, the looks
-/// stack, the reflection row, the refraction and distortion rows. Until this
-/// existed the session wrote its own PostFxDesc BY HAND — "because no mirror
-/// reaches a view the session made" — so the wearer got this struct's DEFAULTS
-/// whatever the author had chosen. Measured on the rig (spikes/smoke-50/f5b):
-/// `world.postFx({exposureEv})` swept from -2 to +4 moved the DESKTOP's sampled
-/// value 8 -> 255 and the EYE's 79 -> 77. The whole World panel was inert in
-/// the headset.
+/// stack, the image block, the reflection row. Until this existed the session
+/// wrote its own PostFxDesc BY HAND, so the wearer got this struct's DEFAULTS
+/// whatever the author had chosen (spikes/smoke-50/f5b: the whole World panel
+/// was inert in the headset). `SceneMirror` pushes the project's description
+/// into the session's view like into every other view of that scene, and THIS
+/// is applied on top of it — once, here, and nowhere else.
 ///
-/// So `SceneMirror` now pushes the project's description into the session's
-/// view like it does into every other view of that scene, and THIS is what is
-/// applied on top of it — once, here, and nowhere else. Every entry is a
-/// structural fact or a measurement, never a taste:
+/// THE STEREO CHAIN IS LAYERED (LAYERED-STEREO-1): each eye is its own layer of
+/// a two-layer array at the same origin, every quad of the chain runs per
+/// layer (multiview) and reads its screen-sized inputs at its own eye. So a
+/// look, a vignette or a meter pattern measured from the frame's centre is
+/// measured from EACH eye's centre, and the looks stack and the image block
+/// ride whole. What is still off is what has no per-eye form in this engine:
 ///
-///   * allowOffscreen — the eye pair is offscreen only because two eyes share
-///     one texture. It is not a thumbnail: it is the picture the wearer is
-///     standing in, and it keeps the chain (PostFxDesc::allowOffscreen).
-///   * bloom — the pin's bloom ladder is ONE 256x256 ping-pong for the WHOLE
-///     target and each blur is a 65-tap box (HDR/BoxBlurH_ps.glsl: +/-32 texels
-///     of 256, and the chain runs six horizontal passes of it). With the eyes
-///     side by side each eye owns 128 texels of that buffer, so one eye's
-///     highlights would smear across the whole of the other. Not a threshold
-///     away from working: a correct bloom needs the blur clamped at the seam
-///     (upstream media) or a ladder per eye plus a tonemap that selects one.
-///   * ssao — reconstructs a view-space position from depth through ONE
-///     camera's projection, and samples a hemisphere of neighbours. A stereo
-///     target has two projections and a seam; neither is repairable here.
-///   * smaaPreset — edge detection plus a blending-weight search that walks up
-///     to 16 texels horizontally, so each eye's inner edge would resolve
-///     against the other eye's picture. That is a <=16 px column per eye rather
-///     than the whole frame, which makes SMAA the first candidate for a
-///     per-eye pass — but a wrong column is still wrong, and MSAA is already
-///     pinned at 1 here, so nothing else is covering it.
-///   * ssrScreenMarch — the march walks the TARGET; see the field's own note.
+///   * allowOffscreen — the eye pair is offscreen only because the runtime owns
+///     the display. It is the picture the wearer is standing in, and it keeps
+///     the chain (PostFxDesc::allowOffscreen).
+///   * bloom — the pin's bloom ladder is ONE fixed 256x256 ping-pong, not a
+///     screen-sized texture, so it holds one picture, not two; a per-eye ladder
+///     (a two-layer ladder and a tonemap reading its own layer) is the work.
+///   * ssao, smaaPreset, hzb — their passes and media are not per layer (the
+///     half-resolution SSAO targets, the SMAA lookup tables' passes, the
+///     pyramid's compute), and a layered chain refuses a pass that reads a
+///     layered texture into a single-layer target (chain::applyStereo).
+///   * ssrScreenMarch — the march's G-buffer passes are not per layer;
 ///     `chain::build` enforces it for any stereo chain whatever a host asked;
-///     this is the place that asks.
-///   * hzb — the depth pyramid is built from the view's own depth for a trace
-///     that does not exist yet, and a pyramid over a target holding two eyes
-///     would reduce across the seam like everything else here. Nothing asks
-///     for it today; it is cleared so that the day something does, it does not
-///     arrive in the headset first.
-///   * refractions, distortion — and this is the entry that was WRONG for one
-///     round (the Fable read's F2). Both are screen-space READS of the target:
-///     the pin's refraction piece samples the scene copy at `screenPosUv +
-///     offset` and falls back only at the FRAME's edges (`abs(screenPosUv * 2 -
-///     1) * 10 - 9`, Samples/Media/Hlms/Pbs/Any/Refractions_piece_ps.any), and
-///     the distortion composite warps by an offset the same way. In a target
-///     holding two eyes there is no fallback at the seam, so a refractive pane
-///     near an eye's nasal edge shows THE OTHER EYE through it — the identical
-///     reason ssao and smaa are here, and it does not matter that the material
-///     itself shades correctly per eye through the instanced-stereo pass
-///     buffer. Off until the sample is clamped to the eye's own half and the
-///     fallback moved to the eye's own edges (a media patch; lane
-///     STEREO-REFRACT-1). They were off in the hand-written descriptor this
-///     policy replaces, so no wearer loses anything they had.
-///   * looks — a look whose geometry is defined about the FRAME'S CENTRE reads
-///     that centre as the pair's inner edge, which is nowhere in either eye
-///     (see `stereoSafeLook`).
+///     this is the place that asks. The RAYS are the stereo answer and run per
+///     layer.
+///   * refractions, distortion — screen-space READS of a scene copy at an
+///     offset, whose copy and composite passes are not per layer (and the pin's
+///     refraction piece has no multiview arm, fork F4's stated limitation).
 ///
 /// AND WHAT IS DELIBERATELY *NOT* HERE. MSAA is not a PostFxDesc field: the
 /// session pins `setSampleCount(1)` itself (HDR + MSAA segfaults this driver,
 /// OgreChain's own note) and the mirror never pushes a count into an offscreen
 /// view. The exposure (mode, stops, window), the meter's pattern and clips, the
-/// reflection row and the grade follow the project, whole.
+/// looks, the image block, the reflection row and the grade follow the project,
+/// whole.
 ///
 /// `ssrOverride` is the ONE session-scoped override: -1 means "the project's
 /// row", 0/1/2 are `vr.begin({reflections:n})`'s measurement arm (VrConfig::ssr).
-inline bool stereoSafeLook(LookKind k) {
-    switch (k) {
-    // POINTWISE: every sample is the pixel's own texel, and no term is
-    // defined about the frame. Correct in both eyes as written.
-    case LookKind::Desaturate:
-    case LookKind::Posterize:
-        return true;
-    // A 3x3 UNSHARP MASK. Its only reach is one texel, so at the seam ONE
-    // column of each eye reads one column of the other — named rather than
-    // waved away, and kept: dropping an author's sharpening over one column of
-    // two thousand would be the larger error.
-    case LookKind::Sharpen:
-        return true;
-    // MEASURED FROM THE CENTRE, OR ACROSS THE WHOLE FRAME. RadialBlur samples
-    // along a line towards a centre (and one centre cannot serve two eyes);
-    // GlassWarp's ripple is a frame-wide pattern, so the same world point
-    // would ripple differently in the two eyes; OldMovie is a frame — jitter,
-    // vignette, scratches — and half a frame in each eye is not one.
-    case LookKind::RadialBlur:
-    case LookKind::GlassWarp:
-    case LookKind::OldMovie:
-    case LookKind::Count:
-        return false;
-    }
-    return false;
-}
-
 inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     fx.allowOffscreen = true;
     fx.bloom          = false;
@@ -6630,21 +6576,7 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     fx.hzbFarthest    = true;
     fx.refractions    = false;
     fx.distortion     = false;
-    // THE IMAGE BLOCK RIDES, ITS VIGNETTE DOES NOT (IMAGE-1): contrast,
-    // saturation, the white balance and the film are pointwise; the vignette is
-    // the one term measured from the frame's centre, and one centre cannot
-    // serve two eyes.
-    fx.image.vignette = 0.0f;
     if (ssrOverride >= 0) fx.ssr = ssrOverride;
-    if (!fx.looks.empty()) {
-        std::vector<LookDesc> kept;
-        kept.reserve(fx.looks.size());
-        for (const LookDesc &l : fx.looks) {
-            if (!stereoSafeLook(l.kind)) continue;
-            kept.push_back(l);
-        }
-        fx.looks.swap(kept);
-    }
 }
 
 /// WHAT LEVEL ONE OBJECT IS ACTUALLY DRAWING (ATOM P1's readout, the gap OWN-TRI

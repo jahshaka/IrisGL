@@ -160,7 +160,7 @@ ChainDesc OgreView::chainDesc() const {
     // editor's own picture), and GiStatus::giAtRest's settled-history term makes
     // a settled shot wait for its own view's history.
     // ...AND IN A STEREO VIEW TOO (PHOTON-GA-VR): the Component gathers a two-eye
-    // target per eye, its grid split at the seam; the row itself (the tier
+    // target per eye, each eye's layer its own grid; the row itself (the tier
     // table's VR column) decides whether a headset runs it.
     // ...AND AN OFFSCREEN VIEW BY ITS DECLARED CONTRACT (the fix round;
     // View::setOffscreenContract): a still picture gathers and its caller waits
@@ -676,8 +676,8 @@ void OgreView::applyPip() {
 // A STEREO view is the picture somebody is standing in, and it is graded by the
 // project like every other view of that scene: `SceneMirror::applyViewEnvironment`
 // pushes the world's PostFxDesc (with the driving camera's lens over it) into
-// this view every frame, exactly as it does into the desktop's. What a
-// side-by-side eye pair cannot carry is filtered out HERE — in the one place
+// this view every frame, exactly as it does into the desktop's. What has no
+// per-eye form yet is filtered out HERE — in the one place
 // every push goes through, so no host can forget it and no later push can undo
 // it — by `applyVrViewPolicy`, whose header states the whole list and why.
 //
@@ -689,29 +689,23 @@ void OgreView::setPostFx(const PostFxDesc &pushed) {
         applyVrViewPolicy(fx, mVrSsrOverride);
         // WHAT THE POLICY TOOK AWAY IS SAID OUT LOUD, ONCE PER CHANGE. Most of
         // it is invisible to an author — nobody misses an SSAO they never saw
-        // in there — but three things are chosen on purpose in the World panel
-        // and are visible on the desktop: a LOOK, the REFRACTIONS row and the
+        // in there — but two things are chosen on purpose in the World panel
+        // and are visible on the desktop: the REFRACTIONS row and the
         // DISTORTION row. "Why is my glass not refracting in the headset" must
         // be answerable from the log rather than from a header.
-        const size_t dropped = pushed.looks.size() - fx.looks.size();
         const bool lostRefract = pushed.refractions && !fx.refractions;
         const bool lostDistort = pushed.distortion && !fx.distortion;
-        const size_t state = dropped * 4u + (lostRefract ? 2u : 0u) + (lostDistort ? 1u : 0u);
+        const size_t state = (lostRefract ? 2u : 0u) + (lostDistort ? 1u : 0u);
         if (state != mVrPolicyDropped) {
             mVrPolicyDropped = state;
             std::string what;
-            if (dropped)
-                what = std::to_string(dropped) + " of this project's " +
-                       std::to_string(pushed.looks.size()) + " look(s)";
-            if (lostRefract) what += (what.empty() ? "" : ", ") + std::string("refractions");
+            if (lostRefract) what += std::string("refractions");
             if (lostDistort) what += (what.empty() ? "" : ", ") + std::string("distortion");
             if (!what.empty())
                 Ogre::LogManager::getSingleton().logMessage(
-                    "Jahshaka VR: " + what + " are not drawn in the headset - each of them "
-                    "reads the TARGET at a coordinate that is not this pixel's (a look's "
-                    "centre, a refraction's or a distortion's offset), and in a target "
-                    "holding two eyes side by side that coordinate crosses the seam into "
-                    "the other eye (jahshaka::engine::applyVrViewPolicy)");
+                    "Jahshaka VR: " + what + " are not drawn in the headset - each reads a "
+                    "copy of the scene at an offset coordinate, and that copy is not per eye "
+                    "in the layered stereo chain yet (jahshaka::engine::applyVrViewPolicy)");
         }
     }
     if (fx == mPostFx) return;   // hosts push per frame; the same value is free

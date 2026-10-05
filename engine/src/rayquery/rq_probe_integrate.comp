@@ -287,12 +287,11 @@ void main()
 		return;
 	const ivec2 grid = ivec2( p.resolution.xy );
 	const float stride = max( p.knobs.x, 1.0 );
-	// THE PIXEL'S EYE (PHOTON-GA-VR). Under stereo the target is two eyes side by
-	// side and the grid two grids: everything below works in the EYE'S OWN pixel
-	// column `lx` and its own cells (the right eye's numbered after the left
-	// eye's, `cellOff`), so no pixel reads a probe of the other eye and nothing
-	// reaches across the seam. With one eye lx = pix.x, cellOff = 0 and gridEye =
-	// grid: the arithmetic is the one-camera arithmetic exactly.
+	// THE PIXEL'S EYE (PHOTON-GA-VR). Under stereo the probe LIST is two grids:
+	// everything below works in the eye's own cells (the right eye's numbered
+	// after the left eye's, `cellOff`), so no pixel reads a probe of the other
+	// eye. With one eye cellOff = 0 and gridEye = grid: the arithmetic is the
+	// one-camera arithmetic exactly.
 	// THE EYE IS THE LAYER (LAYERED-STEREO-1): every screen image here is an
 	// array with one layer per eye and the dispatch's z walks them, so a pixel's
 	// coordinate is its own eye's and the two eyes run the same arithmetic.

@@ -10,11 +10,11 @@
 // This file is the same order, inside the engine, with the two things the
 // spike did not have:
 //
-//   * INSTANCED STEREO instead of two renderOneFrame calls per frame. One
-//     scene pass draws both eyes into one target two eyes wide, with the
+//   * LAYERED MULTIVIEW STEREO instead of two renderOneFrame calls per frame.
+//     The eye pair is a two-layer array, one eye per layer at the same origin,
+//     and every pass draws both layers at once through VK_KHR_multiview, the
 //     per-eye view and projection taken from the camera's VrData
-//     (ChainDesc::stereo -> chain::applyStereo). It is the first use of the
-//     pin's instanced-stereo path on Vulkan (VR_SPEC §2.5).
+//     (ChainDesc::stereo -> chain::applyStereo; LAYERED-STEREO-1).
 //   * THE COPY INSIDE THE FRAME. The spike copied each eye into the runtime's
 //     swapchain image AFTER renderOneFrame, which needed a BarrierSolver
 //     ::assumeTransition to repair the tracking that the frame's own commit had
@@ -1414,7 +1414,8 @@ bool VrSession::create(std::string &reason) {
     mCullCamera->setNearClipDistance(kVrDefaultNear);
     mCullCamera->setFarClipDistance(kVrDefaultFar);
 
-    // THE VIEW. Offscreen, two eyes wide, and the ONE offscreen view in this
+    // THE VIEW. Offscreen, the eye PAIR (setStereo below makes its target two
+    // layers, one eye each; its width is the pair's), and the ONE offscreen view in this
     // engine that keeps the post chain (PostFxDesc::allowOffscreen) — because
     // it is not a thumbnail, it is the picture the user is standing in.
     //
@@ -1425,9 +1426,9 @@ bool VrSession::create(std::string &reason) {
     // (automatic exposure across a +/-2.5 stop window) whatever the author had
     // chosen in the World panel. `SceneMirror::applyViewEnvironment` pushes the
     // project's description into this view every frame now, exactly as it does
-    // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what a
-    // side-by-side eye pair cannot carry — in ONE place, stated once, with the
-    // reason for every entry.
+    // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what has
+    // no per-eye form yet — in ONE place, stated once, with the reason for every
+    // entry.
     //
     // WHAT IS SET HERE IS THE SESSION'S OWN, AND ONLY THAT:
     //   * MSAA at 1. Not a PostFxDesc field: HDR + MSAA segfaults this driver
@@ -3601,7 +3602,7 @@ void VrSession::workspacePosUpdate(Ogre::CompositorWorkspace *workspace) {
 
 // ---------------------------------------------------------------------------
 // THE MIRROR (VR_SPEC §4.3): a second workspace on the desktop View's target,
-// appended after that View's own, painting one half of the eye target over the
+// appended after that View's own, painting one eye's layer (or both, side by side) over the
 // picture it just drew. See JahVrMirror.material for why it is a quad and not
 // a blit.
 void VrSession::teardownMirror() {
@@ -4069,15 +4070,12 @@ VrSession::~VrSession() {
 // engine logs both numbers every session so the reading can be re-checked on
 // any runtime.
 //
-// WHY ONE MESH FOR BOTH EYES. The vertex carries its eye INDEX in z and the
-// pin's own vertex program (`Ogre/VR/HiddenAreaMeshVr`, already in the staged
-// media — Samples/Media/2.0/scripts/materials/Common) writes it to
-// `gl_ViewportIndex`, so one draw covers both eyes' viewports. That needs
-// `VK_EXT_shader_viewport_index_layer`, which this driver has and which Ogre
-// enables whenever the device offers it (OgreVulkanDevice.cpp:1239); the
-// alternative is a draw per eye, and the fallback is that the mask is simply
-// not built. Geometry that spills past an eye's edge is cut by the pass's own
-// SCISSOR, which `chain::applyStereo` sets to the same half as the viewport.
+// WHY ONE MESH FOR BOTH EYES. The vertex carries its eye INDEX in z, and the
+// multiview pass draws the mesh once into both eyes' layers; our vertex program
+// (Jahshaka/VrHiddenArea, JahVrHiddenArea_vs.glsl) keeps a vertex in the view
+// it belongs to (z == gl_ViewIndex) and collapses the other eye's triangles
+// outside the clip volume (LAYERED-STEREO-1). Geometry past an eye's edge is
+// clipped by the view volume — the eye's layer is the whole viewport.
 //
 // WHY IT DRAWS AT RENDER QUEUE 0 AND NOT IN A PASS OF ITS OWN. A pass of its
 // own runs its own cull (CompositorPassScene::execute calls
@@ -4253,7 +4251,7 @@ void VrSession::ensureHiddenAreaMesh() {
             for (int c = 0; c < 3; ++c) {
                 vb.push_back(nx[c]);
                 vb.push_back(ny[c]);
-                vb.push_back(float(eye));   // -> gl_ViewportIndex
+                vb.push_back(float(eye));   // the eye: kept where it == gl_ViewIndex
                 vb.push_back(1.0f);
             }
         }
@@ -4375,12 +4373,11 @@ void VrSession::destroyHiddenAreaMesh() {
 //
 // WHAT THEY HAVE IN COMMON, and why one routine answers for all three: each is
 // a full-screen `Rectangle2D` drawn with a LOW-LEVEL material whose vertex
-// program turns the quad's corners into a camera ray. Instanced stereo doubles
-// their draw like every other (OgreRenderQueue.cpp:697-699), but their vertex
-// programs were written for ONE viewport — so both copies land in the first
-// eye and THE RIGHT EYE HAS NO SKY. (Measured on this lane's fixture before the
-// fix: the two halves of a worldScale-0 frame, which must be identical, differ
-// by 30,306 bytes with a worst of 255/255.)
+// program turns the quad's corners into a camera ray. The multiview pass draws
+// it into both eyes' layers, but its vertex program knows ONE camera — so both
+// eyes would get the left eye's sky. (Measured on this lane's fixture before
+// the fix, under the old two-viewport stereo: the two halves of a worldScale-0
+// frame, which must be identical, differed by 30,306 bytes, worst 255/255.)
 //
 // THE FIX IS A MATERIAL, AND IT HAS TO BE. The pin's per-pass MATERIAL SCHEME
 // (`CompositorPassSceneDef::mMaterialScheme`) looks like the answer and is not:
@@ -4399,8 +4396,8 @@ void VrSession::destroyHiddenAreaMesh() {
 // auto-params — the rendering camera's own inverse view-projection, which for
 // the VR view is the left eye's (see the camera's setCustomProjectionMatrix
 // above) and for the desktop mirror view, a probe capture or a thumbnail is
-// that camera's. Only the SECOND instance reads the pair written here, and only
-// a stereo pass ever draws a second instance.
+// that camera's. Only VIEW 1 reads the pair written here, and outside a
+// multiview pass gl_ViewIndex is 0 (the Vulkan rule).
 void VrSession::syncStereoQuads() {
     if (!mScene || !mScene->sceneManager()) return;
     Ogre::SceneManager *sm = mScene->sceneManager();

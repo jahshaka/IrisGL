@@ -1413,26 +1413,19 @@ struct ChainDesc {
     /// costs no pixel and no pass.
     bool  hiddenAreaMask = false;
 
-    // ---- INSTANCED STEREO (SPECS/VR_SPEC.md §4.3, phase 2) ----------------
-    /// Render BOTH EYES in one pass into a target that is two eyes wide
-    /// (2w x h), the left eye in [0, .5] and the right in [.5, 1].
+    // ---- LAYERED STEREO (SPECS/VR_SPEC.md §4.3; LAYERED-STEREO-1) ----------
+    /// Render BOTH EYES, each into its own layer of a two-layer array at the
+    /// same origin, every pass ONCE through VK_KHR_multiview.
     ///
     /// It is one flag here and a sweep over the built node (chain::build's
-    /// applyStereo): EVERY PASS_SCENE the chosen shape carries — the opaque
-    /// pass, the overlay pass, the SSR prepass, the distortion pass, the
-    /// refraction pass, the shape's own extra scene passes — gets
-    /// `mInstancedStereo`, two viewports and the cull camera. All of them or
-    /// none: a shape that stereo-ised its opaque pass and not its overlay pass
-    /// would draw the gizmos once, across both eyes, at the left eye's
-    /// projection.
-    ///
-    /// The QUAD passes are deliberately untouched. A post quad reads and writes
-    /// the whole 2w x h image, which is right for anything per-pixel (tonemap,
-    /// looks, the exposure reduction) and WRONG for anything that samples a
-    /// neighbourhood across the middle of the image (SSAO, SMAA, the SSR
-    /// march) — those see the seam between the eyes. The VR profile turns them
-    /// off rather than teaching each one where the seam is (VR_SPEC §9 item 6);
-    /// the flag here does not enforce that, the session's profile does.
+    /// applyStereo): every screen-sized texture becomes two layers and EVERY
+    /// scene, quad and clear pass into one is multiview — a scene pass also
+    /// gets `mInstancedStereo` and the cull camera, a quad its multiview twin.
+    /// All of them or none: a pass left single-view would draw one eye only.
+    /// What has no per-layer form (SSAO, SMAA, the SSR march, bloom's fixed
+    /// ladder) is off by the session's policy (applyVrViewPolicy), and the
+    /// sweep refuses a pass that would read a layered texture into a
+    /// single-layer target.
     ///
     /// GRAPH SHAPE: it lives on the pass definitions, so it is part of
     /// sameShape() and a flip rebuilds the workspace — which happens exactly
@@ -7353,10 +7346,10 @@ public:
     bool sceneShapeMoved() const;
 
     // ---- VR (SPECS/VR_SPEC.md §4.3) ---------------------------------------
-    /// Makes this view's chain a STEREO one: every scene pass renders both eyes
-    /// into a target two eyes wide (ChainDesc::stereo). `cullCamera` is the
-    /// name of a camera sitting between the eyes. Rebuilds the workspace
-    /// definition, because the flag lives on the pass definitions.
+    /// Makes this view's chain a STEREO one: the target becomes two layers, one
+    /// eye each, and every pass draws both through multiview (ChainDesc::stereo).
+    /// `cullCamera` is the name of a camera sitting between the eyes. Recreates
+    /// the target and rebuilds the workspace definition.
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
     bool stereo() const { return mStereo; }

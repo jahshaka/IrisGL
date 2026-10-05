@@ -4449,10 +4449,10 @@ struct ReflectParams {
     float prevRayRight[4] = {};
     float prevRayDown[4] = {};
     float prevFwd[4] = {};
-    /// THE SECOND EYE (lane REFLECT-VR-1). `stereo.x` is 1 when the target
-    /// carries two eyes side by side, and then everything above is the LEFT
-    /// eye's over the left half and everything here is the RIGHT eye's over the
-    /// right half. Appended rather than folded into an array of two: the block
+    /// THE SECOND EYE (lane REFLECT-VR-1, LAYERED-STEREO-1). `stereo.x` is 1
+    /// when the target carries two eyes, one per layer of every screen image,
+    /// and then everything above is the LEFT eye's (layer 0) and everything here
+    /// the RIGHT eye's (layer 1). Appended rather than folded into an array of two: the block
     /// above is what a mono view writes and what every reader of this file
     /// already knows, and std140 lays the tail out identically either way.
     float stereo[4] = {};
@@ -4870,22 +4870,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     const unsigned fullW = ssrTex->getWidth(), fullH = ssrTex->getHeight();
     if (!fullW || !fullH) return;
     const int ssrRow = view->chainDesc().ssr;
-    // ---- ONE TRACE, TWO EYES (lane REFLECT-VR-1) ----------------------------
-    // A STEREO target is two eyes side by side in one texture, so the trace
-    // covers both in one dispatch and each pixel's own column says which eye it
-    // belongs to. Only two things have to be true for that to be exact, and
-    // both are arranged here rather than hoped for:
-    //
-    //   * THE SEAM FALLS ON A BLOCK BOUNDARY. At the half-resolution row one
-    //     trace texel covers a 2x2 block of the target, and a block straddling
-    //     the middle would fetch one eye's depth to trace the other eye's ray.
-    //     So the trace width is built from the EYE's width, and an eye whose
-    //     half-resolution width would not divide traces at full resolution
-    //     instead (a 1-pixel-odd eye size costs the row, not the picture).
-    //   * THE EYES ARE KNOWN. They are the runtime's, pushed onto the View by
-    //     the session each located frame; a stereo view without them declines
-    //     rather than tracing one mono answer across two eyes, which is the
-    //     defect this lane exists to remove.
+    // ---- ONE TRACE, TWO EYES (lane REFLECT-VR-1, LAYERED-STEREO-1) ----------
+    // A STEREO target is two layers, one eye each at the same origin, so the
+    // trace covers both in one dispatch whose z is the eye, and every screen
+    // image it reads or writes is per layer — no seam exists to fall anywhere.
+    // THE EYES MUST BE KNOWN: they are the runtime's, pushed onto the View by
+    // the session each located frame; a stereo view without them declines
+    // rather than tracing one mono answer for two eyes.
     const bool stereo = view->stereo();
     const StereoEyeBasis *eyes = view->stereoEyes();
     unsigned traceW = ssrRow >= 2 ? fullW : std::max(1u, fullW / 2u);
@@ -5050,8 +5041,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         return eyeBasis(ortho, pos, rot, el, er, et, eb);
     };
     // THE EYES, OR THE ONE CAMERA. A stereo view whose eyes have not been
-    // pushed yet declines: tracing the head's frustum across a two-eye target
-    // maps each eye's half onto HALF of one mono frustum, which is not a small
+    // pushed yet declines: tracing the head's frustum for both eyes maps each
+    // eye's picture onto the head's one frustum, which is not a small
     // error but a different picture (the reflection of anything off the head's
     // axis lands in the wrong eye or in neither — the owner's "no reflections
     // in the headset", measured).
@@ -6359,8 +6350,8 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) return;
     // TWO EYES, ONE GATHER (PHOTON-GA-VR — the reflection trace's REFLECT-VR-1
     // rule, below where the basis is built): a stereo target is gathered per eye
-    // in the same dispatches, each eye through its own located basis, the probe
-    // grid split at the seam (ScreenProbeGather). A stereo view whose eyes have
+    // in the same dispatches, each eye's layer through its own located basis,
+    // each eye its own probe grid (ScreenProbeGather). A stereo view whose eyes have
     // not been pushed yet DECLINES — gathering the head's frustum across a
     // two-eye target would place every probe at a wrong world point.
     const bool stereo = view->stereo();

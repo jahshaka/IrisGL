@@ -108,20 +108,13 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 prevRayRight;
 	vec4 prevRayDown;
 	vec4 prevFwd;
-	/// ---- THE SECOND EYE (lane REFLECT-VR-1) -----------------------------
-	/// x = 1 when this target carries TWO EYES SIDE BY SIDE — the left eye in
-	/// the left half of every texture here, the right in the right half
-	/// (chain::applyStereo's viewport split). Then the five basis vectors above
-	/// are the LEFT eye's and the five below are the right eye's, each mapped
-	/// over its OWN half as a 0..1 image; with x = 0 the block below is unread
-	/// and the basis above is the one camera's, exactly as before.
-	///
-	/// WHY A HALF TEST AND NOT TWO DISPATCHES: the depth, the normals and the
-	/// roughness of BOTH eyes live in one texture at one scale, and the pixel's
-	/// own coordinate already selects the right eye's texels. Only the RAY
-	/// needs to know which eye it belongs to — one branch on the x coordinate,
-	/// no second descriptor set, no second history ring, and the seam falls on
-	/// a block boundary by construction (the C++ side sizes the trace so).
+	/// ---- THE SECOND EYE (lane REFLECT-VR-1, LAYERED-STEREO-1) ------------
+	/// x = 1 when this target carries TWO EYES, one per LAYER of every screen
+	/// image here (the dispatch's z). Then the five basis vectors above are the
+	/// LEFT eye's and the five below the right eye's, each over its own layer
+	/// as a 0..1 image; with x = 0 the block below is unread and the basis
+	/// above is the one camera's, exactly as before. One dispatch, one
+	/// descriptor set, one history ring: the eye is the layer (gEye).
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;
@@ -148,8 +141,8 @@ layout( set = 0, binding = 1 ) uniform Params
 /// declared identically in both, member for member — but the filter needs none
 /// of the basis: it works in TRACE SPACE (a texel, its neighbours, their depth
 /// and their normal), and the only thing it has to know about stereo is WHICH
-/// HALF it is in, so a tap never crosses the seam. The helpers that read the
-/// basis live in the trace and are deliberately not copied here.
+/// LAYER it is in. The helpers that read the basis live in the trace and are
+/// deliberately not copied here.
 ///
 /// THE EYE IS THE LAYER (LAYERED-STEREO-1): every screen image is an array with
 /// one layer per eye, the dispatch's z walks them, and a tap is always inside

@@ -816,7 +816,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.adaptiveRequested = v.adaptiveAsked;
     out.adaptiveCap = v.adaptiveCap;
     out.raysPerFrame = (unsigned long long)(v.uniformProbes + v.adaptiveLast) * out.raysPerProbe;
-    out.targetW = v.w;
+    out.targetW = v.w * v.layers;   // the eye PAIR (an eye per layer)
     out.targetH = v.h;
     out.stereo = v.stereo;
     out.eyeProbesX = v.eyeGridW;

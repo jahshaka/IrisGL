@@ -1,9 +1,10 @@
 // THE VR MIRROR (SPECS/VR_SPEC.md §4.3, phase 2).
 //
-// One full-screen quad that copies a HALF of the both-eyes VR target onto
-// whatever the desktop is showing — the Player widget's window, or an
-// offscreen texture in a suite. The source is 2w x h with the left eye in
-// [0, .5] and the right in [.5, 1]; `mirrorUv` picks the half:
+// One full-screen quad that copies an eye of the VR target onto whatever the
+// desktop is showing — the Player widget's window, or an offscreen texture in a
+// suite. The source is the LAYERED eye pair (one eye per layer,
+// LAYERED-STEREO-1), addressed in the PAIR's space — the eyes side by side, the
+// left in u [0, .5] and the right in [.5, 1] — and `mirrorUv` picks the part:
 //
 //     mirrorUv.xy = uv SCALE   (0.5, 1) for one eye, (1, 1) for both
 //     mirrorUv.zw = uv OFFSET  (0, 0) left, (0.5, 0) right
