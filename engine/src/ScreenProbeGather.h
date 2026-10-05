@@ -94,6 +94,8 @@ public:
     virtual uint32_t gatherFramesInFlight() const = 0;
     /// The measurement arm "gather.temporal" (lane TEST-1): the pixel history on.
     virtual bool gatherTemporalArm() const = 0;
+    /// The measurement arm "gather.decodeHits" (SPECKLE-FIX-1): every hit decoded.
+    virtual bool gatherDecodeHitsArm() const = 0;
     /// Outside every encoder, ready for compute and barriers.
     virtual VkCommandBuffer gatherFrameCmd() = 0;
 

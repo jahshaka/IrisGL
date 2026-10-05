@@ -1026,6 +1026,12 @@ const ArmDef kArms[] = {
       "is below 1 - the composite replaces the whole environment term where it is 1 (SPEED-GPU, "
       "audit PH-1 / S1). 0 = marched in every pixel, the cost before the skip; the picture is the "
       "same bytes (gi.cone_skip)." },
+    { "gather.decodeHits", 0.0, 0.0, 1.0,
+      "EVERY screen-probe gather hit is a hit RECORD shaded by the visibility-buffer decode, "
+      "never read from the cards or the voxels (SPECKLE-FIX-1). The route-agreement instrument: "
+      "the decode answers a gather hit with the diffuse response only, exactly what the caches "
+      "store, so the two routes on the same hit agree within the caches' own quantisation "
+      "(gi.speckle)." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

@@ -304,7 +304,9 @@ void main()
 			// visibility-buffer decode and written back into this texel by
 			// rq_hit_composite.comp (PHOTON-HIT-SHADE-1). There is no black: a hit
 			// is always shaded (a card, a voxel, or the decode).
-			const bool decodeAlways = jahHitAlwaysDecodes( hitSlot );
+			// (The arm "gather.decodeHits" sends EVERY hit here: the route-agreement
+			// instrument, gi.speckle.)
+			const bool decodeAlways = jahHitAlwaysDecodes( hitSlot ) || p.alpha.z > 0.5;
 			// The mover gate's rotation: this probe's cell and ray, this frame.
 			jahHitSeed = cellIndex * 73856093u ^ lane * 19349663u ^ frame * 2654435761u;
 			if( !decodeAlways )
