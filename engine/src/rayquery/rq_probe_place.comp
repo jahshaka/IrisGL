@@ -55,8 +55,8 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 #define JAH_PROBE_PARAMS_BINDING 0
 #include "jah_probe_params.glsl"
 
-layout( set = 0, binding = 1 ) uniform sampler2D gBufNormals;
-layout( set = 0, binding = 2 ) uniform sampler2D sceneDepth;
+layout( set = 0, binding = 1 ) uniform sampler2DArray gBufNormals;
+layout( set = 0, binding = 2 ) uniform sampler2DArray sceneDepth;
 layout( std430, set = 0, binding = 3 ) buffer Records { JahProbeRecord r[]; } records;
 /// `appended` = how many cells asked for a second probe this frame (the DEMAND, the
 /// budget aside); then each eye row's count of them (pass 1 adds, pass 2 ranks).
@@ -75,16 +75,12 @@ Surface surfaceAt( vec2 pix, int eye )
 	s.dist = 0.0;
 	s.valid = false;
 	// CLAMPED TO THE EYE'S OWN IMAGE: the grid is a ceiling division, so the
-	// last cell of a row can reach past the eye's edge — past the target's, or
-	// under stereo across the SEAM into the other eye — and a sampler's clamp
+	// last cell of a row can reach past the eye's edge, and a sampler's clamp
 	// would read the edge texel while the reconstruction claimed the outside
-	// position. `local` is the eye's 0..1 coordinate (the ray basis's), `uv` the
-	// target's (the textures'); with one eye they are the same number.
-	const float eyeW = float( jahEyeWidth() );
-	const float x0 = float( eye ) * eyeW;
-	const vec2 local = clamp( vec2( ( pix.x - x0 ) / eyeW, pix.y / p.resolution.w ), vec2( 0.0 ),
-							  vec2( 0.999999 ) );
-	const vec2 uv = jahStereo() ? vec2( ( local.x * eyeW + x0 ) / p.resolution.z, local.y ) : local;
+	// position. `pix` is in the eye's OWN image, which is its own layer of every
+	// screen texture (LAYERED-STEREO-1): the eyes run the same arithmetic.
+	const vec2 local = clamp( pix / p.resolution.zw, vec2( 0.0 ), vec2( 0.999999 ) );
+	const vec3 uv = vec3( local, float( eye ) );
 	const float rawDepth = texture( sceneDepth, uv ).x;
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
 		return s;
@@ -181,13 +177,12 @@ void main()
 	const uint index = uint( cell.y * grid.x + cell.x );
 	const float stride = max( p.knobs.x, 1.0 );
 	const uint frame = uint( p.knobs.z );
-	// THE CELL'S EYE AND ITS ORIGIN IN THE TARGET (PHOTON-GA-VR): under stereo
-	// the right eye's cells follow the left eye's and start at the seam, so a
-	// cell's pixels are one eye's pixels; with one eye the origin is cell x
-	// stride, exactly as before.
+	// THE CELL'S EYE AND ITS ORIGIN IN THAT EYE'S IMAGE (PHOTON-GA-VR,
+	// LAYERED-STEREO-1): under stereo the right eye's cells follow the left
+	// eye's in the probe LIST, and a cell's origin is its own-grid coordinate x
+	// stride in its eye's layer; with one eye that is exactly as before.
 	const int eye = jahEyeOfCell( cell.x );
-	const vec2 cellOrigin = vec2( float( cell.x - eye * jahEyeGridW() ), float( cell.y ) ) * stride +
-							vec2( float( eye * jahEyeWidth() ), 0.0 );
+	const vec2 cellOrigin = vec2( jahLocalCell( cell ) ) * stride;
 
 	// ---- 1. THE PROBE'S PIXEL, jittered inside its own cell ---------------
 	vec2 offset = vec2( 0.5, 0.5 );

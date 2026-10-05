@@ -5,7 +5,9 @@
 // size, so a texel is a pixel. Straight alpha: the blend state does the rest.
 #version ogre_glsl_ver_330
 
-vulkan_layout( ogre_t0 ) uniform texture2D photonOverlay;
+#include "JahScreen.glsl"
+
+vulkan_layout( ogre_t0 ) uniform JahScreenTexture photonOverlay;
 
 vulkan( layout( ogre_s0 ) uniform sampler pointSampler );
 
@@ -33,9 +35,9 @@ out vec4 fragColour;
 
 void main()
 {
-	ivec2 size = textureSize( photonOverlay, 0 );
+	ivec2 size = jahScreenSize( photonOverlay, 0 );
 	ivec2 pix = clamp( ivec2( inPs.uv0 * vec2( size ) ), ivec2( 0 ), size - ivec2( 1 ) );
-	vec4 o = texelFetch( photonOverlay, pix, 0 );
+	vec4 o = texelFetch( photonOverlay, jahScreenTexel( pix ), 0 );
 #ifdef PHOTON_COVERAGE
 	// The photon scene pass' layer: covered wherever anything was drawn.
 	const bool covered = any( greaterThan( o, vec4( 0.0 ) ) );

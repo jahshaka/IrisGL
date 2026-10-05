@@ -22,7 +22,9 @@
 // is what keeps amount 0 the exact identity.
 #version ogre_glsl_ver_330
 
-vulkan_layout( ogre_t0 ) uniform texture2D sourceTexture;
+#include "JahScreen.glsl"
+
+vulkan_layout( ogre_t0 ) uniform JahScreenTexture sourceTexture;
 
 vulkan( layout( ogre_s0 ) uniform sampler srcSampler );
 
@@ -45,10 +47,10 @@ out vec4 fragColour;
 
 void main()
 {
-	const ivec2 texSize = textureSize( vkSampler2D( sourceTexture, srcSampler ), 0 );
+	const ivec2 texSize = jahScreenSize( jahScreenSampler( sourceTexture, srcSampler ), 0 );
 	const ivec2 srcCoord = clamp( ivec2( inPs.uv0 * vec2( texSize ) ),
 								  ivec2( 0 ), texSize - ivec2( 1 ) );
-	const vec4  src = texelFetch( vkSampler2D( sourceTexture, srcSampler ), srcCoord, 0 );
+	const vec4  src = texelFetch( jahScreenSampler( sourceTexture, srcSampler ), jahScreenTexel( srcCoord ), 0 );
 
 	const float amount   = clamp( lookParams0.x, 0.0, 1.0 );
 	const vec2  centre   = lookParams0.yz;
@@ -70,8 +72,8 @@ void main()
 	for( int i = 0; i < NUM_SAMPLES; ++i )
 	{
 		const float m = mix( 1.0, multipliers[i], amount );
-		acc += jahSrgbDecode( texture( vkSampler2D( sourceTexture, srcSampler ),
-									   ( inPs.uv0 - centre ) * m + centre ).rgb );
+		acc += jahSrgbDecode( texture( jahScreenSampler( sourceTexture, srcSampler ),
+									   jahScreenUv( ( inPs.uv0 - centre ) * m + centre ) ).rgb );
 	}
 	const vec3 blurred = jahSrgbEncode( acc * ( 1.0 / float( NUM_SAMPLES ) ) );
 

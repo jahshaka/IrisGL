@@ -108,20 +108,13 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 prevRayRight;
 	vec4 prevRayDown;
 	vec4 prevFwd;
-	/// ---- THE SECOND EYE (lane REFLECT-VR-1) -----------------------------
-	/// x = 1 when this target carries TWO EYES SIDE BY SIDE — the left eye in
-	/// the left half of every texture here, the right in the right half
-	/// (chain::applyStereo's viewport split). Then the five basis vectors above
-	/// are the LEFT eye's and the five below are the right eye's, each mapped
-	/// over its OWN half as a 0..1 image; with x = 0 the block below is unread
-	/// and the basis above is the one camera's, exactly as before.
-	///
-	/// WHY A HALF TEST AND NOT TWO DISPATCHES: the depth, the normals and the
-	/// roughness of BOTH eyes live in one texture at one scale, and the pixel's
-	/// own coordinate already selects the right eye's texels. Only the RAY
-	/// needs to know which eye it belongs to — one branch on the x coordinate,
-	/// no second descriptor set, no second history ring, and the seam falls on
-	/// a block boundary by construction (the C++ side sizes the trace so).
+	/// ---- THE SECOND EYE (lane REFLECT-VR-1, LAYERED-STEREO-1) ------------
+	/// x = 1 when this target carries TWO EYES, one per LAYER of every screen
+	/// image here (the dispatch's z). Then the five basis vectors above are the
+	/// LEFT eye's and the five below the right eye's, each over its own layer
+	/// as a 0..1 image; with x = 0 the block below is unread and the basis
+	/// above is the one camera's, exactly as before. One dispatch, one
+	/// descriptor set, one history ring: the eye is the layer (gEye).
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;
@@ -148,20 +141,18 @@ layout( set = 0, binding = 1 ) uniform Params
 /// declared identically in both, member for member — but the filter needs none
 /// of the basis: it works in TRACE SPACE (a texel, its neighbours, their depth
 /// and their normal), and the only thing it has to know about stereo is WHICH
-/// HALF it is in, so a tap never crosses the seam. The helpers that read the
-/// basis live in the trace and are deliberately not copied here.
+/// LAYER it is in. The helpers that read the basis live in the trace and are
+/// deliberately not copied here.
 ///
-/// WHICH EYE OWNS A COLUMN, and the whole of the stereo layout in one place:
-/// the left eye is the left half of the image, the right eye the right half.
-int eyeOfColumn( int x, int width )
-{
-	return ( p.stereo.x > 0.5 && x >= width / 2 ) ? 1 : 0;
-}
+/// THE EYE IS THE LAYER (LAYERED-STEREO-1): every screen image is an array with
+/// one layer per eye, the dispatch's z walks them, and a tap is always inside
+/// its own eye's picture. Set once, first thing in main.
+int gEye = 0;
 
-layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
-layout( set = 0, binding = 3 ) uniform sampler2D gBufShadowRoughness;
-layout( set = 0, binding = 4 ) uniform sampler2D sceneDepth;
-layout( rgba16f, set = 0, binding = 5 ) uniform image2D ssrReflection;
+layout( set = 0, binding = 2 ) uniform sampler2DArray gBufNormals;
+layout( set = 0, binding = 3 ) uniform sampler2DArray gBufShadowRoughness;
+layout( set = 0, binding = 4 ) uniform sampler2DArray sceneDepth;
+layout( rgba16f, set = 0, binding = 5 ) uniform image2DArray ssrReflection;
 /// THE TEMPORAL MEAN, PING-PONGED. Two buffers and not one, because a pixel
 /// reads the mean at its own REPROJECTED coordinate — any pixel of the buffer —
 /// while its neighbours are writing theirs. One buffer makes that a read/write
@@ -169,15 +160,15 @@ layout( rgba16f, set = 0, binding = 5 ) uniform image2D ssrReflection;
 /// frame's depending on the scheduler), and a temporal filter fed by a race is
 /// how a stable picture acquires a shimmer nobody can reproduce. The pair costs
 /// one extra image of 8 bytes per traced pixel.
-layout( rgba16f, set = 0, binding = 6 ) uniform readonly  image2D historyPrev;
-layout( rgba16f, set = 0, binding = 7 ) uniform image2D historyCur;
+layout( rgba16f, set = 0, binding = 6 ) uniform readonly  image2DArray historyPrev;
+layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray historyCur;
 /// ...and the distance beside it, which is what makes the reprojection a TEST
 /// rather than a hope: the surface found at the reprojected pixel is the same
 /// surface only if it was the same distance away.
 // x = the surface's distance (all this pass reads), y = the mean distance the
 // rays in the mean travelled (rq_reflect.comp's).
-layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2D historyDistPrev;
-layout( rg32f, set = 0, binding = 9 ) uniform image2D historyDistCur;
+layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2DArray historyDistPrev;
+layout( rg32f, set = 0, binding = 9 ) uniform image2DArray historyDistCur;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
@@ -285,18 +276,13 @@ void main()
 	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
 	const ivec2 blockOrigin = tc * scale;
 	const vec2 uv = traceUv( tc, scale, fullRes );
-	// THE KERNEL MAY NOT CROSS THE SEAM BETWEEN THE EYES (lane REFLECT-VR-1).
-	// Under stereo the two eyes are two images in one texture, and the columns
-	// either side of the middle are the far edges of two different pictures: a
-	// tap across them averages this eye's reflection with the other eye's, and
-	// the depth and normal tests cannot reject it (the two eyes see the same
-	// surfaces at nearly the same distance and orientation — that is what
-	// stereo IS). So the tap range is the EYE'S half, not the texture's width.
-	const int eye = eyeOfColumn( tc.x, traceRes.x );
-	const int eyeX0 = p.stereo.x > 0.5 ? eye * ( traceRes.x / 2 ) : 0;
-	const int eyeX1 = p.stereo.x > 0.5 ? eyeX0 + traceRes.x / 2 : traceRes.x;
+	// THE KERNEL STAYS IN ITS EYE'S PICTURE (lane REFLECT-VR-1, LAYERED-STEREO-1):
+	// each eye is its own layer, so the tap range is the layer's whole width.
+	gEye = int( gl_GlobalInvocationID.z );
+	const int eyeX0 = 0;
+	const int eyeX1 = traceRes.x;
 
-	const float rawDepth = texelLive ? texture( sceneDepth, uv ).x : 0.0;
+	const float rawDepth = texelLive ? texture( sceneDepth, vec3( uv, float( gEye ) )).x : 0.0;
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
 		texelLive = false;				// nothing was drawn here; the trace wrote nothing either
 
@@ -304,7 +290,7 @@ void main()
 	const float feather = p.projParams.w;
 	// The SAME decode as the trace: fork 16d8e29d4 (was 0043) packs the GGX ALPHA over
 	// [0.001, 1], and the gate is stated in PERCEPTUAL roughness.
-	const float lobeAlpha = texelLive ? max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 ) : 1.0;
+	const float lobeAlpha = texelLive ? max( texture( gBufShadowRoughness, vec3( uv, float( gEye ) )).y * 0.999 + 0.001, 1e-6 ) : 1.0;
 	const float roughness = sqrt( lobeAlpha );
 	if( roughness > roughGate + feather )
 		texelLive = false;
@@ -316,9 +302,9 @@ void main()
 	// decline is for: handing that pixel back to the probe. `historyDistCur` is
 	// zeroed by every decline and written by every answer, so it is exactly the
 	// "this texel has an answer this frame" bit, and it costs one r32 load.
-	if( texelLive && imageLoad( historyDistCur, tc ).x <= 0.0 )
+	if( texelLive && imageLoad( historyDistCur, ivec3( tc, gEye )).x <= 0.0 )
 		texelLive = false;
-	const vec4 centre = texelLive ? imageLoad( historyCur, tc ) : vec4( 0.0 );
+	const vec4 centre = texelLive ? imageLoad( historyCur, ivec3( tc, gEye )) : vec4( 0.0 );
 	if( centre.w <= 0.0 )
 		texelLive = false;				// this texel has no answer to filter or composite
 
@@ -374,11 +360,11 @@ void main()
 			vec3 tn = vec3( 0.0 );
 			if( all( greaterThanEqual( t, ivec2( 0 ) ) ) && all( lessThan( t, traceRes ) ) )
 			{
-				tapDist = imageLoad( historyDistCur, t ).x;
-				h = imageLoad( historyCur, t );
+				tapDist = imageLoad( historyDistCur, ivec3( t, gEye )).x;
+				h = imageLoad( historyCur, ivec3( t, gEye ));
 				const vec2 tuv = traceUv( t, scale, fullRes );
-				td = texture( sceneDepth, tuv ).x;
-				tn = normalize( texture( gBufNormals, tuv ).xyz * 2.0 - 1.0 );
+				td = texture( sceneDepth, vec3( tuv, float( gEye ) )).x;
+				tn = normalize( texture( gBufNormals, vec3( tuv, float( gEye ) )).xyz * 2.0 - 1.0 );
 			}
 			sTapMean[entry] = uvec2( packHalf2x16( h.xy ), packHalf2x16( h.zw ) );
 			sTapDepth[entry] = tapDist > 0.0 ? td : 0.0;
@@ -390,25 +376,24 @@ void main()
 	if( filters )
 	{
 		const float centreDist = viewDistance( rawDepth );
-		const vec3 centreN = normalize( texture( gBufNormals, uv ).xyz * 2.0 - 1.0 );
+		const vec3 centreN = normalize( texture( gBufNormals, vec3( uv, float( gEye ) )).xyz * 2.0 - 1.0 );
 		// THE DEPTH GRADIENT, per trace texel, by central difference. Four
 		// depth taps once per pixel — not per tap — and they are what makes the
 		// kernel slope-aware. A tap off the edge of the buffer contributes a
 		// one-sided difference, which is what `clamp` below gives for free.
 		vec2 grad = vec2( 0.0 );
 		{
-			// Clamped into THIS EYE's half (see eyeX0/eyeX1): a one-sided
-			// difference at the seam, never a step into the other picture.
+			// Clamped into this eye's picture: a one-sided difference at its edge.
 			const ivec2 lo = ivec2( eyeX0, 0 );
 			const ivec2 lim = ivec2( eyeX1 - 1, traceRes.y - 1 );
 			const ivec2 xr = clamp( tc + ivec2( 1, 0 ), lo, lim );
 			const ivec2 xl = clamp( tc - ivec2( 1, 0 ), lo, lim );
 			const ivec2 yu = clamp( tc + ivec2( 0, 1 ), lo, lim );
 			const ivec2 yd = clamp( tc - ivec2( 0, 1 ), lo, lim );
-			const float dxr = texture( sceneDepth, traceUv( xr, scale, fullRes ) ).x;
-			const float dxl = texture( sceneDepth, traceUv( xl, scale, fullRes ) ).x;
-			const float dyu = texture( sceneDepth, traceUv( yu, scale, fullRes ) ).x;
-			const float dyd = texture( sceneDepth, traceUv( yd, scale, fullRes ) ).x;
+			const float dxr = texture( sceneDepth, vec3( traceUv( xr, scale, fullRes ), float( gEye ) )).x;
+			const float dxl = texture( sceneDepth, vec3( traceUv( xl, scale, fullRes ), float( gEye ) )).x;
+			const float dyu = texture( sceneDepth, vec3( traceUv( yu, scale, fullRes ), float( gEye ) )).x;
+			const float dyd = texture( sceneDepth, vec3( traceUv( yd, scale, fullRes ), float( gEye ) )).x;
 			const float sx = float( max( xr.x - xl.x, 1 ) ), sy = float( max( yu.y - yd.y, 1 ) );
 			// A neighbour that drew nothing contributes no gradient rather than
 			// a gradient to the far plane.
@@ -493,16 +478,16 @@ void main()
 			if( any( greaterThanEqual( fc, fullRes ) ) )
 				continue;
 			const vec2 fuv = ( vec2( fc ) + 0.5 ) / vec2( fullRes );
-			const float fd = texture( sceneDepth, fuv ).x;
+			const float fd = texture( sceneDepth, vec3( fuv, float( gEye ) )).x;
 			if( fd <= 0.0 || fd >= 1.0 )
 				continue;
 			// PERCEPTUAL again, from the same 0043 packing (see the decode above):
 			// this texel's own gate, in the same units as the dial.
-			const float fr = sqrt( max( texture( gBufShadowRoughness, fuv ).y * 0.999 + 0.001,
+			const float fr = sqrt( max( texture( gBufShadowRoughness, vec3( fuv, float( gEye ) )).y * 0.999 + 0.001,
 										1e-6 ) );
 			if( fr > roughGate + feather )
 				continue;
-			const vec4 screen = imageLoad( ssrReflection, fc );
+			const vec4 screen = imageLoad( ssrReflection, ivec3( fc, gEye ));
 			const float screenW = clamp( screen.w, 0.0, 1.0 );
 			if( screenW >= 1.0 )
 				continue;				// the march owns this pixel outright
@@ -537,7 +522,7 @@ void main()
 			if( gate <= 0.0 )
 				continue;
 			const vec3 rgb = mix( mean, screen.xyz, screenW );
-			imageStore( ssrReflection, fc, vec4( rgb, mix( screenW, 1.0, gate ) ) );
+			imageStore( ssrReflection, ivec3( fc, gEye ), vec4( rgb, mix( screenW, 1.0, gate ) ) );
 		}
 	}
 }

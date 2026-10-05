@@ -19,7 +19,9 @@
 // is the difference between a test and a tripwire.
 #version ogre_glsl_ver_330
 
-vulkan_layout( ogre_t0 ) uniform texture2D sourceTexture;
+#include "JahScreen.glsl"
+
+vulkan_layout( ogre_t0 ) uniform JahScreenTexture sourceTexture;
 
 vulkan( layout( ogre_s0 ) uniform sampler srcSampler );
 
@@ -49,10 +51,10 @@ float hash21( vec2 p )
 
 void main()
 {
-	const ivec2 texSize = textureSize( vkSampler2D( sourceTexture, srcSampler ), 0 );
+	const ivec2 texSize = jahScreenSize( jahScreenSampler( sourceTexture, srcSampler ), 0 );
 	const ivec2 srcCoord = clamp( ivec2( inPs.uv0 * vec2( texSize ) ),
 								  ivec2( 0 ), texSize - ivec2( 1 ) );
-	const vec4  src = texelFetch( vkSampler2D( sourceTexture, srcSampler ), srcCoord, 0 );
+	const vec4  src = texelFetch( jahScreenSampler( sourceTexture, srcSampler ), jahScreenTexel( srcCoord ), 0 );
 
 	const float amount  = clamp( lookParams0.x, 0.0, 1.0 );
 	const float flicker = clamp( lookParams0.y, 0.0, 1.0 );
@@ -66,8 +68,8 @@ void main()
 
 	// The gate weave: the whole image slides vertically by up to half a percent.
 	const vec2 juv = inPs.uv0 + vec2( 0.0, ( hash11( frame ) - 0.5 ) * 0.01 * jitter );
-	const vec3 base = texture( vkSampler2D( sourceTexture, srcSampler ),
-							   clamp( juv, vec2( 0.0 ), vec2( 1.0 ) ) ).rgb;
+	const vec3 base = texture( jahScreenSampler( sourceTexture, srcSampler ),
+							   jahScreenUv( clamp( juv, vec2( 0.0 ), vec2( 1.0 ) ) ) ).rgb;
 
 	// Sepia: the pixel's luma through a warm tint. The three multipliers ARE the
 	// look — anything with r > g > b reads as aged film — and they are

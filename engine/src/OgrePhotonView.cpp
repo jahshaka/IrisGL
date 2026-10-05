@@ -229,7 +229,8 @@ void OgreView::syncPhotonView() {
     // frames must not wait a frame more for the overlay the tier then writes.
     const bool want = usesOverlay(view) && shape.passes && t;
     if (mPhotonOverlay && (!want || mPhotonOverlay->getWidth() != t->getWidth() ||
-                           mPhotonOverlay->getHeight() != t->getHeight()))
+                           mPhotonOverlay->getHeight() != t->getHeight() ||
+                           mPhotonOverlay->getNumSlices() != t->getNumSlices()))
         retirePhotonOverlay();
     if (want && !mPhotonOverlay) {
         JAH_TRY {
@@ -237,8 +238,10 @@ void OgreView::syncPhotonView() {
             Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
             Ogre::TextureGpu *o = tm->createTexture(
                 "JahPhotonOverlay/" + std::to_string(++sSerial), Ogre::GpuPageOutStrategy::Discard,
-                Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
-            o->setResolution(t->getWidth(), t->getHeight(), 1u);
+                Ogre::TextureFlags::Uav, t->getTextureType());
+            // The TARGET's shape: a stereo view's is layered, one eye per layer
+            // (LAYERED-STEREO-1), and its overlay is read at the fragment's view.
+            o->setResolution(t->getWidth(), t->getHeight(), t->getNumSlices());
             o->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
             o->setNumMipmaps(1u);
             // RESIDENT FOR GOOD, never per frame (the gather's irradiance rule).

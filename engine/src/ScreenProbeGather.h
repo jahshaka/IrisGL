@@ -33,9 +33,9 @@
 // `jahHitRadiance`, GA-1e), and the row is ON BY TIER — `GiToggle::Auto`
 // resolves through the tier table's gather row (Types.h `GiGatherFacts`: High
 // and Epic on, Medium at 36 rays, Low off). SINCE PHOTON-GA-VR: STEREO — a
-// two-eye target gathers per EYE in the same four dispatches (the grid is two
-// grids side by side, split at the seam; each eye reconstructs and reprojects
-// through its own basis — the reflection's REFLECT-VR-1 rule), and the pixel
+// two-eye target gathers per EYE in the same four dispatches (each eye its own
+// layer and its own probe grid, LAYERED-STEREO-1; each eye reconstructs and
+// reprojects through its own basis — the reflection's REFLECT-VR-1 rule), and the pixel
 // history is ONE PACKED 8-byte texel (16 B a pixel for the pair, every view).
 #pragma once
 
@@ -100,8 +100,14 @@ public:
     virtual bool gatherMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible,
                                   VkBuffer &buffer, VkDeviceMemory &memory, void **mapped,
                                   std::string &err) = 0;
-    virtual bool gatherMakeImage(unsigned w, unsigned h, VkFormat fmt, VkImage &image,
-                                 VkDeviceMemory &memory, VkImageView &view, std::string &err) = 0;
+    /// `layers` 0 = a plain 2D image (the probe atlas); n >= 1 = a SCREEN image of
+    /// n layers, one per eye, with a 2D_ARRAY view (LAYERED-STEREO-1).
+    virtual bool gatherMakeImage(unsigned w, unsigned h, unsigned layers, VkFormat fmt,
+                                 VkImage &image, VkDeviceMemory &memory, VkImageView &view,
+                                 std::string &err) = 0;
+    /// A retired 2D_ARRAY view of every layer of an Ogre screen texture (the
+    /// tier's layerView): what the gather's screen shaders declare.
+    virtual VkImageView gatherLayerView(Ogre::TextureGpu *t, bool storage) = 0;
 
     /// ...and the retire window on every one of them.
     virtual void gatherRetireBuffer(VkBuffer buffer, VkDeviceMemory memory) = 0;
@@ -178,12 +184,12 @@ struct GatherInputs {
     bool anisotropic = false;
 
     /// The camera's basis, in the five vectors the shaders reconstruct with.
-    /// Under STEREO these are the LEFT eye's, over its own half as a 0..1 image.
+    /// Under STEREO these are the LEFT eye's, over its own layer as a 0..1 image.
     float camPos[4] = { 0, 0, 0, 1 };
     float rayTL[3] = {}, rayRight[3] = {}, rayDown[3] = {}, fwd[3] = {};
-    /// A TWO-EYE TARGET (PHOTON-GA-VR): the left eye in the left half of every
-    /// texture, the right in the right half (`width` is both eyes', even), and
-    /// the RIGHT eye's basis in the same five vectors. The ray tier fills it
+    /// A TWO-EYE TARGET (PHOTON-GA-VR, LAYERED-STEREO-1): every screen texture is
+    /// a two-layer array, one eye per layer (`width` is ONE eye's), and the RIGHT
+    /// eye's basis is in the second five vectors. The ray tier fills it
     /// from the session's located eyes exactly as the reflection trace does.
     bool stereo = false;
     float camPos2[4] = { 0, 0, 0, 1 };
@@ -382,13 +388,6 @@ private:
         /// after a resize — breaks the REST (never the history) so the integrate
         /// runs and the overlay is written; a held view dispatches nothing.
         unsigned photonLast = 0u;
-        /// ...and THE OVERLAY'S STORAGE VIEW, made once per overlay texture (keyed by
-        /// the texture AND its generation: a re-created overlay may reuse the address)
-        /// and retired when the overlay changes or the view goes — not a view created
-        /// and retired every frame the discs are on.
-        const Ogre::TextureGpu *photonViewOf = nullptr;
-        unsigned photonViewGeneration = 0u;
-        VkImageView photonView = VK_NULL_HANDLE;
         GatherTuning tuningLast;
         /// What the last recorded frame ran with (GatherStatus).
         bool lastTemporal = false;
@@ -406,10 +405,12 @@ private:
         /// The placement counter's per-row words (one per eye and grid row).
         unsigned placeRows = 0u;
         unsigned gridW = 0u, gridH = 0u, uniformProbes = 0u, adaptiveCap = 0u, atlasCols = 0u;
-        /// THE TARGET'S SHAPE (PHOTON-GA-VR): two eyes side by side, each `eyeW`
-        /// pixels and `eyeGridW` probe columns wide (gridW = 2 x eyeGridW); one
-        /// eye = the whole target and the whole grid.
+        /// THE TARGET'S SHAPE (PHOTON-GA-VR, LAYERED-STEREO-1): two eyes, one per
+        /// LAYER of every screen image (`layers` = 2), each `eyeW` pixels and
+        /// `eyeGridW` probe columns wide; the probe LIST holds the two grids side
+        /// by side (gridW = 2 x eyeGridW). One eye = one layer and the whole grid.
         bool stereo = false;
+        unsigned layers = 1u;
         unsigned eyeW = 0u, eyeGridW = 0u;
         unsigned atlasW = 0u, atlasH = 0u;
         bool targetsReady = false;

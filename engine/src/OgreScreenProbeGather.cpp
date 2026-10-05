@@ -25,12 +25,13 @@
 // WHAT IS PING-PONGED (PHOTON-GATHER-1c): the pixel history — one packed
 // 8-byte texel a pixel since PHOTON-GA-VR — `View::flip` names this frame's half.
 //
-// STEREO (PHOTON-GA-VR): a two-eye target is gathered in the same four
-// dispatches. The probe grid is two grids side by side, each `eyeGridW` columns
-// over its own eye's `eyeW` pixels, so a cell's pixels are one eye's and the
-// seam is a cell boundary by construction; every job reconstructs, filters and
-// reprojects through the eye that owns the cell or the pixel (jah_probe_params.glsl's
-// eye helpers — the reflection trace's REFLECT-VR-1 rule, the same text shape).
+// STEREO (PHOTON-GA-VR, LAYERED-STEREO-1): a two-eye target is gathered in the
+// same four dispatches. Every screen image is a two-layer array, one eye per
+// layer at the same origin, and the per-pixel integrate's z is the eye; the
+// probe LIST holds two grids side by side, each `eyeGridW` columns over its own
+// eye's layer, so a cell names its eye. Every job reconstructs, filters and
+// reprojects through the eye that owns the cell or the layer (jah_probe_params.glsl's
+// eye helpers — the reflection trace's rule, the same text shape).
 //
 // THE BOUNDARY THIS FILE KEEPS. It speaks Vulkan and Ogre and knows nothing
 // about the scene graph: everything it needs about the frame arrives in
@@ -168,8 +169,8 @@ struct GatherParams {
     float hitSun[4] = {};
     float hitSun2[4] = {};
     /// THE SECOND EYE (PHOTON-GA-VR; jah_probe_params.glsl's `stereo` block):
-    /// x = 1 stereo, y = one eye's width, z = one eye's probe columns; then the
-    /// right eye's five vectors, now and the previous frame's.
+    /// x = 1 stereo, y = one eye's probe columns (zw unused); then the right
+    /// eye's five vectors, now and the previous frame's.
     float stereo[4] = {};
     float camPos2[4] = {};
     float rayTL2[4] = {};
@@ -437,10 +438,11 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     v.stride = stride;
     v.octRes = octRes;
     v.adaptiveCap = adaptiveCap;
-    // TWO GRIDS SIDE BY SIDE under stereo, each over its own eye (the seam a cell
-    // boundary whatever the eye's width does modulo the stride); one otherwise.
+    // TWO GRIDS SIDE BY SIDE in the probe LIST under stereo, each over its own
+    // eye's layer (LAYERED-STEREO-1: `in.width` is one eye's); one otherwise.
     v.stereo = in.stereo;
-    v.eyeW = in.stereo ? in.width / 2u : in.width;
+    v.layers = in.stereo ? 2u : 1u;
+    v.eyeW = in.width;
     v.eyeGridW = (v.eyeW + stride - 1u) / stride;
     v.gridW = in.stereo ? 2u * v.eyeGridW : v.eyeGridW;
     v.gridH = (in.height + stride - 1u) / stride;
@@ -467,7 +469,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
               "stride is the cure";
         return false;
     }
-    if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, VK_FORMAT_R16G16B16A16_SFLOAT, v.atlas,
+    if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, 0u, VK_FORMAT_R16G16B16A16_SFLOAT, v.atlas,
                                v.atlasMemory, v.atlasView, err))
         return false;
     if (!mHost.gatherMakeBuffer(VkDeviceSize(total) * kRecordBytes,
@@ -478,7 +480,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     for (unsigned k = 0; k < 2u; ++k) {
         // THE PIXEL HISTORY at the target's resolution, one packed texel a pixel
         // for each half of the ping-pong (rq_probe_integrate.comp).
-        if (!mHost.gatherMakeImage(in.width, in.height, VK_FORMAT_R32G32_UINT, v.history[k],
+        if (!mHost.gatherMakeImage(in.width, in.height, v.layers, VK_FORMAT_R32G32_UINT, v.history[k],
                                    v.historyMemory[k], v.historyView[k], err))
             return false;
     }
@@ -490,7 +492,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     // integrate touches it only on a rest frame, and `record` never counts one
     // for a stereo view.
     const unsigned restW = in.stereo ? 1u : in.width, restH = in.stereo ? 1u : in.height;
-    if (!mHost.gatherMakeImage(restW, restH, VK_FORMAT_R16G16B16A16_SFLOAT, v.restMean,
+    if (!mHost.gatherMakeImage(restW, restH, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, v.restMean,
                                v.restMeanMemory, v.restMeanView, err))
         return false;
     // THE COUNTER: the demand (one word, read back) and then each eye's row's count
@@ -525,8 +527,12 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     static unsigned sSerial = 0u;
     Ogre::TextureGpu *t = tm->createTexture("JahProbeIrradiance/" + std::to_string(++sSerial),
                                             Ogre::GpuPageOutStrategy::Discard,
-                                            Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
-    t->setResolution(in.width, in.height, 1u);
+                                            Ogre::TextureFlags::Uav,
+                                            in.stereo ? Ogre::TextureTypes::Type2DArray
+                                                      : Ogre::TextureTypes::Type2D);
+    // ONE LAYER PER EYE under stereo (LAYERED-STEREO-1): the forward pass reads it
+    // at its own gl_ViewIndex (JahProbeGather_piece_ps.any).
+    t->setResolution(in.width, in.height, v.layers);
     t->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
     t->setNumMipmaps(1u);
     // RESIDENT FOR GOOD, never per frame — the 0071 lesson.
@@ -536,7 +542,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     // The atlas, the records, the irradiance target (8 bytes a pixel), the
     // pixel history's two packed halves (8 bytes a pixel each) and the rest mean
     // (8 bytes a pixel; none under stereo).
-    const unsigned long long pixels = (unsigned long long)in.width * in.height;
+    const unsigned long long pixels = (unsigned long long)in.width * in.height * v.layers;
     v.historyBytes = pixels * 2ull * kHistoryTexelBytes;
     v.vramBytes = 1ull * v.atlasW * v.atlasH * 8ull + (unsigned long long)total * kRecordBytes +
                   pixels * 8ull + v.historyBytes + (unsigned long long)restW * restH * 8ull;
@@ -575,9 +581,6 @@ void ScreenProbeGather::drop(View &v) {
     v.restMean = VK_NULL_HANDLE;
     v.restMeanMemory = VK_NULL_HANDLE;
     v.restMeanView = VK_NULL_HANDLE;
-    if (v.photonView) mHost.gatherRetireView(v.photonView);
-    v.photonView = VK_NULL_HANDLE;
-    v.photonViewOf = nullptr;
     v.restFrames = 0u;
     v.sinceRestart = 0u;
     v.age = 0u;
@@ -637,11 +640,20 @@ void ScreenProbeGather::readPending(View &v) {
             // ...AND THE IRRADIANCE READBACK of the same retired frame, decoded
             // from half floats (a test door; see GatherTuning::readback).
             if (v.pending[i].irradiance && v.irrReadbackMapped) {
-                const size_t texels = size_t(v.w) * v.h;
+                // The layers arrive one after another and are laid side by side
+                // (LAYERED-STEREO-1): a stereo readback is the eye pair as one
+                // image, `irradianceW` the pair's width.
+                const size_t layerTexels = size_t(v.w) * v.h;
+                const size_t texels = layerTexels * v.layers;
                 const uint16_t *src = reinterpret_cast<const uint16_t *>(
                     static_cast<const char *>(v.irrReadbackMapped) + i * texels * 8u);
                 v.irrHost.resize(texels * 4u);
-                for (size_t k = 0; k < texels * 4u; ++k) v.irrHost[k] = Ogre::Bitwise::halfToFloat(src[k]);
+                const size_t pairW = size_t(v.w) * v.layers;
+                for (unsigned k = 0; k < v.layers; ++k)
+                    for (unsigned y = 0; y < v.h; ++y)
+                        for (size_t x = 0; x < size_t(v.w) * 4u; ++x)
+                            v.irrHost[(y * pairW + size_t(k) * v.w) * 4u + x] = Ogre::Bitwise::halfToFloat(
+                                src[(size_t(k) * layerTexels + size_t(y) * v.w) * 4u + x]);
                 v.irrHostFrame = v.pending[i].gatherFrame;
                 v.pending[i].irradiance = false;
                 // ...and the uniform cells' twin links (each record's normalW.w).
@@ -686,7 +698,7 @@ void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
         b[i].image = images[i];
         b[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         b[i].subresourceRange.levelCount = 1;
-        b[i].subresourceRange.layerCount = 1;
+        b[i].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;   // every eye's layer
         b[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
@@ -804,7 +816,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.adaptiveRequested = v.adaptiveAsked;
     out.adaptiveCap = v.adaptiveCap;
     out.raysPerFrame = (unsigned long long)(v.uniformProbes + v.adaptiveLast) * out.raysPerProbe;
-    out.targetW = v.w;
+    out.targetW = v.w * v.layers;   // the eye PAIR (an eye per layer)
     out.targetH = v.h;
     out.stereo = v.stereo;
     out.eyeProbesX = v.eyeGridW;
@@ -818,7 +830,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.temporal = v.lastTemporal;
     out.historyAge = v.age;
     out.irradiance = v.irrHost;
-    out.irradianceW = v.irrHost.empty() ? 0u : v.w;
+    out.irradianceW = v.irrHost.empty() ? 0u : v.w * v.layers;
     out.irradianceH = v.irrHost.empty() ? 0u : v.h;
     out.irradianceFrame = v.irrHostFrame;
     out.adaptiveCells = v.adaptiveHost;
@@ -871,11 +883,11 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
                                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0, nullptr, 0, nullptr);
-            const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * 8u;
+            const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 8u;
             VkBufferImageCopy region{};
             region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.layerCount = 1;
+            region.imageSubresource.layerCount = v.layers;
             region.imageExtent = { v.w, v.h, 1u };
             vkCmdCopyImageToBuffer(
                 cmd, static_cast<Ogre::VulkanTextureGpu *>(v.irradiance)->getFinalTextureName(),
@@ -966,7 +978,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     readPending(v);
 
     // (Two eyes' grids side by side under stereo — ensureTargets' arithmetic.)
-    const unsigned eyeGridW = ((in.stereo ? in.width / 2u : in.width) + stride - 1u) / stride;
+    const unsigned eyeGridW = (in.width + stride - 1u) / stride;
     const unsigned gridW = in.stereo ? 2u * eyeGridW : eyeGridW;
     const unsigned gridH = (in.height + stride - 1u) / stride;
     // HOW MANY ADAPTIVE PROBES A FRAME MAY ADD: the table's share of the grid (a
@@ -1275,8 +1287,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // THE SECOND EYE (PHOTON-GA-VR): the shape, and the right eye's basis now and
     // before (written, never read, with one eye).
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;
-    pp.stereo[1] = float(v.eyeW);
-    pp.stereo[2] = float(v.eyeGridW);
+    pp.stereo[1] = float(v.eyeGridW);
     std::memcpy(pp.camPos2, in.camPos2, sizeof(pp.camPos2));
     put3(pp.rayTL2, in.rayTL2, 0.0f);
     put3(pp.rayRight2, in.rayRight2, 0.0f);
@@ -1320,10 +1331,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     argsInfo.range = VK_WHOLE_SIZE;
     VkDescriptorImageInfo normals{}, depth{};
     normals.sampler = mHost.gatherPointSampler();
-    normals.imageView = sampledView(in.normals);
+    normals.imageView = mHost.gatherLayerView(in.normals, false);
     normals.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     depth.sampler = mHost.gatherPointSampler();
-    depth.imageView = sampledView(in.depth);
+    depth.imageView = mHost.gatherLayerView(in.depth, false);
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!normals.imageView || !depth.imageView) return;
 
@@ -1507,13 +1518,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
 
     VkDescriptorImageInfo irradianceStore{};
     {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = v.irradiance;
-        slot.access = Ogre::ResourceAccess::ReadWrite;
-        slot.pixelFormat = v.irradiance->getPixelFormat();
-        irradianceStore.imageView =
-            static_cast<Ogre::VulkanTextureGpu *>(v.irradiance)->createView(slot, false);
-        mHost.gatherRetireView(irradianceStore.imageView);
+        irradianceStore.imageView = mHost.gatherLayerView(v.irradiance, true);
         irradianceStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         if (!irradianceStore.imageView) return;
     }
@@ -1554,28 +1559,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         photon.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         photon.imageView = irradianceStore.imageView;
         if (in.photonOverlay) {
-            if (v.photonView && (v.photonViewOf != in.photonOverlay ||
-                                 v.photonViewGeneration != in.photonOverlayGeneration)) {
-                mHost.gatherRetireView(v.photonView);
-                v.photonView = VK_NULL_HANDLE;
-            }
-            if (!v.photonView) {
-                Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-                slot.texture = in.photonOverlay;
-                slot.access = Ogre::ResourceAccess::Write;
-                slot.pixelFormat = in.photonOverlay->getPixelFormat();
-                v.photonView =
-                    static_cast<Ogre::VulkanTextureGpu *>(in.photonOverlay)->createView(slot, false);
-                v.photonViewOf = in.photonOverlay;
-                v.photonViewGeneration = in.photonOverlayGeneration;
-            }
-            photon.imageView = v.photonView;
+            photon.imageView = mHost.gatherLayerView(in.photonOverlay, true);
             if (!photon.imageView) return;
-        } else if (v.photonView) {
-            // The discs went off: the view goes with them (the overlay may be retired next).
-            mHost.gatherRetireView(v.photonView);
-            v.photonView = VK_NULL_HANDLE;
-            v.photonViewOf = nullptr;
         }
         w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[8].pImageInfo = &photon;
@@ -1815,14 +1800,14 @@ void ScreenProbeGather::finish(const void *key) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeLayout, 0, 1,
                             &v.integrateSets[ring], 0, nullptr);
-    vkCmdDispatch(cmd, (in.width + 7u) / 8u, (in.height + 7u) / 8u, 1u);
+    vkCmdDispatch(cmd, (in.width + 7u) / 8u, (in.height + 7u) / 8u, v.layers);   // z = the eye
     integrateWork.close();
     // THE IRRADIANCE READBACK (a test door): the integrate's output, still in
     // the GENERAL layout its storage writes left it in, copied into this frame's
     // slot of a host ring and decoded once the frame has retired (readPending).
     bool readbackThisFrame = false;
     if (in.tuning.readback) {
-        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * 8u;
+        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 8u;
         if (!v.irrReadback) {
             std::string rerr;
             if (!mHost.gatherMakeBuffer(slotBytes * kFramesInFlight,
@@ -1841,7 +1826,7 @@ void ScreenProbeGather::finish(const void *key) {
             VkBufferImageCopy region{};
             region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.layerCount = 1;
+            region.imageSubresource.layerCount = v.layers;
             region.imageExtent = { v.w, v.h, 1u };
             vkCmdCopyImageToBuffer(
                 cmd, static_cast<Ogre::VulkanTextureGpu *>(v.irradiance)->getFinalTextureName(),

@@ -118,7 +118,7 @@
 // under a different condition is a compile error that loses the frame.
 @property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 @piece( custom_ps_ifdCageGate )
-	ifdCageEnabled = 1.0 - saturate( OGRE_Load2D( jahProbeIrradiance, iFragCoord, 0 ).w );
+	ifdCageEnabled = 1.0 - saturate( OGRE_LoadScreen2D( jahProbeIrradiance, iFragCoord, 0 ).w );
 @end
 @end
 // ...AND A BLENDED FRAGMENT ON A GATHER PASS TAKES NO CAGE AT ALL

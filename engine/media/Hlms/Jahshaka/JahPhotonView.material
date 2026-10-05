@@ -21,6 +21,7 @@
 fragment_program Jahshaka/PhotonOverlay_ps_VK glslvk
 {
 	source JahPhotonView_ps.glsl
+	enable_include_header true
 }
 fragment_program Jahshaka/PhotonOverlay_ps unified
 {

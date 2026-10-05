@@ -17,7 +17,9 @@
 // identity — not "almost", at any resolution.
 #version ogre_glsl_ver_330
 
-vulkan_layout( ogre_t0 ) uniform texture2D sourceTexture;
+#include "JahScreen.glsl"
+
+vulkan_layout( ogre_t0 ) uniform JahScreenTexture sourceTexture;
 
 vulkan( layout( ogre_s0 ) uniform sampler srcSampler );
 
@@ -36,10 +38,10 @@ out vec4 fragColour;
 
 void main()
 {
-	const ivec2 texSize = textureSize( vkSampler2D( sourceTexture, srcSampler ), 0 );
+	const ivec2 texSize = jahScreenSize( jahScreenSampler( sourceTexture, srcSampler ), 0 );
 	const ivec2 srcCoord = clamp( ivec2( inPs.uv0 * vec2( texSize ) ),
 								  ivec2( 0 ), texSize - ivec2( 1 ) );
-	const vec4  src = texelFetch( vkSampler2D( sourceTexture, srcSampler ), srcCoord, 0 );
+	const vec4  src = texelFetch( jahScreenSampler( sourceTexture, srcSampler ), jahScreenTexel( srcCoord ), 0 );
 
 	const float amount = clamp( lookParams0.x, 0.0, 1.0 );
 	const float scale  = max( lookParams0.y, 0.0 );
@@ -52,8 +54,8 @@ void main()
 							  cos( ( inPs.uv0.x * scale + inPs.uv0.y * 0.3 ) * 6.2831853 ) );
 	const vec2 warpedUv = inPs.uv0 + ripple * ( amount * 0.02 );
 
-	const vec4 warped = texture( vkSampler2D( sourceTexture, srcSampler ),
-								 clamp( warpedUv, vec2( 0.0 ), vec2( 1.0 ) ) );
+	const vec4 warped = texture( jahScreenSampler( sourceTexture, srcSampler ),
+								 jahScreenUv( clamp( warpedUv, vec2( 0.0 ), vec2( 1.0 ) ) ) );
 
 	// A SELECT, not a mix: cross-fading the warped image with the unwarped one
 	// would ghost at every amount between 0 and 1, and the amount already lives

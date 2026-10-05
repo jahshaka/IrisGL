@@ -613,6 +613,18 @@ View *OgreEngine::createView(const std::string &name,
 
 View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, unsigned height,
                                       const Colour &background) {
+    return createOffscreen(name, width, height, background, 1u);
+}
+
+OgreView *OgreEngine::createStereoPairView(const std::string &name, unsigned eyeW,
+                                           unsigned eyeH, const Colour &background) {
+    return createOffscreen(name, eyeW * 2u, eyeH, background, 2u);
+}
+
+/// `width` is the view's (for a layered pair, the PAIR's); `layers` > 1 makes the
+/// target a Type2DArray of width / layers per layer (OgreView::createRtt).
+OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, unsigned height,
+                                      const Colour &background, unsigned layers) {
     if (viewNameTaken(name)) return nullptr;
     if (!width || !height) { mLastError = "createOffscreenView: zero size"; return nullptr; }
     if (mHeadless) {
@@ -636,7 +648,8 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
                                                     8, 8, false, &wp);
         }
         ensureHlms();   // retried on every call until it succeeds (e.g. bad media dir)
-        Ogre::TextureGpu *rtt = OgreView::createRtt(mRoot, processUniqueName("rtt"), width, height);
+        Ogre::TextureGpu *rtt =
+            OgreView::createRtt(mRoot, processUniqueName("rtt"), width, height, 1u, layers);
         mViews.emplace_back(new OgreView(mRoot, nullptr, rtt, name, width, height,
                                          background, mLastError));
         mViews.back()->mEngine = this;

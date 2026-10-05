@@ -5,9 +5,8 @@
 // builds a "VR" technique on whichever of them the scene actually draws and
 // points it at this.
 //
-// NO GLSL (non-Vulkan) DELEGATE, on purpose: `gl_InstanceIndex` is Vulkan's
-// spelling of the instance and instanced stereo is a Vulkan path in this
-// engine. A material that asks for this program on GL3Plus would fail loudly,
+// NO GLSL (non-Vulkan) DELEGATE, on purpose: the eye is `gl_ViewIndex` and
+// multiview stereo is a Vulkan path in this engine. A material that asks for this program on GL3Plus would fail loudly,
 // which is the right answer — there is no stereo there to be right about.
 vertex_program Jahshaka/VrScreenQuad_vs glslvk
 {

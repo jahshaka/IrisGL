@@ -1413,26 +1413,19 @@ struct ChainDesc {
     /// costs no pixel and no pass.
     bool  hiddenAreaMask = false;
 
-    // ---- INSTANCED STEREO (SPECS/VR_SPEC.md §4.3, phase 2) ----------------
-    /// Render BOTH EYES in one pass into a target that is two eyes wide
-    /// (2w x h), the left eye in [0, .5] and the right in [.5, 1].
+    // ---- LAYERED STEREO (SPECS/VR_SPEC.md §4.3; LAYERED-STEREO-1) ----------
+    /// Render BOTH EYES, each into its own layer of a two-layer array at the
+    /// same origin, every pass ONCE through VK_KHR_multiview.
     ///
     /// It is one flag here and a sweep over the built node (chain::build's
-    /// applyStereo): EVERY PASS_SCENE the chosen shape carries — the opaque
-    /// pass, the overlay pass, the SSR prepass, the distortion pass, the
-    /// refraction pass, the shape's own extra scene passes — gets
-    /// `mInstancedStereo`, two viewports and the cull camera. All of them or
-    /// none: a shape that stereo-ised its opaque pass and not its overlay pass
-    /// would draw the gizmos once, across both eyes, at the left eye's
-    /// projection.
-    ///
-    /// The QUAD passes are deliberately untouched. A post quad reads and writes
-    /// the whole 2w x h image, which is right for anything per-pixel (tonemap,
-    /// looks, the exposure reduction) and WRONG for anything that samples a
-    /// neighbourhood across the middle of the image (SSAO, SMAA, the SSR
-    /// march) — those see the seam between the eyes. The VR profile turns them
-    /// off rather than teaching each one where the seam is (VR_SPEC §9 item 6);
-    /// the flag here does not enforce that, the session's profile does.
+    /// applyStereo): every screen-sized texture becomes two layers and EVERY
+    /// scene, quad and clear pass into one is multiview — a scene pass also
+    /// gets `mInstancedStereo` and the cull camera, a quad its multiview twin.
+    /// All of them or none: a pass left single-view would draw one eye only.
+    /// What has no per-layer form (SSAO, SMAA, the SSR march, bloom's fixed
+    /// ladder) is off by the session's policy (applyVrViewPolicy), and the
+    /// sweep refuses a pass that would read a layered texture into a
+    /// single-layer target.
     ///
     /// GRAPH SHAPE: it lives on the pass definitions, so it is part of
     /// sameShape() and a flip rebuilds the workspace — which happens exactly
@@ -1695,8 +1688,7 @@ bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef)
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
 /// THE METER'S PATTERN AND CLIPS (EXPOSURE-2). Uniforms on the histogram
 /// meter's compute jobs; only meaningful for the form that measures.
-void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent,
-               bool stereo);
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent);
 void setBloomThreshold(float minThreshold, float fullColourThreshold);
 void initSsao(Ogre::Root *root);
 void destroySsao(Ogre::Root *root);
@@ -7354,10 +7346,10 @@ public:
     bool sceneShapeMoved() const;
 
     // ---- VR (SPECS/VR_SPEC.md §4.3) ---------------------------------------
-    /// Makes this view's chain a STEREO one: every scene pass renders both eyes
-    /// into a target two eyes wide (ChainDesc::stereo). `cullCamera` is the
-    /// name of a camera sitting between the eyes. Rebuilds the workspace
-    /// definition, because the flag lives on the pass definitions.
+    /// Makes this view's chain a STEREO one: the target becomes two layers, one
+    /// eye each, and every pass draws both through multiview (ChainDesc::stereo).
+    /// `cullCamera` is the name of a camera sitting between the eyes. Recreates
+    /// the target and rebuilds the workspace definition.
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
     bool stereo() const { return mStereo; }
@@ -7745,8 +7737,12 @@ public:
     /// `samples` > 1 asks for an implicit-resolve MSAA target: the sample
     /// description MUST be set before scheduleTransitionTo(Resident) (Ogre
     /// asserts OnStorage); the achieved count is validated at the transition.
+    /// `layers` > 1 = a LAYERED target (a stereo view, LAYERED-STEREO-1): a
+    /// Type2DArray of w / layers x h, one layer per eye, so every eye renders at
+    /// the same origin of its own layer (multiview). `w` stays the PAIR's width.
     static Ogre::TextureGpu *createRtt(Ogre::Root *root, const std::string &name,
-                                       unsigned w, unsigned h, unsigned samples = 1);
+                                       unsigned w, unsigned h, unsigned samples = 1,
+                                       unsigned layers = 1);
     /// Rounds down to a power of two and clamps to [1, 16] — what the backend
     /// will even ask the driver for (the driver may still clamp further).
     static unsigned sanitizeSamples(unsigned samples);
@@ -8115,6 +8111,13 @@ public:
 
     View *createOffscreenView(const std::string &name, unsigned width, unsigned height,
                               const Colour &background) override;
+    /// THE VR SESSION'S EYE PAIR (LAYERED-STEREO-1): an offscreen view whose target
+    /// is BORN a two-layer array (one eye per layer, `eyeW` x `eyeH`), so the
+    /// session's setStereo has nothing to re-create. Its width() is the pair's.
+    OgreView *createStereoPairView(const std::string &name, unsigned eyeW, unsigned eyeH,
+                                   const Colour &background);
+    OgreView *createOffscreen(const std::string &name, unsigned width, unsigned height,
+                              const Colour &background, unsigned layers);
 
     void destroyView(View *view) override;
 

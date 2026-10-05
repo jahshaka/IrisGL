@@ -10,11 +10,11 @@
 // This file is the same order, inside the engine, with the two things the
 // spike did not have:
 //
-//   * INSTANCED STEREO instead of two renderOneFrame calls per frame. One
-//     scene pass draws both eyes into one target two eyes wide, with the
+//   * LAYERED MULTIVIEW STEREO instead of two renderOneFrame calls per frame.
+//     The eye pair is a two-layer array, one eye per layer at the same origin,
+//     and every pass draws both layers at once through VK_KHR_multiview, the
 //     per-eye view and projection taken from the camera's VrData
-//     (ChainDesc::stereo -> chain::applyStereo). It is the first use of the
-//     pin's instanced-stereo path on Vulkan (VR_SPEC §2.5).
+//     (ChainDesc::stereo -> chain::applyStereo; LAYERED-STEREO-1).
 //   * THE COPY INSIDE THE FRAME. The spike copied each eye into the runtime's
 //     swapchain image AFTER renderOneFrame, which needed a BarrierSolver
 //     ::assumeTransition to repair the tracking that the frame's own commit had
@@ -966,6 +966,12 @@ private:
     XrSession   mSession = XR_NULL_HANDLE;
     XrSpace     mSpace = XR_NULL_HANDLE;
     XrSwapchain mSwapchain[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    /// ONE ARRAY SWAPCHAIN (arraySize 2, layer = eye) when the runtime accepts it,
+    /// which is what a layered eye pair wants: one acquire and one copy of both
+    /// layers. A runtime that refuses it gets two single-layer swapchains, one per
+    /// eye (a capability of the runtime, not a compatibility arm). In the array
+    /// form only mSwapchain[0] exists.
+    bool        mArraySwapchain = false;
     std::vector<XrSwapchainImageVulkanKHR> mImages[2];
     uint32_t    mAcquired[2] = { 0u, 0u };
     bool        mHasAcquired[2] = { false, false };
@@ -1359,28 +1365,46 @@ bool VrSession::create(std::string &reason) {
     // our renderer and not of the runtime (VrConfig::overrideEyeWidth).
     const unsigned scW = mBoot->mViewCfg[0].recommendedImageRectWidth;
     const unsigned scH = mBoot->mViewCfg[0].recommendedImageRectHeight;
-    for (int eye = 0; eye < 2; ++eye) {
+    const auto makeSwapchain = [&](uint32_t arraySize, int slot) -> XrResult {
         XrSwapchainCreateInfo swci{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
         swci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                           XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         swci.format = mSwapchainFormat;
         swci.sampleCount = 1;
         swci.width = scW; swci.height = scH;
-        swci.faceCount = 1; swci.arraySize = 1; swci.mipCount = 1;
-        r = xrCreateSwapchain(mSession, &swci, &mSwapchain[eye]);
-        if (XR_FAILED(r)) {
-            reason = "xrCreateSwapchain failed: " + xrResultName(mBoot->mInstance, r);
-            return false;
-        }
+        swci.faceCount = 1; swci.arraySize = arraySize; swci.mipCount = 1;
+        const XrResult cr = xrCreateSwapchain(mSession, &swci, &mSwapchain[slot]);
+        if (XR_FAILED(cr)) { mSwapchain[slot] = XR_NULL_HANDLE; return cr; }
         uint32_t n = 0;
-        xrEnumerateSwapchainImages(mSwapchain[eye], 0, &n, nullptr);
-        mImages[eye].assign(n, { XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR });
+        xrEnumerateSwapchainImages(mSwapchain[slot], 0, &n, nullptr);
+        mImages[slot].assign(n, { XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR });
         xrEnumerateSwapchainImages(
-            mSwapchain[eye], n, &n,
-            reinterpret_cast<XrSwapchainImageBaseHeader *>(mImages[eye].data()));
+            mSwapchain[slot], n, &n,
+            reinterpret_cast<XrSwapchainImageBaseHeader *>(mImages[slot].data()));
+        return cr;
+    };
+    // THE EYE PAIR IS LAYERED (LAYERED-STEREO-1), so the swapchain it wants is an
+    // array of two: one acquire, one copy of both layers, the projection views
+    // addressing layer = eye. OpenXR lets a runtime refuse an arraySize it cannot
+    // serve; then each eye gets its own single-layer swapchain.
+    r = makeSwapchain(2u, 0);
+    mArraySwapchain = XR_SUCCEEDED(r);
+    if (mArraySwapchain) {
+        vrLog("swapchain: ONE array of 2 layers, %ux%u, %zu images; rendering %ux%u per eye",
+              scW, scH, mImages[0].size(), mEyeWidth, mEyeHeight);
+    } else {
+        vrLog("swapchain: the runtime refused an array of 2 (%s) - one swapchain per eye",
+              xrResultName(mBoot->mInstance, r).c_str());
+        for (int eye = 0; eye < 2; ++eye) {
+            r = makeSwapchain(1u, eye);
+            if (XR_FAILED(r)) {
+                reason = "xrCreateSwapchain failed: " + xrResultName(mBoot->mInstance, r);
+                return false;
+            }
+        }
+        vrLog("swapchains: 2 x %ux%u, %zu images each; rendering %ux%u per eye", scW, scH,
+              mImages[0].size(), mEyeWidth, mEyeHeight);
     }
-    vrLog("swapchains: 2 x %ux%u, %zu images each; rendering %ux%u per eye", scW, scH,
-          mImages[0].size(), mEyeWidth, mEyeHeight);
 
     // THE CULL CAMERA (VR_SPEC §2.5): one frustum for both eyes, so the two
     // eyes cull and light identically. Its projection is written per frame from
@@ -1390,7 +1414,8 @@ bool VrSession::create(std::string &reason) {
     mCullCamera->setNearClipDistance(kVrDefaultNear);
     mCullCamera->setFarClipDistance(kVrDefaultFar);
 
-    // THE VIEW. Offscreen, two eyes wide, and the ONE offscreen view in this
+    // THE VIEW. Offscreen, the eye PAIR (setStereo below makes its target two
+    // layers, one eye each; its width is the pair's), and the ONE offscreen view in this
     // engine that keeps the post chain (PostFxDesc::allowOffscreen) — because
     // it is not a thumbnail, it is the picture the user is standing in.
     //
@@ -1401,9 +1426,9 @@ bool VrSession::create(std::string &reason) {
     // (automatic exposure across a +/-2.5 stop window) whatever the author had
     // chosen in the World panel. `SceneMirror::applyViewEnvironment` pushes the
     // project's description into this view every frame now, exactly as it does
-    // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what a
-    // side-by-side eye pair cannot carry — in ONE place, stated once, with the
-    // reason for every entry.
+    // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what has
+    // no per-eye form yet — in ONE place, stated once, with the reason for every
+    // entry.
     //
     // WHAT IS SET HERE IS THE SESSION'S OWN, AND ONLY THAT:
     //   * MSAA at 1. Not a PostFxDesc field: HDR + MSAA segfaults this driver
@@ -1415,9 +1440,11 @@ bool VrSession::create(std::string &reason) {
     //     BEFORE a host's first environment push — the warm-up frames, and an
     //     engine-only caller (tests/vr) that has no mirror at all. Every other
     //     field is the struct's default and is replaced on the first push.
-    View *v = mEngine->createOffscreenView("jahshaka-vr", mEyeWidth * 2u, mEyeHeight,
-                                           Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
-    if (!v) { reason = "createOffscreenView failed: " + mEngine->lastError(); return false; }
+    // BORN LAYERED (LAYERED-STEREO-1): the target is the two-layer eye pair from
+    // the start, so setStereo below re-creates nothing.
+    View *v = mEngine->createStereoPairView("jahshaka-vr", mEyeWidth, mEyeHeight,
+                                            Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
+    if (!v) { reason = "createStereoPairView failed: " + mEngine->lastError(); return false; }
     // NO OFFSCREEN CONTRACT: the eye pair PRESENTS to the wearer, so it gathers
     // by the scene's row — the VR column of the tier table — like a window
     // (OgreView's chain rule for a stereo view, PHOTON-GA-VR).
@@ -3391,10 +3418,12 @@ Ogre::TextureGpu *VrSession::scaleImage(unsigned w, unsigned h) {
         // RenderToTexture is what gives a Vulkan texture the transfer usage
         // bits on both sides in this pin (VulkanTextureGpu's createInternal),
         // which is all this image needs: it is never rendered into.
+        // TWO LAYERS, the eye pair's own shape: the array swapchain's one copy
+        // scales both at once, and a per-eye swapchain uses one layer of it.
         mScaleImage = tm->createTexture("JahshakaVrEyeScale", Ogre::GpuPageOutStrategy::Discard,
                                         Ogre::TextureFlags::RenderToTexture,
-                                        Ogre::TextureTypes::Type2D);
-        mScaleImage->setResolution(w, h);
+                                        Ogre::TextureTypes::Type2DArray);
+        mScaleImage->setResolution(w, h, 2u);
         mScaleImage->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
         mScaleImage->scheduleTransitionTo(Ogre::GpuResidency::Resident);
         vrLog("eye scale image: %ux%u RGBA8_UNORM (the measurement override's scale happens "
@@ -3440,7 +3469,15 @@ void VrSession::copyEyes() {
     const unsigned scH = mBoot->mViewCfg[0].recommendedImageRectHeight;
     const bool sameSize = (scW == mEyeWidth && scH == mEyeHeight);
 
-    for (int eye = 0; eye < 2; ++eye) {
+    // THE EYES ARE THE TARGET'S TWO LAYERS (LAYERED-STEREO-1). With ONE array
+    // swapchain a single copy moves both layers (layer = eye on both sides);
+    // with one swapchain per eye, copy `k` moves layer k into its swapchain's
+    // only layer.
+    const int copies = mArraySwapchain ? 1 : 2;
+    const uint32_t layersPerCopy = mArraySwapchain ? 2u : 1u;
+    for (int k = 0; k < copies; ++k) {
+        const int eye = k;   // the swapchain slot, and (one per eye) the eye
+        const uint32_t srcLayer = mArraySwapchain ? 0u : uint32_t(k);
         uint32_t idx = 0;
         XrSwapchainImageAcquireInfo ai{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
         if (XR_FAILED(xrAcquireSwapchainImage(mSwapchain[eye], &ai, &idx))) return;
@@ -3455,7 +3492,7 @@ void VrSession::copyEyes() {
         b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = dst;
-        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layersPerCopy };
         // The runtime hands the image over in COLOR_ATTACHMENT_OPTIMAL and
         // wants it back that way; its contents are ours to overwrite, so
         // UNDEFINED as the old layout is legal and cheaper than preserving them.
@@ -3468,9 +3505,8 @@ void VrSession::copyEyes() {
 
         if (sameSize) {
             VkImageCopy region{};
-            region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            region.srcOffset = { int32_t(eye * mEyeWidth), 0, 0 };
-            region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, srcLayer, layersPerCopy };
+            region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, layersPerCopy };
             region.extent = { mEyeWidth, mEyeHeight, 1 };
             vkCmdCopyImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -3507,10 +3543,10 @@ void VrSession::copyEyes() {
                 vkRs->executeResourceTransition(t);
             }
             VkImageBlit region{};
-            region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            region.srcOffsets[0] = { int32_t(eye * mEyeWidth), 0, 0 };
-            region.srcOffsets[1] = { int32_t((eye + 1) * mEyeWidth), int32_t(mEyeHeight), 1 };
-            region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, srcLayer, layersPerCopy };
+            region.srcOffsets[0] = { 0, 0, 0 };
+            region.srcOffsets[1] = { int32_t(mEyeWidth), int32_t(mEyeHeight), 1 };
+            region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, layersPerCopy };
             region.dstOffsets[0] = { 0, 0, 0 };
             region.dstOffsets[1] = { int32_t(scW), int32_t(scH), 1 };
             vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -3523,8 +3559,8 @@ void VrSession::copyEyes() {
                 vkRs->executeResourceTransition(t);
             }
             VkImageCopy copy{};
-            copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, layersPerCopy };
+            copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, layersPerCopy };
             copy.extent = { scW, scH, 1 };
             vkCmdCopyImage(cmd, scaleImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
@@ -3538,13 +3574,15 @@ void VrSession::copyEyes() {
                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
                              0, nullptr, 0, nullptr, 1, &b);
 
+    }
+    for (int eye = 0; eye < 2; ++eye) {
         mProjViews[eye] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
         mProjViews[eye].pose = mViews[eye].pose;
         mProjViews[eye].fov = mViews[eye].fov;
-        mProjViews[eye].subImage.swapchain = mSwapchain[eye];
+        mProjViews[eye].subImage.swapchain = mSwapchain[mArraySwapchain ? 0 : eye];
         mProjViews[eye].subImage.imageRect.offset = { 0, 0 };
         mProjViews[eye].subImage.imageRect.extent = { int32_t(scW), int32_t(scH) };
-        mProjViews[eye].subImage.imageArrayIndex = 0;
+        mProjViews[eye].subImage.imageArrayIndex = mArraySwapchain ? uint32_t(eye) : 0u;
     }
 
     // BACK TO RenderTarget, and not only for tidiness: a texture left in
@@ -3566,7 +3604,7 @@ void VrSession::workspacePosUpdate(Ogre::CompositorWorkspace *workspace) {
 
 // ---------------------------------------------------------------------------
 // THE MIRROR (VR_SPEC §4.3): a second workspace on the desktop View's target,
-// appended after that View's own, painting one half of the eye target over the
+// appended after that View's own, painting one eye's layer (or both, side by side) over the
 // picture it just drew. See JahVrMirror.material for why it is a quad and not
 // a blit.
 void VrSession::teardownMirror() {
@@ -4034,15 +4072,12 @@ VrSession::~VrSession() {
 // engine logs both numbers every session so the reading can be re-checked on
 // any runtime.
 //
-// WHY ONE MESH FOR BOTH EYES. The vertex carries its eye INDEX in z and the
-// pin's own vertex program (`Ogre/VR/HiddenAreaMeshVr`, already in the staged
-// media — Samples/Media/2.0/scripts/materials/Common) writes it to
-// `gl_ViewportIndex`, so one draw covers both eyes' viewports. That needs
-// `VK_EXT_shader_viewport_index_layer`, which this driver has and which Ogre
-// enables whenever the device offers it (OgreVulkanDevice.cpp:1239); the
-// alternative is a draw per eye, and the fallback is that the mask is simply
-// not built. Geometry that spills past an eye's edge is cut by the pass's own
-// SCISSOR, which `chain::applyStereo` sets to the same half as the viewport.
+// WHY ONE MESH FOR BOTH EYES. The vertex carries its eye INDEX in z, and the
+// multiview pass draws the mesh once into both eyes' layers; our vertex program
+// (Jahshaka/VrHiddenArea, JahVrHiddenArea_vs.glsl) keeps a vertex in the view
+// it belongs to (z == gl_ViewIndex) and collapses the other eye's triangles
+// outside the clip volume (LAYERED-STEREO-1). Geometry past an eye's edge is
+// clipped by the view volume — the eye's layer is the whole viewport.
 //
 // WHY IT DRAWS AT RENDER QUEUE 0 AND NOT IN A PASS OF ITS OWN. A pass of its
 // own runs its own cull (CompositorPassScene::execute calls
@@ -4218,7 +4253,7 @@ void VrSession::ensureHiddenAreaMesh() {
             for (int c = 0; c < 3; ++c) {
                 vb.push_back(nx[c]);
                 vb.push_back(ny[c]);
-                vb.push_back(float(eye));   // -> gl_ViewportIndex
+                vb.push_back(float(eye));   // the eye: kept where it == gl_ViewIndex
                 vb.push_back(1.0f);
             }
         }
@@ -4259,7 +4294,7 @@ void VrSession::ensureHiddenAreaMesh() {
         // SubMesh with an empty shadow Vao asserts inside Ogre the moment
         // anything asks for one.
         sub->mVao[Ogre::VpShadow].push_back(v);
-        sub->mMaterialName = "Ogre/VR/HiddenAreaMeshVr";
+        sub->mMaterialName = "Jahshaka/VrHiddenArea";   // multiview (JahVrHiddenArea.material)
         // INFINITE, and it must be: the vertices are in CLIP space and the
         // object has no world transform at all, so a bounding box computed from
         // them would cull the mask out of the frustum it covers. The pin's
@@ -4340,12 +4375,11 @@ void VrSession::destroyHiddenAreaMesh() {
 //
 // WHAT THEY HAVE IN COMMON, and why one routine answers for all three: each is
 // a full-screen `Rectangle2D` drawn with a LOW-LEVEL material whose vertex
-// program turns the quad's corners into a camera ray. Instanced stereo doubles
-// their draw like every other (OgreRenderQueue.cpp:697-699), but their vertex
-// programs were written for ONE viewport — so both copies land in the first
-// eye and THE RIGHT EYE HAS NO SKY. (Measured on this lane's fixture before the
-// fix: the two halves of a worldScale-0 frame, which must be identical, differ
-// by 30,306 bytes with a worst of 255/255.)
+// program turns the quad's corners into a camera ray. The multiview pass draws
+// it into both eyes' layers, but its vertex program knows ONE camera — so both
+// eyes would get the left eye's sky. (Measured on this lane's fixture before
+// the fix, under the old two-viewport stereo: the two halves of a worldScale-0
+// frame, which must be identical, differed by 30,306 bytes, worst 255/255.)
 //
 // THE FIX IS A MATERIAL, AND IT HAS TO BE. The pin's per-pass MATERIAL SCHEME
 // (`CompositorPassSceneDef::mMaterialScheme`) looks like the answer and is not:
@@ -4364,8 +4398,8 @@ void VrSession::destroyHiddenAreaMesh() {
 // auto-params — the rendering camera's own inverse view-projection, which for
 // the VR view is the left eye's (see the camera's setCustomProjectionMatrix
 // above) and for the desktop mirror view, a probe capture or a thumbnail is
-// that camera's. Only the SECOND instance reads the pair written here, and only
-// a stereo pass ever draws a second instance.
+// that camera's. Only VIEW 1 reads the pair written here, and outside a
+// multiview pass gl_ViewIndex is 0 (the Vulkan rule).
 void VrSession::syncStereoQuads() {
     if (!mScene || !mScene->sceneManager()) return;
     Ogre::SceneManager *sm = mScene->sceneManager();

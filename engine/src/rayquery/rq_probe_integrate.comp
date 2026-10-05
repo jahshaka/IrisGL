@@ -100,26 +100,26 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 #include "jah_probe_params.glsl"
 
 layout( std430, set = 0, binding = 1 ) readonly buffer Records { JahProbeRecord r[]; } records;
-layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
-layout( set = 0, binding = 3 ) uniform sampler2D sceneDepth;
-layout( rgba16f, set = 0, binding = 4 ) uniform image2D probeIrradiance;
+layout( set = 0, binding = 2 ) uniform sampler2DArray gBufNormals;
+layout( set = 0, binding = 3 ) uniform sampler2DArray sceneDepth;
+layout( rgba16f, set = 0, binding = 4 ) uniform image2DArray probeIrradiance;
 /// THE PIXEL HISTORY, ping-ponged (see the header): the previous frame's texel,
 /// read at the reprojected coordinate, and this frame's, written at this pixel.
-layout( rg32ui, set = 0, binding = 5 ) uniform readonly uimage2D historyPrev;
-layout( rg32ui, set = 0, binding = 6 ) uniform writeonly uimage2D historyCur;
+layout( rg32ui, set = 0, binding = 5 ) uniform readonly uimage2DArray historyPrev;
+layout( rg32ui, set = 0, binding = 6 ) uniform writeonly uimage2DArray historyCur;
 /// THE REST MEAN (PHOTON-GATHER-1d): at rest — the camera, the lighting and the
 /// scene held still (p.knobs6.x = the rest frame k >= 1) — a TRUE MEAN of the rest
 /// frames' estimates, restarted at the first rest frame, premultiplied by
 /// coverage like the history. The same pixel reads and writes it (the camera has
 /// not moved, so there is no reprojection and no race): one image, not a pair.
-layout( rgba16f, set = 0, binding = 7 ) uniform image2D restMean;
+layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray restMean;
 /// THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1, binding 8): with p.knobs4.w = 1 (the
 /// scene's view is ScreenProbes) every pixel writes whether it lies on one of the
 /// probes around it — a disc at the probe's own position, coloured by the
 /// irradiance its rays traced — or a dim veil. Written ONLY under the knob and read
 /// by nothing here: the integrate's answer and its histories are the view's none
 /// of its business. With the knob off the binding holds a stand-in, never written.
-layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2D photonOverlay;
+layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray photonOverlay;
 
 #include "jah_reproject.glsl"
 
@@ -287,29 +287,32 @@ void main()
 		return;
 	const ivec2 grid = ivec2( p.resolution.xy );
 	const float stride = max( p.knobs.x, 1.0 );
-	// THE PIXEL'S EYE (PHOTON-GA-VR). Under stereo the target is two eyes side by
-	// side and the grid two grids: everything below works in the EYE'S OWN pixel
-	// column `lx` and its own cells (the right eye's numbered after the left
-	// eye's, `cellOff`), so no pixel reads a probe of the other eye and nothing
-	// reaches across the seam. With one eye lx = pix.x, cellOff = 0 and gridEye =
-	// grid: the arithmetic is the one-camera arithmetic exactly.
-	const int eye = jahEyeOfPixel( pix.x );
+	// THE PIXEL'S EYE (PHOTON-GA-VR). Under stereo the probe LIST is two grids:
+	// everything below works in the eye's own cells (the right eye's numbered
+	// after the left eye's, `cellOff`), so no pixel reads a probe of the other
+	// eye. With one eye cellOff = 0 and gridEye = grid: the arithmetic is the
+	// one-camera arithmetic exactly.
+	// THE EYE IS THE LAYER (LAYERED-STEREO-1): every screen image here is an
+	// array with one layer per eye and the dispatch's z walks them, so a pixel's
+	// coordinate is its own eye's and the two eyes run the same arithmetic.
+	const int eye = int( gl_GlobalInvocationID.z );
 	const int eyeW = jahEyeWidth();
-	const int lx = pix.x - eye * eyeW;
+	const int lx = pix.x;
+	const ivec3 at = ivec3( pix, eye );
 	const ivec2 cellOff = ivec2( eye * jahEyeGridW(), 0 );
 	const ivec2 gridEye = ivec2( jahEyeGridW(), grid.y );
 	const ivec2 cell = clamp( ivec2( vec2( lx, pix.y ) / stride ), ivec2( 0 ), gridEye - 1 ) + cellOff;
 	const uint index = uint( cell.y * grid.x + cell.x );
 	const JahEye thisEye = jahEyeNow( eye );
 	if( p.knobs4.w > 0.5 )
-		imageStore( photonOverlay, pix,
+		imageStore( photonOverlay, at,
 					photonDisc( pix, lx, cell, cellOff, gridEye, grid, thisEye, eyeW, full, stride ) );
 
 	// The pixel's own surface, from the same prepass the probes were placed on:
 	// `uv` over the target (the textures), `local` over the eye's own image (the
 	// ray basis) — one number with one eye.
-	const vec2 uv = ( vec2( pix ) + 0.5 ) / vec2( full );
-	const vec2 local = ( vec2( lx, pix.y ) + 0.5 ) / vec2( eyeW, full.y );
+	const vec2 local = ( vec2( pix ) + 0.5 ) / vec2( full );
+	const vec3 uv = vec3( local, float( eye ) );
 	const float rawDepth = texture( sceneDepth, uv ).x;
 	vec3 pixelNormal = vec3( 0.0 );
 	vec3 pixelWorld = vec3( 0.0 );
@@ -334,12 +337,12 @@ void main()
 		// The sky, or a pixel the prepass never drew. No probe answers for it —
 		// and nothing should: it has no hemisphere. Its history is "no surface"
 		// (a zero word fails every distance test).
-		imageStore( probeIrradiance, pix, vec4( 0.0 ) );
+		imageStore( probeIrradiance, at, vec4( 0.0 ) );
 		if( temporal )
 		{
-			imageStore( historyCur, pix, uvec4( 0u ) );
+			imageStore( historyCur, at, uvec4( 0u ) );
 			if( p.knobs6.x >= 1.0 )
-				imageStore( restMean, pix, vec4( 0.0 ) );
+				imageStore( restMean, at, vec4( 0.0 ) );
 		}
 		return;
 	}
@@ -477,7 +480,7 @@ void main()
 	{
 		// THE MEASUREMENT LEVER (the arm "gather.temporal"): this frame's
 		// estimate alone, and no history is read or written.
-		imageStore( probeIrradiance, pix, answer );
+		imageStore( probeIrradiance, at, answer );
 		return;
 	}
 
@@ -495,9 +498,9 @@ void main()
 		if( jahReproject( pixelWorld, before.camPos, before.perspective, before.rayTL,
 						  before.rayRight, before.rayDown, before.fwd, was, z ) == 0 )
 		{
-			const ivec2 pc = clamp( ivec2( was * vec2( eyeW, full.y ) ) + ivec2( eye * eyeW, 0 ),
-									ivec2( eye * eyeW, 0 ), ivec2( eye * eyeW + eyeW - 1, full.y - 1 ) );
-			const uvec2 texel = imageLoad( historyPrev, pc ).xy;
+			const ivec2 pc = clamp( ivec2( was * vec2( eyeW, full.y ) ), ivec2( 0 ),
+									ivec2( eyeW - 1, full.y - 1 ) );
+			const uvec2 texel = imageLoad( historyPrev, ivec3( pc, eye ) ).xy;
 			float wasDist;
 			vec3 wasNormal;
 			uint wasCount;
@@ -552,11 +555,11 @@ void main()
 	{
 		const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
 		const vec4 rest = restK < 1.5 ? sample1
-									  : mix( imageLoad( restMean, pix ), sample1, 1.0 / restK );
-		imageStore( restMean, pix, rest );
+									  : mix( imageLoad( restMean, at ), sample1, 1.0 / restK );
+		imageStore( restMean, at, rest );
 		mean = mix( mean, rest, clamp( restK / max( p.knobs6.y, 1.0 ), 0.0, 1.0 ) );
 	}
-	imageStore( historyCur, pix,
+	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
 					   packGeom( pixelDist, pixelNormal, prevCount + 1u, mean.w,
 								 roundingDither( ivec2( lx, pix.y ), 2u ) ),
@@ -567,5 +570,5 @@ void main()
 	vec4 outV = vec4( 0.0 );
 	if( mean.w > 1e-3 )
 		outV = vec4( clamp( mean.xyz / mean.w, vec3( 0.0 ), vec3( 1024.0 ) ), mean.w );
-	imageStore( probeIrradiance, pix, outV );
+	imageStore( probeIrradiance, at, outV );
 }

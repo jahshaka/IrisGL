@@ -70,7 +70,7 @@
 
 @property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 @piece( applyIrradianceVolumes )
-	float4 jahProbeGathered = OGRE_Load2D( jahProbeIrradiance, iFragCoord, 0 ).xyzw;
+	float4 jahProbeGathered = OGRE_LoadScreen2D( jahProbeIrradiance, iFragCoord, 0 ).xyzw;
 	pixelData.envColourD += midf3_c( jahProbeGathered.xyz ) * midf_c( jahProbeGathered.w );
 @end
 @end

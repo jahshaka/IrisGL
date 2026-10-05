@@ -160,7 +160,7 @@ ChainDesc OgreView::chainDesc() const {
     // editor's own picture), and GiStatus::giAtRest's settled-history term makes
     // a settled shot wait for its own view's history.
     // ...AND IN A STEREO VIEW TOO (PHOTON-GA-VR): the Component gathers a two-eye
-    // target per eye, its grid split at the seam; the row itself (the tier
+    // target per eye, each eye's layer its own grid; the row itself (the tier
     // table's VR column) decides whether a headset runs it.
     // ...AND AN OFFSCREEN VIEW BY ITS DECLARED CONTRACT (the fix round;
     // View::setOffscreenContract): a still picture gathers and its caller waits
@@ -676,8 +676,8 @@ void OgreView::applyPip() {
 // A STEREO view is the picture somebody is standing in, and it is graded by the
 // project like every other view of that scene: `SceneMirror::applyViewEnvironment`
 // pushes the world's PostFxDesc (with the driving camera's lens over it) into
-// this view every frame, exactly as it does into the desktop's. What a
-// side-by-side eye pair cannot carry is filtered out HERE — in the one place
+// this view every frame, exactly as it does into the desktop's. What has no
+// per-eye form yet is filtered out HERE — in the one place
 // every push goes through, so no host can forget it and no later push can undo
 // it — by `applyVrViewPolicy`, whose header states the whole list and why.
 //
@@ -689,29 +689,23 @@ void OgreView::setPostFx(const PostFxDesc &pushed) {
         applyVrViewPolicy(fx, mVrSsrOverride);
         // WHAT THE POLICY TOOK AWAY IS SAID OUT LOUD, ONCE PER CHANGE. Most of
         // it is invisible to an author — nobody misses an SSAO they never saw
-        // in there — but three things are chosen on purpose in the World panel
-        // and are visible on the desktop: a LOOK, the REFRACTIONS row and the
+        // in there — but two things are chosen on purpose in the World panel
+        // and are visible on the desktop: the REFRACTIONS row and the
         // DISTORTION row. "Why is my glass not refracting in the headset" must
         // be answerable from the log rather than from a header.
-        const size_t dropped = pushed.looks.size() - fx.looks.size();
         const bool lostRefract = pushed.refractions && !fx.refractions;
         const bool lostDistort = pushed.distortion && !fx.distortion;
-        const size_t state = dropped * 4u + (lostRefract ? 2u : 0u) + (lostDistort ? 1u : 0u);
+        const size_t state = (lostRefract ? 2u : 0u) + (lostDistort ? 1u : 0u);
         if (state != mVrPolicyDropped) {
             mVrPolicyDropped = state;
             std::string what;
-            if (dropped)
-                what = std::to_string(dropped) + " of this project's " +
-                       std::to_string(pushed.looks.size()) + " look(s)";
-            if (lostRefract) what += (what.empty() ? "" : ", ") + std::string("refractions");
+            if (lostRefract) what += std::string("refractions");
             if (lostDistort) what += (what.empty() ? "" : ", ") + std::string("distortion");
             if (!what.empty())
                 Ogre::LogManager::getSingleton().logMessage(
-                    "Jahshaka VR: " + what + " are not drawn in the headset - each of them "
-                    "reads the TARGET at a coordinate that is not this pixel's (a look's "
-                    "centre, a refraction's or a distortion's offset), and in a target "
-                    "holding two eyes side by side that coordinate crosses the seam into "
-                    "the other eye (jahshaka::engine::applyVrViewPolicy)");
+                    "Jahshaka VR: " + what + " are not drawn in the headset - each reads a "
+                    "copy of the scene at an offset coordinate, and that copy is not per eye "
+                    "in the layered stereo chain yet (jahshaka::engine::applyVrViewPolicy)");
         }
     }
     if (fx == mPostFx) return;   // hosts push per frame; the same value is free
@@ -1037,7 +1031,23 @@ void OgreView::setStereo(bool on, const std::string &cullCamera) {
     // The flag lives on the pass DEFINITIONS, so this is a definition rebuild
     // and not a live write — the same operation a shadow-node or an effect
     // change performs. It happens exactly twice per session (begin and end).
-    rebuildWorkspaceDef();
+    //
+    // ...AND THE TARGET FOLLOWS IT (LAYERED-STEREO-1): a stereo view's target is
+    // a two-layer array, one eye per layer at the same origin, which is what
+    // makes its chain a multiview one. An RTT cannot change shape in place, so
+    // it is recreated between the detach and the rebuild — one rebuild.
+    JAH_TRY {
+        const bool hadWorkspace = detachWorkspace();
+        // Only when the shape is wrong: the session's pair is BORN layered
+        // (OgreEngine::createStereoPairView), and ending a session makes it 2D.
+        if (mTexture && mTexture->getNumSlices() != (mStereo ? 2u : 1u)) {
+            mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mTexture);
+            mTexture = createRtt(mRoot, processUniqueName("rtt"), mWidth, mHeight,
+                                 mRequestedSamples, mStereo ? 2u : 1u);
+        }
+        rebuildDetachedWorkspaceDef();
+        if (hadWorkspace) attachWorkspace();
+    } JAH_CATCH(mError, );
 }
 
 bool OgreView::detachWorkspace() {
@@ -1488,7 +1498,9 @@ bool OgreView::isEnabled() const { return mEnabled; }
 // it compared the values we had just pushed with themselves.
 unsigned OgreView::width() const {
     Ogre::TextureGpu *t = target();
-    return t ? t->getWidth() : mWidth;
+    // A LAYERED (stereo) target reports its eye PAIR laid side by side — the
+    // layout readPixels returns and the size the view was created at.
+    return t ? t->getWidth() * t->getNumSlices() : mWidth;
 }
 unsigned OgreView::height() const {
     Ogre::TextureGpu *t = target();
@@ -1540,7 +1552,8 @@ void OgreView::rebuildRtt(unsigned w, unsigned h) {
     const bool hadWorkspace = detachWorkspace();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     tm->destroyTexture(mTexture);
-    mTexture = createRtt(mRoot, processUniqueName("rtt"), w, h, mRequestedSamples);
+    mTexture = createRtt(mRoot, processUniqueName("rtt"), w, h, mRequestedSamples,
+                         mStereo ? 2u : 1u);
     // A NEW SAMPLE COUNT CAN MOVE THE SHAPE (ChainDesc::atomDraw: the passthrough
     // shape carries the id pass at 1x only), and the old definition's passes would
     // throw building their render pass against the new target — re-derived before
@@ -1587,16 +1600,23 @@ bool OgreView::readPixels(Image &out) {
     if (!mTexture) { mError = "readPixels: View '" + mName + "' is on-screen"; return false; }
     JAH_TRY {
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+        // A LAYERED (stereo) target is read as its eye PAIR side by side: layer
+        // k lands at x = k * w (the layout `width()` reports).
         const Ogre::uint32 w = mTexture->getWidth(), h = mTexture->getHeight();
+        const Ogre::uint32 layers = mTexture->getNumSlices();
         Ogre::AsyncTextureTicket *t = tm->createAsyncTextureTicket(
-            w, h, 1u, Ogre::TextureTypes::Type2D, mTexture->getPixelFormat());
+            w, h, layers, mTexture->getTextureType(), mTexture->getPixelFormat());
         t->download(mTexture, 0, true);
-        const Ogre::TextureBox box = t->map(0);
-        out.width = w; out.height = h;
-        out.rgba.resize(static_cast<size_t>(w) * h * 4u);
-        for (Ogre::uint32 y = 0; y < h; ++y)
-            std::memcpy(&out.rgba[static_cast<size_t>(y) * w * 4u], box.at(0, y, 0), w * 4u);
-        t->unmap();
+        const Ogre::uint32 W = w * layers;
+        out.width = W; out.height = h;
+        out.rgba.resize(static_cast<size_t>(W) * h * 4u);
+        for (Ogre::uint32 k = 0; k < layers; ++k) {
+            const Ogre::TextureBox box = t->map(k);
+            for (Ogre::uint32 y = 0; y < h; ++y)
+                std::memcpy(&out.rgba[(static_cast<size_t>(y) * W + size_t(k) * w) * 4u],
+                            box.at(0, y, 0), w * 4u);
+            t->unmap();
+        }
         tm->destroyAsyncTextureTicket(t);
         return true;
     } JAH_CATCH(mError, false);
@@ -1644,7 +1664,9 @@ bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char
         }
         const Ogre::PixelFormatGpu fmt = src->getPixelFormat();
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+        // A LAYERED texture (a stereo chain's) is read as its layers side by side.
         const Ogre::uint32 w = src->getWidth(), h = src->getHeight();
+        const Ogre::uint32 layers = src->getNumSlices();
         // Owned for the same reason measuredExposureScale's ticket is: download
         // and map can both throw, and a ticket is not a SharedPtr.
         struct TicketScope {
@@ -1656,20 +1678,25 @@ bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char
                 if (mapped) ticket->unmap();
                 tm->destroyAsyncTextureTicket(ticket);
             }
-        } held{ tm, tm->createAsyncTextureTicket(w, h, 1u, Ogre::TextureTypes::Type2D, fmt) };
+        } held{ tm, tm->createAsyncTextureTicket(w, h, layers, src->getTextureType(), fmt) };
         held.ticket->download(src, 0, true);
-        const Ogre::TextureBox box = held.ticket->map(0);
-        held.mapped = true;
-        out.width = w; out.height = h;
-        out.rgba.resize(static_cast<size_t>(w) * h * 4u);
-        // getColourAt decodes whatever the format is (RGBA16F for both readers)
-        // into float, exactly.
-        for (Ogre::uint32 y = 0; y < h; ++y) {
-            for (Ogre::uint32 x = 0; x < w; ++x) {
-                const Ogre::ColourValue c = box.getColourAt(x, y, 0, fmt);
-                float *o = &out.rgba[(static_cast<size_t>(y) * w + x) * 4u];
-                o[0] = c.r; o[1] = c.g; o[2] = c.b; o[3] = c.a;
+        const Ogre::uint32 W = w * layers;
+        out.width = W; out.height = h;
+        out.rgba.resize(static_cast<size_t>(W) * h * 4u);
+        for (Ogre::uint32 k = 0; k < layers; ++k) {
+            const Ogre::TextureBox box = held.ticket->map(k);
+            held.mapped = true;
+            // getColourAt decodes whatever the format is (RGBA16F for both readers)
+            // into float, exactly.
+            for (Ogre::uint32 y = 0; y < h; ++y) {
+                for (Ogre::uint32 x = 0; x < w; ++x) {
+                    const Ogre::ColourValue c = box.getColourAt(x, y, 0, fmt);
+                    float *o = &out.rgba[(static_cast<size_t>(y) * W + size_t(k) * w + x) * 4u];
+                    o[0] = c.r; o[1] = c.g; o[2] = c.b; o[3] = c.a;
+                }
             }
+            held.ticket->unmap();
+            held.mapped = false;
         }
         return true;
     } JAH_CATCH(mError, false);
@@ -1901,12 +1928,14 @@ void OgreView::destroy() {
 }
 
 Ogre::TextureGpu *OgreView::createRtt(Ogre::Root *root, const std::string &name,
-                                      unsigned w, unsigned h, unsigned samples) {
+                                      unsigned w, unsigned h, unsigned samples, unsigned layers) {
     Ogre::TextureGpuManager *tm = root->getRenderSystem()->getTextureGpuManager();
+    const bool layered = layers > 1u;
     Ogre::TextureGpu *rtt = tm->createTexture(
-        name, Ogre::GpuPageOutStrategy::Discard,
-        Ogre::TextureFlags::RenderToTexture, Ogre::TextureTypes::Type2D);
-    rtt->setResolution(w, h);
+        name, Ogre::GpuPageOutStrategy::Discard, Ogre::TextureFlags::RenderToTexture,
+        layered ? Ogre::TextureTypes::Type2DArray : Ogre::TextureTypes::Type2D);
+    if (layered) rtt->setResolution(w / layers, h, layers);
+    else         rtt->setResolution(w, h);
     rtt->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
     // MSAA (implicit resolve — no MsaaExplicitResolve flag, so readPixels sees
     // the resolved image). MUST precede the Resident transition: Ogre asserts

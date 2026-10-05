@@ -15,7 +15,9 @@
 // neighbourhood is what a 3x3 kernel means, and it is exact at any resolution.
 #version ogre_glsl_ver_330
 
-vulkan_layout( ogre_t0 ) uniform texture2D sourceTexture;
+#include "JahScreen.glsl"
+
+vulkan_layout( ogre_t0 ) uniform JahScreenTexture sourceTexture;
 
 vulkan( layout( ogre_s0 ) uniform sampler srcSampler );
 
@@ -34,10 +36,10 @@ out vec4 fragColour;
 
 void main()
 {
-	const ivec2 texSize = textureSize( vkSampler2D( sourceTexture, srcSampler ), 0 );
+	const ivec2 texSize = jahScreenSize( jahScreenSampler( sourceTexture, srcSampler ), 0 );
 	const ivec2 srcCoord = clamp( ivec2( inPs.uv0 * vec2( texSize ) ),
 								  ivec2( 0 ), texSize - ivec2( 1 ) );
-	const vec4  src = texelFetch( vkSampler2D( sourceTexture, srcSampler ), srcCoord, 0 );
+	const vec4  src = texelFetch( jahScreenSampler( sourceTexture, srcSampler ), jahScreenTexel( srcCoord ), 0 );
 
 	const float amount = clamp( lookParams0.x, 0.0, 1.0 );
 
@@ -47,7 +49,7 @@ void main()
 		for( int dx = -1; dx <= 1; ++dx )
 		{
 			const ivec2 c = clamp( srcCoord + ivec2( dx, dy ), ivec2( 0 ), texSize - ivec2( 1 ) );
-			box += texelFetch( vkSampler2D( sourceTexture, srcSampler ), c, 0 ).rgb;
+			box += texelFetch( jahScreenSampler( sourceTexture, srcSampler ), jahScreenTexel( c ), 0 ).rgb;
 		}
 	}
 	box *= 1.0 / 9.0;
