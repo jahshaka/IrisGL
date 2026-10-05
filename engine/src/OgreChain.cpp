@@ -781,67 +781,54 @@ void addHzbTexture(Ogre::CompositorNodeDef *n, const ChainDesc &desc) {
     // TextureDefinitionBase::createTextures calls _setDepthBufferDefaults
     // unconditionally, and that throws "Texture must've been created with
     // TextureFlags::RenderToTexture" on anything else (OgreTextureGpu.cpp:676).
-    // DiscardableContent is deliberately NOT claimed — the seed rewrites
-    // every texel of mip 0 each frame and each reduce rewrites its own
-    // level, so no level is ever read before this frame wrote it... EXCEPT by the id
-    // pass's first cull (ChainDesc::atomOcclusion), which reads LAST frame's levels
-    // before this frame's seed: the content must survive the frame boundary.
+    // DiscardableContent is deliberately NOT claimed — the build rewrites
+    // every texel of every level each frame, so no level is ever read before this
+    // frame wrote it... EXCEPT by the id pass's first cull (ChainDesc::atomOcclusion),
+    // which reads LAST frame's levels before this frame's build: the content must
+    // survive the frame boundary.
     td->textureFlags = Ogre::TextureFlags::Uav | Ogre::TextureFlags::RenderToTexture;
 }
 
 /// THE PYRAMID'S BUILD from the scene's named depth as it stands at this point of
-/// the graph: one compute pass per mip — the SEED copies the depth into mip 0 (a
-/// separate job because its source is a depth attachment), then one REDUCE per
-/// level, each reading the level above as a UAV and writing its own. Reading the
-/// source as a UAV rather than as a texture is deliberate: an Ogre resource layout
-/// is per-TEXTURE, not per-mip, so binding one texture as Texture and Uav in the
-/// same pass would ask the barrier solver for two layouts at once. Both slots being
-/// Uav asks for one. The jobs are SHARED by every level (and with the id pass's
-/// occlusion, whose recorder dispatches them itself): CompositorPassCompute::execute calls setResourcesToJob()
-/// every frame, so each pass re-binds its own mips before dispatching, and
-/// HlmsComputeJob::_calculateNumThreadGroupsBasedOnSetting reads the bound UAV's MIP
-/// dimensions — so the group counts follow the level with no arithmetic of ours.
+/// the graph: ONE compute pass of the single-pass build (JahHzbBuild_cs — mip 0's copy
+/// and every level in one dispatch, the tail by the last workgroup to arrive; it
+/// replaced a seed pass plus one reduce pass per level, SPEED-VR-MEM). Every mip is its
+/// own UAV slot, and slots past the last level hold the last level again (the shader
+/// stops at the texture's own count). An Ogre resource layout is per-TEXTURE, not
+/// per-mip, so every slot is ReadWrite (the tail reads the levels the tiles wrote).
+/// The job is SHARED with the id pass's occlusion, whose recorder dispatches it itself;
+/// CompositorPassCompute::execute calls setResourcesToJob() every frame, so this pass
+/// re-binds its own mips before dispatching, and the arrival counter in slot
+/// kHzbCounterSlot is the engine's, bound once on the job (hzbBuildJob).
 void addHzbBuild(Ogre::CompositorNodeDef *n, const ChainDesc &desc, const std::string &profilingPrefix) {
-    Ogre::Root &root = Ogre::Root::getSingleton();
-    Ogre::HlmsCompute *hc = root.getHlmsManager() ? root.getHlmsManager()->getComputeHlms() : nullptr;
-    Ogre::HlmsComputeJob *seed = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbSeed") : nullptr;
-    Ogre::HlmsComputeJob *reduce = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbReduce") : nullptr;
-    if (!seed || !reduce) return;
+    Ogre::HlmsComputeJob *job = hzbBuildJob();
+    if (!job || desc.hzbLevels == 0u || desc.hzbLevels > kHzbMaxLevels) return;
     // WHICH WAY IS CLOSE. Ogre's Vulkan render system defaults to REVERSE-Z (near =
     // 1, far = 0), so the closest depth of a footprint is its MAXIMUM — but the
     // shader is told rather than assuming it, so a build that turns reverse depth
     // off still produces a conservative pyramid instead of an inverted one.
-    Ogre::RenderSystem *rs = root.getRenderSystem();
-    reduce->setProperty("hzb_reverse_z", (rs && rs->isReverseDepth()) ? 1 : 0);
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    job->setProperty("hzb_reverse_z", (rs && rs->isReverseDepth()) ? 1 : 0);
     // WHICH DEPTH A LEVEL KEEPS — the request's, not a constant. The farthest chain
     // is the only one an occlusion cull can be conservative against
     // (PostFxDesc::hzbFarthest carries why).
-    reduce->setProperty("hzb_farthest", desc.hzbFarthest ? 1 : 0);
-    {
-        Ogre::CompositorTargetDef *t = n->addTargetPass("");
-        t->setNumPasses(1);
-        auto *c = static_cast<Ogre::CompositorPassComputeDef *>(t->addPass(Ogre::PASS_COMPUTE));
-        c->mJobName = "Jahshaka/HzbSeed";
-        c->mProfilingId = profilingPrefix + "0";
-        c->addTextureSource(0, kDepth);
-        c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
-    }
-    for (unsigned m = 1u; m < desc.hzbLevels; ++m) {
-        Ogre::CompositorTargetDef *t = n->addTargetPass("");
-        t->setNumPasses(1);
-        auto *c = static_cast<Ogre::CompositorPassComputeDef *>(t->addPass(Ogre::PASS_COMPUTE));
-        c->mJobName = "Jahshaka/HzbReduce";
-        c->mProfilingId = profilingPrefix + std::to_string(m);
-        c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, Ogre::uint8(m), Ogre::PFG_UNKNOWN, false);
-        c->addUavSource(1, kHzb, Ogre::ResourceAccess::Read, 0, Ogre::uint8(m - 1u), Ogre::PFG_UNKNOWN, false);
-    }
+    job->setProperty("hzb_farthest", desc.hzbFarthest ? 1 : 0);
+    Ogre::CompositorTargetDef *t = n->addTargetPass("");
+    t->setNumPasses(1);
+    auto *c = static_cast<Ogre::CompositorPassComputeDef *>(t->addPass(Ogre::PASS_COMPUTE));
+    c->mJobName = "Jahshaka/HzbBuild";
+    c->mProfilingId = profilingPrefix + "build";
+    c->addTextureSource(0, kDepth);
+    for (unsigned m = 0u; m < kHzbMaxLevels; ++m)
+        c->addUavSource(m, kHzb, Ogre::ResourceAccess::ReadWrite, 0,
+                        Ogre::uint8(std::min<unsigned>(m, desc.hzbLevels - 1u)), Ogre::PFG_UNKNOWN, false);
 }
 
 /// THE TWO-PASS OCCLUSION'S SECOND HALF (ATOM-OCCLUSION-1, ChainDesc::atomOcclusion),
 /// after the id pass: THE LATE ID PASS on the same RTV, LOADING the id image and the
 /// depth. Its recorder (OgreAtomIdPass.cpp) builds the pyramid from the depth the id
-/// pass just wrote — the seed and a reduce per level the texture has, dispatched by the
-/// recorder rather than as compute passes, so the level count is not graph shape and a
+/// pass just wrote — every level the texture has in ONE dispatch of the single-pass
+/// build, dispatched by the recorder rather than as a compute pass, so the level count is not graph shape and a
 /// resize rebuilds nothing — then tests the set the first cull rejected against it and
 /// draws what is disoccluded. The pyramid it leaves is the one the NEXT frame's first
 /// cull reads.

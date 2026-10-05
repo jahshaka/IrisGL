@@ -116,6 +116,41 @@ float gScale;
 uint gGroupBase;
 bool gUseMask;
 
+// THE CLUSTER'S FRUSTUM TEST (SPEED-VR-MEM, perf audit atom-raster 2c). The instance
+// test (JahCullTest_cs.glsl) passes a survivor whose box touches the view; its cut then
+// emitted every drawn cluster, so an asset around the camera drew its whole 360-degree
+// cut (the 5 M shell at 1.3 R: 639 k triangles). A cluster whose bounding sphere (the
+// bake's, mesh space, culling only - JahClusterCut.glsl) lies wholly behind one of the
+// request's six planes rasterises nothing in this view, so it is not drawn: the same
+// planes, the same inward normalised form and the same conservative sense as the
+// instance's test, on the sphere carried to world space by the instance's rows (its
+// centre transformed, its radius by the largest axis scale). The pick is EXACT in the
+// picture - no triangle of a dropped cluster can cover a pixel of this view - and the cut
+// stays crack-free (the clusters around a seam that are in view are all still drawn). A
+// relative margin of 2^-12 of the radius (plus 1 micrometre) keeps a cluster whose
+// sphere only grazes a plane drawn against the rounding of the transform.
+// THE FOUR SIDE PLANES ONLY (planes 0-3, fillCullFrustum's order), never the depth
+// pair: a shadow camera draws with DEPTH CLAMP (Camera::getNeedsDepthClamp), so a
+// caster in front of its near plane still writes the near depth and shadows what lies
+// behind it - dropping it there would move the shadow (the selftest's B2 pose caught
+// it). The side planes alone still drop every cluster outside the picture's rectangle,
+// and for a perspective view everything behind the eye.
+bool jahClusterInFrustum( vec4 sphere )
+{
+	vec3 c = vec3( dot( gRow0.xyz, sphere.xyz ) + gRow0.w,
+				   dot( gRow1.xyz, sphere.xyz ) + gRow1.w,
+				   dot( gRow2.xyz, sphere.xyz ) + gRow2.w );
+	float r = sphere.w * gScale;
+	r += r * ( 1.0 / 4096.0 ) + 1.0e-6;
+	for( int i = 0; i < 4; ++i )
+	{
+		vec4 pl = params.planes[i];
+		if( dot( pl.xyz, c ) + pl.w < -r )
+			return false;
+	}
+	return true;
+}
+
 bool jahCutEvaluate( uint g )
 {
 	JahClusterGroup gr = groups[g];
@@ -207,6 +242,8 @@ void main()
 	for( uint c = lane; c < dag.y; c += JAH_CUT_WIDTH )
 	{
 		uvec4 range = clusters[dag.x + c].range;
+		if( !jahClusterInFrustum( clusters[dag.x + c].sphere ) )
+			continue;
 		if( jahCutDrawn( range ) )
 		{
 			myIdx += range.y;
@@ -332,6 +369,8 @@ void main()
 	for( uint c = lane; c < dag.y; c += JAH_CUT_WIDTH )
 	{
 		uvec4 range = clusters[dag.x + c].range;
+		if( !jahClusterInFrustum( clusters[dag.x + c].sphere ) )
+			continue;
 		if( mode == 1u ? !jahCutDrawn( range ) : !jahRootDrawn( range ) )
 			continue;
 		uint depth = range.w == JAH_NO_GROUP ? 0u : uint( groups[range.w].error.z ) + 1u;

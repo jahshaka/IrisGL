@@ -18,6 +18,7 @@
 #include <set>
 #include <unistd.h>
 
+#include <OgreDepthBuffer.h>
 #include <OgreFrameStats.h>
 // The frame loop's clock. `Root::getTimer()` returns `Ogre::Timer *` and
 // OgreRoot.h forward-declares it only — the inlined FrameStats sample
@@ -174,6 +175,19 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // A RENDERING boot stays exactly as it always was — initialise(false),
         // no window, no device — so the first window a Vulkan session creates
         // is the host's real one whenever the host can wait that long.
+        // NO STENCIL IN THE DEFAULT DEPTH (SPEED-VR-MEM, perf audit M-5). Every depth
+        // Ogre pools for a target — the window's, the VR eye pair's, the scratch depth the
+        // overlay passes clear and test their gizmos against (OgreChain.cpp
+        // clearOverlayDepth) — takes DepthBuffer::DefaultDepthBufferFormat, which Ogre
+        // picks at the render system's initialisation from this mask: with the stencil
+        // bit it is D32_FLOAT_S8X24_UINT (8 bytes a sample; measured 82 MB on the VR eye
+        // pair, spikes/ham-1). Nothing samples or tests a pooled stencil: SMAA, the one
+        // stencil user, declares its own D32S8 explicitly. Without the bit the pool depth
+        // is D32_FLOAT, the same 32-bit float depth, so every depth test and every pixel
+        // is what it was. Ogre's documented knob for exactly this (OgreDepthBuffer.h),
+        // set before the render system initialises.
+        Ogre::DepthBuffer::AvailableDepthFormats =
+            Ogre::uint8(Ogre::DepthBuffer::DFM_D32 | Ogre::DepthBuffer::DFM_D24 | Ogre::DepthBuffer::DFM_D16);
         mNullWindow = mRoot->initialise(cfg.headless, "jahshaka-headless");
         // THE ENGINE HAS NO WALL CLOCK (Engine.h "Simulation clock"): its
         // frame-time source is put in frame-delay mode right here, before any
@@ -2703,6 +2717,9 @@ OgreEngine::~OgreEngine() {
     // THE ID PASS'S PIPELINE AND ITS IDENTITY INDEX BUFFER (ATOM S3-DRAW): device
     // objects, after every view (whose workspaces recorded it) and before Root.
     try { releaseAtomIdPass(); } catch (...) {}
+    // THE PYRAMID BUILD'S ARRIVAL COUNTER (JahHzbBuild_cs): a device buffer bound on the
+    // shared job, after every view whose chain dispatched it and before Root.
+    try { releaseHzbBuild(); } catch (...) {}
     try { releaseAtomCasterPass(); } catch (...) {}
     // ...and THE PASS PROVIDER comes off the compositor manager (V2-E E9), after every
     // workspace that could instantiate its passes died with the views above. The

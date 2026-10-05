@@ -61,7 +61,7 @@ Ogre::TextureGpu *findHzbTexture(OgreView *view);
 /// `findHzbTexture` below.
 ///
 /// THE PYRAMID IT BINDS IS THE ONE THAT IS THERE. Called before a frame, that is
-/// the PREVIOUS frame's: the seed pass rewrites mip 0 inside the frame's own
+/// the PREVIOUS frame's: the pyramid build rewrites mip 0 inside the frame's own
 /// compositor graph, so until that pass runs the texture still holds the last
 /// completed frame's closest-depth chain. That ORDERING is the design's
 /// previous-frame contract, and it costs nothing — a `jahHzbPrev` copy would pay
@@ -160,8 +160,8 @@ void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullReque
 // THE HIERARCHICAL DEPTH PYRAMID — readback and shape (NANITE_SPEC §4.3)
 //
 // The pyramid itself is built by the compositor (OgreChain.cpp): one R32_FLOAT
-// texture with a full mip chain, written by one compute pass per level right
-// after the opaque pass. These two verbs exist so a suite can ASSERT the
+// texture with a full mip chain, written by ONE compute pass (the single-pass build,
+// JahHzbBuild_cs) right after the opaque pass. These two verbs exist so a suite can ASSERT the
 // reduction rather than trust it, and so a future consumer can ask whether
 // there is anything to bind.
 // ===========================================================================
@@ -204,7 +204,7 @@ bool OgreEngine::hzbStatus(View *view, HzbStatus &out) const {
         out.farthest = v->postFx().hzbFarthest;
         // PRIMED = a frame has been PRESENTED with the chain that owns this
         // texture. The texture exists from the build and holds whatever the
-        // allocation last did until the seed pass of a presented frame writes
+        // allocation last did until the pyramid build of a presented frame writes
         // mip 0; the per-workspace counter is reset by every chain rebuild,
         // which is exactly the event that invalidates the contents again.
         out.primed = v->workspaceFramesPresented() > 0ull;

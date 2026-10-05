@@ -221,18 +221,15 @@ namespace Ogre
 
         /// Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065) — THE ORDER-INDEPENDENT MERGE'S ACCUMULATOR.
         ///
-        /// PFG_R32_UINT, (mWidth, mHeight, mDepth * 13): thirteen texels per voxel,
-        /// interleaved in Z (albedo sum rgba, raw normal sum xyz, emissive sum
-        /// rgb, folded normal sum xyz), all in the fixed-point integers
-        /// Samples/Media/VCT/VoxelMerge_piece_cs.any defines — which also says
-        /// why it is thirteen R32 texels and not four RGBA32 ones: MEASURED, the
-        /// four-texel layout costs the same GPU time and 12 MB more per 64^3
-        /// volume (VOXMERGE-2; the earlier reason, a device loss from the
-        /// 128-bit clear, was fork b028638c1 (was 0067)'s hazard seen from here).
-        /// 52 bytes per voxel, which is 13.6 MB at 64^3 and 109 MB at 128^3, and
-        /// RESIDENT for the voxeliser's life since fork ad452604a+0338ca7f2+c4c80b5f7 (was 0071) (the per-build
-        /// residency round trip of an image this size was the second Xid 109
-        /// site).
+        /// PFG_R32_UINT, (mWidth, mHeight, mDepth * 18): eighteen texels per voxel,
+        /// interleaved in Z, in the fixed-point integers VoxelMerge_piece_cs.any defines
+        /// (which also says why R32 texels and not RGBA32 ones: MEASURED, VOXMERGE-2).
+        /// 72 bytes per voxel, 18.9 MB at 64^3 and 151 MB at 128^3, RESIDENT for life since
+        /// fork ad452604a+0338ca7f2+c4c80b5f7 (was 0071) (the per-build residency round trip
+        /// of an image this size was the second Xid 109 site) - and SHARED by every voxeliser
+        /// of the same size since SPEED-VR-MEM (acquireMergeAccum in the .cpp, perf audit
+        /// M-13): scratch that lives inside one build() needs one copy per size, not one per
+        /// cascade. Not ours to destroy: destroyVoxelTextures releases our use.
         TextureGpu *mMergeAccumTex;
 
         /// THE HOST'S TABLES AND BUFFERS - NOT OWNED (setGeometrySource,
@@ -276,7 +273,8 @@ namespace Ogre
         void clearComputeJobResources();
 
         void createVoxelTextures();
-        /// Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): drops mMergeAccumTex too.
+        /// Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): drops mMergeAccumTex too
+        /// (SPEED-VR-MEM: releases this voxeliser's use of the shared one).
         void destroyVoxelTextures() override;
 
         void clearVoxels();
