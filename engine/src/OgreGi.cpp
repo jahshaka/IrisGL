@@ -3593,8 +3593,15 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
         firstShadow = !mShadowScanPrimed;
         mShadowScanPrimed = true;
         channelsAll = allShadowCasterChannels();
-        for (const auto &mk : mMaterials)
-            if (!mk.second.customPiece[1].empty()) deforming.push_back(mk.first);
+        // A SCROLLING CUT-OUT deforms too (TORNADO-1): its caster alpha-tests the
+        // albedo map through the UV macro, which moves with the shader clock, so
+        // its silhouette changes every frame without a vertex moving.
+        for (const auto &mk : mMaterials) {
+            const PbrParams &p = mk.second.params;
+            const bool scrollingCutout = !mk.second.unlit && p.alphaMode == PbrAlphaMode::Cutout &&
+                                         (p.uvVelocity[0] != 0.0f || p.uvVelocity[1] != 0.0f);
+            if (!mk.second.customPiece[1].empty() || scrollingCutout) deforming.push_back(mk.first);
+        }
         // The per-item gate's roster, rebuilt by this walk (ON-16): which
         // CASTERS deform, not which materials do. Cleared here and refilled
         // below, so it describes exactly the state this walk saw.

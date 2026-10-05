@@ -200,7 +200,15 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
                                           Ogre::Real(bx), Ogre::Real(by)));
         db->setUserValue(1, Ogre::Vector4(Ogre::Real(c), Ogre::Real(-sn),
                                           Ogre::Real(sn), Ogre::Real(c)));
+        // THE UV SCROLL (TORNADO-1): userValue[2], the third and last user value
+        // the pin carries (OgreHlmsPbsDatablock.h): xy the velocity (kept for
+        // the dump), zw the scroll OFFSET the shader adds — written here at
+        // zero and per frame by setShaderTime (applyScrollOffsets). READ only
+        // under `jah_uv_scroll`, so a material that does not scroll generates
+        // exactly the source it did before.
+        db->setUserValue(2, Ogre::Vector4(p.uvVelocity[0], p.uvVelocity[1], 0.0f, 0.0f));
     }
+    applyClockProperty(db, p);
     // Manage the macroblock ourselves: setTwoSidedLighting(changeMacroblock=true)
     // swaps culling to CULL_NONE when enabling but never restores it when
     // disabling, and applyPbr must be idempotent in both directions.
@@ -651,7 +659,8 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             const bool cutoutInputs = cutout &&
                 (o.uvScale[0] != p.uvScale[0] || o.uvScale[1] != p.uvScale[1] ||
                  o.uvOffset[0] != p.uvOffset[0] || o.uvOffset[1] != p.uvOffset[1] ||
-                 o.uvRotation != p.uvRotation || o.alpha != p.alpha || samplersMoved);
+                 o.uvRotation != p.uvRotation || o.alpha != p.alpha || samplersMoved ||
+                 o.uvVelocity[0] != p.uvVelocity[0] || o.uvVelocity[1] != p.uvVelocity[1]);
             if (it->second.paramsPushed &&
                 (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff || cutoutInputs))
                 noteShadowShapeChanged(id);
@@ -921,7 +930,7 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
             db->setCustomPieceFile(Ogre::BLANKSTRING, Ogre::BLANKSTRING, ogrePieceStage(stage));
             if (slot == 1u && !rec.customPiece[slot].empty()) noteShadowShapeChanged(id);
             rec.customPiece[slot].clear();
-            applyClockProperty(db, rec);
+            applyClockProperty(db, rec.params);
             syncCullTwins(rec);
             return true;
         }
@@ -945,7 +954,7 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
         db->setCustomPieceFile(file, kGroup, ogrePieceStage(stage));
         const bool pieceChanged = rec.customPiece[slot] != path;
         rec.customPiece[slot] = path;
-        applyClockProperty(db, rec);
+        applyClockProperty(db, rec.params);
         // A VERTEX piece moves vertices, so it is a caster-shape input; while
         // it stays bound the scan treats the material's items as deforming.
         if (pieceChanged && slot == 1u) noteShadowShapeChanged(id);
@@ -957,8 +966,38 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
     } JAH_CATCH(mError, false);
 }
 
+/// The scroll offset at shader time `t`: velocity x t, WRAPPED to [0, 1) in
+/// double so a long session never loses the texture's precision (the maps
+/// repeat, so a whole-unit shift is no shift).
+static Ogre::Vector4 scrollUserValue(const PbrParams &p, float t) {
+    auto wrap = [](double v) { return v - std::floor(v); };
+    return Ogre::Vector4(p.uvVelocity[0], p.uvVelocity[1],
+                         Ogre::Real(wrap(double(p.uvVelocity[0]) * double(t))),
+                         Ogre::Real(wrap(double(p.uvVelocity[1]) * double(t))));
+}
+
+void OgreScene::applyScrollOffsets() {
+    for (auto &kv : mMaterials) {
+        MaterialRec &rec = kv.second;
+        const PbrParams &p = rec.params;
+        if (rec.unlit || (p.uvVelocity[0] == 0.0f && p.uvVelocity[1] == 0.0f)) continue;
+        const Ogre::Vector4 v = scrollUserValue(p, mShaderTime);
+        Ogre::Hlms *hlms = hlmsFor(rec);
+        if (auto *db = hlms->getDatablock(Ogre::IdString(rec.datablockName)))
+            static_cast<Ogre::HlmsPbsDatablock *>(db)->setUserValue(2, v);
+        for (CullTwin &t : rec.cullTwins) {
+            if (t.datablockName.empty()) continue;
+            if (auto *db = hlms->getDatablock(Ogre::IdString(t.datablockName)))
+                static_cast<Ogre::HlmsPbsDatablock *>(db)->setUserValue(2, v);
+        }
+    }
+}
+
 void OgreScene::setShaderTime(float seconds) {
     mShaderTime = seconds;
+    // THE SCROLLING MAPS (TORNADO-1) take the clock as a per-material OFFSET:
+    // an alpha-tested caster's pixel shader has no pass buffer to read it from.
+    applyScrollOffsets();
     // Read by FogHlmsListener::preparePassBuffer, on the render thread, once
     // per pass. Nothing is flushed and nothing recompiles — the value lands in
     // the pass constant buffer the next time one is built.
@@ -967,18 +1006,29 @@ void OgreScene::setShaderTime(float seconds) {
 
 float OgreScene::shaderTime() const { return mShaderTime; }
 
-// OUR OWN datablock property, and the isolation contract in one function:
+// OUR OWN datablock properties, and the isolation contract in one function:
 // `jah_shader_clock` is what our Hlms library gates the pass-buffer clock
-// declaration on, so a material with no generated piece declares nothing, reads
+// declaration on, so a material that reads no clock declares nothing, reads
 // nothing, and produces byte-identical shader source to a build in which none
-// of this existed. Set when a piece is bound, cleared when the last one goes.
-void OgreScene::applyClockProperty(Ogre::HlmsPbsDatablock *db, const MaterialRec &rec) {
-    const bool wanted = !rec.customPiece[0].empty() || !rec.customPiece[1].empty();
-    const Ogre::HlmsDatablock::CustomPropertyVec &current = db->getCustomProperties();
-    const bool have = !current.empty();
-    if (wanted == have) return;   // setCustomProperties flushes renderables: idempotent or nothing
+// of this existed — set when it carries a generated piece (either stage).
+// `jah_uv_scroll` (TORNADO-1) is set when it scrolls its maps: the UV macro
+// adds the per-frame scroll offset in userValue[2].zw. The pieces are read off the
+// DATABLOCK, not the record, so this answers for a cull twin exactly as for
+// its master — and it runs at the end of every applyPbr, so a velocity edit
+// lands its property in the same push.
+void OgreScene::applyClockProperty(Ogre::HlmsPbsDatablock *db, const PbrParams &p) {
+    bool piece = false;
+    for (size_t s = 0; s < Ogre::CustomPieceStage::NumCustomPieceStages; ++s)
+        if (db->getCustomPieceFileIdHash(Ogre::CustomPieceStage::CustomPieceStage(s))) piece = true;
+    const bool scroll = p.uvVelocity[0] != 0.0f || p.uvVelocity[1] != 0.0f;
     Ogre::HlmsDatablock::CustomPropertyVec props;
-    if (wanted) props.emplace_back("jah_shader_clock", 1);
+    if (piece) props.emplace_back("jah_shader_clock", 1);
+    if (scroll) props.emplace_back("jah_uv_scroll", 1);
+    const Ogre::HlmsDatablock::CustomPropertyVec &current = db->getCustomProperties();
+    bool same = current.size() == props.size();
+    for (size_t i = 0; same && i < props.size(); ++i)
+        same = current[i].keyName == props[i].keyName && current[i].value == props[i].value;
+    if (same) return;   // setCustomProperties flushes renderables: idempotent or nothing
     db->setCustomProperties(props, true);
 }
 
@@ -1007,7 +1057,7 @@ void OgreScene::bindTrackedPiecesInto(const MaterialRec &rec, Ogre::HlmsPbsDatab
         const std::string file = sep == std::string::npos ? path : path.substr(sep + 1);
         db->setCustomPieceFile(file, "Jahshaka", stage);   // Ogre's own setter is idempotent
     }
-    applyClockProperty(db, rec);
+    applyClockProperty(db, rec.params);
 }
 
 bool OgreScene::destroyMaterial(MaterialId id) {

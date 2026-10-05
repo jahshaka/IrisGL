@@ -445,7 +445,20 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	#undef UV_SPECULAR
 	#undef UV_ROUGHNESS
 	#undef UV_EMISSIVE
+	// THE UV SCROLL (TORNADO-1): a material whose maps scroll on the shader
+	// clock adds userValue[2].zw AFTER the transform -- the scroll OFFSET
+	// (velocity x clock, wrapped to [0,1)) the host writes per frame
+	// (OgreScene::setShaderTime). The offset rides the material, not the pass
+	// buffer, because an alpha-tested CASTER's pixel shader samples the albedo
+	// through this macro and declares no pass buffer at all. Only under our
+	// datablock property jah_uv_scroll: every other material keeps the
+	// expression below, byte for byte. (The parameter is not named x here: a
+	// macro parameter substitutes into swizzles too.)
+	@property( jah_uv_scroll )
+	#define JAH_UV_XFORM(jahUvIn) (float2( dot( material.userValue[1].xy, (jahUvIn) * material.userValue[0].xy ), dot( material.userValue[1].zw, (jahUvIn) * material.userValue[0].xy ) ) + material.userValue[0].zw + material.userValue[2].zw)
+	@else
 	#define JAH_UV_XFORM(x) (float2( dot( material.userValue[1].xy, (x) * material.userValue[0].xy ), dot( material.userValue[1].zw, (x) * material.userValue[0].xy ) ) + material.userValue[0].zw)
+	@end
 	#define UV_DIFFUSE(x) JAH_UV_XFORM(x)
 	#define UV_NORMAL(x) JAH_UV_XFORM(x)
 	#define UV_SPECULAR(x) JAH_UV_XFORM(x)

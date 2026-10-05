@@ -498,6 +498,8 @@ void PbrMaterial::setValue(const QString& name, const QVariant& in)
     else if (name == "emissiveAsLightmap") emissiveAsLightmap = value.toBool();
     else if (name == "customPiecePixel")   customPiecePixel   = value.toString();
     else if (name == "customPieceVertex")  customPieceVertex  = value.toString();
+    else if (name == "textureVelocityU")   textureVelocityU   = value.toFloat();
+    else if (name == "textureVelocityV")   textureVelocityV   = value.toFloat();
 
     // Texture properties arrive as a path, matching how CustomMaterial::setValue
     // is driven from the material presets.

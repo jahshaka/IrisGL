@@ -1448,6 +1448,16 @@ struct PbrParams {
     float  uvScale[2]      = { 1.0f, 1.0f };
     float  uvOffset[2]     = { 0.0f, 0.0f };
     float  uvRotation      = 0.0f;   ///< degrees, counter-clockwise
+    /// THE UV SCROLL (TORNADO-1, the animated UV fold): UV units per second of
+    /// the SHADER CLOCK, added after the transform above —
+    ///     uv'' = uv' + uvVelocity * t
+    /// — the shape a shader graph's constant-speed `panner` feeding every
+    /// sampler folds to. The backend turns it into a per-frame OFFSET (wrapped
+    /// to [0,1)) at every setShaderTime. Zero (the default) is INERT and costs
+    /// nothing: the shader reads the offset only on a material whose velocity
+    /// is non-zero (our `jah_uv_scroll` datablock property), so every other
+    /// material generates exactly the source it generated before.
+    float  uvVelocity[2]   = { 0.0f, 0.0f };
     /// Refractive mode only: how far the surface displaces what it samples from
     /// behind it. Roughly an index-of-refraction knob; 0 is a flat window.
     float  refractionStrength = 0.35f;
@@ -1631,6 +1641,7 @@ struct PbrParams {
                uvScale[0] == o.uvScale[0] && uvScale[1] == o.uvScale[1] &&
                uvOffset[0] == o.uvOffset[0] && uvOffset[1] == o.uvOffset[1] &&
                uvRotation == o.uvRotation &&
+               uvVelocity[0] == o.uvVelocity[0] && uvVelocity[1] == o.uvVelocity[1] &&
                refractionStrength == o.refractionStrength &&
                clearCoat == o.clearCoat && clearCoatRoughness == o.clearCoatRoughness &&
                brdf == o.brdf && receiveShadows == o.receiveShadows &&

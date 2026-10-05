@@ -481,13 +481,20 @@ public:
     /// hull); true = the on-top polygon wireframe.
     void setHighlightWireframe(bool on);
     bool highlightWireframe() const { return mHighlightWireframe; }
-    /// Pins the shader clock generated pieces read (HLMS_ADOPTION P5) to an
-    /// exact number of seconds; a NEGATIVE value hands it back to the wall
-    /// clock. This is what makes an animated graph material reproducible —
-    /// a suite that renders at t = 0.25 gets the same pixels every run, and a
-    /// scrubbed timeline can drive the surface from its own playhead.
+    /// Pins the shader clock generated pieces and scrolling maps read
+    /// (HLMS_ADOPTION P5, TORNADO-1) to an exact number of seconds; a NEGATIVE
+    /// value hands it back to the free clock — the document SimulationClock's
+    /// whole 1/60 s steps, accumulated (no wall clock, trap 7). This is what
+    /// makes an animated graph material reproducible — a suite that renders at
+    /// t = 0.25 gets the same pixels every run, and a scrubbed timeline can
+    /// drive the surface from its own playhead. The verb is world.shaderTime.
     void setShaderTimeOverride(float seconds) { mShaderTimeOverride = seconds; }
     float shaderTimeOverride() const { return mShaderTimeOverride; }
+    /// The free clock's current value (seconds), whether or not it is pinned.
+    double shaderSeconds() const { return mShaderSeconds; }
+    /// True once a mirrored material reads the shader clock (a generated piece
+    /// or a scrolling map): only then is the clock pushed at all.
+    bool shaderClockLive() const { return mAnyCustomPiece; }
     /// Light helpers: an icon billboard (sun/bulb/spotlight) at every document
     /// light, plus a wire shape in the light's colour. The attenuation volume
     /// (point rings / spot cone, sized by the light's range) shows only for the
