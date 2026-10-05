@@ -366,11 +366,14 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     for (size_t s = 0; s < Ogre::CustomPieceStage::NumCustomPieceStages; ++s)
         if (db->getCustomPieceFileIdHash(Ogre::CustomPieceStage::CustomPieceStage(s)))
             return AtomRoute::CustomPiece;
-    // A LIVE MATERIAL WITH NO PIECE (TORNADO-1): one that scrolls its maps on the
-    // shader clock (`jah_uv_scroll`, applyClockProperty). The decode samples the
-    // maps through its own shader, which reads no clock, so it would draw the
-    // map frozen — it stays on the stock shader, counted with the pieces.
-    if (!db->getCustomProperties().empty()) return AtomRoute::CustomPiece;
+    // A LIVE MATERIAL (TORNADO-1): one that reads the shader clock or scrolls its
+    // maps (our `jah_shader_clock` / `jah_uv_scroll`, applyClockProperty). The
+    // decode samples the maps through its own shader, which applies no scroll,
+    // so it would draw the map frozen — it stays on the stock shader, counted
+    // with the pieces.
+    for (const Ogre::HlmsDatablock::CustomProperty &cp : db->getCustomProperties())
+        if (cp.keyName == Ogre::IdString("jah_shader_clock") || cp.keyName == Ogre::IdString("jah_uv_scroll"))
+            return AtomRoute::CustomPiece;
     const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
     if (rq == kRefractiveRenderQueue || db->getBlendblock()->isAutoTransparent() ||
         pbs->getTransparencyMode() == Ogre::HlmsPbsDatablock::Refractive)

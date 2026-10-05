@@ -471,6 +471,11 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mDistortionEntries = 0;
     mAnyRefractive = false;
     mAnyDistortion = false;
+    // THE SHADER CLOCK'S READERS go with the entries (TORNADO-1 fix round): the
+    // incoming scene's own materials raise the flag again as they are mirrored,
+    // and a pin was a viewing control on the OUTGOING scene, so it goes too.
+    mAnyCustomPiece = false;
+    mShaderTimeOverride = -1.0f;
     mVerifierCursor = 0;
     mCharacterRigs.clear();
     // THE RIDERS COME OFF THEIR BONES FIRST, and this is not tidiness: a rider's
