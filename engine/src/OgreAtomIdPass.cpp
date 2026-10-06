@@ -732,7 +732,9 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         // frontier invisibly by construction (Nanite has none). THE CUT (mode 3).
         req.lodHysteresis = 0.0f;
         req.mode = 3u;
-        cullPtr = late ? &view->atomCullLate() : &view->atomCull();
+        cullPtr = capture ? &view->atomCullCapture() : late ? &view->atomCullLate() : &view->atomCull();
+        // The capture's list holds the frame the view's first list was sized for.
+        if (capture) cullPtr->followCutBudget(view->atomCull());
         if (late && !testAgainst) {
             // THE FIRST PASS TESTED NOTHING: nothing was rejected, there is nothing to
             // draw — the frame is the frustum-only frame. Its half of the ring says so.

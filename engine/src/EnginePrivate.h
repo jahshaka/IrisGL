@@ -7739,6 +7739,9 @@ public:
     detail::GpuCull &atomCull() { return mAtomCull; }
     /// THE LATE LIST (ATOM-OCCLUSION-1): the disocclusion pass's cull, its own buffers.
     detail::GpuCull &atomCullLate() { return mAtomCullLate; }
+    /// The capture workspace's own list (CLOSE-SHOT-2): its cull must not write the
+    /// view's lists, whose count words the view's stats ring and cut budget read back.
+    detail::GpuCull &atomCullCapture() { return mAtomCullCapture; }
     /// Whether this view's chain carries the two-pass occlusion (ChainDesc::atomOcclusion).
     bool chainAtomOcclusion() const { return mChainAtomOcclusion; }
     /// WHAT THE FIRST CULL TESTS AGAINST (OgreAtomIdPass.cpp): the matrix the pyramid
@@ -7928,6 +7931,7 @@ private:
     /// scene late, so it is compared once a frame beside the id pass's shape.
     bool mChainSsao = false;
     detail::GpuCull mAtomCullLate;
+    detail::GpuCull mAtomCullCapture;
     AtomOcclusionHistory mAtomOcclHistory;
     bool mAtomFirstTested = false;
     unsigned long long mAtomLateTriangles = 0ull;

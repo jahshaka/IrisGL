@@ -1938,6 +1938,7 @@ void OgreView::destroy() {
     }
     mAtomCull.destroy();
     mAtomCullLate.destroy();
+    mAtomCullCapture.destroy();
     atomIdPassForgetView(this);
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
