@@ -7472,6 +7472,7 @@ public:
     bool requestFrameCapture(bool keepHelpers, bool alsoPresented) override;
     FrameCaptureState frameCaptureState() override;
     bool takeFrameCapture(Image &out, bool wait, Image *presented) override;
+    void cancelFrameCapture() override { releaseFrameCapture(); }
     /// OgreEngine::renderOneFrame, before any workspace of the frame updates: does
     /// THIS frame capture (armed, enabled, a scene workspace to draw it)? A clean
     /// capture builds its own workspace here (see mCaptureWorkspace). The flag is

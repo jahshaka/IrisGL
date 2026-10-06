@@ -1837,6 +1837,8 @@ public:
     virtual bool requestFrameCapture(bool keepHelpers = false, bool alsoPresented = false) = 0;
     virtual FrameCaptureState frameCaptureState() = 0;
     virtual bool takeFrameCapture(Image &out, bool wait, Image *presented = nullptr) = 0;
+    /// Drops whatever capture is armed or in flight (state Idle).
+    virtual void cancelFrameCapture() = 0;
 
     /// Compiles every shader this View's SCENE needs, now, without drawing it
     /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).
