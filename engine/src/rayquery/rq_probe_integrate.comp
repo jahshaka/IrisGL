@@ -426,10 +426,18 @@ void main()
 		// pixel on both axes (cells off the eye's grid are skipped, not clamped),
 		// its uniform probe and its adaptive twin, each at the cell's tent weight
 		// times its plane weight.
+		// PAST TWO CELLS THE READ STEPS BY TWO (the cost: a reach of 4 is 16 probe
+		// pairs, not 64): the probes it skips are filtered with the ones it reads
+		// (the filter's 17 taps), so they add little that is independent. The
+		// cells read keep the pixel's own cell's parity on each axis.
+		const int stepC = reach > 2.0 ? 2 : 1;
+		const ivec2 own = ivec2( floor( g ) );
 		const int x0 = int( floor( g.x - reach ) ) + 1, x1 = int( floor( g.x + reach ) );
 		const int y0 = int( floor( g.y - reach ) ) + 1, y1 = int( floor( g.y + reach ) );
-		for( int cy = y0; cy <= y1; ++cy )
-			for( int cx = x0; cx <= x1; ++cx )
+		const int sx = x0 + ( ( ( own.x - x0 ) % stepC ) + stepC ) % stepC;
+		const int sy = y0 + ( ( ( own.y - y0 ) % stepC ) + stepC ) % stepC;
+		for( int cy = sy; cy <= y1; cy += stepC )
+			for( int cx = sx; cx <= x1; cx += stepC )
 			{
 				if( cx < 0 || cy < 0 || cx >= gridEye.x || cy >= gridEye.y )
 					continue;
