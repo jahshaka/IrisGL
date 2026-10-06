@@ -7500,7 +7500,7 @@ public:
         return p && std::find(mCaptureShadowedPasses.begin(), mCaptureShadowedPasses.end(), p) !=
                         mCaptureShadowedPasses.end();
     }
-    /// Builds (or keeps) the persistent capture workspace for the current shape.
+    /// Builds (or keeps, within one capture) the capture workspace for the current shape.
     bool ensureCaptureWorkspace();
     /// The capture listener's workspacePosUpdate: records the copy (Armed -> InFlight).
     void recordFrameCapture(Ogre::CompositorWorkspace *ws);

@@ -2151,8 +2151,13 @@ bool OgreView::ensureCaptureWorkspace() {
 }
 
 void OgreView::beginFrameCapture() {
-    // The capture's workspace draws on the frame that captures and on no other.
+    // The capture's workspace draws on the frame that captures and on no other —
+    // and it LIVES only while a capture needs it: a spent or dropped one goes here,
+    // between frames (takeFrameCapture also frees it the moment the picture is read).
     if (mCaptureWorkspace) mCaptureWorkspace->setEnabled(false);
+    if (mCaptureState != FrameCaptureState::Armed && mCaptureState != FrameCaptureState::InFlight &&
+        mCaptureState != FrameCaptureState::Ready)
+        destroyCaptureWorkspace();
     mCaptureThisFrame = mCaptureState == FrameCaptureState::Armed && mEnabled && mWorkspace &&
                         mScene && mCamera;
     // The listener rides only while something is armed — removed here, between
@@ -2342,6 +2347,11 @@ bool OgreView::takeFrameCapture(Image &out, bool wait, Image *presented) {
         mError = std::string("engine: ") + e.what();
     }
     releaseFrameCapture();
+    // ON DEMAND (the lead's VRAM ruling): the capture's chain instance — ~90 MB at a
+    // 1232x565 editor view — is built for the capturing frame and freed once the
+    // picture is read. Building it costs well under a frame (measured: the capturing
+    // frame's CPU equals a warm capture's), so nothing stays resident for a tile.
+    destroyCaptureWorkspace();
     return ok;
 }
 
@@ -2366,15 +2376,17 @@ void OgreView::destroyCaptureWorkspace() {
     }
     mCaptureHandles = chain::ChainHandles();
     mCaptureShadowedPasses.clear();
+    // ...and the capture's own Atom cull list (~15 MB): Ogre defers the buffers'
+    // destruction past the frames still using them.
+    JAH_TRY { mAtomCullCapture.destroy(); } JAH_CATCH(mError, );
     mCaptureShape = CaptureShape();
 }
 
 void OgreView::releaseFrameCapture() {
     mCaptureThisFrame = false;
     mCaptureState = FrameCaptureState::Idle;
-    // The capture's workspace is PERSISTENT (built on first use, rebuilt when the
-    // view's chain, size, samples or format move, destroyed with the view's chain):
-    // a capture that is dropped only switches it off.
+    // A dropped capture only switches the capture's workspace off here (this may run
+    // inside a frame); beginFrameCapture frees it between frames.
     JAH_TRY { if (mCaptureWorkspace) mCaptureWorkspace->setEnabled(false); } JAH_CATCH(mError, );
     for (Ogre::AsyncTextureTicket **t : { &mCaptureTicket, &mPresentedTicket }) {
         if (!*t) continue;
