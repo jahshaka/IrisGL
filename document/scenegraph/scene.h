@@ -31,8 +31,6 @@ For more information see the LICENSE file
 #include <QJsonArray>
 #include <QJsonObject>
 
-class QMediaPlayer;
-
 namespace iris
 {
 
@@ -1188,7 +1186,11 @@ public:
 	QVector<LightNodePtr> skyLights() const;
 
     QString skyGuid;
+    /// THE WORLD'S AMBIENT MUSIC: a Music asset's guid (empty = none) and its
+    /// volume, 1..100. Data only — the editor's AmbienceService
+    /// (src/services/ambienceservice.h) plays it; the document owns no player.
     QString ambientMusicGuid;
+    float ambientMusicVolume = 50.0f;
 
 	/// THE SKY, AS THE SERIALIZER AND THE PANELS SEE IT: one block per sky
 	/// type, keyed "SingleColor" / "Realistic" / "Gradient" / "Equirectangular"
@@ -1227,14 +1229,6 @@ public:
 	// animation, possession and the renderer's own simulation advance on.
 	// Runtime only — never written to the file.
 	SimulationClock clock;
-
-	// needed for playing music — nullptr until the first startPlayingAmbientMusic();
-	// building one costs an audio-device probe, so it is NOT built in the ctor
-	// (STABILITY_PROGRAM_SPEC Lane 6a; see scene.cpp ensureMediaPlayer()).
-	QMediaPlayer* mediaPlayer;
-	void ensureMediaPlayer();
-	QString ambientMusicPath;
-	float ambientMusicVolume;
 
     Scene();
 public:
@@ -1280,11 +1274,6 @@ public:
     QString getSkyTextureSource();
     void clearSkyTexture();
     void setSkyColor(QColor color);
-
-	void setAmbientMusic(QString path);
-	void stopPlayingAmbientMusic();
-	void startPlayingAmbientMusic();
-	void setAmbientMusicVolume(float volume);
 
     void updateSceneAnimation(float time);
     /// The last time updateSceneAnimation was given.
