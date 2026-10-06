@@ -1801,6 +1801,37 @@ public:
     /// chain has the SSR stage only; false otherwise, lastError says which.
     virtual bool readReflectionHdr(ImageF &out) = 0;
 
+    /// THE FRAME THIS VIEW PRESENTS, READ BACK (CLOSE-SHOT-2) — the picture the
+    /// user is looking at, with no second render and no settle: the view's own
+    /// settled GI, its own grade, its own exposure.
+    ///
+    /// ONE SHOT. `requestFrameCapture` arms the NEXT frame this view renders (an
+    /// enabled view with a scene bound; a disabled view waits until it renders).
+    /// That one frame is drawn with the editor's furniture pushed off — both helper
+    /// channels (setHelpersVisible, setVrHelpersVisible) cleared from every scene
+    /// pass's visibility mask for that frame only, through the pass's own
+    /// pre-execute hook (no workspace rebuild, no history restarted), the HUD and
+    /// the Atom / Photon viewing aids off — unless `keepHelpers` asks for the frame
+    /// exactly as presented (the comparison arm a test needs). Its FINAL colour
+    /// target (the window's swapchain image after the last pass, before present —
+    /// Ogre's own `Window::setWantsToDownload` + `AsyncTextureTicket` route; an
+    /// offscreen view's texture) is copied to a staging buffer at the end of the
+    /// view's workspace, and the copy carries its own fence. A PiP inset drawn
+    /// after the view's workspace is not in the picture.
+    ///
+    /// NOTHING BLOCKS: `frameCaptureState` polls the fence (InFlight -> Ready);
+    /// `takeFrameCapture(out, false)` answers once Ready and is false before.
+    /// `wait = true` blocks on the fence of a frame already rendered (about one
+    /// frame — the shutdown path); it cannot render the frame itself, so an Armed
+    /// capture answers false until the host renders one. A STEREO view (the VR
+    /// session's layered target) answers the LEFT eye (layer 0) at one eye's size.
+    /// The picture is opaque RGBA8 in the window's own encoding (the bytes on
+    /// screen). A new request supersedes an unread one; detaching the scene or
+    /// destroying the view drops it (state Idle).
+    virtual bool requestFrameCapture(bool keepHelpers = false) = 0;
+    virtual FrameCaptureState frameCaptureState() = 0;
+    virtual bool takeFrameCapture(Image &out, bool wait) = 0;
+
     /// Compiles every shader this View's SCENE needs, now, without drawing it
     /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).
     ///

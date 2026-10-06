@@ -7260,6 +7260,23 @@ struct AtomOcclusionHistory {
     const void *scene = nullptr;
 };
 
+/// THE PRESENTED FRAME'S CAPTURE (View::requestFrameCapture, CLOSE-SHOT-2). One per
+/// view, registered through OgreView::addWorkspaceListener while a capture is armed.
+/// On the capturing frame only: `passPreExecute` takes both helper channels out of
+/// the mask the scene pass has just set on the viewport — Ogre's own hook ("fire the
+/// listener in case it wants to change anything", CompositorPassScene::execute,
+/// after `_setVisibilityMask` and before the cull), so nothing is rebuilt and the
+/// next pass sets its own mask again — and `workspacePosUpdate` records the copy of
+/// the final target, after the view's last pass and before the swap.
+class FrameCaptureListener final : public Ogre::CompositorWorkspaceListener {
+public:
+    explicit FrameCaptureListener(OgreView *view) : mView(view) {}
+    void passPreExecute(Ogre::CompositorPass *pass) override;
+    void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
+private:
+    OgreView *mView;
+};
+
 class OgreView final : public View {
 public:
     /// On-screen: `window` is set. Offscreen: `texture` is set. Never both.
@@ -7443,6 +7460,22 @@ public:
     /// this frame if the view was actually part of it (enabled + workspace +
     /// scene). The one place mFramesPresented moves up.
     void notePresented();
+
+    // THE PRESENTED FRAME'S CAPTURE (CLOSE-SHOT-2; View::requestFrameCapture).
+    bool requestFrameCapture(bool keepHelpers) override;
+    FrameCaptureState frameCaptureState() override;
+    bool takeFrameCapture(Image &out, bool wait) override;
+    /// OgreEngine::renderOneFrame, before any workspace of the frame updates: does
+    /// THIS frame capture (armed, enabled, a scene workspace to draw it)? The answer
+    /// holds for the whole frame — the HUD owner, the Atom and Photon listeners and
+    /// the capture listener all read it — and is dropped by notePresented.
+    void beginFrameCapture();
+    bool captureThisFrame() const { return mCaptureThisFrame; }
+    bool captureKeepsHelpers() const { return mCaptureKeepHelpers; }
+    /// The capture listener's workspacePosUpdate: records the copy (Armed -> InFlight).
+    void recordFrameCapture();
+    /// Drops whatever capture is pending (ticket destroyed, listener removed).
+    void releaseFrameCapture();
 
     void setPostFx(const PostFxDesc &fx) override;
     const PostFxDesc &postFx() const override;
@@ -7868,6 +7901,12 @@ private:
     AtomDrawListenerPtr mAtomListener;
     /// PHOTON-VIEW-1: the view's photon listener and the tier's overlay.
     PhotonListenerPtr mPhotonListener;
+    /// CLOSE-SHOT-2: the presented frame's capture (requestFrameCapture).
+    std::unique_ptr<FrameCaptureListener> mCaptureListener;
+    Ogre::AsyncTextureTicket *mCaptureTicket = nullptr;
+    FrameCaptureState mCaptureState = FrameCaptureState::Idle;
+    bool mCaptureKeepHelpers = false;
+    bool mCaptureThisFrame = false;
     Ogre::TextureGpu *mPhotonOverlay = nullptr;
     bool mPhotonOverlayWritten = false;
     unsigned mPhotonOverlayGeneration = 0u;

@@ -122,7 +122,9 @@ public:
     void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override {
         if (!ws) return;
         OgreScene *scene = mView ? mView->ogreScene() : nullptr;
-        const AtomView view = scene ? scene->atomView() : AtomView::Off;
+        // A CAPTURED FRAME (View::requestFrameCapture) is the picture, never the
+        // viewing aid: the Atom view stays off for that one frame.
+        const AtomView view = (scene && !mView->captureThisFrame()) ? scene->atomView() : AtomView::Off;
         Ogre::TextureGpu *table = scene ? scene->atomViewTable() : nullptr;
         Ogre::Pass *pass = (view != AtomView::Off && table) ? atomViewMaterialPass() : nullptr;
         const bool on = pass && pass->hasFragmentProgram() && pass->getNumTextureUnitStates() >= 4u;
