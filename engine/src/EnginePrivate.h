@@ -1795,6 +1795,9 @@ public:
     Ogre::Root *mRoot = nullptr;
     OgreView   *mView = nullptr;
     SsrReprojection mSsrReprojection;
+    /// mSsrReprojection as it stood before the view's push of this frame (CLOSE-SHOT-2:
+    /// the capture's workspace pushes from it, so its resolve reprojects as the view's did).
+    SsrReprojection mSsrReprojectionAtFrameStart;
 };
 }   // namespace chain
 
@@ -7266,14 +7269,15 @@ struct AtomOcclusionHistory {
 
 /// THE PRESENTED FRAME'S CAPTURE (View::requestFrameCapture, CLOSE-SHOT-2). One per
 /// view, registered through OgreView::addWorkspaceListener while a capture is armed
-/// (so it rides the view's workspace AND the clean capture's). In the capture's
-/// workspace only: `passPreExecute` takes both helper channels out of the mask the
-/// scene pass has just set on the viewport — Ogre's own hook ("fire the listener in
-/// case it wants to change anything", CompositorPassScene::execute, after
-/// `_setVisibilityMask` and before the cull) — and `workspacePreUpdate` hides the
-/// HUD. `workspacePosUpdate` records the copy of the final target: the window's at
-/// the end of the view's workspace (keepHelpers), the capture target's at the end
-/// of the capture's.
+/// (so it rides the view's workspace AND the clean capture's). The furniture and the
+/// HUD are baked out of the capture's own definition (OgreView::ensureCaptureWorkspace),
+/// so this listener does two things only. `passPreExecute`, in the capture's
+/// workspace, hands each scene pass that names the view's shadow node in the view's
+/// chain the view's own instance of this frame (Ogre's hook "fire the listener in
+/// case it wants to change anything", CompositorPassScene::execute, after the pass
+/// set its own — none — and before it renders). `workspacePosUpdate` records the copy
+/// of the final target: the window's at the end of the view's workspace (keepHelpers,
+/// or alsoPresented's companion), the capture target's at the end of the capture's.
 class FrameCaptureListener final : public Ogre::CompositorWorkspaceListener {
 public:
     explicit FrameCaptureListener(OgreView *view) : mView(view) {}

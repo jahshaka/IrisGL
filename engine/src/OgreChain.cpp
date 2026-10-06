@@ -4286,9 +4286,12 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     if (!mRoot || !mView) return;
     // THE CAPTURE'S WORKSPACE (CLOSE-SHOT-2) pushes the same globals — it draws the
     // same view — but steps nothing: no push counted, and the SSR reprojection's
-    // "previous frame" is not advanced a second time (a scratch copy carries it).
+    // "previous frame" is not advanced a second time: a scratch copy of the state
+    // the view's own push STARTED from this frame carries it (the view's push has
+    // already advanced mSsrReprojection to this frame's matrix — a copy taken after it
+    // would hand the capture's resolve this frame as its "previous" one).
     if (mView->isCaptureWorkspace(ws)) {
-        SsrReprojection scratch = mSsrReprojection;
+        SsrReprojection scratch = mSsrReprojectionAtFrameStart;
         applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(), mView->width(),
                          mView->height(), scratch, mView->ogreScene());
         return;
@@ -4306,6 +4309,7 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     // material parameters these writes land in are read at pass execute time —
     // so two workspaces in one frame can carry two different exposures even
     // though the materials themselves are process-wide singletons.
+    mSsrReprojectionAtFrameStart = mSsrReprojection;
     applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(),
                      mView->width(), mView->height(), mSsrReprojection, mView->ogreScene());
 }
