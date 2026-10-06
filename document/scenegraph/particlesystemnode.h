@@ -219,6 +219,29 @@ public:
         notifyChanged(NodeChange::Params);
     }
 
+    /// The three LIST-valued colour/size sources have no reflected key, so
+    /// they had no setter either — the verb and the panel assigned the fields
+    /// and the mirror never heard (audit D2). Every writer goes through these.
+    void setColourKeys(const QVector<ParticleColourKey> &keys)
+    {
+        colourKeys = keys;
+        notifyChanged(NodeChange::Params);
+    }
+    void setScaleKeys(const QVector<ParticleScaleKey> &keys)
+    {
+        scaleKeys = keys;
+        notifyChanged(NodeChange::Params);
+    }
+    /// The colour RAMP image (a resolved path) and the asset behind it; both
+    /// empty = no ramp.
+    void setColourRamp(const QString &guid, const QString &path)
+    {
+        if (colourRampGuid == guid && colourRampImage == path) return;
+        colourRampGuid = guid;
+        colourRampImage = path;
+        notifyChanged(NodeChange::Params);
+    }
+
     /// The "Random ..." sliders send a FRACTION of the mean; the fields hold
     /// the absolute spread. (These three were edited by the panel and never
     /// serialized until the ParticleFX2 adoption — audit defect #7.)

@@ -60,7 +60,45 @@ std::string OgreScene::ParticleTopology::key() const {
     for (int shape : emitterShapes) s += std::to_string(shape) + ",";
     s += "|a";
     for (int kind : affectorKinds) s += std::to_string(kind) + ",";
+    for (const std::string &ramp : rampImages) s += "|r" + ramp;
     return s;
+}
+
+// THE RAMP IMAGE BY NAME: ColourImageAffector2 loads it through
+// ResourceGroupManager::AUTODETECT (OgreColourImageAffector2.cpp:95), so the
+// file's DIRECTORY has to be a registered resource location first — the same
+// idiom the IES profiles and the decal atlases use, and the reason this is a
+// path on the desc rather than an id.
+std::string OgreScene::particleRampImage(const std::string &path) {
+    if (path.empty()) return std::string();
+    const size_t slash = path.find_last_of("/\\");
+    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+    const std::string file = slash == std::string::npos ? path : path.substr(slash + 1);
+    Ogre::ResourceGroupManager &rgm = Ogre::ResourceGroupManager::getSingleton();
+    static const char *kGroup = "Jahshaka";
+    if (!rgm.resourceGroupExists(kGroup)) rgm.createResourceGroup(kGroup, false);
+    if (!mParticleRampDirs.count(dir)) {
+        rgm.addResourceLocation(dir, "FileSystem", kGroup, false);
+        mParticleRampDirs.insert(dir);
+    } else if (!rgm.resourceExists(kGroup, file)) {
+        // A LOCATION IS INDEXED ONCE, WHEN IT IS ADDED (OgreResourceGroupManager
+        // .cpp, addResourceLocation: pArch->find("*") -> addToIndex). The store
+        // shards objects by hash, so a ramp imported AFTER an earlier ramp
+        // registered its shard is in a directory Ogre already indexed and is
+        // "not found". Re-adding the location is the public way to re-index it
+        // (per-file addToIndex is private to the group): one directory scan, on
+        // a miss only. The Ogre-native path, kept over loading the image
+        // ourselves as a manual texture: ColourImageAffector2 takes an image
+        // NAME and loads it through the resource system, so the name has to
+        // resolve there.
+        rgm.removeResourceLocation(dir, kGroup);
+        rgm.addResourceLocation(dir, "FileSystem", kGroup, false);
+    }
+    if (!rgm.resourceExists(kGroup, file)) {
+        mError = "particle colour ramp not found: " + path;
+        return std::string();
+    }
+    return file;
 }
 
 namespace {
@@ -499,6 +537,20 @@ bool OgreScene::buildParticleDef(Node &n, const ParticleSystemDesc &d,
     def->reserveNumAffectors(topo.affectorKinds.size());
     for (int kind : topo.affectorKinds)
         def->addAffector(Ogre::IdString(affectorFactoryName(ParticleAffectorDesc::Kind(kind))));
+    // THE RAMP IMAGE BEFORE init() (audit D2): init() runs every affector's
+    // oneTimeInit, and ColourImageAffector2's loads its image THERE — with no
+    // name set it threw ("Image format is unknown"), the push failed, and a
+    // retry found the def half-built (mInitialized already true, no colours).
+    {
+        size_t ramp = 0;
+        const auto &affectors = def->getAffectors();
+        for (size_t i = 0; i < affectors.size() && i < topo.affectorKinds.size(); ++i) {
+            if (ParticleAffectorDesc::Kind(topo.affectorKinds[i]) != ParticleAffectorDesc::Kind::ColourRamp)
+                continue;
+            if (ramp < topo.rampImages.size())
+                affectors[i]->setParameter("image", topo.rampImages[ramp++]);
+        }
+    }
     // AFTER addAffector: adding a Rotator flips rotation type to Texcoord (it
     // reports wantsRotation()), and we want Vertex — the quad's vertices spin,
     // not its UVs, which is what the legacy billboards did and what a flame
@@ -640,34 +692,10 @@ void OgreScene::applyParticleValues(Node &n, const ParticleSystemDesc &d) {
             af->setParameter("max_colour", colourParam(a.colourMax));
             break;
         }
-        case ParticleAffectorDesc::Kind::ColourRamp: {
-            // NOT a TextureId: the affector loads the image BY NAME through
-            // ResourceGroupManager::AUTODETECT (OgreColourImageAffector2.cpp:95),
-            // so the file's DIRECTORY has to be a registered resource location
-            // first — the same idiom the IES profiles and the decal atlases use,
-            // and the reason this is a path on the desc rather than an id.
-            if (a.colourRampPath.empty()) break;
-            const size_t slash = a.colourRampPath.find_last_of("/\\");
-            const std::string dir = slash == std::string::npos
-                                        ? "." : a.colourRampPath.substr(0, slash);
-            const std::string file = slash == std::string::npos
-                                         ? a.colourRampPath : a.colourRampPath.substr(slash + 1);
-            Ogre::ResourceGroupManager &rgm = Ogre::ResourceGroupManager::getSingleton();
-            static const char *kGroup = "Jahshaka";
-            if (!rgm.resourceGroupExists(kGroup)) rgm.createResourceGroup(kGroup, false);
-            if (!mParticleRampDirs.count(dir)) {
-                rgm.addResourceLocation(dir, "FileSystem", kGroup, false);
-                mParticleRampDirs.insert(dir);
-            }
-            if (!rgm.resourceExists(kGroup, file)) {
-                // Reported rather than thrown: a missing ramp must not take the
-                // whole particle push down.
-                mError = "particle colour ramp not found: " + a.colourRampPath;
-                break;
-            }
-            af->setParameter("image", file);
+        case ParticleAffectorDesc::Kind::ColourRamp:
+            // Nothing to set here: the image is FROZEN with the definition
+            // (ParticleTopology::rampImages) and was named before its init().
             break;
-        }
         case ParticleAffectorDesc::Kind::ScaleRate:
             af->setParameter("rate", realParam(a.scaleRate));
             // Additive units/second, or `rate^dt` per second when multiplying
@@ -694,21 +722,34 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
         topo.quotaBucket = quotaBucketFor(d.quota);
         topo.distortion = d.distortion;
         for (const auto &e : d.emitters) topo.emitterShapes.push_back(int(e.shape));
-        for (const auto &a : d.affectors) topo.affectorKinds.push_back(int(a.kind));
+        // A ramp whose image is not there is DROPPED from this push (mError
+        // says which file): ColourImageAffector2 cannot initialise without
+        // one, and a missing ramp must not take the whole emitter down.
+        ParticleSystemDesc pushed = d;
+        pushed.affectors.clear();
+        for (const auto &a : d.affectors) {
+            if (a.kind == ParticleAffectorDesc::Kind::ColourRamp) {
+                const std::string image = particleRampImage(a.colourRampPath);
+                if (image.empty()) continue;
+                topo.rampImages.push_back(image);
+            }
+            pushed.affectors.push_back(a);
+            topo.affectorKinds.push_back(int(a.kind));
+        }
 
         const bool rebuild = !n.particleDef || n.particleTopology != topo.key();
         if (rebuild) {
             releaseParticleSystem(n);
-            if (!buildParticleDef(n, d, topo)) return false;
+            if (!buildParticleDef(n, pushed, topo)) return false;
         }
         // The datablock is per-def and mutated in place: a texture or blend-mode
         // change costs nothing and never rebuilds. (A recycled def already has
         // its datablock; ensureParticleDatablock finds and rewrites it.)
-        const std::string dbName = ensureParticleDatablock(n, d);
+        const std::string dbName = ensureParticleDatablock(n, pushed);
         if (dbName.empty()) return false;
         mParticleDatablocks[n.particleDef] = dbName;
 
-        applyParticleValues(n, d);
+        applyParticleValues(n, pushed);
 
         if (!n.particleSystem) {
             n.particleSystem = mSceneMgr->createParticleSystem2(n.particleDef);

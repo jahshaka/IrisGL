@@ -30,7 +30,7 @@ endfunction()
 
 #find_package(Qt6 COMPONENTS Core)
 
-find_package(Qt6 COMPONENTS Core Gui Multimedia Network Concurrent)
+find_package(Qt6 COMPONENTS Core Gui Network Concurrent)
 message(STATUS "Qt6_VERSION: ${Qt6_VERSION}")
 message(STATUS "Qt6_INSTALL_PREFIX: ${Qt6_INSTALL_PREFIX}")
 
@@ -326,6 +326,7 @@ set (HEADERS
     document/animation/animation.h
     import/materialhelper.h
     core/irisutils.h
+    core/colorjson.h
     document/scenegraph/particlesystemnode.h
     document/materials/pbrmaterial.h
     document/animation/propertyanim.h
@@ -539,7 +540,7 @@ target_include_directories(IrisGL PRIVATE
     "${PROJECT_SOURCE_DIR}/thirdparty/assimp/include/"
 )
 
-target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
+target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent)
 target_link_libraries (IrisGL PRIVATE assimp)
 # meshoptimizer is PRIVATE for the same reason assimp is: the LOD chain it builds
 # crosses to the engine as plain data (iris::Mesh::lodIndices), never as one of

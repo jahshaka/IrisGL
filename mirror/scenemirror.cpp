@@ -3932,6 +3932,11 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
        << ps->maxParticles
        << ps->extents << ps->innerExtents << ps->wind
        << ps->emitColourStart << ps->emitColourEnd
+       // ...and the A-4 affectors' six inputs (audit D2: a live emitter
+       // never saw a fade, a ramp or a size rate change, because nothing
+       // here moved when they did). EVERY field affectorsFor reads is folded.
+       << ps->colourFade1 << ps->colourFade2 << ps->colourFadeSwitch
+       << ps->scaleRate << ps->scaleRateMultiply << ps->colourRampImage
        << quint32(ps->colourKeys.size());
     for (const iris::ParticleColourKey &k : ps->colourKeys)
         hs << k.time << k.r << k.g << k.b << k.a;

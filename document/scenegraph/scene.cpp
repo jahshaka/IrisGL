@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "document/scenegraph/scene.h"
+#include "core/colorjson.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/lightnode.h"
 #include "document/scenegraph/decalnode.h"
@@ -30,7 +31,6 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <QSet>
 
-#include <QtMultimedia/QMediaPlayer>
 
 namespace iris
 {
@@ -514,19 +514,13 @@ Scene::Scene()
 
 	skyGuid = IrisUtils::generateGUID();
 
-	const auto jsonColour = [](const QColor &c) {
-		QJsonObject o;
-		o["r"] = c.red(); o["g"] = c.green(); o["b"] = c.blue(); o["a"] = c.alpha();
-		return o;
-	};
-
 	QJsonObject singleColourBlock;
-	singleColourBlock.insert("skyColor", jsonColour(skyColor));
+	singleColourBlock.insert("skyColor", iris::colorToJson(skyColor));
 
 	QJsonObject gradientBlock;
-	gradientBlock.insert("gradientTop", jsonColour(QColor(255, 146, 138)));
-	gradientBlock.insert("gradientMid", jsonColour(QColor("white")));
-	gradientBlock.insert("gradientBot", jsonColour(QColor(64, 128, 255)));
+	gradientBlock.insert("gradientTop", iris::colorToJson(QColor(255, 146, 138)));
+	gradientBlock.insert("gradientMid", iris::colorToJson(QColor("white")));
+	gradientBlock.insert("gradientBot", iris::colorToJson(QColor(64, 128, 255)));
 	gradientBlock.insert("gradientOffset", .73f);
 
 	skyData.insert("SingleColor", singleColourBlock);
@@ -549,29 +543,6 @@ Scene::Scene()
     // WHICH avatar is being driven never is.
     possession = QSharedPointer<AvatarPossession>(new AvatarPossession(this));
 
-	ambientMusicVolume = 50;
-	// NOT `new QMediaPlayer()` — see ensureMediaPlayer(). Constructing one here
-	// put the Qt multimedia backend on the startup path of every process that
-	// ever makes a Scene, which is all of them.
-	mediaPlayer = nullptr;
-}
-
-// Build the ambient-music player on first play, not in the constructor.
-//
-// The constructor used to do `mediaPlayer = new QMediaPlayer()` unconditionally.
-// Every Scene::create() therefore loaded the Qt multimedia (ffmpeg) backend and
-// enumerated audio devices — a pipewire connect + PulseAudio fallback on a Linux
-// desktop — and the editor makes several Scenes during shell setup
-// (EngineAssetScene, the preview scenes, the editor scene), so it happened on
-// every launch and in every headless suite. Nothing reaches this player until
-// a world with an ambientMusicPath is opened (scenereader.cpp) or the World
-// panel selects one. STABILITY_PROGRAM_SPEC Lane 6a.
-//
-// Note the player is parentless and Scene has no destructor, so it leaks — it
-// always did; deferring it means it now only leaks when it is actually used.
-void Scene::ensureMediaPlayer()
-{
-	if (!mediaPlayer) mediaPlayer = new QMediaPlayer();
 }
 
 void Scene::setSkyTexture(Texture2DPtr tex)
@@ -597,31 +568,6 @@ void Scene::clearSkyTexture()
 void Scene::setSkyColor(QColor color)
 {
     this->skyColor = color;
-}
-
-void Scene::setAmbientMusic(QString path)
-{
-
-	ambientMusicPath = path;
-	
-}
-
-void Scene::stopPlayingAmbientMusic()
-{
-	if (mediaPlayer) mediaPlayer->stop();   // never played: nothing to stop
-}
-
-void Scene::startPlayingAmbientMusic()
-{
-	ensureMediaPlayer();
-	mediaPlayer->stop();
-	mediaPlayer->play();
-}
-
-void Scene::setAmbientMusicVolume(float volume)
-{
-	ambientMusicVolume = volume;
-    // mediaPlayer->setVolume(volume);
 }
 
 // ---------------------------------------------------------------------------

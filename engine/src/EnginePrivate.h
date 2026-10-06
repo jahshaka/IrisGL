@@ -4789,8 +4789,17 @@ private:
         bool     distortion = false;
         std::vector<int> emitterShapes;   // ParticleEmitterShape per emitter, in order
         std::vector<int> affectorKinds;   // ParticleAffectorDesc::Kind per affector, in order
+        /// The ColourRamp affectors' image NAMES, in order. FROZEN like the
+        /// kinds: ColourImageAffector2 reads its image once, in the def's
+        /// init(), and asserts on a later setImageAdjust — a ramp change is
+        /// a new definition (audit D2).
+        std::vector<std::string> rampImages;
         std::string key() const;
     };
+    /// Registers a colour-ramp image's folder with the resource system and
+    /// answers the NAME the affector loads it by, or "" (with mError set) when
+    /// the file is not there.
+    std::string particleRampImage(const std::string &path);
     struct MeshRec {
         Ogre::MeshPtr mesh; std::string name;
         // CPU-skinning support (MeshData::dynamic): the interleaved vertex array
