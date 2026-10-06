@@ -722,6 +722,15 @@ void ScreenProbeGather::releaseBinding(const void *key) {
     detail::FogHlmsListener::setProbeGather(it->second.sceneMgr, nullptr);
 }
 
+bool ScreenProbeGather::rebindThisFrame(const void *key) {
+    auto it = mViews.find(key);
+    if (it == mViews.end()) return false;
+    const View &v = it->second;
+    if (!v.sceneMgr || !v.irradiance || v.recordedFrame != mHost.gatherFrameNow()) return false;
+    detail::FogHlmsListener::setProbeGather(v.sceneMgr, v.irradiance);
+    return true;
+}
+
 void ScreenProbeGather::forget(const void *key) {
     auto it = mViews.find(key);
     if (it == mViews.end()) return;

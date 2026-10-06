@@ -289,6 +289,11 @@ public:
     /// The pass this key registered for is over: the Hlms binding is
     /// PASS-scoped and is taken away here (GATHER-0's D2).
     void releaseBinding(const void *key);
+    /// THE CAPTURE'S BINDING (CLOSE-SHOT-2): a second workspace of the same view,
+    /// drawn after the view's own in the same frame, is handed the irradiance THIS
+    /// frame already produced — re-registered, nothing recorded, no history stepped.
+    /// False when the view recorded nothing this frame.
+    bool rebindThisFrame(const void *key);
     /// A view's listener is going away, or its scene has disarmed.
     void forget(const void *key);
     /// The last frame's numbers for a scene.

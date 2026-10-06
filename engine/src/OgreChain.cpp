@@ -4282,8 +4282,17 @@ float exposureSeed(float exposure) {
     return fixedInverseLuminance(exposure);
 }
 
-void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *) {
+void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     if (!mRoot || !mView) return;
+    // THE CAPTURE'S WORKSPACE (CLOSE-SHOT-2) pushes the same globals — it draws the
+    // same view — but steps nothing: no push counted, and the SSR reprojection's
+    // "previous frame" is not advanced a second time (a scratch copy carries it).
+    if (mView->isCaptureWorkspace(ws)) {
+        SsrReprojection scratch = mSsrReprojection;
+        applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(), mView->width(),
+                         mView->height(), scratch, mView->ogreScene());
+        return;
+    }
     // COUNTED, because "did this view's globals reach the frame at all" is a
     // question that cost a sibling lane a day (DITHER-1, 2026-09-18: a switch
     // flipped mid-session moved zero bytes of the eye picture). It is one

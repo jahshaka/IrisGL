@@ -1138,6 +1138,8 @@ private:
         bool     finishPending = false;
         /// finishSunContact registered them and the pass has not ended yet.
         bool     bound = false;
+        /// The frame those rays were registered in (a capture re-registers them).
+        uint32_t boundFrame = 0xFFFFFFFFu;
     };
     bool makeSunContactPipeline(std::string &err);
     void dropSunContact(SunContactView &sv);
@@ -1188,6 +1190,17 @@ public:
     /// of the opaque pass: no job re-runs.
     void suspendPassBindings(const ReflectPassListener *key, const Ogre::SceneManager *sm);
     void resumePassBindings(const ReflectPassListener *key);
+    /// THE CAPTURE'S PASSES (CLOSE-SHOT-2, View::requestFrameCapture). The view's
+    /// chain instanced a second time for one frame, drawn AFTER the view's own
+    /// workspace, must not trace, decode, composite or step any history a second
+    /// time — every one of those is the view's temporal state (the reflection's
+    /// ping-pong and mover counters, the gather's EMA and age, the hit write-back).
+    /// It is handed the products of THIS frame instead: the reflection the view's
+    /// chain finished (copied into the capture's own jahSsrReflection at its first
+    /// prepass-use pass) and the gather's and the sun contact's registrations
+    /// (the resumePassBindings pattern), released again when each pass ends.
+    void bindCapturePass(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
+    void releaseCapturePass(const ReflectPassListener *key);
     void forgetHits(const ReflectPassListener *key);
     /// The hit list's counters (read back several frames late) for a scene.
     void hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const;
@@ -6706,6 +6719,7 @@ void RayQueryTier::finishSunContact(const ReflectPassListener *key) {
     // releaseSunContactBinding when this pass ends.
     FogHlmsListener::setSunContact(sv.sceneMgr, sv.vis, sv.divisor);
     sv.bound = true;
+    sv.boundFrame = frameNow();
 }
 
 void RayQueryTier::releaseSunContactBinding(const ReflectPassListener *key) {
@@ -6739,6 +6753,44 @@ void RayQueryTier::resumePassBindings(const ReflectPassListener *key) {
     auto it = mSunContacts.find(key);
     if (s.sun && it != mSunContacts.end() && it->second.bound && it->second.sceneMgr && it->second.vis)
         FogHlmsListener::setSunContact(it->second.sceneMgr, it->second.vis, it->second.divisor);
+}
+
+void RayQueryTier::bindCapturePass(const ReflectPassListener *key, OgreView *view,
+                                   Ogre::CompositorPass *pass) {
+    if (!isOpen() || !view || !pass) return;
+    // ONCE A FRAME, at the capture's first prepass-use pass — where the view's own
+    // chain finished its reflection: the finished picture, copied over whatever
+    // the capture's own screen-space resolve wrote.
+    if (view->captureReflectionPending()) {
+        view->setCaptureReflectionPending(false);
+        Ogre::TextureGpu *dst = nullptr;
+        JAH_TRY { dst = pass->getParentNode()->getDefinedTexture(Ogre::IdString("jahSsrReflection")); }
+        catch (const Ogre::Exception &) { dst = nullptr; }
+        Ogre::TextureGpu *src = view->chainTexture(chain::reflectionTextureName());
+        if (src && dst && src != dst && src->getWidth() == dst->getWidth() &&
+            src->getHeight() == dst->getHeight() && src->getPixelFormat() == dst->getPixelFormat() &&
+            src->getNumSlices() == dst->getNumSlices()) {
+            try {
+                mRs->endRenderPassDescriptor();
+                src->copyTo(dst, dst->getEmptyBox(0), 0, src->getEmptyBox(0), 0);
+            } catch (const Ogre::Exception &e) {
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka: the capture's reflection copy failed — " + e.getFullDescription());
+            }
+        }
+    }
+    if (mGather) mGather->rebindThisFrame(key);
+    auto it = mSunContacts.find(key);
+    if (it != mSunContacts.end() && it->second.vis && it->second.sceneMgr &&
+        it->second.boundFrame == frameNow())
+        FogHlmsListener::setSunContact(it->second.sceneMgr, it->second.vis, it->second.divisor);
+}
+
+void RayQueryTier::releaseCapturePass(const ReflectPassListener *key) {
+    releaseGatherBinding(key);
+    auto it = mSunContacts.find(key);
+    if (it != mSunContacts.end() && it->second.sceneMgr)
+        FogHlmsListener::setSunContact(it->second.sceneMgr, nullptr, 1u);
 }
 
 void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus &st) const {
@@ -7401,6 +7453,13 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
     if (!def) return;
+    // THE CAPTURE'S WORKSPACE (CLOSE-SHOT-2) records nothing: it is handed this
+    // frame's products (RayQueryTier::bindCapturePass).
+    if (mView->isCaptureWorkspace(pass->getParentNode()->getWorkspace())) {
+        if (def->mIdentifier == kHitDecodePassIdentifier || def->mPrePassMode != Ogre::PrePassUse) return;
+        mView->mEngine->mRayTier->bindCapturePass(this, mView, pass);
+        return;
+    }
     // THE HIT DECODE PASS (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): every ray
     // job TRACES in front of it — the sun contact, the reflection, the gather —
     // because a hit no cache can shade is appended to the hit list this pass
@@ -7431,6 +7490,7 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
 void ReflectPassListener::passEarlyPreExecute(Ogre::CompositorPass *pass) {
     if (!pass || !mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
     if (pass->getType() != Ogre::PASS_QUAD) return;
+    if (mView->isCaptureWorkspace(pass->getParentNode()->getWorkspace())) return;   // no motion job twice
     if (pass->getDefinition()->mIdentifier != kSsrResolvePassIdentifier) return;
     mView->mEngine->mRayTier->recordMotion(this, mView, pass);
 }
@@ -7446,6 +7506,11 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
     if (!def) return;
+    if (mView->isCaptureWorkspace(pass->getParentNode()->getWorkspace())) {
+        if (def->mIdentifier == kHitDecodePassIdentifier || def->mPrePassMode != Ogre::PrePassUse) return;
+        mView->mEngine->mRayTier->releaseCapturePass(this);
+        return;
+    }
     if (def->mIdentifier == kHitDecodePassIdentifier) {
         mView->mEngine->mRayTier->endHitDecode(this);
         return;

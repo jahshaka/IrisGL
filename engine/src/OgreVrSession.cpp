@@ -1527,6 +1527,8 @@ bool VrSession::create(std::string &reason) {
     mView->setCamera(cam);
     if (mView->camera()) mView->camera()->setVrData(&mVrData);
     mView->addWorkspaceListener(this);
+    // ...and never the capture's (CLOSE-SHOT-2): the eyes are submitted once a frame.
+    mView->excludeFromCapture(this);
     mView->setEnabled(true);
 
     // THE HANDS (phase 4). After the session and the reference space exist and

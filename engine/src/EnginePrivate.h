@@ -7278,7 +7278,6 @@ class FrameCaptureListener final : public Ogre::CompositorWorkspaceListener {
 public:
     explicit FrameCaptureListener(OgreView *view) : mView(view) {}
     void passPreExecute(Ogre::CompositorPass *pass) override;
-    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
     void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
 private:
     OgreView *mView;
@@ -7484,6 +7483,25 @@ public:
     /// passes drop both helper channels; the Atom and Photon listeners leave their
     /// viewing aids off in it.
     Ogre::CompositorWorkspace *captureWorkspace() const { return mCaptureWorkspace; }
+    bool isCaptureWorkspace(const Ogre::CompositorWorkspace *ws) const {
+        return ws && ws == mCaptureWorkspace;
+    }
+    /// The capture's first prepass-use pass copies the view's finished reflection
+    /// (RayQueryTier::bindCapturePass) — once a capture frame.
+    bool captureReflectionPending() const { return mCaptureReflectionPending; }
+    void setCaptureReflectionPending(bool on) { mCaptureReflectionPending = on; }
+    /// A local texture of the view's own chain (its scene node), or null.
+    Ogre::TextureGpu *chainTexture(const char *name) const;
+    /// A listener of this view that must NOT ride the capture's workspace (the VR
+    /// session's eye submission).
+    void excludeFromCapture(Ogre::CompositorWorkspaceListener *l);
+    bool capturesWith(const Ogre::CompositorWorkspaceListener *l) const;
+    bool captureShadowedPass(const Ogre::CompositorPassSceneDef *p) const {
+        return p && std::find(mCaptureShadowedPasses.begin(), mCaptureShadowedPasses.end(), p) !=
+                        mCaptureShadowedPasses.end();
+    }
+    /// Builds (or keeps) the persistent capture workspace for the current shape.
+    bool ensureCaptureWorkspace();
     /// The capture listener's workspacePosUpdate: records the copy (Armed -> InFlight).
     void recordFrameCapture(Ogre::CompositorWorkspace *ws);
     /// Drops whatever capture is pending (ticket, workspace and target destroyed).
@@ -7935,6 +7953,22 @@ private:
     /// view's own before either workspace runs.
     Ogre::CompositorWorkspace *mCaptureWorkspace = nullptr;
     Ogre::TextureGpu *mCaptureTarget = nullptr;
+    std::string mCaptureDef;
+    std::vector<std::string> mCaptureNodeDefs;
+    chain::ChainHandles mCaptureHandles;
+    /// What the capture workspace was built for; any change rebuilds it.
+    struct CaptureShape {
+        unsigned generation = ~0u, w = 0, h = 0, layers = 0, samples = 0;
+        Ogre::PixelFormatGpu format = Ogre::PFG_UNKNOWN;
+        bool operator==(const CaptureShape &o) const {
+            return generation == o.generation && w == o.w && h == o.h && layers == o.layers &&
+                   samples == o.samples && format == o.format;
+        }
+    } mCaptureShape;
+    bool mCaptureReflectionPending = false;
+    /// The capture definition's scene passes that name the shadow node in the view's.
+    std::vector<const Ogre::CompositorPassSceneDef *> mCaptureShadowedPasses;
+    std::vector<Ogre::CompositorWorkspaceListener *> mCaptureExcluded;
     Ogre::TextureGpu *mPhotonOverlay = nullptr;
     bool mPhotonOverlayWritten = false;
     unsigned mPhotonOverlayGeneration = 0u;
