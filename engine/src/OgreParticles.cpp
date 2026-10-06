@@ -80,6 +80,19 @@ std::string OgreScene::particleRampImage(const std::string &path) {
     if (!mParticleRampDirs.count(dir)) {
         rgm.addResourceLocation(dir, "FileSystem", kGroup, false);
         mParticleRampDirs.insert(dir);
+    } else if (!rgm.resourceExists(kGroup, file)) {
+        // A LOCATION IS INDEXED ONCE, WHEN IT IS ADDED (OgreResourceGroupManager
+        // .cpp, addResourceLocation: pArch->find("*") -> addToIndex). The store
+        // shards objects by hash, so a ramp imported AFTER an earlier ramp
+        // registered its shard is in a directory Ogre already indexed and is
+        // "not found". Re-adding the location is the public way to re-index it
+        // (per-file addToIndex is private to the group): one directory scan, on
+        // a miss only. The Ogre-native path, kept over loading the image
+        // ourselves as a manual texture: ColourImageAffector2 takes an image
+        // NAME and loads it through the resource system, so the name has to
+        // resolve there.
+        rgm.removeResourceLocation(dir, kGroup);
+        rgm.addResourceLocation(dir, "FileSystem", kGroup, false);
     }
     if (!rgm.resourceExists(kGroup, file)) {
         mError = "particle colour ramp not found: " + path;
