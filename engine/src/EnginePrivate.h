@@ -1780,6 +1780,10 @@ const char *exposureHistoryTextureName();
 /// The texture HlmsPbs composites as the SSR/ray reflection (jahSsrReflection):
 /// rgb = the reflected radiance, a = the weight the composite lerps by.
 const char *reflectionTextureName();
+/// The SSR march's one-frame colour history (jahSsrPrev): read at the start of a
+/// frame, written at its end — with the exposure history, what a second workspace
+/// of the same chain must be handed to draw the frame the first one drew.
+const char *ssrHistoryTextureName();
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -7261,17 +7265,20 @@ struct AtomOcclusionHistory {
 };
 
 /// THE PRESENTED FRAME'S CAPTURE (View::requestFrameCapture, CLOSE-SHOT-2). One per
-/// view, registered through OgreView::addWorkspaceListener while a capture is armed.
-/// On the capturing frame only: `passPreExecute` takes both helper channels out of
-/// the mask the scene pass has just set on the viewport — Ogre's own hook ("fire the
-/// listener in case it wants to change anything", CompositorPassScene::execute,
-/// after `_setVisibilityMask` and before the cull), so nothing is rebuilt and the
-/// next pass sets its own mask again — and `workspacePosUpdate` records the copy of
-/// the final target, after the view's last pass and before the swap.
+/// view, registered through OgreView::addWorkspaceListener while a capture is armed
+/// (so it rides the view's workspace AND the clean capture's). In the capture's
+/// workspace only: `passPreExecute` takes both helper channels out of the mask the
+/// scene pass has just set on the viewport — Ogre's own hook ("fire the listener in
+/// case it wants to change anything", CompositorPassScene::execute, after
+/// `_setVisibilityMask` and before the cull) — and `workspacePreUpdate` hides the
+/// HUD. `workspacePosUpdate` records the copy of the final target: the window's at
+/// the end of the view's workspace (keepHelpers), the capture target's at the end
+/// of the capture's.
 class FrameCaptureListener final : public Ogre::CompositorWorkspaceListener {
 public:
     explicit FrameCaptureListener(OgreView *view) : mView(view) {}
     void passPreExecute(Ogre::CompositorPass *pass) override;
+    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
     void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
 private:
     OgreView *mView;
@@ -7462,20 +7469,27 @@ public:
     void notePresented();
 
     // THE PRESENTED FRAME'S CAPTURE (CLOSE-SHOT-2; View::requestFrameCapture).
-    bool requestFrameCapture(bool keepHelpers) override;
+    bool requestFrameCapture(bool keepHelpers, bool alsoPresented) override;
     FrameCaptureState frameCaptureState() override;
-    bool takeFrameCapture(Image &out, bool wait) override;
+    bool takeFrameCapture(Image &out, bool wait, Image *presented) override;
     /// OgreEngine::renderOneFrame, before any workspace of the frame updates: does
-    /// THIS frame capture (armed, enabled, a scene workspace to draw it)? The answer
-    /// holds for the whole frame — the HUD owner, the Atom and Photon listeners and
-    /// the capture listener all read it — and is dropped by notePresented.
+    /// THIS frame capture (armed, enabled, a scene workspace to draw it)? A clean
+    /// capture builds its own workspace here (see mCaptureWorkspace). The flag is
+    /// one frame's: notePresented drops it.
     void beginFrameCapture();
     bool captureThisFrame() const { return mCaptureThisFrame; }
     bool captureKeepsHelpers() const { return mCaptureKeepHelpers; }
+    /// The workspace a clean capture draws through this frame, or null. Its scene
+    /// passes drop both helper channels; the Atom and Photon listeners leave their
+    /// viewing aids off in it.
+    Ogre::CompositorWorkspace *captureWorkspace() const { return mCaptureWorkspace; }
     /// The capture listener's workspacePosUpdate: records the copy (Armed -> InFlight).
-    void recordFrameCapture();
-    /// Drops whatever capture is pending (ticket destroyed, listener removed).
+    void recordFrameCapture(Ogre::CompositorWorkspace *ws);
+    /// Drops whatever capture is pending (ticket, workspace and target destroyed).
     void releaseFrameCapture();
+    /// The clean capture's workspace and target, gone (between frames; Ogre defers
+    /// the images' destruction past the frames still using them).
+    void destroyCaptureWorkspace();
 
     void setPostFx(const PostFxDesc &fx) override;
     const PostFxDesc &postFx() const override;
@@ -7789,7 +7803,8 @@ public:
     /// the same origin of its own layer (multiview). `w` stays the PAIR's width.
     static Ogre::TextureGpu *createRtt(Ogre::Root *root, const std::string &name,
                                        unsigned w, unsigned h, unsigned samples = 1,
-                                       unsigned layers = 1);
+                                       unsigned layers = 1,
+                                       Ogre::PixelFormatGpu format = Ogre::PFG_RGBA8_UNORM);
     /// Rounds down to a power of two and clamps to [1, 16] — what the backend
     /// will even ask the driver for (the driver may still clamp further).
     static unsigned sanitizeSamples(unsigned samples);
@@ -7904,9 +7919,21 @@ private:
     /// CLOSE-SHOT-2: the presented frame's capture (requestFrameCapture).
     std::unique_ptr<FrameCaptureListener> mCaptureListener;
     Ogre::AsyncTextureTicket *mCaptureTicket = nullptr;
+    /// A clean capture's companion: the same frame as presented (alsoPresented).
+    Ogre::AsyncTextureTicket *mPresentedTicket = nullptr;
+    bool mCaptureAlsoPresented = false;
     FrameCaptureState mCaptureState = FrameCaptureState::Idle;
     bool mCaptureKeepHelpers = false;
     bool mCaptureThisFrame = false;
+    /// A CLEAN capture never touches the presented frame: the view's chain is
+    /// instanced a second time, for that frame only, into a target of the window's
+    /// size and format, updated AFTER the view's own workspace (so the presented
+    /// frame is computed exactly as it would have been) with the helper channels
+    /// dropped — the frame's settled GI and caches, its camera, its listeners; the
+    /// two workspace-local histories (exposure, SSR colour) copied in from the
+    /// view's own before either workspace runs.
+    Ogre::CompositorWorkspace *mCaptureWorkspace = nullptr;
+    Ogre::TextureGpu *mCaptureTarget = nullptr;
     Ogre::TextureGpu *mPhotonOverlay = nullptr;
     bool mPhotonOverlayWritten = false;
     unsigned mPhotonOverlayGeneration = 0u;

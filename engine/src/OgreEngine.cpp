@@ -1179,10 +1179,6 @@ void OgreEngine::renderOneFrame() {
                 owner = v.get();
                 break;
             }
-            // A CAPTURED FRAME CARRIES NO HUD: the readout and the cover are the
-            // driver's, never the picture (the overlay set is process-wide, so it is
-            // hidden for this one frame and the next frame's apply restores it).
-            if (owner && owner->captureThisFrame()) owner = nullptr;
             if (owner) {
                 RenderStats stats;
                 renderStats(stats);
