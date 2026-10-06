@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "document/scenegraph/scene.h"
+#include "core/colorjson.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/lightnode.h"
 #include "document/scenegraph/decalnode.h"
@@ -513,19 +514,13 @@ Scene::Scene()
 
 	skyGuid = IrisUtils::generateGUID();
 
-	const auto jsonColour = [](const QColor &c) {
-		QJsonObject o;
-		o["r"] = c.red(); o["g"] = c.green(); o["b"] = c.blue(); o["a"] = c.alpha();
-		return o;
-	};
-
 	QJsonObject singleColourBlock;
-	singleColourBlock.insert("skyColor", jsonColour(skyColor));
+	singleColourBlock.insert("skyColor", iris::colorToJson(skyColor));
 
 	QJsonObject gradientBlock;
-	gradientBlock.insert("gradientTop", jsonColour(QColor(255, 146, 138)));
-	gradientBlock.insert("gradientMid", jsonColour(QColor("white")));
-	gradientBlock.insert("gradientBot", jsonColour(QColor(64, 128, 255)));
+	gradientBlock.insert("gradientTop", iris::colorToJson(QColor(255, 146, 138)));
+	gradientBlock.insert("gradientMid", iris::colorToJson(QColor("white")));
+	gradientBlock.insert("gradientBot", iris::colorToJson(QColor(64, 128, 255)));
 	gradientBlock.insert("gradientOffset", .73f);
 
 	skyData.insert("SingleColor", singleColourBlock);

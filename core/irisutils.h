@@ -56,18 +56,6 @@ public:
         return vec;
     }
 
-    static QColor readColor(const QJsonObject &colorObj) {
-        if (colorObj.isEmpty()) return QColor();
-
-        QColor col;
-        col.setRed(colorObj["r"].toInt(0));
-        col.setGreen(colorObj["g"].toInt(0));
-        col.setBlue(colorObj["b"].toInt(0));
-        col.setAlpha(colorObj["a"].toInt(255));
-
-        return col;
-    }
-
     static bool removeDir(const QString &path) {
         QDir dirToRemove(path);
         return dirToRemove.removeRecursively();
