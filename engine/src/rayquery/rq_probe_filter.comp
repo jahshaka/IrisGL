@@ -31,6 +31,12 @@
 //        emitter by 7-31 % in the lane's A/B. A hit and a miss beside each
 //        other are two surfaces here, never averaged — the noise of a light's
 //        edge is the pixel history's to remove (rq_probe_integrate.comp).
+//    THE REACH (GATHER-NOISE-1, p.knobs4.z): 2 since that lane — the 3 x 3
+//    plus the ring of eight at two cells (17 taps), each under the same two
+//    tests: -23 % of the moving floor's noise on Showroom 2, its mean unmoved
+//    against a converged reference (gi.flythrough_noise). With the trace's
+//    cross-probe strata (rq_probe_gather.comp) the taps of one direction are
+//    stratified samples of the texel, not independent ones.
 //    The probe's own texel always weighs 1. An ADAPTIVE probe filters against
 //    its CELL's neighbours (its own cell's uniform probe fails its plane by
 //    construction — that is why it was appended). The nine taps are read in
@@ -82,9 +88,11 @@ shared vec4 gSum[8][64];
 /// workgroup by eight lanes, instead of by all 64 lanes nine times over (every
 /// lane fetched nine records and rebuilt nine frames). Same arithmetic, same
 /// fixed order: the filtered map is bit-identical.
-shared vec4 gTapT[8];
-shared vec4 gTapB[8];
-shared vec4 gTapN[8];
+/// Lanes 8..15 fill the SECOND RING (the eight cells at two cells' offset)
+/// when the filter's reach is 2 (p.knobs4.z, GatherTuning::filterRadius).
+shared vec4 gTapT[16];
+shared vec4 gTapB[16];
+shared vec4 gTapN[16];
 
 /// A neighbour's ray whose hit distance is this far off this probe's in the
 /// same direction (as the RATIO of the nearer to the farther) is weighed out
@@ -121,11 +129,15 @@ void main()
 	const ivec2 cell = ivec2( int( cellIndex ) % max( grid.x, 1 ), int( cellIndex ) / max( grid.x, 1 ) );
 
 	// ---- THE TAP TABLE: lane k (0..7) fills neighbour k, row by row with the
-	// centre skipped — the fixed order the taps are summed in.
-	if( lane < 8u )
+	// centre skipped — the fixed order the taps are summed in; lanes 8..15 the
+	// same eight directions at two cells (the filter's reach 2).
+	const int taps = p.knobs4.z > 1.5 ? 16 : 8;
+	if( lane < uint( taps ) )
 	{
-		const int k = int( lane ) < 4 ? int( lane ) : int( lane ) + 1;
-		const ivec2 nc = cell + ivec2( k % 3 - 1, k / 3 - 1 );
+		const int kk = int( lane ) & 7;
+		const int ring = lane < 8u ? 1 : 2;
+		const int k = kk < 4 ? kk : kk + 1;
+		const ivec2 nc = cell + ivec2( k % 3 - 1, k / 3 - 1 ) * ring;
 		float wPlane = 0.0;
 		vec3 nT = vec3( 0.0 ), nB = vec3( 0.0 ), nN = vec3( 0.0, 0.0, 1.0 );
 		ivec2 nBlock = ivec2( 0 );
@@ -180,7 +192,7 @@ void main()
 			// THE NINE TAPS, IN ONE FIXED ORDER (row by row); the centre is this
 			// probe itself and is already in the sum. The neighbours' frames and
 			// plane weights come from the workgroup's tap table.
-			for( int k = 0; k < 8; ++k )
+			for( int k = 0; k < taps; ++k )
 			{
 				const float wPlane = gTapT[k].w;
 				if( wPlane <= 0.0 )

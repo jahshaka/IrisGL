@@ -635,6 +635,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
            a.rayReflect == b.rayReflect && a.hitDecode == b.hitDecode &&
+           a.hitDecodeAll == b.hitDecodeAll &&
            a.atomDraw == b.atomDraw && a.atomOcclusion == b.atomOcclusion &&
            // THE PREPASS'S SHAPE, not the rows that ask for it (PHOTON-GATHER-1d;
            // RAYS-1's F4): the gather's and the sun contact's rows add NOTHING
@@ -1915,16 +1916,16 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // THE HIT LIST (PHOTON-HIT-SHADE-1): two UAVs the ray jobs append to and
         // the decode's target, W x kHitListHeightFactor H — see ChainDesc::hitDecode.
         if (desc.hitDecode) {
+            const float listFactor = desc.hitDecodeAll ? kHitListHeightFactorDecodeAll : kHitListHeightFactor;
             for (const auto &t : { std::make_pair(kHitIds, Ogre::PFG_RGBA32_UINT),
                                    std::make_pair(kHitDest, Ogre::PFG_R32_UINT) }) {
-                auto *td = addTex(n, t.first, t.second, 0u, 0u, 1.0f, kHitListHeightFactor);
+                auto *td = addTex(n, t.first, t.second, 0u, 0u, 1.0f, listFactor);
                 // RenderToTexture as well: a node texture carries the compositor's
                 // depth-buffer defaults, which Ogre sets on render targets only
                 // (jahSsrReflection's shape: RTT | Uav).
                 td->textureFlags = Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::Uav;
             }
-            auto *td = addTex(n, kHitRadiance, Ogre::PFG_RGBA16_FLOAT, 0u, 0u, 1.0f,
-                              kHitListHeightFactor);
+            auto *td = addTex(n, kHitRadiance, Ogre::PFG_RGBA16_FLOAT, 0u, 0u, 1.0f, listFactor);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
     }

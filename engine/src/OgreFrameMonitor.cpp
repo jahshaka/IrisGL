@@ -1031,7 +1031,56 @@ const ArmDef kArms[] = {
       "never read from the cards or the voxels (SPECKLE-FIX-1). The route-agreement instrument: "
       "the decode answers a gather hit with the diffuse response only, exactly what the caches "
       "store, so the two routes on the same hit agree within the caches' own quantisation "
-      "(gi.speckle)." },
+      "(gi.speckle). While on, the hit list is SIZED for every gather ray of an 8-px stride "
+      "(kHitListHeightFactorDecodeAll; toggling it rebuilds the view's graph) - at the shipped size "
+      "it dropped 46 % of Showroom 2's hits as black; any drop left is giStatus rayQuery.hitDropped "
+      "and a measurement that reads it refuses." },
+    { "gather.octRes", 0.0, 0.0, 8.0,
+      "The screen-probe gather's probe map resolution: rays per probe = octRes^2 (GATHER-NOISE-1's "
+      "noise lever; GatherTuning::octRes). 0 = the tier's (8: 64 rays). At most 8 - one ray is one "
+      "thread of the trace's 8x8 workgroup." },
+    { "gather.stride", 0.0, 0.0, 64.0,
+      "The screen-probe gather's probe stride in pixels (GatherTuning::probeStride). 0 = the tier's "
+      "(8 at Epic, 16 at High and Medium)." },
+    { "gather.historyFrames", 0.0, 0.0, 64.0,
+      "The gather's pixel history floor in frames: a true mean that long, then an EMA at 1/N "
+      "(GatherTuning::historyFrames). 0 = the shipped value; clamped to the history count's range." },
+    { "gather.filterRadius", 0.0, 0.0, 2.0,
+      "The probe-space filter's reach (GatherTuning::filterRadius): 1 = the 3x3 neighbourhood, "
+      "2 = plus the ring of eight at two cells (17 taps). 0 = the shipped reach." },
+    { "gather.restOff", 0.0, 0.0, 1.0,
+      "No rest mean (GatherTuning::restOff): a still view keeps running the history's EMA instead of "
+      "handing over to the rest mean and holding - the door that measures the history at rest." },
+    { "gather.restFrames", 0.0, 0.0, 4096.0,
+      "The rest mean's length in frames (GatherTuning::restFrames): a still view averages this many "
+      "rest frames before it holds. 0 = the settle. With gather.restSeed it builds a CONVERGED "
+      "reference (gi.flythrough_noise)." },
+    { "gather.restSeed", 0.0, 0.0, 4096.0,
+      "The rest frames' sample-sequence offset (GatherTuning::restSeed): two references of one pose "
+      "at two seeds are independent draws. 0 = the shipped sequence." },
+    { "gather.ageView", 0.0, 0.0, 64.0,
+      "THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument): N > 0 replaces the gather's "
+      "answer with magenta where the pixel's reprojected history held fewer than N frames and black "
+      "elsewhere (read in the diffuse photon view). 0 = off." },
+    { "gather.freezeFrame", 0.0, 0.0, 1.0,
+      "The gather's sample sequence held at one frame (GatherTuning::freezeFrameIndex): every frame "
+      "draws the same rays at the same cell, so two runs of one path differ only by what is NOT the "
+      "gather's Monte-Carlo (the caches' state, the rounding) - GATHER-NOISE-1's separation arm." },
+    { "gather.youngFrames", 0.0, 0.0, 64.0,
+      "THE YOUNG HISTORY'S REACH (GatherTuning::youngFrames): a pixel whose history holds fewer "
+      "frames than this reads a wider probe neighbourhood, narrowing to the bilinear four as its "
+      "history fills. 0 = the shipped value; 1 with gather.youngReach 1 = off." },
+    { "gather.youngReach", 0.0, 0.0, 4.0,
+      "The young pixel's reach in probe cells at a history of 0 (GatherTuning::youngReach; 1 = the "
+      "bilinear four, i.e. off). 0 = the shipped value." },
+    { "gather.validationOff", 0.0, 0.0, 1.0,
+      "THE HISTORY'S VALIDATION OFF (GatherTuning::historyValidationOff, a test door): every "
+      "reprojected texel on the previous picture is accepted, the distance and normal tests off - "
+      "what separates a pixel new to the screen from one the tests rejected (GATHER-NOISE-1)." },
+    { "gather.crossStrata", 0.0, 0.0, 8.0,
+      "THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GatherTuning::crossStrata): a ray's jitter in "
+      "its octahedral texel is confined to one of N x N sub-cells, any N x N block of probes covering "
+      "all of them once (shifted at random per texel and frame). 1 = off; 0 = the shipped N." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

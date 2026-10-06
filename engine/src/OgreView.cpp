@@ -58,6 +58,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     mChainRayReflect = chainDesc().rayReflect;
     mChainPrepass = chainDesc().prepass();
     mChainHitDecode = chainDesc().hitDecode;
+    mChainHitDecodeAll = chainDesc().hitDecodeAll;
     mChainAtomDraw = chainDesc().atomDraw;
     mChainAtomOcclusion = chainDesc().atomOcclusion;
     mChainSsao = chainDesc().ssao;
@@ -200,6 +201,7 @@ ChainDesc OgreView::chainDesc() const {
         d.refractions = mPostFx.refractions;
         // THE HIT DECODE (PHOTON-HIT-SHADE-1): the prepass' own rule, below.
         d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
+        d.hitDecodeAll = d.hitDecode && mEngine && mEngine->armRegistry().on(ArmId::GatherDecodeHits);
         d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
         finishAtomOcclusion(d);
         return d;   // displayEncode stays false: the Plain instrument (ChainDesc::displayEncode)
@@ -315,6 +317,8 @@ ChainDesc OgreView::chainDesc() const {
     // hits that no cache can shade are decoded — and NOT tied to which row
     // traces, so toggling the gather where the prepass runs is no new graph.
     d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
+    // ...sized for every gather ray while the arm "gather.decodeHits" is on.
+    d.hitDecodeAll = d.hitDecode && mEngine && mEngine->armRegistry().on(ArmId::GatherDecodeHits);
     // THE PASSTHROUGH SHAPE ON A WINDOW OR A MULTISAMPLED TARGET has no id pass: its
     // scene pass renders straight into that target, and the id pass's depth cannot be
     // that pass's depth — Ogre pairs a window's colour with the window's own depth
@@ -1482,6 +1486,7 @@ void OgreView::rebuildDetachedWorkspaceDef() {
     mChainRayReflect = chainDesc().rayReflect;
     mChainPrepass = chainDesc().prepass();
     mChainHitDecode = chainDesc().hitDecode;
+    mChainHitDecodeAll = chainDesc().hitDecodeAll;
     mChainAtomDraw = chainDesc().atomDraw;
     mChainAtomOcclusion = chainDesc().atomOcclusion;
     mChainSsao = chainDesc().ssao;

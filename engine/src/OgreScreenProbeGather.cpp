@@ -185,6 +185,9 @@ struct GatherParams {
     /// THE ALPHA TABLE (REFLECT-MOVERS-2): xy = its device address, bit-copied;
     /// z = the arm "gather.decodeHits"; w = the mover gate.
     float alpha[4] = {};
+    /// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1): x = the history length below
+    /// which a pixel widens, y = the reach in cells at a history of 0.
+    float young[4] = {};
 };
 
 /// THE PIXEL HISTORY'S BLEND FLOOR (PHOTON-GATHER-1c item 1): the smallest
@@ -211,6 +214,25 @@ unsigned settleFramesOf(unsigned historyFrames) {
     const double h = double(std::max(historyFrames, 2u));
     return unsigned(std::ceil(std::log(1.0 / double(kGatherSettleCodes)) / std::log(1.0 - 1.0 / h)));
 }
+/// The rest mean's length as a tuning runs it: the settle, or the measurement
+/// door GatherTuning::restFrames (the converged reference).
+unsigned restLengthOf(const GatherTuning &t, unsigned historyFrames) {
+    return t.restFrames ? t.restFrames : settleFramesOf(historyFrames);
+}
+/// The probe-space filter's reach in cells as a tuning runs it (1 = 3 x 3,
+/// 2 = plus the ring at two cells).
+constexpr unsigned kFilterRadius = 2u;
+/// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1; rq_probe_integrate.comp): the
+/// history length below which a pixel reads wider, and the reach in probe
+/// cells at a history of 0. MEASURED, not chosen: see the lane's evidence.
+constexpr unsigned kYoungFrames = 12u;
+constexpr float kYoungReach = 4.0f;
+/// THE CROSS-PROBE STRATA (GATHER-NOISE-1; rq_probe_gather.comp): N, the side of
+/// the sub-cell grid a texel is split into across an N x N block of probes.
+constexpr unsigned kCrossStrata = 3u;
+unsigned filterRadiusOf(const GatherTuning &t) {
+    return t.filterRadius ? std::min(t.filterRadius, 2u) : kFilterRadius;
+}
 /// THE REST FRAMES' SAMPLE SEQUENCE: frame index kRestSequenceBase + k at the
 /// k-th rest frame, so the rest mean is the same set of samples whoever asks and
 /// whatever came before — a function of the scene and the camera alone.
@@ -227,7 +249,10 @@ bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
            a.farQueryOff == b.farQueryOff &&
            a.shBands == b.shBands && a.filterOff == b.filterOff &&
            a.historyFrames == b.historyFrames &&
-           a.historyValidationOff == b.historyValidationOff && a.restOff == b.restOff;
+           a.historyValidationOff == b.historyValidationOff && a.restOff == b.restOff &&
+           a.filterRadius == b.filterRadius && a.restFrames == b.restFrames &&
+           a.restSeed == b.restSeed && a.youngFrames == b.youngFrames &&
+           a.youngReach == b.youngReach && a.crossStrata == b.crossStrata;
 }
 
 /// THE ADAPTIVE TEST'S TWO TOLERANCES, and why they are constants rather than
@@ -843,6 +868,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.irradianceW = v.irrHost.empty() ? 0u : v.w * v.layers;
     out.irradianceH = v.irrHost.empty() ? 0u : v.h;
     out.irradianceFrame = v.irrHostFrame;
+    out.frame = v.frame;
     out.adaptiveCells = v.adaptiveHost;
     // THE SETTLED HISTORY (GatherStatus says what and why): every latest view's
     // history N frames past its last RESTART. The rest (and its hold) is
@@ -1083,7 +1109,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         v.sinceRestart = restart ? 0u : std::min(v.sinceRestart + 1u, 1u << 20);
         v.restFrames = still ? std::min(v.restFrames + 1u, 1u << 20) : 0u;
         v.historyFramesLast = historyFramesOf(in.tuning);
-        if (still && v.restFrames > settleFramesOf(v.historyFramesLast)) {
+        if (still && v.restFrames > restLengthOf(in.tuning, v.historyFramesLast)) {
             // THE RE-BIND IS THE SECOND HALF'S (finish): the registration is
             // scoped to the opaque pass, and the hit decode pass runs between.
             v.finishPending = true;
@@ -1162,7 +1188,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // rest mean is the same samples whatever came before it (PHOTON-GATHER-1d).
     pp.knobs[2] = in.tuning.freezeFrameIndex
                       ? 0.0f
-                      : float(v.restFrames ? kRestSequenceBase + v.restFrames : (v.frame & 0xFFFFu));
+                      : float(v.restFrames ? kRestSequenceBase + in.tuning.restSeed * 4096u + v.restFrames
+                                           : (v.frame & 0xFFFFu));
     pp.knobs[3] = float(in.cascadeCount);
     pp.knobs2[0] = in.anisotropic ? 1.0f : 0.0f;
     // THE RAY'S START, OFF THE SURFACE BY AN EPSILON — never by half a voxel
@@ -1217,7 +1244,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // measurement arm asks for 4), the weight floor, the filter on or off.
     pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
     pp.knobs4[1] = kWeightFloor;
-    pp.knobs4[2] = in.tuning.filterOff ? 0.0f : 1.0f;
+    pp.knobs4[2] = in.tuning.filterOff ? 0.0f : float(filterRadiusOf(in.tuning));
     pp.knobs4[3] = in.photonOverlay ? 1.0f : 0.0f;   // THE PHOTON VIEW's discs (PHOTON-VIEW-1)
     // PHOTON-GATHER-1c: the previous camera, the view's age, the history's floor,
     // the lever.
@@ -1231,7 +1258,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.knobs5[1] = 1.0f / float(v.historyFramesLast);
     // THE REST MEAN (PHOTON-GATHER-1d): the rest frame k and N.
     pp.knobs6[0] = temporal ? float(v.restFrames) : 0.0f;
-    pp.knobs6[1] = float(settleFramesOf(v.historyFramesLast));
+    pp.knobs6[1] = float(restLengthOf(in.tuning, v.historyFramesLast));
     // ...and the view's ADVANCING frame counter (PHOTON-GA-VR): the packed
     // history's stochastic rounding is keyed on it, never on the sample
     // sequence's frame above, which a frozen A/B holds still.
@@ -1299,6 +1326,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // before (written, never read, with one eye).
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;
     pp.stereo[1] = float(v.eyeGridW);
+    pp.stereo[2] = float(in.tuning.ageView);   // THE HISTORY-AGE VIEW (an instrument; 0 = off)
+    // THE YOUNG HISTORY'S REACH (GATHER-NOISE-1).
+    pp.young[0] = float(in.tuning.youngFrames ? in.tuning.youngFrames : kYoungFrames);
+    pp.young[1] = in.tuning.youngReach > 0.0f ? in.tuning.youngReach : kYoungReach;
+    // THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GATHER-NOISE-1).
+    pp.young[2] = float(in.tuning.crossStrata ? in.tuning.crossStrata : kCrossStrata);
     std::memcpy(pp.camPos2, in.camPos2, sizeof(pp.camPos2));
     put3(pp.rayTL2, in.rayTL2, 0.0f);
     put3(pp.rayRight2, in.rayRight2, 0.0f);
