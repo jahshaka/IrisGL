@@ -498,13 +498,8 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     mWs = cm->addWorkspace(sm, externals, mCam[0], mWsDef, true, 0);
     if (!mWs) { err = "surface cache: addWorkspace failed"; return false; }
     mWs->setExecutionMask(0u);
-    // THE CAPTURE NEVER WAITS FOR A SHADER (ASYNC-SHADERS-1). A card is drawn the first time
-    // the moment its object appears — with a material the background compiler may still be
-    // building — and a blocking capture waited for that compile on the UI thread (measured:
-    // the one live compile left after a new material). It compiles in the background like
-    // the view instead; a batch that drew any placeholder or skipped any draw is DISCARDED
-    // (workspacePosUpdate) and its cards stay queued, so the atlas never holds a grey card.
-    mWs->setAsyncShaderCompile(true);
+    // THE CAPTURE'S COMPILE MODE is the scene's views' (setAsyncShaders).
+    mWs->setAsyncShaderCompile(mAsyncShaders);
     mWs->addListener(this);
     // ...AND THE MANAGER'S FRAME HEAD, where the capture flag is cleared
     // unconditionally: a capture that threw inside `_update` never reaches its
@@ -1004,6 +999,11 @@ void SurfaceCache::aimCamera(const CardRec &card, unsigned slot) {
 // fix), and these four hooks do the per-card work around each pass and the
 // copies after the last one.
 void SurfaceCache::allWorkspacesBeforeBeginUpdate() { gCapturing = false; }
+
+void SurfaceCache::setAsyncShaders(bool on) {
+    mAsyncShaders = on;
+    if (mWs) mWs->setAsyncShaderCompile(on);
+}
 
 void SurfaceCache::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     if (ws != mWs) return;
@@ -1546,7 +1546,8 @@ void SurfaceCache::relightCards() {
     // it has and stays owed (c.relight), so the next frame that finds the shader built
     // relights exactly these. With no background service the answer is "ready" and the
     // dispatch compiles as it always did.
-    const bool shaderReady = hc->requestAsync(mLightJob) != Ogre::HlmsCompute::AsyncPending;
+    const bool shaderReady =
+        !mAsyncShaders || hc->requestAsync(mLightJob) != Ogre::HlmsCompute::AsyncPending;
     if (shaderReady) {
         Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
         mLightJob->analyzeBarriers(rt);

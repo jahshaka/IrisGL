@@ -1842,6 +1842,7 @@ void OgreView::updateGi() {
 // frame and take the view's mode from their listener (OgrePlanar.cpp).
 void OgreView::setAsyncShaders(bool on) {
     mAsyncShaders = on;
+    if (mScene) mScene->setAsyncShaders(on);   // its captures follow (SurfaceCache)
     if (mWorkspace) mWorkspace->setAsyncShaderCompile(on);
     if (mPipWorkspace) mPipWorkspace->setAsyncShaderCompile(on);
 }

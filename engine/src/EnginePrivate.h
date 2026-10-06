@@ -4122,6 +4122,10 @@ public:
                     NodeId onlyNode = 0) override;
     bool dumpCardAtlas(const std::string &prefix, std::string &err) override;
     const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
+    /// The compile mode the scene's views ask for (View::setAsyncShaders); its own captures
+    /// follow it (ASYNC-SHADERS-1).
+    void setAsyncShaders(bool on) { mAsyncShaders = on; }
+    bool asyncShaders() const { return mAsyncShaders; }
     /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the scene's in-frame
     /// answers to the cache (OgreGpuScene.cpp: the traced shadow-casting movers,
     /// the frame's moved set, the still casters a transform write moved) and the
@@ -4172,6 +4176,7 @@ public:
     }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     std::unique_ptr<SurfaceCache> mSurfaceCache;
+    bool mAsyncShaders = false;
     /// The ray rule's footprint per metre of distance, as updateRayLevels last
     /// computed it (the surface cache's still-trace lift, CardSceneView).
     float mRayFootprintPerMetre = 0.0f;
