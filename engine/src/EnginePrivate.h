@@ -306,6 +306,10 @@ bool surfaceCardsCapturing();
 /// The card capture's workspace, for the monitor's listener walk. Null until a
 /// scene turns `GiParams::cards` on.
 Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache);
+/// The placeholder draws / pending skips made inside the cache's own captures (ASYNC-SHADERS-1).
+/// Kept per SceneManager across the cache's rebuilds; `forget` drops the entry (scene teardown).
+void surfaceCacheAsyncDraws(const Ogre::SceneManager *sm, unsigned long long &placeholders,
+                            unsigned long long &skips, bool forget = false);
 
 class OgreView;
 
@@ -2704,6 +2708,8 @@ public:
 
     ShaderCacheStats stats(Ogre::Root *root) const;
     void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;
+    /// Of `compiled`, those compiled on the background compiler's threads (ASYNC-SHADERS-1).
+    void backgroundCompiles(unsigned &background) const;
     /// THE RENDER-LOOP MONITOR'S COMPILE FEED. Ogre exposes no "a shader was
     /// compiled" callback — the counter is a log listener — and with
     /// OGRE_SHADER_COMPILATION_THREADING_MODE=2 it fires on WORKER threads, so
@@ -7489,6 +7495,8 @@ public:
     unsigned long long workspaceFramesPresented() const { return mWorkspaceFramesPresented; }
     unsigned long long blankFramesPresented() const override;
     bool warmUpShaders() override;
+    void setAsyncShaders(bool on) override;
+    bool asyncShaders() const override;
     /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts
     /// this frame if the view was actually part of it (enabled + workspace +
     /// scene). The one place mFramesPresented moves up.
@@ -7914,6 +7922,8 @@ private:
     Ogre::TextureGpu          *mTexture;
     Ogre::Camera              *mCamera    = nullptr;
     Ogre::CompositorWorkspace *mWorkspace = nullptr;
+    /// View::setAsyncShaders (ASYNC-SHADERS-1): re-applied to every workspace this view builds.
+    bool mAsyncShaders = false;
     OgreScene                 *mScene     = nullptr;
     /// The clear-only workspace, its camera on the engine's blank scene manager
     /// and its definitions (chain::buildBlank). Live exactly while no scene is
@@ -8665,6 +8675,9 @@ public:
     void setCompileObserver(std::function<void()> observer) override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;
+    void setAsyncShaderThreads(unsigned threads) override;
+    AsyncShaderStats asyncShaderStats() const override;
+    void waitForAsyncShaders() override;
 
     ~OgreEngine() override;
 
@@ -8753,6 +8766,14 @@ private:
     /// EngineConfig::headless: the NULL render system is loaded, mNullWindow is
     /// the 1x1 window IT created at boot, and no View can exist.
     bool            mHeadless = false;
+    /// The background shader compiler's thread count (ASYNC-SHADERS-1;
+    /// EngineConfig::asyncShaderThreads, JAH_ASYNC_SHADER_THREADS).
+    unsigned        mAsyncShaderThreads = 2;
+    /// Placeholder draws / pending skips of scenes already destroyed (asyncShaderStats).
+    unsigned long long mRetiredPlaceholderDraws = 0;
+    unsigned long long mRetiredPendingSkips = 0;
+    /// Starts it and installs the placeholder (ensureHlms; see the definition).
+    void startAsyncShaders();
     /// Plugin_ParticleFX2 loaded: the emitter/affector factories exist. False
     /// leaves billboard sets working and setParticleSystem failing cleanly.
     bool            mHasParticleFX2 = false;

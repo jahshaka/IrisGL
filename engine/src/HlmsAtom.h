@@ -221,6 +221,9 @@ public:
     /// Destroys every twin (and the bucket table). Called before the PBS datablocks
     /// they point at can die.
     void destroyDecodeTwins();
+    /// THE ASYNCHRONOUS PLACEHOLDER (ASYNC-SHADERS-1): makes this Hlms' placeholder from the
+    /// PBS one (see the definition). Idempotent; false + `err` when it cannot.
+    bool installAsyncPlaceholder(Ogre::HlmsPbsDatablock *pbsPlaceholder, std::string &err);
     /// A PBS DATABLOCK IS DYING OR CHANGED ITS PERMUTATION: it leaves its bucket
     /// BEFORE it dies — a twin keeps a member's pointer (fillBuffersForV2 binds its
     /// pool) and the maps are keyed by it, so a recycled address would find a stale
@@ -477,6 +480,14 @@ private:
     uint32_t takeClass();
     void releaseClass(uint32_t c);
     Ogre::HlmsPbsDatablock *mClassifyDb = nullptr;
+    /// THE ASYNCHRONOUS PLACEHOLDER (ASYNC-SHADERS-1; installAsyncPlaceholder): the clone the
+    /// fork's RenderQueue draws a pending bucket with, and the PBS placeholder whose pool slot
+    /// its permutation reads.
+    Ogre::HlmsPbsDatablock *mPlaceholderTwin = nullptr;
+    Ogre::HlmsPbsDatablock *mPlaceholderPbs = nullptr;
+    /// HlmsJson round trip of a PBS datablock into this Hlms under `name` (the twins' copy).
+    Ogre::HlmsPbsDatablock *cloneIntoAtom(Ogre::HlmsPbsDatablock *pbs, const Ogre::String &name,
+                                          std::string &err);
     unsigned long long mTwinEpoch = 0ull;
 
     /// The product's decode draws, per SceneManager: the hit decode's

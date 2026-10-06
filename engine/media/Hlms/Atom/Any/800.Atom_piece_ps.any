@@ -849,11 +849,21 @@
 // instance table through a flat interpolant; a decode draw has one draw and many
 // materials, so the index is the id buffer's - the PBS datablock's slot in the PBS
 // pool HlmsAtom bound at materialArray. Everything downstream is unchanged.
+// THE ASYNCHRONOUS PLACEHOLDER (ASYNC-SHADERS-1) reads instead the neutral grey's
+// constants, at the slot the engine baked into its permutation (the placeholder never
+// moves in its pool, and HlmsAtom binds that pool for the draw): every surface whose
+// own permutation is still being built off the frame reads as the same grey, lit like
+// the scene with its own normal and position.
 @undefpiece( LoadMaterial )
 @piece( LoadMaterial )
-	ushort materialId = ushort( atomMaterialSlot );
+	@property( jah_async_placeholder )
+		ushort materialId = ushort( @value( jah_async_placeholder_slot ) );
+	@else
+		ushort materialId = ushort( atomMaterialSlot );
+	@end
 	#define material materialArray[materialId]
 @end
+
 
 // The light mask is the same kind of fact (FINDINGS Q2): the object's, from the GPU
 // scene, never the full-screen draw's.

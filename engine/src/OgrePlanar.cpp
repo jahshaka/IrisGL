@@ -55,6 +55,8 @@
 //     the slots it creates. Any parameter change therefore rebuilds the whole arm.
 #include "EnginePrivate.h"
 
+#include <Compositor/OgreCompositorNode.h>
+#include <Compositor/OgreCompositorWorkspace.h>
 #include <Compositor/OgreCompositorWorkspaceDef.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <Compositor/Pass/PassMipmap/OgreCompositorPassMipmapDef.h>
@@ -102,6 +104,20 @@ void WorkspaceListener::passEarlyPreExecute(Ogre::CompositorPass *pass) {
     const Ogre::Real aspect = mCamera->getAutoAspectRatio()
                                   ? pass->getViewportAspectRatio(0u)
                                   : mCamera->getAspectRatio();
+    // THE MIRRORS COMPILE THE WAY THEIR VIEW DOES (ASYNC-SHADERS-1). Each actor slot has a
+    // workspace of its own, which a nested update would otherwise run BLOCKING — the
+    // owner's smoke caught exactly that stall inside PlanarReflections::update. A mirror
+    // is re-rendered every frame, so a placeholder in it lasts until the shader lands, as
+    // in the view. The slots are re-assigned by update(), so the flag is set on all of
+    // them every time.
+    {
+        const Ogre::CompositorNode *node = pass->getParentNode();
+        const Ogre::CompositorWorkspace *ws = node ? node->getWorkspace() : nullptr;
+        const bool async = ws && ws->getAsyncShaderCompile();
+        for (size_t i = 0; i < mReflections->getNumActiveActorSlots(); ++i)
+            if (Ogre::CompositorWorkspace *slot = mReflections->getActiveActorWorkspace(i))
+                slot->setAsyncShaderCompile(async);
+    }
     // THE PLANAR REFLECTOR'S CACHE WORK (§4.7). It is VIEW-DEPENDENT, so its
     // reason is always `Camera` and never `None`: a mirror re-renders every
     // frame by definition. Counted so a capture can price it (it drags its own

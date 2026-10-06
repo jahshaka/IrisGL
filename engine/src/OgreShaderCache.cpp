@@ -16,6 +16,7 @@
 //  * survive doubt. Every failure path ends in "delete the directory, run cold".
 #include "EnginePrivate.h"
 
+#include <OgreHlmsAsyncCompiler.h>
 #include <mutex>
 // JAHSHAKA_ENGINE_BUILD_ID: a hash of this library's own sources, regenerated
 // on every BUILD (irisgl/cmake/EngineBuildId.cmake) rather than at configure
@@ -309,6 +310,9 @@ class ShaderCache::Counter final : public Ogre::LogListener {
 public:
     std::atomic<unsigned> compiled{0};
     std::atomic<unsigned> fromCache{0};
+    /// Of `compiled`, those built on the background compiler's threads (ASYNC-SHADERS-1):
+    /// no frame waited for them.
+    std::atomic<unsigned> background{0};
     /// THE MONITOR'S FEED (see ShaderCache::recordCompileNames). Written from
     /// whatever thread compiled (mode 2 = the scene's worker pool), drained on
     /// the UI thread. Bounded: a compile burst must never grow this without
@@ -344,6 +348,7 @@ public:
         if (message.size() >= 8 && message.compare(0, 7, "Shader ") == 0) {
             if (message.find(" compiled successfully") != Ogre::String::npos) {
                 ++compiled;
+                if (Ogre::HlmsAsyncCompiler::isServiceThread()) ++background;
                 if (observerThread.load(std::memory_order_relaxed) == std::this_thread::get_id() &&
                     observer)
                     observer();
@@ -524,6 +529,10 @@ void ShaderCache::progress(unsigned &compiled, unsigned &fromCache, unsigned &ex
     compiled  = mCounter ? mCounter->compiled.load()  : 0u;
     fromCache = mCounter ? mCounter->fromCache.load() : 0u;
     expected  = mExpectedShaders;
+}
+
+void ShaderCache::backgroundCompiles(unsigned &background) const {
+    background = mCounter ? mCounter->background.load() : 0u;
 }
 
 std::string ShaderCache::path(const std::string &name) const { return mDir + "/" + name; }

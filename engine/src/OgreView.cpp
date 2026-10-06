@@ -517,6 +517,8 @@ void OgreView::syncPip() {
             // inset would render full-screen over the main view with no error
             // of any kind (spike, correction 3).
             /*vpModifierMask*/ 0xFF, /*executionMask*/ 0xFF);
+        // The inset is drawn every frame like the view itself: same compile mode.
+        if (mPipWorkspace) mPipWorkspace->setAsyncShaderCompile(mAsyncShaders);
         ++mPipGeneration;               // see View::pipGeneration
     } JAH_CATCH(mError, );
 }
@@ -972,6 +974,8 @@ bool OgreView::attachWorkspace() {
         mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
             mScene->sceneManager(), t, mCamera, mWorkspaceDef, mEnabled);
         if (!mWorkspace) return false;
+        // ASYNC-SHADERS-1: the view's compile mode rides every rebuild of its chain.
+        mWorkspace->setAsyncShaderCompile(mAsyncShaders);
         // THE ATOM VIEW'S PASSES START OFF (kAtomViewExecutionBit): the view's atom
         // listener sets the bit, per frame, only while the scene's view is on.
         // ...AND THE PHOTON VIEW'S (kPhotonExecutionBits), by its listener likewise.
@@ -1828,6 +1832,21 @@ void OgreView::updateGi() {
         mScene->updateForwardPlusRanges(mCamera);
     }
 }
+
+// THE VIEW'S COMPILE MODE (ASYNC-SHADERS-1). The flag lives on the WORKSPACE (the fork's
+// CompositorWorkspace::setAsyncShaderCompile), which pushes it onto its SceneManager's
+// RenderQueue for exactly the length of its own update: the view's passes, its shadow
+// node and its PiP inset draw a placeholder for a permutation the background compiler is
+// still building; a capture, a probe or anything else with a workspace of its own stays
+// blocking because ITS workspace never asked. The planar mirrors are re-rendered every
+// frame and take the view's mode from their listener (OgrePlanar.cpp).
+void OgreView::setAsyncShaders(bool on) {
+    mAsyncShaders = on;
+    if (mWorkspace) mWorkspace->setAsyncShaderCompile(on);
+    if (mPipWorkspace) mPipWorkspace->setAsyncShaderCompile(on);
+}
+
+bool OgreView::asyncShaders() const { return mAsyncShaders; }
 
 bool OgreView::warmUpShaders() {
     if (!mScene)  { mError = "warmUpShaders: no scene is bound to view '" + mName + "'"; return false; }

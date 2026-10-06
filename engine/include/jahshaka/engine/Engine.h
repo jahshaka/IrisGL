@@ -1860,6 +1860,17 @@ public:
     /// there is nothing to warm up or the warm-up pass could not be built; a
     /// failure is never fatal — the shaders simply compile later, as before.
     virtual bool warmUpShaders() = 0;
+
+    /// ASYNCHRONOUS SHADERS (ASYNC-SHADERS-1). On: a permutation this view needs and the
+    /// engine has not built yet is built by the engine's background compile service while
+    /// the view keeps drawing — the object shows the neutral placeholder until it lands
+    /// (AsyncShaderStats). Off (the default): the frame compiles what it needs before it
+    /// presents, as it always did. Applies to this view's own frames and its planar
+    /// mirrors, never to a capture, a probe or a thumbnail (those render once and must
+    /// not keep a placeholder). No-op while the service is not running. Survives a
+    /// workspace rebuild.
+    virtual void setAsyncShaders(bool on) = 0;
+    virtual bool asyncShaders() const = 0;
 };
 
 /// Owns the device and every Scene and View.
@@ -2907,6 +2918,16 @@ public:
     /// thirty times instead of once. Keep it to a repaint: it runs inside the
     /// compile, under Ogre's log dispatch. An empty function clears it.
     virtual void setCompileObserver(std::function<void()> observer) = 0;
+
+    /// THE BACKGROUND COMPILE SERVICE (ASYNC-SHADERS-1): see AsyncShaderStats and
+    /// View::setAsyncShaders. `setAsyncShaderThreads(0)` stops it (everything pending is
+    /// dropped and rebuilt by whoever needs it next); the engine starts it with
+    /// EngineConfig::asyncShaderThreads.
+    virtual void setAsyncShaderThreads(unsigned threads) = 0;
+    virtual AsyncShaderStats asyncShaderStats() const = 0;
+    /// Blocks until nothing is pending, publishing as jobs land. For tests and for a
+    /// caller that must hand over a finished picture; never on an interactive path.
+    virtual void waitForAsyncShaders() = 0;
 
     /// The startup progress counter's source: shaders compiled so far, shaders
     /// served from the cache so far, and how many the last saved run needed in
