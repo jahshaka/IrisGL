@@ -3510,6 +3510,13 @@ constexpr float kGatherSettleCodes = 5.0f;
 /// An offscreen view's declared contract (View::setOffscreenContract).
 enum class OffscreenContract { Undeclared, StillPicture, Live };
 
+/// Where a view's one-shot readback of its own presented frame stands
+/// (View::requestFrameCapture, CLOSE-SHOT-2). Idle = nothing asked; Armed = the
+/// next frame this view renders is the one copied; InFlight = that frame's copy
+/// is recorded and its fence has not signalled; Ready = takeFrameCapture answers
+/// without waiting.
+enum class FrameCaptureState { Idle, Armed, InFlight, Ready };
+
 /// What the gather did on the last drawn frame of this scene.
 struct GatherStatus {
     /// The scene's row resolved ON: `GiParams::gather` is On and this machine

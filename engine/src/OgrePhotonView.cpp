@@ -112,7 +112,10 @@ public:
     void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override {
         if (!ws) return;
         OgreScene *scene = mView ? mView->ogreScene() : nullptr;
-        const PhotonView view = scene ? scene->photonView() : PhotonView::Off;
+        // THE CAPTURE'S RENDER (View::requestFrameCapture) is the picture, never the
+        // viewing aid: the Photon view stays off in that workspace alone.
+        const PhotonView view =
+            (scene && ws != mView->captureWorkspace()) ? scene->photonView() : PhotonView::Off;
         // A STEREO VIEW never draws Ogre's visualizers (PhotonViewShape::stereo): a
         // mode set before the headset came up keeps painting the desktop's view only.
         bool sceneBit = drawsGeometry(view) &&

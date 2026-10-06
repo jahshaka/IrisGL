@@ -13,6 +13,9 @@
 // and "run once more" is a call on the instance.
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
+#include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
+#include <OgreViewport.h>
+#include <OgreCamera.h>
 #include <OgreRenderPassDescriptor.h>
 #include <OgreResourceTransition.h>
 #include <OgreRenderSystem.h>
@@ -1054,6 +1057,9 @@ bool OgreView::detachWorkspace() {
     // The clear-only chain targets the same texture and answers the same
     // question (see the declaration); a view never has both.
     if (!mWorkspace) return detachBlankWorkspace();
+    // A clean capture's workspace is an instance of the definition about to go
+    // (CLOSE-SHOT-2): it goes first. Its ticket, if a copy is in flight, stays.
+    destroyCaptureWorkspace();
     // THE REFLECTION TRACE HOLDS THIS CHAIN'S TEXTURES (PHOTON_SPEC §7 R5).
     // Everything below is about to destroy them; see dropReflectState().
     dropReflectState();
@@ -1165,14 +1171,20 @@ void OgreView::addWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
         mWorkspaceListeners.end())
         return;
     mWorkspaceListeners.push_back(l);
-    JAH_TRY { if (mWorkspace) mWorkspace->addListener(l); } JAH_CATCH(mError, );
+    JAH_TRY {
+        if (mWorkspace) mWorkspace->addListener(l);
+        if (mCaptureWorkspace && capturesWith(l)) mCaptureWorkspace->addListener(l);
+    } JAH_CATCH(mError, );
 }
 
 void OgreView::removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
     auto it = std::find(mWorkspaceListeners.begin(), mWorkspaceListeners.end(), l);
     if (it == mWorkspaceListeners.end()) return;
     mWorkspaceListeners.erase(it);
-    JAH_TRY { if (mWorkspace) mWorkspace->removeListener(l); } JAH_CATCH(mError, );
+    JAH_TRY {
+        if (mWorkspace) mWorkspace->removeListener(l);
+        if (mCaptureWorkspace) mCaptureWorkspace->removeListener(l);
+    } JAH_CATCH(mError, );
 }
 
 unsigned OgreView::workspaceGeneration() const { return mWorkspaceGeneration; }
@@ -1180,6 +1192,8 @@ unsigned OgreView::workspaceGeneration() const { return mWorkspaceGeneration; }
 unsigned long long OgreView::framesPresented() const { return mFramesPresented; }
 
 void OgreView::notePresented() {
+    mCaptureThisFrame = false;   // the capture flag is one frame's (beginFrameCapture)
+    JAH_TRY { if (mCaptureWorkspace) mCaptureWorkspace->setEnabled(false); } JAH_CATCH(mError, );
     // Deliberately conservative: a disabled view's workspace is skipped by the
     // compositor, and a view with no scene or no workspace draws nothing. Only
     // frames that really put this view's pixels on the target count.
@@ -1195,6 +1209,11 @@ void OgreView::notePresented() {
 unsigned long long OgreView::blankFramesPresented() const { return mBlankFramesPresented; }
 
 void OgreView::detachScene(bool takeBlank) {
+    // A CAPTURE ASKED OF THIS SCENE DIES WITH IT (CLOSE-SHOT-2): an armed request
+    // left standing would photograph the NEXT world for a caller that asked about
+    // this one (a project tile written under the wrong project).
+    releaseFrameCapture();
+    destroyCaptureWorkspace();
     JAH_TRY {
         detachWorkspace();
         // The inset's camera belongs to the scene that is going away, and its
@@ -1906,6 +1925,12 @@ void OgreView::destroy() {
     // line is work nobody can see. Whatever this view already had comes down.
     detachScene(false);
     destroyBlankChain();
+    // The capture's ticket is the device's (detachScene released it); its listener
+    // goes with the rest.
+    if (mCaptureListener) {
+        removeWorkspaceListener(mCaptureListener.get());
+        mCaptureListener.reset();
+    }
     // The id pass's list: device buffers, gone before the device (ATOM S3-DRAW).
     if (mAtomListener) {
         removeWorkspaceListener(mAtomListener.get());
@@ -1913,6 +1938,7 @@ void OgreView::destroy() {
     }
     mAtomCull.destroy();
     mAtomCullLate.destroy();
+    mAtomCullCapture.destroy();
     atomIdPassForgetView(this);
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
@@ -1928,7 +1954,8 @@ void OgreView::destroy() {
 }
 
 Ogre::TextureGpu *OgreView::createRtt(Ogre::Root *root, const std::string &name,
-                                      unsigned w, unsigned h, unsigned samples, unsigned layers) {
+                                      unsigned w, unsigned h, unsigned samples, unsigned layers,
+                                      Ogre::PixelFormatGpu format) {
     Ogre::TextureGpuManager *tm = root->getRenderSystem()->getTextureGpuManager();
     const bool layered = layers > 1u;
     Ogre::TextureGpu *rtt = tm->createTexture(
@@ -1936,7 +1963,7 @@ Ogre::TextureGpu *OgreView::createRtt(Ogre::Root *root, const std::string &name,
         layered ? Ogre::TextureTypes::Type2DArray : Ogre::TextureTypes::Type2D);
     if (layered) rtt->setResolution(w / layers, h, layers);
     else         rtt->setResolution(w, h);
-    rtt->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+    rtt->setPixelFormat(format);
     // MSAA (implicit resolve — no MsaaExplicitResolve flag, so readPixels sees
     // the resolved image). MUST precede the Resident transition: Ogre asserts
     // OnStorage in setSampleDescription, and the transition validates/clamps
@@ -1961,5 +1988,413 @@ unsigned OgreView::targetSamples() const {
 }
 
 Ogre::TextureGpu *OgreView::targetTexture() const { return target(); }
+
+// ---------------------------------------------------------------------------
+// THE PRESENTED FRAME'S CAPTURE (CLOSE-SHOT-2; View::requestFrameCapture).
+//
+// THE PRESENTED FRAME NEVER CHANGES BECAUSE OF A CAPTURE. Two shapes:
+//
+//   keepHelpers — the frame exactly as shown: the window's own image, read back
+//   by Ogre-Next's route (OgreWindow.h, setManualSwapRelease's note): the window is
+//   created able to download (Window::setWantsToDownload(true), TRANSFER_SRC on
+//   the swapchain images, OgreEngine::createView) and read with an
+//   AsyncTextureTicket before swapBuffers — here, at the end of the view's
+//   workspace.
+//
+//   clean (the tile) — the helpers live INSIDE the scene passes (the grid at RQ 14
+//   and the depth-tested outline shells at RQ 10 are drawn in the opaque pass,
+//   before the post chain and the tonemap; only the gizmo, wires and icons are in
+//   the post-tonemap overlay pass), so there is no copy point in the presented
+//   chain that has the picture without them. The view's chain is therefore
+//   instanced a SECOND time for this one frame (mCaptureWorkspace), into a target
+//   of the window's size and format, updated after the view's own workspace: the
+//   same definition, camera, scene, listeners and settled GI, its scene passes
+//   with both helper channels cleared from the viewport mask (Ogre's
+//   passPreExecute hook — CompositorPassScene::execute fires it after
+//   _setVisibilityMask, before the cull), the HUD and the viewing aids off in it.
+// ---------------------------------------------------------------------------
+
+namespace {
+/// A local texture of the chain's scene node in `ws`, or null (readChainTexture's walk).
+Ogre::TextureGpu *chainLocal(Ogre::CompositorWorkspace *ws, const std::string &workspaceDef,
+                             const char *name) {
+    if (!ws) return nullptr;
+    const Ogre::IdString id(name);
+    const Ogre::IdString sceneNode(chain::sceneNodeDefName(workspaceDef));
+    for (Ogre::CompositorNode *n : ws->getNodeSequence()) {
+        if (!n || n->getName() != sceneNode) continue;
+        const auto &names = n->getDefinition()->getNameToChannelMap();
+        return names.find(id) != names.end() ? n->getDefinedTexture(id) : nullptr;
+    }
+    return nullptr;
+}
+}   // namespace
+
+void FrameCaptureListener::passPreExecute(Ogre::CompositorPass *pass) {
+    if (!mView || !pass || pass->getType() != Ogre::PASS_SCENE) return;
+    if (!pass->getParentNode() || !mView->isCaptureWorkspace(pass->getParentNode()->getWorkspace()))
+        return;
+    const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
+    if (def && def->mShadowNodeRecalculation == Ogre::SHADOW_NODE_CASTER_PASS) return;
+    // THE VIEW'S OWN SHADOW MAPS, OF THIS FRAME. The capture's definition carries no
+    // shadow node (no second atlas, no lamp re-rendered): each scene pass draws with
+    // the view's instance current — what Ogre's SHADOW_NODE_REUSE does inside one
+    // workspace, across the two. CompositorPassScene::execute sets the current node
+    // from its own (none) just before this hook and renders after it; the maps were
+    // written by the view's workspace earlier in the frame and nothing writes them
+    // between, so they are read exactly as the view's passes read them.
+    if (!mView->captureShadowedPass(def)) return;
+    Ogre::CompositorShadowNode *sn = mView->shadowNodeInstance();
+    if (!sn || !sn->getEnabled()) return;
+    Ogre::Camera *cam = static_cast<Ogre::CompositorPassScene *>(pass)->getCamera();
+    if (Ogre::SceneManager *sm = cam ? cam->getSceneManager() : nullptr) sm->_setCurrentShadowNode(sn);
+}
+
+void FrameCaptureListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
+    if (mView && mView->captureThisFrame()) mView->recordFrameCapture(ws);
+}
+
+bool OgreView::requestFrameCapture(bool keepHelpers, bool alsoPresented) {
+    JAH_TRY {
+        if (!target()) { mError = "requestFrameCapture: View '" + mName + "' has no target"; return false; }
+        // A new request supersedes an unread one.
+        releaseFrameCapture();
+        mCaptureKeepHelpers = keepHelpers;
+        mCaptureAlsoPresented = alsoPresented && !keepHelpers;
+        mCaptureState = FrameCaptureState::Armed;
+        if (!mCaptureListener) mCaptureListener.reset(new FrameCaptureListener(this));
+        addWorkspaceListener(mCaptureListener.get());
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+void OgreView::excludeFromCapture(Ogre::CompositorWorkspaceListener *l) {
+    if (!l) return;
+    if (std::find(mCaptureExcluded.begin(), mCaptureExcluded.end(), l) == mCaptureExcluded.end())
+        mCaptureExcluded.push_back(l);
+    JAH_TRY { if (mCaptureWorkspace) mCaptureWorkspace->removeListener(l); } JAH_CATCH(mError, );
+}
+
+bool OgreView::capturesWith(const Ogre::CompositorWorkspaceListener *l) const {
+    // THE PLANAR MIRRORS RIDE IT TOO, and must: Ogre's PlanarReflections state is a
+    // frame's sequence (beginFrame clears it, the opaque pass's update sets it), and
+    // a capture that skipped it saw the view's post-update state in its decode passes
+    // — has_planar_reflections where the view's saw none — and compiled five HlmsAtom
+    // permutations of its own (measured, OgrePlanarReflections.cpp:420-472). With the
+    // listener the capture's passes see exactly the view's sequence; a scene with
+    // mirrors re-renders them once more on the capturing frame (same camera, no
+    // history in them).
+    return l && std::find(mCaptureExcluded.begin(), mCaptureExcluded.end(), l) == mCaptureExcluded.end();
+}
+
+bool OgreView::ensureCaptureWorkspace() {
+    Ogre::TextureGpu *t = target();
+    if (!t || !mWorkspace || !mScene || !mCamera) return false;
+    const unsigned layers = t->getNumSlices();
+    const CaptureShape shape{ mWorkspaceGeneration, t->getWidth(), t->getHeight(), layers,
+                              targetSamples(), t->getPixelFormat() };
+    if (mCaptureWorkspace && shape == mCaptureShape) return true;
+    destroyCaptureWorkspace();
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    // THE CAPTURE'S OWN DEFINITION: the view's chain, as the view describes it this
+    // frame, with the furniture baked out — no helper channel in any scene pass, no
+    // engine overlay — and NO SHADOW NODE INSTANCE: every scene pass that names the
+    // view's shadow node is remembered and stripped of the name (so the workspace
+    // instances no second atlas), and FrameCaptureListener::passPreExecute hands
+    // exactly those passes the view's own instance, of the same frame. (Handing it
+    // to the passes that have none in the view's chain — the photon, distortion and
+    // overlay passes — compiled five HlmsAtom permutations with one texture slot
+    // more, measured, on the session's first tile.)
+    ChainDesc d = chainDesc();
+    d.helpers = false;
+    d.vrHelpers = false;
+    d.overlays = false;
+    mCaptureDef = mWorkspaceDef + "/Capture";
+    chain::build(cm, mCaptureDef, d, mCaptureNodeDefs, mCaptureHandles);
+    mCaptureShadowedPasses.clear();
+    for (const std::string &nd : mCaptureNodeDefs) {
+        Ogre::CompositorNodeDef *n = cm->getNodeDefinitionNonConst(Ogre::IdString(nd));
+        for (size_t t = 0; n && t < n->getNumTargetPasses(); ++t)
+            for (Ogre::CompositorPassDef *p : n->getTargetPass(t)->getCompositorPasses()) {
+                if (!p || p->getType() != Ogre::PASS_SCENE) continue;
+                auto *sp = static_cast<Ogre::CompositorPassSceneDef *>(p);
+                if (sp->mShadowNode == Ogre::IdString()) continue;
+                sp->mShadowNode = Ogre::IdString();
+                sp->mShadowNodeRecalculation = Ogre::SHADOW_NODE_REUSE;
+                mCaptureShadowedPasses.push_back(sp);
+            }
+    }
+    // THE HIT DECODE NEVER RUNS IN THE CAPTURE: its list is the view's traces' and the
+    // capture traces nothing (RayQueryTier::bindCapturePass); the write-back it feeds
+    // already reached the reflection and the gather in the view's own workspace.
+    // Left in, it drew HlmsAtom's decode queue UNARMED — five permutations nothing
+    // else uses, compiled on the UI thread by the session's first tile.
+    for (const std::string &nd : mCaptureNodeDefs) {
+        Ogre::CompositorNodeDef *n = cm->getNodeDefinitionNonConst(Ogre::IdString(nd));
+        for (size_t t = 0; n && t < n->getNumTargetPasses(); ++t)
+            for (Ogre::CompositorPassDef *p : n->getTargetPass(t)->getCompositorPasses())
+                if (p && p->getType() == Ogre::PASS_SCENE && p->mIdentifier == kHitDecodePassIdentifier)
+                    p->mExecutionMask = 0u;
+    }
+    mCaptureTarget = createRtt(mRoot, processUniqueName("capture"), t->getWidth() * layers,
+                               t->getHeight(), shape.samples, layers, t->getPixelFormat());
+    // APPENDED, so it updates after the view's own workspace (and its inset): the
+    // presented frame is computed before anything of the capture runs. DISABLED
+    // except on the frame that captures.
+    mCaptureWorkspace = cm->addWorkspace(mScene->sceneManager(), mCaptureTarget, mCamera,
+                                         mCaptureDef, false);
+    atomRegisterView(mCaptureWorkspace, this);
+    for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
+        if (capturesWith(l)) mCaptureWorkspace->addListener(l);
+    mCaptureShape = shape;
+    return true;
+}
+
+void OgreView::beginFrameCapture() {
+    // The capture's workspace draws on the frame that captures and on no other —
+    // and it LIVES only while a capture needs it: a spent or dropped one goes here,
+    // between frames (takeFrameCapture also frees it the moment the picture is read).
+    if (mCaptureWorkspace) mCaptureWorkspace->setEnabled(false);
+    if (mCaptureState != FrameCaptureState::Armed && mCaptureState != FrameCaptureState::InFlight &&
+        mCaptureState != FrameCaptureState::Ready)
+        destroyCaptureWorkspace();
+    mCaptureThisFrame = mCaptureState == FrameCaptureState::Armed && mEnabled && mWorkspace &&
+                        mScene && mCamera;
+    // The listener rides only while something is armed — removed here, between
+    // frames, never from inside the workspace's own listener walk.
+    if (mCaptureState != FrameCaptureState::Armed && mCaptureListener)
+        removeWorkspaceListener(mCaptureListener.get());
+    if (!mCaptureThisFrame || mCaptureKeepHelpers) return;
+    try {
+        if (!ensureCaptureWorkspace()) { mCaptureThisFrame = false; return; }
+        // THE LIVE WRITES THE VIEW'S GRAPH TAKES (applyLetterbox, applyFixedExposure)
+        // reach the capture's too: the same rectangle, the same fixed exposure.
+        {
+            const unsigned w = width(), h = height();
+            float inner[4];
+            chain::letterboxRect(mCameraDesc.aspect, h ? float(w) / float(h) : 1.0f, inner);
+            for (Ogre::CompositorPassDef *p : mCaptureHandles.insetPasses) {
+                auto &vp = p->mVpRect[0];
+                vp.mVpLeft = inner[0]; vp.mVpTop = inner[1]; vp.mVpWidth = inner[2]; vp.mVpHeight = inner[3];
+                vp.mVpScissorLeft = inner[0]; vp.mVpScissorTop = inner[1];
+                vp.mVpScissorWidth = inner[2]; vp.mVpScissorHeight = inner[3];
+            }
+            for (Ogre::CompositorPassDef *p : mCaptureHandles.scissorPasses) {
+                auto &vp = p->mVpRect[0];
+                vp.mVpScissorLeft = inner[0]; vp.mVpScissorTop = inner[1];
+                vp.mVpScissorWidth = inner[2]; vp.mVpScissorHeight = inner[3];
+            }
+            if (mCaptureHandles.letterboxSwatch)
+                mCaptureHandles.letterboxSwatch->setAllClearColours(toOgre(mBackground));
+            const ChainDesc d = chainDesc();
+            if (mCaptureHandles.fixedExposure && d.hdr && d.tonemapFixed)
+                writeLiveClearColour(mCaptureWorkspace, mCaptureHandles.fixedExposure,
+                                     chain::fixedExposureColour(d.exposureScale, d.exposure));
+        }
+        mCaptureWorkspace->setExecutionMask(mWorkspace->getExecutionMask());
+        // THE TWO WORKSPACE-LOCAL HISTORIES, handed over before either workspace runs:
+        // the capture's tonemap reads the exposure the view's reads, and its march
+        // the same previous picture. (Every other history the capture reaches is the
+        // VIEW's and is read, never stepped: the ray tier's, the gather's, the Atom
+        // cull's, the SSR reprojection — see captureWorkspace's callers.)
+        mRoot->getRenderSystem()->endRenderPassDescriptor();
+        for (const char *name : { chain::exposureHistoryTextureName(), chain::ssrHistoryTextureName() }) {
+            Ogre::TextureGpu *src = chainLocal(mWorkspace, mWorkspaceDef, name);
+            Ogre::TextureGpu *dst = chainLocal(mCaptureWorkspace, mCaptureDef, name);
+            if (!src || !dst || src->getWidth() != dst->getWidth() ||
+                src->getHeight() != dst->getHeight() || src->getPixelFormat() != dst->getPixelFormat())
+                continue;
+            src->copyTo(dst, dst->getEmptyBox(0), 0, src->getEmptyBox(0), 0);
+        }
+        mCaptureReflectionPending = true;
+        mCaptureWorkspace->setEnabled(true);
+    } catch (Ogre::Exception &e) {
+        mError = describeOgreFailure(e);
+        releaseFrameCapture();
+    } catch (std::exception &e) {
+        mError = std::string("engine: ") + e.what();
+        releaseFrameCapture();
+    }
+}
+
+Ogre::TextureGpu *OgreView::chainTexture(const char *name) const {
+    return chainLocal(mWorkspace, mWorkspaceDef, name);
+}
+
+namespace {
+/// One copy of `src`'s layer 0 into a fresh ticket with its own fence.
+Ogre::AsyncTextureTicket *downloadLayer0(Ogre::RenderSystem *rs, Ogre::TextureGpu *src) {
+    // THE LAST RENDER PASS IS CLOSED FIRST, the way every Ogre pass that copies or
+    // dispatches does it (CompositorPassDepthCopy, PassMipmap, PassCompute:
+    // `endRenderPassDescriptor()` before the work). Left open, the copy encoder
+    // INTERRUPTS it, and Vulkan's interrupting store path returns before it records
+    // the swapchain image's PRESENT_SRC final layout — the copy's barrier then names
+    // COLOR_ATTACHMENT_OPTIMAL as the old layout (VUID-VkImageMemoryBarrier-oldLayout-
+    // 01197, measured on engine.window).
+    rs->endRenderPassDescriptor();
+    // ONE LAYER: a stereo target's layer 0 is the left eye (LAYERED-STEREO-1).
+    Ogre::TextureBox box = src->getEmptyBox(0);
+    box.sliceStart = 0;
+    box.numSlices = 1;
+    Ogre::AsyncTextureTicket *t = rs->getTextureGpuManager()->createAsyncTextureTicket(
+        src->getWidth(), src->getHeight(), 1u, Ogre::TextureTypes::Type2D, src->getPixelFormat());
+    // Accurate tracking: the ticket takes its own fence and flushes the copy now, so
+    // the answer does not wait on later frames (a closing window has none).
+    t->download(src, 0, true, &box);
+    return t;
+}
+
+/// The ticket's picture as opaque RGBA8 (the window's own bytes).
+void mapTicket(Ogre::AsyncTextureTicket *t, Image &out) {
+    const Ogre::PixelFormatGpu fmt = t->getPixelFormatFamily();
+    const Ogre::uint32 w = t->getWidth(), h = t->getHeight();
+    const Ogre::TextureBox box = t->map(0);   // waits on the fence if still in flight
+    out.width = w; out.height = h;
+    out.rgba.resize(static_cast<size_t>(w) * h * 4u);
+    const bool rgba = fmt == Ogre::PFG_RGBA8_UNORM || fmt == Ogre::PFG_RGBA8_UNORM_SRGB;
+    const bool bgra = fmt == Ogre::PFG_BGRA8_UNORM || fmt == Ogre::PFG_BGRA8_UNORM_SRGB ||
+                      fmt == Ogre::PFG_BGRX8_UNORM || fmt == Ogre::PFG_BGRX8_UNORM_SRGB;
+    for (Ogre::uint32 y = 0; y < h; ++y) {
+        unsigned char *o = &out.rgba[static_cast<size_t>(y) * w * 4u];
+        const unsigned char *in = static_cast<const unsigned char *>(box.at(0, y, 0));
+        if (rgba || bgra) {
+            for (Ogre::uint32 x = 0; x < w; ++x, o += 4, in += 4) {
+                o[0] = rgba ? in[0] : in[2];
+                o[1] = in[1];
+                o[2] = rgba ? in[2] : in[0];
+                o[3] = 255u;   // the presented frame is opaque (OPAQUE composite)
+            }
+        } else {
+            for (Ogre::uint32 x = 0; x < w; ++x, o += 4) {
+                const Ogre::ColourValue c = box.getColourAt(x, y, 0, fmt);
+                o[0] = static_cast<unsigned char>(std::lround(std::clamp(c.r, 0.0f, 1.0f) * 255.0f));
+                o[1] = static_cast<unsigned char>(std::lround(std::clamp(c.g, 0.0f, 1.0f) * 255.0f));
+                o[2] = static_cast<unsigned char>(std::lround(std::clamp(c.b, 0.0f, 1.0f) * 255.0f));
+                o[3] = 255u;
+            }
+        }
+    }
+    t->unmap();
+}
+}   // namespace
+
+void OgreView::recordFrameCapture(Ogre::CompositorWorkspace *ws) {
+    if (mCaptureState != FrameCaptureState::Armed || !ws) return;
+    const bool own = ws == mWorkspace;
+    const bool clean = !mCaptureKeepHelpers;
+    try {
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        if (own && mWindow && !mWindow->canDownloadData() && (!clean || mCaptureAlsoPresented)) {
+            mError = "frame capture: the window of View '" + mName + "' cannot download";
+            releaseFrameCapture();
+            return;
+        }
+        // The frame AS PRESENTED, at the end of the view's own workspace: the answer
+        // of a keepHelpers capture, or the companion of a clean one that asked for it.
+        if (own && (!clean || mCaptureAlsoPresented) && !mPresentedTicket) {
+            Ogre::AsyncTextureTicket *t = downloadLayer0(rs, target());
+            if (clean) mPresentedTicket = t; else mCaptureTicket = t;
+        }
+        // The CLEAN frame, at the end of the capture's workspace. It draws this one
+        // frame and no other: disabled now, removed at the next frame's start.
+        if (clean && ws == mCaptureWorkspace) {
+            mCaptureTicket = downloadLayer0(rs, mCaptureTarget);
+            mCaptureWorkspace->setEnabled(false);
+        }
+        if (mCaptureTicket) {
+            mCaptureState = FrameCaptureState::InFlight;
+            mCaptureThisFrame = false;
+        }
+    } catch (Ogre::Exception &e) {
+        mError = describeOgreFailure(e);
+        releaseFrameCapture();
+    } catch (std::exception &e) {
+        mError = std::string("engine: ") + e.what();
+        releaseFrameCapture();
+    }
+}
+
+FrameCaptureState OgreView::frameCaptureState() {
+    if (mCaptureState == FrameCaptureState::InFlight && mCaptureTicket) {
+        JAH_TRY {
+            if (mCaptureTicket->queryIsTransferDone() &&
+                (!mPresentedTicket || mPresentedTicket->queryIsTransferDone()))
+                mCaptureState = FrameCaptureState::Ready;
+        } JAH_CATCH(mError, mCaptureState);
+    }
+    return mCaptureState;
+}
+
+bool OgreView::takeFrameCapture(Image &out, bool wait, Image *presented) {
+    const FrameCaptureState st = frameCaptureState();
+    if (st == FrameCaptureState::Idle) { mError = "takeFrameCapture: nothing was requested"; return false; }
+    if (st == FrameCaptureState::Armed) {
+        mError = "takeFrameCapture: View '" + mName + "' has not rendered the armed frame yet";
+        return false;
+    }
+    if (st == FrameCaptureState::InFlight && !wait) return false;
+    bool ok = false;
+    try {
+        mapTicket(mCaptureTicket, out);
+        if (presented) {
+            if (mPresentedTicket) mapTicket(mPresentedTicket, *presented);
+            else *presented = Image();
+        }
+        ok = true;
+    } catch (Ogre::Exception &e) {
+        mError = describeOgreFailure(e);
+    } catch (std::exception &e) {
+        mError = std::string("engine: ") + e.what();
+    }
+    releaseFrameCapture();
+    // ON DEMAND (the lead's VRAM ruling): the capture's chain instance — ~90 MB at a
+    // 1232x565 editor view — is built for the capturing frame and freed once the
+    // picture is read. Building it costs well under a frame (measured: the capturing
+    // frame's CPU equals a warm capture's), so nothing stays resident for a tile.
+    destroyCaptureWorkspace();
+    return ok;
+}
+
+void OgreView::destroyCaptureWorkspace() {
+    if (mCaptureWorkspace) {
+        JAH_TRY {
+            atomUnregisterView(mCaptureWorkspace);
+            mRoot->getCompositorManager2()->removeWorkspace(mCaptureWorkspace);
+        } JAH_CATCH(mError, );
+        mCaptureWorkspace = nullptr;
+    }
+    if (mCaptureTarget) {
+        JAH_TRY {
+            mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mCaptureTarget);
+        } JAH_CATCH(mError, );
+        mCaptureTarget = nullptr;
+    }
+    if (!mCaptureDef.empty()) {
+        JAH_TRY { chain::destroy(mRoot->getCompositorManager2(), mCaptureDef, mCaptureNodeDefs); }
+        JAH_CATCH(mError, );
+        mCaptureDef.clear();
+    }
+    mCaptureHandles = chain::ChainHandles();
+    mCaptureShadowedPasses.clear();
+    // ...and the capture's own Atom cull list (~15 MB): Ogre defers the buffers'
+    // destruction past the frames still using them.
+    JAH_TRY { mAtomCullCapture.destroy(); } JAH_CATCH(mError, );
+    mCaptureShape = CaptureShape();
+}
+
+void OgreView::releaseFrameCapture() {
+    mCaptureThisFrame = false;
+    mCaptureState = FrameCaptureState::Idle;
+    // A dropped capture only switches the capture's workspace off here (this may run
+    // inside a frame); beginFrameCapture frees it between frames.
+    JAH_TRY { if (mCaptureWorkspace) mCaptureWorkspace->setEnabled(false); } JAH_CATCH(mError, );
+    for (Ogre::AsyncTextureTicket **t : { &mCaptureTicket, &mPresentedTicket }) {
+        if (!*t) continue;
+        JAH_TRY {
+            mRoot->getRenderSystem()->getTextureGpuManager()->destroyAsyncTextureTicket(*t);
+        } JAH_CATCH(mError, );
+        *t = nullptr;
+    }
+}
 
 }}}  // namespace jahshaka::engine::detail

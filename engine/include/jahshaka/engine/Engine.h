@@ -1801,6 +1801,45 @@ public:
     /// chain has the SSR stage only; false otherwise, lastError says which.
     virtual bool readReflectionHdr(ImageF &out) = 0;
 
+    /// THE FRAME THIS VIEW PRESENTS, READ BACK (CLOSE-SHOT-2) — the picture the
+    /// user is looking at, with no second render and no settle: the view's own
+    /// settled GI, its own grade, its own exposure.
+    ///
+    /// ONE SHOT, AND THE PRESENTED FRAME NEVER CHANGES BECAUSE OF IT.
+    /// `requestFrameCapture` arms the NEXT frame this view renders (an enabled view
+    /// with a scene bound; a disabled view waits until it renders).
+    ///   * keepHelpers — the frame exactly as presented: the window's final image
+    ///     (Ogre-Next's own window-readback route: `Window::setWantsToDownload` +
+    ///     an AsyncTextureTicket before the present), HUD and furniture included.
+    ///   * clean (the default) — the SAME frame without the editor's furniture.
+    ///     The furniture is drawn inside the scene passes (the grid and the outline
+    ///     shells before the post chain), so no copy point of the presented chain
+    ///     has the picture without it: the view's chain is instanced a second time
+    ///     for that one frame, into a target of the window's size and format, after
+    ///     the view's own workspace — the frame's camera, settled GI, caches and
+    ///     histories (the exposure and SSR histories handed over), both helper
+    ///     channels cleared from its scene passes, the HUD and the Atom/Photon
+    ///     viewing aids off in it. One extra render of the chain on that frame;
+    ///     nothing presented differs.
+    /// Either copy carries its own fence. A PiP inset is not in the clean picture.
+    /// NOTHING BLOCKS: `frameCaptureState` polls the fence (InFlight -> Ready);
+    /// `takeFrameCapture(out, false)` answers once Ready and is false before.
+    /// `wait = true` blocks on the fence of a frame already rendered (about one
+    /// frame — the shutdown path); it cannot render the frame itself, so an Armed
+    /// capture answers false until the host renders one. A STEREO view (the VR
+    /// session's layered target) answers the LEFT eye (layer 0) at one eye's size.
+    /// The picture is opaque RGBA8 in the window's own encoding (the bytes on
+    /// screen). A new request supersedes an unread one; detaching the scene or
+    /// destroying the view drops it (state Idle).
+    /// `alsoPresented` (a clean capture only) reads the SAME frame as presented too,
+    /// handed back through takeFrameCapture's `presented` — the proof that the
+    /// capture left the presented frame alone, and the comparison a test needs.
+    virtual bool requestFrameCapture(bool keepHelpers = false, bool alsoPresented = false) = 0;
+    virtual FrameCaptureState frameCaptureState() = 0;
+    virtual bool takeFrameCapture(Image &out, bool wait, Image *presented = nullptr) = 0;
+    /// Drops whatever capture is armed or in flight (state Idle).
+    virtual void cancelFrameCapture() = 0;
+
     /// Compiles every shader this View's SCENE needs, now, without drawing it
     /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).
     ///

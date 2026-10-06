@@ -566,6 +566,11 @@ View *OgreEngine::createView(const std::string &name,
         // here AND in the resize lambda below, or a resize silently resets it.
         params["FSAA"] = Ogre::StringConverter::toString(mDefaultSamples);
         Ogre::Window *window = mRoot->createRenderWindow(name, width, height, false, &params);
+        // THE PRESENTED FRAME CAN BE READ BACK (CLOSE-SHOT-2, View::requestFrameCapture):
+        // Ogre's own switch (OgreWindow.h) — TRANSFER_SRC on the swapchain images (on
+        // Metal, a layer that is not framebufferOnly). Set before setVSync so the
+        // one swapchain rebuild it costs happens here, at creation, never mid-session.
+        window->setWantsToDownload(true);
         window->setVSync(mVsync, 1u | kLowestLatencyVSync);
         ensureHlms();
         mViews.emplace_back(new OgreView(mRoot, window, nullptr, name, width, height,
@@ -602,6 +607,7 @@ View *OgreEngine::createView(const std::string &name,
             p["vsync_method"] = "Lowest Latency";
             p["FSAA"] = Ogre::StringConverter::toString(samples);
             Ogre::Window *win = root->createRenderWindow(name + "/" + processUniqueName("resize"), w, h, false, &p);
+            win->setWantsToDownload(true);   // the same capture switch as the first window
             win->setVSync(mVsync, 1u | kLowestLatencyVSync);
             return win;
         };
@@ -1163,6 +1169,9 @@ void OgreEngine::renderOneFrame() {
         // Nothing found -> hide(). That is what keeps every thumbnail, preview
         // and pixel suite byte-identical even before the per-pass gate: an
         // offscreen view is never the owner unless it opted in.
+        // THE PRESENTED FRAME'S CAPTURE (CLOSE-SHOT-2): which views capture THIS
+        // frame, decided once before anything of the frame reads it.
+        for (auto &v : mViews) v->beginFrameCapture();
         {
             const OgreView *owner = nullptr;
             for (auto &v : mViews) {

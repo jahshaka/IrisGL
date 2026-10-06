@@ -647,6 +647,14 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
     // THE LATE PASS draws only on a chain that carries it, after a first pass that
     // tested (and so may have rejected something).
     if (late && (!view || !view->chainAtomOcclusion())) return;
+    // THE CAPTURE'S WORKSPACE (CLOSE-SHOT-2, View::requestFrameCapture) is the view's
+    // chain drawn a second time in the frame: its first cull tests NOTHING (its own
+    // pyramid was never built, and the view's history names the view's), so it draws
+    // the frustum's every cluster and its late pass has nothing left to add; and it
+    // touches none of the view's state — no history, no first-tested flag, no stats
+    // ring, no cut budget.
+    const bool capture = view && view->isCaptureWorkspace(pass->getParentNode()->getWorkspace());
+    if (late && capture) return;
     bool draw = cam && gs && gs->live();
     if (draw) {
         const VkFormat colourFmt = Ogre::VulkanMappings::get(ids->getPixelFormat());
@@ -693,11 +701,12 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         fillCullFrustum(cam, float(std::max(1, int(vpRect.mVpHeight * float(th)))), req);
         if (!late) {
             // THE PREVIOUS FRAME'S PYRAMID, while the history still names it.
-            const bool usable = hzb && hist.valid && hist.generation == view->workspaceGeneration() &&
+            const bool usable = !capture && hzb && hist.valid &&
+                                hist.generation == view->workspaceGeneration() &&
                                 hist.scene == scene && hist.width == hzb->getWidth() &&
                                 hist.height == hzb->getHeight() && hist.levels == hzb->getNumMipmaps() &&
                                 std::equal(rect, rect + 4, hist.rect);
-            view->setAtomFirstTested(usable);
+            if (!capture) view->setAtomFirstTested(usable);
             if (usable) {
                 testAgainst = hzb;
                 std::memcpy(req.viewProj, hist.viewProj, sizeof(req.viewProj));
@@ -723,7 +732,9 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         // frontier invisibly by construction (Nanite has none). THE CUT (mode 3).
         req.lodHysteresis = 0.0f;
         req.mode = 3u;
-        cullPtr = late ? &view->atomCullLate() : &view->atomCull();
+        cullPtr = capture ? &view->atomCullCapture() : late ? &view->atomCullLate() : &view->atomCull();
+        // The capture's list holds the frame the view's first list was sized for.
+        if (capture) cullPtr->followCutBudget(view->atomCull());
         if (late && !testAgainst) {
             // THE FIRST PASS TESTED NOTHING: nothing was rejected, there is nothing to
             // draw — the frame is the frustum-only frame. Its half of the ring says so.
@@ -743,7 +754,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
             }
             // ---- (1) THE CULL, into the pass's own list ---------------------------
             std::string err;
-            cycleStats(device, vkRs->getVaoManager(), view, cullPtr, late);   // before this request zeroes them
+            if (!capture) cycleStats(device, vkRs->getVaoManager(), view, cullPtr, late);   // before this request zeroes them
             // NO DAG-BEARING MESH ATTACHED YET (a new project's first frames): no cluster
             // tables, so there is no cut to record — the depth is still cleared below.
             gs->flushClusterTables();
