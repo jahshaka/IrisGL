@@ -7325,19 +7325,20 @@ private:
     OgreView *mView;
 };
 
-/// THE HELD FRAME (ASYNC-SHADERS-1). A frame of an asynchronous view that drew a HOLE — an
-/// object whose shader is still building with no placeholder built yet, which is every object
-/// for a moment after a PASS change (a tier, a GI binding) because the placeholders are pass
-/// permutations too — is not presented: the window keeps the last complete picture (the
-/// fork's CompositorWorkspace::setSuppressSwap) until a frame draws no hole, at most
-/// kMaxHeldFrames in a row. Measured on a cold Basic world: a tier change used to present
-/// ~40 frames with the world missing.
+/// THE HELD FRAME (ASYNC-SHADERS-1), THE SAFETY NET. The grey placeholder (PBS and the Atom
+/// decode) is what a waiting object draws; the placeholders are pass permutations themselves,
+/// and the startup gate builds them for every tier's pass. A frame of an asynchronous view
+/// that still drew a HOLE — an object with neither its shader nor a placeholder yet (unlit,
+/// or a pass nothing prebuilt) — is not presented: the window keeps the last complete picture
+/// (the fork's CompositorWorkspace::setSuppressSwap) until a frame draws no hole, at most
+/// kMaxHeldFrames in a row. Counted (AsyncShaderStats::heldFrames) and rare: measured 0 for a
+/// cold material apply and a cold tier change, 2 at a project create.
 class OgreView;
 class AsyncHoldListener final : public Ogre::CompositorWorkspaceListener {
 public:
     /// Then it presents anyway. FRAMES, and generous: a frame that is not presented does not
     /// wait for the display, so a scripted loop runs several times faster while it holds
-    /// (measured: a cold tier change held 382 frames, 140 when presented).
+    /// (measured before the placeholders were prebuilt: a cold tier change held 382 frames).
     static constexpr unsigned kMaxHeldFrames = 1200u;
     explicit AsyncHoldListener(OgreView *view) : mView(view) {}
     void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
@@ -8719,6 +8720,7 @@ public:
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;
     void setAsyncShaderThreads(unsigned threads) override;
+    void setAsyncShaderPlaceholdersOnly(bool on) override;
     AsyncShaderStats asyncShaderStats() const override;
     void waitForAsyncShaders() override;
 

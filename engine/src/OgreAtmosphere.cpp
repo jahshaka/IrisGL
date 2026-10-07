@@ -115,6 +115,15 @@ void JahAtmosphere::createTextures() {
     mMs = makeLut(tm, "JahAtmo/MultiScatter/" + id, Ogre::TextureTypes::Type2D, kMsSize, kMsSize, 1u);
     mSkyView = makeLut(tm, "JahAtmo/SkyView/" + id, Ogre::TextureTypes::Type2D, kSkyW, kSkyH, 1u);
     mAerial = makeLut(tm, "JahAtmo/Aerial/" + id, Ogre::TextureTypes::Type3D, kApW, kApH, kApD + 1u);
+    // SAMPLEABLE FROM BIRTH (ASYNC-SHADERS-1, a validation defect on base): the
+    // sky quad samples SkyView/Aerial in every draw of the scene, and a new
+    // scene is drawn BEFORE its first frame's update() builds the tables — the
+    // open/create slices' prime and shader warm-up renders. A UAV is born in
+    // GENERAL, so those draws read an image in the wrong layout
+    // (VUID-vkCmdDraw-None-09600 on every create-after-create). The tables are
+    // handed to the samplers here once; update() rebuilds and hands them over
+    // again before any frame the user sees.
+    handOver();
 }
 
 // THE SKY QUAD — the sun disc's recipe and its three traps (DOCS/traps/ENGINE.md:

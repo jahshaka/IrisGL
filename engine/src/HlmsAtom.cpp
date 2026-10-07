@@ -376,6 +376,73 @@ bool HlmsAtom::bucketKeyOf(const Ogre::HlmsPbsDatablock *pbs, BucketKey &out, st
 // ---------------------------------------------------------------------------
 // THE DECODE TWIN
 // ---------------------------------------------------------------------------
+// OGRE'S OWN SERIALISER IS THE COPY. HlmsJson writes one datablock under its Hlms's
+// type name; the same text under OUR type name loads through the loader PBS's JSON half
+// registers (HlmsAtom inherits HlmsPbs::_loadJson), into this Hlms. Every
+// permutation-relevant field travels — the textures (retrieved by name, never
+// reloaded), their samplers and uv sets, workflow, BRDF, transparency, the maps —
+// without a field list of ours to fall out of date.
+Ogre::HlmsPbsDatablock *HlmsAtom::cloneIntoAtom(Ogre::HlmsPbsDatablock *pbs, const Ogre::String &name,
+                                                std::string &err) {
+    const Ogre::String *pbsName = pbs->getNameStr();
+    if (!pbsName) {
+        err = "cloneIntoAtom: the datablock has no name to serialise";
+        return nullptr;
+    }
+    Ogre::String json;
+    Ogre::HlmsJson hj(mHlmsManager, nullptr);
+    hj.saveMaterial(pbs, json, "");
+    const Ogre::String typeKey = "\"" + pbs->getCreator()->getTypeNameStr() + "\" : ";
+    const Ogre::String::size_type at = json.find(typeKey);
+    const Ogre::String nameKey = "\"" + *pbsName + "\" :";
+    const Ogre::String::size_type nameAt =
+        at == Ogre::String::npos ? Ogre::String::npos : json.find(nameKey, at + typeKey.size());
+    if (at == Ogre::String::npos || nameAt == Ogre::String::npos) {
+        err = "cloneIntoAtom: unexpected JSON shape from HlmsJson::saveMaterial";
+        return nullptr;
+    }
+    json.replace(nameAt, nameKey.size(), "\"" + name + "\" :");
+    json.replace(at, typeKey.size(), "\"" + Ogre::String(kTypeName) + "\" : ");
+    try {
+        hj.loadMaterials("jahAtomTwin", Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
+                         json.c_str(), "");
+    } catch (Ogre::Exception &e) {
+        err = "cloneIntoAtom: " + e.getFullDescription();
+        return nullptr;
+    }
+    auto *clone = static_cast<Ogre::HlmsPbsDatablock *>(getDatablock(Ogre::IdString(name)));
+    if (!clone) err = "cloneIntoAtom: the clone did not load";
+    return clone;
+}
+
+// THE ASYNCHRONOUS PLACEHOLDER (ASYNC-SHADERS-1). The fork's Hlms draws an object whose
+// permutation is still being built with the Hlms' placeholder datablock; a decode draw
+// covers a BUCKET's pixels, and a twin cannot stand in for another bucket by itself — so
+// the placeholder is a twin-shaped clone of the PBS placeholder (no class, in no bucket),
+// its permutation carries `jah_async_placeholder` and the PBS placeholder's pool slot
+// (calculateHashForPreCreate; the decode then reads the grey constants for every pixel),
+// and fillBuffersForV2 keeps the REAL twin's class (the pixels) while binding the
+// placeholder's pool (the constants). Never destroyed with the twins.
+bool HlmsAtom::installAsyncPlaceholder(Ogre::HlmsPbsDatablock *pbsPlaceholder, std::string &err) {
+    if (mPlaceholderTwin) return true;
+    if (!pbsPlaceholder || !pbsPlaceholder->getAssignedPool()) {
+        err = "installAsyncPlaceholder: the PBS placeholder has no pool slot";
+        return false;
+    }
+    Ogre::HlmsPbsDatablock *clone = cloneIntoAtom(pbsPlaceholder, "jahAtomAsyncPlaceholder", err);
+    if (!clone) return false;
+    Ogre::HlmsMacroblock macro;
+    macro.mDepthCheck = false;
+    macro.mDepthWrite = false;
+    macro.mCullMode = Ogre::CULL_NONE;
+    clone->setMacroblock(macro);
+    clone->setBlendblock(Ogre::HlmsBlendblock());
+    mPlaceholderTwin = clone;
+    mPlaceholderPbs = pbsPlaceholder;
+    setAsyncPlaceholderDatablock(clone);
+    return true;
+}
+
 Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pbs, std::string &err) {
     if (!pbs || !pbs->getCreator() || pbs->getCreator()->getType() != Ogre::HLMS_PBS) {
         err = "decodeTwinForBucket: not an HlmsPbs datablock";
@@ -396,15 +463,9 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
         return kt->second;
     }
 
-    // OGRE'S OWN SERIALISER IS THE COPY. HlmsJson writes one datablock under its
-    // Hlms's type name; the same text under OUR type name loads through the loader
-    // PBS's JSON half registers (HlmsAtom inherits HlmsPbs::_loadJson), into this
-    // Hlms. Every permutation-relevant field travels — the textures (retrieved by
-    // name, never reloaded), their samplers and uv sets, workflow, BRDF, transparency,
-    // the maps — without a field list of ours to fall out of date. The bucket's
-    // FIRST member is cloned; every later member has the same key, i.e. the same
-    // permutation and textures, and differs only in the constants the decode reads
-    // by slot from the pool.
+    // THE BUCKET'S FIRST MEMBER IS CLONED (cloneIntoAtom); every later member has the
+    // same key, i.e. the same permutation and textures, and differs only in the
+    // constants the decode reads by slot from the pool.
     const Ogre::String *pbsName = pbs->getNameStr();
     if (!pbsName) {
         err = "decodeTwinForBucket: the datablock has no name to serialise";
@@ -418,32 +479,9 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
         return nullptr;
     }
     const Ogre::String twinName = "jahAtomTwin/" + std::to_string(++mTwinSerial) + "/" + *pbsName;
-    Ogre::String json;
-    Ogre::HlmsJson hj(mHlmsManager, nullptr);
-    hj.saveMaterial(pbs, json, "");
-    const Ogre::String typeKey = "\"" + pbs->getCreator()->getTypeNameStr() + "\" : ";
-    const Ogre::String::size_type at = json.find(typeKey);
-    const Ogre::String nameKey = "\"" + *pbsName + "\" :";
-    const Ogre::String::size_type nameAt =
-        at == Ogre::String::npos ? Ogre::String::npos : json.find(nameKey, at + typeKey.size());
-    if (at == Ogre::String::npos || nameAt == Ogre::String::npos) {
-        err = "decodeTwinForBucket: unexpected JSON shape from HlmsJson::saveMaterial";
-        return nullptr;
-    }
-    json.replace(nameAt, nameKey.size(), "\"" + twinName + "\" :");
-    json.replace(at, typeKey.size(), "\"" + Ogre::String(kTypeName) + "\" : ");
-    try {
-        hj.loadMaterials("jahAtomTwin", Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
-                         json.c_str(), "");
-    } catch (Ogre::Exception &e) {
-        releaseClass(classIdx);
-        err = "decodeTwinForBucket: " + e.getFullDescription();
-        return nullptr;
-    }
-    auto *twin = static_cast<Ogre::HlmsPbsDatablock *>(getDatablock(Ogre::IdString(twinName)));
+    auto *twin = cloneIntoAtom(pbs, twinName, err);
     if (!twin) {
         releaseClass(classIdx);
-        err = "decodeTwinForBucket: the twin did not load";
         return nullptr;
     }
     // THE DECODE'S MACROBLOCK: a full-screen triangle neither tests nor writes the
@@ -1157,6 +1195,13 @@ void HlmsAtom::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::Pie
     }
     if (mClassifyDb && renderable && renderable->getDatablock() == mClassifyDb)
         setProperty(kNoTid, Ogre::IdString("atom_classify"), 1);
+    // The asynchronous placeholder's permutation (installAsyncPlaceholder): every pixel reads
+    // the grey constants at the PBS placeholder's slot.
+    if (mPlaceholderTwin && renderable && renderable->getDatablock() == mPlaceholderTwin && mPlaceholderPbs) {
+        setProperty(kNoTid, Ogre::IdString("jah_async_placeholder"), 1);
+        setProperty(kNoTid, Ogre::IdString("jah_async_placeholder_slot"),
+                    Ogre::int32(mPlaceholderPbs->getAssignedSlot()));
+    }
 }
 
 void HlmsAtom::applyStrongMacroblockRules(Ogre::HlmsMacroblock &macroblock, const size_t tid) const {
@@ -1262,7 +1307,21 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
     // because each twin may serve a different pool. The twin's own constants are never
     // read. mLastBoundPool is forgotten so the next draw's PBS half rebinds whatever
     // it needs rather than trusting a slot we overwrote.
-    const Ogre::HlmsDatablock *db = queuedRenderable.renderable->getDatablock();
+    // A PLACEHOLDER DRAW (ASYNC-SHADERS-1; the fork's RenderQueue swapped the placeholder in
+    // for this call): the pixels are the REAL twin's bucket, the constants the placeholder's.
+    const Ogre::HlmsDatablock *placeholderFor = _getAsyncPlaceholderFillFor();
+    const Ogre::HlmsDatablock *db =
+        placeholderFor ? placeholderFor : queuedRenderable.renderable->getDatablock();
+    if (placeholderFor && mPlaceholderPbs && mPlaceholderPbs->getAssignedPool()) {
+        if (auto it = mTwins.find(db); it != mTwins.end())
+            *(mCurrentMappedConstBuffer - 1) = it->second.classIdx;
+        const Ogre::ConstBufferPool::BufferPool *pool = mPlaceholderPbs->getAssignedPool();
+        *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
+            Ogre::PixelShader, 1, pool->materialBuffer, 0,
+            Ogre::uint32(pool->materialBuffer->getTotalSizeBytes()));
+        mLastBoundPool = nullptr;
+        return ret;
+    }
     // THE DRAW'S CLASS, in the .w of the per-draw word PBS just wrote (its four
     // uints end at mCurrentMappedConstBuffer; .w is the planar-reflection index, which
     // no twin's permutation reads — a twin serves a bucket, never a planar renderable):

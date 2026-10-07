@@ -1113,6 +1113,15 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         ++mCapturesLastFrame;
         mTexelsLastFrame += card.size * card.size;
     }
+    // THE COPY SESSION CLOSES HERE, with the copies (ASYNC-SHADERS-1, a validation defect on
+    // base: oldLayout-01197 / VUID-vkCmdDraw-None-09600 on cardShadowRough at a scene's first
+    // captures). The copies leave Ogre's copy encoder OPEN with the layers in TRANSFER_DST;
+    // closing it moves them back to their resting layout AND re-asserts that layout in the
+    // barrier solver. Left open, the first reader below (the relight, whenever the still trace
+    // waits and so does not close it) resolves its barrier against the open session, the
+    // closing inside that very barrier then overwrites the solver's record with GENERAL, and
+    // the next reader transitions a SHADER_READ image "from GENERAL".
+    if (!mBatch.empty()) Ogre::Root::getSingleton().getRenderSystem()->endCopyEncoder();
     const auto tC = std::chrono::steady_clock::now();
     mWsMs = float(std::chrono::duration<double, std::milli>(tB - mBatchStart).count());
     mCopyMs = float(std::chrono::duration<double, std::milli>(tC - tB).count());

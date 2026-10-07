@@ -2924,6 +2924,10 @@ public:
     /// dropped and rebuilt by whoever needs it next); the engine starts it with
     /// EngineConfig::asyncShaderThreads.
     virtual void setAsyncShaderThreads(unsigned threads) = 0;
+    /// While on, an asynchronous view's waiting objects request only the PLACEHOLDER for
+    /// the pass they are drawn in, never their own permutation (the startup gate's tier
+    /// sweep: every pass's placeholders built, nobody's material paid for in every pass).
+    virtual void setAsyncShaderPlaceholdersOnly(bool on) = 0;
     virtual AsyncShaderStats asyncShaderStats() const = 0;
     /// Blocks until nothing is pending, publishing as jobs land. For tests and for a
     /// caller that must hand over a finished picture; never on an interactive path.
