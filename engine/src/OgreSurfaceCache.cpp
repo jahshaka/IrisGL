@@ -883,8 +883,25 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             ++mInvalidMaterial;
         }
     }
+    // ...AND WHO LEFT WITHOUT LEAVING (REFLECT-FIX-1): a resident instance whose node
+    // the scene no longer OFFERS at all — a gesture's drag channel takes a dragged
+    // still off the GI channel for the length of the drag, a hide does the same — is
+    // coming back as itself; one that is still offered but outside the radius is the
+    // camera walking away, and comes back a newcomer.
+    std::vector<NodeId> offered;
+    bool offeredBuilt = false;
     for (size_t i = 0; i < mInstances.size(); ++i) {
         if (mInstances[i].cardCount && !mInstances[i].seen) {
+            if (!offeredBuilt) {
+                offered.reserve(view.candidates.size());
+                for (const CardSceneView::Candidate &cand : view.candidates) offered.push_back(cand.node);
+                std::sort(offered.begin(), offered.end());
+                offeredBuilt = true;
+            }
+            if (!std::binary_search(offered.begin(), offered.end(), mInstances[i].node)) {
+                if (mReturning.size() > 4096u) mReturning.clear();   // a bound, not a policy
+                mReturning.insert(mInstances[i].node);
+            }
             releaseInstance(i);
             changed = true;
         }
@@ -941,8 +958,12 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     // alone holds 256 pages): its reflection went voxel-shaded and blotchy at rest
     // (dark fraction 0.31 -> 0.74, still 0.73 at 20 s; spikes/reflect-tear-audit). So
     // the gate admits exactly those, and still refuses every newcomer.
+    // ...and the same for an instance RETURNING from a gesture (mReturning): the drag
+    // channel takes a dragged still off the GI channel for the gesture, and at its
+    // end the object is offered again — its own re-add, not a newcomer (the app's
+    // Mirror Room drag: the teapot's cards never came back without this).
     const bool gateFull = pagesUsed * 8u >= mPageOwner.size() * 7u;
-    if (gateFull && moved.empty()) return;
+    if (gateFull && moved.empty() && mReturning.empty()) return;
     std::sort(moved.begin(), moved.end());
 
     std::vector<const CardSceneView::Candidate *> arriving;
@@ -950,7 +971,8 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     for (const CardSceneView::Candidate &cand : view.candidates) {
         if (!cand.item || !cand.cards || cand.cards->empty()) continue;
         if (mByNode.find(cand.node) != mByNode.end()) continue;
-        if (gateFull && !std::binary_search(moved.begin(), moved.end(), cand.node)) continue;
+        if (gateFull && !std::binary_search(moved.begin(), moved.end(), cand.node) && !mReturning.count(cand.node))
+            continue;
         if ((cand.box.mCenter - view.viewerPos).squaredLength() > r2) continue;
         arriving.push_back(&cand);
     }
@@ -966,6 +988,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     mAtlasFull = false;
     for (const CardSceneView::Candidate *cand : arriving) {
         buildCardsFor(*cand);
+        if (mByNode.count(cand->node)) mReturning.erase(cand->node);
         if (mAtlasFull) break;
     }
     pagesUsed = 0u;

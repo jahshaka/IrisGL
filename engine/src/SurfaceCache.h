@@ -78,6 +78,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <OgrePixelFormatGpu.h>
@@ -661,6 +662,11 @@ private:
     float    mRadius = 0.0f;
     unsigned mBudget = 0u;
     unsigned long long mInvalidTransform = 0ull;
+    /// REFLECT-FIX-1: the RESIDENT instances whose node stopped being offered while it
+    /// was still in the scene (a drag's gesture takes it off the GI channel; a hide) —
+    /// their return is the object's own re-add, admitted past the fill gate like a
+    /// moved instance's. Erased when the node holds cards again.
+    std::unordered_set<NodeId> mReturning;
     unsigned long long mInvalidMaterial = 0ull;
 };
 
