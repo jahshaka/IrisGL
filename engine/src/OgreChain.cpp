@@ -1962,12 +1962,16 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                               floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
-        // ...AND THE DEPTH THAT PICTURE WAS DRAWN AT (REFLECT-FIX-1), a depth copy
-        // beside the colour copy: the resolve's surface test (JahSsrResolve_ps.glsl,
-        // "THE SAME SURFACE"). 4 bytes a pixel — 8.3 MB at 1920x1080 — per march chain.
+        // ...AND THE DEPTH THAT PICTURE WAS DRAWN AT (REFLECT-FIX-1), copied beside the
+        // colour: the resolve's surface test (JahSsrResolve_ps.glsl, "THE SAME
+        // SURFACE"). 4 bytes a pixel — 8.3 MB at 1920x1080 — per march chain. A
+        // COLOUR texture holding the depth value, not a depth texture: a depth-format
+        // node texture read by the resolve was MEASURED to put the frame's Atom items a
+        // frame late (the dragged box drawn at its previous pose — gi.reflect_uncover's
+        // direct-box check), and a float colour copy reads the same number.
         if (ssrMarch) {
-            auto *td = addTex(n, kSsrPrevDepth, Ogre::PFG_D32_FLOAT);
-            td->preferDepthTexture = true;
+            auto *td = addTex(n, kSsrPrevDepth, Ogre::PFG_R32_FLOAT);
+            td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
         }   // if (ssr)
         // THE HIT LIST (PHOTON-HIT-SHADE-1): two UAVs the ray jobs append to and
@@ -2190,15 +2194,15 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             c->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 1.0f));
             c->mProfilingId = "Jahshaka SSR history seed";
         }
-        // ...and its depth, seeded once with the FAR value of this render system's
-        // convention (REFLECT-FIX-1): no first-frame texel matches a surface, so the
-        // first frame's march hands every pixel to the fallback.
+        // ...and its depth, seeded once with -1, a value no depth buffer holds
+        // (REFLECT-FIX-1): no first-frame texel matches a surface, so the first frame's
+        // march hands every pixel to the fallback.
         if (ssrMarch) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrevDepth);
             t->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
             c->mNumInitialPasses = 1;
-            c->mClearDepth = 1.0f;   // Ogre maps 1 to the far plane under reverse depth
+            c->setAllClearColours(Ogre::ColourValue(-1.0f, -1.0f, -1.0f, -1.0f));
             c->mProfilingId = "Jahshaka SSR history depth seed";
         }
         // WITHOUT THE MARCH, SOMETHING STILL HAS TO WRITE THE REFLECTION
@@ -2582,11 +2586,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // (the owner's tearing; spikes/reflect-tear-audit). With the depth beside it
         // the resolve compares the hit's reprojected depth to the depth the texel
         // was drawn at and declines a texel that showed another surface.
-        Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrevDepth);
-        t->setNumPasses(1);
-        auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(t->addPass(Ogre::PASS_DEPTHCOPY));
-        c->setDepthTextureCopy(kDepth, kSsrPrevDepth);
-        c->mProfilingId = "Jahshaka SSR history depth";
+        auto *dq = addQuad(n, kSsrPrevDepth, "Ogre/Copy/1xFP32", "Jahshaka SSR history depth");
+        dq->addQuadTextureSource(0, kDepth);
+        dq->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        if (desc.letterbox) scissor(handlesOut, dq);
     }
     // THE SCENE HELPERS, after the history copy (REFLECT-FIX-1; kSceneHelperRenderQueue's
     // note): the outline shells, depth-tested wires and markers, and the grid, into the
