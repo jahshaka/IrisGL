@@ -53,6 +53,13 @@
 // answers. There is no black and no sky for a hit: the ray found geometry, and
 // the geometry is shaded.
 //
+// THE STRATA ACROSS PROBES (GATHER-NOISE-1): a texel's ray is jittered inside one
+// of 3 x 3 sub-cells, any 3 x 3 block of uniform probes holding each once, so the
+// filter's average of one direction over its neighbours is stratified (-23 % of
+// the moving floor's noise on Showroom 2 alone, at no cost). The hot spot a lamp
+// throws on a ceiling is what a closed room's rays hit or miss: Showroom 2 with
+// Light0 hidden is 12x quieter (spikes/gather-noise-1).
+//
 // DETERMINISM (spec section 5). Every stochastic input is an integer hash of
 // (probe cell, ray, frame); each ray writes its own texel and nothing is summed
 // here (the filter's reduction is a fixed-order shared-memory tree).
@@ -205,8 +212,22 @@ void main()
 		// than a fixed quadrature that would alias a small bright source in
 		// and out as the probe moves.
 		const ivec2 t = ivec2( int( lane ) % octRes, int( lane ) / octRes );
-		const vec2 j = p.knobs6.w > 0.5 ? vec2( 0.5 )
-										: jahSample2( jahLocalCell( cell ), sequence + lane + 1u, frame );
+		vec2 j = p.knobs6.w > 0.5 ? vec2( 0.5 )
+								  : jahSample2( jahLocalCell( cell ), sequence + lane + 1u, frame );
+		// THE STRATA ACROSS NEIGHBOURING PROBES (GATHER-NOISE-1): this ray's
+		// jitter is confined to sub-cell ((cell + o) mod N) of its texel, the
+		// offset o drawn per TEXEL and per FRAME (never per probe), so every N x N
+		// block of uniform cells holds each sub-cell exactly once — the filter's
+		// and the bilinear's average of one direction over neighbouring probes is
+		// a stratified estimate of the texel — and each probe's ray is uniform
+		// over its texel across frames. Adaptive probes keep the plain jitter.
+		const float strata = floor( max( p.young.z, 1.0 ) );
+		if( strata > 1.5 && !adaptive && p.knobs6.w < 0.5 )
+		{
+			const vec2 o = floor( jahSample2( ivec2( 0 ), 8192u + lane, frame ) * strata );
+			const vec2 s = mod( vec2( jahLocalCell( cell ) ) + o, vec2( strata ) );
+			j = ( s + j ) / strata;
+		}
 		const vec2 uv = ( vec2( t ) + j ) / float( octRes );
 		const vec3 octPoint = jahOctPoint( uv );
 		const float invR = 1.0 / max( length( octPoint ), 1e-6 );

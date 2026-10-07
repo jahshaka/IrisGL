@@ -659,6 +659,7 @@ public:
 private:
     const ArmRegistry *mArms = nullptr;
     bool arm(ArmId a, bool otherwise) const { return mArms ? mArms->on(a) : otherwise; }
+    double armValue(ArmId a) const { return mArms ? mArms->value(a) : 0.0; }
     /// THE REFIT, off by default. A full TLAS rebuild is NVIDIA's own recommendation
     /// ("consider PREFER_FAST_TRACE and perform only rebuilds") and it measures
     /// 0.21-0.35 ms GPU at 8,001 instances on this rig — inside any budget — while
@@ -6419,6 +6420,28 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
                               scene->mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                    .gather;
     in.tuning = scene->gatherTuning();
+    // THE GATHER'S MEASUREMENT ARMS (GATHER-NOISE-1): each one that is set
+    // overrides the scene's tuning field it names; 0 leaves the scene's.
+    {
+        const auto take = [&](ArmId a, unsigned &field) {
+            const double v = armValue(a);
+            if (v > 0.0) field = unsigned(v);
+        };
+        take(ArmId::GatherOctRes, in.tuning.octRes);
+        take(ArmId::GatherStride, in.tuning.probeStride);
+        take(ArmId::GatherHistory, in.tuning.historyFrames);
+        take(ArmId::GatherFilterRadius, in.tuning.filterRadius);
+        take(ArmId::GatherRestFrames, in.tuning.restFrames);
+        take(ArmId::GatherRestSeed, in.tuning.restSeed);
+        take(ArmId::GatherAgeView, in.tuning.ageView);
+        if (arm(ArmId::GatherRestOff, false)) in.tuning.restOff = true;
+        if (arm(ArmId::GatherFreezeFrame, false)) in.tuning.freezeFrameIndex = true;
+        take(ArmId::GatherYoungFrames, in.tuning.youngFrames);
+        if (arm(ArmId::GatherValidationOff, false)) in.tuning.historyValidationOff = true;
+        take(ArmId::GatherCrossStrata, in.tuning.crossStrata);
+        if (armValue(ArmId::GatherYoungReach) > 0.0)
+            in.tuning.youngReach = float(armValue(ArmId::GatherYoungReach));
+    }
     in.restKey = scene->gatherRestKey();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
@@ -7575,7 +7598,7 @@ void OgreView::syncReflectListener() {
     // gather or sun-contact toggle where the prepass already runs is not a new
     // graph and rebuilds nothing.
     if (mChainRayReflect != chainDesc().rayReflect || mChainPrepass != chainDesc().prepass() ||
-        mChainHitDecode != chainDesc().hitDecode)
+        mChainHitDecode != chainDesc().hitDecode || mChainHitDecodeAll != chainDesc().hitDecodeAll)
         rebuildWorkspaceDef();
     // The same arming rule as the planar and globals listeners, and the same
     // reason it is re-evaluated every frame: the shape above can change, and a

@@ -236,6 +236,38 @@ vec3 shEvalAt( uint i, vec3 n, int bands )
 	return max( e, vec3( 0.0 ) );
 }
 
+/// THE WIDE READ'S OCCLUSION TEST (GATHER-NOISE-1's fix round): is the probe at
+/// `probe` reached from the pixel's surface point `x` WITHOUT anything standing
+/// between them? The segment is walked in the eye's own picture, one sample
+/// every 3 pixels of its length on screen (2 to 16): at each, the depth buffer
+/// must not hold a surface NEARER the eye than the segment itself (beyond a 3 %
+/// tolerance: the segment lies on the surface, whose own depth matches it). A
+/// partition, a column or a step between the two is exactly such a nearer
+/// surface — a 0.1 m partition seen from above is a few pixels wide, which a
+/// fixed four samples stepped over (gi.flythrough_noise.Leak).
+bool seenAlongSurface( vec3 x, vec2 xUv, vec3 probe, JahEye e, int eye, vec2 size )
+{
+	vec2 pUv;
+	float pz;
+	if( jahReproject( probe, e.camPos, e.perspective, e.rayTL, e.rayRight, e.rayDown, e.fwd, pUv, pz ) != 0 )
+		return false;
+	const int n = clamp( int( length( ( pUv - xUv ) * size ) / 3.0 ), 2, 16 );
+	for( int i = 1; i < n; ++i )
+	{
+		const vec3 w = mix( x, probe, float( i ) / float( n ) );
+		vec2 uvS;
+		float z;
+		if( jahReproject( w, e.camPos, e.perspective, e.rayTL, e.rayRight, e.rayDown, e.fwd, uvS, z ) != 0 )
+			return false;
+		const float raw = texture( sceneDepth, vec3( uvS, float( eye ) ) ).x;
+		if( raw <= 0.0 || raw >= 1.0 )
+			continue;		// nothing drawn there: the sky stands behind every surface
+		if( jahViewDistance( raw ) < z * 0.97 )
+			return false;
+	}
+	return true;
+}
+
 /// THE DISCS (PHOTON-VIEW-1): the probes of the 3 x 3 cells around the pixel's
 /// own (uniform and adaptive), each projected through the pixel's eye; the nearest
 /// whose disc holds the pixel colours it — E/pi tonemapped (x / (1 + x)), the
@@ -347,6 +379,67 @@ void main()
 		return;
 	}
 
+	// ---- THE PIXEL HISTORY (see the header) ---------------------------------
+	vec4 prev = vec4( 0.0 );
+	uint prevCount = 0u;
+	if( temporal && p.knobs5.x >= 1.0 )
+	{
+		vec2 was;
+		float z;
+		// THROUGH THIS EYE'S PREVIOUS CAMERA, onto this eye's own half of the
+		// history (PHOTON-GA-VR, rq_reflect.comp's historyAt rule): an eye's
+		// mean is never read from the other eye's texels.
+		const JahEye before = jahEyeBefore( eye );
+		if( jahReproject( pixelWorld, before.camPos, before.perspective, before.rayTL,
+						  before.rayRight, before.rayDown, before.fwd, was, z ) == 0 )
+		{
+			const ivec2 pc = clamp( ivec2( was * vec2( eyeW, full.y ) ), ivec2( 0 ),
+									ivec2( eyeW - 1, full.y - 1 ) );
+			const uvec2 texel = imageLoad( historyPrev, ivec3( pc, eye ) ).xy;
+			float wasDist;
+			vec3 wasNormal;
+			uint wasCount;
+			float wasCoverage;
+			unpackGeom( texel.y, wasDist, wasNormal, wasCount, wasCoverage );
+			// THE SAME SURFACE: the same distance (the 5 % test) AND the same
+			// facing (the gather's own same-surface tolerance, the plane test's
+			// normal dot). A corner or a crease reprojects onto a surface at the
+			// same distance facing elsewhere, which the distance alone would pass.
+			// (knobs5.w = 1 is the test door that turns BOTH tests off —
+			// GatherTuning::historyValidationOff, the arm gi.gather_motion
+			// proves its disocclusion bar against; never shipped.)
+			const bool accept = p.knobs5.w > 0.5 ||
+								( jahSameDistance( wasDist, z ) &&
+								  dot( wasNormal, pixelNormal ) >= p.plane.y );
+			if( wasCount > 0u && accept )
+			{
+				const vec4 h = vec4( unpackRgbShared( texel.x ), wasCoverage );
+				if( finite3( h.xyz ) && finite1( h.w ) )
+				{
+					prev = clamp( h, vec4( 0.0 ), vec4( 1024.0, 1024.0, 1024.0, 1.0 ) );
+					prevCount = wasCount;
+				}
+			}
+		}
+	}
+	// ---- THE YOUNG HISTORY'S REACH (GATHER-NOISE-1) ---------------------------
+	// A pixel whose history is short — new to the screen at an edge the camera
+	// turns toward, or uncovered behind a moving silhouette — has averaged only
+	// that many frames, and its block of the picture is several times noisier
+	// than an old pixel's (the lane's measurement: 2.1 against 0.6 codes on the
+	// moving path). It reads the probes of a WIDER neighbourhood: a tent of
+	// `young.y` cells at a history of 0, narrowing linearly to the bilinear four
+	// (a tent of 1 cell IS the bilinear) at `young.x` frames — the
+	// history-length-adaptive filter of SVGF / ReBLUR. Every probe is weighed by
+	// the plane test exactly as the bilinear four are, so the wider read never
+	// crosses onto another surface; what it trades is a transient spatial blur of
+	// the irradiance along the surface, which the history's running mean dilutes
+	// frame by frame as the pixel ages (the converged answer is the bilinear's).
+	// NEVER AT REST: the rest mean is the shipped estimator's mean, exactly.
+	float reach = 1.0;
+	if( temporal && p.knobs6.x < 1.0 && float( prevCount ) < p.young.x )
+		reach = mix( max( p.young.y, 1.0 ), 1.0, float( prevCount ) / max( p.young.x, 1.0 ) );
+
 	// THE FOUR GRID PROBES AROUND THE PIXEL: the cells whose centres bracket
 	// it, and the bilinear weights of that bracket. A cell off the grid clamps
 	// onto the border cell (its weight joins the border's).
@@ -359,6 +452,65 @@ void main()
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
 	float ownCellWeight = 0.0;
+	if( reach > 1.0 )
+	{
+		// THE WIDE READ: every cell whose centre lies within `reach` cells of the
+		// pixel on both axes (cells off the eye's grid are skipped, not clamped),
+		// its uniform probe and its adaptive twin, each at the cell's tent weight
+		// times its plane weight.
+		// PAST TWO CELLS THE READ STEPS BY TWO (the cost: a reach of 4 is 16 probe
+		// pairs, not 64): the probes it skips are filtered with the ones it reads
+		// (the filter's 3 x 3), so they add little that is independent. WHICH
+		// half it reads ALTERNATES frame by frame on each axis, keyed on the
+		// PIXEL'S OWN HISTORY COUNT (one more each frame it is read), so the
+		// history averages both sets and no fixed tap set flips at a cell
+		// boundary (an 8-px step pattern, the fix round's audit) — and a replay
+		// of the same frames reads the same sets (keyed on the view's frame
+		// counter, app.capture_steps' replay moved by 79 px at 1 code).
+		const int stepC = reach > 2.0 ? 2 : 1;
+		const uint parity = prevCount;
+		const ivec2 own = ivec2( floor( g ) ) + ivec2( int( parity & 1u ), int( ( parity >> 1u ) & 1u ) );
+		const int x0 = int( floor( g.x - reach ) ) + 1, x1 = int( floor( g.x + reach ) );
+		const int y0 = int( floor( g.y - reach ) ) + 1, y1 = int( floor( g.y + reach ) );
+		const int sx = x0 + ( ( ( own.x - x0 ) % stepC ) + stepC ) % stepC;
+		const int sy = y0 + ( ( ( own.y - y0 ) % stepC ) + stepC ) % stepC;
+		for( int cy = sy; cy <= y1; cy += stepC )
+			for( int cx = sx; cx <= x1; cx += stepC )
+			{
+				if( cx < 0 || cy < 0 || cx >= gridEye.x || cy >= gridEye.y )
+					continue;
+				const float wt = max( 1.0 - abs( float( cx ) - g.x ) / reach, 0.0 ) *
+								 max( 1.0 - abs( float( cy ) - g.y ) / reach, 0.0 );
+				if( wt <= 0.0 )
+					continue;
+				const ivec2 c = ivec2( cx, cy ) + cellOff;
+				const uint ui = uint( c.y * grid.x + c.x );
+				const float link = records.r[ui].normalW.w;
+				for( int k = 0; k < 2; ++k )
+				{
+					if( k == 1 && link < 0.5 )
+						break;
+					const uint pi = k == 0 ? ui : uint( link ) - 1u;
+					const vec4 posW = records.r[pi].posW;
+					if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
+						continue;
+					float w = wt * jahPlaneWeight( posW.xyz, records.r[pi].normalW.xyz, pixelWorld,
+												   pixelNormal, pixelDist );
+					// ...AND THE PROBE IS SEEN FROM THE PIXEL ALONG ITS SURFACE: no
+					// LIGHT THROUGH A WALL. A floor that runs on under a thin
+					// partition is one plane on both sides, so the plane test alone
+					// would hand the lit side's probes to the dark side's pixels.
+					if( w > 0.0 && !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye,
+														vec2( float( eyeW ), float( full.y ) ) ) )
+						w = 0.0;
+					if( w <= 0.0 )
+						continue;
+					sum += shEvalAt( pi, pixelNormal, bands ) * w;
+					wsum += w;
+				}
+			}
+	}
+	else
 	for( int k = 0; k < 4; ++k )
 	{
 		const ivec2 o = ivec2( k & 1, k >> 1 );
@@ -379,6 +531,8 @@ void main()
 	}
 	// ...AND THE PIXEL'S OWN CELL'S ADAPTIVE TWIN, at that cell's bilinear share:
 	// it exists because the cell holds a surface its uniform probe is not on.
+	// (The wide read took every cell's twin at its tent weight already.)
+	if( reach <= 1.0 )
 	{
 		const float link = records.r[index].normalW.w;
 		if( link > 0.5 && ownCellWeight > 0.0 )
@@ -484,49 +638,6 @@ void main()
 		return;
 	}
 
-	// ---- THE PIXEL HISTORY (see the header) ---------------------------------
-	vec4 prev = vec4( 0.0 );
-	uint prevCount = 0u;
-	if( p.knobs5.x >= 1.0 )
-	{
-		vec2 was;
-		float z;
-		// THROUGH THIS EYE'S PREVIOUS CAMERA, onto this eye's own half of the
-		// history (PHOTON-GA-VR, rq_reflect.comp's historyAt rule): an eye's
-		// mean is never read from the other eye's texels.
-		const JahEye before = jahEyeBefore( eye );
-		if( jahReproject( pixelWorld, before.camPos, before.perspective, before.rayTL,
-						  before.rayRight, before.rayDown, before.fwd, was, z ) == 0 )
-		{
-			const ivec2 pc = clamp( ivec2( was * vec2( eyeW, full.y ) ), ivec2( 0 ),
-									ivec2( eyeW - 1, full.y - 1 ) );
-			const uvec2 texel = imageLoad( historyPrev, ivec3( pc, eye ) ).xy;
-			float wasDist;
-			vec3 wasNormal;
-			uint wasCount;
-			float wasCoverage;
-			unpackGeom( texel.y, wasDist, wasNormal, wasCount, wasCoverage );
-			// THE SAME SURFACE: the same distance (the 5 % test) AND the same
-			// facing (the gather's own same-surface tolerance, the plane test's
-			// normal dot). A corner or a crease reprojects onto a surface at the
-			// same distance facing elsewhere, which the distance alone would pass.
-			// (knobs5.w = 1 is the test door that turns BOTH tests off —
-			// GatherTuning::historyValidationOff, the arm gi.gather_motion
-			// proves its disocclusion bar against; never shipped.)
-			const bool accept = p.knobs5.w > 0.5 ||
-								( jahSameDistance( wasDist, z ) &&
-								  dot( wasNormal, pixelNormal ) >= p.plane.y );
-			if( wasCount > 0u && accept )
-			{
-				const vec4 h = vec4( unpackRgbShared( texel.x ), wasCoverage );
-				if( finite3( h.xyz ) && finite1( h.w ) )
-				{
-					prev = clamp( h, vec4( 0.0 ), vec4( 1024.0, 1024.0, 1024.0, 1.0 ) );
-					prevCount = wasCount;
-				}
-			}
-		}
-	}
 	// THE COUNT-IN-HISTORY IDIOM (rq_reflect.comp): 1/n while the mean is young
 	// — a true running mean, the fastest unbiased convergence — with a floor so
 	// it keeps following a scene that changes. A pixel with no usable history
@@ -570,5 +681,9 @@ void main()
 	vec4 outV = vec4( 0.0 );
 	if( mean.w > 1e-3 )
 		outV = vec4( clamp( mean.xyz / mean.w, vec3( 0.0 ), vec3( 1024.0 ) ), mean.w );
+	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
+	// magenta where the reprojected history held fewer than N frames.
+	if( p.stereo.z > 0.5 )
+		outV = float( prevCount ) < p.stereo.z ? vec4( 0.5, 0.0, 0.5, 1.0 ) : vec4( 0.0, 0.0, 0.0, 1.0 );
 	imageStore( probeIrradiance, at, outV );
 }

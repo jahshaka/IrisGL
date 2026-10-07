@@ -3490,6 +3490,43 @@ struct GatherTuning {
     /// (gi.gather_reference, gi.gather_plane) or that measures the history's own
     /// floor at rest (gi.gather_stable's trade) sets it.
     bool     restOff = false;
+    /// THE FILTER IN PROBE SPACE'S REACH (GATHER-NOISE-1): 0 = the shipped
+    /// reach, 1 = the 3 x 3 neighbourhood alone, 2 = that plus the ring of eight
+    /// at two cells (17 taps). Each tap is weighed by the plane and hit-distance
+    /// tests exactly as the inner ring is.
+    unsigned filterRadius = 0u;
+    /// THE REST MEAN'S LENGTH and its SAMPLE SEQUENCE (GATHER-NOISE-1, the
+    /// converged reference): 0 = the settle (settleFramesOf), else the rest
+    /// mean averages this many rest frames before the view holds; `restSeed`
+    /// offsets the rest frames' sequence so several references of one pose are
+    /// independent draws. Measurement doors, never shipped.
+    unsigned restFrames = 0u;
+    unsigned restSeed = 0u;   ///< at most 255 (the sequence's frame travels as a float)
+    /// THE HISTORY-AGE VIEW (GATHER-NOISE-1's instrument): N > 0 paints every
+    /// pixel whose reprojected history held fewer than N frames magenta and
+    /// every other pixel black, in place of the gather's answer. The history
+    /// itself runs as shipped. Never shipped.
+    unsigned ageView = 0u;
+    /// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1): a pixel whose history holds
+    /// fewer than `youngFrames` frames reads the probes of a WIDER neighbourhood
+    /// — a tent `youngReach` PIXELS wide at a history of 0 (in cells of the
+    /// view's probe stride, never under one), narrowing linearly to
+    /// the shipped bilinear (1 cell) at `youngFrames` — each weighed by the plane
+    /// test as the bilinear four are. 0 = the shipped values; youngFrames 1 with
+    /// youngReach 1 is the reach off (the pre-lane integrate). In pixels, not
+    /// cells: the blur it trades is a distance on the picture (3 cells at High's
+    /// 16-px stride raised the walls' error +13 % where 3 at Epic's 8 px held it).
+    unsigned youngFrames = 0u;
+    float    youngReach = 0.0f;
+    /// THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GATHER-NOISE-1): each
+    /// ray's jitter inside its octahedral texel is confined to one of N x N
+    /// sub-cells, assigned so that any N x N block of probe cells covers all of
+    /// them once (a Latin tiling shifted at random per texel and per frame:
+    /// every probe's ray is still uniform over its texel across frames). The
+    /// probe filter and the bilinear average neighbours' rays of one direction,
+    /// so their mean is a STRATIFIED estimate of the texel instead of N^2
+    /// independent ones. 0 = the shipped N; 1 = off (each ray jittered alone).
+    unsigned crossStrata = 0u;
 };
 
 // THE PIXEL HISTORY'S MEASUREMENT LEVER (PHOTON-GATHER-1c item 3) is an
@@ -3614,6 +3651,10 @@ struct GatherStatus {
     /// Which gather frame the readback is of (the view's frame counter), so a
     /// suite can tell a fresh copy from a repeat.
     unsigned irradianceFrame = 0u;
+    /// ...and the view's frame counter NOW: the next frame the gather records
+    /// carries this number (GATHER-NOISE-1), so a suite that moves the camera
+    /// every frame knows which readback is which pose.
+    unsigned frame = 0u;
     /// ...and THE SAME FRAME'S ADAPTIVE TWINS (the readback door too; PHOTON-II-1 F3): per
     /// uniform cell, row-major over the probe grid (probesX x probesY), 1 where the cell got
     /// its second probe that frame. How a suite proves the budget's ranking starves no cell.

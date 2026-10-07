@@ -1115,6 +1115,13 @@ constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
 constexpr Ogre::uint32 kSsrResolvePassIdentifier = 25004u;
 /// The hit list's height as a factor of the target's (ChainDesc::hitDecode).
 constexpr float kHitListHeightFactor = 0.5625f;
+/// ...and under the arm "gather.decodeHits" (ChainDesc::hitDecodeAll,
+/// GATHER-NOISE-1): every gather ray is a record, so the list holds the Epic
+/// gather's WHOLE worst case (1.25 W H: (W/8)(H/8) probes x 1.25 x 64) beside the
+/// shipped list — the arm measured a route with 46 % of its hits dropped as
+/// black at the shipped size (ROUTE-AGREE-1). 56 bytes a target pixel; a
+/// measurement arm, never a frame path.
+constexpr float kHitListHeightFactorDecodeAll = 2.0f;
 
 struct ChainDesc {
     Colour   background;
@@ -1285,6 +1292,9 @@ struct ChainDesc {
     /// each (28 of record, 8 of radiance) = 42 MB. Not tied to the rows that trace
     /// (a toggle of the gather where the prepass already runs is not a new graph).
     bool  hitDecode = false;
+    /// ...SIZED FOR THE ARM "gather.decodeHits" (kHitListHeightFactorDecodeAll):
+    /// set while the arm is on, so toggling the arm is a new graph.
+    bool  hitDecodeAll = false;
     /// THE VISIBILITY BUFFER (ATOM S3-DRAW, OgreAtomDraw.cpp / OgreAtomIdPass.cpp):
     /// the id pass in front of every scene pass of the view, which then LOAD its
     /// depth and SKIP kAtomRenderQueue (the screen decode shades those items as
@@ -1842,6 +1852,19 @@ enum class ArmId : unsigned {
     DiffuseConeSkip,     ///< "photon.diffuseConeSkip" — the pixel's cone diffuse only where the field's fallback weight is > 0
     SpecularConeSkip,    ///< "photon.specularConeSkip" — the pixel's specular cone only where the reflection's w < 1
     GatherDecodeHits,    ///< "gather.decodeHits" — every gather hit a record (the decode route), never the caches
+    GatherOctRes,        ///< "gather.octRes" — the probe map's resolution (rays = octRes^2; 0 = the tier's)
+    GatherStride,        ///< "gather.stride" — the probe stride in pixels (0 = the tier's)
+    GatherHistory,       ///< "gather.historyFrames" — the pixel history's floor in frames (0 = shipped)
+    GatherFilterRadius,  ///< "gather.filterRadius" — the probe-space filter's reach (0 = shipped)
+    GatherRestOff,       ///< "gather.restOff" — no rest mean: every frame is the history's
+    GatherRestFrames,    ///< "gather.restFrames" — the rest mean's length (0 = the settle)
+    GatherRestSeed,      ///< "gather.restSeed" — the rest frames' sequence offset
+    GatherAgeView,       ///< "gather.ageView" — paint pixels whose history is younger than N frames
+    GatherFreezeFrame,   ///< "gather.freezeFrame" — the sample sequence's frame held (the determinism door)
+    GatherYoungFrames,   ///< "gather.youngFrames" — the history length below which a pixel reads wider (0 = shipped)
+    GatherYoungReach,    ///< "gather.youngReach" — that reach in pixels at a history of 0 (0 = shipped)
+    GatherValidationOff, ///< "gather.validationOff" — every reprojected history texel accepted (a test door)
+    GatherCrossStrata,   ///< "gather.crossStrata" — rays stratified across N x N probes (0 = shipped, 1 = off)
     Count
 };
 class ArmRegistry {
@@ -8002,6 +8025,7 @@ private:
     bool                       mChainPrepass = false;
     /// ...and ChainDesc::hitDecode (PHOTON-HIT-SHADE-1): the hit list + its pass.
     bool                       mChainHitDecode = false;
+    bool                       mChainHitDecodeAll = false;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.

@@ -71,9 +71,10 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 voxelInvSize[kMaxCascades];
 	/// PHOTON-GATHER-1b. x = the SH bands the integrate evaluates (9 = L0..L2,
 	/// 4 = L0..L1: the measurement arm, GatherTuning::shBands), y = the weight
-	/// floor under which a pixel is left to the fallback (w = 0), z = 1 runs the
-	/// filter in probe space (0 = the filtered map is the raw one: the A/B that
-	/// prices the filter), w = 1 writes THE PHOTON VIEW's ScreenProbes overlay
+	/// floor under which a pixel is left to the fallback (w = 0), z = the filter in probe
+	/// space's reach (1 = the 3 x 3 neighbourhood, 2 = plus the ring at two cells;
+	/// 0 = off, the filtered map is the raw one: the A/B that prices the
+	/// filter), w = 1 writes THE PHOTON VIEW's ScreenProbes overlay
 	/// (the integrate's binding 8, PHOTON-VIEW-1).
 	vec4 knobs4;
 	/// THE PREVIOUS FRAME'S CAMERA (PHOTON-GATHER-1c), in the same five numbers
@@ -129,7 +130,9 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// is two grids side by side, the right eye's cells numbered after the left
 	/// eye's, so a probe's cell names its eye. With x = 0 the block is unread, y
 	/// is the whole grid, and every helper below reduces to the one-camera
-	/// arithmetic exactly. zw unused.
+	/// arithmetic exactly. z = THE HISTORY-AGE VIEW (GatherTuning::ageView, an
+	/// instrument: N > 0 paints the pixels whose history held fewer than N
+	/// frames; 0 off). w unused.
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;
@@ -146,6 +149,13 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// hit (the arm "gather.decodeHits", SPECKLE-FIX-1); w = 1 runs the hit's
 	/// mover gate (MOVER-OCCLUSION-1).
 	vec4 alpha;
+	/// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1, rq_probe_integrate.comp; the
+	/// host converts the shipped 24 px to cells of the stride): x =
+	/// the history length in frames below which a pixel reads a WIDER probe
+	/// neighbourhood (0 = never), y = that reach in probe cells at a history of
+	/// 0 (it narrows linearly to the bilinear 1 at x frames). Never at rest.
+	/// z = THE CROSS-PROBE STRATA N (rq_probe_gather.comp; 1 = off).
+	vec4 young;
 } p;
 
 /// ONE EYE'S IMAGE — rq_reflect.comp's `EyeImage`: where the eye is and the
