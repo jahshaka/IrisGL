@@ -2263,9 +2263,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                 p->mLoadActionStencil = Ogre::LoadAction::Load;
                 skipAtomQueue(p);
             }
-            // ...and the helpers: no G-buffer of the march's holds an outline shell's
-            // or the grid's normals either.
-            if (ssrMarch) skipSceneHelpers(p);
+            // ...and the helpers, in EVERY prepass: the G-buffer is the scene's surfaces
+            // (what the march, the gather and SSAO read), and an outline shell or the grid
+            // is not one — they draw no depth here, so their normals and roughness would
+            // land on whatever surface lies behind them. The opaque pass draws them (or,
+            // on a march chain, the helpers pass after the history copy).
+            skipSceneHelpers(p);
             p->mStoreActionColour[0] = Ogre::StoreAction::Store;
             p->mStoreActionColour[1] = Ogre::StoreAction::Store;
             p->mStoreActionDepth     = Ogre::StoreAction::Store;
