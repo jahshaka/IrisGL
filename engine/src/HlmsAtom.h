@@ -386,6 +386,11 @@ protected:
     void setupRootLayout(Ogre::RootLayout &rootLayout, size_t tid) override;
     /// The classifier's renderable property (atom_classify), beside PBS's own.
     void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
+    /// THE ATOM PLACEHOLDER IS A TWIN'S (ASYNC-SHADERS-1): it covers a decode twin's bucket
+    /// (fillBuffersForV2), so only a renderable wearing a twin may stand in with it. Anything
+    /// else of this Hlms (the classifier) skips its draw while pending, and its view holds the
+    /// frame — a classification drawn grey would leave every bucket's depth test empty.
+    bool allowsAsyncPlaceholder(const Ogre::Renderable *renderable) const override;
     /// THE CLASSIFIED PASS'S DEPTH RULE (ATOM-DECODE-CLASS-1) — Ogre's own per-pass
     /// macroblock door (Hlms::applyStrongMacroblockRules, OgreHlms.cpp): under the pass
     /// property atom_classified a bucket draw tests its class's depth EQUAL and

@@ -1079,6 +1079,17 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         acc.skips += skips;
         if (placeholders || skips) {
             ++mCapturesDeferredForShaders;
+            // ...NOR IS IT RELIT: planRelights listed this batch's cards as captured this frame
+            // (a capture and its relight are one update). Their texels were never copied — on a
+            // new scene's first batch the atlas layers are not even initialised (Depth and
+            // Emissive, plain copy targets, still UNDEFINED: measured, the relight sampled them
+            // and the validation layer said so on an OPEN while compiles were pending). They
+            // keep their flags and are relit with the batch that captures them.
+            for (size_t r = mRelight.size(); r-- > 0;)
+                if (std::find(mBatch.begin(), mBatch.end(), mRelight[r]) != mBatch.end()) {
+                    mRelight.erase(mRelight.begin() + std::ptrdiff_t(r));
+                    mRelightMode.erase(mRelightMode.begin() + std::ptrdiff_t(r));
+                }
             mBatch.clear();
             mWs->setExecutionMask(0u);
             traceSun();

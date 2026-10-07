@@ -1204,6 +1204,10 @@ void HlmsAtom::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::Pie
     }
 }
 
+bool HlmsAtom::allowsAsyncPlaceholder(const Ogre::Renderable *renderable) const {
+    return renderable && mTwins.count(renderable->getDatablock()) != 0;
+}
+
 void HlmsAtom::applyStrongMacroblockRules(Ogre::HlmsMacroblock &macroblock, const size_t tid) const {
     Ogre::HlmsPbs::applyStrongMacroblockRules(macroblock, tid);
     // A BUCKET DRAW OF A CLASSIFIED PASS: its class's depth, EQUAL, never written —
@@ -1314,6 +1318,7 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
         placeholderFor ? placeholderFor : queuedRenderable.renderable->getDatablock();
     if (placeholderFor && mPlaceholderPbs && mPlaceholderPbs->getAssignedPool()) {
         // THE PIXELS ARE THE REAL TWIN'S BUCKET — and a datablock that is no twin has no bucket.
+        // Unreachable by construction (allowsAsyncPlaceholder admits twins only); defensive.
         // Left alone the word would be whatever PBS wrote (.w = 0, the "no bucket" class, whose
         // pixels are real), so a missing twin writes a class no pixel carries: the pixel test
         // (cls == .w) passes nowhere and the classified pass's depth (z += .w / 2^24) leaves the
