@@ -4500,6 +4500,9 @@ struct ReflectParams {
     float alpha[4] = {};
     /// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong.
     float fog[8][4] = {};
+    /// THE METAL HIT'S ROUTE (REFLECT-FIX-1): x = the reflector's perceptual roughness
+    /// below which a hit on a metal is decoded (the arm "reflect.metalDecode").
+    float metal[4] = {};
 };
 
 
@@ -5298,6 +5301,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // "reflect.edgeClasses": gi.reflect_mover --edge alternates its two modes). Only the
     // Hits photon view shows it; the reflection's own arithmetic never reads it.
     pp.alpha[2] = mArms ? float(mArms->value(ArmId::ReflectEdgeClasses)) : 0.0f;
+    pp.metal[0] = mArms ? float(mArms->value(ArmId::ReflectMetalDecode)) : float(kReflectMetalDecodeRoughness);
     pp.alpha[3] = rayMoversOf(scene) ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);

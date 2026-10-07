@@ -142,6 +142,18 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 	return voxel;
 }
 
+/// THE VOXEL STORE ALONE (REFLECT-FIX-1): a glossy reflection's hit on a METAL, whose
+/// card holds its ~0 diffuse; the store carries the metal's colour.
+vec3 jahHitRadianceVoxelSourced( vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint, bool mirror,
+								 out bool ok, out uint source )
+{
+	jahHitIndirectGate = jahMoverSkyVisibility( hitPos, normalize( hitNormal ) );
+	const vec3 voxel = jahVoxelRadiance( hitPos, dir, footprint, mirror, ok );
+	jahHitIndirectGate = 1.0;
+	source = ok ? 2u : 0u;
+	return voxel;
+}
+
 vec3 jahHitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint,
 					 bool mirror, bool cardGated, out bool ok )
 {

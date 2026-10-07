@@ -22,10 +22,13 @@
 #include <OgreTechnique.h>
 
 namespace jahshaka { namespace engine { namespace detail {
-// kGridRenderQueue (EnginePrivate.h): after opaque geometry (10), before the
-// particle systems (15) in a chain with no march history — the grid blends over the
-// floor and the particles composite over it; a march chain draws it after the history
-// copy (kSceneHelperRenderQueue's note).
+namespace {
+// After opaque geometry (10) and the Atom queue (11), before the BLENDED surfaces
+// (kBlendedRenderQueue, 14) and the particle systems (15): the grid blends over the
+// floor, and glass and particles composite over the grid (REFLECT-FIX-1: a pane in
+// front of it dims it on every tier).
+constexpr Ogre::uint8 kGridRenderQueue = 13u;
+}  // namespace
 
 bool OgreScene::setGrid(const GridDesc &desc) {
     JAH_TRY {

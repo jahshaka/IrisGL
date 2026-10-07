@@ -2127,6 +2127,9 @@ void OgreScene::updateSurfaceCache() {
     // cheap half of the predicate (shown, the GI channel) is re-read here so a hide
     // this frame is exact; the rest (blend, the card list) changes only through a
     // re-staged slot (a material edit reaches it through the PBS change log).
+    // THE GESTURE'S HELD NODES (REFLECT-FIX-1): a still the drag channel took off the GI
+    // channel is released by the cache and must come back as itself (mReturning).
+    view.gestureHeld = mDragMovers;
     mCardQuery.clear();
     mCardFeed.query(mGiCamPos, view.radius, mCardQuery);
     view.candidates.reserve(mCardQuery.size());

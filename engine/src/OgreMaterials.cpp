@@ -14,9 +14,12 @@ Ogre::uint8 OgreScene::renderQueueFor(const MaterialRec &m) {
     // pass, at a queue above every other scene range.
     if (m.distortion) return kDistortionRenderQueue;
     if (m.refractive) return kRefractiveRenderQueue;   // the chain's refraction pass
-    // A DEPTH-TESTED HELPER (an overlay material that is not on-top: the outline
-    // shells, wires, markers) is not scene geometry — kSceneHelperRenderQueue's note.
-    if (m.unlit && !m.shadingUnlit) return kSceneHelperRenderQueue;
+    // A BLENDED surface draws after the depth-tested editor helpers (REFLECT-FIX-1): a
+    // grid line or an outline behind a pane of glass is seen THROUGH it — dimmed by its
+    // alpha — on every chain. In the opaque queue it drew before the grid's queue, and
+    // whether its depth then hid the grid depended on the tier (a prepass makes the
+    // opaque pass read-only: through on a march chain, hidden without one).
+    if (m.params.alphaMode == PbrAlphaMode::Blend && !(m.unlit && !m.shadingUnlit)) return kBlendedRenderQueue;
     return 10u;                                        // Ogre's default for normal items
 }
 
@@ -668,6 +671,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                 (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff || cutoutInputs))
                 noteShadowShapeChanged(id);
         }
+        const Ogre::uint8 rqBefore = renderQueueFor(it->second);
         it->second.params = p;
         it->second.paramsPushed = true;
         if (it->second.shadingUnlit) {
@@ -692,6 +696,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // it — which is also how gi.probe_gate proves the other half, that a
         // NON-crossing edit flushes nothing at all.
         const bool wasGated = db->hasZeroSpecularResponse();
+        const bool wasMetal = gpuIsMetal(db);
         // THE RAY TIER'S TRACED SET READS THE ALPHA TEST (PHOTON_SPEC §7 R1).
         // An alpha-tested datablock is kept OUT of the acceleration structure —
         // every BLAS is opaque and there is no any-hit shader, so a cut-out
@@ -711,15 +716,21 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         const Ogre::CompareFunction wasAlphaTest = db->getAlphaTest();
         applyPbr(db, p, mRefractionsActive);
         if (wasGated != db->hasZeroSpecularResponse()) ++mProbeGateCrossings;
+        // THE METAL ANSWER FLIPPED (REFLECT-FIX-1): the edit is in place — no slot is
+        // marked and no epoch moves — so a still scene would keep tracing its wearers
+        // with the old kGpuMetal (a crate dragged to metalness 1 stayed black in a
+        // reflection until something moved). Mark them, refileItems' shape.
+        if (wasMetal != gpuIsMetal(db))
+            for (auto &kv : mNodes)
+                if (kv.second.materialRef == id && kv.second.item) markGpuSlotDirty(kv.second);
         if (wasAlphaTest != db->getAlphaTest()) noteShadowScanInput();
         // An alpha-mode change moves the item between render queues, and the
         // items already exist: re-file them or a material turned refractive
         // keeps rendering in the opaque pass (as plain glass) until something
         // else happens to re-attach it.
         if (samplersMoved) bindTrackedTextures(it->second);
-        const bool wasRefractive = it->second.refractive;
         it->second.refractive = p.alphaMode == PbrAlphaMode::Refractive;
-        if (wasRefractive != it->second.refractive) refileItems(id, it->second);
+        if (renderQueueFor(it->second) != rqBefore) refileItems(id, it->second);
         syncCullTwins(it->second);
         return true;
     } JAH_CATCH(mError, false);

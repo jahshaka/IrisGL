@@ -279,3 +279,61 @@ material Jahshaka/SsrHistory
 		}
 	}
 }
+
+//-----------------------------------------------------------------------------
+// The history's depth (REFLECT-FIX-1, JahSsrHistoryDepth_ps.glsl): the scene depth,
+// -1 under an editor helper. Point fetches at the target's own texel.
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/SsrHistoryDepth_ps_GLSL glsl
+{
+	source JahSsrHistoryDepth_ps.glsl
+	default_params
+	{
+		param_named depthTexture	int 0
+		param_named helperMask		int 1
+	}
+}
+
+fragment_program Jahshaka/SsrHistoryDepth_ps_VK glslvk
+{
+	source JahSsrHistoryDepth_ps.glsl
+}
+
+fragment_program Jahshaka/SsrHistoryDepth_ps unified
+{
+	delegate Jahshaka/SsrHistoryDepth_ps_GLSL
+	delegate Jahshaka/SsrHistoryDepth_ps_VK
+}
+
+material Jahshaka/SsrHistoryDepth
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/SsrHistoryDepth_ps
+			{
+			}
+
+			texture_unit depthTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+
+			texture_unit helperMask
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+		}
+	}
+}

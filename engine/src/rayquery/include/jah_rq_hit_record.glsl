@@ -109,17 +109,15 @@ bool jahHitAlwaysDecodes( uint slot )
 	return ( jahHitFlags( slot ) & ( kJahHitGpuMover | kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u;
 }
 
-/// ...AND A REFLECTION RAY'S HIT ON A METAL (REFLECT-FIX-1). The reflection keeps the
-/// full lobe (SPECKLE-FIX-1's rule): what leaves a hit point towards the mirror is its
-/// diffuse AND its specular response, and the caches hold the diffuse alone — for a
-/// metal, ~0. Read from its card a gold torus in the chrome sphere came out black (it
-/// was gold on the voxel route; spikes/reflect-tear-audit dbl-torus-planar-onoff.png).
-/// The decode shades it with its specular lobe and the pass' second-bounce
-/// environment (the voxel cone, the sky) — the planar mirror's rule above, for every
-/// metal. The gather does not ask: its records stay diffuse-only.
-bool jahHitReflectionDecodes( uint slot )
+/// ...AND A METAL (REFLECT-FIX-1, GpuScene.h kGpuMetal). The caches hold a surface's
+/// DIFFUSE response and a metal's is ~0, so a REFLECTION ray never reads a metal's card:
+/// from a sharp reflector the hit is decoded (its specular lobe, the pass' second-bounce
+/// cone — the planar mirror's rule above), from a glossy one it reads the voxel store,
+/// which carries the metal's colour (rq_reflect.comp, p.metal). Gather records stay
+/// diffuse-only (SPECKLE-FIX-1) and never ask.
+bool jahHitIsMetal( uint slot )
 {
-	return jahHitAlwaysDecodes( slot ) || ( jahHitFlags( slot ) & kJahHitGpuMetal ) != 0u;
+	return ( jahHitFlags( slot ) & kJahHitGpuMetal ) != 0u;
 }
 
 /// The LEVEL the NEAR copy of `slot` was built from — the level its per-slot

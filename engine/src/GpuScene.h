@@ -224,13 +224,24 @@ enum GpuInstanceFlag : uint32_t {
     /// The gather's rays ignore it: their records stay diffuse-only (SPECKLE-FIX-1).
     kGpuMetal = 1u << 12,
 };
-/// The metalness above which a hit is a metal's (kGpuMetal): any metal content at
-/// all — the decode is the exact answer at every metalness, the flag only decides
-/// where the cache's diffuse-only answer is no longer one.
-constexpr float kGpuMetalFloor = 0.01f;
+/// The metalness from which a hit is a metal's (kGpuMetal). MEASURED (REFLECT-FIX-1 fix
+/// round, test_reflect_uncover --metal-measure; spikes/reflect-fix-1/round2): a gold
+/// crate of metalness 0.5 / 0.25 / 0.1 read through its CARD is 3.9 / 5.2 / 3.5 display
+/// codes from the full decode in a sharp (r 0.02) chrome sphere and under 2.4 from r 0.1
+/// up — the card's (1 - m) diffuse is most of the picture there — while a metalness-1
+/// crate's card is black. Below 0.5 the card answers; from 0.5 the metal routes.
+constexpr float kGpuMetalFloor = 0.5f;
 /// ...and, under a SPECULAR workflow, the F0 above which it is one (a dielectric's F0
 /// is 0.02-0.08 — water to gemstone — and a metal's is its colour, 0.5 and up).
 constexpr float kGpuMetalF0 = 0.2f;
+/// ...and the REFLECTOR's perceptual roughness below which a METAL hit is decoded (the
+/// arm "reflect.metalDecode"'s default; rq_reflect.comp's p.metal.x); from it up the voxel
+/// store answers. MEASURED (the same run): the voxel route against the full decode, gold
+/// crate in a chrome sphere, by the sphere's roughness 0.02 / 0.10 / 0.15 / 0.20 / 0.25 /
+/// 0.30 / 0.39: 23.9 / 17.7 / 12.5 / 10.9 / 8.4 / 6.3 / 2.2 codes (of ~165). At 0.30 the
+/// reflector's lobe has blurred the difference to the card route's own error for a
+/// half-metal (~5 codes): there the decode buys nothing a viewer sees.
+constexpr double kReflectMetalDecodeRoughness = 0.30;
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the
 /// index range of that level (of submesh 0) AND THE LEVEL'S MEASURED BOUND,

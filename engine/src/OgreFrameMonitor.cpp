@@ -1122,6 +1122,11 @@ const ArmDef kArms[] = {
       "a dropped one), the radiance it returned, its hit and the sun's visibility there - "
       "GatherStatus::rays, the verb world.gatherHits. One more ray per hit while on, and the view "
       "never holds its rest (a held view traces nothing). Nothing reads it but the readback." },
+    { "reflect.metalDecode", kReflectMetalDecodeRoughness, 0.0, 1.0,
+      "THE METAL HIT'S ROUTE (REFLECT-FIX-1): a reflection ray from a reflector of perceptual "
+      "roughness BELOW this value that hits a metal is decoded (its specular lobe, the pass' second-"
+      "bounce cone); a glossier reflector takes the metal hit from the voxel store (it blurs it "
+      "anyway). 0 = never decoded, 1 = always (the full-decode reference)." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

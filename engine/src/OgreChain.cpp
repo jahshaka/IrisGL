@@ -29,6 +29,8 @@
 // RENDER-QUEUE POLICY (§6):
 //   0            sky rectangle (OgreSky.cpp)
 //   10           normal items (Ogre's default), incl. depth-tested outlines
+//   13           the editor grid
+//   14           blended (alpha) surfaces — after the helpers (REFLECT-FIX-1)
 //   15           PFX2 particles and scene-layer billboards
 //   [.. 199]     everything else opaque      <- the OPAQUE pass
 //   200          refractive items (phase 7)  <- the REFRACTIVE pass
@@ -392,7 +394,8 @@ constexpr const char *kLookB = "jahLookB";
 /// the rest of the MSAA scaffolding, CHAIN-MSAA-CRUD.)
 constexpr const char *kRefractOut   = "jahRefractOut";
 constexpr const char *kRefractRtv   = "jahRefractRtv";
-constexpr const char *kSceneHelpersRtv = "jahSceneHelpersRtv";   // REFLECT-FIX-1: the helpers after the SSR history copy
+constexpr const char *kSsrHelperMask = "jahSsrHelperMask";        // REFLECT-FIX-1: where a helper shows in the picture
+constexpr const char *kSsrHelperMaskRtv = "jahSsrHelperMaskRtv";
 /// The picture-in-picture inset's background swatch (CAMERAS_SPEC §7.7): a 4x4
 /// texture cleared to ViewPipDesc::background and copied over the inset rect.
 /// It exists because the inset's colour attachment must LOAD (a Vulkan clear is
@@ -1080,11 +1083,14 @@ Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, co
 /// the screen decode (which is what arms the decode — OgreAtomDraw.cpp's listener).
 void skipAtomQueue(Ogre::CompositorPassSceneDef *p) { p->setSkipRenderQueue(kAtomRenderQueue, true); }
 
-/// A MARCH chain's prepass and opaque pass leave the depth-tested helpers to the pass
-/// after the SSR history copy (kSceneHelperRenderQueue's note, EnginePrivate.h).
+/// THE EDITOR'S HELPERS (REFLECT-FIX-1): every object on the desk's or the wearer's helper
+/// channel — the selection outline, the depth-tested wires and markers, the grid.
+constexpr Ogre::uint32 kSceneHelperBits = kHelperBit | kVrHelperBit;
+/// Every PREPASS leaves the helpers out of the G-buffer: it is the scene's surfaces (what
+/// the march, the gather and SSAO read), and a helper draws no depth there, so its normals
+/// and roughness would land on whatever surface lies behind it.
 void skipSceneHelpers(Ogre::CompositorPassSceneDef *p) {
-    p->setSkipRenderQueue(kSceneHelperRenderQueue, true);
-    p->setSkipRenderQueue(kGridRenderQueue, true);
+    p->mVisibilityMask &= ~kSceneHelperBits;
 }
 
 /// THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1), in front of the scene pass `mainRtv`
@@ -1683,7 +1689,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
-    n->setNumLocalTextureDefinitions(34);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two + the march's velocity + the history's depth
+    n->setNumLocalTextureDefinitions(35);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two + the march's velocity + the history's depth + the helper mask
     // Float under the display encode, as in the passthrough shape (SRGB-ENCODE-1).
     if (desc.letterbox)
         addTex(n, kLetterboxFill, desc.displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM, 4u, 4u);
@@ -1972,6 +1978,20 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         if (ssrMarch) {
             auto *td = addTex(n, kSsrPrevDepth, Ogre::PFG_R32_FLOAT);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+        }
+        // ...AND WHERE AN EDITOR HELPER SHOWS IN THAT PICTURE (REFLECT-FIX-1): the helpers
+        // alone, drawn over the scene's depth into a mask the depth copy reads (any
+        // channel or coverage > 0). RGBA because a helper's colour can be any channel
+        // and its alpha is what a black one leaves. 4 bytes a pixel per march chain.
+        if (ssrMarch) {
+            addTex(n, kSsrHelperMask, Ogre::PFG_RGBA8_UNORM);
+            Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kSsrHelperMaskRtv);
+            Ogre::RenderTargetViewEntry colour0;
+            colour0.textureName = kSsrHelperMask;
+            rtv->colourAttachments.push_back(colour0);
+            rtv->depthAttachment.textureName = kDepth;
+            rtv->stencilAttachment.textureName = kDepth;
+            rtv->preferDepthTexture = true;
         }
         }   // if (ssr)
         // THE HIT LIST (PHOTON-HIT-SHADE-1): two UAVs the ray jobs append to and
@@ -2263,11 +2283,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                 p->mLoadActionStencil = Ogre::LoadAction::Load;
                 skipAtomQueue(p);
             }
-            // ...and the helpers, in EVERY prepass: the G-buffer is the scene's surfaces
-            // (what the march, the gather and SSAO read), and an outline shell or the grid
-            // is not one — they draw no depth here, so their normals and roughness would
-            // land on whatever surface lies behind them. The opaque pass draws them (or,
-            // on a march chain, the helpers pass after the history copy).
+            // ...and the helpers, in EVERY prepass (skipSceneHelpers). The opaque pass draws
+            // them, where they always drew.
             skipSceneHelpers(p);
             p->mStoreActionColour[0] = Ogre::StoreAction::Store;
             p->mStoreActionColour[1] = Ogre::StoreAction::Store;
@@ -2392,9 +2409,6 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mLoadActionStencil = Ogre::LoadAction::Load;
             skipAtomQueue(p);
         }
-        // THE HELPERS WAIT FOR THE HISTORY COPY on a march chain (the scene helpers
-        // pass below; kSceneHelperRenderQueue's note).
-        if (ssrMarch) skipSceneHelpers(p);
         // Plain Store, at every effect combination: upstream's recipe needs
         // "store_and_resolve" here because its refractive pass renders into a
         // MULTISAMPLE clone while sampling the resolved original, and at 1x
@@ -2589,43 +2603,49 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // (the owner's tearing; spikes/reflect-tear-audit). With the depth beside it
         // the resolve compares the hit's reprojected depth to the depth the texel
         // was drawn at and declines a texel that showed another surface.
-        auto *dq = addQuad(n, kSsrPrevDepth, "Ogre/Copy/1xFP32", "Jahshaka SSR history depth");
+        //
+        // AND THE EDITOR'S HELPERS ARE NOT SURFACES. The outline shells, the depth-tested
+        // wires and markers and the grid draw in the opaque pass in their own render queues,
+        // where they always drew — so a grid line stays under smoke (RQ 15) and an outline
+        // behind a pane of glass, on every tier, march or not (gi.reflect_no_helpers).
+        // So the colour copy holds them, and a march hit next to a selected object read
+        // its cyan ring into the chrome sphere (143 px at rest; the audit). Their pixels
+        // are therefore marked in the history's DEPTH as "no surface" (-1, the seed's
+        // value): the helpers alone are drawn into a mask over the scene's depth, and
+        // the depth copy writes -1 under it, so the same-surface test declines those
+        // texels like any other that showed something else.
+        {
+            Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrHelperMaskRtv);
+            t->setNumPasses(1);
+            auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+            p->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
+            p->mLoadActionColour[0] = Ogre::LoadAction::Clear;
+            p->mLoadActionDepth = Ogre::LoadAction::Load;
+            p->mLoadActionStencil = Ogre::LoadAction::Load;
+            p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            p->mStoreActionDepth = Ogre::StoreAction::Store;    // SSAO, the Atom and photon views read it
+            p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+            p->mReadOnlyDepth = true;                            // they test, they never write
+            p->mReadOnlyStencil = true;
+            // the scene's queues, the helper channels alone (the decode and Atom draws are
+            // not helpers and are skipped outright)
+            p->mFirstRQ = 0u;
+            p->mLastRQ  = kRefractiveRenderQueue;
+            p->mVisibilityMask = kSceneHelperBits & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
+            skipAtomQueue(p);
+            p->setSkipRenderQueue(kScreenClassifyRenderQueue, true);
+            p->setSkipRenderQueue(kScreenDecodeRenderQueue, true);
+            p->setSkipRenderQueue(kHitDecodeRenderQueue, true);
+            p->mIncludeOverlays = false;                         // see kIncludeOverlaysNote
+            p->mProfilingId = "Jahshaka SSR helper mask";
+            if (desc.letterbox) inset(handlesOut, p);
+        }
+        auto *dq = addQuad(n, kSsrPrevDepth, "Jahshaka/SsrHistoryDepth", "Jahshaka SSR history depth");
         dq->addQuadTextureSource(0, kDepth);
+        dq->addQuadTextureSource(1, kSsrHelperMask);
         dq->mStoreActionColour[0] = Ogre::StoreAction::Store;
         if (desc.letterbox) scissor(handlesOut, dq);
     }
-    // THE SCENE HELPERS, after the history copy (REFLECT-FIX-1; kSceneHelperRenderQueue's
-    // note): the outline shells, depth-tested wires and markers, and the grid, into the
-    // scene result over the scene's own depth — still in linear light, so the SSAO
-    // multiply and the tonemap below treat them as they always did, and never in a
-    // picture a reflection reads.
-    if (ssrMarch) {
-        Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kSceneHelpersRtv);
-        Ogre::RenderTargetViewEntry colour0;
-        colour0.textureName = sceneResult;
-        rtv->colourAttachments.push_back(colour0);
-        rtv->depthAttachment.textureName = kDepth;
-        rtv->stencilAttachment.textureName = kDepth;
-        rtv->preferDepthTexture = true;
-        Ogre::CompositorTargetDef *t = n->addTargetPass(kSceneHelpersRtv);
-        t->setNumPasses(1);
-        auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
-        p->setAllLoadActions(Ogre::LoadAction::Load);
-        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
-        p->mStoreActionDepth = Ogre::StoreAction::Store;     // SSAO, the Atom and photon views read it
-        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
-        p->mReadOnlyDepth = true;                             // they test, they never write
-        p->mReadOnlyStencil = true;
-        p->mFirstRQ = kSceneHelperRenderQueue;
-        p->mLastRQ  = Ogre::uint8(kGridRenderQueue + 1u);
-        // ITS OWN LOD UPDATE: the opaque pass skips these queues, so it chose no level for
-        // them — left at false a selection shell kept whatever level it last had
-        // (pool.atom's lod-bias sweep read the shell coarse after the bias came back).
-        p->mIncludeOverlays = false;                          // see kIncludeOverlaysNote
-        p->mProfilingId = "Jahshaka scene helpers";
-        if (desc.letterbox) inset(handlesOut, p);
-    }
-
     // SSAO: half-res depth downsample -> AO march -> separable blur (which is
     // also the upsample) -> multiply into the scene colour.
     if (desc.ssao) {

@@ -234,6 +234,11 @@ struct CardSceneView {
     /// chain hands the same coefficients over and this is not read.
     const float *ambientSh = nullptr;
 
+    /// REFLECT-FIX-1: the nodes a GESTURE holds off the GI channel right now (the drag
+    /// channel's movers, OgreScene::mDragMovers). A resident instance released because
+    /// it is held is that object's own re-add when the gesture ends (mReturning).
+    std::vector<NodeId> gestureHeld;
+
     /// ONE CANDIDATE — an item inside the radius that may hold cards. The
     /// scene's own predicate decides membership (still-world GI geometry,
     /// shown, with a baked card list); the cache decides residency.
@@ -662,10 +667,11 @@ private:
     float    mRadius = 0.0f;
     unsigned mBudget = 0u;
     unsigned long long mInvalidTransform = 0ull;
-    /// REFLECT-FIX-1: the RESIDENT instances whose node stopped being offered while it
-    /// was still in the scene (a drag's gesture takes it off the GI channel; a hide) —
-    /// their return is the object's own re-add, admitted past the fill gate like a
-    /// moved instance's. Erased when the node holds cards again.
+    /// REFLECT-FIX-1: the RESIDENT instances a drag GESTURE took off the GI channel
+    /// (CardSceneView::gestureHeld when they were released) — their return is the
+    /// object's own re-add. Pruned every frame to the nodes still held or offered
+    /// (a deleted, hidden or departed one leaves), erased when the node holds cards
+    /// again, cleared by destroyAll.
     std::unordered_set<NodeId> mReturning;
     unsigned long long mInvalidMaterial = 0ull;
 };

@@ -176,6 +176,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's eight
 	/// (jah_fog_along.glsl states them).
 	vec4 fog[8];
+	/// THE METAL HIT'S ROUTE (REFLECT-FIX-1): x = the reflector's perceptual roughness
+	/// below which a hit on a metal is decoded; above it the voxel store answers it.
+	vec4 metal;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -948,10 +951,20 @@ void main()
 		vec3 hitN;
 		jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
 							   hitPrim, rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
-		const bool decodeAlways = jahHitReflectionDecodes( hitSlot );
+		// A METAL HIT (REFLECT-FIX-1): its card holds its diffuse response — ~0 — so the
+		// card never answers it. A SHARP reflector shows the metal's own reflection and
+		// takes the decode (its specular lobe, the pass' second-bounce cone); a GLOSSY one
+		// blurs that over its lobe anyway and takes the voxel store, which carries the
+		// metal's colour, at the cost of a store read instead of a decode record.
+		const bool metalHit = jahHitIsMetal( hitSlot );
+		const bool decodeAlways = jahHitAlwaysDecodes( hitSlot ) || ( metalHit && sqrt( lobeAlpha ) < p.metal.x );
 		// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
 		jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^ uint( p.knobs.z ) * 2654435761u;
-		if( !decodeAlways )
+		if( !decodeAlways && metalHit )
+			traced = jahHitRadianceVoxelSourced( world + worldN * bias + L * t, hitN, L,
+												 reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
+												 ok, photonSource );
+		else if( !decodeAlways )
 			traced = jahHitRadianceSourced( hitSlot, world + worldN * bias + L * t, hitN, L,
 											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
 											true, ok, photonSource );

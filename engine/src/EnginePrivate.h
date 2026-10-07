@@ -840,6 +840,8 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 //   2     the visibility buffer's screen decode draws (HlmsAtom, kScreenDecodeRenderQueue)
 //   10    normal items           (Ogre's default)
 //   11    the visibility buffer's items (kAtomRenderQueue, ATOM S3-DRAW)
+//   13    the editor grid (OgreGrid.cpp)
+//   14    blended (alpha) surfaces (kBlendedRenderQueue, REFLECT-FIX-1)
 //   15    PFX2 billboards
 //   200   refractive items       (reserved; phase 7)
 //   210   on-top overlays        (gizmos, wires, selection outlines)
@@ -850,20 +852,12 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // inside the single range the old one-pass workspace drew.)
 constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
 constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
+/// BLENDED (alpha) surfaces (REFLECT-FIX-1): after the opaque queues, the selection
+/// outline (10, a helper channel) and the grid (13, OgreGrid.cpp), before the particles
+/// (15) — so every depth-tested helper is seen through a pane of glass, on every tier.
+/// v2 FAST (inside [0,100)).
+constexpr Ogre::uint8 kBlendedRenderQueue    = 14;
 
-// THE DEPTH-TESTED EDITOR HELPERS (REFLECT-FIX-1) — the selection's outline shells,
-// the depth-tested wires and markers (every `unlit` overlay material that is not
-// on-top: renderQueueFor) at 12, the grid at 14. They are drawn in the SCENE's
-// linear light (tonemapped with it, occluded by it), and that used to mean in the
-// opaque pass — i.e. inside the picture the SSR march's colour history copies, so a
-// selected object's cyan ring showed in the chrome sphere even at rest (143 px) and
-// the grid's lines on every floor a reflection marched onto. A MARCH chain therefore
-// skips both queues in its prepass and opaque pass and draws them in a pass of their
-// own right AFTER the history copy (OgreChain, "Jahshaka scene helpers"): no
-// reflection and no history ever holds a helper. Every other chain draws them in
-// its opaque pass as before (it has no history). Both inside [0,100): v2 FAST.
-constexpr Ogre::uint8 kSceneHelperRenderQueue = 12;
-constexpr Ogre::uint8 kGridRenderQueue        = 14;
 
 // THE VISIBILITY BUFFER'S QUEUE (ATOM S3-DRAW; SPECS/atom/D3_S3_DRAW_DESIGN.md §2.4).
 // The render-queue split's ONE switch (OgreScene::atomRouteFor, at compose time)
@@ -1907,6 +1901,7 @@ enum class ArmId : unsigned {
     AtomHitWorldLights,  ///< "atom.hitWorldLights" — the hit decode's light list: 0 shipped, 1 off, 2 all
     AtomHitVctSpecular,  ///< "atom.hitVctSpecular" — the hit decode's VCT specular cone (0: compiled out)
     GatherHitsReadback,  ///< "gather.hitsReadback" — every uniform probe's per-ray record read back (FAR-SUN-1)
+    ReflectMetalDecode,  ///< "reflect.metalDecode" — the reflector roughness below which a metal hit decodes
     Count
 };
 class ArmRegistry {
@@ -6850,6 +6845,8 @@ private:
     /// The movement epoch cannot see those (a furniture visibility write is
     /// deliberately not scene movement, VR-SCAN-1), so they say so by name.
     void markGpuSlotDirty(const Node &n);
+    /// REFLECT-FIX-1: the kGpuMetal answer for a datablock (OgreGpuScene.cpp).
+    static bool gpuIsMetal(const Ogre::HlmsDatablock *db);
     /// THE ITEM'S NODE (ATOM-CPU-WALKS-1): every indexed Item and the node that holds
     /// it, maintained where the item index is (indexItemNode / unindexItemNode) — the
     /// PBS change log names Items, and this is how a note becomes a slot.

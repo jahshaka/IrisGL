@@ -713,7 +713,14 @@ void main()
 		const float slope = min( abs( dR - hitDepth ), abs( hitDepth - dL ) ) +
 							min( abs( dU - hitDepth ), abs( hitDepth - dD ) );
 		const float expected = was.z / was.w;
-		const float tol = 2.0 * slope + kSameSurfaceRel * abs( expected );
+		// ...CAPPED at kSameSurfaceCeil of the depth: at a grazing view the slope term grows
+		// without bound, and an uncapped tolerance would accept a thin occluder standing
+		// in front of the surface (a pole over a floor seen edge-on). 3 % of the distance
+		// is under any occluder worth the name and over every slope a surface keeps
+		// across the footprint short of the horizon; past it, a grazing texel is declined
+		// to the fallback rather than risk another surface's colour.
+		const float kSameSurfaceCeil = 3e-2;
+		const float tol = min( 2.0 * slope + kSameSurfaceRel * abs( expected ), kSameSurfaceCeil * abs( expected ) );
 
 		const vec2	at	 = prevTex * prevFrameRes.xy - 0.5;
 		const ivec2 base = ivec2( floor( at ) );

@@ -1683,7 +1683,16 @@ bool OgreView::readReflectionHdr(ImageF &out) {
 bool OgreView::readSsrHistoryHdr(ImageF &out) {
     if (!mTexture) { mError = "readSsrHistoryHdr: View '" + mName + "' is on-screen"; return false; }
     if (!mWorkspace) { mError = "readSsrHistoryHdr: View '" + mName + "' has no workspace"; return false; }
-    return readChainTexture(chain::ssrHistoryTextureName(), out, "readSsrHistoryHdr");
+    if (!readChainTexture(chain::ssrHistoryTextureName(), out, "readSsrHistoryHdr")) return false;
+    // ...with the history's DEPTH in alpha (REFLECT-FIX-1): -1 where no surface shows.
+    ImageF depth;
+    if (!readChainTexture(chain::ssrHistoryDepthTextureName(), depth, "readSsrHistoryHdr")) return false;
+    if (depth.width != out.width || depth.height != out.height) {
+        mError = "readSsrHistoryHdr: the history's colour and depth differ in size";
+        return false;
+    }
+    for (size_t i = 0; i < size_t(out.width) * out.height; ++i) out.rgba[i * 4u + 3u] = depth.rgba[i * 4u];
+    return true;
 }
 
 bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char *who) {
