@@ -2618,7 +2618,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mReadOnlyStencil = true;
         p->mFirstRQ = kSceneHelperRenderQueue;
         p->mLastRQ  = Ogre::uint8(kGridRenderQueue + 1u);
-        p->mUpdateLodLists = false;                           // the opaque pass chose the levels
+        // ITS OWN LOD UPDATE: the opaque pass skips these queues, so it chose no level for
+        // them — left at false a selection shell kept whatever level it last had
+        // (pool.atom's lod-bias sweep read the shell coarse after the bias came back).
         p->mIncludeOverlays = false;                          // see kIncludeOverlaysNote
         p->mProfilingId = "Jahshaka scene helpers";
         if (desc.letterbox) inset(handlesOut, p);
