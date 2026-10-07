@@ -1936,6 +1936,12 @@ void OgreView::destroy() {
         removeWorkspaceListener(mCaptureListener.get());
         mCaptureListener.reset();
     }
+    // The recorder's readback (VIDEO-REC-1): its tickets and NV12 target are the
+    // device's, waited out and freed here, before the target they read goes.
+    if (mVideoReadback) {
+        removeWorkspaceListener(mVideoReadback.get());
+        mVideoReadback.reset();
+    }
     // The id pass's list: device buffers, gone before the device (ATOM S3-DRAW).
     if (mAtomListener) {
         removeWorkspaceListener(mAtomListener.get());

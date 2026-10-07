@@ -261,6 +261,17 @@
 				"hzb_reverse_z" : 1,
 				"hzb_farthest" : 1
 			}
+		},
+
+		"Jahshaka/VideoNv12" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahVideoNv12_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
+			"inform_shader_of_texture_data_change" : true,
+			"textures" : [ {} ],
+			"uav_units" : 1
 		}
 	}
 }

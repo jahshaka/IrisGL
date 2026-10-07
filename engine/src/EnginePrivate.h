@@ -7310,6 +7310,47 @@ private:
     OgreView *mView;
 };
 
+/// THE VIDEO READBACK (VIDEO-REC-1; View::setVideoReadback). One per view that
+/// asks, owned by it, registered through OgreView::addWorkspaceListener while it
+/// lives. At the end of the view's OWN workspace on an armed frame it runs
+/// `Jahshaka/VideoNv12` (the final target -> an R32_UINT target holding the NV12
+/// bytes) and copies that into the oldest free of three AsyncTextureTickets with
+/// frame-count tracking (no flush, no fence of its own: a ticket is done when the
+/// frame that recorded it is — VulkanVaoManager::isFrameFinished). The host
+/// polls; nothing here ever waits unless the host asks it to (a drain).
+class VideoReadback final : public Ogre::CompositorWorkspaceListener {
+public:
+    static constexpr unsigned kRing = 3u;
+    VideoReadback(OgreView *view, Ogre::Root *root) : mView(view), mRoot(root) {}
+    /// Waits out every pending copy, then frees the tickets and the target.
+    ~VideoReadback();
+    /// Allocates for the view's current target; false with `error` when the
+    /// target cannot be converted (size, format).
+    bool init(std::string &error);
+    void arm(unsigned long long tag) { mArmed = true; mArmedTag = tag; }
+    bool take(VideoFrameNv12 &out, bool wait, std::string &error);
+    VideoReadbackStatus status() const;
+    void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
+private:
+    struct Slot {
+        Ogre::AsyncTextureTicket *ticket = nullptr;
+        bool pending = false;
+        unsigned long long tag = 0, order = 0;
+        Ogre::uint32 frame = 0;   // the VaoManager frame the copy was recorded in
+    };
+    void record(Slot &slot);
+    void release();
+    OgreView *mView;
+    Ogre::Root *mRoot;
+    Ogre::TextureGpu *mTarget = nullptr;   // R32_UINT, width/4 x height*3/2
+    unsigned mWidth = 0, mHeight = 0;
+    Slot mSlots[kRing];
+    bool mArmed = false;
+    unsigned long long mArmedTag = 0, mOrder = 0;
+    unsigned long long mRecorded = 0, mDelivered = 0, mDropped = 0;
+    std::string mError;
+};
+
 class OgreView final : public View {
 public:
     /// On-screen: `window` is set. Offscreen: `texture` is set. Never both.
@@ -7499,6 +7540,11 @@ public:
     FrameCaptureState frameCaptureState() override;
     bool takeFrameCapture(Image &out, bool wait, Image *presented) override;
     void cancelFrameCapture() override { releaseFrameCapture(); }
+    // THE VIDEO READBACK (VIDEO-REC-1; OgreVideoReadback.cpp).
+    bool setVideoReadback(bool on) override;
+    void armVideoFrame(unsigned long long tag) override;
+    bool takeVideoFrame(VideoFrameNv12 &out, bool wait) override;
+    VideoReadbackStatus videoReadbackStatus() const override;
     /// OgreEngine::renderOneFrame, before any workspace of the frame updates: does
     /// THIS frame capture (armed, enabled, a scene workspace to draw it)? A clean
     /// capture builds its own workspace here (see mCaptureWorkspace). The flag is
@@ -7968,6 +8014,8 @@ private:
     PhotonListenerPtr mPhotonListener;
     /// CLOSE-SHOT-2: the presented frame's capture (requestFrameCapture).
     std::unique_ptr<FrameCaptureListener> mCaptureListener;
+    /// VIDEO-REC-1: the recorder's per-frame NV12 readback, while on.
+    std::unique_ptr<VideoReadback> mVideoReadback;
     Ogre::AsyncTextureTicket *mCaptureTicket = nullptr;
     /// A clean capture's companion: the same frame as presented (alsoPresented).
     Ogre::AsyncTextureTicket *mPresentedTicket = nullptr;

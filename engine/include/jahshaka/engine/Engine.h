@@ -1840,6 +1840,31 @@ public:
     /// Drops whatever capture is armed or in flight (state Idle).
     virtual void cancelFrameCapture() = 0;
 
+    /// THE VIDEO READBACK (VIDEO-REC-1) — this view's picture, every frame a host
+    /// asks for, converted to NV12 ON THE GPU and read back without the caller
+    /// ever waiting (a recorder's frames; VideoFrameNv12 states the colour).
+    ///
+    /// OFFSCREEN VIEWS ONLY, and the target must be a multiple of 4 wide and 2
+    /// high. `setVideoReadback(true)` allocates the conversion target (1.5 bytes
+    /// a pixel, never the 4 of RGBA) and a RING OF THREE AsyncTextureTickets;
+    /// false (and destroying the view) waits out what is in flight and frees it.
+    ///
+    /// `armVideoFrame(tag)` marks the NEXT frame this view renders: at the end of
+    /// its workspace one compute dispatch converts the final target into the
+    /// NV12 target and one copy fills a free ticket. A frame armed while all
+    /// three slots are still pending is not read back and is counted `dropped`
+    /// (the taker has fallen three frames behind). Arming twice before a render
+    /// keeps the later tag.
+    ///
+    /// `takeVideoFrame(out, false)` hands back the OLDEST finished frame, in
+    /// render order, and is false while none has finished — a poll, never a
+    /// stall. `wait = true` waits for the oldest pending frame's copy (a drain at
+    /// the end of a recording: at most the frames already submitted).
+    virtual bool setVideoReadback(bool on) = 0;
+    virtual void armVideoFrame(unsigned long long tag) = 0;
+    virtual bool takeVideoFrame(VideoFrameNv12 &out, bool wait) = 0;
+    virtual VideoReadbackStatus videoReadbackStatus() const = 0;
+
     /// Compiles every shader this View's SCENE needs, now, without drawing it
     /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).
     ///

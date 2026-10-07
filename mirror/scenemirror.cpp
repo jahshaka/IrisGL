@@ -6753,7 +6753,8 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
 // records the FIRST one wrote — `mWorldPostFx` (the picture-in-picture inset's
 // base) and `mSunExposureGain` (the sun's night rule). They describe the view
 // the host calls applyEnvironment for, and only that one.
-void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &hostCamera)
+void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &hostCamera,
+                                       bool offscreenChain)
 {
     if (!mSource || !view) return;
     // THE CAMERA THE SCENE IS RENDERED THROUGH, NOT THE ONE THE HOST HOLDS
@@ -6774,7 +6775,7 @@ void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &ho
     if (driving) driving = mSource->renderCamera(driving);
     if (!driving) driving = hostCamera;
     const bool cut = driving ? noteDrivingCamera(view, driving) : false;
-    applyViewPostFx(view, /*record=*/false);
+    applyViewPostFx(view, /*record=*/false, offscreenChain);
     // A CUT IS NOT A LIGHTING CHANGE — applyCamera's rule, which this path used
     // to drop on the floor. The chain's automatic exposure adapts at ~75 %/s,
     // so a cut to a differently exposed camera fades over one to two seconds in
@@ -6786,7 +6787,7 @@ void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &ho
     if (cut) view->resetExposureHistory();
 }
 
-void SceneMirror::applyViewPostFx(View *view, bool record)
+void SceneMirror::applyViewPostFx(View *view, bool record, bool offscreenChain)
 {
     // World-panel Enable Shadows (used to be hardcoded on).
     if (view->shadows() != mSource->shadowEnabled)
@@ -6915,6 +6916,7 @@ void SceneMirror::applyViewPostFx(View *view, bool record)
         // shot that opens up two stops makes a disc this rule would otherwise
         // have dropped worth twenty output codes.
         if (record) mSunExposureGain = sunExposureGain(fx);
+        fx.allowOffscreen = offscreenChain;
         view->setPostFx(fx);
     }
 }

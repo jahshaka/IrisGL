@@ -7313,6 +7313,42 @@ struct Image {
     }
 };
 
+/// ONE VIDEO FRAME, as an encoder takes it (VIDEO-REC-1, View::setVideoReadback).
+///
+/// NV12: the luma plane (`width` x `height` bytes, row-major, top-left origin)
+/// followed by ONE interleaved chroma plane (`height / 2` rows of `width` bytes:
+/// Cb, Cr, Cb, Cr ... — one pair per 2x2 block of pixels). 1.5 bytes a pixel.
+///
+/// THE COLOUR, stated once: ITU-R BT.709 coefficients (Kr 0.2126, Kb 0.0722) on
+/// the view's DISPLAY-ENCODED picture — the very bytes readPixels returns, the
+/// sRGB-encoded result of the view's chain — in LIMITED ("video") range: Y in
+/// [16, 235], Cb/Cr in [16, 240] about 128. The chroma of a block is the mean of
+/// its four pixels' chroma (centre-sited). The picture is encoded ONCE (by the
+/// chain); this is a matrix on those codes, never a second transfer curve.
+///
+/// `tag` is the host's own stamp, handed to armVideoFrame for the frame this
+/// picture is of (the recorder's simulated step).
+struct VideoFrameNv12 {
+    unsigned width = 0, height = 0;
+    unsigned long long tag = 0;
+    std::vector<unsigned char> nv12;   // width*height*3/2
+    const unsigned char *luma() const { return nv12.data(); }
+    const unsigned char *chroma() const { return nv12.data() + size_t(width) * height; }
+};
+
+/// What a view's video readback is doing (View::videoReadbackStatus).
+struct VideoReadbackStatus {
+    bool on = false;
+    unsigned width = 0, height = 0;
+    /// Ring slots holding a frame not yet taken (recorded or ready); of `ringSize`.
+    unsigned pending = 0, ringSize = 0;
+    /// Frames converted and copied (an armed frame the view rendered); frames
+    /// handed back through takeVideoFrame; and armed frames that found every
+    /// slot still pending and were therefore NOT read back (the taker is behind).
+    unsigned long long recorded = 0, delivered = 0, dropped = 0;
+    std::string error;
+};
+
 /// A view's SCENE RADIANCE, read back in float (HDR-READBACK-1, PHOTON P3).
 ///
 /// `Image` is the DISPLAY: eight bits a channel, clipped at 1.0, after whatever
@@ -7496,7 +7532,10 @@ enum class CacheKind {
     /// The Atom GPU cull's jobs (detail = "id.cull.cut", "caster.cull.test", ...):
     /// per-frame VIEW work, not a cache — a row so its GPU time is attributable
     /// (lane TEST-1), never "the GI did work".
-    Cull
+    Cull,
+    /// A recording view's colour pass and readback copy (VIDEO-REC-1; detail
+    /// "video.nv12"): per-frame view work while a recording runs, never a cache.
+    Video
 };
 
 /// WHY a cache redid its work. `None` is the important value: the cache did the
