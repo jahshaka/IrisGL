@@ -357,7 +357,10 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     Ogre::Item *item = n.item;
     if (!item || !item->getNumSubItems()) return AtomRoute::Stock;
     const Ogre::uint8 rq = item->getRenderQueueGroup();
-    if (rq != kOpaqueItemQueue && rq != kAtomRenderQueue && rq != kRefractiveRenderQueue)
+    // (a BLENDED item has its own queue since REFLECT-FIX-1, kBlendedRenderQueue: it goes on
+    // to its own reason below, Blended, as it did from the opaque queue)
+    if (rq != kOpaqueItemQueue && rq != kAtomRenderQueue && rq != kRefractiveRenderQueue &&
+        rq != kBlendedRenderQueue)
         return AtomRoute::Stock;
     // THE ID PASS DRAWS THE WORLD CHANNELS ONLY (its cull asks for kGpuVisible): a
     // backdrop (the editor's 4 km Ground plane quad) or a helper draws in the views that
