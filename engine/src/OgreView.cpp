@@ -941,6 +941,9 @@ bool OgreView::setScene(Scene *scene) {
         mCamera->setFarClipDistance(1000.0f);
         mCamera->setAutoAspectRatio(true);
         mScene = s;
+        // ITS CAPTURES FOLLOW THE VIEW'S COMPILE MODE FROM THE FIRST FRAME (ASYNC-SHADERS-1): a
+        // freshly bound scene would otherwise capture BLOCKING until the host's next push.
+        if (mScene) mScene->setAsyncShaders(mAsyncShaders);
         // A new scene means nothing of it has been drawn yet: whatever is in
         // the window belongs to the previous scene (or to whoever owned those
         // pixels before this view existed). Hosts gate their loading cover on
@@ -1840,9 +1843,35 @@ void OgreView::updateGi() {
 // still building; a capture, a probe or anything else with a workspace of its own stays
 // blocking because ITS workspace never asked. The planar mirrors are re-rendered every
 // frame and take the view's mode from their listener (OgrePlanar.cpp).
+void AsyncHoldListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
+    if (!mView || ws != mView->ogreWorkspace() || !mView->asyncHoldScene()) return;
+    mSkipsAtStart = ws->getSceneManager()->getRenderQueue()->getNumPendingSkips();
+}
+
+void AsyncHoldListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
+    if (!mView || ws != mView->ogreWorkspace()) return;
+    const bool hole = mView->asyncShaders() &&
+                      ws->getSceneManager()->getRenderQueue()->getNumPendingSkips() != mSkipsAtStart;
+    // Only once the view has shown something: there is no last picture to hold before that.
+    const bool hold = hole && mView->framesPresented() > 0 && mHeldInARow < kMaxHeldFrames;
+    if (hold) { ++mHeldInARow; ++mHeldFrames; }
+    else {
+        if (hole) ++mHoleyPresented;
+        mHeldInARow = 0;
+    }
+    // EVERY workspace drawing into this window says the same (the PiP inset swaps it too).
+    ws->setSuppressSwap(hold);
+    if (Ogre::CompositorWorkspace *pip = mView->ogrePipWorkspace()) pip->setSuppressSwap(hold);
+}
+
 void OgreView::setAsyncShaders(bool on) {
     mAsyncShaders = on;
     if (mScene) mScene->setAsyncShaders(on);   // its captures follow (SurfaceCache)
+    if (on && !mAsyncHold) {
+        mAsyncHold.reset(new AsyncHoldListener(this));
+        addWorkspaceListener(mAsyncHold.get());
+        excludeFromCapture(mAsyncHold.get());
+    }
     if (mWorkspace) mWorkspace->setAsyncShaderCompile(on);
     if (mPipWorkspace) mPipWorkspace->setAsyncShaderCompile(on);
 }
@@ -2075,8 +2104,20 @@ void FrameCaptureListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (Ogre::SceneManager *sm = cam ? cam->getSceneManager() : nullptr) sm->_setCurrentShadowNode(sn);
 }
 
+namespace {
+unsigned long long incompleteDraws(const Ogre::CompositorWorkspace *ws) {
+    const Ogre::RenderQueue *rq = ws && ws->getSceneManager() ? ws->getSceneManager()->getRenderQueue() : nullptr;
+    return rq ? rq->getNumPlaceholderDraws() + rq->getNumPendingSkips() : 0u;
+}
+}   // namespace
+
+void FrameCaptureListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
+    mIncompleteAt = incompleteDraws(ws);
+}
+
 void FrameCaptureListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
-    if (mView && mView->captureThisFrame()) mView->recordFrameCapture(ws);
+    if (mView && mView->captureThisFrame())
+        mView->recordFrameCapture(ws, incompleteDraws(ws) != mIncompleteAt);
 }
 
 bool OgreView::requestFrameCapture(bool keepHelpers, bool alsoPresented) {
@@ -2217,6 +2258,7 @@ void OgreView::beginFrameCapture() {
                                      chain::fixedExposureColour(d.exposureScale, d.exposure));
         }
         mCaptureWorkspace->setExecutionMask(mWorkspace->getExecutionMask());
+        mCaptureWorkspace->setAsyncShaderCompile(mAsyncShaders);   // see recordFrameCapture
         // THE TWO WORKSPACE-LOCAL HISTORIES, handed over before either workspace runs:
         // the capture's tonemap reads the exposure the view's reads, and its march
         // the same previous picture. (Every other history the capture reaches is the
@@ -2303,10 +2345,21 @@ void mapTicket(Ogre::AsyncTextureTicket *t, Image &out) {
 }
 }   // namespace
 
-void OgreView::recordFrameCapture(Ogre::CompositorWorkspace *ws) {
+void OgreView::recordFrameCapture(Ogre::CompositorWorkspace *ws, bool incomplete) {
     if (mCaptureState != FrameCaptureState::Armed || !ws) return;
     const bool own = ws == mWorkspace;
     const bool clean = !mCaptureKeepHelpers;
+    // A CLEAN PICTURE WITH A SHADER STILL BUILDING IS NOT THE PICTURE (ASYNC-SHADERS-1). The
+    // clean capture (the project tile) compiles like its view (beginFrameCapture): a frame
+    // whose capture workspace drew a placeholder or skipped a draw is not read — the request
+    // stays ARMED and the next frame tries again (the host's settle loop steps frames until it
+    // lands). Never a blocking compile on the UI thread for a tile, never a grey tile. (A
+    // keepHelpers capture IS the presented frame, placeholders included: read as drawn.)
+    if (incomplete && clean && ws == mCaptureWorkspace) {
+        mCaptureWorkspace->setEnabled(false);
+        ++mCaptureRetries;
+        return;
+    }
     try {
         Ogre::RenderSystem *rs = mRoot->getRenderSystem();
         if (own && mWindow && !mWindow->canDownloadData() && (!clean || mCaptureAlsoPresented)) {

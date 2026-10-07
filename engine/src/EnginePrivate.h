@@ -7316,9 +7316,37 @@ class FrameCaptureListener final : public Ogre::CompositorWorkspaceListener {
 public:
     explicit FrameCaptureListener(OgreView *view) : mView(view) {}
     void passPreExecute(Ogre::CompositorPass *pass) override;
+    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
     void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
+    /// The RenderQueue's placeholder draws + pending skips when the workspace began
+    /// (ASYNC-SHADERS-1): a capture whose workspace moved them is incomplete and retried.
+    unsigned long long mIncompleteAt = 0;
 private:
     OgreView *mView;
+};
+
+/// THE HELD FRAME (ASYNC-SHADERS-1). A frame of an asynchronous view that drew a HOLE — an
+/// object whose shader is still building with no placeholder built yet, which is every object
+/// for a moment after a PASS change (a tier, a GI binding) because the placeholders are pass
+/// permutations too — is not presented: the window keeps the last complete picture (the
+/// fork's CompositorWorkspace::setSuppressSwap) until a frame draws no hole, at most
+/// kMaxHeldFrames in a row. Measured on a cold Basic world: a tier change used to present
+/// ~40 frames with the world missing.
+class OgreView;
+class AsyncHoldListener final : public Ogre::CompositorWorkspaceListener {
+public:
+    /// Then it presents anyway. FRAMES, and generous: a frame that is not presented does not
+    /// wait for the display, so a scripted loop runs several times faster while it holds
+    /// (measured: a cold tier change held 382 frames, 140 when presented).
+    static constexpr unsigned kMaxHeldFrames = 1200u;
+    explicit AsyncHoldListener(OgreView *view) : mView(view) {}
+    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
+    void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
+    OgreView *mView;
+    unsigned long long mSkipsAtStart = 0;
+    unsigned mHeldInARow = 0;
+    unsigned long long mHeldFrames = 0;       ///< frames held, ever
+    unsigned long long mHoleyPresented = 0;   ///< frames with a hole that were presented anyway
 };
 
 class OgreView final : public View {
@@ -7543,7 +7571,7 @@ public:
     /// Builds (or keeps, within one capture) the capture workspace for the current shape.
     bool ensureCaptureWorkspace();
     /// The capture listener's workspacePosUpdate: records the copy (Armed -> InFlight).
-    void recordFrameCapture(Ogre::CompositorWorkspace *ws);
+    void recordFrameCapture(Ogre::CompositorWorkspace *ws, bool incomplete = false);
     /// Drops whatever capture is pending (ticket, workspace and target destroyed).
     void releaseFrameCapture();
     /// The clean capture's workspace and target, gone (between frames; Ogre defers
@@ -7929,6 +7957,8 @@ private:
     Ogre::CompositorWorkspace *mWorkspace = nullptr;
     /// View::setAsyncShaders (ASYNC-SHADERS-1): re-applied to every workspace this view builds.
     bool mAsyncShaders = false;
+    /// Captures retried because their frame met a shader still building (ASYNC-SHADERS-1).
+    unsigned long long mCaptureRetries = 0;
     OgreScene                 *mScene     = nullptr;
     /// The clear-only workspace, its camera on the engine's blank scene manager
     /// and its definitions (chain::buildBlank). Live exactly while no scene is
@@ -7953,6 +7983,14 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
+    /// The held frame (AsyncHoldListener); made when the view first turns asynchronous.
+    std::unique_ptr<AsyncHoldListener> mAsyncHold;
+public:
+    Ogre::CompositorWorkspace *ogreWorkspace() const { return mWorkspace; }
+    Ogre::CompositorWorkspace *ogrePipWorkspace() const { return mPipWorkspace; }
+    OgreScene *asyncHoldScene() const { return mScene; }
+    const AsyncHoldListener *asyncHold() const { return mAsyncHold.get(); }
+private:
     /// Owned; registered the same way while this view's chain traces
     /// reflections (PHOTON_SPEC §7 R5). Null everywhere else — on a machine
     /// without ray queries, with the preference off, or on any view whose chain

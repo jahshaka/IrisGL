@@ -5993,6 +5993,11 @@ struct AsyncShaderStats {
     /// Draws inside the surface cache's captures that met a shader still building — those
     /// capture batches are discarded and retried (the atlas never holds a grey card).
     unsigned long long captureDeferredDraws = 0;
+    /// THE HELD FRAME: frames of an asynchronous view NOT presented because they drew a hole
+    /// (the window kept the last complete picture), and frames with a hole presented anyway
+    /// (a hold longer than its cap, or before the view had shown anything). Summed over views.
+    unsigned long long heldFrames = 0;
+    unsigned long long holeyPresented = 0;
     /// Shaders compiled ON THE SERVICE'S THREADS (running total). Subtract it from
     /// `shaderBuildProgress`'s `compiled` and what remains is every compile a frame
     /// waited for — the live-compile sentry's number (SHADER-WARM-2).
