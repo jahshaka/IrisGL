@@ -1313,8 +1313,23 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
     const Ogre::HlmsDatablock *db =
         placeholderFor ? placeholderFor : queuedRenderable.renderable->getDatablock();
     if (placeholderFor && mPlaceholderPbs && mPlaceholderPbs->getAssignedPool()) {
-        if (auto it = mTwins.find(db); it != mTwins.end())
+        // THE PIXELS ARE THE REAL TWIN'S BUCKET — and a datablock that is no twin has no bucket.
+        // Left alone the word would be whatever PBS wrote (.w = 0, the "no bucket" class, whose
+        // pixels are real), so a missing twin writes a class no pixel carries: the pixel test
+        // (cls == .w) passes nowhere and the classified pass's depth (z += .w / 2^24) leaves the
+        // clip volume. The placeholder then covers nothing, and says so once.
+        if (auto it = mTwins.find(db); it != mTwins.end()) {
             *(mCurrentMappedConstBuffer - 1) = it->second.classIdx;
+        } else {
+            *(mCurrentMappedConstBuffer - 1) = kNoPixelClass;
+            if (!mWarnedPlaceholderNoTwin) {
+                mWarnedPlaceholderNoTwin = true;
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka Atom: a placeholder draw for a datablock that is no twin ('" +
+                        db->getName().getFriendlyText() + "') covers nothing",
+                    Ogre::LML_CRITICAL);
+            }
+        }
         const Ogre::ConstBufferPool::BufferPool *pool = mPlaceholderPbs->getAssignedPool();
         *commandBuffer->addCommand<Ogre::CbShaderBuffer>() = Ogre::CbShaderBuffer(
             Ogre::PixelShader, 1, pool->materialBuffer, 0,

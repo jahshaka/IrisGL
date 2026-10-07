@@ -485,6 +485,10 @@ private:
     /// its permutation reads.
     Ogre::HlmsPbsDatablock *mPlaceholderTwin = nullptr;
     Ogre::HlmsPbsDatablock *mPlaceholderPbs = nullptr;
+    /// A class no bucket and no pixel ever carries: a placeholder draw for a datablock that
+    /// is no twin writes it, so it covers nothing (fillBuffersForV2).
+    static constexpr uint32_t kNoPixelClass = 0xFFFFFFFFu;
+    bool mWarnedPlaceholderNoTwin = false;
     /// HlmsJson round trip of a PBS datablock into this Hlms under `name` (the twins' copy).
     Ogre::HlmsPbsDatablock *cloneIntoAtom(Ogre::HlmsPbsDatablock *pbs, const Ogre::String &name,
                                           std::string &err);
